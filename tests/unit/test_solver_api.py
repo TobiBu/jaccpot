@@ -1,0 +1,90 @@
+"""Jaccpot package-local regression tests."""
+
+import jax
+import jax.numpy as jnp
+import numpy as np
+
+from jaccpot import FMMPreset as ExpansePreset
+from jaccpot import FastMultipoleMethod as ExpanseFMM
+from jaccpot import (
+    FMMAdvancedConfig,
+    FMMPreset,
+    FarFieldConfig,
+    FastMultipoleMethod,
+    NearFieldConfig,
+)
+
+
+def _sample_problem(n: int = 64):
+    key = jax.random.PRNGKey(11)
+    key_pos, key_mass = jax.random.split(key)
+    positions = jax.random.uniform(
+        key_pos,
+        (n, 3),
+        minval=-1.0,
+        maxval=1.0,
+        dtype=jnp.float32,
+    )
+    masses = jax.random.uniform(
+        key_mass,
+        (n,),
+        minval=0.5,
+        maxval=1.5,
+        dtype=jnp.float32,
+    )
+    return positions, masses
+
+
+def test_solver_matches_expanse_fast_path():
+    positions, masses = _sample_problem(n=96)
+
+    jaccpot_fmm = FastMultipoleMethod(
+        preset=FMMPreset.FAST,
+        basis="solidfmm",
+        advanced=FMMAdvancedConfig(
+            farfield=FarFieldConfig(mode="pair_grouped"),
+            nearfield=NearFieldConfig(mode="bucketed"),
+        ),
+    )
+    expanse_fmm = ExpanseFMM(
+        preset=ExpansePreset.FAST,
+        theta=0.6,
+        softening=1e-3,
+        working_dtype=jnp.float32,
+        expansion_basis="solidfmm",
+        complex_rotation="solidfmm",
+        mac_type="dehnen",
+        farfield_mode="pair_grouped",
+        nearfield_mode="bucketed",
+    )
+
+    acc_jaccpot = jaccpot_fmm.compute_accelerations(
+        positions,
+        masses,
+        leaf_size=16,
+        max_order=4,
+    )
+    acc_expanse = expanse_fmm.compute_accelerations(
+        positions,
+        masses,
+        leaf_size=16,
+        max_order=4,
+    )
+    assert np.allclose(np.asarray(acc_jaccpot), np.asarray(acc_expanse), rtol=1e-5, atol=1e-5)
+
+
+def test_advanced_config_applies_to_runtime():
+    fmm = FastMultipoleMethod(
+        preset=FMMPreset.BALANCED,
+        basis="solidfmm",
+        advanced=FMMAdvancedConfig(
+            farfield=FarFieldConfig(mode="class_major", grouped_interactions=True),
+            nearfield=NearFieldConfig(mode="bucketed", edge_chunk_size=512),
+            mac_type="engblom",
+        ),
+    )
+    assert fmm.farfield_mode == "class_major"
+    assert bool(fmm.grouped_interactions) is True
+    assert fmm.nearfield_mode == "bucketed"
+    assert int(fmm.nearfield_edge_chunk_size) == 512
+    assert fmm.mac_type == "engblom"
