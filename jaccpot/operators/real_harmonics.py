@@ -54,7 +54,7 @@ recurrence, avoiding trigonometric functions entirely.
 B Matrix Theory for Real Harmonics
 ==================================
 
-The B matrix implements the coordinate swap (x,y,z) → (z,y,x) for spherical
+The B matrix implements the coordinate swap (x,y,z) → (z,y,x) for real
 harmonics, enabling fast y-axis rotations via: D_y(β) = B @ D_z(-β) @ B.
 
 Complex Basis (Dehnen eq 63):
@@ -208,7 +208,7 @@ def sh_size(order: int) -> int:
     Parameters
     ----------
     order : int
-        Maximum spherical harmonic degree p.
+        Maximum harmonic degree p.
 
     Returns
     -------

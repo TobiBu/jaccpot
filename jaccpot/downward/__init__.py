@@ -1,1 +1,1 @@
-"""Downward-sweep operator namespace (placeholder for split refactor)."""
+"""Downward-sweep operators for local-expansion propagation."""
