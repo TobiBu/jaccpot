@@ -36,7 +36,8 @@ Install from source:
 pip install -e .
 ```
 
-`yggdrax` is not on PyPI yet. Install it from GitHub first:
+`yggdrax` is not on PyPI yet. Install it from GitHub first (use the latest
+`main`, which includes native `RadixTree` JAX pytree registration):
 
 ```bash
 git clone https://github.com/TobiBu/yggdrax.git
