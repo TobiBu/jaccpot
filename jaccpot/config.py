@@ -6,8 +6,6 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import Any, Literal, Optional
 
-from jaxtyping import DTypeLike
-
 Basis = Literal["cartesian", "spherical", "solidfmm"]
 FarFieldMode = Literal["auto", "pair_grouped", "class_major"]
 NearFieldMode = Literal["auto", "baseline", "bucketed"]
@@ -23,6 +21,8 @@ class FMMPreset(str, Enum):
 
 @dataclass(frozen=True)
 class TreeConfig:
+    """Tree-construction overrides for advanced runtime tuning."""
+
     mode: Optional[str] = None
     leaf_target: Optional[int] = None
     refine_local: Optional[bool] = None
@@ -32,6 +32,8 @@ class TreeConfig:
 
 @dataclass(frozen=True)
 class FarFieldConfig:
+    """Far-field interaction and translation-kernel overrides."""
+
     grouped_interactions: Optional[bool] = None
     mode: FarFieldMode = "auto"
     rotation: Optional[str] = None
@@ -41,6 +43,8 @@ class FarFieldConfig:
 
 @dataclass(frozen=True)
 class NearFieldConfig:
+    """Near-field direct-interaction strategy overrides."""
+
     mode: NearFieldMode = "auto"
     edge_chunk_size: int = 256
     precompute_scatter_schedules: bool = True
@@ -48,6 +52,8 @@ class NearFieldConfig:
 
 @dataclass(frozen=True)
 class RuntimePolicyConfig:
+    """Execution-policy overrides for tree build and traversal."""
+
     host_refine_mode: str = "auto"
     jit_tree: Optional[bool] = None
     jit_traversal: Optional[bool] = None
@@ -58,19 +64,11 @@ class RuntimePolicyConfig:
 
 @dataclass(frozen=True)
 class FMMAdvancedConfig:
+    """Aggregate container for all advanced FMM override groups."""
+
     tree: TreeConfig = TreeConfig()
     farfield: FarFieldConfig = FarFieldConfig()
     nearfield: NearFieldConfig = NearFieldConfig()
     runtime: RuntimePolicyConfig = RuntimePolicyConfig()
     mac_type: Optional[str] = None
     dehnen_radius_scale: float = 1.0
-
-
-@dataclass(frozen=True)
-class SolverConfig:
-    preset: FMMPreset
-    basis: Basis
-    theta: float
-    softening: float
-    working_dtype: Optional[DTypeLike]
-    advanced: Optional[FMMAdvancedConfig]

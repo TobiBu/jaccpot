@@ -18,6 +18,7 @@ from .runtime.fmm import FMMPreparedState
 
 
 def _default_advanced_for_preset(preset: FMMPreset) -> FMMAdvancedConfig:
+    """Return default advanced overrides for a high-level preset."""
     if preset is FMMPreset.FAST:
         return FMMAdvancedConfig()
     if preset is FMMPreset.BALANCED:
@@ -39,6 +40,7 @@ def _default_advanced_for_preset(preset: FMMPreset) -> FMMAdvancedConfig:
 
 
 def _normalize_preset(preset: Union[FMMPreset, str]) -> FMMPreset:
+    """Normalize user preset input to :class:`FMMPreset`."""
     if isinstance(preset, FMMPreset):
         return preset
     return FMMPreset(str(preset).strip().lower())
@@ -53,6 +55,7 @@ def _pop_legacy_common_overrides(
     working_dtype: Optional[DTypeLike],
     legacy_kwargs: dict[str, Any],
 ) -> tuple[Basis, float, float, float, Optional[DTypeLike], bool]:
+    """Consume legacy constructor kwargs and map them to modern arguments."""
     used = False
     legacy_basis = legacy_kwargs.pop("expansion_basis", None)
     if legacy_basis is not None:
@@ -260,6 +263,7 @@ class FastMultipoleMethod:
         theta: Optional[float] = None,
         reuse_prepared_state: bool = False,
     ) -> Union[Array, Tuple[Array, Array]]:
+        """Compute accelerations (and optional potentials) for particle data."""
         return self._impl.compute_accelerations(
             positions,
             masses,
@@ -283,6 +287,7 @@ class FastMultipoleMethod:
         max_order: int = 4,
         theta: Optional[float] = None,
     ) -> FMMPreparedState:
+        """Prepare and cache tree/interactions for repeated evaluations."""
         return self._impl.prepare_state(
             positions,
             masses,
@@ -301,6 +306,7 @@ class FastMultipoleMethod:
         *,
         max_order: int = 4,
     ) -> Any:
+        """Build upward multipole data for a prebuilt tree."""
         return self._impl.prepare_upward_sweep(
             tree,
             positions_sorted,
@@ -314,6 +320,7 @@ class FastMultipoleMethod:
         *,
         return_potential: bool = False,
     ) -> Union[Array, Tuple[Array, Array]]:
+        """Evaluate a previously prepared state."""
         jit_traversal = (
             True
             if self.advanced.runtime.jit_traversal is None
@@ -326,34 +333,42 @@ class FastMultipoleMethod:
         )
 
     def clear_prepared_state_cache(self: "FastMultipoleMethod") -> None:
+        """Clear cached prepared states in the runtime backend."""
         self._impl.clear_prepared_state_cache()
 
     @property
     def complex_rotation(self: "FastMultipoleMethod") -> str:
+        """Active complex-rotation backend identifier."""
         return str(self._impl.complex_rotation)
 
     @property
     def mac_type(self: "FastMultipoleMethod") -> str:
+        """Active multipole-acceptance criterion policy."""
         return str(self._impl.mac_type)
 
     @property
     def farfield_mode(self: "FastMultipoleMethod") -> str:
+        """Resolved far-field interaction mode."""
         return str(self._impl.farfield_mode)
 
     @property
     def nearfield_mode(self: "FastMultipoleMethod") -> str:
+        """Resolved near-field interaction mode."""
         return str(self._impl.nearfield_mode)
 
     @property
     def nearfield_edge_chunk_size(self: "FastMultipoleMethod") -> int:
+        """Chunk size used by bucketed near-field edge processing."""
         return int(self._impl.nearfield_edge_chunk_size)
 
     @property
     def grouped_interactions(self: "FastMultipoleMethod") -> bool:
+        """Whether grouped interaction traversal is enabled."""
         return bool(self._impl.grouped_interactions)
 
     @grouped_interactions.setter
     def grouped_interactions(self: "FastMultipoleMethod", value: bool) -> None:
+        """Set grouped-interaction mode and mirror it into advanced config."""
         next_value = bool(value)
         self._impl.grouped_interactions = next_value
         if hasattr(self._impl, "_explicit_grouped_interactions"):
