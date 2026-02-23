@@ -1232,6 +1232,52 @@ class FastMultipoleMethod:
             dual_artifacts.grouped_segment_unique_targets,
         )
 
+    def _prepare_downward_with_artifacts(
+        self,
+        *,
+        tree: RadixTree,
+        upward: TreeUpwardData,
+        theta_val: float,
+        locals_template: Optional[LocalExpansionData],
+        interactions: NodeInteractionList,
+        runtime_m2l_chunk_size: Optional[int],
+        runtime_l2l_chunk_size: Optional[int],
+        runtime_traversal_config: Optional[DualTreeTraversalConfig],
+        record_retry: Callable[[DualTreeRetryEvent], None],
+        dense_buffers: Optional[DenseInteractionBuffers],
+        grouped_interactions: bool,
+        grouped_buffers: Optional[GroupedInteractionBuffers],
+        grouped_segment_starts: Optional[Array],
+        grouped_segment_lengths: Optional[Array],
+        grouped_segment_class_ids: Optional[Array],
+        grouped_segment_sort_permutation: Optional[Array],
+        grouped_segment_group_ids: Optional[Array],
+        grouped_segment_unique_targets: Optional[Array],
+        farfield_mode: str,
+    ) -> TreeDownwardData:
+        """Prepare downward sweep using precomputed interaction artifacts."""
+        return self.prepare_downward_sweep(
+            tree,
+            upward,
+            theta=theta_val,
+            initial_locals=locals_template,
+            interactions=interactions,
+            m2l_chunk_size=runtime_m2l_chunk_size,
+            l2l_chunk_size=runtime_l2l_chunk_size,
+            traversal_config=runtime_traversal_config,
+            retry_logger=record_retry,
+            dense_buffers=dense_buffers,
+            grouped_interactions=grouped_interactions,
+            grouped_buffers=grouped_buffers,
+            grouped_segment_starts=grouped_segment_starts,
+            grouped_segment_lengths=grouped_segment_lengths,
+            grouped_segment_class_ids=grouped_segment_class_ids,
+            grouped_segment_sort_permutation=grouped_segment_sort_permutation,
+            grouped_segment_group_ids=grouped_segment_group_ids,
+            grouped_segment_unique_targets=grouped_segment_unique_targets,
+            farfield_mode=farfield_mode,
+        )
+
     def _resolve_nearfield_mode(self, *, num_particles: int) -> str:
         """Resolve near-field execution mode from configured policy."""
         mode = str(self.nearfield_mode).strip().lower()
@@ -1815,16 +1861,16 @@ class FastMultipoleMethod:
             grouped_segment_unique_targets,
         ) = self._unpack_dual_tree_artifacts(dual_artifacts)
 
-        downward = self.prepare_downward_sweep(
-            tree,
-            upward,
-            theta=theta_val,
-            initial_locals=locals_template,
+        downward = self._prepare_downward_with_artifacts(
+            tree=tree,
+            upward=upward,
+            theta_val=theta_val,
+            locals_template=locals_template,
             interactions=interactions,
-            m2l_chunk_size=runtime_m2l_chunk_size,
-            l2l_chunk_size=runtime_l2l_chunk_size,
-            traversal_config=runtime_traversal_config,
-            retry_logger=record_retry,
+            runtime_m2l_chunk_size=runtime_m2l_chunk_size,
+            runtime_l2l_chunk_size=runtime_l2l_chunk_size,
+            runtime_traversal_config=runtime_traversal_config,
+            record_retry=record_retry,
             dense_buffers=dense_buffers,
             grouped_interactions=grouped_interactions,
             grouped_buffers=grouped_buffers,
