@@ -86,7 +86,7 @@ as a UNITARY transformation T = Q @ Θ where Q is defined by:
     For m < 0:   T_n^{-|m|} = (Θ_n^{|m|} - (-1)^{|m|} Θ_n^{-|m|}) / (i√2)
 
 This Q matrix is **not** unitary (no √2). It differs from the unitary
-real tesseral transform used in spherical_harmonics.
+real tesseral transform used by the real-harmonic utility kernels.
 
 B Matrices in Real Basis:
 -------------------------
@@ -461,7 +461,7 @@ def evaluate_local_real(
     directly to unitary real tesseral coefficients without conversion.
 
     Note: Do not compare these coefficients to the unitary real tesseral
-    basis in spherical_harmonics without converting between bases.
+    basis in the real-harmonic utility layer without converting between bases.
 
     **Important Convention**: delta = center - eval_point
     (NOT eval_point - center)!
