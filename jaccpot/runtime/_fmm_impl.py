@@ -1057,6 +1057,143 @@ class FastMultipoleMethod:
             adaptive_applied=adaptive_applied,
         )
 
+    def _validate_prepare_state_request(
+        self,
+        *,
+        leaf_size: int,
+        max_order: int,
+    ) -> None:
+        """Validate order/leaf-size constraints for state preparation."""
+        self._validate_prepare_state_request(
+            leaf_size=int(leaf_size),
+            max_order=int(max_order),
+        )
+
+    def _build_locals_template_for_prepare_state(
+        self,
+        *,
+        tree: RadixTree,
+        upward: TreeUpwardData,
+        max_order: int,
+        pos_sorted: Array,
+    ) -> Optional[LocalExpansionData]:
+        """Build initial local-expansion buffers matching the active basis."""
+        if self.expansion_basis == "spherical":
+            return None
+        if self.expansion_basis == "solidfmm":
+            total_nodes = int(tree.parent.shape[0])
+            coeff_count = sh_size(max_order)
+            coeff_dtype = complex_dtype_for_real(pos_sorted.dtype)
+            return LocalExpansionData(
+                order=max_order,
+                centers=upward.multipoles.centers,
+                coefficients=jnp.zeros((total_nodes, coeff_count), dtype=coeff_dtype),
+            )
+
+        template = self._locals_template
+        total_nodes = int(tree.parent.shape[0])
+        coeff_count = total_coefficients(max_order)
+        reuse_template = (
+            template is not None
+            and int(template.order) == max_order
+            and template.coefficients.shape == (total_nodes, coeff_count)
+            and template.coefficients.dtype == pos_sorted.dtype
+        )
+
+        if reuse_template:
+            return LocalExpansionData(
+                order=max_order,
+                centers=upward.multipoles.centers,
+                coefficients=jnp.zeros_like(template.coefficients),
+            )
+        return initialize_local_expansions(
+            tree,
+            upward.multipoles.centers,
+            max_order=max_order,
+        )
+
+    def _prepare_nearfield_precompute_artifacts(
+        self,
+        *,
+        tree: RadixTree,
+        neighbor_list: NodeNeighborList,
+        leaf_cap: int,
+        num_particles: int,
+    ) -> tuple[
+        Optional[Array],
+        Optional[Array],
+        Optional[Array],
+        Optional[Array],
+        Optional[Array],
+        Optional[Array],
+    ]:
+        """Best-effort precompute of nearfield leaf-pair and scatter artifacts."""
+        nearfield_target_leaf_ids = None
+        nearfield_source_leaf_ids = None
+        nearfield_valid_pairs = None
+        nearfield_chunk_sort_indices = None
+        nearfield_chunk_group_ids = None
+        nearfield_chunk_unique_indices = None
+
+        nearfield_mode = self._resolve_nearfield_mode(num_particles=num_particles)
+        nearfield_edge_chunk_size = self._resolve_nearfield_edge_chunk_size(
+            num_particles=num_particles,
+            nearfield_mode=nearfield_mode,
+        )
+
+        try:
+            (
+                nearfield_target_leaf_ids,
+                nearfield_source_leaf_ids,
+                nearfield_valid_pairs,
+            ) = prepare_leaf_neighbor_pairs(
+                jnp.asarray(tree.node_ranges, dtype=INDEX_DTYPE),
+                jnp.asarray(neighbor_list.leaf_indices, dtype=INDEX_DTYPE),
+                jnp.asarray(neighbor_list.offsets, dtype=INDEX_DTYPE),
+                jnp.asarray(neighbor_list.neighbors, dtype=INDEX_DTYPE),
+            )
+        except Exception:
+            nearfield_target_leaf_ids = None
+            nearfield_source_leaf_ids = None
+            nearfield_valid_pairs = None
+
+        if (
+            nearfield_mode == "bucketed"
+            and nearfield_target_leaf_ids is not None
+            and nearfield_valid_pairs is not None
+        ):
+            try:
+                edge_count = int(nearfield_target_leaf_ids.shape[0])
+                chunk = int(nearfield_edge_chunk_size)
+                chunk_count = (edge_count + chunk - 1) // chunk if edge_count > 0 else 0
+                schedule_items = int(chunk_count * chunk * int(leaf_cap))
+                if schedule_items <= _NEARFIELD_SCATTER_SCHEDULE_ITEM_CAP:
+                    (
+                        nearfield_chunk_sort_indices,
+                        nearfield_chunk_group_ids,
+                        nearfield_chunk_unique_indices,
+                    ) = prepare_bucketed_scatter_schedules(
+                        jnp.asarray(tree.node_ranges, dtype=INDEX_DTYPE),
+                        jnp.asarray(neighbor_list.leaf_indices, dtype=INDEX_DTYPE),
+                        nearfield_target_leaf_ids,
+                        nearfield_valid_pairs,
+                        max_leaf_size=int(leaf_cap),
+                        edge_chunk_size=chunk,
+                    )
+            except Exception:
+                nearfield_chunk_sort_indices = None
+                nearfield_chunk_group_ids = None
+                nearfield_chunk_unique_indices = None
+
+        return (
+            nearfield_target_leaf_ids,
+            nearfield_source_leaf_ids,
+            nearfield_valid_pairs,
+            nearfield_chunk_sort_indices,
+            nearfield_chunk_group_ids,
+            nearfield_chunk_unique_indices,
+        )
+
     def _resolve_nearfield_mode(self, *, num_particles: int) -> str:
         """Resolve near-field execution mode from configured policy."""
         mode = str(self.nearfield_mode).strip().lower()
@@ -1592,40 +1729,12 @@ class FastMultipoleMethod:
             center_mode=upward_center_mode,
         )
 
-        if self.expansion_basis == "spherical":
-            locals_template = None
-        elif self.expansion_basis == "solidfmm":
-            total_nodes = int(tree.parent.shape[0])
-            coeff_count = sh_size(max_order)
-            coeff_dtype = complex_dtype_for_real(pos_sorted.dtype)
-            locals_template = LocalExpansionData(
-                order=max_order,
-                centers=upward.multipoles.centers,
-                coefficients=jnp.zeros((total_nodes, coeff_count), dtype=coeff_dtype),
-            )
-        else:
-            template = self._locals_template
-            total_nodes = int(tree.parent.shape[0])
-            coeff_count = total_coefficients(max_order)
-            reuse_template = (
-                template is not None
-                and int(template.order) == max_order
-                and template.coefficients.shape == (total_nodes, coeff_count)
-                and template.coefficients.dtype == pos_sorted.dtype
-            )
-
-            if reuse_template:
-                locals_template = LocalExpansionData(
-                    order=max_order,
-                    centers=upward.multipoles.centers,
-                    coefficients=jnp.zeros_like(template.coefficients),
-                )
-            else:
-                locals_template = initialize_local_expansions(
-                    tree,
-                    upward.multipoles.centers,
-                    max_order=max_order,
-                )
+        locals_template = self._build_locals_template_for_prepare_state(
+            tree=tree,
+            upward=upward,
+            max_order=max_order,
+            pos_sorted=pos_sorted,
+        )
 
         cache_key = _interaction_cache_key(
             tree,
@@ -1709,61 +1818,19 @@ class FastMultipoleMethod:
         retry_events_tuple = tuple(collected_retries)
         self._recent_retry_events = retry_events_tuple
 
-        nearfield_target_leaf_ids = None
-        nearfield_source_leaf_ids = None
-        nearfield_valid_pairs = None
-        nearfield_chunk_sort_indices = None
-        nearfield_chunk_group_ids = None
-        nearfield_chunk_unique_indices = None
-        nearfield_mode = self._resolve_nearfield_mode(
-            num_particles=int(positions_arr.shape[0])
-        )
-        nearfield_edge_chunk_size = self._resolve_nearfield_edge_chunk_size(
+        (
+            nearfield_target_leaf_ids,
+            nearfield_source_leaf_ids,
+            nearfield_valid_pairs,
+            nearfield_chunk_sort_indices,
+            nearfield_chunk_group_ids,
+            nearfield_chunk_unique_indices,
+        ) = self._prepare_nearfield_precompute_artifacts(
+            tree=tree,
+            neighbor_list=neighbor_list,
+            leaf_cap=leaf_cap,
             num_particles=int(positions_arr.shape[0]),
-            nearfield_mode=nearfield_mode,
         )
-        try:
-            (
-                nearfield_target_leaf_ids,
-                nearfield_source_leaf_ids,
-                nearfield_valid_pairs,
-            ) = prepare_leaf_neighbor_pairs(
-                jnp.asarray(tree.node_ranges, dtype=INDEX_DTYPE),
-                jnp.asarray(neighbor_list.leaf_indices, dtype=INDEX_DTYPE),
-                jnp.asarray(neighbor_list.offsets, dtype=INDEX_DTYPE),
-                jnp.asarray(neighbor_list.neighbors, dtype=INDEX_DTYPE),
-            )
-        except Exception:
-            nearfield_target_leaf_ids = None
-            nearfield_source_leaf_ids = None
-            nearfield_valid_pairs = None
-        if (
-            nearfield_mode == "bucketed"
-            and nearfield_target_leaf_ids is not None
-            and nearfield_valid_pairs is not None
-        ):
-            try:
-                edge_count = int(nearfield_target_leaf_ids.shape[0])
-                chunk = int(nearfield_edge_chunk_size)
-                chunk_count = (edge_count + chunk - 1) // chunk if edge_count > 0 else 0
-                schedule_items = int(chunk_count * chunk * int(leaf_cap))
-                if schedule_items <= _NEARFIELD_SCATTER_SCHEDULE_ITEM_CAP:
-                    (
-                        nearfield_chunk_sort_indices,
-                        nearfield_chunk_group_ids,
-                        nearfield_chunk_unique_indices,
-                    ) = prepare_bucketed_scatter_schedules(
-                        jnp.asarray(tree.node_ranges, dtype=INDEX_DTYPE),
-                        jnp.asarray(neighbor_list.leaf_indices, dtype=INDEX_DTYPE),
-                        nearfield_target_leaf_ids,
-                        nearfield_valid_pairs,
-                        max_leaf_size=int(leaf_cap),
-                        edge_chunk_size=chunk,
-                    )
-            except Exception:
-                nearfield_chunk_sort_indices = None
-                nearfield_chunk_group_ids = None
-                nearfield_chunk_unique_indices = None
 
         return FMMPreparedState(
             tree=tree,
