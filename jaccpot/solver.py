@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import warnings
 from dataclasses import replace
-from typing import Any, Optional, Tuple, Union
+from typing import Any, NamedTuple, Optional, Tuple, Union
 
 from jaxtyping import Array, DTypeLike
 
@@ -80,6 +80,119 @@ def _pop_legacy_common_overrides(
     return basis, theta, G, softening, working_dtype, used
 
 
+class _LegacyRuntimeOverrides(NamedTuple):
+    complex_rotation: str
+    tree_mode: Optional[str]
+    target_leaf_particles: Optional[int]
+    expanse_preset: Optional[str]
+    mac_type: str
+    grouped_interactions: Optional[bool]
+    farfield_mode: str
+    nearfield_mode: str
+    nearfield_edge_chunk_size: int
+    fixed_order: Optional[int]
+    fixed_max_leaf_size: Optional[int]
+    legacy_used: bool
+
+
+def _pop_legacy_runtime_overrides(
+    *,
+    preset_norm: FMMPreset,
+    basis: Basis,
+    advanced_cfg: FMMAdvancedConfig,
+    legacy_kwargs: dict[str, Any],
+    legacy_used: bool,
+) -> _LegacyRuntimeOverrides:
+    """Resolve runtime-facing legacy kwargs while preserving old behavior."""
+    complex_rotation = advanced_cfg.farfield.rotation
+    if complex_rotation is None:
+        complex_rotation = "solidfmm" if basis == "solidfmm" else "cached"
+    legacy_rotation = legacy_kwargs.pop("complex_rotation", None)
+    if legacy_rotation is not None:
+        complex_rotation = str(legacy_rotation)
+        legacy_used = True
+
+    tree_mode = advanced_cfg.tree.mode
+    legacy_tree_mode = legacy_kwargs.pop("tree_build_mode", None)
+    if legacy_tree_mode is not None:
+        tree_mode = str(legacy_tree_mode)
+        legacy_used = True
+
+    target_leaf_particles = advanced_cfg.tree.leaf_target
+    legacy_leaf_target = legacy_kwargs.pop("target_leaf_particles", None)
+    if legacy_leaf_target is not None:
+        target_leaf_particles = int(legacy_leaf_target)
+        legacy_used = True
+
+    expanse_preset = "fast" if preset_norm is FMMPreset.FAST else None
+    legacy_preset = legacy_kwargs.pop("preset", None)
+    if legacy_preset is not None:
+        if hasattr(legacy_preset, "value"):
+            expanse_preset = str(legacy_preset.value)
+        else:
+            expanse_preset = str(legacy_preset)
+        legacy_used = True
+
+    mac_type = (
+        str(advanced_cfg.mac_type)
+        if advanced_cfg.mac_type is not None
+        else ("dehnen" if basis == "solidfmm" else "bh")
+    )
+    legacy_mac_type = legacy_kwargs.pop("mac_type", None)
+    if legacy_mac_type is not None:
+        mac_type = str(legacy_mac_type)
+        legacy_used = True
+
+    grouped_interactions = advanced_cfg.farfield.grouped_interactions
+    legacy_grouped = legacy_kwargs.pop("grouped_interactions", None)
+    if legacy_grouped is not None:
+        grouped_interactions = bool(legacy_grouped)
+        legacy_used = True
+
+    farfield_mode = advanced_cfg.farfield.mode
+    legacy_farfield_mode = legacy_kwargs.pop("farfield_mode", None)
+    if legacy_farfield_mode is not None:
+        farfield_mode = str(legacy_farfield_mode)
+        legacy_used = True
+
+    nearfield_mode = advanced_cfg.nearfield.mode
+    legacy_nearfield_mode = legacy_kwargs.pop("nearfield_mode", None)
+    if legacy_nearfield_mode is not None:
+        nearfield_mode = str(legacy_nearfield_mode)
+        legacy_used = True
+
+    nearfield_edge_chunk_size = advanced_cfg.nearfield.edge_chunk_size
+    legacy_nf_chunk = legacy_kwargs.pop("nearfield_edge_chunk_size", None)
+    if legacy_nf_chunk is not None:
+        nearfield_edge_chunk_size = int(legacy_nf_chunk)
+        legacy_used = True
+
+    fixed_order = legacy_kwargs.pop("fixed_order", None)
+    if fixed_order is not None:
+        fixed_order = int(fixed_order)
+        legacy_used = True
+
+    fixed_max_leaf_size = legacy_kwargs.pop("fixed_max_leaf_size", None)
+    if fixed_max_leaf_size is not None:
+        fixed_max_leaf_size = int(fixed_max_leaf_size)
+        legacy_used = True
+
+    return _LegacyRuntimeOverrides(
+        complex_rotation=complex_rotation,
+        tree_mode=tree_mode,
+        target_leaf_particles=target_leaf_particles,
+        expanse_preset=expanse_preset,
+        mac_type=mac_type,
+        grouped_interactions=grouped_interactions,
+        farfield_mode=farfield_mode,
+        nearfield_mode=nearfield_mode,
+        nearfield_edge_chunk_size=nearfield_edge_chunk_size,
+        fixed_order=fixed_order,
+        fixed_max_leaf_size=fixed_max_leaf_size,
+        legacy_used=legacy_used,
+    )
+
+
 class FastMultipoleMethod:
     """Simplified, preset-first high-level FMM API."""
 
@@ -114,83 +227,26 @@ class FastMultipoleMethod:
             _default_advanced_for_preset(preset_norm) if advanced is None else advanced
         )
 
-        complex_rotation = advanced_cfg.farfield.rotation
-        if complex_rotation is None:
-            complex_rotation = "solidfmm" if basis == "solidfmm" else "cached"
-        legacy_rotation = legacy_kwargs.pop("complex_rotation", None)
-        if legacy_rotation is not None:
-            complex_rotation = str(legacy_rotation)
-            legacy_used = True
-
-        tree_mode = advanced_cfg.tree.mode
-        legacy_tree_mode = legacy_kwargs.pop("tree_build_mode", None)
-        if legacy_tree_mode is not None:
-            tree_mode = str(legacy_tree_mode)
-            legacy_used = True
-        target_leaf_particles = advanced_cfg.tree.leaf_target
-        legacy_leaf_target = legacy_kwargs.pop("target_leaf_particles", None)
-        if legacy_leaf_target is not None:
-            target_leaf_particles = int(legacy_leaf_target)
-            legacy_used = True
-        expanse_preset = "fast" if preset_norm is FMMPreset.FAST else None
-        legacy_preset = legacy_kwargs.pop("preset", None)
-        if legacy_preset is not None:
-            if hasattr(legacy_preset, "value"):
-                expanse_preset = str(legacy_preset.value)
-            else:
-                expanse_preset = str(legacy_preset)
-            legacy_used = True
-
-        mac_type = (
-            str(advanced_cfg.mac_type)
-            if advanced_cfg.mac_type is not None
-            else ("dehnen" if basis == "solidfmm" else "bh")
+        runtime_overrides = _pop_legacy_runtime_overrides(
+            preset_norm=preset_norm,
+            basis=basis,
+            advanced_cfg=advanced_cfg,
+            legacy_kwargs=legacy_kwargs,
+            legacy_used=legacy_used,
         )
-        legacy_mac_type = legacy_kwargs.pop("mac_type", None)
-        if legacy_mac_type is not None:
-            mac_type = str(legacy_mac_type)
-            legacy_used = True
-
-        grouped_interactions = advanced_cfg.farfield.grouped_interactions
-        legacy_grouped = legacy_kwargs.pop("grouped_interactions", None)
-        if legacy_grouped is not None:
-            grouped_interactions = bool(legacy_grouped)
-            legacy_used = True
-        farfield_mode = advanced_cfg.farfield.mode
-        legacy_farfield_mode = legacy_kwargs.pop("farfield_mode", None)
-        if legacy_farfield_mode is not None:
-            farfield_mode = str(legacy_farfield_mode)
-            legacy_used = True
-        nearfield_mode = advanced_cfg.nearfield.mode
-        legacy_nearfield_mode = legacy_kwargs.pop("nearfield_mode", None)
-        if legacy_nearfield_mode is not None:
-            nearfield_mode = str(legacy_nearfield_mode)
-            legacy_used = True
-        nearfield_edge_chunk_size = advanced_cfg.nearfield.edge_chunk_size
-        legacy_nf_chunk = legacy_kwargs.pop("nearfield_edge_chunk_size", None)
-        if legacy_nf_chunk is not None:
-            nearfield_edge_chunk_size = int(legacy_nf_chunk)
-            legacy_used = True
-        fixed_order = legacy_kwargs.pop("fixed_order", None)
-        if fixed_order is not None:
-            fixed_order = int(fixed_order)
-            legacy_used = True
-        fixed_max_leaf_size = legacy_kwargs.pop("fixed_max_leaf_size", None)
-        if fixed_max_leaf_size is not None:
-            fixed_max_leaf_size = int(fixed_max_leaf_size)
-            legacy_used = True
+        legacy_used = runtime_overrides.legacy_used
 
         traversal_config = advanced_cfg.runtime.traversal_config
         self._impl = _RuntimeFMM(
-            preset=expanse_preset,
+            preset=runtime_overrides.expanse_preset,
             theta=float(theta),
             G=float(G),
             softening=float(softening),
             working_dtype=working_dtype,
             expansion_basis=basis,
-            complex_rotation=complex_rotation,
-            tree_build_mode=tree_mode,
-            target_leaf_particles=target_leaf_particles,
+            complex_rotation=runtime_overrides.complex_rotation,
+            tree_build_mode=runtime_overrides.tree_mode,
+            target_leaf_particles=runtime_overrides.target_leaf_particles,
             refine_local=legacy_kwargs.pop(
                 "refine_local", advanced_cfg.tree.refine_local
             ),
@@ -202,8 +258,8 @@ class FastMultipoleMethod:
                 "aspect_threshold",
                 advanced_cfg.tree.aspect_threshold,
             ),
-            grouped_interactions=grouped_interactions,
-            farfield_mode=farfield_mode,
+            grouped_interactions=runtime_overrides.grouped_interactions,
+            farfield_mode=runtime_overrides.farfield_mode,
             m2l_chunk_size=legacy_kwargs.pop(
                 "m2l_chunk_size",
                 advanced_cfg.farfield.m2l_chunk_size,
@@ -212,8 +268,8 @@ class FastMultipoleMethod:
                 "l2l_chunk_size",
                 advanced_cfg.farfield.l2l_chunk_size,
             ),
-            nearfield_mode=nearfield_mode,
-            nearfield_edge_chunk_size=nearfield_edge_chunk_size,
+            nearfield_mode=runtime_overrides.nearfield_mode,
+            nearfield_edge_chunk_size=runtime_overrides.nearfield_edge_chunk_size,
             host_refine_mode=legacy_kwargs.pop(
                 "host_refine_mode",
                 advanced_cfg.runtime.host_refine_mode,
@@ -233,9 +289,9 @@ class FastMultipoleMethod:
             ),
             use_dense_interactions=legacy_kwargs.pop("use_dense_interactions", None),
             traversal_config=legacy_kwargs.pop("traversal_config", traversal_config),
-            fixed_order=fixed_order,
-            fixed_max_leaf_size=fixed_max_leaf_size,
-            mac_type=mac_type,
+            fixed_order=runtime_overrides.fixed_order,
+            fixed_max_leaf_size=runtime_overrides.fixed_max_leaf_size,
+            mac_type=runtime_overrides.mac_type,
         )
         if legacy_used:
             warnings.warn(
