@@ -29,12 +29,9 @@ from yggdrax.interactions import (
     build_well_separated_interactions,
 )
 from yggdrax.tree import (
-    RadixTree,
-    RadixTreeWorkspace,
-    build_fixed_depth_tree,
-    build_fixed_depth_tree_jit,
-    build_tree,
-    build_tree_jit,
+    Tree,
+    TreeType,
+    available_tree_types,
 )
 
 from jaccpot.downward.local_expansions import (
@@ -154,11 +151,11 @@ class FMMResolvedConfig:
 class _TreeBuildArtifacts:
     """Outputs from a tree construction pass used by the FMM pipeline."""
 
-    tree: RadixTree
+    tree: Tree
     positions_sorted: Array
     masses_sorted: Array
     inverse_permutation: Array
-    workspace: Optional[RadixTreeWorkspace]
+    workspace: Optional[object]
     max_leaf_size: int
     cache_leaf_parameter: int
 
@@ -345,9 +342,10 @@ def _build_tree_with_config(
     masses: Array,
     bounds: Tuple[Array, Array],
     *,
+    tree_type: str,
     tree_config: TreeBuilderConfig,
     leaf_size: int,
-    workspace: Optional[RadixTreeWorkspace],
+    workspace: Optional[object],
     jit_tree: bool,
     refine_local: bool,
     max_refine_levels: int,
@@ -355,45 +353,39 @@ def _build_tree_with_config(
 ) -> _TreeBuildArtifacts:
     """Construct a tree according to the resolved builder configuration."""
 
+    del jit_tree
+
     mode = tree_config.mode
-    if mode == "fixed_depth":
-        build_fn = build_fixed_depth_tree_jit if jit_tree else build_fixed_depth_tree
-        (
-            tree,
-            pos_sorted,
-            mass_sorted,
-            inverse,
-            workspace_out,
-        ) = build_fn(
-            positions,
-            masses,
-            bounds,
-            target_leaf_particles=tree_config.target_leaf_particles,
-            return_reordered=True,
-            workspace=workspace,
-            return_workspace=True,
-            refine_local=refine_local,
-            max_refine_levels=max_refine_levels,
-            aspect_threshold=aspect_threshold,
+    build_mode = "fixed_depth" if mode == "fixed_depth" else "adaptive"
+    built_tree = Tree.from_particles(
+        positions,
+        masses,
+        tree_type=tree_type,
+        build_mode=build_mode,
+        bounds=bounds,
+        return_reordered=True,
+        workspace=workspace if tree_type == "radix" else None,  # type: ignore[arg-type]
+        return_workspace=(tree_type == "radix"),
+        leaf_size=int(leaf_size),
+        target_leaf_particles=tree_config.target_leaf_particles,
+        refine_local=refine_local,
+        max_refine_levels=max_refine_levels,
+        aspect_threshold=aspect_threshold,
+    )
+    built_tree.require_fmm_topology()
+    tree = built_tree
+    pos_sorted = built_tree.positions_sorted
+    mass_sorted = built_tree.masses_sorted
+    inverse = built_tree.inverse_permutation
+    workspace_out = built_tree.workspace if tree_type == "radix" else None
+    if pos_sorted is None or mass_sorted is None or inverse is None:
+        raise ValueError(
+            "Tree.from_particles must return reordered arrays for FMM runtime."
         )
-        max_leaf_size = _max_leaf_size_from_tree(tree)
-        cache_leaf_parameter = tree_config.target_leaf_particles
-    elif mode == "lbvh":
-        leaf_cap = int(leaf_size)
-        build_fn = build_tree_jit if jit_tree else build_tree
-        tree, pos_sorted, mass_sorted, inverse, workspace_out = build_fn(
-            positions,
-            masses,
-            bounds,
-            leaf_size=leaf_cap,
-            return_reordered=True,
-            workspace=workspace,
-            return_workspace=True,
-        )
-        max_leaf_size = leaf_cap
-        cache_leaf_parameter = leaf_cap
-    else:
-        raise ValueError(f"unsupported tree build mode: {mode}")
+    max_leaf_size = _max_leaf_size_from_tree(tree)
+    cache_leaf_parameter = (
+        int(leaf_size) if mode == "lbvh" else tree_config.target_leaf_particles
+    )
 
     return _TreeBuildArtifacts(
         tree=tree,
@@ -409,7 +401,7 @@ def _build_tree_with_config(
 class FMMPreparedState(NamedTuple):
     """Keep tree data resident on device across repeated evaluations."""
 
-    tree: RadixTree
+    tree: Tree
     positions_sorted: Array
     masses_sorted: Array
     inverse_permutation: Array
@@ -435,7 +427,7 @@ class _PrepareStateTreeUpwardArtifacts(NamedTuple):
     """Tree/upward artifacts produced during prepare_state orchestration."""
 
     tree_mode: str
-    tree: RadixTree
+    tree: Tree
     positions_sorted: Array
     masses_sorted: Array
     inverse_permutation: Array
@@ -465,6 +457,8 @@ class FastMultipoleMethod:
         softening: Softening length to avoid singularities (default: 0.0)
         tree_build_mode:
             Choose between "lbvh" and "fixed_depth" builders.
+        tree_type:
+            Yggdrax tree family selector (e.g. ``"radix"`` or ``"kdtree"``).
         target_leaf_particles:
             Desired particle count per leaf for fixed-depth trees.
         refine_local:
@@ -492,6 +486,7 @@ class FastMultipoleMethod:
         pair_process_block: Optional[int] = None,
         traversal_config: Optional[DualTreeTraversalConfig] = None,
         tree_build_mode: Optional[str] = None,
+        tree_type: str = "radix",
         target_leaf_particles: Optional[int] = None,
         refine_local: Optional[bool] = None,
         max_refine_levels: Optional[int] = None,
@@ -547,6 +542,14 @@ class FastMultipoleMethod:
         if refine_mode_norm not in ("auto", "on", "off"):
             raise ValueError("host_refine_mode must be 'auto', 'on', or 'off'")
         self.host_refine_mode = refine_mode_norm
+        tree_type_norm = str(tree_type).strip().lower()
+        supported_tree_types = set(available_tree_types())
+        if tree_type_norm not in supported_tree_types:
+            supported_txt = ", ".join(sorted(supported_tree_types))
+            raise ValueError(
+                f"tree_type must be one of ({supported_txt}), got '{tree_type}'"
+            )
+        self.tree_type: TreeType = tree_type_norm  # type: ignore[assignment]
 
         preset_config = get_preset_config(preset) if preset is not None else None
 
@@ -591,7 +594,7 @@ class FastMultipoleMethod:
         self.aspect_threshold = resolved.tree.aspect_threshold
         self.interaction_retry_logger = interaction_retry_logger
         self.use_dense_interactions = resolved.traversal.use_dense_interactions
-        self._tree_workspace: Optional[RadixTreeWorkspace] = None
+        self._tree_workspace: Optional[object] = None
         self._locals_template: Optional[LocalExpansionData] = None
         self._interaction_cache: Optional[_InteractionCacheEntry] = None
         self._prepared_state_cache_key: Optional[tuple[Any, ...]] = None
@@ -678,6 +681,9 @@ class FastMultipoleMethod:
     ) -> bool:
         """Resolve tree-build JIT mode with a CPU-friendly auto heuristic."""
 
+        if self.tree_type != "radix":
+            return False
+
         if jit_tree_override is not None:
             return bool(jit_tree_override)
 
@@ -726,7 +732,11 @@ class FastMultipoleMethod:
             refine_local_override = False
         elif self.host_refine_mode == "on":
             refine_local_override = True
-        elif large_cpu and self.tree_build_mode == "fixed_depth":
+        elif (
+            large_cpu
+            and self.tree_type == "radix"
+            and self.tree_build_mode == "fixed_depth"
+        ):
             refine_local_override = False
 
         if (
@@ -734,6 +744,7 @@ class FastMultipoleMethod:
             and self.preset == "fast"
             and self.expansion_basis == "solidfmm"
             and self.mac_type == "dehnen"
+            and self.tree_type == "radix"
             and self.tree_build_mode == "fixed_depth"
             and large_cpu
         ):
@@ -743,6 +754,7 @@ class FastMultipoleMethod:
             self.preset == "fast"
             and self.expansion_basis == "solidfmm"
             and self.mac_type == "dehnen"
+            and self.tree_type == "radix"
             and large_cpu
             and not self._explicit_traversal_config
             and not self._explicit_max_pair_queue
@@ -831,7 +843,7 @@ class FastMultipoleMethod:
     def _build_locals_template_for_prepare_state(
         self,
         *,
-        tree: RadixTree,
+        tree: Tree,
         upward: TreeUpwardData,
         max_order: int,
         pos_sorted: Array,
@@ -884,6 +896,16 @@ class FastMultipoleMethod:
         upward_center_mode: str,
     ) -> _PrepareStateTreeUpwardArtifacts:
         """Build tree artifacts and run upward preparation for prepare_state."""
+        tree_config = self.config.tree
+        if self.tree_type != "radix" and tree_config.mode == "fixed_depth":
+            tree_config = TreeBuilderConfig(
+                mode="lbvh",
+                target_leaf_particles=tree_config.target_leaf_particles,
+                refine_local=tree_config.refine_local,
+                max_refine_levels=tree_config.max_refine_levels,
+                aspect_threshold=tree_config.aspect_threshold,
+            )
+
         inferred_bounds = self._resolve_prepare_state_bounds(
             positions=positions_arr,
             bounds=bounds,
@@ -897,7 +919,8 @@ class FastMultipoleMethod:
             positions_arr,
             masses_arr,
             inferred_bounds,
-            tree_config=self.config.tree,
+            tree_type=self.tree_type,
+            tree_config=tree_config,
             leaf_size=int(leaf_size),
             workspace=self._tree_workspace,
             jit_tree=jit_tree_flag,
@@ -925,7 +948,7 @@ class FastMultipoleMethod:
         )
 
         return _PrepareStateTreeUpwardArtifacts(
-            tree_mode=self.tree_build_mode,
+            tree_mode=tree_config.mode,
             tree=tree,
             positions_sorted=pos_sorted,
             masses_sorted=mass_sorted,
@@ -1036,7 +1059,7 @@ class FastMultipoleMethod:
     def _prepare_state_nearfield_artifacts(
         self,
         *,
-        tree: RadixTree,
+        tree: Tree,
         neighbor_list: NodeNeighborList,
         leaf_cap: int,
         num_particles: int,
@@ -1096,7 +1119,7 @@ class FastMultipoleMethod:
     def _prepare_nearfield_precompute_artifacts(
         self,
         *,
-        tree: RadixTree,
+        tree: Tree,
         neighbor_list: NodeNeighborList,
         leaf_cap: int,
         num_particles: int,
@@ -1164,7 +1187,7 @@ class FastMultipoleMethod:
     def _prepare_leaf_neighbor_pairs_safe(
         self,
         *,
-        tree: RadixTree,
+        tree: Tree,
         neighbor_list: NodeNeighborList,
     ) -> tuple[Optional[Array], Optional[Array], Optional[Array]]:
         """Best-effort leaf neighbor pair generation."""
@@ -1181,7 +1204,7 @@ class FastMultipoleMethod:
     def _prepare_bucketed_scatter_schedules_safe(
         self,
         *,
-        tree: RadixTree,
+        tree: Tree,
         neighbor_list: NodeNeighborList,
         target_leaf_ids: Array,
         valid_pairs: Array,
@@ -1241,7 +1264,7 @@ class FastMultipoleMethod:
     def _prepare_downward_with_artifacts(
         self,
         *,
-        tree: RadixTree,
+        tree: Tree,
         upward: TreeUpwardData,
         theta_val: float,
         locals_template: Optional[LocalExpansionData],
@@ -1391,7 +1414,7 @@ class FastMultipoleMethod:
 
     def prepare_upward_sweep(
         self: "FastMultipoleMethod",
-        tree: RadixTree,
+        tree: Tree,
         positions_sorted: Array,
         masses_sorted: Array,
         *,
@@ -1437,7 +1460,7 @@ class FastMultipoleMethod:
 
     def run_downward_sweep(
         self: "FastMultipoleMethod",
-        tree: RadixTree,
+        tree: Tree,
         multipoles: NodeMultipoleData,
         interactions: NodeInteractionList,
         *,
@@ -1458,7 +1481,7 @@ class FastMultipoleMethod:
 
     def prepare_downward_sweep(
         self: "FastMultipoleMethod",
-        tree: RadixTree,
+        tree: Tree,
         upward_data: TreeUpwardData,
         *,
         theta: Optional[float] = None,
@@ -1827,7 +1850,7 @@ class FastMultipoleMethod:
     @jaxtyped(typechecker=beartype)
     def evaluate_tree(
         self: "FastMultipoleMethod",
-        tree: RadixTree,
+        tree: Tree,
         positions_sorted: Array,
         masses_sorted: Array,
         locals_or_downward: Union[LocalExpansionData, TreeDownwardData],
@@ -1924,7 +1947,7 @@ class FastMultipoleMethod:
     @jaxtyped(typechecker=beartype)
     def evaluate_tree_compiled(
         self: "FastMultipoleMethod",
-        tree: RadixTree,
+        tree: Tree,
         positions_sorted: Array,
         masses_sorted: Array,
         locals_or_downward: Union[LocalExpansionData, TreeDownwardData],
@@ -2037,7 +2060,7 @@ def _infer_bounds(positions: Array) -> tuple[Array, Array]:
     return minimum - padding, maximum + padding
 
 
-def _max_leaf_size_from_tree(tree: RadixTree) -> int:
+def _max_leaf_size_from_tree(tree: Tree) -> int:
     """Compute maximum number of particles per leaf node."""
     num_internal = int(tree.num_internal_nodes)
     leaf_ranges = tree.node_ranges[num_internal:]
@@ -2058,7 +2081,7 @@ class _TreeEvaluationSetup(NamedTuple):
 
 
 def _prepare_tree_evaluation_inputs(
-    tree: RadixTree,
+    tree: Tree,
     positions_sorted: Array,
     masses_sorted: Array,
     locals_or_downward: Union[LocalExpansionData, TreeDownwardData],
@@ -2820,7 +2843,7 @@ def _propagate_solidfmm_locals_to_children(
 
 
 def _prepare_solidfmm_downward_sweep(
-    tree: RadixTree,
+    tree: Tree,
     upward: TreeUpwardData,
     *,
     theta: float,
@@ -3016,7 +3039,7 @@ def _prepare_solidfmm_downward_sweep(
     ),
 )
 def _evaluate_tree_compiled_impl(
-    tree: RadixTree,
+    tree: Tree,
     positions: Array,
     masses: Array,
     locals_data: LocalExpansionData,
@@ -3118,7 +3141,7 @@ def _evaluate_tree_compiled_impl(
 def _evaluate_prepared_tree(
     *,
     fmm: "FastMultipoleMethod",
-    tree: RadixTree,
+    tree: Tree,
     positions_sorted: Array,
     masses_sorted: Array,
     downward: TreeDownwardData,

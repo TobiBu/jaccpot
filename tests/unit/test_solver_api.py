@@ -3,6 +3,7 @@
 import jax
 import jax.numpy as jnp
 import numpy as np
+import pytest
 
 from jaccpot import (
     FarFieldConfig,
@@ -17,6 +18,7 @@ from jaccpot import FMMPreset as ExpansePreset
 from jaccpot import (
     NearFieldConfig,
 )
+from jaccpot import TreeConfig
 
 
 def _sample_problem(n: int = 64):
@@ -94,3 +96,38 @@ def test_advanced_config_applies_to_runtime():
     assert fmm.nearfield_mode == "bucketed"
     assert int(fmm.nearfield_edge_chunk_size) == 512
     assert fmm.mac_type == "engblom"
+
+
+def test_tree_type_flows_from_advanced_config():
+    fmm = FastMultipoleMethod(
+        preset=FMMPreset.FAST,
+        basis="solidfmm",
+        advanced=FMMAdvancedConfig(tree=TreeConfig(tree_type="radix")),
+    )
+    assert fmm._impl.tree_type == "radix"
+
+
+def test_invalid_tree_type_raises():
+    with pytest.raises(ValueError, match="tree_type must be one of"):
+        FastMultipoleMethod(
+            preset=FMMPreset.FAST,
+            basis="solidfmm",
+            advanced=FMMAdvancedConfig(tree=TreeConfig(tree_type="invalid-tree")),
+        )
+
+
+def test_kdtree_tree_type_runs_compute_accelerations():
+    positions, masses = _sample_problem(n=64)
+    fmm = FastMultipoleMethod(
+        preset=FMMPreset.FAST,
+        basis="solidfmm",
+        advanced=FMMAdvancedConfig(tree=TreeConfig(tree_type="kdtree")),
+    )
+    acc = fmm.compute_accelerations(
+        positions,
+        masses,
+        leaf_size=16,
+        max_order=3,
+    )
+    assert acc.shape == positions.shape
+    assert np.isfinite(np.asarray(acc)).all()

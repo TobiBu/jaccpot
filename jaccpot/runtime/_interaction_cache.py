@@ -18,7 +18,7 @@ from yggdrax.interactions import (
     NodeInteractionList,
     NodeNeighborList,
 )
-from yggdrax.tree import RadixTree
+from yggdrax.tree import Tree
 
 
 @dataclass(frozen=True)
@@ -66,7 +66,7 @@ class _InteractionCacheEntry(NamedTuple):
 
 
 def _interaction_cache_key(
-    tree: RadixTree,
+    tree: Tree,
     *,
     tree_mode: str,
     leaf_parameter: int,
@@ -155,7 +155,7 @@ def _interaction_cache_key(
 
 
 def _build_dual_tree_artifacts(
-    tree: RadixTree,
+    tree: Tree,
     geometry,
     *,
     theta: float,
