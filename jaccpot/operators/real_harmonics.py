@@ -269,15 +269,6 @@ def sh_index(ell: int, m: int) -> int:
 # ===========================================================================
 
 
-@lru_cache(maxsize=None)
-def _precompute_factorial_table(max_n: int, dtype_key: str) -> np.ndarray:
-    """Precompute factorial table for 0..max_n."""
-    dtype = np.dtype(dtype_key)
-    # lgamma(n+1) = log(n!)
-    vals = [float(np.math.lgamma(i + 1)) for i in range(max_n + 1)]
-    return np.exp(np.array(vals, dtype=dtype))
-
-
 def _factorial_table_jax(max_n: int, dtype: DTypeLike) -> Array:
     """Get factorial table as JAX array."""
     n = jnp.arange(0, max_n + 1, dtype=dtype)
@@ -1535,21 +1526,6 @@ def m2l_real_wigner(
 ) -> Array:
     """Baseline M2L using Wigner-D rotations (correctness reference)."""
     return m2l_a6_real_only_wigner(multipole, delta, order=order)
-
-
-# ===========================================================================
-# Optimized M2L kernel using Dehnen A.6.2 / eq (66) constraint
-# ===========================================================================
-
-
-def _m_max_needed(n: int, p: int) -> int:
-    """Maximum |m| needed for degree n at expansion order p.
-
-    From Dehnen eq (66): only M_n^m with |m| ≤ min{n, p-n} contribute.
-    This is because the M2L kernel has the property that F_n^m = 0
-    for |m| > min{n, p-n}.
-    """
-    return min(n, p - n)
 
 
 @partial(jax.jit, static_argnames=("order",))

@@ -306,40 +306,6 @@ def _scatter_contributions(
     return base_acc.at[flat_indices].add(masked_values)
 
 
-def _scatter_contributions_two_stage(
-    base_acc: Array,
-    indices: Array,
-    values: Array,
-    mask: Array,
-) -> Array:
-    """Two-stage scatter: in-batch contiguous reduction then compact add."""
-    if values.size == 0:
-        return base_acc
-    flat_indices = indices.reshape(-1)
-    flat_values = values.reshape(-1, values.shape[-1])
-    flat_mask = mask.reshape(-1)
-    safe_indices = jnp.where(flat_mask, flat_indices, 0)
-    safe_values = jnp.where(flat_mask[:, None], flat_values, 0.0)
-
-    sort_idx = jnp.argsort(safe_indices)
-    idx_sorted = safe_indices[sort_idx]
-    values_sorted = safe_values[sort_idx]
-    item_count = idx_sorted.shape[0]
-
-    is_new = jnp.concatenate(
-        [
-            jnp.array([True]),
-            idx_sorted[1:] != idx_sorted[:-1],
-        ]
-    )
-    group_ids = jnp.cumsum(is_new.astype(INDEX_DTYPE)) - as_index(1)
-    reduced = jax.ops.segment_sum(values_sorted, group_ids, item_count)
-    unique_indices = (
-        jnp.zeros((item_count,), dtype=INDEX_DTYPE).at[group_ids].set(idx_sorted)
-    )
-    return base_acc.at[unique_indices].add(reduced)
-
-
 def _build_scatter_schedule(
     indices: Array,
     mask: Array,
@@ -399,40 +365,6 @@ def _scatter_scalar_contributions(
     flat_mask = mask.reshape(-1)
     masked = jnp.where(flat_mask, flat_values, 0.0)
     return base.at[flat_indices].add(masked)
-
-
-def _scatter_scalar_contributions_two_stage(
-    base: Array,
-    indices: Array,
-    values: Array,
-    mask: Array,
-) -> Array:
-    """Two-stage scalar scatter: in-batch contiguous reduction then compact add."""
-    if values.size == 0:
-        return base
-    flat_indices = indices.reshape(-1)
-    flat_values = values.reshape(-1)
-    flat_mask = mask.reshape(-1)
-    safe_indices = jnp.where(flat_mask, flat_indices, 0)
-    safe_values = jnp.where(flat_mask, flat_values, 0.0)
-
-    sort_idx = jnp.argsort(safe_indices)
-    idx_sorted = safe_indices[sort_idx]
-    values_sorted = safe_values[sort_idx]
-    item_count = idx_sorted.shape[0]
-
-    is_new = jnp.concatenate(
-        [
-            jnp.array([True]),
-            idx_sorted[1:] != idx_sorted[:-1],
-        ]
-    )
-    group_ids = jnp.cumsum(is_new.astype(INDEX_DTYPE)) - as_index(1)
-    reduced = jax.ops.segment_sum(values_sorted, group_ids, item_count)
-    unique_indices = (
-        jnp.zeros((item_count,), dtype=INDEX_DTYPE).at[group_ids].set(idx_sorted)
-    )
-    return base.at[unique_indices].add(reduced)
 
 
 def _scatter_scalars_with_schedule(

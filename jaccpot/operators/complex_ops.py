@@ -138,11 +138,6 @@ def wigner_D_complex_jax(
     return D
 
 
-def _factorial_table(max_n: int, dtype: jnp.dtype) -> Array:
-    n = jnp.arange(0, max_n + 1, dtype=dtype)
-    return jnp.exp(jax.lax.lgamma(n + 1.0)).astype(dtype)
-
-
 @lru_cache(maxsize=None)
 def _factorial_table_cached_impl(max_n: int, dtype_key: str) -> np.ndarray:
     dtype = np.dtype(dtype_key)
@@ -375,18 +370,6 @@ def _complex_swap_matrices(ell: int, *, dtype: jnp.dtype) -> tuple[Array, Array]
     return jnp.asarray(B, dtype=dtype), jnp.asarray(Bt, dtype=dtype)
 
 
-def _solidfmm_swap_pattern(ell: int, *, dtype: jnp.dtype) -> Array:
-    """Row sign pattern used by solidfmm swaps.
-
-    pattern = !(n & 1)
-    If pattern is true (ell even), rows 0,2,4,... are multiplied by -1.
-    If pattern is false (ell odd), rows 1,3,5,... are multiplied by -1.
-    """
-    idx = jnp.arange(2 * ell + 1, dtype=jnp.int32)
-    signs = (-1.0) ** (idx + ell + 1)
-    return jnp.diag(signs.astype(dtype))
-
-
 def _solidfmm_pack_m_nonneg(block: Array, *, ell: int) -> tuple[Array, Array]:
     """Extract m>=0 coefficients as (re, im) arrays.
 
@@ -485,76 +468,6 @@ def _solidfmm_rotscale(
         re_out = scale * (cos_m * re + sin_m * im)
         im_out = scale * (-sin_m * re + cos_m * im)
     return re_out, im_out
-
-
-def _solidfmm_forward_transform_multipole_block(
-    block: Array,
-    delta: Array,
-    *,
-    ell: int,
-) -> Array:
-    """Forward transform for multipoles (solidfmm swap/rotscale pipeline)."""
-    dtype = jnp.asarray(block).dtype
-    delta = jnp.asarray(delta)
-    alpha, beta = _angles_from_delta_solidfmm(delta)
-    _, B_U = _complex_swap_matrices(ell, dtype=dtype)
-    re, im = _solidfmm_pack_m_nonneg(block, ell=ell)
-
-    re, im = _solidfmm_rotscale(
-        re,
-        im,
-        angle=alpha,
-        scale=1.0,
-        ell=ell,
-        forward=True,
-    )
-    re, im = _solidfmm_swap_apply(re, im, B_U, ell=ell)
-    re, im = _solidfmm_rotscale(
-        re,
-        im,
-        angle=beta,
-        scale=1.0,
-        ell=ell,
-        forward=True,
-    )
-    re, im = _solidfmm_swap_apply(re, im, B_U, ell=ell)
-
-    return _solidfmm_unpack_m_nonneg(re, im, ell=ell)
-
-
-def _solidfmm_backward_transform_multipole_block(
-    block: Array,
-    delta: Array,
-    *,
-    ell: int,
-) -> Array:
-    """Backward transform for multipoles (solidfmm swap/rotscale pipeline)."""
-    dtype = jnp.asarray(block).dtype
-    delta = jnp.asarray(delta)
-    alpha, beta = _angles_from_delta_solidfmm(delta)
-    _, B_U = _complex_swap_matrices(ell, dtype=dtype)
-    re, im = _solidfmm_pack_m_nonneg(block, ell=ell)
-
-    re, im = _solidfmm_swap_apply(re, im, B_U, ell=ell)
-    re, im = _solidfmm_rotscale(
-        re,
-        im,
-        angle=beta,
-        scale=1.0,
-        ell=ell,
-        forward=False,
-    )
-    re, im = _solidfmm_swap_apply(re, im, B_U, ell=ell)
-    re, im = _solidfmm_rotscale(
-        re,
-        im,
-        angle=alpha,
-        scale=1.0,
-        ell=ell,
-        forward=False,
-    )
-
-    return _solidfmm_unpack_m_nonneg(re, im, ell=ell)
 
 
 def _angles_from_delta(delta: Array) -> tuple[Array, Array]:
@@ -776,22 +689,6 @@ def _complex_rotation_blocks_from_z_solidfmm(
             D = Dz_alpha @ B_T @ Dz_beta @ B_T
         blocks.append(D)
     return tuple(blocks)
-
-
-def _apply_complex_rotation_blocks(
-    coeffs: Array,
-    blocks: tuple[Array, ...],
-    *,
-    order: int,
-) -> Array:
-    """Apply precomputed rotation blocks to packed complex coefficients."""
-    p = int(order)
-    coeffs = jnp.asarray(coeffs)
-    out = jnp.zeros_like(coeffs)
-    for ell in range(p + 1):
-        sl = slice(sh_offset(ell), sh_offset(ell + 1))
-        out = out.at[sl].set(blocks[ell] @ coeffs[sl])
-    return out
 
 
 def _pack_coeffs_by_ell(
