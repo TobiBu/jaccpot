@@ -9,7 +9,7 @@ _TYPECHECK_HOOK: Any = None
 
 
 def _runtime_typecheck_enabled() -> bool:
-    raw = os.getenv("JACCPOT_RUNTIME_TYPECHECK", "1").strip().lower()
+    raw = os.getenv("JACCPOT_RUNTIME_TYPECHECK", "0").strip().lower()
     return raw not in {"0", "false", "no", "off"}
 
 

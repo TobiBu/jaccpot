@@ -31,12 +31,12 @@ import jax.numpy as jnp
 from beartype import beartype
 from jax import lax
 from jaxtyping import Array, jaxtyped
-
 from yggdrax.dtypes import INDEX_DTYPE
-from jaccpot.operators.real_harmonics import m2m_real, p2m_real_direct, sh_size
-from yggdrax.tree import RadixTree
 from yggdrax.geometry import TreeGeometry, compute_tree_geometry
+from yggdrax.tree import RadixTree
 from yggdrax.tree_moments import TreeMassMoments, compute_tree_mass_moments
+
+from jaccpot.operators.real_harmonics import m2m_real, p2m_real_direct, sh_size
 
 
 class SphericalNodeMultipoleData(NamedTuple):
@@ -63,7 +63,7 @@ _CENTER_MODES = ("com", "aabb", "explicit")
     static_argnames=("order", "max_leaf_size", "num_internal", "total_nodes"),
 )
 def _p2m_leaves(
-    tree: RadixTree,
+    node_ranges: Array,
     positions_sorted: Array,
     masses_sorted: Array,
     centers: Array,
@@ -94,7 +94,7 @@ def _p2m_leaves(
     if leaf_nodes.size == 0:
         return packed
 
-    ranges = jnp.asarray(tree.node_ranges, dtype=INDEX_DTYPE)[leaf_nodes]
+    ranges = jnp.asarray(node_ranges, dtype=INDEX_DTYPE)[leaf_nodes]
     starts = ranges[:, 0]
     ends_inclusive = ranges[:, 1]
     counts = ends_inclusive - starts + 1
@@ -267,7 +267,7 @@ def prepare_spherical_upward_sweep(
         max_leaf = int(max_leaf_size)
 
     packed = _p2m_leaves(
-        tree,
+        jnp.asarray(tree.node_ranges, dtype=INDEX_DTYPE),
         jnp.asarray(positions_sorted),
         jnp.asarray(masses_sorted),
         centers,

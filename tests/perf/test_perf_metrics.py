@@ -6,17 +6,18 @@ collection executes and produces sane, finite values for drift tracking.
 
 from dataclasses import replace
 
-import numpy as np
 import jax
 import jax.numpy as jnp
+import numpy as np
 
 from jaccpot import (
+    FarFieldConfig,
     FMMAdvancedConfig,
     FMMPreset,
-    FarFieldConfig,
     NearFieldConfig,
     TreeConfig,
 )
+
 from .perf_metrics import (
     collect_mode_comparison_metrics,
     collect_prepare_eval_split_metrics,

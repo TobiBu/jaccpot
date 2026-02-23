@@ -9,7 +9,11 @@ description = "JAX Fast Multipole Method solver package built on yggdrax tree ar
 readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "MIT" }
-authors = [{ name = "AstroAI Lab" }]
+authors = [
+  { name = "AstroAI Lab", email = "astroai@iwr.uni-heidelberg.de" },
+  { name = "Tobias Buck", email = "tobias.buck@iwr.uni-heidelberg.de" },
+]
+maintainers = [{ name = "AstroAI Lab", email = "astroai@iwr.uni-heidelberg.de" }]
 keywords = ["fmm", "n-body", "jax", "gravity", "treecode"]
 classifiers = [
   "Development Status :: 3 - Alpha",
@@ -28,6 +32,12 @@ dependencies = [
   "beartype>=0.14.0",
   "yggdrax>=0.0.1,<0.1.0",
 ]
+
+[project.urls]
+Homepage = "https://github.com/AstroAI-Lab/jaccpot"
+Repository = "https://github.com/AstroAI-Lab/jaccpot"
+Issues = "https://github.com/AstroAI-Lab/jaccpot/issues"
+Documentation = "https://github.com/AstroAI-Lab/jaccpot#readme"
 
 [project.optional-dependencies]
 dev = [
@@ -68,7 +78,7 @@ skip_gitignore = true
 [tool.pytest.ini_options]
 minversion = "7.4"
 testpaths = ["tests"]
-addopts = "-q --strict-markers --cov=jaccpot --cov-report=term-missing --cov-report=xml"
+addopts = "-q --strict-markers --ignore=tests/perf --cov=jaccpot --cov-report=term-missing --cov-report=xml"
 
 [tool.coverage.run]
 source = ["jaccpot"]

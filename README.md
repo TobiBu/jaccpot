@@ -93,14 +93,14 @@ pytest --cov=jaccpot --cov-report=term-missing
 
 ## Runtime Type Checking
 
-`jaccpot` enables package-wide runtime checking for annotated callables using
+`jaccpot` can enable package-wide runtime checking for annotated callables using
 `jaxtyping` + `beartype` at import time.
 
-- Enabled by default.
-- Disable when needed (for profiling or debugging) with:
+- Disabled by default.
+- Enable when needed with:
 
 ```bash
-export JACCPOT_RUNTIME_TYPECHECK=0
+export JACCPOT_RUNTIME_TYPECHECK=1
 ```
 
 ## Project Structure

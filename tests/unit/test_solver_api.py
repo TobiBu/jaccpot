@@ -4,13 +4,17 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
-from jaccpot import FMMPreset as ExpansePreset
+from jaccpot import (
+    FarFieldConfig,
+)
+from jaccpot import FastMultipoleMethod
 from jaccpot import FastMultipoleMethod as ExpanseFMM
 from jaccpot import (
     FMMAdvancedConfig,
-    FMMPreset,
-    FarFieldConfig,
-    FastMultipoleMethod,
+)
+from jaccpot import FMMPreset
+from jaccpot import FMMPreset as ExpansePreset
+from jaccpot import (
     NearFieldConfig,
 )
 
@@ -70,7 +74,9 @@ def test_solver_matches_expanse_fast_path():
         leaf_size=16,
         max_order=4,
     )
-    assert np.allclose(np.asarray(acc_jaccpot), np.asarray(acc_expanse), rtol=1e-5, atol=1e-5)
+    assert np.allclose(
+        np.asarray(acc_jaccpot), np.asarray(acc_expanse), rtol=1e-5, atol=1e-5
+    )
 
 
 def test_advanced_config_applies_to_runtime():

@@ -6,29 +6,33 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
+import yggdrax.interactions as tree_interactions_module
+from yggdrax.dtypes import INDEX_DTYPE
+from yggdrax.geometry import compute_tree_geometry
+from yggdrax.interactions import DualTreeTraversalConfig, build_leaf_neighbor_lists
+from yggdrax.tree import build_tree
 
 import jaccpot.runtime.fmm as fmm_module
-import yggdrax.interactions as tree_interactions_module
 from jaccpot import FMMPreset
-from yggdrax.dtypes import INDEX_DTYPE
-from jaccpot.runtime.fmm import (
-    FastMultipoleMethod,
-    compute_gravitational_acceleration,
-    compute_gravitational_potential,
+from jaccpot.downward.local_expansions import (
+    TreeDownwardData,
 )
-from jaccpot.downward.local_expansions import TreeDownwardData
 from jaccpot.downward.local_expansions import (
     prepare_downward_sweep as prepare_local_downward_sweep,
 )
-from jaccpot.downward.local_expansions import run_downward_sweep as run_local_downward_sweep
+from jaccpot.downward.local_expansions import (
+    run_downward_sweep as run_local_downward_sweep,
+)
 from jaccpot.nearfield.near_field import (
     compute_leaf_p2p_accelerations,
     prepare_bucketed_scatter_schedules,
     prepare_leaf_neighbor_pairs,
 )
-from yggdrax.tree import build_tree
-from yggdrax.geometry import compute_tree_geometry
-from yggdrax.interactions import DualTreeTraversalConfig, build_leaf_neighbor_lists
+from jaccpot.runtime.fmm import (
+    FastMultipoleMethod,
+    compute_gravitational_acceleration,
+    compute_gravitational_potential,
+)
 
 DEFAULT_TEST_LEAF_SIZE = 1
 
@@ -946,7 +950,9 @@ def test_nearfield_bucketed_matches_baseline():
         jit_tree=False,
     )
 
-    assert np.allclose(np.asarray(acc_bucketed), np.asarray(acc_baseline), rtol=1e-5, atol=1e-5)
+    assert np.allclose(
+        np.asarray(acc_bucketed), np.asarray(acc_baseline), rtol=1e-5, atol=1e-5
+    )
 
 
 def test_nearfield_precomputed_leaf_pairs_matches_inline_mapping():
@@ -1009,7 +1015,9 @@ def test_nearfield_precomputed_leaf_pairs_matches_inline_mapping():
         precomputed_valid_pairs=valid,
     )
 
-    assert np.allclose(np.asarray(acc_precomputed), np.asarray(acc_inline), rtol=1e-6, atol=1e-6)
+    assert np.allclose(
+        np.asarray(acc_precomputed), np.asarray(acc_inline), rtol=1e-6, atol=1e-6
+    )
 
 
 def test_nearfield_precomputed_bucketed_scatter_matches_inline():
@@ -1086,7 +1094,9 @@ def test_nearfield_precomputed_bucketed_scatter_matches_inline():
         precomputed_chunk_unique_indices=unique_indices,
     )
 
-    assert np.allclose(np.asarray(acc_precomputed), np.asarray(acc_inline), rtol=1e-6, atol=1e-6)
+    assert np.allclose(
+        np.asarray(acc_precomputed), np.asarray(acc_inline), rtol=1e-6, atol=1e-6
+    )
 
 
 def test_prepare_state_reuses_cached_interactions_when_inputs_match():
@@ -1150,7 +1160,9 @@ def test_compute_accelerations_reuses_prepared_state_when_enabled():
         softening=1e-3,
         working_dtype=jnp.float32,
     )
-    with mock.patch.object(fmm, "prepare_state", wraps=fmm.prepare_state) as spy_prepare:
+    with mock.patch.object(
+        fmm, "prepare_state", wraps=fmm.prepare_state
+    ) as spy_prepare:
         acc_first = fmm.compute_accelerations(
             positions,
             masses,
@@ -1169,7 +1181,9 @@ def test_compute_accelerations_reuses_prepared_state_when_enabled():
         )
 
     assert spy_prepare.call_count == 1
-    assert np.allclose(np.asarray(acc_second), np.asarray(acc_first), rtol=1e-6, atol=1e-6)
+    assert np.allclose(
+        np.asarray(acc_second), np.asarray(acc_first), rtol=1e-6, atol=1e-6
+    )
 
 
 def test_compute_accelerations_reuse_cache_invalidates_on_parameter_change():
@@ -1183,7 +1197,9 @@ def test_compute_accelerations_reuse_cache_invalidates_on_parameter_change():
         softening=1e-3,
         working_dtype=jnp.float32,
     )
-    with mock.patch.object(fmm, "prepare_state", wraps=fmm.prepare_state) as spy_prepare:
+    with mock.patch.object(
+        fmm, "prepare_state", wraps=fmm.prepare_state
+    ) as spy_prepare:
         fmm.compute_accelerations(
             positions,
             masses,
@@ -1217,7 +1233,9 @@ def test_compute_accelerations_reuses_prepared_state_for_value_equal_copies():
         softening=1e-3,
         working_dtype=jnp.float32,
     )
-    with mock.patch.object(fmm, "prepare_state", wraps=fmm.prepare_state) as spy_prepare:
+    with mock.patch.object(
+        fmm, "prepare_state", wraps=fmm.prepare_state
+    ) as spy_prepare:
         acc_first = fmm.compute_accelerations(
             positions,
             masses,
@@ -1236,7 +1254,9 @@ def test_compute_accelerations_reuses_prepared_state_for_value_equal_copies():
         )
 
     assert spy_prepare.call_count == 1
-    assert np.allclose(np.asarray(acc_second), np.asarray(acc_first), rtol=1e-6, atol=1e-6)
+    assert np.allclose(
+        np.asarray(acc_second), np.asarray(acc_first), rtol=1e-6, atol=1e-6
+    )
 
 
 def test_compute_accelerations_reuse_cache_invalidates_on_value_change():
@@ -1251,7 +1271,9 @@ def test_compute_accelerations_reuse_cache_invalidates_on_value_change():
         softening=1e-3,
         working_dtype=jnp.float32,
     )
-    with mock.patch.object(fmm, "prepare_state", wraps=fmm.prepare_state) as spy_prepare:
+    with mock.patch.object(
+        fmm, "prepare_state", wraps=fmm.prepare_state
+    ) as spy_prepare:
         fmm.compute_accelerations(
             positions,
             masses,
@@ -1310,7 +1332,9 @@ def test_prepare_state_precomputes_bucketed_scatter_schedule():
         max_order=2,
         jit_tree=False,
     )
-    assert np.allclose(np.asarray(acc_state), np.asarray(acc_full), rtol=1e-5, atol=1e-5)
+    assert np.allclose(
+        np.asarray(acc_state), np.asarray(acc_full), rtol=1e-5, atol=1e-5
+    )
 
 
 def test_prepare_state_cache_respects_theta_changes():
@@ -1388,7 +1412,9 @@ def test_prepare_state_cache_respects_dehnen_radius_scale_changes():
         )
 
     assert spy_build.call_count == 1
-    assert float(spy_build.call_args.kwargs["dehnen_radius_scale"]) == pytest.approx(0.9)
+    assert float(spy_build.call_args.kwargs["dehnen_radius_scale"]) == pytest.approx(
+        0.9
+    )
 
 
 def test_prepare_state_cache_respects_traversal_config_changes():
@@ -1724,7 +1750,9 @@ def test_solidfmm_chunked_m2l_matches_fullbatch():
         jit_tree=False,
     )
 
-    assert np.allclose(np.asarray(acc_chunked), np.asarray(acc_full), rtol=1e-6, atol=1e-6)
+    assert np.allclose(
+        np.asarray(acc_chunked), np.asarray(acc_full), rtol=1e-6, atol=1e-6
+    )
 
 
 def test_fast_preset_adaptive_large_cpu_policy_applies():
@@ -1778,22 +1806,35 @@ def test_adaptive_nearfield_edge_chunk_size_auto_policy():
         nearfield_edge_chunk_size=256,
     )
 
-    assert fmm._resolve_nearfield_edge_chunk_size(
-        num_particles=131072,
-        nearfield_mode="baseline",
-    ) == 256
-    assert fmm._resolve_nearfield_edge_chunk_size(
-        num_particles=262144,
-        nearfield_mode="bucketed",
-    ) == 1024
-    assert fmm._resolve_nearfield_edge_chunk_size(
-        num_particles=1000000,
-        nearfield_mode="bucketed",
-    ) == 2048
-    assert fmm._resolve_nearfield_edge_chunk_size(
-        num_particles=2000000,
-        nearfield_mode="bucketed",
-    ) == 4096
+    assert (
+        fmm._resolve_nearfield_edge_chunk_size(
+            num_particles=131072,
+            nearfield_mode="baseline",
+        )
+        == 256
+    )
+    assert (
+        fmm._resolve_nearfield_edge_chunk_size(
+            num_particles=262144,
+            nearfield_mode="bucketed",
+        )
+        == 1024
+    )
+    assert (
+        fmm._resolve_nearfield_edge_chunk_size(
+            num_particles=1000000,
+            nearfield_mode="bucketed",
+        )
+        == 2048
+    )
+    assert (
+        fmm._resolve_nearfield_edge_chunk_size(
+            num_particles=2000000,
+            nearfield_mode="bucketed",
+        )
+        == 4096
+    )
+
 
 def test_fast_preset_adaptive_policy_respects_explicit_overrides():
     cfg = DualTreeTraversalConfig(
@@ -1996,7 +2037,9 @@ def test_dehnen_radius_scale_must_be_positive():
 
 
 def test_nearfield_mode_validation():
-    with pytest.raises(ValueError, match="nearfield_mode must be 'auto', 'baseline', or 'bucketed'"):
+    with pytest.raises(
+        ValueError, match="nearfield_mode must be 'auto', 'baseline', or 'bucketed'"
+    ):
         FastMultipoleMethod(nearfield_mode="unknown")
     with pytest.raises(ValueError, match="nearfield_edge_chunk_size must be positive"):
         FastMultipoleMethod(nearfield_edge_chunk_size=0)

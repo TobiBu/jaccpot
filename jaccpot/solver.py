@@ -2,9 +2,9 @@
 
 from __future__ import annotations
 
+import warnings
 from dataclasses import replace
 from typing import Any, Optional, Tuple, Union
-import warnings
 
 from jaxtyping import Array, DTypeLike
 
@@ -13,8 +13,8 @@ from .config import (
     FMMAdvancedConfig,
     FMMPreset,
 )
-from .runtime.fmm import FMMPreparedState
 from .runtime.fmm import FastMultipoleMethod as _RuntimeFMM
+from .runtime.fmm import FMMPreparedState
 
 
 def _default_advanced_for_preset(preset: FMMPreset) -> FMMAdvancedConfig:
@@ -188,7 +188,9 @@ class FastMultipoleMethod:
             complex_rotation=complex_rotation,
             tree_build_mode=tree_mode,
             target_leaf_particles=target_leaf_particles,
-            refine_local=legacy_kwargs.pop("refine_local", advanced_cfg.tree.refine_local),
+            refine_local=legacy_kwargs.pop(
+                "refine_local", advanced_cfg.tree.refine_local
+            ),
             max_refine_levels=legacy_kwargs.pop(
                 "max_refine_levels",
                 advanced_cfg.tree.max_refine_levels,
@@ -222,7 +224,9 @@ class FastMultipoleMethod:
                 advanced_cfg.runtime.pair_process_block,
             ),
             dehnen_radius_scale=float(
-                legacy_kwargs.pop("dehnen_radius_scale", advanced_cfg.dehnen_radius_scale)
+                legacy_kwargs.pop(
+                    "dehnen_radius_scale", advanced_cfg.dehnen_radius_scale
+                )
             ),
             use_dense_interactions=legacy_kwargs.pop("use_dense_interactions", None),
             traversal_config=legacy_kwargs.pop("traversal_config", traversal_config),

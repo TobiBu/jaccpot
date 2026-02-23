@@ -1,9 +1,9 @@
 import jax
 import jax.numpy as jnp
+from yggdrax.tree import build_tree
 
 from jaccpot import FastMultipoleMethod
 from jaccpot.runtime.fmm import _infer_bounds
-from yggdrax.tree import build_tree
 
 
 def test_prepare_state_spherical_upward_produces_sh_packed_shape():

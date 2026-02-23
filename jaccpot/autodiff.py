@@ -8,6 +8,7 @@ import jax
 import jax.numpy as jnp
 from jaxtyping import Array
 
+
 def differentiable_gravitational_acceleration(
     positions: Array,
     masses: Array,

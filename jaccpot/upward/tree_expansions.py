@@ -10,11 +10,10 @@ import jax.numpy as jnp
 from beartype import beartype
 from jax import lax
 from jaxtyping import Array, jaxtyped
-
 from yggdrax.dtypes import INDEX_DTYPE
+from yggdrax.geometry import TreeGeometry, compute_tree_geometry
 from yggdrax.multipole_utils import total_coefficients
 from yggdrax.tree import RadixTree
-from yggdrax.geometry import TreeGeometry, compute_tree_geometry
 from yggdrax.tree_moments import (
     TreeMassMoments,
     TreeMultipoleMoments,

@@ -4,6 +4,7 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 
+from jaccpot.operators.complex_harmonics import complex_R_solidfmm
 from jaccpot.operators.complex_ops import (
     complex_dot,
     l2l_complex,
@@ -28,9 +29,10 @@ from jaccpot.operators.complex_ops import (
     translate_along_z_m2m_complex_batch,
     wigner_D_complex_jax,
 )
-from jaccpot.operators.complex_harmonics import complex_R_solidfmm
 from jaccpot.operators.real_harmonics import sh_size
-from jaccpot.operators.solidfmm_reference import translate_along_z_m2l_complex as ref_translate_z
+from jaccpot.operators.solidfmm_reference import (
+    translate_along_z_m2l_complex as ref_translate_z,
+)
 
 
 def test_translate_along_z_m2l_complex_matches_reference() -> None:
@@ -100,7 +102,9 @@ def _translate_z_l2l_reference(local: np.ndarray, dz: float, order: int) -> np.n
     return out
 
 
-def _l2l_reference_complex(local: np.ndarray, delta: np.ndarray, order: int) -> np.ndarray:
+def _l2l_reference_complex(
+    local: np.ndarray, delta: np.ndarray, order: int
+) -> np.ndarray:
     p = int(order)
     R = np.asarray(complex_R_solidfmm(jnp.asarray(delta), order=p))
     out = np.zeros((sh_size(p),), dtype=np.complex128)
@@ -245,7 +249,9 @@ def test_m2m_complex_matches_z_axis_translation() -> None:
         jnp.asarray(multipole), delta, order=order, rotation="solidfmm"
     )
 
-    assert np.allclose(np.asarray(got_solidfmm), np.asarray(ref), rtol=1e-12, atol=1e-12)
+    assert np.allclose(
+        np.asarray(got_solidfmm), np.asarray(ref), rtol=1e-12, atol=1e-12
+    )
 
 
 def test_l2l_complex_matches_z_axis_translation() -> None:

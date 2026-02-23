@@ -1,0 +1,13 @@
+cff-version: 1.2.0
+title: "jaccpot"
+message: "If you use this software, please cite it using this metadata."
+type: software
+authors:
+  - family-names: Buck
+    given-names: Tobias
+    email: tobias.buck@iwr.uni-heidelberg.de
+  - name: AstroAI Lab
+version: 0.0.1
+date-released: 2026-02-23
+repository-code: "https://github.com/AstroAI-Lab/jaccpot"
+license: MIT

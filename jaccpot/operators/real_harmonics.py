@@ -190,12 +190,12 @@ from __future__ import annotations
 
 import math
 from functools import lru_cache, partial
-from typing import Tuple
+from typing import Any, Tuple
 
 import jax
 import jax.numpy as jnp
 import numpy as np
-from jaxtyping import Array
+from jaxtyping import Array, DTypeLike
 
 # ===========================================================================
 # Index utilities
@@ -278,7 +278,7 @@ def _precompute_factorial_table(max_n: int, dtype_key: str) -> np.ndarray:
     return np.exp(np.array(vals, dtype=dtype))
 
 
-def _factorial_table_jax(max_n: int, dtype: jnp.dtype) -> Array:
+def _factorial_table_jax(max_n: int, dtype: DTypeLike) -> Array:
     """Get factorial table as JAX array."""
     n = jnp.arange(0, max_n + 1, dtype=dtype)
     return jnp.exp(jax.lax.lgamma(n + 1.0)).astype(dtype)
@@ -349,7 +349,7 @@ def p2m_real_direct(
     # Precompute factorials
     fact = _factorial_table_jax(2 * p, dtype)
 
-    def fact_int(k: int) -> Array:
+    def fact_int(k: Any) -> Array:
         return fact[jnp.asarray(k, dtype=jnp.int32)]
 
     # Compute cos(m*φ) and sin(m*φ) via Chebyshev recurrence:
@@ -520,7 +520,7 @@ def evaluate_local_real(
     # Precompute factorials
     fact = _factorial_table_jax(2 * p, dtype)
 
-    def fact_int(k: int) -> Array:
+    def fact_int(k: Any) -> Array:
         return fact[jnp.asarray(k, dtype=jnp.int32)]
 
     # Compute cos(m*φ) and sin(m*φ) via Chebyshev recurrence
@@ -699,7 +699,7 @@ def _compute_dehnen_B_matrix_complex(ell: int, dtype_key: str) -> np.ndarray:
     B_prev = np.array([[1.0]], dtype=rdtype)
 
     # Helper to get B_n[m, l] with out-of-bounds returning 0
-    def get_B(B: np.ndarray, n: int, m: int, ell_col: int) -> float:
+    def get_B(B: np.ndarray, n: Any, m: Any, ell_col: Any) -> float:
         if abs(m) > n or abs(ell_col) > n:
             return 0.0
         return B[m + n, ell_col + n]
@@ -813,7 +813,7 @@ def _real_wigner_rotation(
     beta: Array,
     gamma: Array,
     *,
-    dtype: jnp.dtype,
+    dtype: DTypeLike,
     basis: str = "multipole",
 ) -> Array:
     """Real rotation block from complex Wigner D via Dehnen Q transform.
@@ -964,7 +964,7 @@ def _compute_B_real_dehnen_via_Q(
     return B_T, B_U
 
 
-def compute_real_B_matrix_local(ell: int, *, dtype: jnp.dtype) -> Array:
+def compute_real_B_matrix_local(ell: int, *, dtype: DTypeLike) -> Array:
     """Get the real B swap matrix for LOCAL expansions T_n^m.
 
     Use this matrix when rotating local expansion coefficients.
@@ -985,7 +985,7 @@ def compute_real_B_matrix_local(ell: int, *, dtype: jnp.dtype) -> Array:
     return jnp.asarray(B_T)
 
 
-def compute_real_B_matrix_multipole(ell: int, *, dtype: jnp.dtype) -> Array:
+def compute_real_B_matrix_multipole(ell: int, *, dtype: DTypeLike) -> Array:
     """Get the real B swap matrix for MULTIPOLE expansions U_n^m.
 
     Use this matrix when rotating multipole expansion coefficients.
@@ -1009,7 +1009,7 @@ def compute_real_B_matrix_multipole(ell: int, *, dtype: jnp.dtype) -> Array:
     return jnp.asarray(B_U)
 
 
-def verify_real_B_matrix(ell: int, *, dtype: jnp.dtype) -> Tuple[bool, float, float]:
+def verify_real_B_matrix(ell: int, *, dtype: DTypeLike) -> Tuple[bool, float, float]:
     """Verify properties of the real B matrices (both B_T and B_U).
 
     Returns
@@ -1065,7 +1065,7 @@ def verify_real_B_matrix(ell: int, *, dtype: jnp.dtype) -> Tuple[bool, float, fl
 # ===========================================================================
 
 
-def real_Dz_diagonal(ell: int, angle: Array, *, dtype: jnp.dtype) -> Array:
+def real_Dz_diagonal(ell: int, angle: Array, *, dtype: DTypeLike) -> Array:
     """Diagonal D_z rotation for REAL harmonics.
 
     For real harmonics, the z-rotation is block-diagonal:
@@ -1111,7 +1111,7 @@ def real_rotation_to_z_axis_multipole(
     z: Array,
     ell: int,
     *,
-    dtype: jnp.dtype,
+    dtype: DTypeLike,
 ) -> Array:
     """Compute rotation matrix to align vector (x,y,z) with z-axis.
 
@@ -1147,7 +1147,7 @@ def real_rotation_to_z_axis_multipole_wigner(
     z: Array,
     ell: int,
     *,
-    dtype: jnp.dtype,
+    dtype: DTypeLike,
 ) -> Array:
     """Baseline rotation to z-axis using Wigner-D (complex) + Q transform."""
     alpha, beta, gamma = _rotation_to_z_angles(x, y, z)
@@ -1160,7 +1160,7 @@ def real_rotation_from_z_axis_local(
     z: Array,
     ell: int,
     *,
-    dtype: jnp.dtype,
+    dtype: DTypeLike,
 ) -> Array:
     """Compute inverse rotation matrix for LOCAL expansions.
 
@@ -1191,7 +1191,7 @@ def real_rotation_from_z_axis_local_wigner(
     z: Array,
     ell: int,
     *,
-    dtype: jnp.dtype,
+    dtype: DTypeLike,
 ) -> Array:
     """Baseline inverse rotation from z-axis using Wigner-D (locals)."""
     alpha, beta, gamma = _rotation_to_z_angles(x, y, z)
@@ -1204,7 +1204,7 @@ def real_rotation_from_z_axis_multipole(
     z: Array,
     ell: int,
     *,
-    dtype: jnp.dtype,
+    dtype: DTypeLike,
 ) -> Array:
     """Compute inverse rotation matrix for MULTIPOLE expansions.
 
@@ -1232,7 +1232,7 @@ def real_rotation_from_z_axis_multipole_wigner(
     z: Array,
     ell: int,
     *,
-    dtype: jnp.dtype,
+    dtype: DTypeLike,
 ) -> Array:
     """Baseline inverse rotation from z-axis using Wigner-D."""
     alpha, beta, gamma = _rotation_to_z_angles(x, y, z)
@@ -1247,7 +1247,7 @@ def real_rotation_to_z_axis_local(
     z: Array,
     ell: int,
     *,
-    dtype: jnp.dtype,
+    dtype: DTypeLike,
 ) -> Array:
     """Compute rotation matrix to align vector (x,y,z) with z-axis for locals.
 
@@ -1272,7 +1272,7 @@ def real_rotation_to_z_axis_local_wigner(
     z: Array,
     ell: int,
     *,
-    dtype: jnp.dtype,
+    dtype: DTypeLike,
 ) -> Array:
     """Baseline rotation to z-axis using Wigner-D (locals)."""
     alpha, beta, gamma = _rotation_to_z_angles(x, y, z)

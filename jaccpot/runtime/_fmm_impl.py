@@ -16,8 +16,44 @@ import jax.numpy as jnp
 import numpy as np
 from beartype import beartype
 from beartype.typing import Callable, Tuple
-from jaxtyping import Array, jaxtyped
+from jaxtyping import Array, DTypeLike, jaxtyped
+from yggdrax.dense_interactions import DenseInteractionBuffers, densify_interactions
+from yggdrax.grouped_interactions import GroupedInteractionBuffers
+from yggdrax.interactions import (
+    DualTreeRetryEvent,
+    DualTreeTraversalConfig,
+    DualTreeWalkResult,
+    MACType,
+    NodeInteractionList,
+    NodeNeighborList,
+    build_interactions_and_neighbors,
+    build_well_separated_interactions,
+)
+from yggdrax.tree import (
+    RadixTree,
+    RadixTreeWorkspace,
+    build_fixed_depth_tree,
+    build_fixed_depth_tree_jit,
+    build_tree,
+    build_tree_jit,
+)
 
+from jaccpot.downward.local_expansions import (
+    LocalExpansionData,
+    TreeDownwardData,
+    initialize_local_expansions,
+)
+from jaccpot.downward.local_expansions import (
+    prepare_downward_sweep as prepare_tree_downward_sweep,
+)
+from jaccpot.downward.local_expansions import (
+    run_downward_sweep as run_tree_downward_sweep,
+)
+from jaccpot.nearfield.near_field import (
+    compute_leaf_p2p_accelerations,
+    prepare_bucketed_scatter_schedules,
+    prepare_leaf_neighbor_pairs,
+)
 from jaccpot.operators.complex_ops import (
     complex_rotation_blocks_from_z_batch,
     complex_rotation_blocks_from_z_solidfmm_batch,
@@ -32,17 +68,6 @@ from jaccpot.operators.complex_ops import (
     m2l_complex_reference_batch,
     m2l_complex_reference_batch_cached_blocks,
 )
-from yggdrax.dense_interactions import DenseInteractionBuffers, densify_interactions
-from .dtypes import INDEX_DTYPE, as_index, complex_dtype_for_real
-from .fmm_presets import FMMPreset, FMMPresetConfig, get_preset_config
-from yggdrax.grouped_interactions import GroupedInteractionBuffers
-from jaccpot.downward.local_expansions import (
-    LocalExpansionData,
-    TreeDownwardData,
-    initialize_local_expansions,
-)
-from jaccpot.downward.local_expansions import prepare_downward_sweep as prepare_tree_downward_sweep
-from jaccpot.downward.local_expansions import run_downward_sweep as run_tree_downward_sweep
 from jaccpot.operators.multipole_utils import (
     LOCAL_COMBO_INV_FACTORIAL,
     LOCAL_LEVEL_COMBOS,
@@ -51,41 +76,33 @@ from jaccpot.operators.multipole_utils import (
     multi_power,
     total_coefficients,
 )
-from jaccpot.nearfield.near_field import (
-    compute_leaf_p2p_accelerations,
-    prepare_bucketed_scatter_schedules,
-    prepare_leaf_neighbor_pairs,
+from jaccpot.operators.real_harmonics import (
+    evaluate_local_real_with_grad,
+    l2l_real,
+    m2l_real,
+    sh_size,
 )
-from jaccpot.operators.real_harmonics import evaluate_local_real_with_grad, l2l_real, m2l_real, sh_size
+from jaccpot.upward.solidfmm_complex_tree_expansions import (
+    prepare_solidfmm_complex_upward_sweep,
+)
+from jaccpot.upward.spherical_tree_expansions import (
+    prepare_spherical_upward_sweep as prepare_spherical_tree_upward_sweep,
+)
+from jaccpot.upward.tree_expansions import (
+    NodeMultipoleData,
+    TreeUpwardData,
+)
+from jaccpot.upward.tree_expansions import (
+    prepare_upward_sweep as prepare_tree_upward_sweep,
+)
+
+from .dtypes import INDEX_DTYPE, as_index, complex_dtype_for_real
+from .fmm_presets import FMMPreset, FMMPresetConfig, get_preset_config
 from .reference import MultipoleExpansion
 from .reference import compute_expansion as reference_compute_expansion
 from .reference import compute_gravitational_potential as reference_compute_potential
 from .reference import direct_sum as reference_direct_sum
 from .reference import evaluate_expansion as reference_evaluate_expansion
-from jaccpot.upward.solidfmm_complex_tree_expansions import prepare_solidfmm_complex_upward_sweep
-from jaccpot.upward.spherical_tree_expansions import (
-    prepare_spherical_upward_sweep as prepare_spherical_tree_upward_sweep,
-)
-from yggdrax.tree import (
-    RadixTree,
-    RadixTreeWorkspace,
-    build_fixed_depth_tree,
-    build_fixed_depth_tree_jit,
-    build_tree,
-    build_tree_jit,
-)
-from jaccpot.upward.tree_expansions import NodeMultipoleData, TreeUpwardData
-from jaccpot.upward.tree_expansions import prepare_upward_sweep as prepare_tree_upward_sweep
-from yggdrax.interactions import (
-    DualTreeRetryEvent,
-    DualTreeTraversalConfig,
-    DualTreeWalkResult,
-    MACType,
-    NodeInteractionList,
-    NodeNeighborList,
-    build_interactions_and_neighbors,
-    build_well_separated_interactions,
-)
 
 ExpansionBasis = Literal["cartesian", "spherical", "solidfmm"]
 FarFieldMode = Literal["auto", "pair_grouped", "class_major"]
@@ -124,7 +141,7 @@ class FMMResolvedConfig:
     theta: float
     G: float
     softening: float
-    working_dtype: Optional[jnp.dtype]
+    working_dtype: Optional[DTypeLike]
     tree: TreeBuilderConfig
     traversal: TraversalExecutionConfig
     preset: Optional[str]
@@ -203,7 +220,7 @@ def _resolve_fmm_config(
     theta: float,
     G: float,
     softening: float,
-    working_dtype: Optional[jnp.dtype],
+    working_dtype: Optional[DTypeLike],
     tree_build_mode: Optional[str],
     target_leaf_particles: Optional[int],
     refine_local: Optional[bool],
@@ -454,7 +471,9 @@ def _interaction_cache_key(
     leaf_bytes = np.asarray(int(leaf_parameter), dtype=np.int64).tobytes()
     theta_bytes = np.asarray(float(theta), dtype=np.float64).tobytes()
     mac_bytes = str(mac_type).encode("utf8")
-    dehnen_scale_bytes = np.asarray(float(dehnen_radius_scale), dtype=np.float64).tobytes()
+    dehnen_scale_bytes = np.asarray(
+        float(dehnen_radius_scale), dtype=np.float64
+    ).tobytes()
     basis_bytes = str(expansion_basis).encode("utf8")
     center_mode_bytes = str(center_mode).encode("utf8")
     if traversal_config is not None:
@@ -646,7 +665,11 @@ def _build_dual_tree_artifacts(
                 grouped_chunk_size=cache_out.grouped_chunk_size,
             )
 
-    if grouped_interactions and grouped_buffers is not None and grouped_chunk_size is not None:
+    if (
+        grouped_interactions
+        and grouped_buffers is not None
+        and grouped_chunk_size is not None
+    ):
         needs_schedule = (
             grouped_segment_starts is None
             or grouped_segment_lengths is None
@@ -731,11 +754,11 @@ class FastMultipoleMethod:
     """
 
     def __init__(
-        self,
+        self: "FastMultipoleMethod",
         theta: float = 0.5,
         G: float = 1.0,
         softening: float = 1e-12,
-        working_dtype: Optional[jnp.dtype] = None,
+        working_dtype: Optional[DTypeLike] = None,
         *,
         expansion_basis: ExpansionBasis = "cartesian",
         mac_type: MACType = "bh",
@@ -864,7 +887,9 @@ class FastMultipoleMethod:
         self.grouped_interactions = grouped_interactions
 
     @property
-    def recent_retry_events(self: "FastMultipoleMethod") -> Tuple[DualTreeRetryEvent, ...]:
+    def recent_retry_events(
+        self: "FastMultipoleMethod",
+    ) -> Tuple[DualTreeRetryEvent, ...]:
         """Return retry telemetry collected during the latest build."""
 
         return self._recent_retry_events
@@ -954,7 +979,9 @@ class FastMultipoleMethod:
         m2l_chunk_size = self.m2l_chunk_size
         l2l_chunk_size = self.l2l_chunk_size
         grouped_interactions = (
-            False if self.grouped_interactions is None else bool(self.grouped_interactions)
+            False
+            if self.grouped_interactions is None
+            else bool(self.grouped_interactions)
         )
         farfield_mode = self.farfield_mode
         center_mode = "com"
@@ -963,7 +990,9 @@ class FastMultipoleMethod:
 
         backend_name = jax.default_backend() if backend is None else str(backend)
         n_particles = int(num_particles)
-        large_cpu = backend_name == "cpu" and n_particles >= _LARGE_CPU_PARTICLE_THRESHOLD
+        large_cpu = (
+            backend_name == "cpu" and n_particles >= _LARGE_CPU_PARTICLE_THRESHOLD
+        )
         class_major_cpu = (
             backend_name == "cpu" and n_particles >= _CLASS_MAJOR_CPU_PARTICLE_THRESHOLD
         )
@@ -1631,7 +1660,9 @@ class FastMultipoleMethod:
         grouped_segment_starts = dual_artifacts.grouped_segment_starts
         grouped_segment_lengths = dual_artifacts.grouped_segment_lengths
         grouped_segment_class_ids = dual_artifacts.grouped_segment_class_ids
-        grouped_segment_sort_permutation = dual_artifacts.grouped_segment_sort_permutation
+        grouped_segment_sort_permutation = (
+            dual_artifacts.grouped_segment_sort_permutation
+        )
         grouped_segment_group_ids = dual_artifacts.grouped_segment_group_ids
         grouped_segment_unique_targets = dual_artifacts.grouped_segment_unique_targets
 
@@ -1683,13 +1714,15 @@ class FastMultipoleMethod:
             nearfield_mode=nearfield_mode,
         )
         try:
-            nearfield_target_leaf_ids, nearfield_source_leaf_ids, nearfield_valid_pairs = (
-                prepare_leaf_neighbor_pairs(
-                    jnp.asarray(tree.node_ranges, dtype=INDEX_DTYPE),
-                    jnp.asarray(neighbor_list.leaf_indices, dtype=INDEX_DTYPE),
-                    jnp.asarray(neighbor_list.offsets, dtype=INDEX_DTYPE),
-                    jnp.asarray(neighbor_list.neighbors, dtype=INDEX_DTYPE),
-                )
+            (
+                nearfield_target_leaf_ids,
+                nearfield_source_leaf_ids,
+                nearfield_valid_pairs,
+            ) = prepare_leaf_neighbor_pairs(
+                jnp.asarray(tree.node_ranges, dtype=INDEX_DTYPE),
+                jnp.asarray(neighbor_list.leaf_indices, dtype=INDEX_DTYPE),
+                jnp.asarray(neighbor_list.offsets, dtype=INDEX_DTYPE),
+                jnp.asarray(neighbor_list.neighbors, dtype=INDEX_DTYPE),
             )
         except Exception:
             nearfield_target_leaf_ids = None
@@ -1832,7 +1865,9 @@ class FastMultipoleMethod:
         resolved_max_leaf = setup.max_leaf_size
 
         order = int(locals_data.order)
-        nearfield_mode = self._resolve_nearfield_mode(num_particles=int(positions.shape[0]))
+        nearfield_mode = self._resolve_nearfield_mode(
+            num_particles=int(positions.shape[0])
+        )
         nearfield_edge_chunk_size = self._resolve_nearfield_edge_chunk_size(
             num_particles=int(positions.shape[0]),
             nearfield_mode=nearfield_mode,
@@ -2212,7 +2247,9 @@ def _rotation_blocks_for_grouped_classes(
             key_vals = keys_np[class_idx]
             class_key = tuple(int(v) for v in key_vals.tolist())
             blocks = (blocks_to_miss[miss_pos], blocks_from_miss[miss_pos])
-            _operator_cache_put((int(order), str(rotation), str(dtype), class_key), blocks)
+            _operator_cache_put(
+                (int(order), str(rotation), str(dtype), class_key), blocks
+            )
             blocks_to_host[class_idx], blocks_from_host[class_idx] = blocks
 
     blocks_to = jnp.stack([b for b in blocks_to_host if b is not None], axis=0)
@@ -2339,7 +2376,9 @@ def _build_grouped_class_segments(
             tgt_sorted = tgt_chunk[perm]
             grp = np.zeros((int(chunk_size),), dtype=np.int64)
             if int(chunk_size) > 1:
-                grp[1:] = np.cumsum((tgt_sorted[1:] != tgt_sorted[:-1]).astype(np.int64))
+                grp[1:] = np.cumsum(
+                    (tgt_sorted[1:] != tgt_sorted[:-1]).astype(np.int64)
+                )
 
             unique = np.zeros((int(chunk_size),), dtype=np.int64)
             unique[grp] = tgt_sorted
@@ -2887,7 +2926,9 @@ def _prepare_spherical_downward_sweep(
 
     num_internal_nodes = int(tree.num_internal_nodes)
     if num_internal_nodes > 0:
-        left_child = jnp.asarray(tree.left_child[:num_internal_nodes], dtype=INDEX_DTYPE)
+        left_child = jnp.asarray(
+            tree.left_child[:num_internal_nodes], dtype=INDEX_DTYPE
+        )
         right_child = jnp.asarray(
             tree.right_child[:num_internal_nodes],
             dtype=INDEX_DTYPE,
@@ -3060,7 +3101,9 @@ def _prepare_solidfmm_downward_sweep(
 
     num_internal_nodes = int(tree.num_internal_nodes)
     if num_internal_nodes > 0:
-        left_child = jnp.asarray(tree.left_child[:num_internal_nodes], dtype=INDEX_DTYPE)
+        left_child = jnp.asarray(
+            tree.left_child[:num_internal_nodes], dtype=INDEX_DTYPE
+        )
         right_child = jnp.asarray(
             tree.right_child[:num_internal_nodes],
             dtype=INDEX_DTYPE,
@@ -3131,17 +3174,19 @@ def _evaluate_tree_compiled_impl(
     nearfield_mode: str,
     nearfield_edge_chunk_size: int,
 ) -> Union[Array, Tuple[Array, Array]]:
-    use_precomputed = precomputed_target_leaf_ids.shape[0] == neighbor_list.neighbors.shape[0]
+    use_precomputed = (
+        precomputed_target_leaf_ids.shape[0] == neighbor_list.neighbors.shape[0]
+    )
     edge_count = int(neighbor_list.neighbors.shape[0])
     chunk_count = (
-        (edge_count + int(nearfield_edge_chunk_size) - 1) // int(nearfield_edge_chunk_size)
+        (edge_count + int(nearfield_edge_chunk_size) - 1)
+        // int(nearfield_edge_chunk_size)
         if edge_count > 0
         else 0
     )
     chunk_flat_size = int(nearfield_edge_chunk_size) * int(max_leaf_size)
     use_precomputed_scatter = (
-        precomputed_chunk_sort_indices.shape
-        == (chunk_count, chunk_flat_size)
+        precomputed_chunk_sort_indices.shape == (chunk_count, chunk_flat_size)
         and precomputed_chunk_group_ids.shape == (chunk_count, chunk_flat_size)
         and precomputed_chunk_unique_indices.shape == (chunk_count, chunk_flat_size)
     )

@@ -4,15 +4,15 @@ from ._typecheck import enable_runtime_typecheck
 
 enable_runtime_typecheck()
 
+from .autodiff import differentiable_gravitational_acceleration
 from .config import (
+    FarFieldConfig,
     FMMAdvancedConfig,
     FMMPreset,
-    FarFieldConfig,
     NearFieldConfig,
     RuntimePolicyConfig,
     TreeConfig,
 )
-from .autodiff import differentiable_gravitational_acceleration
 from .solver import FastMultipoleMethod
 
 __all__ = [

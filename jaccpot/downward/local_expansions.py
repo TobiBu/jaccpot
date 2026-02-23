@@ -12,9 +12,15 @@ from beartype import beartype
 from beartype.typing import Callable, Tuple
 from jax import lax
 from jaxtyping import Array, jaxtyped
-
 from yggdrax.dense_interactions import DenseInteractionBuffers
 from yggdrax.dtypes import INDEX_DTYPE, as_index
+from yggdrax.interactions import (
+    DualTreeRetryEvent,
+    DualTreeTraversalConfig,
+    MACType,
+    NodeInteractionList,
+    build_well_separated_interactions,
+)
 from yggdrax.multipole_utils import (
     MAX_MULTIPOLE_ORDER,
     level_offset,
@@ -24,14 +30,6 @@ from yggdrax.multipole_utils import (
     total_coefficients,
 )
 from yggdrax.tree import RadixTree
-from jaccpot.upward.tree_expansions import NodeMultipoleData, TreeUpwardData
-from yggdrax.interactions import (
-    DualTreeRetryEvent,
-    DualTreeTraversalConfig,
-    MACType,
-    NodeInteractionList,
-    build_well_separated_interactions,
-)
 from yggdrax.tree_moments import (
     _hexadecapole_from_fourth,
     _octupole_from_third,
@@ -39,6 +37,8 @@ from yggdrax.tree_moments import (
     multipole_from_packed,
     tree_moments_from_raw,
 )
+
+from jaccpot.upward.tree_expansions import NodeMultipoleData, TreeUpwardData
 
 
 class LocalExpansionData(NamedTuple):

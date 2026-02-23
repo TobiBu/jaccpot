@@ -1,7 +1,11 @@
 import jax
 import jax.numpy as jnp
 
-from jaccpot.operators.spherical_harmonics import m2m_a6_real_sh, p2m_point_real_sh, sh_size
+from jaccpot.operators.spherical_harmonics import (
+    m2m_a6_real_sh,
+    p2m_point_real_sh,
+    sh_size,
+)
 
 
 def test_m2m_translation_matches_direct_p2m_for_simple_tree():

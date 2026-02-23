@@ -41,11 +41,11 @@ CI enforces coverage through `pytest-cov`.
 pytest --cov=jaccpot --cov-report=term-missing
 ```
 
-Runtime type checks (`jaxtyping` + `beartype`) are enabled by default when
-importing `jaccpot`. To disable during performance profiling:
+Runtime type checks (`jaxtyping` + `beartype`) are available via import-hook
+instrumentation. To enable during debugging:
 
 ```bash
-export JACCPOT_RUNTIME_TYPECHECK=0
+export JACCPOT_RUNTIME_TYPECHECK=1
 ```
 
 ## Pull requests

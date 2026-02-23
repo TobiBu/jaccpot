@@ -2,14 +2,14 @@
 
 import jax.numpy as jnp
 import pytest
-
 from yggdrax.tree import build_tree
-from jaccpot.upward.tree_expansions import compute_node_multipoles, prepare_upward_sweep
 from yggdrax.tree_moments import (
     compute_tree_mass_moments,
     compute_tree_multipole_moments,
     pack_multipole_expansions,
 )
+
+from jaccpot.upward.tree_expansions import compute_node_multipoles, prepare_upward_sweep
 
 DEFAULT_TEST_LEAF_SIZE = 1
 

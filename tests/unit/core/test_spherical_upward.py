@@ -1,8 +1,8 @@
 import jax
 import jax.numpy as jnp
+from yggdrax.tree import build_tree
 
 from jaccpot.upward.spherical_tree_expansions import prepare_spherical_upward_sweep
-from yggdrax.tree import build_tree
 
 
 def test_spherical_upward_monopole_matches_total_mass():

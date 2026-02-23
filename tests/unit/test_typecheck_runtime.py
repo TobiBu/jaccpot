@@ -16,8 +16,15 @@ def _load_typecheck_module():
     return module
 
 
-def test_runtime_typecheck_enabled_by_default(monkeypatch):
+def test_runtime_typecheck_disabled_by_default(monkeypatch):
     monkeypatch.delenv("JACCPOT_RUNTIME_TYPECHECK", raising=False)
+    module = _load_typecheck_module()
+
+    assert module.enable_runtime_typecheck() is False
+
+
+def test_runtime_typecheck_can_be_enabled(monkeypatch):
+    monkeypatch.setenv("JACCPOT_RUNTIME_TYPECHECK", "1")
     module = _load_typecheck_module()
 
     assert module.enable_runtime_typecheck() is True

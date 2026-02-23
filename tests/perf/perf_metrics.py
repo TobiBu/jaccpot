@@ -11,8 +11,9 @@ from typing import Any, Dict, Iterable, List, Sequence
 
 import jax
 import jax.numpy as jnp
-from jaccpot import FastMultipoleMethod
+
 from examples import benchmark_utils as bench_utils
+from jaccpot import FastMultipoleMethod
 
 
 def _benchmark_like_distribution(
@@ -78,9 +79,7 @@ def collect_prepare_eval_split_metrics(
         )
         state = prep_timing.result
         eval_kwargs: Dict[str, Any] = {}
-        if "jit_traversal" in inspect.signature(
-            fmm.evaluate_prepared_state
-        ).parameters:
+        if "jit_traversal" in inspect.signature(fmm.evaluate_prepared_state).parameters:
             eval_kwargs["jit_traversal"] = True
         eval_timing = bench_utils.time_callable(
             fmm.evaluate_prepared_state,
@@ -154,7 +153,9 @@ def collect_mode_comparison_metrics(
     return [merged_by_n[k] for k in sorted(merged_by_n.keys())]
 
 
-def geometric_mean_speedup(numerator: Sequence[float], denominator: Sequence[float]) -> float:
+def geometric_mean_speedup(
+    numerator: Sequence[float], denominator: Sequence[float]
+) -> float:
     values = jnp.asarray(numerator, dtype=jnp.float64) / jnp.asarray(
         denominator,
         dtype=jnp.float64,

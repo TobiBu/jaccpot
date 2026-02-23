@@ -613,7 +613,7 @@ def translate_along_z_l2l(
     ell_arr, m_arr = _ell_m_table_cached(p)
     ks_full = jnp.arange(p + 1, dtype=jnp.int32)
 
-    def translate_single(idx: int) -> Array:
+    def translate_single(idx: Array) -> Array:
         ell = ell_arr[idx]
         m = m_arr[idx]
 

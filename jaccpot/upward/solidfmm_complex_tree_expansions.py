@@ -15,6 +15,10 @@ import jax.numpy as jnp
 from beartype import beartype
 from jax import lax
 from jaxtyping import Array, jaxtyped
+from yggdrax.dtypes import INDEX_DTYPE, complex_dtype_for_real
+from yggdrax.geometry import TreeGeometry, compute_tree_geometry
+from yggdrax.tree import RadixTree
+from yggdrax.tree_moments import TreeMassMoments, compute_tree_mass_moments
 
 from jaccpot.operators.complex_harmonics import p2m_complex_batch
 from jaccpot.operators.complex_ops import (
@@ -22,11 +26,7 @@ from jaccpot.operators.complex_ops import (
     enforce_conjugate_symmetry_batch,
     m2m_complex,
 )
-from yggdrax.dtypes import INDEX_DTYPE, complex_dtype_for_real
 from jaccpot.operators.real_harmonics import sh_size
-from yggdrax.tree import RadixTree
-from yggdrax.geometry import TreeGeometry, compute_tree_geometry
-from yggdrax.tree_moments import TreeMassMoments, compute_tree_mass_moments
 
 
 class SolidFMMComplexNodeMultipoleData(NamedTuple):
@@ -53,7 +53,7 @@ _CENTER_MODES = ("com", "aabb", "explicit")
     static_argnames=("order", "max_leaf_size", "num_internal", "total_nodes"),
 )
 def _p2m_leaves_complex(
-    tree: RadixTree,
+    node_ranges: Array,
     positions_sorted: Array,
     masses_sorted: Array,
     centers: Array,
@@ -83,7 +83,7 @@ def _p2m_leaves_complex(
     if leaf_nodes.size == 0:
         return packed
 
-    ranges = jnp.asarray(tree.node_ranges, dtype=INDEX_DTYPE)[leaf_nodes]
+    ranges = jnp.asarray(node_ranges, dtype=INDEX_DTYPE)[leaf_nodes]
     starts = ranges[:, 0]
     ends_inclusive = ranges[:, 1]
     counts = ends_inclusive - starts + 1
@@ -228,7 +228,7 @@ def prepare_solidfmm_complex_upward_sweep(
     total_nodes = int(tree.parent.shape[0])
 
     packed = _p2m_leaves_complex(
-        tree,
+        jnp.asarray(tree.node_ranges, dtype=INDEX_DTYPE),
         positions_sorted,
         masses_sorted,
         centers,

@@ -132,7 +132,10 @@ def test_complex_a6_recovers_point_mass_translation_for_some_convention():
     mass = jnp.asarray(1.3, dtype=jnp.float64)
 
     # Build real coeffs using library P2M (already tested for Y_lm recursion).
-    from jaccpot.operators.spherical_harmonics import p2m_point_real_sh, real_sh_to_complex_coeffs
+    from jaccpot.operators.spherical_harmonics import (
+        p2m_point_real_sh,
+        real_sh_to_complex_coeffs,
+    )
 
     child_real = p2m_point_real_sh(pos - child_center, mass, order=p)
     direct_real = p2m_point_real_sh(pos - parent_center, mass, order=p)
@@ -223,7 +226,10 @@ def test_real_a6_matches_complex_oracle_on_random_coeffs():
     _wigner_D_complex.
     """
 
-    from jaccpot.operators.spherical_harmonics import complex_coeffs_to_real_sh, m2m_a6_real_sh
+    from jaccpot.operators.spherical_harmonics import (
+        complex_coeffs_to_real_sh,
+        m2m_a6_real_sh,
+    )
 
     # oracle lives in the dedicated oracle test module
     from tests.test_spherical_complex_m2m_oracle import m2m_a6_complex_oracle

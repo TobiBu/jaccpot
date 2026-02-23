@@ -11,10 +11,9 @@ from beartype import beartype
 from beartype.typing import Tuple
 from jax import lax
 from jaxtyping import Array, jaxtyped
-
 from yggdrax.dtypes import INDEX_DTYPE, as_index
-from yggdrax.tree import RadixTree
 from yggdrax.interactions import NodeNeighborList
+from yggdrax.tree import RadixTree
 
 
 def prepare_leaf_neighbor_pairs(
@@ -139,7 +138,7 @@ def _self_contributions(
     leaf_masses: Array,
     mask: Array,
     *,
-    softening_sq: float,
+    softening_sq: Union[float, Array],
     G: Array,
     compute_potential: bool,
 ) -> Tuple[Array, Optional[Array]]:
@@ -193,7 +192,7 @@ def _pair_contributions(
     source_masses: Array,
     source_mask: Array,
     *,
-    softening_sq: float,
+    softening_sq: Union[float, Array],
     G: Array,
     compute_potential: bool,
 ) -> Tuple[Array, Optional[Array]]:
@@ -262,7 +261,7 @@ def _pair_contributions_batched(
     source_masses: Array,
     source_mask: Array,
     *,
-    softening_sq: float,
+    softening_sq: Union[float, Array],
     G: Array,
     compute_potential: bool,
 ) -> Tuple[Array, Optional[Array]]:
@@ -332,8 +331,8 @@ def _scatter_contributions_two_stage(
     )
     group_ids = jnp.cumsum(is_new.astype(INDEX_DTYPE)) - as_index(1)
     reduced = jax.ops.segment_sum(values_sorted, group_ids, item_count)
-    unique_indices = jnp.zeros((item_count,), dtype=INDEX_DTYPE).at[group_ids].set(
-        idx_sorted
+    unique_indices = (
+        jnp.zeros((item_count,), dtype=INDEX_DTYPE).at[group_ids].set(idx_sorted)
     )
     return base_acc.at[unique_indices].add(reduced)
 
@@ -357,8 +356,8 @@ def _build_scatter_schedule(
         ]
     )
     group_ids = jnp.cumsum(is_new.astype(INDEX_DTYPE)) - as_index(1)
-    unique_indices = jnp.zeros((item_count,), dtype=INDEX_DTYPE).at[group_ids].set(
-        idx_sorted
+    unique_indices = (
+        jnp.zeros((item_count,), dtype=INDEX_DTYPE).at[group_ids].set(idx_sorted)
     )
     return sort_idx, group_ids, unique_indices
 
@@ -426,8 +425,8 @@ def _scatter_scalar_contributions_two_stage(
     )
     group_ids = jnp.cumsum(is_new.astype(INDEX_DTYPE)) - as_index(1)
     reduced = jax.ops.segment_sum(values_sorted, group_ids, item_count)
-    unique_indices = jnp.zeros((item_count,), dtype=INDEX_DTYPE).at[group_ids].set(
-        idx_sorted
+    unique_indices = (
+        jnp.zeros((item_count,), dtype=INDEX_DTYPE).at[group_ids].set(idx_sorted)
     )
     return base.at[unique_indices].add(reduced)
 
@@ -478,7 +477,7 @@ def _compute_leaf_p2p_impl(
     precomputed_chunk_unique_indices: Array,
     max_leaf_size: int,
     *,
-    G: float,
+    G: Union[float, Array],
     softening_sq: Array,
     return_potential: bool,
     collect_neighbor_pairs: bool,
@@ -775,7 +774,9 @@ def _compute_leaf_p2p_impl(
                 acc, pot = carry
                 tgt_idx, src_idx, is_valid = data
 
-                def true_branch(args: tuple[Array, Array, Array, Array]) -> tuple[Array, Array]:
+                def true_branch(
+                    args: tuple[Array, Array, Array, Array],
+                ) -> tuple[Array, Array]:
                     acc_state, pot_state, tgt, src = args
                     target_pos = leaf_positions[tgt]
                     target_mask = leaf_mask[tgt]
@@ -807,7 +808,9 @@ def _compute_leaf_p2p_impl(
                     pot_state = pot_state.at[target_ids].add(masked_pot)
                     return acc_state, pot_state
 
-                def false_branch(args: tuple[Array, Array, Array, Array]) -> tuple[Array, Array]:
+                def false_branch(
+                    args: tuple[Array, Array, Array, Array],
+                ) -> tuple[Array, Array]:
                     acc_state, pot_state, *_ = args
                     return acc_state, pot_state
 
@@ -930,7 +933,7 @@ def compute_leaf_p2p_accelerations(
     positions_sorted: Array,
     masses_sorted: Array,
     *,
-    G: float = 1.0,
+    G: Union[float, Array] = 1.0,
     softening: float = 0.0,
     max_leaf_size: Optional[int] = None,
     return_potential: bool = False,
@@ -1030,7 +1033,9 @@ def compute_leaf_p2p_accelerations(
         and precomputed_chunk_unique_indices is not None
     )
     if use_precomputed_scatter:
-        chunk_sort_indices = jnp.asarray(precomputed_chunk_sort_indices, dtype=INDEX_DTYPE)
+        chunk_sort_indices = jnp.asarray(
+            precomputed_chunk_sort_indices, dtype=INDEX_DTYPE
+        )
         chunk_group_ids = jnp.asarray(precomputed_chunk_group_ids, dtype=INDEX_DTYPE)
         chunk_unique_indices = jnp.asarray(
             precomputed_chunk_unique_indices,

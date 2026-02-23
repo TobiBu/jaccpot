@@ -1,7 +1,10 @@
 import jax.numpy as jnp
 import pytest
 
-from jaccpot.operators.spherical_harmonics import p2m_point_real_sh, translate_along_z_m2m
+from jaccpot.operators.spherical_harmonics import (
+    p2m_point_real_sh,
+    translate_along_z_m2m,
+)
 
 """@pytest.mark.xfail(
     reason=(
