@@ -550,6 +550,15 @@ class _InteractionCacheEntry(NamedTuple):
     grouped_segment_group_ids: Optional[Array]
     grouped_segment_unique_targets: Optional[Array]
     grouped_chunk_size: Optional[int]
+    nearfield_target_leaf_ids: Optional[Array]
+    nearfield_source_leaf_ids: Optional[Array]
+    nearfield_valid_pairs: Optional[Array]
+    nearfield_chunk_sort_indices: Optional[Array]
+    nearfield_chunk_group_ids: Optional[Array]
+    nearfield_chunk_unique_indices: Optional[Array]
+    nearfield_mode: Optional[str]
+    nearfield_edge_chunk_size: Optional[int]
+    nearfield_leaf_cap: Optional[int]
 
 
 def _build_dual_tree_artifacts(
@@ -631,6 +640,15 @@ def _build_dual_tree_artifacts(
                 grouped_segment_group_ids=None,
                 grouped_segment_unique_targets=None,
                 grouped_chunk_size=None,
+                nearfield_target_leaf_ids=None,
+                nearfield_source_leaf_ids=None,
+                nearfield_valid_pairs=None,
+                nearfield_chunk_sort_indices=None,
+                nearfield_chunk_group_ids=None,
+                nearfield_chunk_unique_indices=None,
+                nearfield_mode=None,
+                nearfield_edge_chunk_size=None,
+                nearfield_leaf_cap=None,
             )
             if cache_key is not None
             else None
@@ -669,6 +687,15 @@ def _build_dual_tree_artifacts(
                 grouped_segment_group_ids=cache_out.grouped_segment_group_ids,
                 grouped_segment_unique_targets=cache_out.grouped_segment_unique_targets,
                 grouped_chunk_size=cache_out.grouped_chunk_size,
+                nearfield_target_leaf_ids=cache_out.nearfield_target_leaf_ids,
+                nearfield_source_leaf_ids=cache_out.nearfield_source_leaf_ids,
+                nearfield_valid_pairs=cache_out.nearfield_valid_pairs,
+                nearfield_chunk_sort_indices=cache_out.nearfield_chunk_sort_indices,
+                nearfield_chunk_group_ids=cache_out.nearfield_chunk_group_ids,
+                nearfield_chunk_unique_indices=cache_out.nearfield_chunk_unique_indices,
+                nearfield_mode=cache_out.nearfield_mode,
+                nearfield_edge_chunk_size=cache_out.nearfield_edge_chunk_size,
+                nearfield_leaf_cap=cache_out.nearfield_leaf_cap,
             )
 
     if (
@@ -714,6 +741,15 @@ def _build_dual_tree_artifacts(
                     grouped_segment_group_ids=grouped_segment_group_ids,
                     grouped_segment_unique_targets=grouped_segment_unique_targets,
                     grouped_chunk_size=grouped_chunk_size_cached,
+                    nearfield_target_leaf_ids=cache_out.nearfield_target_leaf_ids,
+                    nearfield_source_leaf_ids=cache_out.nearfield_source_leaf_ids,
+                    nearfield_valid_pairs=cache_out.nearfield_valid_pairs,
+                    nearfield_chunk_sort_indices=cache_out.nearfield_chunk_sort_indices,
+                    nearfield_chunk_group_ids=cache_out.nearfield_chunk_group_ids,
+                    nearfield_chunk_unique_indices=cache_out.nearfield_chunk_unique_indices,
+                    nearfield_mode=cache_out.nearfield_mode,
+                    nearfield_edge_chunk_size=cache_out.nearfield_edge_chunk_size,
+                    nearfield_leaf_cap=cache_out.nearfield_leaf_cap,
                 )
 
     dense_buffers = (
@@ -1165,6 +1201,8 @@ class FastMultipoleMethod:
         neighbor_list: NodeNeighborList,
         leaf_cap: int,
         num_particles: int,
+        nearfield_mode: Optional[str] = None,
+        nearfield_edge_chunk_size: Optional[int] = None,
     ) -> tuple[
         Optional[Array],
         Optional[Array],
@@ -1181,10 +1219,18 @@ class FastMultipoleMethod:
         nearfield_chunk_group_ids = None
         nearfield_chunk_unique_indices = None
 
-        nearfield_mode = self._resolve_nearfield_mode(num_particles=num_particles)
-        nearfield_edge_chunk_size = self._resolve_nearfield_edge_chunk_size(
-            num_particles=num_particles,
-            nearfield_mode=nearfield_mode,
+        resolved_nearfield_mode = (
+            self._resolve_nearfield_mode(num_particles=num_particles)
+            if nearfield_mode is None
+            else str(nearfield_mode).strip().lower()
+        )
+        resolved_nearfield_edge_chunk_size = (
+            self._resolve_nearfield_edge_chunk_size(
+                num_particles=num_particles,
+                nearfield_mode=resolved_nearfield_mode,
+            )
+            if nearfield_edge_chunk_size is None
+            else int(nearfield_edge_chunk_size)
         )
 
         try:
@@ -1204,13 +1250,13 @@ class FastMultipoleMethod:
             nearfield_valid_pairs = None
 
         if (
-            nearfield_mode == "bucketed"
+            resolved_nearfield_mode == "bucketed"
             and nearfield_target_leaf_ids is not None
             and nearfield_valid_pairs is not None
         ):
             try:
                 edge_count = int(nearfield_target_leaf_ids.shape[0])
-                chunk = int(nearfield_edge_chunk_size)
+                chunk = int(resolved_nearfield_edge_chunk_size)
                 chunk_count = (edge_count + chunk - 1) // chunk if edge_count > 0 else 0
                 schedule_items = int(chunk_count * chunk * int(leaf_cap))
                 if schedule_items <= _NEARFIELD_SCATTER_SCHEDULE_ITEM_CAP:
@@ -1917,19 +1963,71 @@ class FastMultipoleMethod:
         retry_events_tuple = tuple(collected_retries)
         self._recent_retry_events = retry_events_tuple
 
-        (
-            nearfield_target_leaf_ids,
-            nearfield_source_leaf_ids,
-            nearfield_valid_pairs,
-            nearfield_chunk_sort_indices,
-            nearfield_chunk_group_ids,
-            nearfield_chunk_unique_indices,
-        ) = self._prepare_nearfield_precompute_artifacts(
-            tree=tree,
-            neighbor_list=neighbor_list,
-            leaf_cap=leaf_cap,
-            num_particles=int(positions_arr.shape[0]),
+        nearfield_mode_resolved = self._resolve_nearfield_mode(
+            num_particles=int(positions_arr.shape[0])
         )
+        nearfield_edge_chunk_size_resolved = self._resolve_nearfield_edge_chunk_size(
+            num_particles=int(positions_arr.shape[0]),
+            nearfield_mode=nearfield_mode_resolved,
+        )
+        reuse_nearfield_cache = (
+            cache_entry is not None
+            and cache_entry.nearfield_mode == nearfield_mode_resolved
+            and cache_entry.nearfield_edge_chunk_size
+            == nearfield_edge_chunk_size_resolved
+            and cache_entry.nearfield_leaf_cap == int(leaf_cap)
+            and cache_entry.nearfield_target_leaf_ids is not None
+            and cache_entry.nearfield_source_leaf_ids is not None
+            and cache_entry.nearfield_valid_pairs is not None
+        )
+        if reuse_nearfield_cache:
+            nearfield_target_leaf_ids = cache_entry.nearfield_target_leaf_ids
+            nearfield_source_leaf_ids = cache_entry.nearfield_source_leaf_ids
+            nearfield_valid_pairs = cache_entry.nearfield_valid_pairs
+            nearfield_chunk_sort_indices = cache_entry.nearfield_chunk_sort_indices
+            nearfield_chunk_group_ids = cache_entry.nearfield_chunk_group_ids
+            nearfield_chunk_unique_indices = cache_entry.nearfield_chunk_unique_indices
+        else:
+            (
+                nearfield_target_leaf_ids,
+                nearfield_source_leaf_ids,
+                nearfield_valid_pairs,
+                nearfield_chunk_sort_indices,
+                nearfield_chunk_group_ids,
+                nearfield_chunk_unique_indices,
+            ) = self._prepare_nearfield_precompute_artifacts(
+                tree=tree,
+                neighbor_list=neighbor_list,
+                leaf_cap=leaf_cap,
+                num_particles=int(positions_arr.shape[0]),
+                nearfield_mode=nearfield_mode_resolved,
+                nearfield_edge_chunk_size=nearfield_edge_chunk_size_resolved,
+            )
+            if cache_entry is not None:
+                cache_entry = _InteractionCacheEntry(
+                    key=cache_entry.key,
+                    interactions=cache_entry.interactions,
+                    neighbor_list=cache_entry.neighbor_list,
+                    dual_tree_result=cache_entry.dual_tree_result,
+                    grouped_buffers=cache_entry.grouped_buffers,
+                    grouped_segment_starts=cache_entry.grouped_segment_starts,
+                    grouped_segment_lengths=cache_entry.grouped_segment_lengths,
+                    grouped_segment_class_ids=cache_entry.grouped_segment_class_ids,
+                    grouped_segment_sort_permutation=cache_entry.grouped_segment_sort_permutation,
+                    grouped_segment_group_ids=cache_entry.grouped_segment_group_ids,
+                    grouped_segment_unique_targets=cache_entry.grouped_segment_unique_targets,
+                    grouped_chunk_size=cache_entry.grouped_chunk_size,
+                    nearfield_target_leaf_ids=nearfield_target_leaf_ids,
+                    nearfield_source_leaf_ids=nearfield_source_leaf_ids,
+                    nearfield_valid_pairs=nearfield_valid_pairs,
+                    nearfield_chunk_sort_indices=nearfield_chunk_sort_indices,
+                    nearfield_chunk_group_ids=nearfield_chunk_group_ids,
+                    nearfield_chunk_unique_indices=nearfield_chunk_unique_indices,
+                    nearfield_mode=nearfield_mode_resolved,
+                    nearfield_edge_chunk_size=nearfield_edge_chunk_size_resolved,
+                    nearfield_leaf_cap=int(leaf_cap),
+                )
+                self._interaction_cache = cache_entry
 
         return FMMPreparedState(
             tree=tree,
