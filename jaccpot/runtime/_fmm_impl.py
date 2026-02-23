@@ -5,7 +5,6 @@ This implementation uses multipole and local expansions to compute
 gravitational forces in O(N) time instead of O(N^2) for direct summation.
 """
 
-import hashlib
 from collections import OrderedDict
 from dataclasses import dataclass
 from functools import partial
@@ -17,7 +16,7 @@ import numpy as np
 from beartype import beartype
 from beartype.typing import Callable, Tuple
 from jaxtyping import Array, DTypeLike, jaxtyped
-from yggdrax.dense_interactions import DenseInteractionBuffers, densify_interactions
+from yggdrax.dense_interactions import DenseInteractionBuffers
 from yggdrax.grouped_interactions import GroupedInteractionBuffers
 from yggdrax.interactions import (
     DualTreeRetryEvent,
@@ -88,6 +87,18 @@ from jaccpot.upward.tree_expansions import (
     prepare_upward_sweep as prepare_tree_upward_sweep,
 )
 
+from ._interaction_cache import (
+    _build_dual_tree_artifacts,
+    _DualTreeArtifacts,
+    _interaction_cache_key,
+    _InteractionCacheEntry,
+)
+from ._nearfield_cache import (
+    NearfieldPrecomputeArtifacts,
+    nearfield_cache_matches,
+    nearfield_from_cache,
+    with_nearfield_cache_artifacts,
+)
 from .dtypes import INDEX_DTYPE, as_index, complex_dtype_for_real
 from .fmm_presets import FMMPreset, FMMPresetConfig, get_preset_config
 from .reference import MultipoleExpansion
@@ -150,24 +161,6 @@ class _TreeBuildArtifacts:
     workspace: Optional[RadixTreeWorkspace]
     max_leaf_size: int
     cache_leaf_parameter: int
-
-
-@dataclass(frozen=True)
-class _DualTreeArtifacts:
-    """Artifacts emitted by the dual-tree traversal builder."""
-
-    interactions: NodeInteractionList
-    neighbor_list: NodeNeighborList
-    traversal_result: DualTreeWalkResult
-    dense_buffers: Optional[DenseInteractionBuffers]
-    grouped_buffers: Optional[GroupedInteractionBuffers]
-    grouped_segment_starts: Optional[Array]
-    grouped_segment_lengths: Optional[Array]
-    grouped_segment_class_ids: Optional[Array]
-    grouped_segment_sort_permutation: Optional[Array]
-    grouped_segment_group_ids: Optional[Array]
-    grouped_segment_unique_targets: Optional[Array]
-    grouped_chunk_size: Optional[int]
 
 
 class _RuntimeExecutionOverrides(NamedTuple):
@@ -413,97 +406,6 @@ def _build_tree_with_config(
     )
 
 
-def _interaction_cache_key(
-    tree: RadixTree,
-    *,
-    tree_mode: str,
-    leaf_parameter: int,
-    theta: float,
-    mac_type: MACType,
-    dehnen_radius_scale: float,
-    expansion_basis: ExpansionBasis,
-    center_mode: str,
-    max_pair_queue: Optional[int],
-    pair_process_block: Optional[int],
-    traversal_config: Optional[DualTreeTraversalConfig],
-    refine_local: Optional[bool],
-    max_refine_levels: Optional[int],
-    aspect_threshold: Optional[float],
-) -> Optional[str]:
-    """Return a hash for the interaction list of a tree/theta configuration.
-
-    If any tree arrays are tracers (e.g., under grad/jit), return ``None`` to
-    disable caching and avoid host round-trips on traced values.
-    """
-
-    hasher = hashlib.sha256()
-
-    try:
-        morton_codes = np.asarray(
-            jax.device_get(tree.morton_codes),
-            dtype=np.uint64,
-        )
-        node_ranges = np.asarray(
-            jax.device_get(tree.node_ranges),
-            dtype=np.int64,
-        )
-        bounds_min = np.asarray(
-            jax.device_get(tree.bounds_min),
-            dtype=np.float64,
-        )
-        bounds_max = np.asarray(
-            jax.device_get(tree.bounds_max),
-            dtype=np.float64,
-        )
-    except Exception:
-        # Any tracer or host-conversion failure disables caching under
-        # transformation (e.g., grad/jit).
-        return None
-
-    hasher.update(morton_codes.tobytes())
-    hasher.update(node_ranges.tobytes())
-    hasher.update(bounds_min.tobytes())
-    hasher.update(bounds_max.tobytes())
-
-    mode_bytes = tree_mode.encode("utf8")
-    leaf_bytes = np.asarray(int(leaf_parameter), dtype=np.int64).tobytes()
-    theta_bytes = np.asarray(float(theta), dtype=np.float64).tobytes()
-    mac_bytes = str(mac_type).encode("utf8")
-    dehnen_scale_bytes = np.asarray(
-        float(dehnen_radius_scale), dtype=np.float64
-    ).tobytes()
-    basis_bytes = str(expansion_basis).encode("utf8")
-    center_mode_bytes = str(center_mode).encode("utf8")
-    if traversal_config is not None:
-        queue_val = int(traversal_config.max_pair_queue)
-        block_val = int(traversal_config.process_block)
-        interaction_val = int(traversal_config.max_interactions_per_node)
-        neighbor_val = int(traversal_config.max_neighbors_per_leaf)
-    else:
-        queue_val = -1 if max_pair_queue is None else int(max_pair_queue)
-        block_val = -1 if pair_process_block is None else int(pair_process_block)
-        interaction_val = -1
-        neighbor_val = -1
-    refine_val = -1 if refine_local is None else int(bool(refine_local))
-    max_refine_val = -1 if max_refine_levels is None else int(max_refine_levels)
-    aspect_val = -1.0 if aspect_threshold is None else float(aspect_threshold)
-    hasher.update(mode_bytes)
-    hasher.update(leaf_bytes)
-    hasher.update(theta_bytes)
-    hasher.update(mac_bytes)
-    hasher.update(dehnen_scale_bytes)
-    hasher.update(basis_bytes)
-    hasher.update(center_mode_bytes)
-    hasher.update(np.asarray(queue_val, dtype=np.int64).tobytes())
-    hasher.update(np.asarray(block_val, dtype=np.int64).tobytes())
-    hasher.update(np.asarray(interaction_val, dtype=np.int64).tobytes())
-    hasher.update(np.asarray(neighbor_val, dtype=np.int64).tobytes())
-    hasher.update(np.asarray(refine_val, dtype=np.int64).tobytes())
-    hasher.update(np.asarray(max_refine_val, dtype=np.int64).tobytes())
-    hasher.update(np.asarray(aspect_val, dtype=np.float64).tobytes())
-    return hasher.hexdigest()
-
-
 class FMMPreparedState(NamedTuple):
     """Keep tree data resident on device across repeated evaluations."""
 
@@ -529,244 +431,28 @@ class FMMPreparedState(NamedTuple):
     nearfield_chunk_unique_indices: Optional[Array]
 
 
-class _InteractionCacheEntry(NamedTuple):
-    """Cache entry for dual-tree interaction artifacts keyed by build options."""
+class _PrepareStateTreeUpwardArtifacts(NamedTuple):
+    """Tree/upward artifacts produced during prepare_state orchestration."""
 
-    key: str
+    tree_mode: str
+    tree: RadixTree
+    positions_sorted: Array
+    masses_sorted: Array
+    inverse_permutation: Array
+    leaf_cap: int
+    leaf_parameter: int
+    upward: TreeUpwardData
+    locals_template: Optional[LocalExpansionData]
+
+
+class _PrepareStateDualDownwardArtifacts(NamedTuple):
+    """Dual-tree and downward artifacts produced during prepare_state."""
+
     interactions: NodeInteractionList
     neighbor_list: NodeNeighborList
-    dual_tree_result: DualTreeWalkResult
-    grouped_buffers: Optional[GroupedInteractionBuffers]
-    grouped_segment_starts: Optional[Array]
-    grouped_segment_lengths: Optional[Array]
-    grouped_segment_class_ids: Optional[Array]
-    grouped_segment_sort_permutation: Optional[Array]
-    grouped_segment_group_ids: Optional[Array]
-    grouped_segment_unique_targets: Optional[Array]
-    grouped_chunk_size: Optional[int]
-    nearfield_target_leaf_ids: Optional[Array]
-    nearfield_source_leaf_ids: Optional[Array]
-    nearfield_valid_pairs: Optional[Array]
-    nearfield_chunk_sort_indices: Optional[Array]
-    nearfield_chunk_group_ids: Optional[Array]
-    nearfield_chunk_unique_indices: Optional[Array]
-    nearfield_mode: Optional[str]
-    nearfield_edge_chunk_size: Optional[int]
-    nearfield_leaf_cap: Optional[int]
-
-
-def _build_dual_tree_artifacts(
-    tree: RadixTree,
-    geometry,
-    *,
-    theta: float,
-    mac_type: MACType,
-    dehnen_radius_scale: float,
-    cache_key: Optional[str],
-    cache_entry: Optional[_InteractionCacheEntry],
-    max_pair_queue: Optional[int],
-    pair_process_block: Optional[int],
-    traversal_config: Optional[DualTreeTraversalConfig],
-    retry_logger: Optional[Callable[[DualTreeRetryEvent], None]],
-    use_dense_interactions: bool,
-    grouped_interactions: bool,
-    grouped_chunk_size: Optional[int],
-) -> tuple[_DualTreeArtifacts, Optional[_InteractionCacheEntry]]:
-    """Construct or reuse dual-tree traversal products for a tree."""
-
-    cache_out = cache_entry
-    if (
-        cache_key is not None
-        and cache_entry is not None
-        and cache_entry.key == cache_key
-    ):
-        interactions = cache_entry.interactions
-        neighbor_list = cache_entry.neighbor_list
-        traversal_result = cache_entry.dual_tree_result
-        grouped_buffers = cache_entry.grouped_buffers
-        grouped_segment_starts = cache_entry.grouped_segment_starts
-        grouped_segment_lengths = cache_entry.grouped_segment_lengths
-        grouped_segment_class_ids = cache_entry.grouped_segment_class_ids
-        grouped_segment_sort_permutation = cache_entry.grouped_segment_sort_permutation
-        grouped_segment_group_ids = cache_entry.grouped_segment_group_ids
-        grouped_segment_unique_targets = cache_entry.grouped_segment_unique_targets
-        grouped_chunk_size_cached = cache_entry.grouped_chunk_size
-    else:
-        from . import fmm as _runtime_fmm
-
-        build_out = _runtime_fmm.build_interactions_and_neighbors(
-            tree,
-            geometry,
-            theta=theta,
-            mac_type=mac_type,
-            dehnen_radius_scale=dehnen_radius_scale,
-            max_pair_queue=max_pair_queue,
-            process_block=pair_process_block,
-            traversal_config=traversal_config,
-            retry_logger=retry_logger,
-            return_result=True,
-            return_grouped=grouped_interactions,
-        )
-        if grouped_interactions:
-            (
-                interactions,
-                neighbor_list,
-                traversal_result,
-                grouped_buffers,
-            ) = build_out
-        else:
-            (
-                interactions,
-                neighbor_list,
-                traversal_result,
-            ) = build_out
-        cache_out = (
-            _InteractionCacheEntry(
-                key=cache_key,
-                interactions=interactions,
-                neighbor_list=neighbor_list,
-                dual_tree_result=traversal_result,
-                grouped_buffers=grouped_buffers if grouped_interactions else None,
-                grouped_segment_starts=None,
-                grouped_segment_lengths=None,
-                grouped_segment_class_ids=None,
-                grouped_segment_sort_permutation=None,
-                grouped_segment_group_ids=None,
-                grouped_segment_unique_targets=None,
-                grouped_chunk_size=None,
-                nearfield_target_leaf_ids=None,
-                nearfield_source_leaf_ids=None,
-                nearfield_valid_pairs=None,
-                nearfield_chunk_sort_indices=None,
-                nearfield_chunk_group_ids=None,
-                nearfield_chunk_unique_indices=None,
-                nearfield_mode=None,
-                nearfield_edge_chunk_size=None,
-                nearfield_leaf_cap=None,
-            )
-            if cache_key is not None
-            else None
-        )
-        grouped_segment_starts = None
-        grouped_segment_lengths = None
-        grouped_segment_class_ids = None
-        grouped_segment_sort_permutation = None
-        grouped_segment_group_ids = None
-        grouped_segment_unique_targets = None
-        grouped_chunk_size_cached = None
-        if not grouped_interactions:
-            grouped_buffers = None
-
-    if grouped_interactions and grouped_buffers is None:
-        from yggdrax import interactions as _yggdrax_interactions
-
-        grouped_buffers = _yggdrax_interactions.build_grouped_interactions_from_pairs(
-            tree,
-            geometry,
-            interactions.sources,
-            interactions.targets,
-            level_offsets=getattr(interactions, "level_offsets", None),
-        )
-        if cache_out is not None:
-            cache_out = _InteractionCacheEntry(
-                key=cache_out.key,
-                interactions=cache_out.interactions,
-                neighbor_list=cache_out.neighbor_list,
-                dual_tree_result=cache_out.dual_tree_result,
-                grouped_buffers=grouped_buffers,
-                grouped_segment_starts=cache_out.grouped_segment_starts,
-                grouped_segment_lengths=cache_out.grouped_segment_lengths,
-                grouped_segment_class_ids=cache_out.grouped_segment_class_ids,
-                grouped_segment_sort_permutation=cache_out.grouped_segment_sort_permutation,
-                grouped_segment_group_ids=cache_out.grouped_segment_group_ids,
-                grouped_segment_unique_targets=cache_out.grouped_segment_unique_targets,
-                grouped_chunk_size=cache_out.grouped_chunk_size,
-                nearfield_target_leaf_ids=cache_out.nearfield_target_leaf_ids,
-                nearfield_source_leaf_ids=cache_out.nearfield_source_leaf_ids,
-                nearfield_valid_pairs=cache_out.nearfield_valid_pairs,
-                nearfield_chunk_sort_indices=cache_out.nearfield_chunk_sort_indices,
-                nearfield_chunk_group_ids=cache_out.nearfield_chunk_group_ids,
-                nearfield_chunk_unique_indices=cache_out.nearfield_chunk_unique_indices,
-                nearfield_mode=cache_out.nearfield_mode,
-                nearfield_edge_chunk_size=cache_out.nearfield_edge_chunk_size,
-                nearfield_leaf_cap=cache_out.nearfield_leaf_cap,
-            )
-
-    if (
-        grouped_interactions
-        and grouped_buffers is not None
-        and grouped_chunk_size is not None
-    ):
-        needs_schedule = (
-            grouped_segment_starts is None
-            or grouped_segment_lengths is None
-            or grouped_segment_class_ids is None
-            or grouped_segment_sort_permutation is None
-            or grouped_segment_group_ids is None
-            or grouped_segment_unique_targets is None
-            or grouped_chunk_size_cached != int(grouped_chunk_size)
-        )
-        if needs_schedule:
-            from . import fmm as _runtime_fmm
-
-            (
-                grouped_segment_starts,
-                grouped_segment_lengths,
-                grouped_segment_class_ids,
-                grouped_segment_sort_permutation,
-                grouped_segment_group_ids,
-                grouped_segment_unique_targets,
-            ) = _runtime_fmm._build_grouped_class_segments(
-                grouped_buffers,
-                chunk_size=int(grouped_chunk_size),
-            )
-            grouped_chunk_size_cached = int(grouped_chunk_size)
-            if cache_out is not None:
-                cache_out = _InteractionCacheEntry(
-                    key=cache_out.key,
-                    interactions=cache_out.interactions,
-                    neighbor_list=cache_out.neighbor_list,
-                    dual_tree_result=cache_out.dual_tree_result,
-                    grouped_buffers=grouped_buffers,
-                    grouped_segment_starts=grouped_segment_starts,
-                    grouped_segment_lengths=grouped_segment_lengths,
-                    grouped_segment_class_ids=grouped_segment_class_ids,
-                    grouped_segment_sort_permutation=grouped_segment_sort_permutation,
-                    grouped_segment_group_ids=grouped_segment_group_ids,
-                    grouped_segment_unique_targets=grouped_segment_unique_targets,
-                    grouped_chunk_size=grouped_chunk_size_cached,
-                    nearfield_target_leaf_ids=cache_out.nearfield_target_leaf_ids,
-                    nearfield_source_leaf_ids=cache_out.nearfield_source_leaf_ids,
-                    nearfield_valid_pairs=cache_out.nearfield_valid_pairs,
-                    nearfield_chunk_sort_indices=cache_out.nearfield_chunk_sort_indices,
-                    nearfield_chunk_group_ids=cache_out.nearfield_chunk_group_ids,
-                    nearfield_chunk_unique_indices=cache_out.nearfield_chunk_unique_indices,
-                    nearfield_mode=cache_out.nearfield_mode,
-                    nearfield_edge_chunk_size=cache_out.nearfield_edge_chunk_size,
-                    nearfield_leaf_cap=cache_out.nearfield_leaf_cap,
-                )
-
-    dense_buffers = (
-        densify_interactions(tree, geometry, interactions)
-        if use_dense_interactions
-        else None
-    )
-
-    artifacts = _DualTreeArtifacts(
-        interactions=interactions,
-        neighbor_list=neighbor_list,
-        traversal_result=traversal_result,
-        dense_buffers=dense_buffers,
-        grouped_buffers=grouped_buffers,
-        grouped_segment_starts=grouped_segment_starts,
-        grouped_segment_lengths=grouped_segment_lengths,
-        grouped_segment_class_ids=grouped_segment_class_ids,
-        grouped_segment_sort_permutation=grouped_segment_sort_permutation,
-        grouped_segment_group_ids=grouped_segment_group_ids,
-        grouped_segment_unique_targets=grouped_segment_unique_targets,
-        grouped_chunk_size=grouped_chunk_size_cached,
-    )
-    return artifacts, cache_out
+    traversal_result: DualTreeWalkResult
+    downward: TreeDownwardData
+    cache_entry: Optional[_InteractionCacheEntry]
 
 
 class FastMultipoleMethod:
@@ -1182,6 +868,245 @@ class FastMultipoleMethod:
             upward.multipoles.centers,
             max_order=max_order,
         )
+
+    def _prepare_state_tree_and_upward(
+        self,
+        *,
+        positions_arr: Array,
+        masses_arr: Array,
+        bounds: Optional[Tuple[Array, Array]],
+        leaf_size: int,
+        max_order: int,
+        refine_local_val: bool,
+        max_refine_levels_val: int,
+        aspect_threshold_val: float,
+        jit_tree_override: Optional[bool],
+        upward_center_mode: str,
+    ) -> _PrepareStateTreeUpwardArtifacts:
+        """Build tree artifacts and run upward preparation for prepare_state."""
+        inferred_bounds = self._resolve_prepare_state_bounds(
+            positions=positions_arr,
+            bounds=bounds,
+        )
+        jit_tree_flag = self._resolve_jit_tree_flag(
+            positions_arr,
+            jit_tree_override=jit_tree_override,
+        )
+
+        build_artifacts = _build_tree_with_config(
+            positions_arr,
+            masses_arr,
+            inferred_bounds,
+            tree_config=self.config.tree,
+            leaf_size=int(leaf_size),
+            workspace=self._tree_workspace,
+            jit_tree=jit_tree_flag,
+            refine_local=refine_local_val,
+            max_refine_levels=max_refine_levels_val,
+            aspect_threshold=aspect_threshold_val,
+        )
+        self._tree_workspace = build_artifacts.workspace
+
+        tree = build_artifacts.tree
+        pos_sorted = build_artifacts.positions_sorted
+        mass_sorted = build_artifacts.masses_sorted
+        upward = self.prepare_upward_sweep(
+            tree,
+            pos_sorted,
+            mass_sorted,
+            max_order=max_order,
+            center_mode=upward_center_mode,
+        )
+        locals_template = self._build_locals_template_for_prepare_state(
+            tree=tree,
+            upward=upward,
+            max_order=max_order,
+            pos_sorted=pos_sorted,
+        )
+
+        return _PrepareStateTreeUpwardArtifacts(
+            tree_mode=self.tree_build_mode,
+            tree=tree,
+            positions_sorted=pos_sorted,
+            masses_sorted=mass_sorted,
+            inverse_permutation=build_artifacts.inverse_permutation,
+            leaf_cap=build_artifacts.max_leaf_size,
+            leaf_parameter=build_artifacts.cache_leaf_parameter,
+            upward=upward,
+            locals_template=locals_template,
+        )
+
+    def _prepare_state_dual_and_downward(
+        self,
+        *,
+        tree_artifacts: _PrepareStateTreeUpwardArtifacts,
+        upward_center_mode: str,
+        theta_val: float,
+        mac_type_val: MACType,
+        dehnen_radius_scale: float,
+        runtime_traversal_config: Optional[DualTreeTraversalConfig],
+        runtime_m2l_chunk_size: Optional[int],
+        runtime_l2l_chunk_size: Optional[int],
+        grouped_interactions: bool,
+        farfield_mode: str,
+        record_retry: Callable[[DualTreeRetryEvent], None],
+        refine_local_val: bool,
+        max_refine_levels_val: int,
+        aspect_threshold_val: float,
+    ) -> _PrepareStateDualDownwardArtifacts:
+        """Build/reuse interactions and prepare downward artifacts."""
+        cache_key = _interaction_cache_key(
+            tree_artifacts.tree,
+            tree_mode=tree_artifacts.tree_mode,
+            leaf_parameter=tree_artifacts.leaf_parameter,
+            theta=theta_val,
+            mac_type=mac_type_val,
+            dehnen_radius_scale=dehnen_radius_scale,
+            expansion_basis=self.expansion_basis,
+            center_mode=upward_center_mode,
+            max_pair_queue=self.max_pair_queue,
+            pair_process_block=self.pair_process_block,
+            traversal_config=runtime_traversal_config,
+            refine_local=refine_local_val,
+            max_refine_levels=max_refine_levels_val,
+            aspect_threshold=aspect_threshold_val,
+        )
+
+        dual_artifacts, cache_entry = _build_dual_tree_artifacts(
+            tree_artifacts.tree,
+            tree_artifacts.upward.geometry,
+            theta=theta_val,
+            mac_type=mac_type_val,
+            dehnen_radius_scale=dehnen_radius_scale,
+            cache_key=cache_key,
+            cache_entry=self._interaction_cache,
+            max_pair_queue=self.max_pair_queue,
+            pair_process_block=self.pair_process_block,
+            traversal_config=runtime_traversal_config,
+            retry_logger=record_retry,
+            use_dense_interactions=self.use_dense_interactions,
+            grouped_interactions=grouped_interactions,
+            grouped_chunk_size=runtime_m2l_chunk_size,
+        )
+        self._interaction_cache = cache_entry
+
+        (
+            interactions,
+            neighbor_list,
+            traversal_result,
+            dense_buffers,
+            grouped_buffers,
+            grouped_segment_starts,
+            grouped_segment_lengths,
+            grouped_segment_class_ids,
+            grouped_segment_sort_permutation,
+            grouped_segment_group_ids,
+            grouped_segment_unique_targets,
+        ) = self._unpack_dual_tree_artifacts(dual_artifacts)
+
+        downward = self._prepare_downward_with_artifacts(
+            tree=tree_artifacts.tree,
+            upward=tree_artifacts.upward,
+            theta_val=theta_val,
+            locals_template=tree_artifacts.locals_template,
+            interactions=interactions,
+            runtime_m2l_chunk_size=runtime_m2l_chunk_size,
+            runtime_l2l_chunk_size=runtime_l2l_chunk_size,
+            runtime_traversal_config=runtime_traversal_config,
+            record_retry=record_retry,
+            dense_buffers=dense_buffers,
+            grouped_interactions=grouped_interactions,
+            grouped_buffers=grouped_buffers,
+            grouped_segment_starts=grouped_segment_starts,
+            grouped_segment_lengths=grouped_segment_lengths,
+            grouped_segment_class_ids=grouped_segment_class_ids,
+            grouped_segment_sort_permutation=grouped_segment_sort_permutation,
+            grouped_segment_group_ids=grouped_segment_group_ids,
+            grouped_segment_unique_targets=grouped_segment_unique_targets,
+            farfield_mode=farfield_mode,
+        )
+        return _PrepareStateDualDownwardArtifacts(
+            interactions=interactions,
+            neighbor_list=neighbor_list,
+            traversal_result=traversal_result,
+            downward=downward,
+            cache_entry=cache_entry,
+        )
+
+    def _prepare_state_nearfield_artifacts(
+        self,
+        *,
+        tree: RadixTree,
+        neighbor_list: NodeNeighborList,
+        leaf_cap: int,
+        num_particles: int,
+        cache_entry: Optional[_InteractionCacheEntry],
+    ) -> NearfieldPrecomputeArtifacts:
+        """Build/reuse near-field precompute artifacts for prepare_state."""
+        nearfield_mode_resolved = self._resolve_nearfield_mode(
+            num_particles=num_particles
+        )
+        nearfield_edge_chunk_size_resolved = self._resolve_nearfield_edge_chunk_size(
+            num_particles=num_particles,
+            nearfield_mode=nearfield_mode_resolved,
+        )
+        if nearfield_cache_matches(
+            cache_entry,
+            nearfield_mode=nearfield_mode_resolved,
+            nearfield_edge_chunk_size=nearfield_edge_chunk_size_resolved,
+            leaf_cap=int(leaf_cap),
+        ):
+            return nearfield_from_cache(cache_entry)
+
+        (
+            target_leaf_ids,
+            source_leaf_ids,
+            valid_pairs,
+            chunk_sort_indices,
+            chunk_group_ids,
+            chunk_unique_indices,
+        ) = self._prepare_nearfield_precompute_artifacts(
+            tree=tree,
+            neighbor_list=neighbor_list,
+            leaf_cap=leaf_cap,
+            num_particles=num_particles,
+            nearfield_mode=nearfield_mode_resolved,
+            nearfield_edge_chunk_size=nearfield_edge_chunk_size_resolved,
+        )
+        nearfield_artifacts = NearfieldPrecomputeArtifacts(
+            target_leaf_ids=target_leaf_ids,
+            source_leaf_ids=source_leaf_ids,
+            valid_pairs=valid_pairs,
+            chunk_sort_indices=chunk_sort_indices,
+            chunk_group_ids=chunk_group_ids,
+            chunk_unique_indices=chunk_unique_indices,
+        )
+        if cache_entry is not None:
+            self._interaction_cache = with_nearfield_cache_artifacts(
+                cache_entry,
+                artifacts=nearfield_artifacts,
+                nearfield_mode=nearfield_mode_resolved,
+                nearfield_edge_chunk_size=nearfield_edge_chunk_size_resolved,
+                leaf_cap=int(leaf_cap),
+            )
+        return nearfield_artifacts
+
+    def _update_locals_template_cache_after_prepare(
+        self,
+        *,
+        locals_template: Optional[LocalExpansionData],
+        upward: TreeUpwardData,
+        max_order: int,
+    ) -> None:
+        """Update reusable cartesian local-expansion template after prepare_state."""
+        if locals_template is not None and self.expansion_basis == "cartesian":
+            self._locals_template = LocalExpansionData(
+                order=max_order,
+                centers=upward.multipoles.centers,
+                coefficients=jnp.zeros_like(locals_template.coefficients),
+            )
+            return
+        self._locals_template = None
 
     def _prepare_nearfield_precompute_artifacts(
         self,
@@ -1776,221 +1701,75 @@ class FastMultipoleMethod:
         theta_val = float(self.theta if theta is None else theta)
         mac_type_val = self.mac_type
 
-        inferred_bounds = self._resolve_prepare_state_bounds(
-            positions=positions_arr,
+        tree_artifacts = self._prepare_state_tree_and_upward(
+            positions_arr=positions_arr,
+            masses_arr=masses_arr,
             bounds=bounds,
-        )
-
-        jit_tree_flag = self._resolve_jit_tree_flag(
-            positions_arr,
-            jit_tree_override=jit_tree,
-        )
-
-        build_artifacts = _build_tree_with_config(
-            positions_arr,
-            masses_arr,
-            inferred_bounds,
-            tree_config=self.config.tree,
             leaf_size=int(leaf_size),
-            workspace=self._tree_workspace,
-            jit_tree=jit_tree_flag,
-            refine_local=refine_local_val,
-            max_refine_levels=max_refine_levels_val,
-            aspect_threshold=aspect_threshold_val,
+            max_order=int(max_order),
+            refine_local_val=refine_local_val,
+            max_refine_levels_val=max_refine_levels_val,
+            aspect_threshold_val=aspect_threshold_val,
+            jit_tree_override=jit_tree,
+            upward_center_mode=upward_center_mode,
         )
-        self._tree_workspace = build_artifacts.workspace
-        tree_mode = self.tree_build_mode
-        tree = build_artifacts.tree
-        pos_sorted = build_artifacts.positions_sorted
-        mass_sorted = build_artifacts.masses_sorted
-        inverse = build_artifacts.inverse_permutation
-        leaf_cap = build_artifacts.max_leaf_size
-        leaf_param = build_artifacts.cache_leaf_parameter
-
-        upward = self.prepare_upward_sweep(
-            tree,
-            pos_sorted,
-            mass_sorted,
-            max_order=max_order,
-            center_mode=upward_center_mode,
-        )
-
-        locals_template = self._build_locals_template_for_prepare_state(
-            tree=tree,
-            upward=upward,
-            max_order=max_order,
-            pos_sorted=pos_sorted,
-        )
-
-        cache_key = _interaction_cache_key(
-            tree,
-            tree_mode=tree_mode,
-            leaf_parameter=leaf_param,
-            theta=theta_val,
-            mac_type=mac_type_val,
-            dehnen_radius_scale=self.dehnen_radius_scale,
-            expansion_basis=self.expansion_basis,
-            center_mode=upward_center_mode,
-            max_pair_queue=self.max_pair_queue,
-            pair_process_block=self.pair_process_block,
-            traversal_config=runtime_traversal_config,
-            refine_local=refine_local_val,
-            max_refine_levels=max_refine_levels_val,
-            aspect_threshold=aspect_threshold_val,
-        )
-
-        dual_artifacts, cache_entry = _build_dual_tree_artifacts(
-            tree,
-            upward.geometry,
-            theta=theta_val,
-            mac_type=mac_type_val,
-            dehnen_radius_scale=self.dehnen_radius_scale,
-            cache_key=cache_key,
-            cache_entry=self._interaction_cache,
-            max_pair_queue=self.max_pair_queue,
-            pair_process_block=self.pair_process_block,
-            traversal_config=runtime_traversal_config,
-            retry_logger=record_retry,
-            use_dense_interactions=self.use_dense_interactions,
-            grouped_interactions=grouped_interactions,
-            grouped_chunk_size=runtime_m2l_chunk_size,
-        )
-        self._interaction_cache = cache_entry
-        (
-            interactions,
-            neighbor_list,
-            traversal_result,
-            dense_buffers,
-            grouped_buffers,
-            grouped_segment_starts,
-            grouped_segment_lengths,
-            grouped_segment_class_ids,
-            grouped_segment_sort_permutation,
-            grouped_segment_group_ids,
-            grouped_segment_unique_targets,
-        ) = self._unpack_dual_tree_artifacts(dual_artifacts)
-
-        downward = self._prepare_downward_with_artifacts(
-            tree=tree,
-            upward=upward,
+        dual_downward_artifacts = self._prepare_state_dual_and_downward(
+            tree_artifacts=tree_artifacts,
+            upward_center_mode=upward_center_mode,
             theta_val=theta_val,
-            locals_template=locals_template,
-            interactions=interactions,
+            mac_type_val=mac_type_val,
+            dehnen_radius_scale=self.dehnen_radius_scale,
+            runtime_traversal_config=runtime_traversal_config,
+            grouped_interactions=grouped_interactions,
             runtime_m2l_chunk_size=runtime_m2l_chunk_size,
             runtime_l2l_chunk_size=runtime_l2l_chunk_size,
-            runtime_traversal_config=runtime_traversal_config,
-            record_retry=record_retry,
-            dense_buffers=dense_buffers,
-            grouped_interactions=grouped_interactions,
-            grouped_buffers=grouped_buffers,
-            grouped_segment_starts=grouped_segment_starts,
-            grouped_segment_lengths=grouped_segment_lengths,
-            grouped_segment_class_ids=grouped_segment_class_ids,
-            grouped_segment_sort_permutation=grouped_segment_sort_permutation,
-            grouped_segment_group_ids=grouped_segment_group_ids,
-            grouped_segment_unique_targets=grouped_segment_unique_targets,
             farfield_mode=farfield_mode,
+            record_retry=record_retry,
+            refine_local_val=refine_local_val,
+            max_refine_levels_val=max_refine_levels_val,
+            aspect_threshold_val=aspect_threshold_val,
         )
 
-        if locals_template is not None and self.expansion_basis == "cartesian":
-            self._locals_template = LocalExpansionData(
-                order=max_order,
-                centers=upward.multipoles.centers,
-                coefficients=jnp.zeros_like(locals_template.coefficients),
-            )
-        else:
-            self._locals_template = None
+        self._update_locals_template_cache_after_prepare(
+            locals_template=tree_artifacts.locals_template,
+            upward=tree_artifacts.upward,
+            max_order=int(max_order),
+        )
 
         retry_events_tuple = tuple(collected_retries)
         self._recent_retry_events = retry_events_tuple
 
-        nearfield_mode_resolved = self._resolve_nearfield_mode(
-            num_particles=int(positions_arr.shape[0])
-        )
-        nearfield_edge_chunk_size_resolved = self._resolve_nearfield_edge_chunk_size(
+        nearfield_artifacts = self._prepare_state_nearfield_artifacts(
+            tree=tree_artifacts.tree,
+            neighbor_list=dual_downward_artifacts.neighbor_list,
+            leaf_cap=tree_artifacts.leaf_cap,
             num_particles=int(positions_arr.shape[0]),
-            nearfield_mode=nearfield_mode_resolved,
+            cache_entry=dual_downward_artifacts.cache_entry,
         )
-        reuse_nearfield_cache = (
-            cache_entry is not None
-            and cache_entry.nearfield_mode == nearfield_mode_resolved
-            and cache_entry.nearfield_edge_chunk_size
-            == nearfield_edge_chunk_size_resolved
-            and cache_entry.nearfield_leaf_cap == int(leaf_cap)
-            and cache_entry.nearfield_target_leaf_ids is not None
-            and cache_entry.nearfield_source_leaf_ids is not None
-            and cache_entry.nearfield_valid_pairs is not None
-        )
-        if reuse_nearfield_cache:
-            nearfield_target_leaf_ids = cache_entry.nearfield_target_leaf_ids
-            nearfield_source_leaf_ids = cache_entry.nearfield_source_leaf_ids
-            nearfield_valid_pairs = cache_entry.nearfield_valid_pairs
-            nearfield_chunk_sort_indices = cache_entry.nearfield_chunk_sort_indices
-            nearfield_chunk_group_ids = cache_entry.nearfield_chunk_group_ids
-            nearfield_chunk_unique_indices = cache_entry.nearfield_chunk_unique_indices
-        else:
-            (
-                nearfield_target_leaf_ids,
-                nearfield_source_leaf_ids,
-                nearfield_valid_pairs,
-                nearfield_chunk_sort_indices,
-                nearfield_chunk_group_ids,
-                nearfield_chunk_unique_indices,
-            ) = self._prepare_nearfield_precompute_artifacts(
-                tree=tree,
-                neighbor_list=neighbor_list,
-                leaf_cap=leaf_cap,
-                num_particles=int(positions_arr.shape[0]),
-                nearfield_mode=nearfield_mode_resolved,
-                nearfield_edge_chunk_size=nearfield_edge_chunk_size_resolved,
-            )
-            if cache_entry is not None:
-                cache_entry = _InteractionCacheEntry(
-                    key=cache_entry.key,
-                    interactions=cache_entry.interactions,
-                    neighbor_list=cache_entry.neighbor_list,
-                    dual_tree_result=cache_entry.dual_tree_result,
-                    grouped_buffers=cache_entry.grouped_buffers,
-                    grouped_segment_starts=cache_entry.grouped_segment_starts,
-                    grouped_segment_lengths=cache_entry.grouped_segment_lengths,
-                    grouped_segment_class_ids=cache_entry.grouped_segment_class_ids,
-                    grouped_segment_sort_permutation=cache_entry.grouped_segment_sort_permutation,
-                    grouped_segment_group_ids=cache_entry.grouped_segment_group_ids,
-                    grouped_segment_unique_targets=cache_entry.grouped_segment_unique_targets,
-                    grouped_chunk_size=cache_entry.grouped_chunk_size,
-                    nearfield_target_leaf_ids=nearfield_target_leaf_ids,
-                    nearfield_source_leaf_ids=nearfield_source_leaf_ids,
-                    nearfield_valid_pairs=nearfield_valid_pairs,
-                    nearfield_chunk_sort_indices=nearfield_chunk_sort_indices,
-                    nearfield_chunk_group_ids=nearfield_chunk_group_ids,
-                    nearfield_chunk_unique_indices=nearfield_chunk_unique_indices,
-                    nearfield_mode=nearfield_mode_resolved,
-                    nearfield_edge_chunk_size=nearfield_edge_chunk_size_resolved,
-                    nearfield_leaf_cap=int(leaf_cap),
-                )
-                self._interaction_cache = cache_entry
 
         return FMMPreparedState(
-            tree=tree,
-            positions_sorted=pos_sorted,
-            masses_sorted=mass_sorted,
-            inverse_permutation=jnp.asarray(inverse, dtype=INDEX_DTYPE),
-            downward=downward,
-            neighbor_list=neighbor_list,
-            max_leaf_size=leaf_cap,
+            tree=tree_artifacts.tree,
+            positions_sorted=tree_artifacts.positions_sorted,
+            masses_sorted=tree_artifacts.masses_sorted,
+            inverse_permutation=jnp.asarray(
+                tree_artifacts.inverse_permutation, dtype=INDEX_DTYPE
+            ),
+            downward=dual_downward_artifacts.downward,
+            neighbor_list=dual_downward_artifacts.neighbor_list,
+            max_leaf_size=tree_artifacts.leaf_cap,
             input_dtype=input_dtype,
             working_dtype=positions_arr.dtype,
             expansion_basis=self.expansion_basis,
             theta=theta_val,
-            interactions=interactions,
-            dual_tree_result=traversal_result,
+            interactions=dual_downward_artifacts.interactions,
+            dual_tree_result=dual_downward_artifacts.traversal_result,
             retry_events=retry_events_tuple,
-            nearfield_target_leaf_ids=nearfield_target_leaf_ids,
-            nearfield_source_leaf_ids=nearfield_source_leaf_ids,
-            nearfield_valid_pairs=nearfield_valid_pairs,
-            nearfield_chunk_sort_indices=nearfield_chunk_sort_indices,
-            nearfield_chunk_group_ids=nearfield_chunk_group_ids,
-            nearfield_chunk_unique_indices=nearfield_chunk_unique_indices,
+            nearfield_target_leaf_ids=nearfield_artifacts.target_leaf_ids,
+            nearfield_source_leaf_ids=nearfield_artifacts.source_leaf_ids,
+            nearfield_valid_pairs=nearfield_artifacts.valid_pairs,
+            nearfield_chunk_sort_indices=nearfield_artifacts.chunk_sort_indices,
+            nearfield_chunk_group_ids=nearfield_artifacts.chunk_group_ids,
+            nearfield_chunk_unique_indices=nearfield_artifacts.chunk_unique_indices,
         )
 
     @jaxtyped(typechecker=beartype)
