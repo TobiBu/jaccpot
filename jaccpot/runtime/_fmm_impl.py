@@ -1058,28 +1058,13 @@ class FastMultipoleMethod:
         ):
             return nearfield_from_cache(cache_entry)
 
-        (
-            target_leaf_ids,
-            source_leaf_ids,
-            valid_pairs,
-            chunk_sort_indices,
-            chunk_group_ids,
-            chunk_unique_indices,
-        ) = self._prepare_nearfield_precompute_artifacts(
+        nearfield_artifacts = self._prepare_nearfield_precompute_artifacts(
             tree=tree,
             neighbor_list=neighbor_list,
             leaf_cap=leaf_cap,
             num_particles=num_particles,
             nearfield_mode=nearfield_mode_resolved,
             nearfield_edge_chunk_size=nearfield_edge_chunk_size_resolved,
-        )
-        nearfield_artifacts = NearfieldPrecomputeArtifacts(
-            target_leaf_ids=target_leaf_ids,
-            source_leaf_ids=source_leaf_ids,
-            valid_pairs=valid_pairs,
-            chunk_sort_indices=chunk_sort_indices,
-            chunk_group_ids=chunk_group_ids,
-            chunk_unique_indices=chunk_unique_indices,
         )
         if cache_entry is not None:
             self._interaction_cache = with_nearfield_cache_artifacts(
@@ -1117,14 +1102,7 @@ class FastMultipoleMethod:
         num_particles: int,
         nearfield_mode: Optional[str] = None,
         nearfield_edge_chunk_size: Optional[int] = None,
-    ) -> tuple[
-        Optional[Array],
-        Optional[Array],
-        Optional[Array],
-        Optional[Array],
-        Optional[Array],
-        Optional[Array],
-    ]:
+    ) -> NearfieldPrecomputeArtifacts:
         """Best-effort precompute of nearfield leaf-pair and scatter artifacts."""
         nearfield_target_leaf_ids = None
         nearfield_source_leaf_ids = None
@@ -1147,58 +1125,87 @@ class FastMultipoleMethod:
             else int(nearfield_edge_chunk_size)
         )
 
-        try:
-            (
-                nearfield_target_leaf_ids,
-                nearfield_source_leaf_ids,
-                nearfield_valid_pairs,
-            ) = prepare_leaf_neighbor_pairs(
-                jnp.asarray(tree.node_ranges, dtype=INDEX_DTYPE),
-                jnp.asarray(neighbor_list.leaf_indices, dtype=INDEX_DTYPE),
-                jnp.asarray(neighbor_list.offsets, dtype=INDEX_DTYPE),
-                jnp.asarray(neighbor_list.neighbors, dtype=INDEX_DTYPE),
-            )
-        except Exception:
-            nearfield_target_leaf_ids = None
-            nearfield_source_leaf_ids = None
-            nearfield_valid_pairs = None
+        (
+            nearfield_target_leaf_ids,
+            nearfield_source_leaf_ids,
+            nearfield_valid_pairs,
+        ) = self._prepare_leaf_neighbor_pairs_safe(
+            tree=tree,
+            neighbor_list=neighbor_list,
+        )
 
         if (
             resolved_nearfield_mode == "bucketed"
             and nearfield_target_leaf_ids is not None
             and nearfield_valid_pairs is not None
         ):
-            try:
-                edge_count = int(nearfield_target_leaf_ids.shape[0])
-                chunk = int(resolved_nearfield_edge_chunk_size)
-                chunk_count = (edge_count + chunk - 1) // chunk if edge_count > 0 else 0
-                schedule_items = int(chunk_count * chunk * int(leaf_cap))
-                if schedule_items <= _NEARFIELD_SCATTER_SCHEDULE_ITEM_CAP:
-                    (
-                        nearfield_chunk_sort_indices,
-                        nearfield_chunk_group_ids,
-                        nearfield_chunk_unique_indices,
-                    ) = prepare_bucketed_scatter_schedules(
-                        jnp.asarray(tree.node_ranges, dtype=INDEX_DTYPE),
-                        jnp.asarray(neighbor_list.leaf_indices, dtype=INDEX_DTYPE),
-                        nearfield_target_leaf_ids,
-                        nearfield_valid_pairs,
-                        max_leaf_size=int(leaf_cap),
-                        edge_chunk_size=chunk,
-                    )
-            except Exception:
-                nearfield_chunk_sort_indices = None
-                nearfield_chunk_group_ids = None
-                nearfield_chunk_unique_indices = None
+            (
+                nearfield_chunk_sort_indices,
+                nearfield_chunk_group_ids,
+                nearfield_chunk_unique_indices,
+            ) = self._prepare_bucketed_scatter_schedules_safe(
+                tree=tree,
+                neighbor_list=neighbor_list,
+                target_leaf_ids=nearfield_target_leaf_ids,
+                valid_pairs=nearfield_valid_pairs,
+                leaf_cap=int(leaf_cap),
+                edge_chunk_size=resolved_nearfield_edge_chunk_size,
+            )
 
-        return (
-            nearfield_target_leaf_ids,
-            nearfield_source_leaf_ids,
-            nearfield_valid_pairs,
-            nearfield_chunk_sort_indices,
-            nearfield_chunk_group_ids,
-            nearfield_chunk_unique_indices,
+        return NearfieldPrecomputeArtifacts(
+            target_leaf_ids=nearfield_target_leaf_ids,
+            source_leaf_ids=nearfield_source_leaf_ids,
+            valid_pairs=nearfield_valid_pairs,
+            chunk_sort_indices=nearfield_chunk_sort_indices,
+            chunk_group_ids=nearfield_chunk_group_ids,
+            chunk_unique_indices=nearfield_chunk_unique_indices,
         )
+
+    def _prepare_leaf_neighbor_pairs_safe(
+        self,
+        *,
+        tree: RadixTree,
+        neighbor_list: NodeNeighborList,
+    ) -> tuple[Optional[Array], Optional[Array], Optional[Array]]:
+        """Best-effort leaf neighbor pair generation."""
+        try:
+            return prepare_leaf_neighbor_pairs(
+                jnp.asarray(tree.node_ranges, dtype=INDEX_DTYPE),
+                jnp.asarray(neighbor_list.leaf_indices, dtype=INDEX_DTYPE),
+                jnp.asarray(neighbor_list.offsets, dtype=INDEX_DTYPE),
+                jnp.asarray(neighbor_list.neighbors, dtype=INDEX_DTYPE),
+            )
+        except Exception:
+            return None, None, None
+
+    def _prepare_bucketed_scatter_schedules_safe(
+        self,
+        *,
+        tree: RadixTree,
+        neighbor_list: NodeNeighborList,
+        target_leaf_ids: Array,
+        valid_pairs: Array,
+        leaf_cap: int,
+        edge_chunk_size: int,
+    ) -> tuple[Optional[Array], Optional[Array], Optional[Array]]:
+        """Best-effort bucketed scatter schedule generation."""
+        try:
+            edge_count = int(target_leaf_ids.shape[0])
+            chunk = int(edge_chunk_size)
+            chunk_count = (edge_count + chunk - 1) // chunk if edge_count > 0 else 0
+            schedule_items = int(chunk_count * chunk * int(leaf_cap))
+            if schedule_items > _NEARFIELD_SCATTER_SCHEDULE_ITEM_CAP:
+                return None, None, None
+            return prepare_bucketed_scatter_schedules(
+                jnp.asarray(tree.node_ranges, dtype=INDEX_DTYPE),
+                jnp.asarray(neighbor_list.leaf_indices, dtype=INDEX_DTYPE),
+                target_leaf_ids,
+                valid_pairs,
+                max_leaf_size=int(leaf_cap),
+                edge_chunk_size=chunk,
+            )
+        except Exception:
+            return None, None, None
 
     def _unpack_dual_tree_artifacts(
         self,
