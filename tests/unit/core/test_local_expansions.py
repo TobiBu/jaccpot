@@ -8,7 +8,7 @@ import jax
 import jax.numpy as jnp
 import pytest
 
-from yggdrasil.dense_interactions import build_dense_interactions
+from yggdrax.dense_interactions import build_dense_interactions
 from jaccpot.runtime.fmm import FastMultipoleMethod
 from jaccpot.downward.local_expansions import (
     DEFAULT_M2L_CHUNK_SIZE,
@@ -29,11 +29,11 @@ from jaccpot.operators.multipole_utils import (
     multi_index_tuples,
     total_coefficients,
 )
-from yggdrasil.tree import build_tree
+from yggdrax.tree import build_tree
 from jaccpot.upward.tree_expansions import prepare_upward_sweep
-from yggdrasil.geometry import compute_tree_geometry
-from yggdrasil.interactions import build_well_separated_interactions
-from yggdrasil.tree_moments import multipole_from_packed
+from yggdrax.geometry import compute_tree_geometry
+from yggdrax.interactions import build_well_separated_interactions
+from yggdrax.tree_moments import multipole_from_packed
 
 DEFAULT_TEST_LEAF_SIZE = 1
 

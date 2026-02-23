@@ -3,9 +3,9 @@
 import jax.numpy as jnp
 import pytest
 
-from yggdrasil.tree import build_tree
+from yggdrax.tree import build_tree
 from jaccpot.upward.tree_expansions import compute_node_multipoles, prepare_upward_sweep
-from yggdrasil.tree_moments import (
+from yggdrax.tree_moments import (
     compute_tree_mass_moments,
     compute_tree_multipole_moments,
     pack_multipole_expansions,
@@ -90,7 +90,7 @@ def test_compute_node_multipoles_high_order_matches_direct():
 
 
 def test_compute_node_multipoles_aabb_uses_geometry_center():
-    from yggdrasil.geometry import compute_tree_geometry
+    from yggdrax.geometry import compute_tree_geometry
 
     tree, pos_sorted, mass_sorted = _build_sample_tree()
     geom = compute_tree_geometry(tree, pos_sorted)
@@ -141,8 +141,8 @@ def test_compute_node_multipoles_rejects_unknown_mode():
 
 
 def test_prepare_upward_sweep_returns_consistent_data():
-    from yggdrasil.geometry import compute_tree_geometry
-    from yggdrasil.tree_moments import compute_tree_mass_moments
+    from yggdrax.geometry import compute_tree_geometry
+    from yggdrax.tree_moments import compute_tree_mass_moments
 
     tree, pos_sorted, mass_sorted = _build_sample_tree()
 

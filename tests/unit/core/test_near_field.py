@@ -5,9 +5,9 @@ import jax.numpy as jnp
 import numpy as np
 
 from jaccpot.nearfield.near_field import compute_leaf_p2p_accelerations
-from yggdrasil.tree import build_tree
-from yggdrasil.geometry import compute_tree_geometry
-from yggdrasil.interactions import build_leaf_neighbor_lists
+from yggdrax.tree import build_tree
+from yggdrax.geometry import compute_tree_geometry
+from yggdrax.interactions import build_leaf_neighbor_lists
 
 DEFAULT_TEST_LEAF_SIZE = 1
 STRICT_NEAR_FIELD_THETA = 0.05

@@ -32,10 +32,10 @@ from jaccpot.operators.complex_ops import (
     m2l_complex_reference_batch,
     m2l_complex_reference_batch_cached_blocks,
 )
-from yggdrasil.dense_interactions import DenseInteractionBuffers, densify_interactions
+from yggdrax.dense_interactions import DenseInteractionBuffers, densify_interactions
 from .dtypes import INDEX_DTYPE, as_index, complex_dtype_for_real
 from .fmm_presets import FMMPreset, FMMPresetConfig, get_preset_config
-from yggdrasil.grouped_interactions import GroupedInteractionBuffers
+from yggdrax.grouped_interactions import GroupedInteractionBuffers
 from jaccpot.downward.local_expansions import (
     LocalExpansionData,
     TreeDownwardData,
@@ -66,7 +66,7 @@ from jaccpot.upward.solidfmm_complex_tree_expansions import prepare_solidfmm_com
 from jaccpot.upward.spherical_tree_expansions import (
     prepare_spherical_upward_sweep as prepare_spherical_tree_upward_sweep,
 )
-from yggdrasil.tree import (
+from yggdrax.tree import (
     RadixTree,
     RadixTreeWorkspace,
     build_fixed_depth_tree,
@@ -76,7 +76,7 @@ from yggdrasil.tree import (
 )
 from jaccpot.upward.tree_expansions import NodeMultipoleData, TreeUpwardData
 from jaccpot.upward.tree_expansions import prepare_upward_sweep as prepare_tree_upward_sweep
-from yggdrasil.interactions import (
+from yggdrax.interactions import (
     DualTreeRetryEvent,
     DualTreeTraversalConfig,
     DualTreeWalkResult,
@@ -621,9 +621,9 @@ def _build_dual_tree_artifacts(
             grouped_buffers = None
 
     if grouped_interactions and grouped_buffers is None:
-        from yggdrasil import interactions as _yggdrasil_interactions
+        from yggdrax import interactions as _yggdrax_interactions
 
-        grouped_buffers = _yggdrasil_interactions.build_grouped_interactions_from_pairs(
+        grouped_buffers = _yggdrax_interactions.build_grouped_interactions_from_pairs(
             tree,
             geometry,
             interactions.sources,
@@ -864,12 +864,12 @@ class FastMultipoleMethod:
         self.grouped_interactions = grouped_interactions
 
     @property
-    def recent_retry_events(self) -> Tuple[DualTreeRetryEvent, ...]:
+    def recent_retry_events(self: "FastMultipoleMethod") -> Tuple[DualTreeRetryEvent, ...]:
         """Return retry telemetry collected during the latest build."""
 
         return self._recent_retry_events
 
-    def clear_prepared_state_cache(self) -> None:
+    def clear_prepared_state_cache(self: "FastMultipoleMethod") -> None:
         """Clear cached prepared-state payloads used by reuse mode."""
 
         self._prepared_state_cache_key = None
@@ -1086,10 +1086,10 @@ class FastMultipoleMethod:
 
     @jaxtyped(typechecker=beartype)
     def evaluate_expansion(
-        self,
+        self: "FastMultipoleMethod",
         expansion: MultipoleExpansion,
         order: int = 1,
-        eval_point: Array = None,
+        eval_point: Optional[Array] = None,
     ) -> Array:
         """Evaluate multipole expansions via the shared reference helper."""
 
@@ -1107,7 +1107,7 @@ class FastMultipoleMethod:
 
     @jaxtyped(typechecker=beartype)
     def direct_sum(
-        self,
+        self: "FastMultipoleMethod",
         positions: Array,
         masses: Array,
         eval_point: Array,
@@ -1125,8 +1125,8 @@ class FastMultipoleMethod:
         )
 
     def prepare_upward_sweep(
-        self,
-        tree,
+        self: "FastMultipoleMethod",
+        tree: RadixTree,
         positions_sorted: Array,
         masses_sorted: Array,
         *,
@@ -1203,8 +1203,8 @@ class FastMultipoleMethod:
         )
 
     def run_downward_sweep(
-        self,
-        tree,
+        self: "FastMultipoleMethod",
+        tree: RadixTree,
         multipoles: NodeMultipoleData,
         interactions: NodeInteractionList,
         *,
@@ -1224,8 +1224,8 @@ class FastMultipoleMethod:
         )
 
     def prepare_downward_sweep(
-        self,
-        tree,
+        self: "FastMultipoleMethod",
+        tree: RadixTree,
         upward_data: TreeUpwardData,
         *,
         theta: Optional[float] = None,
@@ -1322,7 +1322,7 @@ class FastMultipoleMethod:
 
     @jaxtyped(typechecker=beartype)
     def compute_accelerations(
-        self,
+        self: "FastMultipoleMethod",
         positions: Array,
         masses: Array,
         *,
@@ -1425,7 +1425,7 @@ class FastMultipoleMethod:
 
     @jaxtyped(typechecker=beartype)
     def prepare_state(
-        self,
+        self: "FastMultipoleMethod",
         positions: Array,
         masses: Array,
         *,
@@ -1748,7 +1748,7 @@ class FastMultipoleMethod:
 
     @jaxtyped(typechecker=beartype)
     def evaluate_prepared_state(
-        self,
+        self: "FastMultipoleMethod",
         state: FMMPreparedState,
         *,
         return_potential: bool = False,
@@ -1793,7 +1793,7 @@ class FastMultipoleMethod:
 
     @jaxtyped(typechecker=beartype)
     def evaluate_tree(
-        self,
+        self: "FastMultipoleMethod",
         tree: RadixTree,
         positions_sorted: Array,
         masses_sorted: Array,
@@ -1888,7 +1888,7 @@ class FastMultipoleMethod:
 
     @jaxtyped(typechecker=beartype)
     def evaluate_tree_compiled(
-        self,
+        self: "FastMultipoleMethod",
         tree: RadixTree,
         positions_sorted: Array,
         masses_sorted: Array,
@@ -2243,7 +2243,7 @@ def _accumulate_solidfmm_m2l_grouped_chunked_scan(
     starts = jnp.arange(0, pair_count, chunk_size, dtype=INDEX_DTYPE)
     local_accum0 = jnp.zeros_like(locals_coeffs)
 
-    def body(local_accum, start_idx):
+    def body(local_accum: Array, start_idx: Array) -> tuple[Array, None]:
         offset = jnp.arange(chunk_size, dtype=INDEX_DTYPE)
         idx = start_idx + offset
         valid = idx < pair_count
@@ -2401,7 +2401,7 @@ def _accumulate_solidfmm_m2l_class_major_chunked_scan(
     offsets = jnp.arange(chunk_size, dtype=INDEX_DTYPE)
     local_accum0 = jnp.zeros_like(locals_coeffs)
 
-    def body(local_accum, seg_idx):
+    def body(local_accum: Array, seg_idx: Array) -> tuple[Array, None]:
         start = segment_starts[seg_idx]
         seg_len = segment_lengths[seg_idx]
         cls = segment_class_ids[seg_idx]
@@ -2695,7 +2695,7 @@ def _accumulate_solidfmm_m2l_chunked_scan(
     starts = jnp.arange(0, pair_count, chunk_size, dtype=INDEX_DTYPE)
     local_accum0 = jnp.zeros_like(locals_coeffs)
 
-    def body(local_accum, start_idx):
+    def body(local_accum: Array, start_idx: Array) -> tuple[Array, None]:
         offset = jnp.arange(chunk_size, dtype=INDEX_DTYPE)
         idx = start_idx + offset
         valid = idx < pair_count

@@ -534,10 +534,10 @@ def translate_local_real_sh(
             axis=1,
         )
 
-    def eval_at_offsets(local_coeffs, offsets):
+    def eval_at_offsets(local_coeffs: Array, offsets: Array) -> Array:
         from .real_harmonics import evaluate_local_real
 
-        def phi_fn(vec):
+        def phi_fn(vec: Array) -> Array:
             return evaluate_local_real(local_coeffs, -vec, order=p)
 
         return jax.vmap(phi_fn)(offsets)
@@ -546,7 +546,7 @@ def translate_local_real_sh(
     def _cached_collocation(order_key: int, dtype_name: str):
         samp = _make_samples(jnp.dtype(dtype_name))
 
-        def basis_col(j):
+        def basis_col(j: Array) -> Array:
             vec = jnp.zeros((ncoef,), dtype=samp.dtype)
             vec = vec.at[j].set(1.0)
             return eval_at_offsets(vec, samp)

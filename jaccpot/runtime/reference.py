@@ -51,7 +51,7 @@ def compute_expansion(
         jnp.zeros((3,), dtype=positions.dtype),
     )
 
-    def quad_compute():
+    def quad_compute() -> Array:
         rr = jnp.einsum("ni,nj,n->ij", rel, rel, masses)
         r2_sum = jnp.einsum("n->", masses * r2)
         return 3.0 * rr - eye3 * r2_sum
@@ -63,7 +63,7 @@ def compute_expansion(
         operand=None,
     )
 
-    def oct_compute():
+    def oct_compute() -> Array:
         t3 = jnp.einsum("ni,nj,nk,n->ijk", rel, rel, rel, masses)
         mr2 = masses * r2
         term_a = jnp.einsum("ij,nk,n->ijk", eye3, rel, mr2)
@@ -78,7 +78,7 @@ def compute_expansion(
         operand=None,
     )
 
-    def hexa_compute():
+    def hexa_compute() -> Array:
         t4 = jnp.einsum("ni,nj,nk,nl,n->ijkl", rel, rel, rel, rel, masses)
         mr2 = masses * r2
         term_ij = jnp.einsum("ij,nk,nl,n->ijkl", eye3, rel, rel, mr2)
@@ -128,7 +128,7 @@ def evaluate_expansion(
     if eval_point is None:
         raise ValueError("eval_point must be provided")
 
-    def phi_at(x):
+    def phi_at(x: Array) -> Array:
         r_vec = x - expansion.center
         r2 = jnp.dot(r_vec, r_vec)
         r_soft = jnp.sqrt(r2 + softening * softening)
@@ -193,7 +193,7 @@ def compute_gravitational_potential(
 ) -> Array:
     """Compute gravitational potential at ``eval_points``."""
 
-    def compute_potential(eval_point):
+    def compute_potential(eval_point: Array) -> Array:
         r_vec = eval_point - positions
         r = jnp.sqrt(jnp.sum(r_vec**2, axis=1) + softening**2)
         return -G * jnp.sum(masses / (r + 1e-10))

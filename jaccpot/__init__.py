@@ -1,5 +1,9 @@
 """Jaccpot: high-level FMM solver APIs built on Yggdrasil artifacts."""
 
+from ._typecheck import enable_runtime_typecheck
+
+enable_runtime_typecheck()
+
 from .config import (
     FMMAdvancedConfig,
     FMMPreset,

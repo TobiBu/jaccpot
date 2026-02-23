@@ -349,7 +349,7 @@ def p2m_real_direct(
     # Precompute factorials
     fact = _factorial_table_jax(2 * p, dtype)
 
-    def fact_int(k):
+    def fact_int(k: int) -> Array:
         return fact[jnp.asarray(k, dtype=jnp.int32)]
 
     # Compute cos(m*φ) and sin(m*φ) via Chebyshev recurrence:
@@ -520,7 +520,7 @@ def evaluate_local_real(
     # Precompute factorials
     fact = _factorial_table_jax(2 * p, dtype)
 
-    def fact_int(k):
+    def fact_int(k: int) -> Array:
         return fact[jnp.asarray(k, dtype=jnp.int32)]
 
     # Compute cos(m*φ) and sin(m*φ) via Chebyshev recurrence
@@ -699,7 +699,7 @@ def _compute_dehnen_B_matrix_complex(ell: int, dtype_key: str) -> np.ndarray:
     B_prev = np.array([[1.0]], dtype=rdtype)
 
     # Helper to get B_n[m, l] with out-of-bounds returning 0
-    def get_B(B, n, m, ell_col):
+    def get_B(B: np.ndarray, n: int, m: int, ell_col: int) -> float:
         if abs(m) > n or abs(ell_col) > n:
             return 0.0
         return B[m + n, ell_col + n]

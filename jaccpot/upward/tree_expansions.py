@@ -11,11 +11,11 @@ from beartype import beartype
 from jax import lax
 from jaxtyping import Array, jaxtyped
 
-from yggdrasil.dtypes import INDEX_DTYPE
-from yggdrasil.multipole_utils import total_coefficients
-from yggdrasil.tree import RadixTree
-from yggdrasil.geometry import TreeGeometry, compute_tree_geometry
-from yggdrasil.tree_moments import (
+from yggdrax.dtypes import INDEX_DTYPE
+from yggdrax.multipole_utils import total_coefficients
+from yggdrax.tree import RadixTree
+from yggdrax.geometry import TreeGeometry, compute_tree_geometry
+from yggdrax.tree_moments import (
     TreeMassMoments,
     TreeMultipoleMoments,
     compute_tree_mass_moments,
@@ -56,7 +56,7 @@ def _aggregate_m2m_impl(
         node_idx: Array,
         state: Array,
     ) -> Array:
-        def true_branch(idx):
+        def true_branch(idx: Array) -> Array:
             delta = centers[idx] - centers[node_idx]
             translated = translate_packed_moments(
                 state[idx],
@@ -72,7 +72,7 @@ def _aggregate_m2m_impl(
             child_idx,
         )
 
-    def body(iter_idx, state):
+    def body(iter_idx: Array, state: Array) -> Array:
         node_idx = num_internal - 1 - iter_idx
         node_coeff = jnp.zeros_like(prototype)
         node_coeff = add_child(

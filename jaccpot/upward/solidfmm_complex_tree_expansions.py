@@ -22,11 +22,11 @@ from jaccpot.operators.complex_ops import (
     enforce_conjugate_symmetry_batch,
     m2m_complex,
 )
-from yggdrasil.dtypes import INDEX_DTYPE, complex_dtype_for_real
+from yggdrax.dtypes import INDEX_DTYPE, complex_dtype_for_real
 from jaccpot.operators.real_harmonics import sh_size
-from yggdrasil.tree import RadixTree
-from yggdrasil.geometry import TreeGeometry, compute_tree_geometry
-from yggdrasil.tree_moments import TreeMassMoments, compute_tree_mass_moments
+from yggdrax.tree import RadixTree
+from yggdrax.geometry import TreeGeometry, compute_tree_geometry
+from yggdrax.tree_moments import TreeMassMoments, compute_tree_mass_moments
 
 
 class SolidFMMComplexNodeMultipoleData(NamedTuple):
@@ -143,7 +143,7 @@ def _aggregate_m2m_complex(
         child_centers = centers[safe_child_idx]
         deltas = child_centers - centers[node_idx]
 
-        def translate_one(coeffs, delta):
+        def translate_one(coeffs: Array, delta: Array) -> Array:
             return m2m_complex(coeffs, delta, order=p, rotation=rotation).astype(
                 state.dtype
             )
@@ -153,7 +153,7 @@ def _aggregate_m2m_complex(
         node_coeff = jnp.sum(translated, axis=0)
         return enforce_conjugate_symmetry(node_coeff, order=p)
 
-    def body(node_idx, state):
+    def body(node_idx: Array, state: Array) -> Array:
         child_idx_pair = jnp.stack(
             [left_child[node_idx], right_child[node_idx]],
             axis=0,
@@ -165,7 +165,7 @@ def _aggregate_m2m_complex(
 
     max_depth = int(math.ceil(math.log2(max(num_internal + 1, 2)))) + 1
 
-    def one_pass(state):
+    def one_pass(state: Array) -> Array:
         return lax.fori_loop(0, num_internal, body, state)
 
     return lax.fori_loop(0, max_depth, lambda _, s: one_pass(s), packed)

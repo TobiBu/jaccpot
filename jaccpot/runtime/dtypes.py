@@ -5,12 +5,13 @@ switched between 32-bit and 64-bit indices easily.
 """
 
 import jax.numpy as jnp
+from jaxtyping import DTypeLike
 
 # Use 64-bit indices by default to avoid overflow on large problems.
 INDEX_DTYPE = jnp.int64
 
 
-def as_index(x):
+def as_index(x: object) -> jnp.ndarray:
     """Convert a Python or JAX scalar/array to INDEX_DTYPE.
 
     This helper ensures we consistently produce the configured integer
@@ -19,7 +20,7 @@ def as_index(x):
     return jnp.asarray(x, dtype=INDEX_DTYPE)
 
 
-def complex_dtype_for_real(real_dtype):
+def complex_dtype_for_real(real_dtype: DTypeLike) -> jnp.dtype:
     """Return complex dtype paired with a real floating dtype."""
 
     dtype = jnp.asarray(0, dtype=real_dtype).dtype

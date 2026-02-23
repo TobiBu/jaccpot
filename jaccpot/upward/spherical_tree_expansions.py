@@ -32,11 +32,11 @@ from beartype import beartype
 from jax import lax
 from jaxtyping import Array, jaxtyped
 
-from yggdrasil.dtypes import INDEX_DTYPE
+from yggdrax.dtypes import INDEX_DTYPE
 from jaccpot.operators.real_harmonics import m2m_real, p2m_real_direct, sh_size
-from yggdrasil.tree import RadixTree
-from yggdrasil.geometry import TreeGeometry, compute_tree_geometry
-from yggdrasil.tree_moments import TreeMassMoments, compute_tree_mass_moments
+from yggdrax.tree import RadixTree
+from yggdrax.geometry import TreeGeometry, compute_tree_geometry
+from yggdrax.tree_moments import TreeMassMoments, compute_tree_mass_moments
 
 
 class SphericalNodeMultipoleData(NamedTuple):
@@ -150,8 +150,8 @@ def _aggregate_m2m(
         child_idx: Array,
         node_idx: Array,
         state: Array,
-    ):
-        def true_branch(idx):
+    ) -> Array:
+        def true_branch(idx: Array) -> Array:
             child_coeff = state[idx]
             delta = centers[idx] - centers[node_idx]
             translated = m2m_real(child_coeff, delta, order=p)
@@ -164,7 +164,7 @@ def _aggregate_m2m(
             child_idx,
         )
 
-    def body(node_idx, state):
+    def body(node_idx: Array, state: Array) -> Array:
         # Recompute the node's coefficients from scratch from its children.
         # (This is important because we may need multiple passes if internal
         # nodes are not in topological index order.)
@@ -201,7 +201,7 @@ def _aggregate_m2m(
 
     max_depth = int(math.ceil(math.log2(max(num_internal + 1, 2)))) + 1
 
-    def one_pass(state):
+    def one_pass(state: Array) -> Array:
         return lax.fori_loop(0, num_internal, body, state)
 
     return lax.fori_loop(0, max_depth, lambda _, s: one_pass(s), packed)

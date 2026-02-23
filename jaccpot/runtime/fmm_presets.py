@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import Literal, Optional, Union
 
-from yggdrasil.interactions import DualTreeTraversalConfig
+from yggdrax.interactions import DualTreeTraversalConfig
 
 
 class FMMPreset(str, Enum):

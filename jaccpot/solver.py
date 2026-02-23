@@ -245,7 +245,7 @@ class FastMultipoleMethod:
         self.advanced = advanced_cfg
 
     def compute_accelerations(
-        self,
+        self: "FastMultipoleMethod",
         positions: Array,
         masses: Array,
         *,
@@ -270,7 +270,7 @@ class FastMultipoleMethod:
         )
 
     def prepare_state(
-        self,
+        self: "FastMultipoleMethod",
         positions: Array,
         masses: Array,
         *,
@@ -290,7 +290,7 @@ class FastMultipoleMethod:
         )
 
     def prepare_upward_sweep(
-        self,
+        self: "FastMultipoleMethod",
         tree: Any,
         positions_sorted: Array,
         masses_sorted: Array,
@@ -305,7 +305,7 @@ class FastMultipoleMethod:
         )
 
     def evaluate_prepared_state(
-        self,
+        self: "FastMultipoleMethod",
         state: FMMPreparedState,
         *,
         return_potential: bool = False,
@@ -321,35 +321,35 @@ class FastMultipoleMethod:
             jit_traversal=jit_traversal,
         )
 
-    def clear_prepared_state_cache(self) -> None:
+    def clear_prepared_state_cache(self: "FastMultipoleMethod") -> None:
         self._impl.clear_prepared_state_cache()
 
     @property
-    def complex_rotation(self) -> str:
+    def complex_rotation(self: "FastMultipoleMethod") -> str:
         return str(self._impl.complex_rotation)
 
     @property
-    def mac_type(self) -> str:
+    def mac_type(self: "FastMultipoleMethod") -> str:
         return str(self._impl.mac_type)
 
     @property
-    def farfield_mode(self) -> str:
+    def farfield_mode(self: "FastMultipoleMethod") -> str:
         return str(self._impl.farfield_mode)
 
     @property
-    def nearfield_mode(self) -> str:
+    def nearfield_mode(self: "FastMultipoleMethod") -> str:
         return str(self._impl.nearfield_mode)
 
     @property
-    def nearfield_edge_chunk_size(self) -> int:
+    def nearfield_edge_chunk_size(self: "FastMultipoleMethod") -> int:
         return int(self._impl.nearfield_edge_chunk_size)
 
     @property
-    def grouped_interactions(self) -> bool:
+    def grouped_interactions(self: "FastMultipoleMethod") -> bool:
         return bool(self._impl.grouped_interactions)
 
     @grouped_interactions.setter
-    def grouped_interactions(self, value: bool) -> None:
+    def grouped_interactions(self: "FastMultipoleMethod", value: bool) -> None:
         next_value = bool(value)
         self._impl.grouped_interactions = next_value
         if hasattr(self._impl, "_explicit_grouped_interactions"):

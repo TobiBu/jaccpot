@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from functools import partial
-from typing import Dict, List, NamedTuple, Optional
+from typing import Any, Dict, List, NamedTuple, Optional
 
 import jax
 import jax.numpy as jnp
@@ -13,9 +13,9 @@ from beartype.typing import Callable, Tuple
 from jax import lax
 from jaxtyping import Array, jaxtyped
 
-from yggdrasil.dense_interactions import DenseInteractionBuffers
-from yggdrasil.dtypes import INDEX_DTYPE, as_index
-from yggdrasil.multipole_utils import (
+from yggdrax.dense_interactions import DenseInteractionBuffers
+from yggdrax.dtypes import INDEX_DTYPE, as_index
+from yggdrax.multipole_utils import (
     MAX_MULTIPOLE_ORDER,
     level_offset,
     multi_index_factorial,
@@ -23,16 +23,16 @@ from yggdrasil.multipole_utils import (
     multi_power,
     total_coefficients,
 )
-from yggdrasil.tree import RadixTree
+from yggdrax.tree import RadixTree
 from jaccpot.upward.tree_expansions import NodeMultipoleData, TreeUpwardData
-from yggdrasil.interactions import (
+from yggdrax.interactions import (
     DualTreeRetryEvent,
     DualTreeTraversalConfig,
     MACType,
     NodeInteractionList,
     build_well_separated_interactions,
 )
-from yggdrasil.tree_moments import (
+from yggdrax.tree_moments import (
     _hexadecapole_from_fourth,
     _octupole_from_third,
     _quadrupole_from_second,
@@ -490,7 +490,7 @@ def _accumulate_level(
         constant_values=0,
     )
 
-    def body(idx, carry):
+    def body(idx: Array, carry: Array) -> Array:
         coeff_state = carry
         start = idx * chunk
         remaining = pair_count - start
@@ -548,14 +548,14 @@ def _accumulate_dense_m2l_impl(
     coeff_dtype = coeffs.dtype
     max_source_idx = component_matrix.shape[0] - 1
 
-    def body(idx, coeff_state):
+    def body(idx: Array, coeff_state: Array) -> Array:
         node = nodes_flat[idx]
 
-        def accumulate_target(state_coeffs):
+        def accumulate_target(state_coeffs: Array) -> Array:
             mask_row = mask_flat[idx]
             has_pairs = jnp.any(mask_row)
 
-            def compute(inner_state):
+            def compute(inner_state: Array) -> Array:
                 safe_sources = jnp.clip(
                     sources_flat[idx],
                     as_index(0),
@@ -957,7 +957,7 @@ def accumulate_m2l_contributions(
     """Accumulate M2L contributions into the provided local expansions.
 
     The interaction list is ordered by tree level (see
-    :class:`~yggdrasil.interactions.NodeInteractionList.level_offsets`).
+    :class:`~yggdrax.interactions.NodeInteractionList.level_offsets`).
     That metadata lets us process interactions level by level while still
     limiting each JAX `vmap` call to ``chunk_size`` pairs for good fusion and
     peak memory characteristics. Override ``chunk_size`` when benchmarking
@@ -1161,7 +1161,7 @@ def _propagate_local_expansions_impl(
         node_idx: Array,
         child_idx: Array,
     ) -> Array:
-        def true_branch(idx):
+        def true_branch(idx: Array) -> Array:
             delta = centers[idx] - centers[node_idx]
             translated = translate_local_expansion(
                 parent_coeff,
@@ -1177,7 +1177,7 @@ def _propagate_local_expansions_impl(
             child_idx,
         )
 
-    def body(node_idx, state_coeffs):
+    def body(node_idx: Array, state_coeffs: Array) -> Array:
         parent_coeff = state_coeffs[node_idx]
         child_left = left_child[node_idx]
         child_right = right_child[node_idx]

@@ -3,7 +3,7 @@ import jax.numpy as jnp
 
 from jaccpot import FastMultipoleMethod
 from jaccpot.runtime.fmm import _infer_bounds
-from yggdrasil.tree import build_tree
+from yggdrax.tree import build_tree
 
 
 def test_prepare_state_spherical_upward_produces_sh_packed_shape():

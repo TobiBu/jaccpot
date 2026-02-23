@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from functools import partial
-from typing import Optional, Union
+from typing import Any, Optional, Union
 
 import jax
 import jax.numpy as jnp
@@ -12,9 +12,9 @@ from beartype.typing import Tuple
 from jax import lax
 from jaxtyping import Array, jaxtyped
 
-from yggdrasil.dtypes import INDEX_DTYPE, as_index
-from yggdrasil.tree import RadixTree
-from yggdrasil.interactions import NodeNeighborList
+from yggdrax.dtypes import INDEX_DTYPE, as_index
+from yggdrax.tree import RadixTree
+from yggdrax.interactions import NodeNeighborList
 
 
 def prepare_leaf_neighbor_pairs(
@@ -148,7 +148,7 @@ def _self_contributions(
     identity = jnp.eye(leaf_size, dtype=bool)
     eps = jnp.finfo(dtype).eps
 
-    def compute_single(args):
+    def compute_single(args: tuple[Array, Array, Array]) -> tuple[Array, Array]:
         positions_leaf, masses_leaf, mask_leaf = args
         diff = positions_leaf[:, None, :] - positions_leaf[None, :, :]
         dist_sq = jnp.sum(diff * diff, axis=-1) + softening_sq
@@ -169,7 +169,9 @@ def _self_contributions(
 
         return accel_leaf, pot_leaf
 
-    def scan_step(carry, args):
+    def scan_step(
+        carry: Any, args: tuple[Array, Array, Array]
+    ) -> tuple[Any, tuple[Array, Array]]:
         accel_leaf, pot_leaf = compute_single(args)
         return carry, (accel_leaf, pot_leaf)
 
@@ -205,7 +207,7 @@ def _pair_contributions(
 
     soft = softening_sq
 
-    def when_valid(pos):
+    def when_valid(pos: Array) -> tuple[Array, Array]:
         diff = pos - source_pos
         dist_sq = jnp.sum(diff * diff, axis=1) + soft
         mask_src = source_active
@@ -223,7 +225,9 @@ def _pair_contributions(
 
         return accel, pot
 
-    def scan_step(carry, data):
+    def scan_step(
+        carry: Any, data: tuple[Array, Array]
+    ) -> tuple[Any, tuple[Array, Array]]:
         pos, valid = data
 
         accel, pot = lax.cond(
@@ -771,7 +775,7 @@ def _compute_leaf_p2p_impl(
                 acc, pot = carry
                 tgt_idx, src_idx, is_valid = data
 
-                def true_branch(args):
+                def true_branch(args: tuple[Array, Array, Array, Array]) -> tuple[Array, Array]:
                     acc_state, pot_state, tgt, src = args
                     target_pos = leaf_positions[tgt]
                     target_mask = leaf_mask[tgt]
@@ -803,7 +807,7 @@ def _compute_leaf_p2p_impl(
                     pot_state = pot_state.at[target_ids].add(masked_pot)
                     return acc_state, pot_state
 
-                def false_branch(args):
+                def false_branch(args: tuple[Array, Array, Array, Array]) -> tuple[Array, Array]:
                     acc_state, pot_state, *_ = args
                     return acc_state, pot_state
 
@@ -825,7 +829,7 @@ def _compute_leaf_p2p_impl(
             def _edge_body(acc, data):
                 tgt_idx, src_idx, is_valid = data
 
-                def true_branch(args):
+                def true_branch(args: tuple[Array, Array, Array]) -> Array:
                     acc_state, tgt, src = args
                     target_pos = leaf_positions[tgt]
                     target_mask = leaf_mask[tgt]
@@ -854,7 +858,7 @@ def _compute_leaf_p2p_impl(
                     acc_state = acc_state.at[target_ids].add(masked_acc)
                     return acc_state
 
-                def false_branch(args):
+                def false_branch(args: tuple[Array, Array, Array]) -> Array:
                     acc_state, *_ = args
                     return acc_state
 

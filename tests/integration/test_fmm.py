@@ -8,9 +8,9 @@ import numpy as np
 import pytest
 
 import jaccpot.runtime.fmm as fmm_module
-import yggdrasil.interactions as tree_interactions_module
+import yggdrax.interactions as tree_interactions_module
 from jaccpot import FMMPreset
-from yggdrasil.dtypes import INDEX_DTYPE
+from yggdrax.dtypes import INDEX_DTYPE
 from jaccpot.runtime.fmm import (
     FastMultipoleMethod,
     compute_gravitational_acceleration,
@@ -26,9 +26,9 @@ from jaccpot.nearfield.near_field import (
     prepare_bucketed_scatter_schedules,
     prepare_leaf_neighbor_pairs,
 )
-from yggdrasil.tree import build_tree
-from yggdrasil.geometry import compute_tree_geometry
-from yggdrasil.interactions import DualTreeTraversalConfig, build_leaf_neighbor_lists
+from yggdrax.tree import build_tree
+from yggdrax.geometry import compute_tree_geometry
+from yggdrax.interactions import DualTreeTraversalConfig, build_leaf_neighbor_lists
 
 DEFAULT_TEST_LEAF_SIZE = 1
 
