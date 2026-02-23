@@ -17,7 +17,7 @@ from jax import lax
 from jaxtyping import Array, jaxtyped
 from yggdrax.dtypes import INDEX_DTYPE, complex_dtype_for_real
 from yggdrax.geometry import TreeGeometry, compute_tree_geometry
-from yggdrax.tree import RadixTree
+from yggdrax.tree import Tree
 from yggdrax.tree_moments import TreeMassMoments, compute_tree_mass_moments
 
 from jaccpot.operators.complex_harmonics import p2m_complex_batch
@@ -173,7 +173,7 @@ def _aggregate_m2m_complex(
 
 @jaxtyped(typechecker=beartype)
 def prepare_solidfmm_complex_upward_sweep(
-    tree: RadixTree,
+    tree: Tree,
     positions_sorted: Array,
     masses_sorted: Array,
     *,

@@ -13,7 +13,7 @@ from jaxtyping import Array, jaxtyped
 from yggdrax.dtypes import INDEX_DTYPE
 from yggdrax.geometry import TreeGeometry, compute_tree_geometry
 from yggdrax.multipole_utils import total_coefficients
-from yggdrax.tree import RadixTree
+from yggdrax.tree import Tree
 from yggdrax.tree_moments import (
     TreeMassMoments,
     TreeMultipoleMoments,
@@ -94,7 +94,7 @@ def _aggregate_m2m_impl(
 
 @jaxtyped(typechecker=beartype)
 def compute_node_multipoles(
-    tree: RadixTree,
+    tree: Tree,
     positions_sorted: Array,
     masses_sorted: Array,
     *,
@@ -159,7 +159,7 @@ def compute_node_multipoles(
 
 
 def _aggregate_multipoles_via_m2m(
-    tree: RadixTree,
+    tree: Tree,
     centers: Array,
     base_moments: TreeMultipoleMoments,
 ) -> TreeMultipoleMoments:
@@ -203,7 +203,7 @@ class TreeUpwardData(NamedTuple):
 
 @jaxtyped(typechecker=beartype)
 def prepare_upward_sweep(
-    tree: RadixTree,
+    tree: Tree,
     positions_sorted: Array,
     masses_sorted: Array,
     *,

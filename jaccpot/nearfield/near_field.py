@@ -13,7 +13,7 @@ from jax import lax
 from jaxtyping import Array, jaxtyped
 from yggdrax.dtypes import INDEX_DTYPE, as_index
 from yggdrax.interactions import NodeNeighborList
-from yggdrax.tree import RadixTree
+from yggdrax.tree import Tree
 
 
 def prepare_leaf_neighbor_pairs(
@@ -865,7 +865,7 @@ def _compute_leaf_p2p_impl(
 
 @jaxtyped(typechecker=beartype)
 def compute_leaf_p2p_accelerations(
-    tree: RadixTree,
+    tree: Tree,
     neighbor_list: NodeNeighborList,
     positions_sorted: Array,
     masses_sorted: Array,

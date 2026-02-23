@@ -23,6 +23,7 @@ class FMMPreset(str, Enum):
 class TreeConfig:
     """Tree-construction overrides for advanced runtime tuning."""
 
+    tree_type: Optional[str] = None
     mode: Optional[str] = None
     leaf_target: Optional[int] = None
     refine_local: Optional[bool] = None

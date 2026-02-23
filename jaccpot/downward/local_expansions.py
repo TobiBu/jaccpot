@@ -29,7 +29,7 @@ from yggdrax.multipole_utils import (
     multi_power,
     total_coefficients,
 )
-from yggdrax.tree import RadixTree
+from yggdrax.tree import Tree
 from yggdrax.tree_moments import (
     _hexadecapole_from_fourth,
     _octupole_from_third,
@@ -939,7 +939,7 @@ def translate_multipole_to_local(
 
 @jaxtyped(typechecker=beartype)
 def initialize_local_expansions(
-    tree: RadixTree,
+    tree: Tree,
     centers: Array,
     *,
     max_order: int,
@@ -1057,7 +1057,7 @@ def _accumulate_m2l_contributions_impl(
 
 @jaxtyped(typechecker=beartype)
 def run_downward_sweep(
-    tree: RadixTree,
+    tree: Tree,
     multipoles: NodeMultipoleData,
     interactions: Optional[NodeInteractionList] = None,
     *,
@@ -1122,7 +1122,7 @@ def run_downward_sweep(
 
 @jaxtyped(typechecker=beartype)
 def prepare_downward_sweep(
-    tree: RadixTree,
+    tree: Tree,
     upward: TreeUpwardData,
     *,
     theta: float = 0.5,
@@ -1225,7 +1225,7 @@ def _propagate_local_expansions_impl(
 
 @jaxtyped(typechecker=beartype)
 def propagate_local_expansions(
-    tree: RadixTree,
+    tree: Tree,
     local_data: LocalExpansionData,
 ) -> LocalExpansionData:
     """Perform an L2L sweep to accumulate parent locals into children."""

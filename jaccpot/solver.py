@@ -82,6 +82,7 @@ def _pop_legacy_common_overrides(
 
 class _LegacyRuntimeOverrides(NamedTuple):
     complex_rotation: str
+    tree_type: Optional[str]
     tree_mode: Optional[str]
     target_leaf_particles: Optional[int]
     expanse_preset: Optional[str]
@@ -110,6 +111,12 @@ def _pop_legacy_runtime_overrides(
     legacy_rotation = legacy_kwargs.pop("complex_rotation", None)
     if legacy_rotation is not None:
         complex_rotation = str(legacy_rotation)
+        legacy_used = True
+
+    tree_type = advanced_cfg.tree.tree_type
+    legacy_tree_type = legacy_kwargs.pop("tree_type", None)
+    if legacy_tree_type is not None:
+        tree_type = str(legacy_tree_type)
         legacy_used = True
 
     tree_mode = advanced_cfg.tree.mode
@@ -179,6 +186,7 @@ def _pop_legacy_runtime_overrides(
 
     return _LegacyRuntimeOverrides(
         complex_rotation=complex_rotation,
+        tree_type=tree_type,
         tree_mode=tree_mode,
         target_leaf_particles=target_leaf_particles,
         expanse_preset=expanse_preset,
@@ -245,6 +253,7 @@ class FastMultipoleMethod:
             working_dtype=working_dtype,
             expansion_basis=basis,
             complex_rotation=runtime_overrides.complex_rotation,
+            tree_type=runtime_overrides.tree_type or "radix",
             tree_build_mode=runtime_overrides.tree_mode,
             target_leaf_particles=runtime_overrides.target_leaf_particles,
             refine_local=legacy_kwargs.pop(
