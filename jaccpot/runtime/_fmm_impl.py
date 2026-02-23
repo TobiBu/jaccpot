@@ -1076,6 +1076,45 @@ class FastMultipoleMethod:
                 "orders above 4 require expansion_basis='spherical' or 'solidfmm'",
             )
 
+    def _prepare_state_input_arrays(
+        self,
+        positions: Array,
+        masses: Array,
+    ) -> tuple[Array, Array, Any]:
+        """Validate prepare-state inputs and cast them to the working dtype."""
+        positions_arr = jnp.asarray(positions)
+        masses_arr = jnp.asarray(masses)
+        input_dtype = positions_arr.dtype
+
+        if positions_arr.ndim != 2 or positions_arr.shape[1] != 3:
+            raise ValueError("positions must have shape (N, 3)")
+        if masses_arr.shape != (positions_arr.shape[0],):
+            raise ValueError("masses must have shape (N,)")
+        if positions_arr.shape[0] == 0:
+            raise ValueError("need at least one particle")
+
+        working_dtype = self.working_dtype
+        if working_dtype is not None and positions_arr.dtype != working_dtype:
+            positions_arr = positions_arr.astype(working_dtype)
+        if working_dtype is not None and masses_arr.dtype != working_dtype:
+            masses_arr = masses_arr.astype(working_dtype)
+        return positions_arr, masses_arr, input_dtype
+
+    def _resolve_prepare_state_bounds(
+        self,
+        *,
+        positions: Array,
+        bounds: Optional[Tuple[Array, Array]],
+    ) -> tuple[Array, Array]:
+        """Return bounds converted to the working dtype or infer them."""
+        if bounds is None:
+            return _infer_bounds(positions)
+        min_corner, max_corner = bounds
+        return (
+            jnp.asarray(min_corner, dtype=positions.dtype),
+            jnp.asarray(max_corner, dtype=positions.dtype),
+        )
+
     def _build_locals_template_for_prepare_state(
         self,
         *,
@@ -1730,15 +1769,10 @@ class FastMultipoleMethod:
             if self.interaction_retry_logger is not None:
                 self.interaction_retry_logger(event)
 
-        positions_arr = jnp.asarray(positions)
-        masses_arr = jnp.asarray(masses)
-
-        if positions_arr.ndim != 2 or positions_arr.shape[1] != 3:
-            raise ValueError("positions must have shape (N, 3)")
-        if masses_arr.shape != (positions_arr.shape[0],):
-            raise ValueError("masses must have shape (N,)")
-        if positions_arr.shape[0] == 0:
-            raise ValueError("need at least one particle")
+        positions_arr, masses_arr, input_dtype = self._prepare_state_input_arrays(
+            positions,
+            masses,
+        )
 
         runtime_overrides = self._resolve_runtime_execution_overrides(
             num_particles=int(positions_arr.shape[0]),
@@ -1752,25 +1786,13 @@ class FastMultipoleMethod:
         if refine_local is None and runtime_overrides.refine_local_override is not None:
             refine_local_val = bool(runtime_overrides.refine_local_override)
 
-        input_dtype = positions_arr.dtype
-        working_dtype = self.working_dtype
-        if working_dtype is not None and positions_arr.dtype != working_dtype:
-            positions_arr = positions_arr.astype(working_dtype)
-        if working_dtype is not None and masses_arr.dtype != working_dtype:
-            masses_arr = masses_arr.astype(working_dtype)
-
         theta_val = float(self.theta if theta is None else theta)
         mac_type_val = self.mac_type
 
-        inferred_bounds = bounds
-        if inferred_bounds is None:
-            inferred_bounds = _infer_bounds(positions_arr)
-        else:
-            min_corner, max_corner = inferred_bounds
-            inferred_bounds = (
-                jnp.asarray(min_corner, dtype=positions_arr.dtype),
-                jnp.asarray(max_corner, dtype=positions_arr.dtype),
-            )
+        inferred_bounds = self._resolve_prepare_state_bounds(
+            positions=positions_arr,
+            bounds=bounds,
+        )
 
         jit_tree_flag = self._resolve_jit_tree_flag(
             positions_arr,
