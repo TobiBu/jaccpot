@@ -1201,6 +1201,37 @@ class FastMultipoleMethod:
             nearfield_chunk_unique_indices,
         )
 
+    def _unpack_dual_tree_artifacts(
+        self,
+        dual_artifacts: _DualTreeArtifacts,
+    ) -> tuple[
+        NodeInteractionList,
+        NodeNeighborList,
+        DualTreeWalkResult,
+        Optional[DenseInteractionBuffers],
+        Optional[GroupedInteractionBuffers],
+        Optional[Array],
+        Optional[Array],
+        Optional[Array],
+        Optional[Array],
+        Optional[Array],
+        Optional[Array],
+    ]:
+        """Unpack dual-tree artifacts for downward preparation and state export."""
+        return (
+            dual_artifacts.interactions,
+            dual_artifacts.neighbor_list,
+            dual_artifacts.traversal_result,
+            dual_artifacts.dense_buffers,
+            dual_artifacts.grouped_buffers,
+            dual_artifacts.grouped_segment_starts,
+            dual_artifacts.grouped_segment_lengths,
+            dual_artifacts.grouped_segment_class_ids,
+            dual_artifacts.grouped_segment_sort_permutation,
+            dual_artifacts.grouped_segment_group_ids,
+            dual_artifacts.grouped_segment_unique_targets,
+        )
+
     def _resolve_nearfield_mode(self, *, num_particles: int) -> str:
         """Resolve near-field execution mode from configured policy."""
         mode = str(self.nearfield_mode).strip().lower()
@@ -1770,19 +1801,19 @@ class FastMultipoleMethod:
             grouped_chunk_size=runtime_m2l_chunk_size,
         )
         self._interaction_cache = cache_entry
-        interactions = dual_artifacts.interactions
-        neighbor_list = dual_artifacts.neighbor_list
-        traversal_result = dual_artifacts.traversal_result
-        dense_buffers = dual_artifacts.dense_buffers
-        grouped_buffers = dual_artifacts.grouped_buffers
-        grouped_segment_starts = dual_artifacts.grouped_segment_starts
-        grouped_segment_lengths = dual_artifacts.grouped_segment_lengths
-        grouped_segment_class_ids = dual_artifacts.grouped_segment_class_ids
-        grouped_segment_sort_permutation = (
-            dual_artifacts.grouped_segment_sort_permutation
-        )
-        grouped_segment_group_ids = dual_artifacts.grouped_segment_group_ids
-        grouped_segment_unique_targets = dual_artifacts.grouped_segment_unique_targets
+        (
+            interactions,
+            neighbor_list,
+            traversal_result,
+            dense_buffers,
+            grouped_buffers,
+            grouped_segment_starts,
+            grouped_segment_lengths,
+            grouped_segment_class_ids,
+            grouped_segment_sort_permutation,
+            grouped_segment_group_ids,
+            grouped_segment_unique_targets,
+        ) = self._unpack_dual_tree_artifacts(dual_artifacts)
 
         downward = self.prepare_downward_sweep(
             tree,
