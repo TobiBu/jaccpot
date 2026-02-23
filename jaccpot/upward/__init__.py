@@ -1,1 +1,1 @@
-"""Upward-sweep operator namespace (placeholder for split refactor)."""
+"""Upward-sweep operators for tree multipole construction."""

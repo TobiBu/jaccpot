@@ -1,4 +1,4 @@
-"""SolidFMM-style complex spherical-harmonics tree expansion helpers.
+"""SolidFMM-style complex-harmonic tree expansion helpers.
 
 This module implements the *upward sweep* (P2M + M2M) for the complex
 solid-harmonic basis used by the solidfmm-style backend. It is intentionally
