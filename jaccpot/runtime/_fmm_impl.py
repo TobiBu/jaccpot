@@ -76,17 +76,9 @@ from jaccpot.operators.multipole_utils import (
     multi_power,
     total_coefficients,
 )
-from jaccpot.operators.real_harmonics import (
-    evaluate_local_real_with_grad,
-    l2l_real,
-    m2l_real,
-    sh_size,
-)
+from jaccpot.operators.real_harmonics import sh_size
 from jaccpot.upward.solidfmm_complex_tree_expansions import (
     prepare_solidfmm_complex_upward_sweep,
-)
-from jaccpot.upward.spherical_tree_expansions import (
-    prepare_spherical_upward_sweep as prepare_spherical_tree_upward_sweep,
 )
 from jaccpot.upward.tree_expansions import (
     NodeMultipoleData,
@@ -104,7 +96,7 @@ from .reference import compute_gravitational_potential as reference_compute_pote
 from .reference import direct_sum as reference_direct_sum
 from .reference import evaluate_expansion as reference_evaluate_expansion
 
-ExpansionBasis = Literal["cartesian", "spherical", "solidfmm"]
+ExpansionBasis = Literal["cartesian", "solidfmm"]
 FarFieldMode = Literal["auto", "pair_grouped", "class_major"]
 NearFieldMode = Literal["auto", "baseline", "bucketed"]
 
@@ -831,9 +823,9 @@ class FastMultipoleMethod:
     ):
         """Initialize FMM runtime with validated policy and kernel settings."""
         basis_norm = str(expansion_basis).strip().lower()
-        if basis_norm not in ("cartesian", "spherical", "solidfmm"):
+        if basis_norm not in ("cartesian", "solidfmm"):
             raise ValueError(
-                "expansion_basis must be 'cartesian', 'spherical', or 'solidfmm'",
+                "expansion_basis must be 'cartesian' or 'solidfmm'",
             )
         self.expansion_basis = basis_norm  # type: ignore[assignment]
 
@@ -1106,12 +1098,9 @@ class FastMultipoleMethod:
             raise ValueError("leaf_size must be >= 1")
         if self.fixed_order is not None and int(self.fixed_order) != int(max_order):
             raise ValueError("fixed_order must match max_order")
-        if max_order > MAX_MULTIPOLE_ORDER and self.expansion_basis not in (
-            "spherical",
-            "solidfmm",
-        ):
+        if max_order > MAX_MULTIPOLE_ORDER and self.expansion_basis != "solidfmm":
             raise NotImplementedError(
-                "orders above 4 require expansion_basis='spherical' or 'solidfmm'",
+                "orders above 4 require expansion_basis='solidfmm'",
             )
 
     def _prepare_state_input_arrays(
@@ -1162,8 +1151,6 @@ class FastMultipoleMethod:
         pos_sorted: Array,
     ) -> Optional[LocalExpansionData]:
         """Build initial local-expansion buffers matching the active basis."""
-        if self.expansion_basis == "spherical":
-            return None
         if self.expansion_basis == "solidfmm":
             total_nodes = int(tree.parent.shape[0])
             coeff_count = sh_size(max_order)
@@ -1482,38 +1469,6 @@ class FastMultipoleMethod:
     ) -> TreeUpwardData:
         """Bundle geometry, raw moments, and packed expansions for a tree."""
 
-        if self.expansion_basis == "spherical":
-            spherical_upward = prepare_spherical_tree_upward_sweep(
-                tree,
-                positions_sorted,
-                masses_sorted,
-                max_order=max_order,
-                center_mode=center_mode,
-                explicit_centers=explicit_centers,
-            )
-
-            # Adapter: reuse the TreeUpwardData shape expected by the existing
-            # cartesian pipeline for now.
-            #
-            # NOTE: This only makes the *upward* data available for inspection
-            # and experimentation. The current downward pass still expects the
-            # cartesian/STF packed layout (total_coefficients(order)), so a
-            # full spherical pipeline will need a dedicated TreeDownwardData
-            # path.
-            multipoles = NodeMultipoleData(
-                order=int(spherical_upward.multipoles.order),
-                centers=spherical_upward.multipoles.centers,
-                moments=None,  # type: ignore[arg-type]
-                packed=spherical_upward.multipoles.packed,
-                component_matrix=spherical_upward.multipoles.packed,
-            )
-
-            return TreeUpwardData(
-                geometry=spherical_upward.geometry,
-                mass_moments=spherical_upward.mass_moments,
-                multipoles=multipoles,
-            )
-
         if self.expansion_basis == "solidfmm":
             complex_upward = prepare_solidfmm_complex_upward_sweep(
                 tree,
@@ -1609,22 +1564,6 @@ class FastMultipoleMethod:
         retry_callback = (
             retry_logger if retry_logger is not None else self.interaction_retry_logger
         )
-        # If spherical basis requested, use spherical M2L -> spherical locals
-        if self.expansion_basis == "spherical":
-            return _prepare_spherical_downward_sweep(
-                tree,
-                upward_data,
-                theta=theta_val,
-                mac_type=mac_type_val,
-                initial_locals=initial_locals,
-                interactions=interactions,
-                m2l_chunk_size=m2l_chunk_size,
-                retry_logger=retry_callback,
-                traversal_config=config,
-                dense_buffers=dense_buffers,
-                dehnen_radius_scale=dehnen_scale_val,
-            )
-
         if self.expansion_basis == "solidfmm":
             return _prepare_solidfmm_downward_sweep(
                 tree,
@@ -2379,8 +2318,6 @@ def _prepare_tree_evaluation_inputs(
             resolved_max_leaf,
             empty,
         )
-    # spherical downward preparation handled by top-level helper
-
     if max_leaf_size is None:
         leaf_ranges = node_ranges[leaf_nodes]
         counts = leaf_ranges[:, 1] - leaf_ranges[:, 0] + 1
@@ -2402,12 +2339,6 @@ def _prepare_tree_evaluation_inputs(
         resolved_max_leaf,
         None,
     )
-
-
-@partial(jax.jit, static_argnames=("order",))
-def _m2l_real_batch_kernel(src_mult: Array, deltas: Array, *, order: int) -> Array:
-    """Vectorized real-basis M2L kernel for one interaction batch."""
-    return jax.vmap(lambda m, d: m2l_real(m, d, order=order))(src_mult, deltas)
 
 
 @partial(jax.jit, static_argnames=("order", "rotation"))
@@ -2929,17 +2860,6 @@ def _accumulate_solidfmm_m2l_grouped(
     )
 
 
-@partial(jax.jit, static_argnames=("order",))
-def _l2l_real_batch_kernel(
-    coeffs: Array,
-    deltas: Array,
-    *,
-    order: int,
-) -> Array:
-    """Vectorized real-basis L2L translation kernel."""
-    return jax.vmap(lambda c, d: l2l_real(c, d, order=order))(coeffs, deltas)
-
-
 @partial(jax.jit, static_argnames=("order", "rotation"))
 def _l2l_complex_batch_kernel(
     coeffs: Array,
@@ -3111,140 +3031,6 @@ def _propagate_solidfmm_locals_to_children(
     translated = jnp.where(valid[:, None], translated, 0)
     updates = jax.ops.segment_sum(translated, safe_child_idx, total_nodes)
     return coeffs_local + updates
-
-
-@partial(jax.jit, static_argnames=("order", "total_nodes"))
-def _propagate_spherical_locals_to_children(
-    coeffs_local: Array,
-    centers_local: Array,
-    left_child: Array,
-    right_child: Array,
-    *,
-    order: int,
-    total_nodes: int,
-) -> Array:
-    """Apply spherical-basis L2L translations from parents to children."""
-    num_internal_nodes = left_child.shape[0]
-    parent_idx = jnp.arange(num_internal_nodes, dtype=INDEX_DTYPE)
-    child_idx = jnp.concatenate(
-        [left_child[:num_internal_nodes], right_child[:num_internal_nodes]],
-        axis=0,
-    )
-    parent_rep = jnp.concatenate([parent_idx, parent_idx], axis=0)
-    valid = child_idx >= 0
-    safe_child_idx = jnp.where(valid, child_idx, 0)
-
-    parent_coeffs = coeffs_local[parent_rep]
-    deltas = centers_local[safe_child_idx] - centers_local[parent_rep]
-    translated = _l2l_real_batch_kernel(parent_coeffs, deltas, order=order)
-    translated = jnp.where(valid[:, None], translated, 0)
-    updates = jax.ops.segment_sum(translated, safe_child_idx, total_nodes)
-    return coeffs_local + updates
-
-
-def _prepare_spherical_downward_sweep(
-    tree: RadixTree,
-    upward: TreeUpwardData,
-    *,
-    theta: float,
-    mac_type: MACType,
-    initial_locals: Optional[LocalExpansionData] = None,
-    interactions: Optional[NodeInteractionList] = None,
-    m2l_chunk_size: Optional[int] = None,
-    traversal_config: Optional[DualTreeTraversalConfig] = None,
-    dense_buffers: Optional[DenseInteractionBuffers] = None,
-    retry_logger: Optional[Callable[[DualTreeRetryEvent], None]] = None,
-    dehnen_radius_scale: float = 1.0,
-) -> TreeDownwardData:
-    """Prepare M2L accumulation into spherical local buffers.
-
-    This is a correctness-first implementation that computes per-pair
-    spherical M2L contributions using :func:`m2l_a6_dehnen` and
-    accumulates them into per-node packed real tesseral local buffers.
-    """
-
-    # Build interactions if missing.
-    if interactions is None:
-        interactions = build_well_separated_interactions(
-            tree,
-            upward.geometry,
-            theta=theta,
-            mac_type=mac_type,
-            dehnen_radius_scale=dehnen_radius_scale,
-            traversal_config=traversal_config,
-            retry_logger=retry_logger,
-        )
-
-    p = int(upward.multipoles.order)
-    centers = jnp.asarray(upward.multipoles.centers)
-    total_nodes = int(centers.shape[0])
-    coeff_count = sh_size(p)
-
-    # Initialize local buffers (packed real tesseral layout)
-    dtype = centers.dtype
-    if initial_locals is not None:
-        locals_coeffs = jnp.asarray(initial_locals.coefficients)
-        if locals_coeffs.shape != (total_nodes, coeff_count):
-            raise ValueError("initial_locals must match spherical layout")
-    else:
-        locals_coeffs = jnp.zeros((total_nodes, coeff_count), dtype=dtype)
-
-    src = jnp.asarray(interactions.sources, dtype=INDEX_DTYPE)
-    tgt = jnp.asarray(interactions.targets, dtype=INDEX_DTYPE)
-
-    pair_count = int(src.shape[0])
-    if pair_count == 0:
-        empty_locals = LocalExpansionData(
-            order=p,
-            centers=centers,
-            coefficients=locals_coeffs,
-        )
-        return TreeDownwardData(
-            interactions=interactions,
-            locals=empty_locals,
-        )
-
-    multip_packed = jnp.asarray(upward.multipoles.packed)
-
-    # Gather per-pair multipoles and deltas
-    src_mult = multip_packed[src]
-    deltas = centers[tgt] - centers[src]  # delta: source->target
-
-    contribs = _m2l_real_batch_kernel(src_mult, deltas, order=p)
-
-    # Accumulate per-node local contributions using segment_sum for better
-    # fusion.
-    locals_accum = jax.ops.segment_sum(contribs, tgt, total_nodes)
-    locals_updated = locals_coeffs + locals_accum
-
-    num_internal_nodes = int(tree.num_internal_nodes)
-    if num_internal_nodes > 0:
-        left_child = jnp.asarray(
-            tree.left_child[:num_internal_nodes], dtype=INDEX_DTYPE
-        )
-        right_child = jnp.asarray(
-            tree.right_child[:num_internal_nodes],
-            dtype=INDEX_DTYPE,
-        )
-        locals_updated = _propagate_spherical_locals_to_children(
-            locals_updated,
-            centers,
-            left_child,
-            right_child,
-            order=p,
-            total_nodes=total_nodes,
-        )
-
-    locals_after = LocalExpansionData(
-        order=p,
-        centers=centers,
-        coefficients=locals_updated,
-    )
-
-    return TreeDownwardData(
-        interactions=interactions,
-        locals=locals_after,
-    )
 
 
 def _prepare_solidfmm_downward_sweep(
@@ -3606,9 +3392,9 @@ def _evaluate_local_expansions_for_particles(
     return_potential: bool,
 ) -> Tuple[Array, Optional[Array]]:
     """Evaluate node-local expansions at leaf particles and scatter results."""
-    if order > MAX_MULTIPOLE_ORDER and expansion_basis not in ("spherical", "solidfmm"):
+    if order > MAX_MULTIPOLE_ORDER and expansion_basis != "solidfmm":
         raise NotImplementedError(
-            "orders above 4 require expansion_basis='spherical' or 'solidfmm'",
+            "orders above 4 require expansion_basis='solidfmm'",
         )
 
     leaf_ranges = node_ranges[leaf_nodes]
@@ -3633,54 +3419,6 @@ def _evaluate_local_expansions_for_particles(
 
     coeffs = local_data.coefficients[leaf_nodes]
     dtype = positions.dtype
-
-    # If spherical basis, evaluate using pure-real spherical-harmonic locals.
-    if expansion_basis == "spherical":
-        p = int(order)
-
-        # real_harmonics expects delta = center - eval_point
-        offsets_sph = centers[:, None, :] - leaf_positions
-        offsets_sph = jnp.where(valid[..., None], offsets_sph, 0.0)
-
-        def evaluate_leaf_sph(
-            coeffs_leaf: Array,
-            offsets_leaf: Array,
-            mask_leaf: Array,
-        ) -> tuple[Array, Array]:
-            """Evaluate local expansion at particles using pure-real harmonics."""
-
-            # Use the pure-real L2P evaluation from real_harmonics
-            def eval_single(offset: Array) -> tuple[Array, Array]:
-                return evaluate_local_real_with_grad(coeffs_leaf, offset, order=p)
-
-            grads, values = jax.vmap(eval_single)(offsets_leaf)
-            grads = jnp.where(mask_leaf[..., None], grads, 0.0)
-            values = jnp.where(mask_leaf, values, 0.0)
-            return grads, values
-
-        grad_field, potentials = jax.vmap(evaluate_leaf_sph)(
-            coeffs,
-            offsets_sph,
-            valid,
-        )
-
-        gradients = _scatter_vectors(
-            jnp.zeros_like(positions),
-            safe_idx,
-            grad_field,
-            valid,
-        )
-
-        if not return_potential:
-            return gradients, None
-
-        potentials_flat = _scatter_scalars(
-            jnp.zeros((positions.shape[0],), dtype=dtype),
-            safe_idx,
-            potentials,
-            valid,
-        )
-        return gradients, potentials_flat
 
     if expansion_basis == "solidfmm":
         p = int(order)

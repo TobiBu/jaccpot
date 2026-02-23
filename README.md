@@ -23,7 +23,7 @@ Tree construction and traversal artifacts are provided by the companion package
 ## Features
 
 - High-level `FastMultipoleMethod` API with `fast`, `balanced`, and `accurate` presets
-- Configurable expansion basis (`solidfmm`, `spherical`, `cartesian`)
+- Configurable expansion basis (`solidfmm`, `cartesian`)
 - Modular runtime with grouped/dense interaction pathways
 - Near-field and far-field execution paths with optional prepared state reuse
 - Differentiable gravitational acceleration helper via JAX autodiff
