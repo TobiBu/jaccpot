@@ -1064,10 +1064,17 @@ class FastMultipoleMethod:
         max_order: int,
     ) -> None:
         """Validate order/leaf-size constraints for state preparation."""
-        self._validate_prepare_state_request(
-            leaf_size=int(leaf_size),
-            max_order=int(max_order),
-        )
+        if leaf_size < 1:
+            raise ValueError("leaf_size must be >= 1")
+        if self.fixed_order is not None and int(self.fixed_order) != int(max_order):
+            raise ValueError("fixed_order must match max_order")
+        if max_order > MAX_MULTIPOLE_ORDER and self.expansion_basis not in (
+            "spherical",
+            "solidfmm",
+        ):
+            raise NotImplementedError(
+                "orders above 4 require expansion_basis='spherical' or 'solidfmm'",
+            )
 
     def _build_locals_template_for_prepare_state(
         self,
@@ -1620,17 +1627,10 @@ class FastMultipoleMethod:
         arguments control the host-side leaf refinement pass.
         """
 
-        if leaf_size < 1:
-            raise ValueError("leaf_size must be >= 1")
-        if self.fixed_order is not None and int(self.fixed_order) != int(max_order):
-            raise ValueError("fixed_order must match max_order")
-        if max_order > MAX_MULTIPOLE_ORDER and self.expansion_basis not in (
-            "spherical",
-            "solidfmm",
-        ):
-            raise NotImplementedError(
-                "orders above 4 require expansion_basis='spherical' or 'solidfmm'",
-            )
+        self._validate_prepare_state_request(
+            leaf_size=int(leaf_size),
+            max_order=int(max_order),
+        )
 
         refine_local_val = (
             self.refine_local if refine_local is None else bool(refine_local)
