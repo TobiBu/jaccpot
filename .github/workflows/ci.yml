@@ -8,6 +8,8 @@ on:
 jobs:
   lint-and-test:
     runs-on: ubuntu-latest
+    env:
+      JAX_ENABLE_X64: "1"
     strategy:
       fail-fast: false
       matrix:
