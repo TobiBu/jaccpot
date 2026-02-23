@@ -155,12 +155,14 @@ def unpack_tensor(level: int, data: Array) -> Array:
     return tensor
 
 
-LOCAL_LEVEL_COMBOS = {
+# Cached ``(i, j, k)`` tuples by tensor order for hot-path reuse.
+LOCAL_LEVEL_COMBOS: dict[int, tuple[tuple[int, int, int], ...]] = {
     level: multi_index_tuples(level) for level in range(MAX_MULTIPOLE_ORDER + 1)
 }
 
 
-LOCAL_COMBO_INV_FACTORIAL = {
+# Cached inverse multi-index factorials used in local-expansion recurrences.
+LOCAL_COMBO_INV_FACTORIAL: dict[tuple[int, int, int], float] = {
     combo: 1.0 / multi_index_factorial(combo)
     for combos in LOCAL_LEVEL_COMBOS.values()
     for combo in combos

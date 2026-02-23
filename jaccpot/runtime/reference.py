@@ -12,7 +12,23 @@ from jaxtyping import Array, jaxtyped
 
 
 class MultipoleExpansion(NamedTuple):
-    """Multipole expansion coefficients for gravitational fields."""
+    """Multipole coefficients around a shared expansion center.
+
+    Attributes
+    ----------
+    monopole:
+        Zeroth-order mass moment.
+    dipole:
+        First-order vector moment.
+    center:
+        Expansion center (center of mass in ``compute_expansion``).
+    quadrupole:
+        Second-order symmetric trace-free tensor.
+    octupole:
+        Third-order symmetric trace-free tensor.
+    hexadecapole:
+        Fourth-order symmetric trace-free tensor.
+    """
 
     monopole: jnp.ndarray
     dipole: jnp.ndarray
@@ -123,7 +139,11 @@ def evaluate_expansion(
     G: Union[float, Array] = 1.0,
     softening: Union[float, Array] = 0.0,
 ) -> Array:
-    """Evaluate acceleration from ``expansion`` at ``eval_point``."""
+    """Evaluate acceleration from ``expansion`` at one point.
+
+    The potential is assembled from moments up to ``order`` and then
+    differentiated with ``jax.grad`` to produce acceleration.
+    """
 
     if eval_point is None:
         raise ValueError("eval_point must be provided")
@@ -174,7 +194,7 @@ def direct_sum(
     G: Union[float, Array] = 1.0,
     softening: Union[float, Array] = 0.0,
 ) -> Array:
-    """Compute gravitational acceleration via direct summation."""
+    """Compute gravitational acceleration via O(N) direct summation."""
 
     r_vec = eval_point - positions
     dist_sq = jnp.sum(r_vec**2, axis=1, keepdims=True)
@@ -191,7 +211,7 @@ def compute_gravitational_potential(
     G: Union[float, Array] = 1.0,
     softening: Union[float, Array] = 0.0,
 ) -> Array:
-    """Compute gravitational potential at ``eval_points``."""
+    """Compute gravitational potential at ``eval_points`` with direct sums."""
 
     def compute_potential(eval_point: Array) -> Array:
         r_vec = eval_point - positions
