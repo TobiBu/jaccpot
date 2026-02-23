@@ -142,6 +142,7 @@ def _self_contributions(
     G: Array,
     compute_potential: bool,
 ) -> Tuple[Array, Optional[Array]]:
+    """Compute intra-leaf particle-particle contributions."""
     dtype = leaf_positions.dtype
     leaf_size = leaf_positions.shape[1]
     identity = jnp.eye(leaf_size, dtype=bool)
@@ -196,6 +197,7 @@ def _pair_contributions(
     G: Array,
     compute_potential: bool,
 ) -> Tuple[Array, Optional[Array]]:
+    """Compute one target-leaf vs source-leaf contribution block."""
     dtype = target_positions.dtype
     eps = jnp.finfo(dtype).eps
 
@@ -294,6 +296,7 @@ def _scatter_contributions(
     values: Array,
     mask: Array,
 ) -> Array:
+    """Scatter-add vector contributions into particle-ordered output."""
     if values.size == 0:
         return base_acc
     flat_indices = indices.reshape(-1)
@@ -388,6 +391,7 @@ def _scatter_scalar_contributions(
     values: Array,
     mask: Array,
 ) -> Array:
+    """Scatter-add scalar contributions into particle-ordered output."""
     if values.size == 0:
         return base
     flat_indices = indices.reshape(-1)
@@ -490,6 +494,7 @@ def _compute_leaf_p2p_impl(
     Tuple[Array, Array, Array],
     Tuple[Array, Array, Array, Array],
 ]:
+    """JIT near-field kernel over leaf-neighbor particle interactions."""
     (
         leaf_positions,
         leaf_masses,

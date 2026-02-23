@@ -73,6 +73,7 @@ _COMBO_FACTORIAL: Dict[Tuple[int, int, int], int] = {
 
 
 def _double_factorial(n: int) -> int:
+    """Compute n!! for non-negative integers."""
     if n <= 0:
         return 1
     result = 1
@@ -98,6 +99,8 @@ ComponentPowers = Tuple[
 
 
 class _DerivativeInfo(NamedTuple):
+    """Metadata for one mixed derivative polynomial."""
+
     level: int
     terms: Tuple[Tuple[Tuple[int, int, int], int], ...]
 
@@ -106,6 +109,7 @@ def _scale_poly(
     poly: Dict[Tuple[int, int, int], int],
     scale: int,
 ) -> Dict[Tuple[int, int, int], int]:
+    """Scale polynomial coefficients by an integer factor."""
     if scale == 0 or not poly:
         return {}
     return {exp: coeff * scale for exp, coeff in poly.items()}
@@ -115,6 +119,7 @@ def _add_poly(
     left: Dict[Tuple[int, int, int], int],
     right: Dict[Tuple[int, int, int], int],
 ) -> Dict[Tuple[int, int, int], int]:
+    """Add two sparse integer polynomials in 3D exponents."""
     if not left:
         return dict(right)
     if not right:
@@ -133,6 +138,7 @@ def _differentiate_poly(
     poly: Dict[Tuple[int, int, int], int],
     axis: int,
 ) -> Dict[Tuple[int, int, int], int]:
+    """Differentiate a sparse polynomial with respect to one axis."""
     if not poly:
         return {}
     result: Dict[Tuple[int, int, int], int] = {}
@@ -151,6 +157,7 @@ def _mul_by_axis(
     poly: Dict[Tuple[int, int, int], int],
     axis: int,
 ) -> Dict[Tuple[int, int, int], int]:
+    """Multiply a sparse polynomial by x/y/z for the selected axis."""
     if not poly:
         return {}
     result: Dict[Tuple[int, int, int], int] = {}
@@ -165,6 +172,7 @@ def _mul_by_axis(
 def _mul_by_r2(
     poly: Dict[Tuple[int, int, int], int],
 ) -> Dict[Tuple[int, int, int], int]:
+    """Multiply a sparse polynomial by r^2 = x^2 + y^2 + z^2."""
     if not poly:
         return {}
     result: Dict[Tuple[int, int, int], int] = {}
@@ -180,6 +188,7 @@ def _mul_by_r2(
 def _term_tuple(
     poly: Dict[Tuple[int, int, int], int],
 ) -> Tuple[Tuple[Tuple[int, int, int], int], ...]:
+    """Canonicalize sparse polynomial dict into a sorted tuple."""
     return tuple(sorted(poly.items()))
 
 
@@ -187,6 +196,7 @@ def _generate_derivative_info() -> Tuple[
     Dict[Tuple[int, int, int], _DerivativeInfo],
     int,
 ]:
+    """Generate derivative polynomial metadata up to the supported order."""
     combos_by_level = {
         level: multi_index_tuples(level) for level in range(_MAX_M2L_DERIV_ORDER + 1)
     }
@@ -242,6 +252,7 @@ def _build_component_powers(
     delta: Array,
     max_exponent: int,
 ) -> ComponentPowers:
+    """Precompute per-axis powers of displacement components."""
     dtype = delta.dtype
     powers = []
     for axis in range(3):
@@ -256,6 +267,7 @@ def _build_component_powers(
 
 
 def _build_derivative_tables():
+    """Materialize derivative metadata tables for vectorized lookup."""
     combos: List[Tuple[int, int, int]] = []
     levels: List[int] = []
     term_lists: List[List[Tuple[int, int, int]]] = []
@@ -310,12 +322,15 @@ def _build_derivative_tables():
 
 
 class _M2LStencil(NamedTuple):
+    """Precomputed index/scale stencil used by Cartesian M2L."""
+
     gamma_indices: Array
     scales: Array
     component_sizes: Tuple[int, ...]
 
 
 def _build_m2l_stencils() -> Tuple[_M2LStencil, ...]:
+    """Build M2L stencils for every order up to MAX_MULTIPOLE_ORDER."""
     stencils: List[_M2LStencil] = []
     for order in range(MAX_MULTIPOLE_ORDER + 1):
         total_targets = total_coefficients(order)
@@ -374,6 +389,7 @@ DEFAULT_M2L_CHUNK_SIZE = 8192  # 4096  # 2048  # 1024  # 512  # 256
 
 
 def _evaluate_derivative_table(displacement: Array, max_level: int) -> Array:
+    """Evaluate all derivative basis entries at one displacement."""
     dtype = displacement.dtype
 
     comp_powers = _build_component_powers(displacement, _MAX_POLY_EXPONENT)
@@ -420,6 +436,7 @@ def _translate_components_to_local(
     *,
     order: int,
 ) -> Array:
+    """Translate one packed component vector into local coefficients."""
     batched = _translate_components_batch(
         component_vec[None, :],
         delta[None, :],
@@ -435,6 +452,7 @@ def _translate_components_batch(
     *,
     order: int,
 ) -> Array:
+    """Batch version of component-to-local translation."""
     derivative_chunk = jax.vmap(
         lambda disp: _evaluate_derivative_table(disp, order * 2),
     )(delta_chunk)
@@ -469,6 +487,7 @@ def _accumulate_level(
     order: int,
     chunk_size: int,
 ) -> Array:
+    """Accumulate M2L contributions in fixed-size chunks."""
     pair_count = sources.shape[0]
     if pair_count == 0:
         return coeffs
@@ -536,6 +555,7 @@ def _accumulate_dense_m2l_impl(
     *,
     order: int,
 ) -> Array:
+    """Dense-buffer M2L accumulation kernel."""
     levels = int(node_indices.shape[0])
     slots_per_level = int(node_indices.shape[1])
     total_slots = levels * slots_per_level
@@ -658,6 +678,7 @@ def _translate_multipole_to_local_impl(
     third: Array,
     fourth: Array,
 ) -> Array:
+    """Low-level Cartesian multipole-to-local translation implementation."""
     dtype = multipole.dtype
     component_vec = _build_component_vector(
         mass,
@@ -675,6 +696,7 @@ def _translate_multipole_to_local_impl(
 
 
 def _pack_symmetric_tensor(tensor: Array, level: int) -> Array:
+    """Pack a symmetric tensor level into triangular coefficient ordering."""
     combos = _LEVEL_COMBOS[level]
     if level == 0:
         return jnp.reshape(jnp.asarray(tensor, dtype=tensor.dtype), (1,))
@@ -695,6 +717,7 @@ def _build_component_vector(
     *,
     order: int,
 ) -> Array:
+    """Build packed multipole component vector from raw tensor moments."""
     tensors = (mass, dipole, second, third, fourth)
     pieces: List[Array] = []
     for level in range(order + 1):
@@ -991,6 +1014,7 @@ def _accumulate_m2l_contributions_impl(
     chunk_size: int,
     order: int,
 ) -> LocalExpansionData:
+    """JIT core for sparse interaction-list M2L accumulation."""
     centers_target = jnp.asarray(local_data.centers)
     centers_source = jnp.asarray(multipoles.centers)
     coeffs = jnp.asarray(local_data.coefficients)
@@ -1152,6 +1176,7 @@ def _propagate_local_expansions_impl(
     order: int,
     num_internal: int,
 ) -> Array:
+    """JIT L2L propagation kernel over internal tree nodes."""
     if num_internal == 0:
         return coeffs
 

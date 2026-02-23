@@ -179,6 +179,8 @@ class _DualTreeArtifacts:
 
 
 class _RuntimeExecutionOverrides(NamedTuple):
+    """Resolved runtime execution knobs after adaptive policy decisions."""
+
     traversal_config: Optional[DualTreeTraversalConfig]
     m2l_chunk_size: Optional[int]
     l2l_chunk_size: Optional[int]
@@ -208,6 +210,7 @@ _operator_blocks_cache: "OrderedDict[tuple, tuple[Array, Array]]" = OrderedDict(
 
 
 def _resolve_optional(value, preset_value, fallback):
+    """Pick explicit value, then preset value, then fallback."""
     if value is not None:
         return value
     if preset_value is not None:
@@ -234,6 +237,7 @@ def _resolve_fmm_config(
     use_dense_interactions: Optional[bool],
     preset_config: Optional[FMMPresetConfig],
 ) -> FMMResolvedConfig:
+    """Normalize constructor inputs into a validated runtime configuration."""
     preset_name = preset_config.name if preset_config is not None else None
     preset_use_dense_interactions = (
         preset_config.use_dense_interactions if preset_config else None
@@ -532,6 +536,8 @@ class FMMPreparedState(NamedTuple):
 
 
 class _InteractionCacheEntry(NamedTuple):
+    """Cache entry for dual-tree interaction artifacts keyed by build options."""
+
     key: str
     interactions: NodeInteractionList
     neighbor_list: NodeNeighborList
@@ -785,6 +791,7 @@ class FastMultipoleMethod:
         fixed_order: Optional[int] = None,
         fixed_max_leaf_size: Optional[int] = None,
     ):
+        """Initialize FMM runtime with validated policy and kernel settings."""
         basis_norm = str(expansion_basis).strip().lower()
         if basis_norm not in ("cartesian", "spherical", "solidfmm"):
             raise ValueError(
@@ -909,6 +916,7 @@ class FastMultipoleMethod:
         positions: Array,
         masses: Array,
     ) -> Optional[FMMPreparedState]:
+        """Return cached prepared state when key and inputs exactly match."""
         cached_key = self._prepared_state_cache_key
         cached_value = self._prepared_state_cache_value
         cached_positions = self._prepared_state_cache_positions
@@ -940,6 +948,7 @@ class FastMultipoleMethod:
         masses: Array,
         state: FMMPreparedState,
     ) -> None:
+        """Store prepared-state payload and the exact input arrays used."""
         self._prepared_state_cache_key = key
         self._prepared_state_cache_value = state
         self._prepared_state_cache_positions = positions
@@ -2038,6 +2047,7 @@ def _infer_bounds(positions: Array) -> tuple[Array, Array]:
 
 
 def _max_leaf_size_from_tree(tree: RadixTree) -> int:
+    """Compute maximum number of particles per leaf node."""
     num_internal = int(tree.num_internal_nodes)
     leaf_ranges = tree.node_ranges[num_internal:]
     counts = leaf_ranges[:, 1] - leaf_ranges[:, 0] + as_index(1)
@@ -2045,6 +2055,8 @@ def _max_leaf_size_from_tree(tree: RadixTree) -> int:
 
 
 class _TreeEvaluationSetup(NamedTuple):
+    """Prevalidated inputs required by tree-evaluation entry points."""
+
     locals_data: LocalExpansionData
     positions: Array
     masses: Array
@@ -2064,6 +2076,7 @@ def _prepare_tree_evaluation_inputs(
     max_leaf_size: Optional[int],
     return_potential: bool,
 ) -> _TreeEvaluationSetup:
+    """Validate and normalize tree-evaluation inputs for eager/JIT paths."""
     locals_data = (
         locals_or_downward.locals
         if isinstance(locals_or_downward, TreeDownwardData)
@@ -2127,6 +2140,7 @@ def _prepare_tree_evaluation_inputs(
 
 @partial(jax.jit, static_argnames=("order",))
 def _m2l_real_batch_kernel(src_mult: Array, deltas: Array, *, order: int) -> Array:
+    """Vectorized real-basis M2L kernel for one interaction batch."""
     return jax.vmap(lambda m, d: m2l_real(m, d, order=order))(src_mult, deltas)
 
 
@@ -2138,6 +2152,7 @@ def _m2l_complex_batch_kernel(
     order: int,
     rotation: str,
 ) -> Array:
+    """Vectorized complex-basis M2L kernel for one interaction batch."""
     return m2l_complex_reference_batch(
         src_mult,
         deltas,
@@ -2155,6 +2170,7 @@ def _m2l_complex_batch_cached_kernel(
     *,
     order: int,
 ) -> Array:
+    """Vectorized complex M2L kernel using precomputed rotation blocks."""
     return m2l_complex_reference_batch_cached_blocks(
         src_mult,
         deltas,
@@ -2165,6 +2181,7 @@ def _m2l_complex_batch_cached_kernel(
 
 
 def _operator_cache_get(key: tuple) -> Optional[tuple[Array, Array]]:
+    """Read cached grouped-rotation blocks and update LRU order."""
     blocks = _operator_blocks_cache.get(key)
     if blocks is None:
         return None
@@ -2173,6 +2190,7 @@ def _operator_cache_get(key: tuple) -> Optional[tuple[Array, Array]]:
 
 
 def _operator_cache_put(key: tuple, value: tuple[Array, Array]) -> None:
+    """Insert grouped-rotation blocks and evict stale entries by LRU policy."""
     _operator_blocks_cache[key] = value
     _operator_blocks_cache.move_to_end(key)
     while len(_operator_blocks_cache) > _OPERATOR_CACHE_MAX:
@@ -2276,6 +2294,7 @@ def _accumulate_solidfmm_m2l_grouped_chunked_scan(
     total_nodes: int,
     chunk_size: int,
 ) -> Array:
+    """Accumulate grouped solidfmm M2L contributions via chunked scan."""
     pair_count = src_sorted.shape[0]
     starts = jnp.arange(0, pair_count, chunk_size, dtype=INDEX_DTYPE)
     local_accum0 = jnp.zeros_like(locals_coeffs)
@@ -2323,6 +2342,7 @@ def _accumulate_solidfmm_m2l_grouped_fullbatch(
     order: int,
     total_nodes: int,
 ) -> Array:
+    """Accumulate grouped solidfmm M2L contributions in one full batch."""
     src_mult = multip_packed[src_sorted]
     deltas = centers[tgt_sorted] - centers[src_sorted]
     blocks_to = blocks_to_classes[class_ids_sorted]
@@ -2433,6 +2453,7 @@ def _accumulate_solidfmm_m2l_class_major_chunked_scan(
     total_nodes: int,
     chunk_size: int,
 ) -> Array:
+    """Accumulate class-major grouped M2L contributions via chunked scan."""
     num_segments = segment_starts.shape[0]
     if num_segments == 0:
         return locals_coeffs
@@ -2649,6 +2670,7 @@ def _l2l_real_batch_kernel(
     *,
     order: int,
 ) -> Array:
+    """Vectorized real-basis L2L translation kernel."""
     return jax.vmap(lambda c, d: l2l_real(c, d, order=order))(coeffs, deltas)
 
 
@@ -2660,6 +2682,7 @@ def _l2l_complex_batch_kernel(
     order: int,
     rotation: str,
 ) -> Array:
+    """Vectorized complex-basis L2L translation kernel."""
     return l2l_complex_batch(coeffs, deltas, order=order, rotation=rotation)
 
 
@@ -2679,6 +2702,7 @@ def _accumulate_solidfmm_m2l_fullbatch(
     rotation: str,
     total_nodes: int,
 ) -> Array:
+    """Accumulate solidfmm M2L contributions in one full interaction batch."""
     src_mult = multip_packed[src]
     deltas = centers[tgt] - centers[src]
 
@@ -2730,6 +2754,7 @@ def _accumulate_solidfmm_m2l_chunked_scan(
     total_nodes: int,
     chunk_size: int,
 ) -> Array:
+    """Accumulate solidfmm M2L contributions with chunked scan reduction."""
     pair_count = src.shape[0]
     starts = jnp.arange(0, pair_count, chunk_size, dtype=INDEX_DTYPE)
     local_accum0 = jnp.zeros_like(locals_coeffs)
@@ -2797,6 +2822,7 @@ def _propagate_solidfmm_locals_to_children(
     rotation: str,
     total_nodes: int,
 ) -> Array:
+    """Apply solidfmm L2L translations from parents to their children."""
     num_internal_nodes = left_child.shape[0]
     parent_idx = jnp.arange(num_internal_nodes, dtype=INDEX_DTYPE)
     child_idx = jnp.concatenate(
@@ -2831,6 +2857,7 @@ def _propagate_spherical_locals_to_children(
     order: int,
     total_nodes: int,
 ) -> Array:
+    """Apply spherical-basis L2L translations from parents to children."""
     num_internal_nodes = left_child.shape[0]
     parent_idx = jnp.arange(num_internal_nodes, dtype=INDEX_DTYPE)
     child_idx = jnp.concatenate(
@@ -3174,6 +3201,7 @@ def _evaluate_tree_compiled_impl(
     nearfield_mode: str,
     nearfield_edge_chunk_size: int,
 ) -> Union[Array, Tuple[Array, Array]]:
+    """JIT core for far/near field evaluation on a prepared tree state."""
     use_precomputed = (
         precomputed_target_leaf_ids.shape[0] == neighbor_list.neighbors.shape[0]
     )
@@ -3311,6 +3339,7 @@ def _evaluate_local_expansions_for_particles(
     expansion_basis: ExpansionBasis,
     return_potential: bool,
 ) -> Tuple[Array, Optional[Array]]:
+    """Evaluate node-local expansions at leaf particles and scatter results."""
     if order > MAX_MULTIPOLE_ORDER and expansion_basis not in ("spherical", "solidfmm"):
         raise NotImplementedError(
             "orders above 4 require expansion_basis='spherical' or 'solidfmm'",
@@ -3485,6 +3514,7 @@ def _scatter_vectors(
     values: Array,
     mask: Array,
 ) -> Array:
+    """Scatter-add vector values into a flat particle buffer with masking."""
     if values.size == 0:
         return base
     flat_idx = indices.reshape(-1)
@@ -3500,6 +3530,7 @@ def _scatter_scalars(
     values: Array,
     mask: Array,
 ) -> Array:
+    """Scatter-add scalar values into a flat particle buffer with masking."""
     if values is None or values.size == 0:
         return base
     flat_idx = indices.reshape(-1)
