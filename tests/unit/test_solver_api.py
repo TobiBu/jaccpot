@@ -235,3 +235,54 @@ def test_target_indices_preserve_order_and_duplicates():
         rtol=1e-5,
         atol=1e-5,
     )
+
+
+def test_evaluate_prepared_state_can_run_inside_jit_with_targets():
+    positions, masses = _sample_problem(n=64)
+    fmm = FastMultipoleMethod(
+        preset=FMMPreset.FAST,
+        basis="solidfmm",
+    )
+    state = fmm.prepare_state(
+        positions,
+        masses,
+        leaf_size=16,
+        max_order=3,
+    )
+    target_indices = jnp.asarray([0, 7, 11, 23, 31], dtype=jnp.int32)
+
+    jit_eval = jax.jit(
+        lambda st, idx: fmm.evaluate_prepared_state(st, target_indices=idx)
+    )
+    acc_jit = jit_eval(state, target_indices)
+    acc_ref = fmm.evaluate_prepared_state(state, target_indices=target_indices)
+
+    assert acc_jit.shape == (target_indices.shape[0], 3)
+    assert np.allclose(np.asarray(acc_jit), np.asarray(acc_ref), rtol=1e-5, atol=1e-5)
+
+
+def test_jitted_compute_does_not_leak_tracers_into_solver_caches():
+    positions, masses = _sample_problem(n=64)
+    fmm = FastMultipoleMethod(
+        preset=FMMPreset.FAST,
+        basis="solidfmm",
+    )
+
+    jit_full = jax.jit(
+        lambda p, m: fmm.compute_accelerations(
+            p,
+            m,
+            leaf_size=16,
+            max_order=3,
+        )
+    )
+    _ = jit_full(positions, masses)
+
+    state = fmm.prepare_state(
+        positions,
+        masses,
+        leaf_size=16,
+        max_order=3,
+    )
+    acc = fmm.evaluate_prepared_state(state)
+    assert acc.shape == positions.shape

@@ -387,9 +387,9 @@ def _build_tree_with_config(
     try:
         max_leaf_size = _max_leaf_size_from_tree(tree)
     except jax.errors.ConcretizationTypeError:
-        max_leaf_size = (
-            int(leaf_size) if mode == "lbvh" else int(tree_config.target_leaf_particles)
-        )
+        # Traced/JIT path: use a correctness-preserving upper bound.
+        # Using too-small caps can truncate per-leaf gathers downstream.
+        max_leaf_size = int(positions.shape[0])
     cache_leaf_parameter = (
         int(leaf_size) if mode == "lbvh" else tree_config.target_leaf_particles
     )
@@ -405,8 +405,15 @@ def _build_tree_with_config(
     )
 
 
-class FMMPreparedState(NamedTuple):
-    """Keep tree data resident on device across repeated evaluations."""
+@jax.tree_util.register_pytree_node_class
+@dataclass(frozen=True)
+class FMMPreparedState:
+    """Keep prepared tree artifacts resident as a JAX pytree payload.
+
+    The array/tree payload is carried as pytree children so callers can pass
+    this state through ``jax.jit``. Non-array metadata is tracked as static
+    auxiliary data to avoid tracing errors on dtype/string objects.
+    """
 
     tree: Tree
     positions_sorted: Array
@@ -428,6 +435,82 @@ class FMMPreparedState(NamedTuple):
     nearfield_chunk_sort_indices: Optional[Array]
     nearfield_chunk_group_ids: Optional[Array]
     nearfield_chunk_unique_indices: Optional[Array]
+
+    def tree_flatten(self):
+        children = (
+            self.tree,
+            self.positions_sorted,
+            self.masses_sorted,
+            self.inverse_permutation,
+            self.downward,
+            self.neighbor_list,
+            self.interactions,
+            self.dual_tree_result,
+            self.nearfield_target_leaf_ids,
+            self.nearfield_source_leaf_ids,
+            self.nearfield_valid_pairs,
+            self.nearfield_chunk_sort_indices,
+            self.nearfield_chunk_group_ids,
+            self.nearfield_chunk_unique_indices,
+        )
+        aux = (
+            int(self.max_leaf_size),
+            str(jnp.dtype(self.input_dtype)),
+            str(jnp.dtype(self.working_dtype)),
+            str(self.expansion_basis),
+            float(self.theta),
+            self.retry_events,
+        )
+        return children, aux
+
+    @classmethod
+    def tree_unflatten(cls, aux, children):
+        (
+            max_leaf_size,
+            input_dtype_name,
+            working_dtype_name,
+            expansion_basis,
+            theta,
+            retry_events,
+        ) = aux
+        (
+            tree,
+            positions_sorted,
+            masses_sorted,
+            inverse_permutation,
+            downward,
+            neighbor_list,
+            interactions,
+            dual_tree_result,
+            nearfield_target_leaf_ids,
+            nearfield_source_leaf_ids,
+            nearfield_valid_pairs,
+            nearfield_chunk_sort_indices,
+            nearfield_chunk_group_ids,
+            nearfield_chunk_unique_indices,
+        ) = children
+        return cls(
+            tree=tree,
+            positions_sorted=positions_sorted,
+            masses_sorted=masses_sorted,
+            inverse_permutation=inverse_permutation,
+            downward=downward,
+            neighbor_list=neighbor_list,
+            max_leaf_size=int(max_leaf_size),
+            input_dtype=jnp.dtype(input_dtype_name),
+            working_dtype=jnp.dtype(working_dtype_name),
+            expansion_basis=expansion_basis,
+            theta=float(theta),
+            interactions=interactions,
+            dual_tree_result=dual_tree_result,
+            retry_events=retry_events,
+            nearfield_target_leaf_ids=nearfield_target_leaf_ids,
+            nearfield_source_leaf_ids=nearfield_source_leaf_ids,
+            nearfield_valid_pairs=nearfield_valid_pairs,
+            nearfield_chunk_sort_indices=nearfield_chunk_sort_indices,
+            nearfield_chunk_group_ids=nearfield_chunk_group_ids,
+            nearfield_chunk_unique_indices=nearfield_chunk_unique_indices,
+        )
 
 
 class _PrepareStateTreeUpwardArtifacts(NamedTuple):
@@ -452,6 +535,13 @@ class _PrepareStateDualDownwardArtifacts(NamedTuple):
     traversal_result: DualTreeWalkResult
     downward: TreeDownwardData
     cache_entry: Optional[_InteractionCacheEntry]
+
+
+def _contains_tracer(value: Any) -> bool:
+    """Return ``True`` when a pytree contains JAX tracer values."""
+    return any(
+        isinstance(leaf, jax.core.Tracer) for leaf in jax.tree_util.tree_leaves(value)
+    )
 
 
 class FastMultipoleMethod:
@@ -675,6 +765,8 @@ class FastMultipoleMethod:
         state: FMMPreparedState,
     ) -> None:
         """Store prepared-state payload and the exact input arrays used."""
+        if _contains_tracer((positions, masses, state)):
+            return
         self._prepared_state_cache_key = key
         self._prepared_state_cache_value = state
         self._prepared_state_cache_positions = positions
@@ -901,6 +993,7 @@ class FastMultipoleMethod:
         aspect_threshold_val: float,
         jit_tree_override: Optional[bool],
         upward_center_mode: str,
+        allow_stateful_cache: bool,
     ) -> _PrepareStateTreeUpwardArtifacts:
         """Build tree artifacts and run upward preparation for prepare_state."""
         tree_config = self.config.tree
@@ -929,22 +1022,21 @@ class FastMultipoleMethod:
             tree_type=self.tree_type,
             tree_config=tree_config,
             leaf_size=int(leaf_size),
-            workspace=self._tree_workspace,
+            workspace=(self._tree_workspace if allow_stateful_cache else None),
             jit_tree=jit_tree_flag,
             refine_local=refine_local_val,
             max_refine_levels=max_refine_levels_val,
             aspect_threshold=aspect_threshold_val,
         )
-        self._tree_workspace = build_artifacts.workspace
+        if allow_stateful_cache:
+            self._tree_workspace = build_artifacts.workspace
 
         tree = build_artifacts.tree
         pos_sorted = build_artifacts.positions_sorted
         mass_sorted = build_artifacts.masses_sorted
-        leaf_cap_hint = (
-            int(leaf_size)
-            if tree_config.mode == "lbvh"
-            else int(tree_config.target_leaf_particles)
-        )
+        # Provide a safe upper bound for traced/JIT paths; downstream kernels
+        # require a static cap and must never receive a value below true leaf size.
+        leaf_cap_hint = int(positions_arr.shape[0])
         upward = self.prepare_upward_sweep(
             tree,
             pos_sorted,
@@ -989,6 +1081,7 @@ class FastMultipoleMethod:
         refine_local_val: bool,
         max_refine_levels_val: int,
         aspect_threshold_val: float,
+        allow_stateful_cache: bool,
     ) -> _PrepareStateDualDownwardArtifacts:
         """Build/reuse interactions and prepare downward artifacts."""
         cache_key = _interaction_cache_key(
@@ -1015,7 +1108,7 @@ class FastMultipoleMethod:
             mac_type=mac_type_val,
             dehnen_radius_scale=dehnen_radius_scale,
             cache_key=cache_key,
-            cache_entry=self._interaction_cache,
+            cache_entry=(self._interaction_cache if allow_stateful_cache else None),
             max_pair_queue=self.max_pair_queue,
             pair_process_block=self.pair_process_block,
             traversal_config=runtime_traversal_config,
@@ -1024,7 +1117,8 @@ class FastMultipoleMethod:
             grouped_interactions=grouped_interactions,
             grouped_chunk_size=runtime_m2l_chunk_size,
         )
-        self._interaction_cache = cache_entry
+        if allow_stateful_cache:
+            self._interaction_cache = cache_entry
 
         (
             interactions,
@@ -1077,6 +1171,7 @@ class FastMultipoleMethod:
         leaf_cap: int,
         num_particles: int,
         cache_entry: Optional[_InteractionCacheEntry],
+        allow_stateful_cache: bool,
     ) -> NearfieldPrecomputeArtifacts:
         """Build/reuse near-field precompute artifacts for prepare_state."""
         nearfield_mode_resolved = self._resolve_nearfield_mode(
@@ -1102,7 +1197,7 @@ class FastMultipoleMethod:
             nearfield_mode=nearfield_mode_resolved,
             nearfield_edge_chunk_size=nearfield_edge_chunk_size_resolved,
         )
-        if cache_entry is not None:
+        if allow_stateful_cache and cache_entry is not None:
             self._interaction_cache = with_nearfield_cache_artifacts(
                 cache_entry,
                 artifacts=nearfield_artifacts,
@@ -1760,6 +1855,7 @@ class FastMultipoleMethod:
             positions,
             masses,
         )
+        allow_stateful_cache = not _contains_tracer((positions_arr, masses_arr))
 
         runtime_overrides = self._resolve_runtime_execution_overrides(
             num_particles=int(positions_arr.shape[0]),
@@ -1787,6 +1883,7 @@ class FastMultipoleMethod:
             aspect_threshold_val=aspect_threshold_val,
             jit_tree_override=jit_tree,
             upward_center_mode=upward_center_mode,
+            allow_stateful_cache=allow_stateful_cache,
         )
         dual_downward_artifacts = self._prepare_state_dual_and_downward(
             tree_artifacts=tree_artifacts,
@@ -1803,16 +1900,19 @@ class FastMultipoleMethod:
             refine_local_val=refine_local_val,
             max_refine_levels_val=max_refine_levels_val,
             aspect_threshold_val=aspect_threshold_val,
+            allow_stateful_cache=allow_stateful_cache,
         )
 
-        self._update_locals_template_cache_after_prepare(
-            locals_template=tree_artifacts.locals_template,
-            upward=tree_artifacts.upward,
-            max_order=int(max_order),
-        )
+        if allow_stateful_cache:
+            self._update_locals_template_cache_after_prepare(
+                locals_template=tree_artifacts.locals_template,
+                upward=tree_artifacts.upward,
+                max_order=int(max_order),
+            )
 
         retry_events_tuple = tuple(collected_retries)
-        self._recent_retry_events = retry_events_tuple
+        if allow_stateful_cache:
+            self._recent_retry_events = retry_events_tuple
 
         nearfield_artifacts = self._prepare_state_nearfield_artifacts(
             tree=tree_artifacts.tree,
@@ -1820,6 +1920,7 @@ class FastMultipoleMethod:
             leaf_cap=tree_artifacts.leaf_cap,
             num_particles=int(positions_arr.shape[0]),
             cache_entry=dual_downward_artifacts.cache_entry,
+            allow_stateful_cache=allow_stateful_cache,
         )
 
         return FMMPreparedState(
@@ -2070,11 +2171,14 @@ class FastMultipoleMethod:
         if setup.empty_output is not None:
             return setup.empty_output
 
-        order = (
-            int(self.fixed_order)
-            if self.fixed_order is not None
-            else int(setup.locals_data.order)
-        )
+        if self.fixed_order is not None:
+            order = int(self.fixed_order)
+        else:
+            coeff_count = int(setup.locals_data.coefficients.shape[-1])
+            order = _infer_order_from_coeff_count(
+                coeff_count=coeff_count,
+                expansion_basis=self.expansion_basis,
+            )
 
         if self.fixed_max_leaf_size is not None and setup.max_leaf_size > int(
             self.fixed_max_leaf_size
@@ -2165,6 +2269,31 @@ class _TreeEvaluationSetup(NamedTuple):
     node_ranges: Array
     max_leaf_size: int
     empty_output: Optional[Union[Array, Tuple[Array, Array]]]
+
+
+def _infer_order_from_coeff_count(
+    *,
+    coeff_count: int,
+    expansion_basis: ExpansionBasis,
+) -> int:
+    """Infer expansion order from static coefficient-array width."""
+    if expansion_basis == "solidfmm":
+        root = int(round(float(np.sqrt(coeff_count))))
+        order = root - 1
+        if (order + 1) ** 2 != int(coeff_count):
+            raise ValueError(
+                "Could not infer solidfmm order from coefficient shape; "
+                f"got coeff_count={coeff_count}."
+            )
+        return order
+
+    for order in range(MAX_MULTIPOLE_ORDER + 1):
+        if int(total_coefficients(order)) == int(coeff_count):
+            return int(order)
+    raise ValueError(
+        "Could not infer cartesian order from coefficient shape; "
+        f"got coeff_count={coeff_count}."
+    )
 
 
 def _prepare_tree_evaluation_inputs(
