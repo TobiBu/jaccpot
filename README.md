@@ -70,6 +70,15 @@ accelerations = solver.compute_accelerations(positions, masses)
 print(accelerations.shape)
 ```
 
+For split-step integrators (for example active-particle substeps), you can
+evaluate only a subset while still using all particles as FMM sources:
+
+```python
+active = jnp.asarray([0, 7, 11, 32], dtype=jnp.int32)
+state = solver.prepare_state(positions, masses)
+active_acc = solver.evaluate_prepared_state(state, target_indices=active)
+```
+
 ## Development
 
 Run quality gates locally:

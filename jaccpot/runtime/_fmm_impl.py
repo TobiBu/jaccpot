@@ -1230,6 +1230,28 @@ class FastMultipoleMethod:
         except Exception:
             return None, None, None
 
+    def _resolve_target_indices(
+        self,
+        *,
+        target_indices: Optional[Array],
+        num_particles: int,
+    ) -> Optional[Array]:
+        """Validate and normalize optional target particle indices."""
+        if target_indices is None:
+            return None
+        indices = jnp.asarray(target_indices)
+        if indices.ndim != 1:
+            raise ValueError("target_indices must be a 1D array")
+        if not jnp.issubdtype(indices.dtype, jnp.integer):
+            raise ValueError("target_indices must contain integer values")
+        if indices.shape[0] == 0:
+            return indices.astype(INDEX_DTYPE)
+        min_idx = int(jnp.min(indices))
+        max_idx = int(jnp.max(indices))
+        if min_idx < 0 or max_idx >= int(num_particles):
+            raise ValueError("target_indices contains out-of-range values")
+        return indices.astype(INDEX_DTYPE)
+
     def _unpack_dual_tree_artifacts(
         self,
         dual_artifacts: _DualTreeArtifacts,
@@ -1566,6 +1588,7 @@ class FastMultipoleMethod:
         positions: Array,
         masses: Array,
         *,
+        target_indices: Optional[Array] = None,
         bounds: Optional[Tuple[Array, Array]] = None,
         leaf_size: int = 16,
         max_order: int = 2,
@@ -1582,6 +1605,9 @@ class FastMultipoleMethod:
 
         Parameters
         ----------
+        target_indices:
+            Optional 1D index array selecting which target-particle outputs to
+            return. All particles are still used as source masses.
         jit_tree:
             When ``True`` (default) specialise tree construction via JIT to
             amortise repeated builds for consistent tree sizes.
@@ -1659,6 +1685,7 @@ class FastMultipoleMethod:
 
         return self.evaluate_prepared_state(
             state,
+            target_indices=target_indices,
             return_potential=return_potential,
             jit_traversal=jit_traversal_flag,
         )
@@ -1807,28 +1834,49 @@ class FastMultipoleMethod:
         self: "FastMultipoleMethod",
         state: FMMPreparedState,
         *,
+        target_indices: Optional[Array] = None,
         return_potential: bool = False,
         jit_traversal: bool = True,
     ) -> Union[Array, Tuple[Array, Array]]:
-        """Evaluate accelerations (and potentials) for a prepared state."""
+        """Evaluate accelerations/potentials for all particles or targets."""
 
-        evaluation = _evaluate_prepared_tree(
-            fmm=self,
-            tree=state.tree,
-            positions_sorted=state.positions_sorted,
-            masses_sorted=state.masses_sorted,
-            downward=state.downward,
-            neighbor_list=state.neighbor_list,
-            nearfield_target_leaf_ids=state.nearfield_target_leaf_ids,
-            nearfield_source_leaf_ids=state.nearfield_source_leaf_ids,
-            nearfield_valid_pairs=state.nearfield_valid_pairs,
-            nearfield_chunk_sort_indices=state.nearfield_chunk_sort_indices,
-            nearfield_chunk_group_ids=state.nearfield_chunk_group_ids,
-            nearfield_chunk_unique_indices=state.nearfield_chunk_unique_indices,
-            max_leaf_size=state.max_leaf_size,
-            return_potential=return_potential,
-            jit_traversal=jit_traversal,
+        resolved_target_indices = self._resolve_target_indices(
+            target_indices=target_indices,
+            num_particles=int(state.inverse_permutation.shape[0]),
         )
+        if resolved_target_indices is None:
+            evaluation = _evaluate_prepared_tree(
+                fmm=self,
+                tree=state.tree,
+                positions_sorted=state.positions_sorted,
+                masses_sorted=state.masses_sorted,
+                downward=state.downward,
+                neighbor_list=state.neighbor_list,
+                nearfield_target_leaf_ids=state.nearfield_target_leaf_ids,
+                nearfield_source_leaf_ids=state.nearfield_source_leaf_ids,
+                nearfield_valid_pairs=state.nearfield_valid_pairs,
+                nearfield_chunk_sort_indices=state.nearfield_chunk_sort_indices,
+                nearfield_chunk_group_ids=state.nearfield_chunk_group_ids,
+                nearfield_chunk_unique_indices=state.nearfield_chunk_unique_indices,
+                max_leaf_size=state.max_leaf_size,
+                return_potential=return_potential,
+                jit_traversal=jit_traversal,
+            )
+        else:
+            target_sorted_indices = jnp.asarray(
+                state.inverse_permutation[resolved_target_indices],
+                dtype=INDEX_DTYPE,
+            )
+            evaluation = _evaluate_prepared_tree_targets(
+                fmm=self,
+                tree=state.tree,
+                positions_sorted=state.positions_sorted,
+                masses_sorted=state.masses_sorted,
+                downward=state.downward,
+                neighbor_list=state.neighbor_list,
+                target_sorted_indices=target_sorted_indices,
+                return_potential=return_potential,
+            )
 
         if jnp.issubdtype(state.input_dtype, jnp.floating):
             output_dtype = state.input_dtype
@@ -1837,13 +1885,20 @@ class FastMultipoleMethod:
 
         if return_potential:
             acc_sorted, pot_sorted = evaluation
-            accelerations = jnp.asarray(acc_sorted)[state.inverse_permutation]
+            if resolved_target_indices is None:
+                accelerations = jnp.asarray(acc_sorted)[state.inverse_permutation]
+                potentials = jnp.asarray(pot_sorted)[state.inverse_permutation]
+            else:
+                accelerations = jnp.asarray(acc_sorted)
+                potentials = jnp.asarray(pot_sorted)
             accelerations = accelerations.astype(output_dtype)
-            potentials = jnp.asarray(pot_sorted)[state.inverse_permutation]
             potentials = potentials.astype(output_dtype)
             return accelerations, potentials
 
-        accelerations = jnp.asarray(evaluation)[state.inverse_permutation]
+        if resolved_target_indices is None:
+            accelerations = jnp.asarray(evaluation)[state.inverse_permutation]
+        else:
+            accelerations = jnp.asarray(evaluation)
         accelerations = accelerations.astype(output_dtype)
         return accelerations
 
@@ -3178,6 +3233,265 @@ def _evaluate_prepared_tree(
         max_leaf_size=max_leaf_size,
         return_potential=return_potential,
     )
+
+
+def _map_targets_to_leaf_positions(
+    *,
+    target_sorted_indices: Array,
+    leaf_nodes: Array,
+    node_ranges: Array,
+) -> Array:
+    """Map sorted particle indices to positions in the leaf-node array."""
+    if int(target_sorted_indices.shape[0]) == 0:
+        return jnp.zeros((0,), dtype=INDEX_DTYPE)
+    leaf_ranges = node_ranges[leaf_nodes]
+    starts = leaf_ranges[:, 0]
+    ends = leaf_ranges[:, 1]
+    leaf_pos = jnp.searchsorted(starts, target_sorted_indices, side="right") - 1
+    leaf_pos = jnp.clip(leaf_pos, 0, leaf_nodes.shape[0] - 1)
+    valid = (target_sorted_indices >= starts[leaf_pos]) & (
+        target_sorted_indices <= ends[leaf_pos]
+    )
+    if not bool(jnp.all(valid)):
+        raise ValueError("target_indices could not be mapped to prepared tree leaves")
+    return leaf_pos.astype(INDEX_DTYPE)
+
+
+def _build_target_nearfield_source_index_matrix(
+    *,
+    target_sorted_indices: Array,
+    target_leaf_positions: Array,
+    tree: Tree,
+    neighbor_list: NodeNeighborList,
+) -> tuple[Array, Array]:
+    """Build padded source-index lists for each target particle near-field eval."""
+    target_np = np.asarray(jax.device_get(target_sorted_indices), dtype=np.int64)
+    target_leaf_pos_np = np.asarray(
+        jax.device_get(target_leaf_positions),
+        dtype=np.int64,
+    )
+    node_ranges = np.asarray(jax.device_get(tree.node_ranges), dtype=np.int64)
+    leaf_nodes = np.asarray(jax.device_get(neighbor_list.leaf_indices), dtype=np.int64)
+    offsets = np.asarray(jax.device_get(neighbor_list.offsets), dtype=np.int64)
+    neighbors = np.asarray(jax.device_get(neighbor_list.neighbors), dtype=np.int64)
+
+    total_nodes = int(node_ranges.shape[0])
+    leaf_lookup = np.full((total_nodes,), -1, dtype=np.int64)
+    leaf_lookup[leaf_nodes] = np.arange(leaf_nodes.shape[0], dtype=np.int64)
+    leaf_ranges = node_ranges[leaf_nodes]
+
+    source_lists: list[np.ndarray] = []
+    max_sources = 0
+    for target_idx, target_leaf_pos in zip(target_np, target_leaf_pos_np):
+        src_leaf_positions = [int(target_leaf_pos)]
+        nbr_start = int(offsets[target_leaf_pos])
+        nbr_end = int(offsets[target_leaf_pos + 1])
+        if nbr_end > nbr_start:
+            nbr_nodes = neighbors[nbr_start:nbr_end]
+            nbr_leaf_pos = leaf_lookup[nbr_nodes]
+            src_leaf_positions.extend(int(v) for v in nbr_leaf_pos if int(v) >= 0)
+        if src_leaf_positions:
+            src_leaf_positions = list(dict.fromkeys(src_leaf_positions))
+        chunks: list[np.ndarray] = []
+        for src_leaf_pos in src_leaf_positions:
+            start = int(leaf_ranges[src_leaf_pos, 0])
+            end = int(leaf_ranges[src_leaf_pos, 1])
+            chunks.append(np.arange(start, end + 1, dtype=np.int64))
+        if chunks:
+            src_indices = np.concatenate(chunks, axis=0)
+            src_indices = src_indices[src_indices != int(target_idx)]
+            src_indices = np.unique(src_indices)
+        else:
+            src_indices = np.zeros((0,), dtype=np.int64)
+        source_lists.append(src_indices)
+        max_sources = max(max_sources, int(src_indices.shape[0]))
+
+    if max_sources == 0:
+        padded = np.zeros((target_np.shape[0], 0), dtype=np.int64)
+        mask = np.zeros((target_np.shape[0], 0), dtype=bool)
+        return jnp.asarray(padded, dtype=INDEX_DTYPE), jnp.asarray(mask, dtype=bool)
+
+    padded = np.zeros((target_np.shape[0], max_sources), dtype=np.int64)
+    mask = np.zeros((target_np.shape[0], max_sources), dtype=bool)
+    for row, src_indices in enumerate(source_lists):
+        length = int(src_indices.shape[0])
+        if length == 0:
+            continue
+        padded[row, :length] = src_indices
+        mask[row, :length] = True
+    return jnp.asarray(padded, dtype=INDEX_DTYPE), jnp.asarray(mask, dtype=bool)
+
+
+def _compute_targeted_nearfield(
+    *,
+    positions_sorted: Array,
+    masses_sorted: Array,
+    target_sorted_indices: Array,
+    source_indices: Array,
+    source_mask: Array,
+    G: Union[float, Array],
+    softening: float,
+    return_potential: bool,
+) -> tuple[Array, Optional[Array]]:
+    """Compute near-field contributions for target particles only."""
+    target_positions = positions_sorted[target_sorted_indices]
+    dtype = positions_sorted.dtype
+    g_const = jnp.asarray(G, dtype=dtype)
+    softening_sq = jnp.asarray(float(softening) ** 2, dtype=dtype)
+    if int(source_indices.shape[1]) == 0:
+        zeros = jnp.zeros((target_positions.shape[0], 3), dtype=positions_sorted.dtype)
+        if return_potential:
+            return zeros, jnp.zeros((target_positions.shape[0],), dtype=zeros.dtype)
+        return zeros, None
+    src_pos = positions_sorted[source_indices]
+    src_mass = masses_sorted[source_indices]
+    diff = target_positions[:, None, :] - src_pos
+    dist_sq = jnp.sum(diff * diff, axis=-1) + softening_sq
+    eps = jnp.finfo(positions_sorted.dtype).eps
+    inv_r = jnp.where(source_mask, 1.0 / (jnp.sqrt(dist_sq) + eps), 0.0)
+    inv_dist3 = jnp.where(source_mask, inv_r / dist_sq, 0.0)
+    weighted = inv_dist3 * src_mass
+    near_acc = -g_const * jnp.sum(weighted[..., None] * diff, axis=1)
+    if not return_potential:
+        return near_acc, None
+    near_pot = -g_const * jnp.sum(inv_r * src_mass, axis=1)
+    return near_acc, near_pot
+
+
+def _evaluate_local_expansions_for_target_particles(
+    *,
+    local_data: LocalExpansionData,
+    positions_sorted: Array,
+    target_sorted_indices: Array,
+    target_leaf_positions: Array,
+    leaf_nodes: Array,
+    order: int,
+    expansion_basis: ExpansionBasis,
+    return_potential: bool,
+) -> tuple[Array, Optional[Array]]:
+    """Evaluate far-field local expansions for target particles only."""
+    if order > MAX_MULTIPOLE_ORDER and expansion_basis != "solidfmm":
+        raise NotImplementedError(
+            "orders above 4 require expansion_basis='solidfmm'",
+        )
+    if int(target_sorted_indices.shape[0]) == 0:
+        zeros = jnp.zeros((0, 3), dtype=positions_sorted.dtype)
+        if return_potential:
+            return zeros, jnp.zeros((0,), dtype=positions_sorted.dtype)
+        return zeros, None
+
+    target_leaf_nodes = leaf_nodes[target_leaf_positions]
+    centers = local_data.centers[target_leaf_nodes]
+    coeffs = local_data.coefficients[target_leaf_nodes]
+    target_positions = positions_sorted[target_sorted_indices]
+
+    if expansion_basis == "solidfmm":
+        offsets_complex = centers - target_positions
+
+        def eval_one(coeff_row: Array, offset_row: Array) -> tuple[Array, Array]:
+            grad, pot = evaluate_local_complex_with_grad(
+                coeff_row,
+                offset_row,
+                order=int(order),
+            )
+            return grad, pot
+
+        gradients, potentials = jax.vmap(eval_one)(coeffs, offsets_complex)
+        if return_potential:
+            return gradients, potentials
+        return gradients, None
+
+    offsets = target_positions - centers
+
+    def eval_cartesian(coeff_row: Array, offset_row: Array) -> tuple[Array, Array]:
+        coeff_dtype = coeff_row.dtype
+
+        def phi_fn(vec: Array) -> Array:
+            total = coeff_dtype.type(0.0)
+            for level_idx in range(order + 1):
+                start_idx = level_offset(level_idx)
+                combos = LOCAL_LEVEL_COMBOS[level_idx]
+                end_idx = start_idx + len(combos)
+                coeff_slice = coeff_row[start_idx:end_idx]
+                for combo_idx, combo in enumerate(combos):
+                    factor = coeff_dtype.type(LOCAL_COMBO_INV_FACTORIAL[combo])
+                    term = multi_power(vec, combo)
+                    total = total + coeff_slice[combo_idx] * term * factor
+            return total
+
+        value, grad = jax.value_and_grad(phi_fn)(offset_row)
+        return grad, value
+
+    gradients, potentials = jax.vmap(eval_cartesian)(coeffs, offsets)
+    if return_potential:
+        return gradients, potentials
+    return gradients, None
+
+
+def _evaluate_prepared_tree_targets(
+    *,
+    fmm: "FastMultipoleMethod",
+    tree: Tree,
+    positions_sorted: Array,
+    masses_sorted: Array,
+    downward: TreeDownwardData,
+    neighbor_list: NodeNeighborList,
+    target_sorted_indices: Array,
+    return_potential: bool,
+) -> Union[Array, Tuple[Array, Array]]:
+    """Run prepared-tree evaluation for target particles only."""
+    g_const = jnp.asarray(fmm.G, dtype=positions_sorted.dtype)
+    leaf_nodes = jnp.asarray(neighbor_list.leaf_indices, dtype=INDEX_DTYPE)
+    node_ranges = jnp.asarray(tree.node_ranges, dtype=INDEX_DTYPE)
+    target_leaf_positions = _map_targets_to_leaf_positions(
+        target_sorted_indices=target_sorted_indices,
+        leaf_nodes=leaf_nodes,
+        node_ranges=node_ranges,
+    )
+    near_source_idx, near_source_mask = _build_target_nearfield_source_index_matrix(
+        target_sorted_indices=target_sorted_indices,
+        target_leaf_positions=target_leaf_positions,
+        tree=tree,
+        neighbor_list=neighbor_list,
+    )
+    near_acc, near_pot = _compute_targeted_nearfield(
+        positions_sorted=positions_sorted,
+        masses_sorted=masses_sorted,
+        target_sorted_indices=target_sorted_indices,
+        source_indices=near_source_idx,
+        source_mask=near_source_mask,
+        G=g_const,
+        softening=float(fmm.softening),
+        return_potential=return_potential,
+    )
+    far_grad, far_potential_pre = _evaluate_local_expansions_for_target_particles(
+        local_data=downward.locals,
+        positions_sorted=positions_sorted,
+        target_sorted_indices=target_sorted_indices,
+        target_leaf_positions=target_leaf_positions,
+        leaf_nodes=leaf_nodes,
+        order=int(downward.locals.order),
+        expansion_basis=fmm.expansion_basis,
+        return_potential=return_potential,
+    )
+    far_acc = -g_const * far_grad
+    if return_potential:
+        far_pot = (
+            -g_const * far_potential_pre
+            if far_potential_pre is not None
+            else jnp.zeros(
+                (target_sorted_indices.shape[0],), dtype=positions_sorted.dtype
+            )
+        )
+        near_pot_resolved = (
+            near_pot
+            if near_pot is not None
+            else jnp.zeros(
+                (target_sorted_indices.shape[0],), dtype=positions_sorted.dtype
+            )
+        )
+        return near_acc + far_acc, near_pot_resolved + far_pot
+    return near_acc + far_acc
 
 
 @partial(
