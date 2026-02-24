@@ -382,7 +382,14 @@ def _build_tree_with_config(
         raise ValueError(
             "Tree.from_particles must return reordered arrays for FMM runtime."
         )
-    max_leaf_size = _max_leaf_size_from_tree(tree)
+    # Under outer jax.jit, converting a value-dependent leaf max to Python int
+    # can trigger ConcretizationTypeError. Fall back to a static config cap.
+    try:
+        max_leaf_size = _max_leaf_size_from_tree(tree)
+    except jax.errors.ConcretizationTypeError:
+        max_leaf_size = (
+            int(leaf_size) if mode == "lbvh" else int(tree_config.target_leaf_particles)
+        )
     cache_leaf_parameter = (
         int(leaf_size) if mode == "lbvh" else tree_config.target_leaf_particles
     )
@@ -933,12 +940,18 @@ class FastMultipoleMethod:
         tree = build_artifacts.tree
         pos_sorted = build_artifacts.positions_sorted
         mass_sorted = build_artifacts.masses_sorted
+        leaf_cap_hint = (
+            int(leaf_size)
+            if tree_config.mode == "lbvh"
+            else int(tree_config.target_leaf_particles)
+        )
         upward = self.prepare_upward_sweep(
             tree,
             pos_sorted,
             mass_sorted,
             max_order=max_order,
             center_mode=upward_center_mode,
+            max_leaf_size=leaf_cap_hint,
         )
         locals_template = self._build_locals_template_for_prepare_state(
             tree=tree,
@@ -1246,6 +1259,9 @@ class FastMultipoleMethod:
             raise ValueError("target_indices must contain integer values")
         if indices.shape[0] == 0:
             return indices.astype(INDEX_DTYPE)
+        # Under JAX tracing we cannot materialize min/max as Python ints.
+        if isinstance(indices, jax.core.Tracer):
+            return indices.astype(INDEX_DTYPE)
         min_idx = int(jnp.min(indices))
         max_idx = int(jnp.max(indices))
         if min_idx < 0 or max_idx >= int(num_particles):
@@ -1443,6 +1459,7 @@ class FastMultipoleMethod:
         max_order: int = 2,
         center_mode: str = "com",
         explicit_centers: Optional[Array] = None,
+        max_leaf_size: Optional[int] = None,
     ) -> TreeUpwardData:
         """Bundle geometry, raw moments, and packed expansions for a tree."""
 
@@ -1454,6 +1471,7 @@ class FastMultipoleMethod:
                 max_order=max_order,
                 center_mode=center_mode,
                 explicit_centers=explicit_centers,
+                max_leaf_size=max_leaf_size,
                 rotation=self.complex_rotation,
             )
 
@@ -1844,7 +1862,10 @@ class FastMultipoleMethod:
             target_indices=target_indices,
             num_particles=int(state.inverse_permutation.shape[0]),
         )
-        if resolved_target_indices is None:
+        tracing_targets = isinstance(
+            state.positions_sorted, jax.core.Tracer
+        ) or isinstance(resolved_target_indices, jax.core.Tracer)
+        if resolved_target_indices is None or tracing_targets:
             evaluation = _evaluate_prepared_tree(
                 fmm=self,
                 tree=state.tree,
@@ -1888,6 +1909,13 @@ class FastMultipoleMethod:
             if resolved_target_indices is None:
                 accelerations = jnp.asarray(acc_sorted)[state.inverse_permutation]
                 potentials = jnp.asarray(pot_sorted)[state.inverse_permutation]
+            elif tracing_targets:
+                accelerations = jnp.asarray(acc_sorted)[state.inverse_permutation][
+                    resolved_target_indices
+                ]
+                potentials = jnp.asarray(pot_sorted)[state.inverse_permutation][
+                    resolved_target_indices
+                ]
             else:
                 accelerations = jnp.asarray(acc_sorted)
                 potentials = jnp.asarray(pot_sorted)
@@ -1897,6 +1925,10 @@ class FastMultipoleMethod:
 
         if resolved_target_indices is None:
             accelerations = jnp.asarray(evaluation)[state.inverse_permutation]
+        elif tracing_targets:
+            accelerations = jnp.asarray(evaluation)[state.inverse_permutation][
+                resolved_target_indices
+            ]
         else:
             accelerations = jnp.asarray(evaluation)
         accelerations = accelerations.astype(output_dtype)
