@@ -189,6 +189,12 @@ _LARGE_CPU_TRAVERSAL_CONFIG = DualTreeTraversalConfig(
     max_interactions_per_node=65536,
     max_neighbors_per_leaf=32768,
 )
+_KDTREE_DEFAULT_TRAVERSAL_CONFIG = DualTreeTraversalConfig(
+    max_pair_queue=65536,
+    process_block=64,
+    max_interactions_per_node=512,
+    max_neighbors_per_leaf=2048,
+)
 _OPERATOR_CACHE_MAX = 4096
 _operator_blocks_cache: "OrderedDict[tuple, tuple[Array, Array]]" = OrderedDict()
 
@@ -232,7 +238,7 @@ def _resolve_fmm_config(
         preset_config.tree_build_mode if preset_config else None,
         "lbvh",
     )
-    valid_tree_modes = {"lbvh", "fixed_depth"}
+    valid_tree_modes = {"lbvh", "fixed_depth", "adaptive"}
     if tree_mode not in valid_tree_modes:
         allowed_modes = sorted(valid_tree_modes)
         raise ValueError(f"tree_build_mode must be one of {allowed_modes}")
@@ -839,6 +845,14 @@ class FastMultipoleMethod:
             refine_local_override = False
 
         if (
+            self.tree_type == "kdtree"
+            and not self._explicit_traversal_config
+            and not self._explicit_max_pair_queue
+            and not self._explicit_pair_process_block
+        ):
+            traversal_config = _KDTREE_DEFAULT_TRAVERSAL_CONFIG
+
+        if (
             not self._explicit_grouped_interactions
             and self.preset == "fast"
             and self.expansion_basis == "solidfmm"
@@ -1034,9 +1048,13 @@ class FastMultipoleMethod:
         tree = build_artifacts.tree
         pos_sorted = build_artifacts.positions_sorted
         mass_sorted = build_artifacts.masses_sorted
-        # Provide a safe upper bound for traced/JIT paths; downstream kernels
-        # require a static cap and must never receive a value below true leaf size.
-        leaf_cap_hint = int(positions_arr.shape[0])
+        # Use the true tree leaf cap in eager mode for performance. Under outer
+        # tracing/JIT we still need a conservative static upper bound.
+        leaf_cap_hint = (
+            int(build_artifacts.max_leaf_size)
+            if allow_stateful_cache
+            else int(positions_arr.shape[0])
+        )
         upward = self.prepare_upward_sweep(
             tree,
             pos_sorted,
