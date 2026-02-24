@@ -17,8 +17,8 @@ from jaccpot import FMMPreset
 from jaccpot import FMMPreset as ExpansePreset
 from jaccpot import (
     NearFieldConfig,
+    TreeConfig,
 )
-from jaccpot import TreeConfig
 
 
 def _sample_problem(n: int = 64):

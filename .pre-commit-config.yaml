@@ -9,6 +9,13 @@ repos:
     hooks:
       - id: isort
 
+  - repo: https://github.com/jsh9/pydoclint
+    rev: 0.6.1
+    hooks:
+      - id: pydoclint
+        args: ["--style", "numpy"]
+        stages: [manual]
+
   - repo: local
     hooks:
       - id: pytest
@@ -17,3 +24,4 @@ repos:
         language: system
         pass_filenames: false
         args: ["JAX_ENABLE_X64=1", "pytest", "-q"]
+        stages: [manual]
