@@ -183,6 +183,12 @@ _NEARFIELD_BUCKETED_CPU_EDGE_CHUNK_LARGE = 2048
 _NEARFIELD_BUCKETED_CPU_EDGE_CHUNK_XL = 4096
 _NEARFIELD_SCATTER_SCHEDULE_ITEM_CAP = 16_000_000
 _LARGE_CPU_M2L_CHUNK_SIZE = 32768
+_TRACING_MAX_NEIGHBORS_PER_LEAF = 512
+# Traced prepare_state uses static-capacity interaction buffers. This cap limits
+# max_interactions_per_node only in traced mode (outer jax.jit prepare path) to
+# keep padded far-field buffers from dominating runtime. Lower is faster but can
+# trigger traversal overflow/retry on harder particle configurations.
+_TRACING_MAX_INTERACTIONS_PER_NODE = 512
 _LARGE_CPU_TRAVERSAL_CONFIG = DualTreeTraversalConfig(
     max_pair_queue=131072,
     process_block=4096,
@@ -389,16 +395,20 @@ def _build_tree_with_config(
             "Tree.from_particles must return reordered arrays for FMM runtime."
         )
     # Under outer jax.jit, converting a value-dependent leaf max to Python int
-    # can trigger ConcretizationTypeError. Fall back to a static config cap.
+    # can trigger ConcretizationTypeError. Use the configured leaf-size contract
+    # instead of inflating to N, so traced mode matches eager semantics.
     try:
         max_leaf_size = _max_leaf_size_from_tree(tree)
     except jax.errors.ConcretizationTypeError:
-        # Traced/JIT path: use a correctness-preserving upper bound.
-        # Using too-small caps can truncate per-leaf gathers downstream.
-        max_leaf_size = int(positions.shape[0])
+        max_leaf_size = int(leaf_size)
     cache_leaf_parameter = (
         int(leaf_size) if mode == "lbvh" else tree_config.target_leaf_particles
     )
+    if int(max_leaf_size) > int(leaf_size):
+        raise ValueError(
+            "configured leaf_size is too small for built tree: "
+            f"max_leaf_size={int(max_leaf_size)} > leaf_size={int(leaf_size)}"
+        )
 
     return _TreeBuildArtifacts(
         tree=tree,
@@ -898,6 +908,39 @@ class FastMultipoleMethod:
             adaptive_applied=adaptive_applied,
         )
 
+    def _resolve_tracing_traversal_config(
+        self,
+        *,
+        traversal_config: Optional[DualTreeTraversalConfig],
+    ) -> Optional[DualTreeTraversalConfig]:
+        """Clamp traced traversal capacities to avoid pathological padding.
+
+        Applies only when prepare_state runs under tracing and the user did not
+        explicitly provide traversal_config overrides.
+        """
+
+        if traversal_config is None or self._explicit_traversal_config:
+            return traversal_config
+
+        current_neighbors = int(traversal_config.max_neighbors_per_leaf)
+        capped_neighbors = min(current_neighbors, _TRACING_MAX_NEIGHBORS_PER_LEAF)
+        current_interactions = int(traversal_config.max_interactions_per_node)
+        capped_interactions = min(
+            current_interactions, _TRACING_MAX_INTERACTIONS_PER_NODE
+        )
+        if (
+            capped_neighbors == current_neighbors
+            and capped_interactions == current_interactions
+        ):
+            return traversal_config
+
+        return DualTreeTraversalConfig(
+            max_pair_queue=int(traversal_config.max_pair_queue),
+            process_block=int(traversal_config.process_block),
+            max_interactions_per_node=int(capped_interactions),
+            max_neighbors_per_leaf=int(capped_neighbors),
+        )
+
     def _validate_prepare_state_request(
         self,
         *,
@@ -1048,13 +1091,8 @@ class FastMultipoleMethod:
         tree = build_artifacts.tree
         pos_sorted = build_artifacts.positions_sorted
         mass_sorted = build_artifacts.masses_sorted
-        # Use the true tree leaf cap in eager mode for performance. Under outer
-        # tracing/JIT we still need a conservative static upper bound.
-        leaf_cap_hint = (
-            int(build_artifacts.max_leaf_size)
-            if allow_stateful_cache
-            else int(positions_arr.shape[0])
-        )
+        # Keep one leaf-size contract in eager and traced paths.
+        leaf_cap_hint = int(build_artifacts.max_leaf_size)
         upward = self.prepare_upward_sweep(
             tree,
             pos_sorted,
@@ -1076,7 +1114,7 @@ class FastMultipoleMethod:
             positions_sorted=pos_sorted,
             masses_sorted=mass_sorted,
             inverse_permutation=build_artifacts.inverse_permutation,
-            leaf_cap=build_artifacts.max_leaf_size,
+            leaf_cap=leaf_cap_hint,
             leaf_parameter=build_artifacts.cache_leaf_parameter,
             upward=upward,
             locals_template=locals_template,
@@ -1283,10 +1321,17 @@ class FastMultipoleMethod:
             neighbor_list=neighbor_list,
         )
 
+        traced_nearfield_pairs = False
+        if nearfield_target_leaf_ids is not None and nearfield_valid_pairs is not None:
+            traced_nearfield_pairs = _contains_tracer(
+                (nearfield_target_leaf_ids, nearfield_valid_pairs)
+            )
+
         if (
             resolved_nearfield_mode == "bucketed"
             and nearfield_target_leaf_ids is not None
             and nearfield_valid_pairs is not None
+            and not traced_nearfield_pairs
         ):
             (
                 nearfield_chunk_sort_indices,
@@ -1318,11 +1363,20 @@ class FastMultipoleMethod:
     ) -> tuple[Optional[Array], Optional[Array], Optional[Array]]:
         """Best-effort leaf neighbor pair generation."""
         try:
+            sort_by_source = not _contains_tracer(
+                (
+                    tree.node_ranges,
+                    neighbor_list.leaf_indices,
+                    neighbor_list.offsets,
+                    neighbor_list.neighbors,
+                )
+            )
             return prepare_leaf_neighbor_pairs(
                 jnp.asarray(tree.node_ranges, dtype=INDEX_DTYPE),
                 jnp.asarray(neighbor_list.leaf_indices, dtype=INDEX_DTYPE),
                 jnp.asarray(neighbor_list.offsets, dtype=INDEX_DTYPE),
                 jnp.asarray(neighbor_list.neighbors, dtype=INDEX_DTYPE),
+                sort_by_source=sort_by_source,
             )
         except Exception:
             return None, None, None
@@ -1886,6 +1940,10 @@ class FastMultipoleMethod:
         upward_center_mode = runtime_overrides.center_mode
         if refine_local is None and runtime_overrides.refine_local_override is not None:
             refine_local_val = bool(runtime_overrides.refine_local_override)
+        if not allow_stateful_cache:
+            runtime_traversal_config = self._resolve_tracing_traversal_config(
+                traversal_config=runtime_traversal_config,
+            )
 
         theta_val = float(self.theta if theta is None else theta)
         mac_type_val = self.mac_type

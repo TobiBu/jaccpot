@@ -498,44 +498,56 @@ def _compute_leaf_p2p_impl(
                         safe_edge_idx = jnp.where(in_range, edge_idx, 0)
                         valid_edge = in_range & valid_pairs[safe_edge_idx]
 
-                        tgt_leaf = target_leaf_ids[safe_edge_idx]
-                        src_leaf = source_leaf_ids[safe_edge_idx]
-                        tgt_leaf = jnp.where(valid_edge, tgt_leaf, 0)
-                        src_leaf = jnp.where(valid_edge, src_leaf, 0)
+                        def _compute(args):
+                            acc_in, pot_in = args
+                            tgt_leaf = target_leaf_ids[safe_edge_idx]
+                            src_leaf = source_leaf_ids[safe_edge_idx]
+                            tgt_leaf_local = jnp.where(valid_edge, tgt_leaf, 0)
+                            src_leaf_local = jnp.where(valid_edge, src_leaf, 0)
 
-                        tgt_pos = leaf_positions[tgt_leaf]
-                        tgt_mask = leaf_mask[tgt_leaf] & valid_edge[:, None]
-                        src_pos = leaf_positions[src_leaf]
-                        src_mass = leaf_masses[src_leaf]
-                        src_mask = leaf_mask[src_leaf] & valid_edge[:, None]
+                            tgt_pos = leaf_positions[tgt_leaf_local]
+                            tgt_mask = leaf_mask[tgt_leaf_local] & valid_edge[:, None]
+                            src_pos = leaf_positions[src_leaf_local]
+                            src_mass = leaf_masses[src_leaf_local]
+                            src_mask = leaf_mask[src_leaf_local] & valid_edge[:, None]
 
-                        pair_acc, pair_pot = _pair_contributions_batched(
-                            tgt_pos,
-                            tgt_mask,
-                            src_pos,
-                            src_mass,
-                            src_mask,
-                            softening_sq=soft_sq,
-                            G=g_const,
-                            compute_potential=True,
+                            pair_acc, pair_pot = _pair_contributions_batched(
+                                tgt_pos,
+                                tgt_mask,
+                                src_pos,
+                                src_mass,
+                                src_mask,
+                                softening_sq=soft_sq,
+                                G=g_const,
+                                compute_potential=True,
+                            )
+                            acc_out = _scatter_vectors_with_schedule(
+                                acc_in,
+                                pair_acc,
+                                tgt_mask,
+                                sort_idx,
+                                group_ids,
+                                unique_indices,
+                            )
+                            pot_out = _scatter_scalars_with_schedule(  # type: ignore[arg-type]
+                                pot_in,
+                                pair_pot,
+                                tgt_mask,
+                                sort_idx,
+                                group_ids,
+                                unique_indices,
+                            )
+                            return acc_out, pot_out
+
+                        return (
+                            lax.cond(
+                                jnp.any(valid_edge),
+                                _compute,
+                                lambda args: args,
+                                (acc, pot),
+                            ),
+                            None,
                         )
-                        acc = _scatter_vectors_with_schedule(
-                            acc,
-                            pair_acc,
-                            tgt_mask,
-                            sort_idx,
-                            group_ids,
-                            unique_indices,
-                        )
-                        pot = _scatter_scalars_with_schedule(  # type: ignore[arg-type]
-                            pot,
-                            pair_pot,
-                            tgt_mask,
-                            sort_idx,
-                            group_ids,
-                            unique_indices,
-                        )
-                        return (acc, pot), None
 
                     (accelerations, potentials), _ = lax.scan(
                         _chunk_body,
@@ -556,49 +568,63 @@ def _compute_leaf_p2p_impl(
                         safe_edge_idx = jnp.where(in_range, edge_idx, 0)
                         valid_edge = in_range & valid_pairs[safe_edge_idx]
 
-                        tgt_leaf = target_leaf_ids[safe_edge_idx]
-                        src_leaf = source_leaf_ids[safe_edge_idx]
-                        tgt_leaf = jnp.where(valid_edge, tgt_leaf, 0)
-                        src_leaf = jnp.where(valid_edge, src_leaf, 0)
+                        def _compute(args):
+                            acc_in, pot_in = args
+                            tgt_leaf = target_leaf_ids[safe_edge_idx]
+                            src_leaf = source_leaf_ids[safe_edge_idx]
+                            tgt_leaf_local = jnp.where(valid_edge, tgt_leaf, 0)
+                            src_leaf_local = jnp.where(valid_edge, src_leaf, 0)
 
-                        tgt_pos = leaf_positions[tgt_leaf]
-                        tgt_mask = leaf_mask[tgt_leaf] & valid_edge[:, None]
-                        tgt_ids = leaf_particle_idx[tgt_leaf]
-                        src_pos = leaf_positions[src_leaf]
-                        src_mass = leaf_masses[src_leaf]
-                        src_mask = leaf_mask[src_leaf] & valid_edge[:, None]
-                        sort_idx, group_ids, unique_indices = _build_scatter_schedule(
-                            tgt_ids,
-                            tgt_mask,
-                        )
+                            tgt_pos = leaf_positions[tgt_leaf_local]
+                            tgt_mask = leaf_mask[tgt_leaf_local] & valid_edge[:, None]
+                            tgt_ids = leaf_particle_idx[tgt_leaf_local]
+                            src_pos = leaf_positions[src_leaf_local]
+                            src_mass = leaf_masses[src_leaf_local]
+                            src_mask = leaf_mask[src_leaf_local] & valid_edge[:, None]
+                            sort_idx, group_ids, unique_indices = (
+                                _build_scatter_schedule(
+                                    tgt_ids,
+                                    tgt_mask,
+                                )
+                            )
 
-                        pair_acc, pair_pot = _pair_contributions_batched(
-                            tgt_pos,
-                            tgt_mask,
-                            src_pos,
-                            src_mass,
-                            src_mask,
-                            softening_sq=soft_sq,
-                            G=g_const,
-                            compute_potential=True,
+                            pair_acc, pair_pot = _pair_contributions_batched(
+                                tgt_pos,
+                                tgt_mask,
+                                src_pos,
+                                src_mass,
+                                src_mask,
+                                softening_sq=soft_sq,
+                                G=g_const,
+                                compute_potential=True,
+                            )
+                            acc_out = _scatter_vectors_with_schedule(
+                                acc_in,
+                                pair_acc,
+                                tgt_mask,
+                                sort_idx,
+                                group_ids,
+                                unique_indices,
+                            )
+                            pot_out = _scatter_scalars_with_schedule(  # type: ignore[arg-type]
+                                pot_in,
+                                pair_pot,
+                                tgt_mask,
+                                sort_idx,
+                                group_ids,
+                                unique_indices,
+                            )
+                            return acc_out, pot_out
+
+                        return (
+                            lax.cond(
+                                jnp.any(valid_edge),
+                                _compute,
+                                lambda args: args,
+                                (acc, pot),
+                            ),
+                            None,
                         )
-                        acc = _scatter_vectors_with_schedule(
-                            acc,
-                            pair_acc,
-                            tgt_mask,
-                            sort_idx,
-                            group_ids,
-                            unique_indices,
-                        )
-                        pot = _scatter_scalars_with_schedule(  # type: ignore[arg-type]
-                            pot,
-                            pair_pot,
-                            tgt_mask,
-                            sort_idx,
-                            group_ids,
-                            unique_indices,
-                        )
-                        return (acc, pot), None
 
                     (accelerations, potentials), _ = lax.scan(
                         _chunk_body,
@@ -615,36 +641,46 @@ def _compute_leaf_p2p_impl(
                         safe_edge_idx = jnp.where(in_range, edge_idx, 0)
                         valid_edge = in_range & valid_pairs[safe_edge_idx]
 
-                        tgt_leaf = target_leaf_ids[safe_edge_idx]
-                        src_leaf = source_leaf_ids[safe_edge_idx]
-                        tgt_leaf = jnp.where(valid_edge, tgt_leaf, 0)
-                        src_leaf = jnp.where(valid_edge, src_leaf, 0)
+                        def _compute(acc_in):
+                            tgt_leaf = target_leaf_ids[safe_edge_idx]
+                            src_leaf = source_leaf_ids[safe_edge_idx]
+                            tgt_leaf_local = jnp.where(valid_edge, tgt_leaf, 0)
+                            src_leaf_local = jnp.where(valid_edge, src_leaf, 0)
 
-                        tgt_pos = leaf_positions[tgt_leaf]
-                        tgt_mask = leaf_mask[tgt_leaf] & valid_edge[:, None]
-                        src_pos = leaf_positions[src_leaf]
-                        src_mass = leaf_masses[src_leaf]
-                        src_mask = leaf_mask[src_leaf] & valid_edge[:, None]
+                            tgt_pos = leaf_positions[tgt_leaf_local]
+                            tgt_mask = leaf_mask[tgt_leaf_local] & valid_edge[:, None]
+                            src_pos = leaf_positions[src_leaf_local]
+                            src_mass = leaf_masses[src_leaf_local]
+                            src_mask = leaf_mask[src_leaf_local] & valid_edge[:, None]
 
-                        pair_acc, _ = _pair_contributions_batched(
-                            tgt_pos,
-                            tgt_mask,
-                            src_pos,
-                            src_mass,
-                            src_mask,
-                            softening_sq=soft_sq,
-                            G=g_const,
-                            compute_potential=False,
+                            pair_acc, _ = _pair_contributions_batched(
+                                tgt_pos,
+                                tgt_mask,
+                                src_pos,
+                                src_mass,
+                                src_mask,
+                                softening_sq=soft_sq,
+                                G=g_const,
+                                compute_potential=False,
+                            )
+                            return _scatter_vectors_with_schedule(
+                                acc_in,
+                                pair_acc,
+                                tgt_mask,
+                                sort_idx,
+                                group_ids,
+                                unique_indices,
+                            )
+
+                        return (
+                            lax.cond(
+                                jnp.any(valid_edge),
+                                _compute,
+                                lambda acc_in: acc_in,
+                                acc,
+                            ),
+                            None,
                         )
-                        acc = _scatter_vectors_with_schedule(
-                            acc,
-                            pair_acc,
-                            tgt_mask,
-                            sort_idx,
-                            group_ids,
-                            unique_indices,
-                        )
-                        return acc, None
 
                     accelerations, _ = lax.scan(
                         _chunk_body,
@@ -664,41 +700,53 @@ def _compute_leaf_p2p_impl(
                         safe_edge_idx = jnp.where(in_range, edge_idx, 0)
                         valid_edge = in_range & valid_pairs[safe_edge_idx]
 
-                        tgt_leaf = target_leaf_ids[safe_edge_idx]
-                        src_leaf = source_leaf_ids[safe_edge_idx]
-                        tgt_leaf = jnp.where(valid_edge, tgt_leaf, 0)
-                        src_leaf = jnp.where(valid_edge, src_leaf, 0)
+                        def _compute(acc_in):
+                            tgt_leaf = target_leaf_ids[safe_edge_idx]
+                            src_leaf = source_leaf_ids[safe_edge_idx]
+                            tgt_leaf_local = jnp.where(valid_edge, tgt_leaf, 0)
+                            src_leaf_local = jnp.where(valid_edge, src_leaf, 0)
 
-                        tgt_pos = leaf_positions[tgt_leaf]
-                        tgt_mask = leaf_mask[tgt_leaf] & valid_edge[:, None]
-                        tgt_ids = leaf_particle_idx[tgt_leaf]
-                        src_pos = leaf_positions[src_leaf]
-                        src_mass = leaf_masses[src_leaf]
-                        src_mask = leaf_mask[src_leaf] & valid_edge[:, None]
-                        sort_idx, group_ids, unique_indices = _build_scatter_schedule(
-                            tgt_ids,
-                            tgt_mask,
-                        )
+                            tgt_pos = leaf_positions[tgt_leaf_local]
+                            tgt_mask = leaf_mask[tgt_leaf_local] & valid_edge[:, None]
+                            tgt_ids = leaf_particle_idx[tgt_leaf_local]
+                            src_pos = leaf_positions[src_leaf_local]
+                            src_mass = leaf_masses[src_leaf_local]
+                            src_mask = leaf_mask[src_leaf_local] & valid_edge[:, None]
+                            sort_idx, group_ids, unique_indices = (
+                                _build_scatter_schedule(
+                                    tgt_ids,
+                                    tgt_mask,
+                                )
+                            )
 
-                        pair_acc, _ = _pair_contributions_batched(
-                            tgt_pos,
-                            tgt_mask,
-                            src_pos,
-                            src_mass,
-                            src_mask,
-                            softening_sq=soft_sq,
-                            G=g_const,
-                            compute_potential=False,
+                            pair_acc, _ = _pair_contributions_batched(
+                                tgt_pos,
+                                tgt_mask,
+                                src_pos,
+                                src_mass,
+                                src_mask,
+                                softening_sq=soft_sq,
+                                G=g_const,
+                                compute_potential=False,
+                            )
+                            return _scatter_vectors_with_schedule(
+                                acc_in,
+                                pair_acc,
+                                tgt_mask,
+                                sort_idx,
+                                group_ids,
+                                unique_indices,
+                            )
+
+                        return (
+                            lax.cond(
+                                jnp.any(valid_edge),
+                                _compute,
+                                lambda acc_in: acc_in,
+                                acc,
+                            ),
+                            None,
                         )
-                        acc = _scatter_vectors_with_schedule(
-                            acc,
-                            pair_acc,
-                            tgt_mask,
-                            sort_idx,
-                            group_ids,
-                            unique_indices,
-                        )
-                        return acc, None
 
                     accelerations, _ = lax.scan(
                         _chunk_body,
