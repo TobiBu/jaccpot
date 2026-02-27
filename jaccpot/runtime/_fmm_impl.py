@@ -104,7 +104,7 @@ from .reference import compute_gravitational_potential as reference_compute_pote
 from .reference import direct_sum as reference_direct_sum
 from .reference import evaluate_expansion as reference_evaluate_expansion
 
-ExpansionBasis = Literal["cartesian", "solidfmm"]
+ExpansionBasis = Literal["cartesian", "solidfmm", "complex"]
 FarFieldMode = Literal["auto", "pair_grouped", "class_major"]
 NearFieldMode = Literal["auto", "baseline", "bucketed"]
 
@@ -590,6 +590,7 @@ class FastMultipoleMethod:
         working_dtype: Optional[DTypeLike] = None,
         *,
         expansion_basis: ExpansionBasis = "cartesian",
+        basis_impl: Optional[Any] = None,
         mac_type: MACType = "bh",
         complex_rotation: str = "solidfmm",  # "cached",
         dehnen_radius_scale: float = 1.0,
@@ -617,11 +618,14 @@ class FastMultipoleMethod:
     ):
         """Initialize FMM runtime with validated policy and kernel settings."""
         basis_norm = str(expansion_basis).strip().lower()
+        if basis_norm == "complex":
+            basis_norm = "solidfmm"
         if basis_norm not in ("cartesian", "solidfmm"):
             raise ValueError(
-                "expansion_basis must be 'cartesian' or 'solidfmm'",
+                "expansion_basis must be 'cartesian', 'solidfmm', or 'complex'",
             )
         self.expansion_basis = basis_norm  # type: ignore[assignment]
+        self.basis_impl = basis_impl
 
         rotation_norm = str(complex_rotation).strip().lower()
         if rotation_norm not in ("bdz", "cached", "wigner", "solidfmm"):

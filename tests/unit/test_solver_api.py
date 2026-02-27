@@ -6,6 +6,7 @@ import numpy as np
 import pytest
 
 from jaccpot import (
+    ComplexSHBasis,
     FarFieldConfig,
 )
 from jaccpot import FastMultipoleMethod
@@ -105,6 +106,50 @@ def test_tree_type_flows_from_advanced_config():
         advanced=FMMAdvancedConfig(tree=TreeConfig(tree_type="radix")),
     )
     assert fmm._impl.tree_type == "radix"
+
+
+def test_basis_complex_alias_matches_solidfmm():
+    positions, masses = _sample_problem(n=64)
+    fmm_alias = FastMultipoleMethod(
+        preset=FMMPreset.FAST,
+        basis="complex",
+    )
+    fmm_solidfmm = FastMultipoleMethod(
+        preset=FMMPreset.FAST,
+        basis="solidfmm",
+    )
+    acc_alias = fmm_alias.compute_accelerations(
+        positions,
+        masses,
+        leaf_size=16,
+        max_order=3,
+    )
+    acc_solidfmm = fmm_solidfmm.compute_accelerations(
+        positions,
+        masses,
+        leaf_size=16,
+        max_order=3,
+    )
+    assert np.allclose(
+        np.asarray(acc_alias), np.asarray(acc_solidfmm), rtol=1e-5, atol=1e-5
+    )
+
+
+def test_basis_object_is_accepted():
+    positions, masses = _sample_problem(n=48)
+    basis = ComplexSHBasis()
+    fmm = FastMultipoleMethod(
+        preset=FMMPreset.FAST,
+        basis=basis,
+    )
+    acc = fmm.compute_accelerations(
+        positions,
+        masses,
+        leaf_size=16,
+        max_order=3,
+    )
+    assert fmm.basis == "complex"
+    assert acc.shape == positions.shape
 
 
 def test_invalid_tree_type_raises():

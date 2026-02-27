@@ -8,6 +8,7 @@ from typing import Any, NamedTuple, Optional, Tuple, Union
 
 from jaxtyping import Array, DTypeLike
 
+from .basis import BasisInterface, ComplexSHBasis
 from .config import (
     Basis,
     FMMAdvancedConfig,
@@ -46,15 +47,64 @@ def _normalize_preset(preset: Union[FMMPreset, str]) -> FMMPreset:
     return FMMPreset(str(preset).strip().lower())
 
 
+class _BasisResolution(NamedTuple):
+    """Resolved basis routing for public API and runtime backend."""
+
+    public_name: str
+    runtime_basis: Basis
+    basis_impl: Optional[BasisInterface]
+
+
+def _resolve_basis_input(basis: Union[Basis, BasisInterface, str]) -> _BasisResolution:
+    """Normalize basis string/object to runtime expansion basis + metadata."""
+    if isinstance(basis, str):
+        basis_norm = basis.strip().lower()
+        if basis_norm in ("solidfmm", "complex"):
+            return _BasisResolution(
+                public_name="complex",
+                runtime_basis="solidfmm",
+                basis_impl=ComplexSHBasis(),
+            )
+        if basis_norm == "cartesian":
+            return _BasisResolution(
+                public_name="cartesian",
+                runtime_basis="cartesian",
+                basis_impl=None,
+            )
+        raise ValueError(
+            "basis must be one of 'cartesian', 'solidfmm', or 'complex', "
+            f"got '{basis}'"
+        )
+
+    if isinstance(basis, BasisInterface):
+        runtime_basis = str(basis.runtime_expansion_basis).strip().lower()
+        if runtime_basis == "complex":
+            runtime_basis = "solidfmm"
+        if runtime_basis not in ("cartesian", "solidfmm"):
+            raise ValueError(
+                "basis.runtime_expansion_basis must be 'cartesian', "
+                "'solidfmm', or 'complex'"
+            )
+        return _BasisResolution(
+            public_name=str(basis.name),
+            runtime_basis=runtime_basis,  # type: ignore[arg-type]
+            basis_impl=basis,
+        )
+
+    raise TypeError("basis must be a string or BasisInterface implementation")
+
+
 def _pop_legacy_common_overrides(
     *,
-    basis: Basis,
+    basis: Union[Basis, BasisInterface, str],
     theta: float,
     G: float,
     softening: float,
     working_dtype: Optional[DTypeLike],
     legacy_kwargs: dict[str, Any],
-) -> tuple[Basis, float, float, float, Optional[DTypeLike], bool]:
+) -> tuple[
+    Union[Basis, BasisInterface, str], float, float, float, Optional[DTypeLike], bool
+]:
     """Consume legacy constructor kwargs and map them to modern arguments."""
     used = False
     legacy_basis = legacy_kwargs.pop("expansion_basis", None)
@@ -208,7 +258,7 @@ class FastMultipoleMethod:
         self,
         *,
         preset: Union[FMMPreset, str] = FMMPreset.FAST,
-        basis: Basis = "solidfmm",
+        basis: Union[Basis, BasisInterface, str] = "complex",
         theta: float = 0.6,
         G: float = 1.0,
         softening: float = 1e-3,
@@ -229,6 +279,8 @@ class FastMultipoleMethod:
                 legacy_kwargs=legacy_kwargs,
             )
         )
+        basis_resolution = _resolve_basis_input(basis)
+        runtime_basis = basis_resolution.runtime_basis
 
         preset_norm = _normalize_preset(preset)
         advanced_cfg = (
@@ -237,7 +289,7 @@ class FastMultipoleMethod:
 
         runtime_overrides = _pop_legacy_runtime_overrides(
             preset_norm=preset_norm,
-            basis=basis,
+            basis=runtime_basis,
             advanced_cfg=advanced_cfg,
             legacy_kwargs=legacy_kwargs,
             legacy_used=legacy_used,
@@ -251,7 +303,8 @@ class FastMultipoleMethod:
             G=float(G),
             softening=float(softening),
             working_dtype=working_dtype,
-            expansion_basis=basis,
+            expansion_basis=runtime_basis,
+            basis_impl=basis_resolution.basis_impl,
             complex_rotation=runtime_overrides.complex_rotation,
             tree_type=runtime_overrides.tree_type or "radix",
             tree_build_mode=runtime_overrides.tree_mode,
@@ -313,7 +366,8 @@ class FastMultipoleMethod:
             unknown = ", ".join(sorted(str(k) for k in legacy_kwargs.keys()))
             raise TypeError(f"Unknown jaccpot.FastMultipoleMethod kwargs: {unknown}")
         self.preset = preset_norm
-        self.basis = basis
+        self.basis = basis_resolution.public_name
+        self.basis_impl = basis_resolution.basis_impl
         self.advanced = advanced_cfg
 
     def compute_accelerations(

@@ -5,6 +5,7 @@ from ._typecheck import enable_runtime_typecheck
 enable_runtime_typecheck()
 
 from .autodiff import differentiable_gravitational_acceleration
+from .basis import ComplexSHBasis
 from .config import (
     FarFieldConfig,
     FMMAdvancedConfig,
@@ -21,6 +22,7 @@ __all__ = [
     "FMMPreset",
     "FarFieldConfig",
     "FastMultipoleMethod",
+    "ComplexSHBasis",
     "NearFieldConfig",
     "OdisseoFMMCoupler",
     "RuntimePolicyConfig",
