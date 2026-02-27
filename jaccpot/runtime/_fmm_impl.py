@@ -441,6 +441,7 @@ class FMMPreparedState:
     positions_sorted: Array
     masses_sorted: Array
     inverse_permutation: Array
+    upward: TreeUpwardData
     downward: TreeDownwardData
     neighbor_list: NodeNeighborList
     max_leaf_size: int
@@ -457,6 +458,7 @@ class FMMPreparedState:
     nearfield_chunk_sort_indices: Optional[Array]
     nearfield_chunk_group_ids: Optional[Array]
     nearfield_chunk_unique_indices: Optional[Array]
+    force_scale_nodes: Optional[Array]
 
     def tree_flatten(self):
         children = (
@@ -464,6 +466,7 @@ class FMMPreparedState:
             self.positions_sorted,
             self.masses_sorted,
             self.inverse_permutation,
+            self.upward,
             self.downward,
             self.neighbor_list,
             self.interactions,
@@ -474,6 +477,7 @@ class FMMPreparedState:
             self.nearfield_chunk_sort_indices,
             self.nearfield_chunk_group_ids,
             self.nearfield_chunk_unique_indices,
+            self.force_scale_nodes,
         )
         aux = (
             int(self.max_leaf_size),
@@ -500,6 +504,7 @@ class FMMPreparedState:
             positions_sorted,
             masses_sorted,
             inverse_permutation,
+            upward,
             downward,
             neighbor_list,
             interactions,
@@ -510,12 +515,14 @@ class FMMPreparedState:
             nearfield_chunk_sort_indices,
             nearfield_chunk_group_ids,
             nearfield_chunk_unique_indices,
+            force_scale_nodes,
         ) = children
         return cls(
             tree=tree,
             positions_sorted=positions_sorted,
             masses_sorted=masses_sorted,
             inverse_permutation=inverse_permutation,
+            upward=upward,
             downward=downward,
             neighbor_list=neighbor_list,
             max_leaf_size=int(max_leaf_size),
@@ -532,6 +539,7 @@ class FMMPreparedState:
             nearfield_chunk_sort_indices=nearfield_chunk_sort_indices,
             nearfield_chunk_group_ids=nearfield_chunk_group_ids,
             nearfield_chunk_unique_indices=nearfield_chunk_unique_indices,
+            force_scale_nodes=force_scale_nodes,
         )
 
 
@@ -600,6 +608,7 @@ class FastMultipoleMethod:
         m2l_impl: Optional[str] = None,
         adaptive_order: bool = False,
         p_gears: Optional[tuple[int, ...]] = None,
+        mac_force_scale_mode: str = "prev",
         mac_type: MACType = "bh",
         complex_rotation: str = "solidfmm",  # "cached",
         dehnen_radius_scale: float = 1.0,
@@ -641,6 +650,12 @@ class FastMultipoleMethod:
         self.adaptive_order = bool(adaptive_order)
         self.p_gears = tuple(int(v) for v in (p_gears or ()))
         self._recent_far_pairs_by_gear_counts: tuple[int, ...] = tuple()
+        force_scale_mode_norm = str(mac_force_scale_mode).strip().lower()
+        if force_scale_mode_norm not in ("prev", "prepass"):
+            raise ValueError("mac_force_scale_mode must be 'prev' or 'prepass'")
+        self.mac_force_scale_mode = force_scale_mode_norm
+        self._last_force_scale_nodes: Optional[Array] = None
+        self._in_force_scale_prepass = False
 
         rotation_norm = str(complex_rotation).strip().lower()
         if rotation_norm not in ("bdz", "cached", "wigner", "solidfmm"):
@@ -767,6 +782,70 @@ class FastMultipoleMethod:
         if name == "real":
             return "real"
         return "complex"
+
+    def _compute_node_force_scale_from_sorted_acc(
+        self: "FastMultipoleMethod",
+        *,
+        tree: Tree,
+        accelerations_sorted: Array,
+    ) -> Array:
+        """Estimate per-node force scales from sorted per-particle accelerations."""
+        node_ranges = np.asarray(jax.device_get(tree.node_ranges), dtype=np.int64)
+        acc_sorted_np = np.asarray(jax.device_get(accelerations_sorted))
+        mag = np.linalg.norm(acc_sorted_np, axis=1)
+        force_scale = np.zeros((node_ranges.shape[0],), dtype=mag.dtype)
+        for idx, (start, end) in enumerate(node_ranges):
+            s = int(start)
+            e = int(end)
+            if e < s:
+                continue
+            force_scale[idx] = float(np.max(mag[s : e + 1]))
+        return jnp.asarray(force_scale, dtype=accelerations_sorted.dtype)
+
+    def _tail_power_by_gear_from_multipoles(
+        self: "FastMultipoleMethod",
+        *,
+        multipole_packed: Array,
+        p_gears: tuple[int, ...],
+    ) -> Array:
+        """Compute a conservative per-node tail-power estimate for each gear."""
+        packed = jnp.asarray(multipole_packed)
+        if len(p_gears) == 0:
+            return jnp.zeros((packed.shape[0], 0), dtype=packed.real.dtype)
+        total_p = int(round(np.sqrt(int(packed.shape[1])) - 1))
+        magnitudes = jnp.abs(packed)
+        tails: list[Array] = []
+        for p_gear in p_gears:
+            p_clip = int(max(0, min(int(p_gear), total_p)))
+            keep = sh_size(p_clip)
+            tail = jnp.linalg.norm(magnitudes[:, keep:], axis=1)
+            tails.append(tail)
+        return jnp.stack(tails, axis=1)
+
+    def build_dehnen_error_node_features(
+        self: "FastMultipoleMethod",
+        *,
+        upward: TreeUpwardData,
+        p_gears: tuple[int, ...],
+        force_scale_nodes: Optional[Array],
+    ) -> dict[str, Array]:
+        """Build yggdrax ``node_features`` expected by ``mac_type='dehnen_error'``."""
+        if len(p_gears) == 0:
+            raise ValueError("dehnen_error node features require non-empty p_gears")
+        tail_power = self._tail_power_by_gear_from_multipoles(
+            multipole_packed=upward.multipoles.packed,
+            p_gears=p_gears,
+        )
+        if force_scale_nodes is None:
+            force_scale = jnp.ones((tail_power.shape[0],), dtype=tail_power.dtype)
+        else:
+            force_scale = jnp.asarray(force_scale_nodes, dtype=tail_power.dtype)
+            if int(force_scale.shape[0]) != int(tail_power.shape[0]):
+                raise ValueError("force_scale_nodes length must match number of nodes")
+        return {
+            "tail_power_by_gear": tail_power,
+            "force_scale": force_scale,
+        }
 
     def _prepared_state_cache_lookup(
         self,
@@ -1154,6 +1233,7 @@ class FastMultipoleMethod:
         self,
         *,
         tree_artifacts: _PrepareStateTreeUpwardArtifacts,
+        force_scale_nodes: Optional[Array],
         upward_center_mode: str,
         theta_val: float,
         mac_type_val: MACType,
@@ -1170,22 +1250,37 @@ class FastMultipoleMethod:
         allow_stateful_cache: bool,
     ) -> _PrepareStateDualDownwardArtifacts:
         """Build/reuse interactions and prepare downward artifacts."""
-        cache_key = _interaction_cache_key(
-            tree_artifacts.tree,
-            tree_mode=tree_artifacts.tree_mode,
-            leaf_parameter=tree_artifacts.leaf_parameter,
-            theta=theta_val,
-            mac_type=mac_type_val,
-            dehnen_radius_scale=dehnen_radius_scale,
-            expansion_basis=self.expansion_basis,
-            center_mode=upward_center_mode,
-            max_pair_queue=self.max_pair_queue,
-            pair_process_block=self.pair_process_block,
-            traversal_config=runtime_traversal_config,
-            refine_local=refine_local_val,
-            max_refine_levels=max_refine_levels_val,
-            aspect_threshold=aspect_threshold_val,
-        )
+        node_features = None
+        traversal_p_gears = None
+        traversal_eps = None
+        cache_key = None
+        if mac_type_val == "dehnen_error":
+            if len(self.p_gears) == 0:
+                raise ValueError("mac_type='dehnen_error' requires non-empty p_gears")
+            node_features = self.build_dehnen_error_node_features(
+                upward=tree_artifacts.upward,
+                p_gears=self.p_gears,
+                force_scale_nodes=force_scale_nodes,
+            )
+            traversal_p_gears = self.p_gears
+            traversal_eps = theta_val
+        else:
+            cache_key = _interaction_cache_key(
+                tree_artifacts.tree,
+                tree_mode=tree_artifacts.tree_mode,
+                leaf_parameter=tree_artifacts.leaf_parameter,
+                theta=theta_val,
+                mac_type=mac_type_val,
+                dehnen_radius_scale=dehnen_radius_scale,
+                expansion_basis=self.expansion_basis,
+                center_mode=upward_center_mode,
+                max_pair_queue=self.max_pair_queue,
+                pair_process_block=self.pair_process_block,
+                traversal_config=runtime_traversal_config,
+                refine_local=refine_local_val,
+                max_refine_levels=max_refine_levels_val,
+                aspect_threshold=aspect_threshold_val,
+            )
 
         dual_artifacts, cache_entry = _build_dual_tree_artifacts(
             tree_artifacts.tree,
@@ -1202,6 +1297,9 @@ class FastMultipoleMethod:
             use_dense_interactions=self.use_dense_interactions,
             grouped_interactions=grouped_interactions,
             grouped_chunk_size=runtime_m2l_chunk_size,
+            p_gears=traversal_p_gears,
+            eps=traversal_eps,
+            node_features=node_features,
         )
         if allow_stateful_cache:
             self._interaction_cache = cache_entry
@@ -1218,28 +1316,38 @@ class FastMultipoleMethod:
             grouped_segment_sort_permutation,
             grouped_segment_group_ids,
             grouped_segment_unique_targets,
+            far_pairs_by_gear_structured,
         ) = self._unpack_dual_tree_artifacts(dual_artifacts)
 
         far_pairs_by_gear = None
         if self.adaptive_order:
             if len(self.p_gears) == 0:
                 raise ValueError("adaptive_order=True requires non-empty p_gears")
-            gear_buckets: list[tuple[Array, Array]] = []
-            for _ in self.p_gears:
-                gear_buckets.append(
+            if far_pairs_by_gear_structured is not None:
+                far_pairs_by_gear = tuple(
                     (
-                        jnp.zeros((0,), dtype=INDEX_DTYPE),
-                        jnp.zeros((0,), dtype=INDEX_DTYPE),
+                        jnp.asarray(bucket_src, dtype=INDEX_DTYPE),
+                        jnp.asarray(bucket_tgt, dtype=INDEX_DTYPE),
                     )
+                    for bucket_src, bucket_tgt in far_pairs_by_gear_structured
                 )
-            # Conservative baseline bucketization: place all pairs in highest gear.
-            gear_buckets[-1] = (
-                jnp.asarray(interactions.sources, dtype=INDEX_DTYPE),
-                jnp.asarray(interactions.targets, dtype=INDEX_DTYPE),
-            )
-            far_pairs_by_gear = tuple(gear_buckets)
+            else:
+                gear_buckets: list[tuple[Array, Array]] = []
+                for _ in self.p_gears:
+                    gear_buckets.append(
+                        (
+                            jnp.zeros((0,), dtype=INDEX_DTYPE),
+                            jnp.zeros((0,), dtype=INDEX_DTYPE),
+                        )
+                    )
+                # Fallback for MAC variants that do not report structured gears.
+                gear_buckets[-1] = (
+                    jnp.asarray(interactions.sources, dtype=INDEX_DTYPE),
+                    jnp.asarray(interactions.targets, dtype=INDEX_DTYPE),
+                )
+                far_pairs_by_gear = tuple(gear_buckets)
             self._recent_far_pairs_by_gear_counts = tuple(
-                int(bucket_src.shape[0]) for bucket_src, _ in gear_buckets
+                int(bucket_src.shape[0]) for bucket_src, _ in far_pairs_by_gear
             )
         else:
             self._recent_far_pairs_by_gear_counts = tuple()
@@ -1507,6 +1615,7 @@ class FastMultipoleMethod:
         Optional[Array],
         Optional[Array],
         Optional[Array],
+        Optional[tuple[tuple[Array, Array], ...]],
     ]:
         """Unpack dual-tree artifacts for downward preparation and state export."""
         return (
@@ -1521,6 +1630,7 @@ class FastMultipoleMethod:
             dual_artifacts.grouped_segment_sort_permutation,
             dual_artifacts.grouped_segment_group_ids,
             dual_artifacts.grouped_segment_unique_targets,
+            dual_artifacts.far_pairs_by_gear,
         )
 
     def _prepare_downward_with_artifacts(
@@ -1945,12 +2055,24 @@ class FastMultipoleMethod:
             else bool(jit_traversal)
         )
 
-        return self.evaluate_prepared_state(
+        evaluation = self.evaluate_prepared_state(
             state,
             target_indices=target_indices,
             return_potential=return_potential,
             jit_traversal=jit_traversal_flag,
         )
+        if target_indices is None and not _contains_tracer((state, evaluation)):
+            accelerations_out = evaluation[0] if return_potential else evaluation
+            inv = jnp.asarray(state.inverse_permutation)
+            sorted_idx = jnp.argsort(inv)
+            accelerations_sorted = jnp.asarray(accelerations_out)[sorted_idx]
+            self._last_force_scale_nodes = (
+                self._compute_node_force_scale_from_sorted_acc(
+                    tree=state.tree,
+                    accelerations_sorted=accelerations_sorted,
+                )
+            )
+        return evaluation
 
     @jaxtyped(typechecker=beartype)
     def prepare_state(
@@ -2038,8 +2160,60 @@ class FastMultipoleMethod:
             upward_center_mode=upward_center_mode,
             allow_stateful_cache=allow_stateful_cache,
         )
+        force_scale_nodes = None
+        if mac_type_val == "dehnen_error":
+            node_count = int(tree_artifacts.tree.parent.shape[0])
+            previous_force_scale = self._last_force_scale_nodes
+            if self.mac_force_scale_mode == "prev" or self._in_force_scale_prepass:
+                if (
+                    previous_force_scale is not None
+                    and int(previous_force_scale.shape[0]) == node_count
+                ):
+                    force_scale_nodes = jnp.asarray(
+                        previous_force_scale,
+                        dtype=positions_arr.dtype,
+                    )
+                else:
+                    force_scale_nodes = jnp.ones(
+                        (node_count,),
+                        dtype=positions_arr.dtype,
+                    )
+            else:
+                if len(self.p_gears) == 0:
+                    raise ValueError(
+                        "mac_force_scale_mode='prepass' requires non-empty p_gears"
+                    )
+                low_order = int(min(self.p_gears))
+                self._in_force_scale_prepass = True
+                saved_p_gears = self.p_gears
+                try:
+                    self.p_gears = (low_order,)
+                    prepass_acc = self.compute_accelerations(
+                        positions_arr,
+                        masses_arr,
+                        bounds=bounds,
+                        leaf_size=int(leaf_size),
+                        max_order=low_order,
+                        return_potential=False,
+                        theta=theta_val,
+                        reuse_prepared_state=False,
+                        jit_tree=jit_tree,
+                        jit_traversal=False,
+                    )
+                finally:
+                    self.p_gears = saved_p_gears
+                    self._in_force_scale_prepass = False
+                prepass_sorted = jnp.asarray(prepass_acc)[
+                    jnp.argsort(tree_artifacts.inverse_permutation)
+                ]
+                force_scale_nodes = self._compute_node_force_scale_from_sorted_acc(
+                    tree=tree_artifacts.tree,
+                    accelerations_sorted=prepass_sorted,
+                ).astype(positions_arr.dtype)
+                self._last_force_scale_nodes = force_scale_nodes
         dual_downward_artifacts = self._prepare_state_dual_and_downward(
             tree_artifacts=tree_artifacts,
+            force_scale_nodes=force_scale_nodes,
             upward_center_mode=upward_center_mode,
             theta_val=theta_val,
             mac_type_val=mac_type_val,
@@ -2083,6 +2257,7 @@ class FastMultipoleMethod:
             inverse_permutation=jnp.asarray(
                 tree_artifacts.inverse_permutation, dtype=INDEX_DTYPE
             ),
+            upward=tree_artifacts.upward,
             downward=dual_downward_artifacts.downward,
             neighbor_list=dual_downward_artifacts.neighbor_list,
             max_leaf_size=tree_artifacts.leaf_cap,
@@ -2099,6 +2274,7 @@ class FastMultipoleMethod:
             nearfield_chunk_sort_indices=nearfield_artifacts.chunk_sort_indices,
             nearfield_chunk_group_ids=nearfield_artifacts.chunk_group_ids,
             nearfield_chunk_unique_indices=nearfield_artifacts.chunk_unique_indices,
+            force_scale_nodes=force_scale_nodes,
         )
 
     @jaxtyped(typechecker=beartype)
@@ -3503,7 +3679,7 @@ def _prepare_solidfmm_downward_sweep(
                 if pair_count_g == 0:
                     continue
                 coeff_g = sh_size(int(p_gear))
-                locals_slice = locals_updated[:, :coeff_g]
+                locals_slice = jnp.array(locals_updated[:, :coeff_g], copy=True)
                 multip_slice = multip_packed_kernel[:, :coeff_g]
                 if basis_mode_norm == "complex":
                     if pair_count_g <= chunk_size:
@@ -3557,7 +3733,11 @@ def _prepare_solidfmm_downward_sweep(
                             total_nodes=total_nodes,
                             chunk_size=chunk_size,
                         )
-                locals_updated = locals_updated.at[:, :coeff_g].set(locals_slice)
+                locals_tail = locals_updated[:, coeff_g:]
+                locals_updated = jnp.concatenate(
+                    (locals_slice, locals_tail),
+                    axis=1,
+                )
         elif basis_mode_norm == "complex" and pair_count <= chunk_size:
             locals_updated = _accumulate_solidfmm_m2l_fullbatch(
                 locals_coeffs,

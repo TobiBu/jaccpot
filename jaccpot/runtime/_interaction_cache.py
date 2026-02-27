@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from typing import NamedTuple, Optional
 
 import jax
+import jax.numpy as jnp
 import numpy as np
 from beartype.typing import Callable
 from jaxtyping import Array
@@ -37,6 +38,7 @@ class _DualTreeArtifacts:
     grouped_segment_group_ids: Optional[Array]
     grouped_segment_unique_targets: Optional[Array]
     grouped_chunk_size: Optional[int]
+    far_pairs_by_gear: Optional[tuple[tuple[Array, Array], ...]]
 
 
 class _InteractionCacheEntry(NamedTuple):
@@ -170,10 +172,14 @@ def _build_dual_tree_artifacts(
     use_dense_interactions: bool,
     grouped_interactions: bool,
     grouped_chunk_size: Optional[int],
+    p_gears: Optional[tuple[int, ...]] = None,
+    eps: Optional[float] = None,
+    node_features: Optional[dict[str, Array]] = None,
 ) -> tuple[_DualTreeArtifacts, Optional[_InteractionCacheEntry]]:
     """Construct or reuse dual-tree traversal products for a tree."""
 
     cache_out = cache_entry
+    far_pairs_by_gear = None
     if (
         cache_key is not None
         and cache_entry is not None
@@ -193,32 +199,53 @@ def _build_dual_tree_artifacts(
     else:
         from . import fmm as _runtime_fmm
 
+        use_structured = bool(mac_type == "dehnen_error" and p_gears)
         build_out = _runtime_fmm.build_interactions_and_neighbors(
             tree,
             geometry,
             theta=theta,
             mac_type=mac_type,
+            p_gears=p_gears,
+            eps=eps,
             dehnen_radius_scale=dehnen_radius_scale,
+            node_features=node_features,
             max_pair_queue=max_pair_queue,
             process_block=pair_process_block,
             traversal_config=traversal_config,
             retry_logger=retry_logger,
             return_result=True,
             return_grouped=grouped_interactions,
+            return_structured=use_structured,
         )
-        if grouped_interactions:
-            (
-                interactions,
-                neighbor_list,
-                traversal_result,
-                grouped_buffers,
-            ) = build_out
+        if use_structured:
+            interactions = build_out.far_pairs
+            neighbor_list = build_out.near_pairs
+            far_pairs_by_gear_raw = build_out.far_pairs_by_gear
+            far_pairs_by_gear = None
+            if far_pairs_by_gear_raw is not None:
+                far_pairs_by_gear = tuple(
+                    (
+                        jnp.asarray(bucket_sources),
+                        jnp.asarray(bucket_targets),
+                    )
+                    for bucket_sources, bucket_targets in far_pairs_by_gear_raw
+                )
+            traversal_result = build_out.meta.get("traversal_result")
+            grouped_buffers = build_out.meta.get("grouped")
         else:
-            (
-                interactions,
-                neighbor_list,
-                traversal_result,
-            ) = build_out
+            if grouped_interactions:
+                (
+                    interactions,
+                    neighbor_list,
+                    traversal_result,
+                    grouped_buffers,
+                ) = build_out
+            else:
+                (
+                    interactions,
+                    neighbor_list,
+                    traversal_result,
+                ) = build_out
         cache_out = (
             _InteractionCacheEntry(
                 key=cache_key,
@@ -364,5 +391,6 @@ def _build_dual_tree_artifacts(
         grouped_segment_group_ids=grouped_segment_group_ids,
         grouped_segment_unique_targets=grouped_segment_unique_targets,
         grouped_chunk_size=grouped_chunk_size_cached,
+        far_pairs_by_gear=far_pairs_by_gear,
     )
     return artifacts, cache_out
