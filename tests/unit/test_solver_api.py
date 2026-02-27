@@ -131,3 +131,158 @@ def test_kdtree_tree_type_runs_compute_accelerations():
     )
     assert acc.shape == positions.shape
     assert np.isfinite(np.asarray(acc)).all()
+
+
+def test_compute_accelerations_target_indices_matches_full_slice():
+    positions, masses = _sample_problem(n=80)
+    fmm = FastMultipoleMethod(
+        preset=FMMPreset.FAST,
+        basis="solidfmm",
+    )
+    target_indices = jnp.asarray([1, 7, 11, 29, 63], dtype=jnp.int32)
+
+    acc_full = fmm.compute_accelerations(
+        positions,
+        masses,
+        leaf_size=16,
+        max_order=3,
+    )
+    acc_target = fmm.compute_accelerations(
+        positions,
+        masses,
+        target_indices=target_indices,
+        leaf_size=16,
+        max_order=3,
+    )
+
+    assert acc_target.shape == (target_indices.shape[0], 3)
+    assert np.allclose(
+        np.asarray(acc_target),
+        np.asarray(acc_full)[np.asarray(target_indices)],
+        rtol=1e-5,
+        atol=1e-5,
+    )
+
+
+def test_evaluate_prepared_state_target_indices_with_potential():
+    positions, masses = _sample_problem(n=72)
+    fmm = FastMultipoleMethod(
+        preset=FMMPreset.FAST,
+        basis="solidfmm",
+    )
+    target_indices = jnp.asarray([0, 5, 9, 10, 33], dtype=jnp.int32)
+    state = fmm.prepare_state(
+        positions,
+        masses,
+        leaf_size=16,
+        max_order=3,
+    )
+
+    full_acc, full_pot = fmm.evaluate_prepared_state(state, return_potential=True)
+    target_acc, target_pot = fmm.evaluate_prepared_state(
+        state,
+        target_indices=target_indices,
+        return_potential=True,
+    )
+
+    np_idx = np.asarray(target_indices)
+    assert target_acc.shape == (target_indices.shape[0], 3)
+    assert target_pot.shape == (target_indices.shape[0],)
+    assert np.allclose(np.asarray(target_acc), np.asarray(full_acc)[np_idx])
+    assert np.allclose(np.asarray(target_pot), np.asarray(full_pot)[np_idx])
+
+
+def test_target_indices_out_of_range_raises():
+    positions, masses = _sample_problem(n=16)
+    fmm = FastMultipoleMethod(
+        preset=FMMPreset.FAST,
+        basis="solidfmm",
+    )
+    with pytest.raises(ValueError, match="out-of-range"):
+        fmm.compute_accelerations(
+            positions,
+            masses,
+            target_indices=jnp.asarray([0, 16], dtype=jnp.int32),
+            leaf_size=8,
+            max_order=2,
+        )
+
+
+def test_target_indices_preserve_order_and_duplicates():
+    positions, masses = _sample_problem(n=64)
+    fmm = FastMultipoleMethod(
+        preset=FMMPreset.FAST,
+        basis="solidfmm",
+    )
+    target_indices = jnp.asarray([9, 3, 9, 0], dtype=jnp.int32)
+    full_acc = fmm.compute_accelerations(
+        positions,
+        masses,
+        leaf_size=16,
+        max_order=3,
+    )
+    subset_acc = fmm.compute_accelerations(
+        positions,
+        masses,
+        target_indices=target_indices,
+        leaf_size=16,
+        max_order=3,
+    )
+    assert subset_acc.shape == (4, 3)
+    assert np.allclose(
+        np.asarray(subset_acc),
+        np.asarray(full_acc)[np.asarray(target_indices)],
+        rtol=1e-5,
+        atol=1e-5,
+    )
+
+
+def test_evaluate_prepared_state_can_run_inside_jit_with_targets():
+    positions, masses = _sample_problem(n=64)
+    fmm = FastMultipoleMethod(
+        preset=FMMPreset.FAST,
+        basis="solidfmm",
+    )
+    state = fmm.prepare_state(
+        positions,
+        masses,
+        leaf_size=16,
+        max_order=3,
+    )
+    target_indices = jnp.asarray([0, 7, 11, 23, 31], dtype=jnp.int32)
+
+    jit_eval = jax.jit(
+        lambda st, idx: fmm.evaluate_prepared_state(st, target_indices=idx)
+    )
+    acc_jit = jit_eval(state, target_indices)
+    acc_ref = fmm.evaluate_prepared_state(state, target_indices=target_indices)
+
+    assert acc_jit.shape == (target_indices.shape[0], 3)
+    assert np.allclose(np.asarray(acc_jit), np.asarray(acc_ref), rtol=1e-5, atol=1e-5)
+
+
+def test_jitted_compute_does_not_leak_tracers_into_solver_caches():
+    positions, masses = _sample_problem(n=64)
+    fmm = FastMultipoleMethod(
+        preset=FMMPreset.FAST,
+        basis="solidfmm",
+    )
+
+    jit_full = jax.jit(
+        lambda p, m: fmm.compute_accelerations(
+            p,
+            m,
+            leaf_size=16,
+            max_order=3,
+        )
+    )
+    _ = jit_full(positions, masses)
+
+    state = fmm.prepare_state(
+        positions,
+        masses,
+        leaf_size=16,
+        max_order=3,
+    )
+    acc = fmm.evaluate_prepared_state(state)
+    assert acc.shape == positions.shape

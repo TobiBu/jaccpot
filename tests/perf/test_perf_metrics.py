@@ -19,6 +19,7 @@ from jaccpot import (
 )
 
 from .perf_metrics import (
+    collect_active_subset_evaluation_metrics,
     collect_mode_comparison_metrics,
     collect_prepare_eval_split_metrics,
     geometric_mean_speedup,
@@ -127,3 +128,46 @@ def test_collect_mode_comparison_metrics_smoke():
     )
     assert np.isfinite(speedup)
     assert speedup > 0.0
+
+
+def test_collect_active_subset_evaluation_metrics_smoke():
+    rows = collect_active_subset_evaluation_metrics(
+        [512],
+        active_fractions=[0.125, 0.5],
+        leaf_size=16,
+        max_order=2,
+        runs=1,
+        warmup=0,
+        dtype=jnp.float32,
+        key=jax.random.PRNGKey(7),
+        fmm_kwargs=_base_runtime_kwargs(),
+    )
+
+    required = {
+        "num_particles",
+        "active_fraction",
+        "active_count",
+        "prepare_mean_seconds",
+        "evaluate_full_mean_seconds",
+        "evaluate_active_mean_seconds",
+        "evaluate_speedup_full_over_active",
+    }
+    assert len(rows) == 2
+    for row in rows:
+        assert required.issubset(row.keys())
+        assert row["active_count"] >= 1
+
+    numeric = np.asarray(
+        [
+            [
+                row["prepare_mean_seconds"],
+                row["evaluate_full_mean_seconds"],
+                row["evaluate_active_mean_seconds"],
+                row["evaluate_speedup_full_over_active"],
+            ]
+            for row in rows
+        ],
+        dtype=float,
+    )
+    assert np.all(np.isfinite(numeric))
+    assert np.all(numeric > 0.0)

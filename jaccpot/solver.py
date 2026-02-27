@@ -321,6 +321,7 @@ class FastMultipoleMethod:
         positions: Array,
         masses: Array,
         *,
+        target_indices: Optional[Array] = None,
         bounds: Optional[Tuple[Array, Array]] = None,
         leaf_size: int = 16,
         max_order: int = 4,
@@ -328,10 +329,15 @@ class FastMultipoleMethod:
         theta: Optional[float] = None,
         reuse_prepared_state: bool = False,
     ) -> Union[Array, Tuple[Array, Array]]:
-        """Compute accelerations (and optional potentials) for particle data."""
+        """Compute accelerations (and optional potentials) for particle data.
+
+        When ``target_indices`` is provided, all particles remain source masses
+        but outputs are returned only for the indexed target particles.
+        """
         return self._impl.compute_accelerations(
             positions,
             masses,
+            target_indices=target_indices,
             bounds=bounds,
             leaf_size=leaf_size,
             max_order=max_order,
@@ -383,9 +389,10 @@ class FastMultipoleMethod:
         self: "FastMultipoleMethod",
         state: FMMPreparedState,
         *,
+        target_indices: Optional[Array] = None,
         return_potential: bool = False,
     ) -> Union[Array, Tuple[Array, Array]]:
-        """Evaluate a previously prepared state."""
+        """Evaluate a previously prepared state for all particles or a subset."""
         jit_traversal = (
             True
             if self.advanced.runtime.jit_traversal is None
@@ -393,6 +400,7 @@ class FastMultipoleMethod:
         )
         return self._impl.evaluate_prepared_state(
             state,
+            target_indices=target_indices,
             return_potential=return_potential,
             jit_traversal=jit_traversal,
         )

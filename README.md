@@ -70,6 +70,25 @@ accelerations = solver.compute_accelerations(positions, masses)
 print(accelerations.shape)
 ```
 
+For split-step integrators (for example active-particle substeps), you can
+evaluate only a subset while still using all particles as FMM sources:
+
+```python
+active = jnp.asarray([0, 7, 11, 32], dtype=jnp.int32)
+state = solver.prepare_state(positions, masses)
+active_acc = solver.evaluate_prepared_state(state, target_indices=active)
+```
+
+For ODISSEO-style primitive states `(N, 2, 3)`, you can use the adapter:
+
+```python
+from jaccpot import OdisseoFMMCoupler
+
+coupler = OdisseoFMMCoupler(solver, leaf_size=16, max_order=4)
+coupler.prepare(primitive_state, masses)  # full source tree
+acc_active = coupler.accelerations(primitive_state, active_indices=active)
+```
+
 ## Development
 
 Run quality gates locally:

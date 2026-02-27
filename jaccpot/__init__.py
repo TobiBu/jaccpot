@@ -13,6 +13,7 @@ from .config import (
     RuntimePolicyConfig,
     TreeConfig,
 )
+from .odisseo import OdisseoFMMCoupler
 from .solver import FastMultipoleMethod
 
 __all__ = [
@@ -21,6 +22,7 @@ __all__ = [
     "FarFieldConfig",
     "FastMultipoleMethod",
     "NearFieldConfig",
+    "OdisseoFMMCoupler",
     "RuntimePolicyConfig",
     "TreeConfig",
     "differentiable_gravitational_acceleration",

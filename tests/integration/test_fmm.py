@@ -1602,7 +1602,7 @@ def test_prepare_state_cache_key_respects_center_mode():
     assert spy_build.call_count == 1
 
 
-def test_fast_preset_sets_fixed_depth_defaults():
+def test_fast_preset_sets_lbvh_defaults():
     key = jax.random.PRNGKey(111)
     num_particles = 48
     positions = jax.random.normal(key, (num_particles, 3), dtype=jnp.float32)
@@ -1610,7 +1610,7 @@ def test_fast_preset_sets_fixed_depth_defaults():
 
     fmm = FastMultipoleMethod(preset="fast", theta=0.6, softening=1e-3)
 
-    assert fmm.tree_build_mode == "fixed_depth"
+    assert fmm.tree_build_mode == "lbvh"
     assert fmm.target_leaf_particles == 64
     assert fmm.refine_local is False
     assert isinstance(fmm.traversal_config, DualTreeTraversalConfig)

@@ -161,3 +161,85 @@ def geometric_mean_speedup(
         dtype=jnp.float64,
     )
     return float(jnp.exp(jnp.mean(jnp.log(values))))
+
+
+def collect_active_subset_evaluation_metrics(
+    particle_counts: Sequence[int],
+    *,
+    active_fractions: Sequence[float],
+    leaf_size: int,
+    max_order: int,
+    runs: int,
+    warmup: int,
+    dtype: jnp.dtype,
+    key: jax.Array,
+    fmm_kwargs: Dict[str, Any],
+) -> List[Dict[str, Any]]:
+    """Collect prepared-state full vs active-subset evaluation timings."""
+    rows: List[Dict[str, Any]] = []
+    fmm = FastMultipoleMethod(**fmm_kwargs)
+    current_key = key
+
+    for n in particle_counts:
+        positions, masses = _benchmark_like_distribution(
+            int(n),
+            key=current_key,
+            dtype=dtype,
+        )
+        current_key, key_subset = jax.random.split(current_key)
+
+        prep_timing = bench_utils.time_callable(
+            fmm.prepare_state,
+            positions,
+            masses,
+            leaf_size=leaf_size,
+            max_order=max_order,
+            warmup=0,
+            runs=1,
+        )
+        state = prep_timing.result
+
+        eval_full_timing = bench_utils.time_callable(
+            fmm.evaluate_prepared_state,
+            state,
+            warmup=warmup,
+            runs=runs,
+        )
+
+        for frac in active_fractions:
+            fraction = float(frac)
+            if fraction <= 0.0 or fraction > 1.0:
+                raise ValueError("active_fractions must satisfy 0 < f <= 1")
+            active_count = max(1, int(round(fraction * int(n))))
+            subset_idx = jax.random.permutation(
+                key_subset,
+                int(n),
+                independent=True,
+            )[
+                :active_count
+            ].astype(jnp.int32)
+            key_subset, _ = jax.random.split(key_subset)
+
+            eval_active_timing = bench_utils.time_callable(
+                fmm.evaluate_prepared_state,
+                state,
+                target_indices=subset_idx,
+                warmup=warmup,
+                runs=runs,
+            )
+
+            rows.append(
+                {
+                    "num_particles": int(n),
+                    "active_fraction": fraction,
+                    "active_count": int(active_count),
+                    "prepare_mean_seconds": float(prep_timing.mean),
+                    "evaluate_full_mean_seconds": float(eval_full_timing.mean),
+                    "evaluate_active_mean_seconds": float(eval_active_timing.mean),
+                    "evaluate_speedup_full_over_active": float(
+                        eval_full_timing.mean / eval_active_timing.mean
+                    ),
+                }
+            )
+
+    return rows

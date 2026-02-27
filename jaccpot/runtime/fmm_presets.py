@@ -45,7 +45,7 @@ _FAST_TRAVERSAL_CONFIG = DualTreeTraversalConfig(
 
 _FAST_PRESET = FMMPresetConfig(
     name=FMMPreset.FAST,
-    tree_build_mode="fixed_depth",
+    tree_build_mode="lbvh",
     target_leaf_particles=64,
     refine_local=False,
     max_refine_levels=0,
