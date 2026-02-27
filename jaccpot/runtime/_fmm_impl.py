@@ -636,6 +636,7 @@ class FastMultipoleMethod:
         m2l_impl: Optional[str] = None,
         adaptive_order: bool = False,
         p_gears: Optional[tuple[int, ...]] = None,
+        use_pallas: bool = False,
         reuse_topology: bool = False,
         rebuild_every: int = 1,
         mac_force_scale_mode: str = "prev",
@@ -679,6 +680,7 @@ class FastMultipoleMethod:
             self.m2l_impl = "rot_scale"
         self.adaptive_order = bool(adaptive_order)
         self.p_gears = tuple(int(v) for v in (p_gears or ()))
+        self.use_pallas = bool(use_pallas)
         self.reuse_topology = bool(reuse_topology)
         if int(rebuild_every) <= 0:
             raise ValueError("rebuild_every must be positive")
@@ -2114,6 +2116,7 @@ class FastMultipoleMethod:
                 adaptive_order=adaptive_order_val,
                 p_gears=p_gears_val,
                 dehnen_radius_scale=dehnen_scale_val,
+                use_pallas=self.use_pallas,
             )
 
         return prepare_tree_downward_sweep(
@@ -3416,7 +3419,22 @@ def _m2l_real_batch_kernel(
     mode = str(m2l_impl).strip().lower()
     if mode != "rot_scale":
         raise ValueError("real-basis m2l_impl must be 'rot_scale'")
-    return m2l_rot_scale_real_batch(multipoles, deltas, order=order)
+    return m2l_rot_scale_real_batch(multipoles, deltas, order=order, use_pallas=False)
+
+
+@partial(jax.jit, static_argnames=("order", "m2l_impl"))
+def _m2l_real_batch_kernel_pallas(
+    multipoles: Array,
+    deltas: Array,
+    *,
+    order: int,
+    m2l_impl: str,
+) -> Array:
+    """Vectorized real-basis M2L translation kernel using the optional Pallas core."""
+    mode = str(m2l_impl).strip().lower()
+    if mode != "rot_scale":
+        raise ValueError("real-basis m2l_impl must be 'rot_scale'")
+    return m2l_rot_scale_real_batch(multipoles, deltas, order=order, use_pallas=True)
 
 
 @partial(jax.jit, static_argnames=("order",))
@@ -3621,6 +3639,34 @@ def _accumulate_real_m2l_fullbatch(
 
 @partial(
     jax.jit,
+    static_argnames=("order", "m2l_impl", "total_nodes"),
+    donate_argnums=(0,),
+)
+def _accumulate_real_m2l_fullbatch_pallas(
+    locals_coeffs: Array,
+    multip_packed_real: Array,
+    centers: Array,
+    src: Array,
+    tgt: Array,
+    *,
+    order: int,
+    m2l_impl: str,
+    total_nodes: int,
+) -> Array:
+    """Accumulate real-basis M2L contributions using the optional Pallas core."""
+    src_mult = multip_packed_real[src]
+    deltas = centers[tgt] - centers[src]
+    contribs = _m2l_real_batch_kernel_pallas(
+        src_mult,
+        deltas,
+        order=order,
+        m2l_impl=m2l_impl,
+    ).astype(locals_coeffs.dtype)
+    return locals_coeffs + jax.ops.segment_sum(contribs, tgt, total_nodes)
+
+
+@partial(
+    jax.jit,
     static_argnames=("order", "m2l_impl", "total_nodes", "chunk_size"),
     donate_argnums=(0,),
 )
@@ -3651,6 +3697,51 @@ def _accumulate_real_m2l_chunked_scan(
         src_mult = multip_packed_real[src_chunk]
         deltas = centers[tgt_chunk] - centers[src_chunk]
         contribs = _m2l_real_batch_kernel(
+            src_mult,
+            deltas,
+            order=order,
+            m2l_impl=m2l_impl,
+        ).astype(locals_coeffs.dtype)
+        contribs = jnp.where(valid[:, None], contribs, 0)
+        accum_chunk = jax.ops.segment_sum(contribs, tgt_chunk, total_nodes)
+        return local_accum + accum_chunk, None
+
+    local_accum, _ = jax.lax.scan(body, local_accum0, starts)
+    return locals_coeffs + local_accum
+
+
+@partial(
+    jax.jit,
+    static_argnames=("order", "m2l_impl", "total_nodes", "chunk_size"),
+    donate_argnums=(0,),
+)
+def _accumulate_real_m2l_chunked_scan_pallas(
+    locals_coeffs: Array,
+    multip_packed_real: Array,
+    centers: Array,
+    src: Array,
+    tgt: Array,
+    *,
+    order: int,
+    m2l_impl: str,
+    total_nodes: int,
+    chunk_size: int,
+) -> Array:
+    """Chunked real-basis M2L accumulation using the optional Pallas core."""
+    pair_count = src.shape[0]
+    starts = jnp.arange(0, pair_count, chunk_size, dtype=INDEX_DTYPE)
+    local_accum0 = jnp.zeros_like(locals_coeffs)
+
+    def body(local_accum: Array, start_idx: Array) -> tuple[Array, None]:
+        offset = jnp.arange(chunk_size, dtype=INDEX_DTYPE)
+        idx = start_idx + offset
+        valid = idx < pair_count
+        safe_idx = jnp.where(valid, idx, 0)
+        src_chunk = src[safe_idx]
+        tgt_chunk = tgt[safe_idx]
+        src_mult = multip_packed_real[src_chunk]
+        deltas = centers[tgt_chunk] - centers[src_chunk]
+        contribs = _m2l_real_batch_kernel_pallas(
             src_mult,
             deltas,
             order=order,
@@ -3726,6 +3817,7 @@ def _prepare_solidfmm_downward_sweep(
     adaptive_order: bool = False,
     p_gears: tuple[int, ...] = tuple(),
     dehnen_radius_scale: float = 1.0,
+    use_pallas: bool = False,
 ) -> TreeDownwardData:
     """Prepare M2L accumulation for solidfmm-style complex or real locals."""
 
@@ -3885,32 +3977,61 @@ def _prepare_solidfmm_downward_sweep(
                         )
                 else:
                     if pair_count_g <= chunk_size:
-                        locals_slice = _accumulate_real_m2l_fullbatch(
-                            locals_slice,
-                            multip_slice,
-                            centers,
-                            src_g,
-                            tgt_g,
-                            order=int(p_gear),
-                            m2l_impl=(
-                                "rot_scale" if m2l_impl is None else str(m2l_impl)
-                            ),
-                            total_nodes=total_nodes,
-                        )
+                        if use_pallas:
+                            locals_slice = _accumulate_real_m2l_fullbatch_pallas(
+                                locals_slice,
+                                multip_slice,
+                                centers,
+                                src_g,
+                                tgt_g,
+                                order=int(p_gear),
+                                m2l_impl=(
+                                    "rot_scale" if m2l_impl is None else str(m2l_impl)
+                                ),
+                                total_nodes=total_nodes,
+                            )
+                        else:
+                            locals_slice = _accumulate_real_m2l_fullbatch(
+                                locals_slice,
+                                multip_slice,
+                                centers,
+                                src_g,
+                                tgt_g,
+                                order=int(p_gear),
+                                m2l_impl=(
+                                    "rot_scale" if m2l_impl is None else str(m2l_impl)
+                                ),
+                                total_nodes=total_nodes,
+                            )
                     else:
-                        locals_slice = _accumulate_real_m2l_chunked_scan(
-                            locals_slice,
-                            multip_slice,
-                            centers,
-                            src_g,
-                            tgt_g,
-                            order=int(p_gear),
-                            m2l_impl=(
-                                "rot_scale" if m2l_impl is None else str(m2l_impl)
-                            ),
-                            total_nodes=total_nodes,
-                            chunk_size=chunk_size,
-                        )
+                        if use_pallas:
+                            locals_slice = _accumulate_real_m2l_chunked_scan_pallas(
+                                locals_slice,
+                                multip_slice,
+                                centers,
+                                src_g,
+                                tgt_g,
+                                order=int(p_gear),
+                                m2l_impl=(
+                                    "rot_scale" if m2l_impl is None else str(m2l_impl)
+                                ),
+                                total_nodes=total_nodes,
+                                chunk_size=chunk_size,
+                            )
+                        else:
+                            locals_slice = _accumulate_real_m2l_chunked_scan(
+                                locals_slice,
+                                multip_slice,
+                                centers,
+                                src_g,
+                                tgt_g,
+                                order=int(p_gear),
+                                m2l_impl=(
+                                    "rot_scale" if m2l_impl is None else str(m2l_impl)
+                                ),
+                                total_nodes=total_nodes,
+                                chunk_size=chunk_size,
+                            )
                 locals_tail = locals_updated[:, coeff_g:]
                 locals_updated = jnp.concatenate(
                     (locals_slice, locals_tail),
@@ -3940,28 +4061,53 @@ def _prepare_solidfmm_downward_sweep(
                 chunk_size=chunk_size,
             )
         elif pair_count <= chunk_size:
-            locals_updated = _accumulate_real_m2l_fullbatch(
-                locals_coeffs,
-                multip_packed_kernel,
-                centers,
-                src,
-                tgt,
-                order=p,
-                m2l_impl=("rot_scale" if m2l_impl is None else str(m2l_impl)),
-                total_nodes=total_nodes,
-            )
+            if use_pallas:
+                locals_updated = _accumulate_real_m2l_fullbatch_pallas(
+                    locals_coeffs,
+                    multip_packed_kernel,
+                    centers,
+                    src,
+                    tgt,
+                    order=p,
+                    m2l_impl=("rot_scale" if m2l_impl is None else str(m2l_impl)),
+                    total_nodes=total_nodes,
+                )
+            else:
+                locals_updated = _accumulate_real_m2l_fullbatch(
+                    locals_coeffs,
+                    multip_packed_kernel,
+                    centers,
+                    src,
+                    tgt,
+                    order=p,
+                    m2l_impl=("rot_scale" if m2l_impl is None else str(m2l_impl)),
+                    total_nodes=total_nodes,
+                )
         else:
-            locals_updated = _accumulate_real_m2l_chunked_scan(
-                locals_coeffs,
-                multip_packed_kernel,
-                centers,
-                src,
-                tgt,
-                order=p,
-                m2l_impl=("rot_scale" if m2l_impl is None else str(m2l_impl)),
-                total_nodes=total_nodes,
-                chunk_size=chunk_size,
-            )
+            if use_pallas:
+                locals_updated = _accumulate_real_m2l_chunked_scan_pallas(
+                    locals_coeffs,
+                    multip_packed_kernel,
+                    centers,
+                    src,
+                    tgt,
+                    order=p,
+                    m2l_impl=("rot_scale" if m2l_impl is None else str(m2l_impl)),
+                    total_nodes=total_nodes,
+                    chunk_size=chunk_size,
+                )
+            else:
+                locals_updated = _accumulate_real_m2l_chunked_scan(
+                    locals_coeffs,
+                    multip_packed_kernel,
+                    centers,
+                    src,
+                    tgt,
+                    order=p,
+                    m2l_impl=("rot_scale" if m2l_impl is None else str(m2l_impl)),
+                    total_nodes=total_nodes,
+                    chunk_size=chunk_size,
+                )
 
     if basis_mode_norm == "complex":
         locals_updated = enforce_conjugate_symmetry_batch(locals_updated, order=p)

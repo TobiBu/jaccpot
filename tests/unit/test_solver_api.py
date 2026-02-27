@@ -181,6 +181,15 @@ def test_topology_reuse_options_flow_to_runtime():
     assert fmm.recent_topology_reused is False
 
 
+def test_use_pallas_option_flows_to_runtime():
+    fmm = FastMultipoleMethod(
+        preset=FMMPreset.FAST,
+        basis="real",
+        use_pallas=True,
+    )
+    assert fmm._impl.use_pallas is True
+
+
 def test_invalid_tree_type_raises():
     with pytest.raises(ValueError, match="tree_type must be one of"):
         FastMultipoleMethod(

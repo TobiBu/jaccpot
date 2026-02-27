@@ -17,6 +17,10 @@ from jaccpot.operators.real_harmonics import (
     sh_offset,
     translate_along_z_m2l_real,
 )
+from jaccpot.pallas.m2l_core_z_real import (
+    m2l_core_z_real_pallas,
+    pallas_m2l_real_supported,
+)
 
 
 def _rotate_multipole_to_z_single(
@@ -43,16 +47,35 @@ def _rotate_local_from_z_single(local_z: Array, delta: Array, *, order: int) -> 
     return out
 
 
-def m2l_core_z_real(multipole_rot: Array, radii: Array, *, order: int) -> Array:
-    """Apply z-axis real M2L translation to a batch of rotated multipoles."""
+def m2l_core_z_real(
+    multipole_rot: Array,
+    radii: Array,
+    *,
+    order: int,
+    use_pallas: bool = False,
+) -> Array:
+    """Apply z-axis real M2L translation to a batch of rotated multipoles.
+
+    When ``use_pallas=True``, the function dispatches to the optional Pallas
+    kernel on supported accelerator backends and otherwise falls back to the
+    pure-JAX recurrence.
+    """
     r = jnp.maximum(jnp.asarray(radii), jnp.asarray(1.0e-30, dtype=radii.dtype))
+    if bool(use_pallas) and pallas_m2l_real_supported():
+        return m2l_core_z_real_pallas(multipole_rot, r, order=int(order))
     return jax.vmap(lambda m, rr: translate_along_z_m2l_real(m, rr, order=int(order)))(
         multipole_rot,
         r,
     )
 
 
-def m2l_rot_scale_real_batch(multipoles: Array, deltas: Array, *, order: int) -> Array:
+def m2l_rot_scale_real_batch(
+    multipoles: Array,
+    deltas: Array,
+    *,
+    order: int,
+    use_pallas: bool = False,
+) -> Array:
     """Batched rotate+scale real-basis M2L translation.
 
     Parameters
@@ -63,6 +86,8 @@ def m2l_rot_scale_real_batch(multipoles: Array, deltas: Array, *, order: int) ->
         Source-to-target vectors with shape ``(batch, 3)``.
     order:
         Maximum SH order.
+    use_pallas:
+        Enable the optional Pallas z-translation kernel when supported.
     """
     mult = jnp.asarray(multipoles)
     delta = jnp.asarray(deltas)
@@ -78,7 +103,12 @@ def m2l_rot_scale_real_batch(multipoles: Array, deltas: Array, *, order: int) ->
         mult,
         delta,
     )
-    locals_z = m2l_core_z_real(mult_rot, radii, order=int(order))
+    locals_z = m2l_core_z_real(
+        mult_rot,
+        radii,
+        order=int(order),
+        use_pallas=bool(use_pallas),
+    )
     return jax.vmap(lambda l, d: _rotate_local_from_z_single(l, d, order=int(order)))(
         locals_z,
         delta,
