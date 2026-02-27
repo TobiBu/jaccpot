@@ -8,7 +8,7 @@ from typing import Any, NamedTuple, Optional, Tuple, Union
 
 from jaxtyping import Array, DTypeLike
 
-from .basis import BasisInterface, ComplexSHBasis
+from .basis import BasisInterface, ComplexSHBasis, RealSHBasis
 from .config import (
     Basis,
     FMMAdvancedConfig,
@@ -65,6 +65,12 @@ def _resolve_basis_input(basis: Union[Basis, BasisInterface, str]) -> _BasisReso
                 runtime_basis="solidfmm",
                 basis_impl=ComplexSHBasis(),
             )
+        if basis_norm == "real":
+            return _BasisResolution(
+                public_name="real",
+                runtime_basis="solidfmm",
+                basis_impl=RealSHBasis(),
+            )
         if basis_norm == "cartesian":
             return _BasisResolution(
                 public_name="cartesian",
@@ -72,7 +78,7 @@ def _resolve_basis_input(basis: Union[Basis, BasisInterface, str]) -> _BasisReso
                 basis_impl=None,
             )
         raise ValueError(
-            "basis must be one of 'cartesian', 'solidfmm', or 'complex', "
+            "basis must be one of 'cartesian', 'solidfmm', 'complex', or 'real', "
             f"got '{basis}'"
         )
 
@@ -259,6 +265,7 @@ class FastMultipoleMethod:
         *,
         preset: Union[FMMPreset, str] = FMMPreset.FAST,
         basis: Union[Basis, BasisInterface, str] = "complex",
+        m2l_impl: Optional[str] = None,
         theta: float = 0.6,
         G: float = 1.0,
         softening: float = 1e-3,
@@ -281,6 +288,9 @@ class FastMultipoleMethod:
         )
         basis_resolution = _resolve_basis_input(basis)
         runtime_basis = basis_resolution.runtime_basis
+        resolved_m2l_impl = m2l_impl
+        if resolved_m2l_impl is None and basis_resolution.public_name == "real":
+            resolved_m2l_impl = "rot_scale"
 
         preset_norm = _normalize_preset(preset)
         advanced_cfg = (
@@ -305,6 +315,7 @@ class FastMultipoleMethod:
             working_dtype=working_dtype,
             expansion_basis=runtime_basis,
             basis_impl=basis_resolution.basis_impl,
+            m2l_impl=resolved_m2l_impl,
             complex_rotation=runtime_overrides.complex_rotation,
             tree_type=runtime_overrides.tree_type or "radix",
             tree_build_mode=runtime_overrides.tree_mode,

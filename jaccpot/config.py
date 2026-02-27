@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import Any, Literal, Optional
 
-Basis = Literal["cartesian", "solidfmm", "complex"]
+Basis = Literal["cartesian", "solidfmm", "complex", "real"]
 FarFieldMode = Literal["auto", "pair_grouped", "class_major"]
 NearFieldMode = Literal["auto", "baseline", "bucketed"]
 

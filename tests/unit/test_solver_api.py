@@ -152,6 +152,23 @@ def test_basis_object_is_accepted():
     assert acc.shape == positions.shape
 
 
+def test_real_basis_selects_rot_scale_m2l_impl():
+    positions, masses = _sample_problem(n=40)
+    fmm = FastMultipoleMethod(
+        preset=FMMPreset.FAST,
+        basis="real",
+    )
+    acc = fmm.compute_accelerations(
+        positions,
+        masses,
+        leaf_size=8,
+        max_order=3,
+    )
+    assert fmm.basis == "real"
+    assert fmm._impl.m2l_impl == "rot_scale"
+    assert acc.shape == positions.shape
+
+
 def test_invalid_tree_type_raises():
     with pytest.raises(ValueError, match="tree_type must be one of"):
         FastMultipoleMethod(
