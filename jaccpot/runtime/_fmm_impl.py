@@ -598,6 +598,8 @@ class FastMultipoleMethod:
         expansion_basis: ExpansionBasis = "cartesian",
         basis_impl: Optional[Any] = None,
         m2l_impl: Optional[str] = None,
+        adaptive_order: bool = False,
+        p_gears: Optional[tuple[int, ...]] = None,
         mac_type: MACType = "bh",
         complex_rotation: str = "solidfmm",  # "cached",
         dehnen_radius_scale: float = 1.0,
@@ -636,6 +638,9 @@ class FastMultipoleMethod:
         self.m2l_impl = None if m2l_impl is None else str(m2l_impl).strip().lower()
         if self.m2l_impl is None and self._solidfmm_basis_mode() == "real":
             self.m2l_impl = "rot_scale"
+        self.adaptive_order = bool(adaptive_order)
+        self.p_gears = tuple(int(v) for v in (p_gears or ()))
+        self._recent_far_pairs_by_gear_counts: tuple[int, ...] = tuple()
 
         rotation_norm = str(complex_rotation).strip().lower()
         if rotation_norm not in ("bdz", "cached", "wigner", "solidfmm"):
@@ -1215,6 +1220,30 @@ class FastMultipoleMethod:
             grouped_segment_unique_targets,
         ) = self._unpack_dual_tree_artifacts(dual_artifacts)
 
+        far_pairs_by_gear = None
+        if self.adaptive_order:
+            if len(self.p_gears) == 0:
+                raise ValueError("adaptive_order=True requires non-empty p_gears")
+            gear_buckets: list[tuple[Array, Array]] = []
+            for _ in self.p_gears:
+                gear_buckets.append(
+                    (
+                        jnp.zeros((0,), dtype=INDEX_DTYPE),
+                        jnp.zeros((0,), dtype=INDEX_DTYPE),
+                    )
+                )
+            # Conservative baseline bucketization: place all pairs in highest gear.
+            gear_buckets[-1] = (
+                jnp.asarray(interactions.sources, dtype=INDEX_DTYPE),
+                jnp.asarray(interactions.targets, dtype=INDEX_DTYPE),
+            )
+            far_pairs_by_gear = tuple(gear_buckets)
+            self._recent_far_pairs_by_gear_counts = tuple(
+                int(bucket_src.shape[0]) for bucket_src, _ in gear_buckets
+            )
+        else:
+            self._recent_far_pairs_by_gear_counts = tuple()
+
         downward = self._prepare_downward_with_artifacts(
             tree=tree_artifacts.tree,
             upward=tree_artifacts.upward,
@@ -1235,6 +1264,9 @@ class FastMultipoleMethod:
             grouped_segment_group_ids=grouped_segment_group_ids,
             grouped_segment_unique_targets=grouped_segment_unique_targets,
             farfield_mode=farfield_mode,
+            far_pairs_by_gear=far_pairs_by_gear,
+            adaptive_order=self.adaptive_order,
+            p_gears=self.p_gears,
         )
         return _PrepareStateDualDownwardArtifacts(
             interactions=interactions,
@@ -1513,6 +1545,9 @@ class FastMultipoleMethod:
         grouped_segment_group_ids: Optional[Array],
         grouped_segment_unique_targets: Optional[Array],
         farfield_mode: str,
+        far_pairs_by_gear: Optional[tuple[tuple[Array, Array], ...]] = None,
+        adaptive_order: bool = False,
+        p_gears: tuple[int, ...] = tuple(),
     ) -> TreeDownwardData:
         """Prepare downward sweep using precomputed interaction artifacts."""
         return self.prepare_downward_sweep(
@@ -1535,6 +1570,9 @@ class FastMultipoleMethod:
             grouped_segment_group_ids=grouped_segment_group_ids,
             grouped_segment_unique_targets=grouped_segment_unique_targets,
             farfield_mode=farfield_mode,
+            far_pairs_by_gear=far_pairs_by_gear,
+            adaptive_order=adaptive_order,
+            p_gears=p_gears,
         )
 
     def _resolve_nearfield_mode(self, *, num_particles: int) -> str:
@@ -1735,6 +1773,9 @@ class FastMultipoleMethod:
         grouped_segment_unique_targets: Optional[Array] = None,
         farfield_mode: str = "pair_grouped",
         dehnen_radius_scale: Optional[float] = None,
+        far_pairs_by_gear: Optional[tuple[tuple[Array, Array], ...]] = None,
+        adaptive_order: Optional[bool] = None,
+        p_gears: Optional[tuple[int, ...]] = None,
     ) -> TreeDownwardData:
         """Build interactions and locals needed for the downward sweep."""
 
@@ -1752,6 +1793,12 @@ class FastMultipoleMethod:
             retry_logger if retry_logger is not None else self.interaction_retry_logger
         )
         if self.expansion_basis == "solidfmm":
+            adaptive_order_val = (
+                self.adaptive_order if adaptive_order is None else bool(adaptive_order)
+            )
+            p_gears_val = (
+                self.p_gears if p_gears is None else tuple(int(v) for v in p_gears)
+            )
             return _prepare_solidfmm_downward_sweep(
                 tree,
                 upward_data,
@@ -1776,6 +1823,9 @@ class FastMultipoleMethod:
                 grouped_segment_group_ids=grouped_segment_group_ids,
                 grouped_segment_unique_targets=grouped_segment_unique_targets,
                 farfield_mode=farfield_mode,
+                far_pairs_by_gear=far_pairs_by_gear,
+                adaptive_order=adaptive_order_val,
+                p_gears=p_gears_val,
                 dehnen_radius_scale=dehnen_scale_val,
             )
 
@@ -3318,6 +3368,9 @@ def _prepare_solidfmm_downward_sweep(
     grouped_segment_group_ids: Optional[Array] = None,
     grouped_segment_unique_targets: Optional[Array] = None,
     farfield_mode: str = "pair_grouped",
+    far_pairs_by_gear: Optional[tuple[tuple[Array, Array], ...]] = None,
+    adaptive_order: bool = False,
+    p_gears: tuple[int, ...] = tuple(),
     dehnen_radius_scale: float = 1.0,
 ) -> TreeDownwardData:
     """Prepare M2L accumulation for solidfmm-style complex or real locals."""
@@ -3386,7 +3439,7 @@ def _prepare_solidfmm_downward_sweep(
     if chunk_size <= 0:
         raise ValueError("m2l_chunk_size must be positive")
 
-    if basis_mode_norm == "complex" and grouped_interactions:
+    if basis_mode_norm == "complex" and grouped_interactions and not adaptive_order:
         grouped = (
             grouped_buffers
             if grouped_buffers is not None
@@ -3424,7 +3477,88 @@ def _prepare_solidfmm_downward_sweep(
                 chunk_size=chunk_size,
             )
     else:
-        if basis_mode_norm == "complex" and pair_count <= chunk_size:
+        if adaptive_order:
+            if len(p_gears) == 0:
+                raise ValueError("adaptive_order=True requires non-empty p_gears")
+            gear_pairs = far_pairs_by_gear
+            if gear_pairs is None:
+                buckets: list[tuple[Array, Array]] = []
+                for _ in p_gears:
+                    buckets.append(
+                        (
+                            jnp.zeros((0,), dtype=INDEX_DTYPE),
+                            jnp.zeros((0,), dtype=INDEX_DTYPE),
+                        )
+                    )
+                buckets[-1] = (src, tgt)
+                gear_pairs = tuple(buckets)
+            locals_updated = locals_coeffs
+            for gear_idx, p_gear in enumerate(tuple(int(v) for v in p_gears)):
+                if int(p_gear) < 0 or int(p_gear) > int(p):
+                    raise ValueError(
+                        "p_gears entries must satisfy 0 <= p_gear <= p_max"
+                    )
+                src_g, tgt_g = gear_pairs[gear_idx]
+                pair_count_g = int(src_g.shape[0])
+                if pair_count_g == 0:
+                    continue
+                coeff_g = sh_size(int(p_gear))
+                locals_slice = locals_updated[:, :coeff_g]
+                multip_slice = multip_packed_kernel[:, :coeff_g]
+                if basis_mode_norm == "complex":
+                    if pair_count_g <= chunk_size:
+                        locals_slice = _accumulate_solidfmm_m2l_fullbatch(
+                            locals_slice,
+                            multip_slice,
+                            centers,
+                            src_g,
+                            tgt_g,
+                            order=int(p_gear),
+                            rotation=rotation_mode,
+                            total_nodes=total_nodes,
+                        )
+                    else:
+                        locals_slice = _accumulate_solidfmm_m2l_chunked_scan(
+                            locals_slice,
+                            multip_slice,
+                            centers,
+                            src_g,
+                            tgt_g,
+                            order=int(p_gear),
+                            rotation=rotation_mode,
+                            total_nodes=total_nodes,
+                            chunk_size=chunk_size,
+                        )
+                else:
+                    if pair_count_g <= chunk_size:
+                        locals_slice = _accumulate_real_m2l_fullbatch(
+                            locals_slice,
+                            multip_slice,
+                            centers,
+                            src_g,
+                            tgt_g,
+                            order=int(p_gear),
+                            m2l_impl=(
+                                "rot_scale" if m2l_impl is None else str(m2l_impl)
+                            ),
+                            total_nodes=total_nodes,
+                        )
+                    else:
+                        locals_slice = _accumulate_real_m2l_chunked_scan(
+                            locals_slice,
+                            multip_slice,
+                            centers,
+                            src_g,
+                            tgt_g,
+                            order=int(p_gear),
+                            m2l_impl=(
+                                "rot_scale" if m2l_impl is None else str(m2l_impl)
+                            ),
+                            total_nodes=total_nodes,
+                            chunk_size=chunk_size,
+                        )
+                locals_updated = locals_updated.at[:, :coeff_g].set(locals_slice)
+        elif basis_mode_norm == "complex" and pair_count <= chunk_size:
             locals_updated = _accumulate_solidfmm_m2l_fullbatch(
                 locals_coeffs,
                 multip_packed_kernel,

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import warnings
 from dataclasses import replace
-from typing import Any, NamedTuple, Optional, Tuple, Union
+from typing import Any, NamedTuple, Optional, Sequence, Tuple, Union
 
 from jaxtyping import Array, DTypeLike
 
@@ -266,6 +266,8 @@ class FastMultipoleMethod:
         preset: Union[FMMPreset, str] = FMMPreset.FAST,
         basis: Union[Basis, BasisInterface, str] = "complex",
         m2l_impl: Optional[str] = None,
+        adaptive_order: bool = False,
+        p_gears: Optional[Sequence[int]] = None,
         theta: float = 0.6,
         G: float = 1.0,
         softening: float = 1e-3,
@@ -316,6 +318,8 @@ class FastMultipoleMethod:
             expansion_basis=runtime_basis,
             basis_impl=basis_resolution.basis_impl,
             m2l_impl=resolved_m2l_impl,
+            adaptive_order=adaptive_order,
+            p_gears=p_gears,
             complex_rotation=runtime_overrides.complex_rotation,
             tree_type=runtime_overrides.tree_type or "radix",
             tree_build_mode=runtime_overrides.tree_mode,

@@ -24,6 +24,17 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--dtype", choices=("float32", "float64"), default="float32")
     parser.add_argument("--warmup", type=int, default=1)
     parser.add_argument("--runs", type=int, default=3)
+    parser.add_argument(
+        "--adaptive-order",
+        action="store_true",
+        help="Enable adaptive-order M2L gear buckets",
+    )
+    parser.add_argument(
+        "--p-gears",
+        type=str,
+        default="4,6,8,10",
+        help="Comma-separated adaptive orders (used with --adaptive-order)",
+    )
     return parser.parse_args()
 
 
@@ -178,11 +189,19 @@ def main() -> None:
         jax.random.normal(key_mass, (int(ARGS.n),), dtype=dtype)
     ) + jnp.asarray(0.5, dtype=dtype)
 
+    p_gears: tuple[int, ...] = tuple()
+    if ARGS.adaptive_order:
+        p_gears = tuple(int(v.strip()) for v in ARGS.p_gears.split(",") if v.strip())
+        if len(p_gears) == 0:
+            raise SystemExit("--adaptive-order requires non-empty --p-gears")
+
     fmm = FastMultipoleMethod(
         preset="fast",
         basis="solidfmm",
         theta=float(ARGS.theta),
         softening=1.0e-3,
+        adaptive_order=bool(ARGS.adaptive_order),
+        p_gears=p_gears,
     )
 
     tree_timing = time_callable(
@@ -240,6 +259,14 @@ def main() -> None:
         f"near_pairs={counts['near_pairs']} "
         f"interaction_levels={counts['levels']}"
     )
+    gear_counts = tuple(getattr(fmm._impl, "_recent_far_pairs_by_gear_counts", ()))
+    if gear_counts:
+        print(
+            "interaction_counts_by_gear "
+            + " ".join(
+                f"gear{idx}_pairs={int(val)}" for idx, val in enumerate(gear_counts)
+            )
+        )
 
 
 if __name__ == "__main__":
