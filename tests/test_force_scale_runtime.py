@@ -2,15 +2,28 @@
 
 from __future__ import annotations
 
+import inspect
+
 import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
 
 pytest.importorskip("yggdrax")
+from yggdrax import interactions as yggdrax_interactions
 from yggdrax.interactions import DualTreeTraversalConfig
 
 from jaccpot import FastMultipoleMethod, FMMAdvancedConfig, RuntimePolicyConfig
+
+if (
+    "p_gears"
+    not in inspect.signature(
+        yggdrax_interactions.build_interactions_and_neighbors
+    ).parameters
+):
+    pytestmark = pytest.mark.skip(
+        reason="installed yggdrax build does not expose adaptive dehnen_error MAC"
+    )
 
 
 def _sample_problem(n: int, dtype=jnp.float32):

@@ -169,6 +169,18 @@ def test_real_basis_selects_rot_scale_m2l_impl():
     assert acc.shape == positions.shape
 
 
+def test_topology_reuse_options_flow_to_runtime():
+    fmm = FastMultipoleMethod(
+        preset=FMMPreset.FAST,
+        basis="real",
+        reuse_topology=True,
+        rebuild_every=3,
+    )
+    assert fmm._impl.reuse_topology is True
+    assert fmm._impl.rebuild_every == 3
+    assert fmm.recent_topology_reused is False
+
+
 def test_invalid_tree_type_raises():
     with pytest.raises(ValueError, match="tree_type must be one of"):
         FastMultipoleMethod(

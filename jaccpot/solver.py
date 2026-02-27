@@ -268,6 +268,8 @@ class FastMultipoleMethod:
         m2l_impl: Optional[str] = None,
         adaptive_order: bool = False,
         p_gears: Optional[Sequence[int]] = None,
+        reuse_topology: bool = False,
+        rebuild_every: int = 1,
         mac_force_scale_mode: str = "prev",
         theta: float = 0.6,
         G: float = 1.0,
@@ -321,6 +323,8 @@ class FastMultipoleMethod:
             m2l_impl=resolved_m2l_impl,
             adaptive_order=adaptive_order,
             p_gears=p_gears,
+            reuse_topology=reuse_topology,
+            rebuild_every=rebuild_every,
             mac_force_scale_mode=mac_force_scale_mode,
             complex_rotation=runtime_overrides.complex_rotation,
             tree_type=runtime_overrides.tree_type or "radix",
@@ -506,6 +510,12 @@ class FastMultipoleMethod:
     def clear_prepared_state_cache(self: "FastMultipoleMethod") -> None:
         """Clear cached prepared states in the runtime backend."""
         self._impl.clear_prepared_state_cache()
+
+    @property
+    def recent_topology_reused(self: "FastMultipoleMethod") -> bool:
+        """Whether the latest prepare/evaluate path reused cached topology."""
+
+        return bool(getattr(self._impl, "_recent_topology_reused", False))
 
     @property
     def complex_rotation(self: "FastMultipoleMethod") -> str:

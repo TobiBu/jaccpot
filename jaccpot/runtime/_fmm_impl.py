@@ -5,6 +5,7 @@ This implementation uses multipole and local expansions to compute
 gravitational forces in O(N) time instead of O(N^2) for direct summation.
 """
 
+import hashlib
 from collections import OrderedDict
 from dataclasses import dataclass
 from functools import partial
@@ -28,10 +29,13 @@ from yggdrax.interactions import (
     build_interactions_and_neighbors,
     build_well_separated_interactions,
 )
+from yggdrax.morton import morton_encode
 from yggdrax.tree import (
+    RadixTree,
     Tree,
     TreeType,
     available_tree_types,
+    reorder_particles_by_indices,
 )
 
 from jaccpot.basis.real_sh import complex_to_real_coeffs
@@ -164,6 +168,25 @@ class _TreeBuildArtifacts:
     workspace: Optional[object]
     max_leaf_size: int
     cache_leaf_parameter: int
+
+
+@dataclass(frozen=True)
+class _TopologyReuseCandidate:
+    """Candidate topology signature derived from current particle Morton order."""
+
+    key: str
+    sorted_indices: Array
+
+
+@dataclass(frozen=True)
+class _TopologyReuseEntry:
+    """Cached topology metadata for bounded multi-step reuse."""
+
+    key: str
+    tree: Tree
+    max_leaf_size: int
+    cache_leaf_parameter: int
+    reuse_count: int
 
 
 class _RuntimeExecutionOverrides(NamedTuple):
@@ -449,6 +472,7 @@ class FMMPreparedState:
     working_dtype: jnp.dtype
     expansion_basis: ExpansionBasis
     theta: float
+    topology_key: Optional[str]
     interactions: NodeInteractionList
     dual_tree_result: DualTreeWalkResult
     retry_events: Tuple[DualTreeRetryEvent, ...]
@@ -485,6 +509,7 @@ class FMMPreparedState:
             str(jnp.dtype(self.working_dtype)),
             str(self.expansion_basis),
             float(self.theta),
+            self.topology_key,
             self.retry_events,
         )
         return children, aux
@@ -497,6 +522,7 @@ class FMMPreparedState:
             working_dtype_name,
             expansion_basis,
             theta,
+            topology_key,
             retry_events,
         ) = aux
         (
@@ -530,6 +556,7 @@ class FMMPreparedState:
             working_dtype=jnp.dtype(working_dtype_name),
             expansion_basis=expansion_basis,
             theta=float(theta),
+            topology_key=topology_key,
             interactions=interactions,
             dual_tree_result=dual_tree_result,
             retry_events=retry_events,
@@ -553,6 +580,7 @@ class _PrepareStateTreeUpwardArtifacts(NamedTuple):
     inverse_permutation: Array
     leaf_cap: int
     leaf_parameter: int
+    topology_key: Optional[str]
     upward: TreeUpwardData
     locals_template: Optional[LocalExpansionData]
 
@@ -608,6 +636,8 @@ class FastMultipoleMethod:
         m2l_impl: Optional[str] = None,
         adaptive_order: bool = False,
         p_gears: Optional[tuple[int, ...]] = None,
+        reuse_topology: bool = False,
+        rebuild_every: int = 1,
         mac_force_scale_mode: str = "prev",
         mac_type: MACType = "bh",
         complex_rotation: str = "solidfmm",  # "cached",
@@ -649,6 +679,10 @@ class FastMultipoleMethod:
             self.m2l_impl = "rot_scale"
         self.adaptive_order = bool(adaptive_order)
         self.p_gears = tuple(int(v) for v in (p_gears or ()))
+        self.reuse_topology = bool(reuse_topology)
+        if int(rebuild_every) <= 0:
+            raise ValueError("rebuild_every must be positive")
+        self.rebuild_every = int(rebuild_every)
         self._recent_far_pairs_by_gear_counts: tuple[int, ...] = tuple()
         force_scale_mode_norm = str(mac_force_scale_mode).strip().lower()
         if force_scale_mode_norm not in ("prev", "prepass"):
@@ -748,6 +782,8 @@ class FastMultipoleMethod:
         self._prepared_state_cache_value: Optional[FMMPreparedState] = None
         self._prepared_state_cache_positions: Optional[Array] = None
         self._prepared_state_cache_masses: Optional[Array] = None
+        self._topology_reuse_entry: Optional[_TopologyReuseEntry] = None
+        self._recent_topology_reused: bool = False
         self._recent_retry_events: Tuple[DualTreeRetryEvent, ...] = tuple()
         self.fixed_order = fixed_order
         self.fixed_max_leaf_size = fixed_max_leaf_size
@@ -767,6 +803,12 @@ class FastMultipoleMethod:
 
         return self._recent_retry_events
 
+    @property
+    def recent_topology_reused(self: "FastMultipoleMethod") -> bool:
+        """Whether the most recent prepare/evaluate path reused cached topology."""
+
+        return bool(self._recent_topology_reused)
+
     def clear_prepared_state_cache(self: "FastMultipoleMethod") -> None:
         """Clear cached prepared-state payloads used by reuse mode."""
 
@@ -774,6 +816,8 @@ class FastMultipoleMethod:
         self._prepared_state_cache_value = None
         self._prepared_state_cache_positions = None
         self._prepared_state_cache_masses = None
+        self._topology_reuse_entry = None
+        self._recent_topology_reused = False
 
     def _solidfmm_basis_mode(self: "FastMultipoleMethod") -> str:
         """Return active solidfmm coefficient family ('complex' or 'real')."""
@@ -1102,6 +1146,93 @@ class FastMultipoleMethod:
             jnp.asarray(max_corner, dtype=positions.dtype),
         )
 
+    def _topology_reuse_candidate(
+        self,
+        *,
+        positions: Array,
+        bounds: Tuple[Array, Array],
+        tree_config: TreeBuilderConfig,
+        leaf_size: int,
+        refine_local: bool,
+        max_refine_levels: int,
+        aspect_threshold: float,
+        allow_stateful_cache: bool,
+    ) -> Optional[_TopologyReuseCandidate]:
+        """Return a radix-topology reuse signature when host-side caching is safe."""
+
+        if (
+            not self.reuse_topology
+            or not allow_stateful_cache
+            or self.tree_type != "radix"
+        ):
+            return None
+        try:
+            morton_codes = morton_encode(positions, bounds)
+            orig_idx = jnp.arange(positions.shape[0], dtype=INDEX_DTYPE)
+            sorted_indices = jnp.lexsort((orig_idx, morton_codes))
+            sorted_codes = morton_codes[sorted_indices]
+            hasher = hashlib.sha256()
+            hasher.update(
+                np.asarray(jax.device_get(sorted_codes), dtype=np.uint64).tobytes()
+            )
+            hasher.update(
+                np.asarray(jax.device_get(sorted_indices), dtype=np.int64).tobytes()
+            )
+            hasher.update(str(tree_config.mode).encode("utf8"))
+            leaf_param = (
+                int(leaf_size)
+                if tree_config.mode == "lbvh"
+                else int(tree_config.target_leaf_particles)
+            )
+            hasher.update(np.asarray(leaf_param, dtype=np.int64).tobytes())
+            hasher.update(np.asarray(int(bool(refine_local)), dtype=np.int64).tobytes())
+            hasher.update(np.asarray(int(max_refine_levels), dtype=np.int64).tobytes())
+            hasher.update(
+                np.asarray(float(aspect_threshold), dtype=np.float64).tobytes()
+            )
+        except Exception:
+            return None
+        return _TopologyReuseCandidate(
+            key=hasher.hexdigest(),
+            sorted_indices=jnp.asarray(sorted_indices, dtype=INDEX_DTYPE),
+        )
+
+    def _rebuild_tree_artifacts_from_topology(
+        self,
+        *,
+        candidate: _TopologyReuseCandidate,
+        entry: _TopologyReuseEntry,
+        positions: Array,
+        masses: Array,
+    ) -> _TreeBuildArtifacts:
+        """Reorder particles and attach them to a cached radix topology."""
+
+        positions_sorted, masses_sorted, inverse = reorder_particles_by_indices(
+            positions,
+            masses,
+            candidate.sorted_indices,
+        )
+        cached_tree = entry.tree
+        if not isinstance(cached_tree, RadixTree):
+            raise ValueError("topology reuse currently supports radix trees only")
+        rebuilt_tree = RadixTree(
+            topology=cached_tree.topology,
+            build_mode=cached_tree.build_mode,
+            positions_sorted=positions_sorted,
+            masses_sorted=masses_sorted,
+            inverse_permutation=inverse,
+            workspace=cached_tree.workspace,
+        )
+        return _TreeBuildArtifacts(
+            tree=rebuilt_tree,
+            positions_sorted=positions_sorted,
+            masses_sorted=masses_sorted,
+            inverse_permutation=inverse,
+            workspace=cached_tree.workspace,
+            max_leaf_size=int(entry.max_leaf_size),
+            cache_leaf_parameter=int(entry.cache_leaf_parameter),
+        )
+
     def _build_locals_template_for_prepare_state(
         self,
         *,
@@ -1181,21 +1312,66 @@ class FastMultipoleMethod:
             jit_tree_override=jit_tree_override,
         )
 
-        build_artifacts = _build_tree_with_config(
-            positions_arr,
-            masses_arr,
-            inferred_bounds,
-            tree_type=self.tree_type,
+        topology_candidate = self._topology_reuse_candidate(
+            positions=positions_arr,
+            bounds=inferred_bounds,
             tree_config=tree_config,
             leaf_size=int(leaf_size),
-            workspace=(self._tree_workspace if allow_stateful_cache else None),
-            jit_tree=jit_tree_flag,
             refine_local=refine_local_val,
             max_refine_levels=max_refine_levels_val,
             aspect_threshold=aspect_threshold_val,
+            allow_stateful_cache=allow_stateful_cache,
         )
-        if allow_stateful_cache:
-            self._tree_workspace = build_artifacts.workspace
+        self._recent_topology_reused = False
+        cached_topology = self._topology_reuse_entry
+        can_reuse_cached_topology = (
+            topology_candidate is not None
+            and cached_topology is not None
+            and topology_candidate.key == cached_topology.key
+            and cached_topology.reuse_count < (self.rebuild_every - 1)
+        )
+
+        if can_reuse_cached_topology:
+            build_artifacts = self._rebuild_tree_artifacts_from_topology(
+                candidate=topology_candidate,
+                entry=cached_topology,
+                positions=positions_arr,
+                masses=masses_arr,
+            )
+            self._recent_topology_reused = True
+            self._topology_reuse_entry = _TopologyReuseEntry(
+                key=cached_topology.key,
+                tree=build_artifacts.tree,
+                max_leaf_size=int(cached_topology.max_leaf_size),
+                cache_leaf_parameter=int(cached_topology.cache_leaf_parameter),
+                reuse_count=int(cached_topology.reuse_count) + 1,
+            )
+        else:
+            build_artifacts = _build_tree_with_config(
+                positions_arr,
+                masses_arr,
+                inferred_bounds,
+                tree_type=self.tree_type,
+                tree_config=tree_config,
+                leaf_size=int(leaf_size),
+                workspace=(self._tree_workspace if allow_stateful_cache else None),
+                jit_tree=jit_tree_flag,
+                refine_local=refine_local_val,
+                max_refine_levels=max_refine_levels_val,
+                aspect_threshold=aspect_threshold_val,
+            )
+            if allow_stateful_cache:
+                self._tree_workspace = build_artifacts.workspace
+                if topology_candidate is not None:
+                    self._topology_reuse_entry = _TopologyReuseEntry(
+                        key=topology_candidate.key,
+                        tree=build_artifacts.tree,
+                        max_leaf_size=int(build_artifacts.max_leaf_size),
+                        cache_leaf_parameter=int(build_artifacts.cache_leaf_parameter),
+                        reuse_count=0,
+                    )
+                elif self.reuse_topology:
+                    self._topology_reuse_entry = None
 
         tree = build_artifacts.tree
         pos_sorted = build_artifacts.positions_sorted
@@ -1225,6 +1401,7 @@ class FastMultipoleMethod:
             inverse_permutation=build_artifacts.inverse_permutation,
             leaf_cap=leaf_cap_hint,
             leaf_parameter=build_artifacts.cache_leaf_parameter,
+            topology_key=None if topology_candidate is None else topology_candidate.key,
             upward=upward,
             locals_template=locals_template,
         )
@@ -2265,6 +2442,7 @@ class FastMultipoleMethod:
             working_dtype=positions_arr.dtype,
             expansion_basis=self.expansion_basis,
             theta=theta_val,
+            topology_key=tree_artifacts.topology_key,
             interactions=dual_downward_artifacts.interactions,
             dual_tree_result=dual_downward_artifacts.traversal_result,
             retry_events=retry_events_tuple,

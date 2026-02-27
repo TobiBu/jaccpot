@@ -1,6 +1,7 @@
 """Dual-tree interaction cache helpers for the runtime FMM implementation."""
 
 import hashlib
+import inspect
 from dataclasses import dataclass
 from typing import NamedTuple, Optional
 
@@ -199,23 +200,39 @@ def _build_dual_tree_artifacts(
     else:
         from . import fmm as _runtime_fmm
 
-        use_structured = bool(mac_type == "dehnen_error" and p_gears)
-        build_out = _runtime_fmm.build_interactions_and_neighbors(
-            tree,
-            geometry,
+        signature = inspect.signature(_runtime_fmm.build_interactions_and_neighbors)
+        supports_adaptive_mac = "p_gears" in signature.parameters
+        supports_structured = "return_structured" in signature.parameters
+        if mac_type == "dehnen_error" and not supports_adaptive_mac:
+            raise RuntimeError(
+                "Installed yggdrax build does not support mac_type='dehnen_error' "
+                "adaptive gear traversal."
+            )
+        use_structured = bool(
+            mac_type == "dehnen_error" and p_gears and supports_structured
+        )
+        call_kwargs = dict(
             theta=theta,
             mac_type=mac_type,
-            p_gears=p_gears,
-            eps=eps,
             dehnen_radius_scale=dehnen_radius_scale,
-            node_features=node_features,
             max_pair_queue=max_pair_queue,
             process_block=pair_process_block,
             traversal_config=traversal_config,
             retry_logger=retry_logger,
             return_result=True,
             return_grouped=grouped_interactions,
-            return_structured=use_structured,
+        )
+        if supports_adaptive_mac:
+            call_kwargs["p_gears"] = p_gears
+            call_kwargs["eps"] = eps
+            call_kwargs["node_features"] = node_features
+        if supports_structured:
+            call_kwargs["return_structured"] = use_structured
+
+        build_out = _runtime_fmm.build_interactions_and_neighbors(
+            tree,
+            geometry,
+            **call_kwargs,
         )
         if use_structured:
             interactions = build_out.far_pairs
