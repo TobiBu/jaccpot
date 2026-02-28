@@ -78,7 +78,11 @@ from jaccpot.operators.multipole_utils import (
     multi_power,
     total_coefficients,
 )
-from jaccpot.operators.real_harmonics import evaluate_local_real_with_grad, l2l_real
+from jaccpot.operators.real_harmonics import (
+    evaluate_local_real_with_grad,
+    l2l_real,
+    sh_size,
+)
 from jaccpot.upward.solidfmm_complex_tree_expansions import (
     prepare_solidfmm_complex_upward_sweep,
 )
@@ -91,6 +95,8 @@ from jaccpot.upward.tree_expansions import (
 )
 
 from ._adaptive_policy import (
+    adaptive_pair_policy,
+    bucket_far_pairs_by_tag,
     build_adaptive_policy_state,
     compute_node_force_scale_from_sorted_acc,
     source_error_proxy_by_order_from_multipoles,
@@ -1437,20 +1443,21 @@ class FastMultipoleMethod:
         allow_stateful_cache: bool,
     ) -> _PrepareStateDualDownwardArtifacts:
         """Build/reuse interactions and prepare downward artifacts."""
-        node_features = None
-        traversal_p_gears = None
-        traversal_eps = None
+        pair_policy = None
+        policy_state = None
         cache_key = None
-        if mac_type_val == "dehnen_error":
+        if self.adaptive_order:
             if len(self.p_gears) == 0:
-                raise ValueError("mac_type='dehnen_error' requires non-empty p_gears")
-            node_features = self.build_dehnen_error_node_features(
+                raise ValueError("adaptive_order=True requires non-empty p_gears")
+            policy_state = self._build_adaptive_policy_state(
                 upward=tree_artifacts.upward,
                 p_gears=self.p_gears,
                 force_scale_nodes=force_scale_nodes,
+                eps=jnp.asarray(
+                    theta_val, dtype=tree_artifacts.upward.multipoles.packed.real.dtype
+                ),
             )
-            traversal_p_gears = self.p_gears
-            traversal_eps = theta_val
+            pair_policy = adaptive_pair_policy
         else:
             cache_key = _interaction_cache_key(
                 tree_artifacts.tree,
@@ -1484,9 +1491,8 @@ class FastMultipoleMethod:
             use_dense_interactions=self.use_dense_interactions,
             grouped_interactions=grouped_interactions,
             grouped_chunk_size=runtime_m2l_chunk_size,
-            p_gears=traversal_p_gears,
-            eps=traversal_eps,
-            node_features=node_features,
+            pair_policy=pair_policy,
+            policy_state=policy_state,
         )
         if allow_stateful_cache:
             self._interaction_cache = cache_entry
@@ -1503,36 +1509,25 @@ class FastMultipoleMethod:
             grouped_segment_sort_permutation,
             grouped_segment_group_ids,
             grouped_segment_unique_targets,
-            far_pairs_by_gear_structured,
         ) = self._unpack_dual_tree_artifacts(dual_artifacts)
 
         far_pairs_by_gear = None
         if self.adaptive_order:
             if len(self.p_gears) == 0:
                 raise ValueError("adaptive_order=True requires non-empty p_gears")
-            if far_pairs_by_gear_structured is not None:
-                far_pairs_by_gear = tuple(
-                    (
-                        jnp.asarray(bucket_src, dtype=INDEX_DTYPE),
-                        jnp.asarray(bucket_tgt, dtype=INDEX_DTYPE),
-                    )
-                    for bucket_src, bucket_tgt in far_pairs_by_gear_structured
-                )
-            else:
-                gear_buckets: list[tuple[Array, Array]] = []
-                for _ in self.p_gears:
-                    gear_buckets.append(
-                        (
-                            jnp.zeros((0,), dtype=INDEX_DTYPE),
-                            jnp.zeros((0,), dtype=INDEX_DTYPE),
-                        )
-                    )
-                # Fallback for MAC variants that do not report structured gears.
-                gear_buckets[-1] = (
-                    jnp.asarray(interactions.sources, dtype=INDEX_DTYPE),
-                    jnp.asarray(interactions.targets, dtype=INDEX_DTYPE),
-                )
-                far_pairs_by_gear = tuple(gear_buckets)
+            far_total = int(traversal_result.far_pair_count)
+            far_pairs_by_gear = bucket_far_pairs_by_tag(
+                jnp.asarray(
+                    traversal_result.interaction_sources[:far_total], dtype=INDEX_DTYPE
+                ),
+                jnp.asarray(
+                    traversal_result.interaction_targets[:far_total], dtype=INDEX_DTYPE
+                ),
+                jnp.asarray(
+                    traversal_result.interaction_tags[:far_total], dtype=INDEX_DTYPE
+                ),
+                num_tags=len(self.p_gears),
+            )
             self._recent_far_pairs_by_gear_counts = tuple(
                 int(bucket_src.shape[0]) for bucket_src, _ in far_pairs_by_gear
             )
@@ -1802,7 +1797,6 @@ class FastMultipoleMethod:
         Optional[Array],
         Optional[Array],
         Optional[Array],
-        Optional[tuple[tuple[Array, Array], ...]],
     ]:
         """Unpack dual-tree artifacts for downward preparation and state export."""
         return (
@@ -1817,7 +1811,6 @@ class FastMultipoleMethod:
             dual_artifacts.grouped_segment_sort_permutation,
             dual_artifacts.grouped_segment_group_ids,
             dual_artifacts.grouped_segment_unique_targets,
-            dual_artifacts.far_pairs_by_gear,
         )
 
     def _prepare_downward_with_artifacts(
@@ -2333,7 +2326,7 @@ class FastMultipoleMethod:
             )
 
         theta_val = float(self.theta if theta is None else theta)
-        mac_type_val = self.mac_type
+        mac_type_val = "dehnen" if self.mac_type == "dehnen_error" else self.mac_type
 
         tree_artifacts = self._prepare_state_tree_and_upward(
             positions_arr=positions_arr,
@@ -2349,7 +2342,7 @@ class FastMultipoleMethod:
             allow_stateful_cache=allow_stateful_cache,
         )
         force_scale_nodes = None
-        if mac_type_val == "dehnen_error":
+        if self.adaptive_order:
             node_count = int(tree_artifacts.tree.parent.shape[0])
             previous_force_scale = self._last_force_scale_nodes
             if self.mac_force_scale_mode == "prev" or self._in_force_scale_prepass:

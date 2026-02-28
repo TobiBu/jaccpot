@@ -1,7 +1,6 @@
 """Dual-tree interaction cache helpers for the runtime FMM implementation."""
 
 import hashlib
-import inspect
 from dataclasses import dataclass
 from typing import NamedTuple, Optional
 
@@ -39,7 +38,6 @@ class _DualTreeArtifacts:
     grouped_segment_group_ids: Optional[Array]
     grouped_segment_unique_targets: Optional[Array]
     grouped_chunk_size: Optional[int]
-    far_pairs_by_gear: Optional[tuple[tuple[Array, Array], ...]]
 
 
 class _InteractionCacheEntry(NamedTuple):
@@ -173,14 +171,12 @@ def _build_dual_tree_artifacts(
     use_dense_interactions: bool,
     grouped_interactions: bool,
     grouped_chunk_size: Optional[int],
-    p_gears: Optional[tuple[int, ...]] = None,
-    eps: Optional[float] = None,
-    node_features: Optional[dict[str, Array]] = None,
+    pair_policy=None,
+    policy_state=None,
 ) -> tuple[_DualTreeArtifacts, Optional[_InteractionCacheEntry]]:
     """Construct or reuse dual-tree traversal products for a tree."""
 
     cache_out = cache_entry
-    far_pairs_by_gear = None
     if (
         cache_key is not None
         and cache_entry is not None
@@ -200,18 +196,9 @@ def _build_dual_tree_artifacts(
     else:
         from . import fmm as _runtime_fmm
 
-        signature = inspect.signature(_runtime_fmm.build_interactions_and_neighbors)
-        supports_adaptive_mac = "p_gears" in signature.parameters
-        supports_structured = "return_structured" in signature.parameters
-        if mac_type == "dehnen_error" and not supports_adaptive_mac:
-            raise RuntimeError(
-                "Installed yggdrax build does not support mac_type='dehnen_error' "
-                "adaptive gear traversal."
-            )
-        use_structured = bool(
-            mac_type == "dehnen_error" and p_gears and supports_structured
-        )
-        call_kwargs = dict(
+        build_out = _runtime_fmm.build_interactions_and_neighbors(
+            tree,
+            geometry,
             theta=theta,
             mac_type=mac_type,
             dehnen_radius_scale=dehnen_radius_scale,
@@ -221,48 +208,23 @@ def _build_dual_tree_artifacts(
             retry_logger=retry_logger,
             return_result=True,
             return_grouped=grouped_interactions,
+            pair_policy=pair_policy,
+            policy_state=policy_state,
         )
-        if supports_adaptive_mac:
-            call_kwargs["p_gears"] = p_gears
-            call_kwargs["eps"] = eps
-            call_kwargs["node_features"] = node_features
-        if supports_structured:
-            call_kwargs["return_structured"] = use_structured
-
-        build_out = _runtime_fmm.build_interactions_and_neighbors(
-            tree,
-            geometry,
-            **call_kwargs,
-        )
-        if use_structured:
-            interactions = build_out.far_pairs
-            neighbor_list = build_out.near_pairs
-            far_pairs_by_gear_raw = build_out.far_pairs_by_gear
-            far_pairs_by_gear = None
-            if far_pairs_by_gear_raw is not None:
-                far_pairs_by_gear = tuple(
-                    (
-                        jnp.asarray(bucket_sources),
-                        jnp.asarray(bucket_targets),
-                    )
-                    for bucket_sources, bucket_targets in far_pairs_by_gear_raw
-                )
-            traversal_result = build_out.meta.get("traversal_result")
-            grouped_buffers = build_out.meta.get("grouped")
+        if grouped_interactions:
+            (
+                interactions,
+                neighbor_list,
+                traversal_result,
+                grouped_buffers,
+            ) = build_out
         else:
-            if grouped_interactions:
-                (
-                    interactions,
-                    neighbor_list,
-                    traversal_result,
-                    grouped_buffers,
-                ) = build_out
-            else:
-                (
-                    interactions,
-                    neighbor_list,
-                    traversal_result,
-                ) = build_out
+            (
+                interactions,
+                neighbor_list,
+                traversal_result,
+            ) = build_out
+            grouped_buffers = None
         cache_out = (
             _InteractionCacheEntry(
                 key=cache_key,
@@ -408,6 +370,5 @@ def _build_dual_tree_artifacts(
         grouped_segment_group_ids=grouped_segment_group_ids,
         grouped_segment_unique_targets=grouped_segment_unique_targets,
         grouped_chunk_size=grouped_chunk_size_cached,
-        far_pairs_by_gear=far_pairs_by_gear,
     )
     return artifacts, cache_out
