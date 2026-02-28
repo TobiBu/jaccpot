@@ -29,11 +29,11 @@ class ComplexSHBasis:
     coefficient_ordering: str = "ell-major, m=-ell..+ell (packed complex SH)"
     runtime_expansion_basis: str = "solidfmm"
 
-    def n_coeffs(self, p: int) -> int:
+    def n_coeffs(self: "ComplexSHBasis", p: int) -> int:
         """Return packed coefficient count for order ``p``."""
         return int(sh_size(int(p)))
 
-    def pack_coeffs(self, coeffs: Array, *, order: int) -> Array:
+    def pack_coeffs(self: "ComplexSHBasis", coeffs: Array, *, order: int) -> Array:
         """Validate and return packed solidfmm complex coefficients."""
         coeffs_arr = jnp.asarray(coeffs)
         expected = self.n_coeffs(order)
@@ -43,11 +43,13 @@ class ComplexSHBasis:
             )
         return coeffs_arr
 
-    def unpack_coeffs(self, packed: Array, *, order: int) -> Array:
+    def unpack_coeffs(self: "ComplexSHBasis", packed: Array, *, order: int) -> Array:
         """Return packed coefficients (complex basis already uses packed layout)."""
         return self.pack_coeffs(packed, order=order)
 
-    def rotate_to_z(self, coeffs: Array, directions: Array, *, order: int) -> Array:
+    def rotate_to_z(
+        self: "ComplexSHBasis", coeffs: Array, directions: Array, *, order: int
+    ) -> Array:
         """Rotate batched multipoles into a frame aligned to ``+z``."""
         coeffs_arr = self.pack_coeffs(coeffs, order=order)
         x, y, z = self._split_xyz(directions)
@@ -60,7 +62,9 @@ class ComplexSHBasis:
         )
         return self._apply_rotation_blocks(coeffs_arr, to_blocks)
 
-    def rotate_from_z(self, coeffs: Array, directions: Array, *, order: int) -> Array:
+    def rotate_from_z(
+        self: "ComplexSHBasis", coeffs: Array, directions: Array, *, order: int
+    ) -> Array:
         """Rotate batched multipoles from the ``+z`` frame back to world frame."""
         coeffs_arr = self.pack_coeffs(coeffs, order=order)
         x, y, z = self._split_xyz(directions)
@@ -73,7 +77,9 @@ class ComplexSHBasis:
         )
         return self._apply_rotation_blocks(coeffs_arr, from_blocks)
 
-    def m2l_rot_scale(self, sources: Array, deltas: Array, *, order: int) -> Array:
+    def m2l_rot_scale(
+        self: "ComplexSHBasis", sources: Array, deltas: Array, *, order: int
+    ) -> Array:
         """Run existing batched complex M2L kernel for source multipoles."""
         src = self.pack_coeffs(sources, order=order)
         delta_arr = jnp.asarray(deltas)

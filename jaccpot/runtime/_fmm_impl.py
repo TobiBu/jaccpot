@@ -433,7 +433,7 @@ def _build_tree_with_config(
     cache_leaf_parameter = (
         int(leaf_size) if mode == "lbvh" else tree_config.target_leaf_particles
     )
-    if int(max_leaf_size) > int(leaf_size):
+    if mode != "fixed_depth" and int(max_leaf_size) > int(leaf_size):
         raise ValueError(
             "configured leaf_size is too small for built tree: "
             f"max_leaf_size={int(max_leaf_size)} > leaf_size={int(leaf_size)}"
@@ -484,7 +484,12 @@ class FMMPreparedState:
     nearfield_chunk_unique_indices: Optional[Array]
     force_scale_nodes: Optional[Array]
 
-    def tree_flatten(self):
+    def tree_flatten(
+        self: "FMMPreparedState",
+    ) -> tuple[
+        tuple[Any, ...],
+        tuple[int, str, str, str, float, Optional[str], Tuple[DualTreeRetryEvent, ...]],
+    ]:
         children = (
             self.tree,
             self.positions_sorted,
@@ -515,7 +520,9 @@ class FMMPreparedState:
         return children, aux
 
     @classmethod
-    def tree_unflatten(cls, aux, children):
+    def tree_unflatten(
+        cls: type["FMMPreparedState"], aux: tuple[Any, ...], children: tuple[Any, ...]
+    ) -> "FMMPreparedState":
         (
             max_leaf_size,
             input_dtype_name,
@@ -1002,7 +1009,9 @@ class FastMultipoleMethod:
         elif (
             large_cpu
             and self.tree_type == "radix"
-            and self.tree_build_mode == "fixed_depth"
+            and self.preset == "fast"
+            and self.expansion_basis == "solidfmm"
+            and self.mac_type == "dehnen"
         ):
             refine_local_override = False
 
@@ -1020,7 +1029,6 @@ class FastMultipoleMethod:
             and self.expansion_basis == "solidfmm"
             and self.mac_type == "dehnen"
             and self.tree_type == "radix"
-            and self.tree_build_mode == "fixed_depth"
             and large_cpu
         ):
             grouped_interactions = True

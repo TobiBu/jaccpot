@@ -21,22 +21,28 @@ class BasisInterface(Protocol):
     coefficient_ordering: str
     runtime_expansion_basis: str
 
-    def n_coeffs(self, p: int) -> int:
+    def n_coeffs(self: "BasisInterface", p: int) -> int:
         """Return number of packed coefficients for expansion order ``p``."""
 
-    def pack_coeffs(self, coeffs: Array, *, order: int) -> Array:
+    def pack_coeffs(self: "BasisInterface", coeffs: Array, *, order: int) -> Array:
         """Pack basis coefficients into the runtime 1D layout."""
 
-    def unpack_coeffs(self, packed: Array, *, order: int) -> Array:
+    def unpack_coeffs(self: "BasisInterface", packed: Array, *, order: int) -> Array:
         """Unpack runtime 1D coefficient layout into structured basis form."""
 
-    def rotate_to_z(self, coeffs: Array, directions: Array, *, order: int) -> Array:
+    def rotate_to_z(
+        self: "BasisInterface", coeffs: Array, directions: Array, *, order: int
+    ) -> Array:
         """Rotate batched coefficients into a frame where direction maps to ``+z``."""
 
-    def rotate_from_z(self, coeffs: Array, directions: Array, *, order: int) -> Array:
+    def rotate_from_z(
+        self: "BasisInterface", coeffs: Array, directions: Array, *, order: int
+    ) -> Array:
         """Rotate batched coefficients back from the ``+z`` frame."""
 
-    def m2l_rot_scale(self, sources: Array, deltas: Array, *, order: int) -> Array:
+    def m2l_rot_scale(
+        self: "BasisInterface", sources: Array, deltas: Array, *, order: int
+    ) -> Array:
         """Evaluate batched M2L translation in the basis' native convention."""
 
 

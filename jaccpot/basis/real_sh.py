@@ -97,11 +97,11 @@ class RealSHBasis:
     coefficient_ordering: str = "ell-major, m=-ell..+ell (packed real SH)"
     runtime_expansion_basis: str = "solidfmm"
 
-    def n_coeffs(self, p: int) -> int:
+    def n_coeffs(self: "RealSHBasis", p: int) -> int:
         """Return packed coefficient count for expansion order ``p``."""
         return n_real_sh_coeffs(int(p))
 
-    def pack_coeffs(self, coeffs: Array, *, order: int) -> Array:
+    def pack_coeffs(self: "RealSHBasis", coeffs: Array, *, order: int) -> Array:
         """Validate and return packed real SH coefficients."""
         arr = jnp.asarray(coeffs)
         expected = self.n_coeffs(order)
@@ -111,19 +111,25 @@ class RealSHBasis:
             )
         return arr
 
-    def unpack_coeffs(self, packed: Array, *, order: int) -> Array:
+    def unpack_coeffs(self: "RealSHBasis", packed: Array, *, order: int) -> Array:
         """Return packed coefficients (real SH uses the packed runtime layout)."""
         return self.pack_coeffs(packed, order=order)
 
-    def rotate_to_z(self, coeffs: Array, directions: Array, *, order: int) -> Array:
+    def rotate_to_z(
+        self: "RealSHBasis", coeffs: Array, directions: Array, *, order: int
+    ) -> Array:
         """Rotate real SH coefficients into a z-aligned frame (not yet implemented)."""
         raise NotImplementedError("real SH rotations are implemented in Stage J3")
 
-    def rotate_from_z(self, coeffs: Array, directions: Array, *, order: int) -> Array:
+    def rotate_from_z(
+        self: "RealSHBasis", coeffs: Array, directions: Array, *, order: int
+    ) -> Array:
         """Rotate real SH coefficients back from a z-aligned frame."""
         raise NotImplementedError("real SH rotations are implemented in Stage J3")
 
-    def m2l_rot_scale(self, sources: Array, deltas: Array, *, order: int) -> Array:
+    def m2l_rot_scale(
+        self: "RealSHBasis", sources: Array, deltas: Array, *, order: int
+    ) -> Array:
         """Translate real SH multipoles to locals via rotate/scale M2L path."""
         raise NotImplementedError("real SH rotate+scale M2L is implemented in Stage J3")
 

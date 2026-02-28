@@ -23,7 +23,11 @@ Tree construction and traversal artifacts are provided by the companion package
 ## Features
 
 - High-level `FastMultipoleMethod` API with `fast`, `balanced`, and `accurate` presets
-- Configurable expansion basis (`solidfmm`, `cartesian`)
+- Configurable expansion basis (`complex`/`solidfmm`, `real`, `cartesian`)
+- Pure-JAX real spherical harmonic rotate+scale M2L path
+- Adaptive-order far-field evaluation with fixed `p_gears` buckets
+- Optional topology reuse for multiple nearby timesteps
+- Optional Pallas acceleration for the real-basis z-translation hotspot
 - Modular runtime with grouped/dense interaction pathways
 - Near-field and far-field execution paths with optional prepared state reuse
 - Differentiable gravitational acceleration helper via JAX autodiff
@@ -70,6 +74,18 @@ accelerations = solver.compute_accelerations(positions, masses)
 print(accelerations.shape)
 ```
 
+Real-basis rotate+scale FMM uses the same high-level API:
+
+```python
+solver = FastMultipoleMethod(
+    preset="accurate",
+    basis="real",
+    adaptive_order=True,
+    p_gears=(2, 3, 4),
+)
+accelerations = solver.compute_accelerations(positions, masses, max_order=4)
+```
+
 For split-step integrators (for example active-particle substeps), you can
 evaluate only a subset while still using all particles as FMM sources:
 
@@ -88,6 +104,118 @@ coupler = OdisseoFMMCoupler(solver, leaf_size=16, max_order=4)
 coupler.prepare(primitive_state, masses)  # full source tree
 acc_active = coupler.accelerations(primitive_state, active_indices=active)
 ```
+
+## Basis Selection
+
+- `basis="complex"` or `basis="solidfmm"`:
+  default complex solidFMM-compatible path
+- `basis="real"`:
+  real spherical harmonic coefficient layout with rotate+scale-to-z M2L
+- `basis="cartesian"`:
+  cartesian multipole/local expansion path
+
+The default remains the existing complex solidFMM-compatible path.
+
+## Adaptive Order
+
+Use `adaptive_order=True` together with a static gear list:
+
+```python
+solver = FastMultipoleMethod(
+    preset="accurate",
+    basis="real",
+    adaptive_order=True,
+    p_gears=(2, 3, 4),
+)
+```
+
+`p_gears` must be a fixed tuple or list of orders. This keeps all hot paths
+JIT-friendly and avoids shape polymorphism.
+
+Two modes are available in practice:
+
+- baseline adaptive bucketing:
+  works with current jaccpot runtime and falls back to conservative bucket use
+  when the traversal backend does not expose structured gear buckets
+- structured `dehnen_error` bucketing:
+  requires a yggdrax build whose `build_interactions_and_neighbors(...)`
+  supports `p_gears`, `eps`, `node_features`, and `return_structured=True`
+
+Examples:
+
+- [examples/real_sh_adaptive_order.py](/Users/buck/Documents/Nexus/Projects/jaccpot/examples/real_sh_adaptive_order.py)
+- [examples/real_sh_rot_scale_demo.py](/Users/buck/Documents/Nexus/Projects/jaccpot/examples/real_sh_rot_scale_demo.py)
+
+## Force Scales For Dehnen MAC
+
+When using `mac_type="dehnen_error"`, jaccpot can provide the yggdrax
+`node_features` payload expected by the adaptive MAC:
+
+- `tail_power_by_gear` for source nodes
+- `force_scale` for target nodes
+
+Select how force scales are estimated with `mac_force_scale_mode`:
+
+- `"prev"`:
+  reuse the previous full-step acceleration magnitudes
+- `"prepass"`:
+  run a cheap lowest-gear prepass and derive force scales from that pass
+
+The public helper is:
+
+```python
+state = solver.prepare_state(positions, masses, max_order=4)
+node_features = solver.build_dehnen_error_node_features(state)
+```
+
+If the installed yggdrax build does not yet expose adaptive `dehnen_error`
+traversal inputs, jaccpot keeps the fallback paths available but skips those
+specific integration tests.
+
+## Pallas Acceleration
+
+The real-basis z-translation core can be accelerated with Pallas:
+
+```python
+solver = FastMultipoleMethod(
+    preset="accurate",
+    basis="real",
+    use_pallas=True,
+)
+```
+
+Current behavior:
+
+- rotations stay in pure JAX
+- only the real-basis z-axis M2L core is offloaded
+- unsupported backends fall back to the pure-JAX kernel automatically
+
+On the current `expanse` CPU environment, the example reports fallback rather
+than true Pallas execution:
+
+- [examples/pallas_m2l_speed.py](/Users/buck/Documents/Nexus/Projects/jaccpot/examples/pallas_m2l_speed.py)
+
+## Topology Reuse
+
+For small multi-step particle motion, you can reuse cached topology and
+interaction lists for a bounded number of steps:
+
+```python
+solver = FastMultipoleMethod(
+    preset="accurate",
+    basis="real",
+    reuse_topology=True,
+    rebuild_every=3,
+)
+```
+
+The solver always recomputes reordered particles, geometry, upward multipoles,
+and downward locals for the current state. Reuse only applies to cached
+topology/traversal artifacts when the Morton ordering key remains unchanged.
+
+Example:
+
+- [examples/reuse_topology_demo.py](/Users/buck/Documents/Nexus/Projects/jaccpot/examples/reuse_topology_demo.py)
 
 ## Development
 
