@@ -78,11 +78,7 @@ from jaccpot.operators.multipole_utils import (
     multi_power,
     total_coefficients,
 )
-from jaccpot.operators.real_harmonics import (
-    evaluate_local_real_with_grad,
-    l2l_real,
-    sh_size,
-)
+from jaccpot.operators.real_harmonics import evaluate_local_real_with_grad, l2l_real
 from jaccpot.upward.solidfmm_complex_tree_expansions import (
     prepare_solidfmm_complex_upward_sweep,
 )
@@ -94,6 +90,11 @@ from jaccpot.upward.tree_expansions import (
     prepare_upward_sweep as prepare_tree_upward_sweep,
 )
 
+from ._adaptive_policy import (
+    build_adaptive_policy_state,
+    compute_node_force_scale_from_sorted_acc,
+    source_error_proxy_by_order_from_multipoles,
+)
 from ._interaction_cache import (
     _build_dual_tree_artifacts,
     _DualTreeArtifacts,
@@ -843,37 +844,41 @@ class FastMultipoleMethod:
         accelerations_sorted: Array,
     ) -> Array:
         """Estimate per-node force scales from sorted per-particle accelerations."""
-        node_ranges = np.asarray(jax.device_get(tree.node_ranges), dtype=np.int64)
-        acc_sorted_np = np.asarray(jax.device_get(accelerations_sorted))
-        mag = np.linalg.norm(acc_sorted_np, axis=1)
-        force_scale = np.zeros((node_ranges.shape[0],), dtype=mag.dtype)
-        for idx, (start, end) in enumerate(node_ranges):
-            s = int(start)
-            e = int(end)
-            if e < s:
-                continue
-            force_scale[idx] = float(np.max(mag[s : e + 1]))
-        return jnp.asarray(force_scale, dtype=accelerations_sorted.dtype)
 
-    def _tail_power_by_gear_from_multipoles(
+        return compute_node_force_scale_from_sorted_acc(
+            node_ranges=tree.node_ranges,
+            accelerations_sorted=accelerations_sorted,
+        )
+
+    def _source_error_proxy_by_order_from_multipoles(
         self: "FastMultipoleMethod",
         *,
         multipole_packed: Array,
         p_gears: tuple[int, ...],
     ) -> Array:
-        """Compute a conservative per-node tail-power estimate for each gear."""
-        packed = jnp.asarray(multipole_packed)
-        if len(p_gears) == 0:
-            return jnp.zeros((packed.shape[0], 0), dtype=packed.real.dtype)
-        total_p = int(round(np.sqrt(int(packed.shape[1])) - 1))
-        magnitudes = jnp.abs(packed)
-        tails: list[Array] = []
-        for p_gear in p_gears:
-            p_clip = int(max(0, min(int(p_gear), total_p)))
-            keep = sh_size(p_clip)
-            tail = jnp.linalg.norm(magnitudes[:, keep:], axis=1)
-            tails.append(tail)
-        return jnp.stack(tails, axis=1)
+        """Compute a conservative per-node residual proxy for each candidate order."""
+
+        return source_error_proxy_by_order_from_multipoles(
+            multipole_packed=multipole_packed,
+            p_gears=p_gears,
+        )
+
+    def _build_adaptive_policy_state(
+        self: "FastMultipoleMethod",
+        *,
+        upward: TreeUpwardData,
+        p_gears: tuple[int, ...],
+        force_scale_nodes: Optional[Array],
+        eps: Array,
+    ):
+        """Build the solver-owned adaptive policy state from upward data."""
+
+        return build_adaptive_policy_state(
+            upward=upward,
+            p_gears=p_gears,
+            force_scale_nodes=force_scale_nodes,
+            eps=eps,
+        )
 
     def build_dehnen_error_node_features(
         self: "FastMultipoleMethod",
@@ -882,22 +887,17 @@ class FastMultipoleMethod:
         p_gears: tuple[int, ...],
         force_scale_nodes: Optional[Array],
     ) -> dict[str, Array]:
-        """Build yggdrax ``node_features`` expected by ``mac_type='dehnen_error'``."""
-        if len(p_gears) == 0:
-            raise ValueError("dehnen_error node features require non-empty p_gears")
-        tail_power = self._tail_power_by_gear_from_multipoles(
-            multipole_packed=upward.multipoles.packed,
+        """Compatibility wrapper for the legacy dehnen-error feature payload."""
+
+        state = self._build_adaptive_policy_state(
+            upward=upward,
             p_gears=p_gears,
+            force_scale_nodes=force_scale_nodes,
+            eps=jnp.asarray(self.theta, dtype=upward.multipoles.packed.real.dtype),
         )
-        if force_scale_nodes is None:
-            force_scale = jnp.ones((tail_power.shape[0],), dtype=tail_power.dtype)
-        else:
-            force_scale = jnp.asarray(force_scale_nodes, dtype=tail_power.dtype)
-            if int(force_scale.shape[0]) != int(tail_power.shape[0]):
-                raise ValueError("force_scale_nodes length must match number of nodes")
         return {
-            "tail_power_by_gear": tail_power,
-            "force_scale": force_scale,
+            "tail_power_by_gear": state.source_error_proxy_by_order,
+            "force_scale": state.target_force_scale,
         }
 
     def _prepared_state_cache_lookup(
