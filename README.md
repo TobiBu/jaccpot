@@ -135,11 +135,12 @@ JIT-friendly and avoids shape polymorphism.
 Adaptive order selection now uses yggdrax's generic `pair_policy` +
 `interaction_tags` traversal hook. The tree backend only provides generic
 far-pair tags; jaccpot owns the solver-side policy state, order selection, and
-per-order bucketing.
+per-order bucketing. The current notebook example prints the resulting tag-derived
+`far_pairs_by_gear_counts` from the solver runtime.
 
 Examples:
 
-- [examples/real_sh_adaptive_order.py](/Users/buck/Documents/Nexus/Projects/jaccpot/examples/real_sh_adaptive_order.py)
+- [examples/real_sh_adaptive_order.ipynb](/Users/buck/Documents/Nexus/Projects/jaccpot/examples/real_sh_adaptive_order.ipynb)
 - [examples/real_sh_rot_scale_demo.py](/Users/buck/Documents/Nexus/Projects/jaccpot/examples/real_sh_rot_scale_demo.py)
 
 ## Force Scale Modes For Adaptive Traversal

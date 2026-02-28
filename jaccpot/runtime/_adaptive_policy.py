@@ -97,7 +97,7 @@ def build_adaptive_policy_state(
 
 
 def adaptive_pair_policy(
-    policy_state: AdaptivePolicyState, **pair_data
+    policy_state: AdaptivePolicyState, **pair_data: Array
 ) -> tuple[Array, Array]:
     """Return traversal actions and order tags from solver-owned adaptive state."""
 
