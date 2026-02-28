@@ -1,29 +1,13 @@
-"""Runtime checks for persisted and prepass force-scale estimation."""
+"""Runtime checks for solver-side force-scale estimation."""
 
 from __future__ import annotations
-
-import inspect
 
 import jax
 import jax.numpy as jnp
 import numpy as np
-import pytest
-
-pytest.importorskip("yggdrax")
-from yggdrax import interactions as yggdrax_interactions
 from yggdrax.interactions import DualTreeTraversalConfig
 
 from jaccpot import FastMultipoleMethod, FMMAdvancedConfig, RuntimePolicyConfig
-
-if (
-    "p_gears"
-    not in inspect.signature(
-        yggdrax_interactions.build_interactions_and_neighbors
-    ).parameters
-):
-    pytestmark = pytest.mark.skip(
-        reason="installed yggdrax build does not expose adaptive dehnen_error MAC"
-    )
 
 
 def _sample_problem(n: int, dtype=jnp.float32):
@@ -40,7 +24,7 @@ def _sample_problem(n: int, dtype=jnp.float32):
 
 def _advanced_cfg() -> FMMAdvancedConfig:
     return FMMAdvancedConfig(
-        mac_type="dehnen_error",
+        mac_type="dehnen",
         runtime=RuntimePolicyConfig(
             traversal_config=DualTreeTraversalConfig(
                 max_pair_queue=131072,
@@ -65,18 +49,16 @@ def _solver(*, mode: str) -> FastMultipoleMethod:
     )
 
 
-def test_force_scale_modes_run_and_build_node_features():
+def test_force_scale_modes_build_solver_state():
     positions, masses = _sample_problem(72)
 
     prev_solver = _solver(mode="prev")
     _ = prev_solver.compute_accelerations(positions, masses, leaf_size=8, max_order=4)
     state_prev = prev_solver.prepare_state(positions, masses, leaf_size=8, max_order=4)
-    features_prev = prev_solver.build_dehnen_error_node_features(state_prev)
 
-    assert set(features_prev.keys()) == {"tail_power_by_gear", "force_scale"}
-    assert features_prev["tail_power_by_gear"].shape[1] == 3
-    assert features_prev["force_scale"].shape == state_prev.force_scale_nodes.shape
-    assert np.all(np.isfinite(np.asarray(features_prev["force_scale"])))
+    assert state_prev.force_scale_nodes is not None
+    assert state_prev.force_scale_nodes.shape[0] == state_prev.tree.parent.shape[0]
+    assert np.all(np.isfinite(np.asarray(state_prev.force_scale_nodes)))
 
     prepass_solver = _solver(mode="prepass")
     state_prepass = prepass_solver.prepare_state(
@@ -86,6 +68,7 @@ def test_force_scale_modes_run_and_build_node_features():
         max_order=4,
     )
     assert state_prepass.force_scale_nodes is not None
+    assert np.all(np.isfinite(np.asarray(state_prepass.force_scale_nodes)))
     assert not np.allclose(np.asarray(state_prepass.force_scale_nodes), 1.0)
 
 
@@ -96,7 +79,6 @@ def test_force_scale_prepass_is_stable_across_repeated_runs():
     acc_prev = np.asarray(
         prev_solver.compute_accelerations(positions, masses, leaf_size=8, max_order=4)
     )
-    # Prepare once more so the previous-step scales are attached to the state.
     state_prev = prev_solver.prepare_state(positions, masses, leaf_size=8, max_order=4)
     assert state_prev.force_scale_nodes is not None
 

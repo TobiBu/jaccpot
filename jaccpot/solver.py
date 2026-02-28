@@ -446,33 +446,6 @@ class FastMultipoleMethod:
             jit_tree=self.advanced.runtime.jit_tree,
         )
 
-    def build_dehnen_error_node_features(
-        self: "FastMultipoleMethod",
-        state: FMMPreparedState,
-        *,
-        p_gears: Optional[Sequence[int]] = None,
-        force_scale_nodes: Optional[Array] = None,
-    ) -> dict[str, Array]:
-        """Build yggdrax node features for ``mac_type='dehnen_error'``.
-
-        When ``force_scale_nodes`` is omitted, the helper uses the values stored
-        in ``state`` and falls back to unit scales if the prepared state does not
-        carry a previous estimate.
-        """
-
-        gears = (
-            self._impl.p_gears if p_gears is None else tuple(int(v) for v in p_gears)
-        )
-        return self._impl.build_dehnen_error_node_features(
-            upward=state.upward,
-            p_gears=gears,
-            force_scale_nodes=(
-                state.force_scale_nodes
-                if force_scale_nodes is None
-                else force_scale_nodes
-            ),
-        )
-
     def prepare_upward_sweep(
         self: "FastMultipoleMethod",
         tree: Any,

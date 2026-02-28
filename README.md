@@ -132,45 +132,28 @@ solver = FastMultipoleMethod(
 `p_gears` must be a fixed tuple or list of orders. This keeps all hot paths
 JIT-friendly and avoids shape polymorphism.
 
-Two modes are available in practice:
-
-- baseline adaptive bucketing:
-  works with current jaccpot runtime and falls back to conservative bucket use
-  when the traversal backend does not expose structured gear buckets
-- structured `dehnen_error` bucketing:
-  requires a yggdrax build whose `build_interactions_and_neighbors(...)`
-  supports `p_gears`, `eps`, `node_features`, and `return_structured=True`
+Adaptive order selection now uses yggdrax's generic `pair_policy` +
+`interaction_tags` traversal hook. The tree backend only provides generic
+far-pair tags; jaccpot owns the solver-side policy state, order selection, and
+per-order bucketing.
 
 Examples:
 
 - [examples/real_sh_adaptive_order.py](/Users/buck/Documents/Nexus/Projects/jaccpot/examples/real_sh_adaptive_order.py)
 - [examples/real_sh_rot_scale_demo.py](/Users/buck/Documents/Nexus/Projects/jaccpot/examples/real_sh_rot_scale_demo.py)
 
-## Force Scales For Dehnen MAC
+## Force Scale Modes For Adaptive Traversal
 
-When using `mac_type="dehnen_error"`, jaccpot can provide the yggdrax
-`node_features` payload expected by the adaptive MAC:
-
-- `tail_power_by_gear` for source nodes
-- `force_scale` for target nodes
-
-Select how force scales are estimated with `mac_force_scale_mode`:
+Adaptive traversal can weight its solver-side policy state with per-node force
+scales. Select how those scales are estimated with `mac_force_scale_mode`:
 
 - `"prev"`:
   reuse the previous full-step acceleration magnitudes
 - `"prepass"`:
-  run a cheap lowest-gear prepass and derive force scales from that pass
+  run a cheap lowest-order prepass and derive force scales from that pass
 
-The public helper is:
-
-```python
-state = solver.prepare_state(positions, masses, max_order=4)
-node_features = solver.build_dehnen_error_node_features(state)
-```
-
-If the installed yggdrax build does not yet expose adaptive `dehnen_error`
-traversal inputs, jaccpot keeps the fallback paths available but skips those
-specific integration tests.
+These scales stay inside jaccpot's adaptive policy state; they are no longer
+exported as backend-specific traversal `node_features`.
 
 ## Pallas Acceleration
 

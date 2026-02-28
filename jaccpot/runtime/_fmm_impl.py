@@ -886,26 +886,6 @@ class FastMultipoleMethod:
             eps=eps,
         )
 
-    def build_dehnen_error_node_features(
-        self: "FastMultipoleMethod",
-        *,
-        upward: TreeUpwardData,
-        p_gears: tuple[int, ...],
-        force_scale_nodes: Optional[Array],
-    ) -> dict[str, Array]:
-        """Compatibility wrapper for the legacy dehnen-error feature payload."""
-
-        state = self._build_adaptive_policy_state(
-            upward=upward,
-            p_gears=p_gears,
-            force_scale_nodes=force_scale_nodes,
-            eps=jnp.asarray(self.theta, dtype=upward.multipoles.packed.real.dtype),
-        )
-        return {
-            "tail_power_by_gear": state.source_error_proxy_by_order,
-            "force_scale": state.target_force_scale,
-        }
-
     def _prepared_state_cache_lookup(
         self,
         *,
