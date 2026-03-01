@@ -135,7 +135,17 @@ JIT-friendly and avoids shape polymorphism.
 Adaptive order selection now uses yggdrax's generic `pair_policy` +
 `interaction_tags` traversal hook. The tree backend only provides generic
 far-pair tags; jaccpot owns the solver-side policy state, order selection, and
-per-order bucketing. The current notebook example prints the resulting tag-derived
+per-order bucketing.
+
+The current adaptive acceptance model is solver-owned and error-aware:
+- acceptance uses the highest available order as a Dehnen-style safety check
+- accepted pairs are limited to a relaxed geometric cone to avoid pathological
+  over-acceptance
+- once accepted, the solver picks the smallest passing order from `p_gears`
+
+In other words, the highest candidate order decides whether a pair is safe to
+accept, while the first passing order decides how much far-field work is needed.
+The current notebook example prints the resulting tag-derived
 `far_pairs_by_gear_counts` from the solver runtime.
 
 Examples:

@@ -65,3 +65,17 @@ The following legacy integration path should be removed during this branch:
 - `p_gears` / `eps` / `node_features` passed into `yggdrax` traversal
 - structured `far_pairs_by_gear` returned by traversal
 - fallback logic that assigns all far pairs to the highest gear
+
+## Current Acceptance Model
+
+The current jaccpot runtime uses a solver-owned adaptive acceptance rule built
+on yggdrax's generic traversal hook:
+
+- `yggdrax` provides generic pair traversal plus integer `interaction_tags`
+- `jaccpot` computes multipole-derived residual proxies and target force scales
+- acceptance is decided by the highest available order together with a relaxed
+  geometric guard
+- order selection uses the smallest passing order among `p_gears`
+
+This keeps tree traversal generic while making both the MAC decision and the
+required expansion order solver-owned.
