@@ -18,6 +18,18 @@ def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--n", type=int, default=20000, help="Number of particles")
     parser.add_argument("--p", type=int, default=6, help="Multipole order")
+    parser.add_argument(
+        "--preset",
+        choices=("fast", "accurate"),
+        default="fast",
+        help="Solver preset used for the benchmark",
+    )
+    parser.add_argument(
+        "--basis",
+        choices=("real", "complex", "solidfmm"),
+        default="solidfmm",
+        help="Expansion basis used for the benchmark",
+    )
     parser.add_argument("--leaf-size", type=int, default=32, help="Leaf size")
     parser.add_argument("--theta", type=float, default=0.6, help="MAC opening angle")
     parser.add_argument("--device", choices=("cpu", "gpu", "tpu"), default=None)
@@ -259,9 +271,10 @@ def main() -> None:
         if len(p_gears) == 0:
             raise SystemExit("--adaptive-order requires non-empty --p-gears")
 
+    basis = str(ARGS.basis)
     fmm = FastMultipoleMethod(
-        preset="fast",
-        basis="solidfmm",
+        preset=str(ARGS.preset),
+        basis=basis,
         theta=float(ARGS.theta),
         softening=1.0e-3,
         adaptive_order=bool(ARGS.adaptive_order),
@@ -320,7 +333,10 @@ def main() -> None:
     counts = _count_interactions(dual_artifacts)
     device_str = str(jax.devices()[0])
 
-    print(f"device={device_str} dtype={ARGS.dtype} n={ARGS.n} p={ARGS.p}")
+    print(
+        f"device={device_str} dtype={ARGS.dtype} n={ARGS.n} p={ARGS.p} "
+        f"preset={ARGS.preset} basis={ARGS.basis}"
+    )
     timing_parts = [
         "timings_s",
         f"tree_build={tree_timing.mean:.6f}",
