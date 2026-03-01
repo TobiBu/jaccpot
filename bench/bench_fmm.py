@@ -56,6 +56,7 @@ try:
     from jaccpot import FastMultipoleMethod
     from jaccpot.runtime._adaptive_policy import (
         adaptive_pair_policy,
+        adaptive_policy_tolerance,
         bucket_far_pairs_by_tag,
     )
     from jaccpot.runtime._interaction_cache import _build_dual_tree_artifacts
@@ -118,7 +119,11 @@ def _build_traversal(fmm: FastMultipoleMethod, staged: StageArtifacts):
                 (tree_artifacts.tree.parent.shape[0],),
                 dtype=tree_artifacts.positions_sorted.dtype,
             ),
-            eps=jnp.asarray(ARGS.theta, dtype=tree_artifacts.positions_sorted.dtype),
+            eps=adaptive_policy_tolerance(
+                theta=float(ARGS.theta),
+                p_gears=impl.p_gears,
+                dtype=tree_artifacts.positions_sorted.dtype,
+            ),
         )
     dual_artifacts, _ = _build_dual_tree_artifacts(
         tree_artifacts.tree,

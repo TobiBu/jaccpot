@@ -96,6 +96,7 @@ from jaccpot.upward.tree_expansions import (
 
 from ._adaptive_policy import (
     adaptive_pair_policy,
+    adaptive_policy_tolerance,
     bucket_far_pairs_by_tag,
     build_adaptive_policy_state,
     compute_node_force_scale_from_sorted_acc,
@@ -1433,8 +1434,10 @@ class FastMultipoleMethod:
                 upward=tree_artifacts.upward,
                 p_gears=self.p_gears,
                 force_scale_nodes=force_scale_nodes,
-                eps=jnp.asarray(
-                    theta_val, dtype=tree_artifacts.upward.multipoles.packed.real.dtype
+                eps=adaptive_policy_tolerance(
+                    theta=theta_val,
+                    p_gears=self.p_gears,
+                    dtype=tree_artifacts.upward.multipoles.packed.real.dtype,
                 ),
             )
             pair_policy = adaptive_pair_policy

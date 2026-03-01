@@ -24,6 +24,16 @@ class AdaptivePolicyState(NamedTuple):
     order_tags: Array
 
 
+def adaptive_policy_tolerance(
+    *, theta: float, p_gears: tuple[int, ...], dtype
+) -> Array:
+    """Return a conservative solver-side adaptive tolerance derived from ``theta``."""
+
+    if len(p_gears) == 0:
+        raise ValueError("adaptive policy tolerance requires non-empty p_gears")
+    return jnp.asarray(float(theta) ** (max(int(v) for v in p_gears) + 2), dtype=dtype)
+
+
 def source_error_proxy_by_order_from_multipoles(
     *,
     multipole_packed: Array,
@@ -86,6 +96,11 @@ def build_adaptive_policy_state(
         target_force_scale = jnp.asarray(force_scale_nodes, dtype=error_proxy.dtype)
         if int(target_force_scale.shape[0]) != int(error_proxy.shape[0]):
             raise ValueError("force_scale_nodes length must match number of nodes")
+        scale_norm = jnp.maximum(
+            jnp.max(target_force_scale),
+            jnp.asarray(1.0, dtype=error_proxy.dtype),
+        )
+        target_force_scale = target_force_scale / scale_norm
     order_tags = jnp.arange(len(p_gears), dtype=jnp.int32)
     target_accept_threshold = (
         jnp.asarray(eps, dtype=error_proxy.dtype) * target_force_scale
@@ -126,7 +141,7 @@ def adaptive_pair_policy(
     passes = est_err < target_threshold[:, None]
 
     tag_values = jnp.asarray(policy_state.order_tags, dtype=jnp.int32)
-    tags = jnp.max(jnp.where(passes, tag_values[None, :], -1), axis=1)
+    tags = jnp.argmax(passes.astype(jnp.int32), axis=1).astype(jnp.int32)
     accept_mask = valid_pairs & different_nodes & mac_ok & (tags >= 0)
     tags = jnp.where(accept_mask, tags, -jnp.ones_like(tags))
 

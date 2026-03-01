@@ -53,7 +53,7 @@ def test_adaptive_pair_policy_supports_jit():
     assert actions.shape == (3,)
     assert tags.shape == (3,)
     assert int(actions[0]) == 0
-    assert int(tags[0]) == 2
+    assert int(tags[0]) == 1
     assert int(actions[1]) == 1
     assert int(tags[1]) == -1
 
