@@ -58,6 +58,29 @@ def test_adaptive_pair_policy_supports_jit():
     assert int(tags[1]) == -1
 
 
+def test_adaptive_pair_policy_rejects_all_false_pass_rows():
+    state = _policy_state()
+    actions, tags = adaptive_pair_policy(
+        state,
+        valid_pairs=jnp.asarray([True], dtype=jnp.bool_),
+        mac_ok=jnp.asarray([True], dtype=jnp.bool_),
+        different_nodes=jnp.asarray([True], dtype=jnp.bool_),
+        target_leaf=jnp.asarray([False], dtype=jnp.bool_),
+        source_leaf=jnp.asarray([False], dtype=jnp.bool_),
+        same_node=jnp.asarray([False], dtype=jnp.bool_),
+        target_nodes=jnp.asarray([0], dtype=jnp.int32),
+        source_nodes=jnp.asarray([0], dtype=jnp.int32),
+        center_target=jnp.zeros((1, 3), dtype=jnp.float32),
+        center_source=jnp.zeros((1, 3), dtype=jnp.float32),
+        dist_sq=jnp.asarray([0.01], dtype=jnp.float32),
+        extent_target=jnp.asarray([1.0], dtype=jnp.float32),
+        extent_source=jnp.asarray([1.0], dtype=jnp.float32),
+    )
+
+    assert int(actions[0]) == 2
+    assert int(tags[0]) == -1
+
+
 def test_bucket_far_pairs_by_tag_counts_match():
     buckets = bucket_far_pairs_by_tag(
         jnp.asarray([3, 4, 5, 6], dtype=jnp.int32),

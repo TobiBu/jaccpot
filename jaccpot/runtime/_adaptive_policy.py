@@ -130,20 +130,24 @@ def adaptive_pair_policy(
 
     safe_targets = jnp.where(valid_pairs, target_nodes, 0)
     safe_sources = jnp.where(valid_pairs, source_nodes, 0)
-    safe_dist = jnp.maximum(dist_sq, jnp.asarray(1e-24, dtype=dist_sq.dtype))
-    geom_factor = (extent_target + extent_source) / jnp.sqrt(safe_dist)
+    safe_dist_sq = jnp.maximum(dist_sq, jnp.asarray(1e-24, dtype=dist_sq.dtype))
+    extent_sum_sq = jnp.square(extent_target + extent_source)
 
     source_proxy = jnp.asarray(policy_state.source_error_proxy_by_order)[
         safe_sources, :
     ]
     target_threshold = jnp.asarray(policy_state.target_accept_threshold)[safe_targets]
-    est_err = source_proxy * geom_factor[:, None]
-    passes = est_err < target_threshold[:, None]
+    passes = (
+        jnp.square(source_proxy) * extent_sum_sq[:, None]
+        < jnp.square(target_threshold)[:, None] * safe_dist_sq[:, None]
+    )
+    pass_any = jnp.any(passes, axis=1)
 
-    tag_values = jnp.asarray(policy_state.order_tags, dtype=jnp.int32)
-    tags = jnp.argmax(passes.astype(jnp.int32), axis=1).astype(jnp.int32)
-    accept_mask = valid_pairs & different_nodes & mac_ok & (tags >= 0)
-    tags = jnp.where(accept_mask, tags, -jnp.ones_like(tags))
+    order_tags = jnp.asarray(policy_state.order_tags, dtype=jnp.int32)
+    required_idx = jnp.argmax(passes.astype(jnp.int32), axis=1).astype(jnp.int32)
+    raw_tags = order_tags[required_idx]
+    accept_mask = valid_pairs & different_nodes & mac_ok & pass_any
+    tags = jnp.where(accept_mask, raw_tags, -jnp.ones_like(raw_tags))
 
     actions = jnp.full(valid_pairs.shape, _ACTION_REFINE, dtype=jnp.int32)
     actions = jnp.where(accept_mask, _ACTION_ACCEPT, actions)
