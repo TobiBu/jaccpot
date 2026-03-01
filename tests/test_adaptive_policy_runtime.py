@@ -22,9 +22,8 @@ def _policy_state() -> AdaptivePolicyState:
             ],
             dtype=jnp.float32,
         ),
-        target_force_scale=jnp.asarray([1.0, 2.0], dtype=jnp.float32),
+        target_accept_threshold=jnp.asarray([0.25, 0.5], dtype=jnp.float32),
         order_tags=jnp.asarray([0, 1, 2], dtype=jnp.int32),
-        eps=jnp.asarray(0.25, dtype=jnp.float32),
     )
 
 

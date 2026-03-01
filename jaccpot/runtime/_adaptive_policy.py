@@ -20,9 +20,8 @@ class AdaptivePolicyState(NamedTuple):
     """Solver-owned per-node summaries used by adaptive traversal policies."""
 
     source_error_proxy_by_order: Array
-    target_force_scale: Array
+    target_accept_threshold: Array
     order_tags: Array
-    eps: Array
 
 
 def source_error_proxy_by_order_from_multipoles(
@@ -88,11 +87,13 @@ def build_adaptive_policy_state(
         if int(target_force_scale.shape[0]) != int(error_proxy.shape[0]):
             raise ValueError("force_scale_nodes length must match number of nodes")
     order_tags = jnp.arange(len(p_gears), dtype=jnp.int32)
+    target_accept_threshold = (
+        jnp.asarray(eps, dtype=error_proxy.dtype) * target_force_scale
+    )
     return AdaptivePolicyState(
         source_error_proxy_by_order=error_proxy,
-        target_force_scale=target_force_scale,
+        target_accept_threshold=target_accept_threshold,
         order_tags=order_tags,
-        eps=jnp.asarray(eps, dtype=error_proxy.dtype),
     )
 
 
@@ -120,19 +121,13 @@ def adaptive_pair_policy(
     source_proxy = jnp.asarray(policy_state.source_error_proxy_by_order)[
         safe_sources, :
     ]
-    target_scale = jnp.asarray(policy_state.target_force_scale)[safe_targets]
-    threshold = jnp.asarray(policy_state.eps, dtype=dist_sq.dtype) * target_scale
+    target_threshold = jnp.asarray(policy_state.target_accept_threshold)[safe_targets]
     est_err = source_proxy * geom_factor[:, None]
-    passes = est_err < threshold[:, None]
-    pass_any = jnp.any(passes, axis=1)
+    passes = est_err < target_threshold[:, None]
 
-    reversed_passes = jnp.flip(passes, axis=1)
-    last_pass = (
-        passes.shape[1] - 1 - jnp.argmax(reversed_passes.astype(jnp.int32), axis=1)
-    )
     tag_values = jnp.asarray(policy_state.order_tags, dtype=jnp.int32)
-    tags = tag_values[last_pass]
-    accept_mask = valid_pairs & different_nodes & mac_ok & pass_any
+    tags = jnp.max(jnp.where(passes, tag_values[None, :], -1), axis=1)
+    accept_mask = valid_pairs & different_nodes & mac_ok & (tags >= 0)
     tags = jnp.where(accept_mask, tags, -jnp.ones_like(tags))
 
     actions = jnp.full(valid_pairs.shape, _ACTION_REFINE, dtype=jnp.int32)
