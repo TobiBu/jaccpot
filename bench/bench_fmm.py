@@ -35,6 +35,12 @@ def _parse_args() -> argparse.Namespace:
         default="4,6,8,10",
         help="Comma-separated adaptive orders (used with --adaptive-order)",
     )
+    parser.add_argument(
+        "--mac-force-scale-mode",
+        choices=("prev", "prepass"),
+        default="prev",
+        help="Force-scale strategy used when adaptive order is enabled",
+    )
     return parser.parse_args()
 
 
@@ -48,7 +54,10 @@ try:
 
     from examples.benchmark_utils import time_callable
     from jaccpot import FastMultipoleMethod
-    from jaccpot.runtime._adaptive_policy import bucket_far_pairs_by_tag
+    from jaccpot.runtime._adaptive_policy import (
+        adaptive_pair_policy,
+        bucket_far_pairs_by_tag,
+    )
     from jaccpot.runtime._interaction_cache import _build_dual_tree_artifacts
 except ModuleNotFoundError as exc:
     raise SystemExit(
@@ -98,11 +107,24 @@ def _build_traversal(fmm: FastMultipoleMethod, staged: StageArtifacts):
     impl = fmm._impl
     tree_artifacts = staged.tree_artifacts
     runtime_overrides = staged.runtime_overrides
+    pair_policy = None
+    policy_state = None
+    if impl.adaptive_order:
+        pair_policy = adaptive_pair_policy
+        policy_state = impl._build_adaptive_policy_state(
+            upward=tree_artifacts.upward,
+            p_gears=impl.p_gears,
+            force_scale_nodes=jnp.ones(
+                (tree_artifacts.tree.parent.shape[0],),
+                dtype=tree_artifacts.positions_sorted.dtype,
+            ),
+            eps=jnp.asarray(ARGS.theta, dtype=tree_artifacts.positions_sorted.dtype),
+        )
     dual_artifacts, _ = _build_dual_tree_artifacts(
         tree_artifacts.tree,
         tree_artifacts.upward.geometry,
         theta=float(ARGS.theta),
-        mac_type=impl.mac_type,
+        mac_type="dehnen" if impl.mac_type == "dehnen_error" else impl.mac_type,
         dehnen_radius_scale=impl.dehnen_radius_scale,
         cache_key=None,
         cache_entry=None,
@@ -113,6 +135,8 @@ def _build_traversal(fmm: FastMultipoleMethod, staged: StageArtifacts):
         use_dense_interactions=impl.use_dense_interactions,
         grouped_interactions=runtime_overrides.grouped_interactions,
         grouped_chunk_size=runtime_overrides.m2l_chunk_size,
+        pair_policy=pair_policy,
+        policy_state=policy_state,
     )
     return dual_artifacts
 
@@ -139,6 +163,10 @@ def _adaptive_far_pairs_by_gear(fmm: FastMultipoleMethod, dual_artifacts):
         jnp.asarray(traversal_result.interaction_tags[:far_total], dtype=jnp.int32),
         num_tags=len(fmm._impl.p_gears),
     )
+
+
+def _bucket_adaptive_pairs(fmm: FastMultipoleMethod, dual_artifacts):
+    return _adaptive_far_pairs_by_gear(fmm, dual_artifacts)
 
 
 def _run_m2l_downward(fmm: FastMultipoleMethod, staged: StageArtifacts, dual_artifacts):
@@ -233,6 +261,7 @@ def main() -> None:
         softening=1.0e-3,
         adaptive_order=bool(ARGS.adaptive_order),
         p_gears=p_gears,
+        mac_force_scale_mode=str(ARGS.mac_force_scale_mode),
     )
 
     tree_timing = time_callable(
@@ -253,6 +282,16 @@ def main() -> None:
         runs=int(ARGS.runs),
     )
     dual_artifacts = traversal_timing.result
+
+    bucket_timing = None
+    if ARGS.adaptive_order:
+        bucket_timing = time_callable(
+            _bucket_adaptive_pairs,
+            fmm,
+            dual_artifacts,
+            warmup=int(ARGS.warmup),
+            runs=int(ARGS.runs),
+        )
 
     m2l_timing = time_callable(
         _run_m2l_downward,
@@ -277,13 +316,20 @@ def main() -> None:
     device_str = str(jax.devices()[0])
 
     print(f"device={device_str} dtype={ARGS.dtype} n={ARGS.n} p={ARGS.p}")
-    print(
-        "timings_s "
-        f"tree_build={tree_timing.mean:.6f} "
-        f"traversal={traversal_timing.mean:.6f} "
-        f"m2l={m2l_timing.mean:.6f} "
-        f"total={total_timing.mean:.6f}"
+    timing_parts = [
+        "timings_s",
+        f"tree_build={tree_timing.mean:.6f}",
+        f"traversal={traversal_timing.mean:.6f}",
+    ]
+    if bucket_timing is not None:
+        timing_parts.append(f"adaptive_bucket={bucket_timing.mean:.6f}")
+    timing_parts.extend(
+        [
+            f"m2l={m2l_timing.mean:.6f}",
+            f"total={total_timing.mean:.6f}",
+        ]
     )
+    print(" ".join(timing_parts))
     print(
         "interaction_counts "
         f"far_pairs={counts['far_pairs']} "
