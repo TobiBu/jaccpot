@@ -26,7 +26,7 @@ class AdaptivePolicyState(NamedTuple):
 
 
 def adaptive_policy_tolerance(
-    *, theta: float, p_gears: tuple[int, ...], dtype
+    *, theta: float, p_gears: tuple[int, ...], dtype: object
 ) -> Array:
     """Return a conservative solver-side adaptive tolerance derived from ``theta``."""
 
