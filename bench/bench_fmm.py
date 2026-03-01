@@ -48,6 +48,7 @@ try:
 
     from examples.benchmark_utils import time_callable
     from jaccpot import FastMultipoleMethod
+    from jaccpot.runtime._adaptive_policy import bucket_far_pairs_by_tag
     from jaccpot.runtime._interaction_cache import _build_dual_tree_artifacts
 except ModuleNotFoundError as exc:
     raise SystemExit(
@@ -116,6 +117,30 @@ def _build_traversal(fmm: FastMultipoleMethod, staged: StageArtifacts):
     return dual_artifacts
 
 
+def _fresh_locals_template(fmm: FastMultipoleMethod, staged: StageArtifacts):
+    impl = fmm._impl
+    tree_artifacts = staged.tree_artifacts
+    return impl._build_locals_template_for_prepare_state(
+        tree=tree_artifacts.tree,
+        upward=tree_artifacts.upward,
+        max_order=int(ARGS.p),
+        pos_sorted=tree_artifacts.positions_sorted,
+    )
+
+
+def _adaptive_far_pairs_by_gear(fmm: FastMultipoleMethod, dual_artifacts):
+    if not fmm._impl.adaptive_order:
+        return None
+    traversal_result = dual_artifacts.traversal_result
+    far_total = int(traversal_result.far_pair_count)
+    return bucket_far_pairs_by_tag(
+        jnp.asarray(traversal_result.interaction_sources[:far_total], dtype=jnp.int32),
+        jnp.asarray(traversal_result.interaction_targets[:far_total], dtype=jnp.int32),
+        jnp.asarray(traversal_result.interaction_tags[:far_total], dtype=jnp.int32),
+        num_tags=len(fmm._impl.p_gears),
+    )
+
+
 def _run_m2l_downward(fmm: FastMultipoleMethod, staged: StageArtifacts, dual_artifacts):
     impl = fmm._impl
     tree_artifacts = staged.tree_artifacts
@@ -135,11 +160,14 @@ def _run_m2l_downward(fmm: FastMultipoleMethod, staged: StageArtifacts, dual_art
         grouped_segment_unique_targets,
     ) = impl._unpack_dual_tree_artifacts(dual_artifacts)
 
+    locals_template = _fresh_locals_template(fmm, staged)
+    far_pairs_by_gear = _adaptive_far_pairs_by_gear(fmm, dual_artifacts)
+
     return impl._prepare_downward_with_artifacts(
         tree=tree_artifacts.tree,
         upward=tree_artifacts.upward,
         theta_val=float(ARGS.theta),
-        locals_template=tree_artifacts.locals_template,
+        locals_template=locals_template,
         interactions=interactions,
         runtime_m2l_chunk_size=runtime_overrides.m2l_chunk_size,
         runtime_l2l_chunk_size=runtime_overrides.l2l_chunk_size,
@@ -155,6 +183,9 @@ def _run_m2l_downward(fmm: FastMultipoleMethod, staged: StageArtifacts, dual_art
         grouped_segment_group_ids=grouped_segment_group_ids,
         grouped_segment_unique_targets=grouped_segment_unique_targets,
         farfield_mode=runtime_overrides.farfield_mode,
+        far_pairs_by_gear=far_pairs_by_gear,
+        adaptive_order=impl.adaptive_order,
+        p_gears=impl.p_gears,
     )
 
 
