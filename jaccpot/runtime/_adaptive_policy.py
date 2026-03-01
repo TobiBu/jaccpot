@@ -157,7 +157,8 @@ def adaptive_pair_policy(
     order_tags = jnp.asarray(policy_state.order_tags, dtype=jnp.int32)
     required_idx = jnp.argmax(passes.astype(jnp.int32), axis=1).astype(jnp.int32)
     raw_tags = order_tags[required_idx]
-    accept_gate = mac_ok | (highest_order_pass & allow_solver_override & relaxed_mac_ok)
+    del mac_ok
+    accept_gate = highest_order_pass & allow_solver_override & relaxed_mac_ok
     accept_mask = valid_pairs & different_nodes & accept_gate & pass_any
     tags = jnp.where(accept_mask, raw_tags, -jnp.ones_like(raw_tags))
 
