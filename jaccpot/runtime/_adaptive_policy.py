@@ -22,6 +22,7 @@ class AdaptivePolicyState(NamedTuple):
     source_error_proxy_by_order: Array
     target_accept_threshold: Array
     order_tags: Array
+    relaxed_theta_sq: Array
 
 
 def adaptive_policy_tolerance(
@@ -81,6 +82,7 @@ def build_adaptive_policy_state(
     p_gears: tuple[int, ...],
     force_scale_nodes: Optional[Array],
     eps: Array,
+    theta: Array,
 ) -> AdaptivePolicyState:
     """Build the solver-owned adaptive traversal state from upward data."""
 
@@ -105,10 +107,16 @@ def build_adaptive_policy_state(
     target_accept_threshold = (
         jnp.asarray(eps, dtype=error_proxy.dtype) * target_force_scale
     )
+    theta_arr = jnp.asarray(theta, dtype=error_proxy.dtype)
+    relaxed_theta = jnp.minimum(
+        jnp.asarray(1.0, dtype=error_proxy.dtype),
+        jnp.asarray(1.5, dtype=error_proxy.dtype) * theta_arr,
+    )
     return AdaptivePolicyState(
         source_error_proxy_by_order=error_proxy,
         target_accept_threshold=target_accept_threshold,
         order_tags=order_tags,
+        relaxed_theta_sq=jnp.square(relaxed_theta),
     )
 
 
@@ -142,11 +150,15 @@ def adaptive_pair_policy(
         < jnp.square(target_threshold)[:, None] * safe_dist_sq[:, None]
     )
     pass_any = jnp.any(passes, axis=1)
+    highest_order_pass = passes[:, -1]
+    allow_solver_override = (~target_leaf) | (~source_leaf)
+    relaxed_mac_ok = extent_sum_sq <= policy_state.relaxed_theta_sq * safe_dist_sq
 
     order_tags = jnp.asarray(policy_state.order_tags, dtype=jnp.int32)
     required_idx = jnp.argmax(passes.astype(jnp.int32), axis=1).astype(jnp.int32)
     raw_tags = order_tags[required_idx]
-    accept_mask = valid_pairs & different_nodes & mac_ok & pass_any
+    accept_gate = mac_ok | (highest_order_pass & allow_solver_override & relaxed_mac_ok)
+    accept_mask = valid_pairs & different_nodes & accept_gate & pass_any
     tags = jnp.where(accept_mask, raw_tags, -jnp.ones_like(raw_tags))
 
     actions = jnp.full(valid_pairs.shape, _ACTION_REFINE, dtype=jnp.int32)

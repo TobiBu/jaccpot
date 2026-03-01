@@ -136,6 +136,10 @@ def _build_traversal(fmm: FastMultipoleMethod, staged: StageArtifacts):
                 p_gears=impl.p_gears,
                 dtype=tree_artifacts.positions_sorted.dtype,
             ),
+            theta=jnp.asarray(
+                float(ARGS.theta),
+                dtype=tree_artifacts.positions_sorted.dtype,
+            ),
         )
     dual_artifacts, _ = _build_dual_tree_artifacts(
         tree_artifacts.tree,

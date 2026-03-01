@@ -877,6 +877,7 @@ class FastMultipoleMethod:
         p_gears: tuple[int, ...],
         force_scale_nodes: Optional[Array],
         eps: Array,
+        theta: Array,
     ):
         """Build the solver-owned adaptive policy state from upward data."""
 
@@ -885,6 +886,7 @@ class FastMultipoleMethod:
             p_gears=p_gears,
             force_scale_nodes=force_scale_nodes,
             eps=eps,
+            theta=theta,
         )
 
     def _prepared_state_cache_lookup(
@@ -1437,6 +1439,10 @@ class FastMultipoleMethod:
                 eps=adaptive_policy_tolerance(
                     theta=theta_val,
                     p_gears=self.p_gears,
+                    dtype=tree_artifacts.upward.multipoles.packed.real.dtype,
+                ),
+                theta=jnp.asarray(
+                    theta_val,
                     dtype=tree_artifacts.upward.multipoles.packed.real.dtype,
                 ),
             )

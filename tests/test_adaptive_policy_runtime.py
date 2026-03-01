@@ -24,6 +24,7 @@ def _policy_state() -> AdaptivePolicyState:
         ),
         target_accept_threshold=jnp.asarray([0.25, 0.5], dtype=jnp.float32),
         order_tags=jnp.asarray([0, 1, 2], dtype=jnp.int32),
+        relaxed_theta_sq=jnp.asarray(0.8**2, dtype=jnp.float32),
     )
 
 
