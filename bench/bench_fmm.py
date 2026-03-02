@@ -292,10 +292,11 @@ def _prime_paper_force_scales(fmm: FastMultipoleMethod, positions, masses) -> No
 
 def _count_interactions(dual_artifacts) -> dict[str, int]:
     interactions = dual_artifacts.interactions
-    far_pairs = int(interactions.sources.shape[0])
+    traversal_result = dual_artifacts.traversal_result
+    far_pairs = int(traversal_result.far_pair_count)
     level_offsets = getattr(interactions, "level_offsets", None)
     levels = int(level_offsets.shape[0] - 1) if level_offsets is not None else 0
-    near_pairs = int(dual_artifacts.neighbor_list.neighbors.shape[0])
+    near_pairs = int(traversal_result.near_pair_count)
     return {
         "far_pairs": far_pairs,
         "near_pairs": near_pairs,
@@ -392,6 +393,9 @@ def main() -> None:
     )
 
     counts = _count_interactions(dual_artifacts)
+    gear_counts = tuple(getattr(fmm._impl, "_recent_far_pairs_by_gear_counts", ()))
+    if gear_counts and counts["far_pairs"] == 0:
+        counts["far_pairs"] = int(sum(int(v) for v in gear_counts))
     device_str = str(jax.devices()[0])
 
     print(
@@ -418,7 +422,6 @@ def main() -> None:
         f"near_pairs={counts['near_pairs']} "
         f"interaction_levels={counts['levels']}"
     )
-    gear_counts = tuple(getattr(fmm._impl, "_recent_far_pairs_by_gear_counts", ()))
     if gear_counts:
         print(
             "interaction_counts_by_gear "
