@@ -1448,12 +1448,18 @@ class FastMultipoleMethod:
         pair_policy = None
         policy_state = None
         cache_key = None
-        if self.adaptive_order:
-            if len(self.p_gears) == 0:
-                raise ValueError("adaptive_order=True requires non-empty p_gears")
+        use_paper_fixed_policy = (
+            not self.adaptive_order
+        ) and self.adaptive_error_model == "dehnen_paper"
+        if self.adaptive_order or use_paper_fixed_policy:
+            policy_orders = self.p_gears
+            if use_paper_fixed_policy:
+                policy_orders = (int(tree_artifacts.upward.multipoles.order),)
+            if len(policy_orders) == 0:
+                raise ValueError("adaptive traversal policy requires non-empty orders")
             policy_state = self._build_adaptive_policy_state(
                 upward=tree_artifacts.upward,
-                p_gears=self.p_gears,
+                p_gears=policy_orders,
                 force_scale_nodes=force_scale_nodes,
                 eps=jnp.asarray(
                     (
@@ -1461,7 +1467,7 @@ class FastMultipoleMethod:
                         if self.adaptive_eps is not None
                         else adaptive_policy_tolerance(
                             theta=theta_val,
-                            p_gears=self.p_gears,
+                            p_gears=policy_orders,
                             dtype=tree_artifacts.upward.multipoles.packed.real.dtype,
                         )
                     ),
@@ -2368,13 +2374,21 @@ class FastMultipoleMethod:
             allow_stateful_cache=allow_stateful_cache,
         )
         force_scale_nodes = None
-        if self.adaptive_order:
+        use_paper_force_scale = self.adaptive_order or (
+            self.adaptive_error_model == "dehnen_paper"
+        )
+        if use_paper_force_scale:
             node_count = int(tree_artifacts.tree.parent.shape[0])
             previous_force_scale = self._last_force_scale_nodes
             reduction_mode = (
                 "min" if self.adaptive_error_model == "dehnen_paper" else "max"
             )
             need_prepass = False
+            policy_orders = self.p_gears
+            if (
+                not self.adaptive_order
+            ) and self.adaptive_error_model == "dehnen_paper":
+                policy_orders = (int(max_order),)
             if self.mac_force_scale_mode == "prev" or self._in_force_scale_prepass:
                 if (
                     previous_force_scale is not None
@@ -2397,15 +2411,17 @@ class FastMultipoleMethod:
             else:
                 need_prepass = True
             if need_prepass:
-                if len(self.p_gears) == 0:
+                if len(policy_orders) == 0:
                     raise ValueError(
-                        "mac_force_scale_mode='prepass' requires non-empty p_gears"
+                        "mac_force_scale_mode='prepass' requires non-empty orders"
                     )
-                low_order = int(min(self.p_gears))
+                low_order = int(min(policy_orders))
                 self._in_force_scale_prepass = True
                 saved_p_gears = self.p_gears
+                saved_adaptive_order = self.adaptive_order
                 try:
                     self.p_gears = (low_order,)
+                    self.adaptive_order = bool(saved_adaptive_order)
                     prepass_acc = self.compute_accelerations(
                         positions_arr,
                         masses_arr,
@@ -2420,6 +2436,7 @@ class FastMultipoleMethod:
                     )
                 finally:
                     self.p_gears = saved_p_gears
+                    self.adaptive_order = saved_adaptive_order
                     self._in_force_scale_prepass = False
                 prepass_sorted = jnp.asarray(prepass_acc)[
                     jnp.argsort(tree_artifacts.inverse_permutation)
