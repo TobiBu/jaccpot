@@ -12,6 +12,7 @@ from jaccpot.runtime._adaptive_policy import (
     adaptive_pair_policy,
     bucket_far_pairs_by_tag,
     compute_leaf_enclosing_sphere_geometry,
+    compute_leaf_ritter_sphere_geometry,
     compute_smallest_enclosing_sphere_geometry,
     compute_tree_merged_sphere_geometry,
     dehnen_like_pair_error_by_order_from_degree_power,
@@ -335,3 +336,30 @@ def test_tree_merged_sphere_geometry_contains_exact_leaf_spheres():
     for idx in leaf_nodes:
         child_dist = np.linalg.norm(np.asarray(centers[idx]) - np.asarray(centers[0]))
         assert child_dist + float(radii[idx]) <= float(radii[0]) + 1e-5
+
+
+def test_leaf_ritter_sphere_contains_leaf_points():
+    positions = jnp.asarray(
+        [[0.0, 0.0, 0.0], [2.0, 0.0, 0.0], [6.0, 0.0, 0.0], [8.0, 0.0, 0.0]],
+        dtype=jnp.float32,
+    )
+    masses = jnp.ones((4,), dtype=jnp.float32)
+    tree = Tree.from_particles(
+        positions,
+        masses,
+        leaf_size=2,
+        tree_type="radix",
+        target_leaf_particles=2,
+        refine_local=False,
+    )
+    positions_sorted = positions[tree.particle_indices]
+    centers, radii = compute_leaf_ritter_sphere_geometry(
+        tree=tree, positions_sorted=positions_sorted
+    )
+    num_internal = int(tree.num_internal_nodes)
+    node_ranges = np.asarray(tree.node_ranges)
+    for node_idx in range(num_internal, int(tree.parent.shape[0])):
+        start, end = node_ranges[node_idx]
+        pts = np.asarray(positions_sorted[start : end + 1])
+        d = np.linalg.norm(pts - np.asarray(centers[node_idx])[None, :], axis=1)
+        assert np.all(d <= float(radii[node_idx]) + 1e-5)

@@ -721,9 +721,9 @@ class FastMultipoleMethod:
             )
         self.adaptive_error_model = adaptive_error_model_norm
         dehnen_geometry_mode_norm = str(dehnen_geometry_mode).strip().lower()
-        if dehnen_geometry_mode_norm not in ("exact", "tree", "runtime"):
+        if dehnen_geometry_mode_norm not in ("exact", "tree", "tree_approx", "runtime"):
             raise ValueError(
-                "dehnen_geometry_mode must be 'exact', 'tree', or 'runtime'"
+                "dehnen_geometry_mode must be 'exact', 'tree', 'tree_approx', or 'runtime'"
             )
         self.dehnen_geometry_mode = dehnen_geometry_mode_norm
         self.adaptive_eps = None if adaptive_eps is None else float(adaptive_eps)

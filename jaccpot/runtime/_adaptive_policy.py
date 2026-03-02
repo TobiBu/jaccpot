@@ -406,6 +406,63 @@ def compute_leaf_enclosing_sphere_geometry(
     )
 
 
+def _ritter_leaf_sphere(points: np.ndarray) -> tuple[np.ndarray, float]:
+    """Return a fast approximate bounding sphere for a small point set."""
+
+    pts = np.asarray(points, dtype=np.float64)
+    if pts.shape[0] == 0:
+        return np.zeros((3,), dtype=np.float64), 0.0
+    if pts.shape[0] == 1:
+        return pts[0], 0.0
+    p0 = pts[0]
+    d0 = np.sum((pts - p0[None, :]) ** 2, axis=1)
+    p1 = pts[int(np.argmax(d0))]
+    d1 = np.sum((pts - p1[None, :]) ** 2, axis=1)
+    p2 = pts[int(np.argmax(d1))]
+    center = 0.5 * (p1 + p2)
+    radius = float(np.linalg.norm(p2 - center))
+    for point in pts:
+        delta = point - center
+        dist = float(np.linalg.norm(delta))
+        if dist <= radius:
+            continue
+        new_radius = 0.5 * (radius + dist)
+        if dist > 1e-24:
+            center = center + ((new_radius - radius) / dist) * delta
+        radius = new_radius
+    return center, radius
+
+
+def compute_leaf_ritter_sphere_geometry(
+    *, tree: Tree, positions_sorted: Array
+) -> tuple[Array, Array]:
+    """Return fast approximate leaf spheres using Ritter's algorithm."""
+
+    node_ranges = np.asarray(tree.node_ranges, dtype=np.int64)
+    num_nodes = int(node_ranges.shape[0])
+    num_internal = int(tree.num_internal_nodes)
+    centers = np.zeros((num_nodes, positions_sorted.shape[1]), dtype=np.float64)
+    radii = np.zeros((num_nodes,), dtype=np.float64)
+    if num_internal > 0:
+        leaf_ranges = node_ranges[num_internal:]
+    else:
+        leaf_ranges = node_ranges
+    pos = np.asarray(positions_sorted, dtype=np.float64)
+    for leaf_offset, (start, end) in enumerate(leaf_ranges):
+        s = int(start)
+        e = int(end)
+        if e < s:
+            continue
+        center, radius = _ritter_leaf_sphere(pos[s : e + 1])
+        node_idx = num_internal + leaf_offset
+        centers[node_idx] = center
+        radii[node_idx] = radius
+    return (
+        jnp.asarray(centers, dtype=positions_sorted.dtype),
+        jnp.asarray(radii, dtype=positions_sorted.dtype),
+    )
+
+
 def merge_bounding_spheres(
     center_a: Array, radius_a: Array, center_b: Array, radius_b: Array
 ) -> tuple[Array, Array]:
@@ -440,13 +497,21 @@ def merge_bounding_spheres(
 
 
 def compute_tree_merged_sphere_geometry(
-    *, tree: Tree, positions_sorted: Array
+    *, tree: Tree, positions_sorted: Array, leaf_mode: str = "exact"
 ) -> tuple[Array, Array]:
-    """Return node spheres from exact leaf SES geometry and JAX upward merges."""
+    """Return node spheres from leaf spheres and JAX upward merges."""
 
-    centers, radii = compute_leaf_enclosing_sphere_geometry(
-        tree=tree, positions_sorted=positions_sorted
-    )
+    leaf_mode_norm = str(leaf_mode).strip().lower()
+    if leaf_mode_norm == "exact":
+        centers, radii = compute_leaf_enclosing_sphere_geometry(
+            tree=tree, positions_sorted=positions_sorted
+        )
+    elif leaf_mode_norm == "approx":
+        centers, radii = compute_leaf_ritter_sphere_geometry(
+            tree=tree, positions_sorted=positions_sorted
+        )
+    else:
+        raise ValueError("leaf_mode must be 'exact' or 'approx'")
     num_internal = int(tree.num_internal_nodes)
     if num_internal == 0:
         return centers, radii
@@ -489,7 +554,7 @@ def compute_tree_merged_sphere_geometry(
 
 def resolve_dehnen_geometry(
     *,
-    geometry_mode: Literal["exact", "tree", "runtime"],
+    geometry_mode: Literal["exact", "tree", "tree_approx", "runtime"],
     tree: Tree,
     positions_sorted: Array,
     upward: TreeUpwardData,
@@ -507,6 +572,13 @@ def resolve_dehnen_geometry(
         mac_centers, radius_bound = compute_tree_merged_sphere_geometry(
             tree=tree,
             positions_sorted=positions_sorted,
+            leaf_mode="exact",
+        )
+    elif mode == "tree_approx":
+        mac_centers, radius_bound = compute_tree_merged_sphere_geometry(
+            tree=tree,
+            positions_sorted=positions_sorted,
+            leaf_mode="approx",
         )
     elif mode == "runtime":
         expansion_centers = jnp.asarray(upward.multipoles.centers, dtype=dtype)
@@ -516,7 +588,9 @@ def resolve_dehnen_geometry(
         radius_bound = geometry_radius + center_offset
         mac_centers = geometry_centers
     else:
-        raise ValueError("dehnen_geometry_mode must be 'exact', 'tree', or 'runtime'")
+        raise ValueError(
+            "dehnen_geometry_mode must be 'exact', 'tree', 'tree_approx', or 'runtime'"
+        )
     return jnp.asarray(mac_centers, dtype=dtype), jnp.asarray(radius_bound, dtype=dtype)
 
 
@@ -791,6 +865,7 @@ __all__ = [
     "build_adaptive_policy_state",
     "compute_node_force_scale_from_sorted_acc",
     "compute_leaf_enclosing_sphere_geometry",
+    "compute_leaf_ritter_sphere_geometry",
     "compute_smallest_enclosing_sphere_geometry",
     "compute_tree_merged_sphere_geometry",
     "merge_bounding_spheres",
