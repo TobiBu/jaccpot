@@ -704,8 +704,10 @@ class FastMultipoleMethod:
         self.rebuild_every = int(rebuild_every)
         self._recent_far_pairs_by_gear_counts: tuple[int, ...] = tuple()
         force_scale_mode_norm = str(mac_force_scale_mode).strip().lower()
-        if force_scale_mode_norm not in ("prev", "prepass"):
-            raise ValueError("mac_force_scale_mode must be 'prev' or 'prepass'")
+        if force_scale_mode_norm not in ("prev", "prepass", "paper"):
+            raise ValueError(
+                "mac_force_scale_mode must be 'prev', 'prepass', or 'paper'"
+            )
         self.mac_force_scale_mode = force_scale_mode_norm
         adaptive_error_model_norm = str(adaptive_error_model).strip().lower()
         if adaptive_error_model_norm not in (
@@ -2395,7 +2397,9 @@ class FastMultipoleMethod:
                 not self.adaptive_order
             ) and self.adaptive_error_model == "dehnen_paper":
                 policy_orders = (int(max_order),)
-            if self.mac_force_scale_mode == "prev" or self._in_force_scale_prepass:
+            if self.mac_force_scale_mode == "paper":
+                need_prepass = True
+            elif self.mac_force_scale_mode == "prev" or self._in_force_scale_prepass:
                 if (
                     previous_force_scale is not None
                     and int(previous_force_scale.shape[0]) == node_count
@@ -2422,12 +2426,27 @@ class FastMultipoleMethod:
                         "mac_force_scale_mode='prepass' requires non-empty orders"
                     )
                 low_order = int(min(policy_orders))
+                if (
+                    self.mac_force_scale_mode == "paper"
+                    and self.adaptive_error_model == "dehnen_paper"
+                ):
+                    low_order = 1 if int(max_order) >= 1 else 0
                 self._in_force_scale_prepass = True
                 saved_p_gears = self.p_gears
                 saved_adaptive_order = self.adaptive_order
+                saved_adaptive_error_model = self.adaptive_error_model
+                saved_mac_type = self.mac_type
                 try:
                     self.p_gears = (low_order,)
-                    self.adaptive_order = bool(saved_adaptive_order)
+                    if (
+                        self.mac_force_scale_mode == "paper"
+                        and self.adaptive_error_model == "dehnen_paper"
+                    ):
+                        self.adaptive_order = False
+                        self.adaptive_error_model = "tail_proxy"
+                        self.mac_type = "dehnen"
+                    else:
+                        self.adaptive_order = bool(saved_adaptive_order)
                     prepass_acc = self.compute_accelerations(
                         positions_arr,
                         masses_arr,
@@ -2443,6 +2462,8 @@ class FastMultipoleMethod:
                 finally:
                     self.p_gears = saved_p_gears
                     self.adaptive_order = saved_adaptive_order
+                    self.adaptive_error_model = saved_adaptive_error_model
+                    self.mac_type = saved_mac_type
                     self._in_force_scale_prepass = False
                 prepass_sorted = jnp.asarray(prepass_acc)[
                     jnp.argsort(tree_artifacts.inverse_permutation)
