@@ -35,6 +35,46 @@ def adaptive_policy_tolerance(
     return jnp.asarray(float(theta) ** (max(int(v) for v in p_gears) + 2), dtype=dtype)
 
 
+def source_power_by_degree_from_multipoles(*, multipole_packed: Array) -> Array:
+    """Return per-node multipole power grouped by spherical-harmonic degree.
+
+    The packed coefficient layout stores all orders up to ``p`` in cumulative
+    ``sh_size(ell)`` blocks. This helper aggregates the squared coefficient
+    magnitudes degree-by-degree, which is closer to Dehnen's use of per-order
+    source power summaries than a single flat tail norm.
+    """
+
+    packed = jnp.asarray(multipole_packed)
+    total_p = int(round(np.sqrt(int(packed.shape[1])) - 1))
+    magnitudes_sq = jnp.square(jnp.abs(packed))
+    powers: list[Array] = []
+    start = 0
+    for ell in range(total_p + 1):
+        stop = sh_size(ell)
+        powers.append(jnp.sum(magnitudes_sq[:, start:stop], axis=1))
+        start = stop
+    return jnp.stack(powers, axis=1)
+
+
+def source_error_proxy_by_order_from_degree_power(
+    *,
+    degree_power: Array,
+    p_gears: tuple[int, ...],
+) -> Array:
+    """Return the residual tail proxy for each candidate order from degree power."""
+
+    power = jnp.asarray(degree_power)
+    if len(p_gears) == 0:
+        return jnp.zeros((power.shape[0], 0), dtype=power.dtype)
+    total_p = int(power.shape[1] - 1)
+    tails: list[Array] = []
+    for p_gear in p_gears:
+        p_clip = int(max(0, min(int(p_gear), total_p)))
+        tail_power = jnp.sum(power[:, p_clip + 1 :], axis=1)
+        tails.append(jnp.sqrt(tail_power))
+    return jnp.stack(tails, axis=1)
+
+
 def source_error_proxy_by_order_from_multipoles(
     *,
     multipole_packed: Array,
@@ -42,18 +82,13 @@ def source_error_proxy_by_order_from_multipoles(
 ) -> Array:
     """Compute a conservative per-node residual proxy for each candidate order."""
 
-    packed = jnp.asarray(multipole_packed)
-    if len(p_gears) == 0:
-        return jnp.zeros((packed.shape[0], 0), dtype=packed.real.dtype)
-    total_p = int(round(np.sqrt(int(packed.shape[1])) - 1))
-    magnitudes = jnp.abs(packed)
-    tails: list[Array] = []
-    for p_gear in p_gears:
-        p_clip = int(max(0, min(int(p_gear), total_p)))
-        keep = sh_size(p_clip)
-        tail = jnp.linalg.norm(magnitudes[:, keep:], axis=1)
-        tails.append(tail)
-    return jnp.stack(tails, axis=1)
+    degree_power = source_power_by_degree_from_multipoles(
+        multipole_packed=multipole_packed,
+    )
+    return source_error_proxy_by_order_from_degree_power(
+        degree_power=degree_power,
+        p_gears=p_gears,
+    )
 
 
 def compute_node_force_scale_from_sorted_acc(
@@ -195,5 +230,7 @@ __all__ = [
     "bucket_far_pairs_by_tag",
     "build_adaptive_policy_state",
     "compute_node_force_scale_from_sorted_acc",
+    "source_error_proxy_by_order_from_degree_power",
     "source_error_proxy_by_order_from_multipoles",
+    "source_power_by_degree_from_multipoles",
 ]
