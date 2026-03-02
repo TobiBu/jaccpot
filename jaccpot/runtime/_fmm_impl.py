@@ -923,6 +923,132 @@ class FastMultipoleMethod:
             dehnen_geometry_mode=dehnen_geometry_mode,
         )
 
+    def _compute_force_scale_paper_prepass_from_tree_artifacts(
+        self: "FastMultipoleMethod",
+        *,
+        tree_artifacts: _PrepareStateTreeUpwardArtifacts,
+        low_order: int,
+        theta_val: float,
+        upward_center_mode: str,
+        runtime_traversal_config: Optional[DualTreeTraversalConfig],
+        runtime_m2l_chunk_size: Optional[int],
+        runtime_l2l_chunk_size: Optional[int],
+        grouped_interactions: bool,
+        farfield_mode: str,
+        record_retry: Callable[[DualTreeRetryEvent], None],
+        refine_local_val: bool,
+        max_refine_levels_val: int,
+        aspect_threshold_val: float,
+    ) -> Array:
+        """Compute paper-mode force scales via a low-order prepass on the current tree."""
+
+        low_upward = self.prepare_upward_sweep(
+            tree_artifacts.tree,
+            tree_artifacts.positions_sorted,
+            tree_artifacts.masses_sorted,
+            max_order=int(low_order),
+            center_mode=upward_center_mode,
+            max_leaf_size=tree_artifacts.leaf_cap,
+        )
+        low_locals_template = self._build_locals_template_for_prepare_state(
+            tree=tree_artifacts.tree,
+            upward=low_upward,
+            max_order=int(low_order),
+            pos_sorted=tree_artifacts.positions_sorted,
+        )
+        low_tree_artifacts = _PrepareStateTreeUpwardArtifacts(
+            tree_mode=tree_artifacts.tree_mode,
+            tree=tree_artifacts.tree,
+            positions_sorted=tree_artifacts.positions_sorted,
+            masses_sorted=tree_artifacts.masses_sorted,
+            inverse_permutation=tree_artifacts.inverse_permutation,
+            leaf_cap=tree_artifacts.leaf_cap,
+            leaf_parameter=tree_artifacts.leaf_parameter,
+            topology_key=tree_artifacts.topology_key,
+            upward=low_upward,
+            locals_template=low_locals_template,
+        )
+
+        saved_p_gears = self.p_gears
+        saved_adaptive_order = self.adaptive_order
+        saved_adaptive_error_model = self.adaptive_error_model
+        saved_mac_type = self.mac_type
+        saved_recent_counts = self._recent_far_pairs_by_gear_counts
+        self._in_force_scale_prepass = True
+        try:
+            self.p_gears = (int(low_order),)
+            self.adaptive_order = False
+            self.adaptive_error_model = "tail_proxy"
+            self.mac_type = "dehnen"
+            dual_downward_artifacts = self._prepare_state_dual_and_downward(
+                tree_artifacts=low_tree_artifacts,
+                force_scale_nodes=None,
+                upward_center_mode=upward_center_mode,
+                theta_val=theta_val,
+                mac_type_val=self.mac_type,
+                dehnen_radius_scale=self.dehnen_radius_scale,
+                runtime_traversal_config=runtime_traversal_config,
+                runtime_m2l_chunk_size=runtime_m2l_chunk_size,
+                runtime_l2l_chunk_size=runtime_l2l_chunk_size,
+                grouped_interactions=grouped_interactions,
+                farfield_mode=farfield_mode,
+                record_retry=record_retry,
+                refine_local_val=refine_local_val,
+                max_refine_levels_val=max_refine_levels_val,
+                aspect_threshold_val=aspect_threshold_val,
+                allow_stateful_cache=False,
+            )
+            nearfield_artifacts = self._prepare_state_nearfield_artifacts(
+                tree=low_tree_artifacts.tree,
+                neighbor_list=dual_downward_artifacts.neighbor_list,
+                leaf_cap=low_tree_artifacts.leaf_cap,
+                num_particles=int(low_tree_artifacts.positions_sorted.shape[0]),
+                cache_entry=dual_downward_artifacts.cache_entry,
+                allow_stateful_cache=False,
+            )
+            prepass_state = FMMPreparedState(
+                tree=low_tree_artifacts.tree,
+                positions_sorted=low_tree_artifacts.positions_sorted,
+                masses_sorted=low_tree_artifacts.masses_sorted,
+                inverse_permutation=jnp.asarray(
+                    low_tree_artifacts.inverse_permutation, dtype=INDEX_DTYPE
+                ),
+                upward=low_tree_artifacts.upward,
+                downward=dual_downward_artifacts.downward,
+                neighbor_list=dual_downward_artifacts.neighbor_list,
+                max_leaf_size=low_tree_artifacts.leaf_cap,
+                input_dtype=low_tree_artifacts.positions_sorted.dtype,
+                working_dtype=low_tree_artifacts.positions_sorted.dtype,
+                expansion_basis=self.expansion_basis,
+                theta=theta_val,
+                topology_key=low_tree_artifacts.topology_key,
+                interactions=dual_downward_artifacts.interactions,
+                dual_tree_result=dual_downward_artifacts.traversal_result,
+                retry_events=tuple(),
+                nearfield_target_leaf_ids=nearfield_artifacts.target_leaf_ids,
+                nearfield_source_leaf_ids=nearfield_artifacts.source_leaf_ids,
+                nearfield_valid_pairs=nearfield_artifacts.valid_pairs,
+                nearfield_chunk_sort_indices=nearfield_artifacts.chunk_sort_indices,
+                nearfield_chunk_group_ids=nearfield_artifacts.chunk_group_ids,
+                nearfield_chunk_unique_indices=nearfield_artifacts.chunk_unique_indices,
+                force_scale_nodes=None,
+            )
+            prepass_acc = self.evaluate_prepared_state(
+                prepass_state,
+                return_potential=False,
+                jit_traversal=False,
+            )
+        finally:
+            self.p_gears = saved_p_gears
+            self.adaptive_order = saved_adaptive_order
+            self.adaptive_error_model = saved_adaptive_error_model
+            self.mac_type = saved_mac_type
+            self._recent_far_pairs_by_gear_counts = saved_recent_counts
+            self._in_force_scale_prepass = False
+
+        sorted_idx = jnp.argsort(low_tree_artifacts.inverse_permutation)
+        return jnp.asarray(prepass_acc)[sorted_idx]
+
     def _prepared_state_cache_lookup(
         self,
         *,
@@ -2441,43 +2567,57 @@ class FastMultipoleMethod:
                     and self.adaptive_error_model == "dehnen_paper"
                 ):
                     low_order = 1 if int(max_order) >= 1 else 0
-                self._in_force_scale_prepass = True
-                saved_p_gears = self.p_gears
-                saved_adaptive_order = self.adaptive_order
-                saved_adaptive_error_model = self.adaptive_error_model
-                saved_mac_type = self.mac_type
-                try:
-                    self.p_gears = (low_order,)
-                    if (
-                        self.mac_force_scale_mode == "paper"
-                        and self.adaptive_error_model == "dehnen_paper"
-                    ):
-                        self.adaptive_order = False
-                        self.adaptive_error_model = "tail_proxy"
-                        self.mac_type = "dehnen"
-                    else:
-                        self.adaptive_order = bool(saved_adaptive_order)
-                    prepass_acc = self.compute_accelerations(
-                        positions_arr,
-                        masses_arr,
-                        bounds=bounds,
-                        leaf_size=int(leaf_size),
-                        max_order=low_order,
-                        return_potential=False,
-                        theta=theta_val,
-                        reuse_prepared_state=False,
-                        jit_tree=jit_tree,
-                        jit_traversal=False,
+                if (
+                    self.mac_force_scale_mode == "paper"
+                    and self.adaptive_error_model == "dehnen_paper"
+                ):
+                    prepass_sorted = (
+                        self._compute_force_scale_paper_prepass_from_tree_artifacts(
+                            tree_artifacts=tree_artifacts,
+                            low_order=low_order,
+                            theta_val=theta_val,
+                            upward_center_mode=upward_center_mode,
+                            runtime_traversal_config=runtime_traversal_config,
+                            runtime_m2l_chunk_size=runtime_m2l_chunk_size,
+                            runtime_l2l_chunk_size=runtime_l2l_chunk_size,
+                            grouped_interactions=grouped_interactions,
+                            farfield_mode=farfield_mode,
+                            record_retry=record_retry,
+                            refine_local_val=refine_local_val,
+                            max_refine_levels_val=max_refine_levels_val,
+                            aspect_threshold_val=aspect_threshold_val,
+                        )
                     )
-                finally:
-                    self.p_gears = saved_p_gears
-                    self.adaptive_order = saved_adaptive_order
-                    self.adaptive_error_model = saved_adaptive_error_model
-                    self.mac_type = saved_mac_type
-                    self._in_force_scale_prepass = False
-                prepass_sorted = jnp.asarray(prepass_acc)[
-                    jnp.argsort(tree_artifacts.inverse_permutation)
-                ]
+                else:
+                    self._in_force_scale_prepass = True
+                    saved_p_gears = self.p_gears
+                    saved_adaptive_order = self.adaptive_order
+                    saved_adaptive_error_model = self.adaptive_error_model
+                    saved_mac_type = self.mac_type
+                    try:
+                        self.p_gears = (low_order,)
+                        self.adaptive_order = bool(saved_adaptive_order)
+                        prepass_acc = self.compute_accelerations(
+                            positions_arr,
+                            masses_arr,
+                            bounds=bounds,
+                            leaf_size=int(leaf_size),
+                            max_order=low_order,
+                            return_potential=False,
+                            theta=theta_val,
+                            reuse_prepared_state=False,
+                            jit_tree=jit_tree,
+                            jit_traversal=False,
+                        )
+                    finally:
+                        self.p_gears = saved_p_gears
+                        self.adaptive_order = saved_adaptive_order
+                        self.adaptive_error_model = saved_adaptive_error_model
+                        self.mac_type = saved_mac_type
+                        self._in_force_scale_prepass = False
+                    prepass_sorted = jnp.asarray(prepass_acc)[
+                        jnp.argsort(tree_artifacts.inverse_permutation)
+                    ]
                 force_scale_nodes = self._compute_node_force_scale_from_sorted_acc(
                     tree=tree_artifacts.tree,
                     accelerations_sorted=prepass_sorted,
