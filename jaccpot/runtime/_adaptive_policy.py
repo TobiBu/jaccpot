@@ -406,61 +406,102 @@ def compute_leaf_enclosing_sphere_geometry(
     )
 
 
-def _ritter_leaf_sphere(points: np.ndarray) -> tuple[np.ndarray, float]:
-    """Return a fast approximate bounding sphere for a small point set."""
+@jax.jit
+def _batched_ritter_leaf_spheres(
+    leaf_points: Array, leaf_valid: Array
+) -> tuple[Array, Array]:
+    """Return approximate bounding spheres for padded leaf particle blocks."""
 
-    pts = np.asarray(points, dtype=np.float64)
-    if pts.shape[0] == 0:
-        return np.zeros((3,), dtype=np.float64), 0.0
-    if pts.shape[0] == 1:
-        return pts[0], 0.0
-    p0 = pts[0]
-    d0 = np.sum((pts - p0[None, :]) ** 2, axis=1)
-    p1 = pts[int(np.argmax(d0))]
-    d1 = np.sum((pts - p1[None, :]) ** 2, axis=1)
-    p2 = pts[int(np.argmax(d1))]
-    center = 0.5 * (p1 + p2)
-    radius = float(np.linalg.norm(p2 - center))
-    for point in pts:
-        delta = point - center
-        dist = float(np.linalg.norm(delta))
-        if dist <= radius:
-            continue
-        new_radius = 0.5 * (radius + dist)
-        if dist > 1e-24:
-            center = center + ((new_radius - radius) / dist) * delta
-        radius = new_radius
-    return center, radius
+    points = jnp.asarray(leaf_points)
+    valid = jnp.asarray(leaf_valid, dtype=jnp.bool_)
+    dtype = points.dtype
+    valid_f = valid.astype(dtype)
+    counts = jnp.sum(valid_f, axis=1)
+    default_center = jnp.sum(points * valid_f[..., None], axis=1) / jnp.maximum(
+        counts[:, None], jnp.asarray(1.0, dtype=dtype)
+    )
+
+    def leaf_fn(
+        pts: Array, mask: Array, count: Array, fallback_center: Array
+    ) -> tuple[Array, Array]:
+        count_i = count.astype(jnp.int32)
+
+        def no_points(_: None) -> tuple[Array, Array]:
+            return fallback_center, jnp.asarray(0.0, dtype=dtype)
+
+        def with_points(_: None) -> tuple[Array, Array]:
+            first_idx = jnp.argmax(mask.astype(jnp.int32))
+            p0 = pts[first_idx]
+            d0 = jnp.where(
+                mask,
+                jnp.sum(jnp.square(pts - p0[None, :]), axis=1),
+                -jnp.ones(mask.shape, dtype=dtype),
+            )
+            p1_idx = jnp.argmax(d0)
+            p1 = pts[p1_idx]
+            d1 = jnp.where(
+                mask,
+                jnp.sum(jnp.square(pts - p1[None, :]), axis=1),
+                -jnp.ones(mask.shape, dtype=dtype),
+            )
+            p2_idx = jnp.argmax(d1)
+            p2 = pts[p2_idx]
+            center0 = 0.5 * (p1 + p2)
+            radius0 = jnp.linalg.norm(p2 - center0)
+
+            def body(i: int, state: tuple[Array, Array]) -> tuple[Array, Array]:
+                center, radius = state
+                point = pts[i]
+                is_valid = mask[i]
+                delta = point - center
+                dist = jnp.linalg.norm(delta)
+                expand = is_valid & (dist > radius)
+                new_radius = 0.5 * (radius + dist)
+                shift = jnp.where(
+                    dist > jnp.asarray(1e-24, dtype=dtype),
+                    ((new_radius - radius) / dist) * delta,
+                    jnp.zeros_like(delta),
+                )
+                center = jnp.where(expand, center + shift, center)
+                radius = jnp.where(expand, new_radius, radius)
+                return center, radius
+
+            return jax.lax.fori_loop(0, pts.shape[0], body, (center0, radius0))
+
+        return jax.lax.cond(count_i <= 0, no_points, with_points, operand=None)
+
+    centers, radii = jax.vmap(leaf_fn)(points, valid, counts, default_center)
+    return centers, radii
 
 
 def compute_leaf_ritter_sphere_geometry(
     *, tree: Tree, positions_sorted: Array
 ) -> tuple[Array, Array]:
-    """Return fast approximate leaf spheres using Ritter's algorithm."""
+    """Return fast approximate leaf spheres using a batched JAX Ritter pass."""
 
-    node_ranges = np.asarray(tree.node_ranges, dtype=np.int64)
+    node_ranges = jnp.asarray(tree.node_ranges, dtype=jnp.int32)
     num_nodes = int(node_ranges.shape[0])
     num_internal = int(tree.num_internal_nodes)
-    centers = np.zeros((num_nodes, positions_sorted.shape[1]), dtype=np.float64)
-    radii = np.zeros((num_nodes,), dtype=np.float64)
-    if num_internal > 0:
-        leaf_ranges = node_ranges[num_internal:]
-    else:
-        leaf_ranges = node_ranges
-    pos = np.asarray(positions_sorted, dtype=np.float64)
-    for leaf_offset, (start, end) in enumerate(leaf_ranges):
-        s = int(start)
-        e = int(end)
-        if e < s:
-            continue
-        center, radius = _ritter_leaf_sphere(pos[s : e + 1])
-        node_idx = num_internal + leaf_offset
-        centers[node_idx] = center
-        radii[node_idx] = radius
-    return (
-        jnp.asarray(centers, dtype=positions_sorted.dtype),
-        jnp.asarray(radii, dtype=positions_sorted.dtype),
+    centers = jnp.zeros(
+        (num_nodes, positions_sorted.shape[1]), dtype=positions_sorted.dtype
     )
+    radii = jnp.zeros((num_nodes,), dtype=positions_sorted.dtype)
+    leaf_ranges = node_ranges[num_internal:] if num_internal > 0 else node_ranges
+    if int(leaf_ranges.shape[0]) == 0:
+        return centers, radii
+    counts = leaf_ranges[:, 1] - leaf_ranges[:, 0] + 1
+    max_leaf = int(jnp.max(counts)) if int(counts.shape[0]) > 0 else 0
+    idx = jnp.arange(max_leaf, dtype=jnp.int32)
+    particle_idx = leaf_ranges[:, 0:1] + idx[None, :]
+    valid = idx[None, :] < counts[:, None]
+    safe_idx = jnp.clip(particle_idx, 0, positions_sorted.shape[0] - 1)
+    leaf_points = positions_sorted[safe_idx]
+    leaf_points = jnp.where(valid[..., None], leaf_points, 0.0)
+    leaf_centers, leaf_radii = _batched_ritter_leaf_spheres(leaf_points, valid)
+    leaf_nodes = jnp.arange(num_internal, num_nodes, dtype=jnp.int32)
+    centers = centers.at[leaf_nodes].set(leaf_centers.astype(positions_sorted.dtype))
+    radii = radii.at[leaf_nodes].set(leaf_radii.astype(positions_sorted.dtype))
+    return centers, radii
 
 
 def merge_bounding_spheres(
