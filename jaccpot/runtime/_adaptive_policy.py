@@ -75,6 +75,41 @@ def source_error_proxy_by_order_from_degree_power(
     return jnp.stack(tails, axis=1)
 
 
+def dehnen_like_pair_error_by_order_from_degree_power(
+    *,
+    degree_power: Array,
+    opening: Array,
+    p_gears: tuple[int, ...],
+) -> Array:
+    """Return an experimental degree-weighted pair error estimate by order.
+
+    This helper is not yet used by the runtime acceptance path. It provides a
+    more Dehnen-like per-pair estimator by combining per-degree source power
+    with an interaction-specific opening factor. Lower opening values suppress
+    higher-order tails more strongly.
+    """
+
+    power = jnp.asarray(degree_power)
+    opening_arr = jnp.asarray(opening, dtype=power.dtype)
+    if opening_arr.ndim == 0:
+        opening_arr = opening_arr[None]
+    opening_arr = jnp.clip(opening_arr, 0.0, 1.0)
+    if len(p_gears) == 0:
+        return jnp.zeros((opening_arr.shape[0], 0), dtype=power.dtype)
+    total_p = int(power.shape[1] - 1)
+    degree_idx = jnp.arange(total_p + 1, dtype=power.dtype)
+    weighted = power[:, None, :] * jnp.power(
+        opening_arr[:, None, None],
+        degree_idx[None, None, :] + 2.0,
+    )
+    estimates: list[Array] = []
+    for p_gear in p_gears:
+        p_clip = int(max(0, min(int(p_gear), total_p)))
+        tail_power = jnp.sum(weighted[:, 0, p_clip + 1 :], axis=1)
+        estimates.append(jnp.sqrt(tail_power))
+    return jnp.stack(estimates, axis=1)
+
+
 def source_error_proxy_by_order_from_multipoles(
     *,
     multipole_packed: Array,
@@ -230,6 +265,7 @@ __all__ = [
     "bucket_far_pairs_by_tag",
     "build_adaptive_policy_state",
     "compute_node_force_scale_from_sorted_acc",
+    "dehnen_like_pair_error_by_order_from_degree_power",
     "source_error_proxy_by_order_from_degree_power",
     "source_error_proxy_by_order_from_multipoles",
     "source_power_by_degree_from_multipoles",

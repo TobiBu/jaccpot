@@ -10,6 +10,7 @@ from jaccpot.runtime._adaptive_policy import (
     AdaptivePolicyState,
     adaptive_pair_policy,
     bucket_far_pairs_by_tag,
+    dehnen_like_pair_error_by_order_from_degree_power,
     source_error_proxy_by_order_from_degree_power,
     source_error_proxy_by_order_from_multipoles,
     source_power_by_degree_from_multipoles,
@@ -118,3 +119,20 @@ def test_source_power_by_degree_matches_flat_tail_proxy():
 
     assert degree_power.shape == (2, 2)
     assert np.allclose(np.asarray(proxy_from_power), np.asarray(proxy_from_packed))
+
+
+def test_dehnen_like_pair_error_is_monotone_in_opening():
+    degree_power = jnp.asarray([[1.0, 4.0, 9.0]], dtype=jnp.float32)
+    small = dehnen_like_pair_error_by_order_from_degree_power(
+        degree_power=degree_power,
+        opening=jnp.asarray([0.2], dtype=jnp.float32),
+        p_gears=(0, 1),
+    )
+    large = dehnen_like_pair_error_by_order_from_degree_power(
+        degree_power=degree_power,
+        opening=jnp.asarray([0.6], dtype=jnp.float32),
+        p_gears=(0, 1),
+    )
+
+    assert np.all(np.asarray(small) <= np.asarray(large))
+    assert float(large[0, 0]) >= float(large[0, 1])
