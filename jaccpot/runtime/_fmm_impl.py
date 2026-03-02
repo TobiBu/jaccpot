@@ -878,7 +878,7 @@ class FastMultipoleMethod:
         """Estimate per-node force scales from sorted per-particle accelerations."""
 
         return compute_node_force_scale_from_sorted_acc(
-            node_ranges=tree.node_ranges,
+            tree=tree,
             accelerations_sorted=accelerations_sorted,
             reduction=reduction,
         )

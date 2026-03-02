@@ -215,29 +215,82 @@ def source_error_proxy_by_order_from_multipoles(
 
 def compute_node_force_scale_from_sorted_acc(
     *,
-    node_ranges: Array,
+    tree: Tree,
     accelerations_sorted: Array,
     reduction: str = "max",
 ) -> Array:
-    """Estimate per-node force scales from sorted per-particle accelerations."""
+    """Estimate per-node force scales from sorted per-particle accelerations.
 
-    node_ranges_np = np.asarray(node_ranges, dtype=np.int64)
-    acc_sorted_np = np.asarray(accelerations_sorted)
-    mag = np.linalg.norm(acc_sorted_np, axis=1)
+    This is implemented as a JAX-native tree reduction: compute per-leaf scales
+    from the contiguous particle blocks, then propagate scales upward through the
+    binary tree using child reductions.
+    """
+
     reduction_norm = str(reduction).strip().lower()
     if reduction_norm not in ("max", "min"):
         raise ValueError("reduction must be 'max' or 'min'")
-    force_scale = np.zeros((node_ranges_np.shape[0],), dtype=mag.dtype)
-    for idx, (start, end) in enumerate(node_ranges_np):
-        s = int(start)
-        e = int(end)
-        if e < s:
-            continue
-        values = mag[s : e + 1]
-        force_scale[idx] = (
-            float(np.min(values)) if reduction_norm == "min" else float(np.max(values))
+    use_min = reduction_norm == "min"
+
+    magnitudes = jnp.linalg.norm(jnp.asarray(accelerations_sorted), axis=1)
+    dtype = magnitudes.dtype
+    node_ranges = jnp.asarray(tree.node_ranges, dtype=jnp.int32)
+    num_nodes = int(node_ranges.shape[0])
+    num_internal = int(tree.num_internal_nodes)
+    if num_nodes == 0:
+        return jnp.zeros((0,), dtype=dtype)
+
+    identity = jnp.asarray(jnp.inf if use_min else -jnp.inf, dtype=dtype)
+    scales = jnp.zeros((num_nodes,), dtype=dtype)
+    leaf_ranges = node_ranges[num_internal:] if num_internal > 0 else node_ranges
+    leaf_count = int(leaf_ranges.shape[0])
+
+    if leaf_count > 0:
+        counts = jnp.maximum(leaf_ranges[:, 1] - leaf_ranges[:, 0] + 1, 0)
+        max_leaf = int(jnp.max(counts)) if leaf_count > 0 else 0
+        if max_leaf > 0:
+            idx = jnp.arange(max_leaf, dtype=jnp.int32)
+            particle_idx = leaf_ranges[:, 0:1] + idx[None, :]
+            valid = idx[None, :] < counts[:, None]
+            safe_idx = jnp.clip(particle_idx, 0, magnitudes.shape[0] - 1)
+            leaf_values = magnitudes[safe_idx]
+            leaf_values = jnp.where(valid, leaf_values, identity)
+            leaf_scale = (
+                jnp.min(leaf_values, axis=1)
+                if use_min
+                else jnp.max(leaf_values, axis=1)
+            )
+            leaf_scale = jnp.where(counts > 0, leaf_scale, jnp.zeros_like(leaf_scale))
+            leaf_nodes = jnp.arange(num_internal, num_nodes, dtype=jnp.int32)
+            scales = scales.at[leaf_nodes].set(leaf_scale)
+
+    if num_internal <= 0:
+        return scales
+
+    left_child = jnp.asarray(tree.left_child, dtype=jnp.int32)
+    right_child = jnp.asarray(tree.right_child, dtype=jnp.int32)
+    zero = jnp.asarray(0.0, dtype=dtype)
+
+    def body(i: int, current: Array) -> Array:
+        node_idx = num_internal - 1 - i
+        left_idx = left_child[node_idx]
+        right_idx = right_child[node_idx]
+        left_valid = left_idx >= 0
+        right_valid = right_idx >= 0
+        left_value = jnp.where(left_valid, current[jnp.maximum(left_idx, 0)], identity)
+        right_value = jnp.where(
+            right_valid,
+            current[jnp.maximum(right_idx, 0)],
+            identity,
         )
-    return jnp.asarray(force_scale, dtype=accelerations_sorted.dtype)
+        node_value = (
+            jnp.minimum(left_value, right_value)
+            if use_min
+            else jnp.maximum(left_value, right_value)
+        )
+        node_value = jnp.where(left_valid | right_valid, node_value, zero)
+        return current.at[node_idx].set(node_value)
+
+    return jax.lax.fori_loop(0, num_internal, body, scales)
 
 
 def _sphere_from_support(points: np.ndarray) -> tuple[np.ndarray, float]:

@@ -13,6 +13,7 @@ from jaccpot.runtime._adaptive_policy import (
     bucket_far_pairs_by_tag,
     compute_leaf_enclosing_sphere_geometry,
     compute_leaf_ritter_sphere_geometry,
+    compute_node_force_scale_from_sorted_acc,
     compute_smallest_enclosing_sphere_geometry,
     compute_tree_merged_sphere_geometry,
     dehnen_like_pair_error_by_order_from_degree_power,
@@ -336,6 +337,52 @@ def test_tree_merged_sphere_geometry_contains_exact_leaf_spheres():
     for idx in leaf_nodes:
         child_dist = np.linalg.norm(np.asarray(centers[idx]) - np.asarray(centers[0]))
         assert child_dist + float(radii[idx]) <= float(radii[0]) + 1e-5
+
+
+def test_compute_node_force_scale_matches_reference_reductions():
+    positions = jnp.asarray(
+        [[0.0, 0.0, 0.0], [2.0, 0.0, 0.0], [6.0, 0.0, 0.0], [8.0, 0.0, 0.0]],
+        dtype=jnp.float32,
+    )
+    masses = jnp.ones((4,), dtype=jnp.float32)
+    tree = Tree.from_particles(
+        positions,
+        masses,
+        leaf_size=2,
+        tree_type="radix",
+        target_leaf_particles=2,
+        refine_local=False,
+    )
+    accelerations_sorted = jnp.asarray(
+        [[3.0, 0.0, 0.0], [1.0, 0.0, 0.0], [4.0, 0.0, 0.0], [2.0, 0.0, 0.0]],
+        dtype=jnp.float32,
+    )[tree.particle_indices]
+
+    def reference(reduction: str) -> np.ndarray:
+        mags = np.linalg.norm(np.asarray(accelerations_sorted), axis=1)
+        values = np.zeros((int(tree.node_ranges.shape[0]),), dtype=mags.dtype)
+        for idx, (start, end) in enumerate(np.asarray(tree.node_ranges)):
+            s = int(start)
+            e = int(end)
+            vals = mags[s : e + 1]
+            values[idx] = (
+                float(np.min(vals)) if reduction == "min" else float(np.max(vals))
+            )
+        return values
+
+    computed_max = compute_node_force_scale_from_sorted_acc(
+        tree=tree,
+        accelerations_sorted=accelerations_sorted,
+        reduction="max",
+    )
+    computed_min = compute_node_force_scale_from_sorted_acc(
+        tree=tree,
+        accelerations_sorted=accelerations_sorted,
+        reduction="min",
+    )
+
+    assert np.allclose(np.asarray(computed_max), reference("max"))
+    assert np.allclose(np.asarray(computed_min), reference("min"))
 
 
 def test_leaf_ritter_sphere_contains_leaf_points():
