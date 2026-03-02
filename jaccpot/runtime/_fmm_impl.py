@@ -891,6 +891,8 @@ class FastMultipoleMethod:
         self: "FastMultipoleMethod",
         *,
         upward: TreeUpwardData,
+        tree: Tree,
+        positions_sorted: Array,
         p_gears: tuple[int, ...],
         force_scale_nodes: Optional[Array],
         eps: Array,
@@ -901,6 +903,8 @@ class FastMultipoleMethod:
 
         return build_adaptive_policy_state(
             upward=upward,
+            tree=tree,
+            positions_sorted=positions_sorted,
             p_gears=p_gears,
             force_scale_nodes=force_scale_nodes,
             eps=eps,
@@ -1459,6 +1463,8 @@ class FastMultipoleMethod:
                 raise ValueError("adaptive traversal policy requires non-empty orders")
             policy_state = self._build_adaptive_policy_state(
                 upward=tree_artifacts.upward,
+                tree=tree_artifacts.tree,
+                positions_sorted=tree_artifacts.positions_sorted,
                 p_gears=policy_orders,
                 force_scale_nodes=force_scale_nodes,
                 eps=jnp.asarray(

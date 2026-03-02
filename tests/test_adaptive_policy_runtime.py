@@ -10,6 +10,7 @@ from jaccpot.runtime._adaptive_policy import (
     AdaptivePolicyState,
     adaptive_pair_policy,
     bucket_far_pairs_by_tag,
+    compute_smallest_enclosing_sphere_geometry,
     dehnen_like_pair_error_by_order_from_degree_power,
     dehnen_multipole_power_by_degree,
     dehnen_paper_pair_error_by_order,
@@ -43,6 +44,12 @@ def _policy_state() -> AdaptivePolicyState:
             dtype=jnp.float32,
         ),
         source_mass=jnp.asarray([1.0, 0.75], dtype=jnp.float32),
+        source_mac_center=jnp.asarray(
+            [[0.0, 0.0, 0.0], [0.5, 0.0, 0.0]], dtype=jnp.float32
+        ),
+        target_mac_center=jnp.asarray(
+            [[0.0, 0.0, 0.0], [0.5, 0.0, 0.0]], dtype=jnp.float32
+        ),
         source_radius_bound=jnp.asarray([0.5, 0.4], dtype=jnp.float32),
         target_radius_bound=jnp.asarray([0.5, 0.4], dtype=jnp.float32),
         target_accept_threshold=jnp.asarray([0.25, 0.5], dtype=jnp.float32),
@@ -254,3 +261,25 @@ def test_dehnen_paper_error_model_supports_jit():
     actions, tags = run(state)
     assert actions.shape == (2,)
     assert tags.shape == (2,)
+
+
+def test_compute_smallest_enclosing_sphere_geometry_matches_simple_tetrahedron():
+    centers, radii = compute_smallest_enclosing_sphere_geometry(
+        node_ranges=jnp.asarray([[0, 3], [0, 1]], dtype=jnp.int32),
+        positions_sorted=jnp.asarray(
+            [
+                [0.0, 0.0, 0.0],
+                [2.0, 0.0, 0.0],
+                [0.0, 2.0, 0.0],
+                [0.0, 0.0, 2.0],
+            ],
+            dtype=jnp.float32,
+        ),
+    )
+
+    assert np.allclose(
+        np.asarray(centers[0]), np.asarray([2.0 / 3.0, 2.0 / 3.0, 2.0 / 3.0]), atol=1e-5
+    )
+    assert np.isclose(float(radii[0]), np.sqrt(8.0 / 3.0), atol=1e-5)
+    assert np.allclose(np.asarray(centers[1]), np.asarray([1.0, 0.0, 0.0]), atol=1e-5)
+    assert np.isclose(float(radii[1]), 1.0, atol=1e-5)

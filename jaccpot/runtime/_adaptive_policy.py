@@ -9,6 +9,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 from jaxtyping import Array
+from yggdrax.tree import Tree
 
 from jaccpot.upward.tree_expansions import TreeUpwardData
 
@@ -28,6 +29,8 @@ class AdaptivePolicyState(NamedTuple):
     source_degree_power: Array
     source_dehnen_power: Array
     source_mass: Array
+    source_mac_center: Array
+    target_mac_center: Array
     source_radius_bound: Array
     target_radius_bound: Array
     target_accept_threshold: Array
@@ -237,6 +240,142 @@ def compute_node_force_scale_from_sorted_acc(
     return jnp.asarray(force_scale, dtype=accelerations_sorted.dtype)
 
 
+def _sphere_from_support(points: np.ndarray) -> tuple[np.ndarray, float]:
+    """Return the exact sphere defined by up to four support points."""
+
+    pts = np.asarray(points, dtype=np.float64)
+    count = int(pts.shape[0])
+    if count == 0:
+        return np.zeros((3,), dtype=np.float64), -1.0
+    if count == 1:
+        return pts[0], 0.0
+    if count == 2:
+        center = 0.5 * (pts[0] + pts[1])
+        return center, float(np.linalg.norm(pts[0] - center))
+    if count == 3:
+        a, b, c = pts
+        ab = b - a
+        ac = c - a
+        cross = np.cross(ab, ac)
+        denom = 2.0 * float(np.dot(cross, cross))
+        if denom <= 1e-24:
+            best_center = pts[0]
+            best_radius = float("inf")
+            for i in range(3):
+                for j in range(i + 1, 3):
+                    center, radius = _sphere_from_support(pts[[i, j]])
+                    if (
+                        np.all(
+                            np.linalg.norm(pts - center[None, :], axis=1)
+                            <= radius + 1e-10
+                        )
+                        and radius < best_radius
+                    ):
+                        best_center = center
+                        best_radius = radius
+            return best_center, best_radius
+        center = (
+            a
+            + (
+                np.cross(cross, ab) * float(np.dot(ac, ac))
+                + np.cross(ac, cross) * float(np.dot(ab, ab))
+            )
+            / denom
+        )
+        return center, float(np.linalg.norm(a - center))
+    if count == 4:
+        p0 = pts[0]
+        A = 2.0 * (pts[1:] - p0)
+        b = np.sum(pts[1:] * pts[1:], axis=1) - float(np.dot(p0, p0))
+        try:
+            center = np.linalg.solve(A, b)
+        except np.linalg.LinAlgError:
+            best_center = pts[0]
+            best_radius = float("inf")
+            from itertools import combinations
+
+            for size in (2, 3):
+                for combo in combinations(range(4), size):
+                    center, radius = _sphere_from_support(pts[list(combo)])
+                    if (
+                        np.all(
+                            np.linalg.norm(pts - center[None, :], axis=1)
+                            <= radius + 1e-10
+                        )
+                        and radius < best_radius
+                    ):
+                        best_center = center
+                        best_radius = radius
+            return best_center, best_radius
+        return center, float(np.linalg.norm(p0 - center))
+    raise ValueError("support must contain at most four points")
+
+
+def _point_in_sphere(
+    point: np.ndarray, center: np.ndarray, radius: float, tol: float = 1e-10
+) -> bool:
+    if radius < 0.0:
+        return False
+    return float(np.linalg.norm(point - center)) <= radius + tol
+
+
+def _smallest_enclosing_sphere(points: np.ndarray) -> tuple[np.ndarray, float]:
+    """Return the exact smallest enclosing sphere for a 3D point set."""
+
+    pts = np.asarray(points, dtype=np.float64)
+    if pts.shape[0] == 0:
+        return np.zeros((3,), dtype=np.float64), 0.0
+    center = pts[0]
+    radius = 0.0
+    for i in range(pts.shape[0]):
+        p = pts[i]
+        if _point_in_sphere(p, center, radius):
+            continue
+        center = p
+        radius = 0.0
+        for j in range(i):
+            q = pts[j]
+            if _point_in_sphere(q, center, radius):
+                continue
+            center, radius = _sphere_from_support(np.stack([p, q], axis=0))
+            for k in range(j):
+                r = pts[k]
+                if _point_in_sphere(r, center, radius):
+                    continue
+                center, radius = _sphere_from_support(np.stack([p, q, r], axis=0))
+                for l in range(k):
+                    s = pts[l]
+                    if _point_in_sphere(s, center, radius):
+                        continue
+                    center, radius = _sphere_from_support(
+                        np.stack([p, q, r, s], axis=0)
+                    )
+    return center, radius
+
+
+def compute_smallest_enclosing_sphere_geometry(
+    *, node_ranges: Array, positions_sorted: Array
+) -> tuple[Array, Array]:
+    """Return exact SES centres and radii for each node range."""
+
+    ranges = np.asarray(node_ranges, dtype=np.int64)
+    pos = np.asarray(positions_sorted, dtype=np.float64)
+    centers = np.zeros((ranges.shape[0], pos.shape[1]), dtype=np.float64)
+    radii = np.zeros((ranges.shape[0],), dtype=np.float64)
+    for idx, (start, end) in enumerate(ranges):
+        s = int(start)
+        e = int(end)
+        if e < s:
+            continue
+        center, radius = _smallest_enclosing_sphere(pos[s : e + 1])
+        centers[idx] = center
+        radii[idx] = radius
+    return (
+        jnp.asarray(centers, dtype=positions_sorted.dtype),
+        jnp.asarray(radii, dtype=positions_sorted.dtype),
+    )
+
+
 def _dehnen_binomial_matrix(
     *, p_gears: tuple[int, ...], total_p: int, dtype: Array
 ) -> Array:
@@ -250,6 +389,8 @@ def _dehnen_binomial_matrix(
 def build_adaptive_policy_state(
     *,
     upward: TreeUpwardData,
+    tree: Tree,
+    positions_sorted: Array,
     p_gears: tuple[int, ...],
     force_scale_nodes: Optional[Array],
     eps: Array,
@@ -294,11 +435,21 @@ def build_adaptive_policy_state(
         jnp.asarray(1.5, dtype=dtype) * theta_arr,
     )
     total_p = int(dehnen_power.shape[1] - 1)
-    expansion_centers = jnp.asarray(upward.multipoles.centers, dtype=dtype)
-    geometry_centers = jnp.asarray(upward.geometry.center, dtype=dtype)
-    geometry_radius = jnp.asarray(upward.geometry.radius, dtype=dtype)
-    center_offset = jnp.linalg.norm(expansion_centers - geometry_centers, axis=1)
-    radius_bound = geometry_radius + center_offset
+    exact_dehnen_geometry = bool(int(error_model_code_arr) == _ERROR_MODEL_DEHNEN_PAPER)
+    if exact_dehnen_geometry:
+        mac_centers, radius_bound = compute_smallest_enclosing_sphere_geometry(
+            node_ranges=tree.node_ranges,
+            positions_sorted=positions_sorted,
+        )
+        mac_centers = jnp.asarray(mac_centers, dtype=dtype)
+        radius_bound = jnp.asarray(radius_bound, dtype=dtype)
+    else:
+        expansion_centers = jnp.asarray(upward.multipoles.centers, dtype=dtype)
+        geometry_centers = jnp.asarray(upward.geometry.center, dtype=dtype)
+        geometry_radius = jnp.asarray(upward.geometry.radius, dtype=dtype)
+        center_offset = jnp.linalg.norm(expansion_centers - geometry_centers, axis=1)
+        radius_bound = geometry_radius + center_offset
+        mac_centers = geometry_centers
     source_mass = jnp.maximum(
         jnp.abs(jnp.asarray(upward.mass_moments.mass, dtype=dtype)),
         jnp.asarray(1e-24, dtype=dtype),
@@ -308,6 +459,8 @@ def build_adaptive_policy_state(
         source_degree_power=degree_power,
         source_dehnen_power=dehnen_power,
         source_mass=source_mass,
+        source_mac_center=mac_centers,
+        target_mac_center=mac_centers,
         source_radius_bound=radius_bound,
         target_radius_bound=radius_bound,
         target_accept_threshold=target_accept_threshold,
@@ -336,7 +489,7 @@ def _compute_passes_for_error_model(
     opening: Array,
     extent_sum_sq: Array,
     safe_dist_sq: Array,
-    distance: Array,
+    paper_distance: Array,
 ) -> Array:
     """Return per-order pass decisions for the configured adaptive error model."""
 
@@ -360,7 +513,7 @@ def _compute_passes_for_error_model(
             source_mass=source_mass,
             source_radius=source_radius,
             target_radius=target_radius,
-            distance=distance,
+            distance=paper_distance,
             order_values=policy_state.order_values,
             binomial_by_order=policy_state.dehnen_binomial_by_order,
         )
@@ -368,11 +521,11 @@ def _compute_passes_for_error_model(
             pair_error
             * source_mass[:, None]
             / jnp.maximum(
-                jnp.square(distance[:, None]),
+                jnp.square(paper_distance[:, None]),
                 jnp.asarray(1e-24, dtype=pair_error.dtype),
             )
         )
-        convergent = (source_radius + target_radius) < distance
+        convergent = (source_radius + target_radius) < paper_distance
         return convergent[:, None] & (est_force_error < target_threshold[:, None])
 
     return jax.lax.switch(
@@ -412,6 +565,12 @@ def adaptive_pair_policy(
     source_mass = jnp.asarray(policy_state.source_mass)[safe_sources]
     source_radius = jnp.asarray(policy_state.source_radius_bound)[safe_sources]
     target_radius = jnp.asarray(policy_state.target_radius_bound)[safe_targets]
+    source_mac_center = jnp.asarray(policy_state.source_mac_center)[safe_sources]
+    target_mac_center = jnp.asarray(policy_state.target_mac_center)[safe_targets]
+    paper_distance = jnp.maximum(
+        jnp.linalg.norm(source_mac_center - target_mac_center, axis=1),
+        jnp.asarray(1e-24, dtype=dist_sq.dtype),
+    )
     target_threshold = jnp.asarray(policy_state.target_accept_threshold)[safe_targets]
     opening = jnp.sqrt(extent_sum_sq / safe_dist_sq)
     passes = _compute_passes_for_error_model(
@@ -426,7 +585,7 @@ def adaptive_pair_policy(
         opening=opening,
         extent_sum_sq=extent_sum_sq,
         safe_dist_sq=safe_dist_sq,
-        distance=distance,
+        paper_distance=paper_distance,
     )
     pass_any = jnp.any(passes, axis=1)
     highest_order_pass = passes[:, -1]
@@ -484,6 +643,7 @@ __all__ = [
     "bucket_far_pairs_by_tag",
     "build_adaptive_policy_state",
     "compute_node_force_scale_from_sorted_acc",
+    "compute_smallest_enclosing_sphere_geometry",
     "dehnen_like_pair_error_by_order_from_degree_power",
     "dehnen_multipole_power_by_degree",
     "dehnen_paper_pair_error_by_order",
