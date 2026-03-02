@@ -175,6 +175,66 @@ Examples:
 - [examples/real_sh_adaptive_order.ipynb](/Users/buck/Documents/Nexus/Projects/jaccpot/examples/real_sh_adaptive_order.ipynb)
 - [examples/real_sh_rot_scale_demo.py](/Users/buck/Documents/Nexus/Projects/jaccpot/examples/real_sh_rot_scale_demo.py)
 
+## Reproducible Comparison Modes
+
+Use the following three solver configurations for reproducible comparisons on this branch.
+Keep the remaining benchmark settings fixed, for example:
+
+- `preset="accurate"`
+- `basis="real"`
+- `theta=0.6`
+- `leaf_size=16`
+- `max_order=4`
+- `p_gears=(2, 3, 4)` for adaptive runs
+- enlarged traversal caps, as used in `examples/adaptive_vs_fixed_benchmark.ipynb`
+
+Fixed non-adaptive baseline:
+
+```python
+fixed = FastMultipoleMethod(
+    preset="accurate",
+    basis="real",
+    theta=0.6,
+    adaptive_order=False,
+)
+```
+
+Adaptive high-performance default:
+
+```python
+tail_proxy = FastMultipoleMethod(
+    preset="accurate",
+    basis="real",
+    theta=0.6,
+    adaptive_order=True,
+    p_gears=(2, 3, 4),
+    adaptive_error_model="tail_proxy",
+    mac_force_scale_mode="prev",
+)
+```
+
+Adaptive paper-inspired JAX-native mode:
+
+```python
+dehnen_paper = FastMultipoleMethod(
+    preset="accurate",
+    basis="real",
+    theta=0.6,
+    adaptive_order=True,
+    p_gears=(2, 3, 4),
+    adaptive_error_model="dehnen_paper",
+    adaptive_eps=1.0e-3,
+    dehnen_geometry_mode="tree_approx",
+    mac_force_scale_mode="paper",
+)
+```
+
+Interpretation on the current branch:
+
+- `fixed`: fastest non-adaptive baseline
+- `tail_proxy`: best validated adaptive runtime default
+- `dehnen_paper`: higher-accuracy, paper-inspired comparison mode
+
 ## Force Scale Modes For Adaptive Traversal
 
 Adaptive traversal can weight its solver-side policy state with per-node force
