@@ -683,7 +683,6 @@ class FastMultipoleMethod:
         fixed_order: Optional[int] = None,
         fixed_max_leaf_size: Optional[int] = None,
     ):
-        """Initialize FMM runtime with validated policy and kernel settings."""
         basis_norm = str(expansion_basis).strip().lower()
         if basis_norm == "complex":
             basis_norm = "solidfmm"
@@ -2355,26 +2354,47 @@ class FastMultipoleMethod:
 
         Parameters
         ----------
-        target_indices:
+        positions : Array
+            Source and target particle positions.
+        masses : Array
+            Particle masses aligned with ``positions``.
+        target_indices : Optional[Array]
             Optional 1D index array selecting which target-particle outputs to
             return. All particles are still used as source masses.
-        jit_tree:
-            When ``True`` (default) specialise tree construction via JIT to
-            amortise repeated builds for consistent tree sizes.
-        jit_traversal:
-            When ``True`` (default) evaluate the leaf traversal with the
-            compiled implementation for improved throughput.
-        reuse_prepared_state:
-            Reuse the most recent prepared state when identical array objects
-            and preparation parameters are provided.
-        refine_local:
+        bounds : Optional[Tuple[Array, Array]]
+            Optional explicit domain bounds used during tree construction.
+        leaf_size : int
+            Target maximum particle count per leaf for the prepared tree.
+        max_order : int
+            Multipole/local expansion order used for the upward and downward
+            passes.
+        return_potential : bool
+            When ``True``, return a tuple ``(accelerations, potentials)``.
+        theta : Optional[float]
+            Optional per-call MAC opening angle override.
+        jit_tree : Optional[bool]
+            When ``True``, specialise tree construction via JIT to amortise
+            repeated builds for consistent tree sizes.
+        refine_local : Optional[bool]
             Override the fixed-depth builder's local refinement toggle when
             ``tree_build_mode`` is ``"fixed_depth"``.
-        max_refine_levels:
+        max_refine_levels : Optional[int]
             Maximum local refinement iterations passed to the builder.
-        aspect_threshold:
+        aspect_threshold : Optional[float]
             Aspect ratio threshold that triggers additional splits in the
             refinement pass.
+        jit_traversal : Optional[bool]
+            When ``True``, evaluate the traversal/evaluation path with the
+            compiled implementation for improved throughput.
+        reuse_prepared_state : bool
+            Reuse the most recent prepared state when identical array objects
+            and preparation parameters are provided.
+
+        Returns
+        -------
+        Union[Array, Tuple[Array, Array]]
+            Accelerations for all particles or selected targets. When
+            ``return_potential`` is ``True``, also returns the potential.
         """
 
         cache_key: Optional[tuple[Any, ...]] = None
