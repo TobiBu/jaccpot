@@ -153,7 +153,9 @@ Two optional knobs are available for solver-side tuning:
 - `adaptive_error_model="tail_proxy"` (default):
   use the validated per-order tail proxy
 - `adaptive_error_model="dehnen_degree"`:
-  use a degree-resolved Dehnen-style source-power estimator
+  use a simplified degree-resolved Dehnen-style source-power estimator
+- `adaptive_error_model="dehnen_paper"`:
+  use the paper-based `P_n` power and equation (13)/(15) interaction estimator
 - `adaptive_eps=...`:
   override the default theta-derived adaptive tolerance with a direct
   solver-side tolerance scale

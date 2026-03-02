@@ -11,6 +11,8 @@ from jaccpot.runtime._adaptive_policy import (
     adaptive_pair_policy,
     bucket_far_pairs_by_tag,
     dehnen_like_pair_error_by_order_from_degree_power,
+    dehnen_multipole_power_by_degree,
+    dehnen_paper_pair_error_by_order,
     source_error_proxy_by_order_from_degree_power,
     source_error_proxy_by_order_from_multipoles,
     source_power_by_degree_from_multipoles,
@@ -33,9 +35,27 @@ def _policy_state() -> AdaptivePolicyState:
             ],
             dtype=jnp.float32,
         ),
+        source_dehnen_power=jnp.asarray(
+            [
+                [0.8, 0.4, 0.1],
+                [0.5, 0.2, 0.05],
+            ],
+            dtype=jnp.float32,
+        ),
+        source_mass=jnp.asarray([1.0, 0.75], dtype=jnp.float32),
+        source_radius_bound=jnp.asarray([0.5, 0.4], dtype=jnp.float32),
+        target_radius_bound=jnp.asarray([0.5, 0.4], dtype=jnp.float32),
         target_accept_threshold=jnp.asarray([0.25, 0.5], dtype=jnp.float32),
         order_tags=jnp.asarray([0, 1, 2], dtype=jnp.int32),
         order_values=jnp.asarray([2, 3, 4], dtype=jnp.int32),
+        dehnen_binomial_by_order=jnp.asarray(
+            [
+                [1.0, 2.0, 1.0],
+                [1.0, 3.0, 3.0],
+                [1.0, 4.0, 6.0],
+            ],
+            dtype=jnp.float32,
+        ),
         relaxed_theta_sq=jnp.asarray(0.8**2, dtype=jnp.float32),
         error_model_code=jnp.asarray(0, dtype=jnp.int32),
     )
@@ -173,3 +193,64 @@ def test_dehnen_degree_error_model_supports_jit():
     assert actions.shape == (2,)
     assert tags.shape == (2,)
     assert np.all(np.isfinite(np.asarray(tags)))
+
+
+def test_dehnen_multipole_power_matches_degree0_mass():
+    packed = jnp.asarray([[2.0, 3.0, 4.0, 5.0]], dtype=jnp.float32)
+    power = dehnen_multipole_power_by_degree(multipole_packed=packed)
+
+    assert power.shape == (1, 2)
+    assert np.isclose(float(power[0, 0]), 2.0)
+
+
+def test_dehnen_paper_error_is_monotone_in_distance():
+    power = jnp.asarray([[1.0, 0.5, 0.25]], dtype=jnp.float32)
+    order_values = jnp.asarray([1, 2], dtype=jnp.int32)
+    binom = jnp.asarray([[1.0, 1.0, 0.0], [1.0, 2.0, 1.0]], dtype=jnp.float32)
+    near = dehnen_paper_pair_error_by_order(
+        source_power=power,
+        source_mass=jnp.asarray([1.0], dtype=jnp.float32),
+        source_radius=jnp.asarray([0.4], dtype=jnp.float32),
+        target_radius=jnp.asarray([0.3], dtype=jnp.float32),
+        distance=jnp.asarray([1.0], dtype=jnp.float32),
+        order_values=order_values,
+        binomial_by_order=binom,
+    )
+    far = dehnen_paper_pair_error_by_order(
+        source_power=power,
+        source_mass=jnp.asarray([1.0], dtype=jnp.float32),
+        source_radius=jnp.asarray([0.4], dtype=jnp.float32),
+        target_radius=jnp.asarray([0.3], dtype=jnp.float32),
+        distance=jnp.asarray([2.0], dtype=jnp.float32),
+        order_values=order_values,
+        binomial_by_order=binom,
+    )
+
+    assert np.all(np.asarray(far) <= np.asarray(near))
+
+
+def test_dehnen_paper_error_model_supports_jit():
+    state = _policy_state()._replace(error_model_code=jnp.asarray(2, dtype=jnp.int32))
+
+    @jax.jit
+    def run(policy_state: AdaptivePolicyState):
+        return adaptive_pair_policy(
+            policy_state,
+            valid_pairs=jnp.asarray([True, True], dtype=jnp.bool_),
+            mac_ok=jnp.asarray([False, False], dtype=jnp.bool_),
+            different_nodes=jnp.asarray([True, True], dtype=jnp.bool_),
+            target_leaf=jnp.asarray([False, False], dtype=jnp.bool_),
+            source_leaf=jnp.asarray([False, False], dtype=jnp.bool_),
+            same_node=jnp.asarray([False, False], dtype=jnp.bool_),
+            target_nodes=jnp.asarray([0, 1], dtype=jnp.int32),
+            source_nodes=jnp.asarray([0, 1], dtype=jnp.int32),
+            center_target=jnp.zeros((2, 3), dtype=jnp.float32),
+            center_source=jnp.zeros((2, 3), dtype=jnp.float32),
+            dist_sq=jnp.asarray([16.0, 16.0], dtype=jnp.float32),
+            extent_target=jnp.asarray([1.0, 1.0], dtype=jnp.float32),
+            extent_source=jnp.asarray([1.0, 1.0], dtype=jnp.float32),
+        )
+
+    actions, tags = run(state)
+    assert actions.shape == (2,)
+    assert tags.shape == (2,)

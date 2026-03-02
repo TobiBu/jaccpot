@@ -708,9 +708,13 @@ class FastMultipoleMethod:
             raise ValueError("mac_force_scale_mode must be 'prev' or 'prepass'")
         self.mac_force_scale_mode = force_scale_mode_norm
         adaptive_error_model_norm = str(adaptive_error_model).strip().lower()
-        if adaptive_error_model_norm not in ("tail_proxy", "dehnen_degree"):
+        if adaptive_error_model_norm not in (
+            "tail_proxy",
+            "dehnen_degree",
+            "dehnen_paper",
+        ):
             raise ValueError(
-                "adaptive_error_model must be 'tail_proxy' or 'dehnen_degree'"
+                "adaptive_error_model must be 'tail_proxy', 'dehnen_degree', or 'dehnen_paper'"
             )
         self.adaptive_error_model = adaptive_error_model_norm
         self.adaptive_eps = None if adaptive_eps is None else float(adaptive_eps)
@@ -860,12 +864,14 @@ class FastMultipoleMethod:
         *,
         tree: Tree,
         accelerations_sorted: Array,
+        reduction: str = "max",
     ) -> Array:
         """Estimate per-node force scales from sorted per-particle accelerations."""
 
         return compute_node_force_scale_from_sorted_acc(
             node_ranges=tree.node_ranges,
             accelerations_sorted=accelerations_sorted,
+            reduction=reduction,
         )
 
     def _source_error_proxy_by_order_from_multipoles(
@@ -1466,7 +1472,11 @@ class FastMultipoleMethod:
                     dtype=tree_artifacts.upward.multipoles.packed.real.dtype,
                 ),
                 error_model_code=jnp.asarray(
-                    1 if self.adaptive_error_model == "dehnen_degree" else 0,
+                    (
+                        2
+                        if self.adaptive_error_model == "dehnen_paper"
+                        else (1 if self.adaptive_error_model == "dehnen_degree" else 0)
+                    ),
                     dtype=jnp.int32,
                 ),
             )
@@ -2264,6 +2274,9 @@ class FastMultipoleMethod:
                 self._compute_node_force_scale_from_sorted_acc(
                     tree=state.tree,
                     accelerations_sorted=accelerations_sorted,
+                    reduction=(
+                        "min" if self.adaptive_error_model == "dehnen_paper" else "max"
+                    ),
                 )
             )
         return evaluation
@@ -2358,6 +2371,10 @@ class FastMultipoleMethod:
         if self.adaptive_order:
             node_count = int(tree_artifacts.tree.parent.shape[0])
             previous_force_scale = self._last_force_scale_nodes
+            reduction_mode = (
+                "min" if self.adaptive_error_model == "dehnen_paper" else "max"
+            )
+            need_prepass = False
             if self.mac_force_scale_mode == "prev" or self._in_force_scale_prepass:
                 if (
                     previous_force_scale is not None
@@ -2367,12 +2384,19 @@ class FastMultipoleMethod:
                         previous_force_scale,
                         dtype=positions_arr.dtype,
                     )
+                elif (
+                    self.adaptive_error_model == "dehnen_paper"
+                    and not self._in_force_scale_prepass
+                ):
+                    need_prepass = True
                 else:
                     force_scale_nodes = jnp.ones(
                         (node_count,),
                         dtype=positions_arr.dtype,
                     )
             else:
+                need_prepass = True
+            if need_prepass:
                 if len(self.p_gears) == 0:
                     raise ValueError(
                         "mac_force_scale_mode='prepass' requires non-empty p_gears"
@@ -2403,6 +2427,7 @@ class FastMultipoleMethod:
                 force_scale_nodes = self._compute_node_force_scale_from_sorted_acc(
                     tree=tree_artifacts.tree,
                     accelerations_sorted=prepass_sorted,
+                    reduction=reduction_mode,
                 ).astype(positions_arr.dtype)
                 self._last_force_scale_nodes = force_scale_nodes
         dual_downward_artifacts = self._prepare_state_dual_and_downward(

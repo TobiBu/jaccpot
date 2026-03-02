@@ -55,7 +55,7 @@ def _parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--adaptive-error-model",
-        choices=("tail_proxy", "dehnen_degree"),
+        choices=("tail_proxy", "dehnen_degree", "dehnen_paper"),
         default="tail_proxy",
         help="Adaptive error estimator used when adaptive order is enabled",
     )
@@ -160,7 +160,11 @@ def _build_traversal(fmm: FastMultipoleMethod, staged: StageArtifacts):
                 dtype=tree_artifacts.positions_sorted.dtype,
             ),
             error_model_code=jnp.asarray(
-                1 if ARGS.adaptive_error_model == "dehnen_degree" else 0,
+                (
+                    2
+                    if ARGS.adaptive_error_model == "dehnen_paper"
+                    else (1 if ARGS.adaptive_error_model == "dehnen_degree" else 0)
+                ),
                 dtype=jnp.int32,
             ),
         )

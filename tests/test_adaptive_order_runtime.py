@@ -119,3 +119,26 @@ def test_dehnen_degree_adaptive_order_runs():
     assert acc.shape == positions.shape
     assert np.all(np.isfinite(acc))
     assert len(adaptive._impl._recent_far_pairs_by_gear_counts) == 3
+
+
+def test_dehnen_paper_adaptive_order_runs():
+    positions, masses = _sample_problem(80)
+    adaptive = FastMultipoleMethod(
+        preset="accurate",
+        basis="real",
+        theta=0.7,
+        softening=1.0e-2,
+        adaptive_order=True,
+        p_gears=(2, 3, 4),
+        adaptive_error_model="dehnen_paper",
+        adaptive_eps=1.0e-2,
+        advanced=_advanced_cfg(),
+    )
+
+    acc = np.asarray(
+        adaptive.compute_accelerations(positions, masses, leaf_size=8, max_order=4)
+    )
+
+    assert acc.shape == positions.shape
+    assert np.all(np.isfinite(acc))
+    assert len(adaptive._impl._recent_far_pairs_by_gear_counts) == 3
