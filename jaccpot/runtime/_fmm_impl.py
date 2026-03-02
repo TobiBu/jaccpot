@@ -655,6 +655,8 @@ class FastMultipoleMethod:
         reuse_topology: bool = False,
         rebuild_every: int = 1,
         mac_force_scale_mode: str = "prev",
+        adaptive_error_model: str = "tail_proxy",
+        adaptive_eps: Optional[float] = None,
         mac_type: MACType = "bh",
         complex_rotation: str = "solidfmm",  # "cached",
         dehnen_radius_scale: float = 1.0,
@@ -705,6 +707,15 @@ class FastMultipoleMethod:
         if force_scale_mode_norm not in ("prev", "prepass"):
             raise ValueError("mac_force_scale_mode must be 'prev' or 'prepass'")
         self.mac_force_scale_mode = force_scale_mode_norm
+        adaptive_error_model_norm = str(adaptive_error_model).strip().lower()
+        if adaptive_error_model_norm not in ("tail_proxy", "dehnen_degree"):
+            raise ValueError(
+                "adaptive_error_model must be 'tail_proxy' or 'dehnen_degree'"
+            )
+        self.adaptive_error_model = adaptive_error_model_norm
+        self.adaptive_eps = None if adaptive_eps is None else float(adaptive_eps)
+        if self.adaptive_eps is not None and self.adaptive_eps <= 0.0:
+            raise ValueError("adaptive_eps must be > 0 when provided")
         self._last_force_scale_nodes: Optional[Array] = None
         self._in_force_scale_prepass = False
 
@@ -878,6 +889,7 @@ class FastMultipoleMethod:
         force_scale_nodes: Optional[Array],
         eps: Array,
         theta: Array,
+        error_model_code: Array,
     ):
         """Build the solver-owned adaptive policy state from upward data."""
 
@@ -887,6 +899,7 @@ class FastMultipoleMethod:
             force_scale_nodes=force_scale_nodes,
             eps=eps,
             theta=theta,
+            error_model_code=error_model_code,
         )
 
     def _prepared_state_cache_lookup(
@@ -1436,14 +1449,25 @@ class FastMultipoleMethod:
                 upward=tree_artifacts.upward,
                 p_gears=self.p_gears,
                 force_scale_nodes=force_scale_nodes,
-                eps=adaptive_policy_tolerance(
-                    theta=theta_val,
-                    p_gears=self.p_gears,
+                eps=jnp.asarray(
+                    (
+                        self.adaptive_eps
+                        if self.adaptive_eps is not None
+                        else adaptive_policy_tolerance(
+                            theta=theta_val,
+                            p_gears=self.p_gears,
+                            dtype=tree_artifacts.upward.multipoles.packed.real.dtype,
+                        )
+                    ),
                     dtype=tree_artifacts.upward.multipoles.packed.real.dtype,
                 ),
                 theta=jnp.asarray(
                     theta_val,
                     dtype=tree_artifacts.upward.multipoles.packed.real.dtype,
+                ),
+                error_model_code=jnp.asarray(
+                    1 if self.adaptive_error_model == "dehnen_degree" else 0,
+                    dtype=jnp.int32,
                 ),
             )
             pair_policy = adaptive_pair_policy

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from typing import NamedTuple, Optional
 
+import jax
 import jax.numpy as jnp
 import numpy as np
 from jaxtyping import Array
@@ -15,14 +16,20 @@ _ACTION_ACCEPT = 0
 _ACTION_NEAR = 1
 _ACTION_REFINE = 2
 
+_ERROR_MODEL_TAIL_PROXY = 0
+_ERROR_MODEL_DEHNEN_DEGREE = 1
+
 
 class AdaptivePolicyState(NamedTuple):
     """Solver-owned per-node summaries used by adaptive traversal policies."""
 
     source_error_proxy_by_order: Array
+    source_degree_power: Array
     target_accept_threshold: Array
     order_tags: Array
+    order_values: Array
     relaxed_theta_sq: Array
+    error_model_code: Array
 
 
 def adaptive_policy_tolerance(
@@ -79,14 +86,13 @@ def dehnen_like_pair_error_by_order_from_degree_power(
     *,
     degree_power: Array,
     opening: Array,
-    p_gears: tuple[int, ...],
+    order_values: Array,
 ) -> Array:
-    """Return an experimental degree-weighted pair error estimate by order.
+    """Return a Dehnen-style degree-weighted pair error estimate by order.
 
-    This helper is not yet used by the runtime acceptance path. It provides a
-    more Dehnen-like per-pair estimator by combining per-degree source power
-    with an interaction-specific opening factor. Lower opening values suppress
-    higher-order tails more strongly.
+    The source multipole power is retained degree-by-degree and weighted by an
+    interaction-specific opening factor. For each candidate order ``p``, the
+    residual estimate sums only degrees ``ell > p``.
     """
 
     power = jnp.asarray(degree_power)
@@ -94,20 +100,27 @@ def dehnen_like_pair_error_by_order_from_degree_power(
     if opening_arr.ndim == 0:
         opening_arr = opening_arr[None]
     opening_arr = jnp.clip(opening_arr, 0.0, 1.0)
-    if len(p_gears) == 0:
+    order_arr = jnp.asarray(order_values, dtype=jnp.int32)
+    if order_arr.ndim == 0:
+        order_arr = order_arr[None]
+    if int(power.shape[0]) != int(opening_arr.shape[0]):
+        raise ValueError(
+            "degree_power and opening must have matching leading dimensions"
+        )
+    if int(order_arr.shape[0]) == 0:
         return jnp.zeros((opening_arr.shape[0], 0), dtype=power.dtype)
     total_p = int(power.shape[1] - 1)
-    degree_idx = jnp.arange(total_p + 1, dtype=power.dtype)
-    weighted = power[:, None, :] * jnp.power(
-        opening_arr[:, None, None],
-        degree_idx[None, None, :] + 2.0,
+    degree_idx = jnp.arange(total_p + 1, dtype=jnp.int32)
+    opening_weights = jnp.power(
+        opening_arr[:, None],
+        degree_idx[None, :].astype(power.dtype) + 2.0,
     )
-    estimates: list[Array] = []
-    for p_gear in p_gears:
-        p_clip = int(max(0, min(int(p_gear), total_p)))
-        tail_power = jnp.sum(weighted[:, 0, p_clip + 1 :], axis=1)
-        estimates.append(jnp.sqrt(tail_power))
-    return jnp.stack(estimates, axis=1)
+    weighted_power = power * opening_weights
+    include_mask = degree_idx[None, None, :] > order_arr[None, :, None]
+    tail_power = jnp.sum(
+        weighted_power[:, None, :] * include_mask.astype(power.dtype), axis=2
+    )
+    return jnp.sqrt(jnp.maximum(tail_power, jnp.asarray(0.0, dtype=power.dtype)))
 
 
 def source_error_proxy_by_order_from_multipoles(
@@ -153,13 +166,17 @@ def build_adaptive_policy_state(
     force_scale_nodes: Optional[Array],
     eps: Array,
     theta: Array,
+    error_model_code: Array,
 ) -> AdaptivePolicyState:
     """Build the solver-owned adaptive traversal state from upward data."""
 
     if len(p_gears) == 0:
         raise ValueError("adaptive policy state requires non-empty p_gears")
-    error_proxy = source_error_proxy_by_order_from_multipoles(
+    degree_power = source_power_by_degree_from_multipoles(
         multipole_packed=upward.multipoles.packed,
+    )
+    error_proxy = source_error_proxy_by_order_from_degree_power(
+        degree_power=degree_power,
         p_gears=p_gears,
     )
     if force_scale_nodes is None:
@@ -174,6 +191,7 @@ def build_adaptive_policy_state(
         )
         target_force_scale = target_force_scale / scale_norm
     order_tags = jnp.arange(len(p_gears), dtype=jnp.int32)
+    order_values = jnp.asarray(tuple(int(v) for v in p_gears), dtype=jnp.int32)
     target_accept_threshold = (
         jnp.asarray(eps, dtype=error_proxy.dtype) * target_force_scale
     )
@@ -184,9 +202,47 @@ def build_adaptive_policy_state(
     )
     return AdaptivePolicyState(
         source_error_proxy_by_order=error_proxy,
+        source_degree_power=degree_power,
         target_accept_threshold=target_accept_threshold,
         order_tags=order_tags,
+        order_values=order_values,
         relaxed_theta_sq=jnp.square(relaxed_theta),
+        error_model_code=jnp.asarray(error_model_code, dtype=jnp.int32),
+    )
+
+
+def _compute_passes_for_error_model(
+    *,
+    policy_state: AdaptivePolicyState,
+    source_proxy: Array,
+    source_degree_power: Array,
+    target_threshold: Array,
+    opening: Array,
+    extent_sum_sq: Array,
+    safe_dist_sq: Array,
+) -> Array:
+    """Return per-order pass decisions for the configured adaptive error model."""
+
+    def _tail_proxy(_: None) -> Array:
+        return (
+            jnp.square(source_proxy) * extent_sum_sq[:, None]
+            < jnp.square(target_threshold)[:, None] * safe_dist_sq[:, None]
+        )
+
+    def _dehnen_degree(_: None) -> Array:
+        pair_error = dehnen_like_pair_error_by_order_from_degree_power(
+            degree_power=source_degree_power,
+            opening=opening,
+            order_values=policy_state.order_values,
+        )
+        return pair_error < target_threshold[:, None]
+
+    return jax.lax.cond(
+        jnp.asarray(policy_state.error_model_code, dtype=jnp.int32)
+        == _ERROR_MODEL_DEHNEN_DEGREE,
+        _dehnen_degree,
+        _tail_proxy,
+        operand=None,
     )
 
 
@@ -214,10 +270,17 @@ def adaptive_pair_policy(
     source_proxy = jnp.asarray(policy_state.source_error_proxy_by_order)[
         safe_sources, :
     ]
+    source_degree_power = jnp.asarray(policy_state.source_degree_power)[safe_sources, :]
     target_threshold = jnp.asarray(policy_state.target_accept_threshold)[safe_targets]
-    passes = (
-        jnp.square(source_proxy) * extent_sum_sq[:, None]
-        < jnp.square(target_threshold)[:, None] * safe_dist_sq[:, None]
+    opening = jnp.sqrt(extent_sum_sq / safe_dist_sq)
+    passes = _compute_passes_for_error_model(
+        policy_state=policy_state,
+        source_proxy=source_proxy,
+        source_degree_power=source_degree_power,
+        target_threshold=target_threshold,
+        opening=opening,
+        extent_sum_sq=extent_sum_sq,
+        safe_dist_sq=safe_dist_sq,
     )
     pass_any = jnp.any(passes, axis=1)
     highest_order_pass = passes[:, -1]

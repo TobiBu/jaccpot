@@ -53,6 +53,18 @@ def _parse_args() -> argparse.Namespace:
         default="prev",
         help="Force-scale strategy used when adaptive order is enabled",
     )
+    parser.add_argument(
+        "--adaptive-error-model",
+        choices=("tail_proxy", "dehnen_degree"),
+        default="tail_proxy",
+        help="Adaptive error estimator used when adaptive order is enabled",
+    )
+    parser.add_argument(
+        "--adaptive-eps",
+        type=float,
+        default=None,
+        help="Optional direct adaptive tolerance overriding the theta-derived heuristic",
+    )
     return parser.parse_args()
 
 
@@ -131,14 +143,25 @@ def _build_traversal(fmm: FastMultipoleMethod, staged: StageArtifacts):
                 (tree_artifacts.tree.parent.shape[0],),
                 dtype=tree_artifacts.positions_sorted.dtype,
             ),
-            eps=adaptive_policy_tolerance(
-                theta=float(ARGS.theta),
-                p_gears=impl.p_gears,
+            eps=jnp.asarray(
+                (
+                    ARGS.adaptive_eps
+                    if ARGS.adaptive_eps is not None
+                    else adaptive_policy_tolerance(
+                        theta=float(ARGS.theta),
+                        p_gears=impl.p_gears,
+                        dtype=tree_artifacts.positions_sorted.dtype,
+                    )
+                ),
                 dtype=tree_artifacts.positions_sorted.dtype,
             ),
             theta=jnp.asarray(
                 float(ARGS.theta),
                 dtype=tree_artifacts.positions_sorted.dtype,
+            ),
+            error_model_code=jnp.asarray(
+                1 if ARGS.adaptive_error_model == "dehnen_degree" else 0,
+                dtype=jnp.int32,
             ),
         )
     dual_artifacts, _ = _build_dual_tree_artifacts(

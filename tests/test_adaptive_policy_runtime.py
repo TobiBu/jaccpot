@@ -26,9 +26,18 @@ def _policy_state() -> AdaptivePolicyState:
             ],
             dtype=jnp.float32,
         ),
+        source_degree_power=jnp.asarray(
+            [
+                [0.64, 0.04, 0.0025],
+                [0.25, 0.01, 0.0001],
+            ],
+            dtype=jnp.float32,
+        ),
         target_accept_threshold=jnp.asarray([0.25, 0.5], dtype=jnp.float32),
         order_tags=jnp.asarray([0, 1, 2], dtype=jnp.int32),
+        order_values=jnp.asarray([2, 3, 4], dtype=jnp.int32),
         relaxed_theta_sq=jnp.asarray(0.8**2, dtype=jnp.float32),
+        error_model_code=jnp.asarray(0, dtype=jnp.int32),
     )
 
 
@@ -126,13 +135,41 @@ def test_dehnen_like_pair_error_is_monotone_in_opening():
     small = dehnen_like_pair_error_by_order_from_degree_power(
         degree_power=degree_power,
         opening=jnp.asarray([0.2], dtype=jnp.float32),
-        p_gears=(0, 1),
+        order_values=jnp.asarray([0, 1], dtype=jnp.int32),
     )
     large = dehnen_like_pair_error_by_order_from_degree_power(
         degree_power=degree_power,
         opening=jnp.asarray([0.6], dtype=jnp.float32),
-        p_gears=(0, 1),
+        order_values=jnp.asarray([0, 1], dtype=jnp.int32),
     )
 
     assert np.all(np.asarray(small) <= np.asarray(large))
     assert float(large[0, 0]) >= float(large[0, 1])
+
+
+def test_dehnen_degree_error_model_supports_jit():
+    state = _policy_state()._replace(error_model_code=jnp.asarray(1, dtype=jnp.int32))
+
+    @jax.jit
+    def run(policy_state: AdaptivePolicyState):
+        return adaptive_pair_policy(
+            policy_state,
+            valid_pairs=jnp.asarray([True, True], dtype=jnp.bool_),
+            mac_ok=jnp.asarray([False, False], dtype=jnp.bool_),
+            different_nodes=jnp.asarray([True, True], dtype=jnp.bool_),
+            target_leaf=jnp.asarray([False, False], dtype=jnp.bool_),
+            source_leaf=jnp.asarray([False, False], dtype=jnp.bool_),
+            same_node=jnp.asarray([False, False], dtype=jnp.bool_),
+            target_nodes=jnp.asarray([0, 1], dtype=jnp.int32),
+            source_nodes=jnp.asarray([0, 1], dtype=jnp.int32),
+            center_target=jnp.zeros((2, 3), dtype=jnp.float32),
+            center_source=jnp.zeros((2, 3), dtype=jnp.float32),
+            dist_sq=jnp.asarray([16.0, 16.0], dtype=jnp.float32),
+            extent_target=jnp.asarray([1.0, 1.0], dtype=jnp.float32),
+            extent_source=jnp.asarray([1.0, 1.0], dtype=jnp.float32),
+        )
+
+    actions, tags = run(state)
+    assert actions.shape == (2,)
+    assert tags.shape == (2,)
+    assert np.all(np.isfinite(np.asarray(tags)))

@@ -148,6 +148,16 @@ accept, while the first passing order decides how much far-field work is needed.
 The current notebook example prints the resulting tag-derived
 `far_pairs_by_gear_counts` from the solver runtime.
 
+Two optional knobs are available for solver-side tuning:
+
+- `adaptive_error_model="tail_proxy"` (default):
+  use the validated per-order tail proxy
+- `adaptive_error_model="dehnen_degree"`:
+  use a degree-resolved Dehnen-style source-power estimator
+- `adaptive_eps=...`:
+  override the default theta-derived adaptive tolerance with a direct
+  solver-side tolerance scale
+
 Examples:
 
 - [examples/real_sh_adaptive_order.ipynb](/Users/buck/Documents/Nexus/Projects/jaccpot/examples/real_sh_adaptive_order.ipynb)
