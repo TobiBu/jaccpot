@@ -44,12 +44,12 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--p-gears",
         type=str,
-        default="4,6,8,10",
+        default="2,3,4",
         help="Comma-separated adaptive orders (used with --adaptive-order)",
     )
     parser.add_argument(
         "--mac-force-scale-mode",
-        choices=("prev", "prepass"),
+        choices=("prev", "prepass", "paper"),
         default="prev",
         help="Force-scale strategy used when adaptive order is enabled",
     )
@@ -58,6 +58,12 @@ def _parse_args() -> argparse.Namespace:
         choices=("tail_proxy", "dehnen_degree", "dehnen_paper"),
         default="tail_proxy",
         help="Adaptive error estimator used when adaptive order is enabled",
+    )
+    parser.add_argument(
+        "--dehnen-geometry-mode",
+        choices=("exact", "tree", "tree_approx", "runtime"),
+        default="tree_approx",
+        help="Geometry mode used for dehnen_paper adaptive error estimation",
     )
     parser.add_argument(
         "--adaptive-eps",
@@ -138,6 +144,8 @@ def _build_traversal(fmm: FastMultipoleMethod, staged: StageArtifacts):
         pair_policy = adaptive_pair_policy
         policy_state = impl._build_adaptive_policy_state(
             upward=tree_artifacts.upward,
+            tree=tree_artifacts.tree,
+            positions_sorted=tree_artifacts.positions_sorted,
             p_gears=impl.p_gears,
             force_scale_nodes=jnp.ones(
                 (tree_artifacts.tree.parent.shape[0],),
@@ -167,6 +175,7 @@ def _build_traversal(fmm: FastMultipoleMethod, staged: StageArtifacts):
                 ),
                 dtype=jnp.int32,
             ),
+            dehnen_geometry_mode=ARGS.dehnen_geometry_mode,
         )
     dual_artifacts, _ = _build_dual_tree_artifacts(
         tree_artifacts.tree,
@@ -265,6 +274,22 @@ def _run_m2l_downward(fmm: FastMultipoleMethod, staged: StageArtifacts, dual_art
     )
 
 
+def _prime_paper_force_scales(fmm: FastMultipoleMethod, positions, masses) -> None:
+    impl = fmm._impl
+    if not impl.adaptive_order:
+        return
+    if impl.adaptive_error_model != "dehnen_paper":
+        return
+    if impl.mac_force_scale_mode != "paper":
+        return
+    fmm.compute_accelerations(
+        positions,
+        masses,
+        leaf_size=int(ARGS.leaf_size),
+        max_order=int(ARGS.p),
+    )
+
+
 def _count_interactions(dual_artifacts) -> dict[str, int]:
     interactions = dual_artifacts.interactions
     far_pairs = int(interactions.sources.shape[0])
@@ -311,7 +336,12 @@ def main() -> None:
         adaptive_order=bool(ARGS.adaptive_order),
         p_gears=p_gears,
         mac_force_scale_mode=str(ARGS.mac_force_scale_mode),
+        adaptive_error_model=str(ARGS.adaptive_error_model),
+        adaptive_eps=ARGS.adaptive_eps,
+        dehnen_geometry_mode=str(ARGS.dehnen_geometry_mode),
     )
+
+    _prime_paper_force_scales(fmm, positions, masses)
 
     tree_timing = time_callable(
         _build_tree_and_upward,
