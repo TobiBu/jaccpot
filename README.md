@@ -148,14 +148,24 @@ accept, while the first passing order decides how much far-field work is needed.
 The current notebook example prints the resulting tag-derived
 `far_pairs_by_gear_counts` from the solver runtime.
 
-Two optional knobs are available for solver-side tuning:
+Adaptive traversal currently has two practical runtime modes:
 
 - `adaptive_error_model="tail_proxy"` (default):
-  use the validated per-order tail proxy
-- `adaptive_error_model="dehnen_degree"`:
-  use a simplified degree-resolved Dehnen-style source-power estimator
+  the validated high-performance mode; this remains the recommended default
+  when runtime matters most
 - `adaptive_error_model="dehnen_paper"`:
-  use the paper-based `P_n` power and equation (13)/(15) interaction estimator
+  the paper-inspired comparison mode; for JAX-native runs pair it with
+  `dehnen_geometry_mode="tree_approx"`
+
+Other available knobs:
+
+- `adaptive_error_model="dehnen_degree"`:
+  a simplified degree-resolved Dehnen-style source-power estimator
+- `dehnen_geometry_mode="exact"`:
+  exact reference geometry for paper comparisons; not a throughput mode
+- `dehnen_geometry_mode="tree_approx"`:
+  JAX-native paper geometry based on approximate leaf spheres plus upward
+  merged spheres
 - `adaptive_eps=...`:
   override the default theta-derived adaptive tolerance with a direct
   solver-side tolerance scale
@@ -174,6 +184,8 @@ scales. Select how those scales are estimated with `mac_force_scale_mode`:
   reuse the previous full-step acceleration magnitudes
 - `"prepass"`:
   run a cheap lowest-order prepass and derive force scales from that pass
+- `"paper"`:
+  run the stricter paper-style prepass used by `adaptive_error_model="dehnen_paper"`
 
 These scales stay inside jaccpot's adaptive policy state; they are no longer
 exported as backend-specific traversal `node_features`.
