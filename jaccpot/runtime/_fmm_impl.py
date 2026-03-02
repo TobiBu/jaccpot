@@ -896,6 +896,34 @@ class FastMultipoleMethod:
             p_gears=p_gears,
         )
 
+    def _adaptive_error_model_code(self: "FastMultipoleMethod") -> int:
+        """Return the integer policy code for the active adaptive error model."""
+
+        if self.adaptive_error_model == "dehnen_paper":
+            return 2
+        if self.adaptive_error_model == "dehnen_degree":
+            return 1
+        return 0
+
+    def _uses_dehnen_paper_error_model(self: "FastMultipoleMethod") -> bool:
+        """Return whether the active adaptive error model is the paper estimator."""
+
+        return self.adaptive_error_model == "dehnen_paper"
+
+    def _force_scale_reduction_mode(self: "FastMultipoleMethod") -> str:
+        """Return the node reduction mode used for adaptive force scales."""
+
+        return "min" if self._uses_dehnen_paper_error_model() else "max"
+
+    def _policy_orders_for_prepare_state(
+        self: "FastMultipoleMethod", *, max_order: int
+    ) -> tuple[int, ...]:
+        """Return candidate orders used to build adaptive traversal policy state."""
+
+        if (not self.adaptive_order) and self._uses_dehnen_paper_error_model():
+            return (int(max_order),)
+        return self.p_gears
+
     def _build_adaptive_policy_state(
         self: "FastMultipoleMethod",
         *,
@@ -1591,7 +1619,7 @@ class FastMultipoleMethod:
         cache_key = None
         use_paper_fixed_policy = (
             not self.adaptive_order
-        ) and self.adaptive_error_model == "dehnen_paper"
+        ) and self._uses_dehnen_paper_error_model()
         if self.adaptive_order or use_paper_fixed_policy:
             policy_orders = self.p_gears
             if use_paper_fixed_policy:
@@ -1621,11 +1649,7 @@ class FastMultipoleMethod:
                     dtype=tree_artifacts.upward.multipoles.packed.real.dtype,
                 ),
                 error_model_code=jnp.asarray(
-                    (
-                        2
-                        if self.adaptive_error_model == "dehnen_paper"
-                        else (1 if self.adaptive_error_model == "dehnen_degree" else 0)
-                    ),
+                    self._adaptive_error_model_code(),
                     dtype=jnp.int32,
                 ),
                 dehnen_geometry_mode=self.dehnen_geometry_mode,
@@ -2424,9 +2448,7 @@ class FastMultipoleMethod:
                 self._compute_node_force_scale_from_sorted_acc(
                     tree=state.tree,
                     accelerations_sorted=accelerations_sorted,
-                    reduction=(
-                        "min" if self.adaptive_error_model == "dehnen_paper" else "max"
-                    ),
+                    reduction=self._force_scale_reduction_mode(),
                 )
             )
         return evaluation
@@ -2524,15 +2546,11 @@ class FastMultipoleMethod:
         if use_paper_force_scale:
             node_count = int(tree_artifacts.tree.parent.shape[0])
             previous_force_scale = self._last_force_scale_nodes
-            reduction_mode = (
-                "min" if self.adaptive_error_model == "dehnen_paper" else "max"
-            )
+            reduction_mode = self._force_scale_reduction_mode()
             need_prepass = False
-            policy_orders = self.p_gears
-            if (
-                not self.adaptive_order
-            ) and self.adaptive_error_model == "dehnen_paper":
-                policy_orders = (int(max_order),)
+            policy_orders = self._policy_orders_for_prepare_state(
+                max_order=int(max_order)
+            )
             if self.mac_force_scale_mode == "paper":
                 need_prepass = True
             elif self.mac_force_scale_mode == "prev" or self._in_force_scale_prepass:
@@ -2545,7 +2563,7 @@ class FastMultipoleMethod:
                         dtype=positions_arr.dtype,
                     )
                 elif (
-                    self.adaptive_error_model == "dehnen_paper"
+                    self._uses_dehnen_paper_error_model()
                     and not self._in_force_scale_prepass
                 ):
                     need_prepass = True
@@ -2564,12 +2582,12 @@ class FastMultipoleMethod:
                 low_order = int(min(policy_orders))
                 if (
                     self.mac_force_scale_mode == "paper"
-                    and self.adaptive_error_model == "dehnen_paper"
+                    and self._uses_dehnen_paper_error_model()
                 ):
                     low_order = 1 if int(max_order) >= 1 else 0
                 if (
                     self.mac_force_scale_mode == "paper"
-                    and self.adaptive_error_model == "dehnen_paper"
+                    and self._uses_dehnen_paper_error_model()
                 ):
                     prepass_sorted = (
                         self._compute_force_scale_paper_prepass_from_tree_artifacts(
