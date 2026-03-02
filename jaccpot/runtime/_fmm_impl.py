@@ -657,6 +657,7 @@ class FastMultipoleMethod:
         mac_force_scale_mode: str = "prev",
         adaptive_error_model: str = "tail_proxy",
         adaptive_eps: Optional[float] = None,
+        dehnen_geometry_mode: str = "tree",
         mac_type: MACType = "bh",
         complex_rotation: str = "solidfmm",  # "cached",
         dehnen_radius_scale: float = 1.0,
@@ -719,6 +720,12 @@ class FastMultipoleMethod:
                 "adaptive_error_model must be 'tail_proxy', 'dehnen_degree', or 'dehnen_paper'"
             )
         self.adaptive_error_model = adaptive_error_model_norm
+        dehnen_geometry_mode_norm = str(dehnen_geometry_mode).strip().lower()
+        if dehnen_geometry_mode_norm not in ("exact", "tree", "runtime"):
+            raise ValueError(
+                "dehnen_geometry_mode must be 'exact', 'tree', or 'runtime'"
+            )
+        self.dehnen_geometry_mode = dehnen_geometry_mode_norm
         self.adaptive_eps = None if adaptive_eps is None else float(adaptive_eps)
         if self.adaptive_eps is not None and self.adaptive_eps <= 0.0:
             raise ValueError("adaptive_eps must be > 0 when provided")
@@ -900,6 +907,7 @@ class FastMultipoleMethod:
         eps: Array,
         theta: Array,
         error_model_code: Array,
+        dehnen_geometry_mode: str,
     ):
         """Build the solver-owned adaptive policy state from upward data."""
 
@@ -912,6 +920,7 @@ class FastMultipoleMethod:
             eps=eps,
             theta=theta,
             error_model_code=error_model_code,
+            dehnen_geometry_mode=dehnen_geometry_mode,
         )
 
     def _prepared_state_cache_lookup(
@@ -1493,6 +1502,7 @@ class FastMultipoleMethod:
                     ),
                     dtype=jnp.int32,
                 ),
+                dehnen_geometry_mode=self.dehnen_geometry_mode,
             )
             pair_policy = adaptive_pair_policy
         else:

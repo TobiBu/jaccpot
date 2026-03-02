@@ -5,15 +5,19 @@ from __future__ import annotations
 import jax
 import jax.numpy as jnp
 import numpy as np
+from yggdrax.tree import Tree
 
 from jaccpot.runtime._adaptive_policy import (
     AdaptivePolicyState,
     adaptive_pair_policy,
     bucket_far_pairs_by_tag,
+    compute_leaf_enclosing_sphere_geometry,
     compute_smallest_enclosing_sphere_geometry,
+    compute_tree_merged_sphere_geometry,
     dehnen_like_pair_error_by_order_from_degree_power,
     dehnen_multipole_power_by_degree,
     dehnen_paper_pair_error_by_order,
+    merge_bounding_spheres,
     source_error_proxy_by_order_from_degree_power,
     source_error_proxy_by_order_from_multipoles,
     source_power_by_degree_from_multipoles,
@@ -283,3 +287,51 @@ def test_compute_smallest_enclosing_sphere_geometry_matches_simple_tetrahedron()
     assert np.isclose(float(radii[0]), np.sqrt(8.0 / 3.0), atol=1e-5)
     assert np.allclose(np.asarray(centers[1]), np.asarray([1.0, 0.0, 0.0]), atol=1e-5)
     assert np.isclose(float(radii[1]), 1.0, atol=1e-5)
+
+
+def test_merge_bounding_spheres_contains_inputs():
+    center, radius = merge_bounding_spheres(
+        jnp.asarray([0.0, 0.0, 0.0], dtype=jnp.float32),
+        jnp.asarray(1.0, dtype=jnp.float32),
+        jnp.asarray([4.0, 0.0, 0.0], dtype=jnp.float32),
+        jnp.asarray(1.5, dtype=jnp.float32),
+    )
+
+    assert np.allclose(np.asarray(center), np.asarray([2.25, 0.0, 0.0]), atol=1e-5)
+    assert np.isclose(float(radius), 3.25, atol=1e-5)
+
+
+def test_tree_merged_sphere_geometry_contains_exact_leaf_spheres():
+    positions = jnp.asarray(
+        [[0.0, 0.0, 0.0], [2.0, 0.0, 0.0], [6.0, 0.0, 0.0], [8.0, 0.0, 0.0]],
+        dtype=jnp.float32,
+    )
+    masses = jnp.ones((4,), dtype=jnp.float32)
+    tree = Tree.from_particles(
+        positions,
+        masses,
+        leaf_size=2,
+        tree_type="radix",
+        target_leaf_particles=2,
+        refine_local=False,
+    )
+    positions_sorted = positions[tree.particle_indices]
+
+    leaf_centers, leaf_radii = compute_leaf_enclosing_sphere_geometry(
+        tree=tree, positions_sorted=positions_sorted
+    )
+    centers, radii = compute_tree_merged_sphere_geometry(
+        tree=tree, positions_sorted=positions_sorted
+    )
+
+    num_internal = int(tree.num_internal_nodes)
+    leaf_nodes = np.arange(num_internal, int(tree.parent.shape[0]))
+    assert np.allclose(
+        np.asarray(centers[leaf_nodes]), np.asarray(leaf_centers[leaf_nodes]), atol=1e-5
+    )
+    assert np.allclose(
+        np.asarray(radii[leaf_nodes]), np.asarray(leaf_radii[leaf_nodes]), atol=1e-5
+    )
+    for idx in leaf_nodes:
+        child_dist = np.linalg.norm(np.asarray(centers[idx]) - np.asarray(centers[0]))
+        assert child_dist + float(radii[idx]) <= float(radii[0]) + 1e-5

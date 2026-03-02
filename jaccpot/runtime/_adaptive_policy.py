@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import math
-from typing import NamedTuple, Optional
+from typing import Literal, NamedTuple, Optional
 
 import jax
 import jax.numpy as jnp
@@ -376,6 +376,150 @@ def compute_smallest_enclosing_sphere_geometry(
     )
 
 
+def compute_leaf_enclosing_sphere_geometry(
+    *, tree: Tree, positions_sorted: Array
+) -> tuple[Array, Array]:
+    """Return exact SES centres and radii for leaf nodes only."""
+
+    node_ranges = np.asarray(tree.node_ranges, dtype=np.int64)
+    num_nodes = int(node_ranges.shape[0])
+    num_internal = int(tree.num_internal_nodes)
+    centers = np.zeros((num_nodes, positions_sorted.shape[1]), dtype=np.float64)
+    radii = np.zeros((num_nodes,), dtype=np.float64)
+    if num_internal > 0:
+        leaf_ranges = node_ranges[num_internal:]
+    else:
+        leaf_ranges = node_ranges
+    pos = np.asarray(positions_sorted, dtype=np.float64)
+    for leaf_offset, (start, end) in enumerate(leaf_ranges):
+        s = int(start)
+        e = int(end)
+        if e < s:
+            continue
+        center, radius = _smallest_enclosing_sphere(pos[s : e + 1])
+        node_idx = num_internal + leaf_offset
+        centers[node_idx] = center
+        radii[node_idx] = radius
+    return (
+        jnp.asarray(centers, dtype=positions_sorted.dtype),
+        jnp.asarray(radii, dtype=positions_sorted.dtype),
+    )
+
+
+def merge_bounding_spheres(
+    center_a: Array, radius_a: Array, center_b: Array, radius_b: Array
+) -> tuple[Array, Array]:
+    """Return the minimal sphere containing two spheres."""
+
+    center_a = jnp.asarray(center_a)
+    center_b = jnp.asarray(center_b, dtype=center_a.dtype)
+    radius_a = jnp.asarray(radius_a, dtype=center_a.dtype)
+    radius_b = jnp.asarray(radius_b, dtype=center_a.dtype)
+    delta = center_b - center_a
+    tiny = jnp.asarray(1e-24, dtype=center_a.dtype)
+    dist = jnp.maximum(jnp.linalg.norm(delta), tiny)
+    a_contains_b = radius_a >= dist + radius_b
+    b_contains_a = radius_b >= dist + radius_a
+    merged_radius = 0.5 * (dist + radius_a + radius_b)
+    shift = (
+        ((merged_radius - radius_a) / dist)[:, None]
+        if delta.ndim == 2
+        else ((merged_radius - radius_a) / dist) * delta
+    )
+    if delta.ndim == 1:
+        merged_center = center_a + ((merged_radius - radius_a) / dist) * delta
+        center = jnp.where(a_contains_b[..., None], center_a, merged_center)
+        center = jnp.where(b_contains_a[..., None], center_b, center)
+    else:
+        merged_center = center_a + ((merged_radius - radius_a) / dist)[:, None] * delta
+        center = jnp.where(a_contains_b[:, None], center_a, merged_center)
+        center = jnp.where(b_contains_a[:, None], center_b, center)
+    radius = jnp.where(a_contains_b, radius_a, merged_radius)
+    radius = jnp.where(b_contains_a, radius_b, radius)
+    return center, radius
+
+
+def compute_tree_merged_sphere_geometry(
+    *, tree: Tree, positions_sorted: Array
+) -> tuple[Array, Array]:
+    """Return node spheres from exact leaf SES geometry and JAX upward merges."""
+
+    centers, radii = compute_leaf_enclosing_sphere_geometry(
+        tree=tree, positions_sorted=positions_sorted
+    )
+    num_internal = int(tree.num_internal_nodes)
+    if num_internal == 0:
+        return centers, radii
+    left_child = jnp.asarray(tree.left_child, dtype=jnp.int32)
+    right_child = jnp.asarray(tree.right_child, dtype=jnp.int32)
+
+    def body(iter_idx: Array, state: tuple[Array, Array]) -> tuple[Array, Array]:
+        center_state, radius_state = state
+        node_idx = num_internal - 1 - iter_idx
+        left_idx = left_child[node_idx]
+        right_idx = right_child[node_idx]
+
+        left_center = center_state[left_idx]
+        left_radius = radius_state[left_idx]
+
+        def merge_right(_: None) -> tuple[Array, Array]:
+            right_center = center_state[right_idx]
+            right_radius = radius_state[right_idx]
+            return merge_bounding_spheres(
+                left_center, left_radius, right_center, right_radius
+            )
+
+        merged_center, merged_radius = jax.lax.cond(
+            right_idx >= 0,
+            merge_right,
+            lambda _: (left_center, left_radius),
+            operand=None,
+        )
+        center_state = center_state.at[node_idx].set(merged_center)
+        radius_state = radius_state.at[node_idx].set(merged_radius)
+        return center_state, radius_state
+
+    return jax.lax.fori_loop(
+        0,
+        num_internal,
+        body,
+        (centers, radii),
+    )
+
+
+def resolve_dehnen_geometry(
+    *,
+    geometry_mode: Literal["exact", "tree", "runtime"],
+    tree: Tree,
+    positions_sorted: Array,
+    upward: TreeUpwardData,
+    dtype: Array,
+) -> tuple[Array, Array]:
+    """Return MAC centres and radii for the requested Dehnen geometry mode."""
+
+    mode = str(geometry_mode).strip().lower()
+    if mode == "exact":
+        mac_centers, radius_bound = compute_smallest_enclosing_sphere_geometry(
+            node_ranges=tree.node_ranges,
+            positions_sorted=positions_sorted,
+        )
+    elif mode == "tree":
+        mac_centers, radius_bound = compute_tree_merged_sphere_geometry(
+            tree=tree,
+            positions_sorted=positions_sorted,
+        )
+    elif mode == "runtime":
+        expansion_centers = jnp.asarray(upward.multipoles.centers, dtype=dtype)
+        geometry_centers = jnp.asarray(upward.geometry.center, dtype=dtype)
+        geometry_radius = jnp.asarray(upward.geometry.radius, dtype=dtype)
+        center_offset = jnp.linalg.norm(expansion_centers - geometry_centers, axis=1)
+        radius_bound = geometry_radius + center_offset
+        mac_centers = geometry_centers
+    else:
+        raise ValueError("dehnen_geometry_mode must be 'exact', 'tree', or 'runtime'")
+    return jnp.asarray(mac_centers, dtype=dtype), jnp.asarray(radius_bound, dtype=dtype)
+
+
 def _dehnen_binomial_matrix(
     *, p_gears: tuple[int, ...], total_p: int, dtype: Array
 ) -> Array:
@@ -396,6 +540,7 @@ def build_adaptive_policy_state(
     eps: Array,
     theta: Array,
     error_model_code: Array,
+    dehnen_geometry_mode: str = "exact",
 ) -> AdaptivePolicyState:
     """Build the solver-owned adaptive traversal state from upward data."""
 
@@ -437,19 +582,21 @@ def build_adaptive_policy_state(
     total_p = int(dehnen_power.shape[1] - 1)
     exact_dehnen_geometry = bool(int(error_model_code_arr) == _ERROR_MODEL_DEHNEN_PAPER)
     if exact_dehnen_geometry:
-        mac_centers, radius_bound = compute_smallest_enclosing_sphere_geometry(
-            node_ranges=tree.node_ranges,
+        mac_centers, radius_bound = resolve_dehnen_geometry(
+            geometry_mode=dehnen_geometry_mode,
+            tree=tree,
             positions_sorted=positions_sorted,
+            upward=upward,
+            dtype=dtype,
         )
-        mac_centers = jnp.asarray(mac_centers, dtype=dtype)
-        radius_bound = jnp.asarray(radius_bound, dtype=dtype)
     else:
-        expansion_centers = jnp.asarray(upward.multipoles.centers, dtype=dtype)
-        geometry_centers = jnp.asarray(upward.geometry.center, dtype=dtype)
-        geometry_radius = jnp.asarray(upward.geometry.radius, dtype=dtype)
-        center_offset = jnp.linalg.norm(expansion_centers - geometry_centers, axis=1)
-        radius_bound = geometry_radius + center_offset
-        mac_centers = geometry_centers
+        mac_centers, radius_bound = resolve_dehnen_geometry(
+            geometry_mode="runtime",
+            tree=tree,
+            positions_sorted=positions_sorted,
+            upward=upward,
+            dtype=dtype,
+        )
     source_mass = jnp.maximum(
         jnp.abs(jnp.asarray(upward.mass_moments.mass, dtype=dtype)),
         jnp.asarray(1e-24, dtype=dtype),
@@ -643,7 +790,11 @@ __all__ = [
     "bucket_far_pairs_by_tag",
     "build_adaptive_policy_state",
     "compute_node_force_scale_from_sorted_acc",
+    "compute_leaf_enclosing_sphere_geometry",
     "compute_smallest_enclosing_sphere_geometry",
+    "compute_tree_merged_sphere_geometry",
+    "merge_bounding_spheres",
+    "resolve_dehnen_geometry",
     "dehnen_like_pair_error_by_order_from_degree_power",
     "dehnen_multipole_power_by_degree",
     "dehnen_paper_pair_error_by_order",
