@@ -241,11 +241,22 @@ Adaptive traversal can weight its solver-side policy state with per-node force
 scales. Select how those scales are estimated with `mac_force_scale_mode`:
 
 - `"prev"`:
-  reuse the previous full-step acceleration magnitudes
+  reuse the previous full-step per-node force-scale estimate (`self._last_force_scale_nodes`).
+  This is the cheapest option and is the practical default for `tail_proxy`.
 - `"prepass"`:
-  run a cheap lowest-order prepass and derive force scales from that pass
+  run a cheap lowest-order prepass for the current configuration and derive force
+  scales from that pass.
 - `"paper"`:
-  run the stricter paper-style prepass used by `adaptive_error_model="dehnen_paper"`
+  run the stricter paper-style current-step prepass used by
+  `adaptive_error_model="dehnen_paper"`.
+
+Interpretation:
+
+- `prev` is a runtime-oriented reuse mode.
+- `paper` is the more publication/reference-oriented mode because it derives the
+  threshold from a dedicated current-step prepass rather than from historical state.
+- `prepass` sits between the two as a generic current-step estimate that is not
+  specifically tied to the paper-style Dehnen path.
 
 These scales stay inside jaccpot's adaptive policy state; they are no longer
 exported as backend-specific traversal `node_features`.
