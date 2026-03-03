@@ -61,13 +61,22 @@ def _policy_state() -> AdaptivePolicyState:
         target_accept_threshold=jnp.asarray([0.25, 0.5], dtype=jnp.float32),
         order_tags=jnp.asarray([0, 1, 2], dtype=jnp.int32),
         order_values=jnp.asarray([2, 3, 4], dtype=jnp.int32),
-        dehnen_binomial_by_order=jnp.asarray(
+        order_values_float=jnp.asarray([2.0, 3.0, 4.0], dtype=jnp.float32),
+        dehnen_binomial_masked_by_order=jnp.asarray(
             [
                 [1.0, 2.0, 1.0],
                 [1.0, 3.0, 3.0],
                 [1.0, 4.0, 6.0],
             ],
             dtype=jnp.float32,
+        ),
+        dehnen_exponent_by_order=jnp.asarray(
+            [
+                [2, 1, 0],
+                [3, 2, 1],
+                [4, 3, 2],
+            ],
+            dtype=jnp.int32,
         ),
         relaxed_theta_sq=jnp.asarray(0.8**2, dtype=jnp.float32),
         error_model_code=jnp.asarray(0, dtype=jnp.int32),
@@ -219,15 +228,21 @@ def test_dehnen_multipole_power_matches_degree0_mass():
 def test_dehnen_paper_error_is_monotone_in_distance():
     power = jnp.asarray([[1.0, 0.5, 0.25]], dtype=jnp.float32)
     order_values = jnp.asarray([1, 2], dtype=jnp.int32)
+    order_values_float = order_values.astype(jnp.float32)
+    degree_idx = jnp.arange(power.shape[1], dtype=jnp.int32)
     binom = jnp.asarray([[1.0, 1.0, 0.0], [1.0, 2.0, 1.0]], dtype=jnp.float32)
+    include = degree_idx[None, :] <= order_values[:, None]
+    masked_binom = binom * include.astype(jnp.float32)
+    exponent = jnp.maximum(order_values[:, None] - degree_idx[None, :], 0)
     near = dehnen_paper_pair_error_by_order(
         source_power=power,
         source_mass=jnp.asarray([1.0], dtype=jnp.float32),
         source_radius=jnp.asarray([0.4], dtype=jnp.float32),
         target_radius=jnp.asarray([0.3], dtype=jnp.float32),
         distance=jnp.asarray([1.0], dtype=jnp.float32),
-        order_values=order_values,
-        binomial_by_order=binom,
+        order_values_float=order_values_float,
+        masked_binomial_by_order=masked_binom,
+        exponent_by_order=exponent,
     )
     far = dehnen_paper_pair_error_by_order(
         source_power=power,
@@ -235,8 +250,9 @@ def test_dehnen_paper_error_is_monotone_in_distance():
         source_radius=jnp.asarray([0.4], dtype=jnp.float32),
         target_radius=jnp.asarray([0.3], dtype=jnp.float32),
         distance=jnp.asarray([2.0], dtype=jnp.float32),
-        order_values=order_values,
-        binomial_by_order=binom,
+        order_values_float=order_values_float,
+        masked_binomial_by_order=masked_binom,
+        exponent_by_order=exponent,
     )
 
     assert np.all(np.asarray(far) <= np.asarray(near))
@@ -383,6 +399,48 @@ def test_compute_node_force_scale_matches_reference_reductions():
 
     assert np.allclose(np.asarray(computed_max), reference("max"))
     assert np.allclose(np.asarray(computed_min), reference("min"))
+
+
+def test_compute_node_force_scale_root_matches_global_particle_extrema():
+    key = jax.random.PRNGKey(77)
+    positions = jax.random.uniform(
+        key,
+        (128, 3),
+        minval=-1.0,
+        maxval=1.0,
+        dtype=jnp.float32,
+    )
+    masses = jnp.ones((128,), dtype=jnp.float32)
+    tree = Tree.from_particles(
+        positions,
+        masses,
+        leaf_size=8,
+        tree_type="radix",
+        target_leaf_particles=8,
+        refine_local=False,
+    )
+    accel_key = jax.random.PRNGKey(78)
+    accelerations_sorted = jax.random.normal(
+        accel_key,
+        (128, 3),
+        dtype=jnp.float32,
+    )[tree.particle_indices]
+    magnitudes = np.linalg.norm(np.asarray(accelerations_sorted), axis=1)
+
+    computed_max = compute_node_force_scale_from_sorted_acc(
+        tree=tree,
+        accelerations_sorted=accelerations_sorted,
+        reduction="max",
+    )
+    computed_min = compute_node_force_scale_from_sorted_acc(
+        tree=tree,
+        accelerations_sorted=accelerations_sorted,
+        reduction="min",
+    )
+
+    assert np.isclose(float(computed_max[0]), float(np.max(magnitudes)))
+    assert np.isclose(float(computed_min[0]), float(np.min(magnitudes)))
+    assert float(np.min(np.asarray(computed_min))) > 0.0
 
 
 def test_leaf_ritter_sphere_contains_leaf_points():

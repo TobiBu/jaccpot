@@ -36,7 +36,9 @@ class AdaptivePolicyState(NamedTuple):
     target_accept_threshold: Array
     order_tags: Array
     order_values: Array
-    dehnen_binomial_by_order: Array
+    order_values_float: Array
+    dehnen_binomial_masked_by_order: Array
+    dehnen_exponent_by_order: Array
     relaxed_theta_sq: Array
     error_model_code: Array
 
@@ -157,8 +159,9 @@ def dehnen_paper_pair_error_by_order(
     source_radius: Array,
     target_radius: Array,
     distance: Array,
-    order_values: Array,
-    binomial_by_order: Array,
+    order_values_float: Array,
+    masked_binomial_by_order: Array,
+    exponent_by_order: Array,
 ) -> Array:
     """Return Dehnen's equation (15) error estimate by candidate order."""
 
@@ -167,27 +170,22 @@ def dehnen_paper_pair_error_by_order(
     rho_z = jnp.asarray(source_radius, dtype=power.dtype)
     rho_s = jnp.asarray(target_radius, dtype=power.dtype)
     r = jnp.asarray(distance, dtype=power.dtype)
-    order_arr = jnp.asarray(order_values, dtype=jnp.int32)
-    if order_arr.ndim == 0:
-        order_arr = order_arr[None]
-    if int(order_arr.shape[0]) == 0:
+    order_values_arr = jnp.asarray(order_values_float, dtype=power.dtype)
+    if int(order_values_arr.shape[0]) == 0:
         return jnp.zeros((power.shape[0], 0), dtype=power.dtype)
     tiny = jnp.asarray(1e-24, dtype=power.dtype)
     safe_mass = jnp.maximum(jnp.abs(mass), tiny)
     safe_r = jnp.maximum(r, tiny)
-    degree_idx = jnp.arange(power.shape[1], dtype=jnp.int32)
-    exponent = jnp.maximum(order_arr[:, None] - degree_idx[None, :], 0)
     rho_factor = jnp.power(
-        rho_s[:, None, None], exponent[None, :, :].astype(power.dtype)
+        rho_s[:, None, None],
+        jnp.asarray(exponent_by_order, dtype=power.dtype)[None, :, :],
     )
-    include = (degree_idx[None, :] <= order_arr[:, None]).astype(power.dtype)
     e_terms = (
-        jnp.asarray(binomial_by_order, dtype=power.dtype)[None, :, :]
-        * include[None, :, :]
+        jnp.asarray(masked_binomial_by_order, dtype=power.dtype)[None, :, :]
         * power[:, None, :]
         * rho_factor
     )
-    r_pow = jnp.power(safe_r[:, None], order_arr[None, :].astype(power.dtype))
+    r_pow = jnp.power(safe_r[:, None], order_values_arr[None, :])
     e_basic = jnp.sum(e_terms, axis=2) / (safe_mass[:, None] * r_pow)
     improvement = (
         jnp.asarray(8.0, dtype=power.dtype)
@@ -269,9 +267,14 @@ def compute_node_force_scale_from_sorted_acc(
     left_child = jnp.asarray(tree.left_child, dtype=jnp.int32)
     right_child = jnp.asarray(tree.right_child, dtype=jnp.int32)
     zero = jnp.asarray(0.0, dtype=dtype)
+    # Internal-node indices are not guaranteed to be stored in postorder.
+    # Reduce in ascending node span so children are populated before parents.
+    internal_ranges = node_ranges[:num_internal]
+    internal_width = internal_ranges[:, 1] - internal_ranges[:, 0]
+    internal_order = jnp.argsort(internal_width, stable=True)
 
     def body(i: int, current: Array) -> Array:
-        node_idx = num_internal - 1 - i
+        node_idx = internal_order[i]
         left_idx = left_child[node_idx]
         right_idx = right_child[node_idx]
         left_valid = left_idx >= 0
@@ -715,20 +718,38 @@ def build_adaptive_policy_state(
     if len(p_gears) == 0:
         raise ValueError("adaptive policy state requires non-empty p_gears")
     packed = upward.multipoles.packed
-    degree_power = source_power_by_degree_from_multipoles(multipole_packed=packed)
-    dehnen_power = dehnen_multipole_power_by_degree(multipole_packed=packed)
-    error_proxy = source_error_proxy_by_order_from_degree_power(
-        degree_power=degree_power,
-        p_gears=p_gears,
-    )
-    dtype = error_proxy.dtype
+    dtype = packed.real.dtype if jnp.iscomplexobj(packed) else packed.dtype
+    num_nodes = int(packed.shape[0])
     error_model_code_arr = jnp.asarray(error_model_code, dtype=jnp.int32)
-    exact_dehnen = bool(int(error_model_code_arr) == _ERROR_MODEL_DEHNEN_PAPER)
+    model_code = int(error_model_code_arr)
+
+    total_p = _packed_total_order(packed)
+    empty_degree = jnp.zeros((num_nodes, total_p + 1), dtype=dtype)
+    empty_order = jnp.zeros((num_nodes, len(p_gears)), dtype=dtype)
+    degree_power = empty_degree
+    dehnen_power = empty_degree
+    error_proxy = empty_order
+
+    if model_code == _ERROR_MODEL_TAIL_PROXY:
+        degree_power = source_power_by_degree_from_multipoles(multipole_packed=packed)
+        error_proxy = source_error_proxy_by_order_from_degree_power(
+            degree_power=degree_power,
+            p_gears=p_gears,
+        )
+    elif model_code == _ERROR_MODEL_DEHNEN_DEGREE:
+        degree_power = source_power_by_degree_from_multipoles(multipole_packed=packed)
+    elif model_code == _ERROR_MODEL_DEHNEN_PAPER:
+        dehnen_power = dehnen_multipole_power_by_degree(multipole_packed=packed)
+        total_p = int(dehnen_power.shape[1] - 1)
+    else:
+        raise ValueError(f"unknown adaptive error model code {model_code}")
+
+    exact_dehnen = model_code == _ERROR_MODEL_DEHNEN_PAPER
     if force_scale_nodes is None:
-        target_force_scale = jnp.ones((error_proxy.shape[0],), dtype=dtype)
+        target_force_scale = jnp.ones((num_nodes,), dtype=dtype)
     else:
         target_force_scale = jnp.asarray(force_scale_nodes, dtype=dtype)
-        if int(target_force_scale.shape[0]) != int(error_proxy.shape[0]):
+        if int(target_force_scale.shape[0]) != num_nodes:
             raise ValueError("force_scale_nodes length must match number of nodes")
         if not exact_dehnen:
             scale_norm = jnp.maximum(
@@ -742,14 +763,13 @@ def build_adaptive_policy_state(
     )
     order_tags = jnp.arange(len(p_gears), dtype=jnp.int32)
     order_values = jnp.asarray(tuple(int(v) for v in p_gears), dtype=jnp.int32)
+    order_values_float = order_values.astype(dtype)
     theta_arr = jnp.asarray(theta, dtype=dtype)
     relaxed_theta = jnp.minimum(
         jnp.asarray(1.0, dtype=dtype),
         jnp.asarray(1.5, dtype=dtype) * theta_arr,
     )
-    total_p = int(dehnen_power.shape[1] - 1)
-    exact_dehnen_geometry = bool(int(error_model_code_arr) == _ERROR_MODEL_DEHNEN_PAPER)
-    if exact_dehnen_geometry:
+    if exact_dehnen:
         mac_centers, radius_bound = resolve_dehnen_geometry(
             geometry_mode=dehnen_geometry_mode,
             tree=tree,
@@ -769,6 +789,17 @@ def build_adaptive_policy_state(
         jnp.abs(jnp.asarray(upward.mass_moments.mass, dtype=dtype)),
         jnp.asarray(1e-24, dtype=dtype),
     )
+    if exact_dehnen:
+        degree_idx = jnp.arange(total_p + 1, dtype=jnp.int32)
+        exponent_by_order = jnp.maximum(order_values[:, None] - degree_idx[None, :], 0)
+        masked_binomial_by_order = _dehnen_binomial_matrix(
+            p_gears=p_gears,
+            total_p=total_p,
+            dtype=dtype,
+        ) * (degree_idx[None, :] <= order_values[:, None]).astype(dtype)
+    else:
+        exponent_by_order = jnp.zeros((len(p_gears), total_p + 1), dtype=jnp.int32)
+        masked_binomial_by_order = jnp.zeros((len(p_gears), total_p + 1), dtype=dtype)
     return AdaptivePolicyState(
         source_error_proxy_by_order=error_proxy,
         source_degree_power=degree_power,
@@ -781,72 +812,11 @@ def build_adaptive_policy_state(
         target_accept_threshold=target_accept_threshold,
         order_tags=order_tags,
         order_values=order_values,
-        dehnen_binomial_by_order=_dehnen_binomial_matrix(
-            p_gears=p_gears,
-            total_p=total_p,
-            dtype=dtype,
-        ),
+        order_values_float=order_values_float,
+        dehnen_binomial_masked_by_order=masked_binomial_by_order,
+        dehnen_exponent_by_order=exponent_by_order,
         relaxed_theta_sq=jnp.square(relaxed_theta),
         error_model_code=error_model_code_arr,
-    )
-
-
-def _compute_passes_for_error_model(
-    *,
-    policy_state: AdaptivePolicyState,
-    source_proxy: Array,
-    source_degree_power: Array,
-    source_dehnen_power: Array,
-    source_mass: Array,
-    source_radius: Array,
-    target_radius: Array,
-    target_threshold: Array,
-    opening: Array,
-    extent_sum_sq: Array,
-    safe_dist_sq: Array,
-    paper_distance: Array,
-) -> Array:
-    """Return per-order pass decisions for the configured adaptive error model."""
-
-    def _tail_proxy(_: None) -> Array:
-        return (
-            jnp.square(source_proxy) * extent_sum_sq[:, None]
-            < jnp.square(target_threshold)[:, None] * safe_dist_sq[:, None]
-        )
-
-    def _dehnen_degree(_: None) -> Array:
-        pair_error = dehnen_like_pair_error_by_order_from_degree_power(
-            degree_power=source_degree_power,
-            opening=opening,
-            order_values=policy_state.order_values,
-        )
-        return pair_error < target_threshold[:, None]
-
-    def _dehnen_paper(_: None) -> Array:
-        pair_error = dehnen_paper_pair_error_by_order(
-            source_power=source_dehnen_power,
-            source_mass=source_mass,
-            source_radius=source_radius,
-            target_radius=target_radius,
-            distance=paper_distance,
-            order_values=policy_state.order_values,
-            binomial_by_order=policy_state.dehnen_binomial_by_order,
-        )
-        est_force_error = (
-            pair_error
-            * source_mass[:, None]
-            / jnp.maximum(
-                jnp.square(paper_distance[:, None]),
-                jnp.asarray(1e-24, dtype=pair_error.dtype),
-            )
-        )
-        convergent = (source_radius + target_radius) < paper_distance
-        return convergent[:, None] & (est_force_error < target_threshold[:, None])
-
-    return jax.lax.switch(
-        jnp.asarray(policy_state.error_model_code, dtype=jnp.int32),
-        (_tail_proxy, _dehnen_degree, _dehnen_paper),
-        operand=None,
     )
 
 
@@ -870,37 +840,67 @@ def adaptive_pair_policy(
     safe_sources = jnp.where(valid_pairs, source_nodes, 0)
     safe_dist_sq = jnp.maximum(dist_sq, jnp.asarray(1e-24, dtype=dist_sq.dtype))
     extent_sum_sq = jnp.square(extent_target + extent_source)
-    distance = jnp.sqrt(safe_dist_sq)
-
-    source_proxy = jnp.asarray(policy_state.source_error_proxy_by_order)[
-        safe_sources, :
-    ]
-    source_degree_power = jnp.asarray(policy_state.source_degree_power)[safe_sources, :]
-    source_dehnen_power = jnp.asarray(policy_state.source_dehnen_power)[safe_sources, :]
-    source_mass = jnp.asarray(policy_state.source_mass)[safe_sources]
-    source_radius = jnp.asarray(policy_state.source_radius_bound)[safe_sources]
-    target_radius = jnp.asarray(policy_state.target_radius_bound)[safe_targets]
-    source_mac_center = jnp.asarray(policy_state.source_mac_center)[safe_sources]
-    target_mac_center = jnp.asarray(policy_state.target_mac_center)[safe_targets]
-    paper_distance = jnp.maximum(
-        jnp.linalg.norm(source_mac_center - target_mac_center, axis=1),
-        jnp.asarray(1e-24, dtype=dist_sq.dtype),
-    )
     target_threshold = jnp.asarray(policy_state.target_accept_threshold)[safe_targets]
-    opening = jnp.sqrt(extent_sum_sq / safe_dist_sq)
-    passes = _compute_passes_for_error_model(
-        policy_state=policy_state,
-        source_proxy=source_proxy,
-        source_degree_power=source_degree_power,
-        source_dehnen_power=source_dehnen_power,
-        source_mass=source_mass,
-        source_radius=source_radius,
-        target_radius=target_radius,
-        target_threshold=target_threshold,
-        opening=opening,
-        extent_sum_sq=extent_sum_sq,
-        safe_dist_sq=safe_dist_sq,
-        paper_distance=paper_distance,
+
+    def _tail_proxy(_: None) -> Array:
+        source_proxy = jnp.asarray(policy_state.source_error_proxy_by_order)[
+            safe_sources, :
+        ]
+        return (
+            jnp.square(source_proxy) * extent_sum_sq[:, None]
+            < jnp.square(target_threshold)[:, None] * safe_dist_sq[:, None]
+        )
+
+    def _dehnen_degree(_: None) -> Array:
+        source_degree_power = jnp.asarray(policy_state.source_degree_power)[
+            safe_sources, :
+        ]
+        opening = jnp.sqrt(extent_sum_sq / safe_dist_sq)
+        pair_error = dehnen_like_pair_error_by_order_from_degree_power(
+            degree_power=source_degree_power,
+            opening=opening,
+            order_values=policy_state.order_values,
+        )
+        return pair_error < target_threshold[:, None]
+
+    def _dehnen_paper(_: None) -> Array:
+        source_dehnen_power = jnp.asarray(policy_state.source_dehnen_power)[
+            safe_sources, :
+        ]
+        source_mass = jnp.asarray(policy_state.source_mass)[safe_sources]
+        source_radius = jnp.asarray(policy_state.source_radius_bound)[safe_sources]
+        target_radius = jnp.asarray(policy_state.target_radius_bound)[safe_targets]
+        source_mac_center = jnp.asarray(policy_state.source_mac_center)[safe_sources]
+        target_mac_center = jnp.asarray(policy_state.target_mac_center)[safe_targets]
+        paper_distance = jnp.maximum(
+            jnp.linalg.norm(source_mac_center - target_mac_center, axis=1),
+            jnp.asarray(1e-24, dtype=dist_sq.dtype),
+        )
+        pair_error = dehnen_paper_pair_error_by_order(
+            source_power=source_dehnen_power,
+            source_mass=source_mass,
+            source_radius=source_radius,
+            target_radius=target_radius,
+            distance=paper_distance,
+            order_values_float=policy_state.order_values_float,
+            masked_binomial_by_order=policy_state.dehnen_binomial_masked_by_order,
+            exponent_by_order=policy_state.dehnen_exponent_by_order,
+        )
+        est_force_error = (
+            pair_error
+            * source_mass[:, None]
+            / jnp.maximum(
+                jnp.square(paper_distance[:, None]),
+                jnp.asarray(1e-24, dtype=pair_error.dtype),
+            )
+        )
+        convergent = (source_radius + target_radius) < paper_distance
+        return convergent[:, None] & (est_force_error < target_threshold[:, None])
+
+    passes = jax.lax.switch(
+        jnp.asarray(policy_state.error_model_code, dtype=jnp.int32),
+        (_tail_proxy, _dehnen_degree, _dehnen_paper),
+        operand=None,
     )
     pass_any = jnp.any(passes, axis=1)
     highest_order_pass = passes[:, -1]
