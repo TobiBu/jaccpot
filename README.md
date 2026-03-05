@@ -328,6 +328,39 @@ Coverage is enforced in CI via `pytest-cov`:
 pytest --cov=jaccpot --cov-report=term-missing
 ```
 
+### Performance Guard
+
+CI also runs a benchmark regression guard based on:
+
+- [bench/bench_parallel_paths.py](/Users/buck/Documents/Nexus/Projects/jaccpot/bench/bench_parallel_paths.py)
+- [bench/ci_benchmark_guard.py](/Users/buck/Documents/Nexus/Projects/jaccpot/bench/ci_benchmark_guard.py)
+- [bench/benchmark_baseline.json](/Users/buck/Documents/Nexus/Projects/jaccpot/bench/benchmark_baseline.json)
+
+Run the guard locally with the same defaults used in CI:
+
+```bash
+python bench/ci_benchmark_guard.py \
+  --baseline bench/benchmark_baseline.json \
+  --max-regression 0.25 \
+  --n 8000 \
+  --p 4 \
+  --leaf-size 16 \
+  --theta 0.6 \
+  --target-frac 0.1 \
+  --p-gears 2,2,3,3,4 \
+  --warmup 1 \
+  --runs 2 \
+  --dtype float32
+```
+
+If a performance change is intentional, refresh the baseline:
+
+1. Run `bench/bench_parallel_paths.py` with the CI benchmark arguments.
+2. Read the `timings_s` line and update:
+   `target_eval_mean_s` and `adaptive_prepare_mean_s` in
+   `bench/benchmark_baseline.json`.
+3. Re-run `bench/ci_benchmark_guard.py` to confirm the new baseline passes.
+
 ## Runtime Type Checking
 
 `jaccpot` can enable package-wide runtime checking for annotated callables using

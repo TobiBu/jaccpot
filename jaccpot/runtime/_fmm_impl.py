@@ -6,6 +6,7 @@ gravitational forces in O(N) time instead of O(N^2) for direct summation.
 """
 
 import hashlib
+import math
 from collections import OrderedDict
 from dataclasses import dataclass
 from functools import partial
@@ -71,11 +72,9 @@ from jaccpot.operators.complex_ops import (
 )
 from jaccpot.operators.m2l_real_rot_scale import m2l_rot_scale_real_batch
 from jaccpot.operators.multipole_utils import (
-    LOCAL_COMBO_INV_FACTORIAL,
     LOCAL_LEVEL_COMBOS,
     MAX_MULTIPOLE_ORDER,
     level_offset,
-    multi_power,
     total_coefficients,
 )
 from jaccpot.operators.real_harmonics import (
@@ -125,6 +124,103 @@ from .reference import evaluate_expansion as reference_evaluate_expansion
 ExpansionBasis = Literal["cartesian", "solidfmm", "complex"]
 FarFieldMode = Literal["auto", "pair_grouped", "class_major"]
 NearFieldMode = Literal["auto", "baseline", "bucketed"]
+
+_cartesian_eval_table_cache: dict[int, tuple[np.ndarray, np.ndarray, np.ndarray]] = {}
+
+
+def _cartesian_eval_tables(order: int) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Return flattened cartesian local-evaluation tables for one fixed order."""
+    order_int = int(order)
+    cached = _cartesian_eval_table_cache.get(order_int)
+    if cached is not None:
+        return cached
+
+    coeff_indices: list[int] = []
+    exponents: list[tuple[int, int, int]] = []
+    inv_factorials: list[float] = []
+    for level_idx in range(order_int + 1):
+        start_idx = level_offset(level_idx)
+        combos = LOCAL_LEVEL_COMBOS[level_idx]
+        for combo_idx, combo in enumerate(combos):
+            coeff_indices.append(start_idx + combo_idx)
+            exponents.append((int(combo[0]), int(combo[1]), int(combo[2])))
+            inv_factorials.append(
+                float(
+                    1.0
+                    / (
+                        math.factorial(int(combo[0]))
+                        * math.factorial(int(combo[1]))
+                        * math.factorial(int(combo[2]))
+                    )
+                )
+            )
+
+    coeff_idx_np = np.asarray(coeff_indices, dtype=np.int32)
+    exponents_np = np.asarray(exponents, dtype=np.int32)
+    inv_fact_np = np.asarray(inv_factorials, dtype=np.float64)
+    tables = (coeff_idx_np, exponents_np, inv_fact_np)
+    _cartesian_eval_table_cache[order_int] = tables
+    return tables
+
+
+@partial(jax.jit, static_argnames=("order",))
+def _evaluate_local_cartesian_with_grad_batch(
+    coeffs: Array,
+    offsets: Array,
+    *,
+    order: int,
+) -> tuple[Array, Array]:
+    """Evaluate cartesian locals and gradients for a batch of offsets."""
+    coeff_rows = jnp.asarray(coeffs)
+    delta_rows = jnp.asarray(offsets, dtype=coeff_rows.dtype)
+    coeff_shape = coeff_rows.shape[:-1]
+    delta_shape = delta_rows.shape[:-1]
+    if coeff_shape != delta_shape:
+        raise ValueError("coeffs and offsets must share leading batch dimensions")
+
+    coeff_flat = coeff_rows.reshape((-1, coeff_rows.shape[-1]))
+    delta_flat = delta_rows.reshape((-1, 3))
+    coeff_idx_np, exponents_np, inv_fact_np = _cartesian_eval_tables(order)
+    coeff_idx = jnp.asarray(coeff_idx_np, dtype=INDEX_DTYPE)
+    exponents = jnp.asarray(exponents_np, dtype=INDEX_DTYPE)
+    inv_fact = jnp.asarray(inv_fact_np, dtype=coeff_flat.dtype)
+
+    ex = exponents[:, 0]
+    ey = exponents[:, 1]
+    ez = exponents[:, 2]
+    exm1 = jnp.maximum(ex - 1, 0)
+    eym1 = jnp.maximum(ey - 1, 0)
+    ezm1 = jnp.maximum(ez - 1, 0)
+
+    x = delta_flat[:, 0:1]
+    y = delta_flat[:, 1:2]
+    z = delta_flat[:, 2:3]
+
+    x_pow = jnp.power(x, ex[None, :])
+    y_pow = jnp.power(y, ey[None, :])
+    z_pow = jnp.power(z, ez[None, :])
+
+    coeff_terms = coeff_flat[:, coeff_idx] * inv_fact[None, :]
+    monomials = x_pow * y_pow * z_pow
+    values = jnp.sum(coeff_terms * monomials, axis=1)
+
+    ex_f = ex.astype(coeff_flat.dtype)
+    ey_f = ey.astype(coeff_flat.dtype)
+    ez_f = ez.astype(coeff_flat.dtype)
+    grad_x = jnp.sum(
+        coeff_terms * ex_f[None, :] * jnp.power(x, exm1[None, :]) * y_pow * z_pow,
+        axis=1,
+    )
+    grad_y = jnp.sum(
+        coeff_terms * ey_f[None, :] * x_pow * jnp.power(y, eym1[None, :]) * z_pow,
+        axis=1,
+    )
+    grad_z = jnp.sum(
+        coeff_terms * ez_f[None, :] * x_pow * y_pow * jnp.power(z, ezm1[None, :]),
+        axis=1,
+    )
+    grads = jnp.stack((grad_x, grad_y, grad_z), axis=1)
+    return grads.reshape(coeff_shape + (3,)), values.reshape(coeff_shape)
 
 
 @dataclass(frozen=True)
@@ -240,6 +336,93 @@ _KDTREE_DEFAULT_TRAVERSAL_CONFIG = DualTreeTraversalConfig(
 )
 _OPERATOR_CACHE_MAX = 4096
 _operator_blocks_cache: "OrderedDict[tuple, tuple[Array, Array]]" = OrderedDict()
+_GROUPED_OPERATOR_CACHE_MAX = 256
+_grouped_operator_blocks_cache: "OrderedDict[tuple, tuple[Array, Array]]" = (
+    OrderedDict()
+)
+_GROUPED_SEGMENT_CACHE_MAX = 128
+_grouped_segment_cache: (
+    "OrderedDict[tuple, tuple[Array, Array, Array, Array, Array, Array]]"
+) = OrderedDict()
+
+
+def _array_digest(arr: Array) -> Optional[tuple[tuple[int, ...], str, bytes]]:
+    """Return (shape, dtype, digest) for stable host-side cache keys."""
+    if _contains_tracer(arr):
+        return None
+    arr_np = np.asarray(jax.device_get(arr))
+    hasher = hashlib.blake2b(digest_size=16)
+    hasher.update(arr_np.tobytes())
+    return tuple(int(v) for v in arr_np.shape), str(arr_np.dtype), hasher.digest()
+
+
+def _grouped_operator_cache_key(
+    *,
+    order: int,
+    rotation: str,
+    dtype: jnp.dtype,
+    class_keys: Array,
+    class_deltas: Array,
+) -> Optional[tuple]:
+    keys_sig = _array_digest(class_keys)
+    deltas_sig = _array_digest(class_deltas)
+    if keys_sig is None or deltas_sig is None:
+        return None
+    return (
+        int(order),
+        str(rotation),
+        str(dtype),
+        keys_sig,
+        deltas_sig,
+    )
+
+
+def _grouped_segment_cache_key(
+    *,
+    class_offsets: Array,
+    class_targets: Array,
+    chunk_size: int,
+) -> Optional[tuple]:
+    offsets_sig = _array_digest(class_offsets)
+    targets_sig = _array_digest(class_targets)
+    if offsets_sig is None or targets_sig is None:
+        return None
+    return (int(chunk_size), offsets_sig, targets_sig)
+
+
+def _grouped_operator_cache_get(key: tuple) -> Optional[tuple[Array, Array]]:
+    blocks = _grouped_operator_blocks_cache.get(key)
+    if blocks is None:
+        return None
+    _grouped_operator_blocks_cache.move_to_end(key)
+    return blocks
+
+
+def _grouped_operator_cache_put(key: tuple, value: tuple[Array, Array]) -> None:
+    _grouped_operator_blocks_cache[key] = value
+    _grouped_operator_blocks_cache.move_to_end(key)
+    while len(_grouped_operator_blocks_cache) > _GROUPED_OPERATOR_CACHE_MAX:
+        _grouped_operator_blocks_cache.popitem(last=False)
+
+
+def _grouped_segment_cache_get(
+    key: tuple,
+) -> Optional[tuple[Array, Array, Array, Array, Array, Array]]:
+    cached = _grouped_segment_cache.get(key)
+    if cached is None:
+        return None
+    _grouped_segment_cache.move_to_end(key)
+    return cached
+
+
+def _grouped_segment_cache_put(
+    key: tuple,
+    value: tuple[Array, Array, Array, Array, Array, Array],
+) -> None:
+    _grouped_segment_cache[key] = value
+    _grouped_segment_cache.move_to_end(key)
+    while len(_grouped_segment_cache) > _GROUPED_SEGMENT_CACHE_MAX:
+        _grouped_segment_cache.popitem(last=False)
 
 
 def _resolve_optional(value, preset_value, fallback):
@@ -3216,65 +3399,51 @@ def _rotation_blocks_for_grouped_classes(
         empty = jnp.zeros(empty_shape, dtype=dtype)
         return empty, empty
 
-    keys_np = np.asarray(jax.device_get(class_keys), dtype=np.int64)
-    blocks_to_host: list[Optional[Array]] = [None] * num_classes
-    blocks_from_host: list[Optional[Array]] = [None] * num_classes
-    missing_indices: list[int] = []
+    cache_key = _grouped_operator_cache_key(
+        order=order,
+        rotation=rotation,
+        dtype=dtype,
+        class_keys=class_keys,
+        class_deltas=class_deltas,
+    )
+    if cache_key is not None:
+        cached = _grouped_operator_cache_get(cache_key)
+        if cached is not None:
+            return cached
 
-    for class_idx, key_vals in enumerate(keys_np):
-        class_key = tuple(int(v) for v in key_vals.tolist())
-        cache_key = (int(order), str(rotation), str(dtype), class_key)
-        cached = _operator_cache_get(cache_key)
-        if cached is None:
-            missing_indices.append(class_idx)
-            continue
-        blocks_to_host[class_idx], blocks_from_host[class_idx] = cached
-
-    if missing_indices:
-        miss_idx = jnp.asarray(missing_indices, dtype=INDEX_DTYPE)
-        deltas_miss = class_deltas[miss_idx]
-        if rotation == "solidfmm":
-            blocks_to_miss = complex_rotation_blocks_to_z_solidfmm_batch(
-                deltas_miss,
-                order=order,
-                basis="multipole",
-                dtype=dtype,
-            )
-            blocks_from_miss = complex_rotation_blocks_from_z_solidfmm_batch(
-                deltas_miss,
-                order=order,
-                basis="local",
-                dtype=dtype,
-            )
-        elif rotation == "cached":
-            blocks_to_miss = complex_rotation_blocks_to_z_batch(
-                deltas_miss,
-                order=order,
-                basis="multipole",
-                dtype=dtype,
-            )
-            blocks_from_miss = complex_rotation_blocks_from_z_batch(
-                deltas_miss,
-                order=order,
-                basis="local",
-                dtype=dtype,
-            )
-        else:
-            raise ValueError(
-                "grouped operator cache currently supports rotation='cached' or 'solidfmm'"
-            )
-
-        for miss_pos, class_idx in enumerate(missing_indices):
-            key_vals = keys_np[class_idx]
-            class_key = tuple(int(v) for v in key_vals.tolist())
-            blocks = (blocks_to_miss[miss_pos], blocks_from_miss[miss_pos])
-            _operator_cache_put(
-                (int(order), str(rotation), str(dtype), class_key), blocks
-            )
-            blocks_to_host[class_idx], blocks_from_host[class_idx] = blocks
-
-    blocks_to = jnp.stack([b for b in blocks_to_host if b is not None], axis=0)
-    blocks_from = jnp.stack([b for b in blocks_from_host if b is not None], axis=0)
+    deltas = jnp.asarray(class_deltas)
+    if rotation == "solidfmm":
+        blocks_to = complex_rotation_blocks_to_z_solidfmm_batch(
+            deltas,
+            order=order,
+            basis="multipole",
+            dtype=dtype,
+        )
+        blocks_from = complex_rotation_blocks_from_z_solidfmm_batch(
+            deltas,
+            order=order,
+            basis="local",
+            dtype=dtype,
+        )
+    elif rotation == "cached":
+        blocks_to = complex_rotation_blocks_to_z_batch(
+            deltas,
+            order=order,
+            basis="multipole",
+            dtype=dtype,
+        )
+        blocks_from = complex_rotation_blocks_from_z_batch(
+            deltas,
+            order=order,
+            basis="local",
+            dtype=dtype,
+        )
+    else:
+        raise ValueError(
+            "grouped operator cache currently supports rotation='cached' or 'solidfmm'"
+        )
+    if cache_key is not None:
+        _grouped_operator_cache_put(cache_key, (blocks_to, blocks_from))
     return blocks_to, blocks_from
 
 
@@ -3366,12 +3535,25 @@ def _build_grouped_class_segments(
     chunk_size: int,
 ) -> tuple[Array, Array, Array, Array, Array, Array]:
     """Build class-major fixed-width segments for chunked class execution."""
+    cache_key = _grouped_segment_cache_key(
+        class_offsets=grouped.class_offsets,
+        class_targets=grouped.class_targets,
+        chunk_size=int(chunk_size),
+    )
+    if cache_key is not None:
+        cached = _grouped_segment_cache_get(cache_key)
+        if cached is not None:
+            return cached
+
     class_offsets = np.asarray(jax.device_get(grouped.class_offsets), dtype=np.int64)
     class_targets = np.asarray(jax.device_get(grouped.class_targets), dtype=np.int64)
     if class_offsets.size <= 1:
         empty = jnp.zeros((0,), dtype=INDEX_DTYPE)
         empty_matrix = jnp.zeros((0, int(chunk_size)), dtype=INDEX_DTYPE)
-        return empty, empty, empty, empty_matrix, empty_matrix, empty_matrix
+        result = (empty, empty, empty, empty_matrix, empty_matrix, empty_matrix)
+        if cache_key is not None:
+            _grouped_segment_cache_put(cache_key, result)
+        return result
 
     starts: list[int] = []
     lengths: list[int] = []
@@ -3413,7 +3595,7 @@ def _build_grouped_class_segments(
 
     if len(sort_permutation) == 0:
         empty_matrix = jnp.zeros((0, int(chunk_size)), dtype=INDEX_DTYPE)
-        return (
+        result = (
             jnp.asarray(starts, dtype=INDEX_DTYPE),
             jnp.asarray(lengths, dtype=INDEX_DTYPE),
             jnp.asarray(class_ids, dtype=INDEX_DTYPE),
@@ -3421,8 +3603,11 @@ def _build_grouped_class_segments(
             empty_matrix,
             empty_matrix,
         )
+        if cache_key is not None:
+            _grouped_segment_cache_put(cache_key, result)
+        return result
 
-    return (
+    result = (
         jnp.asarray(starts, dtype=INDEX_DTYPE),
         jnp.asarray(lengths, dtype=INDEX_DTYPE),
         jnp.asarray(class_ids, dtype=INDEX_DTYPE),
@@ -3430,6 +3615,9 @@ def _build_grouped_class_segments(
         jnp.asarray(np.stack(group_ids, axis=0), dtype=INDEX_DTYPE),
         jnp.asarray(np.stack(unique_targets, axis=0), dtype=INDEX_DTYPE),
     )
+    if cache_key is not None:
+        _grouped_segment_cache_put(cache_key, result)
+    return result
 
 
 @partial(
@@ -4197,10 +4385,11 @@ def _prepare_solidfmm_downward_sweep(
         if adaptive_order:
             if len(p_gears) == 0:
                 raise ValueError("adaptive_order=True requires non-empty p_gears")
+            p_gears_int = tuple(int(v) for v in p_gears)
             gear_pairs = far_pairs_by_gear
             if gear_pairs is None:
                 buckets: list[tuple[Array, Array]] = []
-                for _ in p_gears:
+                for _ in p_gears_int:
                     buckets.append(
                         (
                             jnp.zeros((0,), dtype=INDEX_DTYPE),
@@ -4209,13 +4398,35 @@ def _prepare_solidfmm_downward_sweep(
                     )
                 buckets[-1] = (src, tgt)
                 gear_pairs = tuple(buckets)
-            locals_updated = locals_coeffs
-            for gear_idx, p_gear in enumerate(tuple(int(v) for v in p_gears)):
+            if len(gear_pairs) != len(p_gears_int):
+                raise ValueError("far_pairs_by_gear must align with p_gears")
+
+            pairs_by_order: dict[int, list[tuple[Array, Array]]] = {}
+            for p_gear, pair_bucket in zip(p_gears_int, gear_pairs):
                 if int(p_gear) < 0 or int(p_gear) > int(p):
                     raise ValueError(
                         "p_gears entries must satisfy 0 <= p_gear <= p_max"
                     )
-                src_g, tgt_g = gear_pairs[gear_idx]
+                pairs_by_order.setdefault(int(p_gear), []).append(pair_bucket)
+
+            locals_updated = locals_coeffs
+            for p_gear, order_pairs in sorted(pairs_by_order.items()):
+                src_parts: list[Array] = []
+                tgt_parts: list[Array] = []
+                for src_g, tgt_g in order_pairs:
+                    if int(src_g.shape[0]) == 0:
+                        continue
+                    src_parts.append(jnp.asarray(src_g, dtype=INDEX_DTYPE))
+                    tgt_parts.append(jnp.asarray(tgt_g, dtype=INDEX_DTYPE))
+                if len(src_parts) == 0:
+                    continue
+                if len(src_parts) == 1:
+                    src_g = src_parts[0]
+                    tgt_g = tgt_parts[0]
+                else:
+                    src_g = jnp.concatenate(src_parts, axis=0)
+                    tgt_g = jnp.concatenate(tgt_parts, axis=0)
+
                 pair_count_g = int(src_g.shape[0])
                 if pair_count_g == 0:
                     continue
@@ -4620,61 +4831,80 @@ def _build_target_nearfield_source_index_matrix(
     neighbor_list: NodeNeighborList,
 ) -> tuple[Array, Array]:
     """Build padded source-index lists for each target particle near-field eval."""
-    target_np = np.asarray(jax.device_get(target_sorted_indices), dtype=np.int64)
-    target_leaf_pos_np = np.asarray(
-        jax.device_get(target_leaf_positions),
-        dtype=np.int64,
-    )
-    node_ranges = np.asarray(jax.device_get(tree.node_ranges), dtype=np.int64)
-    leaf_nodes = np.asarray(jax.device_get(neighbor_list.leaf_indices), dtype=np.int64)
-    offsets = np.asarray(jax.device_get(neighbor_list.offsets), dtype=np.int64)
-    neighbors = np.asarray(jax.device_get(neighbor_list.neighbors), dtype=np.int64)
+    targets = jnp.asarray(target_sorted_indices, dtype=INDEX_DTYPE)
+    target_leaf_pos = jnp.asarray(target_leaf_positions, dtype=INDEX_DTYPE)
+    node_ranges = jnp.asarray(tree.node_ranges, dtype=INDEX_DTYPE)
+    leaf_nodes = jnp.asarray(neighbor_list.leaf_indices, dtype=INDEX_DTYPE)
+    offsets = jnp.asarray(neighbor_list.offsets, dtype=INDEX_DTYPE)
+    neighbors = jnp.asarray(neighbor_list.neighbors, dtype=INDEX_DTYPE)
+
+    num_targets = int(targets.shape[0])
+    if num_targets == 0:
+        empty_idx = jnp.zeros((0, 0), dtype=INDEX_DTYPE)
+        empty_mask = jnp.zeros((0, 0), dtype=bool)
+        return empty_idx, empty_mask
 
     total_nodes = int(node_ranges.shape[0])
-    leaf_lookup = np.full((total_nodes,), -1, dtype=np.int64)
-    leaf_lookup[leaf_nodes] = np.arange(leaf_nodes.shape[0], dtype=np.int64)
+    num_leaves = int(leaf_nodes.shape[0])
+    if num_leaves == 0:
+        empty_idx = jnp.zeros((num_targets, 0), dtype=INDEX_DTYPE)
+        empty_mask = jnp.zeros((num_targets, 0), dtype=bool)
+        return empty_idx, empty_mask
+
     leaf_ranges = node_ranges[leaf_nodes]
+    leaf_counts = leaf_ranges[:, 1] - leaf_ranges[:, 0] + 1
+    max_leaf_particles = int(jnp.max(leaf_counts))
+    if max_leaf_particles <= 0:
+        empty_idx = jnp.zeros((num_targets, 0), dtype=INDEX_DTYPE)
+        empty_mask = jnp.zeros((num_targets, 0), dtype=bool)
+        return empty_idx, empty_mask
 
-    source_lists: list[np.ndarray] = []
-    max_sources = 0
-    for target_idx, target_leaf_pos in zip(target_np, target_leaf_pos_np):
-        src_leaf_positions = [int(target_leaf_pos)]
-        nbr_start = int(offsets[target_leaf_pos])
-        nbr_end = int(offsets[target_leaf_pos + 1])
-        if nbr_end > nbr_start:
-            nbr_nodes = neighbors[nbr_start:nbr_end]
-            nbr_leaf_pos = leaf_lookup[nbr_nodes]
-            src_leaf_positions.extend(int(v) for v in nbr_leaf_pos if int(v) >= 0)
-        if src_leaf_positions:
-            src_leaf_positions = list(dict.fromkeys(src_leaf_positions))
-        chunks: list[np.ndarray] = []
-        for src_leaf_pos in src_leaf_positions:
-            start = int(leaf_ranges[src_leaf_pos, 0])
-            end = int(leaf_ranges[src_leaf_pos, 1])
-            chunks.append(np.arange(start, end + 1, dtype=np.int64))
-        if chunks:
-            src_indices = np.concatenate(chunks, axis=0)
-            src_indices = src_indices[src_indices != int(target_idx)]
-            src_indices = np.unique(src_indices)
-        else:
-            src_indices = np.zeros((0,), dtype=np.int64)
-        source_lists.append(src_indices)
-        max_sources = max(max_sources, int(src_indices.shape[0]))
+    particle_offsets = jnp.arange(max_leaf_particles, dtype=INDEX_DTYPE)
+    leaf_particle_idx = leaf_ranges[:, 0][:, None] + particle_offsets[None, :]
+    leaf_particle_mask = particle_offsets[None, :] < leaf_counts[:, None]
 
-    if max_sources == 0:
-        padded = np.zeros((target_np.shape[0], 0), dtype=np.int64)
-        mask = np.zeros((target_np.shape[0], 0), dtype=bool)
-        return jnp.asarray(padded, dtype=INDEX_DTYPE), jnp.asarray(mask, dtype=bool)
+    leaf_lookup = jnp.full((total_nodes,), -1, dtype=INDEX_DTYPE)
+    leaf_lookup = leaf_lookup.at[leaf_nodes].set(
+        jnp.arange(num_leaves, dtype=INDEX_DTYPE)
+    )
+    nbr_counts = offsets[1:] - offsets[:-1]
+    max_nbr = int(jnp.max(nbr_counts))
+    if max_nbr > 0:
+        nbr_offsets = jnp.arange(max_nbr, dtype=INDEX_DTYPE)
+        nbr_idx = offsets[:-1, None] + nbr_offsets[None, :]
+        nbr_valid = nbr_offsets[None, :] < nbr_counts[:, None]
+        nbr_safe_idx = jnp.where(nbr_valid, nbr_idx, 0)
+        nbr_nodes = neighbors[nbr_safe_idx]
+        nbr_leaf_pos = leaf_lookup[nbr_nodes]
+        nbr_leaf_pos = jnp.where(nbr_valid, nbr_leaf_pos, -1)
+    else:
+        nbr_leaf_pos = jnp.zeros((num_leaves, 0), dtype=INDEX_DTYPE)
 
-    padded = np.zeros((target_np.shape[0], max_sources), dtype=np.int64)
-    mask = np.zeros((target_np.shape[0], max_sources), dtype=bool)
-    for row, src_indices in enumerate(source_lists):
-        length = int(src_indices.shape[0])
-        if length == 0:
-            continue
-        padded[row, :length] = src_indices
-        mask[row, :length] = True
-    return jnp.asarray(padded, dtype=INDEX_DTYPE), jnp.asarray(mask, dtype=bool)
+    self_leaf = jnp.arange(num_leaves, dtype=INDEX_DTYPE)[:, None]
+    source_leaf_positions = jnp.concatenate([self_leaf, nbr_leaf_pos], axis=1)
+    source_leaf_valid = source_leaf_positions >= 0
+    source_leaf_safe = jnp.where(source_leaf_valid, source_leaf_positions, 0)
+
+    source_particle_idx_by_leaf = leaf_particle_idx[source_leaf_safe]
+    source_particle_mask_by_leaf = (
+        leaf_particle_mask[source_leaf_safe] & source_leaf_valid[..., None]
+    )
+
+    target_source_idx = source_particle_idx_by_leaf[target_leaf_pos]
+    target_source_mask = source_particle_mask_by_leaf[target_leaf_pos]
+    target_source_idx = target_source_idx.reshape((num_targets, -1))
+    target_source_mask = target_source_mask.reshape((num_targets, -1))
+    target_source_mask = target_source_mask & (target_source_idx != targets[:, None])
+
+    sentinel = jnp.asarray(jnp.iinfo(INDEX_DTYPE).max, dtype=INDEX_DTYPE)
+    sortable = jnp.where(target_source_mask, target_source_idx, sentinel)
+    sorted_idx = jnp.sort(sortable, axis=1)
+    non_sentinel = sorted_idx < sentinel
+    first = jnp.ones((num_targets, 1), dtype=bool)
+    changed = jnp.concatenate([first, sorted_idx[:, 1:] != sorted_idx[:, :-1]], axis=1)
+    unique_mask = non_sentinel & changed
+    padded = jnp.where(unique_mask, sorted_idx, 0)
+    return padded, unique_mask
 
 
 def _compute_targeted_nearfield(
@@ -4769,26 +4999,11 @@ def _evaluate_local_expansions_for_target_particles(
 
     offsets = target_positions - centers
 
-    def eval_cartesian(coeff_row: Array, offset_row: Array) -> tuple[Array, Array]:
-        coeff_dtype = coeff_row.dtype
-
-        def phi_fn(vec: Array) -> Array:
-            total = coeff_dtype.type(0.0)
-            for level_idx in range(order + 1):
-                start_idx = level_offset(level_idx)
-                combos = LOCAL_LEVEL_COMBOS[level_idx]
-                end_idx = start_idx + len(combos)
-                coeff_slice = coeff_row[start_idx:end_idx]
-                for combo_idx, combo in enumerate(combos):
-                    factor = coeff_dtype.type(LOCAL_COMBO_INV_FACTORIAL[combo])
-                    term = multi_power(vec, combo)
-                    total = total + coeff_slice[combo_idx] * term * factor
-            return total
-
-        value, grad = jax.value_and_grad(phi_fn)(offset_row)
-        return grad, value
-
-    gradients, potentials = jax.vmap(eval_cartesian)(coeffs, offsets)
+    gradients, potentials = _evaluate_local_cartesian_with_grad_batch(
+        coeffs,
+        offsets,
+        order=order,
+    )
     if return_potential:
         return gradients, potentials
     return gradients, None
@@ -4967,33 +5182,17 @@ def _evaluate_local_expansions_for_particles(
         )
         return gradients, potentials_flat
 
-    def evaluate_leaf(
-        coeffs_leaf: Array,
-        offsets_leaf: Array,
-        mask_leaf: Array,
-    ) -> tuple[Array, Array]:
-        coeff_dtype = coeffs_leaf.dtype
-
-        def phi_fn(vec: Array) -> Array:
-            total = coeff_dtype.type(0.0)
-            for level_idx in range(order + 1):
-                start_idx = level_offset(level_idx)
-                combos = LOCAL_LEVEL_COMBOS[level_idx]
-                end_idx = start_idx + len(combos)
-                coeff_slice = coeffs_leaf[start_idx:end_idx]
-                for combo_idx, combo in enumerate(combos):
-                    factor = coeff_dtype.type(LOCAL_COMBO_INV_FACTORIAL[combo])
-                    term = multi_power(vec, combo)
-                    total = total + coeff_slice[combo_idx] * term * factor
-            return total
-
-        value_and_grad_fn = jax.value_and_grad(phi_fn)
-        values, grads = jax.vmap(value_and_grad_fn)(offsets_leaf)
-        grads = jnp.where(mask_leaf[..., None], grads, 0.0)
-        values = jnp.where(mask_leaf, values, 0.0)
-        return grads, values
-
-    grad_field, potentials = jax.vmap(evaluate_leaf)(coeffs, offsets, valid)
+    coeffs_broadcast = jnp.broadcast_to(
+        coeffs[:, None, :],
+        offsets.shape[:-1] + (coeffs.shape[-1],),
+    )
+    grad_field, potentials = _evaluate_local_cartesian_with_grad_batch(
+        coeffs_broadcast,
+        offsets,
+        order=order,
+    )
+    grad_field = jnp.where(valid[..., None], grad_field, 0.0)
+    potentials = jnp.where(valid, potentials, 0.0)
 
     gradients = _scatter_vectors(
         jnp.zeros_like(positions),
