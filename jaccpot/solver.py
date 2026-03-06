@@ -492,6 +492,14 @@ class FastMultipoleMethod:
         """Clear cached prepared states in the runtime backend."""
         self._impl.clear_prepared_state_cache()
 
+    def clear_runtime_caches(
+        self: "FastMultipoleMethod", *, clear_jax_compilation: bool = False
+    ) -> None:
+        """Clear solver/runtime caches; optionally clear JAX compilation caches."""
+        self._impl.clear_runtime_caches(
+            clear_jax_compilation=bool(clear_jax_compilation)
+        )
+
     @property
     def recent_topology_reused(self: "FastMultipoleMethod") -> bool:
         """Whether the latest prepare/evaluate path reused cached topology."""

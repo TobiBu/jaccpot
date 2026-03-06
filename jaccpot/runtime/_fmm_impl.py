@@ -334,16 +334,52 @@ _KDTREE_DEFAULT_TRAVERSAL_CONFIG = DualTreeTraversalConfig(
     max_interactions_per_node=512,
     max_neighbors_per_leaf=2048,
 )
-_OPERATOR_CACHE_MAX = 4096
+_OPERATOR_CACHE_MAX = 512
 _operator_blocks_cache: "OrderedDict[tuple, tuple[Array, Array]]" = OrderedDict()
-_GROUPED_OPERATOR_CACHE_MAX = 256
+_GROUPED_OPERATOR_CACHE_MAX = 32
 _grouped_operator_blocks_cache: "OrderedDict[tuple, tuple[Array, Array]]" = (
     OrderedDict()
 )
-_GROUPED_SEGMENT_CACHE_MAX = 128
+_GROUPED_SEGMENT_CACHE_MAX = 32
 _grouped_segment_cache: (
     "OrderedDict[tuple, tuple[Array, Array, Array, Array, Array, Array]]"
 ) = OrderedDict()
+_GROUPED_OPERATOR_CACHE_ENTRY_MAX_BYTES = 64 * 1024 * 1024
+_GROUPED_OPERATOR_CACHE_TOTAL_MAX_BYTES = 256 * 1024 * 1024
+_GROUPED_SEGMENT_CACHE_ENTRY_MAX_BYTES = 32 * 1024 * 1024
+_GROUPED_SEGMENT_CACHE_TOTAL_MAX_BYTES = 128 * 1024 * 1024
+
+
+def _array_nbytes(arr: Array) -> int:
+    """Return approximate storage size in bytes for one array leaf."""
+    shape = tuple(int(dim) for dim in getattr(arr, "shape", ()))
+    if len(shape) == 0:
+        return int(np.dtype(arr.dtype).itemsize)
+    return int(np.prod(np.asarray(shape, dtype=np.int64))) * int(
+        np.dtype(arr.dtype).itemsize
+    )
+
+
+def _tuple_array_nbytes(value: tuple[Array, ...]) -> int:
+    """Return total bytes for a tuple of array leaves."""
+    return int(sum(_array_nbytes(arr) for arr in value))
+
+
+def _ordered_dict_values_nbytes(cache: OrderedDict) -> int:
+    """Return cumulative bytes of array-valued OrderedDict entries."""
+    total = 0
+    for value in cache.values():
+        total += _tuple_array_nbytes(value)
+    return int(total)
+
+
+def _clear_global_runtime_caches(*, clear_jax_compilation: bool = False) -> None:
+    """Drop process-level runtime caches that can retain large array payloads."""
+    _operator_blocks_cache.clear()
+    _grouped_operator_blocks_cache.clear()
+    _grouped_segment_cache.clear()
+    if clear_jax_compilation:
+        jax.clear_caches()
 
 
 def _array_digest(arr: Array) -> Optional[tuple[tuple[int, ...], str, bytes]]:
@@ -399,9 +435,15 @@ def _grouped_operator_cache_get(key: tuple) -> Optional[tuple[Array, Array]]:
 
 
 def _grouped_operator_cache_put(key: tuple, value: tuple[Array, Array]) -> None:
+    if _tuple_array_nbytes(value) > _GROUPED_OPERATOR_CACHE_ENTRY_MAX_BYTES:
+        return
     _grouped_operator_blocks_cache[key] = value
     _grouped_operator_blocks_cache.move_to_end(key)
-    while len(_grouped_operator_blocks_cache) > _GROUPED_OPERATOR_CACHE_MAX:
+    while (
+        len(_grouped_operator_blocks_cache) > _GROUPED_OPERATOR_CACHE_MAX
+        or _ordered_dict_values_nbytes(_grouped_operator_blocks_cache)
+        > _GROUPED_OPERATOR_CACHE_TOTAL_MAX_BYTES
+    ):
         _grouped_operator_blocks_cache.popitem(last=False)
 
 
@@ -419,9 +461,15 @@ def _grouped_segment_cache_put(
     key: tuple,
     value: tuple[Array, Array, Array, Array, Array, Array],
 ) -> None:
+    if _tuple_array_nbytes(value) > _GROUPED_SEGMENT_CACHE_ENTRY_MAX_BYTES:
+        return
     _grouped_segment_cache[key] = value
     _grouped_segment_cache.move_to_end(key)
-    while len(_grouped_segment_cache) > _GROUPED_SEGMENT_CACHE_MAX:
+    while (
+        len(_grouped_segment_cache) > _GROUPED_SEGMENT_CACHE_MAX
+        or _ordered_dict_values_nbytes(_grouped_segment_cache)
+        > _GROUPED_SEGMENT_CACHE_TOTAL_MAX_BYTES
+    ):
         _grouped_segment_cache.popitem(last=False)
 
 
@@ -1041,6 +1089,22 @@ class FastMultipoleMethod:
         self._prepared_state_cache_masses = None
         self._topology_reuse_entry = None
         self._recent_topology_reused = False
+
+    def clear_runtime_caches(
+        self: "FastMultipoleMethod", *, clear_jax_compilation: bool = False
+    ) -> None:
+        """Release solver/runtime caches to reduce memory pressure."""
+
+        self.clear_prepared_state_cache()
+        self._locals_template = None
+        self._interaction_cache = None
+        self._tree_workspace = None
+        self._last_force_scale_nodes = None
+        self._recent_retry_events = tuple()
+        self._recent_far_pairs_by_gear_counts = tuple()
+        _clear_global_runtime_caches(
+            clear_jax_compilation=bool(clear_jax_compilation)
+        )
 
     def _solidfmm_basis_mode(self: "FastMultipoleMethod") -> str:
         """Return active solidfmm coefficient family ('complex' or 'real')."""

@@ -369,3 +369,22 @@ def test_jitted_compute_does_not_leak_tracers_into_solver_caches():
     )
     acc = fmm.evaluate_prepared_state(state)
     assert acc.shape == positions.shape
+
+
+def test_clear_runtime_caches_resets_runtime_state():
+    positions, masses = _sample_problem(n=64)
+    fmm = FastMultipoleMethod(
+        preset=FMMPreset.FAST,
+        basis="solidfmm",
+    )
+    _ = fmm.compute_accelerations(
+        positions,
+        masses,
+        leaf_size=16,
+        max_order=3,
+        reuse_prepared_state=True,
+    )
+
+    assert fmm._impl._prepared_state_cache_value is not None
+    fmm.clear_runtime_caches(clear_jax_compilation=False)
+    assert fmm._impl._prepared_state_cache_value is None
