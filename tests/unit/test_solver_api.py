@@ -471,9 +471,11 @@ def test_large_n_gpu_preset_applies_memory_safe_gpu_defaults():
     assert fmm._impl.precompute_nearfield_scatter_schedules is False
     assert fmm._impl.streamed_far_pairs is True
     assert fmm._impl.mixed_order_farfield is False
+    assert fmm._impl.m2l_chunk_size is None
     assert fmm._impl.enable_interaction_cache is False
     assert fmm._impl.retain_traversal_result is False
     assert fmm._impl.retain_interactions is False
+    assert fmm._impl.autotune_m2l_chunk is True
     assert fmm._impl.mac_type == "dehnen"
 
 
@@ -550,3 +552,14 @@ def test_prepare_state_non_streamed_without_retention_omits_interactions():
     assert int(state.downward.interactions.sources.shape[0]) == 0
     acc = fmm.evaluate_prepared_state(state)
     assert acc.shape == positions.shape
+
+
+def test_runtime_autotune_m2l_chunk_flag_flows_to_runtime():
+    fmm = FastMultipoleMethod(
+        preset=FMMPreset.FAST,
+        basis="solidfmm",
+        advanced=FMMAdvancedConfig(
+            runtime=RuntimePolicyConfig(autotune_m2l_chunk=True),
+        ),
+    )
+    assert bool(fmm._impl.autotune_m2l_chunk) is True

@@ -42,7 +42,7 @@ def _default_advanced_for_preset(preset: FMMPreset) -> FMMAdvancedConfig:
                 mode="auto",
                 grouped_interactions=False,
                 rotation="solidfmm",
-                m2l_chunk_size=1024,
+                m2l_chunk_size=None,
                 l2l_chunk_size=None,
                 streamed_far_pairs=True,
                 mixed_order=False,
@@ -65,6 +65,7 @@ def _default_advanced_for_preset(preset: FMMPreset) -> FMMAdvancedConfig:
                 enable_interaction_cache=False,
                 retain_traversal_result=False,
                 retain_interactions=False,
+                autotune_m2l_chunk=True,
             ),
             mac_type="dehnen",
             dehnen_radius_scale=1.0,
@@ -482,6 +483,12 @@ class FastMultipoleMethod:
                 legacy_kwargs.pop(
                     "retain_interactions",
                     advanced_cfg.runtime.retain_interactions,
+                )
+            ),
+            autotune_m2l_chunk=bool(
+                legacy_kwargs.pop(
+                    "autotune_m2l_chunk",
+                    advanced_cfg.runtime.autotune_m2l_chunk,
                 )
             ),
             fixed_order=runtime_overrides.fixed_order,

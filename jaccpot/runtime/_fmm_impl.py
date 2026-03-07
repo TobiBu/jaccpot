@@ -7,6 +7,7 @@ gravitational forces in O(N) time instead of O(N^2) for direct summation.
 
 import hashlib
 import math
+import time
 from collections import OrderedDict
 from dataclasses import dataclass
 from functools import partial
@@ -355,6 +356,20 @@ _GROUPED_OPERATOR_CACHE_ENTRY_MAX_BYTES = 64 * 1024 * 1024
 _GROUPED_OPERATOR_CACHE_TOTAL_MAX_BYTES = 256 * 1024 * 1024
 _GROUPED_SEGMENT_CACHE_ENTRY_MAX_BYTES = 32 * 1024 * 1024
 _GROUPED_SEGMENT_CACHE_TOTAL_MAX_BYTES = 128 * 1024 * 1024
+_M2L_CHUNK_AUTOTUNE_CACHE_MAX = 64
+_m2l_chunk_autotune_cache: "OrderedDict[tuple[Any, ...], int]" = OrderedDict()
+_GPU_M2L_AUTOTUNE_PAIR_BINS = (
+    65_536,
+    262_144,
+    1_048_576,
+    4_194_304,
+)
+_GPU_M2L_AUTOTUNE_SMALL_CANDIDATES = (512, 1024)
+_GPU_M2L_AUTOTUNE_MEDIUM_CANDIDATES = (1024, 2048)
+_GPU_M2L_AUTOTUNE_LARGE_CANDIDATES = (2048, 4096)
+_GPU_M2L_AUTOTUNE_XL_CANDIDATES = (4096, 8192)
+_GPU_M2L_AUTOTUNE_MAX_SAMPLE_PAIRS = 65_536
+_GPU_M2L_AUTOTUNE_MAX_SAMPLE_NODES = 8_192
 
 
 def _array_nbytes(arr: Array) -> int:
@@ -378,6 +393,25 @@ def _ordered_dict_values_nbytes(cache: OrderedDict) -> int:
     for value in cache.values():
         total += _tuple_array_nbytes(value)
     return int(total)
+
+
+def _m2l_autotune_lookup(key: tuple[Any, ...]) -> Optional[int]:
+    """Return cached M2L chunk size for an autotune signature."""
+
+    cached = _m2l_chunk_autotune_cache.get(key)
+    if cached is None:
+        return None
+    _m2l_chunk_autotune_cache.move_to_end(key)
+    return int(cached)
+
+
+def _m2l_autotune_store(key: tuple[Any, ...], chunk_size: int) -> None:
+    """Store one autotuned M2L chunk size with LRU eviction."""
+
+    _m2l_chunk_autotune_cache[key] = int(chunk_size)
+    _m2l_chunk_autotune_cache.move_to_end(key)
+    while len(_m2l_chunk_autotune_cache) > _M2L_CHUNK_AUTOTUNE_CACHE_MAX:
+        _m2l_chunk_autotune_cache.popitem(last=False)
 
 
 def _clear_global_runtime_caches(*, clear_jax_compilation: bool = False) -> None:
@@ -1013,6 +1047,7 @@ class FastMultipoleMethod:
         enable_interaction_cache: bool = True,
         retain_traversal_result: bool = True,
         retain_interactions: bool = True,
+        autotune_m2l_chunk: bool = False,
         host_refine_mode: str = "auto",
         preset: Optional[Union[str, FMMPreset]] = None,
         fixed_order: Optional[int] = None,
@@ -1105,6 +1140,7 @@ class FastMultipoleMethod:
         self.enable_interaction_cache = bool(enable_interaction_cache)
         self.retain_traversal_result = bool(retain_traversal_result)
         self.retain_interactions = bool(retain_interactions)
+        self.autotune_m2l_chunk = bool(autotune_m2l_chunk)
         dehnen_scale_val = float(dehnen_radius_scale)
         if dehnen_scale_val <= 0.0:
             raise ValueError("dehnen_radius_scale must be > 0")
@@ -1679,6 +1715,241 @@ class FastMultipoleMethod:
             max_neighbors_per_leaf=int(capped_neighbors),
         )
 
+    def _select_autotune_m2l_candidates(self, *, pair_count: int) -> tuple[int, ...]:
+        """Return candidate chunk sizes for one pair-count regime."""
+
+        pairs = int(pair_count)
+        if pairs < _GPU_M2L_AUTOTUNE_PAIR_BINS[0]:
+            return _GPU_M2L_AUTOTUNE_SMALL_CANDIDATES
+        if pairs < _GPU_M2L_AUTOTUNE_PAIR_BINS[1]:
+            return _GPU_M2L_AUTOTUNE_MEDIUM_CANDIDATES
+        if pairs < _GPU_M2L_AUTOTUNE_PAIR_BINS[2]:
+            return _GPU_M2L_AUTOTUNE_LARGE_CANDIDATES
+        return _GPU_M2L_AUTOTUNE_XL_CANDIDATES
+
+    def _sample_and_remap_far_pairs_for_autotune(
+        self,
+        *,
+        src: Array,
+        tgt: Array,
+        max_pairs: int = _GPU_M2L_AUTOTUNE_MAX_SAMPLE_PAIRS,
+        max_nodes: int = _GPU_M2L_AUTOTUNE_MAX_SAMPLE_NODES,
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        """Sample far pairs and remap node ids to a compact contiguous range."""
+
+        src_np = np.asarray(jax.device_get(src), dtype=np.int64).reshape(-1)
+        tgt_np = np.asarray(jax.device_get(tgt), dtype=np.int64).reshape(-1)
+        pair_count = int(src_np.shape[0])
+        if pair_count == 0:
+            return (
+                np.zeros((0,), dtype=np.int32),
+                np.zeros((0,), dtype=np.int32),
+                np.zeros((0,), dtype=np.int64),
+            )
+
+        stride = max(1, pair_count // int(max_pairs))
+        src_view = src_np[::stride]
+        tgt_view = tgt_np[::stride]
+        if src_view.shape[0] > int(max_pairs):
+            src_view = src_view[: int(max_pairs)]
+            tgt_view = tgt_view[: int(max_pairs)]
+
+        node_to_local: dict[int, int] = {}
+        local_to_global: list[int] = []
+        src_local: list[int] = []
+        tgt_local: list[int] = []
+        max_nodes_int = int(max_nodes)
+        for src_i, tgt_i in zip(src_view.tolist(), tgt_view.tolist()):
+            src_g = int(src_i)
+            tgt_g = int(tgt_i)
+            src_local_id = node_to_local.get(src_g)
+            if src_local_id is None:
+                if len(local_to_global) >= max_nodes_int:
+                    continue
+                src_local_id = len(local_to_global)
+                node_to_local[src_g] = src_local_id
+                local_to_global.append(src_g)
+            tgt_local_id = node_to_local.get(tgt_g)
+            if tgt_local_id is None:
+                if len(local_to_global) >= max_nodes_int:
+                    continue
+                tgt_local_id = len(local_to_global)
+                node_to_local[tgt_g] = tgt_local_id
+                local_to_global.append(tgt_g)
+            src_local.append(src_local_id)
+            tgt_local.append(tgt_local_id)
+
+        return (
+            np.asarray(src_local, dtype=np.int32),
+            np.asarray(tgt_local, dtype=np.int32),
+            np.asarray(local_to_global, dtype=np.int64),
+        )
+
+    def _autotune_runtime_m2l_chunk_size(
+        self,
+        *,
+        upward: TreeUpwardData,
+        src: Array,
+        tgt: Array,
+        order: int,
+        pair_count: int,
+    ) -> Optional[int]:
+        """Auto-select M2L chunk size on GPU for streamed far-pair execution."""
+
+        if (
+            not bool(self.autotune_m2l_chunk)
+            or self.expansion_basis != "solidfmm"
+            or jax.default_backend() != "gpu"
+            or int(pair_count) <= 0
+        ):
+            return None
+
+        basis_mode = self._solidfmm_basis_mode()
+        order_int = int(order)
+        pair_count_int = int(pair_count)
+        dtype_name = str(jnp.asarray(upward.multipoles.centers).dtype)
+        pair_bin = 0
+        for idx, upper in enumerate(_GPU_M2L_AUTOTUNE_PAIR_BINS):
+            if pair_count_int < int(upper):
+                pair_bin = idx
+                break
+        else:
+            pair_bin = len(_GPU_M2L_AUTOTUNE_PAIR_BINS)
+        key = (
+            "gpu",
+            str(basis_mode),
+            dtype_name,
+            order_int,
+            str(self.complex_rotation),
+            "" if self.m2l_impl is None else str(self.m2l_impl),
+            int(bool(self.use_pallas)),
+            int(pair_bin),
+        )
+        cached = _m2l_autotune_lookup(key)
+        if cached is not None:
+            return int(cached)
+
+        candidates = self._select_autotune_m2l_candidates(pair_count=pair_count_int)
+        (
+            src_sample_np,
+            tgt_sample_np,
+            local_to_global_np,
+        ) = self._sample_and_remap_far_pairs_for_autotune(src=src, tgt=tgt)
+        if src_sample_np.size == 0 or local_to_global_np.size == 0:
+            return None
+
+        local_to_global = jnp.asarray(local_to_global_np, dtype=INDEX_DTYPE)
+        src_sample = jnp.asarray(src_sample_np, dtype=INDEX_DTYPE)
+        tgt_sample = jnp.asarray(tgt_sample_np, dtype=INDEX_DTYPE)
+        centers = jnp.asarray(upward.multipoles.centers)[local_to_global]
+        coeff_count = sh_size(order_int)
+        if basis_mode == "complex":
+            coeff_dtype = complex_dtype_for_real(centers.dtype)
+            multip_all = jnp.asarray(upward.multipoles.packed).astype(coeff_dtype)
+        else:
+            coeff_dtype = centers.dtype
+            multip_all = complex_to_real_coeffs(
+                jnp.asarray(upward.multipoles.packed), order=order_int
+            ).astype(coeff_dtype)
+        multip = multip_all[local_to_global, :coeff_count]
+        locals0 = jnp.zeros(
+            (int(local_to_global_np.shape[0]), int(coeff_count)),
+            dtype=coeff_dtype,
+        )
+        total_nodes = int(local_to_global_np.shape[0])
+        best_chunk: Optional[int] = None
+        best_time = math.inf
+
+        for chunk in candidates:
+            chunk_int = int(chunk)
+            if chunk_int <= 0:
+                continue
+            try:
+                if basis_mode == "complex":
+                    _ = _accumulate_solidfmm_m2l_chunked_scan(
+                        locals0,
+                        multip,
+                        centers,
+                        src_sample,
+                        tgt_sample,
+                        order=order_int,
+                        rotation=str(self.complex_rotation),
+                        total_nodes=total_nodes,
+                        chunk_size=chunk_int,
+                    ).block_until_ready()
+                    t0 = time.perf_counter()
+                    _ = _accumulate_solidfmm_m2l_chunked_scan(
+                        locals0,
+                        multip,
+                        centers,
+                        src_sample,
+                        tgt_sample,
+                        order=order_int,
+                        rotation=str(self.complex_rotation),
+                        total_nodes=total_nodes,
+                        chunk_size=chunk_int,
+                    ).block_until_ready()
+                else:
+                    m2l_impl = "rot_scale" if self.m2l_impl is None else str(self.m2l_impl)
+                    if self.use_pallas:
+                        _ = _accumulate_real_m2l_chunked_scan_pallas(
+                            locals0,
+                            multip,
+                            centers,
+                            src_sample,
+                            tgt_sample,
+                            order=order_int,
+                            m2l_impl=m2l_impl,
+                            total_nodes=total_nodes,
+                            chunk_size=chunk_int,
+                        ).block_until_ready()
+                        t0 = time.perf_counter()
+                        _ = _accumulate_real_m2l_chunked_scan_pallas(
+                            locals0,
+                            multip,
+                            centers,
+                            src_sample,
+                            tgt_sample,
+                            order=order_int,
+                            m2l_impl=m2l_impl,
+                            total_nodes=total_nodes,
+                            chunk_size=chunk_int,
+                        ).block_until_ready()
+                    else:
+                        _ = _accumulate_real_m2l_chunked_scan(
+                            locals0,
+                            multip,
+                            centers,
+                            src_sample,
+                            tgt_sample,
+                            order=order_int,
+                            m2l_impl=m2l_impl,
+                            total_nodes=total_nodes,
+                            chunk_size=chunk_int,
+                        ).block_until_ready()
+                        t0 = time.perf_counter()
+                        _ = _accumulate_real_m2l_chunked_scan(
+                            locals0,
+                            multip,
+                            centers,
+                            src_sample,
+                            tgt_sample,
+                            order=order_int,
+                            m2l_impl=m2l_impl,
+                            total_nodes=total_nodes,
+                            chunk_size=chunk_int,
+                        ).block_until_ready()
+                elapsed = float(time.perf_counter() - t0)
+            except Exception:
+                continue
+            if elapsed < best_time:
+                best_time = elapsed
+                best_chunk = chunk_int
+
+        if best_chunk is not None:
+            _m2l_autotune_store(key, int(best_chunk))
+        return best_chunk
+
     def _validate_prepare_state_request(
         self,
         *,
@@ -2170,6 +2441,38 @@ class FastMultipoleMethod:
             )
         else:
             self._recent_far_pairs_by_gear_counts = tuple()
+
+        if (
+            runtime_m2l_chunk_size is None
+            and bool(self.autotune_m2l_chunk)
+            and self.expansion_basis == "solidfmm"
+            and jax.default_backend() == "gpu"
+            and far_pairs_by_gear is not None
+            and len(far_pairs_by_gear) > 0
+        ):
+            tune_idx = 0
+            tune_pair_count = -1
+            for idx, (src_bucket, _) in enumerate(far_pairs_by_gear):
+                count_i = int(src_bucket.shape[0])
+                if count_i > tune_pair_count:
+                    tune_idx = idx
+                    tune_pair_count = count_i
+            if tune_pair_count > 0:
+                tune_src, tune_tgt = far_pairs_by_gear[tune_idx]
+                tune_order = int(
+                    tree_artifacts.upward.multipoles.order
+                    if tune_idx >= len(p_gears_for_downward)
+                    else p_gears_for_downward[tune_idx]
+                )
+                tuned_chunk = self._autotune_runtime_m2l_chunk_size(
+                    upward=tree_artifacts.upward,
+                    src=tune_src,
+                    tgt=tune_tgt,
+                    order=tune_order,
+                    pair_count=tune_pair_count,
+                )
+                if tuned_chunk is not None:
+                    runtime_m2l_chunk_size = int(tuned_chunk)
 
         interactions_for_downward: Optional[NodeInteractionList] = interactions
         if (

@@ -68,6 +68,7 @@ class RuntimePolicyConfig:
     enable_interaction_cache: bool = True
     retain_traversal_result: bool = True
     retain_interactions: bool = True
+    autotune_m2l_chunk: bool = False
 
 
 @dataclass(frozen=True)

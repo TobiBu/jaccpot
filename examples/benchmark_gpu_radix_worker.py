@@ -53,6 +53,8 @@ def _dtype_from_name(name: str) -> jnp.dtype:
 
 
 def _build_runtime_config(config: dict[str, Any]) -> dict[str, Any]:
+    preset_norm = str(config.get("preset", "fast")).strip().lower()
+    autotune_default = preset_norm == "large_n_gpu"
     traversal_raw = config.get("traversal_config")
     traversal_cfg: Optional[DualTreeTraversalConfig]
     if traversal_raw is None:
@@ -104,6 +106,9 @@ def _build_runtime_config(config: dict[str, Any]) -> dict[str, Any]:
                 config.get("retain_traversal_result", True)
             ),
             retain_interactions=bool(config.get("retain_interactions", True)),
+            autotune_m2l_chunk=bool(
+                config.get("autotune_m2l_chunk", autotune_default)
+            ),
         ),
         mac_type=str(config.get("mac_type", "dehnen")),
     )
