@@ -9,6 +9,7 @@ from jaccpot import (
     ComplexSHBasis,
     FarFieldConfig,
 )
+import jaccpot.runtime._fmm_impl as fmm_impl_private
 from jaccpot import FastMultipoleMethod
 from jaccpot import FastMultipoleMethod as ExpanseFMM
 from jaccpot import (
@@ -467,6 +468,10 @@ def test_large_n_gpu_preset_applies_memory_safe_gpu_defaults():
     assert fmm._impl.grouped_interactions is False
     assert fmm._impl.nearfield_mode == "bucketed"
     assert fmm._impl.precompute_nearfield_scatter_schedules is False
+    assert fmm._impl.streamed_far_pairs is True
+    assert fmm._impl.mixed_order_farfield is False
+    assert fmm._impl.enable_interaction_cache is False
+    assert fmm._impl.retain_traversal_result is False
     assert fmm._impl.mac_type == "dehnen"
 
 
@@ -476,3 +481,23 @@ def test_large_n_gpu_preset_accepts_string_alias():
         basis="solidfmm",
     )
     assert fmm.preset is FMMPreset.LARGE_N_GPU
+
+
+def test_bucket_far_pairs_by_level_split_returns_two_gears():
+    interactions = type(
+        "DummyInteractions",
+        (),
+        {"level_offsets": jnp.asarray([0, 2, 4], dtype=jnp.int32)},
+    )()
+    src = jnp.asarray([0, 1, 2, 3], dtype=jnp.int32)
+    tgt = jnp.asarray([4, 5, 6, 7], dtype=jnp.int32)
+    gears, buckets = fmm_impl_private._bucket_far_pairs_by_level_split(
+        interactions=interactions,
+        src_far=src,
+        tgt_far=tgt,
+        max_order=4,
+        min_order=3,
+    )
+    assert gears == (3, 4)
+    assert int(buckets[0][0].shape[0]) == 2
+    assert int(buckets[1][0].shape[0]) == 2

@@ -97,6 +97,10 @@ solver = FastMultipoleMethod(
 )
 ```
 
+`large_n_gpu` keeps JIT enabled while applying memory-oriented runtime defaults
+for large particle-count single-GPU runs (streamed far-pair mode, reduced
+near-field precompute retention, and cache retention disabled).
+
 For split-step integrators (for example active-particle substeps), you can
 evaluate only a subset while still using all particles as FMM sources:
 

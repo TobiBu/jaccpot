@@ -41,6 +41,9 @@ class FarFieldConfig:
     rotation: Optional[str] = None
     m2l_chunk_size: Optional[int] = None
     l2l_chunk_size: Optional[int] = None
+    streamed_far_pairs: Optional[bool] = None
+    mixed_order: bool = False
+    mixed_order_min_order: Optional[int] = None
 
 
 @dataclass(frozen=True)
@@ -62,6 +65,8 @@ class RuntimePolicyConfig:
     max_pair_queue: Optional[int] = None
     pair_process_block: Optional[int] = None
     traversal_config: Optional[Any] = None
+    enable_interaction_cache: bool = True
+    retain_traversal_result: bool = True
 
 
 @dataclass(frozen=True)

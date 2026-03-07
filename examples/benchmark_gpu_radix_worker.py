@@ -71,13 +71,23 @@ def _build_runtime_config(config: dict[str, Any]) -> dict[str, Any]:
             leaf_target=int(config["leaf_target"]),
         ),
         farfield=FarFieldConfig(
-            rotation=str(config["farfield_rotation"]),
-            mode=str(config["farfield_mode"]),
-            grouped_interactions=bool(config["grouped_interactions"]),
+            rotation=str(config.get("farfield_rotation", "solidfmm")),
+            mode=str(config.get("farfield_mode", "auto")),
+            grouped_interactions=bool(config.get("grouped_interactions", False)),
+            streamed_far_pairs=config.get("streamed_far_pairs"),
+            mixed_order=bool(config.get("mixed_order", False)),
+            mixed_order_min_order=(
+                None
+                if config.get("mixed_order_min_order") is None
+                else int(config["mixed_order_min_order"])
+            ),
         ),
         nearfield=NearFieldConfig(
-            mode=str(config["nearfield_mode"]),
-            edge_chunk_size=int(config["nearfield_edge_chunk_size"]),
+            mode=str(config.get("nearfield_mode", "auto")),
+            edge_chunk_size=int(config.get("nearfield_edge_chunk_size", 256)),
+            precompute_scatter_schedules=bool(
+                config.get("precompute_scatter_schedules", True)
+            ),
         ),
         runtime=RuntimePolicyConfig(
             pair_process_block=(
@@ -86,9 +96,15 @@ def _build_runtime_config(config: dict[str, Any]) -> dict[str, Any]:
                 else int(config["pair_process_block"])
             ),
             traversal_config=traversal_cfg,
-            jit_traversal=bool(config["jit_traversal"]),
+            jit_traversal=bool(config.get("jit_traversal", True)),
+            enable_interaction_cache=bool(
+                config.get("enable_interaction_cache", True)
+            ),
+            retain_traversal_result=bool(
+                config.get("retain_traversal_result", True)
+            ),
         ),
-        mac_type=str(config["mac_type"]),
+        mac_type=str(config.get("mac_type", "dehnen")),
     )
     return dict(
         preset=FMMPreset(str(config["preset"])),

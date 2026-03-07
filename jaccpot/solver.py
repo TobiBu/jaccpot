@@ -44,6 +44,9 @@ def _default_advanced_for_preset(preset: FMMPreset) -> FMMAdvancedConfig:
                 rotation="solidfmm",
                 m2l_chunk_size=1024,
                 l2l_chunk_size=None,
+                streamed_far_pairs=True,
+                mixed_order=False,
+                mixed_order_min_order=None,
             ),
             nearfield=replace(
                 cfg.nearfield,
@@ -59,6 +62,8 @@ def _default_advanced_for_preset(preset: FMMPreset) -> FMMAdvancedConfig:
                 traversal_config=None,
                 max_pair_queue=None,
                 pair_process_block=None,
+                enable_interaction_cache=False,
+                retain_traversal_result=False,
             ),
             mac_type="dehnen",
             dehnen_radius_scale=1.0,
@@ -413,6 +418,18 @@ class FastMultipoleMethod:
             ),
             grouped_interactions=runtime_overrides.grouped_interactions,
             farfield_mode=runtime_overrides.farfield_mode,
+            streamed_far_pairs=legacy_kwargs.pop(
+                "streamed_far_pairs",
+                advanced_cfg.farfield.streamed_far_pairs,
+            ),
+            mixed_order_farfield=legacy_kwargs.pop(
+                "mixed_order_farfield",
+                advanced_cfg.farfield.mixed_order,
+            ),
+            mixed_order_min_order=legacy_kwargs.pop(
+                "mixed_order_min_order",
+                advanced_cfg.farfield.mixed_order_min_order,
+            ),
             m2l_chunk_size=legacy_kwargs.pop(
                 "m2l_chunk_size",
                 advanced_cfg.farfield.m2l_chunk_size,
@@ -448,6 +465,18 @@ class FastMultipoleMethod:
             ),
             use_dense_interactions=legacy_kwargs.pop("use_dense_interactions", None),
             traversal_config=legacy_kwargs.pop("traversal_config", traversal_config),
+            enable_interaction_cache=bool(
+                legacy_kwargs.pop(
+                    "enable_interaction_cache",
+                    advanced_cfg.runtime.enable_interaction_cache,
+                )
+            ),
+            retain_traversal_result=bool(
+                legacy_kwargs.pop(
+                    "retain_traversal_result",
+                    advanced_cfg.runtime.retain_traversal_result,
+                )
+            ),
             fixed_order=runtime_overrides.fixed_order,
             fixed_max_leaf_size=runtime_overrides.fixed_max_leaf_size,
             mac_type=runtime_overrides.mac_type,

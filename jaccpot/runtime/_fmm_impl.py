@@ -720,7 +720,7 @@ class FMMPreparedState:
     theta: float
     topology_key: Optional[str]
     interactions: NodeInteractionList
-    dual_tree_result: DualTreeWalkResult
+    dual_tree_result: Optional[DualTreeWalkResult]
     retry_events: Tuple[DualTreeRetryEvent, ...]
     nearfield_target_leaf_ids: Optional[Array]
     nearfield_source_leaf_ids: Optional[Array]
@@ -843,7 +843,7 @@ class _PrepareStateDualDownwardArtifacts(NamedTuple):
 
     interactions: NodeInteractionList
     neighbor_list: NodeNeighborList
-    traversal_result: DualTreeWalkResult
+    traversal_result: Optional[DualTreeWalkResult]
     downward: TreeDownwardData
     cache_entry: Optional[_InteractionCacheEntry]
 
@@ -852,6 +852,52 @@ def _contains_tracer(value: Any) -> bool:
     """Return ``True`` when a pytree contains JAX tracer values."""
     return any(
         isinstance(leaf, jax.core.Tracer) for leaf in jax.tree_util.tree_leaves(value)
+    )
+
+
+def _bucket_far_pairs_by_level_split(
+    *,
+    interactions: NodeInteractionList,
+    src_far: Array,
+    tgt_far: Array,
+    max_order: int,
+    min_order: int,
+) -> tuple[tuple[int, ...], tuple[tuple[Array, Array], ...]]:
+    """Split far pairs into two orders using interaction level offsets.
+
+    Coarser levels use ``max_order`` and deeper levels use ``min_order``.
+    """
+    min_order_int = int(min_order)
+    max_order_int = int(max_order)
+    if min_order_int >= max_order_int:
+        return (max_order_int,), ((src_far, tgt_far),)
+
+    level_offsets = getattr(interactions, "level_offsets", None)
+    if level_offsets is None:
+        return (max_order_int,), ((src_far, tgt_far),)
+
+    try:
+        offsets_np = np.asarray(jax.device_get(level_offsets), dtype=np.int64)
+    except Exception:
+        return (max_order_int,), ((src_far, tgt_far),)
+    if offsets_np.size <= 2:
+        return (max_order_int,), ((src_far, tgt_far),)
+
+    levels = int(offsets_np.size - 1)
+    split_level = max(1, levels // 2)
+    coarse_end = int(offsets_np[min(split_level, levels)])
+    fine_start = coarse_end
+    pair_count = int(src_far.shape[0])
+    coarse_end = max(0, min(coarse_end, pair_count))
+    fine_start = max(0, min(fine_start, pair_count))
+
+    src_hi = jnp.asarray(src_far[:coarse_end], dtype=INDEX_DTYPE)
+    tgt_hi = jnp.asarray(tgt_far[:coarse_end], dtype=INDEX_DTYPE)
+    src_lo = jnp.asarray(src_far[fine_start:], dtype=INDEX_DTYPE)
+    tgt_lo = jnp.asarray(tgt_far[fine_start:], dtype=INDEX_DTYPE)
+    return (
+        (min_order_int, max_order_int),
+        ((src_lo, tgt_lo), (src_hi, tgt_hi)),
     )
 
 
@@ -914,9 +960,14 @@ class FastMultipoleMethod:
         use_dense_interactions: Optional[bool] = None,
         grouped_interactions: Optional[bool] = None,
         farfield_mode: FarFieldMode = "auto",
+        streamed_far_pairs: Optional[bool] = None,
+        mixed_order_farfield: bool = False,
+        mixed_order_min_order: Optional[int] = None,
         nearfield_mode: NearFieldMode = "auto",
         nearfield_edge_chunk_size: int = 256,
         precompute_nearfield_scatter_schedules: bool = True,
+        enable_interaction_cache: bool = True,
+        retain_traversal_result: bool = True,
         host_refine_mode: str = "auto",
         preset: Optional[Union[str, FMMPreset]] = None,
         fixed_order: Optional[int] = None,
@@ -986,6 +1037,16 @@ class FastMultipoleMethod:
                 "farfield_mode must be 'auto', 'pair_grouped', or 'class_major'"
             )
         self.farfield_mode = farfield_mode_norm
+        self.streamed_far_pairs = bool(streamed_far_pairs)
+        self.mixed_order_farfield = bool(mixed_order_farfield)
+        self.mixed_order_min_order = (
+            None if mixed_order_min_order is None else int(mixed_order_min_order)
+        )
+        if (
+            self.mixed_order_min_order is not None
+            and int(self.mixed_order_min_order) < 0
+        ):
+            raise ValueError("mixed_order_min_order must be >= 0")
         nearfield_mode_norm = str(nearfield_mode).strip().lower()
         if nearfield_mode_norm not in ("auto", "baseline", "bucketed"):
             raise ValueError("nearfield_mode must be 'auto', 'baseline', or 'bucketed'")
@@ -996,6 +1057,8 @@ class FastMultipoleMethod:
         self.precompute_nearfield_scatter_schedules = bool(
             precompute_nearfield_scatter_schedules
         )
+        self.enable_interaction_cache = bool(enable_interaction_cache)
+        self.retain_traversal_result = bool(retain_traversal_result)
         dehnen_scale_val = float(dehnen_radius_scale)
         if dehnen_scale_val <= 0.0:
             raise ValueError("dehnen_radius_scale must be > 0")
@@ -1965,6 +2028,9 @@ class FastMultipoleMethod:
                 aspect_threshold=aspect_threshold_val,
             )
 
+        stateful_cache_enabled = bool(allow_stateful_cache) and bool(
+            self.enable_interaction_cache
+        )
         dual_artifacts, cache_entry = _build_dual_tree_artifacts(
             tree_artifacts.tree,
             tree_artifacts.upward.geometry,
@@ -1972,7 +2038,7 @@ class FastMultipoleMethod:
             mac_type=mac_type_val,
             dehnen_radius_scale=dehnen_radius_scale,
             cache_key=cache_key,
-            cache_entry=(self._interaction_cache if allow_stateful_cache else None),
+            cache_entry=(self._interaction_cache if stateful_cache_enabled else None),
             max_pair_queue=self.max_pair_queue,
             pair_process_block=self.pair_process_block,
             traversal_config=runtime_traversal_config,
@@ -1983,7 +2049,7 @@ class FastMultipoleMethod:
             pair_policy=pair_policy,
             policy_state=policy_state,
         )
-        if allow_stateful_cache:
+        if stateful_cache_enabled:
             self._interaction_cache = cache_entry
 
         (
@@ -2001,6 +2067,8 @@ class FastMultipoleMethod:
         ) = self._unpack_dual_tree_artifacts(dual_artifacts)
 
         far_pairs_by_gear = None
+        adaptive_order_for_downward = bool(self.adaptive_order)
+        p_gears_for_downward = self.p_gears
         if self.adaptive_order:
             if len(self.p_gears) == 0:
                 raise ValueError("adaptive_order=True requires non-empty p_gears")
@@ -2017,6 +2085,38 @@ class FastMultipoleMethod:
                 ),
                 num_tags=len(self.p_gears),
             )
+            self._recent_far_pairs_by_gear_counts = tuple(
+                int(bucket_src.shape[0]) for bucket_src, _ in far_pairs_by_gear
+            )
+        elif self.streamed_far_pairs:
+            far_total = int(traversal_result.far_pair_count)
+            src_far = jnp.asarray(
+                traversal_result.interaction_sources[:far_total], dtype=INDEX_DTYPE
+            )
+            tgt_far = jnp.asarray(
+                traversal_result.interaction_targets[:far_total], dtype=INDEX_DTYPE
+            )
+            max_order_int = int(tree_artifacts.upward.multipoles.order)
+            adaptive_order_for_downward = True
+            if self.mixed_order_farfield and max_order_int >= 1:
+                min_order_candidate = (
+                    max_order_int - 1
+                    if self.mixed_order_min_order is None
+                    else int(self.mixed_order_min_order)
+                )
+                min_order_candidate = max(0, min(min_order_candidate, max_order_int))
+                p_gears_for_downward, far_pairs_by_gear = (
+                    _bucket_far_pairs_by_level_split(
+                        interactions=interactions,
+                        src_far=src_far,
+                        tgt_far=tgt_far,
+                        max_order=max_order_int,
+                        min_order=min_order_candidate,
+                    )
+                )
+            else:
+                p_gears_for_downward = (max_order_int,)
+                far_pairs_by_gear = ((src_far, tgt_far),)
             self._recent_far_pairs_by_gear_counts = tuple(
                 int(bucket_src.shape[0]) for bucket_src, _ in far_pairs_by_gear
             )
@@ -2044,13 +2144,15 @@ class FastMultipoleMethod:
             grouped_segment_unique_targets=grouped_segment_unique_targets,
             farfield_mode=farfield_mode,
             far_pairs_by_gear=far_pairs_by_gear,
-            adaptive_order=self.adaptive_order,
-            p_gears=self.p_gears,
+            adaptive_order=adaptive_order_for_downward,
+            p_gears=p_gears_for_downward,
         )
         return _PrepareStateDualDownwardArtifacts(
             interactions=interactions,
             neighbor_list=neighbor_list,
-            traversal_result=traversal_result,
+            traversal_result=(
+                traversal_result if self.retain_traversal_result else None
+            ),
             downward=downward,
             cache_entry=cache_entry,
         )
