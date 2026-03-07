@@ -17,6 +17,7 @@ class FMMPreset(str, Enum):
     FAST = "fast"
     BALANCED = "balanced"
     ACCURATE = "accurate"
+    LARGE_N_GPU = "large_n_gpu"
 
 
 @dataclass(frozen=True)

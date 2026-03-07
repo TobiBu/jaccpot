@@ -23,6 +23,7 @@ Tree construction and traversal artifacts are provided by the companion package
 ## Features
 
 - High-level `FastMultipoleMethod` API with `fast`, `balanced`, and `accurate` presets
+- High-level `FastMultipoleMethod` API with `fast`, `balanced`, `accurate`, and `large_n_gpu` presets
 - Configurable expansion basis (`complex`/`solidfmm`, `real`, `cartesian`)
 - Pure-JAX real spherical harmonic rotate+scale M2L path
 - Adaptive-order far-field evaluation with fixed `p_gears` buckets
@@ -84,6 +85,16 @@ solver = FastMultipoleMethod(
     p_gears=(2, 3, 4),
 )
 accelerations = solver.compute_accelerations(positions, masses, max_order=4)
+```
+
+For very large single-GPU runs, use the dedicated throughput/memory preset:
+
+```python
+solver = FastMultipoleMethod(
+    preset="large_n_gpu",
+    basis="solidfmm",
+    precision="fp32",
+)
 ```
 
 For split-step integrators (for example active-particle substeps), you can

@@ -455,3 +455,24 @@ def test_nearfield_precompute_scatter_flag_flows_to_runtime():
         ),
     )
     assert fmm._impl.precompute_nearfield_scatter_schedules is False
+
+
+def test_large_n_gpu_preset_applies_memory_safe_gpu_defaults():
+    fmm = FastMultipoleMethod(
+        preset=FMMPreset.LARGE_N_GPU,
+        basis="solidfmm",
+    )
+    assert fmm._impl.tree_type == "radix"
+    assert fmm._impl.tree_build_mode == "lbvh"
+    assert fmm._impl.grouped_interactions is False
+    assert fmm._impl.nearfield_mode == "bucketed"
+    assert fmm._impl.precompute_nearfield_scatter_schedules is False
+    assert fmm._impl.mac_type == "dehnen"
+
+
+def test_large_n_gpu_preset_accepts_string_alias():
+    fmm = FastMultipoleMethod(
+        preset="large_n_gpu",
+        basis="solidfmm",
+    )
+    assert fmm.preset is FMMPreset.LARGE_N_GPU

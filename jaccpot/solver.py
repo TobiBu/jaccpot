@@ -24,6 +24,45 @@ def _default_advanced_for_preset(preset: FMMPreset) -> FMMAdvancedConfig:
     """Return default advanced overrides for a high-level preset."""
     if preset is FMMPreset.FAST:
         return FMMAdvancedConfig()
+    if preset is FMMPreset.LARGE_N_GPU:
+        cfg = FMMAdvancedConfig()
+        return replace(
+            cfg,
+            tree=replace(
+                cfg.tree,
+                tree_type="radix",
+                mode="lbvh",
+                leaf_target=64,
+                refine_local=False,
+                max_refine_levels=0,
+                aspect_threshold=16.0,
+            ),
+            farfield=replace(
+                cfg.farfield,
+                mode="auto",
+                grouped_interactions=False,
+                rotation="solidfmm",
+                m2l_chunk_size=1024,
+                l2l_chunk_size=None,
+            ),
+            nearfield=replace(
+                cfg.nearfield,
+                mode="bucketed",
+                edge_chunk_size=256,
+                precompute_scatter_schedules=False,
+            ),
+            runtime=replace(
+                cfg.runtime,
+                host_refine_mode="off",
+                jit_tree=True,
+                jit_traversal=True,
+                traversal_config=None,
+                max_pair_queue=None,
+                pair_process_block=None,
+            ),
+            mac_type="dehnen",
+            dehnen_radius_scale=1.0,
+        )
     if preset is FMMPreset.BALANCED:
         cfg = FMMAdvancedConfig()
         return replace(
