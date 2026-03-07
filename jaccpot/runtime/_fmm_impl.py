@@ -6,6 +6,7 @@ gravitational forces in O(N) time instead of O(N^2) for direct summation.
 """
 
 import hashlib
+import json
 import math
 import time
 from collections import OrderedDict
@@ -412,6 +413,44 @@ def _m2l_autotune_store(key: tuple[Any, ...], chunk_size: int) -> None:
     _m2l_chunk_autotune_cache.move_to_end(key)
     while len(_m2l_chunk_autotune_cache) > _M2L_CHUNK_AUTOTUNE_CACHE_MAX:
         _m2l_chunk_autotune_cache.popitem(last=False)
+
+
+def _m2l_autotune_payload() -> list[dict[str, Any]]:
+    """Return a JSON-serializable snapshot of the global M2L autotune cache."""
+
+    payload: list[dict[str, Any]] = []
+    for key, chunk in _m2l_chunk_autotune_cache.items():
+        payload.append({"key": list(key), "chunk_size": int(chunk)})
+    return payload
+
+
+def _restore_m2l_autotune_payload(
+    payload: list[dict[str, Any]],
+    *,
+    merge: bool = True,
+) -> int:
+    """Restore global M2L autotune cache entries from serialized payload."""
+
+    if not merge:
+        _m2l_chunk_autotune_cache.clear()
+    restored = 0
+    for item in payload:
+        if not isinstance(item, dict):
+            continue
+        key_raw = item.get("key")
+        chunk_raw = item.get("chunk_size")
+        if not isinstance(key_raw, list):
+            continue
+        try:
+            key = tuple(key_raw)
+            chunk_size = int(chunk_raw)
+        except Exception:
+            continue
+        if chunk_size <= 0:
+            continue
+        _m2l_autotune_store(key, chunk_size)
+        restored += 1
+    return int(restored)
 
 
 def _clear_global_runtime_caches(*, clear_jax_compilation: bool = False) -> None:
@@ -1261,6 +1300,43 @@ class FastMultipoleMethod:
         _clear_global_runtime_caches(
             clear_jax_compilation=bool(clear_jax_compilation)
         )
+
+    def export_m2l_autotune_cache(self: "FastMultipoleMethod") -> list[dict[str, Any]]:
+        """Return a JSON-serializable snapshot of global M2L autotune results."""
+
+        return _m2l_autotune_payload()
+
+    def import_m2l_autotune_cache(
+        self: "FastMultipoleMethod",
+        payload: list[dict[str, Any]],
+        *,
+        merge: bool = True,
+    ) -> int:
+        """Restore global M2L autotune results from serialized payload."""
+
+        return _restore_m2l_autotune_payload(payload, merge=bool(merge))
+
+    def save_m2l_autotune_cache(self: "FastMultipoleMethod", path: str) -> int:
+        """Write global M2L autotune cache to a JSON file."""
+
+        payload = self.export_m2l_autotune_cache()
+        with open(path, "w", encoding="utf-8") as handle:
+            json.dump(payload, handle)
+        return int(len(payload))
+
+    def load_m2l_autotune_cache(
+        self: "FastMultipoleMethod",
+        path: str,
+        *,
+        merge: bool = True,
+    ) -> int:
+        """Load global M2L autotune cache from a JSON file."""
+
+        with open(path, "r", encoding="utf-8") as handle:
+            payload = json.load(handle)
+        if not isinstance(payload, list):
+            raise ValueError("autotune cache JSON must contain a list payload")
+        return self.import_m2l_autotune_cache(payload, merge=bool(merge))
 
     def _solidfmm_basis_mode(self: "FastMultipoleMethod") -> str:
         """Return active solidfmm coefficient family ('complex' or 'real')."""

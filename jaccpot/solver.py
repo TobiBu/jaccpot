@@ -611,6 +611,36 @@ class FastMultipoleMethod:
             clear_jax_compilation=bool(clear_jax_compilation)
         )
 
+    def export_m2l_autotune_cache(self: "FastMultipoleMethod") -> list[dict[str, Any]]:
+        """Return a JSON-serializable snapshot of M2L chunk autotune results."""
+
+        return self._impl.export_m2l_autotune_cache()
+
+    def import_m2l_autotune_cache(
+        self: "FastMultipoleMethod",
+        payload: list[dict[str, Any]],
+        *,
+        merge: bool = True,
+    ) -> int:
+        """Restore M2L chunk autotune results from serialized payload."""
+
+        return int(self._impl.import_m2l_autotune_cache(payload, merge=bool(merge)))
+
+    def save_m2l_autotune_cache(self: "FastMultipoleMethod", path: str) -> int:
+        """Write M2L chunk autotune results to a JSON file."""
+
+        return int(self._impl.save_m2l_autotune_cache(path))
+
+    def load_m2l_autotune_cache(
+        self: "FastMultipoleMethod",
+        path: str,
+        *,
+        merge: bool = True,
+    ) -> int:
+        """Load M2L chunk autotune results from a JSON file."""
+
+        return int(self._impl.load_m2l_autotune_cache(path, merge=bool(merge)))
+
     @property
     def recent_topology_reused(self: "FastMultipoleMethod") -> bool:
         """Whether the latest prepare/evaluate path reused cached topology."""

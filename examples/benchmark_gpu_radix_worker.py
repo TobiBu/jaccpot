@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import pathlib
 import sys
 from typing import Any, Optional
@@ -42,6 +43,7 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--warmup", type=int, required=True)
     parser.add_argument("--dtype", choices=("float32", "float64"), required=True)
     parser.add_argument("--seed", type=int, default=0)
+    parser.add_argument("--autotune-cache", default=None)
     parser.add_argument("--config-json", required=True)
     return parser.parse_args()
 
@@ -118,6 +120,15 @@ def _build_runtime_config(config: dict[str, Any]) -> dict[str, Any]:
         theta=float(config["theta"]),
         softening=float(config["softening"]),
         working_dtype=_dtype_from_name(str(config["working_dtype"])),
+        adaptive_order=bool(config.get("adaptive_order", False)),
+        p_gears=tuple(int(v) for v in config.get("p_gears", [])),
+        adaptive_error_model=str(config.get("adaptive_error_model", "tail_proxy")),
+        adaptive_eps=(
+            None
+            if config.get("adaptive_eps") is None
+            else float(config.get("adaptive_eps"))
+        ),
+        mac_force_scale_mode=str(config.get("mac_force_scale_mode", "prev")),
         advanced=advanced,
     )
 
@@ -157,8 +168,13 @@ def _run_sweep_case(
     dtype: jnp.dtype,
     seed: int,
     fmm_kwargs: dict[str, Any],
+    autotune_cache_path: Optional[str] = None,
 ) -> dict[str, Any]:
     fmm = FastMultipoleMethod(**fmm_kwargs)
+    if autotune_cache_path:
+        cache_path = pathlib.Path(str(autotune_cache_path))
+        if cache_path.exists():
+            fmm.load_m2l_autotune_cache(str(cache_path), merge=True)
     key = jax.random.fold_in(jax.random.PRNGKey(int(seed)), int(num_particles))
     positions, masses, _ = bench_utils.generate_random_distribution(
         int(num_particles),
@@ -191,6 +207,10 @@ def _run_sweep_case(
         warmup=int(warmup),
         runs=int(runs),
     )
+    if autotune_cache_path:
+        cache_path = pathlib.Path(str(autotune_cache_path))
+        cache_path.parent.mkdir(parents=True, exist_ok=True)
+        fmm.save_m2l_autotune_cache(str(cache_path))
     return {
         "num_particles": int(num_particles),
         "mean_seconds": float(full_timing.mean),
@@ -213,8 +233,13 @@ def _run_prepare_case(
     dtype: jnp.dtype,
     seed: int,
     fmm_kwargs: dict[str, Any],
+    autotune_cache_path: Optional[str] = None,
 ) -> dict[str, Any]:
     fmm = FastMultipoleMethod(**fmm_kwargs)
+    if autotune_cache_path:
+        cache_path = pathlib.Path(str(autotune_cache_path))
+        if cache_path.exists():
+            fmm.load_m2l_autotune_cache(str(cache_path), merge=True)
     key = jax.random.fold_in(jax.random.PRNGKey(int(seed)), int(num_particles))
     positions, masses, _ = bench_utils.generate_random_distribution(
         int(num_particles),
@@ -276,6 +301,10 @@ def _run_prepare_case(
         - float(interactions_timing.mean),
         0.0,
     )
+    if autotune_cache_path:
+        cache_path = pathlib.Path(str(autotune_cache_path))
+        cache_path.parent.mkdir(parents=True, exist_ok=True)
+        fmm.save_m2l_autotune_cache(str(cache_path))
     return {
         "num_particles": int(num_particles),
         "tree_build_mean_seconds": float(tree_timing.mean),
@@ -292,6 +321,12 @@ def main() -> None:
     cfg = json.loads(args.config_json)
     fmm_kwargs = _build_runtime_config(cfg)
     dtype = _dtype_from_name(args.dtype)
+    autotune_cache_path: Optional[str] = args.autotune_cache
+    if autotune_cache_path is None:
+        env_cache = os.environ.get("JACCPOT_AUTOTUNE_CACHE_PATH")
+        autotune_cache_path = None if env_cache is None else str(env_cache).strip()
+    if autotune_cache_path == "":
+        autotune_cache_path = None
     try:
         if args.mode == "sweep":
             row = _run_sweep_case(
@@ -303,6 +338,7 @@ def main() -> None:
                 dtype=dtype,
                 seed=args.seed,
                 fmm_kwargs=fmm_kwargs,
+                autotune_cache_path=autotune_cache_path,
             )
         else:
             row = _run_prepare_case(
@@ -314,6 +350,7 @@ def main() -> None:
                 dtype=dtype,
                 seed=args.seed,
                 fmm_kwargs=fmm_kwargs,
+                autotune_cache_path=autotune_cache_path,
             )
     except Exception as exc:  # pragma: no cover - worker fallback path
         row = _make_row_error(

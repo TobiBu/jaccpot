@@ -1,5 +1,8 @@
 """Jaccpot package-local regression tests."""
 
+import json
+import tempfile
+
 import jax
 import jax.numpy as jnp
 import numpy as np
@@ -563,3 +566,24 @@ def test_runtime_autotune_m2l_chunk_flag_flows_to_runtime():
         ),
     )
     assert bool(fmm._impl.autotune_m2l_chunk) is True
+
+
+def test_m2l_autotune_cache_roundtrip_api():
+    fmm = FastMultipoleMethod(
+        preset=FMMPreset.FAST,
+        basis="solidfmm",
+    )
+    payload = [{"key": ["gpu", "complex", "float32", 4, "solidfmm", "", 0, 2], "chunk_size": 2048}]
+    restored = fmm.import_m2l_autotune_cache(payload, merge=False)
+    assert restored == 1
+    exported = fmm.export_m2l_autotune_cache()
+    assert any(int(item.get("chunk_size", -1)) == 2048 for item in exported)
+
+    with tempfile.NamedTemporaryFile(mode="w+", suffix=".json", delete=True) as handle:
+        saved = fmm.save_m2l_autotune_cache(handle.name)
+        assert saved >= 1
+        handle.seek(0)
+        raw = json.load(handle)
+        assert isinstance(raw, list)
+        loaded = fmm.load_m2l_autotune_cache(handle.name, merge=False)
+        assert loaded >= 1
