@@ -315,6 +315,7 @@ _NEARFIELD_BUCKETED_CPU_EDGE_CHUNK_MEDIUM = 1024
 _NEARFIELD_BUCKETED_CPU_EDGE_CHUNK_LARGE = 2048
 _NEARFIELD_BUCKETED_CPU_EDGE_CHUNK_XL = 4096
 _NEARFIELD_SCATTER_SCHEDULE_ITEM_CAP = 16_000_000
+_NEARFIELD_SCATTER_SCHEDULE_ITEM_CAP_GPU = 4_000_000
 _LARGE_CPU_M2L_CHUNK_SIZE = 32768
 _TRACING_MAX_NEIGHBORS_PER_LEAF = 512
 # Traced prepare_state uses static-capacity interaction buffers. This cap limits
@@ -322,6 +323,12 @@ _TRACING_MAX_NEIGHBORS_PER_LEAF = 512
 # keep padded far-field buffers from dominating runtime. Lower is faster but can
 # trigger traversal overflow/retry on harder particle configurations.
 _TRACING_MAX_INTERACTIONS_PER_NODE = 512
+_GPU_LARGE_PARTICLE_THRESHOLD = 65_536
+_GPU_MAX_NEIGHBORS_PER_LEAF = 1024
+_GPU_MAX_INTERACTIONS_PER_NODE = 4096
+_GPU_MIN_PAIR_QUEUE_MEDIUM = 131_072
+_GPU_MIN_PAIR_QUEUE_LARGE = 262_144
+_GPU_MIN_PAIR_QUEUE_XL = 524_288
 _LARGE_CPU_TRAVERSAL_CONFIG = DualTreeTraversalConfig(
     max_pair_queue=131072,
     process_block=4096,
@@ -909,6 +916,7 @@ class FastMultipoleMethod:
         farfield_mode: FarFieldMode = "auto",
         nearfield_mode: NearFieldMode = "auto",
         nearfield_edge_chunk_size: int = 256,
+        precompute_nearfield_scatter_schedules: bool = True,
         host_refine_mode: str = "auto",
         preset: Optional[Union[str, FMMPreset]] = None,
         fixed_order: Optional[int] = None,
@@ -985,6 +993,9 @@ class FastMultipoleMethod:
             raise ValueError("nearfield_edge_chunk_size must be positive")
         self.nearfield_mode = nearfield_mode_norm
         self.nearfield_edge_chunk_size = int(nearfield_edge_chunk_size)
+        self.precompute_nearfield_scatter_schedules = bool(
+            precompute_nearfield_scatter_schedules
+        )
         dehnen_scale_val = float(dehnen_radius_scale)
         if dehnen_scale_val <= 0.0:
             raise ValueError("dehnen_radius_scale must be > 0")
@@ -1473,6 +1484,41 @@ class FastMultipoleMethod:
                 m2l_chunk_size = _LARGE_CPU_M2L_CHUNK_SIZE
             if not self._explicit_l2l_chunk_size:
                 l2l_chunk_size = self.l2l_chunk_size
+        if (
+            backend_name == "gpu"
+            and self.tree_type == "radix"
+            and traversal_config is not None
+            and not self._explicit_traversal_config
+            and n_particles >= _GPU_LARGE_PARTICLE_THRESHOLD
+        ):
+            current_queue = int(traversal_config.max_pair_queue)
+            current_block = int(traversal_config.process_block)
+            current_interactions = int(traversal_config.max_interactions_per_node)
+            current_neighbors = int(traversal_config.max_neighbors_per_leaf)
+
+            if n_particles >= 4_194_304:
+                target_queue = _GPU_MIN_PAIR_QUEUE_XL
+            elif n_particles >= 1_048_576:
+                target_queue = _GPU_MIN_PAIR_QUEUE_LARGE
+            else:
+                target_queue = _GPU_MIN_PAIR_QUEUE_MEDIUM
+
+            next_queue = max(current_queue, int(target_queue))
+            next_interactions = min(
+                current_interactions, int(_GPU_MAX_INTERACTIONS_PER_NODE)
+            )
+            next_neighbors = min(current_neighbors, int(_GPU_MAX_NEIGHBORS_PER_LEAF))
+            if (
+                next_queue != current_queue
+                or next_interactions != current_interactions
+                or next_neighbors != current_neighbors
+            ):
+                traversal_config = DualTreeTraversalConfig(
+                    max_pair_queue=int(next_queue),
+                    process_block=int(current_block),
+                    max_interactions_per_node=int(next_interactions),
+                    max_neighbors_per_leaf=int(next_neighbors),
+                )
         if grouped_interactions:
             center_mode = "aabb"
             if farfield_mode == "auto":
@@ -2122,6 +2168,7 @@ class FastMultipoleMethod:
             and nearfield_target_leaf_ids is not None
             and nearfield_valid_pairs is not None
             and not traced_nearfield_pairs
+            and bool(self.precompute_nearfield_scatter_schedules)
         ):
             (
                 nearfield_chunk_sort_indices,
@@ -2187,7 +2234,12 @@ class FastMultipoleMethod:
             chunk = int(edge_chunk_size)
             chunk_count = (edge_count + chunk - 1) // chunk if edge_count > 0 else 0
             schedule_items = int(chunk_count * chunk * int(leaf_cap))
-            if schedule_items > _NEARFIELD_SCATTER_SCHEDULE_ITEM_CAP:
+            schedule_item_cap = (
+                _NEARFIELD_SCATTER_SCHEDULE_ITEM_CAP_GPU
+                if jax.default_backend() == "gpu"
+                else _NEARFIELD_SCATTER_SCHEDULE_ITEM_CAP
+            )
+            if schedule_items > int(schedule_item_cap):
                 return None, None, None
             return prepare_bucketed_scatter_schedules(
                 jnp.asarray(tree.node_ranges, dtype=INDEX_DTYPE),

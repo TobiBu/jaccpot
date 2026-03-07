@@ -440,3 +440,18 @@ def test_precision_fp64_requires_x64_enabled():
             basis="solidfmm",
             precision="fp64",
         )
+
+
+def test_nearfield_precompute_scatter_flag_flows_to_runtime():
+    fmm = FastMultipoleMethod(
+        preset=FMMPreset.FAST,
+        basis="solidfmm",
+        advanced=FMMAdvancedConfig(
+            nearfield=NearFieldConfig(
+                mode="bucketed",
+                edge_chunk_size=256,
+                precompute_scatter_schedules=False,
+            )
+        ),
+    )
+    assert fmm._impl.precompute_nearfield_scatter_schedules is False

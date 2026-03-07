@@ -384,6 +384,12 @@ class FastMultipoleMethod:
             ),
             nearfield_mode=runtime_overrides.nearfield_mode,
             nearfield_edge_chunk_size=runtime_overrides.nearfield_edge_chunk_size,
+            precompute_nearfield_scatter_schedules=bool(
+                legacy_kwargs.pop(
+                    "precompute_nearfield_scatter_schedules",
+                    advanced_cfg.nearfield.precompute_scatter_schedules,
+                )
+            ),
             host_refine_mode=legacy_kwargs.pop(
                 "host_refine_mode",
                 advanced_cfg.runtime.host_refine_mode,
