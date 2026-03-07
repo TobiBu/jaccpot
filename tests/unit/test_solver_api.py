@@ -525,8 +525,7 @@ def test_prepare_state_streamed_can_drop_interaction_storage():
     )
 
     state = fmm.prepare_state(positions, masses, leaf_size=16, max_order=3)
-    assert state.interactions is not None
-    assert int(state.interactions.sources.shape[0]) == 0
+    assert state.interactions is None
     assert int(state.downward.interactions.sources.shape[0]) == 0
     acc = fmm.evaluate_prepared_state(state)
     assert acc.shape == positions.shape
@@ -548,3 +547,6 @@ def test_prepare_state_non_streamed_without_retention_omits_interactions():
 
     state = fmm.prepare_state(positions, masses, leaf_size=16, max_order=2)
     assert state.interactions is None
+    assert int(state.downward.interactions.sources.shape[0]) == 0
+    acc = fmm.evaluate_prepared_state(state)
+    assert acc.shape == positions.shape

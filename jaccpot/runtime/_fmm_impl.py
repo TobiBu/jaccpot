@@ -855,6 +855,24 @@ class _FarPairCOO(NamedTuple):
     targets: Array
 
 
+def _empty_interaction_storage_for_tree(
+    tree: Tree,
+    *,
+    index_dtype: Any = INDEX_DTYPE,
+) -> NodeInteractionList:
+    """Construct a minimal zero-pair interaction list for a given tree."""
+
+    total_nodes = int(jnp.asarray(tree.parent).shape[0])
+    return NodeInteractionList(
+        offsets=jnp.zeros((total_nodes + 1,), dtype=index_dtype),
+        sources=jnp.zeros((0,), dtype=index_dtype),
+        targets=jnp.zeros((0,), dtype=index_dtype),
+        counts=jnp.zeros((total_nodes,), dtype=index_dtype),
+        level_offsets=jnp.zeros((1,), dtype=index_dtype),
+        target_levels=jnp.zeros((0,), dtype=index_dtype),
+    )
+
+
 def _empty_interaction_storage_like(interactions: NodeInteractionList) -> NodeInteractionList:
     """Return zero-pair interaction storage while preserving node-shaped metadata."""
 
@@ -2153,13 +2171,13 @@ class FastMultipoleMethod:
         else:
             self._recent_far_pairs_by_gear_counts = tuple()
 
-        interactions_for_downward = interactions
+        interactions_for_downward: Optional[NodeInteractionList] = interactions
         if (
             self.streamed_far_pairs
             and far_pairs_coo is not None
             and not bool(self.retain_interactions)
         ):
-            interactions_for_downward = _empty_interaction_storage_like(interactions)
+            interactions_for_downward = None
 
         downward = self._prepare_downward_with_artifacts(
             tree=tree_artifacts.tree,
@@ -2181,16 +2199,18 @@ class FastMultipoleMethod:
             grouped_segment_group_ids=grouped_segment_group_ids,
             grouped_segment_unique_targets=grouped_segment_unique_targets,
             farfield_mode=farfield_mode,
+            far_pairs_coo=far_pairs_coo,
             far_pairs_by_gear=far_pairs_by_gear,
             adaptive_order=adaptive_order_for_downward,
             p_gears=p_gears_for_downward,
         )
+        if not bool(self.retain_interactions):
+            downward = downward._replace(
+                interactions=_empty_interaction_storage_like(interactions)
+            )
         interactions_out: Optional[NodeInteractionList]
         if bool(self.retain_interactions):
             interactions_out = interactions
-        elif self.streamed_far_pairs and far_pairs_coo is not None:
-            interactions_out = interactions_for_downward
-            downward = downward._replace(interactions=interactions_for_downward)
         else:
             interactions_out = None
         return _PrepareStateDualDownwardArtifacts(
@@ -2463,7 +2483,7 @@ class FastMultipoleMethod:
         upward: TreeUpwardData,
         theta_val: float,
         locals_template: Optional[LocalExpansionData],
-        interactions: NodeInteractionList,
+        interactions: Optional[NodeInteractionList],
         runtime_m2l_chunk_size: Optional[int],
         runtime_l2l_chunk_size: Optional[int],
         runtime_traversal_config: Optional[DualTreeTraversalConfig],
@@ -2478,6 +2498,7 @@ class FastMultipoleMethod:
         grouped_segment_group_ids: Optional[Array],
         grouped_segment_unique_targets: Optional[Array],
         farfield_mode: str,
+        far_pairs_coo: Optional[_FarPairCOO] = None,
         far_pairs_by_gear: Optional[tuple[tuple[Array, Array], ...]] = None,
         adaptive_order: bool = False,
         p_gears: tuple[int, ...] = tuple(),
@@ -2503,6 +2524,7 @@ class FastMultipoleMethod:
             grouped_segment_group_ids=grouped_segment_group_ids,
             grouped_segment_unique_targets=grouped_segment_unique_targets,
             farfield_mode=farfield_mode,
+            far_pairs_coo=far_pairs_coo,
             far_pairs_by_gear=far_pairs_by_gear,
             adaptive_order=adaptive_order,
             p_gears=p_gears,
@@ -2706,6 +2728,7 @@ class FastMultipoleMethod:
         grouped_segment_unique_targets: Optional[Array] = None,
         farfield_mode: str = "pair_grouped",
         dehnen_radius_scale: Optional[float] = None,
+        far_pairs_coo: Optional[_FarPairCOO] = None,
         far_pairs_by_gear: Optional[tuple[tuple[Array, Array], ...]] = None,
         adaptive_order: Optional[bool] = None,
         p_gears: Optional[tuple[int, ...]] = None,
@@ -2756,6 +2779,7 @@ class FastMultipoleMethod:
                 grouped_segment_group_ids=grouped_segment_group_ids,
                 grouped_segment_unique_targets=grouped_segment_unique_targets,
                 farfield_mode=farfield_mode,
+                far_pairs_coo=far_pairs_coo,
                 far_pairs_by_gear=far_pairs_by_gear,
                 adaptive_order=adaptive_order_val,
                 p_gears=p_gears_val,
@@ -4536,6 +4560,7 @@ def _prepare_solidfmm_downward_sweep(
     grouped_segment_group_ids: Optional[Array] = None,
     grouped_segment_unique_targets: Optional[Array] = None,
     farfield_mode: str = "pair_grouped",
+    far_pairs_coo: Optional[_FarPairCOO] = None,
     far_pairs_by_gear: Optional[tuple[tuple[Array, Array], ...]] = None,
     adaptive_order: bool = False,
     p_gears: tuple[int, ...] = tuple(),
@@ -4544,7 +4569,7 @@ def _prepare_solidfmm_downward_sweep(
 ) -> TreeDownwardData:
     """Prepare M2L accumulation for solidfmm-style complex or real locals."""
 
-    if interactions is None:
+    if interactions is None and far_pairs_coo is None:
         interactions = build_well_separated_interactions(
             tree,
             upward.geometry,
@@ -4554,6 +4579,8 @@ def _prepare_solidfmm_downward_sweep(
             traversal_config=traversal_config,
             retry_logger=retry_logger,
         )
+    if interactions is None:
+        interactions = _empty_interaction_storage_for_tree(tree)
 
     p = int(upward.multipoles.order)
     centers = jnp.asarray(upward.multipoles.centers)
@@ -4575,8 +4602,12 @@ def _prepare_solidfmm_downward_sweep(
     else:
         locals_coeffs = jnp.zeros((total_nodes, coeff_count), dtype=dtype)
 
-    src = jnp.asarray(interactions.sources, dtype=INDEX_DTYPE)
-    tgt = jnp.asarray(interactions.targets, dtype=INDEX_DTYPE)
+    if far_pairs_coo is not None:
+        src = jnp.asarray(far_pairs_coo.sources, dtype=INDEX_DTYPE)
+        tgt = jnp.asarray(far_pairs_coo.targets, dtype=INDEX_DTYPE)
+    else:
+        src = jnp.asarray(interactions.sources, dtype=INDEX_DTYPE)
+        tgt = jnp.asarray(interactions.targets, dtype=INDEX_DTYPE)
 
     pair_count = int(src.shape[0])
 
