@@ -66,6 +66,71 @@ class _InteractionCacheEntry(NamedTuple):
     nearfield_leaf_cap: Optional[int]
 
 
+_CAPACITY_RETRY_MAX_ATTEMPTS = 2
+_CAPACITY_RETRY_QUEUE_BASE = 262_144
+_CAPACITY_RETRY_PROCESS_BLOCK_BASE = 256
+_CAPACITY_RETRY_INTERACTIONS_BASE = 8192
+_CAPACITY_RETRY_NEIGHBORS_BASE = 4096
+_CAPACITY_RETRY_QUEUE_MAX = 4_194_304
+_CAPACITY_RETRY_PROCESS_BLOCK_MAX = 4096
+_CAPACITY_RETRY_INTERACTIONS_MAX = 131_072
+_CAPACITY_RETRY_NEIGHBORS_MAX = 65_536
+
+
+def _looks_like_capacity_error(exc: BaseException) -> bool:
+    """Return whether an exception likely indicates traversal-capacity overflow."""
+    msg = str(exc).lower()
+    needles = (
+        "capacity exceeded",
+        "pair queue",
+        "neighbor list",
+        "interactions per node",
+        "max_pair_queue",
+        "max_neighbors_per_leaf",
+        "max_interactions_per_node",
+    )
+    return any(token in msg for token in needles)
+
+
+def _next_retry_traversal_settings(
+    *,
+    traversal_config: Optional[DualTreeTraversalConfig],
+    max_pair_queue: Optional[int],
+    pair_process_block: Optional[int],
+) -> tuple[DualTreeTraversalConfig, Optional[int], Optional[int]]:
+    """Scale traversal capacities for one retry attempt."""
+    if traversal_config is None:
+        queue = (
+            _CAPACITY_RETRY_QUEUE_BASE
+            if max_pair_queue is None
+            else max(int(max_pair_queue), _CAPACITY_RETRY_QUEUE_BASE)
+        )
+        block = (
+            _CAPACITY_RETRY_PROCESS_BLOCK_BASE
+            if pair_process_block is None
+            else max(int(pair_process_block), _CAPACITY_RETRY_PROCESS_BLOCK_BASE)
+        )
+        interactions = _CAPACITY_RETRY_INTERACTIONS_BASE
+        neighbors = _CAPACITY_RETRY_NEIGHBORS_BASE
+    else:
+        queue = max(int(traversal_config.max_pair_queue) * 2, 1)
+        block = max(int(traversal_config.process_block) * 2, 1)
+        interactions = max(int(traversal_config.max_interactions_per_node) * 2, 1)
+        neighbors = max(int(traversal_config.max_neighbors_per_leaf) * 2, 1)
+
+    queue = min(queue, _CAPACITY_RETRY_QUEUE_MAX)
+    block = min(block, _CAPACITY_RETRY_PROCESS_BLOCK_MAX)
+    interactions = min(interactions, _CAPACITY_RETRY_INTERACTIONS_MAX)
+    neighbors = min(neighbors, _CAPACITY_RETRY_NEIGHBORS_MAX)
+    next_config = DualTreeTraversalConfig(
+        max_pair_queue=int(queue),
+        process_block=int(block),
+        max_interactions_per_node=int(interactions),
+        max_neighbors_per_leaf=int(neighbors),
+    )
+    return next_config, int(queue), int(block)
+
+
 def _interaction_cache_key(
     tree: Tree,
     *,
@@ -196,21 +261,51 @@ def _build_dual_tree_artifacts(
     else:
         from . import fmm as _runtime_fmm
 
-        build_out = _runtime_fmm.build_interactions_and_neighbors(
-            tree,
-            geometry,
-            theta=theta,
-            mac_type=mac_type,
-            dehnen_radius_scale=dehnen_radius_scale,
-            max_pair_queue=max_pair_queue,
-            process_block=pair_process_block,
-            traversal_config=traversal_config,
-            retry_logger=retry_logger,
-            return_result=True,
-            return_grouped=grouped_interactions,
-            pair_policy=pair_policy,
-            policy_state=policy_state,
-        )
+        current_traversal_config = traversal_config
+        current_max_pair_queue = max_pair_queue
+        current_pair_process_block = pair_process_block
+        last_exc: Optional[BaseException] = None
+        build_out = None
+        for attempt in range(_CAPACITY_RETRY_MAX_ATTEMPTS + 1):
+            try:
+                build_out = _runtime_fmm.build_interactions_and_neighbors(
+                    tree,
+                    geometry,
+                    theta=theta,
+                    mac_type=mac_type,
+                    dehnen_radius_scale=dehnen_radius_scale,
+                    max_pair_queue=current_max_pair_queue,
+                    process_block=current_pair_process_block,
+                    traversal_config=current_traversal_config,
+                    retry_logger=retry_logger,
+                    return_result=True,
+                    return_grouped=grouped_interactions,
+                    pair_policy=pair_policy,
+                    policy_state=policy_state,
+                )
+                break
+            except RuntimeError as exc:
+                last_exc = exc
+                if (
+                    attempt >= _CAPACITY_RETRY_MAX_ATTEMPTS
+                    or not _looks_like_capacity_error(exc)
+                ):
+                    raise
+                (
+                    current_traversal_config,
+                    current_max_pair_queue,
+                    current_pair_process_block,
+                ) = _next_retry_traversal_settings(
+                    traversal_config=current_traversal_config,
+                    max_pair_queue=current_max_pair_queue,
+                    pair_process_block=current_pair_process_block,
+                )
+        if build_out is None:
+            if last_exc is not None:
+                raise RuntimeError(str(last_exc)) from last_exc
+            raise RuntimeError(
+                "dual-tree traversal build failed without producing artifacts"
+            )
         if grouped_interactions:
             (
                 interactions,
