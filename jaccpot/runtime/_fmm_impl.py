@@ -719,7 +719,7 @@ class FMMPreparedState:
     expansion_basis: ExpansionBasis
     theta: float
     topology_key: Optional[str]
-    interactions: NodeInteractionList
+    interactions: Optional[NodeInteractionList]
     dual_tree_result: Optional[DualTreeWalkResult]
     retry_events: Tuple[DualTreeRetryEvent, ...]
     nearfield_target_leaf_ids: Optional[Array]
@@ -841,11 +841,37 @@ class _PrepareStateTreeUpwardArtifacts(NamedTuple):
 class _PrepareStateDualDownwardArtifacts(NamedTuple):
     """Dual-tree and downward artifacts produced during prepare_state."""
 
-    interactions: NodeInteractionList
+    interactions: Optional[NodeInteractionList]
     neighbor_list: NodeNeighborList
     traversal_result: Optional[DualTreeWalkResult]
     downward: TreeDownwardData
     cache_entry: Optional[_InteractionCacheEntry]
+
+
+class _FarPairCOO(NamedTuple):
+    """Compact COO-style far-pair representation for streamed M2L execution."""
+
+    sources: Array
+    targets: Array
+
+
+def _empty_interaction_storage_like(interactions: NodeInteractionList) -> NodeInteractionList:
+    """Return zero-pair interaction storage while preserving node-shaped metadata."""
+
+    offsets = jnp.asarray(interactions.offsets)
+    counts = jnp.asarray(interactions.counts)
+    level_offsets = jnp.asarray(interactions.level_offsets)
+    sources = jnp.zeros((0,), dtype=jnp.asarray(interactions.sources).dtype)
+    targets = jnp.zeros((0,), dtype=jnp.asarray(interactions.targets).dtype)
+    target_levels = jnp.zeros((0,), dtype=jnp.asarray(interactions.target_levels).dtype)
+    return NodeInteractionList(
+        offsets=jnp.zeros_like(offsets),
+        sources=sources,
+        targets=targets,
+        counts=jnp.zeros_like(counts),
+        level_offsets=jnp.zeros_like(level_offsets),
+        target_levels=target_levels,
+    )
 
 
 def _contains_tracer(value: Any) -> bool:
@@ -968,6 +994,7 @@ class FastMultipoleMethod:
         precompute_nearfield_scatter_schedules: bool = True,
         enable_interaction_cache: bool = True,
         retain_traversal_result: bool = True,
+        retain_interactions: bool = True,
         host_refine_mode: str = "auto",
         preset: Optional[Union[str, FMMPreset]] = None,
         fixed_order: Optional[int] = None,
@@ -1059,6 +1086,7 @@ class FastMultipoleMethod:
         )
         self.enable_interaction_cache = bool(enable_interaction_cache)
         self.retain_traversal_result = bool(retain_traversal_result)
+        self.retain_interactions = bool(retain_interactions)
         dehnen_scale_val = float(dehnen_radius_scale)
         if dehnen_scale_val <= 0.0:
             raise ValueError("dehnen_radius_scale must be > 0")
@@ -2067,6 +2095,7 @@ class FastMultipoleMethod:
         ) = self._unpack_dual_tree_artifacts(dual_artifacts)
 
         far_pairs_by_gear = None
+        far_pairs_coo: Optional[_FarPairCOO] = None
         adaptive_order_for_downward = bool(self.adaptive_order)
         p_gears_for_downward = self.p_gears
         if self.adaptive_order:
@@ -2096,6 +2125,7 @@ class FastMultipoleMethod:
             tgt_far = jnp.asarray(
                 traversal_result.interaction_targets[:far_total], dtype=INDEX_DTYPE
             )
+            far_pairs_coo = _FarPairCOO(sources=src_far, targets=tgt_far)
             max_order_int = int(tree_artifacts.upward.multipoles.order)
             adaptive_order_for_downward = True
             if self.mixed_order_farfield and max_order_int >= 1:
@@ -2123,12 +2153,20 @@ class FastMultipoleMethod:
         else:
             self._recent_far_pairs_by_gear_counts = tuple()
 
+        interactions_for_downward = interactions
+        if (
+            self.streamed_far_pairs
+            and far_pairs_coo is not None
+            and not bool(self.retain_interactions)
+        ):
+            interactions_for_downward = _empty_interaction_storage_like(interactions)
+
         downward = self._prepare_downward_with_artifacts(
             tree=tree_artifacts.tree,
             upward=tree_artifacts.upward,
             theta_val=theta_val,
             locals_template=tree_artifacts.locals_template,
-            interactions=interactions,
+            interactions=interactions_for_downward,
             runtime_m2l_chunk_size=runtime_m2l_chunk_size,
             runtime_l2l_chunk_size=runtime_l2l_chunk_size,
             runtime_traversal_config=runtime_traversal_config,
@@ -2147,8 +2185,16 @@ class FastMultipoleMethod:
             adaptive_order=adaptive_order_for_downward,
             p_gears=p_gears_for_downward,
         )
+        interactions_out: Optional[NodeInteractionList]
+        if bool(self.retain_interactions):
+            interactions_out = interactions
+        elif self.streamed_far_pairs and far_pairs_coo is not None:
+            interactions_out = interactions_for_downward
+            downward = downward._replace(interactions=interactions_for_downward)
+        else:
+            interactions_out = None
         return _PrepareStateDualDownwardArtifacts(
-            interactions=interactions,
+            interactions=interactions_out,
             neighbor_list=neighbor_list,
             traversal_result=(
                 traversal_result if self.retain_traversal_result else None
@@ -4533,16 +4579,6 @@ def _prepare_solidfmm_downward_sweep(
     tgt = jnp.asarray(interactions.targets, dtype=INDEX_DTYPE)
 
     pair_count = int(src.shape[0])
-    if pair_count == 0:
-        empty_locals = LocalExpansionData(
-            order=p,
-            centers=centers,
-            coefficients=locals_coeffs,
-        )
-        return TreeDownwardData(
-            interactions=interactions,
-            locals=empty_locals,
-        )
 
     multip_packed = jnp.asarray(upward.multipoles.packed)
 
@@ -4620,12 +4656,24 @@ def _prepare_solidfmm_downward_sweep(
                 raise ValueError("far_pairs_by_gear must align with p_gears")
 
             pairs_by_order: dict[int, list[tuple[Array, Array]]] = {}
+            total_pairs_for_adaptive = 0
             for p_gear, pair_bucket in zip(p_gears_int, gear_pairs):
                 if int(p_gear) < 0 or int(p_gear) > int(p):
                     raise ValueError(
                         "p_gears entries must satisfy 0 <= p_gear <= p_max"
                     )
+                total_pairs_for_adaptive += int(pair_bucket[0].shape[0])
                 pairs_by_order.setdefault(int(p_gear), []).append(pair_bucket)
+            if total_pairs_for_adaptive == 0:
+                empty_locals = LocalExpansionData(
+                    order=p,
+                    centers=centers,
+                    coefficients=locals_coeffs,
+                )
+                return TreeDownwardData(
+                    interactions=interactions,
+                    locals=empty_locals,
+                )
 
             locals_updated = locals_coeffs
             for p_gear, order_pairs in sorted(pairs_by_order.items()):
@@ -4737,6 +4785,16 @@ def _prepare_solidfmm_downward_sweep(
                     (locals_slice, locals_tail),
                     axis=1,
                 )
+        elif pair_count == 0:
+            empty_locals = LocalExpansionData(
+                order=p,
+                centers=centers,
+                coefficients=locals_coeffs,
+            )
+            return TreeDownwardData(
+                interactions=interactions,
+                locals=empty_locals,
+            )
         elif basis_mode_norm == "complex" and pair_count <= chunk_size:
             locals_updated = _accumulate_solidfmm_m2l_fullbatch(
                 locals_coeffs,

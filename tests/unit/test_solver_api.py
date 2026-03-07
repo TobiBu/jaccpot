@@ -19,6 +19,7 @@ from jaccpot import FMMPreset
 from jaccpot import FMMPreset as ExpansePreset
 from jaccpot import (
     NearFieldConfig,
+    RuntimePolicyConfig,
     TreeConfig,
 )
 
@@ -472,6 +473,7 @@ def test_large_n_gpu_preset_applies_memory_safe_gpu_defaults():
     assert fmm._impl.mixed_order_farfield is False
     assert fmm._impl.enable_interaction_cache is False
     assert fmm._impl.retain_traversal_result is False
+    assert fmm._impl.retain_interactions is False
     assert fmm._impl.mac_type == "dehnen"
 
 
@@ -501,3 +503,48 @@ def test_bucket_far_pairs_by_level_split_returns_two_gears():
     assert gears == (3, 4)
     assert int(buckets[0][0].shape[0]) == 2
     assert int(buckets[1][0].shape[0]) == 2
+
+
+def test_prepare_state_streamed_can_drop_interaction_storage():
+    positions, masses = _sample_problem(n=128)
+    fmm = FastMultipoleMethod(
+        preset=FMMPreset.FAST,
+        basis="solidfmm",
+        advanced=FMMAdvancedConfig(
+            farfield=FarFieldConfig(
+                mode="auto",
+                grouped_interactions=False,
+                streamed_far_pairs=True,
+            ),
+            runtime=RuntimePolicyConfig(
+                enable_interaction_cache=False,
+                retain_traversal_result=False,
+                retain_interactions=False,
+            ),
+        ),
+    )
+
+    state = fmm.prepare_state(positions, masses, leaf_size=16, max_order=3)
+    assert state.interactions is not None
+    assert int(state.interactions.sources.shape[0]) == 0
+    assert int(state.downward.interactions.sources.shape[0]) == 0
+    acc = fmm.evaluate_prepared_state(state)
+    assert acc.shape == positions.shape
+
+
+def test_prepare_state_non_streamed_without_retention_omits_interactions():
+    positions, masses = _sample_problem(n=64)
+    fmm = FastMultipoleMethod(
+        preset=FMMPreset.FAST,
+        basis="solidfmm",
+        advanced=FMMAdvancedConfig(
+            farfield=FarFieldConfig(streamed_far_pairs=False),
+            runtime=RuntimePolicyConfig(
+                enable_interaction_cache=False,
+                retain_interactions=False,
+            ),
+        ),
+    )
+
+    state = fmm.prepare_state(positions, masses, leaf_size=16, max_order=2)
+    assert state.interactions is None

@@ -67,6 +67,7 @@ class RuntimePolicyConfig:
     traversal_config: Optional[Any] = None
     enable_interaction_cache: bool = True
     retain_traversal_result: bool = True
+    retain_interactions: bool = True
 
 
 @dataclass(frozen=True)

@@ -64,6 +64,7 @@ def _default_advanced_for_preset(preset: FMMPreset) -> FMMAdvancedConfig:
                 pair_process_block=None,
                 enable_interaction_cache=False,
                 retain_traversal_result=False,
+                retain_interactions=False,
             ),
             mac_type="dehnen",
             dehnen_radius_scale=1.0,
@@ -475,6 +476,12 @@ class FastMultipoleMethod:
                 legacy_kwargs.pop(
                     "retain_traversal_result",
                     advanced_cfg.runtime.retain_traversal_result,
+                )
+            ),
+            retain_interactions=bool(
+                legacy_kwargs.pop(
+                    "retain_interactions",
+                    advanced_cfg.runtime.retain_interactions,
                 )
             ),
             fixed_order=runtime_overrides.fixed_order,

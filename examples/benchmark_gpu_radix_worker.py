@@ -103,6 +103,7 @@ def _build_runtime_config(config: dict[str, Any]) -> dict[str, Any]:
             retain_traversal_result=bool(
                 config.get("retain_traversal_result", True)
             ),
+            retain_interactions=bool(config.get("retain_interactions", True)),
         ),
         mac_type=str(config.get("mac_type", "dehnen")),
     )
