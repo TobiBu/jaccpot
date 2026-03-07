@@ -116,6 +116,27 @@ acc_active = coupler.accelerations(primitive_state, active_indices=active)
 
 The default remains the existing complex solidFMM-compatible path.
 
+## Precision Control
+
+Use `precision` to select runtime dtype explicitly:
+
+```python
+solver_fp32 = FastMultipoleMethod(
+    preset="fast",
+    basis="solidfmm",
+    precision="fp32",
+)
+
+solver_fp64 = FastMultipoleMethod(
+    preset="accurate",
+    basis="solidfmm",
+    precision="fp64",
+)
+```
+
+`precision="fp64"` requires `jax_enable_x64=True`. You can still pass
+`working_dtype` directly; if both are set, they must match.
+
 ## Adaptive Order
 
 Use `adaptive_order=True` together with a static gear list:
