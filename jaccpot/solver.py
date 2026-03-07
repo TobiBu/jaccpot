@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import warnings
 from dataclasses import replace
-from typing import Any, NamedTuple, Optional, Sequence, Tuple, Union
+from typing import Any, Literal, NamedTuple, Optional, Sequence, Tuple, Union
 
+import jax
+import jax.numpy as jnp
 from jaxtyping import Array, DTypeLike
 
 from .basis import BasisInterface, ComplexSHBasis, RealSHBasis
@@ -278,6 +280,7 @@ class FastMultipoleMethod:
         theta: float = 0.6,
         G: float = 1.0,
         softening: float = 1e-3,
+        precision: Optional[Literal["fp32", "fp64"]] = None,
         working_dtype: Optional[DTypeLike] = None,
         advanced: Optional[FMMAdvancedConfig] = None,
         **legacy_kwargs: Any,
@@ -295,6 +298,26 @@ class FastMultipoleMethod:
                 legacy_kwargs=legacy_kwargs,
             )
         )
+        if precision is not None:
+            precision_norm = str(precision).strip().lower()
+            if precision_norm not in ("fp32", "fp64"):
+                raise ValueError("precision must be one of ('fp32', 'fp64')")
+            precision_dtype = (
+                jnp.float32 if precision_norm == "fp32" else jnp.float64
+            )
+            if (
+                working_dtype is not None
+                and jnp.dtype(working_dtype) != jnp.dtype(precision_dtype)
+            ):
+                raise ValueError(
+                    "precision conflicts with explicit working_dtype; "
+                    "use only one or ensure they match"
+                )
+            if precision_norm == "fp64" and not bool(jax.config.jax_enable_x64):
+                raise ValueError(
+                    "precision='fp64' requires jax_enable_x64=True"
+                )
+            working_dtype = precision_dtype
         basis_resolution = _resolve_basis_input(basis)
         runtime_basis = basis_resolution.runtime_basis
         resolved_m2l_impl = m2l_impl

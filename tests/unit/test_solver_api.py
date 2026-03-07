@@ -388,3 +388,55 @@ def test_clear_runtime_caches_resets_runtime_state():
     assert fmm._impl._prepared_state_cache_value is not None
     fmm.clear_runtime_caches(clear_jax_compilation=False)
     assert fmm._impl._prepared_state_cache_value is None
+
+
+def test_gpu_runtime_overrides_cap_traversal_capacities_for_large_n():
+    fmm = FastMultipoleMethod(
+        preset=FMMPreset.FAST,
+        basis="solidfmm",
+    )
+    overrides = fmm._impl._resolve_runtime_execution_overrides(
+        num_particles=131072,
+        backend="gpu",
+    )
+    cfg = overrides.traversal_config
+    assert cfg is not None
+    assert int(cfg.max_neighbors_per_leaf) <= 1024
+    assert int(cfg.max_interactions_per_node) <= 4096
+    assert int(cfg.max_pair_queue) >= 131072
+
+
+def test_precision_fp32_sets_working_dtype():
+    fmm = FastMultipoleMethod(
+        preset=FMMPreset.FAST,
+        basis="solidfmm",
+        precision="fp32",
+    )
+    assert fmm._impl.working_dtype == jnp.float32
+
+
+def test_precision_conflicts_with_working_dtype():
+    with pytest.raises(ValueError, match="precision conflicts with explicit"):
+        FastMultipoleMethod(
+            preset=FMMPreset.FAST,
+            basis="solidfmm",
+            precision="fp32",
+            working_dtype=jnp.float64,
+        )
+
+
+def test_precision_fp64_requires_x64_enabled():
+    if bool(jax.config.jax_enable_x64):
+        fmm = FastMultipoleMethod(
+            preset=FMMPreset.FAST,
+            basis="solidfmm",
+            precision="fp64",
+        )
+        assert fmm._impl.working_dtype == jnp.float64
+        return
+    with pytest.raises(ValueError, match="requires jax_enable_x64=True"):
+        FastMultipoleMethod(
+            preset=FMMPreset.FAST,
+            basis="solidfmm",
+            precision="fp64",
+        )
