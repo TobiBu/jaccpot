@@ -4560,7 +4560,7 @@ def _accumulate_solidfmm_m2l_grouped(
         class_deltas=class_deltas,
         dtype=multip_packed.dtype,
     )
-    if int(src_sorted.shape[0]) <= int(chunk_size):
+    if int(src_sorted.shape[0]) <= min(int(chunk_size), _M2L_FULLBATCH_MAX_PAIRS):
         return _accumulate_solidfmm_m2l_grouped_fullbatch(
             locals_coeffs,
             multip_packed,
