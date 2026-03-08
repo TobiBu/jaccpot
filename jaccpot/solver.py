@@ -39,8 +39,8 @@ def _default_advanced_for_preset(preset: FMMPreset) -> FMMAdvancedConfig:
             ),
             farfield=replace(
                 cfg.farfield,
-                mode="auto",
-                grouped_interactions=False,
+                mode="class_major",
+                grouped_interactions=True,
                 rotation="solidfmm",
                 m2l_chunk_size=None,
                 l2l_chunk_size=None,
@@ -235,7 +235,12 @@ def _pop_legacy_runtime_overrides(
         target_leaf_particles = int(legacy_leaf_target)
         legacy_used = True
 
-    expanse_preset = "fast" if preset_norm is FMMPreset.FAST else None
+    if preset_norm is FMMPreset.FAST:
+        expanse_preset = "fast"
+    elif preset_norm is FMMPreset.LARGE_N_GPU:
+        expanse_preset = "large_n_gpu"
+    else:
+        expanse_preset = None
     legacy_preset = legacy_kwargs.pop("preset", None)
     if legacy_preset is not None:
         if hasattr(legacy_preset, "value"):
@@ -348,21 +353,16 @@ class FastMultipoleMethod:
             precision_norm = str(precision).strip().lower()
             if precision_norm not in ("fp32", "fp64"):
                 raise ValueError("precision must be one of ('fp32', 'fp64')")
-            precision_dtype = (
-                jnp.float32 if precision_norm == "fp32" else jnp.float64
-            )
-            if (
-                working_dtype is not None
-                and jnp.dtype(working_dtype) != jnp.dtype(precision_dtype)
+            precision_dtype = jnp.float32 if precision_norm == "fp32" else jnp.float64
+            if working_dtype is not None and jnp.dtype(working_dtype) != jnp.dtype(
+                precision_dtype
             ):
                 raise ValueError(
                     "precision conflicts with explicit working_dtype; "
                     "use only one or ensure they match"
                 )
             if precision_norm == "fp64" and not bool(jax.config.jax_enable_x64):
-                raise ValueError(
-                    "precision='fp64' requires jax_enable_x64=True"
-                )
+                raise ValueError("precision='fp64' requires jax_enable_x64=True")
             working_dtype = precision_dtype
         basis_resolution = _resolve_basis_input(basis)
         runtime_basis = basis_resolution.runtime_basis

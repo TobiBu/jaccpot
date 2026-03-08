@@ -321,6 +321,7 @@ _NEARFIELD_BUCKETED_CPU_EDGE_CHUNK_LARGE = 2048
 _NEARFIELD_BUCKETED_CPU_EDGE_CHUNK_XL = 4096
 _NEARFIELD_SCATTER_SCHEDULE_ITEM_CAP = 16_000_000
 _NEARFIELD_SCATTER_SCHEDULE_ITEM_CAP_GPU = 4_000_000
+_NEARFIELD_GPU_PRECOMPUTE_MAX_PARTICLES = 262_144
 _LARGE_CPU_M2L_CHUNK_SIZE = 32768
 _TRACING_MAX_NEIGHBORS_PER_LEAF = 512
 # Traced prepare_state uses static-capacity interaction buffers. This cap limits
@@ -2740,7 +2741,9 @@ class FastMultipoleMethod:
             and nearfield_target_leaf_ids is not None
             and nearfield_valid_pairs is not None
             and not traced_nearfield_pairs
-            and bool(self.precompute_nearfield_scatter_schedules)
+            and self._should_precompute_nearfield_scatter_schedules(
+                num_particles=int(num_particles)
+            )
         ):
             (
                 nearfield_chunk_sort_indices,
@@ -2763,6 +2766,20 @@ class FastMultipoleMethod:
             chunk_group_ids=nearfield_chunk_group_ids,
             chunk_unique_indices=nearfield_chunk_unique_indices,
         )
+
+    def _should_precompute_nearfield_scatter_schedules(
+        self,
+        *,
+        num_particles: int,
+    ) -> bool:
+        """Decide whether to materialize near-field scatter schedules."""
+        if not bool(self.precompute_nearfield_scatter_schedules):
+            return False
+        if jax.default_backend() != "gpu":
+            return True
+        # For large GPU runs, schedule materialization is often memory-dominant;
+        # keep execution streamed/chunked instead.
+        return int(num_particles) <= int(_NEARFIELD_GPU_PRECOMPUTE_MAX_PARTICLES)
 
     def _prepare_leaf_neighbor_pairs_safe(
         self,
