@@ -21,7 +21,10 @@ from beartype import beartype
 from beartype.typing import Callable, Tuple
 from jaxtyping import Array, DTypeLike, jaxtyped
 from yggdrax.dense_interactions import DenseInteractionBuffers
-from yggdrax.grouped_interactions import GroupedInteractionBuffers
+from yggdrax.grouped_interactions import (
+    GroupedInteractionBuffers,
+    build_grouped_interactions,
+)
 from yggdrax.interactions import (
     DualTreeRetryEvent,
     DualTreeTraversalConfig,
@@ -371,6 +374,9 @@ _GPU_M2L_AUTOTUNE_LARGE_CANDIDATES = (2048, 4096)
 _GPU_M2L_AUTOTUNE_XL_CANDIDATES = (4096, 8192)
 _GPU_M2L_AUTOTUNE_MAX_SAMPLE_PAIRS = 65_536
 _GPU_M2L_AUTOTUNE_MAX_SAMPLE_NODES = 8_192
+# Keep full-batch M2L kernels for genuinely small pair sets only; larger sets use
+# chunked reduction to avoid pair_count-scaled temporaries on GPU.
+_M2L_FULLBATCH_MAX_PAIRS = 2_048
 
 
 def _array_nbytes(arr: Array) -> int:
@@ -946,7 +952,9 @@ def _empty_interaction_storage_for_tree(
     )
 
 
-def _empty_interaction_storage_like(interactions: NodeInteractionList) -> NodeInteractionList:
+def _empty_interaction_storage_like(
+    interactions: NodeInteractionList,
+) -> NodeInteractionList:
     """Return zero-pair interaction storage while preserving node-shaped metadata."""
 
     offsets = jnp.asarray(interactions.offsets)
@@ -1297,9 +1305,7 @@ class FastMultipoleMethod:
         self._last_force_scale_nodes = None
         self._recent_retry_events = tuple()
         self._recent_far_pairs_by_gear_counts = tuple()
-        _clear_global_runtime_caches(
-            clear_jax_compilation=bool(clear_jax_compilation)
-        )
+        _clear_global_runtime_caches(clear_jax_compilation=bool(clear_jax_compilation))
 
     def export_m2l_autotune_cache(self: "FastMultipoleMethod") -> list[dict[str, Any]]:
         """Return a JSON-serializable snapshot of global M2L autotune results."""
@@ -1656,6 +1662,9 @@ class FastMultipoleMethod:
         class_major_cpu = (
             backend_name == "cpu" and n_particles >= _CLASS_MAJOR_CPU_PARTICLE_THRESHOLD
         )
+        class_major_gpu = (
+            backend_name == "gpu" and n_particles >= _GPU_LARGE_PARTICLE_THRESHOLD
+        )
 
         if self.host_refine_mode == "off":
             refine_local_override = False
@@ -1685,6 +1694,16 @@ class FastMultipoleMethod:
             and self.mac_type == "dehnen"
             and self.tree_type == "radix"
             and large_cpu
+        ):
+            grouped_interactions = True
+        if (
+            not self._explicit_grouped_interactions
+            and self.preset in ("fast", "large_n_gpu")
+            and self.expansion_basis == "solidfmm"
+            and self.mac_type == "dehnen"
+            and self.tree_type == "radix"
+            and backend_name == "gpu"
+            and n_particles >= _GPU_LARGE_PARTICLE_THRESHOLD
         ):
             grouped_interactions = True
 
@@ -1743,7 +1762,11 @@ class FastMultipoleMethod:
         if grouped_interactions:
             center_mode = "aabb"
             if farfield_mode == "auto":
-                farfield_mode = "class_major" if class_major_cpu else "pair_grouped"
+                farfield_mode = (
+                    "class_major"
+                    if (class_major_cpu or class_major_gpu)
+                    else "pair_grouped"
+                )
         else:
             farfield_mode = "pair_grouped"
 
@@ -1966,7 +1989,9 @@ class FastMultipoleMethod:
                         chunk_size=chunk_int,
                     ).block_until_ready()
                 else:
-                    m2l_impl = "rot_scale" if self.m2l_impl is None else str(self.m2l_impl)
+                    m2l_impl = (
+                        "rot_scale" if self.m2l_impl is None else str(self.m2l_impl)
+                    )
                     if self.use_pallas:
                         _ = _accumulate_real_m2l_chunked_scan_pallas(
                             locals0,
@@ -4114,6 +4139,43 @@ def _rotation_blocks_for_grouped_classes(
     return blocks_to, blocks_from
 
 
+def _chunk_segment_scatter_add(
+    local_accum: Array,
+    contribs: Array,
+    tgt_chunk: Array,
+    valid: Array,
+    *,
+    chunk_size: int,
+) -> Array:
+    """Reduce one fixed-width chunk by target index and scatter-add into locals."""
+    sort_idx = jnp.argsort(tgt_chunk)
+    tgt_sorted = tgt_chunk[sort_idx]
+    contribs_sorted = contribs[sort_idx]
+    valid_sorted = valid[sort_idx]
+
+    contribs_sorted = jnp.where(valid_sorted[:, None], contribs_sorted, 0)
+    new_group = jnp.concatenate(
+        (
+            jnp.asarray([True], dtype=bool),
+            tgt_sorted[1:] != tgt_sorted[:-1],
+        ),
+        axis=0,
+    )
+    group_ids = jnp.cumsum(new_group.astype(INDEX_DTYPE)) - jnp.asarray(
+        1,
+        dtype=INDEX_DTYPE,
+    )
+    reduced = jax.ops.segment_sum(contribs_sorted, group_ids, chunk_size)
+
+    unique_targets = jnp.zeros((chunk_size,), dtype=INDEX_DTYPE)
+    unique_targets = unique_targets.at[group_ids].set(tgt_sorted)
+    unique_valid = jnp.zeros((chunk_size,), dtype=bool)
+    unique_valid = unique_valid.at[group_ids].set(valid_sorted)
+    safe_targets = jnp.where(unique_valid, unique_targets, 0)
+    reduced = jnp.where(unique_valid[:, None], reduced, 0)
+    return local_accum.at[safe_targets].add(reduced)
+
+
 @partial(
     jax.jit,
     static_argnames=("order", "total_nodes", "chunk_size"),
@@ -4159,9 +4221,14 @@ def _accumulate_solidfmm_m2l_grouped_chunked_scan(
             blocks_from,
             order=order,
         ).astype(locals_coeffs.dtype)
-        contribs = jnp.where(valid[:, None], contribs, 0)
-        accum_chunk = jax.ops.segment_sum(contribs, tgt_chunk, total_nodes)
-        return local_accum + accum_chunk, None
+        local_accum = _chunk_segment_scatter_add(
+            local_accum,
+            contribs,
+            tgt_chunk,
+            valid,
+            chunk_size=chunk_size,
+        )
+        return local_accum, None
 
     local_accum, _ = jax.lax.scan(body, local_accum0, starts)
     return locals_coeffs + local_accum
@@ -4687,9 +4754,14 @@ def _accumulate_solidfmm_m2l_chunked_scan(
             )
 
         contribs = contribs.astype(locals_coeffs.dtype)
-        contribs = jnp.where(valid[:, None], contribs, 0)
-        accum_chunk = jax.ops.segment_sum(contribs, tgt_chunk, total_nodes)
-        return local_accum + accum_chunk, None
+        local_accum = _chunk_segment_scatter_add(
+            local_accum,
+            contribs,
+            tgt_chunk,
+            valid,
+            chunk_size=chunk_size,
+        )
+        return local_accum, None
 
     local_accum, _ = jax.lax.scan(body, local_accum0, starts)
     return locals_coeffs + local_accum
@@ -4828,9 +4900,14 @@ def _accumulate_real_m2l_chunked_scan(
             order=order,
             m2l_impl=m2l_impl,
         ).astype(locals_coeffs.dtype)
-        contribs = jnp.where(valid[:, None], contribs, 0)
-        accum_chunk = jax.ops.segment_sum(contribs, tgt_chunk, total_nodes)
-        return local_accum + accum_chunk, None
+        local_accum = _chunk_segment_scatter_add(
+            local_accum,
+            contribs,
+            tgt_chunk,
+            valid,
+            chunk_size=chunk_size,
+        )
+        return local_accum, None
 
     local_accum, _ = jax.lax.scan(body, local_accum0, starts)
     return locals_coeffs + local_accum
@@ -4873,9 +4950,14 @@ def _accumulate_real_m2l_chunked_scan_pallas(
             order=order,
             m2l_impl=m2l_impl,
         ).astype(locals_coeffs.dtype)
-        contribs = jnp.where(valid[:, None], contribs, 0)
-        accum_chunk = jax.ops.segment_sum(contribs, tgt_chunk, total_nodes)
-        return local_accum + accum_chunk, None
+        local_accum = _chunk_segment_scatter_add(
+            local_accum,
+            contribs,
+            tgt_chunk,
+            valid,
+            chunk_size=chunk_size,
+        )
+        return local_accum, None
 
     local_accum, _ = jax.lax.scan(body, local_accum0, starts)
     return locals_coeffs + local_accum
@@ -5110,7 +5192,7 @@ def _prepare_solidfmm_downward_sweep(
                 locals_slice = jnp.array(locals_updated[:, :coeff_g], copy=True)
                 multip_slice = multip_packed_kernel[:, :coeff_g]
                 if basis_mode_norm == "complex":
-                    if pair_count_g <= chunk_size:
+                    if pair_count_g <= min(chunk_size, _M2L_FULLBATCH_MAX_PAIRS):
                         locals_slice = _accumulate_solidfmm_m2l_fullbatch(
                             locals_slice,
                             multip_slice,
@@ -5134,7 +5216,7 @@ def _prepare_solidfmm_downward_sweep(
                             chunk_size=chunk_size,
                         )
                 else:
-                    if pair_count_g <= chunk_size:
+                    if pair_count_g <= min(chunk_size, _M2L_FULLBATCH_MAX_PAIRS):
                         if use_pallas:
                             locals_slice = _accumulate_real_m2l_fullbatch_pallas(
                                 locals_slice,
@@ -5205,7 +5287,9 @@ def _prepare_solidfmm_downward_sweep(
                 interactions=interactions,
                 locals=empty_locals,
             )
-        elif basis_mode_norm == "complex" and pair_count <= chunk_size:
+        elif basis_mode_norm == "complex" and pair_count <= min(
+            chunk_size, _M2L_FULLBATCH_MAX_PAIRS
+        ):
             locals_updated = _accumulate_solidfmm_m2l_fullbatch(
                 locals_coeffs,
                 multip_packed_kernel,
@@ -5228,7 +5312,7 @@ def _prepare_solidfmm_downward_sweep(
                 total_nodes=total_nodes,
                 chunk_size=chunk_size,
             )
-        elif pair_count <= chunk_size:
+        elif pair_count <= min(chunk_size, _M2L_FULLBATCH_MAX_PAIRS):
             if use_pallas:
                 locals_updated = _accumulate_real_m2l_fullbatch_pallas(
                     locals_coeffs,
