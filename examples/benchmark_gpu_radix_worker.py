@@ -247,6 +247,7 @@ def _worker_autotune_runtime_kwargs(
     autotune_cache_path: Optional[str],
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     tuned_kwargs = dict(fmm_kwargs)
+    autotune_default = str(cfg.get("preset", "")).strip().lower() == "large_n_gpu"
     runtime_cache_path = _runtime_autotune_cache_path(
         cfg=cfg,
         autotune_cache_path=autotune_cache_path,
@@ -311,7 +312,7 @@ def _worker_autotune_runtime_kwargs(
         ):
             return tuned_kwargs, info
     traversal_candidates_raw = cfg.get("traversal_candidates", [])
-    if bool(cfg.get("worker_autotune_traversal", False)) and isinstance(
+    if bool(cfg.get("worker_autotune_traversal", autotune_default)) and isinstance(
         traversal_candidates_raw, list
     ):
         best_time = float("inf")
@@ -360,9 +361,9 @@ def _worker_autotune_runtime_kwargs(
             info["worker_traversal_config"] = best_cfg
 
     nf_candidates_raw = cfg.get("nearfield_chunk_candidates", [])
-    if bool(cfg.get("worker_autotune_nearfield_chunk", False)) and isinstance(
-        nf_candidates_raw, list
-    ):
+    if bool(
+        cfg.get("worker_autotune_nearfield_chunk", autotune_default)
+    ) and isinstance(nf_candidates_raw, list):
         best_time = float("inf")
         best_nf: Optional[int] = None
         for candidate in nf_candidates_raw:
