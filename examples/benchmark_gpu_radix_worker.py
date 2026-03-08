@@ -311,7 +311,30 @@ def _worker_autotune_runtime_kwargs(
             or info["worker_nearfield_edge_chunk_size"] is not None
         ):
             return tuned_kwargs, info
-    traversal_candidates_raw = cfg.get("traversal_candidates", [])
+    traversal_candidates_raw = cfg.get("traversal_candidates")
+    if not isinstance(traversal_candidates_raw, list):
+        traversal_candidates_raw = []
+    if len(traversal_candidates_raw) == 0 and autotune_default:
+        traversal_candidates_raw = [
+            {
+                "max_pair_queue": 131072,
+                "process_block": 128,
+                "max_interactions_per_node": 1024,
+                "max_neighbors_per_leaf": 256,
+            },
+            {
+                "max_pair_queue": 262144,
+                "process_block": 256,
+                "max_interactions_per_node": 4096,
+                "max_neighbors_per_leaf": 1024,
+            },
+            {
+                "max_pair_queue": 524288,
+                "process_block": 512,
+                "max_interactions_per_node": 4096,
+                "max_neighbors_per_leaf": 1024,
+            },
+        ]
     if bool(cfg.get("worker_autotune_traversal", autotune_default)) and isinstance(
         traversal_candidates_raw, list
     ):
@@ -360,7 +383,11 @@ def _worker_autotune_runtime_kwargs(
             tuned_kwargs = _runtime_overrides(tuned_kwargs, traversal_cfg_dict=best_cfg)
             info["worker_traversal_config"] = best_cfg
 
-    nf_candidates_raw = cfg.get("nearfield_chunk_candidates", [])
+    nf_candidates_raw = cfg.get("nearfield_chunk_candidates")
+    if not isinstance(nf_candidates_raw, list):
+        nf_candidates_raw = []
+    if len(nf_candidates_raw) == 0 and autotune_default:
+        nf_candidates_raw = [64, 128, 256, 512]
     if bool(
         cfg.get("worker_autotune_nearfield_chunk", autotune_default)
     ) and isinstance(nf_candidates_raw, list):
