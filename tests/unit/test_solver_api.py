@@ -8,11 +8,11 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 
+import jaccpot.runtime._fmm_impl as fmm_impl_private
 from jaccpot import (
     ComplexSHBasis,
     FarFieldConfig,
 )
-import jaccpot.runtime._fmm_impl as fmm_impl_private
 from jaccpot import FastMultipoleMethod
 from jaccpot import FastMultipoleMethod as ExpanseFMM
 from jaccpot import (
@@ -573,7 +573,12 @@ def test_m2l_autotune_cache_roundtrip_api():
         preset=FMMPreset.FAST,
         basis="solidfmm",
     )
-    payload = [{"key": ["gpu", "complex", "float32", 4, "solidfmm", "", 0, 2], "chunk_size": 2048}]
+    payload = [
+        {
+            "key": ["gpu", "complex", "float32", 4, "solidfmm", "", 0, 2],
+            "chunk_size": 2048,
+        }
+    ]
     restored = fmm.import_m2l_autotune_cache(payload, merge=False)
     assert restored == 1
     exported = fmm.export_m2l_autotune_cache()

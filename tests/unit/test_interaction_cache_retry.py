@@ -58,8 +58,9 @@ def test_build_dual_tree_artifacts_retries_on_capacity_overflow(monkeypatch):
     assert len(calls) == 2
     retry_cfg = calls[1]["traversal_config"]
     assert int(retry_cfg.max_pair_queue) == int(initial_cfg.max_pair_queue) * 2
-    assert int(retry_cfg.max_interactions_per_node) == int(
-        initial_cfg.max_interactions_per_node
-    ) * 2
+    assert (
+        int(retry_cfg.max_interactions_per_node)
+        == int(initial_cfg.max_interactions_per_node) * 2
+    )
     assert artifacts.interactions is interactions
     assert artifacts.neighbor_list is neighbor_list
