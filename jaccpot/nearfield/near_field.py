@@ -995,11 +995,7 @@ def compute_leaf_p2p_accelerations(
 
     softening_sq = jnp.asarray(float(softening) ** 2, dtype=positions.dtype)
 
-    if (
-        precomputed_target_leaf_ids is None
-        or precomputed_source_leaf_ids is None
-        or precomputed_valid_pairs is None
-    ):
+    if precomputed_target_leaf_ids is None or precomputed_valid_pairs is None:
         target_leaf_ids, source_leaf_ids, valid_pairs = prepare_leaf_neighbor_pairs(
             node_ranges,
             leaf_nodes,
@@ -1009,8 +1005,22 @@ def compute_leaf_p2p_accelerations(
         )
     else:
         target_leaf_ids = jnp.asarray(precomputed_target_leaf_ids, dtype=INDEX_DTYPE)
-        source_leaf_ids = jnp.asarray(precomputed_source_leaf_ids, dtype=INDEX_DTYPE)
         valid_pairs = jnp.asarray(precomputed_valid_pairs, dtype=bool)
+        if precomputed_source_leaf_ids is None:
+            # Compact prepared-state mode: derive source leaf ids directly from
+            # neighbor edges while reusing precomputed target/valid buffers.
+            total_nodes = node_ranges.shape[0]
+            leaf_lookup = jnp.full((total_nodes,), -1, dtype=INDEX_DTYPE)
+            leaf_lookup = leaf_lookup.at[leaf_nodes].set(
+                jnp.arange(leaf_nodes.shape[0], dtype=INDEX_DTYPE)
+            )
+            source_leaf_ids = leaf_lookup[neighbors]
+            valid_pairs = valid_pairs & (source_leaf_ids >= 0)
+        else:
+            source_leaf_ids = jnp.asarray(
+                precomputed_source_leaf_ids,
+                dtype=INDEX_DTYPE,
+            )
 
     use_precomputed_scatter = (
         precomputed_chunk_sort_indices is not None

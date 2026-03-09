@@ -33,7 +33,6 @@ def nearfield_cache_matches(
         and cache_entry.nearfield_edge_chunk_size == nearfield_edge_chunk_size
         and cache_entry.nearfield_leaf_cap == int(leaf_cap)
         and cache_entry.nearfield_target_leaf_ids is not None
-        and cache_entry.nearfield_source_leaf_ids is not None
         and cache_entry.nearfield_valid_pairs is not None
     )
 

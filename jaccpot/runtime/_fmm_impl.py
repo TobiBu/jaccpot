@@ -2723,12 +2723,15 @@ class FastMultipoleMethod:
 
         (
             nearfield_target_leaf_ids,
-            nearfield_source_leaf_ids,
+            _nearfield_source_leaf_ids,
             nearfield_valid_pairs,
         ) = self._prepare_leaf_neighbor_pairs_safe(
             tree=tree,
             neighbor_list=neighbor_list,
         )
+        # Keep prepared-state nearfield representation compact and derive source
+        # leaf ids from neighbor_list on demand during evaluation.
+        nearfield_source_leaf_ids = None
 
         traced_nearfield_pairs = False
         if nearfield_target_leaf_ids is not None and nearfield_valid_pairs is not None:
@@ -2789,20 +2792,14 @@ class FastMultipoleMethod:
     ) -> tuple[Optional[Array], Optional[Array], Optional[Array]]:
         """Best-effort leaf neighbor pair generation."""
         try:
-            sort_by_source = not _contains_tracer(
-                (
-                    tree.node_ranges,
-                    neighbor_list.leaf_indices,
-                    neighbor_list.offsets,
-                    neighbor_list.neighbors,
-                )
-            )
             return prepare_leaf_neighbor_pairs(
                 jnp.asarray(tree.node_ranges, dtype=INDEX_DTYPE),
                 jnp.asarray(neighbor_list.leaf_indices, dtype=INDEX_DTYPE),
                 jnp.asarray(neighbor_list.offsets, dtype=INDEX_DTYPE),
                 jnp.asarray(neighbor_list.neighbors, dtype=INDEX_DTYPE),
-                sort_by_source=sort_by_source,
+                # Keep edge order aligned with neighbor_list so source leaf ids can
+                # be derived on demand without storing a second index vector.
+                sort_by_source=False,
             )
         except Exception:
             return None, None, None
@@ -5473,6 +5470,10 @@ def _evaluate_tree_compiled_impl(
     """JIT core for far/near field evaluation on a prepared tree state."""
     use_precomputed = (
         precomputed_target_leaf_ids.shape[0] == neighbor_list.neighbors.shape[0]
+        and precomputed_valid_pairs.shape[0] == neighbor_list.neighbors.shape[0]
+    )
+    use_precomputed_source = (
+        precomputed_source_leaf_ids.shape[0] == neighbor_list.neighbors.shape[0]
     )
     edge_count = int(neighbor_list.neighbors.shape[0])
     chunk_count = (
@@ -5502,7 +5503,9 @@ def _evaluate_tree_compiled_impl(
             precomputed_target_leaf_ids if use_precomputed else None
         ),
         precomputed_source_leaf_ids=(
-            precomputed_source_leaf_ids if use_precomputed else None
+            precomputed_source_leaf_ids
+            if (use_precomputed and use_precomputed_source)
+            else None
         ),
         precomputed_valid_pairs=precomputed_valid_pairs if use_precomputed else None,
         precomputed_chunk_sort_indices=(
