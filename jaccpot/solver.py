@@ -39,8 +39,8 @@ def _default_advanced_for_preset(preset: FMMPreset) -> FMMAdvancedConfig:
             ),
             farfield=replace(
                 cfg.farfield,
-                mode="class_major",
-                grouped_interactions=True,
+                mode="auto",
+                grouped_interactions=False,
                 rotation="solidfmm",
                 m2l_chunk_size=None,
                 l2l_chunk_size=None,

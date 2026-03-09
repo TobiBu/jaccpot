@@ -787,9 +787,6 @@ class FMMPreparedState:
     """
 
     tree: Tree
-    positions_sorted: Array
-    masses_sorted: Array
-    inverse_permutation: Array
     upward: TreeUpwardData
     downward: TreeDownwardData
     neighbor_list: NodeNeighborList
@@ -810,6 +807,30 @@ class FMMPreparedState:
     nearfield_chunk_unique_indices: Optional[Array]
     force_scale_nodes: Optional[Array]
 
+    @property
+    def positions_sorted(self) -> Array:
+        """Canonical sorted particle positions owned by ``tree``."""
+        value = getattr(self.tree, "positions_sorted", None)
+        if value is None:
+            raise ValueError("prepared tree is missing positions_sorted")
+        return jnp.asarray(value)
+
+    @property
+    def masses_sorted(self) -> Array:
+        """Canonical sorted particle masses owned by ``tree``."""
+        value = getattr(self.tree, "masses_sorted", None)
+        if value is None:
+            raise ValueError("prepared tree is missing masses_sorted")
+        return jnp.asarray(value)
+
+    @property
+    def inverse_permutation(self) -> Array:
+        """Canonical inverse permutation owned by ``tree``."""
+        value = getattr(self.tree, "inverse_permutation", None)
+        if value is None:
+            raise ValueError("prepared tree is missing inverse_permutation")
+        return jnp.asarray(value, dtype=INDEX_DTYPE)
+
     def tree_flatten(
         self: "FMMPreparedState",
     ) -> tuple[
@@ -818,9 +839,6 @@ class FMMPreparedState:
     ]:
         children = (
             self.tree,
-            self.positions_sorted,
-            self.masses_sorted,
-            self.inverse_permutation,
             self.upward,
             self.downward,
             self.neighbor_list,
@@ -860,9 +878,6 @@ class FMMPreparedState:
         ) = aux
         (
             tree,
-            positions_sorted,
-            masses_sorted,
-            inverse_permutation,
             upward,
             downward,
             neighbor_list,
@@ -878,9 +893,6 @@ class FMMPreparedState:
         ) = children
         return cls(
             tree=tree,
-            positions_sorted=positions_sorted,
-            masses_sorted=masses_sorted,
-            inverse_permutation=inverse_permutation,
             upward=upward,
             downward=downward,
             neighbor_list=neighbor_list,
@@ -1521,11 +1533,6 @@ class FastMultipoleMethod:
             )
             prepass_state = FMMPreparedState(
                 tree=low_tree_artifacts.tree,
-                positions_sorted=low_tree_artifacts.positions_sorted,
-                masses_sorted=low_tree_artifacts.masses_sorted,
-                inverse_permutation=jnp.asarray(
-                    low_tree_artifacts.inverse_permutation, dtype=INDEX_DTYPE
-                ),
                 upward=low_tree_artifacts.upward,
                 downward=dual_downward_artifacts.downward,
                 neighbor_list=dual_downward_artifacts.neighbor_list,
@@ -3592,11 +3599,6 @@ class FastMultipoleMethod:
 
         return FMMPreparedState(
             tree=tree_artifacts.tree,
-            positions_sorted=tree_artifacts.positions_sorted,
-            masses_sorted=tree_artifacts.masses_sorted,
-            inverse_permutation=jnp.asarray(
-                tree_artifacts.inverse_permutation, dtype=INDEX_DTYPE
-            ),
             upward=tree_artifacts.upward,
             downward=dual_downward_artifacts.downward,
             neighbor_list=dual_downward_artifacts.neighbor_list,
