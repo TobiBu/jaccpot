@@ -8,6 +8,7 @@ gravitational forces in O(N) time instead of O(N^2) for direct summation.
 import hashlib
 import json
 import math
+import os
 import time
 from collections import OrderedDict
 from dataclasses import dataclass
@@ -347,20 +348,46 @@ _KDTREE_DEFAULT_TRAVERSAL_CONFIG = DualTreeTraversalConfig(
     max_interactions_per_node=512,
     max_neighbors_per_leaf=2048,
 )
-_OPERATOR_CACHE_MAX = 512
+
+
+def _env_int(name: str, default: int, *, minimum: int = 1) -> int:
+    """Read a positive integer from env with a defensive fallback."""
+    raw = os.environ.get(name)
+    if raw is None:
+        return int(default)
+    try:
+        val = int(str(raw).strip())
+    except Exception:
+        return int(default)
+    return int(max(val, int(minimum)))
+
+
+_OPERATOR_CACHE_MAX = _env_int("JACCPOT_OPERATOR_CACHE_MAX", 512)
 _operator_blocks_cache: "OrderedDict[tuple, tuple[Array, Array]]" = OrderedDict()
-_GROUPED_OPERATOR_CACHE_MAX = 32
+_GROUPED_OPERATOR_CACHE_MAX = _env_int("JACCPOT_GROUPED_OPERATOR_CACHE_MAX", 32)
 _grouped_operator_blocks_cache: "OrderedDict[tuple, tuple[Array, Array]]" = (
     OrderedDict()
 )
-_GROUPED_SEGMENT_CACHE_MAX = 32
+_GROUPED_SEGMENT_CACHE_MAX = _env_int("JACCPOT_GROUPED_SEGMENT_CACHE_MAX", 32)
 _grouped_segment_cache: (
     "OrderedDict[tuple, tuple[Array, Array, Array, Array, Array, Array]]"
 ) = OrderedDict()
-_GROUPED_OPERATOR_CACHE_ENTRY_MAX_BYTES = 64 * 1024 * 1024
-_GROUPED_OPERATOR_CACHE_TOTAL_MAX_BYTES = 256 * 1024 * 1024
-_GROUPED_SEGMENT_CACHE_ENTRY_MAX_BYTES = 32 * 1024 * 1024
-_GROUPED_SEGMENT_CACHE_TOTAL_MAX_BYTES = 128 * 1024 * 1024
+_GROUPED_OPERATOR_CACHE_ENTRY_MAX_BYTES = _env_int(
+    "JACCPOT_GROUPED_OPERATOR_CACHE_ENTRY_MAX_BYTES",
+    64 * 1024 * 1024,
+)
+_GROUPED_OPERATOR_CACHE_TOTAL_MAX_BYTES = _env_int(
+    "JACCPOT_GROUPED_OPERATOR_CACHE_TOTAL_MAX_BYTES",
+    256 * 1024 * 1024,
+)
+_GROUPED_SEGMENT_CACHE_ENTRY_MAX_BYTES = _env_int(
+    "JACCPOT_GROUPED_SEGMENT_CACHE_ENTRY_MAX_BYTES",
+    32 * 1024 * 1024,
+)
+_GROUPED_SEGMENT_CACHE_TOTAL_MAX_BYTES = _env_int(
+    "JACCPOT_GROUPED_SEGMENT_CACHE_TOTAL_MAX_BYTES",
+    128 * 1024 * 1024,
+)
 _M2L_CHUNK_AUTOTUNE_CACHE_MAX = 64
 _m2l_chunk_autotune_cache: "OrderedDict[tuple[Any, ...], int]" = OrderedDict()
 _GPU_M2L_AUTOTUNE_PAIR_BINS = (
