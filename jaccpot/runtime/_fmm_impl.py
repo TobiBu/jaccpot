@@ -2707,9 +2707,6 @@ class FastMultipoleMethod:
         nearfield_edge_chunk_size: Optional[int] = None,
     ) -> NearfieldPrecomputeArtifacts:
         """Best-effort precompute of nearfield leaf-pair and scatter artifacts."""
-        nearfield_target_leaf_ids = None
-        nearfield_source_leaf_ids = None
-        nearfield_valid_pairs = None
         nearfield_chunk_sort_indices = None
         nearfield_chunk_group_ids = None
         nearfield_chunk_unique_indices = None
@@ -2728,17 +2725,32 @@ class FastMultipoleMethod:
             else int(nearfield_edge_chunk_size)
         )
 
+        should_precompute_scatter = self._should_precompute_nearfield_scatter_schedules(
+            num_particles=int(num_particles)
+        )
+        if resolved_nearfield_mode != "bucketed" or not should_precompute_scatter:
+            # Keep prepared-state nearfield representation compact; derive leaf-edge
+            # pair vectors on demand during evaluation.
+            return NearfieldPrecomputeArtifacts(
+                target_leaf_ids=None,
+                source_leaf_ids=None,
+                valid_pairs=None,
+                chunk_sort_indices=None,
+                chunk_group_ids=None,
+                chunk_unique_indices=None,
+            )
+
+        nearfield_target_leaf_ids = None
+        nearfield_valid_pairs = None
+
         (
             nearfield_target_leaf_ids,
-            _nearfield_source_leaf_ids,
+            nearfield_source_leaf_ids,
             nearfield_valid_pairs,
         ) = self._prepare_leaf_neighbor_pairs_safe(
             tree=tree,
             neighbor_list=neighbor_list,
         )
-        # Keep prepared-state nearfield representation compact and derive source
-        # leaf ids from neighbor_list on demand during evaluation.
-        nearfield_source_leaf_ids = None
 
         traced_nearfield_pairs = False
         if nearfield_target_leaf_ids is not None and nearfield_valid_pairs is not None:
@@ -2747,13 +2759,9 @@ class FastMultipoleMethod:
             )
 
         if (
-            resolved_nearfield_mode == "bucketed"
-            and nearfield_target_leaf_ids is not None
+            nearfield_target_leaf_ids is not None
             and nearfield_valid_pairs is not None
             and not traced_nearfield_pairs
-            and self._should_precompute_nearfield_scatter_schedules(
-                num_particles=int(num_particles)
-            )
         ):
             (
                 nearfield_chunk_sort_indices,
@@ -2769,9 +2777,9 @@ class FastMultipoleMethod:
             )
 
         return NearfieldPrecomputeArtifacts(
-            target_leaf_ids=nearfield_target_leaf_ids,
-            source_leaf_ids=nearfield_source_leaf_ids,
-            valid_pairs=nearfield_valid_pairs,
+            target_leaf_ids=None,
+            source_leaf_ids=None,
+            valid_pairs=None,
             chunk_sort_indices=nearfield_chunk_sort_indices,
             chunk_group_ids=nearfield_chunk_group_ids,
             chunk_unique_indices=nearfield_chunk_unique_indices,
