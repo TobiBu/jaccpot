@@ -338,6 +338,8 @@ _TRACING_MAX_NEIGHBORS_PER_LEAF = 512
 # trigger traversal overflow/retry on harder particle configurations.
 _TRACING_MAX_INTERACTIONS_PER_NODE = 512
 _GPU_LARGE_PARTICLE_THRESHOLD = 65_536
+_GPU_MIN_NEIGHBORS_PER_LEAF = 1024
+_GPU_MIN_INTERACTIONS_PER_NODE = 4096
 _GPU_MAX_NEIGHBORS_PER_LEAF = 1024
 _GPU_MAX_INTERACTIONS_PER_NODE = 4096
 _GPU_MIN_PAIR_QUEUE_MEDIUM = 131_072
@@ -1828,9 +1830,13 @@ class FastMultipoleMethod:
 
             next_queue = max(current_queue, int(target_queue))
             next_interactions = min(
-                current_interactions, int(_GPU_MAX_INTERACTIONS_PER_NODE)
+                max(current_interactions, int(_GPU_MIN_INTERACTIONS_PER_NODE)),
+                int(_GPU_MAX_INTERACTIONS_PER_NODE),
             )
-            next_neighbors = min(current_neighbors, int(_GPU_MAX_NEIGHBORS_PER_LEAF))
+            next_neighbors = min(
+                max(current_neighbors, int(_GPU_MIN_NEIGHBORS_PER_LEAF)),
+                int(_GPU_MAX_NEIGHBORS_PER_LEAF),
+            )
             if (
                 next_queue != current_queue
                 or next_interactions != current_interactions
@@ -3254,7 +3260,7 @@ class FastMultipoleMethod:
                 centers=complex_upward.multipoles.centers,
                 moments=None,  # type: ignore[arg-type]
                 packed=complex_upward.multipoles.packed,
-                component_matrix=complex_upward.multipoles.packed,
+                component_matrix=None,
             )
 
             return TreeUpwardData(

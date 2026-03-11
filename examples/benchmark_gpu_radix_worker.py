@@ -32,6 +32,22 @@ if str(REPO_ROOT) not in sys.path:
 from examples import benchmark_utils as bench_utils
 
 
+def _load_jaccpot_internal_symbols() -> dict[str, Any]:
+    from jaccpot.runtime._adaptive_policy import (  # noqa: E402
+        adaptive_pair_policy,
+        adaptive_policy_tolerance,
+    )
+    from jaccpot.runtime._interaction_cache import (  # noqa: E402
+        _build_dual_tree_artifacts,
+    )
+
+    return {
+        "adaptive_pair_policy": adaptive_pair_policy,
+        "adaptive_policy_tolerance": adaptive_policy_tolerance,
+        "_build_dual_tree_artifacts": _build_dual_tree_artifacts,
+    }
+
+
 def _load_jaccpot_symbols() -> dict[str, Any]:
     from jaccpot import (  # noqa: E402
         FarFieldConfig,
@@ -137,6 +153,146 @@ def _runtime_overrides(
     out = dict(fmm_kwargs)
     out["advanced"] = replace(advanced, runtime=runtime_cfg, nearfield=nearfield_cfg)
     return out
+
+
+def _resolved_prepare_context(
+    fmm: FastMultipoleMethod,
+    *,
+    num_particles: int,
+) -> dict[str, Any]:
+    impl = fmm._impl
+    runtime_overrides = impl._resolve_runtime_execution_overrides(
+        num_particles=int(num_particles)
+    )
+    refine_local_val = bool(impl.refine_local)
+    if runtime_overrides.refine_local_override is not None:
+        refine_local_val = bool(runtime_overrides.refine_local_override)
+    return {
+        "runtime_overrides": runtime_overrides,
+        "runtime_traversal_config": runtime_overrides.traversal_config,
+        "runtime_m2l_chunk_size": runtime_overrides.m2l_chunk_size,
+        "runtime_l2l_chunk_size": runtime_overrides.l2l_chunk_size,
+        "grouped_interactions": runtime_overrides.grouped_interactions,
+        "farfield_mode": runtime_overrides.farfield_mode,
+        "upward_center_mode": runtime_overrides.center_mode,
+        "refine_local_val": refine_local_val,
+        "max_refine_levels_val": int(impl.max_refine_levels),
+        "aspect_threshold_val": float(impl.aspect_threshold),
+        "theta_val": float(impl.theta),
+        "mac_type_val": "dehnen"
+        if impl.mac_type == "dehnen_error"
+        else impl.mac_type,
+        "dehnen_radius_scale": float(impl.dehnen_radius_scale),
+    }
+
+
+def _prepare_tree_upward_artifacts_once(
+    *,
+    fmm: FastMultipoleMethod,
+    positions: Any,
+    masses: Any,
+    leaf_size: int,
+    max_order: int,
+) -> tuple[Any, dict[str, Any]]:
+    ctx = _resolved_prepare_context(fmm, num_particles=int(positions.shape[0]))
+    tree_artifacts = fmm._impl._prepare_state_tree_and_upward(
+        positions_arr=positions,
+        masses_arr=masses,
+        bounds=None,
+        leaf_size=int(leaf_size),
+        max_order=int(max_order),
+        refine_local_val=ctx["refine_local_val"],
+        max_refine_levels_val=ctx["max_refine_levels_val"],
+        aspect_threshold_val=ctx["aspect_threshold_val"],
+        jit_tree_override=fmm.advanced.runtime.jit_tree,
+        upward_center_mode=ctx["upward_center_mode"],
+        allow_stateful_cache=False,
+    )
+    return tree_artifacts, ctx
+
+
+def _build_dual_tree_artifacts_once(
+    *,
+    fmm: FastMultipoleMethod,
+    tree_artifacts: Any,
+    ctx: dict[str, Any],
+) -> Any:
+    internal_symbols = _load_jaccpot_internal_symbols()
+    _build_dual_tree_artifacts = internal_symbols["_build_dual_tree_artifacts"]
+    adaptive_pair_policy = internal_symbols["adaptive_pair_policy"]
+    adaptive_policy_tolerance = internal_symbols["adaptive_policy_tolerance"]
+    impl = fmm._impl
+
+    pair_policy = None
+    policy_state = None
+    use_paper_fixed_policy = (
+        not impl.adaptive_order
+    ) and impl._uses_dehnen_paper_error_model()
+    if impl.adaptive_order or use_paper_fixed_policy:
+        policy_orders = impl.p_gears
+        if use_paper_fixed_policy:
+            policy_orders = (int(tree_artifacts.upward.multipoles.order),)
+        policy_state = impl._build_adaptive_policy_state(
+            upward=tree_artifacts.upward,
+            tree=tree_artifacts.tree,
+            positions_sorted=tree_artifacts.positions_sorted,
+            p_gears=policy_orders,
+            force_scale_nodes=None,
+            eps=jnp.asarray(
+                (
+                    impl.adaptive_eps
+                    if impl.adaptive_eps is not None
+                    else adaptive_policy_tolerance(
+                        theta=ctx["theta_val"],
+                        p_gears=policy_orders,
+                        dtype=tree_artifacts.upward.multipoles.packed.real.dtype,
+                    )
+                ),
+                dtype=tree_artifacts.upward.multipoles.packed.real.dtype,
+            ),
+            theta=jnp.asarray(
+                ctx["theta_val"],
+                dtype=tree_artifacts.upward.multipoles.packed.real.dtype,
+            ),
+            error_model_code=jnp.asarray(
+                impl._adaptive_error_model_code(),
+                dtype=jnp.int32,
+            ),
+            dehnen_geometry_mode=impl.dehnen_geometry_mode,
+        )
+        pair_policy = adaptive_pair_policy
+
+    need_traversal_result = bool(impl.retain_traversal_result) or bool(
+        use_paper_fixed_policy
+    )
+    need_compact_far_pairs = bool(impl.adaptive_order) and not bool(
+        need_traversal_result
+    )
+    dual_artifacts, _ = _build_dual_tree_artifacts(
+        tree_artifacts.tree,
+        tree_artifacts.upward.geometry,
+        theta=ctx["theta_val"],
+        mac_type=ctx["mac_type_val"],
+        dehnen_radius_scale=ctx["dehnen_radius_scale"],
+        cache_key=None,
+        cache_entry=None,
+        max_pair_queue=impl.max_pair_queue,
+        pair_process_block=impl.pair_process_block,
+        traversal_config=ctx["runtime_traversal_config"],
+        retry_logger=lambda _event: None,
+        use_dense_interactions=impl.use_dense_interactions,
+        grouped_interactions=ctx["grouped_interactions"],
+        grouped_chunk_size=ctx["runtime_m2l_chunk_size"],
+        need_traversal_result=need_traversal_result,
+        need_compact_far_pairs=need_compact_far_pairs,
+        precompute_grouped_class_segments=impl._should_precompute_grouped_class_segments(
+            grouped_chunk_size=ctx["runtime_m2l_chunk_size"],
+        ),
+        grouped_schedule_budget_bytes=impl._grouped_schedule_item_budget(),
+        pair_policy=pair_policy,
+        policy_state=policy_state,
+    )
+    return dual_artifacts
 
 
 def _device_autotune_signature(
@@ -354,35 +510,60 @@ def _worker_autotune_runtime_kwargs(
     if not isinstance(traversal_candidates_raw, list):
         traversal_candidates_raw = []
     if len(traversal_candidates_raw) == 0 and autotune_default:
-        traversal_candidates_raw = [
-            {
-                "max_pair_queue": 131072,
-                "process_block": 128,
-                "max_interactions_per_node": 1024,
-                "max_neighbors_per_leaf": 256,
-            },
-            {
-                "max_pair_queue": 262144,
-                "process_block": 256,
-                "max_interactions_per_node": 4096,
-                "max_neighbors_per_leaf": 1024,
-            },
-            {
-                "max_pair_queue": 524288,
-                "process_block": 512,
-                "max_interactions_per_node": 4096,
-                "max_neighbors_per_leaf": 1024,
-            },
-        ]
+        baseline_fmm = _load_jaccpot_symbols()["FastMultipoleMethod"](**tuned_kwargs)
+        baseline_overrides = _resolved_prepare_context(
+            baseline_fmm,
+            num_particles=int(positions.shape[0]),
+        )
+        baseline_cfg = baseline_overrides["runtime_traversal_config"]
+        if baseline_cfg is not None:
+            traversal_candidates_raw = [
+                {
+                    "max_pair_queue": int(baseline_cfg.max_pair_queue),
+                    "process_block": int(baseline_cfg.process_block),
+                    "max_interactions_per_node": int(
+                        baseline_cfg.max_interactions_per_node
+                    ),
+                    "max_neighbors_per_leaf": int(
+                        baseline_cfg.max_neighbors_per_leaf
+                    ),
+                }
+            ]
+        else:
+            traversal_candidates_raw = []
     if bool(cfg.get("worker_autotune_traversal", autotune_default)) and isinstance(
         traversal_candidates_raw, list
     ):
         best_time = float("inf")
         best_cfg: Optional[dict[str, int]] = None
+        baseline_floor: Optional[dict[str, int]] = None
+        if len(traversal_candidates_raw) > 0 and isinstance(
+            traversal_candidates_raw[0], dict
+        ):
+            try:
+                baseline_floor = {
+                    "max_pair_queue": int(traversal_candidates_raw[0]["max_pair_queue"]),
+                    "process_block": int(traversal_candidates_raw[0]["process_block"]),
+                    "max_interactions_per_node": int(
+                        traversal_candidates_raw[0]["max_interactions_per_node"]
+                    ),
+                    "max_neighbors_per_leaf": int(
+                        traversal_candidates_raw[0]["max_neighbors_per_leaf"]
+                    ),
+                }
+            except Exception:
+                baseline_floor = None
         for candidate in traversal_candidates_raw:
             if not isinstance(candidate, dict):
                 continue
             try:
+                if baseline_floor is not None:
+                    if int(candidate["max_pair_queue"]) < baseline_floor["max_pair_queue"]:
+                        continue
+                    if int(candidate["max_interactions_per_node"]) < baseline_floor["max_interactions_per_node"]:
+                        continue
+                    if int(candidate["max_neighbors_per_leaf"]) < baseline_floor["max_neighbors_per_leaf"]:
+                        continue
                 trial_kwargs = _runtime_overrides(
                     tuned_kwargs,
                     traversal_cfg_dict={
@@ -684,11 +865,7 @@ def _run_prepare_case(
     autotune_cache_path: Optional[str] = None,
 ) -> dict[str, Any]:
     jaccpot_symbols = _load_jaccpot_symbols()
-    yggdrax_symbols = _load_yggdrax_symbols()
     FastMultipoleMethod = jaccpot_symbols["FastMultipoleMethod"]
-    Tree = yggdrax_symbols["Tree"]
-    compute_tree_geometry = yggdrax_symbols["compute_tree_geometry"]
-    build_interactions_and_neighbors = yggdrax_symbols["build_interactions_and_neighbors"]
     key = jax.random.fold_in(jax.random.PRNGKey(int(seed)), int(num_particles))
     positions, masses, _ = bench_utils.generate_random_distribution(
         int(num_particles),
@@ -710,42 +887,22 @@ def _run_prepare_case(
         if cache_path.exists():
             fmm.load_m2l_autotune_cache(str(cache_path), merge=True)
 
-    tree_type = str(getattr(fmm._impl, "tree_type", "radix"))
-    tree_mode = str(getattr(fmm._impl, "tree_build_mode", "lbvh"))
-    ygg_build_mode = "fixed_depth" if tree_mode == "fixed_depth" else "adaptive"
-    theta_val = float(getattr(fmm._impl, "theta", fmm_kwargs.get("theta", 0.6)))
-    traversal_cfg = fmm.advanced.runtime.traversal_config
-    mac_type = str(getattr(fmm, "mac_type", "dehnen"))
-    dehnen_radius_scale = float(getattr(fmm._impl, "dehnen_radius_scale", 1.0))
-
     tree_timing = bench_utils.time_callable(
-        Tree.from_particles,
-        positions,
-        masses,
-        tree_type=tree_type,
-        build_mode=ygg_build_mode,
-        return_reordered=True,
+        _prepare_tree_upward_artifacts_once,
+        fmm=fmm,
+        positions=positions,
+        masses=masses,
         leaf_size=int(leaf_size),
+        max_order=int(max_order),
         warmup=int(warmup),
         runs=int(runs),
     )
-    tree = Tree.from_particles(
-        positions,
-        masses,
-        tree_type=tree_type,
-        build_mode=ygg_build_mode,
-        return_reordered=True,
-        leaf_size=int(leaf_size),
-    )
-    geometry = compute_tree_geometry(tree, tree.positions_sorted)
+    tree_artifacts, ctx = tree_timing.result
     interactions_timing = bench_utils.time_callable(
-        build_interactions_and_neighbors,
-        tree,
-        geometry,
-        theta=theta_val,
-        traversal_config=traversal_cfg,
-        mac_type=mac_type,
-        dehnen_radius_scale=dehnen_radius_scale,
+        _build_dual_tree_artifacts_once,
+        fmm=fmm,
+        tree_artifacts=tree_artifacts,
+        ctx=ctx,
         warmup=int(warmup),
         runs=int(runs),
     )
@@ -834,54 +991,48 @@ def _run_interactions_case(
     fmm_kwargs: dict[str, Any],
     autotune_cache_path: Optional[str] = None,
 ) -> dict[str, Any]:
-    del autotune_cache_path
     jaccpot_symbols = _load_jaccpot_symbols()
-    yggdrax_symbols = _load_yggdrax_symbols()
     FastMultipoleMethod = jaccpot_symbols["FastMultipoleMethod"]
-    Tree = yggdrax_symbols["Tree"]
-    compute_tree_geometry = yggdrax_symbols["compute_tree_geometry"]
-    build_interactions_and_neighbors = yggdrax_symbols["build_interactions_and_neighbors"]
     key = jax.random.fold_in(jax.random.PRNGKey(int(seed)), int(num_particles))
     positions, masses, _ = bench_utils.generate_random_distribution(
         int(num_particles),
         key=key,
         dtype=dtype,
     )
-    fmm = FastMultipoleMethod(**fmm_kwargs)
-    tree_type = str(getattr(fmm._impl, "tree_type", "radix"))
-    tree_mode = str(getattr(fmm._impl, "tree_build_mode", "lbvh"))
-    ygg_build_mode = "fixed_depth" if tree_mode == "fixed_depth" else "adaptive"
-    theta_val = float(getattr(fmm._impl, "theta", fmm_kwargs.get("theta", 0.6)))
-    traversal_cfg = fmm.advanced.runtime.traversal_config
-    mac_type = str(getattr(fmm, "mac_type", "dehnen"))
-    dehnen_radius_scale = float(getattr(fmm._impl, "dehnen_radius_scale", 1.0))
-    tree = Tree.from_particles(
-        positions,
-        masses,
-        tree_type=tree_type,
-        build_mode=ygg_build_mode,
-        return_reordered=True,
+    tuned_kwargs, worker_tune_info = _worker_autotune_runtime_kwargs(
+        cfg=cfg,
+        fmm_kwargs=fmm_kwargs,
+        positions=positions,
+        masses=masses,
         leaf_size=int(leaf_size),
+        max_order=1,
+        autotune_cache_path=autotune_cache_path,
     )
-    geometry = compute_tree_geometry(tree, tree.positions_sorted)
+    fmm = FastMultipoleMethod(**tuned_kwargs)
+    tree_artifacts, ctx = _prepare_tree_upward_artifacts_once(
+        fmm=fmm,
+        positions=positions,
+        masses=masses,
+        leaf_size=int(leaf_size),
+        max_order=1,
+    )
     timing = bench_utils.time_callable(
-        build_interactions_and_neighbors,
-        tree,
-        geometry,
-        theta=theta_val,
-        traversal_config=traversal_cfg,
-        mac_type=mac_type,
-        dehnen_radius_scale=dehnen_radius_scale,
+        _build_dual_tree_artifacts_once,
+        fmm=fmm,
+        tree_artifacts=tree_artifacts,
+        ctx=ctx,
         warmup=int(warmup),
         runs=int(runs),
     )
-    return {
+    row = {
         "num_particles": int(num_particles),
         "component": "interactions",
         "mean_seconds": float(timing.mean),
         "std_seconds": float(timing.std),
         "error": "",
     }
+    row.update(worker_tune_info)
+    return row
 
 
 def main() -> None:

@@ -560,6 +560,19 @@ def test_prepare_state_non_streamed_without_retention_omits_interactions():
     assert acc.shape == positions.shape
 
 
+def test_prepare_state_does_not_retain_duplicate_component_matrix():
+    positions, masses = _sample_problem(n=64)
+    fmm = FastMultipoleMethod(
+        preset=FMMPreset.FAST,
+        basis="solidfmm",
+    )
+
+    state = fmm.prepare_state(positions, masses, leaf_size=16, max_order=2)
+    assert state.upward.multipoles.component_matrix is None
+    acc = fmm.evaluate_prepared_state(state)
+    assert acc.shape == positions.shape
+
+
 def test_prepare_state_streamed_without_adaptive_skips_traversal_result_build():
     positions, masses = _sample_problem(n=64)
     fmm = ExpanseFMM(
