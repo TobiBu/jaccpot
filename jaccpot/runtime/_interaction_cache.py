@@ -12,6 +12,7 @@ from jaxtyping import Array
 from yggdrax.dense_interactions import DenseInteractionBuffers, densify_interactions
 from yggdrax.grouped_interactions import GroupedInteractionBuffers
 from yggdrax.interactions import (
+    CompactTaggedFarPairs,
     DualTreeRetryEvent,
     DualTreeTraversalConfig,
     DualTreeWalkResult,
@@ -29,6 +30,7 @@ class _DualTreeArtifacts:
     interactions: NodeInteractionList
     neighbor_list: NodeNeighborList
     traversal_result: Optional[DualTreeWalkResult]
+    compact_far_pairs: Optional[CompactTaggedFarPairs]
     dense_buffers: Optional[DenseInteractionBuffers]
     grouped_buffers: Optional[GroupedInteractionBuffers]
     grouped_segment_starts: Optional[Array]
@@ -47,6 +49,7 @@ class _InteractionCacheEntry(NamedTuple):
     interactions: NodeInteractionList
     neighbor_list: NodeNeighborList
     dual_tree_result: Optional[DualTreeWalkResult]
+    compact_far_pairs: Optional[CompactTaggedFarPairs]
     grouped_buffers: Optional[GroupedInteractionBuffers]
     grouped_segment_starts: Optional[Array]
     grouped_segment_lengths: Optional[Array]
@@ -237,6 +240,7 @@ def _build_dual_tree_artifacts(
     grouped_interactions: bool,
     grouped_chunk_size: Optional[int],
     need_traversal_result: bool,
+    need_compact_far_pairs: bool,
     precompute_grouped_class_segments: bool,
     grouped_schedule_budget_bytes: Optional[int],
     pair_policy=None,
@@ -250,10 +254,12 @@ def _build_dual_tree_artifacts(
         and cache_entry is not None
         and cache_entry.key == cache_key
         and (not need_traversal_result or cache_entry.dual_tree_result is not None)
+        and (not need_compact_far_pairs or cache_entry.compact_far_pairs is not None)
     ):
         interactions = cache_entry.interactions
         neighbor_list = cache_entry.neighbor_list
         traversal_result = cache_entry.dual_tree_result
+        compact_far_pairs = cache_entry.compact_far_pairs
         grouped_buffers = cache_entry.grouped_buffers
         grouped_segment_starts = cache_entry.grouped_segment_starts
         grouped_segment_lengths = cache_entry.grouped_segment_lengths
@@ -283,6 +289,7 @@ def _build_dual_tree_artifacts(
                     traversal_config=current_traversal_config,
                     retry_logger=retry_logger,
                     return_result=need_traversal_result,
+                    return_compact_far_pairs=need_compact_far_pairs,
                     return_grouped=grouped_interactions,
                     pair_policy=pair_policy,
                     policy_state=policy_state,
@@ -311,26 +318,51 @@ def _build_dual_tree_artifacts(
                 "dual-tree traversal build failed without producing artifacts"
             )
         if grouped_interactions:
-            if need_traversal_result:
+            if need_traversal_result and need_compact_far_pairs:
+                (
+                    interactions,
+                    neighbor_list,
+                    traversal_result,
+                    compact_far_pairs,
+                    grouped_buffers,
+                ) = build_out
+            elif need_traversal_result:
                 (
                     interactions,
                     neighbor_list,
                     traversal_result,
                     grouped_buffers,
                 ) = build_out
+                compact_far_pairs = None
+            elif need_compact_far_pairs:
+                interactions, neighbor_list, compact_far_pairs, grouped_buffers = build_out
+                traversal_result = None
             else:
                 interactions, neighbor_list, grouped_buffers = build_out
                 traversal_result = None
+                compact_far_pairs = None
         else:
-            if need_traversal_result:
+            if need_traversal_result and need_compact_far_pairs:
+                (
+                    interactions,
+                    neighbor_list,
+                    traversal_result,
+                    compact_far_pairs,
+                ) = build_out
+            elif need_traversal_result:
                 (
                     interactions,
                     neighbor_list,
                     traversal_result,
                 ) = build_out
+                compact_far_pairs = None
+            elif need_compact_far_pairs:
+                interactions, neighbor_list, compact_far_pairs = build_out
+                traversal_result = None
             else:
                 interactions, neighbor_list = build_out
                 traversal_result = None
+                compact_far_pairs = None
             grouped_buffers = None
         cache_out = (
             _InteractionCacheEntry(
@@ -338,6 +370,7 @@ def _build_dual_tree_artifacts(
                 interactions=interactions,
                 neighbor_list=neighbor_list,
                 dual_tree_result=traversal_result,
+                compact_far_pairs=compact_far_pairs,
                 grouped_buffers=grouped_buffers if grouped_interactions else None,
                 grouped_segment_starts=None,
                 grouped_segment_lengths=None,
@@ -385,6 +418,7 @@ def _build_dual_tree_artifacts(
                 interactions=cache_out.interactions,
                 neighbor_list=cache_out.neighbor_list,
                 dual_tree_result=cache_out.dual_tree_result,
+                compact_far_pairs=cache_out.compact_far_pairs,
                 grouped_buffers=grouped_buffers,
                 grouped_segment_starts=cache_out.grouped_segment_starts,
                 grouped_segment_lengths=cache_out.grouped_segment_lengths,
@@ -430,9 +464,6 @@ def _build_dual_tree_artifacts(
             grouped_segment_starts is None
             or grouped_segment_lengths is None
             or grouped_segment_class_ids is None
-            or grouped_segment_sort_permutation is None
-            or grouped_segment_group_ids is None
-            or grouped_segment_unique_targets is None
             or grouped_chunk_size_cached != int(grouped_chunk_size)
         )
         if needs_schedule:
@@ -442,13 +473,13 @@ def _build_dual_tree_artifacts(
                 grouped_segment_starts,
                 grouped_segment_lengths,
                 grouped_segment_class_ids,
-                grouped_segment_sort_permutation,
-                grouped_segment_group_ids,
-                grouped_segment_unique_targets,
             ) = _runtime_fmm._build_grouped_class_segments(
                 grouped_buffers,
                 chunk_size=int(grouped_chunk_size),
             )
+            grouped_segment_sort_permutation = None
+            grouped_segment_group_ids = None
+            grouped_segment_unique_targets = None
             grouped_chunk_size_cached = int(grouped_chunk_size)
             if cache_out is not None:
                 cache_out = _InteractionCacheEntry(
@@ -456,6 +487,7 @@ def _build_dual_tree_artifacts(
                     interactions=cache_out.interactions,
                     neighbor_list=cache_out.neighbor_list,
                     dual_tree_result=cache_out.dual_tree_result,
+                    compact_far_pairs=cache_out.compact_far_pairs,
                     grouped_buffers=grouped_buffers,
                     grouped_segment_starts=grouped_segment_starts,
                     grouped_segment_lengths=grouped_segment_lengths,
@@ -485,6 +517,7 @@ def _build_dual_tree_artifacts(
         interactions=interactions,
         neighbor_list=neighbor_list,
         traversal_result=traversal_result,
+        compact_far_pairs=compact_far_pairs,
         dense_buffers=dense_buffers,
         grouped_buffers=grouped_buffers,
         grouped_segment_starts=grouped_segment_starts,

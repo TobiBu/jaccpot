@@ -27,6 +27,7 @@ from yggdrax.grouped_interactions import (
     build_grouped_interactions,
 )
 from yggdrax.interactions import (
+    CompactTaggedFarPairs,
     DualTreeRetryEvent,
     DualTreeTraversalConfig,
     DualTreeWalkResult,
@@ -376,7 +377,7 @@ _grouped_operator_blocks_cache: "OrderedDict[tuple, tuple[Array, Array]]" = (
 )
 _GROUPED_SEGMENT_CACHE_MAX = _env_int("JACCPOT_GROUPED_SEGMENT_CACHE_MAX", 32)
 _grouped_segment_cache: (
-    "OrderedDict[tuple, tuple[Array, Array, Array, Array, Array, Array]]"
+    "OrderedDict[tuple, tuple[Array, Array, Array]]"
 ) = OrderedDict()
 _GROUPED_OPERATOR_CACHE_ENTRY_MAX_BYTES = _env_int(
     "JACCPOT_GROUPED_OPERATOR_CACHE_ENTRY_MAX_BYTES",
@@ -569,7 +570,7 @@ def _grouped_operator_cache_put(key: tuple, value: tuple[Array, Array]) -> None:
 
 def _grouped_segment_cache_get(
     key: tuple,
-) -> Optional[tuple[Array, Array, Array, Array, Array, Array]]:
+) -> Optional[tuple[Array, Array, Array]]:
     cached = _grouped_segment_cache.get(key)
     if cached is None:
         return None
@@ -579,7 +580,7 @@ def _grouped_segment_cache_get(
 
 def _grouped_segment_cache_put(
     key: tuple,
-    value: tuple[Array, Array, Array, Array, Array, Array],
+    value: tuple[Array, Array, Array],
 ) -> None:
     if _tuple_array_nbytes(value) > _GROUPED_SEGMENT_CACHE_ENTRY_MAX_BYTES:
         return
@@ -969,6 +970,7 @@ class _PrepareStateDualDownwardArtifacts(NamedTuple):
     interactions: Optional[NodeInteractionList]
     neighbor_list: NodeNeighborList
     traversal_result: Optional[DualTreeWalkResult]
+    compact_far_pairs: Optional[CompactTaggedFarPairs]
     downward: TreeDownwardData
     cache_entry: Optional[_InteractionCacheEntry]
 
@@ -2541,7 +2543,10 @@ class FastMultipoleMethod:
             self.enable_interaction_cache
         )
         need_traversal_result = bool(self.retain_traversal_result) or bool(
-            self.adaptive_order or use_paper_fixed_policy
+            use_paper_fixed_policy
+        )
+        need_compact_far_pairs = bool(self.adaptive_order) and not bool(
+            need_traversal_result
         )
         dual_artifacts, cache_entry = _build_dual_tree_artifacts(
             tree_artifacts.tree,
@@ -2559,6 +2564,7 @@ class FastMultipoleMethod:
             grouped_interactions=grouped_interactions,
             grouped_chunk_size=runtime_m2l_chunk_size,
             need_traversal_result=need_traversal_result,
+            need_compact_far_pairs=need_compact_far_pairs,
             precompute_grouped_class_segments=self._should_precompute_grouped_class_segments(
                 grouped_chunk_size=runtime_m2l_chunk_size,
             ),
@@ -2573,6 +2579,7 @@ class FastMultipoleMethod:
             interactions,
             neighbor_list,
             traversal_result,
+            compact_far_pairs,
             dense_buffers,
             grouped_buffers,
             grouped_segment_starts,
@@ -2590,21 +2597,29 @@ class FastMultipoleMethod:
         if self.adaptive_order:
             if len(self.p_gears) == 0:
                 raise ValueError("adaptive_order=True requires non-empty p_gears")
-            if traversal_result is None:
-                raise RuntimeError(
-                    "adaptive-order traversal requires tagged traversal_result"
-                )
-            far_total = int(traversal_result.far_pair_count)
-            far_pairs_by_gear = bucket_far_pairs_by_tag(
-                jnp.asarray(
+            if traversal_result is not None:
+                far_total = int(traversal_result.far_pair_count)
+                far_sources = jnp.asarray(
                     traversal_result.interaction_sources[:far_total], dtype=INDEX_DTYPE
-                ),
-                jnp.asarray(
+                )
+                far_targets = jnp.asarray(
                     traversal_result.interaction_targets[:far_total], dtype=INDEX_DTYPE
-                ),
-                jnp.asarray(
+                )
+                far_tags = jnp.asarray(
                     traversal_result.interaction_tags[:far_total], dtype=INDEX_DTYPE
-                ),
+                )
+            elif compact_far_pairs is not None:
+                far_sources = jnp.asarray(compact_far_pairs.sources, dtype=INDEX_DTYPE)
+                far_targets = jnp.asarray(compact_far_pairs.targets, dtype=INDEX_DTYPE)
+                far_tags = jnp.asarray(compact_far_pairs.tags, dtype=INDEX_DTYPE)
+            else:
+                raise RuntimeError(
+                    "adaptive-order traversal requires tagged far-pair payload"
+                )
+            far_pairs_by_gear = bucket_far_pairs_by_tag(
+                far_sources,
+                far_targets,
+                far_tags,
                 num_tags=len(self.p_gears),
             )
             self._recent_far_pairs_by_gear_counts = tuple(
@@ -2720,6 +2735,9 @@ class FastMultipoleMethod:
             neighbor_list=neighbor_list,
             traversal_result=(
                 traversal_result if self.retain_traversal_result else None
+            ),
+            compact_far_pairs=(
+                compact_far_pairs if self.adaptive_order else None
             ),
             downward=downward,
             cache_entry=cache_entry,
@@ -2925,14 +2943,10 @@ class FastMultipoleMethod:
             chunk = int(edge_chunk_size)
             chunk_count = (edge_count + chunk - 1) // chunk if edge_count > 0 else 0
             schedule_items = int(chunk_count * chunk * int(leaf_cap))
-            schedule_item_cap = (
-                int(self.nearfield_schedule_item_cap)
-                if self.nearfield_schedule_item_cap is not None
-                else (
-                    _NEARFIELD_SCATTER_SCHEDULE_ITEM_CAP_GPU
-                    if jax.default_backend() == "gpu"
-                    else _NEARFIELD_SCATTER_SCHEDULE_ITEM_CAP
-                )
+            schedule_item_cap = self._resolve_nearfield_schedule_item_cap(
+                edge_count=edge_count,
+                leaf_cap=int(leaf_cap),
+                edge_chunk_size=chunk,
             )
             if schedule_items > int(schedule_item_cap):
                 return None, None, None
@@ -2946,6 +2960,35 @@ class FastMultipoleMethod:
             )
         except Exception:
             return None, None, None
+
+    def _resolve_nearfield_schedule_item_cap(
+        self,
+        *,
+        edge_count: int,
+        leaf_cap: int,
+        edge_chunk_size: int,
+    ) -> int:
+        """Return the max near-field schedule items allowed for this workload."""
+        del edge_count, leaf_cap, edge_chunk_size
+        if self.nearfield_schedule_item_cap is not None:
+            return int(self.nearfield_schedule_item_cap)
+
+        backend_name = jax.default_backend()
+        base_cap = (
+            _NEARFIELD_SCATTER_SCHEDULE_ITEM_CAP_GPU
+            if backend_name == "gpu"
+            else _NEARFIELD_SCATTER_SCHEDULE_ITEM_CAP
+        )
+        if self.memory_objective == "minimum_memory":
+            base_cap = max(1, base_cap // 4)
+        elif self.memory_objective == "throughput":
+            base_cap = base_cap * 2
+
+        if self.memory_budget_bytes is not None:
+            bytes_per_item = 3 * np.dtype(np.int32).itemsize
+            budget_limited_cap = max(1, int(self.memory_budget_bytes) // bytes_per_item)
+            base_cap = min(base_cap, budget_limited_cap)
+        return int(base_cap)
 
     def _should_precompute_grouped_class_segments(
         self,
@@ -2995,6 +3038,7 @@ class FastMultipoleMethod:
         NodeInteractionList,
         NodeNeighborList,
         Optional[DualTreeWalkResult],
+        Optional[CompactTaggedFarPairs],
         Optional[DenseInteractionBuffers],
         Optional[GroupedInteractionBuffers],
         Optional[Array],
@@ -3009,6 +3053,7 @@ class FastMultipoleMethod:
             dual_artifacts.interactions,
             dual_artifacts.neighbor_list,
             dual_artifacts.traversal_result,
+            dual_artifacts.compact_far_pairs,
             dual_artifacts.dense_buffers,
             dual_artifacts.grouped_buffers,
             dual_artifacts.grouped_segment_starts,
@@ -4402,8 +4447,8 @@ def _build_grouped_class_segments(
     grouped: GroupedInteractionBuffers,
     *,
     chunk_size: int,
-) -> tuple[Array, Array, Array, Array, Array, Array]:
-    """Build class-major fixed-width segments for chunked class execution."""
+) -> tuple[Array, Array, Array]:
+    """Build compact class-major segment metadata for chunked execution."""
     cache_key = _grouped_segment_cache_key(
         class_offsets=grouped.class_offsets,
         class_targets=grouped.class_targets,
@@ -4415,11 +4460,9 @@ def _build_grouped_class_segments(
             return cached
 
     class_offsets = np.asarray(jax.device_get(grouped.class_offsets), dtype=np.int64)
-    class_targets = np.asarray(jax.device_get(grouped.class_targets), dtype=np.int64)
     if class_offsets.size <= 1:
         empty = jnp.zeros((0,), dtype=INDEX_DTYPE)
-        empty_matrix = jnp.zeros((0, int(chunk_size)), dtype=INDEX_DTYPE)
-        result = (empty, empty, empty, empty_matrix, empty_matrix, empty_matrix)
+        result = (empty, empty, empty)
         if cache_key is not None:
             _grouped_segment_cache_put(cache_key, result)
         return result
@@ -4427,11 +4470,6 @@ def _build_grouped_class_segments(
     starts: list[int] = []
     lengths: list[int] = []
     class_ids: list[int] = []
-    sort_permutation: list[np.ndarray] = []
-    group_ids: list[np.ndarray] = []
-    unique_targets: list[np.ndarray] = []
-
-    offsets = np.arange(int(chunk_size), dtype=np.int64)
     for class_idx in range(class_offsets.shape[0] - 1):
         start = int(class_offsets[class_idx])
         end = int(class_offsets[class_idx + 1])
@@ -4440,37 +4478,13 @@ def _build_grouped_class_segments(
             starts.append(start)
             lengths.append(seg_len)
             class_ids.append(class_idx)
-
-            idx = start + offsets
-            valid = offsets < seg_len
-            safe_idx = np.where(valid, idx, 0)
-            tgt_chunk = class_targets[safe_idx]
-
-            perm = np.argsort(tgt_chunk, kind="stable")
-            tgt_sorted = tgt_chunk[perm]
-            grp = np.zeros((int(chunk_size),), dtype=np.int64)
-            if int(chunk_size) > 1:
-                grp[1:] = np.cumsum(
-                    (tgt_sorted[1:] != tgt_sorted[:-1]).astype(np.int64)
-                )
-
-            unique = np.zeros((int(chunk_size),), dtype=np.int64)
-            unique[grp] = tgt_sorted
-
-            sort_permutation.append(perm.astype(np.int64))
-            group_ids.append(grp)
-            unique_targets.append(unique)
             start += seg_len
 
-    if len(sort_permutation) == 0:
-        empty_matrix = jnp.zeros((0, int(chunk_size)), dtype=INDEX_DTYPE)
+    if len(starts) == 0:
         result = (
             jnp.asarray(starts, dtype=INDEX_DTYPE),
             jnp.asarray(lengths, dtype=INDEX_DTYPE),
             jnp.asarray(class_ids, dtype=INDEX_DTYPE),
-            empty_matrix,
-            empty_matrix,
-            empty_matrix,
         )
         if cache_key is not None:
             _grouped_segment_cache_put(cache_key, result)
@@ -4480,9 +4494,6 @@ def _build_grouped_class_segments(
         jnp.asarray(starts, dtype=INDEX_DTYPE),
         jnp.asarray(lengths, dtype=INDEX_DTYPE),
         jnp.asarray(class_ids, dtype=INDEX_DTYPE),
-        jnp.asarray(np.stack(sort_permutation, axis=0), dtype=INDEX_DTYPE),
-        jnp.asarray(np.stack(group_ids, axis=0), dtype=INDEX_DTYPE),
-        jnp.asarray(np.stack(unique_targets, axis=0), dtype=INDEX_DTYPE),
     )
     if cache_key is not None:
         _grouped_segment_cache_put(cache_key, result)
@@ -4503,9 +4514,6 @@ def _accumulate_solidfmm_m2l_class_major_chunked_scan(
     segment_starts: Array,
     segment_lengths: Array,
     segment_class_ids: Array,
-    segment_sort_permutation: Array,
-    segment_group_ids: Array,
-    segment_unique_targets: Array,
     blocks_to_classes: Array,
     blocks_from_classes: Array,
     *,
@@ -4547,11 +4555,25 @@ def _accumulate_solidfmm_m2l_class_major_chunked_scan(
             order=order,
         ).astype(locals_coeffs.dtype)
         contribs = jnp.where(valid[:, None], contribs, 0)
-        sort_idx = segment_sort_permutation[seg_idx]
-        group_ids = segment_group_ids[seg_idx]
-        unique_targets = segment_unique_targets[seg_idx]
+        masked_targets = jnp.where(valid, tgt_chunk, jnp.iinfo(INDEX_DTYPE).max)
+        sort_idx = jnp.argsort(masked_targets)
+        tgt_sorted_chunk = tgt_chunk[sort_idx]
         contribs_sorted = contribs[sort_idx]
-        reduced = jax.ops.segment_sum(contribs_sorted, group_ids, chunk_size)
+        valid_sorted = valid[sort_idx]
+        prev_targets = jnp.concatenate(
+            [
+                jnp.asarray([-1], dtype=INDEX_DTYPE),
+                tgt_sorted_chunk[:-1],
+            ]
+        )
+        group_starts = valid_sorted & (
+            jnp.logical_not(jnp.roll(valid_sorted, 1))
+            | (tgt_sorted_chunk != prev_targets)
+        )
+        group_ids = jnp.cumsum(group_starts.astype(INDEX_DTYPE)) - 1
+        safe_group_ids = jnp.where(valid_sorted, group_ids, 0)
+        reduced = jax.ops.segment_sum(contribs_sorted, safe_group_ids, chunk_size)
+        unique_targets = jnp.where(valid_sorted, tgt_sorted_chunk, 0)
         return local_accum.at[unique_targets].add(reduced), None
 
     local_accum, _ = jax.lax.scan(
@@ -4580,6 +4602,11 @@ def _accumulate_solidfmm_m2l_grouped_class_major(
     chunk_size: int,
 ) -> Array:
     """Class-major grouped accumulation without per-pair operator gathers."""
+    del (
+        grouped_segment_sort_permutation,
+        grouped_segment_group_ids,
+        grouped_segment_unique_targets,
+    )
 
     if rotation not in ("cached", "solidfmm"):
         src = grouped.class_sources
@@ -4606,17 +4633,11 @@ def _accumulate_solidfmm_m2l_grouped_class_major(
         grouped_segment_starts is None
         or grouped_segment_lengths is None
         or grouped_segment_class_ids is None
-        or grouped_segment_sort_permutation is None
-        or grouped_segment_group_ids is None
-        or grouped_segment_unique_targets is None
     ):
         (
             segment_starts,
             segment_lengths,
             segment_class_ids,
-            segment_sort_permutation,
-            segment_group_ids,
-            segment_unique_targets,
         ) = _build_grouped_class_segments(
             grouped,
             chunk_size=int(chunk_size),
@@ -4625,15 +4646,6 @@ def _accumulate_solidfmm_m2l_grouped_class_major(
         segment_starts = jnp.asarray(grouped_segment_starts, dtype=INDEX_DTYPE)
         segment_lengths = jnp.asarray(grouped_segment_lengths, dtype=INDEX_DTYPE)
         segment_class_ids = jnp.asarray(grouped_segment_class_ids, dtype=INDEX_DTYPE)
-        segment_sort_permutation = jnp.asarray(
-            grouped_segment_sort_permutation,
-            dtype=INDEX_DTYPE,
-        )
-        segment_group_ids = jnp.asarray(grouped_segment_group_ids, dtype=INDEX_DTYPE)
-        segment_unique_targets = jnp.asarray(
-            grouped_segment_unique_targets,
-            dtype=INDEX_DTYPE,
-        )
     return _accumulate_solidfmm_m2l_class_major_chunked_scan(
         locals_coeffs,
         multip_packed,
@@ -4643,9 +4655,6 @@ def _accumulate_solidfmm_m2l_grouped_class_major(
         segment_starts,
         segment_lengths,
         segment_class_ids,
-        segment_sort_permutation,
-        segment_group_ids,
-        segment_unique_targets,
         blocks_to_classes,
         blocks_from_classes,
         order=order,

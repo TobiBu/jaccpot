@@ -594,7 +594,7 @@ def test_prepare_state_streamed_without_adaptive_skips_traversal_result_build():
     assert state.dual_tree_result is None
 
 
-def test_prepare_state_adaptive_order_requests_traversal_result():
+def test_prepare_state_adaptive_order_requests_compact_far_pairs():
     positions, masses = _sample_problem(n=64)
     fmm = ExpanseFMM(
         theta=0.6,
@@ -623,7 +623,8 @@ def test_prepare_state_adaptive_order_requests_traversal_result():
         state = fmm.prepare_state(positions, masses, leaf_size=8, max_order=3)
 
     assert seen
-    assert all(bool(item.get("return_result", False)) is True for item in seen)
+    assert all(bool(item.get("return_result", True)) is False for item in seen)
+    assert all(bool(item.get("return_compact_far_pairs", False)) is True for item in seen)
     assert state.dual_tree_result is None
 
 
@@ -659,6 +660,54 @@ def test_runtime_memory_policy_fields_flow_to_runtime():
     assert fmm._impl.grouped_schedule_budget_bytes == 4096
     assert fmm._impl.nearfield_schedule_item_cap == 2048
     assert fmm._impl.upward_leaf_batch_size == 128
+
+
+def test_minimum_memory_objective_reduces_default_nearfield_schedule_cap():
+    balanced = FastMultipoleMethod(
+        preset=FMMPreset.FAST,
+        basis="solidfmm",
+        advanced=FMMAdvancedConfig(
+            runtime=RuntimePolicyConfig(memory_objective="balanced"),
+        ),
+    )
+    minimum = FastMultipoleMethod(
+        preset=FMMPreset.FAST,
+        basis="solidfmm",
+        advanced=FMMAdvancedConfig(
+            runtime=RuntimePolicyConfig(memory_objective="minimum_memory"),
+        ),
+    )
+
+    balanced_cap = balanced._impl._resolve_nearfield_schedule_item_cap(
+        edge_count=4096,
+        leaf_cap=32,
+        edge_chunk_size=256,
+    )
+    minimum_cap = minimum._impl._resolve_nearfield_schedule_item_cap(
+        edge_count=4096,
+        leaf_cap=32,
+        edge_chunk_size=256,
+    )
+
+    assert minimum_cap < balanced_cap
+
+
+def test_memory_budget_limits_default_nearfield_schedule_cap():
+    fmm = FastMultipoleMethod(
+        preset=FMMPreset.FAST,
+        basis="solidfmm",
+        advanced=FMMAdvancedConfig(
+            runtime=RuntimePolicyConfig(memory_budget_bytes=96),
+        ),
+    )
+
+    cap = fmm._impl._resolve_nearfield_schedule_item_cap(
+        edge_count=1024,
+        leaf_cap=32,
+        edge_chunk_size=256,
+    )
+
+    assert cap == 8
 
 
 def test_m2l_autotune_cache_roundtrip_api():

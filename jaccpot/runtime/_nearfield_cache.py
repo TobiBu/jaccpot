@@ -65,6 +65,7 @@ def with_nearfield_cache_artifacts(
         interactions=cache_entry.interactions,
         neighbor_list=cache_entry.neighbor_list,
         dual_tree_result=cache_entry.dual_tree_result,
+        compact_far_pairs=cache_entry.compact_far_pairs,
         grouped_buffers=cache_entry.grouped_buffers,
         grouped_segment_starts=cache_entry.grouped_segment_starts,
         grouped_segment_lengths=cache_entry.grouped_segment_lengths,
