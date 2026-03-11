@@ -13,6 +13,15 @@ import time
 from dataclasses import replace
 from typing import Any, Optional
 
+
+def _configure_worker_environment() -> None:
+    """Reduce worker-side CUDA allocator pressure before JAX initializes."""
+    os.environ.setdefault("XLA_PYTHON_CLIENT_PREALLOCATE", "false")
+    os.environ.setdefault("XLA_PYTHON_CLIENT_ALLOCATOR", "platform")
+
+
+_configure_worker_environment()
+
 import jax
 import jax.numpy as jnp
 
@@ -20,27 +29,53 @@ REPO_ROOT = pathlib.Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from yggdrax import Tree, compute_tree_geometry  # noqa: E402
-from yggdrax.interactions import (  # noqa: E402
-    DualTreeTraversalConfig,
-    build_interactions_and_neighbors,
-)
-
 from examples import benchmark_utils as bench_utils
-from jaccpot import (  # noqa: E402
-    FarFieldConfig,
-    FastMultipoleMethod,
-    FMMAdvancedConfig,
-    FMMPreset,
-    NearFieldConfig,
-    RuntimePolicyConfig,
-    TreeConfig,
-)
+
+
+def _load_jaccpot_symbols() -> dict[str, Any]:
+    from jaccpot import (  # noqa: E402
+        FarFieldConfig,
+        FastMultipoleMethod,
+        FMMAdvancedConfig,
+        FMMPreset,
+        NearFieldConfig,
+        RuntimePolicyConfig,
+        TreeConfig,
+    )
+
+    return {
+        "FarFieldConfig": FarFieldConfig,
+        "FastMultipoleMethod": FastMultipoleMethod,
+        "FMMAdvancedConfig": FMMAdvancedConfig,
+        "FMMPreset": FMMPreset,
+        "NearFieldConfig": NearFieldConfig,
+        "RuntimePolicyConfig": RuntimePolicyConfig,
+        "TreeConfig": TreeConfig,
+    }
+
+
+def _load_yggdrax_symbols() -> dict[str, Any]:
+    from yggdrax import Tree, compute_tree_geometry  # noqa: E402
+    from yggdrax.interactions import (  # noqa: E402
+        DualTreeTraversalConfig,
+        build_interactions_and_neighbors,
+    )
+
+    return {
+        "Tree": Tree,
+        "compute_tree_geometry": compute_tree_geometry,
+        "DualTreeTraversalConfig": DualTreeTraversalConfig,
+        "build_interactions_and_neighbors": build_interactions_and_neighbors,
+    }
 
 
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--mode", choices=("sweep", "prepare"), required=True)
+    parser.add_argument(
+        "--mode",
+        choices=("sweep", "prepare", "tree", "interactions"),
+        required=True,
+    )
     parser.add_argument("--num-particles", type=int, required=True)
     parser.add_argument("--leaf-size", type=int, required=True)
     parser.add_argument("--max-order", type=int, required=True)
@@ -79,7 +114,9 @@ def _runtime_overrides(
     traversal_cfg_dict: Optional[dict[str, int]] = None,
     nearfield_edge_chunk_size: Optional[int] = None,
 ) -> dict[str, Any]:
-    advanced: FMMAdvancedConfig = fmm_kwargs["advanced"]
+    yggdrax_symbols = _load_yggdrax_symbols()
+    DualTreeTraversalConfig = yggdrax_symbols["DualTreeTraversalConfig"]
+    advanced = fmm_kwargs["advanced"]
     runtime_cfg = advanced.runtime
     nearfield_cfg = advanced.nearfield
     if traversal_cfg_dict is not None:
@@ -215,6 +252,8 @@ def _measure_prepare_once(
     max_order: int,
     autotune_cache_path: Optional[str],
 ) -> float:
+    jaccpot_symbols = _load_jaccpot_symbols()
+    FastMultipoleMethod = jaccpot_symbols["FastMultipoleMethod"]
     fmm = FastMultipoleMethod(**fmm_kwargs)
     if autotune_cache_path:
         cache_path = pathlib.Path(str(autotune_cache_path))
@@ -435,6 +474,15 @@ def _worker_autotune_runtime_kwargs(
 
 
 def _build_runtime_config(config: dict[str, Any]) -> dict[str, Any]:
+    jaccpot_symbols = _load_jaccpot_symbols()
+    yggdrax_symbols = _load_yggdrax_symbols()
+    FarFieldConfig = jaccpot_symbols["FarFieldConfig"]
+    FMMPreset = jaccpot_symbols["FMMPreset"]
+    NearFieldConfig = jaccpot_symbols["NearFieldConfig"]
+    RuntimePolicyConfig = jaccpot_symbols["RuntimePolicyConfig"]
+    TreeConfig = jaccpot_symbols["TreeConfig"]
+    FMMAdvancedConfig = jaccpot_symbols["FMMAdvancedConfig"]
+    DualTreeTraversalConfig = yggdrax_symbols["DualTreeTraversalConfig"]
     preset_norm = str(config.get("preset", "fast")).strip().lower()
     autotune_default = preset_norm == "large_n_gpu"
     traversal_raw = config.get("traversal_config")
@@ -543,6 +591,8 @@ def _run_sweep_case(
     fmm_kwargs: dict[str, Any],
     autotune_cache_path: Optional[str] = None,
 ) -> dict[str, Any]:
+    jaccpot_symbols = _load_jaccpot_symbols()
+    FastMultipoleMethod = jaccpot_symbols["FastMultipoleMethod"]
     key = jax.random.fold_in(jax.random.PRNGKey(int(seed)), int(num_particles))
     positions, masses, _ = bench_utils.generate_random_distribution(
         int(num_particles),
@@ -633,6 +683,12 @@ def _run_prepare_case(
     fmm_kwargs: dict[str, Any],
     autotune_cache_path: Optional[str] = None,
 ) -> dict[str, Any]:
+    jaccpot_symbols = _load_jaccpot_symbols()
+    yggdrax_symbols = _load_yggdrax_symbols()
+    FastMultipoleMethod = jaccpot_symbols["FastMultipoleMethod"]
+    Tree = yggdrax_symbols["Tree"]
+    compute_tree_geometry = yggdrax_symbols["compute_tree_geometry"]
+    build_interactions_and_neighbors = yggdrax_symbols["build_interactions_and_neighbors"]
     key = jax.random.fold_in(jax.random.PRNGKey(int(seed)), int(num_particles))
     positions, masses, _ = bench_utils.generate_random_distribution(
         int(num_particles),
@@ -725,6 +781,109 @@ def _run_prepare_case(
     return row
 
 
+def _run_tree_case(
+    *,
+    num_particles: int,
+    leaf_size: int,
+    runs: int,
+    warmup: int,
+    dtype: jnp.dtype,
+    seed: int,
+    cfg: dict[str, Any],
+    fmm_kwargs: dict[str, Any],
+    autotune_cache_path: Optional[str] = None,
+) -> dict[str, Any]:
+    del cfg, fmm_kwargs, autotune_cache_path
+    yggdrax_symbols = _load_yggdrax_symbols()
+    Tree = yggdrax_symbols["Tree"]
+    key = jax.random.fold_in(jax.random.PRNGKey(int(seed)), int(num_particles))
+    positions, masses, _ = bench_utils.generate_random_distribution(
+        int(num_particles),
+        key=key,
+        dtype=dtype,
+    )
+    tree_timing = bench_utils.time_callable(
+        Tree.from_particles,
+        positions,
+        masses,
+        tree_type="radix",
+        build_mode="adaptive",
+        return_reordered=True,
+        leaf_size=int(leaf_size),
+        warmup=int(warmup),
+        runs=int(runs),
+    )
+    return {
+        "num_particles": int(num_particles),
+        "component": "tree",
+        "mean_seconds": float(tree_timing.mean),
+        "std_seconds": float(tree_timing.std),
+        "error": "",
+    }
+
+
+def _run_interactions_case(
+    *,
+    num_particles: int,
+    leaf_size: int,
+    runs: int,
+    warmup: int,
+    dtype: jnp.dtype,
+    seed: int,
+    cfg: dict[str, Any],
+    fmm_kwargs: dict[str, Any],
+    autotune_cache_path: Optional[str] = None,
+) -> dict[str, Any]:
+    del autotune_cache_path
+    jaccpot_symbols = _load_jaccpot_symbols()
+    yggdrax_symbols = _load_yggdrax_symbols()
+    FastMultipoleMethod = jaccpot_symbols["FastMultipoleMethod"]
+    Tree = yggdrax_symbols["Tree"]
+    compute_tree_geometry = yggdrax_symbols["compute_tree_geometry"]
+    build_interactions_and_neighbors = yggdrax_symbols["build_interactions_and_neighbors"]
+    key = jax.random.fold_in(jax.random.PRNGKey(int(seed)), int(num_particles))
+    positions, masses, _ = bench_utils.generate_random_distribution(
+        int(num_particles),
+        key=key,
+        dtype=dtype,
+    )
+    fmm = FastMultipoleMethod(**fmm_kwargs)
+    tree_type = str(getattr(fmm._impl, "tree_type", "radix"))
+    tree_mode = str(getattr(fmm._impl, "tree_build_mode", "lbvh"))
+    ygg_build_mode = "fixed_depth" if tree_mode == "fixed_depth" else "adaptive"
+    theta_val = float(getattr(fmm._impl, "theta", fmm_kwargs.get("theta", 0.6)))
+    traversal_cfg = fmm.advanced.runtime.traversal_config
+    mac_type = str(getattr(fmm, "mac_type", "dehnen"))
+    dehnen_radius_scale = float(getattr(fmm._impl, "dehnen_radius_scale", 1.0))
+    tree = Tree.from_particles(
+        positions,
+        masses,
+        tree_type=tree_type,
+        build_mode=ygg_build_mode,
+        return_reordered=True,
+        leaf_size=int(leaf_size),
+    )
+    geometry = compute_tree_geometry(tree, tree.positions_sorted)
+    timing = bench_utils.time_callable(
+        build_interactions_and_neighbors,
+        tree,
+        geometry,
+        theta=theta_val,
+        traversal_config=traversal_cfg,
+        mac_type=mac_type,
+        dehnen_radius_scale=dehnen_radius_scale,
+        warmup=int(warmup),
+        runs=int(runs),
+    )
+    return {
+        "num_particles": int(num_particles),
+        "component": "interactions",
+        "mean_seconds": float(timing.mean),
+        "std_seconds": float(timing.std),
+        "error": "",
+    }
+
+
 def main() -> None:
     args = _parse_args()
     cfg = json.loads(args.config_json)
@@ -750,11 +909,35 @@ def main() -> None:
                 fmm_kwargs=fmm_kwargs,
                 autotune_cache_path=autotune_cache_path,
             )
-        else:
+        elif args.mode == "prepare":
             row = _run_prepare_case(
                 num_particles=args.num_particles,
                 leaf_size=args.leaf_size,
                 max_order=args.max_order,
+                runs=args.runs,
+                warmup=args.warmup,
+                dtype=dtype,
+                seed=args.seed,
+                cfg=cfg,
+                fmm_kwargs=fmm_kwargs,
+                autotune_cache_path=autotune_cache_path,
+            )
+        elif args.mode == "tree":
+            row = _run_tree_case(
+                num_particles=args.num_particles,
+                leaf_size=args.leaf_size,
+                runs=args.runs,
+                warmup=args.warmup,
+                dtype=dtype,
+                seed=args.seed,
+                cfg=cfg,
+                fmm_kwargs=fmm_kwargs,
+                autotune_cache_path=autotune_cache_path,
+            )
+        else:
+            row = _run_interactions_case(
+                num_particles=args.num_particles,
+                leaf_size=args.leaf_size,
                 runs=args.runs,
                 warmup=args.warmup,
                 dtype=dtype,
