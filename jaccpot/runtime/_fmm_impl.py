@@ -130,6 +130,7 @@ from .reference import evaluate_expansion as reference_evaluate_expansion
 ExpansionBasis = Literal["cartesian", "solidfmm", "complex"]
 FarFieldMode = Literal["auto", "pair_grouped", "class_major"]
 NearFieldMode = Literal["auto", "baseline", "bucketed"]
+MemoryObjective = Literal["balanced", "throughput", "minimum_memory"]
 
 _cartesian_eval_table_cache: dict[int, tuple[np.ndarray, np.ndarray, np.ndarray]] = {}
 
@@ -310,6 +311,11 @@ class _RuntimeExecutionOverrides(NamedTuple):
     center_mode: str
     refine_local_override: Optional[bool]
     adaptive_applied: bool
+
+
+_MINIMUM_MEMORY_GPU_M2L_CHUNK_SIZE = 1024
+_MINIMUM_MEMORY_CPU_M2L_CHUNK_SIZE = 4096
+_GROUPED_SCHEDULE_BUDGET_DEFAULT = 32 * 1024 * 1024
 
 
 _LARGE_CPU_PARTICLE_THRESHOLD = 65536
@@ -1131,10 +1137,16 @@ class FastMultipoleMethod:
         nearfield_mode: NearFieldMode = "auto",
         nearfield_edge_chunk_size: int = 256,
         precompute_nearfield_scatter_schedules: bool = True,
+        memory_objective: MemoryObjective = "balanced",
+        memory_budget_bytes: Optional[int] = None,
         enable_interaction_cache: bool = True,
         retain_traversal_result: bool = True,
         retain_interactions: bool = True,
         autotune_m2l_chunk: bool = False,
+        precompute_grouped_class_segments: Optional[bool] = None,
+        grouped_schedule_budget_bytes: Optional[int] = None,
+        nearfield_schedule_item_cap: Optional[int] = None,
+        upward_leaf_batch_size: Optional[int] = None,
         host_refine_mode: str = "auto",
         preset: Optional[Union[str, FMMPreset]] = None,
         fixed_order: Optional[int] = None,
@@ -1224,10 +1236,43 @@ class FastMultipoleMethod:
         self.precompute_nearfield_scatter_schedules = bool(
             precompute_nearfield_scatter_schedules
         )
+        objective_norm = str(memory_objective).strip().lower()
+        if objective_norm not in ("balanced", "throughput", "minimum_memory"):
+            raise ValueError(
+                "memory_objective must be 'balanced', 'throughput', or 'minimum_memory'"
+            )
+        self.memory_objective: MemoryObjective = objective_norm  # type: ignore[assignment]
+        self.memory_budget_bytes = (
+            None if memory_budget_bytes is None else int(memory_budget_bytes)
+        )
+        if self.memory_budget_bytes is not None and self.memory_budget_bytes <= 0:
+            raise ValueError("memory_budget_bytes must be > 0 when provided")
         self.enable_interaction_cache = bool(enable_interaction_cache)
         self.retain_traversal_result = bool(retain_traversal_result)
         self.retain_interactions = bool(retain_interactions)
         self.autotune_m2l_chunk = bool(autotune_m2l_chunk)
+        self.precompute_grouped_class_segments = (
+            None
+            if precompute_grouped_class_segments is None
+            else bool(precompute_grouped_class_segments)
+        )
+        self.grouped_schedule_budget_bytes = (
+            _GROUPED_SCHEDULE_BUDGET_DEFAULT
+            if grouped_schedule_budget_bytes is None
+            else int(grouped_schedule_budget_bytes)
+        )
+        if self.grouped_schedule_budget_bytes <= 0:
+            raise ValueError("grouped_schedule_budget_bytes must be positive")
+        self.nearfield_schedule_item_cap = (
+            None if nearfield_schedule_item_cap is None else int(nearfield_schedule_item_cap)
+        )
+        if self.nearfield_schedule_item_cap is not None and self.nearfield_schedule_item_cap <= 0:
+            raise ValueError("nearfield_schedule_item_cap must be > 0 when provided")
+        self.upward_leaf_batch_size = (
+            None if upward_leaf_batch_size is None else int(upward_leaf_batch_size)
+        )
+        if self.upward_leaf_batch_size is not None and self.upward_leaf_batch_size <= 0:
+            raise ValueError("upward_leaf_batch_size must be > 0 when provided")
         dehnen_scale_val = float(dehnen_radius_scale)
         if dehnen_scale_val <= 0.0:
             raise ValueError("dehnen_radius_scale must be > 0")
@@ -1691,6 +1736,7 @@ class FastMultipoleMethod:
 
         backend_name = jax.default_backend() if backend is None else str(backend)
         n_particles = int(num_particles)
+        minimum_memory = self.memory_objective == "minimum_memory"
         large_cpu = (
             backend_name == "cpu" and n_particles >= _LARGE_CPU_PARTICLE_THRESHOLD
         )
@@ -1797,13 +1843,23 @@ class FastMultipoleMethod:
         if grouped_interactions:
             center_mode = "aabb"
             if farfield_mode == "auto":
-                farfield_mode = (
-                    "class_major"
-                    if (class_major_cpu or class_major_gpu)
-                    else "pair_grouped"
-                )
+                if minimum_memory:
+                    farfield_mode = "pair_grouped"
+                else:
+                    farfield_mode = (
+                        "class_major"
+                        if (class_major_cpu or class_major_gpu)
+                        else "pair_grouped"
+                    )
         else:
             farfield_mode = "pair_grouped"
+
+        if minimum_memory and not self._explicit_m2l_chunk_size:
+            m2l_chunk_size = (
+                _MINIMUM_MEMORY_GPU_M2L_CHUNK_SIZE
+                if backend_name == "gpu"
+                else _MINIMUM_MEMORY_CPU_M2L_CHUNK_SIZE
+            )
 
         return _RuntimeExecutionOverrides(
             traversal_config=traversal_config,
@@ -2484,6 +2540,9 @@ class FastMultipoleMethod:
         stateful_cache_enabled = bool(allow_stateful_cache) and bool(
             self.enable_interaction_cache
         )
+        need_traversal_result = bool(self.retain_traversal_result) or bool(
+            self.adaptive_order or use_paper_fixed_policy
+        )
         dual_artifacts, cache_entry = _build_dual_tree_artifacts(
             tree_artifacts.tree,
             tree_artifacts.upward.geometry,
@@ -2499,6 +2558,11 @@ class FastMultipoleMethod:
             use_dense_interactions=self.use_dense_interactions,
             grouped_interactions=grouped_interactions,
             grouped_chunk_size=runtime_m2l_chunk_size,
+            need_traversal_result=need_traversal_result,
+            precompute_grouped_class_segments=self._should_precompute_grouped_class_segments(
+                grouped_chunk_size=runtime_m2l_chunk_size,
+            ),
+            grouped_schedule_budget_bytes=self._grouped_schedule_item_budget(),
             pair_policy=pair_policy,
             policy_state=policy_state,
         )
@@ -2526,6 +2590,10 @@ class FastMultipoleMethod:
         if self.adaptive_order:
             if len(self.p_gears) == 0:
                 raise ValueError("adaptive_order=True requires non-empty p_gears")
+            if traversal_result is None:
+                raise RuntimeError(
+                    "adaptive-order traversal requires tagged traversal_result"
+                )
             far_total = int(traversal_result.far_pair_count)
             far_pairs_by_gear = bucket_far_pairs_by_tag(
                 jnp.asarray(
@@ -2543,13 +2611,8 @@ class FastMultipoleMethod:
                 int(bucket_src.shape[0]) for bucket_src, _ in far_pairs_by_gear
             )
         elif self.streamed_far_pairs:
-            far_total = int(traversal_result.far_pair_count)
-            src_far = jnp.asarray(
-                traversal_result.interaction_sources[:far_total], dtype=INDEX_DTYPE
-            )
-            tgt_far = jnp.asarray(
-                traversal_result.interaction_targets[:far_total], dtype=INDEX_DTYPE
-            )
+            src_far = jnp.asarray(interactions.sources, dtype=INDEX_DTYPE)
+            tgt_far = jnp.asarray(interactions.targets, dtype=INDEX_DTYPE)
             far_pairs_coo = _FarPairCOO(sources=src_far, targets=tgt_far)
             max_order_int = int(tree_artifacts.upward.multipoles.order)
             adaptive_order_for_downward = True
@@ -2863,9 +2926,13 @@ class FastMultipoleMethod:
             chunk_count = (edge_count + chunk - 1) // chunk if edge_count > 0 else 0
             schedule_items = int(chunk_count * chunk * int(leaf_cap))
             schedule_item_cap = (
-                _NEARFIELD_SCATTER_SCHEDULE_ITEM_CAP_GPU
-                if jax.default_backend() == "gpu"
-                else _NEARFIELD_SCATTER_SCHEDULE_ITEM_CAP
+                int(self.nearfield_schedule_item_cap)
+                if self.nearfield_schedule_item_cap is not None
+                else (
+                    _NEARFIELD_SCATTER_SCHEDULE_ITEM_CAP_GPU
+                    if jax.default_backend() == "gpu"
+                    else _NEARFIELD_SCATTER_SCHEDULE_ITEM_CAP
+                )
             )
             if schedule_items > int(schedule_item_cap):
                 return None, None, None
@@ -2879,6 +2946,22 @@ class FastMultipoleMethod:
             )
         except Exception:
             return None, None, None
+
+    def _should_precompute_grouped_class_segments(
+        self,
+        *,
+        grouped_chunk_size: Optional[int],
+    ) -> bool:
+        """Decide whether grouped class-major schedules should be materialized."""
+        if grouped_chunk_size is None:
+            return False
+        if self.precompute_grouped_class_segments is not None:
+            return bool(self.precompute_grouped_class_segments)
+        return self.memory_objective != "minimum_memory"
+
+    def _grouped_schedule_item_budget(self) -> int:
+        """Return max bytes allowed for cached grouped schedule matrices."""
+        return int(self.grouped_schedule_budget_bytes)
 
     def _resolve_target_indices(
         self,
@@ -2911,7 +2994,7 @@ class FastMultipoleMethod:
     ) -> tuple[
         NodeInteractionList,
         NodeNeighborList,
-        DualTreeWalkResult,
+        Optional[DualTreeWalkResult],
         Optional[DenseInteractionBuffers],
         Optional[GroupedInteractionBuffers],
         Optional[Array],
@@ -3117,6 +3200,7 @@ class FastMultipoleMethod:
                 center_mode=center_mode,
                 explicit_centers=explicit_centers,
                 max_leaf_size=max_leaf_size,
+                leaf_batch_size=self.upward_leaf_batch_size,
                 rotation=self.complex_rotation,
             )
 

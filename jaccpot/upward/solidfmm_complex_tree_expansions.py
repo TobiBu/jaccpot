@@ -15,7 +15,7 @@ import jax.numpy as jnp
 from beartype import beartype
 from jax import lax
 from jaxtyping import Array, jaxtyped
-from yggdrax.dtypes import INDEX_DTYPE, complex_dtype_for_real
+from yggdrax.dtypes import INDEX_DTYPE, as_index, complex_dtype_for_real
 from yggdrax.geometry import TreeGeometry, compute_tree_geometry
 from yggdrax.tree import Tree
 from yggdrax.tree_moments import TreeMassMoments, compute_tree_mass_moments
@@ -50,7 +50,13 @@ _CENTER_MODES = ("com", "aabb", "explicit")
 
 @partial(
     jax.jit,
-    static_argnames=("order", "max_leaf_size", "num_internal", "total_nodes"),
+    static_argnames=(
+        "order",
+        "max_leaf_size",
+        "num_internal",
+        "total_nodes",
+        "leaf_batch_size",
+    ),
 )
 def _p2m_leaves_complex(
     node_ranges: Array,
@@ -62,6 +68,7 @@ def _p2m_leaves_complex(
     max_leaf_size: int,
     num_internal: int,
     total_nodes: int,
+    leaf_batch_size: int,
 ) -> Array:
     """Leaf P2M for solidfmm-style complex SH coefficients."""
 
@@ -83,32 +90,58 @@ def _p2m_leaves_complex(
     if leaf_nodes.size == 0:
         return packed
 
-    ranges = jnp.asarray(node_ranges, dtype=INDEX_DTYPE)[leaf_nodes]
-    starts = ranges[:, 0]
-    ends_inclusive = ranges[:, 1]
-    counts = ends_inclusive - starts + 1
-
+    batch = max(1, int(leaf_batch_size))
+    num_leaves = int(total_nodes - num_internal)
+    steps = (num_leaves + batch - 1) // batch
+    pad_amount = steps * batch - num_leaves
+    leaf_nodes = jnp.pad(
+        leaf_nodes,
+        (0, pad_amount),
+        mode="constant",
+        constant_values=int(num_internal),
+    )
     idx = jnp.arange(int(max_leaf_size), dtype=INDEX_DTYPE)
-    particle_idx = starts[:, None] + idx[None, :]
-    valid = idx[None, :] < counts[:, None]
-    safe_idx = jnp.clip(particle_idx, 0, positions_sorted.shape[0] - 1)
-
-    pos = positions_sorted[safe_idx]
-    pos = jnp.where(valid[..., None], pos, 0.0)
-    masses = masses_sorted[safe_idx]
-    masses = jnp.where(valid, masses, 0.0)
+    batch_offsets = jnp.arange(batch, dtype=INDEX_DTYPE)
 
     def leaf_accumulate(pos_i: Array, mass_i: Array, center_i: Array) -> Array:
         delta = pos_i - center_i
         return p2m_complex_batch(delta, mass_i, order=p)
 
     leaf_vm = jax.vmap(leaf_accumulate, in_axes=(0, 0, 0))
-    contribs = leaf_vm(pos, masses, centers[leaf_nodes])
-    leaf_coeffs = jnp.sum(contribs, axis=1)
-    leaf_coeffs = leaf_coeffs.astype(packed.dtype)
-    leaf_coeffs = enforce_conjugate_symmetry_batch(leaf_coeffs, order=p)
-    packed = packed.at[leaf_nodes].set(leaf_coeffs)
 
+    def body(state: Array, step_idx: Array) -> tuple[Array, None]:
+        start = step_idx * batch
+        batch_nodes = lax.dynamic_slice_in_dim(leaf_nodes, start, batch, axis=0)
+        remaining = num_leaves - start
+        batch_len = jnp.minimum(batch, jnp.maximum(remaining, 0))
+        valid_leaf = batch_offsets < batch_len
+        safe_nodes = jnp.where(valid_leaf, batch_nodes, as_index(num_internal))
+
+        ranges = jnp.asarray(node_ranges, dtype=INDEX_DTYPE)[safe_nodes]
+        starts = ranges[:, 0]
+        ends_inclusive = ranges[:, 1]
+        counts = ends_inclusive - starts + 1
+        particle_idx = starts[:, None] + idx[None, :]
+        valid_particle = valid_leaf[:, None] & (idx[None, :] < counts[:, None])
+        safe_idx = jnp.clip(particle_idx, 0, positions_sorted.shape[0] - 1)
+
+        pos = positions_sorted[safe_idx]
+        pos = jnp.where(valid_particle[..., None], pos, 0.0)
+        masses = masses_sorted[safe_idx]
+        masses = jnp.where(valid_particle, masses, 0.0)
+
+        contribs = leaf_vm(pos, masses, centers[safe_nodes])
+        leaf_coeffs = jnp.sum(contribs, axis=1).astype(state.dtype)
+        leaf_coeffs = enforce_conjugate_symmetry_batch(leaf_coeffs, order=p)
+        current = state[safe_nodes]
+        updates = jnp.where(valid_leaf[:, None], leaf_coeffs, current)
+        return state.at[safe_nodes].set(updates), None
+
+    packed, _ = lax.scan(
+        body,
+        packed,
+        jnp.arange(steps, dtype=INDEX_DTYPE),
+    )
     return packed
 
 
@@ -181,6 +214,7 @@ def prepare_solidfmm_complex_upward_sweep(
     center_mode: str = "com",
     explicit_centers: Optional[Array] = None,
     max_leaf_size: Optional[int] = None,
+    leaf_batch_size: Optional[int] = None,
     rotation: str = "cached",
 ) -> SolidFMMComplexTreeUpwardData:
     """Compute complex multipoles for every node (solidfmm basis)."""
@@ -226,6 +260,7 @@ def prepare_solidfmm_complex_upward_sweep(
 
     num_internal = int(tree.num_internal_nodes)
     total_nodes = int(tree.parent.shape[0])
+    num_leaves = max(total_nodes - num_internal, 0)
 
     packed = _p2m_leaves_complex(
         jnp.asarray(tree.node_ranges, dtype=INDEX_DTYPE),
@@ -236,6 +271,9 @@ def prepare_solidfmm_complex_upward_sweep(
         max_leaf_size=int(max_leaf_size),
         num_internal=num_internal,
         total_nodes=total_nodes,
+        leaf_batch_size=(
+            num_leaves if leaf_batch_size is None else int(leaf_batch_size)
+        ),
     )
 
     packed = _aggregate_m2m_complex(

@@ -192,6 +192,11 @@ def _build_traversal(fmm: FastMultipoleMethod, staged: StageArtifacts):
         use_dense_interactions=impl.use_dense_interactions,
         grouped_interactions=runtime_overrides.grouped_interactions,
         grouped_chunk_size=runtime_overrides.m2l_chunk_size,
+        need_traversal_result=bool(impl.adaptive_order),
+        precompute_grouped_class_segments=impl._should_precompute_grouped_class_segments(
+            grouped_chunk_size=runtime_overrides.m2l_chunk_size,
+        ),
+        grouped_schedule_budget_bytes=impl._grouped_schedule_item_budget(),
         pair_policy=pair_policy,
         policy_state=policy_state,
     )

@@ -59,6 +59,7 @@ def _default_advanced_for_preset(preset: FMMPreset) -> FMMAdvancedConfig:
                 host_refine_mode="off",
                 jit_tree=True,
                 jit_traversal=True,
+                memory_objective="minimum_memory",
                 traversal_config=None,
                 max_pair_queue=None,
                 pair_process_block=None,
@@ -66,6 +67,9 @@ def _default_advanced_for_preset(preset: FMMPreset) -> FMMAdvancedConfig:
                 retain_traversal_result=False,
                 retain_interactions=False,
                 autotune_m2l_chunk=True,
+                precompute_grouped_class_segments=False,
+                grouped_schedule_budget_bytes=8 * 1024 * 1024,
+                upward_leaf_batch_size=2048,
             ),
             mac_type="dehnen",
             dehnen_radius_scale=1.0,
@@ -452,6 +456,16 @@ class FastMultipoleMethod:
                 "host_refine_mode",
                 advanced_cfg.runtime.host_refine_mode,
             ),
+            memory_objective=str(
+                legacy_kwargs.pop(
+                    "memory_objective",
+                    advanced_cfg.runtime.memory_objective,
+                )
+            ),
+            memory_budget_bytes=legacy_kwargs.pop(
+                "memory_budget_bytes",
+                advanced_cfg.runtime.memory_budget_bytes,
+            ),
             max_pair_queue=legacy_kwargs.pop(
                 "max_pair_queue",
                 advanced_cfg.runtime.max_pair_queue,
@@ -490,6 +504,22 @@ class FastMultipoleMethod:
                     "autotune_m2l_chunk",
                     advanced_cfg.runtime.autotune_m2l_chunk,
                 )
+            ),
+            precompute_grouped_class_segments=legacy_kwargs.pop(
+                "precompute_grouped_class_segments",
+                advanced_cfg.runtime.precompute_grouped_class_segments,
+            ),
+            grouped_schedule_budget_bytes=legacy_kwargs.pop(
+                "grouped_schedule_budget_bytes",
+                advanced_cfg.runtime.grouped_schedule_budget_bytes,
+            ),
+            nearfield_schedule_item_cap=legacy_kwargs.pop(
+                "nearfield_schedule_item_cap",
+                advanced_cfg.runtime.nearfield_schedule_item_cap,
+            ),
+            upward_leaf_batch_size=legacy_kwargs.pop(
+                "upward_leaf_batch_size",
+                advanced_cfg.runtime.upward_leaf_batch_size,
             ),
             fixed_order=runtime_overrides.fixed_order,
             fixed_max_leaf_size=runtime_overrides.fixed_max_leaf_size,

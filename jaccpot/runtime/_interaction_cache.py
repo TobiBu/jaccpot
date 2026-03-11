@@ -28,7 +28,7 @@ class _DualTreeArtifacts:
 
     interactions: NodeInteractionList
     neighbor_list: NodeNeighborList
-    traversal_result: DualTreeWalkResult
+    traversal_result: Optional[DualTreeWalkResult]
     dense_buffers: Optional[DenseInteractionBuffers]
     grouped_buffers: Optional[GroupedInteractionBuffers]
     grouped_segment_starts: Optional[Array]
@@ -46,7 +46,7 @@ class _InteractionCacheEntry(NamedTuple):
     key: str
     interactions: NodeInteractionList
     neighbor_list: NodeNeighborList
-    dual_tree_result: DualTreeWalkResult
+    dual_tree_result: Optional[DualTreeWalkResult]
     grouped_buffers: Optional[GroupedInteractionBuffers]
     grouped_segment_starts: Optional[Array]
     grouped_segment_lengths: Optional[Array]
@@ -236,6 +236,9 @@ def _build_dual_tree_artifacts(
     use_dense_interactions: bool,
     grouped_interactions: bool,
     grouped_chunk_size: Optional[int],
+    need_traversal_result: bool,
+    precompute_grouped_class_segments: bool,
+    grouped_schedule_budget_bytes: Optional[int],
     pair_policy=None,
     policy_state=None,
 ) -> tuple[_DualTreeArtifacts, Optional[_InteractionCacheEntry]]:
@@ -246,6 +249,7 @@ def _build_dual_tree_artifacts(
         cache_key is not None
         and cache_entry is not None
         and cache_entry.key == cache_key
+        and (not need_traversal_result or cache_entry.dual_tree_result is not None)
     ):
         interactions = cache_entry.interactions
         neighbor_list = cache_entry.neighbor_list
@@ -278,7 +282,7 @@ def _build_dual_tree_artifacts(
                     process_block=current_pair_process_block,
                     traversal_config=current_traversal_config,
                     retry_logger=retry_logger,
-                    return_result=True,
+                    return_result=need_traversal_result,
                     return_grouped=grouped_interactions,
                     pair_policy=pair_policy,
                     policy_state=policy_state,
@@ -307,18 +311,26 @@ def _build_dual_tree_artifacts(
                 "dual-tree traversal build failed without producing artifacts"
             )
         if grouped_interactions:
-            (
-                interactions,
-                neighbor_list,
-                traversal_result,
-                grouped_buffers,
-            ) = build_out
+            if need_traversal_result:
+                (
+                    interactions,
+                    neighbor_list,
+                    traversal_result,
+                    grouped_buffers,
+                ) = build_out
+            else:
+                interactions, neighbor_list, grouped_buffers = build_out
+                traversal_result = None
         else:
-            (
-                interactions,
-                neighbor_list,
-                traversal_result,
-            ) = build_out
+            if need_traversal_result:
+                (
+                    interactions,
+                    neighbor_list,
+                    traversal_result,
+                ) = build_out
+            else:
+                interactions, neighbor_list = build_out
+                traversal_result = None
             grouped_buffers = None
         cache_out = (
             _InteractionCacheEntry(
@@ -393,9 +405,26 @@ def _build_dual_tree_artifacts(
             )
 
     if (
+        precompute_grouped_class_segments
+        and (
+            grouped_schedule_budget_bytes is None
+            or int(grouped_chunk_size or 0) <= 0
+            or (
+                grouped_buffers is not None
+                and (
+                    int(grouped_buffers.class_targets.shape[0])
+                    * 3
+                    * int(grouped_chunk_size or 1)
+                    * np.dtype(np.int32).itemsize
+                )
+                <= int(grouped_schedule_budget_bytes)
+            )
+        )
+        and (
         grouped_interactions
         and grouped_buffers is not None
         and grouped_chunk_size is not None
+        )
     ):
         needs_schedule = (
             grouped_segment_starts is None

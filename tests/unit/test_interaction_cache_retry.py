@@ -51,6 +51,9 @@ def test_build_dual_tree_artifacts_retries_on_capacity_overflow(monkeypatch):
         use_dense_interactions=False,
         grouped_interactions=False,
         grouped_chunk_size=None,
+        need_traversal_result=True,
+        precompute_grouped_class_segments=False,
+        grouped_schedule_budget_bytes=None,
         pair_policy=None,
         policy_state=None,
     )

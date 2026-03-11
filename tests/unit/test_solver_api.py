@@ -479,6 +479,9 @@ def test_large_n_gpu_preset_applies_memory_safe_gpu_defaults():
     assert fmm._impl.retain_traversal_result is False
     assert fmm._impl.retain_interactions is False
     assert fmm._impl.autotune_m2l_chunk is True
+    assert fmm._impl.memory_objective == "minimum_memory"
+    assert fmm._impl.precompute_grouped_class_segments is False
+    assert fmm._impl.upward_leaf_batch_size == 2048
     assert fmm._impl.mac_type == "dehnen"
 
 
@@ -557,6 +560,73 @@ def test_prepare_state_non_streamed_without_retention_omits_interactions():
     assert acc.shape == positions.shape
 
 
+def test_prepare_state_streamed_without_adaptive_skips_traversal_result_build():
+    positions, masses = _sample_problem(n=64)
+    fmm = ExpanseFMM(
+        theta=0.6,
+        softening=1e-3,
+        working_dtype=jnp.float32,
+        expansion_basis="solidfmm",
+        complex_rotation="solidfmm",
+        mac_type="dehnen",
+        grouped_interactions=False,
+        streamed_far_pairs=True,
+        retain_traversal_result=False,
+        retain_interactions=False,
+    )
+
+    seen = []
+    original = fmm_impl_private.build_interactions_and_neighbors
+
+    def spy_build(*args, **kwargs):
+        seen.append(dict(kwargs))
+        return original(*args, **kwargs)
+
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(
+            "jaccpot.runtime.fmm.build_interactions_and_neighbors",
+            spy_build,
+        )
+        state = fmm.prepare_state(positions, masses, leaf_size=8, max_order=2)
+
+    assert seen
+    assert all(bool(item.get("return_result", True)) is False for item in seen)
+    assert state.dual_tree_result is None
+
+
+def test_prepare_state_adaptive_order_requests_traversal_result():
+    positions, masses = _sample_problem(n=64)
+    fmm = ExpanseFMM(
+        theta=0.6,
+        softening=1e-3,
+        working_dtype=jnp.float32,
+        expansion_basis="solidfmm",
+        complex_rotation="solidfmm",
+        mac_type="dehnen",
+        adaptive_order=True,
+        p_gears=(2, 3),
+        retain_traversal_result=False,
+    )
+
+    seen = []
+    original = fmm_impl_private.build_interactions_and_neighbors
+
+    def spy_build(*args, **kwargs):
+        seen.append(dict(kwargs))
+        return original(*args, **kwargs)
+
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(
+            "jaccpot.runtime.fmm.build_interactions_and_neighbors",
+            spy_build,
+        )
+        state = fmm.prepare_state(positions, masses, leaf_size=8, max_order=3)
+
+    assert seen
+    assert all(bool(item.get("return_result", False)) is True for item in seen)
+    assert state.dual_tree_result is None
+
+
 def test_runtime_autotune_m2l_chunk_flag_flows_to_runtime():
     fmm = FastMultipoleMethod(
         preset=FMMPreset.FAST,
@@ -566,6 +636,29 @@ def test_runtime_autotune_m2l_chunk_flag_flows_to_runtime():
         ),
     )
     assert bool(fmm._impl.autotune_m2l_chunk) is True
+
+
+def test_runtime_memory_policy_fields_flow_to_runtime():
+    fmm = FastMultipoleMethod(
+        preset=FMMPreset.FAST,
+        basis="solidfmm",
+        advanced=FMMAdvancedConfig(
+            runtime=RuntimePolicyConfig(
+                memory_objective="minimum_memory",
+                memory_budget_bytes=123456,
+                precompute_grouped_class_segments=False,
+                grouped_schedule_budget_bytes=4096,
+                nearfield_schedule_item_cap=2048,
+                upward_leaf_batch_size=128,
+            ),
+        ),
+    )
+    assert fmm._impl.memory_objective == "minimum_memory"
+    assert fmm._impl.memory_budget_bytes == 123456
+    assert fmm._impl.precompute_grouped_class_segments is False
+    assert fmm._impl.grouped_schedule_budget_bytes == 4096
+    assert fmm._impl.nearfield_schedule_item_cap == 2048
+    assert fmm._impl.upward_leaf_batch_size == 128
 
 
 def test_m2l_autotune_cache_roundtrip_api():
