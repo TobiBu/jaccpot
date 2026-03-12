@@ -329,7 +329,7 @@ _NEARFIELD_BUCKETED_CPU_EDGE_CHUNK_LARGE = 2048
 _NEARFIELD_BUCKETED_CPU_EDGE_CHUNK_XL = 4096
 _NEARFIELD_SCATTER_SCHEDULE_ITEM_CAP = 16_000_000
 _NEARFIELD_SCATTER_SCHEDULE_ITEM_CAP_GPU = 4_000_000
-_NEARFIELD_GPU_PRECOMPUTE_MAX_PARTICLES = 262_144
+_NEARFIELD_GPU_PRECOMPUTE_MAX_PARTICLES = 65_536
 _LARGE_CPU_M2L_CHUNK_SIZE = 32768
 _TRACING_MAX_NEIGHBORS_PER_LEAF = 512
 # Traced prepare_state uses static-capacity interaction buffers. This cap limits
@@ -338,10 +338,10 @@ _TRACING_MAX_NEIGHBORS_PER_LEAF = 512
 # trigger traversal overflow/retry on harder particle configurations.
 _TRACING_MAX_INTERACTIONS_PER_NODE = 512
 _GPU_LARGE_PARTICLE_THRESHOLD = 65_536
-_GPU_MIN_NEIGHBORS_PER_LEAF = 1024
-_GPU_MIN_INTERACTIONS_PER_NODE = 4096
-_GPU_MAX_NEIGHBORS_PER_LEAF = 1024
-_GPU_MAX_INTERACTIONS_PER_NODE = 4096
+_GPU_MIN_NEIGHBORS_PER_LEAF = 2048
+_GPU_MIN_INTERACTIONS_PER_NODE = 8192
+_GPU_MAX_NEIGHBORS_PER_LEAF = 2048
+_GPU_MAX_INTERACTIONS_PER_NODE = 8192
 _GPU_MIN_PAIR_QUEUE_MEDIUM = 131_072
 _GPU_MIN_PAIR_QUEUE_LARGE = 262_144
 _GPU_MIN_PAIR_QUEUE_XL = 524_288
@@ -378,9 +378,7 @@ _grouped_operator_blocks_cache: "OrderedDict[tuple, tuple[Array, Array]]" = (
     OrderedDict()
 )
 _GROUPED_SEGMENT_CACHE_MAX = _env_int("JACCPOT_GROUPED_SEGMENT_CACHE_MAX", 32)
-_grouped_segment_cache: (
-    "OrderedDict[tuple, tuple[Array, Array, Array]]"
-) = OrderedDict()
+_grouped_segment_cache: "OrderedDict[tuple, tuple[Array, Array, Array]]" = OrderedDict()
 _GROUPED_OPERATOR_CACHE_ENTRY_MAX_BYTES = _env_int(
     "JACCPOT_GROUPED_OPERATOR_CACHE_ENTRY_MAX_BYTES",
     64 * 1024 * 1024,
@@ -1268,9 +1266,14 @@ class FastMultipoleMethod:
         if self.grouped_schedule_budget_bytes <= 0:
             raise ValueError("grouped_schedule_budget_bytes must be positive")
         self.nearfield_schedule_item_cap = (
-            None if nearfield_schedule_item_cap is None else int(nearfield_schedule_item_cap)
+            None
+            if nearfield_schedule_item_cap is None
+            else int(nearfield_schedule_item_cap)
         )
-        if self.nearfield_schedule_item_cap is not None and self.nearfield_schedule_item_cap <= 0:
+        if (
+            self.nearfield_schedule_item_cap is not None
+            and self.nearfield_schedule_item_cap <= 0
+        ):
             raise ValueError("nearfield_schedule_item_cap must be > 0 when provided")
         self.upward_leaf_batch_size = (
             None if upward_leaf_batch_size is None else int(upward_leaf_batch_size)
@@ -1779,6 +1782,7 @@ class FastMultipoleMethod:
             and self.mac_type == "dehnen"
             and self.tree_type == "radix"
             and large_cpu
+            and not minimum_memory
         ):
             grouped_interactions = True
         if (
@@ -1789,6 +1793,7 @@ class FastMultipoleMethod:
             and self.tree_type == "radix"
             and backend_name == "gpu"
             and n_particles >= _GPU_LARGE_PARTICLE_THRESHOLD
+            and not minimum_memory
         ):
             grouped_interactions = True
 
@@ -2302,17 +2307,10 @@ class FastMultipoleMethod:
     ) -> Optional[LocalExpansionData]:
         """Build initial local-expansion buffers matching the active basis."""
         if self.expansion_basis == "solidfmm":
-            total_nodes = int(tree.parent.shape[0])
-            coeff_count = sh_size(max_order)
-            if self._solidfmm_basis_mode() == "real":
-                coeff_dtype = pos_sorted.dtype
-            else:
-                coeff_dtype = complex_dtype_for_real(pos_sorted.dtype)
-            return LocalExpansionData(
-                order=max_order,
-                centers=upward.multipoles.centers,
-                coefficients=jnp.zeros((total_nodes, coeff_count), dtype=coeff_dtype),
-            )
+            # Solid-FMM does not reuse a cached locals template across prepare calls.
+            # Let the downward pass allocate its accumulator on demand so we do not
+            # hold a redundant zero buffer alive across dual-tree staging.
+            return None
 
         template = self._locals_template
         total_nodes = int(tree.parent.shape[0])
@@ -2485,7 +2483,16 @@ class FastMultipoleMethod:
         aspect_threshold_val: float,
         allow_stateful_cache: bool,
     ) -> _PrepareStateDualDownwardArtifacts:
-        """Build/reuse interactions and prepare downward artifacts."""
+        """Build/reuse interactions and prepare downward artifacts.
+
+        Memory note:
+        The dominant warm prepare peak is usually the far-field payload that
+        exists long enough to feed M2L: raw interactions or streamed COO pairs,
+        optional grouped layouts, and the downward locals buffer. Only the
+        returned ``TreeDownwardData`` is meant to survive into prepared state;
+        grouped schedules and other M2L feed artifacts are transient and should
+        stay scoped to this helper.
+        """
         pair_policy = None
         policy_state = None
         cache_key = None
@@ -2573,6 +2580,7 @@ class FastMultipoleMethod:
             need_compact_far_pairs=need_compact_far_pairs,
             precompute_grouped_class_segments=self._should_precompute_grouped_class_segments(
                 grouped_chunk_size=runtime_m2l_chunk_size,
+                farfield_mode=farfield_mode,
             ),
             grouped_schedule_budget_bytes=self._grouped_schedule_item_budget(),
             pair_policy=pair_policy,
@@ -2700,6 +2708,9 @@ class FastMultipoleMethod:
             and far_pairs_coo is not None
             and not bool(self.retain_interactions)
         ):
+            # Streamed far-pair execution can feed the downward pass directly
+            # from COO pairs, so avoid keeping a second node-structured
+            # interaction list alive unless the caller asked to retain it.
             interactions_for_downward = None
 
         downward = self._prepare_downward_with_artifacts(
@@ -2728,6 +2739,9 @@ class FastMultipoleMethod:
             p_gears=p_gears_for_downward,
         )
         if not bool(self.retain_interactions):
+            # Prepared state only needs the locals; keep a shape-compatible
+            # placeholder so downstream code does not accidentally pin the full
+            # far-field pair payload after prepare_state completes.
             downward = downward._replace(
                 interactions=_empty_interaction_storage_like(interactions)
             )
@@ -2742,9 +2756,7 @@ class FastMultipoleMethod:
             traversal_result=(
                 traversal_result if self.retain_traversal_result else None
             ),
-            compact_far_pairs=(
-                compact_far_pairs if self.adaptive_order else None
-            ),
+            compact_far_pairs=(compact_far_pairs if self.adaptive_order else None),
             downward=downward,
             cache_entry=cache_entry,
         )
@@ -3000,9 +3012,12 @@ class FastMultipoleMethod:
         self,
         *,
         grouped_chunk_size: Optional[int],
+        farfield_mode: str,
     ) -> bool:
         """Decide whether grouped class-major schedules should be materialized."""
         if grouped_chunk_size is None:
+            return False
+        if str(farfield_mode).strip().lower() != "class_major":
             return False
         if self.precompute_grouped_class_segments is not None:
             return bool(self.precompute_grouped_class_segments)
@@ -4384,7 +4399,6 @@ def _accumulate_solidfmm_m2l_grouped_chunked_scan(
     """Accumulate grouped solidfmm M2L contributions via chunked scan."""
     pair_count = src_sorted.shape[0]
     starts = jnp.arange(0, pair_count, chunk_size, dtype=INDEX_DTYPE)
-    local_accum0 = jnp.zeros_like(locals_coeffs)
 
     def body(local_accum: Array, start_idx: Array) -> tuple[Array, None]:
         offset = jnp.arange(chunk_size, dtype=INDEX_DTYPE)
@@ -4416,8 +4430,8 @@ def _accumulate_solidfmm_m2l_grouped_chunked_scan(
         )
         return local_accum, None
 
-    local_accum, _ = jax.lax.scan(body, local_accum0, starts)
-    return locals_coeffs + local_accum
+    local_accum, _ = jax.lax.scan(body, locals_coeffs, starts)
+    return local_accum
 
 
 @partial(jax.jit, static_argnames=("order", "total_nodes"), donate_argnums=(0,))
@@ -4533,7 +4547,6 @@ def _accumulate_solidfmm_m2l_class_major_chunked_scan(
         return locals_coeffs
 
     offsets = jnp.arange(chunk_size, dtype=INDEX_DTYPE)
-    local_accum0 = jnp.zeros_like(locals_coeffs)
 
     def body(local_accum: Array, seg_idx: Array) -> tuple[Array, None]:
         start = segment_starts[seg_idx]
@@ -4584,10 +4597,10 @@ def _accumulate_solidfmm_m2l_class_major_chunked_scan(
 
     local_accum, _ = jax.lax.scan(
         body,
-        local_accum0,
+        locals_coeffs,
         jnp.arange(num_segments, dtype=INDEX_DTYPE),
     )
-    return locals_coeffs + local_accum
+    return local_accum
 
 
 def _accumulate_solidfmm_m2l_grouped_class_major(
@@ -4862,7 +4875,6 @@ def _accumulate_solidfmm_m2l_chunked_scan(
     """Accumulate solidfmm M2L contributions with chunked scan reduction."""
     pair_count = src.shape[0]
     starts = jnp.arange(0, pair_count, chunk_size, dtype=INDEX_DTYPE)
-    local_accum0 = jnp.zeros_like(locals_coeffs)
 
     def body(local_accum: Array, start_idx: Array) -> tuple[Array, None]:
         offset = jnp.arange(chunk_size, dtype=INDEX_DTYPE)
@@ -4913,8 +4925,8 @@ def _accumulate_solidfmm_m2l_chunked_scan(
         )
         return local_accum, None
 
-    local_accum, _ = jax.lax.scan(body, local_accum0, starts)
-    return locals_coeffs + local_accum
+    local_accum, _ = jax.lax.scan(body, locals_coeffs, starts)
+    return local_accum
 
 
 @partial(
@@ -5033,7 +5045,6 @@ def _accumulate_real_m2l_chunked_scan(
     """Accumulate real-basis M2L contributions with chunked scan reduction."""
     pair_count = src.shape[0]
     starts = jnp.arange(0, pair_count, chunk_size, dtype=INDEX_DTYPE)
-    local_accum0 = jnp.zeros_like(locals_coeffs)
 
     def body(local_accum: Array, start_idx: Array) -> tuple[Array, None]:
         offset = jnp.arange(chunk_size, dtype=INDEX_DTYPE)
@@ -5059,8 +5070,8 @@ def _accumulate_real_m2l_chunked_scan(
         )
         return local_accum, None
 
-    local_accum, _ = jax.lax.scan(body, local_accum0, starts)
-    return locals_coeffs + local_accum
+    local_accum, _ = jax.lax.scan(body, locals_coeffs, starts)
+    return local_accum
 
 
 @partial(
@@ -5083,7 +5094,6 @@ def _accumulate_real_m2l_chunked_scan_pallas(
     """Chunked real-basis M2L accumulation using the optional Pallas core."""
     pair_count = src.shape[0]
     starts = jnp.arange(0, pair_count, chunk_size, dtype=INDEX_DTYPE)
-    local_accum0 = jnp.zeros_like(locals_coeffs)
 
     def body(local_accum: Array, start_idx: Array) -> tuple[Array, None]:
         offset = jnp.arange(chunk_size, dtype=INDEX_DTYPE)
@@ -5109,8 +5119,8 @@ def _accumulate_real_m2l_chunked_scan_pallas(
         )
         return local_accum, None
 
-    local_accum, _ = jax.lax.scan(body, local_accum0, starts)
-    return locals_coeffs + local_accum
+    local_accum, _ = jax.lax.scan(body, locals_coeffs, starts)
+    return local_accum
 
 
 @partial(
@@ -5178,7 +5188,12 @@ def _prepare_solidfmm_downward_sweep(
     dehnen_radius_scale: float = 1.0,
     use_pallas: bool = False,
 ) -> TreeDownwardData:
-    """Prepare M2L accumulation for solidfmm-style complex or real locals."""
+    """Prepare M2L accumulation for solidfmm-style complex or real locals.
+
+    The returned value intentionally retains only the locals plus a minimal
+    interaction handle. Grouped layouts, chunk schedules, and other M2L feed
+    structures are execution inputs, not part of the long-lived downward state.
+    """
 
     if interactions is None and far_pairs_coo is None:
         interactions = build_well_separated_interactions(
@@ -5241,6 +5256,9 @@ def _prepare_solidfmm_downward_sweep(
         raise ValueError("m2l_chunk_size must be positive")
 
     if basis_mode_norm == "complex" and grouped_interactions and not adaptive_order:
+        # Grouped execution trades extra resident staging buffers for lower M2L
+        # dispatch overhead. Those buffers should remain transient to this call
+        # and must not be copied into the returned ``TreeDownwardData``.
         grouped = (
             grouped_buffers
             if grouped_buffers is not None
@@ -5422,10 +5440,10 @@ def _prepare_solidfmm_downward_sweep(
                                 total_nodes=total_nodes,
                                 chunk_size=chunk_size,
                             )
-                locals_tail = locals_updated[:, coeff_g:]
-                locals_updated = jnp.concatenate(
-                    (locals_slice, locals_tail),
-                    axis=1,
+                locals_updated = jax.lax.dynamic_update_slice(
+                    locals_updated,
+                    locals_slice,
+                    (0, 0),
                 )
         elif pair_count == 0:
             empty_locals = LocalExpansionData(
@@ -5546,23 +5564,13 @@ def _prepare_solidfmm_downward_sweep(
                 total_nodes=total_nodes,
             )
 
-    locals_after = LocalExpansionData(
-        order=p,
-        centers=centers,
-        coefficients=locals_updated,
-    )
-
-    if basis_mode_norm == "complex":
-        locals_after = locals_after._replace(
-            coefficients=enforce_conjugate_symmetry_batch(
-                jnp.asarray(locals_after.coefficients),
-                order=p,
-            )
-        )
-
     return TreeDownwardData(
         interactions=interactions,
-        locals=locals_after,
+        locals=LocalExpansionData(
+            order=p,
+            centers=centers,
+            coefficients=locals_updated,
+        ),
     )
 
 

@@ -9,6 +9,7 @@ import numpy as np
 import pytest
 
 import jaccpot.runtime._fmm_impl as fmm_impl_private
+import jaccpot.runtime._interaction_cache as interaction_cache_private
 from jaccpot import (
     ComplexSHBasis,
     FarFieldConfig,
@@ -406,9 +407,21 @@ def test_gpu_runtime_overrides_cap_traversal_capacities_for_large_n():
     )
     cfg = overrides.traversal_config
     assert cfg is not None
-    assert int(cfg.max_neighbors_per_leaf) <= 1024
-    assert int(cfg.max_interactions_per_node) <= 4096
+    assert int(cfg.max_neighbors_per_leaf) == 2048
+    assert int(cfg.max_interactions_per_node) == 8192
     assert int(cfg.max_pair_queue) >= 131072
+
+
+def test_large_gpu_runs_skip_nearfield_scatter_precompute(monkeypatch):
+    fmm = FastMultipoleMethod(
+        preset=FMMPreset.FAST,
+        basis="solidfmm",
+    )
+    monkeypatch.setattr(fmm_impl_private.jax, "default_backend", lambda: "gpu")
+    assert (
+        fmm._impl._should_precompute_nearfield_scatter_schedules(num_particles=131072)
+        is False
+    )
 
 
 def test_precision_fp32_sets_working_dtype():
@@ -573,6 +586,47 @@ def test_prepare_state_does_not_retain_duplicate_component_matrix():
     assert acc.shape == positions.shape
 
 
+def test_prepare_state_solidfmm_skips_prebuilt_locals_template():
+    positions, masses = _sample_problem(n=64)
+    fmm = FastMultipoleMethod(
+        preset=FMMPreset.FAST,
+        basis="solidfmm",
+    )
+
+    seen_templates = []
+    original = fmm._impl._prepare_downward_with_artifacts
+
+    def spy_prepare_downward(*args, **kwargs):
+        seen_templates.append(kwargs.get("locals_template"))
+        return original(*args, **kwargs)
+
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(fmm._impl, "_prepare_downward_with_artifacts", spy_prepare_downward)
+        state = fmm.prepare_state(positions, masses, leaf_size=16, max_order=2)
+
+    assert seen_templates == [None]
+    acc = fmm.evaluate_prepared_state(state)
+    assert acc.shape == positions.shape
+
+
+def test_prepare_state_solidfmm_complex_locals_remain_conjugate_symmetric():
+    positions, masses = _sample_problem(n=64)
+    fmm = FastMultipoleMethod(
+        preset=FMMPreset.FAST,
+        basis="solidfmm",
+    )
+
+    state = fmm.prepare_state(positions, masses, leaf_size=16, max_order=2)
+    coeffs = state.downward.locals.coefficients
+    coeffs_sym = fmm_impl_private.enforce_conjugate_symmetry_batch(
+        coeffs,
+        order=int(state.downward.locals.order),
+    )
+    assert np.allclose(np.asarray(coeffs), np.asarray(coeffs_sym))
+    acc = fmm.evaluate_prepared_state(state)
+    assert acc.shape == positions.shape
+
+
 def test_prepare_state_streamed_without_adaptive_skips_traversal_result_build():
     positions, masses = _sample_problem(n=64)
     fmm = ExpanseFMM(
@@ -637,7 +691,9 @@ def test_prepare_state_adaptive_order_requests_compact_far_pairs():
 
     assert seen
     assert all(bool(item.get("return_result", True)) is False for item in seen)
-    assert all(bool(item.get("return_compact_far_pairs", False)) is True for item in seen)
+    assert all(
+        bool(item.get("return_compact_far_pairs", False)) is True for item in seen
+    )
     assert state.dual_tree_result is None
 
 
@@ -673,6 +729,90 @@ def test_runtime_memory_policy_fields_flow_to_runtime():
     assert fmm._impl.grouped_schedule_budget_bytes == 4096
     assert fmm._impl.nearfield_schedule_item_cap == 2048
     assert fmm._impl.upward_leaf_batch_size == 128
+
+
+def test_pair_grouped_mode_skips_class_major_schedule_precompute():
+    fmm = FastMultipoleMethod(
+        preset=FMMPreset.FAST,
+        basis="solidfmm",
+        advanced=FMMAdvancedConfig(
+            farfield=FarFieldConfig(mode="pair_grouped", grouped_interactions=True),
+            runtime=RuntimePolicyConfig(precompute_grouped_class_segments=True),
+        ),
+    )
+
+    assert (
+        fmm._impl._should_precompute_grouped_class_segments(
+            grouped_chunk_size=4096,
+            farfield_mode="pair_grouped",
+        )
+        is False
+    )
+    assert (
+        fmm._impl._should_precompute_grouped_class_segments(
+            grouped_chunk_size=4096,
+            farfield_mode="class_major",
+        )
+        is True
+    )
+
+
+def test_minimum_memory_gpu_runtime_does_not_auto_enable_grouped_interactions():
+    fmm = FastMultipoleMethod(
+        preset=FMMPreset.FAST,
+        basis="solidfmm",
+        advanced=FMMAdvancedConfig(
+            runtime=RuntimePolicyConfig(memory_objective="minimum_memory"),
+        ),
+    )
+
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(jax, "default_backend", lambda: "gpu")
+        overrides = fmm._impl._resolve_runtime_execution_overrides(
+            num_particles=131072,
+        )
+
+    assert overrides.grouped_interactions is False
+    assert overrides.farfield_mode == "pair_grouped"
+
+
+def test_without_grouped_class_segments_clears_cached_schedule_arrays():
+    dummy = jnp.asarray([1, 2, 3], dtype=jnp.int32)
+    entry = interaction_cache_private._InteractionCacheEntry(
+        key="abc",
+        interactions="interactions",
+        neighbor_list="neighbors",
+        dual_tree_result="walk",
+        compact_far_pairs="compact",
+        grouped_buffers="grouped",
+        grouped_segment_starts=dummy,
+        grouped_segment_lengths=dummy,
+        grouped_segment_class_ids=dummy,
+        grouped_segment_sort_permutation=dummy,
+        grouped_segment_group_ids=dummy,
+        grouped_segment_unique_targets=dummy,
+        grouped_chunk_size=4096,
+        nearfield_target_leaf_ids=None,
+        nearfield_source_leaf_ids=None,
+        nearfield_valid_pairs=None,
+        nearfield_chunk_sort_indices=None,
+        nearfield_chunk_group_ids=None,
+        nearfield_chunk_unique_indices=None,
+        nearfield_mode=None,
+        nearfield_edge_chunk_size=None,
+        nearfield_leaf_cap=None,
+    )
+
+    trimmed = interaction_cache_private._without_grouped_class_segments(entry)
+
+    assert trimmed.grouped_buffers == "grouped"
+    assert trimmed.grouped_segment_starts is None
+    assert trimmed.grouped_segment_lengths is None
+    assert trimmed.grouped_segment_class_ids is None
+    assert trimmed.grouped_segment_sort_permutation is None
+    assert trimmed.grouped_segment_group_ids is None
+    assert trimmed.grouped_segment_unique_targets is None
+    assert trimmed.grouped_chunk_size is None
 
 
 def test_minimum_memory_objective_reduces_default_nearfield_schedule_cap():
