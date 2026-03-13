@@ -109,6 +109,7 @@ from .reference import evaluate_expansion as reference_evaluate_expansion
 ExpansionBasis = Literal["cartesian", "solidfmm"]
 FarFieldMode = Literal["auto", "pair_grouped", "class_major"]
 NearFieldMode = Literal["auto", "baseline", "bucketed"]
+JerkMode = Literal["fast_approx", "accurate"]
 PackedAccelerationDerivatives = tuple[Array, ...]
 
 
@@ -1903,6 +1904,8 @@ class FastMultipoleMethod:
         aspect_threshold: Optional[float] = None,
         jit_traversal: Optional[bool] = None,
         reuse_prepared_state: bool = False,
+        jerk_mode: str = "fast_approx",
+        jerk_fd_dt: float = 1e-3,
     ) -> tuple[Array, Array]:
         """Run FMM and return accelerations plus jerk estimates.
 
@@ -1970,6 +1973,8 @@ class FastMultipoleMethod:
             velocities,
             target_indices=target_indices,
             jit_traversal=jit_traversal_flag,
+            jerk_mode=jerk_mode,
+            jerk_fd_dt=jerk_fd_dt,
         )
 
     @jaxtyped(typechecker=beartype)
@@ -2270,6 +2275,8 @@ class FastMultipoleMethod:
         *,
         target_indices: Optional[Array] = None,
         jit_traversal: bool = True,
+        jerk_mode: str = "fast_approx",
+        jerk_fd_dt: float = 1e-3,
     ) -> tuple[Array, Array]:
         """Evaluate accelerations and jerk for all particles or targets."""
         vel_arr = jnp.asarray(velocities, dtype=state.working_dtype)
@@ -2283,6 +2290,64 @@ class FastMultipoleMethod:
             target_indices=target_indices,
             num_particles=int(state.inverse_permutation.shape[0]),
         )
+        mode = str(jerk_mode).strip().lower()
+        if mode not in ("fast_approx", "accurate"):
+            raise ValueError("jerk_mode must be 'fast_approx' or 'accurate'")
+
+        if mode == "accurate":
+            dt = float(jerk_fd_dt)
+            if dt <= 0.0:
+                raise ValueError("jerk_fd_dt must be positive")
+
+            accelerations = self.evaluate_prepared_state(
+                state,
+                target_indices=resolved_target_indices,
+                return_potential=False,
+                jit_traversal=jit_traversal,
+                max_acc_derivative_order=0,
+            )
+            positions_unsorted = jnp.asarray(state.positions_sorted)[
+                state.inverse_permutation
+            ]
+            masses_unsorted = jnp.asarray(state.masses_sorted)[
+                state.inverse_permutation
+            ]
+            pos_plus = positions_unsorted + dt * vel_arr
+            pos_minus = positions_unsorted - dt * vel_arr
+            jit_tree_override = (
+                self._jit_tree_default
+                if isinstance(self._jit_tree_default, bool)
+                else None
+            )
+            acc_plus = self.compute_accelerations(
+                pos_plus,
+                masses_unsorted,
+                target_indices=resolved_target_indices,
+                leaf_size=int(state.max_leaf_size),
+                max_order=int(state.downward.locals.order),
+                theta=float(state.theta),
+                jit_tree=jit_tree_override,
+                jit_traversal=jit_traversal,
+                reuse_prepared_state=False,
+            )
+            acc_minus = self.compute_accelerations(
+                pos_minus,
+                masses_unsorted,
+                target_indices=resolved_target_indices,
+                leaf_size=int(state.max_leaf_size),
+                max_order=int(state.downward.locals.order),
+                theta=float(state.theta),
+                jit_tree=jit_tree_override,
+                jit_traversal=jit_traversal,
+                reuse_prepared_state=False,
+            )
+            jerk = (acc_plus - acc_minus) / (2.0 * dt)
+            if jnp.issubdtype(state.input_dtype, jnp.floating):
+                output_dtype = state.input_dtype
+            else:
+                output_dtype = state.working_dtype
+            return accelerations.astype(output_dtype), jerk.astype(output_dtype)
+
         acc_eval = self.evaluate_prepared_state(
             state,
             target_indices=resolved_target_indices,

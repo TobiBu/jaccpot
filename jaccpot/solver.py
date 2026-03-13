@@ -388,6 +388,8 @@ class FastMultipoleMethod:
         max_order: int = 4,
         theta: Optional[float] = None,
         reuse_prepared_state: bool = False,
+        jerk_mode: str = "fast_approx",
+        jerk_fd_dt: float = 1e-3,
     ) -> tuple[Array, Array]:
         """Compute accelerations and jerk estimates for particle data."""
         return self._impl.compute_accelerations_and_jerk(
@@ -402,6 +404,8 @@ class FastMultipoleMethod:
             reuse_prepared_state=reuse_prepared_state,
             jit_tree=self.advanced.runtime.jit_tree,
             jit_traversal=self.advanced.runtime.jit_traversal,
+            jerk_mode=jerk_mode,
+            jerk_fd_dt=jerk_fd_dt,
         )
 
     def prepare_upward_sweep(
@@ -453,6 +457,8 @@ class FastMultipoleMethod:
         velocities: Array,
         *,
         target_indices: Optional[Array] = None,
+        jerk_mode: str = "fast_approx",
+        jerk_fd_dt: float = 1e-3,
     ) -> tuple[Array, Array]:
         """Evaluate accelerations and jerk for a prepared state."""
         jit_traversal = (
@@ -465,6 +471,8 @@ class FastMultipoleMethod:
             velocities,
             target_indices=target_indices,
             jit_traversal=jit_traversal,
+            jerk_mode=jerk_mode,
+            jerk_fd_dt=jerk_fd_dt,
         )
 
     def clear_prepared_state_cache(self: "FastMultipoleMethod") -> None:

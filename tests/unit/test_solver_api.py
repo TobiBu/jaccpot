@@ -400,6 +400,53 @@ def test_compute_accelerations_and_jerk_matches_direct_sum_small_n():
     assert rel < 5e-2
 
 
+def test_compute_accelerations_and_jerk_accurate_mode_matches_direct_sum_tighter():
+    n = 20
+    positions, masses = _sample_problem(n=n)
+    velocities = _sample_velocities(n=n)
+    fmm = FastMultipoleMethod(
+        preset=FMMPreset.ACCURATE,
+        basis="solidfmm",
+    )
+    _, jerk_acc = fmm.compute_accelerations_and_jerk(
+        positions,
+        masses,
+        velocities,
+        leaf_size=10,
+        max_order=4,
+        theta=1e-4,
+        jerk_mode="accurate",
+        jerk_fd_dt=1e-3,
+    )
+    jerk_ref = _direct_sum_jerk(
+        positions,
+        masses,
+        velocities,
+        G=1.0,
+        softening=1e-3,
+    )
+    err_acc = np.linalg.norm(np.asarray(jerk_acc - jerk_ref)) / (
+        np.linalg.norm(np.asarray(jerk_ref)) + 1e-12
+    )
+    assert err_acc < 2e-3
+
+
+def test_compute_accelerations_and_jerk_invalid_mode_raises():
+    positions, masses = _sample_problem(n=16)
+    velocities = _sample_velocities(n=16)
+    fmm = FastMultipoleMethod(
+        preset=FMMPreset.FAST,
+        basis="solidfmm",
+    )
+    with pytest.raises(ValueError, match="jerk_mode"):
+        _ = fmm.compute_accelerations_and_jerk(
+            positions,
+            masses,
+            velocities,
+            jerk_mode="nope",
+        )
+
+
 def test_jitted_compute_does_not_leak_tracers_into_solver_caches():
     positions, masses = _sample_problem(n=64)
     fmm = FastMultipoleMethod(
