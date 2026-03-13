@@ -123,6 +123,9 @@ from ._nearfield_cache import (
 from ._octree_adapter import OctreeExecutionData, build_octree_execution_data
 from ._octree_fmm import (
     OctreeSolidFMMComplexMultipoles,
+    OctreeSolidFMMDownwardPlan,
+    build_octree_downward_plan,
+    build_octree_interaction_plan,
     build_octree_upward_plan,
     prepare_octree_solidfmm_complex_multipoles,
 )
@@ -899,6 +902,7 @@ class FMMPreparedState:
     execution_backend: str = "radix"
     octree: Optional[OctreeExecutionData] = None
     octree_upward: Optional[OctreeSolidFMMComplexMultipoles] = None
+    octree_downward: Optional[OctreeSolidFMMDownwardPlan] = None
 
     @property
     def positions_sorted(self) -> Array:
@@ -947,6 +951,7 @@ class FMMPreparedState:
             self.execution_backend,
             self.octree,
             self.octree_upward,
+            self.octree_downward,
         )
         aux = (
             int(self.max_leaf_size),
@@ -989,6 +994,7 @@ class FMMPreparedState:
             execution_backend,
             octree,
             octree_upward,
+            octree_downward,
         ) = children
         return cls(
             tree=tree,
@@ -1014,6 +1020,7 @@ class FMMPreparedState:
             execution_backend=str(execution_backend),
             octree=octree,
             octree_upward=octree_upward,
+            octree_downward=octree_downward,
         )
 
 
@@ -1062,6 +1069,20 @@ def _build_octree_upward_artifacts(
         masses_sorted,
         max_order=int(max_order),
     )
+
+
+def _build_octree_downward_artifacts(
+    *,
+    octree: Optional[OctreeExecutionData],
+    octree_upward: Optional[OctreeSolidFMMComplexMultipoles],
+    interactions: Optional[NodeInteractionList],
+) -> Optional[OctreeSolidFMMDownwardPlan]:
+    """Build octree-native downward scaffolding when prepared octree data exists."""
+
+    if octree is None or octree_upward is None or interactions is None:
+        return None
+    interaction_plan = build_octree_interaction_plan(octree, interactions)
+    return build_octree_downward_plan(octree, octree_upward, interaction_plan)
 
 
 class _FarPairCOO(NamedTuple):
@@ -1765,6 +1786,13 @@ class FastMultipoleMethod:
                 allow_stateful_cache=False,
             )
             prepass_octree = build_octree_execution_data(low_tree_artifacts.tree)
+            prepass_octree_upward = _build_octree_upward_artifacts(
+                octree=prepass_octree,
+                positions_sorted=low_tree_artifacts.positions_sorted,
+                masses_sorted=low_tree_artifacts.masses_sorted,
+                expansion_basis=self.expansion_basis,
+                max_order=int(low_order),
+            )
             prepass_state = FMMPreparedState(
                 tree=low_tree_artifacts.tree,
                 upward=low_tree_artifacts.upward,
@@ -1787,12 +1815,11 @@ class FastMultipoleMethod:
                 nearfield_chunk_unique_indices=nearfield_artifacts.chunk_unique_indices,
                 force_scale_nodes=None,
                 octree=prepass_octree,
-                octree_upward=_build_octree_upward_artifacts(
+                octree_upward=prepass_octree_upward,
+                octree_downward=_build_octree_downward_artifacts(
                     octree=prepass_octree,
-                    positions_sorted=low_tree_artifacts.positions_sorted,
-                    masses_sorted=low_tree_artifacts.masses_sorted,
-                    expansion_basis=self.expansion_basis,
-                    max_order=int(low_order),
+                    octree_upward=prepass_octree_upward,
+                    interactions=dual_downward_artifacts.interactions,
                 ),
             )
             prepass_acc = self.evaluate_prepared_state(
@@ -4098,6 +4125,13 @@ class FastMultipoleMethod:
             f"chunk_unique_indices={_format_nbytes(_estimate_payload_nbytes(nearfield_artifacts.chunk_unique_indices))}"
         )
         octree = build_octree_execution_data(tree_artifacts.tree)
+        octree_upward = _build_octree_upward_artifacts(
+            octree=octree,
+            positions_sorted=tree_artifacts.positions_sorted,
+            masses_sorted=tree_artifacts.masses_sorted,
+            expansion_basis=self.expansion_basis,
+            max_order=int(max_order),
+        )
 
         return FMMPreparedState(
             tree=tree_artifacts.tree,
@@ -4122,12 +4156,11 @@ class FastMultipoleMethod:
             force_scale_nodes=force_scale_nodes,
             execution_backend=self._resolve_execution_backend(),
             octree=octree,
-            octree_upward=_build_octree_upward_artifacts(
+            octree_upward=octree_upward,
+            octree_downward=_build_octree_downward_artifacts(
                 octree=octree,
-                positions_sorted=tree_artifacts.positions_sorted,
-                masses_sorted=tree_artifacts.masses_sorted,
-                expansion_basis=self.expansion_basis,
-                max_order=int(max_order),
+                octree_upward=octree_upward,
+                interactions=dual_downward_artifacts.interactions,
             ),
         )
 

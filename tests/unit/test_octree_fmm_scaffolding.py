@@ -3,6 +3,7 @@ import numpy as np
 
 from jaccpot import FastMultipoleMethod, FMMAdvancedConfig, FMMPreset, TreeConfig
 from jaccpot.runtime._octree_fmm import (
+    build_octree_downward_plan,
     build_octree_interaction_plan,
     build_octree_upward_plan,
     prepare_octree_solidfmm_complex_multipoles,
@@ -181,3 +182,54 @@ def test_octree_interaction_plan_remaps_farfield_pairs_by_level():
     assert level_offsets[-1] == num_pairs
     assert np.all(target_levels[:num_pairs][1:] >= target_levels[:num_pairs][:-1])
     assert np.all(target_nodes[:num_pairs] >= 0)
+
+
+def test_prepare_state_attaches_octree_native_downward_scaffold():
+    positions, masses = _sample_problem(n=64)
+    fmm = FastMultipoleMethod(
+        preset=FMMPreset.FAST,
+        basis="solidfmm",
+        advanced=FMMAdvancedConfig(tree=TreeConfig(tree_type="octree")),
+    )
+
+    state = fmm.prepare_state(
+        positions,
+        masses,
+        leaf_size=8,
+        max_order=3,
+    )
+
+    assert state.octree is not None
+    assert state.octree_upward is not None
+    assert state.octree_downward is not None
+
+    interaction_plan = build_octree_interaction_plan(state.octree, state.interactions)
+    expected = build_octree_downward_plan(
+        state.octree,
+        state.octree_upward,
+        interaction_plan,
+    )
+
+    root_oct = int(np.asarray(state.octree.radix_node_to_oct)[0])
+    parent = np.asarray(state.octree_downward.parent)
+    children = np.asarray(state.octree.children)
+
+    assert parent[root_oct] == -1
+    assert state.octree_downward.locals_packed.shape == state.octree_upward.packed.shape
+    assert np.allclose(
+        np.asarray(state.octree_downward.centers),
+        np.asarray(state.octree_upward.centers),
+        rtol=1e-6,
+        atol=1e-6,
+    )
+    assert np.array_equal(
+        np.asarray(state.octree_downward.valid_interactions),
+        np.asarray(expected.valid_interactions),
+    )
+    assert int(np.asarray(state.octree_downward.num_pairs)) == int(
+        np.asarray(expected.num_pairs)
+    )
+
+    valid_children = children[root_oct][children[root_oct] >= 0]
+    assert valid_children.size > 0
+    assert np.all(parent[valid_children] == root_oct)
