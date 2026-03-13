@@ -5,6 +5,7 @@ from . import (
     complex_ops,
     real_harmonics,
     solidfmm_reference,
+    symmetric_tensors,
 )
 
 __all__ = [
@@ -12,4 +13,5 @@ __all__ = [
     "complex_ops",
     "real_harmonics",
     "solidfmm_reference",
+    "symmetric_tensors",
 ]
