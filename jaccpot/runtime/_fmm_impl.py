@@ -1146,6 +1146,20 @@ def _materialize_octree_downward_for_evaluation(
     )
 
 
+def _octree_local_expansion_data(
+    octree_downward: Optional[OctreeSolidFMMDownwardPlan],
+) -> Optional[LocalExpansionData]:
+    """Wrap octree-native locals in the shared local-expansion container."""
+
+    if octree_downward is None:
+        return None
+    return LocalExpansionData(
+        order=int(octree_downward.order),
+        centers=jnp.asarray(octree_downward.centers),
+        coefficients=jnp.asarray(octree_downward.locals_packed),
+    )
+
+
 class _FarPairCOO(NamedTuple):
     """Compact COO-style far-pair representation for streamed M2L execution."""
 
@@ -4260,14 +4274,21 @@ class FastMultipoleMethod:
             target_indices=target_indices,
             num_particles=int(state.inverse_permutation.shape[0]),
         )
-        evaluation_downward = (
-            _materialize_octree_downward_for_evaluation(
-                radix_downward=state.downward,
-                octree=state.octree,
-                octree_downward=state.octree_downward,
-            )
-            if str(state.execution_backend).strip().lower() == "octree"
-            else state.downward
+        octree_backend = str(state.execution_backend).strip().lower() == "octree"
+        farfield_local_data = (
+            _octree_local_expansion_data(state.octree_downward)
+            if octree_backend
+            else None
+        )
+        farfield_leaf_nodes = (
+            jnp.asarray(state.octree.radix_leaf_to_oct, dtype=INDEX_DTYPE)
+            if octree_backend and state.octree is not None
+            else None
+        )
+        farfield_node_ranges = (
+            jnp.asarray(state.octree.node_ranges, dtype=INDEX_DTYPE)
+            if octree_backend and state.octree is not None
+            else None
         )
         tracing_targets = isinstance(
             state.positions_sorted, jax.core.Tracer
@@ -4278,8 +4299,11 @@ class FastMultipoleMethod:
                 tree=state.tree,
                 positions_sorted=state.positions_sorted,
                 masses_sorted=state.masses_sorted,
-                downward=evaluation_downward,
+                downward=state.downward,
                 neighbor_list=state.neighbor_list,
+                farfield_local_data=farfield_local_data,
+                farfield_leaf_nodes=farfield_leaf_nodes,
+                farfield_node_ranges=farfield_node_ranges,
                 nearfield_target_leaf_ids=state.nearfield_target_leaf_ids,
                 nearfield_source_leaf_ids=state.nearfield_source_leaf_ids,
                 nearfield_valid_pairs=state.nearfield_valid_pairs,
@@ -4300,8 +4324,11 @@ class FastMultipoleMethod:
                 tree=state.tree,
                 positions_sorted=state.positions_sorted,
                 masses_sorted=state.masses_sorted,
-                downward=evaluation_downward,
+                downward=state.downward,
                 neighbor_list=state.neighbor_list,
+                farfield_local_data=farfield_local_data,
+                farfield_leaf_nodes=farfield_leaf_nodes,
+                farfield_node_ranges=farfield_node_ranges,
                 target_sorted_indices=target_sorted_indices,
                 return_potential=return_potential,
             )
@@ -4350,6 +4377,9 @@ class FastMultipoleMethod:
         locals_or_downward: Union[LocalExpansionData, TreeDownwardData],
         neighbor_list: NodeNeighborList,
         *,
+        farfield_local_data: Optional[LocalExpansionData] = None,
+        farfield_leaf_nodes: Optional[Array] = None,
+        farfield_node_ranges: Optional[Array] = None,
         precomputed_target_leaf_ids: Optional[Array] = None,
         precomputed_source_leaf_ids: Optional[Array] = None,
         precomputed_valid_pairs: Optional[Array] = None,
@@ -4367,6 +4397,9 @@ class FastMultipoleMethod:
             masses_sorted,
             locals_or_downward,
             neighbor_list,
+            farfield_local_data=farfield_local_data,
+            farfield_leaf_nodes=farfield_leaf_nodes,
+            farfield_node_ranges=farfield_node_ranges,
             max_leaf_size=max_leaf_size,
             return_potential=return_potential,
         )
@@ -4447,6 +4480,9 @@ class FastMultipoleMethod:
         locals_or_downward: Union[LocalExpansionData, TreeDownwardData],
         neighbor_list: NodeNeighborList,
         *,
+        farfield_local_data: Optional[LocalExpansionData] = None,
+        farfield_leaf_nodes: Optional[Array] = None,
+        farfield_node_ranges: Optional[Array] = None,
         precomputed_target_leaf_ids: Optional[Array] = None,
         precomputed_source_leaf_ids: Optional[Array] = None,
         precomputed_valid_pairs: Optional[Array] = None,
@@ -4470,6 +4506,9 @@ class FastMultipoleMethod:
             masses_sorted,
             locals_or_downward,
             neighbor_list,
+            farfield_local_data=farfield_local_data,
+            farfield_leaf_nodes=farfield_leaf_nodes,
+            farfield_node_ranges=farfield_node_ranges,
             max_leaf_size=resolved_max_leaf,
             return_potential=return_potential,
         )
@@ -4609,6 +4648,9 @@ def _prepare_tree_evaluation_inputs(
     locals_or_downward: Union[LocalExpansionData, TreeDownwardData],
     neighbor_list: NodeNeighborList,
     *,
+    farfield_local_data: Optional[LocalExpansionData],
+    farfield_leaf_nodes: Optional[Array],
+    farfield_node_ranges: Optional[Array],
     max_leaf_size: Optional[int],
     return_potential: bool,
 ) -> _TreeEvaluationSetup:
@@ -4618,16 +4660,29 @@ def _prepare_tree_evaluation_inputs(
         if isinstance(locals_or_downward, TreeDownwardData)
         else locals_or_downward
     )
+    farfield_locals = (
+        locals_data if farfield_local_data is None else farfield_local_data
+    )
+    eval_leaf_nodes = (
+        jnp.asarray(neighbor_list.leaf_indices, dtype=INDEX_DTYPE)
+        if farfield_leaf_nodes is None
+        else jnp.asarray(farfield_leaf_nodes, dtype=INDEX_DTYPE)
+    )
+    eval_node_ranges = (
+        jnp.asarray(tree.node_ranges, dtype=INDEX_DTYPE)
+        if farfield_node_ranges is None
+        else jnp.asarray(farfield_node_ranges, dtype=INDEX_DTYPE)
+    )
 
-    if locals_data.centers.shape[0] != tree.node_ranges.shape[0]:
-        raise ValueError("local expansions must align with tree nodes")
-    if locals_data.coefficients.shape[0] != tree.node_ranges.shape[0]:
-        raise ValueError("local expansions must align with tree nodes")
+    if farfield_locals.centers.shape[0] != eval_node_ranges.shape[0]:
+        raise ValueError("local expansions must align with evaluation node ranges")
+    if farfield_locals.coefficients.shape[0] != eval_node_ranges.shape[0]:
+        raise ValueError("local expansions must align with evaluation node ranges")
 
     positions = jnp.asarray(positions_sorted)
     masses = jnp.asarray(masses_sorted)
-    leaf_nodes = jnp.asarray(neighbor_list.leaf_indices, dtype=INDEX_DTYPE)
-    node_ranges = jnp.asarray(tree.node_ranges, dtype=INDEX_DTYPE)
+    leaf_nodes = eval_leaf_nodes
+    node_ranges = eval_node_ranges
 
     if leaf_nodes.size == 0:
         zeros = jnp.zeros_like(positions)
@@ -4641,7 +4696,7 @@ def _prepare_tree_evaluation_inputs(
             empty = zeros
         resolved_max_leaf = 0 if max_leaf_size is None else int(max_leaf_size)
         return _TreeEvaluationSetup(
-            locals_data,
+            farfield_locals,
             positions,
             masses,
             leaf_nodes,
@@ -4662,7 +4717,7 @@ def _prepare_tree_evaluation_inputs(
         resolved_max_leaf = int(max_leaf_size)
 
     return _TreeEvaluationSetup(
-        locals_data,
+        farfield_locals,
         positions,
         masses,
         leaf_nodes,
@@ -6150,6 +6205,9 @@ def _evaluate_prepared_tree(
     masses_sorted: Array,
     downward: TreeDownwardData,
     neighbor_list: NodeNeighborList,
+    farfield_local_data: Optional[LocalExpansionData],
+    farfield_leaf_nodes: Optional[Array],
+    farfield_node_ranges: Optional[Array],
     nearfield_target_leaf_ids: Optional[Array],
     nearfield_source_leaf_ids: Optional[Array],
     nearfield_valid_pairs: Optional[Array],
@@ -6173,6 +6231,9 @@ def _evaluate_prepared_tree(
         masses_sorted,
         downward,
         neighbor_list,
+        farfield_local_data=farfield_local_data,
+        farfield_leaf_nodes=farfield_leaf_nodes,
+        farfield_node_ranges=farfield_node_ranges,
         precomputed_target_leaf_ids=nearfield_target_leaf_ids,
         precomputed_source_leaf_ids=nearfield_source_leaf_ids,
         precomputed_valid_pairs=nearfield_valid_pairs,
@@ -6400,6 +6461,9 @@ def _evaluate_prepared_tree_targets(
     masses_sorted: Array,
     downward: TreeDownwardData,
     neighbor_list: NodeNeighborList,
+    farfield_local_data: Optional[LocalExpansionData],
+    farfield_leaf_nodes: Optional[Array],
+    farfield_node_ranges: Optional[Array],
     target_sorted_indices: Array,
     return_potential: bool,
 ) -> Union[Array, Tuple[Array, Array]]:
@@ -6428,13 +6492,34 @@ def _evaluate_prepared_tree_targets(
         softening=float(fmm.softening),
         return_potential=return_potential,
     )
+    farfield_leaf_nodes_resolved = (
+        jnp.asarray(neighbor_list.leaf_indices, dtype=INDEX_DTYPE)
+        if farfield_leaf_nodes is None
+        else jnp.asarray(farfield_leaf_nodes, dtype=INDEX_DTYPE)
+    )
+    farfield_node_ranges_resolved = (
+        jnp.asarray(tree.node_ranges, dtype=INDEX_DTYPE)
+        if farfield_node_ranges is None
+        else jnp.asarray(farfield_node_ranges, dtype=INDEX_DTYPE)
+    )
+    far_target_leaf_positions = _map_targets_to_leaf_positions(
+        target_sorted_indices=target_sorted_indices,
+        leaf_nodes=farfield_leaf_nodes_resolved,
+        node_ranges=farfield_node_ranges_resolved,
+    )
     far_grad, far_potential_pre = _evaluate_local_expansions_for_target_particles(
-        local_data=downward.locals,
+        local_data=(
+            downward.locals if farfield_local_data is None else farfield_local_data
+        ),
         positions_sorted=positions_sorted,
         target_sorted_indices=target_sorted_indices,
-        target_leaf_positions=target_leaf_positions,
-        leaf_nodes=leaf_nodes,
-        order=int(downward.locals.order),
+        target_leaf_positions=far_target_leaf_positions,
+        leaf_nodes=farfield_leaf_nodes_resolved,
+        order=int(
+            downward.locals.order
+            if farfield_local_data is None
+            else farfield_local_data.order
+        ),
         expansion_basis=fmm.expansion_basis,
         return_potential=return_potential,
     )
