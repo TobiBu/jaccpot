@@ -19,6 +19,7 @@ class OctreeExecutionData(NamedTuple):
     node_codes: Array
     node_depths: Array
     node_ranges: Array
+    nodes_by_level: Array
     level_offsets: Array
     num_levels: Array
     leaf_mask: Array
@@ -41,6 +42,7 @@ def build_octree_execution_data(tree: object) -> Optional[OctreeExecutionData]:
         "oct_node_codes",
         "oct_node_depths",
         "oct_node_ranges",
+        "oct_nodes_by_level",
         "oct_level_offsets",
         "oct_num_levels",
         "oct_leaf_mask",
@@ -57,6 +59,7 @@ def build_octree_execution_data(tree: object) -> Optional[OctreeExecutionData]:
     node_codes = jnp.asarray(getattr(tree, "oct_node_codes"), dtype=jnp.uint64)
     node_depths = jnp.asarray(getattr(tree, "oct_node_depths"), dtype=INDEX_DTYPE)
     node_ranges = jnp.asarray(getattr(tree, "oct_node_ranges"), dtype=INDEX_DTYPE)
+    nodes_by_level = jnp.asarray(getattr(tree, "oct_nodes_by_level"), dtype=INDEX_DTYPE)
     level_offsets = jnp.asarray(getattr(tree, "oct_level_offsets"), dtype=INDEX_DTYPE)
     num_levels = jnp.asarray(getattr(tree, "oct_num_levels"), dtype=INDEX_DTYPE)
     leaf_mask = jnp.asarray(getattr(tree, "oct_leaf_mask"), dtype=jnp.bool_)
@@ -107,6 +110,7 @@ def build_octree_execution_data(tree: object) -> Optional[OctreeExecutionData]:
         node_codes=node_codes,
         node_depths=node_depths,
         node_ranges=node_ranges,
+        nodes_by_level=nodes_by_level,
         level_offsets=level_offsets,
         num_levels=num_levels,
         leaf_mask=leaf_mask,
