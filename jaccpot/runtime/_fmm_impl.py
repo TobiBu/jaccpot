@@ -133,6 +133,7 @@ ExpansionBasis = Literal["cartesian", "solidfmm", "complex"]
 FarFieldMode = Literal["auto", "pair_grouped", "class_major"]
 NearFieldMode = Literal["auto", "baseline", "bucketed"]
 MemoryObjective = Literal["balanced", "throughput", "minimum_memory"]
+FMMExecutionBackend = Literal["auto", "radix", "octree"]
 
 _cartesian_eval_table_cache: dict[int, tuple[np.ndarray, np.ndarray, np.ndarray]] = {}
 
@@ -890,6 +891,7 @@ class FMMPreparedState:
     nearfield_chunk_group_ids: Optional[Array]
     nearfield_chunk_unique_indices: Optional[Array]
     force_scale_nodes: Optional[Array]
+    execution_backend: str = "radix"
     octree: Optional[OctreeExecutionData] = None
 
     @property
@@ -936,6 +938,7 @@ class FMMPreparedState:
             self.nearfield_chunk_group_ids,
             self.nearfield_chunk_unique_indices,
             self.force_scale_nodes,
+            self.execution_backend,
             self.octree,
         )
         aux = (
@@ -976,6 +979,7 @@ class FMMPreparedState:
             nearfield_chunk_group_ids,
             nearfield_chunk_unique_indices,
             force_scale_nodes,
+            execution_backend,
             octree,
         ) = children
         return cls(
@@ -999,6 +1003,7 @@ class FMMPreparedState:
             nearfield_chunk_group_ids=nearfield_chunk_group_ids,
             nearfield_chunk_unique_indices=nearfield_chunk_unique_indices,
             force_scale_nodes=force_scale_nodes,
+            execution_backend=str(execution_backend),
             octree=octree,
         )
 
@@ -1193,6 +1198,7 @@ class FastMultipoleMethod:
         mixed_order_farfield: bool = False,
         mixed_order_min_order: Optional[int] = None,
         nearfield_mode: NearFieldMode = "auto",
+        execution_backend: FMMExecutionBackend = "auto",
         nearfield_edge_chunk_size: int = 256,
         precompute_nearfield_scatter_schedules: bool = True,
         memory_objective: MemoryObjective = "balanced",
@@ -1288,9 +1294,13 @@ class FastMultipoleMethod:
         nearfield_mode_norm = str(nearfield_mode).strip().lower()
         if nearfield_mode_norm not in ("auto", "baseline", "bucketed"):
             raise ValueError("nearfield_mode must be 'auto', 'baseline', or 'bucketed'")
+        execution_backend_norm = str(execution_backend).strip().lower()
+        if execution_backend_norm not in ("auto", "radix", "octree"):
+            raise ValueError("execution_backend must be 'auto', 'radix', or 'octree'")
         if int(nearfield_edge_chunk_size) <= 0:
             raise ValueError("nearfield_edge_chunk_size must be positive")
         self.nearfield_mode = nearfield_mode_norm
+        self.execution_backend = execution_backend_norm
         self.nearfield_edge_chunk_size = int(nearfield_edge_chunk_size)
         self.precompute_nearfield_scatter_schedules = bool(
             precompute_nearfield_scatter_schedules
@@ -1425,6 +1435,28 @@ class FastMultipoleMethod:
         self._explicit_pair_process_block = pair_process_block is not None
         self._explicit_grouped_interactions = grouped_interactions is not None
         self.grouped_interactions = grouped_interactions
+
+    def _resolve_execution_backend(self) -> str:
+        """Resolve the active FMM execution backend without altering tree choice."""
+        if self.execution_backend == "auto":
+            return "radix"
+        return self.execution_backend
+
+    def _ensure_execution_backend_supported(
+        self, *, tree: Optional[Tree] = None
+    ) -> str:
+        """Fail fast for execution backends that do not exist yet."""
+        backend = self._resolve_execution_backend()
+        if backend != "octree":
+            return backend
+
+        tree_type = getattr(tree, "tree_type", self.tree_type)
+        if str(tree_type).strip().lower() != "octree":
+            raise ValueError("execution_backend='octree' requires an octree tree_type")
+        raise NotImplementedError(
+            "execution_backend='octree' is not implemented yet; "
+            "use execution_backend='radix' or 'auto' for now"
+        )
 
     @property
     def recent_retry_events(
@@ -3495,6 +3527,7 @@ class FastMultipoleMethod:
         max_leaf_size: Optional[int] = None,
     ) -> TreeUpwardData:
         """Bundle geometry, raw moments, and packed expansions for a tree."""
+        self._ensure_execution_backend_supported(tree=tree)
 
         if self.expansion_basis == "solidfmm":
             complex_upward = prepare_solidfmm_complex_upward_sweep(
@@ -3583,6 +3616,7 @@ class FastMultipoleMethod:
         p_gears: Optional[tuple[int, ...]] = None,
     ) -> TreeDownwardData:
         """Build interactions and locals needed for the downward sweep."""
+        self._ensure_execution_backend_supported(tree=tree)
 
         theta_val = float(self.theta if theta is None else theta)
         mac_type_val = self.mac_type if mac_type is None else mac_type
@@ -4046,6 +4080,7 @@ class FastMultipoleMethod:
             nearfield_chunk_group_ids=nearfield_artifacts.chunk_group_ids,
             nearfield_chunk_unique_indices=nearfield_artifacts.chunk_unique_indices,
             force_scale_nodes=force_scale_nodes,
+            execution_backend=self._resolve_execution_backend(),
             octree=build_octree_execution_data(tree_artifacts.tree),
         )
 

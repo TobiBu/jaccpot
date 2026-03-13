@@ -139,6 +139,61 @@ def test_tree_type_flows_from_advanced_config():
         advanced=FMMAdvancedConfig(tree=TreeConfig(tree_type="radix")),
     )
     assert fmm._impl.tree_type == "radix"
+    assert fmm._impl.execution_backend == "auto"
+
+
+def test_execution_backend_flows_from_advanced_config():
+    fmm = FastMultipoleMethod(
+        preset=FMMPreset.FAST,
+        basis="solidfmm",
+        advanced=FMMAdvancedConfig(
+            tree=TreeConfig(tree_type="octree"),
+            runtime=RuntimePolicyConfig(execution_backend="radix"),
+        ),
+    )
+    assert fmm._impl.tree_type == "octree"
+    assert fmm._impl.execution_backend == "radix"
+
+
+def test_prepare_state_records_resolved_execution_backend():
+    positions, masses = _sample_problem(n=32)
+    fmm = FastMultipoleMethod(
+        preset=FMMPreset.FAST,
+        basis="solidfmm",
+        advanced=FMMAdvancedConfig(
+            tree=TreeConfig(tree_type="octree"),
+            runtime=RuntimePolicyConfig(execution_backend="auto"),
+        ),
+    )
+
+    state = fmm.prepare_state(
+        positions,
+        masses,
+        leaf_size=8,
+        max_order=3,
+    )
+
+    assert state.execution_backend == "radix"
+
+
+def test_explicit_octree_execution_backend_fails_fast_until_implemented():
+    positions, masses = _sample_problem(n=32)
+    fmm = FastMultipoleMethod(
+        preset=FMMPreset.FAST,
+        basis="solidfmm",
+        advanced=FMMAdvancedConfig(
+            tree=TreeConfig(tree_type="octree"),
+            runtime=RuntimePolicyConfig(execution_backend="octree"),
+        ),
+    )
+
+    with pytest.raises(NotImplementedError, match="execution_backend='octree'"):
+        fmm.prepare_state(
+            positions,
+            masses,
+            leaf_size=8,
+            max_order=3,
+        )
 
 
 def test_octree_prepare_state_exposes_octree_execution_view():
