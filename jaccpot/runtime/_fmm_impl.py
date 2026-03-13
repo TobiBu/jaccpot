@@ -120,6 +120,7 @@ from ._nearfield_cache import (
     nearfield_from_cache,
     with_nearfield_cache_artifacts,
 )
+from ._octree_adapter import OctreeExecutionData, build_octree_execution_data
 from .dtypes import INDEX_DTYPE, as_index, complex_dtype_for_real
 from .fmm_presets import FMMPreset, FMMPresetConfig, get_preset_config
 from .reference import MultipoleExpansion
@@ -889,6 +890,7 @@ class FMMPreparedState:
     nearfield_chunk_group_ids: Optional[Array]
     nearfield_chunk_unique_indices: Optional[Array]
     force_scale_nodes: Optional[Array]
+    octree: Optional[OctreeExecutionData] = None
 
     @property
     def positions_sorted(self) -> Array:
@@ -934,6 +936,7 @@ class FMMPreparedState:
             self.nearfield_chunk_group_ids,
             self.nearfield_chunk_unique_indices,
             self.force_scale_nodes,
+            self.octree,
         )
         aux = (
             int(self.max_leaf_size),
@@ -973,6 +976,7 @@ class FMMPreparedState:
             nearfield_chunk_group_ids,
             nearfield_chunk_unique_indices,
             force_scale_nodes,
+            octree,
         ) = children
         return cls(
             tree=tree,
@@ -995,6 +999,7 @@ class FMMPreparedState:
             nearfield_chunk_group_ids=nearfield_chunk_group_ids,
             nearfield_chunk_unique_indices=nearfield_chunk_unique_indices,
             force_scale_nodes=force_scale_nodes,
+            octree=octree,
         )
 
 
@@ -4041,6 +4046,7 @@ class FastMultipoleMethod:
             nearfield_chunk_group_ids=nearfield_artifacts.chunk_group_ids,
             nearfield_chunk_unique_indices=nearfield_artifacts.chunk_unique_indices,
             force_scale_nodes=force_scale_nodes,
+            octree=build_octree_execution_data(tree_artifacts.tree),
         )
 
     @jaxtyped(typechecker=beartype)

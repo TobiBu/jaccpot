@@ -141,6 +141,59 @@ def test_tree_type_flows_from_advanced_config():
     assert fmm._impl.tree_type == "radix"
 
 
+def test_octree_prepare_state_exposes_octree_execution_view():
+    positions, masses = _sample_problem(n=48)
+    fmm = FastMultipoleMethod(
+        preset=FMMPreset.FAST,
+        basis="solidfmm",
+        advanced=FMMAdvancedConfig(tree=TreeConfig(tree_type="octree")),
+    )
+
+    state = fmm.prepare_state(
+        positions,
+        masses,
+        leaf_size=8,
+        max_order=3,
+    )
+
+    assert state.tree.tree_type == "octree"
+    assert state.octree is not None
+    assert int(state.octree.num_valid_nodes) > 0
+    assert state.octree.radix_node_to_oct.shape[0] == state.tree.parent.shape[0]
+    assert state.octree.radix_leaf_to_oct.shape[0] == state.tree.num_leaves
+
+
+def test_octree_solver_matches_radix_prepare_path():
+    positions, masses = _sample_problem(n=64)
+    radix = FastMultipoleMethod(
+        preset=FMMPreset.FAST,
+        basis="solidfmm",
+        advanced=FMMAdvancedConfig(tree=TreeConfig(tree_type="radix")),
+    )
+    octree = FastMultipoleMethod(
+        preset=FMMPreset.FAST,
+        basis="solidfmm",
+        advanced=FMMAdvancedConfig(tree=TreeConfig(tree_type="octree")),
+    )
+
+    acc_radix = radix.compute_accelerations(
+        positions,
+        masses,
+        leaf_size=16,
+        max_order=3,
+    )
+    acc_octree = octree.compute_accelerations(
+        positions,
+        masses,
+        leaf_size=16,
+        max_order=3,
+    )
+
+    assert np.allclose(
+        np.asarray(acc_octree), np.asarray(acc_radix), rtol=1e-5, atol=1e-5
+    )
+
+
 def test_basis_complex_alias_matches_solidfmm():
     positions, masses = _sample_problem(n=64)
     fmm_alias = FastMultipoleMethod(
