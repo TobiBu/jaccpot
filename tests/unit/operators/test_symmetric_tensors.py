@@ -3,6 +3,7 @@ import jax.numpy as jnp
 import numpy as np
 
 from jaccpot.operators.symmetric_tensors import (
+    component_lift_index_map_3d,
     contract_symmetric_one_axis_3d,
     symmetric_component_count,
     symmetric_multi_indices_3d,
@@ -63,3 +64,15 @@ def test_contract_symmetric_one_axis_3d_jit_shape_and_value() -> None:
 
     assert jitted.shape == (symmetric_component_count(order - 1, dim=3),)
     assert np.allclose(np.asarray(jitted), np.asarray(eager), rtol=1e-12, atol=1e-12)
+
+
+def test_component_lift_index_map_3d_order_one() -> None:
+    # Order-1 base tuples are: (1,0,0), (0,1,0), (0,0,1)
+    # Order-2 packed indices are:
+    # 0:(2,0,0), 1:(1,1,0), 2:(1,0,1), 3:(0,2,0), 4:(0,1,1), 5:(0,0,2)
+    got = component_lift_index_map_3d(1)
+    assert got == (
+        (0, 1, 2),
+        (1, 3, 4),
+        (2, 4, 5),
+    )

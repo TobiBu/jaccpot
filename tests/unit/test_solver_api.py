@@ -261,6 +261,51 @@ def test_evaluate_prepared_state_can_run_inside_jit_with_targets():
     assert np.allclose(np.asarray(acc_jit), np.asarray(acc_ref), rtol=1e-5, atol=1e-5)
 
 
+def test_compute_accelerations_returns_acc_derivatives_when_requested():
+    positions, masses = _sample_problem(n=48)
+    fmm = FastMultipoleMethod(
+        preset=FMMPreset.FAST,
+        basis="solidfmm",
+    )
+    acc, derivatives = fmm.compute_accelerations(
+        positions,
+        masses,
+        leaf_size=16,
+        max_order=3,
+        max_acc_derivative_order=1,
+    )
+    assert acc.shape == positions.shape
+    assert len(derivatives) == 1
+    assert derivatives[0].shape == (positions.shape[0], 3, 3)
+
+
+def test_compute_accelerations_acc_derivatives_target_indices_match_slice():
+    positions, masses = _sample_problem(n=56)
+    fmm = FastMultipoleMethod(
+        preset=FMMPreset.FAST,
+        basis="solidfmm",
+    )
+    target_indices = jnp.asarray([2, 8, 13, 21, 34], dtype=jnp.int32)
+    acc_full, deriv_full = fmm.compute_accelerations(
+        positions,
+        masses,
+        leaf_size=16,
+        max_order=3,
+        max_acc_derivative_order=1,
+    )
+    acc_sub, deriv_sub = fmm.compute_accelerations(
+        positions,
+        masses,
+        target_indices=target_indices,
+        leaf_size=16,
+        max_order=3,
+        max_acc_derivative_order=1,
+    )
+    np_idx = np.asarray(target_indices)
+    assert np.allclose(np.asarray(acc_sub), np.asarray(acc_full)[np_idx])
+    assert np.allclose(np.asarray(deriv_sub[0]), np.asarray(deriv_full[0])[np_idx])
+
+
 def test_jitted_compute_does_not_leak_tracers_into_solver_caches():
     positions, masses = _sample_problem(n=64)
     fmm = FastMultipoleMethod(

@@ -56,6 +56,7 @@ from jaccpot.operators.complex_ops import (
     complex_rotation_blocks_to_z_batch,
     complex_rotation_blocks_to_z_solidfmm_batch,
     enforce_conjugate_symmetry_batch,
+    evaluate_local_complex_derivative_tower_batch,
     evaluate_local_complex_with_grad,
     evaluate_local_complex_with_grad_batch,
     l2l_complex,
@@ -73,6 +74,7 @@ from jaccpot.operators.multipole_utils import (
     total_coefficients,
 )
 from jaccpot.operators.real_harmonics import sh_size
+from jaccpot.operators.symmetric_tensors import component_lift_index_map_3d
 from jaccpot.upward.solidfmm_complex_tree_expansions import (
     prepare_solidfmm_complex_upward_sweep,
 )
@@ -107,6 +109,7 @@ from .reference import evaluate_expansion as reference_evaluate_expansion
 ExpansionBasis = Literal["cartesian", "solidfmm"]
 FarFieldMode = Literal["auto", "pair_grouped", "class_major"]
 NearFieldMode = Literal["auto", "baseline", "bucketed"]
+PackedAccelerationDerivatives = tuple[Array, ...]
 
 
 @dataclass(frozen=True)
@@ -1785,7 +1788,13 @@ class FastMultipoleMethod:
         aspect_threshold: Optional[float] = None,
         jit_traversal: Optional[bool] = None,
         reuse_prepared_state: bool = False,
-    ) -> Union[Array, Tuple[Array, Array]]:
+        max_acc_derivative_order: int = 0,
+    ) -> Union[
+        Array,
+        Tuple[Array, Array],
+        Tuple[Array, PackedAccelerationDerivatives],
+        Tuple[Array, Array, PackedAccelerationDerivatives],
+    ]:
         """Run the full FMM pipeline for particle accelerations.
 
         Parameters
@@ -1873,6 +1882,7 @@ class FastMultipoleMethod:
             target_indices=target_indices,
             return_potential=return_potential,
             jit_traversal=jit_traversal_flag,
+            max_acc_derivative_order=max_acc_derivative_order,
         )
 
     @jaxtyped(typechecker=beartype)
@@ -2032,7 +2042,13 @@ class FastMultipoleMethod:
         target_indices: Optional[Array] = None,
         return_potential: bool = False,
         jit_traversal: bool = True,
-    ) -> Union[Array, Tuple[Array, Array]]:
+        max_acc_derivative_order: int = 0,
+    ) -> Union[
+        Array,
+        Tuple[Array, Array],
+        Tuple[Array, PackedAccelerationDerivatives],
+        Tuple[Array, Array, PackedAccelerationDerivatives],
+    ]:
         """Evaluate accelerations/potentials for all particles or targets."""
 
         resolved_target_indices = self._resolve_target_indices(
@@ -2042,6 +2058,14 @@ class FastMultipoleMethod:
         tracing_targets = isinstance(
             state.positions_sorted, jax.core.Tracer
         ) or isinstance(resolved_target_indices, jax.core.Tracer)
+        derivative_order = int(max_acc_derivative_order)
+        if derivative_order < 0:
+            raise ValueError("max_acc_derivative_order must be non-negative")
+        if derivative_order > 0 and state.expansion_basis != "solidfmm":
+            raise NotImplementedError(
+                "max_acc_derivative_order > 0 currently requires expansion_basis='solidfmm'"
+            )
+
         if resolved_target_indices is None or tracing_targets:
             evaluation = _evaluate_prepared_tree(
                 fmm=self,
@@ -2059,6 +2083,7 @@ class FastMultipoleMethod:
                 max_leaf_size=state.max_leaf_size,
                 return_potential=return_potential,
                 jit_traversal=jit_traversal,
+                max_acc_derivative_order=derivative_order,
             )
         else:
             target_sorted_indices = jnp.asarray(
@@ -2074,12 +2099,51 @@ class FastMultipoleMethod:
                 neighbor_list=state.neighbor_list,
                 target_sorted_indices=target_sorted_indices,
                 return_potential=return_potential,
+                max_acc_derivative_order=derivative_order,
             )
 
         if jnp.issubdtype(state.input_dtype, jnp.floating):
             output_dtype = state.input_dtype
         else:
             output_dtype = state.working_dtype
+
+        if derivative_order > 0:
+            if return_potential:
+                acc_sorted, pot_sorted, deriv_sorted = evaluation
+            else:
+                acc_sorted, deriv_sorted = evaluation
+            if resolved_target_indices is None:
+                accelerations = jnp.asarray(acc_sorted)[state.inverse_permutation]
+                derivatives = tuple(
+                    jnp.asarray(level)[state.inverse_permutation]
+                    for level in deriv_sorted
+                )
+                if return_potential:
+                    potentials = jnp.asarray(pot_sorted)[state.inverse_permutation]
+            elif tracing_targets:
+                accelerations = jnp.asarray(acc_sorted)[state.inverse_permutation][
+                    resolved_target_indices
+                ]
+                derivatives = tuple(
+                    jnp.asarray(level)[state.inverse_permutation][
+                        resolved_target_indices
+                    ]
+                    for level in deriv_sorted
+                )
+                if return_potential:
+                    potentials = jnp.asarray(pot_sorted)[state.inverse_permutation][
+                        resolved_target_indices
+                    ]
+            else:
+                accelerations = jnp.asarray(acc_sorted)
+                derivatives = tuple(jnp.asarray(level) for level in deriv_sorted)
+                if return_potential:
+                    potentials = jnp.asarray(pot_sorted)
+            accelerations = accelerations.astype(output_dtype)
+            derivatives = tuple(level.astype(output_dtype) for level in derivatives)
+            if return_potential:
+                return accelerations, potentials.astype(output_dtype), derivatives
+            return accelerations, derivatives
 
         if return_potential:
             acc_sorted, pot_sorted = evaluation
@@ -2179,7 +2243,7 @@ class FastMultipoleMethod:
             precomputed_chunk_unique_indices=precomputed_chunk_unique_indices,
         )
 
-        far_grad, far_potential_pre = _evaluate_local_expansions_for_particles(
+        far_grad, far_potential_pre, _ = _evaluate_local_expansions_for_particles(
             locals_data,
             positions,
             leaf_nodes=leaf_nodes,
@@ -2188,6 +2252,7 @@ class FastMultipoleMethod:
             order=order,
             expansion_basis=self.expansion_basis,
             return_potential=return_potential,
+            max_acc_derivative_order=0,
         )
 
         # far_grad is d/d(delta) of +1/r with delta = center - eval_point.
@@ -3400,7 +3465,7 @@ def _evaluate_tree_compiled_impl(
         ),
     )
 
-    far_grad, far_potential_pre = _evaluate_local_expansions_for_particles(
+    far_grad, far_potential_pre, _ = _evaluate_local_expansions_for_particles(
         locals_data,
         positions,
         leaf_nodes=leaf_nodes,
@@ -3409,6 +3474,7 @@ def _evaluate_tree_compiled_impl(
         order=order,
         expansion_basis=expansion_basis,
         return_potential=return_potential,
+        max_acc_derivative_order=0,
     )
 
     # far_grad is d/d(delta) of +1/r with delta = center - eval_point.
@@ -3447,8 +3513,70 @@ def _evaluate_prepared_tree(
     max_leaf_size: int,
     return_potential: bool,
     jit_traversal: bool,
-) -> Union[Array, Tuple[Array, Array]]:
+    max_acc_derivative_order: int = 0,
+) -> Union[
+    Array,
+    Tuple[Array, Array],
+    Tuple[Array, PackedAccelerationDerivatives],
+    Tuple[Array, Array, PackedAccelerationDerivatives],
+]:
     """Run the prepared-tree evaluation returning Morton-sorted outputs."""
+
+    if int(max_acc_derivative_order) > 0:
+        nearfield_mode = fmm._resolve_nearfield_mode(
+            num_particles=int(positions_sorted.shape[0])
+        )
+        nearfield_edge_chunk_size = fmm._resolve_nearfield_edge_chunk_size(
+            num_particles=int(positions_sorted.shape[0]),
+            nearfield_mode=nearfield_mode,
+        )
+        near = compute_leaf_p2p_accelerations(
+            tree,
+            neighbor_list,
+            positions_sorted,
+            masses_sorted,
+            G=fmm.G,
+            softening=fmm.softening,
+            max_leaf_size=max_leaf_size,
+            return_potential=return_potential,
+            nearfield_mode=nearfield_mode,
+            edge_chunk_size=nearfield_edge_chunk_size,
+            precomputed_target_leaf_ids=nearfield_target_leaf_ids,
+            precomputed_source_leaf_ids=nearfield_source_leaf_ids,
+            precomputed_valid_pairs=nearfield_valid_pairs,
+            precomputed_chunk_sort_indices=nearfield_chunk_sort_indices,
+            precomputed_chunk_group_ids=nearfield_chunk_group_ids,
+            precomputed_chunk_unique_indices=nearfield_chunk_unique_indices,
+        )
+        far_grad, far_potential_pre, far_derivatives = (
+            _evaluate_local_expansions_for_particles(
+                downward.locals,
+                positions_sorted,
+                leaf_nodes=jnp.asarray(neighbor_list.leaf_indices, dtype=INDEX_DTYPE),
+                node_ranges=jnp.asarray(tree.node_ranges, dtype=INDEX_DTYPE),
+                max_leaf_size=max_leaf_size,
+                order=int(downward.locals.order),
+                expansion_basis=fmm.expansion_basis,
+                return_potential=return_potential,
+                max_acc_derivative_order=int(max_acc_derivative_order),
+            )
+        )
+        far_acc = -fmm.G * far_grad
+        if far_derivatives is None:
+            raise RuntimeError("expected far-field acceleration derivatives")
+        acc_derivatives = tuple(fmm.G * level for level in far_derivatives)
+
+        if return_potential:
+            near_acc, near_pot = near
+            far_pot = (
+                -fmm.G * far_potential_pre
+                if far_potential_pre is not None
+                else jnp.zeros(
+                    (positions_sorted.shape[0],), dtype=positions_sorted.dtype
+                )
+            )
+            return near_acc + far_acc, near_pot + far_pot, acc_derivatives
+        return near + far_acc, acc_derivatives
 
     if jit_traversal:
         evaluate_fn = fmm.evaluate_tree_compiled
@@ -3605,7 +3733,8 @@ def _evaluate_local_expansions_for_target_particles(
     order: int,
     expansion_basis: ExpansionBasis,
     return_potential: bool,
-) -> tuple[Array, Optional[Array]]:
+    max_acc_derivative_order: int = 0,
+) -> tuple[Array, Optional[Array], Optional[PackedAccelerationDerivatives]]:
     """Evaluate far-field local expansions for target particles only."""
     if order > MAX_MULTIPOLE_ORDER and expansion_basis != "solidfmm":
         raise NotImplementedError(
@@ -3613,9 +3742,24 @@ def _evaluate_local_expansions_for_target_particles(
         )
     if int(target_sorted_indices.shape[0]) == 0:
         zeros = jnp.zeros((0, 3), dtype=positions_sorted.dtype)
+        derivatives: Optional[PackedAccelerationDerivatives]
+        if max_acc_derivative_order > 0:
+            derivatives = tuple(
+                jnp.zeros(
+                    (
+                        0,
+                        3,
+                        len(component_lift_index_map_3d(level)),
+                    ),
+                    dtype=positions_sorted.dtype,
+                )
+                for level in range(1, max_acc_derivative_order + 1)
+            )
+        else:
+            derivatives = None
         if return_potential:
-            return zeros, jnp.zeros((0,), dtype=positions_sorted.dtype)
-        return zeros, None
+            return zeros, jnp.zeros((0,), dtype=positions_sorted.dtype), derivatives
+        return zeros, None, derivatives
 
     target_leaf_nodes = leaf_nodes[target_leaf_positions]
     centers = local_data.centers[target_leaf_nodes]
@@ -3625,18 +3769,48 @@ def _evaluate_local_expansions_for_target_particles(
     if expansion_basis == "solidfmm":
         offsets_complex = centers - target_positions
 
-        def eval_one(coeff_row: Array, offset_row: Array) -> tuple[Array, Array]:
-            grad, pot = evaluate_local_complex_with_grad(
-                coeff_row,
-                offset_row,
-                order=int(order),
-            )
-            return grad, pot
+        if max_acc_derivative_order <= 0:
 
-        gradients, potentials = jax.vmap(eval_one)(coeffs, offsets_complex)
+            def eval_one(coeff_row: Array, offset_row: Array) -> tuple[Array, Array]:
+                grad, pot = evaluate_local_complex_with_grad(
+                    coeff_row,
+                    offset_row,
+                    order=int(order),
+                )
+                return grad, pot
+
+            gradients, potentials = jax.vmap(eval_one)(coeffs, offsets_complex)
+            if return_potential:
+                return gradients, potentials, None
+            return gradients, None, None
+
+        tower = jax.vmap(
+            lambda coeff_row, offset_row: evaluate_local_complex_derivative_tower_batch(
+                coeff_row,
+                offset_row[jnp.newaxis, :],
+                order=int(order),
+                max_derivative_order=int(max_acc_derivative_order) + 1,
+            ),
+            in_axes=(0, 0),
+        )(coeffs, offsets_complex)
+
+        potentials = tower[0][:, 0, 0]
+        gradients = tower[1][:, 0, :]
+        derivatives: list[Array] = []
+        for level in range(1, max_acc_derivative_order + 1):
+            high = tower[level + 1][:, 0, :]
+            gather = jnp.asarray(
+                component_lift_index_map_3d(level),
+                dtype=INDEX_DTYPE,
+            )
+            # (targets, components(level), xyz) -> (targets, xyz, components(level))
+            lifted = jnp.swapaxes(high[:, gather], 1, 2)
+            sign = -1.0 if level % 2 == 0 else 1.0
+            derivatives.append(sign * lifted)
+        packed_derivatives: PackedAccelerationDerivatives = tuple(derivatives)
         if return_potential:
-            return gradients, potentials
-        return gradients, None
+            return gradients, potentials, packed_derivatives
+        return gradients, None, packed_derivatives
 
     offsets = target_positions - centers
 
@@ -3661,8 +3835,8 @@ def _evaluate_local_expansions_for_target_particles(
 
     gradients, potentials = jax.vmap(eval_cartesian)(coeffs, offsets)
     if return_potential:
-        return gradients, potentials
-    return gradients, None
+        return gradients, potentials, None
+    return gradients, None, None
 
 
 def _evaluate_prepared_tree_targets(
@@ -3675,7 +3849,13 @@ def _evaluate_prepared_tree_targets(
     neighbor_list: NodeNeighborList,
     target_sorted_indices: Array,
     return_potential: bool,
-) -> Union[Array, Tuple[Array, Array]]:
+    max_acc_derivative_order: int = 0,
+) -> Union[
+    Array,
+    Tuple[Array, Array],
+    Tuple[Array, PackedAccelerationDerivatives],
+    Tuple[Array, Array, PackedAccelerationDerivatives],
+]:
     """Run prepared-tree evaluation for target particles only."""
     g_const = jnp.asarray(fmm.G, dtype=positions_sorted.dtype)
     leaf_nodes = jnp.asarray(neighbor_list.leaf_indices, dtype=INDEX_DTYPE)
@@ -3701,17 +3881,25 @@ def _evaluate_prepared_tree_targets(
         softening=float(fmm.softening),
         return_potential=return_potential,
     )
-    far_grad, far_potential_pre = _evaluate_local_expansions_for_target_particles(
-        local_data=downward.locals,
-        positions_sorted=positions_sorted,
-        target_sorted_indices=target_sorted_indices,
-        target_leaf_positions=target_leaf_positions,
-        leaf_nodes=leaf_nodes,
-        order=int(downward.locals.order),
-        expansion_basis=fmm.expansion_basis,
-        return_potential=return_potential,
+    far_grad, far_potential_pre, far_derivatives = (
+        _evaluate_local_expansions_for_target_particles(
+            local_data=downward.locals,
+            positions_sorted=positions_sorted,
+            target_sorted_indices=target_sorted_indices,
+            target_leaf_positions=target_leaf_positions,
+            leaf_nodes=leaf_nodes,
+            order=int(downward.locals.order),
+            expansion_basis=fmm.expansion_basis,
+            return_potential=return_potential,
+            max_acc_derivative_order=max_acc_derivative_order,
+        )
     )
     far_acc = -g_const * far_grad
+    acc_derivatives: Optional[PackedAccelerationDerivatives]
+    if far_derivatives is not None:
+        acc_derivatives = tuple(g_const * level for level in far_derivatives)
+    else:
+        acc_derivatives = None
     if return_potential:
         far_pot = (
             -g_const * far_potential_pre
@@ -3727,8 +3915,12 @@ def _evaluate_prepared_tree_targets(
                 (target_sorted_indices.shape[0],), dtype=positions_sorted.dtype
             )
         )
-        return near_acc + far_acc, near_pot_resolved + far_pot
-    return near_acc + far_acc
+        if acc_derivatives is None:
+            return near_acc + far_acc, near_pot_resolved + far_pot
+        return near_acc + far_acc, near_pot_resolved + far_pot, acc_derivatives
+    if acc_derivatives is None:
+        return near_acc + far_acc
+    return near_acc + far_acc, acc_derivatives
 
 
 @partial(
@@ -3738,6 +3930,7 @@ def _evaluate_prepared_tree_targets(
         "return_potential",
         "order",
         "expansion_basis",
+        "max_acc_derivative_order",
     ),
 )
 def _evaluate_local_expansions_for_particles(
@@ -3750,7 +3943,8 @@ def _evaluate_local_expansions_for_particles(
     order: int,
     expansion_basis: ExpansionBasis,
     return_potential: bool,
-) -> Tuple[Array, Optional[Array]]:
+    max_acc_derivative_order: int = 0,
+) -> tuple[Array, Optional[Array], Optional[PackedAccelerationDerivatives]]:
     """Evaluate node-local expansions at leaf particles and scatter results."""
     if order > MAX_MULTIPOLE_ORDER and expansion_basis != "solidfmm":
         raise NotImplementedError(
@@ -3787,25 +3981,67 @@ def _evaluate_local_expansions_for_particles(
         offsets_complex = centers[:, None, :] - leaf_positions
         offsets_complex = jnp.where(valid[..., None], offsets_complex, 0.0)
 
-        def evaluate_leaf_complex(
-            coeffs_leaf: Array,
-            offsets_leaf: Array,
-            mask_leaf: Array,
-        ) -> tuple[Array, Array]:
-            grads, values = evaluate_local_complex_with_grad_batch(
-                coeffs_leaf,
-                offsets_leaf,
-                order=p,
-            )
-            grads = jnp.where(mask_leaf[..., None], grads, 0.0)
-            values = jnp.where(mask_leaf, values, 0.0)
-            return grads, values
+        if max_acc_derivative_order <= 0:
 
-        grad_field, potentials = jax.vmap(evaluate_leaf_complex)(
-            coeffs,
-            offsets_complex,
-            valid,
-        )
+            def evaluate_leaf_complex(
+                coeffs_leaf: Array,
+                offsets_leaf: Array,
+                mask_leaf: Array,
+            ) -> tuple[Array, Array]:
+                grads, values = evaluate_local_complex_with_grad_batch(
+                    coeffs_leaf,
+                    offsets_leaf,
+                    order=p,
+                )
+                grads = jnp.where(mask_leaf[..., None], grads, 0.0)
+                values = jnp.where(mask_leaf, values, 0.0)
+                return grads, values
+
+            grad_field, potentials = jax.vmap(evaluate_leaf_complex)(
+                coeffs,
+                offsets_complex,
+                valid,
+            )
+            derivative_fields: list[Array] = []
+        else:
+
+            def evaluate_leaf_complex_with_derivatives(
+                coeffs_leaf: Array,
+                offsets_leaf: Array,
+                mask_leaf: Array,
+            ) -> tuple[Array, Array, tuple[Array, ...]]:
+                tower = evaluate_local_complex_derivative_tower_batch(
+                    coeffs_leaf,
+                    offsets_leaf,
+                    order=p,
+                    max_derivative_order=int(max_acc_derivative_order) + 1,
+                )
+                grads = tower[1]
+                values = tower[0][:, 0]
+                grads = jnp.where(mask_leaf[..., None], grads, 0.0)
+                values = jnp.where(mask_leaf, values, 0.0)
+                derivative_levels: list[Array] = []
+                for level in range(1, int(max_acc_derivative_order) + 1):
+                    high = tower[level + 1]
+                    gather = jnp.asarray(
+                        component_lift_index_map_3d(level),
+                        dtype=INDEX_DTYPE,
+                    )
+                    lifted = jnp.swapaxes(high[:, gather], 1, 2)
+                    sign = -1.0 if level % 2 == 0 else 1.0
+                    lifted = sign * lifted
+                    lifted = jnp.where(mask_leaf[:, None, None], lifted, 0.0)
+                    derivative_levels.append(lifted)
+                return grads, values, tuple(derivative_levels)
+
+            grad_field, potentials, derivative_fields_tuple = jax.vmap(
+                evaluate_leaf_complex_with_derivatives
+            )(
+                coeffs,
+                offsets_complex,
+                valid,
+            )
+            derivative_fields = list(derivative_fields_tuple)
 
         gradients = _scatter_vectors(
             jnp.zeros_like(positions),
@@ -3814,8 +4050,30 @@ def _evaluate_local_expansions_for_particles(
             valid,
         )
 
+        derivative_outputs: Optional[PackedAccelerationDerivatives]
+        if max_acc_derivative_order > 0:
+            derivative_outputs = []
+            for level, deriv_field in enumerate(derivative_fields, start=1):
+                scattered = _scatter_rank3(
+                    jnp.zeros(
+                        (
+                            positions.shape[0],
+                            3,
+                            len(component_lift_index_map_3d(level)),
+                        ),
+                        dtype=positions.dtype,
+                    ),
+                    safe_idx,
+                    deriv_field,
+                    valid,
+                )
+                derivative_outputs.append(scattered)
+            derivative_outputs = tuple(derivative_outputs)
+        else:
+            derivative_outputs = None
+
         if not return_potential:
-            return gradients, None
+            return gradients, None, derivative_outputs
 
         potentials_flat = _scatter_scalars(
             jnp.zeros((positions.shape[0],), dtype=dtype),
@@ -3823,7 +4081,7 @@ def _evaluate_local_expansions_for_particles(
             potentials,
             valid,
         )
-        return gradients, potentials_flat
+        return gradients, potentials_flat, derivative_outputs
 
     def evaluate_leaf(
         coeffs_leaf: Array,
@@ -3861,7 +4119,7 @@ def _evaluate_local_expansions_for_particles(
     )
 
     if not return_potential:
-        return gradients, None
+        return gradients, None, None
 
     potentials_flat = _scatter_scalars(
         jnp.zeros((positions.shape[0],), dtype=dtype),
@@ -3869,7 +4127,7 @@ def _evaluate_local_expansions_for_particles(
         potentials,
         valid,
     )
-    return gradients, potentials_flat
+    return gradients, potentials_flat, None
 
 
 def _scatter_vectors(
@@ -3901,6 +4159,22 @@ def _scatter_scalars(
     flat_values = values.reshape(-1)
     flat_mask = mask.reshape(-1)
     masked = jnp.where(flat_mask, flat_values, 0.0)
+    return base.at[flat_idx].add(masked)
+
+
+def _scatter_rank3(
+    base: Array,
+    indices: Array,
+    values: Array,
+    mask: Array,
+) -> Array:
+    """Scatter-add rank-3 values into a particle-major buffer."""
+    if values.size == 0:
+        return base
+    flat_idx = indices.reshape(-1)
+    flat_values = values.reshape(-1, values.shape[-2], values.shape[-1])
+    flat_mask = mask.reshape(-1)
+    masked = jnp.where(flat_mask[:, None, None], flat_values, 0.0)
     return base.at[flat_idx].add(masked)
 
 

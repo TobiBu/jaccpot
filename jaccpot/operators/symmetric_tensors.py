@@ -71,6 +71,18 @@ def _contraction_index_map_3d(order: int) -> tuple[tuple[int, int, int], ...]:
     return tuple(out)
 
 
+def component_lift_index_map_3d(order: int) -> tuple[tuple[int, int, int], ...]:
+    """Map packed order-``order`` components to axis-lifted order-``order+1``.
+
+    For each packed exponent triple ``beta`` of total degree ``order``, returns
+    the three packed indices corresponding to ``beta + e_x``, ``beta + e_y``,
+    and ``beta + e_z`` at total degree ``order + 1``.
+    """
+    if order < 0:
+        raise ValueError("order must be non-negative")
+    return _contraction_index_map_3d(order + 1)
+
+
 @partial(jax.jit, static_argnames=("order",))
 def contract_symmetric_one_axis_3d(
     packed: Array,
@@ -97,6 +109,7 @@ def contract_symmetric_one_axis_3d(
 
 
 __all__ = [
+    "component_lift_index_map_3d",
     "contract_symmetric_one_axis_3d",
     "symmetric_component_count",
     "symmetric_multi_indices_3d",

@@ -328,7 +328,13 @@ class FastMultipoleMethod:
         return_potential: bool = False,
         theta: Optional[float] = None,
         reuse_prepared_state: bool = False,
-    ) -> Union[Array, Tuple[Array, Array]]:
+        max_acc_derivative_order: int = 0,
+    ) -> Union[
+        Array,
+        Tuple[Array, Array],
+        Tuple[Array, tuple[Array, ...]],
+        Tuple[Array, Array, tuple[Array, ...]],
+    ]:
         """Compute accelerations (and optional potentials) for particle data.
 
         When ``target_indices`` is provided, all particles remain source masses
@@ -346,6 +352,7 @@ class FastMultipoleMethod:
             reuse_prepared_state=reuse_prepared_state,
             jit_tree=self.advanced.runtime.jit_tree,
             jit_traversal=self.advanced.runtime.jit_traversal,
+            max_acc_derivative_order=max_acc_derivative_order,
         )
 
     def prepare_state(
@@ -391,7 +398,13 @@ class FastMultipoleMethod:
         *,
         target_indices: Optional[Array] = None,
         return_potential: bool = False,
-    ) -> Union[Array, Tuple[Array, Array]]:
+        max_acc_derivative_order: int = 0,
+    ) -> Union[
+        Array,
+        Tuple[Array, Array],
+        Tuple[Array, tuple[Array, ...]],
+        Tuple[Array, Array, tuple[Array, ...]],
+    ]:
         """Evaluate a previously prepared state for all particles or a subset."""
         jit_traversal = (
             True
@@ -403,6 +416,7 @@ class FastMultipoleMethod:
             target_indices=target_indices,
             return_potential=return_potential,
             jit_traversal=jit_traversal,
+            max_acc_derivative_order=max_acc_derivative_order,
         )
 
     def clear_prepared_state_cache(self: "FastMultipoleMethod") -> None:
