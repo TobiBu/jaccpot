@@ -1886,6 +1886,93 @@ class FastMultipoleMethod:
         )
 
     @jaxtyped(typechecker=beartype)
+    def compute_accelerations_and_jerk(
+        self: "FastMultipoleMethod",
+        positions: Array,
+        masses: Array,
+        velocities: Array,
+        *,
+        target_indices: Optional[Array] = None,
+        bounds: Optional[Tuple[Array, Array]] = None,
+        leaf_size: int = 16,
+        max_order: int = 2,
+        theta: Optional[float] = None,
+        jit_tree: Optional[bool] = None,
+        refine_local: Optional[bool] = None,
+        max_refine_levels: Optional[int] = None,
+        aspect_threshold: Optional[float] = None,
+        jit_traversal: Optional[bool] = None,
+        reuse_prepared_state: bool = False,
+    ) -> tuple[Array, Array]:
+        """Run FMM and return accelerations plus jerk estimates.
+
+        Jerk combines:
+        - exact near-field pairwise jerk from source/target velocities,
+        - far-field convective term from acceleration Jacobian times target velocity.
+        """
+        cache_key: Optional[tuple[Any, ...]] = None
+        state: Optional[FMMPreparedState] = None
+        positions_arr = jnp.asarray(positions)
+        masses_arr = jnp.asarray(masses)
+        if reuse_prepared_state:
+            if bounds is None:
+                bounds_key: tuple[Any, ...] = ("none",)
+            else:
+                bounds_key = ("set", id(bounds[0]), id(bounds[1]))
+            cache_key = (
+                positions_arr.shape,
+                str(positions_arr.dtype),
+                masses_arr.shape,
+                str(masses_arr.dtype),
+                bounds_key,
+                int(leaf_size),
+                int(max_order),
+                None if theta is None else float(theta),
+                None if jit_tree is None else bool(jit_tree),
+                None if refine_local is None else bool(refine_local),
+                None if max_refine_levels is None else int(max_refine_levels),
+                None if aspect_threshold is None else float(aspect_threshold),
+            )
+            state = self._prepared_state_cache_lookup(
+                key=cache_key,
+                positions=positions_arr,
+                masses=masses_arr,
+            )
+
+        if state is None:
+            state = self.prepare_state(
+                positions,
+                masses,
+                bounds=bounds,
+                leaf_size=leaf_size,
+                max_order=max_order,
+                theta=theta,
+                jit_tree=jit_tree,
+                refine_local=refine_local,
+                max_refine_levels=max_refine_levels,
+                aspect_threshold=aspect_threshold,
+            )
+            if reuse_prepared_state and cache_key is not None:
+                self._prepared_state_cache_store(
+                    key=cache_key,
+                    positions=positions_arr,
+                    masses=masses_arr,
+                    state=state,
+                )
+
+        jit_traversal_flag = (
+            self._jit_traversal_default
+            if jit_traversal is None
+            else bool(jit_traversal)
+        )
+        return self.evaluate_prepared_state_with_jerk(
+            state,
+            velocities,
+            target_indices=target_indices,
+            jit_traversal=jit_traversal_flag,
+        )
+
+    @jaxtyped(typechecker=beartype)
     def prepare_state(
         self: "FastMultipoleMethod",
         positions: Array,
@@ -2174,6 +2261,95 @@ class FastMultipoleMethod:
             accelerations = jnp.asarray(evaluation)
         accelerations = accelerations.astype(output_dtype)
         return accelerations
+
+    @jaxtyped(typechecker=beartype)
+    def evaluate_prepared_state_with_jerk(
+        self: "FastMultipoleMethod",
+        state: FMMPreparedState,
+        velocities: Array,
+        *,
+        target_indices: Optional[Array] = None,
+        jit_traversal: bool = True,
+    ) -> tuple[Array, Array]:
+        """Evaluate accelerations and jerk for all particles or targets."""
+        vel_arr = jnp.asarray(velocities, dtype=state.working_dtype)
+        if vel_arr.shape != state.positions_sorted.shape:
+            raise ValueError(
+                "velocities must have shape "
+                f"{tuple(state.positions_sorted.shape)}, got {tuple(vel_arr.shape)}"
+            )
+
+        resolved_target_indices = self._resolve_target_indices(
+            target_indices=target_indices,
+            num_particles=int(state.inverse_permutation.shape[0]),
+        )
+        acc_eval = self.evaluate_prepared_state(
+            state,
+            target_indices=resolved_target_indices,
+            return_potential=False,
+            jit_traversal=jit_traversal,
+            max_acc_derivative_order=1,
+        )
+        accelerations, acc_derivs = acc_eval
+        acc_jac = acc_derivs[0]
+        vel_targets = (
+            vel_arr
+            if resolved_target_indices is None
+            else vel_arr[resolved_target_indices]
+        )
+        far_jerk = jnp.einsum("nij,nj->ni", acc_jac, vel_targets)
+
+        particle_indices = jnp.asarray(state.tree.particle_indices, dtype=INDEX_DTYPE)
+        vel_sorted = vel_arr[particle_indices]
+
+        if resolved_target_indices is None:
+            target_sorted_indices = jnp.arange(
+                state.positions_sorted.shape[0],
+                dtype=INDEX_DTYPE,
+            )
+        else:
+            target_sorted_indices = jnp.asarray(
+                state.inverse_permutation[resolved_target_indices],
+                dtype=INDEX_DTYPE,
+            )
+        leaf_nodes = jnp.asarray(state.neighbor_list.leaf_indices, dtype=INDEX_DTYPE)
+        node_ranges = jnp.asarray(state.tree.node_ranges, dtype=INDEX_DTYPE)
+        target_leaf_positions = _map_targets_to_leaf_positions(
+            target_sorted_indices=target_sorted_indices,
+            leaf_nodes=leaf_nodes,
+            node_ranges=node_ranges,
+        )
+        near_source_idx, near_source_mask = _build_target_nearfield_source_index_matrix(
+            target_sorted_indices=target_sorted_indices,
+            target_leaf_positions=target_leaf_positions,
+            tree=state.tree,
+            neighbor_list=state.neighbor_list,
+        )
+        _, _, near_jerk_sorted = _compute_targeted_nearfield(
+            positions_sorted=state.positions_sorted,
+            masses_sorted=state.masses_sorted,
+            target_sorted_indices=target_sorted_indices,
+            source_indices=near_source_idx,
+            source_mask=near_source_mask,
+            G=jnp.asarray(self.G, dtype=state.positions_sorted.dtype),
+            softening=float(self.softening),
+            return_potential=False,
+            velocities_sorted=vel_sorted,
+            return_jerk=True,
+        )
+        if near_jerk_sorted is None:
+            raise RuntimeError("expected near-field jerk values")
+        if resolved_target_indices is None:
+            near_jerk = near_jerk_sorted[state.inverse_permutation]
+        else:
+            near_jerk = near_jerk_sorted
+
+        jerk = near_jerk + far_jerk
+        if jnp.issubdtype(state.input_dtype, jnp.floating):
+            output_dtype = state.input_dtype
+        else:
+            output_dtype = state.working_dtype
+        return accelerations.astype(output_dtype), jerk.astype(output_dtype)
 
     @jaxtyped(typechecker=beartype)
     def evaluate_tree(
@@ -3697,17 +3873,35 @@ def _compute_targeted_nearfield(
     G: Union[float, Array],
     softening: float,
     return_potential: bool,
-) -> tuple[Array, Optional[Array]]:
+    velocities_sorted: Optional[Array] = None,
+    return_jerk: bool = False,
+) -> tuple[Array, Optional[Array], Optional[Array]]:
     """Compute near-field contributions for target particles only."""
+    if return_jerk and velocities_sorted is None:
+        raise ValueError("velocities_sorted must be provided when return_jerk=True")
     target_positions = positions_sorted[target_sorted_indices]
     dtype = positions_sorted.dtype
     g_const = jnp.asarray(G, dtype=dtype)
     softening_sq = jnp.asarray(float(softening) ** 2, dtype=dtype)
+    target_velocities = (
+        velocities_sorted[target_sorted_indices]
+        if velocities_sorted is not None
+        else None
+    )
     if int(source_indices.shape[1]) == 0:
         zeros = jnp.zeros((target_positions.shape[0], 3), dtype=positions_sorted.dtype)
+        jerk_zeros = (
+            jnp.zeros((target_positions.shape[0], 3), dtype=positions_sorted.dtype)
+            if return_jerk
+            else None
+        )
         if return_potential:
-            return zeros, jnp.zeros((target_positions.shape[0],), dtype=zeros.dtype)
-        return zeros, None
+            return (
+                zeros,
+                jnp.zeros((target_positions.shape[0],), dtype=zeros.dtype),
+                jerk_zeros,
+            )
+        return zeros, None, jerk_zeros
     src_pos = positions_sorted[source_indices]
     src_mass = masses_sorted[source_indices]
     diff = target_positions[:, None, :] - src_pos
@@ -3717,10 +3911,22 @@ def _compute_targeted_nearfield(
     inv_dist3 = jnp.where(source_mask, inv_r / dist_sq, 0.0)
     weighted = inv_dist3 * src_mass
     near_acc = -g_const * jnp.sum(weighted[..., None] * diff, axis=1)
+    near_jerk: Optional[Array]
+    if return_jerk:
+        src_vel = velocities_sorted[source_indices]  # type: ignore[index]
+        vel_diff = target_velocities[:, None, :] - src_vel  # type: ignore[index]
+        inv_dist5 = jnp.where(source_mask, inv_dist3 / dist_sq, 0.0)
+        rv = jnp.sum(diff * vel_diff, axis=-1)
+        jerk_term = vel_diff * inv_dist3[..., None] - (
+            3.0 * rv[..., None] * diff * inv_dist5[..., None]
+        )
+        near_jerk = -g_const * jnp.sum(src_mass[..., None] * jerk_term, axis=1)
+    else:
+        near_jerk = None
     if not return_potential:
-        return near_acc, None
+        return near_acc, None, near_jerk
     near_pot = -g_const * jnp.sum(inv_r * src_mass, axis=1)
-    return near_acc, near_pot
+    return near_acc, near_pot, near_jerk
 
 
 def _evaluate_local_expansions_for_target_particles(
@@ -3871,7 +4077,7 @@ def _evaluate_prepared_tree_targets(
         tree=tree,
         neighbor_list=neighbor_list,
     )
-    near_acc, near_pot = _compute_targeted_nearfield(
+    near_acc, near_pot, _ = _compute_targeted_nearfield(
         positions_sorted=positions_sorted,
         masses_sorted=masses_sorted,
         target_sorted_indices=target_sorted_indices,

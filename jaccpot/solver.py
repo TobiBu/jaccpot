@@ -376,6 +376,34 @@ class FastMultipoleMethod:
             jit_tree=self.advanced.runtime.jit_tree,
         )
 
+    def compute_accelerations_and_jerk(
+        self: "FastMultipoleMethod",
+        positions: Array,
+        masses: Array,
+        velocities: Array,
+        *,
+        target_indices: Optional[Array] = None,
+        bounds: Optional[Tuple[Array, Array]] = None,
+        leaf_size: int = 16,
+        max_order: int = 4,
+        theta: Optional[float] = None,
+        reuse_prepared_state: bool = False,
+    ) -> tuple[Array, Array]:
+        """Compute accelerations and jerk estimates for particle data."""
+        return self._impl.compute_accelerations_and_jerk(
+            positions,
+            masses,
+            velocities,
+            target_indices=target_indices,
+            bounds=bounds,
+            leaf_size=leaf_size,
+            max_order=max_order,
+            theta=theta,
+            reuse_prepared_state=reuse_prepared_state,
+            jit_tree=self.advanced.runtime.jit_tree,
+            jit_traversal=self.advanced.runtime.jit_traversal,
+        )
+
     def prepare_upward_sweep(
         self: "FastMultipoleMethod",
         tree: Any,
@@ -417,6 +445,26 @@ class FastMultipoleMethod:
             return_potential=return_potential,
             jit_traversal=jit_traversal,
             max_acc_derivative_order=max_acc_derivative_order,
+        )
+
+    def evaluate_prepared_state_with_jerk(
+        self: "FastMultipoleMethod",
+        state: FMMPreparedState,
+        velocities: Array,
+        *,
+        target_indices: Optional[Array] = None,
+    ) -> tuple[Array, Array]:
+        """Evaluate accelerations and jerk for a prepared state."""
+        jit_traversal = (
+            True
+            if self.advanced.runtime.jit_traversal is None
+            else bool(self.advanced.runtime.jit_traversal)
+        )
+        return self._impl.evaluate_prepared_state_with_jerk(
+            state,
+            velocities,
+            target_indices=target_indices,
+            jit_traversal=jit_traversal,
         )
 
     def clear_prepared_state_cache(self: "FastMultipoleMethod") -> None:
