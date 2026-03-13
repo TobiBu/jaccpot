@@ -456,6 +456,12 @@ class FastMultipoleMethod:
                 "host_refine_mode",
                 advanced_cfg.runtime.host_refine_mode,
             ),
+            fail_fast=bool(
+                legacy_kwargs.pop(
+                    "fail_fast",
+                    advanced_cfg.runtime.fail_fast,
+                )
+            ),
             memory_objective=str(
                 legacy_kwargs.pop(
                     "memory_objective",

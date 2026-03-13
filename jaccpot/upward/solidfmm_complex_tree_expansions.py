@@ -7,17 +7,19 @@ kept separate from the Dehnen real-basis implementation.
 
 from __future__ import annotations
 
+import os
 from functools import partial
 from typing import NamedTuple, Optional
 
 import jax
 import jax.numpy as jnp
+import numpy as np
 from beartype import beartype
 from jax import lax
 from jaxtyping import Array, jaxtyped
 from yggdrax.dtypes import INDEX_DTYPE, as_index, complex_dtype_for_real
 from yggdrax.geometry import TreeGeometry, compute_tree_geometry
-from yggdrax.tree import Tree
+from yggdrax.tree import Tree, get_level_offsets, get_nodes_by_level
 from yggdrax.tree_moments import TreeMassMoments, compute_tree_mass_moments
 
 from jaccpot.operators.complex_harmonics import p2m_complex_batch
@@ -46,6 +48,74 @@ class SolidFMMComplexTreeUpwardData(NamedTuple):
 
 
 _CENTER_MODES = ("com", "aabb", "explicit")
+_DEFAULT_LEAF_BATCH_SIZE = 2048
+
+
+def _env_flag(name: str, default: bool = False) -> bool:
+    raw = os.environ.get(name)
+    if raw is None:
+        return bool(default)
+    return str(raw).strip().lower() in ("1", "true", "yes", "on")
+
+
+_UPWARD_DIAGNOSTICS = _env_flag("JACCPOT_PREPARE_DIAGNOSTICS", False)
+
+
+def _upward_diag(message: str) -> None:
+    if _UPWARD_DIAGNOSTICS:
+        print(f"[jaccpot.upward] {message}", flush=True)
+
+
+def _format_bytes(count: int) -> str:
+    value = float(max(int(count), 0))
+    for unit in ("B", "KiB", "MiB", "GiB", "TiB"):
+        if value < 1024.0 or unit == "TiB":
+            return f"{value:.2f}{unit}"
+        value /= 1024.0
+    return f"{value:.2f}TiB"
+
+
+def _diag_upward_stage_estimates(
+    *,
+    num_particles: int,
+    total_nodes: int,
+    num_leaves: int,
+    max_leaf_size: int,
+    leaf_batch_size: int,
+    coeffs: int,
+    positions_dtype: jnp.dtype,
+    masses_dtype: jnp.dtype,
+) -> None:
+    if not _UPWARD_DIAGNOSTICS:
+        return
+
+    pos_itemsize = np.dtype(positions_dtype).itemsize
+    mass_itemsize = np.dtype(masses_dtype).itemsize
+    complex_itemsize = np.dtype(
+        complex_dtype_for_real(jnp.result_type(positions_dtype, masses_dtype))
+    ).itemsize
+
+    mass_prefix_bytes = (num_particles + 1) * mass_itemsize
+    weighted_prefix_bytes = (num_particles + 1) * 3 * pos_itemsize
+    total_mass_bytes = total_nodes * mass_itemsize
+    center_bytes = total_nodes * 3 * pos_itemsize
+    effective_batch = max(1, min(int(leaf_batch_size), int(num_leaves)))
+    leaf_point_bytes = effective_batch * max_leaf_size * 3 * pos_itemsize
+    leaf_mass_bytes = effective_batch * max_leaf_size * mass_itemsize
+    leaf_contrib_bytes = effective_batch * max_leaf_size * coeffs * complex_itemsize
+    packed_bytes = total_nodes * coeffs * complex_itemsize
+
+    _upward_diag(
+        "stage estimates "
+        f"mass_prefix={_format_bytes(mass_prefix_bytes)} "
+        f"weighted_prefix={_format_bytes(weighted_prefix_bytes)} "
+        f"total_mass={_format_bytes(total_mass_bytes)} "
+        f"centers={_format_bytes(center_bytes)} "
+        f"p2m_leaf_points={_format_bytes(leaf_point_bytes)} "
+        f"p2m_leaf_masses={_format_bytes(leaf_mass_bytes)} "
+        f"p2m_leaf_contribs={_format_bytes(leaf_contrib_bytes)} "
+        f"packed={_format_bytes(packed_bytes)}"
+    )
 
 
 @partial(
@@ -145,18 +215,31 @@ def _p2m_leaves_complex(
     return packed
 
 
-@partial(jax.jit, static_argnames=("order", "num_internal", "rotation"))
-def _aggregate_m2m_complex(
+@partial(
+    jax.jit,
+    static_argnames=(
+        "order",
+        "num_internal",
+        "num_levels",
+        "level_batch_width",
+        "rotation",
+    ),
+)
+def _aggregate_m2m_complex_by_level(
     packed: Array,
     centers: Array,
     left_child: Array,
     right_child: Array,
+    nodes_by_level: Array,
+    level_offsets: Array,
     *,
     order: int,
     num_internal: int,
+    num_levels: int,
+    level_batch_width: int,
     rotation: str,
 ) -> Array:
-    """Upward aggregation by translating child multipoles to parent."""
+    """Upward aggregation by translating child multipoles level by level."""
 
     p = int(order)
     if p < 0:
@@ -165,43 +248,58 @@ def _aggregate_m2m_complex(
         # Leaf-only trees have no child->parent aggregation work.
         return packed
 
-    def translate_children(
-        node_idx: Array,
-        child_idx_pair: Array,
-        state: Array,
-    ) -> Array:
+    batch_width = int(max(level_batch_width, 1))
+    level_offsets = jnp.asarray(level_offsets, dtype=INDEX_DTYPE)
+    nodes_by_level = jnp.asarray(nodes_by_level, dtype=INDEX_DTYPE)
+    level_slot = jnp.arange(batch_width, dtype=INDEX_DTYPE)
+
+    def _translate_one(coeffs: Array, delta: Array) -> Array:
+        return m2m_complex(coeffs, delta, order=p, rotation=rotation).astype(
+            packed.dtype
+        )
+
+    translate_children = jax.vmap(
+        jax.vmap(_translate_one, in_axes=(0, 0)),
+        in_axes=(0, 0),
+    )
+
+    def level_body(level_rev_idx: Array, state: Array) -> Array:
+        level_idx = as_index((num_levels - 2) - level_rev_idx)
+        start = level_offsets[level_idx]
+        end = level_offsets[level_idx + 1]
+        count = end - start
+        batch_nodes = lax.dynamic_slice_in_dim(
+            nodes_by_level,
+            start_index=start,
+            slice_size=batch_width,
+            axis=0,
+        )
+        valid = level_slot < count
+        internal_valid = valid & (batch_nodes < as_index(num_internal))
+        safe_nodes = jnp.where(internal_valid, batch_nodes, as_index(0))
+
+        child_idx_pair = jnp.stack(
+            [left_child[safe_nodes], right_child[safe_nodes]],
+            axis=1,
+        )
         child_mask = child_idx_pair >= 0
         safe_child_idx = jnp.where(child_mask, child_idx_pair, 0)
         child_coeffs = state[safe_child_idx]
         child_centers = centers[safe_child_idx]
-        deltas = child_centers - centers[node_idx]
+        node_centers = centers[safe_nodes][:, None, :]
+        deltas = child_centers - node_centers
 
-        def translate_one(coeffs: Array, delta: Array) -> Array:
-            return m2m_complex(coeffs, delta, order=p, rotation=rotation).astype(
-                state.dtype
-            )
+        translated = translate_children(child_coeffs, deltas)
+        translated = translated * child_mask[..., None]
+        node_coeffs = jnp.sum(translated, axis=1, dtype=translated.dtype)
+        node_coeffs = enforce_conjugate_symmetry_batch(node_coeffs, order=p)
 
-        translated = jax.vmap(translate_one)(child_coeffs, deltas)
-        translated = translated * child_mask[:, None]
-        node_coeff = jnp.sum(translated, axis=0)
-        return enforce_conjugate_symmetry(node_coeff, order=p)
+        current = state[safe_nodes]
+        updates = jnp.where(internal_valid[:, None], node_coeffs, current)
+        return state.at[safe_nodes].set(updates)
 
-    def body(node_idx: Array, state: Array) -> Array:
-        child_idx_pair = jnp.stack(
-            [left_child[node_idx], right_child[node_idx]],
-            axis=0,
-        )
-        node_coeff = translate_children(node_idx, child_idx_pair, state)
-        return state.at[node_idx].set(node_coeff)
-
-    import math
-
-    max_depth = int(math.ceil(math.log2(max(num_internal + 1, 2)))) + 1
-
-    def one_pass(state: Array) -> Array:
-        return lax.fori_loop(0, num_internal, body, state)
-
-    return lax.fori_loop(0, max_depth, lambda _, s: one_pass(s), packed)
+    internal_level_count = max(int(num_levels) - 1, 0)
+    return lax.fori_loop(0, internal_level_count, level_body, packed)
 
 
 @jaxtyped(typechecker=beartype)
@@ -223,12 +321,24 @@ def prepare_solidfmm_complex_upward_sweep(
     if p < 0:
         raise ValueError("max_order must be >= 0")
 
-    geometry = compute_tree_geometry(tree, positions_sorted)
+    _upward_diag(
+        "geometry start "
+        f"particles={int(positions_sorted.shape[0])} max_order={p} rotation={rotation}"
+    )
+    # Thread the known leaf cap into geometry so JIT does not pad leaf-bound
+    # gathers out to ``num_particles`` for large radix trees.
+    geometry = compute_tree_geometry(
+        tree,
+        positions_sorted,
+        max_leaf_size=int(max_leaf_size) if max_leaf_size is not None else None,
+    )
+    _upward_diag("geometry done")
     mass_moments = compute_tree_mass_moments(
         tree,
         positions_sorted,
         masses_sorted,
     )
+    _upward_diag("mass moments done")
 
     total_nodes = int(tree.parent.shape[0])
     mode = str(center_mode).strip().lower()
@@ -261,7 +371,43 @@ def prepare_solidfmm_complex_upward_sweep(
     num_internal = int(tree.num_internal_nodes)
     total_nodes = int(tree.parent.shape[0])
     num_leaves = max(total_nodes - num_internal, 0)
+    level_offsets = get_level_offsets(tree)
+    nodes_by_level = get_nodes_by_level(tree)
+    num_levels = int(level_offsets.shape[0] - 1)
+    if num_levels <= 0:
+        num_levels = 1
+    level_counts = np.asarray(jax.device_get(level_offsets[1:] - level_offsets[:-1]))
+    internal_level_counts = (
+        level_counts[: max(num_levels - 1, 0)]
+        if level_counts.size > 0
+        else level_counts
+    )
+    level_batch_width = (
+        int(internal_level_counts.max()) if internal_level_counts.size > 0 else 1
+    )
+    resolved_leaf_batch_size = (
+        min(num_leaves, _DEFAULT_LEAF_BATCH_SIZE)
+        if leaf_batch_size is None
+        else int(leaf_batch_size)
+    )
+    _upward_diag(
+        "batch sizing "
+        f"total_nodes={total_nodes} num_internal={num_internal} num_leaves={num_leaves} "
+        f"resolved_leaf_batch_size={resolved_leaf_batch_size} "
+        f"num_levels={num_levels} level_batch_width={level_batch_width}"
+    )
+    _diag_upward_stage_estimates(
+        num_particles=int(positions_sorted.shape[0]),
+        total_nodes=total_nodes,
+        num_leaves=num_leaves,
+        max_leaf_size=int(max_leaf_size),
+        leaf_batch_size=resolved_leaf_batch_size,
+        coeffs=sh_size(p),
+        positions_dtype=positions_sorted.dtype,
+        masses_dtype=masses_sorted.dtype,
+    )
 
+    _upward_diag("p2m start")
     packed = _p2m_leaves_complex(
         jnp.asarray(tree.node_ranges, dtype=INDEX_DTYPE),
         positions_sorted,
@@ -271,20 +417,25 @@ def prepare_solidfmm_complex_upward_sweep(
         max_leaf_size=int(max_leaf_size),
         num_internal=num_internal,
         total_nodes=total_nodes,
-        leaf_batch_size=(
-            num_leaves if leaf_batch_size is None else int(leaf_batch_size)
-        ),
+        leaf_batch_size=resolved_leaf_batch_size,
     )
+    _upward_diag(f"p2m done packed_shape={tuple(int(v) for v in packed.shape)}")
 
-    packed = _aggregate_m2m_complex(
+    _upward_diag("m2m start")
+    packed = _aggregate_m2m_complex_by_level(
         packed,
         centers,
         jnp.asarray(tree.left_child, dtype=INDEX_DTYPE),
         jnp.asarray(tree.right_child, dtype=INDEX_DTYPE),
+        jnp.asarray(nodes_by_level, dtype=INDEX_DTYPE),
+        jnp.asarray(level_offsets, dtype=INDEX_DTYPE),
         order=p,
         num_internal=num_internal,
+        num_levels=num_levels,
+        level_batch_width=level_batch_width,
         rotation=rotation,
     )
+    _upward_diag("m2m done")
 
     multipoles = SolidFMMComplexNodeMultipoleData(
         order=p,

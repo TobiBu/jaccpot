@@ -61,6 +61,7 @@ class RuntimePolicyConfig:
     """Execution-policy overrides for tree build and traversal."""
 
     host_refine_mode: str = "auto"
+    fail_fast: bool = False
     jit_tree: Optional[bool] = None
     jit_traversal: Optional[bool] = None
     memory_objective: MemoryObjective = "balanced"

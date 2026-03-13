@@ -332,6 +332,8 @@ _NEARFIELD_SCATTER_SCHEDULE_ITEM_CAP_GPU = 4_000_000
 _NEARFIELD_GPU_PRECOMPUTE_MAX_PARTICLES = 65_536
 _LARGE_CPU_M2L_CHUNK_SIZE = 32768
 _TRACING_MAX_NEIGHBORS_PER_LEAF = 512
+_TRACING_MAX_PAIR_QUEUE = 65_536
+_TRACING_MAX_PROCESS_BLOCK = 128
 # Traced prepare_state uses static-capacity interaction buffers. This cap limits
 # max_interactions_per_node only in traced mode (outer jax.jit prepare path) to
 # keep padded far-field buffers from dominating runtime. Lower is faster but can
@@ -345,6 +347,10 @@ _GPU_MAX_INTERACTIONS_PER_NODE = 8192
 _GPU_MIN_PAIR_QUEUE_MEDIUM = 131_072
 _GPU_MIN_PAIR_QUEUE_LARGE = 262_144
 _GPU_MIN_PAIR_QUEUE_XL = 524_288
+_GPU_MINIMUM_MEMORY_PAIR_QUEUE = 32_768
+_GPU_MINIMUM_MEMORY_PROCESS_BLOCK = 64
+_GPU_MINIMUM_MEMORY_INTERACTIONS_PER_NODE = 1_024
+_GPU_MINIMUM_MEMORY_NEIGHBORS_PER_LEAF = 256
 _LARGE_CPU_TRAVERSAL_CONFIG = DualTreeTraversalConfig(
     max_pair_queue=131072,
     process_block=4096,
@@ -369,6 +375,23 @@ def _env_int(name: str, default: int, *, minimum: int = 1) -> int:
     except Exception:
         return int(default)
     return int(max(val, int(minimum)))
+
+
+def _env_flag(name: str, default: bool = False) -> bool:
+    """Read a boolean env flag with a defensive fallback."""
+    raw = os.environ.get(name)
+    if raw is None:
+        return bool(default)
+    return str(raw).strip().lower() in ("1", "true", "yes", "on")
+
+
+_PREPARE_DIAGNOSTICS = _env_flag("JACCPOT_PREPARE_DIAGNOSTICS", False)
+
+
+def _prepare_diag(message: str) -> None:
+    """Emit opt-in prepare diagnostics to stdout."""
+    if _PREPARE_DIAGNOSTICS:
+        print(f"[jaccpot.prepare] {message}", flush=True)
 
 
 _OPERATOR_CACHE_MAX = _env_int("JACCPOT_OPERATOR_CACHE_MAX", 512)
@@ -435,6 +458,32 @@ def _ordered_dict_values_nbytes(cache: OrderedDict) -> int:
     for value in cache.values():
         total += _tuple_array_nbytes(value)
     return int(total)
+
+
+def _format_nbytes(count: int) -> str:
+    value = float(max(int(count), 0))
+    for unit in ("B", "KiB", "MiB", "GiB", "TiB"):
+        if value < 1024.0 or unit == "TiB":
+            return f"{value:.2f}{unit}"
+        value /= 1024.0
+    return f"{value:.2f}TiB"
+
+
+def _estimate_payload_nbytes(value: Any) -> int:
+    """Best-effort recursive byte estimate for array-centric payloads."""
+    if value is None:
+        return 0
+    if hasattr(value, "shape") and hasattr(value, "dtype"):
+        return _array_nbytes(value)
+    if isinstance(value, dict):
+        return int(sum(_estimate_payload_nbytes(v) for v in value.values()))
+    if isinstance(value, (tuple, list)):
+        return int(sum(_estimate_payload_nbytes(v) for v in value))
+    if hasattr(value, "_asdict"):
+        return _estimate_payload_nbytes(value._asdict())
+    if hasattr(value, "__dict__"):
+        return _estimate_payload_nbytes(vars(value))
+    return 0
 
 
 def _m2l_autotune_lookup(key: tuple[Any, ...]) -> Optional[int]:
@@ -1001,10 +1050,12 @@ def _empty_interaction_storage_for_tree(
 
 
 def _empty_interaction_storage_like(
-    interactions: NodeInteractionList,
+    interactions: Optional[NodeInteractionList],
 ) -> NodeInteractionList:
     """Return zero-pair interaction storage while preserving node-shaped metadata."""
 
+    if interactions is None:
+        raise ValueError("interactions must be present to derive empty storage")
     offsets = jnp.asarray(interactions.offsets)
     counts = jnp.asarray(interactions.counts)
     level_offsets = jnp.asarray(interactions.level_offsets)
@@ -1150,6 +1201,7 @@ class FastMultipoleMethod:
         nearfield_schedule_item_cap: Optional[int] = None,
         upward_leaf_batch_size: Optional[int] = None,
         host_refine_mode: str = "auto",
+        fail_fast: bool = False,
         preset: Optional[Union[str, FMMPreset]] = None,
         fixed_order: Optional[int] = None,
         fixed_max_leaf_size: Optional[int] = None,
@@ -1252,7 +1304,8 @@ class FastMultipoleMethod:
         self.enable_interaction_cache = bool(enable_interaction_cache)
         self.retain_traversal_result = bool(retain_traversal_result)
         self.retain_interactions = bool(retain_interactions)
-        self.autotune_m2l_chunk = bool(autotune_m2l_chunk)
+        self.fail_fast = bool(fail_fast)
+        self.autotune_m2l_chunk = bool(autotune_m2l_chunk) and not self.fail_fast
         self.precompute_grouped_class_segments = (
             None
             if precompute_grouped_class_segments is None
@@ -1288,6 +1341,8 @@ class FastMultipoleMethod:
         refine_mode_norm = str(host_refine_mode).strip().lower()
         if refine_mode_norm not in ("auto", "on", "off"):
             raise ValueError("host_refine_mode must be 'auto', 'on', or 'off'")
+        if self.fail_fast:
+            refine_mode_norm = "off"
         self.host_refine_mode = refine_mode_norm
         tree_type_norm = str(tree_type).strip().lower()
         supported_tree_types = set(available_tree_types())
@@ -1323,6 +1378,11 @@ class FastMultipoleMethod:
         self.preset = resolved.preset
         self.theta = resolved.theta
         self.mac_type = mac_type
+        if self._uses_dehnen_error_policy():
+            if self.adaptive_error_model == "tail_proxy":
+                self.adaptive_error_model = "dehnen_paper"
+            if self.mac_force_scale_mode == "prev":
+                self.mac_force_scale_mode = "paper"
         self.G = resolved.G
         self.softening = resolved.softening
         self.working_dtype = resolved.working_dtype
@@ -1481,10 +1541,22 @@ class FastMultipoleMethod:
             return 1
         return 0
 
+    def _uses_dehnen_error_policy(self: "FastMultipoleMethod") -> bool:
+        """Return whether traversal should use the Dehnen paper policy hook."""
+
+        return str(self.mac_type) == "dehnen_error"
+
     def _uses_dehnen_paper_error_model(self: "FastMultipoleMethod") -> bool:
         """Return whether the active adaptive error model is the paper estimator."""
 
         return self.adaptive_error_model == "dehnen_paper"
+
+    def _traversal_policy_error_model_code(self: "FastMultipoleMethod") -> int:
+        """Return the policy error model code used during traversal."""
+
+        if self._uses_dehnen_error_policy():
+            return 2
+        return self._adaptive_error_model_code()
 
     def _force_scale_reduction_mode(self: "FastMultipoleMethod") -> str:
         """Return the node reduction mode used for adaptive force scales."""
@@ -1797,6 +1869,15 @@ class FastMultipoleMethod:
         ):
             grouped_interactions = True
 
+        if self.streamed_far_pairs and grouped_interactions:
+            # Streamed far-pair execution and grouped/class-major M2L are
+            # competing strategies. The grouped path overrides streaming in the
+            # downward sweep, so keeping both enabled only pays the grouped
+            # traversal/materialization cost while defeating the user's request
+            # for streamed execution.
+            grouped_interactions = False
+            farfield_mode = "pair_grouped"
+
         if (
             self.preset == "fast"
             and self.expansion_basis == "solidfmm"
@@ -1826,33 +1907,75 @@ class FastMultipoleMethod:
             current_interactions = int(traversal_config.max_interactions_per_node)
             current_neighbors = int(traversal_config.max_neighbors_per_leaf)
 
-            if n_particles >= 4_194_304:
+            if minimum_memory:
+                target_queue = _GPU_MINIMUM_MEMORY_PAIR_QUEUE
+                target_block = _GPU_MINIMUM_MEMORY_PROCESS_BLOCK
+                target_interactions = _GPU_MINIMUM_MEMORY_INTERACTIONS_PER_NODE
+                target_neighbors = _GPU_MINIMUM_MEMORY_NEIGHBORS_PER_LEAF
+            elif n_particles >= 4_194_304:
                 target_queue = _GPU_MIN_PAIR_QUEUE_XL
+                target_block = current_block
+                target_interactions = _GPU_MIN_INTERACTIONS_PER_NODE
+                target_neighbors = _GPU_MIN_NEIGHBORS_PER_LEAF
             elif n_particles >= 1_048_576:
                 target_queue = _GPU_MIN_PAIR_QUEUE_LARGE
+                target_block = current_block
+                target_interactions = _GPU_MIN_INTERACTIONS_PER_NODE
+                target_neighbors = _GPU_MIN_NEIGHBORS_PER_LEAF
             else:
                 target_queue = _GPU_MIN_PAIR_QUEUE_MEDIUM
+                target_block = current_block
+                target_interactions = _GPU_MIN_INTERACTIONS_PER_NODE
+                target_neighbors = _GPU_MIN_NEIGHBORS_PER_LEAF
 
-            next_queue = max(current_queue, int(target_queue))
-            next_interactions = min(
-                max(current_interactions, int(_GPU_MIN_INTERACTIONS_PER_NODE)),
-                int(_GPU_MAX_INTERACTIONS_PER_NODE),
-            )
-            next_neighbors = min(
-                max(current_neighbors, int(_GPU_MIN_NEIGHBORS_PER_LEAF)),
-                int(_GPU_MAX_NEIGHBORS_PER_LEAF),
-            )
+            if minimum_memory:
+                next_queue = min(current_queue, int(target_queue))
+                next_block = min(current_block, int(target_block))
+                next_interactions = min(current_interactions, int(target_interactions))
+                next_neighbors = min(current_neighbors, int(target_neighbors))
+            else:
+                next_queue = max(current_queue, int(target_queue))
+                next_block = current_block
+                next_interactions = min(
+                    max(current_interactions, int(target_interactions)),
+                    int(_GPU_MAX_INTERACTIONS_PER_NODE),
+                )
+                next_neighbors = min(
+                    max(current_neighbors, int(target_neighbors)),
+                    int(_GPU_MAX_NEIGHBORS_PER_LEAF),
+                )
             if (
                 next_queue != current_queue
+                or next_block != current_block
                 or next_interactions != current_interactions
                 or next_neighbors != current_neighbors
             ):
                 traversal_config = DualTreeTraversalConfig(
                     max_pair_queue=int(next_queue),
-                    process_block=int(current_block),
+                    process_block=int(next_block),
                     max_interactions_per_node=int(next_interactions),
                     max_neighbors_per_leaf=int(next_neighbors),
                 )
+        if (
+            minimum_memory
+            and backend_name == "gpu"
+            and self.tree_type == "radix"
+            and not self._explicit_traversal_config
+            and not self._explicit_max_pair_queue
+            and not self._explicit_pair_process_block
+        ):
+            # The Yggdrax count-pass auto-sizing path is still too expensive on
+            # large GPU radix trees. Keep the large-N minimum-memory route on a
+            # bounded explicit traversal config so host-side retry can grow from
+            # a safe baseline without compiling the count-pass kernel.
+            traversal_config = DualTreeTraversalConfig(
+                max_pair_queue=int(_GPU_MINIMUM_MEMORY_PAIR_QUEUE),
+                process_block=int(_GPU_MINIMUM_MEMORY_PROCESS_BLOCK),
+                max_interactions_per_node=int(
+                    _GPU_MINIMUM_MEMORY_INTERACTIONS_PER_NODE
+                ),
+                max_neighbors_per_leaf=int(_GPU_MINIMUM_MEMORY_NEIGHBORS_PER_LEAF),
+            )
         if grouped_interactions:
             center_mode = "aabb"
             if farfield_mode == "auto":
@@ -1899,6 +2022,10 @@ class FastMultipoleMethod:
         if traversal_config is None or self._explicit_traversal_config:
             return traversal_config
 
+        current_queue = int(traversal_config.max_pair_queue)
+        capped_queue = min(current_queue, _TRACING_MAX_PAIR_QUEUE)
+        current_block = int(traversal_config.process_block)
+        capped_block = min(current_block, _TRACING_MAX_PROCESS_BLOCK)
         current_neighbors = int(traversal_config.max_neighbors_per_leaf)
         capped_neighbors = min(current_neighbors, _TRACING_MAX_NEIGHBORS_PER_LEAF)
         current_interactions = int(traversal_config.max_interactions_per_node)
@@ -1906,14 +2033,16 @@ class FastMultipoleMethod:
             current_interactions, _TRACING_MAX_INTERACTIONS_PER_NODE
         )
         if (
-            capped_neighbors == current_neighbors
+            capped_queue == current_queue
+            and capped_block == current_block
+            and capped_neighbors == current_neighbors
             and capped_interactions == current_interactions
         ):
             return traversal_config
 
         return DualTreeTraversalConfig(
-            max_pair_queue=int(traversal_config.max_pair_queue),
-            process_block=int(traversal_config.process_block),
+            max_pair_queue=int(capped_queue),
+            process_block=int(capped_block),
             max_interactions_per_node=int(capped_interactions),
             max_neighbors_per_leaf=int(capped_neighbors),
         )
@@ -2433,8 +2562,27 @@ class FastMultipoleMethod:
         tree = build_artifacts.tree
         pos_sorted = build_artifacts.positions_sorted
         mass_sorted = build_artifacts.masses_sorted
+        total_nodes = int(tree.parent.shape[0])
+        num_internal = int(tree.num_internal_nodes)
+        num_leaves = int(total_nodes - num_internal)
+        _prepare_diag(
+            "tree built "
+            f"particles={int(pos_sorted.shape[0])} leaf_size={int(leaf_size)} "
+            f"total_nodes={total_nodes} num_internal={num_internal} num_leaves={num_leaves} "
+            f"tree_type={self.tree_type} tree_mode={tree_config.mode} jit_tree={bool(jit_tree_flag)}"
+        )
         # Keep one leaf-size contract in eager and traced paths.
         leaf_cap_hint = int(build_artifacts.max_leaf_size)
+        upward_leaf_batch = (
+            int(self.upward_leaf_batch_size)
+            if self.upward_leaf_batch_size is not None
+            else None
+        )
+        _prepare_diag(
+            "upward start "
+            f"max_order={int(max_order)} center_mode={upward_center_mode} "
+            f"leaf_cap={leaf_cap_hint} upward_leaf_batch_size={upward_leaf_batch}"
+        )
         upward = self.prepare_upward_sweep(
             tree,
             pos_sorted,
@@ -2442,6 +2590,11 @@ class FastMultipoleMethod:
             max_order=max_order,
             center_mode=upward_center_mode,
             max_leaf_size=leaf_cap_hint,
+        )
+        _prepare_diag(
+            "upward done "
+            f"multipole_order={int(upward.multipoles.order)} "
+            f"multipole_shape={tuple(int(v) for v in upward.multipoles.packed.shape)}"
         )
         locals_template = self._build_locals_template_for_prepare_state(
             tree=tree,
@@ -2496,9 +2649,10 @@ class FastMultipoleMethod:
         pair_policy = None
         policy_state = None
         cache_key = None
-        use_paper_fixed_policy = (
-            not self.adaptive_order
-        ) and self._uses_dehnen_paper_error_model()
+        use_dehnen_error_policy = self._uses_dehnen_error_policy()
+        use_paper_fixed_policy = (not self.adaptive_order) and (
+            self._uses_dehnen_paper_error_model() or use_dehnen_error_policy
+        )
         if self.adaptive_order or use_paper_fixed_policy:
             policy_orders = self.p_gears
             if use_paper_fixed_policy:
@@ -2528,7 +2682,7 @@ class FastMultipoleMethod:
                     dtype=tree_artifacts.upward.multipoles.packed.real.dtype,
                 ),
                 error_model_code=jnp.asarray(
-                    self._adaptive_error_model_code(),
+                    self._traversal_policy_error_model_code(),
                     dtype=jnp.int32,
                 ),
                 dehnen_geometry_mode=self.dehnen_geometry_mode,
@@ -2558,8 +2712,26 @@ class FastMultipoleMethod:
         need_traversal_result = bool(self.retain_traversal_result) or bool(
             use_paper_fixed_policy
         )
-        need_compact_far_pairs = bool(self.adaptive_order) and not bool(
-            need_traversal_result
+        use_compact_streamed_pairs = (
+            bool(self.streamed_far_pairs)
+            and not bool(self.adaptive_order)
+            and not bool(grouped_interactions)
+            and not bool(self.mixed_order_farfield)
+            and not bool(self.retain_interactions)
+            and not bool(need_traversal_result)
+        )
+        need_compact_far_pairs = (
+            bool(self.adaptive_order) and not bool(need_traversal_result)
+        ) or bool(use_compact_streamed_pairs)
+        need_node_interactions = not bool(use_compact_streamed_pairs)
+        _prepare_diag(
+            "dual-tree start "
+            f"theta={theta_val:.3f} mac_type={mac_type_val} "
+            f"streamed={bool(self.streamed_far_pairs)} grouped={bool(grouped_interactions)} "
+            f"farfield_mode={farfield_mode} memory_objective={self.memory_objective} "
+            f"traversal_config={runtime_traversal_config} "
+            f"need_compact_far_pairs={bool(need_compact_far_pairs)} "
+            f"need_node_interactions={bool(need_node_interactions)}"
         )
         dual_artifacts, cache_entry = _build_dual_tree_artifacts(
             tree_artifacts.tree,
@@ -2573,11 +2745,13 @@ class FastMultipoleMethod:
             pair_process_block=self.pair_process_block,
             traversal_config=runtime_traversal_config,
             retry_logger=record_retry,
+            fail_fast=self.fail_fast,
             use_dense_interactions=self.use_dense_interactions,
             grouped_interactions=grouped_interactions,
             grouped_chunk_size=runtime_m2l_chunk_size,
             need_traversal_result=need_traversal_result,
             need_compact_far_pairs=need_compact_far_pairs,
+            need_node_interactions=need_node_interactions,
             precompute_grouped_class_segments=self._should_precompute_grouped_class_segments(
                 grouped_chunk_size=runtime_m2l_chunk_size,
                 farfield_mode=farfield_mode,
@@ -2603,6 +2777,26 @@ class FastMultipoleMethod:
             grouped_segment_group_ids,
             grouped_segment_unique_targets,
         ) = self._unpack_dual_tree_artifacts(dual_artifacts)
+        far_pair_count_diag = None
+        if compact_far_pairs is not None:
+            far_pair_count_diag = int(compact_far_pairs.sources.shape[0])
+        elif interactions is not None:
+            far_pair_count_diag = int(interactions.sources.shape[0])
+        _prepare_diag(
+            "dual-tree done "
+            f"neighbor_count={int(neighbor_list.neighbors.shape[0])} "
+            f"far_pair_count={far_pair_count_diag} "
+            f"compact_far_pairs={compact_far_pairs is not None} "
+            f"interactions_present={interactions is not None}"
+        )
+        _prepare_diag(
+            "dual-tree bytes "
+            f"neighbors={_format_nbytes(_estimate_payload_nbytes(neighbor_list))} "
+            f"compact_far_pairs={_format_nbytes(_estimate_payload_nbytes(compact_far_pairs))} "
+            f"interactions={_format_nbytes(_estimate_payload_nbytes(interactions))} "
+            f"dense_buffers={_format_nbytes(_estimate_payload_nbytes(dense_buffers))} "
+            f"grouped_buffers={_format_nbytes(_estimate_payload_nbytes(grouped_buffers))}"
+        )
 
         far_pairs_by_gear = None
         far_pairs_coo: Optional[_FarPairCOO] = None
@@ -2640,12 +2834,24 @@ class FastMultipoleMethod:
                 int(bucket_src.shape[0]) for bucket_src, _ in far_pairs_by_gear
             )
         elif self.streamed_far_pairs:
-            src_far = jnp.asarray(interactions.sources, dtype=INDEX_DTYPE)
-            tgt_far = jnp.asarray(interactions.targets, dtype=INDEX_DTYPE)
+            if compact_far_pairs is not None:
+                src_far = jnp.asarray(compact_far_pairs.sources, dtype=INDEX_DTYPE)
+                tgt_far = jnp.asarray(compact_far_pairs.targets, dtype=INDEX_DTYPE)
+            else:
+                if interactions is None:
+                    raise RuntimeError(
+                        "streamed far-pair execution requires interactions or compact far pairs"
+                    )
+                src_far = jnp.asarray(interactions.sources, dtype=INDEX_DTYPE)
+                tgt_far = jnp.asarray(interactions.targets, dtype=INDEX_DTYPE)
             far_pairs_coo = _FarPairCOO(sources=src_far, targets=tgt_far)
             max_order_int = int(tree_artifacts.upward.multipoles.order)
             adaptive_order_for_downward = True
             if self.mixed_order_farfield and max_order_int >= 1:
+                if interactions is None:
+                    raise RuntimeError(
+                        "mixed-order streamed farfield requires node interaction lists"
+                    )
                 min_order_candidate = (
                     max_order_int - 1
                     if self.mixed_order_min_order is None
@@ -2738,12 +2944,26 @@ class FastMultipoleMethod:
             adaptive_order=adaptive_order_for_downward,
             p_gears=p_gears_for_downward,
         )
+        _prepare_diag(
+            "downward done "
+            f"locals_shape={tuple(int(v) for v in downward.locals.coefficients.shape)} "
+            f"interactions_shape={tuple(int(v) for v in downward.interactions.sources.shape)}"
+        )
+        _prepare_diag(
+            "downward bytes "
+            f"locals={_format_nbytes(_estimate_payload_nbytes(downward.locals))} "
+            f"stored_interactions={_format_nbytes(_estimate_payload_nbytes(downward.interactions))}"
+        )
         if not bool(self.retain_interactions):
             # Prepared state only needs the locals; keep a shape-compatible
             # placeholder so downstream code does not accidentally pin the full
             # far-field pair payload after prepare_state completes.
             downward = downward._replace(
-                interactions=_empty_interaction_storage_like(interactions)
+                interactions=(
+                    _empty_interaction_storage_like(interactions)
+                    if interactions is not None
+                    else _empty_interaction_storage_for_tree(tree_artifacts.tree)
+                )
             )
         interactions_out: Optional[NodeInteractionList]
         if bool(self.retain_interactions):
@@ -3641,8 +3861,11 @@ class FastMultipoleMethod:
             allow_stateful_cache=allow_stateful_cache,
         )
         force_scale_nodes = None
-        use_paper_force_scale = self.adaptive_order or (
-            self.adaptive_error_model == "dehnen_paper"
+        use_dehnen_error_policy = self._uses_dehnen_error_policy()
+        use_paper_force_scale = (
+            self.adaptive_order
+            or (self.adaptive_error_model == "dehnen_paper")
+            or use_dehnen_error_policy
         )
         if use_paper_force_scale:
             node_count = int(tree_artifacts.tree.parent.shape[0])
@@ -3664,9 +3887,8 @@ class FastMultipoleMethod:
                         dtype=positions_arr.dtype,
                     )
                 elif (
-                    self._uses_dehnen_paper_error_model()
-                    and not self._in_force_scale_prepass
-                ):
+                    self._uses_dehnen_paper_error_model() or use_dehnen_error_policy
+                ) and not self._in_force_scale_prepass:
                     need_prepass = True
                 else:
                     force_scale_nodes = jnp.ones(
@@ -3681,14 +3903,12 @@ class FastMultipoleMethod:
                         "mac_force_scale_mode='prepass' requires non-empty orders"
                     )
                 low_order = int(min(policy_orders))
-                if (
-                    self.mac_force_scale_mode == "paper"
-                    and self._uses_dehnen_paper_error_model()
+                if self.mac_force_scale_mode == "paper" and (
+                    self._uses_dehnen_paper_error_model() or use_dehnen_error_policy
                 ):
                     low_order = 1 if int(max_order) >= 1 else 0
-                if (
-                    self.mac_force_scale_mode == "paper"
-                    and self._uses_dehnen_paper_error_model()
+                if self.mac_force_scale_mode == "paper" and (
+                    self._uses_dehnen_paper_error_model() or use_dehnen_error_policy
                 ):
                     prepass_sorted = (
                         self._compute_force_scale_paper_prepass_from_tree_artifacts(
@@ -3780,6 +4000,15 @@ class FastMultipoleMethod:
             num_particles=int(positions_arr.shape[0]),
             cache_entry=dual_downward_artifacts.cache_entry,
             allow_stateful_cache=allow_stateful_cache,
+        )
+        _prepare_diag(
+            "nearfield bytes "
+            f"target_leaf_ids={_format_nbytes(_estimate_payload_nbytes(nearfield_artifacts.target_leaf_ids))} "
+            f"source_leaf_ids={_format_nbytes(_estimate_payload_nbytes(nearfield_artifacts.source_leaf_ids))} "
+            f"valid_pairs={_format_nbytes(_estimate_payload_nbytes(nearfield_artifacts.valid_pairs))} "
+            f"chunk_sort_indices={_format_nbytes(_estimate_payload_nbytes(nearfield_artifacts.chunk_sort_indices))} "
+            f"chunk_group_ids={_format_nbytes(_estimate_payload_nbytes(nearfield_artifacts.chunk_group_ids))} "
+            f"chunk_unique_indices={_format_nbytes(_estimate_payload_nbytes(nearfield_artifacts.chunk_unique_indices))}"
         )
 
         return FMMPreparedState(

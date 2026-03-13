@@ -27,7 +27,7 @@ from yggdrax.tree import Tree
 class _DualTreeArtifacts:
     """Artifacts emitted by the dual-tree traversal builder."""
 
-    interactions: NodeInteractionList
+    interactions: Optional[NodeInteractionList]
     neighbor_list: NodeNeighborList
     traversal_result: Optional[DualTreeWalkResult]
     compact_far_pairs: Optional[CompactTaggedFarPairs]
@@ -46,7 +46,7 @@ class _InteractionCacheEntry(NamedTuple):
     """Cache entry for dual-tree interaction artifacts keyed by build options."""
 
     key: str
-    interactions: NodeInteractionList
+    interactions: Optional[NodeInteractionList]
     neighbor_list: NodeNeighborList
     dual_tree_result: Optional[DualTreeWalkResult]
     compact_far_pairs: Optional[CompactTaggedFarPairs]
@@ -69,6 +69,36 @@ class _InteractionCacheEntry(NamedTuple):
     nearfield_leaf_cap: Optional[int]
 
 
+def _without_grouped_class_segments(
+    entry: _InteractionCacheEntry,
+) -> _InteractionCacheEntry:
+    """Drop cached class-major schedule arrays from an interaction cache entry."""
+    return _InteractionCacheEntry(
+        key=entry.key,
+        interactions=entry.interactions,
+        neighbor_list=entry.neighbor_list,
+        dual_tree_result=entry.dual_tree_result,
+        compact_far_pairs=entry.compact_far_pairs,
+        grouped_buffers=entry.grouped_buffers,
+        grouped_segment_starts=None,
+        grouped_segment_lengths=None,
+        grouped_segment_class_ids=None,
+        grouped_segment_sort_permutation=None,
+        grouped_segment_group_ids=None,
+        grouped_segment_unique_targets=None,
+        grouped_chunk_size=None,
+        nearfield_target_leaf_ids=entry.nearfield_target_leaf_ids,
+        nearfield_source_leaf_ids=entry.nearfield_source_leaf_ids,
+        nearfield_valid_pairs=entry.nearfield_valid_pairs,
+        nearfield_chunk_sort_indices=entry.nearfield_chunk_sort_indices,
+        nearfield_chunk_group_ids=entry.nearfield_chunk_group_ids,
+        nearfield_chunk_unique_indices=entry.nearfield_chunk_unique_indices,
+        nearfield_mode=entry.nearfield_mode,
+        nearfield_edge_chunk_size=entry.nearfield_edge_chunk_size,
+        nearfield_leaf_cap=entry.nearfield_leaf_cap,
+    )
+
+
 _CAPACITY_RETRY_MAX_ATTEMPTS = 2
 _CAPACITY_RETRY_QUEUE_BASE = 262_144
 _CAPACITY_RETRY_PROCESS_BLOCK_BASE = 256
@@ -76,7 +106,7 @@ _CAPACITY_RETRY_INTERACTIONS_BASE = 8192
 _CAPACITY_RETRY_NEIGHBORS_BASE = 4096
 _CAPACITY_RETRY_QUEUE_MAX = 4_194_304
 _CAPACITY_RETRY_PROCESS_BLOCK_MAX = 4096
-_CAPACITY_RETRY_INTERACTIONS_MAX = 131_072
+_CAPACITY_RETRY_INTERACTIONS_MAX = 16_384
 _CAPACITY_RETRY_NEIGHBORS_MAX = 65_536
 
 
@@ -116,10 +146,31 @@ def _next_retry_traversal_settings(
         interactions = _CAPACITY_RETRY_INTERACTIONS_BASE
         neighbors = _CAPACITY_RETRY_NEIGHBORS_BASE
     else:
-        queue = max(int(traversal_config.max_pair_queue) * 2, 1)
-        block = max(int(traversal_config.process_block) * 2, 1)
-        interactions = max(int(traversal_config.max_interactions_per_node) * 2, 1)
-        neighbors = max(int(traversal_config.max_neighbors_per_leaf) * 2, 1)
+        # Small explicit traversal configs are useful as the initial
+        # minimum-memory seed, but after a real capacity overflow we should jump
+        # to the established retry floor rather than spending retries on
+        # intermediate capacities that are known to be below the normal host
+        # retry baseline.
+        queue = max(
+            int(traversal_config.max_pair_queue) * 2,
+            _CAPACITY_RETRY_QUEUE_BASE,
+            1,
+        )
+        block = max(
+            int(traversal_config.process_block) * 2,
+            _CAPACITY_RETRY_PROCESS_BLOCK_BASE,
+            1,
+        )
+        interactions = max(
+            int(traversal_config.max_interactions_per_node) * 2,
+            _CAPACITY_RETRY_INTERACTIONS_BASE,
+            1,
+        )
+        neighbors = max(
+            int(traversal_config.max_neighbors_per_leaf) * 2,
+            _CAPACITY_RETRY_NEIGHBORS_BASE,
+            1,
+        )
 
     queue = min(queue, _CAPACITY_RETRY_QUEUE_MAX)
     block = min(block, _CAPACITY_RETRY_PROCESS_BLOCK_MAX)
@@ -132,6 +183,50 @@ def _next_retry_traversal_settings(
         max_neighbors_per_leaf=int(neighbors),
     )
     return next_config, int(queue), int(block)
+
+
+def _format_capacity_error_hint(
+    exc: RuntimeError,
+    *,
+    traversal_config: Optional[DualTreeTraversalConfig],
+    max_pair_queue: Optional[int],
+    pair_process_block: Optional[int],
+) -> str:
+    """Augment traversal capacity failures with actionable tuning hints."""
+    msg = str(exc).strip()
+    if traversal_config is None:
+        queue = None if max_pair_queue is None else int(max_pair_queue)
+        block = None if pair_process_block is None else int(pair_process_block)
+        interactions = None
+        neighbors = None
+    else:
+        queue = int(traversal_config.max_pair_queue)
+        block = int(traversal_config.process_block)
+        interactions = int(traversal_config.max_interactions_per_node)
+        neighbors = int(traversal_config.max_neighbors_per_leaf)
+
+    details = [
+        "Traversal capacity overflow with fail_fast enabled.",
+        msg,
+        "Increase one or more traversal capacities and rerun.",
+    ]
+    details.append(
+        "Current capacities: "
+        f"max_pair_queue={queue}, "
+        f"process_block={block}, "
+        f"max_interactions_per_node={interactions}, "
+        f"max_neighbors_per_leaf={neighbors}."
+    )
+    details.append(
+        "Suggested knobs: "
+        "`RuntimePolicyConfig(traversal_config=DualTreeTraversalConfig(...))`, "
+        "`RuntimePolicyConfig(max_pair_queue=..., pair_process_block=...)`, "
+        "or a larger preset/runtime traversal seed."
+    )
+    details.append(
+        "For exploratory runs, disable `fail_fast` to re-enable host-side retry growth."
+    )
+    return " ".join(details)
 
 
 def _interaction_cache_key(
@@ -236,11 +331,13 @@ def _build_dual_tree_artifacts(
     pair_process_block: Optional[int],
     traversal_config: Optional[DualTreeTraversalConfig],
     retry_logger: Optional[Callable[[DualTreeRetryEvent], None]],
+    fail_fast: bool,
     use_dense_interactions: bool,
     grouped_interactions: bool,
     grouped_chunk_size: Optional[int],
     need_traversal_result: bool,
     need_compact_far_pairs: bool,
+    need_node_interactions: bool,
     precompute_grouped_class_segments: bool,
     grouped_schedule_budget_bytes: Optional[int],
     pair_policy=None,
@@ -255,6 +352,7 @@ def _build_dual_tree_artifacts(
         and cache_entry.key == cache_key
         and (not need_traversal_result or cache_entry.dual_tree_result is not None)
         and (not need_compact_far_pairs or cache_entry.compact_far_pairs is not None)
+        and (not need_node_interactions or cache_entry.interactions is not None)
     ):
         interactions = cache_entry.interactions
         neighbor_list = cache_entry.neighbor_list
@@ -268,6 +366,22 @@ def _build_dual_tree_artifacts(
         grouped_segment_group_ids = cache_entry.grouped_segment_group_ids
         grouped_segment_unique_targets = cache_entry.grouped_segment_unique_targets
         grouped_chunk_size_cached = cache_entry.grouped_chunk_size
+        if not precompute_grouped_class_segments and (
+            grouped_segment_starts is not None
+            or grouped_segment_lengths is not None
+            or grouped_segment_class_ids is not None
+            or grouped_segment_sort_permutation is not None
+            or grouped_segment_group_ids is not None
+            or grouped_segment_unique_targets is not None
+        ):
+            cache_out = _without_grouped_class_segments(cache_entry)
+            grouped_segment_starts = None
+            grouped_segment_lengths = None
+            grouped_segment_class_ids = None
+            grouped_segment_sort_permutation = None
+            grouped_segment_group_ids = None
+            grouped_segment_unique_targets = None
+            grouped_chunk_size_cached = None
     else:
         from . import fmm as _runtime_fmm
 
@@ -290,6 +404,9 @@ def _build_dual_tree_artifacts(
                     retry_logger=retry_logger,
                     return_result=need_traversal_result,
                     return_compact_far_pairs=need_compact_far_pairs,
+                    return_interactions=(
+                        bool(need_node_interactions) or bool(grouped_interactions)
+                    ),
                     return_grouped=grouped_interactions,
                     pair_policy=pair_policy,
                     policy_state=policy_state,
@@ -297,6 +414,15 @@ def _build_dual_tree_artifacts(
                 break
             except RuntimeError as exc:
                 last_exc = exc
+                if fail_fast and _looks_like_capacity_error(exc):
+                    raise RuntimeError(
+                        _format_capacity_error_hint(
+                            exc,
+                            traversal_config=current_traversal_config,
+                            max_pair_queue=current_max_pair_queue,
+                            pair_process_block=current_pair_process_block,
+                        )
+                    ) from exc
                 if (
                     attempt >= _CAPACITY_RETRY_MAX_ATTEMPTS
                     or not _looks_like_capacity_error(exc)
@@ -327,15 +453,14 @@ def _build_dual_tree_artifacts(
                     grouped_buffers,
                 ) = build_out
             elif need_traversal_result:
-                (
-                    interactions,
-                    neighbor_list,
-                    traversal_result,
-                    grouped_buffers,
-                ) = build_out
+                interactions, neighbor_list, traversal_result, grouped_buffers = (
+                    build_out
+                )
                 compact_far_pairs = None
             elif need_compact_far_pairs:
-                interactions, neighbor_list, compact_far_pairs, grouped_buffers = build_out
+                interactions, neighbor_list, compact_far_pairs, grouped_buffers = (
+                    build_out
+                )
                 traversal_result = None
             else:
                 interactions, neighbor_list, grouped_buffers = build_out
@@ -350,11 +475,7 @@ def _build_dual_tree_artifacts(
                     compact_far_pairs,
                 ) = build_out
             elif need_traversal_result:
-                (
-                    interactions,
-                    neighbor_list,
-                    traversal_result,
-                ) = build_out
+                interactions, neighbor_list, traversal_result = build_out
                 compact_far_pairs = None
             elif need_compact_far_pairs:
                 interactions, neighbor_list, compact_far_pairs = build_out
@@ -405,6 +526,10 @@ def _build_dual_tree_artifacts(
     if grouped_interactions and grouped_buffers is None:
         from yggdrax import interactions as _yggdrax_interactions
 
+        if interactions is None:
+            raise RuntimeError(
+                "grouped interaction preparation requires node interaction lists"
+            )
         grouped_buffers = _yggdrax_interactions.build_grouped_interactions_from_pairs(
             tree,
             geometry,
@@ -455,11 +580,15 @@ def _build_dual_tree_artifacts(
             )
         )
         and (
-        grouped_interactions
-        and grouped_buffers is not None
-        and grouped_chunk_size is not None
+            grouped_interactions
+            and grouped_buffers is not None
+            and grouped_chunk_size is not None
         )
     ):
+        # These segment arrays are a pure execution aid for class-major grouped
+        # M2L. They are worth caching only when the schedule itself stays within
+        # budget; otherwise the raw grouped buffers are already the smaller
+        # resident representation.
         needs_schedule = (
             grouped_segment_starts is None
             or grouped_segment_lengths is None
