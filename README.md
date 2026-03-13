@@ -79,6 +79,18 @@ state = solver.prepare_state(positions, masses)
 active_acc = solver.evaluate_prepared_state(state, target_indices=active)
 ```
 
+For integrators that require jerk, use:
+
+```python
+velocities = jax.random.uniform(key_pos, (1024, 3), minval=-0.2, maxval=0.2)
+acc, jerk = solver.compute_accelerations_and_jerk(
+    positions,
+    masses,
+    velocities,
+    jerk_mode="fast_approx",  # or "accurate"
+)
+```
+
 For ODISSEO-style primitive states `(N, 2, 3)`, you can use the adapter:
 
 ```python
@@ -109,6 +121,13 @@ Coverage is enforced in CI via `pytest-cov`:
 
 ```bash
 pytest --cov=jaccpot --cov-report=term-missing
+```
+
+Run the lightweight runtime-path benchmark and CI guard locally:
+
+```bash
+python -m bench.bench_parallel_paths --n 512 --runs 3 --warmup 1
+python -m bench.ci_benchmark_guard --n 384 --runs 2 --warmup 1
 ```
 
 ## Runtime Type Checking
