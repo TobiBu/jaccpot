@@ -995,13 +995,25 @@ def compute_leaf_p2p_accelerations(
 
     softening_sq = jnp.asarray(float(softening) ** 2, dtype=positions.dtype)
 
+    use_precomputed_scatter = (
+        precomputed_chunk_sort_indices is not None
+        and precomputed_chunk_group_ids is not None
+        and precomputed_chunk_unique_indices is not None
+    )
+
     if precomputed_target_leaf_ids is None or precomputed_valid_pairs is None:
+        # Precomputed scatter schedules are built against the neighbor-list edge
+        # order used by prepared state. Re-derive leaf-pair vectors in that same
+        # order so bucketed scans stay aligned with the schedule buffers.
+        sort_by_source = not bool(collect_neighbor_pairs)
+        if use_precomputed_scatter:
+            sort_by_source = False
         target_leaf_ids, source_leaf_ids, valid_pairs = prepare_leaf_neighbor_pairs(
             node_ranges,
             leaf_nodes,
             offsets,
             neighbors,
-            sort_by_source=not bool(collect_neighbor_pairs),
+            sort_by_source=sort_by_source,
         )
     else:
         target_leaf_ids = jnp.asarray(precomputed_target_leaf_ids, dtype=INDEX_DTYPE)
@@ -1022,11 +1034,6 @@ def compute_leaf_p2p_accelerations(
                 dtype=INDEX_DTYPE,
             )
 
-    use_precomputed_scatter = (
-        precomputed_chunk_sort_indices is not None
-        and precomputed_chunk_group_ids is not None
-        and precomputed_chunk_unique_indices is not None
-    )
     if use_precomputed_scatter:
         chunk_sort_indices = jnp.asarray(
             precomputed_chunk_sort_indices, dtype=INDEX_DTYPE
