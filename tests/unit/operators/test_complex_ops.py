@@ -1,5 +1,6 @@
 import math
 
+import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
@@ -7,6 +8,9 @@ import pytest
 from jaccpot.operators.complex_harmonics import complex_R_solidfmm
 from jaccpot.operators.complex_ops import (
     complex_dot,
+    contract_spatial_derivative_with_velocity,
+    evaluate_local_complex_derivative_tower,
+    evaluate_local_complex_with_grad,
     l2l_complex,
     m2m_complex,
     rotate_complex_local_from_z,
@@ -33,6 +37,7 @@ from jaccpot.operators.real_harmonics import sh_size
 from jaccpot.operators.solidfmm_reference import (
     translate_along_z_m2l_complex as ref_translate_z,
 )
+from jaccpot.operators.symmetric_tensors import symmetric_multi_indices_3d
 
 
 def test_translate_along_z_m2l_complex_matches_reference() -> None:
@@ -288,6 +293,69 @@ def test_l2l_complex_solidfmm_matches_direct_reference() -> None:
     )
 
     assert np.allclose(np.asarray(got), ref, rtol=1e-12, atol=1e-12)
+
+
+def _pack_dense_reference(dense: np.ndarray, order: int) -> np.ndarray:
+    flat = dense.reshape(-1)
+    gather = []
+    for nx, ny, nz in symmetric_multi_indices_3d(order):
+        axis = (0,) * nx + (1,) * ny + (2,) * nz
+        idx = 0
+        for a in axis:
+            idx = idx * 3 + a
+        gather.append(idx)
+    return flat[np.asarray(gather, dtype=np.int32)]
+
+
+def test_evaluate_local_complex_derivative_tower_matches_grad_and_hessian() -> None:
+    order = 4
+    rng = np.random.default_rng(21)
+    ncoeff = sh_size(order)
+    local = rng.normal(size=(ncoeff,)) + 1j * rng.normal(size=(ncoeff,))
+    delta = jnp.array([0.31, -0.27, 0.58], dtype=jnp.float64)
+
+    d0, d1, d2 = evaluate_local_complex_derivative_tower(
+        jnp.asarray(local),
+        delta,
+        order=order,
+        max_derivative_order=2,
+    )
+
+    grad_ref, pot_ref = evaluate_local_complex_with_grad(
+        jnp.asarray(local),
+        delta,
+        order=order,
+    )
+    hessian_ref = jax.hessian(
+        lambda d: complex_dot(
+            jnp.asarray(local),
+            complex_R_solidfmm(d, order=order),
+            order=order,
+            conjugate_left=True,
+        ).real
+    )(delta)
+    d2_ref = _pack_dense_reference(np.asarray(hessian_ref), order=2)
+
+    assert np.allclose(np.asarray(d0), np.asarray([pot_ref]), rtol=1e-12, atol=1e-12)
+    assert np.allclose(np.asarray(d1), np.asarray(grad_ref), rtol=1e-12, atol=1e-12)
+    assert np.allclose(np.asarray(d2), d2_ref, rtol=1e-12, atol=1e-12)
+
+
+def test_contract_spatial_derivative_with_velocity_matches_hessian_times_v() -> None:
+    # Packed Hessian layout: xx, xy, xz, yy, yz, zz
+    hessian_packed = jnp.array([2.0, -1.0, 4.0, 3.0, -2.0, 5.0], dtype=jnp.float64)
+    velocity = jnp.array([0.7, -1.1, 0.4], dtype=jnp.float64)
+
+    got = contract_spatial_derivative_with_velocity(hessian_packed, velocity, order=2)
+    expected = jnp.array(
+        [
+            2.0 * 0.7 + (-1.0) * (-1.1) + 4.0 * 0.4,
+            (-1.0) * 0.7 + 3.0 * (-1.1) + (-2.0) * 0.4,
+            4.0 * 0.7 + (-2.0) * (-1.1) + 5.0 * 0.4,
+        ],
+        dtype=jnp.float64,
+    )
+    assert jnp.allclose(got, expected, rtol=0.0, atol=0.0)
 
 
 def test_cached_rotation_blocks_match_direct_multipole() -> None:

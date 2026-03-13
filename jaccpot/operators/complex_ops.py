@@ -17,6 +17,10 @@ from .real_harmonics import (
     sh_offset,
     sh_size,
 )
+from .symmetric_tensors import (
+    contract_symmetric_one_axis_3d,
+    symmetric_multi_indices_3d,
+)
 
 Array = jnp.ndarray
 
@@ -224,6 +228,109 @@ def evaluate_local_complex_with_grad_batch(
             conjugate_left=conjugate_left,
         )
     )(deltas)
+
+
+@lru_cache(maxsize=None)
+def _dense_to_packed_gather_3d(order: int) -> tuple[int, ...]:
+    """Flat gather indices selecting canonical symmetric components."""
+    if order < 0:
+        raise ValueError("order must be non-negative")
+    if order == 0:
+        return (0,)
+    gather: list[int] = []
+    for nx, ny, nz in symmetric_multi_indices_3d(order):
+        flat = 0
+        for _ in range(nx):
+            flat = flat * 3
+        for _ in range(ny):
+            flat = flat * 3 + 1
+        for _ in range(nz):
+            flat = flat * 3 + 2
+        gather.append(flat)
+    return tuple(gather)
+
+
+def _pack_symmetric_dense_3d(dense: Array, *, order: int) -> Array:
+    """Pack a dense 3D symmetric rank-``order`` tensor."""
+    flat = dense.reshape((-1,))
+    gather = jnp.asarray(_dense_to_packed_gather_3d(order), dtype=jnp.int32)
+    return flat[gather]
+
+
+def evaluate_local_complex_derivative_tower(
+    local: Array,
+    delta: Array,
+    *,
+    order: int,
+    max_derivative_order: int,
+    conjugate_left: bool = True,
+) -> tuple[Array, ...]:
+    """Evaluate potential and packed spatial derivatives ``D0..DK``.
+
+    Notes
+    -----
+    This is an order-generic API scaffold for derivative towers. It uses
+    autodiff internally today; hot-path contraction kernels can replace the
+    internals without changing downstream code.
+    """
+    p = int(order)
+    k_max = int(max_derivative_order)
+    if k_max < 0:
+        raise ValueError("max_derivative_order must be non-negative")
+
+    def phi_fn(d: Array) -> Array:
+        return evaluate_local_complex(local, d, order=p, conjugate_left=conjugate_left)
+
+    out: list[Array] = [jnp.asarray([phi_fn(delta)])]
+    if k_max == 0:
+        return tuple(out)
+
+    grad_fn = jax.grad(phi_fn)
+    grad = grad_fn(delta)
+    out.append(grad)
+
+    current_fn = grad_fn
+    for deriv_order in range(2, k_max + 1):
+        current_fn = jax.jacfwd(current_fn)
+        dense = current_fn(delta)
+        out.append(_pack_symmetric_dense_3d(dense, order=deriv_order))
+
+    return tuple(out)
+
+
+@partial(
+    jax.jit,
+    static_argnames=("order", "max_derivative_order", "conjugate_left"),
+)
+def evaluate_local_complex_derivative_tower_batch(
+    local: Array,
+    deltas: Array,
+    *,
+    order: int,
+    max_derivative_order: int,
+    conjugate_left: bool = True,
+) -> tuple[Array, ...]:
+    """Batch evaluate packed derivative towers for one local expansion."""
+    return jax.vmap(
+        lambda d: evaluate_local_complex_derivative_tower(
+            local,
+            d,
+            order=order,
+            max_derivative_order=max_derivative_order,
+            conjugate_left=conjugate_left,
+        )
+    )(deltas)
+
+
+@partial(jax.jit, static_argnames=("order",))
+def contract_spatial_derivative_with_velocity(
+    packed: Array,
+    velocity: Array,
+    *,
+    order: int,
+) -> Array:
+    """Contract packed order-``order`` spatial derivatives with velocity."""
+    return contract_symmetric_one_axis_3d(packed, velocity, order=order)
 
 
 def translate_along_z_m2l_complex(
