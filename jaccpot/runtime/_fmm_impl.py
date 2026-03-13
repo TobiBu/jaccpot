@@ -124,10 +124,12 @@ from ._octree_adapter import OctreeExecutionData, build_octree_execution_data
 from ._octree_fmm import (
     OctreeSolidFMMComplexMultipoles,
     OctreeSolidFMMDownwardPlan,
+    accumulate_octree_solidfmm_m2l,
     build_octree_downward_plan,
     build_octree_interaction_plan,
     build_octree_upward_plan,
     prepare_octree_solidfmm_complex_multipoles,
+    propagate_octree_solidfmm_l2l,
 )
 from .dtypes import INDEX_DTYPE, as_index, complex_dtype_for_real
 from .fmm_presets import FMMPreset, FMMPresetConfig, get_preset_config
@@ -1085,6 +1087,56 @@ def _build_octree_downward_artifacts(
     return build_octree_downward_plan(octree, octree_upward, interaction_plan)
 
 
+def _finalize_octree_downward_artifacts(
+    *,
+    octree: Optional[OctreeExecutionData],
+    octree_upward: Optional[OctreeSolidFMMComplexMultipoles],
+    octree_downward: Optional[OctreeSolidFMMDownwardPlan],
+    expansion_basis: ExpansionBasis,
+    execution_backend: str,
+    m2l_chunk_size: Optional[int],
+) -> Optional[OctreeSolidFMMDownwardPlan]:
+    """Run octree-native M2L/L2L when the narrow octree backend is active."""
+
+    if (
+        execution_backend != "octree"
+        or expansion_basis != "solidfmm"
+        or octree is None
+        or octree_upward is None
+        or octree_downward is None
+    ):
+        return octree_downward
+    accumulated = accumulate_octree_solidfmm_m2l(
+        octree_downward,
+        octree_upward,
+        chunk_size=4096 if m2l_chunk_size is None else int(m2l_chunk_size),
+    )
+    return propagate_octree_solidfmm_l2l(accumulated, octree)
+
+
+def _materialize_octree_downward_for_evaluation(
+    *,
+    radix_downward: TreeDownwardData,
+    octree: Optional[OctreeExecutionData],
+    octree_downward: Optional[OctreeSolidFMMDownwardPlan],
+) -> TreeDownwardData:
+    """Project octree local expansions onto radix node slots for evaluation."""
+
+    if octree is None or octree_downward is None:
+        return radix_downward
+    radix_to_oct = jnp.asarray(octree.radix_node_to_oct, dtype=INDEX_DTYPE)
+    centers = jnp.asarray(octree_downward.centers)[radix_to_oct]
+    coefficients = jnp.asarray(octree_downward.locals_packed)[radix_to_oct]
+    return TreeDownwardData(
+        interactions=radix_downward.interactions,
+        locals=LocalExpansionData(
+            order=int(octree_downward.order),
+            centers=centers,
+            coefficients=coefficients,
+        ),
+    )
+
+
 class _FarPairCOO(NamedTuple):
     """Compact COO-style far-pair representation for streamed M2L execution."""
 
@@ -1496,7 +1548,7 @@ class FastMultipoleMethod:
     def _ensure_execution_backend_supported(
         self, *, tree: Optional[Tree] = None
     ) -> str:
-        """Fail fast for execution backends that do not exist yet."""
+        """Validate execution backends that are available for the current tree."""
         backend = self._resolve_execution_backend()
         if backend != "octree":
             return backend
@@ -1504,10 +1556,11 @@ class FastMultipoleMethod:
         tree_type = getattr(tree, "tree_type", self.tree_type)
         if str(tree_type).strip().lower() != "octree":
             raise ValueError("execution_backend='octree' requires an octree tree_type")
-        raise NotImplementedError(
-            "execution_backend='octree' is not implemented yet; "
-            "use execution_backend='radix' or 'auto' for now"
-        )
+        if self.expansion_basis != "solidfmm":
+            raise NotImplementedError(
+                "execution_backend='octree' currently supports basis='solidfmm' only"
+            )
+        return backend
 
     @property
     def recent_retry_events(
@@ -1793,6 +1846,12 @@ class FastMultipoleMethod:
                 expansion_basis=self.expansion_basis,
                 max_order=int(low_order),
             )
+            prepass_execution_backend = self._resolve_execution_backend()
+            prepass_octree_downward = _build_octree_downward_artifacts(
+                octree=prepass_octree,
+                octree_upward=prepass_octree_upward,
+                interactions=dual_downward_artifacts.interactions,
+            )
             prepass_state = FMMPreparedState(
                 tree=low_tree_artifacts.tree,
                 upward=low_tree_artifacts.upward,
@@ -1814,12 +1873,16 @@ class FastMultipoleMethod:
                 nearfield_chunk_group_ids=nearfield_artifacts.chunk_group_ids,
                 nearfield_chunk_unique_indices=nearfield_artifacts.chunk_unique_indices,
                 force_scale_nodes=None,
+                execution_backend=prepass_execution_backend,
                 octree=prepass_octree,
                 octree_upward=prepass_octree_upward,
-                octree_downward=_build_octree_downward_artifacts(
+                octree_downward=_finalize_octree_downward_artifacts(
                     octree=prepass_octree,
                     octree_upward=prepass_octree_upward,
-                    interactions=dual_downward_artifacts.interactions,
+                    octree_downward=prepass_octree_downward,
+                    expansion_basis=self.expansion_basis,
+                    execution_backend=prepass_execution_backend,
+                    m2l_chunk_size=runtime_m2l_chunk_size,
                 ),
             )
             prepass_acc = self.evaluate_prepared_state(
@@ -4125,12 +4188,18 @@ class FastMultipoleMethod:
             f"chunk_unique_indices={_format_nbytes(_estimate_payload_nbytes(nearfield_artifacts.chunk_unique_indices))}"
         )
         octree = build_octree_execution_data(tree_artifacts.tree)
+        execution_backend = self._resolve_execution_backend()
         octree_upward = _build_octree_upward_artifacts(
             octree=octree,
             positions_sorted=tree_artifacts.positions_sorted,
             masses_sorted=tree_artifacts.masses_sorted,
             expansion_basis=self.expansion_basis,
             max_order=int(max_order),
+        )
+        octree_downward = _build_octree_downward_artifacts(
+            octree=octree,
+            octree_upward=octree_upward,
+            interactions=dual_downward_artifacts.interactions,
         )
 
         return FMMPreparedState(
@@ -4154,13 +4223,16 @@ class FastMultipoleMethod:
             nearfield_chunk_group_ids=nearfield_artifacts.chunk_group_ids,
             nearfield_chunk_unique_indices=nearfield_artifacts.chunk_unique_indices,
             force_scale_nodes=force_scale_nodes,
-            execution_backend=self._resolve_execution_backend(),
+            execution_backend=execution_backend,
             octree=octree,
             octree_upward=octree_upward,
-            octree_downward=_build_octree_downward_artifacts(
+            octree_downward=_finalize_octree_downward_artifacts(
                 octree=octree,
                 octree_upward=octree_upward,
-                interactions=dual_downward_artifacts.interactions,
+                octree_downward=octree_downward,
+                expansion_basis=self.expansion_basis,
+                execution_backend=execution_backend,
+                m2l_chunk_size=runtime_m2l_chunk_size,
             ),
         )
 
@@ -4179,6 +4251,15 @@ class FastMultipoleMethod:
             target_indices=target_indices,
             num_particles=int(state.inverse_permutation.shape[0]),
         )
+        evaluation_downward = (
+            _materialize_octree_downward_for_evaluation(
+                radix_downward=state.downward,
+                octree=state.octree,
+                octree_downward=state.octree_downward,
+            )
+            if str(state.execution_backend).strip().lower() == "octree"
+            else state.downward
+        )
         tracing_targets = isinstance(
             state.positions_sorted, jax.core.Tracer
         ) or isinstance(resolved_target_indices, jax.core.Tracer)
@@ -4188,7 +4269,7 @@ class FastMultipoleMethod:
                 tree=state.tree,
                 positions_sorted=state.positions_sorted,
                 masses_sorted=state.masses_sorted,
-                downward=state.downward,
+                downward=evaluation_downward,
                 neighbor_list=state.neighbor_list,
                 nearfield_target_leaf_ids=state.nearfield_target_leaf_ids,
                 nearfield_source_leaf_ids=state.nearfield_source_leaf_ids,
@@ -4210,7 +4291,7 @@ class FastMultipoleMethod:
                 tree=state.tree,
                 positions_sorted=state.positions_sorted,
                 masses_sorted=state.masses_sorted,
-                downward=state.downward,
+                downward=evaluation_downward,
                 neighbor_list=state.neighbor_list,
                 target_sorted_indices=target_sorted_indices,
                 return_potential=return_potential,

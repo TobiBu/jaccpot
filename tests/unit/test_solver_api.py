@@ -176,7 +176,7 @@ def test_prepare_state_records_resolved_execution_backend():
     assert state.execution_backend == "radix"
 
 
-def test_explicit_octree_execution_backend_fails_fast_until_implemented():
+def test_explicit_octree_execution_backend_prepares_state():
     positions, masses = _sample_problem(n=32)
     fmm = FastMultipoleMethod(
         preset=FMMPreset.FAST,
@@ -187,13 +187,17 @@ def test_explicit_octree_execution_backend_fails_fast_until_implemented():
         ),
     )
 
-    with pytest.raises(NotImplementedError, match="execution_backend='octree'"):
-        fmm.prepare_state(
-            positions,
-            masses,
-            leaf_size=8,
-            max_order=3,
-        )
+    state = fmm.prepare_state(
+        positions,
+        masses,
+        leaf_size=8,
+        max_order=3,
+    )
+
+    assert state.execution_backend == "octree"
+    assert state.octree is not None
+    assert state.octree_upward is not None
+    assert state.octree_downward is not None
 
 
 def test_octree_prepare_state_exposes_octree_execution_view():
@@ -229,6 +233,43 @@ def test_octree_solver_matches_radix_prepare_path():
         preset=FMMPreset.FAST,
         basis="solidfmm",
         advanced=FMMAdvancedConfig(tree=TreeConfig(tree_type="octree")),
+    )
+
+    acc_radix = radix.compute_accelerations(
+        positions,
+        masses,
+        leaf_size=16,
+        max_order=3,
+    )
+    acc_octree = octree.compute_accelerations(
+        positions,
+        masses,
+        leaf_size=16,
+        max_order=3,
+    )
+
+    assert np.allclose(
+        np.asarray(acc_octree), np.asarray(acc_radix), rtol=1e-5, atol=1e-5
+    )
+
+
+def test_octree_execution_backend_matches_radix_on_octree_tree():
+    positions, masses = _sample_problem(n=64)
+    radix = FastMultipoleMethod(
+        preset=FMMPreset.FAST,
+        basis="solidfmm",
+        advanced=FMMAdvancedConfig(
+            tree=TreeConfig(tree_type="octree"),
+            runtime=RuntimePolicyConfig(execution_backend="radix"),
+        ),
+    )
+    octree = FastMultipoleMethod(
+        preset=FMMPreset.FAST,
+        basis="solidfmm",
+        advanced=FMMAdvancedConfig(
+            tree=TreeConfig(tree_type="octree"),
+            runtime=RuntimePolicyConfig(execution_backend="octree"),
+        ),
     )
 
     acc_radix = radix.compute_accelerations(
