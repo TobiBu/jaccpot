@@ -1,7 +1,14 @@
 import jax.numpy as jnp
+import numpy as np
 
 from jaccpot import FastMultipoleMethod, FMMAdvancedConfig, FMMPreset, TreeConfig
-from jaccpot.runtime._octree_fmm import build_octree_upward_plan
+from jaccpot.runtime._octree_fmm import (
+    build_octree_upward_plan,
+    prepare_octree_solidfmm_complex_multipoles,
+)
+from jaccpot.upward.solidfmm_complex_tree_expansions import (
+    prepare_solidfmm_complex_upward_sweep,
+)
 
 
 def _sample_problem(n: int = 48):
@@ -33,3 +40,68 @@ def test_octree_upward_plan_exposes_level_major_metadata():
     assert plan.level_offsets.shape[0] >= int(plan.num_levels) + 1
     assert plan.children.shape[1] == 8
     assert int(plan.num_valid_nodes) >= int(plan.num_leaf_nodes) >= 1
+
+
+def test_octree_complex_multipoles_match_radix_upward_on_mapped_nodes():
+    positions, masses = _sample_problem(n=64)
+    fmm = FastMultipoleMethod(
+        preset=FMMPreset.FAST,
+        basis="solidfmm",
+        advanced=FMMAdvancedConfig(tree=TreeConfig(tree_type="octree")),
+    )
+
+    state = fmm.prepare_state(
+        positions,
+        masses,
+        leaf_size=8,
+        max_order=3,
+    )
+
+    assert state.octree is not None
+    plan = build_octree_upward_plan(state.octree)
+    octree_upward = prepare_octree_solidfmm_complex_multipoles(
+        plan,
+        state.positions_sorted,
+        state.masses_sorted,
+        max_order=3,
+    )
+    radix_upward = prepare_solidfmm_complex_upward_sweep(
+        state.tree,
+        state.positions_sorted,
+        state.masses_sorted,
+        max_order=3,
+        max_leaf_size=8,
+    )
+
+    root_oct = int(np.asarray(state.octree.radix_node_to_oct)[0])
+    radix_nodes = np.asarray(state.octree.radix_node_to_oct)
+    unique_oct, inverse, counts = np.unique(
+        radix_nodes,
+        return_inverse=True,
+        return_counts=True,
+    )
+    del unique_oct
+    unique_radix_mask = counts[inverse] == 1
+    radix_ranges = np.asarray(state.tree.node_ranges)
+    oct_ranges = np.asarray(state.octree.node_ranges)[radix_nodes]
+    matching_range_mask = np.all(radix_ranges == oct_ranges, axis=1)
+    comparable_mask = unique_radix_mask & matching_range_mask
+
+    assert np.allclose(
+        np.asarray(octree_upward.centers)[root_oct],
+        np.asarray(radix_upward.multipoles.centers)[0],
+        rtol=1e-6,
+        atol=1e-6,
+    )
+    assert np.allclose(
+        np.asarray(octree_upward.packed)[root_oct],
+        np.asarray(radix_upward.multipoles.packed)[0],
+        rtol=1e-5,
+        atol=1e-5,
+    )
+    assert np.allclose(
+        np.asarray(octree_upward.centers)[radix_nodes[comparable_mask]],
+        np.asarray(radix_upward.multipoles.centers)[comparable_mask],
+        rtol=1e-6,
+        atol=1e-6,
+    )
