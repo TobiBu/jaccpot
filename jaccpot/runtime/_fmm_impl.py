@@ -934,7 +934,16 @@ class FMMPreparedState:
         self: "FMMPreparedState",
     ) -> tuple[
         tuple[Any, ...],
-        tuple[int, str, str, str, float, Optional[str], Tuple[DualTreeRetryEvent, ...]],
+        tuple[
+            int,
+            str,
+            str,
+            str,
+            float,
+            Optional[str],
+            Tuple[DualTreeRetryEvent, ...],
+            str,
+        ],
     ]:
         children = (
             self.tree,
@@ -950,7 +959,6 @@ class FMMPreparedState:
             self.nearfield_chunk_group_ids,
             self.nearfield_chunk_unique_indices,
             self.force_scale_nodes,
-            self.execution_backend,
             self.octree,
             self.octree_upward,
             self.octree_downward,
@@ -963,6 +971,7 @@ class FMMPreparedState:
             float(self.theta),
             self.topology_key,
             self.retry_events,
+            str(self.execution_backend),
         )
         return children, aux
 
@@ -978,6 +987,7 @@ class FMMPreparedState:
             theta,
             topology_key,
             retry_events,
+            execution_backend,
         ) = aux
         (
             tree,
@@ -993,7 +1003,6 @@ class FMMPreparedState:
             nearfield_chunk_group_ids,
             nearfield_chunk_unique_indices,
             force_scale_nodes,
-            execution_backend,
             octree,
             octree_upward,
             octree_downward,
