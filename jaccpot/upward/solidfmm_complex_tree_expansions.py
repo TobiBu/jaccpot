@@ -376,15 +376,10 @@ def prepare_solidfmm_complex_upward_sweep(
     num_levels = int(level_offsets.shape[0] - 1)
     if num_levels <= 0:
         num_levels = 1
-    level_counts = np.asarray(jax.device_get(level_offsets[1:] - level_offsets[:-1]))
-    internal_level_counts = (
-        level_counts[: max(num_levels - 1, 0)]
-        if level_counts.size > 0
-        else level_counts
-    )
-    level_batch_width = (
-        int(internal_level_counts.max()) if internal_level_counts.size > 0 else 1
-    )
+    # Keep batching shape-derived so this path remains JIT-safe under traced tree
+    # builds. A tighter per-level bound can still be recovered later from octree
+    # metadata if we want to specialize scheduling further.
+    level_batch_width = max(num_internal, 1)
     resolved_leaf_batch_size = (
         min(num_leaves, _DEFAULT_LEAF_BATCH_SIZE)
         if leaf_batch_size is None
