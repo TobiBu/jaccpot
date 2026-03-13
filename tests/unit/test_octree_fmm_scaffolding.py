@@ -2,6 +2,7 @@ import jax.numpy as jnp
 import numpy as np
 
 from jaccpot import FastMultipoleMethod, FMMAdvancedConfig, FMMPreset, TreeConfig
+from jaccpot.operators.complex_ops import l2l_complex_batch
 from jaccpot.runtime._fmm_impl import _prepare_solidfmm_downward_sweep
 from jaccpot.runtime._octree_fmm import (
     accumulate_octree_solidfmm_m2l,
@@ -9,6 +10,7 @@ from jaccpot.runtime._octree_fmm import (
     build_octree_interaction_plan,
     build_octree_upward_plan,
     prepare_octree_solidfmm_complex_multipoles,
+    propagate_octree_solidfmm_l2l,
 )
 from jaccpot.upward.solidfmm_complex_tree_expansions import (
     prepare_solidfmm_complex_upward_sweep,
@@ -277,6 +279,81 @@ def test_octree_m2l_matches_radix_root_local():
     assert np.allclose(
         np.asarray(octree_m2l.locals_packed)[root_oct],
         np.asarray(radix_downward.locals.coefficients)[0],
+        rtol=1e-5,
+        atol=1e-5,
+    )
+
+
+def test_octree_l2l_propagation_updates_children_consistently():
+    positions, masses = _sample_problem(n=64)
+    fmm = FastMultipoleMethod(
+        preset=FMMPreset.FAST,
+        basis="solidfmm",
+        advanced=FMMAdvancedConfig(tree=TreeConfig(tree_type="octree")),
+    )
+
+    state = fmm.prepare_state(
+        positions,
+        masses,
+        leaf_size=8,
+        max_order=3,
+    )
+
+    assert state.octree is not None
+    assert state.octree_upward is not None
+    assert state.octree_downward is not None
+    assert state.interactions is not None
+
+    octree_downward = accumulate_octree_solidfmm_m2l(
+        state.octree_downward,
+        state.octree_upward,
+        chunk_size=128,
+    )
+    octree_downward = propagate_octree_solidfmm_l2l(
+        octree_downward,
+        state.octree,
+    )
+    m2l_only = np.asarray(octree_downward.locals_packed)
+    propagated = propagate_octree_solidfmm_l2l(
+        octree_downward,
+        state.octree,
+    )
+
+    children = np.asarray(state.octree.children)
+    root_oct = int(np.asarray(state.octree.radix_node_to_oct)[0])
+    valid_children = children[root_oct][children[root_oct] >= 0]
+
+    assert np.allclose(
+        np.asarray(propagated.locals_packed)[root_oct],
+        m2l_only[root_oct],
+        rtol=1e-6,
+        atol=1e-6,
+    )
+    assert valid_children.size > 0
+
+    parent_coeffs = np.broadcast_to(
+        np.asarray(propagated.locals_packed)[root_oct][None, :],
+        (valid_children.shape[0], np.asarray(propagated.locals_packed).shape[1]),
+    )
+    deltas = (
+        np.asarray(state.octree_upward.centers)[valid_children]
+        - np.asarray(state.octree_upward.centers)[root_oct]
+    )
+    translated = np.asarray(
+        l2l_complex_batch(
+            jnp.asarray(parent_coeffs),
+            jnp.asarray(deltas),
+            order=3,
+            rotation="solidfmm",
+        )
+    )
+
+    child_delta = (
+        np.asarray(propagated.locals_packed)[valid_children] - m2l_only[valid_children]
+    )
+    assert np.allclose(
+        child_delta,
+        translated,
         rtol=1e-5,
         atol=1e-5,
     )

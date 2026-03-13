@@ -13,6 +13,7 @@ from yggdrax.interactions import NodeInteractionList
 from jaccpot.operators.complex_harmonics import p2m_complex_batch
 from jaccpot.operators.complex_ops import (
     enforce_conjugate_symmetry_batch,
+    l2l_complex_batch,
     m2l_complex_reference_batch,
     m2m_complex,
 )
@@ -317,6 +318,136 @@ def accumulate_octree_solidfmm_m2l(
     )
 
 
+@partial(
+    jax.jit,
+    static_argnames=("order", "num_levels", "level_batch_width"),
+)
+def _propagate_octree_l2l_complex_by_level(
+    locals_coeffs: Array,
+    centers: Array,
+    children: Array,
+    nodes_by_level: Array,
+    level_offsets: Array,
+    *,
+    order: int,
+    num_levels: int,
+    level_batch_width: int,
+) -> Array:
+    """Propagate complex local expansions top-down over explicit octree levels."""
+
+    if int(num_levels) <= 1:
+        return locals_coeffs
+
+    batch_width = int(max(level_batch_width, 1))
+    level_offsets = jnp.asarray(level_offsets, dtype=INDEX_DTYPE)
+    nodes_by_level = jnp.asarray(nodes_by_level, dtype=INDEX_DTYPE)
+    level_slot = jnp.arange(batch_width, dtype=INDEX_DTYPE)
+    child_slot = jnp.arange(int(children.shape[1]), dtype=INDEX_DTYPE)
+
+    def level_body(level_idx: Array, state: Array) -> Array:
+        start = level_offsets[level_idx]
+        end = level_offsets[level_idx + 1]
+        count = end - start
+        batch_nodes = jax.lax.dynamic_slice_in_dim(
+            nodes_by_level,
+            start_index=start,
+            slice_size=batch_width,
+            axis=0,
+        )
+        valid_parent = level_slot < count
+        safe_parents = jnp.where(valid_parent, batch_nodes, 0)
+        child_idx = children[safe_parents]
+        child_mask = valid_parent[:, None] & (child_idx >= 0)
+        safe_child_idx = jnp.where(child_mask, child_idx, 0)
+
+        parent_coeffs = state[safe_parents]
+        parent_coeffs = jnp.broadcast_to(
+            parent_coeffs[:, None, :],
+            (batch_width, int(children.shape[1]), state.shape[1]),
+        )
+        deltas = centers[safe_child_idx] - centers[safe_parents][:, None, :]
+        translated = l2l_complex_batch(
+            parent_coeffs.reshape(-1, state.shape[1]),
+            deltas.reshape(-1, 3),
+            order=order,
+            rotation="solidfmm",
+        ).reshape(batch_width, int(children.shape[1]), state.shape[1])
+        translated = jnp.where(child_mask[..., None], translated, 0.0)
+
+        flat_children = safe_child_idx.reshape(-1)
+        flat_updates = translated.reshape(-1, state.shape[1])
+        flat_valid = child_mask.reshape(-1)
+        flat_children = jnp.where(flat_valid, flat_children, 0)
+        flat_updates = jnp.where(flat_valid[:, None], flat_updates, 0.0)
+
+        sort_idx = jnp.argsort(flat_children)
+        tgt_sorted = flat_children[sort_idx]
+        updates_sorted = flat_updates[sort_idx]
+        valid_sorted = flat_valid[sort_idx]
+        new_group = jnp.concatenate(
+            (jnp.asarray([True], dtype=jnp.bool_), tgt_sorted[1:] != tgt_sorted[:-1]),
+            axis=0,
+        )
+        group_ids = jnp.cumsum(new_group.astype(INDEX_DTYPE)) - jnp.asarray(
+            1,
+            dtype=INDEX_DTYPE,
+        )
+        reduced = jax.ops.segment_sum(
+            updates_sorted,
+            group_ids,
+            batch_width * int(children.shape[1]),
+        )
+        unique_targets = jnp.zeros(
+            (batch_width * int(children.shape[1]),), dtype=INDEX_DTYPE
+        )
+        unique_targets = unique_targets.at[group_ids].set(tgt_sorted)
+        unique_valid = jnp.zeros(
+            (batch_width * int(children.shape[1]),), dtype=jnp.bool_
+        )
+        unique_valid = unique_valid.at[group_ids].set(valid_sorted)
+        safe_targets = jnp.where(unique_valid, unique_targets, 0)
+        reduced = jnp.where(unique_valid[:, None], reduced, 0.0)
+        return state.at[safe_targets].add(reduced)
+
+    propagated = jax.lax.fori_loop(0, int(num_levels) - 1, level_body, locals_coeffs)
+    return enforce_conjugate_symmetry_batch(propagated, order=order)
+
+
+def propagate_octree_solidfmm_l2l(
+    downward: OctreeSolidFMMDownwardPlan,
+    octree: OctreeExecutionData,
+) -> OctreeSolidFMMDownwardPlan:
+    """Propagate octree local expansions top-down over the explicit child table."""
+
+    order = int(downward.order)
+    num_levels = int(octree.num_levels)
+    level_batch_width = max(int(octree.num_valid_nodes), 1)
+    locals_packed = _propagate_octree_l2l_complex_by_level(
+        jnp.asarray(downward.locals_packed),
+        jnp.asarray(downward.centers),
+        jnp.asarray(octree.children, dtype=INDEX_DTYPE),
+        jnp.asarray(octree.nodes_by_level, dtype=INDEX_DTYPE),
+        jnp.asarray(octree.level_offsets[: num_levels + 1], dtype=INDEX_DTYPE),
+        order=order,
+        num_levels=num_levels,
+        level_batch_width=level_batch_width,
+    )
+    return OctreeSolidFMMDownwardPlan(
+        order=downward.order,
+        centers=downward.centers,
+        locals_packed=locals_packed,
+        parent=downward.parent,
+        nodes_by_level=downward.nodes_by_level,
+        level_offsets=downward.level_offsets,
+        target_nodes=downward.target_nodes,
+        source_nodes=downward.source_nodes,
+        target_levels=downward.target_levels,
+        interaction_level_offsets=downward.interaction_level_offsets,
+        valid_interactions=downward.valid_interactions,
+        num_pairs=downward.num_pairs,
+    )
+
+
 def _prefix_mass_and_weighted_position(
     positions_sorted: Array,
     masses_sorted: Array,
@@ -551,5 +682,6 @@ __all__ = [
     "build_octree_interaction_plan",
     "build_octree_upward_plan",
     "compute_octree_center_of_mass",
+    "propagate_octree_solidfmm_l2l",
     "prepare_octree_solidfmm_complex_multipoles",
 ]
