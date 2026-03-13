@@ -1,4 +1,4 @@
-"""Compare grouped far-field modes on runtime and GPU memory."""
+"""Compare far-field execution modes on runtime and GPU memory."""
 
 from __future__ import annotations
 
@@ -129,17 +129,43 @@ def main() -> None:
     positions, masses = _sample_problem(int(args.num_particles), dtype=dtype)
     rows: list[dict[str, Any]] = []
 
-    for farfield_mode in ("pair_grouped", "class_major"):
+    mode_specs = (
+        {
+            "label": "streamed_pair",
+            "grouped_interactions": False,
+            "farfield_mode": "pair_grouped",
+            "streamed_far_pairs": True,
+            "memory_objective": "minimum_memory",
+        },
+        {
+            "label": "pair_grouped",
+            "grouped_interactions": True,
+            "farfield_mode": "pair_grouped",
+            "streamed_far_pairs": False,
+            "memory_objective": "balanced",
+        },
+        {
+            "label": "class_major",
+            "grouped_interactions": True,
+            "farfield_mode": "class_major",
+            "streamed_far_pairs": False,
+            "memory_objective": "balanced",
+        },
+    )
+
+    for mode_spec in mode_specs:
         fmm = FastMultipoleMethod(
             preset=FMMPreset(str(args.preset).strip().lower()),
             basis=args.basis,
             advanced=FMMAdvancedConfig(
                 farfield=FarFieldConfig(
-                    grouped_interactions=True,
-                    mode=farfield_mode,
+                    grouped_interactions=bool(mode_spec["grouped_interactions"]),
+                    mode=str(mode_spec["farfield_mode"]),
+                    streamed_far_pairs=bool(mode_spec["streamed_far_pairs"]),
                 ),
                 runtime=RuntimePolicyConfig(
                     retain_traversal_result=False,
+                    memory_objective=str(mode_spec["memory_objective"]),
                 ),
             ),
         )
@@ -149,18 +175,22 @@ def main() -> None:
             masses,
             leaf_size=int(args.leaf_size),
             max_order=int(args.max_order),
-            phase=f"{farfield_mode}:prepare",
+            phase=f"{mode_spec['label']}:prepare",
             gpu_index=int(args.gpu_index),
         )
         _, eval_peak = _peak_gpu_memory_trace(
             fmm.evaluate_prepared_state,
             state,
-            phase=f"{farfield_mode}:evaluate",
+            phase=f"{mode_spec['label']}:evaluate",
             gpu_index=int(args.gpu_index),
         )
         rows.append(
             {
-                "farfield_mode": farfield_mode,
+                "mode": str(mode_spec["label"]),
+                "grouped_interactions": bool(mode_spec["grouped_interactions"]),
+                "farfield_mode": str(mode_spec["farfield_mode"]),
+                "streamed_far_pairs": bool(mode_spec["streamed_far_pairs"]),
+                "memory_objective": str(mode_spec["memory_objective"]),
                 "prepare": asdict(prepare_peak),
                 "evaluate": asdict(eval_peak),
             }

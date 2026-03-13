@@ -109,40 +109,30 @@ def main() -> None:
     positions, masses = _sample_problem(int(args.num_particles), dtype=dtype)
     snapshots = [_gpu_memory_snapshot("start", gpu_index=int(args.gpu_index))]
 
-    prepare_fn = jax.jit(
-        lambda pos, ms: solver.prepare_state(
-            pos,
-            ms,
-            leaf_size=int(args.leaf_size),
-            max_order=int(args.max_order),
-        )
-    )
     eval_fn = jax.jit(lambda state: solver.evaluate_prepared_state(state))
 
     compile_rows: list[dict[str, Any]] = []
-    compile_start = time.perf_counter()
-    prepared_compiled = prepare_fn.lower(positions, masses).compile()
-    compile_prepare_s = time.perf_counter() - compile_start
+    compile_prepare_s = float("nan")
     snapshots.append(_gpu_memory_snapshot("after_prepare_compile", gpu_index=int(args.gpu_index)))
 
-    if not bool(args.skip_memory_analysis):
-        try:
-            stats = prepared_compiled.memory_analysis()
-            compile_rows.append(
-                {
-                    "phase": "prepare_compile",
-                    "generated_code_size": getattr(stats, "generated_code_size_in_bytes", None),
-                    "argument_size": getattr(stats, "argument_size_in_bytes", None),
-                    "output_size": getattr(stats, "output_size_in_bytes", None),
-                    "temp_size": getattr(stats, "temp_size_in_bytes", None),
-                    "alias_size": getattr(stats, "alias_size_in_bytes", None),
-                }
-            )
-        except Exception as exc:
-            compile_rows.append({"phase": "prepare_compile", "memory_analysis_error": str(exc)})
+    compile_rows.append(
+        {
+            "phase": "prepare_compile",
+            "memory_analysis_error": (
+                "prepare_state is intentionally not wrapped in an outer jax.jit "
+                "for large-N benchmarks; internal runtime compilation still occurs "
+                "during the first prepare_state call"
+            ),
+        }
+    )
 
     warm_prepare_start = time.perf_counter()
-    state = prepared_compiled(positions, masses)
+    state = solver.prepare_state(
+        positions,
+        masses,
+        leaf_size=int(args.leaf_size),
+        max_order=int(args.max_order),
+    )
     _block_until_ready(state)
     warm_prepare_s = time.perf_counter() - warm_prepare_start
     snapshots.append(_gpu_memory_snapshot("after_warm_prepare", gpu_index=int(args.gpu_index)))

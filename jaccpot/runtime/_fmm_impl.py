@@ -1551,6 +1551,11 @@ class FastMultipoleMethod:
 
         return self.adaptive_error_model == "dehnen_paper"
 
+    def _uses_paper_style_traversal_policy(self: "FastMultipoleMethod") -> bool:
+        """Return whether traversal should use the paper-style error policy."""
+
+        return self._uses_dehnen_paper_error_model() or self._uses_dehnen_error_policy()
+
     def _traversal_policy_error_model_code(self: "FastMultipoleMethod") -> int:
         """Return the policy error model code used during traversal."""
 
@@ -1562,6 +1567,16 @@ class FastMultipoleMethod:
         """Return the node reduction mode used for adaptive force scales."""
 
         return "min" if self._uses_dehnen_paper_error_model() else "max"
+
+    def _uses_paper_style_force_scale(self: "FastMultipoleMethod") -> bool:
+        """Return whether prepare_state needs paper-style force-scale handling."""
+
+        return self.adaptive_order or self._uses_paper_style_traversal_policy()
+
+    def _base_mac_type(self: "FastMultipoleMethod") -> MACType:
+        """Return the Yggdrax-facing geometric MAC for the active solver mode."""
+
+        return "dehnen" if self._uses_dehnen_error_policy() else self.mac_type
 
     def _policy_orders_for_prepare_state(
         self: "FastMultipoleMethod", *, max_order: int
@@ -2649,9 +2664,8 @@ class FastMultipoleMethod:
         pair_policy = None
         policy_state = None
         cache_key = None
-        use_dehnen_error_policy = self._uses_dehnen_error_policy()
         use_paper_fixed_policy = (not self.adaptive_order) and (
-            self._uses_dehnen_paper_error_model() or use_dehnen_error_policy
+            self._uses_paper_style_traversal_policy()
         )
         if self.adaptive_order or use_paper_fixed_policy:
             policy_orders = self.p_gears
@@ -3845,7 +3859,7 @@ class FastMultipoleMethod:
             )
 
         theta_val = float(self.theta if theta is None else theta)
-        mac_type_val = "dehnen" if self.mac_type == "dehnen_error" else self.mac_type
+        mac_type_val = self._base_mac_type()
 
         tree_artifacts = self._prepare_state_tree_and_upward(
             positions_arr=positions_arr,
@@ -3861,12 +3875,7 @@ class FastMultipoleMethod:
             allow_stateful_cache=allow_stateful_cache,
         )
         force_scale_nodes = None
-        use_dehnen_error_policy = self._uses_dehnen_error_policy()
-        use_paper_force_scale = (
-            self.adaptive_order
-            or (self.adaptive_error_model == "dehnen_paper")
-            or use_dehnen_error_policy
-        )
+        use_paper_force_scale = self._uses_paper_style_force_scale()
         if use_paper_force_scale:
             node_count = int(tree_artifacts.tree.parent.shape[0])
             previous_force_scale = self._last_force_scale_nodes
@@ -3886,9 +3895,9 @@ class FastMultipoleMethod:
                         previous_force_scale,
                         dtype=positions_arr.dtype,
                     )
-                elif (
-                    self._uses_dehnen_paper_error_model() or use_dehnen_error_policy
-                ) and not self._in_force_scale_prepass:
+                elif self._uses_paper_style_traversal_policy() and (
+                    not self._in_force_scale_prepass
+                ):
                     need_prepass = True
                 else:
                     force_scale_nodes = jnp.ones(
@@ -3904,11 +3913,11 @@ class FastMultipoleMethod:
                     )
                 low_order = int(min(policy_orders))
                 if self.mac_force_scale_mode == "paper" and (
-                    self._uses_dehnen_paper_error_model() or use_dehnen_error_policy
+                    self._uses_paper_style_traversal_policy()
                 ):
                     low_order = 1 if int(max_order) >= 1 else 0
                 if self.mac_force_scale_mode == "paper" and (
-                    self._uses_dehnen_paper_error_model() or use_dehnen_error_policy
+                    self._uses_paper_style_traversal_policy()
                 ):
                     prepass_sorted = (
                         self._compute_force_scale_paper_prepass_from_tree_artifacts(
