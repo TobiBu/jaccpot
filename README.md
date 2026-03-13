@@ -94,6 +94,14 @@ acc, jerk = solver.compute_accelerations_and_jerk(
 See [docs/derivatives_and_jerk.md](docs/derivatives_and_jerk.md) for API details,
 mode tradeoffs, and output tensor layouts.
 
+### Jerk Mode Guide
+
+| Goal | Mode | Notes |
+|---|---|---|
+| Lowest runtime overhead | `fast_approx` | Exact near-field jerk + far-field convective term. |
+| Highest fidelity (includes source-motion effects) | `accurate` | Central finite-difference total derivative (extra solves). |
+| Stable default for large production runs | `fast_approx` | Benchmark against your own workload before switching defaults. |
+
 For ODISSEO-style primitive states `(N, 2, 3)`, you can use the adapter:
 
 ```python

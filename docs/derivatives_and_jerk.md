@@ -56,6 +56,14 @@ Both return:
 
 ## Choosing A Mode
 
+| Priority | Recommended mode | Why |
+|---|---|---|
+| Throughput | `fast_approx` | No extra global solves. |
+| Fidelity to total jerk | `accurate` | Includes source-motion effects via finite differences. |
+| Conservative rollout | start `fast_approx`, compare with `accurate` | Quantify the tradeoff on your own particle distributions. |
+
+General recommendation:
+
 - Start with `fast_approx` when runtime is primary.
 - Use `accurate` when jerk fidelity is critical (e.g. timestep control and
   close agreement to direct-sum jerk reference).
