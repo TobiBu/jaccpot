@@ -8,6 +8,7 @@ from typing import NamedTuple
 import jax
 import jax.numpy as jnp
 from jaxtyping import Array
+from yggdrax.interactions import NodeInteractionList
 
 from jaccpot.operators.complex_harmonics import p2m_complex_batch
 from jaccpot.operators.complex_ops import enforce_conjugate_symmetry_batch, m2m_complex
@@ -42,6 +43,19 @@ class OctreeSolidFMMComplexMultipoles(NamedTuple):
     packed: Array
 
 
+class OctreeInteractionPlan(NamedTuple):
+    """Level-major far-field pairs remapped into explicit octree node space."""
+
+    valid_mask: Array
+    target_nodes: Array
+    source_nodes: Array
+    target_levels: Array
+    offsets: Array
+    counts: Array
+    level_offsets: Array
+    num_pairs: Array
+
+
 def build_octree_upward_plan(octree: OctreeExecutionData) -> OctreeUpwardPlan:
     """Package explicit octree metadata into a future-proof upward-sweep plan."""
 
@@ -58,6 +72,77 @@ def build_octree_upward_plan(octree: OctreeExecutionData) -> OctreeUpwardPlan:
         leaf_nodes=jnp.asarray(octree.leaf_nodes, dtype=INDEX_DTYPE),
         num_valid_nodes=jnp.asarray(octree.num_valid_nodes, dtype=INDEX_DTYPE),
         num_leaf_nodes=jnp.asarray(octree.num_leaf_nodes, dtype=INDEX_DTYPE),
+    )
+
+
+def build_octree_interaction_plan(
+    octree: OctreeExecutionData,
+    interactions: NodeInteractionList,
+) -> OctreeInteractionPlan:
+    """Remap radix far-field pairs into explicit octree node space."""
+
+    radix_sources = jnp.asarray(interactions.sources, dtype=INDEX_DTYPE)
+    radix_targets = jnp.asarray(interactions.targets, dtype=INDEX_DTYPE)
+    num_oct_nodes = int(octree.valid_mask.shape[0])
+    sentinel_node = jnp.asarray(num_oct_nodes, dtype=INDEX_DTYPE)
+    sentinel_level = jnp.asarray(int(octree.num_levels), dtype=INDEX_DTYPE)
+
+    oct_sources = jnp.where(
+        radix_sources >= 0,
+        octree.radix_node_to_oct[jnp.clip(radix_sources, min=0)],
+        jnp.asarray(-1, dtype=INDEX_DTYPE),
+    )
+    oct_targets = jnp.where(
+        radix_targets >= 0,
+        octree.radix_node_to_oct[jnp.clip(radix_targets, min=0)],
+        jnp.asarray(-1, dtype=INDEX_DTYPE),
+    )
+    valid = (
+        (radix_sources >= 0)
+        & (radix_targets >= 0)
+        & (oct_sources >= 0)
+        & (oct_targets >= 0)
+    )
+
+    safe_targets = jnp.where(valid, oct_targets, sentinel_node)
+    safe_sources = jnp.where(valid, oct_sources, sentinel_node)
+    target_depths = octree.node_depths[jnp.clip(safe_targets, 0, num_oct_nodes - 1)]
+    safe_levels = jnp.where(valid, target_depths, sentinel_level)
+    order = jnp.lexsort((safe_sources, safe_targets, safe_levels))
+
+    sorted_valid = valid[order]
+    sorted_targets = safe_targets[order]
+    sorted_sources = safe_sources[order]
+    sorted_levels = safe_levels[order]
+
+    counts = jnp.zeros((num_oct_nodes,), dtype=INDEX_DTYPE)
+    counts = counts.at[jnp.where(sorted_valid, sorted_targets, 0)].add(
+        sorted_valid.astype(INDEX_DTYPE)
+    )
+    offsets = jnp.cumsum(counts, dtype=INDEX_DTYPE) - counts
+
+    num_levels = int(octree.num_levels)
+    level_counts = jnp.zeros((num_levels,), dtype=INDEX_DTYPE)
+    level_counts = level_counts.at[jnp.where(sorted_valid, sorted_levels, 0)].add(
+        sorted_valid.astype(INDEX_DTYPE)
+    )
+    level_offsets = jnp.concatenate(
+        [
+            jnp.zeros((1,), dtype=INDEX_DTYPE),
+            jnp.cumsum(level_counts, dtype=INDEX_DTYPE),
+        ],
+        axis=0,
+    )
+
+    return OctreeInteractionPlan(
+        valid_mask=sorted_valid,
+        target_nodes=sorted_targets,
+        source_nodes=sorted_sources,
+        target_levels=sorted_levels,
+        offsets=offsets,
+        counts=counts,
+        level_offsets=level_offsets,
+        num_pairs=jnp.sum(sorted_valid.astype(INDEX_DTYPE)),
     )
 
 
@@ -286,8 +371,10 @@ def prepare_octree_solidfmm_complex_multipoles(
 
 
 __all__ = [
+    "OctreeInteractionPlan",
     "OctreeSolidFMMComplexMultipoles",
     "OctreeUpwardPlan",
+    "build_octree_interaction_plan",
     "build_octree_upward_plan",
     "compute_octree_center_of_mass",
     "prepare_octree_solidfmm_complex_multipoles",

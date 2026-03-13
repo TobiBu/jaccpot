@@ -3,6 +3,7 @@ import numpy as np
 
 from jaccpot import FastMultipoleMethod, FMMAdvancedConfig, FMMPreset, TreeConfig
 from jaccpot.runtime._octree_fmm import (
+    build_octree_interaction_plan,
     build_octree_upward_plan,
     prepare_octree_solidfmm_complex_multipoles,
 )
@@ -146,3 +147,37 @@ def test_prepare_state_attaches_octree_native_upward_artifacts():
         rtol=1e-5,
         atol=1e-5,
     )
+
+
+def test_octree_interaction_plan_remaps_farfield_pairs_by_level():
+    positions, masses = _sample_problem(n=64)
+    fmm = FastMultipoleMethod(
+        preset=FMMPreset.FAST,
+        basis="solidfmm",
+        advanced=FMMAdvancedConfig(tree=TreeConfig(tree_type="octree")),
+    )
+
+    state = fmm.prepare_state(
+        positions,
+        masses,
+        leaf_size=8,
+        max_order=3,
+    )
+
+    assert state.octree is not None
+    assert state.interactions is not None
+
+    plan = build_octree_interaction_plan(state.octree, state.interactions)
+    num_pairs = int(np.asarray(plan.num_pairs))
+    valid_mask = np.asarray(plan.valid_mask)
+    target_nodes = np.asarray(plan.target_nodes)
+    target_levels = np.asarray(plan.target_levels)
+    counts = np.asarray(plan.counts)
+    level_offsets = np.asarray(plan.level_offsets)
+
+    assert num_pairs > 0
+    assert valid_mask.shape == target_nodes.shape
+    assert counts.sum() == num_pairs
+    assert level_offsets[-1] == num_pairs
+    assert np.all(target_levels[:num_pairs][1:] >= target_levels[:num_pairs][:-1])
+    assert np.all(target_nodes[:num_pairs] >= 0)
