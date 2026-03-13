@@ -19,6 +19,7 @@ from .real_harmonics import (
 )
 from .symmetric_tensors import (
     contract_symmetric_one_axis_3d,
+    symmetric_component_count,
     symmetric_multi_indices_3d,
 )
 
@@ -230,31 +231,86 @@ def evaluate_local_complex_with_grad_batch(
     )(deltas)
 
 
-@lru_cache(maxsize=None)
-def _dense_to_packed_gather_3d(order: int) -> tuple[int, ...]:
-    """Flat gather indices selecting canonical symmetric components."""
-    if order < 0:
-        raise ValueError("order must be non-negative")
-    if order == 0:
-        return (0,)
-    gather: list[int] = []
-    for nx, ny, nz in symmetric_multi_indices_3d(order):
-        flat = 0
-        for _ in range(nx):
-            flat = flat * 3
-        for _ in range(ny):
-            flat = flat * 3 + 1
-        for _ in range(nz):
-            flat = flat * 3 + 2
-        gather.append(flat)
-    return tuple(gather)
+def _lower_complex_harmonics_one_axis(
+    coeffs: Array,
+    *,
+    order: int,
+    axis: int,
+) -> Array:
+    """Apply one Cartesian derivative to packed complex-harmonic coefficients.
+
+    If ``coeffs`` represents ``f_n^m`` over ``0 <= n <= order``, this returns
+    coefficients representing ``∂_{axis} f_n^m`` in the same packed layout.
+    """
+    p = int(order)
+    if axis not in (0, 1, 2):
+        raise ValueError("axis must be 0, 1, or 2")
+    coeffs = jnp.asarray(coeffs)[: sh_size(p)]
+    out = jnp.zeros_like(coeffs)
+
+    def _get(n: int, m: int) -> Array:
+        if n < 0 or abs(m) > n:
+            return jnp.asarray(0.0 + 0.0j, dtype=coeffs.dtype)
+        return coeffs[sh_offset(n) + (m + n)]
+
+    for n in range(1, p + 1):
+        for m in range(-n, n + 1):
+            if axis == 0:
+                val = 0.5 * (_get(n - 1, m - 1) - _get(n - 1, m + 1))
+            elif axis == 1:
+                val = 0.5j * (_get(n - 1, m - 1) + _get(n - 1, m + 1))
+            else:
+                val = _get(n - 1, m)
+            out = out.at[sh_offset(n) + (m + n)].set(val)
+    return out
 
 
-def _pack_symmetric_dense_3d(dense: Array, *, order: int) -> Array:
-    """Pack a dense 3D symmetric rank-``order`` tensor."""
-    flat = dense.reshape((-1,))
-    gather = jnp.asarray(_dense_to_packed_gather_3d(order), dtype=jnp.int32)
-    return flat[gather]
+def _build_complex_harmonic_derivative_coefficients(
+    delta: Array,
+    *,
+    order: int,
+    max_derivative_order: int,
+) -> tuple[Array, ...]:
+    """Build packed coefficient vectors for ``D^k R`` (k=0..K)."""
+    p = int(order)
+    k_max = int(max_derivative_order)
+    if k_max < 0:
+        raise ValueError("max_derivative_order must be non-negative")
+
+    base = jnp.asarray(complex_R_solidfmm(delta, order=p))
+    levels: list[Array] = [base[jnp.newaxis, :]]
+    if k_max == 0:
+        return tuple(levels)
+
+    for deriv_order in range(1, k_max + 1):
+        combos = symmetric_multi_indices_3d(deriv_order)
+        prev_combos = symmetric_multi_indices_3d(deriv_order - 1)
+        prev = levels[-1]
+        prev_index = {combo: idx for idx, combo in enumerate(prev_combos)}
+        current = jnp.zeros(
+            (symmetric_component_count(deriv_order, dim=3), sh_size(p)),
+            dtype=base.dtype,
+        )
+        for idx, combo in enumerate(combos):
+            if combo[0] > 0:
+                parent = (combo[0] - 1, combo[1], combo[2])
+                axis = 0
+            elif combo[1] > 0:
+                parent = (combo[0], combo[1] - 1, combo[2])
+                axis = 1
+            else:
+                parent = (combo[0], combo[1], combo[2] - 1)
+                axis = 2
+            parent_coeff = prev[prev_index[parent]]
+            derived = _lower_complex_harmonics_one_axis(
+                parent_coeff,
+                order=p,
+                axis=axis,
+            )
+            current = current.at[idx].set(derived)
+        levels.append(current)
+
+    return tuple(levels)
 
 
 def evaluate_local_complex_derivative_tower(
@@ -278,23 +334,23 @@ def evaluate_local_complex_derivative_tower(
     if k_max < 0:
         raise ValueError("max_derivative_order must be non-negative")
 
-    def phi_fn(d: Array) -> Array:
-        return evaluate_local_complex(local, d, order=p, conjugate_left=conjugate_left)
-
-    out: list[Array] = [jnp.asarray([phi_fn(delta)])]
-    if k_max == 0:
-        return tuple(out)
-
-    grad_fn = jax.grad(phi_fn)
-    grad = grad_fn(delta)
-    out.append(grad)
-
-    current_fn = grad_fn
-    for deriv_order in range(2, k_max + 1):
-        current_fn = jax.jacfwd(current_fn)
-        dense = current_fn(delta)
-        out.append(_pack_symmetric_dense_3d(dense, order=deriv_order))
-
+    local = jnp.asarray(local)[: sh_size(p)]
+    deriv_coeffs = _build_complex_harmonic_derivative_coefficients(
+        delta,
+        order=p,
+        max_derivative_order=k_max,
+    )
+    out: list[Array] = []
+    for deriv_order, coeff_level in enumerate(deriv_coeffs):
+        vals = jax.vmap(
+            lambda coeff: jnp.real(
+                complex_dot(local, coeff, order=p, conjugate_left=conjugate_left)
+            )
+        )(coeff_level)
+        if deriv_order == 0:
+            out.append(vals)
+        else:
+            out.append(vals[: symmetric_component_count(deriv_order, dim=3)])
     return tuple(out)
 
 

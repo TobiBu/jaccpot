@@ -341,6 +341,31 @@ def test_evaluate_local_complex_derivative_tower_matches_grad_and_hessian() -> N
     assert np.allclose(np.asarray(d2), d2_ref, rtol=1e-12, atol=1e-12)
 
 
+def test_evaluate_local_complex_derivative_tower_matches_third_order_autodiff() -> None:
+    order = 5
+    rng = np.random.default_rng(22)
+    ncoeff = sh_size(order)
+    local = rng.normal(size=(ncoeff,)) + 1j * rng.normal(size=(ncoeff,))
+    delta = jnp.array([0.19, -0.41, 0.63], dtype=jnp.float64)
+
+    _, _, _, d3 = evaluate_local_complex_derivative_tower(
+        jnp.asarray(local),
+        delta,
+        order=order,
+        max_derivative_order=3,
+    )
+
+    phi = lambda d: complex_dot(
+        jnp.asarray(local),
+        complex_R_solidfmm(d, order=order),
+        order=order,
+        conjugate_left=True,
+    ).real
+    d3_dense = jax.jacfwd(jax.hessian(phi))(delta)
+    d3_ref = _pack_dense_reference(np.asarray(d3_dense), order=3)
+    assert np.allclose(np.asarray(d3), d3_ref, rtol=1e-11, atol=1e-11)
+
+
 def test_contract_spatial_derivative_with_velocity_matches_hessian_times_v() -> None:
     # Packed Hessian layout: xx, xy, xz, yy, yz, zz
     hessian_packed = jnp.array([2.0, -1.0, 4.0, 3.0, -2.0, 5.0], dtype=jnp.float64)
