@@ -121,6 +121,11 @@ from ._nearfield_cache import (
     with_nearfield_cache_artifacts,
 )
 from ._octree_adapter import OctreeExecutionData, build_octree_execution_data
+from ._octree_fmm import (
+    OctreeSolidFMMComplexMultipoles,
+    build_octree_upward_plan,
+    prepare_octree_solidfmm_complex_multipoles,
+)
 from .dtypes import INDEX_DTYPE, as_index, complex_dtype_for_real
 from .fmm_presets import FMMPreset, FMMPresetConfig, get_preset_config
 from .reference import MultipoleExpansion
@@ -893,6 +898,7 @@ class FMMPreparedState:
     force_scale_nodes: Optional[Array]
     execution_backend: str = "radix"
     octree: Optional[OctreeExecutionData] = None
+    octree_upward: Optional[OctreeSolidFMMComplexMultipoles] = None
 
     @property
     def positions_sorted(self) -> Array:
@@ -940,6 +946,7 @@ class FMMPreparedState:
             self.force_scale_nodes,
             self.execution_backend,
             self.octree,
+            self.octree_upward,
         )
         aux = (
             int(self.max_leaf_size),
@@ -981,6 +988,7 @@ class FMMPreparedState:
             force_scale_nodes,
             execution_backend,
             octree,
+            octree_upward,
         ) = children
         return cls(
             tree=tree,
@@ -1005,6 +1013,7 @@ class FMMPreparedState:
             force_scale_nodes=force_scale_nodes,
             execution_backend=str(execution_backend),
             octree=octree,
+            octree_upward=octree_upward,
         )
 
 
@@ -1032,6 +1041,27 @@ class _PrepareStateDualDownwardArtifacts(NamedTuple):
     compact_far_pairs: Optional[CompactTaggedFarPairs]
     downward: TreeDownwardData
     cache_entry: Optional[_InteractionCacheEntry]
+
+
+def _build_octree_upward_artifacts(
+    *,
+    octree: Optional[OctreeExecutionData],
+    positions_sorted: Array,
+    masses_sorted: Array,
+    expansion_basis: ExpansionBasis,
+    max_order: int,
+) -> Optional[OctreeSolidFMMComplexMultipoles]:
+    """Build octree-native upward artifacts when the execution tree exposes them."""
+
+    if octree is None or expansion_basis != "solidfmm":
+        return None
+    plan = build_octree_upward_plan(octree)
+    return prepare_octree_solidfmm_complex_multipoles(
+        plan,
+        positions_sorted,
+        masses_sorted,
+        max_order=int(max_order),
+    )
 
 
 class _FarPairCOO(NamedTuple):
@@ -1734,6 +1764,7 @@ class FastMultipoleMethod:
                 cache_entry=dual_downward_artifacts.cache_entry,
                 allow_stateful_cache=False,
             )
+            prepass_octree = build_octree_execution_data(low_tree_artifacts.tree)
             prepass_state = FMMPreparedState(
                 tree=low_tree_artifacts.tree,
                 upward=low_tree_artifacts.upward,
@@ -1755,6 +1786,14 @@ class FastMultipoleMethod:
                 nearfield_chunk_group_ids=nearfield_artifacts.chunk_group_ids,
                 nearfield_chunk_unique_indices=nearfield_artifacts.chunk_unique_indices,
                 force_scale_nodes=None,
+                octree=prepass_octree,
+                octree_upward=_build_octree_upward_artifacts(
+                    octree=prepass_octree,
+                    positions_sorted=low_tree_artifacts.positions_sorted,
+                    masses_sorted=low_tree_artifacts.masses_sorted,
+                    expansion_basis=self.expansion_basis,
+                    max_order=int(low_order),
+                ),
             )
             prepass_acc = self.evaluate_prepared_state(
                 prepass_state,
@@ -4058,6 +4097,7 @@ class FastMultipoleMethod:
             f"chunk_group_ids={_format_nbytes(_estimate_payload_nbytes(nearfield_artifacts.chunk_group_ids))} "
             f"chunk_unique_indices={_format_nbytes(_estimate_payload_nbytes(nearfield_artifacts.chunk_unique_indices))}"
         )
+        octree = build_octree_execution_data(tree_artifacts.tree)
 
         return FMMPreparedState(
             tree=tree_artifacts.tree,
@@ -4081,7 +4121,14 @@ class FastMultipoleMethod:
             nearfield_chunk_unique_indices=nearfield_artifacts.chunk_unique_indices,
             force_scale_nodes=force_scale_nodes,
             execution_backend=self._resolve_execution_backend(),
-            octree=build_octree_execution_data(tree_artifacts.tree),
+            octree=octree,
+            octree_upward=_build_octree_upward_artifacts(
+                octree=octree,
+                positions_sorted=tree_artifacts.positions_sorted,
+                masses_sorted=tree_artifacts.masses_sorted,
+                expansion_basis=self.expansion_basis,
+                max_order=int(max_order),
+            ),
         )
 
     @jaxtyped(typechecker=beartype)

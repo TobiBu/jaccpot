@@ -105,3 +105,44 @@ def test_octree_complex_multipoles_match_radix_upward_on_mapped_nodes():
         rtol=1e-6,
         atol=1e-6,
     )
+
+
+def test_prepare_state_attaches_octree_native_upward_artifacts():
+    positions, masses = _sample_problem(n=64)
+    fmm = FastMultipoleMethod(
+        preset=FMMPreset.FAST,
+        basis="solidfmm",
+        advanced=FMMAdvancedConfig(tree=TreeConfig(tree_type="octree")),
+    )
+
+    state = fmm.prepare_state(
+        positions,
+        masses,
+        leaf_size=8,
+        max_order=3,
+    )
+
+    assert state.octree is not None
+    assert state.octree_upward is not None
+
+    plan = build_octree_upward_plan(state.octree)
+    expected = prepare_octree_solidfmm_complex_multipoles(
+        plan,
+        state.positions_sorted,
+        state.masses_sorted,
+        max_order=3,
+    )
+    root_oct = int(np.asarray(state.octree.radix_node_to_oct)[0])
+
+    assert np.allclose(
+        np.asarray(state.octree_upward.centers),
+        np.asarray(expected.centers),
+        rtol=1e-6,
+        atol=1e-6,
+    )
+    assert np.allclose(
+        np.asarray(state.octree_upward.packed)[root_oct],
+        np.asarray(expected.packed)[root_oct],
+        rtol=1e-5,
+        atol=1e-5,
+    )
