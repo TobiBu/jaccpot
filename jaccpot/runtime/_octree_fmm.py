@@ -11,7 +11,11 @@ from jaxtyping import Array
 from yggdrax.interactions import NodeInteractionList
 
 from jaccpot.operators.complex_harmonics import p2m_complex_batch
-from jaccpot.operators.complex_ops import enforce_conjugate_symmetry_batch, m2m_complex
+from jaccpot.operators.complex_ops import (
+    enforce_conjugate_symmetry_batch,
+    m2l_complex_reference_batch,
+    m2m_complex,
+)
 from jaccpot.operators.real_harmonics import sh_size
 
 from ._octree_adapter import OctreeExecutionData
@@ -201,6 +205,115 @@ def build_octree_downward_plan(
         ),
         valid_interactions=jnp.asarray(interactions.valid_mask, dtype=jnp.bool_),
         num_pairs=jnp.asarray(interactions.num_pairs, dtype=INDEX_DTYPE),
+    )
+
+
+@partial(jax.jit, static_argnames=("order", "chunk_size"))
+def _accumulate_octree_m2l_complex_chunked(
+    locals_coeffs: Array,
+    multipoles: Array,
+    centers: Array,
+    target_nodes: Array,
+    source_nodes: Array,
+    valid_interactions: Array,
+    *,
+    order: int,
+    chunk_size: int,
+) -> Array:
+    """Accumulate complex-basis octree M2L contributions in fixed-size chunks."""
+
+    pair_count = int(target_nodes.shape[0])
+    if pair_count == 0:
+        return locals_coeffs
+
+    chunk = int(max(chunk_size, 1))
+    starts = jnp.arange(0, pair_count, chunk, dtype=INDEX_DTYPE)
+
+    def body(local_accum: Array, start_idx: Array) -> tuple[Array, None]:
+        offset = jnp.arange(chunk, dtype=INDEX_DTYPE)
+        idx = start_idx + offset
+        in_range = idx < pair_count
+        safe_idx = jnp.where(in_range, idx, 0)
+
+        tgt_chunk = target_nodes[safe_idx]
+        src_chunk = source_nodes[safe_idx]
+        valid = in_range & valid_interactions[safe_idx]
+        safe_tgt = jnp.where(valid, tgt_chunk, 0)
+        safe_src = jnp.where(valid, src_chunk, 0)
+
+        deltas = centers[safe_tgt] - centers[safe_src]
+        src_mult = multipoles[safe_src]
+        contribs = m2l_complex_reference_batch(
+            src_mult,
+            deltas,
+            order=order,
+            rotation="solidfmm",
+        ).astype(locals_coeffs.dtype)
+        contribs = jnp.where(valid[:, None], contribs, 0.0)
+
+        sort_idx = jnp.argsort(safe_tgt)
+        tgt_sorted = safe_tgt[sort_idx]
+        contribs_sorted = contribs[sort_idx]
+        valid_sorted = valid[sort_idx]
+        new_group = jnp.concatenate(
+            (jnp.asarray([True], dtype=jnp.bool_), tgt_sorted[1:] != tgt_sorted[:-1]),
+            axis=0,
+        )
+        group_ids = jnp.cumsum(new_group.astype(INDEX_DTYPE)) - jnp.asarray(
+            1,
+            dtype=INDEX_DTYPE,
+        )
+        reduced = jax.ops.segment_sum(contribs_sorted, group_ids, chunk)
+
+        unique_targets = jnp.zeros((chunk,), dtype=INDEX_DTYPE)
+        unique_targets = unique_targets.at[group_ids].set(tgt_sorted)
+        unique_valid = jnp.zeros((chunk,), dtype=jnp.bool_)
+        unique_valid = unique_valid.at[group_ids].set(valid_sorted)
+        safe_targets = jnp.where(unique_valid, unique_targets, 0)
+        reduced = jnp.where(unique_valid[:, None], reduced, 0.0)
+        return local_accum.at[safe_targets].add(reduced), None
+
+    accumulated, _ = jax.lax.scan(body, locals_coeffs, starts)
+    return enforce_conjugate_symmetry_batch(accumulated, order=order)
+
+
+def accumulate_octree_solidfmm_m2l(
+    downward: OctreeSolidFMMDownwardPlan,
+    multipoles: OctreeSolidFMMComplexMultipoles,
+    *,
+    chunk_size: int = 4096,
+) -> OctreeSolidFMMDownwardPlan:
+    """Accumulate octree-native complex M2L contributions into local buffers."""
+
+    order = int(downward.order)
+    if int(multipoles.order) != order:
+        raise ValueError("octree downward and multipoles must use the same order")
+    if int(chunk_size) <= 0:
+        raise ValueError("chunk_size must be positive")
+
+    locals_packed = _accumulate_octree_m2l_complex_chunked(
+        jnp.asarray(downward.locals_packed),
+        jnp.asarray(multipoles.packed),
+        jnp.asarray(downward.centers),
+        jnp.asarray(downward.target_nodes, dtype=INDEX_DTYPE),
+        jnp.asarray(downward.source_nodes, dtype=INDEX_DTYPE),
+        jnp.asarray(downward.valid_interactions, dtype=jnp.bool_),
+        order=order,
+        chunk_size=int(chunk_size),
+    )
+    return OctreeSolidFMMDownwardPlan(
+        order=downward.order,
+        centers=downward.centers,
+        locals_packed=locals_packed,
+        parent=downward.parent,
+        nodes_by_level=downward.nodes_by_level,
+        level_offsets=downward.level_offsets,
+        target_nodes=downward.target_nodes,
+        source_nodes=downward.source_nodes,
+        target_levels=downward.target_levels,
+        interaction_level_offsets=downward.interaction_level_offsets,
+        valid_interactions=downward.valid_interactions,
+        num_pairs=downward.num_pairs,
     )
 
 
@@ -432,6 +545,7 @@ __all__ = [
     "OctreeSolidFMMDownwardPlan",
     "OctreeInteractionPlan",
     "OctreeSolidFMMComplexMultipoles",
+    "accumulate_octree_solidfmm_m2l",
     "build_octree_downward_plan",
     "OctreeUpwardPlan",
     "build_octree_interaction_plan",

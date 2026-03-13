@@ -2,7 +2,9 @@ import jax.numpy as jnp
 import numpy as np
 
 from jaccpot import FastMultipoleMethod, FMMAdvancedConfig, FMMPreset, TreeConfig
+from jaccpot.runtime._fmm_impl import _prepare_solidfmm_downward_sweep
 from jaccpot.runtime._octree_fmm import (
+    accumulate_octree_solidfmm_m2l,
     build_octree_downward_plan,
     build_octree_interaction_plan,
     build_octree_upward_plan,
@@ -233,3 +235,48 @@ def test_prepare_state_attaches_octree_native_downward_scaffold():
     valid_children = children[root_oct][children[root_oct] >= 0]
     assert valid_children.size > 0
     assert np.all(parent[valid_children] == root_oct)
+
+
+def test_octree_m2l_matches_radix_root_local():
+    positions, masses = _sample_problem(n=64)
+    fmm = FastMultipoleMethod(
+        preset=FMMPreset.FAST,
+        basis="solidfmm",
+        advanced=FMMAdvancedConfig(tree=TreeConfig(tree_type="octree")),
+    )
+
+    state = fmm.prepare_state(
+        positions,
+        masses,
+        leaf_size=8,
+        max_order=3,
+    )
+
+    assert state.octree is not None
+    assert state.octree_upward is not None
+    assert state.octree_downward is not None
+
+    octree_m2l = accumulate_octree_solidfmm_m2l(
+        state.octree_downward,
+        state.octree_upward,
+        chunk_size=128,
+    )
+    radix_downward = _prepare_solidfmm_downward_sweep(
+        state.tree,
+        state.upward,
+        theta=float(state.theta),
+        mac_type="bh",
+        interactions=state.interactions,
+        m2l_chunk_size=128,
+        basis_mode="complex",
+        complex_rotation="solidfmm",
+    )
+
+    root_oct = int(np.asarray(state.octree.radix_node_to_oct)[0])
+
+    assert np.allclose(
+        np.asarray(octree_m2l.locals_packed)[root_oct],
+        np.asarray(radix_downward.locals.coefficients)[0],
+        rtol=1e-5,
+        atol=1e-5,
+    )
