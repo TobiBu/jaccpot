@@ -91,6 +91,9 @@ acc, jerk = solver.compute_accelerations_and_jerk(
 )
 ```
 
+See [docs/derivatives_and_jerk.md](docs/derivatives_and_jerk.md) for API details,
+mode tradeoffs, and output tensor layouts.
+
 For ODISSEO-style primitive states `(N, 2, 3)`, you can use the adapter:
 
 ```python
@@ -129,6 +132,11 @@ Run the lightweight runtime-path benchmark and CI guard locally:
 python -m bench.bench_parallel_paths --n 512 --runs 3 --warmup 1
 python -m bench.ci_benchmark_guard --n 384 --runs 2 --warmup 1
 ```
+
+## Examples
+
+- `examples/benchmark_runtime_accuracy.ipynb`: runtime/accuracy benchmark workflow
+- `examples/jerk_modes_demo.ipynb`: compare jerk `fast_approx` vs `accurate` modes
 
 ## Runtime Type Checking
 

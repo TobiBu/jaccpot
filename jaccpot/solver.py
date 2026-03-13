@@ -339,6 +339,14 @@ class FastMultipoleMethod:
 
         When ``target_indices`` is provided, all particles remain source masses
         but outputs are returned only for the indexed target particles.
+
+        Parameters
+        ----------
+        max_acc_derivative_order:
+            Request packed spatial derivatives of acceleration in addition to
+            acceleration itself. ``0`` disables derivatives.
+            ``1`` returns the acceleration Jacobian with shape ``(N, 3, 3)`` in
+            packed-symmetric layout across the trailing axis.
         """
         return self._impl.compute_accelerations(
             positions,
@@ -391,7 +399,18 @@ class FastMultipoleMethod:
         jerk_mode: str = "fast_approx",
         jerk_fd_dt: float = 1e-3,
     ) -> tuple[Array, Array]:
-        """Compute accelerations and jerk estimates for particle data."""
+        """Compute accelerations and jerk estimates for particle data.
+
+        Parameters
+        ----------
+        jerk_mode:
+            ``"fast_approx"`` uses exact near-field jerk plus far-field
+            convective jerk from the acceleration Jacobian.
+            ``"accurate"`` estimates total jerk via central finite differences
+            of full accelerations and includes source-motion effects.
+        jerk_fd_dt:
+            Finite-difference step used only when ``jerk_mode="accurate"``.
+        """
         return self._impl.compute_accelerations_and_jerk(
             positions,
             masses,
@@ -460,7 +479,16 @@ class FastMultipoleMethod:
         jerk_mode: str = "fast_approx",
         jerk_fd_dt: float = 1e-3,
     ) -> tuple[Array, Array]:
-        """Evaluate accelerations and jerk for a prepared state."""
+        """Evaluate accelerations and jerk for a prepared state.
+
+        Parameters
+        ----------
+        jerk_mode:
+            ``"fast_approx"`` or ``"accurate"``; see
+            :meth:`compute_accelerations_and_jerk`.
+        jerk_fd_dt:
+            Finite-difference step for ``"accurate"`` mode.
+        """
         jit_traversal = (
             True
             if self.advanced.runtime.jit_traversal is None
