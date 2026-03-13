@@ -159,7 +159,7 @@ JAX_ENABLE_X64=1 micromamba run -n odisseo python -m pytest -q -o addopts='' \
 
 ## Latest Confirmed State
 
-The original large upward-memory failure is resolved for the target GPU notebook case.
+The original large upward-memory failure is resolved for the target GPU notebook case, and the current `engblom` production baseline is substantially leaner than the earlier `dehnen`/oversized-queue path.
 
 For:
 
@@ -177,43 +177,59 @@ farfield_mode=pair_grouped
 
 the prepare path now completes with:
 
-- working single-shot fail-fast traversal seed:
-  - `max_pair_queue=524288`
-  - `process_block=512`
-  - `max_interactions_per_node=16384`
-  - `max_neighbors_per_leaf=8192`
-- dual-tree result:
-  - `neighbor_count=1371872`
-  - `far_pair_count=817210`
+- current recommended single-shot fail-fast `engblom` baseline:
+  - `mac_type=engblom`
+  - `max_pair_queue=262144`
+  - `process_block=256`
+  - `max_interactions_per_node=8192`
+  - `max_neighbors_per_leaf=4096`
+  - `m2l_chunk_size=1024`
+  - `nearfield_edge_chunk_size=128`
+- dual-tree result under this `engblom` baseline:
+  - `neighbor_count=901932`
+  - `far_pair_count=487290`
   - `compact_far_pairs=True`
   - `interactions_present=False`
 
-Peak/size summary from the current notebook:
+Peak/size summary from the current notebook baseline:
 
-- cold prepare peak GPU delta: `4006 MB`
+- cold prepare peak GPU delta: `3940 MB`
 - warm prepare peak GPU delta: `2326 MB`
-- evaluate peak GPU delta: `204 MB`
-- prepared state size: `27.30 MB`
-- cold prepare wall time: `~86.1 s`
-- warm prepare wall time: `~37.4 s`
-- evaluate wall time: `~2.29 s`
+- evaluate peak GPU delta: `202 MB`
+- prepared state size: `25.51 MB`
+- cold prepare wall time: `~89.1 s`
+- warm prepare wall time: `~37.3 s`
+- evaluate wall time: `~2.71 s`
 
 Retained prepare-state payload is small:
 
 - dual-tree retained bytes:
-  - neighbors: `5.28 MiB`
-  - compact far pairs: `9.35 MiB`
+  - neighbors: `3.49 MiB`
+  - compact far pairs: `5.58 MiB`
 - downward retained bytes:
   - locals: `1.66 MiB`
 - nearfield retained bytes:
   - `0`
+
+Direct warm prepare-peak comparison for the tuned `engblom` path:
+
+- candidate `262144 / 256 / 8192 / 4096`, `m2l=1024`, `nearfield=128`:
+  - warm prepare peak GPU delta: `48 MB`
+  - warm prepare wall time: `3.06 s`
+- control `524288 / 256 / 16384 / 4096`, `m2l=1024`, `nearfield=64`:
+  - warm prepare peak GPU delta: `1566 MB`
+  - warm prepare wall time: `3.25 s`
+
+This strongly suggests the oversized traversal seed was a major driver of the remaining transient prepare workspace under `engblom`.
 
 Conclusion:
 
 - the catastrophic multi-10-GB allocation is gone
 - the remaining prepare peak is transient workspace, not retained state
 - roughly `1.68 GB` of the cold peak is compile/first-call overhead
-- the main remaining optimization target is warm prepare workspace/runtime
+- `engblom` materially reduces interaction counts and retained pair payload versus the earlier `dehnen` baseline
+- `max_pair_queue=262144` is sufficient for this `engblom` case, while `131072` still overflows
+- the main remaining optimization target is compile overhead and any residual warm prepare workspace/runtime above the tuned `engblom` baseline
 
 ## Traversal / Retry Policy
 
