@@ -29,13 +29,13 @@ class OdisseoFMMCoupler:
     _prepared_state: Optional[FMMPreparedState] = None
     _masses: Optional[Array] = None
 
-    def clear(self) -> None:
+    def clear(self: "OdisseoFMMCoupler") -> None:
         """Drop the cached prepared-state payload."""
         self._prepared_state = None
         self._masses = None
 
     def prepare(
-        self,
+        self: "OdisseoFMMCoupler",
         state: Array,
         masses: Array,
         *,
@@ -57,7 +57,7 @@ class OdisseoFMMCoupler:
         return state_prepared
 
     def accelerations(
-        self,
+        self: "OdisseoFMMCoupler",
         state: Array,
         masses: Optional[Array] = None,
         *,

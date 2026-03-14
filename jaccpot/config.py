@@ -6,9 +6,10 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import Any, Literal, Optional
 
-Basis = Literal["cartesian", "solidfmm"]
+Basis = Literal["cartesian", "solidfmm", "complex", "real"]
 FarFieldMode = Literal["auto", "pair_grouped", "class_major"]
 NearFieldMode = Literal["auto", "baseline", "bucketed"]
+MemoryObjective = Literal["balanced", "throughput", "minimum_memory"]
 
 
 class FMMPreset(str, Enum):
@@ -17,6 +18,7 @@ class FMMPreset(str, Enum):
     FAST = "fast"
     BALANCED = "balanced"
     ACCURATE = "accurate"
+    LARGE_N_GPU = "large_n_gpu"
 
 
 @dataclass(frozen=True)
@@ -40,6 +42,9 @@ class FarFieldConfig:
     rotation: Optional[str] = None
     m2l_chunk_size: Optional[int] = None
     l2l_chunk_size: Optional[int] = None
+    streamed_far_pairs: Optional[bool] = None
+    mixed_order: bool = False
+    mixed_order_min_order: Optional[int] = None
 
 
 @dataclass(frozen=True)
@@ -56,11 +61,22 @@ class RuntimePolicyConfig:
     """Execution-policy overrides for tree build and traversal."""
 
     host_refine_mode: str = "auto"
+    fail_fast: bool = False
     jit_tree: Optional[bool] = None
     jit_traversal: Optional[bool] = None
+    memory_objective: MemoryObjective = "balanced"
+    memory_budget_bytes: Optional[int] = None
     max_pair_queue: Optional[int] = None
     pair_process_block: Optional[int] = None
     traversal_config: Optional[Any] = None
+    enable_interaction_cache: bool = True
+    retain_traversal_result: bool = True
+    retain_interactions: bool = True
+    autotune_m2l_chunk: bool = False
+    precompute_grouped_class_segments: Optional[bool] = None
+    grouped_schedule_budget_bytes: Optional[int] = None
+    nearfield_schedule_item_cap: Optional[int] = None
+    upward_leaf_batch_size: Optional[int] = None
 
 
 @dataclass(frozen=True)

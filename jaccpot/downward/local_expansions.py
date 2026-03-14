@@ -60,6 +60,22 @@ _LEVEL_COMBOS: Dict[int, Tuple[Tuple[int, int, int], ...]] = {
     level: multi_index_tuples(level) for level in range(MAX_MULTIPOLE_ORDER + 1)
 }
 
+
+def _multipole_component_matrix(
+    multipoles: NodeMultipoleData,
+    *,
+    coeff_count: int,
+    dtype: Any,
+) -> Array:
+    """Return the component matrix, falling back to packed coefficients."""
+    raw = (
+        multipoles.packed
+        if multipoles.component_matrix is None
+        else multipoles.component_matrix
+    )
+    return jnp.asarray(raw[:, :coeff_count], dtype=dtype)
+
+
 _LEVEL_INDEX_LOOKUP: Dict[int, Dict[Tuple[int, int, int], int]] = {
     level: {combo: idx for idx, combo in enumerate(combos)}
     for level, combos in _LEVEL_COMBOS.items()
@@ -631,8 +647,9 @@ def accumulate_dense_m2l_contributions(
         raise ValueError("local centers must align with multipole centers")
 
     coeff_count = int(coeffs.shape[1])
-    component_matrix = jnp.asarray(
-        multipoles.component_matrix[:, :coeff_count],
+    component_matrix = _multipole_component_matrix(
+        multipoles,
+        coeff_count=coeff_count,
         dtype=coeffs.dtype,
     )
     if component_matrix.shape[0] == 0:
@@ -1032,8 +1049,9 @@ def _accumulate_m2l_contributions_impl(
     coeff_dtype = coeffs.dtype
 
     total_coeff = int(coeffs.shape[1])
-    component_matrix = jnp.asarray(
-        multipoles.packed[:, :total_coeff],
+    component_matrix = _multipole_component_matrix(
+        multipoles,
+        coeff_count=total_coeff,
         dtype=coeff_dtype,
     )
 

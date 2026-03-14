@@ -4,10 +4,13 @@ from __future__ import annotations
 
 import warnings
 from dataclasses import replace
-from typing import Any, NamedTuple, Optional, Tuple, Union
+from typing import Any, Literal, NamedTuple, Optional, Sequence, Tuple, Union
 
+import jax
+import jax.numpy as jnp
 from jaxtyping import Array, DTypeLike
 
+from .basis import BasisInterface, ComplexSHBasis, RealSHBasis
 from .config import (
     Basis,
     FMMAdvancedConfig,
@@ -21,6 +24,56 @@ def _default_advanced_for_preset(preset: FMMPreset) -> FMMAdvancedConfig:
     """Return default advanced overrides for a high-level preset."""
     if preset is FMMPreset.FAST:
         return FMMAdvancedConfig()
+    if preset is FMMPreset.LARGE_N_GPU:
+        cfg = FMMAdvancedConfig()
+        return replace(
+            cfg,
+            tree=replace(
+                cfg.tree,
+                tree_type="radix",
+                mode="lbvh",
+                leaf_target=64,
+                refine_local=False,
+                max_refine_levels=0,
+                aspect_threshold=16.0,
+            ),
+            farfield=replace(
+                cfg.farfield,
+                mode="auto",
+                grouped_interactions=False,
+                rotation="solidfmm",
+                m2l_chunk_size=None,
+                l2l_chunk_size=None,
+                streamed_far_pairs=True,
+                mixed_order=False,
+                mixed_order_min_order=None,
+            ),
+            nearfield=replace(
+                cfg.nearfield,
+                mode="bucketed",
+                edge_chunk_size=256,
+                precompute_scatter_schedules=False,
+            ),
+            runtime=replace(
+                cfg.runtime,
+                host_refine_mode="off",
+                jit_tree=True,
+                jit_traversal=True,
+                memory_objective="minimum_memory",
+                traversal_config=None,
+                max_pair_queue=None,
+                pair_process_block=None,
+                enable_interaction_cache=False,
+                retain_traversal_result=False,
+                retain_interactions=False,
+                autotune_m2l_chunk=True,
+                precompute_grouped_class_segments=False,
+                grouped_schedule_budget_bytes=8 * 1024 * 1024,
+                upward_leaf_batch_size=2048,
+            ),
+            mac_type="dehnen",
+            dehnen_radius_scale=1.0,
+        )
     if preset is FMMPreset.BALANCED:
         cfg = FMMAdvancedConfig()
         return replace(
@@ -46,15 +99,70 @@ def _normalize_preset(preset: Union[FMMPreset, str]) -> FMMPreset:
     return FMMPreset(str(preset).strip().lower())
 
 
+class _BasisResolution(NamedTuple):
+    """Resolved basis routing for public API and runtime backend."""
+
+    public_name: str
+    runtime_basis: Basis
+    basis_impl: Optional[BasisInterface]
+
+
+def _resolve_basis_input(basis: Union[Basis, BasisInterface, str]) -> _BasisResolution:
+    """Normalize basis string/object to runtime expansion basis + metadata."""
+    if isinstance(basis, str):
+        basis_norm = basis.strip().lower()
+        if basis_norm in ("solidfmm", "complex"):
+            return _BasisResolution(
+                public_name="complex",
+                runtime_basis="solidfmm",
+                basis_impl=ComplexSHBasis(),
+            )
+        if basis_norm == "real":
+            return _BasisResolution(
+                public_name="real",
+                runtime_basis="solidfmm",
+                basis_impl=RealSHBasis(),
+            )
+        if basis_norm == "cartesian":
+            return _BasisResolution(
+                public_name="cartesian",
+                runtime_basis="cartesian",
+                basis_impl=None,
+            )
+        raise ValueError(
+            "basis must be one of 'cartesian', 'solidfmm', 'complex', or 'real', "
+            f"got '{basis}'"
+        )
+
+    if isinstance(basis, BasisInterface):
+        runtime_basis = str(basis.runtime_expansion_basis).strip().lower()
+        if runtime_basis == "complex":
+            runtime_basis = "solidfmm"
+        if runtime_basis not in ("cartesian", "solidfmm"):
+            raise ValueError(
+                "basis.runtime_expansion_basis must be 'cartesian', "
+                "'solidfmm', or 'complex'"
+            )
+        return _BasisResolution(
+            public_name=str(basis.name),
+            runtime_basis=runtime_basis,  # type: ignore[arg-type]
+            basis_impl=basis,
+        )
+
+    raise TypeError("basis must be a string or BasisInterface implementation")
+
+
 def _pop_legacy_common_overrides(
     *,
-    basis: Basis,
+    basis: Union[Basis, BasisInterface, str],
     theta: float,
     G: float,
     softening: float,
     working_dtype: Optional[DTypeLike],
     legacy_kwargs: dict[str, Any],
-) -> tuple[Basis, float, float, float, Optional[DTypeLike], bool]:
+) -> tuple[
+    Union[Basis, BasisInterface, str], float, float, float, Optional[DTypeLike], bool
+]:
     """Consume legacy constructor kwargs and map them to modern arguments."""
     used = False
     legacy_basis = legacy_kwargs.pop("expansion_basis", None)
@@ -131,7 +239,12 @@ def _pop_legacy_runtime_overrides(
         target_leaf_particles = int(legacy_leaf_target)
         legacy_used = True
 
-    expanse_preset = "fast" if preset_norm is FMMPreset.FAST else None
+    if preset_norm is FMMPreset.FAST:
+        expanse_preset = "fast"
+    elif preset_norm is FMMPreset.LARGE_N_GPU:
+        expanse_preset = "large_n_gpu"
+    else:
+        expanse_preset = None
     legacy_preset = legacy_kwargs.pop("preset", None)
     if legacy_preset is not None:
         if hasattr(legacy_preset, "value"):
@@ -208,10 +321,21 @@ class FastMultipoleMethod:
         self,
         *,
         preset: Union[FMMPreset, str] = FMMPreset.FAST,
-        basis: Basis = "solidfmm",
+        basis: Union[Basis, BasisInterface, str] = "complex",
+        m2l_impl: Optional[str] = None,
+        adaptive_order: bool = False,
+        p_gears: Optional[Sequence[int]] = None,
+        use_pallas: bool = False,
+        reuse_topology: bool = False,
+        rebuild_every: int = 1,
+        mac_force_scale_mode: str = "prev",
+        adaptive_error_model: str = "tail_proxy",
+        adaptive_eps: Optional[float] = None,
+        dehnen_geometry_mode: str = "tree",
         theta: float = 0.6,
         G: float = 1.0,
         softening: float = 1e-3,
+        precision: Optional[Literal["fp32", "fp64"]] = None,
         working_dtype: Optional[DTypeLike] = None,
         advanced: Optional[FMMAdvancedConfig] = None,
         **legacy_kwargs: Any,
@@ -229,6 +353,26 @@ class FastMultipoleMethod:
                 legacy_kwargs=legacy_kwargs,
             )
         )
+        if precision is not None:
+            precision_norm = str(precision).strip().lower()
+            if precision_norm not in ("fp32", "fp64"):
+                raise ValueError("precision must be one of ('fp32', 'fp64')")
+            precision_dtype = jnp.float32 if precision_norm == "fp32" else jnp.float64
+            if working_dtype is not None and jnp.dtype(working_dtype) != jnp.dtype(
+                precision_dtype
+            ):
+                raise ValueError(
+                    "precision conflicts with explicit working_dtype; "
+                    "use only one or ensure they match"
+                )
+            if precision_norm == "fp64" and not bool(jax.config.jax_enable_x64):
+                raise ValueError("precision='fp64' requires jax_enable_x64=True")
+            working_dtype = precision_dtype
+        basis_resolution = _resolve_basis_input(basis)
+        runtime_basis = basis_resolution.runtime_basis
+        resolved_m2l_impl = m2l_impl
+        if resolved_m2l_impl is None and basis_resolution.public_name == "real":
+            resolved_m2l_impl = "rot_scale"
 
         preset_norm = _normalize_preset(preset)
         advanced_cfg = (
@@ -237,7 +381,7 @@ class FastMultipoleMethod:
 
         runtime_overrides = _pop_legacy_runtime_overrides(
             preset_norm=preset_norm,
-            basis=basis,
+            basis=runtime_basis,
             advanced_cfg=advanced_cfg,
             legacy_kwargs=legacy_kwargs,
             legacy_used=legacy_used,
@@ -251,7 +395,18 @@ class FastMultipoleMethod:
             G=float(G),
             softening=float(softening),
             working_dtype=working_dtype,
-            expansion_basis=basis,
+            expansion_basis=runtime_basis,
+            basis_impl=basis_resolution.basis_impl,
+            m2l_impl=resolved_m2l_impl,
+            adaptive_order=adaptive_order,
+            p_gears=p_gears,
+            use_pallas=use_pallas,
+            reuse_topology=reuse_topology,
+            rebuild_every=rebuild_every,
+            mac_force_scale_mode=mac_force_scale_mode,
+            adaptive_error_model=adaptive_error_model,
+            adaptive_eps=adaptive_eps,
+            dehnen_geometry_mode=dehnen_geometry_mode,
             complex_rotation=runtime_overrides.complex_rotation,
             tree_type=runtime_overrides.tree_type or "radix",
             tree_build_mode=runtime_overrides.tree_mode,
@@ -269,6 +424,18 @@ class FastMultipoleMethod:
             ),
             grouped_interactions=runtime_overrides.grouped_interactions,
             farfield_mode=runtime_overrides.farfield_mode,
+            streamed_far_pairs=legacy_kwargs.pop(
+                "streamed_far_pairs",
+                advanced_cfg.farfield.streamed_far_pairs,
+            ),
+            mixed_order_farfield=legacy_kwargs.pop(
+                "mixed_order_farfield",
+                advanced_cfg.farfield.mixed_order,
+            ),
+            mixed_order_min_order=legacy_kwargs.pop(
+                "mixed_order_min_order",
+                advanced_cfg.farfield.mixed_order_min_order,
+            ),
             m2l_chunk_size=legacy_kwargs.pop(
                 "m2l_chunk_size",
                 advanced_cfg.farfield.m2l_chunk_size,
@@ -279,9 +446,31 @@ class FastMultipoleMethod:
             ),
             nearfield_mode=runtime_overrides.nearfield_mode,
             nearfield_edge_chunk_size=runtime_overrides.nearfield_edge_chunk_size,
+            precompute_nearfield_scatter_schedules=bool(
+                legacy_kwargs.pop(
+                    "precompute_nearfield_scatter_schedules",
+                    advanced_cfg.nearfield.precompute_scatter_schedules,
+                )
+            ),
             host_refine_mode=legacy_kwargs.pop(
                 "host_refine_mode",
                 advanced_cfg.runtime.host_refine_mode,
+            ),
+            fail_fast=bool(
+                legacy_kwargs.pop(
+                    "fail_fast",
+                    advanced_cfg.runtime.fail_fast,
+                )
+            ),
+            memory_objective=str(
+                legacy_kwargs.pop(
+                    "memory_objective",
+                    advanced_cfg.runtime.memory_objective,
+                )
+            ),
+            memory_budget_bytes=legacy_kwargs.pop(
+                "memory_budget_bytes",
+                advanced_cfg.runtime.memory_budget_bytes,
             ),
             max_pair_queue=legacy_kwargs.pop(
                 "max_pair_queue",
@@ -298,6 +487,46 @@ class FastMultipoleMethod:
             ),
             use_dense_interactions=legacy_kwargs.pop("use_dense_interactions", None),
             traversal_config=legacy_kwargs.pop("traversal_config", traversal_config),
+            enable_interaction_cache=bool(
+                legacy_kwargs.pop(
+                    "enable_interaction_cache",
+                    advanced_cfg.runtime.enable_interaction_cache,
+                )
+            ),
+            retain_traversal_result=bool(
+                legacy_kwargs.pop(
+                    "retain_traversal_result",
+                    advanced_cfg.runtime.retain_traversal_result,
+                )
+            ),
+            retain_interactions=bool(
+                legacy_kwargs.pop(
+                    "retain_interactions",
+                    advanced_cfg.runtime.retain_interactions,
+                )
+            ),
+            autotune_m2l_chunk=bool(
+                legacy_kwargs.pop(
+                    "autotune_m2l_chunk",
+                    advanced_cfg.runtime.autotune_m2l_chunk,
+                )
+            ),
+            precompute_grouped_class_segments=legacy_kwargs.pop(
+                "precompute_grouped_class_segments",
+                advanced_cfg.runtime.precompute_grouped_class_segments,
+            ),
+            grouped_schedule_budget_bytes=legacy_kwargs.pop(
+                "grouped_schedule_budget_bytes",
+                advanced_cfg.runtime.grouped_schedule_budget_bytes,
+            ),
+            nearfield_schedule_item_cap=legacy_kwargs.pop(
+                "nearfield_schedule_item_cap",
+                advanced_cfg.runtime.nearfield_schedule_item_cap,
+            ),
+            upward_leaf_batch_size=legacy_kwargs.pop(
+                "upward_leaf_batch_size",
+                advanced_cfg.runtime.upward_leaf_batch_size,
+            ),
             fixed_order=runtime_overrides.fixed_order,
             fixed_max_leaf_size=runtime_overrides.fixed_max_leaf_size,
             mac_type=runtime_overrides.mac_type,
@@ -313,7 +542,8 @@ class FastMultipoleMethod:
             unknown = ", ".join(sorted(str(k) for k in legacy_kwargs.keys()))
             raise TypeError(f"Unknown jaccpot.FastMultipoleMethod kwargs: {unknown}")
         self.preset = preset_norm
-        self.basis = basis
+        self.basis = basis_resolution.public_name
+        self.basis_impl = basis_resolution.basis_impl
         self.advanced = advanced_cfg
 
     def compute_accelerations(
@@ -408,6 +638,50 @@ class FastMultipoleMethod:
     def clear_prepared_state_cache(self: "FastMultipoleMethod") -> None:
         """Clear cached prepared states in the runtime backend."""
         self._impl.clear_prepared_state_cache()
+
+    def clear_runtime_caches(
+        self: "FastMultipoleMethod", *, clear_jax_compilation: bool = False
+    ) -> None:
+        """Clear solver/runtime caches; optionally clear JAX compilation caches."""
+        self._impl.clear_runtime_caches(
+            clear_jax_compilation=bool(clear_jax_compilation)
+        )
+
+    def export_m2l_autotune_cache(self: "FastMultipoleMethod") -> list[dict[str, Any]]:
+        """Return a JSON-serializable snapshot of M2L chunk autotune results."""
+
+        return self._impl.export_m2l_autotune_cache()
+
+    def import_m2l_autotune_cache(
+        self: "FastMultipoleMethod",
+        payload: list[dict[str, Any]],
+        *,
+        merge: bool = True,
+    ) -> int:
+        """Restore M2L chunk autotune results from serialized payload."""
+
+        return int(self._impl.import_m2l_autotune_cache(payload, merge=bool(merge)))
+
+    def save_m2l_autotune_cache(self: "FastMultipoleMethod", path: str) -> int:
+        """Write M2L chunk autotune results to a JSON file."""
+
+        return int(self._impl.save_m2l_autotune_cache(path))
+
+    def load_m2l_autotune_cache(
+        self: "FastMultipoleMethod",
+        path: str,
+        *,
+        merge: bool = True,
+    ) -> int:
+        """Load M2L chunk autotune results from a JSON file."""
+
+        return int(self._impl.load_m2l_autotune_cache(path, merge=bool(merge)))
+
+    @property
+    def recent_topology_reused(self: "FastMultipoleMethod") -> bool:
+        """Whether the latest prepare/evaluate path reused cached topology."""
+
+        return bool(getattr(self._impl, "_recent_topology_reused", False))
 
     @property
     def complex_rotation(self: "FastMultipoleMethod") -> str:
