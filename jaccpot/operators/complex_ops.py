@@ -389,6 +389,53 @@ def contract_spatial_derivative_with_velocity(
     return contract_symmetric_one_axis_3d(packed, velocity, order=order)
 
 
+@partial(jax.jit, static_argnames=("order",))
+def regular_solid_harmonic_gradient_coefficients(
+    delta: Array,
+    *,
+    order: int,
+) -> Array:
+    """Return packed ``(d/dx, d/dy, d/dz)`` coefficients of ``R_n^m(delta)``."""
+    p = int(order)
+    base = jnp.asarray(complex_R_solidfmm(delta, order=p))
+    grad_x = _lower_complex_harmonics_one_axis(base, order=p, axis=0)
+    grad_y = _lower_complex_harmonics_one_axis(base, order=p, axis=1)
+    grad_z = _lower_complex_harmonics_one_axis(base, order=p, axis=2)
+    return jnp.stack((grad_x, grad_y, grad_z), axis=0)
+
+
+@partial(jax.jit, static_argnames=("order",))
+def regular_solid_harmonic_directional_derivative(
+    delta: Array,
+    direction: Array,
+    *,
+    order: int,
+) -> Array:
+    """Directional derivative of packed regular harmonics along ``direction``."""
+    grad = regular_solid_harmonic_gradient_coefficients(delta, order=order)
+    direction_arr = jnp.asarray(direction, dtype=jnp.real(grad).dtype)
+    return jnp.einsum("a,ak->k", direction_arr, grad)
+
+
+@partial(jax.jit, static_argnames=("order",))
+def regular_solid_harmonic_directional_derivative_batch(
+    deltas: Array,
+    directions: Array,
+    *,
+    order: int,
+) -> Array:
+    """Batch directional derivatives of packed regular harmonics."""
+    return jax.vmap(
+        lambda d, v: regular_solid_harmonic_directional_derivative(
+            d,
+            v,
+            order=order,
+        ),
+        in_axes=(0, 0),
+        out_axes=0,
+    )(deltas, directions)
+
+
 def translate_along_z_m2l_complex(
     multipole: Array,
     r: Array,
