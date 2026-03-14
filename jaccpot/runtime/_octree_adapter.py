@@ -6,6 +6,7 @@ from typing import NamedTuple, Optional
 
 import jax.numpy as jnp
 from jaxtyping import Array
+from yggdrax.octree import compute_explicit_octree_box_geometry
 
 from .dtypes import INDEX_DTYPE
 
@@ -35,71 +36,6 @@ class OctreeExecutionData(NamedTuple):
     box_half_extents: Array
     box_radii: Array
     box_max_extents: Array
-
-
-_MAX_MORTON_LEVEL = 21
-
-
-def _compact3_u64(x: Array) -> Array:
-    x = jnp.asarray(x, dtype=jnp.uint64) & jnp.uint64(0x1FFFFF)
-    x = (x | (x << jnp.uint64(32))) & jnp.uint64(0x1F00000000FFFF)
-    x = (x | (x << jnp.uint64(16))) & jnp.uint64(0x1F0000FF0000FF)
-    x = (x | (x << jnp.uint64(8))) & jnp.uint64(0x100F00F00F00F00F)
-    x = (x | (x << jnp.uint64(4))) & jnp.uint64(0x10C30C30C30C30C3)
-    x = (x | (x << jnp.uint64(2))) & jnp.uint64(0x1249249249249249)
-    return x
-
-
-def _compute_octree_box_geometry(
-    *,
-    valid_mask: Array,
-    node_codes: Array,
-    node_depths: Array,
-    bounds_min: Array,
-    bounds_max: Array,
-) -> tuple[Array, Array, Array, Array]:
-    """Compute explicit octree box geometry directly from octree code/depth pairs."""
-
-    bounds_min = jnp.asarray(bounds_min)
-    bounds_max = jnp.asarray(bounds_max)
-    domain = bounds_max - bounds_min
-    depth_clamped = jnp.clip(
-        jnp.asarray(node_depths, dtype=INDEX_DTYPE),
-        jnp.asarray(0, dtype=INDEX_DTYPE),
-        jnp.asarray(_MAX_MORTON_LEVEL, dtype=INDEX_DTYPE),
-    )
-    shift = jnp.asarray(_MAX_MORTON_LEVEL, dtype=jnp.uint64) - depth_clamped.astype(
-        jnp.uint64
-    )
-    node_codes = jnp.asarray(node_codes, dtype=jnp.uint64)
-    x_coords = _compact3_u64(node_codes)
-    y_coords = _compact3_u64(node_codes >> jnp.uint64(1))
-    z_coords = _compact3_u64(node_codes >> jnp.uint64(2))
-
-    x_idx = x_coords >> shift
-    y_idx = y_coords >> shift
-    z_idx = z_coords >> shift
-    indices = jnp.stack([x_idx, y_idx, z_idx], axis=1).astype(bounds_min.dtype)
-
-    counts = jnp.left_shift(
-        jnp.ones_like(depth_clamped, dtype=jnp.uint64),
-        depth_clamped.astype(jnp.uint64),
-    )
-    counts = jnp.maximum(counts, jnp.uint64(1)).astype(bounds_min.dtype)
-    cell_sizes = domain[None, :] / counts[:, None]
-    mins = bounds_min[None, :] + cell_sizes * indices
-    maxs = mins + cell_sizes
-    centers = 0.5 * (mins + maxs)
-    half_extents = 0.5 * (maxs - mins)
-    radii = jnp.linalg.norm(half_extents, axis=1)
-    max_extents = jnp.max(half_extents, axis=1)
-
-    valid_mask = jnp.asarray(valid_mask, dtype=jnp.bool_)
-    centers = jnp.where(valid_mask[:, None], centers, 0.0)
-    half_extents = jnp.where(valid_mask[:, None], half_extents, 0.0)
-    radii = jnp.where(valid_mask, radii, 0.0)
-    max_extents = jnp.where(valid_mask, max_extents, 0.0)
-    return centers, half_extents, radii, max_extents
 
 
 def build_octree_execution_data(tree: object) -> Optional[OctreeExecutionData]:
@@ -173,14 +109,12 @@ def build_octree_execution_data(tree: object) -> Optional[OctreeExecutionData]:
 
     num_valid_nodes = jnp.sum(valid_mask.astype(INDEX_DTYPE))
     num_leaf_nodes = jnp.sum(leaf_mask.astype(INDEX_DTYPE))
-    box_centers, box_half_extents, box_radii, box_max_extents = (
-        _compute_octree_box_geometry(
-            valid_mask=valid_mask,
-            node_codes=node_codes,
-            node_depths=node_depths,
-            bounds_min=jnp.asarray(getattr(tree, "bounds_min")),
-            bounds_max=jnp.asarray(getattr(tree, "bounds_max")),
-        )
+    box_geometry = compute_explicit_octree_box_geometry(
+        valid_mask=valid_mask,
+        node_codes=node_codes,
+        node_depths=node_depths,
+        bounds_min=jnp.asarray(getattr(tree, "bounds_min")),
+        bounds_max=jnp.asarray(getattr(tree, "bounds_max")),
     )
 
     return OctreeExecutionData(
@@ -202,10 +136,10 @@ def build_octree_execution_data(tree: object) -> Optional[OctreeExecutionData]:
         oct_to_radix_leaf=oct_to_radix_leaf,
         num_valid_nodes=num_valid_nodes,
         num_leaf_nodes=num_leaf_nodes,
-        box_centers=box_centers,
-        box_half_extents=box_half_extents,
-        box_radii=box_radii,
-        box_max_extents=box_max_extents,
+        box_centers=box_geometry.centers,
+        box_half_extents=box_geometry.half_extents,
+        box_radii=box_geometry.radii,
+        box_max_extents=box_geometry.max_extents,
     )
 
 
