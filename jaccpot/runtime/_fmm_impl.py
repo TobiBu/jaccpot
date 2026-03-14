@@ -1652,6 +1652,7 @@ class FastMultipoleMethod:
                 moments=None,  # type: ignore[arg-type]
                 packed=complex_upward.multipoles.packed,
                 component_matrix=complex_upward.multipoles.packed,
+                source_motion_packed=complex_upward.multipoles.source_motion_packed,
             )
 
             return TreeUpwardData(
@@ -3587,12 +3588,27 @@ def _prepare_solidfmm_downward_sweep(
             centers=centers,
             coefficients=locals_coeffs,
         )
+        empty_source_motion_locals: Optional[LocalExpansionData]
+        if upward.multipoles.source_motion_packed is not None:
+            empty_source_motion_locals = LocalExpansionData(
+                order=p,
+                centers=centers,
+                coefficients=jnp.zeros_like(locals_coeffs),
+            )
+        else:
+            empty_source_motion_locals = None
         return TreeDownwardData(
             interactions=interactions,
             locals=empty_locals,
+            source_motion_locals=empty_source_motion_locals,
         )
 
     multip_packed = jnp.asarray(upward.multipoles.packed, dtype=dtype)
+    source_motion_multip_packed = (
+        jnp.asarray(upward.multipoles.source_motion_packed, dtype=dtype)
+        if upward.multipoles.source_motion_packed is not None
+        else None
+    )
 
     rotation_mode = str(complex_rotation).strip().lower()
     if rotation_mode not in ("bdz", "cached", "wigner", "solidfmm"):
@@ -3604,69 +3620,79 @@ def _prepare_solidfmm_downward_sweep(
     if chunk_size <= 0:
         raise ValueError("m2l_chunk_size must be positive")
 
-    if grouped_interactions:
-        grouped = (
-            grouped_buffers
-            if grouped_buffers is not None
-            else build_grouped_interactions(tree, upward.geometry, interactions)
+    def _accumulate_from_multipoles(
+        initial_locals_coeffs: Array,
+        multipoles_coeffs: Array,
+    ) -> Array:
+        if grouped_interactions:
+            grouped = (
+                grouped_buffers
+                if grouped_buffers is not None
+                else build_grouped_interactions(tree, upward.geometry, interactions)
+            )
+            mode = str(farfield_mode).strip().lower()
+            if mode not in ("pair_grouped", "class_major"):
+                raise ValueError(
+                    "farfield_mode must be 'pair_grouped' or 'class_major'"
+                )
+            if mode == "class_major":
+                locals_updated_inner = _accumulate_solidfmm_m2l_grouped_class_major(
+                    initial_locals_coeffs,
+                    multipoles_coeffs,
+                    centers,
+                    grouped,
+                    grouped_segment_starts=grouped_segment_starts,
+                    grouped_segment_lengths=grouped_segment_lengths,
+                    grouped_segment_class_ids=grouped_segment_class_ids,
+                    grouped_segment_sort_permutation=grouped_segment_sort_permutation,
+                    grouped_segment_group_ids=grouped_segment_group_ids,
+                    grouped_segment_unique_targets=grouped_segment_unique_targets,
+                    order=p,
+                    rotation=rotation_mode,
+                    total_nodes=total_nodes,
+                    chunk_size=chunk_size,
+                )
+            else:
+                locals_updated_inner = _accumulate_solidfmm_m2l_grouped(
+                    initial_locals_coeffs,
+                    multipoles_coeffs,
+                    centers,
+                    grouped,
+                    order=p,
+                    rotation=rotation_mode,
+                    total_nodes=total_nodes,
+                    chunk_size=chunk_size,
+                )
+        else:
+            if pair_count <= chunk_size:
+                locals_updated_inner = _accumulate_solidfmm_m2l_fullbatch(
+                    initial_locals_coeffs,
+                    multipoles_coeffs,
+                    centers,
+                    src,
+                    tgt,
+                    order=p,
+                    rotation=rotation_mode,
+                    total_nodes=total_nodes,
+                )
+            else:
+                locals_updated_inner = _accumulate_solidfmm_m2l_chunked_scan(
+                    initial_locals_coeffs,
+                    multipoles_coeffs,
+                    centers,
+                    src,
+                    tgt,
+                    order=p,
+                    rotation=rotation_mode,
+                    total_nodes=total_nodes,
+                    chunk_size=chunk_size,
+                )
+        locals_updated_inner = enforce_conjugate_symmetry_batch(
+            locals_updated_inner, order=p
         )
-        mode = str(farfield_mode).strip().lower()
-        if mode not in ("pair_grouped", "class_major"):
-            raise ValueError("farfield_mode must be 'pair_grouped' or 'class_major'")
-        if mode == "class_major":
-            locals_updated = _accumulate_solidfmm_m2l_grouped_class_major(
-                locals_coeffs,
-                multip_packed,
-                centers,
-                grouped,
-                grouped_segment_starts=grouped_segment_starts,
-                grouped_segment_lengths=grouped_segment_lengths,
-                grouped_segment_class_ids=grouped_segment_class_ids,
-                grouped_segment_sort_permutation=grouped_segment_sort_permutation,
-                grouped_segment_group_ids=grouped_segment_group_ids,
-                grouped_segment_unique_targets=grouped_segment_unique_targets,
-                order=p,
-                rotation=rotation_mode,
-                total_nodes=total_nodes,
-                chunk_size=chunk_size,
-            )
-        else:
-            locals_updated = _accumulate_solidfmm_m2l_grouped(
-                locals_coeffs,
-                multip_packed,
-                centers,
-                grouped,
-                order=p,
-                rotation=rotation_mode,
-                total_nodes=total_nodes,
-                chunk_size=chunk_size,
-            )
-    else:
-        if pair_count <= chunk_size:
-            locals_updated = _accumulate_solidfmm_m2l_fullbatch(
-                locals_coeffs,
-                multip_packed,
-                centers,
-                src,
-                tgt,
-                order=p,
-                rotation=rotation_mode,
-                total_nodes=total_nodes,
-            )
-        else:
-            locals_updated = _accumulate_solidfmm_m2l_chunked_scan(
-                locals_coeffs,
-                multip_packed,
-                centers,
-                src,
-                tgt,
-                order=p,
-                rotation=rotation_mode,
-                total_nodes=total_nodes,
-                chunk_size=chunk_size,
-            )
+        return locals_updated_inner
 
-    locals_updated = enforce_conjugate_symmetry_batch(locals_updated, order=p)
+    locals_updated = _accumulate_from_multipoles(locals_coeffs, multip_packed)
 
     if l2l_chunk_size is not None and int(l2l_chunk_size) <= 0:
         raise ValueError("l2l_chunk_size must be positive")
@@ -3689,6 +3715,29 @@ def _prepare_solidfmm_downward_sweep(
             rotation=rotation_mode,
             total_nodes=total_nodes,
         )
+        source_motion_locals_updated: Optional[Array]
+        if source_motion_multip_packed is not None:
+            source_motion_locals_updated = _accumulate_from_multipoles(
+                jnp.zeros_like(locals_coeffs), source_motion_multip_packed
+            )
+            source_motion_locals_updated = _propagate_solidfmm_locals_to_children(
+                source_motion_locals_updated,
+                centers,
+                left_child,
+                right_child,
+                order=p,
+                rotation=rotation_mode,
+                total_nodes=total_nodes,
+            )
+        else:
+            source_motion_locals_updated = None
+    else:
+        if source_motion_multip_packed is not None:
+            source_motion_locals_updated = _accumulate_from_multipoles(
+                jnp.zeros_like(locals_coeffs), source_motion_multip_packed
+            )
+        else:
+            source_motion_locals_updated = None
 
     locals_after = LocalExpansionData(
         order=p,
@@ -3702,10 +3751,23 @@ def _prepare_solidfmm_downward_sweep(
             order=p,
         )
     )
+    source_motion_locals_after: Optional[LocalExpansionData]
+    if source_motion_locals_updated is not None:
+        source_motion_locals_after = LocalExpansionData(
+            order=p,
+            centers=centers,
+            coefficients=enforce_conjugate_symmetry_batch(
+                jnp.asarray(source_motion_locals_updated),
+                order=p,
+            ),
+        )
+    else:
+        source_motion_locals_after = None
 
     return TreeDownwardData(
         interactions=interactions,
         locals=locals_after,
+        source_motion_locals=source_motion_locals_after,
     )
 
 

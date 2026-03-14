@@ -54,6 +54,7 @@ class TreeDownwardData(NamedTuple):
 
     interactions: NodeInteractionList
     locals: LocalExpansionData
+    source_motion_locals: Optional[LocalExpansionData] = None
 
 
 _LEVEL_COMBOS: Dict[int, Tuple[Tuple[int, int, int], ...]] = {
