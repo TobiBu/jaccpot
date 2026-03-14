@@ -56,6 +56,12 @@ Both return:
 - optimized implementation: builds source-motion multipoles directly for fixed
   prepared centers (avoids rebuilding full complex upward bundles)
 
+### Current Scope
+
+- Time-derivative support currently covers jerk only.
+- Higher time derivatives beyond jerk (e.g. snap/crackle and above) are not
+  implemented yet.
+
 ## Choosing A Mode
 
 | Priority | Recommended mode | Why |
