@@ -38,6 +38,10 @@ class OctreeUpwardPlan(NamedTuple):
     leaf_nodes: Array
     num_valid_nodes: Array
     num_leaf_nodes: Array
+    box_centers: Array
+    box_half_extents: Array
+    box_radii: Array
+    box_max_extents: Array
 
 
 class OctreeSolidFMMComplexMultipoles(NamedTuple):
@@ -94,6 +98,10 @@ def build_octree_upward_plan(octree: OctreeExecutionData) -> OctreeUpwardPlan:
         leaf_nodes=jnp.asarray(octree.leaf_nodes, dtype=INDEX_DTYPE),
         num_valid_nodes=jnp.asarray(octree.num_valid_nodes, dtype=INDEX_DTYPE),
         num_leaf_nodes=jnp.asarray(octree.num_leaf_nodes, dtype=INDEX_DTYPE),
+        box_centers=jnp.asarray(octree.box_centers),
+        box_half_extents=jnp.asarray(octree.box_half_extents),
+        box_radii=jnp.asarray(octree.box_radii),
+        box_max_extents=jnp.asarray(octree.box_max_extents),
     )
 
 

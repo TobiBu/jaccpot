@@ -46,6 +46,40 @@ def test_octree_upward_plan_exposes_level_major_metadata():
     assert plan.level_offsets.shape[0] >= int(plan.num_levels) + 1
     assert plan.children.shape[1] == 8
     assert int(plan.num_valid_nodes) >= int(plan.num_leaf_nodes) >= 1
+    assert plan.box_centers.shape == (plan.valid_mask.shape[0], 3)
+    assert plan.box_half_extents.shape == (plan.valid_mask.shape[0], 3)
+    assert plan.box_radii.shape == plan.valid_mask.shape
+    assert plan.box_max_extents.shape == plan.valid_mask.shape
+
+
+def test_octree_execution_view_exposes_native_box_geometry():
+    positions, masses = _sample_problem(n=64)
+    fmm = FastMultipoleMethod(
+        preset=FMMPreset.FAST,
+        basis="solidfmm",
+        advanced=FMMAdvancedConfig(tree=TreeConfig(tree_type="octree")),
+    )
+
+    state = fmm.prepare_state(
+        positions,
+        masses,
+        leaf_size=8,
+        max_order=3,
+    )
+
+    assert state.octree is not None
+    valid_mask = np.asarray(state.octree.valid_mask)
+    box_centers = np.asarray(state.octree.box_centers)
+    box_half_extents = np.asarray(state.octree.box_half_extents)
+    box_radii = np.asarray(state.octree.box_radii)
+    box_max_extents = np.asarray(state.octree.box_max_extents)
+
+    assert box_centers.shape == (valid_mask.shape[0], 3)
+    assert box_half_extents.shape == (valid_mask.shape[0], 3)
+    assert box_radii.shape == valid_mask.shape
+    assert box_max_extents.shape == valid_mask.shape
+    assert np.all(box_radii[valid_mask] > 0.0)
+    assert np.all(box_max_extents[valid_mask] > 0.0)
 
 
 def test_octree_complex_multipoles_match_radix_upward_on_mapped_nodes():

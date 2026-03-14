@@ -220,6 +220,20 @@ def test_octree_prepare_state_exposes_octree_execution_view():
     assert int(state.octree.num_valid_nodes) > 0
     assert state.octree.radix_node_to_oct.shape[0] == state.tree.parent.shape[0]
     assert state.octree.radix_leaf_to_oct.shape[0] == state.tree.num_leaves
+    assert state.octree.box_centers.shape == (state.octree.valid_mask.shape[0], 3)
+    assert state.octree.box_half_extents.shape == (state.octree.valid_mask.shape[0], 3)
+    assert state.nearfield_interop is not None
+    assert np.array_equal(
+        np.asarray(state.nearfield_interop.leaf_nodes),
+        np.asarray(state.neighbor_list.leaf_indices),
+    )
+    assert state.nearfield_interop.node_ranges.shape[0] == state.tree.parent.shape[0]
+    assert int(np.asarray(state.nearfield_interop.counts).sum()) == int(
+        np.asarray(state.neighbor_list.counts).sum()
+    )
+    native_map = np.asarray(state.nearfield_interop.particle_order_to_native_leaf)
+    assert native_map.shape == (state.tree.num_leaves,)
+    assert np.array_equal(np.sort(native_map), np.arange(state.tree.num_leaves))
 
 
 def test_octree_solver_matches_radix_prepare_path():
@@ -288,6 +302,40 @@ def test_octree_execution_backend_matches_radix_on_octree_tree():
     assert np.allclose(
         np.asarray(acc_octree), np.asarray(acc_radix), rtol=1e-5, atol=1e-5
     )
+
+
+def test_octree_execution_backend_target_indices_match_full_prepared_state():
+    positions, masses = _sample_problem(n=72)
+    fmm = FastMultipoleMethod(
+        preset=FMMPreset.FAST,
+        basis="solidfmm",
+        advanced=FMMAdvancedConfig(
+            tree=TreeConfig(tree_type="octree"),
+            runtime=RuntimePolicyConfig(execution_backend="octree"),
+        ),
+    )
+    target_indices = jnp.asarray([0, 5, 9, 10, 33], dtype=jnp.int32)
+
+    state = fmm.prepare_state(
+        positions,
+        masses,
+        leaf_size=8,
+        max_order=3,
+    )
+
+    full_acc, full_pot = fmm.evaluate_prepared_state(state, return_potential=True)
+    target_acc, target_pot = fmm.evaluate_prepared_state(
+        state,
+        target_indices=target_indices,
+        return_potential=True,
+    )
+
+    np_idx = np.asarray(target_indices)
+    assert state.nearfield_interop is not None
+    assert target_acc.shape == (target_indices.shape[0], 3)
+    assert target_pot.shape == (target_indices.shape[0],)
+    assert np.allclose(np.asarray(target_acc), np.asarray(full_acc)[np_idx])
+    assert np.allclose(np.asarray(target_pot), np.asarray(full_pot)[np_idx])
 
 
 def test_basis_complex_alias_matches_solidfmm():
