@@ -8,7 +8,7 @@ import time
 import jax
 import jax.numpy as jnp
 
-from jaccpot import FMMPreset, FastMultipoleMethod
+from jaccpot import FastMultipoleMethod, FMMPreset
 
 
 def _sample_problem(n: int, *, dtype):

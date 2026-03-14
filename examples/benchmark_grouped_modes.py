@@ -14,10 +14,10 @@ import jax
 import jax.numpy as jnp
 
 from jaccpot import (
-    FMMAdvancedConfig,
-    FMMPreset,
     FarFieldConfig,
     FastMultipoleMethod,
+    FMMAdvancedConfig,
+    FMMPreset,
     RuntimePolicyConfig,
 )
 
@@ -64,7 +64,9 @@ def _query_gpu_memory_mb(gpu_index: int) -> tuple[float | None, float | None]:
             ],
             text=True,
         ).strip()
-        used_mb, total_mb = [float(x.strip()) for x in out.splitlines()[0].split(",")[:2]]
+        used_mb, total_mb = [
+            float(x.strip()) for x in out.splitlines()[0].split(",")[:2]
+        ]
         return used_mb, total_mb
     except Exception:
         return None, None
@@ -77,7 +79,9 @@ def _block_ready(value: Any) -> Any:
     )
 
 
-def _peak_gpu_memory_trace(fn, *args, phase: str, gpu_index: int, poll_interval_s: float = 0.02, **kwargs):
+def _peak_gpu_memory_trace(
+    fn, *args, phase: str, gpu_index: int, poll_interval_s: float = 0.02, **kwargs
+):
     samples: list[float] = []
     stop_event = threading.Event()
 
@@ -108,7 +112,9 @@ def _peak_gpu_memory_trace(fn, *args, phase: str, gpu_index: int, poll_interval_
         gpu_used_after_mb=after_used,
         gpu_peak_used_mb=peak_used,
         gpu_peak_delta_mb=(
-            None if peak_used is None or before_used is None else float(peak_used - before_used)
+            None
+            if peak_used is None or before_used is None
+            else float(peak_used - before_used)
         ),
         num_samples=len(samples),
     )

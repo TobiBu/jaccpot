@@ -68,8 +68,13 @@ def _multipole_component_matrix(
     dtype: Any,
 ) -> Array:
     """Return the component matrix, falling back to packed coefficients."""
-    raw = multipoles.packed if multipoles.component_matrix is None else multipoles.component_matrix
+    raw = (
+        multipoles.packed
+        if multipoles.component_matrix is None
+        else multipoles.component_matrix
+    )
     return jnp.asarray(raw[:, :coeff_count], dtype=dtype)
+
 
 _LEVEL_INDEX_LOOKUP: Dict[int, Dict[Tuple[int, int, int], int]] = {
     level: {combo: idx for idx, combo in enumerate(combos)}

@@ -13,7 +13,7 @@ from typing import Any, Optional
 import jax
 import jax.numpy as jnp
 
-from jaccpot import FMMPreset, FastMultipoleMethod
+from jaccpot import FastMultipoleMethod, FMMPreset
 
 
 @dataclass(frozen=True)
@@ -113,7 +113,9 @@ def main() -> None:
 
     compile_rows: list[dict[str, Any]] = []
     compile_prepare_s = float("nan")
-    snapshots.append(_gpu_memory_snapshot("after_prepare_compile", gpu_index=int(args.gpu_index)))
+    snapshots.append(
+        _gpu_memory_snapshot("after_prepare_compile", gpu_index=int(args.gpu_index))
+    )
 
     compile_rows.append(
         {
@@ -135,12 +137,16 @@ def main() -> None:
     )
     _block_until_ready(state)
     warm_prepare_s = time.perf_counter() - warm_prepare_start
-    snapshots.append(_gpu_memory_snapshot("after_warm_prepare", gpu_index=int(args.gpu_index)))
+    snapshots.append(
+        _gpu_memory_snapshot("after_warm_prepare", gpu_index=int(args.gpu_index))
+    )
 
     eval_compile_start = time.perf_counter()
     eval_compiled = eval_fn.lower(state).compile()
     compile_eval_s = time.perf_counter() - eval_compile_start
-    snapshots.append(_gpu_memory_snapshot("after_eval_compile", gpu_index=int(args.gpu_index)))
+    snapshots.append(
+        _gpu_memory_snapshot("after_eval_compile", gpu_index=int(args.gpu_index))
+    )
 
     if not bool(args.skip_memory_analysis):
         try:
@@ -148,7 +154,9 @@ def main() -> None:
             compile_rows.append(
                 {
                     "phase": "eval_compile",
-                    "generated_code_size": getattr(stats, "generated_code_size_in_bytes", None),
+                    "generated_code_size": getattr(
+                        stats, "generated_code_size_in_bytes", None
+                    ),
                     "argument_size": getattr(stats, "argument_size_in_bytes", None),
                     "output_size": getattr(stats, "output_size_in_bytes", None),
                     "temp_size": getattr(stats, "temp_size_in_bytes", None),
@@ -156,13 +164,17 @@ def main() -> None:
                 }
             )
         except Exception as exc:
-            compile_rows.append({"phase": "eval_compile", "memory_analysis_error": str(exc)})
+            compile_rows.append(
+                {"phase": "eval_compile", "memory_analysis_error": str(exc)}
+            )
 
     warm_eval_start = time.perf_counter()
     result = eval_compiled(state)
     _block_until_ready(result)
     warm_eval_s = time.perf_counter() - warm_eval_start
-    snapshots.append(_gpu_memory_snapshot("after_warm_eval", gpu_index=int(args.gpu_index)))
+    snapshots.append(
+        _gpu_memory_snapshot("after_warm_eval", gpu_index=int(args.gpu_index))
+    )
 
     retained_state_bytes = _tree_nbytes(state)
     del result
@@ -170,7 +182,9 @@ def main() -> None:
     del state
     del prepared_compiled
     gc.collect()
-    snapshots.append(_gpu_memory_snapshot("after_cleanup", gpu_index=int(args.gpu_index)))
+    snapshots.append(
+        _gpu_memory_snapshot("after_cleanup", gpu_index=int(args.gpu_index))
+    )
 
     output = {
         "backend": jax.default_backend(),
