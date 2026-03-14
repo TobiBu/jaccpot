@@ -17,6 +17,7 @@ from beartype import beartype
 from beartype.typing import Callable, Tuple
 from jaxtyping import Array, DTypeLike, jaxtyped
 from yggdrax.dense_interactions import DenseInteractionBuffers
+from yggdrax.geometry import compute_tree_geometry
 from yggdrax.grouped_interactions import GroupedInteractionBuffers
 from yggdrax.interactions import (
     DualTreeRetryEvent,
@@ -33,6 +34,7 @@ from yggdrax.tree import (
     TreeType,
     available_tree_types,
 )
+from yggdrax.tree_moments import compute_tree_mass_moments
 
 from jaccpot.downward.local_expansions import (
     LocalExpansionData,
@@ -76,6 +78,7 @@ from jaccpot.operators.multipole_utils import (
 from jaccpot.operators.real_harmonics import sh_size
 from jaccpot.operators.symmetric_tensors import component_lift_index_map_3d
 from jaccpot.upward.solidfmm_complex_tree_expansions import (
+    prepare_solidfmm_complex_source_motion_multipoles,
     prepare_solidfmm_complex_upward_sweep,
 )
 from jaccpot.upward.tree_expansions import (
@@ -2465,31 +2468,31 @@ class FastMultipoleMethod:
         particle_indices = jnp.asarray(state.tree.particle_indices, dtype=INDEX_DTYPE)
         vel_sorted = velocities[particle_indices]
         centers = jnp.asarray(state.downward.locals.centers, dtype=state.working_dtype)
-        complex_upward = prepare_solidfmm_complex_upward_sweep(
+        source_motion_packed = prepare_solidfmm_complex_source_motion_multipoles(
             state.tree,
             state.positions_sorted,
             state.masses_sorted,
-            velocities_sorted=vel_sorted,
+            vel_sorted,
             max_order=int(state.downward.locals.order),
-            center_mode="explicit",
-            explicit_centers=centers,
+            centers=centers,
             max_leaf_size=int(state.max_leaf_size),
             rotation=self.complex_rotation,
         )
-        source_motion_packed = complex_upward.multipoles.source_motion_packed
-        if source_motion_packed is None:
-            raise RuntimeError("expected source-motion multipole coefficients")
         source_motion_multipoles = NodeMultipoleData(
-            order=int(complex_upward.multipoles.order),
-            centers=complex_upward.multipoles.centers,
+            order=int(state.downward.locals.order),
+            centers=centers,
             moments=None,  # type: ignore[arg-type]
             packed=jnp.asarray(source_motion_packed),
             component_matrix=jnp.asarray(source_motion_packed),
             source_motion_packed=None,
         )
         source_motion_upward = TreeUpwardData(
-            geometry=complex_upward.geometry,
-            mass_moments=complex_upward.mass_moments,
+            geometry=compute_tree_geometry(state.tree, state.positions_sorted),
+            mass_moments=compute_tree_mass_moments(
+                state.tree,
+                state.positions_sorted,
+                state.masses_sorted,
+            ),
             multipoles=source_motion_multipoles,
         )
         runtime_overrides = self._resolve_runtime_execution_overrides(

@@ -145,6 +145,7 @@ python -m bench.ci_benchmark_guard --n 384 --runs 2 --warmup 1
 
 - `examples/benchmark_runtime_accuracy.ipynb`: runtime/accuracy benchmark workflow
 - `examples/jerk_modes_demo.ipynb`: compare jerk `fast_approx` vs `accurate` modes
+- `examples/analytic_source_motion_jerk_demo.ipynb`: inspect analytic source-motion jerk behavior on `solidfmm`
 
 ## Runtime Type Checking
 

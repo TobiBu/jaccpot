@@ -6,6 +6,7 @@ from yggdrax.tree import build_tree
 
 from jaccpot.runtime._fmm_impl import FastMultipoleMethod
 from jaccpot.upward.solidfmm_complex_tree_expansions import (
+    prepare_solidfmm_complex_source_motion_multipoles,
     prepare_solidfmm_complex_upward_sweep,
 )
 from jaccpot.upward.tree_expansions import NodeMultipoleData, TreeUpwardData
@@ -105,6 +106,43 @@ def test_prepare_solidfmm_upward_source_motion_matches_finite_difference():
     ref = (plus.multipoles.packed - minus.multipoles.packed) / (2.0 * dt)
     got = analytic.multipoles.source_motion_packed
     assert np.allclose(np.asarray(got), np.asarray(ref), rtol=2e-5, atol=1e-7)
+
+
+def test_prepare_solidfmm_source_motion_multipoles_matches_upward_bundle():
+    tree, pos_sorted, mass_sorted, vel_sorted = _build_sample_tree()
+    order = 4
+    base = prepare_solidfmm_complex_upward_sweep(
+        tree,
+        pos_sorted,
+        mass_sorted,
+        max_order=order,
+        center_mode="aabb",
+    )
+    centers = base.multipoles.centers
+    bundle = prepare_solidfmm_complex_upward_sweep(
+        tree,
+        pos_sorted,
+        mass_sorted,
+        velocities_sorted=vel_sorted,
+        max_order=order,
+        center_mode="explicit",
+        explicit_centers=centers,
+    )
+    direct = prepare_solidfmm_complex_source_motion_multipoles(
+        tree,
+        pos_sorted,
+        mass_sorted,
+        vel_sorted,
+        max_order=order,
+        centers=centers,
+    )
+    assert bundle.multipoles.source_motion_packed is not None
+    assert np.allclose(
+        np.asarray(direct),
+        np.asarray(bundle.multipoles.source_motion_packed),
+        rtol=1e-12,
+        atol=1e-12,
+    )
 
 
 def _as_tree_upward_data(complex_upward) -> TreeUpwardData:

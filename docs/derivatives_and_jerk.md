@@ -53,6 +53,8 @@ Both return:
 - `jerk_fd_dt` is only used as a fallback path for non-`solidfmm` configurations
 - slower than `fast_approx`, but typically faster than finite-difference
   accurate-mode equivalents
+- optimized implementation: builds source-motion multipoles directly for fixed
+  prepared centers (avoids rebuilding full complex upward bundles)
 
 ## Choosing A Mode
 
@@ -72,6 +74,7 @@ General recommendation:
 
 - Derivative and jerk paths are JAX-jit compatible and GPU-friendly.
 - `accurate` jerk mode adds extra far-field source-motion contractions by design.
+- `accurate` mode for `solidfmm` reuses prepared interactions and topology.
 - Run:
   - `python -m bench.bench_parallel_paths ...`
   - `python -m bench.ci_benchmark_guard ...`

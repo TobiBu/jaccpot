@@ -324,30 +324,14 @@ def prepare_solidfmm_complex_upward_sweep(
 
     source_motion_packed: Optional[Array] = None
     if velocities_sorted is not None:
-        vel_sorted_arr = jnp.asarray(velocities_sorted, dtype=positions_sorted.dtype)
-        if vel_sorted_arr.shape != positions_sorted.shape:
-            raise ValueError(
-                "velocities_sorted must have shape "
-                f"{tuple(positions_sorted.shape)}, got {tuple(vel_sorted_arr.shape)}"
-            )
-        source_motion_packed_leaf = _p2m_leaves_complex_source_motion(
-            jnp.asarray(tree.node_ranges, dtype=INDEX_DTYPE),
+        source_motion_packed = prepare_solidfmm_complex_source_motion_multipoles(
+            tree,
             positions_sorted,
             masses_sorted,
-            vel_sorted_arr,
-            centers,
-            order=p,
+            velocities_sorted,
+            max_order=p,
+            centers=centers,
             max_leaf_size=int(max_leaf_size),
-            num_internal=num_internal,
-            total_nodes=total_nodes,
-        )
-        source_motion_packed = _aggregate_m2m_complex(
-            source_motion_packed_leaf,
-            centers,
-            jnp.asarray(tree.left_child, dtype=INDEX_DTYPE),
-            jnp.asarray(tree.right_child, dtype=INDEX_DTYPE),
-            order=p,
-            num_internal=num_internal,
             rotation=rotation,
         )
 
@@ -362,4 +346,64 @@ def prepare_solidfmm_complex_upward_sweep(
         geometry=geometry,
         mass_moments=mass_moments,
         multipoles=multipoles,
+    )
+
+
+@jaxtyped(typechecker=beartype)
+def prepare_solidfmm_complex_source_motion_multipoles(
+    tree: Tree,
+    positions_sorted: Array,
+    masses_sorted: Array,
+    velocities_sorted: Array,
+    *,
+    max_order: int,
+    centers: Array,
+    max_leaf_size: Optional[int] = None,
+    rotation: str = "cached",
+) -> Array:
+    """Compute packed source-motion multipoles for fixed expansion centers."""
+
+    p = int(max_order)
+    if p < 0:
+        raise ValueError("max_order must be >= 0")
+    centers_arr = jnp.asarray(centers, dtype=positions_sorted.dtype)
+    if centers_arr.shape != (int(tree.parent.shape[0]), 3):
+        raise ValueError("centers must have shape (num_nodes, 3)")
+    vel_sorted_arr = jnp.asarray(velocities_sorted, dtype=positions_sorted.dtype)
+    if vel_sorted_arr.shape != positions_sorted.shape:
+        raise ValueError(
+            "velocities_sorted must have shape "
+            f"{tuple(positions_sorted.shape)}, got {tuple(vel_sorted_arr.shape)}"
+        )
+
+    if max_leaf_size is None:
+        num_internal = int(tree.num_internal_nodes)
+        leaf_ranges = jax.device_get(tree.node_ranges)[num_internal:]
+        if leaf_ranges.shape[0] == 0:
+            max_leaf_size = 0
+        else:
+            counts = leaf_ranges[:, 1] - leaf_ranges[:, 0] + 1
+            max_leaf_size = int(jnp.max(counts))
+
+    num_internal = int(tree.num_internal_nodes)
+    total_nodes = int(tree.parent.shape[0])
+    source_motion_packed_leaf = _p2m_leaves_complex_source_motion(
+        jnp.asarray(tree.node_ranges, dtype=INDEX_DTYPE),
+        positions_sorted,
+        masses_sorted,
+        vel_sorted_arr,
+        centers_arr,
+        order=p,
+        max_leaf_size=int(max_leaf_size),
+        num_internal=num_internal,
+        total_nodes=total_nodes,
+    )
+    return _aggregate_m2m_complex(
+        source_motion_packed_leaf,
+        centers_arr,
+        jnp.asarray(tree.left_child, dtype=INDEX_DTYPE),
+        jnp.asarray(tree.right_child, dtype=INDEX_DTYPE),
+        order=p,
+        num_internal=num_internal,
+        rotation=rotation,
     )
