@@ -14,6 +14,7 @@ class OctreeExecutionData(NamedTuple):
     """JAX-friendly octree view retained alongside radix-indexed FMM state."""
 
     valid_mask: Array
+    parent: Array
     children: Array
     child_counts: Array
     node_codes: Array
@@ -124,6 +125,7 @@ def build_octree_execution_data(tree: object) -> Optional[OctreeExecutionData]:
 
     valid_mask = jnp.asarray(getattr(tree, "oct_valid_mask"), dtype=jnp.bool_)
     children = jnp.asarray(getattr(tree, "oct_children"), dtype=INDEX_DTYPE)
+    parent = jnp.asarray(getattr(tree, "oct_parent"), dtype=INDEX_DTYPE)
     child_counts = jnp.asarray(getattr(tree, "oct_child_counts"), dtype=INDEX_DTYPE)
     node_codes = jnp.asarray(getattr(tree, "oct_node_codes"), dtype=jnp.uint64)
     node_depths = jnp.asarray(getattr(tree, "oct_node_depths"), dtype=INDEX_DTYPE)
@@ -183,6 +185,7 @@ def build_octree_execution_data(tree: object) -> Optional[OctreeExecutionData]:
 
     return OctreeExecutionData(
         valid_mask=valid_mask,
+        parent=parent,
         children=children,
         child_counts=child_counts,
         node_codes=node_codes,

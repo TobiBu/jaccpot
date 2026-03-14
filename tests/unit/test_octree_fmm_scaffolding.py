@@ -45,6 +45,7 @@ def test_octree_upward_plan_exposes_level_major_metadata():
     assert plan.nodes_by_level.shape == plan.valid_mask.shape
     assert plan.level_offsets.shape[0] >= int(plan.num_levels) + 1
     assert plan.children.shape[1] == 8
+    assert plan.parent.shape == plan.valid_mask.shape
     assert int(plan.num_valid_nodes) >= int(plan.num_leaf_nodes) >= 1
     assert plan.box_centers.shape == (plan.valid_mask.shape[0], 3)
     assert plan.box_half_extents.shape == (plan.valid_mask.shape[0], 3)
@@ -250,9 +251,11 @@ def test_prepare_state_attaches_octree_native_downward_scaffold():
 
     root_oct = int(np.asarray(state.octree.radix_node_to_oct)[0])
     parent = np.asarray(state.octree_downward.parent)
+    native_parent = np.asarray(state.octree.parent)
     children = np.asarray(state.octree.children)
 
     assert parent[root_oct] == -1
+    assert np.array_equal(parent, native_parent)
     assert state.octree_downward.locals_packed.shape == state.octree_upward.packed.shape
     assert np.allclose(
         np.asarray(state.octree_downward.centers),

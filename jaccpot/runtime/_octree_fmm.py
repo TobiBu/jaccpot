@@ -28,6 +28,7 @@ class OctreeUpwardPlan(NamedTuple):
 
     valid_mask: Array
     leaf_mask: Array
+    parent: Array
     children: Array
     child_counts: Array
     node_depths: Array
@@ -88,6 +89,7 @@ def build_octree_upward_plan(octree: OctreeExecutionData) -> OctreeUpwardPlan:
     return OctreeUpwardPlan(
         valid_mask=jnp.asarray(octree.valid_mask, dtype=jnp.bool_),
         leaf_mask=jnp.asarray(octree.leaf_mask, dtype=jnp.bool_),
+        parent=jnp.asarray(octree.parent, dtype=INDEX_DTYPE),
         children=jnp.asarray(octree.children, dtype=INDEX_DTYPE),
         child_counts=jnp.asarray(octree.child_counts, dtype=INDEX_DTYPE),
         node_depths=jnp.asarray(octree.node_depths, dtype=INDEX_DTYPE),
@@ -183,27 +185,12 @@ def build_octree_downward_plan(
 ) -> OctreeSolidFMMDownwardPlan:
     """Build octree-native downward scaffolding for future M2L/L2L execution."""
 
-    num_nodes = int(octree.valid_mask.shape[0])
-    parent = jnp.full(
-        (num_nodes,), jnp.asarray(-1, dtype=INDEX_DTYPE), dtype=INDEX_DTYPE
-    )
-    parent_nodes = jnp.broadcast_to(
-        jnp.arange(num_nodes, dtype=INDEX_DTYPE)[:, None],
-        octree.children.shape,
-    )
-    child_mask = octree.children >= 0
-    safe_children = jnp.where(child_mask, octree.children, 0)
-    parent = parent.at[safe_children].max(
-        jnp.where(child_mask, parent_nodes, jnp.asarray(-1, dtype=INDEX_DTYPE))
-    )
-    parent = jnp.where(octree.valid_mask, parent, jnp.asarray(-1, dtype=INDEX_DTYPE))
-
     locals_packed = jnp.zeros_like(multipoles.packed)
     return OctreeSolidFMMDownwardPlan(
         order=int(multipoles.order),
         centers=jnp.asarray(multipoles.centers),
         locals_packed=locals_packed,
-        parent=parent,
+        parent=jnp.asarray(octree.parent, dtype=INDEX_DTYPE),
         nodes_by_level=jnp.asarray(octree.nodes_by_level, dtype=INDEX_DTYPE),
         level_offsets=jnp.asarray(octree.level_offsets, dtype=INDEX_DTYPE),
         target_nodes=jnp.asarray(interactions.target_nodes, dtype=INDEX_DTYPE),
