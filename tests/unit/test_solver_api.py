@@ -462,6 +462,72 @@ def test_compute_accelerations_and_jerk_accurate_mode_reuses_prepared_topology(
     assert jerk.shape == positions.shape
 
 
+def test_compute_accelerations_and_jerk_accurate_solidfmm_uses_analytic_path(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    positions, masses = _sample_problem(n=20)
+    velocities = _sample_velocities(n=20)
+    fmm = FastMultipoleMethod(
+        preset=FMMPreset.ACCURATE,
+        basis="solidfmm",
+    )
+
+    def _forbidden(*args, **kwargs):
+        raise AssertionError(
+            "solidfmm accurate jerk should not use finite-difference fallback evaluations"
+        )
+
+    monkeypatch.setattr(
+        fmm._impl,
+        "_evaluate_prepared_state_at_positions_sorted",
+        _forbidden,
+    )
+    acc, jerk = fmm.compute_accelerations_and_jerk(
+        positions,
+        masses,
+        velocities,
+        leaf_size=10,
+        max_order=4,
+        theta=1e-4,
+        jerk_mode="accurate",
+        jerk_fd_dt=1e-3,
+    )
+
+    assert acc.shape == positions.shape
+    assert jerk.shape == positions.shape
+
+
+def test_compute_accelerations_and_jerk_accurate_cartesian_uses_fd_fallback(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    positions, masses = _sample_problem(n=18)
+    velocities = _sample_velocities(n=18)
+    fmm = FastMultipoleMethod(expansion_basis="cartesian")
+
+    def _forbidden(*args, **kwargs):
+        raise AssertionError(
+            "non-solidfmm accurate jerk should use finite-difference fallback"
+        )
+
+    monkeypatch.setattr(
+        fmm._impl,
+        "_evaluate_source_motion_farfield_jerk",
+        _forbidden,
+    )
+    acc, jerk = fmm.compute_accelerations_and_jerk(
+        positions,
+        masses,
+        velocities,
+        leaf_size=8,
+        max_order=3,
+        jerk_mode="accurate",
+        jerk_fd_dt=1e-3,
+    )
+
+    assert acc.shape == positions.shape
+    assert jerk.shape == positions.shape
+
+
 def test_compute_accelerations_and_jerk_invalid_mode_raises():
     positions, masses = _sample_problem(n=16)
     velocities = _sample_velocities(n=16)
