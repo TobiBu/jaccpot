@@ -47,19 +47,19 @@ Both return:
 
 ### `jerk_mode="accurate"`
 
-- central finite-difference estimate of total jerk using two additional
-  acceleration evaluations (`x ± dt * v`) on the prepared topology
-- includes source-motion effects without dedicated time-dependent multipole
-  machinery
-- controlled by `jerk_fd_dt`
-- slower than `fast_approx`, but avoids full tree rebuilds
+- analytic far-field source-motion jerk via source-motion multipole/local
+  contractions (`dM -> dL`) plus convective far-field and exact near-field terms
+- no finite-difference solves for `solidfmm` basis
+- `jerk_fd_dt` is only used as a fallback path for non-`solidfmm` configurations
+- slower than `fast_approx`, but typically faster than finite-difference
+  accurate-mode equivalents
 
 ## Choosing A Mode
 
 | Priority | Recommended mode | Why |
 |---|---|---|
 | Throughput | `fast_approx` | No extra global solves. |
-| Fidelity to total jerk | `accurate` | Includes source-motion effects via finite differences. |
+| Fidelity to total jerk | `accurate` | Includes source-motion effects analytically in the far field. |
 | Conservative rollout | start `fast_approx`, compare with `accurate` | Quantify the tradeoff on your own particle distributions. |
 
 General recommendation:
@@ -71,7 +71,7 @@ General recommendation:
 ## Notes On Performance
 
 - Derivative and jerk paths are JAX-jit compatible and GPU-friendly.
-- `accurate` jerk mode costs additional evaluations by design.
+- `accurate` jerk mode adds extra far-field source-motion contractions by design.
 - Run:
   - `python -m bench.bench_parallel_paths ...`
   - `python -m bench.ci_benchmark_guard ...`

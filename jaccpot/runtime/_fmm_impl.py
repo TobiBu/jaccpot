@@ -2296,41 +2296,74 @@ class FastMultipoleMethod:
             raise ValueError("jerk_mode must be 'fast_approx' or 'accurate'")
 
         if mode == "accurate":
-            dt = float(jerk_fd_dt)
-            if dt <= 0.0:
-                raise ValueError("jerk_fd_dt must be positive")
+            if state.expansion_basis != "solidfmm":
+                dt = float(jerk_fd_dt)
+                if dt <= 0.0:
+                    raise ValueError("jerk_fd_dt must be positive")
 
-            accelerations = self.evaluate_prepared_state(
+                accelerations = self.evaluate_prepared_state(
+                    state,
+                    target_indices=resolved_target_indices,
+                    return_potential=False,
+                    jit_traversal=jit_traversal,
+                    max_acc_derivative_order=0,
+                )
+                particle_indices = jnp.asarray(
+                    state.tree.particle_indices, dtype=INDEX_DTYPE
+                )
+                vel_sorted = vel_arr[particle_indices]
+                positions_plus_sorted = (
+                    jnp.asarray(state.positions_sorted) + dt * vel_sorted
+                )
+                positions_minus_sorted = (
+                    jnp.asarray(state.positions_sorted) - dt * vel_sorted
+                )
+
+                acc_plus = self._evaluate_prepared_state_at_positions_sorted(
+                    state=state,
+                    positions_sorted=positions_plus_sorted,
+                    target_indices=resolved_target_indices,
+                    jit_traversal=jit_traversal,
+                )
+                acc_minus = self._evaluate_prepared_state_at_positions_sorted(
+                    state=state,
+                    positions_sorted=positions_minus_sorted,
+                    target_indices=resolved_target_indices,
+                    jit_traversal=jit_traversal,
+                )
+                jerk = (acc_plus - acc_minus) / (2.0 * dt)
+                if jnp.issubdtype(state.input_dtype, jnp.floating):
+                    output_dtype = state.input_dtype
+                else:
+                    output_dtype = state.working_dtype
+                return accelerations.astype(output_dtype), jerk.astype(output_dtype)
+
+            acc_eval = self.evaluate_prepared_state(
                 state,
                 target_indices=resolved_target_indices,
                 return_potential=False,
                 jit_traversal=jit_traversal,
-                max_acc_derivative_order=0,
+                max_acc_derivative_order=1,
             )
-            particle_indices = jnp.asarray(
-                state.tree.particle_indices, dtype=INDEX_DTYPE
+            accelerations, acc_derivs = acc_eval
+            acc_jac = acc_derivs[0]
+            vel_targets = (
+                vel_arr
+                if resolved_target_indices is None
+                else vel_arr[resolved_target_indices]
             )
-            vel_sorted = vel_arr[particle_indices]
-            positions_plus_sorted = (
-                jnp.asarray(state.positions_sorted) + dt * vel_sorted
-            )
-            positions_minus_sorted = (
-                jnp.asarray(state.positions_sorted) - dt * vel_sorted
-            )
-
-            acc_plus = self._evaluate_prepared_state_at_positions_sorted(
+            far_convective_jerk = jnp.einsum("nij,nj->ni", acc_jac, vel_targets)
+            far_source_motion_jerk = self._evaluate_source_motion_farfield_jerk(
                 state=state,
-                positions_sorted=positions_plus_sorted,
+                velocities=vel_arr,
                 target_indices=resolved_target_indices,
-                jit_traversal=jit_traversal,
             )
-            acc_minus = self._evaluate_prepared_state_at_positions_sorted(
+            near_jerk = self._evaluate_target_nearfield_jerk(
                 state=state,
-                positions_sorted=positions_minus_sorted,
+                velocities=vel_arr,
                 target_indices=resolved_target_indices,
-                jit_traversal=jit_traversal,
             )
-            jerk = (acc_plus - acc_minus) / (2.0 * dt)
+            jerk = near_jerk + far_convective_jerk + far_source_motion_jerk
             if jnp.issubdtype(state.input_dtype, jnp.floating):
                 output_dtype = state.input_dtype
             else:
@@ -2353,18 +2386,37 @@ class FastMultipoleMethod:
         )
         far_jerk = jnp.einsum("nij,nj->ni", acc_jac, vel_targets)
 
-        particle_indices = jnp.asarray(state.tree.particle_indices, dtype=INDEX_DTYPE)
-        vel_sorted = vel_arr[particle_indices]
+        near_jerk = self._evaluate_target_nearfield_jerk(
+            state=state,
+            velocities=vel_arr,
+            target_indices=resolved_target_indices,
+        )
 
-        if resolved_target_indices is None:
+        jerk = near_jerk + far_jerk
+        if jnp.issubdtype(state.input_dtype, jnp.floating):
+            output_dtype = state.input_dtype
+        else:
+            output_dtype = state.working_dtype
+        return accelerations.astype(output_dtype), jerk.astype(output_dtype)
+
+    @jaxtyped(typechecker=beartype)
+    def _evaluate_target_nearfield_jerk(
+        self: "FastMultipoleMethod",
+        state: FMMPreparedState,
+        velocities: Array,
+        *,
+        target_indices: Optional[Array] = None,
+    ) -> Array:
+        particle_indices = jnp.asarray(state.tree.particle_indices, dtype=INDEX_DTYPE)
+        vel_sorted = velocities[particle_indices]
+
+        if target_indices is None:
             target_sorted_indices = jnp.arange(
-                state.positions_sorted.shape[0],
-                dtype=INDEX_DTYPE,
+                state.positions_sorted.shape[0], dtype=INDEX_DTYPE
             )
         else:
             target_sorted_indices = jnp.asarray(
-                state.inverse_permutation[resolved_target_indices],
-                dtype=INDEX_DTYPE,
+                state.inverse_permutation[target_indices], dtype=INDEX_DTYPE
             )
         leaf_nodes = jnp.asarray(state.neighbor_list.leaf_indices, dtype=INDEX_DTYPE)
         node_ranges = jnp.asarray(state.tree.node_ranges, dtype=INDEX_DTYPE)
@@ -2393,17 +2445,117 @@ class FastMultipoleMethod:
         )
         if near_jerk_sorted is None:
             raise RuntimeError("expected near-field jerk values")
-        if resolved_target_indices is None:
-            near_jerk = near_jerk_sorted[state.inverse_permutation]
-        else:
-            near_jerk = near_jerk_sorted
+        if target_indices is None:
+            return near_jerk_sorted[state.inverse_permutation]
+        return near_jerk_sorted
 
-        jerk = near_jerk + far_jerk
-        if jnp.issubdtype(state.input_dtype, jnp.floating):
-            output_dtype = state.input_dtype
+    @jaxtyped(typechecker=beartype)
+    def _evaluate_source_motion_farfield_jerk(
+        self: "FastMultipoleMethod",
+        state: FMMPreparedState,
+        velocities: Array,
+        *,
+        target_indices: Optional[Array] = None,
+    ) -> Array:
+        """Evaluate source-motion far-field jerk using analytic dM->dL contraction."""
+        if state.expansion_basis != "solidfmm":
+            raise NotImplementedError(
+                "source-motion far-field jerk currently requires expansion_basis='solidfmm'"
+            )
+        particle_indices = jnp.asarray(state.tree.particle_indices, dtype=INDEX_DTYPE)
+        vel_sorted = velocities[particle_indices]
+        centers = jnp.asarray(state.downward.locals.centers, dtype=state.working_dtype)
+        complex_upward = prepare_solidfmm_complex_upward_sweep(
+            state.tree,
+            state.positions_sorted,
+            state.masses_sorted,
+            velocities_sorted=vel_sorted,
+            max_order=int(state.downward.locals.order),
+            center_mode="explicit",
+            explicit_centers=centers,
+            max_leaf_size=int(state.max_leaf_size),
+            rotation=self.complex_rotation,
+        )
+        source_motion_packed = complex_upward.multipoles.source_motion_packed
+        if source_motion_packed is None:
+            raise RuntimeError("expected source-motion multipole coefficients")
+        source_motion_multipoles = NodeMultipoleData(
+            order=int(complex_upward.multipoles.order),
+            centers=complex_upward.multipoles.centers,
+            moments=None,  # type: ignore[arg-type]
+            packed=jnp.asarray(source_motion_packed),
+            component_matrix=jnp.asarray(source_motion_packed),
+            source_motion_packed=None,
+        )
+        source_motion_upward = TreeUpwardData(
+            geometry=complex_upward.geometry,
+            mass_moments=complex_upward.mass_moments,
+            multipoles=source_motion_multipoles,
+        )
+        runtime_overrides = self._resolve_runtime_execution_overrides(
+            num_particles=int(state.positions_sorted.shape[0]),
+        )
+        source_motion_downward = self.prepare_downward_sweep(
+            state.tree,
+            source_motion_upward,
+            theta=float(state.theta),
+            mac_type=self.mac_type,
+            initial_locals=None,
+            interactions=state.interactions,
+            m2l_chunk_size=runtime_overrides.m2l_chunk_size,
+            l2l_chunk_size=runtime_overrides.l2l_chunk_size,
+            grouped_interactions=runtime_overrides.grouped_interactions,
+            farfield_mode=runtime_overrides.farfield_mode,
+            dehnen_radius_scale=self.dehnen_radius_scale,
+        )
+        tracing_targets = isinstance(
+            state.positions_sorted, jax.core.Tracer
+        ) or isinstance(target_indices, jax.core.Tracer)
+        if target_indices is None or tracing_targets:
+            far_grad_sorted, _, _ = _evaluate_local_expansions_for_particles(
+                source_motion_downward.locals,
+                state.positions_sorted,
+                leaf_nodes=jnp.asarray(
+                    state.neighbor_list.leaf_indices, dtype=INDEX_DTYPE
+                ),
+                node_ranges=jnp.asarray(state.tree.node_ranges, dtype=INDEX_DTYPE),
+                max_leaf_size=state.max_leaf_size,
+                order=int(source_motion_downward.locals.order),
+                expansion_basis=state.expansion_basis,
+                return_potential=False,
+                max_acc_derivative_order=0,
+            )
+            if target_indices is None:
+                far_grad = jnp.asarray(far_grad_sorted)[state.inverse_permutation]
+            else:
+                far_grad = jnp.asarray(far_grad_sorted)[state.inverse_permutation][
+                    target_indices
+                ]
         else:
-            output_dtype = state.working_dtype
-        return accelerations.astype(output_dtype), jerk.astype(output_dtype)
+            target_sorted_indices = jnp.asarray(
+                state.inverse_permutation[target_indices], dtype=INDEX_DTYPE
+            )
+            leaf_nodes = jnp.asarray(
+                state.neighbor_list.leaf_indices, dtype=INDEX_DTYPE
+            )
+            node_ranges = jnp.asarray(state.tree.node_ranges, dtype=INDEX_DTYPE)
+            target_leaf_positions = _map_targets_to_leaf_positions(
+                target_sorted_indices=target_sorted_indices,
+                leaf_nodes=leaf_nodes,
+                node_ranges=node_ranges,
+            )
+            far_grad, _, _ = _evaluate_local_expansions_for_target_particles(
+                local_data=source_motion_downward.locals,
+                positions_sorted=state.positions_sorted,
+                target_sorted_indices=target_sorted_indices,
+                target_leaf_positions=target_leaf_positions,
+                leaf_nodes=leaf_nodes,
+                order=int(source_motion_downward.locals.order),
+                expansion_basis=state.expansion_basis,
+                return_potential=False,
+                max_acc_derivative_order=0,
+            )
+        return -jnp.asarray(self.G, dtype=state.positions_sorted.dtype) * far_grad
 
     @jaxtyped(typechecker=beartype)
     def _evaluate_prepared_state_at_positions_sorted(
