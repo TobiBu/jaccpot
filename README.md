@@ -99,7 +99,7 @@ mode tradeoffs, and output tensor layouts.
 | Goal | Mode | Notes |
 |---|---|---|
 | Lowest runtime overhead | `fast_approx` | Exact near-field jerk + far-field convective term. |
-| Highest fidelity (includes source-motion effects) | `accurate` | Central finite-difference total derivative (extra solves). |
+| Highest fidelity (includes source-motion effects) | `accurate` | Central finite-difference total derivative (extra evaluations, no full tree rebuild). |
 | Stable default for large production runs | `fast_approx` | Benchmark against your own workload before switching defaults. |
 
 For ODISSEO-style primitive states `(N, 2, 3)`, you can use the adapter:

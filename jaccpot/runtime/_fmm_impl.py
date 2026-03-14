@@ -2306,40 +2306,28 @@ class FastMultipoleMethod:
                 jit_traversal=jit_traversal,
                 max_acc_derivative_order=0,
             )
-            positions_unsorted = jnp.asarray(state.positions_sorted)[
-                state.inverse_permutation
-            ]
-            masses_unsorted = jnp.asarray(state.masses_sorted)[
-                state.inverse_permutation
-            ]
-            pos_plus = positions_unsorted + dt * vel_arr
-            pos_minus = positions_unsorted - dt * vel_arr
-            jit_tree_override = (
-                self._jit_tree_default
-                if isinstance(self._jit_tree_default, bool)
-                else None
+            particle_indices = jnp.asarray(
+                state.tree.particle_indices, dtype=INDEX_DTYPE
             )
-            acc_plus = self.compute_accelerations(
-                pos_plus,
-                masses_unsorted,
-                target_indices=resolved_target_indices,
-                leaf_size=int(state.max_leaf_size),
-                max_order=int(state.downward.locals.order),
-                theta=float(state.theta),
-                jit_tree=jit_tree_override,
-                jit_traversal=jit_traversal,
-                reuse_prepared_state=False,
+            vel_sorted = vel_arr[particle_indices]
+            positions_plus_sorted = (
+                jnp.asarray(state.positions_sorted) + dt * vel_sorted
             )
-            acc_minus = self.compute_accelerations(
-                pos_minus,
-                masses_unsorted,
+            positions_minus_sorted = (
+                jnp.asarray(state.positions_sorted) - dt * vel_sorted
+            )
+
+            acc_plus = self._evaluate_prepared_state_at_positions_sorted(
+                state=state,
+                positions_sorted=positions_plus_sorted,
                 target_indices=resolved_target_indices,
-                leaf_size=int(state.max_leaf_size),
-                max_order=int(state.downward.locals.order),
-                theta=float(state.theta),
-                jit_tree=jit_tree_override,
                 jit_traversal=jit_traversal,
-                reuse_prepared_state=False,
+            )
+            acc_minus = self._evaluate_prepared_state_at_positions_sorted(
+                state=state,
+                positions_sorted=positions_minus_sorted,
+                target_indices=resolved_target_indices,
+                jit_traversal=jit_traversal,
             )
             jerk = (acc_plus - acc_minus) / (2.0 * dt)
             if jnp.issubdtype(state.input_dtype, jnp.floating):
@@ -2415,6 +2403,104 @@ class FastMultipoleMethod:
         else:
             output_dtype = state.working_dtype
         return accelerations.astype(output_dtype), jerk.astype(output_dtype)
+
+    @jaxtyped(typechecker=beartype)
+    def _evaluate_prepared_state_at_positions_sorted(
+        self: "FastMultipoleMethod",
+        state: FMMPreparedState,
+        positions_sorted: Array,
+        *,
+        target_indices: Optional[Array] = None,
+        jit_traversal: bool = True,
+    ) -> Array:
+        """Evaluate accelerations for updated sorted positions on a fixed topology."""
+        positions_sorted_arr = jnp.asarray(positions_sorted, dtype=state.working_dtype)
+        if positions_sorted_arr.shape != state.positions_sorted.shape:
+            raise ValueError(
+                "positions_sorted must have shape "
+                f"{tuple(state.positions_sorted.shape)}, got {tuple(positions_sorted_arr.shape)}"
+            )
+
+        runtime_overrides = self._resolve_runtime_execution_overrides(
+            num_particles=int(positions_sorted_arr.shape[0]),
+        )
+        upward = self.prepare_upward_sweep(
+            state.tree,
+            positions_sorted_arr,
+            state.masses_sorted,
+            max_order=int(state.downward.locals.order),
+            center_mode=runtime_overrides.center_mode,
+            max_leaf_size=int(state.max_leaf_size),
+        )
+        downward = self.prepare_downward_sweep(
+            state.tree,
+            upward,
+            theta=float(state.theta),
+            mac_type=self.mac_type,
+            initial_locals=None,
+            interactions=state.interactions,
+            m2l_chunk_size=runtime_overrides.m2l_chunk_size,
+            l2l_chunk_size=runtime_overrides.l2l_chunk_size,
+            grouped_interactions=runtime_overrides.grouped_interactions,
+            farfield_mode=runtime_overrides.farfield_mode,
+            dehnen_radius_scale=self.dehnen_radius_scale,
+        )
+        resolved_target_indices = self._resolve_target_indices(
+            target_indices=target_indices,
+            num_particles=int(state.inverse_permutation.shape[0]),
+        )
+        tracing_targets = isinstance(
+            positions_sorted_arr, jax.core.Tracer
+        ) or isinstance(resolved_target_indices, jax.core.Tracer)
+        if resolved_target_indices is None or tracing_targets:
+            evaluation = _evaluate_prepared_tree(
+                fmm=self,
+                tree=state.tree,
+                positions_sorted=positions_sorted_arr,
+                masses_sorted=state.masses_sorted,
+                downward=downward,
+                neighbor_list=state.neighbor_list,
+                nearfield_target_leaf_ids=state.nearfield_target_leaf_ids,
+                nearfield_source_leaf_ids=state.nearfield_source_leaf_ids,
+                nearfield_valid_pairs=state.nearfield_valid_pairs,
+                nearfield_chunk_sort_indices=state.nearfield_chunk_sort_indices,
+                nearfield_chunk_group_ids=state.nearfield_chunk_group_ids,
+                nearfield_chunk_unique_indices=state.nearfield_chunk_unique_indices,
+                max_leaf_size=state.max_leaf_size,
+                return_potential=False,
+                jit_traversal=jit_traversal,
+                max_acc_derivative_order=0,
+            )
+        else:
+            target_sorted_indices = jnp.asarray(
+                state.inverse_permutation[resolved_target_indices],
+                dtype=INDEX_DTYPE,
+            )
+            evaluation = _evaluate_prepared_tree_targets(
+                fmm=self,
+                tree=state.tree,
+                positions_sorted=positions_sorted_arr,
+                masses_sorted=state.masses_sorted,
+                downward=downward,
+                neighbor_list=state.neighbor_list,
+                target_sorted_indices=target_sorted_indices,
+                return_potential=False,
+                max_acc_derivative_order=0,
+            )
+
+        if jnp.issubdtype(state.input_dtype, jnp.floating):
+            output_dtype = state.input_dtype
+        else:
+            output_dtype = state.working_dtype
+        if resolved_target_indices is None:
+            accelerations = jnp.asarray(evaluation)[state.inverse_permutation]
+        elif tracing_targets:
+            accelerations = jnp.asarray(evaluation)[state.inverse_permutation][
+                resolved_target_indices
+            ]
+        else:
+            accelerations = jnp.asarray(evaluation)
+        return accelerations.astype(output_dtype)
 
     @jaxtyped(typechecker=beartype)
     def evaluate_tree(

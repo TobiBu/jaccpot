@@ -431,6 +431,37 @@ def test_compute_accelerations_and_jerk_accurate_mode_matches_direct_sum_tighter
     assert err_acc < 2e-3
 
 
+def test_compute_accelerations_and_jerk_accurate_mode_reuses_prepared_topology(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    positions, masses = _sample_problem(n=20)
+    velocities = _sample_velocities(n=20)
+    fmm = FastMultipoleMethod(
+        preset=FMMPreset.ACCURATE,
+        basis="solidfmm",
+    )
+
+    def _forbidden(*args, **kwargs):
+        raise AssertionError(
+            "accurate jerk mode should reuse prepared topology and avoid full rebuild solves"
+        )
+
+    monkeypatch.setattr(fmm._impl, "compute_accelerations", _forbidden)
+    acc, jerk = fmm.compute_accelerations_and_jerk(
+        positions,
+        masses,
+        velocities,
+        leaf_size=10,
+        max_order=4,
+        theta=1e-4,
+        jerk_mode="accurate",
+        jerk_fd_dt=1e-3,
+    )
+
+    assert acc.shape == positions.shape
+    assert jerk.shape == positions.shape
+
+
 def test_compute_accelerations_and_jerk_invalid_mode_raises():
     positions, masses = _sample_problem(n=16)
     velocities = _sample_velocities(n=16)

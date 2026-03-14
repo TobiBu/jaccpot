@@ -48,11 +48,11 @@ Both return:
 ### `jerk_mode="accurate"`
 
 - central finite-difference estimate of total jerk using two additional
-  acceleration solves
+  acceleration evaluations (`x ± dt * v`) on the prepared topology
 - includes source-motion effects without dedicated time-dependent multipole
   machinery
 - controlled by `jerk_fd_dt`
-- slower than `fast_approx`
+- slower than `fast_approx`, but avoids full tree rebuilds
 
 ## Choosing A Mode
 
@@ -71,7 +71,7 @@ General recommendation:
 ## Notes On Performance
 
 - Derivative and jerk paths are JAX-jit compatible and GPU-friendly.
-- `accurate` jerk mode costs additional solves by design.
+- `accurate` jerk mode costs additional evaluations by design.
 - Run:
   - `python -m bench.bench_parallel_paths ...`
   - `python -m bench.ci_benchmark_guard ...`
