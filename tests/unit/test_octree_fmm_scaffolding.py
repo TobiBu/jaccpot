@@ -1,13 +1,24 @@
 import jax.numpy as jnp
 import numpy as np
+from yggdrax.interactions import (
+    DualTreeTraversalConfig,
+    build_octree_native_far_pairs,
+)
 
-from jaccpot import FastMultipoleMethod, FMMAdvancedConfig, FMMPreset, TreeConfig
+from jaccpot import (
+    FastMultipoleMethod,
+    FMMAdvancedConfig,
+    FMMPreset,
+    RuntimePolicyConfig,
+    TreeConfig,
+)
 from jaccpot.operators.complex_ops import l2l_complex_batch
 from jaccpot.runtime._fmm_impl import _prepare_solidfmm_downward_sweep
 from jaccpot.runtime._octree_fmm import (
     accumulate_octree_solidfmm_m2l,
     build_octree_downward_plan,
     build_octree_interaction_plan,
+    build_octree_interaction_plan_from_native_pairs,
     build_octree_upward_plan,
     prepare_octree_solidfmm_complex_multipoles,
     propagate_octree_solidfmm_l2l,
@@ -28,7 +39,10 @@ def test_octree_upward_plan_exposes_level_major_metadata():
     fmm = FastMultipoleMethod(
         preset=FMMPreset.FAST,
         basis="solidfmm",
-        advanced=FMMAdvancedConfig(tree=TreeConfig(tree_type="octree")),
+        advanced=FMMAdvancedConfig(
+            tree=TreeConfig(tree_type="octree"),
+            runtime=RuntimePolicyConfig(execution_backend="octree"),
+        ),
     )
 
     state = fmm.prepare_state(
@@ -221,6 +235,57 @@ def test_octree_interaction_plan_remaps_farfield_pairs_by_level():
     assert level_offsets[-1] == num_pairs
     assert np.all(target_levels[:num_pairs][1:] >= target_levels[:num_pairs][:-1])
     assert np.all(target_nodes[:num_pairs] >= 0)
+
+
+def test_octree_native_far_pairs_feed_downward_plan():
+    positions, masses = _sample_problem(n=64)
+    fmm = FastMultipoleMethod(
+        preset=FMMPreset.FAST,
+        basis="solidfmm",
+        advanced=FMMAdvancedConfig(
+            tree=TreeConfig(tree_type="octree"),
+            runtime=RuntimePolicyConfig(execution_backend="octree"),
+        ),
+    )
+
+    state = fmm.prepare_state(
+        positions,
+        masses,
+        leaf_size=8,
+        max_order=3,
+    )
+
+    assert state.octree is not None
+    assert state.octree_downward is not None
+    assert state.execution_backend == "octree"
+    native_far_pairs = build_octree_native_far_pairs(
+        state.tree,
+        state.upward.geometry,
+        theta=float(state.theta),
+        mac_type="dehnen",
+        traversal_config=DualTreeTraversalConfig(
+            max_pair_queue=8192,
+            process_block=128,
+            max_interactions_per_node=2048,
+            max_neighbors_per_leaf=2048,
+        ),
+    )
+    native_plan = build_octree_interaction_plan_from_native_pairs(
+        state.octree,
+        native_far_pairs,
+    )
+
+    assert int(np.asarray(state.octree_downward.num_pairs)) == int(
+        np.asarray(native_plan.num_pairs)
+    )
+    np.testing.assert_array_equal(
+        np.asarray(state.octree_downward.target_nodes)[: int(np.asarray(native_plan.num_pairs))],
+        np.asarray(native_plan.target_nodes)[: int(np.asarray(native_plan.num_pairs))],
+    )
+    np.testing.assert_array_equal(
+        np.asarray(state.octree_downward.source_nodes)[: int(np.asarray(native_plan.num_pairs))],
+        np.asarray(native_plan.source_nodes)[: int(np.asarray(native_plan.num_pairs))],
+    )
 
 
 def test_prepare_state_attaches_octree_native_downward_scaffold():

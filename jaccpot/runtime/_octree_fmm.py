@@ -8,7 +8,7 @@ from typing import NamedTuple
 import jax
 import jax.numpy as jnp
 from jaxtyping import Array
-from yggdrax.interactions import NodeInteractionList
+from yggdrax.interactions import CompactTaggedOctreeFarPairs, NodeInteractionList
 
 from jaccpot.operators.complex_harmonics import p2m_complex_batch
 from jaccpot.operators.complex_ops import (
@@ -113,11 +113,11 @@ def build_octree_interaction_plan(
 ) -> OctreeInteractionPlan:
     """Remap radix far-field pairs into explicit octree node space."""
 
-    radix_sources = jnp.asarray(interactions.sources, dtype=INDEX_DTYPE)
-    radix_targets = jnp.asarray(interactions.targets, dtype=INDEX_DTYPE)
     num_oct_nodes = int(octree.valid_mask.shape[0])
     sentinel_node = jnp.asarray(num_oct_nodes, dtype=INDEX_DTYPE)
     sentinel_level = jnp.asarray(int(octree.num_levels), dtype=INDEX_DTYPE)
+    radix_sources = jnp.asarray(interactions.sources, dtype=INDEX_DTYPE)
+    radix_targets = jnp.asarray(interactions.targets, dtype=INDEX_DTYPE)
 
     oct_sources = jnp.where(
         radix_sources >= 0,
@@ -136,6 +136,52 @@ def build_octree_interaction_plan(
         & (oct_targets >= 0)
     )
 
+    return build_octree_interaction_plan_from_octree_pairs(
+        octree,
+        oct_sources=oct_sources,
+        oct_targets=oct_targets,
+        valid=valid,
+        sentinel_node=sentinel_node,
+        sentinel_level=sentinel_level,
+    )
+
+
+def build_octree_interaction_plan_from_native_pairs(
+    octree: OctreeExecutionData,
+    far_pairs: CompactTaggedOctreeFarPairs,
+) -> OctreeInteractionPlan:
+    """Package octree-native far-field pairs for octree M2L scheduling."""
+
+    oct_sources = jnp.asarray(far_pairs.sources, dtype=INDEX_DTYPE)
+    oct_targets = jnp.asarray(far_pairs.targets, dtype=INDEX_DTYPE)
+    num_oct_nodes = int(octree.valid_mask.shape[0])
+    return build_octree_interaction_plan_from_octree_pairs(
+        octree,
+        oct_sources=oct_sources,
+        oct_targets=oct_targets,
+        valid=(
+            (oct_sources >= 0)
+            & (oct_targets >= 0)
+            & (oct_sources < num_oct_nodes)
+            & (oct_targets < num_oct_nodes)
+        ),
+        sentinel_node=jnp.asarray(num_oct_nodes, dtype=INDEX_DTYPE),
+        sentinel_level=jnp.asarray(int(octree.num_levels), dtype=INDEX_DTYPE),
+    )
+
+
+def build_octree_interaction_plan_from_octree_pairs(
+    octree: OctreeExecutionData,
+    *,
+    oct_sources: Array,
+    oct_targets: Array,
+    valid: Array,
+    sentinel_node: Array,
+    sentinel_level: Array,
+) -> OctreeInteractionPlan:
+    """Sort octree-space far-field pairs into level-major execution order."""
+
+    num_oct_nodes = int(octree.valid_mask.shape[0])
     safe_targets = jnp.where(valid, oct_targets, sentinel_node)
     safe_sources = jnp.where(valid, oct_sources, sentinel_node)
     target_depths = octree.node_depths[jnp.clip(safe_targets, 0, num_oct_nodes - 1)]
@@ -675,6 +721,7 @@ __all__ = [
     "build_octree_downward_plan",
     "OctreeUpwardPlan",
     "build_octree_interaction_plan",
+    "build_octree_interaction_plan_from_native_pairs",
     "build_octree_upward_plan",
     "compute_octree_center_of_mass",
     "propagate_octree_solidfmm_l2l",
