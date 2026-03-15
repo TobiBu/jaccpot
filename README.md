@@ -94,7 +94,8 @@ acc, jerk = solver.compute_accelerations_and_jerk(
 See [docs/derivatives_and_jerk.md](docs/derivatives_and_jerk.md) for API details,
 mode tradeoffs, and output tensor layouts.
 Current time-derivative support is implemented up to jerk; higher time
-derivatives (snap/crackle and above) are not yet available.
+derivatives currently support snap (`max_time_derivative_order=2`) in the
+accurate analytic path; crackle and above are not yet available.
 
 ### Jerk Mode Guide
 

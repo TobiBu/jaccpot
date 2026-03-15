@@ -31,6 +31,8 @@ Use:
 
 - `FastMultipoleMethod.compute_accelerations_and_jerk(...)`
 - `FastMultipoleMethod.evaluate_prepared_state_with_jerk(...)`
+- `FastMultipoleMethod.compute_accelerations_with_time_derivatives(...)`
+- `FastMultipoleMethod.evaluate_prepared_state_with_time_derivatives(...)`
 
 Both return:
 
@@ -58,11 +60,12 @@ Both return:
 
 ### Current Scope
 
-- Time-derivative support currently covers jerk only.
-- Higher time derivatives beyond jerk (e.g. snap/crackle and above) are not
-  implemented yet.
-- Internal source-motion multipole kernels now support higher directional
-  derivative orders; public runtime assembly beyond jerk is still pending.
+- Public time-derivative runtime support currently covers:
+  - order 1: jerk
+  - order 2: snap
+- Orders above 2 (crackle and above) are not implemented yet.
+- Higher-order source-motion multipole kernels are implemented internally and
+  feed the runtime assembler.
 
 ## Choosing A Mode
 

@@ -428,6 +428,38 @@ class FastMultipoleMethod:
             jerk_fd_dt=jerk_fd_dt,
         )
 
+    def compute_accelerations_with_time_derivatives(
+        self: "FastMultipoleMethod",
+        positions: Array,
+        masses: Array,
+        velocities: Array,
+        *,
+        target_indices: Optional[Array] = None,
+        bounds: Optional[Tuple[Array, Array]] = None,
+        leaf_size: int = 16,
+        max_order: int = 4,
+        theta: Optional[float] = None,
+        reuse_prepared_state: bool = False,
+        max_time_derivative_order: int = 1,
+        mode: str = "accurate",
+    ) -> tuple[Array, tuple[Array, ...]]:
+        """Compute accelerations and time derivatives up to order K."""
+        return self._impl.compute_accelerations_with_time_derivatives(
+            positions,
+            masses,
+            velocities,
+            target_indices=target_indices,
+            bounds=bounds,
+            leaf_size=leaf_size,
+            max_order=max_order,
+            theta=theta,
+            reuse_prepared_state=reuse_prepared_state,
+            jit_tree=self.advanced.runtime.jit_tree,
+            jit_traversal=self.advanced.runtime.jit_traversal,
+            max_time_derivative_order=max_time_derivative_order,
+            mode=mode,
+        )
+
     def prepare_upward_sweep(
         self: "FastMultipoleMethod",
         tree: Any,
@@ -503,6 +535,30 @@ class FastMultipoleMethod:
             jit_traversal=jit_traversal,
             jerk_mode=jerk_mode,
             jerk_fd_dt=jerk_fd_dt,
+        )
+
+    def evaluate_prepared_state_with_time_derivatives(
+        self: "FastMultipoleMethod",
+        state: FMMPreparedState,
+        velocities: Array,
+        *,
+        target_indices: Optional[Array] = None,
+        max_time_derivative_order: int = 1,
+        mode: str = "accurate",
+    ) -> tuple[Array, tuple[Array, ...]]:
+        """Evaluate accelerations and time derivatives for a prepared state."""
+        jit_traversal = (
+            True
+            if self.advanced.runtime.jit_traversal is None
+            else bool(self.advanced.runtime.jit_traversal)
+        )
+        return self._impl.evaluate_prepared_state_with_time_derivatives(
+            state,
+            velocities,
+            target_indices=target_indices,
+            jit_traversal=jit_traversal,
+            max_time_derivative_order=max_time_derivative_order,
+            mode=mode,
         )
 
     def clear_prepared_state_cache(self: "FastMultipoleMethod") -> None:
