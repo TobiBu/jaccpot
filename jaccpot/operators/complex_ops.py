@@ -246,23 +246,59 @@ def _lower_complex_harmonics_one_axis(
     if axis not in (0, 1, 2):
         raise ValueError("axis must be 0, 1, or 2")
     coeffs = jnp.asarray(coeffs)[: sh_size(p)]
-    out = jnp.zeros_like(coeffs)
+    idx_a, idx_b, fac_a, fac_b = _lower_complex_harmonics_axis_maps(p, axis)
+    gathered_a = coeffs[jnp.asarray(idx_a, dtype=jnp.int32)]
+    gathered_b = coeffs[jnp.asarray(idx_b, dtype=jnp.int32)]
+    fac_a_arr = jnp.asarray(fac_a, dtype=coeffs.dtype)
+    fac_b_arr = jnp.asarray(fac_b, dtype=coeffs.dtype)
+    return fac_a_arr * gathered_a + fac_b_arr * gathered_b
 
-    def _get(n: int, m: int) -> Array:
+
+@lru_cache(maxsize=None)
+def _lower_complex_harmonics_axis_maps(
+    order: int,
+    axis: int,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """Precompute gather/scale maps for one Cartesian derivative axis."""
+    p = int(order)
+    ncoeff = sh_size(p)
+    idx_a = np.zeros((ncoeff,), dtype=np.int32)
+    idx_b = np.zeros((ncoeff,), dtype=np.int32)
+    fac_a = np.zeros((ncoeff,), dtype=np.complex128)
+    fac_b = np.zeros((ncoeff,), dtype=np.complex128)
+
+    def _src_index(n: int, m: int) -> tuple[int, bool]:
         if n < 0 or abs(m) > n:
-            return jnp.asarray(0.0 + 0.0j, dtype=coeffs.dtype)
-        return coeffs[sh_offset(n) + (m + n)]
+            return 0, False
+        return sh_offset(n) + (m + n), True
 
-    for n in range(1, p + 1):
+    for n in range(0, p + 1):
         for m in range(-n, n + 1):
+            out_idx = sh_offset(n) + (m + n)
+            if n == 0:
+                continue
             if axis == 0:
-                val = 0.5 * (_get(n - 1, m - 1) - _get(n - 1, m + 1))
+                idx_a_val, valid_a = _src_index(n - 1, m - 1)
+                idx_b_val, valid_b = _src_index(n - 1, m + 1)
+                idx_a[out_idx] = idx_a_val
+                idx_b[out_idx] = idx_b_val
+                fac_a[out_idx] = 0.5 if valid_a else 0.0
+                fac_b[out_idx] = -0.5 if valid_b else 0.0
             elif axis == 1:
-                val = 0.5j * (_get(n - 1, m - 1) + _get(n - 1, m + 1))
+                idx_a_val, valid_a = _src_index(n - 1, m - 1)
+                idx_b_val, valid_b = _src_index(n - 1, m + 1)
+                idx_a[out_idx] = idx_a_val
+                idx_b[out_idx] = idx_b_val
+                fac_a[out_idx] = 0.5j if valid_a else 0.0
+                fac_b[out_idx] = 0.5j if valid_b else 0.0
             else:
-                val = _get(n - 1, m)
-            out = out.at[sh_offset(n) + (m + n)].set(val)
-    return out
+                idx_a_val, valid_a = _src_index(n - 1, m)
+                idx_a[out_idx] = idx_a_val
+                idx_b[out_idx] = 0
+                fac_a[out_idx] = 1.0 if valid_a else 0.0
+                fac_b[out_idx] = 0.0
+
+    return idx_a, idx_b, fac_a, fac_b
 
 
 def _build_complex_harmonic_derivative_coefficients(
@@ -436,27 +472,16 @@ def regular_solid_harmonic_directional_derivative_order(
     if k == 0:
         return jnp.asarray(complex_R_solidfmm(delta, order=p))
 
-    levels = _build_complex_harmonic_derivative_coefficients(
-        delta,
-        order=p,
-        max_derivative_order=k,
-    )
-    packed_level = levels[k]
-    direction_arr = jnp.asarray(direction, dtype=jnp.real(packed_level).dtype)
-    current = packed_level
-    current_order = k
-    for _ in range(k):
-        current = jax.vmap(
-            lambda col: contract_symmetric_one_axis_3d(
-                col,
-                direction_arr,
-                order=current_order,
-            ),
-            in_axes=1,
-            out_axes=1,
-        )(current)
-        current_order -= 1
-    return current[0]
+    base = jnp.asarray(complex_R_solidfmm(delta, order=p))
+    direction_arr = jnp.asarray(direction, dtype=jnp.real(base).dtype)
+
+    def body(_i: int, coeffs: Array) -> Array:
+        dx = _lower_complex_harmonics_one_axis(coeffs, order=p, axis=0)
+        dy = _lower_complex_harmonics_one_axis(coeffs, order=p, axis=1)
+        dz = _lower_complex_harmonics_one_axis(coeffs, order=p, axis=2)
+        return direction_arr[0] * dx + direction_arr[1] * dy + direction_arr[2] * dz
+
+    return jax.lax.fori_loop(0, k, body, base)
 
 
 @partial(jax.jit, static_argnames=("order",))
