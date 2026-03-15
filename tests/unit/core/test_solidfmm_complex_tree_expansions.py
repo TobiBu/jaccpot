@@ -283,3 +283,104 @@ def test_solidfmm_downward_source_motion_locals_match_finite_difference():
     ref = (plus_down.locals.coefficients - minus_down.locals.coefficients) / (2.0 * dt)
     got = analytic_down.source_motion_locals.coefficients
     assert np.allclose(np.asarray(got), np.asarray(ref), rtol=3e-5, atol=1e-7)
+
+
+def test_solidfmm_downward_second_time_derivative_locals_match_finite_difference():
+    tree, pos_sorted, mass_sorted, vel_sorted = _build_sample_tree()
+    order = 4
+    dt = jnp.asarray(1e-5, dtype=pos_sorted.dtype)
+
+    base = prepare_solidfmm_complex_upward_sweep(
+        tree,
+        pos_sorted,
+        mass_sorted,
+        max_order=order,
+        center_mode="aabb",
+    )
+    centers = base.multipoles.centers
+    d2m = prepare_solidfmm_complex_source_motion_multipoles(
+        tree,
+        pos_sorted,
+        mass_sorted,
+        vel_sorted,
+        max_order=order,
+        centers=centers,
+        time_derivative_order=2,
+    )
+
+    fmm = FastMultipoleMethod(expansion_basis="solidfmm")
+    base_down = fmm.prepare_downward_sweep(
+        tree,
+        _as_tree_upward_data(base),
+        theta=0.6,
+    )
+    d2_upward = TreeUpwardData(
+        geometry=base.geometry,
+        mass_moments=base.mass_moments,
+        multipoles=NodeMultipoleData(
+            order=order,
+            centers=centers,
+            moments=None,  # type: ignore[arg-type]
+            packed=d2m,
+            component_matrix=d2m,
+            source_motion_packed=None,
+        ),
+    )
+    d2_down = fmm.prepare_downward_sweep(
+        tree,
+        d2_upward,
+        theta=0.6,
+        interactions=base_down.interactions,
+    )
+
+    plus = prepare_solidfmm_complex_upward_sweep(
+        tree,
+        pos_sorted + dt * vel_sorted,
+        mass_sorted,
+        max_order=order,
+        center_mode="explicit",
+        explicit_centers=centers,
+    )
+    zero = prepare_solidfmm_complex_upward_sweep(
+        tree,
+        pos_sorted,
+        mass_sorted,
+        max_order=order,
+        center_mode="explicit",
+        explicit_centers=centers,
+    )
+    minus = prepare_solidfmm_complex_upward_sweep(
+        tree,
+        pos_sorted - dt * vel_sorted,
+        mass_sorted,
+        max_order=order,
+        center_mode="explicit",
+        explicit_centers=centers,
+    )
+    plus_down = fmm.prepare_downward_sweep(
+        tree,
+        _as_tree_upward_data(plus),
+        theta=0.6,
+        interactions=base_down.interactions,
+    )
+    zero_down = fmm.prepare_downward_sweep(
+        tree,
+        _as_tree_upward_data(zero),
+        theta=0.6,
+        interactions=base_down.interactions,
+    )
+    minus_down = fmm.prepare_downward_sweep(
+        tree,
+        _as_tree_upward_data(minus),
+        theta=0.6,
+        interactions=base_down.interactions,
+    )
+    ref = (
+        plus_down.locals.coefficients
+        - 2.0 * zero_down.locals.coefficients
+        + minus_down.locals.coefficients
+    ) / (dt * dt)
+    rel = np.linalg.norm(np.asarray(d2_down.locals.coefficients - ref)) / (
+        np.linalg.norm(np.asarray(ref)) + 1e-12
+    )
+    assert rel < 2e-3
