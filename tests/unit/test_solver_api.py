@@ -304,6 +304,38 @@ def test_octree_execution_backend_matches_radix_on_octree_tree():
     )
 
 
+def test_octree_execution_backend_exposes_native_nearfield_view():
+    positions, masses = _sample_problem(n=72)
+    fmm = FastMultipoleMethod(
+        preset=FMMPreset.FAST,
+        basis="solidfmm",
+        advanced=FMMAdvancedConfig(
+            tree=TreeConfig(tree_type="octree"),
+            runtime=RuntimePolicyConfig(execution_backend="octree"),
+        ),
+    )
+
+    state = fmm.prepare_state(
+        positions,
+        masses,
+        leaf_size=8,
+        max_order=3,
+    )
+
+    assert state.octree is not None
+    assert state.nearfield_interop is not None
+    leaf_nodes = np.asarray(state.nearfield_interop.leaf_nodes)
+    native_map = np.asarray(state.nearfield_interop.particle_order_to_native_leaf)
+    carrier_nodes = np.unique(np.asarray(state.octree.radix_leaf_to_oct))
+    assert state.nearfield_interop.node_ranges.shape[0] == state.octree.parent.shape[0]
+    assert np.array_equal(np.sort(leaf_nodes), np.sort(carrier_nodes))
+    assert native_map.shape == leaf_nodes.shape
+    assert np.array_equal(np.sort(native_map), np.arange(leaf_nodes.shape[0]))
+    assert state.nearfield_interop.leaf_particle_indices is not None
+    assert state.nearfield_interop.leaf_particle_mask is not None
+    assert state.nearfield_interop.particle_to_leaf_position is not None
+
+
 def test_octree_execution_backend_target_indices_match_full_prepared_state():
     positions, masses = _sample_problem(n=72)
     fmm = FastMultipoleMethod(

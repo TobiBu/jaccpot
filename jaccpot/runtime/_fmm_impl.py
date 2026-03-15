@@ -35,8 +35,10 @@ from yggdrax.interactions import (
     MACType,
     NodeInteractionList,
     NodeNeighborList,
+    OctreeNativeNeighborList,
     build_interactions_and_neighbors,
     build_octree_native_far_pairs,
+    build_octree_native_neighbor_lists,
     build_well_separated_interactions,
 )
 from yggdrax.morton import morton_encode
@@ -63,6 +65,7 @@ from jaccpot.downward.local_expansions import (
 from jaccpot.nearfield.near_field import (
     compute_leaf_p2p_accelerations,
     prepare_bucketed_scatter_schedules,
+    prepare_bucketed_scatter_schedules_from_groups,
     prepare_leaf_neighbor_pairs,
 )
 from jaccpot.operators.complex_ops import (
@@ -1079,6 +1082,9 @@ class NearfieldInteropData(NamedTuple):
     particle_order_node_ranges: Array
     particle_order_leaf_indices: Array
     particle_order_to_native_leaf: Array
+    leaf_particle_indices: Optional[Array] = None
+    leaf_particle_mask: Optional[Array] = None
+    particle_to_leaf_position: Optional[Array] = None
 
 
 def _build_octree_upward_artifacts(
@@ -1884,13 +1890,28 @@ class FastMultipoleMethod:
                 allow_stateful_cache=False,
             )
             prepass_octree = build_octree_execution_data(low_tree_artifacts.tree)
+            prepass_execution_backend = self._resolve_execution_backend()
+            prepass_octree_native_neighbors = None
+            if prepass_execution_backend == "octree" and prepass_octree is not None:
+                prepass_octree_native_neighbors = build_octree_native_neighbor_lists(
+                    low_tree_artifacts.tree,
+                    low_tree_artifacts.upward.geometry,
+                    theta=theta_val,
+                    mac_type=mac_type_val,
+                    dehnen_radius_scale=self.dehnen_radius_scale,
+                    max_pair_queue=self.max_pair_queue,
+                    process_block=self.pair_process_block,
+                    traversal_config=runtime_traversal_config,
+                )
+            prepass_nearfield_interop = _build_nearfield_interop_data(
+                low_tree_artifacts.tree,
+                dual_downward_artifacts.neighbor_list,
+                octree=prepass_octree,
+                native_neighbors=prepass_octree_native_neighbors,
+            )
             nearfield_artifacts = self._prepare_state_nearfield_artifacts(
                 neighbor_list=dual_downward_artifacts.neighbor_list,
-                nearfield_interop=_build_nearfield_interop_data(
-                    low_tree_artifacts.tree,
-                    dual_downward_artifacts.neighbor_list,
-                    octree=prepass_octree,
-                ),
+                nearfield_interop=prepass_nearfield_interop,
                 leaf_cap=low_tree_artifacts.leaf_cap,
                 num_particles=int(low_tree_artifacts.positions_sorted.shape[0]),
                 cache_entry=dual_downward_artifacts.cache_entry,
@@ -1903,7 +1924,6 @@ class FastMultipoleMethod:
                 expansion_basis=self.expansion_basis,
                 max_order=int(low_order),
             )
-            prepass_execution_backend = self._resolve_execution_backend()
             prepass_octree_native_far_pairs = None
             if prepass_execution_backend == "octree" and prepass_octree is not None:
                 prepass_octree_native_far_pairs = build_octree_native_far_pairs(
@@ -1937,11 +1957,7 @@ class FastMultipoleMethod:
                 interactions=dual_downward_artifacts.interactions,
                 dual_tree_result=dual_downward_artifacts.traversal_result,
                 retry_events=tuple(),
-                nearfield_interop=_build_nearfield_interop_data(
-                    low_tree_artifacts.tree,
-                    dual_downward_artifacts.neighbor_list,
-                    octree=prepass_octree,
-                ),
+                nearfield_interop=prepass_nearfield_interop,
                 nearfield_target_leaf_ids=nearfield_artifacts.target_leaf_ids,
                 nearfield_source_leaf_ids=nearfield_artifacts.source_leaf_ids,
                 nearfield_valid_pairs=nearfield_artifacts.valid_pairs,
@@ -3248,6 +3264,11 @@ class FastMultipoleMethod:
         allow_stateful_cache: bool,
     ) -> NearfieldPrecomputeArtifacts:
         """Build/reuse near-field precompute artifacts for prepare_state."""
+        effective_leaf_cap = (
+            int(nearfield_interop.leaf_particle_indices.shape[1])
+            if nearfield_interop.leaf_particle_indices is not None
+            else int(leaf_cap)
+        )
         nearfield_mode_resolved = self._resolve_nearfield_mode(
             num_particles=num_particles
         )
@@ -3266,7 +3287,7 @@ class FastMultipoleMethod:
         nearfield_artifacts = self._prepare_nearfield_precompute_artifacts(
             neighbor_list=neighbor_list,
             nearfield_interop=nearfield_interop,
-            leaf_cap=leaf_cap,
+            leaf_cap=effective_leaf_cap,
             num_particles=num_particles,
             nearfield_mode=nearfield_mode_resolved,
             nearfield_edge_chunk_size=nearfield_edge_chunk_size_resolved,
@@ -3440,6 +3461,17 @@ class FastMultipoleMethod:
             )
             if schedule_items > int(schedule_item_cap):
                 return None, None, None
+            if nearfield_interop.leaf_particle_indices is not None:
+                return prepare_bucketed_scatter_schedules_from_groups(
+                    jnp.asarray(
+                        nearfield_interop.leaf_particle_indices,
+                        dtype=INDEX_DTYPE,
+                    ),
+                    jnp.asarray(nearfield_interop.leaf_particle_mask, dtype=bool),
+                    target_leaf_ids,
+                    valid_pairs,
+                    edge_chunk_size=chunk,
+                )
             return prepare_bucketed_scatter_schedules(
                 jnp.asarray(nearfield_interop.node_ranges, dtype=INDEX_DTYPE),
                 jnp.asarray(nearfield_interop.leaf_nodes, dtype=INDEX_DTYPE),
@@ -4243,13 +4275,28 @@ class FastMultipoleMethod:
             self._recent_retry_events = retry_events_tuple
 
         octree = build_octree_execution_data(tree_artifacts.tree)
+        execution_backend = self._resolve_execution_backend()
+        octree_native_neighbors = None
+        if execution_backend == "octree" and octree is not None:
+            octree_native_neighbors = build_octree_native_neighbor_lists(
+                tree_artifacts.tree,
+                tree_artifacts.upward.geometry,
+                theta=theta_val,
+                mac_type=mac_type_val,
+                dehnen_radius_scale=self.dehnen_radius_scale,
+                max_pair_queue=self.max_pair_queue,
+                process_block=self.pair_process_block,
+                traversal_config=runtime_traversal_config,
+            )
+        nearfield_interop = _build_nearfield_interop_data(
+            tree_artifacts.tree,
+            dual_downward_artifacts.neighbor_list,
+            octree=octree,
+            native_neighbors=octree_native_neighbors,
+        )
         nearfield_artifacts = self._prepare_state_nearfield_artifacts(
             neighbor_list=dual_downward_artifacts.neighbor_list,
-            nearfield_interop=_build_nearfield_interop_data(
-                tree_artifacts.tree,
-                dual_downward_artifacts.neighbor_list,
-                octree=octree,
-            ),
+            nearfield_interop=nearfield_interop,
             leaf_cap=tree_artifacts.leaf_cap,
             num_particles=int(positions_arr.shape[0]),
             cache_entry=dual_downward_artifacts.cache_entry,
@@ -4264,7 +4311,6 @@ class FastMultipoleMethod:
             f"chunk_group_ids={_format_nbytes(_estimate_payload_nbytes(nearfield_artifacts.chunk_group_ids))} "
             f"chunk_unique_indices={_format_nbytes(_estimate_payload_nbytes(nearfield_artifacts.chunk_unique_indices))}"
         )
-        execution_backend = self._resolve_execution_backend()
         octree_upward = _build_octree_upward_artifacts(
             octree=octree,
             positions_sorted=tree_artifacts.positions_sorted,
@@ -4306,11 +4352,7 @@ class FastMultipoleMethod:
             interactions=dual_downward_artifacts.interactions,
             dual_tree_result=dual_downward_artifacts.traversal_result,
             retry_events=retry_events_tuple,
-            nearfield_interop=_build_nearfield_interop_data(
-                tree_artifacts.tree,
-                dual_downward_artifacts.neighbor_list,
-                octree=octree,
-            ),
+            nearfield_interop=nearfield_interop,
             nearfield_target_leaf_ids=nearfield_artifacts.target_leaf_ids,
             nearfield_source_leaf_ids=nearfield_artifacts.source_leaf_ids,
             nearfield_valid_pairs=nearfield_artifacts.valid_pairs,
@@ -4525,6 +4567,8 @@ class FastMultipoleMethod:
             neighbor_offsets_override=nearfield_view.offsets,
             neighbor_indices_override=nearfield_view.neighbors,
             neighbor_counts_override=nearfield_view.counts,
+            leaf_particle_indices_override=nearfield_view.leaf_particle_indices,
+            leaf_particle_mask_override=nearfield_view.leaf_particle_mask,
         )
 
         far_grad, far_potential_pre = _evaluate_local_expansions_for_particles(
@@ -4639,6 +4683,16 @@ class FastMultipoleMethod:
             jnp.asarray(nearfield_view.offsets, dtype=INDEX_DTYPE),
             jnp.asarray(nearfield_view.neighbors, dtype=INDEX_DTYPE),
             jnp.asarray(nearfield_view.counts, dtype=INDEX_DTYPE),
+            (
+                jnp.asarray(nearfield_view.leaf_particle_indices, dtype=INDEX_DTYPE)
+                if nearfield_view.leaf_particle_indices is not None
+                else jnp.zeros((0, 0), dtype=INDEX_DTYPE)
+            ),
+            (
+                jnp.asarray(nearfield_view.leaf_particle_mask, dtype=bool)
+                if nearfield_view.leaf_particle_mask is not None
+                else jnp.zeros((0, 0), dtype=bool)
+            ),
             setup.leaf_nodes,
             setup.node_ranges,
             (
@@ -4784,6 +4838,7 @@ def _build_nearfield_interop_data(
     neighbor_list: NodeNeighborList,
     *,
     octree: Optional[OctreeExecutionData] = None,
+    native_neighbors: Optional[OctreeNativeNeighborList] = None,
 ) -> NearfieldInteropData:
     """Build the explicit leaf/node view shared by current nearfield helpers.
 
@@ -4791,6 +4846,121 @@ def _build_nearfield_interop_data(
     trees, yggdrax now emits that neighbor list in octree-native order while
     still exposing the particle-order leaf mapping needed for target lookup.
     """
+    if native_neighbors is not None:
+        if octree is None:
+            raise ValueError("native octree nearfield data requires octree metadata")
+        leaf_nodes = jnp.asarray(native_neighbors.leaf_indices, dtype=INDEX_DTYPE)
+        leaf_count = int(leaf_nodes.shape[0])
+        radix_leaf_nodes = jnp.asarray(
+            getattr(
+                neighbor_list,
+                "particle_order_leaf_indices",
+                neighbor_list.leaf_indices,
+            ),
+            dtype=INDEX_DTYPE,
+        )
+        radix_leaf_ranges = jnp.asarray(tree.node_ranges, dtype=INDEX_DTYPE)[radix_leaf_nodes]
+        radix_leaf_counts = radix_leaf_ranges[:, 1] - radix_leaf_ranges[:, 0] + 1
+        carrier_lookup = jnp.full(
+            (octree.parent.shape[0],),
+            -1,
+            dtype=INDEX_DTYPE,
+        )
+        carrier_lookup = carrier_lookup.at[leaf_nodes].set(
+            jnp.arange(leaf_count, dtype=INDEX_DTYPE)
+        )
+        radix_carrier_pos = carrier_lookup[
+            jnp.asarray(octree.radix_leaf_to_oct, dtype=INDEX_DTYPE)
+        ]
+        carrier_particle_counts = jax.ops.segment_sum(
+            radix_leaf_counts.astype(INDEX_DTYPE),
+            radix_carrier_pos,
+            leaf_count,
+        )
+        max_particles = int(jnp.max(carrier_particle_counts)) if leaf_count > 0 else 0
+
+        if max_particles > 0:
+            max_radix_leaf_particles = int(jnp.max(radix_leaf_counts))
+            local_offsets = jnp.arange(max_radix_leaf_particles, dtype=INDEX_DTYPE)
+            radix_particle_idx = radix_leaf_ranges[:, 0][:, None] + local_offsets[None, :]
+            radix_particle_valid = local_offsets[None, :] < radix_leaf_counts[:, None]
+            flat_particle_idx = radix_particle_idx.reshape(-1)
+            flat_valid = radix_particle_valid.reshape(-1)
+            flat_carrier_pos = jnp.repeat(radix_carrier_pos, max_radix_leaf_particles)
+            safe_carrier_pos = jnp.where(flat_valid, flat_carrier_pos, leaf_count)
+            order = jnp.argsort(safe_carrier_pos, stable=True)
+            sorted_valid = flat_valid[order]
+            sorted_carrier = safe_carrier_pos[order]
+            sorted_particle_idx = flat_particle_idx[order]
+            valid_int = sorted_valid.astype(INDEX_DTYPE)
+            running = jnp.cumsum(valid_int, dtype=INDEX_DTYPE) - valid_int
+            changed = jnp.concatenate(
+                [
+                    jnp.ones((1,), dtype=bool),
+                    sorted_carrier[1:] != sorted_carrier[:-1],
+                ]
+            )
+            group_starts = jnp.where(
+                sorted_valid & changed,
+                running,
+                jnp.zeros_like(running),
+            )
+            group_starts = jnp.maximum.accumulate(group_starts)
+            sorted_slots = running - group_starts
+            row = jnp.where(sorted_valid, sorted_carrier, leaf_count)
+            col = jnp.where(sorted_valid, sorted_slots, 0)
+            leaf_particle_indices = jnp.zeros(
+                (leaf_count + 1, max_particles),
+                dtype=INDEX_DTYPE,
+            )
+            leaf_particle_mask = jnp.zeros((leaf_count + 1, max_particles), dtype=bool)
+            leaf_particle_indices = leaf_particle_indices.at[row, col].set(
+                jnp.where(sorted_valid, sorted_particle_idx, 0),
+                mode="drop",
+            )
+            leaf_particle_mask = leaf_particle_mask.at[row, col].set(
+                sorted_valid,
+                mode="drop",
+            )
+            leaf_particle_indices = leaf_particle_indices[:leaf_count]
+            leaf_particle_mask = leaf_particle_mask[:leaf_count]
+            particle_to_leaf_position = jnp.zeros(
+                (tree.positions_sorted.shape[0],),
+                dtype=INDEX_DTYPE,
+            )
+            particle_to_leaf_position = particle_to_leaf_position.at[
+                flat_particle_idx[flat_valid]
+            ].set(flat_carrier_pos[flat_valid])
+        else:
+            leaf_particle_indices = jnp.zeros((leaf_count, 0), dtype=INDEX_DTYPE)
+            leaf_particle_mask = jnp.zeros((leaf_count, 0), dtype=bool)
+            particle_to_leaf_position = jnp.zeros(
+                (tree.positions_sorted.shape[0],),
+                dtype=INDEX_DTYPE,
+            )
+
+        oct_node_ranges = jnp.asarray(octree.node_ranges, dtype=INDEX_DTYPE)
+        particle_order_leaf_indices = jnp.asarray(
+            native_neighbors.particle_order_leaf_indices,
+            dtype=INDEX_DTYPE,
+        )
+        return NearfieldInteropData(
+            leaf_nodes=leaf_nodes,
+            node_ranges=oct_node_ranges,
+            offsets=jnp.asarray(native_neighbors.offsets, dtype=INDEX_DTYPE),
+            neighbors=jnp.asarray(native_neighbors.neighbors, dtype=INDEX_DTYPE),
+            counts=jnp.asarray(native_neighbors.counts, dtype=INDEX_DTYPE),
+            particle_order_node_ranges=oct_node_ranges,
+            particle_order_leaf_indices=particle_order_leaf_indices,
+            particle_order_to_native_leaf=jnp.asarray(
+                native_neighbors.particle_order_to_native_leaf,
+                dtype=INDEX_DTYPE,
+            ),
+            leaf_particle_indices=leaf_particle_indices,
+            leaf_particle_mask=leaf_particle_mask,
+            particle_to_leaf_position=particle_to_leaf_position,
+        )
+
     del octree
     leaf_indices = jnp.asarray(neighbor_list.leaf_indices, dtype=INDEX_DTYPE)
     particle_order_leaf_indices = jnp.asarray(
@@ -4813,6 +4983,9 @@ def _build_nearfield_interop_data(
             ),
             dtype=INDEX_DTYPE,
         ),
+        leaf_particle_indices=None,
+        leaf_particle_mask=None,
+        particle_to_leaf_position=None,
     )
 
 
@@ -6276,6 +6449,8 @@ def _evaluate_tree_compiled_impl(
     nearfield_offsets: Array,
     nearfield_neighbors: Array,
     nearfield_counts: Array,
+    nearfield_leaf_particle_indices: Array,
+    nearfield_leaf_particle_mask: Array,
     leaf_nodes: Array,
     node_ranges: Array,
     precomputed_target_leaf_ids: Array,
@@ -6349,6 +6524,16 @@ def _evaluate_tree_compiled_impl(
         neighbor_offsets_override=nearfield_offsets,
         neighbor_indices_override=nearfield_neighbors,
         neighbor_counts_override=nearfield_counts,
+        leaf_particle_indices_override=(
+            nearfield_leaf_particle_indices
+            if nearfield_leaf_particle_indices.shape[0] > 0
+            else None
+        ),
+        leaf_particle_mask_override=(
+            nearfield_leaf_particle_mask
+            if nearfield_leaf_particle_mask.shape[0] > 0
+            else None
+        ),
     )
 
     far_grad, far_potential_pre = _evaluate_local_expansions_for_particles(
@@ -6671,14 +6856,20 @@ def _evaluate_prepared_tree_targets(
         farfield_leaf_nodes=farfield_leaf_nodes,
         farfield_node_ranges=farfield_node_ranges,
     )
-    target_leaf_positions = _map_targets_to_leaf_positions(
-        target_sorted_indices=target_sorted_indices,
-        leaf_nodes=nearfield_view.particle_order_leaf_indices,
-        node_ranges=nearfield_view.particle_order_node_ranges,
-    )
-    target_leaf_positions = nearfield_view.particle_order_to_native_leaf[
-        target_leaf_positions
-    ]
+    if nearfield_view.particle_to_leaf_position is not None:
+        target_leaf_positions = jnp.asarray(
+            nearfield_view.particle_to_leaf_position,
+            dtype=INDEX_DTYPE,
+        )[target_sorted_indices]
+    else:
+        target_leaf_positions = _map_targets_to_leaf_positions(
+            target_sorted_indices=target_sorted_indices,
+            leaf_nodes=nearfield_view.particle_order_leaf_indices,
+            node_ranges=nearfield_view.particle_order_node_ranges,
+        )
+        target_leaf_positions = nearfield_view.particle_order_to_native_leaf[
+            target_leaf_positions
+        ]
     near_source_idx, near_source_mask = _build_target_nearfield_source_index_matrix(
         target_sorted_indices=target_sorted_indices,
         target_leaf_positions=target_leaf_positions,
