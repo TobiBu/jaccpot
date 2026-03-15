@@ -8,6 +8,7 @@ gravitational forces in O(N) time instead of O(N^2) for direct summation.
 from collections import OrderedDict
 from dataclasses import dataclass
 from functools import partial
+from math import comb
 from typing import Any, Literal, NamedTuple, Optional, Union
 
 import jax
@@ -76,7 +77,10 @@ from jaccpot.operators.multipole_utils import (
     total_coefficients,
 )
 from jaccpot.operators.real_harmonics import sh_size
-from jaccpot.operators.symmetric_tensors import component_lift_index_map_3d
+from jaccpot.operators.symmetric_tensors import (
+    component_lift_index_map_3d,
+    contract_symmetric_one_axis_3d,
+)
 from jaccpot.upward.solidfmm_complex_tree_expansions import (
     prepare_solidfmm_complex_source_motion_multipoles,
     prepare_solidfmm_complex_upward_sweep,
@@ -2356,10 +2360,14 @@ class FastMultipoleMethod:
                 else vel_arr[resolved_target_indices]
             )
             far_convective_jerk = jnp.einsum("nij,nj->ni", acc_jac, vel_targets)
-            far_source_motion_jerk = self._evaluate_source_motion_farfield_jerk(
-                state=state,
-                velocities=vel_arr,
-                target_indices=resolved_target_indices,
+            far_source_motion_jerk = (
+                self._evaluate_farfield_time_derivative_orders(
+                    state=state,
+                    velocities=vel_arr,
+                    target_indices=resolved_target_indices,
+                    max_time_derivative_order=1,
+                )[0]
+                - far_convective_jerk
             )
             near_jerk = self._evaluate_target_nearfield_jerk(
                 state=state,
@@ -2560,6 +2568,217 @@ class FastMultipoleMethod:
                 max_acc_derivative_order=0,
             )
         return -jnp.asarray(self.G, dtype=state.positions_sorted.dtype) * far_grad
+
+    @jaxtyped(typechecker=beartype)
+    def _evaluate_farfield_time_derivative_orders(
+        self: "FastMultipoleMethod",
+        state: FMMPreparedState,
+        velocities: Array,
+        *,
+        target_indices: Optional[Array] = None,
+        max_time_derivative_order: int,
+    ) -> tuple[Array, ...]:
+        """Evaluate far-field total time derivatives up to order ``max_time_derivative_order``.
+
+        Uses binomial expansion of ``(∂t + v·∇)^n a`` with analytic source-motion
+        locals ``L_k = ∂t^k L`` and acceleration spatial derivatives.
+        """
+        if state.expansion_basis != "solidfmm":
+            raise NotImplementedError(
+                "far-field higher time derivatives currently require expansion_basis='solidfmm'"
+            )
+        k_max = int(max_time_derivative_order)
+        if k_max <= 0:
+            return tuple()
+
+        def _contract_acc_tensor_with_velocity_power(
+            tensor: Array,
+            velocity: Array,
+            *,
+            order: int,
+        ) -> Array:
+            """Contract symmetric acceleration-derivative tensor ``order`` times."""
+            if order <= 0:
+                raise ValueError("order must be positive")
+
+            def contract_row(row: Array, vrow: Array) -> Array:
+                # row shape: (3, components(order))
+                contracted = row
+                for ord_i in range(order, 0, -1):
+                    contracted = jax.vmap(
+                        lambda comp: contract_symmetric_one_axis_3d(
+                            comp,
+                            vrow,
+                            order=ord_i,
+                        ),
+                        in_axes=0,
+                        out_axes=0,
+                    )(contracted)
+                return contracted[:, 0]
+
+            return jax.vmap(contract_row, in_axes=(0, 0), out_axes=0)(tensor, velocity)
+
+        particle_indices = jnp.asarray(state.tree.particle_indices, dtype=INDEX_DTYPE)
+        vel_sorted = velocities[particle_indices]
+        centers = jnp.asarray(state.downward.locals.centers, dtype=state.working_dtype)
+        runtime_overrides = self._resolve_runtime_execution_overrides(
+            num_particles=int(state.positions_sorted.shape[0]),
+        )
+        resolved_target_indices = self._resolve_target_indices(
+            target_indices=target_indices,
+            num_particles=int(state.inverse_permutation.shape[0]),
+        )
+        tracing_targets = isinstance(
+            state.positions_sorted, jax.core.Tracer
+        ) or isinstance(resolved_target_indices, jax.core.Tracer)
+        vel_targets = (
+            velocities
+            if resolved_target_indices is None
+            else velocities[resolved_target_indices]
+        )
+
+        # Build local coefficient streams L_k = ∂t^k L, including k=0.
+        locals_by_k: list[LocalExpansionData] = [state.downward.locals]
+        geometry = compute_tree_geometry(state.tree, state.positions_sorted)
+        mass_moments = compute_tree_mass_moments(
+            state.tree, state.positions_sorted, state.masses_sorted
+        )
+        for k in range(1, k_max + 1):
+            source_motion_packed = prepare_solidfmm_complex_source_motion_multipoles(
+                state.tree,
+                state.positions_sorted,
+                state.masses_sorted,
+                vel_sorted,
+                max_order=int(state.downward.locals.order),
+                centers=centers,
+                time_derivative_order=k,
+                max_leaf_size=int(state.max_leaf_size),
+                rotation=self.complex_rotation,
+            )
+            source_motion_upward = TreeUpwardData(
+                geometry=geometry,
+                mass_moments=mass_moments,
+                multipoles=NodeMultipoleData(
+                    order=int(state.downward.locals.order),
+                    centers=centers,
+                    moments=None,  # type: ignore[arg-type]
+                    packed=jnp.asarray(source_motion_packed),
+                    component_matrix=jnp.asarray(source_motion_packed),
+                    source_motion_packed=None,
+                ),
+            )
+            down_k = self.prepare_downward_sweep(
+                state.tree,
+                source_motion_upward,
+                theta=float(state.theta),
+                mac_type=self.mac_type,
+                initial_locals=None,
+                interactions=state.interactions,
+                m2l_chunk_size=runtime_overrides.m2l_chunk_size,
+                l2l_chunk_size=runtime_overrides.l2l_chunk_size,
+                grouped_interactions=runtime_overrides.grouped_interactions,
+                farfield_mode=runtime_overrides.farfield_mode,
+                dehnen_radius_scale=self.dehnen_radius_scale,
+            )
+            locals_by_k.append(down_k.locals)
+
+        def _evaluate_local_stream(
+            local_data: LocalExpansionData,
+            *,
+            max_acc_deriv_order: int,
+        ) -> tuple[Array, Optional[PackedAccelerationDerivatives]]:
+            if resolved_target_indices is None or tracing_targets:
+                far_grad_sorted, _, far_derivs = (
+                    _evaluate_local_expansions_for_particles(
+                        local_data,
+                        state.positions_sorted,
+                        leaf_nodes=jnp.asarray(
+                            state.neighbor_list.leaf_indices, dtype=INDEX_DTYPE
+                        ),
+                        node_ranges=jnp.asarray(
+                            state.tree.node_ranges, dtype=INDEX_DTYPE
+                        ),
+                        max_leaf_size=state.max_leaf_size,
+                        order=int(local_data.order),
+                        expansion_basis=state.expansion_basis,
+                        return_potential=False,
+                        max_acc_derivative_order=max_acc_deriv_order,
+                    )
+                )
+                if resolved_target_indices is None:
+                    far_grad = jnp.asarray(far_grad_sorted)[state.inverse_permutation]
+                    if far_derivs is None:
+                        derivs = None
+                    else:
+                        derivs = tuple(
+                            jnp.asarray(level)[state.inverse_permutation]
+                            for level in far_derivs
+                        )
+                else:
+                    far_grad = jnp.asarray(far_grad_sorted)[state.inverse_permutation][
+                        resolved_target_indices
+                    ]
+                    if far_derivs is None:
+                        derivs = None
+                    else:
+                        derivs = tuple(
+                            jnp.asarray(level)[state.inverse_permutation][
+                                resolved_target_indices
+                            ]
+                            for level in far_derivs
+                        )
+                return far_grad, derivs
+            target_sorted_indices = jnp.asarray(
+                state.inverse_permutation[resolved_target_indices], dtype=INDEX_DTYPE
+            )
+            leaf_nodes = jnp.asarray(
+                state.neighbor_list.leaf_indices, dtype=INDEX_DTYPE
+            )
+            node_ranges = jnp.asarray(state.tree.node_ranges, dtype=INDEX_DTYPE)
+            target_leaf_positions = _map_targets_to_leaf_positions(
+                target_sorted_indices=target_sorted_indices,
+                leaf_nodes=leaf_nodes,
+                node_ranges=node_ranges,
+            )
+            far_grad, _, far_derivs = _evaluate_local_expansions_for_target_particles(
+                local_data=local_data,
+                positions_sorted=state.positions_sorted,
+                target_sorted_indices=target_sorted_indices,
+                target_leaf_positions=target_leaf_positions,
+                leaf_nodes=leaf_nodes,
+                order=int(local_data.order),
+                expansion_basis=state.expansion_basis,
+                return_potential=False,
+                max_acc_derivative_order=max_acc_deriv_order,
+            )
+            return far_grad, far_derivs
+
+        g_const = jnp.asarray(self.G, dtype=state.positions_sorted.dtype)
+        outputs: list[Array] = []
+        for n in range(1, k_max + 1):
+            accum = jnp.zeros_like(vel_targets)
+            for k in range(0, n + 1):
+                m = n - k
+                far_grad_k, far_derivs_k = _evaluate_local_stream(
+                    locals_by_k[k],
+                    max_acc_deriv_order=m,
+                )
+                if m == 0:
+                    term_vec = -g_const * far_grad_k
+                else:
+                    if far_derivs_k is None:
+                        raise RuntimeError(
+                            "expected far-field acceleration derivatives"
+                        )
+                    acc_deriv_tensor = g_const * far_derivs_k[m - 1]
+                    term_vec = _contract_acc_tensor_with_velocity_power(
+                        acc_deriv_tensor,
+                        vel_targets,
+                        order=m,
+                    )
+                accum = accum + float(comb(n, k)) * term_vec
+            outputs.append(accum)
+        return tuple(outputs)
 
     @jaxtyped(typechecker=beartype)
     def _evaluate_prepared_state_at_positions_sorted(
