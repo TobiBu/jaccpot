@@ -107,6 +107,39 @@ def _direct_sum_snap(
     return G * jnp.sum(weighted, axis=1)
 
 
+def _direct_sum_crackle(
+    positions: jnp.ndarray,
+    masses: jnp.ndarray,
+    velocities: jnp.ndarray,
+    *,
+    G: float,
+    softening: float,
+) -> jnp.ndarray:
+    diff = positions[:, None, :] - positions[None, :, :]
+    vdiff = velocities[:, None, :] - velocities[None, :, :]
+    dist_sq = jnp.sum(diff * diff, axis=-1) + softening**2
+    eps = jnp.finfo(positions.dtype).eps
+    inv_r = jnp.where(dist_sq > 0, 1.0 / (jnp.sqrt(dist_sq) + eps), 0.0)
+    inv_r3 = inv_r / dist_sq
+    inv_r5 = inv_r3 / dist_sq
+    inv_r7 = inv_r5 / dist_sq
+    inv_r9 = inv_r7 / dist_sq
+    eye = jnp.eye(positions.shape[0], dtype=bool)
+    inv_r5 = jnp.where(eye, 0.0, inv_r5)
+    inv_r7 = jnp.where(eye, 0.0, inv_r7)
+    inv_r9 = jnp.where(eye, 0.0, inv_r9)
+    rv = jnp.sum(diff * vdiff, axis=-1)
+    vv = jnp.sum(vdiff * vdiff, axis=-1)
+    term = (
+        9.0 * vv[..., None] * vdiff * inv_r5[..., None]
+        - 45.0 * (rv * rv)[..., None] * vdiff * inv_r7[..., None]
+        - 45.0 * rv[..., None] * vv[..., None] * diff * inv_r7[..., None]
+        + 105.0 * (rv * rv * rv)[..., None] * diff * inv_r9[..., None]
+    )
+    weighted = masses[None, :, None] * term
+    return G * jnp.sum(weighted, axis=1)
+
+
 def test_solver_matches_expanse_fast_path():
     positions, masses = _sample_problem(n=96)
 
@@ -617,6 +650,61 @@ def test_compute_accelerations_with_time_derivatives_k2_matches_direct_sum():
     )
     assert err_jerk < 5e-3
     assert err_snap < 2e-2
+
+
+def test_compute_accelerations_with_time_derivatives_k3_matches_direct_sum():
+    n = 16
+    positions, masses = _sample_problem(n=n)
+    velocities = _sample_velocities(n=n)
+    fmm = FastMultipoleMethod(
+        preset=FMMPreset.ACCURATE,
+        basis="solidfmm",
+    )
+    acc, derivs = fmm.compute_accelerations_with_time_derivatives(
+        positions,
+        masses,
+        velocities,
+        leaf_size=8,
+        max_order=4,
+        theta=1e-4,
+        max_time_derivative_order=3,
+        mode="accurate",
+    )
+    assert acc.shape == positions.shape
+    assert len(derivs) == 3
+    jerk_ref = _direct_sum_jerk(
+        positions,
+        masses,
+        velocities,
+        G=1.0,
+        softening=1e-3,
+    )
+    snap_ref = _direct_sum_snap(
+        positions,
+        masses,
+        velocities,
+        G=1.0,
+        softening=1e-3,
+    )
+    crackle_ref = _direct_sum_crackle(
+        positions,
+        masses,
+        velocities,
+        G=1.0,
+        softening=1e-3,
+    )
+    err_jerk = np.linalg.norm(np.asarray(derivs[0] - jerk_ref)) / (
+        np.linalg.norm(np.asarray(jerk_ref)) + 1e-12
+    )
+    err_snap = np.linalg.norm(np.asarray(derivs[1] - snap_ref)) / (
+        np.linalg.norm(np.asarray(snap_ref)) + 1e-12
+    )
+    err_crackle = np.linalg.norm(np.asarray(derivs[2] - crackle_ref)) / (
+        np.linalg.norm(np.asarray(crackle_ref)) + 1e-12
+    )
+    assert err_jerk < 5e-3
+    assert err_snap < 3e-2
+    assert err_crackle < 6e-2
 
 
 def test_jitted_compute_does_not_leak_tracers_into_solver_caches():

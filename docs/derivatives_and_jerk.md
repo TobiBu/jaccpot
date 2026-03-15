@@ -63,7 +63,8 @@ Both return:
 - Public time-derivative runtime support currently covers:
   - order 1: jerk
   - order 2: snap
-- Orders above 2 (crackle and above) are not implemented yet.
+- order 3: crackle
+- Orders above 3 are not implemented yet.
 - Higher-order source-motion multipole kernels are implemented internally and
   feed the runtime assembler.
 

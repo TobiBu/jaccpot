@@ -2515,9 +2515,9 @@ class FastMultipoleMethod:
         k_max = int(max_time_derivative_order)
         if k_max < 1:
             raise ValueError("max_time_derivative_order must be >= 1")
-        if k_max > 2:
+        if k_max > 3:
             raise NotImplementedError(
-                "max_time_derivative_order > 2 is not implemented yet"
+                "max_time_derivative_order > 3 is not implemented yet"
             )
         resolved_target_indices = self._resolve_target_indices(
             target_indices=target_indices,
@@ -2594,7 +2594,7 @@ class FastMultipoleMethod:
             tree=state.tree,
             neighbor_list=state.neighbor_list,
         )
-        _, _, near_jerk_sorted, _ = _compute_targeted_nearfield(
+        _, _, near_jerk_sorted, _, _ = _compute_targeted_nearfield(
             positions_sorted=state.positions_sorted,
             masses_sorted=state.masses_sorted,
             target_sorted_indices=target_sorted_indices,
@@ -2625,9 +2625,9 @@ class FastMultipoleMethod:
         k_max = int(max_time_derivative_order)
         if k_max < 1:
             return tuple()
-        if k_max > 2:
+        if k_max > 3:
             raise NotImplementedError(
-                "near-field time derivatives above order 2 are not implemented"
+                "near-field time derivatives above order 3 are not implemented"
             )
         particle_indices = jnp.asarray(state.tree.particle_indices, dtype=INDEX_DTYPE)
         vel_sorted = velocities[particle_indices]
@@ -2652,34 +2652,45 @@ class FastMultipoleMethod:
             tree=state.tree,
             neighbor_list=state.neighbor_list,
         )
-        _, _, near_jerk_sorted, near_snap_sorted = _compute_targeted_nearfield(
-            positions_sorted=state.positions_sorted,
-            masses_sorted=state.masses_sorted,
-            target_sorted_indices=target_sorted_indices,
-            source_indices=near_source_idx,
-            source_mask=near_source_mask,
-            G=jnp.asarray(self.G, dtype=state.positions_sorted.dtype),
-            softening=float(self.softening),
-            return_potential=False,
-            velocities_sorted=vel_sorted,
-            return_jerk=True,
-            return_snap=(k_max >= 2),
+        _, _, near_jerk_sorted, near_snap_sorted, near_crackle_sorted = (
+            _compute_targeted_nearfield(
+                positions_sorted=state.positions_sorted,
+                masses_sorted=state.masses_sorted,
+                target_sorted_indices=target_sorted_indices,
+                source_indices=near_source_idx,
+                source_mask=near_source_mask,
+                G=jnp.asarray(self.G, dtype=state.positions_sorted.dtype),
+                softening=float(self.softening),
+                return_potential=False,
+                velocities_sorted=vel_sorted,
+                return_jerk=True,
+                return_snap=(k_max >= 2),
+                return_crackle=(k_max >= 3),
+            )
         )
         if near_jerk_sorted is None:
             raise RuntimeError("expected near-field jerk values")
         if k_max >= 2 and near_snap_sorted is None:
             raise RuntimeError("expected near-field snap values")
+        if k_max >= 3 and near_crackle_sorted is None:
+            raise RuntimeError("expected near-field crackle values")
         if target_indices is None:
             jerk = near_jerk_sorted[state.inverse_permutation]
             if k_max >= 2:
                 snap = near_snap_sorted[state.inverse_permutation]  # type: ignore[index]
+            if k_max >= 3:
+                crackle = near_crackle_sorted[state.inverse_permutation]  # type: ignore[index]
         else:
             jerk = near_jerk_sorted
             if k_max >= 2:
                 snap = near_snap_sorted  # type: ignore[assignment]
+            if k_max >= 3:
+                crackle = near_crackle_sorted  # type: ignore[assignment]
         if k_max == 1:
             return (jerk,)
-        return (jerk, snap)  # type: ignore[possibly-undefined]
+        if k_max == 2:
+            return (jerk, snap)  # type: ignore[possibly-undefined]
+        return (jerk, snap, crackle)  # type: ignore[possibly-undefined]
 
     @jaxtyped(typechecker=beartype)
     def _evaluate_source_motion_farfield_jerk(
@@ -4685,12 +4696,15 @@ def _compute_targeted_nearfield(
     velocities_sorted: Optional[Array] = None,
     return_jerk: bool = False,
     return_snap: bool = False,
-) -> tuple[Array, Optional[Array], Optional[Array], Optional[Array]]:
+    return_crackle: bool = False,
+) -> tuple[Array, Optional[Array], Optional[Array], Optional[Array], Optional[Array]]:
     """Compute near-field contributions for target particles only."""
     if return_jerk and velocities_sorted is None:
         raise ValueError("velocities_sorted must be provided when return_jerk=True")
     if return_snap and velocities_sorted is None:
         raise ValueError("velocities_sorted must be provided when return_snap=True")
+    if return_crackle and velocities_sorted is None:
+        raise ValueError("velocities_sorted must be provided when return_crackle=True")
     target_positions = positions_sorted[target_sorted_indices]
     dtype = positions_sorted.dtype
     g_const = jnp.asarray(G, dtype=dtype)
@@ -4712,14 +4726,20 @@ def _compute_targeted_nearfield(
             if return_snap
             else None
         )
+        crackle_zeros = (
+            jnp.zeros((target_positions.shape[0], 3), dtype=positions_sorted.dtype)
+            if return_crackle
+            else None
+        )
         if return_potential:
             return (
                 zeros,
                 jnp.zeros((target_positions.shape[0],), dtype=zeros.dtype),
                 jerk_zeros,
                 snap_zeros,
+                crackle_zeros,
             )
-        return zeros, None, jerk_zeros, snap_zeros
+        return zeros, None, jerk_zeros, snap_zeros, crackle_zeros
     src_pos = positions_sorted[source_indices]
     src_mass = masses_sorted[source_indices]
     diff = target_positions[:, None, :] - src_pos
@@ -4731,6 +4751,7 @@ def _compute_targeted_nearfield(
     near_acc = -g_const * jnp.sum(weighted[..., None] * diff, axis=1)
     near_jerk: Optional[Array]
     near_snap: Optional[Array]
+    near_crackle: Optional[Array]
     if return_jerk:
         src_vel = velocities_sorted[source_indices]  # type: ignore[index]
         vel_diff = target_velocities[:, None, :] - src_vel  # type: ignore[index]
@@ -4749,15 +4770,30 @@ def _compute_targeted_nearfield(
                 - 15.0 * (rv * rv)[..., None] * diff * inv_dist7[..., None]
             )
             near_snap = jnp.sum(src_mass[..., None] * snap_term, axis=1) * g_const
+            if return_crackle:
+                inv_dist9 = jnp.where(source_mask, inv_dist7 / dist_sq, 0.0)
+                crackle_term = (
+                    9.0 * vv[..., None] * vel_diff * inv_dist5[..., None]
+                    - 45.0 * (rv * rv)[..., None] * vel_diff * inv_dist7[..., None]
+                    - 45.0 * rv[..., None] * vv[..., None] * diff * inv_dist7[..., None]
+                    + 105.0 * (rv * rv * rv)[..., None] * diff * inv_dist9[..., None]
+                )
+                near_crackle = jnp.sum(src_mass[..., None] * crackle_term, axis=1) * (
+                    g_const
+                )
+            else:
+                near_crackle = None
         else:
             near_snap = None
+            near_crackle = None
     else:
         near_jerk = None
         near_snap = None
+        near_crackle = None
     if not return_potential:
-        return near_acc, None, near_jerk, near_snap
+        return near_acc, None, near_jerk, near_snap, near_crackle
     near_pot = -g_const * jnp.sum(inv_r * src_mass, axis=1)
-    return near_acc, near_pot, near_jerk, near_snap
+    return near_acc, near_pot, near_jerk, near_snap, near_crackle
 
 
 def _evaluate_local_expansions_for_target_particles(
@@ -4908,7 +4944,7 @@ def _evaluate_prepared_tree_targets(
         tree=tree,
         neighbor_list=neighbor_list,
     )
-    near_acc, near_pot, _, _ = _compute_targeted_nearfield(
+    near_acc, near_pot, _, _, _ = _compute_targeted_nearfield(
         positions_sorted=positions_sorted,
         masses_sorted=masses_sorted,
         target_sorted_indices=target_sorted_indices,
