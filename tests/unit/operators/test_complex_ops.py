@@ -15,6 +15,8 @@ from jaccpot.operators.complex_ops import (
     m2m_complex,
     regular_solid_harmonic_directional_derivative,
     regular_solid_harmonic_directional_derivative_batch,
+    regular_solid_harmonic_directional_derivative_order,
+    regular_solid_harmonic_directional_derivative_order_batch,
     rotate_complex_local_from_z,
     rotate_complex_local_from_z_batch,
     rotate_complex_local_from_z_cached,
@@ -563,6 +565,53 @@ def test_regular_harmonic_directional_derivative_batch_matches_single() -> None:
     ref = jnp.stack(
         [
             regular_solid_harmonic_directional_derivative(d, v, order=order)
+            for d, v in zip(deltas, directions)
+        ],
+        axis=0,
+    )
+    assert np.allclose(np.asarray(got), np.asarray(ref), rtol=1e-12, atol=1e-12)
+
+
+def test_regular_harmonic_second_directional_derivative_matches_finite_difference() -> (
+    None
+):
+    order = 5
+    delta = jnp.asarray([0.37, -0.22, 0.58], dtype=jnp.float64)
+    direction = jnp.asarray([0.31, -0.44, 0.21], dtype=jnp.float64)
+    eps = jnp.asarray(1e-5, dtype=jnp.float64)
+    ref = (
+        complex_R_solidfmm(delta + eps * direction, order=order)
+        - 2.0 * complex_R_solidfmm(delta, order=order)
+        + complex_R_solidfmm(delta - eps * direction, order=order)
+    ) / (eps * eps)
+    got = regular_solid_harmonic_directional_derivative_order(
+        delta,
+        direction,
+        order=order,
+        derivative_order=2,
+    )
+    assert np.allclose(np.asarray(got), np.asarray(ref), rtol=4e-5, atol=2e-6)
+
+
+def test_regular_harmonic_second_directional_derivative_batch_matches_single() -> None:
+    order = 4
+    rng = np.random.default_rng(23)
+    deltas = jnp.asarray(rng.normal(size=(6, 3)), dtype=jnp.float64)
+    directions = jnp.asarray(rng.normal(size=(6, 3)), dtype=jnp.float64)
+    got = regular_solid_harmonic_directional_derivative_order_batch(
+        deltas,
+        directions,
+        order=order,
+        derivative_order=2,
+    )
+    ref = jnp.stack(
+        [
+            regular_solid_harmonic_directional_derivative_order(
+                d,
+                v,
+                order=order,
+                derivative_order=2,
+            )
             for d, v in zip(deltas, directions)
         ],
         axis=0,

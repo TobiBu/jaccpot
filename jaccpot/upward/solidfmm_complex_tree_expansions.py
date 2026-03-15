@@ -25,7 +25,7 @@ from jaccpot.operators.complex_ops import (
     enforce_conjugate_symmetry,
     enforce_conjugate_symmetry_batch,
     m2m_complex,
-    regular_solid_harmonic_directional_derivative_batch,
+    regular_solid_harmonic_directional_derivative_order_batch,
 )
 from jaccpot.operators.real_harmonics import sh_size
 
@@ -115,7 +115,14 @@ def _p2m_leaves_complex(
 
 
 @partial(
-    jax.jit, static_argnames=("order", "max_leaf_size", "num_internal", "total_nodes")
+    jax.jit,
+    static_argnames=(
+        "order",
+        "time_derivative_order",
+        "max_leaf_size",
+        "num_internal",
+        "total_nodes",
+    ),
 )
 def _p2m_leaves_complex_source_motion(
     node_ranges: Array,
@@ -125,6 +132,7 @@ def _p2m_leaves_complex_source_motion(
     centers: Array,
     *,
     order: int,
+    time_derivative_order: int,
     max_leaf_size: int,
     num_internal: int,
     total_nodes: int,
@@ -134,6 +142,9 @@ def _p2m_leaves_complex_source_motion(
     p = int(order)
     if p < 0:
         raise ValueError("order must be >= 0")
+    td_order = int(time_derivative_order)
+    if td_order <= 0:
+        raise ValueError("time_derivative_order must be positive")
 
     num_internal = int(num_internal)
     total_nodes = int(total_nodes)
@@ -170,10 +181,11 @@ def _p2m_leaves_complex_source_motion(
     vel = jnp.where(valid[..., None], vel, 0.0)
 
     delta = pos - centers[leaf_nodes][:, None, :]
-    part_deriv = regular_solid_harmonic_directional_derivative_batch(
+    part_deriv = regular_solid_harmonic_directional_derivative_order_batch(
         delta.reshape((-1, 3)),
         vel.reshape((-1, 3)),
         order=p,
+        derivative_order=td_order,
     )
     part_deriv = part_deriv.reshape((delta.shape[0], delta.shape[1], coeffs))
     part_deriv = part_deriv.astype(packed.dtype)
@@ -358,6 +370,7 @@ def prepare_solidfmm_complex_source_motion_multipoles(
     *,
     max_order: int,
     centers: Array,
+    time_derivative_order: int = 1,
     max_leaf_size: Optional[int] = None,
     rotation: str = "cached",
 ) -> Array:
@@ -366,6 +379,9 @@ def prepare_solidfmm_complex_source_motion_multipoles(
     p = int(max_order)
     if p < 0:
         raise ValueError("max_order must be >= 0")
+    td_order = int(time_derivative_order)
+    if td_order <= 0:
+        raise ValueError("time_derivative_order must be positive")
     centers_arr = jnp.asarray(centers, dtype=positions_sorted.dtype)
     if centers_arr.shape != (int(tree.parent.shape[0]), 3):
         raise ValueError("centers must have shape (num_nodes, 3)")
@@ -394,6 +410,7 @@ def prepare_solidfmm_complex_source_motion_multipoles(
         vel_sorted_arr,
         centers_arr,
         order=p,
+        time_derivative_order=td_order,
         max_leaf_size=int(max_leaf_size),
         num_internal=num_internal,
         total_nodes=total_nodes,

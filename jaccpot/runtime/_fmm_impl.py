@@ -2475,6 +2475,7 @@ class FastMultipoleMethod:
             vel_sorted,
             max_order=int(state.downward.locals.order),
             centers=centers,
+            time_derivative_order=1,
             max_leaf_size=int(state.max_leaf_size),
             rotation=self.complex_rotation,
         )

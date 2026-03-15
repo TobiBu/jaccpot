@@ -406,10 +406,11 @@ class FastMultipoleMethod:
         jerk_mode:
             ``"fast_approx"`` uses exact near-field jerk plus far-field
             convective jerk from the acceleration Jacobian.
-            ``"accurate"`` estimates total jerk via central finite differences
-            of full accelerations and includes source-motion effects.
+            ``"accurate"`` uses an analytic far-field source-motion term
+            (`dM -> dL`) plus the convective and exact near-field terms.
         jerk_fd_dt:
-            Finite-difference step used only when ``jerk_mode="accurate"``.
+            Finite-difference step used only for non-``solidfmm`` fallback
+            in ``jerk_mode="accurate"``.
         """
         return self._impl.compute_accelerations_and_jerk(
             positions,
@@ -487,7 +488,8 @@ class FastMultipoleMethod:
             ``"fast_approx"`` or ``"accurate"``; see
             :meth:`compute_accelerations_and_jerk`.
         jerk_fd_dt:
-            Finite-difference step for ``"accurate"`` mode.
+            Finite-difference step for non-``solidfmm`` fallback in
+            ``"accurate"`` mode.
         """
         jit_traversal = (
             True

@@ -61,6 +61,8 @@ Both return:
 - Time-derivative support currently covers jerk only.
 - Higher time derivatives beyond jerk (e.g. snap/crackle and above) are not
   implemented yet.
+- Internal source-motion multipole kernels now support higher directional
+  derivative orders; public runtime assembly beyond jerk is still pending.
 
 ## Choosing A Mode
 

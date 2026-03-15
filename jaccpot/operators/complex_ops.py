@@ -412,9 +412,51 @@ def regular_solid_harmonic_directional_derivative(
     order: int,
 ) -> Array:
     """Directional derivative of packed regular harmonics along ``direction``."""
-    grad = regular_solid_harmonic_gradient_coefficients(delta, order=order)
-    direction_arr = jnp.asarray(direction, dtype=jnp.real(grad).dtype)
-    return jnp.einsum("a,ak->k", direction_arr, grad)
+    return regular_solid_harmonic_directional_derivative_order(
+        delta,
+        direction,
+        order=order,
+        derivative_order=1,
+    )
+
+
+@partial(jax.jit, static_argnames=("order", "derivative_order"))
+def regular_solid_harmonic_directional_derivative_order(
+    delta: Array,
+    direction: Array,
+    *,
+    order: int,
+    derivative_order: int,
+) -> Array:
+    """Order-``k`` directional derivative ``(v·∇)^k R`` in packed form."""
+    p = int(order)
+    k = int(derivative_order)
+    if k < 0:
+        raise ValueError("derivative_order must be non-negative")
+    if k == 0:
+        return jnp.asarray(complex_R_solidfmm(delta, order=p))
+
+    levels = _build_complex_harmonic_derivative_coefficients(
+        delta,
+        order=p,
+        max_derivative_order=k,
+    )
+    packed_level = levels[k]
+    direction_arr = jnp.asarray(direction, dtype=jnp.real(packed_level).dtype)
+    current = packed_level
+    current_order = k
+    for _ in range(k):
+        current = jax.vmap(
+            lambda col: contract_symmetric_one_axis_3d(
+                col,
+                direction_arr,
+                order=current_order,
+            ),
+            in_axes=1,
+            out_axes=1,
+        )(current)
+        current_order -= 1
+    return current[0]
 
 
 @partial(jax.jit, static_argnames=("order",))
@@ -426,10 +468,32 @@ def regular_solid_harmonic_directional_derivative_batch(
 ) -> Array:
     """Batch directional derivatives of packed regular harmonics."""
     return jax.vmap(
-        lambda d, v: regular_solid_harmonic_directional_derivative(
+        lambda d, v: regular_solid_harmonic_directional_derivative_order(
             d,
             v,
             order=order,
+            derivative_order=1,
+        ),
+        in_axes=(0, 0),
+        out_axes=0,
+    )(deltas, directions)
+
+
+@partial(jax.jit, static_argnames=("order", "derivative_order"))
+def regular_solid_harmonic_directional_derivative_order_batch(
+    deltas: Array,
+    directions: Array,
+    *,
+    order: int,
+    derivative_order: int,
+) -> Array:
+    """Batch order-``k`` directional derivatives of packed regular harmonics."""
+    return jax.vmap(
+        lambda d, v: regular_solid_harmonic_directional_derivative_order(
+            d,
+            v,
+            order=order,
+            derivative_order=derivative_order,
         ),
         in_axes=(0, 0),
         out_axes=0,

@@ -145,6 +145,60 @@ def test_prepare_solidfmm_source_motion_multipoles_matches_upward_bundle():
     )
 
 
+def test_prepare_solidfmm_second_time_derivative_multipoles_matches_fd():
+    tree, pos_sorted, mass_sorted, vel_sorted = _build_sample_tree()
+    order = 4
+    dt = jnp.asarray(1e-5, dtype=pos_sorted.dtype)
+    base = prepare_solidfmm_complex_upward_sweep(
+        tree,
+        pos_sorted,
+        mass_sorted,
+        max_order=order,
+        center_mode="aabb",
+    )
+    centers = base.multipoles.centers
+    got = prepare_solidfmm_complex_source_motion_multipoles(
+        tree,
+        pos_sorted,
+        mass_sorted,
+        vel_sorted,
+        max_order=order,
+        centers=centers,
+        time_derivative_order=2,
+    )
+    plus = prepare_solidfmm_complex_upward_sweep(
+        tree,
+        pos_sorted + dt * vel_sorted,
+        mass_sorted,
+        max_order=order,
+        center_mode="explicit",
+        explicit_centers=centers,
+    )
+    zero = prepare_solidfmm_complex_upward_sweep(
+        tree,
+        pos_sorted,
+        mass_sorted,
+        max_order=order,
+        center_mode="explicit",
+        explicit_centers=centers,
+    )
+    minus = prepare_solidfmm_complex_upward_sweep(
+        tree,
+        pos_sorted - dt * vel_sorted,
+        mass_sorted,
+        max_order=order,
+        center_mode="explicit",
+        explicit_centers=centers,
+    )
+    ref = (
+        plus.multipoles.packed - 2.0 * zero.multipoles.packed + minus.multipoles.packed
+    ) / (dt * dt)
+    rel = np.linalg.norm(np.asarray(got - ref)) / (
+        np.linalg.norm(np.asarray(ref)) + 1e-12
+    )
+    assert rel < 2e-3
+
+
 def _as_tree_upward_data(complex_upward) -> TreeUpwardData:
     multipoles = NodeMultipoleData(
         order=int(complex_upward.multipoles.order),
