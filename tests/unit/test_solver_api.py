@@ -304,6 +304,86 @@ def test_octree_execution_backend_matches_radix_on_octree_tree():
     )
 
 
+def test_octree_execution_backend_supports_baseline_nearfield_mode():
+    positions, masses = _sample_problem(n=64)
+    radix = FastMultipoleMethod(
+        preset=FMMPreset.FAST,
+        basis="solidfmm",
+        advanced=FMMAdvancedConfig(
+            tree=TreeConfig(tree_type="octree"),
+            runtime=RuntimePolicyConfig(execution_backend="radix"),
+            nearfield=NearFieldConfig(mode="baseline"),
+        ),
+    )
+    octree = FastMultipoleMethod(
+        preset=FMMPreset.FAST,
+        basis="solidfmm",
+        advanced=FMMAdvancedConfig(
+            tree=TreeConfig(tree_type="octree"),
+            runtime=RuntimePolicyConfig(execution_backend="octree"),
+            nearfield=NearFieldConfig(mode="baseline"),
+        ),
+    )
+
+    acc_radix = radix.compute_accelerations(
+        positions,
+        masses,
+        leaf_size=16,
+        max_order=3,
+    )
+    acc_octree = octree.compute_accelerations(
+        positions,
+        masses,
+        leaf_size=16,
+        max_order=3,
+    )
+
+    assert np.allclose(
+        np.asarray(acc_octree), np.asarray(acc_radix), rtol=1e-5, atol=1e-5
+    )
+
+
+def test_octree_execution_backend_supports_class_major_farfield_mode():
+    positions, masses = _sample_problem(n=64)
+    radix = FastMultipoleMethod(
+        preset=FMMPreset.BALANCED,
+        basis="solidfmm",
+        advanced=FMMAdvancedConfig(
+            tree=TreeConfig(tree_type="octree"),
+            runtime=RuntimePolicyConfig(execution_backend="radix"),
+            farfield=FarFieldConfig(mode="class_major", grouped_interactions=True),
+            nearfield=NearFieldConfig(mode="bucketed", edge_chunk_size=256),
+        ),
+    )
+    octree = FastMultipoleMethod(
+        preset=FMMPreset.BALANCED,
+        basis="solidfmm",
+        advanced=FMMAdvancedConfig(
+            tree=TreeConfig(tree_type="octree"),
+            runtime=RuntimePolicyConfig(execution_backend="octree"),
+            farfield=FarFieldConfig(mode="class_major", grouped_interactions=True),
+            nearfield=NearFieldConfig(mode="bucketed", edge_chunk_size=256),
+        ),
+    )
+
+    acc_radix = radix.compute_accelerations(
+        positions,
+        masses,
+        leaf_size=16,
+        max_order=3,
+    )
+    acc_octree = octree.compute_accelerations(
+        positions,
+        masses,
+        leaf_size=16,
+        max_order=3,
+    )
+
+    assert np.allclose(
+        np.asarray(acc_octree), np.asarray(acc_radix), rtol=1e-5, atol=1e-5
+    )
+
+
 def test_octree_execution_backend_exposes_native_nearfield_view():
     positions, masses = _sample_problem(n=72)
     fmm = FastMultipoleMethod(
