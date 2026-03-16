@@ -827,6 +827,72 @@ def test_clear_runtime_caches_resets_runtime_state():
     assert fmm._impl._prepared_state_cache_value is None
 
 
+def test_octree_reuse_prepared_state_uses_cache_without_topology_reuse(monkeypatch):
+    positions, masses = _sample_problem(n=72)
+    fmm = FastMultipoleMethod(
+        preset=FMMPreset.FAST,
+        basis="solidfmm",
+        advanced=FMMAdvancedConfig(
+            tree=TreeConfig(tree_type="octree"),
+            runtime=RuntimePolicyConfig(execution_backend="octree"),
+        ),
+    )
+
+    acc_first = fmm.compute_accelerations(
+        positions,
+        masses,
+        leaf_size=8,
+        max_order=3,
+        reuse_prepared_state=True,
+    )
+
+    cached_state = fmm._impl._prepared_state_cache_value
+    assert cached_state is not None
+    assert cached_state.execution_backend == "octree"
+    assert fmm.recent_topology_reused is False
+
+    def fail_prepare_state(*args, **kwargs):
+        raise AssertionError("prepare_state should not run when octree cache is reused")
+
+    monkeypatch.setattr(fmm._impl, "prepare_state", fail_prepare_state)
+    acc_second = fmm.compute_accelerations(
+        positions,
+        masses,
+        leaf_size=8,
+        max_order=3,
+        reuse_prepared_state=True,
+    )
+
+    assert fmm._impl._prepared_state_cache_value is cached_state
+    assert fmm.recent_topology_reused is False
+    assert np.allclose(np.asarray(acc_second), np.asarray(acc_first), rtol=1e-5, atol=1e-5)
+
+
+def test_octree_clear_runtime_caches_resets_prepared_state_cache():
+    positions, masses = _sample_problem(n=72)
+    fmm = FastMultipoleMethod(
+        preset=FMMPreset.FAST,
+        basis="solidfmm",
+        advanced=FMMAdvancedConfig(
+            tree=TreeConfig(tree_type="octree"),
+            runtime=RuntimePolicyConfig(execution_backend="octree"),
+        ),
+    )
+    _ = fmm.compute_accelerations(
+        positions,
+        masses,
+        leaf_size=8,
+        max_order=3,
+        reuse_prepared_state=True,
+    )
+
+    assert fmm._impl._prepared_state_cache_value is not None
+    assert fmm._impl._prepared_state_cache_value.execution_backend == "octree"
+    fmm.clear_runtime_caches(clear_jax_compilation=False)
+    assert fmm._impl._prepared_state_cache_value is None
+    assert fmm.recent_topology_reused is False
+
+
 def test_gpu_runtime_overrides_cap_traversal_capacities_for_large_n():
     fmm = FastMultipoleMethod(
         preset=FMMPreset.FAST,
