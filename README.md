@@ -124,9 +124,17 @@ acc, jerk = solver.compute_accelerations_and_jerk(
 
 See [docs/derivatives_and_jerk.md](docs/derivatives_and_jerk.md) for API details,
 mode tradeoffs, and output tensor layouts.
-Public time-derivative support currently reaches crackle
-(`max_time_derivative_order=3`) in the accurate analytic path; orders above
-crackle are not yet available.
+Current higher-order status:
+
+- jerk is available via `compute_accelerations_and_jerk(...)`
+- higher total time derivatives are available via
+  `compute_accelerations_with_time_derivatives(...)`
+- public time-derivative support currently reaches crackle
+  (`max_time_derivative_order=3`)
+- the general time-derivative API currently uses the analytic `accurate` path
+- orders above crackle are not yet available
+- acceleration spatial derivatives (`max_acc_derivative_order > 0`) currently
+  require `basis="solidfmm"`
 
 There is also a worked example notebook for jerk, snap, and crackle:
 [`examples/time_derivatives_demo.ipynb`](/Users/buck/Documents/Nexus/Projects/jaccpot/examples/time_derivatives_demo.ipynb).

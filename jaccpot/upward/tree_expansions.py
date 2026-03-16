@@ -34,7 +34,7 @@ class NodeMultipoleData(NamedTuple):
     centers: Array
     moments: TreeMultipoleMoments
     packed: Array
-    component_matrix: Array
+    component_matrix: Optional[Array]
     source_motion_packed: Optional[Array] = None
 
 
@@ -154,7 +154,7 @@ def compute_node_multipoles(
         centers=moments.center,
         moments=moments,
         packed=packed,
-        component_matrix=component_matrix,
+        component_matrix=moments.raw_packed,
         source_motion_packed=None,
     )
 
@@ -261,7 +261,7 @@ def prepare_upward_sweep(
         centers=centers,
         moments=aggregated,
         packed=packed,
-        component_matrix=component_matrix,
+        component_matrix=aggregated.raw_packed,
         source_motion_packed=None,
     )
 

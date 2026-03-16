@@ -721,6 +721,7 @@ class FastMultipoleMethod:
         *,
         target_indices: Optional[Array] = None,
         return_potential: bool = False,
+        jit_traversal: Optional[bool] = None,
         max_acc_derivative_order: int = 0,
     ) -> Union[
         Array,

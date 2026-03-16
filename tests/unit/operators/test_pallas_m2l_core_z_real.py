@@ -5,10 +5,14 @@ from __future__ import annotations
 import jax
 import jax.numpy as jnp
 import numpy as np
+import pytest
 
 from jaccpot.operators.m2l_real_rot_scale import m2l_core_z_real
 
 
+@pytest.mark.filterwarnings(
+    "ignore:scatter inputs have incompatible types:FutureWarning"
+)
 def test_pallas_core_z_matches_pure_jax():
     order = 4
     coeff_count = (order + 1) ** 2

@@ -68,13 +68,8 @@ def _multipole_component_matrix(
     coeff_count: int,
     dtype: Any,
 ) -> Array:
-    """Return the component matrix, falling back to packed coefficients."""
-    raw = (
-        multipoles.packed
-        if multipoles.component_matrix is None
-        else multipoles.component_matrix
-    )
-    return jnp.asarray(raw[:, :coeff_count], dtype=dtype)
+    """Return the packed multipole coefficients used by the M2L kernels."""
+    return jnp.asarray(multipoles.packed[:, :coeff_count], dtype=dtype)
 
 
 _LEVEL_INDEX_LOOKUP: Dict[int, Dict[Tuple[int, int, int], int]] = {
@@ -470,6 +465,7 @@ def _translate_components_batch(
     order: int,
 ) -> Array:
     """Batch version of component-to-local translation."""
+    zero_disp = jnp.all(delta_chunk == 0, axis=1)
     derivative_chunk = jax.vmap(
         lambda disp: _evaluate_derivative_table(disp, order * 2),
     )(delta_chunk)
@@ -484,12 +480,13 @@ def _translate_components_batch(
         stencil.gamma_indices.shape[1],
     )
     weighted = gathered * scales
-    return jnp.einsum(
+    translated = jnp.einsum(
         "nqc,nc->nq",
         weighted,
         component_chunk,
         precision=lax.Precision.HIGHEST,
     )
+    return jnp.where(zero_disp[:, None], 0, translated)
 
 
 @partial(jax.jit, static_argnames=("order", "chunk_size"))
@@ -499,65 +496,70 @@ def _accumulate_level(
     centers_target: Array,
     centers_source: Array,
     sources: Array,
-    targets: Array,
+    offsets: Array,
+    counts: Array,
     *,
     order: int,
     chunk_size: int,
 ) -> Array:
-    """Accumulate M2L contributions in fixed-size chunks."""
+    """Accumulate M2L contributions in fixed-size chunks per target node."""
     pair_count = sources.shape[0]
     if pair_count == 0:
         return coeffs
 
     chunk = int(max(chunk_size, 1))
-    steps = (pair_count + chunk - 1) // chunk
-    padded_len = steps * chunk
-    pad_amount = padded_len - pair_count
+    padded_len = pair_count + chunk
     sources_padded = jnp.pad(
         sources,
-        (0, pad_amount),
-        mode="constant",
-        constant_values=0,
-    )
-    targets_padded = jnp.pad(
-        targets,
-        (0, pad_amount),
+        (0, padded_len - pair_count),
         mode="constant",
         constant_values=0,
     )
 
-    def body(idx: Array, carry: Array) -> Array:
-        coeff_state = carry
-        start = idx * chunk
-        remaining = pair_count - start
-        chunk_len = jnp.minimum(chunk, jnp.maximum(remaining, 0))
-        src_chunk = lax.dynamic_slice_in_dim(
-            sources_padded,
-            start,
-            chunk,
-            axis=0,
-        )
-        tgt_chunk = lax.dynamic_slice_in_dim(
-            targets_padded,
-            start,
-            chunk,
-            axis=0,
-        )
-        valid = jnp.arange(chunk, dtype=INDEX_DTYPE) < chunk_len
-        safe_src = jnp.where(valid, src_chunk, as_index(0))
-        safe_tgt = jnp.where(valid, tgt_chunk, as_index(0))
-        delta_slice = centers_target[safe_tgt] - centers_source[safe_src]
-        component_slice = component_matrix[safe_src]
-        contrib = _translate_components_batch(
-            component_slice,
-            delta_slice,
-            order=order,
-        )
-        contrib = jnp.where(valid[:, None], contrib, 0.0)
-        coeff_state = coeff_state.at[safe_tgt].add(contrib)
-        return coeff_state
+    num_targets = centers_target.shape[0]
+    slot_idx = jnp.arange(chunk, dtype=INDEX_DTYPE)
 
-    return lax.fori_loop(0, steps, body, coeffs)
+    def target_body(target_idx: Array, coeff_state: Array) -> Array:
+        start = offsets[target_idx]
+        count = counts[target_idx]
+
+        def accumulate_target(state: Array) -> Array:
+            steps = (count + chunk - 1) // chunk
+            target_center = centers_target[target_idx]
+
+            def chunk_body(step_idx: Array, inner_state: Array) -> Array:
+                chunk_start = start + step_idx * chunk
+                remaining = count - step_idx * chunk
+                chunk_len = jnp.minimum(chunk, jnp.maximum(remaining, 0))
+                src_chunk = lax.dynamic_slice_in_dim(
+                    sources_padded,
+                    chunk_start,
+                    chunk,
+                    axis=0,
+                )
+                valid = slot_idx < chunk_len
+                safe_src = jnp.where(valid, src_chunk, as_index(0))
+                delta_slice = target_center - centers_source[safe_src]
+                component_slice = component_matrix[safe_src]
+                contrib = _translate_components_batch(
+                    component_slice,
+                    delta_slice,
+                    order=order,
+                )
+                contrib = jnp.where(valid[:, None], contrib, 0.0)
+                total = jnp.sum(contrib, axis=0)
+                return inner_state.at[target_idx].add(total)
+
+            return lax.fori_loop(0, steps, chunk_body, state)
+
+        return lax.cond(
+            count > 0,
+            accumulate_target,
+            lambda s: s,
+            coeff_state,
+        )
+
+    return lax.fori_loop(0, num_targets, target_body, coeffs)
 
 
 @partial(jax.jit, static_argnames=("order",))
@@ -706,11 +708,13 @@ def _translate_multipole_to_local_impl(
         fourth,
         order=order,
     ).astype(dtype)
-    return _translate_components_to_local(
+    translated = _translate_components_to_local(
         component_vec,
         delta,
         order=order,
     )
+    zero_disp = jnp.all(jnp.asarray(delta, dtype=dtype) == 0)
+    return jnp.where(zero_disp, jnp.zeros_like(translated), translated)
 
 
 def _pack_symmetric_tensor(tensor: Array, level: int) -> Array:
@@ -1038,7 +1042,6 @@ def _accumulate_m2l_contributions_impl(
     coeffs = jnp.asarray(local_data.coefficients)
 
     sources = jnp.asarray(interactions.sources, dtype=INDEX_DTYPE)
-    targets = jnp.asarray(interactions.targets, dtype=INDEX_DTYPE)
     pair_count = int(sources.shape[0])
     if pair_count == 0:
         return LocalExpansionData(
@@ -1062,7 +1065,8 @@ def _accumulate_m2l_contributions_impl(
         centers_target,
         centers_source,
         sources,
-        targets,
+        jnp.asarray(interactions.offsets, dtype=INDEX_DTYPE),
+        jnp.asarray(interactions.counts, dtype=INDEX_DTYPE),
         order=order,
         chunk_size=chunk_size,
     )

@@ -2,6 +2,24 @@
 
 This page documents the higher-derivative and jerk-facing APIs in `jaccpot`.
 
+## Current Status
+
+The higher-order solver support is usable today, with a few explicit scope
+limits:
+
+- `compute_accelerations_and_jerk(...)` is public and supports both
+  `jerk_mode="fast_approx"` and `jerk_mode="accurate"`.
+- `compute_accelerations_with_time_derivatives(...)` is public and currently
+  supports orders 1-3: jerk, snap, and crackle.
+- the general time-derivative API currently accepts only `mode="accurate"`
+  and raises for other mode strings.
+- public acceleration spatial derivatives
+  (`max_acc_derivative_order > 0`) currently require `basis="solidfmm"`.
+- public time derivatives above crackle (`max_time_derivative_order > 3`) are
+  not implemented yet.
+- all of these paths work both on full solves and on prepared-state/subset
+  evaluation APIs.
+
 ## Acceleration Derivatives
 
 Use `max_acc_derivative_order` with:
@@ -24,6 +42,7 @@ Current support:
 
 - enabled for `basis="solidfmm"`
 - requesting derivatives with `basis="cartesian"` raises `NotImplementedError`
+- intended for prepared-state reuse as well as one-shot solves
 
 ## Time-Derivative APIs
 
@@ -44,6 +63,10 @@ Use:
 
 - `accelerations`: shape `(N, 3)` (or subset shape when `target_indices` used)
 - `time_derivatives`: tuple ordered as `(jerk, snap, crackle, ...)`
+
+The higher-order API also works on prepared states, so active-particle or
+substep integrators can reuse a prepared topology and still request only a
+target subset.
 
 For the currently supported public orders:
 
@@ -72,15 +95,19 @@ For the currently supported public orders:
 - optimized implementation: builds source-motion multipoles directly for fixed
   prepared centers (avoids rebuilding full complex upward bundles)
 
-### Current Scope
+## Higher-Order Time-Derivative Scope
 
 - Public time-derivative runtime support currently covers:
   - order 1: jerk
   - order 2: snap
   - order 3: crackle
-- Orders above 3 are not implemented yet.
-- Higher-order source-motion multipole kernels are implemented internally and
-  feed the runtime assembler.
+- `mode="accurate"` is currently the only accepted public mode for the general
+  time-derivative API.
+- the far-field higher time-derivative assembler currently requires
+  `basis="solidfmm"`
+- orders above 3 are not implemented yet
+- higher-order source-motion multipole kernels are implemented internally and
+  feed the public runtime assembler
 
 ## Choosing A Mode
 
@@ -101,6 +128,8 @@ General recommendation:
 - Derivative and jerk paths are JAX-jit compatible and GPU-friendly.
 - `accurate` jerk mode adds extra far-field source-motion contractions by design.
 - `accurate` mode for `solidfmm` reuses prepared interactions and topology.
+- prepared-state target subsets are supported for jerk and higher total time
+  derivatives, which is useful for split-step / active-particle integrators.
 - Run:
   - `python -m bench.bench_parallel_paths ...`
   - `python -m bench.ci_benchmark_guard ...`

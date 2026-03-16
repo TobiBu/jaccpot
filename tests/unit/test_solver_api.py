@@ -166,11 +166,12 @@ def test_solver_matches_expanse_fast_path():
         theta=0.6,
         softening=1e-3,
         working_dtype=jnp.float32,
-        expansion_basis="solidfmm",
-        complex_rotation="solidfmm",
-        mac_type="dehnen",
-        farfield_mode="pair_grouped",
-        nearfield_mode="bucketed",
+        basis="solidfmm",
+        advanced=FMMAdvancedConfig(
+            farfield=FarFieldConfig(mode="pair_grouped", rotation="solidfmm"),
+            nearfield=NearFieldConfig(mode="bucketed"),
+            mac_type="dehnen",
+        ),
     )
 
     acc_jaccpot = jaccpot_fmm.compute_accelerations(
@@ -1166,7 +1167,7 @@ def test_compute_accelerations_and_jerk_accurate_cartesian_uses_fd_fallback(
 ):
     positions, masses = _sample_problem(n=18)
     velocities = _sample_velocities(n=18)
-    fmm = FastMultipoleMethod(expansion_basis="cartesian")
+    fmm = FastMultipoleMethod(basis="cartesian")
 
     def _forbidden(*args, **kwargs):
         raise AssertionError(
@@ -1698,13 +1699,19 @@ def test_prepare_state_streamed_without_adaptive_skips_traversal_result_build():
         theta=0.6,
         softening=1e-3,
         working_dtype=jnp.float32,
-        expansion_basis="solidfmm",
-        complex_rotation="solidfmm",
-        mac_type="dehnen",
-        grouped_interactions=False,
-        streamed_far_pairs=True,
-        retain_traversal_result=False,
-        retain_interactions=False,
+        basis="solidfmm",
+        advanced=FMMAdvancedConfig(
+            farfield=FarFieldConfig(
+                grouped_interactions=False,
+                streamed_far_pairs=True,
+                rotation="solidfmm",
+            ),
+            runtime=RuntimePolicyConfig(
+                retain_traversal_result=False,
+                retain_interactions=False,
+            ),
+            mac_type="dehnen",
+        ),
     )
 
     seen = []
@@ -1732,12 +1739,14 @@ def test_prepare_state_adaptive_order_requests_compact_far_pairs():
         theta=0.6,
         softening=1e-3,
         working_dtype=jnp.float32,
-        expansion_basis="solidfmm",
-        complex_rotation="solidfmm",
-        mac_type="dehnen",
+        basis="solidfmm",
         adaptive_order=True,
         p_gears=(2, 3),
-        retain_traversal_result=False,
+        advanced=FMMAdvancedConfig(
+            farfield=FarFieldConfig(rotation="solidfmm"),
+            runtime=RuntimePolicyConfig(retain_traversal_result=False),
+            mac_type="dehnen",
+        ),
     )
 
     seen = []
