@@ -630,12 +630,17 @@ class FastMultipoleMethod:
         *,
         target_indices: Optional[Array] = None,
         return_potential: bool = False,
+        jit_traversal: Optional[bool] = None,
     ) -> Union[Array, Tuple[Array, Array]]:
         """Evaluate a previously prepared state for all particles or a subset."""
         jit_traversal = (
-            True
-            if self.advanced.runtime.jit_traversal is None
-            else bool(self.advanced.runtime.jit_traversal)
+            (
+                True
+                if self.advanced.runtime.jit_traversal is None
+                else bool(self.advanced.runtime.jit_traversal)
+            )
+            if jit_traversal is None
+            else bool(jit_traversal)
         )
         return self._impl.evaluate_prepared_state(
             state,

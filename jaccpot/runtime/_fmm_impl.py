@@ -1189,10 +1189,14 @@ def _octree_local_expansion_data(
 
     if octree_downward is None:
         return None
+    coefficients = jnp.asarray(octree_downward.locals_packed)
     return LocalExpansionData(
-        order=int(octree_downward.order),
+        order=_infer_order_from_coeff_count(
+            coeff_count=int(coefficients.shape[-1]),
+            expansion_basis="solidfmm",
+        ),
         centers=jnp.asarray(octree_downward.centers),
-        coefficients=jnp.asarray(octree_downward.locals_packed),
+        coefficients=coefficients,
     )
 
 
@@ -4859,7 +4863,9 @@ def _build_nearfield_interop_data(
             ),
             dtype=INDEX_DTYPE,
         )
-        radix_leaf_ranges = jnp.asarray(tree.node_ranges, dtype=INDEX_DTYPE)[radix_leaf_nodes]
+        radix_leaf_ranges = jnp.asarray(tree.node_ranges, dtype=INDEX_DTYPE)[
+            radix_leaf_nodes
+        ]
         radix_leaf_counts = radix_leaf_ranges[:, 1] - radix_leaf_ranges[:, 0] + 1
         carrier_lookup = jnp.full(
             (octree.parent.shape[0],),
@@ -4882,7 +4888,9 @@ def _build_nearfield_interop_data(
         if max_particles > 0:
             max_radix_leaf_particles = int(jnp.max(radix_leaf_counts))
             local_offsets = jnp.arange(max_radix_leaf_particles, dtype=INDEX_DTYPE)
-            radix_particle_idx = radix_leaf_ranges[:, 0][:, None] + local_offsets[None, :]
+            radix_particle_idx = (
+                radix_leaf_ranges[:, 0][:, None] + local_offsets[None, :]
+            )
             radix_particle_valid = local_offsets[None, :] < radix_leaf_counts[:, None]
             flat_particle_idx = radix_particle_idx.reshape(-1)
             flat_valid = radix_particle_valid.reshape(-1)
@@ -4964,7 +4972,9 @@ def _build_nearfield_interop_data(
     del octree
     leaf_indices = jnp.asarray(neighbor_list.leaf_indices, dtype=INDEX_DTYPE)
     particle_order_leaf_indices = jnp.asarray(
-        getattr(neighbor_list, "particle_order_leaf_indices", neighbor_list.leaf_indices),
+        getattr(
+            neighbor_list, "particle_order_leaf_indices", neighbor_list.leaf_indices
+        ),
         dtype=INDEX_DTYPE,
     )
     return NearfieldInteropData(
@@ -6665,17 +6675,36 @@ def _build_target_nearfield_source_index_matrix(
         empty_mask = jnp.zeros((num_targets, 0), dtype=bool)
         return empty_idx, empty_mask
 
-    leaf_ranges = node_ranges[leaf_nodes]
-    leaf_counts = leaf_ranges[:, 1] - leaf_ranges[:, 0] + 1
-    max_leaf_particles = int(jnp.max(leaf_counts))
+    if (
+        nearfield_interop.leaf_particle_indices is not None
+        and nearfield_interop.leaf_particle_mask is not None
+    ):
+        leaf_particle_idx = jnp.asarray(
+            nearfield_interop.leaf_particle_indices,
+            dtype=INDEX_DTYPE,
+        )
+        leaf_particle_mask = jnp.asarray(
+            nearfield_interop.leaf_particle_mask,
+            dtype=bool,
+        )
+        max_leaf_particles = int(leaf_particle_idx.shape[1])
+    else:
+        leaf_ranges = node_ranges[leaf_nodes]
+        leaf_counts = leaf_ranges[:, 1] - leaf_ranges[:, 0] + 1
+        max_leaf_particles = int(jnp.max(leaf_counts))
+        if max_leaf_particles <= 0:
+            empty_idx = jnp.zeros((num_targets, 0), dtype=INDEX_DTYPE)
+            empty_mask = jnp.zeros((num_targets, 0), dtype=bool)
+            return empty_idx, empty_mask
+
+        particle_offsets = jnp.arange(max_leaf_particles, dtype=INDEX_DTYPE)
+        leaf_particle_idx = leaf_ranges[:, 0][:, None] + particle_offsets[None, :]
+        leaf_particle_mask = particle_offsets[None, :] < leaf_counts[:, None]
+
     if max_leaf_particles <= 0:
         empty_idx = jnp.zeros((num_targets, 0), dtype=INDEX_DTYPE)
         empty_mask = jnp.zeros((num_targets, 0), dtype=bool)
         return empty_idx, empty_mask
-
-    particle_offsets = jnp.arange(max_leaf_particles, dtype=INDEX_DTYPE)
-    leaf_particle_idx = leaf_ranges[:, 0][:, None] + particle_offsets[None, :]
-    leaf_particle_mask = particle_offsets[None, :] < leaf_counts[:, None]
 
     leaf_lookup = jnp.full((total_nodes,), -1, dtype=INDEX_DTYPE)
     leaf_lookup = leaf_lookup.at[leaf_nodes].set(
@@ -6890,19 +6919,20 @@ def _evaluate_prepared_tree_targets(
         leaf_nodes=node_views.farfield_leaf_nodes,
         node_ranges=node_views.farfield_node_ranges,
     )
+    resolved_farfield_local_data = (
+        downward.locals if farfield_local_data is None else farfield_local_data
+    )
+    far_order = _infer_order_from_coeff_count(
+        coeff_count=int(resolved_farfield_local_data.coefficients.shape[-1]),
+        expansion_basis=fmm.expansion_basis,
+    )
     far_grad, far_potential_pre = _evaluate_local_expansions_for_target_particles(
-        local_data=(
-            downward.locals if farfield_local_data is None else farfield_local_data
-        ),
+        local_data=resolved_farfield_local_data,
         positions_sorted=positions_sorted,
         target_sorted_indices=target_sorted_indices,
         target_leaf_positions=far_target_leaf_positions,
         leaf_nodes=node_views.farfield_leaf_nodes,
-        order=int(
-            downward.locals.order
-            if farfield_local_data is None
-            else farfield_local_data.order
-        ),
+        order=far_order,
         expansion_basis=fmm.expansion_basis,
         return_potential=return_potential,
     )
