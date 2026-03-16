@@ -1,5 +1,6 @@
 import math
 
+import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
@@ -7,8 +8,15 @@ import pytest
 from jaccpot.operators.complex_harmonics import complex_R_solidfmm
 from jaccpot.operators.complex_ops import (
     complex_dot,
+    contract_spatial_derivative_with_velocity,
+    evaluate_local_complex_derivative_tower,
+    evaluate_local_complex_with_grad,
     l2l_complex,
     m2m_complex,
+    regular_solid_harmonic_directional_derivative,
+    regular_solid_harmonic_directional_derivative_batch,
+    regular_solid_harmonic_directional_derivative_order,
+    regular_solid_harmonic_directional_derivative_order_batch,
     rotate_complex_local_from_z,
     rotate_complex_local_from_z_batch,
     rotate_complex_local_from_z_cached,
@@ -33,6 +41,7 @@ from jaccpot.operators.real_harmonics import sh_size
 from jaccpot.operators.solidfmm_reference import (
     translate_along_z_m2l_complex as ref_translate_z,
 )
+from jaccpot.operators.symmetric_tensors import symmetric_multi_indices_3d
 
 
 def test_translate_along_z_m2l_complex_matches_reference() -> None:
@@ -290,6 +299,94 @@ def test_l2l_complex_solidfmm_matches_direct_reference() -> None:
     assert np.allclose(np.asarray(got), ref, rtol=1e-12, atol=1e-12)
 
 
+def _pack_dense_reference(dense: np.ndarray, order: int) -> np.ndarray:
+    flat = dense.reshape(-1)
+    gather = []
+    for nx, ny, nz in symmetric_multi_indices_3d(order):
+        axis = (0,) * nx + (1,) * ny + (2,) * nz
+        idx = 0
+        for a in axis:
+            idx = idx * 3 + a
+        gather.append(idx)
+    return flat[np.asarray(gather, dtype=np.int32)]
+
+
+def test_evaluate_local_complex_derivative_tower_matches_grad_and_hessian() -> None:
+    order = 4
+    rng = np.random.default_rng(21)
+    ncoeff = sh_size(order)
+    local = rng.normal(size=(ncoeff,)) + 1j * rng.normal(size=(ncoeff,))
+    delta = jnp.array([0.31, -0.27, 0.58], dtype=jnp.float64)
+
+    d0, d1, d2 = evaluate_local_complex_derivative_tower(
+        jnp.asarray(local),
+        delta,
+        order=order,
+        max_derivative_order=2,
+    )
+
+    grad_ref, pot_ref = evaluate_local_complex_with_grad(
+        jnp.asarray(local),
+        delta,
+        order=order,
+    )
+    hessian_ref = jax.hessian(
+        lambda d: complex_dot(
+            jnp.asarray(local),
+            complex_R_solidfmm(d, order=order),
+            order=order,
+            conjugate_left=True,
+        ).real
+    )(delta)
+    d2_ref = _pack_dense_reference(np.asarray(hessian_ref), order=2)
+
+    assert np.allclose(np.asarray(d0), np.asarray([pot_ref]), rtol=1e-12, atol=1e-12)
+    assert np.allclose(np.asarray(d1), np.asarray(grad_ref), rtol=1e-12, atol=1e-12)
+    assert np.allclose(np.asarray(d2), d2_ref, rtol=1e-12, atol=1e-12)
+
+
+def test_evaluate_local_complex_derivative_tower_matches_third_order_autodiff() -> None:
+    order = 5
+    rng = np.random.default_rng(22)
+    ncoeff = sh_size(order)
+    local = rng.normal(size=(ncoeff,)) + 1j * rng.normal(size=(ncoeff,))
+    delta = jnp.array([0.19, -0.41, 0.63], dtype=jnp.float64)
+
+    _, _, _, d3 = evaluate_local_complex_derivative_tower(
+        jnp.asarray(local),
+        delta,
+        order=order,
+        max_derivative_order=3,
+    )
+
+    phi = lambda d: complex_dot(
+        jnp.asarray(local),
+        complex_R_solidfmm(d, order=order),
+        order=order,
+        conjugate_left=True,
+    ).real
+    d3_dense = jax.jacfwd(jax.hessian(phi))(delta)
+    d3_ref = _pack_dense_reference(np.asarray(d3_dense), order=3)
+    assert np.allclose(np.asarray(d3), d3_ref, rtol=1e-11, atol=1e-11)
+
+
+def test_contract_spatial_derivative_with_velocity_matches_hessian_times_v() -> None:
+    # Packed Hessian layout: xx, xy, xz, yy, yz, zz
+    hessian_packed = jnp.array([2.0, -1.0, 4.0, 3.0, -2.0, 5.0], dtype=jnp.float64)
+    velocity = jnp.array([0.7, -1.1, 0.4], dtype=jnp.float64)
+
+    got = contract_spatial_derivative_with_velocity(hessian_packed, velocity, order=2)
+    expected = jnp.array(
+        [
+            2.0 * 0.7 + (-1.0) * (-1.1) + 4.0 * 0.4,
+            (-1.0) * 0.7 + 3.0 * (-1.1) + (-2.0) * 0.4,
+            4.0 * 0.7 + (-2.0) * (-1.1) + 5.0 * 0.4,
+        ],
+        dtype=jnp.float64,
+    )
+    assert jnp.allclose(got, expected, rtol=0.0, atol=0.0)
+
+
 def test_cached_rotation_blocks_match_direct_multipole() -> None:
     order = 4
     rng = np.random.default_rng(9)
@@ -435,3 +532,88 @@ def test_wigner_d_jax_matches_sympy_small_ell() -> None:
         )
 
         assert np.allclose(np.asarray(D_jax), D_ref, rtol=1e-10, atol=1e-10)
+
+
+def test_regular_harmonic_directional_derivative_matches_finite_difference() -> None:
+    order = 5
+    delta = jnp.asarray([0.37, -0.22, 0.58], dtype=jnp.float64)
+    direction = jnp.asarray([0.31, -0.44, 0.21], dtype=jnp.float64)
+    eps = jnp.asarray(1e-6, dtype=jnp.float64)
+
+    ref = (
+        complex_R_solidfmm(delta + eps * direction, order=order)
+        - complex_R_solidfmm(delta - eps * direction, order=order)
+    ) / (2.0 * eps)
+    got = regular_solid_harmonic_directional_derivative(
+        delta,
+        direction,
+        order=order,
+    )
+    assert np.allclose(np.asarray(got), np.asarray(ref), rtol=1e-6, atol=1e-7)
+
+
+def test_regular_harmonic_directional_derivative_batch_matches_single() -> None:
+    order = 4
+    rng = np.random.default_rng(17)
+    deltas = jnp.asarray(rng.normal(size=(6, 3)), dtype=jnp.float64)
+    directions = jnp.asarray(rng.normal(size=(6, 3)), dtype=jnp.float64)
+    got = regular_solid_harmonic_directional_derivative_batch(
+        deltas,
+        directions,
+        order=order,
+    )
+    ref = jnp.stack(
+        [
+            regular_solid_harmonic_directional_derivative(d, v, order=order)
+            for d, v in zip(deltas, directions)
+        ],
+        axis=0,
+    )
+    assert np.allclose(np.asarray(got), np.asarray(ref), rtol=1e-12, atol=1e-12)
+
+
+def test_regular_harmonic_second_directional_derivative_matches_finite_difference() -> (
+    None
+):
+    order = 5
+    delta = jnp.asarray([0.37, -0.22, 0.58], dtype=jnp.float64)
+    direction = jnp.asarray([0.31, -0.44, 0.21], dtype=jnp.float64)
+    eps = jnp.asarray(1e-5, dtype=jnp.float64)
+    ref = (
+        complex_R_solidfmm(delta + eps * direction, order=order)
+        - 2.0 * complex_R_solidfmm(delta, order=order)
+        + complex_R_solidfmm(delta - eps * direction, order=order)
+    ) / (eps * eps)
+    got = regular_solid_harmonic_directional_derivative_order(
+        delta,
+        direction,
+        order=order,
+        derivative_order=2,
+    )
+    assert np.allclose(np.asarray(got), np.asarray(ref), rtol=4e-5, atol=2e-6)
+
+
+def test_regular_harmonic_second_directional_derivative_batch_matches_single() -> None:
+    order = 4
+    rng = np.random.default_rng(23)
+    deltas = jnp.asarray(rng.normal(size=(6, 3)), dtype=jnp.float64)
+    directions = jnp.asarray(rng.normal(size=(6, 3)), dtype=jnp.float64)
+    got = regular_solid_harmonic_directional_derivative_order_batch(
+        deltas,
+        directions,
+        order=order,
+        derivative_order=2,
+    )
+    ref = jnp.stack(
+        [
+            regular_solid_harmonic_directional_derivative_order(
+                d,
+                v,
+                order=order,
+                derivative_order=2,
+            )
+            for d, v in zip(deltas, directions)
+        ],
+        axis=0,
+    )
+    assert np.allclose(np.asarray(got), np.asarray(ref), rtol=1e-12, atol=1e-12)

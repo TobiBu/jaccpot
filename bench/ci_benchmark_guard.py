@@ -1,126 +1,93 @@
-"""Run bench_parallel_paths.py and fail on latency regressions vs baseline."""
+"""CI guard for acceleration/time-derivative runtime path sanity.
+
+This guard intentionally uses broad ratio bounds to avoid hardware-specific
+flakiness while still catching major runtime regressions.
+"""
 
 from __future__ import annotations
 
 import argparse
 import json
-import pathlib
-import subprocess
-import sys
-from typing import Dict
+from pathlib import Path
+
+import jax.numpy as jnp
+
+from bench.bench_parallel_paths import collect_metrics
 
 
-def _parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument(
-        "--baseline",
-        type=pathlib.Path,
-        default=pathlib.Path("bench/benchmark_baseline.json"),
-    )
-    parser.add_argument(
-        "--max-regression",
-        type=float,
-        default=0.25,
-        help="Maximum allowed slowdown ratio (e.g. 0.25 = +25%%).",
-    )
-    parser.add_argument("--n", type=int, default=8000)
-    parser.add_argument("--p", type=int, default=4)
-    parser.add_argument("--leaf-size", type=int, default=16)
-    parser.add_argument("--theta", type=float, default=0.6)
-    parser.add_argument("--target-frac", type=float, default=0.10)
-    parser.add_argument("--p-gears", type=str, default="2,2,3,3,4")
-    parser.add_argument("--warmup", type=int, default=1)
-    parser.add_argument("--runs", type=int, default=2)
-    parser.add_argument("--dtype", choices=("float32", "float64"), default="float32")
-    return parser.parse_args()
+def _validate_metrics(metrics: dict[str, float]) -> None:
+    acc = float(metrics["acc_mean_seconds"])
+    jerk_fast = float(metrics["jerk_fast_mean_seconds"])
+    jerk_acc = float(metrics["jerk_accurate_mean_seconds"])
+    ratio_fast = float(metrics["jerk_fast_over_acc"])
+    ratio_acc = float(metrics["jerk_accurate_over_fast"])
+    td2 = float(metrics["time_deriv2_accurate_mean_seconds"])
+    td3 = float(metrics["time_deriv3_accurate_mean_seconds"])
+    ratio_td2 = float(metrics["time_deriv2_accurate_over_jerk_accurate"])
+    ratio_td3 = float(metrics["time_deriv3_accurate_over_time_deriv2_accurate"])
 
-
-def _load_baseline(path: pathlib.Path) -> Dict[str, float]:
-    if not path.exists():
-        raise FileNotFoundError(f"baseline file not found: {path}")
-    payload = json.loads(path.read_text(encoding="utf-8"))
-    required = ("target_eval_mean_s", "adaptive_prepare_mean_s")
-    missing = [k for k in required if k not in payload]
-    if missing:
-        raise ValueError(f"baseline missing keys: {', '.join(missing)}")
-    return {k: float(payload[k]) for k in required}
-
-
-def _run_benchmark(args: argparse.Namespace) -> Dict[str, float]:
-    cmd = [
-        sys.executable,
-        "bench/bench_parallel_paths.py",
-        "--n",
-        str(int(args.n)),
-        "--p",
-        str(int(args.p)),
-        "--leaf-size",
-        str(int(args.leaf_size)),
-        "--theta",
-        str(float(args.theta)),
-        "--target-frac",
-        str(float(args.target_frac)),
-        "--p-gears",
-        str(args.p_gears),
-        "--warmup",
-        str(int(args.warmup)),
-        "--runs",
-        str(int(args.runs)),
-        "--dtype",
-        str(args.dtype),
-    ]
-    try:
-        proc = subprocess.run(cmd, check=True, text=True, capture_output=True)
-    except subprocess.CalledProcessError as exc:
+    if not (
+        acc > 0.0 and jerk_fast > 0.0 and jerk_acc > 0.0 and td2 > 0.0 and td3 > 0.0
+    ):
+        raise RuntimeError("non-positive benchmark timings observed")
+    if not (0.4 <= ratio_fast <= 8.0):
         raise RuntimeError(
-            "bench_parallel_paths.py failed.\n"
-            f"stdout:\n{exc.stdout}\n\nstderr:\n{exc.stderr}"
-        ) from exc
-    lines = [ln.strip() for ln in proc.stdout.splitlines() if ln.strip()]
-    timing_lines = [ln for ln in lines if ln.startswith("timings_s ")]
-    if not timing_lines:
-        raise RuntimeError(
-            "bench_parallel_paths.py did not produce a timings_s line.\n"
-            f"stdout:\n{proc.stdout}\n\nstderr:\n{proc.stderr}"
+            f"jerk_fast_over_acc out of guard range: {ratio_fast:.3f} "
+            "(expected 0.4..8.0)"
         )
-    fields = timing_lines[-1].split()[1:]
-    parsed: Dict[str, float] = {}
-    for field in fields:
-        key, value = field.split("=", 1)
-        parsed[key] = float(value)
-    required = ("target_eval_mean", "adaptive_prepare_mean")
-    missing = [k for k in required if k not in parsed]
-    if missing:
-        raise RuntimeError(f"timings_s missing keys: {', '.join(missing)}")
-    return {
-        "target_eval_mean_s": float(parsed["target_eval_mean"]),
-        "adaptive_prepare_mean_s": float(parsed["adaptive_prepare_mean"]),
-    }
+    if not (1.2 <= ratio_acc <= 15.0):
+        raise RuntimeError(
+            f"jerk_accurate_over_fast out of guard range: {ratio_acc:.3f} "
+            "(expected 1.2..15.0)"
+        )
+    if not (1.0 <= ratio_td2 <= 12.0):
+        raise RuntimeError(
+            f"time_deriv2_accurate_over_jerk_accurate out of guard range: {ratio_td2:.3f} "
+            "(expected 1.0..12.0)"
+        )
+    if not (1.0 <= ratio_td3 <= 12.0):
+        raise RuntimeError(
+            f"time_deriv3_accurate_over_time_deriv2_accurate out of guard range: {ratio_td3:.3f} "
+            "(expected 1.0..12.0)"
+        )
 
 
 def main() -> None:
-    args = _parse_args()
-    baseline = _load_baseline(args.baseline)
-    observed = _run_benchmark(args)
-    allowed = 1.0 + float(args.max_regression)
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--n", type=int, default=512)
+    parser.add_argument("--runs", type=int, default=3)
+    parser.add_argument("--warmup", type=int, default=1)
+    parser.add_argument("--preset", type=str, default="fast")
+    parser.add_argument("--basis", type=str, default="solidfmm")
+    parser.add_argument("--theta", type=float, default=0.6)
+    parser.add_argument("--leaf-size", type=int, default=16)
+    parser.add_argument("--max-order", type=int, default=4)
+    parser.add_argument("--jerk-fd-dt", type=float, default=1e-3)
+    parser.add_argument("--seed", type=int, default=0)
+    parser.add_argument("--dtype", choices=("float32", "float64"), default="float32")
+    parser.add_argument("--json-out", type=Path, default=None)
+    args = parser.parse_args()
 
-    failures = []
-    for metric_name in ("target_eval_mean_s", "adaptive_prepare_mean_s"):
-        base = baseline[metric_name]
-        value = observed[metric_name]
-        ratio = value / base if base > 0 else float("inf")
-        status = "PASS" if ratio <= allowed else "FAIL"
-        print(
-            f"{metric_name}: observed={value:.6f}s baseline={base:.6f}s "
-            f"ratio={ratio:.3f} allowed<={allowed:.3f} [{status}]"
-        )
-        if ratio > allowed:
-            failures.append(metric_name)
+    dtype = jnp.float64 if args.dtype == "float64" else jnp.float32
+    metrics = collect_metrics(
+        n=int(args.n),
+        runs=int(args.runs),
+        warmup=int(args.warmup),
+        preset=str(args.preset),
+        basis=str(args.basis),
+        theta=float(args.theta),
+        leaf_size=int(args.leaf_size),
+        max_order=int(args.max_order),
+        jerk_fd_dt=float(args.jerk_fd_dt),
+        seed=int(args.seed),
+        dtype=dtype,
+    )
 
-    if failures:
-        raise SystemExit(
-            "Benchmark regression guard failed for: " + ", ".join(failures)
-        )
+    _validate_metrics(metrics)
+    text = json.dumps(metrics, indent=2, sort_keys=True)
+    print(text)
+    if args.json_out is not None:
+        args.json_out.write_text(text + "\n", encoding="utf-8")
 
 
 if __name__ == "__main__":

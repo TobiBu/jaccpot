@@ -110,6 +110,38 @@ state = solver.prepare_state(positions, masses)
 active_acc = solver.evaluate_prepared_state(state, target_indices=active)
 ```
 
+For integrators that require jerk, use:
+
+```python
+velocities = jax.random.uniform(key_pos, (1024, 3), minval=-0.2, maxval=0.2)
+acc, jerk = solver.compute_accelerations_and_jerk(
+    positions,
+    masses,
+    velocities,
+    jerk_mode="fast_approx",  # or "accurate"
+)
+```
+
+See [docs/derivatives_and_jerk.md](docs/derivatives_and_jerk.md) for API details,
+mode tradeoffs, and output tensor layouts.
+Public time-derivative support currently reaches crackle
+(`max_time_derivative_order=3`) in the accurate analytic path; orders above
+crackle are not yet available.
+
+There is also a worked example notebook for jerk, snap, and crackle:
+[`examples/time_derivatives_demo.ipynb`](/Users/buck/Documents/Nexus/Projects/jaccpot/examples/time_derivatives_demo.ipynb).
+
+For a small-`N` direct-sum accuracy check of jerk, snap, and crackle, see:
+[`examples/time_derivatives_accuracy_demo.ipynb`](/Users/buck/Documents/Nexus/Projects/jaccpot/examples/time_derivatives_accuracy_demo.ipynb).
+
+### Jerk Mode Guide
+
+| Goal | Mode | Notes |
+|---|---|---|
+| Lowest runtime overhead | `fast_approx` | Exact near-field jerk + far-field convective term. |
+| Highest fidelity (includes source-motion effects) | `accurate` | Analytic far-field source-motion term + convective + exact near-field jerk. |
+| Stable default for large production runs | `fast_approx` | Benchmark against your own workload before switching defaults. |
+
 For ODISSEO-style primitive states `(N, 2, 3)`, you can use the adapter:
 
 ```python
@@ -413,21 +445,11 @@ CI also runs a benchmark regression guard based on:
 - [bench/ci_benchmark_guard.py](/Users/buck/Documents/Nexus/Projects/jaccpot/bench/ci_benchmark_guard.py)
 - [bench/benchmark_baseline.json](/Users/buck/Documents/Nexus/Projects/jaccpot/bench/benchmark_baseline.json)
 
-Run the guard locally with the same defaults used in CI:
+Run the lightweight runtime-path benchmark and CI guard locally:
 
 ```bash
-python bench/ci_benchmark_guard.py \
-  --baseline bench/benchmark_baseline.json \
-  --max-regression 0.25 \
-  --n 8000 \
-  --p 4 \
-  --leaf-size 16 \
-  --theta 0.6 \
-  --target-frac 0.1 \
-  --p-gears 2,2,3,3,4 \
-  --warmup 1 \
-  --runs 2 \
-  --dtype float32
+python -m bench.bench_parallel_paths --n 512 --runs 3 --warmup 1
+python -m bench.ci_benchmark_guard --n 384 --runs 2 --warmup 1
 ```
 
 If a performance change is intentional, refresh the baseline:
@@ -437,6 +459,12 @@ If a performance change is intentional, refresh the baseline:
    `target_eval_mean_s` and `adaptive_prepare_mean_s` in
    `bench/benchmark_baseline.json`.
 3. Re-run `bench/ci_benchmark_guard.py` to confirm the new baseline passes.
+
+## Examples
+
+- `examples/benchmark_runtime_accuracy.ipynb`: runtime/accuracy benchmark workflow
+- `examples/jerk_modes_demo.ipynb`: compare jerk `fast_approx` vs `accurate` modes
+- `examples/analytic_source_motion_jerk_demo.ipynb`: inspect analytic source-motion jerk behavior on `solidfmm`
 
 ## Runtime Type Checking
 

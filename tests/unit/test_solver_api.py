@@ -51,6 +51,105 @@ def _sample_problem(n: int = 64):
     return positions, masses
 
 
+def _sample_velocities(n: int = 64):
+    key = jax.random.PRNGKey(17)
+    return jax.random.uniform(
+        key,
+        (n, 3),
+        minval=-0.2,
+        maxval=0.2,
+        dtype=jnp.float32,
+    )
+
+
+def _direct_sum_jerk(
+    positions: jnp.ndarray,
+    masses: jnp.ndarray,
+    velocities: jnp.ndarray,
+    *,
+    G: float,
+    softening: float,
+) -> jnp.ndarray:
+    diff = positions[:, None, :] - positions[None, :, :]
+    vdiff = velocities[:, None, :] - velocities[None, :, :]
+    dist_sq = jnp.sum(diff * diff, axis=-1) + softening**2
+    eps = jnp.finfo(positions.dtype).eps
+    inv_r = jnp.where(dist_sq > 0, 1.0 / (jnp.sqrt(dist_sq) + eps), 0.0)
+    inv_r3 = inv_r / dist_sq
+    inv_r5 = inv_r3 / dist_sq
+    eye = jnp.eye(positions.shape[0], dtype=bool)
+    inv_r3 = jnp.where(eye, 0.0, inv_r3)
+    inv_r5 = jnp.where(eye, 0.0, inv_r5)
+    rv = jnp.sum(diff * vdiff, axis=-1)
+    term = vdiff * inv_r3[..., None] - 3.0 * rv[..., None] * diff * inv_r5[..., None]
+    weighted = masses[None, :, None] * term
+    return -G * jnp.sum(weighted, axis=1)
+
+
+def _direct_sum_snap(
+    positions: jnp.ndarray,
+    masses: jnp.ndarray,
+    velocities: jnp.ndarray,
+    *,
+    G: float,
+    softening: float,
+) -> jnp.ndarray:
+    diff = positions[:, None, :] - positions[None, :, :]
+    vdiff = velocities[:, None, :] - velocities[None, :, :]
+    dist_sq = jnp.sum(diff * diff, axis=-1) + softening**2
+    eps = jnp.finfo(positions.dtype).eps
+    inv_r = jnp.where(dist_sq > 0, 1.0 / (jnp.sqrt(dist_sq) + eps), 0.0)
+    inv_r3 = inv_r / dist_sq
+    inv_r5 = inv_r3 / dist_sq
+    inv_r7 = inv_r5 / dist_sq
+    eye = jnp.eye(positions.shape[0], dtype=bool)
+    inv_r3 = jnp.where(eye, 0.0, inv_r3)
+    inv_r5 = jnp.where(eye, 0.0, inv_r5)
+    inv_r7 = jnp.where(eye, 0.0, inv_r7)
+    rv = jnp.sum(diff * vdiff, axis=-1)
+    vv = jnp.sum(vdiff * vdiff, axis=-1)
+    term = (
+        6.0 * rv[..., None] * vdiff * inv_r5[..., None]
+        + 3.0 * vv[..., None] * diff * inv_r5[..., None]
+        - 15.0 * (rv * rv)[..., None] * diff * inv_r7[..., None]
+    )
+    weighted = masses[None, :, None] * term
+    return G * jnp.sum(weighted, axis=1)
+
+
+def _direct_sum_crackle(
+    positions: jnp.ndarray,
+    masses: jnp.ndarray,
+    velocities: jnp.ndarray,
+    *,
+    G: float,
+    softening: float,
+) -> jnp.ndarray:
+    diff = positions[:, None, :] - positions[None, :, :]
+    vdiff = velocities[:, None, :] - velocities[None, :, :]
+    dist_sq = jnp.sum(diff * diff, axis=-1) + softening**2
+    eps = jnp.finfo(positions.dtype).eps
+    inv_r = jnp.where(dist_sq > 0, 1.0 / (jnp.sqrt(dist_sq) + eps), 0.0)
+    inv_r3 = inv_r / dist_sq
+    inv_r5 = inv_r3 / dist_sq
+    inv_r7 = inv_r5 / dist_sq
+    inv_r9 = inv_r7 / dist_sq
+    eye = jnp.eye(positions.shape[0], dtype=bool)
+    inv_r5 = jnp.where(eye, 0.0, inv_r5)
+    inv_r7 = jnp.where(eye, 0.0, inv_r7)
+    inv_r9 = jnp.where(eye, 0.0, inv_r9)
+    rv = jnp.sum(diff * vdiff, axis=-1)
+    vv = jnp.sum(vdiff * vdiff, axis=-1)
+    term = (
+        9.0 * vv[..., None] * vdiff * inv_r5[..., None]
+        - 45.0 * (rv * rv)[..., None] * vdiff * inv_r7[..., None]
+        - 45.0 * rv[..., None] * vv[..., None] * diff * inv_r7[..., None]
+        + 105.0 * (rv * rv * rv)[..., None] * diff * inv_r9[..., None]
+    )
+    weighted = masses[None, :, None] * term
+    return G * jnp.sum(weighted, axis=1)
+
+
 def test_solver_matches_expanse_fast_path():
     positions, masses = _sample_problem(n=96)
 
@@ -859,6 +958,353 @@ def test_evaluate_prepared_state_can_run_inside_jit_with_targets():
 
     assert acc_jit.shape == (target_indices.shape[0], 3)
     assert np.allclose(np.asarray(acc_jit), np.asarray(acc_ref), rtol=1e-5, atol=1e-5)
+
+
+def test_compute_accelerations_returns_acc_derivatives_when_requested():
+    positions, masses = _sample_problem(n=48)
+    fmm = FastMultipoleMethod(
+        preset=FMMPreset.FAST,
+        basis="solidfmm",
+    )
+    acc, derivatives = fmm.compute_accelerations(
+        positions,
+        masses,
+        leaf_size=16,
+        max_order=3,
+        max_acc_derivative_order=1,
+    )
+    assert acc.shape == positions.shape
+    assert len(derivatives) == 1
+    assert derivatives[0].shape == (positions.shape[0], 3, 3)
+
+
+def test_compute_accelerations_acc_derivatives_target_indices_match_slice():
+    positions, masses = _sample_problem(n=56)
+    fmm = FastMultipoleMethod(
+        preset=FMMPreset.FAST,
+        basis="solidfmm",
+    )
+    target_indices = jnp.asarray([2, 8, 13, 21, 34], dtype=jnp.int32)
+    acc_full, deriv_full = fmm.compute_accelerations(
+        positions,
+        masses,
+        leaf_size=16,
+        max_order=3,
+        max_acc_derivative_order=1,
+    )
+    acc_sub, deriv_sub = fmm.compute_accelerations(
+        positions,
+        masses,
+        target_indices=target_indices,
+        leaf_size=16,
+        max_order=3,
+        max_acc_derivative_order=1,
+    )
+    np_idx = np.asarray(target_indices)
+    assert np.allclose(np.asarray(acc_sub), np.asarray(acc_full)[np_idx])
+    assert np.allclose(np.asarray(deriv_sub[0]), np.asarray(deriv_full[0])[np_idx])
+
+
+def test_compute_accelerations_and_jerk_target_indices_match_full_slice():
+    positions, masses = _sample_problem(n=52)
+    velocities = _sample_velocities(n=52)
+    fmm = FastMultipoleMethod(
+        preset=FMMPreset.FAST,
+        basis="solidfmm",
+    )
+    target_indices = jnp.asarray([1, 6, 14, 23, 37], dtype=jnp.int32)
+    acc_full, jerk_full = fmm.compute_accelerations_and_jerk(
+        positions,
+        masses,
+        velocities,
+        leaf_size=16,
+        max_order=3,
+    )
+    acc_sub, jerk_sub = fmm.compute_accelerations_and_jerk(
+        positions,
+        masses,
+        velocities,
+        target_indices=target_indices,
+        leaf_size=16,
+        max_order=3,
+    )
+    np_idx = np.asarray(target_indices)
+    assert np.allclose(np.asarray(acc_sub), np.asarray(acc_full)[np_idx])
+    assert np.allclose(np.asarray(jerk_sub), np.asarray(jerk_full)[np_idx])
+
+
+def test_compute_accelerations_and_jerk_matches_direct_sum_small_n():
+    n = 24
+    positions, masses = _sample_problem(n=n)
+    velocities = _sample_velocities(n=n)
+    fmm = FastMultipoleMethod(
+        preset=FMMPreset.ACCURATE,
+        basis="solidfmm",
+    )
+    acc_fmm, jerk_fmm = fmm.compute_accelerations_and_jerk(
+        positions,
+        masses,
+        velocities,
+        leaf_size=12,
+        max_order=4,
+        theta=1e-4,
+    )
+    jerk_ref = _direct_sum_jerk(
+        positions,
+        masses,
+        velocities,
+        G=1.0,
+        softening=1e-3,
+    )
+    rel = np.linalg.norm(np.asarray(jerk_fmm - jerk_ref)) / (
+        np.linalg.norm(np.asarray(jerk_ref)) + 1e-12
+    )
+    assert acc_fmm.shape == positions.shape
+    assert jerk_fmm.shape == positions.shape
+    assert rel < 5e-2
+
+
+def test_compute_accelerations_and_jerk_accurate_mode_matches_direct_sum_tighter():
+    n = 20
+    positions, masses = _sample_problem(n=n)
+    velocities = _sample_velocities(n=n)
+    fmm = FastMultipoleMethod(
+        preset=FMMPreset.ACCURATE,
+        basis="solidfmm",
+    )
+    _, jerk_acc = fmm.compute_accelerations_and_jerk(
+        positions,
+        masses,
+        velocities,
+        leaf_size=10,
+        max_order=4,
+        theta=1e-4,
+        jerk_mode="accurate",
+        jerk_fd_dt=1e-3,
+    )
+    jerk_ref = _direct_sum_jerk(
+        positions,
+        masses,
+        velocities,
+        G=1.0,
+        softening=1e-3,
+    )
+    err_acc = np.linalg.norm(np.asarray(jerk_acc - jerk_ref)) / (
+        np.linalg.norm(np.asarray(jerk_ref)) + 1e-12
+    )
+    assert err_acc < 2e-3
+
+
+def test_compute_accelerations_and_jerk_accurate_mode_reuses_prepared_topology(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    positions, masses = _sample_problem(n=20)
+    velocities = _sample_velocities(n=20)
+    fmm = FastMultipoleMethod(
+        preset=FMMPreset.ACCURATE,
+        basis="solidfmm",
+    )
+
+    def _forbidden(*args, **kwargs):
+        raise AssertionError(
+            "accurate jerk mode should reuse prepared topology and avoid full rebuild solves"
+        )
+
+    monkeypatch.setattr(fmm._impl, "compute_accelerations", _forbidden)
+    acc, jerk = fmm.compute_accelerations_and_jerk(
+        positions,
+        masses,
+        velocities,
+        leaf_size=10,
+        max_order=4,
+        theta=1e-4,
+        jerk_mode="accurate",
+        jerk_fd_dt=1e-3,
+    )
+
+    assert acc.shape == positions.shape
+    assert jerk.shape == positions.shape
+
+
+def test_compute_accelerations_and_jerk_accurate_solidfmm_uses_analytic_path(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    positions, masses = _sample_problem(n=20)
+    velocities = _sample_velocities(n=20)
+    fmm = FastMultipoleMethod(
+        preset=FMMPreset.ACCURATE,
+        basis="solidfmm",
+    )
+
+    def _forbidden(*args, **kwargs):
+        raise AssertionError(
+            "solidfmm accurate jerk should not use finite-difference fallback evaluations"
+        )
+
+    monkeypatch.setattr(
+        fmm._impl,
+        "_evaluate_prepared_state_at_positions_sorted",
+        _forbidden,
+    )
+    acc, jerk = fmm.compute_accelerations_and_jerk(
+        positions,
+        masses,
+        velocities,
+        leaf_size=10,
+        max_order=4,
+        theta=1e-4,
+        jerk_mode="accurate",
+        jerk_fd_dt=1e-3,
+    )
+
+    assert acc.shape == positions.shape
+    assert jerk.shape == positions.shape
+
+
+def test_compute_accelerations_and_jerk_accurate_cartesian_uses_fd_fallback(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    positions, masses = _sample_problem(n=18)
+    velocities = _sample_velocities(n=18)
+    fmm = FastMultipoleMethod(expansion_basis="cartesian")
+
+    def _forbidden(*args, **kwargs):
+        raise AssertionError(
+            "non-solidfmm accurate jerk should use finite-difference fallback"
+        )
+
+    monkeypatch.setattr(
+        fmm._impl,
+        "_evaluate_source_motion_farfield_jerk",
+        _forbidden,
+    )
+    acc, jerk = fmm.compute_accelerations_and_jerk(
+        positions,
+        masses,
+        velocities,
+        leaf_size=8,
+        max_order=3,
+        jerk_mode="accurate",
+        jerk_fd_dt=1e-3,
+    )
+
+    assert acc.shape == positions.shape
+    assert jerk.shape == positions.shape
+
+
+def test_compute_accelerations_and_jerk_invalid_mode_raises():
+    positions, masses = _sample_problem(n=16)
+    velocities = _sample_velocities(n=16)
+    fmm = FastMultipoleMethod(
+        preset=FMMPreset.FAST,
+        basis="solidfmm",
+    )
+    with pytest.raises(ValueError, match="jerk_mode"):
+        _ = fmm.compute_accelerations_and_jerk(
+            positions,
+            masses,
+            velocities,
+            jerk_mode="nope",
+        )
+
+
+def test_compute_accelerations_with_time_derivatives_k2_matches_direct_sum():
+    n = 18
+    positions, masses = _sample_problem(n=n)
+    velocities = _sample_velocities(n=n)
+    fmm = FastMultipoleMethod(
+        preset=FMMPreset.ACCURATE,
+        basis="solidfmm",
+    )
+    acc, derivs = fmm.compute_accelerations_with_time_derivatives(
+        positions,
+        masses,
+        velocities,
+        leaf_size=10,
+        max_order=4,
+        theta=1e-4,
+        max_time_derivative_order=2,
+        mode="accurate",
+    )
+    assert acc.shape == positions.shape
+    assert len(derivs) == 2
+    jerk_ref = _direct_sum_jerk(
+        positions,
+        masses,
+        velocities,
+        G=1.0,
+        softening=1e-3,
+    )
+    snap_ref = _direct_sum_snap(
+        positions,
+        masses,
+        velocities,
+        G=1.0,
+        softening=1e-3,
+    )
+    err_jerk = np.linalg.norm(np.asarray(derivs[0] - jerk_ref)) / (
+        np.linalg.norm(np.asarray(jerk_ref)) + 1e-12
+    )
+    err_snap = np.linalg.norm(np.asarray(derivs[1] - snap_ref)) / (
+        np.linalg.norm(np.asarray(snap_ref)) + 1e-12
+    )
+    assert err_jerk < 5e-3
+    assert err_snap < 2e-2
+
+
+def test_compute_accelerations_with_time_derivatives_k3_matches_direct_sum():
+    n = 16
+    positions, masses = _sample_problem(n=n)
+    velocities = _sample_velocities(n=n)
+    fmm = FastMultipoleMethod(
+        preset=FMMPreset.ACCURATE,
+        basis="solidfmm",
+    )
+    acc, derivs = fmm.compute_accelerations_with_time_derivatives(
+        positions,
+        masses,
+        velocities,
+        leaf_size=8,
+        max_order=4,
+        theta=1e-4,
+        max_time_derivative_order=3,
+        mode="accurate",
+    )
+    assert acc.shape == positions.shape
+    assert len(derivs) == 3
+    jerk_ref = _direct_sum_jerk(
+        positions,
+        masses,
+        velocities,
+        G=1.0,
+        softening=1e-3,
+    )
+    snap_ref = _direct_sum_snap(
+        positions,
+        masses,
+        velocities,
+        G=1.0,
+        softening=1e-3,
+    )
+    crackle_ref = _direct_sum_crackle(
+        positions,
+        masses,
+        velocities,
+        G=1.0,
+        softening=1e-3,
+    )
+    err_jerk = np.linalg.norm(np.asarray(derivs[0] - jerk_ref)) / (
+        np.linalg.norm(np.asarray(jerk_ref)) + 1e-12
+    )
+    err_snap = np.linalg.norm(np.asarray(derivs[1] - snap_ref)) / (
+        np.linalg.norm(np.asarray(snap_ref)) + 1e-12
+    )
+    err_crackle = np.linalg.norm(np.asarray(derivs[2] - crackle_ref)) / (
+        np.linalg.norm(np.asarray(crackle_ref)) + 1e-12
+    )
+    assert err_jerk < 5e-3
+    assert err_snap < 3e-2
+    assert err_crackle < 6e-2
 
 
 def test_jitted_compute_does_not_leak_tracers_into_solver_caches():

@@ -34,7 +34,8 @@ class NodeMultipoleData(NamedTuple):
     centers: Array
     moments: TreeMultipoleMoments
     packed: Array
-    component_matrix: Optional[Array]
+    component_matrix: Array
+    source_motion_packed: Optional[Array] = None
 
 
 @partial(jax.jit, static_argnames=("order", "num_internal"))
@@ -153,7 +154,8 @@ def compute_node_multipoles(
         centers=moments.center,
         moments=moments,
         packed=packed,
-        component_matrix=None,
+        component_matrix=component_matrix,
+        source_motion_packed=None,
     )
 
 
@@ -259,7 +261,8 @@ def prepare_upward_sweep(
         centers=centers,
         moments=aggregated,
         packed=packed,
-        component_matrix=None,
+        component_matrix=component_matrix,
+        source_motion_packed=None,
     )
 
     return TreeUpwardData(

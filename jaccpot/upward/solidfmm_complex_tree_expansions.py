@@ -27,6 +27,7 @@ from jaccpot.operators.complex_ops import (
     enforce_conjugate_symmetry,
     enforce_conjugate_symmetry_batch,
     m2m_complex,
+    regular_solid_harmonic_directional_derivative_order_batch,
 )
 from jaccpot.operators.real_harmonics import sh_size
 
@@ -37,6 +38,7 @@ class SolidFMMComplexNodeMultipoleData(NamedTuple):
     order: int
     centers: Array  # (num_nodes, 3)
     packed: Array  # (num_nodes, (p+1)^2)
+    source_motion_packed: Optional[Array]  # (num_nodes, (p+1)^2) or None
 
 
 class SolidFMMComplexTreeUpwardData(NamedTuple):
@@ -219,13 +221,87 @@ def _p2m_leaves_complex(
     jax.jit,
     static_argnames=(
         "order",
+        "time_derivative_order",
+        "max_leaf_size",
         "num_internal",
-        "num_levels",
-        "level_batch_width",
-        "rotation",
+        "total_nodes",
     ),
 )
-def _aggregate_m2m_complex_by_level(
+def _p2m_leaves_complex_source_motion(
+    node_ranges: Array,
+    positions_sorted: Array,
+    masses_sorted: Array,
+    velocities_sorted: Array,
+    centers: Array,
+    *,
+    order: int,
+    time_derivative_order: int,
+    max_leaf_size: int,
+    num_internal: int,
+    total_nodes: int,
+) -> Array:
+    """Leaf source-motion P2M: d/dt[m * R(delta)] for fixed expansion centers."""
+
+    p = int(order)
+    if p < 0:
+        raise ValueError("order must be >= 0")
+    td_order = int(time_derivative_order)
+    if td_order <= 0:
+        raise ValueError("time_derivative_order must be positive")
+
+    num_internal = int(num_internal)
+    total_nodes = int(total_nodes)
+    coeffs = sh_size(p)
+
+    dtype = complex_dtype_for_real(
+        jnp.result_type(
+            positions_sorted.dtype,
+            masses_sorted.dtype,
+            velocities_sorted.dtype,
+        )
+    )
+    packed = jnp.zeros((total_nodes, coeffs), dtype=dtype)
+
+    leaf_nodes = jnp.arange(num_internal, total_nodes, dtype=INDEX_DTYPE)
+    if leaf_nodes.size == 0:
+        return packed
+
+    ranges = jnp.asarray(node_ranges, dtype=INDEX_DTYPE)[leaf_nodes]
+    starts = ranges[:, 0]
+    ends_inclusive = ranges[:, 1]
+    counts = ends_inclusive - starts + 1
+
+    idx = jnp.arange(int(max_leaf_size), dtype=INDEX_DTYPE)
+    particle_idx = starts[:, None] + idx[None, :]
+    valid = idx[None, :] < counts[:, None]
+    safe_idx = jnp.clip(particle_idx, 0, positions_sorted.shape[0] - 1)
+
+    pos = positions_sorted[safe_idx]
+    pos = jnp.where(valid[..., None], pos, 0.0)
+    masses = masses_sorted[safe_idx]
+    masses = jnp.where(valid, masses, 0.0)
+    vel = velocities_sorted[safe_idx]
+    vel = jnp.where(valid[..., None], vel, 0.0)
+
+    delta = pos - centers[leaf_nodes][:, None, :]
+    part_deriv = regular_solid_harmonic_directional_derivative_order_batch(
+        delta.reshape((-1, 3)),
+        vel.reshape((-1, 3)),
+        order=p,
+        derivative_order=td_order,
+    )
+    part_deriv = part_deriv.reshape((delta.shape[0], delta.shape[1], coeffs))
+    part_deriv = part_deriv.astype(packed.dtype)
+    part_deriv = jnp.where(valid[..., None], part_deriv, 0)
+
+    leaf_coeffs = jnp.sum(masses[..., None] * part_deriv, axis=1)
+    leaf_coeffs = enforce_conjugate_symmetry_batch(leaf_coeffs, order=p)
+    packed = packed.at[leaf_nodes].set(leaf_coeffs)
+    return packed
+
+
+@partial(jax.jit, static_argnames=("order", "num_internal", "rotation"))
+def _aggregate_m2m_complex(
     packed: Array,
     centers: Array,
     left_child: Array,
@@ -308,6 +384,7 @@ def prepare_solidfmm_complex_upward_sweep(
     positions_sorted: Array,
     masses_sorted: Array,
     *,
+    velocities_sorted: Optional[Array] = None,
     max_order: int = 2,
     center_mode: str = "com",
     explicit_centers: Optional[Array] = None,
@@ -434,14 +511,93 @@ def prepare_solidfmm_complex_upward_sweep(
     )
     _upward_diag("m2m done")
 
+    source_motion_packed: Optional[Array] = None
+    if velocities_sorted is not None:
+        source_motion_packed = prepare_solidfmm_complex_source_motion_multipoles(
+            tree,
+            positions_sorted,
+            masses_sorted,
+            velocities_sorted,
+            max_order=p,
+            centers=centers,
+            max_leaf_size=int(max_leaf_size),
+            rotation=rotation,
+        )
+
     multipoles = SolidFMMComplexNodeMultipoleData(
         order=p,
         centers=centers,
         packed=packed,
+        source_motion_packed=source_motion_packed,
     )
 
     return SolidFMMComplexTreeUpwardData(
         geometry=geometry,
         mass_moments=mass_moments,
         multipoles=multipoles,
+    )
+
+
+@jaxtyped(typechecker=beartype)
+def prepare_solidfmm_complex_source_motion_multipoles(
+    tree: Tree,
+    positions_sorted: Array,
+    masses_sorted: Array,
+    velocities_sorted: Array,
+    *,
+    max_order: int,
+    centers: Array,
+    time_derivative_order: int = 1,
+    max_leaf_size: Optional[int] = None,
+    rotation: str = "cached",
+) -> Array:
+    """Compute packed source-motion multipoles for fixed expansion centers."""
+
+    p = int(max_order)
+    if p < 0:
+        raise ValueError("max_order must be >= 0")
+    td_order = int(time_derivative_order)
+    if td_order <= 0:
+        raise ValueError("time_derivative_order must be positive")
+    centers_arr = jnp.asarray(centers, dtype=positions_sorted.dtype)
+    if centers_arr.shape != (int(tree.parent.shape[0]), 3):
+        raise ValueError("centers must have shape (num_nodes, 3)")
+    vel_sorted_arr = jnp.asarray(velocities_sorted, dtype=positions_sorted.dtype)
+    if vel_sorted_arr.shape != positions_sorted.shape:
+        raise ValueError(
+            "velocities_sorted must have shape "
+            f"{tuple(positions_sorted.shape)}, got {tuple(vel_sorted_arr.shape)}"
+        )
+
+    if max_leaf_size is None:
+        num_internal = int(tree.num_internal_nodes)
+        leaf_ranges = jax.device_get(tree.node_ranges)[num_internal:]
+        if leaf_ranges.shape[0] == 0:
+            max_leaf_size = 0
+        else:
+            counts = leaf_ranges[:, 1] - leaf_ranges[:, 0] + 1
+            max_leaf_size = int(jnp.max(counts))
+
+    num_internal = int(tree.num_internal_nodes)
+    total_nodes = int(tree.parent.shape[0])
+    source_motion_packed_leaf = _p2m_leaves_complex_source_motion(
+        jnp.asarray(tree.node_ranges, dtype=INDEX_DTYPE),
+        positions_sorted,
+        masses_sorted,
+        vel_sorted_arr,
+        centers_arr,
+        order=p,
+        time_derivative_order=td_order,
+        max_leaf_size=int(max_leaf_size),
+        num_internal=num_internal,
+        total_nodes=total_nodes,
+    )
+    return _aggregate_m2m_complex(
+        source_motion_packed_leaf,
+        centers_arr,
+        jnp.asarray(tree.left_child, dtype=INDEX_DTYPE),
+        jnp.asarray(tree.right_child, dtype=INDEX_DTYPE),
+        order=p,
+        num_internal=num_internal,
+        rotation=rotation,
     )

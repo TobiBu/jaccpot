@@ -1,146 +1,194 @@
-"""Benchmark target-subset eval and adaptive-order prepare_state latency."""
+"""Benchmark acceleration and time-derivative execution paths.
+
+This script focuses on relative runtime behavior between:
+- acceleration-only evaluation,
+- jerk in `fast_approx` mode,
+- jerk in `accurate` mode.
+- higher-order accurate time derivatives (`k=2`, `k=3`).
+"""
 
 from __future__ import annotations
 
 import argparse
-import os
-import pathlib
-import sys
+import json
+from pathlib import Path
+from typing import Any
 
-REPO_ROOT = pathlib.Path(__file__).resolve().parents[1]
-if str(REPO_ROOT) not in sys.path:
-    sys.path.insert(0, str(REPO_ROOT))
+import jax
+import jax.numpy as jnp
 
-
-def _parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--n", type=int, default=12000, help="Number of particles")
-    parser.add_argument("--p", type=int, default=4, help="Multipole order")
-    parser.add_argument("--leaf-size", type=int, default=16, help="Leaf size")
-    parser.add_argument("--theta", type=float, default=0.6, help="MAC opening angle")
-    parser.add_argument(
-        "--target-frac",
-        type=float,
-        default=0.10,
-        help="Fraction of particles used in target-subset evaluation",
-    )
-    parser.add_argument(
-        "--p-gears",
-        type=str,
-        default="2,3,4",
-        help="Comma-separated adaptive orders for prepare_state benchmark",
-    )
-    parser.add_argument("--device", choices=("cpu", "gpu", "tpu"), default=None)
-    parser.add_argument("--dtype", choices=("float32", "float64"), default="float32")
-    parser.add_argument("--warmup", type=int, default=1)
-    parser.add_argument("--runs", type=int, default=4)
-    return parser.parse_args()
+from examples.benchmark_utils import time_callable
+from jaccpot import FastMultipoleMethod
 
 
-ARGS = _parse_args()
-if ARGS.device:
-    os.environ["JAX_PLATFORM_NAME"] = ARGS.device
-
-try:
-    import jax
-    import jax.numpy as jnp
-
-    from examples.benchmark_utils import time_callable
-    from jaccpot import FastMultipoleMethod
-except ModuleNotFoundError as exc:
-    raise SystemExit(
-        "Missing runtime dependency. Install jaccpot deps (notably yggdrax) "
-        f"before running this benchmark. Original error: {exc}"
-    ) from exc
-
-
-def _parse_gears(gears: str) -> tuple[int, ...]:
-    parsed = tuple(int(v.strip()) for v in gears.split(",") if v.strip())
-    if len(parsed) == 0:
-        raise ValueError("p_gears cannot be empty")
-    return parsed
-
-
-def main() -> None:
-    if ARGS.dtype == "float64" and not jax.config.jax_enable_x64:
-        raise SystemExit("float64 requested, but JAX x64 is disabled")
-
-    dtype = jnp.float64 if ARGS.dtype == "float64" else jnp.float32
-    key = jax.random.PRNGKey(0)
-    key_pos, key_mass, key_target = jax.random.split(key, 3)
-    n = int(ARGS.n)
-    num_targets = max(1, int(float(ARGS.target_frac) * n))
+def _sample_problem(
+    n: int,
+    *,
+    key: jax.Array,
+    dtype: jnp.dtype,
+) -> tuple[jax.Array, jax.Array, jax.Array]:
+    key_pos, key_mass, key_vel = jax.random.split(key, 3)
     positions = jax.random.uniform(
         key_pos,
         (n, 3),
+        minval=-1.0,
+        maxval=1.0,
         dtype=dtype,
-        minval=jnp.asarray(-1.0, dtype=dtype),
-        maxval=jnp.asarray(1.0, dtype=dtype),
     )
-    masses = jnp.abs(jax.random.normal(key_mass, (n,), dtype=dtype)) + jnp.asarray(
-        0.5, dtype=dtype
+    masses = jax.random.uniform(
+        key_mass,
+        (n,),
+        minval=0.5,
+        maxval=1.5,
+        dtype=dtype,
     )
-    target_indices = jax.random.choice(
-        key_target,
-        n,
-        shape=(num_targets,),
-        replace=False,
+    velocities = jax.random.uniform(
+        key_vel,
+        (n, 3),
+        minval=-0.2,
+        maxval=0.2,
+        dtype=dtype,
     )
-    p_gears = _parse_gears(str(ARGS.p_gears))
+    return positions, masses, velocities
 
-    base = FastMultipoleMethod(
-        preset="accurate",
-        basis="real",
-        theta=float(ARGS.theta),
-        softening=1.0e-3,
-    )
-    state = base.prepare_state(
+
+def collect_metrics(
+    *,
+    n: int,
+    runs: int,
+    warmup: int,
+    preset: str,
+    basis: str,
+    theta: float,
+    leaf_size: int,
+    max_order: int,
+    jerk_fd_dt: float,
+    seed: int,
+    dtype: jnp.dtype,
+) -> dict[str, Any]:
+    key = jax.random.PRNGKey(seed)
+    positions, masses, velocities = _sample_problem(n, key=key, dtype=dtype)
+    solver = FastMultipoleMethod(preset=preset, basis=basis, theta=float(theta))
+
+    acc_timing = time_callable(
+        solver.compute_accelerations,
         positions,
         masses,
-        leaf_size=int(ARGS.leaf_size),
-        max_order=int(ARGS.p),
+        leaf_size=leaf_size,
+        max_order=max_order,
+        warmup=warmup,
+        runs=runs,
     )
-    target_eval = time_callable(
-        base.evaluate_prepared_state,
-        state,
-        target_indices=target_indices,
-        return_potential=False,
-        warmup=int(ARGS.warmup),
-        runs=int(ARGS.runs),
-    )
-
-    adaptive = FastMultipoleMethod(
-        preset="accurate",
-        basis="real",
-        theta=float(ARGS.theta),
-        softening=1.0e-3,
-        adaptive_order=True,
-        p_gears=p_gears,
-        mac_force_scale_mode="prev",
-        adaptive_error_model="tail_proxy",
-    )
-    adaptive_prepare = time_callable(
-        adaptive.prepare_state,
+    jerk_fast_timing = time_callable(
+        solver.compute_accelerations_and_jerk,
         positions,
         masses,
-        leaf_size=int(ARGS.leaf_size),
-        max_order=int(ARGS.p),
-        warmup=int(ARGS.warmup),
-        runs=int(ARGS.runs),
+        velocities,
+        leaf_size=leaf_size,
+        max_order=max_order,
+        jerk_mode="fast_approx",
+        jerk_fd_dt=jerk_fd_dt,
+        warmup=warmup,
+        runs=runs,
+    )
+    jerk_acc_timing = time_callable(
+        solver.compute_accelerations_and_jerk,
+        positions,
+        masses,
+        velocities,
+        leaf_size=leaf_size,
+        max_order=max_order,
+        jerk_mode="accurate",
+        jerk_fd_dt=jerk_fd_dt,
+        warmup=warmup,
+        runs=runs,
+    )
+    td2_acc_timing = time_callable(
+        solver.compute_accelerations_with_time_derivatives,
+        positions,
+        masses,
+        velocities,
+        leaf_size=leaf_size,
+        max_order=max_order,
+        max_time_derivative_order=2,
+        mode="accurate",
+        warmup=warmup,
+        runs=runs,
+    )
+    td3_acc_timing = time_callable(
+        solver.compute_accelerations_with_time_derivatives,
+        positions,
+        masses,
+        velocities,
+        leaf_size=leaf_size,
+        max_order=max_order,
+        max_time_derivative_order=3,
+        mode="accurate",
+        warmup=warmup,
+        runs=runs,
     )
 
-    print(
-        f"device={jax.devices()[0]} dtype={ARGS.dtype} n={n} p={ARGS.p} "
-        f"leaf_size={ARGS.leaf_size} theta={ARGS.theta:.3f} num_targets={num_targets}"
+    return {
+        "n": int(n),
+        "dtype": str(jnp.dtype(dtype)),
+        "preset": str(preset),
+        "basis": str(basis),
+        "theta": float(theta),
+        "leaf_size": int(leaf_size),
+        "max_order": int(max_order),
+        "warmup": int(warmup),
+        "runs": int(runs),
+        "acc_mean_seconds": float(acc_timing.mean),
+        "jerk_fast_mean_seconds": float(jerk_fast_timing.mean),
+        "jerk_accurate_mean_seconds": float(jerk_acc_timing.mean),
+        "time_deriv2_accurate_mean_seconds": float(td2_acc_timing.mean),
+        "time_deriv3_accurate_mean_seconds": float(td3_acc_timing.mean),
+        "jerk_fast_over_acc": float(jerk_fast_timing.mean / acc_timing.mean),
+        "jerk_accurate_over_fast": float(jerk_acc_timing.mean / jerk_fast_timing.mean),
+        "time_deriv2_accurate_over_jerk_accurate": float(
+            td2_acc_timing.mean / jerk_acc_timing.mean
+        ),
+        "time_deriv3_accurate_over_time_deriv2_accurate": float(
+            td3_acc_timing.mean / td2_acc_timing.mean
+        ),
+    }
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--n", type=int, default=512)
+    parser.add_argument("--runs", type=int, default=3)
+    parser.add_argument("--warmup", type=int, default=1)
+    parser.add_argument("--preset", type=str, default="fast")
+    parser.add_argument("--basis", type=str, default="solidfmm")
+    parser.add_argument("--theta", type=float, default=0.6)
+    parser.add_argument("--leaf-size", type=int, default=16)
+    parser.add_argument("--max-order", type=int, default=4)
+    parser.add_argument("--jerk-fd-dt", type=float, default=1e-3)
+    parser.add_argument("--seed", type=int, default=0)
+    parser.add_argument("--dtype", choices=("float32", "float64"), default="float32")
+    parser.add_argument("--json-out", type=Path, default=None)
+    args = parser.parse_args()
+
+    dtype = jnp.float64 if args.dtype == "float64" else jnp.float32
+    metrics = collect_metrics(
+        n=int(args.n),
+        runs=int(args.runs),
+        warmup=int(args.warmup),
+        preset=str(args.preset),
+        basis=str(args.basis),
+        theta=float(args.theta),
+        leaf_size=int(args.leaf_size),
+        max_order=int(args.max_order),
+        jerk_fd_dt=float(args.jerk_fd_dt),
+        seed=int(args.seed),
+        dtype=dtype,
     )
-    print(
-        "timings_s "
-        f"target_eval_mean={target_eval.mean:.6f} "
-        f"target_eval_std={target_eval.std:.6f} "
-        f"adaptive_prepare_mean={adaptive_prepare.mean:.6f} "
-        f"adaptive_prepare_std={adaptive_prepare.std:.6f}"
-    )
-    print("adaptive_p_gears " + ",".join(str(int(v)) for v in p_gears))
+
+    text = json.dumps(metrics, indent=2, sort_keys=True)
+    print(text)
+    if args.json_out is not None:
+        args.json_out.write_text(text + "\n", encoding="utf-8")
 
 
 if __name__ == "__main__":

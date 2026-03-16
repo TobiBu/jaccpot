@@ -17,6 +17,11 @@ from .real_harmonics import (
     sh_offset,
     sh_size,
 )
+from .symmetric_tensors import (
+    contract_symmetric_one_axis_3d,
+    symmetric_component_count,
+    symmetric_multi_indices_3d,
+)
 
 Array = jnp.ndarray
 
@@ -224,6 +229,300 @@ def evaluate_local_complex_with_grad_batch(
             conjugate_left=conjugate_left,
         )
     )(deltas)
+
+
+def _lower_complex_harmonics_one_axis(
+    coeffs: Array,
+    *,
+    order: int,
+    axis: int,
+) -> Array:
+    """Apply one Cartesian derivative to packed complex-harmonic coefficients.
+
+    If ``coeffs`` represents ``f_n^m`` over ``0 <= n <= order``, this returns
+    coefficients representing ``∂_{axis} f_n^m`` in the same packed layout.
+    """
+    p = int(order)
+    if axis not in (0, 1, 2):
+        raise ValueError("axis must be 0, 1, or 2")
+    coeffs = jnp.asarray(coeffs)[: sh_size(p)]
+    idx_a, idx_b, fac_a, fac_b = _lower_complex_harmonics_axis_maps(p, axis)
+    gathered_a = coeffs[jnp.asarray(idx_a, dtype=jnp.int32)]
+    gathered_b = coeffs[jnp.asarray(idx_b, dtype=jnp.int32)]
+    fac_a_arr = jnp.asarray(fac_a, dtype=coeffs.dtype)
+    fac_b_arr = jnp.asarray(fac_b, dtype=coeffs.dtype)
+    return fac_a_arr * gathered_a + fac_b_arr * gathered_b
+
+
+@lru_cache(maxsize=None)
+def _lower_complex_harmonics_axis_maps(
+    order: int,
+    axis: int,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """Precompute gather/scale maps for one Cartesian derivative axis."""
+    p = int(order)
+    ncoeff = sh_size(p)
+    idx_a = np.zeros((ncoeff,), dtype=np.int32)
+    idx_b = np.zeros((ncoeff,), dtype=np.int32)
+    fac_a = np.zeros((ncoeff,), dtype=np.complex128)
+    fac_b = np.zeros((ncoeff,), dtype=np.complex128)
+
+    def _src_index(n: int, m: int) -> tuple[int, bool]:
+        if n < 0 or abs(m) > n:
+            return 0, False
+        return sh_offset(n) + (m + n), True
+
+    for n in range(0, p + 1):
+        for m in range(-n, n + 1):
+            out_idx = sh_offset(n) + (m + n)
+            if n == 0:
+                continue
+            if axis == 0:
+                idx_a_val, valid_a = _src_index(n - 1, m - 1)
+                idx_b_val, valid_b = _src_index(n - 1, m + 1)
+                idx_a[out_idx] = idx_a_val
+                idx_b[out_idx] = idx_b_val
+                fac_a[out_idx] = 0.5 if valid_a else 0.0
+                fac_b[out_idx] = -0.5 if valid_b else 0.0
+            elif axis == 1:
+                idx_a_val, valid_a = _src_index(n - 1, m - 1)
+                idx_b_val, valid_b = _src_index(n - 1, m + 1)
+                idx_a[out_idx] = idx_a_val
+                idx_b[out_idx] = idx_b_val
+                fac_a[out_idx] = 0.5j if valid_a else 0.0
+                fac_b[out_idx] = 0.5j if valid_b else 0.0
+            else:
+                idx_a_val, valid_a = _src_index(n - 1, m)
+                idx_a[out_idx] = idx_a_val
+                idx_b[out_idx] = 0
+                fac_a[out_idx] = 1.0 if valid_a else 0.0
+                fac_b[out_idx] = 0.0
+
+    return idx_a, idx_b, fac_a, fac_b
+
+
+def _build_complex_harmonic_derivative_coefficients(
+    delta: Array,
+    *,
+    order: int,
+    max_derivative_order: int,
+) -> tuple[Array, ...]:
+    """Build packed coefficient vectors for ``D^k R`` (k=0..K)."""
+    p = int(order)
+    k_max = int(max_derivative_order)
+    if k_max < 0:
+        raise ValueError("max_derivative_order must be non-negative")
+
+    base = jnp.asarray(complex_R_solidfmm(delta, order=p))
+    levels: list[Array] = [base[jnp.newaxis, :]]
+    if k_max == 0:
+        return tuple(levels)
+
+    for deriv_order in range(1, k_max + 1):
+        combos = symmetric_multi_indices_3d(deriv_order)
+        prev_combos = symmetric_multi_indices_3d(deriv_order - 1)
+        prev = levels[-1]
+        prev_index = {combo: idx for idx, combo in enumerate(prev_combos)}
+        current = jnp.zeros(
+            (symmetric_component_count(deriv_order, dim=3), sh_size(p)),
+            dtype=base.dtype,
+        )
+        for idx, combo in enumerate(combos):
+            if combo[0] > 0:
+                parent = (combo[0] - 1, combo[1], combo[2])
+                axis = 0
+            elif combo[1] > 0:
+                parent = (combo[0], combo[1] - 1, combo[2])
+                axis = 1
+            else:
+                parent = (combo[0], combo[1], combo[2] - 1)
+                axis = 2
+            parent_coeff = prev[prev_index[parent]]
+            derived = _lower_complex_harmonics_one_axis(
+                parent_coeff,
+                order=p,
+                axis=axis,
+            )
+            current = current.at[idx].set(derived)
+        levels.append(current)
+
+    return tuple(levels)
+
+
+def evaluate_local_complex_derivative_tower(
+    local: Array,
+    delta: Array,
+    *,
+    order: int,
+    max_derivative_order: int,
+    conjugate_left: bool = True,
+) -> tuple[Array, ...]:
+    """Evaluate potential and packed spatial derivatives ``D0..DK``.
+
+    Notes
+    -----
+    This is an order-generic API scaffold for derivative towers. It uses
+    autodiff internally today; hot-path contraction kernels can replace the
+    internals without changing downstream code.
+    """
+    p = int(order)
+    k_max = int(max_derivative_order)
+    if k_max < 0:
+        raise ValueError("max_derivative_order must be non-negative")
+
+    local = jnp.asarray(local)[: sh_size(p)]
+    deriv_coeffs = _build_complex_harmonic_derivative_coefficients(
+        delta,
+        order=p,
+        max_derivative_order=k_max,
+    )
+    out: list[Array] = []
+    for deriv_order, coeff_level in enumerate(deriv_coeffs):
+        vals = jax.vmap(
+            lambda coeff: jnp.real(
+                complex_dot(local, coeff, order=p, conjugate_left=conjugate_left)
+            )
+        )(coeff_level)
+        if deriv_order == 0:
+            out.append(vals)
+        else:
+            out.append(vals[: symmetric_component_count(deriv_order, dim=3)])
+    return tuple(out)
+
+
+@partial(
+    jax.jit,
+    static_argnames=("order", "max_derivative_order", "conjugate_left"),
+)
+def evaluate_local_complex_derivative_tower_batch(
+    local: Array,
+    deltas: Array,
+    *,
+    order: int,
+    max_derivative_order: int,
+    conjugate_left: bool = True,
+) -> tuple[Array, ...]:
+    """Batch evaluate packed derivative towers for one local expansion."""
+    return jax.vmap(
+        lambda d: evaluate_local_complex_derivative_tower(
+            local,
+            d,
+            order=order,
+            max_derivative_order=max_derivative_order,
+            conjugate_left=conjugate_left,
+        )
+    )(deltas)
+
+
+@partial(jax.jit, static_argnames=("order",))
+def contract_spatial_derivative_with_velocity(
+    packed: Array,
+    velocity: Array,
+    *,
+    order: int,
+) -> Array:
+    """Contract packed order-``order`` spatial derivatives with velocity."""
+    return contract_symmetric_one_axis_3d(packed, velocity, order=order)
+
+
+@partial(jax.jit, static_argnames=("order",))
+def regular_solid_harmonic_gradient_coefficients(
+    delta: Array,
+    *,
+    order: int,
+) -> Array:
+    """Return packed ``(d/dx, d/dy, d/dz)`` coefficients of ``R_n^m(delta)``."""
+    p = int(order)
+    base = jnp.asarray(complex_R_solidfmm(delta, order=p))
+    grad_x = _lower_complex_harmonics_one_axis(base, order=p, axis=0)
+    grad_y = _lower_complex_harmonics_one_axis(base, order=p, axis=1)
+    grad_z = _lower_complex_harmonics_one_axis(base, order=p, axis=2)
+    return jnp.stack((grad_x, grad_y, grad_z), axis=0)
+
+
+@partial(jax.jit, static_argnames=("order",))
+def regular_solid_harmonic_directional_derivative(
+    delta: Array,
+    direction: Array,
+    *,
+    order: int,
+) -> Array:
+    """Directional derivative of packed regular harmonics along ``direction``."""
+    return regular_solid_harmonic_directional_derivative_order(
+        delta,
+        direction,
+        order=order,
+        derivative_order=1,
+    )
+
+
+@partial(jax.jit, static_argnames=("order", "derivative_order"))
+def regular_solid_harmonic_directional_derivative_order(
+    delta: Array,
+    direction: Array,
+    *,
+    order: int,
+    derivative_order: int,
+) -> Array:
+    """Order-``k`` directional derivative ``(v·∇)^k R`` in packed form."""
+    p = int(order)
+    k = int(derivative_order)
+    if k < 0:
+        raise ValueError("derivative_order must be non-negative")
+    if k == 0:
+        return jnp.asarray(complex_R_solidfmm(delta, order=p))
+
+    base = jnp.asarray(complex_R_solidfmm(delta, order=p))
+    direction_arr = jnp.asarray(direction, dtype=jnp.real(base).dtype)
+
+    def body(_i: int, coeffs: Array) -> Array:
+        dx = _lower_complex_harmonics_one_axis(coeffs, order=p, axis=0)
+        dy = _lower_complex_harmonics_one_axis(coeffs, order=p, axis=1)
+        dz = _lower_complex_harmonics_one_axis(coeffs, order=p, axis=2)
+        return direction_arr[0] * dx + direction_arr[1] * dy + direction_arr[2] * dz
+
+    return jax.lax.fori_loop(0, k, body, base)
+
+
+@partial(jax.jit, static_argnames=("order",))
+def regular_solid_harmonic_directional_derivative_batch(
+    deltas: Array,
+    directions: Array,
+    *,
+    order: int,
+) -> Array:
+    """Batch directional derivatives of packed regular harmonics."""
+    return jax.vmap(
+        lambda d, v: regular_solid_harmonic_directional_derivative_order(
+            d,
+            v,
+            order=order,
+            derivative_order=1,
+        ),
+        in_axes=(0, 0),
+        out_axes=0,
+    )(deltas, directions)
+
+
+@partial(jax.jit, static_argnames=("order", "derivative_order"))
+def regular_solid_harmonic_directional_derivative_order_batch(
+    deltas: Array,
+    directions: Array,
+    *,
+    order: int,
+    derivative_order: int,
+) -> Array:
+    """Batch order-``k`` directional derivatives of packed regular harmonics."""
+    return jax.vmap(
+        lambda d, v: regular_solid_harmonic_directional_derivative_order(
+            d,
+            v,
+            order=order,
+            derivative_order=derivative_order,
+        ),
+        in_axes=(0, 0),
+        out_axes=0,
+    )(deltas, directions)
 
 
 def translate_along_z_m2l_complex(
