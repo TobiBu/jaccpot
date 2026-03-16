@@ -945,7 +945,9 @@ def test_octree_reuse_prepared_state_uses_cache_without_topology_reuse(monkeypat
 
     assert fmm._impl._prepared_state_cache_value is cached_state
     assert fmm.recent_topology_reused is False
-    assert np.allclose(np.asarray(acc_second), np.asarray(acc_first), rtol=1e-5, atol=1e-5)
+    assert np.allclose(
+        np.asarray(acc_second), np.asarray(acc_first), rtol=1e-5, atol=1e-5
+    )
 
 
 def test_octree_clear_runtime_caches_resets_prepared_state_cache():

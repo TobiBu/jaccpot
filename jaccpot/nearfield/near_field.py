@@ -188,7 +188,10 @@ def _prepare_leaf_data_from_groups(
     leaf_particle_indices = jnp.asarray(leaf_particle_indices, dtype=INDEX_DTYPE)
     leaf_particle_mask = jnp.asarray(leaf_particle_mask, dtype=bool)
     if leaf_particle_indices.size == 0:
-        empty_pos = jnp.zeros((leaf_particle_indices.shape[0], 0, positions.shape[-1]), dtype=positions.dtype)
+        empty_pos = jnp.zeros(
+            (leaf_particle_indices.shape[0], 0, positions.shape[-1]),
+            dtype=positions.dtype,
+        )
         empty_mass = jnp.zeros((leaf_particle_indices.shape[0], 0), dtype=masses.dtype)
         return empty_pos, empty_mass, leaf_particle_mask, leaf_particle_indices
 
@@ -1162,9 +1165,11 @@ def _compute_leaf_p2p_from_prepared_leaf_data_impl(
                             src_pos = leaf_positions[src_leaf_local]
                             src_mass = leaf_masses[src_leaf_local]
                             src_mask = leaf_mask[src_leaf_local] & valid_edge[:, None]
-                            sort_idx, group_ids, unique_indices = _build_scatter_schedule(
-                                tgt_ids,
-                                tgt_mask,
+                            sort_idx, group_ids, unique_indices = (
+                                _build_scatter_schedule(
+                                    tgt_ids,
+                                    tgt_mask,
+                                )
                             )
 
                             pair_acc, pair_pot = _pair_contributions_batched(
@@ -1291,9 +1296,11 @@ def _compute_leaf_p2p_from_prepared_leaf_data_impl(
                             src_pos = leaf_positions[src_leaf_local]
                             src_mass = leaf_masses[src_leaf_local]
                             src_mask = leaf_mask[src_leaf_local] & valid_edge[:, None]
-                            sort_idx, group_ids, unique_indices = _build_scatter_schedule(
-                                tgt_ids,
-                                tgt_mask,
+                            sort_idx, group_ids, unique_indices = (
+                                _build_scatter_schedule(
+                                    tgt_ids,
+                                    tgt_mask,
+                                )
                             )
 
                             pair_acc, _ = _pair_contributions_batched(

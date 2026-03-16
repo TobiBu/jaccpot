@@ -279,11 +279,15 @@ def test_octree_native_far_pairs_feed_downward_plan():
         np.asarray(native_plan.num_pairs)
     )
     np.testing.assert_array_equal(
-        np.asarray(state.octree_downward.target_nodes)[: int(np.asarray(native_plan.num_pairs))],
+        np.asarray(state.octree_downward.target_nodes)[
+            : int(np.asarray(native_plan.num_pairs))
+        ],
         np.asarray(native_plan.target_nodes)[: int(np.asarray(native_plan.num_pairs))],
     )
     np.testing.assert_array_equal(
-        np.asarray(state.octree_downward.source_nodes)[: int(np.asarray(native_plan.num_pairs))],
+        np.asarray(state.octree_downward.source_nodes)[
+            : int(np.asarray(native_plan.num_pairs))
+        ],
         np.asarray(native_plan.source_nodes)[: int(np.asarray(native_plan.num_pairs))],
     )
 
