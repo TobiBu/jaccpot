@@ -100,6 +100,9 @@ crackle are not yet available.
 There is also a worked example notebook for jerk, snap, and crackle:
 [`examples/time_derivatives_demo.ipynb`](/Users/buck/Documents/Nexus/Projects/jaccpot/examples/time_derivatives_demo.ipynb).
 
+For a small-`N` direct-sum accuracy check of jerk, snap, and crackle, see:
+[`examples/time_derivatives_accuracy_demo.ipynb`](/Users/buck/Documents/Nexus/Projects/jaccpot/examples/time_derivatives_accuracy_demo.ipynb).
+
 ### Jerk Mode Guide
 
 | Goal | Mode | Notes |
