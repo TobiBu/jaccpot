@@ -1,66 +1,60 @@
-# Octree FMM Task List
+# Octree FMM Status
 
-This plan tracks the work needed to add an octree-native FMM path beside the
-existing radix-based execution path.
+This note summarizes the current octree-native FMM status in `jaccpot` and the
+remaining work items that still deserve attention.
 
-## Principles
+## Current State
 
-- Keep the current radix FMM path intact.
-- Add an octree FMM backend next to radix, not as a rewrite.
-- Share only topology-agnostic code.
-- Fail fast when users request an octree execution backend that has not yet
-  been implemented.
+The octree backend now exists as a real execution path beside the radix
+backend.
 
-## Milestones
+Implemented and validated:
 
-### 1. Backend Split
+- explicit `execution_backend` support with `auto|radix|octree`
+- octree-native prepared-state metadata attached to solver state
+- octree-native upward/downward scaffolding in explicit octree node space
+- native octree far-pair consumption from `yggdrax`
+- native octree near-neighbor interop for prepared-state and target-subset
+  evaluation
+- prepared-state evaluation for:
+  - full outputs
+  - target subsets
+  - potentials
+  - JIT/eager traversal
+  - prepared-state cache reuse
+- non-default runtime coverage for:
+  - baseline nearfield mode
+  - class-major farfield mode with grouped interactions
 
-- Add explicit `execution_backend` config with `auto|radix|octree`.
-- Preserve current behavior under `auto`.
-- Make explicit `octree` backend requests fail fast until the backend exists.
-- Store the resolved execution backend in prepared state.
+Current practical scope:
+
+- the explicit octree backend is validated for `basis="solidfmm"`
+- radix remains the default execution path unless octree execution is requested
+- topology reuse remains radix-only by design
+
+## Remaining Work
+
+### 1. Broaden config coverage
+
+- add more octree coverage for non-default MAC and runtime combinations
+- add explicit guardrail tests for unsupported basis/backend combinations
+- add more coverage for large-memory and minimum-memory runtime settings
 
 Status: in progress
 
-### 2. Octree-Native Prepared-State Scaffolding
+### 2. Benchmarking and reporting
 
-- Add octree-native execution containers for upward/downward/interactions.
-- Define octree node-space indexing rules.
-- Keep radix<->octree mapping arrays as bridge data only.
-
-Status: pending
-
-### 3. Octree Upward Sweep
-
-- Implement octree-native P2M using `oct_leaf_nodes`.
-- Implement octree-native M2M using `oct_children` and `oct_level_offsets`.
-- Add parity tests against the current radix execution path.
+- compare radix vs octree prepare/evaluate throughput on representative CPU/GPU
+  workloads
+- document preferred validation hardware and known device-sensitive behavior
+- add a stable octree benchmark/example workflow
 
 Status: pending
 
-### 4. Octree Interaction Scheduling
+### 3. User-facing polish
 
-- Build or remap far-field interaction lists into octree node space.
-- Add octree-native scheduling buffers for levelwise M2L.
+- keep README/examples aligned with the supported octree workflow
+- expand example coverage beyond the prepare/evaluate comparison script
+- document recommended solver settings for octree validation runs
 
-Status: pending
-
-### 5. Octree Downward Sweep
-
-- Implement octree-native M2L.
-- Implement octree-native L2L.
-- Evaluate locals on octree leaf nodes.
-
-Status: pending
-
-### 6. Benchmark and Compare
-
-- Compare radix vs octree for:
-  - prepare_state time
-  - upward sweep
-  - interaction scheduling
-  - downward sweep
-  - total runtime
-- Compare correctness across accelerations and potentials.
-
-Status: pending
+Status: in progress
