@@ -377,9 +377,11 @@ def prepare_solidfmm_complex_upward_sweep(
     if num_levels <= 0:
         num_levels = 1
     # Keep batching shape-derived so this path remains JIT-safe under traced tree
-    # builds. A tighter per-level bound can still be recovered later from octree
-    # metadata if we want to specialize scheduling further.
-    level_batch_width = max(num_internal, 1)
+    # builds, but use a tighter per-level bound to avoid inflating static shapes
+    # with the total number of internal nodes.
+    level_sizes = level_offsets[1:] - level_offsets[:-1]
+    max_level_nodes = int(jnp.max(level_sizes)) if level_sizes.size > 0 else 0
+    level_batch_width = max(max_level_nodes, 1)
     resolved_leaf_batch_size = (
         min(num_leaves, _DEFAULT_LEAF_BATCH_SIZE)
         if leaf_batch_size is None
