@@ -25,7 +25,7 @@ Current support:
 - enabled for `basis="solidfmm"`
 - requesting derivatives with `basis="cartesian"` raises `NotImplementedError`
 
-## Jerk APIs
+## Time-Derivative APIs
 
 Use:
 
@@ -34,10 +34,24 @@ Use:
 - `FastMultipoleMethod.compute_accelerations_with_time_derivatives(...)`
 - `FastMultipoleMethod.evaluate_prepared_state_with_time_derivatives(...)`
 
-Both return:
+`compute_accelerations_and_jerk(...)` returns:
 
 - `accelerations`: shape `(N, 3)` (or subset shape when `target_indices` used)
 - `jerk`: same shape as acceleration
+
+`compute_accelerations_with_time_derivatives(...)` and
+`evaluate_prepared_state_with_time_derivatives(...)` return:
+
+- `accelerations`: shape `(N, 3)` (or subset shape when `target_indices` used)
+- `time_derivatives`: tuple ordered as `(jerk, snap, crackle, ...)`
+
+For the currently supported public orders:
+
+- `time_derivatives[0]`: jerk, shape `(N, 3)`
+- `time_derivatives[1]`: snap, shape `(N, 3)` when
+  `max_time_derivative_order >= 2`
+- `time_derivatives[2]`: crackle, shape `(N, 3)` when
+  `max_time_derivative_order >= 3`
 
 ## Jerk Modes
 
@@ -63,7 +77,7 @@ Both return:
 - Public time-derivative runtime support currently covers:
   - order 1: jerk
   - order 2: snap
-- order 3: crackle
+  - order 3: crackle
 - Orders above 3 are not implemented yet.
 - Higher-order source-motion multipole kernels are implemented internally and
   feed the runtime assembler.
@@ -91,3 +105,10 @@ General recommendation:
   - `python -m bench.bench_parallel_paths ...`
   - `python -m bench.ci_benchmark_guard ...`
   to compare path costs on your hardware.
+
+## Example Notebook
+
+See
+[`examples/time_derivatives_demo.ipynb`](/Users/buck/Documents/Nexus/Projects/jaccpot/examples/time_derivatives_demo.ipynb)
+for a worked example that computes and inspects jerk, snap, and crackle in the
+analytic `solidfmm` path.

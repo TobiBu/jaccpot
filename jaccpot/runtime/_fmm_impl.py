@@ -4745,8 +4745,17 @@ def _compute_targeted_nearfield(
     diff = target_positions[:, None, :] - src_pos
     dist_sq = jnp.sum(diff * diff, axis=-1) + softening_sq
     eps = jnp.finfo(positions_sorted.dtype).eps
-    inv_r = jnp.where(source_mask, 1.0 / (jnp.sqrt(dist_sq) + eps), 0.0)
-    inv_dist3 = jnp.where(source_mask, inv_r / dist_sq, 0.0)
+    one = jnp.asarray(1.0, dtype=dtype)
+    zero = jnp.asarray(0.0, dtype=dtype)
+    three = jnp.asarray(3.0, dtype=dtype)
+    six = jnp.asarray(6.0, dtype=dtype)
+    nine = jnp.asarray(9.0, dtype=dtype)
+    fifteen = jnp.asarray(15.0, dtype=dtype)
+    forty_five = jnp.asarray(45.0, dtype=dtype)
+    one_oh_five = jnp.asarray(105.0, dtype=dtype)
+
+    inv_r = jnp.where(source_mask, one / (jnp.sqrt(dist_sq) + eps), zero)
+    inv_dist3 = jnp.where(source_mask, inv_r / dist_sq, zero)
     weighted = inv_dist3 * src_mass
     near_acc = -g_const * jnp.sum(weighted[..., None] * diff, axis=1)
     near_jerk: Optional[Array]
@@ -4755,28 +4764,38 @@ def _compute_targeted_nearfield(
     if return_jerk:
         src_vel = velocities_sorted[source_indices]  # type: ignore[index]
         vel_diff = target_velocities[:, None, :] - src_vel  # type: ignore[index]
-        inv_dist5 = jnp.where(source_mask, inv_dist3 / dist_sq, 0.0)
+        inv_dist5 = jnp.where(source_mask, inv_dist3 / dist_sq, zero)
         rv = jnp.sum(diff * vel_diff, axis=-1)
         jerk_term = vel_diff * inv_dist3[..., None] - (
-            3.0 * rv[..., None] * diff * inv_dist5[..., None]
+            three * rv[..., None] * diff * inv_dist5[..., None]
         )
         near_jerk = -g_const * jnp.sum(src_mass[..., None] * jerk_term, axis=1)
         if return_snap:
-            inv_dist7 = jnp.where(source_mask, inv_dist5 / dist_sq, 0.0)
+            inv_dist7 = jnp.where(source_mask, inv_dist5 / dist_sq, zero)
             vv = jnp.sum(vel_diff * vel_diff, axis=-1)
             snap_term = (
-                6.0 * rv[..., None] * vel_diff * inv_dist5[..., None]
-                + 3.0 * vv[..., None] * diff * inv_dist5[..., None]
-                - 15.0 * (rv * rv)[..., None] * diff * inv_dist7[..., None]
+                six * rv[..., None] * vel_diff * inv_dist5[..., None]
+                + three * vv[..., None] * diff * inv_dist5[..., None]
+                - fifteen * (rv * rv)[..., None] * diff * inv_dist7[..., None]
             )
             near_snap = jnp.sum(src_mass[..., None] * snap_term, axis=1) * g_const
             if return_crackle:
-                inv_dist9 = jnp.where(source_mask, inv_dist7 / dist_sq, 0.0)
+                inv_dist9 = jnp.where(source_mask, inv_dist7 / dist_sq, zero)
                 crackle_term = (
-                    9.0 * vv[..., None] * vel_diff * inv_dist5[..., None]
-                    - 45.0 * (rv * rv)[..., None] * vel_diff * inv_dist7[..., None]
-                    - 45.0 * rv[..., None] * vv[..., None] * diff * inv_dist7[..., None]
-                    + 105.0 * (rv * rv * rv)[..., None] * diff * inv_dist9[..., None]
+                    nine * vv[..., None] * vel_diff * inv_dist5[..., None]
+                    - forty_five
+                    * (rv * rv)[..., None]
+                    * vel_diff
+                    * inv_dist7[..., None]
+                    - forty_five
+                    * rv[..., None]
+                    * vv[..., None]
+                    * diff
+                    * inv_dist7[..., None]
+                    + one_oh_five
+                    * (rv * rv * rv)[..., None]
+                    * diff
+                    * inv_dist9[..., None]
                 )
                 near_crackle = jnp.sum(src_mass[..., None] * crackle_term, axis=1) * (
                     g_const
@@ -5066,6 +5085,8 @@ def _evaluate_local_expansions_for_particles(
                     offsets_leaf,
                     order=p,
                 )
+                grads = grads.astype(dtype)
+                values = values.astype(dtype)
                 grads = jnp.where(mask_leaf[..., None], grads, 0.0)
                 values = jnp.where(mask_leaf, values, 0.0)
                 return grads, values
@@ -5089,8 +5110,8 @@ def _evaluate_local_expansions_for_particles(
                     order=p,
                     max_derivative_order=int(max_acc_derivative_order) + 1,
                 )
-                grads = tower[1]
-                values = tower[0][:, 0]
+                grads = tower[1].astype(dtype)
+                values = tower[0][:, 0].astype(dtype)
                 grads = jnp.where(mask_leaf[..., None], grads, 0.0)
                 values = jnp.where(mask_leaf, values, 0.0)
                 derivative_levels: list[Array] = []
@@ -5102,7 +5123,7 @@ def _evaluate_local_expansions_for_particles(
                     )
                     lifted = jnp.swapaxes(high[:, gather], 1, 2)
                     sign = -1.0 if level % 2 == 0 else 1.0
-                    lifted = sign * lifted
+                    lifted = (sign * lifted).astype(dtype)
                     lifted = jnp.where(mask_leaf[:, None, None], lifted, 0.0)
                     derivative_levels.append(lifted)
                 return grads, values, tuple(derivative_levels)
@@ -5215,7 +5236,8 @@ def _scatter_vectors(
     flat_idx = indices.reshape(-1)
     flat_values = values.reshape(-1, values.shape[-1])
     flat_mask = mask.reshape(-1)
-    masked = jnp.where(flat_mask[:, None], flat_values, 0.0)
+    zero = jnp.zeros((), dtype=base.dtype)
+    masked = jnp.where(flat_mask[:, None], flat_values, zero)
     return base.at[flat_idx].add(masked)
 
 
@@ -5231,7 +5253,8 @@ def _scatter_scalars(
     flat_idx = indices.reshape(-1)
     flat_values = values.reshape(-1)
     flat_mask = mask.reshape(-1)
-    masked = jnp.where(flat_mask, flat_values, 0.0)
+    zero = jnp.zeros((), dtype=base.dtype)
+    masked = jnp.where(flat_mask, flat_values, zero)
     return base.at[flat_idx].add(masked)
 
 
@@ -5247,7 +5270,8 @@ def _scatter_rank3(
     flat_idx = indices.reshape(-1)
     flat_values = values.reshape(-1, values.shape[-2], values.shape[-1])
     flat_mask = mask.reshape(-1)
-    masked = jnp.where(flat_mask[:, None, None], flat_values, 0.0)
+    zero = jnp.zeros((), dtype=base.dtype)
+    masked = jnp.where(flat_mask[:, None, None], flat_values, zero)
     return base.at[flat_idx].add(masked)
 
 
