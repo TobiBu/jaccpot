@@ -77,7 +77,7 @@ skip_gitignore = true
 [tool.pytest.ini_options]
 minversion = "7.4"
 testpaths = ["tests"]
-addopts = "-q --strict-markers --ignore=tests/perf --cov=jaccpot --cov-report=term-missing --cov-report=xml"
+addopts = "-q --strict-markers --ignore=tests/perf"
 
 [tool.coverage.run]
 source = ["jaccpot"]
