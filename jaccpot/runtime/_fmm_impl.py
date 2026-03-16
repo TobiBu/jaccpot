@@ -5,6 +5,11 @@ This implementation uses multipole and local expansions to compute
 gravitational forces in O(N) time instead of O(N^2) for direct summation.
 """
 
+import hashlib
+import json
+import math
+import os
+import time
 from collections import OrderedDict
 from dataclasses import dataclass
 from functools import partial
@@ -21,22 +26,31 @@ from yggdrax.dense_interactions import DenseInteractionBuffers
 from yggdrax.geometry import compute_tree_geometry
 from yggdrax.grouped_interactions import GroupedInteractionBuffers
 from yggdrax.interactions import (
+    CompactTaggedFarPairs,
+    CompactTaggedOctreeFarPairs,
     DualTreeRetryEvent,
     DualTreeTraversalConfig,
     DualTreeWalkResult,
     MACType,
     NodeInteractionList,
     NodeNeighborList,
+    OctreeNativeNeighborList,
     build_interactions_and_neighbors,
+    build_octree_native_far_pairs,
+    build_octree_native_neighbor_lists,
     build_well_separated_interactions,
 )
+from yggdrax.morton import morton_encode
 from yggdrax.tree import (
+    RadixTree,
     Tree,
     TreeType,
     available_tree_types,
+    reorder_particles_by_indices,
 )
 from yggdrax.tree_moments import compute_tree_mass_moments
 
+from jaccpot.basis.real_sh import complex_to_real_coeffs
 from jaccpot.downward.local_expansions import (
     LocalExpansionData,
     TreeDownwardData,
@@ -51,6 +65,7 @@ from jaccpot.downward.local_expansions import (
 from jaccpot.nearfield.near_field import (
     compute_leaf_p2p_accelerations,
     prepare_bucketed_scatter_schedules,
+    prepare_bucketed_scatter_schedules_from_groups,
     prepare_leaf_neighbor_pairs,
 )
 from jaccpot.operators.complex_ops import (
@@ -68,12 +83,11 @@ from jaccpot.operators.complex_ops import (
     m2l_complex_reference_batch,
     m2l_complex_reference_batch_cached_blocks,
 )
+from jaccpot.operators.m2l_real_rot_scale import m2l_rot_scale_real_batch
 from jaccpot.operators.multipole_utils import (
-    LOCAL_COMBO_INV_FACTORIAL,
     LOCAL_LEVEL_COMBOS,
     MAX_MULTIPOLE_ORDER,
     level_offset,
-    multi_power,
     total_coefficients,
 )
 from jaccpot.operators.real_harmonics import sh_size
@@ -93,6 +107,14 @@ from jaccpot.upward.tree_expansions import (
     prepare_upward_sweep as prepare_tree_upward_sweep,
 )
 
+from ._adaptive_policy import (
+    adaptive_pair_policy,
+    adaptive_policy_tolerance,
+    bucket_far_pairs_by_tag,
+    build_adaptive_policy_state,
+    compute_node_force_scale_from_sorted_acc,
+    source_error_proxy_by_order_from_multipoles,
+)
 from ._interaction_cache import (
     _build_dual_tree_artifacts,
     _DualTreeArtifacts,
@@ -105,6 +127,18 @@ from ._nearfield_cache import (
     nearfield_from_cache,
     with_nearfield_cache_artifacts,
 )
+from ._octree_adapter import OctreeExecutionData, build_octree_execution_data
+from ._octree_fmm import (
+    OctreeSolidFMMComplexMultipoles,
+    OctreeSolidFMMDownwardPlan,
+    accumulate_octree_solidfmm_m2l,
+    build_octree_downward_plan,
+    build_octree_interaction_plan,
+    build_octree_interaction_plan_from_native_pairs,
+    build_octree_upward_plan,
+    prepare_octree_solidfmm_complex_multipoles,
+    propagate_octree_solidfmm_l2l,
+)
 from .dtypes import INDEX_DTYPE, as_index, complex_dtype_for_real
 from .fmm_presets import FMMPreset, FMMPresetConfig, get_preset_config
 from .reference import MultipoleExpansion
@@ -113,7 +147,7 @@ from .reference import compute_gravitational_potential as reference_compute_pote
 from .reference import direct_sum as reference_direct_sum
 from .reference import evaluate_expansion as reference_evaluate_expansion
 
-ExpansionBasis = Literal["cartesian", "solidfmm"]
+ExpansionBasis = Literal["cartesian", "solidfmm", "complex"]
 FarFieldMode = Literal["auto", "pair_grouped", "class_major"]
 NearFieldMode = Literal["auto", "baseline", "bucketed"]
 JerkMode = Literal["fast_approx", "accurate"]
@@ -171,6 +205,25 @@ class _TreeBuildArtifacts:
     cache_leaf_parameter: int
 
 
+@dataclass(frozen=True)
+class _TopologyReuseCandidate:
+    """Candidate topology signature derived from current particle Morton order."""
+
+    key: str
+    sorted_indices: Array
+
+
+@dataclass(frozen=True)
+class _TopologyReuseEntry:
+    """Cached topology metadata for bounded multi-step reuse."""
+
+    key: str
+    tree: Tree
+    max_leaf_size: int
+    cache_leaf_parameter: int
+    reuse_count: int
+
+
 class _RuntimeExecutionOverrides(NamedTuple):
     """Resolved runtime execution knobs after adaptive policy decisions."""
 
@@ -184,6 +237,11 @@ class _RuntimeExecutionOverrides(NamedTuple):
     adaptive_applied: bool
 
 
+_MINIMUM_MEMORY_GPU_M2L_CHUNK_SIZE = 1024
+_MINIMUM_MEMORY_CPU_M2L_CHUNK_SIZE = 4096
+_GROUPED_SCHEDULE_BUDGET_DEFAULT = 32 * 1024 * 1024
+
+
 _LARGE_CPU_PARTICLE_THRESHOLD = 65536
 _CLASS_MAJOR_CPU_PARTICLE_THRESHOLD = 262144
 # Bucketed near-field becomes beneficial on CPU at moderate N for the
@@ -193,13 +251,29 @@ _NEARFIELD_BUCKETED_CPU_EDGE_CHUNK_MEDIUM = 1024
 _NEARFIELD_BUCKETED_CPU_EDGE_CHUNK_LARGE = 2048
 _NEARFIELD_BUCKETED_CPU_EDGE_CHUNK_XL = 4096
 _NEARFIELD_SCATTER_SCHEDULE_ITEM_CAP = 16_000_000
+_NEARFIELD_SCATTER_SCHEDULE_ITEM_CAP_GPU = 4_000_000
+_NEARFIELD_GPU_PRECOMPUTE_MAX_PARTICLES = 65_536
 _LARGE_CPU_M2L_CHUNK_SIZE = 32768
 _TRACING_MAX_NEIGHBORS_PER_LEAF = 512
+_TRACING_MAX_PAIR_QUEUE = 65_536
+_TRACING_MAX_PROCESS_BLOCK = 128
 # Traced prepare_state uses static-capacity interaction buffers. This cap limits
 # max_interactions_per_node only in traced mode (outer jax.jit prepare path) to
 # keep padded far-field buffers from dominating runtime. Lower is faster but can
 # trigger traversal overflow/retry on harder particle configurations.
 _TRACING_MAX_INTERACTIONS_PER_NODE = 512
+_GPU_LARGE_PARTICLE_THRESHOLD = 65_536
+_GPU_MIN_NEIGHBORS_PER_LEAF = 2048
+_GPU_MIN_INTERACTIONS_PER_NODE = 8192
+_GPU_MAX_NEIGHBORS_PER_LEAF = 2048
+_GPU_MAX_INTERACTIONS_PER_NODE = 8192
+_GPU_MIN_PAIR_QUEUE_MEDIUM = 131_072
+_GPU_MIN_PAIR_QUEUE_LARGE = 262_144
+_GPU_MIN_PAIR_QUEUE_XL = 524_288
+_GPU_MINIMUM_MEMORY_PAIR_QUEUE = 32_768
+_GPU_MINIMUM_MEMORY_PROCESS_BLOCK = 64
+_GPU_MINIMUM_MEMORY_INTERACTIONS_PER_NODE = 1_024
+_GPU_MINIMUM_MEMORY_NEIGHBORS_PER_LEAF = 256
 _LARGE_CPU_TRAVERSAL_CONFIG = DualTreeTraversalConfig(
     max_pair_queue=131072,
     process_block=4096,
@@ -212,8 +286,284 @@ _KDTREE_DEFAULT_TRAVERSAL_CONFIG = DualTreeTraversalConfig(
     max_interactions_per_node=512,
     max_neighbors_per_leaf=2048,
 )
-_OPERATOR_CACHE_MAX = 4096
+
+
+def _env_int(name: str, default: int, *, minimum: int = 1) -> int:
+    """Read a positive integer from env with a defensive fallback."""
+    raw = os.environ.get(name)
+    if raw is None:
+        return int(default)
+    try:
+        val = int(str(raw).strip())
+    except Exception:
+        return int(default)
+    return int(max(val, int(minimum)))
+
+
+def _env_flag(name: str, default: bool = False) -> bool:
+    """Read a boolean env flag with a defensive fallback."""
+    raw = os.environ.get(name)
+    if raw is None:
+        return bool(default)
+    return str(raw).strip().lower() in ("1", "true", "yes", "on")
+
+
+_PREPARE_DIAGNOSTICS = _env_flag("JACCPOT_PREPARE_DIAGNOSTICS", False)
+
+
+def _prepare_diag(message: str) -> None:
+    """Emit opt-in prepare diagnostics to stdout."""
+    if _PREPARE_DIAGNOSTICS:
+        print(f"[jaccpot.prepare] {message}", flush=True)
+
+
+_OPERATOR_CACHE_MAX = _env_int("JACCPOT_OPERATOR_CACHE_MAX", 512)
 _operator_blocks_cache: "OrderedDict[tuple, tuple[Array, Array]]" = OrderedDict()
+_GROUPED_OPERATOR_CACHE_MAX = _env_int("JACCPOT_GROUPED_OPERATOR_CACHE_MAX", 32)
+_grouped_operator_blocks_cache: "OrderedDict[tuple, tuple[Array, Array]]" = (
+    OrderedDict()
+)
+_GROUPED_SEGMENT_CACHE_MAX = _env_int("JACCPOT_GROUPED_SEGMENT_CACHE_MAX", 32)
+_grouped_segment_cache: "OrderedDict[tuple, tuple[Array, Array, Array]]" = OrderedDict()
+_GROUPED_OPERATOR_CACHE_ENTRY_MAX_BYTES = _env_int(
+    "JACCPOT_GROUPED_OPERATOR_CACHE_ENTRY_MAX_BYTES",
+    64 * 1024 * 1024,
+)
+_GROUPED_OPERATOR_CACHE_TOTAL_MAX_BYTES = _env_int(
+    "JACCPOT_GROUPED_OPERATOR_CACHE_TOTAL_MAX_BYTES",
+    256 * 1024 * 1024,
+)
+_GROUPED_SEGMENT_CACHE_ENTRY_MAX_BYTES = _env_int(
+    "JACCPOT_GROUPED_SEGMENT_CACHE_ENTRY_MAX_BYTES",
+    32 * 1024 * 1024,
+)
+_GROUPED_SEGMENT_CACHE_TOTAL_MAX_BYTES = _env_int(
+    "JACCPOT_GROUPED_SEGMENT_CACHE_TOTAL_MAX_BYTES",
+    128 * 1024 * 1024,
+)
+_M2L_CHUNK_AUTOTUNE_CACHE_MAX = 64
+_m2l_chunk_autotune_cache: "OrderedDict[tuple[Any, ...], int]" = OrderedDict()
+_GPU_M2L_AUTOTUNE_PAIR_BINS = (
+    65_536,
+    262_144,
+    1_048_576,
+    4_194_304,
+)
+_GPU_M2L_AUTOTUNE_SMALL_CANDIDATES = (512, 1024)
+_GPU_M2L_AUTOTUNE_MEDIUM_CANDIDATES = (1024, 2048)
+_GPU_M2L_AUTOTUNE_LARGE_CANDIDATES = (2048, 4096)
+_GPU_M2L_AUTOTUNE_XL_CANDIDATES = (4096, 8192)
+_GPU_M2L_AUTOTUNE_MAX_SAMPLE_PAIRS = 65_536
+_GPU_M2L_AUTOTUNE_MAX_SAMPLE_NODES = 8_192
+# Keep full-batch M2L kernels for genuinely small pair sets only; larger sets use
+# chunked reduction to avoid pair_count-scaled temporaries on GPU.
+_M2L_FULLBATCH_MAX_PAIRS = 2_048
+
+
+def _array_nbytes(arr: Array) -> int:
+    """Return approximate storage size in bytes for one array leaf."""
+    shape = tuple(int(dim) for dim in getattr(arr, "shape", ()))
+    if len(shape) == 0:
+        return int(np.dtype(arr.dtype).itemsize)
+    return int(np.prod(np.asarray(shape, dtype=np.int64))) * int(
+        np.dtype(arr.dtype).itemsize
+    )
+
+
+def _tuple_array_nbytes(value: tuple[Array, ...]) -> int:
+    """Return total bytes for a tuple of array leaves."""
+    return int(sum(_array_nbytes(arr) for arr in value))
+
+
+def _ordered_dict_values_nbytes(cache: OrderedDict) -> int:
+    """Return cumulative bytes of array-valued OrderedDict entries."""
+    total = 0
+    for value in cache.values():
+        total += _tuple_array_nbytes(value)
+    return int(total)
+
+
+def _format_nbytes(count: int) -> str:
+    value = float(max(int(count), 0))
+    for unit in ("B", "KiB", "MiB", "GiB", "TiB"):
+        if value < 1024.0 or unit == "TiB":
+            return f"{value:.2f}{unit}"
+        value /= 1024.0
+    return f"{value:.2f}TiB"
+
+
+def _estimate_payload_nbytes(value: Any) -> int:
+    """Best-effort recursive byte estimate for array-centric payloads."""
+    if value is None:
+        return 0
+    if hasattr(value, "shape") and hasattr(value, "dtype"):
+        return _array_nbytes(value)
+    if isinstance(value, dict):
+        return int(sum(_estimate_payload_nbytes(v) for v in value.values()))
+    if isinstance(value, (tuple, list)):
+        return int(sum(_estimate_payload_nbytes(v) for v in value))
+    if hasattr(value, "_asdict"):
+        return _estimate_payload_nbytes(value._asdict())
+    if hasattr(value, "__dict__"):
+        return _estimate_payload_nbytes(vars(value))
+    return 0
+
+
+def _m2l_autotune_lookup(key: tuple[Any, ...]) -> Optional[int]:
+    """Return cached M2L chunk size for an autotune signature."""
+
+    cached = _m2l_chunk_autotune_cache.get(key)
+    if cached is None:
+        return None
+    _m2l_chunk_autotune_cache.move_to_end(key)
+    return int(cached)
+
+
+def _m2l_autotune_store(key: tuple[Any, ...], chunk_size: int) -> None:
+    """Store one autotuned M2L chunk size with LRU eviction."""
+
+    _m2l_chunk_autotune_cache[key] = int(chunk_size)
+    _m2l_chunk_autotune_cache.move_to_end(key)
+    while len(_m2l_chunk_autotune_cache) > _M2L_CHUNK_AUTOTUNE_CACHE_MAX:
+        _m2l_chunk_autotune_cache.popitem(last=False)
+
+
+def _m2l_autotune_payload() -> list[dict[str, Any]]:
+    """Return a JSON-serializable snapshot of the global M2L autotune cache."""
+
+    payload: list[dict[str, Any]] = []
+    for key, chunk in _m2l_chunk_autotune_cache.items():
+        payload.append({"key": list(key), "chunk_size": int(chunk)})
+    return payload
+
+
+def _restore_m2l_autotune_payload(
+    payload: list[dict[str, Any]],
+    *,
+    merge: bool = True,
+) -> int:
+    """Restore global M2L autotune cache entries from serialized payload."""
+
+    if not merge:
+        _m2l_chunk_autotune_cache.clear()
+    restored = 0
+    for item in payload:
+        if not isinstance(item, dict):
+            continue
+        key_raw = item.get("key")
+        chunk_raw = item.get("chunk_size")
+        if not isinstance(key_raw, list):
+            continue
+        try:
+            key = tuple(key_raw)
+            chunk_size = int(chunk_raw)
+        except Exception:
+            continue
+        if chunk_size <= 0:
+            continue
+        _m2l_autotune_store(key, chunk_size)
+        restored += 1
+    return int(restored)
+
+
+def _clear_global_runtime_caches(*, clear_jax_compilation: bool = False) -> None:
+    """Drop process-level runtime caches that can retain large array payloads."""
+    _operator_blocks_cache.clear()
+    _grouped_operator_blocks_cache.clear()
+    _grouped_segment_cache.clear()
+    if clear_jax_compilation:
+        jax.clear_caches()
+
+
+def _array_digest(arr: Array) -> Optional[tuple[tuple[int, ...], str, bytes]]:
+    """Return (shape, dtype, digest) for stable host-side cache keys."""
+    if _contains_tracer(arr):
+        return None
+    arr_np = np.asarray(jax.device_get(arr))
+    hasher = hashlib.blake2b(digest_size=16)
+    hasher.update(arr_np.tobytes())
+    return tuple(int(v) for v in arr_np.shape), str(arr_np.dtype), hasher.digest()
+
+
+def _grouped_operator_cache_key(
+    *,
+    order: int,
+    rotation: str,
+    dtype: jnp.dtype,
+    class_keys: Array,
+    class_deltas: Array,
+) -> Optional[tuple]:
+    keys_sig = _array_digest(class_keys)
+    deltas_sig = _array_digest(class_deltas)
+    if keys_sig is None or deltas_sig is None:
+        return None
+    return (
+        int(order),
+        str(rotation),
+        str(dtype),
+        keys_sig,
+        deltas_sig,
+    )
+
+
+def _grouped_segment_cache_key(
+    *,
+    class_offsets: Array,
+    class_targets: Array,
+    chunk_size: int,
+) -> Optional[tuple]:
+    offsets_sig = _array_digest(class_offsets)
+    targets_sig = _array_digest(class_targets)
+    if offsets_sig is None or targets_sig is None:
+        return None
+    return (int(chunk_size), offsets_sig, targets_sig)
+
+
+def _grouped_operator_cache_get(key: tuple) -> Optional[tuple[Array, Array]]:
+    blocks = _grouped_operator_blocks_cache.get(key)
+    if blocks is None:
+        return None
+    _grouped_operator_blocks_cache.move_to_end(key)
+    return blocks
+
+
+def _grouped_operator_cache_put(key: tuple, value: tuple[Array, Array]) -> None:
+    if _tuple_array_nbytes(value) > _GROUPED_OPERATOR_CACHE_ENTRY_MAX_BYTES:
+        return
+    _grouped_operator_blocks_cache[key] = value
+    _grouped_operator_blocks_cache.move_to_end(key)
+    while (
+        len(_grouped_operator_blocks_cache) > _GROUPED_OPERATOR_CACHE_MAX
+        or _ordered_dict_values_nbytes(_grouped_operator_blocks_cache)
+        > _GROUPED_OPERATOR_CACHE_TOTAL_MAX_BYTES
+    ):
+        _grouped_operator_blocks_cache.popitem(last=False)
+
+
+def _grouped_segment_cache_get(
+    key: tuple,
+) -> Optional[tuple[Array, Array, Array]]:
+    cached = _grouped_segment_cache.get(key)
+    if cached is None:
+        return None
+    _grouped_segment_cache.move_to_end(key)
+    return cached
+
+
+def _grouped_segment_cache_put(
+    key: tuple,
+    value: tuple[Array, Array, Array],
+) -> None:
+    if _tuple_array_nbytes(value) > _GROUPED_SEGMENT_CACHE_ENTRY_MAX_BYTES:
+        return
+    _grouped_segment_cache[key] = value
+    _grouped_segment_cache.move_to_end(key)
+    while (
+        len(_grouped_segment_cache) > _GROUPED_SEGMENT_CACHE_MAX
+        or _ordered_dict_values_nbytes(_grouped_segment_cache)
+        > _GROUPED_SEGMENT_CACHE_TOTAL_MAX_BYTES
+    ):
+        _grouped_segment_cache.popitem(last=False)
 
 
 def _resolve_optional(value, preset_value, fallback):
@@ -415,7 +765,7 @@ def _build_tree_with_config(
     cache_leaf_parameter = (
         int(leaf_size) if mode == "lbvh" else tree_config.target_leaf_particles
     )
-    if int(max_leaf_size) > int(leaf_size):
+    if mode != "fixed_depth" and int(max_leaf_size) > int(leaf_size):
         raise ValueError(
             "configured leaf_size is too small for built tree: "
             f"max_leaf_size={int(max_leaf_size)} > leaf_size={int(leaf_size)}"
@@ -443,9 +793,7 @@ class FMMPreparedState:
     """
 
     tree: Tree
-    positions_sorted: Array
-    masses_sorted: Array
-    inverse_permutation: Array
+    upward: TreeUpwardData
     downward: TreeDownwardData
     neighbor_list: NodeNeighborList
     max_leaf_size: int
@@ -453,32 +801,80 @@ class FMMPreparedState:
     working_dtype: jnp.dtype
     expansion_basis: ExpansionBasis
     theta: float
-    interactions: NodeInteractionList
-    dual_tree_result: DualTreeWalkResult
+    topology_key: Optional[str]
+    interactions: Optional[NodeInteractionList]
+    dual_tree_result: Optional[DualTreeWalkResult]
     retry_events: Tuple[DualTreeRetryEvent, ...]
+    nearfield_interop: Optional["NearfieldInteropData"]
     nearfield_target_leaf_ids: Optional[Array]
     nearfield_source_leaf_ids: Optional[Array]
     nearfield_valid_pairs: Optional[Array]
     nearfield_chunk_sort_indices: Optional[Array]
     nearfield_chunk_group_ids: Optional[Array]
     nearfield_chunk_unique_indices: Optional[Array]
+    force_scale_nodes: Optional[Array]
+    execution_backend: str = "radix"
+    octree: Optional[OctreeExecutionData] = None
+    octree_upward: Optional[OctreeSolidFMMComplexMultipoles] = None
+    octree_downward: Optional[OctreeSolidFMMDownwardPlan] = None
 
-    def tree_flatten(self):
+    @property
+    def positions_sorted(self) -> Array:
+        """Canonical sorted particle positions owned by ``tree``."""
+        value = getattr(self.tree, "positions_sorted", None)
+        if value is None:
+            raise ValueError("prepared tree is missing positions_sorted")
+        return jnp.asarray(value)
+
+    @property
+    def masses_sorted(self) -> Array:
+        """Canonical sorted particle masses owned by ``tree``."""
+        value = getattr(self.tree, "masses_sorted", None)
+        if value is None:
+            raise ValueError("prepared tree is missing masses_sorted")
+        return jnp.asarray(value)
+
+    @property
+    def inverse_permutation(self) -> Array:
+        """Canonical inverse permutation owned by ``tree``."""
+        value = getattr(self.tree, "inverse_permutation", None)
+        if value is None:
+            raise ValueError("prepared tree is missing inverse_permutation")
+        return jnp.asarray(value, dtype=INDEX_DTYPE)
+
+    def tree_flatten(
+        self: "FMMPreparedState",
+    ) -> tuple[
+        tuple[Any, ...],
+        tuple[
+            int,
+            str,
+            str,
+            str,
+            float,
+            Optional[str],
+            Tuple[DualTreeRetryEvent, ...],
+            str,
+        ],
+    ]:
         children = (
             self.tree,
-            self.positions_sorted,
-            self.masses_sorted,
-            self.inverse_permutation,
+            self.upward,
             self.downward,
             self.neighbor_list,
             self.interactions,
             self.dual_tree_result,
+            self.nearfield_interop,
             self.nearfield_target_leaf_ids,
             self.nearfield_source_leaf_ids,
             self.nearfield_valid_pairs,
             self.nearfield_chunk_sort_indices,
             self.nearfield_chunk_group_ids,
             self.nearfield_chunk_unique_indices,
+            self.force_scale_nodes,
+            self.octree,
+            self.octree_upward,
+            self.octree_downward,
         )
         aux = (
             int(self.max_leaf_size),
@@ -486,41 +882,48 @@ class FMMPreparedState:
             str(jnp.dtype(self.working_dtype)),
             str(self.expansion_basis),
             float(self.theta),
+            self.topology_key,
             self.retry_events,
+            str(self.execution_backend),
         )
         return children, aux
 
     @classmethod
-    def tree_unflatten(cls, aux, children):
+    def tree_unflatten(
+        cls: type["FMMPreparedState"], aux: tuple[Any, ...], children: tuple[Any, ...]
+    ) -> "FMMPreparedState":
         (
             max_leaf_size,
             input_dtype_name,
             working_dtype_name,
             expansion_basis,
             theta,
+            topology_key,
             retry_events,
+            execution_backend,
         ) = aux
         (
             tree,
-            positions_sorted,
-            masses_sorted,
-            inverse_permutation,
+            upward,
             downward,
             neighbor_list,
             interactions,
             dual_tree_result,
+            nearfield_interop,
             nearfield_target_leaf_ids,
             nearfield_source_leaf_ids,
             nearfield_valid_pairs,
             nearfield_chunk_sort_indices,
             nearfield_chunk_group_ids,
             nearfield_chunk_unique_indices,
+            force_scale_nodes,
+            octree,
+            octree_upward,
+            octree_downward,
         ) = children
         return cls(
             tree=tree,
-            positions_sorted=positions_sorted,
-            masses_sorted=masses_sorted,
-            inverse_permutation=inverse_permutation,
+            upward=upward,
             downward=downward,
             neighbor_list=neighbor_list,
             max_leaf_size=int(max_leaf_size),
@@ -528,15 +931,22 @@ class FMMPreparedState:
             working_dtype=jnp.dtype(working_dtype_name),
             expansion_basis=expansion_basis,
             theta=float(theta),
+            topology_key=topology_key,
             interactions=interactions,
             dual_tree_result=dual_tree_result,
             retry_events=retry_events,
+            nearfield_interop=nearfield_interop,
             nearfield_target_leaf_ids=nearfield_target_leaf_ids,
             nearfield_source_leaf_ids=nearfield_source_leaf_ids,
             nearfield_valid_pairs=nearfield_valid_pairs,
             nearfield_chunk_sort_indices=nearfield_chunk_sort_indices,
             nearfield_chunk_group_ids=nearfield_chunk_group_ids,
             nearfield_chunk_unique_indices=nearfield_chunk_unique_indices,
+            force_scale_nodes=force_scale_nodes,
+            execution_backend=str(execution_backend),
+            octree=octree,
+            octree_upward=octree_upward,
+            octree_downward=octree_downward,
         )
 
 
@@ -550,6 +960,7 @@ class _PrepareStateTreeUpwardArtifacts(NamedTuple):
     inverse_permutation: Array
     leaf_cap: int
     leaf_parameter: int
+    topology_key: Optional[str]
     upward: TreeUpwardData
     locals_template: Optional[LocalExpansionData]
 
@@ -557,17 +968,241 @@ class _PrepareStateTreeUpwardArtifacts(NamedTuple):
 class _PrepareStateDualDownwardArtifacts(NamedTuple):
     """Dual-tree and downward artifacts produced during prepare_state."""
 
-    interactions: NodeInteractionList
+    interactions: Optional[NodeInteractionList]
     neighbor_list: NodeNeighborList
-    traversal_result: DualTreeWalkResult
+    traversal_result: Optional[DualTreeWalkResult]
+    compact_far_pairs: Optional[CompactTaggedFarPairs]
     downward: TreeDownwardData
     cache_entry: Optional[_InteractionCacheEntry]
+
+
+class NearfieldInteropData(NamedTuple):
+    """Explicit shared leaf/node view used to interoperate with nearfield code."""
+
+    leaf_nodes: Array
+    node_ranges: Array
+    offsets: Array
+    neighbors: Array
+    counts: Array
+    particle_order_node_ranges: Array
+    particle_order_leaf_indices: Array
+    particle_order_to_native_leaf: Array
+    leaf_particle_indices: Optional[Array] = None
+    leaf_particle_mask: Optional[Array] = None
+    particle_to_leaf_position: Optional[Array] = None
+
+
+def _build_octree_upward_artifacts(
+    *,
+    octree: Optional[OctreeExecutionData],
+    positions_sorted: Array,
+    masses_sorted: Array,
+    expansion_basis: ExpansionBasis,
+    max_order: int,
+) -> Optional[OctreeSolidFMMComplexMultipoles]:
+    """Build octree-native upward artifacts when the execution tree exposes them."""
+
+    if octree is None or expansion_basis != "solidfmm":
+        return None
+    plan = build_octree_upward_plan(octree)
+    return prepare_octree_solidfmm_complex_multipoles(
+        plan,
+        positions_sorted,
+        masses_sorted,
+        max_order=int(max_order),
+    )
+
+
+def _build_octree_downward_artifacts(
+    *,
+    octree: Optional[OctreeExecutionData],
+    octree_upward: Optional[OctreeSolidFMMComplexMultipoles],
+    interactions: Optional[NodeInteractionList],
+    native_far_pairs: Optional[CompactTaggedOctreeFarPairs],
+    execution_backend: str,
+) -> Optional[OctreeSolidFMMDownwardPlan]:
+    """Build octree-native downward scaffolding when prepared octree data exists."""
+
+    if octree is None or octree_upward is None:
+        return None
+    if execution_backend == "octree" and native_far_pairs is not None:
+        interaction_plan = build_octree_interaction_plan_from_native_pairs(
+            octree,
+            native_far_pairs,
+        )
+    elif interactions is not None:
+        interaction_plan = build_octree_interaction_plan(octree, interactions)
+    else:
+        return None
+    return build_octree_downward_plan(octree, octree_upward, interaction_plan)
+
+
+def _finalize_octree_downward_artifacts(
+    *,
+    octree: Optional[OctreeExecutionData],
+    octree_upward: Optional[OctreeSolidFMMComplexMultipoles],
+    octree_downward: Optional[OctreeSolidFMMDownwardPlan],
+    expansion_basis: ExpansionBasis,
+    execution_backend: str,
+    m2l_chunk_size: Optional[int],
+) -> Optional[OctreeSolidFMMDownwardPlan]:
+    """Run octree-native M2L/L2L when the narrow octree backend is active."""
+
+    if (
+        execution_backend != "octree"
+        or expansion_basis != "solidfmm"
+        or octree is None
+        or octree_upward is None
+        or octree_downward is None
+    ):
+        return octree_downward
+    accumulated = accumulate_octree_solidfmm_m2l(
+        octree_downward,
+        octree_upward,
+        chunk_size=4096 if m2l_chunk_size is None else int(m2l_chunk_size),
+    )
+    return propagate_octree_solidfmm_l2l(accumulated, octree)
+
+
+def _materialize_octree_downward_for_evaluation(
+    *,
+    radix_downward: TreeDownwardData,
+    octree: Optional[OctreeExecutionData],
+    octree_downward: Optional[OctreeSolidFMMDownwardPlan],
+) -> TreeDownwardData:
+    """Project octree local expansions onto radix node slots for evaluation."""
+
+    if octree is None or octree_downward is None:
+        return radix_downward
+    radix_to_oct = jnp.asarray(octree.radix_node_to_oct, dtype=INDEX_DTYPE)
+    centers = jnp.asarray(octree_downward.centers)[radix_to_oct]
+    coefficients = jnp.asarray(octree_downward.locals_packed)[radix_to_oct]
+    return TreeDownwardData(
+        interactions=radix_downward.interactions,
+        locals=LocalExpansionData(
+            order=int(octree_downward.order),
+            centers=centers,
+            coefficients=coefficients,
+        ),
+    )
+
+
+def _octree_local_expansion_data(
+    octree_downward: Optional[OctreeSolidFMMDownwardPlan],
+) -> Optional[LocalExpansionData]:
+    """Wrap octree-native locals in the shared local-expansion container."""
+
+    if octree_downward is None:
+        return None
+    coefficients = jnp.asarray(octree_downward.locals_packed)
+    return LocalExpansionData(
+        order=_infer_order_from_coeff_count(
+            coeff_count=int(coefficients.shape[-1]),
+            expansion_basis="solidfmm",
+        ),
+        centers=jnp.asarray(octree_downward.centers),
+        coefficients=coefficients,
+    )
+
+
+class _FarPairCOO(NamedTuple):
+    """Compact COO-style far-pair representation for streamed M2L execution."""
+
+    sources: Array
+    targets: Array
+
+
+def _empty_interaction_storage_for_tree(
+    tree: Tree,
+    *,
+    index_dtype: Any = INDEX_DTYPE,
+) -> NodeInteractionList:
+    """Construct a minimal zero-pair interaction list for a given tree."""
+
+    total_nodes = int(jnp.asarray(tree.parent).shape[0])
+    return NodeInteractionList(
+        offsets=jnp.zeros((total_nodes + 1,), dtype=index_dtype),
+        sources=jnp.zeros((0,), dtype=index_dtype),
+        targets=jnp.zeros((0,), dtype=index_dtype),
+        counts=jnp.zeros((total_nodes,), dtype=index_dtype),
+        level_offsets=jnp.zeros((1,), dtype=index_dtype),
+        target_levels=jnp.zeros((0,), dtype=index_dtype),
+    )
+
+
+def _empty_interaction_storage_like(
+    interactions: Optional[NodeInteractionList],
+) -> NodeInteractionList:
+    """Return zero-pair interaction storage while preserving node-shaped metadata."""
+
+    if interactions is None:
+        raise ValueError("interactions must be present to derive empty storage")
+    offsets = jnp.asarray(interactions.offsets)
+    counts = jnp.asarray(interactions.counts)
+    level_offsets = jnp.asarray(interactions.level_offsets)
+    sources = jnp.zeros((0,), dtype=jnp.asarray(interactions.sources).dtype)
+    targets = jnp.zeros((0,), dtype=jnp.asarray(interactions.targets).dtype)
+    target_levels = jnp.zeros((0,), dtype=jnp.asarray(interactions.target_levels).dtype)
+    return NodeInteractionList(
+        offsets=jnp.zeros_like(offsets),
+        sources=sources,
+        targets=targets,
+        counts=jnp.zeros_like(counts),
+        level_offsets=jnp.zeros_like(level_offsets),
+        target_levels=target_levels,
+    )
 
 
 def _contains_tracer(value: Any) -> bool:
     """Return ``True`` when a pytree contains JAX tracer values."""
     return any(
         isinstance(leaf, jax.core.Tracer) for leaf in jax.tree_util.tree_leaves(value)
+    )
+
+
+def _bucket_far_pairs_by_level_split(
+    *,
+    interactions: NodeInteractionList,
+    src_far: Array,
+    tgt_far: Array,
+    max_order: int,
+    min_order: int,
+) -> tuple[tuple[int, ...], tuple[tuple[Array, Array], ...]]:
+    """Split far pairs into two orders using interaction level offsets.
+
+    Coarser levels use ``max_order`` and deeper levels use ``min_order``.
+    """
+    min_order_int = int(min_order)
+    max_order_int = int(max_order)
+    if min_order_int >= max_order_int:
+        return (max_order_int,), ((src_far, tgt_far),)
+
+    level_offsets = getattr(interactions, "level_offsets", None)
+    if level_offsets is None:
+        return (max_order_int,), ((src_far, tgt_far),)
+
+    try:
+        offsets_np = np.asarray(jax.device_get(level_offsets), dtype=np.int64)
+    except Exception:
+        return (max_order_int,), ((src_far, tgt_far),)
+    if offsets_np.size <= 2:
+        return (max_order_int,), ((src_far, tgt_far),)
+
+    levels = int(offsets_np.size - 1)
+    split_level = max(1, levels // 2)
+    coarse_end = int(offsets_np[min(split_level, levels)])
+    fine_start = coarse_end
+    pair_count = int(src_far.shape[0])
+    coarse_end = max(0, min(coarse_end, pair_count))
+    fine_start = max(0, min(fine_start, pair_count))
+
+    src_hi = jnp.asarray(src_far[:coarse_end], dtype=INDEX_DTYPE)
+    tgt_hi = jnp.asarray(tgt_far[:coarse_end], dtype=INDEX_DTYPE)
+    src_lo = jnp.asarray(src_far[fine_start:], dtype=INDEX_DTYPE)
+    tgt_lo = jnp.asarray(tgt_far[fine_start:], dtype=INDEX_DTYPE)
+    return (
+        (min_order_int, max_order_int),
+        ((src_lo, tgt_lo), (src_hi, tgt_hi)),
     )
 
 
@@ -601,6 +1236,17 @@ class FastMultipoleMethod:
         working_dtype: Optional[DTypeLike] = None,
         *,
         expansion_basis: ExpansionBasis = "cartesian",
+        basis_impl: Optional[Any] = None,
+        m2l_impl: Optional[str] = None,
+        adaptive_order: bool = False,
+        p_gears: Optional[tuple[int, ...]] = None,
+        use_pallas: bool = False,
+        reuse_topology: bool = False,
+        rebuild_every: int = 1,
+        mac_force_scale_mode: str = "prev",
+        adaptive_error_model: str = "tail_proxy",
+        adaptive_eps: Optional[float] = None,
+        dehnen_geometry_mode: str = "tree",
         mac_type: MACType = "bh",
         complex_rotation: str = "solidfmm",  # "cached",
         dehnen_radius_scale: float = 1.0,
@@ -619,20 +1265,76 @@ class FastMultipoleMethod:
         use_dense_interactions: Optional[bool] = None,
         grouped_interactions: Optional[bool] = None,
         farfield_mode: FarFieldMode = "auto",
+        streamed_far_pairs: Optional[bool] = None,
+        mixed_order_farfield: bool = False,
+        mixed_order_min_order: Optional[int] = None,
         nearfield_mode: NearFieldMode = "auto",
+        execution_backend: FMMExecutionBackend = "auto",
         nearfield_edge_chunk_size: int = 256,
+        precompute_nearfield_scatter_schedules: bool = True,
+        memory_objective: MemoryObjective = "balanced",
+        memory_budget_bytes: Optional[int] = None,
+        enable_interaction_cache: bool = True,
+        retain_traversal_result: bool = True,
+        retain_interactions: bool = True,
+        autotune_m2l_chunk: bool = False,
+        precompute_grouped_class_segments: Optional[bool] = None,
+        grouped_schedule_budget_bytes: Optional[int] = None,
+        nearfield_schedule_item_cap: Optional[int] = None,
+        upward_leaf_batch_size: Optional[int] = None,
         host_refine_mode: str = "auto",
+        fail_fast: bool = False,
         preset: Optional[Union[str, FMMPreset]] = None,
         fixed_order: Optional[int] = None,
         fixed_max_leaf_size: Optional[int] = None,
     ):
-        """Initialize FMM runtime with validated policy and kernel settings."""
         basis_norm = str(expansion_basis).strip().lower()
+        if basis_norm == "complex":
+            basis_norm = "solidfmm"
         if basis_norm not in ("cartesian", "solidfmm"):
             raise ValueError(
-                "expansion_basis must be 'cartesian' or 'solidfmm'",
+                "expansion_basis must be 'cartesian', 'solidfmm', or 'complex'",
             )
         self.expansion_basis = basis_norm  # type: ignore[assignment]
+        self.basis_impl = basis_impl
+        self.m2l_impl = None if m2l_impl is None else str(m2l_impl).strip().lower()
+        if self.m2l_impl is None and self._solidfmm_basis_mode() == "real":
+            self.m2l_impl = "rot_scale"
+        self.adaptive_order = bool(adaptive_order)
+        self.p_gears = tuple(int(v) for v in (p_gears or ()))
+        self.use_pallas = bool(use_pallas)
+        self.reuse_topology = bool(reuse_topology)
+        if int(rebuild_every) <= 0:
+            raise ValueError("rebuild_every must be positive")
+        self.rebuild_every = int(rebuild_every)
+        self._recent_far_pairs_by_gear_counts: tuple[int, ...] = tuple()
+        force_scale_mode_norm = str(mac_force_scale_mode).strip().lower()
+        if force_scale_mode_norm not in ("prev", "prepass", "paper"):
+            raise ValueError(
+                "mac_force_scale_mode must be 'prev', 'prepass', or 'paper'"
+            )
+        self.mac_force_scale_mode = force_scale_mode_norm
+        adaptive_error_model_norm = str(adaptive_error_model).strip().lower()
+        if adaptive_error_model_norm not in (
+            "tail_proxy",
+            "dehnen_degree",
+            "dehnen_paper",
+        ):
+            raise ValueError(
+                "adaptive_error_model must be 'tail_proxy', 'dehnen_degree', or 'dehnen_paper'"
+            )
+        self.adaptive_error_model = adaptive_error_model_norm
+        dehnen_geometry_mode_norm = str(dehnen_geometry_mode).strip().lower()
+        if dehnen_geometry_mode_norm not in ("exact", "tree", "tree_approx", "runtime"):
+            raise ValueError(
+                "dehnen_geometry_mode must be 'exact', 'tree', 'tree_approx', or 'runtime'"
+            )
+        self.dehnen_geometry_mode = dehnen_geometry_mode_norm
+        self.adaptive_eps = None if adaptive_eps is None else float(adaptive_eps)
+        if self.adaptive_eps is not None and self.adaptive_eps <= 0.0:
+            raise ValueError("adaptive_eps must be > 0 when provided")
+        self._last_force_scale_nodes: Optional[Array] = None
+        self._in_force_scale_prepass = False
 
         rotation_norm = str(complex_rotation).strip().lower()
         if rotation_norm not in ("bdz", "cached", "wigner", "solidfmm"):
@@ -650,13 +1352,73 @@ class FastMultipoleMethod:
                 "farfield_mode must be 'auto', 'pair_grouped', or 'class_major'"
             )
         self.farfield_mode = farfield_mode_norm
+        self.streamed_far_pairs = bool(streamed_far_pairs)
+        self.mixed_order_farfield = bool(mixed_order_farfield)
+        self.mixed_order_min_order = (
+            None if mixed_order_min_order is None else int(mixed_order_min_order)
+        )
+        if (
+            self.mixed_order_min_order is not None
+            and int(self.mixed_order_min_order) < 0
+        ):
+            raise ValueError("mixed_order_min_order must be >= 0")
         nearfield_mode_norm = str(nearfield_mode).strip().lower()
         if nearfield_mode_norm not in ("auto", "baseline", "bucketed"):
             raise ValueError("nearfield_mode must be 'auto', 'baseline', or 'bucketed'")
+        execution_backend_norm = str(execution_backend).strip().lower()
+        if execution_backend_norm not in ("auto", "radix", "octree"):
+            raise ValueError("execution_backend must be 'auto', 'radix', or 'octree'")
         if int(nearfield_edge_chunk_size) <= 0:
             raise ValueError("nearfield_edge_chunk_size must be positive")
         self.nearfield_mode = nearfield_mode_norm
+        self.execution_backend = execution_backend_norm
         self.nearfield_edge_chunk_size = int(nearfield_edge_chunk_size)
+        self.precompute_nearfield_scatter_schedules = bool(
+            precompute_nearfield_scatter_schedules
+        )
+        objective_norm = str(memory_objective).strip().lower()
+        if objective_norm not in ("balanced", "throughput", "minimum_memory"):
+            raise ValueError(
+                "memory_objective must be 'balanced', 'throughput', or 'minimum_memory'"
+            )
+        self.memory_objective: MemoryObjective = objective_norm  # type: ignore[assignment]
+        self.memory_budget_bytes = (
+            None if memory_budget_bytes is None else int(memory_budget_bytes)
+        )
+        if self.memory_budget_bytes is not None and self.memory_budget_bytes <= 0:
+            raise ValueError("memory_budget_bytes must be > 0 when provided")
+        self.enable_interaction_cache = bool(enable_interaction_cache)
+        self.retain_traversal_result = bool(retain_traversal_result)
+        self.retain_interactions = bool(retain_interactions)
+        self.fail_fast = bool(fail_fast)
+        self.autotune_m2l_chunk = bool(autotune_m2l_chunk) and not self.fail_fast
+        self.precompute_grouped_class_segments = (
+            None
+            if precompute_grouped_class_segments is None
+            else bool(precompute_grouped_class_segments)
+        )
+        self.grouped_schedule_budget_bytes = (
+            _GROUPED_SCHEDULE_BUDGET_DEFAULT
+            if grouped_schedule_budget_bytes is None
+            else int(grouped_schedule_budget_bytes)
+        )
+        if self.grouped_schedule_budget_bytes <= 0:
+            raise ValueError("grouped_schedule_budget_bytes must be positive")
+        self.nearfield_schedule_item_cap = (
+            None
+            if nearfield_schedule_item_cap is None
+            else int(nearfield_schedule_item_cap)
+        )
+        if (
+            self.nearfield_schedule_item_cap is not None
+            and self.nearfield_schedule_item_cap <= 0
+        ):
+            raise ValueError("nearfield_schedule_item_cap must be > 0 when provided")
+        self.upward_leaf_batch_size = (
+            None if upward_leaf_batch_size is None else int(upward_leaf_batch_size)
+        )
+        if self.upward_leaf_batch_size is not None and self.upward_leaf_batch_size <= 0:
+            raise ValueError("upward_leaf_batch_size must be > 0 when provided")
         dehnen_scale_val = float(dehnen_radius_scale)
         if dehnen_scale_val <= 0.0:
             raise ValueError("dehnen_radius_scale must be > 0")
@@ -665,6 +1427,8 @@ class FastMultipoleMethod:
         refine_mode_norm = str(host_refine_mode).strip().lower()
         if refine_mode_norm not in ("auto", "on", "off"):
             raise ValueError("host_refine_mode must be 'auto', 'on', or 'off'")
+        if self.fail_fast:
+            refine_mode_norm = "off"
         self.host_refine_mode = refine_mode_norm
         tree_type_norm = str(tree_type).strip().lower()
         supported_tree_types = set(available_tree_types())
@@ -700,6 +1464,11 @@ class FastMultipoleMethod:
         self.preset = resolved.preset
         self.theta = resolved.theta
         self.mac_type = mac_type
+        if self._uses_dehnen_error_policy():
+            if self.adaptive_error_model == "tail_proxy":
+                self.adaptive_error_model = "dehnen_paper"
+            if self.mac_force_scale_mode == "prev":
+                self.mac_force_scale_mode = "paper"
         self.G = resolved.G
         self.softening = resolved.softening
         self.working_dtype = resolved.working_dtype
@@ -725,6 +1494,8 @@ class FastMultipoleMethod:
         self._prepared_state_cache_value: Optional[FMMPreparedState] = None
         self._prepared_state_cache_positions: Optional[Array] = None
         self._prepared_state_cache_masses: Optional[Array] = None
+        self._topology_reuse_entry: Optional[_TopologyReuseEntry] = None
+        self._recent_topology_reused: bool = False
         self._recent_retry_events: Tuple[DualTreeRetryEvent, ...] = tuple()
         self.fixed_order = fixed_order
         self.fixed_max_leaf_size = fixed_max_leaf_size
@@ -736,6 +1507,29 @@ class FastMultipoleMethod:
         self._explicit_grouped_interactions = grouped_interactions is not None
         self.grouped_interactions = grouped_interactions
 
+    def _resolve_execution_backend(self) -> str:
+        """Resolve the active FMM execution backend without altering tree choice."""
+        if self.execution_backend == "auto":
+            return "radix"
+        return self.execution_backend
+
+    def _ensure_execution_backend_supported(
+        self, *, tree: Optional[Tree] = None
+    ) -> str:
+        """Validate execution backends that are available for the current tree."""
+        backend = self._resolve_execution_backend()
+        if backend != "octree":
+            return backend
+
+        tree_type = getattr(tree, "tree_type", self.tree_type)
+        if str(tree_type).strip().lower() != "octree":
+            raise ValueError("execution_backend='octree' requires an octree tree_type")
+        if self.expansion_basis != "solidfmm":
+            raise NotImplementedError(
+                "execution_backend='octree' currently supports basis='solidfmm' only"
+            )
+        return backend
+
     @property
     def recent_retry_events(
         self: "FastMultipoleMethod",
@@ -744,6 +1538,12 @@ class FastMultipoleMethod:
 
         return self._recent_retry_events
 
+    @property
+    def recent_topology_reused(self: "FastMultipoleMethod") -> bool:
+        """Whether the most recent prepare/evaluate path reused cached topology."""
+
+        return bool(self._recent_topology_reused)
+
     def clear_prepared_state_cache(self: "FastMultipoleMethod") -> None:
         """Clear cached prepared-state payloads used by reuse mode."""
 
@@ -751,6 +1551,356 @@ class FastMultipoleMethod:
         self._prepared_state_cache_value = None
         self._prepared_state_cache_positions = None
         self._prepared_state_cache_masses = None
+        self._topology_reuse_entry = None
+        self._recent_topology_reused = False
+
+    def clear_runtime_caches(
+        self: "FastMultipoleMethod", *, clear_jax_compilation: bool = False
+    ) -> None:
+        """Release solver/runtime caches to reduce memory pressure."""
+
+        self.clear_prepared_state_cache()
+        self._locals_template = None
+        self._interaction_cache = None
+        self._tree_workspace = None
+        self._last_force_scale_nodes = None
+        self._recent_retry_events = tuple()
+        self._recent_far_pairs_by_gear_counts = tuple()
+        _clear_global_runtime_caches(clear_jax_compilation=bool(clear_jax_compilation))
+
+    def export_m2l_autotune_cache(self: "FastMultipoleMethod") -> list[dict[str, Any]]:
+        """Return a JSON-serializable snapshot of global M2L autotune results."""
+
+        return _m2l_autotune_payload()
+
+    def import_m2l_autotune_cache(
+        self: "FastMultipoleMethod",
+        payload: list[dict[str, Any]],
+        *,
+        merge: bool = True,
+    ) -> int:
+        """Restore global M2L autotune results from serialized payload."""
+
+        return _restore_m2l_autotune_payload(payload, merge=bool(merge))
+
+    def save_m2l_autotune_cache(self: "FastMultipoleMethod", path: str) -> int:
+        """Write global M2L autotune cache to a JSON file."""
+
+        payload = self.export_m2l_autotune_cache()
+        with open(path, "w", encoding="utf-8") as handle:
+            json.dump(payload, handle)
+        return int(len(payload))
+
+    def load_m2l_autotune_cache(
+        self: "FastMultipoleMethod",
+        path: str,
+        *,
+        merge: bool = True,
+    ) -> int:
+        """Load global M2L autotune cache from a JSON file."""
+
+        with open(path, "r", encoding="utf-8") as handle:
+            payload = json.load(handle)
+        if not isinstance(payload, list):
+            raise ValueError("autotune cache JSON must contain a list payload")
+        return self.import_m2l_autotune_cache(payload, merge=bool(merge))
+
+    def _solidfmm_basis_mode(self: "FastMultipoleMethod") -> str:
+        """Return active solidfmm coefficient family ('complex' or 'real')."""
+        basis_obj = self.basis_impl
+        name = str(getattr(basis_obj, "name", "")).strip().lower()
+        if name == "real":
+            return "real"
+        return "complex"
+
+    def _compute_node_force_scale_from_sorted_acc(
+        self: "FastMultipoleMethod",
+        *,
+        tree: Tree,
+        accelerations_sorted: Array,
+        reduction: str = "max",
+    ) -> Array:
+        """Estimate per-node force scales from sorted per-particle accelerations."""
+
+        return compute_node_force_scale_from_sorted_acc(
+            tree=tree,
+            accelerations_sorted=accelerations_sorted,
+            reduction=reduction,
+        )
+
+    def _source_error_proxy_by_order_from_multipoles(
+        self: "FastMultipoleMethod",
+        *,
+        multipole_packed: Array,
+        p_gears: tuple[int, ...],
+    ) -> Array:
+        """Compute a conservative per-node residual proxy for each candidate order."""
+
+        return source_error_proxy_by_order_from_multipoles(
+            multipole_packed=multipole_packed,
+            p_gears=p_gears,
+        )
+
+    def _adaptive_error_model_code(self: "FastMultipoleMethod") -> int:
+        """Return the integer policy code for the active adaptive error model."""
+
+        if self.adaptive_error_model == "dehnen_paper":
+            return 2
+        if self.adaptive_error_model == "dehnen_degree":
+            return 1
+        return 0
+
+    def _uses_dehnen_error_policy(self: "FastMultipoleMethod") -> bool:
+        """Return whether traversal should use the Dehnen paper policy hook."""
+
+        return str(self.mac_type) == "dehnen_error"
+
+    def _uses_dehnen_paper_error_model(self: "FastMultipoleMethod") -> bool:
+        """Return whether the active adaptive error model is the paper estimator."""
+
+        return self.adaptive_error_model == "dehnen_paper"
+
+    def _uses_paper_style_traversal_policy(self: "FastMultipoleMethod") -> bool:
+        """Return whether traversal should use the paper-style error policy."""
+
+        return self._uses_dehnen_paper_error_model() or self._uses_dehnen_error_policy()
+
+    def _traversal_policy_error_model_code(self: "FastMultipoleMethod") -> int:
+        """Return the policy error model code used during traversal."""
+
+        if self._uses_dehnen_error_policy():
+            return 2
+        return self._adaptive_error_model_code()
+
+    def _force_scale_reduction_mode(self: "FastMultipoleMethod") -> str:
+        """Return the node reduction mode used for adaptive force scales."""
+
+        return "min" if self._uses_dehnen_paper_error_model() else "max"
+
+    def _uses_paper_style_force_scale(self: "FastMultipoleMethod") -> bool:
+        """Return whether prepare_state needs paper-style force-scale handling."""
+
+        return self.adaptive_order or self._uses_paper_style_traversal_policy()
+
+    def _base_mac_type(self: "FastMultipoleMethod") -> MACType:
+        """Return the Yggdrax-facing geometric MAC for the active solver mode."""
+
+        return "dehnen" if self._uses_dehnen_error_policy() else self.mac_type
+
+    def _policy_orders_for_prepare_state(
+        self: "FastMultipoleMethod", *, max_order: int
+    ) -> tuple[int, ...]:
+        """Return candidate orders used to build adaptive traversal policy state."""
+
+        if (not self.adaptive_order) and self._uses_dehnen_paper_error_model():
+            return (int(max_order),)
+        return self.p_gears
+
+    def _build_adaptive_policy_state(
+        self: "FastMultipoleMethod",
+        *,
+        upward: TreeUpwardData,
+        tree: Tree,
+        positions_sorted: Array,
+        p_gears: tuple[int, ...],
+        force_scale_nodes: Optional[Array],
+        eps: Array,
+        theta: Array,
+        error_model_code: Array,
+        dehnen_geometry_mode: str,
+    ):
+        """Build the solver-owned adaptive policy state from upward data."""
+
+        return build_adaptive_policy_state(
+            upward=upward,
+            tree=tree,
+            positions_sorted=positions_sorted,
+            p_gears=p_gears,
+            force_scale_nodes=force_scale_nodes,
+            eps=eps,
+            theta=theta,
+            error_model_code=error_model_code,
+            dehnen_geometry_mode=dehnen_geometry_mode,
+        )
+
+    def _compute_force_scale_paper_prepass_from_tree_artifacts(
+        self: "FastMultipoleMethod",
+        *,
+        tree_artifacts: _PrepareStateTreeUpwardArtifacts,
+        low_order: int,
+        theta_val: float,
+        upward_center_mode: str,
+        runtime_traversal_config: Optional[DualTreeTraversalConfig],
+        runtime_m2l_chunk_size: Optional[int],
+        runtime_l2l_chunk_size: Optional[int],
+        grouped_interactions: bool,
+        farfield_mode: str,
+        record_retry: Callable[[DualTreeRetryEvent], None],
+        refine_local_val: bool,
+        max_refine_levels_val: int,
+        aspect_threshold_val: float,
+    ) -> Array:
+        """Compute paper-mode force scales via a low-order prepass on the current tree."""
+
+        low_upward = self.prepare_upward_sweep(
+            tree_artifacts.tree,
+            tree_artifacts.positions_sorted,
+            tree_artifacts.masses_sorted,
+            max_order=int(low_order),
+            center_mode=upward_center_mode,
+            max_leaf_size=tree_artifacts.leaf_cap,
+        )
+        low_locals_template = self._build_locals_template_for_prepare_state(
+            tree=tree_artifacts.tree,
+            upward=low_upward,
+            max_order=int(low_order),
+            pos_sorted=tree_artifacts.positions_sorted,
+        )
+        low_tree_artifacts = _PrepareStateTreeUpwardArtifacts(
+            tree_mode=tree_artifacts.tree_mode,
+            tree=tree_artifacts.tree,
+            positions_sorted=tree_artifacts.positions_sorted,
+            masses_sorted=tree_artifacts.masses_sorted,
+            inverse_permutation=tree_artifacts.inverse_permutation,
+            leaf_cap=tree_artifacts.leaf_cap,
+            leaf_parameter=tree_artifacts.leaf_parameter,
+            topology_key=tree_artifacts.topology_key,
+            upward=low_upward,
+            locals_template=low_locals_template,
+        )
+
+        saved_p_gears = self.p_gears
+        saved_adaptive_order = self.adaptive_order
+        saved_adaptive_error_model = self.adaptive_error_model
+        saved_mac_type = self.mac_type
+        saved_recent_counts = self._recent_far_pairs_by_gear_counts
+        self._in_force_scale_prepass = True
+        try:
+            self.p_gears = (int(low_order),)
+            self.adaptive_order = False
+            self.adaptive_error_model = "tail_proxy"
+            self.mac_type = "dehnen"
+            dual_downward_artifacts = self._prepare_state_dual_and_downward(
+                tree_artifacts=low_tree_artifacts,
+                force_scale_nodes=None,
+                upward_center_mode=upward_center_mode,
+                theta_val=theta_val,
+                mac_type_val=self.mac_type,
+                dehnen_radius_scale=self.dehnen_radius_scale,
+                runtime_traversal_config=runtime_traversal_config,
+                runtime_m2l_chunk_size=runtime_m2l_chunk_size,
+                runtime_l2l_chunk_size=runtime_l2l_chunk_size,
+                grouped_interactions=grouped_interactions,
+                farfield_mode=farfield_mode,
+                record_retry=record_retry,
+                refine_local_val=refine_local_val,
+                max_refine_levels_val=max_refine_levels_val,
+                aspect_threshold_val=aspect_threshold_val,
+                allow_stateful_cache=False,
+            )
+            prepass_octree = build_octree_execution_data(low_tree_artifacts.tree)
+            prepass_execution_backend = self._resolve_execution_backend()
+            prepass_octree_native_neighbors = None
+            if prepass_execution_backend == "octree" and prepass_octree is not None:
+                prepass_octree_native_neighbors = build_octree_native_neighbor_lists(
+                    low_tree_artifacts.tree,
+                    low_tree_artifacts.upward.geometry,
+                    theta=theta_val,
+                    mac_type=mac_type_val,
+                    dehnen_radius_scale=self.dehnen_radius_scale,
+                    max_pair_queue=self.max_pair_queue,
+                    process_block=self.pair_process_block,
+                    traversal_config=runtime_traversal_config,
+                )
+            prepass_nearfield_interop = _build_nearfield_interop_data(
+                low_tree_artifacts.tree,
+                dual_downward_artifacts.neighbor_list,
+                octree=prepass_octree,
+                native_neighbors=prepass_octree_native_neighbors,
+            )
+            nearfield_artifacts = self._prepare_state_nearfield_artifacts(
+                neighbor_list=dual_downward_artifacts.neighbor_list,
+                nearfield_interop=prepass_nearfield_interop,
+                leaf_cap=low_tree_artifacts.leaf_cap,
+                num_particles=int(low_tree_artifacts.positions_sorted.shape[0]),
+                cache_entry=dual_downward_artifacts.cache_entry,
+                allow_stateful_cache=False,
+            )
+            prepass_octree_upward = _build_octree_upward_artifacts(
+                octree=prepass_octree,
+                positions_sorted=low_tree_artifacts.positions_sorted,
+                masses_sorted=low_tree_artifacts.masses_sorted,
+                expansion_basis=self.expansion_basis,
+                max_order=int(low_order),
+            )
+            prepass_octree_native_far_pairs = None
+            if prepass_execution_backend == "octree" and prepass_octree is not None:
+                prepass_octree_native_far_pairs = build_octree_native_far_pairs(
+                    low_tree_artifacts.tree,
+                    low_tree_artifacts.upward.geometry,
+                    theta=theta_val,
+                    mac_type=mac_type_val,
+                    dehnen_radius_scale=self.dehnen_radius_scale,
+                    max_pair_queue=self.max_pair_queue,
+                    process_block=self.pair_process_block,
+                    traversal_config=runtime_traversal_config,
+                )
+            prepass_octree_downward = _build_octree_downward_artifacts(
+                octree=prepass_octree,
+                octree_upward=prepass_octree_upward,
+                interactions=dual_downward_artifacts.interactions,
+                native_far_pairs=prepass_octree_native_far_pairs,
+                execution_backend=prepass_execution_backend,
+            )
+            prepass_state = FMMPreparedState(
+                tree=low_tree_artifacts.tree,
+                upward=low_tree_artifacts.upward,
+                downward=dual_downward_artifacts.downward,
+                neighbor_list=dual_downward_artifacts.neighbor_list,
+                max_leaf_size=low_tree_artifacts.leaf_cap,
+                input_dtype=low_tree_artifacts.positions_sorted.dtype,
+                working_dtype=low_tree_artifacts.positions_sorted.dtype,
+                expansion_basis=self.expansion_basis,
+                theta=theta_val,
+                topology_key=low_tree_artifacts.topology_key,
+                interactions=dual_downward_artifacts.interactions,
+                dual_tree_result=dual_downward_artifacts.traversal_result,
+                retry_events=tuple(),
+                nearfield_interop=prepass_nearfield_interop,
+                nearfield_target_leaf_ids=nearfield_artifacts.target_leaf_ids,
+                nearfield_source_leaf_ids=nearfield_artifacts.source_leaf_ids,
+                nearfield_valid_pairs=nearfield_artifacts.valid_pairs,
+                nearfield_chunk_sort_indices=nearfield_artifacts.chunk_sort_indices,
+                nearfield_chunk_group_ids=nearfield_artifacts.chunk_group_ids,
+                nearfield_chunk_unique_indices=nearfield_artifacts.chunk_unique_indices,
+                force_scale_nodes=None,
+                execution_backend=prepass_execution_backend,
+                octree=prepass_octree,
+                octree_upward=prepass_octree_upward,
+                octree_downward=_finalize_octree_downward_artifacts(
+                    octree=prepass_octree,
+                    octree_upward=prepass_octree_upward,
+                    octree_downward=prepass_octree_downward,
+                    expansion_basis=self.expansion_basis,
+                    execution_backend=prepass_execution_backend,
+                    m2l_chunk_size=runtime_m2l_chunk_size,
+                ),
+            )
+            prepass_acc = self.evaluate_prepared_state(
+                prepass_state,
+                return_potential=False,
+                jit_traversal=False,
+            )
+        finally:
+            self.p_gears = saved_p_gears
+            self.adaptive_order = saved_adaptive_order
+            self.adaptive_error_model = saved_adaptive_error_model
+            self.mac_type = saved_mac_type
+            self._recent_far_pairs_by_gear_counts = saved_recent_counts
+            self._in_force_scale_prepass = False
+
+        sorted_idx = jnp.argsort(low_tree_artifacts.inverse_permutation)
+        return jnp.asarray(prepass_acc)[sorted_idx]
 
     def _prepared_state_cache_lookup(
         self,
@@ -847,11 +1997,15 @@ class FastMultipoleMethod:
 
         backend_name = jax.default_backend() if backend is None else str(backend)
         n_particles = int(num_particles)
+        minimum_memory = self.memory_objective == "minimum_memory"
         large_cpu = (
             backend_name == "cpu" and n_particles >= _LARGE_CPU_PARTICLE_THRESHOLD
         )
         class_major_cpu = (
             backend_name == "cpu" and n_particles >= _CLASS_MAJOR_CPU_PARTICLE_THRESHOLD
+        )
+        class_major_gpu = (
+            backend_name == "gpu" and n_particles >= _GPU_LARGE_PARTICLE_THRESHOLD
         )
 
         if self.host_refine_mode == "off":
@@ -861,7 +2015,9 @@ class FastMultipoleMethod:
         elif (
             large_cpu
             and self.tree_type == "radix"
-            and self.tree_build_mode == "fixed_depth"
+            and self.preset == "fast"
+            and self.expansion_basis == "solidfmm"
+            and self.mac_type == "dehnen"
         ):
             refine_local_override = False
 
@@ -879,10 +2035,30 @@ class FastMultipoleMethod:
             and self.expansion_basis == "solidfmm"
             and self.mac_type == "dehnen"
             and self.tree_type == "radix"
-            and self.tree_build_mode == "fixed_depth"
             and large_cpu
+            and not minimum_memory
         ):
             grouped_interactions = True
+        if (
+            not self._explicit_grouped_interactions
+            and self.preset in ("fast", "large_n_gpu")
+            and self.expansion_basis == "solidfmm"
+            and self.mac_type == "dehnen"
+            and self.tree_type == "radix"
+            and backend_name == "gpu"
+            and n_particles >= _GPU_LARGE_PARTICLE_THRESHOLD
+            and not minimum_memory
+        ):
+            grouped_interactions = True
+
+        if self.streamed_far_pairs and grouped_interactions:
+            # Streamed far-pair execution and grouped/class-major M2L are
+            # competing strategies. The grouped path overrides streaming in the
+            # downward sweep, so keeping both enabled only pays the grouped
+            # traversal/materialization cost while defeating the user's request
+            # for streamed execution.
+            grouped_interactions = False
+            farfield_mode = "pair_grouped"
 
         if (
             self.preset == "fast"
@@ -901,12 +2077,107 @@ class FastMultipoleMethod:
                 m2l_chunk_size = _LARGE_CPU_M2L_CHUNK_SIZE
             if not self._explicit_l2l_chunk_size:
                 l2l_chunk_size = self.l2l_chunk_size
+        if (
+            backend_name == "gpu"
+            and self.tree_type == "radix"
+            and traversal_config is not None
+            and not self._explicit_traversal_config
+            and n_particles >= _GPU_LARGE_PARTICLE_THRESHOLD
+        ):
+            current_queue = int(traversal_config.max_pair_queue)
+            current_block = int(traversal_config.process_block)
+            current_interactions = int(traversal_config.max_interactions_per_node)
+            current_neighbors = int(traversal_config.max_neighbors_per_leaf)
+
+            if minimum_memory:
+                target_queue = _GPU_MINIMUM_MEMORY_PAIR_QUEUE
+                target_block = _GPU_MINIMUM_MEMORY_PROCESS_BLOCK
+                target_interactions = _GPU_MINIMUM_MEMORY_INTERACTIONS_PER_NODE
+                target_neighbors = _GPU_MINIMUM_MEMORY_NEIGHBORS_PER_LEAF
+            elif n_particles >= 4_194_304:
+                target_queue = _GPU_MIN_PAIR_QUEUE_XL
+                target_block = current_block
+                target_interactions = _GPU_MIN_INTERACTIONS_PER_NODE
+                target_neighbors = _GPU_MIN_NEIGHBORS_PER_LEAF
+            elif n_particles >= 1_048_576:
+                target_queue = _GPU_MIN_PAIR_QUEUE_LARGE
+                target_block = current_block
+                target_interactions = _GPU_MIN_INTERACTIONS_PER_NODE
+                target_neighbors = _GPU_MIN_NEIGHBORS_PER_LEAF
+            else:
+                target_queue = _GPU_MIN_PAIR_QUEUE_MEDIUM
+                target_block = current_block
+                target_interactions = _GPU_MIN_INTERACTIONS_PER_NODE
+                target_neighbors = _GPU_MIN_NEIGHBORS_PER_LEAF
+
+            if minimum_memory:
+                next_queue = min(current_queue, int(target_queue))
+                next_block = min(current_block, int(target_block))
+                next_interactions = min(current_interactions, int(target_interactions))
+                next_neighbors = min(current_neighbors, int(target_neighbors))
+            else:
+                next_queue = max(current_queue, int(target_queue))
+                next_block = current_block
+                next_interactions = min(
+                    max(current_interactions, int(target_interactions)),
+                    int(_GPU_MAX_INTERACTIONS_PER_NODE),
+                )
+                next_neighbors = min(
+                    max(current_neighbors, int(target_neighbors)),
+                    int(_GPU_MAX_NEIGHBORS_PER_LEAF),
+                )
+            if (
+                next_queue != current_queue
+                or next_block != current_block
+                or next_interactions != current_interactions
+                or next_neighbors != current_neighbors
+            ):
+                traversal_config = DualTreeTraversalConfig(
+                    max_pair_queue=int(next_queue),
+                    process_block=int(next_block),
+                    max_interactions_per_node=int(next_interactions),
+                    max_neighbors_per_leaf=int(next_neighbors),
+                )
+        if (
+            minimum_memory
+            and backend_name == "gpu"
+            and self.tree_type == "radix"
+            and not self._explicit_traversal_config
+            and not self._explicit_max_pair_queue
+            and not self._explicit_pair_process_block
+        ):
+            # The Yggdrax count-pass auto-sizing path is still too expensive on
+            # large GPU radix trees. Keep the large-N minimum-memory route on a
+            # bounded explicit traversal config so host-side retry can grow from
+            # a safe baseline without compiling the count-pass kernel.
+            traversal_config = DualTreeTraversalConfig(
+                max_pair_queue=int(_GPU_MINIMUM_MEMORY_PAIR_QUEUE),
+                process_block=int(_GPU_MINIMUM_MEMORY_PROCESS_BLOCK),
+                max_interactions_per_node=int(
+                    _GPU_MINIMUM_MEMORY_INTERACTIONS_PER_NODE
+                ),
+                max_neighbors_per_leaf=int(_GPU_MINIMUM_MEMORY_NEIGHBORS_PER_LEAF),
+            )
         if grouped_interactions:
             center_mode = "aabb"
             if farfield_mode == "auto":
-                farfield_mode = "class_major" if class_major_cpu else "pair_grouped"
+                if minimum_memory:
+                    farfield_mode = "pair_grouped"
+                else:
+                    farfield_mode = (
+                        "class_major"
+                        if (class_major_cpu or class_major_gpu)
+                        else "pair_grouped"
+                    )
         else:
             farfield_mode = "pair_grouped"
+
+        if minimum_memory and not self._explicit_m2l_chunk_size:
+            m2l_chunk_size = (
+                _MINIMUM_MEMORY_GPU_M2L_CHUNK_SIZE
+                if backend_name == "gpu"
+                else _MINIMUM_MEMORY_CPU_M2L_CHUNK_SIZE
+            )
 
         return _RuntimeExecutionOverrides(
             traversal_config=traversal_config,
@@ -933,6 +2204,10 @@ class FastMultipoleMethod:
         if traversal_config is None or self._explicit_traversal_config:
             return traversal_config
 
+        current_queue = int(traversal_config.max_pair_queue)
+        capped_queue = min(current_queue, _TRACING_MAX_PAIR_QUEUE)
+        current_block = int(traversal_config.process_block)
+        capped_block = min(current_block, _TRACING_MAX_PROCESS_BLOCK)
         current_neighbors = int(traversal_config.max_neighbors_per_leaf)
         capped_neighbors = min(current_neighbors, _TRACING_MAX_NEIGHBORS_PER_LEAF)
         current_interactions = int(traversal_config.max_interactions_per_node)
@@ -940,17 +2215,256 @@ class FastMultipoleMethod:
             current_interactions, _TRACING_MAX_INTERACTIONS_PER_NODE
         )
         if (
-            capped_neighbors == current_neighbors
+            capped_queue == current_queue
+            and capped_block == current_block
+            and capped_neighbors == current_neighbors
             and capped_interactions == current_interactions
         ):
             return traversal_config
 
         return DualTreeTraversalConfig(
-            max_pair_queue=int(traversal_config.max_pair_queue),
-            process_block=int(traversal_config.process_block),
+            max_pair_queue=int(capped_queue),
+            process_block=int(capped_block),
             max_interactions_per_node=int(capped_interactions),
             max_neighbors_per_leaf=int(capped_neighbors),
         )
+
+    def _select_autotune_m2l_candidates(self, *, pair_count: int) -> tuple[int, ...]:
+        """Return candidate chunk sizes for one pair-count regime."""
+
+        pairs = int(pair_count)
+        if pairs < _GPU_M2L_AUTOTUNE_PAIR_BINS[0]:
+            return _GPU_M2L_AUTOTUNE_SMALL_CANDIDATES
+        if pairs < _GPU_M2L_AUTOTUNE_PAIR_BINS[1]:
+            return _GPU_M2L_AUTOTUNE_MEDIUM_CANDIDATES
+        if pairs < _GPU_M2L_AUTOTUNE_PAIR_BINS[2]:
+            return _GPU_M2L_AUTOTUNE_LARGE_CANDIDATES
+        return _GPU_M2L_AUTOTUNE_XL_CANDIDATES
+
+    def _sample_and_remap_far_pairs_for_autotune(
+        self,
+        *,
+        src: Array,
+        tgt: Array,
+        max_pairs: int = _GPU_M2L_AUTOTUNE_MAX_SAMPLE_PAIRS,
+        max_nodes: int = _GPU_M2L_AUTOTUNE_MAX_SAMPLE_NODES,
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        """Sample far pairs and remap node ids to a compact contiguous range."""
+
+        src_np = np.asarray(jax.device_get(src), dtype=np.int64).reshape(-1)
+        tgt_np = np.asarray(jax.device_get(tgt), dtype=np.int64).reshape(-1)
+        pair_count = int(src_np.shape[0])
+        if pair_count == 0:
+            return (
+                np.zeros((0,), dtype=np.int32),
+                np.zeros((0,), dtype=np.int32),
+                np.zeros((0,), dtype=np.int64),
+            )
+
+        stride = max(1, pair_count // int(max_pairs))
+        src_view = src_np[::stride]
+        tgt_view = tgt_np[::stride]
+        if src_view.shape[0] > int(max_pairs):
+            src_view = src_view[: int(max_pairs)]
+            tgt_view = tgt_view[: int(max_pairs)]
+
+        node_to_local: dict[int, int] = {}
+        local_to_global: list[int] = []
+        src_local: list[int] = []
+        tgt_local: list[int] = []
+        max_nodes_int = int(max_nodes)
+        for src_i, tgt_i in zip(src_view.tolist(), tgt_view.tolist()):
+            src_g = int(src_i)
+            tgt_g = int(tgt_i)
+            src_local_id = node_to_local.get(src_g)
+            if src_local_id is None:
+                if len(local_to_global) >= max_nodes_int:
+                    continue
+                src_local_id = len(local_to_global)
+                node_to_local[src_g] = src_local_id
+                local_to_global.append(src_g)
+            tgt_local_id = node_to_local.get(tgt_g)
+            if tgt_local_id is None:
+                if len(local_to_global) >= max_nodes_int:
+                    continue
+                tgt_local_id = len(local_to_global)
+                node_to_local[tgt_g] = tgt_local_id
+                local_to_global.append(tgt_g)
+            src_local.append(src_local_id)
+            tgt_local.append(tgt_local_id)
+
+        return (
+            np.asarray(src_local, dtype=np.int32),
+            np.asarray(tgt_local, dtype=np.int32),
+            np.asarray(local_to_global, dtype=np.int64),
+        )
+
+    def _autotune_runtime_m2l_chunk_size(
+        self,
+        *,
+        upward: TreeUpwardData,
+        src: Array,
+        tgt: Array,
+        order: int,
+        pair_count: int,
+    ) -> Optional[int]:
+        """Auto-select M2L chunk size on GPU for streamed far-pair execution."""
+
+        if (
+            not bool(self.autotune_m2l_chunk)
+            or self.expansion_basis != "solidfmm"
+            or jax.default_backend() != "gpu"
+            or int(pair_count) <= 0
+        ):
+            return None
+
+        basis_mode = self._solidfmm_basis_mode()
+        order_int = int(order)
+        pair_count_int = int(pair_count)
+        dtype_name = str(jnp.asarray(upward.multipoles.centers).dtype)
+        pair_bin = 0
+        for idx, upper in enumerate(_GPU_M2L_AUTOTUNE_PAIR_BINS):
+            if pair_count_int < int(upper):
+                pair_bin = idx
+                break
+        else:
+            pair_bin = len(_GPU_M2L_AUTOTUNE_PAIR_BINS)
+        key = (
+            "gpu",
+            str(basis_mode),
+            dtype_name,
+            order_int,
+            str(self.complex_rotation),
+            "" if self.m2l_impl is None else str(self.m2l_impl),
+            int(bool(self.use_pallas)),
+            int(pair_bin),
+        )
+        cached = _m2l_autotune_lookup(key)
+        if cached is not None:
+            return int(cached)
+
+        candidates = self._select_autotune_m2l_candidates(pair_count=pair_count_int)
+        (
+            src_sample_np,
+            tgt_sample_np,
+            local_to_global_np,
+        ) = self._sample_and_remap_far_pairs_for_autotune(src=src, tgt=tgt)
+        if src_sample_np.size == 0 or local_to_global_np.size == 0:
+            return None
+
+        local_to_global = jnp.asarray(local_to_global_np, dtype=INDEX_DTYPE)
+        src_sample = jnp.asarray(src_sample_np, dtype=INDEX_DTYPE)
+        tgt_sample = jnp.asarray(tgt_sample_np, dtype=INDEX_DTYPE)
+        centers = jnp.asarray(upward.multipoles.centers)[local_to_global]
+        coeff_count = sh_size(order_int)
+        if basis_mode == "complex":
+            coeff_dtype = complex_dtype_for_real(centers.dtype)
+            multip_all = jnp.asarray(upward.multipoles.packed).astype(coeff_dtype)
+        else:
+            coeff_dtype = centers.dtype
+            multip_all = complex_to_real_coeffs(
+                jnp.asarray(upward.multipoles.packed), order=order_int
+            ).astype(coeff_dtype)
+        multip = multip_all[local_to_global, :coeff_count]
+        locals0 = jnp.zeros(
+            (int(local_to_global_np.shape[0]), int(coeff_count)),
+            dtype=coeff_dtype,
+        )
+        total_nodes = int(local_to_global_np.shape[0])
+        best_chunk: Optional[int] = None
+        best_time = math.inf
+
+        for chunk in candidates:
+            chunk_int = int(chunk)
+            if chunk_int <= 0:
+                continue
+            try:
+                if basis_mode == "complex":
+                    _ = _accumulate_solidfmm_m2l_chunked_scan(
+                        locals0,
+                        multip,
+                        centers,
+                        src_sample,
+                        tgt_sample,
+                        order=order_int,
+                        rotation=str(self.complex_rotation),
+                        total_nodes=total_nodes,
+                        chunk_size=chunk_int,
+                    ).block_until_ready()
+                    t0 = time.perf_counter()
+                    _ = _accumulate_solidfmm_m2l_chunked_scan(
+                        locals0,
+                        multip,
+                        centers,
+                        src_sample,
+                        tgt_sample,
+                        order=order_int,
+                        rotation=str(self.complex_rotation),
+                        total_nodes=total_nodes,
+                        chunk_size=chunk_int,
+                    ).block_until_ready()
+                else:
+                    m2l_impl = (
+                        "rot_scale" if self.m2l_impl is None else str(self.m2l_impl)
+                    )
+                    if self.use_pallas:
+                        _ = _accumulate_real_m2l_chunked_scan_pallas(
+                            locals0,
+                            multip,
+                            centers,
+                            src_sample,
+                            tgt_sample,
+                            order=order_int,
+                            m2l_impl=m2l_impl,
+                            total_nodes=total_nodes,
+                            chunk_size=chunk_int,
+                        ).block_until_ready()
+                        t0 = time.perf_counter()
+                        _ = _accumulate_real_m2l_chunked_scan_pallas(
+                            locals0,
+                            multip,
+                            centers,
+                            src_sample,
+                            tgt_sample,
+                            order=order_int,
+                            m2l_impl=m2l_impl,
+                            total_nodes=total_nodes,
+                            chunk_size=chunk_int,
+                        ).block_until_ready()
+                    else:
+                        _ = _accumulate_real_m2l_chunked_scan(
+                            locals0,
+                            multip,
+                            centers,
+                            src_sample,
+                            tgt_sample,
+                            order=order_int,
+                            m2l_impl=m2l_impl,
+                            total_nodes=total_nodes,
+                            chunk_size=chunk_int,
+                        ).block_until_ready()
+                        t0 = time.perf_counter()
+                        _ = _accumulate_real_m2l_chunked_scan(
+                            locals0,
+                            multip,
+                            centers,
+                            src_sample,
+                            tgt_sample,
+                            order=order_int,
+                            m2l_impl=m2l_impl,
+                            total_nodes=total_nodes,
+                            chunk_size=chunk_int,
+                        ).block_until_ready()
+                elapsed = float(time.perf_counter() - t0)
+            except Exception:
+                continue
+            if elapsed < best_time:
+                best_time = elapsed
+                best_chunk = chunk_int
+
+        if best_chunk is not None:
+            _m2l_autotune_store(key, int(best_chunk))
+        return best_chunk
 
     def _validate_prepare_state_request(
         self,
@@ -1007,6 +2521,93 @@ class FastMultipoleMethod:
             jnp.asarray(max_corner, dtype=positions.dtype),
         )
 
+    def _topology_reuse_candidate(
+        self,
+        *,
+        positions: Array,
+        bounds: Tuple[Array, Array],
+        tree_config: TreeBuilderConfig,
+        leaf_size: int,
+        refine_local: bool,
+        max_refine_levels: int,
+        aspect_threshold: float,
+        allow_stateful_cache: bool,
+    ) -> Optional[_TopologyReuseCandidate]:
+        """Return a radix-topology reuse signature when host-side caching is safe."""
+
+        if (
+            not self.reuse_topology
+            or not allow_stateful_cache
+            or self.tree_type != "radix"
+        ):
+            return None
+        try:
+            morton_codes = morton_encode(positions, bounds)
+            orig_idx = jnp.arange(positions.shape[0], dtype=INDEX_DTYPE)
+            sorted_indices = jnp.lexsort((orig_idx, morton_codes))
+            sorted_codes = morton_codes[sorted_indices]
+            hasher = hashlib.sha256()
+            hasher.update(
+                np.asarray(jax.device_get(sorted_codes), dtype=np.uint64).tobytes()
+            )
+            hasher.update(
+                np.asarray(jax.device_get(sorted_indices), dtype=np.int64).tobytes()
+            )
+            hasher.update(str(tree_config.mode).encode("utf8"))
+            leaf_param = (
+                int(leaf_size)
+                if tree_config.mode == "lbvh"
+                else int(tree_config.target_leaf_particles)
+            )
+            hasher.update(np.asarray(leaf_param, dtype=np.int64).tobytes())
+            hasher.update(np.asarray(int(bool(refine_local)), dtype=np.int64).tobytes())
+            hasher.update(np.asarray(int(max_refine_levels), dtype=np.int64).tobytes())
+            hasher.update(
+                np.asarray(float(aspect_threshold), dtype=np.float64).tobytes()
+            )
+        except Exception:
+            return None
+        return _TopologyReuseCandidate(
+            key=hasher.hexdigest(),
+            sorted_indices=jnp.asarray(sorted_indices, dtype=INDEX_DTYPE),
+        )
+
+    def _rebuild_tree_artifacts_from_topology(
+        self,
+        *,
+        candidate: _TopologyReuseCandidate,
+        entry: _TopologyReuseEntry,
+        positions: Array,
+        masses: Array,
+    ) -> _TreeBuildArtifacts:
+        """Reorder particles and attach them to a cached radix topology."""
+
+        positions_sorted, masses_sorted, inverse = reorder_particles_by_indices(
+            positions,
+            masses,
+            candidate.sorted_indices,
+        )
+        cached_tree = entry.tree
+        if not isinstance(cached_tree, RadixTree):
+            raise ValueError("topology reuse currently supports radix trees only")
+        rebuilt_tree = RadixTree(
+            topology=cached_tree.topology,
+            build_mode=cached_tree.build_mode,
+            positions_sorted=positions_sorted,
+            masses_sorted=masses_sorted,
+            inverse_permutation=inverse,
+            workspace=cached_tree.workspace,
+        )
+        return _TreeBuildArtifacts(
+            tree=rebuilt_tree,
+            positions_sorted=positions_sorted,
+            masses_sorted=masses_sorted,
+            inverse_permutation=inverse,
+            workspace=cached_tree.workspace,
+            max_leaf_size=int(entry.max_leaf_size),
+            cache_leaf_parameter=int(entry.cache_leaf_parameter),
+        )
+
     def _build_locals_template_for_prepare_state(
         self,
         *,
@@ -1017,14 +2618,10 @@ class FastMultipoleMethod:
     ) -> Optional[LocalExpansionData]:
         """Build initial local-expansion buffers matching the active basis."""
         if self.expansion_basis == "solidfmm":
-            total_nodes = int(tree.parent.shape[0])
-            coeff_count = sh_size(max_order)
-            coeff_dtype = complex_dtype_for_real(pos_sorted.dtype)
-            return LocalExpansionData(
-                order=max_order,
-                centers=upward.multipoles.centers,
-                coefficients=jnp.zeros((total_nodes, coeff_count), dtype=coeff_dtype),
-            )
+            # Solid-FMM does not reuse a cached locals template across prepare calls.
+            # Let the downward pass allocate its accumulator on demand so we do not
+            # hold a redundant zero buffer alive across dual-tree staging.
+            return None
 
         template = self._locals_template
         total_nodes = int(tree.parent.shape[0])
@@ -1083,27 +2680,91 @@ class FastMultipoleMethod:
             jit_tree_override=jit_tree_override,
         )
 
-        build_artifacts = _build_tree_with_config(
-            positions_arr,
-            masses_arr,
-            inferred_bounds,
-            tree_type=self.tree_type,
+        topology_candidate = self._topology_reuse_candidate(
+            positions=positions_arr,
+            bounds=inferred_bounds,
             tree_config=tree_config,
             leaf_size=int(leaf_size),
-            workspace=(self._tree_workspace if allow_stateful_cache else None),
-            jit_tree=jit_tree_flag,
             refine_local=refine_local_val,
             max_refine_levels=max_refine_levels_val,
             aspect_threshold=aspect_threshold_val,
+            allow_stateful_cache=allow_stateful_cache,
         )
-        if allow_stateful_cache:
-            self._tree_workspace = build_artifacts.workspace
+        self._recent_topology_reused = False
+        cached_topology = self._topology_reuse_entry
+        can_reuse_cached_topology = (
+            topology_candidate is not None
+            and cached_topology is not None
+            and topology_candidate.key == cached_topology.key
+            and cached_topology.reuse_count < (self.rebuild_every - 1)
+        )
+
+        if can_reuse_cached_topology:
+            build_artifacts = self._rebuild_tree_artifacts_from_topology(
+                candidate=topology_candidate,
+                entry=cached_topology,
+                positions=positions_arr,
+                masses=masses_arr,
+            )
+            self._recent_topology_reused = True
+            self._topology_reuse_entry = _TopologyReuseEntry(
+                key=cached_topology.key,
+                tree=build_artifacts.tree,
+                max_leaf_size=int(cached_topology.max_leaf_size),
+                cache_leaf_parameter=int(cached_topology.cache_leaf_parameter),
+                reuse_count=int(cached_topology.reuse_count) + 1,
+            )
+        else:
+            build_artifacts = _build_tree_with_config(
+                positions_arr,
+                masses_arr,
+                inferred_bounds,
+                tree_type=self.tree_type,
+                tree_config=tree_config,
+                leaf_size=int(leaf_size),
+                workspace=(self._tree_workspace if allow_stateful_cache else None),
+                jit_tree=jit_tree_flag,
+                refine_local=refine_local_val,
+                max_refine_levels=max_refine_levels_val,
+                aspect_threshold=aspect_threshold_val,
+            )
+            if allow_stateful_cache:
+                self._tree_workspace = build_artifacts.workspace
+                if topology_candidate is not None:
+                    self._topology_reuse_entry = _TopologyReuseEntry(
+                        key=topology_candidate.key,
+                        tree=build_artifacts.tree,
+                        max_leaf_size=int(build_artifacts.max_leaf_size),
+                        cache_leaf_parameter=int(build_artifacts.cache_leaf_parameter),
+                        reuse_count=0,
+                    )
+                elif self.reuse_topology:
+                    self._topology_reuse_entry = None
 
         tree = build_artifacts.tree
         pos_sorted = build_artifacts.positions_sorted
         mass_sorted = build_artifacts.masses_sorted
+        total_nodes = int(tree.parent.shape[0])
+        num_internal = int(tree.num_internal_nodes)
+        num_leaves = int(total_nodes - num_internal)
+        _prepare_diag(
+            "tree built "
+            f"particles={int(pos_sorted.shape[0])} leaf_size={int(leaf_size)} "
+            f"total_nodes={total_nodes} num_internal={num_internal} num_leaves={num_leaves} "
+            f"tree_type={self.tree_type} tree_mode={tree_config.mode} jit_tree={bool(jit_tree_flag)}"
+        )
         # Keep one leaf-size contract in eager and traced paths.
         leaf_cap_hint = int(build_artifacts.max_leaf_size)
+        upward_leaf_batch = (
+            int(self.upward_leaf_batch_size)
+            if self.upward_leaf_batch_size is not None
+            else None
+        )
+        _prepare_diag(
+            "upward start "
+            f"max_order={int(max_order)} center_mode={upward_center_mode} "
+            f"leaf_cap={leaf_cap_hint} upward_leaf_batch_size={upward_leaf_batch}"
+        )
         upward = self.prepare_upward_sweep(
             tree,
             pos_sorted,
@@ -1111,6 +2772,11 @@ class FastMultipoleMethod:
             max_order=max_order,
             center_mode=upward_center_mode,
             max_leaf_size=leaf_cap_hint,
+        )
+        _prepare_diag(
+            "upward done "
+            f"multipole_order={int(upward.multipoles.order)} "
+            f"multipole_shape={tuple(int(v) for v in upward.multipoles.packed.shape)}"
         )
         locals_template = self._build_locals_template_for_prepare_state(
             tree=tree,
@@ -1127,6 +2793,7 @@ class FastMultipoleMethod:
             inverse_permutation=build_artifacts.inverse_permutation,
             leaf_cap=leaf_cap_hint,
             leaf_parameter=build_artifacts.cache_leaf_parameter,
+            topology_key=None if topology_candidate is None else topology_candidate.key,
             upward=upward,
             locals_template=locals_template,
         )
@@ -1135,6 +2802,7 @@ class FastMultipoleMethod:
         self,
         *,
         tree_artifacts: _PrepareStateTreeUpwardArtifacts,
+        force_scale_nodes: Optional[Array],
         upward_center_mode: str,
         theta_val: float,
         mac_type_val: MACType,
@@ -1150,24 +2818,102 @@ class FastMultipoleMethod:
         aspect_threshold_val: float,
         allow_stateful_cache: bool,
     ) -> _PrepareStateDualDownwardArtifacts:
-        """Build/reuse interactions and prepare downward artifacts."""
-        cache_key = _interaction_cache_key(
-            tree_artifacts.tree,
-            tree_mode=tree_artifacts.tree_mode,
-            leaf_parameter=tree_artifacts.leaf_parameter,
-            theta=theta_val,
-            mac_type=mac_type_val,
-            dehnen_radius_scale=dehnen_radius_scale,
-            expansion_basis=self.expansion_basis,
-            center_mode=upward_center_mode,
-            max_pair_queue=self.max_pair_queue,
-            pair_process_block=self.pair_process_block,
-            traversal_config=runtime_traversal_config,
-            refine_local=refine_local_val,
-            max_refine_levels=max_refine_levels_val,
-            aspect_threshold=aspect_threshold_val,
-        )
+        """Build/reuse interactions and prepare downward artifacts.
 
+        Memory note:
+        The dominant warm prepare peak is usually the far-field payload that
+        exists long enough to feed M2L: raw interactions or streamed COO pairs,
+        optional grouped layouts, and the downward locals buffer. Only the
+        returned ``TreeDownwardData`` is meant to survive into prepared state;
+        grouped schedules and other M2L feed artifacts are transient and should
+        stay scoped to this helper.
+        """
+        pair_policy = None
+        policy_state = None
+        cache_key = None
+        use_paper_fixed_policy = (not self.adaptive_order) and (
+            self._uses_paper_style_traversal_policy()
+        )
+        if self.adaptive_order or use_paper_fixed_policy:
+            policy_orders = self.p_gears
+            if use_paper_fixed_policy:
+                policy_orders = (int(tree_artifacts.upward.multipoles.order),)
+            if len(policy_orders) == 0:
+                raise ValueError("adaptive traversal policy requires non-empty orders")
+            policy_state = self._build_adaptive_policy_state(
+                upward=tree_artifacts.upward,
+                tree=tree_artifacts.tree,
+                positions_sorted=tree_artifacts.positions_sorted,
+                p_gears=policy_orders,
+                force_scale_nodes=force_scale_nodes,
+                eps=jnp.asarray(
+                    (
+                        self.adaptive_eps
+                        if self.adaptive_eps is not None
+                        else adaptive_policy_tolerance(
+                            theta=theta_val,
+                            p_gears=policy_orders,
+                            dtype=tree_artifacts.upward.multipoles.packed.real.dtype,
+                        )
+                    ),
+                    dtype=tree_artifacts.upward.multipoles.packed.real.dtype,
+                ),
+                theta=jnp.asarray(
+                    theta_val,
+                    dtype=tree_artifacts.upward.multipoles.packed.real.dtype,
+                ),
+                error_model_code=jnp.asarray(
+                    self._traversal_policy_error_model_code(),
+                    dtype=jnp.int32,
+                ),
+                dehnen_geometry_mode=self.dehnen_geometry_mode,
+            )
+            pair_policy = adaptive_pair_policy
+        else:
+            cache_key = _interaction_cache_key(
+                tree_artifacts.tree,
+                tree_mode=tree_artifacts.tree_mode,
+                leaf_parameter=tree_artifacts.leaf_parameter,
+                theta=theta_val,
+                mac_type=mac_type_val,
+                dehnen_radius_scale=dehnen_radius_scale,
+                expansion_basis=self.expansion_basis,
+                center_mode=upward_center_mode,
+                max_pair_queue=self.max_pair_queue,
+                pair_process_block=self.pair_process_block,
+                traversal_config=runtime_traversal_config,
+                refine_local=refine_local_val,
+                max_refine_levels=max_refine_levels_val,
+                aspect_threshold=aspect_threshold_val,
+            )
+
+        stateful_cache_enabled = bool(allow_stateful_cache) and bool(
+            self.enable_interaction_cache
+        )
+        need_traversal_result = bool(self.retain_traversal_result) or bool(
+            use_paper_fixed_policy
+        )
+        use_compact_streamed_pairs = (
+            bool(self.streamed_far_pairs)
+            and not bool(self.adaptive_order)
+            and not bool(grouped_interactions)
+            and not bool(self.mixed_order_farfield)
+            and not bool(self.retain_interactions)
+            and not bool(need_traversal_result)
+        )
+        need_compact_far_pairs = (
+            bool(self.adaptive_order) and not bool(need_traversal_result)
+        ) or bool(use_compact_streamed_pairs)
+        need_node_interactions = not bool(use_compact_streamed_pairs)
+        _prepare_diag(
+            "dual-tree start "
+            f"theta={theta_val:.3f} mac_type={mac_type_val} "
+            f"streamed={bool(self.streamed_far_pairs)} grouped={bool(grouped_interactions)} "
+            f"farfield_mode={farfield_mode} memory_objective={self.memory_objective} "
+            f"traversal_config={runtime_traversal_config} "
+            f"need_compact_far_pairs={bool(need_compact_far_pairs)} "
+            f"need_node_interactions={bool(need_node_interactions)}"
+        )
         dual_artifacts, cache_entry = _build_dual_tree_artifacts(
             tree_artifacts.tree,
             tree_artifacts.upward.geometry,
@@ -1175,22 +2921,34 @@ class FastMultipoleMethod:
             mac_type=mac_type_val,
             dehnen_radius_scale=dehnen_radius_scale,
             cache_key=cache_key,
-            cache_entry=(self._interaction_cache if allow_stateful_cache else None),
+            cache_entry=(self._interaction_cache if stateful_cache_enabled else None),
             max_pair_queue=self.max_pair_queue,
             pair_process_block=self.pair_process_block,
             traversal_config=runtime_traversal_config,
             retry_logger=record_retry,
+            fail_fast=self.fail_fast,
             use_dense_interactions=self.use_dense_interactions,
             grouped_interactions=grouped_interactions,
             grouped_chunk_size=runtime_m2l_chunk_size,
+            need_traversal_result=need_traversal_result,
+            need_compact_far_pairs=need_compact_far_pairs,
+            need_node_interactions=need_node_interactions,
+            precompute_grouped_class_segments=self._should_precompute_grouped_class_segments(
+                grouped_chunk_size=runtime_m2l_chunk_size,
+                farfield_mode=farfield_mode,
+            ),
+            grouped_schedule_budget_bytes=self._grouped_schedule_item_budget(),
+            pair_policy=pair_policy,
+            policy_state=policy_state,
         )
-        if allow_stateful_cache:
+        if stateful_cache_enabled:
             self._interaction_cache = cache_entry
 
         (
             interactions,
             neighbor_list,
             traversal_result,
+            compact_far_pairs,
             dense_buffers,
             grouped_buffers,
             grouped_segment_starts,
@@ -1200,13 +2958,154 @@ class FastMultipoleMethod:
             grouped_segment_group_ids,
             grouped_segment_unique_targets,
         ) = self._unpack_dual_tree_artifacts(dual_artifacts)
+        far_pair_count_diag = None
+        if compact_far_pairs is not None:
+            far_pair_count_diag = int(compact_far_pairs.sources.shape[0])
+        elif interactions is not None:
+            far_pair_count_diag = int(interactions.sources.shape[0])
+        _prepare_diag(
+            "dual-tree done "
+            f"neighbor_count={int(neighbor_list.neighbors.shape[0])} "
+            f"far_pair_count={far_pair_count_diag} "
+            f"compact_far_pairs={compact_far_pairs is not None} "
+            f"interactions_present={interactions is not None}"
+        )
+        _prepare_diag(
+            "dual-tree bytes "
+            f"neighbors={_format_nbytes(_estimate_payload_nbytes(neighbor_list))} "
+            f"compact_far_pairs={_format_nbytes(_estimate_payload_nbytes(compact_far_pairs))} "
+            f"interactions={_format_nbytes(_estimate_payload_nbytes(interactions))} "
+            f"dense_buffers={_format_nbytes(_estimate_payload_nbytes(dense_buffers))} "
+            f"grouped_buffers={_format_nbytes(_estimate_payload_nbytes(grouped_buffers))}"
+        )
+
+        far_pairs_by_gear = None
+        far_pairs_coo: Optional[_FarPairCOO] = None
+        adaptive_order_for_downward = bool(self.adaptive_order)
+        p_gears_for_downward = self.p_gears
+        if self.adaptive_order:
+            if len(self.p_gears) == 0:
+                raise ValueError("adaptive_order=True requires non-empty p_gears")
+            if traversal_result is not None:
+                far_total = int(traversal_result.far_pair_count)
+                far_sources = jnp.asarray(
+                    traversal_result.interaction_sources[:far_total], dtype=INDEX_DTYPE
+                )
+                far_targets = jnp.asarray(
+                    traversal_result.interaction_targets[:far_total], dtype=INDEX_DTYPE
+                )
+                far_tags = jnp.asarray(
+                    traversal_result.interaction_tags[:far_total], dtype=INDEX_DTYPE
+                )
+            elif compact_far_pairs is not None:
+                far_sources = jnp.asarray(compact_far_pairs.sources, dtype=INDEX_DTYPE)
+                far_targets = jnp.asarray(compact_far_pairs.targets, dtype=INDEX_DTYPE)
+                far_tags = jnp.asarray(compact_far_pairs.tags, dtype=INDEX_DTYPE)
+            else:
+                raise RuntimeError(
+                    "adaptive-order traversal requires tagged far-pair payload"
+                )
+            far_pairs_by_gear = bucket_far_pairs_by_tag(
+                far_sources,
+                far_targets,
+                far_tags,
+                num_tags=len(self.p_gears),
+            )
+            self._recent_far_pairs_by_gear_counts = tuple(
+                int(bucket_src.shape[0]) for bucket_src, _ in far_pairs_by_gear
+            )
+        elif self.streamed_far_pairs:
+            if compact_far_pairs is not None:
+                src_far = jnp.asarray(compact_far_pairs.sources, dtype=INDEX_DTYPE)
+                tgt_far = jnp.asarray(compact_far_pairs.targets, dtype=INDEX_DTYPE)
+            else:
+                if interactions is None:
+                    raise RuntimeError(
+                        "streamed far-pair execution requires interactions or compact far pairs"
+                    )
+                src_far = jnp.asarray(interactions.sources, dtype=INDEX_DTYPE)
+                tgt_far = jnp.asarray(interactions.targets, dtype=INDEX_DTYPE)
+            far_pairs_coo = _FarPairCOO(sources=src_far, targets=tgt_far)
+            max_order_int = int(tree_artifacts.upward.multipoles.order)
+            adaptive_order_for_downward = True
+            if self.mixed_order_farfield and max_order_int >= 1:
+                if interactions is None:
+                    raise RuntimeError(
+                        "mixed-order streamed farfield requires node interaction lists"
+                    )
+                min_order_candidate = (
+                    max_order_int - 1
+                    if self.mixed_order_min_order is None
+                    else int(self.mixed_order_min_order)
+                )
+                min_order_candidate = max(0, min(min_order_candidate, max_order_int))
+                p_gears_for_downward, far_pairs_by_gear = (
+                    _bucket_far_pairs_by_level_split(
+                        interactions=interactions,
+                        src_far=src_far,
+                        tgt_far=tgt_far,
+                        max_order=max_order_int,
+                        min_order=min_order_candidate,
+                    )
+                )
+            else:
+                p_gears_for_downward = (max_order_int,)
+                far_pairs_by_gear = ((src_far, tgt_far),)
+            self._recent_far_pairs_by_gear_counts = tuple(
+                int(bucket_src.shape[0]) for bucket_src, _ in far_pairs_by_gear
+            )
+        else:
+            self._recent_far_pairs_by_gear_counts = tuple()
+
+        if (
+            runtime_m2l_chunk_size is None
+            and bool(self.autotune_m2l_chunk)
+            and self.expansion_basis == "solidfmm"
+            and jax.default_backend() == "gpu"
+            and far_pairs_by_gear is not None
+            and len(far_pairs_by_gear) > 0
+        ):
+            tune_idx = 0
+            tune_pair_count = -1
+            for idx, (src_bucket, _) in enumerate(far_pairs_by_gear):
+                count_i = int(src_bucket.shape[0])
+                if count_i > tune_pair_count:
+                    tune_idx = idx
+                    tune_pair_count = count_i
+            if tune_pair_count > 0:
+                tune_src, tune_tgt = far_pairs_by_gear[tune_idx]
+                tune_order = int(
+                    tree_artifacts.upward.multipoles.order
+                    if tune_idx >= len(p_gears_for_downward)
+                    else p_gears_for_downward[tune_idx]
+                )
+                tuned_chunk = self._autotune_runtime_m2l_chunk_size(
+                    upward=tree_artifacts.upward,
+                    src=tune_src,
+                    tgt=tune_tgt,
+                    order=tune_order,
+                    pair_count=tune_pair_count,
+                )
+                if tuned_chunk is not None:
+                    runtime_m2l_chunk_size = int(tuned_chunk)
+
+        interactions_for_downward: Optional[NodeInteractionList] = interactions
+        if (
+            self.streamed_far_pairs
+            and far_pairs_coo is not None
+            and not bool(self.retain_interactions)
+        ):
+            # Streamed far-pair execution can feed the downward pass directly
+            # from COO pairs, so avoid keeping a second node-structured
+            # interaction list alive unless the caller asked to retain it.
+            interactions_for_downward = None
 
         downward = self._prepare_downward_with_artifacts(
             tree=tree_artifacts.tree,
             upward=tree_artifacts.upward,
             theta_val=theta_val,
             locals_template=tree_artifacts.locals_template,
-            interactions=interactions,
+            interactions=interactions_for_downward,
             runtime_m2l_chunk_size=runtime_m2l_chunk_size,
             runtime_l2l_chunk_size=runtime_l2l_chunk_size,
             runtime_traversal_config=runtime_traversal_config,
@@ -1221,11 +3120,44 @@ class FastMultipoleMethod:
             grouped_segment_group_ids=grouped_segment_group_ids,
             grouped_segment_unique_targets=grouped_segment_unique_targets,
             farfield_mode=farfield_mode,
+            far_pairs_coo=far_pairs_coo,
+            far_pairs_by_gear=far_pairs_by_gear,
+            adaptive_order=adaptive_order_for_downward,
+            p_gears=p_gears_for_downward,
         )
+        _prepare_diag(
+            "downward done "
+            f"locals_shape={tuple(int(v) for v in downward.locals.coefficients.shape)} "
+            f"interactions_shape={tuple(int(v) for v in downward.interactions.sources.shape)}"
+        )
+        _prepare_diag(
+            "downward bytes "
+            f"locals={_format_nbytes(_estimate_payload_nbytes(downward.locals))} "
+            f"stored_interactions={_format_nbytes(_estimate_payload_nbytes(downward.interactions))}"
+        )
+        if not bool(self.retain_interactions):
+            # Prepared state only needs the locals; keep a shape-compatible
+            # placeholder so downstream code does not accidentally pin the full
+            # far-field pair payload after prepare_state completes.
+            downward = downward._replace(
+                interactions=(
+                    _empty_interaction_storage_like(interactions)
+                    if interactions is not None
+                    else _empty_interaction_storage_for_tree(tree_artifacts.tree)
+                )
+            )
+        interactions_out: Optional[NodeInteractionList]
+        if bool(self.retain_interactions):
+            interactions_out = interactions
+        else:
+            interactions_out = None
         return _PrepareStateDualDownwardArtifacts(
-            interactions=interactions,
+            interactions=interactions_out,
             neighbor_list=neighbor_list,
-            traversal_result=traversal_result,
+            traversal_result=(
+                traversal_result if self.retain_traversal_result else None
+            ),
+            compact_far_pairs=(compact_far_pairs if self.adaptive_order else None),
             downward=downward,
             cache_entry=cache_entry,
         )
@@ -1233,14 +3165,19 @@ class FastMultipoleMethod:
     def _prepare_state_nearfield_artifacts(
         self,
         *,
-        tree: Tree,
         neighbor_list: NodeNeighborList,
+        nearfield_interop: NearfieldInteropData,
         leaf_cap: int,
         num_particles: int,
         cache_entry: Optional[_InteractionCacheEntry],
         allow_stateful_cache: bool,
     ) -> NearfieldPrecomputeArtifacts:
         """Build/reuse near-field precompute artifacts for prepare_state."""
+        effective_leaf_cap = (
+            int(nearfield_interop.leaf_particle_indices.shape[1])
+            if nearfield_interop.leaf_particle_indices is not None
+            else int(leaf_cap)
+        )
         nearfield_mode_resolved = self._resolve_nearfield_mode(
             num_particles=num_particles
         )
@@ -1257,9 +3194,9 @@ class FastMultipoleMethod:
             return nearfield_from_cache(cache_entry)
 
         nearfield_artifacts = self._prepare_nearfield_precompute_artifacts(
-            tree=tree,
             neighbor_list=neighbor_list,
-            leaf_cap=leaf_cap,
+            nearfield_interop=nearfield_interop,
+            leaf_cap=effective_leaf_cap,
             num_particles=num_particles,
             nearfield_mode=nearfield_mode_resolved,
             nearfield_edge_chunk_size=nearfield_edge_chunk_size_resolved,
@@ -1294,17 +3231,14 @@ class FastMultipoleMethod:
     def _prepare_nearfield_precompute_artifacts(
         self,
         *,
-        tree: Tree,
         neighbor_list: NodeNeighborList,
+        nearfield_interop: NearfieldInteropData,
         leaf_cap: int,
         num_particles: int,
         nearfield_mode: Optional[str] = None,
         nearfield_edge_chunk_size: Optional[int] = None,
     ) -> NearfieldPrecomputeArtifacts:
         """Best-effort precompute of nearfield leaf-pair and scatter artifacts."""
-        nearfield_target_leaf_ids = None
-        nearfield_source_leaf_ids = None
-        nearfield_valid_pairs = None
         nearfield_chunk_sort_indices = None
         nearfield_chunk_group_ids = None
         nearfield_chunk_unique_indices = None
@@ -1323,13 +3257,30 @@ class FastMultipoleMethod:
             else int(nearfield_edge_chunk_size)
         )
 
+        should_precompute_scatter = self._should_precompute_nearfield_scatter_schedules(
+            num_particles=int(num_particles)
+        )
+        if resolved_nearfield_mode != "bucketed" or not should_precompute_scatter:
+            # Keep prepared-state nearfield representation compact; derive leaf-edge
+            # pair vectors on demand during evaluation.
+            return NearfieldPrecomputeArtifacts(
+                target_leaf_ids=None,
+                source_leaf_ids=None,
+                valid_pairs=None,
+                chunk_sort_indices=None,
+                chunk_group_ids=None,
+                chunk_unique_indices=None,
+            )
+
+        nearfield_target_leaf_ids = None
+        nearfield_valid_pairs = None
+
         (
             nearfield_target_leaf_ids,
             nearfield_source_leaf_ids,
             nearfield_valid_pairs,
         ) = self._prepare_leaf_neighbor_pairs_safe(
-            tree=tree,
-            neighbor_list=neighbor_list,
+            nearfield_interop=nearfield_interop,
         )
 
         traced_nearfield_pairs = False
@@ -1339,8 +3290,7 @@ class FastMultipoleMethod:
             )
 
         if (
-            resolved_nearfield_mode == "bucketed"
-            and nearfield_target_leaf_ids is not None
+            nearfield_target_leaf_ids is not None
             and nearfield_valid_pairs is not None
             and not traced_nearfield_pairs
         ):
@@ -1349,8 +3299,7 @@ class FastMultipoleMethod:
                 nearfield_chunk_group_ids,
                 nearfield_chunk_unique_indices,
             ) = self._prepare_bucketed_scatter_schedules_safe(
-                tree=tree,
-                neighbor_list=neighbor_list,
+                nearfield_interop=nearfield_interop,
                 target_leaf_ids=nearfield_target_leaf_ids,
                 valid_pairs=nearfield_valid_pairs,
                 leaf_cap=int(leaf_cap),
@@ -1358,36 +3307,43 @@ class FastMultipoleMethod:
             )
 
         return NearfieldPrecomputeArtifacts(
-            target_leaf_ids=nearfield_target_leaf_ids,
-            source_leaf_ids=nearfield_source_leaf_ids,
-            valid_pairs=nearfield_valid_pairs,
+            target_leaf_ids=None,
+            source_leaf_ids=None,
+            valid_pairs=None,
             chunk_sort_indices=nearfield_chunk_sort_indices,
             chunk_group_ids=nearfield_chunk_group_ids,
             chunk_unique_indices=nearfield_chunk_unique_indices,
         )
 
+    def _should_precompute_nearfield_scatter_schedules(
+        self,
+        *,
+        num_particles: int,
+    ) -> bool:
+        """Decide whether to materialize near-field scatter schedules."""
+        if not bool(self.precompute_nearfield_scatter_schedules):
+            return False
+        if jax.default_backend() != "gpu":
+            return True
+        # For large GPU runs, schedule materialization is often memory-dominant;
+        # keep execution streamed/chunked instead.
+        return int(num_particles) <= int(_NEARFIELD_GPU_PRECOMPUTE_MAX_PARTICLES)
+
     def _prepare_leaf_neighbor_pairs_safe(
         self,
         *,
-        tree: Tree,
-        neighbor_list: NodeNeighborList,
+        nearfield_interop: NearfieldInteropData,
     ) -> tuple[Optional[Array], Optional[Array], Optional[Array]]:
         """Best-effort leaf neighbor pair generation."""
         try:
-            sort_by_source = not _contains_tracer(
-                (
-                    tree.node_ranges,
-                    neighbor_list.leaf_indices,
-                    neighbor_list.offsets,
-                    neighbor_list.neighbors,
-                )
-            )
             return prepare_leaf_neighbor_pairs(
-                jnp.asarray(tree.node_ranges, dtype=INDEX_DTYPE),
-                jnp.asarray(neighbor_list.leaf_indices, dtype=INDEX_DTYPE),
-                jnp.asarray(neighbor_list.offsets, dtype=INDEX_DTYPE),
-                jnp.asarray(neighbor_list.neighbors, dtype=INDEX_DTYPE),
-                sort_by_source=sort_by_source,
+                jnp.asarray(nearfield_interop.node_ranges, dtype=INDEX_DTYPE),
+                jnp.asarray(nearfield_interop.leaf_nodes, dtype=INDEX_DTYPE),
+                jnp.asarray(nearfield_interop.offsets, dtype=INDEX_DTYPE),
+                jnp.asarray(nearfield_interop.neighbors, dtype=INDEX_DTYPE),
+                # Keep edge order aligned with neighbor_list so source leaf ids can
+                # be derived on demand without storing a second index vector.
+                sort_by_source=False,
             )
         except Exception:
             return None, None, None
@@ -1395,8 +3351,7 @@ class FastMultipoleMethod:
     def _prepare_bucketed_scatter_schedules_safe(
         self,
         *,
-        tree: Tree,
-        neighbor_list: NodeNeighborList,
+        nearfield_interop: NearfieldInteropData,
         target_leaf_ids: Array,
         valid_pairs: Array,
         leaf_cap: int,
@@ -1408,11 +3363,27 @@ class FastMultipoleMethod:
             chunk = int(edge_chunk_size)
             chunk_count = (edge_count + chunk - 1) // chunk if edge_count > 0 else 0
             schedule_items = int(chunk_count * chunk * int(leaf_cap))
-            if schedule_items > _NEARFIELD_SCATTER_SCHEDULE_ITEM_CAP:
+            schedule_item_cap = self._resolve_nearfield_schedule_item_cap(
+                edge_count=edge_count,
+                leaf_cap=int(leaf_cap),
+                edge_chunk_size=chunk,
+            )
+            if schedule_items > int(schedule_item_cap):
                 return None, None, None
+            if nearfield_interop.leaf_particle_indices is not None:
+                return prepare_bucketed_scatter_schedules_from_groups(
+                    jnp.asarray(
+                        nearfield_interop.leaf_particle_indices,
+                        dtype=INDEX_DTYPE,
+                    ),
+                    jnp.asarray(nearfield_interop.leaf_particle_mask, dtype=bool),
+                    target_leaf_ids,
+                    valid_pairs,
+                    edge_chunk_size=chunk,
+                )
             return prepare_bucketed_scatter_schedules(
-                jnp.asarray(tree.node_ranges, dtype=INDEX_DTYPE),
-                jnp.asarray(neighbor_list.leaf_indices, dtype=INDEX_DTYPE),
+                jnp.asarray(nearfield_interop.node_ranges, dtype=INDEX_DTYPE),
+                jnp.asarray(nearfield_interop.leaf_nodes, dtype=INDEX_DTYPE),
                 target_leaf_ids,
                 valid_pairs,
                 max_leaf_size=int(leaf_cap),
@@ -1420,6 +3391,54 @@ class FastMultipoleMethod:
             )
         except Exception:
             return None, None, None
+
+    def _resolve_nearfield_schedule_item_cap(
+        self,
+        *,
+        edge_count: int,
+        leaf_cap: int,
+        edge_chunk_size: int,
+    ) -> int:
+        """Return the max near-field schedule items allowed for this workload."""
+        del edge_count, leaf_cap, edge_chunk_size
+        if self.nearfield_schedule_item_cap is not None:
+            return int(self.nearfield_schedule_item_cap)
+
+        backend_name = jax.default_backend()
+        base_cap = (
+            _NEARFIELD_SCATTER_SCHEDULE_ITEM_CAP_GPU
+            if backend_name == "gpu"
+            else _NEARFIELD_SCATTER_SCHEDULE_ITEM_CAP
+        )
+        if self.memory_objective == "minimum_memory":
+            base_cap = max(1, base_cap // 4)
+        elif self.memory_objective == "throughput":
+            base_cap = base_cap * 2
+
+        if self.memory_budget_bytes is not None:
+            bytes_per_item = 3 * np.dtype(np.int32).itemsize
+            budget_limited_cap = max(1, int(self.memory_budget_bytes) // bytes_per_item)
+            base_cap = min(base_cap, budget_limited_cap)
+        return int(base_cap)
+
+    def _should_precompute_grouped_class_segments(
+        self,
+        *,
+        grouped_chunk_size: Optional[int],
+        farfield_mode: str,
+    ) -> bool:
+        """Decide whether grouped class-major schedules should be materialized."""
+        if grouped_chunk_size is None:
+            return False
+        if str(farfield_mode).strip().lower() != "class_major":
+            return False
+        if self.precompute_grouped_class_segments is not None:
+            return bool(self.precompute_grouped_class_segments)
+        return self.memory_objective != "minimum_memory"
+
+    def _grouped_schedule_item_budget(self) -> int:
+        """Return max bytes allowed for cached grouped schedule matrices."""
+        return int(self.grouped_schedule_budget_bytes)
 
     def _resolve_target_indices(
         self,
@@ -1452,7 +3471,8 @@ class FastMultipoleMethod:
     ) -> tuple[
         NodeInteractionList,
         NodeNeighborList,
-        DualTreeWalkResult,
+        Optional[DualTreeWalkResult],
+        Optional[CompactTaggedFarPairs],
         Optional[DenseInteractionBuffers],
         Optional[GroupedInteractionBuffers],
         Optional[Array],
@@ -1467,6 +3487,7 @@ class FastMultipoleMethod:
             dual_artifacts.interactions,
             dual_artifacts.neighbor_list,
             dual_artifacts.traversal_result,
+            dual_artifacts.compact_far_pairs,
             dual_artifacts.dense_buffers,
             dual_artifacts.grouped_buffers,
             dual_artifacts.grouped_segment_starts,
@@ -1484,7 +3505,7 @@ class FastMultipoleMethod:
         upward: TreeUpwardData,
         theta_val: float,
         locals_template: Optional[LocalExpansionData],
-        interactions: NodeInteractionList,
+        interactions: Optional[NodeInteractionList],
         runtime_m2l_chunk_size: Optional[int],
         runtime_l2l_chunk_size: Optional[int],
         runtime_traversal_config: Optional[DualTreeTraversalConfig],
@@ -1499,6 +3520,10 @@ class FastMultipoleMethod:
         grouped_segment_group_ids: Optional[Array],
         grouped_segment_unique_targets: Optional[Array],
         farfield_mode: str,
+        far_pairs_coo: Optional[_FarPairCOO] = None,
+        far_pairs_by_gear: Optional[tuple[tuple[Array, Array], ...]] = None,
+        adaptive_order: bool = False,
+        p_gears: tuple[int, ...] = tuple(),
     ) -> TreeDownwardData:
         """Prepare downward sweep using precomputed interaction artifacts."""
         return self.prepare_downward_sweep(
@@ -1521,6 +3546,10 @@ class FastMultipoleMethod:
             grouped_segment_group_ids=grouped_segment_group_ids,
             grouped_segment_unique_targets=grouped_segment_unique_targets,
             farfield_mode=farfield_mode,
+            far_pairs_coo=far_pairs_coo,
+            far_pairs_by_gear=far_pairs_by_gear,
+            adaptive_order=adaptive_order,
+            p_gears=p_gears,
         )
 
     def _resolve_nearfield_mode(self, *, num_particles: int) -> str:
@@ -1640,6 +3669,7 @@ class FastMultipoleMethod:
         max_leaf_size: Optional[int] = None,
     ) -> TreeUpwardData:
         """Bundle geometry, raw moments, and packed expansions for a tree."""
+        self._ensure_execution_backend_supported(tree=tree)
 
         if self.expansion_basis == "solidfmm":
             complex_upward = prepare_solidfmm_complex_upward_sweep(
@@ -1650,6 +3680,7 @@ class FastMultipoleMethod:
                 center_mode=center_mode,
                 explicit_centers=explicit_centers,
                 max_leaf_size=max_leaf_size,
+                leaf_batch_size=self.upward_leaf_batch_size,
                 rotation=self.complex_rotation,
             )
 
@@ -1722,8 +3753,13 @@ class FastMultipoleMethod:
         grouped_segment_unique_targets: Optional[Array] = None,
         farfield_mode: str = "pair_grouped",
         dehnen_radius_scale: Optional[float] = None,
+        far_pairs_coo: Optional[_FarPairCOO] = None,
+        far_pairs_by_gear: Optional[tuple[tuple[Array, Array], ...]] = None,
+        adaptive_order: Optional[bool] = None,
+        p_gears: Optional[tuple[int, ...]] = None,
     ) -> TreeDownwardData:
         """Build interactions and locals needed for the downward sweep."""
+        self._ensure_execution_backend_supported(tree=tree)
 
         theta_val = float(self.theta if theta is None else theta)
         mac_type_val = self.mac_type if mac_type is None else mac_type
@@ -1739,6 +3775,12 @@ class FastMultipoleMethod:
             retry_logger if retry_logger is not None else self.interaction_retry_logger
         )
         if self.expansion_basis == "solidfmm":
+            adaptive_order_val = (
+                self.adaptive_order if adaptive_order is None else bool(adaptive_order)
+            )
+            p_gears_val = (
+                self.p_gears if p_gears is None else tuple(int(v) for v in p_gears)
+            )
             return _prepare_solidfmm_downward_sweep(
                 tree,
                 upward_data,
@@ -1749,6 +3791,8 @@ class FastMultipoleMethod:
                 m2l_chunk_size=m2l_chunk_size,
                 l2l_chunk_size=l2l_chunk_size,
                 complex_rotation=self.complex_rotation,
+                basis_mode=self._solidfmm_basis_mode(),
+                m2l_impl=self.m2l_impl,
                 retry_logger=retry_callback,
                 traversal_config=config,
                 dense_buffers=dense_buffers,
@@ -1761,7 +3805,12 @@ class FastMultipoleMethod:
                 grouped_segment_group_ids=grouped_segment_group_ids,
                 grouped_segment_unique_targets=grouped_segment_unique_targets,
                 farfield_mode=farfield_mode,
+                far_pairs_coo=far_pairs_coo,
+                far_pairs_by_gear=far_pairs_by_gear,
+                adaptive_order=adaptive_order_val,
+                p_gears=p_gears_val,
                 dehnen_radius_scale=dehnen_scale_val,
+                use_pallas=self.use_pallas,
             )
 
         return prepare_tree_downward_sweep(
@@ -1808,26 +3857,47 @@ class FastMultipoleMethod:
 
         Parameters
         ----------
-        target_indices:
+        positions : Array
+            Source and target particle positions.
+        masses : Array
+            Particle masses aligned with ``positions``.
+        target_indices : Optional[Array]
             Optional 1D index array selecting which target-particle outputs to
             return. All particles are still used as source masses.
-        jit_tree:
-            When ``True`` (default) specialise tree construction via JIT to
-            amortise repeated builds for consistent tree sizes.
-        jit_traversal:
-            When ``True`` (default) evaluate the leaf traversal with the
-            compiled implementation for improved throughput.
-        reuse_prepared_state:
-            Reuse the most recent prepared state when identical array objects
-            and preparation parameters are provided.
-        refine_local:
+        bounds : Optional[Tuple[Array, Array]]
+            Optional explicit domain bounds used during tree construction.
+        leaf_size : int
+            Target maximum particle count per leaf for the prepared tree.
+        max_order : int
+            Multipole/local expansion order used for the upward and downward
+            passes.
+        return_potential : bool
+            When ``True``, return a tuple ``(accelerations, potentials)``.
+        theta : Optional[float]
+            Optional per-call MAC opening angle override.
+        jit_tree : Optional[bool]
+            When ``True``, specialise tree construction via JIT to amortise
+            repeated builds for consistent tree sizes.
+        refine_local : Optional[bool]
             Override the fixed-depth builder's local refinement toggle when
             ``tree_build_mode`` is ``"fixed_depth"``.
-        max_refine_levels:
+        max_refine_levels : Optional[int]
             Maximum local refinement iterations passed to the builder.
-        aspect_threshold:
+        aspect_threshold : Optional[float]
             Aspect ratio threshold that triggers additional splits in the
             refinement pass.
+        jit_traversal : Optional[bool]
+            When ``True``, evaluate the traversal/evaluation path with the
+            compiled implementation for improved throughput.
+        reuse_prepared_state : bool
+            Reuse the most recent prepared state when identical array objects
+            and preparation parameters are provided.
+
+        Returns
+        -------
+        Union[Array, Tuple[Array, Array]]
+            Accelerations for all particles or selected targets. When
+            ``return_potential`` is ``True``, also returns the potential.
         """
 
         cache_key: Optional[tuple[Any, ...]] = None
@@ -1886,7 +3956,7 @@ class FastMultipoleMethod:
             else bool(jit_traversal)
         )
 
-        return self.evaluate_prepared_state(
+        evaluation = self.evaluate_prepared_state(
             state,
             target_indices=target_indices,
             return_potential=return_potential,
@@ -2070,6 +4140,19 @@ class FastMultipoleMethod:
             max_time_derivative_order=max_time_derivative_order,
             mode=mode,
         )
+        if target_indices is None and not _contains_tracer((state, evaluation)):
+            accelerations_out = evaluation[0] if return_potential else evaluation
+            inv = jnp.asarray(state.inverse_permutation)
+            sorted_idx = jnp.argsort(inv)
+            accelerations_sorted = jnp.asarray(accelerations_out)[sorted_idx]
+            self._last_force_scale_nodes = (
+                self._compute_node_force_scale_from_sorted_acc(
+                    tree=state.tree,
+                    accelerations_sorted=accelerations_sorted,
+                    reduction=self._force_scale_reduction_mode(),
+                )
+            )
+        return evaluation
 
     @jaxtyped(typechecker=beartype)
     def prepare_state(
@@ -2142,7 +4225,7 @@ class FastMultipoleMethod:
             )
 
         theta_val = float(self.theta if theta is None else theta)
-        mac_type_val = self.mac_type
+        mac_type_val = self._base_mac_type()
 
         tree_artifacts = self._prepare_state_tree_and_upward(
             positions_arr=positions_arr,
@@ -2157,8 +4240,107 @@ class FastMultipoleMethod:
             upward_center_mode=upward_center_mode,
             allow_stateful_cache=allow_stateful_cache,
         )
+        force_scale_nodes = None
+        use_paper_force_scale = self._uses_paper_style_force_scale()
+        if use_paper_force_scale:
+            node_count = int(tree_artifacts.tree.parent.shape[0])
+            previous_force_scale = self._last_force_scale_nodes
+            reduction_mode = self._force_scale_reduction_mode()
+            need_prepass = False
+            policy_orders = self._policy_orders_for_prepare_state(
+                max_order=int(max_order)
+            )
+            if self.mac_force_scale_mode == "paper":
+                need_prepass = True
+            elif self.mac_force_scale_mode == "prev" or self._in_force_scale_prepass:
+                if (
+                    previous_force_scale is not None
+                    and int(previous_force_scale.shape[0]) == node_count
+                ):
+                    force_scale_nodes = jnp.asarray(
+                        previous_force_scale,
+                        dtype=positions_arr.dtype,
+                    )
+                elif self._uses_paper_style_traversal_policy() and (
+                    not self._in_force_scale_prepass
+                ):
+                    need_prepass = True
+                else:
+                    force_scale_nodes = jnp.ones(
+                        (node_count,),
+                        dtype=positions_arr.dtype,
+                    )
+            else:
+                need_prepass = True
+            if need_prepass:
+                if len(policy_orders) == 0:
+                    raise ValueError(
+                        "mac_force_scale_mode='prepass' requires non-empty orders"
+                    )
+                low_order = int(min(policy_orders))
+                if self.mac_force_scale_mode == "paper" and (
+                    self._uses_paper_style_traversal_policy()
+                ):
+                    low_order = 1 if int(max_order) >= 1 else 0
+                if self.mac_force_scale_mode == "paper" and (
+                    self._uses_paper_style_traversal_policy()
+                ):
+                    prepass_sorted = (
+                        self._compute_force_scale_paper_prepass_from_tree_artifacts(
+                            tree_artifacts=tree_artifacts,
+                            low_order=low_order,
+                            theta_val=theta_val,
+                            upward_center_mode=upward_center_mode,
+                            runtime_traversal_config=runtime_traversal_config,
+                            runtime_m2l_chunk_size=runtime_m2l_chunk_size,
+                            runtime_l2l_chunk_size=runtime_l2l_chunk_size,
+                            grouped_interactions=grouped_interactions,
+                            farfield_mode=farfield_mode,
+                            record_retry=record_retry,
+                            refine_local_val=refine_local_val,
+                            max_refine_levels_val=max_refine_levels_val,
+                            aspect_threshold_val=aspect_threshold_val,
+                        )
+                    )
+                else:
+                    self._in_force_scale_prepass = True
+                    saved_p_gears = self.p_gears
+                    saved_adaptive_order = self.adaptive_order
+                    saved_adaptive_error_model = self.adaptive_error_model
+                    saved_mac_type = self.mac_type
+                    try:
+                        self.p_gears = (low_order,)
+                        self.adaptive_order = bool(saved_adaptive_order)
+                        prepass_acc = self.compute_accelerations(
+                            positions_arr,
+                            masses_arr,
+                            bounds=bounds,
+                            leaf_size=int(leaf_size),
+                            max_order=low_order,
+                            return_potential=False,
+                            theta=theta_val,
+                            reuse_prepared_state=False,
+                            jit_tree=jit_tree,
+                            jit_traversal=False,
+                        )
+                    finally:
+                        self.p_gears = saved_p_gears
+                        self.adaptive_order = saved_adaptive_order
+                        self.adaptive_error_model = saved_adaptive_error_model
+                        self.mac_type = saved_mac_type
+                        self._in_force_scale_prepass = False
+                    prepass_sorted = jnp.asarray(prepass_acc)[
+                        jnp.argsort(tree_artifacts.inverse_permutation)
+                    ]
+                force_scale_nodes = self._compute_node_force_scale_from_sorted_acc(
+                    tree=tree_artifacts.tree,
+                    accelerations_sorted=prepass_sorted,
+                    reduction=reduction_mode,
+                ).astype(positions_arr.dtype)
+                self._last_force_scale_nodes = force_scale_nodes
         dual_downward_artifacts = self._prepare_state_dual_and_downward(
             tree_artifacts=tree_artifacts,
+            force_scale_nodes=force_scale_nodes,
             upward_center_mode=upward_center_mode,
             theta_val=theta_val,
             mac_type_val=mac_type_val,
@@ -2186,22 +4368,73 @@ class FastMultipoleMethod:
         if allow_stateful_cache:
             self._recent_retry_events = retry_events_tuple
 
+        octree = build_octree_execution_data(tree_artifacts.tree)
+        execution_backend = self._resolve_execution_backend()
+        octree_native_neighbors = None
+        if execution_backend == "octree" and octree is not None:
+            octree_native_neighbors = build_octree_native_neighbor_lists(
+                tree_artifacts.tree,
+                tree_artifacts.upward.geometry,
+                theta=theta_val,
+                mac_type=mac_type_val,
+                dehnen_radius_scale=self.dehnen_radius_scale,
+                max_pair_queue=self.max_pair_queue,
+                process_block=self.pair_process_block,
+                traversal_config=runtime_traversal_config,
+            )
+        nearfield_interop = _build_nearfield_interop_data(
+            tree_artifacts.tree,
+            dual_downward_artifacts.neighbor_list,
+            octree=octree,
+            native_neighbors=octree_native_neighbors,
+        )
         nearfield_artifacts = self._prepare_state_nearfield_artifacts(
-            tree=tree_artifacts.tree,
             neighbor_list=dual_downward_artifacts.neighbor_list,
+            nearfield_interop=nearfield_interop,
             leaf_cap=tree_artifacts.leaf_cap,
             num_particles=int(positions_arr.shape[0]),
             cache_entry=dual_downward_artifacts.cache_entry,
             allow_stateful_cache=allow_stateful_cache,
         )
+        _prepare_diag(
+            "nearfield bytes "
+            f"target_leaf_ids={_format_nbytes(_estimate_payload_nbytes(nearfield_artifacts.target_leaf_ids))} "
+            f"source_leaf_ids={_format_nbytes(_estimate_payload_nbytes(nearfield_artifacts.source_leaf_ids))} "
+            f"valid_pairs={_format_nbytes(_estimate_payload_nbytes(nearfield_artifacts.valid_pairs))} "
+            f"chunk_sort_indices={_format_nbytes(_estimate_payload_nbytes(nearfield_artifacts.chunk_sort_indices))} "
+            f"chunk_group_ids={_format_nbytes(_estimate_payload_nbytes(nearfield_artifacts.chunk_group_ids))} "
+            f"chunk_unique_indices={_format_nbytes(_estimate_payload_nbytes(nearfield_artifacts.chunk_unique_indices))}"
+        )
+        octree_upward = _build_octree_upward_artifacts(
+            octree=octree,
+            positions_sorted=tree_artifacts.positions_sorted,
+            masses_sorted=tree_artifacts.masses_sorted,
+            expansion_basis=self.expansion_basis,
+            max_order=int(max_order),
+        )
+        octree_native_far_pairs = None
+        if execution_backend == "octree" and octree is not None:
+            octree_native_far_pairs = build_octree_native_far_pairs(
+                tree_artifacts.tree,
+                tree_artifacts.upward.geometry,
+                theta=theta_val,
+                mac_type=mac_type_val,
+                dehnen_radius_scale=self.dehnen_radius_scale,
+                max_pair_queue=self.max_pair_queue,
+                process_block=self.pair_process_block,
+                traversal_config=runtime_traversal_config,
+            )
+        octree_downward = _build_octree_downward_artifacts(
+            octree=octree,
+            octree_upward=octree_upward,
+            interactions=dual_downward_artifacts.interactions,
+            native_far_pairs=octree_native_far_pairs,
+            execution_backend=execution_backend,
+        )
 
         return FMMPreparedState(
             tree=tree_artifacts.tree,
-            positions_sorted=tree_artifacts.positions_sorted,
-            masses_sorted=tree_artifacts.masses_sorted,
-            inverse_permutation=jnp.asarray(
-                tree_artifacts.inverse_permutation, dtype=INDEX_DTYPE
-            ),
+            upward=tree_artifacts.upward,
             downward=dual_downward_artifacts.downward,
             neighbor_list=dual_downward_artifacts.neighbor_list,
             max_leaf_size=tree_artifacts.leaf_cap,
@@ -2209,15 +4442,29 @@ class FastMultipoleMethod:
             working_dtype=positions_arr.dtype,
             expansion_basis=self.expansion_basis,
             theta=theta_val,
+            topology_key=tree_artifacts.topology_key,
             interactions=dual_downward_artifacts.interactions,
             dual_tree_result=dual_downward_artifacts.traversal_result,
             retry_events=retry_events_tuple,
+            nearfield_interop=nearfield_interop,
             nearfield_target_leaf_ids=nearfield_artifacts.target_leaf_ids,
             nearfield_source_leaf_ids=nearfield_artifacts.source_leaf_ids,
             nearfield_valid_pairs=nearfield_artifacts.valid_pairs,
             nearfield_chunk_sort_indices=nearfield_artifacts.chunk_sort_indices,
             nearfield_chunk_group_ids=nearfield_artifacts.chunk_group_ids,
             nearfield_chunk_unique_indices=nearfield_artifacts.chunk_unique_indices,
+            force_scale_nodes=force_scale_nodes,
+            execution_backend=execution_backend,
+            octree=octree,
+            octree_upward=octree_upward,
+            octree_downward=_finalize_octree_downward_artifacts(
+                octree=octree,
+                octree_upward=octree_upward,
+                octree_downward=octree_downward,
+                expansion_basis=self.expansion_basis,
+                execution_backend=execution_backend,
+                m2l_chunk_size=runtime_m2l_chunk_size,
+            ),
         )
 
     @jaxtyped(typechecker=beartype)
@@ -2241,6 +4488,22 @@ class FastMultipoleMethod:
             target_indices=target_indices,
             num_particles=int(state.inverse_permutation.shape[0]),
         )
+        octree_backend = str(state.execution_backend).strip().lower() == "octree"
+        farfield_local_data = (
+            _octree_local_expansion_data(state.octree_downward)
+            if octree_backend
+            else None
+        )
+        farfield_leaf_nodes = (
+            jnp.asarray(state.octree.radix_leaf_to_oct, dtype=INDEX_DTYPE)
+            if octree_backend and state.octree is not None
+            else None
+        )
+        farfield_node_ranges = (
+            jnp.asarray(state.octree.node_ranges, dtype=INDEX_DTYPE)
+            if octree_backend and state.octree is not None
+            else None
+        )
         tracing_targets = isinstance(
             state.positions_sorted, jax.core.Tracer
         ) or isinstance(resolved_target_indices, jax.core.Tracer)
@@ -2260,6 +4523,10 @@ class FastMultipoleMethod:
                 masses_sorted=state.masses_sorted,
                 downward=state.downward,
                 neighbor_list=state.neighbor_list,
+                nearfield_interop=state.nearfield_interop,
+                farfield_local_data=farfield_local_data,
+                farfield_leaf_nodes=farfield_leaf_nodes,
+                farfield_node_ranges=farfield_node_ranges,
                 nearfield_target_leaf_ids=state.nearfield_target_leaf_ids,
                 nearfield_source_leaf_ids=state.nearfield_source_leaf_ids,
                 nearfield_valid_pairs=state.nearfield_valid_pairs,
@@ -2283,6 +4550,10 @@ class FastMultipoleMethod:
                 masses_sorted=state.masses_sorted,
                 downward=state.downward,
                 neighbor_list=state.neighbor_list,
+                nearfield_interop=state.nearfield_interop,
+                farfield_local_data=farfield_local_data,
+                farfield_leaf_nodes=farfield_leaf_nodes,
+                farfield_node_ranges=farfield_node_ranges,
                 target_sorted_indices=target_sorted_indices,
                 return_potential=return_potential,
                 max_acc_derivative_order=derivative_order,
@@ -3176,6 +5447,13 @@ class FastMultipoleMethod:
             precomputed_chunk_sort_indices=precomputed_chunk_sort_indices,
             precomputed_chunk_group_ids=precomputed_chunk_group_ids,
             precomputed_chunk_unique_indices=precomputed_chunk_unique_indices,
+            node_ranges_override=nearfield_view.node_ranges,
+            leaf_nodes_override=nearfield_view.leaf_nodes,
+            neighbor_offsets_override=nearfield_view.offsets,
+            neighbor_indices_override=nearfield_view.neighbors,
+            neighbor_counts_override=nearfield_view.counts,
+            leaf_particle_indices_override=nearfield_view.leaf_particle_indices,
+            leaf_particle_mask_override=nearfield_view.leaf_particle_mask,
         )
 
         far_grad, far_potential_pre, _ = _evaluate_local_expansions_for_particles(
@@ -3217,6 +5495,10 @@ class FastMultipoleMethod:
         locals_or_downward: Union[LocalExpansionData, TreeDownwardData],
         neighbor_list: NodeNeighborList,
         *,
+        nearfield_interop: Optional[NearfieldInteropData] = None,
+        farfield_local_data: Optional[LocalExpansionData] = None,
+        farfield_leaf_nodes: Optional[Array] = None,
+        farfield_node_ranges: Optional[Array] = None,
         precomputed_target_leaf_ids: Optional[Array] = None,
         precomputed_source_leaf_ids: Optional[Array] = None,
         precomputed_valid_pairs: Optional[Array] = None,
@@ -3240,6 +5522,9 @@ class FastMultipoleMethod:
             masses_sorted,
             locals_or_downward,
             neighbor_list,
+            farfield_local_data=farfield_local_data,
+            farfield_leaf_nodes=farfield_leaf_nodes,
+            farfield_node_ranges=farfield_node_ranges,
             max_leaf_size=resolved_max_leaf,
             return_potential=return_potential,
         )
@@ -3267,6 +5552,11 @@ class FastMultipoleMethod:
             num_particles=int(setup.positions.shape[0]),
             nearfield_mode=nearfield_mode,
         )
+        nearfield_view = (
+            _build_nearfield_interop_data(tree, neighbor_list)
+            if nearfield_interop is None
+            else nearfield_interop
+        )
 
         return _evaluate_tree_compiled_impl(
             tree,
@@ -3274,6 +5564,21 @@ class FastMultipoleMethod:
             setup.masses,
             setup.locals_data,
             neighbor_list,
+            jnp.asarray(nearfield_view.leaf_nodes, dtype=INDEX_DTYPE),
+            jnp.asarray(nearfield_view.node_ranges, dtype=INDEX_DTYPE),
+            jnp.asarray(nearfield_view.offsets, dtype=INDEX_DTYPE),
+            jnp.asarray(nearfield_view.neighbors, dtype=INDEX_DTYPE),
+            jnp.asarray(nearfield_view.counts, dtype=INDEX_DTYPE),
+            (
+                jnp.asarray(nearfield_view.leaf_particle_indices, dtype=INDEX_DTYPE)
+                if nearfield_view.leaf_particle_indices is not None
+                else jnp.zeros((0, 0), dtype=INDEX_DTYPE)
+            ),
+            (
+                jnp.asarray(nearfield_view.leaf_particle_mask, dtype=bool)
+                if nearfield_view.leaf_particle_mask is not None
+                else jnp.zeros((0, 0), dtype=bool)
+            ),
             setup.leaf_nodes,
             setup.node_ranges,
             (
@@ -3347,6 +5652,14 @@ class _TreeEvaluationSetup(NamedTuple):
     empty_output: Optional[Union[Array, Tuple[Array, Array]]]
 
 
+class _EvaluationNodeViews(NamedTuple):
+    """Resolved leaf/node metadata for shared nearfield and backend-specific farfield."""
+
+    nearfield: NearfieldInteropData
+    farfield_leaf_nodes: Array
+    farfield_node_ranges: Array
+
+
 def _infer_order_from_coeff_count(
     *,
     coeff_count: int,
@@ -3372,6 +5685,202 @@ def _infer_order_from_coeff_count(
     )
 
 
+def _resolve_evaluation_node_views(
+    tree: Tree,
+    neighbor_list: NodeNeighborList,
+    *,
+    farfield_leaf_nodes: Optional[Array],
+    farfield_node_ranges: Optional[Array],
+) -> _EvaluationNodeViews:
+    """Resolve shared nearfield views and optional backend-specific farfield views.
+
+    Nearfield continues to use the shared radix-oriented neighbor/leaf layout.
+    Farfield may override that view, which is how the octree backend evaluates
+    octree-native locals without rewriting nearfield plumbing yet.
+    """
+
+    nearfield = _build_nearfield_interop_data(tree, neighbor_list)
+    radix_leaf_nodes = jnp.asarray(neighbor_list.leaf_indices, dtype=INDEX_DTYPE)
+    radix_node_ranges = jnp.asarray(tree.node_ranges, dtype=INDEX_DTYPE)
+    resolved_farfield_leaf_nodes = (
+        radix_leaf_nodes
+        if farfield_leaf_nodes is None
+        else jnp.asarray(farfield_leaf_nodes, dtype=INDEX_DTYPE)
+    )
+    resolved_farfield_node_ranges = (
+        radix_node_ranges
+        if farfield_node_ranges is None
+        else jnp.asarray(farfield_node_ranges, dtype=INDEX_DTYPE)
+    )
+    return _EvaluationNodeViews(
+        nearfield=nearfield,
+        farfield_leaf_nodes=resolved_farfield_leaf_nodes,
+        farfield_node_ranges=resolved_farfield_node_ranges,
+    )
+
+
+def _build_nearfield_interop_data(
+    tree: Tree,
+    neighbor_list: NodeNeighborList,
+    *,
+    octree: Optional[OctreeExecutionData] = None,
+    native_neighbors: Optional[OctreeNativeNeighborList] = None,
+) -> NearfieldInteropData:
+    """Build the explicit leaf/node view shared by current nearfield helpers.
+
+    The source-of-truth leaf ordering comes from ``neighbor_list``. For octree
+    trees, yggdrax now emits that neighbor list in octree-native order while
+    still exposing the particle-order leaf mapping needed for target lookup.
+    """
+    if native_neighbors is not None:
+        if octree is None:
+            raise ValueError("native octree nearfield data requires octree metadata")
+        leaf_nodes = jnp.asarray(native_neighbors.leaf_indices, dtype=INDEX_DTYPE)
+        leaf_count = int(leaf_nodes.shape[0])
+        radix_leaf_nodes = jnp.asarray(
+            getattr(
+                neighbor_list,
+                "particle_order_leaf_indices",
+                neighbor_list.leaf_indices,
+            ),
+            dtype=INDEX_DTYPE,
+        )
+        radix_leaf_ranges = jnp.asarray(tree.node_ranges, dtype=INDEX_DTYPE)[
+            radix_leaf_nodes
+        ]
+        radix_leaf_counts = radix_leaf_ranges[:, 1] - radix_leaf_ranges[:, 0] + 1
+        carrier_lookup = jnp.full(
+            (octree.parent.shape[0],),
+            -1,
+            dtype=INDEX_DTYPE,
+        )
+        carrier_lookup = carrier_lookup.at[leaf_nodes].set(
+            jnp.arange(leaf_count, dtype=INDEX_DTYPE)
+        )
+        radix_carrier_pos = carrier_lookup[
+            jnp.asarray(octree.radix_leaf_to_oct, dtype=INDEX_DTYPE)
+        ]
+        carrier_particle_counts = jax.ops.segment_sum(
+            radix_leaf_counts.astype(INDEX_DTYPE),
+            radix_carrier_pos,
+            leaf_count,
+        )
+        max_particles = int(jnp.max(carrier_particle_counts)) if leaf_count > 0 else 0
+
+        if max_particles > 0:
+            max_radix_leaf_particles = int(jnp.max(radix_leaf_counts))
+            local_offsets = jnp.arange(max_radix_leaf_particles, dtype=INDEX_DTYPE)
+            radix_particle_idx = (
+                radix_leaf_ranges[:, 0][:, None] + local_offsets[None, :]
+            )
+            radix_particle_valid = local_offsets[None, :] < radix_leaf_counts[:, None]
+            flat_particle_idx = radix_particle_idx.reshape(-1)
+            flat_valid = radix_particle_valid.reshape(-1)
+            flat_carrier_pos = jnp.repeat(radix_carrier_pos, max_radix_leaf_particles)
+            safe_carrier_pos = jnp.where(flat_valid, flat_carrier_pos, leaf_count)
+            order = jnp.argsort(safe_carrier_pos, stable=True)
+            sorted_valid = flat_valid[order]
+            sorted_carrier = safe_carrier_pos[order]
+            sorted_particle_idx = flat_particle_idx[order]
+            valid_int = sorted_valid.astype(INDEX_DTYPE)
+            running = jnp.cumsum(valid_int, dtype=INDEX_DTYPE) - valid_int
+            changed = jnp.concatenate(
+                [
+                    jnp.ones((1,), dtype=bool),
+                    sorted_carrier[1:] != sorted_carrier[:-1],
+                ]
+            )
+            group_starts = jnp.where(
+                sorted_valid & changed,
+                running,
+                jnp.zeros_like(running),
+            )
+            group_starts = jnp.maximum.accumulate(group_starts)
+            sorted_slots = running - group_starts
+            row = jnp.where(sorted_valid, sorted_carrier, leaf_count)
+            col = jnp.where(sorted_valid, sorted_slots, 0)
+            leaf_particle_indices = jnp.zeros(
+                (leaf_count + 1, max_particles),
+                dtype=INDEX_DTYPE,
+            )
+            leaf_particle_mask = jnp.zeros((leaf_count + 1, max_particles), dtype=bool)
+            leaf_particle_indices = leaf_particle_indices.at[row, col].set(
+                jnp.where(sorted_valid, sorted_particle_idx, 0),
+                mode="drop",
+            )
+            leaf_particle_mask = leaf_particle_mask.at[row, col].set(
+                sorted_valid,
+                mode="drop",
+            )
+            leaf_particle_indices = leaf_particle_indices[:leaf_count]
+            leaf_particle_mask = leaf_particle_mask[:leaf_count]
+            particle_to_leaf_position = jnp.zeros(
+                (tree.positions_sorted.shape[0],),
+                dtype=INDEX_DTYPE,
+            )
+            particle_to_leaf_position = particle_to_leaf_position.at[
+                flat_particle_idx[flat_valid]
+            ].set(flat_carrier_pos[flat_valid])
+        else:
+            leaf_particle_indices = jnp.zeros((leaf_count, 0), dtype=INDEX_DTYPE)
+            leaf_particle_mask = jnp.zeros((leaf_count, 0), dtype=bool)
+            particle_to_leaf_position = jnp.zeros(
+                (tree.positions_sorted.shape[0],),
+                dtype=INDEX_DTYPE,
+            )
+
+        oct_node_ranges = jnp.asarray(octree.node_ranges, dtype=INDEX_DTYPE)
+        particle_order_leaf_indices = jnp.asarray(
+            native_neighbors.particle_order_leaf_indices,
+            dtype=INDEX_DTYPE,
+        )
+        return NearfieldInteropData(
+            leaf_nodes=leaf_nodes,
+            node_ranges=oct_node_ranges,
+            offsets=jnp.asarray(native_neighbors.offsets, dtype=INDEX_DTYPE),
+            neighbors=jnp.asarray(native_neighbors.neighbors, dtype=INDEX_DTYPE),
+            counts=jnp.asarray(native_neighbors.counts, dtype=INDEX_DTYPE),
+            particle_order_node_ranges=oct_node_ranges,
+            particle_order_leaf_indices=particle_order_leaf_indices,
+            particle_order_to_native_leaf=jnp.asarray(
+                native_neighbors.particle_order_to_native_leaf,
+                dtype=INDEX_DTYPE,
+            ),
+            leaf_particle_indices=leaf_particle_indices,
+            leaf_particle_mask=leaf_particle_mask,
+            particle_to_leaf_position=particle_to_leaf_position,
+        )
+
+    del octree
+    leaf_indices = jnp.asarray(neighbor_list.leaf_indices, dtype=INDEX_DTYPE)
+    particle_order_leaf_indices = jnp.asarray(
+        getattr(
+            neighbor_list, "particle_order_leaf_indices", neighbor_list.leaf_indices
+        ),
+        dtype=INDEX_DTYPE,
+    )
+    return NearfieldInteropData(
+        leaf_nodes=leaf_indices,
+        node_ranges=jnp.asarray(tree.node_ranges, dtype=INDEX_DTYPE),
+        offsets=jnp.asarray(neighbor_list.offsets, dtype=INDEX_DTYPE),
+        neighbors=jnp.asarray(neighbor_list.neighbors, dtype=INDEX_DTYPE),
+        counts=jnp.asarray(neighbor_list.counts, dtype=INDEX_DTYPE),
+        particle_order_node_ranges=jnp.asarray(tree.node_ranges, dtype=INDEX_DTYPE),
+        particle_order_leaf_indices=particle_order_leaf_indices,
+        particle_order_to_native_leaf=jnp.asarray(
+            getattr(
+                neighbor_list,
+                "particle_order_to_native_leaf",
+                jnp.arange(leaf_indices.shape[0], dtype=INDEX_DTYPE),
+            ),
+            dtype=INDEX_DTYPE,
+        ),
+        leaf_particle_indices=None,
+        leaf_particle_mask=None,
+        particle_to_leaf_position=None,
+    )
+
+
 def _prepare_tree_evaluation_inputs(
     tree: Tree,
     positions_sorted: Array,
@@ -3379,6 +5888,9 @@ def _prepare_tree_evaluation_inputs(
     locals_or_downward: Union[LocalExpansionData, TreeDownwardData],
     neighbor_list: NodeNeighborList,
     *,
+    farfield_local_data: Optional[LocalExpansionData],
+    farfield_leaf_nodes: Optional[Array],
+    farfield_node_ranges: Optional[Array],
     max_leaf_size: Optional[int],
     return_potential: bool,
 ) -> _TreeEvaluationSetup:
@@ -3388,16 +5900,28 @@ def _prepare_tree_evaluation_inputs(
         if isinstance(locals_or_downward, TreeDownwardData)
         else locals_or_downward
     )
+    farfield_locals = (
+        locals_data if farfield_local_data is None else farfield_local_data
+    )
+    node_views = _resolve_evaluation_node_views(
+        tree,
+        neighbor_list,
+        farfield_leaf_nodes=farfield_leaf_nodes,
+        farfield_node_ranges=farfield_node_ranges,
+    )
 
-    if locals_data.centers.shape[0] != tree.node_ranges.shape[0]:
-        raise ValueError("local expansions must align with tree nodes")
-    if locals_data.coefficients.shape[0] != tree.node_ranges.shape[0]:
-        raise ValueError("local expansions must align with tree nodes")
+    if farfield_locals.centers.shape[0] != node_views.farfield_node_ranges.shape[0]:
+        raise ValueError("local expansions must align with evaluation node ranges")
+    if (
+        farfield_locals.coefficients.shape[0]
+        != node_views.farfield_node_ranges.shape[0]
+    ):
+        raise ValueError("local expansions must align with evaluation node ranges")
 
     positions = jnp.asarray(positions_sorted)
     masses = jnp.asarray(masses_sorted)
-    leaf_nodes = jnp.asarray(neighbor_list.leaf_indices, dtype=INDEX_DTYPE)
-    node_ranges = jnp.asarray(tree.node_ranges, dtype=INDEX_DTYPE)
+    leaf_nodes = node_views.farfield_leaf_nodes
+    node_ranges = node_views.farfield_node_ranges
 
     if leaf_nodes.size == 0:
         zeros = jnp.zeros_like(positions)
@@ -3411,7 +5935,7 @@ def _prepare_tree_evaluation_inputs(
             empty = zeros
         resolved_max_leaf = 0 if max_leaf_size is None else int(max_leaf_size)
         return _TreeEvaluationSetup(
-            locals_data,
+            farfield_locals,
             positions,
             masses,
             leaf_nodes,
@@ -3432,7 +5956,7 @@ def _prepare_tree_evaluation_inputs(
         resolved_max_leaf = int(max_leaf_size)
 
     return _TreeEvaluationSetup(
-        locals_data,
+        farfield_locals,
         positions,
         masses,
         leaf_nodes,
@@ -3511,66 +6035,89 @@ def _rotation_blocks_for_grouped_classes(
         empty = jnp.zeros(empty_shape, dtype=dtype)
         return empty, empty
 
-    keys_np = np.asarray(jax.device_get(class_keys), dtype=np.int64)
-    blocks_to_host: list[Optional[Array]] = [None] * num_classes
-    blocks_from_host: list[Optional[Array]] = [None] * num_classes
-    missing_indices: list[int] = []
+    cache_key = _grouped_operator_cache_key(
+        order=order,
+        rotation=rotation,
+        dtype=dtype,
+        class_keys=class_keys,
+        class_deltas=class_deltas,
+    )
+    if cache_key is not None:
+        cached = _grouped_operator_cache_get(cache_key)
+        if cached is not None:
+            return cached
 
-    for class_idx, key_vals in enumerate(keys_np):
-        class_key = tuple(int(v) for v in key_vals.tolist())
-        cache_key = (int(order), str(rotation), str(dtype), class_key)
-        cached = _operator_cache_get(cache_key)
-        if cached is None:
-            missing_indices.append(class_idx)
-            continue
-        blocks_to_host[class_idx], blocks_from_host[class_idx] = cached
-
-    if missing_indices:
-        miss_idx = jnp.asarray(missing_indices, dtype=INDEX_DTYPE)
-        deltas_miss = class_deltas[miss_idx]
-        if rotation == "solidfmm":
-            blocks_to_miss = complex_rotation_blocks_to_z_solidfmm_batch(
-                deltas_miss,
-                order=order,
-                basis="multipole",
-                dtype=dtype,
-            )
-            blocks_from_miss = complex_rotation_blocks_from_z_solidfmm_batch(
-                deltas_miss,
-                order=order,
-                basis="local",
-                dtype=dtype,
-            )
-        elif rotation == "cached":
-            blocks_to_miss = complex_rotation_blocks_to_z_batch(
-                deltas_miss,
-                order=order,
-                basis="multipole",
-                dtype=dtype,
-            )
-            blocks_from_miss = complex_rotation_blocks_from_z_batch(
-                deltas_miss,
-                order=order,
-                basis="local",
-                dtype=dtype,
-            )
-        else:
-            raise ValueError(
-                "grouped operator cache currently supports rotation='cached' or 'solidfmm'"
-            )
-
-        for miss_pos, class_idx in enumerate(missing_indices):
-            key_vals = keys_np[class_idx]
-            class_key = tuple(int(v) for v in key_vals.tolist())
-            blocks = (blocks_to_miss[miss_pos], blocks_from_miss[miss_pos])
-            _operator_cache_put(
-                (int(order), str(rotation), str(dtype), class_key), blocks
-            )
-            blocks_to_host[class_idx], blocks_from_host[class_idx] = blocks
-
-    blocks_to = jnp.stack([b for b in blocks_to_host if b is not None], axis=0)
-    blocks_from = jnp.stack([b for b in blocks_from_host if b is not None], axis=0)
+    deltas = jnp.asarray(class_deltas)
+    if rotation == "solidfmm":
+        blocks_to = complex_rotation_blocks_to_z_solidfmm_batch(
+            deltas,
+            order=order,
+            basis="multipole",
+            dtype=dtype,
+        )
+        blocks_from = complex_rotation_blocks_from_z_solidfmm_batch(
+            deltas,
+            order=order,
+            basis="local",
+            dtype=dtype,
+        )
+    elif rotation == "cached":
+        blocks_to = complex_rotation_blocks_to_z_batch(
+            deltas,
+            order=order,
+            basis="multipole",
+            dtype=dtype,
+        )
+        blocks_from = complex_rotation_blocks_from_z_batch(
+            deltas,
+            order=order,
+            basis="local",
+            dtype=dtype,
+        )
+    else:
+        raise ValueError(
+            "grouped operator cache currently supports rotation='cached' or 'solidfmm'"
+        )
+    if cache_key is not None:
+        _grouped_operator_cache_put(cache_key, (blocks_to, blocks_from))
     return blocks_to, blocks_from
+
+
+def _chunk_segment_scatter_add(
+    local_accum: Array,
+    contribs: Array,
+    tgt_chunk: Array,
+    valid: Array,
+    *,
+    chunk_size: int,
+) -> Array:
+    """Reduce one fixed-width chunk by target index and scatter-add into locals."""
+    sort_idx = jnp.argsort(tgt_chunk)
+    tgt_sorted = tgt_chunk[sort_idx]
+    contribs_sorted = contribs[sort_idx]
+    valid_sorted = valid[sort_idx]
+
+    contribs_sorted = jnp.where(valid_sorted[:, None], contribs_sorted, 0)
+    new_group = jnp.concatenate(
+        (
+            jnp.asarray([True], dtype=bool),
+            tgt_sorted[1:] != tgt_sorted[:-1],
+        ),
+        axis=0,
+    )
+    group_ids = jnp.cumsum(new_group.astype(INDEX_DTYPE)) - jnp.asarray(
+        1,
+        dtype=INDEX_DTYPE,
+    )
+    reduced = jax.ops.segment_sum(contribs_sorted, group_ids, chunk_size)
+
+    unique_targets = jnp.zeros((chunk_size,), dtype=INDEX_DTYPE)
+    unique_targets = unique_targets.at[group_ids].set(tgt_sorted)
+    unique_valid = jnp.zeros((chunk_size,), dtype=bool)
+    unique_valid = unique_valid.at[group_ids].set(valid_sorted)
+    safe_targets = jnp.where(unique_valid, unique_targets, 0)
+    reduced = jnp.where(unique_valid[:, None], reduced, 0)
+    return local_accum.at[safe_targets].add(reduced)
 
 
 @partial(
@@ -3595,7 +6142,6 @@ def _accumulate_solidfmm_m2l_grouped_chunked_scan(
     """Accumulate grouped solidfmm M2L contributions via chunked scan."""
     pair_count = src_sorted.shape[0]
     starts = jnp.arange(0, pair_count, chunk_size, dtype=INDEX_DTYPE)
-    local_accum0 = jnp.zeros_like(locals_coeffs)
 
     def body(local_accum: Array, start_idx: Array) -> tuple[Array, None]:
         offset = jnp.arange(chunk_size, dtype=INDEX_DTYPE)
@@ -3618,12 +6164,17 @@ def _accumulate_solidfmm_m2l_grouped_chunked_scan(
             blocks_from,
             order=order,
         ).astype(locals_coeffs.dtype)
-        contribs = jnp.where(valid[:, None], contribs, 0)
-        accum_chunk = jax.ops.segment_sum(contribs, tgt_chunk, total_nodes)
-        return local_accum + accum_chunk, None
+        local_accum = _chunk_segment_scatter_add(
+            local_accum,
+            contribs,
+            tgt_chunk,
+            valid,
+            chunk_size=chunk_size,
+        )
+        return local_accum, None
 
-    local_accum, _ = jax.lax.scan(body, local_accum0, starts)
-    return locals_coeffs + local_accum
+    local_accum, _ = jax.lax.scan(body, locals_coeffs, starts)
+    return local_accum
 
 
 @partial(jax.jit, static_argnames=("order", "total_nodes"), donate_argnums=(0,))
@@ -3659,23 +6210,29 @@ def _build_grouped_class_segments(
     grouped: GroupedInteractionBuffers,
     *,
     chunk_size: int,
-) -> tuple[Array, Array, Array, Array, Array, Array]:
-    """Build class-major fixed-width segments for chunked class execution."""
+) -> tuple[Array, Array, Array]:
+    """Build compact class-major segment metadata for chunked execution."""
+    cache_key = _grouped_segment_cache_key(
+        class_offsets=grouped.class_offsets,
+        class_targets=grouped.class_targets,
+        chunk_size=int(chunk_size),
+    )
+    if cache_key is not None:
+        cached = _grouped_segment_cache_get(cache_key)
+        if cached is not None:
+            return cached
+
     class_offsets = np.asarray(jax.device_get(grouped.class_offsets), dtype=np.int64)
-    class_targets = np.asarray(jax.device_get(grouped.class_targets), dtype=np.int64)
     if class_offsets.size <= 1:
         empty = jnp.zeros((0,), dtype=INDEX_DTYPE)
-        empty_matrix = jnp.zeros((0, int(chunk_size)), dtype=INDEX_DTYPE)
-        return empty, empty, empty, empty_matrix, empty_matrix, empty_matrix
+        result = (empty, empty, empty)
+        if cache_key is not None:
+            _grouped_segment_cache_put(cache_key, result)
+        return result
 
     starts: list[int] = []
     lengths: list[int] = []
     class_ids: list[int] = []
-    sort_permutation: list[np.ndarray] = []
-    group_ids: list[np.ndarray] = []
-    unique_targets: list[np.ndarray] = []
-
-    offsets = np.arange(int(chunk_size), dtype=np.int64)
     for class_idx in range(class_offsets.shape[0] - 1):
         start = int(class_offsets[class_idx])
         end = int(class_offsets[class_idx + 1])
@@ -3684,47 +6241,26 @@ def _build_grouped_class_segments(
             starts.append(start)
             lengths.append(seg_len)
             class_ids.append(class_idx)
-
-            idx = start + offsets
-            valid = offsets < seg_len
-            safe_idx = np.where(valid, idx, 0)
-            tgt_chunk = class_targets[safe_idx]
-
-            perm = np.argsort(tgt_chunk, kind="stable")
-            tgt_sorted = tgt_chunk[perm]
-            grp = np.zeros((int(chunk_size),), dtype=np.int64)
-            if int(chunk_size) > 1:
-                grp[1:] = np.cumsum(
-                    (tgt_sorted[1:] != tgt_sorted[:-1]).astype(np.int64)
-                )
-
-            unique = np.zeros((int(chunk_size),), dtype=np.int64)
-            unique[grp] = tgt_sorted
-
-            sort_permutation.append(perm.astype(np.int64))
-            group_ids.append(grp)
-            unique_targets.append(unique)
             start += seg_len
 
-    if len(sort_permutation) == 0:
-        empty_matrix = jnp.zeros((0, int(chunk_size)), dtype=INDEX_DTYPE)
-        return (
+    if len(starts) == 0:
+        result = (
             jnp.asarray(starts, dtype=INDEX_DTYPE),
             jnp.asarray(lengths, dtype=INDEX_DTYPE),
             jnp.asarray(class_ids, dtype=INDEX_DTYPE),
-            empty_matrix,
-            empty_matrix,
-            empty_matrix,
         )
+        if cache_key is not None:
+            _grouped_segment_cache_put(cache_key, result)
+        return result
 
-    return (
+    result = (
         jnp.asarray(starts, dtype=INDEX_DTYPE),
         jnp.asarray(lengths, dtype=INDEX_DTYPE),
         jnp.asarray(class_ids, dtype=INDEX_DTYPE),
-        jnp.asarray(np.stack(sort_permutation, axis=0), dtype=INDEX_DTYPE),
-        jnp.asarray(np.stack(group_ids, axis=0), dtype=INDEX_DTYPE),
-        jnp.asarray(np.stack(unique_targets, axis=0), dtype=INDEX_DTYPE),
     )
+    if cache_key is not None:
+        _grouped_segment_cache_put(cache_key, result)
+    return result
 
 
 @partial(
@@ -3741,9 +6277,6 @@ def _accumulate_solidfmm_m2l_class_major_chunked_scan(
     segment_starts: Array,
     segment_lengths: Array,
     segment_class_ids: Array,
-    segment_sort_permutation: Array,
-    segment_group_ids: Array,
-    segment_unique_targets: Array,
     blocks_to_classes: Array,
     blocks_from_classes: Array,
     *,
@@ -3757,7 +6290,6 @@ def _accumulate_solidfmm_m2l_class_major_chunked_scan(
         return locals_coeffs
 
     offsets = jnp.arange(chunk_size, dtype=INDEX_DTYPE)
-    local_accum0 = jnp.zeros_like(locals_coeffs)
 
     def body(local_accum: Array, seg_idx: Array) -> tuple[Array, None]:
         start = segment_starts[seg_idx]
@@ -3785,19 +6317,33 @@ def _accumulate_solidfmm_m2l_class_major_chunked_scan(
             order=order,
         ).astype(locals_coeffs.dtype)
         contribs = jnp.where(valid[:, None], contribs, 0)
-        sort_idx = segment_sort_permutation[seg_idx]
-        group_ids = segment_group_ids[seg_idx]
-        unique_targets = segment_unique_targets[seg_idx]
+        masked_targets = jnp.where(valid, tgt_chunk, jnp.iinfo(INDEX_DTYPE).max)
+        sort_idx = jnp.argsort(masked_targets)
+        tgt_sorted_chunk = tgt_chunk[sort_idx]
         contribs_sorted = contribs[sort_idx]
-        reduced = jax.ops.segment_sum(contribs_sorted, group_ids, chunk_size)
+        valid_sorted = valid[sort_idx]
+        prev_targets = jnp.concatenate(
+            [
+                jnp.asarray([-1], dtype=INDEX_DTYPE),
+                tgt_sorted_chunk[:-1],
+            ]
+        )
+        group_starts = valid_sorted & (
+            jnp.logical_not(jnp.roll(valid_sorted, 1))
+            | (tgt_sorted_chunk != prev_targets)
+        )
+        group_ids = jnp.cumsum(group_starts.astype(INDEX_DTYPE)) - 1
+        safe_group_ids = jnp.where(valid_sorted, group_ids, 0)
+        reduced = jax.ops.segment_sum(contribs_sorted, safe_group_ids, chunk_size)
+        unique_targets = jnp.where(valid_sorted, tgt_sorted_chunk, 0)
         return local_accum.at[unique_targets].add(reduced), None
 
     local_accum, _ = jax.lax.scan(
         body,
-        local_accum0,
+        locals_coeffs,
         jnp.arange(num_segments, dtype=INDEX_DTYPE),
     )
-    return locals_coeffs + local_accum
+    return local_accum
 
 
 def _accumulate_solidfmm_m2l_grouped_class_major(
@@ -3818,6 +6364,11 @@ def _accumulate_solidfmm_m2l_grouped_class_major(
     chunk_size: int,
 ) -> Array:
     """Class-major grouped accumulation without per-pair operator gathers."""
+    del (
+        grouped_segment_sort_permutation,
+        grouped_segment_group_ids,
+        grouped_segment_unique_targets,
+    )
 
     if rotation not in ("cached", "solidfmm"):
         src = grouped.class_sources
@@ -3844,17 +6395,11 @@ def _accumulate_solidfmm_m2l_grouped_class_major(
         grouped_segment_starts is None
         or grouped_segment_lengths is None
         or grouped_segment_class_ids is None
-        or grouped_segment_sort_permutation is None
-        or grouped_segment_group_ids is None
-        or grouped_segment_unique_targets is None
     ):
         (
             segment_starts,
             segment_lengths,
             segment_class_ids,
-            segment_sort_permutation,
-            segment_group_ids,
-            segment_unique_targets,
         ) = _build_grouped_class_segments(
             grouped,
             chunk_size=int(chunk_size),
@@ -3863,15 +6408,6 @@ def _accumulate_solidfmm_m2l_grouped_class_major(
         segment_starts = jnp.asarray(grouped_segment_starts, dtype=INDEX_DTYPE)
         segment_lengths = jnp.asarray(grouped_segment_lengths, dtype=INDEX_DTYPE)
         segment_class_ids = jnp.asarray(grouped_segment_class_ids, dtype=INDEX_DTYPE)
-        segment_sort_permutation = jnp.asarray(
-            grouped_segment_sort_permutation,
-            dtype=INDEX_DTYPE,
-        )
-        segment_group_ids = jnp.asarray(grouped_segment_group_ids, dtype=INDEX_DTYPE)
-        segment_unique_targets = jnp.asarray(
-            grouped_segment_unique_targets,
-            dtype=INDEX_DTYPE,
-        )
     return _accumulate_solidfmm_m2l_class_major_chunked_scan(
         locals_coeffs,
         multip_packed,
@@ -3881,9 +6417,6 @@ def _accumulate_solidfmm_m2l_grouped_class_major(
         segment_starts,
         segment_lengths,
         segment_class_ids,
-        segment_sort_permutation,
-        segment_group_ids,
-        segment_unique_targets,
         blocks_to_classes,
         blocks_from_classes,
         order=order,
@@ -3933,7 +6466,7 @@ def _accumulate_solidfmm_m2l_grouped(
         class_deltas=class_deltas,
         dtype=multip_packed.dtype,
     )
-    if int(src_sorted.shape[0]) <= int(chunk_size):
+    if int(src_sorted.shape[0]) <= min(int(chunk_size), _M2L_FULLBATCH_MAX_PAIRS):
         return _accumulate_solidfmm_m2l_grouped_fullbatch(
             locals_coeffs,
             multip_packed,
@@ -3971,6 +6504,47 @@ def _l2l_complex_batch_kernel(
 ) -> Array:
     """Vectorized complex-basis L2L translation kernel."""
     return l2l_complex_batch(coeffs, deltas, order=order, rotation=rotation)
+
+
+@partial(jax.jit, static_argnames=("order", "m2l_impl"))
+def _m2l_real_batch_kernel(
+    multipoles: Array,
+    deltas: Array,
+    *,
+    order: int,
+    m2l_impl: str,
+) -> Array:
+    """Vectorized real-basis M2L translation kernel."""
+    mode = str(m2l_impl).strip().lower()
+    if mode != "rot_scale":
+        raise ValueError("real-basis m2l_impl must be 'rot_scale'")
+    return m2l_rot_scale_real_batch(multipoles, deltas, order=order, use_pallas=False)
+
+
+@partial(jax.jit, static_argnames=("order", "m2l_impl"))
+def _m2l_real_batch_kernel_pallas(
+    multipoles: Array,
+    deltas: Array,
+    *,
+    order: int,
+    m2l_impl: str,
+) -> Array:
+    """Vectorized real-basis M2L translation kernel using the optional Pallas core."""
+    mode = str(m2l_impl).strip().lower()
+    if mode != "rot_scale":
+        raise ValueError("real-basis m2l_impl must be 'rot_scale'")
+    return m2l_rot_scale_real_batch(multipoles, deltas, order=order, use_pallas=True)
+
+
+@partial(jax.jit, static_argnames=("order",))
+def _l2l_real_batch_kernel(
+    coeffs: Array,
+    deltas: Array,
+    *,
+    order: int,
+) -> Array:
+    """Vectorized real-basis L2L translation kernel."""
+    return jax.vmap(lambda c, d: l2l_real(c, d, order=order))(coeffs, deltas)
 
 
 @partial(
@@ -4044,7 +6618,6 @@ def _accumulate_solidfmm_m2l_chunked_scan(
     """Accumulate solidfmm M2L contributions with chunked scan reduction."""
     pair_count = src.shape[0]
     starts = jnp.arange(0, pair_count, chunk_size, dtype=INDEX_DTYPE)
-    local_accum0 = jnp.zeros_like(locals_coeffs)
 
     def body(local_accum: Array, start_idx: Array) -> tuple[Array, None]:
         offset = jnp.arange(chunk_size, dtype=INDEX_DTYPE)
@@ -4086,12 +6659,17 @@ def _accumulate_solidfmm_m2l_chunked_scan(
             )
 
         contribs = contribs.astype(locals_coeffs.dtype)
-        contribs = jnp.where(valid[:, None], contribs, 0)
-        accum_chunk = jax.ops.segment_sum(contribs, tgt_chunk, total_nodes)
-        return local_accum + accum_chunk, None
+        local_accum = _chunk_segment_scatter_add(
+            local_accum,
+            contribs,
+            tgt_chunk,
+            valid,
+            chunk_size=chunk_size,
+        )
+        return local_accum, None
 
-    local_accum, _ = jax.lax.scan(body, local_accum0, starts)
-    return locals_coeffs + local_accum
+    local_accum, _ = jax.lax.scan(body, locals_coeffs, starts)
+    return local_accum
 
 
 @partial(
@@ -4134,6 +6712,193 @@ def _propagate_solidfmm_locals_to_children(
     return coeffs_local + updates
 
 
+@partial(
+    jax.jit,
+    static_argnames=("order", "m2l_impl", "total_nodes"),
+    donate_argnums=(0,),
+)
+def _accumulate_real_m2l_fullbatch(
+    locals_coeffs: Array,
+    multip_packed_real: Array,
+    centers: Array,
+    src: Array,
+    tgt: Array,
+    *,
+    order: int,
+    m2l_impl: str,
+    total_nodes: int,
+) -> Array:
+    """Accumulate real-basis M2L contributions in one full interaction batch."""
+    src_mult = multip_packed_real[src]
+    deltas = centers[tgt] - centers[src]
+    contribs = _m2l_real_batch_kernel(
+        src_mult,
+        deltas,
+        order=order,
+        m2l_impl=m2l_impl,
+    ).astype(locals_coeffs.dtype)
+    return locals_coeffs + jax.ops.segment_sum(contribs, tgt, total_nodes)
+
+
+@partial(
+    jax.jit,
+    static_argnames=("order", "m2l_impl", "total_nodes"),
+    donate_argnums=(0,),
+)
+def _accumulate_real_m2l_fullbatch_pallas(
+    locals_coeffs: Array,
+    multip_packed_real: Array,
+    centers: Array,
+    src: Array,
+    tgt: Array,
+    *,
+    order: int,
+    m2l_impl: str,
+    total_nodes: int,
+) -> Array:
+    """Accumulate real-basis M2L contributions using the optional Pallas core."""
+    src_mult = multip_packed_real[src]
+    deltas = centers[tgt] - centers[src]
+    contribs = _m2l_real_batch_kernel_pallas(
+        src_mult,
+        deltas,
+        order=order,
+        m2l_impl=m2l_impl,
+    ).astype(locals_coeffs.dtype)
+    return locals_coeffs + jax.ops.segment_sum(contribs, tgt, total_nodes)
+
+
+@partial(
+    jax.jit,
+    static_argnames=("order", "m2l_impl", "total_nodes", "chunk_size"),
+    donate_argnums=(0,),
+)
+def _accumulate_real_m2l_chunked_scan(
+    locals_coeffs: Array,
+    multip_packed_real: Array,
+    centers: Array,
+    src: Array,
+    tgt: Array,
+    *,
+    order: int,
+    m2l_impl: str,
+    total_nodes: int,
+    chunk_size: int,
+) -> Array:
+    """Accumulate real-basis M2L contributions with chunked scan reduction."""
+    pair_count = src.shape[0]
+    starts = jnp.arange(0, pair_count, chunk_size, dtype=INDEX_DTYPE)
+
+    def body(local_accum: Array, start_idx: Array) -> tuple[Array, None]:
+        offset = jnp.arange(chunk_size, dtype=INDEX_DTYPE)
+        idx = start_idx + offset
+        valid = idx < pair_count
+        safe_idx = jnp.where(valid, idx, 0)
+        src_chunk = src[safe_idx]
+        tgt_chunk = tgt[safe_idx]
+        src_mult = multip_packed_real[src_chunk]
+        deltas = centers[tgt_chunk] - centers[src_chunk]
+        contribs = _m2l_real_batch_kernel(
+            src_mult,
+            deltas,
+            order=order,
+            m2l_impl=m2l_impl,
+        ).astype(locals_coeffs.dtype)
+        local_accum = _chunk_segment_scatter_add(
+            local_accum,
+            contribs,
+            tgt_chunk,
+            valid,
+            chunk_size=chunk_size,
+        )
+        return local_accum, None
+
+    local_accum, _ = jax.lax.scan(body, locals_coeffs, starts)
+    return local_accum
+
+
+@partial(
+    jax.jit,
+    static_argnames=("order", "m2l_impl", "total_nodes", "chunk_size"),
+    donate_argnums=(0,),
+)
+def _accumulate_real_m2l_chunked_scan_pallas(
+    locals_coeffs: Array,
+    multip_packed_real: Array,
+    centers: Array,
+    src: Array,
+    tgt: Array,
+    *,
+    order: int,
+    m2l_impl: str,
+    total_nodes: int,
+    chunk_size: int,
+) -> Array:
+    """Chunked real-basis M2L accumulation using the optional Pallas core."""
+    pair_count = src.shape[0]
+    starts = jnp.arange(0, pair_count, chunk_size, dtype=INDEX_DTYPE)
+
+    def body(local_accum: Array, start_idx: Array) -> tuple[Array, None]:
+        offset = jnp.arange(chunk_size, dtype=INDEX_DTYPE)
+        idx = start_idx + offset
+        valid = idx < pair_count
+        safe_idx = jnp.where(valid, idx, 0)
+        src_chunk = src[safe_idx]
+        tgt_chunk = tgt[safe_idx]
+        src_mult = multip_packed_real[src_chunk]
+        deltas = centers[tgt_chunk] - centers[src_chunk]
+        contribs = _m2l_real_batch_kernel_pallas(
+            src_mult,
+            deltas,
+            order=order,
+            m2l_impl=m2l_impl,
+        ).astype(locals_coeffs.dtype)
+        local_accum = _chunk_segment_scatter_add(
+            local_accum,
+            contribs,
+            tgt_chunk,
+            valid,
+            chunk_size=chunk_size,
+        )
+        return local_accum, None
+
+    local_accum, _ = jax.lax.scan(body, locals_coeffs, starts)
+    return local_accum
+
+
+@partial(
+    jax.jit,
+    static_argnames=("order", "total_nodes"),
+    donate_argnums=(0,),
+)
+def _propagate_real_locals_to_children(
+    coeffs_local: Array,
+    centers_local: Array,
+    left_child: Array,
+    right_child: Array,
+    *,
+    order: int,
+    total_nodes: int,
+) -> Array:
+    """Apply real-basis L2L translations from parents to their children."""
+    num_internal_nodes = left_child.shape[0]
+    parent_idx = jnp.arange(num_internal_nodes, dtype=INDEX_DTYPE)
+    child_idx = jnp.concatenate(
+        [left_child[:num_internal_nodes], right_child[:num_internal_nodes]],
+        axis=0,
+    )
+    parent_rep = jnp.concatenate([parent_idx, parent_idx], axis=0)
+    valid = child_idx >= 0
+    safe_child_idx = jnp.where(valid, child_idx, 0)
+    parent_coeffs = coeffs_local[parent_rep]
+    deltas = centers_local[safe_child_idx] - centers_local[parent_rep]
+    translated = _l2l_real_batch_kernel(parent_coeffs, deltas, order=order)
+    translated = translated.astype(coeffs_local.dtype)
+    translated = jnp.where(valid[:, None], translated, 0)
+    updates = jax.ops.segment_sum(translated, safe_child_idx, total_nodes)
+    return coeffs_local + updates
+
+
 def _prepare_solidfmm_downward_sweep(
     tree: Tree,
     upward: TreeUpwardData,
@@ -4145,6 +6910,8 @@ def _prepare_solidfmm_downward_sweep(
     m2l_chunk_size: Optional[int] = None,
     l2l_chunk_size: Optional[int] = None,
     complex_rotation: str = "solidfmm",
+    basis_mode: str = "complex",
+    m2l_impl: Optional[str] = None,
     traversal_config: Optional[DualTreeTraversalConfig] = None,
     dense_buffers: Optional[DenseInteractionBuffers] = None,
     retry_logger: Optional[Callable[[DualTreeRetryEvent], None]] = None,
@@ -4157,11 +6924,21 @@ def _prepare_solidfmm_downward_sweep(
     grouped_segment_group_ids: Optional[Array] = None,
     grouped_segment_unique_targets: Optional[Array] = None,
     farfield_mode: str = "pair_grouped",
+    far_pairs_coo: Optional[_FarPairCOO] = None,
+    far_pairs_by_gear: Optional[tuple[tuple[Array, Array], ...]] = None,
+    adaptive_order: bool = False,
+    p_gears: tuple[int, ...] = tuple(),
     dehnen_radius_scale: float = 1.0,
+    use_pallas: bool = False,
 ) -> TreeDownwardData:
-    """Prepare M2L accumulation into solidfmm complex local buffers."""
+    """Prepare M2L accumulation for solidfmm-style complex or real locals.
 
-    if interactions is None:
+    The returned value intentionally retains only the locals plus a minimal
+    interaction handle. Grouped layouts, chunk schedules, and other M2L feed
+    structures are execution inputs, not part of the long-lived downward state.
+    """
+
+    if interactions is None and far_pairs_coo is None:
         interactions = build_well_separated_interactions(
             tree,
             upward.geometry,
@@ -4171,13 +6948,22 @@ def _prepare_solidfmm_downward_sweep(
             traversal_config=traversal_config,
             retry_logger=retry_logger,
         )
+    if interactions is None:
+        interactions = _empty_interaction_storage_for_tree(tree)
 
     p = int(upward.multipoles.order)
     centers = jnp.asarray(upward.multipoles.centers)
     total_nodes = int(centers.shape[0])
     coeff_count = sh_size(p)
 
-    dtype = complex_dtype_for_real(centers.dtype)
+    basis_mode_norm = str(basis_mode).strip().lower()
+    if basis_mode_norm not in ("complex", "real"):
+        raise ValueError("basis_mode must be 'complex' or 'real'")
+    dtype = (
+        complex_dtype_for_real(centers.dtype)
+        if basis_mode_norm == "complex"
+        else centers.dtype
+    )
     if initial_locals is not None:
         locals_coeffs = jnp.asarray(initial_locals.coefficients)
         if locals_coeffs.shape != (total_nodes, coeff_count):
@@ -4185,8 +6971,12 @@ def _prepare_solidfmm_downward_sweep(
     else:
         locals_coeffs = jnp.zeros((total_nodes, coeff_count), dtype=dtype)
 
-    src = jnp.asarray(interactions.sources, dtype=INDEX_DTYPE)
-    tgt = jnp.asarray(interactions.targets, dtype=INDEX_DTYPE)
+    if far_pairs_coo is not None:
+        src = jnp.asarray(far_pairs_coo.sources, dtype=INDEX_DTYPE)
+        tgt = jnp.asarray(far_pairs_coo.targets, dtype=INDEX_DTYPE)
+    else:
+        src = jnp.asarray(interactions.sources, dtype=INDEX_DTYPE)
+        tgt = jnp.asarray(interactions.targets, dtype=INDEX_DTYPE)
 
     pair_count = int(src.shape[0])
     if pair_count == 0:
@@ -4218,9 +7008,15 @@ def _prepare_solidfmm_downward_sweep(
     )
 
     rotation_mode = str(complex_rotation).strip().lower()
-    if rotation_mode not in ("bdz", "cached", "wigner", "solidfmm"):
-        raise ValueError(
-            "complex_rotation must be 'bdz', 'cached', 'wigner', or 'solidfmm'"
+    if basis_mode_norm == "complex":
+        if rotation_mode not in ("bdz", "cached", "wigner", "solidfmm"):
+            raise ValueError(
+                "complex_rotation must be 'bdz', 'cached', 'wigner', or 'solidfmm'"
+            )
+        multip_packed_kernel = multip_packed.astype(dtype)
+    else:
+        multip_packed_kernel = complex_to_real_coeffs(multip_packed, order=p).astype(
+            dtype
         )
 
     chunk_size = 4096 if m2l_chunk_size is None else int(m2l_chunk_size)
@@ -4397,6 +7193,13 @@ def _evaluate_tree_compiled_impl(
     masses: Array,
     locals_data: LocalExpansionData,
     neighbor_list: NodeNeighborList,
+    nearfield_leaf_nodes: Array,
+    nearfield_node_ranges: Array,
+    nearfield_offsets: Array,
+    nearfield_neighbors: Array,
+    nearfield_counts: Array,
+    nearfield_leaf_particle_indices: Array,
+    nearfield_leaf_particle_mask: Array,
     leaf_nodes: Array,
     node_ranges: Array,
     precomputed_target_leaf_ids: Array,
@@ -4418,6 +7221,10 @@ def _evaluate_tree_compiled_impl(
     """JIT core for far/near field evaluation on a prepared tree state."""
     use_precomputed = (
         precomputed_target_leaf_ids.shape[0] == neighbor_list.neighbors.shape[0]
+        and precomputed_valid_pairs.shape[0] == neighbor_list.neighbors.shape[0]
+    )
+    use_precomputed_source = (
+        precomputed_source_leaf_ids.shape[0] == neighbor_list.neighbors.shape[0]
     )
     edge_count = int(neighbor_list.neighbors.shape[0])
     chunk_count = (
@@ -4447,7 +7254,9 @@ def _evaluate_tree_compiled_impl(
             precomputed_target_leaf_ids if use_precomputed else None
         ),
         precomputed_source_leaf_ids=(
-            precomputed_source_leaf_ids if use_precomputed else None
+            precomputed_source_leaf_ids
+            if (use_precomputed and use_precomputed_source)
+            else None
         ),
         precomputed_valid_pairs=precomputed_valid_pairs if use_precomputed else None,
         precomputed_chunk_sort_indices=(
@@ -4458,6 +7267,21 @@ def _evaluate_tree_compiled_impl(
         ),
         precomputed_chunk_unique_indices=(
             precomputed_chunk_unique_indices if use_precomputed_scatter else None
+        ),
+        node_ranges_override=nearfield_node_ranges,
+        leaf_nodes_override=nearfield_leaf_nodes,
+        neighbor_offsets_override=nearfield_offsets,
+        neighbor_indices_override=nearfield_neighbors,
+        neighbor_counts_override=nearfield_counts,
+        leaf_particle_indices_override=(
+            nearfield_leaf_particle_indices
+            if nearfield_leaf_particle_indices.shape[0] > 0
+            else None
+        ),
+        leaf_particle_mask_override=(
+            nearfield_leaf_particle_mask
+            if nearfield_leaf_particle_mask.shape[0] > 0
+            else None
         ),
     )
 
@@ -4500,6 +7324,10 @@ def _evaluate_prepared_tree(
     masses_sorted: Array,
     downward: TreeDownwardData,
     neighbor_list: NodeNeighborList,
+    nearfield_interop: Optional[NearfieldInteropData],
+    farfield_local_data: Optional[LocalExpansionData],
+    farfield_leaf_nodes: Optional[Array],
+    farfield_node_ranges: Optional[Array],
     nearfield_target_leaf_ids: Optional[Array],
     nearfield_source_leaf_ids: Optional[Array],
     nearfield_valid_pairs: Optional[Array],
@@ -4585,6 +7413,10 @@ def _evaluate_prepared_tree(
         masses_sorted,
         downward,
         neighbor_list,
+        nearfield_interop=nearfield_interop,
+        farfield_local_data=farfield_local_data,
+        farfield_leaf_nodes=farfield_leaf_nodes,
+        farfield_node_ranges=farfield_node_ranges,
         precomputed_target_leaf_ids=nearfield_target_leaf_ids,
         precomputed_source_leaf_ids=nearfield_source_leaf_ids,
         precomputed_valid_pairs=nearfield_valid_pairs,
@@ -4622,65 +7454,102 @@ def _build_target_nearfield_source_index_matrix(
     *,
     target_sorted_indices: Array,
     target_leaf_positions: Array,
-    tree: Tree,
-    neighbor_list: NodeNeighborList,
+    nearfield_interop: NearfieldInteropData,
 ) -> tuple[Array, Array]:
     """Build padded source-index lists for each target particle near-field eval."""
-    target_np = np.asarray(jax.device_get(target_sorted_indices), dtype=np.int64)
-    target_leaf_pos_np = np.asarray(
-        jax.device_get(target_leaf_positions),
-        dtype=np.int64,
-    )
-    node_ranges = np.asarray(jax.device_get(tree.node_ranges), dtype=np.int64)
-    leaf_nodes = np.asarray(jax.device_get(neighbor_list.leaf_indices), dtype=np.int64)
-    offsets = np.asarray(jax.device_get(neighbor_list.offsets), dtype=np.int64)
-    neighbors = np.asarray(jax.device_get(neighbor_list.neighbors), dtype=np.int64)
+    targets = jnp.asarray(target_sorted_indices, dtype=INDEX_DTYPE)
+    target_leaf_pos = jnp.asarray(target_leaf_positions, dtype=INDEX_DTYPE)
+    node_ranges = jnp.asarray(nearfield_interop.node_ranges, dtype=INDEX_DTYPE)
+    leaf_nodes = jnp.asarray(nearfield_interop.leaf_nodes, dtype=INDEX_DTYPE)
+    offsets = jnp.asarray(nearfield_interop.offsets, dtype=INDEX_DTYPE)
+    neighbors = jnp.asarray(nearfield_interop.neighbors, dtype=INDEX_DTYPE)
+
+    num_targets = int(targets.shape[0])
+    if num_targets == 0:
+        empty_idx = jnp.zeros((0, 0), dtype=INDEX_DTYPE)
+        empty_mask = jnp.zeros((0, 0), dtype=bool)
+        return empty_idx, empty_mask
 
     total_nodes = int(node_ranges.shape[0])
-    leaf_lookup = np.full((total_nodes,), -1, dtype=np.int64)
-    leaf_lookup[leaf_nodes] = np.arange(leaf_nodes.shape[0], dtype=np.int64)
-    leaf_ranges = node_ranges[leaf_nodes]
+    num_leaves = int(leaf_nodes.shape[0])
+    if num_leaves == 0:
+        empty_idx = jnp.zeros((num_targets, 0), dtype=INDEX_DTYPE)
+        empty_mask = jnp.zeros((num_targets, 0), dtype=bool)
+        return empty_idx, empty_mask
 
-    source_lists: list[np.ndarray] = []
-    max_sources = 0
-    for target_idx, target_leaf_pos in zip(target_np, target_leaf_pos_np):
-        src_leaf_positions = [int(target_leaf_pos)]
-        nbr_start = int(offsets[target_leaf_pos])
-        nbr_end = int(offsets[target_leaf_pos + 1])
-        if nbr_end > nbr_start:
-            nbr_nodes = neighbors[nbr_start:nbr_end]
-            nbr_leaf_pos = leaf_lookup[nbr_nodes]
-            src_leaf_positions.extend(int(v) for v in nbr_leaf_pos if int(v) >= 0)
-        if src_leaf_positions:
-            src_leaf_positions = list(dict.fromkeys(src_leaf_positions))
-        chunks: list[np.ndarray] = []
-        for src_leaf_pos in src_leaf_positions:
-            start = int(leaf_ranges[src_leaf_pos, 0])
-            end = int(leaf_ranges[src_leaf_pos, 1])
-            chunks.append(np.arange(start, end + 1, dtype=np.int64))
-        if chunks:
-            src_indices = np.concatenate(chunks, axis=0)
-            src_indices = src_indices[src_indices != int(target_idx)]
-            src_indices = np.unique(src_indices)
-        else:
-            src_indices = np.zeros((0,), dtype=np.int64)
-        source_lists.append(src_indices)
-        max_sources = max(max_sources, int(src_indices.shape[0]))
+    if (
+        nearfield_interop.leaf_particle_indices is not None
+        and nearfield_interop.leaf_particle_mask is not None
+    ):
+        leaf_particle_idx = jnp.asarray(
+            nearfield_interop.leaf_particle_indices,
+            dtype=INDEX_DTYPE,
+        )
+        leaf_particle_mask = jnp.asarray(
+            nearfield_interop.leaf_particle_mask,
+            dtype=bool,
+        )
+        max_leaf_particles = int(leaf_particle_idx.shape[1])
+    else:
+        leaf_ranges = node_ranges[leaf_nodes]
+        leaf_counts = leaf_ranges[:, 1] - leaf_ranges[:, 0] + 1
+        max_leaf_particles = int(jnp.max(leaf_counts))
+        if max_leaf_particles <= 0:
+            empty_idx = jnp.zeros((num_targets, 0), dtype=INDEX_DTYPE)
+            empty_mask = jnp.zeros((num_targets, 0), dtype=bool)
+            return empty_idx, empty_mask
 
-    if max_sources == 0:
-        padded = np.zeros((target_np.shape[0], 0), dtype=np.int64)
-        mask = np.zeros((target_np.shape[0], 0), dtype=bool)
-        return jnp.asarray(padded, dtype=INDEX_DTYPE), jnp.asarray(mask, dtype=bool)
+        particle_offsets = jnp.arange(max_leaf_particles, dtype=INDEX_DTYPE)
+        leaf_particle_idx = leaf_ranges[:, 0][:, None] + particle_offsets[None, :]
+        leaf_particle_mask = particle_offsets[None, :] < leaf_counts[:, None]
 
-    padded = np.zeros((target_np.shape[0], max_sources), dtype=np.int64)
-    mask = np.zeros((target_np.shape[0], max_sources), dtype=bool)
-    for row, src_indices in enumerate(source_lists):
-        length = int(src_indices.shape[0])
-        if length == 0:
-            continue
-        padded[row, :length] = src_indices
-        mask[row, :length] = True
-    return jnp.asarray(padded, dtype=INDEX_DTYPE), jnp.asarray(mask, dtype=bool)
+    if max_leaf_particles <= 0:
+        empty_idx = jnp.zeros((num_targets, 0), dtype=INDEX_DTYPE)
+        empty_mask = jnp.zeros((num_targets, 0), dtype=bool)
+        return empty_idx, empty_mask
+
+    leaf_lookup = jnp.full((total_nodes,), -1, dtype=INDEX_DTYPE)
+    leaf_lookup = leaf_lookup.at[leaf_nodes].set(
+        jnp.arange(num_leaves, dtype=INDEX_DTYPE)
+    )
+    nbr_counts = offsets[1:] - offsets[:-1]
+    max_nbr = int(jnp.max(nbr_counts))
+    if max_nbr > 0:
+        nbr_offsets = jnp.arange(max_nbr, dtype=INDEX_DTYPE)
+        nbr_idx = offsets[:-1, None] + nbr_offsets[None, :]
+        nbr_valid = nbr_offsets[None, :] < nbr_counts[:, None]
+        nbr_safe_idx = jnp.where(nbr_valid, nbr_idx, 0)
+        nbr_nodes = neighbors[nbr_safe_idx]
+        nbr_leaf_pos = leaf_lookup[nbr_nodes]
+        nbr_leaf_pos = jnp.where(nbr_valid, nbr_leaf_pos, -1)
+    else:
+        nbr_leaf_pos = jnp.zeros((num_leaves, 0), dtype=INDEX_DTYPE)
+
+    self_leaf = jnp.arange(num_leaves, dtype=INDEX_DTYPE)[:, None]
+    source_leaf_positions = jnp.concatenate([self_leaf, nbr_leaf_pos], axis=1)
+    source_leaf_valid = source_leaf_positions >= 0
+    source_leaf_safe = jnp.where(source_leaf_valid, source_leaf_positions, 0)
+
+    source_particle_idx_by_leaf = leaf_particle_idx[source_leaf_safe]
+    source_particle_mask_by_leaf = (
+        leaf_particle_mask[source_leaf_safe] & source_leaf_valid[..., None]
+    )
+
+    target_source_idx = source_particle_idx_by_leaf[target_leaf_pos]
+    target_source_mask = source_particle_mask_by_leaf[target_leaf_pos]
+    target_source_idx = target_source_idx.reshape((num_targets, -1))
+    target_source_mask = target_source_mask.reshape((num_targets, -1))
+    target_source_mask = target_source_mask & (target_source_idx != targets[:, None])
+
+    sentinel = jnp.asarray(jnp.iinfo(INDEX_DTYPE).max, dtype=INDEX_DTYPE)
+    sortable = jnp.where(target_source_mask, target_source_idx, sentinel)
+    sorted_idx = jnp.sort(sortable, axis=1)
+    non_sentinel = sorted_idx < sentinel
+    first = jnp.ones((num_targets, 1), dtype=bool)
+    changed = jnp.concatenate([first, sorted_idx[:, 1:] != sorted_idx[:, :-1]], axis=1)
+    unique_mask = non_sentinel & changed
+    padded = jnp.where(unique_mask, sorted_idx, 0)
+    return padded, unique_mask
 
 
 def _compute_targeted_nearfield(
@@ -4859,7 +7728,16 @@ def _evaluate_local_expansions_for_target_particles(
     target_positions = positions_sorted[target_sorted_indices]
 
     if expansion_basis == "solidfmm":
-        offsets_complex = centers - target_positions
+        offsets_solid = centers - target_positions
+        if jnp.issubdtype(coeffs.dtype, jnp.complexfloating):
+
+            def eval_one(coeff_row: Array, offset_row: Array) -> tuple[Array, Array]:
+                grad, pot = evaluate_local_complex_with_grad(
+                    coeff_row,
+                    offset_row,
+                    order=int(order),
+                )
+                return grad, pot
 
         if max_acc_derivative_order <= 0:
 
@@ -4906,26 +7784,11 @@ def _evaluate_local_expansions_for_target_particles(
 
     offsets = target_positions - centers
 
-    def eval_cartesian(coeff_row: Array, offset_row: Array) -> tuple[Array, Array]:
-        coeff_dtype = coeff_row.dtype
-
-        def phi_fn(vec: Array) -> Array:
-            total = coeff_dtype.type(0.0)
-            for level_idx in range(order + 1):
-                start_idx = level_offset(level_idx)
-                combos = LOCAL_LEVEL_COMBOS[level_idx]
-                end_idx = start_idx + len(combos)
-                coeff_slice = coeff_row[start_idx:end_idx]
-                for combo_idx, combo in enumerate(combos):
-                    factor = coeff_dtype.type(LOCAL_COMBO_INV_FACTORIAL[combo])
-                    term = multi_power(vec, combo)
-                    total = total + coeff_slice[combo_idx] * term * factor
-            return total
-
-        value, grad = jax.value_and_grad(phi_fn)(offset_row)
-        return grad, value
-
-    gradients, potentials = jax.vmap(eval_cartesian)(coeffs, offsets)
+    gradients, potentials = _evaluate_local_cartesian_with_grad_batch(
+        coeffs,
+        offsets,
+        order=order,
+    )
     if return_potential:
         return gradients, potentials, None
     return gradients, None, None
@@ -4939,6 +7802,10 @@ def _evaluate_prepared_tree_targets(
     masses_sorted: Array,
     downward: TreeDownwardData,
     neighbor_list: NodeNeighborList,
+    nearfield_interop: Optional[NearfieldInteropData],
+    farfield_local_data: Optional[LocalExpansionData],
+    farfield_leaf_nodes: Optional[Array],
+    farfield_node_ranges: Optional[Array],
     target_sorted_indices: Array,
     return_potential: bool,
     max_acc_derivative_order: int = 0,
@@ -4950,18 +7817,35 @@ def _evaluate_prepared_tree_targets(
 ]:
     """Run prepared-tree evaluation for target particles only."""
     g_const = jnp.asarray(fmm.G, dtype=positions_sorted.dtype)
-    leaf_nodes = jnp.asarray(neighbor_list.leaf_indices, dtype=INDEX_DTYPE)
-    node_ranges = jnp.asarray(tree.node_ranges, dtype=INDEX_DTYPE)
-    target_leaf_positions = _map_targets_to_leaf_positions(
-        target_sorted_indices=target_sorted_indices,
-        leaf_nodes=leaf_nodes,
-        node_ranges=node_ranges,
+    nearfield_view = (
+        _build_nearfield_interop_data(tree, neighbor_list)
+        if nearfield_interop is None
+        else nearfield_interop
     )
+    node_views = _resolve_evaluation_node_views(
+        tree,
+        neighbor_list,
+        farfield_leaf_nodes=farfield_leaf_nodes,
+        farfield_node_ranges=farfield_node_ranges,
+    )
+    if nearfield_view.particle_to_leaf_position is not None:
+        target_leaf_positions = jnp.asarray(
+            nearfield_view.particle_to_leaf_position,
+            dtype=INDEX_DTYPE,
+        )[target_sorted_indices]
+    else:
+        target_leaf_positions = _map_targets_to_leaf_positions(
+            target_sorted_indices=target_sorted_indices,
+            leaf_nodes=nearfield_view.particle_order_leaf_indices,
+            node_ranges=nearfield_view.particle_order_node_ranges,
+        )
+        target_leaf_positions = nearfield_view.particle_order_to_native_leaf[
+            target_leaf_positions
+        ]
     near_source_idx, near_source_mask = _build_target_nearfield_source_index_matrix(
         target_sorted_indices=target_sorted_indices,
         target_leaf_positions=target_leaf_positions,
-        tree=tree,
-        neighbor_list=neighbor_list,
+        nearfield_interop=nearfield_view,
     )
     near_acc, near_pot, _, _, _ = _compute_targeted_nearfield(
         positions_sorted=positions_sorted,
@@ -5177,33 +8061,17 @@ def _evaluate_local_expansions_for_particles(
         )
         return gradients, potentials_flat, derivative_outputs
 
-    def evaluate_leaf(
-        coeffs_leaf: Array,
-        offsets_leaf: Array,
-        mask_leaf: Array,
-    ) -> tuple[Array, Array]:
-        coeff_dtype = coeffs_leaf.dtype
-
-        def phi_fn(vec: Array) -> Array:
-            total = coeff_dtype.type(0.0)
-            for level_idx in range(order + 1):
-                start_idx = level_offset(level_idx)
-                combos = LOCAL_LEVEL_COMBOS[level_idx]
-                end_idx = start_idx + len(combos)
-                coeff_slice = coeffs_leaf[start_idx:end_idx]
-                for combo_idx, combo in enumerate(combos):
-                    factor = coeff_dtype.type(LOCAL_COMBO_INV_FACTORIAL[combo])
-                    term = multi_power(vec, combo)
-                    total = total + coeff_slice[combo_idx] * term * factor
-            return total
-
-        value_and_grad_fn = jax.value_and_grad(phi_fn)
-        values, grads = jax.vmap(value_and_grad_fn)(offsets_leaf)
-        grads = jnp.where(mask_leaf[..., None], grads, 0.0)
-        values = jnp.where(mask_leaf, values, 0.0)
-        return grads, values
-
-    grad_field, potentials = jax.vmap(evaluate_leaf)(coeffs, offsets, valid)
+    coeffs_broadcast = jnp.broadcast_to(
+        coeffs[:, None, :],
+        offsets.shape[:-1] + (coeffs.shape[-1],),
+    )
+    grad_field, potentials = _evaluate_local_cartesian_with_grad_batch(
+        coeffs_broadcast,
+        offsets,
+        order=order,
+    )
+    grad_field = jnp.where(valid[..., None], grad_field, 0.0)
+    potentials = jnp.where(valid, potentials, 0.0)
 
     gradients = _scatter_vectors(
         jnp.zeros_like(positions),

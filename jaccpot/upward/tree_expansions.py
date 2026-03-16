@@ -148,7 +148,6 @@ def compute_node_multipoles(
     )
 
     packed = pack_multipole_expansions(moments, max_order=max_order)
-    component_matrix = jnp.asarray(packed)
 
     return NodeMultipoleData(
         order=int(moments.max_order),
@@ -256,7 +255,6 @@ def prepare_upward_sweep(
     )
 
     packed = pack_multipole_expansions(aggregated, max_order=max_order)
-    component_matrix = jnp.asarray(packed)
 
     multipoles = NodeMultipoleData(
         order=int(aggregated.max_order),

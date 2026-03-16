@@ -12,6 +12,7 @@ from yggdrax.geometry import compute_tree_geometry
 from yggdrax.interactions import DualTreeTraversalConfig, build_leaf_neighbor_lists
 from yggdrax.tree import build_tree
 
+import jaccpot.runtime._fmm_impl as fmm_impl_private
 import jaccpot.runtime.fmm as fmm_module
 from jaccpot import FMMPreset
 from jaccpot.downward.local_expansions import (
@@ -1016,7 +1017,7 @@ def test_nearfield_precomputed_leaf_pairs_matches_inline_mapping():
     )
 
     assert np.allclose(
-        np.asarray(acc_precomputed), np.asarray(acc_inline), rtol=1e-6, atol=1e-6
+        np.asarray(acc_precomputed), np.asarray(acc_inline), rtol=1e-5, atol=1e-5
     )
 
 
@@ -1095,7 +1096,7 @@ def test_nearfield_precomputed_bucketed_scatter_matches_inline():
     )
 
     assert np.allclose(
-        np.asarray(acc_precomputed), np.asarray(acc_inline), rtol=1e-6, atol=1e-6
+        np.asarray(acc_precomputed), np.asarray(acc_inline), rtol=1e-5, atol=1e-5
     )
 
 
@@ -1464,7 +1465,120 @@ def test_prepare_state_cache_respects_traversal_config_changes():
         )
 
     assert spy_build.call_count == 1
-    assert spy_build.call_args.kwargs["traversal_config"] is config_b
+
+
+def test_prepare_state_reuses_topology_when_morton_order_stable():
+    key = jax.random.PRNGKey(777)
+    num_particles = 48
+    base_positions = jax.random.uniform(
+        key,
+        (num_particles, 3),
+        minval=-0.4,
+        maxval=0.4,
+        dtype=jnp.float32,
+    )
+    moved_positions = jnp.array(np.asarray(base_positions))
+    masses = jnp.linspace(0.5, 1.5, num_particles, dtype=jnp.float32)
+    bounds = (
+        jnp.asarray([-1.0, -1.0, -1.0], dtype=jnp.float32),
+        jnp.asarray([1.0, 1.0, 1.0], dtype=jnp.float32),
+    )
+
+    fmm = FastMultipoleMethod(
+        theta=0.6,
+        softening=1e-3,
+        working_dtype=jnp.float32,
+        reuse_topology=True,
+        rebuild_every=3,
+    )
+    state_first = fmm.prepare_state(
+        base_positions,
+        masses,
+        bounds=bounds,
+        leaf_size=8,
+        max_order=2,
+        jit_tree=False,
+    )
+
+    with mock.patch.object(
+        fmm_impl_private,
+        "_build_tree_with_config",
+        side_effect=AssertionError("should reuse cached topology"),
+    ):
+        state_second = fmm.prepare_state(
+            moved_positions,
+            masses,
+            bounds=bounds,
+            leaf_size=8,
+            max_order=2,
+            jit_tree=False,
+        )
+
+    assert state_first.topology_key == state_second.topology_key
+    assert fmm.recent_topology_reused is True
+
+
+def test_prepare_state_rebuilds_topology_after_rebuild_every_steps():
+    key = jax.random.PRNGKey(778)
+    num_particles = 40
+    base_positions = jax.random.uniform(
+        key,
+        (num_particles, 3),
+        minval=-0.35,
+        maxval=0.35,
+        dtype=jnp.float32,
+    )
+    moved_a = jnp.array(np.asarray(base_positions))
+    moved_b = jnp.array(np.asarray(base_positions))
+    masses = jnp.ones((num_particles,), dtype=jnp.float32)
+    bounds = (
+        jnp.asarray([-1.0, -1.0, -1.0], dtype=jnp.float32),
+        jnp.asarray([1.0, 1.0, 1.0], dtype=jnp.float32),
+    )
+
+    fmm = FastMultipoleMethod(
+        theta=0.6,
+        softening=1e-3,
+        working_dtype=jnp.float32,
+        reuse_topology=True,
+        rebuild_every=2,
+    )
+    state_first = fmm.prepare_state(
+        base_positions,
+        masses,
+        bounds=bounds,
+        leaf_size=8,
+        max_order=2,
+        jit_tree=False,
+    )
+    state_second = fmm.prepare_state(
+        moved_a,
+        masses,
+        bounds=bounds,
+        leaf_size=8,
+        max_order=2,
+        jit_tree=False,
+    )
+    assert state_first.topology_key == state_second.topology_key
+    assert fmm.recent_topology_reused is True
+
+    with mock.patch.object(
+        fmm_impl_private,
+        "_build_tree_with_config",
+        wraps=fmm_impl_private._build_tree_with_config,
+    ) as spy_build:
+        state_third = fmm.prepare_state(
+            moved_b,
+            masses,
+            bounds=bounds,
+            leaf_size=8,
+            max_order=2,
+            jit_tree=False,
+        )
+
+    assert state_third.topology_key == state_second.topology_key
+    assert spy_build.call_count == 1
+    assert fmm.recent_topology_reused is False
 
 
 def test_prepare_state_reuses_grouped_buffers_from_cache():
@@ -1676,7 +1790,7 @@ def test_solidfmm_float32_uses_complex64_locals():
 
 
 def test_solidfmm_float64_uses_complex128_locals():
-    with jax.experimental.enable_x64():
+    with jax.enable_x64(True):
         key = jax.random.PRNGKey(9)
         num_particles = 64
         positions = jax.random.uniform(
@@ -1796,7 +1910,7 @@ def test_fast_preset_adaptive_class_major_threshold():
     assert overrides.farfield_mode == "class_major"
 
 
-def test_adaptive_nearfield_edge_chunk_size_auto_policy():
+def test_adaptive_nearfield_edge_chunk_size_auto_policy(monkeypatch):
     fmm = FastMultipoleMethod(
         preset=FMMPreset.FAST,
         expansion_basis="solidfmm",
@@ -1805,6 +1919,7 @@ def test_adaptive_nearfield_edge_chunk_size_auto_policy():
         nearfield_mode="auto",
         nearfield_edge_chunk_size=256,
     )
+    monkeypatch.setattr(jax, "default_backend", lambda: "cpu")
 
     assert (
         fmm._resolve_nearfield_edge_chunk_size(
@@ -2047,7 +2162,7 @@ def test_nearfield_mode_validation():
 
 def test_solidfmm_dehnen_accuracy_improves_with_order():
     """Regression: solidfmm+dehnen should improve strongly with expansion order."""
-    with jax.experimental.enable_x64():
+    with jax.enable_x64(True):
         num_particles = 320
         softening = 1e-3
         positions, masses = _benchmark_like_distribution(

@@ -13,6 +13,7 @@ class FMMPreset(str, Enum):
     """Named presets offering curated FMM parameter selections."""
 
     FAST = "fast"
+    LARGE_N_GPU = "large_n_gpu"
 
 
 @dataclass(frozen=True)
@@ -66,6 +67,34 @@ _FAST_PRESET = FMMPresetConfig(
     ),
 )
 
+_LARGE_N_GPU_TRAVERSAL_CONFIG = DualTreeTraversalConfig(
+    max_pair_queue=262144,
+    process_block=256,
+    max_interactions_per_node=4096,
+    max_neighbors_per_leaf=1024,
+)
+
+_LARGE_N_GPU_PRESET = FMMPresetConfig(
+    name=FMMPreset.LARGE_N_GPU,
+    tree_build_mode="lbvh",
+    target_leaf_particles=64,
+    refine_local=False,
+    max_refine_levels=0,
+    aspect_threshold=16.0,
+    m2l_chunk_size=None,
+    l2l_chunk_size=None,
+    max_pair_queue=None,
+    pair_process_block=None,
+    traversal_config=_LARGE_N_GPU_TRAVERSAL_CONFIG,
+    use_dense_interactions=False,
+    jit_tree=True,
+    jit_traversal=True,
+    description=(
+        "Large-N GPU preset prioritizing stable memory behavior and high "
+        "throughput on streamed/grouped far-field execution."
+    ),
+)
+
 
 def resolve_preset(name: Union[str, FMMPreset]) -> FMMPreset:
     """Normalise preset identifiers to :class:`FMMPreset`."""
@@ -92,6 +121,8 @@ def get_preset_config(name: Union[str, FMMPreset]) -> FMMPresetConfig:
     preset = resolve_preset(name)
     if preset is FMMPreset.FAST:
         return _FAST_PRESET
+    if preset is FMMPreset.LARGE_N_GPU:
+        return _LARGE_N_GPU_PRESET
     raise AssertionError(f"Missing config for preset {preset!r}")
 
 

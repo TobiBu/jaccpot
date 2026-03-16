@@ -3,6 +3,7 @@
 from . import (
     complex_harmonics,
     complex_ops,
+    m2l_real_rot_scale,
     real_harmonics,
     solidfmm_reference,
     symmetric_tensors,
@@ -11,6 +12,7 @@ from . import (
 __all__ = [
     "complex_harmonics",
     "complex_ops",
+    "m2l_real_rot_scale",
     "real_harmonics",
     "solidfmm_reference",
     "symmetric_tensors",

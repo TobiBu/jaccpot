@@ -4,11 +4,31 @@ Keep a single source of truth for index dtype so the codebase can be
 switched between 32-bit and 64-bit indices easily.
 """
 
+from __future__ import annotations
+
+import os
+
 import jax.numpy as jnp
 from jaxtyping import DTypeLike
 
-# Use 64-bit indices by default to avoid overflow on large problems.
-INDEX_DTYPE = jnp.int64
+
+def _resolve_index_dtype() -> jnp.dtype:
+    """Resolve index dtype from environment.
+
+    Supported values:
+    - ``JACCPOT_INDEX_PRECISION=int32`` (lower memory, faster on many GPUs)
+    - ``JACCPOT_INDEX_PRECISION=int64`` (default; safest for very large indices)
+    """
+    raw = str(os.environ.get("JACCPOT_INDEX_PRECISION", "int64")).strip().lower()
+    if raw in ("int32", "i32", "32"):
+        return jnp.int32
+    if raw in ("int64", "i64", "64"):
+        return jnp.int64
+    # Defensive fallback for unknown user input.
+    return jnp.int64
+
+
+INDEX_DTYPE = _resolve_index_dtype()
 
 
 def as_index(x: object) -> jnp.ndarray:
