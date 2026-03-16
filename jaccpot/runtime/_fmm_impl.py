@@ -51,6 +51,7 @@ from yggdrax.tree import (
 from yggdrax.tree_moments import compute_tree_mass_moments
 
 from jaccpot.basis.real_sh import complex_to_real_coeffs
+from jaccpot.config import FMMExecutionBackend, MemoryObjective
 from jaccpot.downward.local_expansions import (
     LocalExpansionData,
     TreeDownwardData,
@@ -61,6 +62,9 @@ from jaccpot.downward.local_expansions import (
 )
 from jaccpot.downward.local_expansions import (
     run_downward_sweep as run_tree_downward_sweep,
+)
+from jaccpot.downward.local_expansions import (
+    translate_local_expansion,
 )
 from jaccpot.nearfield.near_field import (
     compute_leaf_p2p_accelerations,
@@ -819,7 +823,7 @@ class FMMPreparedState:
     octree_downward: Optional[OctreeSolidFMMDownwardPlan] = None
 
     @property
-    def positions_sorted(self) -> Array:
+    def positions_sorted(self: "FMMPreparedState") -> Array:
         """Canonical sorted particle positions owned by ``tree``."""
         value = getattr(self.tree, "positions_sorted", None)
         if value is None:
@@ -827,7 +831,7 @@ class FMMPreparedState:
         return jnp.asarray(value)
 
     @property
-    def masses_sorted(self) -> Array:
+    def masses_sorted(self: "FMMPreparedState") -> Array:
         """Canonical sorted particle masses owned by ``tree``."""
         value = getattr(self.tree, "masses_sorted", None)
         if value is None:
@@ -835,7 +839,7 @@ class FMMPreparedState:
         return jnp.asarray(value)
 
     @property
-    def inverse_permutation(self) -> Array:
+    def inverse_permutation(self: "FMMPreparedState") -> Array:
         """Canonical inverse permutation owned by ``tree``."""
         value = getattr(self.tree, "inverse_permutation", None)
         if value is None:
@@ -1204,6 +1208,40 @@ def _bucket_far_pairs_by_level_split(
         (min_order_int, max_order_int),
         ((src_lo, tgt_lo), (src_hi, tgt_hi)),
     )
+
+
+@partial(jax.jit, static_argnames=("order",))
+def _evaluate_local_cartesian_with_grad_batch(
+    coeffs: Array,
+    offsets: Array,
+    *,
+    order: int,
+) -> tuple[Array, Array]:
+    """Evaluate cartesian local expansions and gradients at batch offsets."""
+    leading_shape = coeffs.shape[:-1]
+    coeffs_flat = jnp.reshape(coeffs, (-1, coeffs.shape[-1]))
+    offsets_flat = jnp.reshape(offsets, (-1, offsets.shape[-1]))
+
+    translated_flat = jax.vmap(
+        lambda coeff_row, offset_row: translate_local_expansion(
+            coeff_row,
+            offset_row,
+            order=order,
+        )
+    )(coeffs_flat, offsets_flat)
+
+    translated = jnp.reshape(
+        translated_flat,
+        leading_shape + (translated_flat.shape[-1],),
+    )
+
+    potentials = translated[..., level_offset(0)]
+    if order <= 0:
+        gradients = jnp.zeros(leading_shape + (3,), dtype=translated.dtype)
+    else:
+        first = translated[..., level_offset(1) : level_offset(1) + 3]
+        gradients = jnp.stack([first[..., 2], first[..., 1], first[..., 0]], axis=-1)
+    return gradients, potentials
 
 
 class FastMultipoleMethod:
@@ -3689,7 +3727,7 @@ class FastMultipoleMethod:
                 centers=complex_upward.multipoles.centers,
                 moments=None,  # type: ignore[arg-type]
                 packed=complex_upward.multipoles.packed,
-                component_matrix=complex_upward.multipoles.packed,
+                component_matrix=None,
                 source_motion_packed=complex_upward.multipoles.source_motion_packed,
             )
 
@@ -3963,6 +4001,7 @@ class FastMultipoleMethod:
             jit_traversal=jit_traversal_flag,
             max_acc_derivative_order=max_acc_derivative_order,
         )
+        return evaluation
 
     @jaxtyped(typechecker=beartype)
     def compute_accelerations_and_jerk(
@@ -4862,8 +4901,11 @@ class FastMultipoleMethod:
         near_source_idx, near_source_mask = _build_target_nearfield_source_index_matrix(
             target_sorted_indices=target_sorted_indices,
             target_leaf_positions=target_leaf_positions,
-            tree=state.tree,
-            neighbor_list=state.neighbor_list,
+            nearfield_interop=(
+                _build_nearfield_interop_data(state.tree, state.neighbor_list)
+                if state.nearfield_interop is None
+                else state.nearfield_interop
+            ),
         )
         _, _, near_jerk_sorted, _, _ = _compute_targeted_nearfield(
             positions_sorted=state.positions_sorted,
@@ -4920,8 +4962,11 @@ class FastMultipoleMethod:
         near_source_idx, near_source_mask = _build_target_nearfield_source_index_matrix(
             target_sorted_indices=target_sorted_indices,
             target_leaf_positions=target_leaf_positions,
-            tree=state.tree,
-            neighbor_list=state.neighbor_list,
+            nearfield_interop=(
+                _build_nearfield_interop_data(state.tree, state.neighbor_list)
+                if state.nearfield_interop is None
+                else state.nearfield_interop
+            ),
         )
         _, _, near_jerk_sorted, near_snap_sorted, near_crackle_sorted = (
             _compute_targeted_nearfield(
@@ -4995,7 +5040,7 @@ class FastMultipoleMethod:
             centers=centers,
             moments=None,  # type: ignore[arg-type]
             packed=jnp.asarray(source_motion_packed),
-            component_matrix=jnp.asarray(source_motion_packed),
+            component_matrix=None,
             source_motion_packed=None,
         )
         source_motion_upward = TreeUpwardData(
@@ -5339,6 +5384,10 @@ class FastMultipoleMethod:
                 masses_sorted=state.masses_sorted,
                 downward=downward,
                 neighbor_list=state.neighbor_list,
+                nearfield_interop=state.nearfield_interop,
+                farfield_local_data=None,
+                farfield_leaf_nodes=None,
+                farfield_node_ranges=None,
                 nearfield_target_leaf_ids=state.nearfield_target_leaf_ids,
                 nearfield_source_leaf_ids=state.nearfield_source_leaf_ids,
                 nearfield_valid_pairs=state.nearfield_valid_pairs,
@@ -5362,6 +5411,10 @@ class FastMultipoleMethod:
                 masses_sorted=state.masses_sorted,
                 downward=downward,
                 neighbor_list=state.neighbor_list,
+                nearfield_interop=state.nearfield_interop,
+                farfield_local_data=None,
+                farfield_leaf_nodes=None,
+                farfield_node_ranges=None,
                 target_sorted_indices=target_sorted_indices,
                 return_potential=False,
                 max_acc_derivative_order=0,
@@ -5390,6 +5443,10 @@ class FastMultipoleMethod:
         locals_or_downward: Union[LocalExpansionData, TreeDownwardData],
         neighbor_list: NodeNeighborList,
         *,
+        nearfield_interop: Optional[NearfieldInteropData] = None,
+        farfield_local_data: Optional[LocalExpansionData] = None,
+        farfield_leaf_nodes: Optional[Array] = None,
+        farfield_node_ranges: Optional[Array] = None,
         precomputed_target_leaf_ids: Optional[Array] = None,
         precomputed_source_leaf_ids: Optional[Array] = None,
         precomputed_valid_pairs: Optional[Array] = None,
@@ -5407,6 +5464,9 @@ class FastMultipoleMethod:
             masses_sorted,
             locals_or_downward,
             neighbor_list,
+            farfield_local_data=farfield_local_data,
+            farfield_leaf_nodes=farfield_leaf_nodes,
+            farfield_node_ranges=farfield_node_ranges,
             max_leaf_size=max_leaf_size,
             return_potential=return_potential,
         )
@@ -5428,6 +5488,11 @@ class FastMultipoleMethod:
         nearfield_edge_chunk_size = self._resolve_nearfield_edge_chunk_size(
             num_particles=int(positions.shape[0]),
             nearfield_mode=nearfield_mode,
+        )
+        nearfield_view = (
+            _build_nearfield_interop_data(tree, neighbor_list)
+            if nearfield_interop is None
+            else nearfield_interop
         )
 
         near = compute_leaf_p2p_accelerations(
@@ -7729,6 +7794,7 @@ def _evaluate_local_expansions_for_target_particles(
 
     if expansion_basis == "solidfmm":
         offsets_solid = centers - target_positions
+        offsets_complex = offsets_solid
         if jnp.issubdtype(coeffs.dtype, jnp.complexfloating):
 
             def eval_one(coeff_row: Array, offset_row: Array) -> tuple[Array, Array]:
@@ -7863,7 +7929,7 @@ def _evaluate_prepared_tree_targets(
             positions_sorted=positions_sorted,
             target_sorted_indices=target_sorted_indices,
             target_leaf_positions=target_leaf_positions,
-            leaf_nodes=leaf_nodes,
+            leaf_nodes=node_views.farfield_leaf_nodes,
             order=int(downward.locals.order),
             expansion_basis=fmm.expansion_basis,
             return_potential=return_potential,
