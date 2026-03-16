@@ -465,6 +465,86 @@ def test_octree_execution_backend_prepared_state_eager_matches_compiled():
     )
 
 
+def test_octree_execution_backend_target_indices_preserve_order_and_duplicates():
+    positions, masses = _sample_problem(n=72)
+    fmm = FastMultipoleMethod(
+        preset=FMMPreset.FAST,
+        basis="solidfmm",
+        advanced=FMMAdvancedConfig(
+            tree=TreeConfig(tree_type="octree"),
+            runtime=RuntimePolicyConfig(execution_backend="octree"),
+        ),
+    )
+    target_indices = jnp.asarray([9, 3, 9, 0], dtype=jnp.int32)
+    state = fmm.prepare_state(
+        positions,
+        masses,
+        leaf_size=8,
+        max_order=3,
+    )
+
+    full_acc, full_pot = fmm.evaluate_prepared_state(state, return_potential=True)
+    subset_acc, subset_pot = fmm.evaluate_prepared_state(
+        state,
+        target_indices=target_indices,
+        return_potential=True,
+    )
+
+    np_idx = np.asarray(target_indices)
+    assert subset_acc.shape == (target_indices.shape[0], 3)
+    assert subset_pot.shape == (target_indices.shape[0],)
+    assert np.allclose(
+        np.asarray(subset_acc),
+        np.asarray(full_acc)[np_idx],
+        rtol=1e-5,
+        atol=1e-5,
+    )
+    assert np.allclose(
+        np.asarray(subset_pot),
+        np.asarray(full_pot)[np_idx],
+        rtol=1e-5,
+        atol=1e-5,
+    )
+
+
+def test_octree_execution_backend_prepared_state_jit_targets_with_potential():
+    positions, masses = _sample_problem(n=72)
+    fmm = FastMultipoleMethod(
+        preset=FMMPreset.FAST,
+        basis="solidfmm",
+        advanced=FMMAdvancedConfig(
+            tree=TreeConfig(tree_type="octree"),
+            runtime=RuntimePolicyConfig(execution_backend="octree"),
+        ),
+    )
+    target_indices = jnp.asarray([0, 7, 11, 23, 31], dtype=jnp.int32)
+    state = fmm.prepare_state(
+        positions,
+        masses,
+        leaf_size=8,
+        max_order=3,
+    )
+
+    jit_eval = jax.jit(
+        lambda st, idx: fmm.evaluate_prepared_state(
+            st,
+            target_indices=idx,
+            return_potential=True,
+        )
+    )
+    acc_jit, pot_jit = jit_eval(state, target_indices)
+    acc_ref, pot_ref = fmm.evaluate_prepared_state(
+        state,
+        target_indices=target_indices,
+        return_potential=True,
+    )
+
+    assert acc_jit.shape == (target_indices.shape[0], 3)
+    assert pot_jit.shape == (target_indices.shape[0],)
+    assert np.allclose(np.asarray(acc_jit), np.asarray(acc_ref), rtol=1e-5, atol=1e-5)
+    assert np.allclose(np.asarray(pot_jit), np.asarray(pot_ref), rtol=1e-5, atol=1e-5)
+
+
 def test_basis_complex_alias_matches_solidfmm():
     positions, masses = _sample_problem(n=64)
     fmm_alias = FastMultipoleMethod(
