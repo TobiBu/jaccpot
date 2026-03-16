@@ -28,8 +28,9 @@ def _sample_problem(n: int, dtype=jnp.float32):
     return positions, masses
 
 
-def _advanced_cfg() -> FMMAdvancedConfig:
+def _advanced_cfg(*, mac_type: str | None = None) -> FMMAdvancedConfig:
     return FMMAdvancedConfig(
+        mac_type=mac_type,
         runtime=RuntimePolicyConfig(
             traversal_config=DualTreeTraversalConfig(
                 max_pair_queue=131072,
@@ -37,7 +38,7 @@ def _advanced_cfg() -> FMMAdvancedConfig:
                 max_interactions_per_node=65536,
                 max_neighbors_per_leaf=65536,
             )
-        )
+        ),
     )
 
 
@@ -243,9 +244,8 @@ def test_dehnen_error_fixed_order_runs():
         basis="real",
         theta=0.6,
         softening=1.0e-2,
-        mac_type="dehnen_error",
         adaptive_order=False,
-        advanced=_advanced_cfg(),
+        advanced=_advanced_cfg(mac_type="dehnen_error"),
     )
 
     acc = np.asarray(
@@ -262,9 +262,8 @@ def test_dehnen_error_uses_adaptive_pair_policy(monkeypatch):
         basis="real",
         theta=0.6,
         softening=1.0e-2,
-        mac_type="dehnen_error",
         adaptive_order=False,
-        advanced=_advanced_cfg(),
+        advanced=_advanced_cfg(mac_type="dehnen_error"),
     )
 
     sentinel_policy_state = object()
