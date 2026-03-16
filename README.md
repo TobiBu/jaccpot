@@ -159,7 +159,7 @@ Still worth keeping in mind:
 
 Example:
 
-- [examples/compare_yggdrax_jaccpot_prepare.py](/export/home/tbuck/jaccpot/examples/compare_yggdrax_jaccpot_prepare.py)
+- [examples/compare_yggdrax_jaccpot_prepare.py](examples/compare_yggdrax_jaccpot_prepare.py)
 
 ## Basis Selection
 
