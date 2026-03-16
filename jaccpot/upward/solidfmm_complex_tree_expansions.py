@@ -300,8 +300,17 @@ def _p2m_leaves_complex_source_motion(
     return packed
 
 
-@partial(jax.jit, static_argnames=("order", "num_internal", "rotation"))
-def _aggregate_m2m_complex(
+@partial(
+    jax.jit,
+    static_argnames=(
+        "order",
+        "num_internal",
+        "num_levels",
+        "level_batch_width",
+        "rotation",
+    ),
+)
+def _aggregate_m2m_complex_by_level(
     packed: Array,
     centers: Array,
     left_child: Array,
@@ -456,9 +465,7 @@ def prepare_solidfmm_complex_upward_sweep(
     # Keep batching shape-derived so this path remains JIT-safe under traced tree
     # builds, but use a tighter per-level bound to avoid inflating static shapes
     # with the total number of internal nodes.
-    level_sizes = level_offsets[1:] - level_offsets[:-1]
-    max_level_nodes = int(jnp.max(level_sizes)) if level_sizes.size > 0 else 0
-    level_batch_width = max(max_level_nodes, 1)
+    level_batch_width = max(int(num_internal), 1)
     resolved_leaf_batch_size = (
         min(num_leaves, _DEFAULT_LEAF_BATCH_SIZE)
         if leaf_batch_size is None
@@ -592,12 +599,23 @@ def prepare_solidfmm_complex_source_motion_multipoles(
         num_internal=num_internal,
         total_nodes=total_nodes,
     )
-    return _aggregate_m2m_complex(
+    level_offsets = get_level_offsets(tree)
+    nodes_by_level = get_nodes_by_level(tree)
+    num_levels = int(level_offsets.shape[0] - 1)
+    if num_levels <= 0:
+        num_levels = 1
+    level_batch_width = max(int(num_internal), 1)
+
+    return _aggregate_m2m_complex_by_level(
         source_motion_packed_leaf,
         centers_arr,
         jnp.asarray(tree.left_child, dtype=INDEX_DTYPE),
         jnp.asarray(tree.right_child, dtype=INDEX_DTYPE),
+        jnp.asarray(nodes_by_level, dtype=INDEX_DTYPE),
+        jnp.asarray(level_offsets, dtype=INDEX_DTYPE),
         order=p,
         num_internal=num_internal,
+        num_levels=num_levels,
+        level_batch_width=level_batch_width,
         rotation=rotation,
     )
