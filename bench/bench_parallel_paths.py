@@ -1,9 +1,10 @@
-"""Benchmark acceleration and jerk execution paths.
+"""Benchmark acceleration and time-derivative execution paths.
 
 This script focuses on relative runtime behavior between:
 - acceleration-only evaluation,
 - jerk in `fast_approx` mode,
 - jerk in `accurate` mode.
+- higher-order accurate time derivatives (`k=2`, `k=3`).
 """
 
 from __future__ import annotations
@@ -102,6 +103,30 @@ def collect_metrics(
         warmup=warmup,
         runs=runs,
     )
+    td2_acc_timing = time_callable(
+        solver.compute_accelerations_with_time_derivatives,
+        positions,
+        masses,
+        velocities,
+        leaf_size=leaf_size,
+        max_order=max_order,
+        max_time_derivative_order=2,
+        mode="accurate",
+        warmup=warmup,
+        runs=runs,
+    )
+    td3_acc_timing = time_callable(
+        solver.compute_accelerations_with_time_derivatives,
+        positions,
+        masses,
+        velocities,
+        leaf_size=leaf_size,
+        max_order=max_order,
+        max_time_derivative_order=3,
+        mode="accurate",
+        warmup=warmup,
+        runs=runs,
+    )
 
     return {
         "n": int(n),
@@ -116,8 +141,16 @@ def collect_metrics(
         "acc_mean_seconds": float(acc_timing.mean),
         "jerk_fast_mean_seconds": float(jerk_fast_timing.mean),
         "jerk_accurate_mean_seconds": float(jerk_acc_timing.mean),
+        "time_deriv2_accurate_mean_seconds": float(td2_acc_timing.mean),
+        "time_deriv3_accurate_mean_seconds": float(td3_acc_timing.mean),
         "jerk_fast_over_acc": float(jerk_fast_timing.mean / acc_timing.mean),
         "jerk_accurate_over_fast": float(jerk_acc_timing.mean / jerk_fast_timing.mean),
+        "time_deriv2_accurate_over_jerk_accurate": float(
+            td2_acc_timing.mean / jerk_acc_timing.mean
+        ),
+        "time_deriv3_accurate_over_time_deriv2_accurate": float(
+            td3_acc_timing.mean / td2_acc_timing.mean
+        ),
     }
 
 

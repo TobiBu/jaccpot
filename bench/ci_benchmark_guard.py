@@ -1,4 +1,4 @@
-"""CI guard for acceleration/jerk runtime path sanity.
+"""CI guard for acceleration/time-derivative runtime path sanity.
 
 This guard intentionally uses broad ratio bounds to avoid hardware-specific
 flakiness while still catching major runtime regressions.
@@ -21,8 +21,14 @@ def _validate_metrics(metrics: dict[str, float]) -> None:
     jerk_acc = float(metrics["jerk_accurate_mean_seconds"])
     ratio_fast = float(metrics["jerk_fast_over_acc"])
     ratio_acc = float(metrics["jerk_accurate_over_fast"])
+    td2 = float(metrics["time_deriv2_accurate_mean_seconds"])
+    td3 = float(metrics["time_deriv3_accurate_mean_seconds"])
+    ratio_td2 = float(metrics["time_deriv2_accurate_over_jerk_accurate"])
+    ratio_td3 = float(metrics["time_deriv3_accurate_over_time_deriv2_accurate"])
 
-    if not (acc > 0.0 and jerk_fast > 0.0 and jerk_acc > 0.0):
+    if not (
+        acc > 0.0 and jerk_fast > 0.0 and jerk_acc > 0.0 and td2 > 0.0 and td3 > 0.0
+    ):
         raise RuntimeError("non-positive benchmark timings observed")
     if not (0.4 <= ratio_fast <= 8.0):
         raise RuntimeError(
@@ -33,6 +39,16 @@ def _validate_metrics(metrics: dict[str, float]) -> None:
         raise RuntimeError(
             f"jerk_accurate_over_fast out of guard range: {ratio_acc:.3f} "
             "(expected 1.2..15.0)"
+        )
+    if not (1.0 <= ratio_td2 <= 12.0):
+        raise RuntimeError(
+            f"time_deriv2_accurate_over_jerk_accurate out of guard range: {ratio_td2:.3f} "
+            "(expected 1.0..12.0)"
+        )
+    if not (1.0 <= ratio_td3 <= 12.0):
+        raise RuntimeError(
+            f"time_deriv3_accurate_over_time_deriv2_accurate out of guard range: {ratio_td3:.3f} "
+            "(expected 1.0..12.0)"
         )
 
 
