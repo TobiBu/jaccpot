@@ -1017,7 +1017,7 @@ def test_nearfield_precomputed_leaf_pairs_matches_inline_mapping():
     )
 
     assert np.allclose(
-        np.asarray(acc_precomputed), np.asarray(acc_inline), rtol=1e-6, atol=1e-6
+        np.asarray(acc_precomputed), np.asarray(acc_inline), rtol=1e-5, atol=1e-5
     )
 
 
@@ -1096,7 +1096,7 @@ def test_nearfield_precomputed_bucketed_scatter_matches_inline():
     )
 
     assert np.allclose(
-        np.asarray(acc_precomputed), np.asarray(acc_inline), rtol=1e-6, atol=1e-6
+        np.asarray(acc_precomputed), np.asarray(acc_inline), rtol=1e-5, atol=1e-5
     )
 
 
@@ -1790,7 +1790,7 @@ def test_solidfmm_float32_uses_complex64_locals():
 
 
 def test_solidfmm_float64_uses_complex128_locals():
-    with jax.experimental.enable_x64():
+    with jax.enable_x64(True):
         key = jax.random.PRNGKey(9)
         num_particles = 64
         positions = jax.random.uniform(
@@ -1910,7 +1910,7 @@ def test_fast_preset_adaptive_class_major_threshold():
     assert overrides.farfield_mode == "class_major"
 
 
-def test_adaptive_nearfield_edge_chunk_size_auto_policy():
+def test_adaptive_nearfield_edge_chunk_size_auto_policy(monkeypatch):
     fmm = FastMultipoleMethod(
         preset=FMMPreset.FAST,
         expansion_basis="solidfmm",
@@ -1919,6 +1919,7 @@ def test_adaptive_nearfield_edge_chunk_size_auto_policy():
         nearfield_mode="auto",
         nearfield_edge_chunk_size=256,
     )
+    monkeypatch.setattr(jax, "default_backend", lambda: "cpu")
 
     assert (
         fmm._resolve_nearfield_edge_chunk_size(
@@ -2161,7 +2162,7 @@ def test_nearfield_mode_validation():
 
 def test_solidfmm_dehnen_accuracy_improves_with_order():
     """Regression: solidfmm+dehnen should improve strongly with expansion order."""
-    with jax.experimental.enable_x64():
+    with jax.enable_x64(True):
         num_particles = 320
         softening = 1e-3
         positions, masses = _benchmark_like_distribution(

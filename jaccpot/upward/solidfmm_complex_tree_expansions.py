@@ -376,15 +376,12 @@ def prepare_solidfmm_complex_upward_sweep(
     num_levels = int(level_offsets.shape[0] - 1)
     if num_levels <= 0:
         num_levels = 1
-    level_counts = np.asarray(jax.device_get(level_offsets[1:] - level_offsets[:-1]))
-    internal_level_counts = (
-        level_counts[: max(num_levels - 1, 0)]
-        if level_counts.size > 0
-        else level_counts
-    )
-    level_batch_width = (
-        int(internal_level_counts.max()) if internal_level_counts.size > 0 else 1
-    )
+    # Keep batching shape-derived so this path remains JIT-safe under traced tree
+    # builds, but use a tighter per-level bound to avoid inflating static shapes
+    # with the total number of internal nodes.
+    level_sizes = level_offsets[1:] - level_offsets[:-1]
+    max_level_nodes = int(jnp.max(level_sizes)) if level_sizes.size > 0 else 0
+    level_batch_width = max(max_level_nodes, 1)
     resolved_leaf_batch_size = (
         min(num_leaves, _DEFAULT_LEAF_BATCH_SIZE)
         if leaf_batch_size is None

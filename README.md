@@ -22,7 +22,6 @@ Tree construction and traversal artifacts are provided by the companion package
 
 ## Features
 
-- High-level `FastMultipoleMethod` API with `fast`, `balanced`, and `accurate` presets
 - High-level `FastMultipoleMethod` API with `fast`, `balanced`, `accurate`, and `large_n_gpu` presets
 - Configurable expansion basis (`complex`/`solidfmm`, `real`, `cartesian`)
 - Pure-JAX real spherical harmonic rotate+scale M2L path
@@ -31,6 +30,7 @@ Tree construction and traversal artifacts are provided by the companion package
 - Optional Pallas acceleration for the real-basis z-translation hotspot
 - Modular runtime with grouped/dense interaction pathways
 - Near-field and far-field execution paths with optional prepared state reuse
+- Explicit octree execution backend for `basis="solidfmm"`
 - Differentiable gravitational acceleration helper via JAX autodiff
 
 ## Installation
@@ -119,6 +119,47 @@ coupler = OdisseoFMMCoupler(solver, leaf_size=16, max_order=4)
 coupler.prepare(primitive_state, masses)  # full source tree
 acc_active = coupler.accelerations(primitive_state, active_indices=active)
 ```
+
+## Octree Backend
+
+The default runtime path remains radix-oriented. To request explicit octree
+execution, configure both the tree type and runtime backend:
+
+```python
+from jaccpot import (
+    FastMultipoleMethod,
+    FMMAdvancedConfig,
+    RuntimePolicyConfig,
+    TreeConfig,
+)
+
+solver = FastMultipoleMethod(
+    preset="fast",
+    basis="solidfmm",
+    advanced=FMMAdvancedConfig(
+        tree=TreeConfig(tree_type="octree"),
+        runtime=RuntimePolicyConfig(execution_backend="octree"),
+    ),
+)
+```
+
+Current practical scope:
+
+- the octree backend is validated for `basis="solidfmm"`
+- prepared-state evaluation supports full outputs, target subsets, potentials,
+  JIT/eager traversal, and prepared-state cache reuse
+- non-default runtime modes such as baseline nearfield and class-major
+  farfield are covered in the solver tests
+
+Still worth keeping in mind:
+
+- `execution_backend="auto"` may still resolve to the radix backend
+- topology reuse remains radix-only
+- validation is currently most reliable on the preferred project validation GPU
+
+Example:
+
+- [examples/compare_yggdrax_jaccpot_prepare.py](examples/compare_yggdrax_jaccpot_prepare.py)
 
 ## Basis Selection
 

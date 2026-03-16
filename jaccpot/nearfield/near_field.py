@@ -101,6 +101,51 @@ def prepare_bucketed_scatter_schedules(
     )(flat_tgt_ids, flat_tgt_mask)
 
 
+def prepare_bucketed_scatter_schedules_from_groups(
+    leaf_particle_indices: Array,
+    leaf_particle_mask: Array,
+    target_leaf_ids: Array,
+    valid_pairs: Array,
+    *,
+    edge_chunk_size: int,
+) -> Tuple[Array, Array, Array]:
+    """Precompute per-chunk scatter schedules for explicit leaf-particle groups."""
+    chunk = int(edge_chunk_size)
+    if chunk <= 0:
+        raise ValueError("edge_chunk_size must be positive")
+
+    leaf_particle_indices = jnp.asarray(leaf_particle_indices, dtype=INDEX_DTYPE)
+    leaf_particle_mask = jnp.asarray(leaf_particle_mask, dtype=bool)
+    target_leaf_ids = jnp.asarray(target_leaf_ids, dtype=INDEX_DTYPE)
+    valid_pairs = jnp.asarray(valid_pairs, dtype=bool)
+
+    n_edges = int(target_leaf_ids.shape[0])
+    flat_size = int(leaf_particle_indices.shape[1]) * chunk
+    if n_edges == 0:
+        empty = jnp.zeros((0, flat_size), dtype=INDEX_DTYPE)
+        return empty, empty, empty
+
+    chunk_starts = jnp.arange(0, n_edges, chunk, dtype=INDEX_DTYPE)
+    chunk_offsets = jnp.arange(chunk, dtype=INDEX_DTYPE)
+    edge_idx = chunk_starts[:, None] + chunk_offsets[None, :]
+    in_range = edge_idx < n_edges
+    safe_edge_idx = jnp.where(in_range, edge_idx, 0)
+    valid_edge = in_range & valid_pairs[safe_edge_idx]
+
+    tgt_leaf = target_leaf_ids[safe_edge_idx]
+    tgt_leaf = jnp.where(valid_edge, tgt_leaf, 0)
+    tgt_ids = leaf_particle_indices[tgt_leaf]
+    tgt_mask = leaf_particle_mask[tgt_leaf] & valid_edge[..., None]
+
+    flat_tgt_ids = tgt_ids.reshape(chunk_starts.shape[0], flat_size)
+    flat_tgt_mask = tgt_mask.reshape(chunk_starts.shape[0], flat_size)
+    return jax.vmap(
+        _build_scatter_schedule,
+        in_axes=(0, 0),
+        out_axes=0,
+    )(flat_tgt_ids, flat_tgt_mask)
+
+
 def _prepare_leaf_data(
     node_ranges: Array,
     leaf_nodes: Array,
@@ -131,6 +176,35 @@ def _prepare_leaf_data(
     leaf_masses = jnp.where(valid, leaf_masses, 0.0)
 
     return leaf_positions, leaf_masses, valid, safe_idx
+
+
+def _prepare_leaf_data_from_groups(
+    leaf_particle_indices: Array,
+    leaf_particle_mask: Array,
+    positions: Array,
+    masses: Array,
+) -> Tuple[Array, Array, Array, Array]:
+    """Gather per-leaf particle data from explicit particle-membership groups."""
+    leaf_particle_indices = jnp.asarray(leaf_particle_indices, dtype=INDEX_DTYPE)
+    leaf_particle_mask = jnp.asarray(leaf_particle_mask, dtype=bool)
+    if leaf_particle_indices.size == 0:
+        empty_pos = jnp.zeros(
+            (leaf_particle_indices.shape[0], 0, positions.shape[-1]),
+            dtype=positions.dtype,
+        )
+        empty_mass = jnp.zeros((leaf_particle_indices.shape[0], 0), dtype=masses.dtype)
+        return empty_pos, empty_mass, leaf_particle_mask, leaf_particle_indices
+
+    safe_idx = jnp.clip(
+        leaf_particle_indices,
+        min=0,
+        max=positions.shape[0] - 1,
+    )
+    leaf_positions = positions[safe_idx]
+    leaf_masses = masses[safe_idx]
+    leaf_positions = jnp.where(leaf_particle_mask[..., None], leaf_positions, 0.0)
+    leaf_masses = jnp.where(leaf_particle_mask, leaf_masses, 0.0)
+    return leaf_positions, leaf_masses, leaf_particle_mask, safe_idx
 
 
 def _self_contributions(
@@ -911,6 +985,502 @@ def _compute_leaf_p2p_impl(
     return outputs
 
 
+@partial(
+    jax.jit,
+    static_argnames=(
+        "return_potential",
+        "collect_neighbor_pairs",
+        "nearfield_mode",
+        "edge_chunk_size",
+        "use_precomputed_scatter",
+    ),
+)
+def _compute_leaf_p2p_from_prepared_leaf_data_impl(
+    offsets: Array,
+    neighbors: Array,
+    positions: Array,
+    target_leaf_ids: Array,
+    source_leaf_ids: Array,
+    valid_pairs: Array,
+    precomputed_chunk_sort_indices: Array,
+    precomputed_chunk_group_ids: Array,
+    precomputed_chunk_unique_indices: Array,
+    leaf_positions: Array,
+    leaf_masses: Array,
+    leaf_mask: Array,
+    leaf_particle_idx: Array,
+    *,
+    G: Union[float, Array],
+    softening_sq: Array,
+    return_potential: bool,
+    collect_neighbor_pairs: bool,
+    nearfield_mode: str,
+    edge_chunk_size: int,
+    use_precomputed_scatter: bool,
+) -> Union[
+    Array,
+    Tuple[Array, Array],
+    Tuple[Array, Array, Array],
+    Tuple[Array, Array, Array, Array],
+]:
+    """JIT near-field kernel over explicit per-leaf particle groups."""
+    dtype = positions.dtype
+    g_const = jnp.asarray(G, dtype=dtype)
+    soft_sq = softening_sq
+    max_leaf_size = int(leaf_particle_idx.shape[1])
+
+    accelerations = jnp.zeros_like(positions)
+    if return_potential:
+        potentials = jnp.zeros((positions.shape[0],), dtype=dtype)
+    else:
+        potentials = None
+
+    self_accel, self_potential = _self_contributions(
+        leaf_positions,
+        leaf_masses,
+        leaf_mask,
+        softening_sq=soft_sq,
+        G=g_const,
+        compute_potential=return_potential,
+    )
+    accelerations = _scatter_contributions(
+        accelerations,
+        leaf_particle_idx,
+        self_accel,
+        leaf_mask,
+    )
+    if return_potential and self_potential is not None and potentials is not None:
+        potentials = _scatter_scalar_contributions(
+            potentials,
+            leaf_particle_idx,
+            self_potential,
+            leaf_mask,
+        )
+
+    inputs = (target_leaf_ids, source_leaf_ids, valid_pairs)
+
+    if neighbors.shape[0] > 0:
+        mode = str(nearfield_mode).strip().lower()
+        if mode not in ("baseline", "bucketed"):
+            raise ValueError("nearfield_mode must be 'baseline' or 'bucketed'")
+        if mode == "bucketed":
+            chunk = int(edge_chunk_size)
+            if chunk <= 0:
+                raise ValueError("edge_chunk_size must be positive")
+            starts = jnp.arange(0, neighbors.shape[0], chunk, dtype=INDEX_DTYPE)
+            chunk_offsets = jnp.arange(chunk, dtype=INDEX_DTYPE)
+            chunk_flat_size = int(chunk * max_leaf_size)
+
+            if return_potential and potentials is not None:
+                if use_precomputed_scatter:
+
+                    def _chunk_body(carry, data):
+                        acc, pot = carry
+                        start, sort_idx, group_ids, unique_indices = data
+                        edge_idx = start + chunk_offsets
+                        in_range = edge_idx < neighbors.shape[0]
+                        safe_edge_idx = jnp.where(in_range, edge_idx, 0)
+                        valid_edge = in_range & valid_pairs[safe_edge_idx]
+
+                        def _compute(args):
+                            acc_in, pot_in = args
+                            tgt_leaf = target_leaf_ids[safe_edge_idx]
+                            src_leaf = source_leaf_ids[safe_edge_idx]
+                            tgt_leaf_local = jnp.where(valid_edge, tgt_leaf, 0)
+                            src_leaf_local = jnp.where(valid_edge, src_leaf, 0)
+
+                            tgt_pos = leaf_positions[tgt_leaf_local]
+                            tgt_mask = leaf_mask[tgt_leaf_local] & valid_edge[:, None]
+                            src_pos = leaf_positions[src_leaf_local]
+                            src_mass = leaf_masses[src_leaf_local]
+                            src_mask = leaf_mask[src_leaf_local] & valid_edge[:, None]
+
+                            pair_acc, pair_pot = _pair_contributions_batched(
+                                tgt_pos,
+                                tgt_mask,
+                                src_pos,
+                                src_mass,
+                                src_mask,
+                                softening_sq=soft_sq,
+                                G=g_const,
+                                compute_potential=True,
+                            )
+                            acc_out = _scatter_vectors_with_schedule(
+                                acc_in,
+                                pair_acc,
+                                tgt_mask,
+                                sort_idx,
+                                group_ids,
+                                unique_indices,
+                            )
+                            pot_out = _scatter_scalars_with_schedule(
+                                pot_in,
+                                pair_pot,
+                                tgt_mask,
+                                sort_idx,
+                                group_ids,
+                                unique_indices,
+                            )
+                            return acc_out, pot_out
+
+                        return (
+                            lax.cond(
+                                jnp.any(valid_edge),
+                                _compute,
+                                lambda args: args,
+                                (acc, pot),
+                            ),
+                            None,
+                        )
+
+                    (accelerations, potentials), _ = lax.scan(
+                        _chunk_body,
+                        (accelerations, potentials),
+                        (
+                            starts,
+                            precomputed_chunk_sort_indices[:, :chunk_flat_size],
+                            precomputed_chunk_group_ids[:, :chunk_flat_size],
+                            precomputed_chunk_unique_indices[:, :chunk_flat_size],
+                        ),
+                    )
+                else:
+
+                    def _chunk_body(carry, start):
+                        acc, pot = carry
+                        edge_idx = start + chunk_offsets
+                        in_range = edge_idx < neighbors.shape[0]
+                        safe_edge_idx = jnp.where(in_range, edge_idx, 0)
+                        valid_edge = in_range & valid_pairs[safe_edge_idx]
+
+                        def _compute(args):
+                            acc_in, pot_in = args
+                            tgt_leaf = target_leaf_ids[safe_edge_idx]
+                            src_leaf = source_leaf_ids[safe_edge_idx]
+                            tgt_leaf_local = jnp.where(valid_edge, tgt_leaf, 0)
+                            src_leaf_local = jnp.where(valid_edge, src_leaf, 0)
+
+                            tgt_pos = leaf_positions[tgt_leaf_local]
+                            tgt_mask = leaf_mask[tgt_leaf_local] & valid_edge[:, None]
+                            tgt_ids = leaf_particle_idx[tgt_leaf_local]
+                            src_pos = leaf_positions[src_leaf_local]
+                            src_mass = leaf_masses[src_leaf_local]
+                            src_mask = leaf_mask[src_leaf_local] & valid_edge[:, None]
+                            sort_idx, group_ids, unique_indices = (
+                                _build_scatter_schedule(
+                                    tgt_ids,
+                                    tgt_mask,
+                                )
+                            )
+
+                            pair_acc, pair_pot = _pair_contributions_batched(
+                                tgt_pos,
+                                tgt_mask,
+                                src_pos,
+                                src_mass,
+                                src_mask,
+                                softening_sq=soft_sq,
+                                G=g_const,
+                                compute_potential=True,
+                            )
+                            acc_out = _scatter_vectors_with_schedule(
+                                acc_in,
+                                pair_acc,
+                                tgt_mask,
+                                sort_idx,
+                                group_ids,
+                                unique_indices,
+                            )
+                            pot_out = _scatter_scalars_with_schedule(
+                                pot_in,
+                                pair_pot,
+                                tgt_mask,
+                                sort_idx,
+                                group_ids,
+                                unique_indices,
+                            )
+                            return acc_out, pot_out
+
+                        return (
+                            lax.cond(
+                                jnp.any(valid_edge),
+                                _compute,
+                                lambda args: args,
+                                (acc, pot),
+                            ),
+                            None,
+                        )
+
+                    (accelerations, potentials), _ = lax.scan(
+                        _chunk_body,
+                        (accelerations, potentials),
+                        starts,
+                    )
+            else:
+                if use_precomputed_scatter:
+
+                    def _chunk_body(acc, data):
+                        start, sort_idx, group_ids, unique_indices = data
+                        edge_idx = start + chunk_offsets
+                        in_range = edge_idx < neighbors.shape[0]
+                        safe_edge_idx = jnp.where(in_range, edge_idx, 0)
+                        valid_edge = in_range & valid_pairs[safe_edge_idx]
+
+                        def _compute(acc_in):
+                            tgt_leaf = target_leaf_ids[safe_edge_idx]
+                            src_leaf = source_leaf_ids[safe_edge_idx]
+                            tgt_leaf_local = jnp.where(valid_edge, tgt_leaf, 0)
+                            src_leaf_local = jnp.where(valid_edge, src_leaf, 0)
+
+                            tgt_pos = leaf_positions[tgt_leaf_local]
+                            tgt_mask = leaf_mask[tgt_leaf_local] & valid_edge[:, None]
+                            src_pos = leaf_positions[src_leaf_local]
+                            src_mass = leaf_masses[src_leaf_local]
+                            src_mask = leaf_mask[src_leaf_local] & valid_edge[:, None]
+
+                            pair_acc, _ = _pair_contributions_batched(
+                                tgt_pos,
+                                tgt_mask,
+                                src_pos,
+                                src_mass,
+                                src_mask,
+                                softening_sq=soft_sq,
+                                G=g_const,
+                                compute_potential=False,
+                            )
+                            return _scatter_vectors_with_schedule(
+                                acc_in,
+                                pair_acc,
+                                tgt_mask,
+                                sort_idx,
+                                group_ids,
+                                unique_indices,
+                            )
+
+                        return (
+                            lax.cond(
+                                jnp.any(valid_edge),
+                                _compute,
+                                lambda acc_in: acc_in,
+                                acc,
+                            ),
+                            None,
+                        )
+
+                    accelerations, _ = lax.scan(
+                        _chunk_body,
+                        accelerations,
+                        (
+                            starts,
+                            precomputed_chunk_sort_indices[:, :chunk_flat_size],
+                            precomputed_chunk_group_ids[:, :chunk_flat_size],
+                            precomputed_chunk_unique_indices[:, :chunk_flat_size],
+                        ),
+                    )
+                else:
+
+                    def _chunk_body(acc, start):
+                        edge_idx = start + chunk_offsets
+                        in_range = edge_idx < neighbors.shape[0]
+                        safe_edge_idx = jnp.where(in_range, edge_idx, 0)
+                        valid_edge = in_range & valid_pairs[safe_edge_idx]
+
+                        def _compute(acc_in):
+                            tgt_leaf = target_leaf_ids[safe_edge_idx]
+                            src_leaf = source_leaf_ids[safe_edge_idx]
+                            tgt_leaf_local = jnp.where(valid_edge, tgt_leaf, 0)
+                            src_leaf_local = jnp.where(valid_edge, src_leaf, 0)
+
+                            tgt_pos = leaf_positions[tgt_leaf_local]
+                            tgt_mask = leaf_mask[tgt_leaf_local] & valid_edge[:, None]
+                            tgt_ids = leaf_particle_idx[tgt_leaf_local]
+                            src_pos = leaf_positions[src_leaf_local]
+                            src_mass = leaf_masses[src_leaf_local]
+                            src_mask = leaf_mask[src_leaf_local] & valid_edge[:, None]
+                            sort_idx, group_ids, unique_indices = (
+                                _build_scatter_schedule(
+                                    tgt_ids,
+                                    tgt_mask,
+                                )
+                            )
+
+                            pair_acc, _ = _pair_contributions_batched(
+                                tgt_pos,
+                                tgt_mask,
+                                src_pos,
+                                src_mass,
+                                src_mask,
+                                softening_sq=soft_sq,
+                                G=g_const,
+                                compute_potential=False,
+                            )
+                            return _scatter_vectors_with_schedule(
+                                acc_in,
+                                pair_acc,
+                                tgt_mask,
+                                sort_idx,
+                                group_ids,
+                                unique_indices,
+                            )
+
+                        return (
+                            lax.cond(
+                                jnp.any(valid_edge),
+                                _compute,
+                                lambda acc_in: acc_in,
+                                acc,
+                            ),
+                            None,
+                        )
+
+                    accelerations, _ = lax.scan(
+                        _chunk_body,
+                        accelerations,
+                        starts,
+                    )
+        elif return_potential and potentials is not None:
+
+            def _edge_body(carry, data):
+                acc, pot = carry
+                tgt_idx, src_idx, is_valid = data
+
+                def true_branch(
+                    args: tuple[Array, Array, Array, Array],
+                ) -> tuple[Array, Array]:
+                    acc_state, pot_state, tgt, src = args
+                    target_pos = leaf_positions[tgt]
+                    target_mask = leaf_mask[tgt]
+                    target_ids = leaf_particle_idx[tgt]
+
+                    source_pos = leaf_positions[src]
+                    source_mass = leaf_masses[src]
+                    source_mask = leaf_mask[src]
+
+                    pair_accel, pair_pot = _pair_contributions(
+                        target_pos,
+                        target_mask,
+                        source_pos,
+                        source_mass,
+                        source_mask,
+                        softening_sq=soft_sq,
+                        G=g_const,
+                        compute_potential=True,
+                    )
+
+                    masked_acc = jnp.where(target_mask[:, None], pair_accel, 0.0)
+                    masked_pot = jnp.where(target_mask, pair_pot, 0.0)
+
+                    acc_state = acc_state.at[target_ids].add(masked_acc)
+                    pot_state = pot_state.at[target_ids].add(masked_pot)
+                    return acc_state, pot_state
+
+                def false_branch(
+                    args: tuple[Array, Array, Array, Array],
+                ) -> tuple[Array, Array]:
+                    acc_state, pot_state, *_ = args
+                    return acc_state, pot_state
+
+                updated = lax.cond(
+                    is_valid,
+                    true_branch,
+                    false_branch,
+                    (acc, pot, tgt_idx, src_idx),
+                )
+                return updated, None
+
+            (accelerations, potentials), _ = lax.scan(
+                _edge_body,
+                (accelerations, potentials),
+                inputs,
+            )
+        else:
+
+            def _edge_body(acc, data):
+                tgt_idx, src_idx, is_valid = data
+
+                def true_branch(args: tuple[Array, Array, Array]) -> Array:
+                    acc_state, tgt, src = args
+                    target_pos = leaf_positions[tgt]
+                    target_mask = leaf_mask[tgt]
+                    target_ids = leaf_particle_idx[tgt]
+
+                    source_pos = leaf_positions[src]
+                    source_mass = leaf_masses[src]
+                    source_mask = leaf_mask[src]
+
+                    pair_accel, _ = _pair_contributions(
+                        target_pos,
+                        target_mask,
+                        source_pos,
+                        source_mass,
+                        source_mask,
+                        softening_sq=soft_sq,
+                        G=g_const,
+                        compute_potential=False,
+                    )
+
+                    masked_acc = jnp.where(target_mask[:, None], pair_accel, 0.0)
+                    acc_state = acc_state.at[target_ids].add(masked_acc)
+                    return acc_state
+
+                def false_branch(args: tuple[Array, Array, Array]) -> Array:
+                    acc_state, *_ = args
+                    return acc_state
+
+                updated_acc = lax.cond(
+                    is_valid,
+                    true_branch,
+                    false_branch,
+                    (acc, tgt_idx, src_idx),
+                )
+                return updated_acc, None
+
+            accelerations, _ = lax.scan(
+                _edge_body,
+                accelerations,
+                inputs,
+            )
+
+    neighbor_pairs = jnp.zeros((0, 2), dtype=INDEX_DTYPE)
+    pair_count = as_index(0)
+    if collect_neighbor_pairs:
+        max_pairs = neighbors.shape[0]
+        pair_buffer = jnp.zeros((max_pairs, 2), dtype=INDEX_DTYPE)
+
+        def _pair_body(idx, state):
+            ptr, buf = state
+
+            def _add_pair(args):
+                ptr_val, buf_val = args
+                pair = jnp.stack([target_leaf_ids[idx], source_leaf_ids[idx]], axis=0)
+                buf_val = buf_val.at[ptr_val].set(pair)
+                return ptr_val + as_index(1), buf_val
+
+            return lax.cond(
+                valid_pairs[idx],
+                _add_pair,
+                lambda args: args,
+                (ptr, buf),
+            )
+
+        pair_count, pair_buffer = lax.fori_loop(
+            0,
+            max_pairs,
+            _pair_body,
+            (as_index(0), pair_buffer),
+        )
+        neighbor_pairs = pair_buffer
+
+    outputs = (accelerations,)
+    if return_potential and potentials is not None:
+        outputs += (potentials,)
+    if collect_neighbor_pairs:
+        outputs += (neighbor_pairs, pair_count)
+
+    if len(outputs) == 1:
+        return outputs[0]
+    return outputs
+
+
 @jaxtyped(typechecker=beartype)
 def compute_leaf_p2p_accelerations(
     tree: Tree,
@@ -931,6 +1501,13 @@ def compute_leaf_p2p_accelerations(
     precomputed_chunk_sort_indices: Optional[Array] = None,
     precomputed_chunk_group_ids: Optional[Array] = None,
     precomputed_chunk_unique_indices: Optional[Array] = None,
+    node_ranges_override: Optional[Array] = None,
+    leaf_nodes_override: Optional[Array] = None,
+    neighbor_offsets_override: Optional[Array] = None,
+    neighbor_indices_override: Optional[Array] = None,
+    neighbor_counts_override: Optional[Array] = None,
+    leaf_particle_indices_override: Optional[Array] = None,
+    leaf_particle_mask_override: Optional[Array] = None,
 ) -> Union[
     Array,
     Tuple[Array, Array],
@@ -970,11 +1547,32 @@ def compute_leaf_p2p_accelerations(
 
     positions = jnp.asarray(positions_sorted)
     masses = jnp.asarray(masses_sorted)
-    node_ranges = jnp.asarray(tree.node_ranges, dtype=INDEX_DTYPE)
+    node_ranges = (
+        jnp.asarray(tree.node_ranges, dtype=INDEX_DTYPE)
+        if node_ranges_override is None
+        else jnp.asarray(node_ranges_override, dtype=INDEX_DTYPE)
+    )
 
-    leaf_nodes = jnp.asarray(neighbor_list.leaf_indices, dtype=INDEX_DTYPE)
-    offsets = jnp.asarray(neighbor_list.offsets, dtype=INDEX_DTYPE)
-    neighbors = jnp.asarray(neighbor_list.neighbors, dtype=INDEX_DTYPE)
+    leaf_nodes = (
+        jnp.asarray(neighbor_list.leaf_indices, dtype=INDEX_DTYPE)
+        if leaf_nodes_override is None
+        else jnp.asarray(leaf_nodes_override, dtype=INDEX_DTYPE)
+    )
+    offsets = (
+        jnp.asarray(neighbor_list.offsets, dtype=INDEX_DTYPE)
+        if neighbor_offsets_override is None
+        else jnp.asarray(neighbor_offsets_override, dtype=INDEX_DTYPE)
+    )
+    neighbors = (
+        jnp.asarray(neighbor_list.neighbors, dtype=INDEX_DTYPE)
+        if neighbor_indices_override is None
+        else jnp.asarray(neighbor_indices_override, dtype=INDEX_DTYPE)
+    )
+    neighbor_counts = (
+        jnp.asarray(neighbor_list.counts, dtype=INDEX_DTYPE)
+        if neighbor_counts_override is None
+        else jnp.asarray(neighbor_counts_override, dtype=INDEX_DTYPE)
+    )
 
     if leaf_nodes.size == 0:
         zeros = jnp.zeros_like(positions)
@@ -983,25 +1581,51 @@ def compute_leaf_p2p_accelerations(
             return zeros, pot_zeros
         return zeros
 
-    if max_leaf_size is None:
-        leaf_ranges = node_ranges[leaf_nodes]
-        counts = leaf_ranges[:, 1] - leaf_ranges[:, 0] + 1
-        try:
-            max_leaf_size = int(jnp.max(counts).item())
-        except TypeError as exc:
-            raise ValueError(
-                "max_leaf_size must be provided when tracing or JIT-compiling"
-            ) from exc
+    if leaf_particle_indices_override is not None:
+        explicit_leaf_particle_indices = jnp.asarray(
+            leaf_particle_indices_override,
+            dtype=INDEX_DTYPE,
+        )
+        explicit_leaf_particle_mask = (
+            jnp.asarray(leaf_particle_mask_override, dtype=bool)
+            if leaf_particle_mask_override is not None
+            else jnp.ones_like(explicit_leaf_particle_indices, dtype=bool)
+        )
+        max_leaf_size = int(explicit_leaf_particle_indices.shape[1])
+    else:
+        explicit_leaf_particle_indices = None
+        explicit_leaf_particle_mask = None
+        if max_leaf_size is None:
+            leaf_ranges = node_ranges[leaf_nodes]
+            counts = leaf_ranges[:, 1] - leaf_ranges[:, 0] + 1
+            try:
+                max_leaf_size = int(jnp.max(counts).item())
+            except TypeError as exc:
+                raise ValueError(
+                    "max_leaf_size must be provided when tracing or JIT-compiling"
+                ) from exc
 
     softening_sq = jnp.asarray(float(softening) ** 2, dtype=positions.dtype)
 
+    use_precomputed_scatter = (
+        precomputed_chunk_sort_indices is not None
+        and precomputed_chunk_group_ids is not None
+        and precomputed_chunk_unique_indices is not None
+    )
+
     if precomputed_target_leaf_ids is None or precomputed_valid_pairs is None:
+        # Precomputed scatter schedules are built against the neighbor-list edge
+        # order used by prepared state. Re-derive leaf-pair vectors in that same
+        # order so bucketed scans stay aligned with the schedule buffers.
+        sort_by_source = not bool(collect_neighbor_pairs)
+        if use_precomputed_scatter:
+            sort_by_source = False
         target_leaf_ids, source_leaf_ids, valid_pairs = prepare_leaf_neighbor_pairs(
             node_ranges,
             leaf_nodes,
             offsets,
             neighbors,
-            sort_by_source=not bool(collect_neighbor_pairs),
+            sort_by_source=sort_by_source,
         )
     else:
         target_leaf_ids = jnp.asarray(precomputed_target_leaf_ids, dtype=INDEX_DTYPE)
@@ -1022,11 +1646,6 @@ def compute_leaf_p2p_accelerations(
                 dtype=INDEX_DTYPE,
             )
 
-    use_precomputed_scatter = (
-        precomputed_chunk_sort_indices is not None
-        and precomputed_chunk_group_ids is not None
-        and precomputed_chunk_unique_indices is not None
-    )
     if use_precomputed_scatter:
         chunk_sort_indices = jnp.asarray(
             precomputed_chunk_sort_indices, dtype=INDEX_DTYPE
@@ -1041,20 +1660,55 @@ def compute_leaf_p2p_accelerations(
         chunk_group_ids = jnp.zeros((0, 0), dtype=INDEX_DTYPE)
         chunk_unique_indices = jnp.zeros((0, 0), dtype=INDEX_DTYPE)
 
-    return _compute_leaf_p2p_impl(
-        node_ranges,
-        leaf_nodes,
+    if explicit_leaf_particle_indices is None:
+        return _compute_leaf_p2p_impl(
+            node_ranges,
+            leaf_nodes,
+            offsets,
+            neighbors,
+            positions,
+            masses,
+            target_leaf_ids,
+            source_leaf_ids,
+            valid_pairs,
+            chunk_sort_indices,
+            chunk_group_ids,
+            chunk_unique_indices,
+            int(max_leaf_size),
+            G=G,
+            softening_sq=softening_sq,
+            return_potential=return_potential,
+            collect_neighbor_pairs=collect_neighbor_pairs,
+            nearfield_mode=nearfield_mode,
+            edge_chunk_size=int(edge_chunk_size),
+            use_precomputed_scatter=use_precomputed_scatter,
+        )
+
+    (
+        leaf_positions,
+        leaf_masses,
+        leaf_mask,
+        leaf_particle_idx,
+    ) = _prepare_leaf_data_from_groups(
+        explicit_leaf_particle_indices,
+        explicit_leaf_particle_mask,
+        positions,
+        masses,
+    )
+    return _compute_leaf_p2p_from_prepared_leaf_data_impl(
         offsets,
         neighbors,
         positions,
-        masses,
         target_leaf_ids,
         source_leaf_ids,
         valid_pairs,
         chunk_sort_indices,
         chunk_group_ids,
         chunk_unique_indices,
-        int(max_leaf_size),
+        leaf_positions,
+        leaf_masses,
+        leaf_mask,
+        leaf_particle_idx,
         G=G,
         softening_sq=softening_sq,
         return_potential=return_potential,

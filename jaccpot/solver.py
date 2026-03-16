@@ -191,6 +191,7 @@ def _pop_legacy_common_overrides(
 class _LegacyRuntimeOverrides(NamedTuple):
     complex_rotation: str
     tree_type: Optional[str]
+    execution_backend: str
     tree_mode: Optional[str]
     target_leaf_particles: Optional[int]
     expanse_preset: Optional[str]
@@ -225,6 +226,12 @@ def _pop_legacy_runtime_overrides(
     legacy_tree_type = legacy_kwargs.pop("tree_type", None)
     if legacy_tree_type is not None:
         tree_type = str(legacy_tree_type)
+        legacy_used = True
+
+    execution_backend = advanced_cfg.runtime.execution_backend
+    legacy_execution_backend = legacy_kwargs.pop("execution_backend", None)
+    if legacy_execution_backend is not None:
+        execution_backend = str(legacy_execution_backend)
         legacy_used = True
 
     tree_mode = advanced_cfg.tree.mode
@@ -300,6 +307,7 @@ def _pop_legacy_runtime_overrides(
     return _LegacyRuntimeOverrides(
         complex_rotation=complex_rotation,
         tree_type=tree_type,
+        execution_backend=execution_backend,
         tree_mode=tree_mode,
         target_leaf_particles=target_leaf_particles,
         expanse_preset=expanse_preset,
@@ -409,6 +417,7 @@ class FastMultipoleMethod:
             dehnen_geometry_mode=dehnen_geometry_mode,
             complex_rotation=runtime_overrides.complex_rotation,
             tree_type=runtime_overrides.tree_type or "radix",
+            execution_backend=runtime_overrides.execution_backend,
             tree_build_mode=runtime_overrides.tree_mode,
             target_leaf_particles=runtime_overrides.target_leaf_particles,
             refine_local=legacy_kwargs.pop(
@@ -621,12 +630,17 @@ class FastMultipoleMethod:
         *,
         target_indices: Optional[Array] = None,
         return_potential: bool = False,
+        jit_traversal: Optional[bool] = None,
     ) -> Union[Array, Tuple[Array, Array]]:
         """Evaluate a previously prepared state for all particles or a subset."""
         jit_traversal = (
-            True
-            if self.advanced.runtime.jit_traversal is None
-            else bool(self.advanced.runtime.jit_traversal)
+            (
+                True
+                if self.advanced.runtime.jit_traversal is None
+                else bool(self.advanced.runtime.jit_traversal)
+            )
+            if jit_traversal is None
+            else bool(jit_traversal)
         )
         return self._impl.evaluate_prepared_state(
             state,

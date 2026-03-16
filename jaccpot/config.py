@@ -10,6 +10,7 @@ Basis = Literal["cartesian", "solidfmm", "complex", "real"]
 FarFieldMode = Literal["auto", "pair_grouped", "class_major"]
 NearFieldMode = Literal["auto", "baseline", "bucketed"]
 MemoryObjective = Literal["balanced", "throughput", "minimum_memory"]
+FMMExecutionBackend = Literal["auto", "radix", "octree"]
 
 
 class FMMPreset(str, Enum):
@@ -60,6 +61,7 @@ class NearFieldConfig:
 class RuntimePolicyConfig:
     """Execution-policy overrides for tree build and traversal."""
 
+    execution_backend: FMMExecutionBackend = "auto"
     host_refine_mode: str = "auto"
     fail_fast: bool = False
     jit_tree: Optional[bool] = None

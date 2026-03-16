@@ -139,6 +139,490 @@ def test_tree_type_flows_from_advanced_config():
         advanced=FMMAdvancedConfig(tree=TreeConfig(tree_type="radix")),
     )
     assert fmm._impl.tree_type == "radix"
+    assert fmm._impl.execution_backend == "auto"
+
+
+def test_execution_backend_flows_from_advanced_config():
+    fmm = FastMultipoleMethod(
+        preset=FMMPreset.FAST,
+        basis="solidfmm",
+        advanced=FMMAdvancedConfig(
+            tree=TreeConfig(tree_type="octree"),
+            runtime=RuntimePolicyConfig(execution_backend="radix"),
+        ),
+    )
+    assert fmm._impl.tree_type == "octree"
+    assert fmm._impl.execution_backend == "radix"
+
+
+def test_prepare_state_records_resolved_execution_backend():
+    positions, masses = _sample_problem(n=32)
+    fmm = FastMultipoleMethod(
+        preset=FMMPreset.FAST,
+        basis="solidfmm",
+        advanced=FMMAdvancedConfig(
+            tree=TreeConfig(tree_type="octree"),
+            runtime=RuntimePolicyConfig(execution_backend="auto"),
+        ),
+    )
+
+    state = fmm.prepare_state(
+        positions,
+        masses,
+        leaf_size=8,
+        max_order=3,
+    )
+
+    assert state.execution_backend == "radix"
+
+
+def test_explicit_octree_execution_backend_prepares_state():
+    positions, masses = _sample_problem(n=32)
+    fmm = FastMultipoleMethod(
+        preset=FMMPreset.FAST,
+        basis="solidfmm",
+        advanced=FMMAdvancedConfig(
+            tree=TreeConfig(tree_type="octree"),
+            runtime=RuntimePolicyConfig(execution_backend="octree"),
+        ),
+    )
+
+    state = fmm.prepare_state(
+        positions,
+        masses,
+        leaf_size=8,
+        max_order=3,
+    )
+
+    assert state.execution_backend == "octree"
+    assert state.octree is not None
+    assert state.octree_upward is not None
+    assert state.octree_downward is not None
+
+
+def test_octree_prepare_state_exposes_octree_execution_view():
+    positions, masses = _sample_problem(n=48)
+    fmm = FastMultipoleMethod(
+        preset=FMMPreset.FAST,
+        basis="solidfmm",
+        advanced=FMMAdvancedConfig(tree=TreeConfig(tree_type="octree")),
+    )
+
+    state = fmm.prepare_state(
+        positions,
+        masses,
+        leaf_size=8,
+        max_order=3,
+    )
+
+    assert state.tree.tree_type == "octree"
+    assert state.octree is not None
+    assert int(state.octree.num_valid_nodes) > 0
+    assert state.octree.radix_node_to_oct.shape[0] == state.tree.parent.shape[0]
+    assert state.octree.radix_leaf_to_oct.shape[0] == state.tree.num_leaves
+    assert state.octree.box_centers.shape == (state.octree.valid_mask.shape[0], 3)
+    assert state.octree.box_half_extents.shape == (state.octree.valid_mask.shape[0], 3)
+    assert state.nearfield_interop is not None
+    assert np.array_equal(
+        np.asarray(state.nearfield_interop.leaf_nodes),
+        np.asarray(state.neighbor_list.leaf_indices),
+    )
+    assert state.nearfield_interop.node_ranges.shape[0] == state.tree.parent.shape[0]
+    assert int(np.asarray(state.nearfield_interop.counts).sum()) == int(
+        np.asarray(state.neighbor_list.counts).sum()
+    )
+    native_map = np.asarray(state.nearfield_interop.particle_order_to_native_leaf)
+    assert native_map.shape == (state.tree.num_leaves,)
+    assert np.array_equal(np.sort(native_map), np.arange(state.tree.num_leaves))
+
+
+def test_octree_solver_matches_radix_prepare_path():
+    positions, masses = _sample_problem(n=64)
+    radix = FastMultipoleMethod(
+        preset=FMMPreset.FAST,
+        basis="solidfmm",
+        advanced=FMMAdvancedConfig(tree=TreeConfig(tree_type="radix")),
+    )
+    octree = FastMultipoleMethod(
+        preset=FMMPreset.FAST,
+        basis="solidfmm",
+        advanced=FMMAdvancedConfig(tree=TreeConfig(tree_type="octree")),
+    )
+
+    acc_radix = radix.compute_accelerations(
+        positions,
+        masses,
+        leaf_size=16,
+        max_order=3,
+    )
+    acc_octree = octree.compute_accelerations(
+        positions,
+        masses,
+        leaf_size=16,
+        max_order=3,
+    )
+
+    assert np.allclose(
+        np.asarray(acc_octree), np.asarray(acc_radix), rtol=1e-5, atol=1e-5
+    )
+
+
+def test_octree_execution_backend_matches_radix_on_octree_tree():
+    positions, masses = _sample_problem(n=64)
+    radix = FastMultipoleMethod(
+        preset=FMMPreset.FAST,
+        basis="solidfmm",
+        advanced=FMMAdvancedConfig(
+            tree=TreeConfig(tree_type="octree"),
+            runtime=RuntimePolicyConfig(execution_backend="radix"),
+        ),
+    )
+    octree = FastMultipoleMethod(
+        preset=FMMPreset.FAST,
+        basis="solidfmm",
+        advanced=FMMAdvancedConfig(
+            tree=TreeConfig(tree_type="octree"),
+            runtime=RuntimePolicyConfig(execution_backend="octree"),
+        ),
+    )
+
+    acc_radix = radix.compute_accelerations(
+        positions,
+        masses,
+        leaf_size=16,
+        max_order=3,
+    )
+    acc_octree = octree.compute_accelerations(
+        positions,
+        masses,
+        leaf_size=16,
+        max_order=3,
+    )
+
+    assert np.allclose(
+        np.asarray(acc_octree), np.asarray(acc_radix), rtol=1e-5, atol=1e-5
+    )
+
+
+def test_octree_execution_backend_supports_baseline_nearfield_mode():
+    positions, masses = _sample_problem(n=64)
+    radix = FastMultipoleMethod(
+        preset=FMMPreset.FAST,
+        basis="solidfmm",
+        advanced=FMMAdvancedConfig(
+            tree=TreeConfig(tree_type="octree"),
+            runtime=RuntimePolicyConfig(execution_backend="radix"),
+            nearfield=NearFieldConfig(mode="baseline"),
+        ),
+    )
+    octree = FastMultipoleMethod(
+        preset=FMMPreset.FAST,
+        basis="solidfmm",
+        advanced=FMMAdvancedConfig(
+            tree=TreeConfig(tree_type="octree"),
+            runtime=RuntimePolicyConfig(execution_backend="octree"),
+            nearfield=NearFieldConfig(mode="baseline"),
+        ),
+    )
+
+    acc_radix = radix.compute_accelerations(
+        positions,
+        masses,
+        leaf_size=16,
+        max_order=3,
+    )
+    acc_octree = octree.compute_accelerations(
+        positions,
+        masses,
+        leaf_size=16,
+        max_order=3,
+    )
+
+    assert np.allclose(
+        np.asarray(acc_octree), np.asarray(acc_radix), rtol=1e-5, atol=1e-5
+    )
+
+
+def test_octree_execution_backend_supports_class_major_farfield_mode():
+    positions, masses = _sample_problem(n=64)
+    radix = FastMultipoleMethod(
+        preset=FMMPreset.BALANCED,
+        basis="solidfmm",
+        advanced=FMMAdvancedConfig(
+            tree=TreeConfig(tree_type="octree"),
+            runtime=RuntimePolicyConfig(execution_backend="radix"),
+            farfield=FarFieldConfig(mode="class_major", grouped_interactions=True),
+            nearfield=NearFieldConfig(mode="bucketed", edge_chunk_size=256),
+        ),
+    )
+    octree = FastMultipoleMethod(
+        preset=FMMPreset.BALANCED,
+        basis="solidfmm",
+        advanced=FMMAdvancedConfig(
+            tree=TreeConfig(tree_type="octree"),
+            runtime=RuntimePolicyConfig(execution_backend="octree"),
+            farfield=FarFieldConfig(mode="class_major", grouped_interactions=True),
+            nearfield=NearFieldConfig(mode="bucketed", edge_chunk_size=256),
+        ),
+    )
+
+    acc_radix = radix.compute_accelerations(
+        positions,
+        masses,
+        leaf_size=16,
+        max_order=3,
+    )
+    acc_octree = octree.compute_accelerations(
+        positions,
+        masses,
+        leaf_size=16,
+        max_order=3,
+    )
+
+    assert np.allclose(
+        np.asarray(acc_octree), np.asarray(acc_radix), rtol=1e-5, atol=1e-5
+    )
+
+
+def test_octree_execution_backend_exposes_native_nearfield_view():
+    positions, masses = _sample_problem(n=72)
+    fmm = FastMultipoleMethod(
+        preset=FMMPreset.FAST,
+        basis="solidfmm",
+        advanced=FMMAdvancedConfig(
+            tree=TreeConfig(tree_type="octree"),
+            runtime=RuntimePolicyConfig(execution_backend="octree"),
+        ),
+    )
+
+    state = fmm.prepare_state(
+        positions,
+        masses,
+        leaf_size=8,
+        max_order=3,
+    )
+
+    assert state.octree is not None
+    assert state.nearfield_interop is not None
+    leaf_nodes = np.asarray(state.nearfield_interop.leaf_nodes)
+    native_map = np.asarray(state.nearfield_interop.particle_order_to_native_leaf)
+    carrier_nodes = np.unique(np.asarray(state.octree.radix_leaf_to_oct))
+    assert state.nearfield_interop.node_ranges.shape[0] == state.octree.parent.shape[0]
+    assert np.array_equal(np.sort(leaf_nodes), np.sort(carrier_nodes))
+    assert native_map.shape == leaf_nodes.shape
+    assert np.array_equal(np.sort(native_map), np.arange(leaf_nodes.shape[0]))
+    assert state.nearfield_interop.leaf_particle_indices is not None
+    assert state.nearfield_interop.leaf_particle_mask is not None
+    assert state.nearfield_interop.particle_to_leaf_position is not None
+
+
+def test_octree_execution_backend_target_indices_match_full_prepared_state():
+    positions, masses = _sample_problem(n=72)
+    fmm = FastMultipoleMethod(
+        preset=FMMPreset.FAST,
+        basis="solidfmm",
+        advanced=FMMAdvancedConfig(
+            tree=TreeConfig(tree_type="octree"),
+            runtime=RuntimePolicyConfig(execution_backend="octree"),
+        ),
+    )
+    target_indices = jnp.asarray([0, 5, 9, 10, 33], dtype=jnp.int32)
+
+    state = fmm.prepare_state(
+        positions,
+        masses,
+        leaf_size=8,
+        max_order=3,
+    )
+
+    full_acc, full_pot = fmm.evaluate_prepared_state(state, return_potential=True)
+    target_acc, target_pot = fmm.evaluate_prepared_state(
+        state,
+        target_indices=target_indices,
+        return_potential=True,
+    )
+
+    np_idx = np.asarray(target_indices)
+    assert state.nearfield_interop is not None
+    assert target_acc.shape == (target_indices.shape[0], 3)
+    assert target_pot.shape == (target_indices.shape[0],)
+    assert np.allclose(np.asarray(target_acc), np.asarray(full_acc)[np_idx])
+    assert np.allclose(np.asarray(target_pot), np.asarray(full_pot)[np_idx])
+
+
+def test_octree_execution_backend_prepared_state_jit_targets_match_eager():
+    positions, masses = _sample_problem(n=72)
+    fmm = FastMultipoleMethod(
+        preset=FMMPreset.FAST,
+        basis="solidfmm",
+        advanced=FMMAdvancedConfig(
+            tree=TreeConfig(tree_type="octree"),
+            runtime=RuntimePolicyConfig(execution_backend="octree"),
+        ),
+    )
+    target_indices = jnp.asarray([0, 7, 11, 23, 31], dtype=jnp.int32)
+    state = fmm.prepare_state(
+        positions,
+        masses,
+        leaf_size=8,
+        max_order=3,
+    )
+
+    jit_eval = jax.jit(
+        lambda st, idx: fmm.evaluate_prepared_state(st, target_indices=idx)
+    )
+    acc_jit = jit_eval(state, target_indices)
+    acc_ref = fmm.evaluate_prepared_state(state, target_indices=target_indices)
+
+    assert acc_jit.shape == (target_indices.shape[0], 3)
+    assert np.allclose(np.asarray(acc_jit), np.asarray(acc_ref), rtol=1e-5, atol=1e-5)
+
+
+def test_octree_execution_backend_prepared_state_eager_matches_compiled():
+    positions, masses = _sample_problem(n=72)
+    fmm = FastMultipoleMethod(
+        preset=FMMPreset.FAST,
+        basis="solidfmm",
+        advanced=FMMAdvancedConfig(
+            tree=TreeConfig(tree_type="octree"),
+            runtime=RuntimePolicyConfig(execution_backend="octree"),
+        ),
+    )
+    target_indices = jnp.asarray([0, 5, 9, 10, 33], dtype=jnp.int32)
+    state = fmm.prepare_state(
+        positions,
+        masses,
+        leaf_size=8,
+        max_order=3,
+    )
+
+    full_acc_compiled, full_pot_compiled = fmm.evaluate_prepared_state(
+        state,
+        return_potential=True,
+        jit_traversal=True,
+    )
+    full_acc_eager, full_pot_eager = fmm.evaluate_prepared_state(
+        state,
+        return_potential=True,
+        jit_traversal=False,
+    )
+    target_acc_compiled, target_pot_compiled = fmm.evaluate_prepared_state(
+        state,
+        target_indices=target_indices,
+        return_potential=True,
+        jit_traversal=True,
+    )
+    target_acc_eager, target_pot_eager = fmm.evaluate_prepared_state(
+        state,
+        target_indices=target_indices,
+        return_potential=True,
+        jit_traversal=False,
+    )
+
+    assert np.allclose(
+        np.asarray(full_acc_compiled),
+        np.asarray(full_acc_eager),
+        rtol=1e-5,
+        atol=1e-5,
+    )
+    assert np.allclose(
+        np.asarray(full_pot_compiled),
+        np.asarray(full_pot_eager),
+        rtol=1e-5,
+        atol=1e-5,
+    )
+    assert np.allclose(
+        np.asarray(target_acc_compiled),
+        np.asarray(target_acc_eager),
+        rtol=1e-5,
+        atol=1e-5,
+    )
+    assert np.allclose(
+        np.asarray(target_pot_compiled),
+        np.asarray(target_pot_eager),
+        rtol=1e-5,
+        atol=1e-5,
+    )
+
+
+def test_octree_execution_backend_target_indices_preserve_order_and_duplicates():
+    positions, masses = _sample_problem(n=72)
+    fmm = FastMultipoleMethod(
+        preset=FMMPreset.FAST,
+        basis="solidfmm",
+        advanced=FMMAdvancedConfig(
+            tree=TreeConfig(tree_type="octree"),
+            runtime=RuntimePolicyConfig(execution_backend="octree"),
+        ),
+    )
+    target_indices = jnp.asarray([9, 3, 9, 0], dtype=jnp.int32)
+    state = fmm.prepare_state(
+        positions,
+        masses,
+        leaf_size=8,
+        max_order=3,
+    )
+
+    full_acc, full_pot = fmm.evaluate_prepared_state(state, return_potential=True)
+    subset_acc, subset_pot = fmm.evaluate_prepared_state(
+        state,
+        target_indices=target_indices,
+        return_potential=True,
+    )
+
+    np_idx = np.asarray(target_indices)
+    assert subset_acc.shape == (target_indices.shape[0], 3)
+    assert subset_pot.shape == (target_indices.shape[0],)
+    assert np.allclose(
+        np.asarray(subset_acc),
+        np.asarray(full_acc)[np_idx],
+        rtol=1e-5,
+        atol=1e-5,
+    )
+    assert np.allclose(
+        np.asarray(subset_pot),
+        np.asarray(full_pot)[np_idx],
+        rtol=1e-5,
+        atol=1e-5,
+    )
+
+
+def test_octree_execution_backend_prepared_state_jit_targets_with_potential():
+    positions, masses = _sample_problem(n=72)
+    fmm = FastMultipoleMethod(
+        preset=FMMPreset.FAST,
+        basis="solidfmm",
+        advanced=FMMAdvancedConfig(
+            tree=TreeConfig(tree_type="octree"),
+            runtime=RuntimePolicyConfig(execution_backend="octree"),
+        ),
+    )
+    target_indices = jnp.asarray([0, 7, 11, 23, 31], dtype=jnp.int32)
+    state = fmm.prepare_state(
+        positions,
+        masses,
+        leaf_size=8,
+        max_order=3,
+    )
+
+    jit_eval = jax.jit(
+        lambda st, idx: fmm.evaluate_prepared_state(
+            st,
+            target_indices=idx,
+            return_potential=True,
+        )
+    )
+    acc_jit, pot_jit = jit_eval(state, target_indices)
+    acc_ref, pot_ref = fmm.evaluate_prepared_state(
+        state,
+        target_indices=target_indices,
+        return_potential=True,
+    )
+
+    assert acc_jit.shape == (target_indices.shape[0], 3)
+    assert pot_jit.shape == (target_indices.shape[0],)
+    assert np.allclose(np.asarray(acc_jit), np.asarray(acc_ref), rtol=1e-5, atol=1e-5)
+    assert np.allclose(np.asarray(pot_jit), np.asarray(pot_ref), rtol=1e-5, atol=1e-5)
 
 
 def test_basis_complex_alias_matches_solidfmm():
@@ -421,6 +905,74 @@ def test_clear_runtime_caches_resets_runtime_state():
     assert fmm._impl._prepared_state_cache_value is not None
     fmm.clear_runtime_caches(clear_jax_compilation=False)
     assert fmm._impl._prepared_state_cache_value is None
+
+
+def test_octree_reuse_prepared_state_uses_cache_without_topology_reuse(monkeypatch):
+    positions, masses = _sample_problem(n=72)
+    fmm = FastMultipoleMethod(
+        preset=FMMPreset.FAST,
+        basis="solidfmm",
+        advanced=FMMAdvancedConfig(
+            tree=TreeConfig(tree_type="octree"),
+            runtime=RuntimePolicyConfig(execution_backend="octree"),
+        ),
+    )
+
+    acc_first = fmm.compute_accelerations(
+        positions,
+        masses,
+        leaf_size=8,
+        max_order=3,
+        reuse_prepared_state=True,
+    )
+
+    cached_state = fmm._impl._prepared_state_cache_value
+    assert cached_state is not None
+    assert cached_state.execution_backend == "octree"
+    assert fmm.recent_topology_reused is False
+
+    def fail_prepare_state(*args, **kwargs):
+        raise AssertionError("prepare_state should not run when octree cache is reused")
+
+    monkeypatch.setattr(fmm._impl, "prepare_state", fail_prepare_state)
+    acc_second = fmm.compute_accelerations(
+        positions,
+        masses,
+        leaf_size=8,
+        max_order=3,
+        reuse_prepared_state=True,
+    )
+
+    assert fmm._impl._prepared_state_cache_value is cached_state
+    assert fmm.recent_topology_reused is False
+    assert np.allclose(
+        np.asarray(acc_second), np.asarray(acc_first), rtol=1e-5, atol=1e-5
+    )
+
+
+def test_octree_clear_runtime_caches_resets_prepared_state_cache():
+    positions, masses = _sample_problem(n=72)
+    fmm = FastMultipoleMethod(
+        preset=FMMPreset.FAST,
+        basis="solidfmm",
+        advanced=FMMAdvancedConfig(
+            tree=TreeConfig(tree_type="octree"),
+            runtime=RuntimePolicyConfig(execution_backend="octree"),
+        ),
+    )
+    _ = fmm.compute_accelerations(
+        positions,
+        masses,
+        leaf_size=8,
+        max_order=3,
+        reuse_prepared_state=True,
+    )
+
+    assert fmm._impl._prepared_state_cache_value is not None
+    assert fmm._impl._prepared_state_cache_value.execution_backend == "octree"
+    fmm.clear_runtime_caches(clear_jax_compilation=False)
+    assert fmm._impl._prepared_state_cache_value is None
+    assert fmm.recent_topology_reused is False
 
 
 def test_gpu_runtime_overrides_cap_traversal_capacities_for_large_n():

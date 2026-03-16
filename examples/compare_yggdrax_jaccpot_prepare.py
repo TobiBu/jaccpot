@@ -1,7 +1,8 @@
 """Cross-compare yggdrax tree/traversal vs jaccpot prepare/evaluate timings.
 
 Run with:
-    JAX_ENABLE_X64=1 conda run -n expanse python examples/compare_yggdrax_jaccpot_prepare.py
+    JAX_ENABLE_X64=1 micromamba run -n odisseo python \
+        examples/compare_yggdrax_jaccpot_prepare.py
 """
 
 from __future__ import annotations
@@ -16,7 +17,12 @@ from yggdrax.interactions import (
     build_interactions_and_neighbors,
 )
 
-from jaccpot import FastMultipoleMethod
+from jaccpot import (
+    FastMultipoleMethod,
+    FMMAdvancedConfig,
+    RuntimePolicyConfig,
+    TreeConfig,
+)
 
 
 def _sync(value):
@@ -101,15 +107,58 @@ def main() -> None:
             f"interactions={traversal_s:.4f}s nodes={int(tree.num_nodes)}"
         )
 
-    for tree_type in ("radix", "kdtree"):
-        fmm = FastMultipoleMethod(
-            preset="fast",
-            basis="solidfmm",
-            theta=0.6,
-            working_dtype=jnp.float32,
-            tree_type=tree_type,
-            target_leaf_particles=32,
-        )
+    solver_configs = [
+        (
+            "radix",
+            FastMultipoleMethod(
+                preset="fast",
+                basis="solidfmm",
+                theta=0.6,
+                working_dtype=jnp.float32,
+                tree_type="radix",
+                target_leaf_particles=32,
+            ),
+        ),
+        (
+            "kdtree",
+            FastMultipoleMethod(
+                preset="fast",
+                basis="solidfmm",
+                theta=0.6,
+                working_dtype=jnp.float32,
+                tree_type="kdtree",
+                target_leaf_particles=32,
+            ),
+        ),
+        (
+            "octree-radix-backend",
+            FastMultipoleMethod(
+                preset="fast",
+                basis="solidfmm",
+                theta=0.6,
+                working_dtype=jnp.float32,
+                advanced=FMMAdvancedConfig(
+                    tree=TreeConfig(tree_type="octree"),
+                    runtime=RuntimePolicyConfig(execution_backend="radix"),
+                ),
+            ),
+        ),
+        (
+            "octree-native-backend",
+            FastMultipoleMethod(
+                preset="fast",
+                basis="solidfmm",
+                theta=0.6,
+                working_dtype=jnp.float32,
+                advanced=FMMAdvancedConfig(
+                    tree=TreeConfig(tree_type="octree"),
+                    runtime=RuntimePolicyConfig(execution_backend="octree"),
+                ),
+            ),
+        ),
+    ]
+
+    for label, fmm in solver_configs:
         prepare_s = _time_mean(
             lambda: fmm.prepare_state(
                 positions,
@@ -128,9 +177,11 @@ def main() -> None:
         eval_s = _time_mean(
             lambda st: fmm.evaluate_prepared_state(st), state, repeats=3
         )
+        resolved_backend = str(getattr(state, "execution_backend", "n/a"))
         print(
-            f"[jaccpot {tree_type}] prepare_state={prepare_s:.4f}s "
-            f"evaluate_prepared_state={eval_s:.4f}s"
+            f"[jaccpot {label}] prepare_state={prepare_s:.4f}s "
+            f"evaluate_prepared_state={eval_s:.4f}s "
+            f"resolved_backend={resolved_backend}"
         )
 
 
