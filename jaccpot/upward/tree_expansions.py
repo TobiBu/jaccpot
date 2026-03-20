@@ -211,10 +211,15 @@ def prepare_upward_sweep(
     max_order: int = 2,
     center_mode: str = "com",
     explicit_centers: Optional[Array] = None,
+    precomputed_geometry: Optional[TreeGeometry] = None,
 ) -> TreeUpwardData:
     """Compute geometry, moments, and packed multipoles for a tree."""
 
-    geometry = compute_tree_geometry(tree, positions_sorted)
+    geometry = (
+        precomputed_geometry
+        if precomputed_geometry is not None
+        else compute_tree_geometry(tree, positions_sorted)
+    )
     mass_moments = compute_tree_mass_moments(
         tree,
         positions_sorted,

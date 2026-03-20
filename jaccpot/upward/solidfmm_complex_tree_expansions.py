@@ -400,6 +400,7 @@ def prepare_solidfmm_complex_upward_sweep(
     max_leaf_size: Optional[int] = None,
     leaf_batch_size: Optional[int] = None,
     rotation: str = "cached",
+    precomputed_geometry: Optional[TreeGeometry] = None,
 ) -> SolidFMMComplexTreeUpwardData:
     """Compute complex multipoles for every node (solidfmm basis)."""
 
@@ -413,10 +414,14 @@ def prepare_solidfmm_complex_upward_sweep(
     )
     # Thread the known leaf cap into geometry so JIT does not pad leaf-bound
     # gathers out to ``num_particles`` for large radix trees.
-    geometry = compute_tree_geometry(
-        tree,
-        positions_sorted,
-        max_leaf_size=int(max_leaf_size) if max_leaf_size is not None else None,
+    geometry = (
+        precomputed_geometry
+        if precomputed_geometry is not None
+        else compute_tree_geometry(
+            tree,
+            positions_sorted,
+            max_leaf_size=int(max_leaf_size) if max_leaf_size is not None else None,
+        )
     )
     _upward_diag("geometry done")
     mass_moments = compute_tree_mass_moments(
