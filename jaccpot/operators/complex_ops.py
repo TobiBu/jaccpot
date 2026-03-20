@@ -26,6 +26,30 @@ from .symmetric_tensors import (
 Array = jnp.ndarray
 
 
+@lru_cache(maxsize=None)
+def _conjugate_symmetry_metadata(order: int) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """Return packed-index metadata for conjugate-symmetry projection."""
+
+    p = int(order)
+    center_idx: list[int] = []
+    pos_idx: list[int] = []
+    neg_idx: list[int] = []
+    signs: list[float] = []
+    for ell in range(p + 1):
+        base = sh_offset(ell)
+        center_idx.append(base + ell)
+        for m in range(1, ell + 1):
+            pos_idx.append(base + ell + m)
+            neg_idx.append(base + ell - m)
+            signs.append(-1.0 if (m % 2) else 1.0)
+    return (
+        np.asarray(center_idx, dtype=np.int32),
+        np.asarray(pos_idx, dtype=np.int32),
+        np.asarray(neg_idx, dtype=np.int32),
+        np.asarray(signs, dtype=np.float64),
+    )
+
+
 def enforce_conjugate_symmetry(
     coeffs: Array,
     *,
@@ -35,31 +59,36 @@ def enforce_conjugate_symmetry(
 
     Enforces C_n^{-m} = (-1)^m * conj(C_n^{m}) and Im(C_n^0)=0.
     """
-    p = int(order)
-    coeffs = jnp.asarray(coeffs)
-    out = coeffs
-    for ell in range(p + 1):
-        sl = slice(sh_offset(ell), sh_offset(ell + 1))
-        block = out[sl]
-        block = block.at[ell].set(jnp.real(block[ell]) + 0.0j)
-        if ell > 0:
-            m = jnp.arange(1, ell + 1)
-            pos = ell + m
-            neg = ell - m
-            rdtype = jnp.real(jnp.zeros((), dtype=block.dtype)).dtype
-            signs = ((-1.0) ** m).astype(rdtype)
-            block = block.at[neg].set(signs * jnp.conjugate(block[pos]))
-        out = out.at[sl].set(block)
-    return out
+    coeffs_arr = jnp.asarray(coeffs)
+    return enforce_conjugate_symmetry_batch(coeffs_arr[None, :], order=order)[0]
 
 
+@partial(jax.jit, static_argnames=("order",))
 def enforce_conjugate_symmetry_batch(
     coeffs: Array,
     *,
     order: int,
 ) -> Array:
     """Batch projection onto conjugate-symmetric form."""
-    return jax.vmap(lambda c: enforce_conjugate_symmetry(c, order=order))(coeffs)
+
+    coeffs_arr = jnp.asarray(coeffs)
+    center_idx_np, pos_idx_np, neg_idx_np, signs_np = _conjugate_symmetry_metadata(
+        int(order)
+    )
+    center_idx = jnp.asarray(center_idx_np, dtype=jnp.int32)
+    pos_idx = jnp.asarray(pos_idx_np, dtype=jnp.int32)
+    neg_idx = jnp.asarray(neg_idx_np, dtype=jnp.int32)
+    real_dtype = jnp.real(jnp.zeros((), dtype=coeffs_arr.dtype)).dtype
+    signs = jnp.asarray(signs_np, dtype=real_dtype).astype(coeffs_arr.dtype)
+
+    out = coeffs_arr
+    center_vals = jnp.real(out[..., center_idx]).astype(coeffs_arr.dtype)
+    out = out.at[..., center_idx].set(center_vals)
+    if pos_idx_np.size == 0:
+        return out
+    mirrored = signs * jnp.conjugate(out[..., pos_idx])
+    out = out.at[..., neg_idx].set(mirrored)
+    return out
 
 
 def _wigner_d_small_jax(ell: int, beta: Array, *, dtype: jnp.dtype) -> Array:
