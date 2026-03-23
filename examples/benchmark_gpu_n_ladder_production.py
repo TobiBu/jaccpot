@@ -97,6 +97,11 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--autocvd-exclude", nargs="*", default=[])
     parser.add_argument("--cuda-visible-devices", default=None)
     parser.add_argument("--index-precision", default="int32")
+    parser.add_argument(
+        "--runtime-path",
+        choices=("auto", "legacy", "large_n"),
+        default="auto",
+    )
     return parser.parse_args()
 
 
@@ -326,6 +331,7 @@ def _base_fmm_kwargs() -> dict[str, Any]:
     return {
         "preset": FMMPreset.LARGE_N_GPU,
         "basis": "solidfmm",
+        "runtime_path": str(ARGS.runtime_path).strip().lower(),
         "precision": "fp32",
         "theta": float(ARGS.theta),
         "softening": float(ARGS.softening),
@@ -351,6 +357,7 @@ def serialize_fmm_kwargs_for_worker(fmm_kwargs: dict[str, Any]) -> dict[str, Any
         return {
             "preset": "large_n_gpu",
             "basis": str(fmm_kwargs.get("basis", "solidfmm")),
+            "runtime_path": str(fmm_kwargs.get("runtime_path", "auto")),
             "theta": float(fmm_kwargs.get("theta", 0.6)),
             "softening": float(fmm_kwargs.get("softening", 1e-3)),
             "working_dtype": str(

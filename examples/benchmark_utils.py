@@ -108,8 +108,21 @@ def generate_random_distribution(
     return positions, masses, key
 
 
+def apply_runtime_path(
+    kwargs: dict[str, Any],
+    *,
+    runtime_path: str = "auto",
+) -> dict[str, Any]:
+    """Return solver kwargs with an explicit runtime-path selection."""
+
+    updated = dict(kwargs)
+    updated["runtime_path"] = str(runtime_path).strip().lower()
+    return updated
+
+
 __all__ = [
     "TimingResult",
+    "apply_runtime_path",
     "generate_random_distribution",
     "time_callable",
 ]
