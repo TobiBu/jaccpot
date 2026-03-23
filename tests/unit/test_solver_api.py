@@ -208,6 +208,170 @@ def test_advanced_config_applies_to_runtime():
     assert fmm.mac_type == "engblom"
 
 
+def test_large_gpu_minimum_memory_streamed_path_keeps_explicit_traversal_caps():
+    impl = fmm_impl_private.FastMultipoleMethod(
+        preset=FMMPreset.LARGE_N_GPU,
+        expansion_basis="solidfmm",
+        mac_type="engblom",
+        streamed_far_pairs=True,
+        grouped_interactions=False,
+        memory_objective="minimum_memory",
+        fail_fast=True,
+        traversal_config=DualTreeTraversalConfig(
+            max_pair_queue=1_048_576,
+            process_block=256,
+            max_interactions_per_node=32_768,
+            max_neighbors_per_leaf=16_384,
+        ),
+    )
+
+    overrides = impl._resolve_runtime_execution_overrides(
+        num_particles=2_097_152,
+        backend="gpu",
+    )
+
+    assert overrides.traversal_config is not None
+    assert int(overrides.traversal_config.max_pair_queue) == 1_048_576
+    assert int(overrides.traversal_config.process_block) == 256
+    assert int(overrides.traversal_config.max_interactions_per_node) == 32_768
+    assert int(overrides.traversal_config.max_neighbors_per_leaf) == 16_384
+
+
+def test_large_gpu_minimum_memory_streamed_tree_guard_caps_overflowing_seed():
+    cfg = DualTreeTraversalConfig(
+        max_pair_queue=1_048_576,
+        process_block=256,
+        max_interactions_per_node=32_768,
+        max_neighbors_per_leaf=16_384,
+    )
+
+    capped = (
+        fmm_impl_private._cap_minimum_memory_streamed_gpu_traversal_config_for_tree(
+            traversal_config=cfg,
+            total_nodes=262_143,
+            num_leaves=131_072,
+            num_particles=16_777_216,
+        )
+    )
+
+    assert capped is not None
+    assert int(capped.max_pair_queue) == 524_288
+    assert int(capped.process_block) == 256
+    assert int(capped.max_interactions_per_node) == 8_192
+    assert int(capped.max_neighbors_per_leaf) == 4_096
+
+
+def test_large_gpu_minimum_memory_streamed_tree_guard_keeps_safe_seed():
+    cfg = DualTreeTraversalConfig(
+        max_pair_queue=1_048_576,
+        process_block=256,
+        max_interactions_per_node=16_384,
+        max_neighbors_per_leaf=8_192,
+    )
+
+    kept = (
+        fmm_impl_private._cap_minimum_memory_streamed_gpu_traversal_config_for_tree(
+            traversal_config=cfg,
+            total_nodes=65_535,
+            num_leaves=32_768,
+            num_particles=2_097_152,
+        )
+    )
+
+    assert kept == cfg
+
+
+def test_large_gpu_minimum_memory_streamed_path_clamps_auto_traversal_seed():
+    impl = fmm_impl_private.FastMultipoleMethod(
+        preset=FMMPreset.LARGE_N_GPU,
+        expansion_basis="solidfmm",
+        mac_type="engblom",
+        streamed_far_pairs=True,
+        grouped_interactions=False,
+        memory_objective="minimum_memory",
+        fail_fast=True,
+    )
+
+    overrides = impl._resolve_runtime_execution_overrides(
+        num_particles=2_097_152,
+        backend="gpu",
+    )
+
+    assert overrides.traversal_config is not None
+    assert int(overrides.traversal_config.max_pair_queue) == 32_768
+    assert int(overrides.traversal_config.process_block) == 64
+    assert int(overrides.traversal_config.max_interactions_per_node) == 1_024
+    assert int(overrides.traversal_config.max_neighbors_per_leaf) == 256
+
+
+def test_prepare_bucketed_scatter_schedules_skips_int32_overflow_shape():
+    impl = fmm_impl_private.FastMultipoleMethod(
+        preset=FMMPreset.LARGE_N_GPU,
+        expansion_basis="solidfmm",
+        memory_objective="minimum_memory",
+    )
+    nearfield_interop = fmm_impl_private.NearfieldInteropData(
+        leaf_nodes=jnp.zeros((0,), dtype=jnp.int32),
+        node_ranges=jnp.zeros((0, 2), dtype=jnp.int32),
+        offsets=jnp.zeros((0,), dtype=jnp.int32),
+        neighbors=jnp.zeros((0,), dtype=jnp.int32),
+        counts=jnp.zeros((0,), dtype=jnp.int32),
+        particle_order_node_ranges=jnp.zeros((0, 2), dtype=jnp.int32),
+        particle_order_leaf_indices=jnp.zeros((0,), dtype=jnp.int32),
+        particle_order_to_native_leaf=jnp.zeros((0,), dtype=jnp.int32),
+    )
+
+    target_leaf_ids = jnp.zeros((67_108_608,), dtype=jnp.int32)
+    valid_pairs = jnp.ones((67_108_608,), dtype=bool)
+
+    out = impl._prepare_bucketed_scatter_schedules_safe(
+        nearfield_interop=nearfield_interop,
+        target_leaf_ids=target_leaf_ids,
+        valid_pairs=valid_pairs,
+        leaf_cap=128,
+        edge_chunk_size=128,
+    )
+
+    assert out == (None, None, None)
+
+
+def test_large_gpu_minimum_memory_nearfield_prepare_skips_pair_vector_precompute():
+    impl = fmm_impl_private.FastMultipoleMethod(
+        preset=FMMPreset.LARGE_N_GPU,
+        expansion_basis="solidfmm",
+        memory_objective="minimum_memory",
+        nearfield_mode="bucketed",
+        precompute_nearfield_scatter_schedules=False,
+    )
+    nearfield_interop = fmm_impl_private.NearfieldInteropData(
+        leaf_nodes=jnp.zeros((1,), dtype=jnp.int32),
+        node_ranges=jnp.zeros((1, 2), dtype=jnp.int32),
+        offsets=jnp.zeros((2,), dtype=jnp.int32),
+        neighbors=jnp.zeros((0,), dtype=jnp.int32),
+        counts=jnp.zeros((1,), dtype=jnp.int32),
+        particle_order_node_ranges=jnp.zeros((1, 2), dtype=jnp.int32),
+        particle_order_leaf_indices=jnp.zeros((1,), dtype=jnp.int32),
+        particle_order_to_native_leaf=jnp.zeros((1,), dtype=jnp.int32),
+    )
+
+    out = impl._prepare_nearfield_precompute_artifacts(
+        neighbor_list=None,  # unused on the short-circuit path
+        nearfield_interop=nearfield_interop,
+        leaf_cap=128,
+        num_particles=2_097_152,
+        nearfield_mode="bucketed",
+        nearfield_edge_chunk_size=128,
+        retain_pair_vectors=False,
+    )
+
+    assert out.target_leaf_ids is None
+    assert out.source_leaf_ids is None
+    assert out.valid_pairs is None
+    assert out.chunk_sort_indices is None
+    assert out.chunk_group_ids is None
+    assert out.chunk_unique_indices is None
+
+
 def test_dehnen_error_defaults_to_paper_policy_settings():
     fmm = FastMultipoleMethod(
         preset=FMMPreset.FAST,

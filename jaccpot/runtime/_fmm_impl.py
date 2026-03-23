@@ -266,6 +266,7 @@ _NEARFIELD_BUCKETED_CPU_EDGE_CHUNK_XL = 4096
 _NEARFIELD_SCATTER_SCHEDULE_ITEM_CAP = 16_000_000
 _NEARFIELD_SCATTER_SCHEDULE_ITEM_CAP_GPU = 4_000_000
 _NEARFIELD_GPU_PRECOMPUTE_MAX_PARTICLES = 65_536
+_NEARFIELD_SCATTER_SCHEDULE_INT32_ITEM_LIMIT = np.iinfo(np.int32).max
 _LARGE_CPU_M2L_CHUNK_SIZE = 32768
 _TRACING_MAX_NEIGHBORS_PER_LEAF = 512
 _TRACING_MAX_PAIR_QUEUE = 65_536
@@ -287,6 +288,12 @@ _GPU_MINIMUM_MEMORY_PAIR_QUEUE = 32_768
 _GPU_MINIMUM_MEMORY_PROCESS_BLOCK = 64
 _GPU_MINIMUM_MEMORY_INTERACTIONS_PER_NODE = 1_024
 _GPU_MINIMUM_MEMORY_NEIGHBORS_PER_LEAF = 256
+_GPU_STREAMED_MINIMUM_MEMORY_EXPLICIT_PAIR_QUEUE_LARGE = 262_144
+_GPU_STREAMED_MINIMUM_MEMORY_EXPLICIT_PAIR_QUEUE_XL = 524_288
+_GPU_STREAMED_MINIMUM_MEMORY_EXPLICIT_PROCESS_BLOCK = 256
+_GPU_STREAMED_MINIMUM_MEMORY_EXPLICIT_INTERACTIONS_PER_NODE = 8_192
+_GPU_STREAMED_MINIMUM_MEMORY_EXPLICIT_NEIGHBORS_PER_LEAF = 4_096
+_LEGACY_STATIC_TRAVERSAL_INT32_ITEM_LIMIT = np.iinfo(np.int32).max
 _LARGE_CPU_TRAVERSAL_CONFIG = DualTreeTraversalConfig(
     max_pair_queue=131072,
     process_block=4096,
@@ -319,6 +326,105 @@ def _env_flag(name: str, default: bool = False) -> bool:
     if raw is None:
         return bool(default)
     return str(raw).strip().lower() in ("1", "true", "yes", "on")
+
+
+def _minimum_memory_streamed_gpu_traversal_ceiling(
+    *, num_particles: int
+) -> DualTreeTraversalConfig:
+    """Return explicit traversal ceilings for large-N streamed GPU runs.
+
+    These ceilings mirror the lean engblom/streamed production profile that has
+    been substantially more memory-efficient than oversized explicit traversal
+    caps in large-N minimum-memory benchmarks.
+    """
+
+    n = int(num_particles)
+    pair_queue = (
+        _GPU_STREAMED_MINIMUM_MEMORY_EXPLICIT_PAIR_QUEUE_XL
+        if n >= 4_194_304
+        else _GPU_STREAMED_MINIMUM_MEMORY_EXPLICIT_PAIR_QUEUE_LARGE
+    )
+    return DualTreeTraversalConfig(
+        max_pair_queue=int(pair_queue),
+        process_block=int(_GPU_STREAMED_MINIMUM_MEMORY_EXPLICIT_PROCESS_BLOCK),
+        max_interactions_per_node=int(
+            _GPU_STREAMED_MINIMUM_MEMORY_EXPLICIT_INTERACTIONS_PER_NODE
+        ),
+        max_neighbors_per_leaf=int(
+            _GPU_STREAMED_MINIMUM_MEMORY_EXPLICIT_NEIGHBORS_PER_LEAF
+        ),
+    )
+
+
+def _cap_minimum_memory_streamed_gpu_traversal_config_for_tree(
+    *,
+    traversal_config: Optional[DualTreeTraversalConfig],
+    total_nodes: int,
+    num_leaves: int,
+    num_particles: int,
+) -> Optional[DualTreeTraversalConfig]:
+    """Clamp impossible explicit traversal seeds for legacy large-N GPU walks.
+
+    Yggdrax's legacy static-capacity traversal path materializes far/near
+    buffers sized by:
+    - ``total_nodes * max_interactions_per_node``
+    - ``num_leaves * max_neighbors_per_leaf``
+
+    For very large radix trees, oversized explicit seeds can overflow signed
+    int32 shape scalars before traversal starts, or force enormous flat buffers
+    that are guaranteed to exhaust device memory. Cap only the impossible cases
+    to the existing lean streamed-GPU ceiling, while preserving smaller explicit
+    configs unchanged.
+    """
+
+    if traversal_config is None:
+        return None
+
+    safe_total_nodes = max(1, int(total_nodes))
+    safe_num_leaves = max(1, int(num_leaves))
+    current_queue = int(traversal_config.max_pair_queue)
+    current_block = int(traversal_config.process_block)
+    current_interactions = int(traversal_config.max_interactions_per_node)
+    current_neighbors = int(traversal_config.max_neighbors_per_leaf)
+
+    far_slots = safe_total_nodes * current_interactions
+    near_slots = safe_num_leaves * current_neighbors
+    if (
+        far_slots <= int(_LEGACY_STATIC_TRAVERSAL_INT32_ITEM_LIMIT)
+        and near_slots <= int(_LEGACY_STATIC_TRAVERSAL_INT32_ITEM_LIMIT)
+    ):
+        return traversal_config
+
+    explicit_ceiling = _minimum_memory_streamed_gpu_traversal_ceiling(
+        num_particles=int(num_particles)
+    )
+    int32_far_cap = max(
+        1, int(_LEGACY_STATIC_TRAVERSAL_INT32_ITEM_LIMIT) // safe_total_nodes
+    )
+    int32_near_cap = max(
+        1, int(_LEGACY_STATIC_TRAVERSAL_INT32_ITEM_LIMIT) // safe_num_leaves
+    )
+    capped = DualTreeTraversalConfig(
+        max_pair_queue=int(
+            min(current_queue, int(explicit_ceiling.max_pair_queue))
+        ),
+        process_block=int(min(current_block, int(explicit_ceiling.process_block))),
+        max_interactions_per_node=int(
+            min(
+                current_interactions,
+                int(explicit_ceiling.max_interactions_per_node),
+                int32_far_cap,
+            )
+        ),
+        max_neighbors_per_leaf=int(
+            min(
+                current_neighbors,
+                int(explicit_ceiling.max_neighbors_per_leaf),
+                int32_near_cap,
+            )
+        ),
+    )
+    return capped
 
 
 _PREPARE_DIAGNOSTICS = _env_flag("JACCPOT_PREPARE_DIAGNOSTICS", False)
@@ -833,7 +939,7 @@ class FMMPreparedState:
     """
 
     tree: Tree
-    upward: TreeUpwardData
+    upward: Optional[TreeUpwardData]
     downward: TreeDownwardData
     neighbor_list: NodeNeighborList
     max_leaf_size: int
@@ -1051,6 +1157,37 @@ def _build_octree_upward_artifacts(
         masses_sorted,
         max_order=int(max_order),
     )
+
+
+def _prepared_state_upward_payload(
+    *,
+    upward: TreeUpwardData,
+    memory_objective: str,
+) -> Optional[TreeUpwardData]:
+    """Return the upward payload to retain in prepared state.
+
+    The plain prepared evaluation path uses `downward`, `tree`, and near-field
+    metadata, but does not consume the original upward bundle. In
+    minimum-memory mode we can therefore avoid retaining this large payload and
+    reconstruct any advanced source-motion data later from the canonical sorted
+    particle arrays if needed.
+    """
+
+    if str(memory_objective).strip().lower() == "minimum_memory":
+        return None
+    return upward
+
+
+def _prepared_state_octree_upward_payload(
+    *,
+    octree_upward: Optional[OctreeSolidFMMComplexMultipoles],
+    memory_objective: str,
+) -> Optional[OctreeSolidFMMComplexMultipoles]:
+    """Return the octree-upward payload to retain in prepared state."""
+
+    if str(memory_objective).strip().lower() == "minimum_memory":
+        return None
+    return octree_upward
 
 
 def _build_octree_downward_artifacts(
@@ -2204,7 +2341,10 @@ class FastMultipoleMethod:
             )
             prepass_state = FMMPreparedState(
                 tree=low_tree_artifacts.tree,
-                upward=low_tree_artifacts.upward,
+                upward=_prepared_state_upward_payload(
+                    upward=low_tree_artifacts.upward,
+                    memory_objective=self.memory_objective,
+                ),
                 downward=dual_downward_artifacts.downward,
                 neighbor_list=dual_downward_artifacts.neighbor_list,
                 max_leaf_size=low_tree_artifacts.leaf_cap,
@@ -2226,7 +2366,10 @@ class FastMultipoleMethod:
                 force_scale_nodes=None,
                 execution_backend=prepass_execution_backend,
                 octree=prepass_octree,
-                octree_upward=prepass_octree_upward,
+                octree_upward=_prepared_state_octree_upward_payload(
+                    octree_upward=prepass_octree_upward,
+                    memory_objective=self.memory_objective,
+                ),
                 octree_downward=_finalize_octree_downward_artifacts(
                     octree=prepass_octree,
                     octree_upward=prepass_octree_upward,
@@ -2507,6 +2650,45 @@ class FastMultipoleMethod:
                     _GPU_MINIMUM_MEMORY_INTERACTIONS_PER_NODE
                 ),
                 max_neighbors_per_leaf=int(_GPU_MINIMUM_MEMORY_NEIGHBORS_PER_LEAF),
+            )
+        if (
+            minimum_memory
+            and backend_name == "gpu"
+            and self.tree_type == "radix"
+            and self.expansion_basis == "solidfmm"
+            and bool(self.streamed_far_pairs)
+            and not bool(grouped_interactions)
+            and bool(self.fail_fast)
+            and not self._explicit_traversal_config
+            and not self._explicit_max_pair_queue
+            and not self._explicit_pair_process_block
+            and traversal_config is not None
+            and n_particles >= 1_048_576
+        ):
+            explicit_ceiling = _minimum_memory_streamed_gpu_traversal_ceiling(
+                num_particles=n_particles
+            )
+            capped_queue = min(
+                int(traversal_config.max_pair_queue),
+                int(explicit_ceiling.max_pair_queue),
+            )
+            capped_block = min(
+                int(traversal_config.process_block),
+                int(explicit_ceiling.process_block),
+            )
+            capped_interactions = min(
+                int(traversal_config.max_interactions_per_node),
+                int(explicit_ceiling.max_interactions_per_node),
+            )
+            capped_neighbors = min(
+                int(traversal_config.max_neighbors_per_leaf),
+                int(explicit_ceiling.max_neighbors_per_leaf),
+            )
+            traversal_config = DualTreeTraversalConfig(
+                max_pair_queue=int(capped_queue),
+                process_block=int(capped_block),
+                max_interactions_per_node=int(capped_interactions),
+                max_neighbors_per_leaf=int(capped_neighbors),
             )
         if grouped_interactions:
             center_mode = "aabb"
@@ -3345,6 +3527,43 @@ class FastMultipoleMethod:
             f"need_node_interactions={bool(need_node_interactions)} "
             f"dense_buffers={bool(use_dense_interactions_for_prepare)}"
         )
+        if (
+            runtime_traversal_config is not None
+            and self.memory_objective == "minimum_memory"
+            and jax.default_backend() == "gpu"
+            and self.tree_type == "radix"
+            and self.expansion_basis == "solidfmm"
+            and bool(self.streamed_far_pairs)
+            and not bool(grouped_interactions)
+        ):
+            total_nodes = int(tree_artifacts.tree.parent.shape[0])
+            num_internal = int(jnp.asarray(tree_artifacts.tree.left_child).shape[0])
+            num_leaves = max(1, total_nodes - num_internal)
+            sanitized_traversal_config = (
+                _cap_minimum_memory_streamed_gpu_traversal_config_for_tree(
+                    traversal_config=runtime_traversal_config,
+                    total_nodes=total_nodes,
+                    num_leaves=num_leaves,
+                    num_particles=int(tree_artifacts.positions_sorted.shape[0]),
+                )
+            )
+            if sanitized_traversal_config != runtime_traversal_config:
+                far_slots_before = (
+                    total_nodes
+                    * int(runtime_traversal_config.max_interactions_per_node)
+                )
+                near_slots_before = (
+                    num_leaves
+                    * int(runtime_traversal_config.max_neighbors_per_leaf)
+                )
+                _prepare_diag(
+                    "capped explicit traversal_config for legacy streamed GPU walk "
+                    f"total_nodes={total_nodes} num_leaves={num_leaves} "
+                    f"far_slots={far_slots_before} near_slots={near_slots_before} "
+                    f"from={runtime_traversal_config} "
+                    f"to={sanitized_traversal_config}"
+                )
+                runtime_traversal_config = sanitized_traversal_config
         jit_traversal_for_prepare = bool(self._jit_traversal_default)
         dual_artifacts, cache_entry = _build_dual_tree_artifacts(
             tree_artifacts.tree,
@@ -3807,6 +4026,22 @@ class FastMultipoleMethod:
         should_precompute_scatter = self._should_precompute_nearfield_scatter_schedules(
             num_particles=int(num_particles)
         )
+        if (
+            not bool(retain_pair_vectors_resolved)
+            and not bool(should_precompute_scatter)
+        ):
+            # In large-N minimum-memory GPU runs, prepared evaluation can derive
+            # near-field pair vectors on demand from the neighbor list. Avoid
+            # materializing enormous edge-index buffers during prepare_state
+            # when we are neither retaining them nor building scatter schedules.
+            return NearfieldPrecomputeArtifacts(
+                target_leaf_ids=None,
+                source_leaf_ids=None,
+                valid_pairs=None,
+                chunk_sort_indices=None,
+                chunk_group_ids=None,
+                chunk_unique_indices=None,
+            )
         if resolved_nearfield_mode != "bucketed":
             return NearfieldPrecomputeArtifacts(
                 target_leaf_ids=None,
@@ -3927,6 +4162,8 @@ class FastMultipoleMethod:
             chunk = int(edge_chunk_size)
             chunk_count = (edge_count + chunk - 1) // chunk if edge_count > 0 else 0
             schedule_items = int(chunk_count * chunk * int(leaf_cap))
+            if schedule_items > int(_NEARFIELD_SCATTER_SCHEDULE_INT32_ITEM_LIMIT):
+                return None, None, None
             schedule_item_cap = self._resolve_nearfield_schedule_item_cap(
                 edge_count=edge_count,
                 leaf_cap=int(leaf_cap),
@@ -5006,7 +5243,10 @@ class FastMultipoleMethod:
 
         return FMMPreparedState(
             tree=tree_artifacts.tree,
-            upward=tree_artifacts.upward,
+            upward=_prepared_state_upward_payload(
+                upward=tree_artifacts.upward,
+                memory_objective=self.memory_objective,
+            ),
             downward=dual_downward_artifacts.downward,
             neighbor_list=dual_downward_artifacts.neighbor_list,
             max_leaf_size=tree_artifacts.leaf_cap,
@@ -5028,7 +5268,10 @@ class FastMultipoleMethod:
             force_scale_nodes=force_scale_nodes,
             execution_backend=execution_backend,
             octree=octree,
-            octree_upward=octree_upward,
+            octree_upward=_prepared_state_octree_upward_payload(
+                octree_upward=octree_upward,
+                memory_objective=self.memory_objective,
+            ),
             octree_downward=_finalize_octree_downward_artifacts(
                 octree=octree,
                 octree_upward=octree_upward,
