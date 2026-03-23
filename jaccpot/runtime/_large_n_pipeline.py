@@ -11,11 +11,9 @@ from jaxtyping import Array
 from yggdrax.interactions import DualTreeRetryEvent, DualTreeTraversalConfig, MACType
 
 from .dtypes import INDEX_DTYPE
-from ._large_n_farfield import evaluate_large_n_farfield
 from ._large_n_nearfield import (
     build_large_n_leaf_particle_groups,
     build_large_n_nearfield_precompute,
-    evaluate_large_n_nearfield,
     resolve_large_n_execution_config,
 )
 from ._large_n_types import LargeNPreparedState
@@ -146,7 +144,7 @@ def evaluate_large_n_state(
 ):
     """Evaluate the slim large-N state for the full particle set."""
 
-    from ._fmm_impl import NearfieldInteropData
+    from ._fmm_impl import _evaluate_tree_compiled_impl
 
     if target_indices is not None:
         raise NotImplementedError(
@@ -158,44 +156,69 @@ def evaluate_large_n_state(
         )
 
     leaf_nodes = jnp.asarray(state.neighbor_list.leaf_indices, dtype=INDEX_DTYPE)
-    nearfield_interop = NearfieldInteropData(
-        leaf_nodes=leaf_nodes,
-        node_ranges=jnp.asarray(state.tree.node_ranges, dtype=INDEX_DTYPE),
-        offsets=jnp.asarray(state.neighbor_list.offsets, dtype=INDEX_DTYPE),
-        neighbors=jnp.asarray(state.neighbor_list.neighbors, dtype=INDEX_DTYPE),
-        counts=jnp.asarray(state.neighbor_list.counts, dtype=INDEX_DTYPE),
-        particle_order_node_ranges=jnp.asarray(state.tree.node_ranges, dtype=INDEX_DTYPE),
-        particle_order_leaf_indices=leaf_nodes,
-        particle_order_to_native_leaf=jnp.arange(
-            leaf_nodes.shape[0],
-            dtype=INDEX_DTYPE,
-        ),
-        leaf_particle_indices=(
-            jnp.asarray(state.nearfield_leaf_particle_indices, dtype=INDEX_DTYPE)
-            if int(state.nearfield_leaf_particle_indices.size) > 0
-            else None
-        ),
-        leaf_particle_mask=(
-            jnp.asarray(state.nearfield_leaf_particle_mask, dtype=bool)
-            if int(state.nearfield_leaf_particle_mask.size) > 0
-            else None
-        ),
-    )
-    eval_out = fmm.evaluate_tree_compiled(
+    nearfield_mode = str(state.nearfield_mode)
+    nearfield_edge_chunk_size = int(state.nearfield_edge_chunk_size)
+    eval_out = _evaluate_tree_compiled_impl(
         state.tree,
         state.positions_sorted,
         state.masses_sorted,
         state.local_data,
         state.neighbor_list,
-        nearfield_interop=nearfield_interop,
-        precomputed_target_leaf_ids=state.nearfield_target_leaf_ids,
-        precomputed_source_leaf_ids=state.nearfield_source_leaf_ids,
-        precomputed_valid_pairs=state.nearfield_valid_pairs,
-        precomputed_chunk_sort_indices=state.nearfield_chunk_sort_indices,
-        precomputed_chunk_group_ids=state.nearfield_chunk_group_ids,
-        precomputed_chunk_unique_indices=state.nearfield_chunk_unique_indices,
+        leaf_nodes,
+        jnp.asarray(state.tree.node_ranges, dtype=INDEX_DTYPE),
+        jnp.asarray(state.neighbor_list.offsets, dtype=INDEX_DTYPE),
+        jnp.asarray(state.neighbor_list.neighbors, dtype=INDEX_DTYPE),
+        jnp.asarray(state.neighbor_list.counts, dtype=INDEX_DTYPE),
+        (
+            jnp.asarray(state.nearfield_leaf_particle_indices, dtype=INDEX_DTYPE)
+            if int(state.nearfield_leaf_particle_indices.size) > 0
+            else jnp.zeros((0, 0), dtype=INDEX_DTYPE)
+        ),
+        (
+            jnp.asarray(state.nearfield_leaf_particle_mask, dtype=bool)
+            if int(state.nearfield_leaf_particle_mask.size) > 0
+            else jnp.zeros((0, 0), dtype=bool)
+        ),
+        leaf_nodes,
+        jnp.asarray(state.tree.node_ranges, dtype=INDEX_DTYPE),
+        (
+            jnp.asarray(state.nearfield_target_leaf_ids, dtype=INDEX_DTYPE)
+            if state.nearfield_target_leaf_ids is not None
+            else jnp.zeros((0,), dtype=INDEX_DTYPE)
+        ),
+        (
+            jnp.asarray(state.nearfield_source_leaf_ids, dtype=INDEX_DTYPE)
+            if state.nearfield_source_leaf_ids is not None
+            else jnp.zeros((0,), dtype=INDEX_DTYPE)
+        ),
+        (
+            jnp.asarray(state.nearfield_valid_pairs, dtype=bool)
+            if state.nearfield_valid_pairs is not None
+            else jnp.zeros((0,), dtype=bool)
+        ),
+        (
+            jnp.asarray(state.nearfield_chunk_sort_indices, dtype=INDEX_DTYPE)
+            if state.nearfield_chunk_sort_indices is not None
+            else jnp.zeros((0, 0), dtype=INDEX_DTYPE)
+        ),
+        (
+            jnp.asarray(state.nearfield_chunk_group_ids, dtype=INDEX_DTYPE)
+            if state.nearfield_chunk_group_ids is not None
+            else jnp.zeros((0, 0), dtype=INDEX_DTYPE)
+        ),
+        (
+            jnp.asarray(state.nearfield_chunk_unique_indices, dtype=INDEX_DTYPE)
+            if state.nearfield_chunk_unique_indices is not None
+            else jnp.zeros((0, 0), dtype=INDEX_DTYPE)
+        ),
+        G=float(getattr(fmm, "G")),
+        softening=float(getattr(fmm, "softening")),
+        order=int(state.local_data.order),
+        expansion_basis="solidfmm",
         max_leaf_size=int(state.max_leaf_size),
         return_potential=bool(return_potential),
+        nearfield_mode=nearfield_mode,
+        nearfield_edge_chunk_size=nearfield_edge_chunk_size,
     )
 
     if jnp.issubdtype(state.input_dtype, jnp.floating):
