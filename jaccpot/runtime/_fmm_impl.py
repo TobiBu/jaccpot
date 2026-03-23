@@ -126,6 +126,12 @@ from ._interaction_cache import (
     _interaction_cache_key,
     _InteractionCacheEntry,
 )
+from ._large_n_pipeline import (
+    can_use_large_n_prepare_path,
+    evaluate_large_n_state,
+    prepare_large_n_state,
+)
+from ._large_n_types import LargeNPreparedState
 from ._nearfield_cache import (
     NearfieldPrecomputeArtifacts,
     nearfield_cache_matches,
@@ -157,6 +163,7 @@ FarFieldMode = Literal["auto", "pair_grouped", "class_major"]
 NearFieldMode = Literal["auto", "baseline", "bucketed"]
 JerkMode = Literal["fast_approx", "accurate"]
 PackedAccelerationDerivatives = tuple[Array, ...]
+PreparedStateLike = Union["FMMPreparedState", LargeNPreparedState]
 
 
 @dataclass(frozen=True)
@@ -1751,6 +1758,7 @@ class FastMultipoleMethod:
         mixed_order_farfield: bool = False,
         mixed_order_min_order: Optional[int] = None,
         nearfield_mode: NearFieldMode = "auto",
+        runtime_path: Literal["auto", "legacy", "large_n"] = "auto",
         execution_backend: FMMExecutionBackend = "auto",
         nearfield_edge_chunk_size: int = 256,
         precompute_nearfield_scatter_schedules: bool = True,
@@ -1847,12 +1855,16 @@ class FastMultipoleMethod:
         nearfield_mode_norm = str(nearfield_mode).strip().lower()
         if nearfield_mode_norm not in ("auto", "baseline", "bucketed"):
             raise ValueError("nearfield_mode must be 'auto', 'baseline', or 'bucketed'")
+        runtime_path_norm = str(runtime_path).strip().lower()
+        if runtime_path_norm not in ("auto", "legacy", "large_n"):
+            raise ValueError("runtime_path must be 'auto', 'legacy', or 'large_n'")
         execution_backend_norm = str(execution_backend).strip().lower()
         if execution_backend_norm not in ("auto", "radix", "octree"):
             raise ValueError("execution_backend must be 'auto', 'radix', or 'octree'")
         if int(nearfield_edge_chunk_size) <= 0:
             raise ValueError("nearfield_edge_chunk_size must be positive")
         self.nearfield_mode = nearfield_mode_norm
+        self.runtime_path = runtime_path_norm
         self.execution_backend = execution_backend_norm
         self.nearfield_edge_chunk_size = int(nearfield_edge_chunk_size)
         self.precompute_nearfield_scatter_schedules = bool(
@@ -1973,7 +1985,7 @@ class FastMultipoleMethod:
         self._locals_template: Optional[LocalExpansionData] = None
         self._interaction_cache: Optional[_InteractionCacheEntry] = None
         self._prepared_state_cache_key: Optional[tuple[Any, ...]] = None
-        self._prepared_state_cache_value: Optional[FMMPreparedState] = None
+        self._prepared_state_cache_value: Optional[PreparedStateLike] = None
         self._prepared_state_cache_positions: Optional[Array] = None
         self._prepared_state_cache_masses: Optional[Array] = None
         self._topology_reuse_entry: Optional[_TopologyReuseEntry] = None
@@ -2401,7 +2413,7 @@ class FastMultipoleMethod:
         key: tuple[Any, ...],
         positions: Array,
         masses: Array,
-    ) -> Optional[FMMPreparedState]:
+    ) -> Optional[PreparedStateLike]:
         """Return cached prepared state when key and inputs exactly match."""
         cached_key = self._prepared_state_cache_key
         cached_value = self._prepared_state_cache_value
@@ -2432,7 +2444,7 @@ class FastMultipoleMethod:
         key: tuple[Any, ...],
         positions: Array,
         masses: Array,
-        state: FMMPreparedState,
+        state: PreparedStateLike,
     ) -> None:
         """Store prepared-state payload and the exact input arrays used."""
         if _contains_tracer((positions, masses, state)):
@@ -4973,7 +4985,7 @@ class FastMultipoleMethod:
         refine_local: Optional[bool] = None,
         max_refine_levels: Optional[int] = None,
         aspect_threshold: Optional[float] = None,
-    ) -> FMMPreparedState:
+    ) -> PreparedStateLike:
         """Precompute tree and interaction data for repeated evaluations.
 
         When ``tree_build_mode`` is ``"fixed_depth"`` the optional
@@ -5031,6 +5043,35 @@ class FastMultipoleMethod:
 
         theta_val = float(self.theta if theta is None else theta)
         mac_type_val = self._base_mac_type()
+
+        if can_use_large_n_prepare_path(
+            self,
+            positions_arr=positions_arr,
+            masses_arr=masses_arr,
+            allow_stateful_cache=allow_stateful_cache,
+        ):
+            return prepare_large_n_state(
+                self,
+                positions_arr=positions_arr,
+                masses_arr=masses_arr,
+                input_dtype=input_dtype,
+                bounds=bounds,
+                leaf_size=int(leaf_size),
+                max_order=int(max_order),
+                theta_val=theta_val,
+                mac_type_val=mac_type_val,
+                refine_local_val=refine_local_val,
+                max_refine_levels_val=max_refine_levels_val,
+                aspect_threshold_val=aspect_threshold_val,
+                jit_tree_override=jit_tree,
+                allow_stateful_cache=allow_stateful_cache,
+                runtime_traversal_config=runtime_traversal_config,
+                runtime_m2l_chunk_size=runtime_m2l_chunk_size,
+                runtime_l2l_chunk_size=runtime_l2l_chunk_size,
+                upward_center_mode=upward_center_mode,
+                record_retry=record_retry,
+                collected_retries=collected_retries,
+            )
 
         tree_artifacts = self._prepare_state_tree_and_upward(
             positions_arr=positions_arr,
@@ -5285,7 +5326,7 @@ class FastMultipoleMethod:
     @jaxtyped(typechecker=beartype)
     def evaluate_prepared_state(
         self: "FastMultipoleMethod",
-        state: FMMPreparedState,
+        state: PreparedStateLike,
         *,
         target_indices: Optional[Array] = None,
         return_potential: bool = False,
@@ -5298,6 +5339,15 @@ class FastMultipoleMethod:
         Tuple[Array, Array, PackedAccelerationDerivatives],
     ]:
         """Evaluate accelerations/potentials for all particles or targets."""
+
+        if isinstance(state, LargeNPreparedState):
+            return evaluate_large_n_state(
+                self,
+                state,
+                target_indices=target_indices,
+                return_potential=return_potential,
+                max_acc_derivative_order=max_acc_derivative_order,
+            )
 
         resolved_target_indices = self._resolve_target_indices(
             target_indices=target_indices,

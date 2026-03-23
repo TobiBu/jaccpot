@@ -406,6 +406,7 @@ class FastMultipoleMethod:
             expansion_basis=runtime_basis,
             basis_impl=basis_resolution.basis_impl,
             m2l_impl=resolved_m2l_impl,
+            runtime_path=str(legacy_kwargs.pop("runtime_path", "auto")),
             adaptive_order=adaptive_order,
             p_gears=p_gears,
             use_pallas=use_pallas,

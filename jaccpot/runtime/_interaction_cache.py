@@ -210,7 +210,6 @@ def _dual_tree_build_raw(
     build_out = None
     for attempt in range(_CAPACITY_RETRY_MAX_ATTEMPTS + 1):
         try:
-            del jit_traversal
             build_out = _runtime_fmm.build_interactions_and_neighbors(
                 tree,
                 geometry,
