@@ -23,6 +23,7 @@ class LargeNExecutionConfig:
 
     nearfield_mode: str
     nearfield_edge_chunk_size: int
+    retain_leaf_groups: bool
     retain_pair_vectors: bool
     precompute_scatter: bool
 

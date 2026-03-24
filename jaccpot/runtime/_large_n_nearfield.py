@@ -83,6 +83,7 @@ def resolve_large_n_execution_config(
     return LargeNExecutionConfig(
         nearfield_mode=nearfield_mode,
         nearfield_edge_chunk_size=edge_chunk_size,
+        retain_leaf_groups=(nearfield_mode == "bucketed"),
         retain_pair_vectors=retain_pair_vectors,
         precompute_scatter=precompute_scatter,
     )

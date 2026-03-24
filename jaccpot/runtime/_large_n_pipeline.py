@@ -92,7 +92,7 @@ def prepare_large_n_state(
         fmm,
         num_particles=int(positions_arr.shape[0]),
     )
-    if bool(execution_config.precompute_scatter):
+    if bool(execution_config.retain_leaf_groups):
         leaf_particle_indices, leaf_particle_mask = build_large_n_leaf_particle_groups(
             tree_artifacts.tree,
             dual_downward_artifacts.neighbor_list,
