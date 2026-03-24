@@ -180,7 +180,6 @@ def main() -> None:
     del result
     del eval_compiled
     del state
-    del prepared_compiled
     gc.collect()
     snapshots.append(
         _gpu_memory_snapshot("after_cleanup", gpu_index=int(args.gpu_index))

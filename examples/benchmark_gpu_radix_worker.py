@@ -1626,6 +1626,7 @@ def _run_sweep_case(
         cache_path = pathlib.Path(str(autotune_cache_path))
         if cache_path.exists():
             fmm.load_m2l_autotune_cache(str(cache_path), merge=True)
+    resolved_path_info = bench_utils.resolved_large_n_memory_path_report(fmm)
     benchmark_scope = str(cfg.get("benchmark_scope", "steady_eval")).strip().lower()
     if benchmark_scope not in ("full", "steady_eval"):
         benchmark_scope = "steady_eval"
@@ -1688,6 +1689,7 @@ def _run_sweep_case(
         "benchmark_scope": benchmark_scope,
         "error": "",
     }
+    row.update(resolved_path_info)
     row.update(worker_tune_info)
     return row
 

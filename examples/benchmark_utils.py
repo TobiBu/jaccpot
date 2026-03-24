@@ -120,9 +120,52 @@ def apply_runtime_path(
     return updated
 
 
+def resolved_large_n_memory_path_report(fmm: Any) -> dict[str, Any]:
+    """Return the resolved runtime flags relevant to the lean large-N path."""
+
+    impl = getattr(fmm, "_impl", None)
+    if impl is None:
+        return {
+            "resolved_runtime_path": None,
+            "resolved_memory_objective": None,
+            "resolved_streamed_far_pairs": None,
+            "resolved_grouped_interactions": None,
+            "resolved_retain_traversal_result": None,
+            "resolved_retain_interactions": None,
+            "resolved_large_n_memory_path_active": None,
+        }
+
+    memory_objective = str(getattr(impl, "memory_objective", "")).strip().lower()
+    runtime_path = str(getattr(fmm, "runtime_path", getattr(impl, "runtime_path", "auto"))).strip().lower()
+    streamed_far_pairs = bool(getattr(impl, "streamed_far_pairs", False))
+    grouped_interactions = getattr(impl, "grouped_interactions", None)
+    grouped_interactions_bool = (
+        None if grouped_interactions is None else bool(grouped_interactions)
+    )
+    retain_traversal_result = bool(getattr(impl, "retain_traversal_result", True))
+    retain_interactions = bool(getattr(impl, "retain_interactions", True))
+    active = (
+        memory_objective == "minimum_memory"
+        and streamed_far_pairs
+        and not retain_traversal_result
+        and not retain_interactions
+        and not bool(grouped_interactions_bool)
+    )
+    return {
+        "resolved_runtime_path": runtime_path,
+        "resolved_memory_objective": memory_objective,
+        "resolved_streamed_far_pairs": streamed_far_pairs,
+        "resolved_grouped_interactions": grouped_interactions_bool,
+        "resolved_retain_traversal_result": retain_traversal_result,
+        "resolved_retain_interactions": retain_interactions,
+        "resolved_large_n_memory_path_active": bool(active),
+    }
+
+
 __all__ = [
     "TimingResult",
     "apply_runtime_path",
     "generate_random_distribution",
+    "resolved_large_n_memory_path_report",
     "time_callable",
 ]
