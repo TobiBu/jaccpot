@@ -47,6 +47,7 @@ from jaccpot.runtime._interaction_cache import _build_dual_tree_artifacts_split
 from jaccpot.runtime._interaction_cache import _can_split_dual_tree_build
 from jaccpot.runtime._interaction_cache import _dual_tree_build_raw
 from jaccpot.runtime._interaction_cache import _dual_tree_unpack_build_output
+from yggdrax.interactions import build_compact_far_pairs, build_leaf_neighbor_lists
 
 
 @dataclass(frozen=True)
@@ -398,6 +399,78 @@ def _measure_prepare_stage_split(
             use_dense_interactions=use_dense_interactions_for_prepare,
         )
 
+    def dual_tree_split_far_only_fn(tree_artifacts):
+        pair_policy, policy_state, use_paper_fixed_policy = _raw_dual_tree_policy(
+            tree_artifacts
+        )
+        need_traversal_result = bool(impl.retain_traversal_result) or bool(
+            use_paper_fixed_policy
+        )
+        use_compact_streamed_pairs = (
+            bool(impl.streamed_far_pairs)
+            and not bool(impl.adaptive_order)
+            and not bool(ctx["grouped_interactions"])
+            and not bool(impl.mixed_order_farfield)
+            and not bool(impl.retain_interactions)
+            and not bool(need_traversal_result)
+        )
+        need_compact_far_pairs = (
+            bool(impl.adaptive_order) and not bool(need_traversal_result)
+        ) or bool(use_compact_streamed_pairs)
+        if not bool(need_compact_far_pairs):
+            return None
+        if not _can_split_dual_tree_build(
+            grouped_interactions=ctx["grouped_interactions"],
+            need_traversal_result=need_traversal_result,
+            pair_policy=pair_policy,
+            policy_state=policy_state,
+        ):
+            raise RuntimeError("split dual-tree far-only build is not eligible for this config")
+        return build_compact_far_pairs(
+            tree_artifacts.tree,
+            tree_artifacts.upward.geometry,
+            theta=ctx["theta_val"],
+            mac_type=ctx["mac_type_val"],
+            dehnen_radius_scale=ctx["dehnen_radius_scale"],
+            max_pair_queue=impl.max_pair_queue,
+            process_block=impl.pair_process_block,
+            traversal_config=ctx["runtime_traversal_config"],
+            retry_logger=lambda _event: None,
+        )
+
+    def dual_tree_split_near_only_fn(tree_artifacts):
+        pair_policy, policy_state, use_paper_fixed_policy = _raw_dual_tree_policy(
+            tree_artifacts
+        )
+        need_traversal_result = bool(impl.retain_traversal_result) or bool(
+            use_paper_fixed_policy
+        )
+        if not _can_split_dual_tree_build(
+            grouped_interactions=ctx["grouped_interactions"],
+            need_traversal_result=need_traversal_result,
+            pair_policy=pair_policy,
+            policy_state=policy_state,
+        ):
+            raise RuntimeError("split dual-tree near-only build is not eligible for this config")
+        traversal_cfg = ctx["runtime_traversal_config"]
+        max_neighbors_per_leaf = (
+            int(traversal_cfg.max_neighbors_per_leaf)
+            if traversal_cfg is not None
+            else 2048
+        )
+        return build_leaf_neighbor_lists(
+            tree_artifacts.tree,
+            tree_artifacts.upward.geometry,
+            theta=ctx["theta_val"],
+            max_neighbors_per_leaf=max_neighbors_per_leaf,
+            mac_type=ctx["mac_type_val"],
+            dehnen_radius_scale=ctx["dehnen_radius_scale"],
+            max_pair_queue=impl.max_pair_queue,
+            process_block=impl.pair_process_block,
+            traversal_config=traversal_cfg,
+            retry_logger=lambda _event: None,
+        )
+
     def dual_tree_unpack_fn(build_raw_out):
         build_out, _current_traversal_config, _current_max_pair_queue, _current_pair_process_block = build_raw_out
         pair_policy, policy_state, use_paper_fixed_policy = (None, None, False)
@@ -473,6 +546,58 @@ def _measure_prepare_stage_split(
         poll_interval_s=float(poll_interval_s),
     )
     peak_row["retained_bytes"] = int(_tree_nbytes(split_build_warm)) if split_build_warm is not None else None
+    phase_rows.append(peak_row)
+
+    split_far_only_cold, peak_row, _, _, _ = _peak_gpu_memory_trace(
+        dual_tree_split_far_only_fn,
+        tree_artifacts_cold,
+        label="dual_tree_split_far_only_cold",
+        gpu_index=int(gpu_index),
+        poll_interval_s=float(poll_interval_s),
+    )
+    peak_row["retained_bytes"] = int(_tree_nbytes(split_far_only_cold)) if split_far_only_cold is not None else None
+    phase_rows.append(peak_row)
+
+    for _ in range(max(0, int(warmup))):
+        warm_split_far_only = dual_tree_split_far_only_fn(tree_artifacts_warm)
+        _block_until_ready(warm_split_far_only)
+        del warm_split_far_only
+        _clear_runtime_memory()
+
+    split_far_only_warm, peak_row, _, _, _ = _peak_gpu_memory_trace(
+        dual_tree_split_far_only_fn,
+        tree_artifacts_warm,
+        label="dual_tree_split_far_only_warm",
+        gpu_index=int(gpu_index),
+        poll_interval_s=float(poll_interval_s),
+    )
+    peak_row["retained_bytes"] = int(_tree_nbytes(split_far_only_warm)) if split_far_only_warm is not None else None
+    phase_rows.append(peak_row)
+
+    split_near_only_cold, peak_row, _, _, _ = _peak_gpu_memory_trace(
+        dual_tree_split_near_only_fn,
+        tree_artifacts_cold,
+        label="dual_tree_split_near_only_cold",
+        gpu_index=int(gpu_index),
+        poll_interval_s=float(poll_interval_s),
+    )
+    peak_row["retained_bytes"] = int(_tree_nbytes(split_near_only_cold)) if split_near_only_cold is not None else None
+    phase_rows.append(peak_row)
+
+    for _ in range(max(0, int(warmup))):
+        warm_split_near_only = dual_tree_split_near_only_fn(tree_artifacts_warm)
+        _block_until_ready(warm_split_near_only)
+        del warm_split_near_only
+        _clear_runtime_memory()
+
+    split_near_only_warm, peak_row, _, _, _ = _peak_gpu_memory_trace(
+        dual_tree_split_near_only_fn,
+        tree_artifacts_warm,
+        label="dual_tree_split_near_only_warm",
+        gpu_index=int(gpu_index),
+        poll_interval_s=float(poll_interval_s),
+    )
+    peak_row["retained_bytes"] = int(_tree_nbytes(split_near_only_warm)) if split_near_only_warm is not None else None
     phase_rows.append(peak_row)
 
     unpack_cold, peak_row, _, _, _ = _peak_gpu_memory_trace(
@@ -816,6 +941,8 @@ def _measure_prepare_stage_split(
     summary = {
         "dual_tree_build_raw_compile_overhead_mb": _peak_delta(phase_rows, "dual_tree_build_raw_cold", "dual_tree_build_raw_warm"),
         "dual_tree_split_build_compile_overhead_mb": _peak_delta(phase_rows, "dual_tree_split_build_cold", "dual_tree_split_build_warm"),
+        "dual_tree_split_far_only_compile_overhead_mb": _peak_delta(phase_rows, "dual_tree_split_far_only_cold", "dual_tree_split_far_only_warm"),
+        "dual_tree_split_near_only_compile_overhead_mb": _peak_delta(phase_rows, "dual_tree_split_near_only_cold", "dual_tree_split_near_only_warm"),
         "dual_tree_unpack_compile_overhead_mb": _peak_delta(phase_rows, "dual_tree_unpack_cold", "dual_tree_unpack_warm"),
         "raw_dual_compile_overhead_mb": _peak_delta(phase_rows, "raw_dual_tree_cold", "raw_dual_tree_warm"),
         "downward_compile_overhead_mb": _peak_delta(phase_rows, "downward_only_cold", "downward_only_warm"),
@@ -831,6 +958,10 @@ def _measure_prepare_stage_split(
     del build_raw_warm
     del split_build_cold
     del split_build_warm
+    del split_far_only_cold
+    del split_far_only_warm
+    del split_near_only_cold
+    del split_near_only_warm
     del unpack_cold
     del unpack_warm
     del raw_dual_cold

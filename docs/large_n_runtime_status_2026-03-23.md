@@ -169,6 +169,96 @@ Conclusion:
 - the alarming stage timings were largely first-call compile cost
 - warm runtime work should stay focused on near-field and memory
 
+## Updated H200 Memory Findings
+
+The newer H200 memory work changed the picture substantially. The main result is:
+
+- the lean `large_n_gpu` / `minimum_memory` path now reaches `N=4_194_304`
+  in the single-`N` notebook on the H200 after the Yggdrax split-traversal work
+- however, prepare is still the dominant memory bottleneck
+
+Representative `N=4_194_304` numbers from
+[`benchmarks/single_n_memory/single_n_4194304_summary.csv`](/export/home/tbuck/jaccpot/benchmarks/single_n_memory/single_n_4194304_summary.csv):
+
+- prepared state size: about `215.84 MB`
+- prepare cold peak delta: about `12.83 GB`
+- prepare warm peak delta: about `8.65 GB`
+- evaluate warm peak delta: about `1.37 GB`
+
+Conclusion:
+
+- retained prepared-state size is not the limiting factor at `4M`
+- evaluation is not the limiting factor either
+- the practical ceiling is still prepare-side transient memory
+
+### What The Yggdrax Split Work Achieved
+
+The Yggdrax-side split traversal work was decisive.
+
+At `N=4_194_304`, the localized stage split in
+[`benchmarks/single_n_memory/single_n_4194304_prepare_stage_memory_split.csv`](/export/home/tbuck/jaccpot/benchmarks/single_n_memory/single_n_4194304_prepare_stage_memory_split.csv)
+shows:
+
+- old monolithic raw traversal build warm peak: about `41.08 GB`
+- old monolithic raw traversal build cold peak: about `69.76 GB`
+- new split traversal build warm peak: about `8.41 GB`
+- new split traversal build cold peak: about `12.51 GB`
+
+Conclusion:
+
+- without the Yggdrax split-builder and compact-far-pair work, `4M` would still
+  be completely impractical
+- the split path is a real success, not just a cosmetic cleanup
+- but the split traversal build itself is now the next dominant memory target
+
+### Where The Remaining Memory Goes
+
+The retained-state breakdown at `N=4_194_304` from
+[`benchmarks/single_n_memory/single_n_4194304_prepared_subsystems.csv`](/export/home/tbuck/jaccpot/benchmarks/single_n_memory/single_n_4194304_prepared_subsystems.csv)
+and
+[`benchmarks/single_n_memory/single_n_4194304_prepared_paths.csv`](/export/home/tbuck/jaccpot/benchmarks/single_n_memory/single_n_4194304_prepared_paths.csv)
+shows:
+
+- `tree_geometry`: about `146.19 MB`
+- `nearfield`: about `56.40 MB`
+- `other`: about `13.25 MB`
+
+Largest retained arrays:
+
+- `prepared.tree.positions_sorted`: `48 MB`
+- `prepared.neighbor_list.neighbors`: about `35.78 MB`
+- `prepared.tree.topology.morton_codes`: `32 MB`
+- `prepared.tree.topology.particle_indices`: `32 MB`
+
+Conclusion:
+
+- Jaccpot retained state is relatively slim compared with the multi-GB prepare
+  transient
+- the current next win is not prepared-state slimming first
+- the current next win is lowering the warm transient footprint of the split
+  traversal build
+
+### Updated Bottleneck Hypothesis
+
+The old prepare-cold story was:
+
+- raw dual-tree traversal compile spikes were the main blocker
+
+The updated `4M` story is:
+
+- the catastrophic compile spike was reduced enough to fit
+- the remaining blocker is now the warm split traversal build itself
+- tree/upward, downward, and retained state are all secondary at this point
+
+That means the highest-value next question is now:
+
+- inside the split traversal build, how much of the `~8.4 GB` warm footprint
+  comes from the far-only compact-pair builder and how much comes from the
+  near-only neighbor-list builder?
+
+The profiler has been extended to answer exactly that, but the new `far_only` /
+`near_only` split CSV rows were not yet collected at the time of writing.
+
 ## Current Hypothesis For The Next Win
 
 The strongest current hypothesis is:
@@ -234,14 +324,48 @@ Most likely direction:
   - no neighbor-pair collection
   - no generic override plumbing in the hot path
 
-### 4. After near-field wins, return to memory scaling
+### 4. Split the `4M` warm traversal transient into far-only vs near-only
 
-Once `256k` is comfortably faster and still lean:
+Run the updated prepare-stage split notebook cell and record:
 
-- validate at `512k`
-- retry the memory fit path toward `1e6`
+- `dual_tree_split_far_only_cold`
+- `dual_tree_split_far_only_warm`
+- `dual_tree_split_near_only_cold`
+- `dual_tree_split_near_only_warm`
 
-### 5. If wrapper-side split traversal is not enough, patch Yggdrax itself
+This is now the highest-priority measurement because it will determine whether
+the next Yggdrax optimization should focus on:
+
+- compact far-pair construction
+- near-only neighbor-list construction
+- or any shared queue/buffer staging that still survives both split paths
+
+### 5. After that attribution, continue memory scaling work in Yggdrax
+
+If the near-only path dominates:
+
+- reduce warm transient neighbor buffer footprint first
+- inspect queue usage and near-list staging layout in the generic near builder
+
+If the far-only path dominates:
+
+- continue reducing queue and staging overlap in the compact far-pair builder
+
+If both are large:
+
+- reduce live queue/buffer overlap and shared staging inside the split traversal
+  path itself
+
+### 6. Only after the Yggdrax warm transient is smaller, revisit prepared-state slimming
+
+Once the split traversal warm peak is lower:
+
+- validate again at `4M`
+- retry the fit path beyond `4M`
+- then revisit retained-state slimming and evaluation leaf staging if the next
+  ceiling is no longer traversal-dominated
+
+### 7. If wrapper-side split traversal is not enough, patch Yggdrax itself
 
 Recent prepare-memory profiling narrowed the remaining large cold spike to the
 raw dual-tree traversal build. Splitting the Jaccpot-side far/near build path
@@ -256,8 +380,11 @@ That means one explicit follow-up track should now be recorded:
 - then re-measure prepare cold/warm peaks against the current Jaccpot-side split
   helper
 
-This is now a first-class candidate for breaking the remaining large-`N`
-prepare-memory ceiling.
+This work is no longer hypothetical; it already happened and it moved the fit
+ceiling materially. The remaining Yggdrax work should now be understood as:
+
+- phase 1: remove catastrophic compile/raw-build spikes
+- phase 2: reduce the warm split-build transient at multi-million-particle scale
 
 ## Concrete Resume Checklist
 
