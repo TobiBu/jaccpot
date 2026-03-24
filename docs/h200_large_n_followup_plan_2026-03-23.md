@@ -153,12 +153,13 @@ Main risk:
 1. Verify the new streamed P2M change on the other GPU server.
 2. Record that the H200 now reaches `4_194_304` particles in the single-`N`
    notebook with the lean minimum-memory path.
-3. Re-run the updated prepare-stage split and capture the new:
-   - `dual_tree_split_far_only_*`
-   - `dual_tree_split_near_only_*`
-   rows
-4. If `near_only` dominates, optimize the Yggdrax near-neighbor builder first.
-5. If `far_only` dominates, continue on the compact far-pair builder first.
+3. Use the latest prepare-stage split as the restart point:
+   - `dual_tree_split_far_only_warm`: about `290 MB`
+   - `dual_tree_split_near_only_warm`: about `10.39 GB`
+   - `dual_tree_split_build_warm`: about `10.46 GB`
+4. Optimize the Yggdrax near-neighbor builder first.
+5. Only revisit the far-only compact builder if later runs show a new far-side
+   regression.
 6. Only after lowering the warm split-build transient should prepared-state
    slimming or evaluation leaf staging become the primary track.
 
@@ -166,8 +167,8 @@ Main risk:
 
 The current `N=4_194_304` H200 single-`N` run now shows:
 
-- prepare cold peak delta: about `12.83 GB`
-- prepare warm peak delta: about `8.65 GB`
+- prepare cold peak delta: about `10.78 GB`
+- prepare warm peak delta: about `10.70 GB`
 - evaluate warm peak delta: about `1.37 GB`
 - prepared state size: about `215.84 MB`
 
@@ -176,14 +177,15 @@ Interpretation:
 - the H200 fit ceiling moved materially because the old catastrophic traversal
   build path was reduced enough to fit
 - the next ceiling is still prepare-side transient memory, not retained state
-- the dominant remaining target is the warm split traversal build in Yggdrax,
-  not Jaccpot prepared-state storage
+- the dominant remaining target is the warm near-only split traversal build in
+  Yggdrax, not Jaccpot prepared-state storage
 
 Most important concrete lesson:
 
 - at multi-million-particle scale, the problem is no longer primarily
   compile-time overhead
-- the problem is the warm transient footprint of the split dual-tree build
+- the problem is the warm transient footprint of the near-only split dual-tree
+  build
 
 ## Fast Resume Checklist
 
@@ -199,3 +201,5 @@ When returning to this work:
    - evaluate peak memory
    - runtime at `524288`, `1048576`, `2097152`, and `4194304`
 4. If upward memory is no longer dominant, move to prepared-state slimming.
+5. Before doing that, check the latest split table and start from the
+   near-only Yggdrax neighbor-list builder, not the far-only path.

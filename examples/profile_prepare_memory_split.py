@@ -41,6 +41,9 @@ from jaccpot.runtime._adaptive_policy import (
     adaptive_pair_policy,
     adaptive_policy_tolerance,
 )
+from jaccpot.runtime._fmm_impl import (
+    _cap_minimum_memory_streamed_gpu_traversal_config_for_tree,
+)
 from jaccpot.runtime._fmm_impl import _build_nearfield_interop_data
 from jaccpot.runtime._interaction_cache import _build_dual_tree_artifacts
 from jaccpot.runtime._interaction_cache import _build_dual_tree_artifacts_split
@@ -316,6 +319,20 @@ def _measure_prepare_stage_split(
             pair_policy = adaptive_pair_policy
         return pair_policy, policy_state, use_paper_fixed_policy
 
+    def _effective_runtime_traversal_config(tree_artifacts):
+        traversal_config = ctx["runtime_traversal_config"]
+        if traversal_config is None:
+            return None
+        total_nodes = int(tree_artifacts.tree.parent.shape[0])
+        num_internal = int(jnp.asarray(tree_artifacts.tree.left_child).shape[0])
+        num_leaves = max(1, total_nodes - num_internal)
+        return _cap_minimum_memory_streamed_gpu_traversal_config_for_tree(
+            traversal_config=traversal_config,
+            total_nodes=total_nodes,
+            num_leaves=num_leaves,
+            num_particles=int(tree_artifacts.positions_sorted.shape[0]),
+        )
+
     def dual_tree_build_raw_fn(tree_artifacts):
         pair_policy, policy_state, use_paper_fixed_policy = _raw_dual_tree_policy(
             tree_artifacts
@@ -335,6 +352,7 @@ def _measure_prepare_stage_split(
             bool(impl.adaptive_order) and not bool(need_traversal_result)
         ) or bool(use_compact_streamed_pairs)
         need_node_interactions = not bool(use_compact_streamed_pairs)
+        traversal_config = _effective_runtime_traversal_config(tree_artifacts)
         return _dual_tree_build_raw(
             tree=tree_artifacts.tree,
             geometry=tree_artifacts.upward.geometry,
@@ -343,7 +361,7 @@ def _measure_prepare_stage_split(
             dehnen_radius_scale=ctx["dehnen_radius_scale"],
             max_pair_queue=impl.max_pair_queue,
             pair_process_block=impl.pair_process_block,
-            traversal_config=ctx["runtime_traversal_config"],
+            traversal_config=traversal_config,
             retry_logger=lambda _event: None,
             fail_fast=impl.fail_fast,
             need_traversal_result=need_traversal_result,
@@ -384,6 +402,7 @@ def _measure_prepare_stage_split(
             policy_state=policy_state,
         ):
             raise RuntimeError("split dual-tree build is not eligible for this config")
+        traversal_config = _effective_runtime_traversal_config(tree_artifacts)
         return _build_dual_tree_artifacts_split(
             tree=tree_artifacts.tree,
             geometry=tree_artifacts.upward.geometry,
@@ -392,7 +411,7 @@ def _measure_prepare_stage_split(
             dehnen_radius_scale=ctx["dehnen_radius_scale"],
             max_pair_queue=impl.max_pair_queue,
             pair_process_block=impl.pair_process_block,
-            traversal_config=ctx["runtime_traversal_config"],
+            traversal_config=traversal_config,
             retry_logger=lambda _event: None,
             need_node_interactions=need_node_interactions,
             need_compact_far_pairs=need_compact_far_pairs,
@@ -426,6 +445,7 @@ def _measure_prepare_stage_split(
             policy_state=policy_state,
         ):
             raise RuntimeError("split dual-tree far-only build is not eligible for this config")
+        traversal_config = _effective_runtime_traversal_config(tree_artifacts)
         return build_compact_far_pairs(
             tree_artifacts.tree,
             tree_artifacts.upward.geometry,
@@ -434,7 +454,7 @@ def _measure_prepare_stage_split(
             dehnen_radius_scale=ctx["dehnen_radius_scale"],
             max_pair_queue=impl.max_pair_queue,
             process_block=impl.pair_process_block,
-            traversal_config=ctx["runtime_traversal_config"],
+            traversal_config=traversal_config,
             retry_logger=lambda _event: None,
         )
 
@@ -452,7 +472,7 @@ def _measure_prepare_stage_split(
             policy_state=policy_state,
         ):
             raise RuntimeError("split dual-tree near-only build is not eligible for this config")
-        traversal_cfg = ctx["runtime_traversal_config"]
+        traversal_cfg = _effective_runtime_traversal_config(tree_artifacts)
         max_neighbors_per_leaf = (
             int(traversal_cfg.max_neighbors_per_leaf)
             if traversal_cfg is not None

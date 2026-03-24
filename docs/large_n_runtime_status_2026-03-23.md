@@ -250,14 +250,32 @@ The updated `4M` story is:
 - the remaining blocker is now the warm split traversal build itself
 - tree/upward, downward, and retained state are all secondary at this point
 
-That means the highest-value next question is now:
+The newer split-profiler run now answers the far-vs-near question directly.
+From
+[`benchmarks/single_n_memory/single_n_4194304_prepare_stage_memory_split.csv`](/export/home/tbuck/jaccpot/benchmarks/single_n_memory/single_n_4194304_prepare_stage_memory_split.csv):
 
-- inside the split traversal build, how much of the `~8.4 GB` warm footprint
-  comes from the far-only compact-pair builder and how much comes from the
-  near-only neighbor-list builder?
+- `dual_tree_split_far_only_warm`: about `290 MB`
+- `dual_tree_split_near_only_warm`: about `10.39 GB`
+- `dual_tree_split_build_warm`: about `10.46 GB`
+- `downward_only_warm`: about `20 MB`
+- `nearfield_prepare_warm`: about `0 MB`
 
-The profiler has been extended to answer exactly that, but the new `far_only` /
-`near_only` split CSV rows were not yet collected at the time of writing.
+Conclusion:
+
+- the remaining warm split-build footprint is overwhelmingly in the near-only
+  Yggdrax traversal path
+- the far-only compact-pair builder is no longer the main memory problem
+- the next real optimization target is the transient neighbor-list construction
+  path in Yggdrax, not Jaccpot retained-state slimming
+
+One subtlety from the same run:
+
+- `dual_tree_build_raw_warm`: about `24.70 GB`
+- `raw_dual_tree_warm`: about `16.60 GB`
+
+These rows remain allocator-order sensitive and should be treated as secondary
+diagnostics. The explicit split rows above are the trustworthy attribution for
+the current memory bottleneck.
 
 ## Current Hypothesis For The Next Win
 
