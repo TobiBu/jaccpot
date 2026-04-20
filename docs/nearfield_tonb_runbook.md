@@ -5,6 +5,28 @@ Date: 2026-04-15
 This runbook is the copy/paste path for running the new cross-repo TONB
 (target-owned-nearfield-blocks) A/B checks once a GPU is free.
 
+## Production default policy (updated 2026-04-20)
+
+For regular `large_n_gpu` production runs, we now treat radix fast-lane as the
+default execution path:
+
+- preset: `large_n_gpu`
+- tree: `radix`
+- basis: `solidfmm`
+- dtype: `float32`
+- nearfield mode: `bucketed`
+- default target-owned block size: `8` (when
+  `JACCPOT_LARGE_N_TARGET_BLOCK_SIZE` is unset or `<= 0`)
+- recommended production leaf size from latest runtime sweeps: `256`
+
+Notes:
+
+- `YGGDRAX_NEARFIELD_TARGET_BLOCK_SIZE` remains an optional override for
+  explicit A/B experiments.
+- This document still contains older TONB A/B checkpoints below; those sections
+  are useful for historical context but do not override the production default
+  policy above.
+
 ## 1) Preconditions
 
 1. Use the same environment used by current runtime checks:
@@ -202,6 +224,14 @@ Conclusion:
   internals
 - no block-size sweep is recommended until TONB kernel overhead is reduced
 
+Prepared-state memory note (2026-04-20):
+
+- radix fast-lane prepared state now trims legacy
+  `neighbor_leaf_positions` storage by default (no extra flag)
+- this removes a large duplicated nearfield tensor from resident state memory
+  when running fast-lane acceleration benchmarks
+- when non-fast-lane fallback code needs neighbor-leaf positions, it rebuilds
+  them from `offsets` + `neighbors`
 ## 10) Radix Fast-Lane 1M guard automation (April 20, 2026)
 
 Use this command to run the frozen 1M baseline-vs-fast-lane guard on one free

@@ -2,6 +2,20 @@
 
 Date: 2026-04-15
 
+## Status addendum (2026-04-20)
+
+The implementation state has moved forward since this original structural note:
+
+- radix fast-lane is now the production default for eligible `large_n_gpu`
+  radix/solidfmm runs (no extra opt-in flag required)
+- default fast-lane target block size is `8` when
+  `JACCPOT_LARGE_N_TARGET_BLOCK_SIZE` is unset or `<= 0`
+- latest runtime benchmarking favored `leaf_size=256` for production throughput
+
+The sections below remain useful as design/history context for why TONB was
+introduced, but the operational default policy should be read from
+`docs/nearfield_tonb_runbook.md`.
+
 ## 1) Focused comparison
 
 ### What jaxFMM does structurally (direct path)

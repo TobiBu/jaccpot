@@ -467,8 +467,8 @@ Lock-in update (2026-04-17):
   and enforces radix fast-lane for production acceleration evaluate path
 - acceleration eval on large-N prepared state is now locked to radix fast-lane
   payload route; non-fast-lane accel eval raises with clear guidance
-- legacy `JACCPOT_LARGE_N_RADIX_FAST_LANE=0` opt-out is ignored by execution
-  config resolution (fast path is now policy, not optional)
+- legacy `JACCPOT_LARGE_N_RADIX_FAST_LANE=0` opt-out remains accepted only as a
+  no-op compatibility input; execution config is policy-locked to fast lane
 - obsolete generic large-N nearfield dispatcher helper removed from
   `jaccpot/runtime/_large_n_nearfield.py`
 - added lock-policy tests:
@@ -515,6 +515,18 @@ Status note (2026-04-20):
   supported with a lower default threshold (`1.03x`)
 - runbook now includes one copy/paste guard command in
   `docs/nearfield_tonb_runbook.md`
+
+Memory follow-up note (2026-04-20):
+
+- reduced radix fast-lane prepared-state footprint by trimming legacy
+  `neighbor_leaf_positions` from `LargeNPreparedState.neighbor_list`
+  in the fast-lane path
+- no new runtime flag was introduced; trim is applied by default for fast lane
+- generic fallback paths that need neighbor-leaf positions rebuild them from
+  `offsets` + `neighbors` when absent
+- added lock-policy regression coverage:
+  - `tests/unit/test_large_n_fast_path_policy.py`:
+    `test_large_n_fast_lane_trims_neighbor_leaf_positions`
 - latest quick validation snapshot (single selected GPU,
   `CUDA_VISIBLE_DEVICES=9`, `runs=1`, `warmup=0`):
   - steady-eval metric (`evaluate_mean_seconds`):

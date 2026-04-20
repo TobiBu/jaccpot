@@ -5,7 +5,6 @@ from __future__ import annotations
 import os
 from typing import Optional
 
-import jax
 import jax.numpy as jnp
 from jaxtyping import Array
 from yggdrax.interactions import NodeNeighborList
@@ -22,7 +21,7 @@ from ._nearfield_cache import NearfieldPrecomputeArtifacts
 from ._large_n_types import LargeNExecutionConfig, LargeNPreparedState
 from .dtypes import INDEX_DTYPE, as_index
 
-_NEARFIELD_GPU_PRECOMPUTE_MAX_PARTICLES = 131072
+_RADIX_FAST_LANE_DEFAULT_TARGET_BLOCK_SIZE = 8
 
 
 def build_large_n_leaf_particle_groups(
@@ -67,7 +66,8 @@ def resolve_large_n_execution_config(
     """Resolve near-field policy for the locked large-N radix fast path.
 
     The production large-N GPU radix/solidfmm path is locked to radix fast-lane
-    execution.
+    execution. If no valid explicit target block size is provided via
+    ``JACCPOT_LARGE_N_TARGET_BLOCK_SIZE``, the fast lane defaults to block size 8.
     """
 
     nearfield_mode = str(fmm._resolve_nearfield_mode(num_particles=int(num_particles)))
@@ -81,31 +81,11 @@ def resolve_large_n_execution_config(
         str(getattr(fmm, "memory_objective", "")).strip().lower()
         != "minimum_memory"
     )
-    precompute_scatter = bool(getattr(fmm, "precompute_nearfield_scatter_schedules"))
-    if jax.default_backend() == "gpu":
-        precompute_scatter = precompute_scatter and (
-            int(num_particles) <= _NEARFIELD_GPU_PRECOMPUTE_MAX_PARTICLES
-        )
     target_owned_block_size = int(
         os.environ.get("JACCPOT_LARGE_N_TARGET_BLOCK_SIZE", "0")
     )
     if target_owned_block_size < 0:
         target_owned_block_size = 0
-    if str(nearfield_mode).strip().lower() != "bucketed":
-        target_owned_block_size = 0
-    speed_layout_env = str(
-        os.environ.get("JACCPOT_LARGE_N_SPEED_PREPARED_LAYOUT", "auto")
-    ).strip().lower()
-    if speed_layout_env in {"1", "true", "yes", "on"}:
-        speed_prepared_layout = True
-    elif speed_layout_env in {"0", "false", "no", "off"}:
-        speed_prepared_layout = False
-    else:
-        speed_prepared_layout = (
-            str(nearfield_mode).strip().lower() == "bucketed"
-            and int(target_owned_block_size) > 0
-            and bool(retain_pair_vectors)
-        )
 
     tree_type = str(getattr(fmm, "tree_type", "")).strip().lower()
     preset = str(getattr(fmm, "preset", "")).strip().lower()
@@ -126,7 +106,7 @@ def resolve_large_n_execution_config(
     if str(nearfield_mode).strip().lower() != "bucketed":
         raise ValueError("radix_fast_lane requires nearfield_mode='bucketed'")
     if int(target_owned_block_size) <= 0:
-        target_owned_block_size = 8
+        target_owned_block_size = int(_RADIX_FAST_LANE_DEFAULT_TARGET_BLOCK_SIZE)
 
     radix_fast_lane = True
     # Fast lane is a fixed-shape TONB path; force prepare-time canonical layout.

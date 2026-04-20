@@ -22,22 +22,21 @@ def _make_large_n_fmm():
 
 
 def test_large_n_fast_lane_defaults_on(monkeypatch):
-    monkeypatch.delenv("JACCPOT_LARGE_N_RADIX_FAST_LANE", raising=False)
     monkeypatch.delenv("JACCPOT_LARGE_N_TARGET_BLOCK_SIZE", raising=False)
 
     cfg = resolve_large_n_execution_config(_make_large_n_fmm(), num_particles=2048)
     assert bool(cfg.radix_fast_lane)
-    assert int(cfg.target_owned_block_size) > 0
+    assert int(cfg.target_owned_block_size) == 8
     assert bool(cfg.speed_prepared_layout)
 
 
-def test_large_n_fast_lane_ignores_legacy_opt_out_env(monkeypatch):
+def test_large_n_fast_lane_legacy_opt_out_env_is_noop(monkeypatch):
     monkeypatch.setenv("JACCPOT_LARGE_N_RADIX_FAST_LANE", "0")
     monkeypatch.setenv("JACCPOT_LARGE_N_TARGET_BLOCK_SIZE", "0")
 
     cfg = resolve_large_n_execution_config(_make_large_n_fmm(), num_particles=2048)
     assert bool(cfg.radix_fast_lane)
-    assert int(cfg.target_owned_block_size) > 0
+    assert int(cfg.target_owned_block_size) == 8
 
 
 def test_large_n_accel_eval_requires_fast_lane_state(monkeypatch):
@@ -77,3 +76,40 @@ def test_large_n_accel_eval_requires_fast_lane_state(monkeypatch):
 
     with pytest.raises(RuntimeError, match="requires radix fast-lane state"):
         _ = fmm.evaluate_prepared_state(state_no_fast)
+
+
+def test_large_n_fast_lane_trims_neighbor_leaf_positions(monkeypatch):
+    monkeypatch.setattr(jax, "default_backend", lambda: "gpu")
+    monkeypatch.setenv("JACCPOT_LARGE_N_TARGET_BLOCK_SIZE", "8")
+    monkeypatch.setenv("JACCPOT_LARGE_N_SPEED_PREPARED_LAYOUT", "1")
+
+    key = jax.random.PRNGKey(11)
+    pos_key, mass_key = jax.random.split(key)
+    positions = jax.random.uniform(
+        pos_key,
+        (1024, 3),
+        minval=-1.0,
+        maxval=1.0,
+        dtype=jnp.float32,
+    )
+    masses = jax.random.uniform(
+        mass_key,
+        (1024,),
+        minval=0.1,
+        maxval=1.1,
+        dtype=jnp.float32,
+    )
+
+    fmm = _make_large_n_fmm()
+    state = fmm.prepare_state(
+        positions,
+        masses,
+        leaf_size=256,
+        max_order=4,
+    )
+
+    assert bool(getattr(state, "radix_fast_lane", False))
+    assert getattr(state.neighbor_list, "neighbor_leaf_positions", None) is None
+
+    acc = fmm.evaluate_prepared_state(state)
+    assert tuple(acc.shape) == (1024, 3)
