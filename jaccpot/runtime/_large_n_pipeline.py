@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import os
 from typing import Any, Callable, Optional
 
 import jax
 import jax.numpy as jnp
+import numpy as np
 from beartype.typing import Tuple
 from jaxtyping import Array
 from yggdrax.interactions import DualTreeRetryEvent, DualTreeTraversalConfig, MACType
@@ -14,9 +16,11 @@ from .dtypes import INDEX_DTYPE
 from ._large_n_nearfield import (
     build_large_n_leaf_particle_groups,
     build_large_n_nearfield_precompute,
+    build_large_n_target_owned_blocks,
+    evaluate_large_n_nearfield_fast_lane,
     resolve_large_n_execution_config,
 )
-from ._large_n_types import LargeNPreparedState
+from ._large_n_types import LargeNPreparedState, RadixFastNearfieldPayload
 
 
 def prepare_large_n_state(
@@ -92,6 +96,113 @@ def prepare_large_n_state(
         fmm,
         num_particles=int(positions_arr.shape[0]),
     )
+    def _env_bool(name: str, default: bool) -> bool:
+        raw = str(os.environ.get(name, "1" if default else "0")).strip().lower()
+        return raw in {"1", "true", "yes", "on"}
+
+    def _env_pos_int(name: str, default: int) -> int:
+        try:
+            value = int(os.environ.get(name, str(default)))
+        except Exception:
+            value = int(default)
+        return max(1, int(value))
+
+    def _canonical_static_int(
+        value_env: str,
+        default_value: int,
+        options_env: str,
+        default_options: str,
+    ) -> int:
+        try:
+            raw_value = int(os.environ.get(value_env, str(default_value)))
+        except Exception:
+            raw_value = int(default_value)
+        options_raw = str(os.environ.get(options_env, default_options)).strip()
+        options: list[int] = []
+        for token in options_raw.split(","):
+            token = token.strip()
+            if not token:
+                continue
+            try:
+                val = int(token)
+            except Exception:
+                continue
+            if val > 0 and val not in options:
+                options.append(val)
+        if not options:
+            options = [int(default_value)]
+        if raw_value in options:
+            return int(raw_value)
+        return int(min(options, key=lambda v: (abs(v - raw_value), v)))
+
+    nearfield_delayed_scatter_chunks_per_superchunk = _env_pos_int(
+        "JACCPOT_LARGE_N_DELAYED_SCATTER_CHUNKS",
+        1,
+    )
+    nearfield_chunk_scan_batch_size = _env_pos_int(
+        "JACCPOT_LARGE_N_CHUNK_SCAN_BATCH_SIZE",
+        1,
+    )
+    nearfield_chunk_scan_unroll = _env_pos_int(
+        "JACCPOT_LARGE_N_CHUNK_SCAN_UNROLL",
+        1,
+    )
+    nearfield_superchunk_scan_unroll = _env_pos_int(
+        "JACCPOT_LARGE_N_SUPERCHUNK_SCAN_UNROLL",
+        1,
+    )
+    nearfield_sorted_scatter_hint = _env_bool(
+        "JACCPOT_LARGE_N_SORTED_SCATTER_HINT",
+        False,
+    )
+    nearfield_grouped_sorted_scatter = _env_bool(
+        "JACCPOT_LARGE_N_GROUPED_SORTED_SCATTER",
+        False,
+    )
+    nearfield_superchunk_target_reduce = _env_bool(
+        "JACCPOT_LARGE_N_SUPERCHUNK_TARGET_REDUCE",
+        False,
+    )
+    nearfield_disable_chunk_cond = _env_bool(
+        "JACCPOT_LARGE_N_DISABLE_CHUNK_COND",
+        True,
+    )
+    nearfield_target_leaf_batch_size = _canonical_static_int(
+        "JACCPOT_LARGE_N_TARGET_LEAF_BATCH_SIZE",
+        32,
+        "JACCPOT_LARGE_N_TARGET_LEAF_BATCH_OPTIONS",
+        "16,32,64",
+    )
+    nearfield_target_block_tile_size = _canonical_static_int(
+        "JACCPOT_LARGE_N_TARGET_BLOCK_TILE_SIZE",
+        8,
+        "JACCPOT_LARGE_N_TARGET_BLOCK_TILE_OPTIONS",
+        "4,8,16",
+    )
+    nearfield_target_block_tile_scan_unroll = _canonical_static_int(
+        "JACCPOT_LARGE_N_TARGET_BLOCK_TILE_SCAN_UNROLL",
+        1,
+        "JACCPOT_LARGE_N_TARGET_BLOCK_TILE_SCAN_UNROLL_OPTIONS",
+        "1,2,4",
+    )
+    nearfield_target_block_batch_scan_unroll = _canonical_static_int(
+        "JACCPOT_LARGE_N_TARGET_BLOCK_BATCH_SCAN_UNROLL",
+        1,
+        "JACCPOT_LARGE_N_TARGET_BLOCK_BATCH_SCAN_UNROLL_OPTIONS",
+        "1,2,4",
+    )
+    nearfield_target_block_overflow_fast_max_blocks = _canonical_static_int(
+        "JACCPOT_LARGE_N_TARGET_BLOCK_OVERFLOW_FAST_MAX_BLOCKS",
+        65536,
+        "JACCPOT_LARGE_N_TARGET_BLOCK_OVERFLOW_FAST_MAX_BLOCKS_OPTIONS",
+        "16384,32768,65536,131072",
+    )
+    disable_specialized_large_n_nearfield = (
+        str(os.environ.get("JACCPOT_DISABLE_LARGE_N_SPECIALIZED_NEARFIELD", "0"))
+        .strip()
+        .lower()
+        in {"1", "true", "yes", "on"}
+    )
     if bool(execution_config.retain_leaf_groups):
         leaf_particle_indices, leaf_particle_mask = build_large_n_leaf_particle_groups(
             tree_artifacts.tree,
@@ -108,6 +219,286 @@ def prepare_large_n_state(
         leaf_particle_mask=leaf_particle_mask,
         execution_config=execution_config,
     )
+    neighbor_payload = dual_downward_artifacts.neighbor_list
+    payload_block_leaf_ids = getattr(neighbor_payload, "target_block_leaf_ids", None)
+    payload_block_source_leaf_ids = getattr(
+        neighbor_payload, "target_block_source_leaf_ids", None
+    )
+    payload_block_valid_mask = getattr(neighbor_payload, "target_block_valid_mask", None)
+    payload_block_offsets = getattr(neighbor_payload, "target_block_offsets", None)
+    payload_block_size = int(getattr(neighbor_payload, "target_block_size", 0))
+    num_leaves = int(jnp.asarray(neighbor_payload.leaf_indices).shape[0])
+    if (
+        int(execution_config.target_owned_block_size) > 0
+        and payload_block_leaf_ids is not None
+        and payload_block_source_leaf_ids is not None
+        and payload_block_valid_mask is not None
+        and payload_block_size == int(execution_config.target_owned_block_size)
+    ):
+        target_block_leaf_ids = jnp.asarray(payload_block_leaf_ids, dtype=INDEX_DTYPE)
+        target_block_source_leaf_ids = jnp.asarray(
+            payload_block_source_leaf_ids, dtype=INDEX_DTYPE
+        )
+        target_block_valid_mask = jnp.asarray(payload_block_valid_mask, dtype=bool)
+        if payload_block_offsets is not None:
+            payload_offsets = jnp.asarray(payload_block_offsets, dtype=INDEX_DTYPE)
+            if payload_offsets.shape == (num_leaves + 1,):
+                target_block_offsets = payload_offsets
+            else:
+                if int(target_block_leaf_ids.shape[0]) > 0:
+                    block_counts = jnp.bincount(target_block_leaf_ids, length=num_leaves)
+                    target_block_offsets = jnp.concatenate(
+                        [
+                            jnp.zeros((1,), dtype=INDEX_DTYPE),
+                            jnp.cumsum(block_counts, dtype=INDEX_DTYPE),
+                        ]
+                    )
+                else:
+                    target_block_offsets = jnp.zeros((num_leaves + 1,), dtype=INDEX_DTYPE)
+        else:
+            if int(target_block_leaf_ids.shape[0]) > 0:
+                block_counts = jnp.bincount(target_block_leaf_ids, length=num_leaves)
+                target_block_offsets = jnp.concatenate(
+                    [
+                        jnp.zeros((1,), dtype=INDEX_DTYPE),
+                        jnp.cumsum(block_counts, dtype=INDEX_DTYPE),
+                    ]
+                )
+            else:
+                target_block_offsets = jnp.zeros((num_leaves + 1,), dtype=INDEX_DTYPE)
+    else:
+        (
+            target_block_leaf_ids,
+            target_block_source_leaf_ids,
+            target_block_valid_mask,
+            target_block_offsets,
+        ) = build_large_n_target_owned_blocks(
+            tree=tree_artifacts.tree,
+            neighbor_list=neighbor_payload,
+            block_size=int(execution_config.target_owned_block_size),
+        )
+
+    if int(target_block_leaf_ids.shape[0]) > 0:
+        # Normalize to stable leaf-major ordering once at prepare time so the
+        # runtime TONB kernel can reduce contiguous target runs without
+        # per-batch sort overhead.
+        block_order = jnp.argsort(target_block_leaf_ids, stable=True)
+        target_block_leaf_ids = target_block_leaf_ids[block_order]
+        target_block_source_leaf_ids = target_block_source_leaf_ids[block_order]
+        target_block_valid_mask = target_block_valid_mask[block_order]
+        block_counts = jnp.bincount(target_block_leaf_ids, length=num_leaves)
+        target_block_offsets = jnp.concatenate(
+            [
+                jnp.zeros((1,), dtype=INDEX_DTYPE),
+                jnp.cumsum(block_counts, dtype=INDEX_DTYPE),
+            ]
+        )
+
+    if bool(execution_config.speed_prepared_layout):
+        target_leaf_block_counts = target_block_offsets[1:] - target_block_offsets[:-1]
+    else:
+        target_leaf_block_counts = None
+
+    target_block_source_leaf_ids_padded = None
+    target_block_valid_mask_padded = None
+    if bool(execution_config.speed_prepared_layout):
+        block_size = int(execution_config.target_owned_block_size)
+        if (
+            block_size > 0
+            and int(target_block_source_leaf_ids.shape[0]) > 0
+            and target_leaf_block_counts is not None
+        ):
+            fast_blocks_raw = os.environ.get(
+                "JACCPOT_LARGE_N_SPEED_PREPARED_FAST_BLOCKS",
+                "8",
+            )
+            try:
+                fast_blocks = max(1, int(fast_blocks_raw))
+            except Exception:
+                fast_blocks = 8
+            max_leaf_blocks = int(jnp.max(target_leaf_block_counts))
+            logical_fast_blocks = min(fast_blocks, max_leaf_blocks)
+            target_block_tile_size = int(nearfield_target_block_tile_size)
+            aligned_fast_blocks = (
+                (max(1, logical_fast_blocks) + target_block_tile_size - 1)
+                // target_block_tile_size
+            ) * target_block_tile_size
+            speed_layout_max_mb_raw = os.environ.get(
+                "JACCPOT_LARGE_N_SPEED_PREPARED_MAX_MB",
+                "256",
+            )
+            try:
+                speed_layout_max_mb = max(0.0, float(speed_layout_max_mb_raw))
+            except Exception:
+                speed_layout_max_mb = 256.0
+            est_layout_bytes = float(
+                num_leaves
+                * max(1, aligned_fast_blocks)
+                * block_size
+                * (
+                    jnp.dtype(INDEX_DTYPE).itemsize
+                    + jnp.dtype(bool).itemsize
+                )
+            )
+            est_layout_mb = est_layout_bytes / (1024.0 * 1024.0)
+            if logical_fast_blocks > 0 and est_layout_mb <= speed_layout_max_mb:
+                block_idx_offsets = jnp.arange(aligned_fast_blocks, dtype=INDEX_DTYPE)
+                block_idx = (
+                    target_block_offsets[:-1, None] + block_idx_offsets[None, :]
+                )
+                block_valid = (
+                    (block_idx_offsets[None, :] < int(logical_fast_blocks))
+                    & (block_idx_offsets[None, :] < target_leaf_block_counts[:, None])
+                )
+                safe_block_idx = jnp.where(block_valid, block_idx, 0)
+                target_block_source_leaf_ids_padded = jnp.where(
+                    block_valid[:, :, None],
+                    target_block_source_leaf_ids[safe_block_idx],
+                    0,
+                )
+                target_block_valid_mask_padded = (
+                    target_block_valid_mask[safe_block_idx]
+                    & block_valid[:, :, None]
+                )
+                # Compact overflow blocks so fallback target-block kernels only
+                # process high-degree tail work instead of all blocks.
+                offsets_np = np.asarray(target_block_offsets, dtype=np.int64)
+                source_np = np.asarray(target_block_source_leaf_ids)
+                valid_np = np.asarray(target_block_valid_mask)
+                block_leaf_ids_np = np.asarray(target_block_leaf_ids, dtype=np.int64)
+                counts_np = np.diff(offsets_np)
+                fast_counts_np = np.minimum(counts_np, np.int64(logical_fast_blocks))
+                overflow_counts_np = counts_np - fast_counts_np
+                overflow_offsets_np = np.zeros((num_leaves + 1,), dtype=np.int64)
+                overflow_offsets_np[1:] = np.cumsum(overflow_counts_np, dtype=np.int64)
+                overflow_total = int(overflow_offsets_np[-1])
+                if overflow_total > 0:
+                    block_ids_np = np.arange(block_leaf_ids_np.shape[0], dtype=np.int64)
+                    block_local_idx_np = block_ids_np - offsets_np[block_leaf_ids_np]
+                    keep_np = block_local_idx_np >= fast_counts_np[block_leaf_ids_np]
+                    overflow_source_np = source_np[keep_np]
+                    overflow_valid_np = valid_np[keep_np]
+                    overflow_leaf_ids_np = block_leaf_ids_np[keep_np]
+                    if int(overflow_source_np.shape[0]) != int(overflow_total):
+                        raise RuntimeError(
+                            "overflow compaction mismatch: "
+                            f"expected={overflow_total}, got={overflow_source_np.shape[0]}"
+                        )
+                else:
+                    overflow_source_np = np.zeros(
+                        (0, block_size),
+                        dtype=source_np.dtype,
+                    )
+                    overflow_valid_np = np.zeros(
+                        (0, block_size),
+                        dtype=valid_np.dtype,
+                    )
+                    overflow_leaf_ids_np = np.zeros((0,), dtype=np.int64)
+                if overflow_total > 0:
+                    target_block_source_leaf_ids = jnp.asarray(
+                        overflow_source_np,
+                        dtype=INDEX_DTYPE,
+                    )
+                    target_block_valid_mask = jnp.asarray(overflow_valid_np, dtype=bool)
+                    target_block_leaf_ids = jnp.asarray(
+                        overflow_leaf_ids_np,
+                        dtype=INDEX_DTYPE,
+                    )
+                    target_block_offsets = jnp.asarray(
+                        overflow_offsets_np,
+                        dtype=INDEX_DTYPE,
+                    )
+                else:
+                    target_block_source_leaf_ids = jnp.zeros(
+                        (0, block_size),
+                        dtype=INDEX_DTYPE,
+                    )
+                    target_block_valid_mask = jnp.zeros((0, block_size), dtype=bool)
+                    target_block_leaf_ids = jnp.zeros((0,), dtype=INDEX_DTYPE)
+                    target_block_offsets = jnp.zeros((num_leaves + 1,), dtype=INDEX_DTYPE)
+                target_leaf_block_counts = (
+                    target_block_offsets[1:] - target_block_offsets[:-1]
+                )
+
+    radix_fast_payload = None
+    if (
+        bool(execution_config.radix_fast_lane)
+        and target_block_source_leaf_ids_padded is not None
+        and target_block_valid_mask_padded is not None
+        and int(leaf_particle_indices.size) > 0
+    ):
+        source_slot_tile_raw = os.environ.get(
+            "JACCPOT_LARGE_N_RADIX_FAST_SOURCE_SLOT_TILE",
+            "64",
+        )
+        batch_tile_t = int(nearfield_target_leaf_batch_size)
+        try:
+            source_slot_tile = max(1, int(source_slot_tile_raw))
+        except Exception:
+            source_slot_tile = 64
+        source_slot_scan_unroll = int(nearfield_target_block_tile_scan_unroll)
+        target_batch_scan_unroll = int(nearfield_target_block_batch_scan_unroll)
+        fallback_block_tile_size = int(nearfield_target_block_tile_size)
+
+        target_particle_ids = jnp.asarray(leaf_particle_indices, dtype=INDEX_DTYPE)
+        target_particle_mask = jnp.asarray(leaf_particle_mask, dtype=bool)
+        source_leaf_ids_padded = jnp.asarray(target_block_source_leaf_ids_padded, dtype=INDEX_DTYPE)
+        source_leaf_valid_padded = jnp.asarray(target_block_valid_mask_padded, dtype=bool)
+
+        num_target_leaves = int(target_particle_ids.shape[0])
+        target_leaf_ids = jnp.arange(num_target_leaves, dtype=INDEX_DTYPE)
+        source_slots = int(source_leaf_ids_padded.shape[1]) * int(source_leaf_ids_padded.shape[2])
+        source_leaf_size = int(target_particle_ids.shape[1])
+
+        source_leaf_ids_flat = source_leaf_ids_padded.reshape((num_target_leaves, source_slots))
+        source_leaf_valid_flat = source_leaf_valid_padded.reshape((num_target_leaves, source_slots))
+        safe_source_leaf_ids = jnp.where(source_leaf_valid_flat, source_leaf_ids_flat, 0)
+
+        payload_max_mb_raw = os.environ.get(
+            "JACCPOT_LARGE_N_RADIX_FAST_PAYLOAD_MAX_MB",
+            "1024",
+        )
+        try:
+            payload_max_mb = max(0.0, float(payload_max_mb_raw))
+        except Exception:
+            payload_max_mb = 1024.0
+        est_payload_bytes = float(
+            num_target_leaves
+            * max(1, source_slots)
+            * max(1, source_leaf_size)
+            * (
+                jnp.dtype(INDEX_DTYPE).itemsize
+                + jnp.dtype(bool).itemsize
+            )
+        )
+        est_payload_mb = est_payload_bytes / (1024.0 * 1024.0)
+
+        if source_slots > 0 and est_payload_mb <= payload_max_mb:
+            source_particle_ids = target_particle_ids[safe_source_leaf_ids]
+            source_particle_mask = (
+                target_particle_mask[safe_source_leaf_ids]
+                & source_leaf_valid_flat[:, :, None]
+            )
+        else:
+            source_particle_ids = jnp.zeros((0, 0, 0), dtype=INDEX_DTYPE)
+            source_particle_mask = jnp.zeros((0, 0, 0), dtype=bool)
+
+        radix_fast_payload = RadixFastNearfieldPayload(
+            target_leaf_ids=target_leaf_ids,
+            target_particle_ids=target_particle_ids,
+            target_particle_mask=target_particle_mask,
+            source_leaf_ids=source_leaf_ids_padded,
+            source_leaf_valid_mask=source_leaf_valid_padded,
+            source_particle_ids=source_particle_ids,
+            source_particle_mask=source_particle_mask,
+            batch_tile_t=int(batch_tile_t),
+            batch_tile_s=int(source_slot_tile),
+            source_slot_scan_unroll=int(source_slot_scan_unroll),
+            target_batch_scan_unroll=int(target_batch_scan_unroll),
+            fallback_block_tile_size=int(fallback_block_tile_size),
+            fallback_tile_scan_unroll=int(source_slot_scan_unroll),
+            fallback_batch_scan_unroll=int(target_batch_scan_unroll),
+        )
 
     return LargeNPreparedState(
         tree=tree_artifacts.tree,
@@ -121,6 +512,15 @@ def prepare_large_n_state(
         nearfield_chunk_sort_indices=nearfield_artifacts.chunk_sort_indices,
         nearfield_chunk_group_ids=nearfield_artifacts.chunk_group_ids,
         nearfield_chunk_unique_indices=nearfield_artifacts.chunk_unique_indices,
+        nearfield_target_block_leaf_ids=target_block_leaf_ids,
+        nearfield_target_block_source_leaf_ids=target_block_source_leaf_ids,
+        nearfield_target_block_valid_mask=target_block_valid_mask,
+        nearfield_target_block_offsets=target_block_offsets,
+        nearfield_target_block_source_leaf_ids_padded=(
+            target_block_source_leaf_ids_padded
+        ),
+        nearfield_target_block_valid_mask_padded=target_block_valid_mask_padded,
+        nearfield_target_block_size=int(execution_config.target_owned_block_size),
         max_leaf_size=int(tree_artifacts.leaf_cap),
         input_dtype=jnp.dtype(input_dtype),
         working_dtype=jnp.dtype(positions_arr.dtype),
@@ -131,6 +531,33 @@ def prepare_large_n_state(
         expansion_basis="solidfmm",
         nearfield_mode=str(execution_config.nearfield_mode),
         nearfield_edge_chunk_size=int(execution_config.nearfield_edge_chunk_size),
+        nearfield_delayed_scatter_chunks_per_superchunk=int(
+            nearfield_delayed_scatter_chunks_per_superchunk
+        ),
+        nearfield_chunk_scan_batch_size=int(nearfield_chunk_scan_batch_size),
+        nearfield_chunk_scan_unroll=int(nearfield_chunk_scan_unroll),
+        nearfield_superchunk_scan_unroll=int(nearfield_superchunk_scan_unroll),
+        nearfield_sorted_scatter_hint=bool(nearfield_sorted_scatter_hint),
+        nearfield_grouped_sorted_scatter=bool(nearfield_grouped_sorted_scatter),
+        nearfield_superchunk_target_reduce=bool(nearfield_superchunk_target_reduce),
+        nearfield_disable_chunk_cond=bool(nearfield_disable_chunk_cond),
+        nearfield_target_leaf_batch_size=int(nearfield_target_leaf_batch_size),
+        nearfield_target_block_tile_size=int(nearfield_target_block_tile_size),
+        nearfield_target_block_tile_scan_unroll=int(
+            nearfield_target_block_tile_scan_unroll
+        ),
+        nearfield_target_block_batch_scan_unroll=int(
+            nearfield_target_block_batch_scan_unroll
+        ),
+        nearfield_target_block_overflow_fast_max_blocks=int(
+            nearfield_target_block_overflow_fast_max_blocks
+        ),
+        speed_prepared_layout=bool(execution_config.speed_prepared_layout),
+        radix_fast_lane=bool(execution_config.radix_fast_lane),
+        disable_specialized_large_n_nearfield=bool(
+            disable_specialized_large_n_nearfield
+        ),
+        radix_fast_payload=radix_fast_payload,
     )
 
 
@@ -142,9 +569,18 @@ def evaluate_large_n_state(
     return_potential: bool,
     max_acc_derivative_order: int,
 ):
-    """Evaluate the slim large-N state for the full particle set."""
+    """Evaluate large-N prepared state for the full particle set.
 
-    from ._fmm_impl import _evaluate_tree_compiled_impl
+    Acceleration evaluation on the production large-N path is locked to the
+    radix fast-lane payload route. Potential evaluation still falls back to the
+    compiled generic evaluator until a dedicated fast-lane potential path is
+    implemented.
+    """
+
+    from ._fmm_impl import (
+        _evaluate_local_expansions_for_particles,
+        _evaluate_tree_compiled_impl,
+    )
 
     if target_indices is not None:
         raise NotImplementedError(
@@ -156,6 +592,39 @@ def evaluate_large_n_state(
         )
 
     leaf_nodes = jnp.asarray(state.neighbor_list.leaf_indices, dtype=INDEX_DTYPE)
+    node_ranges = jnp.asarray(state.tree.node_ranges, dtype=INDEX_DTYPE)
+    if (not bool(getattr(state, "radix_fast_lane", False))) and (not bool(return_potential)):
+        raise RuntimeError(
+            "large_n acceleration evaluation requires radix fast-lane state; "
+            "prepare state with the large_n_gpu radix profile before accel-only evaluate"
+        )
+    if bool(getattr(state, "radix_fast_lane", False)) and not bool(return_potential):
+        near_acc = evaluate_large_n_nearfield_fast_lane(
+            fmm,
+            state,
+            return_potential=False,
+        )
+        far_grad, _, _ = _evaluate_local_expansions_for_particles(
+            state.local_data,
+            state.positions_sorted,
+            leaf_nodes=leaf_nodes,
+            node_ranges=node_ranges,
+            max_leaf_size=int(state.max_leaf_size),
+            order=int(state.local_data.order),
+            expansion_basis="solidfmm",
+            return_potential=False,
+            max_acc_derivative_order=0,
+        )
+        far_acc = -float(getattr(fmm, "G")) * far_grad
+        accelerations_sorted = near_acc + far_acc
+        if jnp.issubdtype(state.input_dtype, jnp.floating):
+            output_dtype = state.input_dtype
+        else:
+            output_dtype = state.working_dtype
+        return jnp.asarray(accelerations_sorted)[state.inverse_permutation].astype(
+            output_dtype
+        )
+
     nearfield_mode = str(state.nearfield_mode)
     nearfield_edge_chunk_size = int(state.nearfield_edge_chunk_size)
     eval_out = _evaluate_tree_compiled_impl(
@@ -165,7 +634,7 @@ def evaluate_large_n_state(
         state.local_data,
         state.neighbor_list,
         leaf_nodes,
-        jnp.asarray(state.tree.node_ranges, dtype=INDEX_DTYPE),
+        node_ranges,
         jnp.asarray(state.neighbor_list.offsets, dtype=INDEX_DTYPE),
         jnp.asarray(state.neighbor_list.neighbors, dtype=INDEX_DTYPE),
         jnp.asarray(state.neighbor_list.counts, dtype=INDEX_DTYPE),
@@ -180,7 +649,7 @@ def evaluate_large_n_state(
             else jnp.zeros((0, 0), dtype=bool)
         ),
         leaf_nodes,
-        jnp.asarray(state.tree.node_ranges, dtype=INDEX_DTYPE),
+        node_ranges,
         (
             jnp.asarray(state.nearfield_target_leaf_ids, dtype=INDEX_DTYPE)
             if state.nearfield_target_leaf_ids is not None
@@ -211,6 +680,42 @@ def evaluate_large_n_state(
             if state.nearfield_chunk_unique_indices is not None
             else jnp.zeros((0, 0), dtype=INDEX_DTYPE)
         ),
+        (
+            jnp.asarray(state.nearfield_target_block_offsets, dtype=INDEX_DTYPE)
+            if state.nearfield_target_block_offsets is not None
+            else jnp.zeros((leaf_nodes.shape[0] + 1,), dtype=INDEX_DTYPE)
+        ),
+        (
+            jnp.asarray(state.nearfield_target_block_leaf_ids, dtype=INDEX_DTYPE)
+            if state.nearfield_target_block_leaf_ids is not None
+            else jnp.zeros((0,), dtype=INDEX_DTYPE)
+        ),
+        (
+            jnp.asarray(state.nearfield_target_block_source_leaf_ids, dtype=INDEX_DTYPE)
+            if state.nearfield_target_block_source_leaf_ids is not None
+            else jnp.zeros((0, 0), dtype=INDEX_DTYPE)
+        ),
+        (
+            jnp.asarray(state.nearfield_target_block_valid_mask, dtype=bool)
+            if state.nearfield_target_block_valid_mask is not None
+            else jnp.zeros((0, 0), dtype=bool)
+        ),
+        (
+            jnp.asarray(
+                state.nearfield_target_block_source_leaf_ids_padded,
+                dtype=INDEX_DTYPE,
+            )
+            if state.nearfield_target_block_source_leaf_ids_padded is not None
+            else jnp.zeros((leaf_nodes.shape[0], 0, 0), dtype=INDEX_DTYPE)
+        ),
+        (
+            jnp.asarray(
+                state.nearfield_target_block_valid_mask_padded,
+                dtype=bool,
+            )
+            if state.nearfield_target_block_valid_mask_padded is not None
+            else jnp.zeros((leaf_nodes.shape[0], 0, 0), dtype=bool)
+        ),
         G=float(getattr(fmm, "G")),
         softening=float(getattr(fmm, "softening")),
         order=int(state.local_data.order),
@@ -219,6 +724,32 @@ def evaluate_large_n_state(
         return_potential=bool(return_potential),
         nearfield_mode=nearfield_mode,
         nearfield_edge_chunk_size=nearfield_edge_chunk_size,
+        nearfield_delayed_scatter_chunks_per_superchunk=int(
+            state.nearfield_delayed_scatter_chunks_per_superchunk
+        ),
+        nearfield_chunk_scan_batch_size=int(state.nearfield_chunk_scan_batch_size),
+        nearfield_chunk_scan_unroll=int(state.nearfield_chunk_scan_unroll),
+        nearfield_superchunk_scan_unroll=int(state.nearfield_superchunk_scan_unroll),
+        nearfield_sorted_scatter_hint=bool(state.nearfield_sorted_scatter_hint),
+        nearfield_grouped_sorted_scatter=bool(state.nearfield_grouped_sorted_scatter),
+        nearfield_superchunk_target_reduce=bool(
+            state.nearfield_superchunk_target_reduce
+        ),
+        nearfield_disable_chunk_cond=bool(state.nearfield_disable_chunk_cond),
+        nearfield_target_leaf_batch_size=int(state.nearfield_target_leaf_batch_size),
+        nearfield_target_block_tile_size=int(state.nearfield_target_block_tile_size),
+        nearfield_target_block_tile_scan_unroll=int(
+            state.nearfield_target_block_tile_scan_unroll
+        ),
+        nearfield_target_block_batch_scan_unroll=int(
+            state.nearfield_target_block_batch_scan_unroll
+        ),
+        nearfield_target_block_overflow_fast_max_blocks=int(
+            state.nearfield_target_block_overflow_fast_max_blocks
+        ),
+        disable_specialized_large_n_nearfield=bool(
+            state.disable_specialized_large_n_nearfield
+        ),
     )
 
     if jnp.issubdtype(state.input_dtype, jnp.floating):

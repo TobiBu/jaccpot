@@ -678,6 +678,7 @@ def test_octree_execution_backend_exposes_native_nearfield_view():
     assert state.nearfield_interop.leaf_particle_indices is not None
     assert state.nearfield_interop.leaf_particle_mask is not None
     assert state.nearfield_interop.particle_to_leaf_position is not None
+    assert state.nearfield_interop.neighbor_leaf_positions is not None
 
 
 def test_octree_execution_backend_target_indices_match_full_prepared_state():
@@ -1694,6 +1695,40 @@ def test_large_n_gpu_preset_accepts_string_alias():
         basis="solidfmm",
     )
     assert fmm.preset is FMMPreset.LARGE_N_GPU
+
+
+def test_large_n_compiled_eval_uses_specialized_nearfield(monkeypatch):
+    positions, masses = _sample_problem(n=64)
+    fmm = FastMultipoleMethod(
+        preset=FMMPreset.LARGE_N_GPU,
+        basis="solidfmm",
+    )
+    monkeypatch.setattr(fmm_impl_private.jax, "default_backend", lambda: "gpu")
+
+    state = fmm.prepare_state(positions, masses, leaf_size=16, max_order=3)
+
+    assert state.execution_backend == "large_n"
+    assert state.nearfield_mode == "bucketed"
+    assert int(state.nearfield_leaf_particle_indices.shape[0]) > 0
+    assert state.nearfield_chunk_sort_indices is None
+
+    called = {"specialized": 0}
+    original = fmm_impl_private.compute_leaf_p2p_accelerations_large_n_accel_only
+
+    def _spy_specialized(*args, **kwargs):
+        called["specialized"] += 1
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(
+        fmm_impl_private,
+        "compute_leaf_p2p_accelerations_large_n_accel_only",
+        _spy_specialized,
+    )
+
+    acc = fmm.evaluate_prepared_state(state)
+
+    assert acc.shape == positions.shape
+    assert called["specialized"] == 1
 
 
 def test_bucket_far_pairs_by_level_split_returns_two_gears():

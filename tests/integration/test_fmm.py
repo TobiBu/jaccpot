@@ -26,6 +26,7 @@ from jaccpot.downward.local_expansions import (
 )
 from jaccpot.nearfield.near_field import (
     compute_leaf_p2p_accelerations,
+    compute_leaf_p2p_accelerations_large_n_accel_only,
     prepare_bucketed_scatter_schedules,
     prepare_leaf_neighbor_pairs,
 )
@@ -1100,6 +1101,332 @@ def test_nearfield_precomputed_bucketed_scatter_matches_inline():
     )
 
 
+def test_radix_fast_lane_prepared_state_matches_large_n_baseline(monkeypatch):
+    monkeypatch.setattr(jax, "default_backend", lambda: "gpu")
+    monkeypatch.setenv("JACCPOT_LARGE_N_TARGET_BLOCK_SIZE", "8")
+    monkeypatch.setenv("JACCPOT_LARGE_N_SPEED_PREPARED_LAYOUT", "1")
+
+    key = jax.random.PRNGKey(1234)
+    key_pos, key_mass = jax.random.split(key)
+    positions = jax.random.uniform(
+        key_pos,
+        (2048, 3),
+        minval=-1.0,
+        maxval=1.0,
+        dtype=jnp.float32,
+    )
+    masses = jax.random.uniform(
+        key_mass,
+        (2048,),
+        minval=0.1,
+        maxval=1.1,
+        dtype=jnp.float32,
+    )
+
+    kwargs = dict(
+        preset="large_n_gpu",
+        expansion_basis="solidfmm",
+        theta=0.6,
+        nearfield_mode="bucketed",
+        nearfield_edge_chunk_size=64,
+        grouped_interactions=False,
+        working_dtype=jnp.float32,
+    )
+
+    fmm = FastMultipoleMethod(**kwargs)
+    state = fmm.prepare_state(
+        positions,
+        masses,
+        leaf_size=256,
+        max_order=4,
+    )
+    assert bool(getattr(state, "radix_fast_lane", False))
+    assert getattr(state, "radix_fast_payload", None) is not None
+
+    payload = state.radix_fast_payload
+    assert payload.target_particle_ids.ndim == 2
+    assert payload.source_particle_ids.ndim == 3
+    assert payload.target_particle_mask.shape == payload.target_particle_ids.shape
+    assert payload.source_particle_mask.shape == payload.source_particle_ids.shape
+
+    fast_acc = np.asarray(fmm.evaluate_prepared_state(state))
+    baseline_acc, _ = fmm.evaluate_prepared_state(state, return_potential=True)
+    baseline_acc = np.asarray(baseline_acc)
+    abs_err = np.abs(fast_acc - baseline_acc)
+    max_abs_err = float(abs_err.max(initial=0.0))
+    denom = np.maximum(np.abs(baseline_acc), 1e-8)
+    max_rel_err = float((abs_err / denom).max(initial=0.0))
+    assert np.allclose(
+        fast_acc,
+        baseline_acc,
+        rtol=5e-4,
+        atol=5e-4,
+    ), (
+        "radix fast-lane acceleration drift exceeded tolerance: "
+        f"max_abs_err={max_abs_err:.6e}, max_rel_err={max_rel_err:.6e}"
+    )
+
+
+def test_large_n_prepacked_overflow_fallback_matches_tiled_overflow(monkeypatch):
+    monkeypatch.setattr(jax, "default_backend", lambda: "gpu")
+    monkeypatch.setenv("JACCPOT_LARGE_N_TARGET_BLOCK_SIZE", "1")
+    monkeypatch.setenv("JACCPOT_LARGE_N_SPEED_PREPARED_LAYOUT", "1")
+    monkeypatch.setenv("JACCPOT_LARGE_N_SPEED_PREPARED_FAST_BLOCKS", "1")
+
+    key = jax.random.PRNGKey(20260417)
+    key_pos, key_mass = jax.random.split(key)
+    positions = jax.random.uniform(
+        key_pos,
+        (4096, 3),
+        minval=-1.0,
+        maxval=1.0,
+        dtype=jnp.float32,
+    )
+    masses = jax.random.uniform(
+        key_mass,
+        (4096,),
+        minval=0.1,
+        maxval=1.1,
+        dtype=jnp.float32,
+    )
+
+    fmm = FastMultipoleMethod(
+        preset="large_n_gpu",
+        expansion_basis="solidfmm",
+        theta=0.6,
+        nearfield_mode="bucketed",
+        nearfield_edge_chunk_size=64,
+        grouped_interactions=False,
+        working_dtype=jnp.float32,
+    )
+    state = fmm.prepare_state(
+        positions,
+        masses,
+        leaf_size=256,
+        max_order=4,
+    )
+
+    assert state.nearfield_target_block_source_leaf_ids_padded is not None
+    assert state.nearfield_target_block_valid_mask_padded is not None
+    overflow_blocks = int(state.nearfield_target_block_source_leaf_ids.shape[0])
+    assert overflow_blocks > 1
+
+    tiled_overflow_acc = np.asarray(
+        compute_leaf_p2p_accelerations_large_n_accel_only(
+            state.tree,
+            state.neighbor_list,
+            state.positions_sorted,
+            state.masses_sorted,
+            G=float(getattr(fmm, "G")),
+            softening=float(getattr(fmm, "softening")),
+            edge_chunk_size=int(state.nearfield_edge_chunk_size),
+            precomputed_target_leaf_ids=state.nearfield_target_leaf_ids,
+            precomputed_source_leaf_ids=state.nearfield_source_leaf_ids,
+            precomputed_valid_pairs=state.nearfield_valid_pairs,
+            leaf_particle_indices=state.nearfield_leaf_particle_indices,
+            leaf_particle_mask=state.nearfield_leaf_particle_mask,
+            precomputed_target_block_leaf_ids=state.nearfield_target_block_leaf_ids,
+            precomputed_target_block_source_leaf_ids=state.nearfield_target_block_source_leaf_ids,
+            precomputed_target_block_valid_mask=state.nearfield_target_block_valid_mask,
+            precomputed_target_block_offsets=state.nearfield_target_block_offsets,
+            precomputed_target_block_source_leaf_ids_padded=(
+                state.nearfield_target_block_source_leaf_ids_padded
+            ),
+            precomputed_target_block_valid_mask_padded=(
+                state.nearfield_target_block_valid_mask_padded
+            ),
+            delayed_scatter_chunks_per_superchunk=int(
+                state.nearfield_delayed_scatter_chunks_per_superchunk
+            ),
+            chunk_scan_batch_size=int(state.nearfield_chunk_scan_batch_size),
+            chunk_scan_unroll=int(state.nearfield_chunk_scan_unroll),
+            superchunk_scan_unroll=int(state.nearfield_superchunk_scan_unroll),
+            sorted_scatter_hint=bool(state.nearfield_sorted_scatter_hint),
+            grouped_sorted_scatter=bool(state.nearfield_grouped_sorted_scatter),
+            superchunk_target_reduce=bool(state.nearfield_superchunk_target_reduce),
+            disable_chunk_cond=bool(state.nearfield_disable_chunk_cond),
+            target_leaf_batch_size=int(state.nearfield_target_leaf_batch_size),
+            target_block_tile_size=int(state.nearfield_target_block_tile_size),
+            target_block_tile_scan_unroll=int(
+                state.nearfield_target_block_tile_scan_unroll
+            ),
+            target_block_batch_scan_unroll=int(
+                state.nearfield_target_block_batch_scan_unroll
+            ),
+            target_block_overflow_fast_max_blocks=131072,
+        )
+    )
+    fallback_overflow_acc = np.asarray(
+        compute_leaf_p2p_accelerations_large_n_accel_only(
+            state.tree,
+            state.neighbor_list,
+            state.positions_sorted,
+            state.masses_sorted,
+            G=float(getattr(fmm, "G")),
+            softening=float(getattr(fmm, "softening")),
+            edge_chunk_size=int(state.nearfield_edge_chunk_size),
+            precomputed_target_leaf_ids=state.nearfield_target_leaf_ids,
+            precomputed_source_leaf_ids=state.nearfield_source_leaf_ids,
+            precomputed_valid_pairs=state.nearfield_valid_pairs,
+            leaf_particle_indices=state.nearfield_leaf_particle_indices,
+            leaf_particle_mask=state.nearfield_leaf_particle_mask,
+            precomputed_target_block_leaf_ids=state.nearfield_target_block_leaf_ids,
+            precomputed_target_block_source_leaf_ids=state.nearfield_target_block_source_leaf_ids,
+            precomputed_target_block_valid_mask=state.nearfield_target_block_valid_mask,
+            precomputed_target_block_offsets=state.nearfield_target_block_offsets,
+            precomputed_target_block_source_leaf_ids_padded=(
+                state.nearfield_target_block_source_leaf_ids_padded
+            ),
+            precomputed_target_block_valid_mask_padded=(
+                state.nearfield_target_block_valid_mask_padded
+            ),
+            delayed_scatter_chunks_per_superchunk=int(
+                state.nearfield_delayed_scatter_chunks_per_superchunk
+            ),
+            chunk_scan_batch_size=int(state.nearfield_chunk_scan_batch_size),
+            chunk_scan_unroll=int(state.nearfield_chunk_scan_unroll),
+            superchunk_scan_unroll=int(state.nearfield_superchunk_scan_unroll),
+            sorted_scatter_hint=bool(state.nearfield_sorted_scatter_hint),
+            grouped_sorted_scatter=bool(state.nearfield_grouped_sorted_scatter),
+            superchunk_target_reduce=bool(state.nearfield_superchunk_target_reduce),
+            disable_chunk_cond=bool(state.nearfield_disable_chunk_cond),
+            target_leaf_batch_size=int(state.nearfield_target_leaf_batch_size),
+            target_block_tile_size=int(state.nearfield_target_block_tile_size),
+            target_block_tile_scan_unroll=int(
+                state.nearfield_target_block_tile_scan_unroll
+            ),
+            target_block_batch_scan_unroll=int(
+                state.nearfield_target_block_batch_scan_unroll
+            ),
+            target_block_overflow_fast_max_blocks=1,
+        )
+    )
+
+    abs_err = np.abs(fallback_overflow_acc - tiled_overflow_acc)
+    max_abs_err = float(abs_err.max(initial=0.0))
+    denom = np.maximum(np.abs(tiled_overflow_acc), 1e-8)
+    max_rel_err = float((abs_err / denom).max(initial=0.0))
+    assert np.allclose(
+        fallback_overflow_acc,
+        tiled_overflow_acc,
+        rtol=2e-4,
+        atol=3e-4,
+    ), (
+        "overflow fallback drift exceeded tolerance: "
+        f"max_abs_err={max_abs_err:.6e}, max_rel_err={max_rel_err:.6e}, "
+        f"overflow_blocks={overflow_blocks}"
+    )
+
+
+def test_radix_fast_lane_fixed_seed_repeatability(monkeypatch):
+    monkeypatch.setattr(jax, "default_backend", lambda: "gpu")
+    monkeypatch.setenv("JACCPOT_LARGE_N_TARGET_BLOCK_SIZE", "8")
+    monkeypatch.setenv("JACCPOT_LARGE_N_SPEED_PREPARED_LAYOUT", "1")
+
+    seed = 20260417
+    key_a = jax.random.PRNGKey(seed)
+    key_a_pos, key_a_mass = jax.random.split(key_a)
+    positions_a = jax.random.uniform(
+        key_a_pos,
+        (2048, 3),
+        minval=-1.0,
+        maxval=1.0,
+        dtype=jnp.float32,
+    )
+    masses_a = jax.random.uniform(
+        key_a_mass,
+        (2048,),
+        minval=0.1,
+        maxval=1.1,
+        dtype=jnp.float32,
+    )
+
+    key_b = jax.random.PRNGKey(seed)
+    key_b_pos, key_b_mass = jax.random.split(key_b)
+    positions_b = jax.random.uniform(
+        key_b_pos,
+        (2048, 3),
+        minval=-1.0,
+        maxval=1.0,
+        dtype=jnp.float32,
+    )
+    masses_b = jax.random.uniform(
+        key_b_mass,
+        (2048,),
+        minval=0.1,
+        maxval=1.1,
+        dtype=jnp.float32,
+    )
+    assert np.array_equal(np.asarray(positions_a), np.asarray(positions_b))
+    assert np.array_equal(np.asarray(masses_a), np.asarray(masses_b))
+
+    kwargs = dict(
+        preset="large_n_gpu",
+        expansion_basis="solidfmm",
+        theta=0.6,
+        nearfield_mode="bucketed",
+        nearfield_edge_chunk_size=64,
+        grouped_interactions=False,
+        working_dtype=jnp.float32,
+    )
+    fmm_a = FastMultipoleMethod(**kwargs)
+    fmm_b = FastMultipoleMethod(**kwargs)
+
+    state_a = fmm_a.prepare_state(
+        positions_a,
+        masses_a,
+        leaf_size=256,
+        max_order=4,
+    )
+    state_b = fmm_b.prepare_state(
+        positions_b,
+        masses_b,
+        leaf_size=256,
+        max_order=4,
+    )
+    assert bool(getattr(state_a, "radix_fast_lane", False))
+    assert bool(getattr(state_b, "radix_fast_lane", False))
+
+    payload_a = state_a.radix_fast_payload
+    payload_b = state_b.radix_fast_payload
+    assert payload_a is not None
+    assert payload_b is not None
+    assert np.array_equal(
+        np.asarray(payload_a.target_particle_ids),
+        np.asarray(payload_b.target_particle_ids),
+    )
+    assert np.array_equal(
+        np.asarray(payload_a.target_particle_mask),
+        np.asarray(payload_b.target_particle_mask),
+    )
+    assert np.array_equal(
+        np.asarray(payload_a.source_particle_ids),
+        np.asarray(payload_b.source_particle_ids),
+    )
+    assert np.array_equal(
+        np.asarray(payload_a.source_particle_mask),
+        np.asarray(payload_b.source_particle_mask),
+    )
+
+    acc_a_0 = np.asarray(fmm_a.evaluate_prepared_state(state_a))
+    acc_a_1 = np.asarray(fmm_a.evaluate_prepared_state(state_a))
+    acc_b_0 = np.asarray(fmm_b.evaluate_prepared_state(state_b))
+    abs_err = np.abs(acc_b_0 - acc_a_0)
+    max_abs_err = float(abs_err.max(initial=0.0))
+    denom = np.maximum(np.abs(acc_a_0), 1e-8)
+    max_rel_err = float((abs_err / denom).max(initial=0.0))
+    assert np.array_equal(acc_a_0, acc_a_1)
+    assert np.allclose(
+        acc_b_0,
+        acc_a_0,
+        rtol=5e-6,
+        atol=5e-6,
+    ), (
+        "fixed-seed repeatability drift exceeded tolerance: "
+        f"max_abs_err={max_abs_err:.6e}, max_rel_err={max_rel_err:.6e}"
+    )
+
+
 def test_prepare_state_reuses_cached_interactions_when_inputs_match():
     key = jax.random.PRNGKey(123)
     num_particles = 32
@@ -1911,7 +2238,7 @@ def test_fast_preset_adaptive_class_major_threshold():
 
 
 def test_adaptive_nearfield_edge_chunk_size_auto_policy(monkeypatch):
-    fmm = FastMultipoleMethod(
+    fmm_cpu = FastMultipoleMethod(
         preset=FMMPreset.FAST,
         expansion_basis="solidfmm",
         complex_rotation="solidfmm",
@@ -1922,32 +2249,65 @@ def test_adaptive_nearfield_edge_chunk_size_auto_policy(monkeypatch):
     monkeypatch.setattr(jax, "default_backend", lambda: "cpu")
 
     assert (
-        fmm._resolve_nearfield_edge_chunk_size(
+        fmm_cpu._resolve_nearfield_edge_chunk_size(
             num_particles=131072,
             nearfield_mode="baseline",
         )
         == 256
     )
     assert (
-        fmm._resolve_nearfield_edge_chunk_size(
+        fmm_cpu._resolve_nearfield_edge_chunk_size(
             num_particles=262144,
             nearfield_mode="bucketed",
         )
         == 1024
     )
     assert (
-        fmm._resolve_nearfield_edge_chunk_size(
+        fmm_cpu._resolve_nearfield_edge_chunk_size(
             num_particles=1000000,
             nearfield_mode="bucketed",
         )
         == 2048
     )
     assert (
-        fmm._resolve_nearfield_edge_chunk_size(
+        fmm_cpu._resolve_nearfield_edge_chunk_size(
             num_particles=2000000,
             nearfield_mode="bucketed",
         )
         == 4096
+    )
+
+    fmm_gpu = FastMultipoleMethod(
+        preset=FMMPreset.LARGE_N_GPU,
+        expansion_basis="solidfmm",
+        complex_rotation="solidfmm",
+        nearfield_mode="auto",
+        nearfield_edge_chunk_size=128,
+    )
+    monkeypatch.setattr(jax, "default_backend", lambda: "gpu")
+
+    assert fmm_gpu._resolve_nearfield_mode(num_particles=131072) == "baseline"
+    assert fmm_gpu._resolve_nearfield_mode(num_particles=262144) == "bucketed"
+    assert (
+        fmm_gpu._resolve_nearfield_edge_chunk_size(
+            num_particles=131072,
+            nearfield_mode="baseline",
+        )
+        == 128
+    )
+    assert (
+        fmm_gpu._resolve_nearfield_edge_chunk_size(
+            num_particles=262144,
+            nearfield_mode="bucketed",
+        )
+        == 256
+    )
+    assert (
+        fmm_gpu._resolve_nearfield_edge_chunk_size(
+            num_particles=1000000,
+            nearfield_mode="bucketed",
+        )
+        == 256
     )
 
 
