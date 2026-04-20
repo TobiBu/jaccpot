@@ -500,10 +500,18 @@ def prepare_large_n_state(
             fallback_batch_scan_unroll=int(target_batch_scan_unroll),
         )
 
+    state_neighbor_list = neighbor_payload
+    if bool(execution_config.radix_fast_lane):
+        # Memory trim for radix fast lane:
+        # neighbor_leaf_positions duplicates information recoverable from
+        # offsets+neighbors and is not needed by the fast-lane accel path.
+        # Keep it out of prepared state to reduce resident memory.
+        state_neighbor_list = neighbor_payload._replace(neighbor_leaf_positions=None)
+
     return LargeNPreparedState(
         tree=tree_artifacts.tree,
         local_data=dual_downward_artifacts.downward.locals,
-        neighbor_list=dual_downward_artifacts.neighbor_list,
+        neighbor_list=state_neighbor_list,
         nearfield_leaf_particle_indices=leaf_particle_indices,
         nearfield_leaf_particle_mask=leaf_particle_mask,
         nearfield_target_leaf_ids=nearfield_artifacts.target_leaf_ids,
