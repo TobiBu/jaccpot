@@ -121,8 +121,12 @@ def _load_yggdrax_symbols() -> dict[str, Any]:
 
 
 def _load_large_n_runtime_symbols() -> dict[str, Any]:
-    from jaccpot.runtime._large_n_farfield import evaluate_large_n_farfield  # noqa: E402
-    from jaccpot.runtime._large_n_nearfield import evaluate_large_n_nearfield  # noqa: E402
+    from jaccpot.runtime._large_n_farfield import (  # noqa: E402
+        evaluate_large_n_farfield,
+    )
+    from jaccpot.runtime._large_n_nearfield import (  # noqa: E402
+        evaluate_large_n_nearfield,
+    )
     from jaccpot.runtime._large_n_types import LargeNPreparedState  # noqa: E402
 
     return {
@@ -172,9 +176,7 @@ def _load_nearfield_symbols() -> dict[str, Any]:
         "_reduce_pair_bucket_by_target_leaf": _reduce_pair_bucket_by_target_leaf,
         "_scatter_contributions": _scatter_contributions,
         "collect_radix_fast_lane_counters": collect_radix_fast_lane_counters,
-        "pallas_nearfield_tile_pair_supported": (
-            pallas_nearfield_tile_pair_supported
-        ),
+        "pallas_nearfield_tile_pair_supported": (pallas_nearfield_tile_pair_supported),
         "nearfield_unique_updates_backend": nearfield_unique_updates_backend,
         "pack_unique_particle_vector_updates": pack_unique_particle_vector_updates,
         "pallas_nearfield_unique_updates_supported": (
@@ -321,16 +323,20 @@ def _prepared_state_total_mb(state: Any) -> float:
     return float(total_bytes) / (1024**2)
 
 
-def _resolved_nearfield_runtime_report(fmm: Any, *, num_particles: int) -> dict[str, Any]:
+def _resolved_nearfield_runtime_report(
+    fmm: Any, *, num_particles: int
+) -> dict[str, Any]:
     impl = getattr(fmm, "_impl", None)
     if impl is None:
         return {
             "resolved_nearfield_mode": None,
             "resolved_nearfield_edge_chunk_size": None,
         }
-    nearfield_mode = str(
-        impl._resolve_nearfield_mode(num_particles=int(num_particles))
-    ).strip().lower()
+    nearfield_mode = (
+        str(impl._resolve_nearfield_mode(num_particles=int(num_particles)))
+        .strip()
+        .lower()
+    )
     nearfield_edge_chunk_size = int(
         impl._resolve_nearfield_edge_chunk_size(
             num_particles=int(num_particles),
@@ -1154,10 +1160,12 @@ def _device_autotune_signature(
         "num_particles": int(num_particles),
         "tree_type": str(cfg.get("tree_type", "")),
         "farfield_mode": str(cfg.get("farfield_mode", "")),
-        "benchmark_scope": str(cfg.get("benchmark_scope", "steady_eval")).strip().lower(),
-        "worker_autotune_objective": str(
-            cfg.get("worker_autotune_objective", "")
-        ).strip().lower(),
+        "benchmark_scope": str(cfg.get("benchmark_scope", "steady_eval"))
+        .strip()
+        .lower(),
+        "worker_autotune_objective": str(cfg.get("worker_autotune_objective", ""))
+        .strip()
+        .lower(),
     }
     return hashlib.sha256(
         json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
@@ -1456,9 +1464,7 @@ def _worker_autotune_runtime_kwargs(
     benchmark_scope = str(cfg.get("benchmark_scope", "steady_eval")).strip().lower()
     if benchmark_scope not in ("steady_eval", "full"):
         benchmark_scope = "steady_eval"
-    autotune_objective = str(
-        cfg.get("worker_autotune_objective", "")
-    ).strip().lower()
+    autotune_objective = str(cfg.get("worker_autotune_objective", "")).strip().lower()
     if autotune_objective not in ("prepare", "steady_eval", "full"):
         if autotune_default:
             autotune_objective = benchmark_scope
@@ -2959,7 +2965,9 @@ def _run_nearfield_components_case(
                     )
                 )
                 reduced_tgt_ids = leaf_particle_idx[reduced_tgt_leaf_local]
-                reduced_tgt_mask = leaf_mask[reduced_tgt_leaf_local] & reduced_valid[:, None]
+                reduced_tgt_mask = (
+                    leaf_mask[reduced_tgt_leaf_local] & reduced_valid[:, None]
+                )
                 return scatter_contributions(
                     acc_in,
                     reduced_tgt_ids,
@@ -3056,7 +3064,9 @@ def _run_nearfield_components_case(
                     )
                 )
                 compact_tgt_ids = leaf_particle_idx[compact_tgt_leaf_local]
-                compact_tgt_mask = leaf_mask[compact_tgt_leaf_local] & compact_valid[:, None]
+                compact_tgt_mask = (
+                    leaf_mask[compact_tgt_leaf_local] & compact_valid[:, None]
+                )
                 return scatter_contributions(
                     acc_in,
                     compact_tgt_ids,
@@ -3151,7 +3161,9 @@ def _run_nearfield_components_case(
                     )
                 )
                 reduced_tgt_ids = leaf_particle_idx[reduced_tgt_leaf_local]
-                reduced_tgt_mask = leaf_mask[reduced_tgt_leaf_local] & reduced_valid[:, None]
+                reduced_tgt_mask = (
+                    leaf_mask[reduced_tgt_leaf_local] & reduced_valid[:, None]
+                )
                 flat_indices = reduced_tgt_ids.reshape(-1, 1)
                 flat_values = reduced_pair_acc.reshape(-1, reduced_pair_acc.shape[-1])
                 flat_mask = reduced_tgt_mask.reshape(-1)
@@ -3255,7 +3267,9 @@ def _run_nearfield_components_case(
                     )
                 )
                 compact_tgt_ids = leaf_particle_idx[compact_tgt_leaf_local]
-                compact_tgt_mask = leaf_mask[compact_tgt_leaf_local] & compact_valid[:, None]
+                compact_tgt_mask = (
+                    leaf_mask[compact_tgt_leaf_local] & compact_valid[:, None]
+                )
                 return scatter_contributions(
                     acc_in,
                     compact_tgt_ids,
@@ -3581,7 +3595,9 @@ def _run_nearfield_components_case(
 
             target_acc, _ = jax.lax.scan(
                 _source_body,
-                jnp.zeros((leaf_size_local, positions_sorted.shape[-1]), dtype=dtype_local),
+                jnp.zeros(
+                    (leaf_size_local, positions_sorted.shape[-1]), dtype=dtype_local
+                ),
                 slots,
             )
             return (leaf_acc.at[target_idx].set(target_acc), None)
@@ -3783,7 +3799,12 @@ def _run_nearfield_components_case(
                 # target-leaf variants.
                 tgt_pos_block = jnp.broadcast_to(
                     tgt_pos[:, None, :, :],
-                    (target_batch_local, neighbor_block_local, leaf_size_local, tgt_pos.shape[-1]),
+                    (
+                        target_batch_local,
+                        neighbor_block_local,
+                        leaf_size_local,
+                        tgt_pos.shape[-1],
+                    ),
                 ).reshape(-1, leaf_size_local, tgt_pos.shape[-1])
                 tgt_mask_block = jnp.broadcast_to(
                     tgt_mask[:, None, :],
@@ -3872,7 +3893,9 @@ def _run_nearfield_components_case(
 
         num_particles = int(positions_sorted.shape[0])
         num_tiles = (num_particles + tile_local - 1) // tile_local
-        tile_acc0 = jnp.zeros((num_tiles, tile_local, positions_sorted.shape[-1]), dtype=dtype_local)
+        tile_acc0 = jnp.zeros(
+            (num_tiles, tile_local, positions_sorted.shape[-1]), dtype=dtype_local
+        )
         if edge_count_local == 0:
             return tile_acc0.reshape(-1, positions_sorted.shape[-1])[:num_particles]
 
@@ -4087,10 +4110,14 @@ def _run_nearfield_components_case(
                 src_leaf_local = jnp.where(valid_edge, src_leaf, 0)
 
                 tgt_pos_tiles = leaf_pos_tiles[tgt_leaf_local]
-                tgt_mask_tiles = leaf_mask_tiles[tgt_leaf_local] & valid_edge[:, None, None]
+                tgt_mask_tiles = (
+                    leaf_mask_tiles[tgt_leaf_local] & valid_edge[:, None, None]
+                )
                 src_pos_tiles = leaf_pos_tiles[src_leaf_local]
                 src_mass_tiles = leaf_mass_tiles[src_leaf_local]
-                src_mask_tiles = leaf_mask_tiles[src_leaf_local] & valid_edge[:, None, None]
+                src_mask_tiles = (
+                    leaf_mask_tiles[src_leaf_local] & valid_edge[:, None, None]
+                )
 
                 batch_tgt_pos = jnp.broadcast_to(
                     tgt_pos_tiles[:, :, None, :, :],
@@ -4318,10 +4345,14 @@ def _run_nearfield_components_case(
                 src_leaf_local = jnp.where(valid_edge, src_leaf, 0)
 
                 tgt_pos_tiles = leaf_pos_tiles[tgt_leaf_local]
-                tgt_mask_tiles = leaf_mask_tiles[tgt_leaf_local] & valid_edge[:, None, None]
+                tgt_mask_tiles = (
+                    leaf_mask_tiles[tgt_leaf_local] & valid_edge[:, None, None]
+                )
                 src_pos_tiles = leaf_pos_tiles[src_leaf_local]
                 src_mass_tiles = leaf_mass_tiles[src_leaf_local]
-                src_mask_tiles = leaf_mask_tiles[src_leaf_local] & valid_edge[:, None, None]
+                src_mask_tiles = (
+                    leaf_mask_tiles[src_leaf_local] & valid_edge[:, None, None]
+                )
 
                 batch_tgt_pos = tgt_pos_tiles.reshape(
                     -1,
@@ -4330,7 +4361,9 @@ def _run_nearfield_components_case(
                 )
                 batch_tgt_mask = tgt_mask_tiles.reshape(-1, tile_local)
 
-                def _src_tile_body(tile_acc_flat: Any, src_tile_idx: Any) -> tuple[Any, None]:
+                def _src_tile_body(
+                    tile_acc_flat: Any, src_tile_idx: Any
+                ) -> tuple[Any, None]:
                     src_pos_one = src_pos_tiles[:, src_tile_idx, :, :]
                     src_mass_one = src_mass_tiles[:, src_tile_idx, :]
                     src_mask_one = src_mask_tiles[:, src_tile_idx, :]
@@ -4369,7 +4402,8 @@ def _run_nearfield_components_case(
                         batch_src_mask,
                     )
                     return (
-                        tile_acc_flat + contrib.reshape(
+                        tile_acc_flat
+                        + contrib.reshape(
                             chunk_local,
                             tile_count,
                             tile_local,
@@ -4546,7 +4580,9 @@ def _run_nearfield_components_case(
                     )
                 )
                 reduced_tgt_ids = leaf_particle_idx[reduced_tgt_leaf_local]
-                reduced_tgt_mask = leaf_mask[reduced_tgt_leaf_local] & reduced_valid[:, None]
+                reduced_tgt_mask = (
+                    leaf_mask[reduced_tgt_leaf_local] & reduced_valid[:, None]
+                )
                 return reduced_tgt_ids, reduced_pair_acc, reduced_tgt_mask
 
             super_ids, super_values, super_mask = jax.vmap(_chunk_probe)(super_offsets)
@@ -4554,7 +4590,9 @@ def _run_nearfield_components_case(
                 scatter_contributions(
                     acc,
                     super_ids.reshape(-1, super_ids.shape[-1]),
-                    super_values.reshape(-1, super_values.shape[-2], super_values.shape[-1]),
+                    super_values.reshape(
+                        -1, super_values.shape[-2], super_values.shape[-1]
+                    ),
                     super_mask.reshape(-1, super_mask.shape[-1]),
                 ),
                 None,
@@ -4650,7 +4688,9 @@ def _run_nearfield_components_case(
                     )
                 )
                 reduced_tgt_ids = leaf_particle_idx[reduced_tgt_leaf_local]
-                reduced_tgt_mask = leaf_mask[reduced_tgt_leaf_local] & reduced_valid[:, None]
+                reduced_tgt_mask = (
+                    leaf_mask[reduced_tgt_leaf_local] & reduced_valid[:, None]
+                )
                 return reduced_tgt_ids, reduced_pair_acc, reduced_tgt_mask
 
             super_ids, super_values, super_mask = jax.vmap(_chunk_probe)(super_offsets)
@@ -4745,7 +4785,9 @@ def _run_nearfield_components_case(
                     )
                 )
                 reduced_tgt_ids = leaf_particle_idx[reduced_tgt_leaf_local]
-                reduced_tgt_mask = leaf_mask[reduced_tgt_leaf_local] & reduced_valid[:, None]
+                reduced_tgt_mask = (
+                    leaf_mask[reduced_tgt_leaf_local] & reduced_valid[:, None]
+                )
                 return (
                     total_in
                     + jnp.sum(reduced_pair_acc, dtype=dtype_local)
@@ -4777,11 +4819,18 @@ def _run_nearfield_components_case(
         positions_sorted = jnp.asarray(prepared_state.positions_sorted)
         masses_sorted = jnp.asarray(prepared_state.masses_sorted)
         node_ranges = jnp.asarray(prepared_state.tree.node_ranges, dtype=INDEX_DTYPE)
-        leaf_nodes = jnp.asarray(prepared_state.neighbor_list.leaf_indices, dtype=INDEX_DTYPE)
+        leaf_nodes = jnp.asarray(
+            prepared_state.neighbor_list.leaf_indices, dtype=INDEX_DTYPE
+        )
         offsets = jnp.asarray(prepared_state.neighbor_list.offsets, dtype=INDEX_DTYPE)
-        neighbors = jnp.asarray(prepared_state.neighbor_list.neighbors, dtype=INDEX_DTYPE)
+        neighbors = jnp.asarray(
+            prepared_state.neighbor_list.neighbors, dtype=INDEX_DTYPE
+        )
 
-        if prepared_state.nearfield_target_leaf_ids is None or prepared_state.nearfield_valid_pairs is None:
+        if (
+            prepared_state.nearfield_target_leaf_ids is None
+            or prepared_state.nearfield_valid_pairs is None
+        ):
             target_leaf_ids, source_leaf_ids, valid_pairs = prepare_leaf_neighbor_pairs(
                 node_ranges,
                 leaf_nodes,
@@ -4830,7 +4879,9 @@ def _run_nearfield_components_case(
             (
                 jnp.asarray(leaf_particle_mask, dtype=bool)
                 if leaf_particle_mask is not None
-                else jnp.ones_like(jnp.asarray(leaf_particle_indices, dtype=INDEX_DTYPE), dtype=bool)
+                else jnp.ones_like(
+                    jnp.asarray(leaf_particle_indices, dtype=INDEX_DTYPE), dtype=bool
+                )
             ),
             positions_sorted,
             masses_sorted,
@@ -4855,20 +4906,26 @@ def _run_nearfield_components_case(
         positions_sorted = jnp.asarray(prepared_state.positions_sorted)
         masses_sorted = jnp.asarray(prepared_state.masses_sorted)
         node_ranges = jnp.asarray(prepared_state.tree.node_ranges, dtype=INDEX_DTYPE)
-        leaf_nodes = jnp.asarray(prepared_state.neighbor_list.leaf_indices, dtype=INDEX_DTYPE)
+        leaf_nodes = jnp.asarray(
+            prepared_state.neighbor_list.leaf_indices, dtype=INDEX_DTYPE
+        )
         offsets = jnp.asarray(prepared_state.neighbor_list.offsets, dtype=INDEX_DTYPE)
-        neighbors = jnp.asarray(prepared_state.neighbor_list.neighbors, dtype=INDEX_DTYPE)
+        neighbors = jnp.asarray(
+            prepared_state.neighbor_list.neighbors, dtype=INDEX_DTYPE
+        )
 
         if (
             prepared_state.nearfield_source_leaf_ids is None
             or prepared_state.nearfield_valid_pairs is None
         ):
-            _target_leaf_ids, source_leaf_ids, valid_pairs = prepare_leaf_neighbor_pairs(
-                node_ranges,
-                leaf_nodes,
-                offsets,
-                neighbors,
-                sort_by_source=False,
+            _target_leaf_ids, source_leaf_ids, valid_pairs = (
+                prepare_leaf_neighbor_pairs(
+                    node_ranges,
+                    leaf_nodes,
+                    offsets,
+                    neighbors,
+                    sort_by_source=False,
+                )
             )
         else:
             source_leaf_ids = jnp.asarray(
@@ -5039,9 +5096,9 @@ def _run_nearfield_components_case(
         and prepared_state.nearfield_chunk_sort_indices is None
         and prepared_state.nearfield_chunk_group_ids is None
         and prepared_state.nearfield_chunk_unique_indices is None
-        and str(
-            os.environ.get("JACCPOT_DISABLE_LARGE_N_SPECIALIZED_NEARFIELD", "0")
-        ).strip().lower()
+        and str(os.environ.get("JACCPOT_DISABLE_LARGE_N_SPECIALIZED_NEARFIELD", "0"))
+        .strip()
+        .lower()
         not in {"1", "true", "yes", "on"}
     )
     row["specialized_path_active"] = bool(specialized_path_active)

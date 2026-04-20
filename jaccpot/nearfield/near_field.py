@@ -58,12 +58,18 @@ def collect_radix_fast_lane_counters(
     scatter_bytes = int(target_slot_count * 3 * accel_itemsize)
     scatter_ops = int(target_slot_count)
 
-    num_target_leaves = int(target_particle_ids.shape[0]) if target_particle_ids.ndim >= 1 else 0
-    num_source_slots = int(source_particle_ids.shape[1]) if source_particle_ids.ndim >= 2 else 0
+    num_target_leaves = (
+        int(target_particle_ids.shape[0]) if target_particle_ids.ndim >= 1 else 0
+    )
+    num_source_slots = (
+        int(source_particle_ids.shape[1]) if source_particle_ids.ndim >= 2 else 0
+    )
     target_batch_size = max(1, int(getattr(payload, "batch_tile_t", 1)))
     source_slot_tile_size = max(1, int(getattr(payload, "batch_tile_s", 1)))
     target_batches = (num_target_leaves + target_batch_size - 1) // target_batch_size
-    source_slot_tiles = (num_source_slots + source_slot_tile_size - 1) // source_slot_tile_size
+    source_slot_tiles = (
+        num_source_slots + source_slot_tile_size - 1
+    ) // source_slot_tile_size
 
     return RadixFastLanePerfCounters(
         gather_bytes=gather_bytes,
@@ -478,8 +484,8 @@ def _scatter_contributions_grouped_sorted(
     )
     group_ids = jnp.cumsum(is_new.astype(INDEX_DTYPE)) - as_index(1)
     reduced = jax.ops.segment_sum(masked_values, group_ids, item_count)
-    unique_indices = jnp.zeros((item_count,), dtype=INDEX_DTYPE).at[group_ids].set(
-        flat_indices
+    unique_indices = (
+        jnp.zeros((item_count,), dtype=INDEX_DTYPE).at[group_ids].set(flat_indices)
     )
     return base_acc.at[unique_indices].add(reduced, indices_are_sorted=True)
 
@@ -600,8 +606,10 @@ def _reduce_pair_bucket_by_target_leaf(
         group_ids,
         chunk,
     )
-    reduced_target_leaf_ids = jnp.zeros((chunk,), dtype=INDEX_DTYPE).at[group_ids].set(
-        jnp.where(valid_edge, target_leaf_ids, 0)
+    reduced_target_leaf_ids = (
+        jnp.zeros((chunk,), dtype=INDEX_DTYPE)
+        .at[group_ids]
+        .set(jnp.where(valid_edge, target_leaf_ids, 0))
     )
     reduced_valid = jnp.zeros((chunk,), dtype=bool).at[group_ids].set(valid_edge)
     return reduced_target_leaf_ids, reduced_pair_acc, reduced_valid
@@ -722,6 +730,7 @@ def _compute_leaf_p2p_prepared_large_n_pairs_only_impl(
 
     chunk_offsets = jnp.arange(chunk, dtype=INDEX_DTYPE)
     starts = jnp.arange(0, edge_count, chunk, dtype=INDEX_DTYPE)
+
     def _chunk_probe_from_start(
         start: Array, active: Array
     ) -> tuple[Array, Array, Array, Array]:
@@ -760,7 +769,12 @@ def _compute_leaf_p2p_prepared_large_n_pairs_only_impl(
         )
         reduced_tgt_ids = leaf_particle_idx[reduced_tgt_leaf_local]
         reduced_tgt_mask = leaf_mask[reduced_tgt_leaf_local] & reduced_valid[:, None]
-        return reduced_tgt_leaf_local, reduced_tgt_ids, reduced_pair_acc, reduced_tgt_mask
+        return (
+            reduced_tgt_leaf_local,
+            reduced_tgt_ids,
+            reduced_pair_acc,
+            reduced_tgt_mask,
+        )
 
     if superchunk == 1 and scan_batch == 1:
         if sorted_scatter_hint:
@@ -821,10 +835,14 @@ def _compute_leaf_p2p_prepared_large_n_pairs_only_impl(
         if superchunk_target_reduce and superchunk > 1:
             flat_valid = jnp.any(super_mask, axis=-1).reshape(-1)
             flat_tgt_leaf = super_leaf.reshape(-1)
-            reduced_leaf, reduced_values, reduced_valid = _reduce_pair_bucket_by_target_leaf(
-                flat_tgt_leaf,
-                flat_valid,
-                super_values.reshape(-1, super_values.shape[-2], super_values.shape[-1]),
+            reduced_leaf, reduced_values, reduced_valid = (
+                _reduce_pair_bucket_by_target_leaf(
+                    flat_tgt_leaf,
+                    flat_valid,
+                    super_values.reshape(
+                        -1, super_values.shape[-2], super_values.shape[-1]
+                    ),
+                )
             )
             reduced_ids = leaf_particle_idx[reduced_leaf]
             reduced_mask = leaf_mask[reduced_leaf] & reduced_valid[:, None]
@@ -906,10 +924,18 @@ def _accumulate_target_block_tile_sequence(
         src_mass = leaf_masses[safe_src_leaf_ids]
         src_mask = leaf_mask[safe_src_leaf_ids] & tile_source_valid[:, :, :, None]
 
-        flat_src_pos = src_pos.reshape((leaf_batch * block_tile * block_size, leaf_size, 3))
-        flat_src_mass = src_mass.reshape((leaf_batch * block_tile * block_size, leaf_size))
-        flat_src_mask = src_mask.reshape((leaf_batch * block_tile * block_size, leaf_size))
-        flat_pair_valid = tile_source_valid.reshape((leaf_batch * block_tile * block_size))
+        flat_src_pos = src_pos.reshape(
+            (leaf_batch * block_tile * block_size, leaf_size, 3)
+        )
+        flat_src_mass = src_mass.reshape(
+            (leaf_batch * block_tile * block_size, leaf_size)
+        )
+        flat_src_mask = src_mask.reshape(
+            (leaf_batch * block_tile * block_size, leaf_size)
+        )
+        flat_pair_valid = tile_source_valid.reshape(
+            (leaf_batch * block_tile * block_size)
+        )
         flat_target_mask = flat_target_mask_base & flat_pair_valid[:, None]
 
         pair_acc, _ = _pair_contributions_batched(
@@ -1128,7 +1154,9 @@ def _compute_leaf_p2p_prepared_large_n_pairs_target_blocks_impl(
         safe_block_idx = jnp.where(in_tile, block_idx, 0)
 
         tile_source_ids_seq = block_source_leaf_ids[safe_block_idx]
-        tile_source_valid_seq = block_valid_mask[safe_block_idx] & in_tile[:, :, :, None]
+        tile_source_valid_seq = (
+            block_valid_mask[safe_block_idx] & in_tile[:, :, :, None]
+        )
 
         target_leaf_acc = _accumulate_target_block_tile_sequence(
             target_pos,
@@ -2572,9 +2600,8 @@ def compute_leaf_p2p_accelerations(
         # order used by prepared state. Re-derive leaf-pair vectors in that same
         # order so bucketed scans stay aligned with the schedule buffers.
         sort_by_source = not bool(collect_neighbor_pairs)
-        if (
-            str(nearfield_mode).strip().lower() == "bucketed"
-            and not bool(use_precomputed_scatter)
+        if str(nearfield_mode).strip().lower() == "bucketed" and not bool(
+            use_precomputed_scatter
         ):
             # The minimum-memory large-N GPU path uses direct scatter in the
             # bucketed loop, so preserving target-local edge order improves
@@ -2752,7 +2779,9 @@ def _compute_radix_fast_lane_payload_pairs_impl(
         safe_target_leaf_ids = jnp.where(target_active, target_leaf_ids, 0)
 
         batch_target_ids = target_particle_ids[safe_target_leaf_ids]
-        batch_target_mask = target_particle_mask[safe_target_leaf_ids] & target_active[:, None]
+        batch_target_mask = (
+            target_particle_mask[safe_target_leaf_ids] & target_active[:, None]
+        )
         batch_target_pos = positions[batch_target_ids]
 
         batch_source_ids_all = source_particle_ids[safe_target_leaf_ids]
@@ -2786,16 +2815,19 @@ def _compute_radix_fast_lane_payload_pairs_impl(
                 batch_source_slot_valid_all[:, safe_slot_ids] & in_slot[None, :]
             )
             tile_source_mask = (
-                batch_source_mask_all[:, safe_slot_ids, :]
-                & tile_slot_valid[:, :, None]
+                batch_source_mask_all[:, safe_slot_ids, :] & tile_slot_valid[:, :, None]
             )
 
             src_pos = positions[tile_source_ids]
             src_mass = masses[tile_source_ids]
 
-            flat_src_pos = src_pos.reshape((leaf_batch * slot_tile, source_leaf_size, 3))
+            flat_src_pos = src_pos.reshape(
+                (leaf_batch * slot_tile, source_leaf_size, 3)
+            )
             flat_src_mass = src_mass.reshape((leaf_batch * slot_tile, source_leaf_size))
-            flat_src_mask = tile_source_mask.reshape((leaf_batch * slot_tile, source_leaf_size))
+            flat_src_mask = tile_source_mask.reshape(
+                (leaf_batch * slot_tile, source_leaf_size)
+            )
             flat_slot_valid = tile_slot_valid.reshape((leaf_batch * slot_tile,))
             flat_target_mask = flat_target_mask_base & flat_slot_valid[:, None]
 
@@ -2887,27 +2919,33 @@ def compute_leaf_p2p_accelerations_radix_fast_lane(
         # Migration fallback: retain previous prepacked source-leaf path when
         # source-particle payload tensors are not provisioned.
         source_leaf_ids_padded = jnp.asarray(payload.source_leaf_ids, dtype=INDEX_DTYPE)
-        source_valid_mask_padded = jnp.asarray(payload.source_leaf_valid_mask, dtype=bool)
+        source_valid_mask_padded = jnp.asarray(
+            payload.source_leaf_valid_mask, dtype=bool
+        )
         tile_scan_unroll = max(1, int(getattr(payload, "fallback_tile_scan_unroll", 1)))
-        batch_scan_unroll = max(1, int(getattr(payload, "fallback_batch_scan_unroll", 1)))
+        batch_scan_unroll = max(
+            1, int(getattr(payload, "fallback_batch_scan_unroll", 1))
+        )
         fallback_block_tile_size = max(
             1,
             int(getattr(payload, "fallback_block_tile_size", 8)),
         )
-        pair_acc = _compute_leaf_p2p_prepared_large_n_pairs_target_blocks_prepacked_impl(
-            positions,
-            source_leaf_ids_padded,
-            source_valid_mask_padded,
-            leaf_positions,
-            leaf_masses,
-            leaf_mask,
-            leaf_particle_idx,
-            G=G,
-            softening_sq=softening_sq,
-            target_leaf_batch_size=int(payload.batch_tile_t),
-            target_block_tile_size=int(fallback_block_tile_size),
-            target_block_tile_scan_unroll=int(tile_scan_unroll),
-            target_block_batch_scan_unroll=int(batch_scan_unroll),
+        pair_acc = (
+            _compute_leaf_p2p_prepared_large_n_pairs_target_blocks_prepacked_impl(
+                positions,
+                source_leaf_ids_padded,
+                source_valid_mask_padded,
+                leaf_positions,
+                leaf_masses,
+                leaf_mask,
+                leaf_particle_idx,
+                G=G,
+                softening_sq=softening_sq,
+                target_leaf_batch_size=int(payload.batch_tile_t),
+                target_block_tile_size=int(fallback_block_tile_size),
+                target_block_tile_scan_unroll=int(tile_scan_unroll),
+                target_block_batch_scan_unroll=int(batch_scan_unroll),
+            )
         )
         return self_acc + pair_acc
 
@@ -3034,21 +3072,35 @@ def compute_leaf_p2p_accelerations_large_n_accel_only(
 
     softening_sq = jnp.asarray(float(softening) ** 2, dtype=positions.dtype)
     delayed_scatter_chunks_per_superchunk = int(
-        1 if delayed_scatter_chunks_per_superchunk is None else delayed_scatter_chunks_per_superchunk
+        1
+        if delayed_scatter_chunks_per_superchunk is None
+        else delayed_scatter_chunks_per_superchunk
     )
-    chunk_scan_batch_size = int(1 if chunk_scan_batch_size is None else chunk_scan_batch_size)
+    chunk_scan_batch_size = int(
+        1 if chunk_scan_batch_size is None else chunk_scan_batch_size
+    )
     chunk_scan_unroll = int(1 if chunk_scan_unroll is None else chunk_scan_unroll)
-    superchunk_scan_unroll = int(1 if superchunk_scan_unroll is None else superchunk_scan_unroll)
-    sorted_scatter_hint = bool(False if sorted_scatter_hint is None else sorted_scatter_hint)
+    superchunk_scan_unroll = int(
+        1 if superchunk_scan_unroll is None else superchunk_scan_unroll
+    )
+    sorted_scatter_hint = bool(
+        False if sorted_scatter_hint is None else sorted_scatter_hint
+    )
     grouped_sorted_scatter = bool(
         False if grouped_sorted_scatter is None else grouped_sorted_scatter
     )
     superchunk_target_reduce = bool(
         False if superchunk_target_reduce is None else superchunk_target_reduce
     )
-    disable_chunk_cond = bool(True if disable_chunk_cond is None else disable_chunk_cond)
-    target_leaf_batch_size = int(32 if target_leaf_batch_size is None else target_leaf_batch_size)
-    target_block_tile_size = int(8 if target_block_tile_size is None else target_block_tile_size)
+    disable_chunk_cond = bool(
+        True if disable_chunk_cond is None else disable_chunk_cond
+    )
+    target_leaf_batch_size = int(
+        32 if target_leaf_batch_size is None else target_leaf_batch_size
+    )
+    target_block_tile_size = int(
+        8 if target_block_tile_size is None else target_block_tile_size
+    )
     target_block_tile_scan_unroll = int(
         1 if target_block_tile_scan_unroll is None else target_block_tile_scan_unroll
     )
@@ -3081,26 +3133,30 @@ def compute_leaf_p2p_accelerations_large_n_accel_only(
             G=G,
             softening_sq=softening_sq,
         )
-        pair_acc = _compute_leaf_p2p_prepared_large_n_pairs_target_blocks_prepacked_impl(
-            positions,
-            jnp.asarray(
-                precomputed_target_block_source_leaf_ids_padded,
-                dtype=INDEX_DTYPE,
-            ),
-            jnp.asarray(precomputed_target_block_valid_mask_padded, dtype=bool),
-            leaf_positions,
-            leaf_masses,
-            leaf_mask,
-            leaf_particle_idx,
-            G=G,
-            softening_sq=softening_sq,
-            target_leaf_batch_size=target_leaf_batch_size,
-            target_block_tile_size=target_block_tile_size,
-            target_block_tile_scan_unroll=target_block_tile_scan_unroll,
-            target_block_batch_scan_unroll=target_block_batch_scan_unroll,
+        pair_acc = (
+            _compute_leaf_p2p_prepared_large_n_pairs_target_blocks_prepacked_impl(
+                positions,
+                jnp.asarray(
+                    precomputed_target_block_source_leaf_ids_padded,
+                    dtype=INDEX_DTYPE,
+                ),
+                jnp.asarray(precomputed_target_block_valid_mask_padded, dtype=bool),
+                leaf_positions,
+                leaf_masses,
+                leaf_mask,
+                leaf_particle_idx,
+                G=G,
+                softening_sq=softening_sq,
+                target_leaf_batch_size=target_leaf_batch_size,
+                target_block_tile_size=target_block_tile_size,
+                target_block_tile_scan_unroll=target_block_tile_scan_unroll,
+                target_block_batch_scan_unroll=target_block_batch_scan_unroll,
+            )
         )
         if use_target_blocks:
-            overflow_block_count = int(precomputed_target_block_source_leaf_ids.shape[0])
+            overflow_block_count = int(
+                precomputed_target_block_source_leaf_ids.shape[0]
+            )
             overflow_pair_kernel = (
                 _compute_leaf_p2p_prepared_large_n_pairs_target_blocks_tiled_impl
                 if overflow_block_count <= target_block_overflow_fast_max_blocks

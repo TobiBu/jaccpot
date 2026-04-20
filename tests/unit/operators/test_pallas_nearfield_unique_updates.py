@@ -5,9 +5,8 @@ from __future__ import annotations
 import importlib.util
 from pathlib import Path
 
-import numpy as np
-
 import jax.numpy as jnp
+import numpy as np
 
 
 def _load_nearfield_unique_updates_module():
@@ -73,7 +72,9 @@ def test_pack_unique_particle_vector_updates_matches_scatter_add():
     masked_values = jnp.where(mask[..., None], values, 0.0)
     scattered = base.at[indices.reshape(-1)].add(masked_values.reshape(-1, 3))
 
-    assert np.allclose(np.asarray(packed), np.asarray(scattered), rtol=1.0e-6, atol=1.0e-6)
+    assert np.allclose(
+        np.asarray(packed), np.asarray(scattered), rtol=1.0e-6, atol=1.0e-6
+    )
 
 
 def test_nearfield_unique_updates_backend_returns_known_value():

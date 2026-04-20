@@ -5,9 +5,8 @@ from __future__ import annotations
 import importlib.util
 from pathlib import Path
 
-import numpy as np
-
 import jax.numpy as jnp
+import numpy as np
 
 
 def _load_nearfield_tile_pair_module():

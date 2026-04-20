@@ -27,7 +27,9 @@ Array = jnp.ndarray
 
 
 @lru_cache(maxsize=None)
-def _conjugate_symmetry_metadata(order: int) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+def _conjugate_symmetry_metadata(
+    order: int,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     """Return packed-index metadata for conjugate-symmetry projection."""
 
     p = int(order)

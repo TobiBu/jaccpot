@@ -14,7 +14,6 @@ import pathlib
 import subprocess
 import sys
 
-
 REPO_ROOT = pathlib.Path(__file__).resolve().parents[1]
 YGGDRAX_ROOT = REPO_ROOT.parent / "yggdrax"
 

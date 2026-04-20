@@ -269,13 +269,11 @@ def test_large_gpu_minimum_memory_streamed_tree_guard_keeps_safe_seed():
         max_neighbors_per_leaf=8_192,
     )
 
-    kept = (
-        fmm_impl_private._cap_minimum_memory_streamed_gpu_traversal_config_for_tree(
-            traversal_config=cfg,
-            total_nodes=65_535,
-            num_leaves=32_768,
-            num_particles=2_097_152,
-        )
+    kept = fmm_impl_private._cap_minimum_memory_streamed_gpu_traversal_config_for_tree(
+        traversal_config=cfg,
+        total_nodes=65_535,
+        num_leaves=32_768,
+        num_particles=2_097_152,
     )
 
     assert kept == cfg

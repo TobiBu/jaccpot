@@ -136,7 +136,11 @@ def resolved_large_n_memory_path_report(fmm: Any) -> dict[str, Any]:
         }
 
     memory_objective = str(getattr(impl, "memory_objective", "")).strip().lower()
-    runtime_path = str(getattr(fmm, "runtime_path", getattr(impl, "runtime_path", "auto"))).strip().lower()
+    runtime_path = (
+        str(getattr(fmm, "runtime_path", getattr(impl, "runtime_path", "auto")))
+        .strip()
+        .lower()
+    )
     streamed_far_pairs = bool(getattr(impl, "streamed_far_pairs", False))
     grouped_interactions = getattr(impl, "grouped_interactions", None)
     grouped_interactions_bool = (

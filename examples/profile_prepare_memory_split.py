@@ -35,22 +35,25 @@ REPO_ROOT = pathlib.Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from jaccpot import FastMultipoleMethod, FMMPreset
+from yggdrax.interactions import build_compact_far_pairs, build_leaf_neighbor_lists
+
 from examples.benchmark_gpu_radix_worker import _build_runtime_config
+from jaccpot import FastMultipoleMethod, FMMPreset
 from jaccpot.runtime._adaptive_policy import (
     adaptive_pair_policy,
     adaptive_policy_tolerance,
 )
 from jaccpot.runtime._fmm_impl import (
+    _build_nearfield_interop_data,
     _cap_minimum_memory_streamed_gpu_traversal_config_for_tree,
 )
-from jaccpot.runtime._fmm_impl import _build_nearfield_interop_data
-from jaccpot.runtime._interaction_cache import _build_dual_tree_artifacts
-from jaccpot.runtime._interaction_cache import _build_dual_tree_artifacts_split
-from jaccpot.runtime._interaction_cache import _can_split_dual_tree_build
-from jaccpot.runtime._interaction_cache import _dual_tree_build_raw
-from jaccpot.runtime._interaction_cache import _dual_tree_unpack_build_output
-from yggdrax.interactions import build_compact_far_pairs, build_leaf_neighbor_lists
+from jaccpot.runtime._interaction_cache import (
+    _build_dual_tree_artifacts,
+    _build_dual_tree_artifacts_split,
+    _can_split_dual_tree_build,
+    _dual_tree_build_raw,
+    _dual_tree_unpack_build_output,
+)
 
 
 @dataclass(frozen=True)
@@ -260,7 +263,11 @@ def _measure_prepare_stage_split(
         gpu_index=int(gpu_index),
         poll_interval_s=float(poll_interval_s),
     )
-    peak_row["retained_bytes"] = int(_tree_nbytes(tree_artifacts_cold)) if tree_artifacts_cold is not None else None
+    peak_row["retained_bytes"] = (
+        int(_tree_nbytes(tree_artifacts_cold))
+        if tree_artifacts_cold is not None
+        else None
+    )
     phase_rows.append(peak_row)
 
     for _ in range(max(0, int(warmup))):
@@ -275,7 +282,11 @@ def _measure_prepare_stage_split(
         gpu_index=int(gpu_index),
         poll_interval_s=float(poll_interval_s),
     )
-    peak_row["retained_bytes"] = int(_tree_nbytes(tree_artifacts_warm)) if tree_artifacts_warm is not None else None
+    peak_row["retained_bytes"] = (
+        int(_tree_nbytes(tree_artifacts_warm))
+        if tree_artifacts_warm is not None
+        else None
+    )
     phase_rows.append(peak_row)
 
     def _raw_dual_tree_policy(tree_artifacts):
@@ -444,7 +455,9 @@ def _measure_prepare_stage_split(
             pair_policy=pair_policy,
             policy_state=policy_state,
         ):
-            raise RuntimeError("split dual-tree far-only build is not eligible for this config")
+            raise RuntimeError(
+                "split dual-tree far-only build is not eligible for this config"
+            )
         traversal_config = _effective_runtime_traversal_config(tree_artifacts)
         return build_compact_far_pairs(
             tree_artifacts.tree,
@@ -471,7 +484,9 @@ def _measure_prepare_stage_split(
             pair_policy=pair_policy,
             policy_state=policy_state,
         ):
-            raise RuntimeError("split dual-tree near-only build is not eligible for this config")
+            raise RuntimeError(
+                "split dual-tree near-only build is not eligible for this config"
+            )
         traversal_cfg = _effective_runtime_traversal_config(tree_artifacts)
         max_neighbors_per_leaf = (
             int(traversal_cfg.max_neighbors_per_leaf)
@@ -492,7 +507,12 @@ def _measure_prepare_stage_split(
         )
 
     def dual_tree_unpack_fn(build_raw_out):
-        build_out, _current_traversal_config, _current_max_pair_queue, _current_pair_process_block = build_raw_out
+        (
+            build_out,
+            _current_traversal_config,
+            _current_max_pair_queue,
+            _current_pair_process_block,
+        ) = build_raw_out
         pair_policy, policy_state, use_paper_fixed_policy = (None, None, False)
         del pair_policy, policy_state
         need_traversal_result = bool(impl.retain_traversal_result) or bool(
@@ -523,7 +543,9 @@ def _measure_prepare_stage_split(
         gpu_index=int(gpu_index),
         poll_interval_s=float(poll_interval_s),
     )
-    peak_row["retained_bytes"] = int(_tree_nbytes(build_raw_cold)) if build_raw_cold is not None else None
+    peak_row["retained_bytes"] = (
+        int(_tree_nbytes(build_raw_cold)) if build_raw_cold is not None else None
+    )
     phase_rows.append(peak_row)
 
     for _ in range(max(0, int(warmup))):
@@ -539,7 +561,9 @@ def _measure_prepare_stage_split(
         gpu_index=int(gpu_index),
         poll_interval_s=float(poll_interval_s),
     )
-    peak_row["retained_bytes"] = int(_tree_nbytes(build_raw_warm)) if build_raw_warm is not None else None
+    peak_row["retained_bytes"] = (
+        int(_tree_nbytes(build_raw_warm)) if build_raw_warm is not None else None
+    )
     phase_rows.append(peak_row)
 
     split_build_cold, peak_row, _, _, _ = _peak_gpu_memory_trace(
@@ -549,7 +573,9 @@ def _measure_prepare_stage_split(
         gpu_index=int(gpu_index),
         poll_interval_s=float(poll_interval_s),
     )
-    peak_row["retained_bytes"] = int(_tree_nbytes(split_build_cold)) if split_build_cold is not None else None
+    peak_row["retained_bytes"] = (
+        int(_tree_nbytes(split_build_cold)) if split_build_cold is not None else None
+    )
     phase_rows.append(peak_row)
 
     for _ in range(max(0, int(warmup))):
@@ -565,7 +591,9 @@ def _measure_prepare_stage_split(
         gpu_index=int(gpu_index),
         poll_interval_s=float(poll_interval_s),
     )
-    peak_row["retained_bytes"] = int(_tree_nbytes(split_build_warm)) if split_build_warm is not None else None
+    peak_row["retained_bytes"] = (
+        int(_tree_nbytes(split_build_warm)) if split_build_warm is not None else None
+    )
     phase_rows.append(peak_row)
 
     split_far_only_cold, peak_row, _, _, _ = _peak_gpu_memory_trace(
@@ -575,7 +603,11 @@ def _measure_prepare_stage_split(
         gpu_index=int(gpu_index),
         poll_interval_s=float(poll_interval_s),
     )
-    peak_row["retained_bytes"] = int(_tree_nbytes(split_far_only_cold)) if split_far_only_cold is not None else None
+    peak_row["retained_bytes"] = (
+        int(_tree_nbytes(split_far_only_cold))
+        if split_far_only_cold is not None
+        else None
+    )
     phase_rows.append(peak_row)
 
     for _ in range(max(0, int(warmup))):
@@ -591,7 +623,11 @@ def _measure_prepare_stage_split(
         gpu_index=int(gpu_index),
         poll_interval_s=float(poll_interval_s),
     )
-    peak_row["retained_bytes"] = int(_tree_nbytes(split_far_only_warm)) if split_far_only_warm is not None else None
+    peak_row["retained_bytes"] = (
+        int(_tree_nbytes(split_far_only_warm))
+        if split_far_only_warm is not None
+        else None
+    )
     phase_rows.append(peak_row)
 
     split_near_only_cold, peak_row, _, _, _ = _peak_gpu_memory_trace(
@@ -601,7 +637,11 @@ def _measure_prepare_stage_split(
         gpu_index=int(gpu_index),
         poll_interval_s=float(poll_interval_s),
     )
-    peak_row["retained_bytes"] = int(_tree_nbytes(split_near_only_cold)) if split_near_only_cold is not None else None
+    peak_row["retained_bytes"] = (
+        int(_tree_nbytes(split_near_only_cold))
+        if split_near_only_cold is not None
+        else None
+    )
     phase_rows.append(peak_row)
 
     for _ in range(max(0, int(warmup))):
@@ -617,7 +657,11 @@ def _measure_prepare_stage_split(
         gpu_index=int(gpu_index),
         poll_interval_s=float(poll_interval_s),
     )
-    peak_row["retained_bytes"] = int(_tree_nbytes(split_near_only_warm)) if split_near_only_warm is not None else None
+    peak_row["retained_bytes"] = (
+        int(_tree_nbytes(split_near_only_warm))
+        if split_near_only_warm is not None
+        else None
+    )
     phase_rows.append(peak_row)
 
     unpack_cold, peak_row, _, _, _ = _peak_gpu_memory_trace(
@@ -627,7 +671,9 @@ def _measure_prepare_stage_split(
         gpu_index=int(gpu_index),
         poll_interval_s=float(poll_interval_s),
     )
-    peak_row["retained_bytes"] = int(_tree_nbytes(unpack_cold)) if unpack_cold is not None else None
+    peak_row["retained_bytes"] = (
+        int(_tree_nbytes(unpack_cold)) if unpack_cold is not None else None
+    )
     phase_rows.append(peak_row)
 
     for _ in range(max(0, int(warmup))):
@@ -643,7 +689,9 @@ def _measure_prepare_stage_split(
         gpu_index=int(gpu_index),
         poll_interval_s=float(poll_interval_s),
     )
-    peak_row["retained_bytes"] = int(_tree_nbytes(unpack_warm)) if unpack_warm is not None else None
+    peak_row["retained_bytes"] = (
+        int(_tree_nbytes(unpack_warm)) if unpack_warm is not None else None
+    )
     phase_rows.append(peak_row)
 
     def raw_dual_tree_fn(tree_artifacts):
@@ -705,7 +753,9 @@ def _measure_prepare_stage_split(
         gpu_index=int(gpu_index),
         poll_interval_s=float(poll_interval_s),
     )
-    peak_row["retained_bytes"] = int(_tree_nbytes(raw_dual_cold)) if raw_dual_cold is not None else None
+    peak_row["retained_bytes"] = (
+        int(_tree_nbytes(raw_dual_cold)) if raw_dual_cold is not None else None
+    )
     phase_rows.append(peak_row)
 
     for _ in range(max(0, int(warmup))):
@@ -721,7 +771,9 @@ def _measure_prepare_stage_split(
         gpu_index=int(gpu_index),
         poll_interval_s=float(poll_interval_s),
     )
-    peak_row["retained_bytes"] = int(_tree_nbytes(raw_dual_warm)) if raw_dual_warm is not None else None
+    peak_row["retained_bytes"] = (
+        int(_tree_nbytes(raw_dual_warm)) if raw_dual_warm is not None else None
+    )
     phase_rows.append(peak_row)
 
     def downward_only_fn(tree_artifacts, raw_dual_artifacts):
@@ -752,9 +804,11 @@ def _measure_prepare_stage_split(
             p_gears_for_downward=far_pair_plan.p_gears_for_downward,
             runtime_m2l_chunk_size=ctx["runtime_m2l_chunk_size"],
         )
-        interactions_for_downward = impl._prepare_state_select_interactions_for_downward(
-            interactions=interactions,
-            far_pairs_coo=far_pair_plan.far_pairs_coo,
+        interactions_for_downward = (
+            impl._prepare_state_select_interactions_for_downward(
+                interactions=interactions,
+                far_pairs_coo=far_pair_plan.far_pairs_coo,
+            )
         )
         return impl._prepare_downward_with_artifacts(
             tree=tree_artifacts.tree,
@@ -790,7 +844,11 @@ def _measure_prepare_stage_split(
         gpu_index=int(gpu_index),
         poll_interval_s=float(poll_interval_s),
     )
-    peak_row["retained_bytes"] = int(_tree_nbytes(downward_only_cold)) if downward_only_cold is not None else None
+    peak_row["retained_bytes"] = (
+        int(_tree_nbytes(downward_only_cold))
+        if downward_only_cold is not None
+        else None
+    )
     phase_rows.append(peak_row)
 
     for _ in range(max(0, int(warmup))):
@@ -807,7 +865,11 @@ def _measure_prepare_stage_split(
         gpu_index=int(gpu_index),
         poll_interval_s=float(poll_interval_s),
     )
-    peak_row["retained_bytes"] = int(_tree_nbytes(downward_only_warm)) if downward_only_warm is not None else None
+    peak_row["retained_bytes"] = (
+        int(_tree_nbytes(downward_only_warm))
+        if downward_only_warm is not None
+        else None
+    )
     phase_rows.append(peak_row)
 
     def nearfield_prepare_fn(tree_artifacts, raw_dual_artifacts):
@@ -846,7 +908,11 @@ def _measure_prepare_stage_split(
         gpu_index=int(gpu_index),
         poll_interval_s=float(poll_interval_s),
     )
-    peak_row["retained_bytes"] = int(_tree_nbytes(nearfield_prepare_cold)) if nearfield_prepare_cold is not None else None
+    peak_row["retained_bytes"] = (
+        int(_tree_nbytes(nearfield_prepare_cold))
+        if nearfield_prepare_cold is not None
+        else None
+    )
     phase_rows.append(peak_row)
 
     for _ in range(max(0, int(warmup))):
@@ -863,7 +929,11 @@ def _measure_prepare_stage_split(
         gpu_index=int(gpu_index),
         poll_interval_s=float(poll_interval_s),
     )
-    peak_row["retained_bytes"] = int(_tree_nbytes(nearfield_prepare_warm)) if nearfield_prepare_warm is not None else None
+    peak_row["retained_bytes"] = (
+        int(_tree_nbytes(nearfield_prepare_warm))
+        if nearfield_prepare_warm is not None
+        else None
+    )
     phase_rows.append(peak_row)
 
     def dual_downward_fn(tree_artifacts):
@@ -893,7 +963,9 @@ def _measure_prepare_stage_split(
         gpu_index=int(gpu_index),
         poll_interval_s=float(poll_interval_s),
     )
-    peak_row["retained_bytes"] = int(_tree_nbytes(dual_cold)) if dual_cold is not None else None
+    peak_row["retained_bytes"] = (
+        int(_tree_nbytes(dual_cold)) if dual_cold is not None else None
+    )
     phase_rows.append(peak_row)
 
     for _ in range(max(0, int(warmup))):
@@ -909,7 +981,9 @@ def _measure_prepare_stage_split(
         gpu_index=int(gpu_index),
         poll_interval_s=float(poll_interval_s),
     )
-    peak_row["retained_bytes"] = int(_tree_nbytes(dual_warm)) if dual_warm is not None else None
+    peak_row["retained_bytes"] = (
+        int(_tree_nbytes(dual_warm)) if dual_warm is not None else None
+    )
     phase_rows.append(peak_row)
 
     def prepare_fn():
@@ -927,7 +1001,9 @@ def _measure_prepare_stage_split(
         gpu_index=int(gpu_index),
         poll_interval_s=float(poll_interval_s),
     )
-    peak_row["retained_bytes"] = int(_tree_nbytes(state_cold)) if state_cold is not None else None
+    peak_row["retained_bytes"] = (
+        int(_tree_nbytes(state_cold)) if state_cold is not None else None
+    )
     phase_rows.append(peak_row)
 
     for _ in range(max(0, int(warmup))):
@@ -942,7 +1018,9 @@ def _measure_prepare_stage_split(
         gpu_index=int(gpu_index),
         poll_interval_s=float(poll_interval_s),
     )
-    peak_row["retained_bytes"] = int(_tree_nbytes(state_warm)) if state_warm is not None else None
+    peak_row["retained_bytes"] = (
+        int(_tree_nbytes(state_warm)) if state_warm is not None else None
+    )
     phase_rows.append(peak_row)
 
     def evaluate_fn(state):
@@ -959,17 +1037,41 @@ def _measure_prepare_stage_split(
     phase_rows.append(peak_row)
 
     summary = {
-        "dual_tree_build_raw_compile_overhead_mb": _peak_delta(phase_rows, "dual_tree_build_raw_cold", "dual_tree_build_raw_warm"),
-        "dual_tree_split_build_compile_overhead_mb": _peak_delta(phase_rows, "dual_tree_split_build_cold", "dual_tree_split_build_warm"),
-        "dual_tree_split_far_only_compile_overhead_mb": _peak_delta(phase_rows, "dual_tree_split_far_only_cold", "dual_tree_split_far_only_warm"),
-        "dual_tree_split_near_only_compile_overhead_mb": _peak_delta(phase_rows, "dual_tree_split_near_only_cold", "dual_tree_split_near_only_warm"),
-        "dual_tree_unpack_compile_overhead_mb": _peak_delta(phase_rows, "dual_tree_unpack_cold", "dual_tree_unpack_warm"),
-        "raw_dual_compile_overhead_mb": _peak_delta(phase_rows, "raw_dual_tree_cold", "raw_dual_tree_warm"),
-        "downward_compile_overhead_mb": _peak_delta(phase_rows, "downward_only_cold", "downward_only_warm"),
-        "nearfield_prepare_compile_overhead_mb": _peak_delta(phase_rows, "nearfield_prepare_cold", "nearfield_prepare_warm"),
-        "tree_compile_overhead_mb": _peak_delta(phase_rows, "tree_upward_cold", "tree_upward_warm"),
-        "dual_compile_overhead_mb": _peak_delta(phase_rows, "dual_downward_cold", "dual_downward_warm"),
-        "prepare_compile_overhead_mb": _peak_delta(phase_rows, "prepare_cold", "prepare_warm"),
+        "dual_tree_build_raw_compile_overhead_mb": _peak_delta(
+            phase_rows, "dual_tree_build_raw_cold", "dual_tree_build_raw_warm"
+        ),
+        "dual_tree_split_build_compile_overhead_mb": _peak_delta(
+            phase_rows, "dual_tree_split_build_cold", "dual_tree_split_build_warm"
+        ),
+        "dual_tree_split_far_only_compile_overhead_mb": _peak_delta(
+            phase_rows, "dual_tree_split_far_only_cold", "dual_tree_split_far_only_warm"
+        ),
+        "dual_tree_split_near_only_compile_overhead_mb": _peak_delta(
+            phase_rows,
+            "dual_tree_split_near_only_cold",
+            "dual_tree_split_near_only_warm",
+        ),
+        "dual_tree_unpack_compile_overhead_mb": _peak_delta(
+            phase_rows, "dual_tree_unpack_cold", "dual_tree_unpack_warm"
+        ),
+        "raw_dual_compile_overhead_mb": _peak_delta(
+            phase_rows, "raw_dual_tree_cold", "raw_dual_tree_warm"
+        ),
+        "downward_compile_overhead_mb": _peak_delta(
+            phase_rows, "downward_only_cold", "downward_only_warm"
+        ),
+        "nearfield_prepare_compile_overhead_mb": _peak_delta(
+            phase_rows, "nearfield_prepare_cold", "nearfield_prepare_warm"
+        ),
+        "tree_compile_overhead_mb": _peak_delta(
+            phase_rows, "tree_upward_cold", "tree_upward_warm"
+        ),
+        "dual_compile_overhead_mb": _peak_delta(
+            phase_rows, "dual_downward_cold", "dual_downward_warm"
+        ),
+        "prepare_compile_overhead_mb": _peak_delta(
+            phase_rows, "prepare_cold", "prepare_warm"
+        ),
     }
 
     del dual_cold
@@ -999,7 +1101,9 @@ def _measure_prepare_stage_split(
     return phase_rows, summary
 
 
-def _peak_delta(rows: list[dict[str, Any]], cold_label: str, warm_label: str) -> Optional[float]:
+def _peak_delta(
+    rows: list[dict[str, Any]], cold_label: str, warm_label: str
+) -> Optional[float]:
     cold = None
     warm = None
     for row in rows:

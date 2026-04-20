@@ -12,7 +12,6 @@ from beartype.typing import Tuple
 from jaxtyping import Array
 from yggdrax.interactions import DualTreeRetryEvent, DualTreeTraversalConfig, MACType
 
-from .dtypes import INDEX_DTYPE
 from ._large_n_nearfield import (
     build_large_n_leaf_particle_groups,
     build_large_n_nearfield_precompute,
@@ -21,6 +20,7 @@ from ._large_n_nearfield import (
     resolve_large_n_execution_config,
 )
 from ._large_n_types import LargeNPreparedState, RadixFastNearfieldPayload
+from .dtypes import INDEX_DTYPE
 
 
 def prepare_large_n_state(
@@ -96,6 +96,7 @@ def prepare_large_n_state(
         fmm,
         num_particles=int(positions_arr.shape[0]),
     )
+
     def _env_bool(name: str, default: bool) -> bool:
         raw = str(os.environ.get(name, "1" if default else "0")).strip().lower()
         return raw in {"1", "true", "yes", "on"}
@@ -197,12 +198,9 @@ def prepare_large_n_state(
         "JACCPOT_LARGE_N_TARGET_BLOCK_OVERFLOW_FAST_MAX_BLOCKS_OPTIONS",
         "16384,32768,65536,131072",
     )
-    disable_specialized_large_n_nearfield = (
-        str(os.environ.get("JACCPOT_DISABLE_LARGE_N_SPECIALIZED_NEARFIELD", "0"))
-        .strip()
-        .lower()
-        in {"1", "true", "yes", "on"}
-    )
+    disable_specialized_large_n_nearfield = str(
+        os.environ.get("JACCPOT_DISABLE_LARGE_N_SPECIALIZED_NEARFIELD", "0")
+    ).strip().lower() in {"1", "true", "yes", "on"}
     if bool(execution_config.retain_leaf_groups):
         leaf_particle_indices, leaf_particle_mask = build_large_n_leaf_particle_groups(
             tree_artifacts.tree,
@@ -224,7 +222,9 @@ def prepare_large_n_state(
     payload_block_source_leaf_ids = getattr(
         neighbor_payload, "target_block_source_leaf_ids", None
     )
-    payload_block_valid_mask = getattr(neighbor_payload, "target_block_valid_mask", None)
+    payload_block_valid_mask = getattr(
+        neighbor_payload, "target_block_valid_mask", None
+    )
     payload_block_offsets = getattr(neighbor_payload, "target_block_offsets", None)
     payload_block_size = int(getattr(neighbor_payload, "target_block_size", 0))
     num_leaves = int(jnp.asarray(neighbor_payload.leaf_indices).shape[0])
@@ -246,7 +246,9 @@ def prepare_large_n_state(
                 target_block_offsets = payload_offsets
             else:
                 if int(target_block_leaf_ids.shape[0]) > 0:
-                    block_counts = jnp.bincount(target_block_leaf_ids, length=num_leaves)
+                    block_counts = jnp.bincount(
+                        target_block_leaf_ids, length=num_leaves
+                    )
                     target_block_offsets = jnp.concatenate(
                         [
                             jnp.zeros((1,), dtype=INDEX_DTYPE),
@@ -254,7 +256,9 @@ def prepare_large_n_state(
                         ]
                     )
                 else:
-                    target_block_offsets = jnp.zeros((num_leaves + 1,), dtype=INDEX_DTYPE)
+                    target_block_offsets = jnp.zeros(
+                        (num_leaves + 1,), dtype=INDEX_DTYPE
+                    )
         else:
             if int(target_block_leaf_ids.shape[0]) > 0:
                 block_counts = jnp.bincount(target_block_leaf_ids, length=num_leaves)
@@ -335,21 +339,15 @@ def prepare_large_n_state(
                 num_leaves
                 * max(1, aligned_fast_blocks)
                 * block_size
-                * (
-                    jnp.dtype(INDEX_DTYPE).itemsize
-                    + jnp.dtype(bool).itemsize
-                )
+                * (jnp.dtype(INDEX_DTYPE).itemsize + jnp.dtype(bool).itemsize)
             )
             est_layout_mb = est_layout_bytes / (1024.0 * 1024.0)
             if logical_fast_blocks > 0 and est_layout_mb <= speed_layout_max_mb:
                 block_idx_offsets = jnp.arange(aligned_fast_blocks, dtype=INDEX_DTYPE)
-                block_idx = (
-                    target_block_offsets[:-1, None] + block_idx_offsets[None, :]
-                )
+                block_idx = target_block_offsets[:-1, None] + block_idx_offsets[None, :]
                 block_valid = (
-                    (block_idx_offsets[None, :] < int(logical_fast_blocks))
-                    & (block_idx_offsets[None, :] < target_leaf_block_counts[:, None])
-                )
+                    block_idx_offsets[None, :] < int(logical_fast_blocks)
+                ) & (block_idx_offsets[None, :] < target_leaf_block_counts[:, None])
                 safe_block_idx = jnp.where(block_valid, block_idx, 0)
                 target_block_source_leaf_ids_padded = jnp.where(
                     block_valid[:, :, None],
@@ -357,8 +355,7 @@ def prepare_large_n_state(
                     0,
                 )
                 target_block_valid_mask_padded = (
-                    target_block_valid_mask[safe_block_idx]
-                    & block_valid[:, :, None]
+                    target_block_valid_mask[safe_block_idx] & block_valid[:, :, None]
                 )
                 # Compact overflow blocks so fallback target-block kernels only
                 # process high-degree tail work instead of all blocks.
@@ -415,7 +412,9 @@ def prepare_large_n_state(
                     )
                     target_block_valid_mask = jnp.zeros((0, block_size), dtype=bool)
                     target_block_leaf_ids = jnp.zeros((0,), dtype=INDEX_DTYPE)
-                    target_block_offsets = jnp.zeros((num_leaves + 1,), dtype=INDEX_DTYPE)
+                    target_block_offsets = jnp.zeros(
+                        (num_leaves + 1,), dtype=INDEX_DTYPE
+                    )
                 target_leaf_block_counts = (
                     target_block_offsets[1:] - target_block_offsets[:-1]
                 )
@@ -442,17 +441,29 @@ def prepare_large_n_state(
 
         target_particle_ids = jnp.asarray(leaf_particle_indices, dtype=INDEX_DTYPE)
         target_particle_mask = jnp.asarray(leaf_particle_mask, dtype=bool)
-        source_leaf_ids_padded = jnp.asarray(target_block_source_leaf_ids_padded, dtype=INDEX_DTYPE)
-        source_leaf_valid_padded = jnp.asarray(target_block_valid_mask_padded, dtype=bool)
+        source_leaf_ids_padded = jnp.asarray(
+            target_block_source_leaf_ids_padded, dtype=INDEX_DTYPE
+        )
+        source_leaf_valid_padded = jnp.asarray(
+            target_block_valid_mask_padded, dtype=bool
+        )
 
         num_target_leaves = int(target_particle_ids.shape[0])
         target_leaf_ids = jnp.arange(num_target_leaves, dtype=INDEX_DTYPE)
-        source_slots = int(source_leaf_ids_padded.shape[1]) * int(source_leaf_ids_padded.shape[2])
+        source_slots = int(source_leaf_ids_padded.shape[1]) * int(
+            source_leaf_ids_padded.shape[2]
+        )
         source_leaf_size = int(target_particle_ids.shape[1])
 
-        source_leaf_ids_flat = source_leaf_ids_padded.reshape((num_target_leaves, source_slots))
-        source_leaf_valid_flat = source_leaf_valid_padded.reshape((num_target_leaves, source_slots))
-        safe_source_leaf_ids = jnp.where(source_leaf_valid_flat, source_leaf_ids_flat, 0)
+        source_leaf_ids_flat = source_leaf_ids_padded.reshape(
+            (num_target_leaves, source_slots)
+        )
+        source_leaf_valid_flat = source_leaf_valid_padded.reshape(
+            (num_target_leaves, source_slots)
+        )
+        safe_source_leaf_ids = jnp.where(
+            source_leaf_valid_flat, source_leaf_ids_flat, 0
+        )
 
         payload_max_mb_raw = os.environ.get(
             "JACCPOT_LARGE_N_RADIX_FAST_PAYLOAD_MAX_MB",
@@ -466,10 +477,7 @@ def prepare_large_n_state(
             num_target_leaves
             * max(1, source_slots)
             * max(1, source_leaf_size)
-            * (
-                jnp.dtype(INDEX_DTYPE).itemsize
-                + jnp.dtype(bool).itemsize
-            )
+            * (jnp.dtype(INDEX_DTYPE).itemsize + jnp.dtype(bool).itemsize)
         )
         est_payload_mb = est_payload_bytes / (1024.0 * 1024.0)
 
@@ -601,7 +609,9 @@ def evaluate_large_n_state(
 
     leaf_nodes = jnp.asarray(state.neighbor_list.leaf_indices, dtype=INDEX_DTYPE)
     node_ranges = jnp.asarray(state.tree.node_ranges, dtype=INDEX_DTYPE)
-    if (not bool(getattr(state, "radix_fast_lane", False))) and (not bool(return_potential)):
+    if (not bool(getattr(state, "radix_fast_lane", False))) and (
+        not bool(return_potential)
+    ):
         raise RuntimeError(
             "large_n acceleration evaluation requires radix fast-lane state; "
             "prepare state with the large_n_gpu radix profile before accel-only evaluate"
@@ -796,7 +806,10 @@ def can_use_large_n_prepare_path(
     runtime_path = str(getattr(fmm, "runtime_path", "auto")).strip().lower()
     if runtime_path == "legacy":
         return False
-    if runtime_path == "auto" and str(getattr(fmm, "preset", "")).strip().lower() != "large_n_gpu":
+    if (
+        runtime_path == "auto"
+        and str(getattr(fmm, "preset", "")).strip().lower() != "large_n_gpu"
+    ):
         return False
     if not allow_stateful_cache:
         return False
@@ -814,7 +827,10 @@ def can_use_large_n_prepare_path(
         return False
     if str(getattr(fmm, "complex_rotation", "")).strip().lower() != "solidfmm":
         return False
-    if bool(getattr(fmm, "_uses_paper_style_force_scale")) and fmm._uses_paper_style_force_scale():
+    if (
+        bool(getattr(fmm, "_uses_paper_style_force_scale"))
+        and fmm._uses_paper_style_force_scale()
+    ):
         return False
     if int(positions_arr.shape[0]) != int(masses_arr.shape[0]):
         return False

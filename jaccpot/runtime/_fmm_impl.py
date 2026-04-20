@@ -397,10 +397,9 @@ def _cap_minimum_memory_streamed_gpu_traversal_config_for_tree(
 
     far_slots = safe_total_nodes * current_interactions
     near_slots = safe_num_leaves * current_neighbors
-    if (
-        far_slots <= int(_LEGACY_STATIC_TRAVERSAL_INT32_ITEM_LIMIT)
-        and near_slots <= int(_LEGACY_STATIC_TRAVERSAL_INT32_ITEM_LIMIT)
-    ):
+    if far_slots <= int(
+        _LEGACY_STATIC_TRAVERSAL_INT32_ITEM_LIMIT
+    ) and near_slots <= int(_LEGACY_STATIC_TRAVERSAL_INT32_ITEM_LIMIT):
         return traversal_config
 
     explicit_ceiling = _minimum_memory_streamed_gpu_traversal_ceiling(
@@ -413,9 +412,7 @@ def _cap_minimum_memory_streamed_gpu_traversal_config_for_tree(
         1, int(_LEGACY_STATIC_TRAVERSAL_INT32_ITEM_LIMIT) // safe_num_leaves
     )
     capped = DualTreeTraversalConfig(
-        max_pair_queue=int(
-            min(current_queue, int(explicit_ceiling.max_pair_queue))
-        ),
+        max_pair_queue=int(min(current_queue, int(explicit_ceiling.max_pair_queue))),
         process_block=int(min(current_block, int(explicit_ceiling.process_block))),
         max_interactions_per_node=int(
             min(
@@ -3308,13 +3305,15 @@ class FastMultipoleMethod:
                     if topology_candidate is not None:
                         topology_key_for_state = topology_candidate.key
                     else:
-                        topology_key_for_state = self._topology_reuse_key_from_sorted_codes(
-                            sorted_codes=build_artifacts.tree.morton_codes,
-                            tree_config=tree_config,
-                            leaf_size=int(leaf_size),
-                            refine_local=refine_local_val,
-                            max_refine_levels=max_refine_levels_val,
-                            aspect_threshold=aspect_threshold_val,
+                        topology_key_for_state = (
+                            self._topology_reuse_key_from_sorted_codes(
+                                sorted_codes=build_artifacts.tree.morton_codes,
+                                tree_config=tree_config,
+                                leaf_size=int(leaf_size),
+                                refine_local=refine_local_val,
+                                max_refine_levels=max_refine_levels_val,
+                                aspect_threshold=aspect_threshold_val,
+                            )
                         )
                 if topology_key_for_state is not None:
                     self._topology_reuse_entry = _TopologyReuseEntry(
@@ -3358,9 +3357,7 @@ class FastMultipoleMethod:
                 geometry_key_base: Any = topology_key_for_state
             else:
                 bounds_key = (
-                    None
-                    if bounds is None
-                    else (int(id(bounds[0])), int(id(bounds[1])))
+                    None if bounds is None else (int(id(bounds[0])), int(id(bounds[1])))
                 )
                 geometry_key_base = (
                     self.tree_type,
@@ -3562,13 +3559,11 @@ class FastMultipoleMethod:
                 )
             )
             if sanitized_traversal_config != runtime_traversal_config:
-                far_slots_before = (
-                    total_nodes
-                    * int(runtime_traversal_config.max_interactions_per_node)
+                far_slots_before = total_nodes * int(
+                    runtime_traversal_config.max_interactions_per_node
                 )
-                near_slots_before = (
-                    num_leaves
-                    * int(runtime_traversal_config.max_neighbors_per_leaf)
+                near_slots_before = num_leaves * int(
+                    runtime_traversal_config.max_neighbors_per_leaf
                 )
                 _prepare_diag(
                     "capped explicit traversal_config for legacy streamed GPU walk "
@@ -3666,9 +3661,11 @@ class FastMultipoleMethod:
             runtime_m2l_chunk_size=runtime_m2l_chunk_size,
         )
 
-        interactions_for_downward = self._prepare_state_select_interactions_for_downward(
-            interactions=interactions,
-            far_pairs_coo=far_pairs_coo,
+        interactions_for_downward = (
+            self._prepare_state_select_interactions_for_downward(
+                interactions=interactions,
+                far_pairs_coo=far_pairs_coo,
+            )
         )
 
         downward = self._prepare_downward_with_artifacts(
@@ -3824,9 +3821,11 @@ class FastMultipoleMethod:
         recent_counts: tuple[int, ...] = tuple()
 
         if self.adaptive_order:
-            far_sources, far_targets, far_tags = self._prepare_state_extract_adaptive_far_pairs(
-                traversal_result=traversal_result,
-                compact_far_pairs=compact_far_pairs,
+            far_sources, far_targets, far_tags = (
+                self._prepare_state_extract_adaptive_far_pairs(
+                    traversal_result=traversal_result,
+                    compact_far_pairs=compact_far_pairs,
+                )
             )
             far_pairs_by_gear = bucket_far_pairs_by_tag(
                 far_sources,
@@ -4030,9 +4029,7 @@ class FastMultipoleMethod:
             else int(nearfield_edge_chunk_size)
         )
         retain_pair_vectors_resolved = (
-            self._should_retain_nearfield_pair_vectors(
-                num_particles=int(num_particles)
-            )
+            self._should_retain_nearfield_pair_vectors(num_particles=int(num_particles))
             if retain_pair_vectors is None
             else bool(retain_pair_vectors)
         )
@@ -4040,9 +4037,8 @@ class FastMultipoleMethod:
         should_precompute_scatter = self._should_precompute_nearfield_scatter_schedules(
             num_particles=int(num_particles)
         )
-        if (
-            not bool(retain_pair_vectors_resolved)
-            and not bool(should_precompute_scatter)
+        if not bool(retain_pair_vectors_resolved) and not bool(
+            should_precompute_scatter
         ):
             # In large-N minimum-memory GPU runs, prepared evaluation can derive
             # near-field pair vectors on demand from the neighbor list. Avoid
@@ -6651,7 +6647,9 @@ def _build_nearfield_interop_data(
             raise ValueError("native octree nearfield data requires octree metadata")
         leaf_nodes = jnp.asarray(native_neighbors.leaf_indices, dtype=INDEX_DTYPE)
         native_offsets = jnp.asarray(native_neighbors.offsets, dtype=INDEX_DTYPE)
-        native_neighbors_flat = jnp.asarray(native_neighbors.neighbors, dtype=INDEX_DTYPE)
+        native_neighbors_flat = jnp.asarray(
+            native_neighbors.neighbors, dtype=INDEX_DTYPE
+        )
         native_counts = jnp.asarray(native_neighbors.counts, dtype=INDEX_DTYPE)
         leaf_count = int(leaf_nodes.shape[0])
         radix_leaf_nodes = jnp.asarray(
@@ -8033,29 +8031,31 @@ def _prepare_solidfmm_downward_sweep(
         )
         source_motion_locals_updated: Optional[Array]
         if source_motion_multip_packed is not None:
-            source_motion_locals_updated = _solidfmm_downward_accumulate_from_multipoles(
-                jnp.zeros_like(locals_coeffs),
-                source_motion_multip_packed,
-                tree=tree,
-                upward=upward,
-                interactions=interactions,
-                centers=centers,
-                src=src,
-                tgt=tgt,
-                pair_count=pair_count,
-                order=p,
-                rotation_mode=rotation_mode,
-                total_nodes=total_nodes,
-                chunk_size=chunk_size,
-                grouped_interactions=grouped_interactions,
-                grouped_buffers=grouped_buffers,
-                grouped_segment_starts=grouped_segment_starts,
-                grouped_segment_lengths=grouped_segment_lengths,
-                grouped_segment_class_ids=grouped_segment_class_ids,
-                grouped_segment_sort_permutation=grouped_segment_sort_permutation,
-                grouped_segment_group_ids=grouped_segment_group_ids,
-                grouped_segment_unique_targets=grouped_segment_unique_targets,
-                farfield_mode=farfield_mode,
+            source_motion_locals_updated = (
+                _solidfmm_downward_accumulate_from_multipoles(
+                    jnp.zeros_like(locals_coeffs),
+                    source_motion_multip_packed,
+                    tree=tree,
+                    upward=upward,
+                    interactions=interactions,
+                    centers=centers,
+                    src=src,
+                    tgt=tgt,
+                    pair_count=pair_count,
+                    order=p,
+                    rotation_mode=rotation_mode,
+                    total_nodes=total_nodes,
+                    chunk_size=chunk_size,
+                    grouped_interactions=grouped_interactions,
+                    grouped_buffers=grouped_buffers,
+                    grouped_segment_starts=grouped_segment_starts,
+                    grouped_segment_lengths=grouped_segment_lengths,
+                    grouped_segment_class_ids=grouped_segment_class_ids,
+                    grouped_segment_sort_permutation=grouped_segment_sort_permutation,
+                    grouped_segment_group_ids=grouped_segment_group_ids,
+                    grouped_segment_unique_targets=grouped_segment_unique_targets,
+                    farfield_mode=farfield_mode,
+                )
             )
             source_motion_locals_updated = _propagate_solidfmm_locals_to_children(
                 source_motion_locals_updated,
@@ -8249,7 +8249,9 @@ def _evaluate_tree_compiled_impl(
                 if (use_precomputed and use_precomputed_source)
                 else None
             ),
-            precomputed_valid_pairs=precomputed_valid_pairs if use_precomputed else None,
+            precomputed_valid_pairs=(
+                precomputed_valid_pairs if use_precomputed else None
+            ),
             leaf_particle_indices=nearfield_leaf_particle_indices,
             leaf_particle_mask=nearfield_leaf_particle_mask,
             precomputed_target_block_leaf_ids=(
@@ -8312,7 +8314,9 @@ def _evaluate_tree_compiled_impl(
                 if (use_precomputed and use_precomputed_source)
                 else None
             ),
-            precomputed_valid_pairs=precomputed_valid_pairs if use_precomputed else None,
+            precomputed_valid_pairs=(
+                precomputed_valid_pairs if use_precomputed else None
+            ),
             precomputed_chunk_sort_indices=(
                 precomputed_chunk_sort_indices if use_precomputed_scatter else None
             ),

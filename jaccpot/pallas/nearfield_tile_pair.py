@@ -212,7 +212,9 @@ def nearfield_tile_pair_accel_pallas(
 
     tile_size = int(target_positions.shape[0])
     if tile_size <= 0 or (tile_size & (tile_size - 1)) != 0:
-        raise ValueError("Pallas tile kernel requires a positive power-of-two tile size")
+        raise ValueError(
+            "Pallas tile kernel requires a positive power-of-two tile size"
+        )
 
     target_positions_padded = jnp.pad(target_positions, ((0, 0), (0, 1)))
     source_positions_padded = jnp.pad(source_positions, ((0, 0), (0, 1)))
@@ -234,7 +236,9 @@ def nearfield_tile_pair_accel_pallas(
         ],
         out_specs=pl.BlockSpec((tile_size, _PADDED_VECTOR_WIDTH), lambda pid: (0, 0)),
         grid=(tile_size,),
-        compiler_params=plgpu.CompilerParams(num_warps=max(1, tile_size // 8), num_stages=1),
+        compiler_params=plgpu.CompilerParams(
+            num_warps=max(1, tile_size // 8), num_stages=1
+        ),
         interpret=False,
         name=f"nearfield_tile_pair_t{tile_size}",
     )

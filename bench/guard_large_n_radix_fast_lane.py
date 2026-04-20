@@ -12,7 +12,6 @@ import sys
 from datetime import datetime
 from typing import Any
 
-
 REPO_ROOT = pathlib.Path(__file__).resolve().parents[1]
 WORKER = REPO_ROOT / "examples" / "benchmark_gpu_radix_worker.py"
 YGGDRAX_ROOT = REPO_ROOT.parent / "yggdrax"
@@ -52,7 +51,9 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--runs", type=int, default=3)
     parser.add_argument("--warmup", type=int, default=1)
     parser.add_argument("--seed", type=int, default=0)
-    parser.add_argument("--benchmark-scope", choices=("steady_eval", "full"), default="steady_eval")
+    parser.add_argument(
+        "--benchmark-scope", choices=("steady_eval", "full"), default="steady_eval"
+    )
     parser.add_argument("--fast-block-size", type=int, default=8)
     parser.add_argument("--min-speedup", type=float, default=None)
     parser.add_argument("--output-prefix", type=pathlib.Path, default=None)
@@ -177,7 +178,9 @@ def _metric_key(benchmark_scope: str) -> str:
     return "mean_seconds" if benchmark_scope == "full" else "evaluate_mean_seconds"
 
 
-def _make_output_paths(prefix_arg: pathlib.Path | None) -> tuple[pathlib.Path, pathlib.Path]:
+def _make_output_paths(
+    prefix_arg: pathlib.Path | None,
+) -> tuple[pathlib.Path, pathlib.Path]:
     if prefix_arg is not None:
         prefix = prefix_arg if prefix_arg.is_absolute() else (REPO_ROOT / prefix_arg)
         return prefix.with_suffix(".csv"), prefix.with_suffix(".json")
@@ -203,11 +206,15 @@ def main() -> None:
     base = float(baseline_row.get(metric, float("nan")))
     fast = float(fast_row.get(metric, float("nan")))
     if not (base > 0.0 and fast > 0.0):
-        raise RuntimeError(f"Non-positive benchmark metric values: baseline={base}, fast={fast}")
+        raise RuntimeError(
+            f"Non-positive benchmark metric values: baseline={base}, fast={fast}"
+        )
 
     speedup = base / fast
-    min_speedup = float(args.min_speedup) if args.min_speedup is not None else (
-        2.0 if str(args.benchmark_scope) == "steady_eval" else 1.03
+    min_speedup = (
+        float(args.min_speedup)
+        if args.min_speedup is not None
+        else (2.0 if str(args.benchmark_scope) == "steady_eval" else 1.03)
     )
     if speedup < float(min_speedup):
         raise RuntimeError(
@@ -267,7 +274,9 @@ def main() -> None:
         "rows": rows,
         "csv_path": str(csv_path),
     }
-    json_path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    json_path.write_text(
+        json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+    )
 
     print(json.dumps(payload, sort_keys=True))
     print(f"Wrote CSV: {csv_path}")

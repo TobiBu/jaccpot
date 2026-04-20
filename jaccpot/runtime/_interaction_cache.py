@@ -261,7 +261,9 @@ def _dual_tree_build_raw(
     if build_out is None:
         if last_exc is not None:
             raise RuntimeError(str(last_exc)) from last_exc
-        raise RuntimeError("dual-tree traversal build failed without producing artifacts")
+        raise RuntimeError(
+            "dual-tree traversal build failed without producing artifacts"
+        )
     return (
         build_out,
         current_traversal_config,
@@ -287,7 +289,13 @@ def _dual_tree_unpack_build_output(
 
     if grouped_interactions:
         if need_traversal_result and need_compact_far_pairs:
-            interactions, neighbor_list, traversal_result, compact_far_pairs, grouped_buffers = build_out
+            (
+                interactions,
+                neighbor_list,
+                traversal_result,
+                compact_far_pairs,
+                grouped_buffers,
+            ) = build_out
         elif need_traversal_result:
             interactions, neighbor_list, traversal_result, grouped_buffers = build_out
             compact_far_pairs = None
@@ -467,7 +475,9 @@ def _dual_tree_build_grouped_buffers(
     from yggdrax import interactions as _yggdrax_interactions
 
     if interactions is None:
-        raise RuntimeError("grouped interaction preparation requires node interaction lists")
+        raise RuntimeError(
+            "grouped interaction preparation requires node interaction lists"
+        )
     return _yggdrax_interactions.build_grouped_interactions_from_pairs(
         tree,
         geometry,

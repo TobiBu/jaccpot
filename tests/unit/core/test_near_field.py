@@ -555,7 +555,9 @@ def test_large_n_accel_only_target_owned_accum_matches_baseline():
 
     old_target_owned = os.environ.get("JACCPOT_LARGE_N_TARGET_OWNED_ACCUM")
     old_batch = os.environ.get("JACCPOT_LARGE_N_TARGET_LEAF_BATCH_SIZE")
-    old_neighbor_block = os.environ.get("JACCPOT_LARGE_N_TARGET_LEAF_NEIGHBOR_BLOCK_SIZE")
+    old_neighbor_block = os.environ.get(
+        "JACCPOT_LARGE_N_TARGET_LEAF_NEIGHBOR_BLOCK_SIZE"
+    )
     try:
         os.environ["JACCPOT_LARGE_N_TARGET_OWNED_ACCUM"] = "0"
         baseline = compute_leaf_p2p_accelerations_large_n_accel_only(
@@ -771,9 +773,7 @@ def test_large_n_accel_only_grouped_sorted_scatter_matches_baseline():
         if old_grouped_sorted is None:
             os.environ.pop("JACCPOT_LARGE_N_GROUPED_SORTED_SCATTER", None)
         else:
-            os.environ["JACCPOT_LARGE_N_GROUPED_SORTED_SCATTER"] = (
-                old_grouped_sorted
-            )
+            os.environ["JACCPOT_LARGE_N_GROUPED_SORTED_SCATTER"] = old_grouped_sorted
 
     assert np.allclose(
         np.asarray(grouped_sorted),
@@ -822,7 +822,9 @@ def test_large_n_accel_only_target_owned_accum_v2_matches_baseline():
     old_target_owned = os.environ.get("JACCPOT_LARGE_N_TARGET_OWNED_ACCUM")
     old_target_owned_v2 = os.environ.get("JACCPOT_LARGE_N_TARGET_OWNED_ACCUM_V2")
     old_batch = os.environ.get("JACCPOT_LARGE_N_TARGET_LEAF_BATCH_SIZE")
-    old_neighbor_block = os.environ.get("JACCPOT_LARGE_N_TARGET_LEAF_NEIGHBOR_BLOCK_SIZE")
+    old_neighbor_block = os.environ.get(
+        "JACCPOT_LARGE_N_TARGET_LEAF_NEIGHBOR_BLOCK_SIZE"
+    )
     try:
         os.environ["JACCPOT_LARGE_N_TARGET_OWNED_ACCUM"] = "0"
         os.environ["JACCPOT_LARGE_N_TARGET_OWNED_ACCUM_V2"] = "0"
@@ -960,7 +962,9 @@ def test_large_n_accel_only_superchunk_target_reduce_matches_baseline():
         if old_superchunk_reduce is None:
             os.environ.pop("JACCPOT_LARGE_N_SUPERCHUNK_TARGET_REDUCE", None)
         else:
-            os.environ["JACCPOT_LARGE_N_SUPERCHUNK_TARGET_REDUCE"] = old_superchunk_reduce
+            os.environ["JACCPOT_LARGE_N_SUPERCHUNK_TARGET_REDUCE"] = (
+                old_superchunk_reduce
+            )
 
     assert np.allclose(
         np.asarray(reduced),
@@ -1082,7 +1086,9 @@ def _build_test_radix_fast_payload(
     )
 
     num_leaves = int(leaf_particle_indices.shape[0])
-    max_neighbors = int(np.max(np.asarray(neighbor_list.counts))) if num_leaves > 0 else 0
+    max_neighbors = (
+        int(np.max(np.asarray(neighbor_list.counts))) if num_leaves > 0 else 0
+    )
     max_leaf_size = int(leaf_particle_indices.shape[1]) if num_leaves > 0 else 0
 
     source_leaf_ids_padded = jnp.zeros((num_leaves, max_neighbors), dtype=INDEX_DTYPE)
@@ -1107,7 +1113,9 @@ def _build_test_radix_fast_payload(
             & source_leaf_valid_mask_padded[..., None]
         )
     else:
-        source_particle_ids = jnp.zeros((num_leaves, 0, max_leaf_size), dtype=INDEX_DTYPE)
+        source_particle_ids = jnp.zeros(
+            (num_leaves, 0, max_leaf_size), dtype=INDEX_DTYPE
+        )
         source_particle_mask = jnp.zeros((num_leaves, 0, max_leaf_size), dtype=bool)
 
     return RadixFastNearfieldPayload(
@@ -1248,9 +1256,9 @@ def test_collect_radix_fast_lane_counters_matches_payload_formula():
     source_slots = int(payload.source_particle_ids.size)
     itemsize = int(jnp.dtype(pos_sorted.dtype).itemsize)
     mass_itemsize = int(jnp.dtype(mass_sorted.dtype).itemsize)
-    expected_gather_bytes = target_slots * (3 * itemsize + mass_itemsize) + source_slots * (
+    expected_gather_bytes = target_slots * (
         3 * itemsize + mass_itemsize
-    )
+    ) + source_slots * (3 * itemsize + mass_itemsize)
     expected_scatter_bytes = target_slots * 3 * itemsize
     expected_scatter_ops = target_slots
 

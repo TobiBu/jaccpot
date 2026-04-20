@@ -76,8 +76,8 @@ def pack_unique_particle_vector_updates(
     )
     group_ids = jnp.cumsum(is_new.astype(INDEX_DTYPE)) - 1
 
-    unique_encoded = jnp.zeros((item_count,), dtype=INDEX_DTYPE).at[group_ids].set(
-        encoded_sorted
+    unique_encoded = (
+        jnp.zeros((item_count,), dtype=INDEX_DTYPE).at[group_ids].set(encoded_sorted)
     )
     unique_valid = jnp.zeros((item_count,), dtype=bool).at[group_ids].set(valid_sorted)
     unique_values = jax.ops.segment_sum(values_sorted, group_ids, item_count)
@@ -173,7 +173,9 @@ def _apply_packed_particle_vector_updates_pallas(
             ),
             pl.BlockSpec((particle_count, _PADDED_VECTOR_WIDTH), lambda pid: (0, 0)),
         ],
-        out_specs=pl.BlockSpec((particle_count, _PADDED_VECTOR_WIDTH), lambda pid: (0, 0)),
+        out_specs=pl.BlockSpec(
+            (particle_count, _PADDED_VECTOR_WIDTH), lambda pid: (0, 0)
+        ),
         grid=(math.ceil(update_count / block_size),),
         compiler_params=plgpu.CompilerParams(num_warps=4, num_stages=1),
         interpret=False,

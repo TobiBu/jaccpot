@@ -17,8 +17,8 @@ from jaccpot.nearfield.near_field import (
     prepare_leaf_neighbor_pairs,
 )
 
-from ._nearfield_cache import NearfieldPrecomputeArtifacts
 from ._large_n_types import LargeNExecutionConfig, LargeNPreparedState
+from ._nearfield_cache import NearfieldPrecomputeArtifacts
 from .dtypes import INDEX_DTYPE, as_index
 
 _RADIX_FAST_LANE_DEFAULT_TARGET_BLOCK_SIZE = 8
@@ -78,8 +78,7 @@ def resolve_large_n_execution_config(
         )
     )
     retain_pair_vectors = (
-        str(getattr(fmm, "memory_objective", "")).strip().lower()
-        != "minimum_memory"
+        str(getattr(fmm, "memory_objective", "")).strip().lower() != "minimum_memory"
     )
     target_owned_block_size = int(
         os.environ.get("JACCPOT_LARGE_N_TARGET_BLOCK_SIZE", "0")
@@ -135,7 +134,9 @@ def build_large_n_target_owned_blocks(
 
     k = int(block_size)
     if k <= 0:
-        num_leaves = int(jnp.asarray(neighbor_list.leaf_indices, dtype=INDEX_DTYPE).shape[0])
+        num_leaves = int(
+            jnp.asarray(neighbor_list.leaf_indices, dtype=INDEX_DTYPE).shape[0]
+        )
         return (
             jnp.zeros((0,), dtype=INDEX_DTYPE),
             jnp.zeros((0, 0), dtype=INDEX_DTYPE),
@@ -272,7 +273,9 @@ def build_large_n_nearfield_precompute(
         source_leaf_ids=(
             source_leaf_ids if bool(execution_config.retain_pair_vectors) else None
         ),
-        valid_pairs=(valid_pairs if bool(execution_config.retain_pair_vectors) else None),
+        valid_pairs=(
+            valid_pairs if bool(execution_config.retain_pair_vectors) else None
+        ),
         chunk_sort_indices=chunk_sort_indices,
         chunk_group_ids=chunk_group_ids,
         chunk_unique_indices=chunk_unique_indices,
