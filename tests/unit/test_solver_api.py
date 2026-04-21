@@ -326,10 +326,30 @@ def test_large_gpu_minimum_memory_streamed_path_clamps_auto_traversal_seed():
     )
 
     assert overrides.traversal_config is not None
-    assert int(overrides.traversal_config.max_pair_queue) == 32_768
-    assert int(overrides.traversal_config.process_block) == 64
-    assert int(overrides.traversal_config.max_interactions_per_node) == 1_024
-    assert int(overrides.traversal_config.max_neighbors_per_leaf) == 256
+    assert int(overrides.traversal_config.max_pair_queue) == 262_144
+    assert int(overrides.traversal_config.process_block) == 256
+    assert int(overrides.traversal_config.max_interactions_per_node) == 8_192
+    assert int(overrides.traversal_config.max_neighbors_per_leaf) == 4_096
+
+
+def test_large_gpu_minimum_memory_streamed_seed_scales_for_xl_particle_counts():
+    impl = fmm_impl_private.FastMultipoleMethod(
+        preset=FMMPreset.LARGE_N_GPU,
+        expansion_basis="solidfmm",
+        memory_objective="minimum_memory",
+        fail_fast=True,
+    )
+
+    overrides = impl._resolve_runtime_execution_overrides(
+        num_particles=4_194_304,
+        backend="gpu",
+    )
+
+    assert overrides.traversal_config is not None
+    assert int(overrides.traversal_config.max_pair_queue) == 524_288
+    assert int(overrides.traversal_config.process_block) == 256
+    assert int(overrides.traversal_config.max_interactions_per_node) == 8_192
+    assert int(overrides.traversal_config.max_neighbors_per_leaf) == 4_096
 
 
 def test_prepare_bucketed_scatter_schedules_skips_int32_overflow_shape():

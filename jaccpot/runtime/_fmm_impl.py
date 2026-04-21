@@ -365,6 +365,37 @@ def _minimum_memory_streamed_gpu_traversal_ceiling(
     )
 
 
+def _minimum_memory_streamed_gpu_traversal_seed(
+    *, num_particles: int
+) -> DualTreeTraversalConfig:
+    """Return deterministic minimum-memory traversal seed for production GPU runs.
+
+    Keep a small seed for sub-million workloads, but use a larger fixed seed for
+    multi-million particle runs to avoid early fail-fast traversal overflow.
+    """
+
+    n = int(num_particles)
+    if n >= 4_194_304:
+        return _minimum_memory_streamed_gpu_traversal_ceiling(num_particles=n)
+    if n >= 1_048_576:
+        return DualTreeTraversalConfig(
+            max_pair_queue=int(_GPU_STREAMED_MINIMUM_MEMORY_EXPLICIT_PAIR_QUEUE_LARGE),
+            process_block=int(_GPU_STREAMED_MINIMUM_MEMORY_EXPLICIT_PROCESS_BLOCK),
+            max_interactions_per_node=int(
+                _GPU_STREAMED_MINIMUM_MEMORY_EXPLICIT_INTERACTIONS_PER_NODE
+            ),
+            max_neighbors_per_leaf=int(
+                _GPU_STREAMED_MINIMUM_MEMORY_EXPLICIT_NEIGHBORS_PER_LEAF
+            ),
+        )
+    return DualTreeTraversalConfig(
+        max_pair_queue=int(_GPU_MINIMUM_MEMORY_PAIR_QUEUE),
+        process_block=int(_GPU_MINIMUM_MEMORY_PROCESS_BLOCK),
+        max_interactions_per_node=int(_GPU_MINIMUM_MEMORY_INTERACTIONS_PER_NODE),
+        max_neighbors_per_leaf=int(_GPU_MINIMUM_MEMORY_NEIGHBORS_PER_LEAF),
+    )
+
+
 def _cap_minimum_memory_streamed_gpu_traversal_config_for_tree(
     *,
     traversal_config: Optional[DualTreeTraversalConfig],
@@ -2737,13 +2768,8 @@ class FastMultipoleMethod:
             # large GPU radix trees. Keep the large-N minimum-memory route on a
             # bounded explicit traversal config so host-side retry can grow from
             # a safe baseline without compiling the count-pass kernel.
-            traversal_config = DualTreeTraversalConfig(
-                max_pair_queue=int(_GPU_MINIMUM_MEMORY_PAIR_QUEUE),
-                process_block=int(_GPU_MINIMUM_MEMORY_PROCESS_BLOCK),
-                max_interactions_per_node=int(
-                    _GPU_MINIMUM_MEMORY_INTERACTIONS_PER_NODE
-                ),
-                max_neighbors_per_leaf=int(_GPU_MINIMUM_MEMORY_NEIGHBORS_PER_LEAF),
+            traversal_config = _minimum_memory_streamed_gpu_traversal_seed(
+                num_particles=n_particles
             )
         if (
             production_large_n
@@ -3698,9 +3724,28 @@ class FastMultipoleMethod:
         ) and not _contains_tracer(
             (tree_artifacts.positions_sorted, tree_artifacts.masses_sorted)
         )
-        allow_split_build = bool(
-            int(os.environ.get("JACCPOT_PREPARE_STAGE_MEMORY_SPLIT_ENABLED", "0"))
+        split_build_env_raw = os.environ.get(
+            "JACCPOT_PREPARE_STAGE_MEMORY_SPLIT_ENABLED"
         )
+        if split_build_env_raw is None:
+            # Default to the lower-peak split traversal build in the production
+            # minimum-memory streamed GPU path; keep env opt-out for debugging.
+            allow_split_build = bool(
+                self.memory_objective == "minimum_memory"
+                and jax.default_backend() == "gpu"
+                and self.tree_type == "radix"
+                and self.expansion_basis == "solidfmm"
+                and bool(self.streamed_far_pairs)
+                and not bool(grouped_interactions)
+            )
+        else:
+            allow_split_build = str(split_build_env_raw).strip().lower() in {
+                "1",
+                "true",
+                "yes",
+                "on",
+            }
+        _prepare_diag(f"allow_split_build={bool(allow_split_build)}")
         dual_artifacts, cache_entry = _build_dual_tree_artifacts(
             tree_artifacts.tree,
             tree_artifacts.upward.geometry,
