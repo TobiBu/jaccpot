@@ -331,6 +331,7 @@ def _dual_tree_unpack_build_output(
 
 def _can_split_dual_tree_build(
     *,
+    split_enabled: bool,
     grouped_interactions: bool,
     need_traversal_result: bool,
     pair_policy,
@@ -345,7 +346,8 @@ def _can_split_dual_tree_build(
     """
 
     return (
-        not bool(grouped_interactions)
+        bool(split_enabled)
+        and not bool(grouped_interactions)
         and not bool(need_traversal_result)
         and pair_policy is None
         and policy_state is None
@@ -770,6 +772,7 @@ def _build_dual_tree_artifacts(
     need_node_interactions: bool,
     precompute_grouped_class_segments: bool,
     grouped_schedule_budget_bytes: Optional[int],
+    allow_split_build: bool = False,
     pair_policy=None,
     policy_state=None,
     jit_traversal: bool = True,
@@ -801,6 +804,7 @@ def _build_dual_tree_artifacts(
         cache_out = cache_hit.cache_out
     else:
         use_split_build = _can_split_dual_tree_build(
+            split_enabled=bool(allow_split_build),
             grouped_interactions=grouped_interactions,
             need_traversal_result=need_traversal_result,
             pair_policy=pair_policy,

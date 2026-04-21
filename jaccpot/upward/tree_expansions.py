@@ -165,7 +165,7 @@ def _aggregate_multipoles_via_m2m(
     base_moments: TreeMultipoleMoments,
 ) -> TreeMultipoleMoments:
     total_nodes = base_moments.mass.shape[0]
-    num_internal = int(tree.num_internal_nodes)
+    num_internal = int(jnp.asarray(tree.left_child).shape[0])
     order = int(base_moments.max_order)
     coeffs = total_coefficients(order)
     packed = jnp.zeros(

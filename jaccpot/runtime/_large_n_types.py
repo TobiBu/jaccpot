@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Optional
+from typing import Any, NamedTuple, Optional
 
 import jax
 import jax.numpy as jnp
@@ -15,6 +15,16 @@ from yggdrax.tree import Tree
 from jaccpot.downward.local_expansions import LocalExpansionData
 
 from .dtypes import INDEX_DTYPE
+
+
+class _CompatInteractionStorage(NamedTuple):
+    sources: Array
+    targets: Array
+    level_offsets: Optional[Array]
+
+
+class _CompatDownwardView(NamedTuple):
+    interactions: _CompatInteractionStorage
 
 
 @dataclass(frozen=True)
@@ -52,7 +62,7 @@ class RadixFastNearfieldPayload:
     fallback_batch_scan_unroll: int = 1
 
     def tree_flatten(
-        self,
+        self: "RadixFastNearfieldPayload",
     ) -> tuple[tuple[Any, ...], tuple[int, int, int, int, int, int, int]]:
         children = (
             self.target_leaf_ids,
@@ -76,7 +86,7 @@ class RadixFastNearfieldPayload:
 
     @classmethod
     def tree_unflatten(
-        cls,
+        cls: type["RadixFastNearfieldPayload"],
         aux: tuple[Any, ...],
         children: tuple[Any, ...],
     ) -> "RadixFastNearfieldPayload":
@@ -177,28 +187,43 @@ class LargeNPreparedState:
     radix_fast_payload: Optional[RadixFastNearfieldPayload] = None
 
     @property
-    def positions_sorted(self) -> Array:
+    def positions_sorted(self: "LargeNPreparedState") -> Array:
         value = getattr(self.tree, "positions_sorted", None)
         if value is None:
             raise ValueError("prepared tree is missing positions_sorted")
         return jnp.asarray(value)
 
     @property
-    def masses_sorted(self) -> Array:
+    def masses_sorted(self: "LargeNPreparedState") -> Array:
         value = getattr(self.tree, "masses_sorted", None)
         if value is None:
             raise ValueError("prepared tree is missing masses_sorted")
         return jnp.asarray(value)
 
     @property
-    def inverse_permutation(self) -> Array:
+    def inverse_permutation(self: "LargeNPreparedState") -> Array:
         value = getattr(self.tree, "inverse_permutation", None)
         if value is None:
             raise ValueError("prepared tree is missing inverse_permutation")
         return jnp.asarray(value, dtype=INDEX_DTYPE)
 
+    @property
+    def interactions(self: "LargeNPreparedState") -> None:
+        """Compatibility view: large-N state does not retain far interactions."""
+        return None
+
+    @property
+    def downward(self: "LargeNPreparedState") -> _CompatDownwardView:
+        """Compatibility view exposing empty downward interactions."""
+        empty = _CompatInteractionStorage(
+            sources=jnp.zeros((0,), dtype=INDEX_DTYPE),
+            targets=jnp.zeros((0,), dtype=INDEX_DTYPE),
+            level_offsets=None,
+        )
+        return _CompatDownwardView(interactions=empty)
+
     def tree_flatten(
-        self,
+        self: "LargeNPreparedState",
     ) -> tuple[
         tuple[Any, ...],
         tuple[Any, ...],
@@ -257,7 +282,7 @@ class LargeNPreparedState:
 
     @classmethod
     def tree_unflatten(
-        cls,
+        cls: type["LargeNPreparedState"],
         aux: tuple[Any, ...],
         children: tuple[Any, ...],
     ) -> "LargeNPreparedState":

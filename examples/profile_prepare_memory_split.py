@@ -407,6 +407,7 @@ def _measure_prepare_stage_split(
             impl.expansion_basis != "solidfmm"
         )
         if not _can_split_dual_tree_build(
+            split_enabled=True,
             grouped_interactions=ctx["grouped_interactions"],
             need_traversal_result=need_traversal_result,
             pair_policy=pair_policy,
@@ -450,6 +451,7 @@ def _measure_prepare_stage_split(
         if not bool(need_compact_far_pairs):
             return None
         if not _can_split_dual_tree_build(
+            split_enabled=True,
             grouped_interactions=ctx["grouped_interactions"],
             need_traversal_result=need_traversal_result,
             pair_policy=pair_policy,
@@ -479,6 +481,7 @@ def _measure_prepare_stage_split(
             use_paper_fixed_policy
         )
         if not _can_split_dual_tree_build(
+            split_enabled=True,
             grouped_interactions=ctx["grouped_interactions"],
             need_traversal_result=need_traversal_result,
             pair_policy=pair_policy,

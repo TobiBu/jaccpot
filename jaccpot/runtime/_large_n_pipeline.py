@@ -584,7 +584,7 @@ def evaluate_large_n_state(
     target_indices: Optional[Array],
     return_potential: bool,
     max_acc_derivative_order: int,
-):
+) -> Any:
     """Evaluate large-N prepared state for the full particle set.
 
     Acceleration evaluation on the production large-N path is locked to the

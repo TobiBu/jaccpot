@@ -1500,7 +1500,7 @@ def _prepare_solidfmm_downward_child_inputs(
 ) -> _SolidFMMDownwardChildInputs:
     """Resolve child-index arrays for L2L propagation."""
 
-    num_internal_nodes = int(tree.num_internal_nodes)
+    num_internal_nodes = int(jnp.asarray(tree.left_child).shape[0])
     if num_internal_nodes <= 0:
         return _SolidFMMDownwardChildInputs(
             num_internal_nodes=0,
@@ -3330,7 +3330,7 @@ class FastMultipoleMethod:
         pos_sorted = build_artifacts.positions_sorted
         mass_sorted = build_artifacts.masses_sorted
         total_nodes = int(tree.parent.shape[0])
-        num_internal = int(tree.num_internal_nodes)
+        num_internal = int(jnp.asarray(tree.left_child).shape[0])
         num_leaves = int(total_nodes - num_internal)
         _prepare_diag(
             "tree built "
@@ -3573,7 +3573,12 @@ class FastMultipoleMethod:
                     f"to={sanitized_traversal_config}"
                 )
                 runtime_traversal_config = sanitized_traversal_config
-        jit_traversal_for_prepare = bool(self._jit_traversal_default)
+        jit_traversal_for_prepare = bool(self._jit_traversal_default) and not _contains_tracer(
+            (tree_artifacts.positions_sorted, tree_artifacts.masses_sorted)
+        )
+        allow_split_build = bool(
+            int(os.environ.get("JACCPOT_PREPARE_STAGE_MEMORY_SPLIT_ENABLED", "0"))
+        )
         dual_artifacts, cache_entry = _build_dual_tree_artifacts(
             tree_artifacts.tree,
             tree_artifacts.upward.geometry,
@@ -3598,6 +3603,7 @@ class FastMultipoleMethod:
                 farfield_mode=farfield_mode,
             ),
             grouped_schedule_budget_bytes=self._grouped_schedule_item_budget(),
+            allow_split_build=allow_split_build,
             pair_policy=pair_policy,
             policy_state=policy_state,
             jit_traversal=jit_traversal_for_prepare,
@@ -4733,6 +4739,34 @@ class FastMultipoleMethod:
         state: Optional[FMMPreparedState] = None
         positions_arr = jnp.asarray(positions)
         masses_arr = jnp.asarray(masses)
+        if _contains_tracer((positions_arr, masses_arr)):
+            if bool(return_potential):
+                raise NotImplementedError(
+                    "traced compute_accelerations fallback does not support return_potential=True"
+                )
+            if int(max_acc_derivative_order) != 0:
+                raise NotImplementedError(
+                    "traced compute_accelerations fallback does not support acceleration derivatives"
+                )
+            target_positions = (
+                positions_arr
+                if target_indices is None
+                else jnp.asarray(
+                    positions_arr[
+                        jnp.asarray(target_indices, dtype=INDEX_DTYPE),
+                    ],
+                    dtype=positions_arr.dtype,
+                )
+            )
+            return jax.vmap(
+                lambda eval_point: reference_direct_sum(
+                    positions_arr,
+                    masses_arr,
+                    eval_point,
+                    G=self.G,
+                    softening=self.softening,
+                )
+            )(target_positions)
         if reuse_prepared_state:
             if bounds is None:
                 bounds_key: tuple[Any, ...] = ("none",)
@@ -5228,9 +5262,11 @@ class FastMultipoleMethod:
             self._recent_retry_events = retry_events_tuple
 
         execution_backend = self._resolve_execution_backend()
+        tree_type_norm = str(getattr(tree_artifacts.tree, "tree_type", "")).strip().lower()
+        build_octree_payload = execution_backend == "octree" or tree_type_norm == "octree"
         octree = (
             build_octree_execution_data(tree_artifacts.tree)
-            if execution_backend == "octree"
+            if build_octree_payload
             else None
         )
         octree_native_neighbors = None
@@ -5248,9 +5284,51 @@ class FastMultipoleMethod:
         nearfield_interop = _build_nearfield_interop_data(
             tree_artifacts.tree,
             dual_downward_artifacts.neighbor_list,
-            octree=octree,
-            native_neighbors=octree_native_neighbors,
+            octree=None,
+            native_neighbors=None,
         )
+        if (
+            execution_backend == "octree"
+            and nearfield_interop.leaf_particle_indices is None
+        ):
+            leaf_nodes_nf = jnp.asarray(nearfield_interop.leaf_nodes, dtype=INDEX_DTYPE)
+            node_ranges_nf = jnp.asarray(
+                nearfield_interop.particle_order_node_ranges,
+                dtype=INDEX_DTYPE,
+            )
+            leaf_ranges_nf = node_ranges_nf[leaf_nodes_nf]
+            counts_nf = leaf_ranges_nf[:, 1] - leaf_ranges_nf[:, 0] + 1
+            width_nf = int(jnp.max(counts_nf)) if int(leaf_nodes_nf.shape[0]) > 0 else 0
+            if width_nf > 0:
+                offsets_nf = jnp.arange(width_nf, dtype=INDEX_DTYPE)
+                leaf_particle_indices_nf = (
+                    leaf_ranges_nf[:, 0][:, None] + offsets_nf[None, :]
+                )
+                leaf_particle_mask_nf = offsets_nf[None, :] < counts_nf[:, None]
+                particle_to_leaf_position_nf = jnp.zeros(
+                    (int(positions_arr.shape[0]),),
+                    dtype=INDEX_DTYPE,
+                )
+                particle_to_leaf_position_nf = particle_to_leaf_position_nf.at[
+                    leaf_particle_indices_nf[leaf_particle_mask_nf]
+                ].set(
+                    jnp.repeat(
+                        jnp.arange(int(leaf_nodes_nf.shape[0]), dtype=INDEX_DTYPE),
+                        counts_nf.astype(INDEX_DTYPE),
+                    )
+                )
+            else:
+                leaf_particle_indices_nf = jnp.zeros((int(leaf_nodes_nf.shape[0]), 0), dtype=INDEX_DTYPE)
+                leaf_particle_mask_nf = jnp.zeros((int(leaf_nodes_nf.shape[0]), 0), dtype=bool)
+                particle_to_leaf_position_nf = jnp.zeros(
+                    (int(positions_arr.shape[0]),),
+                    dtype=INDEX_DTYPE,
+                )
+            nearfield_interop = nearfield_interop._replace(
+                leaf_particle_indices=leaf_particle_indices_nf,
+                leaf_particle_mask=leaf_particle_mask_nf,
+                particle_to_leaf_position=particle_to_leaf_position_nf,
+            )
         nearfield_artifacts = self._prepare_state_nearfield_artifacts(
             neighbor_list=dual_downward_artifacts.neighbor_list,
             nearfield_interop=nearfield_interop,
@@ -5366,7 +5444,10 @@ class FastMultipoleMethod:
             target_indices=target_indices,
             num_particles=int(state.inverse_permutation.shape[0]),
         )
-        octree_backend = str(state.execution_backend).strip().lower() == "octree"
+        octree_backend = (
+            str(state.execution_backend).strip().lower() == "octree"
+            and bool(int(os.environ.get("JACCPOT_ENABLE_OCTREE_EVAL", "0")))
+        )
         farfield_local_data = (
             _octree_local_expansion_data(state.octree_downward)
             if octree_backend
@@ -5393,7 +5474,10 @@ class FastMultipoleMethod:
                 "max_acc_derivative_order > 0 currently requires expansion_basis='solidfmm'"
             )
 
-        if resolved_target_indices is None or tracing_targets:
+        use_full_eval_for_targets = bool(return_potential) and (
+            resolved_target_indices is not None
+        )
+        if resolved_target_indices is None or tracing_targets or use_full_eval_for_targets:
             evaluation = _evaluate_prepared_tree(
                 fmm=self,
                 tree=state.tree,
@@ -5455,7 +5539,7 @@ class FastMultipoleMethod:
                 )
                 if return_potential:
                     potentials = jnp.asarray(pot_sorted)[state.inverse_permutation]
-            elif tracing_targets:
+            elif tracing_targets or use_full_eval_for_targets:
                 accelerations = jnp.asarray(acc_sorted)[state.inverse_permutation][
                     resolved_target_indices
                 ]
@@ -5485,7 +5569,7 @@ class FastMultipoleMethod:
             if resolved_target_indices is None:
                 accelerations = jnp.asarray(acc_sorted)[state.inverse_permutation]
                 potentials = jnp.asarray(pot_sorted)[state.inverse_permutation]
-            elif tracing_targets:
+            elif tracing_targets or use_full_eval_for_targets:
                 accelerations = jnp.asarray(acc_sorted)[state.inverse_permutation][
                     resolved_target_indices
                 ]
@@ -6544,7 +6628,7 @@ def _infer_bounds(positions: Array) -> tuple[Array, Array]:
 
 def _max_leaf_size_from_tree(tree: Tree) -> int:
     """Compute maximum number of particles per leaf node."""
-    num_internal = int(tree.num_internal_nodes)
+    num_internal = int(jnp.asarray(tree.left_child).shape[0])
     leaf_ranges = tree.node_ranges[num_internal:]
     counts = leaf_ranges[:, 1] - leaf_ranges[:, 0] + as_index(1)
     return int(jnp.max(counts))

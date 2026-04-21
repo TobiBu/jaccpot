@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import jax.numpy as jnp
+from jaxtyping import Array
 
 from ._large_n_types import LargeNPreparedState
 from .dtypes import INDEX_DTYPE
@@ -12,7 +13,7 @@ def evaluate_large_n_farfield(
     state: LargeNPreparedState,
     *,
     return_potential: bool,
-):
+) -> tuple[Array, Array, Array]:
     """Evaluate leaf-local expansions for every particle in sorted order."""
     # Import lazily to avoid a circular dependency during module import.
     from ._fmm_impl import _evaluate_local_expansions_for_particles

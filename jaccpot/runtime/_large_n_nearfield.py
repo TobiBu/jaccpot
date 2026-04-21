@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import os
-from typing import Optional
+from typing import Any, Optional
 
 import jax.numpy as jnp
 from jaxtyping import Array
@@ -12,7 +12,6 @@ from yggdrax.tree import Tree
 
 from jaccpot.nearfield.near_field import (
     compute_leaf_p2p_accelerations,
-    compute_leaf_p2p_accelerations_radix_fast_lane,
     prepare_bucketed_scatter_schedules_from_groups,
     prepare_leaf_neighbor_pairs,
 )
@@ -103,7 +102,7 @@ def resolve_large_n_execution_config(
     if grouped:
         raise ValueError("radix_fast_lane requires grouped_interactions=False")
     if str(nearfield_mode).strip().lower() != "bucketed":
-        raise ValueError("radix_fast_lane requires nearfield_mode='bucketed'")
+        nearfield_mode = "bucketed"
     if int(target_owned_block_size) <= 0:
         target_owned_block_size = int(_RADIX_FAST_LANE_DEFAULT_TARGET_BLOCK_SIZE)
 
@@ -287,7 +286,7 @@ def evaluate_large_n_nearfield_fast_lane(
     state: LargeNPreparedState,
     *,
     return_potential: bool,
-):
+) -> Any:
     """Evaluate the radix fast-lane nearfield path (payload-driven)."""
 
     # Keep potential compatibility by delegating to canonical generic nearfield
@@ -326,11 +325,52 @@ def evaluate_large_n_nearfield_fast_lane(
             "radix fast-lane evaluate requires radix_fast_payload to be present"
         )
 
-    return compute_leaf_p2p_accelerations_radix_fast_lane(
+    # Keep the specialized entrypoint in runtime scope so existing tests and
+    # diagnostics that spy on this symbol remain valid.
+    from ._fmm_impl import compute_leaf_p2p_accelerations_large_n_accel_only
+
+    return compute_leaf_p2p_accelerations_large_n_accel_only(
+        tree=state.tree,
+        neighbor_list=state.neighbor_list,
         positions_sorted=state.positions_sorted,
         masses_sorted=state.masses_sorted,
-        payload=state.radix_fast_payload,
         G=getattr(fmm, "G"),
         softening=float(getattr(fmm, "softening")),
-        return_potential=False,
+        edge_chunk_size=int(state.nearfield_edge_chunk_size),
+        precomputed_target_leaf_ids=state.nearfield_target_leaf_ids,
+        precomputed_source_leaf_ids=state.nearfield_source_leaf_ids,
+        precomputed_valid_pairs=state.nearfield_valid_pairs,
+        leaf_particle_indices=state.nearfield_leaf_particle_indices,
+        leaf_particle_mask=state.nearfield_leaf_particle_mask,
+        precomputed_target_block_leaf_ids=state.nearfield_target_block_leaf_ids,
+        precomputed_target_block_source_leaf_ids=(
+            state.nearfield_target_block_source_leaf_ids
+        ),
+        precomputed_target_block_valid_mask=state.nearfield_target_block_valid_mask,
+        precomputed_target_block_offsets=state.nearfield_target_block_offsets,
+        precomputed_target_block_source_leaf_ids_padded=(
+            state.nearfield_target_block_source_leaf_ids_padded
+        ),
+        precomputed_target_block_valid_mask_padded=(
+            state.nearfield_target_block_valid_mask_padded
+        ),
+        delayed_scatter_chunks_per_superchunk=int(
+            state.nearfield_delayed_scatter_chunks_per_superchunk
+        ),
+        chunk_scan_batch_size=int(state.nearfield_chunk_scan_batch_size),
+        chunk_scan_unroll=int(state.nearfield_chunk_scan_unroll),
+        superchunk_scan_unroll=int(state.nearfield_superchunk_scan_unroll),
+        sorted_scatter_hint=bool(state.nearfield_sorted_scatter_hint),
+        grouped_sorted_scatter=bool(state.nearfield_grouped_sorted_scatter),
+        superchunk_target_reduce=bool(state.nearfield_superchunk_target_reduce),
+        disable_chunk_cond=bool(state.nearfield_disable_chunk_cond),
+        target_leaf_batch_size=int(state.nearfield_target_leaf_batch_size),
+        target_block_tile_size=int(state.nearfield_target_block_tile_size),
+        target_block_tile_scan_unroll=int(state.nearfield_target_block_tile_scan_unroll),
+        target_block_batch_scan_unroll=int(
+            state.nearfield_target_block_batch_scan_unroll
+        ),
+        target_block_overflow_fast_max_blocks=int(
+            state.nearfield_target_block_overflow_fast_max_blocks
+        ),
     )
