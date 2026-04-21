@@ -152,7 +152,7 @@ def canonical_large_n_production_config(
         "enable_interaction_cache": False,
         "retain_traversal_result": False,
         "retain_interactions": False,
-        "autotune_m2l_chunk": False,
+        "autotune_m2l_chunk": True,
         "mac_type": "dehnen",
     }
 
