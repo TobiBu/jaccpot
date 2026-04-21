@@ -11,6 +11,7 @@ from yggdrax.interactions import DualTreeTraversalConfig
 
 import jaccpot.runtime._fmm_impl as fmm_impl_private
 import jaccpot.runtime._interaction_cache as interaction_cache_private
+import jaccpot.runtime._large_n_nearfield as large_n_nearfield_private
 import jaccpot.runtime.fmm as runtime_fmm
 import jaccpot.upward.solidfmm_complex_tree_expansions as upward_private
 from jaccpot import (
@@ -1711,15 +1712,15 @@ def test_large_n_compiled_eval_uses_specialized_nearfield(monkeypatch):
     assert state.nearfield_chunk_sort_indices is None
 
     called = {"specialized": 0}
-    original = fmm_impl_private.compute_leaf_p2p_accelerations_large_n_accel_only
+    original = large_n_nearfield_private.compute_leaf_p2p_accelerations_radix_fast_lane
 
     def _spy_specialized(*args, **kwargs):
         called["specialized"] += 1
         return original(*args, **kwargs)
 
     monkeypatch.setattr(
-        fmm_impl_private,
-        "compute_leaf_p2p_accelerations_large_n_accel_only",
+        large_n_nearfield_private,
+        "compute_leaf_p2p_accelerations_radix_fast_lane",
         _spy_specialized,
     )
 
