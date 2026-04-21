@@ -3573,7 +3573,9 @@ class FastMultipoleMethod:
                     f"to={sanitized_traversal_config}"
                 )
                 runtime_traversal_config = sanitized_traversal_config
-        jit_traversal_for_prepare = bool(self._jit_traversal_default) and not _contains_tracer(
+        jit_traversal_for_prepare = bool(
+            self._jit_traversal_default
+        ) and not _contains_tracer(
             (tree_artifacts.positions_sorted, tree_artifacts.masses_sorted)
         )
         allow_split_build = bool(
@@ -4752,9 +4754,7 @@ class FastMultipoleMethod:
                 positions_arr
                 if target_indices is None
                 else jnp.asarray(
-                    positions_arr[
-                        jnp.asarray(target_indices, dtype=INDEX_DTYPE),
-                    ],
+                    positions_arr[jnp.asarray(target_indices, dtype=INDEX_DTYPE),],
                     dtype=positions_arr.dtype,
                 )
             )
@@ -5262,8 +5262,12 @@ class FastMultipoleMethod:
             self._recent_retry_events = retry_events_tuple
 
         execution_backend = self._resolve_execution_backend()
-        tree_type_norm = str(getattr(tree_artifacts.tree, "tree_type", "")).strip().lower()
-        build_octree_payload = execution_backend == "octree" or tree_type_norm == "octree"
+        tree_type_norm = (
+            str(getattr(tree_artifacts.tree, "tree_type", "")).strip().lower()
+        )
+        build_octree_payload = (
+            execution_backend == "octree" or tree_type_norm == "octree"
+        )
         octree = (
             build_octree_execution_data(tree_artifacts.tree)
             if build_octree_payload
@@ -5318,8 +5322,12 @@ class FastMultipoleMethod:
                     )
                 )
             else:
-                leaf_particle_indices_nf = jnp.zeros((int(leaf_nodes_nf.shape[0]), 0), dtype=INDEX_DTYPE)
-                leaf_particle_mask_nf = jnp.zeros((int(leaf_nodes_nf.shape[0]), 0), dtype=bool)
+                leaf_particle_indices_nf = jnp.zeros(
+                    (int(leaf_nodes_nf.shape[0]), 0), dtype=INDEX_DTYPE
+                )
+                leaf_particle_mask_nf = jnp.zeros(
+                    (int(leaf_nodes_nf.shape[0]), 0), dtype=bool
+                )
                 particle_to_leaf_position_nf = jnp.zeros(
                     (int(positions_arr.shape[0]),),
                     dtype=INDEX_DTYPE,
@@ -5444,9 +5452,10 @@ class FastMultipoleMethod:
             target_indices=target_indices,
             num_particles=int(state.inverse_permutation.shape[0]),
         )
-        octree_backend = (
-            str(state.execution_backend).strip().lower() == "octree"
-            and bool(int(os.environ.get("JACCPOT_ENABLE_OCTREE_EVAL", "0")))
+        octree_backend = str(
+            state.execution_backend
+        ).strip().lower() == "octree" and bool(
+            int(os.environ.get("JACCPOT_ENABLE_OCTREE_EVAL", "0"))
         )
         farfield_local_data = (
             _octree_local_expansion_data(state.octree_downward)
@@ -5477,7 +5486,11 @@ class FastMultipoleMethod:
         use_full_eval_for_targets = bool(return_potential) and (
             resolved_target_indices is not None
         )
-        if resolved_target_indices is None or tracing_targets or use_full_eval_for_targets:
+        if (
+            resolved_target_indices is None
+            or tracing_targets
+            or use_full_eval_for_targets
+        ):
             evaluation = _evaluate_prepared_tree(
                 fmm=self,
                 tree=state.tree,

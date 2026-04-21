@@ -366,7 +366,9 @@ def evaluate_large_n_nearfield_fast_lane(
         disable_chunk_cond=bool(state.nearfield_disable_chunk_cond),
         target_leaf_batch_size=int(state.nearfield_target_leaf_batch_size),
         target_block_tile_size=int(state.nearfield_target_block_tile_size),
-        target_block_tile_scan_unroll=int(state.nearfield_target_block_tile_scan_unroll),
+        target_block_tile_scan_unroll=int(
+            state.nearfield_target_block_tile_scan_unroll
+        ),
         target_block_batch_scan_unroll=int(
             state.nearfield_target_block_batch_scan_unroll
         ),
