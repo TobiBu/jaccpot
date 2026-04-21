@@ -1699,13 +1699,23 @@ def _build_runtime_config(config: dict[str, Any]) -> dict[str, Any]:
     TreeConfig = jaccpot_symbols["TreeConfig"]
     FMMAdvancedConfig = jaccpot_symbols["FMMAdvancedConfig"]
     DualTreeTraversalConfig = yggdrax_symbols["DualTreeTraversalConfig"]
-    preset_norm = str(config.get("preset", "fast")).strip().lower()
+    cfg = dict(config)
+    preset_norm = str(cfg.get("preset", "fast")).strip().lower()
+    if preset_norm == "large_n_gpu":
+        canonical_cfg = bench_utils.canonical_large_n_production_config(
+            leaf_target=int(cfg.get("leaf_target", 256)),
+            theta=float(cfg.get("theta", 0.6)),
+            softening=float(cfg.get("softening", 1e-3)),
+            working_dtype=str(cfg.get("working_dtype", "float32")),
+        )
+        for key, value in canonical_cfg.items():
+            cfg[key] = value
     autotune_default = preset_norm == "large_n_gpu"
-    memory_objective = str(config.get("memory_objective", "balanced")).strip().lower()
-    traversal_raw = config.get("traversal_config")
+    memory_objective = str(cfg.get("memory_objective", "balanced")).strip().lower()
+    traversal_raw = cfg.get("traversal_config")
     if traversal_raw is None:
         # Older benchmark notes and handoff commands used this name.
-        traversal_raw = config.get("runtime_traversal_config")
+        traversal_raw = cfg.get("runtime_traversal_config")
     traversal_cfg: Optional[DualTreeTraversalConfig]
     if traversal_raw is None:
         traversal_cfg = None
@@ -1719,60 +1729,60 @@ def _build_runtime_config(config: dict[str, Any]) -> dict[str, Any]:
 
     advanced = FMMAdvancedConfig(
         tree=TreeConfig(
-            tree_type=str(config["tree_type"]),
-            leaf_target=int(config["leaf_target"]),
+            tree_type=str(cfg["tree_type"]),
+            leaf_target=int(cfg["leaf_target"]),
         ),
         farfield=FarFieldConfig(
-            rotation=str(config.get("farfield_rotation", "solidfmm")),
-            mode=str(config.get("farfield_mode", "auto")),
-            grouped_interactions=bool(config.get("grouped_interactions", False)),
-            streamed_far_pairs=config.get("streamed_far_pairs"),
-            mixed_order=bool(config.get("mixed_order", False)),
+            rotation=str(cfg.get("farfield_rotation", "solidfmm")),
+            mode=str(cfg.get("farfield_mode", "auto")),
+            grouped_interactions=bool(cfg.get("grouped_interactions", False)),
+            streamed_far_pairs=cfg.get("streamed_far_pairs"),
+            mixed_order=bool(cfg.get("mixed_order", False)),
             mixed_order_min_order=(
                 None
-                if config.get("mixed_order_min_order") is None
-                else int(config["mixed_order_min_order"])
+                if cfg.get("mixed_order_min_order") is None
+                else int(cfg["mixed_order_min_order"])
             ),
         ),
         nearfield=NearFieldConfig(
-            mode=str(config.get("nearfield_mode", "auto")),
-            edge_chunk_size=int(config.get("nearfield_edge_chunk_size", 256)),
+            mode=str(cfg.get("nearfield_mode", "auto")),
+            edge_chunk_size=int(cfg.get("nearfield_edge_chunk_size", 256)),
             precompute_scatter_schedules=bool(
-                config.get("precompute_scatter_schedules", True)
+                cfg.get("precompute_scatter_schedules", True)
             ),
         ),
         runtime=RuntimePolicyConfig(
-            fail_fast=bool(config.get("fail_fast", False)),
+            fail_fast=bool(cfg.get("fail_fast", False)),
             pair_process_block=(
                 None
-                if config.get("pair_process_block") is None
-                else int(config["pair_process_block"])
+                if cfg.get("pair_process_block") is None
+                else int(cfg["pair_process_block"])
             ),
             memory_objective=str(memory_objective),
             traversal_config=traversal_cfg,
-            jit_traversal=bool(config.get("jit_traversal", True)),
-            enable_interaction_cache=bool(config.get("enable_interaction_cache", True)),
-            retain_traversal_result=bool(config.get("retain_traversal_result", True)),
-            retain_interactions=bool(config.get("retain_interactions", True)),
-            autotune_m2l_chunk=bool(config.get("autotune_m2l_chunk", autotune_default)),
+            jit_traversal=bool(cfg.get("jit_traversal", True)),
+            enable_interaction_cache=bool(cfg.get("enable_interaction_cache", True)),
+            retain_traversal_result=bool(cfg.get("retain_traversal_result", True)),
+            retain_interactions=bool(cfg.get("retain_interactions", True)),
+            autotune_m2l_chunk=bool(cfg.get("autotune_m2l_chunk", autotune_default)),
         ),
-        mac_type=str(config.get("mac_type", "dehnen")),
+        mac_type=str(cfg.get("mac_type", "dehnen")),
     )
     return dict(
-        preset=FMMPreset(str(config["preset"])),
-        basis=str(config["basis"]),
-        theta=float(config["theta"]),
-        softening=float(config["softening"]),
-        working_dtype=_dtype_from_name(str(config["working_dtype"])),
-        adaptive_order=bool(config.get("adaptive_order", False)),
-        p_gears=tuple(int(v) for v in config.get("p_gears", [])),
-        adaptive_error_model=str(config.get("adaptive_error_model", "tail_proxy")),
+        preset=FMMPreset(str(cfg["preset"])),
+        basis=str(cfg["basis"]),
+        theta=float(cfg["theta"]),
+        softening=float(cfg["softening"]),
+        working_dtype=_dtype_from_name(str(cfg["working_dtype"])),
+        adaptive_order=bool(cfg.get("adaptive_order", False)),
+        p_gears=tuple(int(v) for v in cfg.get("p_gears", [])),
+        adaptive_error_model=str(cfg.get("adaptive_error_model", "tail_proxy")),
         adaptive_eps=(
             None
-            if config.get("adaptive_eps") is None
-            else float(config.get("adaptive_eps"))
+            if cfg.get("adaptive_eps") is None
+            else float(cfg.get("adaptive_eps"))
         ),
-        mac_force_scale_mode=str(config.get("mac_force_scale_mode", "prev")),
+        mac_force_scale_mode=str(cfg.get("mac_force_scale_mode", "prev")),
         advanced=advanced,
     )
 

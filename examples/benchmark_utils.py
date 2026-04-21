@@ -120,6 +120,43 @@ def apply_runtime_path(
     return updated
 
 
+def canonical_large_n_production_config(
+    *,
+    leaf_target: int = 256,
+    theta: float = 0.6,
+    softening: float = 1e-3,
+    working_dtype: str = "float32",
+) -> dict[str, Any]:
+    """Return canonical benchmark config for large-N radix fast memory path."""
+
+    return {
+        "preset": "large_n_gpu",
+        "basis": "solidfmm",
+        "theta": float(theta),
+        "softening": float(softening),
+        "working_dtype": str(working_dtype),
+        "tree_type": "radix",
+        "leaf_target": int(leaf_target),
+        "farfield_rotation": "solidfmm",
+        "farfield_mode": "pair_grouped",
+        "grouped_interactions": False,
+        "streamed_far_pairs": True,
+        "mixed_order": False,
+        "mixed_order_min_order": None,
+        "nearfield_mode": "bucketed",
+        "nearfield_edge_chunk_size": 256,
+        "precompute_scatter_schedules": False,
+        "memory_objective": "minimum_memory",
+        "fail_fast": True,
+        "jit_traversal": True,
+        "enable_interaction_cache": False,
+        "retain_traversal_result": False,
+        "retain_interactions": False,
+        "autotune_m2l_chunk": True,
+        "mac_type": "dehnen",
+    }
+
+
 def resolved_large_n_memory_path_report(fmm: Any) -> dict[str, Any]:
     """Return the resolved runtime flags relevant to the lean large-N path."""
 
@@ -169,6 +206,7 @@ def resolved_large_n_memory_path_report(fmm: Any) -> dict[str, Any]:
 __all__ = [
     "TimingResult",
     "apply_runtime_path",
+    "canonical_large_n_production_config",
     "generate_random_distribution",
     "resolved_large_n_memory_path_report",
     "time_callable",
