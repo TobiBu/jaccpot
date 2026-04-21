@@ -1455,6 +1455,9 @@ def _worker_autotune_runtime_kwargs(
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     tuned_kwargs = dict(fmm_kwargs)
     autotune_default = str(cfg.get("preset", "")).strip().lower() == "large_n_gpu"
+    tie_tolerance = float(cfg.get("worker_autotune_runtime_tie_tolerance", 0.02))
+    if tie_tolerance < 0.0:
+        tie_tolerance = 0.0
     autotune_traversal_enabled = bool(
         cfg.get("worker_autotune_traversal", autotune_default)
     )
@@ -1552,6 +1555,7 @@ def _worker_autotune_runtime_kwargs(
     if autotune_traversal_enabled and isinstance(traversal_candidates_raw, list):
         best_time = float("inf")
         best_cfg: Optional[dict[str, int]] = None
+        best_cfg_mem_score: Optional[tuple[int, int, int, int]] = None
         baseline_floor: Optional[dict[str, int]] = traversal_floor
         if len(traversal_candidates_raw) > 0 and isinstance(
             traversal_candidates_raw[0], dict
@@ -1620,9 +1624,23 @@ def _worker_autotune_runtime_kwargs(
                         autotune_cache_path=autotune_cache_path,
                         benchmark_scope=autotune_objective,
                     )
+                mem_score = (
+                    int(normalized_candidate["max_pair_queue"]),
+                    int(normalized_candidate["max_interactions_per_node"]),
+                    int(normalized_candidate["max_neighbors_per_leaf"]),
+                    int(normalized_candidate["process_block"]),
+                )
                 if t < best_time:
                     best_time = t
                     best_cfg = normalized_candidate
+                    best_cfg_mem_score = mem_score
+                elif best_cfg is not None and best_cfg_mem_score is not None:
+                    runtime_tie_limit = float(best_time) * (
+                        1.0 + float(tie_tolerance)
+                    )
+                    if float(t) <= runtime_tie_limit and mem_score < best_cfg_mem_score:
+                        best_cfg = normalized_candidate
+                        best_cfg_mem_score = mem_score
             except Exception:
                 continue
         if best_cfg is not None:
@@ -1671,6 +1689,12 @@ def _worker_autotune_runtime_kwargs(
                 if t < best_time:
                     best_time = t
                     best_nf = candidate_nf
+                elif best_nf is not None:
+                    runtime_tie_limit = float(best_time) * (
+                        1.0 + float(tie_tolerance)
+                    )
+                    if float(t) <= runtime_tie_limit and int(candidate_nf) < int(best_nf):
+                        best_nf = candidate_nf
             except Exception:
                 continue
         if best_nf is not None:
