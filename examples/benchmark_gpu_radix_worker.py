@@ -1454,7 +1454,7 @@ def _worker_autotune_runtime_kwargs(
     autotune_cache_path: Optional[str],
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     tuned_kwargs = dict(fmm_kwargs)
-    autotune_default = str(cfg.get("preset", "")).strip().lower() == "large_n_gpu"
+    autotune_default = False
     tie_tolerance = float(cfg.get("worker_autotune_runtime_tie_tolerance", 0.02))
     if tie_tolerance < 0.0:
         tie_tolerance = 0.0
@@ -1734,7 +1734,7 @@ def _build_runtime_config(config: dict[str, Any]) -> dict[str, Any]:
         )
         for key, value in canonical_cfg.items():
             cfg[key] = value
-    autotune_default = preset_norm == "large_n_gpu"
+    autotune_default = False
     memory_objective = str(cfg.get("memory_objective", "balanced")).strip().lower()
     traversal_raw = cfg.get("traversal_config")
     if traversal_raw is None:
