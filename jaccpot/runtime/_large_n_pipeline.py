@@ -609,6 +609,11 @@ def evaluate_large_n_state(
 
     leaf_nodes = jnp.asarray(state.neighbor_list.leaf_indices, dtype=INDEX_DTYPE)
     node_ranges = jnp.asarray(state.tree.node_ranges, dtype=INDEX_DTYPE)
+    nearfield_mode = str(state.nearfield_mode).strip().lower()
+    if nearfield_mode != "bucketed":
+        raise RuntimeError(
+            "large_n evaluation requires nearfield_mode='bucketed' prepared state"
+        )
     if (not bool(getattr(state, "radix_fast_lane", False))) and (
         not bool(return_potential)
     ):
@@ -643,7 +648,6 @@ def evaluate_large_n_state(
             output_dtype
         )
 
-    nearfield_mode = str(state.nearfield_mode)
     nearfield_edge_chunk_size = int(state.nearfield_edge_chunk_size)
     eval_out = _evaluate_tree_compiled_impl(
         state.tree,
@@ -804,7 +808,7 @@ def can_use_large_n_prepare_path(
     """Decide whether prepare_state should dispatch to the large-N path."""
 
     runtime_path = str(getattr(fmm, "runtime_path", "auto")).strip().lower()
-    if runtime_path == "legacy":
+    if runtime_path not in ("auto", "legacy", "large_n"):
         return False
     if (
         runtime_path == "auto"

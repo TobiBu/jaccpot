@@ -209,7 +209,7 @@ def test_advanced_config_applies_to_runtime():
     assert fmm.mac_type == "engblom"
 
 
-def test_large_gpu_minimum_memory_streamed_path_keeps_explicit_traversal_caps():
+def test_large_gpu_minimum_memory_streamed_path_caps_oversized_explicit_traversal():
     impl = fmm_impl_private.FastMultipoleMethod(
         preset=FMMPreset.LARGE_N_GPU,
         expansion_basis="solidfmm",
@@ -232,10 +232,39 @@ def test_large_gpu_minimum_memory_streamed_path_keeps_explicit_traversal_caps():
     )
 
     assert overrides.traversal_config is not None
-    assert int(overrides.traversal_config.max_pair_queue) == 1_048_576
+    assert int(overrides.traversal_config.max_pair_queue) == 262_144
     assert int(overrides.traversal_config.process_block) == 256
-    assert int(overrides.traversal_config.max_interactions_per_node) == 32_768
-    assert int(overrides.traversal_config.max_neighbors_per_leaf) == 16_384
+    assert int(overrides.traversal_config.max_interactions_per_node) == 8_192
+    assert int(overrides.traversal_config.max_neighbors_per_leaf) == 4_096
+
+
+def test_large_gpu_minimum_memory_streamed_path_keeps_small_explicit_traversal():
+    impl = fmm_impl_private.FastMultipoleMethod(
+        preset=FMMPreset.LARGE_N_GPU,
+        expansion_basis="solidfmm",
+        mac_type="engblom",
+        streamed_far_pairs=True,
+        grouped_interactions=False,
+        memory_objective="minimum_memory",
+        fail_fast=True,
+        traversal_config=DualTreeTraversalConfig(
+            max_pair_queue=32_768,
+            process_block=64,
+            max_interactions_per_node=1_024,
+            max_neighbors_per_leaf=256,
+        ),
+    )
+
+    overrides = impl._resolve_runtime_execution_overrides(
+        num_particles=2_097_152,
+        backend="gpu",
+    )
+
+    assert overrides.traversal_config is not None
+    assert int(overrides.traversal_config.max_pair_queue) == 32_768
+    assert int(overrides.traversal_config.process_block) == 64
+    assert int(overrides.traversal_config.max_interactions_per_node) == 1_024
+    assert int(overrides.traversal_config.max_neighbors_per_leaf) == 256
 
 
 def test_large_gpu_minimum_memory_streamed_tree_guard_caps_overflowing_seed():
@@ -1694,6 +1723,55 @@ def test_large_n_gpu_preset_accepts_string_alias():
         basis="solidfmm",
     )
     assert fmm.preset is FMMPreset.LARGE_N_GPU
+
+
+def test_large_n_gpu_profile_coerces_conflicting_runtime_knobs():
+    fmm = FastMultipoleMethod(
+        preset=FMMPreset.LARGE_N_GPU,
+        basis="solidfmm",
+        advanced=FMMAdvancedConfig(
+            nearfield=NearFieldConfig(mode="baseline", precompute_scatter_schedules=True),
+            farfield=FarFieldConfig(
+                mode="class_major",
+                grouped_interactions=True,
+                streamed_far_pairs=False,
+                mixed_order=True,
+                mixed_order_min_order=2,
+            ),
+            runtime=RuntimePolicyConfig(
+                memory_objective="throughput",
+                enable_interaction_cache=True,
+                retain_traversal_result=True,
+                retain_interactions=True,
+            ),
+        ),
+        runtime_path="legacy",
+    )
+    impl = fmm._impl
+    assert impl.runtime_path == "large_n"
+    assert impl.memory_objective == "minimum_memory"
+    assert impl.nearfield_mode == "bucketed"
+    assert impl.precompute_nearfield_scatter_schedules is False
+    assert impl.streamed_far_pairs is True
+    assert bool(impl.grouped_interactions) is False
+    assert impl.farfield_mode == "pair_grouped"
+    assert impl.mixed_order_farfield is False
+    assert impl.mixed_order_min_order is None
+    assert impl.enable_interaction_cache is False
+    assert impl.retain_traversal_result is False
+    assert impl.retain_interactions is False
+
+
+def test_large_n_prepare_path_ignores_legacy_runtime_path_request(monkeypatch):
+    positions, masses = _sample_problem(n=64)
+    fmm = FastMultipoleMethod(
+        preset=FMMPreset.LARGE_N_GPU,
+        basis="solidfmm",
+        runtime_path="legacy",
+    )
+    monkeypatch.setattr(fmm_impl_private.jax, "default_backend", lambda: "gpu")
+    state = fmm.prepare_state(positions, masses, leaf_size=16, max_order=3)
+    assert state.execution_backend == "large_n"
 
 
 def test_large_n_compiled_eval_uses_specialized_nearfield(monkeypatch):

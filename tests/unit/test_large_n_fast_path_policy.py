@@ -26,6 +26,9 @@ def test_large_n_fast_lane_defaults_on(monkeypatch):
 
     cfg = resolve_large_n_execution_config(_make_large_n_fmm(), num_particles=2048)
     assert bool(cfg.radix_fast_lane)
+    assert str(cfg.nearfield_mode) == "bucketed"
+    assert bool(cfg.retain_leaf_groups)
+    assert bool(cfg.precompute_scatter) is False
     assert int(cfg.target_owned_block_size) == 8
     assert bool(cfg.speed_prepared_layout)
 
@@ -113,3 +116,32 @@ def test_large_n_fast_lane_trims_neighbor_leaf_positions(monkeypatch):
 
     acc = fmm.evaluate_prepared_state(state)
     assert tuple(acc.shape) == (1024, 3)
+
+
+def test_large_n_eval_rejects_non_bucketed_state(monkeypatch):
+    monkeypatch.setattr(jax, "default_backend", lambda: "gpu")
+    monkeypatch.setenv("JACCPOT_LARGE_N_TARGET_BLOCK_SIZE", "8")
+
+    key = jax.random.PRNGKey(19)
+    pos_key, mass_key = jax.random.split(key)
+    positions = jax.random.uniform(
+        pos_key,
+        (512, 3),
+        minval=-1.0,
+        maxval=1.0,
+        dtype=jnp.float32,
+    )
+    masses = jax.random.uniform(
+        mass_key,
+        (512,),
+        minval=0.1,
+        maxval=1.1,
+        dtype=jnp.float32,
+    )
+
+    fmm = _make_large_n_fmm()
+    state = fmm.prepare_state(positions, masses, leaf_size=256, max_order=4)
+    state_bad = replace(state, nearfield_mode="baseline")
+
+    with pytest.raises(RuntimeError, match="nearfield_mode='bucketed'"):
+        _ = fmm.evaluate_prepared_state(state_bad)

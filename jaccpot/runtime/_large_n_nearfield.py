@@ -70,7 +70,7 @@ def resolve_large_n_execution_config(
     ``JACCPOT_LARGE_N_TARGET_BLOCK_SIZE``, the fast lane defaults to block size 8.
     """
 
-    nearfield_mode = str(fmm._resolve_nearfield_mode(num_particles=int(num_particles)))
+    nearfield_mode = "bucketed"
     edge_chunk_size = int(
         fmm._resolve_nearfield_edge_chunk_size(
             num_particles=int(num_particles),
@@ -102,8 +102,6 @@ def resolve_large_n_execution_config(
         raise ValueError("radix_fast_lane requires working_dtype=float32")
     if grouped:
         raise ValueError("radix_fast_lane requires grouped_interactions=False")
-    if str(nearfield_mode).strip().lower() != "bucketed":
-        nearfield_mode = "bucketed"
     if int(target_owned_block_size) <= 0:
         target_owned_block_size = int(_RADIX_FAST_LANE_DEFAULT_TARGET_BLOCK_SIZE)
 
@@ -115,7 +113,7 @@ def resolve_large_n_execution_config(
     return LargeNExecutionConfig(
         nearfield_mode=nearfield_mode,
         nearfield_edge_chunk_size=edge_chunk_size,
-        retain_leaf_groups=(nearfield_mode == "bucketed"),
+        retain_leaf_groups=True,
         retain_pair_vectors=retain_pair_vectors,
         precompute_scatter=precompute_scatter,
         target_owned_block_size=target_owned_block_size,
@@ -218,13 +216,8 @@ def build_large_n_nearfield_precompute(
     """Build only the near-field artifacts needed by the large-N path."""
 
     if str(execution_config.nearfield_mode).strip().lower() != "bucketed":
-        return NearfieldPrecomputeArtifacts(
-            target_leaf_ids=None,
-            source_leaf_ids=None,
-            valid_pairs=None,
-            chunk_sort_indices=None,
-            chunk_group_ids=None,
-            chunk_unique_indices=None,
+        raise RuntimeError(
+            "large_n nearfield precompute requires nearfield_mode='bucketed'"
         )
 
     if (not bool(execution_config.retain_pair_vectors)) and (

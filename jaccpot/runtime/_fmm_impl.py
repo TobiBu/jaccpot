@@ -2000,6 +2000,44 @@ class FastMultipoleMethod:
         self._explicit_pair_process_block = pair_process_block is not None
         self._explicit_grouped_interactions = grouped_interactions is not None
         self.grouped_interactions = grouped_interactions
+        self._apply_large_n_gpu_production_contract()
+
+    def _is_large_n_gpu_production_profile(self) -> bool:
+        """Whether this solver should run the canonical large-N GPU contract."""
+        return (
+            str(self.preset).strip().lower() == "large_n_gpu"
+            and str(self.tree_type).strip().lower() == "radix"
+            and str(self.expansion_basis).strip().lower() == "solidfmm"
+            and str(self.execution_backend).strip().lower() != "octree"
+        )
+
+    def _apply_large_n_gpu_production_contract(self) -> None:
+        """Normalize large-N GPU runtime knobs to the canonical fast memory path."""
+
+        if not self._is_large_n_gpu_production_profile():
+            return
+
+        # Keep large-N production on one stable runtime lane.
+        self.runtime_path = "large_n"
+        self.memory_objective = "minimum_memory"  # type: ignore[assignment]
+        self.streamed_far_pairs = True
+        self.grouped_interactions = False
+        self._explicit_grouped_interactions = False
+        self.farfield_mode = "pair_grouped"
+
+        # Keep near-field on the radix fast-lane compatible bucketed path.
+        self.nearfield_mode = "bucketed"
+        self.precompute_nearfield_scatter_schedules = False
+        self.mixed_order_farfield = False
+        self.mixed_order_min_order = None
+
+        # Disable retention caches that increase memory pressure on this profile.
+        self.enable_interaction_cache = False
+        self.retain_traversal_result = False
+        self.retain_interactions = False
+        self.precompute_grouped_class_segments = False
+        if self.upward_leaf_batch_size is None:
+            self.upward_leaf_batch_size = 2048
 
     def _resolve_execution_backend(self) -> str:
         """Resolve the active FMM execution backend without altering tree choice."""
@@ -2501,7 +2539,8 @@ class FastMultipoleMethod:
 
         backend_name = jax.default_backend() if backend is None else str(backend)
         n_particles = int(num_particles)
-        minimum_memory = self.memory_objective == "minimum_memory"
+        production_large_n = self._is_large_n_gpu_production_profile()
+        minimum_memory = self.memory_objective == "minimum_memory" or production_large_n
         large_cpu = (
             backend_name == "cpu" and n_particles >= _LARGE_CPU_PARTICLE_THRESHOLD
         )
@@ -2554,6 +2593,10 @@ class FastMultipoleMethod:
             and not minimum_memory
         ):
             grouped_interactions = True
+
+        if production_large_n:
+            grouped_interactions = False
+            farfield_mode = "pair_grouped"
 
         if self.streamed_far_pairs and grouped_interactions:
             # Streamed far-pair execution and grouped/class-major M2L are
@@ -2661,6 +2704,43 @@ class FastMultipoleMethod:
                     _GPU_MINIMUM_MEMORY_INTERACTIONS_PER_NODE
                 ),
                 max_neighbors_per_leaf=int(_GPU_MINIMUM_MEMORY_NEIGHBORS_PER_LEAF),
+            )
+        if (
+            production_large_n
+            and backend_name == "gpu"
+            and traversal_config is not None
+        ):
+            # Production large-N radix path should not allow oversized explicit
+            # traversal seeds to inflate memory footprint. Keep user overrides
+            # only within the bounded streamed minimum-memory ceiling.
+            explicit_ceiling = _minimum_memory_streamed_gpu_traversal_ceiling(
+                num_particles=n_particles
+            )
+            traversal_config = DualTreeTraversalConfig(
+                max_pair_queue=int(
+                    min(
+                        int(traversal_config.max_pair_queue),
+                        int(explicit_ceiling.max_pair_queue),
+                    )
+                ),
+                process_block=int(
+                    min(
+                        int(traversal_config.process_block),
+                        int(explicit_ceiling.process_block),
+                    )
+                ),
+                max_interactions_per_node=int(
+                    min(
+                        int(traversal_config.max_interactions_per_node),
+                        int(explicit_ceiling.max_interactions_per_node),
+                    )
+                ),
+                max_neighbors_per_leaf=int(
+                    min(
+                        int(traversal_config.max_neighbors_per_leaf),
+                        int(explicit_ceiling.max_neighbors_per_leaf),
+                    )
+                ),
             )
         if (
             minimum_memory
@@ -4373,6 +4453,8 @@ class FastMultipoleMethod:
 
     def _resolve_nearfield_mode(self, *, num_particles: int) -> str:
         """Resolve near-field execution mode from configured policy."""
+        if self._is_large_n_gpu_production_profile():
+            return "bucketed"
         mode = str(self.nearfield_mode).strip().lower()
         if mode != "auto":
             return mode

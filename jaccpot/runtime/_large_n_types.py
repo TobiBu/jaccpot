@@ -166,7 +166,7 @@ class LargeNPreparedState:
     force_scale_nodes: Optional[Array] = None
     execution_backend: str = "large_n"
     expansion_basis: str = "solidfmm"
-    nearfield_mode: str = "baseline"
+    nearfield_mode: str = "bucketed"
     nearfield_edge_chunk_size: int = 256
     nearfield_delayed_scatter_chunks_per_superchunk: int = 1
     nearfield_chunk_scan_batch_size: int = 1
