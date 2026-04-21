@@ -10,6 +10,7 @@ import json
 import math
 import os
 import time
+import warnings
 from collections import OrderedDict
 from dataclasses import dataclass
 from functools import lru_cache, partial
@@ -1841,6 +1842,7 @@ class FastMultipoleMethod:
                 "farfield_mode must be 'auto', 'pair_grouped', or 'class_major'"
             )
         self.farfield_mode = farfield_mode_norm
+        self._explicit_streamed_far_pairs = streamed_far_pairs is not None
         self.streamed_far_pairs = bool(streamed_far_pairs)
         self.mixed_order_farfield = bool(mixed_order_farfield)
         self.mixed_order_min_order = (
@@ -1857,12 +1859,20 @@ class FastMultipoleMethod:
         runtime_path_norm = str(runtime_path).strip().lower()
         if runtime_path_norm not in ("auto", "legacy", "large_n"):
             raise ValueError("runtime_path must be 'auto', 'legacy', or 'large_n'")
+        if runtime_path_norm == "legacy":
+            warnings.warn(
+                "runtime_path='legacy' is deprecated and will be removed; "
+                "use runtime_path='large_n' or runtime_path='auto'.",
+                FutureWarning,
+                stacklevel=2,
+            )
         execution_backend_norm = str(execution_backend).strip().lower()
         if execution_backend_norm not in ("auto", "radix", "octree"):
             raise ValueError("execution_backend must be 'auto', 'radix', or 'octree'")
         if int(nearfield_edge_chunk_size) <= 0:
             raise ValueError("nearfield_edge_chunk_size must be positive")
         self.nearfield_mode = nearfield_mode_norm
+        self._explicit_nearfield_mode = nearfield_mode_norm != "auto"
         self.runtime_path = runtime_path_norm
         self.execution_backend = execution_backend_norm
         self.nearfield_edge_chunk_size = int(nearfield_edge_chunk_size)
@@ -1875,6 +1885,7 @@ class FastMultipoleMethod:
                 "memory_objective must be 'balanced', 'throughput', or 'minimum_memory'"
             )
         self.memory_objective: MemoryObjective = objective_norm  # type: ignore[assignment]
+        self._explicit_memory_objective = objective_norm != "balanced"
         self.memory_budget_bytes = (
             None if memory_budget_bytes is None else int(memory_budget_bytes)
         )
@@ -2016,6 +2027,35 @@ class FastMultipoleMethod:
 
         if not self._is_large_n_gpu_production_profile():
             return
+
+        if self._explicit_memory_objective and self.memory_objective != "minimum_memory":
+            warnings.warn(
+                "large_n_gpu production profile coerces memory_objective to "
+                "'minimum_memory' for memory-stable performance.",
+                FutureWarning,
+                stacklevel=2,
+            )
+        if self._explicit_nearfield_mode and str(self.nearfield_mode).strip().lower() != "bucketed":
+            warnings.warn(
+                "large_n_gpu production profile coerces nearfield_mode to "
+                "'bucketed' to keep radix fast-lane active.",
+                FutureWarning,
+                stacklevel=2,
+            )
+        if bool(self.grouped_interactions):
+            warnings.warn(
+                "large_n_gpu production profile disables grouped_interactions "
+                "to keep streamed pair_grouped execution.",
+                FutureWarning,
+                stacklevel=2,
+            )
+        if self._explicit_streamed_far_pairs and not bool(self.streamed_far_pairs):
+            warnings.warn(
+                "large_n_gpu production profile enables streamed_far_pairs "
+                "for low-memory execution.",
+                FutureWarning,
+                stacklevel=2,
+            )
 
         # Keep large-N production on one stable runtime lane.
         self.runtime_path = "large_n"

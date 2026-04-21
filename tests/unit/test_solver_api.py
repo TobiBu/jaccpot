@@ -1762,6 +1762,23 @@ def test_large_n_gpu_profile_coerces_conflicting_runtime_knobs():
     assert impl.retain_interactions is False
 
 
+def test_large_n_gpu_profile_emits_deprecation_warnings_for_conflicting_knobs():
+    with pytest.warns(FutureWarning):
+        _ = FastMultipoleMethod(
+            preset=FMMPreset.LARGE_N_GPU,
+            basis="solidfmm",
+            advanced=FMMAdvancedConfig(
+                nearfield=NearFieldConfig(mode="baseline"),
+                farfield=FarFieldConfig(
+                    grouped_interactions=True,
+                    streamed_far_pairs=False,
+                ),
+                runtime=RuntimePolicyConfig(memory_objective="throughput"),
+            ),
+            runtime_path="legacy",
+        )
+
+
 def test_large_n_prepare_path_ignores_legacy_runtime_path_request(monkeypatch):
     positions, masses = _sample_problem(n=64)
     fmm = FastMultipoleMethod(
