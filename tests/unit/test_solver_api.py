@@ -1750,7 +1750,9 @@ def test_large_n_gpu_profile_coerces_conflicting_runtime_knobs():
         preset=FMMPreset.LARGE_N_GPU,
         basis="solidfmm",
         advanced=FMMAdvancedConfig(
-            nearfield=NearFieldConfig(mode="baseline", precompute_scatter_schedules=True),
+            nearfield=NearFieldConfig(
+                mode="baseline", precompute_scatter_schedules=True
+            ),
             farfield=FarFieldConfig(
                 mode="class_major",
                 grouped_interactions=True,

@@ -1635,9 +1635,7 @@ def _worker_autotune_runtime_kwargs(
                     best_cfg = normalized_candidate
                     best_cfg_mem_score = mem_score
                 elif best_cfg is not None and best_cfg_mem_score is not None:
-                    runtime_tie_limit = float(best_time) * (
-                        1.0 + float(tie_tolerance)
-                    )
+                    runtime_tie_limit = float(best_time) * (1.0 + float(tie_tolerance))
                     if float(t) <= runtime_tie_limit and mem_score < best_cfg_mem_score:
                         best_cfg = normalized_candidate
                         best_cfg_mem_score = mem_score
@@ -1690,10 +1688,10 @@ def _worker_autotune_runtime_kwargs(
                     best_time = t
                     best_nf = candidate_nf
                 elif best_nf is not None:
-                    runtime_tie_limit = float(best_time) * (
-                        1.0 + float(tie_tolerance)
-                    )
-                    if float(t) <= runtime_tie_limit and int(candidate_nf) < int(best_nf):
+                    runtime_tie_limit = float(best_time) * (1.0 + float(tie_tolerance))
+                    if float(t) <= runtime_tie_limit and int(candidate_nf) < int(
+                        best_nf
+                    ):
                         best_nf = candidate_nf
             except Exception:
                 continue
@@ -1802,9 +1800,7 @@ def _build_runtime_config(config: dict[str, Any]) -> dict[str, Any]:
         p_gears=tuple(int(v) for v in cfg.get("p_gears", [])),
         adaptive_error_model=str(cfg.get("adaptive_error_model", "tail_proxy")),
         adaptive_eps=(
-            None
-            if cfg.get("adaptive_eps") is None
-            else float(cfg.get("adaptive_eps"))
+            None if cfg.get("adaptive_eps") is None else float(cfg.get("adaptive_eps"))
         ),
         mac_force_scale_mode=str(cfg.get("mac_force_scale_mode", "prev")),
         advanced=advanced,

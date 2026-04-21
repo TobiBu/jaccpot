@@ -2059,14 +2059,20 @@ class FastMultipoleMethod:
         if not self._is_large_n_gpu_production_profile():
             return
 
-        if self._explicit_memory_objective and self.memory_objective != "minimum_memory":
+        if (
+            self._explicit_memory_objective
+            and self.memory_objective != "minimum_memory"
+        ):
             warnings.warn(
                 "large_n_gpu production profile coerces memory_objective to "
                 "'minimum_memory' for memory-stable performance.",
                 FutureWarning,
                 stacklevel=2,
             )
-        if self._explicit_nearfield_mode and str(self.nearfield_mode).strip().lower() != "bucketed":
+        if (
+            self._explicit_nearfield_mode
+            and str(self.nearfield_mode).strip().lower() != "bucketed"
+        ):
             warnings.warn(
                 "large_n_gpu production profile coerces nearfield_mode to "
                 "'bucketed' to keep radix fast-lane active.",
