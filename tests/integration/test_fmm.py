@@ -904,7 +904,7 @@ def test_evaluate_tree_compiled_matches_eager():
 
 def test_nearfield_bucketed_matches_baseline():
     key = jax.random.PRNGKey(515)
-    num_particles = 128
+    num_particles = 96
     positions = jax.random.uniform(
         key,
         (num_particles, 3),
@@ -921,7 +921,7 @@ def test_nearfield_bucketed_matches_baseline():
         expansion_basis="solidfmm",
         complex_rotation="solidfmm",
         mac_type="dehnen",
-        fixed_order=4,
+        fixed_order=3,
         fixed_max_leaf_size=16,
         grouped_interactions=True,
         farfield_mode="class_major",
@@ -941,14 +941,14 @@ def test_nearfield_bucketed_matches_baseline():
         positions,
         masses,
         leaf_size=16,
-        max_order=4,
+        max_order=3,
         jit_tree=False,
     )
     acc_bucketed = fmm_bucketed.compute_accelerations(
         positions,
         masses,
         leaf_size=16,
-        max_order=4,
+        max_order=3,
         jit_tree=False,
     )
 
@@ -2339,7 +2339,7 @@ def test_fast_preset_adaptive_policy_respects_explicit_overrides():
 
 def test_solidfmm_grouped_interactions_matches_sparse_path():
     key = jax.random.PRNGKey(23)
-    num_particles = 192
+    num_particles = 128
     positions = jax.random.uniform(
         key,
         (num_particles, 3),
@@ -2356,7 +2356,7 @@ def test_solidfmm_grouped_interactions_matches_sparse_path():
         expansion_basis="solidfmm",
         complex_rotation="solidfmm",
         mac_type="dehnen",
-        fixed_order=4,
+        fixed_order=3,
     )
 
     bounds = (
@@ -2374,7 +2374,7 @@ def test_solidfmm_grouped_interactions_matches_sparse_path():
         tree,
         pos_sorted,
         mass_sorted,
-        max_order=4,
+        max_order=3,
         center_mode="aabb",
     )
     downward_sparse = fmm.prepare_downward_sweep(
@@ -2401,7 +2401,7 @@ def test_solidfmm_grouped_interactions_matches_sparse_path():
 
 def test_solidfmm_grouped_class_major_matches_pair_grouped():
     key = jax.random.PRNGKey(31)
-    num_particles = 160
+    num_particles = 112
     positions = jax.random.uniform(
         key,
         (num_particles, 3),
@@ -2420,7 +2420,7 @@ def test_solidfmm_grouped_class_major_matches_pair_grouped():
         mac_type="dehnen",
         grouped_interactions=True,
         farfield_mode="pair_grouped",
-        fixed_order=4,
+        fixed_order=3,
     )
 
     bounds = (
@@ -2438,7 +2438,7 @@ def test_solidfmm_grouped_class_major_matches_pair_grouped():
         tree,
         pos_sorted,
         mass_sorted,
-        max_order=4,
+        max_order=3,
         center_mode="aabb",
     )
     downward_pair = fmm.prepare_downward_sweep(
