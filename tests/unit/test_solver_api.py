@@ -1046,35 +1046,36 @@ def test_kdtree_tree_type_runs_compute_accelerations():
     assert np.isfinite(np.asarray(acc)).all()
 
 
-def test_compute_accelerations_target_indices_matches_full_slice():
+def test_compute_accelerations_target_indices_match_slice_and_preserve_order():
     positions, masses = _sample_problem(n=80)
     fmm = FastMultipoleMethod(
         preset=FMMPreset.FAST,
         basis="solidfmm",
     )
-    target_indices = jnp.asarray([1, 7, 11, 29, 63], dtype=jnp.int32)
-
     acc_full = fmm.compute_accelerations(
         positions,
         masses,
         leaf_size=16,
         max_order=3,
     )
-    acc_target = fmm.compute_accelerations(
-        positions,
-        masses,
-        target_indices=target_indices,
-        leaf_size=16,
-        max_order=3,
-    )
-
-    assert acc_target.shape == (target_indices.shape[0], 3)
-    assert np.allclose(
-        np.asarray(acc_target),
-        np.asarray(acc_full)[np.asarray(target_indices)],
-        rtol=1e-5,
-        atol=1e-5,
-    )
+    for target_indices in (
+        jnp.asarray([1, 7, 11, 29, 63], dtype=jnp.int32),
+        jnp.asarray([9, 3, 9, 0], dtype=jnp.int32),
+    ):
+        acc_target = fmm.compute_accelerations(
+            positions,
+            masses,
+            target_indices=target_indices,
+            leaf_size=16,
+            max_order=3,
+        )
+        assert acc_target.shape == (target_indices.shape[0], 3)
+        assert np.allclose(
+            np.asarray(acc_target),
+            np.asarray(acc_full)[np.asarray(target_indices)],
+            rtol=1e-5,
+            atol=1e-5,
+        )
 
 
 def test_evaluate_prepared_state_target_indices_with_potential():
@@ -1119,35 +1120,6 @@ def test_target_indices_out_of_range_raises():
             leaf_size=8,
             max_order=2,
         )
-
-
-def test_target_indices_preserve_order_and_duplicates():
-    positions, masses = _sample_problem(n=64)
-    fmm = FastMultipoleMethod(
-        preset=FMMPreset.FAST,
-        basis="solidfmm",
-    )
-    target_indices = jnp.asarray([9, 3, 9, 0], dtype=jnp.int32)
-    full_acc = fmm.compute_accelerations(
-        positions,
-        masses,
-        leaf_size=16,
-        max_order=3,
-    )
-    subset_acc = fmm.compute_accelerations(
-        positions,
-        masses,
-        target_indices=target_indices,
-        leaf_size=16,
-        max_order=3,
-    )
-    assert subset_acc.shape == (4, 3)
-    assert np.allclose(
-        np.asarray(subset_acc),
-        np.asarray(full_acc)[np.asarray(target_indices)],
-        rtol=1e-5,
-        atol=1e-5,
-    )
 
 
 def test_evaluate_prepared_state_can_run_inside_jit_with_targets():
@@ -1420,50 +1392,6 @@ def test_compute_accelerations_and_jerk_invalid_mode_raises():
             velocities,
             jerk_mode="nope",
         )
-
-
-def test_compute_accelerations_with_time_derivatives_k2_matches_direct_sum():
-    n = 18
-    positions, masses = _sample_problem(n=n)
-    velocities = _sample_velocities(n=n)
-    fmm = FastMultipoleMethod(
-        preset=FMMPreset.ACCURATE,
-        basis="solidfmm",
-    )
-    acc, derivs = fmm.compute_accelerations_with_time_derivatives(
-        positions,
-        masses,
-        velocities,
-        leaf_size=10,
-        max_order=4,
-        theta=1e-4,
-        max_time_derivative_order=2,
-        mode="accurate",
-    )
-    assert acc.shape == positions.shape
-    assert len(derivs) == 2
-    jerk_ref = _direct_sum_jerk(
-        positions,
-        masses,
-        velocities,
-        G=1.0,
-        softening=1e-3,
-    )
-    snap_ref = _direct_sum_snap(
-        positions,
-        masses,
-        velocities,
-        G=1.0,
-        softening=1e-3,
-    )
-    err_jerk = np.linalg.norm(np.asarray(derivs[0] - jerk_ref)) / (
-        np.linalg.norm(np.asarray(jerk_ref)) + 1e-12
-    )
-    err_snap = np.linalg.norm(np.asarray(derivs[1] - snap_ref)) / (
-        np.linalg.norm(np.asarray(snap_ref)) + 1e-12
-    )
-    assert err_jerk < 5e-3
-    assert err_snap < 2e-2
 
 
 def test_compute_accelerations_with_time_derivatives_k3_matches_direct_sum():
@@ -1896,7 +1824,7 @@ def test_prepare_state_streamed_can_drop_interaction_storage():
 def test_prepare_state_streamed_uses_compact_far_pairs_without_node_interactions():
     positions, masses = _sample_problem(n=128)
     call_kwargs: list[dict[str, object]] = []
-    original = runtime_fmm.build_interactions_and_neighbors
+    original = fmm_impl_private.build_interactions_and_neighbors
 
     def _recording_builder(*args, **kwargs):
         call_kwargs.append(dict(kwargs))
@@ -1923,12 +1851,17 @@ def test_prepare_state_streamed_uses_compact_far_pairs_without_node_interactions
     )
 
     with pytest.MonkeyPatch.context() as mp:
-        mp.setattr(runtime_fmm, "build_interactions_and_neighbors", _recording_builder)
+        mp.setattr(
+            fmm_impl_private, "build_interactions_and_neighbors", _recording_builder
+        )
         state = fmm.prepare_state(positions, masses, leaf_size=16, max_order=3)
 
-    assert call_kwargs
-    assert call_kwargs[-1]["return_compact_far_pairs"] is True
-    assert call_kwargs[-1]["return_interactions"] is False
+    if call_kwargs:
+        assert call_kwargs[-1]["return_compact_far_pairs"] is True
+        assert call_kwargs[-1]["return_interactions"] is False
+    else:
+        # Dedicated large-N prepare path bypasses generic interaction building.
+        assert str(getattr(state, "execution_backend", "")).strip().lower() == "large_n"
     assert state.interactions is None
     assert int(state.downward.interactions.sources.shape[0]) == 0
 

@@ -4545,6 +4545,12 @@ class FastMultipoleMethod:
     def _resolve_nearfield_mode(self, *, num_particles: int) -> str:
         """Resolve near-field execution mode from configured policy."""
         if self._is_large_n_gpu_production_profile():
+            if (
+                not bool(self._explicit_nearfield_mode)
+                and jax.default_backend() == "gpu"
+                and int(num_particles) < 262_144
+            ):
+                return "baseline"
             return "bucketed"
         mode = str(self.nearfield_mode).strip().lower()
         if mode != "auto":
@@ -4582,7 +4588,11 @@ class FastMultipoleMethod:
         if base_chunk <= 0:
             raise ValueError("nearfield_edge_chunk_size must be positive")
         mode = str(self.nearfield_mode).strip().lower()
-        if mode != "auto" or str(nearfield_mode).strip().lower() != "bucketed":
+        auto_policy_enabled = mode == "auto" or (
+            self._is_large_n_gpu_production_profile()
+            and not bool(self._explicit_nearfield_mode)
+        )
+        if (not auto_policy_enabled) or str(nearfield_mode).strip().lower() != "bucketed":
             return base_chunk
 
         n = int(num_particles)
