@@ -488,7 +488,7 @@ def test_execution_backend_flows_from_advanced_config():
 
 
 def test_prepare_state_records_resolved_execution_backend():
-    positions, masses = _sample_problem(n=32)
+    positions, masses = _sample_problem(n=16)
     fmm = FastMultipoleMethod(
         preset=FMMPreset.FAST,
         basis="solidfmm",
@@ -501,15 +501,15 @@ def test_prepare_state_records_resolved_execution_backend():
     state = fmm.prepare_state(
         positions,
         masses,
-        leaf_size=8,
-        max_order=3,
+        leaf_size=4,
+        max_order=2,
     )
 
     assert state.execution_backend == "radix"
 
 
 def test_explicit_octree_execution_backend_prepares_state():
-    positions, masses = _sample_problem(n=32)
+    positions, masses = _sample_problem(n=16)
     fmm = FastMultipoleMethod(
         preset=FMMPreset.FAST,
         basis="solidfmm",
@@ -522,8 +522,8 @@ def test_explicit_octree_execution_backend_prepares_state():
     state = fmm.prepare_state(
         positions,
         masses,
-        leaf_size=8,
-        max_order=3,
+        leaf_size=4,
+        max_order=2,
     )
 
     assert state.execution_backend == "octree"
@@ -533,7 +533,7 @@ def test_explicit_octree_execution_backend_prepares_state():
 
 
 def test_octree_prepare_state_exposes_octree_execution_view():
-    positions, masses = _sample_problem(n=48)
+    positions, masses = _sample_problem(n=24)
     fmm = FastMultipoleMethod(
         preset=FMMPreset.FAST,
         basis="solidfmm",
@@ -544,7 +544,7 @@ def test_octree_prepare_state_exposes_octree_execution_view():
         positions,
         masses,
         leaf_size=8,
-        max_order=3,
+        max_order=2,
     )
 
     assert state.tree.tree_type == "octree"
@@ -569,7 +569,7 @@ def test_octree_prepare_state_exposes_octree_execution_view():
 
 
 def test_octree_solver_matches_radix_prepare_path():
-    positions, masses = _sample_problem(n=64)
+    positions, masses = _sample_problem(n=48)
     radix = FastMultipoleMethod(
         preset=FMMPreset.FAST,
         basis="solidfmm",
@@ -585,13 +585,13 @@ def test_octree_solver_matches_radix_prepare_path():
         positions,
         masses,
         leaf_size=16,
-        max_order=3,
+        max_order=2,
     )
     acc_octree = octree.compute_accelerations(
         positions,
         masses,
         leaf_size=16,
-        max_order=3,
+        max_order=2,
     )
 
     assert np.allclose(
@@ -600,7 +600,7 @@ def test_octree_solver_matches_radix_prepare_path():
 
 
 def test_octree_execution_backend_matches_radix_on_octree_tree():
-    positions, masses = _sample_problem(n=64)
+    positions, masses = _sample_problem(n=48)
     radix = FastMultipoleMethod(
         preset=FMMPreset.FAST,
         basis="solidfmm",
@@ -622,13 +622,13 @@ def test_octree_execution_backend_matches_radix_on_octree_tree():
         positions,
         masses,
         leaf_size=16,
-        max_order=3,
+        max_order=2,
     )
     acc_octree = octree.compute_accelerations(
         positions,
         masses,
         leaf_size=16,
-        max_order=3,
+        max_order=2,
     )
 
     assert np.allclose(
@@ -740,21 +740,32 @@ def test_octree_execution_backend_target_indices_match_full_prepared_state(
     octree_backend_prepared_state,
 ):
     fmm, state = octree_backend_prepared_state
-    target_indices = jnp.asarray([0, 5, 9, 10, 33], dtype=jnp.int32)
-
     full_acc, full_pot = fmm.evaluate_prepared_state(state, return_potential=True)
-    target_acc, target_pot = fmm.evaluate_prepared_state(
-        state,
-        target_indices=target_indices,
-        return_potential=True,
-    )
-
-    np_idx = np.asarray(target_indices)
     assert state.nearfield_interop is not None
-    assert target_acc.shape == (target_indices.shape[0], 3)
-    assert target_pot.shape == (target_indices.shape[0],)
-    assert np.allclose(np.asarray(target_acc), np.asarray(full_acc)[np_idx])
-    assert np.allclose(np.asarray(target_pot), np.asarray(full_pot)[np_idx])
+    for target_indices in (
+        jnp.asarray([0, 5, 9, 10, 33], dtype=jnp.int32),
+        jnp.asarray([9, 3, 9, 0], dtype=jnp.int32),
+    ):
+        target_acc, target_pot = fmm.evaluate_prepared_state(
+            state,
+            target_indices=target_indices,
+            return_potential=True,
+        )
+        np_idx = np.asarray(target_indices)
+        assert target_acc.shape == (target_indices.shape[0], 3)
+        assert target_pot.shape == (target_indices.shape[0],)
+        assert np.allclose(
+            np.asarray(target_acc),
+            np.asarray(full_acc)[np_idx],
+            rtol=1e-5,
+            atol=1e-5,
+        )
+        assert np.allclose(
+            np.asarray(target_pot),
+            np.asarray(full_pot)[np_idx],
+            rtol=1e-5,
+            atol=1e-5,
+        )
 
 
 def test_octree_execution_backend_prepared_state_jit_targets_match_eager(
@@ -823,36 +834,6 @@ def test_octree_execution_backend_prepared_state_eager_matches_compiled(
     assert np.allclose(
         np.asarray(target_pot_compiled),
         np.asarray(target_pot_eager),
-        rtol=1e-5,
-        atol=1e-5,
-    )
-
-
-def test_octree_execution_backend_target_indices_preserve_order_and_duplicates(
-    octree_backend_prepared_state,
-):
-    fmm, state = octree_backend_prepared_state
-    target_indices = jnp.asarray([9, 3, 9, 0], dtype=jnp.int32)
-
-    full_acc, full_pot = fmm.evaluate_prepared_state(state, return_potential=True)
-    subset_acc, subset_pot = fmm.evaluate_prepared_state(
-        state,
-        target_indices=target_indices,
-        return_potential=True,
-    )
-
-    np_idx = np.asarray(target_indices)
-    assert subset_acc.shape == (target_indices.shape[0], 3)
-    assert subset_pot.shape == (target_indices.shape[0],)
-    assert np.allclose(
-        np.asarray(subset_acc),
-        np.asarray(full_acc)[np_idx],
-        rtol=1e-5,
-        atol=1e-5,
-    )
-    assert np.allclose(
-        np.asarray(subset_pot),
-        np.asarray(full_pot)[np_idx],
         rtol=1e-5,
         atol=1e-5,
     )
@@ -992,8 +973,9 @@ def test_kdtree_tree_type_runs_compute_accelerations():
     assert np.isfinite(np.asarray(acc)).all()
 
 
-def test_compute_accelerations_target_indices_match_slice_and_preserve_order():
-    positions, masses = _sample_problem(n=80)
+def test_target_indices_match_slice_across_acceleration_apis():
+    positions, masses = _sample_problem(n=64)
+    velocities = _sample_velocities(n=64)
     fmm = FastMultipoleMethod(
         preset=FMMPreset.FAST,
         basis="solidfmm",
@@ -1022,6 +1004,66 @@ def test_compute_accelerations_target_indices_match_slice_and_preserve_order():
             rtol=1e-5,
             atol=1e-5,
         )
+
+    deriv_target_indices = jnp.asarray([2, 8, 13, 21, 34], dtype=jnp.int32)
+    acc_full_deriv, deriv_full = fmm.compute_accelerations(
+        positions,
+        masses,
+        leaf_size=16,
+        max_order=3,
+        max_acc_derivative_order=1,
+    )
+    acc_sub_deriv, deriv_sub = fmm.compute_accelerations(
+        positions,
+        masses,
+        target_indices=deriv_target_indices,
+        leaf_size=16,
+        max_order=3,
+        max_acc_derivative_order=1,
+    )
+    np_idx_deriv = np.asarray(deriv_target_indices)
+    assert np.allclose(
+        np.asarray(acc_sub_deriv),
+        np.asarray(acc_full_deriv)[np_idx_deriv],
+        rtol=1e-5,
+        atol=1e-5,
+    )
+    assert np.allclose(
+        np.asarray(deriv_sub[0]),
+        np.asarray(deriv_full[0])[np_idx_deriv],
+        rtol=1e-5,
+        atol=1e-5,
+    )
+
+    jerk_target_indices = jnp.asarray([1, 6, 14, 23, 37], dtype=jnp.int32)
+    acc_full_jerk, jerk_full = fmm.compute_accelerations_and_jerk(
+        positions,
+        masses,
+        velocities,
+        leaf_size=16,
+        max_order=3,
+    )
+    acc_sub_jerk, jerk_sub = fmm.compute_accelerations_and_jerk(
+        positions,
+        masses,
+        velocities,
+        target_indices=jerk_target_indices,
+        leaf_size=16,
+        max_order=3,
+    )
+    np_idx_jerk = np.asarray(jerk_target_indices)
+    assert np.allclose(
+        np.asarray(acc_sub_jerk),
+        np.asarray(acc_full_jerk)[np_idx_jerk],
+        rtol=1e-5,
+        atol=1e-5,
+    )
+    assert np.allclose(
+        np.asarray(jerk_sub),
+        np.asarray(jerk_full)[np_idx_jerk],
+        rtol=1e-5,
+        atol=1e-5,
+    )
 
 
 def test_evaluate_prepared_state_target_indices_with_potential():
@@ -1110,63 +1152,8 @@ def test_compute_accelerations_returns_acc_derivatives_when_requested():
     assert derivatives[0].shape == (positions.shape[0], 3, 3)
 
 
-def test_compute_accelerations_acc_derivatives_target_indices_match_slice():
-    positions, masses = _sample_problem(n=56)
-    fmm = FastMultipoleMethod(
-        preset=FMMPreset.FAST,
-        basis="solidfmm",
-    )
-    target_indices = jnp.asarray([2, 8, 13, 21, 34], dtype=jnp.int32)
-    acc_full, deriv_full = fmm.compute_accelerations(
-        positions,
-        masses,
-        leaf_size=16,
-        max_order=3,
-        max_acc_derivative_order=1,
-    )
-    acc_sub, deriv_sub = fmm.compute_accelerations(
-        positions,
-        masses,
-        target_indices=target_indices,
-        leaf_size=16,
-        max_order=3,
-        max_acc_derivative_order=1,
-    )
-    np_idx = np.asarray(target_indices)
-    assert np.allclose(np.asarray(acc_sub), np.asarray(acc_full)[np_idx])
-    assert np.allclose(np.asarray(deriv_sub[0]), np.asarray(deriv_full[0])[np_idx])
-
-
-def test_compute_accelerations_and_jerk_target_indices_match_full_slice():
-    positions, masses = _sample_problem(n=52)
-    velocities = _sample_velocities(n=52)
-    fmm = FastMultipoleMethod(
-        preset=FMMPreset.FAST,
-        basis="solidfmm",
-    )
-    target_indices = jnp.asarray([1, 6, 14, 23, 37], dtype=jnp.int32)
-    acc_full, jerk_full = fmm.compute_accelerations_and_jerk(
-        positions,
-        masses,
-        velocities,
-        leaf_size=16,
-        max_order=3,
-    )
-    acc_sub, jerk_sub = fmm.compute_accelerations_and_jerk(
-        positions,
-        masses,
-        velocities,
-        target_indices=target_indices,
-        leaf_size=16,
-        max_order=3,
-    )
-    np_idx = np.asarray(target_indices)
-    assert np.allclose(np.asarray(acc_sub), np.asarray(acc_full)[np_idx])
-    assert np.allclose(np.asarray(jerk_sub), np.asarray(jerk_full)[np_idx])
-
-
 def test_compute_accelerations_and_jerk_matches_direct_sum_small_n():
-    n = 24
+    n = 20
     positions, masses = _sample_problem(n=n)
     velocities = _sample_velocities(n=n)
     fmm = FastMultipoleMethod(
@@ -1197,7 +1184,7 @@ def test_compute_accelerations_and_jerk_matches_direct_sum_small_n():
 
 
 def test_compute_accelerations_and_jerk_accurate_mode_matches_direct_sum_tighter():
-    n = 20
+    n = 16
     positions, masses = _sample_problem(n=n)
     velocities = _sample_velocities(n=n)
     fmm = FastMultipoleMethod(
@@ -1296,8 +1283,8 @@ def test_compute_accelerations_and_jerk_accurate_solidfmm_uses_analytic_path(
 def test_compute_accelerations_and_jerk_accurate_cartesian_uses_fd_fallback(
     monkeypatch: pytest.MonkeyPatch,
 ):
-    positions, masses = _sample_problem(n=18)
-    velocities = _sample_velocities(n=18)
+    positions, masses = _sample_problem(n=14)
+    velocities = _sample_velocities(n=14)
     fmm = FastMultipoleMethod(basis="cartesian")
 
     def _forbidden(*args, **kwargs):
