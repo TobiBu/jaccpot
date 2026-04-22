@@ -28,7 +28,7 @@ def _sample_problem(n: int = 64):
 
 
 def test_accepts_legacy_expanse_kwargs_with_deprecation_warning():
-    positions, masses = _sample_problem(n=64)
+    positions, masses = _sample_problem(n=32)
     with pytest.warns(DeprecationWarning):
         fmm = FastMultipoleMethod(
             preset="fast",

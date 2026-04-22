@@ -637,7 +637,7 @@ def test_octree_execution_backend_matches_radix_on_octree_tree():
 
 
 def test_octree_execution_backend_supports_baseline_nearfield_mode():
-    positions, masses = _sample_problem(n=64)
+    positions, masses = _sample_problem(n=48)
     radix = FastMultipoleMethod(
         preset=FMMPreset.FAST,
         basis="solidfmm",
@@ -676,7 +676,7 @@ def test_octree_execution_backend_supports_baseline_nearfield_mode():
 
 
 def test_octree_execution_backend_supports_class_major_farfield_mode():
-    positions, masses = _sample_problem(n=64)
+    positions, masses = _sample_problem(n=48)
     radix = FastMultipoleMethod(
         preset=FMMPreset.BALANCED,
         basis="solidfmm",

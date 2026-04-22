@@ -1,5 +1,6 @@
 import jax.numpy as jnp
 import numpy as np
+import pytest
 from yggdrax.interactions import (
     DualTreeTraversalConfig,
     build_octree_native_far_pairs,
@@ -34,15 +35,13 @@ def _sample_problem(n: int = 48):
     return positions, masses
 
 
-def test_octree_upward_plan_exposes_level_major_metadata():
-    positions, masses = _sample_problem()
+@pytest.fixture(scope="module")
+def octree_state():
+    positions, masses = _sample_problem(n=64)
     fmm = FastMultipoleMethod(
         preset=FMMPreset.FAST,
         basis="solidfmm",
-        advanced=FMMAdvancedConfig(
-            tree=TreeConfig(tree_type="octree"),
-            runtime=RuntimePolicyConfig(execution_backend="octree"),
-        ),
+        advanced=FMMAdvancedConfig(tree=TreeConfig(tree_type="octree")),
     )
 
     state = fmm.prepare_state(
@@ -51,6 +50,31 @@ def test_octree_upward_plan_exposes_level_major_metadata():
         leaf_size=8,
         max_order=3,
     )
+    return fmm, state
+
+
+@pytest.fixture(scope="module")
+def octree_state_native_backend():
+    positions, masses = _sample_problem(n=64)
+    fmm = FastMultipoleMethod(
+        preset=FMMPreset.FAST,
+        basis="solidfmm",
+        advanced=FMMAdvancedConfig(
+            tree=TreeConfig(tree_type="octree"),
+            runtime=RuntimePolicyConfig(execution_backend="octree"),
+        ),
+    )
+    state = fmm.prepare_state(
+        positions,
+        masses,
+        leaf_size=8,
+        max_order=3,
+    )
+    return fmm, state
+
+
+def test_octree_upward_plan_exposes_level_major_metadata(octree_state):
+    _, state = octree_state
 
     assert state.octree is not None
     plan = build_octree_upward_plan(state.octree)
@@ -67,20 +91,8 @@ def test_octree_upward_plan_exposes_level_major_metadata():
     assert plan.box_max_extents.shape == plan.valid_mask.shape
 
 
-def test_octree_execution_view_exposes_native_box_geometry():
-    positions, masses = _sample_problem(n=64)
-    fmm = FastMultipoleMethod(
-        preset=FMMPreset.FAST,
-        basis="solidfmm",
-        advanced=FMMAdvancedConfig(tree=TreeConfig(tree_type="octree")),
-    )
-
-    state = fmm.prepare_state(
-        positions,
-        masses,
-        leaf_size=8,
-        max_order=3,
-    )
+def test_octree_execution_view_exposes_native_box_geometry(octree_state):
+    _, state = octree_state
 
     assert state.octree is not None
     valid_mask = np.asarray(state.octree.valid_mask)
@@ -97,20 +109,8 @@ def test_octree_execution_view_exposes_native_box_geometry():
     assert np.all(box_max_extents[valid_mask] > 0.0)
 
 
-def test_octree_complex_multipoles_match_radix_upward_on_mapped_nodes():
-    positions, masses = _sample_problem(n=64)
-    fmm = FastMultipoleMethod(
-        preset=FMMPreset.FAST,
-        basis="solidfmm",
-        advanced=FMMAdvancedConfig(tree=TreeConfig(tree_type="octree")),
-    )
-
-    state = fmm.prepare_state(
-        positions,
-        masses,
-        leaf_size=8,
-        max_order=3,
-    )
+def test_octree_complex_multipoles_match_radix_upward_on_mapped_nodes(octree_state):
+    _, state = octree_state
 
     assert state.octree is not None
     plan = build_octree_upward_plan(state.octree)
@@ -162,20 +162,8 @@ def test_octree_complex_multipoles_match_radix_upward_on_mapped_nodes():
     )
 
 
-def test_prepare_state_attaches_octree_native_upward_artifacts():
-    positions, masses = _sample_problem(n=64)
-    fmm = FastMultipoleMethod(
-        preset=FMMPreset.FAST,
-        basis="solidfmm",
-        advanced=FMMAdvancedConfig(tree=TreeConfig(tree_type="octree")),
-    )
-
-    state = fmm.prepare_state(
-        positions,
-        masses,
-        leaf_size=8,
-        max_order=3,
-    )
+def test_prepare_state_attaches_octree_native_upward_artifacts(octree_state):
+    _, state = octree_state
 
     assert state.octree is not None
     assert state.octree_upward is not None
@@ -203,20 +191,8 @@ def test_prepare_state_attaches_octree_native_upward_artifacts():
     )
 
 
-def test_octree_interaction_plan_remaps_farfield_pairs_by_level():
-    positions, masses = _sample_problem(n=64)
-    fmm = FastMultipoleMethod(
-        preset=FMMPreset.FAST,
-        basis="solidfmm",
-        advanced=FMMAdvancedConfig(tree=TreeConfig(tree_type="octree")),
-    )
-
-    state = fmm.prepare_state(
-        positions,
-        masses,
-        leaf_size=8,
-        max_order=3,
-    )
+def test_octree_interaction_plan_remaps_farfield_pairs_by_level(octree_state):
+    _, state = octree_state
 
     assert state.octree is not None
     assert state.interactions is not None
@@ -237,23 +213,8 @@ def test_octree_interaction_plan_remaps_farfield_pairs_by_level():
     assert np.all(target_nodes[:num_pairs] >= 0)
 
 
-def test_octree_native_far_pairs_feed_downward_plan():
-    positions, masses = _sample_problem(n=64)
-    fmm = FastMultipoleMethod(
-        preset=FMMPreset.FAST,
-        basis="solidfmm",
-        advanced=FMMAdvancedConfig(
-            tree=TreeConfig(tree_type="octree"),
-            runtime=RuntimePolicyConfig(execution_backend="octree"),
-        ),
-    )
-
-    state = fmm.prepare_state(
-        positions,
-        masses,
-        leaf_size=8,
-        max_order=3,
-    )
+def test_octree_native_far_pairs_feed_downward_plan(octree_state_native_backend):
+    _, state = octree_state_native_backend
 
     assert state.octree is not None
     assert state.octree_downward is not None
@@ -292,20 +253,8 @@ def test_octree_native_far_pairs_feed_downward_plan():
     )
 
 
-def test_prepare_state_attaches_octree_native_downward_scaffold():
-    positions, masses = _sample_problem(n=64)
-    fmm = FastMultipoleMethod(
-        preset=FMMPreset.FAST,
-        basis="solidfmm",
-        advanced=FMMAdvancedConfig(tree=TreeConfig(tree_type="octree")),
-    )
-
-    state = fmm.prepare_state(
-        positions,
-        masses,
-        leaf_size=8,
-        max_order=3,
-    )
+def test_prepare_state_attaches_octree_native_downward_scaffold(octree_state):
+    _, state = octree_state
 
     assert state.octree is not None
     assert state.octree_upward is not None
@@ -345,20 +294,8 @@ def test_prepare_state_attaches_octree_native_downward_scaffold():
     assert np.all(parent[valid_children] == root_oct)
 
 
-def test_octree_m2l_matches_radix_root_local():
-    positions, masses = _sample_problem(n=64)
-    fmm = FastMultipoleMethod(
-        preset=FMMPreset.FAST,
-        basis="solidfmm",
-        advanced=FMMAdvancedConfig(tree=TreeConfig(tree_type="octree")),
-    )
-
-    state = fmm.prepare_state(
-        positions,
-        masses,
-        leaf_size=8,
-        max_order=3,
-    )
+def test_octree_m2l_matches_radix_root_local(octree_state):
+    _, state = octree_state
 
     assert state.octree is not None
     assert state.octree_upward is not None
@@ -390,20 +327,8 @@ def test_octree_m2l_matches_radix_root_local():
     )
 
 
-def test_octree_l2l_propagation_updates_children_consistently():
-    positions, masses = _sample_problem(n=64)
-    fmm = FastMultipoleMethod(
-        preset=FMMPreset.FAST,
-        basis="solidfmm",
-        advanced=FMMAdvancedConfig(tree=TreeConfig(tree_type="octree")),
-    )
-
-    state = fmm.prepare_state(
-        positions,
-        masses,
-        leaf_size=8,
-        max_order=3,
-    )
+def test_octree_l2l_propagation_updates_children_consistently(octree_state):
+    _, state = octree_state
 
     assert state.octree is not None
     assert state.octree_upward is not None

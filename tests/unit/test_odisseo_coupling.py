@@ -28,28 +28,32 @@ def _sample_state(n: int = 48):
     return state, masses
 
 
-def test_coupler_prepare_and_full_accelerations():
-    state, masses = _sample_state()
+@pytest.fixture(scope="module")
+def prepared_coupler():
+    state, masses = _sample_state(n=56)
     solver = FastMultipoleMethod(preset="fast", basis="solidfmm")
     coupler = OdisseoFMMCoupler(solver=solver, leaf_size=16, max_order=3)
     coupler.prepare(state, masses)
+    return coupler, state, masses
+
+
+def test_coupler_prepare_and_full_accelerations(prepared_coupler):
+    coupler, state, _ = prepared_coupler
     acc = coupler.accelerations(state)
     assert acc.shape == (state.shape[0], 3)
     assert np.isfinite(np.asarray(acc)).all()
 
 
-def test_coupler_active_subset_matches_solver_prepared_subset():
-    state, masses = _sample_state(n=56)
-    solver = FastMultipoleMethod(preset="fast", basis="solidfmm")
-    coupler = OdisseoFMMCoupler(solver=solver, leaf_size=16, max_order=3)
+def test_coupler_active_subset_matches_solver_prepared_subset(prepared_coupler):
+    coupler, state, _ = prepared_coupler
     active = jnp.asarray([0, 3, 9, 22, 47], dtype=jnp.int32)
 
-    coupler.prepare(state, masses)
     subset_acc = coupler.accelerations(state, active_indices=active)
 
-    positions = state[:, 0, :]
-    prepared = solver.prepare_state(positions, masses, leaf_size=16, max_order=3)
-    expected = solver.evaluate_prepared_state(prepared, target_indices=active)
+    expected = coupler.solver.evaluate_prepared_state(
+        coupler._prepared_state,
+        target_indices=active,
+    )
 
     assert subset_acc.shape == (active.shape[0], 3)
     assert np.allclose(

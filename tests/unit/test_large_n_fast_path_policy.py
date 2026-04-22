@@ -71,77 +71,15 @@ def test_large_n_accel_eval_requires_fast_lane_state(monkeypatch):
         leaf_size=256,
         max_order=4,
     )
-    state_no_fast = replace(
-        state,
-        radix_fast_lane=False,
-        radix_fast_payload=None,
-    )
+    state_no_fast = replace(state, radix_fast_lane=False, radix_fast_payload=None)
+    assert bool(getattr(state, "radix_fast_lane", False))
+    assert getattr(state.neighbor_list, "neighbor_leaf_positions", None) is None
 
     with pytest.raises(RuntimeError, match="requires radix fast-lane state"):
         _ = fmm.evaluate_prepared_state(state_no_fast)
 
-
-def test_large_n_fast_lane_trims_neighbor_leaf_positions(monkeypatch):
-    monkeypatch.setattr(jax, "default_backend", lambda: "gpu")
-    monkeypatch.setenv("JACCPOT_LARGE_N_TARGET_BLOCK_SIZE", "8")
-    monkeypatch.setenv("JACCPOT_LARGE_N_SPEED_PREPARED_LAYOUT", "1")
-
-    key = jax.random.PRNGKey(11)
-    pos_key, mass_key = jax.random.split(key)
-    positions = jax.random.uniform(
-        pos_key,
-        (1024, 3),
-        minval=-1.0,
-        maxval=1.0,
-        dtype=jnp.float32,
-    )
-    masses = jax.random.uniform(
-        mass_key,
-        (1024,),
-        minval=0.1,
-        maxval=1.1,
-        dtype=jnp.float32,
-    )
-
-    fmm = _make_large_n_fmm()
-    state = fmm.prepare_state(
-        positions,
-        masses,
-        leaf_size=256,
-        max_order=4,
-    )
-
-    assert bool(getattr(state, "radix_fast_lane", False))
-    assert getattr(state.neighbor_list, "neighbor_leaf_positions", None) is None
-
     acc = fmm.evaluate_prepared_state(state)
     assert tuple(acc.shape) == (1024, 3)
-
-
-def test_large_n_eval_rejects_non_bucketed_state(monkeypatch):
-    monkeypatch.setattr(jax, "default_backend", lambda: "gpu")
-    monkeypatch.setenv("JACCPOT_LARGE_N_TARGET_BLOCK_SIZE", "8")
-
-    key = jax.random.PRNGKey(19)
-    pos_key, mass_key = jax.random.split(key)
-    positions = jax.random.uniform(
-        pos_key,
-        (512, 3),
-        minval=-1.0,
-        maxval=1.0,
-        dtype=jnp.float32,
-    )
-    masses = jax.random.uniform(
-        mass_key,
-        (512,),
-        minval=0.1,
-        maxval=1.1,
-        dtype=jnp.float32,
-    )
-
-    fmm = _make_large_n_fmm()
-    state = fmm.prepare_state(positions, masses, leaf_size=256, max_order=4)
     state_bad = replace(state, nearfield_mode="baseline")
-
     with pytest.raises(RuntimeError, match="nearfield_mode='bucketed'"):
         _ = fmm.evaluate_prepared_state(state_bad)

@@ -445,7 +445,8 @@ def test_translate_multipole_to_local_matches_direct_derivatives():
         return_reordered=True,
     )
 
-    max_order = 4
+    # Order-4 derivative fidelity is covered by dedicated order-4 tests below.
+    max_order = 3
     upward = prepare_upward_sweep(
         tree,
         pos_sorted,
