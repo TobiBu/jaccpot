@@ -63,6 +63,26 @@ def _sample_velocities(n: int = 64):
     )
 
 
+@pytest.fixture(scope="module")
+def octree_backend_prepared_state():
+    positions, masses = _sample_problem(n=72)
+    fmm = FastMultipoleMethod(
+        preset=FMMPreset.FAST,
+        basis="solidfmm",
+        advanced=FMMAdvancedConfig(
+            tree=TreeConfig(tree_type="octree"),
+            runtime=RuntimePolicyConfig(execution_backend="octree"),
+        ),
+    )
+    state = fmm.prepare_state(
+        positions,
+        masses,
+        leaf_size=8,
+        max_order=3,
+    )
+    return fmm, state
+
+
 def _direct_sum_jerk(
     positions: jnp.ndarray,
     masses: jnp.ndarray,
@@ -696,23 +716,10 @@ def test_octree_execution_backend_supports_class_major_farfield_mode():
     )
 
 
-def test_octree_execution_backend_exposes_native_nearfield_view():
-    positions, masses = _sample_problem(n=72)
-    fmm = FastMultipoleMethod(
-        preset=FMMPreset.FAST,
-        basis="solidfmm",
-        advanced=FMMAdvancedConfig(
-            tree=TreeConfig(tree_type="octree"),
-            runtime=RuntimePolicyConfig(execution_backend="octree"),
-        ),
-    )
-
-    state = fmm.prepare_state(
-        positions,
-        masses,
-        leaf_size=8,
-        max_order=3,
-    )
+def test_octree_execution_backend_exposes_native_nearfield_view(
+    octree_backend_prepared_state,
+):
+    _, state = octree_backend_prepared_state
 
     assert state.octree is not None
     assert state.nearfield_interop is not None
@@ -729,24 +736,11 @@ def test_octree_execution_backend_exposes_native_nearfield_view():
     assert state.nearfield_interop.neighbor_leaf_positions is not None
 
 
-def test_octree_execution_backend_target_indices_match_full_prepared_state():
-    positions, masses = _sample_problem(n=72)
-    fmm = FastMultipoleMethod(
-        preset=FMMPreset.FAST,
-        basis="solidfmm",
-        advanced=FMMAdvancedConfig(
-            tree=TreeConfig(tree_type="octree"),
-            runtime=RuntimePolicyConfig(execution_backend="octree"),
-        ),
-    )
+def test_octree_execution_backend_target_indices_match_full_prepared_state(
+    octree_backend_prepared_state,
+):
+    fmm, state = octree_backend_prepared_state
     target_indices = jnp.asarray([0, 5, 9, 10, 33], dtype=jnp.int32)
-
-    state = fmm.prepare_state(
-        positions,
-        masses,
-        leaf_size=8,
-        max_order=3,
-    )
 
     full_acc, full_pot = fmm.evaluate_prepared_state(state, return_potential=True)
     target_acc, target_pot = fmm.evaluate_prepared_state(
@@ -763,23 +757,11 @@ def test_octree_execution_backend_target_indices_match_full_prepared_state():
     assert np.allclose(np.asarray(target_pot), np.asarray(full_pot)[np_idx])
 
 
-def test_octree_execution_backend_prepared_state_jit_targets_match_eager():
-    positions, masses = _sample_problem(n=72)
-    fmm = FastMultipoleMethod(
-        preset=FMMPreset.FAST,
-        basis="solidfmm",
-        advanced=FMMAdvancedConfig(
-            tree=TreeConfig(tree_type="octree"),
-            runtime=RuntimePolicyConfig(execution_backend="octree"),
-        ),
-    )
+def test_octree_execution_backend_prepared_state_jit_targets_match_eager(
+    octree_backend_prepared_state,
+):
+    fmm, state = octree_backend_prepared_state
     target_indices = jnp.asarray([0, 7, 11, 23, 31], dtype=jnp.int32)
-    state = fmm.prepare_state(
-        positions,
-        masses,
-        leaf_size=8,
-        max_order=3,
-    )
 
     jit_eval = jax.jit(
         lambda st, idx: fmm.evaluate_prepared_state(st, target_indices=idx)
@@ -791,23 +773,11 @@ def test_octree_execution_backend_prepared_state_jit_targets_match_eager():
     assert np.allclose(np.asarray(acc_jit), np.asarray(acc_ref), rtol=1e-5, atol=1e-5)
 
 
-def test_octree_execution_backend_prepared_state_eager_matches_compiled():
-    positions, masses = _sample_problem(n=72)
-    fmm = FastMultipoleMethod(
-        preset=FMMPreset.FAST,
-        basis="solidfmm",
-        advanced=FMMAdvancedConfig(
-            tree=TreeConfig(tree_type="octree"),
-            runtime=RuntimePolicyConfig(execution_backend="octree"),
-        ),
-    )
+def test_octree_execution_backend_prepared_state_eager_matches_compiled(
+    octree_backend_prepared_state,
+):
+    fmm, state = octree_backend_prepared_state
     target_indices = jnp.asarray([0, 5, 9, 10, 33], dtype=jnp.int32)
-    state = fmm.prepare_state(
-        positions,
-        masses,
-        leaf_size=8,
-        max_order=3,
-    )
 
     full_acc_compiled, full_pot_compiled = fmm.evaluate_prepared_state(
         state,
@@ -858,23 +828,11 @@ def test_octree_execution_backend_prepared_state_eager_matches_compiled():
     )
 
 
-def test_octree_execution_backend_target_indices_preserve_order_and_duplicates():
-    positions, masses = _sample_problem(n=72)
-    fmm = FastMultipoleMethod(
-        preset=FMMPreset.FAST,
-        basis="solidfmm",
-        advanced=FMMAdvancedConfig(
-            tree=TreeConfig(tree_type="octree"),
-            runtime=RuntimePolicyConfig(execution_backend="octree"),
-        ),
-    )
+def test_octree_execution_backend_target_indices_preserve_order_and_duplicates(
+    octree_backend_prepared_state,
+):
+    fmm, state = octree_backend_prepared_state
     target_indices = jnp.asarray([9, 3, 9, 0], dtype=jnp.int32)
-    state = fmm.prepare_state(
-        positions,
-        masses,
-        leaf_size=8,
-        max_order=3,
-    )
 
     full_acc, full_pot = fmm.evaluate_prepared_state(state, return_potential=True)
     subset_acc, subset_pot = fmm.evaluate_prepared_state(
@@ -900,23 +858,11 @@ def test_octree_execution_backend_target_indices_preserve_order_and_duplicates()
     )
 
 
-def test_octree_execution_backend_prepared_state_jit_targets_with_potential():
-    positions, masses = _sample_problem(n=72)
-    fmm = FastMultipoleMethod(
-        preset=FMMPreset.FAST,
-        basis="solidfmm",
-        advanced=FMMAdvancedConfig(
-            tree=TreeConfig(tree_type="octree"),
-            runtime=RuntimePolicyConfig(execution_backend="octree"),
-        ),
-    )
+def test_octree_execution_backend_prepared_state_jit_targets_with_potential(
+    octree_backend_prepared_state,
+):
+    fmm, state = octree_backend_prepared_state
     target_indices = jnp.asarray([0, 7, 11, 23, 31], dtype=jnp.int32)
-    state = fmm.prepare_state(
-        positions,
-        masses,
-        leaf_size=8,
-        max_order=3,
-    )
 
     jit_eval = jax.jit(
         lambda st, idx: fmm.evaluate_prepared_state(
