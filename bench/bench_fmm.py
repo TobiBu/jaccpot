@@ -71,6 +71,12 @@ def _parse_args() -> argparse.Namespace:
         default=None,
         help="Optional direct adaptive tolerance overriding the theta-derived heuristic",
     )
+    parser.add_argument(
+        "--runtime-path",
+        choices=("auto", "legacy", "large_n"),
+        default="auto",
+        help="Select the legacy or dedicated large-N runtime path",
+    )
     return parser.parse_args()
 
 
@@ -337,6 +343,7 @@ def main() -> None:
     fmm = FastMultipoleMethod(
         preset=str(ARGS.preset),
         basis=basis,
+        runtime_path=str(ARGS.runtime_path).strip().lower(),
         theta=float(ARGS.theta),
         softening=1.0e-3,
         adaptive_order=bool(ARGS.adaptive_order),

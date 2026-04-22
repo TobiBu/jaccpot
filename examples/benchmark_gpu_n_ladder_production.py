@@ -62,7 +62,9 @@ def _configure_environment(args: argparse.Namespace) -> int:
     nvidia_smi_gpu_index = int(visible_physical_gpus[0]) if visible_physical_gpus else 0
     os.environ["JACCPOT_NVIDIA_SMI_GPU_INDEX"] = str(nvidia_smi_gpu_index)
 
-    print("CUDA_VISIBLE_DEVICES:", os.environ.get("CUDA_VISIBLE_DEVICES", "<all visible>"))
+    print(
+        "CUDA_VISIBLE_DEVICES:", os.environ.get("CUDA_VISIBLE_DEVICES", "<all visible>")
+    )
     print("JACCPOT_INDEX_PRECISION:", os.environ.get("JACCPOT_INDEX_PRECISION"))
     print("nvidia-smi physical GPU index:", nvidia_smi_gpu_index)
     return nvidia_smi_gpu_index
@@ -97,6 +99,11 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--autocvd-exclude", nargs="*", default=[])
     parser.add_argument("--cuda-visible-devices", default=None)
     parser.add_argument("--index-precision", default="int32")
+    parser.add_argument(
+        "--runtime-path",
+        choices=("auto", "legacy", "large_n"),
+        default="auto",
+    )
     return parser.parse_args()
 
 
@@ -111,16 +118,17 @@ REPO_ROOT = pathlib.Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
+from yggdrax.interactions import DualTreeTraversalConfig  # noqa: E402
+
 from jaccpot import (  # noqa: E402
-    FMMAdvancedConfig,
-    FMMPreset,
     FarFieldConfig,
     FastMultipoleMethod,
+    FMMAdvancedConfig,
+    FMMPreset,
     NearFieldConfig,
     RuntimePolicyConfig,
     TreeConfig,
 )
-from yggdrax.interactions import DualTreeTraversalConfig  # noqa: E402
 
 WORKING_DTYPE = getattr(jnp, ARGS.dtype)
 OUTPUT_DIR = (
@@ -244,7 +252,10 @@ def classify_worker_error(message: str) -> str:
     text = str(message).lower().strip()
     if text == "":
         return ""
-    if "pair queue capacity exceeded" in text or "interaction capacity exceeded" in text:
+    if (
+        "pair queue capacity exceeded" in text
+        or "interaction capacity exceeded" in text
+    ):
         return "interaction_capacity"
     if "neighbor list capacity exceeded" in text:
         return "neighbor_capacity"
@@ -326,6 +337,7 @@ def _base_fmm_kwargs() -> dict[str, Any]:
     return {
         "preset": FMMPreset.LARGE_N_GPU,
         "basis": "solidfmm",
+        "runtime_path": str(ARGS.runtime_path).strip().lower(),
         "precision": "fp32",
         "theta": float(ARGS.theta),
         "softening": float(ARGS.softening),
@@ -345,12 +357,15 @@ def serialize_fmm_kwargs_for_worker(fmm_kwargs: dict[str, Any]) -> dict[str, Any
             traversal_payload = {
                 "process_block": int(traversal_cfg.process_block),
                 "max_neighbors_per_leaf": int(traversal_cfg.max_neighbors_per_leaf),
-                "max_interactions_per_node": int(traversal_cfg.max_interactions_per_node),
+                "max_interactions_per_node": int(
+                    traversal_cfg.max_interactions_per_node
+                ),
                 "max_pair_queue": int(traversal_cfg.max_pair_queue),
             }
         return {
             "preset": "large_n_gpu",
             "basis": str(fmm_kwargs.get("basis", "solidfmm")),
+            "runtime_path": str(fmm_kwargs.get("runtime_path", "auto")),
             "theta": float(fmm_kwargs.get("theta", 0.6)),
             "softening": float(fmm_kwargs.get("softening", 1e-3)),
             "working_dtype": str(
@@ -424,9 +439,7 @@ def with_runtime_knobs(
         traversal_config=DualTreeTraversalConfig(
             max_pair_queue=int(traversal_cfg["max_pair_queue"]),
             process_block=int(traversal_cfg["process_block"]),
-            max_interactions_per_node=int(
-                traversal_cfg["max_interactions_per_node"]
-            ),
+            max_interactions_per_node=int(traversal_cfg["max_interactions_per_node"]),
             max_neighbors_per_leaf=int(traversal_cfg["max_neighbors_per_leaf"]),
         ),
     )
@@ -505,7 +518,9 @@ def run_worker_case(
             break
         stdout_lines.append(line)
     samples: list[dict[str, float]] = []
-    baseline_used_mb = float(_query_gpu_memory_mb_by_pid(proc.pid)) if ready_seen else 0.0
+    baseline_used_mb = (
+        float(_query_gpu_memory_mb_by_pid(proc.pid)) if ready_seen else 0.0
+    )
     while proc.poll() is None:
         timestamp_s = time.perf_counter()
         try:
@@ -516,7 +531,9 @@ def run_worker_case(
         time.sleep(float(ARGS.peak_poll_interval_s))
     stdout, stderr = proc.communicate()
     if stdout:
-        stdout_lines.extend(line.strip() for line in stdout.splitlines() if line.strip())
+        stdout_lines.extend(
+            line.strip() for line in stdout.splitlines() if line.strip()
+        )
     trace_df = pd.DataFrame(samples)
     peak_used_mb = (
         float(trace_df["gpu_used_mb"].max())
@@ -527,9 +544,7 @@ def run_worker_case(
         "num_particles": int(num_particles),
         "max_pair_queue": int(traversal_cfg["max_pair_queue"]),
         "process_block": int(traversal_cfg["process_block"]),
-        "max_interactions_per_node": int(
-            traversal_cfg["max_interactions_per_node"]
-        ),
+        "max_interactions_per_node": int(traversal_cfg["max_interactions_per_node"]),
         "max_neighbors_per_leaf": int(traversal_cfg["max_neighbors_per_leaf"]),
         "m2l_chunk_size": int(m2l_chunk_size),
         "nearfield_edge_chunk_size": int(nearfield_edge_chunk_size),
@@ -645,7 +660,9 @@ def _write_markdown_summary(
 
     for entry in TRAVERSAL_GUIDANCE:
         particle_limit = entry["particle_limit"]
-        target_label = "N > 65536" if particle_limit is None else f"N <= {int(particle_limit)}"
+        target_label = (
+            "N > 65536" if particle_limit is None else f"N <= {int(particle_limit)}"
+        )
         lines.append(
             (
                 f"- {target_label}: "
@@ -752,17 +769,25 @@ def _write_markdown_summary(
 
 def _df_to_markdown_table(df: pd.DataFrame) -> str:
     columns = [str(column) for column in df.columns]
-    rows = [[str(value) for value in row] for row in df.itertuples(index=False, name=None)]
+    rows = [
+        [str(value) for value in row] for row in df.itertuples(index=False, name=None)
+    ]
     widths = [len(column) for column in columns]
     for row in rows:
         for index, value in enumerate(row):
             widths[index] = max(widths[index], len(value))
 
     def _format_row(values: list[str]) -> str:
-        return "| " + " | ".join(value.ljust(width) for value, width in zip(values, widths)) + " |"
+        return (
+            "| "
+            + " | ".join(value.ljust(width) for value, width in zip(values, widths))
+            + " |"
+        )
 
     separator = "| " + " | ".join("-" * width for width in widths) + " |"
-    return "\n".join([_format_row(columns), separator] + [_format_row(row) for row in rows])
+    return "\n".join(
+        [_format_row(columns), separator] + [_format_row(row) for row in rows]
+    )
 
 
 def main() -> None:

@@ -18,23 +18,23 @@ from collections import defaultdict
 from contextlib import ExitStack, contextmanager, nullcontext
 from typing import Any, Iterator
 
+import benchmark_utils
 import jax
 import jax.numpy as jnp
+from yggdrax.interactions import DualTreeTraversalConfig
 
-import benchmark_utils
 import jaccpot.runtime._fmm_impl as _rt_mod
 import jaccpot.runtime._interaction_cache as _interaction_cache_mod
 import jaccpot.upward.solidfmm_complex_tree_expansions as _up_solid_mod
 from jaccpot import (
-    FMMAdvancedConfig,
-    FMMPreset,
     FarFieldConfig,
     FastMultipoleMethod,
+    FMMAdvancedConfig,
+    FMMPreset,
     NearFieldConfig,
     RuntimePolicyConfig,
     TreeConfig,
 )
-from yggdrax.interactions import DualTreeTraversalConfig
 
 
 def _block_tree(value: Any) -> Any:
@@ -322,9 +322,7 @@ def profile_prepare_residuals(
     }
     for key_name, values in stats.items():
         kept = values[keep_slice] if len(values) > int(warmup) else values
-        row[f"{key_name}_ms"] = (
-            float(jnp.mean(jnp.asarray(kept))) if len(kept) else 0.0
-        )
+        row[f"{key_name}_ms"] = float(jnp.mean(jnp.asarray(kept))) if len(kept) else 0.0
 
     p2m_ms = row.get("P2M_ms", 0.0)
     m2m_ms = row.get("M2M_ms", 0.0)
@@ -346,7 +344,9 @@ def profile_prepare_residuals(
     )
 
     row["operator_sum_ms"] = p2m_ms + m2m_ms + m2l_ms + l2l_ms
-    row["residual_target_ms"] = max(row["prepare_total_ms"] - row["operator_sum_ms"], 0.0)
+    row["residual_target_ms"] = max(
+        row["prepare_total_ms"] - row["operator_sum_ms"], 0.0
+    )
     row["upward_non_operator_est_ms"] = max(upward_total - p2m_ms - m2m_ms, 0.0)
     row["downward_non_operator_est_ms"] = max(downward_total - m2l_ms - l2l_ms, 0.0)
     row["dual_artifacts_profiled_ms"] = (
@@ -367,10 +367,9 @@ def profile_prepare_residuals(
         - row.get("downward_symmetry_ms", 0.0),
         0.0,
     )
-    row["downward_accumulate_non_operator_ms"] = (
-        row.get("downward_symmetry_ms", 0.0)
-        + row.get("downward_accumulate_residual_ms", 0.0)
-    )
+    row["downward_accumulate_non_operator_ms"] = row.get(
+        "downward_symmetry_ms", 0.0
+    ) + row.get("downward_accumulate_residual_ms", 0.0)
     row["downward_support_profiled_ms"] = (
         row.get("downward_adaptive_payload_ms", 0.0)
         + row.get("downward_streamed_pair_plan_ms", 0.0)

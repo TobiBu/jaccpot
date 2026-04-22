@@ -19,6 +19,9 @@ from yggdrax.interactions import (
     MACType,
     NodeInteractionList,
     NodeNeighborList,
+    build_compact_far_pairs,
+    build_interactions_and_neighbors_split,
+    build_leaf_neighbor_lists,
 )
 from yggdrax.tree import Tree
 
@@ -210,7 +213,6 @@ def _dual_tree_build_raw(
     build_out = None
     for attempt in range(_CAPACITY_RETRY_MAX_ATTEMPTS + 1):
         try:
-            del jit_traversal
             build_out = _runtime_fmm.build_interactions_and_neighbors(
                 tree,
                 geometry,
@@ -259,7 +261,9 @@ def _dual_tree_build_raw(
     if build_out is None:
         if last_exc is not None:
             raise RuntimeError(str(last_exc)) from last_exc
-        raise RuntimeError("dual-tree traversal build failed without producing artifacts")
+        raise RuntimeError(
+            "dual-tree traversal build failed without producing artifacts"
+        )
     return (
         build_out,
         current_traversal_config,
@@ -285,7 +289,13 @@ def _dual_tree_unpack_build_output(
 
     if grouped_interactions:
         if need_traversal_result and need_compact_far_pairs:
-            interactions, neighbor_list, traversal_result, compact_far_pairs, grouped_buffers = build_out
+            (
+                interactions,
+                neighbor_list,
+                traversal_result,
+                compact_far_pairs,
+                grouped_buffers,
+            ) = build_out
         elif need_traversal_result:
             interactions, neighbor_list, traversal_result, grouped_buffers = build_out
             compact_far_pairs = None
@@ -319,6 +329,143 @@ def _dual_tree_unpack_build_output(
     return interactions, neighbor_list, traversal_result, compact_far_pairs, None
 
 
+def _can_split_dual_tree_build(
+    *,
+    split_enabled: bool,
+    grouped_interactions: bool,
+    need_traversal_result: bool,
+    pair_policy,
+    policy_state,
+) -> bool:
+    """Return whether far/near traversal can be built in separate passes.
+
+    This path is intentionally narrow. It is meant for the minimum-memory
+    streamed GPU regime where we do not need traversal tags/results and can
+    trade extra prepare work for a lower peak by never materializing far and
+    near traversal buffers in the same kernel.
+    """
+
+    return (
+        bool(split_enabled)
+        and not bool(grouped_interactions)
+        and not bool(need_traversal_result)
+        and pair_policy is None
+        and policy_state is None
+    )
+
+
+def _build_dual_tree_artifacts_split(
+    *,
+    tree: Tree,
+    geometry,
+    theta: float,
+    mac_type: MACType,
+    dehnen_radius_scale: float,
+    max_pair_queue: Optional[int],
+    pair_process_block: Optional[int],
+    traversal_config: Optional[DualTreeTraversalConfig],
+    retry_logger: Optional[Callable[[DualTreeRetryEvent], None]],
+    need_node_interactions: bool,
+    need_compact_far_pairs: bool,
+    use_dense_interactions: bool,
+) -> _DualTreeArtifacts:
+    """Build far and near traversal products in separate Yggdrax calls."""
+
+    need_far_payload = bool(
+        need_node_interactions or need_compact_far_pairs or use_dense_interactions
+    )
+    interactions: Optional[NodeInteractionList]
+    compact_far_pairs: Optional[CompactTaggedFarPairs]
+    if need_far_payload and not bool(need_node_interactions or use_dense_interactions):
+        interactions = None
+        compact_far_pairs = build_compact_far_pairs(
+            tree,
+            geometry,
+            theta=theta,
+            mac_type=mac_type,
+            dehnen_radius_scale=dehnen_radius_scale,
+            max_pair_queue=max_pair_queue,
+            process_block=pair_process_block,
+            traversal_config=traversal_config,
+            retry_logger=retry_logger,
+        )
+        neighbor_list = build_leaf_neighbor_lists(
+            tree,
+            geometry,
+            theta=theta,
+            max_neighbors_per_leaf=(
+                int(traversal_config.max_neighbors_per_leaf)
+                if traversal_config is not None
+                else 2048
+            ),
+            mac_type=mac_type,
+            dehnen_radius_scale=dehnen_radius_scale,
+            max_pair_queue=max_pair_queue,
+            process_block=pair_process_block,
+            traversal_config=traversal_config,
+            retry_logger=retry_logger,
+        )
+    elif need_far_payload:
+        interactions, neighbor_list = build_interactions_and_neighbors_split(
+            tree,
+            geometry,
+            theta=theta,
+            max_interactions_per_node=None,
+            max_neighbors_per_leaf=(
+                int(traversal_config.max_neighbors_per_leaf)
+                if traversal_config is not None
+                else 2048
+            ),
+            mac_type=mac_type,
+            dehnen_radius_scale=dehnen_radius_scale,
+            max_pair_queue=max_pair_queue,
+            process_block=pair_process_block,
+            traversal_config=traversal_config,
+            retry_logger=retry_logger,
+        )
+        compact_far_pairs = None
+    else:
+        interactions = None
+        compact_far_pairs = None
+        neighbor_list = build_leaf_neighbor_lists(
+            tree,
+            geometry,
+            theta=theta,
+            max_neighbors_per_leaf=(
+                int(traversal_config.max_neighbors_per_leaf)
+                if traversal_config is not None
+                else 2048
+            ),
+            mac_type=mac_type,
+            dehnen_radius_scale=dehnen_radius_scale,
+            max_pair_queue=max_pair_queue,
+            process_block=pair_process_block,
+            traversal_config=traversal_config,
+            retry_logger=retry_logger,
+        )
+    dense_buffers = _dual_tree_build_dense_buffers(
+        tree=tree,
+        geometry=geometry,
+        interactions=interactions,
+        use_dense_interactions=use_dense_interactions,
+    )
+    return _DualTreeArtifacts(
+        interactions=interactions,
+        neighbor_list=neighbor_list,
+        traversal_result=None,
+        compact_far_pairs=compact_far_pairs,
+        dense_buffers=dense_buffers,
+        grouped_buffers=None,
+        grouped_segment_starts=None,
+        grouped_segment_lengths=None,
+        grouped_segment_class_ids=None,
+        grouped_segment_sort_permutation=None,
+        grouped_segment_group_ids=None,
+        grouped_segment_unique_targets=None,
+        grouped_chunk_size=None,
+    )
+
+
 def _dual_tree_build_grouped_buffers(
     *,
     tree: Tree,
@@ -330,7 +477,9 @@ def _dual_tree_build_grouped_buffers(
     from yggdrax import interactions as _yggdrax_interactions
 
     if interactions is None:
-        raise RuntimeError("grouped interaction preparation requires node interaction lists")
+        raise RuntimeError(
+            "grouped interaction preparation requires node interaction lists"
+        )
     return _yggdrax_interactions.build_grouped_interactions_from_pairs(
         tree,
         geometry,
@@ -623,6 +772,7 @@ def _build_dual_tree_artifacts(
     need_node_interactions: bool,
     precompute_grouped_class_segments: bool,
     grouped_schedule_budget_bytes: Optional[int],
+    allow_split_build: bool = False,
     pair_policy=None,
     policy_state=None,
     jit_traversal: bool = True,
@@ -653,74 +803,137 @@ def _build_dual_tree_artifacts(
         grouped_chunk_size_cached = cache_hit.grouped_chunk_size_cached
         cache_out = cache_hit.cache_out
     else:
-        build_out, _, _, _ = _dual_tree_build_raw(
-            tree=tree,
-            geometry=geometry,
-            theta=theta,
-            mac_type=mac_type,
-            dehnen_radius_scale=dehnen_radius_scale,
-            max_pair_queue=max_pair_queue,
-            pair_process_block=pair_process_block,
-            traversal_config=traversal_config,
-            retry_logger=retry_logger,
-            fail_fast=fail_fast,
-            need_traversal_result=need_traversal_result,
-            need_compact_far_pairs=need_compact_far_pairs,
-            need_node_interactions=need_node_interactions,
+        use_split_build = _can_split_dual_tree_build(
+            split_enabled=bool(allow_split_build),
             grouped_interactions=grouped_interactions,
+            need_traversal_result=need_traversal_result,
             pair_policy=pair_policy,
             policy_state=policy_state,
-            jit_traversal=jit_traversal,
         )
-        (
-            interactions,
-            neighbor_list,
-            traversal_result,
-            compact_far_pairs,
-            grouped_buffers,
-        ) = _dual_tree_unpack_build_output(
-            build_out=build_out,
-            grouped_interactions=grouped_interactions,
-            need_traversal_result=need_traversal_result,
-            need_compact_far_pairs=need_compact_far_pairs,
-        )
-        cache_out = (
-            _InteractionCacheEntry(
-                key=cache_key,
-                interactions=interactions,
-                neighbor_list=neighbor_list,
-                dual_tree_result=traversal_result,
-                compact_far_pairs=compact_far_pairs,
-                grouped_buffers=grouped_buffers if grouped_interactions else None,
-                grouped_segment_starts=None,
-                grouped_segment_lengths=None,
-                grouped_segment_class_ids=None,
-                grouped_segment_sort_permutation=None,
-                grouped_segment_group_ids=None,
-                grouped_segment_unique_targets=None,
-                grouped_chunk_size=None,
-                nearfield_target_leaf_ids=None,
-                nearfield_source_leaf_ids=None,
-                nearfield_valid_pairs=None,
-                nearfield_chunk_sort_indices=None,
-                nearfield_chunk_group_ids=None,
-                nearfield_chunk_unique_indices=None,
-                nearfield_mode=None,
-                nearfield_edge_chunk_size=None,
-                nearfield_leaf_cap=None,
+        if use_split_build:
+            split_artifacts = _build_dual_tree_artifacts_split(
+                tree=tree,
+                geometry=geometry,
+                theta=theta,
+                mac_type=mac_type,
+                dehnen_radius_scale=dehnen_radius_scale,
+                max_pair_queue=max_pair_queue,
+                pair_process_block=pair_process_block,
+                traversal_config=traversal_config,
+                retry_logger=retry_logger,
+                need_node_interactions=need_node_interactions,
+                need_compact_far_pairs=need_compact_far_pairs,
+                use_dense_interactions=use_dense_interactions,
             )
-            if cache_key is not None
-            else None
-        )
-        grouped_segment_starts = None
-        grouped_segment_lengths = None
-        grouped_segment_class_ids = None
-        grouped_segment_sort_permutation = None
-        grouped_segment_group_ids = None
-        grouped_segment_unique_targets = None
-        grouped_chunk_size_cached = None
-        if not grouped_interactions:
-            grouped_buffers = None
+            interactions = split_artifacts.interactions
+            neighbor_list = split_artifacts.neighbor_list
+            traversal_result = split_artifacts.traversal_result
+            compact_far_pairs = split_artifacts.compact_far_pairs
+            grouped_buffers = split_artifacts.grouped_buffers
+            grouped_segment_starts = None
+            grouped_segment_lengths = None
+            grouped_segment_class_ids = None
+            grouped_segment_sort_permutation = None
+            grouped_segment_group_ids = None
+            grouped_segment_unique_targets = None
+            grouped_chunk_size_cached = None
+            cache_out = (
+                _InteractionCacheEntry(
+                    key=cache_key,
+                    interactions=interactions,
+                    neighbor_list=neighbor_list,
+                    dual_tree_result=traversal_result,
+                    compact_far_pairs=compact_far_pairs,
+                    grouped_buffers=None,
+                    grouped_segment_starts=None,
+                    grouped_segment_lengths=None,
+                    grouped_segment_class_ids=None,
+                    grouped_segment_sort_permutation=None,
+                    grouped_segment_group_ids=None,
+                    grouped_segment_unique_targets=None,
+                    grouped_chunk_size=None,
+                    nearfield_target_leaf_ids=None,
+                    nearfield_source_leaf_ids=None,
+                    nearfield_valid_pairs=None,
+                    nearfield_chunk_sort_indices=None,
+                    nearfield_chunk_group_ids=None,
+                    nearfield_chunk_unique_indices=None,
+                    nearfield_mode=None,
+                    nearfield_edge_chunk_size=None,
+                    nearfield_leaf_cap=None,
+                )
+                if (cache_key is not None and not need_compact_far_pairs)
+                else None
+            )
+        else:
+            build_out, _, _, _ = _dual_tree_build_raw(
+                tree=tree,
+                geometry=geometry,
+                theta=theta,
+                mac_type=mac_type,
+                dehnen_radius_scale=dehnen_radius_scale,
+                max_pair_queue=max_pair_queue,
+                pair_process_block=pair_process_block,
+                traversal_config=traversal_config,
+                retry_logger=retry_logger,
+                fail_fast=fail_fast,
+                need_traversal_result=need_traversal_result,
+                need_compact_far_pairs=need_compact_far_pairs,
+                need_node_interactions=need_node_interactions,
+                grouped_interactions=grouped_interactions,
+                pair_policy=pair_policy,
+                policy_state=policy_state,
+                jit_traversal=jit_traversal,
+            )
+            (
+                interactions,
+                neighbor_list,
+                traversal_result,
+                compact_far_pairs,
+                grouped_buffers,
+            ) = _dual_tree_unpack_build_output(
+                build_out=build_out,
+                grouped_interactions=grouped_interactions,
+                need_traversal_result=need_traversal_result,
+                need_compact_far_pairs=need_compact_far_pairs,
+            )
+            cache_out = (
+                _InteractionCacheEntry(
+                    key=cache_key,
+                    interactions=interactions,
+                    neighbor_list=neighbor_list,
+                    dual_tree_result=traversal_result,
+                    compact_far_pairs=compact_far_pairs,
+                    grouped_buffers=grouped_buffers if grouped_interactions else None,
+                    grouped_segment_starts=None,
+                    grouped_segment_lengths=None,
+                    grouped_segment_class_ids=None,
+                    grouped_segment_sort_permutation=None,
+                    grouped_segment_group_ids=None,
+                    grouped_segment_unique_targets=None,
+                    grouped_chunk_size=None,
+                    nearfield_target_leaf_ids=None,
+                    nearfield_source_leaf_ids=None,
+                    nearfield_valid_pairs=None,
+                    nearfield_chunk_sort_indices=None,
+                    nearfield_chunk_group_ids=None,
+                    nearfield_chunk_unique_indices=None,
+                    nearfield_mode=None,
+                    nearfield_edge_chunk_size=None,
+                    nearfield_leaf_cap=None,
+                )
+                if cache_key is not None
+                else None
+            )
+            grouped_segment_starts = None
+            grouped_segment_lengths = None
+            grouped_segment_class_ids = None
+            grouped_segment_sort_permutation = None
+            grouped_segment_group_ids = None
+            grouped_segment_unique_targets = None
+            grouped_chunk_size_cached = None
+            if not grouped_interactions:
+                grouped_buffers = None
 
     if grouped_interactions and grouped_buffers is None:
         grouped_buffers = _dual_tree_build_grouped_buffers(

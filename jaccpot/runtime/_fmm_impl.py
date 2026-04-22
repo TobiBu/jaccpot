@@ -10,6 +10,7 @@ import json
 import math
 import os
 import time
+import warnings
 from collections import OrderedDict
 from dataclasses import dataclass
 from functools import lru_cache, partial
@@ -69,6 +70,7 @@ from jaccpot.downward.local_expansions import (
 )
 from jaccpot.nearfield.near_field import (
     compute_leaf_p2p_accelerations,
+    compute_leaf_p2p_accelerations_large_n_accel_only,
     prepare_bucketed_scatter_schedules,
     prepare_bucketed_scatter_schedules_from_groups,
     prepare_leaf_neighbor_pairs,
@@ -126,6 +128,12 @@ from ._interaction_cache import (
     _interaction_cache_key,
     _InteractionCacheEntry,
 )
+from ._large_n_pipeline import (
+    can_use_large_n_prepare_path,
+    evaluate_large_n_state,
+    prepare_large_n_state,
+)
+from ._large_n_types import LargeNPreparedState
 from ._nearfield_cache import (
     NearfieldPrecomputeArtifacts,
     nearfield_cache_matches,
@@ -157,6 +165,7 @@ FarFieldMode = Literal["auto", "pair_grouped", "class_major"]
 NearFieldMode = Literal["auto", "baseline", "bucketed"]
 JerkMode = Literal["fast_approx", "accurate"]
 PackedAccelerationDerivatives = tuple[Array, ...]
+PreparedStateLike = Union["FMMPreparedState", LargeNPreparedState]
 
 
 @dataclass(frozen=True)
@@ -266,6 +275,7 @@ _NEARFIELD_BUCKETED_CPU_EDGE_CHUNK_XL = 4096
 _NEARFIELD_SCATTER_SCHEDULE_ITEM_CAP = 16_000_000
 _NEARFIELD_SCATTER_SCHEDULE_ITEM_CAP_GPU = 4_000_000
 _NEARFIELD_GPU_PRECOMPUTE_MAX_PARTICLES = 65_536
+_NEARFIELD_SCATTER_SCHEDULE_INT32_ITEM_LIMIT = np.iinfo(np.int32).max
 _LARGE_CPU_M2L_CHUNK_SIZE = 32768
 _TRACING_MAX_NEIGHBORS_PER_LEAF = 512
 _TRACING_MAX_PAIR_QUEUE = 65_536
@@ -287,6 +297,12 @@ _GPU_MINIMUM_MEMORY_PAIR_QUEUE = 32_768
 _GPU_MINIMUM_MEMORY_PROCESS_BLOCK = 64
 _GPU_MINIMUM_MEMORY_INTERACTIONS_PER_NODE = 1_024
 _GPU_MINIMUM_MEMORY_NEIGHBORS_PER_LEAF = 256
+_GPU_STREAMED_MINIMUM_MEMORY_EXPLICIT_PAIR_QUEUE_LARGE = 262_144
+_GPU_STREAMED_MINIMUM_MEMORY_EXPLICIT_PAIR_QUEUE_XL = 524_288
+_GPU_STREAMED_MINIMUM_MEMORY_EXPLICIT_PROCESS_BLOCK = 256
+_GPU_STREAMED_MINIMUM_MEMORY_EXPLICIT_INTERACTIONS_PER_NODE = 8_192
+_GPU_STREAMED_MINIMUM_MEMORY_EXPLICIT_NEIGHBORS_PER_LEAF = 4_096
+_LEGACY_STATIC_TRAVERSAL_INT32_ITEM_LIMIT = np.iinfo(np.int32).max
 _LARGE_CPU_TRAVERSAL_CONFIG = DualTreeTraversalConfig(
     max_pair_queue=131072,
     process_block=4096,
@@ -319,6 +335,133 @@ def _env_flag(name: str, default: bool = False) -> bool:
     if raw is None:
         return bool(default)
     return str(raw).strip().lower() in ("1", "true", "yes", "on")
+
+
+def _minimum_memory_streamed_gpu_traversal_ceiling(
+    *, num_particles: int
+) -> DualTreeTraversalConfig:
+    """Return explicit traversal ceilings for large-N streamed GPU runs.
+
+    These ceilings mirror the lean engblom/streamed production profile that has
+    been substantially more memory-efficient than oversized explicit traversal
+    caps in large-N minimum-memory benchmarks.
+    """
+
+    n = int(num_particles)
+    pair_queue = (
+        _GPU_STREAMED_MINIMUM_MEMORY_EXPLICIT_PAIR_QUEUE_XL
+        if n >= 4_194_304
+        else _GPU_STREAMED_MINIMUM_MEMORY_EXPLICIT_PAIR_QUEUE_LARGE
+    )
+    return DualTreeTraversalConfig(
+        max_pair_queue=int(pair_queue),
+        process_block=int(_GPU_STREAMED_MINIMUM_MEMORY_EXPLICIT_PROCESS_BLOCK),
+        max_interactions_per_node=int(
+            _GPU_STREAMED_MINIMUM_MEMORY_EXPLICIT_INTERACTIONS_PER_NODE
+        ),
+        max_neighbors_per_leaf=int(
+            _GPU_STREAMED_MINIMUM_MEMORY_EXPLICIT_NEIGHBORS_PER_LEAF
+        ),
+    )
+
+
+def _minimum_memory_streamed_gpu_traversal_seed(
+    *, num_particles: int
+) -> DualTreeTraversalConfig:
+    """Return deterministic minimum-memory traversal seed for production GPU runs.
+
+    Keep a small seed for sub-million workloads, but use a larger fixed seed for
+    multi-million particle runs to avoid early fail-fast traversal overflow.
+    """
+
+    n = int(num_particles)
+    if n >= 4_194_304:
+        return _minimum_memory_streamed_gpu_traversal_ceiling(num_particles=n)
+    if n >= 1_048_576:
+        return DualTreeTraversalConfig(
+            max_pair_queue=int(_GPU_STREAMED_MINIMUM_MEMORY_EXPLICIT_PAIR_QUEUE_LARGE),
+            process_block=int(_GPU_STREAMED_MINIMUM_MEMORY_EXPLICIT_PROCESS_BLOCK),
+            max_interactions_per_node=int(
+                _GPU_STREAMED_MINIMUM_MEMORY_EXPLICIT_INTERACTIONS_PER_NODE
+            ),
+            max_neighbors_per_leaf=int(
+                _GPU_STREAMED_MINIMUM_MEMORY_EXPLICIT_NEIGHBORS_PER_LEAF
+            ),
+        )
+    return DualTreeTraversalConfig(
+        max_pair_queue=int(_GPU_MINIMUM_MEMORY_PAIR_QUEUE),
+        process_block=int(_GPU_MINIMUM_MEMORY_PROCESS_BLOCK),
+        max_interactions_per_node=int(_GPU_MINIMUM_MEMORY_INTERACTIONS_PER_NODE),
+        max_neighbors_per_leaf=int(_GPU_MINIMUM_MEMORY_NEIGHBORS_PER_LEAF),
+    )
+
+
+def _cap_minimum_memory_streamed_gpu_traversal_config_for_tree(
+    *,
+    traversal_config: Optional[DualTreeTraversalConfig],
+    total_nodes: int,
+    num_leaves: int,
+    num_particles: int,
+) -> Optional[DualTreeTraversalConfig]:
+    """Clamp impossible explicit traversal seeds for legacy large-N GPU walks.
+
+    Yggdrax's legacy static-capacity traversal path materializes far/near
+    buffers sized by:
+    - ``total_nodes * max_interactions_per_node``
+    - ``num_leaves * max_neighbors_per_leaf``
+
+    For very large radix trees, oversized explicit seeds can overflow signed
+    int32 shape scalars before traversal starts, or force enormous flat buffers
+    that are guaranteed to exhaust device memory. Cap only the impossible cases
+    to the existing lean streamed-GPU ceiling, while preserving smaller explicit
+    configs unchanged.
+    """
+
+    if traversal_config is None:
+        return None
+
+    safe_total_nodes = max(1, int(total_nodes))
+    safe_num_leaves = max(1, int(num_leaves))
+    current_queue = int(traversal_config.max_pair_queue)
+    current_block = int(traversal_config.process_block)
+    current_interactions = int(traversal_config.max_interactions_per_node)
+    current_neighbors = int(traversal_config.max_neighbors_per_leaf)
+
+    far_slots = safe_total_nodes * current_interactions
+    near_slots = safe_num_leaves * current_neighbors
+    if far_slots <= int(
+        _LEGACY_STATIC_TRAVERSAL_INT32_ITEM_LIMIT
+    ) and near_slots <= int(_LEGACY_STATIC_TRAVERSAL_INT32_ITEM_LIMIT):
+        return traversal_config
+
+    explicit_ceiling = _minimum_memory_streamed_gpu_traversal_ceiling(
+        num_particles=int(num_particles)
+    )
+    int32_far_cap = max(
+        1, int(_LEGACY_STATIC_TRAVERSAL_INT32_ITEM_LIMIT) // safe_total_nodes
+    )
+    int32_near_cap = max(
+        1, int(_LEGACY_STATIC_TRAVERSAL_INT32_ITEM_LIMIT) // safe_num_leaves
+    )
+    capped = DualTreeTraversalConfig(
+        max_pair_queue=int(min(current_queue, int(explicit_ceiling.max_pair_queue))),
+        process_block=int(min(current_block, int(explicit_ceiling.process_block))),
+        max_interactions_per_node=int(
+            min(
+                current_interactions,
+                int(explicit_ceiling.max_interactions_per_node),
+                int32_far_cap,
+            )
+        ),
+        max_neighbors_per_leaf=int(
+            min(
+                current_neighbors,
+                int(explicit_ceiling.max_neighbors_per_leaf),
+                int32_near_cap,
+            )
+        ),
+    )
+    return capped
 
 
 _PREPARE_DIAGNOSTICS = _env_flag("JACCPOT_PREPARE_DIAGNOSTICS", False)
@@ -833,7 +976,7 @@ class FMMPreparedState:
     """
 
     tree: Tree
-    upward: TreeUpwardData
+    upward: Optional[TreeUpwardData]
     downward: TreeDownwardData
     neighbor_list: NodeNeighborList
     max_leaf_size: int
@@ -1030,6 +1173,7 @@ class NearfieldInteropData(NamedTuple):
     leaf_particle_indices: Optional[Array] = None
     leaf_particle_mask: Optional[Array] = None
     particle_to_leaf_position: Optional[Array] = None
+    neighbor_leaf_positions: Optional[Array] = None
 
 
 def _build_octree_upward_artifacts(
@@ -1051,6 +1195,37 @@ def _build_octree_upward_artifacts(
         masses_sorted,
         max_order=int(max_order),
     )
+
+
+def _prepared_state_upward_payload(
+    *,
+    upward: TreeUpwardData,
+    memory_objective: str,
+) -> Optional[TreeUpwardData]:
+    """Return the upward payload to retain in prepared state.
+
+    The plain prepared evaluation path uses `downward`, `tree`, and near-field
+    metadata, but does not consume the original upward bundle. In
+    minimum-memory mode we can therefore avoid retaining this large payload and
+    reconstruct any advanced source-motion data later from the canonical sorted
+    particle arrays if needed.
+    """
+
+    if str(memory_objective).strip().lower() == "minimum_memory":
+        return None
+    return upward
+
+
+def _prepared_state_octree_upward_payload(
+    *,
+    octree_upward: Optional[OctreeSolidFMMComplexMultipoles],
+    memory_objective: str,
+) -> Optional[OctreeSolidFMMComplexMultipoles]:
+    """Return the octree-upward payload to retain in prepared state."""
+
+    if str(memory_objective).strip().lower() == "minimum_memory":
+        return None
+    return octree_upward
 
 
 def _build_octree_downward_artifacts(
@@ -1357,7 +1532,7 @@ def _prepare_solidfmm_downward_child_inputs(
 ) -> _SolidFMMDownwardChildInputs:
     """Resolve child-index arrays for L2L propagation."""
 
-    num_internal_nodes = int(tree.num_internal_nodes)
+    num_internal_nodes = int(jnp.asarray(tree.left_child).shape[0])
     if num_internal_nodes <= 0:
         return _SolidFMMDownwardChildInputs(
             num_internal_nodes=0,
@@ -1614,6 +1789,7 @@ class FastMultipoleMethod:
         mixed_order_farfield: bool = False,
         mixed_order_min_order: Optional[int] = None,
         nearfield_mode: NearFieldMode = "auto",
+        runtime_path: Literal["auto", "legacy", "large_n"] = "auto",
         execution_backend: FMMExecutionBackend = "auto",
         nearfield_edge_chunk_size: int = 256,
         precompute_nearfield_scatter_schedules: bool = True,
@@ -1697,6 +1873,7 @@ class FastMultipoleMethod:
                 "farfield_mode must be 'auto', 'pair_grouped', or 'class_major'"
             )
         self.farfield_mode = farfield_mode_norm
+        self._explicit_streamed_far_pairs = streamed_far_pairs is not None
         self.streamed_far_pairs = bool(streamed_far_pairs)
         self.mixed_order_farfield = bool(mixed_order_farfield)
         self.mixed_order_min_order = (
@@ -1710,12 +1887,24 @@ class FastMultipoleMethod:
         nearfield_mode_norm = str(nearfield_mode).strip().lower()
         if nearfield_mode_norm not in ("auto", "baseline", "bucketed"):
             raise ValueError("nearfield_mode must be 'auto', 'baseline', or 'bucketed'")
+        runtime_path_norm = str(runtime_path).strip().lower()
+        if runtime_path_norm not in ("auto", "legacy", "large_n"):
+            raise ValueError("runtime_path must be 'auto', 'legacy', or 'large_n'")
+        if runtime_path_norm == "legacy":
+            warnings.warn(
+                "runtime_path='legacy' is deprecated and will be removed; "
+                "use runtime_path='large_n' or runtime_path='auto'.",
+                FutureWarning,
+                stacklevel=2,
+            )
         execution_backend_norm = str(execution_backend).strip().lower()
         if execution_backend_norm not in ("auto", "radix", "octree"):
             raise ValueError("execution_backend must be 'auto', 'radix', or 'octree'")
         if int(nearfield_edge_chunk_size) <= 0:
             raise ValueError("nearfield_edge_chunk_size must be positive")
         self.nearfield_mode = nearfield_mode_norm
+        self._explicit_nearfield_mode = nearfield_mode_norm != "auto"
+        self.runtime_path = runtime_path_norm
         self.execution_backend = execution_backend_norm
         self.nearfield_edge_chunk_size = int(nearfield_edge_chunk_size)
         self.precompute_nearfield_scatter_schedules = bool(
@@ -1727,6 +1916,7 @@ class FastMultipoleMethod:
                 "memory_objective must be 'balanced', 'throughput', or 'minimum_memory'"
             )
         self.memory_objective: MemoryObjective = objective_norm  # type: ignore[assignment]
+        self._explicit_memory_objective = objective_norm != "balanced"
         self.memory_budget_bytes = (
             None if memory_budget_bytes is None else int(memory_budget_bytes)
         )
@@ -1836,7 +2026,7 @@ class FastMultipoleMethod:
         self._locals_template: Optional[LocalExpansionData] = None
         self._interaction_cache: Optional[_InteractionCacheEntry] = None
         self._prepared_state_cache_key: Optional[tuple[Any, ...]] = None
-        self._prepared_state_cache_value: Optional[FMMPreparedState] = None
+        self._prepared_state_cache_value: Optional[PreparedStateLike] = None
         self._prepared_state_cache_positions: Optional[Array] = None
         self._prepared_state_cache_masses: Optional[Array] = None
         self._topology_reuse_entry: Optional[_TopologyReuseEntry] = None
@@ -1852,6 +2042,79 @@ class FastMultipoleMethod:
         self._explicit_pair_process_block = pair_process_block is not None
         self._explicit_grouped_interactions = grouped_interactions is not None
         self.grouped_interactions = grouped_interactions
+        self._apply_large_n_gpu_production_contract()
+
+    def _is_large_n_gpu_production_profile(self) -> bool:
+        """Whether this solver should run the canonical large-N GPU contract."""
+        return (
+            str(self.preset).strip().lower() == "large_n_gpu"
+            and str(self.tree_type).strip().lower() == "radix"
+            and str(self.expansion_basis).strip().lower() == "solidfmm"
+            and str(self.execution_backend).strip().lower() != "octree"
+        )
+
+    def _apply_large_n_gpu_production_contract(self) -> None:
+        """Normalize large-N GPU runtime knobs to the canonical fast memory path."""
+
+        if not self._is_large_n_gpu_production_profile():
+            return
+
+        if (
+            self._explicit_memory_objective
+            and self.memory_objective != "minimum_memory"
+        ):
+            warnings.warn(
+                "large_n_gpu production profile coerces memory_objective to "
+                "'minimum_memory' for memory-stable performance.",
+                FutureWarning,
+                stacklevel=2,
+            )
+        if (
+            self._explicit_nearfield_mode
+            and str(self.nearfield_mode).strip().lower() != "bucketed"
+        ):
+            warnings.warn(
+                "large_n_gpu production profile coerces nearfield_mode to "
+                "'bucketed' to keep radix fast-lane active.",
+                FutureWarning,
+                stacklevel=2,
+            )
+        if bool(self.grouped_interactions):
+            warnings.warn(
+                "large_n_gpu production profile disables grouped_interactions "
+                "to keep streamed pair_grouped execution.",
+                FutureWarning,
+                stacklevel=2,
+            )
+        if self._explicit_streamed_far_pairs and not bool(self.streamed_far_pairs):
+            warnings.warn(
+                "large_n_gpu production profile enables streamed_far_pairs "
+                "for low-memory execution.",
+                FutureWarning,
+                stacklevel=2,
+            )
+
+        # Keep large-N production on one stable runtime lane.
+        self.runtime_path = "large_n"
+        self.memory_objective = "minimum_memory"  # type: ignore[assignment]
+        self.streamed_far_pairs = True
+        self.grouped_interactions = False
+        self._explicit_grouped_interactions = False
+        self.farfield_mode = "pair_grouped"
+
+        # Keep near-field on the radix fast-lane compatible bucketed path.
+        self.nearfield_mode = "bucketed"
+        self.precompute_nearfield_scatter_schedules = False
+        self.mixed_order_farfield = False
+        self.mixed_order_min_order = None
+
+        # Disable retention caches that increase memory pressure on this profile.
+        self.enable_interaction_cache = False
+        self.retain_traversal_result = False
+        self.retain_interactions = False
+        self.precompute_grouped_class_segments = False
+        if self.upward_leaf_batch_size is None:
+            self.upward_leaf_batch_size = 2048
 
     def _resolve_execution_backend(self) -> str:
         """Resolve the active FMM execution backend without altering tree choice."""
@@ -2204,7 +2467,10 @@ class FastMultipoleMethod:
             )
             prepass_state = FMMPreparedState(
                 tree=low_tree_artifacts.tree,
-                upward=low_tree_artifacts.upward,
+                upward=_prepared_state_upward_payload(
+                    upward=low_tree_artifacts.upward,
+                    memory_objective=self.memory_objective,
+                ),
                 downward=dual_downward_artifacts.downward,
                 neighbor_list=dual_downward_artifacts.neighbor_list,
                 max_leaf_size=low_tree_artifacts.leaf_cap,
@@ -2226,7 +2492,10 @@ class FastMultipoleMethod:
                 force_scale_nodes=None,
                 execution_backend=prepass_execution_backend,
                 octree=prepass_octree,
-                octree_upward=prepass_octree_upward,
+                octree_upward=_prepared_state_octree_upward_payload(
+                    octree_upward=prepass_octree_upward,
+                    memory_objective=self.memory_objective,
+                ),
                 octree_downward=_finalize_octree_downward_artifacts(
                     octree=prepass_octree,
                     octree_upward=prepass_octree_upward,
@@ -2258,7 +2527,7 @@ class FastMultipoleMethod:
         key: tuple[Any, ...],
         positions: Array,
         masses: Array,
-    ) -> Optional[FMMPreparedState]:
+    ) -> Optional[PreparedStateLike]:
         """Return cached prepared state when key and inputs exactly match."""
         cached_key = self._prepared_state_cache_key
         cached_value = self._prepared_state_cache_value
@@ -2289,7 +2558,7 @@ class FastMultipoleMethod:
         key: tuple[Any, ...],
         positions: Array,
         masses: Array,
-        state: FMMPreparedState,
+        state: PreparedStateLike,
     ) -> None:
         """Store prepared-state payload and the exact input arrays used."""
         if _contains_tracer((positions, masses, state)):
@@ -2347,7 +2616,8 @@ class FastMultipoleMethod:
 
         backend_name = jax.default_backend() if backend is None else str(backend)
         n_particles = int(num_particles)
-        minimum_memory = self.memory_objective == "minimum_memory"
+        production_large_n = self._is_large_n_gpu_production_profile()
+        minimum_memory = self.memory_objective == "minimum_memory" or production_large_n
         large_cpu = (
             backend_name == "cpu" and n_particles >= _LARGE_CPU_PARTICLE_THRESHOLD
         )
@@ -2400,6 +2670,10 @@ class FastMultipoleMethod:
             and not minimum_memory
         ):
             grouped_interactions = True
+
+        if production_large_n:
+            grouped_interactions = False
+            farfield_mode = "pair_grouped"
 
         if self.streamed_far_pairs and grouped_interactions:
             # Streamed far-pair execution and grouped/class-major M2L are
@@ -2500,13 +2774,84 @@ class FastMultipoleMethod:
             # large GPU radix trees. Keep the large-N minimum-memory route on a
             # bounded explicit traversal config so host-side retry can grow from
             # a safe baseline without compiling the count-pass kernel.
+            traversal_config = _minimum_memory_streamed_gpu_traversal_seed(
+                num_particles=n_particles
+            )
+        if (
+            production_large_n
+            and backend_name == "gpu"
+            and traversal_config is not None
+        ):
+            # Production large-N radix path should not allow oversized explicit
+            # traversal seeds to inflate memory footprint. Keep user overrides
+            # only within the bounded streamed minimum-memory ceiling.
+            explicit_ceiling = _minimum_memory_streamed_gpu_traversal_ceiling(
+                num_particles=n_particles
+            )
             traversal_config = DualTreeTraversalConfig(
-                max_pair_queue=int(_GPU_MINIMUM_MEMORY_PAIR_QUEUE),
-                process_block=int(_GPU_MINIMUM_MEMORY_PROCESS_BLOCK),
-                max_interactions_per_node=int(
-                    _GPU_MINIMUM_MEMORY_INTERACTIONS_PER_NODE
+                max_pair_queue=int(
+                    min(
+                        int(traversal_config.max_pair_queue),
+                        int(explicit_ceiling.max_pair_queue),
+                    )
                 ),
-                max_neighbors_per_leaf=int(_GPU_MINIMUM_MEMORY_NEIGHBORS_PER_LEAF),
+                process_block=int(
+                    min(
+                        int(traversal_config.process_block),
+                        int(explicit_ceiling.process_block),
+                    )
+                ),
+                max_interactions_per_node=int(
+                    min(
+                        int(traversal_config.max_interactions_per_node),
+                        int(explicit_ceiling.max_interactions_per_node),
+                    )
+                ),
+                max_neighbors_per_leaf=int(
+                    min(
+                        int(traversal_config.max_neighbors_per_leaf),
+                        int(explicit_ceiling.max_neighbors_per_leaf),
+                    )
+                ),
+            )
+        if (
+            minimum_memory
+            and backend_name == "gpu"
+            and self.tree_type == "radix"
+            and self.expansion_basis == "solidfmm"
+            and bool(self.streamed_far_pairs)
+            and not bool(grouped_interactions)
+            and bool(self.fail_fast)
+            and not self._explicit_traversal_config
+            and not self._explicit_max_pair_queue
+            and not self._explicit_pair_process_block
+            and traversal_config is not None
+            and n_particles >= 1_048_576
+        ):
+            explicit_ceiling = _minimum_memory_streamed_gpu_traversal_ceiling(
+                num_particles=n_particles
+            )
+            capped_queue = min(
+                int(traversal_config.max_pair_queue),
+                int(explicit_ceiling.max_pair_queue),
+            )
+            capped_block = min(
+                int(traversal_config.process_block),
+                int(explicit_ceiling.process_block),
+            )
+            capped_interactions = min(
+                int(traversal_config.max_interactions_per_node),
+                int(explicit_ceiling.max_interactions_per_node),
+            )
+            capped_neighbors = min(
+                int(traversal_config.max_neighbors_per_leaf),
+                int(explicit_ceiling.max_neighbors_per_leaf),
+            )
+            traversal_config = DualTreeTraversalConfig(
+                max_pair_queue=int(capped_queue),
+                process_block=int(capped_block),
+                max_interactions_per_node=int(capped_interactions),
+                max_neighbors_per_leaf=int(capped_neighbors),
             )
         if grouped_interactions:
             center_mode = "aabb"
@@ -3112,13 +3457,15 @@ class FastMultipoleMethod:
                     if topology_candidate is not None:
                         topology_key_for_state = topology_candidate.key
                     else:
-                        topology_key_for_state = self._topology_reuse_key_from_sorted_codes(
-                            sorted_codes=build_artifacts.tree.morton_codes,
-                            tree_config=tree_config,
-                            leaf_size=int(leaf_size),
-                            refine_local=refine_local_val,
-                            max_refine_levels=max_refine_levels_val,
-                            aspect_threshold=aspect_threshold_val,
+                        topology_key_for_state = (
+                            self._topology_reuse_key_from_sorted_codes(
+                                sorted_codes=build_artifacts.tree.morton_codes,
+                                tree_config=tree_config,
+                                leaf_size=int(leaf_size),
+                                refine_local=refine_local_val,
+                                max_refine_levels=max_refine_levels_val,
+                                aspect_threshold=aspect_threshold_val,
+                            )
                         )
                 if topology_key_for_state is not None:
                     self._topology_reuse_entry = _TopologyReuseEntry(
@@ -3135,7 +3482,7 @@ class FastMultipoleMethod:
         pos_sorted = build_artifacts.positions_sorted
         mass_sorted = build_artifacts.masses_sorted
         total_nodes = int(tree.parent.shape[0])
-        num_internal = int(tree.num_internal_nodes)
+        num_internal = int(jnp.asarray(tree.left_child).shape[0])
         num_leaves = int(total_nodes - num_internal)
         _prepare_diag(
             "tree built "
@@ -3162,9 +3509,7 @@ class FastMultipoleMethod:
                 geometry_key_base: Any = topology_key_for_state
             else:
                 bounds_key = (
-                    None
-                    if bounds is None
-                    else (int(id(bounds[0])), int(id(bounds[1])))
+                    None if bounds is None else (int(id(bounds[0])), int(id(bounds[1])))
                 )
                 geometry_key_base = (
                     self.tree_type,
@@ -3345,7 +3690,68 @@ class FastMultipoleMethod:
             f"need_node_interactions={bool(need_node_interactions)} "
             f"dense_buffers={bool(use_dense_interactions_for_prepare)}"
         )
-        jit_traversal_for_prepare = bool(self._jit_traversal_default)
+        if (
+            runtime_traversal_config is not None
+            and self.memory_objective == "minimum_memory"
+            and jax.default_backend() == "gpu"
+            and self.tree_type == "radix"
+            and self.expansion_basis == "solidfmm"
+            and bool(self.streamed_far_pairs)
+            and not bool(grouped_interactions)
+        ):
+            total_nodes = int(tree_artifacts.tree.parent.shape[0])
+            num_internal = int(jnp.asarray(tree_artifacts.tree.left_child).shape[0])
+            num_leaves = max(1, total_nodes - num_internal)
+            sanitized_traversal_config = (
+                _cap_minimum_memory_streamed_gpu_traversal_config_for_tree(
+                    traversal_config=runtime_traversal_config,
+                    total_nodes=total_nodes,
+                    num_leaves=num_leaves,
+                    num_particles=int(tree_artifacts.positions_sorted.shape[0]),
+                )
+            )
+            if sanitized_traversal_config != runtime_traversal_config:
+                far_slots_before = total_nodes * int(
+                    runtime_traversal_config.max_interactions_per_node
+                )
+                near_slots_before = num_leaves * int(
+                    runtime_traversal_config.max_neighbors_per_leaf
+                )
+                _prepare_diag(
+                    "capped explicit traversal_config for legacy streamed GPU walk "
+                    f"total_nodes={total_nodes} num_leaves={num_leaves} "
+                    f"far_slots={far_slots_before} near_slots={near_slots_before} "
+                    f"from={runtime_traversal_config} "
+                    f"to={sanitized_traversal_config}"
+                )
+                runtime_traversal_config = sanitized_traversal_config
+        jit_traversal_for_prepare = bool(
+            self._jit_traversal_default
+        ) and not _contains_tracer(
+            (tree_artifacts.positions_sorted, tree_artifacts.masses_sorted)
+        )
+        split_build_env_raw = os.environ.get(
+            "JACCPOT_PREPARE_STAGE_MEMORY_SPLIT_ENABLED"
+        )
+        if split_build_env_raw is None:
+            # Default to the lower-peak split traversal build in the production
+            # minimum-memory streamed GPU path; keep env opt-out for debugging.
+            allow_split_build = bool(
+                self.memory_objective == "minimum_memory"
+                and jax.default_backend() == "gpu"
+                and self.tree_type == "radix"
+                and self.expansion_basis == "solidfmm"
+                and bool(self.streamed_far_pairs)
+                and not bool(grouped_interactions)
+            )
+        else:
+            allow_split_build = str(split_build_env_raw).strip().lower() in {
+                "1",
+                "true",
+                "yes",
+                "on",
+            }
+        _prepare_diag(f"allow_split_build={bool(allow_split_build)}")
         dual_artifacts, cache_entry = _build_dual_tree_artifacts(
             tree_artifacts.tree,
             tree_artifacts.upward.geometry,
@@ -3370,6 +3776,7 @@ class FastMultipoleMethod:
                 farfield_mode=farfield_mode,
             ),
             grouped_schedule_budget_bytes=self._grouped_schedule_item_budget(),
+            allow_split_build=allow_split_build,
             pair_policy=pair_policy,
             policy_state=policy_state,
             jit_traversal=jit_traversal_for_prepare,
@@ -3433,9 +3840,11 @@ class FastMultipoleMethod:
             runtime_m2l_chunk_size=runtime_m2l_chunk_size,
         )
 
-        interactions_for_downward = self._prepare_state_select_interactions_for_downward(
-            interactions=interactions,
-            far_pairs_coo=far_pairs_coo,
+        interactions_for_downward = (
+            self._prepare_state_select_interactions_for_downward(
+                interactions=interactions,
+                far_pairs_coo=far_pairs_coo,
+            )
         )
 
         downward = self._prepare_downward_with_artifacts(
@@ -3591,9 +4000,11 @@ class FastMultipoleMethod:
         recent_counts: tuple[int, ...] = tuple()
 
         if self.adaptive_order:
-            far_sources, far_targets, far_tags = self._prepare_state_extract_adaptive_far_pairs(
-                traversal_result=traversal_result,
-                compact_far_pairs=compact_far_pairs,
+            far_sources, far_targets, far_tags = (
+                self._prepare_state_extract_adaptive_far_pairs(
+                    traversal_result=traversal_result,
+                    compact_far_pairs=compact_far_pairs,
+                )
             )
             far_pairs_by_gear = bucket_far_pairs_by_tag(
                 far_sources,
@@ -3797,9 +4208,7 @@ class FastMultipoleMethod:
             else int(nearfield_edge_chunk_size)
         )
         retain_pair_vectors_resolved = (
-            self._should_retain_nearfield_pair_vectors(
-                num_particles=int(num_particles)
-            )
+            self._should_retain_nearfield_pair_vectors(num_particles=int(num_particles))
             if retain_pair_vectors is None
             else bool(retain_pair_vectors)
         )
@@ -3807,6 +4216,21 @@ class FastMultipoleMethod:
         should_precompute_scatter = self._should_precompute_nearfield_scatter_schedules(
             num_particles=int(num_particles)
         )
+        if not bool(retain_pair_vectors_resolved) and not bool(
+            should_precompute_scatter
+        ):
+            # In large-N minimum-memory GPU runs, prepared evaluation can derive
+            # near-field pair vectors on demand from the neighbor list. Avoid
+            # materializing enormous edge-index buffers during prepare_state
+            # when we are neither retaining them nor building scatter schedules.
+            return NearfieldPrecomputeArtifacts(
+                target_leaf_ids=None,
+                source_leaf_ids=None,
+                valid_pairs=None,
+                chunk_sort_indices=None,
+                chunk_group_ids=None,
+                chunk_unique_indices=None,
+            )
         if resolved_nearfield_mode != "bucketed":
             return NearfieldPrecomputeArtifacts(
                 target_leaf_ids=None,
@@ -3927,6 +4351,8 @@ class FastMultipoleMethod:
             chunk = int(edge_chunk_size)
             chunk_count = (edge_count + chunk - 1) // chunk if edge_count > 0 else 0
             schedule_items = int(chunk_count * chunk * int(leaf_cap))
+            if schedule_items > int(_NEARFIELD_SCATTER_SCHEDULE_INT32_ITEM_LIMIT):
+                return None, None, None
             schedule_item_cap = self._resolve_nearfield_schedule_item_cap(
                 edge_count=edge_count,
                 leaf_cap=int(leaf_cap),
@@ -4118,14 +4544,30 @@ class FastMultipoleMethod:
 
     def _resolve_nearfield_mode(self, *, num_particles: int) -> str:
         """Resolve near-field execution mode from configured policy."""
+        if self._is_large_n_gpu_production_profile():
+            if (
+                not bool(self._explicit_nearfield_mode)
+                and jax.default_backend() == "gpu"
+                and int(num_particles) < 262_144
+            ):
+                return "baseline"
+            return "bucketed"
         mode = str(self.nearfield_mode).strip().lower()
         if mode != "auto":
             return mode
         backend = jax.default_backend()
+        large_gpu = (
+            backend == "gpu"
+            and int(num_particles) >= 262_144
+            and str(self.preset).strip().lower() == "large_n_gpu"
+            and str(self.expansion_basis).strip().lower() == "solidfmm"
+        )
         large_cpu = (
             backend == "cpu"
             and int(num_particles) >= _NEARFIELD_BUCKETED_CPU_PARTICLE_THRESHOLD
         )
+        if large_gpu:
+            return "bucketed"
         if (
             large_cpu
             and self.preset == "fast"
@@ -4141,17 +4583,30 @@ class FastMultipoleMethod:
         num_particles: int,
         nearfield_mode: str,
     ) -> int:
-        """Resolve near-field edge chunk size with large-N CPU auto policy."""
+        """Resolve near-field edge chunk size with large-N auto policy."""
         base_chunk = int(self.nearfield_edge_chunk_size)
         if base_chunk <= 0:
             raise ValueError("nearfield_edge_chunk_size must be positive")
         mode = str(self.nearfield_mode).strip().lower()
-        if mode != "auto" or str(nearfield_mode).strip().lower() != "bucketed":
-            return base_chunk
-        if jax.default_backend() != "cpu":
+        auto_policy_enabled = mode == "auto" or (
+            self._is_large_n_gpu_production_profile()
+            and not bool(self._explicit_nearfield_mode)
+        )
+        if (not auto_policy_enabled) or str(
+            nearfield_mode
+        ).strip().lower() != "bucketed":
             return base_chunk
 
         n = int(num_particles)
+        if jax.default_backend() == "gpu":
+            if (
+                str(self.preset).strip().lower() == "large_n_gpu"
+                and str(self.expansion_basis).strip().lower() == "solidfmm"
+            ):
+                if n >= 262_144:
+                    return max(base_chunk, 256)
+            return base_chunk
+
         if n >= 2_000_000:
             return max(base_chunk, _NEARFIELD_BUCKETED_CPU_EDGE_CHUNK_XL)
         if n >= 1_000_000:
@@ -4471,6 +4926,32 @@ class FastMultipoleMethod:
         state: Optional[FMMPreparedState] = None
         positions_arr = jnp.asarray(positions)
         masses_arr = jnp.asarray(masses)
+        if _contains_tracer((positions_arr, masses_arr)):
+            if bool(return_potential):
+                raise NotImplementedError(
+                    "traced compute_accelerations fallback does not support return_potential=True"
+                )
+            if int(max_acc_derivative_order) != 0:
+                raise NotImplementedError(
+                    "traced compute_accelerations fallback does not support acceleration derivatives"
+                )
+            target_positions = (
+                positions_arr
+                if target_indices is None
+                else jnp.asarray(
+                    positions_arr[jnp.asarray(target_indices, dtype=INDEX_DTYPE),],
+                    dtype=positions_arr.dtype,
+                )
+            )
+            return jax.vmap(
+                lambda eval_point: reference_direct_sum(
+                    positions_arr,
+                    masses_arr,
+                    eval_point,
+                    G=self.G,
+                    softening=self.softening,
+                )
+            )(target_positions)
         if reuse_prepared_state:
             if bounds is None:
                 bounds_key: tuple[Any, ...] = ("none",)
@@ -4736,7 +5217,7 @@ class FastMultipoleMethod:
         refine_local: Optional[bool] = None,
         max_refine_levels: Optional[int] = None,
         aspect_threshold: Optional[float] = None,
-    ) -> FMMPreparedState:
+    ) -> PreparedStateLike:
         """Precompute tree and interaction data for repeated evaluations.
 
         When ``tree_build_mode`` is ``"fixed_depth"`` the optional
@@ -4794,6 +5275,35 @@ class FastMultipoleMethod:
 
         theta_val = float(self.theta if theta is None else theta)
         mac_type_val = self._base_mac_type()
+
+        if can_use_large_n_prepare_path(
+            self,
+            positions_arr=positions_arr,
+            masses_arr=masses_arr,
+            allow_stateful_cache=allow_stateful_cache,
+        ):
+            return prepare_large_n_state(
+                self,
+                positions_arr=positions_arr,
+                masses_arr=masses_arr,
+                input_dtype=input_dtype,
+                bounds=bounds,
+                leaf_size=int(leaf_size),
+                max_order=int(max_order),
+                theta_val=theta_val,
+                mac_type_val=mac_type_val,
+                refine_local_val=refine_local_val,
+                max_refine_levels_val=max_refine_levels_val,
+                aspect_threshold_val=aspect_threshold_val,
+                jit_tree_override=jit_tree,
+                allow_stateful_cache=allow_stateful_cache,
+                runtime_traversal_config=runtime_traversal_config,
+                runtime_m2l_chunk_size=runtime_m2l_chunk_size,
+                runtime_l2l_chunk_size=runtime_l2l_chunk_size,
+                upward_center_mode=upward_center_mode,
+                record_retry=record_retry,
+                collected_retries=collected_retries,
+            )
 
         tree_artifacts = self._prepare_state_tree_and_upward(
             positions_arr=positions_arr,
@@ -4937,9 +5447,15 @@ class FastMultipoleMethod:
             self._recent_retry_events = retry_events_tuple
 
         execution_backend = self._resolve_execution_backend()
+        tree_type_norm = (
+            str(getattr(tree_artifacts.tree, "tree_type", "")).strip().lower()
+        )
+        build_octree_payload = (
+            execution_backend == "octree" or tree_type_norm == "octree"
+        )
         octree = (
             build_octree_execution_data(tree_artifacts.tree)
-            if execution_backend == "octree"
+            if build_octree_payload
             else None
         )
         octree_native_neighbors = None
@@ -4957,9 +5473,55 @@ class FastMultipoleMethod:
         nearfield_interop = _build_nearfield_interop_data(
             tree_artifacts.tree,
             dual_downward_artifacts.neighbor_list,
-            octree=octree,
-            native_neighbors=octree_native_neighbors,
+            octree=None,
+            native_neighbors=None,
         )
+        if (
+            execution_backend == "octree"
+            and nearfield_interop.leaf_particle_indices is None
+        ):
+            leaf_nodes_nf = jnp.asarray(nearfield_interop.leaf_nodes, dtype=INDEX_DTYPE)
+            node_ranges_nf = jnp.asarray(
+                nearfield_interop.particle_order_node_ranges,
+                dtype=INDEX_DTYPE,
+            )
+            leaf_ranges_nf = node_ranges_nf[leaf_nodes_nf]
+            counts_nf = leaf_ranges_nf[:, 1] - leaf_ranges_nf[:, 0] + 1
+            width_nf = int(jnp.max(counts_nf)) if int(leaf_nodes_nf.shape[0]) > 0 else 0
+            if width_nf > 0:
+                offsets_nf = jnp.arange(width_nf, dtype=INDEX_DTYPE)
+                leaf_particle_indices_nf = (
+                    leaf_ranges_nf[:, 0][:, None] + offsets_nf[None, :]
+                )
+                leaf_particle_mask_nf = offsets_nf[None, :] < counts_nf[:, None]
+                particle_to_leaf_position_nf = jnp.zeros(
+                    (int(positions_arr.shape[0]),),
+                    dtype=INDEX_DTYPE,
+                )
+                particle_to_leaf_position_nf = particle_to_leaf_position_nf.at[
+                    leaf_particle_indices_nf[leaf_particle_mask_nf]
+                ].set(
+                    jnp.repeat(
+                        jnp.arange(int(leaf_nodes_nf.shape[0]), dtype=INDEX_DTYPE),
+                        counts_nf.astype(INDEX_DTYPE),
+                    )
+                )
+            else:
+                leaf_particle_indices_nf = jnp.zeros(
+                    (int(leaf_nodes_nf.shape[0]), 0), dtype=INDEX_DTYPE
+                )
+                leaf_particle_mask_nf = jnp.zeros(
+                    (int(leaf_nodes_nf.shape[0]), 0), dtype=bool
+                )
+                particle_to_leaf_position_nf = jnp.zeros(
+                    (int(positions_arr.shape[0]),),
+                    dtype=INDEX_DTYPE,
+                )
+            nearfield_interop = nearfield_interop._replace(
+                leaf_particle_indices=leaf_particle_indices_nf,
+                leaf_particle_mask=leaf_particle_mask_nf,
+                particle_to_leaf_position=particle_to_leaf_position_nf,
+            )
         nearfield_artifacts = self._prepare_state_nearfield_artifacts(
             neighbor_list=dual_downward_artifacts.neighbor_list,
             nearfield_interop=nearfield_interop,
@@ -5006,7 +5568,10 @@ class FastMultipoleMethod:
 
         return FMMPreparedState(
             tree=tree_artifacts.tree,
-            upward=tree_artifacts.upward,
+            upward=_prepared_state_upward_payload(
+                upward=tree_artifacts.upward,
+                memory_objective=self.memory_objective,
+            ),
             downward=dual_downward_artifacts.downward,
             neighbor_list=dual_downward_artifacts.neighbor_list,
             max_leaf_size=tree_artifacts.leaf_cap,
@@ -5028,7 +5593,10 @@ class FastMultipoleMethod:
             force_scale_nodes=force_scale_nodes,
             execution_backend=execution_backend,
             octree=octree,
-            octree_upward=octree_upward,
+            octree_upward=_prepared_state_octree_upward_payload(
+                octree_upward=octree_upward,
+                memory_objective=self.memory_objective,
+            ),
             octree_downward=_finalize_octree_downward_artifacts(
                 octree=octree,
                 octree_upward=octree_upward,
@@ -5042,7 +5610,7 @@ class FastMultipoleMethod:
     @jaxtyped(typechecker=beartype)
     def evaluate_prepared_state(
         self: "FastMultipoleMethod",
-        state: FMMPreparedState,
+        state: PreparedStateLike,
         *,
         target_indices: Optional[Array] = None,
         return_potential: bool = False,
@@ -5056,11 +5624,24 @@ class FastMultipoleMethod:
     ]:
         """Evaluate accelerations/potentials for all particles or targets."""
 
+        if isinstance(state, LargeNPreparedState):
+            return evaluate_large_n_state(
+                self,
+                state,
+                target_indices=target_indices,
+                return_potential=return_potential,
+                max_acc_derivative_order=max_acc_derivative_order,
+            )
+
         resolved_target_indices = self._resolve_target_indices(
             target_indices=target_indices,
             num_particles=int(state.inverse_permutation.shape[0]),
         )
-        octree_backend = str(state.execution_backend).strip().lower() == "octree"
+        octree_backend = str(
+            state.execution_backend
+        ).strip().lower() == "octree" and bool(
+            int(os.environ.get("JACCPOT_ENABLE_OCTREE_EVAL", "0"))
+        )
         farfield_local_data = (
             _octree_local_expansion_data(state.octree_downward)
             if octree_backend
@@ -5087,7 +5668,14 @@ class FastMultipoleMethod:
                 "max_acc_derivative_order > 0 currently requires expansion_basis='solidfmm'"
             )
 
-        if resolved_target_indices is None or tracing_targets:
+        use_full_eval_for_targets = bool(return_potential) and (
+            resolved_target_indices is not None
+        )
+        if (
+            resolved_target_indices is None
+            or tracing_targets
+            or use_full_eval_for_targets
+        ):
             evaluation = _evaluate_prepared_tree(
                 fmm=self,
                 tree=state.tree,
@@ -5149,7 +5737,7 @@ class FastMultipoleMethod:
                 )
                 if return_potential:
                     potentials = jnp.asarray(pot_sorted)[state.inverse_permutation]
-            elif tracing_targets:
+            elif tracing_targets or use_full_eval_for_targets:
                 accelerations = jnp.asarray(acc_sorted)[state.inverse_permutation][
                     resolved_target_indices
                 ]
@@ -5179,7 +5767,7 @@ class FastMultipoleMethod:
             if resolved_target_indices is None:
                 accelerations = jnp.asarray(acc_sorted)[state.inverse_permutation]
                 potentials = jnp.asarray(pot_sorted)[state.inverse_permutation]
-            elif tracing_targets:
+            elif tracing_targets or use_full_eval_for_targets:
                 accelerations = jnp.asarray(acc_sorted)[state.inverse_permutation][
                     resolved_target_indices
                 ]
@@ -6209,6 +6797,12 @@ class FastMultipoleMethod:
                 if precomputed_chunk_unique_indices is not None
                 else jnp.zeros((0, 0), dtype=INDEX_DTYPE)
             ),
+            jnp.zeros((setup.leaf_nodes.shape[0] + 1,), dtype=INDEX_DTYPE),
+            jnp.zeros((0,), dtype=INDEX_DTYPE),
+            jnp.zeros((0, 0), dtype=INDEX_DTYPE),
+            jnp.zeros((0, 0), dtype=bool),
+            jnp.zeros((setup.leaf_nodes.shape[0], 0, 0), dtype=INDEX_DTYPE),
+            jnp.zeros((setup.leaf_nodes.shape[0], 0, 0), dtype=bool),
             G=self.G,
             softening=self.softening,
             order=order,
@@ -6232,7 +6826,7 @@ def _infer_bounds(positions: Array) -> tuple[Array, Array]:
 
 def _max_leaf_size_from_tree(tree: Tree) -> int:
     """Compute maximum number of particles per leaf node."""
-    num_internal = int(tree.num_internal_nodes)
+    num_internal = int(jnp.asarray(tree.left_child).shape[0])
     leaf_ranges = tree.node_ranges[num_internal:]
     counts = leaf_ranges[:, 1] - leaf_ranges[:, 0] + as_index(1)
     return int(jnp.max(counts))
@@ -6334,6 +6928,11 @@ def _build_nearfield_interop_data(
         if octree is None:
             raise ValueError("native octree nearfield data requires octree metadata")
         leaf_nodes = jnp.asarray(native_neighbors.leaf_indices, dtype=INDEX_DTYPE)
+        native_offsets = jnp.asarray(native_neighbors.offsets, dtype=INDEX_DTYPE)
+        native_neighbors_flat = jnp.asarray(
+            native_neighbors.neighbors, dtype=INDEX_DTYPE
+        )
+        native_counts = jnp.asarray(native_neighbors.counts, dtype=INDEX_DTYPE)
         leaf_count = int(leaf_nodes.shape[0])
         radix_leaf_nodes = jnp.asarray(
             getattr(
@@ -6427,6 +7026,36 @@ def _build_nearfield_interop_data(
                 dtype=INDEX_DTYPE,
             )
 
+        native_neighbor_leaf_positions = getattr(
+            native_neighbors,
+            "neighbor_leaf_positions",
+            None,
+        )
+        if native_neighbor_leaf_positions is not None:
+            neighbor_leaf_positions = jnp.asarray(
+                native_neighbor_leaf_positions,
+                dtype=INDEX_DTYPE,
+            )
+        else:
+            if leaf_count > 0:
+                max_nbr = int(jnp.max(native_counts))
+            else:
+                max_nbr = 0
+            if max_nbr > 0:
+                nbr_offsets = jnp.arange(max_nbr, dtype=INDEX_DTYPE)
+                nbr_idx = native_offsets[:-1, None] + nbr_offsets[None, :]
+                nbr_valid = nbr_offsets[None, :] < native_counts[:, None]
+                nbr_safe_idx = jnp.where(nbr_valid, nbr_idx, 0)
+                nbr_nodes = native_neighbors_flat[nbr_safe_idx]
+                neighbor_leaf_positions = carrier_lookup[nbr_nodes]
+                neighbor_leaf_positions = jnp.where(
+                    nbr_valid,
+                    neighbor_leaf_positions,
+                    jnp.asarray(-1, dtype=INDEX_DTYPE),
+                )
+            else:
+                neighbor_leaf_positions = jnp.zeros((leaf_count, 0), dtype=INDEX_DTYPE)
+
         oct_node_ranges = jnp.asarray(octree.node_ranges, dtype=INDEX_DTYPE)
         particle_order_leaf_indices = jnp.asarray(
             native_neighbors.particle_order_leaf_indices,
@@ -6435,9 +7064,9 @@ def _build_nearfield_interop_data(
         return NearfieldInteropData(
             leaf_nodes=leaf_nodes,
             node_ranges=oct_node_ranges,
-            offsets=jnp.asarray(native_neighbors.offsets, dtype=INDEX_DTYPE),
-            neighbors=jnp.asarray(native_neighbors.neighbors, dtype=INDEX_DTYPE),
-            counts=jnp.asarray(native_neighbors.counts, dtype=INDEX_DTYPE),
+            offsets=native_offsets,
+            neighbors=native_neighbors_flat,
+            counts=native_counts,
             particle_order_node_ranges=oct_node_ranges,
             particle_order_leaf_indices=particle_order_leaf_indices,
             particle_order_to_native_leaf=jnp.asarray(
@@ -6447,6 +7076,7 @@ def _build_nearfield_interop_data(
             leaf_particle_indices=leaf_particle_indices,
             leaf_particle_mask=leaf_particle_mask,
             particle_to_leaf_position=particle_to_leaf_position,
+            neighbor_leaf_positions=neighbor_leaf_positions,
         )
 
     del octree
@@ -6457,6 +7087,45 @@ def _build_nearfield_interop_data(
         ),
         dtype=INDEX_DTYPE,
     )
+    nbr_counts = jnp.asarray(neighbor_list.counts, dtype=INDEX_DTYPE)
+    num_leaves = int(leaf_indices.shape[0])
+    payload_neighbor_leaf_positions = getattr(
+        neighbor_list,
+        "neighbor_leaf_positions",
+        None,
+    )
+    if payload_neighbor_leaf_positions is not None:
+        neighbor_leaf_positions = jnp.asarray(
+            payload_neighbor_leaf_positions,
+            dtype=INDEX_DTYPE,
+        )
+    else:
+        if num_leaves > 0:
+            max_nbr = int(jnp.max(nbr_counts))
+        else:
+            max_nbr = 0
+        if max_nbr > 0:
+            total_nodes = int(tree.node_ranges.shape[0])
+            leaf_lookup = jnp.full((total_nodes,), -1, dtype=INDEX_DTYPE)
+            leaf_lookup = leaf_lookup.at[leaf_indices].set(
+                jnp.arange(num_leaves, dtype=INDEX_DTYPE)
+            )
+            offsets = jnp.asarray(neighbor_list.offsets, dtype=INDEX_DTYPE)
+            neighbors = jnp.asarray(neighbor_list.neighbors, dtype=INDEX_DTYPE)
+            nbr_offsets = jnp.arange(max_nbr, dtype=INDEX_DTYPE)
+            nbr_idx = offsets[:-1, None] + nbr_offsets[None, :]
+            nbr_valid = nbr_offsets[None, :] < nbr_counts[:, None]
+            nbr_safe_idx = jnp.where(nbr_valid, nbr_idx, 0)
+            nbr_nodes = neighbors[nbr_safe_idx]
+            neighbor_leaf_positions = leaf_lookup[nbr_nodes]
+            neighbor_leaf_positions = jnp.where(
+                nbr_valid,
+                neighbor_leaf_positions,
+                jnp.asarray(-1, dtype=INDEX_DTYPE),
+            )
+        else:
+            neighbor_leaf_positions = jnp.zeros((num_leaves, 0), dtype=INDEX_DTYPE)
+
     return NearfieldInteropData(
         leaf_nodes=leaf_indices,
         node_ranges=jnp.asarray(tree.node_ranges, dtype=INDEX_DTYPE),
@@ -6476,6 +7145,7 @@ def _build_nearfield_interop_data(
         leaf_particle_indices=None,
         leaf_particle_mask=None,
         particle_to_leaf_position=None,
+        neighbor_leaf_positions=neighbor_leaf_positions,
     )
 
 
@@ -7643,29 +8313,31 @@ def _prepare_solidfmm_downward_sweep(
         )
         source_motion_locals_updated: Optional[Array]
         if source_motion_multip_packed is not None:
-            source_motion_locals_updated = _solidfmm_downward_accumulate_from_multipoles(
-                jnp.zeros_like(locals_coeffs),
-                source_motion_multip_packed,
-                tree=tree,
-                upward=upward,
-                interactions=interactions,
-                centers=centers,
-                src=src,
-                tgt=tgt,
-                pair_count=pair_count,
-                order=p,
-                rotation_mode=rotation_mode,
-                total_nodes=total_nodes,
-                chunk_size=chunk_size,
-                grouped_interactions=grouped_interactions,
-                grouped_buffers=grouped_buffers,
-                grouped_segment_starts=grouped_segment_starts,
-                grouped_segment_lengths=grouped_segment_lengths,
-                grouped_segment_class_ids=grouped_segment_class_ids,
-                grouped_segment_sort_permutation=grouped_segment_sort_permutation,
-                grouped_segment_group_ids=grouped_segment_group_ids,
-                grouped_segment_unique_targets=grouped_segment_unique_targets,
-                farfield_mode=farfield_mode,
+            source_motion_locals_updated = (
+                _solidfmm_downward_accumulate_from_multipoles(
+                    jnp.zeros_like(locals_coeffs),
+                    source_motion_multip_packed,
+                    tree=tree,
+                    upward=upward,
+                    interactions=interactions,
+                    centers=centers,
+                    src=src,
+                    tgt=tgt,
+                    pair_count=pair_count,
+                    order=p,
+                    rotation_mode=rotation_mode,
+                    total_nodes=total_nodes,
+                    chunk_size=chunk_size,
+                    grouped_interactions=grouped_interactions,
+                    grouped_buffers=grouped_buffers,
+                    grouped_segment_starts=grouped_segment_starts,
+                    grouped_segment_lengths=grouped_segment_lengths,
+                    grouped_segment_class_ids=grouped_segment_class_ids,
+                    grouped_segment_sort_permutation=grouped_segment_sort_permutation,
+                    grouped_segment_group_ids=grouped_segment_group_ids,
+                    grouped_segment_unique_targets=grouped_segment_unique_targets,
+                    farfield_mode=farfield_mode,
+                )
             )
             source_motion_locals_updated = _propagate_solidfmm_locals_to_children(
                 source_motion_locals_updated,
@@ -7729,6 +8401,20 @@ def _prepare_solidfmm_downward_sweep(
         "expansion_basis",
         "nearfield_mode",
         "nearfield_edge_chunk_size",
+        "nearfield_delayed_scatter_chunks_per_superchunk",
+        "nearfield_chunk_scan_batch_size",
+        "nearfield_chunk_scan_unroll",
+        "nearfield_superchunk_scan_unroll",
+        "nearfield_sorted_scatter_hint",
+        "nearfield_grouped_sorted_scatter",
+        "nearfield_superchunk_target_reduce",
+        "nearfield_disable_chunk_cond",
+        "nearfield_target_leaf_batch_size",
+        "nearfield_target_block_tile_size",
+        "nearfield_target_block_tile_scan_unroll",
+        "nearfield_target_block_batch_scan_unroll",
+        "nearfield_target_block_overflow_fast_max_blocks",
+        "disable_specialized_large_n_nearfield",
     ),
 )
 def _evaluate_tree_compiled_impl(
@@ -7752,6 +8438,12 @@ def _evaluate_tree_compiled_impl(
     precomputed_chunk_sort_indices: Array,
     precomputed_chunk_group_ids: Array,
     precomputed_chunk_unique_indices: Array,
+    precomputed_target_block_offsets: Array,
+    precomputed_target_block_leaf_ids: Array,
+    precomputed_target_block_source_leaf_ids: Array,
+    precomputed_target_block_valid_mask: Array,
+    precomputed_target_block_source_leaf_ids_padded: Array,
+    precomputed_target_block_valid_mask_padded: Array,
     *,
     G: float,
     softening: float,
@@ -7761,8 +8453,23 @@ def _evaluate_tree_compiled_impl(
     return_potential: bool,
     nearfield_mode: str,
     nearfield_edge_chunk_size: int,
+    nearfield_delayed_scatter_chunks_per_superchunk: int = 1,
+    nearfield_chunk_scan_batch_size: int = 1,
+    nearfield_chunk_scan_unroll: int = 1,
+    nearfield_superchunk_scan_unroll: int = 1,
+    nearfield_sorted_scatter_hint: bool = False,
+    nearfield_grouped_sorted_scatter: bool = False,
+    nearfield_superchunk_target_reduce: bool = False,
+    nearfield_disable_chunk_cond: bool = True,
+    nearfield_target_leaf_batch_size: int = 32,
+    nearfield_target_block_tile_size: int = 8,
+    nearfield_target_block_tile_scan_unroll: int = 1,
+    nearfield_target_block_batch_scan_unroll: int = 1,
+    nearfield_target_block_overflow_fast_max_blocks: int = 65536,
+    disable_specialized_large_n_nearfield: bool = False,
 ) -> Union[Array, Tuple[Array, Array]]:
     """JIT core for far/near field evaluation on a prepared tree state."""
+    disable_specialized_large_n = bool(disable_specialized_large_n_nearfield)
     use_precomputed = (
         precomputed_target_leaf_ids.shape[0] == neighbor_list.neighbors.shape[0]
         and precomputed_valid_pairs.shape[0] == neighbor_list.neighbors.shape[0]
@@ -7783,51 +8490,140 @@ def _evaluate_tree_compiled_impl(
         and precomputed_chunk_group_ids.shape == (chunk_count, chunk_flat_size)
         and precomputed_chunk_unique_indices.shape == (chunk_count, chunk_flat_size)
     )
-    near = compute_leaf_p2p_accelerations(
-        tree,
-        neighbor_list,
-        positions,
-        masses,
-        G=G,
-        softening=softening,
-        max_leaf_size=max_leaf_size,
-        return_potential=return_potential,
-        nearfield_mode=nearfield_mode,
-        edge_chunk_size=nearfield_edge_chunk_size,
-        precomputed_target_leaf_ids=(
-            precomputed_target_leaf_ids if use_precomputed else None
-        ),
-        precomputed_source_leaf_ids=(
-            precomputed_source_leaf_ids
-            if (use_precomputed and use_precomputed_source)
-            else None
-        ),
-        precomputed_valid_pairs=precomputed_valid_pairs if use_precomputed else None,
-        precomputed_chunk_sort_indices=(
-            precomputed_chunk_sort_indices if use_precomputed_scatter else None
-        ),
-        precomputed_chunk_group_ids=(
-            precomputed_chunk_group_ids if use_precomputed_scatter else None
-        ),
-        precomputed_chunk_unique_indices=(
-            precomputed_chunk_unique_indices if use_precomputed_scatter else None
-        ),
-        node_ranges_override=nearfield_node_ranges,
-        leaf_nodes_override=nearfield_leaf_nodes,
-        neighbor_offsets_override=nearfield_offsets,
-        neighbor_indices_override=nearfield_neighbors,
-        neighbor_counts_override=nearfield_counts,
-        leaf_particle_indices_override=(
-            nearfield_leaf_particle_indices
-            if nearfield_leaf_particle_indices.shape[0] > 0
-            else None
-        ),
-        leaf_particle_mask_override=(
-            nearfield_leaf_particle_mask
-            if nearfield_leaf_particle_mask.shape[0] > 0
-            else None
-        ),
+    use_specialized_large_n = (
+        not disable_specialized_large_n
+        and not bool(return_potential)
+        and str(nearfield_mode).strip().lower() == "bucketed"
+        and nearfield_leaf_particle_indices.shape[0] > 0
+        and not use_precomputed_scatter
     )
+    use_target_blocks = (
+        precomputed_target_block_offsets.shape[0]
+        == (neighbor_list.leaf_indices.shape[0] + 1)
+        and precomputed_target_block_leaf_ids.shape[0] > 0
+        and precomputed_target_block_source_leaf_ids.shape[0]
+        == precomputed_target_block_leaf_ids.shape[0]
+        and precomputed_target_block_valid_mask.shape
+        == precomputed_target_block_source_leaf_ids.shape
+    )
+    use_target_blocks_padded = (
+        precomputed_target_block_source_leaf_ids_padded.shape[0]
+        == neighbor_list.leaf_indices.shape[0]
+        and precomputed_target_block_source_leaf_ids_padded.shape[1] > 0
+        and precomputed_target_block_source_leaf_ids_padded.shape[2] > 0
+        and precomputed_target_block_valid_mask_padded.shape
+        == precomputed_target_block_source_leaf_ids_padded.shape
+    )
+    if use_specialized_large_n:
+        near = compute_leaf_p2p_accelerations_large_n_accel_only(
+            tree,
+            neighbor_list,
+            positions,
+            masses,
+            G=G,
+            softening=softening,
+            edge_chunk_size=nearfield_edge_chunk_size,
+            precomputed_target_leaf_ids=(
+                precomputed_target_leaf_ids if use_precomputed else None
+            ),
+            precomputed_source_leaf_ids=(
+                precomputed_source_leaf_ids
+                if (use_precomputed and use_precomputed_source)
+                else None
+            ),
+            precomputed_valid_pairs=(
+                precomputed_valid_pairs if use_precomputed else None
+            ),
+            leaf_particle_indices=nearfield_leaf_particle_indices,
+            leaf_particle_mask=nearfield_leaf_particle_mask,
+            precomputed_target_block_leaf_ids=(
+                precomputed_target_block_leaf_ids if use_target_blocks else None
+            ),
+            precomputed_target_block_source_leaf_ids=(
+                precomputed_target_block_source_leaf_ids if use_target_blocks else None
+            ),
+            precomputed_target_block_valid_mask=(
+                precomputed_target_block_valid_mask if use_target_blocks else None
+            ),
+            precomputed_target_block_offsets=(
+                precomputed_target_block_offsets if use_target_blocks else None
+            ),
+            precomputed_target_block_source_leaf_ids_padded=(
+                precomputed_target_block_source_leaf_ids_padded
+                if use_target_blocks_padded
+                else None
+            ),
+            precomputed_target_block_valid_mask_padded=(
+                precomputed_target_block_valid_mask_padded
+                if use_target_blocks_padded
+                else None
+            ),
+            delayed_scatter_chunks_per_superchunk=(
+                nearfield_delayed_scatter_chunks_per_superchunk
+            ),
+            chunk_scan_batch_size=nearfield_chunk_scan_batch_size,
+            chunk_scan_unroll=nearfield_chunk_scan_unroll,
+            superchunk_scan_unroll=nearfield_superchunk_scan_unroll,
+            sorted_scatter_hint=nearfield_sorted_scatter_hint,
+            grouped_sorted_scatter=nearfield_grouped_sorted_scatter,
+            superchunk_target_reduce=nearfield_superchunk_target_reduce,
+            disable_chunk_cond=nearfield_disable_chunk_cond,
+            target_leaf_batch_size=nearfield_target_leaf_batch_size,
+            target_block_tile_size=nearfield_target_block_tile_size,
+            target_block_tile_scan_unroll=nearfield_target_block_tile_scan_unroll,
+            target_block_batch_scan_unroll=nearfield_target_block_batch_scan_unroll,
+            target_block_overflow_fast_max_blocks=(
+                nearfield_target_block_overflow_fast_max_blocks
+            ),
+        )
+    else:
+        near = compute_leaf_p2p_accelerations(
+            tree,
+            neighbor_list,
+            positions,
+            masses,
+            G=G,
+            softening=softening,
+            max_leaf_size=max_leaf_size,
+            return_potential=return_potential,
+            nearfield_mode=nearfield_mode,
+            edge_chunk_size=nearfield_edge_chunk_size,
+            precomputed_target_leaf_ids=(
+                precomputed_target_leaf_ids if use_precomputed else None
+            ),
+            precomputed_source_leaf_ids=(
+                precomputed_source_leaf_ids
+                if (use_precomputed and use_precomputed_source)
+                else None
+            ),
+            precomputed_valid_pairs=(
+                precomputed_valid_pairs if use_precomputed else None
+            ),
+            precomputed_chunk_sort_indices=(
+                precomputed_chunk_sort_indices if use_precomputed_scatter else None
+            ),
+            precomputed_chunk_group_ids=(
+                precomputed_chunk_group_ids if use_precomputed_scatter else None
+            ),
+            precomputed_chunk_unique_indices=(
+                precomputed_chunk_unique_indices if use_precomputed_scatter else None
+            ),
+            node_ranges_override=nearfield_node_ranges,
+            leaf_nodes_override=nearfield_leaf_nodes,
+            neighbor_offsets_override=nearfield_offsets,
+            neighbor_indices_override=nearfield_neighbors,
+            neighbor_counts_override=nearfield_counts,
+            leaf_particle_indices_override=(
+                nearfield_leaf_particle_indices
+                if nearfield_leaf_particle_indices.shape[0] > 0
+                else None
+            ),
+            leaf_particle_mask_override=(
+                nearfield_leaf_particle_mask
+                if nearfield_leaf_particle_mask.shape[0] > 0
+                else None
+            ),
+        )
 
     far_grad, far_potential_pre, _ = _evaluate_local_expansions_for_particles(
         locals_data,
@@ -8014,7 +8810,6 @@ def _build_target_nearfield_source_index_matrix(
         empty_mask = jnp.zeros((0, 0), dtype=bool)
         return empty_idx, empty_mask
 
-    total_nodes = int(node_ranges.shape[0])
     num_leaves = int(leaf_nodes.shape[0])
     if num_leaves == 0:
         empty_idx = jnp.zeros((num_targets, 0), dtype=INDEX_DTYPE)
@@ -8052,22 +8847,29 @@ def _build_target_nearfield_source_index_matrix(
         empty_mask = jnp.zeros((num_targets, 0), dtype=bool)
         return empty_idx, empty_mask
 
-    leaf_lookup = jnp.full((total_nodes,), -1, dtype=INDEX_DTYPE)
-    leaf_lookup = leaf_lookup.at[leaf_nodes].set(
-        jnp.arange(num_leaves, dtype=INDEX_DTYPE)
-    )
-    nbr_counts = offsets[1:] - offsets[:-1]
-    max_nbr = int(jnp.max(nbr_counts))
-    if max_nbr > 0:
-        nbr_offsets = jnp.arange(max_nbr, dtype=INDEX_DTYPE)
-        nbr_idx = offsets[:-1, None] + nbr_offsets[None, :]
-        nbr_valid = nbr_offsets[None, :] < nbr_counts[:, None]
-        nbr_safe_idx = jnp.where(nbr_valid, nbr_idx, 0)
-        nbr_nodes = neighbors[nbr_safe_idx]
-        nbr_leaf_pos = leaf_lookup[nbr_nodes]
-        nbr_leaf_pos = jnp.where(nbr_valid, nbr_leaf_pos, -1)
+    if nearfield_interop.neighbor_leaf_positions is not None:
+        nbr_leaf_pos = jnp.asarray(
+            nearfield_interop.neighbor_leaf_positions,
+            dtype=INDEX_DTYPE,
+        )
     else:
-        nbr_leaf_pos = jnp.zeros((num_leaves, 0), dtype=INDEX_DTYPE)
+        total_nodes = int(node_ranges.shape[0])
+        leaf_lookup = jnp.full((total_nodes,), -1, dtype=INDEX_DTYPE)
+        leaf_lookup = leaf_lookup.at[leaf_nodes].set(
+            jnp.arange(num_leaves, dtype=INDEX_DTYPE)
+        )
+        nbr_counts = offsets[1:] - offsets[:-1]
+        max_nbr = int(jnp.max(nbr_counts))
+        if max_nbr > 0:
+            nbr_offsets = jnp.arange(max_nbr, dtype=INDEX_DTYPE)
+            nbr_idx = offsets[:-1, None] + nbr_offsets[None, :]
+            nbr_valid = nbr_offsets[None, :] < nbr_counts[:, None]
+            nbr_safe_idx = jnp.where(nbr_valid, nbr_idx, 0)
+            nbr_nodes = neighbors[nbr_safe_idx]
+            nbr_leaf_pos = leaf_lookup[nbr_nodes]
+            nbr_leaf_pos = jnp.where(nbr_valid, nbr_leaf_pos, -1)
+        else:
+            nbr_leaf_pos = jnp.zeros((num_leaves, 0), dtype=INDEX_DTYPE)
 
     self_leaf = jnp.arange(num_leaves, dtype=INDEX_DTYPE)[:, None]
     source_leaf_positions = jnp.concatenate([self_leaf, nbr_leaf_pos], axis=1)

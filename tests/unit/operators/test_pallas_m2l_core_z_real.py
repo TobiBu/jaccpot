@@ -27,8 +27,14 @@ def test_pallas_core_z_matches_pure_jax():
     )
 
     pure = np.asarray(m2l_core_z_real(multipoles, radii, order=order, use_pallas=False))
-    pallas = np.asarray(
-        m2l_core_z_real(multipoles, radii, order=order, use_pallas=True)
-    )
+    try:
+        pallas = np.asarray(
+            m2l_core_z_real(multipoles, radii, order=order, use_pallas=True)
+        )
+    except Exception as exc:  # pragma: no cover - backend/hardware dependent
+        msg = str(exc).lower()
+        if "warpgroup" in msg or "ptx" in msg or "triton" in msg:
+            pytest.skip(f"Pallas kernel unavailable on this GPU/runtime: {exc}")
+        raise
 
     assert np.allclose(pallas, pure, rtol=1.0e-5, atol=1.0e-5)

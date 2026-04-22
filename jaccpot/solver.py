@@ -383,6 +383,9 @@ class FastMultipoleMethod:
             resolved_m2l_impl = "rot_scale"
 
         preset_norm = _normalize_preset(preset)
+        if preset_norm is FMMPreset.LARGE_N_GPU and working_dtype is None:
+            # Large-N radix fast lane is currently specialized for fp32 kernels.
+            working_dtype = jnp.float32
         advanced_cfg = (
             _default_advanced_for_preset(preset_norm) if advanced is None else advanced
         )
@@ -406,6 +409,7 @@ class FastMultipoleMethod:
             expansion_basis=runtime_basis,
             basis_impl=basis_resolution.basis_impl,
             m2l_impl=resolved_m2l_impl,
+            runtime_path=str(legacy_kwargs.pop("runtime_path", "auto")),
             adaptive_order=adaptive_order,
             p_gears=p_gears,
             use_pallas=use_pallas,

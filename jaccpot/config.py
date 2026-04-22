@@ -6,6 +6,20 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import Any, Literal, Optional
 
+BASIS_DOC = "Preferred production basis is 'solidfmm'."
+FARFIELD_MODE_DOC = (
+    "For large_n_gpu production, far-field execution is canonicalized to "
+    "'pair_grouped'."
+)
+NEARFIELD_MODE_DOC = (
+    "For large_n_gpu production, near-field execution is canonicalized to "
+    "'bucketed'."
+)
+MEMORY_OBJECTIVE_DOC = (
+    "For large_n_gpu production, memory objective is canonicalized to "
+    "'minimum_memory'."
+)
+
 Basis = Literal["cartesian", "solidfmm", "complex", "real"]
 FarFieldMode = Literal["auto", "pair_grouped", "class_major"]
 NearFieldMode = Literal["auto", "baseline", "bucketed"]
@@ -59,7 +73,14 @@ class NearFieldConfig:
 
 @dataclass(frozen=True)
 class RuntimePolicyConfig:
-    """Execution-policy overrides for tree build and traversal."""
+    """Execution-policy overrides for tree build and traversal.
+
+    Notes:
+    - `runtime_path='legacy'` is deprecated and will be removed.
+    - For `preset='large_n_gpu'`, runtime policy is canonicalized to the
+      production low-memory fast path (minimum_memory + streamed pair_grouped
+      + bucketed nearfield).
+    """
 
     execution_backend: FMMExecutionBackend = "auto"
     host_refine_mode: str = "auto"

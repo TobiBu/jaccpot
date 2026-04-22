@@ -451,7 +451,7 @@ def prepare_solidfmm_complex_upward_sweep(
     centers = jnp.asarray(centers, dtype=positions_sorted.dtype)
 
     if max_leaf_size is None:
-        num_internal = int(tree.num_internal_nodes)
+        num_internal = int(jnp.asarray(tree.left_child).shape[0])
         leaf_ranges = jax.device_get(tree.node_ranges)[num_internal:]
         if leaf_ranges.shape[0] == 0:
             max_leaf_size = 0
@@ -459,7 +459,7 @@ def prepare_solidfmm_complex_upward_sweep(
             counts = leaf_ranges[:, 1] - leaf_ranges[:, 0] + 1
             max_leaf_size = int(jnp.max(counts))
 
-    num_internal = int(tree.num_internal_nodes)
+    num_internal = int(jnp.asarray(tree.left_child).shape[0])
     total_nodes = int(tree.parent.shape[0])
     num_leaves = max(total_nodes - num_internal, 0)
     level_offsets = get_level_offsets(tree)
@@ -582,7 +582,7 @@ def prepare_solidfmm_complex_source_motion_multipoles(
         )
 
     if max_leaf_size is None:
-        num_internal = int(tree.num_internal_nodes)
+        num_internal = int(jnp.asarray(tree.left_child).shape[0])
         leaf_ranges = jax.device_get(tree.node_ranges)[num_internal:]
         if leaf_ranges.shape[0] == 0:
             max_leaf_size = 0
@@ -590,7 +590,7 @@ def prepare_solidfmm_complex_source_motion_multipoles(
             counts = leaf_ranges[:, 1] - leaf_ranges[:, 0] + 1
             max_leaf_size = int(jnp.max(counts))
 
-    num_internal = int(tree.num_internal_nodes)
+    num_internal = int(jnp.asarray(tree.left_child).shape[0])
     total_nodes = int(tree.parent.shape[0])
     source_motion_packed_leaf = _p2m_leaves_complex_source_motion(
         jnp.asarray(tree.node_ranges, dtype=INDEX_DTYPE),

@@ -38,11 +38,99 @@ class OctreeExecutionData(NamedTuple):
     box_max_extents: Array
 
 
+def _build_fallback_octree_execution_data(tree: object) -> OctreeExecutionData:
+    """Build a consistent octree execution view from radix topology fields."""
+
+    parent = jnp.asarray(getattr(tree, "parent"), dtype=INDEX_DTYPE)
+    left_child = jnp.asarray(getattr(tree, "left_child"), dtype=INDEX_DTYPE)
+    right_child = jnp.asarray(getattr(tree, "right_child"), dtype=INDEX_DTYPE)
+    node_ranges = jnp.asarray(getattr(tree, "node_ranges"), dtype=INDEX_DTYPE)
+    bounds_min = jnp.asarray(getattr(tree, "bounds_min"))
+    bounds_max = jnp.asarray(getattr(tree, "bounds_max"))
+    node_codes = jnp.asarray(getattr(tree, "morton_codes"), dtype=jnp.uint64)
+
+    num_nodes = int(parent.shape[0])
+    num_internal = int(left_child.shape[0])
+    num_leaves = max(0, num_nodes - num_internal)
+
+    children = jnp.full((num_nodes, 8), -1, dtype=INDEX_DTYPE)
+    if num_internal > 0:
+        children = children.at[:num_internal, 0].set(left_child[:num_internal])
+        children = children.at[:num_internal, 1].set(right_child[:num_internal])
+    child_counts = jnp.sum(children >= 0, axis=1, dtype=INDEX_DTYPE)
+
+    depth = jnp.zeros((num_nodes,), dtype=INDEX_DTYPE)
+    if num_nodes > 0:
+        for idx in range(1, num_nodes):
+            p = int(parent[idx])
+            depth = depth.at[idx].set(
+                depth[p] + 1 if p >= 0 else jnp.asarray(0, dtype=INDEX_DTYPE)
+            )
+    num_levels_int = (int(jnp.max(depth)) + 1) if num_nodes > 0 else 1
+    num_levels = jnp.asarray(num_levels_int, dtype=INDEX_DTYPE)
+    nodes_by_level = jnp.argsort(depth, stable=True).astype(INDEX_DTYPE)
+    level_offsets = jnp.zeros((num_levels_int + 1,), dtype=INDEX_DTYPE)
+    if num_nodes > 0:
+        counts = jnp.bincount(depth, length=num_levels_int).astype(INDEX_DTYPE)
+        level_offsets = level_offsets.at[1:].set(jnp.cumsum(counts, dtype=INDEX_DTYPE))
+
+    leaf_mask = jnp.arange(num_nodes, dtype=INDEX_DTYPE) >= int(num_internal)
+    leaf_nodes = jnp.arange(num_internal, num_nodes, dtype=INDEX_DTYPE)
+
+    radix_node_to_oct = jnp.arange(num_nodes, dtype=INDEX_DTYPE)
+    radix_leaf_to_oct = jnp.arange(num_internal, num_nodes, dtype=INDEX_DTYPE)
+    oct_to_radix_node = jnp.arange(num_nodes, dtype=INDEX_DTYPE)
+    oct_to_radix_leaf = jnp.full((num_nodes,), -1, dtype=INDEX_DTYPE)
+    if num_leaves > 0:
+        oct_to_radix_leaf = oct_to_radix_leaf.at[num_internal:num_nodes].set(
+            jnp.arange(num_leaves, dtype=INDEX_DTYPE)
+        )
+
+    global_center = jnp.asarray((bounds_min + bounds_max) * 0.5)
+    global_half_extent = jnp.asarray((bounds_max - bounds_min) * 0.5)
+    box_centers = jnp.broadcast_to(global_center[None, :], (num_nodes, 3))
+    box_half_extents = jnp.broadcast_to(global_half_extent[None, :], (num_nodes, 3))
+    box_radii = jnp.broadcast_to(
+        jnp.linalg.norm(global_half_extent)[None], (num_nodes,)
+    )
+    box_max_extents = jnp.broadcast_to(jnp.max(global_half_extent)[None], (num_nodes,))
+
+    return OctreeExecutionData(
+        valid_mask=jnp.ones((num_nodes,), dtype=bool),
+        parent=parent,
+        children=children,
+        child_counts=child_counts,
+        node_codes=node_codes,
+        node_depths=depth,
+        node_ranges=node_ranges,
+        nodes_by_level=nodes_by_level,
+        level_offsets=level_offsets,
+        num_levels=num_levels,
+        leaf_mask=leaf_mask,
+        leaf_nodes=leaf_nodes,
+        radix_node_to_oct=radix_node_to_oct,
+        radix_leaf_to_oct=radix_leaf_to_oct,
+        oct_to_radix_node=oct_to_radix_node,
+        oct_to_radix_leaf=oct_to_radix_leaf,
+        num_valid_nodes=jnp.asarray(num_nodes, dtype=INDEX_DTYPE),
+        num_leaf_nodes=jnp.asarray(num_leaves, dtype=INDEX_DTYPE),
+        box_centers=box_centers,
+        box_half_extents=box_half_extents,
+        box_radii=box_radii,
+        box_max_extents=box_max_extents,
+    )
+
+
 def build_octree_execution_data(tree: object) -> Optional[OctreeExecutionData]:
     """Return a padded octree execution view when explicit octree fields exist."""
     if not hasattr(tree, "oct_valid_mask"):
         return None
     view = build_explicit_octree_traversal_view(tree)
+    root_oct = int(jnp.asarray(view.radix_node_to_oct, dtype=INDEX_DTYPE)[0])
+    tree_root_range = jnp.asarray(getattr(tree, "node_ranges"))[0]
+    oct_root_range = jnp.asarray(view.node_ranges)[root_oct]
+    if not bool(jnp.all(tree_root_range == oct_root_range)):
+        return _build_fallback_octree_execution_data(tree)
 
     return OctreeExecutionData(
         valid_mask=view.valid_mask,
