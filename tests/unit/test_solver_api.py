@@ -1752,7 +1752,10 @@ def test_prepare_state_streamed_uses_compact_far_pairs_without_node_interactions
         assert call_kwargs[-1]["return_interactions"] is False
     else:
         # Dedicated large-N prepare path bypasses generic interaction building.
-        assert str(getattr(state, "execution_backend", "")).strip().lower() == "large_n"
+        backend = str(getattr(state, "execution_backend", "")).strip().lower()
+        # CPU runs may resolve LARGE_N_GPU preset to radix while still bypassing
+        # generic interaction building.
+        assert backend in {"large_n", "radix"}
     assert state.interactions is None
     assert int(state.downward.interactions.sources.shape[0]) == 0
 
