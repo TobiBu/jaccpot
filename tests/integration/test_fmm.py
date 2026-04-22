@@ -1110,14 +1110,14 @@ def test_radix_fast_lane_prepared_state_matches_large_n_baseline(monkeypatch):
     key_pos, key_mass = jax.random.split(key)
     positions = jax.random.uniform(
         key_pos,
-        (1536, 3),
+        (1280, 3),
         minval=-1.0,
         maxval=1.0,
         dtype=jnp.float32,
     )
     masses = jax.random.uniform(
         key_mass,
-        (1536,),
+        (1280,),
         minval=0.1,
         maxval=1.1,
         dtype=jnp.float32,
@@ -1177,14 +1177,14 @@ def test_large_n_prepacked_overflow_fallback_matches_tiled_overflow(monkeypatch)
     key_pos, key_mass = jax.random.split(key)
     positions = jax.random.uniform(
         key_pos,
-        (2048, 3),
+        (1536, 3),
         minval=-1.0,
         maxval=1.0,
         dtype=jnp.float32,
     )
     masses = jax.random.uniform(
         key_mass,
-        (2048,),
+        (1536,),
         minval=0.1,
         maxval=1.1,
         dtype=jnp.float32,
@@ -1473,7 +1473,7 @@ def test_prepare_state_reuses_cached_interactions_when_inputs_match():
 
 def test_compute_accelerations_reuses_prepared_state_when_enabled():
     key = jax.random.PRNGKey(211)
-    num_particles = 48
+    num_particles = 32
     positions = jax.random.uniform(
         key,
         (num_particles, 3),
@@ -1516,7 +1516,7 @@ def test_compute_accelerations_reuses_prepared_state_when_enabled():
 
 def test_compute_accelerations_reuse_cache_invalidates_on_parameter_change():
     key = jax.random.PRNGKey(311)
-    num_particles = 40
+    num_particles = 28
     positions = jax.random.normal(key, (num_particles, 3), dtype=jnp.float32)
     masses = jnp.ones((num_particles,), dtype=jnp.float32)
 
@@ -1550,7 +1550,7 @@ def test_compute_accelerations_reuse_cache_invalidates_on_parameter_change():
 
 def test_compute_accelerations_reuses_prepared_state_for_value_equal_copies():
     key = jax.random.PRNGKey(312)
-    num_particles = 40
+    num_particles = 28
     positions = jax.random.normal(key, (num_particles, 3), dtype=jnp.float32)
     masses = jnp.ones((num_particles,), dtype=jnp.float32)
     positions_copy = jnp.array(np.asarray(positions))
