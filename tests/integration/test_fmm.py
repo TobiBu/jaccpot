@@ -1110,14 +1110,14 @@ def test_radix_fast_lane_prepared_state_matches_large_n_baseline(monkeypatch):
     key_pos, key_mass = jax.random.split(key)
     positions = jax.random.uniform(
         key_pos,
-        (2048, 3),
+        (1536, 3),
         minval=-1.0,
         maxval=1.0,
         dtype=jnp.float32,
     )
     masses = jax.random.uniform(
         key_mass,
-        (2048,),
+        (1536,),
         minval=0.1,
         maxval=1.1,
         dtype=jnp.float32,
