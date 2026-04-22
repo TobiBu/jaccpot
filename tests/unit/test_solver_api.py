@@ -508,7 +508,9 @@ def test_prepare_state_records_resolved_execution_backend():
     assert state.execution_backend == "radix"
 
 
-def test_explicit_octree_execution_backend_prepares_state(octree_backend_prepared_state):
+def test_explicit_octree_execution_backend_prepares_state(
+    octree_backend_prepared_state,
+):
     _, state = octree_backend_prepared_state
 
     assert state.execution_backend == "octree"

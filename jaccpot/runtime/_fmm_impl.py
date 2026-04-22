@@ -4592,7 +4592,9 @@ class FastMultipoleMethod:
             self._is_large_n_gpu_production_profile()
             and not bool(self._explicit_nearfield_mode)
         )
-        if (not auto_policy_enabled) or str(nearfield_mode).strip().lower() != "bucketed":
+        if (not auto_policy_enabled) or str(
+            nearfield_mode
+        ).strip().lower() != "bucketed":
             return base_chunk
 
         n = int(num_particles)
