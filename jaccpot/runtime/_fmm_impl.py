@@ -3187,7 +3187,6 @@ class FastMultipoleMethod:
         masses_arr = jnp.asarray(masses)
         input_dtype = positions_arr.dtype
 
-
         if positions_arr.ndim != 2 or positions_arr.shape[1] != 3:
             raise ValueError("positions must have shape (N, 3)")
         if masses_arr.shape != (positions_arr.shape[0],):

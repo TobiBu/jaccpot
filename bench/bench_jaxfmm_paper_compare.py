@@ -179,7 +179,9 @@ def _block_until_ready(value: Any) -> Any:
     return jax.tree_util.tree_map(_maybe_block, value)
 
 
-def _time_min_repeat(fn: Callable[[], Any], *, warmup: int, repeats: int) -> tuple[float, float, float]:
+def _time_min_repeat(
+    fn: Callable[[], Any], *, warmup: int, repeats: int
+) -> tuple[float, float, float]:
     if warmup < 0:
         raise ValueError("warmup must be non-negative")
     if repeats <= 0:
@@ -196,7 +198,11 @@ def _time_min_repeat(fn: Callable[[], Any], *, warmup: int, repeats: int) -> tup
         end = time.perf_counter()
         samples.append(end - start)
 
-    return float(min(samples)), float(statistics.mean(samples)), float(statistics.pstdev(samples))
+    return (
+        float(min(samples)),
+        float(statistics.mean(samples)),
+        float(statistics.pstdev(samples)),
+    )
 
 
 def _n_values(min_exp: int, max_exp: int, steps: int) -> list[int]:
@@ -213,7 +219,9 @@ def _n_values(min_exp: int, max_exp: int, steps: int) -> list[int]:
     return out
 
 
-def _distribution(key: jax.Array, n: int, name: str, dtype: jnp.dtype) -> tuple[jax.Array, jax.Array]:
+def _distribution(
+    key: jax.Array, n: int, name: str, dtype: jnp.dtype
+) -> tuple[jax.Array, jax.Array]:
     k1, k2 = jax.random.split(key)
     if name == "uniform_cube":
         pts = jax.random.uniform(k1, (n, 3), minval=-1.0, maxval=1.0, dtype=dtype)
