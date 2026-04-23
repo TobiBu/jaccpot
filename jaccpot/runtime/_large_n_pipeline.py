@@ -418,7 +418,6 @@ def prepare_large_n_state(
                 target_leaf_block_counts = (
                     target_block_offsets[1:] - target_block_offsets[:-1]
                 )
-
     radix_fast_payload = None
     if (
         bool(execution_config.radix_fast_lane)
