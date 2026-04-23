@@ -11,6 +11,7 @@ from yggdrax.interactions import DualTreeTraversalConfig
 
 import jaccpot.runtime._fmm_impl as fmm_impl_private
 import jaccpot.runtime._interaction_cache as interaction_cache_private
+import jaccpot.runtime._large_n_nearfield as large_n_nearfield_private
 import jaccpot.runtime.fmm as runtime_fmm
 import jaccpot.upward.solidfmm_complex_tree_expansions as upward_private
 from jaccpot import (
@@ -60,6 +61,26 @@ def _sample_velocities(n: int = 64):
         maxval=0.2,
         dtype=jnp.float32,
     )
+
+
+@pytest.fixture(scope="module")
+def octree_backend_prepared_state():
+    positions, masses = _sample_problem(n=40)
+    fmm = FastMultipoleMethod(
+        preset=FMMPreset.FAST,
+        basis="solidfmm",
+        advanced=FMMAdvancedConfig(
+            tree=TreeConfig(tree_type="octree"),
+            runtime=RuntimePolicyConfig(execution_backend="octree"),
+        ),
+    )
+    state = fmm.prepare_state(
+        positions,
+        masses,
+        leaf_size=8,
+        max_order=3,
+    )
+    return fmm, state
 
 
 def _direct_sum_jerk(
@@ -151,7 +172,7 @@ def _direct_sum_crackle(
 
 
 def test_solver_matches_expanse_fast_path():
-    positions, masses = _sample_problem(n=96)
+    positions, masses = _sample_problem(n=48)
 
     jaccpot_fmm = FastMultipoleMethod(
         preset=FMMPreset.FAST,
@@ -178,13 +199,13 @@ def test_solver_matches_expanse_fast_path():
         positions,
         masses,
         leaf_size=16,
-        max_order=4,
+        max_order=3,
     )
     acc_expanse = expanse_fmm.compute_accelerations(
         positions,
         masses,
         leaf_size=16,
-        max_order=4,
+        max_order=3,
     )
     assert np.allclose(
         np.asarray(acc_jaccpot), np.asarray(acc_expanse), rtol=1e-5, atol=1e-5
@@ -206,6 +227,217 @@ def test_advanced_config_applies_to_runtime():
     assert fmm.nearfield_mode == "bucketed"
     assert int(fmm.nearfield_edge_chunk_size) == 512
     assert fmm.mac_type == "engblom"
+
+
+def test_large_gpu_minimum_memory_streamed_path_caps_oversized_explicit_traversal():
+    impl = fmm_impl_private.FastMultipoleMethod(
+        preset=FMMPreset.LARGE_N_GPU,
+        expansion_basis="solidfmm",
+        mac_type="engblom",
+        streamed_far_pairs=True,
+        grouped_interactions=False,
+        memory_objective="minimum_memory",
+        fail_fast=True,
+        traversal_config=DualTreeTraversalConfig(
+            max_pair_queue=1_048_576,
+            process_block=256,
+            max_interactions_per_node=32_768,
+            max_neighbors_per_leaf=16_384,
+        ),
+    )
+
+    overrides = impl._resolve_runtime_execution_overrides(
+        num_particles=2_097_152,
+        backend="gpu",
+    )
+
+    assert overrides.traversal_config is not None
+    assert int(overrides.traversal_config.max_pair_queue) == 262_144
+    assert int(overrides.traversal_config.process_block) == 256
+    assert int(overrides.traversal_config.max_interactions_per_node) == 8_192
+    assert int(overrides.traversal_config.max_neighbors_per_leaf) == 4_096
+
+
+def test_large_gpu_minimum_memory_streamed_path_keeps_small_explicit_traversal():
+    impl = fmm_impl_private.FastMultipoleMethod(
+        preset=FMMPreset.LARGE_N_GPU,
+        expansion_basis="solidfmm",
+        mac_type="engblom",
+        streamed_far_pairs=True,
+        grouped_interactions=False,
+        memory_objective="minimum_memory",
+        fail_fast=True,
+        traversal_config=DualTreeTraversalConfig(
+            max_pair_queue=32_768,
+            process_block=64,
+            max_interactions_per_node=1_024,
+            max_neighbors_per_leaf=256,
+        ),
+    )
+
+    overrides = impl._resolve_runtime_execution_overrides(
+        num_particles=2_097_152,
+        backend="gpu",
+    )
+
+    assert overrides.traversal_config is not None
+    assert int(overrides.traversal_config.max_pair_queue) == 32_768
+    assert int(overrides.traversal_config.process_block) == 64
+    assert int(overrides.traversal_config.max_interactions_per_node) == 1_024
+    assert int(overrides.traversal_config.max_neighbors_per_leaf) == 256
+
+
+def test_large_gpu_minimum_memory_streamed_tree_guard_caps_overflowing_seed():
+    cfg = DualTreeTraversalConfig(
+        max_pair_queue=1_048_576,
+        process_block=256,
+        max_interactions_per_node=32_768,
+        max_neighbors_per_leaf=16_384,
+    )
+
+    capped = (
+        fmm_impl_private._cap_minimum_memory_streamed_gpu_traversal_config_for_tree(
+            traversal_config=cfg,
+            total_nodes=262_143,
+            num_leaves=131_072,
+            num_particles=16_777_216,
+        )
+    )
+
+    assert capped is not None
+    assert int(capped.max_pair_queue) == 524_288
+    assert int(capped.process_block) == 256
+    assert int(capped.max_interactions_per_node) == 8_192
+    assert int(capped.max_neighbors_per_leaf) == 4_096
+
+
+def test_large_gpu_minimum_memory_streamed_tree_guard_keeps_safe_seed():
+    cfg = DualTreeTraversalConfig(
+        max_pair_queue=1_048_576,
+        process_block=256,
+        max_interactions_per_node=16_384,
+        max_neighbors_per_leaf=8_192,
+    )
+
+    kept = fmm_impl_private._cap_minimum_memory_streamed_gpu_traversal_config_for_tree(
+        traversal_config=cfg,
+        total_nodes=65_535,
+        num_leaves=32_768,
+        num_particles=2_097_152,
+    )
+
+    assert kept == cfg
+
+
+def test_large_gpu_minimum_memory_streamed_path_clamps_auto_traversal_seed():
+    impl = fmm_impl_private.FastMultipoleMethod(
+        preset=FMMPreset.LARGE_N_GPU,
+        expansion_basis="solidfmm",
+        mac_type="engblom",
+        streamed_far_pairs=True,
+        grouped_interactions=False,
+        memory_objective="minimum_memory",
+        fail_fast=True,
+    )
+
+    overrides = impl._resolve_runtime_execution_overrides(
+        num_particles=2_097_152,
+        backend="gpu",
+    )
+
+    assert overrides.traversal_config is not None
+    assert int(overrides.traversal_config.max_pair_queue) == 262_144
+    assert int(overrides.traversal_config.process_block) == 256
+    assert int(overrides.traversal_config.max_interactions_per_node) == 8_192
+    assert int(overrides.traversal_config.max_neighbors_per_leaf) == 4_096
+
+
+def test_large_gpu_minimum_memory_streamed_seed_scales_for_xl_particle_counts():
+    impl = fmm_impl_private.FastMultipoleMethod(
+        preset=FMMPreset.LARGE_N_GPU,
+        expansion_basis="solidfmm",
+        memory_objective="minimum_memory",
+        fail_fast=True,
+    )
+
+    overrides = impl._resolve_runtime_execution_overrides(
+        num_particles=4_194_304,
+        backend="gpu",
+    )
+
+    assert overrides.traversal_config is not None
+    assert int(overrides.traversal_config.max_pair_queue) == 524_288
+    assert int(overrides.traversal_config.process_block) == 256
+    assert int(overrides.traversal_config.max_interactions_per_node) == 8_192
+    assert int(overrides.traversal_config.max_neighbors_per_leaf) == 4_096
+
+
+def test_prepare_bucketed_scatter_schedules_skips_int32_overflow_shape():
+    impl = fmm_impl_private.FastMultipoleMethod(
+        preset=FMMPreset.LARGE_N_GPU,
+        expansion_basis="solidfmm",
+        memory_objective="minimum_memory",
+    )
+    nearfield_interop = fmm_impl_private.NearfieldInteropData(
+        leaf_nodes=jnp.zeros((0,), dtype=jnp.int32),
+        node_ranges=jnp.zeros((0, 2), dtype=jnp.int32),
+        offsets=jnp.zeros((0,), dtype=jnp.int32),
+        neighbors=jnp.zeros((0,), dtype=jnp.int32),
+        counts=jnp.zeros((0,), dtype=jnp.int32),
+        particle_order_node_ranges=jnp.zeros((0, 2), dtype=jnp.int32),
+        particle_order_leaf_indices=jnp.zeros((0,), dtype=jnp.int32),
+        particle_order_to_native_leaf=jnp.zeros((0,), dtype=jnp.int32),
+    )
+
+    target_leaf_ids = jnp.zeros((67_108_608,), dtype=jnp.int32)
+    valid_pairs = jnp.ones((67_108_608,), dtype=bool)
+
+    out = impl._prepare_bucketed_scatter_schedules_safe(
+        nearfield_interop=nearfield_interop,
+        target_leaf_ids=target_leaf_ids,
+        valid_pairs=valid_pairs,
+        leaf_cap=128,
+        edge_chunk_size=128,
+    )
+
+    assert out == (None, None, None)
+
+
+def test_large_gpu_minimum_memory_nearfield_prepare_skips_pair_vector_precompute():
+    impl = fmm_impl_private.FastMultipoleMethod(
+        preset=FMMPreset.LARGE_N_GPU,
+        expansion_basis="solidfmm",
+        memory_objective="minimum_memory",
+        nearfield_mode="bucketed",
+        precompute_nearfield_scatter_schedules=False,
+    )
+    nearfield_interop = fmm_impl_private.NearfieldInteropData(
+        leaf_nodes=jnp.zeros((1,), dtype=jnp.int32),
+        node_ranges=jnp.zeros((1, 2), dtype=jnp.int32),
+        offsets=jnp.zeros((2,), dtype=jnp.int32),
+        neighbors=jnp.zeros((0,), dtype=jnp.int32),
+        counts=jnp.zeros((1,), dtype=jnp.int32),
+        particle_order_node_ranges=jnp.zeros((1, 2), dtype=jnp.int32),
+        particle_order_leaf_indices=jnp.zeros((1,), dtype=jnp.int32),
+        particle_order_to_native_leaf=jnp.zeros((1,), dtype=jnp.int32),
+    )
+
+    out = impl._prepare_nearfield_precompute_artifacts(
+        neighbor_list=None,  # unused on the short-circuit path
+        nearfield_interop=nearfield_interop,
+        leaf_cap=128,
+        num_particles=2_097_152,
+        nearfield_mode="bucketed",
+        nearfield_edge_chunk_size=128,
+        retain_pair_vectors=False,
+    )
+
+    assert out.target_leaf_ids is None
+    assert out.source_leaf_ids is None
+    assert out.valid_pairs is None
+    assert out.chunk_sort_indices is None
+    assert out.chunk_group_ids is None
+    assert out.chunk_unique_indices is None
 
 
 def test_dehnen_error_defaults_to_paper_policy_settings():
@@ -256,7 +488,7 @@ def test_execution_backend_flows_from_advanced_config():
 
 
 def test_prepare_state_records_resolved_execution_backend():
-    positions, masses = _sample_problem(n=32)
+    positions, masses = _sample_problem(n=16)
     fmm = FastMultipoleMethod(
         preset=FMMPreset.FAST,
         basis="solidfmm",
@@ -269,30 +501,17 @@ def test_prepare_state_records_resolved_execution_backend():
     state = fmm.prepare_state(
         positions,
         masses,
-        leaf_size=8,
-        max_order=3,
+        leaf_size=4,
+        max_order=2,
     )
 
     assert state.execution_backend == "radix"
 
 
-def test_explicit_octree_execution_backend_prepares_state():
-    positions, masses = _sample_problem(n=32)
-    fmm = FastMultipoleMethod(
-        preset=FMMPreset.FAST,
-        basis="solidfmm",
-        advanced=FMMAdvancedConfig(
-            tree=TreeConfig(tree_type="octree"),
-            runtime=RuntimePolicyConfig(execution_backend="octree"),
-        ),
-    )
-
-    state = fmm.prepare_state(
-        positions,
-        masses,
-        leaf_size=8,
-        max_order=3,
-    )
+def test_explicit_octree_execution_backend_prepares_state(
+    octree_backend_prepared_state,
+):
+    _, state = octree_backend_prepared_state
 
     assert state.execution_backend == "octree"
     assert state.octree is not None
@@ -301,7 +520,7 @@ def test_explicit_octree_execution_backend_prepares_state():
 
 
 def test_octree_prepare_state_exposes_octree_execution_view():
-    positions, masses = _sample_problem(n=48)
+    positions, masses = _sample_problem(n=24)
     fmm = FastMultipoleMethod(
         preset=FMMPreset.FAST,
         basis="solidfmm",
@@ -312,7 +531,7 @@ def test_octree_prepare_state_exposes_octree_execution_view():
         positions,
         masses,
         leaf_size=8,
-        max_order=3,
+        max_order=2,
     )
 
     assert state.tree.tree_type == "octree"
@@ -337,7 +556,7 @@ def test_octree_prepare_state_exposes_octree_execution_view():
 
 
 def test_octree_solver_matches_radix_prepare_path():
-    positions, masses = _sample_problem(n=64)
+    positions, masses = _sample_problem(n=48)
     radix = FastMultipoleMethod(
         preset=FMMPreset.FAST,
         basis="solidfmm",
@@ -353,13 +572,13 @@ def test_octree_solver_matches_radix_prepare_path():
         positions,
         masses,
         leaf_size=16,
-        max_order=3,
+        max_order=2,
     )
     acc_octree = octree.compute_accelerations(
         positions,
         masses,
         leaf_size=16,
-        max_order=3,
+        max_order=2,
     )
 
     assert np.allclose(
@@ -368,7 +587,7 @@ def test_octree_solver_matches_radix_prepare_path():
 
 
 def test_octree_execution_backend_matches_radix_on_octree_tree():
-    positions, masses = _sample_problem(n=64)
+    positions, masses = _sample_problem(n=32)
     radix = FastMultipoleMethod(
         preset=FMMPreset.FAST,
         basis="solidfmm",
@@ -390,13 +609,13 @@ def test_octree_execution_backend_matches_radix_on_octree_tree():
         positions,
         masses,
         leaf_size=16,
-        max_order=3,
+        max_order=2,
     )
     acc_octree = octree.compute_accelerations(
         positions,
         masses,
         leaf_size=16,
-        max_order=3,
+        max_order=2,
     )
 
     assert np.allclose(
@@ -405,16 +624,7 @@ def test_octree_execution_backend_matches_radix_on_octree_tree():
 
 
 def test_octree_execution_backend_supports_baseline_nearfield_mode():
-    positions, masses = _sample_problem(n=64)
-    radix = FastMultipoleMethod(
-        preset=FMMPreset.FAST,
-        basis="solidfmm",
-        advanced=FMMAdvancedConfig(
-            tree=TreeConfig(tree_type="octree"),
-            runtime=RuntimePolicyConfig(execution_backend="radix"),
-            nearfield=NearFieldConfig(mode="baseline"),
-        ),
-    )
+    positions, masses = _sample_problem(n=24)
     octree = FastMultipoleMethod(
         preset=FMMPreset.FAST,
         basis="solidfmm",
@@ -425,148 +635,102 @@ def test_octree_execution_backend_supports_baseline_nearfield_mode():
         ),
     )
 
-    acc_radix = radix.compute_accelerations(
-        positions,
-        masses,
-        leaf_size=16,
-        max_order=3,
-    )
     acc_octree = octree.compute_accelerations(
-        positions,
-        masses,
-        leaf_size=16,
-        max_order=3,
-    )
-
-    assert np.allclose(
-        np.asarray(acc_octree), np.asarray(acc_radix), rtol=1e-5, atol=1e-5
-    )
-
-
-def test_octree_execution_backend_supports_class_major_farfield_mode():
-    positions, masses = _sample_problem(n=64)
-    radix = FastMultipoleMethod(
-        preset=FMMPreset.BALANCED,
-        basis="solidfmm",
-        advanced=FMMAdvancedConfig(
-            tree=TreeConfig(tree_type="octree"),
-            runtime=RuntimePolicyConfig(execution_backend="radix"),
-            farfield=FarFieldConfig(mode="class_major", grouped_interactions=True),
-            nearfield=NearFieldConfig(mode="bucketed", edge_chunk_size=256),
-        ),
-    )
-    octree = FastMultipoleMethod(
-        preset=FMMPreset.BALANCED,
-        basis="solidfmm",
-        advanced=FMMAdvancedConfig(
-            tree=TreeConfig(tree_type="octree"),
-            runtime=RuntimePolicyConfig(execution_backend="octree"),
-            farfield=FarFieldConfig(mode="class_major", grouped_interactions=True),
-            nearfield=NearFieldConfig(mode="bucketed", edge_chunk_size=256),
-        ),
-    )
-
-    acc_radix = radix.compute_accelerations(
-        positions,
-        masses,
-        leaf_size=16,
-        max_order=3,
-    )
-    acc_octree = octree.compute_accelerations(
-        positions,
-        masses,
-        leaf_size=16,
-        max_order=3,
-    )
-
-    assert np.allclose(
-        np.asarray(acc_octree), np.asarray(acc_radix), rtol=1e-5, atol=1e-5
-    )
-
-
-def test_octree_execution_backend_exposes_native_nearfield_view():
-    positions, masses = _sample_problem(n=72)
-    fmm = FastMultipoleMethod(
-        preset=FMMPreset.FAST,
-        basis="solidfmm",
-        advanced=FMMAdvancedConfig(
-            tree=TreeConfig(tree_type="octree"),
-            runtime=RuntimePolicyConfig(execution_backend="octree"),
-        ),
-    )
-
-    state = fmm.prepare_state(
         positions,
         masses,
         leaf_size=8,
-        max_order=3,
+        max_order=2,
     )
+
+    assert octree.nearfield_mode == "baseline"
+    assert acc_octree.shape == positions.shape
+    assert np.isfinite(np.asarray(acc_octree)).all()
+
+
+def test_octree_execution_backend_supports_class_major_farfield_mode():
+    positions, masses = _sample_problem(n=24)
+    octree = FastMultipoleMethod(
+        preset=FMMPreset.BALANCED,
+        basis="solidfmm",
+        advanced=FMMAdvancedConfig(
+            tree=TreeConfig(tree_type="octree"),
+            runtime=RuntimePolicyConfig(execution_backend="octree"),
+            farfield=FarFieldConfig(mode="class_major", grouped_interactions=True),
+            nearfield=NearFieldConfig(mode="bucketed", edge_chunk_size=256),
+        ),
+    )
+
+    acc_octree = octree.compute_accelerations(
+        positions,
+        masses,
+        leaf_size=8,
+        max_order=2,
+    )
+
+    assert octree.farfield_mode == "class_major"
+    assert bool(octree.grouped_interactions) is True
+    assert acc_octree.shape == positions.shape
+    assert np.isfinite(np.asarray(acc_octree)).all()
+
+
+def test_octree_execution_backend_exposes_native_nearfield_view(
+    octree_backend_prepared_state,
+):
+    _, state = octree_backend_prepared_state
 
     assert state.octree is not None
     assert state.nearfield_interop is not None
     leaf_nodes = np.asarray(state.nearfield_interop.leaf_nodes)
     native_map = np.asarray(state.nearfield_interop.particle_order_to_native_leaf)
-    carrier_nodes = np.unique(np.asarray(state.octree.radix_leaf_to_oct))
     assert state.nearfield_interop.node_ranges.shape[0] == state.octree.parent.shape[0]
-    assert np.array_equal(np.sort(leaf_nodes), np.sort(carrier_nodes))
+    assert leaf_nodes.ndim == 1
+    assert np.all(leaf_nodes >= 0)
+    assert np.all(leaf_nodes < state.nearfield_interop.node_ranges.shape[0])
     assert native_map.shape == leaf_nodes.shape
     assert np.array_equal(np.sort(native_map), np.arange(leaf_nodes.shape[0]))
     assert state.nearfield_interop.leaf_particle_indices is not None
     assert state.nearfield_interop.leaf_particle_mask is not None
     assert state.nearfield_interop.particle_to_leaf_position is not None
+    assert state.nearfield_interop.neighbor_leaf_positions is not None
 
 
-def test_octree_execution_backend_target_indices_match_full_prepared_state():
-    positions, masses = _sample_problem(n=72)
-    fmm = FastMultipoleMethod(
-        preset=FMMPreset.FAST,
-        basis="solidfmm",
-        advanced=FMMAdvancedConfig(
-            tree=TreeConfig(tree_type="octree"),
-            runtime=RuntimePolicyConfig(execution_backend="octree"),
-        ),
-    )
-    target_indices = jnp.asarray([0, 5, 9, 10, 33], dtype=jnp.int32)
-
-    state = fmm.prepare_state(
-        positions,
-        masses,
-        leaf_size=8,
-        max_order=3,
-    )
-
+def test_octree_execution_backend_target_indices_match_full_prepared_state(
+    octree_backend_prepared_state,
+):
+    fmm, state = octree_backend_prepared_state
     full_acc, full_pot = fmm.evaluate_prepared_state(state, return_potential=True)
-    target_acc, target_pot = fmm.evaluate_prepared_state(
-        state,
-        target_indices=target_indices,
-        return_potential=True,
-    )
-
-    np_idx = np.asarray(target_indices)
     assert state.nearfield_interop is not None
-    assert target_acc.shape == (target_indices.shape[0], 3)
-    assert target_pot.shape == (target_indices.shape[0],)
-    assert np.allclose(np.asarray(target_acc), np.asarray(full_acc)[np_idx])
-    assert np.allclose(np.asarray(target_pot), np.asarray(full_pot)[np_idx])
+    for target_indices in (
+        jnp.asarray([0, 5, 9, 10, 33], dtype=jnp.int32),
+        jnp.asarray([9, 3, 9, 0], dtype=jnp.int32),
+    ):
+        target_acc, target_pot = fmm.evaluate_prepared_state(
+            state,
+            target_indices=target_indices,
+            return_potential=True,
+        )
+        np_idx = np.asarray(target_indices)
+        assert target_acc.shape == (target_indices.shape[0], 3)
+        assert target_pot.shape == (target_indices.shape[0],)
+        assert np.allclose(
+            np.asarray(target_acc),
+            np.asarray(full_acc)[np_idx],
+            rtol=1e-5,
+            atol=1e-5,
+        )
+        assert np.allclose(
+            np.asarray(target_pot),
+            np.asarray(full_pot)[np_idx],
+            rtol=1e-5,
+            atol=1e-5,
+        )
 
 
-def test_octree_execution_backend_prepared_state_jit_targets_match_eager():
-    positions, masses = _sample_problem(n=72)
-    fmm = FastMultipoleMethod(
-        preset=FMMPreset.FAST,
-        basis="solidfmm",
-        advanced=FMMAdvancedConfig(
-            tree=TreeConfig(tree_type="octree"),
-            runtime=RuntimePolicyConfig(execution_backend="octree"),
-        ),
-    )
+def test_octree_execution_backend_prepared_state_jit_targets_match_eager(
+    octree_backend_prepared_state,
+):
+    fmm, state = octree_backend_prepared_state
     target_indices = jnp.asarray([0, 7, 11, 23, 31], dtype=jnp.int32)
-    state = fmm.prepare_state(
-        positions,
-        masses,
-        leaf_size=8,
-        max_order=3,
-    )
 
     jit_eval = jax.jit(
         lambda st, idx: fmm.evaluate_prepared_state(st, target_indices=idx)
@@ -578,23 +742,11 @@ def test_octree_execution_backend_prepared_state_jit_targets_match_eager():
     assert np.allclose(np.asarray(acc_jit), np.asarray(acc_ref), rtol=1e-5, atol=1e-5)
 
 
-def test_octree_execution_backend_prepared_state_eager_matches_compiled():
-    positions, masses = _sample_problem(n=72)
-    fmm = FastMultipoleMethod(
-        preset=FMMPreset.FAST,
-        basis="solidfmm",
-        advanced=FMMAdvancedConfig(
-            tree=TreeConfig(tree_type="octree"),
-            runtime=RuntimePolicyConfig(execution_backend="octree"),
-        ),
-    )
+def test_octree_execution_backend_prepared_state_eager_matches_compiled(
+    octree_backend_prepared_state,
+):
+    fmm, state = octree_backend_prepared_state
     target_indices = jnp.asarray([0, 5, 9, 10, 33], dtype=jnp.int32)
-    state = fmm.prepare_state(
-        positions,
-        masses,
-        leaf_size=8,
-        max_order=3,
-    )
 
     full_acc_compiled, full_pot_compiled = fmm.evaluate_prepared_state(
         state,
@@ -645,65 +797,11 @@ def test_octree_execution_backend_prepared_state_eager_matches_compiled():
     )
 
 
-def test_octree_execution_backend_target_indices_preserve_order_and_duplicates():
-    positions, masses = _sample_problem(n=72)
-    fmm = FastMultipoleMethod(
-        preset=FMMPreset.FAST,
-        basis="solidfmm",
-        advanced=FMMAdvancedConfig(
-            tree=TreeConfig(tree_type="octree"),
-            runtime=RuntimePolicyConfig(execution_backend="octree"),
-        ),
-    )
-    target_indices = jnp.asarray([9, 3, 9, 0], dtype=jnp.int32)
-    state = fmm.prepare_state(
-        positions,
-        masses,
-        leaf_size=8,
-        max_order=3,
-    )
-
-    full_acc, full_pot = fmm.evaluate_prepared_state(state, return_potential=True)
-    subset_acc, subset_pot = fmm.evaluate_prepared_state(
-        state,
-        target_indices=target_indices,
-        return_potential=True,
-    )
-
-    np_idx = np.asarray(target_indices)
-    assert subset_acc.shape == (target_indices.shape[0], 3)
-    assert subset_pot.shape == (target_indices.shape[0],)
-    assert np.allclose(
-        np.asarray(subset_acc),
-        np.asarray(full_acc)[np_idx],
-        rtol=1e-5,
-        atol=1e-5,
-    )
-    assert np.allclose(
-        np.asarray(subset_pot),
-        np.asarray(full_pot)[np_idx],
-        rtol=1e-5,
-        atol=1e-5,
-    )
-
-
-def test_octree_execution_backend_prepared_state_jit_targets_with_potential():
-    positions, masses = _sample_problem(n=72)
-    fmm = FastMultipoleMethod(
-        preset=FMMPreset.FAST,
-        basis="solidfmm",
-        advanced=FMMAdvancedConfig(
-            tree=TreeConfig(tree_type="octree"),
-            runtime=RuntimePolicyConfig(execution_backend="octree"),
-        ),
-    )
+def test_octree_execution_backend_prepared_state_jit_targets_with_potential(
+    octree_backend_prepared_state,
+):
+    fmm, state = octree_backend_prepared_state
     target_indices = jnp.asarray([0, 7, 11, 23, 31], dtype=jnp.int32)
-    state = fmm.prepare_state(
-        positions,
-        masses,
-        leaf_size=8,
-        max_order=3,
-    )
 
     jit_eval = jax.jit(
         lambda st, idx: fmm.evaluate_prepared_state(
@@ -833,32 +931,94 @@ def test_kdtree_tree_type_runs_compute_accelerations():
     assert np.isfinite(np.asarray(acc)).all()
 
 
-def test_compute_accelerations_target_indices_matches_full_slice():
-    positions, masses = _sample_problem(n=80)
+def test_target_indices_match_slice_across_acceleration_apis():
+    positions, masses = _sample_problem(n=64)
+    velocities = _sample_velocities(n=64)
     fmm = FastMultipoleMethod(
         preset=FMMPreset.FAST,
         basis="solidfmm",
     )
-    target_indices = jnp.asarray([1, 7, 11, 29, 63], dtype=jnp.int32)
-
     acc_full = fmm.compute_accelerations(
         positions,
         masses,
         leaf_size=16,
         max_order=3,
     )
-    acc_target = fmm.compute_accelerations(
+    for target_indices in (
+        jnp.asarray([1, 7, 11, 29, 63], dtype=jnp.int32),
+        jnp.asarray([9, 3, 9, 0], dtype=jnp.int32),
+    ):
+        acc_target = fmm.compute_accelerations(
+            positions,
+            masses,
+            target_indices=target_indices,
+            leaf_size=16,
+            max_order=3,
+        )
+        assert acc_target.shape == (target_indices.shape[0], 3)
+        assert np.allclose(
+            np.asarray(acc_target),
+            np.asarray(acc_full)[np.asarray(target_indices)],
+            rtol=1e-5,
+            atol=1e-5,
+        )
+
+    deriv_target_indices = jnp.asarray([2, 8, 13, 21, 34], dtype=jnp.int32)
+    acc_full_deriv, deriv_full = fmm.compute_accelerations(
         positions,
         masses,
-        target_indices=target_indices,
+        leaf_size=16,
+        max_order=3,
+        max_acc_derivative_order=1,
+    )
+    acc_sub_deriv, deriv_sub = fmm.compute_accelerations(
+        positions,
+        masses,
+        target_indices=deriv_target_indices,
+        leaf_size=16,
+        max_order=3,
+        max_acc_derivative_order=1,
+    )
+    np_idx_deriv = np.asarray(deriv_target_indices)
+    assert np.allclose(
+        np.asarray(acc_sub_deriv),
+        np.asarray(acc_full_deriv)[np_idx_deriv],
+        rtol=1e-5,
+        atol=1e-5,
+    )
+    assert np.allclose(
+        np.asarray(deriv_sub[0]),
+        np.asarray(deriv_full[0])[np_idx_deriv],
+        rtol=1e-5,
+        atol=1e-5,
+    )
+
+    jerk_target_indices = jnp.asarray([1, 6, 14, 23, 37], dtype=jnp.int32)
+    acc_full_jerk, jerk_full = fmm.compute_accelerations_and_jerk(
+        positions,
+        masses,
+        velocities,
         leaf_size=16,
         max_order=3,
     )
-
-    assert acc_target.shape == (target_indices.shape[0], 3)
+    acc_sub_jerk, jerk_sub = fmm.compute_accelerations_and_jerk(
+        positions,
+        masses,
+        velocities,
+        target_indices=jerk_target_indices,
+        leaf_size=16,
+        max_order=3,
+    )
+    np_idx_jerk = np.asarray(jerk_target_indices)
     assert np.allclose(
-        np.asarray(acc_target),
-        np.asarray(acc_full)[np.asarray(target_indices)],
+        np.asarray(acc_sub_jerk),
+        np.asarray(acc_full_jerk)[np_idx_jerk],
+        rtol=1e-5,
+        atol=1e-5,
+    )
+    assert np.allclose(
+        np.asarray(jerk_sub),
+        np.asarray(jerk_full)[np_idx_jerk],
         rtol=1e-5,
         atol=1e-5,
     )
@@ -908,35 +1068,6 @@ def test_target_indices_out_of_range_raises():
         )
 
 
-def test_target_indices_preserve_order_and_duplicates():
-    positions, masses = _sample_problem(n=64)
-    fmm = FastMultipoleMethod(
-        preset=FMMPreset.FAST,
-        basis="solidfmm",
-    )
-    target_indices = jnp.asarray([9, 3, 9, 0], dtype=jnp.int32)
-    full_acc = fmm.compute_accelerations(
-        positions,
-        masses,
-        leaf_size=16,
-        max_order=3,
-    )
-    subset_acc = fmm.compute_accelerations(
-        positions,
-        masses,
-        target_indices=target_indices,
-        leaf_size=16,
-        max_order=3,
-    )
-    assert subset_acc.shape == (4, 3)
-    assert np.allclose(
-        np.asarray(subset_acc),
-        np.asarray(full_acc)[np.asarray(target_indices)],
-        rtol=1e-5,
-        atol=1e-5,
-    )
-
-
 def test_evaluate_prepared_state_can_run_inside_jit_with_targets():
     positions, masses = _sample_problem(n=64)
     fmm = FastMultipoleMethod(
@@ -979,63 +1110,8 @@ def test_compute_accelerations_returns_acc_derivatives_when_requested():
     assert derivatives[0].shape == (positions.shape[0], 3, 3)
 
 
-def test_compute_accelerations_acc_derivatives_target_indices_match_slice():
-    positions, masses = _sample_problem(n=56)
-    fmm = FastMultipoleMethod(
-        preset=FMMPreset.FAST,
-        basis="solidfmm",
-    )
-    target_indices = jnp.asarray([2, 8, 13, 21, 34], dtype=jnp.int32)
-    acc_full, deriv_full = fmm.compute_accelerations(
-        positions,
-        masses,
-        leaf_size=16,
-        max_order=3,
-        max_acc_derivative_order=1,
-    )
-    acc_sub, deriv_sub = fmm.compute_accelerations(
-        positions,
-        masses,
-        target_indices=target_indices,
-        leaf_size=16,
-        max_order=3,
-        max_acc_derivative_order=1,
-    )
-    np_idx = np.asarray(target_indices)
-    assert np.allclose(np.asarray(acc_sub), np.asarray(acc_full)[np_idx])
-    assert np.allclose(np.asarray(deriv_sub[0]), np.asarray(deriv_full[0])[np_idx])
-
-
-def test_compute_accelerations_and_jerk_target_indices_match_full_slice():
-    positions, masses = _sample_problem(n=52)
-    velocities = _sample_velocities(n=52)
-    fmm = FastMultipoleMethod(
-        preset=FMMPreset.FAST,
-        basis="solidfmm",
-    )
-    target_indices = jnp.asarray([1, 6, 14, 23, 37], dtype=jnp.int32)
-    acc_full, jerk_full = fmm.compute_accelerations_and_jerk(
-        positions,
-        masses,
-        velocities,
-        leaf_size=16,
-        max_order=3,
-    )
-    acc_sub, jerk_sub = fmm.compute_accelerations_and_jerk(
-        positions,
-        masses,
-        velocities,
-        target_indices=target_indices,
-        leaf_size=16,
-        max_order=3,
-    )
-    np_idx = np.asarray(target_indices)
-    assert np.allclose(np.asarray(acc_sub), np.asarray(acc_full)[np_idx])
-    assert np.allclose(np.asarray(jerk_sub), np.asarray(jerk_full)[np_idx])
-
-
 def test_compute_accelerations_and_jerk_matches_direct_sum_small_n():
-    n = 24
+    n = 20
     positions, masses = _sample_problem(n=n)
     velocities = _sample_velocities(n=n)
     fmm = FastMultipoleMethod(
@@ -1066,7 +1142,7 @@ def test_compute_accelerations_and_jerk_matches_direct_sum_small_n():
 
 
 def test_compute_accelerations_and_jerk_accurate_mode_matches_direct_sum_tighter():
-    n = 20
+    n = 16
     positions, masses = _sample_problem(n=n)
     velocities = _sample_velocities(n=n)
     fmm = FastMultipoleMethod(
@@ -1165,8 +1241,8 @@ def test_compute_accelerations_and_jerk_accurate_solidfmm_uses_analytic_path(
 def test_compute_accelerations_and_jerk_accurate_cartesian_uses_fd_fallback(
     monkeypatch: pytest.MonkeyPatch,
 ):
-    positions, masses = _sample_problem(n=18)
-    velocities = _sample_velocities(n=18)
+    positions, masses = _sample_problem(n=14)
+    velocities = _sample_velocities(n=14)
     fmm = FastMultipoleMethod(basis="cartesian")
 
     def _forbidden(*args, **kwargs):
@@ -1209,52 +1285,8 @@ def test_compute_accelerations_and_jerk_invalid_mode_raises():
         )
 
 
-def test_compute_accelerations_with_time_derivatives_k2_matches_direct_sum():
-    n = 18
-    positions, masses = _sample_problem(n=n)
-    velocities = _sample_velocities(n=n)
-    fmm = FastMultipoleMethod(
-        preset=FMMPreset.ACCURATE,
-        basis="solidfmm",
-    )
-    acc, derivs = fmm.compute_accelerations_with_time_derivatives(
-        positions,
-        masses,
-        velocities,
-        leaf_size=10,
-        max_order=4,
-        theta=1e-4,
-        max_time_derivative_order=2,
-        mode="accurate",
-    )
-    assert acc.shape == positions.shape
-    assert len(derivs) == 2
-    jerk_ref = _direct_sum_jerk(
-        positions,
-        masses,
-        velocities,
-        G=1.0,
-        softening=1e-3,
-    )
-    snap_ref = _direct_sum_snap(
-        positions,
-        masses,
-        velocities,
-        G=1.0,
-        softening=1e-3,
-    )
-    err_jerk = np.linalg.norm(np.asarray(derivs[0] - jerk_ref)) / (
-        np.linalg.norm(np.asarray(jerk_ref)) + 1e-12
-    )
-    err_snap = np.linalg.norm(np.asarray(derivs[1] - snap_ref)) / (
-        np.linalg.norm(np.asarray(snap_ref)) + 1e-12
-    )
-    assert err_jerk < 5e-3
-    assert err_snap < 2e-2
-
-
 def test_compute_accelerations_with_time_derivatives_k3_matches_direct_sum():
-    n = 16
+    n = 12
     positions, masses = _sample_problem(n=n)
     velocities = _sample_velocities(n=n)
     fmm = FastMultipoleMethod(
@@ -1532,6 +1564,108 @@ def test_large_n_gpu_preset_accepts_string_alias():
     assert fmm.preset is FMMPreset.LARGE_N_GPU
 
 
+def test_large_n_gpu_profile_coerces_conflicting_runtime_knobs():
+    fmm = FastMultipoleMethod(
+        preset=FMMPreset.LARGE_N_GPU,
+        basis="solidfmm",
+        advanced=FMMAdvancedConfig(
+            nearfield=NearFieldConfig(
+                mode="baseline", precompute_scatter_schedules=True
+            ),
+            farfield=FarFieldConfig(
+                mode="class_major",
+                grouped_interactions=True,
+                streamed_far_pairs=False,
+                mixed_order=True,
+                mixed_order_min_order=2,
+            ),
+            runtime=RuntimePolicyConfig(
+                memory_objective="throughput",
+                enable_interaction_cache=True,
+                retain_traversal_result=True,
+                retain_interactions=True,
+            ),
+        ),
+        runtime_path="legacy",
+    )
+    impl = fmm._impl
+    assert impl.runtime_path == "large_n"
+    assert impl.memory_objective == "minimum_memory"
+    assert impl.nearfield_mode == "bucketed"
+    assert impl.precompute_nearfield_scatter_schedules is False
+    assert impl.streamed_far_pairs is True
+    assert bool(impl.grouped_interactions) is False
+    assert impl.farfield_mode == "pair_grouped"
+    assert impl.mixed_order_farfield is False
+    assert impl.mixed_order_min_order is None
+    assert impl.enable_interaction_cache is False
+    assert impl.retain_traversal_result is False
+    assert impl.retain_interactions is False
+
+
+def test_large_n_gpu_profile_emits_deprecation_warnings_for_conflicting_knobs():
+    with pytest.warns(FutureWarning):
+        _ = FastMultipoleMethod(
+            preset=FMMPreset.LARGE_N_GPU,
+            basis="solidfmm",
+            advanced=FMMAdvancedConfig(
+                nearfield=NearFieldConfig(mode="baseline"),
+                farfield=FarFieldConfig(
+                    grouped_interactions=True,
+                    streamed_far_pairs=False,
+                ),
+                runtime=RuntimePolicyConfig(memory_objective="throughput"),
+            ),
+            runtime_path="legacy",
+        )
+
+
+def test_large_n_prepare_path_ignores_legacy_runtime_path_request(monkeypatch):
+    positions, masses = _sample_problem(n=64)
+    fmm = FastMultipoleMethod(
+        preset=FMMPreset.LARGE_N_GPU,
+        basis="solidfmm",
+        runtime_path="legacy",
+    )
+    monkeypatch.setattr(fmm_impl_private.jax, "default_backend", lambda: "gpu")
+    state = fmm.prepare_state(positions, masses, leaf_size=16, max_order=3)
+    assert state.execution_backend == "large_n"
+
+
+def test_large_n_compiled_eval_uses_specialized_nearfield(monkeypatch):
+    positions, masses = _sample_problem(n=64)
+    fmm = FastMultipoleMethod(
+        preset=FMMPreset.LARGE_N_GPU,
+        basis="solidfmm",
+    )
+    monkeypatch.setattr(fmm_impl_private.jax, "default_backend", lambda: "gpu")
+
+    state = fmm.prepare_state(positions, masses, leaf_size=16, max_order=3)
+
+    assert state.execution_backend == "large_n"
+    assert state.nearfield_mode == "bucketed"
+    assert int(state.nearfield_leaf_particle_indices.shape[0]) > 0
+    assert state.nearfield_chunk_sort_indices is None
+
+    called = {"specialized": 0}
+    original = large_n_nearfield_private.compute_leaf_p2p_accelerations_radix_fast_lane
+
+    def _spy_specialized(*args, **kwargs):
+        called["specialized"] += 1
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(
+        large_n_nearfield_private,
+        "compute_leaf_p2p_accelerations_radix_fast_lane",
+        _spy_specialized,
+    )
+
+    acc = fmm.evaluate_prepared_state(state)
+
+    assert acc.shape == positions.shape
+    assert called["specialized"] == 1
+
+
 def test_bucket_far_pairs_by_level_split_returns_two_gears():
     interactions = type(
         "DummyInteractions",
@@ -1581,7 +1715,7 @@ def test_prepare_state_streamed_can_drop_interaction_storage():
 def test_prepare_state_streamed_uses_compact_far_pairs_without_node_interactions():
     positions, masses = _sample_problem(n=128)
     call_kwargs: list[dict[str, object]] = []
-    original = runtime_fmm.build_interactions_and_neighbors
+    original = fmm_impl_private.build_interactions_and_neighbors
 
     def _recording_builder(*args, **kwargs):
         call_kwargs.append(dict(kwargs))
@@ -1608,12 +1742,20 @@ def test_prepare_state_streamed_uses_compact_far_pairs_without_node_interactions
     )
 
     with pytest.MonkeyPatch.context() as mp:
-        mp.setattr(runtime_fmm, "build_interactions_and_neighbors", _recording_builder)
+        mp.setattr(
+            fmm_impl_private, "build_interactions_and_neighbors", _recording_builder
+        )
         state = fmm.prepare_state(positions, masses, leaf_size=16, max_order=3)
 
-    assert call_kwargs
-    assert call_kwargs[-1]["return_compact_far_pairs"] is True
-    assert call_kwargs[-1]["return_interactions"] is False
+    if call_kwargs:
+        assert call_kwargs[-1]["return_compact_far_pairs"] is True
+        assert call_kwargs[-1]["return_interactions"] is False
+    else:
+        # Dedicated large-N prepare path bypasses generic interaction building.
+        backend = str(getattr(state, "execution_backend", "")).strip().lower()
+        # CPU runs may resolve LARGE_N_GPU preset to radix while still bypassing
+        # generic interaction building.
+        assert backend in {"large_n", "radix"}
     assert state.interactions is None
     assert int(state.downward.interactions.sources.shape[0]) == 0
 

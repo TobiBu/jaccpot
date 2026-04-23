@@ -45,11 +45,17 @@ def main() -> None:
     parser.add_argument("--max-order", type=int, default=4)
     parser.add_argument("--preset", type=str, default="large_n_gpu")
     parser.add_argument("--basis", type=str, default="solidfmm")
+    parser.add_argument(
+        "--runtime-path",
+        choices=("auto", "legacy", "large_n"),
+        default="auto",
+    )
     args = parser.parse_args()
 
     solver = FastMultipoleMethod(
         preset=FMMPreset(str(args.preset).strip().lower()),
         basis=args.basis,
+        runtime_path=str(args.runtime_path).strip().lower(),
     )
     positions, masses = _sample_problem(args.num_particles, dtype=jnp.float32)
     impl = solver._impl
@@ -106,12 +112,16 @@ def main() -> None:
         max_order=int(args.max_order),
     )
     timings.append(("prepare_state", elapsed))
+    timings.append(("prepared_state_type", 0.0))
 
     _, elapsed = _time_call(solver.evaluate_prepared_state, state)
     timings.append(("evaluate_prepared_state", elapsed))
 
     for label, seconds in timings:
-        print(f"{label:24s} {seconds:10.4f}s")
+        if label == "prepared_state_type":
+            print(f"{label:24s} {type(state).__name__}")
+        else:
+            print(f"{label:24s} {seconds:10.4f}s")
 
 
 if __name__ == "__main__":

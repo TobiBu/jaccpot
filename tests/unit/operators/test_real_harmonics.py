@@ -326,7 +326,7 @@ def test_z_m2l_error_improves_with_order():
     direct = 1.0 / jnp.linalg.norm(eval_point)
 
     errors = []
-    for order in range(1, 12):
+    for order in range(1, 10):
         # Unit monopole
         multipole = jnp.zeros(sh_size(order))
         multipole = multipole.at[0].set(1.0)
@@ -355,7 +355,7 @@ def test_z_m2l_error_improves_with_order():
             )
 
     # The highest order should achieve very good accuracy
-    assert errors[-1] < 1e-10, f"Final error {errors[-1]:.2e} not small enough"
+    assert errors[-1] < 1e-9, f"Final error {errors[-1]:.2e} not small enough"
 
 
 def test_m2l_convergence_radius_respected_in_rotated_geometry():

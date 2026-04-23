@@ -140,7 +140,5 @@ General recommendation:
 See
 [`examples/time_derivatives_demo.ipynb`](/Users/buck/Documents/Nexus/Projects/jaccpot/examples/time_derivatives_demo.ipynb)
 for a worked example that computes and inspects jerk, snap, and crackle in the
-analytic `solidfmm` path.
-
-For a direct-sum accuracy comparison on small particle sets, see
-[`examples/time_derivatives_accuracy_demo.ipynb`](/Users/buck/Documents/Nexus/Projects/jaccpot/examples/time_derivatives_accuracy_demo.ipynb).
+analytic `solidfmm` path, including a direct-sum accuracy comparison on small
+particle sets.

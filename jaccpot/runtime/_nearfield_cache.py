@@ -24,6 +24,7 @@ def nearfield_cache_matches(
     nearfield_mode: str,
     nearfield_edge_chunk_size: int,
     leaf_cap: int,
+    require_pair_vectors: bool = False,
 ) -> bool:
     """Return whether cache entry contains reusable near-field artifacts."""
 
@@ -32,6 +33,13 @@ def nearfield_cache_matches(
         and cache_entry.nearfield_mode == nearfield_mode
         and cache_entry.nearfield_edge_chunk_size == nearfield_edge_chunk_size
         and cache_entry.nearfield_leaf_cap == int(leaf_cap)
+        and (
+            not bool(require_pair_vectors)
+            or (
+                cache_entry.nearfield_target_leaf_ids is not None
+                and cache_entry.nearfield_valid_pairs is not None
+            )
+        )
     )
 
 

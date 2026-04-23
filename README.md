@@ -136,11 +136,9 @@ Current higher-order status:
 - acceleration spatial derivatives (`max_acc_derivative_order > 0`) currently
   require `basis="solidfmm"`
 
-There is also a worked example notebook for jerk, snap, and crackle:
+There is also a worked example notebook for jerk, snap, and crackle, including
+a small-`N` direct-sum accuracy check:
 [`examples/time_derivatives_demo.ipynb`](/Users/buck/Documents/Nexus/Projects/jaccpot/examples/time_derivatives_demo.ipynb).
-
-For a small-`N` direct-sum accuracy check of jerk, snap, and crackle, see:
-[`examples/time_derivatives_accuracy_demo.ipynb`](/Users/buck/Documents/Nexus/Projects/jaccpot/examples/time_derivatives_accuracy_demo.ipynb).
 
 ### Jerk Mode Guide
 
@@ -470,9 +468,14 @@ If a performance change is intentional, refresh the baseline:
 
 ## Examples
 
-- `examples/benchmark_runtime_accuracy.ipynb`: runtime/accuracy benchmark workflow
-- `examples/jerk_modes_demo.ipynb`: compare jerk `fast_approx` vs `accurate` modes
-- `examples/analytic_source_motion_jerk_demo.ipynb`: inspect analytic source-motion jerk behavior on `solidfmm`
+- `examples/benchmark_runtime_accuracy.ipynb`: main runtime/accuracy benchmark workflow
+- `examples/adaptive_vs_fixed_benchmark.ipynb`: adaptive-order vs fixed-order comparison
+- `examples/benchmark_gpu_radix_runtime.ipynb`: GPU/radix runtime and memory-pressure deep dive
+- `examples/benchmark_gpu_single_n_memory.ipynb`: interactive single-`N` GPU memory probe with plots/tables
+- `examples/benchmark_gpu_n_ladder_production.py`: production-oriented large-`N` parameter sweep
+- `examples/time_derivatives_demo.ipynb`: usage plus direct-sum accuracy checks for jerk, snap, and crackle
+- `examples/jerk_modes_demo.ipynb`: compare jerk `fast_approx` vs `accurate`, including analytic source-motion behavior
+- `examples/real_sh_adaptive_order.ipynb`: real-basis adaptive-order demo
 
 ## Runtime Type Checking
 
