@@ -48,6 +48,7 @@ from yggdrax.tree import (
     Tree,
     TreeType,
     available_tree_types,
+    rebuild_static_radix_tree_from_template,
     reorder_particles_by_indices,
 )
 from yggdrax.tree_moments import compute_tree_mass_moments
@@ -761,7 +762,7 @@ def _resolve_fmm_config(
         preset_config.tree_build_mode if preset_config else None,
         "lbvh",
     )
-    valid_tree_modes = {"lbvh", "fixed_depth", "adaptive"}
+    valid_tree_modes = {"lbvh", "fixed_depth", "adaptive", "static_radix"}
     if tree_mode not in valid_tree_modes:
         allowed_modes = sorted(valid_tree_modes)
         raise ValueError(f"tree_build_mode must be one of {allowed_modes}")
@@ -896,7 +897,13 @@ def _build_tree_with_config(
         tree.require_fmm_topology()
         workspace_out = None
     else:
-        build_mode = "fixed_depth" if mode == "fixed_depth" else "adaptive"
+        build_mode = (
+            "fixed_depth"
+            if mode == "fixed_depth"
+            else "static_radix"
+            if mode == "static_radix"
+            else "adaptive"
+        )
         built_tree = Tree.from_particles(
             positions,
             masses,
@@ -930,7 +937,9 @@ def _build_tree_with_config(
     except jax.errors.ConcretizationTypeError:
         max_leaf_size = int(leaf_size)
     cache_leaf_parameter = (
-        int(leaf_size) if mode == "lbvh" else tree_config.target_leaf_particles
+        int(leaf_size)
+        if mode in {"lbvh", "static_radix"}
+        else tree_config.target_leaf_particles
     )
     if mode != "fixed_depth" and int(max_leaf_size) > int(leaf_size):
         raise ValueError(
@@ -1798,6 +1807,7 @@ class FastMultipoleMethod:
         enable_interaction_cache: bool = True,
         retain_traversal_result: bool = True,
         retain_interactions: bool = True,
+        prepare_stage_memory_split_enabled: Optional[bool] = None,
         autotune_m2l_chunk: bool = False,
         precompute_grouped_class_segments: Optional[bool] = None,
         grouped_schedule_budget_bytes: Optional[int] = None,
@@ -1829,6 +1839,11 @@ class FastMultipoleMethod:
             raise ValueError("rebuild_every must be positive")
         self.rebuild_every = int(rebuild_every)
         self._recent_far_pairs_by_gear_counts: tuple[int, ...] = tuple()
+        self._recent_dual_node_count: int = 0
+        self._recent_dual_leaf_count: int = 0
+        self._recent_dual_neighbor_count: int = 0
+        self._recent_dual_far_pair_count: int = 0
+        self._recent_dual_m2l_chunk_size: int = 0
         force_scale_mode_norm = str(mac_force_scale_mode).strip().lower()
         if force_scale_mode_norm not in ("prev", "prepass", "paper"):
             raise ValueError(
@@ -1925,6 +1940,11 @@ class FastMultipoleMethod:
         self.enable_interaction_cache = bool(enable_interaction_cache)
         self.retain_traversal_result = bool(retain_traversal_result)
         self.retain_interactions = bool(retain_interactions)
+        self.prepare_stage_memory_split_enabled = (
+            None
+            if prepare_stage_memory_split_enabled is None
+            else bool(prepare_stage_memory_split_enabled)
+        )
         self.fail_fast = bool(fail_fast)
         self.autotune_m2l_chunk = bool(autotune_m2l_chunk) and not self.fail_fast
         self.precompute_grouped_class_segments = (
@@ -2025,6 +2045,8 @@ class FastMultipoleMethod:
         self._tree_workspace: Optional[object] = None
         self._locals_template: Optional[LocalExpansionData] = None
         self._interaction_cache: Optional[_InteractionCacheEntry] = None
+        self._interaction_cache_hits: int = 0
+        self._interaction_cache_misses: int = 0
         self._prepared_state_cache_key: Optional[tuple[Any, ...]] = None
         self._prepared_state_cache_value: Optional[PreparedStateLike] = None
         self._prepared_state_cache_positions: Optional[Array] = None
@@ -2033,6 +2055,60 @@ class FastMultipoleMethod:
         self._geometry_reuse_entry: Optional[_GeometryReuseEntry] = None
         self._recent_topology_reused: bool = False
         self._recent_retry_events: Tuple[DualTreeRetryEvent, ...] = tuple()
+        self._compiled_profile_fingerprint_last: Optional[str] = None
+        self._compiled_profile_transitions: int = 0
+        self._compiled_profile_refresh_calls: int = 0
+        self._compiled_profile_refresh_reuse_tier_full: int = 0
+        self._compiled_profile_refresh_reuse_tier_topology: int = 0
+        self._compiled_profile_refresh_reuse_tier_overflow: int = 0
+        self._large_n_same_topology_refresh_attempts: int = 0
+        self._large_n_same_topology_refresh_hits: int = 0
+        self._large_n_same_topology_refresh_misses: int = 0
+        self._large_n_same_topology_refresh_miss_no_key: int = 0
+        self._large_n_same_topology_refresh_miss_topology: int = 0
+        self._large_n_same_topology_refresh_miss_neighbor: int = 0
+        self._large_n_same_topology_refresh_miss_traced: int = 0
+        self._large_n_same_topology_refresh_last_error: str = ""
+        self._static_radix_refresh_hits: int = 0
+        self._static_radix_refresh_misses: int = 0
+        self._static_radix_profile_overflows: int = 0
+        self._compiled_profile_multipoles_only_calls: int = 0
+        self._compiled_profile_topology_rebuild_calls: int = 0
+        self._large_n_overflow_profile_cap: int = 0
+        self._large_n_overflow_profile_reprofiles: int = 0
+        self._large_n_neighbor_edges_profile_cap: int = 0
+        self._large_n_neighbor_edges_profile_reprofiles: int = 0
+        self._refresh_timing_total_seconds: float = 0.0
+        self._refresh_timing_input_seconds: float = 0.0
+        self._refresh_timing_tree_upward_seconds: float = 0.0
+        self._refresh_timing_dual_downward_seconds: float = 0.0
+        self._refresh_timing_nearfield_seconds: float = 0.0
+        self._refresh_timing_profile_accounting_seconds: float = 0.0
+        self._refresh_timing_compile_or_sync_suspect_seconds: float = 0.0
+        self._refresh_timing_dual_setup_seconds: float = 0.0
+        self._refresh_timing_dual_artifact_build_seconds: float = 0.0
+        self._refresh_timing_dual_far_pair_plan_seconds: float = 0.0
+        self._refresh_timing_dual_m2l_autotune_seconds: float = 0.0
+        self._refresh_timing_dual_select_interactions_seconds: float = 0.0
+        self._refresh_timing_dual_downward_compute_seconds: float = 0.0
+        self._refresh_timing_dual_m2l_compute_seconds: float = 0.0
+        self._refresh_timing_dual_l2l_compute_seconds: float = 0.0
+        self._refresh_timing_dual_final_symmetry_seconds: float = 0.0
+        self._refresh_timing_dual_source_motion_seconds: float = 0.0
+        self._refresh_timing_dual_finalize_seconds: float = 0.0
+        self._refresh_timing_dual_residual_seconds: float = 0.0
+        self._refresh_timing_nearfield_leaf_groups_seconds: float = 0.0
+        self._refresh_timing_nearfield_precompute_seconds: float = 0.0
+        self._refresh_timing_nearfield_target_blocks_seconds: float = 0.0
+        self._refresh_timing_nearfield_block_sort_seconds: float = 0.0
+        self._refresh_timing_nearfield_speed_layout_seconds: float = 0.0
+        self._refresh_timing_nearfield_overflow_profile_seconds: float = 0.0
+        self._refresh_timing_nearfield_radix_payload_seconds: float = 0.0
+        self._refresh_timing_nearfield_neighbor_padding_seconds: float = 0.0
+        self._refresh_timing_nearfield_state_pack_seconds: float = 0.0
+        self._refresh_timing_nearfield_residual_seconds: float = 0.0
+        self._refresh_timing_calls: int = 0
+        self._refresh_timing_active: bool = False
         self.fixed_order = fixed_order
         self.fixed_max_leaf_size = fixed_max_leaf_size
         self._explicit_m2l_chunk_size = m2l_chunk_size is not None
@@ -2108,8 +2184,9 @@ class FastMultipoleMethod:
         self.mixed_order_farfield = False
         self.mixed_order_min_order = None
 
-        # Disable retention caches that increase memory pressure on this profile.
-        self.enable_interaction_cache = False
+        # Keep the topology-derived interaction scaffold resident so fixed-shape
+        # refreshes can reuse it instead of rebuilding the dual-tree artifacts.
+        self.enable_interaction_cache = True
         self.retain_traversal_result = False
         self.retain_interactions = False
         self.precompute_grouped_class_segments = False
@@ -2171,11 +2248,895 @@ class FastMultipoleMethod:
         self.clear_prepared_state_cache()
         self._locals_template = None
         self._interaction_cache = None
+        self._interaction_cache_hits = 0
+        self._interaction_cache_misses = 0
         self._tree_workspace = None
         self._last_force_scale_nodes = None
         self._recent_retry_events = tuple()
         self._recent_far_pairs_by_gear_counts = tuple()
+        self._recent_dual_node_count = 0
+        self._recent_dual_leaf_count = 0
+        self._recent_dual_neighbor_count = 0
+        self._recent_dual_far_pair_count = 0
+        self._recent_dual_m2l_chunk_size = 0
+        self._compiled_profile_fingerprint_last = None
+        self._compiled_profile_transitions = 0
+        self._compiled_profile_refresh_calls = 0
+        self._compiled_profile_refresh_reuse_tier_full = 0
+        self._compiled_profile_refresh_reuse_tier_topology = 0
+        self._compiled_profile_refresh_reuse_tier_overflow = 0
+        self._large_n_same_topology_refresh_attempts = 0
+        self._large_n_same_topology_refresh_hits = 0
+        self._large_n_same_topology_refresh_misses = 0
+        self._large_n_same_topology_refresh_miss_no_key = 0
+        self._large_n_same_topology_refresh_miss_topology = 0
+        self._large_n_same_topology_refresh_miss_neighbor = 0
+        self._large_n_same_topology_refresh_miss_traced = 0
+        self._large_n_same_topology_refresh_last_error = ""
+        self._static_radix_refresh_hits = 0
+        self._static_radix_refresh_misses = 0
+        self._static_radix_profile_overflows = 0
+        self._compiled_profile_multipoles_only_calls = 0
+        self._compiled_profile_topology_rebuild_calls = 0
+        self._large_n_overflow_profile_cap = 0
+        self._large_n_overflow_profile_reprofiles = 0
+        self._large_n_neighbor_edges_profile_cap = 0
+        self._large_n_neighbor_edges_profile_reprofiles = 0
+        self._refresh_timing_total_seconds = 0.0
+        self._refresh_timing_input_seconds = 0.0
+        self._refresh_timing_tree_upward_seconds = 0.0
+        self._refresh_timing_dual_downward_seconds = 0.0
+        self._refresh_timing_nearfield_seconds = 0.0
+        self._refresh_timing_profile_accounting_seconds = 0.0
+        self._refresh_timing_compile_or_sync_suspect_seconds = 0.0
+        self._refresh_timing_dual_setup_seconds = 0.0
+        self._refresh_timing_dual_artifact_build_seconds = 0.0
+        self._refresh_timing_dual_far_pair_plan_seconds = 0.0
+        self._refresh_timing_dual_m2l_autotune_seconds = 0.0
+        self._refresh_timing_dual_select_interactions_seconds = 0.0
+        self._refresh_timing_dual_downward_compute_seconds = 0.0
+        self._refresh_timing_dual_m2l_compute_seconds = 0.0
+        self._refresh_timing_dual_l2l_compute_seconds = 0.0
+        self._refresh_timing_dual_final_symmetry_seconds = 0.0
+        self._refresh_timing_dual_source_motion_seconds = 0.0
+        self._refresh_timing_dual_finalize_seconds = 0.0
+        self._refresh_timing_dual_residual_seconds = 0.0
+        self._refresh_timing_nearfield_leaf_groups_seconds = 0.0
+        self._refresh_timing_nearfield_precompute_seconds = 0.0
+        self._refresh_timing_nearfield_target_blocks_seconds = 0.0
+        self._refresh_timing_nearfield_block_sort_seconds = 0.0
+        self._refresh_timing_nearfield_speed_layout_seconds = 0.0
+        self._refresh_timing_nearfield_overflow_profile_seconds = 0.0
+        self._refresh_timing_nearfield_radix_payload_seconds = 0.0
+        self._refresh_timing_nearfield_neighbor_padding_seconds = 0.0
+        self._refresh_timing_nearfield_state_pack_seconds = 0.0
+        self._refresh_timing_nearfield_residual_seconds = 0.0
+        self._refresh_timing_calls = 0
+        self._refresh_timing_active = False
         _clear_global_runtime_caches(clear_jax_compilation=bool(clear_jax_compilation))
+
+    def _compiled_profile_from_prepared_state(
+        self: "FastMultipoleMethod",
+        state: PreparedStateLike,
+    ) -> dict[str, Any]:
+        """Build a stable-shape profile summary for compile-reuse diagnostics."""
+        def _shape0(value: Any) -> int:
+            if value is None:
+                return 0
+            return int(jnp.asarray(value).shape[0])
+
+        def _shape_last(value: Any) -> int:
+            if value is None:
+                return 0
+            arr = jnp.asarray(value)
+            return int(arr.shape[-1]) if arr.ndim >= 1 else 0
+
+        leaves, _ = jax.tree_util.tree_flatten(state)
+        leaf_shapes: list[tuple[int, ...]] = []
+        for leaf in leaves:
+            shape = getattr(leaf, "shape", None)
+            if shape is None:
+                continue
+            leaf_shapes.append(tuple(int(v) for v in shape))
+
+        tree_parent = getattr(state.tree, "parent", None)
+        neighbor_leaf_indices = getattr(state.neighbor_list, "leaf_indices", None)
+        node_count = (
+            int(jnp.asarray(tree_parent).shape[0]) if tree_parent is not None else 0
+        )
+        leaf_count = (
+            int(jnp.asarray(neighbor_leaf_indices).shape[0])
+            if neighbor_leaf_indices is not None
+            else 0
+        )
+        nearfield_blocks = _shape0(
+            getattr(state, "nearfield_target_leaf_ids", None)
+        )
+        nearfield_target_block_slots = _shape0(
+            getattr(state, "nearfield_target_block_source_leaf_ids", None)
+        )
+        leaf_particle_slots = _shape_last(
+            getattr(state, "nearfield_leaf_particle_indices", None)
+        )
+        order = 0
+        local_data = getattr(state, "local_data", None)
+        if local_data is not None:
+            order = int(getattr(local_data, "order", 0))
+        else:
+            downward = getattr(state, "downward", None)
+            locals_view = getattr(downward, "locals", None) if downward is not None else None
+            order = int(getattr(locals_view, "order", 0)) if locals_view is not None else 0
+
+        return {
+            "preset": str(self.preset),
+            "runtime_path": str(self.runtime_path),
+            "tree_type": str(self.tree_type),
+            "execution_backend": str(getattr(state, "execution_backend", "unknown")),
+            "expansion_basis": str(getattr(state, "expansion_basis", self.expansion_basis)),
+            "working_dtype": str(jnp.dtype(getattr(state, "working_dtype", self.working_dtype))),
+            "max_leaf_size": int(getattr(state, "max_leaf_size", 0)),
+            "max_order": int(order),
+            "max_nodes": int(node_count),
+            "max_leaves": int(leaf_count),
+            "max_nearfield_blocks": int(nearfield_blocks),
+            "max_nearfield_target_block_slots": int(nearfield_target_block_slots),
+            "max_leaf_particle_slots": int(leaf_particle_slots),
+            "leaf_shapes": tuple(leaf_shapes),
+        }
+
+    def _compiled_profile_fingerprint(self: "FastMultipoleMethod", profile: dict[str, Any]) -> str:
+        payload = json.dumps(profile, sort_keys=True, separators=(",", ":"))
+        return hashlib.sha1(payload.encode("utf-8")).hexdigest()
+
+    def _compiled_profile_capacity_compatible(
+        self: "FastMultipoleMethod",
+        base_profile: dict[str, Any],
+        candidate_profile: dict[str, Any],
+    ) -> bool:
+        """Return True when candidate usage fits within base profile capacities."""
+        capacity_fields = (
+            "max_nodes",
+            "max_leaves",
+            "max_nearfield_blocks",
+            "max_nearfield_target_block_slots",
+            "max_leaf_particle_slots",
+        )
+        return all(
+            int(candidate_profile.get(name, 0)) <= int(base_profile.get(name, 0))
+            for name in capacity_fields
+        )
+
+    def _compiled_profile_record_transition(
+        self: "FastMultipoleMethod",
+        profile_fingerprint: str,
+    ) -> None:
+        prev = self._compiled_profile_fingerprint_last
+        if prev is not None and profile_fingerprint != prev:
+            self._compiled_profile_transitions += 1
+        self._compiled_profile_fingerprint_last = profile_fingerprint
+
+    def get_runtime_diagnostics(self: "FastMultipoleMethod") -> dict[str, Any]:
+        """Return read-only runtime diagnostics for compile/profile reuse audits."""
+        return {
+            "compiled_profile_fingerprint_last": self._compiled_profile_fingerprint_last,
+            "compiled_profile_transitions": int(self._compiled_profile_transitions),
+            "refresh_prepare_calls": int(self._compiled_profile_refresh_calls),
+            "refresh_prepare_reuse_tier_full": int(
+                self._compiled_profile_refresh_reuse_tier_full
+            ),
+            "refresh_prepare_reuse_tier_topology": int(
+                self._compiled_profile_refresh_reuse_tier_topology
+            ),
+            "refresh_prepare_reuse_tier_overflow": int(
+                self._compiled_profile_refresh_reuse_tier_overflow
+            ),
+            "large_n_same_topology_refresh_attempts": int(
+                self._large_n_same_topology_refresh_attempts
+            ),
+            "large_n_same_topology_refresh_hits": int(
+                self._large_n_same_topology_refresh_hits
+            ),
+            "large_n_same_topology_refresh_misses": int(
+                self._large_n_same_topology_refresh_misses
+            ),
+            "large_n_same_topology_refresh_miss_no_key": int(
+                self._large_n_same_topology_refresh_miss_no_key
+            ),
+            "large_n_same_topology_refresh_miss_topology": int(
+                self._large_n_same_topology_refresh_miss_topology
+            ),
+            "large_n_same_topology_refresh_miss_neighbor": int(
+                self._large_n_same_topology_refresh_miss_neighbor
+            ),
+            "large_n_same_topology_refresh_miss_traced": int(
+                self._large_n_same_topology_refresh_miss_traced
+            ),
+            "large_n_same_topology_refresh_last_error": str(
+                self._large_n_same_topology_refresh_last_error
+            ),
+            "static_radix_refresh_hits": int(self._static_radix_refresh_hits),
+            "static_radix_refresh_misses": int(self._static_radix_refresh_misses),
+            "static_radix_profile_overflows": int(
+                self._static_radix_profile_overflows
+            ),
+            "update_multipoles_only_calls": int(
+                self._compiled_profile_multipoles_only_calls
+            ),
+            "rebuild_topology_in_place_calls": int(
+                self._compiled_profile_topology_rebuild_calls
+            ),
+            "large_n_overflow_profile_cap": int(self._large_n_overflow_profile_cap),
+            "large_n_overflow_profile_reprofiles": int(
+                self._large_n_overflow_profile_reprofiles
+            ),
+            "large_n_neighbor_edges_profile_cap": int(
+                self._large_n_neighbor_edges_profile_cap
+            ),
+            "large_n_neighbor_edges_profile_reprofiles": int(
+                self._large_n_neighbor_edges_profile_reprofiles
+            ),
+            "interaction_cache_hits": int(self._interaction_cache_hits),
+            "interaction_cache_misses": int(self._interaction_cache_misses),
+            "recent_dual_node_count": int(self._recent_dual_node_count),
+            "recent_dual_leaf_count": int(self._recent_dual_leaf_count),
+            "recent_dual_neighbor_count": int(self._recent_dual_neighbor_count),
+            "recent_dual_far_pair_count": int(self._recent_dual_far_pair_count),
+            "recent_dual_far_pairs_by_gear_counts": tuple(
+                int(v) for v in self._recent_far_pairs_by_gear_counts
+            ),
+            "recent_dual_m2l_chunk_size": int(self._recent_dual_m2l_chunk_size),
+            "refresh_total_seconds": float(self._refresh_timing_total_seconds),
+            "refresh_input_seconds": float(self._refresh_timing_input_seconds),
+            "refresh_tree_upward_seconds": float(
+                self._refresh_timing_tree_upward_seconds
+            ),
+            "refresh_dual_downward_seconds": float(
+                self._refresh_timing_dual_downward_seconds
+            ),
+            "refresh_nearfield_seconds": float(self._refresh_timing_nearfield_seconds),
+            "refresh_profile_accounting_seconds": float(
+                self._refresh_timing_profile_accounting_seconds
+            ),
+            "refresh_compile_or_sync_suspect_seconds": float(
+                self._refresh_timing_compile_or_sync_suspect_seconds
+            ),
+            "refresh_dual_setup_seconds": float(
+                self._refresh_timing_dual_setup_seconds
+            ),
+            "refresh_dual_artifact_build_seconds": float(
+                self._refresh_timing_dual_artifact_build_seconds
+            ),
+            "refresh_dual_far_pair_plan_seconds": float(
+                self._refresh_timing_dual_far_pair_plan_seconds
+            ),
+            "refresh_dual_m2l_autotune_seconds": float(
+                self._refresh_timing_dual_m2l_autotune_seconds
+            ),
+            "refresh_dual_select_interactions_seconds": float(
+                self._refresh_timing_dual_select_interactions_seconds
+            ),
+            "refresh_dual_downward_compute_seconds": float(
+                self._refresh_timing_dual_downward_compute_seconds
+            ),
+            "refresh_dual_m2l_compute_seconds": float(
+                self._refresh_timing_dual_m2l_compute_seconds
+            ),
+            "refresh_dual_l2l_compute_seconds": float(
+                self._refresh_timing_dual_l2l_compute_seconds
+            ),
+            "refresh_dual_final_symmetry_seconds": float(
+                self._refresh_timing_dual_final_symmetry_seconds
+            ),
+            "refresh_dual_source_motion_seconds": float(
+                self._refresh_timing_dual_source_motion_seconds
+            ),
+            "refresh_dual_finalize_seconds": float(
+                self._refresh_timing_dual_finalize_seconds
+            ),
+            "refresh_dual_residual_seconds": float(
+                self._refresh_timing_dual_residual_seconds
+            ),
+            "refresh_nearfield_leaf_groups_seconds": float(
+                self._refresh_timing_nearfield_leaf_groups_seconds
+            ),
+            "refresh_nearfield_precompute_seconds": float(
+                self._refresh_timing_nearfield_precompute_seconds
+            ),
+            "refresh_nearfield_target_blocks_seconds": float(
+                self._refresh_timing_nearfield_target_blocks_seconds
+            ),
+            "refresh_nearfield_block_sort_seconds": float(
+                self._refresh_timing_nearfield_block_sort_seconds
+            ),
+            "refresh_nearfield_speed_layout_seconds": float(
+                self._refresh_timing_nearfield_speed_layout_seconds
+            ),
+            "refresh_nearfield_overflow_profile_seconds": float(
+                self._refresh_timing_nearfield_overflow_profile_seconds
+            ),
+            "refresh_nearfield_radix_payload_seconds": float(
+                self._refresh_timing_nearfield_radix_payload_seconds
+            ),
+            "refresh_nearfield_neighbor_padding_seconds": float(
+                self._refresh_timing_nearfield_neighbor_padding_seconds
+            ),
+            "refresh_nearfield_state_pack_seconds": float(
+                self._refresh_timing_nearfield_state_pack_seconds
+            ),
+            "refresh_nearfield_residual_seconds": float(
+                self._refresh_timing_nearfield_residual_seconds
+            ),
+            "refresh_timing_calls": int(self._refresh_timing_calls),
+        }
+
+    def refresh_prepared_state(
+        self: "FastMultipoleMethod",
+        prepared_state: PreparedStateLike,
+        positions: Array,
+        masses: Array,
+        *,
+        bounds: Optional[Tuple[Array, Array]] = None,
+        leaf_size: Optional[int] = None,
+        max_order: Optional[int] = None,
+        theta: Optional[float] = None,
+    ) -> PreparedStateLike:
+        """Refresh prepared state under large-N/radix profile constraints."""
+        if not self._is_large_n_gpu_production_profile():
+            raise NotImplementedError(
+                "refresh_prepared_state is currently supported only for "
+                "preset='large_n_gpu', tree_type='radix', expansion_basis='solidfmm'."
+            )
+        if not isinstance(prepared_state, LargeNPreparedState):
+            raise NotImplementedError(
+                "refresh_prepared_state currently supports LargeNPreparedState only."
+            )
+
+        self._compiled_profile_refresh_calls += 1
+        refresh_t0 = time.perf_counter()
+        input_before = float(getattr(self, "_refresh_timing_input_seconds", 0.0))
+        tree_before = float(getattr(self, "_refresh_timing_tree_upward_seconds", 0.0))
+        dual_before = float(getattr(self, "_refresh_timing_dual_downward_seconds", 0.0))
+        nearfield_before = float(getattr(self, "_refresh_timing_nearfield_seconds", 0.0))
+        profile_t0 = time.perf_counter()
+        prev_profile = self._compiled_profile_from_prepared_state(prepared_state)
+        prev_fingerprint = self._compiled_profile_fingerprint(prev_profile)
+        profile_seconds = time.perf_counter() - profile_t0
+
+        was_refresh_timing_active = bool(getattr(self, "_refresh_timing_active", False))
+        self._refresh_timing_active = True
+        try:
+            next_state = self._refresh_large_n_same_topology(
+                prepared_state,
+                positions,
+                masses,
+                bounds=bounds,
+                leaf_size=int(prepared_state.max_leaf_size if leaf_size is None else leaf_size),
+                max_order=(
+                    int(prepared_state.local_data.order)
+                    if max_order is None
+                    else int(max_order)
+                ),
+                theta=theta,
+            )
+            if next_state is None:
+                next_state = self.prepare_state(
+                    positions,
+                    masses,
+                    bounds=bounds,
+                    leaf_size=int(
+                        prepared_state.max_leaf_size if leaf_size is None else leaf_size
+                    ),
+                    max_order=(
+                        int(prepared_state.local_data.order)
+                        if max_order is None
+                        else int(max_order)
+                    ),
+                    theta=theta,
+                )
+        finally:
+            self._refresh_timing_active = was_refresh_timing_active
+        prepare_elapsed = time.perf_counter() - refresh_t0
+
+        profile_t0 = time.perf_counter()
+        next_profile = self._compiled_profile_from_prepared_state(next_state)
+        next_fingerprint = self._compiled_profile_fingerprint(next_profile)
+        self._compiled_profile_record_transition(next_fingerprint)
+
+        if next_fingerprint == prev_fingerprint:
+            self._compiled_profile_refresh_reuse_tier_full += 1
+        elif self._compiled_profile_capacity_compatible(prev_profile, next_profile):
+            self._compiled_profile_refresh_reuse_tier_topology += 1
+        else:
+            self._compiled_profile_refresh_reuse_tier_overflow += 1
+        profile_seconds += time.perf_counter() - profile_t0
+        total_elapsed = time.perf_counter() - refresh_t0
+        input_delta = float(getattr(self, "_refresh_timing_input_seconds", 0.0)) - input_before
+        tree_delta = (
+            float(getattr(self, "_refresh_timing_tree_upward_seconds", 0.0))
+            - tree_before
+        )
+        dual_delta = (
+            float(getattr(self, "_refresh_timing_dual_downward_seconds", 0.0))
+            - dual_before
+        )
+        nearfield_delta = (
+            float(getattr(self, "_refresh_timing_nearfield_seconds", 0.0))
+            - nearfield_before
+        )
+        stage_sum = (
+            input_delta
+            + tree_delta
+            + dual_delta
+            + nearfield_delta
+            + float(profile_seconds)
+        )
+        # prepare_large_n_state records cumulative stage timings directly on
+        # the solver. Attribute the unaccounted part of this refresh to Python
+        # overhead, sync, compilation, or other work outside the explicit
+        # large-N stage timers.
+        self._refresh_timing_profile_accounting_seconds += float(profile_seconds)
+        self._refresh_timing_total_seconds += float(total_elapsed)
+        self._refresh_timing_compile_or_sync_suspect_seconds += max(
+            0.0,
+            float(total_elapsed) - float(stage_sum),
+        )
+        self._refresh_timing_calls += 1
+        return next_state
+
+    def _refresh_large_n_same_topology(
+        self: "FastMultipoleMethod",
+        prepared_state: LargeNPreparedState,
+        positions: Array,
+        masses: Array,
+        *,
+        bounds: Optional[Tuple[Array, Array]],
+        leaf_size: int,
+        max_order: int,
+        theta: Optional[float],
+    ) -> Optional[LargeNPreparedState]:
+        """Refresh large-N numeric payloads when the radix topology is unchanged."""
+
+        self._large_n_same_topology_refresh_attempts += 1
+        if not isinstance(prepared_state.tree, RadixTree):
+            self._large_n_same_topology_refresh_misses += 1
+            self._large_n_same_topology_refresh_miss_no_key += 1
+            return None
+
+        input_t0 = time.perf_counter()
+        positions_arr, masses_arr, input_dtype = self._prepare_state_input_arrays(
+            positions,
+            masses,
+        )
+        if bool(getattr(self, "_refresh_timing_active", False)):
+            self._refresh_timing_input_seconds += time.perf_counter() - input_t0
+        allow_stateful_cache = not _contains_tracer((positions_arr, masses_arr))
+        if not allow_stateful_cache:
+            self._large_n_same_topology_refresh_misses += 1
+            self._large_n_same_topology_refresh_miss_traced += 1
+            return None
+
+        self._validate_prepare_state_request(
+            leaf_size=int(leaf_size),
+            max_order=int(max_order),
+        )
+        runtime_overrides = self._resolve_runtime_execution_overrides(
+            num_particles=int(positions_arr.shape[0]),
+        )
+        runtime_traversal_config = runtime_overrides.traversal_config
+        runtime_m2l_chunk_size = runtime_overrides.m2l_chunk_size
+        runtime_l2l_chunk_size = runtime_overrides.l2l_chunk_size
+        upward_center_mode = runtime_overrides.center_mode
+        refine_local_val = self.refine_local
+        if runtime_overrides.refine_local_override is not None:
+            refine_local_val = bool(runtime_overrides.refine_local_override)
+        max_refine_levels_val = self.max_refine_levels
+        aspect_threshold_val = self.aspect_threshold
+        theta_val = float(self.theta if theta is None else theta)
+        mac_type_val = self._base_mac_type()
+
+        tree_config = self.config.tree
+        if self.tree_type != "radix" and tree_config.mode in (
+            "fixed_depth",
+            "static_radix",
+        ):
+            tree_config = TreeBuilderConfig(
+                mode="lbvh",
+                target_leaf_particles=tree_config.target_leaf_particles,
+                refine_local=tree_config.refine_local,
+                max_refine_levels=tree_config.max_refine_levels,
+                aspect_threshold=tree_config.aspect_threshold,
+            )
+        inferred_bounds = self._resolve_prepare_state_bounds(
+            positions=positions_arr,
+            bounds=bounds,
+        )
+
+        tree_t0 = time.perf_counter()
+        refresh_topology_key = getattr(prepared_state, "topology_key", None)
+        topology_candidate = None
+        if tree_config.mode == "static_radix":
+            try:
+                next_state = self.prepare_state(
+                    positions_arr,
+                    masses_arr,
+                    bounds=bounds,
+                    leaf_size=int(leaf_size),
+                    max_order=int(max_order),
+                    theta=theta,
+                )
+            except Exception as exc:
+                self._large_n_same_topology_refresh_last_error = (
+                    f"{type(exc).__name__}: {exc}"
+                )
+                self._large_n_same_topology_refresh_misses += 1
+                self._large_n_same_topology_refresh_miss_topology += 1
+                self._static_radix_refresh_misses += 1
+                return None
+
+            prev_profile = self._compiled_profile_from_prepared_state(prepared_state)
+            next_profile = self._compiled_profile_from_prepared_state(next_state)
+            same_profile = self._compiled_profile_fingerprint(prev_profile) == (
+                self._compiled_profile_fingerprint(next_profile)
+            )
+            compatible_profile = self._compiled_profile_capacity_compatible(
+                prev_profile,
+                next_profile,
+            )
+            if not (same_profile or compatible_profile):
+                self._large_n_same_topology_refresh_misses += 1
+                self._large_n_same_topology_refresh_miss_topology += 1
+                self._static_radix_refresh_misses += 1
+                self._static_radix_profile_overflows += 1
+                self._large_n_same_topology_refresh_last_error = (
+                    "static_radix refreshed profile exceeded previous capacities"
+                )
+                return None
+            self._large_n_same_topology_refresh_hits += 1
+            self._static_radix_refresh_hits += 1
+            return next_state
+        else:
+            previous_topology_key = refresh_topology_key
+            if previous_topology_key is None:
+                previous_codes = getattr(prepared_state.tree, "morton_codes", None)
+                if previous_codes is not None:
+                    previous_topology_key = self._topology_reuse_key_from_sorted_codes(
+                        sorted_codes=jnp.asarray(previous_codes),
+                        tree_config=tree_config,
+                        leaf_size=int(leaf_size),
+                        refine_local=refine_local_val,
+                        max_refine_levels=max_refine_levels_val,
+                        aspect_threshold=aspect_threshold_val,
+                    )
+            if previous_topology_key is None:
+                self._large_n_same_topology_refresh_misses += 1
+                self._large_n_same_topology_refresh_miss_no_key += 1
+                return None
+            try:
+                morton_codes = morton_encode(positions_arr, inferred_bounds)
+                orig_idx = jnp.arange(positions_arr.shape[0], dtype=INDEX_DTYPE)
+                sorted_indices = jnp.lexsort((orig_idx, morton_codes))
+                sorted_codes = morton_codes[sorted_indices]
+                topology_key = self._topology_reuse_key_from_sorted_codes(
+                    sorted_codes=sorted_codes,
+                    tree_config=tree_config,
+                    leaf_size=int(leaf_size),
+                    refine_local=refine_local_val,
+                    max_refine_levels=max_refine_levels_val,
+                    aspect_threshold=aspect_threshold_val,
+                )
+                if topology_key is not None:
+                    topology_candidate = _TopologyReuseCandidate(
+                        key=topology_key,
+                        sorted_indices=jnp.asarray(sorted_indices, dtype=INDEX_DTYPE),
+                    )
+            except Exception:
+                topology_candidate = None
+            if (
+                topology_candidate is None
+                or topology_candidate.key != previous_topology_key
+            ):
+                self._large_n_same_topology_refresh_misses += 1
+                self._large_n_same_topology_refresh_miss_topology += 1
+                return None
+
+            topology_entry = _TopologyReuseEntry(
+                key=str(previous_topology_key),
+                tree=prepared_state.tree,
+                max_leaf_size=int(prepared_state.max_leaf_size),
+                cache_leaf_parameter=int(leaf_size),
+                reuse_count=0,
+            )
+            build_artifacts = self._rebuild_tree_artifacts_from_topology(
+                candidate=topology_candidate,
+                entry=topology_entry,
+                positions=positions_arr,
+                masses=masses_arr,
+            )
+            refresh_topology_key = topology_candidate.key
+        upward = self.prepare_upward_sweep(
+            build_artifacts.tree,
+            build_artifacts.positions_sorted,
+            build_artifacts.masses_sorted,
+            max_order=int(max_order),
+            center_mode=upward_center_mode,
+            max_leaf_size=int(build_artifacts.max_leaf_size),
+        )
+        locals_template = self._build_locals_template_for_prepare_state(
+            tree=build_artifacts.tree,
+            upward=upward,
+            max_order=int(max_order),
+            pos_sorted=build_artifacts.positions_sorted,
+        )
+        tree_artifacts = _PrepareStateTreeUpwardArtifacts(
+            tree_mode=tree_config.mode,
+            tree=build_artifacts.tree,
+            positions_sorted=build_artifacts.positions_sorted,
+            masses_sorted=build_artifacts.masses_sorted,
+            inverse_permutation=build_artifacts.inverse_permutation,
+            leaf_cap=int(build_artifacts.max_leaf_size),
+            leaf_parameter=int(build_artifacts.cache_leaf_parameter),
+            topology_key=refresh_topology_key,
+            upward=upward,
+            locals_template=locals_template,
+        )
+        if bool(getattr(self, "_refresh_timing_active", False)):
+            self._refresh_timing_tree_upward_seconds += time.perf_counter() - tree_t0
+
+        collected_retries: list[DualTreeRetryEvent] = []
+
+        def record_retry(event: DualTreeRetryEvent) -> None:
+            collected_retries.append(event)
+            if self.interaction_retry_logger is not None:
+                self.interaction_retry_logger(event)
+
+        dual_t0 = time.perf_counter()
+        dual_downward_artifacts = self._prepare_state_dual_and_downward(
+            tree_artifacts=tree_artifacts,
+            force_scale_nodes=prepared_state.force_scale_nodes,
+            upward_center_mode=upward_center_mode,
+            theta_val=theta_val,
+            mac_type_val=mac_type_val,
+            dehnen_radius_scale=self.dehnen_radius_scale,
+            runtime_traversal_config=runtime_traversal_config,
+            runtime_m2l_chunk_size=runtime_m2l_chunk_size,
+            runtime_l2l_chunk_size=runtime_l2l_chunk_size,
+            grouped_interactions=False,
+            farfield_mode="pair_grouped",
+            record_retry=record_retry,
+            refine_local_val=refine_local_val,
+            max_refine_levels_val=max_refine_levels_val,
+            aspect_threshold_val=aspect_threshold_val,
+            allow_stateful_cache=True,
+        )
+        if bool(getattr(self, "_refresh_timing_active", False)):
+            elapsed = time.perf_counter() - dual_t0
+            recorded = float(getattr(self, "_refresh_timing_dual_downward_seconds", 0.0))
+            # _prepare_state_dual_and_downward records detailed timing itself.
+            # Keep this branch intentionally empty except to make the elapsed
+            # value visible while avoiding double accounting.
+            _ = (elapsed, recorded)
+
+        if not self._large_n_neighbor_list_matches(
+            prepared_state.neighbor_list,
+            dual_downward_artifacts.neighbor_list,
+        ):
+            self._large_n_same_topology_refresh_misses += 1
+            self._large_n_same_topology_refresh_miss_neighbor += 1
+            return None
+
+        self._large_n_same_topology_refresh_hits += 1
+
+        if allow_stateful_cache:
+            self._update_locals_template_cache_after_prepare(
+                locals_template=tree_artifacts.locals_template,
+                upward=tree_artifacts.upward,
+                max_order=int(max_order),
+            )
+            self._recent_retry_events = tuple(collected_retries)
+            self._topology_reuse_entry = _TopologyReuseEntry(
+                key=str(refresh_topology_key),
+                tree=tree_artifacts.tree,
+                max_leaf_size=int(tree_artifacts.leaf_cap),
+                cache_leaf_parameter=int(tree_artifacts.leaf_parameter),
+                reuse_count=0,
+            )
+
+        return LargeNPreparedState(
+            tree=tree_artifacts.tree,
+            local_data=dual_downward_artifacts.downward.locals,
+            neighbor_list=prepared_state.neighbor_list,
+            nearfield_leaf_particle_indices=prepared_state.nearfield_leaf_particle_indices,
+            nearfield_leaf_particle_mask=prepared_state.nearfield_leaf_particle_mask,
+            nearfield_target_leaf_ids=prepared_state.nearfield_target_leaf_ids,
+            nearfield_source_leaf_ids=prepared_state.nearfield_source_leaf_ids,
+            nearfield_valid_pairs=prepared_state.nearfield_valid_pairs,
+            nearfield_chunk_sort_indices=prepared_state.nearfield_chunk_sort_indices,
+            nearfield_chunk_group_ids=prepared_state.nearfield_chunk_group_ids,
+            nearfield_chunk_unique_indices=prepared_state.nearfield_chunk_unique_indices,
+            nearfield_target_block_leaf_ids=prepared_state.nearfield_target_block_leaf_ids,
+            nearfield_target_block_source_leaf_ids=prepared_state.nearfield_target_block_source_leaf_ids,
+            nearfield_target_block_valid_mask=prepared_state.nearfield_target_block_valid_mask,
+            nearfield_target_block_offsets=prepared_state.nearfield_target_block_offsets,
+            nearfield_target_block_source_leaf_ids_padded=(
+                prepared_state.nearfield_target_block_source_leaf_ids_padded
+            ),
+            nearfield_target_block_valid_mask_padded=(
+                prepared_state.nearfield_target_block_valid_mask_padded
+            ),
+            nearfield_target_block_size=int(prepared_state.nearfield_target_block_size),
+            max_leaf_size=int(prepared_state.max_leaf_size),
+            input_dtype=jnp.dtype(input_dtype),
+            working_dtype=jnp.dtype(positions_arr.dtype),
+            theta=float(theta_val),
+            topology_key=refresh_topology_key,
+            retry_events=tuple(collected_retries),
+            force_scale_nodes=prepared_state.force_scale_nodes,
+            execution_backend=prepared_state.execution_backend,
+            expansion_basis=prepared_state.expansion_basis,
+            nearfield_mode=prepared_state.nearfield_mode,
+            nearfield_edge_chunk_size=int(prepared_state.nearfield_edge_chunk_size),
+            nearfield_delayed_scatter_chunks_per_superchunk=int(
+                prepared_state.nearfield_delayed_scatter_chunks_per_superchunk
+            ),
+            nearfield_chunk_scan_batch_size=int(
+                prepared_state.nearfield_chunk_scan_batch_size
+            ),
+            nearfield_chunk_scan_unroll=int(prepared_state.nearfield_chunk_scan_unroll),
+            nearfield_superchunk_scan_unroll=int(
+                prepared_state.nearfield_superchunk_scan_unroll
+            ),
+            nearfield_sorted_scatter_hint=bool(
+                prepared_state.nearfield_sorted_scatter_hint
+            ),
+            nearfield_grouped_sorted_scatter=bool(
+                prepared_state.nearfield_grouped_sorted_scatter
+            ),
+            nearfield_superchunk_target_reduce=bool(
+                prepared_state.nearfield_superchunk_target_reduce
+            ),
+            nearfield_disable_chunk_cond=bool(
+                prepared_state.nearfield_disable_chunk_cond
+            ),
+            nearfield_target_leaf_batch_size=int(
+                prepared_state.nearfield_target_leaf_batch_size
+            ),
+            nearfield_target_block_tile_size=int(
+                prepared_state.nearfield_target_block_tile_size
+            ),
+            nearfield_target_block_tile_scan_unroll=int(
+                prepared_state.nearfield_target_block_tile_scan_unroll
+            ),
+            nearfield_target_block_batch_scan_unroll=int(
+                prepared_state.nearfield_target_block_batch_scan_unroll
+            ),
+            nearfield_target_block_overflow_fast_max_blocks=int(
+                prepared_state.nearfield_target_block_overflow_fast_max_blocks
+            ),
+            nearfield_target_block_overflow_profile_capacity=int(
+                prepared_state.nearfield_target_block_overflow_profile_capacity
+            ),
+            nearfield_target_block_overflow_active_blocks=int(
+                prepared_state.nearfield_target_block_overflow_active_blocks
+            ),
+            speed_prepared_layout=bool(prepared_state.speed_prepared_layout),
+            radix_fast_lane=bool(prepared_state.radix_fast_lane),
+            disable_specialized_large_n_nearfield=bool(
+                prepared_state.disable_specialized_large_n_nearfield
+            ),
+            radix_fast_payload=prepared_state.radix_fast_payload,
+        )
+
+    def _large_n_neighbor_list_matches(
+        self: "FastMultipoleMethod",
+        previous: NodeNeighborList,
+        current: NodeNeighborList,
+    ) -> bool:
+        """Return True when current active neighbor edges match previous state."""
+
+        try:
+            prev_offsets = np.asarray(jax.device_get(previous.offsets))
+            cur_offsets = np.asarray(jax.device_get(current.offsets))
+            prev_counts = np.asarray(jax.device_get(previous.counts))
+            cur_counts = np.asarray(jax.device_get(current.counts))
+            prev_leaf = np.asarray(jax.device_get(previous.leaf_indices))
+            cur_leaf = np.asarray(jax.device_get(current.leaf_indices))
+            if (
+                prev_offsets.shape != cur_offsets.shape
+                or prev_counts.shape != cur_counts.shape
+                or prev_leaf.shape != cur_leaf.shape
+            ):
+                return False
+            if (
+                not np.array_equal(prev_offsets, cur_offsets)
+                or not np.array_equal(prev_counts, cur_counts)
+                or not np.array_equal(prev_leaf, cur_leaf)
+            ):
+                return False
+            active_edges = int(cur_offsets[-1]) if cur_offsets.size > 0 else 0
+            prev_neighbors = np.asarray(jax.device_get(previous.neighbors))
+            cur_neighbors = np.asarray(jax.device_get(current.neighbors))
+            if int(prev_neighbors.shape[0]) < active_edges:
+                return False
+            if int(cur_neighbors.shape[0]) < active_edges:
+                return False
+            return bool(
+                np.array_equal(
+                    prev_neighbors[:active_edges],
+                    cur_neighbors[:active_edges],
+                )
+            )
+        except Exception:
+            return False
+
+    def update_multipoles_only(
+        self: "FastMultipoleMethod",
+        prepared_state: PreparedStateLike,
+        positions: Array,
+        masses: Array,
+        *,
+        leaf_size: Optional[int] = None,
+        max_order: Optional[int] = None,
+        theta: Optional[float] = None,
+    ) -> PreparedStateLike:
+        """Refresh multipole/local payloads when topology key remains unchanged."""
+        if not self._is_large_n_gpu_production_profile():
+            raise NotImplementedError(
+                "update_multipoles_only is currently supported only for "
+                "preset='large_n_gpu', tree_type='radix', expansion_basis='solidfmm'."
+            )
+        if not isinstance(prepared_state, LargeNPreparedState):
+            raise NotImplementedError(
+                "update_multipoles_only currently supports LargeNPreparedState only."
+            )
+        self._compiled_profile_multipoles_only_calls += 1
+        refreshed = self.refresh_prepared_state(
+            prepared_state,
+            positions,
+            masses,
+            leaf_size=leaf_size,
+            max_order=max_order,
+            theta=theta,
+        )
+        if getattr(refreshed, "topology_key", None) != getattr(
+            prepared_state, "topology_key", None
+        ):
+            raise RuntimeError(
+                "Topology changed during update_multipoles_only; "
+                "use rebuild_topology_in_place for topology updates."
+            )
+        return refreshed
+
+    def rebuild_topology_in_place(
+        self: "FastMultipoleMethod",
+        prepared_state: PreparedStateLike,
+        positions: Array,
+        masses: Array,
+        *,
+        bounds: Optional[Tuple[Array, Array]] = None,
+        leaf_size: Optional[int] = None,
+        max_order: Optional[int] = None,
+        theta: Optional[float] = None,
+    ) -> PreparedStateLike:
+        """Rebuild topology while attempting to remain profile-capacity compatible."""
+        if not self._is_large_n_gpu_production_profile():
+            raise NotImplementedError(
+                "rebuild_topology_in_place is currently supported only for "
+                "preset='large_n_gpu', tree_type='radix', expansion_basis='solidfmm'."
+            )
+        if not isinstance(prepared_state, LargeNPreparedState):
+            raise NotImplementedError(
+                "rebuild_topology_in_place currently supports LargeNPreparedState only."
+            )
+        self._compiled_profile_topology_rebuild_calls += 1
+        return self.refresh_prepared_state(
+            prepared_state,
+            positions,
+            masses,
+            bounds=bounds,
+            leaf_size=leaf_size,
+            max_order=max_order,
+            theta=theta,
+        )
 
     def export_m2l_autotune_cache(self: "FastMultipoleMethod") -> list[dict[str, Any]]:
         """Return a JSON-serializable snapshot of global M2L autotune results."""
@@ -3209,7 +4170,8 @@ class FastMultipoleMethod:
     ) -> tuple[Array, Array]:
         """Return bounds converted to the working dtype or infer them."""
         if bounds is None:
-            return _infer_bounds(positions)
+            min_corner, max_corner = _infer_bounds(positions)
+            return min_corner, max_corner
         min_corner, max_corner = bounds
         return (
             jnp.asarray(min_corner, dtype=positions.dtype),
@@ -3291,6 +4253,29 @@ class FastMultipoleMethod:
             return None
         return hasher.hexdigest()
 
+    def _static_radix_topology_key_from_tree(
+        self,
+        tree: RadixTree,
+        *,
+        leaf_size: int,
+    ) -> Optional[str]:
+        """Return a stable key for a static-radix data-structure shape."""
+
+        try:
+            hasher = hashlib.sha256()
+            hasher.update(b"static_radix_topology_v1")
+            for value, dtype in (
+                (tree.parent, np.int64),
+                (tree.left_child, np.int64),
+                (tree.right_child, np.int64),
+                (tree.node_ranges, np.int64),
+            ):
+                hasher.update(np.asarray(jax.device_get(value), dtype=dtype).tobytes())
+            hasher.update(np.asarray(int(leaf_size), dtype=np.int64).tobytes())
+        except Exception:
+            return None
+        return hasher.hexdigest()
+
     def _rebuild_tree_artifacts_from_topology(
         self,
         *,
@@ -3325,6 +4310,41 @@ class FastMultipoleMethod:
             workspace=cached_tree.workspace,
             max_leaf_size=int(entry.max_leaf_size),
             cache_leaf_parameter=int(entry.cache_leaf_parameter),
+        )
+
+    def _rebuild_static_radix_tree_artifacts_from_template(
+        self,
+        *,
+        template_tree: RadixTree,
+        positions: Array,
+        masses: Array,
+        leaf_size: int,
+        bounds: Optional[Tuple[Array, Array]],
+    ) -> _TreeBuildArtifacts:
+        """Refresh payload arrays against a static-radix data structure."""
+
+        result = rebuild_static_radix_tree_from_template(
+            positions,
+            masses,
+            template_tree,
+            bounds=bounds,
+            return_reordered=True,
+        )
+        rebuilt_tree, positions_sorted, masses_sorted, inverse = result
+        max_leaf_size = _max_leaf_size_from_tree(rebuilt_tree)
+        if int(max_leaf_size) > int(leaf_size):
+            raise ValueError(
+                "static_radix refresh exceeded leaf capacity: "
+                f"max_leaf_size={int(max_leaf_size)} leaf_size={int(leaf_size)}"
+            )
+        return _TreeBuildArtifacts(
+            tree=rebuilt_tree,
+            positions_sorted=positions_sorted,
+            masses_sorted=masses_sorted,
+            inverse_permutation=inverse,
+            workspace=getattr(template_tree, "workspace", None),
+            max_leaf_size=int(max_leaf_size),
+            cache_leaf_parameter=int(leaf_size),
         )
 
     def _build_locals_template_for_prepare_state(
@@ -3381,7 +4401,10 @@ class FastMultipoleMethod:
     ) -> _PrepareStateTreeUpwardArtifacts:
         """Build tree artifacts and run upward preparation for prepare_state."""
         tree_config = self.config.tree
-        if self.tree_type != "radix" and tree_config.mode == "fixed_depth":
+        if self.tree_type != "radix" and tree_config.mode in (
+            "fixed_depth",
+            "static_radix",
+        ):
             tree_config = TreeBuilderConfig(
                 mode="lbvh",
                 target_leaf_particles=tree_config.target_leaf_particles,
@@ -3453,10 +4476,17 @@ class FastMultipoleMethod:
             )
             if allow_stateful_cache:
                 self._tree_workspace = build_artifacts.workspace
+                if tree_config.mode == "static_radix":
+                    topology_key_for_state = (
+                        self._static_radix_topology_key_from_tree(
+                            build_artifacts.tree,
+                            leaf_size=int(leaf_size),
+                        )
+                    )
                 if self.reuse_topology:
                     if topology_candidate is not None:
                         topology_key_for_state = topology_candidate.key
-                    else:
+                    elif topology_key_for_state is None:
                         topology_key_for_state = (
                             self._topology_reuse_key_from_sorted_codes(
                                 sorted_codes=build_artifacts.tree.morton_codes,
@@ -3599,6 +4629,22 @@ class FastMultipoleMethod:
         grouped schedules and other M2L feed artifacts are transient and should
         stay scoped to this helper.
         """
+        refresh_timing_active = bool(getattr(self, "_refresh_timing_active", False))
+        dual_total_t0 = time.perf_counter()
+        dual_stage_sum = 0.0
+
+        def _record_dual_stage(attr: str, start: float) -> None:
+            nonlocal dual_stage_sum
+            elapsed = float(time.perf_counter() - start)
+            dual_stage_sum += elapsed
+            if refresh_timing_active:
+                setattr(
+                    self,
+                    attr,
+                    float(getattr(self, attr, 0.0)) + elapsed,
+                )
+
+        stage_t0 = time.perf_counter()
         pair_policy = None
         policy_state = None
         cache_key = None
@@ -3733,7 +4779,9 @@ class FastMultipoleMethod:
         split_build_env_raw = os.environ.get(
             "JACCPOT_PREPARE_STAGE_MEMORY_SPLIT_ENABLED"
         )
-        if split_build_env_raw is None:
+        if self.prepare_stage_memory_split_enabled is not None:
+            allow_split_build = bool(self.prepare_stage_memory_split_enabled)
+        elif split_build_env_raw is None:
             # Default to the lower-peak split traversal build in the production
             # minimum-memory streamed GPU path; keep env opt-out for debugging.
             allow_split_build = bool(
@@ -3752,6 +4800,9 @@ class FastMultipoleMethod:
                 "on",
             }
         _prepare_diag(f"allow_split_build={bool(allow_split_build)}")
+        _record_dual_stage("_refresh_timing_dual_setup_seconds", stage_t0)
+
+        stage_t0 = time.perf_counter()
         dual_artifacts, cache_entry = _build_dual_tree_artifacts(
             tree_artifacts.tree,
             tree_artifacts.upward.geometry,
@@ -3782,8 +4833,15 @@ class FastMultipoleMethod:
             jit_traversal=jit_traversal_for_prepare,
         )
         if stateful_cache_enabled:
+            if bool(getattr(dual_artifacts, "cache_hit", False)):
+                self._interaction_cache_hits += 1
+            else:
+                self._interaction_cache_misses += 1
+        _record_dual_stage("_refresh_timing_dual_artifact_build_seconds", stage_t0)
+        if stateful_cache_enabled:
             self._interaction_cache = cache_entry
 
+        stage_t0 = time.perf_counter()
         (
             interactions,
             neighbor_list,
@@ -3803,6 +4861,15 @@ class FastMultipoleMethod:
             far_pair_count_diag = int(compact_far_pairs.sources.shape[0])
         elif interactions is not None:
             far_pair_count_diag = int(interactions.sources.shape[0])
+        total_nodes_diag = int(tree_artifacts.tree.parent.shape[0])
+        internal_nodes_diag = int(jnp.asarray(tree_artifacts.tree.left_child).shape[0])
+        leaf_count_diag = max(0, total_nodes_diag - internal_nodes_diag)
+        self._recent_dual_node_count = int(total_nodes_diag)
+        self._recent_dual_leaf_count = int(leaf_count_diag)
+        self._recent_dual_neighbor_count = int(neighbor_list.neighbors.shape[0])
+        self._recent_dual_far_pair_count = (
+            0 if far_pair_count_diag is None else int(far_pair_count_diag)
+        )
         _prepare_diag(
             "dual-tree done "
             f"neighbor_count={int(neighbor_list.neighbors.shape[0])} "
@@ -3832,21 +4899,33 @@ class FastMultipoleMethod:
         self._recent_far_pairs_by_gear_counts = (
             far_pair_plan.recent_far_pairs_by_gear_counts
         )
+        _record_dual_stage("_refresh_timing_dual_far_pair_plan_seconds", stage_t0)
 
+        stage_t0 = time.perf_counter()
         runtime_m2l_chunk_size = self._prepare_state_autotune_downward_chunk_size(
             upward=tree_artifacts.upward,
             far_pairs_by_gear=far_pairs_by_gear,
             p_gears_for_downward=p_gears_for_downward,
             runtime_m2l_chunk_size=runtime_m2l_chunk_size,
         )
+        self._recent_dual_m2l_chunk_size = (
+            0 if runtime_m2l_chunk_size is None else int(runtime_m2l_chunk_size)
+        )
+        _record_dual_stage("_refresh_timing_dual_m2l_autotune_seconds", stage_t0)
 
+        stage_t0 = time.perf_counter()
         interactions_for_downward = (
             self._prepare_state_select_interactions_for_downward(
                 interactions=interactions,
                 far_pairs_coo=far_pairs_coo,
             )
         )
+        _record_dual_stage(
+            "_refresh_timing_dual_select_interactions_seconds",
+            stage_t0,
+        )
 
+        stage_t0 = time.perf_counter()
         downward = self._prepare_downward_with_artifacts(
             tree=tree_artifacts.tree,
             upward=tree_artifacts.upward,
@@ -3872,6 +4951,9 @@ class FastMultipoleMethod:
             adaptive_order=adaptive_order_for_downward,
             p_gears=p_gears_for_downward,
         )
+        _record_dual_stage("_refresh_timing_dual_downward_compute_seconds", stage_t0)
+
+        stage_t0 = time.perf_counter()
         _prepare_diag(
             "downward done "
             f"locals_shape={tuple(int(v) for v in downward.locals.coefficients.shape)} "
@@ -3898,6 +4980,13 @@ class FastMultipoleMethod:
             interactions_out = interactions
         else:
             interactions_out = None
+        _record_dual_stage("_refresh_timing_dual_finalize_seconds", stage_t0)
+        if refresh_timing_active:
+            residual = max(
+                0.0,
+                float(time.perf_counter() - dual_total_t0) - float(dual_stage_sum),
+            )
+            self._refresh_timing_dual_residual_seconds += residual
         return _PrepareStateDualDownwardArtifacts(
             interactions=interactions_out,
             neighbor_list=neighbor_list,
@@ -4803,6 +5892,17 @@ class FastMultipoleMethod:
             p_gears_val = (
                 self.p_gears if p_gears is None else tuple(int(v) for v in p_gears)
             )
+            timing_recorder = None
+            sync_substage_timing = str(
+                os.environ.get("JACCPOT_REFRESH_TIMING_SYNC_SUBSTAGES", "0")
+            ).strip().lower() in {"1", "true", "yes", "on"}
+            if bool(getattr(self, "_refresh_timing_active", False)) and bool(
+                sync_substage_timing
+            ):
+
+                def timing_recorder(attr: str, elapsed: float) -> None:
+                    setattr(self, attr, float(getattr(self, attr, 0.0)) + elapsed)
+
             return _prepare_solidfmm_downward_sweep(
                 tree,
                 upward_data,
@@ -4833,6 +5933,7 @@ class FastMultipoleMethod:
                 p_gears=p_gears_val,
                 dehnen_radius_scale=dehnen_scale_val,
                 use_pallas=self.use_pallas,
+                timing_recorder=timing_recorder,
             )
 
         return prepare_tree_downward_sweep(
@@ -5251,10 +6352,13 @@ class FastMultipoleMethod:
             if self.interaction_retry_logger is not None:
                 self.interaction_retry_logger(event)
 
+        input_t0 = time.perf_counter()
         positions_arr, masses_arr, input_dtype = self._prepare_state_input_arrays(
             positions,
             masses,
         )
+        if bool(getattr(self, "_refresh_timing_active", False)):
+            self._refresh_timing_input_seconds += time.perf_counter() - input_t0
         allow_stateful_cache = not _contains_tracer((positions_arr, masses_arr))
 
         runtime_overrides = self._resolve_runtime_execution_overrides(
@@ -8198,6 +9302,7 @@ def _prepare_solidfmm_downward_sweep(
     p_gears: tuple[int, ...] = tuple(),
     dehnen_radius_scale: float = 1.0,
     use_pallas: bool = False,
+    timing_recorder: Optional[Callable[[str, float], None]] = None,
 ) -> TreeDownwardData:
     """Prepare M2L accumulation for solidfmm-style complex or real locals.
 
@@ -8221,6 +9326,13 @@ def _prepare_solidfmm_downward_sweep(
     src = interaction_inputs.src
     tgt = interaction_inputs.tgt
     pair_count = interaction_inputs.pair_count
+
+    def _record_timed_array(attr: str, start: float, value: Array) -> Array:
+        if timing_recorder is None:
+            return value
+        value = jax.block_until_ready(value)
+        timing_recorder(attr, float(time.perf_counter() - start))
+        return value
 
     p = int(upward.multipoles.order)
     downward_init = _prepare_solidfmm_downward_init(
@@ -8270,6 +9382,7 @@ def _prepare_solidfmm_downward_sweep(
     if chunk_size <= 0:
         raise ValueError("m2l_chunk_size must be positive")
 
+    stage_t0 = time.perf_counter()
     locals_updated = _solidfmm_downward_accumulate_from_multipoles(
         locals_coeffs,
         multip_packed_kernel,
@@ -8294,6 +9407,11 @@ def _prepare_solidfmm_downward_sweep(
         grouped_segment_unique_targets=grouped_segment_unique_targets,
         farfield_mode=farfield_mode,
     )
+    locals_updated = _record_timed_array(
+        "_refresh_timing_dual_m2l_compute_seconds",
+        stage_t0,
+        locals_updated,
+    )
 
     if l2l_chunk_size is not None and int(l2l_chunk_size) <= 0:
         raise ValueError("l2l_chunk_size must be positive")
@@ -8302,6 +9420,7 @@ def _prepare_solidfmm_downward_sweep(
     if child_inputs.num_internal_nodes > 0:
         left_child = child_inputs.left_child
         right_child = child_inputs.right_child
+        stage_t0 = time.perf_counter()
         locals_updated = _propagate_solidfmm_locals_to_children(
             locals_updated,
             centers,
@@ -8311,8 +9430,14 @@ def _prepare_solidfmm_downward_sweep(
             rotation=rotation_mode,
             total_nodes=total_nodes,
         )
+        locals_updated = _record_timed_array(
+            "_refresh_timing_dual_l2l_compute_seconds",
+            stage_t0,
+            locals_updated,
+        )
         source_motion_locals_updated: Optional[Array]
         if source_motion_multip_packed is not None:
+            stage_t0 = time.perf_counter()
             source_motion_locals_updated = (
                 _solidfmm_downward_accumulate_from_multipoles(
                     jnp.zeros_like(locals_coeffs),
@@ -8348,27 +9473,45 @@ def _prepare_solidfmm_downward_sweep(
                 rotation=rotation_mode,
                 total_nodes=total_nodes,
             )
+            source_motion_locals_updated = _record_timed_array(
+                "_refresh_timing_dual_source_motion_seconds",
+                stage_t0,
+                source_motion_locals_updated,
+            )
         else:
             source_motion_locals_updated = None
     else:
         if source_motion_multip_packed is not None:
+            stage_t0 = time.perf_counter()
             source_motion_locals_updated = _accumulate_from_multipoles(
                 jnp.zeros_like(locals_coeffs), source_motion_multip_packed
+            )
+            source_motion_locals_updated = _record_timed_array(
+                "_refresh_timing_dual_source_motion_seconds",
+                stage_t0,
+                source_motion_locals_updated,
             )
         else:
             source_motion_locals_updated = None
 
+    stage_t0 = time.perf_counter()
     locals_after = LocalExpansionData(
         order=p,
         centers=centers,
         coefficients=locals_updated,
     )
 
+    coefficients_after = enforce_conjugate_symmetry_batch(
+        jnp.asarray(locals_after.coefficients),
+        order=p,
+    )
+    coefficients_after = _record_timed_array(
+        "_refresh_timing_dual_final_symmetry_seconds",
+        stage_t0,
+        coefficients_after,
+    )
     locals_after = locals_after._replace(
-        coefficients=enforce_conjugate_symmetry_batch(
-            jnp.asarray(locals_after.coefficients),
-            order=p,
-        )
+        coefficients=coefficients_after
     )
     source_motion_locals_after: Optional[LocalExpansionData]
     if source_motion_locals_updated is not None:

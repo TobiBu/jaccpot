@@ -21,7 +21,7 @@ from ._large_n_types import LargeNExecutionConfig, LargeNPreparedState
 from ._nearfield_cache import NearfieldPrecomputeArtifacts
 from .dtypes import INDEX_DTYPE, as_index
 
-_RADIX_FAST_LANE_DEFAULT_TARGET_BLOCK_SIZE = 8
+_RADIX_FAST_LANE_DEFAULT_TARGET_BLOCK_SIZE = 32
 
 
 def build_large_n_leaf_particle_groups(
@@ -202,6 +202,77 @@ def build_large_n_target_owned_blocks(
         jnp.asarray(block_source_leaf_ids, dtype=INDEX_DTYPE),
         jnp.asarray(edge_valid, dtype=bool),
         jnp.asarray(block_offsets, dtype=INDEX_DTYPE),
+    )
+
+
+def build_large_n_target_owned_blocks_static(
+    *,
+    tree: Tree,
+    neighbor_list: NodeNeighborList,
+    block_size: int,
+    max_blocks_per_leaf: int,
+) -> tuple[Array, Array, bool]:
+    """Build fixed-capacity target-owned source-leaf blocks.
+
+    Returns ``(source_leaf_ids_padded, valid_mask_padded, capacity_ok)`` where
+    the first two tensors have shape ``(num_leaves, max_blocks_per_leaf,
+    block_size)``. If any leaf needs more than ``max_blocks_per_leaf`` blocks,
+    ``capacity_ok`` is false and callers should fall back to the dynamic
+    builder.
+    """
+
+    k = int(block_size)
+    max_blocks = int(max_blocks_per_leaf)
+    leaf_nodes = jnp.asarray(neighbor_list.leaf_indices, dtype=INDEX_DTYPE)
+    num_leaves = int(leaf_nodes.shape[0])
+    if k <= 0 or max_blocks <= 0:
+        return (
+            jnp.zeros((num_leaves, 0, 0), dtype=INDEX_DTYPE),
+            jnp.zeros((num_leaves, 0, 0), dtype=bool),
+            False,
+        )
+
+    node_ranges = jnp.asarray(tree.node_ranges, dtype=INDEX_DTYPE)
+    offsets = jnp.asarray(neighbor_list.offsets, dtype=INDEX_DTYPE)
+    neighbors = jnp.asarray(neighbor_list.neighbors, dtype=INDEX_DTYPE)
+    if num_leaves == 0:
+        return (
+            jnp.zeros((0, max_blocks, k), dtype=INDEX_DTYPE),
+            jnp.zeros((0, max_blocks, k), dtype=bool),
+            True,
+        )
+
+    counts = offsets[1:] - offsets[:-1]
+    max_count = int(jnp.max(counts)) if int(counts.shape[0]) > 0 else 0
+    if max_count > max_blocks * k:
+        return (
+            jnp.zeros((num_leaves, max_blocks, k), dtype=INDEX_DTYPE),
+            jnp.zeros((num_leaves, max_blocks, k), dtype=bool),
+            False,
+        )
+
+    total_nodes = int(node_ranges.shape[0])
+    leaf_lookup = jnp.full((total_nodes,), -1, dtype=INDEX_DTYPE)
+    leaf_lookup = leaf_lookup.at[leaf_nodes].set(
+        jnp.arange(num_leaves, dtype=INDEX_DTYPE)
+    )
+
+    block_offsets = jnp.arange(max_blocks, dtype=INDEX_DTYPE)
+    slot_offsets = jnp.arange(k, dtype=INDEX_DTYPE)
+    edge_idx = (
+        offsets[:-1, None, None]
+        + block_offsets[None, :, None] * as_index(k)
+        + slot_offsets[None, None, :]
+    )
+    edge_stop = offsets[1:, None, None]
+    in_leaf = edge_idx < edge_stop
+    safe_edge_idx = jnp.where(in_leaf, edge_idx, 0)
+    source_leaf_ids = leaf_lookup[neighbors[safe_edge_idx]]
+    valid_mask = in_leaf & (source_leaf_ids >= 0)
+    return (
+        jnp.where(valid_mask, source_leaf_ids, 0).astype(INDEX_DTYPE),
+        jnp.asarray(valid_mask, dtype=bool),
+        True,
     )
 
 

@@ -43,6 +43,7 @@ class _DualTreeArtifacts:
     grouped_segment_group_ids: Optional[Array]
     grouped_segment_unique_targets: Optional[Array]
     grouped_chunk_size: Optional[int]
+    cache_hit: bool = False
 
 
 class _InteractionCacheEntry(NamedTuple):
@@ -789,6 +790,7 @@ def _build_dual_tree_artifacts(
         precompute_grouped_class_segments=precompute_grouped_class_segments,
     )
     if cache_hit is not None:
+        dual_tree_cache_hit = True
         interactions = cache_hit.interactions
         neighbor_list = cache_hit.neighbor_list
         traversal_result = cache_hit.traversal_result
@@ -803,6 +805,7 @@ def _build_dual_tree_artifacts(
         grouped_chunk_size_cached = cache_hit.grouped_chunk_size_cached
         cache_out = cache_hit.cache_out
     else:
+        dual_tree_cache_hit = False
         use_split_build = _can_split_dual_tree_build(
             split_enabled=bool(allow_split_build),
             grouped_interactions=grouped_interactions,
@@ -862,7 +865,7 @@ def _build_dual_tree_artifacts(
                     nearfield_edge_chunk_size=None,
                     nearfield_leaf_cap=None,
                 )
-                if (cache_key is not None and not need_compact_far_pairs)
+                if cache_key is not None
                 else None
             )
         else:
@@ -1059,5 +1062,6 @@ def _build_dual_tree_artifacts(
         grouped_segment_group_ids=grouped_segment_group_ids,
         grouped_segment_unique_targets=grouped_segment_unique_targets,
         grouped_chunk_size=grouped_chunk_size_cached,
+        cache_hit=bool(dual_tree_cache_hit),
     )
     return artifacts, cache_out

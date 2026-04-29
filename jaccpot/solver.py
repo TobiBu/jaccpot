@@ -518,6 +518,10 @@ class FastMultipoleMethod:
                     advanced_cfg.runtime.retain_interactions,
                 )
             ),
+            prepare_stage_memory_split_enabled=legacy_kwargs.pop(
+                "prepare_stage_memory_split_enabled",
+                advanced_cfg.runtime.prepare_stage_memory_split_enabled,
+            ),
             autotune_m2l_chunk=bool(
                 legacy_kwargs.pop(
                     "autotune_m2l_chunk",
@@ -808,6 +812,74 @@ class FastMultipoleMethod:
             max_time_derivative_order=max_time_derivative_order,
             mode=mode,
         )
+
+    def refresh_prepared_state(
+        self: "FastMultipoleMethod",
+        prepared_state: FMMPreparedState,
+        positions: Array,
+        masses: Array,
+        *,
+        bounds: Optional[Tuple[Array, Array]] = None,
+        leaf_size: Optional[int] = None,
+        max_order: Optional[int] = None,
+        theta: Optional[float] = None,
+    ) -> FMMPreparedState:
+        """Refresh prepared state under fixed-profile large-N runtime constraints."""
+        return self._impl.refresh_prepared_state(
+            prepared_state,
+            positions,
+            masses,
+            bounds=bounds,
+            leaf_size=leaf_size,
+            max_order=max_order,
+            theta=theta,
+        )
+
+    def update_multipoles_only(
+        self: "FastMultipoleMethod",
+        prepared_state: FMMPreparedState,
+        positions: Array,
+        masses: Array,
+        *,
+        leaf_size: Optional[int] = None,
+        max_order: Optional[int] = None,
+        theta: Optional[float] = None,
+    ) -> FMMPreparedState:
+        """Update multipole/local payloads when topology mapping is unchanged."""
+        return self._impl.update_multipoles_only(
+            prepared_state,
+            positions,
+            masses,
+            leaf_size=leaf_size,
+            max_order=max_order,
+            theta=theta,
+        )
+
+    def rebuild_topology_in_place(
+        self: "FastMultipoleMethod",
+        prepared_state: FMMPreparedState,
+        positions: Array,
+        masses: Array,
+        *,
+        bounds: Optional[Tuple[Array, Array]] = None,
+        leaf_size: Optional[int] = None,
+        max_order: Optional[int] = None,
+        theta: Optional[float] = None,
+    ) -> FMMPreparedState:
+        """Rebuild topology while tracking profile compatibility diagnostics."""
+        return self._impl.rebuild_topology_in_place(
+            prepared_state,
+            positions,
+            masses,
+            bounds=bounds,
+            leaf_size=leaf_size,
+            max_order=max_order,
+            theta=theta,
+        )
+
+    def get_runtime_diagnostics(self: "FastMultipoleMethod") -> dict[str, Any]:
+        """Return runtime diagnostics for compile/profile reuse benchmarking."""
+        return self._impl.get_runtime_diagnostics()
 
     def clear_prepared_state_cache(self: "FastMultipoleMethod") -> None:
         """Clear cached prepared states in the runtime backend."""

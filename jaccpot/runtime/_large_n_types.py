@@ -181,6 +181,8 @@ class LargeNPreparedState:
     nearfield_target_block_tile_scan_unroll: int = 1
     nearfield_target_block_batch_scan_unroll: int = 1
     nearfield_target_block_overflow_fast_max_blocks: int = 65536
+    nearfield_target_block_overflow_profile_capacity: int = 0
+    nearfield_target_block_overflow_active_blocks: int = 0
     speed_prepared_layout: bool = False
     radix_fast_lane: bool = False
     disable_specialized_large_n_nearfield: bool = False
@@ -274,6 +276,8 @@ class LargeNPreparedState:
             int(self.nearfield_target_block_tile_scan_unroll),
             int(self.nearfield_target_block_batch_scan_unroll),
             int(self.nearfield_target_block_overflow_fast_max_blocks),
+            int(self.nearfield_target_block_overflow_profile_capacity),
+            int(self.nearfield_target_block_overflow_active_blocks),
             bool(self.speed_prepared_layout),
             bool(self.radix_fast_lane),
             bool(self.disable_specialized_large_n_nearfield),
@@ -374,6 +378,8 @@ class LargeNPreparedState:
                 nearfield_target_block_tile_scan_unroll,
                 nearfield_target_block_batch_scan_unroll,
                 nearfield_target_block_overflow_fast_max_blocks,
+                nearfield_target_block_overflow_profile_capacity,
+                nearfield_target_block_overflow_active_blocks,
                 speed_prepared_layout,
                 radix_fast_lane,
                 disable_specialized_large_n_nearfield,
@@ -453,6 +459,12 @@ class LargeNPreparedState:
             ),
             nearfield_target_block_overflow_fast_max_blocks=int(
                 nearfield_target_block_overflow_fast_max_blocks
+            ),
+            nearfield_target_block_overflow_profile_capacity=int(
+                nearfield_target_block_overflow_profile_capacity
+            ),
+            nearfield_target_block_overflow_active_blocks=int(
+                nearfield_target_block_overflow_active_blocks
             ),
             speed_prepared_layout=bool(speed_prepared_layout),
             radix_fast_lane=bool(radix_fast_lane),
