@@ -288,7 +288,9 @@ def test_prepare_refresh_static_radix_tree_preserves_static_shape():
     assert refreshed.max_leaf_size <= 32
     assert refreshed.tree.num_leaves == state.tree.num_leaves
     assert state.tree.parent.shape == refreshed.tree.parent.shape
-    assert state.neighbor_list.neighbors.shape == refreshed.neighbor_list.neighbors.shape
+    assert (
+        state.neighbor_list.neighbors.shape == refreshed.neighbor_list.neighbors.shape
+    )
     assert diagnostics["large_n_same_topology_refresh_hits"] >= 1
     assert diagnostics["static_radix_refresh_hits"] >= 1
 

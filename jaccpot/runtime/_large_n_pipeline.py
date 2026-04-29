@@ -317,6 +317,7 @@ def prepare_large_n_state(
             if int(cap) >= required:
                 return int(cap)
         return int(required)
+
     nearfield_total_t0 = stage_t0
     nearfield_stage_sum = 0.0
 
@@ -388,9 +389,7 @@ def prepare_large_n_state(
         if bool(static_capacity_ok):
             target_block_source_leaf_ids_padded = static_source_leaf_ids_padded
             target_block_valid_mask_padded = static_valid_mask_padded
-            target_block_source_leaf_ids = jnp.zeros(
-                (0, block_size), dtype=INDEX_DTYPE
-            )
+            target_block_source_leaf_ids = jnp.zeros((0, block_size), dtype=INDEX_DTYPE)
             target_block_valid_mask = jnp.zeros((0, block_size), dtype=bool)
             target_block_leaf_ids = jnp.zeros((0,), dtype=INDEX_DTYPE)
             target_block_offsets = jnp.zeros((num_leaves + 1,), dtype=INDEX_DTYPE)
@@ -481,8 +480,7 @@ def prepare_large_n_state(
     if bool(execution_config.speed_prepared_layout):
         if (
             not bool(static_target_blocks_used)
-            and
-            block_size > 0
+            and block_size > 0
             and int(target_block_source_leaf_ids.shape[0]) > 0
             and target_leaf_block_counts is not None
         ):
@@ -616,7 +614,10 @@ def prepare_large_n_state(
         overflow_profile_capacity = int(next_capacity)
         setattr(fmm, "_large_n_overflow_profile_cap", int(overflow_profile_capacity))
 
-    if overflow_profile_capacity > 0 and overflow_active_blocks < overflow_profile_capacity:
+    if (
+        overflow_profile_capacity > 0
+        and overflow_active_blocks < overflow_profile_capacity
+    ):
         pad_rows = int(overflow_profile_capacity - overflow_active_blocks)
         block_size = int(target_block_source_leaf_ids.shape[1])
         target_block_leaf_ids = jnp.concatenate(
@@ -788,7 +789,10 @@ def prepare_large_n_state(
                 "_large_n_neighbor_edges_profile_cap",
                 int(neighbor_profile_capacity),
             )
-        if neighbor_profile_capacity > 0 and neighbor_active_edges < neighbor_profile_capacity:
+        if (
+            neighbor_profile_capacity > 0
+            and neighbor_active_edges < neighbor_profile_capacity
+        ):
             pad_edges = int(neighbor_profile_capacity - neighbor_active_edges)
             neighbor_edges = jnp.concatenate(
                 [

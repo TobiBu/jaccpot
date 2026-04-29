@@ -900,9 +900,7 @@ def _build_tree_with_config(
         build_mode = (
             "fixed_depth"
             if mode == "fixed_depth"
-            else "static_radix"
-            if mode == "static_radix"
-            else "adaptive"
+            else "static_radix" if mode == "static_radix" else "adaptive"
         )
         built_tree = Tree.from_particles(
             positions,
@@ -2320,6 +2318,7 @@ class FastMultipoleMethod:
         state: PreparedStateLike,
     ) -> dict[str, Any]:
         """Build a stable-shape profile summary for compile-reuse diagnostics."""
+
         def _shape0(value: Any) -> int:
             if value is None:
                 return 0
@@ -2349,9 +2348,7 @@ class FastMultipoleMethod:
             if neighbor_leaf_indices is not None
             else 0
         )
-        nearfield_blocks = _shape0(
-            getattr(state, "nearfield_target_leaf_ids", None)
-        )
+        nearfield_blocks = _shape0(getattr(state, "nearfield_target_leaf_ids", None))
         nearfield_target_block_slots = _shape0(
             getattr(state, "nearfield_target_block_source_leaf_ids", None)
         )
@@ -2364,16 +2361,24 @@ class FastMultipoleMethod:
             order = int(getattr(local_data, "order", 0))
         else:
             downward = getattr(state, "downward", None)
-            locals_view = getattr(downward, "locals", None) if downward is not None else None
-            order = int(getattr(locals_view, "order", 0)) if locals_view is not None else 0
+            locals_view = (
+                getattr(downward, "locals", None) if downward is not None else None
+            )
+            order = (
+                int(getattr(locals_view, "order", 0)) if locals_view is not None else 0
+            )
 
         return {
             "preset": str(self.preset),
             "runtime_path": str(self.runtime_path),
             "tree_type": str(self.tree_type),
             "execution_backend": str(getattr(state, "execution_backend", "unknown")),
-            "expansion_basis": str(getattr(state, "expansion_basis", self.expansion_basis)),
-            "working_dtype": str(jnp.dtype(getattr(state, "working_dtype", self.working_dtype))),
+            "expansion_basis": str(
+                getattr(state, "expansion_basis", self.expansion_basis)
+            ),
+            "working_dtype": str(
+                jnp.dtype(getattr(state, "working_dtype", self.working_dtype))
+            ),
             "max_leaf_size": int(getattr(state, "max_leaf_size", 0)),
             "max_order": int(order),
             "max_nodes": int(node_count),
@@ -2384,7 +2389,9 @@ class FastMultipoleMethod:
             "leaf_shapes": tuple(leaf_shapes),
         }
 
-    def _compiled_profile_fingerprint(self: "FastMultipoleMethod", profile: dict[str, Any]) -> str:
+    def _compiled_profile_fingerprint(
+        self: "FastMultipoleMethod", profile: dict[str, Any]
+    ) -> str:
         payload = json.dumps(profile, sort_keys=True, separators=(",", ":"))
         return hashlib.sha1(payload.encode("utf-8")).hexdigest()
 
@@ -2456,9 +2463,7 @@ class FastMultipoleMethod:
             ),
             "static_radix_refresh_hits": int(self._static_radix_refresh_hits),
             "static_radix_refresh_misses": int(self._static_radix_refresh_misses),
-            "static_radix_profile_overflows": int(
-                self._static_radix_profile_overflows
-            ),
+            "static_radix_profile_overflows": int(self._static_radix_profile_overflows),
             "update_multipoles_only_calls": int(
                 self._compiled_profile_multipoles_only_calls
             ),
@@ -2596,7 +2601,9 @@ class FastMultipoleMethod:
         input_before = float(getattr(self, "_refresh_timing_input_seconds", 0.0))
         tree_before = float(getattr(self, "_refresh_timing_tree_upward_seconds", 0.0))
         dual_before = float(getattr(self, "_refresh_timing_dual_downward_seconds", 0.0))
-        nearfield_before = float(getattr(self, "_refresh_timing_nearfield_seconds", 0.0))
+        nearfield_before = float(
+            getattr(self, "_refresh_timing_nearfield_seconds", 0.0)
+        )
         profile_t0 = time.perf_counter()
         prev_profile = self._compiled_profile_from_prepared_state(prepared_state)
         prev_fingerprint = self._compiled_profile_fingerprint(prev_profile)
@@ -2610,7 +2617,9 @@ class FastMultipoleMethod:
                 positions,
                 masses,
                 bounds=bounds,
-                leaf_size=int(prepared_state.max_leaf_size if leaf_size is None else leaf_size),
+                leaf_size=int(
+                    prepared_state.max_leaf_size if leaf_size is None else leaf_size
+                ),
                 max_order=(
                     int(prepared_state.local_data.order)
                     if max_order is None
@@ -2650,7 +2659,9 @@ class FastMultipoleMethod:
             self._compiled_profile_refresh_reuse_tier_overflow += 1
         profile_seconds += time.perf_counter() - profile_t0
         total_elapsed = time.perf_counter() - refresh_t0
-        input_delta = float(getattr(self, "_refresh_timing_input_seconds", 0.0)) - input_before
+        input_delta = (
+            float(getattr(self, "_refresh_timing_input_seconds", 0.0)) - input_before
+        )
         tree_delta = (
             float(getattr(self, "_refresh_timing_tree_upward_seconds", 0.0))
             - tree_before
@@ -2910,7 +2921,9 @@ class FastMultipoleMethod:
         )
         if bool(getattr(self, "_refresh_timing_active", False)):
             elapsed = time.perf_counter() - dual_t0
-            recorded = float(getattr(self, "_refresh_timing_dual_downward_seconds", 0.0))
+            recorded = float(
+                getattr(self, "_refresh_timing_dual_downward_seconds", 0.0)
+            )
             # _prepare_state_dual_and_downward records detailed timing itself.
             # Keep this branch intentionally empty except to make the elapsed
             # value visible while avoiding double accounting.
@@ -4477,11 +4490,9 @@ class FastMultipoleMethod:
             if allow_stateful_cache:
                 self._tree_workspace = build_artifacts.workspace
                 if tree_config.mode == "static_radix":
-                    topology_key_for_state = (
-                        self._static_radix_topology_key_from_tree(
-                            build_artifacts.tree,
-                            leaf_size=int(leaf_size),
-                        )
+                    topology_key_for_state = self._static_radix_topology_key_from_tree(
+                        build_artifacts.tree,
+                        leaf_size=int(leaf_size),
                     )
                 if self.reuse_topology:
                     if topology_candidate is not None:
@@ -9510,9 +9521,7 @@ def _prepare_solidfmm_downward_sweep(
         stage_t0,
         coefficients_after,
     )
-    locals_after = locals_after._replace(
-        coefficients=coefficients_after
-    )
+    locals_after = locals_after._replace(coefficients=coefficients_after)
     source_motion_locals_after: Optional[LocalExpansionData]
     if source_motion_locals_updated is not None:
         source_motion_locals_after = LocalExpansionData(
