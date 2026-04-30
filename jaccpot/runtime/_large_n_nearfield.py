@@ -67,7 +67,7 @@ def resolve_large_n_execution_config(
 
     The production large-N GPU radix/solidfmm path is locked to radix fast-lane
     execution. If no valid explicit target block size is provided via
-    ``JACCPOT_LARGE_N_TARGET_BLOCK_SIZE``, the fast lane defaults to block size 8.
+    ``JACCPOT_LARGE_N_TARGET_BLOCK_SIZE``, the fast lane defaults to block size 32.
     """
 
     nearfield_mode = "bucketed"
