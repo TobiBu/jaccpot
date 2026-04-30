@@ -1,6 +1,7 @@
 """Dual-tree interaction cache helpers for the runtime FMM implementation."""
 
 import hashlib
+import time
 from dataclasses import dataclass
 from typing import Any, NamedTuple, Optional
 
@@ -369,8 +370,13 @@ def _build_dual_tree_artifacts_split(
     need_node_interactions: bool,
     need_compact_far_pairs: bool,
     use_dense_interactions: bool,
+    timing_callback: Optional[Callable[[str, float], None]] = None,
 ) -> _DualTreeArtifacts:
     """Build far and near traversal products in separate Yggdrax calls."""
+
+    def _record(name: str, start: float) -> None:
+        if timing_callback is not None:
+            timing_callback(name, float(time.perf_counter() - start))
 
     need_far_payload = bool(
         need_node_interactions or need_compact_far_pairs or use_dense_interactions
@@ -378,6 +384,7 @@ def _build_dual_tree_artifacts_split(
     interactions: Optional[NodeInteractionList]
     compact_far_pairs: Optional[CompactTaggedFarPairs]
     if need_far_payload and not bool(need_node_interactions or use_dense_interactions):
+        stage_t0 = time.perf_counter()
         interactions = None
         compact_far_pairs = build_compact_far_pairs(
             tree,
@@ -390,6 +397,8 @@ def _build_dual_tree_artifacts_split(
             traversal_config=traversal_config,
             retry_logger=retry_logger,
         )
+        _record("dual_split_far_pairs", stage_t0)
+        stage_t0 = time.perf_counter()
         neighbor_list = build_leaf_neighbor_lists(
             tree,
             geometry,
@@ -406,7 +415,9 @@ def _build_dual_tree_artifacts_split(
             traversal_config=traversal_config,
             retry_logger=retry_logger,
         )
+        _record("dual_split_leaf_neighbors", stage_t0)
     elif need_far_payload:
+        stage_t0 = time.perf_counter()
         interactions, neighbor_list = build_interactions_and_neighbors_split(
             tree,
             geometry,
@@ -424,10 +435,12 @@ def _build_dual_tree_artifacts_split(
             traversal_config=traversal_config,
             retry_logger=retry_logger,
         )
+        _record("dual_split_interactions_and_neighbors", stage_t0)
         compact_far_pairs = None
     else:
         interactions = None
         compact_far_pairs = None
+        stage_t0 = time.perf_counter()
         neighbor_list = build_leaf_neighbor_lists(
             tree,
             geometry,
@@ -444,12 +457,15 @@ def _build_dual_tree_artifacts_split(
             traversal_config=traversal_config,
             retry_logger=retry_logger,
         )
+        _record("dual_split_leaf_neighbors", stage_t0)
+    stage_t0 = time.perf_counter()
     dense_buffers = _dual_tree_build_dense_buffers(
         tree=tree,
         geometry=geometry,
         interactions=interactions,
         use_dense_interactions=use_dense_interactions,
     )
+    _record("dual_split_dense_buffers", stage_t0)
     return _DualTreeArtifacts(
         interactions=interactions,
         neighbor_list=neighbor_list,
@@ -777,6 +793,7 @@ def _build_dual_tree_artifacts(
     pair_policy=None,
     policy_state=None,
     jit_traversal: bool = True,
+    timing_callback: Optional[Callable[[str, float], None]] = None,
 ) -> tuple[_DualTreeArtifacts, Optional[_InteractionCacheEntry]]:
     """Construct or reuse dual-tree traversal products for a tree."""
 
@@ -827,6 +844,7 @@ def _build_dual_tree_artifacts(
                 need_node_interactions=need_node_interactions,
                 need_compact_far_pairs=need_compact_far_pairs,
                 use_dense_interactions=use_dense_interactions,
+                timing_callback=timing_callback,
             )
             interactions = split_artifacts.interactions
             neighbor_list = split_artifacts.neighbor_list
@@ -869,6 +887,7 @@ def _build_dual_tree_artifacts(
                 else None
             )
         else:
+            stage_t0 = time.perf_counter()
             build_out, _, _, _ = _dual_tree_build_raw(
                 tree=tree,
                 geometry=geometry,
@@ -888,6 +907,11 @@ def _build_dual_tree_artifacts(
                 policy_state=policy_state,
                 jit_traversal=jit_traversal,
             )
+            if timing_callback is not None:
+                timing_callback(
+                    "dual_raw_interactions_and_neighbors",
+                    float(time.perf_counter() - stage_t0),
+                )
             (
                 interactions,
                 neighbor_list,

@@ -2085,6 +2085,11 @@ class FastMultipoleMethod:
         self._refresh_timing_compile_or_sync_suspect_seconds: float = 0.0
         self._refresh_timing_dual_setup_seconds: float = 0.0
         self._refresh_timing_dual_artifact_build_seconds: float = 0.0
+        self._refresh_timing_dual_split_far_pairs_seconds: float = 0.0
+        self._refresh_timing_dual_split_leaf_neighbors_seconds: float = 0.0
+        self._refresh_timing_dual_split_combined_seconds: float = 0.0
+        self._refresh_timing_dual_raw_combined_seconds: float = 0.0
+        self._refresh_timing_dual_split_dense_buffers_seconds: float = 0.0
         self._refresh_timing_dual_far_pair_plan_seconds: float = 0.0
         self._refresh_timing_dual_m2l_autotune_seconds: float = 0.0
         self._refresh_timing_dual_select_interactions_seconds: float = 0.0
@@ -2289,6 +2294,11 @@ class FastMultipoleMethod:
         self._refresh_timing_compile_or_sync_suspect_seconds = 0.0
         self._refresh_timing_dual_setup_seconds = 0.0
         self._refresh_timing_dual_artifact_build_seconds = 0.0
+        self._refresh_timing_dual_split_far_pairs_seconds = 0.0
+        self._refresh_timing_dual_split_leaf_neighbors_seconds = 0.0
+        self._refresh_timing_dual_split_combined_seconds = 0.0
+        self._refresh_timing_dual_raw_combined_seconds = 0.0
+        self._refresh_timing_dual_split_dense_buffers_seconds = 0.0
         self._refresh_timing_dual_far_pair_plan_seconds = 0.0
         self._refresh_timing_dual_m2l_autotune_seconds = 0.0
         self._refresh_timing_dual_select_interactions_seconds = 0.0
@@ -2510,6 +2520,21 @@ class FastMultipoleMethod:
             ),
             "refresh_dual_artifact_build_seconds": float(
                 self._refresh_timing_dual_artifact_build_seconds
+            ),
+            "refresh_dual_split_far_pairs_seconds": float(
+                self._refresh_timing_dual_split_far_pairs_seconds
+            ),
+            "refresh_dual_split_leaf_neighbors_seconds": float(
+                self._refresh_timing_dual_split_leaf_neighbors_seconds
+            ),
+            "refresh_dual_split_combined_seconds": float(
+                self._refresh_timing_dual_split_combined_seconds
+            ),
+            "refresh_dual_raw_combined_seconds": float(
+                self._refresh_timing_dual_raw_combined_seconds
+            ),
+            "refresh_dual_split_dense_buffers_seconds": float(
+                self._refresh_timing_dual_split_dense_buffers_seconds
             ),
             "refresh_dual_far_pair_plan_seconds": float(
                 self._refresh_timing_dual_far_pair_plan_seconds
@@ -4655,6 +4680,21 @@ class FastMultipoleMethod:
                     float(getattr(self, attr, 0.0)) + elapsed,
                 )
 
+        def _record_dual_artifact_substage(name: str, elapsed: float) -> None:
+            if not refresh_timing_active:
+                return
+            attr_by_name = {
+                "dual_split_far_pairs": "_refresh_timing_dual_split_far_pairs_seconds",
+                "dual_split_leaf_neighbors": "_refresh_timing_dual_split_leaf_neighbors_seconds",
+                "dual_split_interactions_and_neighbors": "_refresh_timing_dual_split_combined_seconds",
+                "dual_raw_interactions_and_neighbors": "_refresh_timing_dual_raw_combined_seconds",
+                "dual_split_dense_buffers": "_refresh_timing_dual_split_dense_buffers_seconds",
+            }
+            attr = attr_by_name.get(str(name))
+            if attr is None:
+                return
+            setattr(self, attr, float(getattr(self, attr, 0.0)) + float(elapsed))
+
         stage_t0 = time.perf_counter()
         pair_policy = None
         policy_state = None
@@ -4842,6 +4882,7 @@ class FastMultipoleMethod:
             pair_policy=pair_policy,
             policy_state=policy_state,
             jit_traversal=jit_traversal_for_prepare,
+            timing_callback=_record_dual_artifact_substage,
         )
         if stateful_cache_enabled:
             if bool(getattr(dual_artifacts, "cache_hit", False)):
