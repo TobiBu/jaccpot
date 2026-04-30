@@ -244,6 +244,62 @@ def test_prepare_state_fixed_depth_tree():
     assert state.max_leaf_size == int(jnp.max(counts))
 
 
+def test_prepare_refresh_static_radix_tree_preserves_static_shape():
+    key = jax.random.PRNGKey(123)
+    core = 0.01 * jax.random.normal(key, (160, 3), dtype=jnp.float32)
+    halo = jax.random.uniform(
+        key,
+        (64, 3),
+        minval=-1.0,
+        maxval=1.0,
+        dtype=jnp.float32,
+    )
+    positions = jnp.concatenate([core, halo], axis=0)
+    masses = jnp.ones((positions.shape[0],), dtype=jnp.float32)
+
+    fmm = FastMultipoleMethod(
+        preset="large_n_gpu",
+        runtime_path="large_n",
+        working_dtype=jnp.float32,
+        expansion_basis="solidfmm",
+        complex_rotation="solidfmm",
+        tree_build_mode="static_radix",
+        fixed_order=2,
+    )
+    state = fmm.prepare_state(
+        positions,
+        masses,
+        leaf_size=32,
+        max_order=2,
+    )
+    moved = positions.at[:8].add(jnp.array([1.0e-5, 0.0, 0.0], dtype=jnp.float32))
+    refreshed = fmm.refresh_prepared_state(
+        state,
+        moved,
+        masses,
+        leaf_size=32,
+        max_order=2,
+    )
+    diagnostics = fmm.get_runtime_diagnostics()
+
+    assert state.tree.build_mode == "static_radix"
+    assert refreshed.tree.build_mode == "static_radix"
+    assert state.max_leaf_size <= 32
+    assert refreshed.max_leaf_size <= 32
+    assert refreshed.tree.num_leaves == state.tree.num_leaves
+    assert state.tree.parent.shape == refreshed.tree.parent.shape
+    assert (
+        state.neighbor_list.neighbors.shape == refreshed.neighbor_list.neighbors.shape
+    )
+    assert diagnostics["large_n_same_topology_refresh_hits"] >= 1
+    assert diagnostics["static_radix_refresh_hits"] >= 1
+
+
+def test_capacity_fixed_depth_tree_mode_is_removed():
+    with pytest.raises(ValueError, match="tree_build_mode"):
+        FastMultipoleMethod(tree_build_mode="capacity_fixed_depth")
+
+
 def _fixed_depth_sample():
     positions = jnp.array(
         [
@@ -1172,6 +1228,7 @@ def test_large_n_prepacked_overflow_fallback_matches_tiled_overflow(monkeypatch)
     monkeypatch.setenv("JACCPOT_LARGE_N_TARGET_BLOCK_SIZE", "1")
     monkeypatch.setenv("JACCPOT_LARGE_N_SPEED_PREPARED_LAYOUT", "1")
     monkeypatch.setenv("JACCPOT_LARGE_N_SPEED_PREPARED_FAST_BLOCKS", "1")
+    monkeypatch.setenv("JACCPOT_LARGE_N_STATIC_TARGET_BLOCKS", "0")
 
     key = jax.random.PRNGKey(20260417)
     key_pos, key_mass = jax.random.split(key)
