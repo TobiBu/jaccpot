@@ -4350,41 +4350,6 @@ class FastMultipoleMethod:
             cache_leaf_parameter=int(entry.cache_leaf_parameter),
         )
 
-    def _rebuild_static_radix_tree_artifacts_from_template(
-        self,
-        *,
-        template_tree: RadixTree,
-        positions: Array,
-        masses: Array,
-        leaf_size: int,
-        bounds: Optional[Tuple[Array, Array]],
-    ) -> _TreeBuildArtifacts:
-        """Refresh payload arrays against a static-radix data structure."""
-
-        result = rebuild_static_radix_tree_from_template(
-            positions,
-            masses,
-            template_tree,
-            bounds=bounds,
-            return_reordered=True,
-        )
-        rebuilt_tree, positions_sorted, masses_sorted, inverse = result
-        max_leaf_size = _max_leaf_size_from_tree(rebuilt_tree)
-        if int(max_leaf_size) > int(leaf_size):
-            raise ValueError(
-                "static_radix refresh exceeded leaf capacity: "
-                f"max_leaf_size={int(max_leaf_size)} leaf_size={int(leaf_size)}"
-            )
-        return _TreeBuildArtifacts(
-            tree=rebuilt_tree,
-            positions_sorted=positions_sorted,
-            masses_sorted=masses_sorted,
-            inverse_permutation=inverse,
-            workspace=getattr(template_tree, "workspace", None),
-            max_leaf_size=int(max_leaf_size),
-            cache_leaf_parameter=int(leaf_size),
-        )
-
     def _build_locals_template_for_prepare_state(
         self,
         *,
