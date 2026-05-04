@@ -321,6 +321,8 @@ class LargeNPreparedState:
             nearfield_target_block_tile_scan_unroll = 1
             nearfield_target_block_batch_scan_unroll = 1
             nearfield_target_block_overflow_fast_max_blocks = 65536
+            nearfield_target_block_overflow_profile_capacity = 0
+            nearfield_target_block_overflow_active_blocks = 0
             disable_specialized_large_n_nearfield = False
         elif len(aux) == 14:
             (
@@ -352,6 +354,8 @@ class LargeNPreparedState:
             nearfield_target_block_tile_scan_unroll = 1
             nearfield_target_block_batch_scan_unroll = 1
             nearfield_target_block_overflow_fast_max_blocks = 65536
+            nearfield_target_block_overflow_profile_capacity = 0
+            nearfield_target_block_overflow_active_blocks = 0
         else:
             (
                 nearfield_target_block_size,
