@@ -902,6 +902,7 @@ def _build_tree_with_config(
             if mode == "fixed_depth"
             else "static_radix" if mode == "static_radix" else "adaptive"
         )
+        supports_workspace = tree_type == "radix" and mode != "static_radix"
         built_tree = Tree.from_particles(
             positions,
             masses,
@@ -909,8 +910,8 @@ def _build_tree_with_config(
             build_mode=build_mode,
             bounds=bounds,
             return_reordered=True,
-            workspace=workspace if tree_type == "radix" else None,  # type: ignore[arg-type]
-            return_workspace=(tree_type == "radix"),
+            workspace=workspace if supports_workspace else None,  # type: ignore[arg-type]
+            return_workspace=supports_workspace,
             leaf_size=int(leaf_size),
             target_leaf_particles=tree_config.target_leaf_particles,
             refine_local=refine_local,
