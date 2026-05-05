@@ -95,6 +95,7 @@ class RuntimePolicyConfig:
     enable_interaction_cache: bool = True
     retain_traversal_result: bool = True
     retain_interactions: bool = True
+    prepare_stage_memory_split_enabled: Optional[bool] = None
     autotune_m2l_chunk: bool = False
     precompute_grouped_class_segments: Optional[bool] = None
     grouped_schedule_budget_bytes: Optional[int] = None
