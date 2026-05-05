@@ -432,12 +432,14 @@ def prepare_solidfmm_complex_upward_sweep(
     geometry = (
         precomputed_geometry
         if precomputed_geometry is not None
-        else None
-        if bool(defer_geometry)
-        else compute_tree_geometry(
-            tree,
-            positions_sorted,
-            max_leaf_size=int(max_leaf_size) if max_leaf_size is not None else None,
+        else (
+            None
+            if bool(defer_geometry)
+            else compute_tree_geometry(
+                tree,
+                positions_sorted,
+                max_leaf_size=int(max_leaf_size) if max_leaf_size is not None else None,
+            )
         )
     )
     _record_stage("geometry", stage_t0, geometry)

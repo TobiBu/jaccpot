@@ -20,8 +20,8 @@ from yggdrax.interactions import (
     MACType,
     NodeInteractionList,
     NodeNeighborList,
-    build_compact_far_pairs_and_leaf_neighbor_lists,
     build_compact_far_pairs,
+    build_compact_far_pairs_and_leaf_neighbor_lists,
     build_interactions_and_neighbors_split,
     build_leaf_neighbor_lists,
 )
@@ -387,17 +387,19 @@ def _build_dual_tree_artifacts_split(
     if need_far_payload and not bool(need_node_interactions or use_dense_interactions):
         stage_t0 = time.perf_counter()
         interactions = None
-        compact_far_pairs, neighbor_list = build_compact_far_pairs_and_leaf_neighbor_lists(
-            tree,
-            geometry,
-            theta=theta,
-            mac_type=mac_type,
-            dehnen_radius_scale=dehnen_radius_scale,
-            max_pair_queue=max_pair_queue,
-            process_block=pair_process_block,
-            traversal_config=traversal_config,
-            retry_logger=retry_logger,
-            timing_callback=timing_callback,
+        compact_far_pairs, neighbor_list = (
+            build_compact_far_pairs_and_leaf_neighbor_lists(
+                tree,
+                geometry,
+                theta=theta,
+                mac_type=mac_type,
+                dehnen_radius_scale=dehnen_radius_scale,
+                max_pair_queue=max_pair_queue,
+                process_block=pair_process_block,
+                traversal_config=traversal_config,
+                retry_logger=retry_logger,
+                timing_callback=timing_callback,
+            )
         )
         _record("dual_split_shared_far_pairs_leaf_neighbors", stage_t0)
     elif need_far_payload:

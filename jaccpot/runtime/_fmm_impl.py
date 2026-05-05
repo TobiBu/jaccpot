@@ -2936,7 +2936,10 @@ class FastMultipoleMethod:
             aspect_threshold=aspect_threshold_val,
             allow_stateful_cache=allow_stateful_cache,
         )
-        if topology_candidate is None or topology_candidate.key != previous_topology_key:
+        if (
+            topology_candidate is None
+            or topology_candidate.key != previous_topology_key
+        ):
             self._large_n_same_topology_refresh_misses += 1
             self._large_n_same_topology_refresh_miss_topology += 1
             if tree_config.mode == "static_radix":
@@ -4399,7 +4402,9 @@ class FastMultipoleMethod:
             hasher = hashlib.sha256()
             hasher.update(b"static_radix_topology_v1")
             hasher.update(np.asarray(int(tree.num_particles), dtype=np.int64).tobytes())
-            hasher.update(np.asarray(int(tree.parent.shape[0]), dtype=np.int64).tobytes())
+            hasher.update(
+                np.asarray(int(tree.parent.shape[0]), dtype=np.int64).tobytes()
+            )
             hasher.update(
                 np.asarray(int(tree.num_internal_nodes), dtype=np.int64).tobytes()
             )
@@ -5956,6 +5961,7 @@ class FastMultipoleMethod:
         self._ensure_execution_backend_supported(tree=tree)
 
         if self.expansion_basis == "solidfmm":
+
             def _record_upward_stage(name: str, elapsed: float) -> None:
                 if not bool(getattr(self, "_refresh_timing_active", False)):
                     return
