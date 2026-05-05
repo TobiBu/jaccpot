@@ -224,6 +224,8 @@ class _TopologyReuseCandidate:
 
     key: str
     sorted_indices: Array
+    sorted_codes: Optional[Array] = None
+    bounds: Optional[Tuple[Array, Array]] = None
 
 
 @dataclass(frozen=True)
@@ -293,7 +295,7 @@ _GPU_MIN_PAIR_QUEUE_MEDIUM = 131_072
 _GPU_MIN_PAIR_QUEUE_LARGE = 262_144
 _GPU_MIN_PAIR_QUEUE_XL = 524_288
 _GPU_MINIMUM_MEMORY_PAIR_QUEUE = 32_768
-_GPU_MINIMUM_MEMORY_PROCESS_BLOCK = 64
+_GPU_MINIMUM_MEMORY_PROCESS_BLOCK = 1024
 _GPU_MINIMUM_MEMORY_INTERACTIONS_PER_NODE = 1_024
 _GPU_MINIMUM_MEMORY_NEIGHBORS_PER_LEAF = 256
 _GPU_STREAMED_MINIMUM_MEMORY_EXPLICIT_PAIR_QUEUE_LARGE = 262_144
@@ -369,15 +371,39 @@ def _minimum_memory_streamed_gpu_traversal_seed(
 ) -> DualTreeTraversalConfig:
     """Return deterministic minimum-memory traversal seed for production GPU runs.
 
-    Keep a small seed for sub-million workloads, but use a larger fixed seed for
-    multi-million particle runs to avoid early fail-fast traversal overflow.
+    Keep a small queue seed for sub-million workloads, but use the streamed
+    process-block floor to avoid underfilled count-pass kernels. Multi-million
+    particle runs use a larger fixed seed to avoid early fail-fast traversal
+    overflow.
     """
 
     n = int(num_particles)
     if n >= 4_194_304:
-        return _minimum_memory_streamed_gpu_traversal_ceiling(num_particles=n)
-    if n >= 1_048_576:
+        default_config = _minimum_memory_streamed_gpu_traversal_ceiling(num_particles=n)
         return DualTreeTraversalConfig(
+            max_pair_queue=_env_int(
+                "JACCPOT_LARGE_N_GPU_MIN_MEMORY_PAIR_QUEUE",
+                int(default_config.max_pair_queue),
+                minimum=4,
+            ),
+            process_block=_env_int(
+                "JACCPOT_LARGE_N_GPU_MIN_MEMORY_PROCESS_BLOCK",
+                int(default_config.process_block),
+                minimum=1,
+            ),
+            max_interactions_per_node=_env_int(
+                "JACCPOT_LARGE_N_GPU_MIN_MEMORY_INTERACTIONS_PER_NODE",
+                int(default_config.max_interactions_per_node),
+                minimum=1,
+            ),
+            max_neighbors_per_leaf=_env_int(
+                "JACCPOT_LARGE_N_GPU_MIN_MEMORY_NEIGHBORS_PER_LEAF",
+                int(default_config.max_neighbors_per_leaf),
+                minimum=1,
+            ),
+        )
+    if n >= 1_048_576:
+        default_config = DualTreeTraversalConfig(
             max_pair_queue=int(_GPU_STREAMED_MINIMUM_MEMORY_EXPLICIT_PAIR_QUEUE_LARGE),
             process_block=int(_GPU_STREAMED_MINIMUM_MEMORY_EXPLICIT_PROCESS_BLOCK),
             max_interactions_per_node=int(
@@ -387,11 +413,34 @@ def _minimum_memory_streamed_gpu_traversal_seed(
                 _GPU_STREAMED_MINIMUM_MEMORY_EXPLICIT_NEIGHBORS_PER_LEAF
             ),
         )
+    else:
+        default_config = DualTreeTraversalConfig(
+            max_pair_queue=int(_GPU_MINIMUM_MEMORY_PAIR_QUEUE),
+            process_block=int(_GPU_MINIMUM_MEMORY_PROCESS_BLOCK),
+            max_interactions_per_node=int(_GPU_MINIMUM_MEMORY_INTERACTIONS_PER_NODE),
+            max_neighbors_per_leaf=int(_GPU_MINIMUM_MEMORY_NEIGHBORS_PER_LEAF),
+        )
     return DualTreeTraversalConfig(
-        max_pair_queue=int(_GPU_MINIMUM_MEMORY_PAIR_QUEUE),
-        process_block=int(_GPU_MINIMUM_MEMORY_PROCESS_BLOCK),
-        max_interactions_per_node=int(_GPU_MINIMUM_MEMORY_INTERACTIONS_PER_NODE),
-        max_neighbors_per_leaf=int(_GPU_MINIMUM_MEMORY_NEIGHBORS_PER_LEAF),
+        max_pair_queue=_env_int(
+            "JACCPOT_LARGE_N_GPU_MIN_MEMORY_PAIR_QUEUE",
+            int(default_config.max_pair_queue),
+            minimum=4,
+        ),
+        process_block=_env_int(
+            "JACCPOT_LARGE_N_GPU_MIN_MEMORY_PROCESS_BLOCK",
+            int(default_config.process_block),
+            minimum=1,
+        ),
+        max_interactions_per_node=_env_int(
+            "JACCPOT_LARGE_N_GPU_MIN_MEMORY_INTERACTIONS_PER_NODE",
+            int(default_config.max_interactions_per_node),
+            minimum=1,
+        ),
+        max_neighbors_per_leaf=_env_int(
+            "JACCPOT_LARGE_N_GPU_MIN_MEMORY_NEIGHBORS_PER_LEAF",
+            int(default_config.max_neighbors_per_leaf),
+            minimum=1,
+        ),
     )
 
 
@@ -900,6 +949,7 @@ def _build_tree_with_config(
             if mode == "fixed_depth"
             else "static_radix" if mode == "static_radix" else "adaptive"
         )
+        supports_workspace = tree_type == "radix" and mode != "static_radix"
         built_tree = Tree.from_particles(
             positions,
             masses,
@@ -907,8 +957,8 @@ def _build_tree_with_config(
             build_mode=build_mode,
             bounds=bounds,
             return_reordered=True,
-            workspace=workspace if tree_type == "radix" else None,  # type: ignore[arg-type]
-            return_workspace=(tree_type == "radix"),
+            workspace=workspace if supports_workspace else None,  # type: ignore[arg-type]
+            return_workspace=supports_workspace,
             leaf_size=int(leaf_size),
             target_leaf_particles=tree_config.target_leaf_particles,
             refine_local=refine_local,
@@ -2077,12 +2127,24 @@ class FastMultipoleMethod:
         self._refresh_timing_total_seconds: float = 0.0
         self._refresh_timing_input_seconds: float = 0.0
         self._refresh_timing_tree_upward_seconds: float = 0.0
+        self._refresh_timing_tree_build_seconds: float = 0.0
+        self._refresh_timing_upward_compute_seconds: float = 0.0
+        self._refresh_timing_upward_geometry_seconds: float = 0.0
+        self._refresh_timing_upward_mass_moments_seconds: float = 0.0
+        self._refresh_timing_upward_p2m_seconds: float = 0.0
+        self._refresh_timing_upward_m2m_seconds: float = 0.0
+        self._refresh_timing_upward_source_motion_seconds: float = 0.0
         self._refresh_timing_dual_downward_seconds: float = 0.0
         self._refresh_timing_nearfield_seconds: float = 0.0
         self._refresh_timing_profile_accounting_seconds: float = 0.0
         self._refresh_timing_compile_or_sync_suspect_seconds: float = 0.0
         self._refresh_timing_dual_setup_seconds: float = 0.0
         self._refresh_timing_dual_artifact_build_seconds: float = 0.0
+        self._refresh_timing_dual_split_shared_far_near_seconds: float = 0.0
+        self._refresh_timing_dual_split_shared_count_seconds: float = 0.0
+        self._refresh_timing_dual_split_shared_combined_fill_seconds: float = 0.0
+        self._refresh_timing_dual_split_shared_far_fill_seconds: float = 0.0
+        self._refresh_timing_dual_split_shared_near_fill_seconds: float = 0.0
         self._refresh_timing_dual_split_far_pairs_seconds: float = 0.0
         self._refresh_timing_dual_split_leaf_neighbors_seconds: float = 0.0
         self._refresh_timing_dual_split_combined_seconds: float = 0.0
@@ -2286,12 +2348,24 @@ class FastMultipoleMethod:
         self._refresh_timing_total_seconds = 0.0
         self._refresh_timing_input_seconds = 0.0
         self._refresh_timing_tree_upward_seconds = 0.0
+        self._refresh_timing_tree_build_seconds = 0.0
+        self._refresh_timing_upward_compute_seconds = 0.0
+        self._refresh_timing_upward_geometry_seconds = 0.0
+        self._refresh_timing_upward_mass_moments_seconds = 0.0
+        self._refresh_timing_upward_p2m_seconds = 0.0
+        self._refresh_timing_upward_m2m_seconds = 0.0
+        self._refresh_timing_upward_source_motion_seconds = 0.0
         self._refresh_timing_dual_downward_seconds = 0.0
         self._refresh_timing_nearfield_seconds = 0.0
         self._refresh_timing_profile_accounting_seconds = 0.0
         self._refresh_timing_compile_or_sync_suspect_seconds = 0.0
         self._refresh_timing_dual_setup_seconds = 0.0
         self._refresh_timing_dual_artifact_build_seconds = 0.0
+        self._refresh_timing_dual_split_shared_far_near_seconds = 0.0
+        self._refresh_timing_dual_split_shared_count_seconds = 0.0
+        self._refresh_timing_dual_split_shared_combined_fill_seconds = 0.0
+        self._refresh_timing_dual_split_shared_far_fill_seconds = 0.0
+        self._refresh_timing_dual_split_shared_near_fill_seconds = 0.0
         self._refresh_timing_dual_split_far_pairs_seconds = 0.0
         self._refresh_timing_dual_split_leaf_neighbors_seconds = 0.0
         self._refresh_timing_dual_split_combined_seconds = 0.0
@@ -2503,6 +2577,27 @@ class FastMultipoleMethod:
             "refresh_tree_upward_seconds": float(
                 self._refresh_timing_tree_upward_seconds
             ),
+            "refresh_tree_build_seconds": float(
+                self._refresh_timing_tree_build_seconds
+            ),
+            "refresh_upward_compute_seconds": float(
+                self._refresh_timing_upward_compute_seconds
+            ),
+            "refresh_upward_geometry_seconds": float(
+                self._refresh_timing_upward_geometry_seconds
+            ),
+            "refresh_upward_mass_moments_seconds": float(
+                self._refresh_timing_upward_mass_moments_seconds
+            ),
+            "refresh_upward_p2m_seconds": float(
+                self._refresh_timing_upward_p2m_seconds
+            ),
+            "refresh_upward_m2m_seconds": float(
+                self._refresh_timing_upward_m2m_seconds
+            ),
+            "refresh_upward_source_motion_seconds": float(
+                self._refresh_timing_upward_source_motion_seconds
+            ),
             "refresh_dual_downward_seconds": float(
                 self._refresh_timing_dual_downward_seconds
             ),
@@ -2518,6 +2613,21 @@ class FastMultipoleMethod:
             ),
             "refresh_dual_artifact_build_seconds": float(
                 self._refresh_timing_dual_artifact_build_seconds
+            ),
+            "refresh_dual_split_shared_far_near_seconds": float(
+                self._refresh_timing_dual_split_shared_far_near_seconds
+            ),
+            "refresh_dual_split_shared_count_seconds": float(
+                self._refresh_timing_dual_split_shared_count_seconds
+            ),
+            "refresh_dual_split_shared_combined_fill_seconds": float(
+                self._refresh_timing_dual_split_shared_combined_fill_seconds
+            ),
+            "refresh_dual_split_shared_far_fill_seconds": float(
+                self._refresh_timing_dual_split_shared_far_fill_seconds
+            ),
+            "refresh_dual_split_shared_near_fill_seconds": float(
+                self._refresh_timing_dual_split_shared_near_fill_seconds
             ),
             "refresh_dual_split_far_pairs_seconds": float(
                 self._refresh_timing_dual_split_far_pairs_seconds
@@ -2788,49 +2898,16 @@ class FastMultipoleMethod:
         tree_t0 = time.perf_counter()
         refresh_topology_key = getattr(prepared_state, "topology_key", None)
         topology_candidate = None
-        if tree_config.mode == "static_radix":
-            try:
-                next_state = self.prepare_state(
-                    positions_arr,
-                    masses_arr,
-                    bounds=bounds,
+        previous_topology_key = refresh_topology_key
+        if previous_topology_key is None:
+            if tree_config.mode == "static_radix" and isinstance(
+                prepared_state.tree, RadixTree
+            ):
+                previous_topology_key = self._static_radix_topology_key_from_tree(
+                    prepared_state.tree,
                     leaf_size=int(leaf_size),
-                    max_order=int(max_order),
-                    theta=theta,
                 )
-            except Exception as exc:
-                self._large_n_same_topology_refresh_last_error = (
-                    f"{type(exc).__name__}: {exc}"
-                )
-                self._large_n_same_topology_refresh_misses += 1
-                self._large_n_same_topology_refresh_miss_topology += 1
-                self._static_radix_refresh_misses += 1
-                return None
-
-            prev_profile = self._compiled_profile_from_prepared_state(prepared_state)
-            next_profile = self._compiled_profile_from_prepared_state(next_state)
-            same_profile = self._compiled_profile_fingerprint(prev_profile) == (
-                self._compiled_profile_fingerprint(next_profile)
-            )
-            compatible_profile = self._compiled_profile_capacity_compatible(
-                prev_profile,
-                next_profile,
-            )
-            if not (same_profile or compatible_profile):
-                self._large_n_same_topology_refresh_misses += 1
-                self._large_n_same_topology_refresh_miss_topology += 1
-                self._static_radix_refresh_misses += 1
-                self._static_radix_profile_overflows += 1
-                self._large_n_same_topology_refresh_last_error = (
-                    "static_radix refreshed profile exceeded previous capacities"
-                )
-                return None
-            self._large_n_same_topology_refresh_hits += 1
-            self._static_radix_refresh_hits += 1
-            return next_state
-        else:
-            previous_topology_key = refresh_topology_key
-            if previous_topology_key is None:
+            else:
                 previous_codes = getattr(prepared_state.tree, "morton_codes", None)
                 if previous_codes is not None:
                     previous_topology_key = self._topology_reuse_key_from_sorted_codes(
@@ -2841,52 +2918,51 @@ class FastMultipoleMethod:
                         max_refine_levels=max_refine_levels_val,
                         aspect_threshold=aspect_threshold_val,
                     )
-            if previous_topology_key is None:
-                self._large_n_same_topology_refresh_misses += 1
-                self._large_n_same_topology_refresh_miss_no_key += 1
-                return None
-            try:
-                morton_codes = morton_encode(positions_arr, inferred_bounds)
-                orig_idx = jnp.arange(positions_arr.shape[0], dtype=INDEX_DTYPE)
-                sorted_indices = jnp.lexsort((orig_idx, morton_codes))
-                sorted_codes = morton_codes[sorted_indices]
-                topology_key = self._topology_reuse_key_from_sorted_codes(
-                    sorted_codes=sorted_codes,
-                    tree_config=tree_config,
-                    leaf_size=int(leaf_size),
-                    refine_local=refine_local_val,
-                    max_refine_levels=max_refine_levels_val,
-                    aspect_threshold=aspect_threshold_val,
-                )
-                if topology_key is not None:
-                    topology_candidate = _TopologyReuseCandidate(
-                        key=topology_key,
-                        sorted_indices=jnp.asarray(sorted_indices, dtype=INDEX_DTYPE),
-                    )
-            except Exception:
-                topology_candidate = None
-            if (
-                topology_candidate is None
-                or topology_candidate.key != previous_topology_key
-            ):
-                self._large_n_same_topology_refresh_misses += 1
-                self._large_n_same_topology_refresh_miss_topology += 1
-                return None
+        if previous_topology_key is None:
+            self._large_n_same_topology_refresh_misses += 1
+            self._large_n_same_topology_refresh_miss_no_key += 1
+            if tree_config.mode == "static_radix":
+                self._static_radix_refresh_misses += 1
+            return None
+        topology_candidate = self._topology_reuse_candidate(
+            positions=positions_arr,
+            bounds=inferred_bounds,
+            tree_config=tree_config,
+            leaf_size=int(leaf_size),
+            refine_local=refine_local_val,
+            max_refine_levels=max_refine_levels_val,
+            aspect_threshold=aspect_threshold_val,
+            allow_stateful_cache=allow_stateful_cache,
+        )
+        if (
+            topology_candidate is None
+            or topology_candidate.key != previous_topology_key
+        ):
+            self._large_n_same_topology_refresh_misses += 1
+            self._large_n_same_topology_refresh_miss_topology += 1
+            if tree_config.mode == "static_radix":
+                self._static_radix_refresh_misses += 1
+            return None
 
-            topology_entry = _TopologyReuseEntry(
-                key=str(previous_topology_key),
-                tree=prepared_state.tree,
-                max_leaf_size=int(prepared_state.max_leaf_size),
-                cache_leaf_parameter=int(leaf_size),
-                reuse_count=0,
-            )
-            build_artifacts = self._rebuild_tree_artifacts_from_topology(
-                candidate=topology_candidate,
-                entry=topology_entry,
-                positions=positions_arr,
-                masses=masses_arr,
-            )
-            refresh_topology_key = topology_candidate.key
+        topology_entry = _TopologyReuseEntry(
+            key=str(previous_topology_key),
+            tree=prepared_state.tree,
+            max_leaf_size=int(prepared_state.max_leaf_size),
+            cache_leaf_parameter=int(leaf_size),
+            reuse_count=0,
+        )
+        build_artifacts = self._rebuild_tree_artifacts_from_topology(
+            candidate=topology_candidate,
+            entry=topology_entry,
+            positions=positions_arr,
+            masses=masses_arr,
+        )
+        refresh_topology_key = topology_candidate.key
+        defer_geometry = (
+            tree_config.mode == "static_radix"
+            and str(upward_center_mode).strip().lower() == "com"
+            and self._interaction_cache is not None
+        )
         upward = self.prepare_upward_sweep(
             build_artifacts.tree,
             build_artifacts.positions_sorted,
@@ -2894,6 +2970,7 @@ class FastMultipoleMethod:
             max_order=int(max_order),
             center_mode=upward_center_mode,
             max_leaf_size=int(build_artifacts.max_leaf_size),
+            defer_geometry=defer_geometry,
         )
         locals_template = self._build_locals_template_for_prepare_state(
             tree=build_artifacts.tree,
@@ -2961,6 +3038,8 @@ class FastMultipoleMethod:
             return None
 
         self._large_n_same_topology_refresh_hits += 1
+        if tree_config.mode == "static_radix":
+            self._static_radix_refresh_hits += 1
 
         if allow_stateful_cache:
             self._update_locals_template_cache_after_prepare(
@@ -4229,7 +4308,7 @@ class FastMultipoleMethod:
         """Return a radix-topology reuse signature when host-side caching is safe."""
 
         if (
-            not self.reuse_topology
+            (not self.reuse_topology and tree_config.mode != "static_radix")
             or not allow_stateful_cache
             or self.tree_type != "radix"
         ):
@@ -4239,14 +4318,32 @@ class FastMultipoleMethod:
             orig_idx = jnp.arange(positions.shape[0], dtype=INDEX_DTYPE)
             sorted_indices = jnp.lexsort((orig_idx, morton_codes))
             sorted_codes = morton_codes[sorted_indices]
-            key = self._topology_reuse_key_from_sorted_codes(
-                sorted_codes=sorted_codes,
-                tree_config=tree_config,
-                leaf_size=leaf_size,
-                refine_local=refine_local,
-                max_refine_levels=max_refine_levels,
-                aspect_threshold=aspect_threshold,
-            )
+            if tree_config.mode == "static_radix":
+                num_leaves = (int(positions.shape[0]) + int(leaf_size) - 1) // int(
+                    leaf_size
+                )
+                hasher = hashlib.sha256()
+                hasher.update(b"static_radix_topology_v1")
+                hasher.update(
+                    np.asarray(int(positions.shape[0]), dtype=np.int64).tobytes()
+                )
+                hasher.update(
+                    np.asarray(max(2 * num_leaves - 1, 1), dtype=np.int64).tobytes()
+                )
+                hasher.update(
+                    np.asarray(max(num_leaves - 1, 0), dtype=np.int64).tobytes()
+                )
+                hasher.update(np.asarray(int(leaf_size), dtype=np.int64).tobytes())
+                key = hasher.hexdigest()
+            else:
+                key = self._topology_reuse_key_from_sorted_codes(
+                    sorted_codes=sorted_codes,
+                    tree_config=tree_config,
+                    leaf_size=leaf_size,
+                    refine_local=refine_local,
+                    max_refine_levels=max_refine_levels,
+                    aspect_threshold=aspect_threshold,
+                )
         except Exception:
             return None
         if key is None:
@@ -4254,6 +4351,8 @@ class FastMultipoleMethod:
         return _TopologyReuseCandidate(
             key=key,
             sorted_indices=jnp.asarray(sorted_indices, dtype=INDEX_DTYPE),
+            sorted_codes=jnp.asarray(sorted_codes),
+            bounds=bounds,
         )
 
     def _topology_reuse_key_from_sorted_codes(
@@ -4300,13 +4399,13 @@ class FastMultipoleMethod:
         try:
             hasher = hashlib.sha256()
             hasher.update(b"static_radix_topology_v1")
-            for value, dtype in (
-                (tree.parent, np.int64),
-                (tree.left_child, np.int64),
-                (tree.right_child, np.int64),
-                (tree.node_ranges, np.int64),
-            ):
-                hasher.update(np.asarray(jax.device_get(value), dtype=dtype).tobytes())
+            hasher.update(np.asarray(int(tree.num_particles), dtype=np.int64).tobytes())
+            hasher.update(
+                np.asarray(int(tree.parent.shape[0]), dtype=np.int64).tobytes()
+            )
+            hasher.update(
+                np.asarray(int(tree.num_internal_nodes), dtype=np.int64).tobytes()
+            )
             hasher.update(np.asarray(int(leaf_size), dtype=np.int64).tobytes())
         except Exception:
             return None
@@ -4330,8 +4429,35 @@ class FastMultipoleMethod:
         cached_tree = entry.tree
         if not isinstance(cached_tree, RadixTree):
             raise ValueError("topology reuse currently supports radix trees only")
+        topology = cached_tree.topology
+        if (
+            cached_tree.build_mode == "static_radix"
+            and candidate.sorted_codes is not None
+            and candidate.bounds is not None
+        ):
+            num_internal = int(cached_tree.num_internal_nodes)
+            leaf_starts = jnp.asarray(
+                cached_tree.node_ranges[num_internal:, 0],
+                dtype=INDEX_DTYPE,
+            )
+            topology = topology._replace(
+                particle_indices=jnp.asarray(
+                    candidate.sorted_indices,
+                    dtype=INDEX_DTYPE,
+                ),
+                morton_codes=jnp.asarray(candidate.sorted_codes),
+                bounds_min=jnp.asarray(candidate.bounds[0], dtype=positions.dtype),
+                bounds_max=jnp.asarray(candidate.bounds[1], dtype=positions.dtype),
+                leaf_codes=jnp.asarray(candidate.sorted_codes)[leaf_starts],
+                leaf_depths=jnp.full(
+                    (leaf_starts.shape[0],),
+                    -1,
+                    dtype=INDEX_DTYPE,
+                ),
+                use_morton_geometry=jnp.asarray(False, dtype=jnp.bool_),
+            )
         rebuilt_tree = RadixTree(
-            topology=cached_tree.topology,
+            topology=topology,
             build_mode=cached_tree.build_mode,
             positions_sorted=positions_sorted,
             masses_sorted=masses_sorted,
@@ -4445,6 +4571,7 @@ class FastMultipoleMethod:
         )
         topology_key_for_state: Optional[str] = None
 
+        tree_build_t0 = time.perf_counter()
         if can_reuse_cached_topology:
             build_artifacts = self._rebuild_tree_artifacts_from_topology(
                 candidate=topology_candidate,
@@ -4506,6 +4633,10 @@ class FastMultipoleMethod:
                     )
                 elif self.reuse_topology:
                     self._topology_reuse_entry = None
+        if bool(getattr(self, "_refresh_timing_active", False)):
+            self._refresh_timing_tree_build_seconds += (
+                time.perf_counter() - tree_build_t0
+            )
 
         tree = build_artifacts.tree
         pos_sorted = build_artifacts.positions_sorted
@@ -4559,6 +4690,13 @@ class FastMultipoleMethod:
             if geometry_entry is not None and geometry_entry.key == geometry_cache_key:
                 cached_geometry = geometry_entry.geometry
 
+        upward_t0 = time.perf_counter()
+        defer_geometry = (
+            bool(getattr(self, "_refresh_timing_active", False))
+            and tree_config.mode == "static_radix"
+            and str(upward_center_mode).strip().lower() == "com"
+            and self._interaction_cache is not None
+        )
         upward = self.prepare_upward_sweep(
             tree,
             pos_sorted,
@@ -4567,8 +4705,17 @@ class FastMultipoleMethod:
             center_mode=upward_center_mode,
             max_leaf_size=leaf_cap_hint,
             precomputed_geometry=cached_geometry,
+            defer_geometry=defer_geometry,
         )
-        if allow_stateful_cache and geometry_cache_key is not None:
+        if bool(getattr(self, "_refresh_timing_active", False)):
+            self._refresh_timing_upward_compute_seconds += (
+                time.perf_counter() - upward_t0
+            )
+        if (
+            allow_stateful_cache
+            and geometry_cache_key is not None
+            and upward.geometry is not None
+        ):
             self._geometry_reuse_entry = _GeometryReuseEntry(
                 key=geometry_cache_key,
                 geometry=upward.geometry,
@@ -4647,6 +4794,11 @@ class FastMultipoleMethod:
             if not refresh_timing_active:
                 return
             attr_by_name = {
+                "dual_split_shared_far_pairs_leaf_neighbors": "_refresh_timing_dual_split_shared_far_near_seconds",
+                "dual_split_shared_count": "_refresh_timing_dual_split_shared_count_seconds",
+                "dual_split_shared_combined_fill": "_refresh_timing_dual_split_shared_combined_fill_seconds",
+                "dual_split_shared_far_fill": "_refresh_timing_dual_split_shared_far_fill_seconds",
+                "dual_split_shared_near_fill": "_refresh_timing_dual_split_shared_near_fill_seconds",
                 "dual_split_far_pairs": "_refresh_timing_dual_split_far_pairs_seconds",
                 "dual_split_leaf_neighbors": "_refresh_timing_dual_split_leaf_neighbors_seconds",
                 "dual_split_interactions_and_neighbors": "_refresh_timing_dual_split_combined_seconds",
@@ -4817,9 +4969,19 @@ class FastMultipoleMethod:
         _record_dual_stage("_refresh_timing_dual_setup_seconds", stage_t0)
 
         stage_t0 = time.perf_counter()
+        geometry_factory = (
+            None
+            if tree_artifacts.upward.geometry is not None
+            else lambda: compute_tree_geometry(
+                tree_artifacts.tree,
+                tree_artifacts.positions_sorted,
+                max_leaf_size=int(tree_artifacts.leaf_cap),
+            )
+        )
         dual_artifacts, cache_entry = _build_dual_tree_artifacts(
             tree_artifacts.tree,
             tree_artifacts.upward.geometry,
+            geometry_factory=geometry_factory,
             theta=theta_val,
             mac_type=mac_type_val,
             dehnen_radius_scale=dehnen_radius_scale,
@@ -5791,11 +5953,28 @@ class FastMultipoleMethod:
         explicit_centers: Optional[Array] = None,
         max_leaf_size: Optional[int] = None,
         precomputed_geometry: Optional[Any] = None,
+        defer_geometry: bool = False,
     ) -> TreeUpwardData:
         """Bundle geometry, raw moments, and packed expansions for a tree."""
         self._ensure_execution_backend_supported(tree=tree)
 
         if self.expansion_basis == "solidfmm":
+
+            def _record_upward_stage(name: str, elapsed: float) -> None:
+                if not bool(getattr(self, "_refresh_timing_active", False)):
+                    return
+                attr_by_name = {
+                    "geometry": "_refresh_timing_upward_geometry_seconds",
+                    "mass_moments": "_refresh_timing_upward_mass_moments_seconds",
+                    "p2m": "_refresh_timing_upward_p2m_seconds",
+                    "m2m": "_refresh_timing_upward_m2m_seconds",
+                    "source_motion": "_refresh_timing_upward_source_motion_seconds",
+                }
+                attr = attr_by_name.get(str(name))
+                if attr is None:
+                    return
+                setattr(self, attr, float(getattr(self, attr, 0.0)) + float(elapsed))
+
             complex_upward = prepare_solidfmm_complex_upward_sweep(
                 tree,
                 positions_sorted,
@@ -5807,6 +5986,8 @@ class FastMultipoleMethod:
                 leaf_batch_size=self.upward_leaf_batch_size,
                 rotation=self.complex_rotation,
                 precomputed_geometry=precomputed_geometry,
+                upward_timing_callback=_record_upward_stage,
+                defer_geometry=bool(defer_geometry),
             )
 
             multipoles = NodeMultipoleData(

@@ -21,6 +21,7 @@ from yggdrax.interactions import (
     NodeInteractionList,
     NodeNeighborList,
     build_compact_far_pairs,
+    build_compact_far_pairs_and_leaf_neighbor_lists,
     build_interactions_and_neighbors_split,
     build_leaf_neighbor_lists,
 )
@@ -386,36 +387,21 @@ def _build_dual_tree_artifacts_split(
     if need_far_payload and not bool(need_node_interactions or use_dense_interactions):
         stage_t0 = time.perf_counter()
         interactions = None
-        compact_far_pairs = build_compact_far_pairs(
-            tree,
-            geometry,
-            theta=theta,
-            mac_type=mac_type,
-            dehnen_radius_scale=dehnen_radius_scale,
-            max_pair_queue=max_pair_queue,
-            process_block=pair_process_block,
-            traversal_config=traversal_config,
-            retry_logger=retry_logger,
+        compact_far_pairs, neighbor_list = (
+            build_compact_far_pairs_and_leaf_neighbor_lists(
+                tree,
+                geometry,
+                theta=theta,
+                mac_type=mac_type,
+                dehnen_radius_scale=dehnen_radius_scale,
+                max_pair_queue=max_pair_queue,
+                process_block=pair_process_block,
+                traversal_config=traversal_config,
+                retry_logger=retry_logger,
+                timing_callback=timing_callback,
+            )
         )
-        _record("dual_split_far_pairs", stage_t0)
-        stage_t0 = time.perf_counter()
-        neighbor_list = build_leaf_neighbor_lists(
-            tree,
-            geometry,
-            theta=theta,
-            max_neighbors_per_leaf=(
-                int(traversal_config.max_neighbors_per_leaf)
-                if traversal_config is not None
-                else 2048
-            ),
-            mac_type=mac_type,
-            dehnen_radius_scale=dehnen_radius_scale,
-            max_pair_queue=max_pair_queue,
-            process_block=pair_process_block,
-            traversal_config=traversal_config,
-            retry_logger=retry_logger,
-        )
-        _record("dual_split_leaf_neighbors", stage_t0)
+        _record("dual_split_shared_far_pairs_leaf_neighbors", stage_t0)
     elif need_far_payload:
         stage_t0 = time.perf_counter()
         interactions, neighbor_list = build_interactions_and_neighbors_split(
@@ -771,6 +757,7 @@ def _build_dual_tree_artifacts(
     tree: Tree,
     geometry,
     *,
+    geometry_factory: Optional[Callable[[], Any]] = None,
     theta: float,
     mac_type: MACType,
     dehnen_radius_scale: float,
@@ -823,6 +810,12 @@ def _build_dual_tree_artifacts(
         cache_out = cache_hit.cache_out
     else:
         dual_tree_cache_hit = False
+        if geometry is None:
+            if geometry_factory is None:
+                raise ValueError(
+                    "geometry must be provided when dual-tree cache lookup misses"
+                )
+            geometry = geometry_factory()
         use_split_build = _can_split_dual_tree_build(
             split_enabled=bool(allow_split_build),
             grouped_interactions=grouped_interactions,
