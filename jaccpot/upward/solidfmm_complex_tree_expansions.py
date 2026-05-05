@@ -8,6 +8,7 @@ kept separate from the Dehnen real-basis implementation.
 from __future__ import annotations
 
 import os
+import time
 from functools import partial
 from typing import NamedTuple, Optional
 
@@ -15,6 +16,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 from beartype import beartype
+from beartype.typing import Callable
 from jax import lax
 from jaxtyping import Array, jaxtyped
 from yggdrax.dtypes import INDEX_DTYPE, as_index, complex_dtype_for_real
@@ -401,34 +403,52 @@ def prepare_solidfmm_complex_upward_sweep(
     leaf_batch_size: Optional[int] = None,
     rotation: str = "cached",
     precomputed_geometry: Optional[TreeGeometry] = None,
+    upward_timing_callback: Optional[Callable[[str, float], None]] = None,
+    defer_geometry: bool = False,
 ) -> SolidFMMComplexTreeUpwardData:
     """Compute complex multipoles for every node (solidfmm basis)."""
 
     p = int(max_order)
     if p < 0:
         raise ValueError("max_order must be >= 0")
+    profile_stages = (
+        upward_timing_callback is not None
+        and os.environ.get("JACCPOT_PROFILE_UPWARD_STAGES", "0") == "1"
+    )
+
+    def _record_stage(name: str, start: float, value) -> None:
+        if not profile_stages or upward_timing_callback is None:
+            return
+        jax.block_until_ready(value)
+        upward_timing_callback(name, float(time.perf_counter() - start))
 
     _upward_diag(
         "geometry start "
         f"particles={int(positions_sorted.shape[0])} max_order={p} rotation={rotation}"
     )
+    stage_t0 = time.perf_counter()
     # Thread the known leaf cap into geometry so JIT does not pad leaf-bound
     # gathers out to ``num_particles`` for large radix trees.
     geometry = (
         precomputed_geometry
         if precomputed_geometry is not None
+        else None
+        if bool(defer_geometry)
         else compute_tree_geometry(
             tree,
             positions_sorted,
             max_leaf_size=int(max_leaf_size) if max_leaf_size is not None else None,
         )
     )
+    _record_stage("geometry", stage_t0, geometry)
     _upward_diag("geometry done")
+    stage_t0 = time.perf_counter()
     mass_moments = compute_tree_mass_moments(
         tree,
         positions_sorted,
         masses_sorted,
     )
+    _record_stage("mass_moments", stage_t0, mass_moments)
     _upward_diag("mass moments done")
 
     total_nodes = int(tree.parent.shape[0])
@@ -494,6 +514,7 @@ def prepare_solidfmm_complex_upward_sweep(
     )
 
     _upward_diag("p2m start")
+    stage_t0 = time.perf_counter()
     packed = _p2m_leaves_complex(
         jnp.asarray(tree.node_ranges, dtype=INDEX_DTYPE),
         positions_sorted,
@@ -505,9 +526,11 @@ def prepare_solidfmm_complex_upward_sweep(
         total_nodes=total_nodes,
         leaf_batch_size=resolved_leaf_batch_size,
     )
+    _record_stage("p2m", stage_t0, packed)
     _upward_diag(f"p2m done packed_shape={tuple(int(v) for v in packed.shape)}")
 
     _upward_diag("m2m start")
+    stage_t0 = time.perf_counter()
     packed = _aggregate_m2m_complex_by_level(
         packed,
         centers,
@@ -521,10 +544,12 @@ def prepare_solidfmm_complex_upward_sweep(
         level_batch_width=level_batch_width,
         rotation=rotation,
     )
+    _record_stage("m2m", stage_t0, packed)
     _upward_diag("m2m done")
 
     source_motion_packed: Optional[Array] = None
     if velocities_sorted is not None:
+        stage_t0 = time.perf_counter()
         source_motion_packed = prepare_solidfmm_complex_source_motion_multipoles(
             tree,
             positions_sorted,
@@ -535,6 +560,7 @@ def prepare_solidfmm_complex_upward_sweep(
             max_leaf_size=int(max_leaf_size),
             rotation=rotation,
         )
+        _record_stage("source_motion", stage_t0, source_motion_packed)
 
     multipoles = SolidFMMComplexNodeMultipoleData(
         order=p,
