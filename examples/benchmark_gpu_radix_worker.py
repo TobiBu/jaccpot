@@ -1724,6 +1724,7 @@ def _build_runtime_config(config: dict[str, Any]) -> dict[str, Any]:
     cfg = dict(config)
     preset_norm = str(cfg.get("preset", "fast")).strip().lower()
     if preset_norm == "large_n_gpu":
+        explicit_cfg = dict(cfg)
         canonical_cfg = bench_utils.canonical_large_n_production_config(
             leaf_target=int(cfg.get("leaf_target", 256)),
             theta=float(cfg.get("theta", 0.6)),
@@ -1732,6 +1733,9 @@ def _build_runtime_config(config: dict[str, Any]) -> dict[str, Any]:
         )
         for key, value in canonical_cfg.items():
             cfg[key] = value
+        for key, value in explicit_cfg.items():
+            if value is not None:
+                cfg[key] = value
     autotune_default = preset_norm == "large_n_gpu"
     memory_objective = str(cfg.get("memory_objective", "balanced")).strip().lower()
     traversal_raw = cfg.get("traversal_config")
@@ -1752,6 +1756,7 @@ def _build_runtime_config(config: dict[str, Any]) -> dict[str, Any]:
     advanced = FMMAdvancedConfig(
         tree=TreeConfig(
             tree_type=str(cfg["tree_type"]),
+            mode=str(cfg.get("tree_build_mode", "lbvh")),
             leaf_target=int(cfg["leaf_target"]),
         ),
         farfield=FarFieldConfig(

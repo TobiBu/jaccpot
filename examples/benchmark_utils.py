@@ -136,6 +136,7 @@ def canonical_large_n_production_config(
         "softening": float(softening),
         "working_dtype": str(working_dtype),
         "tree_type": "radix",
+        "tree_build_mode": "lbvh",
         "leaf_target": int(leaf_target),
         "farfield_rotation": "solidfmm",
         "farfield_mode": "pair_grouped",
