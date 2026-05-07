@@ -187,6 +187,7 @@ class LargeNPreparedState:
     radix_fast_lane: bool = False
     disable_specialized_large_n_nearfield: bool = False
     radix_fast_payload: Optional[RadixFastNearfieldPayload] = None
+    radix_overflow_payload: Optional[RadixFastNearfieldPayload] = None
 
     @property
     def positions_sorted(self: "LargeNPreparedState") -> Array:
@@ -249,6 +250,7 @@ class LargeNPreparedState:
             self.nearfield_target_block_source_leaf_ids_padded,
             self.nearfield_target_block_valid_mask_padded,
             self.radix_fast_payload,
+            self.radix_overflow_payload,
             self.force_scale_nodes,
         )
         aux = (
@@ -407,8 +409,13 @@ class LargeNPreparedState:
             nearfield_target_block_source_leaf_ids_padded,
             nearfield_target_block_valid_mask_padded,
             radix_fast_payload,
-            force_scale_nodes,
+            *remaining_children,
         ) = children
+        if len(remaining_children) == 1:
+            radix_overflow_payload = None
+            (force_scale_nodes,) = remaining_children
+        else:
+            radix_overflow_payload, force_scale_nodes = remaining_children
         return cls(
             tree=tree,
             local_data=local_data,
@@ -476,4 +483,5 @@ class LargeNPreparedState:
                 disable_specialized_large_n_nearfield
             ),
             radix_fast_payload=radix_fast_payload,
+            radix_overflow_payload=radix_overflow_payload,
         )

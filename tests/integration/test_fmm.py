@@ -1223,11 +1223,124 @@ def test_radix_fast_lane_prepared_state_matches_large_n_baseline(monkeypatch):
     )
 
 
+def test_radix_fast_lane_includes_overflow_target_blocks(monkeypatch):
+    monkeypatch.setattr(jax, "default_backend", lambda: "gpu")
+    monkeypatch.setenv("JACCPOT_LARGE_N_TARGET_BLOCK_SIZE", "1")
+    monkeypatch.setenv("JACCPOT_LARGE_N_SPEED_PREPARED_LAYOUT", "1")
+    monkeypatch.setenv("JACCPOT_LARGE_N_SPEED_PREPARED_FAST_BLOCKS", "1")
+    monkeypatch.setenv("JACCPOT_LARGE_N_SPEED_PREPARED_AUTO_FULL_BLOCKS", "0")
+    monkeypatch.setenv("JACCPOT_LARGE_N_STATIC_TARGET_BLOCKS", "0")
+
+    key = jax.random.PRNGKey(20260506)
+    key_pos, key_mass = jax.random.split(key)
+    positions = jax.random.uniform(
+        key_pos,
+        (1280, 3),
+        minval=-1.0,
+        maxval=1.0,
+        dtype=jnp.float32,
+    )
+    masses = jax.random.uniform(
+        key_mass,
+        (1280,),
+        minval=0.1,
+        maxval=1.1,
+        dtype=jnp.float32,
+    )
+
+    fmm = FastMultipoleMethod(
+        preset="large_n_gpu",
+        expansion_basis="solidfmm",
+        theta=0.6,
+        nearfield_mode="bucketed",
+        nearfield_edge_chunk_size=64,
+        grouped_interactions=False,
+        working_dtype=jnp.float32,
+    )
+    state = fmm.prepare_state(
+        positions,
+        masses,
+        leaf_size=256,
+        max_order=4,
+    )
+
+    assert bool(getattr(state, "radix_fast_lane", False))
+    assert state.nearfield_target_block_source_leaf_ids is not None
+    assert int(state.nearfield_target_block_source_leaf_ids.shape[0]) > 0
+    assert getattr(state, "radix_overflow_payload", None) is not None
+    assert int(state.radix_overflow_payload.source_particle_ids.size) > 0
+
+    fast_acc = np.asarray(fmm.evaluate_prepared_state(state))
+    baseline_acc, _ = fmm.evaluate_prepared_state(state, return_potential=True)
+    baseline_acc = np.asarray(baseline_acc)
+    abs_err = np.abs(fast_acc - baseline_acc)
+    max_abs_err = float(abs_err.max(initial=0.0))
+    denom = np.maximum(np.abs(baseline_acc), 1e-8)
+    max_rel_err = float((abs_err / denom).max(initial=0.0))
+    assert np.allclose(
+        fast_acc,
+        baseline_acc,
+        rtol=5e-4,
+        atol=5e-4,
+    ), (
+        "radix fast-lane overflow acceleration drift exceeded tolerance: "
+        f"max_abs_err={max_abs_err:.6e}, max_rel_err={max_rel_err:.6e}"
+    )
+
+
+def test_radix_fast_lane_auto_full_prefix_eliminates_overflow(monkeypatch):
+    monkeypatch.setattr(jax, "default_backend", lambda: "gpu")
+    monkeypatch.setenv("JACCPOT_LARGE_N_TARGET_BLOCK_SIZE", "1")
+    monkeypatch.setenv("JACCPOT_LARGE_N_SPEED_PREPARED_LAYOUT", "1")
+    monkeypatch.setenv("JACCPOT_LARGE_N_SPEED_PREPARED_FAST_BLOCKS", "1")
+    monkeypatch.setenv("JACCPOT_LARGE_N_STATIC_TARGET_BLOCKS", "0")
+
+    key = jax.random.PRNGKey(20260507)
+    key_pos, key_mass = jax.random.split(key)
+    positions = jax.random.uniform(
+        key_pos,
+        (1280, 3),
+        minval=-1.0,
+        maxval=1.0,
+        dtype=jnp.float32,
+    )
+    masses = jax.random.uniform(
+        key_mass,
+        (1280,),
+        minval=0.1,
+        maxval=1.1,
+        dtype=jnp.float32,
+    )
+
+    fmm = FastMultipoleMethod(
+        preset="large_n_gpu",
+        expansion_basis="solidfmm",
+        theta=0.6,
+        nearfield_mode="bucketed",
+        nearfield_edge_chunk_size=64,
+        grouped_interactions=False,
+        working_dtype=jnp.float32,
+    )
+    state = fmm.prepare_state(
+        positions,
+        masses,
+        leaf_size=256,
+        max_order=4,
+    )
+
+    assert bool(getattr(state, "radix_fast_lane", False))
+    assert state.nearfield_target_block_source_leaf_ids_padded is not None
+    assert int(state.nearfield_target_block_source_leaf_ids_padded.shape[1]) > 1
+    assert int(state.nearfield_target_block_overflow_active_blocks) == 0
+    assert getattr(state, "radix_overflow_payload", None) is None
+
+
 def test_large_n_prepacked_overflow_fallback_matches_tiled_overflow(monkeypatch):
     monkeypatch.setattr(jax, "default_backend", lambda: "gpu")
     monkeypatch.setenv("JACCPOT_LARGE_N_TARGET_BLOCK_SIZE", "1")
     monkeypatch.setenv("JACCPOT_LARGE_N_SPEED_PREPARED_LAYOUT", "1")
     monkeypatch.setenv("JACCPOT_LARGE_N_SPEED_PREPARED_FAST_BLOCKS", "1")
+    monkeypatch.setenv("JACCPOT_LARGE_N_SPEED_PREPARED_AUTO_FULL_BLOCKS", "0")
     monkeypatch.setenv("JACCPOT_LARGE_N_STATIC_TARGET_BLOCKS", "0")
 
     key = jax.random.PRNGKey(20260417)

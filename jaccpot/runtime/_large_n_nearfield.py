@@ -12,6 +12,8 @@ from yggdrax.tree import Tree
 
 from jaccpot.nearfield.near_field import (
     compute_leaf_p2p_accelerations,
+    compute_leaf_p2p_accelerations_radix_payload_pairs_only,
+    compute_leaf_p2p_accelerations_target_block_pairs_only,
     compute_leaf_p2p_accelerations_radix_fast_lane,
     prepare_bucketed_scatter_schedules_from_groups,
     prepare_leaf_neighbor_pairs,
@@ -390,7 +392,7 @@ def evaluate_large_n_nearfield_fast_lane(
             "radix fast-lane evaluate requires radix_fast_payload to be present"
         )
 
-    return compute_leaf_p2p_accelerations_radix_fast_lane(
+    near_acc = compute_leaf_p2p_accelerations_radix_fast_lane(
         positions_sorted=state.positions_sorted,
         masses_sorted=state.masses_sorted,
         payload=state.radix_fast_payload,
@@ -398,3 +400,46 @@ def evaluate_large_n_nearfield_fast_lane(
         softening=float(getattr(fmm, "softening")),
         return_potential=False,
     )
+    overflow_payload = getattr(state, "radix_overflow_payload", None)
+    if overflow_payload is not None:
+        return near_acc + compute_leaf_p2p_accelerations_radix_payload_pairs_only(
+            positions_sorted=state.positions_sorted,
+            masses_sorted=state.masses_sorted,
+            payload=overflow_payload,
+            G=getattr(fmm, "G"),
+            softening=float(getattr(fmm, "softening")),
+        )
+
+    if (
+        state.nearfield_target_block_offsets is None
+        or state.nearfield_target_block_leaf_ids is None
+        or state.nearfield_target_block_source_leaf_ids is None
+        or state.nearfield_target_block_valid_mask is None
+        or int(state.nearfield_target_block_source_leaf_ids.size) == 0
+    ):
+        return near_acc
+
+    overflow_acc = compute_leaf_p2p_accelerations_target_block_pairs_only(
+        state.positions_sorted,
+        state.masses_sorted,
+        state.nearfield_leaf_particle_indices,
+        state.nearfield_leaf_particle_mask,
+        state.nearfield_target_block_offsets,
+        state.nearfield_target_block_leaf_ids,
+        state.nearfield_target_block_source_leaf_ids,
+        state.nearfield_target_block_valid_mask,
+        G=getattr(fmm, "G"),
+        softening=float(getattr(fmm, "softening")),
+        target_leaf_batch_size=int(state.nearfield_target_leaf_batch_size),
+        target_block_tile_size=int(state.nearfield_target_block_tile_size),
+        target_block_tile_scan_unroll=int(
+            state.nearfield_target_block_tile_scan_unroll
+        ),
+        target_block_batch_scan_unroll=int(
+            state.nearfield_target_block_batch_scan_unroll
+        ),
+        target_block_overflow_fast_max_blocks=int(
+            state.nearfield_target_block_overflow_fast_max_blocks
+        ),
+    )
+    return near_acc + overflow_acc

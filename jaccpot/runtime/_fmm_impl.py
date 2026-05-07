@@ -3139,6 +3139,7 @@ class FastMultipoleMethod:
                 prepared_state.disable_specialized_large_n_nearfield
             ),
             radix_fast_payload=prepared_state.radix_fast_payload,
+            radix_overflow_payload=prepared_state.radix_overflow_payload,
         )
 
     def _large_n_neighbor_list_matches(

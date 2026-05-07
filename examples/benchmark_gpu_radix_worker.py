@@ -349,6 +349,47 @@ def _resolved_nearfield_runtime_report(
     }
 
 
+def _shape_or_none(value: Any) -> Optional[tuple[int, ...]]:
+    if value is None:
+        return None
+    shape = getattr(value, "shape", None)
+    if shape is None:
+        return None
+    return tuple(int(dim) for dim in shape)
+
+
+def _large_n_prepared_state_report(state: Any) -> dict[str, Any]:
+    radix_payload = getattr(state, "radix_fast_payload", None)
+    overflow_payload = getattr(state, "radix_overflow_payload", None)
+    return {
+        "large_n_target_block_size": int(
+            getattr(state, "nearfield_target_block_size", -1)
+        ),
+        "large_n_overflow_active_blocks": int(
+            getattr(state, "nearfield_target_block_overflow_active_blocks", -1)
+        ),
+        "large_n_overflow_profile_capacity": int(
+            getattr(state, "nearfield_target_block_overflow_profile_capacity", -1)
+        ),
+        "large_n_block_padded_shape": _shape_or_none(
+            getattr(state, "nearfield_target_block_source_leaf_ids_padded", None)
+        ),
+        "large_n_overflow_block_shape": _shape_or_none(
+            getattr(state, "nearfield_target_block_source_leaf_ids", None)
+        ),
+        "large_n_radix_source_particle_shape": (
+            _shape_or_none(getattr(radix_payload, "source_particle_ids", None))
+            if radix_payload is not None
+            else None
+        ),
+        "large_n_radix_overflow_source_particle_shape": (
+            _shape_or_none(getattr(overflow_payload, "source_particle_ids", None))
+            if overflow_payload is not None
+            else None
+        ),
+    }
+
+
 def _query_gpu_memory_mb() -> tuple[float, float]:
     """Query current GPU used/total memory via nvidia-smi."""
     cmd = [
@@ -1963,6 +2004,7 @@ def _run_sweep_case(
             num_particles=int(num_particles),
         )
     )
+    row.update(_large_n_prepared_state_report(prepared_state))
     row.update(worker_tune_info)
     return row
 

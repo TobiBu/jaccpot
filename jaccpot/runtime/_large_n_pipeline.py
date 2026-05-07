@@ -495,10 +495,6 @@ def prepare_large_n_state(
             max_leaf_blocks = int(jnp.max(target_leaf_block_counts))
             logical_fast_blocks = min(fast_blocks, max_leaf_blocks)
             target_block_tile_size = int(nearfield_target_block_tile_size)
-            aligned_fast_blocks = (
-                (max(1, logical_fast_blocks) + target_block_tile_size - 1)
-                // target_block_tile_size
-            ) * target_block_tile_size
             speed_layout_max_mb_raw = os.environ.get(
                 "JACCPOT_LARGE_N_SPEED_PREPARED_MAX_MB",
                 "256",
@@ -507,6 +503,31 @@ def prepare_large_n_state(
                 speed_layout_max_mb = max(0.0, float(speed_layout_max_mb_raw))
             except Exception:
                 speed_layout_max_mb = 256.0
+
+            def _aligned_block_count(block_count: int) -> int:
+                return (
+                    (max(1, int(block_count)) + target_block_tile_size - 1)
+                    // target_block_tile_size
+                ) * target_block_tile_size
+
+            def _layout_mb(block_count: int) -> float:
+                return float(
+                    num_leaves
+                    * max(1, int(block_count))
+                    * block_size
+                    * (jnp.dtype(INDEX_DTYPE).itemsize + jnp.dtype(bool).itemsize)
+                ) / (1024.0 * 1024.0)
+
+            auto_full_blocks = _env_bool(
+                "JACCPOT_LARGE_N_SPEED_PREPARED_AUTO_FULL_BLOCKS",
+                True,
+            )
+            if bool(auto_full_blocks) and max_leaf_blocks > logical_fast_blocks:
+                candidate_aligned_blocks = _aligned_block_count(max_leaf_blocks)
+                if _layout_mb(candidate_aligned_blocks) <= speed_layout_max_mb:
+                    logical_fast_blocks = int(max_leaf_blocks)
+
+            aligned_fast_blocks = _aligned_block_count(logical_fast_blocks)
             est_layout_bytes = float(
                 num_leaves
                 * max(1, aligned_fast_blocks)
@@ -644,6 +665,7 @@ def prepare_large_n_state(
     _record_nf("_refresh_timing_nearfield_overflow_profile_seconds", substage_t0)
 
     radix_fast_payload = None
+    radix_overflow_payload = None
     substage_t0 = time.perf_counter()
     if (
         bool(execution_config.radix_fast_lane)
@@ -732,6 +754,112 @@ def prepare_large_n_state(
             fallback_tile_scan_unroll=int(source_slot_scan_unroll),
             fallback_batch_scan_unroll=int(target_batch_scan_unroll),
         )
+
+        if (
+            overflow_active_blocks > 0
+            and target_block_offsets is not None
+            and target_block_source_leaf_ids is not None
+            and target_block_valid_mask is not None
+        ):
+            overflow_counts = target_block_offsets[1:] - target_block_offsets[:-1]
+            max_overflow_blocks = (
+                int(jnp.max(overflow_counts))
+                if int(overflow_counts.shape[0]) > 0
+                else 0
+            )
+            if max_overflow_blocks > 0:
+                overflow_block_tile = max(1, int(nearfield_target_block_tile_size))
+                aligned_overflow_blocks = (
+                    (max_overflow_blocks + overflow_block_tile - 1)
+                    // overflow_block_tile
+                ) * overflow_block_tile
+                overflow_source_slots = int(aligned_overflow_blocks) * int(block_size)
+                overflow_payload_max_mb_raw = os.environ.get(
+                    "JACCPOT_LARGE_N_RADIX_OVERFLOW_PAYLOAD_MAX_MB",
+                    "1024",
+                )
+                try:
+                    overflow_payload_max_mb = max(
+                        0.0,
+                        float(overflow_payload_max_mb_raw),
+                    )
+                except Exception:
+                    overflow_payload_max_mb = 1024.0
+                est_overflow_payload_bytes = float(
+                    num_target_leaves
+                    * max(1, overflow_source_slots)
+                    * max(1, source_leaf_size)
+                    * (jnp.dtype(INDEX_DTYPE).itemsize + jnp.dtype(bool).itemsize)
+                )
+                est_overflow_payload_mb = est_overflow_payload_bytes / (
+                    1024.0 * 1024.0
+                )
+                if overflow_source_slots > 0 and (
+                    est_overflow_payload_mb <= overflow_payload_max_mb
+                ):
+                    overflow_block_offsets = jnp.arange(
+                        aligned_overflow_blocks,
+                        dtype=INDEX_DTYPE,
+                    )
+                    overflow_block_idx = (
+                        target_block_offsets[:-1, None]
+                        + overflow_block_offsets[None, :]
+                    )
+                    overflow_block_valid = (
+                        overflow_block_offsets[None, :] < overflow_counts[:, None]
+                    )
+                    safe_overflow_block_idx = jnp.where(
+                        overflow_block_valid,
+                        overflow_block_idx,
+                        0,
+                    )
+                    overflow_source_leaf_ids_padded = jnp.where(
+                        overflow_block_valid[:, :, None],
+                        target_block_source_leaf_ids[safe_overflow_block_idx],
+                        0,
+                    )
+                    overflow_source_leaf_valid_padded = (
+                        target_block_valid_mask[safe_overflow_block_idx]
+                        & overflow_block_valid[:, :, None]
+                    )
+                    overflow_source_leaf_ids_flat = (
+                        overflow_source_leaf_ids_padded.reshape(
+                            (num_target_leaves, overflow_source_slots)
+                        )
+                    )
+                    overflow_source_leaf_valid_flat = (
+                        overflow_source_leaf_valid_padded.reshape(
+                            (num_target_leaves, overflow_source_slots)
+                        )
+                    )
+                    safe_overflow_source_leaf_ids = jnp.where(
+                        overflow_source_leaf_valid_flat,
+                        overflow_source_leaf_ids_flat,
+                        0,
+                    )
+                    overflow_source_particle_ids = target_particle_ids[
+                        safe_overflow_source_leaf_ids
+                    ]
+                    overflow_source_particle_mask = (
+                        target_particle_mask[safe_overflow_source_leaf_ids]
+                        & overflow_source_leaf_valid_flat[:, :, None]
+                    )
+                    radix_overflow_payload = RadixFastNearfieldPayload(
+                        target_leaf_ids=target_leaf_ids,
+                        target_particle_ids=target_particle_ids,
+                        target_particle_mask=target_particle_mask,
+                        source_leaf_ids=overflow_source_leaf_ids_padded,
+                        source_leaf_valid_mask=overflow_source_leaf_valid_padded,
+                        source_particle_ids=overflow_source_particle_ids,
+                        source_particle_mask=overflow_source_particle_mask,
+                        batch_tile_t=int(batch_tile_t),
+                        batch_tile_s=int(source_slot_tile),
+                        source_slot_scan_unroll=int(source_slot_scan_unroll),
+                        target_batch_scan_unroll=int(target_batch_scan_unroll),
+                        fallback_block_tile_size=int(fallback_block_tile_size),
+                        fallback_tile_scan_unroll=int(source_slot_scan_unroll),
+                        fallback_batch_scan_unroll=int(target_batch_scan_unroll),
+                    )
     _record_nf("_refresh_timing_nearfield_radix_payload_seconds", substage_t0)
 
     substage_t0 = time.perf_counter()
@@ -869,6 +997,7 @@ def prepare_large_n_state(
             disable_specialized_large_n_nearfield
         ),
         radix_fast_payload=radix_fast_payload,
+        radix_overflow_payload=radix_overflow_payload,
     )
     _record_nf("_refresh_timing_nearfield_state_pack_seconds", substage_t0)
     if bool(getattr(fmm, "_refresh_timing_active", False)):

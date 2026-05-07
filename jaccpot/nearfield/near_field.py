@@ -1352,6 +1352,68 @@ def _compute_leaf_p2p_prepared_large_n_pairs_target_blocks_tiled_impl(
     )
 
 
+def compute_leaf_p2p_accelerations_target_block_pairs_only(
+    positions_sorted: Array,
+    masses_sorted: Array,
+    leaf_particle_indices: Array,
+    leaf_particle_mask: Array,
+    block_offsets: Array,
+    block_target_leaf_ids: Array,
+    block_source_leaf_ids: Array,
+    block_valid_mask: Array,
+    *,
+    G: Union[float, Array] = 1.0,
+    softening: float = 0.0,
+    target_leaf_batch_size: int = 32,
+    target_block_tile_size: int = 8,
+    target_block_tile_scan_unroll: int = 1,
+    target_block_batch_scan_unroll: int = 1,
+    target_block_overflow_fast_max_blocks: int = 65536,
+) -> Array:
+    """Evaluate target-block pair contributions without intra-leaf self work."""
+    positions = jnp.asarray(positions_sorted)
+    masses = jnp.asarray(masses_sorted)
+    block_source_leaf_ids = jnp.asarray(block_source_leaf_ids, dtype=INDEX_DTYPE)
+    block_valid_mask = jnp.asarray(block_valid_mask, dtype=bool)
+    if int(block_source_leaf_ids.size) == 0:
+        return jnp.zeros_like(positions)
+
+    leaf_positions, leaf_masses, leaf_mask, leaf_particle_idx = (
+        _prepare_leaf_data_from_groups(
+            leaf_particle_indices,
+            leaf_particle_mask,
+            positions,
+            masses,
+        )
+    )
+    softening_sq = jnp.asarray(float(softening) ** 2, dtype=positions.dtype)
+    use_tiled_overflow = int(block_source_leaf_ids.shape[0]) <= int(
+        target_block_overflow_fast_max_blocks
+    )
+    overflow_pair_kernel = (
+        _compute_leaf_p2p_prepared_large_n_pairs_target_blocks_tiled_impl
+        if use_tiled_overflow
+        else _compute_leaf_p2p_prepared_large_n_pairs_target_blocks_impl
+    )
+    return overflow_pair_kernel(
+        positions,
+        jnp.asarray(block_offsets, dtype=INDEX_DTYPE),
+        jnp.asarray(block_target_leaf_ids, dtype=INDEX_DTYPE),
+        block_source_leaf_ids,
+        block_valid_mask,
+        leaf_positions,
+        leaf_masses,
+        leaf_mask,
+        leaf_particle_idx,
+        G=G,
+        softening_sq=softening_sq,
+        target_leaf_batch_size=int(target_leaf_batch_size),
+        target_block_tile_size=int(target_block_tile_size),
+        target_block_tile_scan_unroll=int(target_block_tile_scan_unroll),
+        target_block_batch_scan_unroll=int(target_block_batch_scan_unroll),
+    )
+
+
 @partial(
     jax.jit,
     static_argnames=(
@@ -2976,6 +3038,54 @@ def compute_leaf_p2p_accelerations_radix_fast_lane(
         target_batch_scan_unroll=int(target_batch_scan_unroll),
     )
     return self_acc + pair_acc
+
+
+def compute_leaf_p2p_accelerations_radix_payload_pairs_only(
+    *,
+    positions_sorted: Array,
+    masses_sorted: Array,
+    payload: Any,
+    G: Union[float, Array] = 1.0,
+    softening: float = 0.0,
+) -> Array:
+    """Evaluate payload pair contributions without intra-leaf self work."""
+    positions = jnp.asarray(positions_sorted)
+    masses = jnp.asarray(masses_sorted)
+
+    target_particle_ids = jnp.asarray(payload.target_particle_ids, dtype=INDEX_DTYPE)
+    target_particle_mask = jnp.asarray(payload.target_particle_mask, dtype=bool)
+    source_particle_ids = jnp.asarray(payload.source_particle_ids, dtype=INDEX_DTYPE)
+    source_particle_mask = jnp.asarray(payload.source_particle_mask, dtype=bool)
+
+    if int(target_particle_ids.size) == 0 or int(source_particle_ids.size) == 0:
+        return jnp.zeros_like(positions)
+
+    source_slot_valid_mask = jnp.any(source_particle_mask, axis=-1)
+    source_slot_tile_size = max(1, int(payload.batch_tile_s))
+    source_slot_scan_unroll = max(
+        1,
+        int(getattr(payload, "source_slot_scan_unroll", 1)),
+    )
+    target_batch_scan_unroll = max(
+        1,
+        int(getattr(payload, "target_batch_scan_unroll", 1)),
+    )
+    softening_sq = jnp.asarray(float(softening) ** 2, dtype=positions.dtype)
+    return _compute_radix_fast_lane_payload_pairs_impl(
+        positions,
+        masses,
+        target_particle_ids,
+        target_particle_mask,
+        source_particle_ids,
+        source_particle_mask,
+        source_slot_valid_mask,
+        G=G,
+        softening_sq=softening_sq,
+        target_leaf_batch_size=int(payload.batch_tile_t),
+        source_slot_tile_size=int(source_slot_tile_size),
+        source_slot_scan_unroll=int(source_slot_scan_unroll),
+        target_batch_scan_unroll=int(target_batch_scan_unroll),
+    )
 
 
 def compute_leaf_p2p_accelerations_large_n_accel_only(
