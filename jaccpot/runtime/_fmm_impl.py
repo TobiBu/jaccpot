@@ -2184,6 +2184,8 @@ class FastMultipoleMethod:
         self._refresh_strict_mode_active_count: int = 0
         self._strict_profiled_max_pair_queue: int = 0
         self._strict_profiled_pair_process_block: int = 0
+        self._strict_profiled_context_key: str = ""
+        self._strict_profile_catalog: dict[str, dict[str, int]] = {}
         self._strict_profile_loaded_once: bool = False
         self.fixed_order = fixed_order
         self.fixed_max_leaf_size = fixed_max_leaf_size
@@ -2416,6 +2418,8 @@ class FastMultipoleMethod:
         self._refresh_strict_mode_active_count = 0
         self._strict_profiled_max_pair_queue = 0
         self._strict_profiled_pair_process_block = 0
+        self._strict_profiled_context_key = ""
+        self._strict_profile_catalog = {}
         self._strict_profile_loaded_once = False
         _clear_global_runtime_caches(clear_jax_compilation=bool(clear_jax_compilation))
 
@@ -2427,8 +2431,22 @@ class FastMultipoleMethod:
             )
         )
 
-    def _maybe_load_strict_cap_profile(self) -> None:
+    def _strict_cap_profile_context_key(
+        self,
+        *,
+        tree_mode: str,
+        leaf_parameter: int,
+        particle_count: int,
+    ) -> str:
+        return (
+            f"tree_mode={str(tree_mode).strip().lower()}|"
+            f"leaf={int(leaf_parameter)}|n={int(particle_count)}"
+        )
+
+    def _maybe_load_strict_cap_profile(self, *, context_key: Optional[str] = None) -> None:
         if self._strict_profile_loaded_once:
+            if context_key is not None:
+                self._apply_strict_cap_profile_for_key(context_key=context_key)
             return
         self._strict_profile_loaded_once = True
         try:
@@ -2436,17 +2454,74 @@ class FastMultipoleMethod:
             if not os.path.exists(path):
                 return
             payload = json.load(open(path, "r", encoding="utf-8"))
-            q = int(payload.get("max_pair_queue", 0) or 0)
-            b = int(payload.get("pair_process_block", 0) or 0)
-            if q > 0:
-                self._strict_profiled_max_pair_queue = q
-            if b > 0:
-                self._strict_profiled_pair_process_block = b
+            if isinstance(payload, dict) and isinstance(payload.get("profiles"), dict):
+                self._strict_profile_catalog = {
+                    str(k): {
+                        "max_pair_queue": int(v.get("max_pair_queue", 0) or 0),
+                        "pair_process_block": int(v.get("pair_process_block", 0) or 0),
+                    }
+                    for k, v in payload["profiles"].items()
+                    if isinstance(v, dict)
+                }
+            else:
+                # Backward compatibility with the original single-profile payload.
+                q = int(payload.get("max_pair_queue", 0) or 0)
+                b = int(payload.get("pair_process_block", 0) or 0)
+                self._strict_profile_catalog = {
+                    "legacy_default": {
+                        "max_pair_queue": q,
+                        "pair_process_block": b,
+                    }
+                }
+            if context_key is not None:
+                self._apply_strict_cap_profile_for_key(context_key=context_key)
+            elif len(self._strict_profile_catalog) > 0:
+                # Preserve previous behavior when no context is supplied.
+                self._apply_strict_cap_profile_for_key(context_key="legacy_default")
         except Exception:
             return
 
+    def _apply_strict_cap_profile_for_key(self, *, context_key: str) -> None:
+        selected_key = ""
+        selected = self._strict_profile_catalog.get(context_key)
+        if selected is not None:
+            selected_key = context_key
+        else:
+            # Conservative fallback: keep same tree_mode+leaf and pick the largest queue.
+            prefix = "|".join(str(context_key).split("|")[:2])
+            best_q = 0
+            best_entry: Optional[dict[str, int]] = None
+            best_key = ""
+            for key, entry in self._strict_profile_catalog.items():
+                if not str(key).startswith(prefix):
+                    continue
+                q = int(entry.get("max_pair_queue", 0) or 0)
+                if q >= best_q:
+                    best_q = q
+                    best_entry = entry
+                    best_key = str(key)
+            if best_entry is not None:
+                selected = best_entry
+                selected_key = best_key
+            else:
+                selected = self._strict_profile_catalog.get("legacy_default")
+                selected_key = "legacy_default" if selected is not None else ""
+        if selected is None:
+            return
+        q = int(selected.get("max_pair_queue", 0) or 0)
+        b = int(selected.get("pair_process_block", 0) or 0)
+        if q > 0:
+            self._strict_profiled_max_pair_queue = q
+        if b > 0:
+            self._strict_profiled_pair_process_block = b
+        if selected_key:
+            self._strict_profiled_context_key = selected_key
+
     def _record_strict_cap_profile_from_retries(
-        self, retry_events: Tuple[DualTreeRetryEvent, ...]
+        self,
+        retry_events: Tuple[DualTreeRetryEvent, ...],
+        *,
+        context_key: Optional[str] = None,
     ) -> None:
         if len(retry_events) == 0:
             return
@@ -2466,6 +2541,19 @@ class FastMultipoleMethod:
             return
         self._strict_profiled_max_pair_queue = max_queue
         self._strict_profiled_pair_process_block = max_block
+        if context_key is not None:
+            self._strict_profiled_context_key = str(context_key)
+            existing = self._strict_profile_catalog.get(str(context_key), {})
+            self._strict_profile_catalog[str(context_key)] = {
+                "max_pair_queue": max(
+                    int(existing.get("max_pair_queue", 0) or 0),
+                    int(max_queue),
+                ),
+                "pair_process_block": max(
+                    int(existing.get("pair_process_block", 0) or 0),
+                    int(max_block),
+                ),
+            }
         if str(
             os.environ.get("JACCPOT_STATIC_STRICT_CAP_RECORD", "1")
         ).strip().lower() not in {"1", "true", "yes", "on"}:
@@ -2473,8 +2561,9 @@ class FastMultipoleMethod:
         try:
             path = self._strict_cap_profile_path()
             payload = {
-                "max_pair_queue": int(max_queue),
-                "pair_process_block": int(max_block),
+                "version": 2,
+                "active_context_key": str(self._strict_profiled_context_key),
+                "profiles": self._strict_profile_catalog,
             }
             with open(path, "w", encoding="utf-8") as handle:
                 json.dump(payload, handle)
@@ -2677,6 +2766,7 @@ class FastMultipoleMethod:
             "strict_profiled_pair_process_block": int(
                 self._strict_profiled_pair_process_block
             ),
+            "strict_profiled_context_key": str(self._strict_profiled_context_key),
             "recent_dual_node_count": int(self._recent_dual_node_count),
             "recent_dual_leaf_count": int(self._recent_dual_leaf_count),
             "recent_dual_neighbor_count": int(self._recent_dual_neighbor_count),
@@ -3160,7 +3250,16 @@ class FastMultipoleMethod:
                 max_order=int(max_order),
             )
             self._recent_retry_events = tuple(collected_retries)
-            self._record_strict_cap_profile_from_retries(self._recent_retry_events)
+            self._record_strict_cap_profile_from_retries(
+                self._recent_retry_events,
+                context_key=self._strict_cap_profile_context_key(
+                    tree_mode=str(tree_artifacts.tree_mode),
+                    leaf_parameter=int(tree_artifacts.leaf_parameter),
+                    particle_count=int(
+                        jnp.asarray(tree_artifacts.positions_sorted).shape[0]
+                    ),
+                ),
+            )
             self._topology_reuse_entry = _TopologyReuseEntry(
                 key=str(refresh_topology_key),
                 tree=tree_artifacts.tree,
@@ -5042,7 +5141,12 @@ class FastMultipoleMethod:
             )
         )
         if strict_mode_active:
-            self._maybe_load_strict_cap_profile()
+            strict_context_key = self._strict_cap_profile_context_key(
+                tree_mode=str(tree_artifacts.tree_mode),
+                leaf_parameter=int(tree_artifacts.leaf_parameter),
+                particle_count=int(jnp.asarray(tree_artifacts.positions_sorted).shape[0]),
+            )
+            self._maybe_load_strict_cap_profile(context_key=strict_context_key)
             profiled_q = int(self._strict_profiled_max_pair_queue)
             profiled_b = int(self._strict_profiled_pair_process_block)
             if profiled_q > 0:
@@ -6978,7 +7082,16 @@ class FastMultipoleMethod:
         retry_events_tuple = tuple(collected_retries)
         if allow_stateful_cache:
             self._recent_retry_events = retry_events_tuple
-            self._record_strict_cap_profile_from_retries(retry_events_tuple)
+            self._record_strict_cap_profile_from_retries(
+                retry_events_tuple,
+                context_key=self._strict_cap_profile_context_key(
+                    tree_mode=str(tree_artifacts.tree_mode),
+                    leaf_parameter=int(tree_artifacts.leaf_parameter),
+                    particle_count=int(
+                        jnp.asarray(tree_artifacts.positions_sorted).shape[0]
+                    ),
+                ),
+            )
 
         execution_backend = self._resolve_execution_backend()
         tree_type_norm = (
