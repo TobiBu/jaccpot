@@ -2958,11 +2958,7 @@ class FastMultipoleMethod:
             masses=masses_arr,
         )
         refresh_topology_key = topology_candidate.key
-        defer_geometry = (
-            tree_config.mode == "static_radix"
-            and str(upward_center_mode).strip().lower() == "com"
-            and self._interaction_cache is not None
-        )
+        defer_geometry = False
         upward = self.prepare_upward_sweep(
             build_artifacts.tree,
             build_artifacts.positions_sorted,
@@ -3029,9 +3025,12 @@ class FastMultipoleMethod:
             # value visible while avoiding double accounting.
             _ = (elapsed, recorded)
 
-        if not self._large_n_neighbor_list_matches(
-            prepared_state.neighbor_list,
-            dual_downward_artifacts.neighbor_list,
+        if (
+            tree_config.mode != "static_radix"
+            and not self._large_n_neighbor_list_matches(
+                prepared_state.neighbor_list,
+                dual_downward_artifacts.neighbor_list,
+            )
         ):
             self._large_n_same_topology_refresh_misses += 1
             self._large_n_same_topology_refresh_miss_neighbor += 1
@@ -3056,90 +3055,29 @@ class FastMultipoleMethod:
                 reuse_count=0,
             )
 
-        return LargeNPreparedState(
-            tree=tree_artifacts.tree,
-            local_data=dual_downward_artifacts.downward.locals,
-            neighbor_list=prepared_state.neighbor_list,
-            nearfield_leaf_particle_indices=prepared_state.nearfield_leaf_particle_indices,
-            nearfield_leaf_particle_mask=prepared_state.nearfield_leaf_particle_mask,
-            nearfield_target_leaf_ids=prepared_state.nearfield_target_leaf_ids,
-            nearfield_source_leaf_ids=prepared_state.nearfield_source_leaf_ids,
-            nearfield_valid_pairs=prepared_state.nearfield_valid_pairs,
-            nearfield_chunk_sort_indices=prepared_state.nearfield_chunk_sort_indices,
-            nearfield_chunk_group_ids=prepared_state.nearfield_chunk_group_ids,
-            nearfield_chunk_unique_indices=prepared_state.nearfield_chunk_unique_indices,
-            nearfield_target_block_leaf_ids=prepared_state.nearfield_target_block_leaf_ids,
-            nearfield_target_block_source_leaf_ids=prepared_state.nearfield_target_block_source_leaf_ids,
-            nearfield_target_block_valid_mask=prepared_state.nearfield_target_block_valid_mask,
-            nearfield_target_block_offsets=prepared_state.nearfield_target_block_offsets,
-            nearfield_target_block_source_leaf_ids_padded=(
-                prepared_state.nearfield_target_block_source_leaf_ids_padded
-            ),
-            nearfield_target_block_valid_mask_padded=(
-                prepared_state.nearfield_target_block_valid_mask_padded
-            ),
-            nearfield_target_block_size=int(prepared_state.nearfield_target_block_size),
-            max_leaf_size=int(prepared_state.max_leaf_size),
-            input_dtype=jnp.dtype(input_dtype),
-            working_dtype=jnp.dtype(positions_arr.dtype),
-            theta=float(theta_val),
-            topology_key=refresh_topology_key,
-            retry_events=tuple(collected_retries),
-            force_scale_nodes=prepared_state.force_scale_nodes,
-            execution_backend=prepared_state.execution_backend,
-            expansion_basis=prepared_state.expansion_basis,
-            nearfield_mode=prepared_state.nearfield_mode,
-            nearfield_edge_chunk_size=int(prepared_state.nearfield_edge_chunk_size),
-            nearfield_delayed_scatter_chunks_per_superchunk=int(
-                prepared_state.nearfield_delayed_scatter_chunks_per_superchunk
-            ),
-            nearfield_chunk_scan_batch_size=int(
-                prepared_state.nearfield_chunk_scan_batch_size
-            ),
-            nearfield_chunk_scan_unroll=int(prepared_state.nearfield_chunk_scan_unroll),
-            nearfield_superchunk_scan_unroll=int(
-                prepared_state.nearfield_superchunk_scan_unroll
-            ),
-            nearfield_sorted_scatter_hint=bool(
-                prepared_state.nearfield_sorted_scatter_hint
-            ),
-            nearfield_grouped_sorted_scatter=bool(
-                prepared_state.nearfield_grouped_sorted_scatter
-            ),
-            nearfield_superchunk_target_reduce=bool(
-                prepared_state.nearfield_superchunk_target_reduce
-            ),
-            nearfield_disable_chunk_cond=bool(
-                prepared_state.nearfield_disable_chunk_cond
-            ),
-            nearfield_target_leaf_batch_size=int(
-                prepared_state.nearfield_target_leaf_batch_size
-            ),
-            nearfield_target_block_tile_size=int(
-                prepared_state.nearfield_target_block_tile_size
-            ),
-            nearfield_target_block_tile_scan_unroll=int(
-                prepared_state.nearfield_target_block_tile_scan_unroll
-            ),
-            nearfield_target_block_batch_scan_unroll=int(
-                prepared_state.nearfield_target_block_batch_scan_unroll
-            ),
-            nearfield_target_block_overflow_fast_max_blocks=int(
-                prepared_state.nearfield_target_block_overflow_fast_max_blocks
-            ),
-            nearfield_target_block_overflow_profile_capacity=int(
-                prepared_state.nearfield_target_block_overflow_profile_capacity
-            ),
-            nearfield_target_block_overflow_active_blocks=int(
-                prepared_state.nearfield_target_block_overflow_active_blocks
-            ),
-            speed_prepared_layout=bool(prepared_state.speed_prepared_layout),
-            radix_fast_lane=bool(prepared_state.radix_fast_lane),
-            disable_specialized_large_n_nearfield=bool(
-                prepared_state.disable_specialized_large_n_nearfield
-            ),
-            radix_fast_payload=prepared_state.radix_fast_payload,
-            radix_overflow_payload=prepared_state.radix_overflow_payload,
+        return prepare_large_n_state(
+            self,
+            positions_arr=positions_arr,
+            masses_arr=masses_arr,
+            input_dtype=input_dtype,
+            bounds=bounds,
+            leaf_size=int(leaf_size),
+            max_order=int(max_order),
+            theta_val=theta_val,
+            mac_type_val=mac_type_val,
+            refine_local_val=refine_local_val,
+            max_refine_levels_val=max_refine_levels_val,
+            aspect_threshold_val=aspect_threshold_val,
+            jit_tree_override=None,
+            allow_stateful_cache=allow_stateful_cache,
+            runtime_traversal_config=runtime_traversal_config,
+            runtime_m2l_chunk_size=runtime_m2l_chunk_size,
+            runtime_l2l_chunk_size=runtime_l2l_chunk_size,
+            upward_center_mode=upward_center_mode,
+            record_retry=record_retry,
+            collected_retries=collected_retries,
+            tree_artifacts=tree_artifacts,
+            dual_downward_artifacts=dual_downward_artifacts,
         )
 
     def _large_n_neighbor_list_matches(
@@ -4872,8 +4810,14 @@ class FastMultipoleMethod:
                 aspect_threshold=aspect_threshold_val,
             )
 
-        stateful_cache_enabled = bool(allow_stateful_cache) and bool(
-            self.enable_interaction_cache
+        # A static-radix topology key describes the capacity-fixed tree shape,
+        # not the current leaf membership, geometry, or MAC decisions. Reusing
+        # cached dual-tree artifacts across evolved positions can therefore
+        # attach stale neighbor/far-field payloads to freshly sorted particles.
+        stateful_cache_enabled = (
+            bool(allow_stateful_cache)
+            and bool(self.enable_interaction_cache)
+            and str(tree_artifacts.tree_mode) != "static_radix"
         )
         need_traversal_result = bool(self.retain_traversal_result) or bool(
             use_paper_fixed_policy

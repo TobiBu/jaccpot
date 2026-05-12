@@ -47,26 +47,30 @@ def prepare_large_n_state(
     upward_center_mode: str,
     record_retry: Callable[[DualTreeRetryEvent], None],
     collected_retries: list[DualTreeRetryEvent],
+    tree_artifacts: Optional[Any] = None,
+    dual_downward_artifacts: Optional[Any] = None,
 ) -> LargeNPreparedState:
     """Prepare the slim large-N state using the dedicated narrow path."""
 
     refresh_timing_active = bool(getattr(fmm, "_refresh_timing_active", False))
 
     stage_t0 = time.perf_counter()
-    tree_artifacts = fmm._prepare_state_tree_and_upward(
-        positions_arr=positions_arr,
-        masses_arr=masses_arr,
-        bounds=bounds,
-        leaf_size=int(leaf_size),
-        max_order=int(max_order),
-        refine_local_val=refine_local_val,
-        max_refine_levels_val=max_refine_levels_val,
-        aspect_threshold_val=aspect_threshold_val,
-        jit_tree_override=jit_tree_override,
-        upward_center_mode=upward_center_mode,
-        allow_stateful_cache=allow_stateful_cache,
-    )
-    if bool(getattr(fmm, "_refresh_timing_active", False)):
+    built_tree_artifacts = tree_artifacts is None
+    if tree_artifacts is None:
+        tree_artifacts = fmm._prepare_state_tree_and_upward(
+            positions_arr=positions_arr,
+            masses_arr=masses_arr,
+            bounds=bounds,
+            leaf_size=int(leaf_size),
+            max_order=int(max_order),
+            refine_local_val=refine_local_val,
+            max_refine_levels_val=max_refine_levels_val,
+            aspect_threshold_val=aspect_threshold_val,
+            jit_tree_override=jit_tree_override,
+            upward_center_mode=upward_center_mode,
+            allow_stateful_cache=allow_stateful_cache,
+        )
+    if bool(getattr(fmm, "_refresh_timing_active", False)) and built_tree_artifacts:
         setattr(
             fmm,
             "_refresh_timing_tree_upward_seconds",
@@ -75,25 +79,30 @@ def prepare_large_n_state(
         )
 
     stage_t0 = time.perf_counter()
-    dual_downward_artifacts = fmm._prepare_state_dual_and_downward(
-        tree_artifacts=tree_artifacts,
-        force_scale_nodes=None,
-        upward_center_mode=upward_center_mode,
-        theta_val=theta_val,
-        mac_type_val=mac_type_val,
-        dehnen_radius_scale=fmm.dehnen_radius_scale,
-        runtime_traversal_config=runtime_traversal_config,
-        runtime_m2l_chunk_size=runtime_m2l_chunk_size,
-        runtime_l2l_chunk_size=runtime_l2l_chunk_size,
-        grouped_interactions=False,
-        farfield_mode="pair_grouped",
-        record_retry=record_retry,
-        refine_local_val=refine_local_val,
-        max_refine_levels_val=max_refine_levels_val,
-        aspect_threshold_val=aspect_threshold_val,
-        allow_stateful_cache=allow_stateful_cache,
-    )
-    if bool(getattr(fmm, "_refresh_timing_active", False)):
+    built_dual_downward_artifacts = dual_downward_artifacts is None
+    if dual_downward_artifacts is None:
+        dual_downward_artifacts = fmm._prepare_state_dual_and_downward(
+            tree_artifacts=tree_artifacts,
+            force_scale_nodes=None,
+            upward_center_mode=upward_center_mode,
+            theta_val=theta_val,
+            mac_type_val=mac_type_val,
+            dehnen_radius_scale=fmm.dehnen_radius_scale,
+            runtime_traversal_config=runtime_traversal_config,
+            runtime_m2l_chunk_size=runtime_m2l_chunk_size,
+            runtime_l2l_chunk_size=runtime_l2l_chunk_size,
+            grouped_interactions=False,
+            farfield_mode="pair_grouped",
+            record_retry=record_retry,
+            refine_local_val=refine_local_val,
+            max_refine_levels_val=max_refine_levels_val,
+            aspect_threshold_val=aspect_threshold_val,
+            allow_stateful_cache=allow_stateful_cache,
+        )
+    if (
+        bool(getattr(fmm, "_refresh_timing_active", False))
+        and built_dual_downward_artifacts
+    ):
         setattr(
             fmm,
             "_refresh_timing_dual_downward_seconds",

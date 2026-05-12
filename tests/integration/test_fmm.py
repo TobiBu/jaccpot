@@ -244,7 +244,9 @@ def test_prepare_state_fixed_depth_tree():
     assert state.max_leaf_size == int(jnp.max(counts))
 
 
-def test_prepare_refresh_static_radix_tree_preserves_static_shape():
+def test_prepare_refresh_static_radix_tree_preserves_static_shape(monkeypatch):
+    monkeypatch.setattr(jax, "default_backend", lambda: "gpu")
+
     key = jax.random.PRNGKey(123)
     core = 0.01 * jax.random.normal(key, (160, 3), dtype=jnp.float32)
     halo = jax.random.uniform(
@@ -293,6 +295,127 @@ def test_prepare_refresh_static_radix_tree_preserves_static_shape():
     )
     assert diagnostics["large_n_same_topology_refresh_hits"] >= 1
     assert diagnostics["static_radix_refresh_hits"] >= 1
+
+
+def test_static_radix_refresh_rebuilds_current_large_n_payloads(monkeypatch):
+    monkeypatch.setattr(jax, "default_backend", lambda: "gpu")
+    monkeypatch.setenv("JACCPOT_LARGE_N_TARGET_BLOCK_SIZE", "4")
+    monkeypatch.setenv("JACCPOT_LARGE_N_SPEED_PREPARED_LAYOUT", "1")
+    monkeypatch.setenv("JACCPOT_LARGE_N_STATIC_TARGET_BLOCKS", "1")
+    monkeypatch.setenv("JACCPOT_LARGE_N_STATIC_TARGET_BLOCKS_MAX_PER_LEAF", "16")
+
+    key = jax.random.PRNGKey(20260507)
+    key_pos, key_mass = jax.random.split(key)
+    positions = jax.random.uniform(
+        key_pos,
+        (2048, 3),
+        minval=-1.0,
+        maxval=1.0,
+        dtype=jnp.float32,
+    )
+    masses = jax.random.uniform(
+        key_mass,
+        (2048,),
+        minval=0.1,
+        maxval=1.1,
+        dtype=jnp.float32,
+    )
+    displacement = 0.02 * jnp.stack(
+        [
+            jnp.sin(jnp.arange(positions.shape[0], dtype=jnp.float32) * 0.13),
+            jnp.cos(jnp.arange(positions.shape[0], dtype=jnp.float32) * 0.17),
+            jnp.sin(jnp.arange(positions.shape[0], dtype=jnp.float32) * 0.19),
+        ],
+        axis=1,
+    )
+    moved = positions + displacement
+
+    kwargs = dict(
+        preset="large_n_gpu",
+        runtime_path="large_n",
+        expansion_basis="solidfmm",
+        complex_rotation="solidfmm",
+        theta=0.6,
+        nearfield_mode="bucketed",
+        nearfield_edge_chunk_size=64,
+        grouped_interactions=False,
+        working_dtype=jnp.float32,
+        tree_build_mode="static_radix",
+        fixed_order=2,
+    )
+
+    fmm = FastMultipoleMethod(**kwargs)
+    state = fmm.prepare_state(positions, masses, leaf_size=128, max_order=2)
+    refreshed = fmm.refresh_prepared_state(
+        state,
+        moved,
+        masses,
+        leaf_size=128,
+        max_order=2,
+    )
+    diagnostics = fmm.get_runtime_diagnostics()
+
+    fresh_fmm = FastMultipoleMethod(**kwargs)
+    fresh = fresh_fmm.prepare_state(moved, masses, leaf_size=128, max_order=2)
+
+    assert diagnostics["large_n_same_topology_refresh_hits"] >= 1
+    assert diagnostics["static_radix_refresh_hits"] >= 1
+    assert refreshed.tree.build_mode == "static_radix"
+    assert fresh.tree.build_mode == "static_radix"
+
+    refreshed_acc = np.asarray(fmm.evaluate_prepared_state(refreshed))
+    fresh_acc = np.asarray(fresh_fmm.evaluate_prepared_state(fresh))
+    assert np.allclose(refreshed_acc, fresh_acc, rtol=1e-5, atol=1e-5)
+
+    def assert_array_equal(left, right):
+        if left is None or right is None:
+            assert left is None and right is None
+            return
+        assert np.array_equal(np.asarray(left), np.asarray(right))
+
+    assert_array_equal(
+        refreshed.nearfield_leaf_particle_indices,
+        fresh.nearfield_leaf_particle_indices,
+    )
+    assert_array_equal(
+        refreshed.nearfield_leaf_particle_mask,
+        fresh.nearfield_leaf_particle_mask,
+    )
+    assert_array_equal(
+        refreshed.nearfield_target_block_source_leaf_ids_padded,
+        fresh.nearfield_target_block_source_leaf_ids_padded,
+    )
+    assert_array_equal(
+        refreshed.nearfield_target_block_valid_mask_padded,
+        fresh.nearfield_target_block_valid_mask_padded,
+    )
+    assert_array_equal(
+        refreshed.nearfield_target_block_source_leaf_ids,
+        fresh.nearfield_target_block_source_leaf_ids,
+    )
+    assert_array_equal(
+        refreshed.nearfield_target_block_valid_mask,
+        fresh.nearfield_target_block_valid_mask,
+    )
+    assert_array_equal(
+        refreshed.nearfield_target_block_offsets,
+        fresh.nearfield_target_block_offsets,
+    )
+
+    assert refreshed.radix_fast_payload is not None
+    assert fresh.radix_fast_payload is not None
+    for attr in (
+        "target_particle_ids",
+        "target_particle_mask",
+        "source_leaf_ids",
+        "source_leaf_valid_mask",
+        "source_particle_ids",
+        "source_particle_mask",
+    ):
+        assert_array_equal(
+            getattr(refreshed.radix_fast_payload, attr),
+            getattr(fresh.radix_fast_payload, attr),
+        )
 
 
 def test_capacity_fixed_depth_tree_mode_is_removed():
