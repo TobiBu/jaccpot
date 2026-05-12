@@ -126,6 +126,7 @@ from ._interaction_cache import (
     _DualTreeArtifacts,
     _interaction_cache_key,
     _InteractionCacheEntry,
+    _RefreshDualPlannerHint,
 )
 from ._large_n_pipeline import (
     can_use_large_n_prepare_path,
@@ -2172,6 +2173,11 @@ class FastMultipoleMethod:
         self._refresh_timing_nearfield_residual_seconds: float = 0.0
         self._refresh_timing_calls: int = 0
         self._refresh_timing_active: bool = False
+        self._refresh_dual_planner_cache: dict[str, _RefreshDualPlannerHint] = {}
+        self._refresh_dual_planner_cache_hits: int = 0
+        self._refresh_dual_planner_cache_misses: int = 0
+        self._refresh_dual_planner_compile_count: int = 0
+        self._refresh_dual_planner_execute_count: int = 0
         self.fixed_order = fixed_order
         self.fixed_max_leaf_size = fixed_max_leaf_size
         self._explicit_m2l_chunk_size = m2l_chunk_size is not None
@@ -2393,6 +2399,11 @@ class FastMultipoleMethod:
         self._refresh_timing_nearfield_residual_seconds = 0.0
         self._refresh_timing_calls = 0
         self._refresh_timing_active = False
+        self._refresh_dual_planner_cache = {}
+        self._refresh_dual_planner_cache_hits = 0
+        self._refresh_dual_planner_cache_misses = 0
+        self._refresh_dual_planner_compile_count = 0
+        self._refresh_dual_planner_execute_count = 0
         _clear_global_runtime_caches(clear_jax_compilation=bool(clear_jax_compilation))
 
     def _compiled_profile_from_prepared_state(
@@ -2564,6 +2575,18 @@ class FastMultipoleMethod:
             ),
             "interaction_cache_hits": int(self._interaction_cache_hits),
             "interaction_cache_misses": int(self._interaction_cache_misses),
+            "refresh_dual_planner_cache_hits": int(
+                self._refresh_dual_planner_cache_hits
+            ),
+            "refresh_dual_planner_cache_misses": int(
+                self._refresh_dual_planner_cache_misses
+            ),
+            "refresh_dual_planner_compile_count": int(
+                self._refresh_dual_planner_compile_count
+            ),
+            "refresh_dual_planner_execute_count": int(
+                self._refresh_dual_planner_execute_count
+            ),
             "recent_dual_node_count": int(self._recent_dual_node_count),
             "recent_dual_leaf_count": int(self._recent_dual_leaf_count),
             "recent_dual_neighbor_count": int(self._recent_dual_neighbor_count),
@@ -4911,6 +4934,65 @@ class FastMultipoleMethod:
                 "on",
             }
         _prepare_diag(f"allow_split_build={bool(allow_split_build)}")
+        refresh_planner_mode = str(
+            os.environ.get("JACCPOT_LARGE_N_REFRESH_DUAL_PLANNER_MODE", "auto")
+        ).strip().lower()
+        planner_enabled = bool(
+            (
+                refresh_planner_mode == "on"
+                or (
+                    refresh_planner_mode == "auto"
+                    and self._is_large_n_gpu_production_profile()
+                    and str(tree_artifacts.tree_mode).strip().lower()
+                    == "static_radix"
+                )
+            )
+        )
+        planner_hint: Optional[_RefreshDualPlannerHint] = None
+        if planner_enabled:
+            traversal_key = (
+                "none"
+                if runtime_traversal_config is None
+                else (
+                    f"{int(runtime_traversal_config.max_pair_queue)}:"
+                    f"{int(runtime_traversal_config.process_block)}:"
+                    f"{int(runtime_traversal_config.max_interactions_per_node)}:"
+                    f"{int(runtime_traversal_config.max_neighbors_per_leaf)}"
+                )
+            )
+            planner_key = "|".join(
+                (
+                    str(tree_artifacts.topology_key),
+                    str(tree_artifacts.tree_mode),
+                    str(int(tree_artifacts.leaf_parameter)),
+                    f"{float(theta_val):.12g}",
+                    str(mac_type_val),
+                    str(bool(grouped_interactions)),
+                    str(bool(need_traversal_result)),
+                    str(bool(need_compact_far_pairs)),
+                    str(bool(need_node_interactions)),
+                    str(bool(allow_split_build)),
+                    str(traversal_key),
+                )
+            )
+            planner_hint = self._refresh_dual_planner_cache.get(planner_key)
+            if planner_hint is None:
+                self._refresh_dual_planner_cache_misses += 1
+                use_split_build_hint = bool(
+                    allow_split_build
+                    and not bool(grouped_interactions)
+                    and not bool(need_traversal_result)
+                    and pair_policy is None
+                    and policy_state is None
+                )
+                planner_hint = _RefreshDualPlannerHint(
+                    use_split_build=use_split_build_hint
+                )
+                self._refresh_dual_planner_cache[planner_key] = planner_hint
+                self._refresh_dual_planner_compile_count += 1
+            else:
+                self._refresh_dual_planner_cache_hits += 1
+            self._refresh_dual_planner_execute_count += 1
         _record_dual_stage("_refresh_timing_dual_setup_seconds", stage_t0)
 
         stage_t0 = time.perf_counter()
@@ -4953,6 +5035,7 @@ class FastMultipoleMethod:
             policy_state=policy_state,
             jit_traversal=jit_traversal_for_prepare,
             timing_callback=_record_dual_artifact_substage,
+            planner_hint=planner_hint,
         )
         if stateful_cache_enabled:
             if bool(getattr(dual_artifacts, "cache_hit", False)):

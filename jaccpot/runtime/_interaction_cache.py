@@ -93,6 +93,12 @@ class _DualTreeCacheHit(NamedTuple):
     cache_out: Optional["_InteractionCacheEntry"]
 
 
+class _RefreshDualPlannerHint(NamedTuple):
+    """Cached refresh planner decision for dual artifact build routing."""
+
+    use_split_build: bool
+
+
 def _without_grouped_class_segments(
     entry: _InteractionCacheEntry,
 ) -> _InteractionCacheEntry:
@@ -781,6 +787,7 @@ def _build_dual_tree_artifacts(
     policy_state=None,
     jit_traversal: bool = True,
     timing_callback: Optional[Callable[[str, float], None]] = None,
+    planner_hint: Optional[_RefreshDualPlannerHint] = None,
 ) -> tuple[_DualTreeArtifacts, Optional[_InteractionCacheEntry]]:
     """Construct or reuse dual-tree traversal products for a tree."""
 
@@ -816,13 +823,18 @@ def _build_dual_tree_artifacts(
                     "geometry must be provided when dual-tree cache lookup misses"
                 )
             geometry = geometry_factory()
-        use_split_build = _can_split_dual_tree_build(
-            split_enabled=bool(allow_split_build),
-            grouped_interactions=grouped_interactions,
-            need_traversal_result=need_traversal_result,
-            pair_policy=pair_policy,
-            policy_state=policy_state,
-        )
+        if planner_hint is not None:
+            # Fast refresh path: reuse prior routing decision and avoid
+            # re-evaluating split-eligibility branching on host each call.
+            use_split_build = bool(planner_hint.use_split_build)
+        else:
+            use_split_build = _can_split_dual_tree_build(
+                split_enabled=bool(allow_split_build),
+                grouped_interactions=grouped_interactions,
+                need_traversal_result=need_traversal_result,
+                pair_policy=pair_policy,
+                policy_state=policy_state,
+            )
         if use_split_build:
             split_artifacts = _build_dual_tree_artifacts_split(
                 tree=tree,
