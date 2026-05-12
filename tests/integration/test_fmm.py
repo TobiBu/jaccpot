@@ -475,6 +475,7 @@ def test_static_radix_refresh_dual_planner_mode_parity_and_diagnostics(monkeypat
     acc_off = np.asarray(fmm_off.evaluate_prepared_state(refreshed_off))
 
     monkeypatch.setenv("JACCPOT_LARGE_N_REFRESH_DUAL_PLANNER_MODE", "on")
+    monkeypatch.setenv("JACCPOT_STATIC_STRICT_GPU_MODE", "on")
     fmm_on = FastMultipoleMethod(**kwargs)
     state_on = fmm_on.prepare_state(positions, masses, leaf_size=128, max_order=2)
     refreshed_on = fmm_on.refresh_prepared_state(
@@ -500,6 +501,7 @@ def test_static_radix_refresh_dual_planner_mode_parity_and_diagnostics(monkeypat
     assert diagnostics_on["refresh_dual_planner_cache_hits"] >= 1
     assert diagnostics_on["refresh_dual_planner_steady_timing_bypass_count"] >= 1
     assert diagnostics_on["refresh_dual_planner_compiled_route_count"] >= 1
+    assert diagnostics_on["refresh_strict_mode_active_count"] >= 2
 
 
 def test_capacity_fixed_depth_tree_mode_is_removed():

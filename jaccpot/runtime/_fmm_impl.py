@@ -2181,6 +2181,7 @@ class FastMultipoleMethod:
         self._refresh_dual_planner_execute_count: int = 0
         self._refresh_dual_planner_steady_timing_bypass_count: int = 0
         self._refresh_dual_planner_compiled_route_count: int = 0
+        self._refresh_strict_mode_active_count: int = 0
         self.fixed_order = fixed_order
         self.fixed_max_leaf_size = fixed_max_leaf_size
         self._explicit_m2l_chunk_size = m2l_chunk_size is not None
@@ -2409,6 +2410,7 @@ class FastMultipoleMethod:
         self._refresh_dual_planner_execute_count = 0
         self._refresh_dual_planner_steady_timing_bypass_count = 0
         self._refresh_dual_planner_compiled_route_count = 0
+        self._refresh_strict_mode_active_count = 0
         _clear_global_runtime_caches(clear_jax_compilation=bool(clear_jax_compilation))
 
     def _compiled_profile_from_prepared_state(
@@ -2597,6 +2599,9 @@ class FastMultipoleMethod:
             ),
             "refresh_dual_planner_compiled_route_count": int(
                 self._refresh_dual_planner_compiled_route_count
+            ),
+            "refresh_strict_mode_active_count": int(
+                self._refresh_strict_mode_active_count
             ),
             "recent_dual_node_count": int(self._recent_dual_node_count),
             "recent_dual_leaf_count": int(self._recent_dual_leaf_count),
@@ -4948,6 +4953,24 @@ class FastMultipoleMethod:
         refresh_planner_mode = str(
             os.environ.get("JACCPOT_LARGE_N_REFRESH_DUAL_PLANNER_MODE", "auto")
         ).strip().lower()
+        strict_mode_env = str(
+            os.environ.get("JACCPOT_STATIC_STRICT_GPU_MODE", "auto")
+        ).strip().lower()
+        strict_mode_active = bool(
+            (
+                strict_mode_env == "on"
+                or (
+                    strict_mode_env == "auto"
+                    and self._is_large_n_gpu_production_profile()
+                    and str(tree_artifacts.tree_mode).strip().lower() == "static_radix"
+                )
+            )
+        )
+        if strict_mode_active:
+            self._refresh_strict_mode_active_count += 1
+            # Strict mode contract: one-shot shared count->fill and single queue.
+            os.environ["YGGDRAX_DUAL_TREE_SHARED_COUNT_FILL_ONE_SHOT"] = "1"
+            os.environ["YGGDRAX_DUAL_TREE_SHARED_COUNT_FILL_STEADY_SINGLE_QUEUE"] = "1"
         planner_enabled = bool(
             (
                 refresh_planner_mode == "on"
@@ -5085,7 +5108,7 @@ class FastMultipoleMethod:
             pair_process_block=self.pair_process_block,
             traversal_config=runtime_traversal_config,
             retry_logger=(None if jit_traversal_for_prepare else record_retry),
-            fail_fast=self.fail_fast,
+            fail_fast=(self.fail_fast or strict_mode_active),
             use_dense_interactions=use_dense_interactions_for_prepare,
             grouped_interactions=grouped_interactions,
             grouped_chunk_size=runtime_m2l_chunk_size,
