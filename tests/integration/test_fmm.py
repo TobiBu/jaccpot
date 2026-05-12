@@ -418,6 +418,88 @@ def test_static_radix_refresh_rebuilds_current_large_n_payloads(monkeypatch):
         )
 
 
+def test_static_radix_refresh_dual_planner_mode_parity_and_diagnostics(monkeypatch):
+    monkeypatch.setattr(jax, "default_backend", lambda: "gpu")
+
+    key = jax.random.PRNGKey(20260512)
+    key_pos, key_mass = jax.random.split(key)
+    positions = jax.random.uniform(
+        key_pos,
+        (1024, 3),
+        minval=-1.0,
+        maxval=1.0,
+        dtype=jnp.float32,
+    )
+    masses = jax.random.uniform(
+        key_mass,
+        (1024,),
+        minval=0.1,
+        maxval=1.1,
+        dtype=jnp.float32,
+    )
+    displacement = 0.01 * jnp.stack(
+        [
+            jnp.sin(jnp.arange(positions.shape[0], dtype=jnp.float32) * 0.11),
+            jnp.cos(jnp.arange(positions.shape[0], dtype=jnp.float32) * 0.07),
+            jnp.sin(jnp.arange(positions.shape[0], dtype=jnp.float32) * 0.05),
+        ],
+        axis=1,
+    )
+    moved = positions + displacement
+    moved_2 = moved + 0.5 * displacement
+
+    kwargs = dict(
+        preset="large_n_gpu",
+        runtime_path="large_n",
+        expansion_basis="solidfmm",
+        complex_rotation="solidfmm",
+        theta=0.6,
+        nearfield_mode="bucketed",
+        nearfield_edge_chunk_size=64,
+        grouped_interactions=False,
+        working_dtype=jnp.float32,
+        tree_build_mode="static_radix",
+        fixed_order=2,
+    )
+
+    monkeypatch.setenv("JACCPOT_LARGE_N_REFRESH_DUAL_PLANNER_MODE", "off")
+    fmm_off = FastMultipoleMethod(**kwargs)
+    state_off = fmm_off.prepare_state(positions, masses, leaf_size=128, max_order=2)
+    refreshed_off = fmm_off.refresh_prepared_state(
+        state_off,
+        moved,
+        masses,
+        leaf_size=128,
+        max_order=2,
+    )
+    acc_off = np.asarray(fmm_off.evaluate_prepared_state(refreshed_off))
+
+    monkeypatch.setenv("JACCPOT_LARGE_N_REFRESH_DUAL_PLANNER_MODE", "on")
+    fmm_on = FastMultipoleMethod(**kwargs)
+    state_on = fmm_on.prepare_state(positions, masses, leaf_size=128, max_order=2)
+    refreshed_on = fmm_on.refresh_prepared_state(
+        state_on,
+        moved,
+        masses,
+        leaf_size=128,
+        max_order=2,
+    )
+    _ = fmm_on.refresh_prepared_state(
+        refreshed_on,
+        moved_2,
+        masses,
+        leaf_size=128,
+        max_order=2,
+    )
+    acc_on = np.asarray(fmm_on.evaluate_prepared_state(refreshed_on))
+    diagnostics_on = fmm_on.get_runtime_diagnostics()
+
+    assert np.allclose(acc_on, acc_off, rtol=1e-5, atol=1e-5)
+    assert diagnostics_on["refresh_dual_planner_execute_count"] >= 2
+    assert diagnostics_on["refresh_dual_planner_compile_count"] >= 1
+    assert diagnostics_on["refresh_dual_planner_cache_hits"] >= 1
+
+
 def test_capacity_fixed_depth_tree_mode_is_removed():
     with pytest.raises(ValueError, match="tree_build_mode"):
         FastMultipoleMethod(tree_build_mode="capacity_fixed_depth")
