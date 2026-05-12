@@ -2182,6 +2182,9 @@ class FastMultipoleMethod:
         self._refresh_dual_planner_steady_timing_bypass_count: int = 0
         self._refresh_dual_planner_compiled_route_count: int = 0
         self._refresh_strict_mode_active_count: int = 0
+        self._strict_profiled_max_pair_queue: int = 0
+        self._strict_profiled_pair_process_block: int = 0
+        self._strict_profile_loaded_once: bool = False
         self.fixed_order = fixed_order
         self.fixed_max_leaf_size = fixed_max_leaf_size
         self._explicit_m2l_chunk_size = m2l_chunk_size is not None
@@ -2411,7 +2414,72 @@ class FastMultipoleMethod:
         self._refresh_dual_planner_steady_timing_bypass_count = 0
         self._refresh_dual_planner_compiled_route_count = 0
         self._refresh_strict_mode_active_count = 0
+        self._strict_profiled_max_pair_queue = 0
+        self._strict_profiled_pair_process_block = 0
+        self._strict_profile_loaded_once = False
         _clear_global_runtime_caches(clear_jax_compilation=bool(clear_jax_compilation))
+
+    def _strict_cap_profile_path(self) -> str:
+        return str(
+            os.environ.get(
+                "JACCPOT_STATIC_STRICT_CAP_PROFILE_PATH",
+                "/tmp/jaccpot_static_strict_caps.json",
+            )
+        )
+
+    def _maybe_load_strict_cap_profile(self) -> None:
+        if self._strict_profile_loaded_once:
+            return
+        self._strict_profile_loaded_once = True
+        try:
+            path = self._strict_cap_profile_path()
+            if not os.path.exists(path):
+                return
+            payload = json.load(open(path, "r", encoding="utf-8"))
+            q = int(payload.get("max_pair_queue", 0) or 0)
+            b = int(payload.get("pair_process_block", 0) or 0)
+            if q > 0:
+                self._strict_profiled_max_pair_queue = q
+            if b > 0:
+                self._strict_profiled_pair_process_block = b
+        except Exception:
+            return
+
+    def _record_strict_cap_profile_from_retries(
+        self, retry_events: Tuple[DualTreeRetryEvent, ...]
+    ) -> None:
+        if len(retry_events) == 0:
+            return
+        max_queue = int(self._strict_profiled_max_pair_queue)
+        max_block = int(self._strict_profiled_pair_process_block)
+        for ev in retry_events:
+            try:
+                q = int(getattr(ev, "queue_capacity", 0) or 0)
+            except Exception:
+                q = 0
+            if q > max_queue:
+                max_queue = q
+        block_hint = int(self.pair_process_block or 0)
+        if block_hint > max_block:
+            max_block = block_hint
+        if max_queue <= 0 and max_block <= 0:
+            return
+        self._strict_profiled_max_pair_queue = max_queue
+        self._strict_profiled_pair_process_block = max_block
+        if str(
+            os.environ.get("JACCPOT_STATIC_STRICT_CAP_RECORD", "1")
+        ).strip().lower() not in {"1", "true", "yes", "on"}:
+            return
+        try:
+            path = self._strict_cap_profile_path()
+            payload = {
+                "max_pair_queue": int(max_queue),
+                "pair_process_block": int(max_block),
+            }
+            with open(path, "w", encoding="utf-8") as handle:
+                json.dump(payload, handle)
+        except Exception:
+            return
 
     def _compiled_profile_from_prepared_state(
         self: "FastMultipoleMethod",
@@ -2602,6 +2670,12 @@ class FastMultipoleMethod:
             ),
             "refresh_strict_mode_active_count": int(
                 self._refresh_strict_mode_active_count
+            ),
+            "strict_profiled_max_pair_queue": int(
+                self._strict_profiled_max_pair_queue
+            ),
+            "strict_profiled_pair_process_block": int(
+                self._strict_profiled_pair_process_block
             ),
             "recent_dual_node_count": int(self._recent_dual_node_count),
             "recent_dual_leaf_count": int(self._recent_dual_leaf_count),
@@ -3086,6 +3160,7 @@ class FastMultipoleMethod:
                 max_order=int(max_order),
             )
             self._recent_retry_events = tuple(collected_retries)
+            self._record_strict_cap_profile_from_retries(self._recent_retry_events)
             self._topology_reuse_entry = _TopologyReuseEntry(
                 key=str(refresh_topology_key),
                 tree=tree_artifacts.tree,
@@ -4967,6 +5042,39 @@ class FastMultipoleMethod:
             )
         )
         if strict_mode_active:
+            self._maybe_load_strict_cap_profile()
+            profiled_q = int(self._strict_profiled_max_pair_queue)
+            profiled_b = int(self._strict_profiled_pair_process_block)
+            if profiled_q > 0:
+                if runtime_traversal_config is not None:
+                    runtime_traversal_config = DualTreeTraversalConfig(
+                        max_pair_queue=max(
+                            int(runtime_traversal_config.max_pair_queue),
+                            int(profiled_q),
+                        ),
+                        process_block=(
+                            int(profiled_b)
+                            if profiled_b > 0
+                            else int(runtime_traversal_config.process_block)
+                        ),
+                        max_interactions_per_node=int(
+                            runtime_traversal_config.max_interactions_per_node
+                        ),
+                        max_neighbors_per_leaf=int(
+                            runtime_traversal_config.max_neighbors_per_leaf
+                        ),
+                    )
+                else:
+                    runtime_traversal_config = DualTreeTraversalConfig(
+                        max_pair_queue=int(profiled_q),
+                        process_block=(
+                            int(profiled_b)
+                            if profiled_b > 0
+                            else int(self.pair_process_block or 1024)
+                        ),
+                        max_interactions_per_node=8192,
+                        max_neighbors_per_leaf=4096,
+                    )
             self._refresh_strict_mode_active_count += 1
             # Strict mode contract: one-shot shared count->fill and single queue.
             os.environ["YGGDRAX_DUAL_TREE_SHARED_COUNT_FILL_ONE_SHOT"] = "1"
@@ -5107,7 +5215,14 @@ class FastMultipoleMethod:
             max_pair_queue=self.max_pair_queue,
             pair_process_block=self.pair_process_block,
             traversal_config=runtime_traversal_config,
-            retry_logger=(None if jit_traversal_for_prepare else record_retry),
+            retry_logger=(
+                record_retry
+                if str(
+                    os.environ.get("JACCPOT_STATIC_STRICT_CAP_RECORD", "1")
+                ).strip().lower()
+                in {"1", "true", "yes", "on"}
+                else (None if jit_traversal_for_prepare else record_retry)
+            ),
             fail_fast=(self.fail_fast or strict_mode_active),
             use_dense_interactions=use_dense_interactions_for_prepare,
             grouped_interactions=grouped_interactions,
@@ -6863,6 +6978,7 @@ class FastMultipoleMethod:
         retry_events_tuple = tuple(collected_retries)
         if allow_stateful_cache:
             self._recent_retry_events = retry_events_tuple
+            self._record_strict_cap_profile_from_retries(retry_events_tuple)
 
         execution_backend = self._resolve_execution_backend()
         tree_type_norm = (
