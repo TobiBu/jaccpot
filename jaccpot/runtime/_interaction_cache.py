@@ -97,6 +97,7 @@ class _RefreshDualPlannerHint(NamedTuple):
     """Cached refresh planner decision for dual artifact build routing."""
 
     use_split_build: bool
+    suppress_substage_timing: bool = False
 
 
 def _without_grouped_class_segments(

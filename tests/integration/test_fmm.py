@@ -498,6 +498,7 @@ def test_static_radix_refresh_dual_planner_mode_parity_and_diagnostics(monkeypat
     assert diagnostics_on["refresh_dual_planner_execute_count"] >= 2
     assert diagnostics_on["refresh_dual_planner_compile_count"] >= 1
     assert diagnostics_on["refresh_dual_planner_cache_hits"] >= 1
+    assert diagnostics_on["refresh_dual_planner_steady_timing_bypass_count"] >= 1
 
 
 def test_capacity_fixed_depth_tree_mode_is_removed():

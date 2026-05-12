@@ -2178,6 +2178,7 @@ class FastMultipoleMethod:
         self._refresh_dual_planner_cache_misses: int = 0
         self._refresh_dual_planner_compile_count: int = 0
         self._refresh_dual_planner_execute_count: int = 0
+        self._refresh_dual_planner_steady_timing_bypass_count: int = 0
         self.fixed_order = fixed_order
         self.fixed_max_leaf_size = fixed_max_leaf_size
         self._explicit_m2l_chunk_size = m2l_chunk_size is not None
@@ -2404,6 +2405,7 @@ class FastMultipoleMethod:
         self._refresh_dual_planner_cache_misses = 0
         self._refresh_dual_planner_compile_count = 0
         self._refresh_dual_planner_execute_count = 0
+        self._refresh_dual_planner_steady_timing_bypass_count = 0
         _clear_global_runtime_caches(clear_jax_compilation=bool(clear_jax_compilation))
 
     def _compiled_profile_from_prepared_state(
@@ -2586,6 +2588,9 @@ class FastMultipoleMethod:
             ),
             "refresh_dual_planner_execute_count": int(
                 self._refresh_dual_planner_execute_count
+            ),
+            "refresh_dual_planner_steady_timing_bypass_count": int(
+                self._refresh_dual_planner_steady_timing_bypass_count
             ),
             "recent_dual_node_count": int(self._recent_dual_node_count),
             "recent_dual_leaf_count": int(self._recent_dual_leaf_count),
@@ -4949,6 +4954,7 @@ class FastMultipoleMethod:
             )
         )
         planner_hint: Optional[_RefreshDualPlannerHint] = None
+        planner_cache_hit = False
         if planner_enabled:
             traversal_key = (
                 "none"
@@ -4986,13 +4992,30 @@ class FastMultipoleMethod:
                     and policy_state is None
                 )
                 planner_hint = _RefreshDualPlannerHint(
-                    use_split_build=use_split_build_hint
+                    use_split_build=use_split_build_hint,
+                    suppress_substage_timing=True,
                 )
                 self._refresh_dual_planner_cache[planner_key] = planner_hint
                 self._refresh_dual_planner_compile_count += 1
             else:
+                planner_cache_hit = True
                 self._refresh_dual_planner_cache_hits += 1
             self._refresh_dual_planner_execute_count += 1
+        planner_allow_steady_timing_bypass = str(
+            os.environ.get(
+                "JACCPOT_LARGE_N_REFRESH_DUAL_PLANNER_STEADY_NO_SUBSTAGE_TIMING",
+                "1",
+            )
+        ).strip().lower() in {"1", "true", "yes", "on"}
+        dual_artifact_timing_callback = _record_dual_artifact_substage
+        if (
+            planner_hint is not None
+            and planner_cache_hit
+            and bool(getattr(planner_hint, "suppress_substage_timing", False))
+            and planner_allow_steady_timing_bypass
+        ):
+            dual_artifact_timing_callback = None
+            self._refresh_dual_planner_steady_timing_bypass_count += 1
         _record_dual_stage("_refresh_timing_dual_setup_seconds", stage_t0)
 
         stage_t0 = time.perf_counter()
@@ -5034,7 +5057,7 @@ class FastMultipoleMethod:
             pair_policy=pair_policy,
             policy_state=policy_state,
             jit_traversal=jit_traversal_for_prepare,
-            timing_callback=_record_dual_artifact_substage,
+            timing_callback=dual_artifact_timing_callback,
             planner_hint=planner_hint,
         )
         if stateful_cache_enabled:
