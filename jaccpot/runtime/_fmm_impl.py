@@ -4962,45 +4962,6 @@ class FastMultipoleMethod:
         planner_hint: Optional[_RefreshDualPlannerHint] = None
         planner_cache_hit = False
         if planner_enabled:
-            total_nodes_planner = int(tree_artifacts.tree.parent.shape[0])
-            internal_nodes_planner = int(
-                jnp.asarray(tree_artifacts.tree.left_child).shape[0]
-            )
-            leaf_count_planner = max(0, total_nodes_planner - internal_nodes_planner)
-            (
-                use_split_build_compiled,
-                _use_compact_shared_far_near_compiled,
-                suppress_substage_timing_compiled,
-            ) = _compiled_refresh_dual_planner_route(
-                allow_split_build_flag=jnp.asarray(
-                    bool(allow_split_build), dtype=jnp.bool_
-                ),
-                grouped_interactions_flag=jnp.asarray(
-                    bool(grouped_interactions), dtype=jnp.bool_
-                ),
-                need_traversal_result_flag=jnp.asarray(
-                    bool(need_traversal_result), dtype=jnp.bool_
-                ),
-                has_pair_policy_flag=jnp.asarray(pair_policy is not None, dtype=jnp.bool_),
-                has_policy_state_flag=jnp.asarray(
-                    policy_state is not None, dtype=jnp.bool_
-                ),
-                leaf_count=jnp.asarray(leaf_count_planner, dtype=jnp.int32),
-                need_node_interactions_flag=jnp.asarray(
-                    bool(need_node_interactions), dtype=jnp.bool_
-                ),
-                need_compact_far_pairs_flag=jnp.asarray(
-                    bool(need_compact_far_pairs), dtype=jnp.bool_
-                ),
-                use_dense_interactions_flag=jnp.asarray(
-                    bool(use_dense_interactions_for_prepare), dtype=jnp.bool_
-                ),
-            )
-            use_split_build_compiled_bool = bool(jax.device_get(use_split_build_compiled))
-            suppress_substage_timing_compiled_bool = bool(
-                jax.device_get(suppress_substage_timing_compiled)
-            )
-            self._refresh_dual_planner_compiled_route_count += 1
             traversal_key = (
                 "none"
                 if runtime_traversal_config is None
@@ -5029,6 +4990,51 @@ class FastMultipoleMethod:
             planner_hint = self._refresh_dual_planner_cache.get(planner_key)
             if planner_hint is None:
                 self._refresh_dual_planner_cache_misses += 1
+                total_nodes_planner = int(tree_artifacts.tree.parent.shape[0])
+                internal_nodes_planner = int(
+                    jnp.asarray(tree_artifacts.tree.left_child).shape[0]
+                )
+                leaf_count_planner = max(
+                    0, total_nodes_planner - internal_nodes_planner
+                )
+                (
+                    use_split_build_compiled,
+                    _use_compact_shared_far_near_compiled,
+                    suppress_substage_timing_compiled,
+                ) = _compiled_refresh_dual_planner_route(
+                    allow_split_build_flag=jnp.asarray(
+                        bool(allow_split_build), dtype=jnp.bool_
+                    ),
+                    grouped_interactions_flag=jnp.asarray(
+                        bool(grouped_interactions), dtype=jnp.bool_
+                    ),
+                    need_traversal_result_flag=jnp.asarray(
+                        bool(need_traversal_result), dtype=jnp.bool_
+                    ),
+                    has_pair_policy_flag=jnp.asarray(
+                        pair_policy is not None, dtype=jnp.bool_
+                    ),
+                    has_policy_state_flag=jnp.asarray(
+                        policy_state is not None, dtype=jnp.bool_
+                    ),
+                    leaf_count=jnp.asarray(leaf_count_planner, dtype=jnp.int32),
+                    need_node_interactions_flag=jnp.asarray(
+                        bool(need_node_interactions), dtype=jnp.bool_
+                    ),
+                    need_compact_far_pairs_flag=jnp.asarray(
+                        bool(need_compact_far_pairs), dtype=jnp.bool_
+                    ),
+                    use_dense_interactions_flag=jnp.asarray(
+                        bool(use_dense_interactions_for_prepare), dtype=jnp.bool_
+                    ),
+                )
+                use_split_build_compiled_bool = bool(
+                    jax.device_get(use_split_build_compiled)
+                )
+                suppress_substage_timing_compiled_bool = bool(
+                    jax.device_get(suppress_substage_timing_compiled)
+                )
+                self._refresh_dual_planner_compiled_route_count += 1
                 planner_hint = _RefreshDualPlannerHint(
                     use_split_build=use_split_build_compiled_bool,
                     suppress_substage_timing=suppress_substage_timing_compiled_bool,
