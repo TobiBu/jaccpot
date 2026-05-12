@@ -3,6 +3,7 @@
 import hashlib
 import time
 from dataclasses import dataclass
+from functools import partial
 from typing import Any, NamedTuple, Optional
 
 import jax
@@ -98,6 +99,44 @@ class _RefreshDualPlannerHint(NamedTuple):
 
     use_split_build: bool
     suppress_substage_timing: bool = False
+
+
+@partial(jax.jit, static_argnames=())
+def _compiled_refresh_dual_planner_route(
+    *,
+    allow_split_build_flag: Array,
+    grouped_interactions_flag: Array,
+    need_traversal_result_flag: Array,
+    has_pair_policy_flag: Array,
+    has_policy_state_flag: Array,
+    leaf_count: Array,
+    need_node_interactions_flag: Array,
+    need_compact_far_pairs_flag: Array,
+    use_dense_interactions_flag: Array,
+) -> tuple[Array, Array, Array]:
+    """Return compiled routing decisions for refresh dual-artifact planning.
+
+    This keeps steady-state route/plan branching in JAX control flow so the
+    refresh hot path avoids repeated Python-side conditional orchestration.
+    """
+
+    use_split_build = (
+        allow_split_build_flag
+        & (~grouped_interactions_flag)
+        & (~need_traversal_result_flag)
+        & (~has_pair_policy_flag)
+        & (~has_policy_state_flag)
+    )
+    need_far_payload = (
+        need_node_interactions_flag
+        | need_compact_far_pairs_flag
+        | use_dense_interactions_flag
+    )
+    use_compact_shared_far_near = (
+        use_split_build & need_far_payload & (~need_node_interactions_flag)
+    )
+    suppress_substage_timing = use_split_build & (leaf_count >= jnp.int32(1))
+    return use_split_build, use_compact_shared_far_near, suppress_substage_timing
 
 
 def _without_grouped_class_segments(

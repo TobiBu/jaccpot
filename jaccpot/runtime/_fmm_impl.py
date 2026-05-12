@@ -122,6 +122,7 @@ from ._adaptive_policy import (
     source_error_proxy_by_order_from_multipoles,
 )
 from ._interaction_cache import (
+    _compiled_refresh_dual_planner_route,
     _build_dual_tree_artifacts,
     _DualTreeArtifacts,
     _interaction_cache_key,
@@ -2179,6 +2180,7 @@ class FastMultipoleMethod:
         self._refresh_dual_planner_compile_count: int = 0
         self._refresh_dual_planner_execute_count: int = 0
         self._refresh_dual_planner_steady_timing_bypass_count: int = 0
+        self._refresh_dual_planner_compiled_route_count: int = 0
         self.fixed_order = fixed_order
         self.fixed_max_leaf_size = fixed_max_leaf_size
         self._explicit_m2l_chunk_size = m2l_chunk_size is not None
@@ -2406,6 +2408,7 @@ class FastMultipoleMethod:
         self._refresh_dual_planner_compile_count = 0
         self._refresh_dual_planner_execute_count = 0
         self._refresh_dual_planner_steady_timing_bypass_count = 0
+        self._refresh_dual_planner_compiled_route_count = 0
         _clear_global_runtime_caches(clear_jax_compilation=bool(clear_jax_compilation))
 
     def _compiled_profile_from_prepared_state(
@@ -2591,6 +2594,9 @@ class FastMultipoleMethod:
             ),
             "refresh_dual_planner_steady_timing_bypass_count": int(
                 self._refresh_dual_planner_steady_timing_bypass_count
+            ),
+            "refresh_dual_planner_compiled_route_count": int(
+                self._refresh_dual_planner_compiled_route_count
             ),
             "recent_dual_node_count": int(self._recent_dual_node_count),
             "recent_dual_leaf_count": int(self._recent_dual_leaf_count),
@@ -4956,6 +4962,45 @@ class FastMultipoleMethod:
         planner_hint: Optional[_RefreshDualPlannerHint] = None
         planner_cache_hit = False
         if planner_enabled:
+            total_nodes_planner = int(tree_artifacts.tree.parent.shape[0])
+            internal_nodes_planner = int(
+                jnp.asarray(tree_artifacts.tree.left_child).shape[0]
+            )
+            leaf_count_planner = max(0, total_nodes_planner - internal_nodes_planner)
+            (
+                use_split_build_compiled,
+                _use_compact_shared_far_near_compiled,
+                suppress_substage_timing_compiled,
+            ) = _compiled_refresh_dual_planner_route(
+                allow_split_build_flag=jnp.asarray(
+                    bool(allow_split_build), dtype=jnp.bool_
+                ),
+                grouped_interactions_flag=jnp.asarray(
+                    bool(grouped_interactions), dtype=jnp.bool_
+                ),
+                need_traversal_result_flag=jnp.asarray(
+                    bool(need_traversal_result), dtype=jnp.bool_
+                ),
+                has_pair_policy_flag=jnp.asarray(pair_policy is not None, dtype=jnp.bool_),
+                has_policy_state_flag=jnp.asarray(
+                    policy_state is not None, dtype=jnp.bool_
+                ),
+                leaf_count=jnp.asarray(leaf_count_planner, dtype=jnp.int32),
+                need_node_interactions_flag=jnp.asarray(
+                    bool(need_node_interactions), dtype=jnp.bool_
+                ),
+                need_compact_far_pairs_flag=jnp.asarray(
+                    bool(need_compact_far_pairs), dtype=jnp.bool_
+                ),
+                use_dense_interactions_flag=jnp.asarray(
+                    bool(use_dense_interactions_for_prepare), dtype=jnp.bool_
+                ),
+            )
+            use_split_build_compiled_bool = bool(jax.device_get(use_split_build_compiled))
+            suppress_substage_timing_compiled_bool = bool(
+                jax.device_get(suppress_substage_timing_compiled)
+            )
+            self._refresh_dual_planner_compiled_route_count += 1
             traversal_key = (
                 "none"
                 if runtime_traversal_config is None
@@ -4984,16 +5029,9 @@ class FastMultipoleMethod:
             planner_hint = self._refresh_dual_planner_cache.get(planner_key)
             if planner_hint is None:
                 self._refresh_dual_planner_cache_misses += 1
-                use_split_build_hint = bool(
-                    allow_split_build
-                    and not bool(grouped_interactions)
-                    and not bool(need_traversal_result)
-                    and pair_policy is None
-                    and policy_state is None
-                )
                 planner_hint = _RefreshDualPlannerHint(
-                    use_split_build=use_split_build_hint,
-                    suppress_substage_timing=True,
+                    use_split_build=use_split_build_compiled_bool,
+                    suppress_substage_timing=suppress_substage_timing_compiled_bool,
                 )
                 self._refresh_dual_planner_cache[planner_key] = planner_hint
                 self._refresh_dual_planner_compile_count += 1
