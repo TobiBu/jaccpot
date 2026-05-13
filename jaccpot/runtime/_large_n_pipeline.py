@@ -25,6 +25,206 @@ from ._large_n_types import LargeNPreparedState, RadixFastNearfieldPayload
 from .dtypes import INDEX_DTYPE
 
 
+def _read_large_n_env_config() -> dict[str, Any]:
+    def _env_bool(name: str, default: bool) -> bool:
+        raw = str(os.environ.get(name, "1" if default else "0")).strip().lower()
+        return raw in {"1", "true", "yes", "on"}
+
+    def _env_pos_int(name: str, default: int) -> int:
+        try:
+            value = int(os.environ.get(name, str(default)))
+        except Exception:
+            value = int(default)
+        return max(1, int(value))
+
+    def _canonical_static_int(
+        value_env: str,
+        default_value: int,
+        options_env: str,
+        default_options: str,
+    ) -> int:
+        try:
+            raw_value = int(os.environ.get(value_env, str(default_value)))
+        except Exception:
+            raw_value = int(default_value)
+        options_raw = str(os.environ.get(options_env, default_options)).strip()
+        options: list[int] = []
+        for token in options_raw.split(","):
+            token = token.strip()
+            if not token:
+                continue
+            try:
+                val = int(token)
+            except Exception:
+                continue
+            if val > 0 and val not in options:
+                options.append(val)
+        if not options:
+            options = [int(default_value)]
+        if raw_value in options:
+            return int(raw_value)
+        return int(min(options, key=lambda v: (abs(v - raw_value), v)))
+
+    overflow_profile_headroom_raw = os.environ.get(
+        "JACCPOT_LARGE_N_OVERFLOW_PROFILE_HEADROOM",
+        "2.0",
+    )
+    try:
+        overflow_profile_headroom = max(1.0, float(overflow_profile_headroom_raw))
+    except Exception:
+        overflow_profile_headroom = 2.0
+    overflow_profile_caps_raw = os.environ.get(
+        "JACCPOT_LARGE_N_OVERFLOW_PROFILE_CAP_OPTIONS",
+        "64,128,256,512,1024,2048,4096,8192,16384,32768,65536",
+    )
+    overflow_profile_caps: list[int] = []
+    for token in str(overflow_profile_caps_raw).split(","):
+        token = token.strip()
+        if not token:
+            continue
+        try:
+            value = int(token)
+        except Exception:
+            continue
+        if value > 0 and value not in overflow_profile_caps:
+            overflow_profile_caps.append(value)
+    overflow_profile_caps = sorted(overflow_profile_caps)
+    if not overflow_profile_caps:
+        overflow_profile_caps = [64, 128, 256, 512, 1024]
+
+    neighbor_profile_headroom_raw = os.environ.get(
+        "JACCPOT_LARGE_N_NEIGHBOR_EDGE_PROFILE_HEADROOM",
+        "1.0",
+    )
+    try:
+        neighbor_profile_headroom = max(1.0, float(neighbor_profile_headroom_raw))
+    except Exception:
+        neighbor_profile_headroom = 1.0
+    neighbor_profile_caps_raw = os.environ.get(
+        "JACCPOT_LARGE_N_NEIGHBOR_EDGE_PROFILE_CAP_OPTIONS",
+        "4096,8192,12288,16384,20480,24576,28672,32768,49152,65536,98304,131072",
+    )
+    neighbor_profile_caps: list[int] = []
+    for token in str(neighbor_profile_caps_raw).split(","):
+        token = token.strip()
+        if not token:
+            continue
+        try:
+            value = int(token)
+        except Exception:
+            continue
+        if value > 0 and value not in neighbor_profile_caps:
+            neighbor_profile_caps.append(value)
+    neighbor_profile_caps = sorted(neighbor_profile_caps)
+    if not neighbor_profile_caps:
+        neighbor_profile_caps = [4096, 8192, 12288, 16384, 20480, 24576, 28672, 32768]
+    neighbor_profile_bootstrap_cap_raw = os.environ.get(
+        "JACCPOT_LARGE_N_NEIGHBOR_EDGE_PROFILE_BOOTSTRAP_CAP",
+        "0",
+    )
+    try:
+        neighbor_profile_bootstrap_cap = max(
+            0,
+            int(neighbor_profile_bootstrap_cap_raw),
+        )
+    except Exception:
+        neighbor_profile_bootstrap_cap = 0
+    overflow_profile_bootstrap_cap_raw = os.environ.get(
+        "JACCPOT_LARGE_N_OVERFLOW_PROFILE_BOOTSTRAP_CAP",
+        "0",
+    )
+    try:
+        overflow_profile_bootstrap_cap = max(
+            0,
+            int(overflow_profile_bootstrap_cap_raw),
+        )
+    except Exception:
+        overflow_profile_bootstrap_cap = 0
+
+    return {
+        "nearfield_delayed_scatter_chunks_per_superchunk": _env_pos_int(
+            "JACCPOT_LARGE_N_DELAYED_SCATTER_CHUNKS", 1
+        ),
+        "nearfield_chunk_scan_batch_size": _env_pos_int(
+            "JACCPOT_LARGE_N_CHUNK_SCAN_BATCH_SIZE", 1
+        ),
+        "nearfield_chunk_scan_unroll": _env_pos_int(
+            "JACCPOT_LARGE_N_CHUNK_SCAN_UNROLL", 1
+        ),
+        "nearfield_superchunk_scan_unroll": _env_pos_int(
+            "JACCPOT_LARGE_N_SUPERCHUNK_SCAN_UNROLL", 1
+        ),
+        "nearfield_sorted_scatter_hint": _env_bool(
+            "JACCPOT_LARGE_N_SORTED_SCATTER_HINT", False
+        ),
+        "nearfield_grouped_sorted_scatter": _env_bool(
+            "JACCPOT_LARGE_N_GROUPED_SORTED_SCATTER", False
+        ),
+        "nearfield_superchunk_target_reduce": _env_bool(
+            "JACCPOT_LARGE_N_SUPERCHUNK_TARGET_REDUCE", False
+        ),
+        "nearfield_disable_chunk_cond": _env_bool(
+            "JACCPOT_LARGE_N_DISABLE_CHUNK_COND", True
+        ),
+        "nearfield_target_leaf_batch_size": _canonical_static_int(
+            "JACCPOT_LARGE_N_TARGET_LEAF_BATCH_SIZE",
+            32,
+            "JACCPOT_LARGE_N_TARGET_LEAF_BATCH_OPTIONS",
+            "16,32,64",
+        ),
+        "nearfield_target_block_tile_size": _canonical_static_int(
+            "JACCPOT_LARGE_N_TARGET_BLOCK_TILE_SIZE",
+            8,
+            "JACCPOT_LARGE_N_TARGET_BLOCK_TILE_OPTIONS",
+            "4,8,16",
+        ),
+        "nearfield_target_block_tile_scan_unroll": _canonical_static_int(
+            "JACCPOT_LARGE_N_TARGET_BLOCK_TILE_SCAN_UNROLL",
+            1,
+            "JACCPOT_LARGE_N_TARGET_BLOCK_TILE_SCAN_UNROLL_OPTIONS",
+            "1,2,4",
+        ),
+        "nearfield_target_block_batch_scan_unroll": _canonical_static_int(
+            "JACCPOT_LARGE_N_TARGET_BLOCK_BATCH_SCAN_UNROLL",
+            1,
+            "JACCPOT_LARGE_N_TARGET_BLOCK_BATCH_SCAN_UNROLL_OPTIONS",
+            "1,2,4",
+        ),
+        "nearfield_target_block_overflow_fast_max_blocks": _canonical_static_int(
+            "JACCPOT_LARGE_N_TARGET_BLOCK_OVERFLOW_FAST_MAX_BLOCKS",
+            65536,
+            "JACCPOT_LARGE_N_TARGET_BLOCK_OVERFLOW_FAST_MAX_BLOCKS_OPTIONS",
+            "16384,32768,65536,131072",
+        ),
+        "static_target_blocks_enabled": _env_bool(
+            "JACCPOT_LARGE_N_STATIC_TARGET_BLOCKS", True
+        ),
+        "static_target_blocks_max_per_leaf": _canonical_static_int(
+            "JACCPOT_LARGE_N_STATIC_TARGET_BLOCKS_MAX_PER_LEAF",
+            32,
+            "JACCPOT_LARGE_N_STATIC_TARGET_BLOCKS_MAX_PER_LEAF_OPTIONS",
+            "8,16,32,64,128",
+        ),
+        "overflow_profile_headroom": float(overflow_profile_headroom),
+        "overflow_profile_caps": tuple(int(v) for v in overflow_profile_caps),
+        "neighbor_profile_headroom": float(neighbor_profile_headroom),
+        "neighbor_profile_caps": tuple(int(v) for v in neighbor_profile_caps),
+        "neighbor_profile_bootstrap_cap": int(neighbor_profile_bootstrap_cap),
+        "overflow_profile_bootstrap_cap": int(overflow_profile_bootstrap_cap),
+        "disable_specialized_large_n_nearfield": _env_bool(
+            "JACCPOT_DISABLE_LARGE_N_SPECIALIZED_NEARFIELD", False
+        ),
+    }
+
+
+def _large_n_env_config_for_fmm(fmm: object) -> dict[str, Any]:
+    cfg = getattr(fmm, "_large_n_env_config_cached", None)
+    if cfg is None:
+        cfg = _read_large_n_env_config()
+        setattr(fmm, "_large_n_env_config_cached", cfg)
+    return cfg
+
+
 def prepare_large_n_state(
     fmm: object,
     *,
@@ -127,191 +327,60 @@ def prepare_large_n_state(
         num_particles=int(positions_arr.shape[0]),
     )
 
-    def _env_bool(name: str, default: bool) -> bool:
-        raw = str(os.environ.get(name, "1" if default else "0")).strip().lower()
-        return raw in {"1", "true", "yes", "on"}
-
-    def _env_pos_int(name: str, default: int) -> int:
-        try:
-            value = int(os.environ.get(name, str(default)))
-        except Exception:
-            value = int(default)
-        return max(1, int(value))
-
-    def _canonical_static_int(
-        value_env: str,
-        default_value: int,
-        options_env: str,
-        default_options: str,
-    ) -> int:
-        try:
-            raw_value = int(os.environ.get(value_env, str(default_value)))
-        except Exception:
-            raw_value = int(default_value)
-        options_raw = str(os.environ.get(options_env, default_options)).strip()
-        options: list[int] = []
-        for token in options_raw.split(","):
-            token = token.strip()
-            if not token:
-                continue
-            try:
-                val = int(token)
-            except Exception:
-                continue
-            if val > 0 and val not in options:
-                options.append(val)
-        if not options:
-            options = [int(default_value)]
-        if raw_value in options:
-            return int(raw_value)
-        return int(min(options, key=lambda v: (abs(v - raw_value), v)))
-
-    nearfield_delayed_scatter_chunks_per_superchunk = _env_pos_int(
-        "JACCPOT_LARGE_N_DELAYED_SCATTER_CHUNKS",
-        1,
+    large_n_env_cfg = _large_n_env_config_for_fmm(fmm)
+    nearfield_delayed_scatter_chunks_per_superchunk = int(
+        large_n_env_cfg["nearfield_delayed_scatter_chunks_per_superchunk"]
     )
-    nearfield_chunk_scan_batch_size = _env_pos_int(
-        "JACCPOT_LARGE_N_CHUNK_SCAN_BATCH_SIZE",
-        1,
+    nearfield_chunk_scan_batch_size = int(
+        large_n_env_cfg["nearfield_chunk_scan_batch_size"]
     )
-    nearfield_chunk_scan_unroll = _env_pos_int(
-        "JACCPOT_LARGE_N_CHUNK_SCAN_UNROLL",
-        1,
+    nearfield_chunk_scan_unroll = int(large_n_env_cfg["nearfield_chunk_scan_unroll"])
+    nearfield_superchunk_scan_unroll = int(
+        large_n_env_cfg["nearfield_superchunk_scan_unroll"]
     )
-    nearfield_superchunk_scan_unroll = _env_pos_int(
-        "JACCPOT_LARGE_N_SUPERCHUNK_SCAN_UNROLL",
-        1,
+    nearfield_sorted_scatter_hint = bool(
+        large_n_env_cfg["nearfield_sorted_scatter_hint"]
     )
-    nearfield_sorted_scatter_hint = _env_bool(
-        "JACCPOT_LARGE_N_SORTED_SCATTER_HINT",
-        False,
+    nearfield_grouped_sorted_scatter = bool(
+        large_n_env_cfg["nearfield_grouped_sorted_scatter"]
     )
-    nearfield_grouped_sorted_scatter = _env_bool(
-        "JACCPOT_LARGE_N_GROUPED_SORTED_SCATTER",
-        False,
+    nearfield_superchunk_target_reduce = bool(
+        large_n_env_cfg["nearfield_superchunk_target_reduce"]
     )
-    nearfield_superchunk_target_reduce = _env_bool(
-        "JACCPOT_LARGE_N_SUPERCHUNK_TARGET_REDUCE",
-        False,
+    nearfield_disable_chunk_cond = bool(large_n_env_cfg["nearfield_disable_chunk_cond"])
+    nearfield_target_leaf_batch_size = int(
+        large_n_env_cfg["nearfield_target_leaf_batch_size"]
     )
-    nearfield_disable_chunk_cond = _env_bool(
-        "JACCPOT_LARGE_N_DISABLE_CHUNK_COND",
-        True,
+    nearfield_target_block_tile_size = int(
+        large_n_env_cfg["nearfield_target_block_tile_size"]
     )
-    nearfield_target_leaf_batch_size = _canonical_static_int(
-        "JACCPOT_LARGE_N_TARGET_LEAF_BATCH_SIZE",
-        32,
-        "JACCPOT_LARGE_N_TARGET_LEAF_BATCH_OPTIONS",
-        "16,32,64",
+    nearfield_target_block_tile_scan_unroll = int(
+        large_n_env_cfg["nearfield_target_block_tile_scan_unroll"]
     )
-    nearfield_target_block_tile_size = _canonical_static_int(
-        "JACCPOT_LARGE_N_TARGET_BLOCK_TILE_SIZE",
-        8,
-        "JACCPOT_LARGE_N_TARGET_BLOCK_TILE_OPTIONS",
-        "4,8,16",
+    nearfield_target_block_batch_scan_unroll = int(
+        large_n_env_cfg["nearfield_target_block_batch_scan_unroll"]
     )
-    nearfield_target_block_tile_scan_unroll = _canonical_static_int(
-        "JACCPOT_LARGE_N_TARGET_BLOCK_TILE_SCAN_UNROLL",
-        1,
-        "JACCPOT_LARGE_N_TARGET_BLOCK_TILE_SCAN_UNROLL_OPTIONS",
-        "1,2,4",
+    nearfield_target_block_overflow_fast_max_blocks = int(
+        large_n_env_cfg["nearfield_target_block_overflow_fast_max_blocks"]
     )
-    nearfield_target_block_batch_scan_unroll = _canonical_static_int(
-        "JACCPOT_LARGE_N_TARGET_BLOCK_BATCH_SCAN_UNROLL",
-        1,
-        "JACCPOT_LARGE_N_TARGET_BLOCK_BATCH_SCAN_UNROLL_OPTIONS",
-        "1,2,4",
+    static_target_blocks_enabled = bool(large_n_env_cfg["static_target_blocks_enabled"])
+    static_target_blocks_max_per_leaf = int(
+        large_n_env_cfg["static_target_blocks_max_per_leaf"]
     )
-    nearfield_target_block_overflow_fast_max_blocks = _canonical_static_int(
-        "JACCPOT_LARGE_N_TARGET_BLOCK_OVERFLOW_FAST_MAX_BLOCKS",
-        65536,
-        "JACCPOT_LARGE_N_TARGET_BLOCK_OVERFLOW_FAST_MAX_BLOCKS_OPTIONS",
-        "16384,32768,65536,131072",
+    overflow_profile_headroom = float(large_n_env_cfg["overflow_profile_headroom"])
+    overflow_profile_caps = tuple(
+        int(v) for v in large_n_env_cfg["overflow_profile_caps"]
     )
-    static_target_blocks_enabled = _env_bool(
-        "JACCPOT_LARGE_N_STATIC_TARGET_BLOCKS",
-        True,
+    neighbor_profile_headroom = float(large_n_env_cfg["neighbor_profile_headroom"])
+    neighbor_profile_caps = tuple(
+        int(v) for v in large_n_env_cfg["neighbor_profile_caps"]
     )
-    static_target_blocks_max_per_leaf = _canonical_static_int(
-        "JACCPOT_LARGE_N_STATIC_TARGET_BLOCKS_MAX_PER_LEAF",
-        32,
-        "JACCPOT_LARGE_N_STATIC_TARGET_BLOCKS_MAX_PER_LEAF_OPTIONS",
-        "8,16,32,64,128",
+    neighbor_profile_bootstrap_cap = int(
+        large_n_env_cfg["neighbor_profile_bootstrap_cap"]
     )
-    overflow_profile_headroom_raw = os.environ.get(
-        "JACCPOT_LARGE_N_OVERFLOW_PROFILE_HEADROOM",
-        "2.0",
+    overflow_profile_bootstrap_cap = int(
+        large_n_env_cfg["overflow_profile_bootstrap_cap"]
     )
-    try:
-        overflow_profile_headroom = max(1.0, float(overflow_profile_headroom_raw))
-    except Exception:
-        overflow_profile_headroom = 2.0
-    overflow_profile_caps_raw = os.environ.get(
-        "JACCPOT_LARGE_N_OVERFLOW_PROFILE_CAP_OPTIONS",
-        "64,128,256,512,1024,2048,4096,8192,16384,32768,65536",
-    )
-    overflow_profile_caps: list[int] = []
-    for token in str(overflow_profile_caps_raw).split(","):
-        token = token.strip()
-        if not token:
-            continue
-        try:
-            value = int(token)
-        except Exception:
-            continue
-        if value > 0 and value not in overflow_profile_caps:
-            overflow_profile_caps.append(value)
-    overflow_profile_caps = sorted(overflow_profile_caps)
-    if not overflow_profile_caps:
-        overflow_profile_caps = [64, 128, 256, 512, 1024]
-    neighbor_profile_headroom_raw = os.environ.get(
-        "JACCPOT_LARGE_N_NEIGHBOR_EDGE_PROFILE_HEADROOM",
-        "1.0",
-    )
-    try:
-        neighbor_profile_headroom = max(1.0, float(neighbor_profile_headroom_raw))
-    except Exception:
-        neighbor_profile_headroom = 1.0
-    neighbor_profile_caps_raw = os.environ.get(
-        "JACCPOT_LARGE_N_NEIGHBOR_EDGE_PROFILE_CAP_OPTIONS",
-        "4096,8192,12288,16384,20480,24576,28672,32768,49152,65536,98304,131072",
-    )
-    neighbor_profile_caps: list[int] = []
-    for token in str(neighbor_profile_caps_raw).split(","):
-        token = token.strip()
-        if not token:
-            continue
-        try:
-            value = int(token)
-        except Exception:
-            continue
-        if value > 0 and value not in neighbor_profile_caps:
-            neighbor_profile_caps.append(value)
-    neighbor_profile_caps = sorted(neighbor_profile_caps)
-    if not neighbor_profile_caps:
-        neighbor_profile_caps = [4096, 8192, 12288, 16384, 20480, 24576, 28672, 32768]
-    neighbor_profile_bootstrap_cap_raw = os.environ.get(
-        "JACCPOT_LARGE_N_NEIGHBOR_EDGE_PROFILE_BOOTSTRAP_CAP",
-        "0",
-    )
-    try:
-        neighbor_profile_bootstrap_cap = max(
-            0,
-            int(neighbor_profile_bootstrap_cap_raw),
-        )
-    except Exception:
-        neighbor_profile_bootstrap_cap = 0
-    overflow_profile_bootstrap_cap_raw = os.environ.get(
-        "JACCPOT_LARGE_N_OVERFLOW_PROFILE_BOOTSTRAP_CAP",
-        "0",
-    )
-    try:
-        overflow_profile_bootstrap_cap = max(
-            0,
-            int(overflow_profile_bootstrap_cap_raw),
-        )
-    except Exception:
-        overflow_profile_bootstrap_cap = 0
 
     def _pick_overflow_profile_capacity(required: int) -> int:
         required = max(0, int(required))
@@ -337,9 +406,9 @@ def prepare_large_n_state(
         if refresh_timing_active:
             setattr(fmm, attr, float(getattr(fmm, attr, 0.0)) + elapsed)
 
-    disable_specialized_large_n_nearfield = str(
-        os.environ.get("JACCPOT_DISABLE_LARGE_N_SPECIALIZED_NEARFIELD", "0")
-    ).strip().lower() in {"1", "true", "yes", "on"}
+    disable_specialized_large_n_nearfield = bool(
+        large_n_env_cfg["disable_specialized_large_n_nearfield"]
+    )
     substage_t0 = time.perf_counter()
     if bool(execution_config.retain_leaf_groups):
         leaf_particle_indices, leaf_particle_mask = build_large_n_leaf_particle_groups(
