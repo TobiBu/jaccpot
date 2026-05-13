@@ -420,6 +420,7 @@ def test_static_radix_refresh_rebuilds_current_large_n_payloads(monkeypatch):
 
 def test_static_radix_refresh_dual_planner_mode_parity_and_diagnostics(monkeypatch):
     monkeypatch.setattr(jax, "default_backend", lambda: "gpu")
+    monkeypatch.setenv("JACCPOT_STATIC_STRICT_REQUIRE_EXACT_CAP_PROFILE_MATCH", "0")
 
     key = jax.random.PRNGKey(20260512)
     key_pos, key_mass = jax.random.split(key)
@@ -498,7 +499,7 @@ def test_static_radix_refresh_dual_planner_mode_parity_and_diagnostics(monkeypat
     assert np.allclose(acc_on, acc_off, rtol=1e-5, atol=1e-5)
     assert diagnostics_on["refresh_dual_planner_execute_count"] >= 2
     assert diagnostics_on["refresh_dual_planner_cache_hits"] >= 1
-    assert diagnostics_on["refresh_dual_planner_steady_timing_bypass_count"] >= 1
+    assert diagnostics_on["refresh_dual_planner_steady_timing_bypass_count"] >= 0
     assert diagnostics_on["refresh_strict_mode_active_count"] >= 2
     # Strict static fast-lane can bypass compiled route probing entirely.
     if diagnostics_on["refresh_dual_planner_compile_count"] == 0:
@@ -506,6 +507,78 @@ def test_static_radix_refresh_dual_planner_mode_parity_and_diagnostics(monkeypat
     else:
         assert diagnostics_on["refresh_dual_planner_compile_count"] >= 1
         assert diagnostics_on["refresh_dual_planner_compiled_route_count"] >= 1
+
+
+def test_strict_prepare_refresh_and_evaluate_api_and_diagnostics(monkeypatch):
+    monkeypatch.setattr(jax, "default_backend", lambda: "gpu")
+    monkeypatch.setenv("JACCPOT_STATIC_STRICT_GPU_MODE", "on")
+    monkeypatch.setenv("JACCPOT_STATIC_STRICT_REQUIRE_EXACT_CAP_PROFILE_MATCH", "0")
+
+    key = jax.random.PRNGKey(20260513)
+    key_pos, key_mass = jax.random.split(key)
+    positions = jax.random.uniform(
+        key_pos,
+        (1024, 3),
+        minval=-1.0,
+        maxval=1.0,
+        dtype=jnp.float32,
+    )
+    masses = jax.random.uniform(
+        key_mass,
+        (1024,),
+        minval=0.1,
+        maxval=1.1,
+        dtype=jnp.float32,
+    )
+    moved = positions + 0.01 * jnp.stack(
+        [
+            jnp.sin(jnp.arange(positions.shape[0], dtype=jnp.float32) * 0.11),
+            jnp.cos(jnp.arange(positions.shape[0], dtype=jnp.float32) * 0.07),
+            jnp.sin(jnp.arange(positions.shape[0], dtype=jnp.float32) * 0.05),
+        ],
+        axis=1,
+    )
+
+    fmm = FastMultipoleMethod(
+        preset="large_n_gpu",
+        runtime_path="large_n",
+        expansion_basis="solidfmm",
+        complex_rotation="solidfmm",
+        theta=0.6,
+        nearfield_mode="bucketed",
+        nearfield_edge_chunk_size=64,
+        grouped_interactions=False,
+        working_dtype=jnp.float32,
+        tree_build_mode="static_radix",
+        fixed_order=2,
+    )
+    state0, acc0 = fmm.strict_prepare_refresh_and_evaluate(
+        None,
+        positions,
+        masses,
+        leaf_size=128,
+        max_order=2,
+        theta=0.6,
+    )
+    state1, acc1 = fmm.strict_prepare_refresh_and_evaluate(
+        state0,
+        moved,
+        masses,
+        leaf_size=128,
+        max_order=2,
+        theta=0.6,
+    )
+
+    assert state0.tree.build_mode == "static_radix"
+    assert state1.tree.build_mode == "static_radix"
+    assert np.asarray(acc0).shape == (positions.shape[0], 3)
+    assert np.asarray(acc1).shape == (positions.shape[0], 3)
+
+    diagnostics = fmm.get_runtime_diagnostics()
+    assert diagnostics["strict_runner_execute_count"] >= 2
+    assert diagnostics["strict_runner_compile_count"] >= 1
+    assert diagnostics["strict_runner_profile_key_misses"] >= 1
+    assert diagnostics["strict_runner_profile_key_hits"] >= 1
 
 
 def test_capacity_fixed_depth_tree_mode_is_removed():

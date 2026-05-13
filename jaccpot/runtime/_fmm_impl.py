@@ -2198,6 +2198,16 @@ class FastMultipoleMethod:
             .lower()
             in {"1", "true", "yes", "on"}
         )
+        self._strict_cap_require_exact_profile_match: bool = (
+            str(
+                os.environ.get(
+                    "JACCPOT_STATIC_STRICT_REQUIRE_EXACT_CAP_PROFILE_MATCH", "1"
+                )
+            )
+            .strip()
+            .lower()
+            in {"1", "true", "yes", "on"}
+        )
         split_build_env_raw = os.environ.get(
             "JACCPOT_PREPARE_STAGE_MEMORY_SPLIT_ENABLED"
         )
@@ -2225,6 +2235,12 @@ class FastMultipoleMethod:
         self._refresh_dual_planner_steady_timing_bypass_count: int = 0
         self._refresh_dual_planner_compiled_route_count: int = 0
         self._refresh_strict_mode_active_count: int = 0
+        self._strict_runner_compile_count: int = 0
+        self._strict_runner_execute_count: int = 0
+        self._strict_runner_profile_key_hits: int = 0
+        self._strict_runner_profile_key_misses: int = 0
+        self._strict_runner_fail_fast_reject_count: int = 0
+        self._strict_runner_seen_profile_keys: set[str] = set()
         self._strict_profiled_max_pair_queue: int = 0
         self._strict_profiled_pair_process_block: int = 0
         self._strict_profiled_context_key: str = ""
@@ -2478,6 +2494,12 @@ class FastMultipoleMethod:
         self._refresh_dual_planner_steady_timing_bypass_count = 0
         self._refresh_dual_planner_compiled_route_count = 0
         self._refresh_strict_mode_active_count = 0
+        self._strict_runner_compile_count = 0
+        self._strict_runner_execute_count = 0
+        self._strict_runner_profile_key_hits = 0
+        self._strict_runner_profile_key_misses = 0
+        self._strict_runner_fail_fast_reject_count = 0
+        self._strict_runner_seen_profile_keys = set()
         self._strict_profiled_max_pair_queue = 0
         self._strict_profiled_pair_process_block = 0
         self._strict_profiled_context_key = ""
@@ -2820,6 +2842,17 @@ class FastMultipoleMethod:
             "refresh_strict_mode_active_count": int(
                 self._refresh_strict_mode_active_count
             ),
+            "strict_runner_compile_count": int(self._strict_runner_compile_count),
+            "strict_runner_execute_count": int(self._strict_runner_execute_count),
+            "strict_runner_profile_key_hits": int(
+                self._strict_runner_profile_key_hits
+            ),
+            "strict_runner_profile_key_misses": int(
+                self._strict_runner_profile_key_misses
+            ),
+            "strict_runner_fail_fast_reject_count": int(
+                self._strict_runner_fail_fast_reject_count
+            ),
             "strict_profiled_max_pair_queue": int(
                 self._strict_profiled_max_pair_queue
             ),
@@ -3125,6 +3158,87 @@ class FastMultipoleMethod:
         )
         self._refresh_timing_calls += 1
         return next_state
+
+    def strict_prepare_refresh_and_evaluate(
+        self: "FastMultipoleMethod",
+        prepared_state: Optional[PreparedStateLike],
+        positions: Array,
+        masses: Array,
+        *,
+        bounds: Optional[Tuple[Array, Array]] = None,
+        leaf_size: int = 16,
+        max_order: int = 2,
+        theta: Optional[float] = None,
+        jit_traversal: Optional[bool] = True,
+    ) -> tuple[PreparedStateLike, Array]:
+        """Strict static-radix helper: prepare/refresh once, then evaluate."""
+        if not self._is_large_n_gpu_production_profile():
+            self._strict_runner_fail_fast_reject_count += 1
+            raise RuntimeError(
+                "strict_prepare_refresh_and_evaluate requires large_n_gpu production profile."
+            )
+
+        positions_arr = jnp.asarray(positions)
+        masses_arr = jnp.asarray(masses)
+        profile_key = (
+            f"n={int(positions_arr.shape[0])}|"
+            f"leaf={int(leaf_size)}|"
+            f"order={int(max_order)}|"
+            f"theta={float(self.theta if theta is None else theta):.12g}"
+        )
+        if profile_key in self._strict_runner_seen_profile_keys:
+            self._strict_runner_profile_key_hits += 1
+        else:
+            self._strict_runner_profile_key_misses += 1
+            self._strict_runner_compile_count += 1
+            self._strict_runner_seen_profile_keys.add(profile_key)
+        self._strict_runner_execute_count += 1
+
+        if prepared_state is None:
+            next_state = self.prepare_state(
+                positions_arr,
+                masses_arr,
+                bounds=bounds,
+                leaf_size=int(leaf_size),
+                max_order=int(max_order),
+                theta=theta,
+                jit_tree=self._jit_tree_default,
+            )
+        else:
+            if not isinstance(prepared_state, LargeNPreparedState):
+                self._strict_runner_fail_fast_reject_count += 1
+                raise RuntimeError(
+                    "strict_prepare_refresh_and_evaluate requires LargeNPreparedState input."
+                )
+            next_state_try = self._refresh_large_n_same_topology(
+                prepared_state,
+                positions_arr,
+                masses_arr,
+                bounds=bounds,
+                leaf_size=int(leaf_size),
+                max_order=int(max_order),
+                theta=theta,
+            )
+            if next_state_try is None:
+                self._strict_runner_fail_fast_reject_count += 1
+                raise RuntimeError(
+                    "strict_prepare_refresh_and_evaluate fail-fast: "
+                    "refresh miss (profile/topology mismatch)."
+                )
+            next_state = next_state_try
+
+        acc = self.evaluate_prepared_state(
+            next_state,
+            target_indices=None,
+            return_potential=False,
+            jit_traversal=(
+                self._jit_traversal_default
+                if jit_traversal is None
+                else bool(jit_traversal)
+            ),
+            max_acc_derivative_order=0,
+        )
+        return next_state, jnp.asarray(acc)
 
     def _refresh_large_n_same_topology(
         self: "FastMultipoleMethod",
@@ -4202,7 +4316,7 @@ class FastMultipoleMethod:
             traversal_config=traversal_config,
             m2l_chunk_size=m2l_chunk_size,
             l2l_chunk_size=l2l_chunk_size,
-            grouped_interactions=grouped_interactions_active,
+            grouped_interactions=grouped_interactions,
             farfield_mode=farfield_mode,
             center_mode=center_mode,
             refine_local_override=refine_local_override,
@@ -5238,8 +5352,22 @@ class FastMultipoleMethod:
                 particle_count=int(jnp.asarray(tree_artifacts.positions_sorted).shape[0]),
             )
             self._maybe_load_strict_cap_profile(context_key=strict_context_key)
+            if bool(self._strict_cap_require_exact_profile_match):
+                if str(self._strict_profiled_context_key) != str(strict_context_key):
+                    self._strict_runner_fail_fast_reject_count += 1
+                    raise RuntimeError(
+                        "strict static lane requires exact cap profile key match: "
+                        f"requested={strict_context_key} "
+                        f"resolved={self._strict_profiled_context_key or 'none'}"
+                    )
             profiled_q = int(self._strict_profiled_max_pair_queue)
             profiled_b = int(self._strict_profiled_pair_process_block)
+            if bool(self._strict_cap_require_exact_profile_match) and profiled_q <= 0:
+                self._strict_runner_fail_fast_reject_count += 1
+                raise RuntimeError(
+                    "strict static lane requires non-zero profiled max_pair_queue "
+                    f"for key {strict_context_key}"
+                )
             if profiled_q > 0:
                 if runtime_traversal_config is not None:
                     runtime_traversal_config = DualTreeTraversalConfig(

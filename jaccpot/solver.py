@@ -835,6 +835,30 @@ class FastMultipoleMethod:
             theta=theta,
         )
 
+    def strict_prepare_refresh_and_evaluate(
+        self: "FastMultipoleMethod",
+        prepared_state: Optional[FMMPreparedState],
+        positions: Array,
+        masses: Array,
+        *,
+        bounds: Optional[Tuple[Array, Array]] = None,
+        leaf_size: int = 16,
+        max_order: int = 4,
+        theta: Optional[float] = None,
+        jit_traversal: Optional[bool] = True,
+    ) -> tuple[FMMPreparedState, Array]:
+        """Strict static-radix helper: prepare/refresh and evaluate in one call."""
+        return self._impl.strict_prepare_refresh_and_evaluate(
+            prepared_state,
+            positions,
+            masses,
+            bounds=bounds,
+            leaf_size=int(leaf_size),
+            max_order=int(max_order),
+            theta=theta,
+            jit_traversal=jit_traversal,
+        )
+
     def update_multipoles_only(
         self: "FastMultipoleMethod",
         prepared_state: FMMPreparedState,
