@@ -557,6 +557,53 @@ def _build_dual_tree_artifacts_split(
     )
 
 
+def _build_dual_tree_artifacts_split_strict_streamed(
+    *,
+    tree: Tree,
+    geometry,
+    theta: float,
+    mac_type: MACType,
+    dehnen_radius_scale: float,
+    max_pair_queue: Optional[int],
+    pair_process_block: Optional[int],
+    traversal_config: Optional[DualTreeTraversalConfig],
+) -> _DualTreeArtifacts:
+    """Strict static fast-lane: single compact shared far+near build call.
+
+    This path intentionally avoids generic split-builder host branching and
+    callback plumbing. It is valid only for streamed compact far-pairs with no
+    dense/grouped/interactions payload requests.
+    """
+
+    compact_far_pairs, neighbor_list = build_compact_far_pairs_and_leaf_neighbor_lists(
+        tree,
+        geometry,
+        theta=theta,
+        mac_type=mac_type,
+        dehnen_radius_scale=dehnen_radius_scale,
+        max_pair_queue=max_pair_queue,
+        process_block=pair_process_block,
+        traversal_config=traversal_config,
+        retry_logger=None,
+        timing_callback=None,
+    )
+    return _DualTreeArtifacts(
+        interactions=None,
+        neighbor_list=neighbor_list,
+        traversal_result=None,
+        compact_far_pairs=compact_far_pairs,
+        dense_buffers=None,
+        grouped_buffers=None,
+        grouped_segment_starts=None,
+        grouped_segment_lengths=None,
+        grouped_segment_class_ids=None,
+        grouped_segment_sort_permutation=None,
+        grouped_segment_group_ids=None,
+        grouped_segment_unique_targets=None,
+        grouped_chunk_size=None,
+    )
+
+
 def _dual_tree_build_grouped_buffers(
     *,
     tree: Tree,
@@ -918,20 +965,41 @@ def _build_dual_tree_artifacts(
                 policy_state=policy_state,
             )
         if use_split_build:
-            split_artifacts = _build_dual_tree_artifacts_split(
-                tree=tree,
-                geometry=geometry,
-                theta=theta,
-                mac_type=mac_type,
-                dehnen_radius_scale=dehnen_radius_scale,
-                max_pair_queue=max_pair_queue,
-                pair_process_block=pair_process_block,
-                traversal_config=traversal_config,
-                retry_logger=retry_logger,
-                need_node_interactions=need_node_interactions,
-                need_compact_far_pairs=need_compact_far_pairs,
-                use_dense_interactions=use_dense_interactions,
-                timing_callback=timing_callback,
+            strict_streamed_split = bool(
+                fail_fast
+                and bool(need_compact_far_pairs)
+                and not bool(need_node_interactions)
+                and not bool(use_dense_interactions)
+                and not bool(grouped_interactions)
+                and not bool(need_traversal_result)
+            )
+            split_artifacts = (
+                _build_dual_tree_artifacts_split_strict_streamed(
+                    tree=tree,
+                    geometry=geometry,
+                    theta=theta,
+                    mac_type=mac_type,
+                    dehnen_radius_scale=dehnen_radius_scale,
+                    max_pair_queue=max_pair_queue,
+                    pair_process_block=pair_process_block,
+                    traversal_config=traversal_config,
+                )
+                if strict_streamed_split
+                else _build_dual_tree_artifacts_split(
+                    tree=tree,
+                    geometry=geometry,
+                    theta=theta,
+                    mac_type=mac_type,
+                    dehnen_radius_scale=dehnen_radius_scale,
+                    max_pair_queue=max_pair_queue,
+                    pair_process_block=pair_process_block,
+                    traversal_config=traversal_config,
+                    retry_logger=retry_logger,
+                    need_node_interactions=need_node_interactions,
+                    need_compact_far_pairs=need_compact_far_pairs,
+                    use_dense_interactions=use_dense_interactions,
+                    timing_callback=timing_callback,
+                )
             )
             interactions = split_artifacts.interactions
             neighbor_list = split_artifacts.neighbor_list

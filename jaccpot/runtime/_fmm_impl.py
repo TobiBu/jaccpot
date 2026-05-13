@@ -5428,19 +5428,35 @@ class FastMultipoleMethod:
             f"grouped_buffers={_format_nbytes(_estimate_payload_nbytes(grouped_buffers))}"
         )
 
-        far_pair_plan = self._prepare_state_plan_far_pairs_for_downward(
-            interactions=interactions,
-            traversal_result=traversal_result,
-            compact_far_pairs=compact_far_pairs,
-            upward=tree_artifacts.upward,
+        strict_streamed_direct_far_pairs = bool(
+            strict_mode_active
+            and bool(use_compact_streamed_pairs)
+            and compact_far_pairs is not None
+            and not bool(self.adaptive_order)
+            and not bool(self.mixed_order_farfield)
         )
-        far_pairs_by_gear = far_pair_plan.far_pairs_by_gear
-        far_pairs_coo = far_pair_plan.far_pairs_coo
-        adaptive_order_for_downward = far_pair_plan.adaptive_order_for_downward
-        p_gears_for_downward = far_pair_plan.p_gears_for_downward
-        self._recent_far_pairs_by_gear_counts = (
-            far_pair_plan.recent_far_pairs_by_gear_counts
-        )
+        if strict_streamed_direct_far_pairs:
+            src_far = jnp.asarray(compact_far_pairs.sources, dtype=INDEX_DTYPE)
+            tgt_far = jnp.asarray(compact_far_pairs.targets, dtype=INDEX_DTYPE)
+            far_pairs_coo = _FarPairCOO(sources=src_far, targets=tgt_far)
+            far_pairs_by_gear = ((src_far, tgt_far),)
+            adaptive_order_for_downward = True
+            p_gears_for_downward = (int(tree_artifacts.upward.multipoles.order),)
+            self._recent_far_pairs_by_gear_counts = (int(src_far.shape[0]),)
+        else:
+            far_pair_plan = self._prepare_state_plan_far_pairs_for_downward(
+                interactions=interactions,
+                traversal_result=traversal_result,
+                compact_far_pairs=compact_far_pairs,
+                upward=tree_artifacts.upward,
+            )
+            far_pairs_by_gear = far_pair_plan.far_pairs_by_gear
+            far_pairs_coo = far_pair_plan.far_pairs_coo
+            adaptive_order_for_downward = far_pair_plan.adaptive_order_for_downward
+            p_gears_for_downward = far_pair_plan.p_gears_for_downward
+            self._recent_far_pairs_by_gear_counts = (
+                far_pair_plan.recent_far_pairs_by_gear_counts
+            )
         _record_dual_stage("_refresh_timing_dual_far_pair_plan_seconds", stage_t0)
 
         stage_t0 = _stage_now()
@@ -5457,7 +5473,9 @@ class FastMultipoleMethod:
 
         stage_t0 = _stage_now()
         interactions_for_downward = (
-            self._prepare_state_select_interactions_for_downward(
+            None
+            if strict_streamed_direct_far_pairs and not bool(self.retain_interactions)
+            else self._prepare_state_select_interactions_for_downward(
                 interactions=interactions,
                 far_pairs_coo=far_pairs_coo,
             )
