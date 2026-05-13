@@ -4202,7 +4202,7 @@ class FastMultipoleMethod:
             traversal_config=traversal_config,
             m2l_chunk_size=m2l_chunk_size,
             l2l_chunk_size=l2l_chunk_size,
-            grouped_interactions=grouped_interactions,
+            grouped_interactions=grouped_interactions_active,
             farfield_mode=farfield_mode,
             center_mode=center_mode,
             refine_local_override=refine_local_override,
@@ -5132,15 +5132,21 @@ class FastMultipoleMethod:
             and bool(self.enable_interaction_cache)
             and str(tree_artifacts.tree_mode) != "static_radix"
         )
+        grouped_interactions_active = bool(grouped_interactions)
+        adaptive_order_active = bool(self.adaptive_order)
+        mixed_order_farfield_active = bool(self.mixed_order_farfield)
+        retain_interactions_active = bool(self.retain_interactions)
+        has_pair_policy = pair_policy is not None
+        has_policy_state = policy_state is not None
         need_traversal_result = bool(self.retain_traversal_result) or bool(
             use_paper_fixed_policy
         )
         use_compact_streamed_pairs = (
             bool(self.streamed_far_pairs)
-            and not bool(self.adaptive_order)
-            and not bool(grouped_interactions)
-            and not bool(self.mixed_order_farfield)
-            and not bool(self.retain_interactions)
+            and not adaptive_order_active
+            and not grouped_interactions_active
+            and not mixed_order_farfield_active
+            and not retain_interactions_active
             and not bool(need_traversal_result)
         )
         need_compact_far_pairs = (
@@ -5153,7 +5159,7 @@ class FastMultipoleMethod:
         _prepare_diag(
             "dual-tree start "
             f"theta={theta_val:.3f} mac_type={mac_type_val} "
-            f"streamed={bool(self.streamed_far_pairs)} grouped={bool(grouped_interactions)} "
+            f"streamed={bool(self.streamed_far_pairs)} grouped={grouped_interactions_active} "
             f"farfield_mode={farfield_mode} memory_objective={self.memory_objective} "
             f"traversal_config={runtime_traversal_config} "
             f"need_compact_far_pairs={bool(need_compact_far_pairs)} "
@@ -5167,7 +5173,7 @@ class FastMultipoleMethod:
             and self.tree_type == "radix"
             and self.expansion_basis == "solidfmm"
             and bool(self.streamed_far_pairs)
-            and not bool(grouped_interactions)
+            and not grouped_interactions_active
         ):
             total_nodes = int(tree_artifacts.tree.parent.shape[0])
             num_internal = int(jnp.asarray(tree_artifacts.tree.left_child).shape[0])
@@ -5207,7 +5213,7 @@ class FastMultipoleMethod:
             # minimum-memory streamed GPU path; keep env opt-out for debugging.
             allow_split_build = bool(
                 self._streamed_minimum_memory_gpu_default_split_build
-                and not bool(grouped_interactions)
+                and not grouped_interactions_active
             )
         else:
             allow_split_build = bool(self._prepare_stage_memory_split_env_override)
@@ -5276,10 +5282,10 @@ class FastMultipoleMethod:
             strict_mode_active
             and bool(allow_split_build)
             and bool(use_compact_streamed_pairs)
-            and not bool(grouped_interactions)
+            and not grouped_interactions_active
             and not bool(need_traversal_result)
-            and not bool(self.adaptive_order)
-            and not bool(self.mixed_order_farfield)
+            and not adaptive_order_active
+            and not mixed_order_farfield_active
         )
         if strict_streamed_fast_path:
             self._refresh_dual_planner_cache_hits += 1
@@ -5312,10 +5318,10 @@ class FastMultipoleMethod:
             strict_split_fastlane = bool(
                 strict_mode_active
                 and bool(allow_split_build)
-                and not bool(grouped_interactions)
+                and not grouped_interactions_active
                 and not bool(need_traversal_result)
-                and pair_policy is None
-                and policy_state is None
+                and not has_pair_policy
+                and not has_policy_state
             )
             if strict_split_fastlane:
                 # Strict/static production lane: keep routing fully on a
@@ -5346,7 +5352,7 @@ class FastMultipoleMethod:
                         str(int(tree_artifacts.leaf_parameter)),
                         f"{float(theta_val):.12g}",
                         str(mac_type_val),
-                        str(bool(grouped_interactions)),
+                        str(grouped_interactions_active),
                         str(bool(need_traversal_result)),
                         str(bool(need_compact_far_pairs)),
                         str(bool(need_node_interactions)),
@@ -5373,16 +5379,16 @@ class FastMultipoleMethod:
                             bool(allow_split_build), dtype=jnp.bool_
                         ),
                         grouped_interactions_flag=jnp.asarray(
-                            bool(grouped_interactions), dtype=jnp.bool_
+                            grouped_interactions_active, dtype=jnp.bool_
                         ),
                         need_traversal_result_flag=jnp.asarray(
                             bool(need_traversal_result), dtype=jnp.bool_
                         ),
                         has_pair_policy_flag=jnp.asarray(
-                            pair_policy is not None, dtype=jnp.bool_
+                            has_pair_policy, dtype=jnp.bool_
                         ),
                         has_policy_state_flag=jnp.asarray(
-                            policy_state is not None, dtype=jnp.bool_
+                            has_policy_state, dtype=jnp.bool_
                         ),
                         leaf_count=jnp.asarray(leaf_count_planner, dtype=jnp.int32),
                         need_node_interactions_flag=jnp.asarray(
