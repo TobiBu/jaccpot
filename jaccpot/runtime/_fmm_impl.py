@@ -2181,9 +2181,17 @@ class FastMultipoleMethod:
         self._refresh_dual_planner_mode: str = str(
             os.environ.get("JACCPOT_LARGE_N_REFRESH_DUAL_PLANNER_MODE", "auto")
         ).strip().lower()
+        self._refresh_dual_planner_mode_on: bool = (
+            self._refresh_dual_planner_mode == "on"
+        )
+        self._refresh_dual_planner_mode_auto: bool = (
+            self._refresh_dual_planner_mode == "auto"
+        )
         self._strict_gpu_mode: str = str(
             os.environ.get("JACCPOT_STATIC_STRICT_GPU_MODE", "auto")
         ).strip().lower()
+        self._strict_gpu_mode_on: bool = self._strict_gpu_mode == "on"
+        self._strict_gpu_mode_auto: bool = self._strict_gpu_mode == "auto"
         self._planner_steady_timing_bypass_enabled: bool = (
             str(
                 os.environ.get(
@@ -2216,15 +2224,27 @@ class FastMultipoleMethod:
         self._explicit_pair_process_block = pair_process_block is not None
         self._explicit_grouped_interactions = grouped_interactions is not None
         self.grouped_interactions = grouped_interactions
-        self._apply_large_n_gpu_production_contract()
-
-    def _is_large_n_gpu_production_profile(self) -> bool:
-        """Whether this solver should run the canonical large-N GPU contract."""
-        return (
+        self._large_n_gpu_production_profile_cached: bool = (
             str(self.preset).strip().lower() == "large_n_gpu"
             and str(self.tree_type).strip().lower() == "radix"
             and str(self.expansion_basis).strip().lower() == "solidfmm"
             and str(self.execution_backend).strip().lower() != "octree"
+        )
+        self._apply_large_n_gpu_production_contract()
+
+    def _is_large_n_gpu_production_profile(self) -> bool:
+        """Whether this solver should run the canonical large-N GPU contract."""
+        return bool(
+            getattr(
+                self,
+                "_large_n_gpu_production_profile_cached",
+                (
+                    str(self.preset).strip().lower() == "large_n_gpu"
+                    and str(self.tree_type).strip().lower() == "radix"
+                    and str(self.expansion_basis).strip().lower() == "solidfmm"
+                    and str(self.execution_backend).strip().lower() != "octree"
+                ),
+            )
         )
 
     def _apply_large_n_gpu_production_contract(self) -> None:
@@ -5184,15 +5204,16 @@ class FastMultipoleMethod:
                 "on",
             }
         _prepare_diag(f"allow_split_build={bool(allow_split_build)}")
-        refresh_planner_mode = str(self._refresh_dual_planner_mode).strip().lower()
-        strict_mode_env = str(self._strict_gpu_mode).strip().lower()
+        tree_mode_static_radix = (
+            str(tree_artifacts.tree_mode).strip().lower() == "static_radix"
+        )
         strict_mode_active = bool(
             (
-                strict_mode_env == "on"
+                self._strict_gpu_mode_on
                 or (
-                    strict_mode_env == "auto"
-                    and self._is_large_n_gpu_production_profile()
-                    and str(tree_artifacts.tree_mode).strip().lower() == "static_radix"
+                    self._strict_gpu_mode_auto
+                    and self._large_n_gpu_production_profile_cached
+                    and tree_mode_static_radix
                 )
             )
         )
@@ -5269,12 +5290,11 @@ class FastMultipoleMethod:
             )
         planner_enabled = bool(
             (
-                refresh_planner_mode == "on"
+                self._refresh_dual_planner_mode_on
                 or (
-                    refresh_planner_mode == "auto"
-                    and self._is_large_n_gpu_production_profile()
-                    and str(tree_artifacts.tree_mode).strip().lower()
-                    == "static_radix"
+                    self._refresh_dual_planner_mode_auto
+                    and self._large_n_gpu_production_profile_cached
+                    and tree_mode_static_radix
                 )
             )
         )
