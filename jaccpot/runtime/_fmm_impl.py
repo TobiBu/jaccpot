@@ -4928,19 +4928,23 @@ class FastMultipoleMethod:
         stay scoped to this helper.
         """
         refresh_timing_active = bool(getattr(self, "_refresh_timing_active", False))
-        dual_total_t0 = time.perf_counter()
+        dual_total_t0 = time.perf_counter() if refresh_timing_active else 0.0
         dual_stage_sum = 0.0
+
+        def _stage_now() -> float:
+            return time.perf_counter() if refresh_timing_active else 0.0
 
         def _record_dual_stage(attr: str, start: float) -> None:
             nonlocal dual_stage_sum
+            if not refresh_timing_active:
+                return
             elapsed = float(time.perf_counter() - start)
             dual_stage_sum += elapsed
-            if refresh_timing_active:
-                setattr(
-                    self,
-                    attr,
-                    float(getattr(self, attr, 0.0)) + elapsed,
-                )
+            setattr(
+                self,
+                attr,
+                float(getattr(self, attr, 0.0)) + elapsed,
+            )
 
         def _record_dual_artifact_substage(name: str, elapsed: float) -> None:
             if not refresh_timing_active:
@@ -5379,7 +5383,7 @@ class FastMultipoleMethod:
         if stateful_cache_enabled:
             self._interaction_cache = cache_entry
 
-        stage_t0 = time.perf_counter()
+        stage_t0 = _stage_now()
         (
             interactions,
             neighbor_list,
@@ -5439,7 +5443,7 @@ class FastMultipoleMethod:
         )
         _record_dual_stage("_refresh_timing_dual_far_pair_plan_seconds", stage_t0)
 
-        stage_t0 = time.perf_counter()
+        stage_t0 = _stage_now()
         runtime_m2l_chunk_size = self._prepare_state_autotune_downward_chunk_size(
             upward=tree_artifacts.upward,
             far_pairs_by_gear=far_pairs_by_gear,
@@ -5451,7 +5455,7 @@ class FastMultipoleMethod:
         )
         _record_dual_stage("_refresh_timing_dual_m2l_autotune_seconds", stage_t0)
 
-        stage_t0 = time.perf_counter()
+        stage_t0 = _stage_now()
         interactions_for_downward = (
             self._prepare_state_select_interactions_for_downward(
                 interactions=interactions,
@@ -5463,7 +5467,7 @@ class FastMultipoleMethod:
             stage_t0,
         )
 
-        stage_t0 = time.perf_counter()
+        stage_t0 = _stage_now()
         downward = self._prepare_downward_with_artifacts(
             tree=tree_artifacts.tree,
             upward=tree_artifacts.upward,
@@ -5491,7 +5495,7 @@ class FastMultipoleMethod:
         )
         _record_dual_stage("_refresh_timing_dual_downward_compute_seconds", stage_t0)
 
-        stage_t0 = time.perf_counter()
+        stage_t0 = _stage_now()
         _prepare_diag(
             "downward done "
             f"locals_shape={tuple(int(v) for v in downward.locals.coefficients.shape)} "

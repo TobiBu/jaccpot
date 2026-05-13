@@ -461,9 +461,10 @@ def _build_dual_tree_artifacts_split(
     timing_callback: Optional[Callable[[str, float], None]] = None,
 ) -> _DualTreeArtifacts:
     """Build far and near traversal products in separate Yggdrax calls."""
+    timing_enabled = timing_callback is not None
 
-    def _record(name: str, start: float) -> None:
-        if timing_callback is not None:
+    def _record(name: str, start: Optional[float]) -> None:
+        if timing_enabled and start is not None:
             timing_callback(name, float(time.perf_counter() - start))
 
     need_far_payload = bool(
@@ -472,7 +473,7 @@ def _build_dual_tree_artifacts_split(
     interactions: Optional[NodeInteractionList]
     compact_far_pairs: Optional[CompactTaggedFarPairs]
     if need_far_payload and not bool(need_node_interactions or use_dense_interactions):
-        stage_t0 = time.perf_counter()
+        stage_t0 = time.perf_counter() if timing_enabled else None
         interactions = None
         compact_far_pairs, neighbor_list = (
             build_compact_far_pairs_and_leaf_neighbor_lists(
@@ -490,7 +491,7 @@ def _build_dual_tree_artifacts_split(
         )
         _record("dual_split_shared_far_pairs_leaf_neighbors", stage_t0)
     elif need_far_payload:
-        stage_t0 = time.perf_counter()
+        stage_t0 = time.perf_counter() if timing_enabled else None
         interactions, neighbor_list = build_interactions_and_neighbors_split(
             tree,
             geometry,
@@ -513,7 +514,7 @@ def _build_dual_tree_artifacts_split(
     else:
         interactions = None
         compact_far_pairs = None
-        stage_t0 = time.perf_counter()
+        stage_t0 = time.perf_counter() if timing_enabled else None
         neighbor_list = build_leaf_neighbor_lists(
             tree,
             geometry,
@@ -531,7 +532,7 @@ def _build_dual_tree_artifacts_split(
             retry_logger=retry_logger,
         )
         _record("dual_split_leaf_neighbors", stage_t0)
-    stage_t0 = time.perf_counter()
+    stage_t0 = time.perf_counter() if timing_enabled else None
     dense_buffers = _dual_tree_build_dense_buffers(
         tree=tree,
         geometry=geometry,
@@ -973,7 +974,7 @@ def _build_dual_tree_artifacts(
                 else None
             )
         else:
-            stage_t0 = time.perf_counter()
+            stage_t0 = time.perf_counter() if timing_callback is not None else None
             build_out, _, _, _ = _dual_tree_build_raw(
                 tree=tree,
                 geometry=geometry,
@@ -993,7 +994,7 @@ def _build_dual_tree_artifacts(
                 policy_state=policy_state,
                 jit_traversal=jit_traversal,
             )
-            if timing_callback is not None:
+            if timing_callback is not None and stage_t0 is not None:
                 timing_callback(
                     "dual_raw_interactions_and_neighbors",
                     float(time.perf_counter() - stage_t0),
