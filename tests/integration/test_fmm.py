@@ -634,7 +634,7 @@ def test_strict_exact_cap_profile_match_fail_fast(monkeypatch, tmp_path):
     assert diagnostics["strict_runner_fail_fast_reject_count"] >= 1
 
 
-def test_strict_run_segmented_api(monkeypatch):
+def test_strict_run_v2_api(monkeypatch):
     monkeypatch.setattr(jax, "default_backend", lambda: "gpu")
     monkeypatch.setenv("JACCPOT_STATIC_STRICT_GPU_MODE", "on")
     monkeypatch.setenv("JACCPOT_STATIC_STRICT_REQUIRE_EXACT_CAP_PROFILE_MATCH", "0")
@@ -677,25 +677,16 @@ def test_strict_run_segmented_api(monkeypatch):
         fixed_order=2,
     )
 
-    @jax.jit
-    def _segment_runner(state_in, acc_self, steps):
-        del steps
-        # No-op dynamic update; keeps shape stable and validates API flow.
-        vel_new = state_in[:, 1, :] + 0.0 * acc_self
-        state_out = state_in.at[:, 1, :].set(vel_new)
-        return state_out, state_out
-
-    state_out, prepared_out, history = fmm.strict_run_segmented(
+    state_out, prepared_out, history = fmm.strict_run_v2(
         state=state0,
         masses=masses,
+        dt=1e-3,
         num_steps=3,
         refresh_every=2,
-        segment_runner=_segment_runner,
-        positions_getter=lambda state_in: state_in[:, 0, :],
         leaf_size=128,
         max_order=2,
         theta=0.6,
-        collect_history=False,
+        return_history=False,
     )
     assert prepared_out.tree.build_mode == "static_radix"
     assert history is None

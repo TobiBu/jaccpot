@@ -893,6 +893,42 @@ class FastMultipoleMethod:
             collect_history=bool(collect_history),
         )
 
+    def strict_run_v2(
+        self: "FastMultipoleMethod",
+        *,
+        state: Array,
+        masses: Array,
+        dt: float,
+        num_steps: int,
+        refresh_every: int,
+        leaf_size: int,
+        max_order: int,
+        theta: Optional[float] = None,
+        prepared_state: Optional[FMMPreparedState] = None,
+        jit_traversal: Optional[bool] = True,
+        add_external: bool = False,
+        external_acceleration_fn: Optional[Callable[[Array], Array]] = None,
+        rematerialize_between_refresh: bool = True,
+        return_history: bool = False,
+    ) -> tuple[Array, FMMPreparedState, Optional[Array]]:
+        """Strict V2 segmented runner with raw tensor API."""
+        return self._impl.strict_run_v2(
+            state=state,
+            masses=masses,
+            dt=float(dt),
+            num_steps=int(num_steps),
+            refresh_every=int(refresh_every),
+            leaf_size=int(leaf_size),
+            max_order=int(max_order),
+            theta=theta,
+            prepared_state=prepared_state,
+            jit_traversal=jit_traversal,
+            add_external=bool(add_external),
+            external_acceleration_fn=external_acceleration_fn,
+            rematerialize_between_refresh=bool(rematerialize_between_refresh),
+            return_history=bool(return_history),
+        )
+
     def update_multipoles_only(
         self: "FastMultipoleMethod",
         prepared_state: FMMPreparedState,

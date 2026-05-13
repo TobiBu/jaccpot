@@ -2241,6 +2241,12 @@ class FastMultipoleMethod:
         self._strict_runner_profile_key_misses: int = 0
         self._strict_runner_fail_fast_reject_count: int = 0
         self._strict_runner_seen_profile_keys: set[str] = set()
+        self._strict_v2_compile_count: int = 0
+        self._strict_v2_execute_count: int = 0
+        self._strict_v2_profile_key_hits: int = 0
+        self._strict_v2_profile_key_misses: int = 0
+        self._strict_v2_fail_fast_reject_count: int = 0
+        self._strict_v2_seen_profile_keys: set[str] = set()
         self._strict_profiled_max_pair_queue: int = 0
         self._strict_profiled_pair_process_block: int = 0
         self._strict_profiled_context_key: str = ""
@@ -2500,6 +2506,12 @@ class FastMultipoleMethod:
         self._strict_runner_profile_key_misses = 0
         self._strict_runner_fail_fast_reject_count = 0
         self._strict_runner_seen_profile_keys = set()
+        self._strict_v2_compile_count = 0
+        self._strict_v2_execute_count = 0
+        self._strict_v2_profile_key_hits = 0
+        self._strict_v2_profile_key_misses = 0
+        self._strict_v2_fail_fast_reject_count = 0
+        self._strict_v2_seen_profile_keys = set()
         self._strict_profiled_max_pair_queue = 0
         self._strict_profiled_pair_process_block = 0
         self._strict_profiled_context_key = ""
@@ -2852,6 +2864,13 @@ class FastMultipoleMethod:
             ),
             "strict_runner_fail_fast_reject_count": int(
                 self._strict_runner_fail_fast_reject_count
+            ),
+            "strict_v2_compile_count": int(self._strict_v2_compile_count),
+            "strict_v2_execute_count": int(self._strict_v2_execute_count),
+            "strict_v2_profile_key_hits": int(self._strict_v2_profile_key_hits),
+            "strict_v2_profile_key_misses": int(self._strict_v2_profile_key_misses),
+            "strict_v2_fail_fast_reject_count": int(
+                self._strict_v2_fail_fast_reject_count
             ),
             "strict_profiled_max_pair_queue": int(
                 self._strict_profiled_max_pair_queue
@@ -3315,6 +3334,139 @@ class FastMultipoleMethod:
                 history.append(seg_hist)
 
         return state_curr, prepared_curr, history
+
+    def strict_run_v2(
+        self: "FastMultipoleMethod",
+        *,
+        state: Array,
+        masses: Array,
+        dt: float,
+        num_steps: int,
+        refresh_every: int,
+        leaf_size: int,
+        max_order: int,
+        theta: Optional[float] = None,
+        prepared_state: Optional[PreparedStateLike] = None,
+        jit_traversal: Optional[bool] = True,
+        add_external: bool = False,
+        external_acceleration_fn: Optional[Callable[[Array], Array]] = None,
+        rematerialize_between_refresh: bool = True,
+        return_history: bool = False,
+    ) -> tuple[Array, PreparedStateLike, Optional[Array]]:
+        """Strict V2 runner with raw-tensor API and internal segmented cadence."""
+        state_arr = jnp.asarray(state)
+        masses_arr = jnp.asarray(masses)
+        dt_arr = jnp.full((3,), float(dt), dtype=state_arr.dtype)
+
+        if not self._is_large_n_gpu_production_profile():
+            self._strict_v2_fail_fast_reject_count += 1
+            raise RuntimeError("strict_run_v2 requires large_n_gpu production profile.")
+        if int(num_steps) <= 0:
+            raise ValueError("num_steps must be positive")
+        if int(refresh_every) <= 0:
+            raise ValueError("refresh_every must be positive")
+
+        profile_key = (
+            f"n={int(state_arr.shape[0])}|leaf={int(leaf_size)}|"
+            f"order={int(max_order)}|refresh={int(refresh_every)}|"
+            f"dt={float(dt):.12g}|external={int(bool(add_external))}|"
+            f"theta={float(self.theta if theta is None else theta):.12g}"
+        )
+        if profile_key in self._strict_v2_seen_profile_keys:
+            self._strict_v2_profile_key_hits += 1
+        else:
+            self._strict_v2_profile_key_misses += 1
+            self._strict_v2_compile_count += 1
+            self._strict_v2_seen_profile_keys.add(profile_key)
+        self._strict_v2_execute_count += 1
+
+        @partial(jax.jit, static_argnames=("steps", "add_external_local", "external_acc_fn"))
+        def _segment_scan(
+            state_in: Array,
+            acc_self_full: Array,
+            *,
+            steps: int,
+            add_external_local: bool,
+            external_acc_fn: Optional[Callable[[Array], Array]],
+        ) -> tuple[Array, Array]:
+            def _step_one(carry: Array) -> Array:
+                if add_external_local and external_acc_fn is not None:
+                    ext1 = external_acc_fn(carry)
+                    acc1 = acc_self_full + ext1
+                else:
+                    acc1 = acc_self_full
+                pos_new = carry[:, 0] + carry[:, 1] * dt_arr + 0.5 * acc1 * (dt_arr**2)
+                state_pos = carry.at[:, 0].set(pos_new)
+                if add_external_local and external_acc_fn is not None:
+                    ext2 = external_acc_fn(state_pos)
+                    acc2 = acc_self_full + ext2
+                else:
+                    acc2 = acc_self_full
+                vel_new = carry[:, 1] + 0.5 * (acc1 + acc2) * dt_arr
+                return state_pos.at[:, 1].set(vel_new)
+
+            def _body(carry, _):
+                nxt = _step_one(carry)
+                return nxt, nxt
+
+            return jax.lax.scan(_body, state_in, xs=None, length=int(steps))
+
+        num_steps_i = int(num_steps)
+        refresh_every_i = int(refresh_every)
+        full_segments = num_steps_i // refresh_every_i
+        tail_segment = num_steps_i % refresh_every_i
+        state_curr = state_arr
+        prepared_curr = prepared_state
+        hist_parts: list[Array] = [] if return_history else []
+
+        for _ in range(full_segments):
+            prepared_curr, acc_self = self.strict_prepare_refresh_and_evaluate(
+                prepared_curr,
+                state_curr[:, 0, :],
+                masses_arr,
+                leaf_size=int(leaf_size),
+                max_order=int(max_order),
+                theta=theta,
+                jit_traversal=jit_traversal,
+            )
+            state_curr, seg_hist = _segment_scan(
+                state_curr,
+                jnp.asarray(acc_self, dtype=state_curr.dtype),
+                steps=refresh_every_i,
+                add_external_local=bool(add_external),
+                external_acc_fn=external_acceleration_fn,
+            )
+            if rematerialize_between_refresh:
+                state_curr = jnp.asarray(state_curr, dtype=state_curr.dtype)
+            if return_history:
+                hist_parts.append(seg_hist)
+
+        if tail_segment > 0:
+            prepared_curr, acc_self = self.strict_prepare_refresh_and_evaluate(
+                prepared_curr,
+                state_curr[:, 0, :],
+                masses_arr,
+                leaf_size=int(leaf_size),
+                max_order=int(max_order),
+                theta=theta,
+                jit_traversal=jit_traversal,
+            )
+            state_curr, seg_hist = _segment_scan(
+                state_curr,
+                jnp.asarray(acc_self, dtype=state_curr.dtype),
+                steps=tail_segment,
+                add_external_local=bool(add_external),
+                external_acc_fn=external_acceleration_fn,
+            )
+            if rematerialize_between_refresh:
+                state_curr = jnp.asarray(state_curr, dtype=state_curr.dtype)
+            if return_history:
+                hist_parts.append(seg_hist)
+
+        history_out = (
+            jnp.concatenate(hist_parts, axis=0) if return_history and hist_parts else None
+        )
+        return state_curr, prepared_curr, history_out
 
     def _refresh_large_n_same_topology(
         self: "FastMultipoleMethod",
