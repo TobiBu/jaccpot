@@ -2192,6 +2192,12 @@ class FastMultipoleMethod:
         ).strip().lower()
         self._strict_gpu_mode_on: bool = self._strict_gpu_mode == "on"
         self._strict_gpu_mode_auto: bool = self._strict_gpu_mode == "auto"
+        self._strict_cap_record_enabled: bool = (
+            str(os.environ.get("JACCPOT_STATIC_STRICT_CAP_RECORD", "1"))
+            .strip()
+            .lower()
+            in {"1", "true", "yes", "on"}
+        )
         self._planner_steady_timing_bypass_enabled: bool = (
             str(
                 os.environ.get(
@@ -2594,9 +2600,7 @@ class FastMultipoleMethod:
                     int(max_block),
                 ),
             }
-        if str(
-            os.environ.get("JACCPOT_STATIC_STRICT_CAP_RECORD", "1")
-        ).strip().lower() not in {"1", "true", "yes", "on"}:
+        if not bool(getattr(self, "_strict_cap_record_enabled", True)):
             return
         try:
             path = self._strict_cap_profile_path()
@@ -5445,10 +5449,7 @@ class FastMultipoleMethod:
                 if strict_mode_active
                 else (
                     record_retry
-                    if str(
-                        os.environ.get("JACCPOT_STATIC_STRICT_CAP_RECORD", "1")
-                    ).strip().lower()
-                    in {"1", "true", "yes", "on"}
+                    if bool(getattr(self, "_strict_cap_record_enabled", True))
                     else (None if jit_traversal_for_prepare else record_retry)
                 )
             ),
