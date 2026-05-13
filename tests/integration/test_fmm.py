@@ -634,6 +634,77 @@ def test_strict_exact_cap_profile_match_fail_fast(monkeypatch, tmp_path):
     assert diagnostics["strict_runner_fail_fast_reject_count"] >= 1
 
 
+def test_strict_run_segmented_api(monkeypatch):
+    monkeypatch.setattr(jax, "default_backend", lambda: "gpu")
+    monkeypatch.setenv("JACCPOT_STATIC_STRICT_GPU_MODE", "on")
+    monkeypatch.setenv("JACCPOT_STATIC_STRICT_REQUIRE_EXACT_CAP_PROFILE_MATCH", "0")
+
+    key = jax.random.PRNGKey(20260513)
+    key_pos, key_mass = jax.random.split(key)
+    positions = jax.random.uniform(
+        key_pos,
+        (512, 3),
+        minval=-1.0,
+        maxval=1.0,
+        dtype=jnp.float32,
+    )
+    masses = jax.random.uniform(
+        key_mass,
+        (512,),
+        minval=0.1,
+        maxval=1.1,
+        dtype=jnp.float32,
+    )
+    state0 = jnp.stack(
+        [
+            positions,
+            jnp.zeros_like(positions),
+        ],
+        axis=1,
+    )
+
+    fmm = FastMultipoleMethod(
+        preset="large_n_gpu",
+        runtime_path="large_n",
+        expansion_basis="solidfmm",
+        complex_rotation="solidfmm",
+        theta=0.6,
+        nearfield_mode="bucketed",
+        nearfield_edge_chunk_size=64,
+        grouped_interactions=False,
+        working_dtype=jnp.float32,
+        tree_build_mode="static_radix",
+        fixed_order=2,
+    )
+
+    @jax.jit
+    def _segment_runner(state_in, acc_self, steps):
+        del steps
+        # No-op dynamic update; keeps shape stable and validates API flow.
+        vel_new = state_in[:, 1, :] + 0.0 * acc_self
+        state_out = state_in.at[:, 1, :].set(vel_new)
+        return state_out, state_out
+
+    state_out, prepared_out, history = fmm.strict_run_segmented(
+        state=state0,
+        masses=masses,
+        num_steps=3,
+        refresh_every=2,
+        segment_runner=_segment_runner,
+        positions_getter=lambda state_in: state_in[:, 0, :],
+        leaf_size=128,
+        max_order=2,
+        theta=0.6,
+        collect_history=False,
+    )
+    assert prepared_out.tree.build_mode == "static_radix"
+    assert history is None
+    assert np.asarray(state_out).shape == np.asarray(state0).shape
+
+    diagnostics = fmm.get_runtime_diagnostics()
+    assert diagnostics["strict_runner_execute_count"] >= 2
+
+
 def test_capacity_fixed_depth_tree_mode_is_removed():
     with pytest.raises(ValueError, match="tree_build_mode"):
         FastMultipoleMethod(tree_build_mode="capacity_fixed_depth")

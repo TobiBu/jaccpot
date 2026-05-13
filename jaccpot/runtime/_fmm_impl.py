@@ -3240,6 +3240,82 @@ class FastMultipoleMethod:
         )
         return next_state, jnp.asarray(acc)
 
+    def strict_run_segmented(
+        self: "FastMultipoleMethod",
+        *,
+        state: Any,
+        masses: Array,
+        num_steps: int,
+        refresh_every: int,
+        segment_runner: Callable[[Any, Array, int], tuple[Any, Any]],
+        positions_getter: Callable[[Any], Array],
+        prepared_state: Optional[PreparedStateLike] = None,
+        leaf_size: int = 16,
+        max_order: int = 2,
+        theta: Optional[float] = None,
+        jit_traversal: Optional[bool] = True,
+        rematerialize_fn: Optional[Callable[[Any], Any]] = None,
+        collect_history: bool = False,
+    ) -> tuple[Any, PreparedStateLike, Optional[list[Any]]]:
+        """Run strict refresh/evaluate cadence with caller-provided segment runner."""
+        if int(num_steps) <= 0:
+            raise ValueError("num_steps must be positive")
+        if int(refresh_every) <= 0:
+            raise ValueError("refresh_every must be positive")
+
+        num_steps_i = int(num_steps)
+        refresh_every_i = int(refresh_every)
+        full_segments = num_steps_i // refresh_every_i
+        tail_segment = num_steps_i % refresh_every_i
+
+        state_curr = state
+        prepared_curr = prepared_state
+        history: Optional[list[Any]] = [] if collect_history else None
+
+        for _ in range(full_segments):
+            positions_curr = positions_getter(state_curr)
+            prepared_curr, acc_self = self.strict_prepare_refresh_and_evaluate(
+                prepared_curr,
+                positions_curr,
+                masses,
+                leaf_size=int(leaf_size),
+                max_order=int(max_order),
+                theta=theta,
+                jit_traversal=jit_traversal,
+            )
+            state_curr, seg_hist = segment_runner(
+                state_curr,
+                jnp.asarray(acc_self),
+                int(refresh_every_i),
+            )
+            if rematerialize_fn is not None:
+                state_curr = rematerialize_fn(state_curr)
+            if history is not None:
+                history.append(seg_hist)
+
+        if tail_segment > 0:
+            positions_curr = positions_getter(state_curr)
+            prepared_curr, acc_self = self.strict_prepare_refresh_and_evaluate(
+                prepared_curr,
+                positions_curr,
+                masses,
+                leaf_size=int(leaf_size),
+                max_order=int(max_order),
+                theta=theta,
+                jit_traversal=jit_traversal,
+            )
+            state_curr, seg_hist = segment_runner(
+                state_curr,
+                jnp.asarray(acc_self),
+                int(tail_segment),
+            )
+            if rematerialize_fn is not None:
+                state_curr = rematerialize_fn(state_curr)
+            if history is not None:
+                history.append(seg_hist)
+
+        return state_curr, prepared_curr, history
+
     def _refresh_large_n_same_topology(
         self: "FastMultipoleMethod",
         prepared_state: LargeNPreparedState,

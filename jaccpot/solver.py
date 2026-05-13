@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import warnings
 from dataclasses import replace
-from typing import Any, Literal, NamedTuple, Optional, Sequence, Tuple, Union
+from typing import Any, Callable, Literal, NamedTuple, Optional, Sequence, Tuple, Union
 
 import jax
 import jax.numpy as jnp
@@ -857,6 +857,40 @@ class FastMultipoleMethod:
             max_order=int(max_order),
             theta=theta,
             jit_traversal=jit_traversal,
+        )
+
+    def strict_run_segmented(
+        self: "FastMultipoleMethod",
+        *,
+        state: Any,
+        masses: Array,
+        num_steps: int,
+        refresh_every: int,
+        segment_runner: Callable[[Any, Array, int], tuple[Any, Any]],
+        positions_getter: Callable[[Any], Array],
+        prepared_state: Optional[FMMPreparedState] = None,
+        leaf_size: int = 16,
+        max_order: int = 4,
+        theta: Optional[float] = None,
+        jit_traversal: Optional[bool] = True,
+        rematerialize_fn: Optional[Callable[[Any], Any]] = None,
+        collect_history: bool = False,
+    ) -> tuple[Any, FMMPreparedState, Optional[list[Any]]]:
+        """Run strict segmented refresh cadence with caller-provided segment kernel."""
+        return self._impl.strict_run_segmented(
+            state=state,
+            masses=masses,
+            num_steps=int(num_steps),
+            refresh_every=int(refresh_every),
+            segment_runner=segment_runner,
+            positions_getter=positions_getter,
+            prepared_state=prepared_state,
+            leaf_size=int(leaf_size),
+            max_order=int(max_order),
+            theta=theta,
+            jit_traversal=jit_traversal,
+            rematerialize_fn=rematerialize_fn,
+            collect_history=bool(collect_history),
         )
 
     def update_multipoles_only(
