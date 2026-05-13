@@ -2174,6 +2174,10 @@ class FastMultipoleMethod:
         self._refresh_timing_nearfield_residual_seconds: float = 0.0
         self._refresh_timing_calls: int = 0
         self._refresh_timing_active: bool = False
+        self._refresh_timing_enabled: bool = (
+            str(os.environ.get("JACCPOT_REFRESH_TIMING_ENABLE", "0")).strip().lower()
+            in {"1", "true", "yes", "on"}
+        )
         self._refresh_dual_planner_cache: dict[str, _RefreshDualPlannerHint] = {}
         self._refresh_dual_planner_cache_hits: int = 0
         self._refresh_dual_planner_cache_misses: int = 0
@@ -2933,6 +2937,42 @@ class FastMultipoleMethod:
             )
 
         self._compiled_profile_refresh_calls += 1
+        refresh_timing_enabled = bool(
+            getattr(self, "_refresh_timing_enabled", False)
+        )
+        if not refresh_timing_enabled:
+            next_state = self._refresh_large_n_same_topology(
+                prepared_state,
+                positions,
+                masses,
+                bounds=bounds,
+                leaf_size=int(
+                    prepared_state.max_leaf_size if leaf_size is None else leaf_size
+                ),
+                max_order=(
+                    int(prepared_state.local_data.order)
+                    if max_order is None
+                    else int(max_order)
+                ),
+                theta=theta,
+            )
+            if next_state is None:
+                next_state = self.prepare_state(
+                    positions,
+                    masses,
+                    bounds=bounds,
+                    leaf_size=int(
+                        prepared_state.max_leaf_size if leaf_size is None else leaf_size
+                    ),
+                    max_order=(
+                        int(prepared_state.local_data.order)
+                        if max_order is None
+                        else int(max_order)
+                    ),
+                    theta=theta,
+                )
+            return next_state
+
         refresh_t0 = time.perf_counter()
         input_before = float(getattr(self, "_refresh_timing_input_seconds", 0.0))
         tree_before = float(getattr(self, "_refresh_timing_tree_upward_seconds", 0.0))
@@ -4966,7 +5006,7 @@ class FastMultipoleMethod:
                 return
             setattr(self, attr, float(getattr(self, attr, 0.0)) + float(elapsed))
 
-        stage_t0 = time.perf_counter()
+        stage_t0 = _stage_now()
         pair_policy = None
         policy_state = None
         cache_key = None
