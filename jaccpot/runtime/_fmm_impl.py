@@ -5187,6 +5187,30 @@ class FastMultipoleMethod:
             # Strict mode contract: one-shot shared count->fill and single queue.
             os.environ["YGGDRAX_DUAL_TREE_SHARED_COUNT_FILL_ONE_SHOT"] = "1"
             os.environ["YGGDRAX_DUAL_TREE_SHARED_COUNT_FILL_STEADY_SINGLE_QUEUE"] = "1"
+        strict_streamed_fast_path = bool(
+            strict_mode_active
+            and bool(allow_split_build)
+            and bool(use_compact_streamed_pairs)
+            and not bool(grouped_interactions)
+            and not bool(need_traversal_result)
+            and not bool(self.adaptive_order)
+            and not bool(self.mixed_order_farfield)
+        )
+        if strict_streamed_fast_path:
+            self._refresh_dual_planner_cache_hits += 1
+            self._refresh_dual_planner_execute_count += 1
+            self._refresh_dual_planner_steady_timing_bypass_count += 1
+            return self._prepare_state_dual_and_downward_strict_streamed_fast(
+                tree_artifacts=tree_artifacts,
+                theta_val=theta_val,
+                mac_type_val=mac_type_val,
+                dehnen_radius_scale=dehnen_radius_scale,
+                runtime_traversal_config=runtime_traversal_config,
+                runtime_m2l_chunk_size=runtime_m2l_chunk_size,
+                runtime_l2l_chunk_size=runtime_l2l_chunk_size,
+                record_retry=record_retry,
+                farfield_mode=farfield_mode,
+            )
         planner_enabled = bool(
             (
                 refresh_planner_mode == "on"
@@ -6189,6 +6213,154 @@ class FastMultipoleMethod:
             far_pairs_by_gear=far_pairs_by_gear,
             adaptive_order=adaptive_order,
             p_gears=p_gears,
+        )
+
+    def _prepare_state_dual_and_downward_strict_streamed_fast(
+        self,
+        *,
+        tree_artifacts: _PrepareStateTreeUpwardArtifacts,
+        theta_val: float,
+        mac_type_val: MACType,
+        dehnen_radius_scale: float,
+        runtime_traversal_config: Optional[DualTreeTraversalConfig],
+        runtime_m2l_chunk_size: Optional[int],
+        runtime_l2l_chunk_size: Optional[int],
+        record_retry: Callable[[DualTreeRetryEvent], None],
+        farfield_mode: str,
+    ) -> _PrepareStateDualDownwardArtifacts:
+        """Strict static fast path with compact streamed far-pairs only."""
+
+        geometry_factory = (
+            None
+            if tree_artifacts.upward.geometry is not None
+            else lambda: compute_tree_geometry(
+                tree_artifacts.tree,
+                tree_artifacts.positions_sorted,
+                max_leaf_size=int(tree_artifacts.leaf_cap),
+            )
+        )
+        dual_artifacts, cache_entry = _build_dual_tree_artifacts(
+            tree_artifacts.tree,
+            tree_artifacts.upward.geometry,
+            geometry_factory=geometry_factory,
+            theta=theta_val,
+            mac_type=mac_type_val,
+            dehnen_radius_scale=dehnen_radius_scale,
+            cache_key=None,
+            cache_entry=None,
+            max_pair_queue=self.max_pair_queue,
+            pair_process_block=self.pair_process_block,
+            traversal_config=runtime_traversal_config,
+            retry_logger=None,
+            fail_fast=True,
+            use_dense_interactions=False,
+            grouped_interactions=False,
+            grouped_chunk_size=runtime_m2l_chunk_size,
+            need_traversal_result=False,
+            need_compact_far_pairs=True,
+            need_node_interactions=False,
+            precompute_grouped_class_segments=False,
+            grouped_schedule_budget_bytes=self._grouped_schedule_item_budget(),
+            allow_split_build=True,
+            pair_policy=None,
+            policy_state=None,
+            jit_traversal=True,
+            timing_callback=None,
+            planner_hint=_RefreshDualPlannerHint(
+                use_split_build=True,
+                suppress_substage_timing=True,
+            ),
+        )
+        (
+            interactions,
+            neighbor_list,
+            traversal_result,
+            compact_far_pairs,
+            dense_buffers,
+            grouped_buffers,
+            grouped_segment_starts,
+            grouped_segment_lengths,
+            grouped_segment_class_ids,
+            grouped_segment_sort_permutation,
+            grouped_segment_group_ids,
+            grouped_segment_unique_targets,
+        ) = self._unpack_dual_tree_artifacts(dual_artifacts)
+        del (
+            interactions,
+            traversal_result,
+            dense_buffers,
+            grouped_buffers,
+            grouped_segment_starts,
+            grouped_segment_lengths,
+            grouped_segment_class_ids,
+            grouped_segment_sort_permutation,
+            grouped_segment_group_ids,
+            grouped_segment_unique_targets,
+        )
+        if compact_far_pairs is None:
+            raise RuntimeError(
+                "strict streamed fast path requires compact far-pair artifacts"
+            )
+        total_nodes_diag = int(tree_artifacts.tree.parent.shape[0])
+        internal_nodes_diag = int(jnp.asarray(tree_artifacts.tree.left_child).shape[0])
+        leaf_count_diag = max(0, total_nodes_diag - internal_nodes_diag)
+        self._recent_dual_node_count = int(total_nodes_diag)
+        self._recent_dual_leaf_count = int(leaf_count_diag)
+        self._recent_dual_neighbor_count = int(neighbor_list.neighbors.shape[0])
+        self._recent_dual_far_pair_count = int(compact_far_pairs.sources.shape[0])
+
+        src_far = jnp.asarray(compact_far_pairs.sources, dtype=INDEX_DTYPE)
+        tgt_far = jnp.asarray(compact_far_pairs.targets, dtype=INDEX_DTYPE)
+        far_pairs_coo = _FarPairCOO(sources=src_far, targets=tgt_far)
+        far_pairs_by_gear: tuple[tuple[Array, Array], ...] = ((src_far, tgt_far),)
+        p_gears_for_downward = (int(tree_artifacts.upward.multipoles.order),)
+        self._recent_far_pairs_by_gear_counts = (int(src_far.shape[0]),)
+
+        runtime_m2l_chunk_size = self._prepare_state_autotune_downward_chunk_size(
+            upward=tree_artifacts.upward,
+            far_pairs_by_gear=far_pairs_by_gear,
+            p_gears_for_downward=p_gears_for_downward,
+            runtime_m2l_chunk_size=runtime_m2l_chunk_size,
+        )
+        self._recent_dual_m2l_chunk_size = (
+            0 if runtime_m2l_chunk_size is None else int(runtime_m2l_chunk_size)
+        )
+        downward = self._prepare_downward_with_artifacts(
+            tree=tree_artifacts.tree,
+            upward=tree_artifacts.upward,
+            theta_val=theta_val,
+            locals_template=tree_artifacts.locals_template,
+            interactions=None,
+            runtime_m2l_chunk_size=runtime_m2l_chunk_size,
+            runtime_l2l_chunk_size=runtime_l2l_chunk_size,
+            runtime_traversal_config=runtime_traversal_config,
+            record_retry=record_retry,
+            dense_buffers=None,
+            grouped_interactions=False,
+            grouped_buffers=None,
+            grouped_segment_starts=None,
+            grouped_segment_lengths=None,
+            grouped_segment_class_ids=None,
+            grouped_segment_sort_permutation=None,
+            grouped_segment_group_ids=None,
+            grouped_segment_unique_targets=None,
+            farfield_mode=farfield_mode,
+            far_pairs_coo=far_pairs_coo,
+            far_pairs_by_gear=far_pairs_by_gear,
+            adaptive_order=True,
+            p_gears=p_gears_for_downward,
+        )
+        if not bool(self.retain_interactions):
+            downward = downward._replace(
+                interactions=_empty_interaction_storage_for_tree(tree_artifacts.tree)
+            )
+        return _PrepareStateDualDownwardArtifacts(
+            interactions=None,
+            neighbor_list=neighbor_list,
+            traversal_result=None,
+            compact_far_pairs=None,
+            downward=downward,
+            cache_entry=cache_entry,
         )
 
     def _resolve_nearfield_mode(self, *, num_particles: int) -> str:
