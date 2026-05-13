@@ -2198,6 +2198,15 @@ class FastMultipoleMethod:
             .lower()
             in {"1", "true", "yes", "on"}
         )
+        split_build_env_raw = os.environ.get(
+            "JACCPOT_PREPARE_STAGE_MEMORY_SPLIT_ENABLED"
+        )
+        self._prepare_stage_memory_split_env_override: Optional[bool] = (
+            None
+            if split_build_env_raw is None
+            else str(split_build_env_raw).strip().lower()
+            in {"1", "true", "yes", "on"}
+        )
         self._planner_steady_timing_bypass_enabled: bool = (
             str(
                 os.environ.get(
@@ -2230,6 +2239,13 @@ class FastMultipoleMethod:
         self._explicit_pair_process_block = pair_process_block is not None
         self._explicit_grouped_interactions = grouped_interactions is not None
         self.grouped_interactions = grouped_interactions
+        self._streamed_minimum_memory_gpu_default_split_build: bool = bool(
+            self.memory_objective == "minimum_memory"
+            and jax.default_backend() == "gpu"
+            and self.tree_type == "radix"
+            and self.expansion_basis == "solidfmm"
+            and bool(self.streamed_far_pairs)
+        )
         self._large_n_gpu_production_profile_cached: bool = (
             str(self.preset).strip().lower() == "large_n_gpu"
             and str(self.tree_type).strip().lower() == "radix"
@@ -5184,29 +5200,17 @@ class FastMultipoleMethod:
         ) and not _contains_tracer(
             (tree_artifacts.positions_sorted, tree_artifacts.masses_sorted)
         )
-        split_build_env_raw = os.environ.get(
-            "JACCPOT_PREPARE_STAGE_MEMORY_SPLIT_ENABLED"
-        )
         if self.prepare_stage_memory_split_enabled is not None:
             allow_split_build = bool(self.prepare_stage_memory_split_enabled)
-        elif split_build_env_raw is None:
+        elif self._prepare_stage_memory_split_env_override is None:
             # Default to the lower-peak split traversal build in the production
             # minimum-memory streamed GPU path; keep env opt-out for debugging.
             allow_split_build = bool(
-                self.memory_objective == "minimum_memory"
-                and jax.default_backend() == "gpu"
-                and self.tree_type == "radix"
-                and self.expansion_basis == "solidfmm"
-                and bool(self.streamed_far_pairs)
+                self._streamed_minimum_memory_gpu_default_split_build
                 and not bool(grouped_interactions)
             )
         else:
-            allow_split_build = str(split_build_env_raw).strip().lower() in {
-                "1",
-                "true",
-                "yes",
-                "on",
-            }
+            allow_split_build = bool(self._prepare_stage_memory_split_env_override)
         _prepare_diag(f"allow_split_build={bool(allow_split_build)}")
         tree_mode_static_radix = (
             str(tree_artifacts.tree_mode).strip().lower() == "static_radix"
