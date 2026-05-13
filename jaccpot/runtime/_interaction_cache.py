@@ -258,6 +258,47 @@ def _dual_tree_build_raw(
     current_traversal_config = traversal_config
     current_max_pair_queue = max_pair_queue
     current_pair_process_block = pair_process_block
+
+    if fail_fast:
+        # Strict/static lane: avoid Python retry-orchestration entirely.
+        try:
+            build_out = _runtime_fmm.build_interactions_and_neighbors(
+                tree,
+                geometry,
+                theta=theta,
+                mac_type=mac_type,
+                dehnen_radius_scale=dehnen_radius_scale,
+                max_pair_queue=current_max_pair_queue,
+                process_block=current_pair_process_block,
+                traversal_config=current_traversal_config,
+                retry_logger=retry_logger,
+                return_result=need_traversal_result,
+                return_compact_far_pairs=need_compact_far_pairs,
+                return_interactions=(
+                    bool(need_node_interactions) or bool(grouped_interactions)
+                ),
+                return_grouped=grouped_interactions,
+                pair_policy=pair_policy,
+                policy_state=policy_state,
+            )
+        except RuntimeError as exc:
+            if _looks_like_capacity_error(exc):
+                raise RuntimeError(
+                    _format_capacity_error_hint(
+                        exc,
+                        traversal_config=current_traversal_config,
+                        max_pair_queue=current_max_pair_queue,
+                        pair_process_block=current_pair_process_block,
+                    )
+                ) from exc
+            raise
+        return (
+            build_out,
+            current_traversal_config,
+            current_max_pair_queue,
+            current_pair_process_block,
+        )
+
     last_exc: Optional[BaseException] = None
     build_out = None
     for attempt in range(_CAPACITY_RETRY_MAX_ATTEMPTS + 1):

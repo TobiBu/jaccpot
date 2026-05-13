@@ -5197,89 +5197,109 @@ class FastMultipoleMethod:
         planner_hint: Optional[_RefreshDualPlannerHint] = None
         planner_cache_hit = False
         if planner_enabled:
-            traversal_key = (
-                "none"
-                if runtime_traversal_config is None
-                else (
-                    f"{int(runtime_traversal_config.max_pair_queue)}:"
-                    f"{int(runtime_traversal_config.process_block)}:"
-                    f"{int(runtime_traversal_config.max_interactions_per_node)}:"
-                    f"{int(runtime_traversal_config.max_neighbors_per_leaf)}"
-                )
+            strict_split_fastlane = bool(
+                strict_mode_active
+                and bool(allow_split_build)
+                and not bool(grouped_interactions)
+                and not bool(need_traversal_result)
+                and pair_policy is None
+                and policy_state is None
             )
-            planner_key = "|".join(
-                (
-                    str(tree_artifacts.topology_key),
-                    str(tree_artifacts.tree_mode),
-                    str(int(tree_artifacts.leaf_parameter)),
-                    f"{float(theta_val):.12g}",
-                    str(mac_type_val),
-                    str(bool(grouped_interactions)),
-                    str(bool(need_traversal_result)),
-                    str(bool(need_compact_far_pairs)),
-                    str(bool(need_node_interactions)),
-                    str(bool(allow_split_build)),
-                    str(traversal_key),
-                )
-            )
-            planner_hint = self._refresh_dual_planner_cache.get(planner_key)
-            if planner_hint is None:
-                self._refresh_dual_planner_cache_misses += 1
-                total_nodes_planner = int(tree_artifacts.tree.parent.shape[0])
-                internal_nodes_planner = int(
-                    jnp.asarray(tree_artifacts.tree.left_child).shape[0]
-                )
-                leaf_count_planner = max(
-                    0, total_nodes_planner - internal_nodes_planner
-                )
-                (
-                    use_split_build_compiled,
-                    _use_compact_shared_far_near_compiled,
-                    suppress_substage_timing_compiled,
-                ) = _compiled_refresh_dual_planner_route(
-                    allow_split_build_flag=jnp.asarray(
-                        bool(allow_split_build), dtype=jnp.bool_
-                    ),
-                    grouped_interactions_flag=jnp.asarray(
-                        bool(grouped_interactions), dtype=jnp.bool_
-                    ),
-                    need_traversal_result_flag=jnp.asarray(
-                        bool(need_traversal_result), dtype=jnp.bool_
-                    ),
-                    has_pair_policy_flag=jnp.asarray(
-                        pair_policy is not None, dtype=jnp.bool_
-                    ),
-                    has_policy_state_flag=jnp.asarray(
-                        policy_state is not None, dtype=jnp.bool_
-                    ),
-                    leaf_count=jnp.asarray(leaf_count_planner, dtype=jnp.int32),
-                    need_node_interactions_flag=jnp.asarray(
-                        bool(need_node_interactions), dtype=jnp.bool_
-                    ),
-                    need_compact_far_pairs_flag=jnp.asarray(
-                        bool(need_compact_far_pairs), dtype=jnp.bool_
-                    ),
-                    use_dense_interactions_flag=jnp.asarray(
-                        bool(use_dense_interactions_for_prepare), dtype=jnp.bool_
-                    ),
-                )
-                use_split_build_compiled_bool = bool(
-                    jax.device_get(use_split_build_compiled)
-                )
-                suppress_substage_timing_compiled_bool = bool(
-                    jax.device_get(suppress_substage_timing_compiled)
-                )
-                self._refresh_dual_planner_compiled_route_count += 1
+            if strict_split_fastlane:
+                # Strict/static production lane: keep routing fully on a
+                # fixed host-side decision and skip compiled route probing +
+                # device_get round-trips in the refresh hot path.
                 planner_hint = _RefreshDualPlannerHint(
-                    use_split_build=use_split_build_compiled_bool,
-                    suppress_substage_timing=suppress_substage_timing_compiled_bool,
+                    use_split_build=True,
+                    suppress_substage_timing=True,
                 )
-                self._refresh_dual_planner_cache[planner_key] = planner_hint
-                self._refresh_dual_planner_compile_count += 1
-            else:
                 planner_cache_hit = True
                 self._refresh_dual_planner_cache_hits += 1
-            self._refresh_dual_planner_execute_count += 1
+                self._refresh_dual_planner_execute_count += 1
+            else:
+                traversal_key = (
+                    "none"
+                    if runtime_traversal_config is None
+                    else (
+                        f"{int(runtime_traversal_config.max_pair_queue)}:"
+                        f"{int(runtime_traversal_config.process_block)}:"
+                        f"{int(runtime_traversal_config.max_interactions_per_node)}:"
+                        f"{int(runtime_traversal_config.max_neighbors_per_leaf)}"
+                    )
+                )
+                planner_key = "|".join(
+                    (
+                        str(tree_artifacts.topology_key),
+                        str(tree_artifacts.tree_mode),
+                        str(int(tree_artifacts.leaf_parameter)),
+                        f"{float(theta_val):.12g}",
+                        str(mac_type_val),
+                        str(bool(grouped_interactions)),
+                        str(bool(need_traversal_result)),
+                        str(bool(need_compact_far_pairs)),
+                        str(bool(need_node_interactions)),
+                        str(bool(allow_split_build)),
+                        str(traversal_key),
+                    )
+                )
+                planner_hint = self._refresh_dual_planner_cache.get(planner_key)
+                if planner_hint is None:
+                    self._refresh_dual_planner_cache_misses += 1
+                    total_nodes_planner = int(tree_artifacts.tree.parent.shape[0])
+                    internal_nodes_planner = int(
+                        jnp.asarray(tree_artifacts.tree.left_child).shape[0]
+                    )
+                    leaf_count_planner = max(
+                        0, total_nodes_planner - internal_nodes_planner
+                    )
+                    (
+                        use_split_build_compiled,
+                        _use_compact_shared_far_near_compiled,
+                        suppress_substage_timing_compiled,
+                    ) = _compiled_refresh_dual_planner_route(
+                        allow_split_build_flag=jnp.asarray(
+                            bool(allow_split_build), dtype=jnp.bool_
+                        ),
+                        grouped_interactions_flag=jnp.asarray(
+                            bool(grouped_interactions), dtype=jnp.bool_
+                        ),
+                        need_traversal_result_flag=jnp.asarray(
+                            bool(need_traversal_result), dtype=jnp.bool_
+                        ),
+                        has_pair_policy_flag=jnp.asarray(
+                            pair_policy is not None, dtype=jnp.bool_
+                        ),
+                        has_policy_state_flag=jnp.asarray(
+                            policy_state is not None, dtype=jnp.bool_
+                        ),
+                        leaf_count=jnp.asarray(leaf_count_planner, dtype=jnp.int32),
+                        need_node_interactions_flag=jnp.asarray(
+                            bool(need_node_interactions), dtype=jnp.bool_
+                        ),
+                        need_compact_far_pairs_flag=jnp.asarray(
+                            bool(need_compact_far_pairs), dtype=jnp.bool_
+                        ),
+                        use_dense_interactions_flag=jnp.asarray(
+                            bool(use_dense_interactions_for_prepare), dtype=jnp.bool_
+                        ),
+                    )
+                    use_split_build_compiled_bool = bool(
+                        jax.device_get(use_split_build_compiled)
+                    )
+                    suppress_substage_timing_compiled_bool = bool(
+                        jax.device_get(suppress_substage_timing_compiled)
+                    )
+                    self._refresh_dual_planner_compiled_route_count += 1
+                    planner_hint = _RefreshDualPlannerHint(
+                        use_split_build=use_split_build_compiled_bool,
+                        suppress_substage_timing=suppress_substage_timing_compiled_bool,
+                    )
+                    self._refresh_dual_planner_cache[planner_key] = planner_hint
+                    self._refresh_dual_planner_compile_count += 1
+                else:
+                    planner_cache_hit = True
+                    self._refresh_dual_planner_cache_hits += 1
+                self._refresh_dual_planner_execute_count += 1
         planner_allow_steady_timing_bypass = str(
             os.environ.get(
                 "JACCPOT_LARGE_N_REFRESH_DUAL_PLANNER_STEADY_NO_SUBSTAGE_TIMING",
@@ -5320,12 +5340,16 @@ class FastMultipoleMethod:
             pair_process_block=self.pair_process_block,
             traversal_config=runtime_traversal_config,
             retry_logger=(
-                record_retry
-                if str(
-                    os.environ.get("JACCPOT_STATIC_STRICT_CAP_RECORD", "1")
-                ).strip().lower()
-                in {"1", "true", "yes", "on"}
-                else (None if jit_traversal_for_prepare else record_retry)
+                None
+                if strict_mode_active
+                else (
+                    record_retry
+                    if str(
+                        os.environ.get("JACCPOT_STATIC_STRICT_CAP_RECORD", "1")
+                    ).strip().lower()
+                    in {"1", "true", "yes", "on"}
+                    else (None if jit_traversal_for_prepare else record_retry)
+                )
             ),
             fail_fast=(self.fail_fast or strict_mode_active),
             use_dense_interactions=use_dense_interactions_for_prepare,
