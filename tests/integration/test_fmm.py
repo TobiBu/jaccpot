@@ -1,5 +1,6 @@
 """Tests for Fast Multipole Method."""
 
+import json
 from unittest import mock
 
 import jax
@@ -579,6 +580,58 @@ def test_strict_prepare_refresh_and_evaluate_api_and_diagnostics(monkeypatch):
     assert diagnostics["strict_runner_compile_count"] >= 1
     assert diagnostics["strict_runner_profile_key_misses"] >= 1
     assert diagnostics["strict_runner_profile_key_hits"] >= 1
+
+
+def test_strict_exact_cap_profile_match_fail_fast(monkeypatch, tmp_path):
+    monkeypatch.setattr(jax, "default_backend", lambda: "gpu")
+    monkeypatch.setenv("JACCPOT_STATIC_STRICT_GPU_MODE", "on")
+    monkeypatch.setenv("JACCPOT_STATIC_STRICT_REQUIRE_EXACT_CAP_PROFILE_MATCH", "1")
+    profile_path = tmp_path / "strict_caps.json"
+    profile_path.write_text(
+        json.dumps(
+            {
+                "version": 2,
+                "active_context_key": "tree_mode=static_radix|leaf=64|n=999",
+                "profiles": {
+                    "tree_mode=static_radix|leaf=64|n=999": {
+                        "max_pair_queue": 16384,
+                        "pair_process_block": 1024,
+                    }
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("JACCPOT_STATIC_STRICT_CAP_PROFILE_PATH", str(profile_path))
+
+    key = jax.random.PRNGKey(20260513)
+    positions = jax.random.uniform(
+        key,
+        (1024, 3),
+        minval=-1.0,
+        maxval=1.0,
+        dtype=jnp.float32,
+    )
+    masses = jnp.ones((1024,), dtype=jnp.float32)
+    moved = positions + 1e-3
+
+    fmm = FastMultipoleMethod(
+        preset="large_n_gpu",
+        runtime_path="large_n",
+        expansion_basis="solidfmm",
+        complex_rotation="solidfmm",
+        theta=0.6,
+        nearfield_mode="bucketed",
+        nearfield_edge_chunk_size=64,
+        grouped_interactions=False,
+        working_dtype=jnp.float32,
+        tree_build_mode="static_radix",
+        fixed_order=2,
+    )
+    with pytest.raises(RuntimeError, match="exact cap profile key match"):
+        _ = fmm.prepare_state(positions, masses, leaf_size=128, max_order=2)
+    diagnostics = fmm.get_runtime_diagnostics()
+    assert diagnostics["strict_runner_fail_fast_reject_count"] >= 1
 
 
 def test_capacity_fixed_depth_tree_mode_is_removed():
