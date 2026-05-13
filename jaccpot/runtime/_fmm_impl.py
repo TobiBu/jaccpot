@@ -2178,6 +2178,22 @@ class FastMultipoleMethod:
             str(os.environ.get("JACCPOT_REFRESH_TIMING_ENABLE", "0")).strip().lower()
             in {"1", "true", "yes", "on"}
         )
+        self._refresh_dual_planner_mode: str = str(
+            os.environ.get("JACCPOT_LARGE_N_REFRESH_DUAL_PLANNER_MODE", "auto")
+        ).strip().lower()
+        self._strict_gpu_mode: str = str(
+            os.environ.get("JACCPOT_STATIC_STRICT_GPU_MODE", "auto")
+        ).strip().lower()
+        self._planner_steady_timing_bypass_enabled: bool = (
+            str(
+                os.environ.get(
+                    "JACCPOT_LARGE_N_REFRESH_DUAL_PLANNER_STEADY_NO_SUBSTAGE_TIMING",
+                    "1",
+                )
+            ).strip().lower()
+            in {"1", "true", "yes", "on"}
+        )
+        self._strict_shared_env_applied: bool = False
         self._refresh_dual_planner_cache: dict[str, _RefreshDualPlannerHint] = {}
         self._refresh_dual_planner_cache_hits: int = 0
         self._refresh_dual_planner_cache_misses: int = 0
@@ -5168,12 +5184,8 @@ class FastMultipoleMethod:
                 "on",
             }
         _prepare_diag(f"allow_split_build={bool(allow_split_build)}")
-        refresh_planner_mode = str(
-            os.environ.get("JACCPOT_LARGE_N_REFRESH_DUAL_PLANNER_MODE", "auto")
-        ).strip().lower()
-        strict_mode_env = str(
-            os.environ.get("JACCPOT_STATIC_STRICT_GPU_MODE", "auto")
-        ).strip().lower()
+        refresh_planner_mode = str(self._refresh_dual_planner_mode).strip().lower()
+        strict_mode_env = str(self._strict_gpu_mode).strip().lower()
         strict_mode_active = bool(
             (
                 strict_mode_env == "on"
@@ -5225,8 +5237,12 @@ class FastMultipoleMethod:
                     )
             self._refresh_strict_mode_active_count += 1
             # Strict mode contract: one-shot shared count->fill and single queue.
-            os.environ["YGGDRAX_DUAL_TREE_SHARED_COUNT_FILL_ONE_SHOT"] = "1"
-            os.environ["YGGDRAX_DUAL_TREE_SHARED_COUNT_FILL_STEADY_SINGLE_QUEUE"] = "1"
+            if not bool(getattr(self, "_strict_shared_env_applied", False)):
+                os.environ["YGGDRAX_DUAL_TREE_SHARED_COUNT_FILL_ONE_SHOT"] = "1"
+                os.environ["YGGDRAX_DUAL_TREE_SHARED_COUNT_FILL_STEADY_SINGLE_QUEUE"] = (
+                    "1"
+                )
+                self._strict_shared_env_applied = True
         strict_streamed_fast_path = bool(
             strict_mode_active
             and bool(allow_split_build)
@@ -5368,12 +5384,9 @@ class FastMultipoleMethod:
                     planner_cache_hit = True
                     self._refresh_dual_planner_cache_hits += 1
                 self._refresh_dual_planner_execute_count += 1
-        planner_allow_steady_timing_bypass = str(
-            os.environ.get(
-                "JACCPOT_LARGE_N_REFRESH_DUAL_PLANNER_STEADY_NO_SUBSTAGE_TIMING",
-                "1",
-            )
-        ).strip().lower() in {"1", "true", "yes", "on"}
+        planner_allow_steady_timing_bypass = bool(
+            self._planner_steady_timing_bypass_enabled
+        )
         dual_artifact_timing_callback = _record_dual_artifact_substage
         if (
             planner_hint is not None
