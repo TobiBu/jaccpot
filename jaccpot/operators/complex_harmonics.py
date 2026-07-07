@@ -26,6 +26,7 @@ def _pack_complex(full_nm: jnp.ndarray) -> jnp.ndarray:
     """Pack a (p+1, p+1) complex array (m>=0) into (p+1)^2 with m in [-n,n]."""
     p = full_nm.shape[0] - 1
     out = jnp.zeros((sh_size(p),), dtype=full_nm.dtype)
+    real_dtype = jnp.real(jnp.zeros((), dtype=full_nm.dtype)).dtype
 
     for n in range(p + 1):
         for m in range(-n, n + 1):
@@ -33,7 +34,8 @@ def _pack_complex(full_nm: jnp.ndarray) -> jnp.ndarray:
                 val = full_nm[n, m]
             else:
                 m_abs = -m
-                val = ((-1.0) ** m_abs) * jnp.conjugate(full_nm[n, m_abs])
+                sign = jnp.asarray(-1.0 if (m_abs % 2) else 1.0, dtype=real_dtype)
+                val = sign.astype(full_nm.dtype) * jnp.conjugate(full_nm[n, m_abs])
             out = out.at[sh_index(n, m)].set(val)
 
     return out
@@ -73,6 +75,63 @@ def complex_R_solidfmm(delta: jnp.ndarray, *, order: int) -> jnp.ndarray:
             fac = 1.0 / ((n + m) * (n - m))
             val = val.at[n, m].set(
                 ((2 * n - 1) * z * val[n - 1, m] - r2 * val[n - 2, m]) * fac
+            )
+
+    return _pack_complex(val)
+
+
+def complex_R_solidfmm_preserve_dtype(delta: jnp.ndarray, *, order: int) -> jnp.ndarray:
+    """Regular solid harmonics preserving the real dtype of ``delta``.
+
+    The reference ``complex_R_solidfmm`` intentionally computes in float64/complex128.
+    This variant keeps float32 inputs in complex64 for the large-N GPU local-eval
+    path while retaining complex128 when the incoming positions are float64.
+    """
+    p = int(order)
+    if p < 0:
+        raise ValueError("order must be >= 0")
+
+    delta_arr = jnp.asarray(delta)
+    if jnp.issubdtype(delta_arr.dtype, jnp.floating):
+        real_dtype = delta_arr.dtype
+    else:
+        real_dtype = jnp.float32
+    complex_dtype = jnp.complex128 if real_dtype == jnp.float64 else jnp.complex64
+
+    d = jnp.asarray(delta, dtype=real_dtype)
+    x, y, z = d[0], d[1], d[2]
+    r2 = x * x + y * y + z * z
+    xy = x.astype(complex_dtype) + jnp.asarray(1j, dtype=complex_dtype) * y.astype(
+        complex_dtype
+    )
+
+    val = jnp.zeros((p + 1, p + 1), dtype=complex_dtype)
+    one = jnp.asarray(1.0, dtype=real_dtype).astype(complex_dtype)
+    val = val.at[0, 0].set(one)
+
+    if p == 0:
+        return _pack_complex(val)
+
+    val = val.at[1, 0].set(z.astype(complex_dtype))
+    val = val.at[1, 1].set(xy * jnp.asarray(0.5, dtype=real_dtype).astype(complex_dtype))
+
+    for m in range(2, p + 1):
+        fac = jnp.asarray(1.0 / (2.0 * m), dtype=real_dtype).astype(complex_dtype)
+        val = val.at[m, m].set(val[m - 1, m - 1] * xy * fac)
+
+    zc = z.astype(complex_dtype)
+    r2c = r2.astype(complex_dtype)
+    for m in range(1, p):
+        val = val.at[m + 1, m].set(zc * val[m, m])
+
+    for m in range(0, p - 1):
+        for n in range(m + 2, p + 1):
+            fac = jnp.asarray(1.0 / ((n + m) * (n - m)), dtype=real_dtype).astype(
+                complex_dtype
+            )
+            val = val.at[n, m].set(
+                ((2 * n - 1) * zc * val[n - 1, m] - r2c * val[n - 2, m])
+                * fac
             )
 
     return _pack_complex(val)

@@ -9,7 +9,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
-from .complex_harmonics import complex_R_solidfmm
+from .complex_harmonics import complex_R_solidfmm, complex_R_solidfmm_preserve_dtype
 from .dtypes import complex_dtype_for_real
 from .real_harmonics import (
     _compute_dehnen_B_matrix_complex,
@@ -469,6 +469,209 @@ def regular_solid_harmonic_gradient_coefficients(
     grad_y = _lower_complex_harmonics_one_axis(base, order=p, axis=1)
     grad_z = _lower_complex_harmonics_one_axis(base, order=p, axis=2)
     return jnp.stack((grad_x, grad_y, grad_z), axis=0)
+
+
+
+
+@partial(jax.jit, static_argnames=("order",))
+def regular_solid_harmonic_gradient_coefficients_preserve_dtype(
+    delta: Array,
+    *,
+    order: int,
+) -> Array:
+    """Return local-gradient coefficients without widening float32 deltas."""
+    p = int(order)
+    base = jnp.asarray(complex_R_solidfmm_preserve_dtype(delta, order=p))
+    grad_x = _lower_complex_harmonics_one_axis(base, order=p, axis=0)
+    grad_y = _lower_complex_harmonics_one_axis(base, order=p, axis=1)
+    grad_z = _lower_complex_harmonics_one_axis(base, order=p, axis=2)
+    return jnp.stack((grad_x, grad_y, grad_z), axis=0)
+
+
+def evaluate_local_complex_grad_analytic_preserve_dtype(
+    local: Array,
+    delta: Array,
+    *,
+    order: int,
+    conjugate_left: bool = True,
+) -> Array:
+    """Evaluate the analytic local gradient without float32->complex128 widening."""
+    p = int(order)
+    ncoeff = sh_size(p)
+    local_coeffs = jnp.asarray(local)[:ncoeff]
+    if conjugate_left:
+        local_coeffs = jnp.conjugate(local_coeffs)
+    grad_coeffs = regular_solid_harmonic_gradient_coefficients_preserve_dtype(
+        delta,
+        order=p,
+    )[:, :ncoeff]
+    return jnp.real(jnp.sum(local_coeffs[None, :] * grad_coeffs, axis=-1))
+
+
+def _regular_solid_harmonic_order4_scalars(delta: Array) -> tuple[Array, ...]:
+    """Return packed order-4 regular harmonics as scalar expressions."""
+    delta_arr = jnp.asarray(delta)
+    real_dtype = delta_arr.dtype if jnp.issubdtype(delta_arr.dtype, jnp.floating) else jnp.float32
+    complex_dtype = jnp.complex128 if real_dtype == jnp.float64 else jnp.complex64
+
+    d = jnp.asarray(delta, dtype=real_dtype)
+    x, y, z = d[0], d[1], d[2]
+    xy = x.astype(complex_dtype) + jnp.asarray(1j, dtype=complex_dtype) * y.astype(complex_dtype)
+    zc = z.astype(complex_dtype)
+    r2c = (x * x + y * y + z * z).astype(complex_dtype)
+    one = jnp.asarray(1.0, dtype=real_dtype).astype(complex_dtype)
+
+    pos: dict[tuple[int, int], Array] = {}
+    pos[(0, 0)] = one
+    pos[(1, 0)] = zc
+    pos[(1, 1)] = xy * jnp.asarray(0.5, dtype=real_dtype).astype(complex_dtype)
+    pos[(2, 2)] = pos[(1, 1)] * xy * jnp.asarray(0.25, dtype=real_dtype).astype(complex_dtype)
+    pos[(3, 3)] = pos[(2, 2)] * xy * jnp.asarray(1.0 / 6.0, dtype=real_dtype).astype(complex_dtype)
+    pos[(4, 4)] = pos[(3, 3)] * xy * jnp.asarray(0.125, dtype=real_dtype).astype(complex_dtype)
+    pos[(2, 1)] = zc * pos[(1, 1)]
+    pos[(3, 2)] = zc * pos[(2, 2)]
+    pos[(4, 3)] = zc * pos[(3, 3)]
+    pos[(2, 0)] = (jnp.asarray(3.0, dtype=real_dtype).astype(complex_dtype) * zc * pos[(1, 0)] - r2c * pos[(0, 0)]) * jnp.asarray(0.25, dtype=real_dtype).astype(complex_dtype)
+    pos[(3, 0)] = (jnp.asarray(5.0, dtype=real_dtype).astype(complex_dtype) * zc * pos[(2, 0)] - r2c * pos[(1, 0)]) * jnp.asarray(1.0 / 9.0, dtype=real_dtype).astype(complex_dtype)
+    pos[(4, 0)] = (jnp.asarray(7.0, dtype=real_dtype).astype(complex_dtype) * zc * pos[(3, 0)] - r2c * pos[(2, 0)]) * jnp.asarray(1.0 / 16.0, dtype=real_dtype).astype(complex_dtype)
+    pos[(3, 1)] = (jnp.asarray(5.0, dtype=real_dtype).astype(complex_dtype) * zc * pos[(2, 1)] - r2c * pos[(1, 1)]) * jnp.asarray(0.125, dtype=real_dtype).astype(complex_dtype)
+    pos[(4, 1)] = (jnp.asarray(7.0, dtype=real_dtype).astype(complex_dtype) * zc * pos[(3, 1)] - r2c * pos[(2, 1)]) * jnp.asarray(1.0 / 15.0, dtype=real_dtype).astype(complex_dtype)
+    pos[(4, 2)] = (jnp.asarray(7.0, dtype=real_dtype).astype(complex_dtype) * zc * pos[(3, 2)] - r2c * pos[(2, 2)]) * jnp.asarray(1.0 / 12.0, dtype=real_dtype).astype(complex_dtype)
+
+    def get(n: int, m: int) -> Array:
+        if m >= 0:
+            return pos[(n, m)]
+        m_abs = -m
+        sign = jnp.asarray(-1.0 if (m_abs % 2) else 1.0, dtype=real_dtype).astype(complex_dtype)
+        return sign * jnp.conjugate(pos[(n, m_abs)])
+
+    return tuple(get(n, m) for n in range(5) for m in range(-n, n + 1))
+
+
+def evaluate_local_complex_grad_order4_unrolled(
+    local: Array,
+    delta: Array,
+    *,
+    order: int,
+    conjugate_left: bool = True,
+) -> Array:
+    """Evaluate order-4 local gradient with scalar recurrence/contraction."""
+    if int(order) != 4:
+        return evaluate_local_complex_grad_analytic_preserve_dtype(
+            local,
+            delta,
+            order=order,
+            conjugate_left=conjugate_left,
+        )
+
+    r = _regular_solid_harmonic_order4_scalars(delta)
+    local_coeffs = jnp.asarray(local)[:25]
+    if conjugate_left:
+        local_coeffs = jnp.conjugate(local_coeffs)
+    cdtype = jnp.result_type(local_coeffs.dtype, r[0].dtype)
+    half = jnp.asarray(0.5, dtype=jnp.real(jnp.zeros((), dtype=cdtype)).dtype).astype(cdtype)
+    half_i = jnp.asarray(0.5j, dtype=cdtype)
+    zero = jnp.asarray(0.0, dtype=cdtype)
+
+    def ridx(n: int, m: int) -> int:
+        return n * n + (m + n)
+
+    def src(n: int, m: int) -> Array:
+        if n < 0 or m < -n or m > n:
+            return zero
+        return r[ridx(n, m)]
+
+    acc_x = zero
+    acc_y = zero
+    acc_z = zero
+    for n in range(1, 5):
+        for m in range(-n, n + 1):
+            coeff = local_coeffs[ridx(n, m)].astype(cdtype)
+            left = src(n - 1, m - 1)
+            right = src(n - 1, m + 1)
+            acc_x = acc_x + coeff * (half * left - half * right)
+            acc_y = acc_y + coeff * (half_i * left + half_i * right)
+            acc_z = acc_z + coeff * src(n - 1, m)
+    return jnp.real(jnp.stack((acc_x, acc_y, acc_z), axis=0))
+
+
+def evaluate_local_complex_with_grad_analytic(
+    local: Array,
+    delta: Array,
+    *,
+    order: int,
+    conjugate_left: bool = True,
+) -> tuple[Array, Array]:
+    """Evaluate complex local expansion and gradient without autodiff."""
+    p = int(order)
+    ncoeff = sh_size(p)
+    local_coeffs = jnp.asarray(local)[:ncoeff]
+    if conjugate_left:
+        local_coeffs = jnp.conjugate(local_coeffs)
+    regular = jnp.asarray(complex_R_solidfmm(delta, order=p))[:ncoeff]
+    grad_coeffs = regular_solid_harmonic_gradient_coefficients(delta, order=p)[
+        :, :ncoeff
+    ]
+    potential = jnp.real(jnp.sum(local_coeffs * regular))
+    grad = jnp.real(jnp.sum(local_coeffs[None, :] * grad_coeffs, axis=-1))
+    return grad, potential
+
+
+def evaluate_local_complex_grad_analytic(
+    local: Array,
+    delta: Array,
+    *,
+    order: int,
+    conjugate_left: bool = True,
+) -> Array:
+    """Evaluate only the complex local-expansion gradient without autodiff."""
+    p = int(order)
+    ncoeff = sh_size(p)
+    local_coeffs = jnp.asarray(local)[:ncoeff]
+    if conjugate_left:
+        local_coeffs = jnp.conjugate(local_coeffs)
+    grad_coeffs = regular_solid_harmonic_gradient_coefficients(delta, order=p)[
+        :, :ncoeff
+    ]
+    return jnp.real(jnp.sum(local_coeffs[None, :] * grad_coeffs, axis=-1))
+
+
+@partial(jax.jit, static_argnames=("order", "conjugate_left"))
+def evaluate_local_complex_grad_analytic_batch(
+    local: Array,
+    deltas: Array,
+    *,
+    order: int,
+    conjugate_left: bool = True,
+) -> Array:
+    """Batch evaluate only complex local-expansion gradients."""
+    return jax.vmap(
+        lambda d: evaluate_local_complex_grad_analytic(
+            local,
+            d,
+            order=order,
+            conjugate_left=conjugate_left,
+        )
+    )(deltas)
+
+
+@partial(jax.jit, static_argnames=("order", "conjugate_left"))
+def evaluate_local_complex_with_grad_analytic_batch(
+    local: Array,
+    deltas: Array,
+    *,
+    order: int,
+    conjugate_left: bool = True,
+) -> tuple[Array, Array]:
+    """Batch evaluate complex local expansion gradients without autodiff."""
+    return jax.vmap(
+        lambda d: evaluate_local_complex_with_grad_analytic(
+            local,
+            d,
+            order=order,
+            conjugate_left=conjugate_left,
+        )
+    )(deltas)
 
 
 @partial(jax.jit, static_argnames=("order",))

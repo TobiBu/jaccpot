@@ -1,6 +1,7 @@
 """Tests for near-field particle-to-particle evaluation."""
 
 import os
+from dataclasses import replace
 
 import jax
 import jax.numpy as jnp
@@ -1195,6 +1196,103 @@ def test_radix_fast_lane_accel_matches_large_n_specialized_small():
 
     assert np.allclose(
         np.asarray(fast_lane),
+        np.asarray(baseline),
+        rtol=1e-6,
+        atol=1e-6,
+    )
+
+
+def test_radix_fast_lane_occupancy_sort_and_empty_tile_skip_match_fallback():
+    positions = jnp.array(
+        [
+            [-0.8, 0.1, 0.0],
+            [-0.7, -0.1, 0.05],
+            [-0.2, 0.3, -0.2],
+            [0.15, 0.25, 0.1],
+            [0.6, -0.2, -0.05],
+            [0.75, 0.05, 0.2],
+        ]
+    )
+    masses = jnp.array([1.0, 1.5, 0.7, 0.9, 1.2, 0.8])
+    bounds = (jnp.array([-1.0, -1.0, -1.0]), jnp.array([1.0, 1.0, 1.0]))
+    tree, pos_sorted, mass_sorted, _ = build_tree(
+        positions,
+        masses,
+        bounds,
+        return_reordered=True,
+        leaf_size=2,
+    )
+    geometry = compute_tree_geometry(tree, pos_sorted)
+    neighbor_list = build_leaf_neighbor_lists(tree, geometry, theta=0.3)
+    node_ranges = jnp.asarray(tree.node_ranges)
+    leaf_nodes = jnp.asarray(neighbor_list.leaf_indices)
+    leaf_ranges = node_ranges[leaf_nodes]
+    counts = leaf_ranges[:, 1] - leaf_ranges[:, 0] + 1
+    max_leaf_size = int(np.max(np.asarray(counts)))
+    offsets = jnp.arange(max_leaf_size, dtype=leaf_ranges.dtype)
+    leaf_particle_indices = leaf_ranges[:, 0][:, None] + offsets[None, :]
+    leaf_particle_mask = offsets[None, :] < counts[:, None]
+
+    payload = _build_test_radix_fast_payload(
+        tree=tree,
+        neighbor_list=neighbor_list,
+        leaf_particle_indices=leaf_particle_indices,
+        leaf_particle_mask=leaf_particle_mask,
+    )
+    num_leaves, source_slots = payload.source_leaf_ids.shape
+    block_size = 2
+    padded_slots = ((source_slots + block_size - 1) // block_size) * block_size
+    pad_slots = padded_slots - source_slots
+    source_leaf_ids = jnp.pad(payload.source_leaf_ids, ((0, 0), (0, pad_slots)))
+    source_leaf_valid = jnp.pad(
+        payload.source_leaf_valid_mask,
+        ((0, 0), (0, pad_slots)),
+    )
+    payload = replace(
+        payload,
+        source_leaf_ids=source_leaf_ids.reshape((num_leaves, -1, block_size)),
+        source_leaf_valid_mask=source_leaf_valid.reshape(
+            (num_leaves, -1, block_size)
+        ),
+        source_particle_ids=jnp.zeros((0, 0, 0), dtype=INDEX_DTYPE),
+        source_particle_mask=jnp.zeros((0, 0, 0), dtype=bool),
+        fallback_block_tile_size=1,
+    )
+
+    flag_names = (
+        "JACCPOT_LARGE_N_RADIX_FAST_OCCUPANCY_SORT",
+        "JACCPOT_LARGE_N_RADIX_FAST_SKIP_EMPTY_TILES",
+        "JACCPOT_LARGE_N_RADIX_FAST_COMPONENTWISE_PAIRS",
+    )
+    old_flags = {name: os.environ.get(name) for name in flag_names}
+    try:
+        for name in flag_names:
+            os.environ[name] = "0"
+        baseline = compute_leaf_p2p_accelerations_radix_fast_lane(
+            positions_sorted=pos_sorted,
+            masses_sorted=mass_sorted,
+            payload=payload,
+            G=1.25,
+            softening=0.05,
+        )
+        for name in flag_names:
+            os.environ[name] = "1"
+        optimized = compute_leaf_p2p_accelerations_radix_fast_lane(
+            positions_sorted=pos_sorted,
+            masses_sorted=mass_sorted,
+            payload=payload,
+            G=1.25,
+            softening=0.05,
+        )
+    finally:
+        for name, value in old_flags.items():
+            if value is None:
+                os.environ.pop(name, None)
+            else:
+                os.environ[name] = value
+
+    assert np.allclose(
+        np.asarray(optimized),
         np.asarray(baseline),
         rtol=1e-6,
         atol=1e-6,

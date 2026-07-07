@@ -576,6 +576,8 @@ def test_strict_prepare_refresh_and_evaluate_api_and_diagnostics(monkeypatch):
     assert np.asarray(acc1).shape == (positions.shape[0], 3)
 
     diagnostics = fmm.get_runtime_diagnostics()
+    # Two strict_prepare_refresh_and_evaluate calls -> two strict-runner
+    # executions (the increment is +1 per call at _fmm_impl.py:3732).
     assert diagnostics["strict_runner_execute_count"] >= 2
     assert diagnostics["strict_runner_compile_count"] >= 1
     assert diagnostics["strict_runner_profile_key_misses"] >= 1
@@ -643,14 +645,14 @@ def test_strict_run_v2_api(monkeypatch):
     key_pos, key_mass = jax.random.split(key)
     positions = jax.random.uniform(
         key_pos,
-        (512, 3),
+        (2048, 3),
         minval=-1.0,
         maxval=1.0,
         dtype=jnp.float32,
     )
     masses = jax.random.uniform(
         key_mass,
-        (512,),
+        (2048,),
         minval=0.1,
         maxval=1.1,
         dtype=jnp.float32,
@@ -682,7 +684,7 @@ def test_strict_run_v2_api(monkeypatch):
         masses=masses,
         dt=1e-3,
         num_steps=3,
-        refresh_every=2,
+        refresh_every=1,
         leaf_size=128,
         max_order=2,
         theta=0.6,
@@ -694,6 +696,135 @@ def test_strict_run_v2_api(monkeypatch):
 
     diagnostics = fmm.get_runtime_diagnostics()
     assert diagnostics["strict_runner_execute_count"] >= 2
+
+
+def test_strict_fused_moved_endpoint_matches_fresh_prepare(monkeypatch):
+    monkeypatch.setattr(jax, "default_backend", lambda: "gpu")
+    monkeypatch.setenv("JACCPOT_STATIC_STRICT_GPU_MODE", "on")
+    monkeypatch.setenv("JACCPOT_STATIC_STRICT_REQUIRE_EXACT_CAP_PROFILE_MATCH", "0")
+    monkeypatch.setenv("JACCPOT_STATIC_STRICT_FUSED_MODE", "on")
+    monkeypatch.setenv("JACCPOT_STATIC_STRICT_FUSED_DEVICE_ONLY", "1")
+    monkeypatch.setenv("JACCPOT_STATIC_STRICT_FUSED_DISALLOW_HOST_SEGMENT_FALLBACK", "1")
+    monkeypatch.setenv("JACCPOT_STATIC_STRICT_FUSED_FLAT_COMPACT_FAR_PAIRS", "1")
+    monkeypatch.setenv("JACCPOT_STATIC_STRICT_FUSED_COMPACT_FAR_PAIR_CAP", "32768")
+    monkeypatch.setenv("JACCPOT_LARGE_N_STATIC_TARGET_BLOCKS_MAX_PER_LEAF", "32")
+    monkeypatch.setenv("JACCPOT_LARGE_N_NEIGHBOR_EDGE_PROFILE_FIXED_CAP", "65536")
+
+    key = jax.random.PRNGKey(20260620)
+    key_pos, key_vel, key_mass = jax.random.split(key, 3)
+    positions = jax.random.uniform(
+        key_pos,
+        (512, 3),
+        minval=-1.0,
+        maxval=1.0,
+        dtype=jnp.float32,
+    )
+    velocities = 0.01 * jax.random.normal(key_vel, (512, 3), dtype=jnp.float32)
+    masses = jax.random.uniform(
+        key_mass,
+        (512,),
+        minval=0.1,
+        maxval=1.1,
+        dtype=jnp.float32,
+    )
+    state0 = jnp.stack([positions, velocities], axis=1)
+
+    kwargs = dict(
+        preset="large_n_gpu",
+        runtime_path="large_n",
+        expansion_basis="solidfmm",
+        complex_rotation="solidfmm",
+        theta=0.6,
+        nearfield_mode="bucketed",
+        nearfield_edge_chunk_size=64,
+        grouped_interactions=False,
+        working_dtype=jnp.float32,
+        tree_build_mode="static_radix",
+        fixed_order=2,
+    )
+    fmm = FastMultipoleMethod(**kwargs)
+    state_out, prepared_out, history = fmm.strict_run_v2(
+        state=state0,
+        masses=masses,
+        dt=2.0e-4,
+        num_steps=1,
+        refresh_every=1,
+        leaf_size=128,
+        max_order=2,
+        theta=0.6,
+        return_history=False,
+    )
+    assert history is None
+    diagnostics = fmm.get_runtime_diagnostics()
+    assert diagnostics["strict_fused_mode_active"] is True
+    assert diagnostics["strict_fused_fallback_count"] == 0
+    assert diagnostics["strict_self_force_endpoint_evaluations"] == 1
+
+    fresh_fmm = FastMultipoleMethod(**kwargs)
+    fresh = fresh_fmm.prepare_state(state_out[:, 0, :], masses, leaf_size=128, max_order=2)
+    endpoint_acc = np.asarray(fmm.evaluate_prepared_state(prepared_out))
+    fresh_acc = np.asarray(fresh_fmm.evaluate_prepared_state(fresh))
+    diff = endpoint_acc - fresh_acc
+    rel_l2 = np.linalg.norm(diff) / max(np.linalg.norm(fresh_acc), 1.0e-12)
+    assert rel_l2 <= 1.0e-4
+    assert np.max(np.abs(diff)) <= 5.0e-3
+
+
+def test_strict_fused_compact_far_pair_cap_fails(monkeypatch):
+    monkeypatch.setattr(jax, "default_backend", lambda: "gpu")
+    monkeypatch.setenv("JACCPOT_STATIC_STRICT_GPU_MODE", "on")
+    monkeypatch.setenv("JACCPOT_STATIC_STRICT_REQUIRE_EXACT_CAP_PROFILE_MATCH", "0")
+    monkeypatch.setenv("JACCPOT_STATIC_STRICT_FUSED_MODE", "on")
+    monkeypatch.setenv("JACCPOT_STATIC_STRICT_FUSED_DEVICE_ONLY", "1")
+    monkeypatch.setenv("JACCPOT_STATIC_STRICT_FUSED_DISALLOW_HOST_SEGMENT_FALLBACK", "0")
+    monkeypatch.setenv("JACCPOT_STATIC_STRICT_FUSED_FLAT_COMPACT_FAR_PAIRS", "1")
+    monkeypatch.setenv("JACCPOT_STATIC_STRICT_FUSED_COMPACT_FAR_PAIR_CAP", "1")
+    monkeypatch.setenv("JACCPOT_LARGE_N_STATIC_TARGET_BLOCKS_MAX_PER_LEAF", "32")
+    monkeypatch.setenv("JACCPOT_LARGE_N_NEIGHBOR_EDGE_PROFILE_FIXED_CAP", "65536")
+
+    key = jax.random.PRNGKey(20260621)
+    key_pos, key_mass = jax.random.split(key)
+    positions = jax.random.uniform(
+        key_pos,
+        (2048, 3),
+        minval=-1.0,
+        maxval=1.0,
+        dtype=jnp.float32,
+    )
+    masses = jax.random.uniform(
+        key_mass,
+        (2048,),
+        minval=0.1,
+        maxval=1.1,
+        dtype=jnp.float32,
+    )
+    state0 = jnp.stack([positions, jnp.zeros_like(positions)], axis=1)
+
+    fmm = FastMultipoleMethod(
+        preset="large_n_gpu",
+        runtime_path="large_n",
+        expansion_basis="solidfmm",
+        complex_rotation="solidfmm",
+        theta=0.6,
+        nearfield_mode="bucketed",
+        nearfield_edge_chunk_size=64,
+        grouped_interactions=False,
+        working_dtype=jnp.float32,
+        tree_build_mode="static_radix",
+        fixed_order=2,
+    )
+    with pytest.raises(Exception, match="JACCPOT_STATIC_STRICT_FUSED_COMPACT_FAR_PAIR_CAP|compact far-pair cap exceeded"):
+        fmm.strict_run_v2(
+            state=state0,
+            masses=masses,
+            dt=1.0e-4,
+            num_steps=1,
+            refresh_every=1,
+            leaf_size=64,
+            max_order=2,
+            theta=0.6,
+            return_history=False,
+        )
 
 
 def test_capacity_fixed_depth_tree_mode_is_removed():
@@ -2737,6 +2868,74 @@ def test_solidfmm_chunked_m2l_matches_fullbatch():
     assert np.allclose(
         np.asarray(acc_chunked), np.asarray(acc_full), rtol=1e-6, atol=1e-6
     )
+
+
+def test_solidfmm_m2l_ignores_padded_compact_far_pairs():
+    order = 2
+    coeff_count = fmm_impl_private.sh_size(order)
+    centers = jnp.array(
+        [
+            [0.0, 0.0, 0.0],
+            [1.0, 0.25, -0.5],
+            [-0.75, 0.5, 0.25],
+            [0.5, -0.5, 1.0],
+        ],
+        dtype=jnp.float32,
+    )
+    multipoles = (
+        jnp.arange(centers.shape[0] * coeff_count, dtype=jnp.float32)
+        .reshape((centers.shape[0], coeff_count))
+        .astype(jnp.complex64)
+        * jnp.array(0.01 + 0.02j, dtype=jnp.complex64)
+    )
+    src_exact = jnp.array([1], dtype=INDEX_DTYPE)
+    tgt_exact = jnp.array([0], dtype=INDEX_DTYPE)
+    src_padded = jnp.array([1, -1, -1, -1], dtype=INDEX_DTYPE)
+    tgt_padded = jnp.array([0, -1, -1, -1], dtype=INDEX_DTYPE)
+    active_count = jnp.array(1, dtype=INDEX_DTYPE)
+
+    exact_full = fmm_impl_private._accumulate_solidfmm_m2l_fullbatch(
+        jnp.zeros_like(multipoles),
+        multipoles,
+        centers,
+        src_exact,
+        tgt_exact,
+        active_count,
+        order=order,
+        rotation="solidfmm",
+        total_nodes=int(centers.shape[0]),
+    )
+    padded_full = fmm_impl_private._accumulate_solidfmm_m2l_fullbatch(
+        jnp.zeros_like(multipoles),
+        multipoles,
+        centers,
+        src_padded,
+        tgt_padded,
+        active_count,
+        order=order,
+        rotation="solidfmm",
+        total_nodes=int(centers.shape[0]),
+    )
+    padded_chunked = fmm_impl_private._accumulate_solidfmm_m2l_chunked_scan(
+        jnp.zeros_like(multipoles),
+        multipoles,
+        centers,
+        src_padded,
+        tgt_padded,
+        active_count,
+        order=order,
+        rotation="solidfmm",
+        total_nodes=int(centers.shape[0]),
+        chunk_size=2,
+    )
+
+    exact_np = np.asarray(exact_full)
+    padded_full_np = np.asarray(padded_full)
+    padded_chunked_np = np.asarray(padded_chunked)
+    assert np.isfinite(padded_full_np).all()
+    assert np.isfinite(padded_chunked_np).all()
+    assert np.allclose(padded_full_np, exact_np, rtol=1e-6, atol=1e-6)
+    assert np.allclose(padded_chunked_np, exact_np, rtol=1e-6, atol=1e-6)
 
 
 def test_fast_preset_adaptive_large_cpu_policy_applies():

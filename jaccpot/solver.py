@@ -619,6 +619,9 @@ class FastMultipoleMethod:
         leaf_size: int = 16,
         max_order: int = 4,
         theta: Optional[float] = None,
+        cache_policy: str = "auto",
+        runtime_overrides_override: Optional[Any] = None,
+        fused_device_mode: bool = False,
     ) -> FMMPreparedState:
         """Prepare and cache tree/interactions for repeated evaluations."""
         return self._impl.prepare_state(
@@ -629,6 +632,8 @@ class FastMultipoleMethod:
             max_order=max_order,
             theta=theta,
             jit_tree=self.advanced.runtime.jit_tree,
+            runtime_overrides_override=runtime_overrides_override,
+            fused_device_mode=bool(fused_device_mode),
         )
 
     def compute_accelerations_and_jerk(
@@ -823,6 +828,7 @@ class FastMultipoleMethod:
         leaf_size: Optional[int] = None,
         max_order: Optional[int] = None,
         theta: Optional[float] = None,
+        fused_device_mode: bool = False,
     ) -> FMMPreparedState:
         """Refresh prepared state under fixed-profile large-N runtime constraints."""
         return self._impl.refresh_prepared_state(
@@ -833,6 +839,7 @@ class FastMultipoleMethod:
             leaf_size=leaf_size,
             max_order=max_order,
             theta=theta,
+            fused_device_mode=bool(fused_device_mode),
         )
 
     def strict_prepare_refresh_and_evaluate(
@@ -905,12 +912,14 @@ class FastMultipoleMethod:
         max_order: int,
         theta: Optional[float] = None,
         prepared_state: Optional[FMMPreparedState] = None,
+        initial_self_acceleration: Optional[Array] = None,
         jit_traversal: Optional[bool] = True,
         add_external: bool = False,
         external_acceleration_fn: Optional[Callable[[Array], Array]] = None,
         rematerialize_between_refresh: bool = True,
         return_history: bool = False,
-    ) -> tuple[Array, FMMPreparedState, Optional[Array]]:
+        return_prepared_state: bool = True,
+    ) -> tuple[Array, Optional[FMMPreparedState], Optional[Array]]:
         """Strict V2 segmented runner with raw tensor API."""
         return self._impl.strict_run_v2(
             state=state,
@@ -922,11 +931,13 @@ class FastMultipoleMethod:
             max_order=int(max_order),
             theta=theta,
             prepared_state=prepared_state,
+            initial_self_acceleration=initial_self_acceleration,
             jit_traversal=jit_traversal,
             add_external=bool(add_external),
             external_acceleration_fn=external_acceleration_fn,
             rematerialize_between_refresh=bool(rematerialize_between_refresh),
             return_history=bool(return_history),
+            return_prepared_state=bool(return_prepared_state),
         )
 
     def update_multipoles_only(

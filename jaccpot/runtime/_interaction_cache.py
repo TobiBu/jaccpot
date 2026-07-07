@@ -1,6 +1,7 @@
 """Dual-tree interaction cache helpers for the runtime FMM implementation."""
 
 import hashlib
+import os
 import time
 from dataclasses import dataclass
 from functools import partial
@@ -575,17 +576,49 @@ def _build_dual_tree_artifacts_split_strict_streamed(
     dense/grouped/interactions payload requests.
     """
 
+    if traversal_config is not None:
+        max_interactions_per_node = int(traversal_config.max_interactions_per_node)
+        max_neighbors_per_leaf = int(traversal_config.max_neighbors_per_leaf)
+        max_pair_queue_resolved = int(traversal_config.max_pair_queue)
+        process_block_resolved = int(traversal_config.process_block)
+    else:
+        max_interactions_per_node = 8192
+        max_neighbors_per_leaf = 4096
+        max_pair_queue_resolved = None if max_pair_queue is None else int(max_pair_queue)
+        process_block_resolved = (
+            None if pair_process_block is None else int(pair_process_block)
+        )
+
+    flat_compact_enabled = (
+        os.environ.get("JACCPOT_STATIC_STRICT_FUSED_FLAT_COMPACT_FAR_PAIRS", "1")
+        not in ("0", "false", "False", "off", "OFF")
+    )
+    compact_far_pair_capacity = None
+    if flat_compact_enabled:
+        compact_far_pair_capacity = int(
+            os.environ.get(
+                "JACCPOT_STATIC_STRICT_FUSED_COMPACT_FAR_PAIR_CAP", "131072"
+            )
+        )
+        if compact_far_pair_capacity <= 0:
+            raise ValueError(
+                "JACCPOT_STATIC_STRICT_FUSED_COMPACT_FAR_PAIR_CAP must be positive"
+            )
+
     compact_far_pairs, neighbor_list = build_compact_far_pairs_and_leaf_neighbor_lists(
         tree,
         geometry,
         theta=theta,
         mac_type=mac_type,
         dehnen_radius_scale=dehnen_radius_scale,
-        max_pair_queue=max_pair_queue,
-        process_block=pair_process_block,
-        traversal_config=traversal_config,
+        max_interactions_per_node=max_interactions_per_node,
+        max_neighbors_per_leaf=max_neighbors_per_leaf,
+        max_pair_queue=max_pair_queue_resolved,
+        process_block=process_block_resolved,
+        traversal_config=None,
         retry_logger=None,
         timing_callback=None,
+        compact_far_pair_capacity=compact_far_pair_capacity,
     )
     return _DualTreeArtifacts(
         interactions=None,

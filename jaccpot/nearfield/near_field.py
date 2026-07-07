@@ -18,6 +18,23 @@ from yggdrax.interactions import NodeNeighborList
 from yggdrax.tree import Tree
 
 
+_LARGE_N_NEARFIELD_DIAG_MODES = frozenset(
+    ("full", "self_only", "pairs_only", "zero")
+)
+
+
+def _large_n_nearfield_diag_mode() -> str:
+    mode = str(os.environ.get("JACCPOT_LARGE_N_NEARFIELD_DIAG_MODE", "full")).strip().lower()
+    return mode if mode in _LARGE_N_NEARFIELD_DIAG_MODES else "full"
+
+
+def _env_flag(name: str, default: bool = False) -> bool:
+    raw = os.environ.get(name)
+    if raw is None:
+        return bool(default)
+    return str(raw).strip().lower() in {"1", "true", "yes", "on"}
+
+
 @dataclass(frozen=True)
 class RadixFastLanePerfCounters:
     """Static-shape payload counters for radix fast-lane nearfield diagnostics."""
@@ -419,6 +436,42 @@ def _pair_contributions_batched(
 
     weighted = inv_dist3 * source_masses[:, None, :]
     accels = -G * jnp.sum(weighted[..., None] * diff, axis=2)
+    accels = jnp.where(target_mask[..., None], accels, 0.0)
+
+    if compute_potential:
+        potentials = -G * jnp.sum(inv_r * source_masses[:, None, :], axis=2)
+        potentials = jnp.where(target_mask, potentials, 0.0)
+        return accels, potentials
+
+    return accels, None
+
+
+@partial(jax.jit, static_argnames=("compute_potential",))
+def _pair_contributions_batched_componentwise(
+    target_positions: Array,
+    target_mask: Array,
+    source_positions: Array,
+    source_masses: Array,
+    source_mask: Array,
+    *,
+    softening_sq: Union[float, Array],
+    G: Array,
+    compute_potential: bool,
+) -> Tuple[Array, Optional[Array]]:
+    """Vectorized pair contributions with explicit Cartesian components."""
+    dx = target_positions[:, :, None, 0] - source_positions[:, None, :, 0]
+    dy = target_positions[:, :, None, 1] - source_positions[:, None, :, 1]
+    dz = target_positions[:, :, None, 2] - source_positions[:, None, :, 2]
+    dist_sq = dx * dx + dy * dy + dz * dz + softening_sq
+    pair_mask = target_mask[:, :, None] & source_mask[:, None, :]
+
+    safe_dist_sq = jnp.where(pair_mask, dist_sq, jnp.ones_like(dist_sq))
+    inv_r = jnp.where(pair_mask, lax.rsqrt(safe_dist_sq), 0.0)
+    weighted = inv_r * inv_r * inv_r * source_masses[:, None, :]
+    accel_x = -G * jnp.sum(weighted * dx, axis=2)
+    accel_y = -G * jnp.sum(weighted * dy, axis=2)
+    accel_z = -G * jnp.sum(weighted * dz, axis=2)
+    accels = jnp.stack((accel_x, accel_y, accel_z), axis=-1)
     accels = jnp.where(target_mask[..., None], accels, 0.0)
 
     if compute_potential:
@@ -893,6 +946,8 @@ def _accumulate_target_block_tile_sequence(
     g_const: Array,
     softening_sq: Array,
     tile_unroll: int,
+    skip_empty_tiles: bool = False,
+    componentwise_pairs: bool = False,
 ) -> Array:
     """Accumulate target-leaf accelerations from fixed-shape tile sequences."""
     dtype = target_pos.dtype
@@ -918,41 +973,60 @@ def _accumulate_target_block_tile_sequence(
 
     def _tile_body(local_acc, tile_data):
         tile_source_ids, tile_source_valid = tile_data
-        safe_src_leaf_ids = jnp.where(tile_source_valid, tile_source_ids, 0)
 
-        src_pos = leaf_positions[safe_src_leaf_ids]
-        src_mass = leaf_masses[safe_src_leaf_ids]
-        src_mask = leaf_mask[safe_src_leaf_ids] & tile_source_valid[:, :, :, None]
+        def _apply_tile(acc_in):
+            safe_src_leaf_ids = jnp.where(tile_source_valid, tile_source_ids, 0)
+            src_pos = leaf_positions[safe_src_leaf_ids]
+            src_mass = leaf_masses[safe_src_leaf_ids]
+            src_mask = leaf_mask[safe_src_leaf_ids] & tile_source_valid[:, :, :, None]
 
-        flat_src_pos = src_pos.reshape(
-            (leaf_batch * block_tile * block_size, leaf_size, 3)
-        )
-        flat_src_mass = src_mass.reshape(
-            (leaf_batch * block_tile * block_size, leaf_size)
-        )
-        flat_src_mask = src_mask.reshape(
-            (leaf_batch * block_tile * block_size, leaf_size)
-        )
-        flat_pair_valid = tile_source_valid.reshape(
-            (leaf_batch * block_tile * block_size)
-        )
-        flat_target_mask = flat_target_mask_base & flat_pair_valid[:, None]
+            flat_src_pos = src_pos.reshape(
+                (leaf_batch * block_tile * block_size, leaf_size, 3)
+            )
+            flat_src_mass = src_mass.reshape(
+                (leaf_batch * block_tile * block_size, leaf_size)
+            )
+            flat_src_mask = src_mask.reshape(
+                (leaf_batch * block_tile * block_size, leaf_size)
+            )
+            flat_pair_valid = tile_source_valid.reshape(
+                (leaf_batch * block_tile * block_size)
+            )
+            flat_target_mask = flat_target_mask_base & flat_pair_valid[:, None]
 
-        pair_acc, _ = _pair_contributions_batched(
-            flat_target_pos_base,
-            flat_target_mask,
-            flat_src_pos,
-            flat_src_mass,
-            flat_src_mask,
-            softening_sq=softening_sq,
-            G=g_const,
-            compute_potential=False,
-        )
-        tile_acc = jnp.sum(
-            pair_acc.reshape((leaf_batch, block_tile, block_size, leaf_size, 3)),
-            axis=(1, 2),
-        )
-        return local_acc + tile_acc, None
+            pair_reducer = (
+                _pair_contributions_batched_componentwise
+                if bool(componentwise_pairs)
+                else _pair_contributions_batched
+            )
+            pair_acc, _ = pair_reducer(
+                flat_target_pos_base,
+                flat_target_mask,
+                flat_src_pos,
+                flat_src_mass,
+                flat_src_mask,
+                softening_sq=softening_sq,
+                G=g_const,
+                compute_potential=False,
+            )
+            tile_acc = jnp.sum(
+                pair_acc.reshape(
+                    (leaf_batch, block_tile, block_size, leaf_size, 3)
+                ),
+                axis=(1, 2),
+            )
+            return acc_in + tile_acc
+
+        if bool(skip_empty_tiles):
+            local_acc = lax.cond(
+                jnp.any(tile_source_valid),
+                _apply_tile,
+                lambda acc_in: acc_in,
+                local_acc,
+            )
+        else:
+            local_acc = _apply_tile(local_acc)
+        return local_acc, None
 
     target_leaf_acc, _ = lax.scan(
         _tile_body,
@@ -1006,6 +1080,8 @@ def _compute_target_block_pairs_from_source_tiles(
     target_leaf_batch_size: int,
     target_block_tile_scan_unroll: int,
     target_block_batch_scan_unroll: int,
+    skip_empty_tiles: bool = False,
+    componentwise_pairs: bool = False,
 ) -> Array:
     """Evaluate TONB pair contributions from canonical [tile, leaf, lane_block, lane] tensors."""
     num_leaves = int(leaf_positions.shape[0])
@@ -1051,6 +1127,8 @@ def _compute_target_block_pairs_from_source_tiles(
             g_const=g_const,
             softening_sq=softening_sq,
             tile_unroll=tile_unroll,
+            skip_empty_tiles=bool(skip_empty_tiles),
+            componentwise_pairs=bool(componentwise_pairs),
         )
         return jnp.where(target_active[:, None, None], target_leaf_acc, 0.0)
 
@@ -1196,6 +1274,9 @@ def _compute_leaf_p2p_prepared_large_n_pairs_target_blocks_impl(
         "target_block_tile_size",
         "target_block_tile_scan_unroll",
         "target_block_batch_scan_unroll",
+        "occupancy_sort",
+        "skip_empty_tiles",
+        "componentwise_pairs",
     ),
 )
 def _compute_leaf_p2p_prepared_large_n_pairs_target_blocks_prepacked_impl(
@@ -1213,6 +1294,9 @@ def _compute_leaf_p2p_prepared_large_n_pairs_target_blocks_prepacked_impl(
     target_block_tile_size: int,
     target_block_tile_scan_unroll: int,
     target_block_batch_scan_unroll: int,
+    occupancy_sort: bool = False,
+    skip_empty_tiles: bool = False,
+    componentwise_pairs: bool = False,
 ) -> Array:
     """Target-major prepacked TONB path over [leaf, block, lane] prepared layout."""
     dtype = positions.dtype
@@ -1234,6 +1318,23 @@ def _compute_leaf_p2p_prepared_large_n_pairs_target_blocks_prepacked_impl(
 
     source_leaf_ids_all = block_source_leaf_ids_padded
     source_valid_all = block_valid_mask_padded
+    if bool(occupancy_sort):
+        block_counts = jnp.sum(jnp.any(source_valid_all, axis=-1), axis=1)
+        leaf_order = jnp.argsort(block_counts, stable=True)
+        old_to_new = jnp.zeros((num_leaves,), dtype=INDEX_DTYPE).at[leaf_order].set(
+            jnp.arange(num_leaves, dtype=INDEX_DTYPE)
+        )
+        source_leaf_ids_all = source_leaf_ids_all[leaf_order]
+        source_valid_all = source_valid_all[leaf_order]
+        source_leaf_ids_all = jnp.where(
+            source_valid_all,
+            old_to_new[source_leaf_ids_all],
+            0,
+        )
+        leaf_positions = leaf_positions[leaf_order]
+        leaf_masses = leaf_masses[leaf_order]
+        leaf_mask = leaf_mask[leaf_order]
+        leaf_particle_idx = leaf_particle_idx[leaf_order]
     if padded_blocks != max_blocks:
         pad_blocks = padded_blocks - max_blocks
         source_leaf_ids_all = jnp.pad(
@@ -1273,6 +1374,8 @@ def _compute_leaf_p2p_prepared_large_n_pairs_target_blocks_prepacked_impl(
         target_leaf_batch_size=target_leaf_batch_size,
         target_block_tile_scan_unroll=target_block_tile_scan_unroll,
         target_block_batch_scan_unroll=target_block_batch_scan_unroll,
+        skip_empty_tiles=bool(skip_empty_tiles),
+        componentwise_pairs=bool(componentwise_pairs),
     )
 
 
@@ -2966,16 +3069,24 @@ def compute_leaf_p2p_accelerations_radix_fast_lane(
     leaf_mask = target_particle_mask
     leaf_particle_idx = safe_target_particle_ids
 
+    diag_mode = _large_n_nearfield_diag_mode()
+    if diag_mode == "zero":
+        return jnp.zeros_like(positions)
+
     softening_sq = jnp.asarray(float(softening) ** 2, dtype=positions.dtype)
-    self_acc = _compute_leaf_p2p_prepared_large_n_self_only_impl(
-        positions,
-        leaf_positions,
-        leaf_masses,
-        leaf_mask,
-        leaf_particle_idx,
-        G=G,
-        softening_sq=softening_sq,
-    )
+    self_acc = jnp.zeros_like(positions)
+    if diag_mode != "pairs_only":
+        self_acc = _compute_leaf_p2p_prepared_large_n_self_only_impl(
+            positions,
+            leaf_positions,
+            leaf_masses,
+            leaf_mask,
+            leaf_particle_idx,
+            G=G,
+            softening_sq=softening_sq,
+        )
+    if diag_mode == "self_only":
+        return self_acc
 
     if int(source_particle_ids.size) == 0:
         # Migration fallback: retain previous prepacked source-leaf path when
@@ -2992,6 +3103,18 @@ def compute_leaf_p2p_accelerations_radix_fast_lane(
             1,
             int(getattr(payload, "fallback_block_tile_size", 8)),
         )
+        occupancy_sort = _env_flag(
+            "JACCPOT_LARGE_N_RADIX_FAST_OCCUPANCY_SORT",
+            True,
+        )
+        skip_empty_tiles = _env_flag(
+            "JACCPOT_LARGE_N_RADIX_FAST_SKIP_EMPTY_TILES",
+            True,
+        )
+        componentwise_pairs = _env_flag(
+            "JACCPOT_LARGE_N_RADIX_FAST_COMPONENTWISE_PAIRS",
+            True,
+        )
         pair_acc = (
             _compute_leaf_p2p_prepared_large_n_pairs_target_blocks_prepacked_impl(
                 positions,
@@ -3007,6 +3130,9 @@ def compute_leaf_p2p_accelerations_radix_fast_lane(
                 target_block_tile_size=int(fallback_block_tile_size),
                 target_block_tile_scan_unroll=int(tile_scan_unroll),
                 target_block_batch_scan_unroll=int(batch_scan_unroll),
+                occupancy_sort=bool(occupancy_sort),
+                skip_empty_tiles=bool(skip_empty_tiles),
+                componentwise_pairs=bool(componentwise_pairs),
             )
         )
         return self_acc + pair_acc

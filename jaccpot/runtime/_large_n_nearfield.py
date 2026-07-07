@@ -24,6 +24,14 @@ from ._nearfield_cache import NearfieldPrecomputeArtifacts
 from .dtypes import INDEX_DTYPE, as_index
 
 _RADIX_FAST_LANE_DEFAULT_TARGET_BLOCK_SIZE = 32
+_LARGE_N_NEARFIELD_DIAG_MODES = frozenset(
+    ("full", "self_only", "pairs_only", "overflow_only", "zero")
+)
+
+
+def normalize_large_n_nearfield_diag_mode() -> str:
+    mode = str(os.environ.get("JACCPOT_LARGE_N_NEARFIELD_DIAG_MODE", "full")).strip().lower()
+    return mode if mode in _LARGE_N_NEARFIELD_DIAG_MODES else "full"
 
 
 def build_large_n_leaf_particle_groups(
@@ -213,6 +221,7 @@ def build_large_n_target_owned_blocks_static(
     neighbor_list: NodeNeighborList,
     block_size: int,
     max_blocks_per_leaf: int,
+    check_capacity: bool = True,
 ) -> tuple[Array, Array, bool]:
     """Build fixed-capacity target-owned source-leaf blocks.
 
@@ -243,15 +252,24 @@ def build_large_n_target_owned_blocks_static(
             jnp.zeros((0, max_blocks, k), dtype=bool),
             True,
         )
-
-    counts = offsets[1:] - offsets[:-1]
-    max_count = int(jnp.max(counts)) if int(counts.shape[0]) > 0 else 0
-    if max_count > max_blocks * k:
+    if int(neighbors.shape[0]) == 0:
+        # Tiny-N edge case: no neighbor edges exist yet; keep static
+        # target-block layout shape-stable with all-invalid slots.
         return (
             jnp.zeros((num_leaves, max_blocks, k), dtype=INDEX_DTYPE),
             jnp.zeros((num_leaves, max_blocks, k), dtype=bool),
-            False,
+            True,
         )
+
+    counts = offsets[1:] - offsets[:-1]
+    if bool(check_capacity):
+        max_count = int(jnp.max(counts)) if int(counts.shape[0]) > 0 else 0
+        if max_count > max_blocks * k:
+            return (
+                jnp.zeros((num_leaves, max_blocks, k), dtype=INDEX_DTYPE),
+                jnp.zeros((num_leaves, max_blocks, k), dtype=bool),
+                False,
+            )
 
     total_nodes = int(node_ranges.shape[0])
     leaf_lookup = jnp.full((total_nodes,), -1, dtype=INDEX_DTYPE)
@@ -387,21 +405,27 @@ def evaluate_large_n_nearfield_fast_lane(
             leaf_particle_mask_override=leaf_particle_mask_override,
         )
 
+    diag_mode = normalize_large_n_nearfield_diag_mode()
+    if diag_mode == "zero":
+        return jnp.zeros_like(state.positions_sorted)
+
     if state.radix_fast_payload is None:
         raise RuntimeError(
             "radix fast-lane evaluate requires radix_fast_payload to be present"
         )
 
-    near_acc = compute_leaf_p2p_accelerations_radix_fast_lane(
-        positions_sorted=state.positions_sorted,
-        masses_sorted=state.masses_sorted,
-        payload=state.radix_fast_payload,
-        G=getattr(fmm, "G"),
-        softening=float(getattr(fmm, "softening")),
-        return_potential=False,
-    )
+    near_acc = jnp.zeros_like(state.positions_sorted)
+    if diag_mode != "overflow_only":
+        near_acc = compute_leaf_p2p_accelerations_radix_fast_lane(
+            positions_sorted=state.positions_sorted,
+            masses_sorted=state.masses_sorted,
+            payload=state.radix_fast_payload,
+            G=getattr(fmm, "G"),
+            softening=float(getattr(fmm, "softening")),
+            return_potential=False,
+        )
     overflow_payload = getattr(state, "radix_overflow_payload", None)
-    if overflow_payload is not None:
+    if overflow_payload is not None and diag_mode in ("full", "overflow_only"):
         return near_acc + compute_leaf_p2p_accelerations_radix_payload_pairs_only(
             positions_sorted=state.positions_sorted,
             masses_sorted=state.masses_sorted,
@@ -416,6 +440,7 @@ def evaluate_large_n_nearfield_fast_lane(
         or state.nearfield_target_block_source_leaf_ids is None
         or state.nearfield_target_block_valid_mask is None
         or int(state.nearfield_target_block_source_leaf_ids.size) == 0
+        or diag_mode not in ("full", "overflow_only")
     ):
         return near_acc
 
