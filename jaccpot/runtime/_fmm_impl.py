@@ -4238,6 +4238,78 @@ class FastMultipoleMethod:
         prepared_out = prepared_curr if return_prepared_state else None
         return state_curr, prepared_out, history_out
 
+    def strict_fused_prepared_eval_fn(
+        self: "FastMultipoleMethod",
+        *,
+        positions: Array,
+        masses: Array,
+        leaf_size: int,
+        max_order: int,
+        theta: Optional[float] = None,
+    ) -> tuple[PreparedStateLike, Callable[[PreparedStateLike], Array]]:
+        """Build a fused-lane prepared state and return a jitted eval-only closure.
+
+        Isolates the *evaluate* cost of the strict fused static-radix lane for
+        apples-to-apples benchmarking against functional FMM eval APIs (e.g.
+        jaxfmm ``eval_potential``): the prepared state is built eagerly with the
+        fused device-mode layout (optimized flat compact far-pairs + static
+        target-block near-field), exactly as ``strict_run_v2`` bootstraps it, and
+        the returned closure runs the same self-force evaluation the fused step
+        runs per endpoint (``evaluate_large_n_state``) with **no refresh and no
+        velocity-Verlet update**.
+
+        Returns ``(prepared_state, eval_fn)``; time ``eval_fn(prepared_state)``.
+        """
+        positions_arr = jnp.asarray(positions)
+        masses_arr = jnp.asarray(masses)
+        if not self._is_large_n_gpu_production_profile():
+            raise RuntimeError(
+                "strict_fused_prepared_eval_fn requires large_n_gpu production profile."
+            )
+        fused_mode_requested = bool(getattr(self, "_strict_fused_mode_enabled", False))
+        fused_mode_allowed = self._strict_fused_profile_allows_n(
+            int(positions_arr.shape[0])
+        )
+        self._strict_fused_mode_active = bool(fused_mode_requested and fused_mode_allowed)
+        if not self._strict_fused_mode_active:
+            raise RuntimeError(
+                "strict fused mode is not active for this particle count/config; "
+                "enable JACCPOT_STATIC_STRICT_FUSED_MODE and include N in "
+                "JACCPOT_STATIC_STRICT_FUSED_PROFILE_SET."
+            )
+        runtime_overrides = self._resolve_runtime_execution_overrides(
+            num_particles=int(positions_arr.shape[0])
+        )
+        prepared = self.prepare_state(
+            positions_arr,
+            masses_arr,
+            leaf_size=int(leaf_size),
+            max_order=int(max_order),
+            theta=theta,
+            jit_tree=self._jit_tree_default,
+            runtime_overrides_override=runtime_overrides,
+            fused_device_mode=True,
+        )
+        if not isinstance(prepared, LargeNPreparedState):
+            raise RuntimeError(
+                "strict fused eval-only requires a LargeNPreparedState."
+            )
+        self._record_large_n_eval_shape_diagnostics(prepared)
+
+        @jax.jit
+        def _eval(prepared_in: PreparedStateLike) -> Array:
+            return jnp.asarray(
+                evaluate_large_n_state(
+                    self,
+                    prepared_in,
+                    target_indices=None,
+                    return_potential=False,
+                    max_acc_derivative_order=0,
+                )
+            )
+
+        return prepared, _eval
+
     def _refresh_large_n_same_topology(
         self: "FastMultipoleMethod",
         prepared_state: LargeNPreparedState,

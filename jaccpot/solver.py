@@ -940,6 +940,29 @@ class FastMultipoleMethod:
             return_prepared_state=bool(return_prepared_state),
         )
 
+    def strict_fused_prepared_eval_fn(
+        self: "FastMultipoleMethod",
+        *,
+        positions: Array,
+        masses: Array,
+        leaf_size: int,
+        max_order: int,
+        theta: Optional[float] = None,
+    ) -> tuple[FMMPreparedState, Callable[[FMMPreparedState], Array]]:
+        """Fused-lane eval-only closure for apples-to-apples eval benchmarking.
+
+        Returns ``(prepared_state, eval_fn)``: the prepared state is built with the
+        fused device-mode layout, and ``eval_fn(prepared_state)`` runs the fused
+        self-force evaluation with no refresh or velocity-Verlet update.
+        """
+        return self._impl.strict_fused_prepared_eval_fn(
+            positions=positions,
+            masses=masses,
+            leaf_size=int(leaf_size),
+            max_order=int(max_order),
+            theta=theta,
+        )
+
     def update_multipoles_only(
         self: "FastMultipoleMethod",
         prepared_state: FMMPreparedState,
