@@ -12,7 +12,7 @@ import os
 import time
 import warnings
 from collections import OrderedDict
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from functools import lru_cache, partial
 from math import comb
 from typing import Any, Literal, NamedTuple, Optional, Union
@@ -81,7 +81,12 @@ from jaccpot.operators.complex_ops import (
     complex_rotation_blocks_to_z_solidfmm_batch,
     enforce_conjugate_symmetry_batch,
     evaluate_local_complex_derivative_tower_batch,
+    evaluate_local_complex_grad_analytic,
+    evaluate_local_complex_grad_analytic_preserve_dtype,
+    evaluate_local_complex_grad_order4_unrolled,
+    evaluate_local_complex_grad_analytic_batch,
     evaluate_local_complex_with_grad,
+    evaluate_local_complex_with_grad_analytic_batch,
     evaluate_local_complex_with_grad_batch,
     l2l_complex,
     l2l_complex_batch,
@@ -122,10 +127,12 @@ from ._adaptive_policy import (
     source_error_proxy_by_order_from_multipoles,
 )
 from ._interaction_cache import (
+    _compiled_refresh_dual_planner_route,
     _build_dual_tree_artifacts,
     _DualTreeArtifacts,
     _interaction_cache_key,
     _InteractionCacheEntry,
+    _RefreshDualPlannerHint,
 )
 from ._large_n_pipeline import (
     can_use_large_n_prepare_path,
@@ -165,6 +172,80 @@ NearFieldMode = Literal["auto", "baseline", "bucketed"]
 JerkMode = Literal["fast_approx", "accurate"]
 PackedAccelerationDerivatives = tuple[Array, ...]
 PreparedStateLike = Union["FMMPreparedState", LargeNPreparedState]
+
+_STRICT_REFRESH_DIAG_MODES = frozenset(
+    {
+        "full",
+        "tree_only",
+        "upward_only",
+        "downward_only",
+        "eval_only",
+        "integrator_only",
+    }
+)
+
+_STRICT_REFRESH_DETAIL_DIAG_MODES = frozenset(
+    {
+        "full",
+        "tree_sort_only",
+        "tree_metadata_only",
+        "p2m_only",
+        "m2m_only",
+        "m2l_only",
+        "l2l_only",
+        "downward_artifacts_only",
+    }
+)
+
+
+def _velocity_verlet_state_update(
+    state: Array,
+    acceleration_current: Array,
+    acceleration_new: Array,
+    dt: Array,
+) -> Array:
+    """Complete a velocity-Verlet step after the endpoint force is known."""
+    state_arr = jnp.asarray(state)
+    dt_arr = jnp.asarray(dt, dtype=state_arr.dtype)
+    position_new = (
+        state_arr[:, 0]
+        + state_arr[:, 1] * dt_arr
+        + 0.5 * jnp.asarray(acceleration_current, dtype=state_arr.dtype) * dt_arr**2
+    )
+    velocity_new = state_arr[:, 1] + 0.5 * (
+        jnp.asarray(acceleration_current, dtype=state_arr.dtype)
+        + jnp.asarray(acceleration_new, dtype=state_arr.dtype)
+    ) * dt_arr
+    return state_arr.at[:, 0].set(position_new).at[:, 1].set(velocity_new)
+
+
+def _normalize_strict_refresh_diag_mode(raw: object) -> str:
+    mode = str(raw if raw is not None else "full").strip().lower()
+    if mode not in _STRICT_REFRESH_DIAG_MODES:
+        return "full"
+    return mode
+
+
+def _normalize_strict_refresh_detail_diag_mode(raw: object) -> str:
+    mode = str(raw if raw is not None else "full").strip().lower()
+    if mode not in _STRICT_REFRESH_DETAIL_DIAG_MODES:
+        return "full"
+    return mode
+
+
+def _strict_refresh_diag_stage_flags(mode: str) -> tuple[bool, bool, bool, bool]:
+    mode = _normalize_strict_refresh_diag_mode(mode)
+    if mode == "integrator_only":
+        return False, False, False, False
+    if mode == "eval_only":
+        return False, False, False, True
+    if mode == "tree_only":
+        return True, False, False, False
+    if mode == "upward_only":
+        return True, True, False, False
+    if mode == "downward_only":
+        return True, True, True, False
+    return True, True, True, True
 
 
 @dataclass(frozen=True)
@@ -768,6 +849,7 @@ def _grouped_segment_cache_put(
         > _GROUPED_SEGMENT_CACHE_TOTAL_MAX_BYTES
     ):
         _grouped_segment_cache.popitem(last=False)
+
 
 
 def _resolve_optional(value, preset_value, fallback):
@@ -1380,6 +1462,7 @@ class _FarPairCOO(NamedTuple):
 
     sources: Array
     targets: Array
+    active_count: Optional[Array] = None
 
 
 class _PrepareStateFarPairPlan(NamedTuple):
@@ -1409,6 +1492,7 @@ class _SolidFMMDownwardInteractionInputs(NamedTuple):
     src: Array
     tgt: Array
     pair_count: int
+    active_pair_count: Array
 
 
 class _SolidFMMDownwardMultipoleInputs(NamedTuple):
@@ -1500,14 +1584,21 @@ def _prepare_solidfmm_downward_interaction_inputs(
     if far_pairs_coo is not None:
         src = jnp.asarray(far_pairs_coo.sources, dtype=INDEX_DTYPE)
         tgt = jnp.asarray(far_pairs_coo.targets, dtype=INDEX_DTYPE)
+        active_pair_count = (
+            jnp.asarray(far_pairs_coo.active_count, dtype=INDEX_DTYPE)
+            if far_pairs_coo.active_count is not None
+            else jnp.asarray(src.shape[0], dtype=INDEX_DTYPE)
+        )
     else:
         src = jnp.asarray(resolved_interactions.sources, dtype=INDEX_DTYPE)
         tgt = jnp.asarray(resolved_interactions.targets, dtype=INDEX_DTYPE)
+        active_pair_count = jnp.asarray(src.shape[0], dtype=INDEX_DTYPE)
     return _SolidFMMDownwardInteractionInputs(
         interactions=resolved_interactions,
         src=src,
         tgt=tgt,
         pair_count=int(src.shape[0]),
+        active_pair_count=active_pair_count,
     )
 
 
@@ -1614,6 +1705,7 @@ def _solidfmm_downward_accumulate_from_multipoles(
     src: Array,
     tgt: Array,
     pair_count: int,
+    active_pair_count: Array,
     order: int,
     rotation_mode: str,
     total_nodes: int,
@@ -1675,6 +1767,7 @@ def _solidfmm_downward_accumulate_from_multipoles(
                 centers,
                 src,
                 tgt,
+                active_pair_count,
                 order=order,
                 rotation=rotation_mode,
                 total_nodes=total_nodes,
@@ -1686,6 +1779,7 @@ def _solidfmm_downward_accumulate_from_multipoles(
                 centers,
                 src,
                 tgt,
+                active_pair_count,
                 order=order,
                 rotation=rotation_mode,
                 total_nodes=total_nodes,
@@ -1890,6 +1984,11 @@ class FastMultipoleMethod:
         self._recent_dual_neighbor_count: int = 0
         self._recent_dual_far_pair_count: int = 0
         self._recent_dual_m2l_chunk_size: int = 0
+        self._static_radix_tree_leaf_count: int = 0
+        self._static_radix_tree_node_count: int = 0
+        self._static_radix_far_pair_count: int = 0
+        self._static_radix_m2l_chunk_count: int = 0
+        self._static_radix_l2l_edge_count: int = 0
         force_scale_mode_norm = str(mac_force_scale_mode).strip().lower()
         if force_scale_mode_norm not in ("prev", "prepass", "paper"):
             raise ValueError(
@@ -2103,6 +2202,18 @@ class FastMultipoleMethod:
         self._recent_retry_events: Tuple[DualTreeRetryEvent, ...] = tuple()
         self._compiled_profile_fingerprint_last: Optional[str] = None
         self._compiled_profile_transitions: int = 0
+        self._large_n_eval_leaf_nodes_shape: tuple[int, ...] = ()
+        self._large_n_eval_local_coefficients_shape: tuple[int, ...] = ()
+        self._large_n_eval_local_centers_shape: tuple[int, ...] = ()
+        self._large_n_eval_active_leaf_count: int = 0
+        self._large_n_eval_max_leaf_size: int = 0
+        self._large_n_eval_leaf_particle_slots: int = 0
+        self._large_n_radix_payload_present: bool = False
+        self._large_n_radix_payload_source_particle_shape: tuple[int, ...] = ()
+        self._large_n_radix_payload_source_particle_slots: int = 0
+        self._large_n_radix_payload_source_leaf_shape: tuple[int, ...] = ()
+        self._large_n_radix_payload_source_leaf_slots: int = 0
+        self._large_n_target_block_source_leaf_padded_shape: tuple[int, ...] = ()
         self._compiled_profile_refresh_calls: int = 0
         self._compiled_profile_refresh_reuse_tier_full: int = 0
         self._compiled_profile_refresh_reuse_tier_topology: int = 0
@@ -2118,6 +2229,8 @@ class FastMultipoleMethod:
         self._static_radix_refresh_hits: int = 0
         self._static_radix_refresh_misses: int = 0
         self._static_radix_profile_overflows: int = 0
+        self._static_radix_compact_pair_reuse_hits: int = 0
+        self._static_radix_compact_pair_reuse_misses: int = 0
         self._compiled_profile_multipoles_only_calls: int = 0
         self._compiled_profile_topology_rebuild_calls: int = 0
         self._large_n_overflow_profile_cap: int = 0
@@ -2172,6 +2285,205 @@ class FastMultipoleMethod:
         self._refresh_timing_nearfield_residual_seconds: float = 0.0
         self._refresh_timing_calls: int = 0
         self._refresh_timing_active: bool = False
+        self._refresh_timing_enabled: bool = (
+            str(os.environ.get("JACCPOT_REFRESH_TIMING_ENABLE", "0")).strip().lower()
+            in {"1", "true", "yes", "on"}
+        )
+        self._refresh_dual_planner_mode: str = str(
+            os.environ.get("JACCPOT_LARGE_N_REFRESH_DUAL_PLANNER_MODE", "auto")
+        ).strip().lower()
+        self._refresh_dual_planner_mode_on: bool = (
+            self._refresh_dual_planner_mode == "on"
+        )
+        self._refresh_dual_planner_mode_auto: bool = (
+            self._refresh_dual_planner_mode == "auto"
+        )
+        self._strict_gpu_mode: str = str(
+            os.environ.get("JACCPOT_STATIC_STRICT_GPU_MODE", "auto")
+        ).strip().lower()
+        self._strict_gpu_mode_on: bool = self._strict_gpu_mode == "on"
+        self._strict_gpu_mode_auto: bool = self._strict_gpu_mode == "auto"
+        self._strict_cap_record_enabled: bool = (
+            str(os.environ.get("JACCPOT_STATIC_STRICT_CAP_RECORD", "1"))
+            .strip()
+            .lower()
+            in {"1", "true", "yes", "on"}
+        )
+        self._strict_cap_require_exact_profile_match: bool = (
+            str(
+                os.environ.get(
+                    "JACCPOT_STATIC_STRICT_REQUIRE_EXACT_CAP_PROFILE_MATCH", "1"
+                )
+            )
+            .strip()
+            .lower()
+            in {"1", "true", "yes", "on"}
+        )
+        split_build_env_raw = os.environ.get(
+            "JACCPOT_PREPARE_STAGE_MEMORY_SPLIT_ENABLED"
+        )
+        self._prepare_stage_memory_split_env_override: Optional[bool] = (
+            None
+            if split_build_env_raw is None
+            else str(split_build_env_raw).strip().lower()
+            in {"1", "true", "yes", "on"}
+        )
+        self._planner_steady_timing_bypass_enabled: bool = (
+            str(
+                os.environ.get(
+                    "JACCPOT_LARGE_N_REFRESH_DUAL_PLANNER_STEADY_NO_SUBSTAGE_TIMING",
+                    "1",
+                )
+            ).strip().lower()
+            in {"1", "true", "yes", "on"}
+        )
+        self._strict_shared_env_applied: bool = False
+        self._refresh_dual_planner_cache: dict[str, _RefreshDualPlannerHint] = {}
+        self._refresh_dual_planner_cache_hits: int = 0
+        self._refresh_dual_planner_cache_misses: int = 0
+        self._refresh_dual_planner_compile_count: int = 0
+        self._refresh_dual_planner_execute_count: int = 0
+        self._refresh_dual_planner_steady_timing_bypass_count: int = 0
+        self._refresh_dual_planner_compiled_route_count: int = 0
+        self._refresh_strict_mode_active_count: int = 0
+        self._strict_runner_compile_count: int = 0
+        self._strict_runner_execute_count: int = 0
+        self._strict_runner_profile_key_hits: int = 0
+        self._strict_runner_profile_key_misses: int = 0
+        self._strict_runner_fail_fast_reject_count: int = 0
+        self._strict_runner_seen_profile_keys: set[str] = set()
+        self._strict_v2_compile_count: int = 0
+        self._strict_v2_execute_count: int = 0
+        self._strict_v2_profile_key_hits: int = 0
+        self._strict_v2_profile_key_misses: int = 0
+        self._strict_v2_fail_fast_reject_count: int = 0
+        self._strict_v2_seen_profile_keys: set[str] = set()
+        self._strict_fused_mode_raw: str = str(
+            os.environ.get("JACCPOT_STATIC_STRICT_FUSED_MODE", "off")
+        ).strip().lower()
+        self._strict_fused_mode_enabled: bool = self._strict_fused_mode_raw in {
+            "1",
+            "true",
+            "yes",
+            "on",
+        }
+        self._strict_fused_profile_set_raw: str = str(
+            os.environ.get("JACCPOT_STATIC_STRICT_FUSED_PROFILE_SET", "")
+        ).strip()
+        self._strict_fused_disable_hot_timing: bool = str(
+            os.environ.get("JACCPOT_STATIC_STRICT_FUSED_DISABLE_HOT_TIMING", "1")
+        ).strip().lower() in {"1", "true", "yes", "on"}
+        self._strict_fused_disable_rematerialize: bool = str(
+            os.environ.get("JACCPOT_STATIC_STRICT_FUSED_DISABLE_REMATERIALIZE", "0")
+        ).strip().lower() in {"1", "true", "yes", "on"}
+        self._strict_fused_disallow_host_segment_fallback: bool = str(
+            os.environ.get(
+                "JACCPOT_STATIC_STRICT_FUSED_DISALLOW_HOST_SEGMENT_FALLBACK",
+                "0",
+            )
+        ).strip().lower() in {"1", "true", "yes", "on"}
+        self._strict_fused_device_only: bool = str(
+            os.environ.get(
+                "JACCPOT_STATIC_STRICT_FUSED_DEVICE_ONLY",
+                "0",
+            )
+        ).strip().lower() in {"1", "true", "yes", "on"}
+        self._strict_fused_compiled_segment_loop: bool = str(
+            os.environ.get(
+                "JACCPOT_STATIC_STRICT_FUSED_COMPILED_SEGMENT_LOOP",
+                "1",
+            )
+        ).strip().lower() in {"1", "true", "yes", "on"}
+        self._strict_fused_jit_refresh_eval: bool = str(
+            os.environ.get(
+                "JACCPOT_STATIC_STRICT_FUSED_JIT_REFRESH_EVAL",
+                "1",
+            )
+        ).strip().lower() in {"1", "true", "yes", "on"}
+        self._large_n_eval_diag_mode: str = str(
+            os.environ.get("JACCPOT_LARGE_N_EVAL_DIAG_MODE", "full")
+        ).strip().lower()
+        if self._large_n_eval_diag_mode not in {
+            "full",
+            "near_only",
+            "far_only",
+            "local_only",
+            "near_zero",
+            "far_zero",
+            "permutation_only",
+            "zero",
+        }:
+            self._large_n_eval_diag_mode = "full"
+        self._large_n_nearfield_diag_mode: str = str(
+            os.environ.get("JACCPOT_LARGE_N_NEARFIELD_DIAG_MODE", "full")
+        ).strip().lower()
+        if self._large_n_nearfield_diag_mode not in {
+            "full",
+            "self_only",
+            "pairs_only",
+            "overflow_only",
+            "zero",
+        }:
+            self._large_n_nearfield_diag_mode = "full"
+        self._strict_refresh_diag_mode: str = _normalize_strict_refresh_diag_mode(
+            os.environ.get("JACCPOT_STRICT_REFRESH_DIAG_MODE", "full")
+        )
+        self._strict_refresh_detail_diag_mode: str = (
+            _normalize_strict_refresh_detail_diag_mode(
+                os.environ.get("JACCPOT_STRICT_REFRESH_DETAIL_DIAG_MODE", "full")
+            )
+        )
+        self._static_radix_reuse_structures: bool = str(
+            os.environ.get("JACCPOT_STATIC_RADIX_REUSE_STRUCTURES", "0")
+        ).strip().lower() in {"1", "true", "yes", "on"}
+        self._static_radix_upward_batched: bool = str(
+            os.environ.get("JACCPOT_STATIC_RADIX_UPWARD_BATCHED", "0")
+        ).strip().lower() in {"1", "true", "yes", "on"}
+        self._static_radix_downward_batched: bool = str(
+            os.environ.get("JACCPOT_STATIC_RADIX_DOWNWARD_BATCHED", "0")
+        ).strip().lower() in {"1", "true", "yes", "on"}
+        (
+            self._strict_refresh_diag_tree_active,
+            self._strict_refresh_diag_upward_active,
+            self._strict_refresh_diag_downward_active,
+            self._strict_refresh_diag_eval_active,
+        ) = _strict_refresh_diag_stage_flags(self._strict_refresh_diag_mode)
+        self._strict_fused_mode_active: bool = False
+        self._strict_fused_compile_count: int = 0
+        self._strict_fused_execute_count: int = 0
+        self._strict_fused_profile_key_hits: int = 0
+        self._strict_fused_profile_key_misses: int = 0
+        self._strict_fused_fallback_count: int = 0
+        self._strict_fused_last_fallback_reason: str = ""
+        self._strict_fused_device_refresh_route_count: int = 0
+        self._strict_fused_planner_bypassed_count: int = 0
+        self._strict_velocity_verlet_acceleration_carry_active: bool = False
+        self._strict_self_force_bootstrap_evaluations: int = 0
+        self._strict_self_force_endpoint_evaluations: int = 0
+        self._strict_external_bootstrap_evaluations: int = 0
+        self._strict_external_endpoint_evaluations: int = 0
+        self._strict_static_target_block_capacity_ok: bool = True
+        self._large_n_radix_fast_occupancy_sort: bool = str(
+            os.environ.get("JACCPOT_LARGE_N_RADIX_FAST_OCCUPANCY_SORT", "1")
+        ).strip().lower() in {"1", "true", "yes", "on"}
+        self._large_n_radix_fast_skip_empty_tiles: bool = str(
+            os.environ.get("JACCPOT_LARGE_N_RADIX_FAST_SKIP_EMPTY_TILES", "1")
+        ).strip().lower() in {"1", "true", "yes", "on"}
+        self._strict_fused_seen_profile_keys: set[str] = set()
+        self._strict_fused_fastlane_diag_enabled: bool = str(
+            os.environ.get("JACCPOT_STATIC_STRICT_FUSED_FASTLANE_DIAG", "1")
+        ).strip().lower() in {"1", "true", "yes", "on"}
+        self._strict_fused_fastlane_attempts: int = 0
+        self._strict_fused_fastlane_hits: int = 0
+        self._strict_fused_fastlane_misses: int = 0
+        self._strict_fused_fastlane_last_blockers: tuple[str, ...] = tuple()
+        self._strict_fused_fastlane_block_counts: dict[str, int] = {}
+        self._strict_fused_jit_function_cache: dict[tuple[Any, ...], tuple[Any, ...]] = {}
+        self._strict_profiled_max_pair_queue: int = 0
+        self._strict_profiled_pair_process_block: int = 0
+        self._strict_profiled_context_key: str = ""
+        self._strict_profile_catalog: dict[str, dict[str, int]] = {}
+        self._strict_profile_loaded_once: bool = False
         self.fixed_order = fixed_order
         self.fixed_max_leaf_size = fixed_max_leaf_size
         self._explicit_m2l_chunk_size = m2l_chunk_size is not None
@@ -2181,15 +2493,37 @@ class FastMultipoleMethod:
         self._explicit_pair_process_block = pair_process_block is not None
         self._explicit_grouped_interactions = grouped_interactions is not None
         self.grouped_interactions = grouped_interactions
-        self._apply_large_n_gpu_production_contract()
-
-    def _is_large_n_gpu_production_profile(self) -> bool:
-        """Whether this solver should run the canonical large-N GPU contract."""
-        return (
+        self._streamed_minimum_memory_gpu_default_split_build: bool = bool(
+            self.memory_objective == "minimum_memory"
+            and jax.default_backend() == "gpu"
+            and self.tree_type == "radix"
+            and self.expansion_basis == "solidfmm"
+            and bool(self.streamed_far_pairs)
+        )
+        self._large_n_gpu_production_profile_cached: bool = (
             str(self.preset).strip().lower() == "large_n_gpu"
             and str(self.tree_type).strip().lower() == "radix"
             and str(self.expansion_basis).strip().lower() == "solidfmm"
             and str(self.execution_backend).strip().lower() != "octree"
+        )
+        self._static_runtime_fixed_sizing: bool = str(
+            os.environ.get("JACCPOT_STATIC_RUNTIME_FIXED_SIZING", "1")
+        ).strip().lower() in {"1", "true", "yes", "on"}
+        self._apply_large_n_gpu_production_contract()
+
+    def _is_large_n_gpu_production_profile(self) -> bool:
+        """Whether this solver should run the canonical large-N GPU contract."""
+        return bool(
+            getattr(
+                self,
+                "_large_n_gpu_production_profile_cached",
+                (
+                    str(self.preset).strip().lower() == "large_n_gpu"
+                    and str(self.tree_type).strip().lower() == "radix"
+                    and str(self.expansion_basis).strip().lower() == "solidfmm"
+                    and str(self.execution_backend).strip().lower() != "octree"
+                ),
+            )
         )
 
     def _apply_large_n_gpu_production_contract(self) -> None:
@@ -2324,6 +2658,18 @@ class FastMultipoleMethod:
         self._recent_dual_m2l_chunk_size = 0
         self._compiled_profile_fingerprint_last = None
         self._compiled_profile_transitions = 0
+        self._large_n_eval_leaf_nodes_shape = ()
+        self._large_n_eval_local_coefficients_shape = ()
+        self._large_n_eval_local_centers_shape = ()
+        self._large_n_eval_active_leaf_count = 0
+        self._large_n_eval_max_leaf_size = 0
+        self._large_n_eval_leaf_particle_slots = 0
+        self._large_n_radix_payload_present = False
+        self._large_n_radix_payload_source_particle_shape = ()
+        self._large_n_radix_payload_source_particle_slots = 0
+        self._large_n_radix_payload_source_leaf_shape = ()
+        self._large_n_radix_payload_source_leaf_slots = 0
+        self._large_n_target_block_source_leaf_padded_shape = ()
         self._compiled_profile_refresh_calls = 0
         self._compiled_profile_refresh_reuse_tier_full = 0
         self._compiled_profile_refresh_reuse_tier_topology = 0
@@ -2339,6 +2685,8 @@ class FastMultipoleMethod:
         self._static_radix_refresh_hits = 0
         self._static_radix_refresh_misses = 0
         self._static_radix_profile_overflows = 0
+        self._static_radix_compact_pair_reuse_hits = 0
+        self._static_radix_compact_pair_reuse_misses = 0
         self._compiled_profile_multipoles_only_calls = 0
         self._compiled_profile_topology_rebuild_calls = 0
         self._large_n_overflow_profile_cap = 0
@@ -2393,7 +2741,199 @@ class FastMultipoleMethod:
         self._refresh_timing_nearfield_residual_seconds = 0.0
         self._refresh_timing_calls = 0
         self._refresh_timing_active = False
+        self._refresh_dual_planner_cache = {}
+        self._refresh_dual_planner_cache_hits = 0
+        self._refresh_dual_planner_cache_misses = 0
+        self._refresh_dual_planner_compile_count = 0
+        self._refresh_dual_planner_execute_count = 0
+        self._refresh_dual_planner_steady_timing_bypass_count = 0
+        self._refresh_dual_planner_compiled_route_count = 0
+        self._refresh_strict_mode_active_count = 0
+        self._strict_runner_compile_count = 0
+        self._strict_runner_execute_count = 0
+        self._strict_runner_profile_key_hits = 0
+        self._strict_runner_profile_key_misses = 0
+        self._strict_runner_fail_fast_reject_count = 0
+        self._strict_runner_seen_profile_keys = set()
+        self._strict_v2_compile_count = 0
+        self._strict_v2_execute_count = 0
+        self._strict_v2_profile_key_hits = 0
+        self._strict_v2_profile_key_misses = 0
+        self._strict_v2_fail_fast_reject_count = 0
+        self._strict_v2_seen_profile_keys = set()
+        self._strict_fused_mode_active = False
+        self._strict_fused_compile_count = 0
+        self._strict_fused_execute_count = 0
+        self._strict_fused_profile_key_hits = 0
+        self._strict_fused_profile_key_misses = 0
+        self._strict_fused_fallback_count = 0
+        self._strict_fused_last_fallback_reason = ""
+        self._strict_fused_device_refresh_route_count = 0
+        self._strict_fused_planner_bypassed_count = 0
+        self._strict_velocity_verlet_acceleration_carry_active = False
+        self._strict_self_force_bootstrap_evaluations = 0
+        self._strict_self_force_endpoint_evaluations = 0
+        self._strict_external_bootstrap_evaluations = 0
+        self._strict_external_endpoint_evaluations = 0
+        self._strict_static_target_block_capacity_ok = True
+        self._strict_fused_seen_profile_keys = set()
+        self._strict_fused_fastlane_attempts = 0
+        self._strict_fused_fastlane_hits = 0
+        self._strict_fused_fastlane_misses = 0
+        self._strict_fused_fastlane_last_blockers = tuple()
+        self._strict_fused_fastlane_block_counts = {}
+        self._strict_fused_jit_function_cache = {}
+        self._strict_profiled_max_pair_queue = 0
+        self._strict_profiled_pair_process_block = 0
+        self._strict_profiled_context_key = ""
+        self._strict_profile_catalog = {}
+        self._strict_profile_loaded_once = False
         _clear_global_runtime_caches(clear_jax_compilation=bool(clear_jax_compilation))
+
+    def _strict_cap_profile_path(self) -> str:
+        return str(
+            os.environ.get(
+                "JACCPOT_STATIC_STRICT_CAP_PROFILE_PATH",
+                "/tmp/jaccpot_static_strict_caps.json",
+            )
+        )
+
+    def _strict_cap_profile_context_key(
+        self,
+        *,
+        tree_mode: str,
+        leaf_parameter: int,
+        particle_count: int,
+    ) -> str:
+        return (
+            f"tree_mode={str(tree_mode).strip().lower()}|"
+            f"leaf={int(leaf_parameter)}|n={int(particle_count)}"
+        )
+
+    def _maybe_load_strict_cap_profile(self, *, context_key: Optional[str] = None) -> None:
+        if self._strict_profile_loaded_once:
+            if context_key is not None:
+                self._apply_strict_cap_profile_for_key(context_key=context_key)
+            return
+        self._strict_profile_loaded_once = True
+        try:
+            path = self._strict_cap_profile_path()
+            if not os.path.exists(path):
+                return
+            payload = json.load(open(path, "r", encoding="utf-8"))
+            if isinstance(payload, dict) and isinstance(payload.get("profiles"), dict):
+                self._strict_profile_catalog = {
+                    str(k): {
+                        "max_pair_queue": int(v.get("max_pair_queue", 0) or 0),
+                        "pair_process_block": int(v.get("pair_process_block", 0) or 0),
+                    }
+                    for k, v in payload["profiles"].items()
+                    if isinstance(v, dict)
+                }
+            else:
+                # Backward compatibility with the original single-profile payload.
+                q = int(payload.get("max_pair_queue", 0) or 0)
+                b = int(payload.get("pair_process_block", 0) or 0)
+                self._strict_profile_catalog = {
+                    "legacy_default": {
+                        "max_pair_queue": q,
+                        "pair_process_block": b,
+                    }
+                }
+            if context_key is not None:
+                self._apply_strict_cap_profile_for_key(context_key=context_key)
+            elif len(self._strict_profile_catalog) > 0:
+                # Preserve previous behavior when no context is supplied.
+                self._apply_strict_cap_profile_for_key(context_key="legacy_default")
+        except Exception:
+            return
+
+    def _apply_strict_cap_profile_for_key(self, *, context_key: str) -> None:
+        selected_key = ""
+        selected = self._strict_profile_catalog.get(context_key)
+        if selected is not None:
+            selected_key = context_key
+        else:
+            # Conservative fallback: keep same tree_mode+leaf and pick the largest queue.
+            prefix = "|".join(str(context_key).split("|")[:2])
+            best_q = 0
+            best_entry: Optional[dict[str, int]] = None
+            best_key = ""
+            for key, entry in self._strict_profile_catalog.items():
+                if not str(key).startswith(prefix):
+                    continue
+                q = int(entry.get("max_pair_queue", 0) or 0)
+                if q >= best_q:
+                    best_q = q
+                    best_entry = entry
+                    best_key = str(key)
+            if best_entry is not None:
+                selected = best_entry
+                selected_key = best_key
+            else:
+                selected = self._strict_profile_catalog.get("legacy_default")
+                selected_key = "legacy_default" if selected is not None else ""
+        if selected is None:
+            return
+        q = int(selected.get("max_pair_queue", 0) or 0)
+        b = int(selected.get("pair_process_block", 0) or 0)
+        if q > 0:
+            self._strict_profiled_max_pair_queue = q
+        if b > 0:
+            self._strict_profiled_pair_process_block = b
+        if selected_key:
+            self._strict_profiled_context_key = selected_key
+
+    def _record_strict_cap_profile_from_retries(
+        self,
+        retry_events: Tuple[DualTreeRetryEvent, ...],
+        *,
+        context_key: Optional[str] = None,
+    ) -> None:
+        if len(retry_events) == 0:
+            return
+        max_queue = int(self._strict_profiled_max_pair_queue)
+        max_block = int(self._strict_profiled_pair_process_block)
+        for ev in retry_events:
+            try:
+                q = int(getattr(ev, "queue_capacity", 0) or 0)
+            except Exception:
+                q = 0
+            if q > max_queue:
+                max_queue = q
+        block_hint = int(self.pair_process_block or 0)
+        if block_hint > max_block:
+            max_block = block_hint
+        if max_queue <= 0 and max_block <= 0:
+            return
+        self._strict_profiled_max_pair_queue = max_queue
+        self._strict_profiled_pair_process_block = max_block
+        if context_key is not None:
+            self._strict_profiled_context_key = str(context_key)
+            existing = self._strict_profile_catalog.get(str(context_key), {})
+            self._strict_profile_catalog[str(context_key)] = {
+                "max_pair_queue": max(
+                    int(existing.get("max_pair_queue", 0) or 0),
+                    int(max_queue),
+                ),
+                "pair_process_block": max(
+                    int(existing.get("pair_process_block", 0) or 0),
+                    int(max_block),
+                ),
+            }
+        if not bool(getattr(self, "_strict_cap_record_enabled", True)):
+            return
+        try:
+            path = self._strict_cap_profile_path()
+            payload = {
+                "version": 2,
+                "active_context_key": str(self._strict_profiled_context_key),
+                "profiles": self._strict_profile_catalog,
+            }
+            with open(path, "w", encoding="utf-8") as handle:
+                json.dump(payload, handle)
+        except Exception:
+            return
 
     def _compiled_profile_from_prepared_state(
         self: "FastMultipoleMethod",
@@ -2471,6 +3011,72 @@ class FastMultipoleMethod:
             "leaf_shapes": tuple(leaf_shapes),
         }
 
+    def _record_large_n_eval_shape_diagnostics(
+        self: "FastMultipoleMethod",
+        state: PreparedStateLike,
+    ) -> None:
+        """Record shape-only local-eval diagnostics outside compiled hot loops."""
+        neighbor_list = getattr(state, "neighbor_list", None)
+        leaf_nodes = (
+            getattr(neighbor_list, "leaf_indices", None)
+            if neighbor_list is not None
+            else None
+        )
+        local_data = getattr(state, "local_data", None)
+        coefficients = getattr(local_data, "coefficients", None)
+        centers = getattr(local_data, "centers", None)
+        leaf_particles = getattr(state, "nearfield_leaf_particle_indices", None)
+        radix_payload = getattr(state, "radix_fast_payload", None)
+        radix_source_particles = (
+            getattr(radix_payload, "source_particle_ids", None)
+            if radix_payload is not None
+            else None
+        )
+        radix_source_leaves = (
+            getattr(radix_payload, "source_leaf_ids", None)
+            if radix_payload is not None
+            else None
+        )
+        padded_source_leaves = getattr(
+            state, "nearfield_target_block_source_leaf_ids_padded", None
+        )
+
+        def _shape_tuple(value: Any) -> tuple[int, ...]:
+            shape = getattr(value, "shape", None)
+            if shape is None:
+                return ()
+            return tuple(int(v) for v in shape)
+
+        leaf_shape = _shape_tuple(leaf_nodes)
+        leaf_particle_shape = _shape_tuple(leaf_particles)
+        radix_source_particle_shape = _shape_tuple(radix_source_particles)
+        radix_source_leaf_shape = _shape_tuple(radix_source_leaves)
+        padded_source_leaf_shape = _shape_tuple(padded_source_leaves)
+        self._large_n_eval_leaf_nodes_shape = leaf_shape
+        self._large_n_eval_local_coefficients_shape = _shape_tuple(coefficients)
+        self._large_n_eval_local_centers_shape = _shape_tuple(centers)
+        self._large_n_eval_active_leaf_count = int(leaf_shape[0]) if leaf_shape else 0
+        self._large_n_eval_max_leaf_size = int(getattr(state, "max_leaf_size", 0))
+        self._large_n_eval_leaf_particle_slots = (
+            int(leaf_particle_shape[0] * leaf_particle_shape[1])
+            if len(leaf_particle_shape) >= 2
+            else 0
+        )
+        self._large_n_radix_payload_present = radix_payload is not None
+        self._large_n_radix_payload_source_particle_shape = radix_source_particle_shape
+        self._large_n_radix_payload_source_particle_slots = (
+            int(radix_source_particle_shape[0] * radix_source_particle_shape[1] * radix_source_particle_shape[2])
+            if len(radix_source_particle_shape) >= 3
+            else 0
+        )
+        self._large_n_radix_payload_source_leaf_shape = radix_source_leaf_shape
+        self._large_n_radix_payload_source_leaf_slots = (
+            int(radix_source_leaf_shape[0] * radix_source_leaf_shape[1] * radix_source_leaf_shape[2])
+            if len(radix_source_leaf_shape) >= 3
+            else 0
+        )
+        self._large_n_target_block_source_leaf_padded_shape = padded_source_leaf_shape
+
     def _compiled_profile_fingerprint(
         self: "FastMultipoleMethod", profile: dict[str, Any]
     ) -> str:
@@ -2503,6 +3109,23 @@ class FastMultipoleMethod:
         if prev is not None and profile_fingerprint != prev:
             self._compiled_profile_transitions += 1
         self._compiled_profile_fingerprint_last = profile_fingerprint
+
+    def _strict_fused_profile_allows_n(self: "FastMultipoleMethod", n: int) -> bool:
+        raw = str(getattr(self, "_strict_fused_profile_set_raw", "")).strip()
+        if raw == "":
+            return True
+        allowed: set[int] = set()
+        for token in raw.split(","):
+            t = token.strip()
+            if not t:
+                continue
+            try:
+                allowed.add(int(t))
+            except Exception:
+                continue
+        if not allowed:
+            return True
+        return int(n) in allowed
 
     def get_runtime_diagnostics(self: "FastMultipoleMethod") -> dict[str, Any]:
         """Return read-only runtime diagnostics for compile/profile reuse audits."""
@@ -2546,6 +3169,12 @@ class FastMultipoleMethod:
             "static_radix_refresh_hits": int(self._static_radix_refresh_hits),
             "static_radix_refresh_misses": int(self._static_radix_refresh_misses),
             "static_radix_profile_overflows": int(self._static_radix_profile_overflows),
+            "static_radix_compact_pair_reuse_hits": int(
+                self._static_radix_compact_pair_reuse_hits
+            ),
+            "static_radix_compact_pair_reuse_misses": int(
+                self._static_radix_compact_pair_reuse_misses
+            ),
             "update_multipoles_only_calls": int(
                 self._compiled_profile_multipoles_only_calls
             ),
@@ -2564,6 +3193,203 @@ class FastMultipoleMethod:
             ),
             "interaction_cache_hits": int(self._interaction_cache_hits),
             "interaction_cache_misses": int(self._interaction_cache_misses),
+            "refresh_dual_planner_cache_hits": int(
+                self._refresh_dual_planner_cache_hits
+            ),
+            "refresh_dual_planner_cache_misses": int(
+                self._refresh_dual_planner_cache_misses
+            ),
+            "refresh_dual_planner_compile_count": int(
+                self._refresh_dual_planner_compile_count
+            ),
+            "refresh_dual_planner_execute_count": int(
+                self._refresh_dual_planner_execute_count
+            ),
+            "refresh_dual_planner_steady_timing_bypass_count": int(
+                self._refresh_dual_planner_steady_timing_bypass_count
+            ),
+            "refresh_dual_planner_compiled_route_count": int(
+                self._refresh_dual_planner_compiled_route_count
+            ),
+            "refresh_strict_mode_active_count": int(
+                self._refresh_strict_mode_active_count
+            ),
+            "strict_runner_compile_count": int(self._strict_runner_compile_count),
+            "strict_runner_execute_count": int(self._strict_runner_execute_count),
+            "strict_runner_profile_key_hits": int(
+                self._strict_runner_profile_key_hits
+            ),
+            "strict_runner_profile_key_misses": int(
+                self._strict_runner_profile_key_misses
+            ),
+            "strict_runner_fail_fast_reject_count": int(
+                self._strict_runner_fail_fast_reject_count
+            ),
+            "strict_v2_compile_count": int(self._strict_v2_compile_count),
+            "strict_v2_execute_count": int(self._strict_v2_execute_count),
+            "strict_v2_profile_key_hits": int(self._strict_v2_profile_key_hits),
+            "strict_v2_profile_key_misses": int(self._strict_v2_profile_key_misses),
+            "strict_v2_fail_fast_reject_count": int(
+                self._strict_v2_fail_fast_reject_count
+            ),
+            "large_n_eval_diag_mode": str(
+                getattr(self, "_large_n_eval_diag_mode", "full")
+            ),
+            "large_n_nearfield_diag_mode": str(
+                getattr(self, "_large_n_nearfield_diag_mode", "full")
+            ),
+            "large_n_eval_leaf_nodes_shape": tuple(
+                getattr(self, "_large_n_eval_leaf_nodes_shape", ())
+            ),
+            "large_n_eval_local_coefficients_shape": tuple(
+                getattr(self, "_large_n_eval_local_coefficients_shape", ())
+            ),
+            "large_n_eval_local_centers_shape": tuple(
+                getattr(self, "_large_n_eval_local_centers_shape", ())
+            ),
+            "large_n_eval_active_leaf_count": int(
+                getattr(self, "_large_n_eval_active_leaf_count", 0)
+            ),
+            "large_n_eval_max_leaf_size": int(
+                getattr(self, "_large_n_eval_max_leaf_size", 0)
+            ),
+            "large_n_eval_leaf_particle_slots": int(
+                getattr(self, "_large_n_eval_leaf_particle_slots", 0)
+            ),
+            "large_n_radix_payload_present": bool(
+                getattr(self, "_large_n_radix_payload_present", False)
+            ),
+            "large_n_radix_payload_source_particle_shape": tuple(
+                getattr(self, "_large_n_radix_payload_source_particle_shape", ())
+            ),
+            "large_n_radix_payload_source_particle_slots": int(
+                getattr(self, "_large_n_radix_payload_source_particle_slots", 0)
+            ),
+            "large_n_radix_payload_source_leaf_shape": tuple(
+                getattr(self, "_large_n_radix_payload_source_leaf_shape", ())
+            ),
+            "large_n_radix_payload_source_leaf_slots": int(
+                getattr(self, "_large_n_radix_payload_source_leaf_slots", 0)
+            ),
+            "large_n_target_block_source_leaf_padded_shape": tuple(
+                getattr(self, "_large_n_target_block_source_leaf_padded_shape", ())
+            ),
+            "strict_refresh_diag_mode": str(
+                getattr(self, "_strict_refresh_diag_mode", "full")
+            ),
+            "strict_refresh_diag_tree_active": bool(
+                getattr(self, "_strict_refresh_diag_tree_active", True)
+            ),
+            "strict_refresh_diag_upward_active": bool(
+                getattr(self, "_strict_refresh_diag_upward_active", True)
+            ),
+            "strict_refresh_diag_downward_active": bool(
+                getattr(self, "_strict_refresh_diag_downward_active", True)
+            ),
+            "strict_refresh_diag_eval_active": bool(
+                getattr(self, "_strict_refresh_diag_eval_active", True)
+            ),
+            "strict_refresh_detail_diag_mode": str(
+                getattr(self, "_strict_refresh_detail_diag_mode", "full")
+            ),
+            "static_radix_reuse_structures": bool(
+                getattr(self, "_static_radix_reuse_structures", False)
+            ),
+            "static_radix_upward_batched": bool(
+                getattr(self, "_static_radix_upward_batched", False)
+            ),
+            "static_radix_downward_batched": bool(
+                getattr(self, "_static_radix_downward_batched", False)
+            ),
+            "static_radix_tree_leaf_count": int(
+                getattr(self, "_static_radix_tree_leaf_count", 0)
+            ),
+            "static_radix_tree_node_count": int(
+                getattr(self, "_static_radix_tree_node_count", 0)
+            ),
+            "static_radix_far_pair_count": int(
+                getattr(self, "_static_radix_far_pair_count", 0)
+            ),
+            "static_radix_compact_pair_reuse_hits": int(
+                getattr(self, "_static_radix_compact_pair_reuse_hits", 0)
+            ),
+            "static_radix_compact_pair_reuse_misses": int(
+                getattr(self, "_static_radix_compact_pair_reuse_misses", 0)
+            ),
+            "static_radix_m2l_chunk_count": int(
+                getattr(self, "_static_radix_m2l_chunk_count", 0)
+            ),
+            "static_radix_l2l_edge_count": int(
+                getattr(self, "_static_radix_l2l_edge_count", 0)
+            ),
+            "strict_fused_mode_active": bool(self._strict_fused_mode_active),
+            "strict_fused_compile_count": int(self._strict_fused_compile_count),
+            "strict_fused_execute_count": int(self._strict_fused_execute_count),
+            "strict_fused_profile_key_hits": int(
+                self._strict_fused_profile_key_hits
+            ),
+            "strict_fused_profile_key_misses": int(
+                self._strict_fused_profile_key_misses
+            ),
+            "strict_fused_fallback_count": int(self._strict_fused_fallback_count),
+            "strict_fused_last_fallback_reason": str(
+                self._strict_fused_last_fallback_reason
+            ),
+            "strict_fused_device_refresh_route_count": int(
+                self._strict_fused_device_refresh_route_count
+            ),
+            "strict_fused_planner_bypassed_count": int(
+                self._strict_fused_planner_bypassed_count
+            ),
+            "strict_velocity_verlet_acceleration_carry_active": bool(
+                self._strict_velocity_verlet_acceleration_carry_active
+            ),
+            "strict_self_force_bootstrap_evaluations": int(
+                self._strict_self_force_bootstrap_evaluations
+            ),
+            "strict_self_force_initial_full_fmm_evaluations": int(
+                self._strict_self_force_bootstrap_evaluations
+            ),
+            "strict_self_force_endpoint_evaluations": int(
+                self._strict_self_force_endpoint_evaluations
+            ),
+            "strict_external_bootstrap_evaluations": int(
+                self._strict_external_bootstrap_evaluations
+            ),
+            "strict_external_endpoint_evaluations": int(
+                self._strict_external_endpoint_evaluations
+            ),
+            "strict_static_target_block_capacity_ok": bool(
+                self._strict_static_target_block_capacity_ok
+            ),
+            "large_n_radix_fast_occupancy_sort": bool(
+                self._large_n_radix_fast_occupancy_sort
+            ),
+            "large_n_radix_fast_skip_empty_tiles": bool(
+                self._large_n_radix_fast_skip_empty_tiles
+            ),
+            "strict_fused_fastlane_diag_enabled": bool(
+                self._strict_fused_fastlane_diag_enabled
+            ),
+            "strict_fused_fastlane_attempts": int(
+                self._strict_fused_fastlane_attempts
+            ),
+            "strict_fused_fastlane_hits": int(self._strict_fused_fastlane_hits),
+            "strict_fused_fastlane_misses": int(self._strict_fused_fastlane_misses),
+            "strict_fused_fastlane_last_blockers": tuple(
+                str(v) for v in self._strict_fused_fastlane_last_blockers
+            ),
+            "strict_fused_fastlane_block_counts": {
+                str(k): int(v)
+                for k, v in dict(self._strict_fused_fastlane_block_counts).items()
+            },
+            "strict_profiled_max_pair_queue": int(
+                self._strict_profiled_max_pair_queue
+            ),
+            "strict_profiled_pair_process_block": int(
+                self._strict_profiled_pair_process_block
+            ),
+            "strict_profiled_context_key": str(self._strict_profiled_context_key),
             "recent_dual_node_count": int(self._recent_dual_node_count),
             "recent_dual_leaf_count": int(self._recent_dual_leaf_count),
             "recent_dual_neighbor_count": int(self._recent_dual_neighbor_count),
@@ -2717,6 +3543,7 @@ class FastMultipoleMethod:
         leaf_size: Optional[int] = None,
         max_order: Optional[int] = None,
         theta: Optional[float] = None,
+        fused_device_mode: bool = False,
     ) -> PreparedStateLike:
         """Refresh prepared state under large-N/radix profile constraints."""
         if not self._is_large_n_gpu_production_profile():
@@ -2730,6 +3557,44 @@ class FastMultipoleMethod:
             )
 
         self._compiled_profile_refresh_calls += 1
+        refresh_timing_enabled = bool(
+            getattr(self, "_refresh_timing_enabled", False)
+        )
+        if not refresh_timing_enabled:
+            next_state = self._refresh_large_n_same_topology(
+                prepared_state,
+                positions,
+                masses,
+                bounds=bounds,
+                leaf_size=int(
+                    prepared_state.max_leaf_size if leaf_size is None else leaf_size
+                ),
+                max_order=(
+                    int(prepared_state.local_data.order)
+                    if max_order is None
+                    else int(max_order)
+                ),
+                theta=theta,
+                fused_device_mode=bool(fused_device_mode),
+            )
+            if next_state is None:
+                next_state = self.prepare_state(
+                    positions,
+                    masses,
+                    bounds=bounds,
+                    leaf_size=int(
+                        prepared_state.max_leaf_size if leaf_size is None else leaf_size
+                    ),
+                    max_order=(
+                        int(prepared_state.local_data.order)
+                        if max_order is None
+                        else int(max_order)
+                    ),
+                    theta=theta,
+                    fused_device_mode=bool(fused_device_mode),
+                )
+            return next_state
+
         refresh_t0 = time.perf_counter()
         input_before = float(getattr(self, "_refresh_timing_input_seconds", 0.0))
         tree_before = float(getattr(self, "_refresh_timing_tree_upward_seconds", 0.0))
@@ -2759,6 +3624,7 @@ class FastMultipoleMethod:
                     else int(max_order)
                 ),
                 theta=theta,
+                fused_device_mode=bool(fused_device_mode),
             )
             if next_state is None:
                 next_state = self.prepare_state(
@@ -2774,6 +3640,7 @@ class FastMultipoleMethod:
                         else int(max_order)
                     ),
                     theta=theta,
+                    fused_device_mode=bool(fused_device_mode),
                 )
         finally:
             self._refresh_timing_active = was_refresh_timing_active
@@ -2827,6 +3694,622 @@ class FastMultipoleMethod:
         self._refresh_timing_calls += 1
         return next_state
 
+    def strict_prepare_refresh_and_evaluate(
+        self: "FastMultipoleMethod",
+        prepared_state: Optional[PreparedStateLike],
+        positions: Array,
+        masses: Array,
+        *,
+        bounds: Optional[Tuple[Array, Array]] = None,
+        leaf_size: int = 16,
+        max_order: int = 2,
+        theta: Optional[float] = None,
+        jit_traversal: Optional[bool] = True,
+        runtime_overrides: Optional[_RuntimeExecutionOverrides] = None,
+        fused_device_mode: Optional[bool] = None,
+    ) -> tuple[PreparedStateLike, Array]:
+        """Strict static-radix helper: prepare/refresh once, then evaluate."""
+        if not self._is_large_n_gpu_production_profile():
+            self._strict_runner_fail_fast_reject_count += 1
+            raise RuntimeError(
+                "strict_prepare_refresh_and_evaluate requires large_n_gpu production profile."
+            )
+
+        positions_arr = jnp.asarray(positions)
+        masses_arr = jnp.asarray(masses)
+        profile_key = (
+            f"n={int(positions_arr.shape[0])}|"
+            f"leaf={int(leaf_size)}|"
+            f"order={int(max_order)}|"
+            f"theta={float(self.theta if theta is None else theta):.12g}"
+        )
+        if profile_key in self._strict_runner_seen_profile_keys:
+            self._strict_runner_profile_key_hits += 1
+        else:
+            self._strict_runner_profile_key_misses += 1
+            self._strict_runner_compile_count += 1
+            self._strict_runner_seen_profile_keys.add(profile_key)
+        self._strict_runner_execute_count += 1
+
+        if prepared_state is None:
+            next_state = self.prepare_state(
+                positions_arr,
+                masses_arr,
+                bounds=bounds,
+                leaf_size=int(leaf_size),
+                max_order=int(max_order),
+                theta=theta,
+                jit_tree=self._jit_tree_default,
+                runtime_overrides_override=runtime_overrides,
+                fused_device_mode=bool(
+                    self._strict_fused_mode_active
+                    if fused_device_mode is None
+                    else fused_device_mode
+                ),
+            )
+        else:
+            if not isinstance(prepared_state, LargeNPreparedState):
+                self._strict_runner_fail_fast_reject_count += 1
+                raise RuntimeError(
+                    "strict_prepare_refresh_and_evaluate requires LargeNPreparedState input."
+                )
+            next_state_try = self._refresh_large_n_same_topology(
+                prepared_state,
+                positions_arr,
+                masses_arr,
+                bounds=bounds,
+                leaf_size=int(leaf_size),
+                max_order=int(max_order),
+                theta=theta,
+                runtime_overrides_override=runtime_overrides,
+                fused_device_mode=bool(
+                    self._strict_fused_mode_active
+                    if fused_device_mode is None
+                    else fused_device_mode
+                ),
+            )
+            if next_state_try is None:
+                self._strict_runner_fail_fast_reject_count += 1
+                raise RuntimeError(
+                    "strict_prepare_refresh_and_evaluate fail-fast: "
+                    "refresh miss (profile/topology mismatch)."
+                )
+            next_state = next_state_try
+
+        acc = self.evaluate_prepared_state(
+            next_state,
+            target_indices=None,
+            return_potential=False,
+            jit_traversal=(
+                self._jit_traversal_default
+                if jit_traversal is None
+                else bool(jit_traversal)
+            ),
+            max_acc_derivative_order=0,
+        )
+        return next_state, jnp.asarray(acc)
+
+    def strict_run_segmented(
+        self: "FastMultipoleMethod",
+        *,
+        state: Any,
+        masses: Array,
+        num_steps: int,
+        refresh_every: int,
+        segment_runner: Callable[[Any, Array, int], tuple[Any, Any]],
+        positions_getter: Callable[[Any], Array],
+        prepared_state: Optional[PreparedStateLike] = None,
+        leaf_size: int = 16,
+        max_order: int = 2,
+        theta: Optional[float] = None,
+        jit_traversal: Optional[bool] = True,
+        rematerialize_fn: Optional[Callable[[Any], Any]] = None,
+        collect_history: bool = False,
+    ) -> tuple[Any, PreparedStateLike, Optional[list[Any]]]:
+        """Run strict refresh/evaluate cadence with caller-provided segment runner."""
+        if int(num_steps) <= 0:
+            raise ValueError("num_steps must be positive")
+        if int(refresh_every) <= 0:
+            raise ValueError("refresh_every must be positive")
+
+        num_steps_i = int(num_steps)
+        refresh_every_i = int(refresh_every)
+        full_segments = num_steps_i // refresh_every_i
+        tail_segment = num_steps_i % refresh_every_i
+
+        state_curr = state
+        prepared_curr = prepared_state
+        history: Optional[list[Any]] = [] if collect_history else None
+        runtime_overrides_cached = self._resolve_runtime_execution_overrides(
+            num_particles=int(jnp.asarray(masses).shape[0]),
+        )
+
+        for _ in range(full_segments):
+            positions_curr = positions_getter(state_curr)
+            prepared_curr, acc_self = self.strict_prepare_refresh_and_evaluate(
+                prepared_curr,
+                positions_curr,
+                masses,
+                leaf_size=int(leaf_size),
+                max_order=int(max_order),
+                theta=theta,
+                jit_traversal=jit_traversal,
+                runtime_overrides=runtime_overrides_cached,
+                fused_device_mode=bool(self._strict_fused_mode_active),
+            )
+            state_curr, seg_hist = segment_runner(
+                state_curr,
+                jnp.asarray(acc_self),
+                int(refresh_every_i),
+            )
+            if rematerialize_fn is not None:
+                state_curr = rematerialize_fn(state_curr)
+            if history is not None:
+                history.append(seg_hist)
+
+        if tail_segment > 0:
+            positions_curr = positions_getter(state_curr)
+            prepared_curr, acc_self = self.strict_prepare_refresh_and_evaluate(
+                prepared_curr,
+                positions_curr,
+                masses,
+                leaf_size=int(leaf_size),
+                max_order=int(max_order),
+                theta=theta,
+                jit_traversal=jit_traversal,
+                runtime_overrides=runtime_overrides_cached,
+                fused_device_mode=bool(self._strict_fused_mode_active),
+            )
+            state_curr, seg_hist = segment_runner(
+                state_curr,
+                jnp.asarray(acc_self),
+                int(tail_segment),
+            )
+            if rematerialize_fn is not None:
+                state_curr = rematerialize_fn(state_curr)
+            if history is not None:
+                history.append(seg_hist)
+
+        return state_curr, prepared_curr, history
+
+    def strict_run_v2(
+        self: "FastMultipoleMethod",
+        *,
+        state: Array,
+        masses: Array,
+        dt: float,
+        num_steps: int,
+        refresh_every: int,
+        leaf_size: int,
+        max_order: int,
+        theta: Optional[float] = None,
+        prepared_state: Optional[PreparedStateLike] = None,
+        initial_self_acceleration: Optional[Array] = None,
+        jit_traversal: Optional[bool] = True,
+        add_external: bool = False,
+        external_acceleration_fn: Optional[Callable[[Array], Array]] = None,
+        rematerialize_between_refresh: bool = True,
+        return_history: bool = False,
+        return_prepared_state: bool = True,
+    ) -> tuple[Array, Optional[PreparedStateLike], Optional[Array]]:
+        """Run endpoint-correct velocity Verlet with strict prepared-state refresh."""
+        state_arr = jnp.asarray(state)
+        masses_arr = jnp.asarray(masses)
+        dt_arr = jnp.asarray(float(dt), dtype=state_arr.dtype)
+        num_steps_i = int(num_steps)
+
+        if not self._is_large_n_gpu_production_profile():
+            self._strict_v2_fail_fast_reject_count += 1
+            raise RuntimeError("strict_run_v2 requires large_n_gpu production profile.")
+        if num_steps_i <= 0:
+            raise ValueError("num_steps must be positive")
+        if int(refresh_every) != 1:
+            self._strict_v2_fail_fast_reject_count += 1
+            raise ValueError(
+                "strict_run_v2 requires refresh_every=1 for endpoint-correct "
+                "velocity-Verlet self gravity"
+            )
+
+        profile_key = (
+            f"n={int(state_arr.shape[0])}|leaf={int(leaf_size)}|"
+            f"order={int(max_order)}|refresh=1|"
+            f"dt={float(dt):.12g}|external={int(bool(add_external))}|"
+            f"theta={float(self.theta if theta is None else theta):.12g}"
+        )
+        if profile_key in self._strict_v2_seen_profile_keys:
+            self._strict_v2_profile_key_hits += 1
+        else:
+            self._strict_v2_profile_key_misses += 1
+            self._strict_v2_compile_count += 1
+            self._strict_v2_seen_profile_keys.add(profile_key)
+        self._strict_v2_execute_count += 1
+
+        fused_mode_requested = bool(getattr(self, "_strict_fused_mode_enabled", False))
+        fused_mode_allowed = self._strict_fused_profile_allows_n(int(state_arr.shape[0]))
+        self._strict_fused_mode_active = bool(fused_mode_requested and fused_mode_allowed)
+        if self._strict_fused_mode_active:
+            if profile_key in self._strict_fused_seen_profile_keys:
+                self._strict_fused_profile_key_hits += 1
+            else:
+                self._strict_fused_profile_key_misses += 1
+                self._strict_fused_compile_count += 1
+                self._strict_fused_seen_profile_keys.add(profile_key)
+            self._strict_fused_execute_count += 1
+            self._strict_fused_device_refresh_route_count += num_steps_i
+            self._strict_fused_planner_bypassed_count += num_steps_i
+        elif fused_mode_requested and not fused_mode_allowed:
+            self._strict_fused_fallback_count += 1
+            self._strict_fused_last_fallback_reason = (
+                "particle_count_not_in_JACCPOT_STATIC_STRICT_FUSED_PROFILE_SET"
+            )
+        else:
+            self._strict_fused_last_fallback_reason = ""
+
+        self._strict_velocity_verlet_acceleration_carry_active = True
+        diag_mode = str(getattr(self, "_strict_refresh_diag_mode", "full"))
+        eval_diag_mode = str(getattr(self, "_large_n_eval_diag_mode", "full"))
+        detail_diag_mode = str(
+            getattr(self, "_strict_refresh_detail_diag_mode", "full")
+        )
+        self_eval_active = bool(
+            getattr(self, "_strict_refresh_diag_eval_active", True)
+        ) and detail_diag_mode == "full" and eval_diag_mode != "zero"
+        self._strict_self_force_bootstrap_evaluations = int(self_eval_active)
+        self._strict_self_force_endpoint_evaluations = (
+            num_steps_i if self_eval_active else 0
+        )
+        self._strict_external_bootstrap_evaluations = int(
+            bool(add_external) and external_acceleration_fn is not None
+        )
+        self._strict_external_endpoint_evaluations = (
+            num_steps_i
+            if bool(add_external) and external_acceleration_fn is not None
+            else 0
+        )
+
+        runtime_overrides = self._resolve_runtime_execution_overrides(
+            num_particles=int(state_arr.shape[0])
+        )
+        prepared_curr = prepared_state
+        if prepared_curr is None:
+            prepared_curr = self.prepare_state(
+                state_arr[:, 0, :],
+                masses_arr,
+                leaf_size=int(leaf_size),
+                max_order=int(max_order),
+                theta=theta,
+                jit_tree=self._jit_tree_default,
+                runtime_overrides_override=runtime_overrides,
+                fused_device_mode=bool(self._strict_fused_mode_active),
+            )
+        if self._strict_fused_mode_active and not isinstance(
+            prepared_curr, LargeNPreparedState
+        ):
+            self._strict_runner_fail_fast_reject_count += 1
+            raise RuntimeError(
+                "strict fused velocity-Verlet requires LargeNPreparedState input."
+            )
+        if isinstance(prepared_curr, LargeNPreparedState):
+            self._record_large_n_eval_shape_diagnostics(prepared_curr)
+
+        def _evaluate_self(prepared_in: PreparedStateLike, state_in: Array) -> Array:
+            if not self_eval_active:
+                return jnp.zeros_like(state_in[:, 0, :])
+            if eval_diag_mode == "permutation_only":
+                return (
+                    jnp.asarray(prepared_in.positions_sorted)[
+                        prepared_in.inverse_permutation
+                    ]
+                    * jnp.asarray(0.0, dtype=state_in.dtype)
+                )
+            return jnp.asarray(
+                evaluate_large_n_state(
+                    self,
+                    prepared_in,
+                    target_indices=None,
+                    return_potential=False,
+                    max_acc_derivative_order=0,
+                ),
+                dtype=state_in.dtype,
+            )
+
+        if not self_eval_active:
+            acceleration_self_current = jnp.zeros_like(state_arr[:, 0, :])
+        elif initial_self_acceleration is None:
+            acceleration_self_current = _evaluate_self(prepared_curr, state_arr)
+        else:
+            acceleration_self_current = jnp.asarray(
+                initial_self_acceleration, dtype=state_arr.dtype
+            )
+        if add_external and external_acceleration_fn is not None:
+            acceleration_current = acceleration_self_current + jnp.asarray(
+                external_acceleration_fn(state_arr), dtype=state_arr.dtype
+            )
+        else:
+            acceleration_current = acceleration_self_current
+        def _static_target_block_capacity_ok(
+            prepared_in: PreparedStateLike,
+        ) -> Array:
+            padded = getattr(
+                prepared_in,
+                "nearfield_target_block_source_leaf_ids_padded",
+                None,
+            )
+            if padded is None:
+                return jnp.asarray(True)
+            padded_arr = jnp.asarray(padded)
+            if padded_arr.ndim != 3 or int(padded_arr.shape[1]) == 0:
+                return jnp.asarray(True)
+            offsets = jnp.asarray(prepared_in.neighbor_list.offsets)
+            counts = offsets[1:] - offsets[:-1]
+            capacity = int(padded_arr.shape[1]) * int(padded_arr.shape[2])
+            return jnp.all(counts <= jnp.asarray(capacity, dtype=counts.dtype))
+
+        def _refresh_and_evaluate_endpoint(
+            prepared_in: PreparedStateLike,
+            state_position: Array,
+        ) -> tuple[PreparedStateLike, Array]:
+            if diag_mode in {"integrator_only", "eval_only"}:
+                prepared_new = prepared_in
+            else:
+                prepared_new = self._refresh_large_n_same_topology(
+                    prepared_in,
+                    state_position[:, 0, :],
+                    masses_arr,
+                    bounds=None,
+                    leaf_size=int(leaf_size),
+                    max_order=int(max_order),
+                    theta=theta,
+                    runtime_overrides_override=None,
+                    fused_device_mode=bool(self._strict_fused_mode_active),
+                )
+                if prepared_new is None:
+                    raise RuntimeError(
+                        "strict velocity-Verlet refresh failed: topology/profile mismatch"
+                    )
+            return prepared_new, _evaluate_self(prepared_new, state_position)
+
+        if self._strict_fused_mode_active:
+            cache_key = (
+                "strict_velocity_verlet",
+                tuple(int(v) for v in state_arr.shape),
+                str(state_arr.dtype),
+                tuple(int(v) for v in masses_arr.shape),
+                str(masses_arr.dtype),
+                float(dt),
+                num_steps_i,
+                int(leaf_size),
+                int(max_order),
+                float(self.theta if theta is None else theta),
+                bool(add_external),
+                id(external_acceleration_fn) if external_acceleration_fn is not None else 0,
+                bool(rematerialize_between_refresh),
+                bool(return_history),
+                diag_mode,
+                detail_diag_mode,
+                eval_diag_mode,
+                str(getattr(self, "_large_n_nearfield_diag_mode", "full")),
+            )
+            jit_cache = getattr(self, "_strict_fused_jit_function_cache", {})
+            compiled_runner = jit_cache.get(cache_key)
+            if compiled_runner is None:
+                @jax.jit
+                def _compiled_runner(
+                    prepared_initial: LargeNPreparedState,
+                    state_initial: Array,
+                    acceleration_initial: Array,
+                ) -> tuple[
+                    tuple[LargeNPreparedState, Array, Array, Array], Optional[Array]
+                ]:
+                    def _step(carry, _):
+                        (
+                            prepared_now,
+                            state_now,
+                            acceleration_now,
+                            capacity_ok_now,
+                        ) = carry
+                        position_new = (
+                            state_now[:, 0]
+                            + state_now[:, 1] * dt_arr
+                            + 0.5 * acceleration_now * dt_arr**2
+                        )
+                        state_position = state_now.at[:, 0].set(position_new)
+                        prepared_new, acceleration_self_new = (
+                            _refresh_and_evaluate_endpoint(
+                                prepared_now, state_position
+                            )
+                        )
+                        if add_external and external_acceleration_fn is not None:
+                            acceleration_new = acceleration_self_new + jnp.asarray(
+                                external_acceleration_fn(state_position),
+                                dtype=state_now.dtype,
+                            )
+                        else:
+                            acceleration_new = acceleration_self_new
+                        state_new = _velocity_verlet_state_update(
+                            state_now,
+                            acceleration_now,
+                            acceleration_new,
+                            dt_arr,
+                        )
+                        if rematerialize_between_refresh:
+                            state_new = jnp.asarray(state_new, dtype=state_now.dtype)
+                        capacity_ok_new = capacity_ok_now & (
+                            _static_target_block_capacity_ok(prepared_new)
+                        )
+                        return (
+                            prepared_new,
+                            state_new,
+                            acceleration_new,
+                            capacity_ok_new,
+                        ), (state_new if return_history else None)
+
+                    return jax.lax.scan(
+                        _step,
+                        (
+                            prepared_initial,
+                            state_initial,
+                            acceleration_initial,
+                            _static_target_block_capacity_ok(prepared_initial),
+                        ),
+                        xs=None,
+                        length=num_steps_i,
+                    )
+
+                compiled_runner = _compiled_runner
+                jit_cache[cache_key] = compiled_runner
+                self._strict_fused_jit_function_cache = jit_cache
+
+            try:
+                (
+                    prepared_curr,
+                    state_curr,
+                    _,
+                    capacity_ok_all,
+                ), history_out = compiled_runner(
+                    prepared_curr,
+                    state_arr,
+                    jnp.asarray(acceleration_current, dtype=state_arr.dtype),
+                )
+                self._strict_static_target_block_capacity_ok = bool(
+                    np.asarray(jax.device_get(capacity_ok_all))
+                )
+                if not self._strict_static_target_block_capacity_ok:
+                    max_blocks = os.environ.get(
+                        "JACCPOT_LARGE_N_STATIC_TARGET_BLOCKS_MAX_PER_LEAF",
+                        "32",
+                    )
+                    raise RuntimeError(
+                        "fused payload static target-block cap exceeded during "
+                        "compiled velocity-Verlet scan: max_blocks_per_leaf="
+                        f"{max_blocks}. Increase "
+                        "JACCPOT_LARGE_N_STATIC_TARGET_BLOCKS_MAX_PER_LEAF."
+                    )
+            except Exception as exc:
+                if bool(
+                    getattr(self, "_strict_fused_disallow_host_segment_fallback", False)
+                ):
+                    raise RuntimeError(
+                        "strict fused velocity-Verlet scan failed while host fallback "
+                        "is disallowed"
+                    ) from exc
+                raise
+        else:
+            state_curr = state_arr
+            history_parts: list[Array] = []
+            acceleration_now = jnp.asarray(
+                acceleration_current, dtype=state_arr.dtype
+            )
+            for _ in range(num_steps_i):
+                position_new = (
+                    state_curr[:, 0]
+                    + state_curr[:, 1] * dt_arr
+                    + 0.5 * acceleration_now * dt_arr**2
+                )
+                state_position = state_curr.at[:, 0].set(position_new)
+                prepared_curr, acceleration_self_new = (
+                    _refresh_and_evaluate_endpoint(prepared_curr, state_position)
+                )
+                if add_external and external_acceleration_fn is not None:
+                    acceleration_new = acceleration_self_new + jnp.asarray(
+                        external_acceleration_fn(state_position),
+                        dtype=state_curr.dtype,
+                    )
+                else:
+                    acceleration_new = acceleration_self_new
+                state_curr = _velocity_verlet_state_update(
+                    state_curr, acceleration_now, acceleration_new, dt_arr
+                )
+                acceleration_now = acceleration_new
+                if return_history:
+                    history_parts.append(state_curr)
+            history_out = (
+                jnp.stack(history_parts, axis=0) if return_history else None
+            )
+
+        self._strict_runner_execute_count += num_steps_i
+        if profile_key in self._strict_runner_seen_profile_keys:
+            self._strict_runner_profile_key_hits += num_steps_i
+        else:
+            self._strict_runner_seen_profile_keys.add(profile_key)
+            self._strict_runner_compile_count += 1
+            self._strict_runner_profile_key_misses += 1
+            self._strict_runner_profile_key_hits += max(0, num_steps_i - 1)
+        prepared_out = prepared_curr if return_prepared_state else None
+        return state_curr, prepared_out, history_out
+
+    def strict_fused_prepared_eval_fn(
+        self: "FastMultipoleMethod",
+        *,
+        positions: Array,
+        masses: Array,
+        leaf_size: int,
+        max_order: int,
+        theta: Optional[float] = None,
+    ) -> tuple[PreparedStateLike, Callable[[PreparedStateLike], Array]]:
+        """Build a fused-lane prepared state and return a jitted eval-only closure.
+
+        Isolates the *evaluate* cost of the strict fused static-radix lane for
+        apples-to-apples benchmarking against functional FMM eval APIs (e.g.
+        jaxfmm ``eval_potential``): the prepared state is built eagerly with the
+        fused device-mode layout (optimized flat compact far-pairs + static
+        target-block near-field), exactly as ``strict_run_v2`` bootstraps it, and
+        the returned closure runs the same self-force evaluation the fused step
+        runs per endpoint (``evaluate_large_n_state``) with **no refresh and no
+        velocity-Verlet update**.
+
+        Returns ``(prepared_state, eval_fn)``; time ``eval_fn(prepared_state)``.
+        """
+        positions_arr = jnp.asarray(positions)
+        masses_arr = jnp.asarray(masses)
+        if not self._is_large_n_gpu_production_profile():
+            raise RuntimeError(
+                "strict_fused_prepared_eval_fn requires large_n_gpu production profile."
+            )
+        fused_mode_requested = bool(getattr(self, "_strict_fused_mode_enabled", False))
+        fused_mode_allowed = self._strict_fused_profile_allows_n(
+            int(positions_arr.shape[0])
+        )
+        self._strict_fused_mode_active = bool(fused_mode_requested and fused_mode_allowed)
+        if not self._strict_fused_mode_active:
+            raise RuntimeError(
+                "strict fused mode is not active for this particle count/config; "
+                "enable JACCPOT_STATIC_STRICT_FUSED_MODE and include N in "
+                "JACCPOT_STATIC_STRICT_FUSED_PROFILE_SET."
+            )
+        runtime_overrides = self._resolve_runtime_execution_overrides(
+            num_particles=int(positions_arr.shape[0])
+        )
+        prepared = self.prepare_state(
+            positions_arr,
+            masses_arr,
+            leaf_size=int(leaf_size),
+            max_order=int(max_order),
+            theta=theta,
+            jit_tree=self._jit_tree_default,
+            runtime_overrides_override=runtime_overrides,
+            fused_device_mode=True,
+        )
+        if not isinstance(prepared, LargeNPreparedState):
+            raise RuntimeError(
+                "strict fused eval-only requires a LargeNPreparedState."
+            )
+        self._record_large_n_eval_shape_diagnostics(prepared)
+
+        @jax.jit
+        def _eval(prepared_in: PreparedStateLike) -> Array:
+            return jnp.asarray(
+                evaluate_large_n_state(
+                    self,
+                    prepared_in,
+                    target_indices=None,
+                    return_potential=False,
+                    max_acc_derivative_order=0,
+                )
+            )
+
+        return prepared, _eval
+
     def _refresh_large_n_same_topology(
         self: "FastMultipoleMethod",
         prepared_state: LargeNPreparedState,
@@ -2837,6 +4320,8 @@ class FastMultipoleMethod:
         leaf_size: int,
         max_order: int,
         theta: Optional[float],
+        runtime_overrides_override: Optional[_RuntimeExecutionOverrides] = None,
+        fused_device_mode: bool = False,
     ) -> Optional[LargeNPreparedState]:
         """Refresh large-N numeric payloads when the radix topology is unchanged."""
 
@@ -2846,15 +4331,21 @@ class FastMultipoleMethod:
             self._large_n_same_topology_refresh_miss_no_key += 1
             return None
 
-        input_t0 = time.perf_counter()
+        refresh_timing_active = bool(getattr(self, "_refresh_timing_active", False)) and not (
+            bool(fused_device_mode)
+            and bool(getattr(self, "_strict_fused_disable_hot_timing", False))
+        )
+
+        input_t0 = time.perf_counter() if refresh_timing_active else 0.0
         positions_arr, masses_arr, input_dtype = self._prepare_state_input_arrays(
             positions,
             masses,
         )
-        if bool(getattr(self, "_refresh_timing_active", False)):
+        if refresh_timing_active:
             self._refresh_timing_input_seconds += time.perf_counter() - input_t0
-        allow_stateful_cache = not _contains_tracer((positions_arr, masses_arr))
-        if not allow_stateful_cache:
+        traced_refresh = bool(_contains_tracer((positions_arr, masses_arr)))
+        allow_stateful_cache = bool(fused_device_mode) or (not traced_refresh)
+        if (not allow_stateful_cache) and (not bool(fused_device_mode)):
             self._large_n_same_topology_refresh_misses += 1
             self._large_n_same_topology_refresh_miss_traced += 1
             return None
@@ -2863,9 +4354,11 @@ class FastMultipoleMethod:
             leaf_size=int(leaf_size),
             max_order=int(max_order),
         )
-        runtime_overrides = self._resolve_runtime_execution_overrides(
-            num_particles=int(positions_arr.shape[0]),
-        )
+        runtime_overrides = runtime_overrides_override
+        if runtime_overrides is None:
+            runtime_overrides = self._resolve_runtime_execution_overrides(
+                num_particles=int(positions_arr.shape[0]),
+            )
         runtime_traversal_config = runtime_overrides.traversal_config
         runtime_m2l_chunk_size = runtime_overrides.m2l_chunk_size
         runtime_l2l_chunk_size = runtime_overrides.l2l_chunk_size
@@ -2890,79 +4383,120 @@ class FastMultipoleMethod:
                 max_refine_levels=tree_config.max_refine_levels,
                 aspect_threshold=tree_config.aspect_threshold,
             )
+        static_fused_refresh = bool(fused_device_mode) and (
+            str(tree_config.mode).strip().lower() == "static_radix"
+        )
         inferred_bounds = self._resolve_prepare_state_bounds(
             positions=positions_arr,
             bounds=bounds,
         )
 
-        tree_t0 = time.perf_counter()
+        tree_t0 = time.perf_counter() if refresh_timing_active else 0.0
         refresh_topology_key = getattr(prepared_state, "topology_key", None)
         topology_candidate = None
-        previous_topology_key = refresh_topology_key
-        if previous_topology_key is None:
-            if tree_config.mode == "static_radix" and isinstance(
-                prepared_state.tree, RadixTree
-            ):
-                previous_topology_key = self._static_radix_topology_key_from_tree(
-                    prepared_state.tree,
-                    leaf_size=int(leaf_size),
-                )
-            else:
-                previous_codes = getattr(prepared_state.tree, "morton_codes", None)
-                if previous_codes is not None:
-                    previous_topology_key = self._topology_reuse_key_from_sorted_codes(
-                        sorted_codes=jnp.asarray(previous_codes),
-                        tree_config=tree_config,
-                        leaf_size=int(leaf_size),
-                        refine_local=refine_local_val,
-                        max_refine_levels=max_refine_levels_val,
-                        aspect_threshold=aspect_threshold_val,
-                    )
-        if previous_topology_key is None:
-            self._large_n_same_topology_refresh_misses += 1
-            self._large_n_same_topology_refresh_miss_no_key += 1
-            if tree_config.mode == "static_radix":
-                self._static_radix_refresh_misses += 1
-            return None
-        topology_candidate = self._topology_reuse_candidate(
-            positions=positions_arr,
-            bounds=inferred_bounds,
-            tree_config=tree_config,
-            leaf_size=int(leaf_size),
-            refine_local=refine_local_val,
-            max_refine_levels=max_refine_levels_val,
-            aspect_threshold=aspect_threshold_val,
-            allow_stateful_cache=allow_stateful_cache,
-        )
-        if (
-            topology_candidate is None
-            or topology_candidate.key != previous_topology_key
-        ):
-            self._large_n_same_topology_refresh_misses += 1
-            self._large_n_same_topology_refresh_miss_topology += 1
-            if tree_config.mode == "static_radix":
-                self._static_radix_refresh_misses += 1
-            return None
 
-        topology_entry = _TopologyReuseEntry(
-            key=str(previous_topology_key),
-            tree=prepared_state.tree,
-            max_leaf_size=int(prepared_state.max_leaf_size),
-            cache_leaf_parameter=int(leaf_size),
-            reuse_count=0,
+        if static_fused_refresh:
+            build_artifacts = self._rebuild_tree_artifacts_from_static_template(
+                template_tree=prepared_state.tree,
+                positions=positions_arr,
+                masses=masses_arr,
+                bounds=inferred_bounds,
+                max_leaf_size=int(prepared_state.max_leaf_size),
+                cache_leaf_parameter=int(leaf_size),
+            )
+            if refresh_topology_key is None:
+                refresh_topology_key = "static_fused_template"
+        else:
+            previous_topology_key = refresh_topology_key
+            if previous_topology_key is None:
+                if tree_config.mode == "static_radix" and isinstance(
+                    prepared_state.tree, RadixTree
+                ):
+                    previous_topology_key = self._static_radix_topology_key_from_tree(
+                        prepared_state.tree,
+                        leaf_size=int(leaf_size),
+                    )
+                else:
+                    previous_codes = getattr(prepared_state.tree, "morton_codes", None)
+                    if previous_codes is not None:
+                        previous_topology_key = self._topology_reuse_key_from_sorted_codes(
+                            sorted_codes=jnp.asarray(previous_codes),
+                            tree_config=tree_config,
+                            leaf_size=int(leaf_size),
+                            refine_local=refine_local_val,
+                            max_refine_levels=max_refine_levels_val,
+                            aspect_threshold=aspect_threshold_val,
+                        )
+            if previous_topology_key is None:
+                self._large_n_same_topology_refresh_misses += 1
+                self._large_n_same_topology_refresh_miss_no_key += 1
+                if tree_config.mode == "static_radix":
+                    self._static_radix_refresh_misses += 1
+                return None
+
+            topology_candidate = self._topology_reuse_candidate(
+                positions=positions_arr,
+                bounds=inferred_bounds,
+                tree_config=tree_config,
+                leaf_size=int(leaf_size),
+                refine_local=refine_local_val,
+                max_refine_levels=max_refine_levels_val,
+                aspect_threshold=aspect_threshold_val,
+                allow_stateful_cache=allow_stateful_cache,
+            )
+            if (
+                topology_candidate is None
+                or topology_candidate.key != previous_topology_key
+            ):
+                self._large_n_same_topology_refresh_misses += 1
+                self._large_n_same_topology_refresh_miss_topology += 1
+                if tree_config.mode == "static_radix":
+                    self._static_radix_refresh_misses += 1
+                return None
+
+            topology_entry = _TopologyReuseEntry(
+                key=str(previous_topology_key),
+                tree=prepared_state.tree,
+                max_leaf_size=int(prepared_state.max_leaf_size),
+                cache_leaf_parameter=int(leaf_size),
+                reuse_count=0,
+            )
+            build_artifacts = self._rebuild_tree_artifacts_from_topology(
+                candidate=topology_candidate,
+                entry=topology_entry,
+                positions=positions_arr,
+                masses=masses_arr,
+            )
+            refresh_topology_key = topology_candidate.key
+
+        strict_refresh_diag_mode = str(
+            getattr(self, "_strict_refresh_diag_mode", "full")
         )
-        build_artifacts = self._rebuild_tree_artifacts_from_topology(
-            candidate=topology_candidate,
-            entry=topology_entry,
-            positions=positions_arr,
-            masses=masses_arr,
+        strict_refresh_detail_diag_mode = str(
+            getattr(self, "_strict_refresh_detail_diag_mode", "full")
         )
-        refresh_topology_key = topology_candidate.key
-        defer_geometry = (
-            tree_config.mode == "static_radix"
-            and str(upward_center_mode).strip().lower() == "com"
-            and self._interaction_cache is not None
-        )
+        strict_refresh_tree_detail_only = strict_refresh_detail_diag_mode in {
+            "tree_sort_only",
+            "tree_metadata_only",
+        }
+        strict_refresh_upward_detail_only = strict_refresh_detail_diag_mode in {
+            "p2m_only",
+            "m2m_only",
+        }
+        if bool(static_fused_refresh) and (
+            strict_refresh_diag_mode == "tree_only"
+            or strict_refresh_tree_detail_only
+        ):
+            self._large_n_same_topology_refresh_hits += 1
+            if tree_config.mode == "static_radix":
+                self._static_radix_refresh_hits += 1
+            return replace(
+                prepared_state,
+                tree=build_artifacts.tree,
+                topology_key=refresh_topology_key,
+            )
+
+        defer_geometry = False
         upward = self.prepare_upward_sweep(
             build_artifacts.tree,
             build_artifacts.positions_sorted,
@@ -2990,8 +4524,39 @@ class FastMultipoleMethod:
             upward=upward,
             locals_template=locals_template,
         )
-        if bool(getattr(self, "_refresh_timing_active", False)):
+        if refresh_timing_active:
             self._refresh_timing_tree_upward_seconds += time.perf_counter() - tree_t0
+
+        if bool(static_fused_refresh) and (
+            strict_refresh_diag_mode == "upward_only"
+            or strict_refresh_upward_detail_only
+        ):
+            dep = jnp.asarray(0.0, dtype=tree_artifacts.positions_sorted.dtype)
+            multipoles = getattr(tree_artifacts.upward, "multipoles", None)
+            packed = getattr(multipoles, "packed", None)
+            centers = getattr(multipoles, "centers", None)
+            if packed is not None:
+                dep = dep + jnp.asarray(
+                    jnp.real(jnp.sum(jnp.asarray(packed))),
+                    dtype=dep.dtype,
+                ) * jnp.asarray(0.0, dtype=dep.dtype)
+            if centers is not None:
+                dep = dep + jnp.asarray(
+                    jnp.sum(jnp.asarray(centers)),
+                    dtype=dep.dtype,
+                ) * jnp.asarray(0.0, dtype=dep.dtype)
+            diag_tree = replace(
+                tree_artifacts.tree,
+                positions_sorted=tree_artifacts.positions_sorted + dep,
+            )
+            self._large_n_same_topology_refresh_hits += 1
+            if tree_config.mode == "static_radix":
+                self._static_radix_refresh_hits += 1
+            return replace(
+                prepared_state,
+                tree=diag_tree,
+                topology_key=refresh_topology_key,
+            )
 
         collected_retries: list[DualTreeRetryEvent] = []
 
@@ -3000,26 +4565,174 @@ class FastMultipoleMethod:
             if self.interaction_retry_logger is not None:
                 self.interaction_retry_logger(event)
 
-        dual_t0 = time.perf_counter()
-        dual_downward_artifacts = self._prepare_state_dual_and_downward(
-            tree_artifacts=tree_artifacts,
-            force_scale_nodes=prepared_state.force_scale_nodes,
-            upward_center_mode=upward_center_mode,
-            theta_val=theta_val,
-            mac_type_val=mac_type_val,
-            dehnen_radius_scale=self.dehnen_radius_scale,
-            runtime_traversal_config=runtime_traversal_config,
-            runtime_m2l_chunk_size=runtime_m2l_chunk_size,
-            runtime_l2l_chunk_size=runtime_l2l_chunk_size,
-            grouped_interactions=False,
-            farfield_mode="pair_grouped",
-            record_retry=record_retry,
-            refine_local_val=refine_local_val,
-            max_refine_levels_val=max_refine_levels_val,
-            aspect_threshold_val=aspect_threshold_val,
-            allow_stateful_cache=True,
+        dual_t0 = time.perf_counter() if refresh_timing_active else 0.0
+        strict_fused_traced_hot_path = bool(fused_device_mode) and bool(getattr(self, "_strict_fused_mode_active", False))
+        cached_compact_far_pairs = getattr(prepared_state, "compact_far_pairs", None)
+        compact_far_pairs_carry_placeholder = cached_compact_far_pairs
+        reuse_static_compact_pairs_enabled = str(
+            os.environ.get(
+                "JACCPOT_STATIC_STRICT_FUSED_REUSE_COMPACT_PAIRS",
+                "1",
+            )
+        ).strip().lower() in {"1", "true", "yes", "on"}
+        allow_unsafe_compact_pair_reuse = str(
+            os.environ.get(
+                "JACCPOT_STATIC_STRICT_FUSED_ALLOW_UNSAFE_COMPACT_PAIR_REUSE",
+                "0",
+            )
+        ).strip().lower() in {"1", "true", "yes", "on"}
+        safe_fresh_compact_pair_rebuild = (
+            bool(strict_fused_traced_hot_path)
+            and str(tree_config.mode).strip().lower() == "static_radix"
+            and str(
+                os.environ.get(
+                    "JACCPOT_STATIC_STRICT_FUSED_FRESH_COMPACT_PAIR_REBUILD",
+                    "1",
+                )
+            ).strip().lower() in {"1", "true", "yes", "on"}
+            and not bool(allow_unsafe_compact_pair_reuse)
         )
-        if bool(getattr(self, "_refresh_timing_active", False)):
+        reuse_static_compact_pairs = (
+            bool(strict_fused_traced_hot_path)
+            and bool(cached_compact_far_pairs is not None)
+            and str(tree_config.mode).strip().lower() == "static_radix"
+            and bool(reuse_static_compact_pairs_enabled)
+            and bool(allow_unsafe_compact_pair_reuse)
+        )
+        if (
+            bool(strict_fused_traced_hot_path)
+            and bool(cached_compact_far_pairs is not None)
+            and str(tree_config.mode).strip().lower() == "static_radix"
+            and bool(reuse_static_compact_pairs_enabled)
+            and not bool(allow_unsafe_compact_pair_reuse)
+            and not bool(safe_fresh_compact_pair_rebuild)
+        ):
+            raise RuntimeError(
+                "strict fused compact far-pair reuse is unsafe for moved "
+                "static-radix positions: cached M2L pairs can change after "
+                "the drift and corrupt endpoint forces. A production fix needs "
+                "fresh fixed-cap compact pairs with an active mask/count, or a "
+                "proven far-pair validity key. Set "
+                "JACCPOT_STATIC_STRICT_FUSED_ALLOW_UNSAFE_COMPACT_PAIR_REUSE=1 "
+                "only for legacy performance experiments."
+            )
+        if bool(safe_fresh_compact_pair_rebuild):
+            cached_compact_far_pairs = None
+        if bool(strict_fused_traced_hot_path) and (
+            str(tree_config.mode).strip().lower() == "static_radix"
+        ):
+            if reuse_static_compact_pairs:
+                self._static_radix_compact_pair_reuse_hits += 1
+            else:
+                self._static_radix_compact_pair_reuse_misses += 1
+        if reuse_static_compact_pairs:
+            src_far = jnp.asarray(cached_compact_far_pairs.sources, dtype=INDEX_DTYPE)
+            tgt_far = jnp.asarray(cached_compact_far_pairs.targets, dtype=INDEX_DTYPE)
+            far_pairs_by_gear = ((src_far, tgt_far),)
+            downward = self._prepare_downward_with_artifacts(
+                tree=tree_artifacts.tree,
+                upward=tree_artifacts.upward,
+                theta_val=theta_val,
+                locals_template=tree_artifacts.locals_template,
+                interactions=None,
+                runtime_m2l_chunk_size=runtime_m2l_chunk_size,
+                runtime_l2l_chunk_size=runtime_l2l_chunk_size,
+                runtime_traversal_config=runtime_traversal_config,
+                record_retry=record_retry,
+                dense_buffers=None,
+                grouped_interactions=False,
+                grouped_buffers=None,
+                grouped_segment_starts=None,
+                grouped_segment_lengths=None,
+                grouped_segment_class_ids=None,
+                grouped_segment_sort_permutation=None,
+                grouped_segment_group_ids=None,
+                grouped_segment_unique_targets=None,
+                farfield_mode="pair_grouped",
+                far_pairs_coo=_FarPairCOO(
+                    sources=src_far,
+                    targets=tgt_far,
+                    active_count=getattr(cached_compact_far_pairs, "far_pair_count", None),
+                ),
+                far_pairs_by_gear=far_pairs_by_gear,
+                adaptive_order=True,
+                p_gears=(int(tree_artifacts.upward.multipoles.order),),
+            )
+            downward = downward._replace(
+                interactions=_empty_interaction_storage_for_tree(tree_artifacts.tree)
+            )
+            dual_downward_artifacts = _PrepareStateDualDownwardArtifacts(
+                interactions=None,
+                neighbor_list=prepared_state.neighbor_list,
+                traversal_result=None,
+                compact_far_pairs=cached_compact_far_pairs,
+                downward=downward,
+                cache_entry=None,
+            )
+        else:
+            dual_downward_artifacts = self._prepare_state_dual_and_downward(
+                tree_artifacts=tree_artifacts,
+                force_scale_nodes=prepared_state.force_scale_nodes,
+                upward_center_mode=upward_center_mode,
+                theta_val=theta_val,
+                mac_type_val=mac_type_val,
+                dehnen_radius_scale=self.dehnen_radius_scale,
+                runtime_traversal_config=runtime_traversal_config,
+                runtime_m2l_chunk_size=runtime_m2l_chunk_size,
+                runtime_l2l_chunk_size=runtime_l2l_chunk_size,
+                grouped_interactions=False,
+                farfield_mode="pair_grouped",
+                record_retry=record_retry,
+                refine_local_val=refine_local_val,
+                max_refine_levels_val=max_refine_levels_val,
+                aspect_threshold_val=aspect_threshold_val,
+                allow_stateful_cache=True,
+                suppress_host_side_effects=strict_fused_traced_hot_path,
+            )
+        if str(tree_config.mode).strip().lower() == "static_radix":
+            tree_now = build_artifacts.tree
+            leaf_codes = getattr(tree_now, "leaf_codes", None)
+            parent = getattr(tree_now, "parent", None)
+            left_child = getattr(tree_now, "left_child", None)
+            compact_pairs = getattr(dual_downward_artifacts, "compact_far_pairs", None)
+            compact_sources = (
+                getattr(compact_pairs, "sources", None)
+                if compact_pairs is not None
+                else None
+            )
+            far_pair_count = (
+                int(getattr(compact_sources, "shape", (0,))[0])
+                if compact_sources is not None
+                else int(getattr(self, "_recent_dual_far_pair_count", 0))
+            )
+            chunk_size = (
+                4096
+                if runtime_m2l_chunk_size is None
+                else int(runtime_m2l_chunk_size)
+            )
+            self._static_radix_tree_leaf_count = (
+                int(getattr(leaf_codes, "shape", (0,))[0])
+                if leaf_codes is not None
+                else int(getattr(self, "_recent_dual_leaf_count", 0))
+            )
+            self._static_radix_tree_node_count = (
+                int(getattr(parent, "shape", (0,))[0])
+                if parent is not None
+                else int(getattr(self, "_recent_dual_node_count", 0))
+            )
+            self._static_radix_far_pair_count = int(far_pair_count)
+            self._static_radix_m2l_chunk_count = (
+                0
+                if chunk_size <= 0 or far_pair_count <= 0
+                else int((far_pair_count + chunk_size - 1) // chunk_size)
+            )
+            self._static_radix_l2l_edge_count = (
+                2 * int(getattr(left_child, "shape", (0,))[0])
+                if left_child is not None
+                else 0
+            )
+
+        if refresh_timing_active:
             elapsed = time.perf_counter() - dual_t0
             recorded = float(
                 getattr(self, "_refresh_timing_dual_downward_seconds", 0.0)
@@ -3029,9 +4742,12 @@ class FastMultipoleMethod:
             # value visible while avoiding double accounting.
             _ = (elapsed, recorded)
 
-        if not self._large_n_neighbor_list_matches(
-            prepared_state.neighbor_list,
-            dual_downward_artifacts.neighbor_list,
+        if (
+            tree_config.mode != "static_radix"
+            and not self._large_n_neighbor_list_matches(
+                prepared_state.neighbor_list,
+                dual_downward_artifacts.neighbor_list,
+            )
         ):
             self._large_n_same_topology_refresh_misses += 1
             self._large_n_same_topology_refresh_miss_neighbor += 1
@@ -3041,13 +4757,23 @@ class FastMultipoleMethod:
         if tree_config.mode == "static_radix":
             self._static_radix_refresh_hits += 1
 
-        if allow_stateful_cache:
+        if allow_stateful_cache and (not traced_refresh):
             self._update_locals_template_cache_after_prepare(
                 locals_template=tree_artifacts.locals_template,
                 upward=tree_artifacts.upward,
                 max_order=int(max_order),
             )
             self._recent_retry_events = tuple(collected_retries)
+            self._record_strict_cap_profile_from_retries(
+                self._recent_retry_events,
+                context_key=self._strict_cap_profile_context_key(
+                    tree_mode=str(tree_artifacts.tree_mode),
+                    leaf_parameter=int(tree_artifacts.leaf_parameter),
+                    particle_count=int(
+                        jnp.asarray(tree_artifacts.positions_sorted).shape[0]
+                    ),
+                ),
+            )
             self._topology_reuse_entry = _TopologyReuseEntry(
                 key=str(refresh_topology_key),
                 tree=tree_artifacts.tree,
@@ -3056,91 +4782,37 @@ class FastMultipoleMethod:
                 reuse_count=0,
             )
 
-        return LargeNPreparedState(
-            tree=tree_artifacts.tree,
-            local_data=dual_downward_artifacts.downward.locals,
-            neighbor_list=prepared_state.neighbor_list,
-            nearfield_leaf_particle_indices=prepared_state.nearfield_leaf_particle_indices,
-            nearfield_leaf_particle_mask=prepared_state.nearfield_leaf_particle_mask,
-            nearfield_target_leaf_ids=prepared_state.nearfield_target_leaf_ids,
-            nearfield_source_leaf_ids=prepared_state.nearfield_source_leaf_ids,
-            nearfield_valid_pairs=prepared_state.nearfield_valid_pairs,
-            nearfield_chunk_sort_indices=prepared_state.nearfield_chunk_sort_indices,
-            nearfield_chunk_group_ids=prepared_state.nearfield_chunk_group_ids,
-            nearfield_chunk_unique_indices=prepared_state.nearfield_chunk_unique_indices,
-            nearfield_target_block_leaf_ids=prepared_state.nearfield_target_block_leaf_ids,
-            nearfield_target_block_source_leaf_ids=prepared_state.nearfield_target_block_source_leaf_ids,
-            nearfield_target_block_valid_mask=prepared_state.nearfield_target_block_valid_mask,
-            nearfield_target_block_offsets=prepared_state.nearfield_target_block_offsets,
-            nearfield_target_block_source_leaf_ids_padded=(
-                prepared_state.nearfield_target_block_source_leaf_ids_padded
-            ),
-            nearfield_target_block_valid_mask_padded=(
-                prepared_state.nearfield_target_block_valid_mask_padded
-            ),
-            nearfield_target_block_size=int(prepared_state.nearfield_target_block_size),
-            max_leaf_size=int(prepared_state.max_leaf_size),
-            input_dtype=jnp.dtype(input_dtype),
-            working_dtype=jnp.dtype(positions_arr.dtype),
-            theta=float(theta_val),
-            topology_key=refresh_topology_key,
-            retry_events=tuple(collected_retries),
-            force_scale_nodes=prepared_state.force_scale_nodes,
-            execution_backend=prepared_state.execution_backend,
-            expansion_basis=prepared_state.expansion_basis,
-            nearfield_mode=prepared_state.nearfield_mode,
-            nearfield_edge_chunk_size=int(prepared_state.nearfield_edge_chunk_size),
-            nearfield_delayed_scatter_chunks_per_superchunk=int(
-                prepared_state.nearfield_delayed_scatter_chunks_per_superchunk
-            ),
-            nearfield_chunk_scan_batch_size=int(
-                prepared_state.nearfield_chunk_scan_batch_size
-            ),
-            nearfield_chunk_scan_unroll=int(prepared_state.nearfield_chunk_scan_unroll),
-            nearfield_superchunk_scan_unroll=int(
-                prepared_state.nearfield_superchunk_scan_unroll
-            ),
-            nearfield_sorted_scatter_hint=bool(
-                prepared_state.nearfield_sorted_scatter_hint
-            ),
-            nearfield_grouped_sorted_scatter=bool(
-                prepared_state.nearfield_grouped_sorted_scatter
-            ),
-            nearfield_superchunk_target_reduce=bool(
-                prepared_state.nearfield_superchunk_target_reduce
-            ),
-            nearfield_disable_chunk_cond=bool(
-                prepared_state.nearfield_disable_chunk_cond
-            ),
-            nearfield_target_leaf_batch_size=int(
-                prepared_state.nearfield_target_leaf_batch_size
-            ),
-            nearfield_target_block_tile_size=int(
-                prepared_state.nearfield_target_block_tile_size
-            ),
-            nearfield_target_block_tile_scan_unroll=int(
-                prepared_state.nearfield_target_block_tile_scan_unroll
-            ),
-            nearfield_target_block_batch_scan_unroll=int(
-                prepared_state.nearfield_target_block_batch_scan_unroll
-            ),
-            nearfield_target_block_overflow_fast_max_blocks=int(
-                prepared_state.nearfield_target_block_overflow_fast_max_blocks
-            ),
-            nearfield_target_block_overflow_profile_capacity=int(
-                prepared_state.nearfield_target_block_overflow_profile_capacity
-            ),
-            nearfield_target_block_overflow_active_blocks=int(
-                prepared_state.nearfield_target_block_overflow_active_blocks
-            ),
-            speed_prepared_layout=bool(prepared_state.speed_prepared_layout),
-            radix_fast_lane=bool(prepared_state.radix_fast_lane),
-            disable_specialized_large_n_nearfield=bool(
-                prepared_state.disable_specialized_large_n_nearfield
-            ),
-            radix_fast_payload=prepared_state.radix_fast_payload,
+        refreshed_state = prepare_large_n_state(
+            self,
+            positions_arr=positions_arr,
+            masses_arr=masses_arr,
+            input_dtype=input_dtype,
+            bounds=bounds,
+            leaf_size=int(leaf_size),
+            max_order=int(max_order),
+            theta_val=theta_val,
+            mac_type_val=mac_type_val,
+            refine_local_val=refine_local_val,
+            max_refine_levels_val=max_refine_levels_val,
+            aspect_threshold_val=aspect_threshold_val,
+            jit_tree_override=None,
+            allow_stateful_cache=allow_stateful_cache,
+            runtime_traversal_config=runtime_traversal_config,
+            runtime_m2l_chunk_size=runtime_m2l_chunk_size,
+            runtime_l2l_chunk_size=runtime_l2l_chunk_size,
+            upward_center_mode=upward_center_mode,
+            record_retry=record_retry,
+            collected_retries=collected_retries,
+            tree_artifacts=tree_artifacts,
+            dual_downward_artifacts=dual_downward_artifacts,
+            fused_device_mode=bool(fused_device_mode),
         )
-
+        if bool(safe_fresh_compact_pair_rebuild):
+            return replace(
+                refreshed_state,
+                compact_far_pairs=compact_far_pairs_carry_placeholder,
+            )
+        return refreshed_state
     def _large_n_neighbor_list_matches(
         self: "FastMultipoleMethod",
         previous: NodeNeighborList,
@@ -3693,6 +5365,9 @@ class FastMultipoleMethod:
         backend_name = jax.default_backend() if backend is None else str(backend)
         n_particles = int(num_particles)
         production_large_n = self._is_large_n_gpu_production_profile()
+        static_runtime_fixed_sizing = bool(
+            getattr(self, "_static_runtime_fixed_sizing", True)
+        )
         minimum_memory = self.memory_objective == "minimum_memory" or production_large_n
         large_cpu = (
             backend_name == "cpu" and n_particles >= _LARGE_CPU_PARTICLE_THRESHOLD
@@ -3750,6 +5425,25 @@ class FastMultipoleMethod:
         if production_large_n:
             grouped_interactions = False
             farfield_mode = "pair_grouped"
+
+        if static_runtime_fixed_sizing:
+            # Static sizing mode: keep traversal/chunk execution knobs fixed to
+            # constructor/global-input values and skip adaptive runtime rewrites.
+            if self.streamed_far_pairs and grouped_interactions:
+                grouped_interactions = False
+                farfield_mode = "pair_grouped"
+            if not grouped_interactions:
+                farfield_mode = "pair_grouped"
+            return _RuntimeExecutionOverrides(
+                traversal_config=traversal_config,
+                m2l_chunk_size=m2l_chunk_size,
+                l2l_chunk_size=l2l_chunk_size,
+                grouped_interactions=grouped_interactions,
+                farfield_mode=farfield_mode,
+                center_mode=center_mode,
+                refine_local_override=refine_local_override,
+                adaptive_applied=False,
+            )
 
         if self.streamed_far_pairs and grouped_interactions:
             # Streamed far-pair execution and grouped/class-major M2L are
@@ -4157,6 +5851,7 @@ class FastMultipoleMethod:
                         centers,
                         src_sample,
                         tgt_sample,
+                        jnp.asarray(src_sample.shape[0], dtype=INDEX_DTYPE),
                         order=order_int,
                         rotation=str(self.complex_rotation),
                         total_nodes=total_nodes,
@@ -4169,6 +5864,7 @@ class FastMultipoleMethod:
                         centers,
                         src_sample,
                         tgt_sample,
+                        jnp.asarray(src_sample.shape[0], dtype=INDEX_DTYPE),
                         order=order_int,
                         rotation=str(self.complex_rotation),
                         total_nodes=total_nodes,
@@ -4209,6 +5905,7 @@ class FastMultipoleMethod:
                             centers,
                             src_sample,
                             tgt_sample,
+                            jnp.asarray(src_sample.shape[0], dtype=INDEX_DTYPE),
                             order=order_int,
                             m2l_impl=m2l_impl,
                             total_nodes=total_nodes,
@@ -4221,6 +5918,7 @@ class FastMultipoleMethod:
                             centers,
                             src_sample,
                             tgt_sample,
+                            jnp.asarray(src_sample.shape[0], dtype=INDEX_DTYPE),
                             order=order_int,
                             m2l_impl=m2l_impl,
                             total_nodes=total_nodes,
@@ -4472,6 +6170,42 @@ class FastMultipoleMethod:
             workspace=cached_tree.workspace,
             max_leaf_size=int(entry.max_leaf_size),
             cache_leaf_parameter=int(entry.cache_leaf_parameter),
+        )
+
+    def _rebuild_tree_artifacts_from_static_template(
+        self,
+        *,
+        template_tree: RadixTree,
+        positions: Array,
+        masses: Array,
+        bounds: Optional[Tuple[Array, Array]],
+        max_leaf_size: int,
+        cache_leaf_parameter: int,
+    ) -> _TreeBuildArtifacts:
+        """Refresh static-radix tree artifacts from a fixed template topology."""
+
+        rebuilt_result = rebuild_static_radix_tree_from_template(
+            positions,
+            masses,
+            template_tree,
+            bounds=bounds,
+            return_reordered=True,
+        )
+        if not isinstance(rebuilt_result, tuple) or len(rebuilt_result) != 4:
+            raise RuntimeError(
+                "static radix template rebuild must return tree and reordered arrays"
+            )
+        rebuilt_tree, positions_sorted, masses_sorted, inverse = rebuilt_result
+        if not isinstance(rebuilt_tree, RadixTree):
+            raise ValueError("static radix template rebuild returned non-radix tree")
+        return _TreeBuildArtifacts(
+            tree=rebuilt_tree,
+            positions_sorted=jnp.asarray(positions_sorted, dtype=positions.dtype),
+            masses_sorted=jnp.asarray(masses_sorted, dtype=masses.dtype),
+            inverse_permutation=jnp.asarray(inverse, dtype=INDEX_DTYPE),
+            workspace=template_tree.workspace,
+            max_leaf_size=int(max_leaf_size),
+            cache_leaf_parameter=int(cache_leaf_parameter),
         )
 
     def _build_locals_template_for_prepare_state(
@@ -4745,6 +6479,62 @@ class FastMultipoleMethod:
             locals_template=locals_template,
         )
 
+    def _prepare_state_tree_upward_and_dual_downward(
+        self,
+        *,
+        positions_arr: Array,
+        masses_arr: Array,
+        bounds: Optional[Tuple[Array, Array]],
+        leaf_size: int,
+        max_order: int,
+        refine_local_val: bool,
+        max_refine_levels_val: int,
+        aspect_threshold_val: float,
+        jit_tree_override: Optional[bool],
+        upward_center_mode: str,
+        allow_stateful_cache: bool,
+        theta_val: float,
+        mac_type_val: MACType,
+        runtime_traversal_config: Optional[DualTreeTraversalConfig],
+        runtime_m2l_chunk_size: Optional[int],
+        runtime_l2l_chunk_size: Optional[int],
+        record_retry: Callable[[DualTreeRetryEvent], None],
+    ) -> tuple[_PrepareStateTreeUpwardArtifacts, _PrepareStateDualDownwardArtifacts]:
+        """Build tree/upward and dual/downward artifacts in one helper call."""
+
+        tree_artifacts = self._prepare_state_tree_and_upward(
+            positions_arr=positions_arr,
+            masses_arr=masses_arr,
+            bounds=bounds,
+            leaf_size=int(leaf_size),
+            max_order=int(max_order),
+            refine_local_val=bool(refine_local_val),
+            max_refine_levels_val=int(max_refine_levels_val),
+            aspect_threshold_val=float(aspect_threshold_val),
+            jit_tree_override=jit_tree_override,
+            upward_center_mode=upward_center_mode,
+            allow_stateful_cache=bool(allow_stateful_cache),
+        )
+        dual_downward_artifacts = self._prepare_state_dual_and_downward(
+            tree_artifacts=tree_artifacts,
+            force_scale_nodes=None,
+            upward_center_mode=upward_center_mode,
+            theta_val=float(theta_val),
+            mac_type_val=mac_type_val,
+            dehnen_radius_scale=self.dehnen_radius_scale,
+            runtime_traversal_config=runtime_traversal_config,
+            runtime_m2l_chunk_size=runtime_m2l_chunk_size,
+            runtime_l2l_chunk_size=runtime_l2l_chunk_size,
+            grouped_interactions=False,
+            farfield_mode=self.farfield_mode,
+            record_retry=record_retry,
+            refine_local_val=bool(refine_local_val),
+            max_refine_levels_val=int(max_refine_levels_val),
+            aspect_threshold_val=float(aspect_threshold_val),
+            allow_stateful_cache=bool(allow_stateful_cache),
+        )
+        return tree_artifacts, dual_downward_artifacts
+
     def _prepare_state_dual_and_downward(
         self,
         *,
@@ -4764,6 +6554,7 @@ class FastMultipoleMethod:
         max_refine_levels_val: int,
         aspect_threshold_val: float,
         allow_stateful_cache: bool,
+        suppress_host_side_effects: bool = False,
     ) -> _PrepareStateDualDownwardArtifacts:
         """Build/reuse interactions and prepare downward artifacts.
 
@@ -4775,20 +6566,27 @@ class FastMultipoleMethod:
         grouped schedules and other M2L feed artifacts are transient and should
         stay scoped to this helper.
         """
-        refresh_timing_active = bool(getattr(self, "_refresh_timing_active", False))
-        dual_total_t0 = time.perf_counter()
+        suppress_host_side_effects = bool(suppress_host_side_effects)
+        refresh_timing_active = bool(getattr(self, "_refresh_timing_active", False)) and (
+            not suppress_host_side_effects
+        )
+        dual_total_t0 = time.perf_counter() if refresh_timing_active else 0.0
         dual_stage_sum = 0.0
+
+        def _stage_now() -> float:
+            return time.perf_counter() if refresh_timing_active else 0.0
 
         def _record_dual_stage(attr: str, start: float) -> None:
             nonlocal dual_stage_sum
+            if not refresh_timing_active:
+                return
             elapsed = float(time.perf_counter() - start)
             dual_stage_sum += elapsed
-            if refresh_timing_active:
-                setattr(
-                    self,
-                    attr,
-                    float(getattr(self, attr, 0.0)) + elapsed,
-                )
+            setattr(
+                self,
+                attr,
+                float(getattr(self, attr, 0.0)) + elapsed,
+            )
 
         def _record_dual_artifact_substage(name: str, elapsed: float) -> None:
             if not refresh_timing_active:
@@ -4810,13 +6608,296 @@ class FastMultipoleMethod:
                 return
             setattr(self, attr, float(getattr(self, attr, 0.0)) + float(elapsed))
 
-        stage_t0 = time.perf_counter()
+        stage_t0 = _stage_now()
         pair_policy = None
         policy_state = None
         cache_key = None
         use_paper_fixed_policy = (not self.adaptive_order) and (
             self._uses_paper_style_traversal_policy()
         )
+        if bool(suppress_host_side_effects) and bool(
+            getattr(self, "_strict_fused_mode_active", False)
+        ) and bool(getattr(self, "_strict_fused_device_only", False)):
+            use_paper_fixed_policy = False
+
+        # A static-radix topology key describes the capacity-fixed tree shape,
+        # not the current leaf membership, geometry, or MAC decisions. Reusing
+        # cached dual-tree artifacts across evolved positions can therefore
+        # attach stale neighbor/far-field payloads to freshly sorted particles.
+        stateful_cache_enabled = (
+            bool(allow_stateful_cache)
+            and bool(self.enable_interaction_cache)
+            and str(tree_artifacts.tree_mode) != "static_radix"
+            and (not suppress_host_side_effects)
+        )
+        grouped_interactions_active = bool(grouped_interactions)
+        strict_fused_device_only_hot_path = bool(suppress_host_side_effects) and bool(
+            getattr(self, "_strict_fused_mode_active", False)
+        ) and bool(getattr(self, "_strict_fused_device_only", False))
+        adaptive_order_active = bool(self.adaptive_order) and not bool(
+            strict_fused_device_only_hot_path
+        )
+        mixed_order_farfield_active = bool(self.mixed_order_farfield) and not bool(
+            strict_fused_device_only_hot_path
+        )
+        retain_interactions_active = bool(self.retain_interactions) and not bool(
+            strict_fused_device_only_hot_path
+        )
+        need_traversal_result = (
+            bool(self.retain_traversal_result) and not bool(strict_fused_device_only_hot_path)
+        ) or bool(use_paper_fixed_policy)
+        traced_prepare_inputs = bool(
+            _contains_tracer((tree_artifacts.positions_sorted, tree_artifacts.masses_sorted))
+        )
+        strict_fused_node_interactions_safe_path = (
+            bool(strict_fused_device_only_hot_path)
+            and str(
+                os.environ.get(
+                    "JACCPOT_STATIC_STRICT_FUSED_NODE_INTERACTIONS_SAFE_PATH",
+                    "0",
+                )
+            ).strip().lower() in {"1", "true", "yes", "on"}
+            and not (
+                str(
+                    os.environ.get(
+                        "JACCPOT_STATIC_STRICT_FUSED_ALLOW_UNSAFE_COMPACT_PAIR_REUSE",
+                        "0",
+                    )
+                ).strip().lower() in {"1", "true", "yes", "on"}
+            )
+        )
+        use_compact_streamed_pairs = (
+            (bool(self.streamed_far_pairs) or bool(strict_fused_device_only_hot_path))
+            and not bool(strict_fused_node_interactions_safe_path)
+            and not adaptive_order_active
+            and not grouped_interactions_active
+            and not mixed_order_farfield_active
+            and not retain_interactions_active
+            and not bool(need_traversal_result)
+            and (
+                not bool(traced_prepare_inputs)
+                or bool(strict_fused_device_only_hot_path)
+            )
+        )
+        need_compact_far_pairs = (
+            bool(adaptive_order_active) and not bool(need_traversal_result)
+        ) or bool(use_compact_streamed_pairs)
+        need_node_interactions = not bool(use_compact_streamed_pairs)
+        use_dense_interactions_for_prepare = bool(self.use_dense_interactions) and (
+            self.expansion_basis != "solidfmm"
+        )
+        if not suppress_host_side_effects:
+            _prepare_diag(
+                "dual-tree start "
+                f"theta={theta_val:.3f} mac_type={mac_type_val} "
+                f"streamed={bool(self.streamed_far_pairs)} grouped={grouped_interactions_active} "
+                f"farfield_mode={farfield_mode} memory_objective={self.memory_objective} "
+                f"traversal_config={runtime_traversal_config} "
+                f"need_compact_far_pairs={bool(need_compact_far_pairs)} "
+                f"need_node_interactions={bool(need_node_interactions)} "
+                f"dense_buffers={bool(use_dense_interactions_for_prepare)}"
+            )
+        if (
+            runtime_traversal_config is not None
+            and self.memory_objective == "minimum_memory"
+            and jax.default_backend() == "gpu"
+            and self.tree_type == "radix"
+            and self.expansion_basis == "solidfmm"
+            and bool(self.streamed_far_pairs)
+            and not grouped_interactions_active
+        ):
+            total_nodes = int(tree_artifacts.tree.parent.shape[0])
+            num_internal = int(jnp.asarray(tree_artifacts.tree.left_child).shape[0])
+            num_leaves = max(1, total_nodes - num_internal)
+            sanitized_traversal_config = (
+                _cap_minimum_memory_streamed_gpu_traversal_config_for_tree(
+                    traversal_config=runtime_traversal_config,
+                    total_nodes=total_nodes,
+                    num_leaves=num_leaves,
+                    num_particles=int(tree_artifacts.positions_sorted.shape[0]),
+                )
+            )
+            if sanitized_traversal_config != runtime_traversal_config:
+                far_slots_before = total_nodes * int(
+                    runtime_traversal_config.max_interactions_per_node
+                )
+                near_slots_before = num_leaves * int(
+                    runtime_traversal_config.max_neighbors_per_leaf
+                )
+                if not suppress_host_side_effects:
+                    _prepare_diag(
+                        "capped explicit traversal_config for legacy streamed GPU walk "
+                        f"total_nodes={total_nodes} num_leaves={num_leaves} "
+                        f"far_slots={far_slots_before} near_slots={near_slots_before} "
+                        f"from={runtime_traversal_config} "
+                        f"to={sanitized_traversal_config}"
+                    )
+                runtime_traversal_config = sanitized_traversal_config
+        jit_traversal_for_prepare = bool(
+            self._jit_traversal_default
+        ) and not _contains_tracer(
+            (tree_artifacts.positions_sorted, tree_artifacts.masses_sorted)
+        )
+        if self.prepare_stage_memory_split_enabled is not None:
+            allow_split_build = bool(self.prepare_stage_memory_split_enabled)
+        elif self._prepare_stage_memory_split_env_override is None:
+            # Default to the lower-peak split traversal build in the production
+            # minimum-memory streamed GPU path; keep env opt-out for debugging.
+            allow_split_build = bool(
+                self._streamed_minimum_memory_gpu_default_split_build
+                and not grouped_interactions_active
+            )
+        else:
+            allow_split_build = bool(self._prepare_stage_memory_split_env_override)
+        if bool(strict_fused_device_only_hot_path):
+            allow_split_build = True
+        if not suppress_host_side_effects:
+            _prepare_diag(f"allow_split_build={bool(allow_split_build)}")
+        tree_mode_static_radix = (
+            str(tree_artifacts.tree_mode).strip().lower() == "static_radix"
+        )
+        strict_mode_active = bool(
+            (
+                self._strict_gpu_mode_on
+                or (
+                    self._strict_gpu_mode_auto
+                    and self._large_n_gpu_production_profile_cached
+                    and tree_mode_static_radix
+                )
+            )
+        )
+        if strict_mode_active:
+            strict_context_key = self._strict_cap_profile_context_key(
+                tree_mode=str(tree_artifacts.tree_mode),
+                leaf_parameter=int(tree_artifacts.leaf_parameter),
+                particle_count=int(jnp.asarray(tree_artifacts.positions_sorted).shape[0]),
+            )
+            strict_fused_hot_path = bool(getattr(self, "_strict_fused_mode_active", False))
+            strict_profile_key_stable = (
+                str(self._strict_profiled_context_key) == str(strict_context_key)
+            )
+            if not (strict_fused_hot_path and strict_profile_key_stable):
+                self._maybe_load_strict_cap_profile(context_key=strict_context_key)
+            if bool(self._strict_cap_require_exact_profile_match):
+                if str(self._strict_profiled_context_key) != str(strict_context_key):
+                    self._strict_runner_fail_fast_reject_count += 1
+                    raise RuntimeError(
+                        "strict static lane requires exact cap profile key match: "
+                        f"requested={strict_context_key} "
+                        f"resolved={self._strict_profiled_context_key or 'none'}"
+                    )
+            profiled_q = int(self._strict_profiled_max_pair_queue)
+            profiled_b = int(self._strict_profiled_pair_process_block)
+            if bool(self._strict_cap_require_exact_profile_match) and profiled_q <= 0:
+                self._strict_runner_fail_fast_reject_count += 1
+                raise RuntimeError(
+                    "strict static lane requires non-zero profiled max_pair_queue "
+                    f"for key {strict_context_key}"
+                )
+            if profiled_q > 0:
+                if runtime_traversal_config is not None:
+                    runtime_traversal_config = DualTreeTraversalConfig(
+                        max_pair_queue=max(
+                            int(runtime_traversal_config.max_pair_queue),
+                            int(profiled_q),
+                        ),
+                        process_block=(
+                            int(profiled_b)
+                            if profiled_b > 0
+                            else int(runtime_traversal_config.process_block)
+                        ),
+                        max_interactions_per_node=int(
+                            runtime_traversal_config.max_interactions_per_node
+                        ),
+                        max_neighbors_per_leaf=int(
+                            runtime_traversal_config.max_neighbors_per_leaf
+                        ),
+                    )
+                else:
+                    runtime_traversal_config = DualTreeTraversalConfig(
+                        max_pair_queue=int(profiled_q),
+                        process_block=(
+                            int(profiled_b)
+                            if profiled_b > 0
+                            else int(self.pair_process_block or 1024)
+                        ),
+                        max_interactions_per_node=8192,
+                        max_neighbors_per_leaf=4096,
+                    )
+            if bool(traced_prepare_inputs) and not bool(strict_fused_device_only_hot_path):
+                allow_split_build = False
+            if not suppress_host_side_effects:
+                self._refresh_strict_mode_active_count += 1
+                # Strict mode contract: one-shot shared count->fill and single queue.
+                if not bool(getattr(self, "_strict_shared_env_applied", False)):
+                    os.environ["YGGDRAX_DUAL_TREE_SHARED_COUNT_FILL_ONE_SHOT"] = "1"
+                    os.environ[
+                        "YGGDRAX_DUAL_TREE_SHARED_COUNT_FILL_STEADY_SINGLE_QUEUE"
+                    ] = "1"
+                    self._strict_shared_env_applied = True
+        strict_streamed_fast_path = bool(
+            strict_mode_active
+            and bool(allow_split_build)
+            and bool(use_compact_streamed_pairs)
+            and not grouped_interactions_active
+            and not bool(need_traversal_result)
+            and not adaptive_order_active
+            and not mixed_order_farfield_active
+            and (
+                not bool(traced_prepare_inputs)
+                or bool(strict_fused_device_only_hot_path)
+            )
+        )
+        if bool(strict_fused_device_only_hot_path) and bool(
+            getattr(self, "_strict_fused_fastlane_diag_enabled", True)
+        ):
+            self._strict_fused_fastlane_attempts += 1
+            blockers: list[str] = []
+            if not bool(strict_mode_active):
+                blockers.append("strict_mode_inactive")
+            if not bool(allow_split_build):
+                blockers.append("split_build_disabled")
+            if not bool(use_compact_streamed_pairs):
+                blockers.append("compact_streamed_pairs_disabled")
+            if bool(grouped_interactions_active):
+                blockers.append("grouped_interactions_active")
+            if bool(need_traversal_result):
+                blockers.append("traversal_result_required")
+            if bool(adaptive_order_active):
+                blockers.append("adaptive_order_active")
+            if bool(mixed_order_farfield_active):
+                blockers.append("mixed_order_farfield_active")
+            if bool(traced_prepare_inputs) and not bool(strict_streamed_fast_path):
+                blockers.append("compact_streamed_tracer_unsupported")
+            if bool(strict_streamed_fast_path):
+                self._strict_fused_fastlane_hits += 1
+                self._strict_fused_fastlane_last_blockers = tuple()
+            else:
+                self._strict_fused_fastlane_misses += 1
+                self._strict_fused_fastlane_last_blockers = tuple(blockers)
+                counts = dict(getattr(self, "_strict_fused_fastlane_block_counts", {}))
+                for key in blockers:
+                    counts[str(key)] = int(counts.get(str(key), 0)) + 1
+                self._strict_fused_fastlane_block_counts = counts
+        if strict_streamed_fast_path:
+            if not suppress_host_side_effects:
+                self._refresh_dual_planner_cache_hits += 1
+                self._refresh_dual_planner_execute_count += 1
+                self._refresh_dual_planner_steady_timing_bypass_count += 1
+            return self._prepare_state_dual_and_downward_strict_streamed_fast(
+                tree_artifacts=tree_artifacts,
+                theta_val=theta_val,
+                mac_type_val=mac_type_val,
+                dehnen_radius_scale=dehnen_radius_scale,
+                runtime_traversal_config=runtime_traversal_config,
+                runtime_m2l_chunk_size=runtime_m2l_chunk_size,
+                runtime_l2l_chunk_size=runtime_l2l_chunk_size,
+                record_retry=record_retry,
+                farfield_mode=farfield_mode,
+                retain_interactions=bool(retain_interactions_active),
+                suppress_host_side_effects=suppress_host_side_effects,
+            )
+
         if self.adaptive_order or use_paper_fixed_policy:
             policy_orders = self.p_gears
             if use_paper_fixed_policy:
@@ -4870,102 +6951,146 @@ class FastMultipoleMethod:
                 max_refine_levels=max_refine_levels_val,
                 aspect_threshold=aspect_threshold_val,
             )
-
-        stateful_cache_enabled = bool(allow_stateful_cache) and bool(
-            self.enable_interaction_cache
+        has_pair_policy = pair_policy is not None
+        has_policy_state = policy_state is not None
+        planner_enabled = bool(
+            (
+                self._refresh_dual_planner_mode_on
+                or (
+                    self._refresh_dual_planner_mode_auto
+                    and self._large_n_gpu_production_profile_cached
+                    and tree_mode_static_radix
+                )
+            )
         )
-        need_traversal_result = bool(self.retain_traversal_result) or bool(
-            use_paper_fixed_policy
+        planner_hint: Optional[_RefreshDualPlannerHint] = None
+        planner_cache_hit = False
+        if planner_enabled:
+            strict_split_fastlane = bool(
+                (bool(suppress_host_side_effects) and not has_pair_policy and not has_policy_state)
+                or (
+                    strict_mode_active
+                    and bool(allow_split_build)
+                    and not grouped_interactions_active
+                    and not bool(need_traversal_result)
+                    and not has_pair_policy
+                    and not has_policy_state
+                )
+            )
+            if strict_split_fastlane:
+                # Strict/static production lane: keep routing fully on a
+                # fixed host-side decision and skip compiled route probing +
+                # device_get round-trips in the refresh hot path.
+                planner_hint = _RefreshDualPlannerHint(
+                    use_split_build=bool(allow_split_build),
+                    suppress_substage_timing=True,
+                )
+                planner_cache_hit = True
+                if not suppress_host_side_effects:
+                    self._refresh_dual_planner_cache_hits += 1
+                    self._refresh_dual_planner_execute_count += 1
+            else:
+                traversal_key = (
+                    "none"
+                    if runtime_traversal_config is None
+                    else (
+                        f"{int(runtime_traversal_config.max_pair_queue)}:"
+                        f"{int(runtime_traversal_config.process_block)}:"
+                        f"{int(runtime_traversal_config.max_interactions_per_node)}:"
+                        f"{int(runtime_traversal_config.max_neighbors_per_leaf)}"
+                    )
+                )
+                planner_key = "|".join(
+                    (
+                        str(tree_artifacts.topology_key),
+                        str(tree_artifacts.tree_mode),
+                        str(int(tree_artifacts.leaf_parameter)),
+                        f"{float(theta_val):.12g}",
+                        str(mac_type_val),
+                        str(grouped_interactions_active),
+                        str(bool(need_traversal_result)),
+                        str(bool(need_compact_far_pairs)),
+                        str(bool(need_node_interactions)),
+                        str(bool(allow_split_build)),
+                        str(traversal_key),
+                    )
+                )
+                planner_hint = self._refresh_dual_planner_cache.get(planner_key)
+                if planner_hint is None:
+                    if not suppress_host_side_effects:
+                        self._refresh_dual_planner_cache_misses += 1
+                    total_nodes_planner = int(tree_artifacts.tree.parent.shape[0])
+                    internal_nodes_planner = int(
+                        jnp.asarray(tree_artifacts.tree.left_child).shape[0]
+                    )
+                    leaf_count_planner = max(
+                        0, total_nodes_planner - internal_nodes_planner
+                    )
+                    (
+                        use_split_build_compiled,
+                        _use_compact_shared_far_near_compiled,
+                        suppress_substage_timing_compiled,
+                    ) = _compiled_refresh_dual_planner_route(
+                        allow_split_build_flag=jnp.asarray(
+                            bool(allow_split_build), dtype=jnp.bool_
+                        ),
+                        grouped_interactions_flag=jnp.asarray(
+                            grouped_interactions_active, dtype=jnp.bool_
+                        ),
+                        need_traversal_result_flag=jnp.asarray(
+                            bool(need_traversal_result), dtype=jnp.bool_
+                        ),
+                        has_pair_policy_flag=jnp.asarray(
+                            has_pair_policy, dtype=jnp.bool_
+                        ),
+                        has_policy_state_flag=jnp.asarray(
+                            has_policy_state, dtype=jnp.bool_
+                        ),
+                        leaf_count=jnp.asarray(leaf_count_planner, dtype=jnp.int32),
+                        need_node_interactions_flag=jnp.asarray(
+                            bool(need_node_interactions), dtype=jnp.bool_
+                        ),
+                        need_compact_far_pairs_flag=jnp.asarray(
+                            bool(need_compact_far_pairs), dtype=jnp.bool_
+                        ),
+                        use_dense_interactions_flag=jnp.asarray(
+                            bool(use_dense_interactions_for_prepare), dtype=jnp.bool_
+                        ),
+                    )
+                    if suppress_host_side_effects:
+                        use_split_build_compiled_bool = bool(allow_split_build)
+                        suppress_substage_timing_compiled_bool = True
+                    else:
+                        use_split_build_compiled_bool = bool(use_split_build_compiled)
+                        suppress_substage_timing_compiled_bool = bool(suppress_substage_timing_compiled)
+                    if not suppress_host_side_effects:
+                        self._refresh_dual_planner_compiled_route_count += 1
+                    planner_hint = _RefreshDualPlannerHint(
+                        use_split_build=use_split_build_compiled_bool,
+                        suppress_substage_timing=suppress_substage_timing_compiled_bool,
+                    )
+                    if not suppress_host_side_effects:
+                        self._refresh_dual_planner_cache[planner_key] = planner_hint
+                        self._refresh_dual_planner_compile_count += 1
+                else:
+                    planner_cache_hit = True
+                    if not suppress_host_side_effects:
+                        self._refresh_dual_planner_cache_hits += 1
+                if not suppress_host_side_effects:
+                    self._refresh_dual_planner_execute_count += 1
+        planner_allow_steady_timing_bypass = bool(
+            self._planner_steady_timing_bypass_enabled
         )
-        use_compact_streamed_pairs = (
-            bool(self.streamed_far_pairs)
-            and not bool(self.adaptive_order)
-            and not bool(grouped_interactions)
-            and not bool(self.mixed_order_farfield)
-            and not bool(self.retain_interactions)
-            and not bool(need_traversal_result)
-        )
-        need_compact_far_pairs = (
-            bool(self.adaptive_order) and not bool(need_traversal_result)
-        ) or bool(use_compact_streamed_pairs)
-        need_node_interactions = not bool(use_compact_streamed_pairs)
-        use_dense_interactions_for_prepare = bool(self.use_dense_interactions) and (
-            self.expansion_basis != "solidfmm"
-        )
-        _prepare_diag(
-            "dual-tree start "
-            f"theta={theta_val:.3f} mac_type={mac_type_val} "
-            f"streamed={bool(self.streamed_far_pairs)} grouped={bool(grouped_interactions)} "
-            f"farfield_mode={farfield_mode} memory_objective={self.memory_objective} "
-            f"traversal_config={runtime_traversal_config} "
-            f"need_compact_far_pairs={bool(need_compact_far_pairs)} "
-            f"need_node_interactions={bool(need_node_interactions)} "
-            f"dense_buffers={bool(use_dense_interactions_for_prepare)}"
-        )
+        dual_artifact_timing_callback = _record_dual_artifact_substage
         if (
-            runtime_traversal_config is not None
-            and self.memory_objective == "minimum_memory"
-            and jax.default_backend() == "gpu"
-            and self.tree_type == "radix"
-            and self.expansion_basis == "solidfmm"
-            and bool(self.streamed_far_pairs)
-            and not bool(grouped_interactions)
+            planner_hint is not None
+            and planner_cache_hit
+            and bool(getattr(planner_hint, "suppress_substage_timing", False))
+            and planner_allow_steady_timing_bypass
         ):
-            total_nodes = int(tree_artifacts.tree.parent.shape[0])
-            num_internal = int(jnp.asarray(tree_artifacts.tree.left_child).shape[0])
-            num_leaves = max(1, total_nodes - num_internal)
-            sanitized_traversal_config = (
-                _cap_minimum_memory_streamed_gpu_traversal_config_for_tree(
-                    traversal_config=runtime_traversal_config,
-                    total_nodes=total_nodes,
-                    num_leaves=num_leaves,
-                    num_particles=int(tree_artifacts.positions_sorted.shape[0]),
-                )
-            )
-            if sanitized_traversal_config != runtime_traversal_config:
-                far_slots_before = total_nodes * int(
-                    runtime_traversal_config.max_interactions_per_node
-                )
-                near_slots_before = num_leaves * int(
-                    runtime_traversal_config.max_neighbors_per_leaf
-                )
-                _prepare_diag(
-                    "capped explicit traversal_config for legacy streamed GPU walk "
-                    f"total_nodes={total_nodes} num_leaves={num_leaves} "
-                    f"far_slots={far_slots_before} near_slots={near_slots_before} "
-                    f"from={runtime_traversal_config} "
-                    f"to={sanitized_traversal_config}"
-                )
-                runtime_traversal_config = sanitized_traversal_config
-        jit_traversal_for_prepare = bool(
-            self._jit_traversal_default
-        ) and not _contains_tracer(
-            (tree_artifacts.positions_sorted, tree_artifacts.masses_sorted)
-        )
-        split_build_env_raw = os.environ.get(
-            "JACCPOT_PREPARE_STAGE_MEMORY_SPLIT_ENABLED"
-        )
-        if self.prepare_stage_memory_split_enabled is not None:
-            allow_split_build = bool(self.prepare_stage_memory_split_enabled)
-        elif split_build_env_raw is None:
-            # Default to the lower-peak split traversal build in the production
-            # minimum-memory streamed GPU path; keep env opt-out for debugging.
-            allow_split_build = bool(
-                self.memory_objective == "minimum_memory"
-                and jax.default_backend() == "gpu"
-                and self.tree_type == "radix"
-                and self.expansion_basis == "solidfmm"
-                and bool(self.streamed_far_pairs)
-                and not bool(grouped_interactions)
-            )
-        else:
-            allow_split_build = str(split_build_env_raw).strip().lower() in {
-                "1",
-                "true",
-                "yes",
-                "on",
-            }
-        _prepare_diag(f"allow_split_build={bool(allow_split_build)}")
+            dual_artifact_timing_callback = None
+            if not suppress_host_side_effects:
+                self._refresh_dual_planner_steady_timing_bypass_count += 1
         _record_dual_stage("_refresh_timing_dual_setup_seconds", stage_t0)
 
         stage_t0 = time.perf_counter()
@@ -4990,8 +7115,16 @@ class FastMultipoleMethod:
             max_pair_queue=self.max_pair_queue,
             pair_process_block=self.pair_process_block,
             traversal_config=runtime_traversal_config,
-            retry_logger=(None if jit_traversal_for_prepare else record_retry),
-            fail_fast=self.fail_fast,
+            retry_logger=(
+                None
+                if strict_mode_active
+                else (
+                    record_retry
+                    if bool(getattr(self, "_strict_cap_record_enabled", True))
+                    else (None if jit_traversal_for_prepare else record_retry)
+                )
+            ),
+            fail_fast=(self.fail_fast or strict_mode_active),
             use_dense_interactions=use_dense_interactions_for_prepare,
             grouped_interactions=grouped_interactions,
             grouped_chunk_size=runtime_m2l_chunk_size,
@@ -5007,18 +7140,21 @@ class FastMultipoleMethod:
             pair_policy=pair_policy,
             policy_state=policy_state,
             jit_traversal=jit_traversal_for_prepare,
-            timing_callback=_record_dual_artifact_substage,
+            timing_callback=dual_artifact_timing_callback,
+            planner_hint=planner_hint,
         )
         if stateful_cache_enabled:
             if bool(getattr(dual_artifacts, "cache_hit", False)):
-                self._interaction_cache_hits += 1
+                if not suppress_host_side_effects:
+                    self._interaction_cache_hits += 1
             else:
-                self._interaction_cache_misses += 1
+                if not suppress_host_side_effects:
+                    self._interaction_cache_misses += 1
         _record_dual_stage("_refresh_timing_dual_artifact_build_seconds", stage_t0)
         if stateful_cache_enabled:
             self._interaction_cache = cache_entry
 
-        stage_t0 = time.perf_counter()
+        stage_t0 = _stage_now()
         (
             interactions,
             neighbor_list,
@@ -5033,66 +7169,97 @@ class FastMultipoleMethod:
             grouped_segment_group_ids,
             grouped_segment_unique_targets,
         ) = self._unpack_dual_tree_artifacts(dual_artifacts)
-        far_pair_count_diag = None
-        if compact_far_pairs is not None:
-            far_pair_count_diag = int(compact_far_pairs.sources.shape[0])
-        elif interactions is not None:
-            far_pair_count_diag = int(interactions.sources.shape[0])
-        total_nodes_diag = int(tree_artifacts.tree.parent.shape[0])
-        internal_nodes_diag = int(jnp.asarray(tree_artifacts.tree.left_child).shape[0])
-        leaf_count_diag = max(0, total_nodes_diag - internal_nodes_diag)
-        self._recent_dual_node_count = int(total_nodes_diag)
-        self._recent_dual_leaf_count = int(leaf_count_diag)
-        self._recent_dual_neighbor_count = int(neighbor_list.neighbors.shape[0])
-        self._recent_dual_far_pair_count = (
-            0 if far_pair_count_diag is None else int(far_pair_count_diag)
-        )
-        _prepare_diag(
-            "dual-tree done "
-            f"neighbor_count={int(neighbor_list.neighbors.shape[0])} "
-            f"far_pair_count={far_pair_count_diag} "
-            f"compact_far_pairs={compact_far_pairs is not None} "
-            f"interactions_present={interactions is not None}"
-        )
-        _prepare_diag(
-            "dual-tree bytes "
-            f"neighbors={_format_nbytes(_estimate_payload_nbytes(neighbor_list))} "
-            f"compact_far_pairs={_format_nbytes(_estimate_payload_nbytes(compact_far_pairs))} "
-            f"interactions={_format_nbytes(_estimate_payload_nbytes(interactions))} "
-            f"dense_buffers={_format_nbytes(_estimate_payload_nbytes(dense_buffers))} "
-            f"grouped_buffers={_format_nbytes(_estimate_payload_nbytes(grouped_buffers))}"
-        )
+        if not suppress_host_side_effects:
+            far_pair_count_diag = None
+            if compact_far_pairs is not None:
+                far_pair_count_diag = int(compact_far_pairs.sources.shape[0])
+            elif interactions is not None:
+                far_pair_count_diag = int(interactions.sources.shape[0])
+            total_nodes_diag = int(tree_artifacts.tree.parent.shape[0])
+            internal_nodes_diag = int(jnp.asarray(tree_artifacts.tree.left_child).shape[0])
+            leaf_count_diag = max(0, total_nodes_diag - internal_nodes_diag)
+            self._recent_dual_node_count = int(total_nodes_diag)
+            self._recent_dual_leaf_count = int(leaf_count_diag)
+            self._recent_dual_neighbor_count = int(neighbor_list.neighbors.shape[0])
+            self._recent_dual_far_pair_count = (
+                0 if far_pair_count_diag is None else int(far_pair_count_diag)
+            )
+            _prepare_diag(
+                "dual-tree done "
+                f"neighbor_count={int(neighbor_list.neighbors.shape[0])} "
+                f"far_pair_count={far_pair_count_diag} "
+                f"compact_far_pairs={compact_far_pairs is not None} "
+                f"interactions_present={interactions is not None}"
+            )
+            _prepare_diag(
+                "dual-tree bytes "
+                f"neighbors={_format_nbytes(_estimate_payload_nbytes(neighbor_list))} "
+                f"compact_far_pairs={_format_nbytes(_estimate_payload_nbytes(compact_far_pairs))} "
+                f"interactions={_format_nbytes(_estimate_payload_nbytes(interactions))} "
+                f"dense_buffers={_format_nbytes(_estimate_payload_nbytes(dense_buffers))} "
+                f"grouped_buffers={_format_nbytes(_estimate_payload_nbytes(grouped_buffers))}"
+            )
 
-        far_pair_plan = self._prepare_state_plan_far_pairs_for_downward(
-            interactions=interactions,
-            traversal_result=traversal_result,
-            compact_far_pairs=compact_far_pairs,
-            upward=tree_artifacts.upward,
+        strict_streamed_direct_far_pairs = bool(
+            strict_mode_active
+            and bool(use_compact_streamed_pairs)
+            and compact_far_pairs is not None
+            and not bool(adaptive_order_active)
+            and not bool(mixed_order_farfield_active)
         )
-        far_pairs_by_gear = far_pair_plan.far_pairs_by_gear
-        far_pairs_coo = far_pair_plan.far_pairs_coo
-        adaptive_order_for_downward = far_pair_plan.adaptive_order_for_downward
-        p_gears_for_downward = far_pair_plan.p_gears_for_downward
-        self._recent_far_pairs_by_gear_counts = (
-            far_pair_plan.recent_far_pairs_by_gear_counts
-        )
+        if strict_streamed_direct_far_pairs:
+            src_far = jnp.asarray(compact_far_pairs.sources, dtype=INDEX_DTYPE)
+            tgt_far = jnp.asarray(compact_far_pairs.targets, dtype=INDEX_DTYPE)
+            far_pairs_coo = _FarPairCOO(
+                sources=src_far,
+                targets=tgt_far,
+                active_count=getattr(compact_far_pairs, "far_pair_count", None),
+            )
+            far_pairs_by_gear = ((src_far, tgt_far),)
+            adaptive_order_for_downward = True
+            p_gears_for_downward = (int(tree_artifacts.upward.multipoles.order),)
+            if not suppress_host_side_effects:
+                self._recent_far_pairs_by_gear_counts = (int(src_far.shape[0]),)
+        else:
+            far_pair_plan = self._prepare_state_plan_far_pairs_for_downward(
+                interactions=interactions,
+                traversal_result=traversal_result,
+                compact_far_pairs=compact_far_pairs,
+                upward=tree_artifacts.upward,
+            )
+            far_pairs_by_gear = far_pair_plan.far_pairs_by_gear
+            far_pairs_coo = far_pair_plan.far_pairs_coo
+            adaptive_order_for_downward = far_pair_plan.adaptive_order_for_downward
+            p_gears_for_downward = far_pair_plan.p_gears_for_downward
+            if not suppress_host_side_effects:
+                self._recent_far_pairs_by_gear_counts = (
+                    far_pair_plan.recent_far_pairs_by_gear_counts
+                )
         _record_dual_stage("_refresh_timing_dual_far_pair_plan_seconds", stage_t0)
 
-        stage_t0 = time.perf_counter()
-        runtime_m2l_chunk_size = self._prepare_state_autotune_downward_chunk_size(
-            upward=tree_artifacts.upward,
-            far_pairs_by_gear=far_pairs_by_gear,
-            p_gears_for_downward=p_gears_for_downward,
-            runtime_m2l_chunk_size=runtime_m2l_chunk_size,
-        )
-        self._recent_dual_m2l_chunk_size = (
-            0 if runtime_m2l_chunk_size is None else int(runtime_m2l_chunk_size)
-        )
+        stage_t0 = _stage_now()
+        if suppress_host_side_effects and bool(
+            getattr(self, "_static_runtime_fixed_sizing", True)
+        ):
+            runtime_m2l_chunk_size = runtime_m2l_chunk_size
+        else:
+            runtime_m2l_chunk_size = self._prepare_state_autotune_downward_chunk_size(
+                upward=tree_artifacts.upward,
+                far_pairs_by_gear=far_pairs_by_gear,
+                p_gears_for_downward=p_gears_for_downward,
+                runtime_m2l_chunk_size=runtime_m2l_chunk_size,
+            )
+        if not suppress_host_side_effects:
+            self._recent_dual_m2l_chunk_size = (
+                0 if runtime_m2l_chunk_size is None else int(runtime_m2l_chunk_size)
+            )
         _record_dual_stage("_refresh_timing_dual_m2l_autotune_seconds", stage_t0)
 
-        stage_t0 = time.perf_counter()
+        stage_t0 = _stage_now()
         interactions_for_downward = (
-            self._prepare_state_select_interactions_for_downward(
+            None
+            if strict_streamed_direct_far_pairs and not bool(retain_interactions_active)
+            else self._prepare_state_select_interactions_for_downward(
                 interactions=interactions,
                 far_pairs_coo=far_pairs_coo,
             )
@@ -5102,7 +7269,7 @@ class FastMultipoleMethod:
             stage_t0,
         )
 
-        stage_t0 = time.perf_counter()
+        stage_t0 = _stage_now()
         downward = self._prepare_downward_with_artifacts(
             tree=tree_artifacts.tree,
             upward=tree_artifacts.upward,
@@ -5130,18 +7297,19 @@ class FastMultipoleMethod:
         )
         _record_dual_stage("_refresh_timing_dual_downward_compute_seconds", stage_t0)
 
-        stage_t0 = time.perf_counter()
-        _prepare_diag(
-            "downward done "
-            f"locals_shape={tuple(int(v) for v in downward.locals.coefficients.shape)} "
-            f"interactions_shape={tuple(int(v) for v in downward.interactions.sources.shape)}"
-        )
-        _prepare_diag(
-            "downward bytes "
-            f"locals={_format_nbytes(_estimate_payload_nbytes(downward.locals))} "
-            f"stored_interactions={_format_nbytes(_estimate_payload_nbytes(downward.interactions))}"
-        )
-        if not bool(self.retain_interactions):
+        stage_t0 = _stage_now()
+        if not suppress_host_side_effects:
+            _prepare_diag(
+                "downward done "
+                f"locals_shape={tuple(int(v) for v in downward.locals.coefficients.shape)} "
+                f"interactions_shape={tuple(int(v) for v in downward.interactions.sources.shape)}"
+            )
+            _prepare_diag(
+                "downward bytes "
+                f"locals={_format_nbytes(_estimate_payload_nbytes(downward.locals))} "
+                f"stored_interactions={_format_nbytes(_estimate_payload_nbytes(downward.interactions))}"
+            )
+        if not bool(retain_interactions_active):
             # Prepared state only needs the locals; keep a shape-compatible
             # placeholder so downstream code does not accidentally pin the full
             # far-field pair payload after prepare_state completes.
@@ -5153,7 +7321,7 @@ class FastMultipoleMethod:
                 )
             )
         interactions_out: Optional[NodeInteractionList]
-        if bool(self.retain_interactions):
+        if bool(retain_interactions_active):
             interactions_out = interactions
         else:
             interactions_out = None
@@ -5168,9 +7336,13 @@ class FastMultipoleMethod:
             interactions=interactions_out,
             neighbor_list=neighbor_list,
             traversal_result=(
-                traversal_result if self.retain_traversal_result else None
+                traversal_result if bool(need_traversal_result) else None
             ),
-            compact_far_pairs=(compact_far_pairs if self.adaptive_order else None),
+            compact_far_pairs=(
+                compact_far_pairs
+                if (bool(adaptive_order_active) or bool(strict_streamed_direct_far_pairs))
+                else None
+            ),
             downward=downward,
             cache_entry=cache_entry,
         )
@@ -5224,9 +7396,19 @@ class FastMultipoleMethod:
                 )
             src_far = jnp.asarray(interactions.sources, dtype=INDEX_DTYPE)
             tgt_far = jnp.asarray(interactions.targets, dtype=INDEX_DTYPE)
-        far_pairs_coo = _FarPairCOO(sources=src_far, targets=tgt_far)
+        active_count = (
+            getattr(compact_far_pairs, "far_pair_count", None)
+            if compact_far_pairs is not None
+            else None
+        )
+        far_pairs_coo = _FarPairCOO(
+            sources=src_far,
+            targets=tgt_far,
+            active_count=active_count,
+        )
         max_order_int = int(upward.multipoles.order)
-        if self.mixed_order_farfield and max_order_int >= 1:
+        strict_fused_device_only_active = bool(getattr(self, "_strict_fused_mode_active", False)) and bool(getattr(self, "_strict_fused_device_only", False))
+        if self.mixed_order_farfield and max_order_int >= 1 and (not strict_fused_device_only_active):
             if interactions is None:
                 raise RuntimeError(
                     "mixed-order streamed farfield requires node interaction lists"
@@ -5313,6 +7495,15 @@ class FastMultipoleMethod:
         runtime_m2l_chunk_size: Optional[int],
     ) -> Optional[int]:
         """Choose runtime M2L chunk size for the downward pass."""
+
+        static_runtime_fixed_sizing = bool(
+            getattr(self, "_static_runtime_fixed_sizing", True)
+        )
+        if static_runtime_fixed_sizing:
+            return runtime_m2l_chunk_size
+
+        if bool(getattr(self, "_strict_fused_mode_active", False)):
+            return runtime_m2l_chunk_size
 
         if (
             runtime_m2l_chunk_size is not None
@@ -5806,6 +7997,168 @@ class FastMultipoleMethod:
             far_pairs_by_gear=far_pairs_by_gear,
             adaptive_order=adaptive_order,
             p_gears=p_gears,
+        )
+
+    def _prepare_state_dual_and_downward_strict_streamed_fast(
+        self,
+        *,
+        tree_artifacts: _PrepareStateTreeUpwardArtifacts,
+        theta_val: float,
+        mac_type_val: MACType,
+        dehnen_radius_scale: float,
+        runtime_traversal_config: Optional[DualTreeTraversalConfig],
+        runtime_m2l_chunk_size: Optional[int],
+        runtime_l2l_chunk_size: Optional[int],
+        record_retry: Callable[[DualTreeRetryEvent], None],
+        farfield_mode: str,
+        retain_interactions: bool = False,
+        suppress_host_side_effects: bool = False,
+    ) -> _PrepareStateDualDownwardArtifacts:
+        """Strict static fast path with compact streamed far-pairs only."""
+
+        geometry_factory = (
+            None
+            if tree_artifacts.upward.geometry is not None
+            else lambda: compute_tree_geometry(
+                tree_artifacts.tree,
+                tree_artifacts.positions_sorted,
+                max_leaf_size=int(tree_artifacts.leaf_cap),
+            )
+        )
+        dual_artifacts, cache_entry = _build_dual_tree_artifacts(
+            tree_artifacts.tree,
+            tree_artifacts.upward.geometry,
+            geometry_factory=geometry_factory,
+            theta=theta_val,
+            mac_type=mac_type_val,
+            dehnen_radius_scale=dehnen_radius_scale,
+            cache_key=None,
+            cache_entry=None,
+            max_pair_queue=self.max_pair_queue,
+            pair_process_block=self.pair_process_block,
+            traversal_config=runtime_traversal_config,
+            retry_logger=None,
+            fail_fast=True,
+            use_dense_interactions=False,
+            grouped_interactions=False,
+            grouped_chunk_size=runtime_m2l_chunk_size,
+            need_traversal_result=False,
+            need_compact_far_pairs=True,
+            need_node_interactions=False,
+            precompute_grouped_class_segments=False,
+            grouped_schedule_budget_bytes=self._grouped_schedule_item_budget(),
+            allow_split_build=True,
+            pair_policy=None,
+            policy_state=None,
+            jit_traversal=True,
+            timing_callback=None,
+            planner_hint=_RefreshDualPlannerHint(
+                use_split_build=True,
+                suppress_substage_timing=True,
+            ),
+        )
+        (
+            interactions,
+            neighbor_list,
+            traversal_result,
+            compact_far_pairs,
+            dense_buffers,
+            grouped_buffers,
+            grouped_segment_starts,
+            grouped_segment_lengths,
+            grouped_segment_class_ids,
+            grouped_segment_sort_permutation,
+            grouped_segment_group_ids,
+            grouped_segment_unique_targets,
+        ) = self._unpack_dual_tree_artifacts(dual_artifacts)
+        del (
+            interactions,
+            traversal_result,
+            dense_buffers,
+            grouped_buffers,
+            grouped_segment_starts,
+            grouped_segment_lengths,
+            grouped_segment_class_ids,
+            grouped_segment_sort_permutation,
+            grouped_segment_group_ids,
+            grouped_segment_unique_targets,
+        )
+        if compact_far_pairs is None:
+            raise RuntimeError(
+                "strict streamed fast path requires compact far-pair artifacts"
+            )
+        if not suppress_host_side_effects:
+            total_nodes_diag = int(tree_artifacts.tree.parent.shape[0])
+            internal_nodes_diag = int(jnp.asarray(tree_artifacts.tree.left_child).shape[0])
+            leaf_count_diag = max(0, total_nodes_diag - internal_nodes_diag)
+            self._recent_dual_node_count = int(total_nodes_diag)
+            self._recent_dual_leaf_count = int(leaf_count_diag)
+            self._recent_dual_neighbor_count = int(neighbor_list.neighbors.shape[0])
+            self._recent_dual_far_pair_count = int(compact_far_pairs.sources.shape[0])
+
+        src_far = jnp.asarray(compact_far_pairs.sources, dtype=INDEX_DTYPE)
+        tgt_far = jnp.asarray(compact_far_pairs.targets, dtype=INDEX_DTYPE)
+        far_pairs_coo = _FarPairCOO(
+            sources=src_far,
+            targets=tgt_far,
+            active_count=getattr(compact_far_pairs, "far_pair_count", None),
+        )
+        far_pairs_by_gear: tuple[tuple[Array, Array], ...] = ((src_far, tgt_far),)
+        p_gears_for_downward = (int(tree_artifacts.upward.multipoles.order),)
+        if not suppress_host_side_effects:
+            self._recent_far_pairs_by_gear_counts = (int(src_far.shape[0]),)
+
+        if suppress_host_side_effects and bool(
+            getattr(self, "_static_runtime_fixed_sizing", True)
+        ):
+            runtime_m2l_chunk_size = runtime_m2l_chunk_size
+        else:
+            runtime_m2l_chunk_size = self._prepare_state_autotune_downward_chunk_size(
+                upward=tree_artifacts.upward,
+                far_pairs_by_gear=far_pairs_by_gear,
+                p_gears_for_downward=p_gears_for_downward,
+                runtime_m2l_chunk_size=runtime_m2l_chunk_size,
+            )
+        if not suppress_host_side_effects:
+            self._recent_dual_m2l_chunk_size = (
+                0 if runtime_m2l_chunk_size is None else int(runtime_m2l_chunk_size)
+            )
+        downward = self._prepare_downward_with_artifacts(
+            tree=tree_artifacts.tree,
+            upward=tree_artifacts.upward,
+            theta_val=theta_val,
+            locals_template=tree_artifacts.locals_template,
+            interactions=None,
+            runtime_m2l_chunk_size=runtime_m2l_chunk_size,
+            runtime_l2l_chunk_size=runtime_l2l_chunk_size,
+            runtime_traversal_config=runtime_traversal_config,
+            record_retry=record_retry,
+            dense_buffers=None,
+            grouped_interactions=False,
+            grouped_buffers=None,
+            grouped_segment_starts=None,
+            grouped_segment_lengths=None,
+            grouped_segment_class_ids=None,
+            grouped_segment_sort_permutation=None,
+            grouped_segment_group_ids=None,
+            grouped_segment_unique_targets=None,
+            farfield_mode=farfield_mode,
+            far_pairs_coo=far_pairs_coo,
+            far_pairs_by_gear=far_pairs_by_gear,
+            adaptive_order=True,
+            p_gears=p_gears_for_downward,
+        )
+        if not bool(retain_interactions):
+            downward = downward._replace(
+                interactions=_empty_interaction_storage_for_tree(tree_artifacts.tree)
+            )
+        return _PrepareStateDualDownwardArtifacts(
+            interactions=None,
+            neighbor_list=neighbor_list,
+            traversal_result=None,
+            compact_far_pairs=compact_far_pairs,
+            downward=downward,
+            cache_entry=cache_entry,
         )
 
     def _resolve_nearfield_mode(self, *, num_particles: int) -> str:
@@ -6514,6 +8867,8 @@ class FastMultipoleMethod:
         refine_local: Optional[bool] = None,
         max_refine_levels: Optional[int] = None,
         aspect_threshold: Optional[float] = None,
+        runtime_overrides_override: Optional[_RuntimeExecutionOverrides] = None,
+        fused_device_mode: bool = False,
     ) -> PreparedStateLike:
         """Precompute tree and interaction data for repeated evaluations.
 
@@ -6557,9 +8912,11 @@ class FastMultipoleMethod:
             self._refresh_timing_input_seconds += time.perf_counter() - input_t0
         allow_stateful_cache = not _contains_tracer((positions_arr, masses_arr))
 
-        runtime_overrides = self._resolve_runtime_execution_overrides(
-            num_particles=int(positions_arr.shape[0]),
-        )
+        runtime_overrides = runtime_overrides_override
+        if runtime_overrides is None:
+            runtime_overrides = self._resolve_runtime_execution_overrides(
+                num_particles=int(positions_arr.shape[0]),
+            )
         runtime_traversal_config = runtime_overrides.traversal_config
         runtime_m2l_chunk_size = runtime_overrides.m2l_chunk_size
         runtime_l2l_chunk_size = runtime_overrides.l2l_chunk_size
@@ -6603,6 +8960,7 @@ class FastMultipoleMethod:
                 upward_center_mode=upward_center_mode,
                 record_retry=record_retry,
                 collected_retries=collected_retries,
+                fused_device_mode=bool(fused_device_mode),
             )
 
         tree_artifacts = self._prepare_state_tree_and_upward(
@@ -6745,6 +9103,16 @@ class FastMultipoleMethod:
         retry_events_tuple = tuple(collected_retries)
         if allow_stateful_cache:
             self._recent_retry_events = retry_events_tuple
+            self._record_strict_cap_profile_from_retries(
+                retry_events_tuple,
+                context_key=self._strict_cap_profile_context_key(
+                    tree_mode=str(tree_artifacts.tree_mode),
+                    leaf_parameter=int(tree_artifacts.leaf_parameter),
+                    particle_count=int(
+                        jnp.asarray(tree_artifacts.positions_sorted).shape[0]
+                    ),
+                ),
+            )
 
         execution_backend = self._resolve_execution_backend()
         tree_type_norm = (
@@ -8660,7 +11028,9 @@ def _chunk_segment_scatter_add(
     chunk_size: int,
 ) -> Array:
     """Reduce one fixed-width chunk by target index and scatter-add into locals."""
-    sort_idx = jnp.argsort(tgt_chunk)
+    masked_targets = jnp.where(valid, tgt_chunk, jnp.iinfo(INDEX_DTYPE).max)
+    sort_idx = jnp.argsort(masked_targets)
+    sorted_keys = masked_targets[sort_idx]
     tgt_sorted = tgt_chunk[sort_idx]
     contribs_sorted = contribs[sort_idx]
     valid_sorted = valid[sort_idx]
@@ -8669,7 +11039,7 @@ def _chunk_segment_scatter_add(
     new_group = jnp.concatenate(
         (
             jnp.asarray([True], dtype=bool),
-            tgt_sorted[1:] != tgt_sorted[:-1],
+            sorted_keys[1:] != sorted_keys[:-1],
         ),
         axis=0,
     )
@@ -8947,6 +11317,7 @@ def _accumulate_solidfmm_m2l_grouped_class_major(
             centers,
             src,
             tgt,
+            jnp.asarray(src.shape[0], dtype=INDEX_DTYPE),
             order=order,
             rotation=rotation,
             total_nodes=total_nodes,
@@ -9016,6 +11387,7 @@ def _accumulate_solidfmm_m2l_grouped(
             centers,
             src,
             tgt,
+            jnp.asarray(src.shape[0], dtype=INDEX_DTYPE),
             order=order,
             rotation=rotation,
             total_nodes=total_nodes,
@@ -9126,14 +11498,21 @@ def _accumulate_solidfmm_m2l_fullbatch(
     centers: Array,
     src: Array,
     tgt: Array,
+    active_pair_count: Array,
     *,
     order: int,
     rotation: str,
     total_nodes: int,
 ) -> Array:
     """Accumulate solidfmm M2L contributions in one full interaction batch."""
-    src_mult = multip_packed[src]
-    deltas = centers[tgt] - centers[src]
+    idx = jnp.arange(src.shape[0], dtype=INDEX_DTYPE)
+    raw_src = src
+    raw_tgt = tgt
+    valid = (idx < active_pair_count) & (raw_src >= 0) & (raw_tgt >= 0)
+    safe_src = jnp.where(valid, raw_src, 0)
+    safe_tgt = jnp.where(valid, raw_tgt, 0)
+    src_mult = multip_packed[safe_src]
+    deltas = centers[safe_tgt] - centers[safe_src]
 
     if rotation == "cached":
         blocks_to_z = complex_rotation_blocks_to_z_batch(
@@ -9163,7 +11542,8 @@ def _accumulate_solidfmm_m2l_fullbatch(
             rotation=rotation,
         )
     contribs = contribs.astype(locals_coeffs.dtype)
-    return locals_coeffs + jax.ops.segment_sum(contribs, tgt, total_nodes)
+    contribs = jnp.where(valid[:, None], contribs, 0)
+    return locals_coeffs + jax.ops.segment_sum(contribs, safe_tgt, total_nodes)
 
 
 @partial(
@@ -9177,6 +11557,7 @@ def _accumulate_solidfmm_m2l_chunked_scan(
     centers: Array,
     src: Array,
     tgt: Array,
+    active_pair_count: Array,
     *,
     order: int,
     rotation: str,
@@ -9188,51 +11569,67 @@ def _accumulate_solidfmm_m2l_chunked_scan(
     starts = jnp.arange(0, pair_count, chunk_size, dtype=INDEX_DTYPE)
 
     def body(local_accum: Array, start_idx: Array) -> tuple[Array, None]:
-        offset = jnp.arange(chunk_size, dtype=INDEX_DTYPE)
-        idx = start_idx + offset
-        valid = idx < pair_count
-        safe_idx = jnp.where(valid, idx, 0)
+        def active_chunk(accum: Array) -> Array:
+            offset = jnp.arange(chunk_size, dtype=INDEX_DTYPE)
+            idx = start_idx + offset
+            valid = idx < pair_count
+            safe_idx = jnp.where(valid, idx, 0)
 
-        src_chunk = src[safe_idx]
-        tgt_chunk = tgt[safe_idx]
-        src_mult = multip_packed[src_chunk]
-        deltas = centers[tgt_chunk] - centers[src_chunk]
+            src_chunk_raw = src[safe_idx]
+            tgt_chunk_raw = tgt[safe_idx]
+            valid = (
+                valid
+                & (idx < active_pair_count)
+                & (src_chunk_raw >= 0)
+                & (tgt_chunk_raw >= 0)
+            )
+            src_chunk = jnp.where(valid, src_chunk_raw, 0)
+            tgt_chunk = jnp.where(valid, tgt_chunk_raw, 0)
+            src_mult = multip_packed[src_chunk]
+            deltas = centers[tgt_chunk] - centers[src_chunk]
 
-        if rotation == "cached":
-            blocks_to_z = complex_rotation_blocks_to_z_batch(
-                deltas,
-                order=order,
-                basis="multipole",
-                dtype=src_mult.dtype,
-            )
-            blocks_from_z = complex_rotation_blocks_from_z_batch(
-                deltas,
-                order=order,
-                basis="local",
-                dtype=src_mult.dtype,
-            )
-            contribs = _m2l_complex_batch_cached_kernel(
-                src_mult,
-                deltas,
-                blocks_to_z,
-                blocks_from_z,
-                order=order,
-            )
-        else:
-            contribs = _m2l_complex_batch_kernel(
-                src_mult,
-                deltas,
-                order=order,
-                rotation=rotation,
+            if rotation == "cached":
+                blocks_to_z = complex_rotation_blocks_to_z_batch(
+                    deltas,
+                    order=order,
+                    basis="multipole",
+                    dtype=src_mult.dtype,
+                )
+                blocks_from_z = complex_rotation_blocks_from_z_batch(
+                    deltas,
+                    order=order,
+                    basis="local",
+                    dtype=src_mult.dtype,
+                )
+                contribs = _m2l_complex_batch_cached_kernel(
+                    src_mult,
+                    deltas,
+                    blocks_to_z,
+                    blocks_from_z,
+                    order=order,
+                )
+            else:
+                contribs = _m2l_complex_batch_kernel(
+                    src_mult,
+                    deltas,
+                    order=order,
+                    rotation=rotation,
+                )
+
+            contribs = contribs.astype(locals_coeffs.dtype)
+            return _chunk_segment_scatter_add(
+                accum,
+                contribs,
+                tgt_chunk,
+                valid,
+                chunk_size=chunk_size,
             )
 
-        contribs = contribs.astype(locals_coeffs.dtype)
-        local_accum = _chunk_segment_scatter_add(
+        local_accum = jax.lax.cond(
+            start_idx < active_pair_count,
+            active_chunk,
+            lambda accum: accum,
             local_accum,
-            contribs,
-            tgt_chunk,
-            valid,
-            chunk_size=chunk_size,
         )
         return local_accum, None
 
@@ -9291,21 +11688,29 @@ def _accumulate_real_m2l_fullbatch(
     centers: Array,
     src: Array,
     tgt: Array,
+    active_pair_count: Array,
     *,
     order: int,
     m2l_impl: str,
     total_nodes: int,
 ) -> Array:
     """Accumulate real-basis M2L contributions in one full interaction batch."""
-    src_mult = multip_packed_real[src]
-    deltas = centers[tgt] - centers[src]
+    idx = jnp.arange(src.shape[0], dtype=INDEX_DTYPE)
+    raw_src = src
+    raw_tgt = tgt
+    valid = (idx < active_pair_count) & (raw_src >= 0) & (raw_tgt >= 0)
+    safe_src = jnp.where(valid, raw_src, 0)
+    safe_tgt = jnp.where(valid, raw_tgt, 0)
+    src_mult = multip_packed_real[safe_src]
+    deltas = centers[safe_tgt] - centers[safe_src]
     contribs = _m2l_real_batch_kernel(
         src_mult,
         deltas,
         order=order,
         m2l_impl=m2l_impl,
     ).astype(locals_coeffs.dtype)
-    return locals_coeffs + jax.ops.segment_sum(contribs, tgt, total_nodes)
+    contribs = jnp.where(valid[:, None], contribs, 0)
+    return locals_coeffs + jax.ops.segment_sum(contribs, safe_tgt, total_nodes)
 
 
 @partial(
@@ -9347,6 +11752,7 @@ def _accumulate_real_m2l_chunked_scan(
     centers: Array,
     src: Array,
     tgt: Array,
+    active_pair_count: Array,
     *,
     order: int,
     m2l_impl: str,
@@ -9358,26 +11764,42 @@ def _accumulate_real_m2l_chunked_scan(
     starts = jnp.arange(0, pair_count, chunk_size, dtype=INDEX_DTYPE)
 
     def body(local_accum: Array, start_idx: Array) -> tuple[Array, None]:
-        offset = jnp.arange(chunk_size, dtype=INDEX_DTYPE)
-        idx = start_idx + offset
-        valid = idx < pair_count
-        safe_idx = jnp.where(valid, idx, 0)
-        src_chunk = src[safe_idx]
-        tgt_chunk = tgt[safe_idx]
-        src_mult = multip_packed_real[src_chunk]
-        deltas = centers[tgt_chunk] - centers[src_chunk]
-        contribs = _m2l_real_batch_kernel(
-            src_mult,
-            deltas,
-            order=order,
-            m2l_impl=m2l_impl,
-        ).astype(locals_coeffs.dtype)
-        local_accum = _chunk_segment_scatter_add(
+        def active_chunk(accum: Array) -> Array:
+            offset = jnp.arange(chunk_size, dtype=INDEX_DTYPE)
+            idx = start_idx + offset
+            valid = idx < pair_count
+            safe_idx = jnp.where(valid, idx, 0)
+            src_chunk_raw = src[safe_idx]
+            tgt_chunk_raw = tgt[safe_idx]
+            valid = (
+                valid
+                & (idx < active_pair_count)
+                & (src_chunk_raw >= 0)
+                & (tgt_chunk_raw >= 0)
+            )
+            src_chunk = jnp.where(valid, src_chunk_raw, 0)
+            tgt_chunk = jnp.where(valid, tgt_chunk_raw, 0)
+            src_mult = multip_packed_real[src_chunk]
+            deltas = centers[tgt_chunk] - centers[src_chunk]
+            contribs = _m2l_real_batch_kernel(
+                src_mult,
+                deltas,
+                order=order,
+                m2l_impl=m2l_impl,
+            ).astype(locals_coeffs.dtype)
+            return _chunk_segment_scatter_add(
+                accum,
+                contribs,
+                tgt_chunk,
+                valid,
+                chunk_size=chunk_size,
+            )
+
+        local_accum = jax.lax.cond(
+            start_idx < active_pair_count,
+            active_chunk,
+            lambda accum: accum,
             local_accum,
-            contribs,
-            tgt_chunk,
-            valid,
-            chunk_size=chunk_size,
         )
         return local_accum, None
 
@@ -9522,6 +11944,7 @@ def _prepare_solidfmm_downward_sweep(
     src = interaction_inputs.src
     tgt = interaction_inputs.tgt
     pair_count = interaction_inputs.pair_count
+    active_pair_count = interaction_inputs.active_pair_count
 
     def _record_timed_array(attr: str, start: float, value: Array) -> Array:
         if timing_recorder is None:
@@ -9563,51 +11986,97 @@ def _prepare_solidfmm_downward_sweep(
             source_motion_locals=empty_source_motion_locals,
         )
 
-    multipole_inputs = _prepare_solidfmm_downward_multipole_inputs(
-        upward=upward,
-        dtype=dtype,
-        basis_mode=basis_mode,
-        complex_rotation=complex_rotation,
+    detail_diag_mode = _normalize_strict_refresh_detail_diag_mode(
+        os.environ.get("JACCPOT_STRICT_REFRESH_DETAIL_DIAG_MODE", "full")
     )
-    multip_packed = multipole_inputs.multip_packed
-    source_motion_multip_packed = multipole_inputs.source_motion_multip_packed
-    multip_packed_kernel = multipole_inputs.multip_packed_kernel
-    rotation_mode = multipole_inputs.rotation_mode
 
-    chunk_size = 4096 if m2l_chunk_size is None else int(m2l_chunk_size)
-    if chunk_size <= 0:
-        raise ValueError("m2l_chunk_size must be positive")
+    def _detail_downward_data(
+        coefficients: Array,
+        source_motion_coefficients: Optional[Array] = None,
+    ) -> TreeDownwardData:
+        source_motion_locals: Optional[LocalExpansionData]
+        if source_motion_coefficients is not None:
+            source_motion_locals = LocalExpansionData(
+                order=p,
+                centers=centers,
+                coefficients=source_motion_coefficients,
+            )
+        else:
+            source_motion_locals = None
+        return TreeDownwardData(
+            interactions=interactions,
+            locals=LocalExpansionData(
+                order=p,
+                centers=centers,
+                coefficients=coefficients,
+            ),
+            source_motion_locals=source_motion_locals,
+        )
 
-    stage_t0 = time.perf_counter()
-    locals_updated = _solidfmm_downward_accumulate_from_multipoles(
-        locals_coeffs,
-        multip_packed_kernel,
-        tree=tree,
-        upward=upward,
-        interactions=interactions,
-        centers=centers,
-        src=src,
-        tgt=tgt,
-        pair_count=pair_count,
-        order=p,
-        rotation_mode=rotation_mode,
-        total_nodes=total_nodes,
-        chunk_size=chunk_size,
-        grouped_interactions=grouped_interactions,
-        grouped_buffers=grouped_buffers,
-        grouped_segment_starts=grouped_segment_starts,
-        grouped_segment_lengths=grouped_segment_lengths,
-        grouped_segment_class_ids=grouped_segment_class_ids,
-        grouped_segment_sort_permutation=grouped_segment_sort_permutation,
-        grouped_segment_group_ids=grouped_segment_group_ids,
-        grouped_segment_unique_targets=grouped_segment_unique_targets,
-        farfield_mode=farfield_mode,
-    )
-    locals_updated = _record_timed_array(
-        "_refresh_timing_dual_m2l_compute_seconds",
-        stage_t0,
-        locals_updated,
-    )
+    if detail_diag_mode == "downward_artifacts_only":
+        source_motion_zeros = (
+            jnp.zeros_like(locals_coeffs)
+            if upward.multipoles.source_motion_packed is not None
+            else None
+        )
+        return _detail_downward_data(locals_coeffs, source_motion_zeros)
+
+    rotation_mode = str(complex_rotation).strip().lower()
+    source_motion_multip_packed = None
+    if detail_diag_mode == "l2l_only":
+        locals_updated = jnp.ones_like(locals_coeffs)
+        chunk_size = 4096 if m2l_chunk_size is None else int(m2l_chunk_size)
+        if chunk_size <= 0:
+            raise ValueError("m2l_chunk_size must be positive")
+    else:
+        multipole_inputs = _prepare_solidfmm_downward_multipole_inputs(
+            upward=upward,
+            dtype=dtype,
+            basis_mode=basis_mode,
+            complex_rotation=complex_rotation,
+        )
+        multip_packed = multipole_inputs.multip_packed
+        source_motion_multip_packed = multipole_inputs.source_motion_multip_packed
+        multip_packed_kernel = multipole_inputs.multip_packed_kernel
+        rotation_mode = multipole_inputs.rotation_mode
+
+        chunk_size = 4096 if m2l_chunk_size is None else int(m2l_chunk_size)
+        if chunk_size <= 0:
+            raise ValueError("m2l_chunk_size must be positive")
+
+        stage_t0 = time.perf_counter()
+        locals_updated = _solidfmm_downward_accumulate_from_multipoles(
+            locals_coeffs,
+            multip_packed_kernel,
+            tree=tree,
+            upward=upward,
+            interactions=interactions,
+            centers=centers,
+            src=src,
+            tgt=tgt,
+            pair_count=pair_count,
+            active_pair_count=active_pair_count,
+            order=p,
+            rotation_mode=rotation_mode,
+            total_nodes=total_nodes,
+            chunk_size=chunk_size,
+            grouped_interactions=grouped_interactions,
+            grouped_buffers=grouped_buffers,
+            grouped_segment_starts=grouped_segment_starts,
+            grouped_segment_lengths=grouped_segment_lengths,
+            grouped_segment_class_ids=grouped_segment_class_ids,
+            grouped_segment_sort_permutation=grouped_segment_sort_permutation,
+            grouped_segment_group_ids=grouped_segment_group_ids,
+            grouped_segment_unique_targets=grouped_segment_unique_targets,
+            farfield_mode=farfield_mode,
+        )
+        locals_updated = _record_timed_array(
+            "_refresh_timing_dual_m2l_compute_seconds",
+            stage_t0,
+            locals_updated,
+        )
+        if detail_diag_mode == "m2l_only":
+            return _detail_downward_data(locals_updated)
 
     if l2l_chunk_size is not None and int(l2l_chunk_size) <= 0:
         raise ValueError("l2l_chunk_size must be positive")
@@ -9645,6 +12114,7 @@ def _prepare_solidfmm_downward_sweep(
                     src=src,
                     tgt=tgt,
                     pair_count=pair_count,
+                    active_pair_count=active_pair_count,
                     order=p,
                     rotation_mode=rotation_mode,
                     total_nodes=total_nodes,
@@ -10413,29 +12883,28 @@ def _evaluate_local_expansions_for_target_particles(
     if expansion_basis == "solidfmm":
         offsets_solid = centers - target_positions
         offsets_complex = offsets_solid
-        if jnp.issubdtype(coeffs.dtype, jnp.complexfloating):
-
-            def eval_one(coeff_row: Array, offset_row: Array) -> tuple[Array, Array]:
-                grad, pot = evaluate_local_complex_with_grad(
-                    coeff_row,
-                    offset_row,
-                    order=int(order),
-                )
-                return grad, pot
 
         if max_acc_derivative_order <= 0:
+            if return_potential:
 
-            def eval_one(coeff_row: Array, offset_row: Array) -> tuple[Array, Array]:
-                grad, pot = evaluate_local_complex_with_grad(
+                def eval_one(coeff_row: Array, offset_row: Array) -> tuple[Array, Array]:
+                    grad, pot = evaluate_local_complex_with_grad_analytic(
+                        coeff_row,
+                        offset_row,
+                        order=int(order),
+                    )
+                    return grad, pot
+
+                gradients, potentials = jax.vmap(eval_one)(coeffs, offsets_complex)
+                return gradients, potentials, None
+
+            gradients = jax.vmap(
+                lambda coeff_row, offset_row: evaluate_local_complex_grad_analytic(
                     coeff_row,
                     offset_row,
                     order=int(order),
                 )
-                return grad, pot
-
-            gradients, potentials = jax.vmap(eval_one)(coeffs, offsets_complex)
-            if return_potential:
-                return gradients, potentials, None
+            )(coeffs, offsets_complex)
             return gradients, None, None
 
         tower = jax.vmap(
@@ -10642,28 +13111,99 @@ def _evaluate_local_expansions_for_particles(
         offsets_complex = jnp.where(valid[..., None], offsets_complex, 0.0)
 
         if max_acc_derivative_order <= 0:
+            if not bool(return_potential):
+                flat_analytic = str(
+                    os.environ.get(
+                        "JACCPOT_LOCAL_EVAL_FLAT_ANALYTIC",
+                        "0",
+                    )
+                ).strip().lower() in {"1", "true", "yes", "on"}
 
-            def evaluate_leaf_complex(
-                coeffs_leaf: Array,
-                offsets_leaf: Array,
-                mask_leaf: Array,
-            ) -> tuple[Array, Array]:
-                grads, values = evaluate_local_complex_with_grad_batch(
-                    coeffs_leaf,
-                    offsets_leaf,
-                    order=p,
+                dtype_preserve_analytic = str(
+                    os.environ.get(
+                        "JACCPOT_LOCAL_EVAL_DTYPE_PRESERVE",
+                        "0",
+                    )
+                ).strip().lower() in {"1", "true", "yes", "on"}
+                order4_unrolled_analytic = str(
+                    os.environ.get(
+                        "JACCPOT_LOCAL_EVAL_ORDER4_UNROLLED",
+                        "0",
+                    )
+                ).strip().lower() in {"1", "true", "yes", "on"}
+                eval_complex_grad = (
+                    evaluate_local_complex_grad_order4_unrolled
+                    if bool(order4_unrolled_analytic) and p == 4
+                    else (
+                        evaluate_local_complex_grad_analytic_preserve_dtype
+                        if bool(dtype_preserve_analytic)
+                        else evaluate_local_complex_grad_analytic
+                    )
                 )
-                grads = grads.astype(dtype)
-                values = values.astype(dtype)
-                grads = jnp.where(mask_leaf[..., None], grads, 0.0)
-                values = jnp.where(mask_leaf, values, 0.0)
-                return grads, values
 
-            grad_field, potentials = jax.vmap(evaluate_leaf_complex)(
-                coeffs,
-                offsets_complex,
-                valid,
-            )
+                if bool(flat_analytic):
+                    coeffs_flat = jnp.broadcast_to(
+                        coeffs[:, None, :],
+                        offsets_complex.shape[:-1] + (coeffs.shape[-1],),
+                    ).reshape((-1, coeffs.shape[-1]))
+                    offsets_flat = offsets_complex.reshape((-1, offsets_complex.shape[-1]))
+                    mask_flat = valid.reshape((-1,))
+                    grad_flat = jax.vmap(
+                        lambda coeff_row, offset_row: eval_complex_grad(
+                            coeff_row,
+                            offset_row,
+                            order=p,
+                        )
+                    )(coeffs_flat, offsets_flat)
+                    grad_flat = grad_flat.astype(dtype)
+                    grad_flat = jnp.where(mask_flat[:, None], grad_flat, 0.0)
+                    grad_field = grad_flat.reshape(valid.shape + (3,))
+                else:
+
+                    def evaluate_leaf_complex_grad_only(
+                        coeffs_leaf: Array,
+                        offsets_leaf: Array,
+                        mask_leaf: Array,
+                    ) -> Array:
+                        grads = jax.vmap(
+                            lambda offset: eval_complex_grad(
+                                coeffs_leaf,
+                                offset,
+                                order=p,
+                            )
+                        )(offsets_leaf)
+                        grads = grads.astype(dtype)
+                        return jnp.where(mask_leaf[..., None], grads, 0.0)
+
+                    grad_field = jax.vmap(evaluate_leaf_complex_grad_only)(
+                        coeffs,
+                        offsets_complex,
+                        valid,
+                    )
+                potentials = None
+            else:
+
+                def evaluate_leaf_complex(
+                    coeffs_leaf: Array,
+                    offsets_leaf: Array,
+                    mask_leaf: Array,
+                ) -> tuple[Array, Array]:
+                    grads, values = evaluate_local_complex_with_grad_analytic_batch(
+                        coeffs_leaf,
+                        offsets_leaf,
+                        order=p,
+                    )
+                    grads = grads.astype(dtype)
+                    values = values.astype(dtype)
+                    grads = jnp.where(mask_leaf[..., None], grads, 0.0)
+                    values = jnp.where(mask_leaf, values, 0.0)
+                    return grads, values
+
+                grad_field, potentials = jax.vmap(evaluate_leaf_complex)(
+                    coeffs,
+                    offsets_complex,
+                    valid,
+                )
             derivative_fields: list[Array] = []
         else:
 
@@ -10705,12 +13245,21 @@ def _evaluate_local_expansions_for_particles(
             )
             derivative_fields = list(derivative_fields_tuple)
 
-        gradients = _scatter_vectors(
-            jnp.zeros_like(positions),
-            safe_idx,
-            grad_field,
-            valid,
-        )
+        direct_leaf_flatten = str(
+            os.environ.get(
+                "JACCPOT_LOCAL_EVAL_DIRECT_LEAF_FLATTEN",
+                "0",
+            )
+        ).strip().lower() in {"1", "true", "yes", "on"}
+        if bool(direct_leaf_flatten) and max_acc_derivative_order <= 0:
+            gradients = grad_field.reshape((-1, grad_field.shape[-1]))[: positions.shape[0]]
+        else:
+            gradients = _scatter_vectors(
+                jnp.zeros_like(positions),
+                safe_idx,
+                grad_field,
+                valid,
+            )
 
         derivative_outputs: Optional[PackedAccelerationDerivatives]
         if max_acc_derivative_order > 0:

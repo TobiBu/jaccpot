@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import warnings
 from dataclasses import replace
-from typing import Any, Literal, NamedTuple, Optional, Sequence, Tuple, Union
+from typing import Any, Callable, Literal, NamedTuple, Optional, Sequence, Tuple, Union
 
 import jax
 import jax.numpy as jnp
@@ -619,6 +619,9 @@ class FastMultipoleMethod:
         leaf_size: int = 16,
         max_order: int = 4,
         theta: Optional[float] = None,
+        cache_policy: str = "auto",
+        runtime_overrides_override: Optional[Any] = None,
+        fused_device_mode: bool = False,
     ) -> FMMPreparedState:
         """Prepare and cache tree/interactions for repeated evaluations."""
         return self._impl.prepare_state(
@@ -629,6 +632,8 @@ class FastMultipoleMethod:
             max_order=max_order,
             theta=theta,
             jit_tree=self.advanced.runtime.jit_tree,
+            runtime_overrides_override=runtime_overrides_override,
+            fused_device_mode=bool(fused_device_mode),
         )
 
     def compute_accelerations_and_jerk(
@@ -823,6 +828,7 @@ class FastMultipoleMethod:
         leaf_size: Optional[int] = None,
         max_order: Optional[int] = None,
         theta: Optional[float] = None,
+        fused_device_mode: bool = False,
     ) -> FMMPreparedState:
         """Refresh prepared state under fixed-profile large-N runtime constraints."""
         return self._impl.refresh_prepared_state(
@@ -832,6 +838,128 @@ class FastMultipoleMethod:
             bounds=bounds,
             leaf_size=leaf_size,
             max_order=max_order,
+            theta=theta,
+            fused_device_mode=bool(fused_device_mode),
+        )
+
+    def strict_prepare_refresh_and_evaluate(
+        self: "FastMultipoleMethod",
+        prepared_state: Optional[FMMPreparedState],
+        positions: Array,
+        masses: Array,
+        *,
+        bounds: Optional[Tuple[Array, Array]] = None,
+        leaf_size: int = 16,
+        max_order: int = 4,
+        theta: Optional[float] = None,
+        jit_traversal: Optional[bool] = True,
+    ) -> tuple[FMMPreparedState, Array]:
+        """Strict static-radix helper: prepare/refresh and evaluate in one call."""
+        return self._impl.strict_prepare_refresh_and_evaluate(
+            prepared_state,
+            positions,
+            masses,
+            bounds=bounds,
+            leaf_size=int(leaf_size),
+            max_order=int(max_order),
+            theta=theta,
+            jit_traversal=jit_traversal,
+        )
+
+    def strict_run_segmented(
+        self: "FastMultipoleMethod",
+        *,
+        state: Any,
+        masses: Array,
+        num_steps: int,
+        refresh_every: int,
+        segment_runner: Callable[[Any, Array, int], tuple[Any, Any]],
+        positions_getter: Callable[[Any], Array],
+        prepared_state: Optional[FMMPreparedState] = None,
+        leaf_size: int = 16,
+        max_order: int = 4,
+        theta: Optional[float] = None,
+        jit_traversal: Optional[bool] = True,
+        rematerialize_fn: Optional[Callable[[Any], Any]] = None,
+        collect_history: bool = False,
+    ) -> tuple[Any, FMMPreparedState, Optional[list[Any]]]:
+        """Run strict segmented refresh cadence with caller-provided segment kernel."""
+        return self._impl.strict_run_segmented(
+            state=state,
+            masses=masses,
+            num_steps=int(num_steps),
+            refresh_every=int(refresh_every),
+            segment_runner=segment_runner,
+            positions_getter=positions_getter,
+            prepared_state=prepared_state,
+            leaf_size=int(leaf_size),
+            max_order=int(max_order),
+            theta=theta,
+            jit_traversal=jit_traversal,
+            rematerialize_fn=rematerialize_fn,
+            collect_history=bool(collect_history),
+        )
+
+    def strict_run_v2(
+        self: "FastMultipoleMethod",
+        *,
+        state: Array,
+        masses: Array,
+        dt: float,
+        num_steps: int,
+        refresh_every: int,
+        leaf_size: int,
+        max_order: int,
+        theta: Optional[float] = None,
+        prepared_state: Optional[FMMPreparedState] = None,
+        initial_self_acceleration: Optional[Array] = None,
+        jit_traversal: Optional[bool] = True,
+        add_external: bool = False,
+        external_acceleration_fn: Optional[Callable[[Array], Array]] = None,
+        rematerialize_between_refresh: bool = True,
+        return_history: bool = False,
+        return_prepared_state: bool = True,
+    ) -> tuple[Array, Optional[FMMPreparedState], Optional[Array]]:
+        """Strict V2 segmented runner with raw tensor API."""
+        return self._impl.strict_run_v2(
+            state=state,
+            masses=masses,
+            dt=float(dt),
+            num_steps=int(num_steps),
+            refresh_every=int(refresh_every),
+            leaf_size=int(leaf_size),
+            max_order=int(max_order),
+            theta=theta,
+            prepared_state=prepared_state,
+            initial_self_acceleration=initial_self_acceleration,
+            jit_traversal=jit_traversal,
+            add_external=bool(add_external),
+            external_acceleration_fn=external_acceleration_fn,
+            rematerialize_between_refresh=bool(rematerialize_between_refresh),
+            return_history=bool(return_history),
+            return_prepared_state=bool(return_prepared_state),
+        )
+
+    def strict_fused_prepared_eval_fn(
+        self: "FastMultipoleMethod",
+        *,
+        positions: Array,
+        masses: Array,
+        leaf_size: int,
+        max_order: int,
+        theta: Optional[float] = None,
+    ) -> tuple[FMMPreparedState, Callable[[FMMPreparedState], Array]]:
+        """Fused-lane eval-only closure for apples-to-apples eval benchmarking.
+
+        Returns ``(prepared_state, eval_fn)``: the prepared state is built with the
+        fused device-mode layout, and ``eval_fn(prepared_state)`` runs the fused
+        self-force evaluation with no refresh or velocity-Verlet update.
+        """
+        return self._impl.strict_fused_prepared_eval_fn(
+            positions=positions,
+            masses=masses,
+            leaf_size=int(leaf_size),
+            max_order=int(max_order),
             theta=theta,
         )
 

@@ -17,10 +17,12 @@ from jaccpot.operators.real_harmonics import (
     sh_offset,
     translate_along_z_m2l_real,
 )
-from jaccpot.pallas.m2l_core_z_real import (
-    m2l_core_z_real_pallas,
-    pallas_m2l_real_supported,
-)
+
+# NOTE: ``jaccpot.pallas.m2l_core_z_real`` is imported lazily inside
+# ``m2l_core_z_real`` below. A top-level import creates a circular import
+# (``jaccpot.pallas.__init__`` -> ``m2l_core_z_real`` -> ``jaccpot.operators``
+# -> this module -> ``jaccpot.pallas.m2l_core_z_real``), which breaks
+# ``from jaccpot.pallas import ...`` when it is the first jaccpot import.
 
 
 def _rotate_multipole_to_z_single(
@@ -60,6 +62,11 @@ def m2l_core_z_real(
     kernel on supported accelerator backends and otherwise falls back to the
     pure-JAX recurrence.
     """
+    from jaccpot.pallas.m2l_core_z_real import (
+        m2l_core_z_real_pallas,
+        pallas_m2l_real_supported,
+    )
+
     r = jnp.maximum(jnp.asarray(radii), jnp.asarray(1.0e-30, dtype=radii.dtype))
     if bool(use_pallas) and pallas_m2l_real_supported():
         return m2l_core_z_real_pallas(multipole_rot, r, order=int(order))

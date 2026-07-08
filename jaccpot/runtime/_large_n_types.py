@@ -3,13 +3,17 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, NamedTuple, Optional
+from typing import Any, NamedTuple, Optional, Union
 
 import jax
 import jax.numpy as jnp
 from beartype.typing import Tuple
 from jaxtyping import Array
-from yggdrax.interactions import DualTreeRetryEvent, NodeNeighborList
+from yggdrax.interactions import (
+    CompactTaggedFarPairs,
+    DualTreeRetryEvent,
+    NodeNeighborList,
+)
 from yggdrax.tree import Tree
 
 from jaccpot.downward.local_expansions import LocalExpansionData
@@ -134,6 +138,81 @@ class RadixFastNearfieldPayload:
         )
 
 
+
+
+@jax.tree_util.register_pytree_node_class
+@dataclass(frozen=True)
+class LargeNCompiledState:
+    """JAX-carryable large-N runtime state used by compiled refresh loops."""
+
+    prepared: LargeNPreparedState
+    positions_sorted: Array
+    masses_sorted: Array
+    inverse_permutation: Array
+    topology_key: Optional[str]
+    max_leaf_size: int
+    local_order: int
+
+    @classmethod
+    def from_prepared(
+        cls: type["LargeNCompiledState"], prepared: "LargeNPreparedState"
+    ) -> "LargeNCompiledState":
+        return cls(
+            prepared=prepared,
+            positions_sorted=jnp.asarray(prepared.positions_sorted),
+            masses_sorted=jnp.asarray(prepared.masses_sorted),
+            inverse_permutation=jnp.asarray(prepared.inverse_permutation, dtype=INDEX_DTYPE),
+            topology_key=getattr(prepared, "topology_key", None),
+            max_leaf_size=int(prepared.max_leaf_size),
+            local_order=int(getattr(prepared, "local_order", prepared.local_data.order)),
+        )
+
+    def to_prepared(self: "LargeNCompiledState") -> "LargeNPreparedState":
+        return self.prepared
+
+    def tree_flatten(
+        self: "LargeNCompiledState",
+    ) -> tuple[tuple[Any, ...], tuple[Optional[str], int, int]]:
+        children=(
+            self.prepared,
+            self.positions_sorted,
+            self.masses_sorted,
+            self.inverse_permutation,
+        )
+        aux=(self.topology_key, int(self.max_leaf_size), int(self.local_order))
+        return children, aux
+
+    @classmethod
+    def tree_unflatten(
+        cls: type["LargeNCompiledState"],
+        aux: tuple[Optional[str], int, int],
+        children: tuple[Any, ...],
+    ) -> "LargeNCompiledState":
+        topology_key, max_leaf_size, local_order = aux
+        prepared, positions_sorted, masses_sorted, inverse_permutation = children
+        return cls(
+            prepared=prepared,
+            positions_sorted=positions_sorted,
+            masses_sorted=masses_sorted,
+            inverse_permutation=inverse_permutation,
+            topology_key=topology_key,
+            max_leaf_size=int(max_leaf_size),
+            local_order=int(local_order),
+        )
+
+
+def large_n_as_prepared_state(state: Union["LargeNPreparedState", LargeNCompiledState]) -> "LargeNPreparedState":
+    if isinstance(state, LargeNCompiledState):
+        return state.prepared
+    return state
+
+
+def large_n_to_compiled_state(state: Union["LargeNPreparedState", LargeNCompiledState]) -> LargeNCompiledState:
+    if isinstance(state, LargeNCompiledState):
+        return state
+    return LargeNCompiledState.from_prepared(state)
+
+
 @jax.tree_util.register_pytree_node_class
 @dataclass(frozen=True)
 class LargeNPreparedState:
@@ -158,6 +237,7 @@ class LargeNPreparedState:
     nearfield_target_block_valid_mask_padded: Optional[Array]
     nearfield_target_block_size: int
     max_leaf_size: int
+    local_order: int
     input_dtype: jnp.dtype
     working_dtype: jnp.dtype
     theta: float
@@ -187,6 +267,8 @@ class LargeNPreparedState:
     radix_fast_lane: bool = False
     disable_specialized_large_n_nearfield: bool = False
     radix_fast_payload: Optional[RadixFastNearfieldPayload] = None
+    radix_overflow_payload: Optional[RadixFastNearfieldPayload] = None
+    compact_far_pairs: Optional[CompactTaggedFarPairs] = None
 
     @property
     def positions_sorted(self: "LargeNPreparedState") -> Array:
@@ -249,11 +331,14 @@ class LargeNPreparedState:
             self.nearfield_target_block_source_leaf_ids_padded,
             self.nearfield_target_block_valid_mask_padded,
             self.radix_fast_payload,
+            self.radix_overflow_payload,
+            self.compact_far_pairs,
             self.force_scale_nodes,
         )
         aux = (
             int(self.nearfield_target_block_size),
             int(self.max_leaf_size),
+            int(self.local_order),
             str(jnp.dtype(self.input_dtype)),
             str(jnp.dtype(self.working_dtype)),
             float(self.theta),
@@ -292,6 +377,7 @@ class LargeNPreparedState:
     ) -> "LargeNPreparedState":
         if len(aux) < 13:
             raise ValueError("LargeNPreparedState aux payload is malformed")
+        local_order: Optional[int] = None
         if len(aux) == 13:
             (
                 nearfield_target_block_size,
@@ -356,10 +442,43 @@ class LargeNPreparedState:
             nearfield_target_block_overflow_fast_max_blocks = 65536
             nearfield_target_block_overflow_profile_capacity = 0
             nearfield_target_block_overflow_active_blocks = 0
+        elif len(aux) == 29:
+            (
+                nearfield_target_block_size,
+                max_leaf_size,
+                input_dtype_name,
+                working_dtype_name,
+                theta,
+                topology_key,
+                retry_events,
+                execution_backend,
+                expansion_basis,
+                nearfield_mode,
+                nearfield_edge_chunk_size,
+                nearfield_delayed_scatter_chunks_per_superchunk,
+                nearfield_chunk_scan_batch_size,
+                nearfield_chunk_scan_unroll,
+                nearfield_superchunk_scan_unroll,
+                nearfield_sorted_scatter_hint,
+                nearfield_grouped_sorted_scatter,
+                nearfield_superchunk_target_reduce,
+                nearfield_disable_chunk_cond,
+                nearfield_target_leaf_batch_size,
+                nearfield_target_block_tile_size,
+                nearfield_target_block_tile_scan_unroll,
+                nearfield_target_block_batch_scan_unroll,
+                nearfield_target_block_overflow_fast_max_blocks,
+                nearfield_target_block_overflow_profile_capacity,
+                nearfield_target_block_overflow_active_blocks,
+                speed_prepared_layout,
+                radix_fast_lane,
+                disable_specialized_large_n_nearfield,
+            ) = aux
         else:
             (
                 nearfield_target_block_size,
                 max_leaf_size,
+                local_order,
                 input_dtype_name,
                 working_dtype_name,
                 theta,
@@ -407,8 +526,19 @@ class LargeNPreparedState:
             nearfield_target_block_source_leaf_ids_padded,
             nearfield_target_block_valid_mask_padded,
             radix_fast_payload,
-            force_scale_nodes,
+            *remaining_children,
         ) = children
+        if len(remaining_children) == 1:
+            radix_overflow_payload = None
+            compact_far_pairs = None
+            (force_scale_nodes,) = remaining_children
+        elif len(remaining_children) == 2:
+            radix_overflow_payload, force_scale_nodes = remaining_children
+            compact_far_pairs = None
+        else:
+            radix_overflow_payload, compact_far_pairs, force_scale_nodes = remaining_children
+        if local_order is None:
+            local_order = int(getattr(local_data, "order", 0))
         return cls(
             tree=tree,
             local_data=local_data,
@@ -433,6 +563,7 @@ class LargeNPreparedState:
             ),
             nearfield_target_block_size=int(nearfield_target_block_size),
             max_leaf_size=int(max_leaf_size),
+            local_order=int(local_order),
             input_dtype=jnp.dtype(input_dtype_name),
             working_dtype=jnp.dtype(working_dtype_name),
             theta=float(theta),
@@ -476,4 +607,6 @@ class LargeNPreparedState:
                 disable_specialized_large_n_nearfield
             ),
             radix_fast_payload=radix_fast_payload,
+            radix_overflow_payload=radix_overflow_payload,
+            compact_far_pairs=compact_far_pairs,
         )

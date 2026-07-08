@@ -1,17 +1,18 @@
 """Tests for near-field particle-to-particle evaluation."""
 
 import os
+from dataclasses import replace
 
 import jax
 import jax.numpy as jnp
 import numpy as np
+import pytest
 from yggdrax.dtypes import INDEX_DTYPE
 from yggdrax.geometry import compute_tree_geometry
 from yggdrax.interactions import build_leaf_neighbor_lists
 from yggdrax.tree import build_tree
 
 from jaccpot.nearfield.near_field import (
-    _compact_reduced_pair_bucket_rows,
     collect_radix_fast_lane_counters,
     compute_leaf_p2p_accelerations,
     compute_leaf_p2p_accelerations_large_n_accel_only,
@@ -396,47 +397,6 @@ def test_large_n_accel_only_prepared_bucketed_matches_generic():
         np.asarray(generic),
         rtol=1e-6,
         atol=1e-6,
-    )
-
-
-def test_compact_reduced_pair_bucket_rows_packs_valid_prefix():
-    reduced_target_leaf_ids = jnp.array([4, 0, 7, 0], dtype=jnp.int32)
-    reduced_pair_acc = jnp.array(
-        [
-            [[1.0, 2.0], [3.0, 4.0]],
-            [[0.0, 0.0], [0.0, 0.0]],
-            [[5.0, 6.0], [7.0, 8.0]],
-            [[0.0, 0.0], [0.0, 0.0]],
-        ]
-    )
-    reduced_valid = jnp.array([True, False, True, False])
-
-    compact_leaf_ids, compact_pair_acc, compact_valid = (
-        _compact_reduced_pair_bucket_rows(
-            reduced_target_leaf_ids,
-            reduced_pair_acc,
-            reduced_valid,
-        )
-    )
-
-    assert np.array_equal(
-        np.asarray(compact_leaf_ids),
-        np.asarray([4, 7, 0, 0], dtype=np.int32),
-    )
-    assert np.array_equal(
-        np.asarray(compact_valid),
-        np.asarray([True, True, False, False]),
-    )
-    assert np.allclose(
-        np.asarray(compact_pair_acc),
-        np.asarray(
-            [
-                [[1.0, 2.0], [3.0, 4.0]],
-                [[5.0, 6.0], [7.0, 8.0]],
-                [[0.0, 0.0], [0.0, 0.0]],
-                [[0.0, 0.0], [0.0, 0.0]],
-            ]
-        ),
     )
 
 
@@ -1195,6 +1155,285 @@ def test_radix_fast_lane_accel_matches_large_n_specialized_small():
 
     assert np.allclose(
         np.asarray(fast_lane),
+        np.asarray(baseline),
+        rtol=1e-6,
+        atol=1e-6,
+    )
+
+
+def _build_small_fast_lane_case(*, leaf_size=2, theta=0.3):
+    """Shared small tree + radix fast-lane payload for Pallas parity tests."""
+    positions = jnp.array(
+        [
+            [-0.8, 0.1, 0.0],
+            [-0.7, -0.1, 0.05],
+            [-0.2, 0.3, -0.2],
+            [0.15, 0.25, 0.1],
+            [0.6, -0.2, -0.05],
+            [0.75, 0.05, 0.2],
+        ]
+    )
+    masses = jnp.array([1.0, 1.5, 0.7, 0.9, 1.2, 0.8])
+    bounds = (jnp.array([-1.0, -1.0, -1.0]), jnp.array([1.0, 1.0, 1.0]))
+    tree, pos_sorted, mass_sorted, _ = build_tree(
+        positions,
+        masses,
+        bounds,
+        return_reordered=True,
+        leaf_size=leaf_size,
+    )
+    geometry = compute_tree_geometry(tree, pos_sorted)
+    neighbor_list = build_leaf_neighbor_lists(tree, geometry, theta=theta)
+
+    node_ranges = jnp.asarray(tree.node_ranges)
+    leaf_nodes = jnp.asarray(neighbor_list.leaf_indices)
+    leaf_ranges = node_ranges[leaf_nodes]
+    counts = leaf_ranges[:, 1] - leaf_ranges[:, 0] + 1
+    max_leaf_size = int(np.max(np.asarray(counts)))
+    offsets = jnp.arange(max_leaf_size, dtype=leaf_ranges.dtype)
+    leaf_particle_indices = leaf_ranges[:, 0][:, None] + offsets[None, :]
+    leaf_particle_mask = offsets[None, :] < counts[:, None]
+
+    payload = _build_test_radix_fast_payload(
+        tree=tree,
+        neighbor_list=neighbor_list,
+        leaf_particle_indices=leaf_particle_indices,
+        leaf_particle_mask=leaf_particle_mask,
+    )
+    return pos_sorted, mass_sorted, payload, tree, neighbor_list
+
+
+def test_radix_fast_lane_pallas_accel_matches_baseline(monkeypatch):
+    pos_sorted, mass_sorted, payload, _, _ = _build_small_fast_lane_case()
+
+    baseline = compute_leaf_p2p_accelerations_radix_fast_lane(
+        positions_sorted=pos_sorted,
+        masses_sorted=mass_sorted,
+        payload=payload,
+        G=1.25,
+        softening=0.05,
+        use_pallas=False,
+    )
+
+    # Force the fused Pallas path to run in interpret mode (CPU/CI-safe).
+    monkeypatch.setenv("JACCPOT_NEARFIELD_PALLAS_INTERPRET", "1")
+    fused = compute_leaf_p2p_accelerations_radix_fast_lane(
+        positions_sorted=pos_sorted,
+        masses_sorted=mass_sorted,
+        payload=payload,
+        G=1.25,
+        softening=0.05,
+        use_pallas=True,
+    )
+
+    assert np.allclose(np.asarray(fused), np.asarray(baseline), rtol=1e-5, atol=1e-6)
+
+
+def test_radix_fast_lane_pallas_potential_matches_generic(monkeypatch):
+    pos_sorted, mass_sorted, payload, tree, neighbor_list = (
+        _build_small_fast_lane_case()
+    )
+
+    ref_acc, ref_pot = compute_leaf_p2p_accelerations(
+        tree,
+        neighbor_list,
+        pos_sorted,
+        mass_sorted,
+        G=1.25,
+        softening=0.05,
+        return_potential=True,
+    )
+
+    monkeypatch.setenv("JACCPOT_NEARFIELD_PALLAS_INTERPRET", "1")
+    fused_acc, fused_pot = compute_leaf_p2p_accelerations_radix_fast_lane(
+        positions_sorted=pos_sorted,
+        masses_sorted=mass_sorted,
+        payload=payload,
+        G=1.25,
+        softening=0.05,
+        return_potential=True,
+        use_pallas=True,
+    )
+
+    assert np.allclose(np.asarray(fused_acc), np.asarray(ref_acc), rtol=1e-5, atol=1e-6)
+    assert np.allclose(np.asarray(fused_pot), np.asarray(ref_pot), rtol=1e-5, atol=1e-6)
+
+
+def test_radix_fast_lane_potential_requires_pallas():
+    pos_sorted, mass_sorted, payload, _, _ = _build_small_fast_lane_case()
+    with pytest.raises(NotImplementedError):
+        compute_leaf_p2p_accelerations_radix_fast_lane(
+            positions_sorted=pos_sorted,
+            masses_sorted=mass_sorted,
+            payload=payload,
+            G=1.25,
+            softening=0.05,
+            return_potential=True,
+            use_pallas=False,
+        )
+
+
+def _to_prepacked_payload(payload, block_size=2):
+    """Convert a materialized fast-lane payload to the prepacked source-leaf layout."""
+    num_leaves, source_slots = payload.source_leaf_ids.shape
+    padded_slots = ((source_slots + block_size - 1) // block_size) * block_size
+    pad_slots = padded_slots - source_slots
+    source_leaf_ids = jnp.pad(payload.source_leaf_ids, ((0, 0), (0, pad_slots)))
+    source_leaf_valid = jnp.pad(
+        payload.source_leaf_valid_mask, ((0, 0), (0, pad_slots))
+    )
+    return replace(
+        payload,
+        source_leaf_ids=source_leaf_ids.reshape((num_leaves, -1, block_size)),
+        source_leaf_valid_mask=source_leaf_valid.reshape((num_leaves, -1, block_size)),
+        source_particle_ids=jnp.zeros((0, 0, 0), dtype=INDEX_DTYPE),
+        source_particle_mask=jnp.zeros((0, 0, 0), dtype=bool),
+        fallback_block_tile_size=1,
+    )
+
+
+def test_radix_fast_lane_prepacked_pallas_accel_matches_baseline(monkeypatch):
+    pos_sorted, mass_sorted, payload, _, _ = _build_small_fast_lane_case()
+    payload = _to_prepacked_payload(payload)
+
+    baseline = compute_leaf_p2p_accelerations_radix_fast_lane(
+        positions_sorted=pos_sorted,
+        masses_sorted=mass_sorted,
+        payload=payload,
+        G=1.25,
+        softening=0.05,
+        use_pallas=False,
+    )
+    monkeypatch.setenv("JACCPOT_NEARFIELD_PALLAS_INTERPRET", "1")
+    fused = compute_leaf_p2p_accelerations_radix_fast_lane(
+        positions_sorted=pos_sorted,
+        masses_sorted=mass_sorted,
+        payload=payload,
+        G=1.25,
+        softening=0.05,
+        use_pallas=True,
+    )
+    assert np.allclose(np.asarray(fused), np.asarray(baseline), rtol=1e-5, atol=1e-6)
+
+
+def test_radix_fast_lane_prepacked_pallas_potential_matches_generic(monkeypatch):
+    pos_sorted, mass_sorted, payload, tree, neighbor_list = (
+        _build_small_fast_lane_case()
+    )
+    payload = _to_prepacked_payload(payload)
+
+    ref_acc, ref_pot = compute_leaf_p2p_accelerations(
+        tree,
+        neighbor_list,
+        pos_sorted,
+        mass_sorted,
+        G=1.25,
+        softening=0.05,
+        return_potential=True,
+    )
+    monkeypatch.setenv("JACCPOT_NEARFIELD_PALLAS_INTERPRET", "1")
+    fused_acc, fused_pot = compute_leaf_p2p_accelerations_radix_fast_lane(
+        positions_sorted=pos_sorted,
+        masses_sorted=mass_sorted,
+        payload=payload,
+        G=1.25,
+        softening=0.05,
+        return_potential=True,
+        use_pallas=True,
+    )
+    assert np.allclose(np.asarray(fused_acc), np.asarray(ref_acc), rtol=1e-5, atol=1e-6)
+    assert np.allclose(np.asarray(fused_pot), np.asarray(ref_pot), rtol=1e-5, atol=1e-6)
+
+
+def test_radix_fast_lane_occupancy_sort_and_empty_tile_skip_match_fallback():
+    positions = jnp.array(
+        [
+            [-0.8, 0.1, 0.0],
+            [-0.7, -0.1, 0.05],
+            [-0.2, 0.3, -0.2],
+            [0.15, 0.25, 0.1],
+            [0.6, -0.2, -0.05],
+            [0.75, 0.05, 0.2],
+        ]
+    )
+    masses = jnp.array([1.0, 1.5, 0.7, 0.9, 1.2, 0.8])
+    bounds = (jnp.array([-1.0, -1.0, -1.0]), jnp.array([1.0, 1.0, 1.0]))
+    tree, pos_sorted, mass_sorted, _ = build_tree(
+        positions,
+        masses,
+        bounds,
+        return_reordered=True,
+        leaf_size=2,
+    )
+    geometry = compute_tree_geometry(tree, pos_sorted)
+    neighbor_list = build_leaf_neighbor_lists(tree, geometry, theta=0.3)
+    node_ranges = jnp.asarray(tree.node_ranges)
+    leaf_nodes = jnp.asarray(neighbor_list.leaf_indices)
+    leaf_ranges = node_ranges[leaf_nodes]
+    counts = leaf_ranges[:, 1] - leaf_ranges[:, 0] + 1
+    max_leaf_size = int(np.max(np.asarray(counts)))
+    offsets = jnp.arange(max_leaf_size, dtype=leaf_ranges.dtype)
+    leaf_particle_indices = leaf_ranges[:, 0][:, None] + offsets[None, :]
+    leaf_particle_mask = offsets[None, :] < counts[:, None]
+
+    payload = _build_test_radix_fast_payload(
+        tree=tree,
+        neighbor_list=neighbor_list,
+        leaf_particle_indices=leaf_particle_indices,
+        leaf_particle_mask=leaf_particle_mask,
+    )
+    num_leaves, source_slots = payload.source_leaf_ids.shape
+    block_size = 2
+    padded_slots = ((source_slots + block_size - 1) // block_size) * block_size
+    pad_slots = padded_slots - source_slots
+    source_leaf_ids = jnp.pad(payload.source_leaf_ids, ((0, 0), (0, pad_slots)))
+    source_leaf_valid = jnp.pad(
+        payload.source_leaf_valid_mask,
+        ((0, 0), (0, pad_slots)),
+    )
+    payload = replace(
+        payload,
+        source_leaf_ids=source_leaf_ids.reshape((num_leaves, -1, block_size)),
+        source_leaf_valid_mask=source_leaf_valid.reshape((num_leaves, -1, block_size)),
+        source_particle_ids=jnp.zeros((0, 0, 0), dtype=INDEX_DTYPE),
+        source_particle_mask=jnp.zeros((0, 0, 0), dtype=bool),
+        fallback_block_tile_size=1,
+    )
+
+    flag_names = (
+        "JACCPOT_LARGE_N_RADIX_FAST_OCCUPANCY_SORT",
+        "JACCPOT_LARGE_N_RADIX_FAST_SKIP_EMPTY_TILES",
+        "JACCPOT_LARGE_N_RADIX_FAST_COMPONENTWISE_PAIRS",
+    )
+    old_flags = {name: os.environ.get(name) for name in flag_names}
+    try:
+        for name in flag_names:
+            os.environ[name] = "0"
+        baseline = compute_leaf_p2p_accelerations_radix_fast_lane(
+            positions_sorted=pos_sorted,
+            masses_sorted=mass_sorted,
+            payload=payload,
+            G=1.25,
+            softening=0.05,
+        )
+        for name in flag_names:
+            os.environ[name] = "1"
+        optimized = compute_leaf_p2p_accelerations_radix_fast_lane(
+            positions_sorted=pos_sorted,
+            masses_sorted=mass_sorted,
+            payload=payload,
+            G=1.25,
+            softening=0.05,
+        )
+    finally:
+        for name, value in old_flags.items():
+            if value is None:
+                os.environ.pop(name, None)
+            else:
+                os.environ[name] = value
+
+    assert np.allclose(
+        np.asarray(optimized),
         np.asarray(baseline),
         rtol=1e-6,
         atol=1e-6,

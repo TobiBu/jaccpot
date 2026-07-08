@@ -1,8 +1,10 @@
 """Dual-tree interaction cache helpers for the runtime FMM implementation."""
 
 import hashlib
+import os
 import time
 from dataclasses import dataclass
+from functools import partial
 from typing import Any, NamedTuple, Optional
 
 import jax
@@ -91,6 +93,51 @@ class _DualTreeCacheHit(NamedTuple):
     grouped_segment_unique_targets: Optional[Array]
     grouped_chunk_size_cached: Optional[int]
     cache_out: Optional["_InteractionCacheEntry"]
+
+
+class _RefreshDualPlannerHint(NamedTuple):
+    """Cached refresh planner decision for dual artifact build routing."""
+
+    use_split_build: bool
+    suppress_substage_timing: bool = False
+
+
+@partial(jax.jit, static_argnames=())
+def _compiled_refresh_dual_planner_route(
+    *,
+    allow_split_build_flag: Array,
+    grouped_interactions_flag: Array,
+    need_traversal_result_flag: Array,
+    has_pair_policy_flag: Array,
+    has_policy_state_flag: Array,
+    leaf_count: Array,
+    need_node_interactions_flag: Array,
+    need_compact_far_pairs_flag: Array,
+    use_dense_interactions_flag: Array,
+) -> tuple[Array, Array, Array]:
+    """Return compiled routing decisions for refresh dual-artifact planning.
+
+    This keeps steady-state route/plan branching in JAX control flow so the
+    refresh hot path avoids repeated Python-side conditional orchestration.
+    """
+
+    use_split_build = (
+        allow_split_build_flag
+        & (~grouped_interactions_flag)
+        & (~need_traversal_result_flag)
+        & (~has_pair_policy_flag)
+        & (~has_policy_state_flag)
+    )
+    need_far_payload = (
+        need_node_interactions_flag
+        | need_compact_far_pairs_flag
+        | use_dense_interactions_flag
+    )
+    use_compact_shared_far_near = (
+        use_split_build & need_far_payload & (~need_node_interactions_flag)
+    )
+    suppress_substage_timing = use_split_build & (leaf_count >= jnp.int32(1))
+    return use_split_build, use_compact_shared_far_near, suppress_substage_timing
 
 
 def _without_grouped_class_segments(
@@ -212,6 +259,47 @@ def _dual_tree_build_raw(
     current_traversal_config = traversal_config
     current_max_pair_queue = max_pair_queue
     current_pair_process_block = pair_process_block
+
+    if fail_fast:
+        # Strict/static lane: avoid Python retry-orchestration entirely.
+        try:
+            build_out = _runtime_fmm.build_interactions_and_neighbors(
+                tree,
+                geometry,
+                theta=theta,
+                mac_type=mac_type,
+                dehnen_radius_scale=dehnen_radius_scale,
+                max_pair_queue=current_max_pair_queue,
+                process_block=current_pair_process_block,
+                traversal_config=current_traversal_config,
+                retry_logger=retry_logger,
+                return_result=need_traversal_result,
+                return_compact_far_pairs=need_compact_far_pairs,
+                return_interactions=(
+                    bool(need_node_interactions) or bool(grouped_interactions)
+                ),
+                return_grouped=grouped_interactions,
+                pair_policy=pair_policy,
+                policy_state=policy_state,
+            )
+        except RuntimeError as exc:
+            if _looks_like_capacity_error(exc):
+                raise RuntimeError(
+                    _format_capacity_error_hint(
+                        exc,
+                        traversal_config=current_traversal_config,
+                        max_pair_queue=current_max_pair_queue,
+                        pair_process_block=current_pair_process_block,
+                    )
+                ) from exc
+            raise
+        return (
+            build_out,
+            current_traversal_config,
+            current_max_pair_queue,
+            current_pair_process_block,
+        )
+
     last_exc: Optional[BaseException] = None
     build_out = None
     for attempt in range(_CAPACITY_RETRY_MAX_ATTEMPTS + 1):
@@ -374,9 +462,10 @@ def _build_dual_tree_artifacts_split(
     timing_callback: Optional[Callable[[str, float], None]] = None,
 ) -> _DualTreeArtifacts:
     """Build far and near traversal products in separate Yggdrax calls."""
+    timing_enabled = timing_callback is not None
 
-    def _record(name: str, start: float) -> None:
-        if timing_callback is not None:
+    def _record(name: str, start: Optional[float]) -> None:
+        if timing_enabled and start is not None:
             timing_callback(name, float(time.perf_counter() - start))
 
     need_far_payload = bool(
@@ -385,7 +474,7 @@ def _build_dual_tree_artifacts_split(
     interactions: Optional[NodeInteractionList]
     compact_far_pairs: Optional[CompactTaggedFarPairs]
     if need_far_payload and not bool(need_node_interactions or use_dense_interactions):
-        stage_t0 = time.perf_counter()
+        stage_t0 = time.perf_counter() if timing_enabled else None
         interactions = None
         compact_far_pairs, neighbor_list = (
             build_compact_far_pairs_and_leaf_neighbor_lists(
@@ -403,7 +492,7 @@ def _build_dual_tree_artifacts_split(
         )
         _record("dual_split_shared_far_pairs_leaf_neighbors", stage_t0)
     elif need_far_payload:
-        stage_t0 = time.perf_counter()
+        stage_t0 = time.perf_counter() if timing_enabled else None
         interactions, neighbor_list = build_interactions_and_neighbors_split(
             tree,
             geometry,
@@ -426,7 +515,7 @@ def _build_dual_tree_artifacts_split(
     else:
         interactions = None
         compact_far_pairs = None
-        stage_t0 = time.perf_counter()
+        stage_t0 = time.perf_counter() if timing_enabled else None
         neighbor_list = build_leaf_neighbor_lists(
             tree,
             geometry,
@@ -444,7 +533,7 @@ def _build_dual_tree_artifacts_split(
             retry_logger=retry_logger,
         )
         _record("dual_split_leaf_neighbors", stage_t0)
-    stage_t0 = time.perf_counter()
+    stage_t0 = time.perf_counter() if timing_enabled else None
     dense_buffers = _dual_tree_build_dense_buffers(
         tree=tree,
         geometry=geometry,
@@ -458,6 +547,85 @@ def _build_dual_tree_artifacts_split(
         traversal_result=None,
         compact_far_pairs=compact_far_pairs,
         dense_buffers=dense_buffers,
+        grouped_buffers=None,
+        grouped_segment_starts=None,
+        grouped_segment_lengths=None,
+        grouped_segment_class_ids=None,
+        grouped_segment_sort_permutation=None,
+        grouped_segment_group_ids=None,
+        grouped_segment_unique_targets=None,
+        grouped_chunk_size=None,
+    )
+
+
+def _build_dual_tree_artifacts_split_strict_streamed(
+    *,
+    tree: Tree,
+    geometry,
+    theta: float,
+    mac_type: MACType,
+    dehnen_radius_scale: float,
+    max_pair_queue: Optional[int],
+    pair_process_block: Optional[int],
+    traversal_config: Optional[DualTreeTraversalConfig],
+) -> _DualTreeArtifacts:
+    """Strict static fast-lane: single compact shared far+near build call.
+
+    This path intentionally avoids generic split-builder host branching and
+    callback plumbing. It is valid only for streamed compact far-pairs with no
+    dense/grouped/interactions payload requests.
+    """
+
+    if traversal_config is not None:
+        max_interactions_per_node = int(traversal_config.max_interactions_per_node)
+        max_neighbors_per_leaf = int(traversal_config.max_neighbors_per_leaf)
+        max_pair_queue_resolved = int(traversal_config.max_pair_queue)
+        process_block_resolved = int(traversal_config.process_block)
+    else:
+        max_interactions_per_node = 8192
+        max_neighbors_per_leaf = 4096
+        max_pair_queue_resolved = None if max_pair_queue is None else int(max_pair_queue)
+        process_block_resolved = (
+            None if pair_process_block is None else int(pair_process_block)
+        )
+
+    flat_compact_enabled = (
+        os.environ.get("JACCPOT_STATIC_STRICT_FUSED_FLAT_COMPACT_FAR_PAIRS", "1")
+        not in ("0", "false", "False", "off", "OFF")
+    )
+    compact_far_pair_capacity = None
+    if flat_compact_enabled:
+        compact_far_pair_capacity = int(
+            os.environ.get(
+                "JACCPOT_STATIC_STRICT_FUSED_COMPACT_FAR_PAIR_CAP", "131072"
+            )
+        )
+        if compact_far_pair_capacity <= 0:
+            raise ValueError(
+                "JACCPOT_STATIC_STRICT_FUSED_COMPACT_FAR_PAIR_CAP must be positive"
+            )
+
+    compact_far_pairs, neighbor_list = build_compact_far_pairs_and_leaf_neighbor_lists(
+        tree,
+        geometry,
+        theta=theta,
+        mac_type=mac_type,
+        dehnen_radius_scale=dehnen_radius_scale,
+        max_interactions_per_node=max_interactions_per_node,
+        max_neighbors_per_leaf=max_neighbors_per_leaf,
+        max_pair_queue=max_pair_queue_resolved,
+        process_block=process_block_resolved,
+        traversal_config=None,
+        retry_logger=None,
+        timing_callback=None,
+        compact_far_pair_capacity=compact_far_pair_capacity,
+    )
+    return _DualTreeArtifacts(
+        interactions=None,
+        neighbor_list=neighbor_list,
+        traversal_result=None,
+        compact_far_pairs=compact_far_pairs,
+        dense_buffers=None,
         grouped_buffers=None,
         grouped_segment_starts=None,
         grouped_segment_lengths=None,
@@ -781,6 +949,7 @@ def _build_dual_tree_artifacts(
     policy_state=None,
     jit_traversal: bool = True,
     timing_callback: Optional[Callable[[str, float], None]] = None,
+    planner_hint: Optional[_RefreshDualPlannerHint] = None,
 ) -> tuple[_DualTreeArtifacts, Optional[_InteractionCacheEntry]]:
     """Construct or reuse dual-tree traversal products for a tree."""
 
@@ -816,28 +985,54 @@ def _build_dual_tree_artifacts(
                     "geometry must be provided when dual-tree cache lookup misses"
                 )
             geometry = geometry_factory()
-        use_split_build = _can_split_dual_tree_build(
-            split_enabled=bool(allow_split_build),
-            grouped_interactions=grouped_interactions,
-            need_traversal_result=need_traversal_result,
-            pair_policy=pair_policy,
-            policy_state=policy_state,
-        )
+        if planner_hint is not None:
+            # Fast refresh path: reuse prior routing decision and avoid
+            # re-evaluating split-eligibility branching on host each call.
+            use_split_build = bool(planner_hint.use_split_build)
+        else:
+            use_split_build = _can_split_dual_tree_build(
+                split_enabled=bool(allow_split_build),
+                grouped_interactions=grouped_interactions,
+                need_traversal_result=need_traversal_result,
+                pair_policy=pair_policy,
+                policy_state=policy_state,
+            )
         if use_split_build:
-            split_artifacts = _build_dual_tree_artifacts_split(
-                tree=tree,
-                geometry=geometry,
-                theta=theta,
-                mac_type=mac_type,
-                dehnen_radius_scale=dehnen_radius_scale,
-                max_pair_queue=max_pair_queue,
-                pair_process_block=pair_process_block,
-                traversal_config=traversal_config,
-                retry_logger=retry_logger,
-                need_node_interactions=need_node_interactions,
-                need_compact_far_pairs=need_compact_far_pairs,
-                use_dense_interactions=use_dense_interactions,
-                timing_callback=timing_callback,
+            strict_streamed_split = bool(
+                fail_fast
+                and bool(need_compact_far_pairs)
+                and not bool(need_node_interactions)
+                and not bool(use_dense_interactions)
+                and not bool(grouped_interactions)
+                and not bool(need_traversal_result)
+            )
+            split_artifacts = (
+                _build_dual_tree_artifacts_split_strict_streamed(
+                    tree=tree,
+                    geometry=geometry,
+                    theta=theta,
+                    mac_type=mac_type,
+                    dehnen_radius_scale=dehnen_radius_scale,
+                    max_pair_queue=max_pair_queue,
+                    pair_process_block=pair_process_block,
+                    traversal_config=traversal_config,
+                )
+                if strict_streamed_split
+                else _build_dual_tree_artifacts_split(
+                    tree=tree,
+                    geometry=geometry,
+                    theta=theta,
+                    mac_type=mac_type,
+                    dehnen_radius_scale=dehnen_radius_scale,
+                    max_pair_queue=max_pair_queue,
+                    pair_process_block=pair_process_block,
+                    traversal_config=traversal_config,
+                    retry_logger=retry_logger,
+                    need_node_interactions=need_node_interactions,
+                    need_compact_far_pairs=need_compact_far_pairs,
+                    use_dense_interactions=use_dense_interactions,
+                    timing_callback=timing_callback,
+                )
             )
             interactions = split_artifacts.interactions
             neighbor_list = split_artifacts.neighbor_list
@@ -880,7 +1075,7 @@ def _build_dual_tree_artifacts(
                 else None
             )
         else:
-            stage_t0 = time.perf_counter()
+            stage_t0 = time.perf_counter() if timing_callback is not None else None
             build_out, _, _, _ = _dual_tree_build_raw(
                 tree=tree,
                 geometry=geometry,
@@ -900,7 +1095,7 @@ def _build_dual_tree_artifacts(
                 policy_state=policy_state,
                 jit_traversal=jit_traversal,
             )
-            if timing_callback is not None:
+            if timing_callback is not None and stage_t0 is not None:
                 timing_callback(
                     "dual_raw_interactions_and_neighbors",
                     float(time.perf_counter() - stage_t0),

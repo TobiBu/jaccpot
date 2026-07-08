@@ -30,6 +30,7 @@ from typing import Any, Optional
 
 import jax
 import jax.numpy as jnp
+import numpy as np
 
 REPO_ROOT = pathlib.Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
@@ -82,6 +83,28 @@ def _sample_problem(n: int, *, dtype: jnp.dtype) -> tuple[jax.Array, jax.Array]:
         dtype=dtype,
     )
     return positions, masses
+
+
+def _load_problem_npz(path: str, *, dtype: jnp.dtype) -> tuple[jax.Array, jax.Array]:
+    payload = np.load(str(path))
+    if "positions" not in payload:
+        raise KeyError("input NPZ must contain a 'positions' array")
+    positions = np.asarray(payload["positions"])
+    if positions.ndim != 2 or positions.shape[1] != 3:
+        raise ValueError(
+            f"positions must have shape (N, 3), got {tuple(positions.shape)}"
+        )
+    if "masses" in payload:
+        masses = np.asarray(payload["masses"])
+    elif "mass" in payload:
+        masses = np.asarray(payload["mass"])
+    else:
+        masses = np.full((positions.shape[0],), 1.0 / positions.shape[0], dtype=np.float32)
+    if masses.shape != (positions.shape[0],):
+        raise ValueError(
+            f"masses must have shape ({positions.shape[0]},), got {tuple(masses.shape)}"
+        )
+    return jnp.asarray(positions, dtype=dtype), jnp.asarray(masses, dtype=dtype)
 
 
 def _block_until_ready(value: Any) -> Any:
@@ -1029,15 +1052,29 @@ def _measure_prepare_stage_split(
     def evaluate_fn(state):
         return solver.evaluate_prepared_state(state)
 
-    _block_until_ready(evaluate_fn(state_warm))
-    _, peak_row, _, _, _ = _peak_gpu_memory_trace(
-        evaluate_fn,
-        state_warm,
-        label="evaluate_warm",
-        gpu_index=int(gpu_index),
-        poll_interval_s=float(poll_interval_s),
-    )
-    phase_rows.append(peak_row)
+    if state_warm is None:
+        phase_rows.append(
+            {
+                "component": "evaluate_warm",
+                "gpu_used_before_mb": None,
+                "gpu_used_after_mb": None,
+                "gpu_peak_used_mb": None,
+                "gpu_peak_delta_mb": None,
+                "wall_seconds": 0.0,
+                "error": "skipped because prepare_warm failed",
+                "error_type": "Skipped",
+            }
+        )
+    else:
+        _block_until_ready(evaluate_fn(state_warm))
+        _, peak_row, _, _, _ = _peak_gpu_memory_trace(
+            evaluate_fn,
+            state_warm,
+            label="evaluate_warm",
+            gpu_index=int(gpu_index),
+            poll_interval_s=float(poll_interval_s),
+        )
+        phase_rows.append(peak_row)
 
     summary = {
         "dual_tree_build_raw_compile_overhead_mb": _peak_delta(
@@ -1136,6 +1173,16 @@ def main() -> None:
     parser.add_argument("--poll-interval-s", type=float, default=0.02)
     parser.add_argument("--warmup", type=int, default=1)
     parser.add_argument("--config-json", default=None)
+    parser.add_argument(
+        "--input-npz",
+        default=None,
+        help="Optional NPZ with positions and masses/mass arrays to profile.",
+    )
+    parser.add_argument(
+        "--output-json",
+        default=None,
+        help="Optional path where the profiler JSON payload should be written.",
+    )
     args = parser.parse_args()
 
     dtype = getattr(jnp, str(args.dtype))
@@ -1150,7 +1197,15 @@ def main() -> None:
             basis=str(args.basis),
             runtime_path=str(args.runtime_path).strip().lower(),
         )
-    positions, masses = _sample_problem(int(args.num_particles), dtype=dtype)
+    if args.input_npz is None:
+        positions, masses = _sample_problem(int(args.num_particles), dtype=dtype)
+    else:
+        positions, masses = _load_problem_npz(str(args.input_npz), dtype=dtype)
+        if int(args.num_particles) != int(positions.shape[0]):
+            raise ValueError(
+                "--num-particles must match input NPZ positions; "
+                f"got {int(args.num_particles)} and {int(positions.shape[0])}"
+            )
     positions, masses = _block_until_ready((positions, masses))
 
     phase_rows, summary = _measure_prepare_stage_split(
@@ -1176,7 +1231,12 @@ def main() -> None:
         "phase_rows": phase_rows,
         "summary": summary,
     }
-    print(json.dumps(output, sort_keys=True))
+    output_json = json.dumps(output, sort_keys=True)
+    if args.output_json is not None:
+        output_path = pathlib.Path(str(args.output_json))
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        output_path.write_text(output_json + "\n", encoding="utf-8")
+    print(output_json)
 
 
 if __name__ == "__main__":
