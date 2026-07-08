@@ -405,8 +405,25 @@ def prepare_solidfmm_complex_upward_sweep(
     precomputed_geometry: Optional[TreeGeometry] = None,
     upward_timing_callback: Optional[Callable[[str, float], None]] = None,
     defer_geometry: bool = False,
+    static_num_levels: Optional[int] = None,
 ) -> SolidFMMComplexTreeUpwardData:
-    """Compute complex multipoles for every node (solidfmm basis)."""
+    """Compute complex multipoles for every node (solidfmm basis).
+
+    ``static_num_levels`` lets callers that know the tree topology concretely
+    (e.g. at full-prepare or via a fixed-topology template) pass the *actual* tree
+    depth. Radix trees pad ``level_offsets`` to the full Morton depth, so deriving
+    the M2M level count from the array shape makes the level loop iterate many
+    empty levels (each still paying a full-width vmapped translate). Passing the
+    concrete depth collapses that waste while remaining recompile-free under the
+    fixed-shape contract and bit-identical to the padded result. It must be a
+    static int (it feeds an ``@jax.jit`` static arg) and is safe to omit, in which
+    case the padded shape-derived depth is used (correct, just slower).
+
+    Note: the M2M per-level batch width stays at ``num_internal``. It cannot be
+    shrunk to the max internal-level width because the level loop's
+    ``dynamic_slice_in_dim`` clamps its start index to ``total_nodes - width``, so
+    a narrower width silently shifts the window for deep levels and corrupts the
+    aggregation."""
 
     p = int(max_order)
     if p < 0:
@@ -486,12 +503,15 @@ def prepare_solidfmm_complex_upward_sweep(
     num_leaves = max(total_nodes - num_internal, 0)
     level_offsets = get_level_offsets(tree)
     nodes_by_level = get_nodes_by_level(tree)
-    num_levels = int(level_offsets.shape[0] - 1)
-    if num_levels <= 0:
-        num_levels = 1
+    if static_num_levels is not None:
+        num_levels = max(int(static_num_levels), 1)
+    else:
+        num_levels = int(level_offsets.shape[0] - 1)
+        if num_levels <= 0:
+            num_levels = 1
     # Keep batching shape-derived so this path remains JIT-safe under traced tree
-    # builds, but use a tighter per-level bound to avoid inflating static shapes
-    # with the total number of internal nodes.
+    # builds. Width stays at num_internal (see the docstring note: the M2M slice
+    # clamps its start, so a narrower width is unsafe).
     level_batch_width = max(int(num_internal), 1)
     resolved_leaf_batch_size = (
         min(num_leaves, _DEFAULT_LEAF_BATCH_SIZE)

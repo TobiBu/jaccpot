@@ -51,6 +51,69 @@ def _build_sample_tree():
     return tree, pos_sorted, mass_sorted, vel_sorted
 
 
+def _build_multilevel_tree(n=600, leaf_size=8, seed=0):
+    rng = np.random.default_rng(seed)
+    pos = jnp.asarray(np.clip(rng.normal(0.0, 0.3, (n, 3)), -0.99, 0.99))
+    mass = jnp.asarray(rng.uniform(0.5, 1.5, n))
+    bounds = (
+        jnp.array([-1.0, -1.0, -1.0], dtype=pos.dtype),
+        jnp.array([1.0, 1.0, 1.0], dtype=pos.dtype),
+    )
+    tree, ps, msorted, _ = build_tree(
+        pos, mass, bounds, return_reordered=True, leaf_size=leaf_size
+    )
+    return tree, ps, msorted
+
+
+def test_static_num_levels_bit_identical_to_padded():
+    """Passing the concrete (unpadded) depth must be bit-identical to deriving
+    the M2M level count from the padded level_offsets shape."""
+    from yggdrax.tree import get_num_levels
+
+    tree, ps, ms = _build_multilevel_tree()
+    actual_num_levels = int(get_num_levels(tree))
+
+    padded = prepare_solidfmm_complex_upward_sweep(
+        tree, ps, ms, max_order=4, center_mode="com"
+    )
+    optimized = prepare_solidfmm_complex_upward_sweep(
+        tree,
+        ps,
+        ms,
+        max_order=4,
+        center_mode="com",
+        static_num_levels=actual_num_levels,
+    )
+    # Exact equality: same arithmetic, only the empty padded levels are skipped.
+    assert jnp.array_equal(padded.multipoles.packed, optimized.multipoles.packed)
+
+
+def test_prepare_upward_sweep_stashes_and_reuses_concrete_depth():
+    """The runtime method stashes the concrete depth and a traced (jitted) call
+    reuses it, staying bit-identical to the concrete result."""
+    import jax
+    from yggdrax.tree import get_num_levels
+
+    from jaccpot.runtime._fmm_impl import FastMultipoleMethod
+
+    tree, ps, ms = _build_multilevel_tree()
+    actual = int(get_num_levels(tree))
+    fmm = FastMultipoleMethod(expansion_basis="solidfmm")
+
+    concrete = fmm.prepare_upward_sweep(
+        tree, ps, ms, max_order=4, center_mode="com", max_leaf_size=8
+    )
+    assert fmm._static_upward_num_levels == actual
+
+    def _run(t, p, m):
+        return fmm.prepare_upward_sweep(
+            t, p, m, max_order=4, center_mode="com", max_leaf_size=8
+        ).multipoles.packed
+
+    packed_jit = jax.jit(_run)(tree, ps, ms)
+    assert jnp.array_equal(packed_jit, concrete.multipoles.packed)
+
+
 def test_prepare_solidfmm_upward_source_motion_optional_none():
     tree, pos_sorted, mass_sorted, _ = _build_sample_tree()
     upward = prepare_solidfmm_complex_upward_sweep(

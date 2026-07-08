@@ -48,6 +48,7 @@ from yggdrax.tree import (
     Tree,
     TreeType,
     available_tree_types,
+    get_node_levels,
     rebuild_static_radix_tree_from_template,
     reorder_particles_by_indices,
 )
@@ -1986,6 +1987,11 @@ class FastMultipoleMethod:
         self._recent_dual_m2l_chunk_size: int = 0
         self._static_radix_tree_leaf_count: int = 0
         self._static_radix_tree_node_count: int = 0
+        # Concrete tree depth (unpadded), stashed at build so the traced refresh
+        # can pass it as a static arg to the upward M2M level loop. Radix trees
+        # pad level_offsets to full Morton depth; using the padded shape makes the
+        # M2M loop iterate many empty levels. See _resolve_upward_num_levels.
+        self._static_upward_num_levels: Optional[int] = None
         self._static_radix_far_pair_count: int = 0
         self._static_radix_m2l_chunk_count: int = 0
         self._static_radix_l2l_edge_count: int = 0
@@ -4070,6 +4076,13 @@ class FastMultipoleMethod:
             return prepared_new, _evaluate_self(prepared_new, state_position)
 
         if self._strict_fused_mode_active:
+            # Stash the concrete tree depth now, while prepared_curr is concrete,
+            # so the traced refresh inside the compiled runner passes it as the
+            # M2M level-loop static arg. Keyed into cache_key so a topology with a
+            # different depth compiles its own runner.
+            static_upward_num_levels = self._resolve_upward_num_levels(
+                getattr(prepared_curr, "tree", None)
+            )
             cache_key = (
                 "strict_velocity_verlet",
                 tuple(int(v) for v in state_arr.shape),
@@ -4089,6 +4102,7 @@ class FastMultipoleMethod:
                 detail_diag_mode,
                 eval_diag_mode,
                 str(getattr(self, "_large_n_nearfield_diag_mode", "full")),
+                static_upward_num_levels,
             )
             jit_cache = getattr(self, "_strict_fused_jit_function_cache", {})
             compiled_runner = jit_cache.get(cache_key)
@@ -8295,6 +8309,29 @@ class FastMultipoleMethod:
             softening=self.softening,
         )
 
+    def _resolve_upward_num_levels(self, tree: Tree) -> Optional[int]:
+        """Return the concrete (unpadded) tree depth for the M2M level loop.
+
+        When ``tree`` is concrete (full prepare / template build) this computes
+        the actual depth and stashes it on ``self``. When ``tree`` is a JAX
+        tracer (the fused device-resident refresh) its array values are
+        unavailable, so we return the previously stashed value. The stash is
+        populated by the eager full-prepare that always precedes the traced
+        refresh, so the hot path gets the concrete depth. Returns ``None`` only
+        if nothing concrete has been seen yet (callers then fall back to the
+        padded shape-derived depth, which is correct, just slower)."""
+        probe = getattr(tree, "parent", None)
+        if probe is None or isinstance(probe, jax.core.Tracer):
+            return self._static_upward_num_levels
+        try:
+            levels = get_node_levels(tree)
+            if isinstance(levels, jax.core.Tracer):
+                return self._static_upward_num_levels
+            self._static_upward_num_levels = int(jnp.max(levels)) + 1
+        except Exception:
+            return self._static_upward_num_levels
+        return self._static_upward_num_levels
+
     def prepare_upward_sweep(
         self: "FastMultipoleMethod",
         tree: Tree,
@@ -8341,6 +8378,7 @@ class FastMultipoleMethod:
                 precomputed_geometry=precomputed_geometry,
                 upward_timing_callback=_record_upward_stage,
                 defer_geometry=bool(defer_geometry),
+                static_num_levels=self._resolve_upward_num_levels(tree),
             )
 
             multipoles = NodeMultipoleData(
