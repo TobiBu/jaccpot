@@ -13,7 +13,6 @@ from yggdrax.interactions import build_leaf_neighbor_lists
 from yggdrax.tree import build_tree
 
 from jaccpot.nearfield.near_field import (
-    _compact_reduced_pair_bucket_rows,
     collect_radix_fast_lane_counters,
     compute_leaf_p2p_accelerations,
     compute_leaf_p2p_accelerations_large_n_accel_only,
@@ -398,47 +397,6 @@ def test_large_n_accel_only_prepared_bucketed_matches_generic():
         np.asarray(generic),
         rtol=1e-6,
         atol=1e-6,
-    )
-
-
-def test_compact_reduced_pair_bucket_rows_packs_valid_prefix():
-    reduced_target_leaf_ids = jnp.array([4, 0, 7, 0], dtype=jnp.int32)
-    reduced_pair_acc = jnp.array(
-        [
-            [[1.0, 2.0], [3.0, 4.0]],
-            [[0.0, 0.0], [0.0, 0.0]],
-            [[5.0, 6.0], [7.0, 8.0]],
-            [[0.0, 0.0], [0.0, 0.0]],
-        ]
-    )
-    reduced_valid = jnp.array([True, False, True, False])
-
-    compact_leaf_ids, compact_pair_acc, compact_valid = (
-        _compact_reduced_pair_bucket_rows(
-            reduced_target_leaf_ids,
-            reduced_pair_acc,
-            reduced_valid,
-        )
-    )
-
-    assert np.array_equal(
-        np.asarray(compact_leaf_ids),
-        np.asarray([4, 7, 0, 0], dtype=np.int32),
-    )
-    assert np.array_equal(
-        np.asarray(compact_valid),
-        np.asarray([True, True, False, False]),
-    )
-    assert np.allclose(
-        np.asarray(compact_pair_acc),
-        np.asarray(
-            [
-                [[1.0, 2.0], [3.0, 4.0]],
-                [[5.0, 6.0], [7.0, 8.0]],
-                [[0.0, 0.0], [0.0, 0.0]],
-                [[0.0, 0.0], [0.0, 0.0]],
-            ]
-        ),
     )
 
 

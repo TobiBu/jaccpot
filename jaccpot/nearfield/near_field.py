@@ -679,28 +679,6 @@ def _reduce_pair_bucket_by_target_leaf(
     return reduced_target_leaf_ids, reduced_pair_acc, reduced_valid
 
 
-def _compact_reduced_pair_bucket_rows(
-    reduced_target_leaf_ids: Array,
-    reduced_pair_acc: Array,
-    reduced_valid: Array,
-) -> Tuple[Array, Array, Array]:
-    """Move valid reduced rows to the front of the fixed-size bucket buffers.
-
-    This keeps the public shape stable for JIT friendliness while testing
-    whether denser valid-row packing helps the downstream particle-order update
-    path.
-    """
-
-    if int(reduced_valid.shape[0]) == 0:
-        return reduced_target_leaf_ids, reduced_pair_acc, reduced_valid
-
-    order = jnp.argsort(~reduced_valid, stable=True)
-    compact_leaf_ids = reduced_target_leaf_ids[order]
-    compact_pair_acc = reduced_pair_acc[order]
-    compact_valid = reduced_valid[order]
-    return compact_leaf_ids, compact_pair_acc, compact_valid
-
-
 @jax.jit
 def _compute_leaf_p2p_prepared_large_n_self_only_impl(
     positions: Array,
