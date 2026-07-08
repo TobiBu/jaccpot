@@ -19,7 +19,9 @@ compute capability >= 8.0 (Ampere+); it cannot run on sm_75.
 Usage: python bench/profile_fused_gpu_util.py [physical_gpu_index]
 (set CUDA_VISIBLE_DEVICES to the same GPU).
 """
+
 from __future__ import annotations
+
 import os
 import statistics
 import subprocess
@@ -29,7 +31,8 @@ import time
 
 def _set_env() -> None:
     for k, v in dict(
-        JACCPOT_STATIC_STRICT_GPU_MODE="on", JACCPOT_STATIC_STRICT_FUSED_MODE="on",
+        JACCPOT_STATIC_STRICT_GPU_MODE="on",
+        JACCPOT_STATIC_STRICT_FUSED_MODE="on",
         JACCPOT_STATIC_STRICT_FUSED_PROFILE_SET="200000",
         JACCPOT_STATIC_STRICT_REQUIRE_EXACT_CAP_PROFILE_MATCH="0",
         JACCPOT_STATIC_STRICT_FUSED_DEVICE_ONLY="1",
@@ -51,22 +54,43 @@ def main() -> None:
     _set_env()
     import jax
     import jax.numpy as jnp
+
     from jaccpot import FastMultipoleMethod
 
-    pos = jax.random.uniform(jax.random.PRNGKey(0), (n, 3), minval=-1, maxval=1, dtype=jnp.float32)
+    pos = jax.random.uniform(
+        jax.random.PRNGKey(0), (n, 3), minval=-1, maxval=1, dtype=jnp.float32
+    )
     vel = 0.01 * jax.random.normal(jax.random.PRNGKey(2), (n, 3), dtype=jnp.float32)
-    mass = jax.random.uniform(jax.random.PRNGKey(1), (n,), minval=0.1, maxval=1.0, dtype=jnp.float32)
+    mass = jax.random.uniform(
+        jax.random.PRNGKey(1), (n,), minval=0.1, maxval=1.0, dtype=jnp.float32
+    )
     state0 = jnp.stack([pos, vel], axis=1)
     solver = FastMultipoleMethod(
-        preset="large_n_gpu", runtime_path="large_n", expansion_basis="solidfmm",
-        complex_rotation="solidfmm", theta=0.6, nearfield_mode="bucketed",
-        nearfield_edge_chunk_size=64, grouped_interactions=False,
-        working_dtype=jnp.float32, tree_build_mode="static_radix", fixed_order=4)
+        preset="large_n_gpu",
+        runtime_path="large_n",
+        expansion_basis="solidfmm",
+        complex_rotation="solidfmm",
+        theta=0.6,
+        nearfield_mode="bucketed",
+        nearfield_edge_chunk_size=64,
+        grouped_interactions=False,
+        working_dtype=jnp.float32,
+        tree_build_mode="static_radix",
+        fixed_order=4,
+    )
 
     def run(nsteps):
         out, _, _ = solver.strict_run_v2(
-            state=state0, masses=mass, dt=2.0e-4, num_steps=nsteps, refresh_every=1,
-            leaf_size=256, max_order=4, theta=0.6, return_history=False)
+            state=state0,
+            masses=mass,
+            dt=2.0e-4,
+            num_steps=nsteps,
+            refresh_every=1,
+            leaf_size=256,
+            max_order=4,
+            theta=0.6,
+            return_history=False,
+        )
         return out
 
     print("warming (compile)...", flush=True)
@@ -74,7 +98,9 @@ def main() -> None:
 
     dmon = subprocess.Popen(
         ["nvidia-smi", "dmon", "-i", phys_gpu, "-s", "u", "-d", "1", "-c", "120"],
-        stdout=subprocess.PIPE, text=True)
+        stdout=subprocess.PIPE,
+        text=True,
+    )
     t0 = time.perf_counter()
     run(steps).block_until_ready()
     wall = time.perf_counter() - t0
@@ -87,15 +113,24 @@ def main() -> None:
                 sm.append(int(parts[1]))
             except ValueError:
                 pass
-    print(f"strict_run_v2 {steps} steps @{n}: wall={wall:.2f}s  per-step={wall/steps*1000:.1f} ms", flush=True)
+    print(
+        f"strict_run_v2 {steps} steps @{n}: wall={wall:.2f}s  per-step={wall/steps*1000:.1f} ms",
+        flush=True,
+    )
     if sm:
         busy = [x for x in sm if x > 5]
-        print(f"GPU SM%%: mean={statistics.mean(sm):.0f} (excl compile idle: mean={statistics.mean(busy) if busy else 0:.0f}) "
-              f"min={min(sm)} max={max(sm)} n={len(sm)}", flush=True)
+        print(
+            f"GPU SM%%: mean={statistics.mean(sm):.0f} (excl compile idle: mean={statistics.mean(busy) if busy else 0:.0f}) "
+            f"min={min(sm)} max={max(sm)} n={len(sm)}",
+            flush=True,
+        )
     diag = solver.get_runtime_diagnostics()
-    print(f"fused_active={diag.get('strict_fused_mode_active')} "
-          f"fallback={diag.get('strict_fused_fallback_count')} "
-          f"compile={diag.get('strict_fused_compile_count')}", flush=True)
+    print(
+        f"fused_active={diag.get('strict_fused_mode_active')} "
+        f"fallback={diag.get('strict_fused_fallback_count')} "
+        f"compile={diag.get('strict_fused_compile_count')}",
+        flush=True,
+    )
 
 
 if __name__ == "__main__":
