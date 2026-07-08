@@ -17,14 +17,15 @@ from yggdrax.dtypes import INDEX_DTYPE, as_index
 from yggdrax.interactions import NodeNeighborList
 from yggdrax.tree import Tree
 
-
-_LARGE_N_NEARFIELD_DIAG_MODES = frozenset(
-    ("full", "self_only", "pairs_only", "zero")
-)
+_LARGE_N_NEARFIELD_DIAG_MODES = frozenset(("full", "self_only", "pairs_only", "zero"))
 
 
 def _large_n_nearfield_diag_mode() -> str:
-    mode = str(os.environ.get("JACCPOT_LARGE_N_NEARFIELD_DIAG_MODE", "full")).strip().lower()
+    mode = (
+        str(os.environ.get("JACCPOT_LARGE_N_NEARFIELD_DIAG_MODE", "full"))
+        .strip()
+        .lower()
+    )
     return mode if mode in _LARGE_N_NEARFIELD_DIAG_MODES else "full"
 
 
@@ -33,6 +34,16 @@ def _env_flag(name: str, default: bool = False) -> bool:
     if raw is None:
         return bool(default)
     return str(raw).strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _env_int(name: str, default: int = 0) -> int:
+    raw = os.environ.get(name)
+    if raw is None:
+        return int(default)
+    try:
+        return int(str(raw).strip())
+    except (TypeError, ValueError):
+        return int(default)
 
 
 @dataclass(frozen=True)
@@ -1010,9 +1021,7 @@ def _accumulate_target_block_tile_sequence(
                 compute_potential=False,
             )
             tile_acc = jnp.sum(
-                pair_acc.reshape(
-                    (leaf_batch, block_tile, block_size, leaf_size, 3)
-                ),
+                pair_acc.reshape((leaf_batch, block_tile, block_size, leaf_size, 3)),
                 axis=(1, 2),
             )
             return acc_in + tile_acc
@@ -1321,8 +1330,10 @@ def _compute_leaf_p2p_prepared_large_n_pairs_target_blocks_prepacked_impl(
     if bool(occupancy_sort):
         block_counts = jnp.sum(jnp.any(source_valid_all, axis=-1), axis=1)
         leaf_order = jnp.argsort(block_counts, stable=True)
-        old_to_new = jnp.zeros((num_leaves,), dtype=INDEX_DTYPE).at[leaf_order].set(
-            jnp.arange(num_leaves, dtype=INDEX_DTYPE)
+        old_to_new = (
+            jnp.zeros((num_leaves,), dtype=INDEX_DTYPE)
+            .at[leaf_order]
+            .set(jnp.arange(num_leaves, dtype=INDEX_DTYPE))
         )
         source_leaf_ids_all = source_leaf_ids_all[leaf_order]
         source_valid_all = source_valid_all[leaf_order]
@@ -3037,6 +3048,193 @@ def _compute_radix_fast_lane_payload_pairs_impl(
     )
 
 
+def _compute_leaf_p2p_prepared_large_n_self_only_with_potential_impl(
+    positions: Array,
+    leaf_positions: Array,
+    leaf_masses: Array,
+    leaf_mask: Array,
+    leaf_particle_idx: Array,
+    *,
+    G: Union[float, Array],
+    softening_sq: Array,
+) -> Tuple[Array, Array]:
+    """Self-leaf accel + potential portion of the large-N kernel."""
+    dtype = positions.dtype
+    g_const = jnp.asarray(G, dtype=dtype)
+    accelerations = jnp.zeros_like(positions)
+    potentials = jnp.zeros(positions.shape[:1], dtype=dtype)
+    self_accel, self_pot = _self_contributions(
+        leaf_positions,
+        leaf_masses,
+        leaf_mask,
+        softening_sq=softening_sq,
+        G=g_const,
+        compute_potential=True,
+    )
+    acc = _scatter_contributions(
+        accelerations,
+        leaf_particle_idx,
+        self_accel,
+        leaf_mask,
+    )
+    pot = _scatter_scalar_contributions(
+        potentials,
+        leaf_particle_idx,
+        self_pot,
+        leaf_mask,
+    )
+    return acc, pot
+
+
+def _radix_fast_lane_pairs_pallas(
+    positions: Array,
+    masses: Array,
+    target_particle_ids: Array,
+    target_particle_mask: Array,
+    source_particle_ids: Array,
+    source_particle_mask: Array,
+    *,
+    G: Union[float, Array],
+    softening_sq: Array,
+    compute_potential: bool,
+    num_warps: Optional[int] = None,
+    num_stages: int = 1,
+    target_subtile: Optional[int] = None,
+    interpret: bool = False,
+) -> Union[Array, Tuple[Array, Array]]:
+    """Fused Pallas cross-leaf pair path for the radix fast lane.
+
+    Gathers leaf-major target/source tensors, evaluates the fused leaf kernel
+    (no HBM ``W x W`` distance matrix), then scatters the leaf-major result back
+    to particle order via the existing scatter helpers.  The intra-leaf self
+    term is handled separately by the caller, matching the pure-JAX path.
+    """
+    from jaccpot.pallas.nearfield_fused_leaf import nearfield_fused_leaf_pallas
+
+    dtype = positions.dtype
+    g_const = jnp.asarray(G, dtype=dtype)
+
+    num_target_leaves = int(target_particle_ids.shape[0])
+    target_leaf_size = int(target_particle_ids.shape[1])
+    num_source_slots = int(source_particle_ids.shape[1])
+    source_leaf_size = int(source_particle_ids.shape[2])
+    num_sources = num_source_slots * source_leaf_size
+
+    accelerations = jnp.zeros_like(positions)
+    if num_target_leaves == 0 or target_leaf_size == 0 or num_sources == 0:
+        if compute_potential:
+            return accelerations, jnp.zeros(positions.shape[:1], dtype=dtype)
+        return accelerations
+
+    safe_target_ids = jnp.where(target_particle_mask, target_particle_ids, 0)
+    tgt_pos = positions[safe_target_ids]
+
+    safe_source_ids = jnp.reshape(
+        jnp.where(source_particle_mask, source_particle_ids, 0),
+        (num_target_leaves, num_sources),
+    )
+    src_pos = positions[safe_source_ids]
+    src_mass = masses[safe_source_ids]
+    src_mask_flat = jnp.reshape(source_particle_mask, (num_target_leaves, num_sources))
+
+    out = nearfield_fused_leaf_pallas(
+        tgt_pos,
+        target_particle_mask,
+        src_pos,
+        src_mass,
+        src_mask_flat,
+        softening_sq=softening_sq,
+        G=g_const,
+        num_warps=num_warps,
+        num_stages=num_stages,
+        target_subtile=target_subtile,
+        interpret=interpret,
+    )
+
+    pair_acc = _scatter_contributions(
+        accelerations, target_particle_ids, out[..., :3], target_particle_mask
+    )
+    if compute_potential:
+        potentials = jnp.zeros(positions.shape[:1], dtype=dtype)
+        pair_pot = _scatter_scalar_contributions(
+            potentials, target_particle_ids, out[..., 3], target_particle_mask
+        )
+        return pair_acc, pair_pot
+    return pair_acc
+
+
+def _radix_fast_lane_prepacked_pallas(
+    source_leaf_ids_padded: Array,
+    source_valid_mask_padded: Array,
+    leaf_positions: Array,
+    leaf_masses: Array,
+    leaf_mask: Array,
+    leaf_particle_idx: Array,
+    positions: Array,
+    *,
+    G: Union[float, Array],
+    softening_sq: Array,
+    compute_potential: bool,
+    num_warps: Optional[int] = None,
+    num_stages: int = 1,
+    target_subtile: Optional[int] = None,
+    interpret: bool = False,
+) -> Union[Array, Tuple[Array, Array]]:
+    """Fused Pallas leaf-pair path over the compact prepacked source-leaf layout.
+
+    Consumes the ``(num_leaves, max_blocks, block_size)`` source-leaf-id tensors
+    used by the production fused near-field lane. Source leaves are gathered by
+    id inside the kernel (no dense per-particle source materialization), then the
+    leaf-major result is scattered to particle order.  The intra-leaf self term
+    is handled separately by the caller, matching the pure-JAX path.
+    """
+    from jaccpot.pallas.nearfield_fused_leaf import nearfield_leafpair_pallas
+
+    dtype = positions.dtype
+    g_const = jnp.asarray(G, dtype=dtype)
+
+    num_leaves = int(source_leaf_ids_padded.shape[0])
+    num_source_slots = int(source_leaf_ids_padded.shape[1]) * int(
+        source_leaf_ids_padded.shape[2]
+    )
+
+    accelerations = jnp.zeros_like(positions)
+    if num_leaves == 0 or num_source_slots == 0 or int(leaf_positions.shape[1]) == 0:
+        if compute_potential:
+            return accelerations, jnp.zeros(positions.shape[:1], dtype=dtype)
+        return accelerations
+
+    source_leaf_ids_flat = source_leaf_ids_padded.reshape(
+        (num_leaves, num_source_slots)
+    )
+    source_valid_flat = source_valid_mask_padded.reshape((num_leaves, num_source_slots))
+
+    out = nearfield_leafpair_pallas(
+        leaf_positions,
+        leaf_masses,
+        leaf_mask,
+        source_leaf_ids_flat,
+        source_valid_flat,
+        softening_sq=softening_sq,
+        G=g_const,
+        num_warps=num_warps,
+        num_stages=num_stages,
+        target_subtile=target_subtile,
+        interpret=interpret,
+    )
+
+    pair_acc = _scatter_contributions(
+        accelerations, leaf_particle_idx, out[..., :3], leaf_mask
+    )
+    if compute_potential:
+        potentials = jnp.zeros(positions.shape[:1], dtype=dtype)
+        pair_pot = _scatter_scalar_contributions(
+            potentials, leaf_particle_idx, out[..., 3], leaf_mask
+        )
+        return pair_acc, pair_pot
+    return pair_acc
+
+
 def compute_leaf_p2p_accelerations_radix_fast_lane(
     *,
     positions_sorted: Array,
@@ -3045,23 +3243,57 @@ def compute_leaf_p2p_accelerations_radix_fast_lane(
     G: Union[float, Array] = 1.0,
     softening: float = 0.0,
     return_potential: bool = False,
+    use_pallas: bool = False,
 ) -> Union[Array, Tuple[Array, Array]]:
     """Payload-driven nearfield entry for the radix fast lane."""
     positions = jnp.asarray(positions_sorted)
     masses = jnp.asarray(masses_sorted)
-    if bool(return_potential):
-        raise NotImplementedError(
-            "compute_leaf_p2p_accelerations_radix_fast_lane does not yet "
-            "support return_potential=True"
-        )
+    want_potential = bool(return_potential)
+    dtype = positions.dtype
 
     target_particle_ids = jnp.asarray(payload.target_particle_ids, dtype=INDEX_DTYPE)
     target_particle_mask = jnp.asarray(payload.target_particle_mask, dtype=bool)
     source_particle_ids = jnp.asarray(payload.source_particle_ids, dtype=INDEX_DTYPE)
     source_particle_mask = jnp.asarray(payload.source_particle_mask, dtype=bool)
 
+    # Decide whether a fused Pallas cross-leaf pair path is usable. Requires a
+    # supported GPU (or forced interpret mode for CPU testing). Two layouts:
+    #   - materialized per-particle source payload -> pairs kernel;
+    #   - compact prepacked source-leaf-id layout (the production fused lane) ->
+    #     leaf-pair kernel that gathers source leaves by id.
+    pallas_interpret = _env_flag("JACCPOT_NEARFIELD_PALLAS_INTERPRET", False)
+    pallas_available = False
+    if bool(use_pallas):
+        from jaccpot.pallas.nearfield_fused_leaf import (
+            pallas_nearfield_fused_supported,
+        )
+
+        pallas_available = pallas_interpret or pallas_nearfield_fused_supported()
+    has_materialized_sources = int(source_particle_ids.size) > 0
+    has_prepacked_sources = (
+        int(source_particle_ids.size) == 0
+        and int(jnp.asarray(payload.source_leaf_ids).size) > 0
+    )
+    pallas_pairs = pallas_available and has_materialized_sources
+    pallas_prepacked = pallas_available and has_prepacked_sources
+
+    # Potential is only implemented on the fused Pallas paths; otherwise the
+    # caller falls back to the generic W x W path (preserving prior behavior).
+    if want_potential and not (pallas_pairs or pallas_prepacked):
+        raise NotImplementedError(
+            "compute_leaf_p2p_accelerations_radix_fast_lane supports "
+            "return_potential=True only on the fused Pallas paths "
+            "(use_pallas=True on a supported GPU)"
+        )
+
+    def _zeros_result():
+        acc = jnp.zeros_like(positions)
+        if want_potential:
+            return acc, jnp.zeros(positions.shape[:1], dtype=dtype)
+        return acc
+
     if int(target_particle_ids.size) == 0:
-        return jnp.zeros_like(positions)
+        return _zeros_result()
 
     safe_target_particle_ids = jnp.where(target_particle_mask, target_particle_ids, 0)
     leaf_positions = positions[safe_target_particle_ids]
@@ -3071,30 +3303,99 @@ def compute_leaf_p2p_accelerations_radix_fast_lane(
 
     diag_mode = _large_n_nearfield_diag_mode()
     if diag_mode == "zero":
-        return jnp.zeros_like(positions)
+        return _zeros_result()
 
     softening_sq = jnp.asarray(float(softening) ** 2, dtype=positions.dtype)
     self_acc = jnp.zeros_like(positions)
+    self_pot = jnp.zeros(positions.shape[:1], dtype=dtype)
     if diag_mode != "pairs_only":
-        self_acc = _compute_leaf_p2p_prepared_large_n_self_only_impl(
-            positions,
-            leaf_positions,
-            leaf_masses,
-            leaf_mask,
-            leaf_particle_idx,
-            G=G,
-            softening_sq=softening_sq,
-        )
+        if want_potential:
+            (
+                self_acc,
+                self_pot,
+            ) = _compute_leaf_p2p_prepared_large_n_self_only_with_potential_impl(
+                positions,
+                leaf_positions,
+                leaf_masses,
+                leaf_mask,
+                leaf_particle_idx,
+                G=G,
+                softening_sq=softening_sq,
+            )
+        else:
+            self_acc = _compute_leaf_p2p_prepared_large_n_self_only_impl(
+                positions,
+                leaf_positions,
+                leaf_masses,
+                leaf_mask,
+                leaf_particle_idx,
+                G=G,
+                softening_sq=softening_sq,
+            )
     if diag_mode == "self_only":
+        if want_potential:
+            return self_acc, self_pot
         return self_acc
 
+    if pallas_pairs:
+        pallas_num_warps = _env_int("JACCPOT_NEARFIELD_PALLAS_NUM_WARPS", 0)
+        pallas_num_stages = max(1, _env_int("JACCPOT_NEARFIELD_PALLAS_NUM_STAGES", 1))
+        pallas_subtile = _env_int("JACCPOT_NEARFIELD_PALLAS_TARGET_SUBTILE", 0)
+        pairs_result = _radix_fast_lane_pairs_pallas(
+            positions,
+            masses,
+            target_particle_ids,
+            target_particle_mask,
+            source_particle_ids,
+            source_particle_mask,
+            G=G,
+            softening_sq=softening_sq,
+            compute_potential=want_potential,
+            num_warps=(pallas_num_warps if pallas_num_warps > 0 else None),
+            num_stages=pallas_num_stages,
+            target_subtile=(pallas_subtile if pallas_subtile > 0 else None),
+            interpret=pallas_interpret,
+        )
+        if want_potential:
+            pair_acc, pair_pot = pairs_result
+            return self_acc + pair_acc, self_pot + pair_pot
+        return self_acc + pairs_result
+
     if int(source_particle_ids.size) == 0:
-        # Migration fallback: retain previous prepacked source-leaf path when
-        # source-particle payload tensors are not provisioned.
+        # Prepacked source-leaf-id layout (the production fused near-field lane).
         source_leaf_ids_padded = jnp.asarray(payload.source_leaf_ids, dtype=INDEX_DTYPE)
         source_valid_mask_padded = jnp.asarray(
             payload.source_leaf_valid_mask, dtype=bool
         )
+
+        if pallas_prepacked:
+            pallas_num_warps = _env_int("JACCPOT_NEARFIELD_PALLAS_NUM_WARPS", 0)
+            pallas_num_stages = max(
+                1, _env_int("JACCPOT_NEARFIELD_PALLAS_NUM_STAGES", 1)
+            )
+            pallas_subtile = _env_int("JACCPOT_NEARFIELD_PALLAS_TARGET_SUBTILE", 0)
+            prepacked_result = _radix_fast_lane_prepacked_pallas(
+                source_leaf_ids_padded,
+                source_valid_mask_padded,
+                leaf_positions,
+                leaf_masses,
+                leaf_mask,
+                leaf_particle_idx,
+                positions,
+                G=G,
+                softening_sq=softening_sq,
+                compute_potential=want_potential,
+                num_warps=(pallas_num_warps if pallas_num_warps > 0 else None),
+                num_stages=pallas_num_stages,
+                target_subtile=(pallas_subtile if pallas_subtile > 0 else None),
+                interpret=pallas_interpret,
+            )
+            if want_potential:
+                pair_acc, pair_pot = prepacked_result
+                return self_acc + pair_acc, self_pot + pair_pot
+            return self_acc + prepacked_result
+
+        # Migration fallback: pure-JAX prepacked source-leaf path.
         tile_scan_unroll = max(1, int(getattr(payload, "fallback_tile_scan_unroll", 1)))
         batch_scan_unroll = max(
             1, int(getattr(payload, "fallback_batch_scan_unroll", 1))
@@ -3173,6 +3474,7 @@ def compute_leaf_p2p_accelerations_radix_payload_pairs_only(
     payload: Any,
     G: Union[float, Array] = 1.0,
     softening: float = 0.0,
+    use_pallas: bool = False,
 ) -> Array:
     """Evaluate payload pair contributions without intra-leaf self work."""
     positions = jnp.asarray(positions_sorted)
@@ -3186,6 +3488,32 @@ def compute_leaf_p2p_accelerations_radix_payload_pairs_only(
     if int(target_particle_ids.size) == 0 or int(source_particle_ids.size) == 0:
         return jnp.zeros_like(positions)
 
+    softening_sq = jnp.asarray(float(softening) ** 2, dtype=positions.dtype)
+    if bool(use_pallas):
+        from jaccpot.pallas.nearfield_fused_leaf import (
+            pallas_nearfield_fused_supported,
+        )
+
+        pallas_interpret = _env_flag("JACCPOT_NEARFIELD_PALLAS_INTERPRET", False)
+        if pallas_interpret or pallas_nearfield_fused_supported():
+            return _radix_fast_lane_pairs_pallas(
+                positions,
+                masses,
+                target_particle_ids,
+                target_particle_mask,
+                source_particle_ids,
+                source_particle_mask,
+                G=G,
+                softening_sq=softening_sq,
+                compute_potential=False,
+                num_warps=(_env_int("JACCPOT_NEARFIELD_PALLAS_NUM_WARPS", 0) or None),
+                num_stages=max(1, _env_int("JACCPOT_NEARFIELD_PALLAS_NUM_STAGES", 1)),
+                target_subtile=(
+                    _env_int("JACCPOT_NEARFIELD_PALLAS_TARGET_SUBTILE", 0) or None
+                ),
+                interpret=pallas_interpret,
+            )
+
     source_slot_valid_mask = jnp.any(source_particle_mask, axis=-1)
     source_slot_tile_size = max(1, int(payload.batch_tile_s))
     source_slot_scan_unroll = max(
@@ -3196,7 +3524,6 @@ def compute_leaf_p2p_accelerations_radix_payload_pairs_only(
         1,
         int(getattr(payload, "target_batch_scan_unroll", 1)),
     )
-    softening_sq = jnp.asarray(float(softening) ** 2, dtype=positions.dtype)
     return _compute_radix_fast_lane_payload_pairs_impl(
         positions,
         masses,
