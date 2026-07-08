@@ -3897,8 +3897,19 @@ class FastMultipoleMethod:
         rematerialize_between_refresh: bool = True,
         return_history: bool = False,
         return_prepared_state: bool = True,
+        step_callback: Optional[Callable[[Array, Array], None]] = None,
+        step_callback_stride: int = 1,
     ) -> tuple[Array, Optional[PreparedStateLike], Optional[Array]]:
-        """Run endpoint-correct velocity Verlet with strict prepared-state refresh."""
+        """Run endpoint-correct velocity Verlet with strict prepared-state refresh.
+
+        ``step_callback`` is an optional traced, side-effecting hook called inside
+        the device-resident scan as ``step_callback(step_index, state)`` every
+        ``step_callback_stride`` steps (``step_index`` and ``state`` are traced
+        device values). It must be fire-and-forget (return nothing) and should use
+        ``jax.debug.callback`` internally to ship only small, on-device-reduced
+        data to the host (e.g. a projected density grid), so the GPU is not
+        stalled. It does not touch the scan carry and is independent of
+        ``return_history``."""
         state_arr = jnp.asarray(state)
         masses_arr = jnp.asarray(masses)
         dt_arr = jnp.asarray(float(dt), dtype=state_arr.dtype)
@@ -4103,6 +4114,8 @@ class FastMultipoleMethod:
                 eval_diag_mode,
                 str(getattr(self, "_large_n_nearfield_diag_mode", "full")),
                 static_upward_num_levels,
+                id(step_callback) if step_callback is not None else 0,
+                int(step_callback_stride),
             )
             jit_cache = getattr(self, "_strict_fused_jit_function_cache", {})
             compiled_runner = jit_cache.get(cache_key)
@@ -4115,7 +4128,7 @@ class FastMultipoleMethod:
                 ) -> tuple[
                     tuple[LargeNPreparedState, Array, Array, Array], Optional[Array]
                 ]:
-                    def _step(carry, _):
+                    def _step(carry, scan_x):
                         (
                             prepared_now,
                             state_now,
@@ -4148,6 +4161,26 @@ class FastMultipoleMethod:
                         )
                         if rematerialize_between_refresh:
                             state_new = jnp.asarray(state_new, dtype=state_now.dtype)
+                        if step_callback is not None:
+                            # Fire-and-forget streaming hook (e.g. render). Gated by
+                            # stride via lax.cond so it only fires + only computes its
+                            # on-device reduction on emit steps. Returns a dummy int so
+                            # both cond branches match; the result is discarded and the
+                            # scan carry is untouched.
+                            def _emit(_):
+                                step_callback(scan_x, state_new)
+                                return jnp.int32(0)
+
+                            def _skip(_):
+                                return jnp.int32(0)
+
+                            jax.lax.cond(
+                                (scan_x % jnp.int32(step_callback_stride))
+                                == jnp.int32(0),
+                                _emit,
+                                _skip,
+                                operand=None,
+                            )
                         capacity_ok_new = capacity_ok_now & (
                             _static_target_block_capacity_ok(prepared_new)
                         )
@@ -4158,6 +4191,13 @@ class FastMultipoleMethod:
                             capacity_ok_new,
                         ), (state_new if return_history else None)
 
+                    # Feed a per-step index only when a streaming callback needs it
+                    # (keeps the no-callback path byte-for-byte unchanged).
+                    scan_xs = (
+                        jnp.arange(num_steps_i, dtype=jnp.int32)
+                        if step_callback is not None
+                        else None
+                    )
                     return jax.lax.scan(
                         _step,
                         (
@@ -4166,7 +4206,7 @@ class FastMultipoleMethod:
                             acceleration_initial,
                             _static_target_block_capacity_ok(prepared_initial),
                         ),
-                        xs=None,
+                        xs=scan_xs,
                         length=num_steps_i,
                     )
 

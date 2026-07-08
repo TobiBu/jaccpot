@@ -919,8 +919,16 @@ class FastMultipoleMethod:
         rematerialize_between_refresh: bool = True,
         return_history: bool = False,
         return_prepared_state: bool = True,
+        step_callback: Optional[Callable[[Array, Array], None]] = None,
+        step_callback_stride: int = 1,
     ) -> tuple[Array, Optional[FMMPreparedState], Optional[Array]]:
-        """Strict V2 segmented runner with raw tensor API."""
+        """Strict V2 segmented runner with raw tensor API.
+
+        ``step_callback``/``step_callback_stride`` add an optional fire-and-forget
+        streaming hook inside the device-resident scan (see the impl docstring):
+        ``step_callback(step_index, state)`` every ``step_callback_stride`` steps,
+        for minimal-sync rendering via ``jax.debug.callback``.
+        """
         return self._impl.strict_run_v2(
             state=state,
             masses=masses,
@@ -938,6 +946,8 @@ class FastMultipoleMethod:
             rematerialize_between_refresh=bool(rematerialize_between_refresh),
             return_history=bool(return_history),
             return_prepared_state=bool(return_prepared_state),
+            step_callback=step_callback,
+            step_callback_stride=int(step_callback_stride),
         )
 
     def strict_fused_prepared_eval_fn(
