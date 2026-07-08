@@ -21,7 +21,9 @@ Findings on an RTX 2080 Ti (200k, p=4, theta=0.6, leaf/N_max=256, fp32):
 
 The fused-lane env flags must be set BEFORE constructing the solver.
 """
+
 from __future__ import annotations
+
 import argparse
 import json
 import os
@@ -59,8 +61,62 @@ def main() -> None:
     p.add_argument("--acc-targets", type=int, default=256)
     p.add_argument("--far-pair-cap", default="131072")
     p.add_argument("--neighbor-cap", default="2097152")
+    p.add_argument(
+        "--use-pallas",
+        default="both",
+        choices=["0", "1", "both"],
+        help="jaccpot near-field backend: 0=pure JAX, 1=fused Pallas, both",
+    )
+    p.add_argument(
+        "--near-only",
+        action="store_true",
+        help="isolate near-field cost (JACCPOT_LARGE_N_EVAL_DIAG_MODE=near_only)",
+    )
     p.add_argument("--output", default=None)
+    p.add_argument(
+        "--gpu-select",
+        default="free",
+        choices=["free", "least-used", "none"],
+        help=(
+            "GPU selection before init: 'free' waits (via autocvd) for a fully "
+            "idle GPU so timings are not corrupted by other jobs; 'least-used' "
+            "picks the idlest now without waiting; 'none' uses the current "
+            "CUDA_VISIBLE_DEVICES. Reliable benchmarks require an uncontended GPU."
+        ),
+    )
+    p.add_argument(
+        "--gpu-wait-timeout",
+        type=int,
+        default=None,
+        help="Seconds to wait for a free GPU before giving up (default: forever).",
+    )
     args = p.parse_args()
+
+    # Pin to an uncontended GPU BEFORE jax initializes CUDA. On shared servers
+    # this is essential: timing on a GPU running other jobs is meaningless.
+    if args.gpu_select != "none" and "CUDA_VISIBLE_DEVICES" not in os.environ:
+        try:
+            from autocvd import autocvd
+
+            selected = autocvd(
+                num_gpus=1,
+                least_used=(args.gpu_select == "least-used"),
+                timeout=args.gpu_wait_timeout,
+            )
+            print(f"# autocvd selected GPU(s): {selected}", flush=True)
+        except Exception as e:  # pragma: no cover - environment dependent
+            print(
+                f"# autocvd unavailable ({type(e).__name__}: {e}); using default GPU",
+                flush=True,
+            )
+
+    if args.near_only:
+        os.environ.setdefault("JACCPOT_LARGE_N_EVAL_DIAG_MODE", "near_only")
+
+    if args.use_pallas == "both":
+        pallas_settings = [False, True]
+    else:
+        pallas_settings = [bool(int(args.use_pallas))]
 
     ns = [int(x) for x in args.ns.split(",")]
     _set_fused_env(",".join(str(n) for n in ns), args.far_pair_cap, args.neighbor_cap)
@@ -68,11 +124,13 @@ def main() -> None:
     import jax
     import jax.numpy as jnp
     import numpy as np
+
     from jaccpot import FastMultipoleMethod
 
     try:
         from jaxfmm.fmm import eval_potential
         from jaxfmm.hierarchy import gen_hierarchy
+
         have_jaxfmm = True
     except Exception:
         have_jaxfmm = False
@@ -119,34 +177,60 @@ def main() -> None:
 
         if have_jaxfmm:
             try:
-                hier = gen_hierarchy(pts, p=args.p, theta=args.theta, s=args.s, N_max=args.leaf)
+                hier = gen_hierarchy(
+                    pts, p=args.p, theta=args.theta, s=args.s, N_max=args.leaf
+                )
                 fn = lambda: eval_potential(mass, **hier)
                 mn, me = timeit(fn)
                 row["jaxfmm_pot_min_s"], row["jaxfmm_pot_mean_s"] = mn, me
             except Exception as e:
                 row["jaxfmm_status"] = f"{type(e).__name__}: {e}"[:160]
 
-        try:
-            solver = FastMultipoleMethod(
-                preset="large_n_gpu", runtime_path="large_n",
-                expansion_basis="solidfmm", complex_rotation="solidfmm",
-                theta=args.theta, nearfield_mode="bucketed", nearfield_edge_chunk_size=64,
-                grouped_interactions=False, working_dtype=jnp.float32,
-                tree_build_mode="static_radix", fixed_order=args.p,
+        for use_pallas in pallas_settings:
+            sfx = "_pallas" if use_pallas else "_jax"
+            try:
+                solver = FastMultipoleMethod(
+                    preset="large_n_gpu",
+                    runtime_path="large_n",
+                    expansion_basis="solidfmm",
+                    complex_rotation="solidfmm",
+                    theta=args.theta,
+                    nearfield_mode="bucketed",
+                    nearfield_edge_chunk_size=64,
+                    grouped_interactions=False,
+                    working_dtype=jnp.float32,
+                    tree_build_mode="static_radix",
+                    fixed_order=args.p,
+                    use_pallas=bool(use_pallas),
+                )
+                prepared, eval_fn = solver.strict_fused_prepared_eval_fn(
+                    positions=pts,
+                    masses=mass,
+                    leaf_size=args.leaf,
+                    max_order=args.p,
+                    theta=args.theta,
+                )
+                mn, me = timeit(lambda: eval_fn(prepared))
+                acc = np.asarray(eval_fn(prepared))
+                diag = solver.get_runtime_diagnostics()
+                soft = float(getattr(solver._impl, "softening", 1e-3))
+                row[f"jaccpot_force_min_s{sfx}"] = mn
+                row[f"jaccpot_force_mean_s{sfx}"] = me
+                row[f"jaccpot_relerr_acc{sfx}"] = relerr(
+                    acc[np.asarray(tgt)], direct_accel(pts, mass, tgt, soft)
+                )
+                row[f"jaccpot_fused_active{sfx}"] = bool(
+                    diag.get("strict_fused_mode_active")
+                )
+                row[f"jaccpot_use_pallas{sfx}"] = bool(use_pallas)
+            except Exception as e:
+                row[f"jaccpot_status{sfx}"] = f"{type(e).__name__}: {e}"[:160]
+
+        both = all(f"jaccpot_force_min_s{s}" in row for s in ("_jax", "_pallas"))
+        if both and row["jaccpot_force_min_s_pallas"] > 0:
+            row["pallas_speedup"] = (
+                row["jaccpot_force_min_s_jax"] / row["jaccpot_force_min_s_pallas"]
             )
-            prepared, eval_fn = solver.strict_fused_prepared_eval_fn(
-                positions=pts, masses=mass, leaf_size=args.leaf, max_order=args.p, theta=args.theta,
-            )
-            mn, me = timeit(lambda: eval_fn(prepared))
-            acc = np.asarray(eval_fn(prepared))
-            diag = solver.get_runtime_diagnostics()
-            soft = float(getattr(solver._impl, "softening", 1e-3))
-            row["jaccpot_force_min_s"], row["jaccpot_force_mean_s"] = mn, me
-            row["jaccpot_relerr_acc"] = relerr(acc[np.asarray(tgt)], direct_accel(pts, mass, tgt, soft))
-            row["jaccpot_fused_active"] = bool(diag.get("strict_fused_mode_active"))
-            row["jaccpot_fallback"] = int(diag.get("strict_fused_fallback_count", -1))
-        except Exception as e:
-            row["jaccpot_status"] = f"{type(e).__name__}: {e}"[:160]
 
         print(json.dumps(row), flush=True)
         rows.append(row)
