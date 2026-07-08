@@ -33,8 +33,7 @@ from .dtypes import INDEX_DTYPE
 
 def _contains_jax_tracer(value: Any) -> bool:
     return any(
-        isinstance(leaf, jax.core.Tracer)
-        for leaf in jax.tree_util.tree_leaves(value)
+        isinstance(leaf, jax.core.Tracer) for leaf in jax.tree_util.tree_leaves(value)
     )
 
 
@@ -183,6 +182,55 @@ def _read_large_n_env_config() -> dict[str, Any]:
     except Exception:
         neighbor_profile_fixed_cap = int(max(0, int(neighbor_profile_bootstrap_cap)))
 
+    # Static target-block cap. Supports "auto" (data-driven sizing; sentinel 0)
+    # in addition to explicit ints, and — for any value — auto-grows to fit the
+    # densest leaf at build time (see _large_n_pipeline static-block region),
+    # mirroring the neighbor/overflow cap profiling (headroom + caps ladder).
+    static_target_blocks_cap_raw = (
+        str(os.environ.get("JACCPOT_LARGE_N_STATIC_TARGET_BLOCKS_MAX_PER_LEAF", "32"))
+        .strip()
+        .lower()
+    )
+    static_target_blocks_auto = static_target_blocks_cap_raw in {"auto", "-1"}
+    if static_target_blocks_auto:
+        static_target_blocks_max_per_leaf = 0
+    else:
+        try:
+            static_target_blocks_max_per_leaf = max(
+                1, int(static_target_blocks_cap_raw)
+            )
+        except Exception:
+            static_target_blocks_max_per_leaf = 0
+            static_target_blocks_auto = True
+    static_target_blocks_headroom_raw = os.environ.get(
+        "JACCPOT_LARGE_N_STATIC_TARGET_BLOCKS_HEADROOM", "1.25"
+    )
+    try:
+        static_target_blocks_headroom = max(
+            1.0, float(static_target_blocks_headroom_raw)
+        )
+    except Exception:
+        static_target_blocks_headroom = 1.25
+    static_target_blocks_cap_options: list[int] = []
+    for token in str(
+        os.environ.get(
+            "JACCPOT_LARGE_N_STATIC_TARGET_BLOCKS_MAX_PER_LEAF_OPTIONS",
+            "8,16,32,64,128,256,512,1024,2048,4096",
+        )
+    ).split(","):
+        token = token.strip()
+        if not token:
+            continue
+        try:
+            value = int(token)
+        except Exception:
+            continue
+        if value > 0 and value not in static_target_blocks_cap_options:
+            static_target_blocks_cap_options.append(value)
+    static_target_blocks_cap_options = sorted(static_target_blocks_cap_options)
+    if not static_target_blocks_cap_options:
+        static_target_blocks_cap_options = [8, 16, 32, 64, 128, 256, 512, 1024]
+
     return {
         "nearfield_delayed_scatter_chunks_per_superchunk": _env_pos_int(
             "JACCPOT_LARGE_N_DELAYED_SCATTER_CHUNKS", 1
@@ -241,11 +289,11 @@ def _read_large_n_env_config() -> dict[str, Any]:
         "static_target_blocks_enabled": _env_bool(
             "JACCPOT_LARGE_N_STATIC_TARGET_BLOCKS", True
         ),
-        "static_target_blocks_max_per_leaf": _canonical_static_int(
-            "JACCPOT_LARGE_N_STATIC_TARGET_BLOCKS_MAX_PER_LEAF",
-            32,
-            "JACCPOT_LARGE_N_STATIC_TARGET_BLOCKS_MAX_PER_LEAF_OPTIONS",
-            "8,16,32,64,128",
+        "static_target_blocks_max_per_leaf": int(static_target_blocks_max_per_leaf),
+        "static_target_blocks_auto": bool(static_target_blocks_auto),
+        "static_target_blocks_headroom": float(static_target_blocks_headroom),
+        "static_target_blocks_cap_options": tuple(
+            int(v) for v in static_target_blocks_cap_options
         ),
         "overflow_profile_headroom": float(overflow_profile_headroom),
         "overflow_profile_caps": tuple(int(v) for v in overflow_profile_caps),
@@ -301,7 +349,9 @@ def prepare_large_n_state(
 ) -> Union[LargeNPreparedState, LargeNCompiledState]:
     """Prepare the slim large-N state using the dedicated narrow path."""
 
-    refresh_timing_active = bool(getattr(fmm, "_refresh_timing_active", False)) and not (
+    refresh_timing_active = bool(
+        getattr(fmm, "_refresh_timing_active", False)
+    ) and not (
         bool(fused_device_mode)
         and bool(getattr(fmm, "_strict_fused_disable_hot_timing", False))
     )
@@ -314,12 +364,9 @@ def prepare_large_n_state(
     def _elapsed(start: float) -> float:
         return float(_now() - start)
 
-    disable_fused_tree_dual_prepare = (
-        str(
-            os.environ.get("JACCPOT_LARGE_N_DISABLE_FUSED_TREE_DUAL_PREPARE", "0")
-        ).strip().lower()
-        in {"1", "true", "yes", "on"}
-    )
+    disable_fused_tree_dual_prepare = str(
+        os.environ.get("JACCPOT_LARGE_N_DISABLE_FUSED_TREE_DUAL_PREPARE", "0")
+    ).strip().lower() in {"1", "true", "yes", "on"}
 
     built_tree_artifacts = tree_artifacts is None
     built_dual_downward_artifacts = dual_downward_artifacts is None
@@ -362,8 +409,7 @@ def prepare_large_n_state(
             setattr(
                 fmm,
                 "_refresh_timing_dual_downward_seconds",
-                float(getattr(fmm, "_refresh_timing_dual_downward_seconds", 0.0))
-                + 0.0,
+                float(getattr(fmm, "_refresh_timing_dual_downward_seconds", 0.0)) + 0.0,
             )
     else:
         stage_t0 = _now()
@@ -409,10 +455,7 @@ def prepare_large_n_state(
                 aspect_threshold_val=aspect_threshold_val,
                 allow_stateful_cache=allow_stateful_cache,
             )
-        if (
-            refresh_timing_active
-            and built_dual_downward_artifacts
-        ):
+        if refresh_timing_active and built_dual_downward_artifacts:
             setattr(
                 fmm,
                 "_refresh_timing_dual_downward_seconds",
@@ -483,6 +526,15 @@ def prepare_large_n_state(
     static_target_blocks_max_per_leaf = int(
         large_n_env_cfg["static_target_blocks_max_per_leaf"]
     )
+    static_target_blocks_auto = bool(
+        large_n_env_cfg.get("static_target_blocks_auto", False)
+    )
+    static_target_blocks_headroom = float(
+        large_n_env_cfg.get("static_target_blocks_headroom", 1.25)
+    )
+    static_target_blocks_cap_options = tuple(
+        int(v) for v in large_n_env_cfg.get("static_target_blocks_cap_options", ())
+    )
     overflow_profile_headroom = float(large_n_env_cfg["overflow_profile_headroom"])
     overflow_profile_caps = tuple(
         int(v) for v in large_n_env_cfg["overflow_profile_caps"]
@@ -517,6 +569,13 @@ def prepare_large_n_state(
     def _pick_neighbor_profile_capacity(required: int) -> int:
         required = max(0, int(required))
         for cap in neighbor_profile_caps:
+            if int(cap) >= required:
+                return int(cap)
+        return int(required)
+
+    def _pick_static_target_blocks_capacity(required: int) -> int:
+        required = max(1, int(required))
+        for cap in static_target_blocks_cap_options:
             if int(cap) >= required:
                 return int(cap)
         return int(required)
@@ -600,8 +659,8 @@ def prepare_large_n_state(
             "1",
         )
     ).strip().lower() in {"1", "true", "yes", "on"}
-    allow_static_target_blocks_in_fused = (
-        (not bool(fused_device_mode)) or bool(fused_payload_enabled)
+    allow_static_target_blocks_in_fused = (not bool(fused_device_mode)) or bool(
+        fused_payload_enabled
     )
     traced_target_block_payload = _contains_jax_tracer(
         (
@@ -610,10 +669,48 @@ def prepare_large_n_state(
             leaf_particle_indices,
         )
     )
+    # Resolve the effective static-target-block cap. On an eager prepare we can
+    # inspect the concrete neighbour degree and auto-size the cap to fit the
+    # densest leaf (mirrors the neighbor/overflow cap profiling); the resolved
+    # cap is cached on the fmm so the traced strict refresh reuses the identical
+    # fixed shape (zero-recompile). Grows monotonically across eager refreshes.
+    resolved_cap_attr = "_large_n_fused_static_target_blocks_resolved_cap"
+    cached_static_cap = int(getattr(fmm, resolved_cap_attr, 0) or 0)
+    if bool(traced_target_block_payload):
+        effective_static_cap = (
+            cached_static_cap
+            if cached_static_cap > 0
+            else int(static_target_blocks_max_per_leaf)
+        )
+    else:
+        _sb_offsets = jnp.asarray(
+            getattr(neighbor_payload, "offsets", jnp.zeros((1,), dtype=INDEX_DTYPE)),
+            dtype=INDEX_DTYPE,
+        )
+        if int(_sb_offsets.shape[0]) >= 2:
+            _sb_max_count = int(jnp.max(_sb_offsets[1:] - _sb_offsets[:-1]))
+        else:
+            _sb_max_count = 0
+        _sb_required = (
+            (_sb_max_count + int(block_size) - 1) // int(block_size)
+            if int(block_size) > 0
+            else 0
+        )
+        _sb_required = max(1, int(_sb_required))
+        if bool(static_target_blocks_auto) or (
+            int(static_target_blocks_max_per_leaf) < _sb_required
+        ):
+            _sb_target = int(np.ceil(_sb_required * static_target_blocks_headroom))
+            _sb_candidate = _pick_static_target_blocks_capacity(_sb_target)
+        else:
+            _sb_candidate = int(static_target_blocks_max_per_leaf)
+        effective_static_cap = max(cached_static_cap, int(_sb_candidate), 1)
+        setattr(fmm, resolved_cap_attr, int(effective_static_cap))
+
     preflight_key = (
         int(num_leaves),
         int(block_size),
-        int(static_target_blocks_max_per_leaf),
+        int(effective_static_cap),
     )
     preflight_attr = "_large_n_fused_payload_static_target_block_preflight"
     preflight_ok = getattr(fmm, preflight_attr, None) == preflight_key
@@ -631,9 +728,8 @@ def prepare_large_n_state(
             "fused payload static target-block cap was not preflighted before "
             "entering traced strict refresh: "
             f"num_leaves={int(num_leaves)} block_size={int(block_size)} "
-            f"max_blocks_per_leaf={int(static_target_blocks_max_per_leaf)}. "
-            "Run an eager prepare/refresh with the same cap first or increase "
-            "JACCPOT_LARGE_N_STATIC_TARGET_BLOCKS_MAX_PER_LEAF."
+            f"max_blocks_per_leaf={int(effective_static_cap)}. "
+            "Run an eager prepare/refresh with the same cap first."
         )
     if (
         bool(allow_static_target_blocks_in_fused)
@@ -650,7 +746,7 @@ def prepare_large_n_state(
             tree=tree_artifacts.tree,
             neighbor_list=neighbor_payload,
             block_size=block_size,
-            max_blocks_per_leaf=int(static_target_blocks_max_per_leaf),
+            max_blocks_per_leaf=int(effective_static_cap),
             check_capacity=not (
                 bool(fused_device_mode)
                 and bool(fused_payload_enabled)
@@ -665,11 +761,13 @@ def prepare_large_n_state(
             and not bool(static_capacity_ok)
         ):
             raise RuntimeError(
-                "fused payload static target-block cap exceeded: "
+                "fused payload static target-block cap exceeded after auto-size: "
                 f"num_leaves={int(num_leaves)} block_size={int(block_size)} "
-                f"max_blocks_per_leaf={int(static_target_blocks_max_per_leaf)}. "
-                "Increase JACCPOT_LARGE_N_STATIC_TARGET_BLOCKS_MAX_PER_LEAF "
-                "or disable JACCPOT_LARGE_N_RADIX_FAST_PAYLOAD_IN_FUSED."
+                f"max_blocks_per_leaf={int(effective_static_cap)}. This should not "
+                "happen with auto-sizing; set "
+                "JACCPOT_LARGE_N_STATIC_TARGET_BLOCKS_MAX_PER_LEAF=auto, raise the "
+                "cap options ladder, or disable "
+                "JACCPOT_LARGE_N_RADIX_FAST_PAYLOAD_IN_FUSED."
             )
         if (
             bool(fused_device_mode)
@@ -817,12 +915,16 @@ def prepare_large_n_state(
                     * (jnp.dtype(INDEX_DTYPE).itemsize + jnp.dtype(bool).itemsize)
                 ) / (1024.0 * 1024.0)
 
-            auto_full_blocks_raw = str(
-                os.environ.get(
-                    "JACCPOT_LARGE_N_SPEED_PREPARED_AUTO_FULL_BLOCKS",
-                    "1",
+            auto_full_blocks_raw = (
+                str(
+                    os.environ.get(
+                        "JACCPOT_LARGE_N_SPEED_PREPARED_AUTO_FULL_BLOCKS",
+                        "1",
+                    )
                 )
-            ).strip().lower()
+                .strip()
+                .lower()
+            )
             auto_full_blocks = auto_full_blocks_raw in {"1", "true", "yes", "on"}
             if bool(auto_full_blocks) and max_leaf_blocks > logical_fast_blocks:
                 candidate_aligned_blocks = _aligned_block_count(max_leaf_blocks)
@@ -858,17 +960,29 @@ def prepare_large_n_state(
                     offsets_np = np.asarray(target_block_offsets, dtype=np.int64)
                     source_np = np.asarray(target_block_source_leaf_ids)
                     valid_np = np.asarray(target_block_valid_mask)
-                    block_leaf_ids_np = np.asarray(target_block_leaf_ids, dtype=np.int64)
+                    block_leaf_ids_np = np.asarray(
+                        target_block_leaf_ids, dtype=np.int64
+                    )
                     counts_np = np.diff(offsets_np)
-                    fast_counts_np = np.minimum(counts_np, np.int64(logical_fast_blocks))
+                    fast_counts_np = np.minimum(
+                        counts_np, np.int64(logical_fast_blocks)
+                    )
                     overflow_counts_np = counts_np - fast_counts_np
                     overflow_offsets_np = np.zeros((num_leaves + 1,), dtype=np.int64)
-                    overflow_offsets_np[1:] = np.cumsum(overflow_counts_np, dtype=np.int64)
+                    overflow_offsets_np[1:] = np.cumsum(
+                        overflow_counts_np, dtype=np.int64
+                    )
                     overflow_total = int(overflow_offsets_np[-1])
                     if overflow_total > 0:
-                        block_ids_np = np.arange(block_leaf_ids_np.shape[0], dtype=np.int64)
-                        block_local_idx_np = block_ids_np - offsets_np[block_leaf_ids_np]
-                        keep_np = block_local_idx_np >= fast_counts_np[block_leaf_ids_np]
+                        block_ids_np = np.arange(
+                            block_leaf_ids_np.shape[0], dtype=np.int64
+                        )
+                        block_local_idx_np = (
+                            block_ids_np - offsets_np[block_leaf_ids_np]
+                        )
+                        keep_np = (
+                            block_local_idx_np >= fast_counts_np[block_leaf_ids_np]
+                        )
                         overflow_source_np = source_np[keep_np]
                         overflow_valid_np = valid_np[keep_np]
                         overflow_leaf_ids_np = block_leaf_ids_np[keep_np]
@@ -892,7 +1006,9 @@ def prepare_large_n_state(
                             overflow_source_np,
                             dtype=INDEX_DTYPE,
                         )
-                        target_block_valid_mask = jnp.asarray(overflow_valid_np, dtype=bool)
+                        target_block_valid_mask = jnp.asarray(
+                            overflow_valid_np, dtype=bool
+                        )
                         target_block_leaf_ids = jnp.asarray(
                             overflow_leaf_ids_np,
                             dtype=INDEX_DTYPE,
@@ -921,10 +1037,14 @@ def prepare_large_n_state(
     if bool(fused_device_mode) and static_runtime_fixed_sizing:
         overflow_profile_capacity = int(overflow_profile_fixed_cap)
         if overflow_profile_capacity <= 0:
-            overflow_profile_capacity = int(getattr(fmm, "_large_n_overflow_profile_cap", 0))
+            overflow_profile_capacity = int(
+                getattr(fmm, "_large_n_overflow_profile_cap", 0)
+            )
             if overflow_profile_capacity <= 0:
                 overflow_profile_capacity = int(overflow_active_blocks)
-            setattr(fmm, "_large_n_overflow_profile_cap", int(overflow_profile_capacity))
+            setattr(
+                fmm, "_large_n_overflow_profile_cap", int(overflow_profile_capacity)
+            )
         if overflow_active_blocks > overflow_profile_capacity:
             raise RuntimeError(
                 "static runtime sizing overflow cap exceeded: "
@@ -960,7 +1080,10 @@ def prepare_large_n_state(
         overflow_profile_capacity = int(overflow_active_blocks)
     elif static_runtime_fixed_sizing:
         overflow_profile_capacity = int(overflow_profile_fixed_cap)
-        if overflow_profile_capacity > 0 and overflow_active_blocks > overflow_profile_capacity:
+        if (
+            overflow_profile_capacity > 0
+            and overflow_active_blocks > overflow_profile_capacity
+        ):
             raise RuntimeError(
                 "static runtime sizing overflow cap exceeded: "
                 f"active_blocks={overflow_active_blocks} cap={overflow_profile_capacity}. "
@@ -993,25 +1116,36 @@ def prepare_large_n_state(
                 axis=0,
             )
     else:
-        overflow_profile_capacity = int(getattr(fmm, "_large_n_overflow_profile_cap", 0))
+        overflow_profile_capacity = int(
+            getattr(fmm, "_large_n_overflow_profile_cap", 0)
+        )
         if overflow_profile_capacity <= 0 and overflow_profile_bootstrap_cap > 0:
             overflow_profile_capacity = _pick_overflow_profile_capacity(
                 int(overflow_profile_bootstrap_cap)
             )
-            setattr(fmm, "_large_n_overflow_profile_cap", int(overflow_profile_capacity))
+            setattr(
+                fmm, "_large_n_overflow_profile_cap", int(overflow_profile_capacity)
+            )
         if overflow_active_blocks > overflow_profile_capacity:
             required_blocks = int(
-                np.ceil(float(overflow_active_blocks) * float(overflow_profile_headroom))
+                np.ceil(
+                    float(overflow_active_blocks) * float(overflow_profile_headroom)
+                )
             )
             next_capacity = _pick_overflow_profile_capacity(required_blocks)
-            if overflow_profile_capacity > 0 and next_capacity > overflow_profile_capacity:
+            if (
+                overflow_profile_capacity > 0
+                and next_capacity > overflow_profile_capacity
+            ):
                 setattr(
                     fmm,
                     "_large_n_overflow_profile_reprofiles",
                     int(getattr(fmm, "_large_n_overflow_profile_reprofiles", 0)) + 1,
                 )
             overflow_profile_capacity = int(next_capacity)
-            setattr(fmm, "_large_n_overflow_profile_cap", int(overflow_profile_capacity))
+            setattr(
+                fmm, "_large_n_overflow_profile_cap", int(overflow_profile_capacity)
+            )
 
         if (
             overflow_profile_capacity > 0
@@ -1178,9 +1312,7 @@ def prepare_large_n_state(
                     * max(1, source_leaf_size)
                     * (jnp.dtype(INDEX_DTYPE).itemsize + jnp.dtype(bool).itemsize)
                 )
-                est_overflow_payload_mb = est_overflow_payload_bytes / (
-                    1024.0 * 1024.0
-                )
+                est_overflow_payload_mb = est_overflow_payload_bytes / (1024.0 * 1024.0)
                 if overflow_source_slots > 0 and (
                     est_overflow_payload_mb <= overflow_payload_max_mb
                 ):
@@ -1297,7 +1429,9 @@ def prepare_large_n_state(
                 )
             if neighbor_active_edges > neighbor_profile_capacity:
                 required_edges = int(
-                    np.ceil(float(neighbor_active_edges) * float(neighbor_profile_headroom))
+                    np.ceil(
+                        float(neighbor_active_edges) * float(neighbor_profile_headroom)
+                    )
                 )
                 next_capacity = _pick_neighbor_profile_capacity(required_edges)
                 if (
@@ -1431,8 +1565,7 @@ def prepare_large_n_state(
             float(getattr(fmm, "_refresh_timing_nearfield_residual_seconds", 0.0))
             + max(
                 0.0,
-                float(_now() - nearfield_total_t0)
-                - float(nearfield_stage_sum),
+                float(_now() - nearfield_total_t0) - float(nearfield_stage_sum),
             ),
         )
     if bool(return_compiled_state):
@@ -1484,7 +1617,9 @@ def evaluate_large_n_state(
             )
         )
 
-    leaf_nodes = jnp.asarray(state_prepared.neighbor_list.leaf_indices, dtype=INDEX_DTYPE)
+    leaf_nodes = jnp.asarray(
+        state_prepared.neighbor_list.leaf_indices, dtype=INDEX_DTYPE
+    )
     node_ranges = jnp.asarray(state_prepared.tree.node_ranges, dtype=INDEX_DTYPE)
     nearfield_mode = str(state_prepared.nearfield_mode).strip().lower()
     if nearfield_mode != "bucketed":
@@ -1503,9 +1638,11 @@ def evaluate_large_n_state(
         and (not bool(return_potential))
         and (getattr(state_prepared, "radix_fast_payload", None) is not None)
     ):
-        eval_diag_mode = str(
-            os.environ.get("JACCPOT_LARGE_N_EVAL_DIAG_MODE", "full")
-        ).strip().lower()
+        eval_diag_mode = (
+            str(os.environ.get("JACCPOT_LARGE_N_EVAL_DIAG_MODE", "full"))
+            .strip()
+            .lower()
+        )
         if eval_diag_mode not in {
             "full",
             "near_only",
@@ -1523,7 +1660,13 @@ def evaluate_large_n_state(
         disable_far_eval = str(
             os.environ.get("JACCPOT_LARGE_N_EVAL_DISABLE_FAR", "0")
         ).strip().lower() in {"1", "true", "yes", "on"}
-        if eval_diag_mode in {"far_only", "local_only", "near_zero", "permutation_only", "zero"}:
+        if eval_diag_mode in {
+            "far_only",
+            "local_only",
+            "near_zero",
+            "permutation_only",
+            "zero",
+        }:
             disable_near_eval = True
         if eval_diag_mode in {"near_only", "far_zero", "permutation_only", "zero"}:
             disable_far_eval = True
@@ -1563,9 +1706,9 @@ def evaluate_large_n_state(
             )
         else:
             accelerations_sorted = near_acc + far_acc
-        return jnp.asarray(accelerations_sorted)[state_prepared.inverse_permutation].astype(
-            output_dtype
-        )
+        return jnp.asarray(accelerations_sorted)[
+            state_prepared.inverse_permutation
+        ].astype(output_dtype)
 
     nearfield_edge_chunk_size = int(state_prepared.nearfield_edge_chunk_size)
     eval_out = _evaluate_tree_compiled_impl(
@@ -1580,7 +1723,9 @@ def evaluate_large_n_state(
         jnp.asarray(state_prepared.neighbor_list.neighbors, dtype=INDEX_DTYPE),
         jnp.asarray(state_prepared.neighbor_list.counts, dtype=INDEX_DTYPE),
         (
-            jnp.asarray(state_prepared.nearfield_leaf_particle_indices, dtype=INDEX_DTYPE)
+            jnp.asarray(
+                state_prepared.nearfield_leaf_particle_indices, dtype=INDEX_DTYPE
+            )
             if int(state_prepared.nearfield_leaf_particle_indices.size) > 0
             else jnp.zeros((0, 0), dtype=INDEX_DTYPE)
         ),
@@ -1617,22 +1762,30 @@ def evaluate_large_n_state(
             else jnp.zeros((0, 0), dtype=INDEX_DTYPE)
         ),
         (
-            jnp.asarray(state_prepared.nearfield_chunk_unique_indices, dtype=INDEX_DTYPE)
+            jnp.asarray(
+                state_prepared.nearfield_chunk_unique_indices, dtype=INDEX_DTYPE
+            )
             if state_prepared.nearfield_chunk_unique_indices is not None
             else jnp.zeros((0, 0), dtype=INDEX_DTYPE)
         ),
         (
-            jnp.asarray(state_prepared.nearfield_target_block_offsets, dtype=INDEX_DTYPE)
+            jnp.asarray(
+                state_prepared.nearfield_target_block_offsets, dtype=INDEX_DTYPE
+            )
             if state_prepared.nearfield_target_block_offsets is not None
             else jnp.zeros((leaf_nodes.shape[0] + 1,), dtype=INDEX_DTYPE)
         ),
         (
-            jnp.asarray(state_prepared.nearfield_target_block_leaf_ids, dtype=INDEX_DTYPE)
+            jnp.asarray(
+                state_prepared.nearfield_target_block_leaf_ids, dtype=INDEX_DTYPE
+            )
             if state_prepared.nearfield_target_block_leaf_ids is not None
             else jnp.zeros((0,), dtype=INDEX_DTYPE)
         ),
         (
-            jnp.asarray(state_prepared.nearfield_target_block_source_leaf_ids, dtype=INDEX_DTYPE)
+            jnp.asarray(
+                state_prepared.nearfield_target_block_source_leaf_ids, dtype=INDEX_DTYPE
+            )
             if state_prepared.nearfield_target_block_source_leaf_ids is not None
             else jnp.zeros((0, 0), dtype=INDEX_DTYPE)
         ),
@@ -1668,17 +1821,29 @@ def evaluate_large_n_state(
         nearfield_delayed_scatter_chunks_per_superchunk=int(
             state_prepared.nearfield_delayed_scatter_chunks_per_superchunk
         ),
-        nearfield_chunk_scan_batch_size=int(state_prepared.nearfield_chunk_scan_batch_size),
+        nearfield_chunk_scan_batch_size=int(
+            state_prepared.nearfield_chunk_scan_batch_size
+        ),
         nearfield_chunk_scan_unroll=int(state_prepared.nearfield_chunk_scan_unroll),
-        nearfield_superchunk_scan_unroll=int(state_prepared.nearfield_superchunk_scan_unroll),
-        nearfield_sorted_scatter_hint=bool(state_prepared.nearfield_sorted_scatter_hint),
-        nearfield_grouped_sorted_scatter=bool(state_prepared.nearfield_grouped_sorted_scatter),
+        nearfield_superchunk_scan_unroll=int(
+            state_prepared.nearfield_superchunk_scan_unroll
+        ),
+        nearfield_sorted_scatter_hint=bool(
+            state_prepared.nearfield_sorted_scatter_hint
+        ),
+        nearfield_grouped_sorted_scatter=bool(
+            state_prepared.nearfield_grouped_sorted_scatter
+        ),
         nearfield_superchunk_target_reduce=bool(
             state_prepared.nearfield_superchunk_target_reduce
         ),
         nearfield_disable_chunk_cond=bool(state_prepared.nearfield_disable_chunk_cond),
-        nearfield_target_leaf_batch_size=int(state_prepared.nearfield_target_leaf_batch_size),
-        nearfield_target_block_tile_size=int(state_prepared.nearfield_target_block_tile_size),
+        nearfield_target_leaf_batch_size=int(
+            state_prepared.nearfield_target_leaf_batch_size
+        ),
+        nearfield_target_block_tile_size=int(
+            state_prepared.nearfield_target_block_tile_size
+        ),
         nearfield_target_block_tile_scan_unroll=int(
             state_prepared.nearfield_target_block_tile_scan_unroll
         ),
@@ -1704,16 +1869,16 @@ def evaluate_large_n_state(
         accelerations_sorted = eval_out
 
     if not return_potential:
-        return jnp.asarray(accelerations_sorted)[state_prepared.inverse_permutation].astype(
-            output_dtype
-        )
+        return jnp.asarray(accelerations_sorted)[
+            state_prepared.inverse_permutation
+        ].astype(output_dtype)
 
-    accelerations = jnp.asarray(accelerations_sorted)[state_prepared.inverse_permutation].astype(
-        output_dtype
-    )
-    potentials = jnp.asarray(potentials_sorted)[state_prepared.inverse_permutation].astype(
-        output_dtype
-    )
+    accelerations = jnp.asarray(accelerations_sorted)[
+        state_prepared.inverse_permutation
+    ].astype(output_dtype)
+    potentials = jnp.asarray(potentials_sorted)[
+        state_prepared.inverse_permutation
+    ].astype(output_dtype)
     return accelerations, potentials
 
 
