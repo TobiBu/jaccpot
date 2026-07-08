@@ -138,8 +138,6 @@ class RadixFastNearfieldPayload:
         )
 
 
-
-
 @jax.tree_util.register_pytree_node_class
 @dataclass(frozen=True)
 class LargeNCompiledState:
@@ -161,10 +159,14 @@ class LargeNCompiledState:
             prepared=prepared,
             positions_sorted=jnp.asarray(prepared.positions_sorted),
             masses_sorted=jnp.asarray(prepared.masses_sorted),
-            inverse_permutation=jnp.asarray(prepared.inverse_permutation, dtype=INDEX_DTYPE),
+            inverse_permutation=jnp.asarray(
+                prepared.inverse_permutation, dtype=INDEX_DTYPE
+            ),
             topology_key=getattr(prepared, "topology_key", None),
             max_leaf_size=int(prepared.max_leaf_size),
-            local_order=int(getattr(prepared, "local_order", prepared.local_data.order)),
+            local_order=int(
+                getattr(prepared, "local_order", prepared.local_data.order)
+            ),
         )
 
     def to_prepared(self: "LargeNCompiledState") -> "LargeNPreparedState":
@@ -173,13 +175,13 @@ class LargeNCompiledState:
     def tree_flatten(
         self: "LargeNCompiledState",
     ) -> tuple[tuple[Any, ...], tuple[Optional[str], int, int]]:
-        children=(
+        children = (
             self.prepared,
             self.positions_sorted,
             self.masses_sorted,
             self.inverse_permutation,
         )
-        aux=(self.topology_key, int(self.max_leaf_size), int(self.local_order))
+        aux = (self.topology_key, int(self.max_leaf_size), int(self.local_order))
         return children, aux
 
     @classmethod
@@ -201,13 +203,17 @@ class LargeNCompiledState:
         )
 
 
-def large_n_as_prepared_state(state: Union["LargeNPreparedState", LargeNCompiledState]) -> "LargeNPreparedState":
+def large_n_as_prepared_state(
+    state: Union["LargeNPreparedState", LargeNCompiledState],
+) -> "LargeNPreparedState":
     if isinstance(state, LargeNCompiledState):
         return state.prepared
     return state
 
 
-def large_n_to_compiled_state(state: Union["LargeNPreparedState", LargeNCompiledState]) -> LargeNCompiledState:
+def large_n_to_compiled_state(
+    state: Union["LargeNPreparedState", LargeNCompiledState],
+) -> LargeNCompiledState:
     if isinstance(state, LargeNCompiledState):
         return state
     return LargeNCompiledState.from_prepared(state)
@@ -536,7 +542,9 @@ class LargeNPreparedState:
             radix_overflow_payload, force_scale_nodes = remaining_children
             compact_far_pairs = None
         else:
-            radix_overflow_payload, compact_far_pairs, force_scale_nodes = remaining_children
+            radix_overflow_payload, compact_far_pairs, force_scale_nodes = (
+                remaining_children
+            )
         if local_order is None:
             local_order = int(getattr(local_data, "order", 0))
         return cls(
