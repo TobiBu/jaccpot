@@ -58,8 +58,7 @@ def _resolve_subtile(target_subtile, leaf_width: int) -> int:
     return _pow2_floor(bt)
 
 
-# Positions are padded to width 4 for aligned vector loads (mirrors the
-# single-block prototype in ``nearfield_tile_pair.py``).
+# Positions are padded to width 4 for aligned vector loads.
 _POS_WIDTH = 4
 
 
