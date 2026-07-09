@@ -7,6 +7,7 @@ particles: ~1224 -> ~119 ms/step on an A100) with bit-identical energy /
 angular-momentum conservation. It must stay ON by default; a silent regression
 of that default would quietly cost ~10x. The env var remains as an opt-out.
 """
+
 from __future__ import annotations
 
 import jax.numpy as jnp

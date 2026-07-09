@@ -83,9 +83,9 @@ from jaccpot.operators.complex_ops import (
     enforce_conjugate_symmetry_batch,
     evaluate_local_complex_derivative_tower_batch,
     evaluate_local_complex_grad_analytic,
+    evaluate_local_complex_grad_analytic_batch,
     evaluate_local_complex_grad_analytic_preserve_dtype,
     evaluate_local_complex_grad_order4_unrolled,
-    evaluate_local_complex_grad_analytic_batch,
     evaluate_local_complex_with_grad,
     evaluate_local_complex_with_grad_analytic_batch,
     evaluate_local_complex_with_grad_batch,
@@ -128,8 +128,8 @@ from ._adaptive_policy import (
     source_error_proxy_by_order_from_multipoles,
 )
 from ._interaction_cache import (
-    _compiled_refresh_dual_planner_route,
     _build_dual_tree_artifacts,
+    _compiled_refresh_dual_planner_route,
     _DualTreeArtifacts,
     _interaction_cache_key,
     _InteractionCacheEntry,
@@ -213,10 +213,15 @@ def _velocity_verlet_state_update(
         + state_arr[:, 1] * dt_arr
         + 0.5 * jnp.asarray(acceleration_current, dtype=state_arr.dtype) * dt_arr**2
     )
-    velocity_new = state_arr[:, 1] + 0.5 * (
-        jnp.asarray(acceleration_current, dtype=state_arr.dtype)
-        + jnp.asarray(acceleration_new, dtype=state_arr.dtype)
-    ) * dt_arr
+    velocity_new = (
+        state_arr[:, 1]
+        + 0.5
+        * (
+            jnp.asarray(acceleration_current, dtype=state_arr.dtype)
+            + jnp.asarray(acceleration_new, dtype=state_arr.dtype)
+        )
+        * dt_arr
+    )
     return state_arr.at[:, 0].set(position_new).at[:, 1].set(velocity_new)
 
 
@@ -850,7 +855,6 @@ def _grouped_segment_cache_put(
         > _GROUPED_SEGMENT_CACHE_TOTAL_MAX_BYTES
     ):
         _grouped_segment_cache.popitem(last=False)
-
 
 
 def _resolve_optional(value, preset_value, fallback):
@@ -2291,58 +2295,47 @@ class FastMultipoleMethod:
         self._refresh_timing_nearfield_residual_seconds: float = 0.0
         self._refresh_timing_calls: int = 0
         self._refresh_timing_active: bool = False
-        self._refresh_timing_enabled: bool = (
-            str(os.environ.get("JACCPOT_REFRESH_TIMING_ENABLE", "0")).strip().lower()
-            in {"1", "true", "yes", "on"}
+        self._refresh_timing_enabled: bool = str(
+            os.environ.get("JACCPOT_REFRESH_TIMING_ENABLE", "0")
+        ).strip().lower() in {"1", "true", "yes", "on"}
+        self._refresh_dual_planner_mode: str = (
+            str(os.environ.get("JACCPOT_LARGE_N_REFRESH_DUAL_PLANNER_MODE", "auto"))
+            .strip()
+            .lower()
         )
-        self._refresh_dual_planner_mode: str = str(
-            os.environ.get("JACCPOT_LARGE_N_REFRESH_DUAL_PLANNER_MODE", "auto")
-        ).strip().lower()
         self._refresh_dual_planner_mode_on: bool = (
             self._refresh_dual_planner_mode == "on"
         )
         self._refresh_dual_planner_mode_auto: bool = (
             self._refresh_dual_planner_mode == "auto"
         )
-        self._strict_gpu_mode: str = str(
-            os.environ.get("JACCPOT_STATIC_STRICT_GPU_MODE", "auto")
-        ).strip().lower()
+        self._strict_gpu_mode: str = (
+            str(os.environ.get("JACCPOT_STATIC_STRICT_GPU_MODE", "auto"))
+            .strip()
+            .lower()
+        )
         self._strict_gpu_mode_on: bool = self._strict_gpu_mode == "on"
         self._strict_gpu_mode_auto: bool = self._strict_gpu_mode == "auto"
-        self._strict_cap_record_enabled: bool = (
-            str(os.environ.get("JACCPOT_STATIC_STRICT_CAP_RECORD", "1"))
-            .strip()
-            .lower()
-            in {"1", "true", "yes", "on"}
-        )
-        self._strict_cap_require_exact_profile_match: bool = (
-            str(
-                os.environ.get(
-                    "JACCPOT_STATIC_STRICT_REQUIRE_EXACT_CAP_PROFILE_MATCH", "1"
-                )
-            )
-            .strip()
-            .lower()
-            in {"1", "true", "yes", "on"}
-        )
+        self._strict_cap_record_enabled: bool = str(
+            os.environ.get("JACCPOT_STATIC_STRICT_CAP_RECORD", "1")
+        ).strip().lower() in {"1", "true", "yes", "on"}
+        self._strict_cap_require_exact_profile_match: bool = str(
+            os.environ.get("JACCPOT_STATIC_STRICT_REQUIRE_EXACT_CAP_PROFILE_MATCH", "1")
+        ).strip().lower() in {"1", "true", "yes", "on"}
         split_build_env_raw = os.environ.get(
             "JACCPOT_PREPARE_STAGE_MEMORY_SPLIT_ENABLED"
         )
         self._prepare_stage_memory_split_env_override: Optional[bool] = (
             None
             if split_build_env_raw is None
-            else str(split_build_env_raw).strip().lower()
-            in {"1", "true", "yes", "on"}
+            else str(split_build_env_raw).strip().lower() in {"1", "true", "yes", "on"}
         )
-        self._planner_steady_timing_bypass_enabled: bool = (
-            str(
-                os.environ.get(
-                    "JACCPOT_LARGE_N_REFRESH_DUAL_PLANNER_STEADY_NO_SUBSTAGE_TIMING",
-                    "1",
-                )
-            ).strip().lower()
-            in {"1", "true", "yes", "on"}
-        )
+        self._planner_steady_timing_bypass_enabled: bool = str(
+            os.environ.get(
+                "JACCPOT_LARGE_N_REFRESH_DUAL_PLANNER_STEADY_NO_SUBSTAGE_TIMING",
+                "1",
+            )
+        ).strip().lower() in {"1", "true", "yes", "on"}
         self._strict_shared_env_applied: bool = False
         self._refresh_dual_planner_cache: dict[str, _RefreshDualPlannerHint] = {}
         self._refresh_dual_planner_cache_hits: int = 0
@@ -2364,9 +2357,11 @@ class FastMultipoleMethod:
         self._strict_v2_profile_key_misses: int = 0
         self._strict_v2_fail_fast_reject_count: int = 0
         self._strict_v2_seen_profile_keys: set[str] = set()
-        self._strict_fused_mode_raw: str = str(
-            os.environ.get("JACCPOT_STATIC_STRICT_FUSED_MODE", "off")
-        ).strip().lower()
+        self._strict_fused_mode_raw: str = (
+            str(os.environ.get("JACCPOT_STATIC_STRICT_FUSED_MODE", "off"))
+            .strip()
+            .lower()
+        )
         self._strict_fused_mode_enabled: bool = self._strict_fused_mode_raw in {
             "1",
             "true",
@@ -2414,9 +2409,11 @@ class FastMultipoleMethod:
                 "1",
             )
         ).strip().lower() in {"1", "true", "yes", "on"}
-        self._large_n_eval_diag_mode: str = str(
-            os.environ.get("JACCPOT_LARGE_N_EVAL_DIAG_MODE", "full")
-        ).strip().lower()
+        self._large_n_eval_diag_mode: str = (
+            str(os.environ.get("JACCPOT_LARGE_N_EVAL_DIAG_MODE", "full"))
+            .strip()
+            .lower()
+        )
         if self._large_n_eval_diag_mode not in {
             "full",
             "near_only",
@@ -2428,9 +2425,11 @@ class FastMultipoleMethod:
             "zero",
         }:
             self._large_n_eval_diag_mode = "full"
-        self._large_n_nearfield_diag_mode: str = str(
-            os.environ.get("JACCPOT_LARGE_N_NEARFIELD_DIAG_MODE", "full")
-        ).strip().lower()
+        self._large_n_nearfield_diag_mode: str = (
+            str(os.environ.get("JACCPOT_LARGE_N_NEARFIELD_DIAG_MODE", "full"))
+            .strip()
+            .lower()
+        )
         if self._large_n_nearfield_diag_mode not in {
             "full",
             "self_only",
@@ -2492,7 +2491,9 @@ class FastMultipoleMethod:
         self._strict_fused_fastlane_misses: int = 0
         self._strict_fused_fastlane_last_blockers: tuple[str, ...] = tuple()
         self._strict_fused_fastlane_block_counts: dict[str, int] = {}
-        self._strict_fused_jit_function_cache: dict[tuple[Any, ...], tuple[Any, ...]] = {}
+        self._strict_fused_jit_function_cache: dict[
+            tuple[Any, ...], tuple[Any, ...]
+        ] = {}
         self._strict_profiled_max_pair_queue: int = 0
         self._strict_profiled_pair_process_block: int = 0
         self._strict_profiled_context_key: str = ""
@@ -2824,7 +2825,9 @@ class FastMultipoleMethod:
             f"leaf={int(leaf_parameter)}|n={int(particle_count)}"
         )
 
-    def _maybe_load_strict_cap_profile(self, *, context_key: Optional[str] = None) -> None:
+    def _maybe_load_strict_cap_profile(
+        self, *, context_key: Optional[str] = None
+    ) -> None:
         if self._strict_profile_loaded_once:
             if context_key is not None:
                 self._apply_strict_cap_profile_for_key(context_key=context_key)
@@ -3079,13 +3082,21 @@ class FastMultipoleMethod:
         self._large_n_radix_payload_present = radix_payload is not None
         self._large_n_radix_payload_source_particle_shape = radix_source_particle_shape
         self._large_n_radix_payload_source_particle_slots = (
-            int(radix_source_particle_shape[0] * radix_source_particle_shape[1] * radix_source_particle_shape[2])
+            int(
+                radix_source_particle_shape[0]
+                * radix_source_particle_shape[1]
+                * radix_source_particle_shape[2]
+            )
             if len(radix_source_particle_shape) >= 3
             else 0
         )
         self._large_n_radix_payload_source_leaf_shape = radix_source_leaf_shape
         self._large_n_radix_payload_source_leaf_slots = (
-            int(radix_source_leaf_shape[0] * radix_source_leaf_shape[1] * radix_source_leaf_shape[2])
+            int(
+                radix_source_leaf_shape[0]
+                * radix_source_leaf_shape[1]
+                * radix_source_leaf_shape[2]
+            )
             if len(radix_source_leaf_shape) >= 3
             else 0
         )
@@ -3230,9 +3241,7 @@ class FastMultipoleMethod:
             ),
             "strict_runner_compile_count": int(self._strict_runner_compile_count),
             "strict_runner_execute_count": int(self._strict_runner_execute_count),
-            "strict_runner_profile_key_hits": int(
-                self._strict_runner_profile_key_hits
-            ),
+            "strict_runner_profile_key_hits": int(self._strict_runner_profile_key_hits),
             "strict_runner_profile_key_misses": int(
                 self._strict_runner_profile_key_misses
             ),
@@ -3339,9 +3348,7 @@ class FastMultipoleMethod:
             "strict_fused_mode_active": bool(self._strict_fused_mode_active),
             "strict_fused_compile_count": int(self._strict_fused_compile_count),
             "strict_fused_execute_count": int(self._strict_fused_execute_count),
-            "strict_fused_profile_key_hits": int(
-                self._strict_fused_profile_key_hits
-            ),
+            "strict_fused_profile_key_hits": int(self._strict_fused_profile_key_hits),
             "strict_fused_profile_key_misses": int(
                 self._strict_fused_profile_key_misses
             ),
@@ -3385,9 +3392,7 @@ class FastMultipoleMethod:
             "strict_fused_fastlane_diag_enabled": bool(
                 self._strict_fused_fastlane_diag_enabled
             ),
-            "strict_fused_fastlane_attempts": int(
-                self._strict_fused_fastlane_attempts
-            ),
+            "strict_fused_fastlane_attempts": int(self._strict_fused_fastlane_attempts),
             "strict_fused_fastlane_hits": int(self._strict_fused_fastlane_hits),
             "strict_fused_fastlane_misses": int(self._strict_fused_fastlane_misses),
             "strict_fused_fastlane_last_blockers": tuple(
@@ -3397,9 +3402,7 @@ class FastMultipoleMethod:
                 str(k): int(v)
                 for k, v in dict(self._strict_fused_fastlane_block_counts).items()
             },
-            "strict_profiled_max_pair_queue": int(
-                self._strict_profiled_max_pair_queue
-            ),
+            "strict_profiled_max_pair_queue": int(self._strict_profiled_max_pair_queue),
             "strict_profiled_pair_process_block": int(
                 self._strict_profiled_pair_process_block
             ),
@@ -3571,9 +3574,7 @@ class FastMultipoleMethod:
             )
 
         self._compiled_profile_refresh_calls += 1
-        refresh_timing_enabled = bool(
-            getattr(self, "_refresh_timing_enabled", False)
-        )
+        refresh_timing_enabled = bool(getattr(self, "_refresh_timing_enabled", False))
         if not refresh_timing_enabled:
             next_state = self._refresh_large_n_same_topology(
                 prepared_state,
@@ -3950,8 +3951,12 @@ class FastMultipoleMethod:
         self._strict_v2_execute_count += 1
 
         fused_mode_requested = bool(getattr(self, "_strict_fused_mode_enabled", False))
-        fused_mode_allowed = self._strict_fused_profile_allows_n(int(state_arr.shape[0]))
-        self._strict_fused_mode_active = bool(fused_mode_requested and fused_mode_allowed)
+        fused_mode_allowed = self._strict_fused_profile_allows_n(
+            int(state_arr.shape[0])
+        )
+        self._strict_fused_mode_active = bool(
+            fused_mode_requested and fused_mode_allowed
+        )
         if self._strict_fused_mode_active:
             if profile_key in self._strict_fused_seen_profile_keys:
                 self._strict_fused_profile_key_hits += 1
@@ -3976,9 +3981,11 @@ class FastMultipoleMethod:
         detail_diag_mode = str(
             getattr(self, "_strict_refresh_detail_diag_mode", "full")
         )
-        self_eval_active = bool(
-            getattr(self, "_strict_refresh_diag_eval_active", True)
-        ) and detail_diag_mode == "full" and eval_diag_mode != "zero"
+        self_eval_active = (
+            bool(getattr(self, "_strict_refresh_diag_eval_active", True))
+            and detail_diag_mode == "full"
+            and eval_diag_mode != "zero"
+        )
         self._strict_self_force_bootstrap_evaluations = int(self_eval_active)
         self._strict_self_force_endpoint_evaluations = (
             num_steps_i if self_eval_active else 0
@@ -4021,12 +4028,9 @@ class FastMultipoleMethod:
             if not self_eval_active:
                 return jnp.zeros_like(state_in[:, 0, :])
             if eval_diag_mode == "permutation_only":
-                return (
-                    jnp.asarray(prepared_in.positions_sorted)[
-                        prepared_in.inverse_permutation
-                    ]
-                    * jnp.asarray(0.0, dtype=state_in.dtype)
-                )
+                return jnp.asarray(prepared_in.positions_sorted)[
+                    prepared_in.inverse_permutation
+                ] * jnp.asarray(0.0, dtype=state_in.dtype)
             return jnp.asarray(
                 evaluate_large_n_state(
                     self,
@@ -4052,6 +4056,7 @@ class FastMultipoleMethod:
             )
         else:
             acceleration_current = acceleration_self_current
+
         def _static_target_block_capacity_ok(
             prepared_in: PreparedStateLike,
         ) -> Array:
@@ -4114,7 +4119,11 @@ class FastMultipoleMethod:
                 int(max_order),
                 float(self.theta if theta is None else theta),
                 bool(add_external),
-                id(external_acceleration_fn) if external_acceleration_fn is not None else 0,
+                (
+                    id(external_acceleration_fn)
+                    if external_acceleration_fn is not None
+                    else 0
+                ),
                 bool(rematerialize_between_refresh),
                 bool(return_history),
                 diag_mode,
@@ -4128,6 +4137,7 @@ class FastMultipoleMethod:
             jit_cache = getattr(self, "_strict_fused_jit_function_cache", {})
             compiled_runner = jit_cache.get(cache_key)
             if compiled_runner is None:
+
                 @jax.jit
                 def _compiled_runner(
                     prepared_initial: LargeNPreparedState,
@@ -4150,9 +4160,7 @@ class FastMultipoleMethod:
                         )
                         state_position = state_now.at[:, 0].set(position_new)
                         prepared_new, acceleration_self_new = (
-                            _refresh_and_evaluate_endpoint(
-                                prepared_now, state_position
-                            )
+                            _refresh_and_evaluate_endpoint(prepared_now, state_position)
                         )
                         if add_external and external_acceleration_fn is not None:
                             acceleration_new = acceleration_self_new + jnp.asarray(
@@ -4259,9 +4267,7 @@ class FastMultipoleMethod:
         else:
             state_curr = state_arr
             history_parts: list[Array] = []
-            acceleration_now = jnp.asarray(
-                acceleration_current, dtype=state_arr.dtype
-            )
+            acceleration_now = jnp.asarray(acceleration_current, dtype=state_arr.dtype)
             for _ in range(num_steps_i):
                 position_new = (
                     state_curr[:, 0]
@@ -4269,8 +4275,8 @@ class FastMultipoleMethod:
                     + 0.5 * acceleration_now * dt_arr**2
                 )
                 state_position = state_curr.at[:, 0].set(position_new)
-                prepared_curr, acceleration_self_new = (
-                    _refresh_and_evaluate_endpoint(prepared_curr, state_position)
+                prepared_curr, acceleration_self_new = _refresh_and_evaluate_endpoint(
+                    prepared_curr, state_position
                 )
                 if add_external and external_acceleration_fn is not None:
                     acceleration_new = acceleration_self_new + jnp.asarray(
@@ -4285,9 +4291,7 @@ class FastMultipoleMethod:
                 acceleration_now = acceleration_new
                 if return_history:
                     history_parts.append(state_curr)
-            history_out = (
-                jnp.stack(history_parts, axis=0) if return_history else None
-            )
+            history_out = jnp.stack(history_parts, axis=0) if return_history else None
 
         self._strict_runner_execute_count += num_steps_i
         if profile_key in self._strict_runner_seen_profile_keys:
@@ -4332,7 +4336,9 @@ class FastMultipoleMethod:
         fused_mode_allowed = self._strict_fused_profile_allows_n(
             int(positions_arr.shape[0])
         )
-        self._strict_fused_mode_active = bool(fused_mode_requested and fused_mode_allowed)
+        self._strict_fused_mode_active = bool(
+            fused_mode_requested and fused_mode_allowed
+        )
         if not self._strict_fused_mode_active:
             raise RuntimeError(
                 "strict fused mode is not active for this particle count/config; "
@@ -4353,9 +4359,7 @@ class FastMultipoleMethod:
             fused_device_mode=True,
         )
         if not isinstance(prepared, LargeNPreparedState):
-            raise RuntimeError(
-                "strict fused eval-only requires a LargeNPreparedState."
-            )
+            raise RuntimeError("strict fused eval-only requires a LargeNPreparedState.")
         self._record_large_n_eval_shape_diagnostics(prepared)
 
         @jax.jit
@@ -4393,7 +4397,9 @@ class FastMultipoleMethod:
             self._large_n_same_topology_refresh_miss_no_key += 1
             return None
 
-        refresh_timing_active = bool(getattr(self, "_refresh_timing_active", False)) and not (
+        refresh_timing_active = bool(
+            getattr(self, "_refresh_timing_active", False)
+        ) and not (
             bool(fused_device_mode)
             and bool(getattr(self, "_strict_fused_disable_hot_timing", False))
         )
@@ -4481,13 +4487,15 @@ class FastMultipoleMethod:
                 else:
                     previous_codes = getattr(prepared_state.tree, "morton_codes", None)
                     if previous_codes is not None:
-                        previous_topology_key = self._topology_reuse_key_from_sorted_codes(
-                            sorted_codes=jnp.asarray(previous_codes),
-                            tree_config=tree_config,
-                            leaf_size=int(leaf_size),
-                            refine_local=refine_local_val,
-                            max_refine_levels=max_refine_levels_val,
-                            aspect_threshold=aspect_threshold_val,
+                        previous_topology_key = (
+                            self._topology_reuse_key_from_sorted_codes(
+                                sorted_codes=jnp.asarray(previous_codes),
+                                tree_config=tree_config,
+                                leaf_size=int(leaf_size),
+                                refine_local=refine_local_val,
+                                max_refine_levels=max_refine_levels_val,
+                                aspect_threshold=aspect_threshold_val,
+                            )
                         )
             if previous_topology_key is None:
                 self._large_n_same_topology_refresh_misses += 1
@@ -4546,8 +4554,7 @@ class FastMultipoleMethod:
             "m2m_only",
         }
         if bool(static_fused_refresh) and (
-            strict_refresh_diag_mode == "tree_only"
-            or strict_refresh_tree_detail_only
+            strict_refresh_diag_mode == "tree_only" or strict_refresh_tree_detail_only
         ):
             self._large_n_same_topology_refresh_hits += 1
             if tree_config.mode == "static_radix":
@@ -4628,7 +4635,9 @@ class FastMultipoleMethod:
                 self.interaction_retry_logger(event)
 
         dual_t0 = time.perf_counter() if refresh_timing_active else 0.0
-        strict_fused_traced_hot_path = bool(fused_device_mode) and bool(getattr(self, "_strict_fused_mode_active", False))
+        strict_fused_traced_hot_path = bool(fused_device_mode) and bool(
+            getattr(self, "_strict_fused_mode_active", False)
+        )
         cached_compact_far_pairs = getattr(prepared_state, "compact_far_pairs", None)
         compact_far_pairs_carry_placeholder = cached_compact_far_pairs
         reuse_static_compact_pairs_enabled = str(
@@ -4651,7 +4660,10 @@ class FastMultipoleMethod:
                     "JACCPOT_STATIC_STRICT_FUSED_FRESH_COMPACT_PAIR_REBUILD",
                     "1",
                 )
-            ).strip().lower() in {"1", "true", "yes", "on"}
+            )
+            .strip()
+            .lower()
+            in {"1", "true", "yes", "on"}
             and not bool(allow_unsafe_compact_pair_reuse)
         )
         reuse_static_compact_pairs = (
@@ -4714,7 +4726,9 @@ class FastMultipoleMethod:
                 far_pairs_coo=_FarPairCOO(
                     sources=src_far,
                     targets=tgt_far,
-                    active_count=getattr(cached_compact_far_pairs, "far_pair_count", None),
+                    active_count=getattr(
+                        cached_compact_far_pairs, "far_pair_count", None
+                    ),
                 ),
                 far_pairs_by_gear=far_pairs_by_gear,
                 adaptive_order=True,
@@ -4768,9 +4782,7 @@ class FastMultipoleMethod:
                 else int(getattr(self, "_recent_dual_far_pair_count", 0))
             )
             chunk_size = (
-                4096
-                if runtime_m2l_chunk_size is None
-                else int(runtime_m2l_chunk_size)
+                4096 if runtime_m2l_chunk_size is None else int(runtime_m2l_chunk_size)
             )
             self._static_radix_tree_leaf_count = (
                 int(getattr(leaf_codes, "shape", (0,))[0])
@@ -4875,6 +4887,7 @@ class FastMultipoleMethod:
                 compact_far_pairs=compact_far_pairs_carry_placeholder,
             )
         return refreshed_state
+
     def _large_n_neighbor_list_matches(
         self: "FastMultipoleMethod",
         previous: NodeNeighborList,
@@ -6629,9 +6642,9 @@ class FastMultipoleMethod:
         stay scoped to this helper.
         """
         suppress_host_side_effects = bool(suppress_host_side_effects)
-        refresh_timing_active = bool(getattr(self, "_refresh_timing_active", False)) and (
-            not suppress_host_side_effects
-        )
+        refresh_timing_active = bool(
+            getattr(self, "_refresh_timing_active", False)
+        ) and (not suppress_host_side_effects)
         dual_total_t0 = time.perf_counter() if refresh_timing_active else 0.0
         dual_stage_sum = 0.0
 
@@ -6677,9 +6690,11 @@ class FastMultipoleMethod:
         use_paper_fixed_policy = (not self.adaptive_order) and (
             self._uses_paper_style_traversal_policy()
         )
-        if bool(suppress_host_side_effects) and bool(
-            getattr(self, "_strict_fused_mode_active", False)
-        ) and bool(getattr(self, "_strict_fused_device_only", False)):
+        if (
+            bool(suppress_host_side_effects)
+            and bool(getattr(self, "_strict_fused_mode_active", False))
+            and bool(getattr(self, "_strict_fused_device_only", False))
+        ):
             use_paper_fixed_policy = False
 
         # A static-radix topology key describes the capacity-fixed tree shape,
@@ -6693,9 +6708,11 @@ class FastMultipoleMethod:
             and (not suppress_host_side_effects)
         )
         grouped_interactions_active = bool(grouped_interactions)
-        strict_fused_device_only_hot_path = bool(suppress_host_side_effects) and bool(
-            getattr(self, "_strict_fused_mode_active", False)
-        ) and bool(getattr(self, "_strict_fused_device_only", False))
+        strict_fused_device_only_hot_path = (
+            bool(suppress_host_side_effects)
+            and bool(getattr(self, "_strict_fused_mode_active", False))
+            and bool(getattr(self, "_strict_fused_device_only", False))
+        )
         adaptive_order_active = bool(self.adaptive_order) and not bool(
             strict_fused_device_only_hot_path
         )
@@ -6706,10 +6723,13 @@ class FastMultipoleMethod:
             strict_fused_device_only_hot_path
         )
         need_traversal_result = (
-            bool(self.retain_traversal_result) and not bool(strict_fused_device_only_hot_path)
+            bool(self.retain_traversal_result)
+            and not bool(strict_fused_device_only_hot_path)
         ) or bool(use_paper_fixed_policy)
         traced_prepare_inputs = bool(
-            _contains_tracer((tree_artifacts.positions_sorted, tree_artifacts.masses_sorted))
+            _contains_tracer(
+                (tree_artifacts.positions_sorted, tree_artifacts.masses_sorted)
+            )
         )
         strict_fused_node_interactions_safe_path = (
             bool(strict_fused_device_only_hot_path)
@@ -6718,14 +6738,20 @@ class FastMultipoleMethod:
                     "JACCPOT_STATIC_STRICT_FUSED_NODE_INTERACTIONS_SAFE_PATH",
                     "0",
                 )
-            ).strip().lower() in {"1", "true", "yes", "on"}
+            )
+            .strip()
+            .lower()
+            in {"1", "true", "yes", "on"}
             and not (
                 str(
                     os.environ.get(
                         "JACCPOT_STATIC_STRICT_FUSED_ALLOW_UNSAFE_COMPACT_PAIR_REUSE",
                         "0",
                     )
-                ).strip().lower() in {"1", "true", "yes", "on"}
+                )
+                .strip()
+                .lower()
+                in {"1", "true", "yes", "on"}
             )
         )
         use_compact_streamed_pairs = (
@@ -6832,11 +6858,15 @@ class FastMultipoleMethod:
             strict_context_key = self._strict_cap_profile_context_key(
                 tree_mode=str(tree_artifacts.tree_mode),
                 leaf_parameter=int(tree_artifacts.leaf_parameter),
-                particle_count=int(jnp.asarray(tree_artifacts.positions_sorted).shape[0]),
+                particle_count=int(
+                    jnp.asarray(tree_artifacts.positions_sorted).shape[0]
+                ),
             )
-            strict_fused_hot_path = bool(getattr(self, "_strict_fused_mode_active", False))
-            strict_profile_key_stable = (
-                str(self._strict_profiled_context_key) == str(strict_context_key)
+            strict_fused_hot_path = bool(
+                getattr(self, "_strict_fused_mode_active", False)
+            )
+            strict_profile_key_stable = str(self._strict_profiled_context_key) == str(
+                strict_context_key
             )
             if not (strict_fused_hot_path and strict_profile_key_stable):
                 self._maybe_load_strict_cap_profile(context_key=strict_context_key)
@@ -6886,7 +6916,9 @@ class FastMultipoleMethod:
                         max_interactions_per_node=8192,
                         max_neighbors_per_leaf=4096,
                     )
-            if bool(traced_prepare_inputs) and not bool(strict_fused_device_only_hot_path):
+            if bool(traced_prepare_inputs) and not bool(
+                strict_fused_device_only_hot_path
+            ):
                 allow_split_build = False
             if not suppress_host_side_effects:
                 self._refresh_strict_mode_active_count += 1
@@ -7029,7 +7061,11 @@ class FastMultipoleMethod:
         planner_cache_hit = False
         if planner_enabled:
             strict_split_fastlane = bool(
-                (bool(suppress_host_side_effects) and not has_pair_policy and not has_policy_state)
+                (
+                    bool(suppress_host_side_effects)
+                    and not has_pair_policy
+                    and not has_policy_state
+                )
                 or (
                     strict_mode_active
                     and bool(allow_split_build)
@@ -7124,7 +7160,9 @@ class FastMultipoleMethod:
                         suppress_substage_timing_compiled_bool = True
                     else:
                         use_split_build_compiled_bool = bool(use_split_build_compiled)
-                        suppress_substage_timing_compiled_bool = bool(suppress_substage_timing_compiled)
+                        suppress_substage_timing_compiled_bool = bool(
+                            suppress_substage_timing_compiled
+                        )
                     if not suppress_host_side_effects:
                         self._refresh_dual_planner_compiled_route_count += 1
                     planner_hint = _RefreshDualPlannerHint(
@@ -7238,7 +7276,9 @@ class FastMultipoleMethod:
             elif interactions is not None:
                 far_pair_count_diag = int(interactions.sources.shape[0])
             total_nodes_diag = int(tree_artifacts.tree.parent.shape[0])
-            internal_nodes_diag = int(jnp.asarray(tree_artifacts.tree.left_child).shape[0])
+            internal_nodes_diag = int(
+                jnp.asarray(tree_artifacts.tree.left_child).shape[0]
+            )
             leaf_count_diag = max(0, total_nodes_diag - internal_nodes_diag)
             self._recent_dual_node_count = int(total_nodes_diag)
             self._recent_dual_leaf_count = int(leaf_count_diag)
@@ -7402,7 +7442,10 @@ class FastMultipoleMethod:
             ),
             compact_far_pairs=(
                 compact_far_pairs
-                if (bool(adaptive_order_active) or bool(strict_streamed_direct_far_pairs))
+                if (
+                    bool(adaptive_order_active)
+                    or bool(strict_streamed_direct_far_pairs)
+                )
                 else None
             ),
             downward=downward,
@@ -7469,8 +7512,14 @@ class FastMultipoleMethod:
             active_count=active_count,
         )
         max_order_int = int(upward.multipoles.order)
-        strict_fused_device_only_active = bool(getattr(self, "_strict_fused_mode_active", False)) and bool(getattr(self, "_strict_fused_device_only", False))
-        if self.mixed_order_farfield and max_order_int >= 1 and (not strict_fused_device_only_active):
+        strict_fused_device_only_active = bool(
+            getattr(self, "_strict_fused_mode_active", False)
+        ) and bool(getattr(self, "_strict_fused_device_only", False))
+        if (
+            self.mixed_order_farfield
+            and max_order_int >= 1
+            and (not strict_fused_device_only_active)
+        ):
             if interactions is None:
                 raise RuntimeError(
                     "mixed-order streamed farfield requires node interaction lists"
@@ -8151,7 +8200,9 @@ class FastMultipoleMethod:
             )
         if not suppress_host_side_effects:
             total_nodes_diag = int(tree_artifacts.tree.parent.shape[0])
-            internal_nodes_diag = int(jnp.asarray(tree_artifacts.tree.left_child).shape[0])
+            internal_nodes_diag = int(
+                jnp.asarray(tree_artifacts.tree.left_child).shape[0]
+            )
             leaf_count_diag = max(0, total_nodes_diag - internal_nodes_diag)
             self._recent_dual_node_count = int(total_nodes_diag)
             self._recent_dual_leaf_count = int(leaf_count_diag)
@@ -12973,7 +13024,9 @@ def _evaluate_local_expansions_for_target_particles(
         if max_acc_derivative_order <= 0:
             if return_potential:
 
-                def eval_one(coeff_row: Array, offset_row: Array) -> tuple[Array, Array]:
+                def eval_one(
+                    coeff_row: Array, offset_row: Array
+                ) -> tuple[Array, Array]:
                     grad, pot = evaluate_local_complex_with_grad_analytic(
                         coeff_row,
                         offset_row,
@@ -13232,7 +13285,9 @@ def _evaluate_local_expansions_for_particles(
                         coeffs[:, None, :],
                         offsets_complex.shape[:-1] + (coeffs.shape[-1],),
                     ).reshape((-1, coeffs.shape[-1]))
-                    offsets_flat = offsets_complex.reshape((-1, offsets_complex.shape[-1]))
+                    offsets_flat = offsets_complex.reshape(
+                        (-1, offsets_complex.shape[-1])
+                    )
                     mask_flat = valid.reshape((-1,))
                     grad_flat = jax.vmap(
                         lambda coeff_row, offset_row: eval_complex_grad(
@@ -13338,7 +13393,9 @@ def _evaluate_local_expansions_for_particles(
             )
         ).strip().lower() in {"1", "true", "yes", "on"}
         if bool(direct_leaf_flatten) and max_acc_derivative_order <= 0:
-            gradients = grad_field.reshape((-1, grad_field.shape[-1]))[: positions.shape[0]]
+            gradients = grad_field.reshape((-1, grad_field.shape[-1]))[
+                : positions.shape[0]
+            ]
         else:
             gradients = _scatter_vectors(
                 jnp.zeros_like(positions),

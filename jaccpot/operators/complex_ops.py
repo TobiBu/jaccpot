@@ -471,8 +471,6 @@ def regular_solid_harmonic_gradient_coefficients(
     return jnp.stack((grad_x, grad_y, grad_z), axis=0)
 
 
-
-
 @partial(jax.jit, static_argnames=("order",))
 def regular_solid_harmonic_gradient_coefficients_preserve_dtype(
     delta: Array,
@@ -511,12 +509,18 @@ def evaluate_local_complex_grad_analytic_preserve_dtype(
 def _regular_solid_harmonic_order4_scalars(delta: Array) -> tuple[Array, ...]:
     """Return packed order-4 regular harmonics as scalar expressions."""
     delta_arr = jnp.asarray(delta)
-    real_dtype = delta_arr.dtype if jnp.issubdtype(delta_arr.dtype, jnp.floating) else jnp.float32
+    real_dtype = (
+        delta_arr.dtype
+        if jnp.issubdtype(delta_arr.dtype, jnp.floating)
+        else jnp.float32
+    )
     complex_dtype = jnp.complex128 if real_dtype == jnp.float64 else jnp.complex64
 
     d = jnp.asarray(delta, dtype=real_dtype)
     x, y, z = d[0], d[1], d[2]
-    xy = x.astype(complex_dtype) + jnp.asarray(1j, dtype=complex_dtype) * y.astype(complex_dtype)
+    xy = x.astype(complex_dtype) + jnp.asarray(1j, dtype=complex_dtype) * y.astype(
+        complex_dtype
+    )
     zc = z.astype(complex_dtype)
     r2c = (x * x + y * y + z * z).astype(complex_dtype)
     one = jnp.asarray(1.0, dtype=real_dtype).astype(complex_dtype)
@@ -525,24 +529,52 @@ def _regular_solid_harmonic_order4_scalars(delta: Array) -> tuple[Array, ...]:
     pos[(0, 0)] = one
     pos[(1, 0)] = zc
     pos[(1, 1)] = xy * jnp.asarray(0.5, dtype=real_dtype).astype(complex_dtype)
-    pos[(2, 2)] = pos[(1, 1)] * xy * jnp.asarray(0.25, dtype=real_dtype).astype(complex_dtype)
-    pos[(3, 3)] = pos[(2, 2)] * xy * jnp.asarray(1.0 / 6.0, dtype=real_dtype).astype(complex_dtype)
-    pos[(4, 4)] = pos[(3, 3)] * xy * jnp.asarray(0.125, dtype=real_dtype).astype(complex_dtype)
+    pos[(2, 2)] = (
+        pos[(1, 1)] * xy * jnp.asarray(0.25, dtype=real_dtype).astype(complex_dtype)
+    )
+    pos[(3, 3)] = (
+        pos[(2, 2)]
+        * xy
+        * jnp.asarray(1.0 / 6.0, dtype=real_dtype).astype(complex_dtype)
+    )
+    pos[(4, 4)] = (
+        pos[(3, 3)] * xy * jnp.asarray(0.125, dtype=real_dtype).astype(complex_dtype)
+    )
     pos[(2, 1)] = zc * pos[(1, 1)]
     pos[(3, 2)] = zc * pos[(2, 2)]
     pos[(4, 3)] = zc * pos[(3, 3)]
-    pos[(2, 0)] = (jnp.asarray(3.0, dtype=real_dtype).astype(complex_dtype) * zc * pos[(1, 0)] - r2c * pos[(0, 0)]) * jnp.asarray(0.25, dtype=real_dtype).astype(complex_dtype)
-    pos[(3, 0)] = (jnp.asarray(5.0, dtype=real_dtype).astype(complex_dtype) * zc * pos[(2, 0)] - r2c * pos[(1, 0)]) * jnp.asarray(1.0 / 9.0, dtype=real_dtype).astype(complex_dtype)
-    pos[(4, 0)] = (jnp.asarray(7.0, dtype=real_dtype).astype(complex_dtype) * zc * pos[(3, 0)] - r2c * pos[(2, 0)]) * jnp.asarray(1.0 / 16.0, dtype=real_dtype).astype(complex_dtype)
-    pos[(3, 1)] = (jnp.asarray(5.0, dtype=real_dtype).astype(complex_dtype) * zc * pos[(2, 1)] - r2c * pos[(1, 1)]) * jnp.asarray(0.125, dtype=real_dtype).astype(complex_dtype)
-    pos[(4, 1)] = (jnp.asarray(7.0, dtype=real_dtype).astype(complex_dtype) * zc * pos[(3, 1)] - r2c * pos[(2, 1)]) * jnp.asarray(1.0 / 15.0, dtype=real_dtype).astype(complex_dtype)
-    pos[(4, 2)] = (jnp.asarray(7.0, dtype=real_dtype).astype(complex_dtype) * zc * pos[(3, 2)] - r2c * pos[(2, 2)]) * jnp.asarray(1.0 / 12.0, dtype=real_dtype).astype(complex_dtype)
+    pos[(2, 0)] = (
+        jnp.asarray(3.0, dtype=real_dtype).astype(complex_dtype) * zc * pos[(1, 0)]
+        - r2c * pos[(0, 0)]
+    ) * jnp.asarray(0.25, dtype=real_dtype).astype(complex_dtype)
+    pos[(3, 0)] = (
+        jnp.asarray(5.0, dtype=real_dtype).astype(complex_dtype) * zc * pos[(2, 0)]
+        - r2c * pos[(1, 0)]
+    ) * jnp.asarray(1.0 / 9.0, dtype=real_dtype).astype(complex_dtype)
+    pos[(4, 0)] = (
+        jnp.asarray(7.0, dtype=real_dtype).astype(complex_dtype) * zc * pos[(3, 0)]
+        - r2c * pos[(2, 0)]
+    ) * jnp.asarray(1.0 / 16.0, dtype=real_dtype).astype(complex_dtype)
+    pos[(3, 1)] = (
+        jnp.asarray(5.0, dtype=real_dtype).astype(complex_dtype) * zc * pos[(2, 1)]
+        - r2c * pos[(1, 1)]
+    ) * jnp.asarray(0.125, dtype=real_dtype).astype(complex_dtype)
+    pos[(4, 1)] = (
+        jnp.asarray(7.0, dtype=real_dtype).astype(complex_dtype) * zc * pos[(3, 1)]
+        - r2c * pos[(2, 1)]
+    ) * jnp.asarray(1.0 / 15.0, dtype=real_dtype).astype(complex_dtype)
+    pos[(4, 2)] = (
+        jnp.asarray(7.0, dtype=real_dtype).astype(complex_dtype) * zc * pos[(3, 2)]
+        - r2c * pos[(2, 2)]
+    ) * jnp.asarray(1.0 / 12.0, dtype=real_dtype).astype(complex_dtype)
 
     def get(n: int, m: int) -> Array:
         if m >= 0:
             return pos[(n, m)]
         m_abs = -m
-        sign = jnp.asarray(-1.0 if (m_abs % 2) else 1.0, dtype=real_dtype).astype(complex_dtype)
+        sign = jnp.asarray(-1.0 if (m_abs % 2) else 1.0, dtype=real_dtype).astype(
+            complex_dtype
+        )
         return sign * jnp.conjugate(pos[(n, m_abs)])
 
     return tuple(get(n, m) for n in range(5) for m in range(-n, n + 1))
@@ -569,7 +601,9 @@ def evaluate_local_complex_grad_order4_unrolled(
     if conjugate_left:
         local_coeffs = jnp.conjugate(local_coeffs)
     cdtype = jnp.result_type(local_coeffs.dtype, r[0].dtype)
-    half = jnp.asarray(0.5, dtype=jnp.real(jnp.zeros((), dtype=cdtype)).dtype).astype(cdtype)
+    half = jnp.asarray(0.5, dtype=jnp.real(jnp.zeros((), dtype=cdtype)).dtype).astype(
+        cdtype
+    )
     half_i = jnp.asarray(0.5j, dtype=cdtype)
     zero = jnp.asarray(0.0, dtype=cdtype)
 

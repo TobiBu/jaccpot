@@ -113,7 +113,9 @@ def complex_R_solidfmm_preserve_dtype(delta: jnp.ndarray, *, order: int) -> jnp.
         return _pack_complex(val)
 
     val = val.at[1, 0].set(z.astype(complex_dtype))
-    val = val.at[1, 1].set(xy * jnp.asarray(0.5, dtype=real_dtype).astype(complex_dtype))
+    val = val.at[1, 1].set(
+        xy * jnp.asarray(0.5, dtype=real_dtype).astype(complex_dtype)
+    )
 
     for m in range(2, p + 1):
         fac = jnp.asarray(1.0 / (2.0 * m), dtype=real_dtype).astype(complex_dtype)
@@ -130,8 +132,7 @@ def complex_R_solidfmm_preserve_dtype(delta: jnp.ndarray, *, order: int) -> jnp.
                 complex_dtype
             )
             val = val.at[n, m].set(
-                ((2 * n - 1) * zc * val[n - 1, m] - r2c * val[n - 2, m])
-                * fac
+                ((2 * n - 1) * zc * val[n - 1, m] - r2c * val[n - 2, m]) * fac
             )
 
     return _pack_complex(val)
