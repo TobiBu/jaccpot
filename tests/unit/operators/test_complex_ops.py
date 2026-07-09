@@ -546,10 +546,7 @@ def test_regular_harmonic_directional_derivative_batch_matches_single(
     directions = jnp.asarray(rng.normal(size=(6, 3)), dtype=jnp.float64)
     got = batch_fn(deltas, directions, order=order, **kwargs)
     ref = jnp.stack(
-        [
-            single_fn(d, v, order=order, **kwargs)
-            for d, v in zip(deltas, directions)
-        ],
+        [single_fn(d, v, order=order, **kwargs) for d, v in zip(deltas, directions)],
         axis=0,
     )
     assert np.allclose(np.asarray(got), np.asarray(ref), rtol=1e-12, atol=1e-12)
