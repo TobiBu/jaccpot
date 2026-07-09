@@ -584,21 +584,20 @@ def _build_dual_tree_artifacts_split_strict_streamed(
     else:
         max_interactions_per_node = 8192
         max_neighbors_per_leaf = 4096
-        max_pair_queue_resolved = None if max_pair_queue is None else int(max_pair_queue)
+        max_pair_queue_resolved = (
+            None if max_pair_queue is None else int(max_pair_queue)
+        )
         process_block_resolved = (
             None if pair_process_block is None else int(pair_process_block)
         )
 
-    flat_compact_enabled = (
-        os.environ.get("JACCPOT_STATIC_STRICT_FUSED_FLAT_COMPACT_FAR_PAIRS", "1")
-        not in ("0", "false", "False", "off", "OFF")
-    )
+    flat_compact_enabled = os.environ.get(
+        "JACCPOT_STATIC_STRICT_FUSED_FLAT_COMPACT_FAR_PAIRS", "1"
+    ) not in ("0", "false", "False", "off", "OFF")
     compact_far_pair_capacity = None
     if flat_compact_enabled:
         compact_far_pair_capacity = int(
-            os.environ.get(
-                "JACCPOT_STATIC_STRICT_FUSED_COMPACT_FAR_PAIR_CAP", "131072"
-            )
+            os.environ.get("JACCPOT_STATIC_STRICT_FUSED_COMPACT_FAR_PAIR_CAP", "131072")
         )
         if compact_far_pair_capacity <= 0:
             raise ValueError(

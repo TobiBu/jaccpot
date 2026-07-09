@@ -99,7 +99,9 @@ def _load_problem_npz(path: str, *, dtype: jnp.dtype) -> tuple[jax.Array, jax.Ar
     elif "mass" in payload:
         masses = np.asarray(payload["mass"])
     else:
-        masses = np.full((positions.shape[0],), 1.0 / positions.shape[0], dtype=np.float32)
+        masses = np.full(
+            (positions.shape[0],), 1.0 / positions.shape[0], dtype=np.float32
+        )
     if masses.shape != (positions.shape[0],):
         raise ValueError(
             f"masses must have shape ({positions.shape[0]},), got {tuple(masses.shape)}"

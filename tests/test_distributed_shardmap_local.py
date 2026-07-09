@@ -10,11 +10,10 @@ the L2P evaluation. Small N so the compile is quick.
         pytest tests/test_distributed_shardmap_local.py -q
 """
 
-import numpy as np
-import pytest
-
 import jax
 import jax.numpy as jnp
+import numpy as np
+import pytest
 from jax.sharding import PartitionSpec as P
 
 try:
@@ -23,18 +22,18 @@ except ImportError:  # pragma: no cover
     from jax.experimental.shard_map import shard_map
 
 from yggdrax import build_interactions_and_neighbors, compute_tree_geometry
-from yggdrax.interactions import DualTreeTraversalConfig
-from yggdrax.tree import Tree
 from yggdrax.distributed import device_count, make_mesh
 from yggdrax.distributed.partition import global_bounds
+from yggdrax.interactions import DualTreeTraversalConfig
+from yggdrax.tree import Tree
 
-from jaccpot.upward.tree_expansions import compute_node_multipoles
 from jaccpot.downward.local_expansions import (
     accumulate_m2l_contributions,
     initialize_local_expansions,
     propagate_local_expansions,
 )
 from jaccpot.runtime._fmm_impl import _evaluate_local_expansions_for_particles
+from jaccpot.upward.tree_expansions import compute_node_multipoles
 
 pytestmark = pytest.mark.skipif(
     device_count() < 2, reason="shard_map local-path needs >= 2 devices"
@@ -63,7 +62,11 @@ def test_local_far_path_under_shard_map():
     def fn(p, m):
         bounds = global_bounds(p)
         tree = Tree.from_particles(
-            p, m, tree_type="radix", bounds=bounds, return_reordered=True,
+            p,
+            m,
+            tree_type="radix",
+            bounds=bounds,
+            return_reordered=True,
             leaf_size=_LEAF,
         )
         geom = compute_tree_geometry(tree, tree.positions_sorted, max_leaf_size=_LEAF)
@@ -92,7 +95,10 @@ def test_local_far_path_under_shard_map():
         return jnp.sum(far)[None], jnp.sum(jnp.isfinite(far).astype(jnp.int32))[None]
 
     tot, nfinite = shard_map(
-        fn, mesh=mesh, in_specs=(P("gpus"), P("gpus")), out_specs=(P("gpus"), P("gpus")),
+        fn,
+        mesh=mesh,
+        in_specs=(P("gpus"), P("gpus")),
+        out_specs=(P("gpus"), P("gpus")),
         check_vma=False,
     )(pos, mass)
     tot = np.asarray(tot)

@@ -14,20 +14,18 @@ invariants (single device, fast, no shard_map):
 Together these mean a remote multipole array can be dropped in as the M2L source.
 """
 
-import numpy as np
-
 import jax.numpy as jnp
-
+import numpy as np
 from yggdrax.bounds import infer_bounds
 from yggdrax.dtypes import INDEX_DTYPE
 from yggdrax.interactions import NodeInteractionList
 from yggdrax.tree import Tree
 
-from jaccpot.upward.tree_expansions import NodeMultipoleData, compute_node_multipoles
 from jaccpot.downward.local_expansions import (
     accumulate_m2l_contributions,
     initialize_local_expansions,
 )
+from jaccpot.upward.tree_expansions import NodeMultipoleData, compute_node_multipoles
 
 _ORDER = 2
 _LEAF = 8
@@ -37,7 +35,11 @@ def _tree(points, bounds):
     pts = jnp.asarray(points)
     mass = jnp.ones(pts.shape[0], dtype=pts.dtype)
     tree = Tree.from_particles(
-        pts, mass, tree_type="radix", bounds=bounds, return_reordered=True,
+        pts,
+        mass,
+        tree_type="radix",
+        bounds=bounds,
+        return_reordered=True,
         leaf_size=_LEAF,
     )
     return tree, tree.positions_sorted, tree.masses_sorted
@@ -88,7 +90,9 @@ def test_m2l_additivity_over_sources():
     n_s = int(src_mp.centers.shape[0])
     offsets, sources, counts, src_cols = _per_target_sources(n_t, n_s)
 
-    multi = accumulate_m2l_contributions(_ilist(offsets, sources, counts), src_mp, local0)
+    multi = accumulate_m2l_contributions(
+        _ilist(offsets, sources, counts), src_mp, local0
+    )
 
     # Sum of per-source single-interaction runs (each from zero local0).
     acc = np.asarray(local0.coefficients)
@@ -98,7 +102,9 @@ def test_m2l_additivity_over_sources():
         )
         acc = acc + np.asarray(one.coefficients)
 
-    np.testing.assert_allclose(np.asarray(multi.coefficients), acc, rtol=1e-4, atol=1e-5)
+    np.testing.assert_allclose(
+        np.asarray(multi.coefficients), acc, rtol=1e-4, atol=1e-5
+    )
     # non-trivial
     assert np.abs(np.asarray(multi.coefficients)).max() > 0
 
@@ -109,7 +115,9 @@ def test_m2l_source_array_permutation_invariance():
     n_s = int(src_mp.centers.shape[0])
     offsets, sources, counts, _ = _per_target_sources(n_t, n_s)
 
-    base = accumulate_m2l_contributions(_ilist(offsets, sources, counts), src_mp, local0)
+    base = accumulate_m2l_contributions(
+        _ilist(offsets, sources, counts), src_mp, local0
+    )
 
     rng = np.random.default_rng(2)
     perm = rng.permutation(n_s)
@@ -128,5 +136,8 @@ def test_m2l_source_array_permutation_invariance():
     )
 
     np.testing.assert_allclose(
-        np.asarray(permd.coefficients), np.asarray(base.coefficients), rtol=1e-5, atol=1e-6
+        np.asarray(permd.coefficients),
+        np.asarray(base.coefficients),
+        rtol=1e-5,
+        atol=1e-6,
     )
