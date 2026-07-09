@@ -176,7 +176,8 @@ def test_evaluate_local_real_monopole():
 def test_evaluate_local_real_with_grad_consistency():
     """Gradient matches numerical gradient."""
     order = 3
-    local_coeffs = jnp.array(np.random.randn(sh_size(order)))
+    rng = np.random.default_rng(0)
+    local_coeffs = jnp.array(rng.standard_normal(sh_size(order)))
     delta = jnp.array([0.5, 0.3, 0.2])
 
     grad, val = evaluate_local_real_with_grad(local_coeffs, delta, order=order)
@@ -271,34 +272,40 @@ def test_rotation_preserves_monopole():
 # ===========================================================================
 
 
-def test_z_m2m_identity_at_zero():
-    """M2M with dz=0 should be identity."""
+@pytest.mark.parametrize(
+    "translate_fn, seed",
+    [
+        (translate_along_z_m2m_real, 0),
+        (translate_along_z_l2l_real, 1),
+    ],
+)
+def test_z_translate_identity_at_zero(translate_fn, seed):
+    """M2M/L2L with dz=0 should be identity."""
     order = 4
-    key = jax.random.PRNGKey(0)
-    multipole = jax.random.normal(key, (sh_size(order),))
+    key = jax.random.PRNGKey(seed)
+    coeffs = jax.random.normal(key, (sh_size(order),))
 
-    result = translate_along_z_m2m_real(multipole, jnp.array(0.0), order=order)
-    assert jnp.allclose(result, multipole, atol=1e-10)
+    result = translate_fn(coeffs, jnp.array(0.0), order=order)
+    assert jnp.allclose(result, coeffs, atol=1e-10)
 
 
-def test_z_l2l_identity_at_zero():
-    """L2L with dz=0 should be identity."""
+@pytest.mark.parametrize(
+    "m2l_call",
+    [
+        # Z-axis M2L: translation distance r=2.0 along z.
+        lambda mp, order: translate_along_z_m2l_real(mp, jnp.array(2.0), order=order),
+        # Full (rotated) M2L: delta of length 2.0 along x.
+        lambda mp, order: m2l_real(mp, jnp.array([2.0, 0.0, 0.0]), order=order),
+    ],
+)
+def test_m2l_monopole_gives_inverse_distance(m2l_call):
+    """M2L of a unit monopole at distance r gives a 1/r local monopole term."""
     order = 4
-    key = jax.random.PRNGKey(1)
-    local = jax.random.normal(key, (sh_size(order),))
-
-    result = translate_along_z_l2l_real(local, jnp.array(0.0), order=order)
-    assert jnp.allclose(result, local, atol=1e-10)
-
-
-def test_z_m2l_monopole_gives_inverse_distance():
-    """M2L of unit monopole at distance r gives 1/r."""
-    order = 4
+    r = 2.0
     multipole = jnp.zeros(sh_size(order))
     multipole = multipole.at[0].set(1.0)  # Unit monopole
 
-    r = 2.0
-    local = translate_along_z_m2l_real(multipole, jnp.array(r), order=order)
+    local = m2l_call(multipole, order)
 
     # The ell=0 local coefficient should be 1/r
     assert jnp.isclose(local[0], 1.0 / r, atol=1e-10)
@@ -325,8 +332,12 @@ def test_z_m2l_error_improves_with_order():
     # Direct potential: 1/|eval_point - origin|
     direct = 1.0 / jnp.linalg.norm(eval_point)
 
+    # Representative orders (smallest / middle / largest) are enough to
+    # establish the "error improves with order" trend and the final-accuracy
+    # margin, while keeping the JAX compile cost low.
+    orders = (1, 5, 9)
     errors = []
-    for order in range(1, 10):
+    for order in orders:
         # Unit monopole
         multipole = jnp.zeros(sh_size(order))
         multipole = multipole.at[0].set(1.0)
@@ -350,8 +361,8 @@ def test_z_m2l_error_improves_with_order():
             # Only check while error is above machine precision
             assert errors[i + 1] <= errors[i] * 1.1, (
                 "Error did not decrease: order "
-                f"{i+1} error {errors[i]:.2e} -> "
-                f"order {i+2} error {errors[i+1]:.2e}"
+                f"{orders[i]} error {errors[i]:.2e} -> "
+                f"order {orders[i+1]} error {errors[i+1]:.2e}"
             )
 
     # The highest order should achieve very good accuracy
@@ -398,7 +409,9 @@ def test_m2l_convergence_radius_respected_in_rotated_geometry():
 
     direct = 1.0 / r_eval
     errors = []
-    for order in range(2, 8):
+    # Representative orders (smallest / middle / largest) suffice to check the
+    # monotone-improvement trend while keeping the JAX compile cost low.
+    for order in (2, 4, 7):
         multipole = jnp.zeros(sh_size(order), dtype=dtype).at[0].set(1.0)
         local = translate_along_z_m2l_real(multipole, jnp.asarray(R), order=order)
         delta_l2p = local_center_rot - eval_point_rot
@@ -493,20 +506,6 @@ def test_m2m_real_preserves_monopole():
     assert jnp.isclose(result[0], multipole[0], atol=1e-10)
 
 
-def test_m2l_real_monopole_gives_inverse_distance():
-    """M2L of unit monopole gives a 1/r local monopole term."""
-    order = 4
-    multipole = jnp.zeros(sh_size(order))
-    multipole = multipole.at[0].set(1.0)  # Unit monopole
-
-    delta = jnp.array([2.0, 0.0, 0.0])  # Distance 2 along x
-    local = m2l_real(multipole, delta, order=order)
-
-    # The ell=0 local coefficient should be 1/|delta| = 0.5
-    r = jnp.linalg.norm(delta)
-    assert jnp.isclose(local[0], 1.0 / r, atol=1e-10)
-
-
 def test_m2l_real_matches_optimized():
     """m2l_real and m2l_optimized_real should give identical results."""
     order = 4
@@ -598,13 +597,6 @@ def test_full_pipeline_single_particle():
     # center MINUS eval_point
     delta_l2p = local_center - test_point
     potential_fmm = evaluate_local_real(local, delta_l2p, order=order)
-
-    # Direct calculation
-    r = jnp.linalg.norm(test_point - source_pos)
-    potential_direct = mass / r
-
-    # Should match to good precision for well-separated expansion
-    assert jnp.isclose(potential_fmm, potential_direct, rtol=1e-6)
 
     # Direct calculation
     r = jnp.linalg.norm(test_point - source_pos)

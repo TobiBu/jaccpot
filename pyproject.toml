@@ -44,6 +44,7 @@ dev = [
   "isort>=5.13.2",
   "pytest>=8.3.0",
   "pytest-cov>=5.0.0",
+  "pytest-xdist>=3.6.0",
   "pre-commit>=3.8.0",
   "build>=1.2.2",
   "twine>=5.1.1",
@@ -77,7 +78,11 @@ skip_gitignore = true
 [tool.pytest.ini_options]
 minversion = "7.4"
 testpaths = ["tests"]
-addopts = "-q --strict-markers --ignore=tests/perf"
+# `-n auto` runs the (compilation-bound) JAX test suite across all logical cores
+# via pytest-xdist. On a 72-core host this cuts wall-clock from ~25 min to ~2 min;
+# a fixed `-n 32` measured marginally faster there. Override with `-n 0` to run
+# serially (e.g. for pdb/`-x` debugging, which xdist does not support).
+addopts = "-q --strict-markers --ignore=tests/perf -n auto"
 
 [tool.coverage.run]
 source = ["jaccpot"]

@@ -1959,7 +1959,10 @@ def test_runtime_memory_policy_fields_flow_to_runtime():
 
 
 def test_solidfmm_upward_defaults_to_bounded_leaf_batch_size():
-    positions, masses = _sample_problem(n=4096)
+    # The recorded batch size is min(num_leaves, _DEFAULT_LEAF_BATCH_SIZE) and
+    # expected_batch is recomputed from the actual tree below, so a small N is
+    # sufficient to exercise the leaf_batch_size=None default path.
+    positions, masses = _sample_problem(n=512)
     fmm = FastMultipoleMethod(
         preset=FMMPreset.FAST,
         basis="solidfmm",
