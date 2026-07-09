@@ -934,7 +934,9 @@ def test_translate_multipole_to_local_order_four_matches_autodiff():
         rho = offsets[idx]
         approx = _evaluate_local_series(local_coeffs, rho, order)
         actual = multipole_potential(delta + rho)
-    assert jnp.allclose(approx, actual, atol=1e-8, rtol=5e-6)
+        assert jnp.allclose(
+            approx, actual, atol=1e-8, rtol=5e-6
+        ), f"local series mismatch at offset {idx} ({offsets[idx]})"
 
 
 def test_translate_multipole_to_local_order4_derivatives_offsets():
