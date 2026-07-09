@@ -27,11 +27,10 @@ itself is validated separately in yggdrax).
         pytest tests/test_distributed_fmm_shardmap.py -q
 """
 
-import numpy as np
-import pytest
-
 import jax
 import jax.numpy as jnp
+import numpy as np
+import pytest
 from jax.sharding import PartitionSpec as P
 
 try:
@@ -40,10 +39,6 @@ except ImportError:  # pragma: no cover
     from jax.experimental.shard_map import shard_map
 
 from yggdrax import build_interactions_and_neighbors, compute_tree_geometry
-from yggdrax.dtypes import INDEX_DTYPE
-from yggdrax.interactions import DualTreeTraversalConfig, NodeInteractionList
-from yggdrax.morton import morton_encode_impl
-from yggdrax.tree import Tree
 from yggdrax.distributed import device_count, make_mesh
 from yggdrax.distributed.cross_walk import dual_tree_walk_cross_impl
 from yggdrax.distributed.let import (
@@ -53,8 +48,11 @@ from yggdrax.distributed.let import (
 )
 from yggdrax.distributed.local_tree import sanitize_padding
 from yggdrax.distributed.partition import global_bounds
+from yggdrax.dtypes import INDEX_DTYPE
+from yggdrax.interactions import DualTreeTraversalConfig, NodeInteractionList
+from yggdrax.morton import morton_encode_impl
+from yggdrax.tree import Tree
 
-from jaccpot.upward.tree_expansions import compute_node_multipoles
 from jaccpot.downward.local_expansions import (
     accumulate_m2l_contributions,
     initialize_local_expansions,
@@ -62,6 +60,7 @@ from jaccpot.downward.local_expansions import (
 )
 from jaccpot.nearfield.near_field import compute_leaf_p2p_accelerations
 from jaccpot.runtime._fmm_impl import _evaluate_local_expansions_for_particles
+from jaccpot.upward.tree_expansions import compute_node_multipoles
 
 pytestmark = pytest.mark.skipif(
     device_count() < 2, reason="distributed FMM needs >= 2 devices"
@@ -106,7 +105,7 @@ def test_distributed_fmm_shardmap_matches_direct():
     mass_g = np.zeros((ndev, cap), np.float32)
     gid_g = np.full((ndev, cap), -1, np.int64)
     for d in range(ndev):
-        chunk = order[d * per:(d + 1) * per]
+        chunk = order[d * per : (d + 1) * per]
         pos_g[d, :per] = pts[chunk]
         mass_g[d, :per] = mass[chunk]
         gid_g[d, :per] = chunk
@@ -116,16 +115,19 @@ def test_distributed_fmm_shardmap_matches_direct():
     max_req = (ndev - 1) * Lloc
     max_recv = (ndev - 1) * Lloc
     cfg = DualTreeTraversalConfig(
-        max_interactions_per_node=256, max_neighbors_per_leaf=64,
-        max_pair_queue=8192, process_block=64,
+        max_interactions_per_node=256,
+        max_neighbors_per_leaf=64,
+        max_pair_queue=8192,
+        process_block=64,
     )
     KC = 256  # cross-walk far/near caps
     KN = 64
 
-    def _combined_neighbors(tree, nbr, cross, rct, halo, n_local, n_halo_rows,
-                            local_only=False):
+    def _combined_neighbors(
+        tree, nbr, cross, rct, halo, n_local, n_halo_rows, local_only=False
+    ):
         """Vectorised unified P2P neighbour CSR over [local leaves ; halo blocks]."""
-        leaf_nodes = jnp.asarray(nbr.leaf_indices, INDEX_DTYPE)   # [Lloc]
+        leaf_nodes = jnp.asarray(nbr.leaf_indices, INDEX_DTYPE)  # [Lloc]
         n_lloc = leaf_nodes.shape[0]
         total_nodes = jnp.asarray(tree.node_ranges).shape[0]
         node_to_row = (
@@ -158,8 +160,12 @@ def test_distributed_fmm_shardmap_matches_direct():
         c_tgt_node = cross_leaf[jnp.clip(c_row, 0, cross_leaf.shape[0] - 1)]
         r_tgt = node_to_row[jnp.clip(c_tgt_node, 0, total_nodes)]
         coarse_ranges = jnp.asarray(rct.tree.node_ranges, INDEX_DTYPE)
-        coarse_pos = coarse_ranges[jnp.clip(r_src_cnode, 0, coarse_ranges.shape[0] - 1), 0]
-        block = halo.coarse_to_halo[jnp.clip(coarse_pos, 0, halo.coarse_to_halo.shape[0] - 1)]
+        coarse_pos = coarse_ranges[
+            jnp.clip(r_src_cnode, 0, coarse_ranges.shape[0] - 1), 0
+        ]
+        block = halo.coarse_to_halo[
+            jnp.clip(coarse_pos, 0, halo.coarse_to_halo.shape[0] - 1)
+        ]
         r_src_row = n_lloc + block
         r_valid = r_valid & (r_tgt >= 0) & (block >= 0)
 
@@ -179,16 +185,18 @@ def test_distributed_fmm_shardmap_matches_direct():
         tgt_s = tgt[srt]
         src_s = src[srt]
         counts = jnp.bincount(tgt, length=u_leaves).astype(INDEX_DTYPE)
-        offsets = jnp.concatenate(
-            [jnp.zeros((1,), INDEX_DTYPE), jnp.cumsum(counts)]
-        )
+        offsets = jnp.concatenate([jnp.zeros((1,), INDEX_DTYPE), jnp.cumsum(counts)])
         return offsets, src_s, counts, u_leaves
 
     def fn(pos, mass, gid, count):
         bounds = global_bounds(pos)
         pos_s, mass_s = sanitize_padding(pos, mass, count)
         tree = Tree.from_particles(
-            pos_s, mass_s, tree_type="radix", bounds=bounds, return_reordered=True,
+            pos_s,
+            mass_s,
+            tree_type="radix",
+            bounds=bounds,
+            return_reordered=True,
             leaf_size=_LEAF,
         )
         lp = tree.positions_sorted
@@ -197,20 +205,27 @@ def test_distributed_fmm_shardmap_matches_direct():
         geom = compute_tree_geometry(tree, lp, max_leaf_size=_LEAF)
         mp = compute_node_multipoles(tree, lp, lm, max_order=_P)
         inter, nbr, walkres = build_interactions_and_neighbors(
-            tree, geom, theta=_THETA, traversal_config=cfg, mac_type=_MAC,
+            tree,
+            geom,
+            theta=_THETA,
+            traversal_config=cfg,
+            mac_type=_MAC,
             return_result=True,
         )
-        diag = jnp.array([
-            walkres.far_pair_count.astype(jnp.float64),
-            walkres.near_pair_count.astype(jnp.float64),
-            walkres.queue_overflow.astype(jnp.float64),
-            walkres.far_overflow.astype(jnp.float64),
-            walkres.near_overflow.astype(jnp.float64),
-            jnp.sum(jnp.asarray(nbr.counts)).astype(jnp.float64),
-        ])
+        diag = jnp.array(
+            [
+                walkres.far_pair_count.astype(jnp.float64),
+                walkres.near_pair_count.astype(jnp.float64),
+                walkres.queue_overflow.astype(jnp.float64),
+                walkres.far_overflow.astype(jnp.float64),
+                walkres.near_overflow.astype(jnp.float64),
+                jnp.sum(jnp.asarray(nbr.counts)).astype(jnp.float64),
+            ]
+        )
 
         # remote coarse tree + classify + halo import (frontier uses mass/COM)
         from yggdrax.tree_moments import compute_tree_mass_moments
+
         mm = compute_tree_mass_moments(tree, lp, lm)
         fr = build_coarse_frontier(tree, mm.mass, mm.center_of_mass)
         rct = build_remote_coarse_tree(fr, ndev, bounds=bounds)
@@ -218,12 +233,25 @@ def test_distributed_fmm_shardmap_matches_direct():
             rct.tree, rct.positions_sorted, rct.masses_sorted, max_order=_P
         )
         cross = dual_tree_walk_cross_impl(
-            tree, geom, rct.tree, rct.geometry, _THETA_CROSS, mac_type=_MAC,
-            max_interactions_per_node=KC, max_neighbors_per_leaf=KN, max_pair_queue=8192,
+            tree,
+            geom,
+            rct.tree,
+            rct.geometry,
+            _THETA_CROSS,
+            mac_type=_MAC,
+            max_interactions_per_node=KC,
+            max_neighbors_per_leaf=KN,
+            max_pair_queue=8192,
         )
         halo = import_near_halo(
-            rct, cross, lp, lm, ndev, leaf_size=_LEAF,
-            max_req_leaves=max_req, max_recv_leaves=max_recv,
+            rct,
+            cross,
+            lp,
+            lm,
+            ndev,
+            leaf_size=_LEAF,
+            max_req_leaves=max_req,
+            max_recv_leaves=max_recv,
         )
 
         mp = mp._replace(order=_P)
@@ -235,8 +263,13 @@ def test_distributed_fmm_shardmap_matches_direct():
             loc = loc._replace(order=_P)
             loc = propagate_local_expansions(tree, loc)
             g = _evaluate_local_expansions_for_particles(
-                loc, lp, leaf_nodes=leaf_nodes, node_ranges=nr,
-                max_leaf_size=_LEAF, order=_P, expansion_basis="cartesian",
+                loc,
+                lp,
+                leaf_nodes=leaf_nodes,
+                node_ranges=nr,
+                max_leaf_size=_LEAF,
+                order=_P,
+                expansion_basis="cartesian",
                 return_potential=False,
             )[0]
             return -_G * g
@@ -278,7 +311,13 @@ def test_distributed_fmm_shardmap_matches_direct():
             tree, nbr, cross, rct, halo, cap, 0, local_only=True
         )
         near_self = compute_leaf_p2p_accelerations(
-            tree, nbr, lp, lm, G=_G, softening=_SOFT, nearfield_mode="baseline",
+            tree,
+            nbr,
+            lp,
+            lm,
+            G=_G,
+            softening=_SOFT,
+            nearfield_mode="baseline",
             node_ranges_override=jnp.zeros((ul_s + 1, 2), INDEX_DTYPE),
             leaf_nodes_override=jnp.arange(ul_s, dtype=INDEX_DTYPE),
             neighbor_offsets_override=offs_s,
@@ -295,7 +334,12 @@ def test_distributed_fmm_shardmap_matches_direct():
         lp_idx = jnp.concatenate([loc_idx, halo_idx], axis=0)
         lp_mask = jnp.concatenate([loc_mask, halo_mask], axis=0)
         near_full = compute_leaf_p2p_accelerations(
-            tree, nbr, concat_pos, concat_mass, G=_G, softening=_SOFT,
+            tree,
+            nbr,
+            concat_pos,
+            concat_mass,
+            G=_G,
+            softening=_SOFT,
             nearfield_mode="baseline",
             node_ranges_override=jnp.zeros((u_leaves + 1, 2), INDEX_DTYPE),
             leaf_nodes_override=jnp.arange(u_leaves, dtype=INDEX_DTYPE),
@@ -317,7 +361,8 @@ def test_distributed_fmm_shardmap_matches_direct():
 
     counts_dev = jnp.full((ndev,), per, dtype=INDEX_DTYPE)
     far_o, near_o, far_full_o, near_full_o, gid_out, diag_o = shard_map(
-        fn, mesh=mesh,
+        fn,
+        mesh=mesh,
         in_specs=(P("gpus"), P("gpus"), P("gpus"), P("gpus")),
         out_specs=(P("gpus"),) * 6,
         check_vma=False,
@@ -334,10 +379,10 @@ def test_distributed_fmm_shardmap_matches_direct():
     gid_out = np.asarray(gid_out).reshape(-1).astype(np.int64)
 
     # match distributed forces back to global ids, and record each particle's domain
-    dist = np.zeros((n, 3), np.float64)          # full
-    dist_self = np.zeros((n, 3), np.float64)     # local self only
-    r_far = np.zeros((n, 3), np.float64)         # remote far (M2L coarse)
-    r_near = np.zeros((n, 3), np.float64)        # remote near (halo)
+    dist = np.zeros((n, 3), np.float64)  # full
+    dist_self = np.zeros((n, 3), np.float64)  # local self only
+    r_far = np.zeros((n, 3), np.float64)  # remote far (M2L coarse)
+    r_near = np.zeros((n, 3), np.float64)  # remote near (halo)
     domain_of = np.full(n, -1, np.int64)
     seen = np.zeros(n, bool)
     rows_per = far_o.shape[0] // ndev
@@ -359,14 +404,16 @@ def test_distributed_fmm_shardmap_matches_direct():
     direct_local = np.zeros((n, 3), np.float64)
     for d in range(ndev):
         idx = np.where(domain_of == d)[0]
-        dl = np.asarray(_direct(jnp.asarray(pts[idx]), jnp.asarray(mass[idx]), _G, _SOFT))
+        dl = np.asarray(
+            _direct(jnp.asarray(pts[idx]), jnp.asarray(mass[idx]), _G, _SOFT)
+        )
         direct_local[idx] = dl
 
     # aggregate relative L2 error (robust: low-net-force particles don't explode)
     def _agg(a, b):
         return float(np.linalg.norm(a - b) / (np.linalg.norm(b) + 1e-30))
 
-    direct_remote = direct - direct_local          # each particle vs OTHER domains
+    direct_remote = direct - direct_local  # each particle vs OTHER domains
     err_self = _agg(dist_self, direct_local)
     err_full = _agg(dist, direct)
     err_remote = _agg(r_far + r_near, direct_remote)

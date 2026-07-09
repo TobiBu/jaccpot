@@ -17,22 +17,19 @@ This is the single-device validation of the force path; the shard_map wrapping
 is mechanical on top.
 """
 
-import numpy as np
-
 import jax.numpy as jnp
-
+import numpy as np
 from yggdrax import (
     build_interactions_and_neighbors,
     compute_tree_geometry,
     get_leaf_nodes,
     infer_bounds,
 )
+from yggdrax.distributed import dual_tree_walk_cross
 from yggdrax.dtypes import INDEX_DTYPE
 from yggdrax.interactions import NodeInteractionList
 from yggdrax.tree import Tree
-from yggdrax.distributed import dual_tree_walk_cross
 
-from jaccpot.upward.tree_expansions import compute_node_multipoles
 from jaccpot.downward.local_expansions import (
     accumulate_m2l_contributions,
     initialize_local_expansions,
@@ -40,6 +37,7 @@ from jaccpot.downward.local_expansions import (
 )
 from jaccpot.nearfield.near_field import compute_leaf_p2p_accelerations
 from jaccpot.runtime._fmm_impl import _evaluate_local_expansions_for_particles
+from jaccpot.upward.tree_expansions import compute_node_multipoles
 
 _P = 2
 _THETA = 0.4
@@ -53,7 +51,11 @@ def _build(points, bounds):
     pts = jnp.asarray(points)
     mass = jnp.asarray(points_mass(points))
     tree = Tree.from_particles(
-        pts, mass, tree_type="radix", bounds=bounds, return_reordered=True,
+        pts,
+        mass,
+        tree_type="radix",
+        bounds=bounds,
+        return_reordered=True,
         leaf_size=_LEAF,
     )
     geom = compute_tree_geometry(tree, tree.positions_sorted, max_leaf_size=_LEAF)
@@ -91,7 +93,7 @@ def test_distributed_fmm_assembly_matches_direct():
     # Split into two spatially-contiguous domains by x (A = remote's neighbour).
     order = np.argsort(pts[:, 0])
     A_pts = pts[order[: n // 2]]
-    B_pts = pts[order[n // 2:]]
+    B_pts = pts[order[n // 2 :]]
 
     tree_A, geom_A = _build(A_pts, bounds)
     tree_B, geom_B = _build(B_pts, bounds)
@@ -101,24 +103,37 @@ def test_distributed_fmm_assembly_matches_direct():
     B_mass = np.asarray(tree_B.masses_sorted)
     nA, nB = A_pos.shape[0], B_pos.shape[0]
 
-    mp_A = compute_node_multipoles(tree_A, tree_A.positions_sorted, tree_A.masses_sorted, max_order=_P)
-    mp_B = compute_node_multipoles(tree_B, tree_B.positions_sorted, tree_B.masses_sorted, max_order=_P)
+    mp_A = compute_node_multipoles(
+        tree_A, tree_A.positions_sorted, tree_A.masses_sorted, max_order=_P
+    )
+    mp_B = compute_node_multipoles(
+        tree_B, tree_B.positions_sorted, tree_B.masses_sorted, max_order=_P
+    )
 
     # ---- FAR: self M2L + remote M2L -> L2L -> L2P ----
     inter_A, nbr_A = build_interactions_and_neighbors(
         tree_A, geom_A, theta=_THETA, mac_type=_MAC
     )
     cross = dual_tree_walk_cross(
-        tree_A, geom_A, tree_B, geom_B, _THETA, mac_type=_MAC,
-        max_interactions_per_node=512, max_neighbors_per_leaf=512, max_pair_queue=16384,
+        tree_A,
+        geom_A,
+        tree_B,
+        geom_B,
+        _THETA,
+        mac_type=_MAC,
+        max_interactions_per_node=512,
+        max_neighbors_per_leaf=512,
+        max_pair_queue=16384,
     )
     assert not bool(cross.far_overflow) and not bool(cross.near_overflow)
     assert not bool(cross.queue_overflow)
 
     local = initialize_local_expansions(tree_A, mp_A.centers, max_order=_P)
-    local = accumulate_m2l_contributions(inter_A, mp_A, local)          # A <- A
-    local = accumulate_m2l_contributions(_ilist_from_cross(cross), mp_B, local)  # A <- B
-    local = propagate_local_expansions(tree_A, local)                   # L2L
+    local = accumulate_m2l_contributions(inter_A, mp_A, local)  # A <- A
+    local = accumulate_m2l_contributions(
+        _ilist_from_cross(cross), mp_B, local
+    )  # A <- B
+    local = propagate_local_expansions(tree_A, local)  # L2L
 
     A_leaf_nodes = np.asarray(nbr_A.leaf_indices)
     far_grad = _evaluate_local_expansions_for_particles(
@@ -159,22 +174,26 @@ def test_distributed_fmm_assembly_matches_direct():
     def _csr_map(off, nbr, cnt, rowleaf):
         off, nbr, cnt, rowleaf = map(np.asarray, (off, nbr, cnt, rowleaf))
         return {
-            int(rowleaf[r]): nbr[int(off[r]): int(off[r]) + int(cnt[r])].tolist()
+            int(rowleaf[r]): nbr[int(off[r]) : int(off[r]) + int(cnt[r])].tolist()
             for r in range(len(rowleaf))
         }
 
-    self_nbr = _csr_map(nbr_A.offsets, nbr_A.neighbors, nbr_A.counts, nbr_A.leaf_indices)
+    self_nbr = _csr_map(
+        nbr_A.offsets, nbr_A.neighbors, nbr_A.counts, nbr_A.leaf_indices
+    )
     cross_nbr = _csr_map(
-        cross.neighbor_offsets, cross.neighbor_indices, cross.neighbor_counts,
+        cross.neighbor_offsets,
+        cross.neighbor_indices,
+        cross.neighbor_counts,
         cross.leaf_indices,
     )
 
     uni_neighbors, uni_offsets = [], [0]
     for nd in A_leaf_nodes:
         for sn in self_nbr.get(int(nd), []):
-            uni_neighbors.append(A_node_to_row[int(sn)])          # A self -> A row
+            uni_neighbors.append(A_node_to_row[int(sn)])  # A self -> A row
         for sn in cross_nbr.get(int(nd), []):
-            uni_neighbors.append(La + B_node_to_row[int(sn)])     # A<-B  -> B row
+            uni_neighbors.append(La + B_node_to_row[int(sn)])  # A<-B  -> B row
         uni_offsets.append(len(uni_neighbors))
     for _ in range(Lb):  # B rows target nothing (their outputs are discarded)
         uni_offsets.append(len(uni_neighbors))

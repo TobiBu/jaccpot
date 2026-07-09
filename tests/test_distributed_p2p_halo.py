@@ -10,10 +10,8 @@ checks the local particles' accelerations equal a direct Plummer sum over the
 halo particles (single device, fast, no shard_map).
 """
 
-import numpy as np
-
 import jax.numpy as jnp
-
+import numpy as np
 from yggdrax import build_prepared_tree_artifacts
 from yggdrax.dtypes import INDEX_DTYPE
 
@@ -25,7 +23,7 @@ _SOFT = 0.05
 
 def _plummer(tgt, src, src_mass, G, soft):
     """Plummer accel on each `tgt` from all `src` (self pairs give 0: diff=0)."""
-    diff = tgt[:, None, :] - src[None, :, :]             # r_i - r_j
+    diff = tgt[:, None, :] - src[None, :, :]  # r_i - r_j
     d2 = (diff**2).sum(-1) + soft**2
     inv = d2 ** (-1.5)
     return -G * (src_mass[None, :, None] * diff * inv[..., None]).sum(axis=1)
@@ -40,7 +38,7 @@ def test_halo_source_p2p_matches_direct_sum():
     loc_mass = rng.uniform(0.5, 2.0, size=(n_loc,)).astype(np.float32)
     halo_mass = rng.uniform(0.5, 2.0, size=(n_halo,)).astype(np.float32)
 
-    pos = jnp.asarray(np.concatenate([local, halo], axis=0))       # [nL+nH, 3]
+    pos = jnp.asarray(np.concatenate([local, halo], axis=0))  # [nL+nH, 3]
     mass = jnp.asarray(np.concatenate([loc_mass, halo_mass], axis=0))
 
     # Throwaway real Tree + NodeNeighborList only to satisfy the typed signature;
@@ -66,8 +64,12 @@ def test_halo_source_p2p_matches_direct_sum():
         nearfield_mode="baseline",
         node_ranges_override=jnp.zeros((2, 2), INDEX_DTYPE),
         leaf_nodes_override=jnp.asarray([0, 1], INDEX_DTYPE),
-        neighbor_offsets_override=jnp.asarray([0, 1, 1], INDEX_DTYPE),  # leaf0 -> [edge0]
-        neighbor_indices_override=jnp.asarray([1], INDEX_DTYPE),        # edge0 source = leaf node 1
+        neighbor_offsets_override=jnp.asarray(
+            [0, 1, 1], INDEX_DTYPE
+        ),  # leaf0 -> [edge0]
+        neighbor_indices_override=jnp.asarray(
+            [1], INDEX_DTYPE
+        ),  # edge0 source = leaf node 1
         neighbor_counts_override=jnp.asarray([1, 0], INDEX_DTYPE),
         leaf_particle_indices_override=jnp.asarray(idx, INDEX_DTYPE),
         leaf_particle_mask_override=jnp.asarray(m),
