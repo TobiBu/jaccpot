@@ -9,15 +9,19 @@ Each GPU owns a Morton domain and, per device inside one shard_map:
 Forces are matched back to a global-id direct N-body sum.
 
 RESULT: the local FMM and the LET near-field (halo import + combined P2P) are
-BIT-EXACT vs direct on 4 GPUs. Two jaccpot stages misbehave *under shard_map*
-specifically (they are correct single-device -- see Phase 4a/b/c):
-  * the near P2P via node_ranges-gather (`_prepare_leaf_data`) -> WORKED AROUND
-    here by driving compute_leaf_p2p_accelerations through its explicit
-    `leaf_particle_indices_override` path;
-  * the P2M/M2L->L2P far chain (also node_ranges-gather) -> still open, so this
-    test exercises the near-field LET (theta_cross->0 imports all remote as
-    halo). The coarse far-field M2L is a scaling optimisation, deferred until
-    the jaccpot P2M shard_map path is fixed the same way as the P2P one.
+BIT-EXACT vs direct on 4 GPUs. Two separate issues are worked around / deferred:
+  * SHARD_MAP BUG: jaccpot's near P2P via node_ranges-gather
+    (`_prepare_leaf_data`) gives ~100x-wrong forces under shard_map (correct
+    single-device). WORKED AROUND here by driving compute_leaf_p2p_accelerations
+    through its explicit `leaf_particle_indices_override` path (bit-exact).
+  * COARSE FAR-FIELD BUG (open, NOT shard_map): the coarse-tree M2L (a leaf=1
+    tree over remote frontier COMs) produces garbage even single-device, and
+    error grows with more far interactions -> a real bug in the coarse M2L
+    path, distinct from shard_map (M2L/L2P are bit-exact under shard_map mesh=1;
+    the full-tree far in the single-device Phase 4c assembly is accurate). So
+    this test routes all remote through the (exact) near-field LET
+    (theta_cross->0). The coarse far-field M2L is a scaling optimisation,
+    deferred pending that debug (fast single-device cycles).
 
 Domains are pre-split by Morton on the host and carried with a global id, so
 the distributed result can be matched to the reference (the SFC decompose
