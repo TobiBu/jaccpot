@@ -1260,9 +1260,12 @@ def propagate_local_expansions(
     centers = jnp.asarray(local_data.centers)
     coeffs = jnp.asarray(local_data.coefficients)
 
-    num_internal = int(tree.num_internal_nodes)
+    # Use the static array shape (not int(tree.num_internal_nodes)) so this is
+    # safe to trace inside a transform such as jax.shard_map, where the tree's
+    # scalar count fields are traced leaves.
     left_child = jnp.asarray(tree.left_child, dtype=INDEX_DTYPE)
     right_child = jnp.asarray(tree.right_child, dtype=INDEX_DTYPE)
+    num_internal = int(left_child.shape[0])
 
     if num_internal == 0:
         return LocalExpansionData(
