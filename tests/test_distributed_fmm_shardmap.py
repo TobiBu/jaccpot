@@ -246,7 +246,7 @@ def test_distributed_fmm_shardmap_matches_direct():
         # Gather every domain's per-node multipoles; seed each coarse leaf with
         # the real order-p multipole of the remote leaf it represents (their
         # expansion centres coincide -- both are that leaf's COM), then M2M up.
-        gpacked = jax.lax.all_gather(mp.packed, "gpus", tiled=False)   # [ndev,Nnodes,C]
+        gpacked = jax.lax.all_gather(mp.packed, "gpus", tiled=False)  # [ndev,Nnodes,C]
         c_geom_mp = compute_node_multipoles(
             rct.tree, rct.positions_sorted, rct.masses_sorted, max_order=_P
         )
@@ -257,7 +257,7 @@ def test_distributed_fmm_shardmap_matches_direct():
         c_nint = int(c_lc.shape[0])
         c_nr = jnp.asarray(rct.tree.node_ranges, INDEX_DTYPE)
         c_leaves = jnp.arange(c_nint, c_total, dtype=INDEX_DTYPE)
-        spos = c_nr[c_leaves, 0]                      # coarse sorted pos per leaf
+        spos = c_nr[c_leaves, 0]  # coarse sorted pos per leaf
         dom = rct.tag_domain[spos]
         nod = rct.tag_node_id[spos]
         okm = nod >= 0
@@ -269,8 +269,12 @@ def test_distributed_fmm_shardmap_matches_direct():
             seed, c_centers, c_lc, c_rc, order=_P, num_internal=c_nint
         )
         rmp = NodeMultipoleData(
-            order=_P, centers=c_centers, moments=None, packed=full_packed,
-            component_matrix=None, source_motion_packed=None,
+            order=_P,
+            centers=c_centers,
+            moments=None,
+            packed=full_packed,
+            component_matrix=None,
+            source_motion_packed=None,
         )
         cross = dual_tree_walk_cross_impl(
             tree,
