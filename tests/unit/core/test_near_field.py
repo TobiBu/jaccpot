@@ -2,6 +2,7 @@
 
 import os
 from dataclasses import replace
+from types import SimpleNamespace
 
 import jax
 import jax.numpy as jnp
@@ -53,6 +54,60 @@ def _direct_sum(
         potentials[i] = -G * np.sum(masses * inv_r)
 
     return accelerations, potentials
+
+
+@pytest.fixture(scope="module")
+def accel_only_case():
+    """Shared 6-particle tree + leaf-particle index/mask used by the large-N
+    accel-only parity tests (built once per module)."""
+    positions = jnp.array(
+        [
+            [-0.8, 0.1, 0.0],
+            [-0.7, -0.1, 0.05],
+            [-0.2, 0.3, -0.2],
+            [0.15, 0.25, 0.1],
+            [0.6, -0.2, -0.05],
+            [0.75, 0.05, 0.2],
+        ]
+    )
+    masses = jnp.array([1.0, 1.5, 0.7, 0.9, 1.2, 0.8])
+    bounds = (jnp.array([-1.0, -1.0, -1.0]), jnp.array([1.0, 1.0, 1.0]))
+    tree, pos_sorted, mass_sorted, _ = build_tree(
+        positions, masses, bounds, return_reordered=True, leaf_size=2
+    )
+    geometry = compute_tree_geometry(tree, pos_sorted)
+    neighbor_list = build_leaf_neighbor_lists(tree, geometry, theta=0.3)
+
+    node_ranges = jnp.asarray(tree.node_ranges)
+    leaf_nodes = jnp.asarray(neighbor_list.leaf_indices)
+    leaf_ranges = node_ranges[leaf_nodes]
+    counts = leaf_ranges[:, 1] - leaf_ranges[:, 0] + 1
+    max_leaf_size = int(np.max(np.asarray(counts)))
+    offsets = jnp.arange(max_leaf_size, dtype=leaf_ranges.dtype)
+    leaf_particle_indices = leaf_ranges[:, 0][:, None] + offsets[None, :]
+    leaf_particle_mask = offsets[None, :] < counts[:, None]
+    return SimpleNamespace(
+        tree=tree,
+        neighbor_list=neighbor_list,
+        pos_sorted=pos_sorted,
+        mass_sorted=mass_sorted,
+        leaf_particle_indices=leaf_particle_indices,
+        leaf_particle_mask=leaf_particle_mask,
+    )
+
+
+def _accel_only(case):
+    return compute_leaf_p2p_accelerations_large_n_accel_only(
+        case.tree,
+        case.neighbor_list,
+        case.pos_sorted,
+        case.mass_sorted,
+        G=1.25,
+        softening=0.05,
+        edge_chunk_size=2,
+        leaf_particle_indices=case.leaf_particle_indices,
+        leaf_particle_mask=case.leaf_particle_mask,
+    )
 
 
 def test_near_field_matches_direct_sum():
@@ -400,626 +455,105 @@ def test_large_n_accel_only_prepared_bucketed_matches_generic():
     )
 
 
-def test_large_n_accel_only_delayed_scatter_chunking_matches_baseline():
-    positions = jnp.array(
-        [
-            [-0.8, 0.1, 0.0],
-            [-0.7, -0.1, 0.05],
-            [-0.2, 0.3, -0.2],
-            [0.15, 0.25, 0.1],
-            [0.6, -0.2, -0.05],
-            [0.75, 0.05, 0.2],
-        ]
-    )
-    masses = jnp.array([1.0, 1.5, 0.7, 0.9, 1.2, 0.8])
-    bounds = (
-        jnp.array([-1.0, -1.0, -1.0]),
-        jnp.array([1.0, 1.0, 1.0]),
-    )
-
-    tree, pos_sorted, mass_sorted, _ = build_tree(
-        positions,
-        masses,
-        bounds,
-        return_reordered=True,
-        leaf_size=2,
-    )
-    geometry = compute_tree_geometry(tree, pos_sorted)
-    neighbor_list = build_leaf_neighbor_lists(tree, geometry, theta=0.3)
-
-    node_ranges = jnp.asarray(tree.node_ranges)
-    leaf_nodes = jnp.asarray(neighbor_list.leaf_indices)
-    leaf_ranges = node_ranges[leaf_nodes]
-    counts = leaf_ranges[:, 1] - leaf_ranges[:, 0] + 1
-    max_leaf_size = int(np.max(np.asarray(counts)))
-    offsets = jnp.arange(max_leaf_size, dtype=leaf_ranges.dtype)
-    leaf_particle_indices = leaf_ranges[:, 0][:, None] + offsets[None, :]
-    leaf_particle_mask = offsets[None, :] < counts[:, None]
-
-    old_env = os.environ.get("JACCPOT_LARGE_N_DELAYED_SCATTER_CHUNKS")
-    try:
-        os.environ["JACCPOT_LARGE_N_DELAYED_SCATTER_CHUNKS"] = "1"
-        baseline = compute_leaf_p2p_accelerations_large_n_accel_only(
-            tree,
-            neighbor_list,
-            pos_sorted,
-            mass_sorted,
-            G=1.25,
-            softening=0.05,
-            edge_chunk_size=2,
-            leaf_particle_indices=leaf_particle_indices,
-            leaf_particle_mask=leaf_particle_mask,
-        )
-
-        os.environ["JACCPOT_LARGE_N_DELAYED_SCATTER_CHUNKS"] = "2"
-        delayed = compute_leaf_p2p_accelerations_large_n_accel_only(
-            tree,
-            neighbor_list,
-            pos_sorted,
-            mass_sorted,
-            G=1.25,
-            softening=0.05,
-            edge_chunk_size=2,
-            leaf_particle_indices=leaf_particle_indices,
-            leaf_particle_mask=leaf_particle_mask,
-        )
-    finally:
-        if old_env is None:
-            os.environ.pop("JACCPOT_LARGE_N_DELAYED_SCATTER_CHUNKS", None)
-        else:
-            os.environ["JACCPOT_LARGE_N_DELAYED_SCATTER_CHUNKS"] = old_env
-
-    assert np.allclose(
-        np.asarray(delayed),
-        np.asarray(baseline),
-        rtol=1e-6,
-        atol=1e-6,
-    )
+_ACCEL_ONLY_PARITY_CASES = {
+    "delayed_scatter_chunking": (
+        {"JACCPOT_LARGE_N_DELAYED_SCATTER_CHUNKS": "1"},
+        {"JACCPOT_LARGE_N_DELAYED_SCATTER_CHUNKS": "2"},
+    ),
+    "target_owned_accum": (
+        {"JACCPOT_LARGE_N_TARGET_OWNED_ACCUM": "0"},
+        {
+            "JACCPOT_LARGE_N_TARGET_OWNED_ACCUM": "1",
+            "JACCPOT_LARGE_N_TARGET_LEAF_BATCH_SIZE": "2",
+            "JACCPOT_LARGE_N_TARGET_LEAF_NEIGHBOR_BLOCK_SIZE": "2",
+        },
+    ),
+    "sorted_scatter_hint": (
+        {
+            "JACCPOT_LARGE_N_TARGET_OWNED_ACCUM": "0",
+            "JACCPOT_LARGE_N_SORTED_SCATTER_HINT": "0",
+        },
+        {
+            "JACCPOT_LARGE_N_TARGET_OWNED_ACCUM": "0",
+            "JACCPOT_LARGE_N_SORTED_SCATTER_HINT": "1",
+        },
+    ),
+    "grouped_sorted_scatter": (
+        {
+            "JACCPOT_LARGE_N_TARGET_OWNED_ACCUM": "0",
+            "JACCPOT_LARGE_N_SORTED_SCATTER_HINT": "0",
+            "JACCPOT_LARGE_N_GROUPED_SORTED_SCATTER": "0",
+        },
+        {
+            "JACCPOT_LARGE_N_TARGET_OWNED_ACCUM": "0",
+            "JACCPOT_LARGE_N_SORTED_SCATTER_HINT": "1",
+            "JACCPOT_LARGE_N_GROUPED_SORTED_SCATTER": "1",
+        },
+    ),
+    "target_owned_accum_v2": (
+        {
+            "JACCPOT_LARGE_N_TARGET_OWNED_ACCUM": "0",
+            "JACCPOT_LARGE_N_TARGET_OWNED_ACCUM_V2": "0",
+        },
+        {
+            "JACCPOT_LARGE_N_TARGET_OWNED_ACCUM": "1",
+            "JACCPOT_LARGE_N_TARGET_OWNED_ACCUM_V2": "1",
+            "JACCPOT_LARGE_N_TARGET_LEAF_BATCH_SIZE": "2",
+            "JACCPOT_LARGE_N_TARGET_LEAF_NEIGHBOR_BLOCK_SIZE": "2",
+        },
+    ),
+    "superchunk_target_reduce": (
+        {
+            "JACCPOT_LARGE_N_TARGET_OWNED_ACCUM": "0",
+            "JACCPOT_LARGE_N_DELAYED_SCATTER_CHUNKS": "2",
+            "JACCPOT_LARGE_N_SUPERCHUNK_TARGET_REDUCE": "0",
+        },
+        {
+            "JACCPOT_LARGE_N_TARGET_OWNED_ACCUM": "0",
+            "JACCPOT_LARGE_N_DELAYED_SCATTER_CHUNKS": "2",
+            "JACCPOT_LARGE_N_SUPERCHUNK_TARGET_REDUCE": "1",
+        },
+    ),
+    "disable_chunk_cond": (
+        {
+            "JACCPOT_LARGE_N_TARGET_OWNED_ACCUM": "0",
+            "JACCPOT_LARGE_N_DELAYED_SCATTER_CHUNKS": "1",
+            "JACCPOT_LARGE_N_DISABLE_CHUNK_COND": "0",
+        },
+        {
+            "JACCPOT_LARGE_N_TARGET_OWNED_ACCUM": "0",
+            "JACCPOT_LARGE_N_DELAYED_SCATTER_CHUNKS": "1",
+            "JACCPOT_LARGE_N_DISABLE_CHUNK_COND": "1",
+        },
+    ),
+}
 
 
-def test_large_n_accel_only_target_owned_accum_matches_baseline():
-    positions = jnp.array(
-        [
-            [-0.8, 0.1, 0.0],
-            [-0.7, -0.1, 0.05],
-            [-0.2, 0.3, -0.2],
-            [0.15, 0.25, 0.1],
-            [0.6, -0.2, -0.05],
-            [0.75, 0.05, 0.2],
-        ]
-    )
-    masses = jnp.array([1.0, 1.5, 0.7, 0.9, 1.2, 0.8])
-    bounds = (
-        jnp.array([-1.0, -1.0, -1.0]),
-        jnp.array([1.0, 1.0, 1.0]),
-    )
+@pytest.mark.parametrize(
+    "baseline_env, optimized_env",
+    list(_ACCEL_ONLY_PARITY_CASES.values()),
+    ids=list(_ACCEL_ONLY_PARITY_CASES.keys()),
+)
+def test_large_n_accel_only_env_variants_match_baseline(
+    monkeypatch, accel_only_case, baseline_env, optimized_env
+):
+    """Every large-N accel-only scatter/accumulation variant must reproduce the
+    default baseline bit-for-bit on the shared small case.
 
-    tree, pos_sorted, mass_sorted, _ = build_tree(
-        positions,
-        masses,
-        bounds,
-        return_reordered=True,
-        leaf_size=2,
-    )
-    geometry = compute_tree_geometry(tree, pos_sorted)
-    neighbor_list = build_leaf_neighbor_lists(tree, geometry, theta=0.3)
+    Consolidates the former per-flag ``*_matches_baseline`` tests, which each
+    rebuilt the identical 6-particle tree and ran the same baseline/optimized
+    A/B comparison.
+    """
+    for name, value in baseline_env.items():
+        monkeypatch.setenv(name, value)
+    baseline = _accel_only(accel_only_case)
 
-    node_ranges = jnp.asarray(tree.node_ranges)
-    leaf_nodes = jnp.asarray(neighbor_list.leaf_indices)
-    leaf_ranges = node_ranges[leaf_nodes]
-    counts = leaf_ranges[:, 1] - leaf_ranges[:, 0] + 1
-    max_leaf_size = int(np.max(np.asarray(counts)))
-    offsets = jnp.arange(max_leaf_size, dtype=leaf_ranges.dtype)
-    leaf_particle_indices = leaf_ranges[:, 0][:, None] + offsets[None, :]
-    leaf_particle_mask = offsets[None, :] < counts[:, None]
-
-    old_target_owned = os.environ.get("JACCPOT_LARGE_N_TARGET_OWNED_ACCUM")
-    old_batch = os.environ.get("JACCPOT_LARGE_N_TARGET_LEAF_BATCH_SIZE")
-    old_neighbor_block = os.environ.get(
-        "JACCPOT_LARGE_N_TARGET_LEAF_NEIGHBOR_BLOCK_SIZE"
-    )
-    try:
-        os.environ["JACCPOT_LARGE_N_TARGET_OWNED_ACCUM"] = "0"
-        baseline = compute_leaf_p2p_accelerations_large_n_accel_only(
-            tree,
-            neighbor_list,
-            pos_sorted,
-            mass_sorted,
-            G=1.25,
-            softening=0.05,
-            edge_chunk_size=2,
-            leaf_particle_indices=leaf_particle_indices,
-            leaf_particle_mask=leaf_particle_mask,
-        )
-
-        os.environ["JACCPOT_LARGE_N_TARGET_OWNED_ACCUM"] = "1"
-        os.environ["JACCPOT_LARGE_N_TARGET_LEAF_BATCH_SIZE"] = "2"
-        os.environ["JACCPOT_LARGE_N_TARGET_LEAF_NEIGHBOR_BLOCK_SIZE"] = "2"
-        target_owned = compute_leaf_p2p_accelerations_large_n_accel_only(
-            tree,
-            neighbor_list,
-            pos_sorted,
-            mass_sorted,
-            G=1.25,
-            softening=0.05,
-            edge_chunk_size=2,
-            leaf_particle_indices=leaf_particle_indices,
-            leaf_particle_mask=leaf_particle_mask,
-        )
-    finally:
-        if old_target_owned is None:
-            os.environ.pop("JACCPOT_LARGE_N_TARGET_OWNED_ACCUM", None)
-        else:
-            os.environ["JACCPOT_LARGE_N_TARGET_OWNED_ACCUM"] = old_target_owned
-        if old_batch is None:
-            os.environ.pop("JACCPOT_LARGE_N_TARGET_LEAF_BATCH_SIZE", None)
-        else:
-            os.environ["JACCPOT_LARGE_N_TARGET_LEAF_BATCH_SIZE"] = old_batch
-        if old_neighbor_block is None:
-            os.environ.pop("JACCPOT_LARGE_N_TARGET_LEAF_NEIGHBOR_BLOCK_SIZE", None)
-        else:
-            os.environ["JACCPOT_LARGE_N_TARGET_LEAF_NEIGHBOR_BLOCK_SIZE"] = (
-                old_neighbor_block
-            )
+    for name, value in optimized_env.items():
+        monkeypatch.setenv(name, value)
+    optimized = _accel_only(accel_only_case)
 
     assert np.allclose(
-        np.asarray(target_owned),
-        np.asarray(baseline),
-        rtol=1e-6,
-        atol=1e-6,
-    )
-
-
-def test_large_n_accel_only_sorted_scatter_hint_matches_baseline():
-    positions = jnp.array(
-        [
-            [-0.8, 0.1, 0.0],
-            [-0.7, -0.1, 0.05],
-            [-0.2, 0.3, -0.2],
-            [0.15, 0.25, 0.1],
-            [0.6, -0.2, -0.05],
-            [0.75, 0.05, 0.2],
-        ]
-    )
-    masses = jnp.array([1.0, 1.5, 0.7, 0.9, 1.2, 0.8])
-    bounds = (
-        jnp.array([-1.0, -1.0, -1.0]),
-        jnp.array([1.0, 1.0, 1.0]),
-    )
-
-    tree, pos_sorted, mass_sorted, _ = build_tree(
-        positions,
-        masses,
-        bounds,
-        return_reordered=True,
-        leaf_size=2,
-    )
-    geometry = compute_tree_geometry(tree, pos_sorted)
-    neighbor_list = build_leaf_neighbor_lists(tree, geometry, theta=0.3)
-
-    node_ranges = jnp.asarray(tree.node_ranges)
-    leaf_nodes = jnp.asarray(neighbor_list.leaf_indices)
-    leaf_ranges = node_ranges[leaf_nodes]
-    counts = leaf_ranges[:, 1] - leaf_ranges[:, 0] + 1
-    max_leaf_size = int(np.max(np.asarray(counts)))
-    offsets = jnp.arange(max_leaf_size, dtype=leaf_ranges.dtype)
-    leaf_particle_indices = leaf_ranges[:, 0][:, None] + offsets[None, :]
-    leaf_particle_mask = offsets[None, :] < counts[:, None]
-
-    old_sorted_hint = os.environ.get("JACCPOT_LARGE_N_SORTED_SCATTER_HINT")
-    old_target_owned = os.environ.get("JACCPOT_LARGE_N_TARGET_OWNED_ACCUM")
-    try:
-        os.environ["JACCPOT_LARGE_N_TARGET_OWNED_ACCUM"] = "0"
-        os.environ["JACCPOT_LARGE_N_SORTED_SCATTER_HINT"] = "0"
-        baseline = compute_leaf_p2p_accelerations_large_n_accel_only(
-            tree,
-            neighbor_list,
-            pos_sorted,
-            mass_sorted,
-            G=1.25,
-            softening=0.05,
-            edge_chunk_size=2,
-            leaf_particle_indices=leaf_particle_indices,
-            leaf_particle_mask=leaf_particle_mask,
-        )
-
-        os.environ["JACCPOT_LARGE_N_SORTED_SCATTER_HINT"] = "1"
-        sorted_hint = compute_leaf_p2p_accelerations_large_n_accel_only(
-            tree,
-            neighbor_list,
-            pos_sorted,
-            mass_sorted,
-            G=1.25,
-            softening=0.05,
-            edge_chunk_size=2,
-            leaf_particle_indices=leaf_particle_indices,
-            leaf_particle_mask=leaf_particle_mask,
-        )
-    finally:
-        if old_target_owned is None:
-            os.environ.pop("JACCPOT_LARGE_N_TARGET_OWNED_ACCUM", None)
-        else:
-            os.environ["JACCPOT_LARGE_N_TARGET_OWNED_ACCUM"] = old_target_owned
-        if old_sorted_hint is None:
-            os.environ.pop("JACCPOT_LARGE_N_SORTED_SCATTER_HINT", None)
-        else:
-            os.environ["JACCPOT_LARGE_N_SORTED_SCATTER_HINT"] = old_sorted_hint
-
-    assert np.allclose(
-        np.asarray(sorted_hint),
-        np.asarray(baseline),
-        rtol=1e-6,
-        atol=1e-6,
-    )
-
-
-def test_large_n_accel_only_grouped_sorted_scatter_matches_baseline():
-    positions = jnp.array(
-        [
-            [-0.8, 0.1, 0.0],
-            [-0.7, -0.1, 0.05],
-            [-0.2, 0.3, -0.2],
-            [0.15, 0.25, 0.1],
-            [0.6, -0.2, -0.05],
-            [0.75, 0.05, 0.2],
-        ]
-    )
-    masses = jnp.array([1.0, 1.5, 0.7, 0.9, 1.2, 0.8])
-    bounds = (
-        jnp.array([-1.0, -1.0, -1.0]),
-        jnp.array([1.0, 1.0, 1.0]),
-    )
-
-    tree, pos_sorted, mass_sorted, _ = build_tree(
-        positions,
-        masses,
-        bounds,
-        return_reordered=True,
-        leaf_size=2,
-    )
-    geometry = compute_tree_geometry(tree, pos_sorted)
-    neighbor_list = build_leaf_neighbor_lists(tree, geometry, theta=0.3)
-
-    node_ranges = jnp.asarray(tree.node_ranges)
-    leaf_nodes = jnp.asarray(neighbor_list.leaf_indices)
-    leaf_ranges = node_ranges[leaf_nodes]
-    counts = leaf_ranges[:, 1] - leaf_ranges[:, 0] + 1
-    max_leaf_size = int(np.max(np.asarray(counts)))
-    offsets = jnp.arange(max_leaf_size, dtype=leaf_ranges.dtype)
-    leaf_particle_indices = leaf_ranges[:, 0][:, None] + offsets[None, :]
-    leaf_particle_mask = offsets[None, :] < counts[:, None]
-
-    old_sorted_hint = os.environ.get("JACCPOT_LARGE_N_SORTED_SCATTER_HINT")
-    old_grouped_sorted = os.environ.get("JACCPOT_LARGE_N_GROUPED_SORTED_SCATTER")
-    old_target_owned = os.environ.get("JACCPOT_LARGE_N_TARGET_OWNED_ACCUM")
-    try:
-        os.environ["JACCPOT_LARGE_N_TARGET_OWNED_ACCUM"] = "0"
-        os.environ["JACCPOT_LARGE_N_SORTED_SCATTER_HINT"] = "0"
-        os.environ["JACCPOT_LARGE_N_GROUPED_SORTED_SCATTER"] = "0"
-        baseline = compute_leaf_p2p_accelerations_large_n_accel_only(
-            tree,
-            neighbor_list,
-            pos_sorted,
-            mass_sorted,
-            G=1.25,
-            softening=0.05,
-            edge_chunk_size=2,
-            leaf_particle_indices=leaf_particle_indices,
-            leaf_particle_mask=leaf_particle_mask,
-        )
-
-        os.environ["JACCPOT_LARGE_N_SORTED_SCATTER_HINT"] = "1"
-        os.environ["JACCPOT_LARGE_N_GROUPED_SORTED_SCATTER"] = "1"
-        grouped_sorted = compute_leaf_p2p_accelerations_large_n_accel_only(
-            tree,
-            neighbor_list,
-            pos_sorted,
-            mass_sorted,
-            G=1.25,
-            softening=0.05,
-            edge_chunk_size=2,
-            leaf_particle_indices=leaf_particle_indices,
-            leaf_particle_mask=leaf_particle_mask,
-        )
-    finally:
-        if old_target_owned is None:
-            os.environ.pop("JACCPOT_LARGE_N_TARGET_OWNED_ACCUM", None)
-        else:
-            os.environ["JACCPOT_LARGE_N_TARGET_OWNED_ACCUM"] = old_target_owned
-        if old_sorted_hint is None:
-            os.environ.pop("JACCPOT_LARGE_N_SORTED_SCATTER_HINT", None)
-        else:
-            os.environ["JACCPOT_LARGE_N_SORTED_SCATTER_HINT"] = old_sorted_hint
-        if old_grouped_sorted is None:
-            os.environ.pop("JACCPOT_LARGE_N_GROUPED_SORTED_SCATTER", None)
-        else:
-            os.environ["JACCPOT_LARGE_N_GROUPED_SORTED_SCATTER"] = old_grouped_sorted
-
-    assert np.allclose(
-        np.asarray(grouped_sorted),
-        np.asarray(baseline),
-        rtol=1e-6,
-        atol=1e-6,
-    )
-
-
-def test_large_n_accel_only_target_owned_accum_v2_matches_baseline():
-    positions = jnp.array(
-        [
-            [-0.8, 0.1, 0.0],
-            [-0.7, -0.1, 0.05],
-            [-0.2, 0.3, -0.2],
-            [0.15, 0.25, 0.1],
-            [0.6, -0.2, -0.05],
-            [0.75, 0.05, 0.2],
-        ]
-    )
-    masses = jnp.array([1.0, 1.5, 0.7, 0.9, 1.2, 0.8])
-    bounds = (
-        jnp.array([-1.0, -1.0, -1.0]),
-        jnp.array([1.0, 1.0, 1.0]),
-    )
-
-    tree, pos_sorted, mass_sorted, _ = build_tree(
-        positions,
-        masses,
-        bounds,
-        return_reordered=True,
-        leaf_size=2,
-    )
-    geometry = compute_tree_geometry(tree, pos_sorted)
-    neighbor_list = build_leaf_neighbor_lists(tree, geometry, theta=0.3)
-
-    node_ranges = jnp.asarray(tree.node_ranges)
-    leaf_nodes = jnp.asarray(neighbor_list.leaf_indices)
-    leaf_ranges = node_ranges[leaf_nodes]
-    counts = leaf_ranges[:, 1] - leaf_ranges[:, 0] + 1
-    max_leaf_size = int(np.max(np.asarray(counts)))
-    offsets = jnp.arange(max_leaf_size, dtype=leaf_ranges.dtype)
-    leaf_particle_indices = leaf_ranges[:, 0][:, None] + offsets[None, :]
-    leaf_particle_mask = offsets[None, :] < counts[:, None]
-
-    old_target_owned = os.environ.get("JACCPOT_LARGE_N_TARGET_OWNED_ACCUM")
-    old_target_owned_v2 = os.environ.get("JACCPOT_LARGE_N_TARGET_OWNED_ACCUM_V2")
-    old_batch = os.environ.get("JACCPOT_LARGE_N_TARGET_LEAF_BATCH_SIZE")
-    old_neighbor_block = os.environ.get(
-        "JACCPOT_LARGE_N_TARGET_LEAF_NEIGHBOR_BLOCK_SIZE"
-    )
-    try:
-        os.environ["JACCPOT_LARGE_N_TARGET_OWNED_ACCUM"] = "0"
-        os.environ["JACCPOT_LARGE_N_TARGET_OWNED_ACCUM_V2"] = "0"
-        baseline = compute_leaf_p2p_accelerations_large_n_accel_only(
-            tree,
-            neighbor_list,
-            pos_sorted,
-            mass_sorted,
-            G=1.25,
-            softening=0.05,
-            edge_chunk_size=2,
-            leaf_particle_indices=leaf_particle_indices,
-            leaf_particle_mask=leaf_particle_mask,
-        )
-
-        os.environ["JACCPOT_LARGE_N_TARGET_OWNED_ACCUM"] = "1"
-        os.environ["JACCPOT_LARGE_N_TARGET_OWNED_ACCUM_V2"] = "1"
-        os.environ["JACCPOT_LARGE_N_TARGET_LEAF_BATCH_SIZE"] = "2"
-        os.environ["JACCPOT_LARGE_N_TARGET_LEAF_NEIGHBOR_BLOCK_SIZE"] = "2"
-        target_owned_v2 = compute_leaf_p2p_accelerations_large_n_accel_only(
-            tree,
-            neighbor_list,
-            pos_sorted,
-            mass_sorted,
-            G=1.25,
-            softening=0.05,
-            edge_chunk_size=2,
-            leaf_particle_indices=leaf_particle_indices,
-            leaf_particle_mask=leaf_particle_mask,
-        )
-    finally:
-        if old_target_owned is None:
-            os.environ.pop("JACCPOT_LARGE_N_TARGET_OWNED_ACCUM", None)
-        else:
-            os.environ["JACCPOT_LARGE_N_TARGET_OWNED_ACCUM"] = old_target_owned
-        if old_target_owned_v2 is None:
-            os.environ.pop("JACCPOT_LARGE_N_TARGET_OWNED_ACCUM_V2", None)
-        else:
-            os.environ["JACCPOT_LARGE_N_TARGET_OWNED_ACCUM_V2"] = old_target_owned_v2
-        if old_batch is None:
-            os.environ.pop("JACCPOT_LARGE_N_TARGET_LEAF_BATCH_SIZE", None)
-        else:
-            os.environ["JACCPOT_LARGE_N_TARGET_LEAF_BATCH_SIZE"] = old_batch
-        if old_neighbor_block is None:
-            os.environ.pop("JACCPOT_LARGE_N_TARGET_LEAF_NEIGHBOR_BLOCK_SIZE", None)
-        else:
-            os.environ["JACCPOT_LARGE_N_TARGET_LEAF_NEIGHBOR_BLOCK_SIZE"] = (
-                old_neighbor_block
-            )
-
-    assert np.allclose(
-        np.asarray(target_owned_v2),
-        np.asarray(baseline),
-        rtol=1e-6,
-        atol=1e-6,
-    )
-
-
-def test_large_n_accel_only_superchunk_target_reduce_matches_baseline():
-    positions = jnp.array(
-        [
-            [-0.8, 0.1, 0.0],
-            [-0.7, -0.1, 0.05],
-            [-0.2, 0.3, -0.2],
-            [0.15, 0.25, 0.1],
-            [0.6, -0.2, -0.05],
-            [0.75, 0.05, 0.2],
-        ]
-    )
-    masses = jnp.array([1.0, 1.5, 0.7, 0.9, 1.2, 0.8])
-    bounds = (
-        jnp.array([-1.0, -1.0, -1.0]),
-        jnp.array([1.0, 1.0, 1.0]),
-    )
-
-    tree, pos_sorted, mass_sorted, _ = build_tree(
-        positions,
-        masses,
-        bounds,
-        return_reordered=True,
-        leaf_size=2,
-    )
-    geometry = compute_tree_geometry(tree, pos_sorted)
-    neighbor_list = build_leaf_neighbor_lists(tree, geometry, theta=0.3)
-
-    node_ranges = jnp.asarray(tree.node_ranges)
-    leaf_nodes = jnp.asarray(neighbor_list.leaf_indices)
-    leaf_ranges = node_ranges[leaf_nodes]
-    counts = leaf_ranges[:, 1] - leaf_ranges[:, 0] + 1
-    max_leaf_size = int(np.max(np.asarray(counts)))
-    offsets = jnp.arange(max_leaf_size, dtype=leaf_ranges.dtype)
-    leaf_particle_indices = leaf_ranges[:, 0][:, None] + offsets[None, :]
-    leaf_particle_mask = offsets[None, :] < counts[:, None]
-
-    old_target_owned = os.environ.get("JACCPOT_LARGE_N_TARGET_OWNED_ACCUM")
-    old_chunks = os.environ.get("JACCPOT_LARGE_N_DELAYED_SCATTER_CHUNKS")
-    old_superchunk_reduce = os.environ.get("JACCPOT_LARGE_N_SUPERCHUNK_TARGET_REDUCE")
-    try:
-        os.environ["JACCPOT_LARGE_N_TARGET_OWNED_ACCUM"] = "0"
-        os.environ["JACCPOT_LARGE_N_DELAYED_SCATTER_CHUNKS"] = "2"
-        os.environ["JACCPOT_LARGE_N_SUPERCHUNK_TARGET_REDUCE"] = "0"
-        baseline = compute_leaf_p2p_accelerations_large_n_accel_only(
-            tree,
-            neighbor_list,
-            pos_sorted,
-            mass_sorted,
-            G=1.25,
-            softening=0.05,
-            edge_chunk_size=2,
-            leaf_particle_indices=leaf_particle_indices,
-            leaf_particle_mask=leaf_particle_mask,
-        )
-
-        os.environ["JACCPOT_LARGE_N_SUPERCHUNK_TARGET_REDUCE"] = "1"
-        reduced = compute_leaf_p2p_accelerations_large_n_accel_only(
-            tree,
-            neighbor_list,
-            pos_sorted,
-            mass_sorted,
-            G=1.25,
-            softening=0.05,
-            edge_chunk_size=2,
-            leaf_particle_indices=leaf_particle_indices,
-            leaf_particle_mask=leaf_particle_mask,
-        )
-    finally:
-        if old_target_owned is None:
-            os.environ.pop("JACCPOT_LARGE_N_TARGET_OWNED_ACCUM", None)
-        else:
-            os.environ["JACCPOT_LARGE_N_TARGET_OWNED_ACCUM"] = old_target_owned
-        if old_chunks is None:
-            os.environ.pop("JACCPOT_LARGE_N_DELAYED_SCATTER_CHUNKS", None)
-        else:
-            os.environ["JACCPOT_LARGE_N_DELAYED_SCATTER_CHUNKS"] = old_chunks
-        if old_superchunk_reduce is None:
-            os.environ.pop("JACCPOT_LARGE_N_SUPERCHUNK_TARGET_REDUCE", None)
-        else:
-            os.environ["JACCPOT_LARGE_N_SUPERCHUNK_TARGET_REDUCE"] = (
-                old_superchunk_reduce
-            )
-
-    assert np.allclose(
-        np.asarray(reduced),
-        np.asarray(baseline),
-        rtol=1e-6,
-        atol=1e-6,
-    )
-
-
-def test_large_n_accel_only_disable_chunk_cond_matches_baseline():
-    positions = jnp.array(
-        [
-            [-0.8, 0.1, 0.0],
-            [-0.7, -0.1, 0.05],
-            [-0.2, 0.3, -0.2],
-            [0.15, 0.25, 0.1],
-            [0.6, -0.2, -0.05],
-            [0.75, 0.05, 0.2],
-        ]
-    )
-    masses = jnp.array([1.0, 1.5, 0.7, 0.9, 1.2, 0.8])
-    bounds = (
-        jnp.array([-1.0, -1.0, -1.0]),
-        jnp.array([1.0, 1.0, 1.0]),
-    )
-
-    tree, pos_sorted, mass_sorted, _ = build_tree(
-        positions,
-        masses,
-        bounds,
-        return_reordered=True,
-        leaf_size=2,
-    )
-    geometry = compute_tree_geometry(tree, pos_sorted)
-    neighbor_list = build_leaf_neighbor_lists(tree, geometry, theta=0.3)
-
-    node_ranges = jnp.asarray(tree.node_ranges)
-    leaf_nodes = jnp.asarray(neighbor_list.leaf_indices)
-    leaf_ranges = node_ranges[leaf_nodes]
-    counts = leaf_ranges[:, 1] - leaf_ranges[:, 0] + 1
-    max_leaf_size = int(np.max(np.asarray(counts)))
-    offsets = jnp.arange(max_leaf_size, dtype=leaf_ranges.dtype)
-    leaf_particle_indices = leaf_ranges[:, 0][:, None] + offsets[None, :]
-    leaf_particle_mask = offsets[None, :] < counts[:, None]
-
-    old_target_owned = os.environ.get("JACCPOT_LARGE_N_TARGET_OWNED_ACCUM")
-    old_disable_chunk_cond = os.environ.get("JACCPOT_LARGE_N_DISABLE_CHUNK_COND")
-    old_chunks = os.environ.get("JACCPOT_LARGE_N_DELAYED_SCATTER_CHUNKS")
-    try:
-        os.environ["JACCPOT_LARGE_N_TARGET_OWNED_ACCUM"] = "0"
-        os.environ["JACCPOT_LARGE_N_DELAYED_SCATTER_CHUNKS"] = "1"
-        os.environ["JACCPOT_LARGE_N_DISABLE_CHUNK_COND"] = "0"
-        baseline = compute_leaf_p2p_accelerations_large_n_accel_only(
-            tree,
-            neighbor_list,
-            pos_sorted,
-            mass_sorted,
-            G=1.25,
-            softening=0.05,
-            edge_chunk_size=2,
-            leaf_particle_indices=leaf_particle_indices,
-            leaf_particle_mask=leaf_particle_mask,
-        )
-
-        os.environ["JACCPOT_LARGE_N_DISABLE_CHUNK_COND"] = "1"
-        no_cond = compute_leaf_p2p_accelerations_large_n_accel_only(
-            tree,
-            neighbor_list,
-            pos_sorted,
-            mass_sorted,
-            G=1.25,
-            softening=0.05,
-            edge_chunk_size=2,
-            leaf_particle_indices=leaf_particle_indices,
-            leaf_particle_mask=leaf_particle_mask,
-        )
-    finally:
-        if old_target_owned is None:
-            os.environ.pop("JACCPOT_LARGE_N_TARGET_OWNED_ACCUM", None)
-        else:
-            os.environ["JACCPOT_LARGE_N_TARGET_OWNED_ACCUM"] = old_target_owned
-        if old_disable_chunk_cond is None:
-            os.environ.pop("JACCPOT_LARGE_N_DISABLE_CHUNK_COND", None)
-        else:
-            os.environ["JACCPOT_LARGE_N_DISABLE_CHUNK_COND"] = old_disable_chunk_cond
-        if old_chunks is None:
-            os.environ.pop("JACCPOT_LARGE_N_DELAYED_SCATTER_CHUNKS", None)
-        else:
-            os.environ["JACCPOT_LARGE_N_DELAYED_SCATTER_CHUNKS"] = old_chunks
-
-    assert np.allclose(
-        np.asarray(no_cond),
-        np.asarray(baseline),
-        rtol=1e-6,
-        atol=1e-6,
+        np.asarray(optimized), np.asarray(baseline), rtol=1e-6, atol=1e-6
     )
 
 

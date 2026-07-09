@@ -98,6 +98,12 @@ def _prepare_tree_for_m2l(order: int = 2):
     return tree, upward, interactions
 
 
+@pytest.fixture(scope="module")
+def prepared_m2l_tree():
+    """Shared order-2 M2L tree, reused so the XLA artifact is compiled once."""
+    return _prepare_tree_for_m2l()
+
+
 def _pack_local_coefficients(order, scalar, vec, mat, dtype):
     coeffs = jnp.zeros((total_coefficients(order),), dtype=dtype)
     coeffs = coeffs.at[level_offset(0)].set(scalar)
@@ -611,8 +617,8 @@ def test_propagate_local_expansions_accumulates_parent():
     "chunk_size",
     [1, 2, DEFAULT_M2L_CHUNK_SIZE, 10**6],
 )
-def test_accumulate_m2l_matches_pairwise_translations(chunk_size):
-    tree, upward, interactions = _prepare_tree_for_m2l()
+def test_accumulate_m2l_matches_pairwise_translations(chunk_size, prepared_m2l_tree):
+    tree, upward, interactions = prepared_m2l_tree
 
     order = int(upward.multipoles.order)
     local_init = initialize_local_expansions(
@@ -662,8 +668,8 @@ def test_accumulate_m2l_matches_pairwise_translations(chunk_size):
 
 
 @pytest.mark.parametrize("bad_chunk", [0, -3])
-def test_accumulate_m2l_rejects_non_positive_chunk_size(bad_chunk):
-    tree, upward, interactions = _prepare_tree_for_m2l()
+def test_accumulate_m2l_rejects_non_positive_chunk_size(bad_chunk, prepared_m2l_tree):
+    tree, upward, interactions = prepared_m2l_tree
 
     order = int(upward.multipoles.order)
     local_init = initialize_local_expansions(
@@ -681,8 +687,8 @@ def test_accumulate_m2l_rejects_non_positive_chunk_size(bad_chunk):
         )
 
 
-def test_accumulate_dense_m2l_matches_sparse_accumulator():
-    tree, upward, _interactions = _prepare_tree_for_m2l()
+def test_accumulate_dense_m2l_matches_sparse_accumulator(prepared_m2l_tree):
+    tree, upward, _interactions = prepared_m2l_tree
     dense_buffers = build_dense_interactions(
         tree,
         upward.geometry,
@@ -784,10 +790,12 @@ def test_translate_multipole_to_local_matches_autodiff_reference():
     assert jnp.allclose(approx, actual, atol=1e-10, rtol=1e-8)
 
 
-def test_translate_multipole_to_local_order_four_matches_autodiff():
-    order = 4
-    dtype = jnp.dtype(jnp.float64)
+def _order_four_autodiff_reference(dtype):
+    """Shared order-4 multipole potential and its autodiff derivative chain.
 
+    Both order-4 autodiff tests build the same tree/moments and the same
+    einsum-based potential; this helper holds that duplicated block once.
+    """
     positions = jnp.array(
         [
             [0.35, -0.27, 0.18],
@@ -815,144 +823,17 @@ def test_translate_multipole_to_local_order_four_matches_autodiff():
         tree,
         positions_sorted,
         masses_sorted,
-        max_order=order,
+        max_order=4,
     )
 
     center = upward.multipoles.centers[0]
     multipole_coeffs = upward.multipoles.packed[0]
-    delta = jnp.array([0.4, -0.35, 0.3], dtype=dtype)
-    local_coeffs = translate_multipole_to_local(
-        multipole_coeffs,
-        delta,
-        order=order,
-    )
-
-    scalar, gradient, hessian, third, fourth = _unpack_local_derivatives(
-        local_coeffs,
-        order,
-    )[:5]
 
     moments = multipole_from_packed(
         multipole_coeffs[jnp.newaxis, :],
         center[jnp.newaxis, :],
-        order,
+        4,
     )
-    mass = moments.mass[0]
-    dipole = moments.dipole[0]
-    quadrupole = moments.quadrupole[0]
-    octupole = moments.octupole[0]
-    hexadecapole = moments.hexadecapole[0]
-
-    def multipole_potential(displacement):
-        inv_r = jnp.reciprocal(jnp.linalg.norm(displacement))
-        phi_val = mass * inv_r
-        if order >= 1:
-            phi_val = phi_val + jnp.dot(dipole, displacement) * inv_r**3
-        if order >= 2:
-            quad_term = jnp.einsum(
-                "ij,i,j->",
-                quadrupole,
-                displacement,
-                displacement,
-            )
-            phi_val = phi_val + 0.5 * quad_term * inv_r**5
-        if order >= 3:
-            oct_term = jnp.einsum(
-                "ijk,i,j,k->",
-                octupole,
-                displacement,
-                displacement,
-                displacement,
-            )
-            phi_val = phi_val + (1.0 / 6.0) * oct_term * inv_r**7
-        if order >= 4:
-            hex_term = jnp.einsum(
-                "ijkl,i,j,k,l->",
-                hexadecapole,
-                displacement,
-                displacement,
-                displacement,
-                displacement,
-            )
-            phi_val = phi_val + (1.0 / 24.0) * hex_term * inv_r**9
-        return phi_val
-
-    grad_fn = jax.grad(multipole_potential)
-    hess_fn = jax.jacfwd(grad_fn)
-    third_fn = jax.jacfwd(hess_fn)
-    fourth_fn = jax.jacfwd(third_fn)
-
-    phi_ref = multipole_potential(delta)
-    grad_ref = grad_fn(delta)
-    hess_ref = hess_fn(delta)
-    third_ref = third_fn(delta)
-    fourth_ref = fourth_fn(delta)
-
-    assert jnp.allclose(scalar, phi_ref, atol=1e-10, rtol=1e-8)
-    assert jnp.allclose(gradient, grad_ref, atol=1e-10, rtol=1e-8)
-    assert jnp.allclose(hessian, hess_ref, atol=1e-9, rtol=1e-7)
-    assert jnp.allclose(third, third_ref, atol=1e-9, rtol=1e-7)
-    assert jnp.allclose(fourth, fourth_ref, atol=1e-8, rtol=1e-6)
-
-    offsets = jnp.array(
-        [
-            [0.01, -0.015, 0.012],
-            [-0.008, 0.01, -0.006],
-            [0.0, 0.0, 0.0],
-        ],
-        dtype=dtype,
-    )
-    for idx in range(offsets.shape[0]):
-        rho = offsets[idx]
-        approx = _evaluate_local_series(local_coeffs, rho, order)
-        actual = multipole_potential(delta + rho)
-    assert jnp.allclose(approx, actual, atol=1e-8, rtol=5e-6)
-
-
-def test_translate_multipole_to_local_order4_derivatives_offsets():
-    order = 4
-    dtype = jnp.dtype(jnp.float64)
-
-    positions = jnp.array(
-        [
-            [0.35, -0.27, 0.18],
-            [-0.22, 0.31, -0.29],
-            [0.12, 0.14, -0.33],
-            [-0.28, -0.19, 0.26],
-        ],
-        dtype=dtype,
-    )
-    masses = jnp.array([1.1, 0.9, 1.3, 0.8], dtype=dtype)
-    bounds = (
-        jnp.array([-1.0, -1.0, -1.0], dtype=dtype),
-        jnp.array([1.0, 1.0, 1.0], dtype=dtype),
-    )
-
-    jax.config.update("jax_enable_x64", True)
-
-    tree, positions_sorted, masses_sorted, _ = build_tree(
-        positions,
-        masses,
-        bounds,
-        return_reordered=True,
-        leaf_size=DEFAULT_TEST_LEAF_SIZE,
-    )
-    upward = prepare_upward_sweep(
-        tree,
-        positions_sorted,
-        masses_sorted,
-        max_order=order,
-    )
-
-    multipole_coeffs = upward.multipoles.packed[0]
-    center = upward.multipoles.centers[0]
-
-    moments = multipole_from_packed(
-        multipole_coeffs[jnp.newaxis, :],
-        center[jnp.newaxis, :],
-        order,
-    )
-
     mass = moments.mass[0]
     dipole = moments.dipole[0]
     quadrupole = moments.quadrupole[0]
@@ -994,40 +875,118 @@ def test_translate_multipole_to_local_order4_derivatives_offsets():
     third_fn = jax.jacfwd(hess_fn)
     fourth_fn = jax.jacfwd(third_fn)
 
+    return (
+        multipole_coeffs,
+        multipole_potential,
+        grad_fn,
+        hess_fn,
+        third_fn,
+        fourth_fn,
+    )
+
+
+def test_translate_multipole_to_local_order_four_matches_autodiff():
+    order = 4
+    dtype = jnp.dtype(jnp.float64)
+
+    (
+        multipole_coeffs,
+        multipole_potential,
+        grad_fn,
+        hess_fn,
+        third_fn,
+        fourth_fn,
+    ) = _order_four_autodiff_reference(dtype)
+
+    delta = jnp.array([0.4, -0.35, 0.3], dtype=dtype)
+    local_coeffs = translate_multipole_to_local(
+        multipole_coeffs,
+        delta,
+        order=order,
+    )
+
+    scalar, gradient, hessian, third, fourth = _unpack_local_derivatives(
+        local_coeffs,
+        order,
+    )[:5]
+
+    phi_ref = multipole_potential(delta)
+    grad_ref = grad_fn(delta)
+    hess_ref = hess_fn(delta)
+    third_ref = third_fn(delta)
+    fourth_ref = fourth_fn(delta)
+
+    assert jnp.allclose(scalar, phi_ref, atol=1e-10, rtol=1e-8)
+    assert jnp.allclose(gradient, grad_ref, atol=1e-10, rtol=1e-8)
+    assert jnp.allclose(hessian, hess_ref, atol=1e-9, rtol=1e-7)
+    assert jnp.allclose(third, third_ref, atol=1e-9, rtol=1e-7)
+    assert jnp.allclose(fourth, fourth_ref, atol=1e-8, rtol=1e-6)
+
     offsets = jnp.array(
         [
-            [0.4, -0.35, 0.3],
-            [-0.45, 0.32, -0.28],
-            [0.25, 0.41, -0.37],
+            [0.01, -0.015, 0.012],
+            [-0.008, 0.01, -0.006],
+            [0.0, 0.0, 0.0],
         ],
         dtype=dtype,
     )
-
     for idx in range(offsets.shape[0]):
-        delta = offsets[idx]
-        local_coeffs = translate_multipole_to_local(
+        rho = offsets[idx]
+        approx = _evaluate_local_series(local_coeffs, rho, order)
+        actual = multipole_potential(delta + rho)
+        assert jnp.allclose(
+            approx, actual, atol=1e-8, rtol=5e-6
+        ), f"local series mismatch at offset {idx} ({offsets[idx]})"
+
+
+def test_translate_multipole_to_local_order4_derivatives_offsets():
+    order = 4
+    dtype = jnp.dtype(jnp.float64)
+
+    with jax.enable_x64(True):
+        (
             multipole_coeffs,
-            delta,
-            order=order,
+            multipole_potential,
+            grad_fn,
+            hess_fn,
+            third_fn,
+            fourth_fn,
+        ) = _order_four_autodiff_reference(dtype)
+
+        offsets = jnp.array(
+            [
+                [0.4, -0.35, 0.3],
+                [-0.45, 0.32, -0.28],
+                [0.25, 0.41, -0.37],
+            ],
+            dtype=dtype,
         )
-        derivatives = _unpack_local_derivatives(local_coeffs, order)
-        scalar = derivatives[0]
-        gradient = derivatives[1]
-        hessian = derivatives[2]
-        third = derivatives[3]
-        fourth = derivatives[4]
 
-        phi_ref = multipole_potential(delta)
-        grad_ref = grad_fn(delta)
-        hess_ref = hess_fn(delta)
-        third_ref = third_fn(delta)
-        fourth_ref = fourth_fn(delta)
+        for idx in range(offsets.shape[0]):
+            delta = offsets[idx]
+            local_coeffs = translate_multipole_to_local(
+                multipole_coeffs,
+                delta,
+                order=order,
+            )
+            derivatives = _unpack_local_derivatives(local_coeffs, order)
+            scalar = derivatives[0]
+            gradient = derivatives[1]
+            hessian = derivatives[2]
+            third = derivatives[3]
+            fourth = derivatives[4]
 
-        assert jnp.allclose(scalar, phi_ref, atol=1e-10, rtol=1e-8)
-        assert jnp.allclose(gradient, grad_ref, atol=1e-10, rtol=1e-8)
-        assert jnp.allclose(hessian, hess_ref, atol=1e-9, rtol=1e-7)
-        assert jnp.allclose(third, third_ref, atol=1e-9, rtol=1e-7)
-        assert jnp.allclose(fourth, fourth_ref, atol=1e-8, rtol=1e-6)
+            phi_ref = multipole_potential(delta)
+            grad_ref = grad_fn(delta)
+            hess_ref = hess_fn(delta)
+            third_ref = third_fn(delta)
+            fourth_ref = fourth_fn(delta)
+
+            assert jnp.allclose(scalar, phi_ref, atol=1e-10, rtol=1e-8)
+            assert jnp.allclose(gradient, grad_ref, atol=1e-10, rtol=1e-8)
+            assert jnp.allclose(hessian, hess_ref, atol=1e-9, rtol=1e-7)
+            assert jnp.allclose(third, third_ref, atol=1e-9, rtol=1e-7)
+            assert jnp.allclose(fourth, fourth_ref, atol=1e-8, rtol=1e-6)
 
 
 def test_translate_multipole_to_local_far_field_matches_direct_sum():
@@ -1098,8 +1057,39 @@ def test_translate_multipole_to_local_far_field_matches_direct_sum():
     assert jnp.allclose(local_grad, direct_grad, atol=1e-10, rtol=1e-8)
 
 
-def test_run_downward_sweep_matches_manual_sequence():
-    tree, upward, interactions = _prepare_tree_for_m2l()
+@pytest.mark.parametrize(
+    "sweep_order, root_scalar, root_vec, root_mat",
+    [
+        (
+            2,
+            0.42,
+            [0.01, -0.03, 0.02],
+            [
+                [0.05, -0.01, 0.0],
+                [-0.01, 0.07, 0.02],
+                [0.0, 0.02, -0.04],
+            ],
+        ),
+        (
+            4,
+            0.18,
+            [0.02, -0.015, 0.03],
+            [
+                [0.04, -0.01, 0.0],
+                [-0.01, 0.05, 0.015],
+                [0.0, 0.015, -0.035],
+            ],
+        ),
+    ],
+    ids=["order2", "order4"],
+)
+def test_run_downward_sweep_matches_manual_sequence(
+    sweep_order,
+    root_scalar,
+    root_vec,
+    root_mat,
+):
+    tree, upward, interactions = _prepare_tree_for_m2l(order=sweep_order)
 
     order = int(upward.multipoles.order)
     base_locals = initialize_local_expansions(
@@ -1109,16 +1099,9 @@ def test_run_downward_sweep_matches_manual_sequence():
     )
 
     dtype = base_locals.centers.dtype
-    root_scalar = dtype.type(0.42)
-    root_vec = jnp.array([0.01, -0.03, 0.02], dtype=dtype)
-    root_mat = jnp.array(
-        [
-            [0.05, -0.01, 0.0],
-            [-0.01, 0.07, 0.02],
-            [0.0, 0.02, -0.04],
-        ],
-        dtype=dtype,
-    )
+    root_scalar = dtype.type(root_scalar)
+    root_vec = jnp.array(root_vec, dtype=dtype)
+    root_mat = jnp.array(root_mat, dtype=dtype)
     root_coeffs = _pack_local_coefficients(
         order,
         root_scalar,
@@ -1154,8 +1137,8 @@ def test_run_downward_sweep_matches_manual_sequence():
     assert jnp.allclose(combined.centers, manual.centers)
 
 
-def test_run_downward_sweep_handles_dense_buffers():
-    tree, upward, interactions = _prepare_tree_for_m2l()
+def test_run_downward_sweep_handles_dense_buffers(prepared_m2l_tree):
+    tree, upward, interactions = prepared_m2l_tree
     dense_buffers = build_dense_interactions(
         tree,
         upward.geometry,
@@ -1178,64 +1161,8 @@ def test_run_downward_sweep_handles_dense_buffers():
     assert jnp.allclose(dense.centers, sparse.centers)
 
 
-def test_run_downward_sweep_order_four_matches_manual_sequence():
-    tree, upward, interactions = _prepare_tree_for_m2l(order=4)
-
-    order = int(upward.multipoles.order)
-    base_locals = initialize_local_expansions(
-        tree,
-        upward.multipoles.centers,
-        max_order=order,
-    )
-
-    dtype = base_locals.centers.dtype
-    root_scalar = dtype.type(0.18)
-    root_vec = jnp.array([0.02, -0.015, 0.03], dtype=dtype)
-    root_mat = jnp.array(
-        [
-            [0.04, -0.01, 0.0],
-            [-0.01, 0.05, 0.015],
-            [0.0, 0.015, -0.035],
-        ],
-        dtype=dtype,
-    )
-    root_coeffs = _pack_local_coefficients(
-        order,
-        root_scalar,
-        root_vec,
-        root_mat,
-        dtype,
-    )
-
-    coeffs_with_root = base_locals.coefficients.at[0].set(root_coeffs)
-    initial_locals = LocalExpansionData(
-        order,
-        base_locals.centers,
-        coeffs_with_root,
-    )
-
-    manual = propagate_local_expansions(
-        tree,
-        accumulate_m2l_contributions(
-            interactions,
-            upward.multipoles,
-            initial_locals,
-        ),
-    )
-
-    combined = run_downward_sweep(
-        tree,
-        upward.multipoles,
-        interactions,
-        initial_locals=initial_locals,
-    )
-
-    assert jnp.allclose(combined.coefficients, manual.coefficients)
-    assert jnp.allclose(combined.centers, manual.centers)
-
-
-def test_prepare_downward_sweep_builds_expected_data():
-    tree, upward, interactions = _prepare_tree_for_m2l()
+def test_prepare_downward_sweep_builds_expected_data(prepared_m2l_tree):
+    tree, upward, interactions = prepared_m2l_tree
 
     downward = prepare_downward_sweep(
         tree,
@@ -1270,8 +1197,8 @@ def test_prepare_downward_sweep_builds_expected_data():
     assert jnp.allclose(downward.locals.centers, manual.centers)
 
 
-def test_prepare_downward_sweep_accepts_dense_buffers():
-    tree, upward, _interactions = _prepare_tree_for_m2l()
+def test_prepare_downward_sweep_accepts_dense_buffers(prepared_m2l_tree):
+    tree, upward, _interactions = prepared_m2l_tree
     dense_buffers = build_dense_interactions(
         tree,
         upward.geometry,
