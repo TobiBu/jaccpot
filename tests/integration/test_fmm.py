@@ -704,7 +704,9 @@ def test_strict_fused_moved_endpoint_matches_fresh_prepare(monkeypatch):
     monkeypatch.setenv("JACCPOT_STATIC_STRICT_REQUIRE_EXACT_CAP_PROFILE_MATCH", "0")
     monkeypatch.setenv("JACCPOT_STATIC_STRICT_FUSED_MODE", "on")
     monkeypatch.setenv("JACCPOT_STATIC_STRICT_FUSED_DEVICE_ONLY", "1")
-    monkeypatch.setenv("JACCPOT_STATIC_STRICT_FUSED_DISALLOW_HOST_SEGMENT_FALLBACK", "1")
+    monkeypatch.setenv(
+        "JACCPOT_STATIC_STRICT_FUSED_DISALLOW_HOST_SEGMENT_FALLBACK", "1"
+    )
     monkeypatch.setenv("JACCPOT_STATIC_STRICT_FUSED_FLAT_COMPACT_FAR_PAIRS", "1")
     monkeypatch.setenv("JACCPOT_STATIC_STRICT_FUSED_COMPACT_FAR_PAIR_CAP", "32768")
     monkeypatch.setenv("JACCPOT_LARGE_N_STATIC_TARGET_BLOCKS_MAX_PER_LEAF", "32")
@@ -761,7 +763,9 @@ def test_strict_fused_moved_endpoint_matches_fresh_prepare(monkeypatch):
     assert diagnostics["strict_self_force_endpoint_evaluations"] == 1
 
     fresh_fmm = FastMultipoleMethod(**kwargs)
-    fresh = fresh_fmm.prepare_state(state_out[:, 0, :], masses, leaf_size=128, max_order=2)
+    fresh = fresh_fmm.prepare_state(
+        state_out[:, 0, :], masses, leaf_size=128, max_order=2
+    )
     endpoint_acc = np.asarray(fmm.evaluate_prepared_state(prepared_out))
     fresh_acc = np.asarray(fresh_fmm.evaluate_prepared_state(fresh))
     diff = endpoint_acc - fresh_acc
@@ -776,7 +780,9 @@ def test_strict_fused_compact_far_pair_cap_fails(monkeypatch):
     monkeypatch.setenv("JACCPOT_STATIC_STRICT_REQUIRE_EXACT_CAP_PROFILE_MATCH", "0")
     monkeypatch.setenv("JACCPOT_STATIC_STRICT_FUSED_MODE", "on")
     monkeypatch.setenv("JACCPOT_STATIC_STRICT_FUSED_DEVICE_ONLY", "1")
-    monkeypatch.setenv("JACCPOT_STATIC_STRICT_FUSED_DISALLOW_HOST_SEGMENT_FALLBACK", "0")
+    monkeypatch.setenv(
+        "JACCPOT_STATIC_STRICT_FUSED_DISALLOW_HOST_SEGMENT_FALLBACK", "0"
+    )
     monkeypatch.setenv("JACCPOT_STATIC_STRICT_FUSED_FLAT_COMPACT_FAR_PAIRS", "1")
     monkeypatch.setenv("JACCPOT_STATIC_STRICT_FUSED_COMPACT_FAR_PAIR_CAP", "1")
     monkeypatch.setenv("JACCPOT_LARGE_N_STATIC_TARGET_BLOCKS_MAX_PER_LEAF", "32")
@@ -813,7 +819,10 @@ def test_strict_fused_compact_far_pair_cap_fails(monkeypatch):
         tree_build_mode="static_radix",
         fixed_order=2,
     )
-    with pytest.raises(Exception, match="JACCPOT_STATIC_STRICT_FUSED_COMPACT_FAR_PAIR_CAP|compact far-pair cap exceeded"):
+    with pytest.raises(
+        Exception,
+        match="JACCPOT_STATIC_STRICT_FUSED_COMPACT_FAR_PAIR_CAP|compact far-pair cap exceeded",
+    ):
         fmm.strict_run_v2(
             state=state0,
             masses=masses,
@@ -2882,12 +2891,9 @@ def test_solidfmm_m2l_ignores_padded_compact_far_pairs():
         ],
         dtype=jnp.float32,
     )
-    multipoles = (
-        jnp.arange(centers.shape[0] * coeff_count, dtype=jnp.float32)
-        .reshape((centers.shape[0], coeff_count))
-        .astype(jnp.complex64)
-        * jnp.array(0.01 + 0.02j, dtype=jnp.complex64)
-    )
+    multipoles = jnp.arange(centers.shape[0] * coeff_count, dtype=jnp.float32).reshape(
+        (centers.shape[0], coeff_count)
+    ).astype(jnp.complex64) * jnp.array(0.01 + 0.02j, dtype=jnp.complex64)
     src_exact = jnp.array([1], dtype=INDEX_DTYPE)
     tgt_exact = jnp.array([0], dtype=INDEX_DTYPE)
     src_padded = jnp.array([1, -1, -1, -1], dtype=INDEX_DTYPE)
