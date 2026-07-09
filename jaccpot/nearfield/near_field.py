@@ -124,8 +124,14 @@ def prepare_leaf_neighbor_pairs(
     )
     edge_indices = jnp.arange(neighbors.shape[0], dtype=INDEX_DTYPE)
     target_leaf_ids = jnp.searchsorted(offsets[1:], edge_indices, side="right")
-    source_leaf_ids = leaf_lookup[neighbors]
-    valid_pairs = source_leaf_ids >= 0
+    # `neighbors` may carry -1 padding when the neighbour list is not compacted
+    # (e.g. the traced/jax.shard_map branch of _result_to_neighbors keeps the
+    # full [num_leaves * max_neighbors] buffer). A raw leaf_lookup[-1] would wrap
+    # to a real leaf row; clip + an explicit >=0 mask drops padding edges so both
+    # near-field kernels are correct regardless of compaction.
+    valid_neighbor = neighbors >= 0
+    source_leaf_ids = leaf_lookup[jnp.clip(neighbors, 0, total_nodes - 1)]
+    valid_pairs = valid_neighbor & (source_leaf_ids >= 0)
 
     if not sort_by_source:
         return target_leaf_ids, source_leaf_ids, valid_pairs
