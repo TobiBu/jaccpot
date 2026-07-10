@@ -2448,15 +2448,6 @@ class FastMultipoleMethod:
                 os.environ.get("JACCPOT_STRICT_REFRESH_DETAIL_DIAG_MODE", "full")
             )
         )
-        self._static_radix_reuse_structures: bool = str(
-            os.environ.get("JACCPOT_STATIC_RADIX_REUSE_STRUCTURES", "0")
-        ).strip().lower() in {"1", "true", "yes", "on"}
-        self._static_radix_upward_batched: bool = str(
-            os.environ.get("JACCPOT_STATIC_RADIX_UPWARD_BATCHED", "0")
-        ).strip().lower() in {"1", "true", "yes", "on"}
-        self._static_radix_downward_batched: bool = str(
-            os.environ.get("JACCPOT_STATIC_RADIX_DOWNWARD_BATCHED", "0")
-        ).strip().lower() in {"1", "true", "yes", "on"}
         (
             self._strict_refresh_diag_tree_active,
             self._strict_refresh_diag_upward_active,
@@ -3316,15 +3307,6 @@ class FastMultipoleMethod:
             ),
             "strict_refresh_detail_diag_mode": str(
                 getattr(self, "_strict_refresh_detail_diag_mode", "full")
-            ),
-            "static_radix_reuse_structures": bool(
-                getattr(self, "_static_radix_reuse_structures", False)
-            ),
-            "static_radix_upward_batched": bool(
-                getattr(self, "_static_radix_upward_batched", False)
-            ),
-            "static_radix_downward_batched": bool(
-                getattr(self, "_static_radix_downward_batched", False)
             ),
             "static_radix_tree_leaf_count": int(
                 getattr(self, "_static_radix_tree_leaf_count", 0)
@@ -11818,6 +11800,68 @@ def _propagate_solidfmm_locals_to_children(
 
 @partial(
     jax.jit,
+    static_argnames=("order", "rotation", "total_nodes"),
+    donate_argnums=(0,),
+)
+def _propagate_solidfmm_locals_by_level(
+    coeffs_local: Array,
+    centers: Array,
+    left_child: Array,
+    right_child: Array,
+    node_levels: Array,
+    *,
+    order: int,
+    rotation: str,
+    total_nodes: int,
+) -> Array:
+    """Top-down, level-by-level L2L cascade over a binary tree.
+
+    A single parent->child pass (``_propagate_solidfmm_locals_to_children``)
+    moves each node's local expansion down exactly one level. That is only
+    sufficient when every node already carries the far-field appropriate to its
+    own level. A local expansion deposited high in the tree (a well-separated
+    interaction accepted at a coarse node) must instead cascade through every
+    intermediate level to reach the leaves, or the leaves never see it and the
+    evaluated field degrades with tree depth.
+
+    Iterate levels root->leaf and translate only the parents that live at the
+    current level, so each node's fully-accumulated expansion (its own plus
+    everything inherited from shallower ancestors) is propagated to its children
+    before those children are used as parents in turn.
+    """
+    num_internal = int(left_child.shape[0])
+    if num_internal <= 0:
+        return coeffs_local
+
+    left_internal = left_child[:num_internal]
+    right_internal = right_child[:num_internal]
+    parent_levels = node_levels[:num_internal].astype(INDEX_DTYPE)
+    parent_idx = jnp.arange(num_internal, dtype=INDEX_DTYPE)
+    parent_rep = jnp.concatenate([parent_idx, parent_idx], axis=0)
+    max_level = jnp.max(parent_levels)
+    minus_one = jnp.asarray(-1, dtype=left_internal.dtype)
+
+    def level_body(level: Array, state: Array) -> Array:
+        active = parent_levels == level
+        lc = jnp.where(active, left_internal, minus_one)
+        rc = jnp.where(active, right_internal, minus_one)
+        child_idx = jnp.concatenate([lc, rc], axis=0)
+        valid = child_idx >= 0
+        safe_child = jnp.where(valid, child_idx, 0)
+        parent_coeffs = state[parent_rep]
+        deltas = centers[safe_child] - centers[parent_rep]
+        translated = _l2l_complex_batch_kernel(
+            parent_coeffs, deltas, order=order, rotation=rotation
+        ).astype(state.dtype)
+        translated = jnp.where(valid[:, None], translated, 0)
+        updates = jax.ops.segment_sum(translated, safe_child, total_nodes)
+        return state + updates
+
+    return jax.lax.fori_loop(0, max_level + 1, level_body, coeffs_local)
+
+
+@partial(
+    jax.jit,
     static_argnames=("order", "m2l_impl", "total_nodes"),
     donate_argnums=(0,),
 )
@@ -12224,12 +12268,14 @@ def _prepare_solidfmm_downward_sweep(
     if child_inputs.num_internal_nodes > 0:
         left_child = child_inputs.left_child
         right_child = child_inputs.right_child
+        node_levels = get_node_levels(tree)
         stage_t0 = time.perf_counter()
-        locals_updated = _propagate_solidfmm_locals_to_children(
+        locals_updated = _propagate_solidfmm_locals_by_level(
             locals_updated,
             centers,
             left_child,
             right_child,
+            node_levels,
             order=p,
             rotation=rotation_mode,
             total_nodes=total_nodes,
@@ -12269,11 +12315,12 @@ def _prepare_solidfmm_downward_sweep(
                     farfield_mode=farfield_mode,
                 )
             )
-            source_motion_locals_updated = _propagate_solidfmm_locals_to_children(
+            source_motion_locals_updated = _propagate_solidfmm_locals_by_level(
                 source_motion_locals_updated,
                 centers,
                 left_child,
                 right_child,
+                node_levels,
                 order=p,
                 rotation=rotation_mode,
                 total_nodes=total_nodes,

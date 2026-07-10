@@ -350,6 +350,18 @@ def _aggregate_m2m_complex_by_level(
         in_axes=(0, 0),
     )
 
+    # Scatter target for invalid / padding slots. All padding slots must route
+    # to a dead row rather than a real node: with duplicate scatter indices XLA
+    # takes the last write, so if padding collapsed onto a real node id (e.g. 0,
+    # the root) it would clobber that node's genuine M2M contribution. We append
+    # one throwaway row to the carried state and discard it at the end. Reads
+    # (children / centers) still clamp to a valid in-range index.
+    dead_row = as_index(packed.shape[0])
+    packed_ext = jnp.concatenate(
+        [packed, jnp.zeros((1,) + tuple(packed.shape[1:]), dtype=packed.dtype)],
+        axis=0,
+    )
+
     def level_body(level_rev_idx: Array, state: Array) -> Array:
         level_idx = as_index((num_levels - 2) - level_rev_idx)
         start = level_offsets[level_idx]
@@ -363,17 +375,19 @@ def _aggregate_m2m_complex_by_level(
         )
         valid = level_slot < count
         internal_valid = valid & (batch_nodes < as_index(num_internal))
-        safe_nodes = jnp.where(internal_valid, batch_nodes, as_index(0))
+        # Clamped index for gathers (children / centers); dead row for scatters.
+        gather_nodes = jnp.where(internal_valid, batch_nodes, as_index(0))
+        scatter_nodes = jnp.where(internal_valid, batch_nodes, dead_row)
 
         child_idx_pair = jnp.stack(
-            [left_child[safe_nodes], right_child[safe_nodes]],
+            [left_child[gather_nodes], right_child[gather_nodes]],
             axis=1,
         )
         child_mask = child_idx_pair >= 0
         safe_child_idx = jnp.where(child_mask, child_idx_pair, 0)
         child_coeffs = state[safe_child_idx]
         child_centers = centers[safe_child_idx]
-        node_centers = centers[safe_nodes][:, None, :]
+        node_centers = centers[gather_nodes][:, None, :]
         deltas = child_centers - node_centers
 
         translated = translate_children(child_coeffs, deltas)
@@ -381,12 +395,11 @@ def _aggregate_m2m_complex_by_level(
         node_coeffs = jnp.sum(translated, axis=1, dtype=translated.dtype)
         node_coeffs = enforce_conjugate_symmetry_batch(node_coeffs, order=p)
 
-        current = state[safe_nodes]
-        updates = jnp.where(internal_valid[:, None], node_coeffs, current)
-        return state.at[safe_nodes].set(updates)
+        return state.at[scatter_nodes].set(node_coeffs)
 
     internal_level_count = max(int(num_levels) - 1, 0)
-    return lax.fori_loop(0, internal_level_count, level_body, packed)
+    result = lax.fori_loop(0, internal_level_count, level_body, packed_ext)
+    return result[: packed.shape[0]]
 
 
 @jaxtyped(typechecker=beartype)
