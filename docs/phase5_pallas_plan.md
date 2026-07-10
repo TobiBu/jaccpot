@@ -80,6 +80,25 @@ Optimization ladder (v0 → A100 tuning):
   and **fuse the gather** (`multip[src]`, `centers[tgt]-centers[src]`) currently done outside
   the kernel (`_fmm_impl.py:11635`). This is where the rotation-block reuse pays off.
 
+#### GPU-backend constraints (measured on H100, 2026-07; must drive the redesign)
+
+The v0 prototype is correct under `interpret` but does **not** run on either Pallas GPU
+backend as written — its per-pair blocks have ragged, non-power-of-2 shapes ((p+1, 2p+1),
+(C,), (C,K)):
+- **Mosaic GPU** (default): rejects it — **no fp64 TMA** ("unsupported TMA dtype f64"), and
+  TMA copies must be a multiple of the **128-byte warpgroup** size (a per-pair block is
+  (p+1)^2 elements = 72 B at p=2, 200 B at p=4). Mosaic wants large, 128-B-aligned tiles.
+- **Triton** (`backend="triton"`, works on cc>=8.0): rejects it — **all array shapes must be
+  powers of 2** ("requires ... size is a power of 2. Encountered ... shape (3, 5)"). It does
+  support fp64 and small gather-heavy tiles otherwise.
+
+=> The GPU kernel must **pad every coefficient dim to a power of two** (p=4: C 25->32, md 9->16,
+p+1 5->8, K 5->8; ~1.3–1.8x padded FLOPs) with mask lanes, and **process a power-of-two BLOCK
+of pairs per program** (vectorise over pairs; the pair-block dim is the natural pow2 tile) via
+the Triton backend. `m2l_complex_fused_pallas` already takes `backend="triton"`; the remaining
+work is the pow2 padding + pair-block tiling. Triton is the target backend for this kernel
+(fp64 + small tiles); Mosaic is unsuitable.
+
 ### 2. Promote + tune the existing near-field P2P kernel — lower effort (35% block)
 
 `jaccpot/pallas/nearfield_fused_leaf.py` is already register-tiled and streams sources

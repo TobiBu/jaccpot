@@ -274,12 +274,20 @@ def _m2l_complex_fused_kernel(
 
 
 def m2l_complex_fused_pallas(
-    multipoles, blocks_to_z, blocks_from_z, r, *, order, interpret=False
+    multipoles, blocks_to_z, blocks_from_z, r, *, order, interpret=False,
+    backend="triton",
 ):
     """Fused complex-basis M2L via a Pallas kernel (one program per pair).
 
     Same signature/semantics as ``m2l_complex_fused_jax``. Requires an Ampere+
     GPU unless ``interpret=True``.
+
+    ``backend`` selects the Pallas GPU lowering. The default ``"triton"`` is
+    required for this kernel: the Mosaic-GPU backend rejects it (no fp64 TMA, and
+    its TMA copies must be a multiple of the 128-byte warpgroup size, whereas the
+    per-pair blocks here are (p+1)^2 elements = 72/200 bytes). Triton handles the
+    small, gather-heavy per-pair tiles and fp64. ``interpret=True`` ignores the
+    backend and runs CPU semantics.
     """
     p = int(order)
     N = multipoles.shape[0]
@@ -331,6 +339,7 @@ def m2l_complex_fused_pallas(
             jax.ShapeDtypeStruct((N, C), real_dtype),
         ],
         interpret=interpret,
+        backend=(None if interpret else backend),
         name=f"m2l_complex_fused_p{p}",
     )(mr, mi, btr, bti, bfr, bfi, rr, *table_arrays)
 
