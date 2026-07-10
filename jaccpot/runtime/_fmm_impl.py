@@ -67,7 +67,9 @@ from jaccpot.downward.local_expansions import (
 from jaccpot.downward.local_expansions import (
     run_downward_sweep as run_tree_downward_sweep,
 )
-from jaccpot.downward.local_expansions import translate_local_expansion
+from jaccpot.downward.local_expansions import (
+    translate_local_expansion,
+)
 from jaccpot.nearfield.near_field import (
     compute_leaf_p2p_accelerations,
     compute_leaf_p2p_accelerations_large_n_accel_only,
