@@ -110,3 +110,25 @@ the Pallas near-field is ~1.79x, not 10x. The kernel-count collapse (19,600 tiny
 kernels -> one big kernel) is real and IS the mechanism of the 1.79x; the 10x wall-clock
 was an artifact of profiling on contended GPUs. Clean pallas ~130 ms/step is in the ballpark
 of the doc's "119 ms A100" figure.
+
+## PADDING INVESTIGATION (2026-07-10) — mostly a benchmark artifact
+Probed the real source-slot fill in the radix_fast_payload:
+  cap=64 (my ablation env): (782,64,32)=2048 slots/leaf, 11.4% fill.
+  cap=32 (PRODUCTION DEFAULT): (782,32,32)=1024 slots, 22.7% fill.
+  cap=auto: also picks 32 (actual max=25 blocks/leaf -> headroom -> ladder -> 32).
+Actual usage: max=25 blocks/leaf, mean=7.8 (out of cap). Blocks ~full (30/32).
+
+Findings:
+- ALL earlier H100 numbers used cap=64 (2x over the default). Production default (32)
+  / auto are ~2x less near-field work; the near-field is ~2x better in production than
+  the cap=64 measurements (incl. the 1.79x, measured at cap=64 for both paths).
+- auto is correct (relL2 1.96e-5 vs fixed-32) and robust in the fused lane; it right-sizes
+  and (with the existing fused-path overflow RuntimeError) there is no silent overflow to
+  the slow target-block path.
+- Remaining waste at cap=32 is leaf VARIANCE (mean 7.8 vs max 25), but the kernel skips
+  empty blocks via lax.cond so effective waste << fill fraction. The only larger lever is a
+  BLOCK-PARALLEL near-field kernel (eliminates variance) -- substantial rewrite, uncertain ROI.
+
+Action: re-benchmark at the DEFAULT cap (32) / auto (not 64) for representative production
+numbers; consider making `auto` the TARGET_BLOCKS_MAX_PER_LEAF default (right-sizes per
+problem) -- validated correct, minor risk on untested non-fused paths.

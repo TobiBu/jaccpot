@@ -187,7 +187,7 @@ def _read_large_n_env_config() -> dict[str, Any]:
     # densest leaf at build time (see _large_n_pipeline static-block region),
     # mirroring the neighbor/overflow cap profiling (headroom + caps ladder).
     static_target_blocks_cap_raw = (
-        str(os.environ.get("JACCPOT_LARGE_N_STATIC_TARGET_BLOCKS_MAX_PER_LEAF", "32"))
+        str(os.environ.get("JACCPOT_LARGE_N_STATIC_TARGET_BLOCKS_MAX_PER_LEAF", "auto"))
         .strip()
         .lower()
     )
