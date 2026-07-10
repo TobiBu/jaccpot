@@ -1986,18 +1986,39 @@ class FastMultipoleMethod:
         # silently ran the ~10x-slower launch-bound jnp near-field on capable
         # GPUs; the non-Pallas path is retained solely as the sm_75/CPU lane.
         # An explicit use_pallas=True/False still overrides this resolution.
-        if use_pallas is None:
-            try:
-                from jaccpot.pallas.nearfield_fused_leaf import (
-                    pallas_nearfield_fused_supported,
-                )
+        try:
+            from jaccpot.pallas.nearfield_fused_leaf import (
+                pallas_nearfield_fused_supported,
+            )
 
-                resolved_use_pallas = bool(pallas_nearfield_fused_supported())
-            except Exception:
-                resolved_use_pallas = False
+            _pallas_ok = bool(pallas_nearfield_fused_supported())
+        except Exception:
+            _pallas_ok = False
+        if use_pallas is None:
+            resolved_use_pallas = _pallas_ok
         else:
             resolved_use_pallas = bool(use_pallas)
+            if resolved_use_pallas and not _pallas_ok:
+                # No silent slow path: the caller explicitly asked for the Pallas
+                # near-field but this device cannot run it (needs a GPU with
+                # compute capability >= 8.0). Surface it loudly and fall back to
+                # the pure-JAX near-field, keeping self.use_pallas honest (False)
+                # so the resolved path is never misreported.
+                import warnings as _warnings
+
+                _warnings.warn(
+                    "use_pallas=True was requested but this device cannot run "
+                    "the Pallas near-field (needs GPU sm_80+); falling back to "
+                    "the slower pure-JAX near-field. Pass use_pallas=False to "
+                    "silence this, or run on an Ampere+ GPU.",
+                    RuntimeWarning,
+                    stacklevel=2,
+                )
+                resolved_use_pallas = False
         self.use_pallas = resolved_use_pallas
+        # Record the resolved near-field path so it is observable (never silent):
+        # exposed via runtime diagnostics as "nearfield_path".
+        self._nearfield_path = "pallas" if resolved_use_pallas else "jax"
         self.reuse_topology = bool(reuse_topology)
         if int(rebuild_every) <= 0:
             raise ValueError("rebuild_every must be positive")
@@ -3347,6 +3368,7 @@ class FastMultipoleMethod:
                 getattr(self, "_static_radix_l2l_edge_count", 0)
             ),
             "strict_fused_mode_active": bool(self._strict_fused_mode_active),
+            "nearfield_path": str(getattr(self, "_nearfield_path", "jax")),
             "strict_fused_compile_count": int(self._strict_fused_compile_count),
             "strict_fused_execute_count": int(self._strict_fused_execute_count),
             "strict_fused_profile_key_hits": int(self._strict_fused_profile_key_hits),
