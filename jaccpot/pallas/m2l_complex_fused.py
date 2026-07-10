@@ -274,7 +274,13 @@ def _m2l_complex_fused_kernel(
 
 
 def m2l_complex_fused_pallas(
-    multipoles, blocks_to_z, blocks_from_z, r, *, order, interpret=False,
+    multipoles,
+    blocks_to_z,
+    blocks_from_z,
+    r,
+    *,
+    order,
+    interpret=False,
     backend="triton",
 ):
     """Fused complex-basis M2L via a Pallas kernel (one program per pair).
