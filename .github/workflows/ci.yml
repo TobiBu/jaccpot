@@ -38,7 +38,12 @@ jobs:
         run: isort --check-only .
 
       - name: Unit tests with coverage
-        run: pytest
+        # Cap pytest-xdist workers on CI. pyproject sets `-n auto`, which spawns
+        # one worker per logical core; on the memory-limited GitHub runner each
+        # worker loads JAX and runs float64 FMM, and their combined footprint
+        # OOMs the runner (it is reclaimed mid-run with a "shutdown signal").
+        # Two workers fit; `-n auto` still applies for local high-core hosts.
+        run: pytest -n 2
 
       - name: Upload coverage XML artifact
         uses: actions/upload-artifact@v4
