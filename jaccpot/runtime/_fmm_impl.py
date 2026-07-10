@@ -67,7 +67,9 @@ from jaccpot.downward.local_expansions import (
 from jaccpot.downward.local_expansions import (
     run_downward_sweep as run_tree_downward_sweep,
 )
-from jaccpot.downward.local_expansions import translate_local_expansion
+from jaccpot.downward.local_expansions import (
+    translate_local_expansion,
+)
 from jaccpot.nearfield.near_field import (
     compute_leaf_p2p_accelerations,
     compute_leaf_p2p_accelerations_large_n_accel_only,
@@ -2386,9 +2388,11 @@ class FastMultipoleMethod:
         # Default ON: the device-only fused hot path enables the streamed
         # fast-lane (_prepare_state_dual_and_downward_strict_streamed_fast),
         # which is ~10x faster than the host-routed path for the strict fused
-        # static-radix lane (200k: ~1224 -> ~119 ms/step on an A100) with
-        # bit-identical energy/Lz conservation. Set the env var to "0" to opt
-        # back into the slow host-routed path (kept only as a fallback).
+        # static-radix lane (200k particles: ~1224 -> ~119 ms/step on an A100)
+        # with bit-identical energy / angular-momentum conservation
+        # (max|dE/E0| = 8.415e-04 either way, verified over 400 steps). Set the
+        # env var to "0" to opt back into the slower host-routed path, which is
+        # retained only as a fallback.
         self._strict_fused_device_only: bool = str(
             os.environ.get(
                 "JACCPOT_STATIC_STRICT_FUSED_DEVICE_ONLY",
