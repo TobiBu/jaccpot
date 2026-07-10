@@ -85,8 +85,8 @@ pytestmark = pytest.mark.skipif(
 )
 
 _P = 3
-_THETA = 0.4          # local self-interaction MAC
-_THETA_CROSS = 0.1    # engaged cross-domain far-field MAC
+_THETA = 0.4  # local self-interaction MAC
+_THETA_CROSS = 0.1  # engaged cross-domain far-field MAC
 _MAC = "bh"
 _LEAF = 8
 _G = 1.0
@@ -148,9 +148,7 @@ def test_distributed_solidfmm_far_matches_direct():
     KN = 128
     C = sh_size(_P)
 
-    def _combined_neighbors(
-        tree, nbr, cross, rct, halo, n_halo_rows, local_only=False
-    ):
+    def _combined_neighbors(tree, nbr, cross, rct, halo, n_halo_rows, local_only=False):
         """Vectorised unified P2P neighbour CSR over [local leaves ; halo blocks]."""
         leaf_nodes = jnp.asarray(nbr.leaf_indices, INDEX_DTYPE)
         n_lloc = leaf_nodes.shape[0]
@@ -212,8 +210,12 @@ def test_distributed_solidfmm_far_matches_direct():
         bounds = global_bounds(pos)
         pos_s, mass_s = sanitize_padding(pos, mass, count)
         tree = Tree.from_particles(
-            pos_s, mass_s, tree_type="radix", bounds=bounds,
-            return_reordered=True, leaf_size=_LEAF,
+            pos_s,
+            mass_s,
+            tree_type="radix",
+            bounds=bounds,
+            return_reordered=True,
+            leaf_size=_LEAF,
         )
         lp = tree.positions_sorted
         lm = tree.masses_sorted
@@ -230,7 +232,11 @@ def test_distributed_solidfmm_far_matches_direct():
         packed = up.multipoles.packed
 
         inter, nbr = build_interactions_and_neighbors(
-            tree, geom, theta=_THETA, traversal_config=cfg, mac_type=_MAC,
+            tree,
+            geom,
+            theta=_THETA,
+            traversal_config=cfg,
+            mac_type=_MAC,
         )
 
         # remote coarse tree over frontier (leaf COM + mass)
@@ -240,8 +246,12 @@ def test_distributed_solidfmm_far_matches_direct():
 
         # coarse solidfmm centres (COM) + level structure
         upc = prepare_solidfmm_complex_upward_sweep(
-            rct.tree, rct.positions_sorted, rct.masses_sorted,
-            max_order=_P, max_leaf_size=1, rotation=_ROT,
+            rct.tree,
+            rct.positions_sorted,
+            rct.masses_sorted,
+            max_order=_P,
+            max_leaf_size=1,
+            rotation=_ROT,
         )
         c_centers = upc.multipoles.centers
         c_lc = jnp.asarray(rct.tree.left_child, INDEX_DTYPE)
@@ -259,27 +269,46 @@ def test_distributed_solidfmm_far_matches_direct():
         okm = nod >= 0
         leafp = gpacked[jnp.where(okm, dom, 0), jnp.where(okm, nod, 0)]
         leafp = jnp.where(okm[:, None], leafp, 0.0)
-        seed = jnp.zeros((c_total, C), dtype=cdtype).at[c_leaves].set(
-            leafp.astype(cdtype)
+        seed = (
+            jnp.zeros((c_total, C), dtype=cdtype).at[c_leaves].set(leafp.astype(cdtype))
         )
         c_nbl = get_nodes_by_level(rct.tree)
         c_loff = get_level_offsets(rct.tree)
         c_numlev = int(c_loff.shape[0] - 1)
         coarse_packed = _aggregate_m2m_complex_by_level(
-            seed, c_centers, c_lc, c_rc,
-            jnp.asarray(c_nbl, INDEX_DTYPE), jnp.asarray(c_loff, INDEX_DTYPE),
-            order=_P, num_internal=c_nint, num_levels=c_numlev,
-            level_batch_width=max(c_nint, 1), rotation=_ROT,
+            seed,
+            c_centers,
+            c_lc,
+            c_rc,
+            jnp.asarray(c_nbl, INDEX_DTYPE),
+            jnp.asarray(c_loff, INDEX_DTYPE),
+            order=_P,
+            num_internal=c_nint,
+            num_levels=c_numlev,
+            level_batch_width=max(c_nint, 1),
+            rotation=_ROT,
         )
 
         cross = dual_tree_walk_cross_impl(
-            tree, geom, rct.tree, rct.geometry, _THETA_CROSS, mac_type=_MAC,
-            max_interactions_per_node=KC, max_neighbors_per_leaf=KN,
+            tree,
+            geom,
+            rct.tree,
+            rct.geometry,
+            _THETA_CROSS,
+            mac_type=_MAC,
+            max_interactions_per_node=KC,
+            max_neighbors_per_leaf=KN,
             max_pair_queue=1 << 15,
         )
         halo = import_near_halo(
-            rct, cross, lp, lm, ndev, leaf_size=_LEAF,
-            max_req_leaves=max_req, max_recv_leaves=max_recv,
+            rct,
+            cross,
+            lp,
+            lm,
+            ndev,
+            leaf_size=_LEAF,
+            max_req_leaves=max_req,
+            max_recv_leaves=max_recv,
         )
 
         leaf_nodes = jnp.asarray(nbr.leaf_indices, INDEX_DTYPE)
@@ -291,13 +320,24 @@ def test_distributed_solidfmm_far_matches_direct():
         def _l2p(loc_coeffs):
             loc_coeffs = enforce_conjugate_symmetry_batch(loc_coeffs, order=_P)
             loc_coeffs = _propagate_solidfmm_locals_by_level(
-                loc_coeffs, centers, lc_full, rc_full, node_levels,
-                order=_P, rotation=_ROT, total_nodes=int(total_nodes),
+                loc_coeffs,
+                centers,
+                lc_full,
+                rc_full,
+                node_levels,
+                order=_P,
+                rotation=_ROT,
+                total_nodes=int(total_nodes),
             )
             ld = LocalExpansionData(order=_P, centers=centers, coefficients=loc_coeffs)
             g = _evaluate_local_expansions_for_particles(
-                ld, lp, leaf_nodes=leaf_nodes, node_ranges=nr,
-                max_leaf_size=_LEAF, order=_P, expansion_basis="solidfmm",
+                ld,
+                lp,
+                leaf_nodes=leaf_nodes,
+                node_ranges=nr,
+                max_leaf_size=_LEAF,
+                order=_P,
+                expansion_basis="solidfmm",
                 return_potential=False,
             )[0]
             return -_G * g
@@ -308,8 +348,15 @@ def test_distributed_solidfmm_far_matches_direct():
         s_tgt = jnp.asarray(inter.targets, INDEX_DTYPE)
         s_active = jnp.sum((s_tgt >= 0).astype(INDEX_DTYPE))
         loc_self = _accumulate_solidfmm_m2l_fullbatch(
-            zeros, packed, centers, s_src, s_tgt, s_active,
-            order=_P, rotation=_ROT, total_nodes=int(total_nodes),
+            zeros,
+            packed,
+            centers,
+            s_src,
+            s_tgt,
+            s_active,
+            order=_P,
+            rotation=_ROT,
+            total_nodes=int(total_nodes),
         )
         far_self = _l2p(loc_self)
 
@@ -342,7 +389,13 @@ def test_distributed_solidfmm_far_matches_direct():
             tree, nbr, cross, rct, halo, 0, local_only=True
         )
         near_self = compute_leaf_p2p_accelerations(
-            tree, nbr, lp, lm, G=_G, softening=_SOFT, nearfield_mode="baseline",
+            tree,
+            nbr,
+            lp,
+            lm,
+            G=_G,
+            softening=_SOFT,
+            nearfield_mode="baseline",
             node_ranges_override=jnp.zeros((ul_s + 1, 2), INDEX_DTYPE),
             leaf_nodes_override=jnp.arange(ul_s, dtype=INDEX_DTYPE),
             neighbor_offsets_override=offs_s,
@@ -358,7 +411,12 @@ def test_distributed_solidfmm_far_matches_direct():
         lp_idx = jnp.concatenate([loc_idx, halo_idx], axis=0)
         lp_mask = jnp.concatenate([loc_mask, halo_mask], axis=0)
         near_full = compute_leaf_p2p_accelerations(
-            tree, nbr, concat_pos, concat_mass, G=_G, softening=_SOFT,
+            tree,
+            nbr,
+            concat_pos,
+            concat_mass,
+            G=_G,
+            softening=_SOFT,
             nearfield_mode="baseline",
             node_ranges_override=jnp.zeros((u_leaves + 1, 2), INDEX_DTYPE),
             leaf_nodes_override=jnp.arange(u_leaves, dtype=INDEX_DTYPE),
@@ -371,22 +429,28 @@ def test_distributed_solidfmm_far_matches_direct():
 
         diag = jnp.array(
             [
-                jnp.sum(x_valid.astype(jnp.float64)),          # cross far pairs
-                jnp.sum((s_tgt >= 0).astype(jnp.float64)),     # local self far pairs
+                jnp.sum(x_valid.astype(jnp.float64)),  # cross far pairs
+                jnp.sum((s_tgt >= 0).astype(jnp.float64)),  # local self far pairs
                 jnp.sum(jnp.asarray(cross.neighbor_counts)).astype(jnp.float64),
                 jnp.linalg.norm(far_full - far_self).astype(jnp.float64),  # remote far
             ]
         )
         return (
-            far_self[:cap], near_self[:cap], far_full[:cap], near_full[:cap],
-            gid_sorted[:, None].astype(jnp.float64), diag[None, :],
+            far_self[:cap],
+            near_self[:cap],
+            far_full[:cap],
+            near_full[:cap],
+            gid_sorted[:, None].astype(jnp.float64),
+            diag[None, :],
         )
 
     counts_dev = jnp.full((ndev,), per, dtype=INDEX_DTYPE)
     far_o, near_o, far_full_o, near_full_o, gid_out, diag_o = shard_map(
-        fn, mesh=mesh,
+        fn,
+        mesh=mesh,
         in_specs=(P("gpus"), P("gpus"), P("gpus"), P("gpus")),
-        out_specs=(P("gpus"),) * 6, check_vma=False,
+        out_specs=(P("gpus"),) * 6,
+        check_vma=False,
     )(
         jnp.asarray(pos_g.reshape(ndev * cap, 3)),
         jnp.asarray(mass_g.reshape(ndev * cap)),
