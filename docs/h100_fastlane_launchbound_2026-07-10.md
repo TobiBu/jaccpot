@@ -95,3 +95,18 @@ are NOT reliable and should be treated as indicative only. Use nsys KERNEL COUNT
 SUCCESS METRIC for the fix = REDUCE the ~852/step tiny-kernel count (collapse to a
 few big kernels). Final wall-clock speedup must be validated on an EXCLUSIVE GPU
 (none free right now; use a quiet GPU / MIG slice / off-hours).
+
+## EXCLUSIVE-GPU WALL-CLOCK (trustworthy) — 2026-07-10
+Ran the jnp-vs-Pallas near-field A/B on a genuinely free H100 (GPU 2, util<5% mem<2GB),
+200k / leaf 256 / order 4 / fp32 / theta 0.6:
+  jnp near-field:    ~243 ms/step
+  pallas near-field: ~130 ms/step
+  => SPEEDUP 1.79x (real, contention-free).
+
+IMPORTANT CORRECTION: the "~10x" and "1122-1638 ms/step" figures earlier in this doc
+were on SHARED GPUs and are dominated by contention (~5-7x inflation). On a clean GPU
+the OLD (jnp) default is ~243 ms/step, not ~1122. So the genuine launch-bound win from
+the Pallas near-field is ~1.79x, not 10x. The kernel-count collapse (19,600 tiny near-field
+kernels -> one big kernel) is real and IS the mechanism of the 1.79x; the 10x wall-clock
+was an artifact of profiling on contended GPUs. Clean pallas ~130 ms/step is in the ballpark
+of the doc's "119 ms A100" figure.
