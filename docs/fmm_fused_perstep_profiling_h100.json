@@ -1,0 +1,35 @@
+{
+  "cc": "9.0",
+  "n": 200000,
+  "steps": 30,
+  "modes": {
+    "integrator_only": {
+      "per_step_ms": 40.99123943597078,
+      "fused_active": true
+    },
+    "tree_only": {
+      "per_step_ms": 146.26882529507083,
+      "fused_active": true
+    },
+    "upward_only": {
+      "per_step_ms": 317.680156044662,
+      "fused_active": true
+    },
+    "downward_only": {
+      "per_step_ms": 775.3455747074137,
+      "fused_active": true
+    },
+    "full": {
+      "per_step_ms": 1236.677521529297,
+      "fused_active": true
+    }
+  },
+  "attributed_ms": {
+    "integrator+overhead": 40.99123943597078,
+    "tree": 105.27758585910004,
+    "upward": 171.41133074959117,
+    "downward": 457.6654186627517,
+    "eval+nearfield": 461.33194682188343,
+    "full_total": 1236.677521529297
+  }
+}
