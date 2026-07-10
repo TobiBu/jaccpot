@@ -2444,15 +2444,6 @@ class FastMultipoleMethod:
                 os.environ.get("JACCPOT_STRICT_REFRESH_DETAIL_DIAG_MODE", "full")
             )
         )
-        self._static_radix_reuse_structures: bool = str(
-            os.environ.get("JACCPOT_STATIC_RADIX_REUSE_STRUCTURES", "0")
-        ).strip().lower() in {"1", "true", "yes", "on"}
-        self._static_radix_upward_batched: bool = str(
-            os.environ.get("JACCPOT_STATIC_RADIX_UPWARD_BATCHED", "0")
-        ).strip().lower() in {"1", "true", "yes", "on"}
-        self._static_radix_downward_batched: bool = str(
-            os.environ.get("JACCPOT_STATIC_RADIX_DOWNWARD_BATCHED", "0")
-        ).strip().lower() in {"1", "true", "yes", "on"}
         (
             self._strict_refresh_diag_tree_active,
             self._strict_refresh_diag_upward_active,
@@ -3312,15 +3303,6 @@ class FastMultipoleMethod:
             ),
             "strict_refresh_detail_diag_mode": str(
                 getattr(self, "_strict_refresh_detail_diag_mode", "full")
-            ),
-            "static_radix_reuse_structures": bool(
-                getattr(self, "_static_radix_reuse_structures", False)
-            ),
-            "static_radix_upward_batched": bool(
-                getattr(self, "_static_radix_upward_batched", False)
-            ),
-            "static_radix_downward_batched": bool(
-                getattr(self, "_static_radix_downward_batched", False)
             ),
             "static_radix_tree_leaf_count": int(
                 getattr(self, "_static_radix_tree_leaf_count", 0)
