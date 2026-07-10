@@ -14,12 +14,16 @@ Run (autocvd picks the GPU):
   PYTHONPATH=<worktree> CUDA_VISIBLE_DEVICES=<gpu> \
       micromamba run -n odisseo python bench/nearfield_leafpair_microbench.py
 """
-from __future__ import annotations
-import os, time, itertools
 
-import numpy as np
+from __future__ import annotations
+
+import itertools
+import os
+import time
+
 import jax
 import jax.numpy as jnp
+import numpy as np
 
 from jaccpot.pallas.nearfield_fused_leaf import (
     nearfield_leafpair_jax,
@@ -37,8 +41,11 @@ def _make_inputs(L, W, S, valid_frac, seed=0):
     sids = rng.integers(0, L, size=(L, S)).astype(np.int32)
     svalid = rng.uniform(size=(L, S)) < valid_frac
     return (
-        jnp.asarray(pos), jnp.asarray(mass), jnp.asarray(mask),
-        jnp.asarray(sids), jnp.asarray(svalid),
+        jnp.asarray(pos),
+        jnp.asarray(mass),
+        jnp.asarray(mask),
+        jnp.asarray(sids),
+        jnp.asarray(svalid),
     )
 
 
@@ -48,11 +55,15 @@ def parity():
     pos, mass, mask, sids, svalid = _make_inputs(L, W, S, valid_frac=0.7, seed=1)
     soft = jnp.asarray(1e-4, jnp.float32)
     G = jnp.asarray(1.0, jnp.float32)
-    ref = np.asarray(nearfield_leafpair_jax(pos, mass, mask, sids, svalid, softening_sq=soft, G=G))
+    ref = np.asarray(
+        nearfield_leafpair_jax(pos, mass, mask, sids, svalid, softening_sq=soft, G=G)
+    )
     for bt in (16, 8):
-        got = np.asarray(nearfield_leafpair_pallas(
-            pos, mass, mask, sids, svalid, softening_sq=soft, G=G,
-            target_subtile=bt))
+        got = np.asarray(
+            nearfield_leafpair_pallas(
+                pos, mass, mask, sids, svalid, softening_sq=soft, G=G, target_subtile=bt
+            )
+        )
         err = float(np.max(np.abs(got - ref)))
         rel = err / (float(np.max(np.abs(ref))) + 1e-30)
         ok = "OK" if rel <= 1e-5 else "FAIL"  # relative: accels have large magnitude
@@ -83,15 +94,26 @@ def speed():
     for bt, nw, ns in itertools.product((32, 64, 128), (None, 2, 4, 8), (1, 2)):
         try:
             fn = lambda bt=bt, nw=nw, ns=ns: nearfield_leafpair_pallas(
-                pos, mass, mask, sids, svalid, softening_sq=soft, G=G,
-                target_subtile=bt, num_warps=nw, num_stages=ns)
+                pos,
+                mass,
+                mask,
+                sids,
+                svalid,
+                softening_sq=soft,
+                G=G,
+                target_subtile=bt,
+                num_warps=nw,
+                num_stages=ns,
+            )
             ms = _time(fn)
             if bt == 32 and nw is None and ns == 1:
                 base = ms
             spd = f"{base/ms:.2f}x" if base else "-"
             print(f"  {bt:>4} {str(nw):>6} {ns:>7} {ms:>9.3f} {spd:>9}")
         except Exception as e:
-            print(f"  {bt:>4} {str(nw):>6} {ns:>7}  FAIL {type(e).__name__}: {str(e)[:60]}")
+            print(
+                f"  {bt:>4} {str(nw):>6} {ns:>7}  FAIL {type(e).__name__}: {str(e)[:60]}"
+            )
 
 
 if __name__ == "__main__":
