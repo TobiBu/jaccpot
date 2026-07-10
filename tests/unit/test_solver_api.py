@@ -20,10 +20,16 @@ from jaccpot import (
 )
 from jaccpot import FastMultipoleMethod
 from jaccpot import FastMultipoleMethod as ExpanseFMM
-from jaccpot import FMMAdvancedConfig
+from jaccpot import (
+    FMMAdvancedConfig,
+)
 from jaccpot import FMMPreset
 from jaccpot import FMMPreset as ExpansePreset
-from jaccpot import NearFieldConfig, RuntimePolicyConfig, TreeConfig
+from jaccpot import (
+    NearFieldConfig,
+    RuntimePolicyConfig,
+    TreeConfig,
+)
 
 
 def _sample_problem(n: int = 64):
