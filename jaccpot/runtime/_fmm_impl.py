@@ -1916,7 +1916,7 @@ class FastMultipoleMethod:
         m2l_impl: Optional[str] = None,
         adaptive_order: bool = False,
         p_gears: Optional[tuple[int, ...]] = None,
-        use_pallas: bool = False,
+        use_pallas: Optional[bool] = None,
         reuse_topology: bool = False,
         rebuild_every: int = 1,
         mac_force_scale_mode: str = "prev",
@@ -1980,7 +1980,24 @@ class FastMultipoleMethod:
             self.m2l_impl = "rot_scale"
         self.adaptive_order = bool(adaptive_order)
         self.p_gears = tuple(int(v) for v in (p_gears or ()))
-        self.use_pallas = bool(use_pallas)
+        # Default the Pallas near-field ON wherever it can run (Ampere sm_80+),
+        # and fall back to the pure-JAX near-field ONLY on hardware that cannot
+        # run Pallas (e.g. RTX 2080 / sm_75) or CPU. Leaving it off by default
+        # silently ran the ~10x-slower launch-bound jnp near-field on capable
+        # GPUs; the non-Pallas path is retained solely as the sm_75/CPU lane.
+        # An explicit use_pallas=True/False still overrides this resolution.
+        if use_pallas is None:
+            try:
+                from jaccpot.pallas.nearfield_fused_leaf import (
+                    pallas_nearfield_fused_supported,
+                )
+
+                resolved_use_pallas = bool(pallas_nearfield_fused_supported())
+            except Exception:
+                resolved_use_pallas = False
+        else:
+            resolved_use_pallas = bool(use_pallas)
+        self.use_pallas = resolved_use_pallas
         self.reuse_topology = bool(reuse_topology)
         if int(rebuild_every) <= 0:
             raise ValueError("rebuild_every must be positive")
