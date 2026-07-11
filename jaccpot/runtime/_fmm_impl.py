@@ -11926,15 +11926,18 @@ def _propagate_solidfmm_locals_by_level(
         valid = child_idx >= 0
         safe_child = jnp.where(valid, child_idx, 0)
         parent_coeffs = state[parent_rep]
+        # L2L uses the old_center - new_center (parent - child) displacement in
+        # BOTH bases. The complex path previously used child - parent here,
+        # which is the wrong sign: the far field was left uncorrected in
+        # proportion to the cascade depth, capping accuracy (~3e-3 at
+        # theta>=0.5) regardless of expansion order, while looking fine at small
+        # theta where the L2L cascade is shallow.
+        deltas = centers[parent_rep] - centers[safe_child]
         if real_basis:
-            # l2l_real uses the old_center - new_center (parent - child)
-            # convention, i.e. the negative of the complex kernel's delta.
-            deltas = centers[parent_rep] - centers[safe_child]
             translated = _l2l_real_batch_kernel(
                 parent_coeffs, deltas, order=order
             ).astype(state.dtype)
         else:
-            deltas = centers[safe_child] - centers[parent_rep]
             translated = _l2l_complex_batch_kernel(
                 parent_coeffs, deltas, order=order, rotation=rotation
             ).astype(state.dtype)
