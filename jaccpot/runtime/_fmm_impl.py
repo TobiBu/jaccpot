@@ -1423,6 +1423,45 @@ def _finalize_octree_downward_artifacts(
     return propagate_octree_solidfmm_l2l(accumulated, octree)
 
 
+def _octree_farfield_eval_inputs(state):
+    """Far-field eval overrides that make the octree backend evaluate its OWN locals.
+
+    For ``execution_backend == "octree"`` the octree upward/M2L/L2L pass fills octree-node-
+    space local expansions (``state.octree_downward``), but the default far-field eval
+    evaluates the radix locals. Passing these three overrides into the full-particle eval
+    path evaluates the OCTREE locals at each particle instead. The near-field is already
+    octree-native (``state.nearfield_interop``) and needs no override.
+
+    The three outputs share the octree node-id space, and ``state.octree.node_ranges`` index
+    into ``state.positions_sorted`` in the same (radix-Morton) order -- ``state.octree`` is
+    derived from ``state.tree`` via ``build_octree_execution_data`` (which asserts root-range
+    equality) -- so no re-permutation is needed. Returns ``(None, None, None)`` for non-octree
+    backends or when the octree downward pass was not run.
+    """
+    if (
+        str(getattr(state, "execution_backend", "radix")).strip().lower() != "octree"
+        or getattr(state, "octree", None) is None
+        or getattr(state, "octree_downward", None) is None
+    ):
+        return None, None, None
+    downward = state.octree_downward
+    coefficients = jnp.asarray(downward.locals_packed)
+    farfield_local_data = LocalExpansionData(
+        # Infer order from the (static) coefficient width. downward.order can be a
+        # traced pytree leaf when compute_accelerations is jitted, so concretizing it
+        # with int(...) raises ConcretizationTypeError; coefficients.shape[-1] is static.
+        order=_infer_order_from_coeff_count(
+            coeff_count=int(coefficients.shape[-1]),
+            expansion_basis="solidfmm",
+        ),
+        centers=jnp.asarray(downward.centers),
+        coefficients=coefficients,
+    )
+    farfield_leaf_nodes = jnp.asarray(state.octree.leaf_nodes, dtype=INDEX_DTYPE)
+    farfield_node_ranges = jnp.asarray(state.octree.node_ranges, dtype=INDEX_DTYPE)
+    return farfield_local_data, farfield_leaf_nodes, farfield_node_ranges
+
+
 class _FarPairCOO(NamedTuple):
     """Compact COO-style far-pair representation for streamed M2L execution."""
 
@@ -9416,6 +9455,13 @@ class FastMultipoleMethod:
         use_full_eval_for_targets = bool(return_potential) and (
             resolved_target_indices is not None
         )
+        # Octree backend: evaluate the octree-native far-field locals (the near-field is
+        # already octree-native). Only the full-particle path honours these overrides.
+        (
+            octree_farfield_local_data,
+            octree_farfield_leaf_nodes,
+            octree_farfield_node_ranges,
+        ) = _octree_farfield_eval_inputs(state)
         if (
             resolved_target_indices is None
             or tracing_targets
@@ -9429,9 +9475,9 @@ class FastMultipoleMethod:
                 downward=state.downward,
                 neighbor_list=state.neighbor_list,
                 nearfield_interop=state.nearfield_interop,
-                farfield_local_data=None,
-                farfield_leaf_nodes=None,
-                farfield_node_ranges=None,
+                farfield_local_data=octree_farfield_local_data,
+                farfield_leaf_nodes=octree_farfield_leaf_nodes,
+                farfield_node_ranges=octree_farfield_node_ranges,
                 nearfield_target_leaf_ids=state.nearfield_target_leaf_ids,
                 nearfield_source_leaf_ids=state.nearfield_source_leaf_ids,
                 nearfield_valid_pairs=state.nearfield_valid_pairs,
@@ -10242,6 +10288,12 @@ class FastMultipoleMethod:
         tracing_targets = isinstance(
             positions_sorted_arr, jax.core.Tracer
         ) or isinstance(resolved_target_indices, jax.core.Tracer)
+        # Octree backend: evaluate octree-native far-field locals (full path only).
+        (
+            octree_farfield_local_data,
+            octree_farfield_leaf_nodes,
+            octree_farfield_node_ranges,
+        ) = _octree_farfield_eval_inputs(state)
         if resolved_target_indices is None or tracing_targets:
             evaluation = _evaluate_prepared_tree(
                 fmm=self,
@@ -10251,9 +10303,9 @@ class FastMultipoleMethod:
                 downward=downward,
                 neighbor_list=state.neighbor_list,
                 nearfield_interop=state.nearfield_interop,
-                farfield_local_data=None,
-                farfield_leaf_nodes=None,
-                farfield_node_ranges=None,
+                farfield_local_data=octree_farfield_local_data,
+                farfield_leaf_nodes=octree_farfield_leaf_nodes,
+                farfield_node_ranges=octree_farfield_node_ranges,
                 nearfield_target_leaf_ids=state.nearfield_target_leaf_ids,
                 nearfield_source_leaf_ids=state.nearfield_source_leaf_ids,
                 nearfield_valid_pairs=state.nearfield_valid_pairs,
