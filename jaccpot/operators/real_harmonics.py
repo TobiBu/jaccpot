@@ -197,6 +197,8 @@ import jax.numpy as jnp
 import numpy as np
 from jaxtyping import Array, DTypeLike
 
+from jaccpot.operators.symmetric_tensors import symmetric_multi_indices_3d
+
 # ===========================================================================
 # Index utilities
 # ===========================================================================
@@ -641,6 +643,65 @@ def evaluate_local_real_with_grad(
     # We return ∇_delta φ; caller should negate if needed for force.
     potential, grad = jax.value_and_grad(phi_fn)(delta)
     return grad, potential
+
+
+@partial(jax.jit, static_argnames=("order", "max_derivative_order"))
+def evaluate_local_real_derivative_tower(
+    local_coeffs: Array,
+    delta: Array,
+    *,
+    order: int,
+    max_derivative_order: int,
+) -> Tuple[Array, ...]:
+    """Potential and packed symmetric spatial-derivative tower ``D0..DK``.
+
+    ``Dk`` holds the k-th partial derivatives of the real local expansion with
+    respect to ``delta`` (= center - eval_point), stored as unique symmetric
+    components in the deterministic order of
+    :func:`~jaccpot.operators.symmetric_tensors.symmetric_multi_indices_3d`.
+    ``D0`` has shape ``(1,)`` and holds the potential.
+
+    This mirrors :func:`evaluate_local_complex_derivative_tower` (also autodiff
+    based) so downstream L2P code can consume either basis's tower identically.
+    """
+    p = int(order)
+    k_max = int(max_derivative_order)
+    if k_max < 0:
+        raise ValueError("max_derivative_order must be non-negative")
+
+    def phi(d: Array) -> Array:
+        return evaluate_local_real(local_coeffs, d, order=p)
+
+    out: list[Array] = [jnp.reshape(phi(delta), (1,))]
+    deriv_fn = phi
+    for k in range(1, k_max + 1):
+        deriv_fn = jax.jacfwd(deriv_fn)
+        tensor = deriv_fn(delta)  # shape (3,) * k, fully symmetric
+        components = []
+        for nx, ny, nz in symmetric_multi_indices_3d(k):
+            axes = tuple([0] * nx + [1] * ny + [2] * nz)
+            components.append(tensor[axes])
+        out.append(jnp.stack(components))
+    return tuple(out)
+
+
+@partial(jax.jit, static_argnames=("order", "max_derivative_order"))
+def evaluate_local_real_derivative_tower_batch(
+    local_coeffs: Array,
+    deltas: Array,
+    *,
+    order: int,
+    max_derivative_order: int,
+) -> Tuple[Array, ...]:
+    """Batched :func:`evaluate_local_real_derivative_tower` over ``deltas``."""
+    return jax.vmap(
+        lambda d: evaluate_local_real_derivative_tower(
+            local_coeffs,
+            d,
+            order=order,
+            max_derivative_order=max_derivative_order,
+        )
+    )(deltas)
 
 
 # ===========================================================================
@@ -1761,6 +1822,8 @@ __all__ = [
     # L2P (local to particle evaluation)
     "evaluate_local_real",
     "evaluate_local_real_with_grad",
+    "evaluate_local_real_derivative_tower",
+    "evaluate_local_real_derivative_tower_batch",
     # B matrices for coordinate swap (x,y,z) → (z,y,x)
     "compute_real_B_matrix_local",
     "compute_real_B_matrix_multipole",

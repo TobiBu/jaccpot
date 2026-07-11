@@ -111,6 +111,7 @@ from jaccpot.operators.multipole_utils import (
 )
 from jaccpot.operators.real_harmonics import (
     complex_to_dehnen_real_coeffs,
+    evaluate_local_real_derivative_tower_batch,
     evaluate_local_real_with_grad,
     l2l_real,
     sh_size,
@@ -13251,19 +13252,43 @@ def _evaluate_local_expansions_for_target_particles(
         # Real (Dehnen no-sqrt2) basis: real-typed locals, evaluated with the
         # real L2P operator (detected by coefficient dtype).
         if not jnp.iscomplexobj(coeffs):
-            if int(max_acc_derivative_order) > 0:
-                raise NotImplementedError(
-                    "real-basis L2P does not yet support acceleration "
-                    "derivative towers (max_acc_derivative_order > 0)"
-                )
-            grads, pots = jax.vmap(
-                lambda coeff_row, offset_row: evaluate_local_real_with_grad(
-                    coeff_row, offset_row, order=int(order)
-                )
+            if int(max_acc_derivative_order) <= 0:
+                grads, pots = jax.vmap(
+                    lambda coeff_row, offset_row: evaluate_local_real_with_grad(
+                        coeff_row, offset_row, order=int(order)
+                    )
+                )(coeffs, offsets_complex)
+                if return_potential:
+                    return grads, pots, None
+                return grads, None, None
+
+            tower = jax.vmap(
+                lambda coeff_row, offset_row: (
+                    evaluate_local_real_derivative_tower_batch(
+                        coeff_row,
+                        offset_row[jnp.newaxis, :],
+                        order=int(order),
+                        max_derivative_order=int(max_acc_derivative_order) + 1,
+                    )
+                ),
+                in_axes=(0, 0),
             )(coeffs, offsets_complex)
+            potentials = tower[0][:, 0, 0]
+            gradients = tower[1][:, 0, :]
+            derivatives_real: list[Array] = []
+            for level in range(1, max_acc_derivative_order + 1):
+                high = tower[level + 1][:, 0, :]
+                gather = jnp.asarray(
+                    component_lift_index_map_3d(level),
+                    dtype=INDEX_DTYPE,
+                )
+                lifted = jnp.swapaxes(high[:, gather], 1, 2)
+                sign = -1.0 if level % 2 == 0 else 1.0
+                derivatives_real.append(sign * lifted)
+            packed_real: PackedAccelerationDerivatives = tuple(derivatives_real)
             if return_potential:
-                return grads, pots, None
-            return grads, None, None
+                return gradients, potentials, packed_real
+            return gradients, None, packed_real
 
         if max_acc_derivative_order <= 0:
             if return_potential:
@@ -13497,53 +13522,76 @@ def _evaluate_local_expansions_for_particles(
         # real L2P operator. Detected by coefficient dtype so no basis_mode needs
         # to be threaded through every caller.
         if not jnp.iscomplexobj(coeffs):
-            if int(max_acc_derivative_order) > 0:
-                raise NotImplementedError(
-                    "real-basis L2P does not yet support acceleration "
-                    "derivative towers (max_acc_derivative_order > 0)"
+            # Real (Dehnen) branch: compute grad_field / potentials /
+            # derivative_fields with the real L2P operators, then fall through
+            # to the shared scatter below (identical to the complex path).
+            if int(max_acc_derivative_order) <= 0:
+
+                def evaluate_leaf_real(
+                    coeffs_leaf: Array,
+                    offsets_leaf: Array,
+                    mask_leaf: Array,
+                ) -> tuple[Array, Array]:
+                    grads, values = jax.vmap(
+                        lambda offset: evaluate_local_real_with_grad(
+                            coeffs_leaf, offset, order=p
+                        )
+                    )(offsets_leaf)
+                    # evaluate_local_real_with_grad returns d(phi)/d(delta) with
+                    # delta = center - eval_point == the acceleration
+                    # contribution consumed downstream.
+                    grads = grads.astype(dtype)
+                    values = values.astype(dtype)
+                    grads = jnp.where(mask_leaf[..., None], grads, 0.0)
+                    values = jnp.where(mask_leaf, values, 0.0)
+                    return grads, values
+
+                grad_field, potentials = jax.vmap(evaluate_leaf_real)(
+                    coeffs,
+                    offsets_complex,
+                    valid,
                 )
+                derivative_fields = []
+            else:
 
-            def evaluate_leaf_real(
-                coeffs_leaf: Array,
-                offsets_leaf: Array,
-                mask_leaf: Array,
-            ) -> tuple[Array, Array]:
-                grads, values = jax.vmap(
-                    lambda offset: evaluate_local_real_with_grad(
-                        coeffs_leaf, offset, order=p
+                def evaluate_leaf_real_with_derivatives(
+                    coeffs_leaf: Array,
+                    offsets_leaf: Array,
+                    mask_leaf: Array,
+                ) -> tuple[Array, Array, tuple[Array, ...]]:
+                    tower = evaluate_local_real_derivative_tower_batch(
+                        coeffs_leaf,
+                        offsets_leaf,
+                        order=p,
+                        max_derivative_order=int(max_acc_derivative_order) + 1,
                     )
-                )(offsets_leaf)
-                # evaluate_local_real_with_grad returns d(phi)/d(delta) with
-                # delta = center - eval_point, which equals the acceleration
-                # contribution -grad_{eval} phi consumed downstream.
-                grads = grads.astype(dtype)
-                values = values.astype(dtype)
-                grads = jnp.where(mask_leaf[..., None], grads, 0.0)
-                values = jnp.where(mask_leaf, values, 0.0)
-                return grads, values
+                    grads = tower[1].astype(dtype)
+                    values = tower[0][:, 0].astype(dtype)
+                    grads = jnp.where(mask_leaf[..., None], grads, 0.0)
+                    values = jnp.where(mask_leaf, values, 0.0)
+                    derivative_levels: list[Array] = []
+                    for level in range(1, int(max_acc_derivative_order) + 1):
+                        high = tower[level + 1]
+                        gather = jnp.asarray(
+                            component_lift_index_map_3d(level),
+                            dtype=INDEX_DTYPE,
+                        )
+                        lifted = jnp.swapaxes(high[:, gather], 1, 2)
+                        sign = -1.0 if level % 2 == 0 else 1.0
+                        lifted = (sign * lifted).astype(dtype)
+                        lifted = jnp.where(mask_leaf[:, None, None], lifted, 0.0)
+                        derivative_levels.append(lifted)
+                    return grads, values, tuple(derivative_levels)
 
-            grad_field, potentials = jax.vmap(evaluate_leaf_real)(
-                coeffs,
-                offsets_complex,
-                valid,
-            )
-            gradients = _scatter_vectors(
-                jnp.zeros_like(positions),
-                safe_idx,
-                grad_field,
-                valid,
-            )
-            if not return_potential:
-                return gradients, None, None
-            potentials_flat = _scatter_scalars(
-                jnp.zeros((positions.shape[0],), dtype=dtype),
-                safe_idx,
-                potentials,
-                valid,
-            )
-            return gradients, potentials_flat, None
-
-        if max_acc_derivative_order <= 0:
+                grad_field, potentials, derivative_fields_tuple = jax.vmap(
+                    evaluate_leaf_real_with_derivatives
+                )(
+                    coeffs,
+                    offsets_complex,
+                    valid,
+                )
+                derivative_fields = list(derivative_fields_tuple)
+        elif max_acc_derivative_order <= 0:
             if not bool(return_potential):
                 flat_analytic = str(
                     os.environ.get(

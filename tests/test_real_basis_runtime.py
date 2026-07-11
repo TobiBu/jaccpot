@@ -146,3 +146,52 @@ def test_real_basis_tracks_complex_basis():
         np.linalg.norm(acc_complex) + 1.0e-12
     )
     assert rel_l2 < 3.0e-2
+
+
+def test_real_basis_acceleration_derivatives_match_complex():
+    """Real-basis acceleration derivative towers match the complex path.
+
+    Regression guard for the real L2P derivative tower
+    (evaluate_local_real_derivative_tower): with the same tree/interactions the
+    real and complex bases must produce identical accelerations AND identical
+    packed acceleration-derivative levels.
+    """
+    if not jax.config.jax_enable_x64:
+        pytest.skip("requires x64 for stable tolerance")
+
+    n = 400
+    dtype = jnp.float64
+    key = jax.random.PRNGKey(5)
+    key_pos, key_mass = jax.random.split(key)
+    positions = jax.random.uniform(
+        key_pos, (n, 3), minval=-1.0, maxval=1.0, dtype=dtype
+    )
+    masses = jnp.abs(jax.random.normal(key_mass, (n,), dtype=dtype)) + jnp.asarray(
+        0.5, dtype=dtype
+    )
+
+    def run(basis: str, k: int):
+        fmm = FastMultipoleMethod(preset="accurate", basis=basis, theta=0.4)
+        return fmm.compute_accelerations(
+            positions, masses, leaf_size=16, max_order=6, max_acc_derivative_order=k
+        )
+
+    for k in (1, 2):
+        real_out = run("real", k)
+        complex_out = run("complex", k)
+        acc_real = np.asarray(real_out[0])
+        acc_complex = np.asarray(complex_out[0])
+        assert (
+            np.linalg.norm(acc_real - acc_complex)
+            / (np.linalg.norm(acc_complex) + 1.0e-12)
+            < 1.0e-6
+        )
+        levels_real = real_out[1]
+        levels_complex = complex_out[1]
+        assert len(levels_real) == len(levels_complex) == k
+        for dr, dc in zip(levels_real, levels_complex):
+            dr_np = np.asarray(dr)
+            dc_np = np.asarray(dc)
+            assert dr_np.shape == dc_np.shape
+            rel = np.linalg.norm(dr_np - dc_np) / (np.linalg.norm(dc_np) + 1.0e-30)
+            assert rel < 1.0e-6
