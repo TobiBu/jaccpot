@@ -12,8 +12,8 @@ import jax.numpy as jnp
 from jaxtyping import Array
 
 from jaccpot.operators.real_harmonics import (
-    real_rotation_from_z_axis_multipole,
-    real_rotation_to_z_axis_local,
+    real_rotation_from_z_axis_local,
+    real_rotation_to_z_axis_multipole,
     sh_offset,
     translate_along_z_m2l_real,
 )
@@ -33,7 +33,7 @@ def _rotate_multipole_to_z_single(
     out = jnp.zeros_like(multipole)
     for ell in range(int(order) + 1):
         sl = slice(sh_offset(ell), sh_offset(ell + 1))
-        block = real_rotation_from_z_axis_multipole(x, y, z, ell, dtype=multipole.dtype)
+        block = real_rotation_to_z_axis_multipole(x, y, z, ell, dtype=multipole.dtype)
         out = out.at[sl].set(block @ multipole[sl])
     return out
 
@@ -44,7 +44,7 @@ def _rotate_local_from_z_single(local_z: Array, delta: Array, *, order: int) -> 
     out = jnp.zeros_like(local_z)
     for ell in range(int(order) + 1):
         sl = slice(sh_offset(ell), sh_offset(ell + 1))
-        block = real_rotation_to_z_axis_local(x, y, z, ell, dtype=local_z.dtype)
+        block = real_rotation_from_z_axis_local(x, y, z, ell, dtype=local_z.dtype)
         out = out.at[sl].set(block @ local_z[sl])
     return out
 

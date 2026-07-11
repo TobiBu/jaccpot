@@ -1096,6 +1096,54 @@ def real_Dz_diagonal(ell: int, angle: Array, *, dtype: DTypeLike) -> Array:
     return D
 
 
+def _multipole_align_to_z_block(
+    x: Array, y: Array, z: Array, ell: int, *, dtype: DTypeLike
+) -> Array:
+    """Degree-``ell`` block that rotates a MULTIPOLE from the world frame into
+    the frame where the direction ``(x, y, z)`` points along ``+z``.
+
+    Verified identity (to machine precision):
+        (this block) @ p2m(s)[block] == p2m(g @ s)[block]
+    where ``g`` is the physical rotation with ``g @ (x,y,z)/|.| == +z_hat``.
+
+    Convention (CRITICAL): the coded ``B`` matrix
+    (:func:`_compute_dehnen_B_matrix_complex`) is the **x <-> z** swap, so
+    ``B @ Dz(theta) @ B`` is a rotation about the *x* axis. Aligning
+    ``(x, y, z)`` with ``+z`` therefore requires the azimuth that removes the
+    *x*-component, ``az = atan2(x, y)`` (not ``atan2(y, x)``, which suits a
+    y-rotation swap), followed by the polar tilt about x,
+    ``ax = atan2(rho, z)``. In coordinate space ``g = Rx(ax) @ Rz(az)`` whose
+    multipole representation is ``B_U @ Dz(-ax) @ B_U @ Dz(az)``.
+    """
+    rho = jnp.sqrt(x * x + y * y)
+    az = jnp.arctan2(x, y)
+    ax = jnp.arctan2(rho, z)
+    B_U = compute_real_B_matrix_multipole(ell, dtype=dtype)
+    return (
+        B_U
+        @ real_Dz_diagonal(ell, -ax, dtype=dtype)
+        @ B_U
+        @ real_Dz_diagonal(ell, az, dtype=dtype)
+    )
+
+
+def _multipole_align_from_z_block(
+    x: Array, y: Array, z: Array, ell: int, *, dtype: DTypeLike
+) -> Array:
+    """Inverse of :func:`_multipole_align_to_z_block` (multipole z-frame ->
+    world). Equals ``Dz(-az) @ B_U @ Dz(ax) @ B_U`` with the same angles."""
+    rho = jnp.sqrt(x * x + y * y)
+    az = jnp.arctan2(x, y)
+    ax = jnp.arctan2(rho, z)
+    B_U = compute_real_B_matrix_multipole(ell, dtype=dtype)
+    return (
+        real_Dz_diagonal(ell, -az, dtype=dtype)
+        @ B_U
+        @ real_Dz_diagonal(ell, ax, dtype=dtype)
+        @ B_U
+    )
+
+
 def real_rotation_to_z_axis_multipole(
     x: Array,
     y: Array,
@@ -1104,32 +1152,14 @@ def real_rotation_to_z_axis_multipole(
     *,
     dtype: DTypeLike,
 ) -> Array:
-    """Compute rotation matrix to align vector (x,y,z) with z-axis.
+    """Rotation that aligns the vector (x,y,z) with the +z axis for MULTIPOLES.
 
-    Use this to rotate multipole expansion coefficients U_n^m.
-
-    Using the Dehnen rotation D_y(-θ) @ D_z(-φ) expressed via B:
-    1. Rotate by -αz = -arctan(y/x) around z → brings vector to xz-plane
-    2. Swap x↔z with B
-    3. Rotate by -αx = -arctan(ρ/z) around z → aligns with z-axis
-    4. Swap back with B
-
-    D = B_U @ Dz(-αx) @ B_U @ Dz(αz)
-
-    After applying D @ M, the multipole expansion has its z-axis aligned
-    with the original (x,y,z) direction.
+    Use this to rotate multipole expansion coefficients U_n^m into the
+    z-aligned frame. After applying ``D @ M``, the multipole expansion is
+    expressed in the frame where the original ``(x, y, z)`` direction lies on
+    ``+z``.
     """
-    rho = jnp.sqrt(x * x + y * y)
-
-    # Dehnen's angles (positive, as specified in A.6.2)
-    alpha_z = jnp.arctan2(y, x)
-    alpha_x = jnp.arctan2(rho, z)
-
-    B_U = compute_real_B_matrix_multipole(ell, dtype=dtype)
-    Dz_neg_alpha_z = real_Dz_diagonal(ell, -alpha_z, dtype=dtype)
-    Dz_neg_alpha_x = real_Dz_diagonal(ell, -alpha_x, dtype=dtype)
-
-    return B_U @ Dz_neg_alpha_x @ B_U @ Dz_neg_alpha_z
+    return _multipole_align_to_z_block(x, y, z, ell, dtype=dtype)
 
 
 def real_rotation_to_z_axis_multipole_wigner(
@@ -1153,27 +1183,15 @@ def real_rotation_from_z_axis_local(
     *,
     dtype: DTypeLike,
 ) -> Array:
-    """Compute inverse rotation matrix for LOCAL expansions.
+    """Rotation for LOCAL expansions from the z-aligned frame back to world.
 
-    Use this to rotate local expansion coefficients T_n^m back
-    from the z-aligned frame.
-
-    For locals in the Dehnen basis, rotate back using the inverse of
-    the z-alignment rotation:
-        D_inv = Dz(-αz) @ B @ Dz(+αx) @ B
-        L = D_inv @ L_z
+    Because :func:`evaluate_local_real` contracts local coefficients against
+    the SAME regular solid harmonics ``U_n^m`` used by P2M, local coefficients
+    transform as the (matrix) transpose of the multipole rotation -- NOT via a
+    separate ``B_T`` matrix. This block is therefore the transpose of the
+    multipole world->z rotation (:func:`real_rotation_to_z_axis_multipole`).
     """
-    rho = jnp.sqrt(x * x + y * y)
-
-    # Same angles as forward rotation
-    alpha_z = jnp.arctan2(y, x)
-    alpha_x = jnp.arctan2(rho, z)
-
-    B_T = compute_real_B_matrix_local(ell, dtype=dtype)
-    Dz_pos_alpha_z = real_Dz_diagonal(ell, alpha_z, dtype=dtype)
-    Dz_pos_alpha_x = real_Dz_diagonal(ell, alpha_x, dtype=dtype)
-
-    return Dz_pos_alpha_z @ B_T @ Dz_pos_alpha_x @ B_T
+    return _multipole_align_to_z_block(x, y, z, ell, dtype=dtype).T
 
 
 def real_rotation_from_z_axis_local_wigner(
@@ -1197,24 +1215,12 @@ def real_rotation_from_z_axis_multipole(
     *,
     dtype: DTypeLike,
 ) -> Array:
-    """Compute inverse rotation matrix for MULTIPOLE expansions.
+    """Inverse rotation for MULTIPOLE expansions (z-aligned frame -> world).
 
-    For multipoles in the Dehnen basis, rotate back using the inverse of
-    the z-alignment rotation:
-        D_inv = Dz(-αz) @ B_U @ Dz(+αx) @ B_U
-        M = D_inv @ M_z
+    This is the inverse of :func:`real_rotation_to_z_axis_multipole`; apply it
+    to rotate a z-frame multipole back to the world frame (``M = D @ M_z``).
     """
-    rho = jnp.sqrt(x * x + y * y)
-
-    # Same angles as forward rotation
-    alpha_z = jnp.arctan2(y, x)
-    alpha_x = jnp.arctan2(rho, z)
-
-    B_U = compute_real_B_matrix_multipole(ell, dtype=dtype)
-    Dz_pos_alpha_z = real_Dz_diagonal(ell, alpha_z, dtype=dtype)
-    Dz_pos_alpha_x = real_Dz_diagonal(ell, alpha_x, dtype=dtype)
-
-    return Dz_pos_alpha_z @ B_U @ Dz_pos_alpha_x @ B_U
+    return _multipole_align_from_z_block(x, y, z, ell, dtype=dtype)
 
 
 def real_rotation_from_z_axis_multipole_wigner(
@@ -1240,21 +1246,15 @@ def real_rotation_to_z_axis_local(
     *,
     dtype: DTypeLike,
 ) -> Array:
-    """Compute rotation matrix to align vector (x,y,z) with z-axis for locals.
+    """Rotation that aligns (x,y,z) with the +z axis for LOCAL expansions.
 
-    For local expansions in the Dehnen basis:
-        D = B_T @ Dz(-αx) @ B_T @ Dz(αz)
+    Local coefficients transform as the transpose-inverse of the multipole
+    rotation (they contract against the regular ``U_n^m`` basis in
+    :func:`evaluate_local_real`). The world->z local rotation is therefore the
+    transpose of the multipole z->world rotation
+    (:func:`real_rotation_from_z_axis_multipole`).
     """
-    rho = jnp.sqrt(x * x + y * y)
-
-    alpha_z = jnp.arctan2(y, x)
-    alpha_x = jnp.arctan2(rho, z)
-
-    B_T = compute_real_B_matrix_local(ell, dtype=dtype)
-    Dz_neg_alpha_z = real_Dz_diagonal(ell, -alpha_z, dtype=dtype)
-    Dz_neg_alpha_x = real_Dz_diagonal(ell, -alpha_x, dtype=dtype)
-
-    return B_T @ Dz_neg_alpha_x @ B_T @ Dz_neg_alpha_z
+    return _multipole_align_from_z_block(x, y, z, ell, dtype=dtype).T
 
 
 def real_rotation_to_z_axis_local_wigner(
@@ -1353,8 +1353,18 @@ def translate_along_z_m2l_real(
                 # Sign from Dehnen eq (84). The real basis uses the same
                 # parity factor for both cos/sin channels; any m-channel
                 # mixing is handled by the z-rotation blocks.
+                #
+                # Normalization (CRITICAL): the no-sqrt2 real basis pairs the
+                # complex +m and -m channels through Q. The complex addition
+                # theorem contributes both, so each real m != 0 channel carries
+                # a factor of 2 relative to the m = 0 channel. Dropping it makes
+                # every m != 0 local coefficient exactly half its true value,
+                # which is invisible for on-axis (m = 0 only) geometries but
+                # caps off-axis M2L accuracy at a few percent regardless of
+                # expansion order. See tests/.../test_real_harmonics.py.
                 sign = (-1.0) ** m
-                coeff = sign * fact[n + k] / (r ** (n + k + 1))
+                channel_scale = 1.0 if m == 0 else 2.0
+                coeff = channel_scale * sign * fact[n + k] / (r ** (n + k + 1))
                 acc = acc + coeff * multipole[src_idx]
 
             out = out.at[sh_index(n, m)].set(acc)
@@ -1451,22 +1461,22 @@ def m2l_a6_real_only(
     r2 = jnp.dot(delta, delta)
     r = jnp.sqrt(jnp.maximum(r2, 1e-60))
 
-    # Step 1: Rotate MULTIPOLE to z-aligned frame using B_U
+    # Step 1: Rotate MULTIPOLE into the z-aligned frame.
     M_rotated = jnp.zeros_like(multipole)
     for ell in range(p + 1):
         sl = slice(sh_offset(ell), sh_offset(ell + 1))
-        D_inv = real_rotation_from_z_axis_multipole(x, y, z, ell, dtype=dtype)
-        M_rotated = M_rotated.at[sl].set(D_inv @ multipole[sl])
+        D_to = real_rotation_to_z_axis_multipole(x, y, z, ell, dtype=dtype)
+        M_rotated = M_rotated.at[sl].set(D_to @ multipole[sl])
 
     # Step 2: Z-axis M2L translation in real basis
     L_z = translate_along_z_m2l_real(M_rotated, r, order=p)
 
-    # Step 3: Rotate LOCAL back from z-aligned frame using B_T
+    # Step 3: Rotate the LOCAL expansion back from the z-aligned frame.
     out = jnp.zeros_like(L_z)
     for ell in range(p + 1):
         sl = slice(sh_offset(ell), sh_offset(ell + 1))
-        D_fwd = real_rotation_to_z_axis_local(x, y, z, ell, dtype=dtype)
-        out = out.at[sl].set(D_fwd @ L_z[sl])
+        D_from = real_rotation_from_z_axis_local(x, y, z, ell, dtype=dtype)
+        out = out.at[sl].set(D_from @ L_z[sl])
 
     return out
 
@@ -1590,24 +1600,22 @@ def m2m_real(
     is_zero = r < 1e-30
     dz = jnp.where(is_zero, 0.0, r)
 
-    # Step 1: Rotate MULTIPOLE to z-aligned frame using B_U
+    # Step 1: Rotate MULTIPOLE into the z-aligned frame.
     M_rotated = jnp.zeros_like(multipole)
     for ell in range(p + 1):
         sl = slice(sh_offset(ell), sh_offset(ell + 1))
-        D_inv = real_rotation_from_z_axis_multipole(x, y, z, ell, dtype=dtype)
-        M_rotated = M_rotated.at[sl].set(D_inv @ multipole[sl])
+        D_to = real_rotation_to_z_axis_multipole(x, y, z, ell, dtype=dtype)
+        M_rotated = M_rotated.at[sl].set(D_to @ multipole[sl])
 
-    # Step 2: Z-axis M2M translation
-    # For M2M, we translate the multipole expansion by -dz along the z-axis
-    # (moving center from source to destination = negative of delta direction)
+    # Step 2: Z-axis M2M translation (distance dz = |delta| along +z).
     M_z = translate_along_z_m2m_real(M_rotated, dz, order=p)
 
-    # Step 3: Rotate MULTIPOLE back from z-aligned frame
+    # Step 3: Rotate MULTIPOLE back from the z-aligned frame.
     out = jnp.zeros_like(M_z)
     for ell in range(p + 1):
         sl = slice(sh_offset(ell), sh_offset(ell + 1))
-        D_fwd = real_rotation_to_z_axis_multipole(x, y, z, ell, dtype=dtype)
-        out = out.at[sl].set(D_fwd @ M_z[sl])
+        D_from = real_rotation_from_z_axis_multipole(x, y, z, ell, dtype=dtype)
+        out = out.at[sl].set(D_from @ M_z[sl])
 
     return out
 
@@ -1629,7 +1637,9 @@ def l2l_real(
     local : Array
         Packed real local coefficients of length (order+1)^2.
     delta : Array
-        3-vector from parent center to child center.
+        3-vector ``old_center - new_center`` (parent center minus child
+        center). This matches the ``dest -> source`` sign convention used by
+        :func:`m2m_real` and is what makes the rotated translation converge.
     order : int
         Maximum SH degree.
 
@@ -1652,25 +1662,22 @@ def l2l_real(
     is_zero = r < 1e-30
     dz = jnp.where(is_zero, 0.0, r)
 
-    # Step 1: Rotate LOCAL to z-aligned frame
-    # For local coefficients, we use the same rotation as
-    # multipole to z-aligned
-    # but with B_T instead of B_U
+    # Step 1: Rotate the LOCAL expansion into the z-aligned frame.
     L_rotated = jnp.zeros_like(local)
     for ell in range(p + 1):
         sl = slice(sh_offset(ell), sh_offset(ell + 1))
-        D_inv = real_rotation_from_z_axis_local(x, y, z, ell, dtype=dtype)
-        L_rotated = L_rotated.at[sl].set(D_inv @ local[sl])
+        D_to = real_rotation_to_z_axis_local(x, y, z, ell, dtype=dtype)
+        L_rotated = L_rotated.at[sl].set(D_to @ local[sl])
 
-    # Step 2: Z-axis L2L translation
+    # Step 2: Z-axis L2L translation (distance dz = |delta| along +z).
     L_z = translate_along_z_l2l_real(L_rotated, dz, order=p)
 
-    # Step 3: Rotate LOCAL back from z-aligned frame using B_T
+    # Step 3: Rotate the LOCAL expansion back from the z-aligned frame.
     out = jnp.zeros_like(L_z)
     for ell in range(p + 1):
         sl = slice(sh_offset(ell), sh_offset(ell + 1))
-        D_fwd = real_rotation_to_z_axis_local(x, y, z, ell, dtype=dtype)
-        out = out.at[sl].set(D_fwd @ L_z[sl])
+        D_from = real_rotation_from_z_axis_local(x, y, z, ell, dtype=dtype)
+        out = out.at[sl].set(D_from @ L_z[sl])
 
     return out
 

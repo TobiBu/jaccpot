@@ -45,7 +45,12 @@ def _m2l_translation_tables(order: int) -> tuple[np.ndarray, ...]:
     for n in range(p + 1):
         for m in range(-n, n + 1):
             idx = sh_index(n, m)
-            sign[idx] = -1.0 if (m % 2) else 1.0
+            # (-1)^m parity times the no-sqrt2 real-basis channel factor: every
+            # m != 0 channel carries an extra factor of 2 (see the pure-JAX
+            # translate_along_z_m2l_real). Folding it into ``sign`` keeps the
+            # Pallas kernel identical to the reference recurrence.
+            parity = -1.0 if (m % 2) else 1.0
+            sign[idx] = parity * (2.0 if m != 0 else 1.0)
             m_abs = abs(m)
             for k in range(m_abs, p - n + 1):
                 src_index[idx, k] = sh_index(k, m)
