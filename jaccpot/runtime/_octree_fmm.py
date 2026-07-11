@@ -406,7 +406,9 @@ def _propagate_octree_l2l_complex_by_level(
             parent_coeffs[:, None, :],
             (batch_width, int(children.shape[1]), state.shape[1]),
         )
-        deltas = centers[safe_child_idx] - centers[safe_parents][:, None, :]
+        # L2L delta convention is parent - child (opposite of M2M's child - parent);
+        # l2l_complex is exact only with this sign.
+        deltas = centers[safe_parents][:, None, :] - centers[safe_child_idx]
         translated = l2l_complex_batch(
             parent_coeffs.reshape(-1, state.shape[1]),
             deltas.reshape(-1, 3),
