@@ -787,6 +787,67 @@ def build_Q_dehnen_no_sqrt2(ell: int) -> np.ndarray:
     return Q
 
 
+@lru_cache(maxsize=None)
+def _dehnen_real_Q_full(order: int) -> np.ndarray:
+    """Block-diagonal complex->Dehnen-real transform for all degrees <= order.
+
+    Stacks :func:`build_Q_dehnen_no_sqrt2` per degree into one
+    ``((p+1)^2, (p+1)^2)`` complex matrix ``Q`` such that, for packed complex
+    solidfmm coefficients ``c`` (conjugate-symmetric), ``real(Q @ c)`` are the
+    packed Dehnen no-sqrt2 real coefficients used by this module's operators.
+    """
+    p = int(order)
+    if p < 0:
+        raise ValueError("order must be >= 0")
+    ncoeff = sh_size(p)
+    q_full = np.zeros((ncoeff, ncoeff), dtype=np.complex128)
+    for ell in range(p + 1):
+        sl = slice(sh_offset(ell), sh_offset(ell + 1))
+        q_full[sl, sl] = build_Q_dehnen_no_sqrt2(ell)
+    return q_full
+
+
+@partial(jax.jit, static_argnames=("order",))
+def complex_to_dehnen_real_coeffs(complex_coeffs: Array, *, order: int) -> Array:
+    """Convert packed complex solidfmm coefficients to Dehnen no-sqrt2 real ones.
+
+    This is the conversion consistent with :func:`p2m_real_direct` and the real
+    M2L/M2M/L2L/L2P operators in this module (verified: for a point source,
+    ``complex_to_dehnen_real_coeffs(complex_R_solidfmm(delta)) ==
+    p2m_real_direct(delta)`` to machine precision).
+
+    NOTE: this is NOT the same as ``jaccpot.basis.real_sh.complex_to_real_coeffs``,
+    which produces the unitary sqrt(2) tesseral basis (a different normalization
+    that is incompatible with the Dehnen no-sqrt2 real operators here).
+
+    Parameters
+    ----------
+    complex_coeffs : Array
+        Packed complex coefficients of shape ``(..., (p+1)^2)``.
+    order : int
+        Maximum harmonic degree ``p``.
+
+    Returns
+    -------
+    Array
+        Packed real coefficients of shape ``(..., (p+1)^2)`` with the real dtype
+        matching the input's real component.
+    """
+    coeffs = jnp.asarray(complex_coeffs)
+    expected = sh_size(int(order))
+    if int(coeffs.shape[-1]) != expected:
+        raise ValueError(
+            f"expected last dimension {expected} for order={int(order)}, "
+            f"got {coeffs.shape[-1]}"
+        )
+    q_full = jnp.asarray(
+        _dehnen_real_Q_full(int(order)),
+        dtype=jnp.result_type(coeffs.dtype, jnp.complex64),
+    )
+    converted = jnp.real(coeffs @ q_full.T)
+    return converted.astype(coeffs.real.dtype)
+
+
 def _wigner_D_complex(ell: int, alpha: float, beta: float, gamma: float) -> np.ndarray:
     """Compute complex Wigner D^ell using SymPy (baseline correctness path)."""
     try:
@@ -1692,6 +1753,9 @@ __all__ = [
     "sh_size",
     "sh_offset",
     "sh_index",
+    # Complex -> Dehnen real basis conversion
+    "build_Q_dehnen_no_sqrt2",
+    "complex_to_dehnen_real_coeffs",
     # P2M (particle to multipole)
     "p2m_real_direct",
     # L2P (local to particle evaluation)

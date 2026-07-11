@@ -74,7 +74,50 @@ def test_real_basis_matches_direct_sum_small_n():
     )
 
     rel_l2 = np.linalg.norm(acc_real - acc_ref) / (np.linalg.norm(acc_ref) + 1.0e-12)
-    assert rel_l2 < 5.0e-2
+    assert rel_l2 < 5.0e-3
+
+
+def test_real_basis_far_field_converges_with_order():
+    """Real-basis far-field must converge with expansion order.
+
+    Regression guard for the runtime real-basis path (Q-based complex->Dehnen
+    conversion + real M2L/L2L/L2P routing). A far-field-engaged configuration
+    must show the error dropping monotonically as the order grows -- the old
+    path (wrong sqrt(2) conversion + conjugate-symmetry applied to real locals)
+    plateaued at ~10% regardless of order.
+    """
+    if not jax.config.jax_enable_x64:
+        pytest.skip("requires x64 for stable tolerance")
+
+    n = 1500
+    dtype = jnp.float64
+    key = jax.random.PRNGKey(7)
+    key_pos, key_mass = jax.random.split(key)
+    positions = jax.random.uniform(
+        key_pos, (n, 3), minval=-1.0, maxval=1.0, dtype=dtype
+    )
+    masses = jnp.abs(jax.random.normal(key_mass, (n,), dtype=dtype)) + jnp.asarray(
+        0.5, dtype=dtype
+    )
+    soft = 1.0e-3
+    acc_ref = _direct_sum_accelerations(
+        np.asarray(positions), np.asarray(masses), softening=soft
+    )
+
+    def rel_err(order: int) -> float:
+        fmm = FastMultipoleMethod(
+            preset="accurate", basis="real", theta=0.6, softening=soft
+        )
+        acc = np.asarray(
+            fmm.compute_accelerations(positions, masses, leaf_size=16, max_order=order)
+        )
+        return float(np.linalg.norm(acc - acc_ref) / np.linalg.norm(acc_ref))
+
+    errors = [rel_err(o) for o in (2, 4, 6)]
+    # Monotone improvement with order, and a tight final accuracy.
+    assert errors[1] < errors[0]
+    assert errors[2] < errors[1]
+    assert errors[2] < 1.0e-3
 
 
 def test_real_basis_tracks_complex_basis():
@@ -102,4 +145,4 @@ def test_real_basis_tracks_complex_basis():
     rel_l2 = np.linalg.norm(acc_real - acc_complex) / (
         np.linalg.norm(acc_complex) + 1.0e-12
     )
-    assert rel_l2 < 7.0e-2
+    assert rel_l2 < 3.0e-2
