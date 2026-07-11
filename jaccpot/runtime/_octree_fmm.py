@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from functools import partial
-from typing import NamedTuple
+from typing import NamedTuple, Optional
 
 import jax
 import jax.numpy as jnp
@@ -678,8 +678,15 @@ def prepare_octree_solidfmm_complex_multipoles(
     masses_sorted: Array,
     *,
     max_order: int,
+    max_leaf_size: Optional[int] = None,
 ) -> OctreeSolidFMMComplexMultipoles:
-    """Build octree-native solidfmm complex multipoles in explicit octree space."""
+    """Build octree-native solidfmm complex multipoles in explicit octree space.
+
+    ``max_leaf_size`` is the static per-leaf particle cap for the P2M kernel. Pass a fixed
+    capacity to keep the P2M ``static_argnames`` constant across calls (no recompilation
+    when only positions change -- e.g. across time-integration steps). If ``None`` it is
+    derived from the current occupancy (may retrace if the max occupancy changes).
+    """
 
     total_mass, centers = compute_octree_center_of_mass(
         plan,
@@ -690,10 +697,15 @@ def prepare_octree_solidfmm_complex_multipoles(
 
     leaf_nodes = jnp.asarray(plan.leaf_nodes, dtype=INDEX_DTYPE)
     leaf_valid = leaf_nodes >= 0
-    safe_leaf_nodes = jnp.where(leaf_valid, leaf_nodes, 0)
-    leaf_ranges = plan.node_ranges[safe_leaf_nodes]
-    leaf_counts = jnp.where(leaf_valid, leaf_ranges[:, 1] - leaf_ranges[:, 0] + 1, 0)
-    max_leaf_size = max(int(jnp.max(leaf_counts)), 1)
+    if max_leaf_size is None:
+        safe_leaf_nodes = jnp.where(leaf_valid, leaf_nodes, 0)
+        leaf_ranges = plan.node_ranges[safe_leaf_nodes]
+        leaf_counts = jnp.where(
+            leaf_valid, leaf_ranges[:, 1] - leaf_ranges[:, 0] + 1, 0
+        )
+        max_leaf_size = max(int(jnp.max(leaf_counts)), 1)
+    else:
+        max_leaf_size = int(max_leaf_size)
 
     packed = _p2m_octree_leaves_complex(
         leaf_nodes,

@@ -13,13 +13,20 @@ far interaction per leaf. It runs on the NATURAL node layout (root at index 0, n
 reserved sentinel node) enabled by the collision-free-scatter + derived-batch-width
 kernel fixes in ``runtime/_octree_fmm``.
 
-Near-field note: the U-list P2P here is a straightforward vectorized reference kernel
-(pads to the max U-list width x max leaf size). It is O(N) for bounded occupancy but
-materializes a dense per-leaf tensor; a production large-N path should route the U-list
-through the optimized ``compute_leaf_p2p_accelerations`` near kernel instead.
+``device=True`` (default) builds the octree + U/V lists fully on-device with STATIC
+shapes (yggdrax ``build_uniform_octree_execution_view_device``: a dense node space of
+size ``(8^(L+1)-1)/7`` + fixed-capacity lists) and runs the near field on the optimized
+device P2P kernel (``_compute_leaf_p2p_impl``). For a fixed ``(N, depth, order,
+max_leaf_capacity)`` nothing recompiles when only positions/masses change -- the inner
+FMM kernels' static args (``num_levels=L+1``, ``level_batch_width=8^L``, node count) are
+functions of ``depth`` alone -- so it can be reused across ODISSEO time-integration steps
+without retracing. ``device=False`` uses the host-numpy reference build + a sequential
+``lax.map`` near field. Both give identical forces.
 """
 
 from __future__ import annotations
+
+from typing import Optional
 
 import jax
 import jax.numpy as jnp
@@ -28,9 +35,11 @@ from jaxtyping import Array
 from yggdrax.octree_uvwx import (
     UniformOctreeExecutionView,
     build_uniform_octree_execution_view,
+    build_uniform_octree_execution_view_device,
 )
 
 from ..downward.local_expansions import LocalExpansionData
+from ..nearfield.near_field import _compute_leaf_p2p_impl
 from ..runtime._fmm_impl import _evaluate_local_expansions_for_particles
 from ..runtime._octree_adapter import OctreeExecutionData
 from ..runtime._octree_fmm import (
@@ -107,7 +116,11 @@ def _octree_far_field_grad(
     """O(N) far field: upward (P2M/M2M) -> V-list M2L -> L2L -> evaluate locals."""
     plan = build_octree_upward_plan(octree)
     multipoles = prepare_octree_solidfmm_complex_multipoles(
-        plan, positions_sorted, masses_sorted, max_order=int(order)
+        plan,
+        positions_sorted,
+        masses_sorted,
+        max_order=int(order),
+        max_leaf_size=int(max_leaf_size),
     )
     far_pairs = CompactTaggedOctreeFarPairs(
         sources=jnp.asarray(view.v_src, dtype=INDEX_DTYPE),
@@ -232,6 +245,54 @@ def _ulist_near_accelerations(
     return near
 
 
+def _ulist_near_device(
+    positions_sorted: Array,
+    masses_sorted: Array,
+    view: UniformOctreeExecutionView,
+    *,
+    G: float,
+    softening: float,
+    max_leaf_size: int,
+) -> Array:
+    """Device U-list near-field P2P via the optimized ``_compute_leaf_p2p_impl``.
+
+    Consumes the device build's fixed-width U-list (row ids, self-excluded, sentinel =
+    ``num_nodes``) as a precomputed (target, source, valid) pair list, so the shapes are
+    static (``num_leaves * 26``) and the kernel does its own memory-safe chunking. The
+    kernel adds each leaf's intra-leaf self block once, matching the self-excluded U-list.
+    """
+    num_nodes = int(view.parent.shape[0])
+    num_leaves = int(view.leaf_indices.shape[0])
+    u_cap = 26
+    src_rows_raw = jnp.asarray(view.u_neighbors, dtype=INDEX_DTYPE)
+    valid_pairs = src_rows_raw < num_leaves  # sentinel (num_nodes) and pads excluded
+    source_leaf_ids = jnp.where(valid_pairs, src_rows_raw, jnp.asarray(0, INDEX_DTYPE))
+    target_leaf_ids = jnp.repeat(jnp.arange(num_leaves, dtype=INDEX_DTYPE), u_cap)
+    empty = jnp.zeros((0, 0), dtype=INDEX_DTYPE)
+    return _compute_leaf_p2p_impl(
+        jnp.asarray(view.node_ranges, dtype=INDEX_DTYPE),
+        jnp.asarray(view.leaf_indices, dtype=INDEX_DTYPE),
+        jnp.asarray(view.u_offsets, dtype=INDEX_DTYPE),
+        source_leaf_ids,
+        positions_sorted,
+        masses_sorted,
+        target_leaf_ids,
+        source_leaf_ids,
+        valid_pairs,
+        empty,
+        empty,
+        empty,
+        int(max_leaf_size),
+        G=G,
+        softening_sq=jnp.asarray(float(softening) ** 2, dtype=positions_sorted.dtype),
+        return_potential=False,
+        collect_neighbor_pairs=False,
+        nearfield_mode="baseline",
+        edge_chunk_size=256,
+        use_precomputed_scatter=False,
+    )
+
+
 def octree_fmm_accelerations(
     positions: Array,
     masses: Array,
@@ -240,29 +301,50 @@ def octree_fmm_accelerations(
     order: int,
     G: float = 1.0,
     softening: float = 1e-2,
+    max_leaf_capacity: Optional[int] = None,
+    device: bool = True,
+    bounds: Optional[tuple] = None,
     return_view: bool = False,
 ):
     """O(N) octree-FMM gravitational accelerations (far V-list + near U-list P2P).
 
     ``positions`` (N, 3), ``masses`` (N,); returns accelerations in the SAME order as the
     inputs. ``depth`` = uniform octree levels, ``order`` = multipole expansion order.
+
+    With ``device=True`` (default) the octree + U/V lists are built fully on-device with
+    STATIC shapes (dense node space + fixed-capacity lists) and the near field runs on the
+    optimized device P2P kernel -- so for a fixed ``(N, depth, order, max_leaf_capacity)``
+    nothing recompiles when only positions/masses change (i.e. across time-integration
+    steps). Pass ``max_leaf_capacity`` (a static per-leaf particle cap) to guarantee no
+    recompilation; if ``None`` it is inferred from the current occupancy (host, may
+    retrace if occupancy changes). ``device=False`` uses the host-numpy reference build.
     """
     positions = jnp.asarray(positions)
     masses = jnp.asarray(masses)
-    pos_host = np.asarray(positions)
 
-    view = build_uniform_octree_execution_view(pos_host, int(depth))
+    if device:
+        view = build_uniform_octree_execution_view_device(
+            positions, int(depth), bounds=bounds
+        )
+        near_fn = _ulist_near_device
+    else:
+        view = build_uniform_octree_execution_view(np.asarray(positions), int(depth))
+        near_fn = _ulist_near_accelerations
+
     octree = octree_execution_data_from_view(view)
     perm = jnp.asarray(view.perm, dtype=INDEX_DTYPE)
     positions_sorted = positions[perm]
     masses_sorted = masses[perm]
 
-    counts = (
-        view.node_ranges[view.leaf_indices, 1]
-        - view.node_ranges[view.leaf_indices, 0]
-        + 1
-    )
-    max_leaf_size = max(int(counts.max()), 1)
+    if max_leaf_capacity is not None:
+        max_leaf_size = int(max_leaf_capacity)
+    else:
+        counts = (
+            view.node_ranges[view.leaf_indices, 1]
+            - view.node_ranges[view.leaf_indices, 0]
+            + 1
+        )
+        max_leaf_size = max(int(counts.max()), 1)
 
     far_grad = _octree_far_field_grad(
         view,
@@ -273,7 +355,7 @@ def octree_fmm_accelerations(
         max_leaf_size=max_leaf_size,
     )
     far_acc = -float(G) * far_grad
-    near_acc = _ulist_near_accelerations(
+    near_acc = near_fn(
         positions_sorted,
         masses_sorted,
         view,
