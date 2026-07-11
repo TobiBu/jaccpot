@@ -677,6 +677,49 @@ def _treecode_neighbor_list(prod, *, num_leaves, num_internal, idx_dtype):
     )
 
 
+def _raise_if_true(flag, message: str) -> None:
+    """Raise ``message`` if ``flag`` is true, under jit (via callback) or eagerly."""
+    if isinstance(flag, jax.core.Tracer):
+
+        def _callback(value):
+            if bool(value):
+                raise RuntimeError(message)
+
+        jax.debug.callback(_callback, flag)
+    elif bool(flag):
+        raise RuntimeError(message)
+
+
+def _treecode_mac_extents(
+    geometry, parent, num_internal, mac_type, dehnen_radius_scale, dtype
+):
+    """Per-node MAC extents matching the yggdrax dual-tree exactly.
+
+    Same recipe as ``_interactions_impl`` (bh: box ``max_extent``; dehnen/engblom:
+    bounding-sphere ``radius``), propagated to effective far/leaf extents and, for
+    dehnen, scaled by ``dehnen_radius_scale``. The treecode ``_mac_ok`` uses the same
+    ``(r_t + r_s)^2 <= theta^2 d^2`` sum form as bh/dehnen, so feeding these extents
+    reproduces the dual-tree's far/near acceptance (accuracy-profile parity).
+    """
+    from yggdrax._interactions_impl import (
+        _compute_effective_extents,
+        _compute_leaf_effective_extents,
+    )
+
+    use_sphere = str(mac_type) in ("dehnen", "engblom")
+    base = jnp.asarray(
+        geometry.radius if use_sphere else geometry.max_extent, dtype=dtype
+    )
+    eff_far = _compute_effective_extents(parent, base)
+    eff_leaf = _compute_leaf_effective_extents(parent, base, int(num_internal))
+    if str(mac_type) == "dehnen":
+        scale = jnp.asarray(dehnen_radius_scale, dtype=dtype)
+        eff_far = scale * eff_far
+        eff_leaf = scale * eff_leaf
+    node_idx = jnp.arange(base.shape[0])
+    return jnp.where(node_idx >= int(num_internal), eff_leaf, eff_far)
+
+
 def _build_treecode_artifacts_strict_streamed(
     *,
     tree: Tree,
@@ -696,9 +739,14 @@ def _build_treecode_artifacts_strict_streamed(
     (internal locals stay zero -> no double-count). See
     :mod:`jaccpot.experimental.treecode_far_near` and ``benchmark_a100/WALK_SPEC.md``.
 
-    ``mac_extents`` uses the geometry's conservative ``max_extent`` (Barnes-Hut MAC),
-    which matches direct N-body to theta tolerance; matching the dual-tree's dehnen
-    MAC (to reproduce its far/near split exactly) is a later accuracy-profile tweak.
+    ``mac_extents`` uses the treecode's OWN MAC (env
+    ``JACCPOT_STATIC_STRICT_FUSED_TREECODE_MAC``, default ``bh``), not necessarily the
+    dual-tree's ``mac_type``: the treecode is a different method (per-leaf, no L2L) and
+    is both faster AND more accurate under the box ``bh`` extents than under the larger
+    ``dehnen`` sphere extents (which force deeper acceptance -> more M2L pairs). Set the
+    env knob to ``dual`` to instead reproduce the configured ``mac_type`` exactly. All
+    variants use the same :func:`_treecode_mac_extents` recipe. Overflow of any per-leaf
+    / flat capacity is surfaced as a ``RuntimeError`` rather than silently truncated.
     """
     from jaccpot.experimental.treecode_far_near import (
         build_treecode_far_pairs_and_neighbors,
@@ -720,7 +768,16 @@ def _build_treecode_artifacts_strict_streamed(
     root_idx = jnp.argmin(topo.parent).astype(idx)
 
     centers = jnp.asarray(geometry.center)
-    mac_extents = jnp.asarray(geometry.max_extent, dtype=centers.dtype)
+    tc_mac = os.environ.get("JACCPOT_STATIC_STRICT_FUSED_TREECODE_MAC", "bh").strip()
+    walk_mac_type = mac_type if tc_mac == "dual" else tc_mac
+    mac_extents = _treecode_mac_extents(
+        geometry,
+        topo.parent,
+        num_internal,
+        walk_mac_type,
+        dehnen_radius_scale,
+        centers.dtype,
+    )
 
     def _env_int(name, default):
         return int(os.environ.get(name, str(default)))
@@ -747,6 +804,12 @@ def _build_treecode_artifacts_strict_streamed(
         far_pair_capacity=far_cap,
         near_capacity=near_cap,
         idx_dtype=idx,
+    )
+    _raise_if_true(
+        prod.overflow,
+        "treecode walk overflowed a capacity (far/near per-leaf, stack, or flat "
+        "far/near cap). Raise JACCPOT_STATIC_STRICT_FUSED_TREECODE_FAR_PER_LEAF / "
+        "NEAR_PER_LEAF / STACK / NEAR_CAP or COMPACT_FAR_PAIR_CAP.",
     )
 
     compact_far_pairs = CompactTaggedFarPairs(
