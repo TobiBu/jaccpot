@@ -1423,47 +1423,6 @@ def _finalize_octree_downward_artifacts(
     return propagate_octree_solidfmm_l2l(accumulated, octree)
 
 
-def _materialize_octree_downward_for_evaluation(
-    *,
-    radix_downward: TreeDownwardData,
-    octree: Optional[OctreeExecutionData],
-    octree_downward: Optional[OctreeSolidFMMDownwardPlan],
-) -> TreeDownwardData:
-    """Project octree local expansions onto radix node slots for evaluation."""
-
-    if octree is None or octree_downward is None:
-        return radix_downward
-    radix_to_oct = jnp.asarray(octree.radix_node_to_oct, dtype=INDEX_DTYPE)
-    centers = jnp.asarray(octree_downward.centers)[radix_to_oct]
-    coefficients = jnp.asarray(octree_downward.locals_packed)[radix_to_oct]
-    return TreeDownwardData(
-        interactions=radix_downward.interactions,
-        locals=LocalExpansionData(
-            order=int(octree_downward.order),
-            centers=centers,
-            coefficients=coefficients,
-        ),
-    )
-
-
-def _octree_local_expansion_data(
-    octree_downward: Optional[OctreeSolidFMMDownwardPlan],
-) -> Optional[LocalExpansionData]:
-    """Wrap octree-native locals in the shared local-expansion container."""
-
-    if octree_downward is None:
-        return None
-    coefficients = jnp.asarray(octree_downward.locals_packed)
-    return LocalExpansionData(
-        order=_infer_order_from_coeff_count(
-            coeff_count=int(coefficients.shape[-1]),
-            expansion_basis="solidfmm",
-        ),
-        centers=jnp.asarray(octree_downward.centers),
-        coefficients=coefficients,
-    )
-
-
 class _FarPairCOO(NamedTuple):
     """Compact COO-style far-pair representation for streamed M2L execution."""
 
@@ -9443,26 +9402,6 @@ class FastMultipoleMethod:
             target_indices=target_indices,
             num_particles=int(state.inverse_permutation.shape[0]),
         )
-        octree_backend = str(
-            state.execution_backend
-        ).strip().lower() == "octree" and bool(
-            int(os.environ.get("JACCPOT_ENABLE_OCTREE_EVAL", "0"))
-        )
-        farfield_local_data = (
-            _octree_local_expansion_data(state.octree_downward)
-            if octree_backend
-            else None
-        )
-        farfield_leaf_nodes = (
-            jnp.asarray(state.octree.radix_leaf_to_oct, dtype=INDEX_DTYPE)
-            if octree_backend and state.octree is not None
-            else None
-        )
-        farfield_node_ranges = (
-            jnp.asarray(state.octree.node_ranges, dtype=INDEX_DTYPE)
-            if octree_backend and state.octree is not None
-            else None
-        )
         tracing_targets = isinstance(
             state.positions_sorted, jax.core.Tracer
         ) or isinstance(resolved_target_indices, jax.core.Tracer)
@@ -9490,9 +9429,9 @@ class FastMultipoleMethod:
                 downward=state.downward,
                 neighbor_list=state.neighbor_list,
                 nearfield_interop=state.nearfield_interop,
-                farfield_local_data=farfield_local_data,
-                farfield_leaf_nodes=farfield_leaf_nodes,
-                farfield_node_ranges=farfield_node_ranges,
+                farfield_local_data=None,
+                farfield_leaf_nodes=None,
+                farfield_node_ranges=None,
                 nearfield_target_leaf_ids=state.nearfield_target_leaf_ids,
                 nearfield_source_leaf_ids=state.nearfield_source_leaf_ids,
                 nearfield_valid_pairs=state.nearfield_valid_pairs,
@@ -9517,9 +9456,9 @@ class FastMultipoleMethod:
                 downward=state.downward,
                 neighbor_list=state.neighbor_list,
                 nearfield_interop=state.nearfield_interop,
-                farfield_local_data=farfield_local_data,
-                farfield_leaf_nodes=farfield_leaf_nodes,
-                farfield_node_ranges=farfield_node_ranges,
+                farfield_local_data=None,
+                farfield_leaf_nodes=None,
+                farfield_node_ranges=None,
                 target_sorted_indices=target_sorted_indices,
                 return_potential=return_potential,
                 max_acc_derivative_order=derivative_order,
