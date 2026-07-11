@@ -149,7 +149,11 @@ from ._nearfield_cache import (
     nearfield_from_cache,
     with_nearfield_cache_artifacts,
 )
-from ._octree_adapter import OctreeExecutionData, build_octree_execution_data
+from ._octree_adapter import (
+    OctreeExecutionData,
+    build_octree_execution_data,
+    build_octree_execution_data_with_status,
+)
 from ._octree_fmm import (
     OctreeSolidFMMComplexMultipoles,
     OctreeSolidFMMDownwardPlan,
@@ -5230,13 +5234,21 @@ class FastMultipoleMethod:
                 allow_stateful_cache=False,
             )
             prepass_execution_backend = self._resolve_execution_backend()
-            prepass_octree = (
-                build_octree_execution_data(low_tree_artifacts.tree)
-                if prepass_execution_backend == "octree"
-                else None
-            )
+            if prepass_execution_backend == "octree":
+                prepass_octree, prepass_octree_native = (
+                    build_octree_execution_data_with_status(low_tree_artifacts.tree)
+                )
+            else:
+                prepass_octree, prepass_octree_native = None, False
+            # See the main prepared-state path: only build native-octree interaction
+            # lists when the octree view is non-degenerate; otherwise far/near come from
+            # the consistent compat lists on the fallback (binary) tree.
             prepass_octree_native_neighbors = None
-            if prepass_execution_backend == "octree" and prepass_octree is not None:
+            if (
+                prepass_execution_backend == "octree"
+                and prepass_octree is not None
+                and prepass_octree_native
+            ):
                 prepass_octree_native_neighbors = build_octree_native_neighbor_lists(
                     low_tree_artifacts.tree,
                     low_tree_artifacts.upward.geometry,
@@ -5269,7 +5281,11 @@ class FastMultipoleMethod:
                 max_order=int(low_order),
             )
             prepass_octree_native_far_pairs = None
-            if prepass_execution_backend == "octree" and prepass_octree is not None:
+            if (
+                prepass_execution_backend == "octree"
+                and prepass_octree is not None
+                and prepass_octree_native
+            ):
                 prepass_octree_native_far_pairs = build_octree_native_far_pairs(
                     low_tree_artifacts.tree,
                     low_tree_artifacts.upward.geometry,
@@ -9257,13 +9273,20 @@ class FastMultipoleMethod:
         build_octree_payload = (
             execution_backend == "octree" or tree_type_norm == "octree"
         )
-        octree = (
-            build_octree_execution_data(tree_artifacts.tree)
-            if build_octree_payload
-            else None
-        )
+        if build_octree_payload:
+            octree, octree_native = build_octree_execution_data_with_status(
+                tree_artifacts.tree
+            )
+        else:
+            octree, octree_native = None, False
+        # Only build the native-octree interaction lists when the octree view is
+        # actually native (non-degenerate). On a degenerate octree (build_octree_
+        # execution_data fell back to the binary tree), the native walk would produce
+        # far pairs in a node space inconsistent with `octree`/the near list -> gaps +
+        # double-counts; leaving native_far_pairs=None routes far through the compat
+        # interaction list on the same (fallback) tree, matching the near field.
         octree_native_neighbors = None
-        if execution_backend == "octree" and octree is not None:
+        if execution_backend == "octree" and octree is not None and octree_native:
             octree_native_neighbors = build_octree_native_neighbor_lists(
                 tree_artifacts.tree,
                 tree_artifacts.upward.geometry,
@@ -9351,7 +9374,7 @@ class FastMultipoleMethod:
             max_order=int(max_order),
         )
         octree_native_far_pairs = None
-        if execution_backend == "octree" and octree is not None:
+        if execution_backend == "octree" and octree is not None and octree_native:
             octree_native_far_pairs = build_octree_native_far_pairs(
                 tree_artifacts.tree,
                 tree_artifacts.upward.geometry,
