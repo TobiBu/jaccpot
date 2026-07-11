@@ -1440,6 +1440,58 @@ def translate_along_z_m2m_real(
     return out
 
 
+@lru_cache(maxsize=None)
+def z_m2l_translation_tables(order: int) -> Tuple[np.ndarray, ...]:
+    """Single source of truth for the real z-axis M2L recurrence structure.
+
+    The real (Dehnen no-sqrt2) z-axis M2L is
+
+        F_n^m = sum_{k=|m|}^{p-n} sign(m) * (n+k)! / r^{n+k+1} * M_k^m,
+        sign(m) = (-1)^m * (2 if m != 0 else 1),
+
+    where the factor of 2 on the m != 0 channels comes from the no-sqrt2 pairing
+    of the complex +m/-m channels (dropping it halves every m != 0 coefficient
+    and caps off-axis M2L accuracy regardless of expansion order).
+
+    Returns static per-term metadata, indexed by ``[out, k]`` where
+    ``out = sh_index(n, m)`` and ``k`` is the slot in ``[0, p]``:
+
+        src_index[out, k]   packed index ``sh_index(k, m)`` of the source coeff
+        valid[out, k]       True when slot k contributes (``|m| <= k <= p - n``)
+        fact_index[out, k]  numerator factorial index (``n + k``)
+        r_exponent[out, k]  radius exponent (``n + k + 1``)
+        sign[out]           ``sign(m)`` (shared across all slots of an output)
+
+    BOTH the pure-JAX kernel :func:`translate_along_z_m2l_real` and the Pallas
+    kernel (``jaccpot.pallas.m2l_core_z_real``) build from these tables, so the
+    recurrence is defined exactly once and the two encodings cannot drift. The
+    parity test in ``tests/unit/operators/test_pallas_m2l_core_z_real.py``
+    guards this invariant on CPU (Pallas interpret mode).
+    """
+    p = int(order)
+    if p < 0:
+        raise ValueError("order must be >= 0")
+    coeff_count = sh_size(p)
+    n_slots = p + 1
+    src_index = np.zeros((coeff_count, n_slots), dtype=np.int32)
+    valid = np.zeros((coeff_count, n_slots), dtype=np.bool_)
+    fact_index = np.zeros((coeff_count, n_slots), dtype=np.int32)
+    r_exponent = np.zeros((coeff_count, n_slots), dtype=np.int32)
+    sign = np.ones((coeff_count,), dtype=np.float64)
+
+    for n in range(p + 1):
+        for m in range(-n, n + 1):
+            out_idx = sh_index(n, m)
+            sign[out_idx] = (-1.0 if (m % 2) else 1.0) * (2.0 if m != 0 else 1.0)
+            m_abs = abs(m)
+            for k in range(m_abs, p - n + 1):
+                src_index[out_idx, k] = sh_index(k, m)
+                valid[out_idx, k] = True
+                fact_index[out_idx, k] = n + k
+                r_exponent[out_idx, k] = n + k + 1
+    return src_index, valid, fact_index, r_exponent, sign
+
+
 @partial(jax.jit, static_argnames=("order",))
 def translate_along_z_m2l_real(
     multipole: Array,
@@ -1447,12 +1499,13 @@ def translate_along_z_m2l_real(
     *,
     order: int,
 ) -> Array:
-    """Translate multipole to local along +z in real harmonic basis.
+    """Translate multipole to local along +z in the real harmonic basis.
 
-    F_n^m = sum_{k=|m|}^{p-n} (-1)^m * M_k^m * (n+k)! / r^{n+k+1}
+    F_n^m = sum_{k=|m|}^{p-n} sign(m) * (n+k)! / r^{n+k+1} * M_k^m
 
-    For real harmonics, the sign (-1)^m needs careful handling because
-    the real and imaginary parts (cos/sin channels) have different parity.
+    Implemented as a vectorized contraction over the shared per-term tables from
+    :func:`z_m2l_translation_tables` (the single source of the recurrence, also
+    used by the Pallas kernel).
     """
     p = int(order)
     multipole = jnp.asarray(multipole)
@@ -1460,38 +1513,24 @@ def translate_along_z_m2l_real(
     dtype = multipole.dtype
 
     fact = _factorial_table_jax(2 * p, dtype)
+    src_index_np, valid_np, fact_index_np, r_exponent_np, sign_np = (
+        z_m2l_translation_tables(p)
+    )
+    src_index = jnp.asarray(src_index_np)
+    valid = jnp.asarray(valid_np)
+    fact_index = jnp.asarray(fact_index_np)
+    r_exponent = jnp.asarray(r_exponent_np, dtype=dtype)
+    sign = jnp.asarray(sign_np, dtype=dtype)
 
-    ncoeff = sh_size(p)
-    out = jnp.zeros((ncoeff,), dtype=dtype)
-
-    for n in range(p + 1):
-        for m in range(-n, n + 1):
-            m_abs = abs(m)
-            acc = jnp.asarray(0.0, dtype=dtype)
-
-            # Sum over k from |m| to p - n
-            for k in range(m_abs, p - n + 1):
-                src_idx = sh_index(k, m)
-                # Sign from Dehnen eq (84). The real basis uses the same
-                # parity factor for both cos/sin channels; any m-channel
-                # mixing is handled by the z-rotation blocks.
-                #
-                # Normalization (CRITICAL): the no-sqrt2 real basis pairs the
-                # complex +m and -m channels through Q. The complex addition
-                # theorem contributes both, so each real m != 0 channel carries
-                # a factor of 2 relative to the m = 0 channel. Dropping it makes
-                # every m != 0 local coefficient exactly half its true value,
-                # which is invisible for on-axis (m = 0 only) geometries but
-                # caps off-axis M2L accuracy at a few percent regardless of
-                # expansion order. See tests/.../test_real_harmonics.py.
-                sign = (-1.0) ** m
-                channel_scale = 1.0 if m == 0 else 2.0
-                coeff = channel_scale * sign * fact[n + k] / (r ** (n + k + 1))
-                acc = acc + coeff * multipole[src_idx]
-
-            out = out.at[sh_index(n, m)].set(acc)
-
-    return out
+    # Per-(output, slot) term: sign(m) * (n+k)! / r^(n+k+1) * M_k^m, masked to the
+    # valid slots. Invalid slots read index 0 / exponent 0 (harmless) and are
+    # zeroed before the reduction.
+    src_mult = multipole[src_index]
+    fact_num = fact[fact_index]
+    r_pow = jnp.power(r, r_exponent)
+    terms = sign[:, None] * fact_num / r_pow * src_mult
+    terms = jnp.where(valid, terms, jnp.asarray(0.0, dtype=dtype))
+    return jnp.sum(terms, axis=1).astype(dtype)
 
 
 @partial(jax.jit, static_argnames=("order",))
@@ -1841,6 +1880,7 @@ __all__ = [
     # Z-axis translations
     "translate_along_z_m2m_real",
     "translate_along_z_m2l_real",
+    "z_m2l_translation_tables",
     "translate_along_z_l2l_real",
     # Full operators (rotation-accelerated)
     "m2m_real",

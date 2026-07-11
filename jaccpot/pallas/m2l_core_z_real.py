@@ -12,9 +12,8 @@ from jax import lax
 from jaxtyping import Array
 
 from jaccpot.operators.real_harmonics import (
-    sh_index,
     sh_size,
-    translate_along_z_m2l_real,
+    z_m2l_translation_tables,
 )
 
 try:
@@ -33,38 +32,17 @@ def pallas_m2l_real_supported() -> bool:
 
 @lru_cache(maxsize=32)
 def _m2l_translation_tables(order: int) -> tuple[np.ndarray, ...]:
-    """Build static lookup tables for one fixed spherical-harmonic order."""
+    """Static lookup tables for one fixed order, derived from the SINGLE source.
 
+    The per-term recurrence structure comes entirely from
+    :func:`jaccpot.operators.real_harmonics.z_m2l_translation_tables`, so the
+    Pallas kernel and the pure-JAX ``translate_along_z_m2l_real`` cannot drift.
+    This function only adapts that metadata to the layout the kernel consumes
+    (``power`` = radius exponent, plus a materialized factorial value table).
+    """
     p = int(order)
-    coeff_count = sh_size(p)
-    src_index = np.zeros((coeff_count, p + 1), dtype=np.int32)
-    valid = np.zeros((coeff_count, p + 1), dtype=np.bool_)
-    power = np.zeros((coeff_count, p + 1), dtype=np.int32)
-    fact_index = np.zeros((coeff_count, p + 1), dtype=np.int32)
-    sign = np.ones((coeff_count,), dtype=np.float64)
-
-    # This MUST stay identical to the reference recurrence in
-    # jaccpot.operators.real_harmonics.translate_along_z_m2l_real:
-    #   F_n^m = sum_k  sign * (n+k)! / r^(n+k+1) * M_k^m
-    # so the factorial NUMERATOR index is (n+k) while the radius exponent is
-    # (n+k+1). They are distinct tables on purpose -- conflating them (using the
-    # radius exponent as the factorial index) scales every term by (n+k+1).
-    # tests/unit/operators/test_pallas_m2l_core_z_real.py enforces parity with
-    # the pure-JAX kernel in interpret mode.
-    for n in range(p + 1):
-        for m in range(-n, n + 1):
-            idx = sh_index(n, m)
-            # (-1)^m parity times the no-sqrt2 real-basis channel factor: every
-            # m != 0 channel carries an extra factor of 2.
-            parity = -1.0 if (m % 2) else 1.0
-            sign[idx] = parity * (2.0 if m != 0 else 1.0)
-            m_abs = abs(m)
-            for k in range(m_abs, p - n + 1):
-                src_index[idx, k] = sh_index(k, m)
-                valid[idx, k] = True
-                power[idx, k] = n + k + 1
-                fact_index[idx, k] = n + k
-
+    src_index, valid, fact_index, r_exponent, sign = z_m2l_translation_tables(p)
+    power = r_exponent  # kernel names the radius exponent "power"
     factorial = np.asarray(
         [math.factorial(k) for k in range(2 * p + 1)],
         dtype=np.float64,
