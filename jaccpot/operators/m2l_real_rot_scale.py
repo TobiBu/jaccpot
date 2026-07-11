@@ -7,6 +7,9 @@ then rotate local coefficients back.
 
 from __future__ import annotations
 
+from functools import partial
+from typing import Any
+
 import jax
 import jax.numpy as jnp
 from jaxtyping import Array
@@ -15,6 +18,7 @@ from jaccpot.operators.real_harmonics import (
     real_rotation_from_z_axis_local,
     real_rotation_to_z_axis_multipole,
     sh_offset,
+    sh_size,
     translate_along_z_m2l_real,
 )
 
@@ -122,4 +126,143 @@ def m2l_rot_scale_real_batch(
     )
 
 
-__all__ = ["m2l_core_z_real", "m2l_rot_scale_real_batch"]
+# ---------------------------------------------------------------------------
+# Grouped (per-interaction-class) real M2L: precompute the real rotation blocks
+# once per class and reuse them across all pairs that share the class geometry.
+# This mirrors the complex cached-blocks path and removes the per-pair rotation
+# construction cost, which dominates the rotate/scale M2L.
+# ---------------------------------------------------------------------------
+
+
+def _pack_by_ell(coeffs: Array, *, order: int) -> Array:
+    """Pack (p+1)^2 coefficients into a padded (p+1, 2p+1) array."""
+    p = int(order)
+    max_m = 2 * p + 1
+    out = jnp.zeros((p + 1, max_m), dtype=coeffs.dtype)
+    for ell in range(p + 1):
+        sl = slice(sh_offset(ell), sh_offset(ell + 1))
+        out = out.at[ell, : 2 * ell + 1].set(coeffs[sl])
+    return out
+
+
+def _unpack_by_ell(packed: Array, *, order: int) -> Array:
+    """Inverse of :func:`_pack_by_ell`."""
+    p = int(order)
+    out = jnp.zeros((sh_size(p),), dtype=packed.dtype)
+    for ell in range(p + 1):
+        sl = slice(sh_offset(ell), sh_offset(ell + 1))
+        out = out.at[sl].set(packed[ell, : 2 * ell + 1])
+    return out
+
+
+@partial(jax.jit, static_argnames=("order",))
+def _apply_real_rotation_blocks_padded_batch(
+    coeffs: Array, blocks_array: Array, *, order: int
+) -> Array:
+    """Apply padded per-degree real rotation blocks to a batch of coefficients.
+
+    ``blocks_array`` has shape ``(batch, p+1, 2p+1, 2p+1)`` (block-diagonal per
+    degree, zero-padded); ``coeffs`` has shape ``(batch, (p+1)^2)``.
+    """
+    packed = jax.vmap(lambda c: _pack_by_ell(c, order=order))(coeffs)
+    rotated = jnp.einsum("nbij,nbj->nbi", blocks_array, packed)
+    return jax.vmap(lambda c: _unpack_by_ell(c, order=order))(rotated)
+
+
+def _real_rotation_blocks_padded(
+    deltas: Array, *, order: int, dtype: Any, which: str
+) -> Array:
+    """Padded real rotation blocks for a batch of displacement vectors.
+
+    ``which='to_z_multipole'`` builds the multipole world->z blocks;
+    ``which='from_z_local'`` builds the local z->world blocks.
+    """
+    p = int(order)
+    max_m = 2 * p + 1
+    if which == "to_z_multipole":
+        rot_fn = real_rotation_to_z_axis_multipole
+    elif which == "from_z_local":
+        rot_fn = real_rotation_from_z_axis_local
+    else:
+        raise ValueError("which must be 'to_z_multipole' or 'from_z_local'")
+
+    def one(delta: Array) -> Array:
+        x, y, z = delta[0], delta[1], delta[2]
+        out = jnp.zeros((p + 1, max_m, max_m), dtype=dtype)
+        for ell in range(p + 1):
+            size = 2 * ell + 1
+            block = rot_fn(x, y, z, ell, dtype=dtype)
+            out = out.at[ell, :size, :size].set(block)
+        return out
+
+    return jax.vmap(one)(jnp.asarray(deltas))
+
+
+def real_rotation_blocks_to_z_multipole_batch(
+    deltas: Array, *, order: int, dtype: Any
+) -> Array:
+    """Padded real multipole world->z rotation blocks, one set per delta."""
+    return _real_rotation_blocks_padded(
+        deltas, order=order, dtype=dtype, which="to_z_multipole"
+    )
+
+
+def real_rotation_blocks_from_z_local_batch(
+    deltas: Array, *, order: int, dtype: Any
+) -> Array:
+    """Padded real local z->world rotation blocks, one set per delta."""
+    return _real_rotation_blocks_padded(
+        deltas, order=order, dtype=dtype, which="from_z_local"
+    )
+
+
+@partial(jax.jit, static_argnames=("order",))
+def m2l_rot_scale_real_batch_cached_blocks(
+    multipoles: Array,
+    deltas: Array,
+    blocks_to_z: Array,
+    blocks_from_z: Array,
+    *,
+    order: int,
+) -> Array:
+    """Batched real-basis M2L using precomputed per-pair rotation blocks.
+
+    Equivalent to :func:`m2l_rot_scale_real_batch` but the (expensive) real
+    rotation matrices are supplied precomputed (typically shared across an
+    interaction class), so only the z-axis translation runs per pair.
+
+    Parameters
+    ----------
+    multipoles:
+        Source multipoles ``(batch, (order+1)^2)``.
+    deltas:
+        Source-to-target vectors ``(batch, 3)`` (used for the translation radius).
+    blocks_to_z:
+        Multipole world->z blocks ``(batch, order+1, 2*order+1, 2*order+1)``.
+    blocks_from_z:
+        Local z->world blocks with the same shape.
+    order:
+        Maximum SH order.
+    """
+    p = int(order)
+    mult_rot = _apply_real_rotation_blocks_padded_batch(
+        jnp.asarray(multipoles), jnp.asarray(blocks_to_z), order=p
+    )
+    radii = jnp.sqrt(
+        jnp.maximum(jnp.sum(jnp.asarray(deltas) * jnp.asarray(deltas), axis=1), 1.0e-60)
+    )
+    locals_z = jax.vmap(lambda m, rr: translate_along_z_m2l_real(m, rr, order=p))(
+        mult_rot, radii
+    )
+    return _apply_real_rotation_blocks_padded_batch(
+        locals_z, jnp.asarray(blocks_from_z), order=p
+    )
+
+
+__all__ = [
+    "m2l_core_z_real",
+    "m2l_rot_scale_real_batch",
+    "m2l_rot_scale_real_batch_cached_blocks",
+    "real_rotation_blocks_to_z_multipole_batch",
+    "real_rotation_blocks_from_z_local_batch",
+]

@@ -97,7 +97,12 @@ from jaccpot.operators.complex_ops import (
     m2l_complex_reference_batch,
     m2l_complex_reference_batch_cached_blocks,
 )
-from jaccpot.operators.m2l_real_rot_scale import m2l_rot_scale_real_batch
+from jaccpot.operators.m2l_real_rot_scale import (
+    m2l_rot_scale_real_batch,
+    m2l_rot_scale_real_batch_cached_blocks,
+    real_rotation_blocks_from_z_local_batch,
+    real_rotation_blocks_to_z_multipole_batch,
+)
 from jaccpot.operators.multipole_utils import (
     LOCAL_LEVEL_COMBOS,
     MAX_MULTIPOLE_ORDER,
@@ -1754,38 +1759,15 @@ def _solidfmm_downward_accumulate_from_multipoles(
 ) -> Array:
     """Run one solidfmm M2L accumulation pass plus symmetry enforcement.
 
-    For ``basis_mode == "real"`` this dispatches to the real (Dehnen no-sqrt2)
-    M2L kernels. Grouped / class-major real accumulation kernels are not yet
-    implemented, so the real path always uses the flat pair batch (fullbatch or
-    chunked scan). Real coefficients carry no conjugate symmetry, so the complex
-    symmetry-enforcement step is skipped.
+    Both the complex and real (Dehnen no-sqrt2) bases share the grouped /
+    class-major / flat dispatch; ``basis_mode`` selects the cached rotation
+    blocks and translation kernel (see :func:`_m2l_cached_kernel_dispatch`). The
+    non-grouped path uses the dedicated real flat kernels for ``basis_mode ==
+    "real"``. Real coefficients carry no conjugate symmetry, so the complex
+    symmetry-enforcement step is skipped for the real basis.
     """
 
-    if str(basis_mode).strip().lower() == "real":
-        if pair_count <= chunk_size:
-            return _accumulate_real_m2l_fullbatch(
-                initial_locals_coeffs,
-                multipoles_coeffs,
-                centers,
-                src,
-                tgt,
-                active_pair_count,
-                order=order,
-                m2l_impl=m2l_impl,
-                total_nodes=total_nodes,
-            )
-        return _accumulate_real_m2l_chunked_scan(
-            initial_locals_coeffs,
-            multipoles_coeffs,
-            centers,
-            src,
-            tgt,
-            active_pair_count,
-            order=order,
-            m2l_impl=m2l_impl,
-            total_nodes=total_nodes,
-            chunk_size=chunk_size,
-        )
+    real_basis = str(basis_mode).strip().lower() == "real"
 
     if grouped_interactions:
         grouped = (
@@ -1812,6 +1794,7 @@ def _solidfmm_downward_accumulate_from_multipoles(
                 rotation=rotation_mode,
                 total_nodes=total_nodes,
                 chunk_size=chunk_size,
+                basis_mode=basis_mode,
             )
         else:
             locals_updated = _accumulate_solidfmm_m2l_grouped(
@@ -1821,6 +1804,33 @@ def _solidfmm_downward_accumulate_from_multipoles(
                 grouped,
                 order=order,
                 rotation=rotation_mode,
+                total_nodes=total_nodes,
+                chunk_size=chunk_size,
+                basis_mode=basis_mode,
+            )
+    elif real_basis:
+        if pair_count <= chunk_size:
+            locals_updated = _accumulate_real_m2l_fullbatch(
+                initial_locals_coeffs,
+                multipoles_coeffs,
+                centers,
+                src,
+                tgt,
+                active_pair_count,
+                order=order,
+                m2l_impl=m2l_impl,
+                total_nodes=total_nodes,
+            )
+        else:
+            locals_updated = _accumulate_real_m2l_chunked_scan(
+                initial_locals_coeffs,
+                multipoles_coeffs,
+                centers,
+                src,
+                tgt,
+                active_pair_count,
+                order=order,
+                m2l_impl=m2l_impl,
                 total_nodes=total_nodes,
                 chunk_size=chunk_size,
             )
@@ -1850,6 +1860,9 @@ def _solidfmm_downward_accumulate_from_multipoles(
                 total_nodes=total_nodes,
                 chunk_size=chunk_size,
             )
+
+    if real_basis:
+        return locals_updated
     return enforce_conjugate_symmetry_batch(locals_updated, order=order)
 
 
@@ -11134,6 +11147,30 @@ def _m2l_complex_batch_cached_kernel(
     )
 
 
+def _m2l_cached_kernel_dispatch(
+    src_mult: Array,
+    deltas: Array,
+    blocks_to_z: Array,
+    blocks_from_z: Array,
+    *,
+    order: int,
+    basis_mode: str,
+) -> Array:
+    """Apply precomputed rotation blocks in the complex or real basis.
+
+    ``basis_mode`` is a Python string (static under jit), so this branches at
+    trace time. The real branch uses the Dehnen no-sqrt2 cached kernel; the
+    complex branch is unchanged.
+    """
+    if str(basis_mode).strip().lower() == "real":
+        return m2l_rot_scale_real_batch_cached_blocks(
+            src_mult, deltas, blocks_to_z, blocks_from_z, order=order
+        )
+    return _m2l_complex_batch_cached_kernel(
+        src_mult, deltas, blocks_to_z, blocks_from_z, order=order
+    )
+
+
 def _operator_cache_get(key: tuple) -> Optional[tuple[Array, Array]]:
     """Read cached grouped-rotation blocks and update LRU order."""
     blocks = _operator_blocks_cache.get(key)
@@ -11158,8 +11195,14 @@ def _rotation_blocks_for_grouped_classes(
     class_keys: Array,
     class_deltas: Array,
     dtype: jnp.dtype,
+    basis_mode: str = "complex",
 ) -> tuple[Array, Array]:
-    """Resolve rotation blocks for all grouped classes with cache reuse."""
+    """Resolve rotation blocks for all grouped classes with cache reuse.
+
+    For ``basis_mode == "real"`` the Dehnen no-sqrt2 real rotation blocks are
+    built (multipole world->z and local z->world) and the ``rotation`` argument
+    is ignored (the real path has a single rotation construction).
+    """
     num_classes = int(class_deltas.shape[0])
     max_m = 2 * int(order) + 1
     empty_shape = (0, int(order) + 1, max_m, max_m)
@@ -11167,9 +11210,10 @@ def _rotation_blocks_for_grouped_classes(
         empty = jnp.zeros(empty_shape, dtype=dtype)
         return empty, empty
 
+    real_basis = str(basis_mode).strip().lower() == "real"
     cache_key = _grouped_operator_cache_key(
         order=order,
-        rotation=rotation,
+        rotation=("real" if real_basis else rotation),
         dtype=dtype,
         class_keys=class_keys,
         class_deltas=class_deltas,
@@ -11180,6 +11224,17 @@ def _rotation_blocks_for_grouped_classes(
             return cached
 
     deltas = jnp.asarray(class_deltas)
+    if real_basis:
+        blocks_to = real_rotation_blocks_to_z_multipole_batch(
+            deltas, order=order, dtype=dtype
+        )
+        blocks_from = real_rotation_blocks_from_z_local_batch(
+            deltas, order=order, dtype=dtype
+        )
+        if cache_key is not None:
+            _grouped_operator_cache_put(cache_key, (blocks_to, blocks_from))
+        return blocks_to, blocks_from
+
     if rotation == "solidfmm":
         blocks_to = complex_rotation_blocks_to_z_solidfmm_batch(
             deltas,
@@ -11256,7 +11311,7 @@ def _chunk_segment_scatter_add(
 
 @partial(
     jax.jit,
-    static_argnames=("order", "total_nodes", "chunk_size"),
+    static_argnames=("order", "total_nodes", "chunk_size", "basis_mode"),
     donate_argnums=(0,),
 )
 def _accumulate_solidfmm_m2l_grouped_chunked_scan(
@@ -11272,6 +11327,7 @@ def _accumulate_solidfmm_m2l_grouped_chunked_scan(
     order: int,
     total_nodes: int,
     chunk_size: int,
+    basis_mode: str = "complex",
 ) -> Array:
     """Accumulate grouped solidfmm M2L contributions via chunked scan."""
     pair_count = src_sorted.shape[0]
@@ -11291,12 +11347,13 @@ def _accumulate_solidfmm_m2l_grouped_chunked_scan(
         blocks_to = blocks_to_classes[cls_chunk]
         blocks_from = blocks_from_classes[cls_chunk]
 
-        contribs = _m2l_complex_batch_cached_kernel(
+        contribs = _m2l_cached_kernel_dispatch(
             src_mult,
             deltas,
             blocks_to,
             blocks_from,
             order=order,
+            basis_mode=basis_mode,
         ).astype(locals_coeffs.dtype)
         local_accum = _chunk_segment_scatter_add(
             local_accum,
@@ -11311,7 +11368,11 @@ def _accumulate_solidfmm_m2l_grouped_chunked_scan(
     return local_accum
 
 
-@partial(jax.jit, static_argnames=("order", "total_nodes"), donate_argnums=(0,))
+@partial(
+    jax.jit,
+    static_argnames=("order", "total_nodes", "basis_mode"),
+    donate_argnums=(0,),
+)
 def _accumulate_solidfmm_m2l_grouped_fullbatch(
     locals_coeffs: Array,
     multip_packed: Array,
@@ -11324,18 +11385,20 @@ def _accumulate_solidfmm_m2l_grouped_fullbatch(
     *,
     order: int,
     total_nodes: int,
+    basis_mode: str = "complex",
 ) -> Array:
     """Accumulate grouped solidfmm M2L contributions in one full batch."""
     src_mult = multip_packed[src_sorted]
     deltas = centers[tgt_sorted] - centers[src_sorted]
     blocks_to = blocks_to_classes[class_ids_sorted]
     blocks_from = blocks_from_classes[class_ids_sorted]
-    contribs = _m2l_complex_batch_cached_kernel(
+    contribs = _m2l_cached_kernel_dispatch(
         src_mult,
         deltas,
         blocks_to,
         blocks_from,
         order=order,
+        basis_mode=basis_mode,
     ).astype(locals_coeffs.dtype)
     return locals_coeffs + jax.ops.segment_sum(contribs, tgt_sorted, total_nodes)
 
@@ -11399,7 +11462,7 @@ def _build_grouped_class_segments(
 
 @partial(
     jax.jit,
-    static_argnames=("order", "total_nodes", "chunk_size"),
+    static_argnames=("order", "total_nodes", "chunk_size", "basis_mode"),
     donate_argnums=(0,),
 )
 def _accumulate_solidfmm_m2l_class_major_chunked_scan(
@@ -11417,6 +11480,7 @@ def _accumulate_solidfmm_m2l_class_major_chunked_scan(
     order: int,
     total_nodes: int,
     chunk_size: int,
+    basis_mode: str = "complex",
 ) -> Array:
     """Accumulate class-major grouped M2L contributions via chunked scan."""
     num_segments = segment_starts.shape[0]
@@ -11443,12 +11507,13 @@ def _accumulate_solidfmm_m2l_class_major_chunked_scan(
         blocks_to = jnp.broadcast_to(block_to, (chunk_size,) + block_to.shape)
         blocks_from = jnp.broadcast_to(block_from, (chunk_size,) + block_from.shape)
 
-        contribs = _m2l_complex_batch_cached_kernel(
+        contribs = _m2l_cached_kernel_dispatch(
             src_mult,
             deltas,
             blocks_to,
             blocks_from,
             order=order,
+            basis_mode=basis_mode,
         ).astype(locals_coeffs.dtype)
         contribs = jnp.where(valid[:, None], contribs, 0)
         masked_targets = jnp.where(valid, tgt_chunk, jnp.iinfo(INDEX_DTYPE).max)
@@ -11496,6 +11561,7 @@ def _accumulate_solidfmm_m2l_grouped_class_major(
     rotation: str,
     total_nodes: int,
     chunk_size: int,
+    basis_mode: str = "complex",
 ) -> Array:
     """Class-major grouped accumulation without per-pair operator gathers."""
     del (
@@ -11525,6 +11591,7 @@ def _accumulate_solidfmm_m2l_grouped_class_major(
         class_keys=jnp.asarray(grouped.class_keys, dtype=jnp.int32),
         class_deltas=jnp.asarray(grouped.class_displacements),
         dtype=multip_packed.dtype,
+        basis_mode=basis_mode,
     )
     if (
         grouped_segment_starts is None
@@ -11557,6 +11624,7 @@ def _accumulate_solidfmm_m2l_grouped_class_major(
         order=order,
         total_nodes=total_nodes,
         chunk_size=int(chunk_size),
+        basis_mode=basis_mode,
     )
 
 
@@ -11570,6 +11638,7 @@ def _accumulate_solidfmm_m2l_grouped(
     rotation: str,
     total_nodes: int,
     chunk_size: int,
+    basis_mode: str = "complex",
 ) -> Array:
     """Grouped M2L accumulation using cached class blocks and pair chunking."""
 
@@ -11601,6 +11670,7 @@ def _accumulate_solidfmm_m2l_grouped(
         class_keys=class_keys,
         class_deltas=class_deltas,
         dtype=multip_packed.dtype,
+        basis_mode=basis_mode,
     )
     if int(src_sorted.shape[0]) <= min(int(chunk_size), _M2L_FULLBATCH_MAX_PAIRS):
         return _accumulate_solidfmm_m2l_grouped_fullbatch(
@@ -11627,6 +11697,7 @@ def _accumulate_solidfmm_m2l_grouped(
         order=order,
         total_nodes=total_nodes,
         chunk_size=int(chunk_size),
+        basis_mode=basis_mode,
     )
 
 
