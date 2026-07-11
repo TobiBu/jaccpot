@@ -459,17 +459,33 @@ def _propagate_octree_l2l_complex_by_level(
 def propagate_octree_solidfmm_l2l(
     downward: OctreeSolidFMMDownwardPlan,
     octree: OctreeExecutionData,
+    *,
+    num_levels: Optional[int] = None,
+    level_batch_width: Optional[int] = None,
 ) -> OctreeSolidFMMDownwardPlan:
-    """Propagate octree local expansions top-down over the explicit child table."""
+    """Propagate octree local expansions top-down over the explicit child table.
+
+    ``num_levels`` and ``level_batch_width`` are static kernel args. Pass them (constants
+    derived from the tree depth) to keep the L2L ``static_argnames`` fixed across calls so
+    an enclosing ``jax.jit`` does not recompile / concretize traced values -- required for
+    a single fused jit over a static-shape octree. If ``None`` they are derived from the
+    octree (host concretization; fine eagerly, not under an outer jit).
+    """
 
     order = int(downward.order)
-    num_levels = int(octree.num_levels)
+    if num_levels is None:
+        num_levels = int(octree.num_levels)
+    else:
+        num_levels = int(num_levels)
     active_level_offsets = jnp.asarray(
         octree.level_offsets[: num_levels + 1], dtype=INDEX_DTYPE
     )
     # Per-level dynamic_slice window: max per-level count from level_offsets, NOT
     # num_valid_nodes (total). See prepare_octree_solidfmm_complex_multipoles.
-    level_batch_width = max(int(jnp.max(jnp.diff(active_level_offsets))), 1)
+    if level_batch_width is None:
+        level_batch_width = max(int(jnp.max(jnp.diff(active_level_offsets))), 1)
+    else:
+        level_batch_width = int(level_batch_width)
     locals_packed = _propagate_octree_l2l_complex_by_level(
         jnp.asarray(downward.locals_packed),
         jnp.asarray(downward.centers),
@@ -679,13 +695,18 @@ def prepare_octree_solidfmm_complex_multipoles(
     *,
     max_order: int,
     max_leaf_size: Optional[int] = None,
+    num_levels: Optional[int] = None,
+    level_batch_width: Optional[int] = None,
 ) -> OctreeSolidFMMComplexMultipoles:
     """Build octree-native solidfmm complex multipoles in explicit octree space.
 
-    ``max_leaf_size`` is the static per-leaf particle cap for the P2M kernel. Pass a fixed
-    capacity to keep the P2M ``static_argnames`` constant across calls (no recompilation
-    when only positions change -- e.g. across time-integration steps). If ``None`` it is
-    derived from the current occupancy (may retrace if the max occupancy changes).
+    ``max_leaf_size`` is the static per-leaf particle cap for the P2M kernel; ``num_levels``
+    and ``level_batch_width`` are the static M2M level-loop args. Pass fixed values (derived
+    from the tree depth) to keep the P2M/M2M ``static_argnames`` constant across calls, so
+    an enclosing ``jax.jit`` neither recompiles nor concretizes traced values -- required
+    for a single fused jit over a static-shape octree (e.g. across time-integration steps).
+    If ``None`` each is derived from the current tree (host concretization; fine eagerly,
+    not under an outer jit).
     """
 
     total_mass, centers = compute_octree_center_of_mass(
@@ -718,7 +739,10 @@ def prepare_octree_solidfmm_complex_multipoles(
         max_leaf_size=max_leaf_size,
     )
 
-    num_levels = int(plan.num_levels)
+    if num_levels is None:
+        num_levels = int(plan.num_levels)
+    else:
+        num_levels = int(num_levels)
     active_level_offsets = jnp.asarray(
         plan.level_offsets[: num_levels + 1], dtype=INDEX_DTYPE
     )
@@ -726,7 +750,10 @@ def prepare_octree_solidfmm_complex_multipoles(
     # it MUST be the max per-level node count (from level_offsets), NOT num_valid_nodes
     # (the total). Using the total misaligns the front-anchored per-level reads for any
     # tree deeper than 2 levels (root+leaves), silently corrupting the M2M aggregation.
-    level_batch_width = max(int(jnp.max(jnp.diff(active_level_offsets))), 1)
+    if level_batch_width is None:
+        level_batch_width = max(int(jnp.max(jnp.diff(active_level_offsets))), 1)
+    else:
+        level_batch_width = int(level_batch_width)
     packed = _aggregate_octree_m2m_complex_by_level(
         packed,
         centers,
