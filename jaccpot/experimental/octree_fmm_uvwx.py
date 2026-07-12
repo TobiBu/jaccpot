@@ -42,28 +42,21 @@ from yggdrax.octree_uvwx import (
 
 from ..downward.local_expansions import LocalExpansionData
 from ..nearfield.near_field import _compute_leaf_p2p_impl
-from ..runtime._fmm_impl import _evaluate_local_expansions_for_particles
+from ..runtime._fmm_impl import (
+    _accumulate_solidfmm_m2l_chunked_scan,
+    _evaluate_local_expansions_for_particles,
+)
 from ..runtime._octree_adapter import OctreeExecutionData
 from ..runtime._octree_fmm import (
-    accumulate_octree_solidfmm_m2l,
-    build_octree_downward_plan,
-    build_octree_interaction_plan_from_native_pairs,
+    _propagate_octree_l2l_complex_by_level,
     build_octree_upward_plan,
     prepare_octree_solidfmm_complex_multipoles,
-    propagate_octree_solidfmm_l2l,
 )
 
 try:
     from ..runtime.dtypes import INDEX_DTYPE
 except Exception:  # pragma: no cover - dtype module always present in practice
     INDEX_DTYPE = jnp.int64
-
-try:
-    from yggdrax.interactions import CompactTaggedOctreeFarPairs
-except Exception as exc:  # pragma: no cover
-    raise ImportError(
-        "octree_fmm_uvwx requires yggdrax.interactions.CompactTaggedOctreeFarPairs"
-    ) from exc
 
 
 def octree_execution_data_from_view(
@@ -135,6 +128,7 @@ def _octree_far_field_grad(
     max_leaf_size: int,
     num_levels: Optional[int] = None,
     level_batch_width: Optional[int] = None,
+    m2l_chunk_size: int = 1024,
 ) -> Array:
     """O(N) far field: upward (P2M/M2M) -> V-list M2L -> L2L -> evaluate locals.
 
@@ -143,6 +137,14 @@ def _octree_far_field_grad(
     Pass them for the DENSE device build (num_levels=depth+1, level_batch_width=8**depth);
     leave ``None`` for the compact host build so they are derived from its actual per-level
     node counts (the dense 8**depth would over-run the compact node arrays).
+
+    M2L runs as a fixed-chunk scatter-add scan (``_accumulate_octree_m2l_complex_chunked``)
+    DIRECTLY over the yggdrax V-list pairs -- no global interaction plan. The chunked M2L
+    kernel re-groups duplicate targets per chunk, so a pre-sorted (level-major) pair order
+    is unnecessary; dropping the full-candidate ``jnp.lexsort`` (which sorted every padded
+    ``node_capacity * v_capacity`` slot inside the jit) removes the octree far-field's
+    dominant compile cost while producing bit-identical locals. ``m2l_chunk_size`` is the
+    static scan block; padding/sentinel pairs (source or target >= num_nodes) are masked.
     """
     plan = build_octree_upward_plan(octree)
     multipoles = prepare_octree_solidfmm_complex_multipoles(
@@ -154,25 +156,60 @@ def _octree_far_field_grad(
         num_levels=num_levels,
         level_batch_width=level_batch_width,
     )
-    far_pairs = CompactTaggedOctreeFarPairs(
-        sources=jnp.asarray(view.v_src, dtype=INDEX_DTYPE),
-        targets=jnp.asarray(view.v_tgt, dtype=INDEX_DTYPE),
-        tags=jnp.zeros(int(view.v_src.shape[0]), dtype=INDEX_DTYPE),
+    # M2L: route the yggdrax V-list pairs through the RADIX fast-lane's streamed complex
+    # M2L kernel (_accumulate_solidfmm_m2l_chunked_scan) -- same solidfmm math as the
+    # octree-native kernel but with active_pair_count chunk-skipping + the efficient
+    # _chunk_segment_scatter_add. The octree-native _accumulate_octree_m2l_complex_chunked
+    # was ~40000x slower/pair (full per-chunk argsort, no chunk-skip). Compact the real
+    # pairs to the front (sentinel node_capacity -> -1, which the kernel masks) so the
+    # chunk-skip actually engages and the padded tail costs ~nothing.
+    num_nodes = int(view.parent.shape[0])
+    v_src = jnp.asarray(view.v_src, dtype=INDEX_DTYPE)
+    v_tgt = jnp.asarray(view.v_tgt, dtype=INDEX_DTYPE)
+    valid_pairs = (v_src < num_nodes) & (v_tgt < num_nodes)
+    pair_perm = jnp.argsort(jnp.logical_not(valid_pairs))  # real pairs first
+    src_pairs = jnp.where(valid_pairs, v_src, -1)[pair_perm]
+    tgt_pairs = jnp.where(valid_pairs, v_tgt, -1)[pair_perm]
+    active_pairs = jnp.sum(valid_pairs.astype(INDEX_DTYPE))
+    locals_packed = _accumulate_solidfmm_m2l_chunked_scan(
+        jnp.zeros_like(multipoles.packed),
+        jnp.asarray(multipoles.packed),
+        jnp.asarray(multipoles.centers),
+        src_pairs,
+        tgt_pairs,
+        active_pairs,
+        order=int(order),
+        rotation="solidfmm",
+        total_nodes=num_nodes,
+        chunk_size=int(m2l_chunk_size),
     )
-    interactions = build_octree_interaction_plan_from_native_pairs(octree, far_pairs)
-    downward = build_octree_downward_plan(octree, multipoles, interactions)
-    downward = accumulate_octree_solidfmm_m2l(downward, multipoles, chunk_size=1024)
-    downward = propagate_octree_solidfmm_l2l(
-        downward,
-        octree,
-        num_levels=num_levels,
-        level_batch_width=level_batch_width,
+    # L2L level cascade over the octree child table (parent - child delta; the complex
+    # kernel is exact only with that sign). Derive the static level count / per-level
+    # dynamic_slice window when not supplied (host build), matching
+    # propagate_octree_solidfmm_l2l.
+    l2l_levels = int(octree.num_levels) if num_levels is None else int(num_levels)
+    active_level_offsets = jnp.asarray(
+        octree.level_offsets[: l2l_levels + 1], dtype=INDEX_DTYPE
+    )
+    if level_batch_width is None:
+        l2l_batch_width = max(int(jnp.max(jnp.diff(active_level_offsets))), 1)
+    else:
+        l2l_batch_width = int(level_batch_width)
+    locals_packed = _propagate_octree_l2l_complex_by_level(
+        locals_packed,
+        jnp.asarray(multipoles.centers),
+        jnp.asarray(octree.children, dtype=INDEX_DTYPE),
+        jnp.asarray(octree.nodes_by_level, dtype=INDEX_DTYPE),
+        active_level_offsets,
+        order=int(order),
+        num_levels=l2l_levels,
+        level_batch_width=l2l_batch_width,
     )
 
     local_data = LocalExpansionData(
         order=int(order),
-        centers=downward.centers,
-        coefficients=downward.locals_packed,
+        centers=jnp.asarray(multipoles.centers),
+        coefficients=locals_packed,
     )
     grad = _evaluate_local_expansions_for_particles(
         local_data,
