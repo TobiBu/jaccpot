@@ -288,7 +288,10 @@ def _ulist_near_device(
     """
     num_nodes = int(view.parent.shape[0])
     num_leaves = int(view.leaf_indices.shape[0])
-    u_cap = 26
+    # CSR width = fixed per-leaf near-list capacity. 26 for the uniform/sparse builds
+    # (colleague-only U list); the adaptive build's extended-near (U + W + X) uses a wider
+    # capacity, so derive it from the stored list rather than hardcoding 26.
+    u_cap = int(view.u_neighbors.shape[0] // max(num_leaves, 1))
     src_rows_raw = jnp.asarray(view.u_neighbors, dtype=INDEX_DTYPE)
     valid_pairs = src_rows_raw < num_leaves  # sentinel (num_nodes) and pads excluded
     source_leaf_ids = jnp.where(valid_pairs, src_rows_raw, jnp.asarray(0, INDEX_DTYPE))
