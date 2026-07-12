@@ -806,13 +806,17 @@ def translate_along_z_m2l_complex(
     dtype = multipole.real.dtype
 
     ncoeff = sh_size(p)
-    out = jnp.zeros((ncoeff,), dtype=multipole.dtype)
+    # This is the complex-basis M2L: always accumulate in a complex dtype even
+    # if a real-typed multipole array is passed in (defensive; a real input
+    # would otherwise raise when constructing a complex accumulator).
+    cdtype = jnp.result_type(multipole.dtype, jnp.complex64)
+    out = jnp.zeros((ncoeff,), dtype=cdtype)
     fact = _factorial_table_cached(2 * p, dtype)
 
     for n in range(p + 1):
         for m in range(-n, n + 1):
             m_abs = abs(m)
-            acc = jnp.asarray(0.0 + 0.0j, dtype=multipole.dtype)
+            acc = jnp.asarray(0.0 + 0.0j, dtype=cdtype)
             for k in range(m_abs, p - n + 1):
                 src_idx = sh_offset(k) + (m + k)
                 coeff = ((-1.0) ** m) * fact[n + k] / (r ** (n + k + 1))

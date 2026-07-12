@@ -97,14 +97,25 @@ from jaccpot.operators.complex_ops import (
     m2l_complex_reference_batch,
     m2l_complex_reference_batch_cached_blocks,
 )
-from jaccpot.operators.m2l_real_rot_scale import m2l_rot_scale_real_batch
+from jaccpot.operators.m2l_real_rot_scale import (
+    m2l_rot_scale_real_batch,
+    m2l_rot_scale_real_batch_cached_blocks,
+    real_rotation_blocks_from_z_local_batch,
+    real_rotation_blocks_to_z_multipole_batch,
+)
 from jaccpot.operators.multipole_utils import (
     LOCAL_LEVEL_COMBOS,
     MAX_MULTIPOLE_ORDER,
     level_offset,
     total_coefficients,
 )
-from jaccpot.operators.real_harmonics import sh_size
+from jaccpot.operators.real_harmonics import (
+    complex_to_dehnen_real_coeffs,
+    evaluate_local_real_derivative_tower_batch,
+    evaluate_local_real_with_grad,
+    l2l_real,
+    sh_size,
+)
 from jaccpot.operators.symmetric_tensors import (
     component_lift_index_map_3d,
     contract_symmetric_one_axis_3d,
@@ -1655,22 +1666,40 @@ def _prepare_solidfmm_downward_multipole_inputs(
 
     p = int(upward.multipoles.order)
     basis_mode_norm = str(basis_mode).strip().lower()
-    multip_packed = jnp.asarray(upward.multipoles.packed, dtype=dtype)
-    source_motion_multip_packed = (
-        jnp.asarray(upward.multipoles.source_motion_packed, dtype=dtype)
+    rotation_mode = str(complex_rotation).strip().lower()
+    # The upward sweep always produces packed COMPLEX solidfmm multipoles.
+    packed_raw = jnp.asarray(upward.multipoles.packed)
+    source_motion_raw = (
+        jnp.asarray(upward.multipoles.source_motion_packed)
         if upward.multipoles.source_motion_packed is not None
         else None
     )
-    rotation_mode = str(complex_rotation).strip().lower()
     if basis_mode_norm == "complex":
         if rotation_mode not in ("bdz", "cached", "wigner", "solidfmm"):
             raise ValueError(
                 "complex_rotation must be 'bdz', 'cached', 'wigner', or 'solidfmm'"
             )
-        multip_packed_kernel = multip_packed.astype(dtype)
+        multip_packed = packed_raw.astype(dtype)
+        source_motion_multip_packed = (
+            source_motion_raw.astype(dtype) if source_motion_raw is not None else None
+        )
+        multip_packed_kernel = multip_packed
     else:
-        multip_packed_kernel = complex_to_real_coeffs(multip_packed, order=p).astype(
-            dtype
+        # Real (Dehnen no-sqrt2) basis: convert the FULL complex multipoles with
+        # the Dehnen Q transform (consistent with the real M2L/L2L/L2P operators).
+        # NOTE: do NOT use jaccpot.basis.real_sh.complex_to_real_coeffs here --
+        # that is the unitary sqrt(2) tesseral basis and is incompatible with the
+        # Dehnen operators (it silently caps far-field accuracy). Also must NOT
+        # cast the complex packed to a real dtype first (that would drop the
+        # imaginary part / sin channels).
+        multip_packed = packed_raw
+        multip_packed_kernel = complex_to_dehnen_real_coeffs(
+            packed_raw, order=p
+        ).astype(dtype)
+        source_motion_multip_packed = (
+            complex_to_dehnen_real_coeffs(source_motion_raw, order=p).astype(dtype)
+            if source_motion_raw is not None
+            else None
         )
     return _SolidFMMDownwardMultipoleInputs(
         multip_packed=multip_packed,
@@ -1726,8 +1755,20 @@ def _solidfmm_downward_accumulate_from_multipoles(
     grouped_segment_group_ids: Optional[Array],
     grouped_segment_unique_targets: Optional[Array],
     farfield_mode: str,
+    basis_mode: str = "complex",
+    m2l_impl: str = "rot_scale",
 ) -> Array:
-    """Run one solidfmm M2L accumulation pass plus symmetry enforcement."""
+    """Run one solidfmm M2L accumulation pass plus symmetry enforcement.
+
+    Both the complex and real (Dehnen no-sqrt2) bases share the grouped /
+    class-major / flat dispatch; ``basis_mode`` selects the cached rotation
+    blocks and translation kernel (see :func:`_m2l_cached_kernel_dispatch`). The
+    non-grouped path uses the dedicated real flat kernels for ``basis_mode ==
+    "real"``. Real coefficients carry no conjugate symmetry, so the complex
+    symmetry-enforcement step is skipped for the real basis.
+    """
+
+    real_basis = str(basis_mode).strip().lower() == "real"
 
     if grouped_interactions:
         grouped = (
@@ -1754,6 +1795,7 @@ def _solidfmm_downward_accumulate_from_multipoles(
                 rotation=rotation_mode,
                 total_nodes=total_nodes,
                 chunk_size=chunk_size,
+                basis_mode=basis_mode,
             )
         else:
             locals_updated = _accumulate_solidfmm_m2l_grouped(
@@ -1763,6 +1805,33 @@ def _solidfmm_downward_accumulate_from_multipoles(
                 grouped,
                 order=order,
                 rotation=rotation_mode,
+                total_nodes=total_nodes,
+                chunk_size=chunk_size,
+                basis_mode=basis_mode,
+            )
+    elif real_basis:
+        if pair_count <= chunk_size:
+            locals_updated = _accumulate_real_m2l_fullbatch(
+                initial_locals_coeffs,
+                multipoles_coeffs,
+                centers,
+                src,
+                tgt,
+                active_pair_count,
+                order=order,
+                m2l_impl=m2l_impl,
+                total_nodes=total_nodes,
+            )
+        else:
+            locals_updated = _accumulate_real_m2l_chunked_scan(
+                initial_locals_coeffs,
+                multipoles_coeffs,
+                centers,
+                src,
+                tgt,
+                active_pair_count,
+                order=order,
+                m2l_impl=m2l_impl,
                 total_nodes=total_nodes,
                 chunk_size=chunk_size,
             )
@@ -1792,6 +1861,9 @@ def _solidfmm_downward_accumulate_from_multipoles(
                 total_nodes=total_nodes,
                 chunk_size=chunk_size,
             )
+
+    if real_basis:
+        return locals_updated
     return enforce_conjugate_symmetry_batch(locals_updated, order=order)
 
 
@@ -11076,6 +11148,30 @@ def _m2l_complex_batch_cached_kernel(
     )
 
 
+def _m2l_cached_kernel_dispatch(
+    src_mult: Array,
+    deltas: Array,
+    blocks_to_z: Array,
+    blocks_from_z: Array,
+    *,
+    order: int,
+    basis_mode: str,
+) -> Array:
+    """Apply precomputed rotation blocks in the complex or real basis.
+
+    ``basis_mode`` is a Python string (static under jit), so this branches at
+    trace time. The real branch uses the Dehnen no-sqrt2 cached kernel; the
+    complex branch is unchanged.
+    """
+    if str(basis_mode).strip().lower() == "real":
+        return m2l_rot_scale_real_batch_cached_blocks(
+            src_mult, deltas, blocks_to_z, blocks_from_z, order=order
+        )
+    return _m2l_complex_batch_cached_kernel(
+        src_mult, deltas, blocks_to_z, blocks_from_z, order=order
+    )
+
+
 def _operator_cache_get(key: tuple) -> Optional[tuple[Array, Array]]:
     """Read cached grouped-rotation blocks and update LRU order."""
     blocks = _operator_blocks_cache.get(key)
@@ -11100,8 +11196,14 @@ def _rotation_blocks_for_grouped_classes(
     class_keys: Array,
     class_deltas: Array,
     dtype: jnp.dtype,
+    basis_mode: str = "complex",
 ) -> tuple[Array, Array]:
-    """Resolve rotation blocks for all grouped classes with cache reuse."""
+    """Resolve rotation blocks for all grouped classes with cache reuse.
+
+    For ``basis_mode == "real"`` the Dehnen no-sqrt2 real rotation blocks are
+    built (multipole world->z and local z->world) and the ``rotation`` argument
+    is ignored (the real path has a single rotation construction).
+    """
     num_classes = int(class_deltas.shape[0])
     max_m = 2 * int(order) + 1
     empty_shape = (0, int(order) + 1, max_m, max_m)
@@ -11109,9 +11211,10 @@ def _rotation_blocks_for_grouped_classes(
         empty = jnp.zeros(empty_shape, dtype=dtype)
         return empty, empty
 
+    real_basis = str(basis_mode).strip().lower() == "real"
     cache_key = _grouped_operator_cache_key(
         order=order,
-        rotation=rotation,
+        rotation=("real" if real_basis else rotation),
         dtype=dtype,
         class_keys=class_keys,
         class_deltas=class_deltas,
@@ -11122,6 +11225,17 @@ def _rotation_blocks_for_grouped_classes(
             return cached
 
     deltas = jnp.asarray(class_deltas)
+    if real_basis:
+        blocks_to = real_rotation_blocks_to_z_multipole_batch(
+            deltas, order=order, dtype=dtype
+        )
+        blocks_from = real_rotation_blocks_from_z_local_batch(
+            deltas, order=order, dtype=dtype
+        )
+        if cache_key is not None:
+            _grouped_operator_cache_put(cache_key, (blocks_to, blocks_from))
+        return blocks_to, blocks_from
+
     if rotation == "solidfmm":
         blocks_to = complex_rotation_blocks_to_z_solidfmm_batch(
             deltas,
@@ -11198,7 +11312,7 @@ def _chunk_segment_scatter_add(
 
 @partial(
     jax.jit,
-    static_argnames=("order", "total_nodes", "chunk_size"),
+    static_argnames=("order", "total_nodes", "chunk_size", "basis_mode"),
     donate_argnums=(0,),
 )
 def _accumulate_solidfmm_m2l_grouped_chunked_scan(
@@ -11214,6 +11328,7 @@ def _accumulate_solidfmm_m2l_grouped_chunked_scan(
     order: int,
     total_nodes: int,
     chunk_size: int,
+    basis_mode: str = "complex",
 ) -> Array:
     """Accumulate grouped solidfmm M2L contributions via chunked scan."""
     pair_count = src_sorted.shape[0]
@@ -11233,12 +11348,13 @@ def _accumulate_solidfmm_m2l_grouped_chunked_scan(
         blocks_to = blocks_to_classes[cls_chunk]
         blocks_from = blocks_from_classes[cls_chunk]
 
-        contribs = _m2l_complex_batch_cached_kernel(
+        contribs = _m2l_cached_kernel_dispatch(
             src_mult,
             deltas,
             blocks_to,
             blocks_from,
             order=order,
+            basis_mode=basis_mode,
         ).astype(locals_coeffs.dtype)
         local_accum = _chunk_segment_scatter_add(
             local_accum,
@@ -11253,7 +11369,11 @@ def _accumulate_solidfmm_m2l_grouped_chunked_scan(
     return local_accum
 
 
-@partial(jax.jit, static_argnames=("order", "total_nodes"), donate_argnums=(0,))
+@partial(
+    jax.jit,
+    static_argnames=("order", "total_nodes", "basis_mode"),
+    donate_argnums=(0,),
+)
 def _accumulate_solidfmm_m2l_grouped_fullbatch(
     locals_coeffs: Array,
     multip_packed: Array,
@@ -11266,18 +11386,20 @@ def _accumulate_solidfmm_m2l_grouped_fullbatch(
     *,
     order: int,
     total_nodes: int,
+    basis_mode: str = "complex",
 ) -> Array:
     """Accumulate grouped solidfmm M2L contributions in one full batch."""
     src_mult = multip_packed[src_sorted]
     deltas = centers[tgt_sorted] - centers[src_sorted]
     blocks_to = blocks_to_classes[class_ids_sorted]
     blocks_from = blocks_from_classes[class_ids_sorted]
-    contribs = _m2l_complex_batch_cached_kernel(
+    contribs = _m2l_cached_kernel_dispatch(
         src_mult,
         deltas,
         blocks_to,
         blocks_from,
         order=order,
+        basis_mode=basis_mode,
     ).astype(locals_coeffs.dtype)
     return locals_coeffs + jax.ops.segment_sum(contribs, tgt_sorted, total_nodes)
 
@@ -11341,7 +11463,7 @@ def _build_grouped_class_segments(
 
 @partial(
     jax.jit,
-    static_argnames=("order", "total_nodes", "chunk_size"),
+    static_argnames=("order", "total_nodes", "chunk_size", "basis_mode"),
     donate_argnums=(0,),
 )
 def _accumulate_solidfmm_m2l_class_major_chunked_scan(
@@ -11359,6 +11481,7 @@ def _accumulate_solidfmm_m2l_class_major_chunked_scan(
     order: int,
     total_nodes: int,
     chunk_size: int,
+    basis_mode: str = "complex",
 ) -> Array:
     """Accumulate class-major grouped M2L contributions via chunked scan."""
     num_segments = segment_starts.shape[0]
@@ -11385,12 +11508,13 @@ def _accumulate_solidfmm_m2l_class_major_chunked_scan(
         blocks_to = jnp.broadcast_to(block_to, (chunk_size,) + block_to.shape)
         blocks_from = jnp.broadcast_to(block_from, (chunk_size,) + block_from.shape)
 
-        contribs = _m2l_complex_batch_cached_kernel(
+        contribs = _m2l_cached_kernel_dispatch(
             src_mult,
             deltas,
             blocks_to,
             blocks_from,
             order=order,
+            basis_mode=basis_mode,
         ).astype(locals_coeffs.dtype)
         contribs = jnp.where(valid[:, None], contribs, 0)
         masked_targets = jnp.where(valid, tgt_chunk, jnp.iinfo(INDEX_DTYPE).max)
@@ -11438,6 +11562,7 @@ def _accumulate_solidfmm_m2l_grouped_class_major(
     rotation: str,
     total_nodes: int,
     chunk_size: int,
+    basis_mode: str = "complex",
 ) -> Array:
     """Class-major grouped accumulation without per-pair operator gathers."""
     del (
@@ -11467,6 +11592,7 @@ def _accumulate_solidfmm_m2l_grouped_class_major(
         class_keys=jnp.asarray(grouped.class_keys, dtype=jnp.int32),
         class_deltas=jnp.asarray(grouped.class_displacements),
         dtype=multip_packed.dtype,
+        basis_mode=basis_mode,
     )
     if (
         grouped_segment_starts is None
@@ -11499,6 +11625,7 @@ def _accumulate_solidfmm_m2l_grouped_class_major(
         order=order,
         total_nodes=total_nodes,
         chunk_size=int(chunk_size),
+        basis_mode=basis_mode,
     )
 
 
@@ -11512,6 +11639,7 @@ def _accumulate_solidfmm_m2l_grouped(
     rotation: str,
     total_nodes: int,
     chunk_size: int,
+    basis_mode: str = "complex",
 ) -> Array:
     """Grouped M2L accumulation using cached class blocks and pair chunking."""
 
@@ -11543,6 +11671,7 @@ def _accumulate_solidfmm_m2l_grouped(
         class_keys=class_keys,
         class_deltas=class_deltas,
         dtype=multip_packed.dtype,
+        basis_mode=basis_mode,
     )
     if int(src_sorted.shape[0]) <= min(int(chunk_size), _M2L_FULLBATCH_MAX_PAIRS):
         return _accumulate_solidfmm_m2l_grouped_fullbatch(
@@ -11569,6 +11698,7 @@ def _accumulate_solidfmm_m2l_grouped(
         order=order,
         total_nodes=total_nodes,
         chunk_size=int(chunk_size),
+        basis_mode=basis_mode,
     )
 
 
@@ -11817,7 +11947,7 @@ def _propagate_solidfmm_locals_to_children(
 
 @partial(
     jax.jit,
-    static_argnames=("order", "rotation", "total_nodes"),
+    static_argnames=("order", "rotation", "total_nodes", "basis_mode"),
     donate_argnums=(0,),
 )
 def _propagate_solidfmm_locals_by_level(
@@ -11830,6 +11960,7 @@ def _propagate_solidfmm_locals_by_level(
     order: int,
     rotation: str,
     total_nodes: int,
+    basis_mode: str = "complex",
 ) -> Array:
     """Top-down, level-by-level L2L cascade over a binary tree.
 
@@ -11850,6 +11981,7 @@ def _propagate_solidfmm_locals_by_level(
     if num_internal <= 0:
         return coeffs_local
 
+    real_basis = str(basis_mode).strip().lower() == "real"
     left_internal = left_child[:num_internal]
     right_internal = right_child[:num_internal]
     parent_levels = node_levels[:num_internal].astype(INDEX_DTYPE)
@@ -11866,10 +11998,21 @@ def _propagate_solidfmm_locals_by_level(
         valid = child_idx >= 0
         safe_child = jnp.where(valid, child_idx, 0)
         parent_coeffs = state[parent_rep]
-        deltas = centers[safe_child] - centers[parent_rep]
-        translated = _l2l_complex_batch_kernel(
-            parent_coeffs, deltas, order=order, rotation=rotation
-        ).astype(state.dtype)
+        # L2L uses the old_center - new_center (parent - child) displacement in
+        # BOTH bases. The complex path previously used child - parent here,
+        # which is the wrong sign: the far field was left uncorrected in
+        # proportion to the cascade depth, capping accuracy (~3e-3 at
+        # theta>=0.5) regardless of expansion order, while looking fine at small
+        # theta where the L2L cascade is shallow.
+        deltas = centers[parent_rep] - centers[safe_child]
+        if real_basis:
+            translated = _l2l_real_batch_kernel(
+                parent_coeffs, deltas, order=order
+            ).astype(state.dtype)
+        else:
+            translated = _l2l_complex_batch_kernel(
+                parent_coeffs, deltas, order=order, rotation=rotation
+            ).astype(state.dtype)
         translated = jnp.where(valid[:, None], translated, 0)
         updates = jax.ops.segment_sum(translated, safe_child, total_nodes)
         return state + updates
@@ -12222,6 +12365,9 @@ def _prepare_solidfmm_downward_sweep(
         return _detail_downward_data(locals_coeffs, source_motion_zeros)
 
     rotation_mode = str(complex_rotation).strip().lower()
+    resolved_m2l_impl = (
+        "rot_scale" if m2l_impl is None else str(m2l_impl).strip().lower()
+    )
     source_motion_multip_packed = None
     if detail_diag_mode == "l2l_only":
         locals_updated = jnp.ones_like(locals_coeffs)
@@ -12269,6 +12415,8 @@ def _prepare_solidfmm_downward_sweep(
             grouped_segment_group_ids=grouped_segment_group_ids,
             grouped_segment_unique_targets=grouped_segment_unique_targets,
             farfield_mode=farfield_mode,
+            basis_mode=basis_mode,
+            m2l_impl=resolved_m2l_impl,
         )
         locals_updated = _record_timed_array(
             "_refresh_timing_dual_m2l_compute_seconds",
@@ -12296,6 +12444,7 @@ def _prepare_solidfmm_downward_sweep(
             order=p,
             rotation=rotation_mode,
             total_nodes=total_nodes,
+            basis_mode=basis_mode,
         )
         locals_updated = _record_timed_array(
             "_refresh_timing_dual_l2l_compute_seconds",
@@ -12330,6 +12479,8 @@ def _prepare_solidfmm_downward_sweep(
                     grouped_segment_group_ids=grouped_segment_group_ids,
                     grouped_segment_unique_targets=grouped_segment_unique_targets,
                     farfield_mode=farfield_mode,
+                    basis_mode=basis_mode,
+                    m2l_impl=resolved_m2l_impl,
                 )
             )
             source_motion_locals_updated = _propagate_solidfmm_locals_by_level(
@@ -12341,6 +12492,7 @@ def _prepare_solidfmm_downward_sweep(
                 order=p,
                 rotation=rotation_mode,
                 total_nodes=total_nodes,
+                basis_mode=basis_mode,
             )
             source_motion_locals_updated = _record_timed_array(
                 "_refresh_timing_dual_source_motion_seconds",
@@ -12370,25 +12522,35 @@ def _prepare_solidfmm_downward_sweep(
         coefficients=locals_updated,
     )
 
-    coefficients_after = enforce_conjugate_symmetry_batch(
-        jnp.asarray(locals_after.coefficients),
-        order=p,
-    )
-    coefficients_after = _record_timed_array(
-        "_refresh_timing_dual_final_symmetry_seconds",
-        stage_t0,
-        coefficients_after,
-    )
-    locals_after = locals_after._replace(coefficients=coefficients_after)
+    # Conjugate symmetry is a property of the COMPLEX solidfmm coefficients
+    # only. Real (Dehnen no-sqrt2) locals are not conjugate-symmetric, so
+    # applying it there corrupts them (it silently caps far-field accuracy).
+    real_basis = str(basis_mode).strip().lower() == "real"
+    if not real_basis:
+        coefficients_after = enforce_conjugate_symmetry_batch(
+            jnp.asarray(locals_after.coefficients),
+            order=p,
+        )
+        coefficients_after = _record_timed_array(
+            "_refresh_timing_dual_final_symmetry_seconds",
+            stage_t0,
+            coefficients_after,
+        )
+        locals_after = locals_after._replace(coefficients=coefficients_after)
     source_motion_locals_after: Optional[LocalExpansionData]
     if source_motion_locals_updated is not None:
+        source_motion_coefficients = (
+            jnp.asarray(source_motion_locals_updated)
+            if real_basis
+            else enforce_conjugate_symmetry_batch(
+                jnp.asarray(source_motion_locals_updated),
+                order=p,
+            )
+        )
         source_motion_locals_after = LocalExpansionData(
             order=p,
             centers=centers,
-            coefficients=enforce_conjugate_symmetry_batch(
-                jnp.asarray(source_motion_locals_updated),
-                order=p,
-            ),
+            coefficients=source_motion_coefficients,
         )
     else:
         source_motion_locals_after = None
@@ -13087,6 +13249,47 @@ def _evaluate_local_expansions_for_target_particles(
         offsets_solid = centers - target_positions
         offsets_complex = offsets_solid
 
+        # Real (Dehnen no-sqrt2) basis: real-typed locals, evaluated with the
+        # real L2P operator (detected by coefficient dtype).
+        if not jnp.iscomplexobj(coeffs):
+            if int(max_acc_derivative_order) <= 0:
+                grads, pots = jax.vmap(
+                    lambda coeff_row, offset_row: evaluate_local_real_with_grad(
+                        coeff_row, offset_row, order=int(order)
+                    )
+                )(coeffs, offsets_complex)
+                if return_potential:
+                    return grads, pots, None
+                return grads, None, None
+
+            tower = jax.vmap(
+                lambda coeff_row, offset_row: (
+                    evaluate_local_real_derivative_tower_batch(
+                        coeff_row,
+                        offset_row[jnp.newaxis, :],
+                        order=int(order),
+                        max_derivative_order=int(max_acc_derivative_order) + 1,
+                    )
+                ),
+                in_axes=(0, 0),
+            )(coeffs, offsets_complex)
+            potentials = tower[0][:, 0, 0]
+            gradients = tower[1][:, 0, :]
+            derivatives_real: list[Array] = []
+            for level in range(1, max_acc_derivative_order + 1):
+                high = tower[level + 1][:, 0, :]
+                gather = jnp.asarray(
+                    component_lift_index_map_3d(level),
+                    dtype=INDEX_DTYPE,
+                )
+                lifted = jnp.swapaxes(high[:, gather], 1, 2)
+                sign = -1.0 if level % 2 == 0 else 1.0
+                derivatives_real.append(sign * lifted)
+            packed_real: PackedAccelerationDerivatives = tuple(derivatives_real)
+            if return_potential:
+                return gradients, potentials, packed_real
+            return gradients, None, packed_real
+
         if max_acc_derivative_order <= 0:
             if return_potential:
 
@@ -13315,7 +13518,80 @@ def _evaluate_local_expansions_for_particles(
         offsets_complex = centers[:, None, :] - leaf_positions
         offsets_complex = jnp.where(valid[..., None], offsets_complex, 0.0)
 
-        if max_acc_derivative_order <= 0:
+        # Real (Dehnen no-sqrt2) basis: locals are real-typed, evaluated with the
+        # real L2P operator. Detected by coefficient dtype so no basis_mode needs
+        # to be threaded through every caller.
+        if not jnp.iscomplexobj(coeffs):
+            # Real (Dehnen) branch: compute grad_field / potentials /
+            # derivative_fields with the real L2P operators, then fall through
+            # to the shared scatter below (identical to the complex path).
+            if int(max_acc_derivative_order) <= 0:
+
+                def evaluate_leaf_real(
+                    coeffs_leaf: Array,
+                    offsets_leaf: Array,
+                    mask_leaf: Array,
+                ) -> tuple[Array, Array]:
+                    grads, values = jax.vmap(
+                        lambda offset: evaluate_local_real_with_grad(
+                            coeffs_leaf, offset, order=p
+                        )
+                    )(offsets_leaf)
+                    # evaluate_local_real_with_grad returns d(phi)/d(delta) with
+                    # delta = center - eval_point == the acceleration
+                    # contribution consumed downstream.
+                    grads = grads.astype(dtype)
+                    values = values.astype(dtype)
+                    grads = jnp.where(mask_leaf[..., None], grads, 0.0)
+                    values = jnp.where(mask_leaf, values, 0.0)
+                    return grads, values
+
+                grad_field, potentials = jax.vmap(evaluate_leaf_real)(
+                    coeffs,
+                    offsets_complex,
+                    valid,
+                )
+                derivative_fields = []
+            else:
+
+                def evaluate_leaf_real_with_derivatives(
+                    coeffs_leaf: Array,
+                    offsets_leaf: Array,
+                    mask_leaf: Array,
+                ) -> tuple[Array, Array, tuple[Array, ...]]:
+                    tower = evaluate_local_real_derivative_tower_batch(
+                        coeffs_leaf,
+                        offsets_leaf,
+                        order=p,
+                        max_derivative_order=int(max_acc_derivative_order) + 1,
+                    )
+                    grads = tower[1].astype(dtype)
+                    values = tower[0][:, 0].astype(dtype)
+                    grads = jnp.where(mask_leaf[..., None], grads, 0.0)
+                    values = jnp.where(mask_leaf, values, 0.0)
+                    derivative_levels: list[Array] = []
+                    for level in range(1, int(max_acc_derivative_order) + 1):
+                        high = tower[level + 1]
+                        gather = jnp.asarray(
+                            component_lift_index_map_3d(level),
+                            dtype=INDEX_DTYPE,
+                        )
+                        lifted = jnp.swapaxes(high[:, gather], 1, 2)
+                        sign = -1.0 if level % 2 == 0 else 1.0
+                        lifted = (sign * lifted).astype(dtype)
+                        lifted = jnp.where(mask_leaf[:, None, None], lifted, 0.0)
+                        derivative_levels.append(lifted)
+                    return grads, values, tuple(derivative_levels)
+
+                grad_field, potentials, derivative_fields_tuple = jax.vmap(
+                    evaluate_leaf_real_with_derivatives
+                )(
+                    coeffs,
+                    offsets_complex,
+                    valid,
+                )
+                derivative_fields = list(derivative_fields_tuple)
+        elif max_acc_derivative_order <= 0:
             if not bool(return_potential):
                 flat_analytic = str(
                     os.environ.get(
