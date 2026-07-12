@@ -41,7 +41,12 @@ from yggdrax.octree_uvwx import (
 )
 
 from ..downward.local_expansions import LocalExpansionData
-from ..nearfield.near_field import _compute_leaf_p2p_impl
+from ..nearfield.near_field import (
+    _compute_leaf_p2p_impl,
+    _compute_leaf_p2p_prepared_large_n_pairs_target_blocks_prepacked_impl,
+    _compute_leaf_p2p_prepared_large_n_self_only_impl,
+    _radix_fast_lane_prepacked_pallas,
+)
 from ..runtime._fmm_impl import (
     _accumulate_solidfmm_m2l_chunked_scan,
     _evaluate_local_expansions_for_particles,
@@ -370,6 +375,130 @@ def _ulist_near_device(
     )
 
 
+def _octree_near_field(
+    positions_sorted: Array,
+    masses_sorted: Array,
+    view: UniformOctreeExecutionView,
+    *,
+    G: float,
+    softening: float,
+    max_leaf_size: int,
+    use_pallas: bool = True,
+    pallas_interpret: bool = False,
+) -> Array:
+    """Leaf-major U-list near-field P2P, reusing the radix fast-lane machinery.
+
+    Builds the leaf-major particle packs (``leaf_positions/masses/mask/idx`` of shape
+    ``(num_leaves, max_leaf_size, ...)``) from the octree node ranges, plus the per-target
+    source-leaf-id list from the U-list (self + sentinel excluded), then:
+
+    * the intra-leaf self block (``i != j`` within a leaf) via
+      ``_compute_leaf_p2p_prepared_large_n_self_only_impl``;
+    * the cross-leaf pairs via the Pallas ``nearfield_leafpair`` kernel
+      (``_radix_fast_lane_prepacked_pallas``, gathers source leaves by id + skips padded
+      slots cheaply) when ``use_pallas`` and a supported accelerator is present, else the
+      pure-JAX prepacked path (autodiff-able; the differentiable fallback).
+
+    The dense baseline (:func:`_ulist_near_device`) pads every leaf to ``max_leaf_size``
+    AND materialises every padded U-slot, which is ~50x wasteful on an adaptive tree
+    (mean leaf occupancy << max) -- this path pays for padding only via a cheap predicate.
+    Result is in Morton (sorted) order, matching the far field.
+    """
+    num_nodes = int(view.parent.shape[0])
+    num_leaves = int(view.leaf_indices.shape[0])
+    W = int(max_leaf_size)
+    n_part = int(positions_sorted.shape[0])
+    u_cap = int(view.u_neighbors.shape[0] // max(num_leaves, 1))
+    dtype = positions_sorted.dtype
+    softening_sq = jnp.asarray(softening, dtype=dtype) ** 2  # traced-safe (no float())
+
+    # ---- leaf-major particle packs from node ranges ----
+    leaf_node = jnp.asarray(view.leaf_indices, dtype=INDEX_DTYPE)
+    node_ranges = jnp.asarray(view.node_ranges, dtype=INDEX_DTYPE)
+    valid_leaf = leaf_node < num_nodes
+    leaf_node_safe = jnp.where(valid_leaf, leaf_node, 0)
+    lo = node_ranges[leaf_node_safe, 0]
+    occ = node_ranges[leaf_node_safe, 1] - node_ranges[leaf_node_safe, 0] + 1
+    slot = jnp.arange(W, dtype=INDEX_DTYPE)
+    leaf_mask = (slot[None, :] < occ[:, None]) & valid_leaf[:, None]  # (L, W)
+    leaf_particle_idx = jnp.where(
+        leaf_mask, jnp.clip(lo[:, None] + slot[None, :], 0, n_part - 1), 0
+    )
+    leaf_positions = positions_sorted[leaf_particle_idx]  # (L, W, 3)
+    leaf_masses = masses_sorted[leaf_particle_idx]  # (L, W)
+
+    # ---- per-target source-leaf-id list from the U-list (self + sentinel excluded) ----
+    src_rows = jnp.asarray(view.u_neighbors, dtype=INDEX_DTYPE).reshape(
+        num_leaves, u_cap
+    )
+    self_row = jnp.arange(num_leaves, dtype=INDEX_DTYPE)[:, None]
+    src_valid = (src_rows < num_leaves) & (src_rows != self_row)
+    src_rows_safe = jnp.where(src_valid, src_rows, 0)
+    src_ids_3d = src_rows_safe[:, None, :]  # (L, 1, u_cap)
+    src_valid_3d = src_valid[:, None, :]
+
+    self_acc = _compute_leaf_p2p_prepared_large_n_self_only_impl(
+        positions_sorted,
+        leaf_positions,
+        leaf_masses,
+        leaf_mask,
+        leaf_particle_idx,
+        G=G,
+        softening_sq=softening_sq,
+    )
+
+    pallas_ok = False
+    if bool(use_pallas):
+        if bool(pallas_interpret):
+            pallas_ok = True
+        else:
+            try:
+                from ..pallas.nearfield_fused_leaf import (
+                    pallas_nearfield_fused_supported,
+                )
+
+                pallas_ok = pallas_nearfield_fused_supported()
+            except Exception:  # pragma: no cover - pallas import is env-dependent
+                pallas_ok = False
+
+    if pallas_ok:
+        pair_acc = _radix_fast_lane_prepacked_pallas(
+            src_ids_3d,
+            src_valid_3d,
+            leaf_positions,
+            leaf_masses,
+            leaf_mask,
+            leaf_particle_idx,
+            positions_sorted,
+            G=G,
+            softening_sq=softening_sq,
+            compute_potential=False,
+            interpret=bool(pallas_interpret),
+        )
+    else:
+        pair_acc = (
+            _compute_leaf_p2p_prepared_large_n_pairs_target_blocks_prepacked_impl(
+                positions_sorted,
+                src_ids_3d,
+                src_valid_3d,
+                leaf_positions,
+                leaf_masses,
+                leaf_mask,
+                leaf_particle_idx,
+                G=G,
+                softening_sq=softening_sq,
+                target_leaf_batch_size=min(num_leaves, 256),
+                target_block_tile_size=8,
+                target_block_tile_scan_unroll=1,
+                target_block_batch_scan_unroll=1,
+                occupancy_sort=True,
+                skip_empty_tiles=True,
+                componentwise_pairs=True,
+            )
+        )
+    return self_acc + pair_acc
+
+
 @partial(
     jax.jit,
     static_argnames=(
@@ -379,6 +508,7 @@ def _ulist_near_device(
         "sparse",
         "node_capacity",
         "leaf_capacity",
+        "near_use_pallas",
     ),
 )
 def _octree_uvwx_device_compute(
@@ -393,6 +523,7 @@ def _octree_uvwx_device_compute(
     sparse: bool = False,
     node_capacity: int = 0,
     leaf_capacity: int = 0,
+    near_use_pallas: bool = True,
 ) -> Array:
     """Single jitted O(N) octree-FMM compute over the static-shape device build.
 
@@ -436,13 +567,14 @@ def _octree_uvwx_device_compute(
         level_batch_width=level_batch_width,
     )
     far_acc = -G * far_grad
-    near_acc = _ulist_near_device(
+    near_acc = _octree_near_field(
         positions_sorted,
         masses_sorted,
         view,
         G=G,
         softening=softening,
         max_leaf_size=int(max_leaf_size),
+        use_pallas=bool(near_use_pallas),
     )
     acc_sorted = far_acc + near_acc
     inv = (
@@ -466,6 +598,7 @@ def octree_fmm_accelerations(
     leaf_capacity: Optional[int] = None,
     bounds: Optional[tuple] = None,
     return_view: bool = False,
+    near_use_pallas: bool = True,
 ):
     """O(N) octree-FMM gravitational accelerations (far V-list + near U-list P2P).
 
@@ -507,6 +640,7 @@ def octree_fmm_accelerations(
                 sparse=True,
                 node_capacity=int(node_capacity),
                 leaf_capacity=int(leaf_capacity),
+                near_use_pallas=bool(near_use_pallas),
             )
             if return_view:
                 return acc, build_sparse_uniform_octree_execution_view_device(
@@ -535,6 +669,7 @@ def octree_fmm_accelerations(
             depth=int(depth),
             order=int(order),
             max_leaf_size=max_leaf_size,
+            near_use_pallas=bool(near_use_pallas),
         )
         if return_view:
             return acc, build_uniform_octree_execution_view_device(
