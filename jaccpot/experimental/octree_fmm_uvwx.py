@@ -68,6 +68,8 @@ except Exception as exc:  # pragma: no cover
 
 def octree_execution_data_from_view(
     view: UniformOctreeExecutionView,
+    *,
+    num_levels: Optional[int] = None,
 ) -> OctreeExecutionData:
     """Wrap a yggdrax uniform-octree execution view in jaccpot's OctreeExecutionData.
 
@@ -76,7 +78,18 @@ def octree_execution_data_from_view(
     operators do not use for the U/V path -- identity radix<->oct maps and zero box
     geometry (the operators use centre-of-mass centres computed during the upward pass,
     not box centres).
+
+    ``num_levels`` is the static level count. Leave ``None`` to read it from the view
+    (works when the view is built INSIDE the same jit, so its num_levels is a python-int
+    constant). Pass it explicitly (= max_depth+1) for STAGED compilation, where the view
+    arrays are handed to a SEPARATE jit as traced args -- then ``view.num_levels`` is a
+    traced scalar and ``int(...)`` on it would raise. Staging the build and the FMM into
+    two jits (instead of one monolithic graph) avoids the pathological fused compile.
     """
+    if num_levels is None:
+        num_levels = int(view.num_levels)
+    else:
+        num_levels = int(num_levels)
     num_nodes = int(view.parent.shape[0])
     idx = jnp.arange(num_nodes, dtype=INDEX_DTYPE)
     zeros_n3 = jnp.zeros((num_nodes, 3))
@@ -90,11 +103,10 @@ def octree_execution_data_from_view(
         node_ranges=jnp.asarray(view.node_ranges, dtype=INDEX_DTYPE),
         nodes_by_level=jnp.asarray(view.nodes_by_level, dtype=INDEX_DTYPE),
         level_offsets=jnp.asarray(view.level_offsets, dtype=INDEX_DTYPE),
-        # STATIC python int (not a traced array): num_levels indexes static slices
+        # STATIC python int (resolved above): num_levels indexes static slices
         # (level_offsets[:num_levels+1]) and jnp.zeros((num_levels,)) shapes, and is a
-        # kernel static_argname -- keeping it a python constant lets the whole U/V path
-        # sit inside a single jax.jit without concretizing a traced value.
-        num_levels=int(view.num_levels),
+        # kernel static_argname -- must stay a python constant (never a traced value).
+        num_levels=num_levels,
         leaf_mask=jnp.asarray(view.leaf_mask, dtype=bool),
         leaf_nodes=jnp.asarray(view.leaf_nodes, dtype=INDEX_DTYPE),
         radix_node_to_oct=idx,
