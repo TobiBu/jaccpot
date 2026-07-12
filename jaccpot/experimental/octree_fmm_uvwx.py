@@ -234,7 +234,9 @@ def _ulist_near_accelerations(
     src_counts_j = jnp.asarray(src_counts_by_node, dtype=INDEX_DTYPE)
     local = jnp.arange(ml, dtype=INDEX_DTYPE)
 
-    def leaf_near(leaf_args):
+    def leaf_near(
+        leaf_args: tuple[Array, Array, Array],
+    ) -> tuple[Array, Array, Array]:
         tgt_start, tgt_count, src_node_row = leaf_args
         # target particles [tgt_start, tgt_start+ml), masked to tgt_count
         tgt_pidx = tgt_start + local
@@ -429,7 +431,7 @@ def octree_fmm_accelerations(
     leaf_capacity: Optional[int] = None,
     bounds: Optional[tuple] = None,
     return_view: bool = False,
-):
+) -> Array | tuple[Array, UniformOctreeExecutionView]:
     """O(N) octree-FMM gravitational accelerations (far V-list + near U-list P2P).
 
     ``positions`` (N, 3), ``masses`` (N,); returns accelerations in the SAME order as the

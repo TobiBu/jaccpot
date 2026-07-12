@@ -121,7 +121,9 @@ def _treecode_walk_kernel(
     near_ref[0, :] = jnp.full((max_near_pad,), _SENTINEL, dtype=near_ref.dtype)
     stack_ref[0, 0] = root_ref[0].astype(stack_ref.dtype)
 
-    def cond(carry):
+    def cond(
+        carry: tuple[Array, Array, Array, Array, Array],
+    ) -> Array:
         # Per-leaf early exit: stop as soon as this leaf's stack drains. A vmapped
         # fori_loop cannot do this (all lanes share a trip count); the whole point
         # of one-program-per-leaf is that each descent runs only its own length.
@@ -129,7 +131,9 @@ def _treecode_walk_kernel(
         sp, fc, nc, ovf, it = carry
         return jnp.logical_and(sp > 0, it < max_iters)
 
-    def body(carry):
+    def body(
+        carry: tuple[Array, Array, Array, Array, Array],
+    ) -> tuple[Array, Array, Array, Array, Array]:
         sp, fc, nc, ovf, it = carry
         active = sp > 0  # always True given cond, kept for parity with the reference
         sp_pop = jnp.where(active, sp - 1, 0)

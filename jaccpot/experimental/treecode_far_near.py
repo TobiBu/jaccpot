@@ -31,6 +31,7 @@ from typing import NamedTuple, Optional
 import jax
 import jax.numpy as jnp
 from jax import Array
+from jaxtyping import DTypeLike
 
 from jaccpot.experimental.treecode_walk import TreecodeLeafLists, treecode_leaf_walk
 from jaccpot.pallas.treecode_walk_pallas import (
@@ -193,7 +194,7 @@ def build_treecode_far_pairs_and_neighbors(
     max_iters: int,
     far_pair_capacity: int,
     near_capacity: int,
-    idx_dtype=None,
+    idx_dtype: Optional[DTypeLike] = None,
     use_pallas: Optional[bool] = None,
     interpret: bool = False,
 ) -> TreecodeFarNearLists:

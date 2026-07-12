@@ -89,7 +89,14 @@ def _single_leaf_walk(
     nc = jnp.int32(0)
     overflow = jnp.bool_(False)
 
-    def body(_, state):
+    def body(
+        _: jax.Array,
+        state: tuple[
+            jax.Array, jax.Array, jax.Array, jax.Array, jax.Array, jax.Array, jax.Array
+        ],
+    ) -> tuple[
+        jax.Array, jax.Array, jax.Array, jax.Array, jax.Array, jax.Array, jax.Array
+    ]:
         stack, sp, far, near, fc, nc, overflow = state
         active = sp > 0
         sp_pop = jnp.where(active, sp - 1, 0)
@@ -143,20 +150,20 @@ def _single_leaf_walk(
     static_argnames=("num_internal", "max_far", "max_near", "max_stack", "max_iters"),
 )
 def treecode_leaf_walk(
-    leaf_nodes,
-    centers,
-    mac_extents,
-    left_child_full,
-    right_child_full,
-    theta_sq,
-    root_idx,
+    leaf_nodes: jax.Array,
+    centers: jax.Array,
+    mac_extents: jax.Array,
+    left_child_full: jax.Array,
+    right_child_full: jax.Array,
+    theta_sq: jax.Array,
+    root_idx: jax.Array,
     *,
-    num_internal,
-    max_far,
-    max_near,
-    max_stack,
-    max_iters,
-):
+    num_internal: int,
+    max_far: int,
+    max_near: int,
+    max_stack: int,
+    max_iters: int,
+) -> TreecodeLeafLists:
     """Vectorized per-leaf treecode walk (vmap over the single-leaf kernel body).
 
     ``max_iters`` bounds the descent (== total node count is always sufficient: each
