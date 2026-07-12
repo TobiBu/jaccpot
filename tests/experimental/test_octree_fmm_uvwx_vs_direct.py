@@ -98,6 +98,31 @@ def test_device_matches_host_build():
     assert np.max(rel) < 1e-10, f"device vs host max rel diff {np.max(rel):.2e}"
 
 
+def test_sparse_device_matches_direct():
+    """The SPARSE-occupied static build (feasible on clustered data at the depth needed
+    to bound occupancy) matches direct N-body through the fused-jit device path."""
+    pos, mass = _points(4000, 7, "clustered")
+    acc = np.asarray(
+        octree_fmm_accelerations(
+            pos,
+            mass,
+            depth=4,
+            order=4,
+            device=True,
+            sparse=True,
+            node_capacity=2000,
+            leaf_capacity=1500,
+            max_leaf_capacity=512,
+        )
+    )
+    direct = _direct(pos, mass, 1.0, 1e-2)
+    rel = np.linalg.norm(acc - direct, axis=1) / (
+        np.linalg.norm(direct, axis=1) + 1e-12
+    )
+    assert np.median(rel) < 2e-2, f"median rel err {np.median(rel):.3e}"
+    assert np.percentile(rel, 90) < 5e-2, f"p90 rel err {np.percentile(rel, 90):.3e}"
+
+
 def test_device_build_does_not_recompile_across_positions():
     """Fixed (N, depth, order, max_leaf_capacity): changing only positions must NOT
     trigger recompilation -- the whole point of the static-shape device build (reuse

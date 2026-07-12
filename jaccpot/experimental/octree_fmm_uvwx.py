@@ -35,6 +35,7 @@ import numpy as np
 from jaxtyping import Array
 from yggdrax.octree_uvwx import (
     UniformOctreeExecutionView,
+    build_sparse_uniform_octree_execution_view_device,
     build_uniform_octree_execution_view,
     build_uniform_octree_execution_view_device,
 )
@@ -100,8 +101,11 @@ def octree_execution_data_from_view(
         radix_leaf_to_oct=jnp.asarray(view.leaf_indices, dtype=INDEX_DTYPE),
         oct_to_radix_node=idx,
         oct_to_radix_leaf=idx,
-        num_valid_nodes=jnp.asarray(int(view.num_valid_nodes), dtype=INDEX_DTYPE),
-        num_leaf_nodes=jnp.asarray(int(view.num_leaf_nodes), dtype=INDEX_DTYPE),
+        # NB: kept as (possibly traced) arrays, not int(...): for the SPARSE build these
+        # are data-dependent jnp.sum results, so int() would break the fused jit. Nothing
+        # downstream needs them as static ints (num_levels carries the static level count).
+        num_valid_nodes=jnp.asarray(view.num_valid_nodes, dtype=INDEX_DTYPE),
+        num_leaf_nodes=jnp.asarray(view.num_leaf_nodes, dtype=INDEX_DTYPE),
         box_centers=jnp.asarray(view.centers),
         box_half_extents=zeros_n3,
         box_radii=jnp.zeros(num_nodes),
@@ -314,7 +318,17 @@ def _ulist_near_device(
     )
 
 
-@partial(jax.jit, static_argnames=("depth", "order", "max_leaf_size"))
+@partial(
+    jax.jit,
+    static_argnames=(
+        "depth",
+        "order",
+        "max_leaf_size",
+        "sparse",
+        "node_capacity",
+        "leaf_capacity",
+    ),
+)
 def _octree_uvwx_device_compute(
     positions: Array,
     masses: Array,
@@ -324,20 +338,36 @@ def _octree_uvwx_device_compute(
     depth: int,
     order: int,
     max_leaf_size: int,
+    sparse: bool = False,
+    node_capacity: int = 0,
+    leaf_capacity: int = 0,
 ) -> Array:
     """Single jitted O(N) octree-FMM compute over the static-shape device build.
 
     Everything -- device octree + U/V build, upward/M2L/L2L, octree-node eval, U-list
-    near P2P, perm inversion -- runs inside ONE jax.jit. The static args (depth, order,
-    max_leaf_size) plus the dense static-shape build mean it compiles once and is reused
-    for all subsequent calls at the same (N, depth, order, max_leaf_size), regardless of
-    the (traced) positions/masses/G/softening -- so no recompilation across integration
-    steps. ``num_levels = depth + 1`` and ``level_batch_width = 8**depth`` are compile-time
-    constants threaded into the kernels' static_argnames.
+    near P2P, perm inversion -- runs inside ONE jax.jit. The static args plus the
+    static-shape build mean it compiles once and is reused for all subsequent calls at the
+    same static config, regardless of the (traced) positions/masses/G/softening -- so no
+    recompilation across integration steps.
+
+    ``sparse=False`` uses the DENSE build (node count ``(8^(L+1)-1)/7``; only viable for
+    small depth / near-uniform data); ``level_batch_width = 8**depth``. ``sparse=True`` uses
+    the SPARSE-occupied build (only occupied cells, padded to ``node_capacity`` /
+    ``leaf_capacity``; viable on concentrated data at the depth needed to bound leaf
+    occupancy); ``level_batch_width = leaf_capacity``. ``num_levels = depth + 1`` either way.
     """
     num_levels = int(depth) + 1
-    level_batch_width = 8 ** int(depth)
-    view = build_uniform_octree_execution_view_device(positions, int(depth))
+    if sparse:
+        view = build_sparse_uniform_octree_execution_view_device(
+            positions,
+            int(depth),
+            node_capacity=int(node_capacity),
+            leaf_capacity=int(leaf_capacity),
+        )
+        level_batch_width = int(leaf_capacity)
+    else:
+        view = build_uniform_octree_execution_view_device(positions, int(depth))
+        level_batch_width = 8 ** int(depth)
     octree = octree_execution_data_from_view(view)
     perm = jnp.asarray(view.perm, dtype=INDEX_DTYPE)
     positions_sorted = positions[perm]
@@ -379,6 +409,9 @@ def octree_fmm_accelerations(
     softening: float = 1e-2,
     max_leaf_capacity: Optional[int] = None,
     device: bool = True,
+    sparse: bool = False,
+    node_capacity: Optional[int] = None,
+    leaf_capacity: Optional[int] = None,
     bounds: Optional[tuple] = None,
     return_view: bool = False,
 ):
@@ -401,6 +434,37 @@ def octree_fmm_accelerations(
     masses = jnp.asarray(masses)
 
     if device:
+        if sparse:
+            if node_capacity is None or leaf_capacity is None:
+                raise ValueError(
+                    "sparse=True requires node_capacity and leaf_capacity (static caps)"
+                )
+            if max_leaf_capacity is None:
+                raise ValueError(
+                    "sparse=True requires max_leaf_capacity (>= max leaf occupancy)"
+                )
+            max_leaf_size = int(max_leaf_capacity)
+            acc = _octree_uvwx_device_compute(
+                positions,
+                masses,
+                jnp.asarray(G, dtype=positions.dtype),
+                jnp.asarray(softening, dtype=positions.dtype),
+                depth=int(depth),
+                order=int(order),
+                max_leaf_size=max_leaf_size,
+                sparse=True,
+                node_capacity=int(node_capacity),
+                leaf_capacity=int(leaf_capacity),
+            )
+            if return_view:
+                return acc, build_sparse_uniform_octree_execution_view_device(
+                    positions,
+                    int(depth),
+                    node_capacity=int(node_capacity),
+                    leaf_capacity=int(leaf_capacity),
+                )
+            return acc
+
         if max_leaf_capacity is not None:
             max_leaf_size = int(max_leaf_capacity)
         else:
