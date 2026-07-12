@@ -121,41 +121,68 @@ def _build_fallback_octree_execution_data(tree: object) -> OctreeExecutionData:
     )
 
 
-def build_octree_execution_data(tree: object) -> Optional[OctreeExecutionData]:
-    """Return a padded octree execution view when explicit octree fields exist."""
+def build_octree_execution_data_with_status(
+    tree: object,
+) -> tuple[Optional[OctreeExecutionData], bool]:
+    """Build the octree execution view and report whether the NATIVE octree was used.
+
+    Returns ``(data, used_native)``. ``used_native`` is ``False`` when the native
+    explicit-octree view is DEGENERATE -- its root does not span all particles -- which
+    happens when the tree's leaves are count-based rather than octree-cell-aligned (e.g.
+    near-uniform data with unpopulated ``leaf_depths``), collapsing distinct leaves into a
+    partial-domain octree. In that case a binary fallback view is returned with
+    ``used_native=False``, signalling that the octree node space is INCONSISTENT with the
+    native octree walk: callers must then build the far/near interaction lists from the
+    same (compat/radix) tree, not from ``build_octree_native_far_pairs`` (which walks the
+    degenerate native view). Mixing a native-octree far list with this fallback view is
+    exactly what corrupted the octree backend on uniform data.
+    """
     if not hasattr(tree, "oct_valid_mask"):
-        return None
+        return None, False
     view = build_explicit_octree_traversal_view(tree)
     root_oct = int(jnp.asarray(view.radix_node_to_oct, dtype=INDEX_DTYPE)[0])
     tree_root_range = jnp.asarray(getattr(tree, "node_ranges"))[0]
     oct_root_range = jnp.asarray(view.node_ranges)[root_oct]
     if not bool(jnp.all(tree_root_range == oct_root_range)):
-        return _build_fallback_octree_execution_data(tree)
+        return _build_fallback_octree_execution_data(tree), False
 
-    return OctreeExecutionData(
-        valid_mask=view.valid_mask,
-        parent=view.parent,
-        children=view.children,
-        child_counts=view.child_counts,
-        node_codes=view.node_codes,
-        node_depths=view.node_depths,
-        node_ranges=view.node_ranges,
-        nodes_by_level=view.nodes_by_level,
-        level_offsets=view.level_offsets,
-        num_levels=view.num_levels,
-        leaf_mask=view.leaf_mask,
-        leaf_nodes=view.leaf_nodes,
-        radix_node_to_oct=view.radix_node_to_oct,
-        radix_leaf_to_oct=view.radix_leaf_to_oct,
-        oct_to_radix_node=view.oct_to_radix_node,
-        oct_to_radix_leaf=view.oct_to_radix_leaf,
-        num_valid_nodes=view.num_valid_nodes,
-        num_leaf_nodes=view.num_leaf_nodes,
-        box_centers=view.box_centers,
-        box_half_extents=view.box_half_extents,
-        box_radii=view.box_radii,
-        box_max_extents=view.box_max_extents,
+    return (
+        OctreeExecutionData(
+            valid_mask=view.valid_mask,
+            parent=view.parent,
+            children=view.children,
+            child_counts=view.child_counts,
+            node_codes=view.node_codes,
+            node_depths=view.node_depths,
+            node_ranges=view.node_ranges,
+            nodes_by_level=view.nodes_by_level,
+            level_offsets=view.level_offsets,
+            num_levels=view.num_levels,
+            leaf_mask=view.leaf_mask,
+            leaf_nodes=view.leaf_nodes,
+            radix_node_to_oct=view.radix_node_to_oct,
+            radix_leaf_to_oct=view.radix_leaf_to_oct,
+            oct_to_radix_node=view.oct_to_radix_node,
+            oct_to_radix_leaf=view.oct_to_radix_leaf,
+            num_valid_nodes=view.num_valid_nodes,
+            num_leaf_nodes=view.num_leaf_nodes,
+            box_centers=view.box_centers,
+            box_half_extents=view.box_half_extents,
+            box_radii=view.box_radii,
+            box_max_extents=view.box_max_extents,
+        ),
+        True,
     )
 
 
-__all__ = ["OctreeExecutionData", "build_octree_execution_data"]
+def build_octree_execution_data(tree: object) -> Optional[OctreeExecutionData]:
+    """Return a padded octree execution view when explicit octree fields exist."""
+    data, _ = build_octree_execution_data_with_status(tree)
+    return data
+
+
+__all__ = [
+    "OctreeExecutionData",
+    "build_octree_execution_data",
+    "build_octree_execution_data_with_status",
+]

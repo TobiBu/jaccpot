@@ -604,6 +604,22 @@ def _build_dual_tree_artifacts_split_strict_streamed(
                 "JACCPOT_STATIC_STRICT_FUSED_COMPACT_FAR_PAIR_CAP must be positive"
             )
 
+    # Opt-in: build far/near from the device-resident per-leaf treecode walk
+    # instead of the host-iterated yggdrax dual-tree walk (kills the walk launch
+    # storm). Default off -> no behaviour change. See _build_treecode_artifacts.
+    treecode_enabled = os.environ.get(
+        "JACCPOT_STATIC_STRICT_FUSED_TREECODE_WALK", "0"
+    ) not in ("0", "false", "False", "off", "OFF")
+    if treecode_enabled:
+        return _build_treecode_artifacts_strict_streamed(
+            tree=tree,
+            geometry=geometry,
+            theta=theta,
+            mac_type=mac_type,
+            dehnen_radius_scale=dehnen_radius_scale,
+            compact_far_pair_capacity=compact_far_pair_capacity,
+        )
+
     compact_far_pairs, neighbor_list = build_compact_far_pairs_and_leaf_neighbor_lists(
         tree,
         geometry,
@@ -618,6 +634,192 @@ def _build_dual_tree_artifacts_split_strict_streamed(
         retry_logger=None,
         timing_callback=None,
         compact_far_pair_capacity=compact_far_pair_capacity,
+    )
+    return _DualTreeArtifacts(
+        interactions=None,
+        neighbor_list=neighbor_list,
+        traversal_result=None,
+        compact_far_pairs=compact_far_pairs,
+        dense_buffers=None,
+        grouped_buffers=None,
+        grouped_segment_starts=None,
+        grouped_segment_lengths=None,
+        grouped_segment_class_ids=None,
+        grouped_segment_sort_permutation=None,
+        grouped_segment_group_ids=None,
+        grouped_segment_unique_targets=None,
+        grouped_chunk_size=None,
+    )
+
+
+def _treecode_neighbor_list(prod, *, num_leaves, num_internal, idx_dtype):
+    """Full yggdrax ``NodeNeighborList`` from the treecode producer's near CSR.
+
+    The radix fast lane reads only ``leaf_indices``/``offsets``/``neighbors``/
+    ``counts`` and rebuilds target-owned blocks + particle-order maps itself, so the
+    remaining fields are cheap valid placeholders (``target_block_size=0``, i.e. no
+    prebuilt blocks; ``neighbor_leaf_positions`` empty). This is validated end-to-end
+    against direct N-body by tests/experimental/test_treecode_graft_solidfmm.py.
+    """
+    return NodeNeighborList(
+        offsets=prod.near_offsets,
+        neighbors=prod.near_neighbors,
+        leaf_indices=prod.near_leaf_indices,
+        counts=prod.near_counts,
+        particle_order_leaf_indices=prod.near_leaf_indices,
+        particle_order_to_native_leaf=jnp.arange(num_leaves, dtype=idx_dtype),
+        neighbor_leaf_positions=jnp.zeros((num_leaves, 0), dtype=idx_dtype),
+        target_block_leaf_ids=jnp.zeros((0,), dtype=idx_dtype),
+        target_block_source_leaf_ids=jnp.zeros((0, 0), dtype=idx_dtype),
+        target_block_valid_mask=jnp.zeros((0, 0), dtype=bool),
+        target_block_offsets=jnp.zeros((num_leaves + 1,), dtype=idx_dtype),
+        target_block_size=0,
+    )
+
+
+def _raise_if_true(flag, message: str) -> None:
+    """Raise ``message`` if ``flag`` is true, under jit (via callback) or eagerly."""
+    if isinstance(flag, jax.core.Tracer):
+
+        def _callback(value):
+            if bool(value):
+                raise RuntimeError(message)
+
+        jax.debug.callback(_callback, flag)
+    elif bool(flag):
+        raise RuntimeError(message)
+
+
+def _treecode_mac_extents(
+    geometry, parent, num_internal, mac_type, dehnen_radius_scale, dtype
+):
+    """Per-node MAC extents matching the yggdrax dual-tree exactly.
+
+    Same recipe as ``_interactions_impl`` (bh: box ``max_extent``; dehnen/engblom:
+    bounding-sphere ``radius``), propagated to effective far/leaf extents and, for
+    dehnen, scaled by ``dehnen_radius_scale``. The treecode ``_mac_ok`` uses the same
+    ``(r_t + r_s)^2 <= theta^2 d^2`` sum form as bh/dehnen, so feeding these extents
+    reproduces the dual-tree's far/near acceptance (accuracy-profile parity).
+    """
+    from yggdrax._interactions_impl import (
+        _compute_effective_extents,
+        _compute_leaf_effective_extents,
+    )
+
+    use_sphere = str(mac_type) in ("dehnen", "engblom")
+    base = jnp.asarray(
+        geometry.radius if use_sphere else geometry.max_extent, dtype=dtype
+    )
+    eff_far = _compute_effective_extents(parent, base)
+    eff_leaf = _compute_leaf_effective_extents(parent, base, int(num_internal))
+    if str(mac_type) == "dehnen":
+        scale = jnp.asarray(dehnen_radius_scale, dtype=dtype)
+        eff_far = scale * eff_far
+        eff_leaf = scale * eff_leaf
+    node_idx = jnp.arange(base.shape[0])
+    return jnp.where(node_idx >= int(num_internal), eff_leaf, eff_far)
+
+
+def _build_treecode_artifacts_strict_streamed(
+    *,
+    tree: Tree,
+    geometry,
+    theta: float,
+    mac_type: MACType,
+    dehnen_radius_scale: float,
+    compact_far_pair_capacity: Optional[int],
+) -> _DualTreeArtifacts:
+    """Strict fast-lane far/near build from the per-leaf treecode walk.
+
+    Device-resident replacement for
+    :func:`_build_dual_tree_artifacts_split_strict_streamed`'s yggdrax walk call,
+    gated by ``JACCPOT_STATIC_STRICT_FUSED_TREECODE_WALK`` (default off). The treecode
+    yields a different-but-equally-valid interaction set (per-leaf, split-source): far
+    targets are always leaves, so the downstream solidfmm L2L cascade acts as a no-op
+    (internal locals stay zero -> no double-count). See
+    :mod:`jaccpot.experimental.treecode_far_near` and ``benchmark_a100/WALK_SPEC.md``.
+
+    ``mac_extents`` uses the treecode's OWN MAC (env
+    ``JACCPOT_STATIC_STRICT_FUSED_TREECODE_MAC``, default ``bh``), not necessarily the
+    dual-tree's ``mac_type``: the treecode is a different method (per-leaf, no L2L) and
+    is both faster AND more accurate under the box ``bh`` extents than under the larger
+    ``dehnen`` sphere extents (which force deeper acceptance -> more M2L pairs). Set the
+    env knob to ``dual`` to instead reproduce the configured ``mac_type`` exactly. All
+    variants use the same :func:`_treecode_mac_extents` recipe. Overflow of any per-leaf
+    / flat capacity is surfaced as a ``RuntimeError`` rather than silently truncated.
+    """
+    from jaccpot.experimental.treecode_far_near import (
+        build_treecode_far_pairs_and_neighbors,
+    )
+
+    topo = tree.topology
+    num_internal = int(topo.num_internal_nodes)
+    total_nodes = int(topo.parent.shape[0])
+    num_leaves = total_nodes - num_internal
+    idx = topo.parent.dtype
+
+    left_full = jnp.concatenate(
+        [jnp.asarray(topo.left_child, idx), jnp.full((num_leaves,), -1, idx)]
+    )
+    right_full = jnp.concatenate(
+        [jnp.asarray(topo.right_child, idx), jnp.full((num_leaves,), -1, idx)]
+    )
+    leaf_nodes = jnp.arange(num_internal, total_nodes, dtype=idx)
+    root_idx = jnp.argmin(topo.parent).astype(idx)
+
+    centers = jnp.asarray(geometry.center)
+    tc_mac = os.environ.get("JACCPOT_STATIC_STRICT_FUSED_TREECODE_MAC", "bh").strip()
+    walk_mac_type = mac_type if tc_mac == "dual" else tc_mac
+    mac_extents = _treecode_mac_extents(
+        geometry,
+        topo.parent,
+        num_internal,
+        walk_mac_type,
+        dehnen_radius_scale,
+        centers.dtype,
+    )
+
+    def _env_int(name, default):
+        return int(os.environ.get(name, str(default)))
+
+    max_far = _env_int("JACCPOT_STATIC_STRICT_FUSED_TREECODE_FAR_PER_LEAF", 2048)
+    max_near = _env_int("JACCPOT_STATIC_STRICT_FUSED_TREECODE_NEAR_PER_LEAF", 2048)
+    max_stack = _env_int("JACCPOT_STATIC_STRICT_FUSED_TREECODE_STACK", 256)
+    near_cap = _env_int("JACCPOT_STATIC_STRICT_FUSED_TREECODE_NEAR_CAP", 1 << 20)
+    far_cap = int(compact_far_pair_capacity) if compact_far_pair_capacity else 131072
+
+    prod = build_treecode_far_pairs_and_neighbors(
+        leaf_nodes,
+        centers,
+        mac_extents,
+        left_full,
+        right_full,
+        jnp.asarray(float(theta) * float(theta), centers.dtype),
+        root_idx,
+        num_internal=num_internal,
+        max_far=max_far,
+        max_near=max_near,
+        max_stack=max_stack,
+        max_iters=total_nodes + 1,
+        far_pair_capacity=far_cap,
+        near_capacity=near_cap,
+        idx_dtype=idx,
+    )
+    _raise_if_true(
+        prod.overflow,
+        "treecode walk overflowed a capacity (far/near per-leaf, stack, or flat "
+        "far/near cap). Raise JACCPOT_STATIC_STRICT_FUSED_TREECODE_FAR_PER_LEAF / "
+        "NEAR_PER_LEAF / STACK / NEAR_CAP or COMPACT_FAR_PAIR_CAP.",
+    )
+
+    compact_far_pairs = CompactTaggedFarPairs(
+        sources=prod.far_sources,
+        targets=prod.far_targets,
+        tags=prod.far_tags,
+        far_pair_count=prod.far_pair_count,
+    )
+    neighbor_list = _treecode_neighbor_list(
+        prod, num_leaves=num_leaves, num_internal=num_internal, idx_dtype=idx
     )
     return _DualTreeArtifacts(
         interactions=None,

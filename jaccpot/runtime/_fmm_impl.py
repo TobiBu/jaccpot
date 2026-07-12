@@ -160,7 +160,11 @@ from ._nearfield_cache import (
     nearfield_from_cache,
     with_nearfield_cache_artifacts,
 )
-from ._octree_adapter import OctreeExecutionData, build_octree_execution_data
+from ._octree_adapter import (
+    OctreeExecutionData,
+    build_octree_execution_data,
+    build_octree_execution_data_with_status,
+)
 from ._octree_fmm import (
     OctreeSolidFMMComplexMultipoles,
     OctreeSolidFMMDownwardPlan,
@@ -1434,45 +1438,43 @@ def _finalize_octree_downward_artifacts(
     return propagate_octree_solidfmm_l2l(accumulated, octree)
 
 
-def _materialize_octree_downward_for_evaluation(
-    *,
-    radix_downward: TreeDownwardData,
-    octree: Optional[OctreeExecutionData],
-    octree_downward: Optional[OctreeSolidFMMDownwardPlan],
-) -> TreeDownwardData:
-    """Project octree local expansions onto radix node slots for evaluation."""
+def _octree_farfield_eval_inputs(state):
+    """Far-field eval overrides that make the octree backend evaluate its OWN locals.
 
-    if octree is None or octree_downward is None:
-        return radix_downward
-    radix_to_oct = jnp.asarray(octree.radix_node_to_oct, dtype=INDEX_DTYPE)
-    centers = jnp.asarray(octree_downward.centers)[radix_to_oct]
-    coefficients = jnp.asarray(octree_downward.locals_packed)[radix_to_oct]
-    return TreeDownwardData(
-        interactions=radix_downward.interactions,
-        locals=LocalExpansionData(
-            order=int(octree_downward.order),
-            centers=centers,
-            coefficients=coefficients,
-        ),
-    )
+    For ``execution_backend == "octree"`` the octree upward/M2L/L2L pass fills octree-node-
+    space local expansions (``state.octree_downward``), but the default far-field eval
+    evaluates the radix locals. Passing these three overrides into the full-particle eval
+    path evaluates the OCTREE locals at each particle instead. The near-field is already
+    octree-native (``state.nearfield_interop``) and needs no override.
 
-
-def _octree_local_expansion_data(
-    octree_downward: Optional[OctreeSolidFMMDownwardPlan],
-) -> Optional[LocalExpansionData]:
-    """Wrap octree-native locals in the shared local-expansion container."""
-
-    if octree_downward is None:
-        return None
-    coefficients = jnp.asarray(octree_downward.locals_packed)
-    return LocalExpansionData(
+    The three outputs share the octree node-id space, and ``state.octree.node_ranges`` index
+    into ``state.positions_sorted`` in the same (radix-Morton) order -- ``state.octree`` is
+    derived from ``state.tree`` via ``build_octree_execution_data`` (which asserts root-range
+    equality) -- so no re-permutation is needed. Returns ``(None, None, None)`` for non-octree
+    backends or when the octree downward pass was not run.
+    """
+    if (
+        str(getattr(state, "execution_backend", "radix")).strip().lower() != "octree"
+        or getattr(state, "octree", None) is None
+        or getattr(state, "octree_downward", None) is None
+    ):
+        return None, None, None
+    downward = state.octree_downward
+    coefficients = jnp.asarray(downward.locals_packed)
+    farfield_local_data = LocalExpansionData(
+        # Infer order from the (static) coefficient width. downward.order can be a
+        # traced pytree leaf when compute_accelerations is jitted, so concretizing it
+        # with int(...) raises ConcretizationTypeError; coefficients.shape[-1] is static.
         order=_infer_order_from_coeff_count(
             coeff_count=int(coefficients.shape[-1]),
             expansion_basis="solidfmm",
         ),
-        centers=jnp.asarray(octree_downward.centers),
+        centers=jnp.asarray(downward.centers),
         coefficients=coefficients,
     )
+    farfield_leaf_nodes = jnp.asarray(state.octree.leaf_nodes, dtype=INDEX_DTYPE)
+    farfield_node_ranges = jnp.asarray(state.octree.node_ranges, dtype=INDEX_DTYPE)
+    return farfield_local_data, farfield_leaf_nodes, farfield_node_ranges
 
 
 class _FarPairCOO(NamedTuple):
@@ -5304,13 +5306,21 @@ class FastMultipoleMethod:
                 allow_stateful_cache=False,
             )
             prepass_execution_backend = self._resolve_execution_backend()
-            prepass_octree = (
-                build_octree_execution_data(low_tree_artifacts.tree)
-                if prepass_execution_backend == "octree"
-                else None
-            )
+            if prepass_execution_backend == "octree":
+                prepass_octree, prepass_octree_native = (
+                    build_octree_execution_data_with_status(low_tree_artifacts.tree)
+                )
+            else:
+                prepass_octree, prepass_octree_native = None, False
+            # See the main prepared-state path: only build native-octree interaction
+            # lists when the octree view is non-degenerate; otherwise far/near come from
+            # the consistent compat lists on the fallback (binary) tree.
             prepass_octree_native_neighbors = None
-            if prepass_execution_backend == "octree" and prepass_octree is not None:
+            if (
+                prepass_execution_backend == "octree"
+                and prepass_octree is not None
+                and prepass_octree_native
+            ):
                 prepass_octree_native_neighbors = build_octree_native_neighbor_lists(
                     low_tree_artifacts.tree,
                     low_tree_artifacts.upward.geometry,
@@ -5343,7 +5353,11 @@ class FastMultipoleMethod:
                 max_order=int(low_order),
             )
             prepass_octree_native_far_pairs = None
-            if prepass_execution_backend == "octree" and prepass_octree is not None:
+            if (
+                prepass_execution_backend == "octree"
+                and prepass_octree is not None
+                and prepass_octree_native
+            ):
                 prepass_octree_native_far_pairs = build_octree_native_far_pairs(
                     low_tree_artifacts.tree,
                     low_tree_artifacts.upward.geometry,
@@ -9331,13 +9345,20 @@ class FastMultipoleMethod:
         build_octree_payload = (
             execution_backend == "octree" or tree_type_norm == "octree"
         )
-        octree = (
-            build_octree_execution_data(tree_artifacts.tree)
-            if build_octree_payload
-            else None
-        )
+        if build_octree_payload:
+            octree, octree_native = build_octree_execution_data_with_status(
+                tree_artifacts.tree
+            )
+        else:
+            octree, octree_native = None, False
+        # Only build the native-octree interaction lists when the octree view is
+        # actually native (non-degenerate). On a degenerate octree (build_octree_
+        # execution_data fell back to the binary tree), the native walk would produce
+        # far pairs in a node space inconsistent with `octree`/the near list -> gaps +
+        # double-counts; leaving native_far_pairs=None routes far through the compat
+        # interaction list on the same (fallback) tree, matching the near field.
         octree_native_neighbors = None
-        if execution_backend == "octree" and octree is not None:
+        if execution_backend == "octree" and octree is not None and octree_native:
             octree_native_neighbors = build_octree_native_neighbor_lists(
                 tree_artifacts.tree,
                 tree_artifacts.upward.geometry,
@@ -9425,7 +9446,7 @@ class FastMultipoleMethod:
             max_order=int(max_order),
         )
         octree_native_far_pairs = None
-        if execution_backend == "octree" and octree is not None:
+        if execution_backend == "octree" and octree is not None and octree_native:
             octree_native_far_pairs = build_octree_native_far_pairs(
                 tree_artifacts.tree,
                 tree_artifacts.upward.geometry,
@@ -9515,26 +9536,6 @@ class FastMultipoleMethod:
             target_indices=target_indices,
             num_particles=int(state.inverse_permutation.shape[0]),
         )
-        octree_backend = str(
-            state.execution_backend
-        ).strip().lower() == "octree" and bool(
-            int(os.environ.get("JACCPOT_ENABLE_OCTREE_EVAL", "0"))
-        )
-        farfield_local_data = (
-            _octree_local_expansion_data(state.octree_downward)
-            if octree_backend
-            else None
-        )
-        farfield_leaf_nodes = (
-            jnp.asarray(state.octree.radix_leaf_to_oct, dtype=INDEX_DTYPE)
-            if octree_backend and state.octree is not None
-            else None
-        )
-        farfield_node_ranges = (
-            jnp.asarray(state.octree.node_ranges, dtype=INDEX_DTYPE)
-            if octree_backend and state.octree is not None
-            else None
-        )
         tracing_targets = isinstance(
             state.positions_sorted, jax.core.Tracer
         ) or isinstance(resolved_target_indices, jax.core.Tracer)
@@ -9549,6 +9550,13 @@ class FastMultipoleMethod:
         use_full_eval_for_targets = bool(return_potential) and (
             resolved_target_indices is not None
         )
+        # Octree backend: evaluate the octree-native far-field locals (the near-field is
+        # already octree-native). Only the full-particle path honours these overrides.
+        (
+            octree_farfield_local_data,
+            octree_farfield_leaf_nodes,
+            octree_farfield_node_ranges,
+        ) = _octree_farfield_eval_inputs(state)
         if (
             resolved_target_indices is None
             or tracing_targets
@@ -9562,9 +9570,9 @@ class FastMultipoleMethod:
                 downward=state.downward,
                 neighbor_list=state.neighbor_list,
                 nearfield_interop=state.nearfield_interop,
-                farfield_local_data=farfield_local_data,
-                farfield_leaf_nodes=farfield_leaf_nodes,
-                farfield_node_ranges=farfield_node_ranges,
+                farfield_local_data=octree_farfield_local_data,
+                farfield_leaf_nodes=octree_farfield_leaf_nodes,
+                farfield_node_ranges=octree_farfield_node_ranges,
                 nearfield_target_leaf_ids=state.nearfield_target_leaf_ids,
                 nearfield_source_leaf_ids=state.nearfield_source_leaf_ids,
                 nearfield_valid_pairs=state.nearfield_valid_pairs,
@@ -9589,9 +9597,9 @@ class FastMultipoleMethod:
                 downward=state.downward,
                 neighbor_list=state.neighbor_list,
                 nearfield_interop=state.nearfield_interop,
-                farfield_local_data=farfield_local_data,
-                farfield_leaf_nodes=farfield_leaf_nodes,
-                farfield_node_ranges=farfield_node_ranges,
+                farfield_local_data=None,
+                farfield_leaf_nodes=None,
+                farfield_node_ranges=None,
                 target_sorted_indices=target_sorted_indices,
                 return_potential=return_potential,
                 max_acc_derivative_order=derivative_order,
@@ -10375,6 +10383,12 @@ class FastMultipoleMethod:
         tracing_targets = isinstance(
             positions_sorted_arr, jax.core.Tracer
         ) or isinstance(resolved_target_indices, jax.core.Tracer)
+        # Octree backend: evaluate octree-native far-field locals (full path only).
+        (
+            octree_farfield_local_data,
+            octree_farfield_leaf_nodes,
+            octree_farfield_node_ranges,
+        ) = _octree_farfield_eval_inputs(state)
         if resolved_target_indices is None or tracing_targets:
             evaluation = _evaluate_prepared_tree(
                 fmm=self,
@@ -10384,9 +10398,9 @@ class FastMultipoleMethod:
                 downward=downward,
                 neighbor_list=state.neighbor_list,
                 nearfield_interop=state.nearfield_interop,
-                farfield_local_data=None,
-                farfield_leaf_nodes=None,
-                farfield_node_ranges=None,
+                farfield_local_data=octree_farfield_local_data,
+                farfield_leaf_nodes=octree_farfield_leaf_nodes,
+                farfield_node_ranges=octree_farfield_node_ranges,
                 nearfield_target_leaf_ids=state.nearfield_target_leaf_ids,
                 nearfield_source_leaf_ids=state.nearfield_source_leaf_ids,
                 nearfield_valid_pairs=state.nearfield_valid_pairs,
