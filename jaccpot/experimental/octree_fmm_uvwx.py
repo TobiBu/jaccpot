@@ -133,7 +133,8 @@ def _octree_far_field_grad(
     max_leaf_size: int,
     num_levels: Optional[int] = None,
     level_batch_width: Optional[int] = None,
-    m2l_chunk_size: int = 1024,
+    m2l_chunk_size: int = 4096,
+    v_active_capacity: Optional[int] = None,
 ) -> Array:
     """O(N) far field: upward (P2M/M2M) -> V-list M2L -> L2L -> evaluate locals.
 
@@ -143,13 +144,15 @@ def _octree_far_field_grad(
     leave ``None`` for the compact host build so they are derived from its actual per-level
     node counts (the dense 8**depth would over-run the compact node arrays).
 
-    M2L runs as a fixed-chunk scatter-add scan (``_accumulate_octree_m2l_complex_chunked``)
-    DIRECTLY over the yggdrax V-list pairs -- no global interaction plan. The chunked M2L
-    kernel re-groups duplicate targets per chunk, so a pre-sorted (level-major) pair order
-    is unnecessary; dropping the full-candidate ``jnp.lexsort`` (which sorted every padded
-    ``node_capacity * v_capacity`` slot inside the jit) removes the octree far-field's
-    dominant compile cost while producing bit-identical locals. ``m2l_chunk_size`` is the
-    static scan block; padding/sentinel pairs (source or target >= num_nodes) are masked.
+    M2L runs as a fixed-chunk scatter-add scan (radix ``_accumulate_solidfmm_m2l_chunked_scan``)
+    DIRECTLY over the yggdrax V-list pairs -- no global interaction plan / lexsort. The V-list
+    is padded to ``node_capacity * v_capacity`` slots (~3.45M @200k, ~4x the ~800k real pairs),
+    so ``v_active_capacity`` (static) STREAM-COMPACTS the real pairs into a fixed buffer of
+    that size (sentinel -> -1, masked by the kernel) -- the M2L scan then iterates
+    ``v_active_capacity / m2l_chunk_size`` chunks instead of the full padded count, which is
+    the dominant far-field cost at 200k. Leave ``None`` to skip compaction (argsort real-first
+    over the full padded array; correct but slow). ``v_active_capacity`` must be >= the true
+    pair count or the excess pairs are silently dropped.
     """
     plan = build_octree_upward_plan(octree)
     multipoles = prepare_octree_solidfmm_complex_multipoles(
@@ -172,10 +175,27 @@ def _octree_far_field_grad(
     v_src = jnp.asarray(view.v_src, dtype=INDEX_DTYPE)
     v_tgt = jnp.asarray(view.v_tgt, dtype=INDEX_DTYPE)
     valid_pairs = (v_src < num_nodes) & (v_tgt < num_nodes)
-    pair_perm = jnp.argsort(jnp.logical_not(valid_pairs))  # real pairs first
-    src_pairs = jnp.where(valid_pairs, v_src, -1)[pair_perm]
-    tgt_pairs = jnp.where(valid_pairs, v_tgt, -1)[pair_perm]
-    active_pairs = jnp.sum(valid_pairs.astype(INDEX_DTYPE))
+    n_valid = jnp.sum(valid_pairs.astype(INDEX_DTYPE))
+    if v_active_capacity is None:
+        # No compaction: sort real pairs to the front over the full padded array.
+        pair_perm = jnp.argsort(jnp.logical_not(valid_pairs))
+        src_pairs = jnp.where(valid_pairs, v_src, -1)[pair_perm]
+        tgt_pairs = jnp.where(valid_pairs, v_tgt, -1)[pair_perm]
+        active_pairs = n_valid
+    else:
+        # Stream-compact the real pairs into a fixed v_active_capacity buffer (cumsum
+        # scatter, cheaper than argsort); the M2L scan then only touches ~real/chunk chunks.
+        cap = int(v_active_capacity)
+        dest = jnp.where(
+            valid_pairs, jnp.cumsum(valid_pairs.astype(INDEX_DTYPE)) - 1, cap
+        )
+        src_pairs = (
+            jnp.full((cap,), -1, dtype=INDEX_DTYPE).at[dest].set(v_src, mode="drop")
+        )
+        tgt_pairs = (
+            jnp.full((cap,), -1, dtype=INDEX_DTYPE).at[dest].set(v_tgt, mode="drop")
+        )
+        active_pairs = jnp.minimum(n_valid, cap)
     locals_packed = _accumulate_solidfmm_m2l_chunked_scan(
         jnp.zeros_like(multipoles.packed),
         jnp.asarray(multipoles.packed),
