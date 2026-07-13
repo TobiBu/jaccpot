@@ -11796,7 +11796,7 @@ def _accumulate_solidfmm_m2l_fullbatch(
     src_mult = multip_packed[safe_src]
     deltas = centers[safe_tgt] - centers[safe_src]
 
-    if rotation == "cached":
+    if rotation == "cached" or _fused_complex_m2l_pallas_active():
         blocks_to_z = complex_rotation_blocks_to_z_batch(
             deltas,
             order=order,
@@ -11809,7 +11809,7 @@ def _accumulate_solidfmm_m2l_fullbatch(
             basis="local",
             dtype=src_mult.dtype,
         )
-        contribs = _m2l_complex_batch_cached_kernel(
+        contribs = _apply_cached_complex_m2l(
             src_mult,
             deltas,
             blocks_to_z,
@@ -11826,6 +11826,54 @@ def _accumulate_solidfmm_m2l_fullbatch(
     contribs = contribs.astype(locals_coeffs.dtype)
     contribs = jnp.where(valid[:, None], contribs, 0)
     return locals_coeffs + jax.ops.segment_sum(contribs, safe_tgt, total_nodes)
+
+
+def _fused_complex_m2l_pallas_active() -> bool:
+    """Whether to route the cached complex M2L through the fused Pallas kernel.
+
+    Gated by ``JACCPOT_STATIC_STRICT_FUSED_M2L_PALLAS`` and the sm_80+ support
+    check (falls back to the reference cached kernel on unsupported hardware).
+    Evaluated at trace time; the flag does not change within a compiled run.
+    """
+    flag = str(
+        os.environ.get("JACCPOT_STATIC_STRICT_FUSED_M2L_PALLAS", "0")
+    ).strip().lower()
+    if flag not in {"1", "true", "yes", "on"}:
+        return False
+    try:
+        from jaccpot.pallas.m2l_complex_fused import (
+            pallas_m2l_complex_fused_supported,
+        )
+
+        return bool(pallas_m2l_complex_fused_supported())
+    except Exception:
+        return False
+
+
+def _apply_cached_complex_m2l(
+    src_mult: Array,
+    deltas: Array,
+    blocks_to_z: Array,
+    blocks_from_z: Array,
+    *,
+    order: int,
+) -> Array:
+    """Cached-block complex M2L: fused Pallas kernel when enabled, else reference.
+
+    Both consume the identical precomputed rotation blocks; the fused Pallas
+    kernel keeps the rotate -> z-translate -> rotate-back intermediates on-chip
+    (collapses the launch-bound reference vmap on Ampere+).
+    """
+    if _fused_complex_m2l_pallas_active():
+        from jaccpot.pallas.m2l_complex_fused import m2l_complex_fused_pallas
+
+        r = jnp.sqrt(jnp.sum(deltas * deltas, axis=-1))
+        return m2l_complex_fused_pallas(
+            src_mult, blocks_to_z, blocks_from_z, r, order=order
+        )
+    return _m2l_complex_batch_cached_kernel(
+        src_mult, deltas, blocks_to_z, blocks_from_z, order=order
+    )
 
 
 @partial(
@@ -11870,7 +11918,7 @@ def _accumulate_solidfmm_m2l_chunked_scan(
             src_mult = multip_packed[src_chunk]
             deltas = centers[tgt_chunk] - centers[src_chunk]
 
-            if rotation == "cached":
+            if rotation == "cached" or _fused_complex_m2l_pallas_active():
                 blocks_to_z = complex_rotation_blocks_to_z_batch(
                     deltas,
                     order=order,
@@ -11883,7 +11931,7 @@ def _accumulate_solidfmm_m2l_chunked_scan(
                     basis="local",
                     dtype=src_mult.dtype,
                 )
-                contribs = _m2l_complex_batch_cached_kernel(
+                contribs = _apply_cached_complex_m2l(
                     src_mult,
                     deltas,
                     blocks_to_z,
