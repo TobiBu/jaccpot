@@ -151,3 +151,39 @@ cached-blocks reference is NOT it; relerr ~1.8). Steps:
 2. Call it unchunked over the far-pair buffer (raise chunk_size to the buffer size or
    a dedicated single-launch path).
 Both Path A/B flags stay OFF until Path A delivers a validated speedup.
+
+---
+
+## UPDATE 2026-07-14 (DECISIVE: the M2L kernel is NOT the far-field bottleneck)
+
+Built a fully-fused REAL M2L Pallas kernel (`jaccpot/pallas/m2l_real_fused.py`,
+commit 3d4cb72): full rotate->z-translate->rotate-back in one Triton kernel,
+gather-free + pow2-padded, real (Dehnen) convention. Validated A100 relerr ~1e-15
+vs `m2l_rot_scale_real_batch`. Wired flag-gated into `_apply_real_m2l`.
+
+**It does NOT speed up the A100 far-field — and neither can any M2L kernel.**
+Measured far-field (M2L+L2L) at 200k/order4/theta0.8, all ~53-58 ms:
+| M2L variant | far-field ms |
+|---|---|
+| complex solidfmm (production) | 56.7 |
+| real rot-scale (pure JAX)     | 52.6 |
+| real z-core Pallas            | 56.3 |
+| real fully-fused Pallas       | 55.8 (chunked) / 58.2 (unchunked) |
+
+Localization: standalone (JIT'd) the ENTIRE real M2L for 64,698 far pairs (build
+blocks + rotate + z + rotate) = **9.25 ms** (block-build 9.12). The fast-lane
+far-field bucket is ~56 ms => the M2L kernel is only ~16%; **~84% is plumbing**:
+per-pair source-multipole gather (`multip_packed[src]`), scatter-add to locals
+(`segment_sum`), the **L2L** downsweep, and the **2x padding** (131072 far-pair
+buffer vs ~64,698 active). Chunk size (32 chunks vs 1) makes no difference.
+
+### => Re-scoped levers for the A100 far-field (NOT the M2L kernel)
+1. **Padding**: process ~64,698 active pairs, not the 131072 buffer (fixed-shape
+   compaction / right-size the compact-far-pair cap). ~2x of the far-field volume.
+2. **Gather/scatter**: the per-pair source-multipole gather + segment_sum scatter
+   dominate; grouping/deduping source nodes or a fused gather-M2L-scatter kernel.
+3. **L2L** downsweep cost (separate from M2L) — decompose M2L-only vs L2L first.
+The complex + real fused M2L kernels are kept as validated, reusable infra (they'd
+matter once the plumbing shrinks, or at higher order / other HW), but the flags
+stay OFF: they don't move the A100 number. The big A100 win remains the near-field
+Pallas kernel (already in: 210->59 ms).
