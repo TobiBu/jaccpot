@@ -405,64 +405,115 @@ def _octree_near_field(
     max_leaf_size: int,
     use_pallas: bool = True,
     pallas_interpret: bool = False,
+    near_block_size: Optional[int] = 128,
 ) -> Array:
-    """Leaf-major U-list near-field P2P, reusing the radix fast-lane machinery.
+    """U-list near-field P2P over fixed-width UNITS, reusing the radix fast-lane machinery.
 
-    Builds the leaf-major particle packs (``leaf_positions/masses/mask/idx`` of shape
-    ``(num_leaves, max_leaf_size, ...)``) from the octree node ranges, plus the per-target
-    source-leaf-id list from the U-list (self + sentinel excluded), then:
+    Packs particles into units, builds each unit's source-unit id list, then adds the
+    intra-unit self block (``i != j``, via ``_compute_leaf_p2p_prepared_large_n_self_only_impl``)
+    plus the cross-unit pairs via the Pallas ``nearfield_leafpair`` kernel
+    (``_radix_fast_lane_prepacked_pallas``, gathers sources by id + cheaply cond-skips padded
+    slots) when ``use_pallas`` + a supported accelerator, else the pure-JAX prepacked path
+    (autodiff-able; the differentiable fallback). Result is in Morton (sorted) order.
 
-    * the intra-leaf self block (``i != j`` within a leaf) via
-      ``_compute_leaf_p2p_prepared_large_n_self_only_impl``;
-    * the cross-leaf pairs via the Pallas ``nearfield_leafpair`` kernel
-      (``_radix_fast_lane_prepacked_pallas``, gathers source leaves by id + skips padded
-      slots cheaply) when ``use_pallas`` and a supported accelerator is present, else the
-      pure-JAX prepacked path (autodiff-able; the differentiable fallback).
+    ``near_block_size`` selects the unit:
 
-    The dense baseline (:func:`_ulist_near_device`) pads every leaf to ``max_leaf_size``
-    AND materialises every padded U-slot, which is ~50x wasteful on an adaptive tree
-    (mean leaf occupancy << max) -- this path pays for padding only via a cheap predicate.
-    Result is in Morton (sorted) order, matching the far field.
+    * ``None`` -> one unit per leaf, width ``max_leaf_size``. An adaptive octree's leaves are
+      badly under-full (8-way split: mean occ << ``max_leaf_size``), so every leaf pads to the
+      global max occupancy -- the ``W^2`` particle term is dominated by padding.
+    * ``B`` (default 128) -> DENSE-BLOCK packing: each leaf is chunked into ``ceil(occ/B)``
+      fixed-``B`` blocks (respecting leaf boundaries), and blocks are the units (width ``B``,
+      not max occ). A block's sources = its leaf's OTHER blocks (intra-leaf near) + its
+      U-neighbour leaves' blocks. Decoupling the width from max occupancy cuts the near-field
+      ~2x on the 200k disk (leaf occ mean ~34 vs max 256). Block count is bounded statically by
+      ``ceil(N/B) + num_leaves``.
     """
     num_nodes = int(view.parent.shape[0])
     num_leaves = int(view.leaf_indices.shape[0])
-    W = int(max_leaf_size)
     n_part = int(positions_sorted.shape[0])
     u_cap = int(view.u_neighbors.shape[0] // max(num_leaves, 1))
     dtype = positions_sorted.dtype
     softening_sq = jnp.asarray(softening, dtype=dtype) ** 2  # traced-safe (no float())
 
-    # ---- leaf-major particle packs from node ranges ----
+    # ---- leaf geometry from node ranges (shared by both unit modes) ----
     leaf_node = jnp.asarray(view.leaf_indices, dtype=INDEX_DTYPE)
     node_ranges = jnp.asarray(view.node_ranges, dtype=INDEX_DTYPE)
     valid_leaf = leaf_node < num_nodes
     leaf_node_safe = jnp.where(valid_leaf, leaf_node, 0)
     lo = node_ranges[leaf_node_safe, 0]
-    occ = node_ranges[leaf_node_safe, 1] - node_ranges[leaf_node_safe, 0] + 1
-    slot = jnp.arange(W, dtype=INDEX_DTYPE)
-    leaf_mask = (slot[None, :] < occ[:, None]) & valid_leaf[:, None]  # (L, W)
-    leaf_particle_idx = jnp.where(
-        leaf_mask, jnp.clip(lo[:, None] + slot[None, :], 0, n_part - 1), 0
+    occ = jnp.where(
+        valid_leaf,
+        node_ranges[leaf_node_safe, 1] - node_ranges[leaf_node_safe, 0] + 1,
+        0,
     )
-    leaf_positions = positions_sorted[leaf_particle_idx]  # (L, W, 3)
-    leaf_masses = masses_sorted[leaf_particle_idx]  # (L, W)
-
-    # ---- per-target source-leaf-id list from the U-list (self + sentinel excluded) ----
     src_rows = jnp.asarray(view.u_neighbors, dtype=INDEX_DTYPE).reshape(
         num_leaves, u_cap
     )
-    self_row = jnp.arange(num_leaves, dtype=INDEX_DTYPE)[:, None]
-    src_valid = (src_rows < num_leaves) & (src_rows != self_row)
-    src_rows_safe = jnp.where(src_valid, src_rows, 0)
-    src_ids_3d = src_rows_safe[:, None, :]  # (L, 1, u_cap)
-    src_valid_3d = src_valid[:, None, :]
+
+    if near_block_size is None:
+        # one unit per leaf, width = max_leaf_size
+        W = int(max_leaf_size)
+        slot = jnp.arange(W, dtype=INDEX_DTYPE)
+        unit_mask = (slot[None, :] < occ[:, None]) & valid_leaf[:, None]
+        unit_pidx = jnp.where(
+            unit_mask, jnp.clip(lo[:, None] + slot[None, :], 0, n_part - 1), 0
+        )
+        self_row = jnp.arange(num_leaves, dtype=INDEX_DTYPE)[:, None]
+        s_valid = (src_rows < num_leaves) & (src_rows != self_row)
+        src_ids_3d = jnp.where(s_valid, src_rows, 0)[:, None, :]  # (L, 1, u_cap)
+        src_valid_3d = s_valid[:, None, :]
+    else:
+        # dense-block units: chunk each leaf into fixed-B blocks (width B, not max occ)
+        B = int(near_block_size)
+        block_cap = (n_part + B - 1) // B + num_leaves  # tight upper bound on #blocks
+        mbpl = (int(max_leaf_size) + B - 1) // B  # static max blocks per leaf
+        bpl = (occ + B - 1) // B  # blocks per leaf (0 if empty/invalid)
+        cum = jnp.cumsum(bpl)
+        block_start = cum - bpl
+        total_blocks = jnp.sum(bpl)
+        g = jnp.arange(block_cap, dtype=INDEX_DTYPE)
+        block_leaf = jnp.clip(jnp.searchsorted(cum, g, side="right"), 0, num_leaves - 1)
+        valid_block = g < total_blocks
+        block_local = g - block_start[block_leaf]
+        slot = jnp.arange(B, dtype=INDEX_DTYPE)
+        within = block_local[:, None] * B + slot[None, :]
+        unit_mask = valid_block[:, None] & (within < occ[block_leaf][:, None])
+        unit_pidx = jnp.where(
+            unit_mask, jnp.clip(lo[block_leaf][:, None] + within, 0, n_part - 1), 0
+        )
+        # sources: own leaf's other blocks (intra-leaf near) + U-neighbour leaves' blocks
+        r = block_leaf
+        nbrs = jnp.concatenate(
+            [r[:, None], src_rows[r]], axis=1
+        )  # (block_cap, 1+u_cap)
+        nbr_valid = jnp.concatenate(
+            [valid_block[:, None], src_rows[r] < num_leaves], axis=1
+        )
+        k = jnp.arange(mbpl, dtype=INDEX_DTYPE)
+        sb = (
+            block_start[nbrs][:, :, None] + k[None, None, :]
+        )  # (block_cap, 1+u_cap, mbpl)
+        sb_valid = (
+            nbr_valid[:, :, None]
+            & (k[None, None, :] < bpl[nbrs][:, :, None])
+            & (sb != g[:, None, None])  # exclude the target block itself
+        )
+        n_src = (1 + u_cap) * mbpl
+        src_ids_3d = jnp.where(sb_valid, jnp.clip(sb, 0, block_cap - 1), 0).reshape(
+            block_cap, 1, n_src
+        )
+        src_valid_3d = sb_valid.reshape(block_cap, 1, n_src)
+
+    unit_positions = positions_sorted[unit_pidx]
+    unit_masses = masses_sorted[unit_pidx]
+    num_units = int(unit_pidx.shape[0])
 
     self_acc = _compute_leaf_p2p_prepared_large_n_self_only_impl(
         positions_sorted,
-        leaf_positions,
-        leaf_masses,
-        leaf_mask,
-        leaf_particle_idx,
+        unit_positions,
+        unit_masses,
+        unit_mask,
+        unit_pidx,
         G=G,
         softening_sq=softening_sq,
     )
@@ -485,10 +536,10 @@ def _octree_near_field(
         pair_acc = _radix_fast_lane_prepacked_pallas(
             src_ids_3d,
             src_valid_3d,
-            leaf_positions,
-            leaf_masses,
-            leaf_mask,
-            leaf_particle_idx,
+            unit_positions,
+            unit_masses,
+            unit_mask,
+            unit_pidx,
             positions_sorted,
             G=G,
             softening_sq=softening_sq,
@@ -501,13 +552,13 @@ def _octree_near_field(
                 positions_sorted,
                 src_ids_3d,
                 src_valid_3d,
-                leaf_positions,
-                leaf_masses,
-                leaf_mask,
-                leaf_particle_idx,
+                unit_positions,
+                unit_masses,
+                unit_mask,
+                unit_pidx,
                 G=G,
                 softening_sq=softening_sq,
-                target_leaf_batch_size=min(num_leaves, 256),
+                target_leaf_batch_size=min(num_units, 256),
                 target_block_tile_size=8,
                 target_block_tile_scan_unroll=1,
                 target_block_batch_scan_unroll=1,
