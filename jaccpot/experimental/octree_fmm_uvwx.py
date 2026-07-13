@@ -43,7 +43,6 @@ from yggdrax.octree_uvwx import (
 from ..downward.local_expansions import LocalExpansionData
 from ..nearfield.near_field import (
     _compute_leaf_p2p_impl,
-    _compute_leaf_p2p_prepared_large_n_pairs_target_blocks_prepacked_impl,
     _compute_leaf_p2p_prepared_large_n_self_only_impl,
     _radix_fast_lane_prepacked_pallas,
 )
@@ -474,15 +473,20 @@ def _octree_near_field(
     use_pallas: bool = True,
     pallas_interpret: bool = False,
     near_block_size: Optional[int] = 128,
+    edge_capacity: Optional[int] = None,
+    near_chunk_size: int = 512,
 ) -> Array:
     """U-list near-field P2P over fixed-width UNITS, reusing the radix fast-lane machinery.
 
     Packs particles into units, builds each unit's source-unit id list, then adds the
     intra-unit self block (``i != j``, via ``_compute_leaf_p2p_prepared_large_n_self_only_impl``)
-    plus the cross-unit pairs via the Pallas ``nearfield_leafpair`` kernel
-    (``_radix_fast_lane_prepacked_pallas``, gathers sources by id + cheaply cond-skips padded
-    slots) when ``use_pallas`` + a supported accelerator, else the pure-JAX prepacked path
-    (autodiff-able; the differentiable fallback). Result is in Morton (sorted) order.
+    plus the cross-unit pairs. With ``use_pallas`` + a supported accelerator this uses the
+    Pallas ``nearfield_leafpair`` kernel (``_radix_fast_lane_prepacked_pallas``: gathers
+    sources by id + cheaply cond-skips padded slots; fastest, ~200 ms @200k). Otherwise it
+    uses a memory-safe pure-JAX CHUNKED EDGE SCAN over the (target, source) unit pairs -- the
+    AUTODIFF-ABLE / non-Ampere path (~780 ms @200k; the radix prepacked pure-JAX impl OOMs at
+    36-132 GiB). ``edge_capacity`` (static; default ``num_units * source_slots``) bounds the
+    compacted edge list and ``near_chunk_size`` is the per-chunk pair block. Morton order.
 
     ``near_block_size`` selects the unit:
 
@@ -615,25 +619,55 @@ def _octree_near_field(
             interpret=bool(pallas_interpret),
         )
     else:
-        pair_acc = (
-            _compute_leaf_p2p_prepared_large_n_pairs_target_blocks_prepacked_impl(
-                positions_sorted,
-                src_ids_3d,
-                src_valid_3d,
-                unit_positions,
-                unit_masses,
-                unit_mask,
-                unit_pidx,
-                G=G,
-                softening_sq=softening_sq,
-                target_leaf_batch_size=min(num_units, 256),
-                target_block_tile_size=8,
-                target_block_tile_scan_unroll=1,
-                target_block_batch_scan_unroll=1,
-                occupancy_sort=True,
-                skip_empty_tiles=True,
-                componentwise_pairs=True,
-            )
+        # Memory-safe pure-JAX cross-pairs (autodiff-able / non-Ampere path): enumerate the
+        # (target-unit, source-unit) edges from the source lists, stream-compact the real
+        # edges to the front, and lax.scan over fixed-size chunks -- per-chunk memory is only
+        # (near_chunk_size, W, W, 3), bounded, and whole padding chunks are cond-skipped. The
+        # radix prepacked impl OOMs here (materializes dense tiles: 36-132 GiB @200k).
+        n_src = int(src_ids_3d.shape[2])
+        cap = int(edge_capacity) if edge_capacity is not None else num_units * n_src
+        chunk = int(near_chunk_size)
+        tgt_flat = jnp.repeat(jnp.arange(num_units, dtype=INDEX_DTYPE), n_src)
+        src_flat = src_ids_3d.reshape(-1)
+        edge_valid = src_valid_3d.reshape(-1)
+        dest = jnp.where(
+            edge_valid, jnp.cumsum(edge_valid.astype(INDEX_DTYPE)) - 1, cap
+        )
+        tgt_e = (
+            jnp.full((cap,), 0, dtype=INDEX_DTYPE).at[dest].set(tgt_flat, mode="drop")
+        )
+        src_e = (
+            jnp.full((cap,), 0, dtype=INDEX_DTYPE).at[dest].set(src_flat, mode="drop")
+        )
+        n_edges = jnp.minimum(jnp.sum(edge_valid.astype(INDEX_DTYPE)), cap)
+        starts = jnp.arange(0, cap, chunk, dtype=INDEX_DTYPE)
+
+        def _edge_body(near, start):
+            def _active(near):
+                rng = start + jnp.arange(chunk, dtype=INDEX_DTYPE)
+                idx = jnp.clip(rng, 0, cap - 1)
+                inr = rng < n_edges
+                tb = tgt_e[idx]
+                sbk = src_e[idx]
+                tpos = unit_positions[tb]
+                tmask = unit_mask[tb] & inr[:, None]
+                tpidx = unit_pidx[tb]
+                spos = unit_positions[sbk]
+                smass = unit_masses[sbk]
+                smask = unit_mask[sbk]
+                d = tpos[:, :, None, :] - spos[:, None, :, :]
+                d2 = jnp.sum(d * d, axis=-1) + softening_sq
+                pv = tmask[:, :, None] & smask[:, None, :]
+                inv = jnp.where(pv, d2 ** (-1.5), 0.0)
+                ac = -G * jnp.sum(smass[:, None, :, None] * d * inv[..., None], axis=2)
+                return near.at[tpidx.reshape(-1)].add(
+                    jnp.where(tmask.reshape(-1)[:, None], ac.reshape(-1, 3), 0.0)
+                )
+
+            return jax.lax.cond(start < n_edges, _active, lambda nr: nr, near), None
+
+        pair_acc, _ = jax.lax.scan(
+            _edge_body, jnp.zeros((n_part, 3), dtype=positions_sorted.dtype), starts
         )
     return self_acc + pair_acc
 
