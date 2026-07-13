@@ -697,6 +697,7 @@ def prepare_octree_solidfmm_complex_multipoles(
     max_leaf_size: Optional[int] = None,
     num_levels: Optional[int] = None,
     level_batch_width: Optional[int] = None,
+    centers_override: Optional[Array] = None,
 ) -> OctreeSolidFMMComplexMultipoles:
     """Build octree-native solidfmm complex multipoles in explicit octree space.
 
@@ -707,14 +708,24 @@ def prepare_octree_solidfmm_complex_multipoles(
     for a single fused jit over a static-shape octree (e.g. across time-integration steps).
     If ``None`` each is derived from the current tree (host concretization; fine eagerly,
     not under an outer jit).
+
+    ``centers_override`` sets the per-node expansion centres. Default (``None``) uses
+    centre-of-mass centres (tightest truncation error). Pass the GEOMETRIC box centres
+    (``view.centers``) to make M2L source->target displacements grid-quantised (identical
+    for equal relative offsets) so they group into a finite set of interaction classes --
+    the prerequisite for the cached/grouped M2L. An FMM is valid about any centres; box
+    centres cost a little accuracy vs COM at fixed order.
     """
 
-    total_mass, centers = compute_octree_center_of_mass(
-        plan,
-        positions_sorted,
-        masses_sorted,
-    )
-    del total_mass
+    if centers_override is None:
+        total_mass, centers = compute_octree_center_of_mass(
+            plan,
+            positions_sorted,
+            masses_sorted,
+        )
+        del total_mass
+    else:
+        centers = jnp.asarray(centers_override)
 
     leaf_nodes = jnp.asarray(plan.leaf_nodes, dtype=INDEX_DTYPE)
     leaf_valid = leaf_nodes >= 0

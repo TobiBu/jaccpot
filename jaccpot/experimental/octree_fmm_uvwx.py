@@ -47,9 +47,14 @@ from ..nearfield.near_field import (
     _compute_leaf_p2p_prepared_large_n_self_only_impl,
     _radix_fast_lane_prepacked_pallas,
 )
+from ..operators.complex_ops import (
+    complex_rotation_blocks_from_z_solidfmm_batch,
+    complex_rotation_blocks_to_z_solidfmm_batch,
+)
 from ..runtime._fmm_impl import (
     _accumulate_solidfmm_m2l_chunked_scan,
     _evaluate_local_expansions_for_particles,
+    _m2l_complex_batch_cached_kernel,
 )
 from ..runtime._octree_adapter import OctreeExecutionData
 from ..runtime._octree_fmm import (
@@ -135,8 +140,24 @@ def _octree_far_field_grad(
     level_batch_width: Optional[int] = None,
     m2l_chunk_size: int = 4096,
     v_active_capacity: Optional[int] = None,
+    geometric_centers: bool = False,
+    m2l_grouped: bool = False,
+    class_capacity: int = 8192,
 ) -> Array:
     """O(N) far field: upward (P2M/M2M) -> V-list M2L -> L2L -> evaluate locals.
+
+    ``geometric_centers=True`` expands about the octree box centres (``view.centers``)
+    instead of centres of mass, making M2L displacements grid-quantised (the prerequisite
+    for grouped/cached M2L). Slightly looser truncation error than COM at fixed order.
+
+    ``m2l_grouped=True`` (requires ``geometric_centers=True`` + ``v_active_capacity``) runs the
+    CACHED/GROUPED M2L: it groups the compacted V-pairs by their (now bit-identical)
+    box-centre displacement via ``jnp.unique`` into ``<= class_capacity`` interaction classes,
+    precomputes the solidfmm rotation blocks ONCE per class, and applies them with the cached
+    kernel -- so per-pair work is a cheap cached z-translate instead of a full rotation
+    recompute. This is the radix fast-lane's M2L trick; ~3.6x faster than the per-pair
+    ``rotation="solidfmm"`` chunked scan @200k (190 -> 53 ms). ``class_capacity`` MUST exceed
+    the true class count (else ``jnp.unique`` truncates and mis-assigns pairs).
 
     ``num_levels`` / ``level_batch_width`` are static (from tree depth) so the M2M/L2L
     kernels' ``static_argnames`` stay fixed -- the whole far field runs inside one jit.
@@ -155,6 +176,7 @@ def _octree_far_field_grad(
     pair count or the excess pairs are silently dropped.
     """
     plan = build_octree_upward_plan(octree)
+    centers_override = jnp.asarray(view.centers) if bool(geometric_centers) else None
     multipoles = prepare_octree_solidfmm_complex_multipoles(
         plan,
         positions_sorted,
@@ -163,6 +185,7 @@ def _octree_far_field_grad(
         max_leaf_size=int(max_leaf_size),
         num_levels=num_levels,
         level_batch_width=level_batch_width,
+        centers_override=centers_override,
     )
     # M2L: route the yggdrax V-list pairs through the RADIX fast-lane's streamed complex
     # M2L kernel (_accumulate_solidfmm_m2l_chunked_scan) -- same solidfmm math as the
@@ -176,38 +199,83 @@ def _octree_far_field_grad(
     v_tgt = jnp.asarray(view.v_tgt, dtype=INDEX_DTYPE)
     valid_pairs = (v_src < num_nodes) & (v_tgt < num_nodes)
     n_valid = jnp.sum(valid_pairs.astype(INDEX_DTYPE))
-    if v_active_capacity is None:
-        # No compaction: sort real pairs to the front over the full padded array.
-        pair_perm = jnp.argsort(jnp.logical_not(valid_pairs))
-        src_pairs = jnp.where(valid_pairs, v_src, -1)[pair_perm]
-        tgt_pairs = jnp.where(valid_pairs, v_tgt, -1)[pair_perm]
-        active_pairs = n_valid
-    else:
-        # Stream-compact the real pairs into a fixed v_active_capacity buffer (cumsum
-        # scatter, cheaper than argsort); the M2L scan then only touches ~real/chunk chunks.
+    packed = jnp.asarray(multipoles.packed)
+    centers_arr = jnp.asarray(multipoles.centers)
+    if m2l_grouped:
+        # CACHED/GROUPED M2L (requires geometric centres so displacements quantise).
+        if not bool(geometric_centers):
+            raise ValueError("m2l_grouped=True requires geometric_centers=True")
+        if v_active_capacity is None:
+            raise ValueError("m2l_grouped=True requires v_active_capacity")
         cap = int(v_active_capacity)
         dest = jnp.where(
             valid_pairs, jnp.cumsum(valid_pairs.astype(INDEX_DTYPE)) - 1, cap
         )
-        src_pairs = (
-            jnp.full((cap,), -1, dtype=INDEX_DTYPE).at[dest].set(v_src, mode="drop")
+        src_c = jnp.full((cap,), 0, dtype=INDEX_DTYPE).at[dest].set(v_src, mode="drop")
+        tgt_c = jnp.full((cap,), 0, dtype=INDEX_DTYPE).at[dest].set(v_tgt, mode="drop")
+        pad = jnp.arange(cap) >= jnp.minimum(n_valid, cap)
+        cdt = packed.dtype
+        deltas = centers_arr[tgt_c] - centers_arr[src_c]
+        # group pairs by exact box-centre displacement -> interaction classes
+        uniq, cls_id = jnp.unique(
+            deltas,
+            axis=0,
+            size=int(class_capacity),
+            return_inverse=True,
+            fill_value=0.0,
         )
-        tgt_pairs = (
-            jnp.full((cap,), -1, dtype=INDEX_DTYPE).at[dest].set(v_tgt, mode="drop")
+        cls_id = cls_id.reshape(-1)
+        one_x = jnp.asarray([1.0, 0.0, 0.0], dtype=centers_arr.dtype)
+        safe_disp = jnp.where(jnp.all(uniq == 0, axis=1, keepdims=True), one_x, uniq)
+        blocks_to = complex_rotation_blocks_to_z_solidfmm_batch(
+            safe_disp, order=int(order), basis="multipole", dtype=cdt
         )
-        active_pairs = jnp.minimum(n_valid, cap)
-    locals_packed = _accumulate_solidfmm_m2l_chunked_scan(
-        jnp.zeros_like(multipoles.packed),
-        jnp.asarray(multipoles.packed),
-        jnp.asarray(multipoles.centers),
-        src_pairs,
-        tgt_pairs,
-        active_pairs,
-        order=int(order),
-        rotation="solidfmm",
-        total_nodes=num_nodes,
-        chunk_size=int(m2l_chunk_size),
-    )
+        blocks_from = complex_rotation_blocks_from_z_solidfmm_batch(
+            safe_disp, order=int(order), basis="local", dtype=cdt
+        )
+        deltas_safe = jnp.where(pad[:, None], one_x, deltas)  # avoid r=0 on padding
+        contribs = _m2l_complex_batch_cached_kernel(
+            packed[src_c],
+            deltas_safe,
+            blocks_to[cls_id],
+            blocks_from[cls_id],
+            order=int(order),
+        ).astype(cdt)
+        contribs = jnp.where(pad[:, None], 0, contribs)  # zero padding pairs
+        locals_packed = jnp.zeros_like(packed).at[tgt_c].add(contribs)
+    else:
+        if v_active_capacity is None:
+            # No compaction: sort real pairs to the front over the full padded array.
+            pair_perm = jnp.argsort(jnp.logical_not(valid_pairs))
+            src_pairs = jnp.where(valid_pairs, v_src, -1)[pair_perm]
+            tgt_pairs = jnp.where(valid_pairs, v_tgt, -1)[pair_perm]
+            active_pairs = n_valid
+        else:
+            # Stream-compact the real pairs into a fixed v_active_capacity buffer (cumsum
+            # scatter, cheaper than argsort); the scan then touches ~real/chunk chunks.
+            cap = int(v_active_capacity)
+            dest = jnp.where(
+                valid_pairs, jnp.cumsum(valid_pairs.astype(INDEX_DTYPE)) - 1, cap
+            )
+            src_pairs = (
+                jnp.full((cap,), -1, dtype=INDEX_DTYPE).at[dest].set(v_src, mode="drop")
+            )
+            tgt_pairs = (
+                jnp.full((cap,), -1, dtype=INDEX_DTYPE).at[dest].set(v_tgt, mode="drop")
+            )
+            active_pairs = jnp.minimum(n_valid, cap)
+        locals_packed = _accumulate_solidfmm_m2l_chunked_scan(
+            jnp.zeros_like(packed),
+            packed,
+            centers_arr,
+            src_pairs,
+            tgt_pairs,
+            active_pairs,
+            order=int(order),
+            rotation="solidfmm",
+            total_nodes=num_nodes,
+            chunk_size=int(m2l_chunk_size),
+        )
     # L2L level cascade over the octree child table (parent - child delta; the complex
     # kernel is exact only with that sign). Derive the static level count / per-level
     # dynamic_slice window when not supplied (host build), matching
