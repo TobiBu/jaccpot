@@ -187,3 +187,33 @@ The complex + real fused M2L kernels are kept as validated, reusable infra (they
 matter once the plumbing shrinks, or at higher order / other HW), but the flags
 stay OFF: they don't move the A100 number. The big A100 win remains the near-field
 Pallas kernel (already in: 210->59 ms).
+
+---
+
+## UPDATE 2026-07-14 (far-field root cause: interaction-list CONSTRUCTION, not M2L)
+
+Decomposed the ~56 ms A100 far-field bucket with clean per-step GPU medians +
+production-size micro-benchmarks:
+- **M2L accumulate** (`_accumulate_real_m2l_chunked_scan`, gather+kernel+scatter+scan,
+  standalone at 1563 nodes / 64,698 pairs / cap 131072): **14.1 ms** (chunk 4096); the
+  raw M2L kernel over the gathered pairs is 10.4 ms.
+- **gather** `mult[src]` = 0.16 ms; **segment_sum scatter** -> nodes = 0.35 ms (negligible).
+- **padding**: tightening the far-pair cap 131072 -> 81920 saved 0.8 ms (the chunked
+  scan already skips padded chunks via `lax.cond`). Dead end.
+- **L2L**: ~2.5 ms incremental (full_downward - m2l_only).
+- **=> by elimination, ~40 ms/step is the dual-tree FAR-PAIR CONSTRUCTION**
+  (`_build_dual_tree_artifacts(need_compact_far_pairs=True)` ->
+  `build_compact_far_pairs_and_leaf_neighbor_lists`, the MAC traversal that emits the
+  ~64,698 far pairs), rebuilt every step (refresh_every locked at 1). ~70% of the
+  far-field, ~1/3 of the whole 120 ms step. (Internal `runtime_refresh_*` host timers
+  under-report it -- they measure async dispatch, not GPU completion.)
+
+### Consequence
+NO M2L kernel work (Path A complex-fused, Path B real-fused/z-core) can help the A100
+far-field -- they optimize the 14 ms accumulate, not the 40 ms interaction-list build.
+Padding + gather/scatter are also non-levers (measured). **The far-field lever is the
+far-pair interaction-list construction** (`_interaction_cache` / dual-tree traversal):
+make it cheaper per step, or reuse it across steps (blocked: refresh_every=1). The
+fused M2L kernels remain validated infra (flags OFF). The big A100 win is still the
+near-field Pallas (210->59 ms, in). Near-field (59) + M2L-accumulate (14) + L2L (~3) +
+far-pair-build (~40) + tree/upward (~4) ~ 120 ms checks out.
