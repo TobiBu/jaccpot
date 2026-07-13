@@ -78,3 +78,44 @@ an array of shape (5, 9)."* The per-pair shapes are non-power-of-2:
 - `benchmark_a100/run_a100_real_m2l.sh` (real-basis rotation M2L cost).
 - Enable the fused M2L: `JACCPOT_STATIC_STRICT_FUSED_M2L_PALLAS=1 ODISSEO_FMM_USE_PALLAS=1`
   (+ the `env_fused.sh` fast-lane knobs). Currently errors on GPU until the kernel is fixed.
+
+---
+
+## UPDATE 2026-07-13 (kernel now lowers on Triton; wiring blocked on convention)
+
+Executed option-1 pad-to-measure. Two Triton-GPU blockers on the v0 kernel were
+fixed (commit eefcd3d, `jaccpot/pallas/m2l_complex_fused.py`):
+1. **power-of-2 shapes** — pad tables/buffers to Cp/Bp/mdp/Kp; padded lanes inert.
+2. **no `gather` on Triton GPU** — reformulate pack/unpack/z-core gathers as
+   constant-matrix elementwise-multiply+reduce (one-hot `Ppack`/`Uunpack` +
+   dense z-core `Z = Zsign*Zfact*r**-Zexp`). Verified viable by a Triton probe.
+
+Validation: interpret parity 9/9; **real-Triton A100 parity vs
+`m2l_complex_reference_batch_cached_blocks` = relerr ~3e-7** (orders 2-4). The
+Phase-5 kernel is now GPU-functional.
+
+### BLOCKER 1 — convention mismatch (why the fast-lane wiring gives 67% error)
+The fused kernel matches the **cached-blocks** convention. The production large_n
+fast lane computes M2L via `_m2l_complex_batch_kernel(rotation="solidfmm")`, which
+differs from the cached reference by **relerr ~1.8** — and it is NOT a delta-sign,
+conjugate, or to_z/from_z basis-swap difference (all tried, all ~1.1). It is a
+deeper normalization/scaling convention. So enabling
+`JACCPOT_STATIC_STRICT_FUSED_M2L_PALLAS=1` on the fast lane yields ~68% force error.
+=> Need either a solidfmm-convention fused kernel, or a solidfmm<->cached coeff
+conversion, or switch the whole lane (upward+M2L+downward) to the cached convention
+consistently (the large_n gate currently requires complex_rotation="solidfmm").
+
+### BLOCKER 2 — no speedup per-chunk
+Even ignoring correctness, the fused M2L measured 60.7 ms vs 56.7 ms (SLOWER). The
+chunked scan calls it per-chunk (~32 chunks at chunk_size 4096) and the gather-free
+reformulation adds dense selection-matrix FLOPs; the launch-collapse benefit needs
+the M2L batched over ALL far pairs in one call (raise chunk_size to cover the pair
+buffer, or a dedicated unchunked fused path), not 32 per-chunk launches.
+
+### Next
+1. Reconcile the convention: study `_m2l_complex_batch_kernel` solidfmm rotation +
+   z-translation normalization vs the cached reference; build solidfmm-convention
+   blocks/z-core for the fused kernel (or a coeff transform). Re-validate force parity.
+2. Batch the fused M2L unchunked (single launch over the compact far-pair buffer) to
+   actually collapse launches; re-measure (target M2L 56.7 -> ~20 ms).
+Flag stays OFF until both are done (kernel fix is committed + validated standalone).
