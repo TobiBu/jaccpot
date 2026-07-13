@@ -113,6 +113,37 @@ def test_octree_fmm_real_basis_matches_direct(m2l_grouped):
     assert np.percentile(rel, 90) < 5e-2, f"p90 rel err {np.percentile(rel, 90):.3e}"
 
 
+@pytest.mark.parametrize("near_block_size", [None, 64])
+def test_octree_fmm_purejax_near_matches_direct(near_block_size):
+    """Explicitly pin the pure-JAX (autodiff-able / non-Ampere) near path: the compacted
+    chunked edge-scan (``near_use_pallas=False``) must match direct N-body, in both unit
+    modes -- leaf mode (``near_block_size=None``, one tile per leaf) and dense-block mode
+    (``near_block_size=64``, leaves chunked into fixed-B blocks + compacted source lists).
+    The Pallas near falls back to this path on non-Ampere/CPU, but nothing else asserts the
+    pure-JAX near in isolation. Guards ``_octree_near_field``'s pure-JAX branch + both
+    unit-construction schemes.
+    """
+    pos, mass = _points(4000, 7, "clustered")
+    acc = np.asarray(
+        octree_fmm_accelerations(
+            pos,
+            mass,
+            depth=3,
+            order=4,
+            G=1.0,
+            softening=1e-2,
+            near_use_pallas=False,
+            near_block_size=near_block_size,
+        )
+    )
+    direct = _direct(pos, mass, 1.0, 1e-2)
+    rel = np.linalg.norm(acc - direct, axis=1) / (
+        np.linalg.norm(direct, axis=1) + 1e-12
+    )
+    assert np.median(rel) < 2e-2, f"median rel err {np.median(rel):.3e}"
+    assert np.percentile(rel, 90) < 5e-2, f"p90 rel err {np.percentile(rel, 90):.3e}"
+
+
 def test_device_matches_host_build():
     """The on-device static build gives the same forces as the host-numpy reference."""
     pos, mass = _points(3000, 7, "clustered")

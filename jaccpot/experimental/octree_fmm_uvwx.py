@@ -1082,6 +1082,19 @@ def octree_fmm_accelerations(
       the grouped/cached M2L on box centres (~3.6x faster M2L). ``m2l_grouped`` requires
       ``geometric_centers=True`` and a ``v_active_capacity`` >= the true V-pair count.
     * ``near_block_size`` / ``edge_capacity`` / ``near_chunk_size`` -- near-field packing knobs.
+      TUNING (measured @200k adaptive, order 4, A100): the near field is the dominant cost and
+      is padding-bound. ``mbpl=1`` (``near_block_size >= max_leaf_size``, or ``None`` for leaf
+      mode) is fastest for BOTH backends -- shorter source lists beat tighter within-tile fill
+      (Pallas 222 vs 258 ms @ B=128; pure-JAX 834 vs 1281 ms). Size the build's ``u_capacity``
+      to ~1.15x the true max U-neighbours/leaf (measured 138 here; 256 wastes ~1.9x, but 64
+      TRUNCATES -> wrong forces). The pure-JAX near runs ~3.8x the Pallas near (chunk-scan
+      overhead); it is the autodiff-able / non-Ampere fallback, not the fast path. CEILING: even
+      tuned, the near field carries ~(max_leaf_size/mean_occ)^2 within-tile padding (~48x here;
+      leaves are ~15% full on clustered data) that neither ``near_block_size`` nor ``u_capacity``
+      removes -- killing it needs a compacted/occupancy-bucketed near (leaf-respecting tiles are
+      required for clean P2P, so dense leaf-ignoring tiles would need per-pair leaf-adjacency
+      masking). This is why the octree is not competitive with the radix fast lane @200k
+      single-GPU (build+far already exceed its full step); the octree's edge is large-N / multi-GPU.
 
     With ``device=True`` (default) the ENTIRE compute runs inside a single jax.jit over the
     static-shape device build (:func:`_octree_uvwx_device_compute`): for a fixed
