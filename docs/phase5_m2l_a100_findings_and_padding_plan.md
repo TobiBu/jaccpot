@@ -119,3 +119,35 @@ buffer, or a dedicated unchunked fused path), not 32 per-chunk launches.
 2. Batch the fused M2L unchunked (single launch over the compact far-pair buffer) to
    actually collapse launches; re-measure (target M2L 56.7 -> ~20 ms).
 Flag stays OFF until both are done (kernel fix is committed + validated standalone).
+
+---
+
+## UPDATE 2026-07-14 (Path B done — real z-core Pallas: correct but no speedup)
+
+Fixed + wired the real-valued M2L Pallas kernel (commit bfaaad2):
+- `m2l_core_z_real_pallas` now takes `backend` (default `"triton"`); it was
+  defaulting to Mosaic-GPU which rejects the small per-(pair,coeff) tiles
+  ("bytes=100 not divisible by warpgroup 128"). On Triton it lowers + runs on the
+  A100 (relerr ~1e-6 vs pure-JAX, orders 2-4).
+- Wired into the fast-lane real dispatch via `_apply_real_m2l` (gated by
+  `JACCPOT_STATIC_STRICT_FUSED_M2L_PALLAS` + `pallas_m2l_real_supported`), swapping
+  only the z-core kernel inside the correctly-masked real scan. Convention-self-
+  consistent: A100 force err **0.2831% (correct)** — no 68% mismatch.
+
+**Result: correct but NO speedup.** real M2L = 56.3 ms with the Pallas z-core vs
+**52.6 ms** pure-JAX (slight regression); total 119.5 vs 115.7 ms. => the z-core is
+NOT the launch-bound cost. The M2L launch-bound cost lives in the per-pair JAX
+**rotations** (rotate to/from z, block-diagonal Wigner) + the **per-chunk scan** (32
+chunks @ chunk_size 4096). Fusing only the z-core leaves both untouched.
+
+### Implication for Path A (now the clear target)
+A speedup needs the **full** rotate -> z-translate -> rotate-back fused into ONE
+kernel (collapsing the rotation launches), run **UNCHUNKED** (single launch over the
+whole compact far-pair buffer, not 32 chunks), and in the **solidfmm convention**
+(what `_m2l_complex_batch_kernel(rotation="solidfmm")` produces — the phase5 kernel's
+cached-blocks reference is NOT it; relerr ~1.8). Steps:
+1. Derive solidfmm-convention rotation blocks + z-core for the fused complex kernel
+   (or a solidfmm<->cached coeff transform), re-validate force parity in the lane.
+2. Call it unchunked over the far-pair buffer (raise chunk_size to the buffer size or
+   a dedicated single-launch path).
+Both Path A/B flags stay OFF until Path A delivers a validated speedup.
