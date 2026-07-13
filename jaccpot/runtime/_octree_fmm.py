@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from functools import partial
-from typing import NamedTuple
+from typing import NamedTuple, Optional
 
 import jax
 import jax.numpy as jnp
@@ -406,7 +406,9 @@ def _propagate_octree_l2l_complex_by_level(
             parent_coeffs[:, None, :],
             (batch_width, int(children.shape[1]), state.shape[1]),
         )
-        deltas = centers[safe_child_idx] - centers[safe_parents][:, None, :]
+        # L2L delta convention is parent - child (opposite of M2M's child - parent);
+        # l2l_complex is exact only with this sign.
+        deltas = centers[safe_parents][:, None, :] - centers[safe_child_idx]
         translated = l2l_complex_batch(
             parent_coeffs.reshape(-1, state.shape[1]),
             deltas.reshape(-1, 3),
@@ -457,18 +459,39 @@ def _propagate_octree_l2l_complex_by_level(
 def propagate_octree_solidfmm_l2l(
     downward: OctreeSolidFMMDownwardPlan,
     octree: OctreeExecutionData,
+    *,
+    num_levels: Optional[int] = None,
+    level_batch_width: Optional[int] = None,
 ) -> OctreeSolidFMMDownwardPlan:
-    """Propagate octree local expansions top-down over the explicit child table."""
+    """Propagate octree local expansions top-down over the explicit child table.
+
+    ``num_levels`` and ``level_batch_width`` are static kernel args. Pass them (constants
+    derived from the tree depth) to keep the L2L ``static_argnames`` fixed across calls so
+    an enclosing ``jax.jit`` does not recompile / concretize traced values -- required for
+    a single fused jit over a static-shape octree. If ``None`` they are derived from the
+    octree (host concretization; fine eagerly, not under an outer jit).
+    """
 
     order = int(downward.order)
-    num_levels = int(octree.num_levels)
-    level_batch_width = max(int(octree.num_valid_nodes), 1)
+    if num_levels is None:
+        num_levels = int(octree.num_levels)
+    else:
+        num_levels = int(num_levels)
+    active_level_offsets = jnp.asarray(
+        octree.level_offsets[: num_levels + 1], dtype=INDEX_DTYPE
+    )
+    # Per-level dynamic_slice window: max per-level count from level_offsets, NOT
+    # num_valid_nodes (total). See prepare_octree_solidfmm_complex_multipoles.
+    if level_batch_width is None:
+        level_batch_width = max(int(jnp.max(jnp.diff(active_level_offsets))), 1)
+    else:
+        level_batch_width = int(level_batch_width)
     locals_packed = _propagate_octree_l2l_complex_by_level(
         jnp.asarray(downward.locals_packed),
         jnp.asarray(downward.centers),
         jnp.asarray(octree.children, dtype=INDEX_DTYPE),
         jnp.asarray(octree.nodes_by_level, dtype=INDEX_DTYPE),
-        jnp.asarray(octree.level_offsets[: num_levels + 1], dtype=INDEX_DTYPE),
+        active_level_offsets,
         order=order,
         num_levels=num_levels,
         level_batch_width=level_batch_width,
@@ -581,8 +604,10 @@ def _p2m_octree_leaves_complex(
         return jnp.where(valid, coeff, 0.0)
 
     coeffs_by_leaf = jax.vmap(leaf_coeff)(jnp.clip(leaf_nodes, 0), leaf_valid)
-    safe_leaf_nodes = jnp.where(leaf_valid, leaf_nodes, 0)
-    return packed.at[safe_leaf_nodes].set(coeffs_by_leaf)
+    # Scatter invalid leaves out of range (total_nodes) with mode="drop" so they never
+    # collide with a real node's write at index 0 (no reserved dead node needed).
+    safe_leaf_nodes = jnp.where(leaf_valid, leaf_nodes, total_nodes)
+    return packed.at[safe_leaf_nodes].set(coeffs_by_leaf, mode="drop")
 
 
 @partial(
@@ -607,6 +632,7 @@ def _aggregate_octree_m2m_complex_by_level(
         return packed
 
     batch_width = int(max(level_batch_width, 1))
+    total_nodes = int(packed.shape[0])
     level_offsets = jnp.asarray(level_offsets, dtype=INDEX_DTYPE)
     nodes_by_level = jnp.asarray(nodes_by_level, dtype=INDEX_DTYPE)
     level_slot = jnp.arange(batch_width, dtype=INDEX_DTYPE)
@@ -636,6 +662,11 @@ def _aggregate_octree_m2m_complex_by_level(
             axis=0,
         )
         valid = level_slot < count
+        # Gather with invalid batch slots clamped to index 0 (their values are masked
+        # out below). The SCATTER instead sends invalid slots out of range
+        # (total_nodes) with mode="drop", so a padding slot can never clobber a real
+        # node's write -- in particular the root at index 0. This is what lets the
+        # kernel run on the natural node layout (root at 0) with no reserved dead node.
         safe_nodes = jnp.where(valid, batch_nodes, 0)
         child_idx = children[safe_nodes]
         has_children = jnp.any(child_idx >= 0, axis=1)
@@ -651,7 +682,8 @@ def _aggregate_octree_m2m_complex_by_level(
         node_coeffs = enforce_conjugate_symmetry_batch(node_coeffs, order=p)
         current = state[safe_nodes]
         updates = jnp.where((valid & has_children)[:, None], node_coeffs, current)
-        return state.at[safe_nodes].set(updates)
+        scatter_nodes = jnp.where(valid, batch_nodes, total_nodes)
+        return state.at[scatter_nodes].set(updates, mode="drop")
 
     return jax.lax.fori_loop(0, int(num_levels) - 1, level_body, packed)
 
@@ -662,22 +694,50 @@ def prepare_octree_solidfmm_complex_multipoles(
     masses_sorted: Array,
     *,
     max_order: int,
+    max_leaf_size: Optional[int] = None,
+    num_levels: Optional[int] = None,
+    level_batch_width: Optional[int] = None,
+    centers_override: Optional[Array] = None,
 ) -> OctreeSolidFMMComplexMultipoles:
-    """Build octree-native solidfmm complex multipoles in explicit octree space."""
+    """Build octree-native solidfmm complex multipoles in explicit octree space.
 
-    total_mass, centers = compute_octree_center_of_mass(
-        plan,
-        positions_sorted,
-        masses_sorted,
-    )
-    del total_mass
+    ``max_leaf_size`` is the static per-leaf particle cap for the P2M kernel; ``num_levels``
+    and ``level_batch_width`` are the static M2M level-loop args. Pass fixed values (derived
+    from the tree depth) to keep the P2M/M2M ``static_argnames`` constant across calls, so
+    an enclosing ``jax.jit`` neither recompiles nor concretizes traced values -- required
+    for a single fused jit over a static-shape octree (e.g. across time-integration steps).
+    If ``None`` each is derived from the current tree (host concretization; fine eagerly,
+    not under an outer jit).
+
+    ``centers_override`` sets the per-node expansion centres. Default (``None``) uses
+    centre-of-mass centres (tightest truncation error). Pass the GEOMETRIC box centres
+    (``view.centers``) to make M2L source->target displacements grid-quantised (identical
+    for equal relative offsets) so they group into a finite set of interaction classes --
+    the prerequisite for the cached/grouped M2L. An FMM is valid about any centres; box
+    centres cost a little accuracy vs COM at fixed order.
+    """
+
+    if centers_override is None:
+        total_mass, centers = compute_octree_center_of_mass(
+            plan,
+            positions_sorted,
+            masses_sorted,
+        )
+        del total_mass
+    else:
+        centers = jnp.asarray(centers_override)
 
     leaf_nodes = jnp.asarray(plan.leaf_nodes, dtype=INDEX_DTYPE)
     leaf_valid = leaf_nodes >= 0
-    safe_leaf_nodes = jnp.where(leaf_valid, leaf_nodes, 0)
-    leaf_ranges = plan.node_ranges[safe_leaf_nodes]
-    leaf_counts = jnp.where(leaf_valid, leaf_ranges[:, 1] - leaf_ranges[:, 0] + 1, 0)
-    max_leaf_size = max(int(jnp.max(leaf_counts)), 1)
+    if max_leaf_size is None:
+        safe_leaf_nodes = jnp.where(leaf_valid, leaf_nodes, 0)
+        leaf_ranges = plan.node_ranges[safe_leaf_nodes]
+        leaf_counts = jnp.where(
+            leaf_valid, leaf_ranges[:, 1] - leaf_ranges[:, 0] + 1, 0
+        )
+        max_leaf_size = max(int(jnp.max(leaf_counts)), 1)
+    else:
+        max_leaf_size = int(max_leaf_size)
 
     packed = _p2m_octree_leaves_complex(
         leaf_nodes,
@@ -690,11 +750,21 @@ def prepare_octree_solidfmm_complex_multipoles(
         max_leaf_size=max_leaf_size,
     )
 
-    num_levels = int(plan.num_levels)
+    if num_levels is None:
+        num_levels = int(plan.num_levels)
+    else:
+        num_levels = int(num_levels)
     active_level_offsets = jnp.asarray(
         plan.level_offsets[: num_levels + 1], dtype=INDEX_DTYPE
     )
-    level_batch_width = max(int(plan.num_valid_nodes), 1)
+    # level_batch_width is the per-level dynamic_slice window for the M2M level loop:
+    # it MUST be the max per-level node count (from level_offsets), NOT num_valid_nodes
+    # (the total). Using the total misaligns the front-anchored per-level reads for any
+    # tree deeper than 2 levels (root+leaves), silently corrupting the M2M aggregation.
+    if level_batch_width is None:
+        level_batch_width = max(int(jnp.max(jnp.diff(active_level_offsets))), 1)
+    else:
+        level_batch_width = int(level_batch_width)
     packed = _aggregate_octree_m2m_complex_by_level(
         packed,
         centers,

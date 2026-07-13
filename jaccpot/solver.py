@@ -333,7 +333,9 @@ class FastMultipoleMethod:
         m2l_impl: Optional[str] = None,
         adaptive_order: bool = False,
         p_gears: Optional[Sequence[int]] = None,
-        use_pallas: bool = False,
+        # None => resolve at construction: Pallas near-field ON where it can run
+        # (Ampere sm_80+), pure-JAX only on sm_75/CPU. Explicit True/False wins.
+        use_pallas: Optional[bool] = None,
         reuse_topology: bool = False,
         rebuild_every: int = 1,
         mac_force_scale_mode: str = "prev",
