@@ -83,6 +83,36 @@ def test_octree_fmm_converges_with_order():
     assert np.median(rel6) < 1e-3
 
 
+@pytest.mark.parametrize("m2l_grouped", [False, True])
+def test_octree_fmm_real_basis_matches_direct(m2l_grouped):
+    """The real (Dehnen) basis far field -- ungrouped and grouped/cached M2L -- matches
+    direct N-body to the same tolerance as the complex basis. The grouped real M2L
+    (class-major rotation blocks + cached z-translate) must be bit-for-bit as accurate as
+    the per-pair path; only the speed differs. Guards the ``basis='real'`` dispatch and
+    the grouped-real branch in ``_octree_far_field_grad_real``.
+    """
+    pos, mass = _points(4000, 7, "clustered")
+    acc = np.asarray(
+        octree_fmm_accelerations(
+            pos,
+            mass,
+            depth=3,
+            order=4,
+            G=1.0,
+            softening=1e-2,
+            basis="real",
+            m2l_grouped=m2l_grouped,
+            v_active_capacity=1 << 16,
+        )
+    )
+    direct = _direct(pos, mass, 1.0, 1e-2)
+    rel = np.linalg.norm(acc - direct, axis=1) / (
+        np.linalg.norm(direct, axis=1) + 1e-12
+    )
+    assert np.median(rel) < 2e-2, f"median rel err {np.median(rel):.3e}"
+    assert np.percentile(rel, 90) < 5e-2, f"p90 rel err {np.percentile(rel, 90):.3e}"
+
+
 def test_device_matches_host_build():
     """The on-device static build gives the same forces as the host-numpy reference."""
     pos, mass = _points(3000, 7, "clustered")

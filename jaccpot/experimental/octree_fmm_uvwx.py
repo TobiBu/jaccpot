@@ -74,6 +74,11 @@ from ..operators.complex_ops import (
     complex_rotation_blocks_from_z_solidfmm_batch,
     complex_rotation_blocks_to_z_solidfmm_batch,
 )
+from ..operators.m2l_real_rot_scale import (
+    m2l_rot_scale_real_batch_cached_blocks,
+    real_rotation_blocks_from_z_local_batch,
+    real_rotation_blocks_to_z_multipole_batch,
+)
 from ..operators.real_harmonics import (
     evaluate_local_real_with_grad,
     l2l_real,
@@ -223,6 +228,8 @@ def _octree_far_field_grad(
             num_levels=num_levels,
             m2l_chunk_size=int(m2l_chunk_size),
             v_active_capacity=v_active_capacity,
+            m2l_grouped=bool(m2l_grouped),
+            class_capacity=int(class_capacity),
         )
     plan = build_octree_upward_plan(octree)
     centers_override = jnp.asarray(view.centers) if bool(geometric_centers) else None
@@ -376,6 +383,8 @@ def _octree_far_field_grad_real(
     num_levels: Optional[int] = None,
     m2l_chunk_size: int = 4096,
     v_active_capacity: Optional[int] = None,
+    m2l_grouped: bool = False,
+    class_capacity: int = 8192,
 ) -> Array:
     """Real-basis (Dehnen) octree far field: real P2M/M2M/M2L/L2L + real L2P (with grad).
 
@@ -456,40 +465,86 @@ def _octree_far_field_grad_real(
 
     mp = jax.lax.fori_loop(0, n_levels - 1, m2m_body, mp)
 
-    # ---- M2L: delta = target - source; compact V-pairs -> real rot-scale chunked kernel ----
+    # ---- M2L: delta = target - source over the V-list ----
     v_src = jnp.asarray(view.v_src, dtype=INDEX_DTYPE)
     v_tgt = jnp.asarray(view.v_tgt, dtype=INDEX_DTYPE)
     valid_pairs = (v_src < num_nodes) & (v_tgt < num_nodes)
     n_valid = jnp.sum(valid_pairs.astype(INDEX_DTYPE))
-    if v_active_capacity is None:
-        pair_perm = jnp.argsort(jnp.logical_not(valid_pairs))
-        src_pairs = jnp.where(valid_pairs, v_src, -1)[pair_perm]
-        tgt_pairs = jnp.where(valid_pairs, v_tgt, -1)[pair_perm]
-        active_pairs = n_valid
-    else:
+    if m2l_grouped:
+        # GROUPED/CACHED real M2L -- the real analog of the complex grouped path: box centres
+        # (used throughout this real far field) make the V-pair displacements grid-quantised,
+        # so group them into <= class_capacity interaction classes via jnp.unique, precompute
+        # the REAL rotation blocks ONCE per class, and apply with the cached kernel (only the
+        # z-translation runs per pair). Removes the per-pair rotation build that makes the
+        # ungrouped real M2L slow. Requires v_active_capacity (static compaction buffer).
+        if v_active_capacity is None:
+            raise ValueError("m2l_grouped=True requires v_active_capacity")
         cap = int(v_active_capacity)
         dest = jnp.where(
             valid_pairs, jnp.cumsum(valid_pairs.astype(INDEX_DTYPE)) - 1, cap
         )
-        src_pairs = (
-            jnp.full((cap,), -1, dtype=INDEX_DTYPE).at[dest].set(v_src, mode="drop")
+        src_c = jnp.full((cap,), 0, dtype=INDEX_DTYPE).at[dest].set(v_src, mode="drop")
+        tgt_c = jnp.full((cap,), 0, dtype=INDEX_DTYPE).at[dest].set(v_tgt, mode="drop")
+        pad = jnp.arange(cap) >= jnp.minimum(n_valid, cap)
+        rdt = mp.dtype
+        deltas = centers[tgt_c] - centers[src_c]
+        uniq, cls_id = jnp.unique(
+            deltas,
+            axis=0,
+            size=int(class_capacity),
+            return_inverse=True,
+            fill_value=0.0,
         )
-        tgt_pairs = (
-            jnp.full((cap,), -1, dtype=INDEX_DTYPE).at[dest].set(v_tgt, mode="drop")
+        cls_id = cls_id.reshape(-1)
+        one_x = jnp.asarray([1.0, 0.0, 0.0], dtype=centers.dtype)
+        safe_disp = jnp.where(jnp.all(uniq == 0, axis=1, keepdims=True), one_x, uniq)
+        blocks_to = real_rotation_blocks_to_z_multipole_batch(
+            safe_disp, order=p, dtype=rdt
         )
-        active_pairs = jnp.minimum(n_valid, cap)
-    locals_packed = _accumulate_real_m2l_chunked_scan(
-        jnp.zeros_like(mp),
-        mp,
-        centers,
-        src_pairs,
-        tgt_pairs,
-        active_pairs,
-        order=p,
-        m2l_impl="rot_scale",
-        total_nodes=num_nodes,
-        chunk_size=int(m2l_chunk_size),
-    )
+        blocks_from = real_rotation_blocks_from_z_local_batch(
+            safe_disp, order=p, dtype=rdt
+        )
+        deltas_safe = jnp.where(pad[:, None], one_x, deltas)  # avoid r=0 on padding
+        contribs = m2l_rot_scale_real_batch_cached_blocks(
+            mp[src_c],
+            deltas_safe,
+            blocks_to[cls_id],
+            blocks_from[cls_id],
+            order=p,
+        ).astype(rdt)
+        contribs = jnp.where(pad[:, None], 0, contribs)
+        locals_packed = jnp.zeros_like(mp).at[tgt_c].add(contribs)
+    else:
+        # ungrouped: compact real pairs -> per-pair rotate-scale chunked scan
+        if v_active_capacity is None:
+            pair_perm = jnp.argsort(jnp.logical_not(valid_pairs))
+            src_pairs = jnp.where(valid_pairs, v_src, -1)[pair_perm]
+            tgt_pairs = jnp.where(valid_pairs, v_tgt, -1)[pair_perm]
+            active_pairs = n_valid
+        else:
+            cap = int(v_active_capacity)
+            dest = jnp.where(
+                valid_pairs, jnp.cumsum(valid_pairs.astype(INDEX_DTYPE)) - 1, cap
+            )
+            src_pairs = (
+                jnp.full((cap,), -1, dtype=INDEX_DTYPE).at[dest].set(v_src, mode="drop")
+            )
+            tgt_pairs = (
+                jnp.full((cap,), -1, dtype=INDEX_DTYPE).at[dest].set(v_tgt, mode="drop")
+            )
+            active_pairs = jnp.minimum(n_valid, cap)
+        locals_packed = _accumulate_real_m2l_chunked_scan(
+            jnp.zeros_like(mp),
+            mp,
+            centers,
+            src_pairs,
+            tgt_pairs,
+            active_pairs,
+            order=p,
+            m2l_impl="rot_scale",
+            total_nodes=num_nodes,
+            chunk_size=int(m2l_chunk_size),
+        )
 
     # ---- L2L down-sweep: delta = PARENT - child (source=parent; OPPOSITE of M2M) ----
     delta_parent_minus_child = centers[parent_safe] - centers
