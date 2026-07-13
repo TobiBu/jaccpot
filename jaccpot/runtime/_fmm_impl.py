@@ -11778,14 +11778,43 @@ def _real_m2l_pallas_active() -> bool:
         return False
 
 
-def _apply_real_m2l(src_mult, deltas, *, order, m2l_impl):
-    """Real-basis batched M2L: Pallas z-core when enabled, else pure-JAX rot-scale.
+def _m2l_real_batch_kernel_fused_pallas(
+    multipoles: Array,
+    deltas: Array,
+    *,
+    order: int,
+    m2l_impl: str,
+) -> Array:
+    """Real-basis M2L via the FULLY-fused Pallas kernel (rotate+z-translate+rotate
+    in one launch). Builds the real rotation blocks + radii from deltas."""
+    mode = str(m2l_impl).strip().lower()
+    if mode != "rot_scale":
+        raise ValueError("real-basis m2l_impl must be 'rot_scale'")
+    from jaccpot.operators.m2l_real_rot_scale import (
+        real_rotation_blocks_from_z_local_batch,
+        real_rotation_blocks_to_z_multipole_batch,
+    )
+    from jaccpot.pallas.m2l_real_fused import m2l_real_fused_pallas
 
-    Both share the identical rotate -> z-translate -> rotate-back math; the Pallas
-    path (m2l_core_z_real, Triton) runs the z-core as a single fused kernel launch.
+    r = jnp.linalg.norm(deltas, axis=1)
+    bto = real_rotation_blocks_to_z_multipole_batch(
+        deltas, order=order, dtype=multipoles.dtype
+    )
+    bfr = real_rotation_blocks_from_z_local_batch(
+        deltas, order=order, dtype=multipoles.dtype
+    )
+    return m2l_real_fused_pallas(multipoles, bto, bfr, r, order=order)
+
+
+def _apply_real_m2l(src_mult, deltas, *, order, m2l_impl):
+    """Real-basis batched M2L: fully-fused Pallas kernel when enabled, else pure-JAX.
+
+    When the fused-M2L Pallas flag is active, route through the single-launch fused
+    kernel (rotate -> z-translate -> rotate-back on-chip), collapsing the per-pair
+    JAX rotation launches. Otherwise the pure-JAX rot-scale path.
     """
     if _real_m2l_pallas_active():
-        return _m2l_real_batch_kernel_pallas(
+        return _m2l_real_batch_kernel_fused_pallas(
             src_mult, deltas, order=order, m2l_impl=m2l_impl
         )
     return _m2l_real_batch_kernel(src_mult, deltas, order=order, m2l_impl=m2l_impl)
