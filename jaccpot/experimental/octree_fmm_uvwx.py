@@ -682,6 +682,13 @@ def _octree_near_field(
         "node_capacity",
         "leaf_capacity",
         "near_use_pallas",
+        "geometric_centers",
+        "m2l_grouped",
+        "class_capacity",
+        "v_active_capacity",
+        "near_block_size",
+        "edge_capacity",
+        "near_chunk_size",
     ),
 )
 def _octree_uvwx_device_compute(
@@ -697,6 +704,13 @@ def _octree_uvwx_device_compute(
     node_capacity: int = 0,
     leaf_capacity: int = 0,
     near_use_pallas: bool = True,
+    geometric_centers: bool = False,
+    m2l_grouped: bool = False,
+    class_capacity: int = 8192,
+    v_active_capacity: Optional[int] = None,
+    near_block_size: Optional[int] = 128,
+    edge_capacity: Optional[int] = None,
+    near_chunk_size: int = 512,
 ) -> Array:
     """Single jitted O(N) octree-FMM compute over the static-shape device build.
 
@@ -738,6 +752,10 @@ def _octree_uvwx_device_compute(
         max_leaf_size=int(max_leaf_size),
         num_levels=num_levels,
         level_batch_width=level_batch_width,
+        v_active_capacity=v_active_capacity,
+        geometric_centers=bool(geometric_centers),
+        m2l_grouped=bool(m2l_grouped),
+        class_capacity=int(class_capacity),
     )
     far_acc = -G * far_grad
     near_acc = _octree_near_field(
@@ -748,6 +766,9 @@ def _octree_uvwx_device_compute(
         softening=softening,
         max_leaf_size=int(max_leaf_size),
         use_pallas=bool(near_use_pallas),
+        near_block_size=near_block_size,
+        edge_capacity=edge_capacity,
+        near_chunk_size=int(near_chunk_size),
     )
     acc_sorted = far_acc + near_acc
     inv = (
@@ -772,11 +793,27 @@ def octree_fmm_accelerations(
     bounds: Optional[tuple] = None,
     return_view: bool = False,
     near_use_pallas: bool = True,
+    geometric_centers: bool = False,
+    m2l_grouped: bool = False,
+    class_capacity: int = 8192,
+    v_active_capacity: Optional[int] = None,
+    near_block_size: Optional[int] = 128,
+    edge_capacity: Optional[int] = None,
+    near_chunk_size: int = 512,
 ):
     """O(N) octree-FMM gravitational accelerations (far V-list + near U-list P2P).
 
     ``positions`` (N, 3), ``masses`` (N,); returns accelerations in the SAME order as the
     inputs. ``depth`` = uniform octree levels, ``order`` = multipole expansion order.
+
+    Fast/opt-in knobs (all static, default to the safe COM + chunked-M2L + Pallas-near path):
+
+    * ``near_use_pallas`` (default True) -- Pallas leaf-pair near (fastest); ``False`` uses the
+      memory-safe chunked pure-JAX near (autodiff-able; runs on non-Ampere/CPU).
+    * ``geometric_centers`` + ``m2l_grouped`` (+ ``v_active_capacity``, ``class_capacity``) --
+      the grouped/cached M2L on box centres (~3.6x faster M2L). ``m2l_grouped`` requires
+      ``geometric_centers=True`` and a ``v_active_capacity`` >= the true V-pair count.
+    * ``near_block_size`` / ``edge_capacity`` / ``near_chunk_size`` -- near-field packing knobs.
 
     With ``device=True`` (default) the ENTIRE compute runs inside a single jax.jit over the
     static-shape device build (:func:`_octree_uvwx_device_compute`): for a fixed
@@ -814,6 +851,13 @@ def octree_fmm_accelerations(
                 node_capacity=int(node_capacity),
                 leaf_capacity=int(leaf_capacity),
                 near_use_pallas=bool(near_use_pallas),
+                geometric_centers=bool(geometric_centers),
+                m2l_grouped=bool(m2l_grouped),
+                class_capacity=int(class_capacity),
+                v_active_capacity=v_active_capacity,
+                near_block_size=near_block_size,
+                edge_capacity=edge_capacity,
+                near_chunk_size=int(near_chunk_size),
             )
             if return_view:
                 return acc, build_sparse_uniform_octree_execution_view_device(
@@ -843,6 +887,13 @@ def octree_fmm_accelerations(
             order=int(order),
             max_leaf_size=max_leaf_size,
             near_use_pallas=bool(near_use_pallas),
+            geometric_centers=bool(geometric_centers),
+            m2l_grouped=bool(m2l_grouped),
+            class_capacity=int(class_capacity),
+            v_active_capacity=v_active_capacity,
+            near_block_size=near_block_size,
+            edge_capacity=edge_capacity,
+            near_chunk_size=int(near_chunk_size),
         )
         if return_view:
             return acc, build_uniform_octree_execution_view_device(
