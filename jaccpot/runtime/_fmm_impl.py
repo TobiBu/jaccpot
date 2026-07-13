@@ -11758,6 +11758,39 @@ def _m2l_real_batch_kernel_pallas(
     return m2l_rot_scale_real_batch(multipoles, deltas, order=order, use_pallas=True)
 
 
+def _real_m2l_pallas_active() -> bool:
+    """Whether to route the real-basis M2L z-core through the Pallas kernel.
+
+    Gated by ``JACCPOT_STATIC_STRICT_FUSED_M2L_PALLAS`` and the sm_80+ real-M2L
+    support check (falls back to the pure-JAX rot-scale otherwise). Trace-time;
+    the flag does not change within a compiled run.
+    """
+    flag = str(
+        os.environ.get("JACCPOT_STATIC_STRICT_FUSED_M2L_PALLAS", "0")
+    ).strip().lower()
+    if flag not in {"1", "true", "yes", "on"}:
+        return False
+    try:
+        from jaccpot.pallas.m2l_core_z_real import pallas_m2l_real_supported
+
+        return bool(pallas_m2l_real_supported())
+    except Exception:
+        return False
+
+
+def _apply_real_m2l(src_mult, deltas, *, order, m2l_impl):
+    """Real-basis batched M2L: Pallas z-core when enabled, else pure-JAX rot-scale.
+
+    Both share the identical rotate -> z-translate -> rotate-back math; the Pallas
+    path (m2l_core_z_real, Triton) runs the z-core as a single fused kernel launch.
+    """
+    if _real_m2l_pallas_active():
+        return _m2l_real_batch_kernel_pallas(
+            src_mult, deltas, order=order, m2l_impl=m2l_impl
+        )
+    return _m2l_real_batch_kernel(src_mult, deltas, order=order, m2l_impl=m2l_impl)
+
+
 @partial(jax.jit, static_argnames=("order",))
 def _l2l_real_batch_kernel(
     coeffs: Array,
@@ -12108,7 +12141,7 @@ def _accumulate_real_m2l_fullbatch(
     safe_tgt = jnp.where(valid, raw_tgt, 0)
     src_mult = multip_packed_real[safe_src]
     deltas = centers[safe_tgt] - centers[safe_src]
-    contribs = _m2l_real_batch_kernel(
+    contribs = _apply_real_m2l(
         src_mult,
         deltas,
         order=order,
@@ -12186,7 +12219,7 @@ def _accumulate_real_m2l_chunked_scan(
             tgt_chunk = jnp.where(valid, tgt_chunk_raw, 0)
             src_mult = multip_packed_real[src_chunk]
             deltas = centers[tgt_chunk] - centers[src_chunk]
-            contribs = _m2l_real_batch_kernel(
+            contribs = _apply_real_m2l(
                 src_mult,
                 deltas,
                 order=order,
