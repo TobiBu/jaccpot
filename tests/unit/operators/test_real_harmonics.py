@@ -26,7 +26,6 @@ from jaccpot.operators.real_harmonics import (  # Index utilities; P2M; L2P; B m
     l2l_real,
     m2l_optimized_real,
     m2l_real,
-    m2l_real_wigner,
     m2m_real,
     p2m_real_direct,
     real_Dz_diagonal,
@@ -426,7 +425,13 @@ def test_m2l_convergence_radius_respected_in_rotated_geometry():
 
 
 def test_solidfmm_reference_matches_z_axis_m2l():
-    """Solidfmm reference should match z-axis M2L in the real basis."""
+    """Genuine-complex solidfmm reference relates to the real-basis z-M2L.
+
+    The complex reference (``m2l_solidfmm_reference``) runs a standard complex
+    M2L, so it reproduces the real-basis result on the m = 0 channel and is a
+    factor of 2 smaller on every m != 0 channel -- exactly the no-sqrt2
+    real-basis factor carried by ``translate_along_z_m2l_real``.
+    """
     dtype = jnp.float64
     order = 6
 
@@ -442,9 +447,19 @@ def test_solidfmm_reference_matches_z_axis_m2l():
     local_ref = translate_along_z_m2l_real(
         multipole, jnp.linalg.norm(delta_m2l), order=order
     )
-    local_solidfmm = m2l_solidfmm_reference(multipole, delta_m2l, order=order)
+    local_solidfmm = np.asarray(
+        m2l_solidfmm_reference(multipole, delta_m2l, order=order)
+    )
 
-    assert jnp.allclose(local_solidfmm, local_ref, rtol=1e-10, atol=1e-10)
+    # Rescale the genuine-complex reference by the real-basis channel factor.
+    channel_scale = np.ones(sh_size(order))
+    for n in range(order + 1):
+        for m in range(-n, n + 1):
+            if m != 0:
+                channel_scale[sh_index(n, m)] = 2.0
+    local_solidfmm_real = local_solidfmm * channel_scale
+
+    assert jnp.allclose(local_solidfmm_real, local_ref, rtol=1e-10, atol=1e-10)
 
 
 def test_z_m2l_higher_multipoles():
@@ -777,28 +792,33 @@ def test_m2l_rotated_matches_alignment_pipeline():
     multipole_rot = jnp.zeros_like(multipole)
     for ell in range(order + 1):
         sl = slice(ell * ell, (ell + 1) * (ell + 1))
-        D_inv = real_rotation_from_z_axis_multipole(x, y, z, ell, dtype=dtype)
-        multipole_rot = multipole_rot.at[sl].set(D_inv @ multipole[sl])
+        D_to = real_rotation_to_z_axis_multipole(x, y, z, ell, dtype=dtype)
+        multipole_rot = multipole_rot.at[sl].set(D_to @ multipole[sl])
 
     local_z = translate_along_z_m2l_real(multipole_rot, jnp.asarray(R), order=order)
 
     local_manual = jnp.zeros_like(local_z)
     for ell in range(order + 1):
         sl = slice(ell * ell, (ell + 1) * (ell + 1))
-        D_fwd = real_rotation_to_z_axis_local(x, y, z, ell, dtype=dtype)
-        local_manual = local_manual.at[sl].set(D_fwd @ local_z[sl])
+        D_from = real_rotation_from_z_axis_local(x, y, z, ell, dtype=dtype)
+        local_manual = local_manual.at[sl].set(D_from @ local_z[sl])
 
     assert jnp.allclose(local_fast, local_manual, rtol=1e-10, atol=1e-10)
 
 
-@pytest.mark.xfail(
-    reason="Off-axis M2L rotation basis mismatch; Wigner baseline not yet aligned with real basis.",
-)
 def test_m2l_rotated_error_improves_with_order():
-    """Off-axis M2L should improve with expansion order (Wigner baseline)."""
-    pytest.importorskip("sympy")
+    """Off-axis M2L (rotation-accelerated real path) converges with order.
+
+    Regression test for the two bugs that previously capped off-axis M2L at a
+    few percent regardless of order: (1) the missing factor of 2 on the m != 0
+    channels of the z-axis M2L, and (2) the wrong alignment azimuth in the
+    B-matrix rotations (plus the local rotation being a separate ``B_T`` matrix
+    rather than the transpose of the multipole rotation).
+    """
     dtype = jnp.float64
-    source_pos = jnp.array([0.0, 0.0, 0.0], dtype=dtype)
+    # Multipole is expanded about the ORIGIN (p2m_real_direct(source_pos)), so
+    # the M2L displacement is origin -> local_center = local_center.
+    source_pos = jnp.array([0.2, -0.1, 0.3], dtype=dtype)
     local_center = jnp.array([3.0, 2.0, 4.0], dtype=dtype)
     eval_offset = jnp.array([0.2, -0.1, 0.15], dtype=dtype)
 
@@ -806,14 +826,14 @@ def test_m2l_rotated_error_improves_with_order():
     r = jnp.linalg.norm(eval_point - source_pos)
     potential_direct = 1.0 / r
 
-    orders = [2, 3, 4, 5, 6]
+    orders = [2, 4, 6, 8]
     errors = []
     for order in orders:
         multipole = p2m_real_direct(
             source_pos, jnp.asarray(1.0, dtype=dtype), order=order
         )
-        delta_m2l = local_center - source_pos
-        local = m2l_real_wigner(multipole, delta_m2l, order=order)
+        delta_m2l = local_center
+        local = m2l_real(multipole, delta_m2l, order=order)
         delta_l2p = local_center - eval_point
         potential_fmm = evaluate_local_real(local, delta_l2p, order=order)
         err = float(
@@ -821,8 +841,45 @@ def test_m2l_rotated_error_improves_with_order():
         )
         errors.append(err)
 
-    # Expect meaningful improvement with order on off-axis path.
-    assert errors[-1] < errors[0] * 0.4
+    # Geometric convergence: each step should cut the error substantially, and
+    # the highest order should reach near machine precision.
+    for lo, hi in zip(errors, errors[1:]):
+        if lo > 1e-12:
+            assert hi < lo * 0.2
+    assert errors[-1] < 1e-9
+
+
+def test_full_rotated_pipeline_m2m_m2l_l2l_converges():
+    """Fully off-axis P2M -> M2M -> M2L -> L2L -> L2P converges with order.
+
+    Exercises the rotation-accelerated M2M and L2L operators (which had no
+    off-axis correctness coverage before) together with the fixed M2L.
+    """
+    dtype = jnp.float64
+    source = jnp.array([0.15, 0.1, 0.05], dtype=dtype)
+    leaf = jnp.array([0.0, 0.0, 0.0], dtype=dtype)
+    parent = jnp.array([0.3, 0.2, 0.1], dtype=dtype)
+    target = jnp.array([3.0, 2.0, 4.0], dtype=dtype)
+    child = jnp.array([3.1, 2.1, 3.8], dtype=dtype)
+    eval_point = child + jnp.array([0.05, -0.06, 0.04], dtype=dtype)
+    direct = 1.0 / jnp.linalg.norm(eval_point - source)
+
+    errors = []
+    for order in (3, 5, 7, 9):
+        multipole_leaf = p2m_real_direct(
+            source - leaf, jnp.asarray(1.0, dtype=dtype), order=order
+        )
+        # M2M/L2L use the old_center - new_center (dest -> source) convention.
+        multipole_parent = m2m_real(multipole_leaf, leaf - parent, order=order)
+        local_target = m2l_real(multipole_parent, target - parent, order=order)
+        local_child = l2l_real(local_target, target - child, order=order)
+        potential = evaluate_local_real(local_child, child - eval_point, order=order)
+        errors.append(float(jnp.abs(potential - direct) / jnp.abs(direct)))
+
+    for lo, hi in zip(errors, errors[1:]):
+        if lo > 1e-12:
+            assert hi < lo
+    assert errors[-1] < 1e-9
 
 
 def test_rotation_to_from_z_axis_are_inverses():

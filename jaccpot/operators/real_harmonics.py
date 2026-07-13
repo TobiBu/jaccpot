@@ -197,6 +197,8 @@ import jax.numpy as jnp
 import numpy as np
 from jaxtyping import Array, DTypeLike
 
+from jaccpot.operators.symmetric_tensors import symmetric_multi_indices_3d
+
 # ===========================================================================
 # Index utilities
 # ===========================================================================
@@ -643,6 +645,65 @@ def evaluate_local_real_with_grad(
     return grad, potential
 
 
+@partial(jax.jit, static_argnames=("order", "max_derivative_order"))
+def evaluate_local_real_derivative_tower(
+    local_coeffs: Array,
+    delta: Array,
+    *,
+    order: int,
+    max_derivative_order: int,
+) -> Tuple[Array, ...]:
+    """Potential and packed symmetric spatial-derivative tower ``D0..DK``.
+
+    ``Dk`` holds the k-th partial derivatives of the real local expansion with
+    respect to ``delta`` (= center - eval_point), stored as unique symmetric
+    components in the deterministic order of
+    :func:`~jaccpot.operators.symmetric_tensors.symmetric_multi_indices_3d`.
+    ``D0`` has shape ``(1,)`` and holds the potential.
+
+    This mirrors :func:`evaluate_local_complex_derivative_tower` (also autodiff
+    based) so downstream L2P code can consume either basis's tower identically.
+    """
+    p = int(order)
+    k_max = int(max_derivative_order)
+    if k_max < 0:
+        raise ValueError("max_derivative_order must be non-negative")
+
+    def phi(d: Array) -> Array:
+        return evaluate_local_real(local_coeffs, d, order=p)
+
+    out: list[Array] = [jnp.reshape(phi(delta), (1,))]
+    deriv_fn = phi
+    for k in range(1, k_max + 1):
+        deriv_fn = jax.jacfwd(deriv_fn)
+        tensor = deriv_fn(delta)  # shape (3,) * k, fully symmetric
+        components = []
+        for nx, ny, nz in symmetric_multi_indices_3d(k):
+            axes = tuple([0] * nx + [1] * ny + [2] * nz)
+            components.append(tensor[axes])
+        out.append(jnp.stack(components))
+    return tuple(out)
+
+
+@partial(jax.jit, static_argnames=("order", "max_derivative_order"))
+def evaluate_local_real_derivative_tower_batch(
+    local_coeffs: Array,
+    deltas: Array,
+    *,
+    order: int,
+    max_derivative_order: int,
+) -> Tuple[Array, ...]:
+    """Batched :func:`evaluate_local_real_derivative_tower` over ``deltas``."""
+    return jax.vmap(
+        lambda d: evaluate_local_real_derivative_tower(
+            local_coeffs,
+            d,
+            order=order,
+            max_derivative_order=max_derivative_order,
+        )
+    )(deltas)
+
+
 # ===========================================================================
 # Real B matrix (sparse checkerboard structure)
 # ===========================================================================
@@ -785,6 +846,67 @@ def build_Q_dehnen_no_sqrt2(ell: int) -> np.ndarray:
         Q[row_T_minus_m, col_minus_m] = 0.5j * phase
 
     return Q
+
+
+@lru_cache(maxsize=None)
+def _dehnen_real_Q_full(order: int) -> np.ndarray:
+    """Block-diagonal complex->Dehnen-real transform for all degrees <= order.
+
+    Stacks :func:`build_Q_dehnen_no_sqrt2` per degree into one
+    ``((p+1)^2, (p+1)^2)`` complex matrix ``Q`` such that, for packed complex
+    solidfmm coefficients ``c`` (conjugate-symmetric), ``real(Q @ c)`` are the
+    packed Dehnen no-sqrt2 real coefficients used by this module's operators.
+    """
+    p = int(order)
+    if p < 0:
+        raise ValueError("order must be >= 0")
+    ncoeff = sh_size(p)
+    q_full = np.zeros((ncoeff, ncoeff), dtype=np.complex128)
+    for ell in range(p + 1):
+        sl = slice(sh_offset(ell), sh_offset(ell + 1))
+        q_full[sl, sl] = build_Q_dehnen_no_sqrt2(ell)
+    return q_full
+
+
+@partial(jax.jit, static_argnames=("order",))
+def complex_to_dehnen_real_coeffs(complex_coeffs: Array, *, order: int) -> Array:
+    """Convert packed complex solidfmm coefficients to Dehnen no-sqrt2 real ones.
+
+    This is the conversion consistent with :func:`p2m_real_direct` and the real
+    M2L/M2M/L2L/L2P operators in this module (verified: for a point source,
+    ``complex_to_dehnen_real_coeffs(complex_R_solidfmm(delta)) ==
+    p2m_real_direct(delta)`` to machine precision).
+
+    NOTE: this is NOT the same as ``jaccpot.basis.real_sh.complex_to_real_coeffs``,
+    which produces the unitary sqrt(2) tesseral basis (a different normalization
+    that is incompatible with the Dehnen no-sqrt2 real operators here).
+
+    Parameters
+    ----------
+    complex_coeffs : Array
+        Packed complex coefficients of shape ``(..., (p+1)^2)``.
+    order : int
+        Maximum harmonic degree ``p``.
+
+    Returns
+    -------
+    Array
+        Packed real coefficients of shape ``(..., (p+1)^2)`` with the real dtype
+        matching the input's real component.
+    """
+    coeffs = jnp.asarray(complex_coeffs)
+    expected = sh_size(int(order))
+    if int(coeffs.shape[-1]) != expected:
+        raise ValueError(
+            f"expected last dimension {expected} for order={int(order)}, "
+            f"got {coeffs.shape[-1]}"
+        )
+    q_full = jnp.asarray(
+        _dehnen_real_Q_full(int(order)),
+        dtype=jnp.result_type(coeffs.dtype, jnp.complex64),
+    )
+    converted = jnp.real(coeffs @ q_full.T)
+    return converted.astype(coeffs.real.dtype)
 
 
 def _wigner_D_complex(ell: int, alpha: float, beta: float, gamma: float) -> np.ndarray:
@@ -1096,6 +1218,54 @@ def real_Dz_diagonal(ell: int, angle: Array, *, dtype: DTypeLike) -> Array:
     return D
 
 
+def _multipole_align_to_z_block(
+    x: Array, y: Array, z: Array, ell: int, *, dtype: DTypeLike
+) -> Array:
+    """Degree-``ell`` block that rotates a MULTIPOLE from the world frame into
+    the frame where the direction ``(x, y, z)`` points along ``+z``.
+
+    Verified identity (to machine precision):
+        (this block) @ p2m(s)[block] == p2m(g @ s)[block]
+    where ``g`` is the physical rotation with ``g @ (x,y,z)/|.| == +z_hat``.
+
+    Convention (CRITICAL): the coded ``B`` matrix
+    (:func:`_compute_dehnen_B_matrix_complex`) is the **x <-> z** swap, so
+    ``B @ Dz(theta) @ B`` is a rotation about the *x* axis. Aligning
+    ``(x, y, z)`` with ``+z`` therefore requires the azimuth that removes the
+    *x*-component, ``az = atan2(x, y)`` (not ``atan2(y, x)``, which suits a
+    y-rotation swap), followed by the polar tilt about x,
+    ``ax = atan2(rho, z)``. In coordinate space ``g = Rx(ax) @ Rz(az)`` whose
+    multipole representation is ``B_U @ Dz(-ax) @ B_U @ Dz(az)``.
+    """
+    rho = jnp.sqrt(x * x + y * y)
+    az = jnp.arctan2(x, y)
+    ax = jnp.arctan2(rho, z)
+    B_U = compute_real_B_matrix_multipole(ell, dtype=dtype)
+    return (
+        B_U
+        @ real_Dz_diagonal(ell, -ax, dtype=dtype)
+        @ B_U
+        @ real_Dz_diagonal(ell, az, dtype=dtype)
+    )
+
+
+def _multipole_align_from_z_block(
+    x: Array, y: Array, z: Array, ell: int, *, dtype: DTypeLike
+) -> Array:
+    """Inverse of :func:`_multipole_align_to_z_block` (multipole z-frame ->
+    world). Equals ``Dz(-az) @ B_U @ Dz(ax) @ B_U`` with the same angles."""
+    rho = jnp.sqrt(x * x + y * y)
+    az = jnp.arctan2(x, y)
+    ax = jnp.arctan2(rho, z)
+    B_U = compute_real_B_matrix_multipole(ell, dtype=dtype)
+    return (
+        real_Dz_diagonal(ell, -az, dtype=dtype)
+        @ B_U
+        @ real_Dz_diagonal(ell, ax, dtype=dtype)
+        @ B_U
+    )
+
+
 def real_rotation_to_z_axis_multipole(
     x: Array,
     y: Array,
@@ -1104,32 +1274,14 @@ def real_rotation_to_z_axis_multipole(
     *,
     dtype: DTypeLike,
 ) -> Array:
-    """Compute rotation matrix to align vector (x,y,z) with z-axis.
+    """Rotation that aligns the vector (x,y,z) with the +z axis for MULTIPOLES.
 
-    Use this to rotate multipole expansion coefficients U_n^m.
-
-    Using the Dehnen rotation D_y(-θ) @ D_z(-φ) expressed via B:
-    1. Rotate by -αz = -arctan(y/x) around z → brings vector to xz-plane
-    2. Swap x↔z with B
-    3. Rotate by -αx = -arctan(ρ/z) around z → aligns with z-axis
-    4. Swap back with B
-
-    D = B_U @ Dz(-αx) @ B_U @ Dz(αz)
-
-    After applying D @ M, the multipole expansion has its z-axis aligned
-    with the original (x,y,z) direction.
+    Use this to rotate multipole expansion coefficients U_n^m into the
+    z-aligned frame. After applying ``D @ M``, the multipole expansion is
+    expressed in the frame where the original ``(x, y, z)`` direction lies on
+    ``+z``.
     """
-    rho = jnp.sqrt(x * x + y * y)
-
-    # Dehnen's angles (positive, as specified in A.6.2)
-    alpha_z = jnp.arctan2(y, x)
-    alpha_x = jnp.arctan2(rho, z)
-
-    B_U = compute_real_B_matrix_multipole(ell, dtype=dtype)
-    Dz_neg_alpha_z = real_Dz_diagonal(ell, -alpha_z, dtype=dtype)
-    Dz_neg_alpha_x = real_Dz_diagonal(ell, -alpha_x, dtype=dtype)
-
-    return B_U @ Dz_neg_alpha_x @ B_U @ Dz_neg_alpha_z
+    return _multipole_align_to_z_block(x, y, z, ell, dtype=dtype)
 
 
 def real_rotation_to_z_axis_multipole_wigner(
@@ -1153,27 +1305,15 @@ def real_rotation_from_z_axis_local(
     *,
     dtype: DTypeLike,
 ) -> Array:
-    """Compute inverse rotation matrix for LOCAL expansions.
+    """Rotation for LOCAL expansions from the z-aligned frame back to world.
 
-    Use this to rotate local expansion coefficients T_n^m back
-    from the z-aligned frame.
-
-    For locals in the Dehnen basis, rotate back using the inverse of
-    the z-alignment rotation:
-        D_inv = Dz(-αz) @ B @ Dz(+αx) @ B
-        L = D_inv @ L_z
+    Because :func:`evaluate_local_real` contracts local coefficients against
+    the SAME regular solid harmonics ``U_n^m`` used by P2M, local coefficients
+    transform as the (matrix) transpose of the multipole rotation -- NOT via a
+    separate ``B_T`` matrix. This block is therefore the transpose of the
+    multipole world->z rotation (:func:`real_rotation_to_z_axis_multipole`).
     """
-    rho = jnp.sqrt(x * x + y * y)
-
-    # Same angles as forward rotation
-    alpha_z = jnp.arctan2(y, x)
-    alpha_x = jnp.arctan2(rho, z)
-
-    B_T = compute_real_B_matrix_local(ell, dtype=dtype)
-    Dz_pos_alpha_z = real_Dz_diagonal(ell, alpha_z, dtype=dtype)
-    Dz_pos_alpha_x = real_Dz_diagonal(ell, alpha_x, dtype=dtype)
-
-    return Dz_pos_alpha_z @ B_T @ Dz_pos_alpha_x @ B_T
+    return _multipole_align_to_z_block(x, y, z, ell, dtype=dtype).T
 
 
 def real_rotation_from_z_axis_local_wigner(
@@ -1197,24 +1337,12 @@ def real_rotation_from_z_axis_multipole(
     *,
     dtype: DTypeLike,
 ) -> Array:
-    """Compute inverse rotation matrix for MULTIPOLE expansions.
+    """Inverse rotation for MULTIPOLE expansions (z-aligned frame -> world).
 
-    For multipoles in the Dehnen basis, rotate back using the inverse of
-    the z-alignment rotation:
-        D_inv = Dz(-αz) @ B_U @ Dz(+αx) @ B_U
-        M = D_inv @ M_z
+    This is the inverse of :func:`real_rotation_to_z_axis_multipole`; apply it
+    to rotate a z-frame multipole back to the world frame (``M = D @ M_z``).
     """
-    rho = jnp.sqrt(x * x + y * y)
-
-    # Same angles as forward rotation
-    alpha_z = jnp.arctan2(y, x)
-    alpha_x = jnp.arctan2(rho, z)
-
-    B_U = compute_real_B_matrix_multipole(ell, dtype=dtype)
-    Dz_pos_alpha_z = real_Dz_diagonal(ell, alpha_z, dtype=dtype)
-    Dz_pos_alpha_x = real_Dz_diagonal(ell, alpha_x, dtype=dtype)
-
-    return Dz_pos_alpha_z @ B_U @ Dz_pos_alpha_x @ B_U
+    return _multipole_align_from_z_block(x, y, z, ell, dtype=dtype)
 
 
 def real_rotation_from_z_axis_multipole_wigner(
@@ -1240,21 +1368,15 @@ def real_rotation_to_z_axis_local(
     *,
     dtype: DTypeLike,
 ) -> Array:
-    """Compute rotation matrix to align vector (x,y,z) with z-axis for locals.
+    """Rotation that aligns (x,y,z) with the +z axis for LOCAL expansions.
 
-    For local expansions in the Dehnen basis:
-        D = B_T @ Dz(-αx) @ B_T @ Dz(αz)
+    Local coefficients transform as the transpose-inverse of the multipole
+    rotation (they contract against the regular ``U_n^m`` basis in
+    :func:`evaluate_local_real`). The world->z local rotation is therefore the
+    transpose of the multipole z->world rotation
+    (:func:`real_rotation_from_z_axis_multipole`).
     """
-    rho = jnp.sqrt(x * x + y * y)
-
-    alpha_z = jnp.arctan2(y, x)
-    alpha_x = jnp.arctan2(rho, z)
-
-    B_T = compute_real_B_matrix_local(ell, dtype=dtype)
-    Dz_neg_alpha_z = real_Dz_diagonal(ell, -alpha_z, dtype=dtype)
-    Dz_neg_alpha_x = real_Dz_diagonal(ell, -alpha_x, dtype=dtype)
-
-    return B_T @ Dz_neg_alpha_x @ B_T @ Dz_neg_alpha_z
+    return _multipole_align_from_z_block(x, y, z, ell, dtype=dtype).T
 
 
 def real_rotation_to_z_axis_local_wigner(
@@ -1318,6 +1440,58 @@ def translate_along_z_m2m_real(
     return out
 
 
+@lru_cache(maxsize=None)
+def z_m2l_translation_tables(order: int) -> Tuple[np.ndarray, ...]:
+    """Single source of truth for the real z-axis M2L recurrence structure.
+
+    The real (Dehnen no-sqrt2) z-axis M2L is
+
+        F_n^m = sum_{k=|m|}^{p-n} sign(m) * (n+k)! / r^{n+k+1} * M_k^m,
+        sign(m) = (-1)^m * (2 if m != 0 else 1),
+
+    where the factor of 2 on the m != 0 channels comes from the no-sqrt2 pairing
+    of the complex +m/-m channels (dropping it halves every m != 0 coefficient
+    and caps off-axis M2L accuracy regardless of expansion order).
+
+    Returns static per-term metadata, indexed by ``[out, k]`` where
+    ``out = sh_index(n, m)`` and ``k`` is the slot in ``[0, p]``:
+
+        src_index[out, k]   packed index ``sh_index(k, m)`` of the source coeff
+        valid[out, k]       True when slot k contributes (``|m| <= k <= p - n``)
+        fact_index[out, k]  numerator factorial index (``n + k``)
+        r_exponent[out, k]  radius exponent (``n + k + 1``)
+        sign[out]           ``sign(m)`` (shared across all slots of an output)
+
+    BOTH the pure-JAX kernel :func:`translate_along_z_m2l_real` and the Pallas
+    kernel (``jaccpot.pallas.m2l_core_z_real``) build from these tables, so the
+    recurrence is defined exactly once and the two encodings cannot drift. The
+    parity test in ``tests/unit/operators/test_pallas_m2l_core_z_real.py``
+    guards this invariant on CPU (Pallas interpret mode).
+    """
+    p = int(order)
+    if p < 0:
+        raise ValueError("order must be >= 0")
+    coeff_count = sh_size(p)
+    n_slots = p + 1
+    src_index = np.zeros((coeff_count, n_slots), dtype=np.int32)
+    valid = np.zeros((coeff_count, n_slots), dtype=np.bool_)
+    fact_index = np.zeros((coeff_count, n_slots), dtype=np.int32)
+    r_exponent = np.zeros((coeff_count, n_slots), dtype=np.int32)
+    sign = np.ones((coeff_count,), dtype=np.float64)
+
+    for n in range(p + 1):
+        for m in range(-n, n + 1):
+            out_idx = sh_index(n, m)
+            sign[out_idx] = (-1.0 if (m % 2) else 1.0) * (2.0 if m != 0 else 1.0)
+            m_abs = abs(m)
+            for k in range(m_abs, p - n + 1):
+                src_index[out_idx, k] = sh_index(k, m)
+                valid[out_idx, k] = True
+                fact_index[out_idx, k] = n + k
+                r_exponent[out_idx, k] = n + k + 1
+    return src_index, valid, fact_index, r_exponent, sign
+
+
 @partial(jax.jit, static_argnames=("order",))
 def translate_along_z_m2l_real(
     multipole: Array,
@@ -1325,12 +1499,13 @@ def translate_along_z_m2l_real(
     *,
     order: int,
 ) -> Array:
-    """Translate multipole to local along +z in real harmonic basis.
+    """Translate multipole to local along +z in the real harmonic basis.
 
-    F_n^m = sum_{k=|m|}^{p-n} (-1)^m * M_k^m * (n+k)! / r^{n+k+1}
+    F_n^m = sum_{k=|m|}^{p-n} sign(m) * (n+k)! / r^{n+k+1} * M_k^m
 
-    For real harmonics, the sign (-1)^m needs careful handling because
-    the real and imaginary parts (cos/sin channels) have different parity.
+    Implemented as a vectorized contraction over the shared per-term tables from
+    :func:`z_m2l_translation_tables` (the single source of the recurrence, also
+    used by the Pallas kernel).
     """
     p = int(order)
     multipole = jnp.asarray(multipole)
@@ -1338,28 +1513,24 @@ def translate_along_z_m2l_real(
     dtype = multipole.dtype
 
     fact = _factorial_table_jax(2 * p, dtype)
+    src_index_np, valid_np, fact_index_np, r_exponent_np, sign_np = (
+        z_m2l_translation_tables(p)
+    )
+    src_index = jnp.asarray(src_index_np)
+    valid = jnp.asarray(valid_np)
+    fact_index = jnp.asarray(fact_index_np)
+    r_exponent = jnp.asarray(r_exponent_np, dtype=dtype)
+    sign = jnp.asarray(sign_np, dtype=dtype)
 
-    ncoeff = sh_size(p)
-    out = jnp.zeros((ncoeff,), dtype=dtype)
-
-    for n in range(p + 1):
-        for m in range(-n, n + 1):
-            m_abs = abs(m)
-            acc = jnp.asarray(0.0, dtype=dtype)
-
-            # Sum over k from |m| to p - n
-            for k in range(m_abs, p - n + 1):
-                src_idx = sh_index(k, m)
-                # Sign from Dehnen eq (84). The real basis uses the same
-                # parity factor for both cos/sin channels; any m-channel
-                # mixing is handled by the z-rotation blocks.
-                sign = (-1.0) ** m
-                coeff = sign * fact[n + k] / (r ** (n + k + 1))
-                acc = acc + coeff * multipole[src_idx]
-
-            out = out.at[sh_index(n, m)].set(acc)
-
-    return out
+    # Per-(output, slot) term: sign(m) * (n+k)! / r^(n+k+1) * M_k^m, masked to the
+    # valid slots. Invalid slots read index 0 / exponent 0 (harmless) and are
+    # zeroed before the reduction.
+    src_mult = multipole[src_index]
+    fact_num = fact[fact_index]
+    r_pow = jnp.power(r, r_exponent)
+    terms = sign[:, None] * fact_num / r_pow * src_mult
+    terms = jnp.where(valid, terms, jnp.asarray(0.0, dtype=dtype))
+    return jnp.sum(terms, axis=1).astype(dtype)
 
 
 @partial(jax.jit, static_argnames=("order",))
@@ -1451,22 +1622,22 @@ def m2l_a6_real_only(
     r2 = jnp.dot(delta, delta)
     r = jnp.sqrt(jnp.maximum(r2, 1e-60))
 
-    # Step 1: Rotate MULTIPOLE to z-aligned frame using B_U
+    # Step 1: Rotate MULTIPOLE into the z-aligned frame.
     M_rotated = jnp.zeros_like(multipole)
     for ell in range(p + 1):
         sl = slice(sh_offset(ell), sh_offset(ell + 1))
-        D_inv = real_rotation_from_z_axis_multipole(x, y, z, ell, dtype=dtype)
-        M_rotated = M_rotated.at[sl].set(D_inv @ multipole[sl])
+        D_to = real_rotation_to_z_axis_multipole(x, y, z, ell, dtype=dtype)
+        M_rotated = M_rotated.at[sl].set(D_to @ multipole[sl])
 
     # Step 2: Z-axis M2L translation in real basis
     L_z = translate_along_z_m2l_real(M_rotated, r, order=p)
 
-    # Step 3: Rotate LOCAL back from z-aligned frame using B_T
+    # Step 3: Rotate the LOCAL expansion back from the z-aligned frame.
     out = jnp.zeros_like(L_z)
     for ell in range(p + 1):
         sl = slice(sh_offset(ell), sh_offset(ell + 1))
-        D_fwd = real_rotation_to_z_axis_local(x, y, z, ell, dtype=dtype)
-        out = out.at[sl].set(D_fwd @ L_z[sl])
+        D_from = real_rotation_from_z_axis_local(x, y, z, ell, dtype=dtype)
+        out = out.at[sl].set(D_from @ L_z[sl])
 
     return out
 
@@ -1590,24 +1761,22 @@ def m2m_real(
     is_zero = r < 1e-30
     dz = jnp.where(is_zero, 0.0, r)
 
-    # Step 1: Rotate MULTIPOLE to z-aligned frame using B_U
+    # Step 1: Rotate MULTIPOLE into the z-aligned frame.
     M_rotated = jnp.zeros_like(multipole)
     for ell in range(p + 1):
         sl = slice(sh_offset(ell), sh_offset(ell + 1))
-        D_inv = real_rotation_from_z_axis_multipole(x, y, z, ell, dtype=dtype)
-        M_rotated = M_rotated.at[sl].set(D_inv @ multipole[sl])
+        D_to = real_rotation_to_z_axis_multipole(x, y, z, ell, dtype=dtype)
+        M_rotated = M_rotated.at[sl].set(D_to @ multipole[sl])
 
-    # Step 2: Z-axis M2M translation
-    # For M2M, we translate the multipole expansion by -dz along the z-axis
-    # (moving center from source to destination = negative of delta direction)
+    # Step 2: Z-axis M2M translation (distance dz = |delta| along +z).
     M_z = translate_along_z_m2m_real(M_rotated, dz, order=p)
 
-    # Step 3: Rotate MULTIPOLE back from z-aligned frame
+    # Step 3: Rotate MULTIPOLE back from the z-aligned frame.
     out = jnp.zeros_like(M_z)
     for ell in range(p + 1):
         sl = slice(sh_offset(ell), sh_offset(ell + 1))
-        D_fwd = real_rotation_to_z_axis_multipole(x, y, z, ell, dtype=dtype)
-        out = out.at[sl].set(D_fwd @ M_z[sl])
+        D_from = real_rotation_from_z_axis_multipole(x, y, z, ell, dtype=dtype)
+        out = out.at[sl].set(D_from @ M_z[sl])
 
     return out
 
@@ -1629,7 +1798,9 @@ def l2l_real(
     local : Array
         Packed real local coefficients of length (order+1)^2.
     delta : Array
-        3-vector from parent center to child center.
+        3-vector ``old_center - new_center`` (parent center minus child
+        center). This matches the ``dest -> source`` sign convention used by
+        :func:`m2m_real` and is what makes the rotated translation converge.
     order : int
         Maximum SH degree.
 
@@ -1652,25 +1823,22 @@ def l2l_real(
     is_zero = r < 1e-30
     dz = jnp.where(is_zero, 0.0, r)
 
-    # Step 1: Rotate LOCAL to z-aligned frame
-    # For local coefficients, we use the same rotation as
-    # multipole to z-aligned
-    # but with B_T instead of B_U
+    # Step 1: Rotate the LOCAL expansion into the z-aligned frame.
     L_rotated = jnp.zeros_like(local)
     for ell in range(p + 1):
         sl = slice(sh_offset(ell), sh_offset(ell + 1))
-        D_inv = real_rotation_from_z_axis_local(x, y, z, ell, dtype=dtype)
-        L_rotated = L_rotated.at[sl].set(D_inv @ local[sl])
+        D_to = real_rotation_to_z_axis_local(x, y, z, ell, dtype=dtype)
+        L_rotated = L_rotated.at[sl].set(D_to @ local[sl])
 
-    # Step 2: Z-axis L2L translation
+    # Step 2: Z-axis L2L translation (distance dz = |delta| along +z).
     L_z = translate_along_z_l2l_real(L_rotated, dz, order=p)
 
-    # Step 3: Rotate LOCAL back from z-aligned frame using B_T
+    # Step 3: Rotate the LOCAL expansion back from the z-aligned frame.
     out = jnp.zeros_like(L_z)
     for ell in range(p + 1):
         sl = slice(sh_offset(ell), sh_offset(ell + 1))
-        D_fwd = real_rotation_to_z_axis_local(x, y, z, ell, dtype=dtype)
-        out = out.at[sl].set(D_fwd @ L_z[sl])
+        D_from = real_rotation_from_z_axis_local(x, y, z, ell, dtype=dtype)
+        out = out.at[sl].set(D_from @ L_z[sl])
 
     return out
 
@@ -1685,11 +1853,16 @@ __all__ = [
     "sh_size",
     "sh_offset",
     "sh_index",
+    # Complex -> Dehnen real basis conversion
+    "build_Q_dehnen_no_sqrt2",
+    "complex_to_dehnen_real_coeffs",
     # P2M (particle to multipole)
     "p2m_real_direct",
     # L2P (local to particle evaluation)
     "evaluate_local_real",
     "evaluate_local_real_with_grad",
+    "evaluate_local_real_derivative_tower",
+    "evaluate_local_real_derivative_tower_batch",
     # B matrices for coordinate swap (x,y,z) → (z,y,x)
     "compute_real_B_matrix_local",
     "compute_real_B_matrix_multipole",
@@ -1707,6 +1880,7 @@ __all__ = [
     # Z-axis translations
     "translate_along_z_m2m_real",
     "translate_along_z_m2l_real",
+    "z_m2l_translation_tables",
     "translate_along_z_l2l_real",
     # Full operators (rotation-accelerated)
     "m2m_real",
