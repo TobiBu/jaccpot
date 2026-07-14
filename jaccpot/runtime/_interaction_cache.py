@@ -828,12 +828,22 @@ def _build_treecode_artifacts_strict_streamed(
         near_capacity=near_cap,
         idx_dtype=idx,
     )
-    _raise_if_true(
-        prod.overflow,
-        "treecode walk overflowed a capacity (far/near per-leaf, stack, or flat "
-        "far/near cap). Raise JACCPOT_STATIC_STRICT_FUSED_TREECODE_FAR_PER_LEAF / "
-        "NEAR_PER_LEAF / STACK / NEAR_CAP or COMPACT_FAR_PAIR_CAP.",
-    )
+    # Overflow guard: EAGER-ONLY. Inside the device-resident velocity-Verlet
+    # scan `prod.overflow` is a tracer, and _raise_if_true would emit a
+    # jax.debug.callback -- an ordered per-step host round-trip that serializes
+    # the scan and starves the GPU (the whole fused runner is otherwise
+    # device-resident). We skip it in the traced path: the auto-sized per-leaf
+    # caps (max_far/max_near = 4*num_leaves >= total_nodes) make per-leaf
+    # overflow structurally impossible, and the eager prepare pass (concrete
+    # `prod.overflow`) validates the flat far/near caps once before the scan is
+    # compiled. See docs/phase5_m2l_a100_findings_and_padding_plan.md.
+    if not isinstance(prod.overflow, jax.core.Tracer):
+        _raise_if_true(
+            prod.overflow,
+            "treecode walk overflowed a capacity (far/near per-leaf, stack, or "
+            "flat far/near cap). Raise JACCPOT_STATIC_STRICT_FUSED_TREECODE_FAR_PER_LEAF"
+            " / NEAR_PER_LEAF / STACK / NEAR_CAP or COMPACT_FAR_PAIR_CAP.",
+        )
 
     compact_far_pairs = CompactTaggedFarPairs(
         sources=prod.far_sources,
