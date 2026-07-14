@@ -23,11 +23,13 @@ from __future__ import annotations
 
 import functools
 import math
+from typing import Any
 
 import jax
 import jax.numpy as jnp
 import numpy as np
 from jax.experimental import pallas as pl
+from jaxtyping import Array
 
 from jaccpot.operators.real_harmonics import (
     sh_offset,
@@ -107,7 +109,7 @@ def m2l_real_fused_tables(order: int) -> dict:
     )
 
 
-def _tables_to_jnp(order, real_dtype):
+def _tables_to_jnp(order: int, real_dtype: Any) -> dict[str, Array]:
     t = m2l_real_fused_tables(order)
     return dict(
         Ppack=jnp.asarray(t["Ppack"], dtype=real_dtype),
@@ -118,16 +120,19 @@ def _tables_to_jnp(order, real_dtype):
     )
 
 
-def _matvec(mat, vec):
+def _matvec(mat: Array, vec: Array) -> Array:
+    """out[i] = sum_j mat[i,j] * vec[j] (gather-free; Triton-GPU friendly)."""
     return jnp.sum(mat * vec[None, :], axis=1)
 
 
-def _block_matmul_real(block, vec):
+def _block_matmul_real(block: Array, vec: Array) -> Array:
     """out[b,i] = sum_j block[b,i,j] vec[b,j]  (real block-diagonal rotation)."""
     return jnp.sum(block * vec[:, None, :], axis=-1)
 
 
-def _m2l_real_one(mult, bto, bfr, r, t):
+def _m2l_real_one(
+    mult: Array, bto: Array, bfr: Array, r: Array, t: dict[str, Array]
+) -> Array:
     """Full real M2L for one pair: rotate -> z-translate -> rotate-back."""
     Ppack = t["Ppack"]
     Uunpack = t["Uunpack"]
@@ -156,14 +161,23 @@ def _pair_pad_dims(order):
     return (t["C"], t["Cp"], t["p"] + 1, t["Bp"], t["md"], t["mdp"])
 
 
-def _pad_pair_inputs(mult, bto, bfr, dims):
+def _pad_pair_inputs(
+    mult: Array, bto: Array, bfr: Array, dims: tuple[int, ...]
+) -> tuple[Array, Array, Array]:
     C, Cp, B, Bp, md, mdp = dims
     mpad = ((0, 0), (0, Cp - C))
     bpad = ((0, 0), (0, Bp - B), (0, mdp - md), (0, mdp - md))
     return jnp.pad(mult, mpad), jnp.pad(bto, bpad), jnp.pad(bfr, bpad)
 
 
-def m2l_real_fused_jax(multipoles, blocks_to_z, blocks_from_z, r, *, order):
+def m2l_real_fused_jax(
+    multipoles: Array,
+    blocks_to_z: Array,
+    blocks_from_z: Array,
+    r: Array,
+    *,
+    order: int,
+) -> Array:
     """Pure-jnp reference for the fused real kernel (vmapped over pairs).
 
     multipoles: [N, C] real; blocks_*: [N, p+1, md, md] real; r: [N].
@@ -193,15 +207,15 @@ _TABLE_KEYS = ("Ppack", "Uunpack", "Zsign", "Zfact", "Zexp")
 
 
 def m2l_real_fused_pallas(
-    multipoles,
-    blocks_to_z,
-    blocks_from_z,
-    r,
+    multipoles: Array,
+    blocks_to_z: Array,
+    blocks_from_z: Array,
+    r: Array,
     *,
-    order,
-    interpret=False,
-    backend="triton",
-):
+    order: int,
+    interpret: bool = False,
+    backend: str = "triton",
+) -> Array:
     """Fully-fused real-basis M2L via a single Pallas kernel per pair.
 
     Same signature/semantics as :func:`m2l_real_fused_jax`. Triton backend
