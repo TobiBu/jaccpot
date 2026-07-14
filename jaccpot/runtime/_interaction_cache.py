@@ -700,6 +700,13 @@ def _treecode_mac_extents(
     dehnen, scaled by ``dehnen_radius_scale``. The treecode ``_mac_ok`` uses the same
     ``(r_t + r_s)^2 <= theta^2 d^2`` sum form as bh/dehnen, so feeding these extents
     reproduces the dual-tree's far/near acceptance (accuracy-profile parity).
+
+    STABILITY NOTE: the box ``max_extent`` (bh) is a LOWER bound on the true source
+    radius; the bounding-sphere ``radius`` (dehnen) is the correct (upper) bound. In the
+    frozen-topology fast lane the bh under-bound lets the MAC over-accept far pairs as
+    leaves spread under drift -> multipole error accumulates -> the integration heats and
+    blows up. Prefer the sphere (dehnen) extents for multi-step integration; see
+    :func:`_build_treecode_artifacts_strict_streamed` and docs/treecode_mac_stability.md.
     """
     from yggdrax._interactions_impl import (
         _compute_effective_extents,
@@ -740,13 +747,43 @@ def _build_treecode_artifacts_strict_streamed(
     :mod:`jaccpot.experimental.treecode_far_near` and ``benchmark_a100/WALK_SPEC.md``.
 
     ``mac_extents`` uses the treecode's OWN MAC (env
-    ``JACCPOT_STATIC_STRICT_FUSED_TREECODE_MAC``, default ``bh``), not necessarily the
-    dual-tree's ``mac_type``: the treecode is a different method (per-leaf, no L2L) and
-    is both faster AND more accurate under the box ``bh`` extents than under the larger
-    ``dehnen`` sphere extents (which force deeper acceptance -> more M2L pairs). Set the
-    env knob to ``dual`` to instead reproduce the configured ``mac_type`` exactly. All
-    variants use the same :func:`_treecode_mac_extents` recipe. Overflow of any per-leaf
-    / flat capacity is surfaced as a ``RuntimeError`` rather than silently truncated.
+    ``JACCPOT_STATIC_STRICT_FUSED_TREECODE_MAC``, default ``dual``), selected via
+    :func:`_treecode_mac_extents`:
+
+      * ``dual`` (DEFAULT): reproduce the configured dual-tree ``mac_type`` extents
+        exactly (for the large-N preset that is ``dehnen`` -> per-node bounding-SPHERE
+        radius, ``dehnen_radius_scale``-scaled). This is the physically correct
+        multipole-radius bound and gives ACCURACY-PROFILE PARITY with the validated
+        dual-tree walk.
+      * ``bh``: the treecode's own Barnes-Hut MAC using the axis-aligned box
+        ``max_extent`` (box half-width).
+      * ``dehnen`` / ``engblom``: force those sphere extents regardless of ``mac_type``.
+
+    WHY ``dual``/dehnen IS THE DEFAULT (dynamic-stability finding, 2026-07-14):
+      The box ``bh`` extent is CHEAPER (smaller extent -> MAC passes more readily ->
+      fewer far/M2L pairs -> faster) and is STATICALLY as accurate as dehnen (t=0 force
+      parity vs the dual-tree/direct N-body ~0.03%, because for compact leaves the box
+      half-width ~ the bounding-sphere radius). BUT it is DYNAMICALLY UNSTABLE in the
+      frozen-topology fast lane: the box half-width UNDER-estimates the true source
+      multipole radius (the bounding sphere always circumscribes the box), so as
+      particles drift and the fixed-topology leaves spread/elongate the box extent
+      increasingly under-bounds the real mass extent. The MAC then admits far-field M2L
+      pairs whose r_source/d exceeds the theta accuracy budget -> the O((r_s/d)^(p+1))
+      multipole truncation error grows step over step -> a small NON-CONSERVATIVE force
+      error is injected every step -> the system HEATS and blows up (200k/order-4 run:
+      max|v| 7 -> 20 -> 142 -> >1000 over 300 steps; total energy diverges). The dehnen
+      bounding-SPHERE radius is the correct (over-)bound on the source extent, stays
+      valid under drift, and reproduces the dual-tree acceptance -> stable: max|v| and
+      dKE/dLz track the dual-tree baseline to <1% over 300 steps. The cost is a modest
+      slowdown (deeper acceptance -> more M2L pairs). Set the env knob to ``bh`` ONLY for
+      single-shot / static force evaluations where per-step accumulation cannot occur.
+      See ``benchmark_a100/WALK_SPEC.md`` and ``docs/treecode_mac_stability.md``.
+
+    Overflow of any per-leaf / flat capacity is surfaced as a ``RuntimeError`` in the
+    EAGER prepare pass; inside the traced velocity-Verlet scan the check is skipped (a
+    per-step ``jax.debug.callback`` would serialize the device-resident scan), so the
+    auto-sized per-leaf caps (>= total node count) plus generous flat caps must stay
+    overflow-proof for the whole trajectory.
     """
     from jaccpot.experimental.treecode_far_near import (
         build_treecode_far_pairs_and_neighbors,
@@ -772,7 +809,13 @@ def _build_treecode_artifacts_strict_streamed(
     root_idx = jnp.argmin(topo.parent).astype(idx)
 
     centers = jnp.asarray(geometry.center)
-    tc_mac = os.environ.get("JACCPOT_STATIC_STRICT_FUSED_TREECODE_MAC", "bh").strip()
+    # Default ``dual`` (reproduce the configured dual-tree MAC extents, i.e. the dehnen
+    # bounding-SPHERE radius for the large-N preset). ``bh`` (box max_extent) is faster
+    # but DYNAMICALLY UNSTABLE under frozen-topology drift -- it under-bounds the source
+    # multipole radius and injects a non-conservative force error that heats the system
+    # (see the docstring above + docs/treecode_mac_stability.md). ``bh`` is safe only for
+    # single-shot/static force evaluations.
+    tc_mac = os.environ.get("JACCPOT_STATIC_STRICT_FUSED_TREECODE_MAC", "dual").strip()
     walk_mac_type = mac_type if tc_mac == "dual" else tc_mac
     mac_extents = _treecode_mac_extents(
         geometry,

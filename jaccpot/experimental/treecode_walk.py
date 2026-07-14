@@ -45,7 +45,16 @@ class TreecodeLeafLists(NamedTuple):
 
 
 def _mac_ok(center_t, ext_t, center_s, ext_s, theta_sq):
-    """Barnes-Hut MAC: (r_t + r_s)^2 <= theta^2 * d^2, guarded for self/degenerate."""
+    """Barnes-Hut MAC: (r_t + r_s)^2 <= theta^2 * d^2, guarded for self/degenerate.
+
+    ``ext_*`` are the per-node MAC extents supplied by the caller. Their MEANING is the
+    caller's choice and it matters for multi-step stability: a box half-width
+    (``max_extent``, "bh") UNDER-bounds the true source multipole radius and, in a
+    frozen-topology integration, lets this test over-accept far pairs as leaves spread ->
+    accumulating multipole error -> the run heats/blows up. Use bounding-SPHERE radii
+    (dehnen) for stable dynamics. See ``_interaction_cache._treecode_mac_extents`` and
+    docs/treecode_mac_stability.md.
+    """
     delta = center_t - center_s
     dist_sq = jnp.sum(delta * delta)
     rsum = ext_t + ext_s
