@@ -14,7 +14,6 @@ N-body sum to within 1%.
 import jax.numpy as jnp
 import numpy as np
 import pytest
-
 from yggdrax.distributed import device_count, make_mesh
 
 from jaccpot.distributed import (
@@ -90,7 +89,9 @@ def test_driver_real_basis_matches_direct():
     pts, mass = _separated_clusters(ndev, per)
     config = DistributedFMMConfig(basis="real", mac_type="bh")
 
-    result = distributed_fmm_accelerations(pts, mass, config=config, mesh=mesh, jit=False)
+    result = distributed_fmm_accelerations(
+        pts, mass, config=config, mesh=mesh, jit=False
+    )
     direct = np.asarray(
         _direct(jnp.asarray(pts), jnp.asarray(mass), config.G, config.softening)
     )
@@ -114,7 +115,9 @@ def test_driver_solidfmm_matches_direct():
     pts, mass = _separated_clusters(ndev, per)
     config = DistributedFMMConfig(basis="solidfmm", mac_type="bh")
 
-    result = distributed_fmm_accelerations(pts, mass, config=config, mesh=mesh, jit=False)
+    result = distributed_fmm_accelerations(
+        pts, mass, config=config, mesh=mesh, jit=False
+    )
     direct = np.asarray(
         _direct(jnp.asarray(pts), jnp.asarray(mass), config.G, config.softening)
     )
@@ -134,8 +137,12 @@ def test_driver_jit_matches_eager():
     pts, mass = _separated_clusters(ndev, per)
     config = DistributedFMMConfig()
 
-    eager = distributed_fmm_accelerations(pts, mass, config=config, mesh=mesh, jit=False)
-    jitted = distributed_fmm_accelerations(pts, mass, config=config, mesh=mesh, jit=True)
+    eager = distributed_fmm_accelerations(
+        pts, mass, config=config, mesh=mesh, jit=False
+    )
+    jitted = distributed_fmm_accelerations(
+        pts, mass, config=config, mesh=mesh, jit=True
+    )
 
     diff = float(
         np.linalg.norm(eager.accelerations - jitted.accelerations)

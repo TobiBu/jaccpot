@@ -688,9 +688,7 @@ def distributed_fmm_accelerations(
     else:
         ndev = int(np.prod(list(mesh.shape.values())))
 
-    part = partition_for_devices(
-        positions, masses, ndev, leaf_size=config.leaf_size
-    )
+    part = partition_for_devices(positions, masses, ndev, leaf_size=config.leaf_size)
     cap = part["cap"]
     counts_dev = jnp.asarray(part["counts"], INDEX_DTYPE)
 

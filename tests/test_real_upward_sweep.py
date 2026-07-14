@@ -12,7 +12,6 @@ jax.config.update("jax_enable_x64", True)
 
 import jax.numpy as jnp
 import numpy as np
-
 from yggdrax.tree import Tree
 
 from jaccpot.operators.real_harmonics import complex_to_dehnen_real_coeffs
@@ -52,9 +51,9 @@ def test_real_upward_matches_complex_convert():
         num = float(jnp.linalg.norm(up_r.multipoles.packed - ref))
         den = float(jnp.linalg.norm(ref)) + 1e-30
         rel = num / den
-        cerr = float(
-            jnp.linalg.norm(up_r.multipoles.centers - up_c.multipoles.centers)
+        cerr = float(jnp.linalg.norm(up_r.multipoles.centers - up_c.multipoles.centers))
+        print(
+            f"p={p}: real-upward vs complex+convert rel={rel:.3e}  center_err={cerr:.3e}"
         )
-        print(f"p={p}: real-upward vs complex+convert rel={rel:.3e}  center_err={cerr:.3e}")
         assert cerr < 1e-9, f"centers differ (p={p}): {cerr:.3e}"
         assert rel < 1e-9, f"real upward != complex+convert (p={p}): {rel:.3e}"
