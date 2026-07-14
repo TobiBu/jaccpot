@@ -4,15 +4,19 @@ _Bookkeeping + plan, 2026-07-14._
 
 ## STATUS (branch `feat/phase5-multigpu-foldin`, off `feat/phase5-pallas-m2l-prototype`)
 
-- **DONE — 5a + 5b (real basis + dehnen MAC), CPU-validated (4 devices vs direct):**
+- **DONE — 5a + 5b + native-real upward, CPU-validated (4 devices vs direct):**
   - Landed the stranded solidfmm driver as the baseline (0.24%).
-  - `DistributedFMMConfig.basis` in {`real`,`solidfmm`}; real path converts multipoles to
-    Dehnen coeffs at the M2L boundary and routes self+cross M2L through `_apply_real_m2l`
-    (upward/coarse-M2M stay complex, L2P auto-selects real by dtype).
+  - `DistributedFMMConfig.basis` in {`real`,`solidfmm`}; real path routes self+cross M2L
+    through `_apply_real_m2l`, L2L `basis_mode="real"`, L2P auto-selects real by dtype.
+  - **Native-real upward** (`jaccpot/upward/real_tree_expansions.py`): real leaf P2M +
+    `aggregate_m2m_real_by_level`, so the local upward, coarse upward, and coarse M2M are
+    all real — the coarse-tree `all_gather` now ships REAL multipoles (half the inter-GPU
+    comm), and the complex→real M2L-boundary conversions are gone. Unit-tested against the
+    complex+`complex_to_dehnen_real_coeffs` oracle: 1e-16 match, p=1..4.
   - Flipped the DEFAULT to the converged fast-lane config **real + dehnen** → 0.19% vs
     direct (beats bh's 0.24%), no overflow; solidfmm/bh kept behind explicit config + test.
   - Tests: `tests/test_distributed_fmm_driver.py` (default real+dehnen, real+bh, legacy
-    solidfmm, jit==eager) — all green on CPU.
+    solidfmm, jit==eager) + `tests/test_real_upward_sweep.py` — all green on CPU.
 - **NEXT — 5c (needs GPU):** set `JACCPOT_STATIC_STRICT_FUSED_M2L_PALLAS=1` (M2L already
   routes through `_apply_real_m2l` → fused real M2L Pallas engages automatically) + swap the
   near-field from `nearfield_mode="baseline"` to the fused Pallas P2P. Validate on Ampere.
