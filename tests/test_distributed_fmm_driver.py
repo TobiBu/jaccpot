@@ -77,6 +77,31 @@ def test_driver_matches_direct():
     assert err < 1e-2, f"driver aggL2 err {err:.6f} exceeds 1%"
 
 
+def test_driver_real_basis_matches_direct():
+    """Real (Dehnen) far-field basis matches direct N-body as well as solidfmm.
+
+    Isolates the basis change: same IC and same bh MAC as the solidfmm baseline,
+    only ``basis="real"``. Confirms the per-device far field converged onto the
+    single-GPU fast-lane real path is correct.
+    """
+    ndev = min(4, device_count())
+    mesh = make_mesh(ndev)
+    per = 64
+    pts, mass = _separated_clusters(ndev, per)
+    config = DistributedFMMConfig(basis="real")
+
+    result = distributed_fmm_accelerations(pts, mass, config=config, mesh=mesh, jit=False)
+    direct = np.asarray(
+        _direct(jnp.asarray(pts), jnp.asarray(mass), config.G, config.softening)
+    )
+    err = float(
+        np.linalg.norm(result.accelerations - direct) / (np.linalg.norm(direct) + 1e-30)
+    )
+    print(f"driver REAL-basis FULL aggL2 vs direct = {err:.6f}  (ndev={ndev})")
+    assert not result.overflow, "traversal buffers overflowed -- grow the caps"
+    assert err < 1e-2, f"real-basis aggL2 err {err:.6f} exceeds 1%"
+
+
 def test_driver_jit_matches_eager():
     """The jitted (steady-state timing) path must match the eager path."""
     ndev = min(4, device_count())

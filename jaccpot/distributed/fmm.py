@@ -71,9 +71,11 @@ from jaccpot.operators.complex_ops import (
     enforce_conjugate_symmetry_batch,
     m2l_complex_reference_batch,
 )
-from jaccpot.operators.real_harmonics import sh_size
+from jaccpot.operators.real_harmonics import complex_to_dehnen_real_coeffs, sh_size
 from jaccpot.runtime._fmm_impl import (
+    _accumulate_real_m2l_fullbatch,
     _accumulate_solidfmm_m2l_fullbatch,
+    _apply_real_m2l,
     _evaluate_local_expansions_for_particles,
     _propagate_solidfmm_locals_by_level,
 )
@@ -119,6 +121,12 @@ class DistributedFMMConfig:
     G: float = 1.0
     rotation: str = "solidfmm"
     mac_type: str = "bh"
+    # Far-field expansion basis: "solidfmm" (complex) or "real" (Dehnen no-sqrt2).
+    # "real" converges the per-device far field onto the single-GPU fast-lane path
+    # (memory-lighter, and unlocks the fused real M2L Pallas kernel when
+    # JACCPOT_STATIC_STRICT_FUSED_M2L_PALLAS is set). Upward sweep + coarse M2M stay
+    # complex; multipoles are converted to Dehnen real coeffs at the M2L boundary.
+    basis: str = "solidfmm"
     # self dual-tree walk capacities
     max_interactions_per_node: int = 512
     max_neighbors_per_leaf: int = 128
@@ -249,6 +257,7 @@ def _make_fn(config: DistributedFMMConfig, ndev: int, cap: int) -> Callable:
     mac = config.mac_type
     theta = config.theta
     theta_cross = config.theta_cross
+    is_real = str(config.basis).strip().lower() == "real"
 
     C = sh_size(p)
     if cap % leaf != 0:
@@ -349,6 +358,14 @@ def _make_fn(config: DistributedFMMConfig, ndev: int, cap: int) -> Callable:
         )
         centers = up.multipoles.centers
         packed = up.multipoles.packed
+        # Far-field coefficient dtype + source multipoles. For the real basis the
+        # upward sweep stays complex (validated), and we convert to Dehnen no-sqrt2
+        # real coeffs at the M2L boundary; the L2L/L2P then auto-select the real
+        # path by dtype. solidfmm keeps the complex packed multipoles unchanged.
+        coeff_dtype = lp.dtype if is_real else cdtype
+        packed_use = (
+            complex_to_dehnen_real_coeffs(packed, order=p) if is_real else packed
+        )
 
         inter, nbr, self_res = build_interactions_and_neighbors(
             tree,
@@ -408,6 +425,12 @@ def _make_fn(config: DistributedFMMConfig, ndev: int, cap: int) -> Callable:
             level_batch_width=max(c_nint, 1),
             rotation=rot,
         )
+        # coarse M2M stays complex (validated); convert to real at the M2L boundary.
+        coarse_packed_use = (
+            complex_to_dehnen_real_coeffs(coarse_packed, order=p)
+            if is_real
+            else coarse_packed
+        )
 
         cross = dual_tree_walk_cross_impl(
             tree,
@@ -438,7 +461,9 @@ def _make_fn(config: DistributedFMMConfig, ndev: int, cap: int) -> Callable:
         rc_full = jnp.asarray(tree.right_child, INDEX_DTYPE)
 
         def _l2p(loc_coeffs):
-            loc_coeffs = enforce_conjugate_symmetry_batch(loc_coeffs, order=p)
+            # Real coeffs carry no conjugate symmetry -> skip the complex-only fixup.
+            if not is_real:
+                loc_coeffs = enforce_conjugate_symmetry_batch(loc_coeffs, order=p)
             loc_coeffs = _propagate_solidfmm_locals_by_level(
                 loc_coeffs,
                 centers,
@@ -448,8 +473,11 @@ def _make_fn(config: DistributedFMMConfig, ndev: int, cap: int) -> Callable:
                 order=p,
                 rotation=rot,
                 total_nodes=int(total_nodes),
+                basis_mode="real" if is_real else "complex",
             )
             ld = LocalExpansionData(order=p, centers=centers, coefficients=loc_coeffs)
+            # L2P auto-selects the real path from the (real-typed) coefficients;
+            # expansion_basis stays "solidfmm" for both.
             g = _evaluate_local_expansions_for_particles(
                 ld,
                 lp,
@@ -462,22 +490,37 @@ def _make_fn(config: DistributedFMMConfig, ndev: int, cap: int) -> Callable:
             )[0]
             return -G * g
 
-        # far: self solidfmm M2L (local list) + remote solidfmm M2L (cross list)
-        zeros = jnp.zeros((int(total_nodes), C), dtype=cdtype)
+        # far: self M2L (local list) + remote M2L (cross list). Both bases share the
+        # tgt-minus-src delta convention; the real path routes through the same
+        # Pallas-aware _apply_real_m2l kernel used by the single-GPU fast lane.
+        zeros = jnp.zeros((int(total_nodes), C), dtype=coeff_dtype)
         s_src = jnp.asarray(inter.sources, INDEX_DTYPE)
         s_tgt = jnp.asarray(inter.targets, INDEX_DTYPE)
         s_active = jnp.sum((s_tgt >= 0).astype(INDEX_DTYPE))
-        loc_self = _accumulate_solidfmm_m2l_fullbatch(
-            zeros,
-            packed,
-            centers,
-            s_src,
-            s_tgt,
-            s_active,
-            order=p,
-            rotation=rot,
-            total_nodes=int(total_nodes),
-        )
+        if is_real:
+            loc_self = _accumulate_real_m2l_fullbatch(
+                zeros,
+                packed_use,
+                centers,
+                s_src,
+                s_tgt,
+                s_active,
+                order=p,
+                m2l_impl="rot_scale",
+                total_nodes=int(total_nodes),
+            )
+        else:
+            loc_self = _accumulate_solidfmm_m2l_fullbatch(
+                zeros,
+                packed_use,
+                centers,
+                s_src,
+                s_tgt,
+                s_active,
+                order=p,
+                rotation=rot,
+                total_nodes=int(total_nodes),
+            )
 
         # cross M2L: separate source (coarse) / target (local) centres
         x_src = jnp.asarray(cross.interaction_sources, INDEX_DTYPE)
@@ -485,9 +528,15 @@ def _make_fn(config: DistributedFMMConfig, ndev: int, cap: int) -> Callable:
         x_valid = x_tgt >= 0
         xs = jnp.where(x_valid, x_src, 0)
         xt = jnp.where(x_valid, x_tgt, 0)
-        x_contribs = m2l_complex_reference_batch(
-            coarse_packed[xs], centers[xt] - c_centers[xs], order=p, rotation=rot
-        ).astype(cdtype)
+        x_deltas = centers[xt] - c_centers[xs]
+        if is_real:
+            x_contribs = _apply_real_m2l(
+                coarse_packed_use[xs], x_deltas, order=p, m2l_impl="rot_scale"
+            ).astype(coeff_dtype)
+        else:
+            x_contribs = m2l_complex_reference_batch(
+                coarse_packed_use[xs], x_deltas, order=p, rotation=rot
+            ).astype(cdtype)
         x_contribs = jnp.where(x_valid[:, None], x_contribs, 0)
         loc_full = loc_self + jax.ops.segment_sum(x_contribs, xt, int(total_nodes))
         far_full = _l2p(loc_full)
