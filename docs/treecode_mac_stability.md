@@ -18,9 +18,13 @@ Env knob: `JACCPOT_STATIC_STRICT_FUSED_TREECODE_MAC` ∈ {`dual` (default), `bh`
 
 The fast lane runs velocity-Verlet as a single device-resident `lax.scan` and refreshes
 interactions under a **frozen tree topology** (`_refresh_large_n_same_topology`): the
-radix tree structure / leaf–particle assignment is fixed for the whole run; only node
-geometry, multipoles, and the far/near interaction lists are recomputed each step as
-particles drift.
+tree *shape* (node index-ranges, leaf count, fixed-capacity buffers) is fixed for the
+whole run to keep array shapes constant (no recompile), but everything numeric is
+recomputed each step from the current positions: the particles are **re-Morton-sorted**
+(fresh leaf membership), and node **centers, bounding-sphere radii, box extents,
+multipoles, and the far/near interaction lists** are all rebuilt
+(`rebuild_static_radix_tree_from_template`, `use_morton_geometry=False`). So the geometry
+is **not** stale — this is important for reading the bug below.
 
 The treecode walk is a per-leaf single-tree Barnes-Hut descent: each leaf accepts
 well-separated source *nodes* (→ M2L into that leaf's local expansion, no L2L) and marks
@@ -36,19 +40,27 @@ Two extent recipes (both from `_treecode_mac_extents`, matching yggdrax's dual-t
 
 ## The bug
 
+This is **not** a stale-geometry bug (geometry is recomputed every step — see above). It
+is a **bound-tightness** bug, present on every freshly-recomputed step.
+
 The multipole approximation error for an accepted far pair scales as
 `O((r_source / d)^(p+1))`. The MAC is meant to keep `r_source/d ≲ θ` so this stays within
-the accuracy budget. But `bh` feeds the **box half-width**, which *under-estimates* the
-true mass extent (the bounding sphere always circumscribes the box). At t=0 the leaves
-are compact, box ≈ sphere, and the error is negligible (parity vs the dual-tree/direct
-N-body ~0.03 %). Under the **frozen topology**, particles drift and the fixed leaves
-spread / elongate, so the box half-width increasingly under-bounds the real extent. The
-MAC then admits far-field M2L pairs whose real `r_source/d` exceeds θ → the truncation
-error grows → a small **non-conservative** force error is injected every step → the
-system **heats and blows up**.
+the accuracy budget. But `bh` feeds the **box `max_extent`** (max axis half-width), which
+is a systematic *under-bound* of the true source radius: the bounding sphere always
+circumscribes the box (≈√3× larger for an isotropic cloud, more when anisotropic).
+Feeding the smaller extent into `(r_t + r_s)² ≤ θ²d²` makes the MAC accept pairs at
+smaller `d` than the sphere would — i.e. **`bh` effectively runs at a coarser opening
+angle than the requested θ**, so the far field is systematically under-resolved.
 
-The dehnen bounding-sphere radius is the correct upper bound on the source extent, stays
-valid as leaves spread, and reproduces the validated dual-tree acceptance → stable.
+As an *instantaneous* magnitude that error is tiny (t=0 parity vs the dual-tree/direct
+N-body ~0.03 %), which is why a single force evaluation looks fine. But it is a
+**coherent, non-gradient** force bias, and velocity-Verlet does not conserve energy under
+a non-conservative force, so it **accumulates into secular heating** step over step → the
+system blows up.
+
+The dehnen bounding-sphere radius is the correct upper bound on the source extent, keeps
+every accepted pair inside the θ budget, and reproduces the validated dual-tree
+acceptance → the integration conserves energy like the dual walk → stable.
 
 ## Evidence (200k particles, order 4, θ=0.8, leaf 256, A100, real basis)
 

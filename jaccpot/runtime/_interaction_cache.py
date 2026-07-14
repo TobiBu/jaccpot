@@ -701,11 +701,13 @@ def _treecode_mac_extents(
     ``(r_t + r_s)^2 <= theta^2 d^2`` sum form as bh/dehnen, so feeding these extents
     reproduces the dual-tree's far/near acceptance (accuracy-profile parity).
 
-    STABILITY NOTE: the box ``max_extent`` (bh) is a LOWER bound on the true source
-    radius; the bounding-sphere ``radius`` (dehnen) is the correct (upper) bound. In the
-    frozen-topology fast lane the bh under-bound lets the MAC over-accept far pairs as
-    leaves spread under drift -> multipole error accumulates -> the integration heats and
-    blows up. Prefer the sphere (dehnen) extents for multi-step integration; see
+    STABILITY NOTE: the box ``max_extent`` (bh) systematically UNDER-bounds the true
+    source radius; the bounding-sphere ``radius`` (dehnen) is the correct (upper) bound
+    (the sphere circumscribes the box). Feeding the smaller box extent makes the MAC
+    over-accept far pairs -> bh runs at an effectively coarser opening angle than the
+    requested theta -> a coherent non-conservative force bias that accumulates into
+    secular heating over a multi-step integration (even though geometry is recomputed
+    fresh each step). Prefer the sphere (dehnen) extents for multi-step integration; see
     :func:`_build_treecode_artifacts_strict_streamed` and docs/treecode_mac_stability.md.
     """
     from yggdrax._interactions_impl import (
@@ -760,24 +762,33 @@ def _build_treecode_artifacts_strict_streamed(
       * ``dehnen`` / ``engblom``: force those sphere extents regardless of ``mac_type``.
 
     WHY ``dual``/dehnen IS THE DEFAULT (dynamic-stability finding, 2026-07-14):
+      NOTE this is NOT a stale-geometry bug. Every refresh re-Morton-sorts the particles
+      and recomputes ALL node quantities -- centers, bounding-sphere radii, box extents,
+      multipoles, far/near lists -- from the CURRENT positions (see
+      ``rebuild_static_radix_tree_from_template``, ``use_morton_geometry=False``). Only
+      the tree SHAPE is frozen (node index-ranges, leaf count, buffer capacities) to keep
+      array shapes constant / avoid recompilation. The bug is a bound-TIGHTNESS issue,
+      present on every (freshly recomputed) step:
+
       The box ``bh`` extent is CHEAPER (smaller extent -> MAC passes more readily ->
-      fewer far/M2L pairs -> faster) and is STATICALLY as accurate as dehnen (t=0 force
-      parity vs the dual-tree/direct N-body ~0.03%, because for compact leaves the box
-      half-width ~ the bounding-sphere radius). BUT it is DYNAMICALLY UNSTABLE in the
-      frozen-topology fast lane: the box half-width UNDER-estimates the true source
-      multipole radius (the bounding sphere always circumscribes the box), so as
-      particles drift and the fixed-topology leaves spread/elongate the box extent
-      increasingly under-bounds the real mass extent. The MAC then admits far-field M2L
-      pairs whose r_source/d exceeds the theta accuracy budget -> the O((r_s/d)^(p+1))
-      multipole truncation error grows step over step -> a small NON-CONSERVATIVE force
-      error is injected every step -> the system HEATS and blows up (200k/order-4 run:
-      max|v| 7 -> 20 -> 142 -> >1000 over 300 steps; total energy diverges). The dehnen
-      bounding-SPHERE radius is the correct (over-)bound on the source extent, stays
-      valid under drift, and reproduces the dual-tree acceptance -> stable: max|v| and
-      dKE/dLz track the dual-tree baseline to <1% over 300 steps. The cost is a modest
-      slowdown (deeper acceptance -> more M2L pairs). Set the env knob to ``bh`` ONLY for
-      single-shot / static force evaluations where per-step accumulation cannot occur.
-      See ``benchmark_a100/WALK_SPEC.md`` and ``docs/treecode_mac_stability.md``.
+      fewer far/M2L pairs -> faster) and STATICALLY looks as accurate as dehnen (t=0 force
+      parity vs the dual-tree/direct N-body ~0.03%). But the box ``max_extent`` (max axis
+      half-width) is a systematic UNDER-bound of the true source multipole radius: the
+      bounding sphere always circumscribes the box (~sqrt(3)x larger for an isotropic
+      cloud, more when anisotropic). Feeding the smaller box extent into
+      ``(r_t + r_s)^2 <= theta^2 d^2`` makes the MAC accept pairs at smaller ``d`` than the
+      sphere would -> bh effectively runs at a COARSER opening angle than the requested
+      ``theta`` -> the far field is systematically under-resolved. As an instantaneous
+      magnitude that is tiny, but it is a COHERENT, NON-GRADIENT force bias, and
+      velocity-Verlet does not conserve energy under a non-conservative force, so it
+      ACCUMULATES into secular heating over steps (200k/order-4: max|v| 7 -> 20 -> 142 ->
+      >1000 over 300 steps; total energy diverges). The dehnen bounding-SPHERE radius is
+      the correct bound, keeps every accepted pair inside the ``theta`` budget, and
+      reproduces the dual-tree acceptance -> stable: max|v| and dKE/dLz track the dual-tree
+      baseline to <1% over 300 steps. Cost: a modest slowdown (deeper acceptance -> more
+      M2L pairs). Set the env knob to ``bh`` ONLY for single-shot / static force
+      evaluations where per-step accumulation cannot occur. See
+      ``benchmark_a100/WALK_SPEC.md`` and ``docs/treecode_mac_stability.md``.
 
     Overflow of any per-leaf / flat capacity is surfaced as a ``RuntimeError`` in the
     EAGER prepare pass; inside the traced velocity-Verlet scan the check is skipped (a
@@ -811,10 +822,13 @@ def _build_treecode_artifacts_strict_streamed(
     centers = jnp.asarray(geometry.center)
     # Default ``dual`` (reproduce the configured dual-tree MAC extents, i.e. the dehnen
     # bounding-SPHERE radius for the large-N preset). ``bh`` (box max_extent) is faster
-    # but DYNAMICALLY UNSTABLE under frozen-topology drift -- it under-bounds the source
-    # multipole radius and injects a non-conservative force error that heats the system
-    # (see the docstring above + docs/treecode_mac_stability.md). ``bh`` is safe only for
-    # single-shot/static force evaluations.
+    # but DYNAMICALLY UNSTABLE: the box half-width systematically UNDER-bounds the true
+    # source multipole radius (sphere circumscribes box) -> the MAC runs at an effectively
+    # coarser opening angle than the requested theta -> a coherent non-conservative force
+    # bias that velocity-Verlet accumulates into secular heating (blows up over steps).
+    # Geometry is recomputed fresh every step; this is a bound-tightness bug, not stale
+    # geometry (see the docstring above + docs/treecode_mac_stability.md). ``bh`` is safe
+    # only for single-shot/static force evaluations.
     tc_mac = os.environ.get("JACCPOT_STATIC_STRICT_FUSED_TREECODE_MAC", "dual").strip()
     walk_mac_type = mac_type if tc_mac == "dual" else tc_mac
     mac_extents = _treecode_mac_extents(
