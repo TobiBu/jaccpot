@@ -1,6 +1,27 @@
 # Folding the single-GPU fast-lane advances into the multi-GPU FMM
 
-_Bookkeeping + plan, 2026-07-14. No code changes yet — this is the Phase-5 scope._
+_Bookkeeping + plan, 2026-07-14._
+
+## STATUS (branch `feat/phase5-multigpu-foldin`, off `feat/phase5-pallas-m2l-prototype`)
+
+- **DONE — 5a + 5b (real basis + dehnen MAC), CPU-validated (4 devices vs direct):**
+  - Landed the stranded solidfmm driver as the baseline (0.24%).
+  - `DistributedFMMConfig.basis` in {`real`,`solidfmm`}; real path converts multipoles to
+    Dehnen coeffs at the M2L boundary and routes self+cross M2L through `_apply_real_m2l`
+    (upward/coarse-M2M stay complex, L2P auto-selects real by dtype).
+  - Flipped the DEFAULT to the converged fast-lane config **real + dehnen** → 0.19% vs
+    direct (beats bh's 0.24%), no overflow; solidfmm/bh kept behind explicit config + test.
+  - Tests: `tests/test_distributed_fmm_driver.py` (default real+dehnen, real+bh, legacy
+    solidfmm, jit==eager) — all green on CPU.
+- **NEXT — 5c (needs GPU):** set `JACCPOT_STATIC_STRICT_FUSED_M2L_PALLAS=1` (M2L already
+  routes through `_apply_real_m2l` → fused real M2L Pallas engages automatically) + swap the
+  near-field from `nearfield_mode="baseline"` to the fused Pallas P2P. Validate on Ampere.
+- **NEXT — 5d (needs GPU):** weak/strong multi-GPU scaling via `benchmark_multigpu/`; compare
+  per-device throughput to the single-GPU O(N) curve; watch LET/comm overhead.
+
+---
+
+_Original plan below._
 
 ## Two separate force paths (the crux)
 
