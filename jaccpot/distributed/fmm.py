@@ -71,13 +71,17 @@ from jaccpot.operators.complex_ops import (
     enforce_conjugate_symmetry_batch,
     m2l_complex_reference_batch,
 )
-from jaccpot.operators.real_harmonics import complex_to_dehnen_real_coeffs, sh_size
+from jaccpot.operators.real_harmonics import sh_size
 from jaccpot.runtime._fmm_impl import (
     _accumulate_real_m2l_fullbatch,
     _accumulate_solidfmm_m2l_fullbatch,
     _apply_real_m2l,
     _evaluate_local_expansions_for_particles,
     _propagate_solidfmm_locals_by_level,
+)
+from jaccpot.upward.real_tree_expansions import (
+    aggregate_m2m_real_by_level,
+    prepare_real_upward_sweep,
 )
 from jaccpot.upward.solidfmm_complex_tree_expansions import (
     _aggregate_m2m_complex_by_level,
@@ -355,20 +359,22 @@ def _make_fn(config: DistributedFMMConfig, ndev: int, cap: int) -> Callable:
         total_nodes = jnp.asarray(tree.node_ranges).shape[0]
         cdtype = complex_dtype_for_real(lp.dtype)
 
-        # local solidfmm upward
-        up = prepare_solidfmm_complex_upward_sweep(
-            tree, lp, lm, max_order=p, max_leaf_size=leaf, rotation=rot
-        )
+        # local upward. Real basis runs a NATIVE-real P2M + M2M (multipoles are
+        # real from the start -> the coarse-tree all_gather below ships half the
+        # bytes); solidfmm runs the complex sweep. Both produce per-node multipoles
+        # + COM centers with the same API.
+        if is_real:
+            up = prepare_real_upward_sweep(
+                tree, lp, lm, max_order=p, max_leaf_size=leaf
+            )
+        else:
+            up = prepare_solidfmm_complex_upward_sweep(
+                tree, lp, lm, max_order=p, max_leaf_size=leaf, rotation=rot
+            )
         centers = up.multipoles.centers
-        packed = up.multipoles.packed
-        # Far-field coefficient dtype + source multipoles. For the real basis the
-        # upward sweep stays complex (validated), and we convert to Dehnen no-sqrt2
-        # real coeffs at the M2L boundary; the L2L/L2P then auto-select the real
-        # path by dtype. solidfmm keeps the complex packed multipoles unchanged.
+        packed = up.multipoles.packed  # real when is_real, complex otherwise
         coeff_dtype = lp.dtype if is_real else cdtype
-        packed_use = (
-            complex_to_dehnen_real_coeffs(packed, order=p) if is_real else packed
-        )
+        packed_use = packed
 
         inter, nbr, self_res = build_interactions_and_neighbors(
             tree,
@@ -384,15 +390,24 @@ def _make_fn(config: DistributedFMMConfig, ndev: int, cap: int) -> Callable:
         fr = build_coarse_frontier(tree, mm.mass, mm.center_of_mass)
         rct = build_remote_coarse_tree(fr, ndev, bounds=bounds)
 
-        # coarse solidfmm centres (COM) + level structure
-        upc = prepare_solidfmm_complex_upward_sweep(
-            rct.tree,
-            rct.positions_sorted,
-            rct.masses_sorted,
-            max_order=p,
-            max_leaf_size=1,
-            rotation=rot,
-        )
+        # coarse centres (COM) + level structure (same basis as the local sweep)
+        if is_real:
+            upc = prepare_real_upward_sweep(
+                rct.tree,
+                rct.positions_sorted,
+                rct.masses_sorted,
+                max_order=p,
+                max_leaf_size=1,
+            )
+        else:
+            upc = prepare_solidfmm_complex_upward_sweep(
+                rct.tree,
+                rct.positions_sorted,
+                rct.masses_sorted,
+                max_order=p,
+                max_leaf_size=1,
+                rotation=rot,
+            )
         c_centers = upc.multipoles.centers
         c_lc = jnp.asarray(rct.tree.left_child, INDEX_DTYPE)
         c_rc = jnp.asarray(rct.tree.right_child, INDEX_DTYPE)
@@ -401,7 +416,8 @@ def _make_fn(config: DistributedFMMConfig, ndev: int, cap: int) -> Callable:
         c_nr = jnp.asarray(rct.tree.node_ranges, INDEX_DTYPE)
         c_leaves = jnp.arange(c_nint, c_total, dtype=INDEX_DTYPE)
 
-        # seed coarse leaves with remote leaves' REAL solidfmm multipoles
+        # seed coarse leaves with the remote leaves' own multipoles. The gathered
+        # array is REAL in the real basis (half the bytes of the complex packed).
         gpacked = jax.lax.all_gather(packed, "gpus", tiled=False)  # [ndev,N,C]
         spos = c_nr[c_leaves, 0]
         dom = rct.tag_domain[spos]
@@ -410,30 +426,41 @@ def _make_fn(config: DistributedFMMConfig, ndev: int, cap: int) -> Callable:
         leafp = gpacked[jnp.where(okm, dom, 0), jnp.where(okm, nod, 0)]
         leafp = jnp.where(okm[:, None], leafp, 0.0)
         seed = (
-            jnp.zeros((c_total, C), dtype=cdtype).at[c_leaves].set(leafp.astype(cdtype))
+            jnp.zeros((c_total, C), dtype=coeff_dtype)
+            .at[c_leaves]
+            .set(leafp.astype(coeff_dtype))
         )
         c_nbl = get_nodes_by_level(rct.tree)
         c_loff = get_level_offsets(rct.tree)
         c_numlev = int(c_loff.shape[0] - 1)
-        coarse_packed = _aggregate_m2m_complex_by_level(
-            seed,
-            c_centers,
-            c_lc,
-            c_rc,
-            jnp.asarray(c_nbl, INDEX_DTYPE),
-            jnp.asarray(c_loff, INDEX_DTYPE),
-            order=p,
-            num_internal=c_nint,
-            num_levels=c_numlev,
-            level_batch_width=max(c_nint, 1),
-            rotation=rot,
-        )
-        # coarse M2M stays complex (validated); convert to real at the M2L boundary.
-        coarse_packed_use = (
-            complex_to_dehnen_real_coeffs(coarse_packed, order=p)
-            if is_real
-            else coarse_packed
-        )
+        if is_real:
+            coarse_packed = aggregate_m2m_real_by_level(
+                seed,
+                c_centers,
+                c_lc,
+                c_rc,
+                jnp.asarray(c_nbl, INDEX_DTYPE),
+                jnp.asarray(c_loff, INDEX_DTYPE),
+                order=p,
+                num_internal=c_nint,
+                num_levels=c_numlev,
+                level_batch_width=max(c_nint, 1),
+            )
+        else:
+            coarse_packed = _aggregate_m2m_complex_by_level(
+                seed,
+                c_centers,
+                c_lc,
+                c_rc,
+                jnp.asarray(c_nbl, INDEX_DTYPE),
+                jnp.asarray(c_loff, INDEX_DTYPE),
+                order=p,
+                num_internal=c_nint,
+                num_levels=c_numlev,
+                level_batch_width=max(c_nint, 1),
+                rotation=rot,
+            )
+        coarse_packed_use = coarse_packed  # real when is_real, complex otherwise
 
         cross = dual_tree_walk_cross_impl(
             tree,
