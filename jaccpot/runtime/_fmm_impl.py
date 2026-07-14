@@ -11765,9 +11765,11 @@ def _real_m2l_pallas_active() -> bool:
     support check (falls back to the pure-JAX rot-scale otherwise). Trace-time;
     the flag does not change within a compiled run.
     """
-    flag = str(
-        os.environ.get("JACCPOT_STATIC_STRICT_FUSED_M2L_PALLAS", "0")
-    ).strip().lower()
+    flag = (
+        str(os.environ.get("JACCPOT_STATIC_STRICT_FUSED_M2L_PALLAS", "0"))
+        .strip()
+        .lower()
+    )
     if flag not in {"1", "true", "yes", "on"}:
         return False
     try:
@@ -11897,9 +11899,11 @@ def _fused_complex_m2l_pallas_active() -> bool:
     check (falls back to the reference cached kernel on unsupported hardware).
     Evaluated at trace time; the flag does not change within a compiled run.
     """
-    flag = str(
-        os.environ.get("JACCPOT_STATIC_STRICT_FUSED_M2L_PALLAS", "0")
-    ).strip().lower()
+    flag = (
+        str(os.environ.get("JACCPOT_STATIC_STRICT_FUSED_M2L_PALLAS", "0"))
+        .strip()
+        .lower()
+    )
     if flag not in {"1", "true", "yes", "on"}:
         return False
     try:

@@ -92,8 +92,19 @@ def m2l_real_fused_tables(order: int) -> dict:
                 Zfact[out, s] = float(fact[int(fact_index[out, k])])
                 Zexp[out, s] = float(r_exponent[out, k])
 
-    return dict(p=p, C=C, md=md, Cp=Cp, Bp=Bp, mdp=mdp,
-                Ppack=Ppack, Uunpack=Uunpack, Zsign=Zsign, Zfact=Zfact, Zexp=Zexp)
+    return dict(
+        p=p,
+        C=C,
+        md=md,
+        Cp=Cp,
+        Bp=Bp,
+        mdp=mdp,
+        Ppack=Ppack,
+        Uunpack=Uunpack,
+        Zsign=Zsign,
+        Zfact=Zfact,
+        Zexp=Zexp,
+    )
 
 
 def _tables_to_jnp(order, real_dtype):
@@ -162,7 +173,10 @@ def m2l_real_fused_jax(multipoles, blocks_to_z, blocks_from_z, r, *, order):
     dims = _pair_pad_dims(order)
     C = dims[0]
     mult, bto, bfr = _pad_pair_inputs(
-        jnp.asarray(multipoles), jnp.asarray(blocks_to_z), jnp.asarray(blocks_from_z), dims
+        jnp.asarray(multipoles),
+        jnp.asarray(blocks_to_z),
+        jnp.asarray(blocks_from_z),
+        dims,
     )
     out = jax.vmap(lambda m, a, b, rr: _m2l_real_one(m, a, b, rr, t))(mult, bto, bfr, r)
     return out[:, :C]
@@ -170,19 +184,23 @@ def m2l_real_fused_jax(multipoles, blocks_to_z, blocks_from_z, r, *, order):
 
 def _m2l_real_fused_kernel(mult_ref, bto_ref, bfr_ref, r_ref, *table_and_out_refs):
     table_refs = table_and_out_refs[: len(_TABLE_KEYS)]
-    (out_ref,) = table_and_out_refs[len(_TABLE_KEYS):]
+    (out_ref,) = table_and_out_refs[len(_TABLE_KEYS) :]
     tables = {k: ref[...] for k, ref in zip(_TABLE_KEYS, table_refs)}
-    out_ref[0, :] = _m2l_real_one(
-        mult_ref[0], bto_ref[0], bfr_ref[0], r_ref[0], tables
-    )
+    out_ref[0, :] = _m2l_real_one(mult_ref[0], bto_ref[0], bfr_ref[0], r_ref[0], tables)
 
 
 _TABLE_KEYS = ("Ppack", "Uunpack", "Zsign", "Zfact", "Zexp")
 
 
 def m2l_real_fused_pallas(
-    multipoles, blocks_to_z, blocks_from_z, r, *, order,
-    interpret=False, backend="triton",
+    multipoles,
+    blocks_to_z,
+    blocks_from_z,
+    r,
+    *,
+    order,
+    interpret=False,
+    backend="triton",
 ):
     """Fully-fused real-basis M2L via a single Pallas kernel per pair.
 
