@@ -753,7 +753,11 @@ def _build_treecode_artifacts_strict_streamed(
     )
 
     topo = tree.topology
-    num_internal = int(topo.num_internal_nodes)
+    # Derive counts from STATIC shapes (scan-compatible): inside the strict
+    # velocity-Verlet scan the tree is re-fed as a tracer, so int(topo.num_internal_nodes)
+    # (a traced value) raises ConcretizationTypeError. left_child has shape
+    # [num_internal] and parent has shape [total_nodes]; both are static.
+    num_internal = int(topo.left_child.shape[0])
     total_nodes = int(topo.parent.shape[0])
     num_leaves = total_nodes - num_internal
     idx = topo.parent.dtype
