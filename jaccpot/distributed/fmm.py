@@ -120,13 +120,16 @@ class DistributedFMMConfig:
     softening: float = 0.02
     G: float = 1.0
     rotation: str = "solidfmm"
-    mac_type: str = "bh"
-    # Far-field expansion basis: "solidfmm" (complex) or "real" (Dehnen no-sqrt2).
-    # "real" converges the per-device far field onto the single-GPU fast-lane path
+    # dehnen bounding-SPHERE MAC extents (the correct multipole-radius bound, matching
+    # the single-GPU fast lane and required for stable multi-step use). "bh" (box) is
+    # cheaper but under-bounds the source radius; keep it only for single-shot use.
+    mac_type: str = "dehnen"
+    # Far-field expansion basis: "real" (Dehnen no-sqrt2, DEFAULT) or "solidfmm" (complex).
+    # "real" is the per-device far field converged onto the single-GPU fast-lane path
     # (memory-lighter, and unlocks the fused real M2L Pallas kernel when
     # JACCPOT_STATIC_STRICT_FUSED_M2L_PALLAS is set). Upward sweep + coarse M2M stay
     # complex; multipoles are converted to Dehnen real coeffs at the M2L boundary.
-    basis: str = "solidfmm"
+    basis: str = "real"
     # self dual-tree walk capacities
     max_interactions_per_node: int = 512
     max_neighbors_per_leaf: int = 128

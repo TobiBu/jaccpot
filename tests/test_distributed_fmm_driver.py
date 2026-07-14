@@ -54,8 +54,8 @@ def test_driver_matches_direct():
     per = 64
     pts, mass = _separated_clusters(ndev, per)
 
-    # Defaults of DistributedFMMConfig match the validated test's constants
-    # (order=3, theta=0.4, theta_cross=0.1, leaf=8, soft=0.02, solidfmm/bh).
+    # Defaults are the converged fast-lane config (real basis + dehnen MAC,
+    # order=3, theta=0.4, theta_cross=0.1, leaf=8, soft=0.02).
     config = DistributedFMMConfig()
 
     result = distributed_fmm_accelerations(
@@ -88,7 +88,7 @@ def test_driver_real_basis_matches_direct():
     mesh = make_mesh(ndev)
     per = 64
     pts, mass = _separated_clusters(ndev, per)
-    config = DistributedFMMConfig(basis="real")
+    config = DistributedFMMConfig(basis="real", mac_type="bh")
 
     result = distributed_fmm_accelerations(pts, mass, config=config, mesh=mesh, jit=False)
     direct = np.asarray(
@@ -100,6 +100,30 @@ def test_driver_real_basis_matches_direct():
     print(f"driver REAL-basis FULL aggL2 vs direct = {err:.6f}  (ndev={ndev})")
     assert not result.overflow, "traversal buffers overflowed -- grow the caps"
     assert err < 1e-2, f"real-basis aggL2 err {err:.6f} exceeds 1%"
+
+
+def test_driver_solidfmm_matches_direct():
+    """Legacy solidfmm(complex)/bh path still matches direct after the real default.
+
+    Keeps the pre-convergence force path covered regardless of the (now real+dehnen)
+    default, so a future change to the real path can't silently break solidfmm.
+    """
+    ndev = min(4, device_count())
+    mesh = make_mesh(ndev)
+    per = 64
+    pts, mass = _separated_clusters(ndev, per)
+    config = DistributedFMMConfig(basis="solidfmm", mac_type="bh")
+
+    result = distributed_fmm_accelerations(pts, mass, config=config, mesh=mesh, jit=False)
+    direct = np.asarray(
+        _direct(jnp.asarray(pts), jnp.asarray(mass), config.G, config.softening)
+    )
+    err = float(
+        np.linalg.norm(result.accelerations - direct) / (np.linalg.norm(direct) + 1e-30)
+    )
+    print(f"driver SOLIDFMM FULL aggL2 vs direct = {err:.6f}  (ndev={ndev})")
+    assert not result.overflow, "traversal buffers overflowed -- grow the caps"
+    assert err < 1e-2, f"solidfmm aggL2 err {err:.6f} exceeds 1%"
 
 
 def test_driver_jit_matches_eager():
