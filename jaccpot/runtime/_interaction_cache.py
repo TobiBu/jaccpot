@@ -786,10 +786,27 @@ def _build_treecode_artifacts_strict_streamed(
     def _env_int(name, default):
         return int(os.environ.get(name, str(default)))
 
-    max_far = _env_int("JACCPOT_STATIC_STRICT_FUSED_TREECODE_FAR_PER_LEAF", 2048)
-    max_near = _env_int("JACCPOT_STATIC_STRICT_FUSED_TREECODE_NEAR_PER_LEAF", 2048)
-    max_stack = _env_int("JACCPOT_STATIC_STRICT_FUSED_TREECODE_STACK", 256)
-    near_cap = _env_int("JACCPOT_STATIC_STRICT_FUSED_TREECODE_NEAR_CAP", 1 << 20)
+    # Auto-size the treecode caps from the tree so the walk runs zero-config
+    # (explicit env overrides still win). A leaf's far/near list can never exceed
+    # the node count, so 4*num_leaves (>= total_nodes ~ 2*num_leaves for a binary
+    # radix tree) makes per-leaf overflow impossible while staying modest memory.
+    # near_cap defaults to the downstream neighbor-edge capacity (the treecode's
+    # bh-MAC near split feeds the same near-field buffer, so this is the correct
+    # bound); far_cap is the compact far-pair capacity. Defaults chosen so the
+    # 200k/order4 fast lane runs without hand-tuning (old fixed 2048/256/1<<20
+    # overflowed on the bh-MAC near split).
+    auto_per_leaf = max(4096, 4 * int(num_leaves))
+    neighbor_edge_cap = _env_int(
+        "JACCPOT_LARGE_N_NEIGHBOR_EDGE_PROFILE_FIXED_CAP", 1 << 21
+    )
+    max_far = _env_int("JACCPOT_STATIC_STRICT_FUSED_TREECODE_FAR_PER_LEAF", auto_per_leaf)
+    max_near = _env_int(
+        "JACCPOT_STATIC_STRICT_FUSED_TREECODE_NEAR_PER_LEAF", auto_per_leaf
+    )
+    max_stack = _env_int("JACCPOT_STATIC_STRICT_FUSED_TREECODE_STACK", 512)
+    near_cap = _env_int(
+        "JACCPOT_STATIC_STRICT_FUSED_TREECODE_NEAR_CAP", neighbor_edge_cap
+    )
     far_cap = int(compact_far_pair_capacity) if compact_far_pair_capacity else 131072
 
     prod = build_treecode_far_pairs_and_neighbors(
