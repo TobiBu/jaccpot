@@ -217,3 +217,44 @@ make it cheaper per step, or reuse it across steps (blocked: refresh_every=1). T
 fused M2L kernels remain validated infra (flags OFF). The big A100 win is still the
 near-field Pallas (210->59 ms, in). Near-field (59) + M2L-accumulate (14) + L2L (~3) +
 far-pair-build (~40) + tree/upward (~4) ~ 120 ms checks out.
+
+---
+
+## UPDATE 2026-07-14 (WIN: device-resident treecode-walk far-pair build = 1.8x)
+
+The far-field bottleneck was the interaction-list CONSTRUCTION (host-iterated
+yggdrax dual-tree walk = launch storm, ~40 ms/step). The codebase already had a
+device-resident alternative (`_build_treecode_artifacts_strict_streamed`, from the
+merged perf/pallas-treecode-walk work), gated by
+`JACCPOT_STATIC_STRICT_FUSED_TREECODE_WALK=1`, but it raised ConcretizationTypeError
+inside the strict VV scan (`int(topo.num_internal_nodes)` on a traced value).
+
+Fixed (commit 9aa1666: derive num_internal from the static `topo.left_child.shape[0]`)
++ raised its caps. Result on A100 @ 200k / order4 / theta0.8, force err 0.2815%
+(identical to baseline):
+
+| stage | dual-walk (baseline) | treecode-walk |
+|---|---|---|
+| tree+upward | 4.1 | 4.1 |
+| far-field (build+M2L+L2L) | 56.7 | **22.7** |
+| near-field+eval | 59.2 | 38.5 |
+| **TOTAL** | **120.1 ms** | **~67 ms (1.8x)** |
+
+Far-field build launch-storm killed (56.7->22.7). The treecode uses the `bh` MAC
+(env `..._TREECODE_MAC`, default bh) which re-partitions near->far (far is cheaper
+per pair), so near-field also drops (59->38.5). A100 progression: pure-JAX 271 ->
++near-field-Pallas 120 -> +treecode-walk 67 ms (~4x vs pure JAX).
+
+### Config to enable (needs cap tuning for the bh-MAC split)
+```
+JACCPOT_STATIC_STRICT_FUSED_TREECODE_WALK=1
+JACCPOT_STATIC_STRICT_FUSED_TREECODE_FAR_PER_LEAF=4096
+JACCPOT_STATIC_STRICT_FUSED_TREECODE_NEAR_PER_LEAF=4096
+JACCPOT_STATIC_STRICT_FUSED_TREECODE_STACK=512
+JACCPOT_STATIC_STRICT_FUSED_TREECODE_NEAR_CAP=2097152   # <= neighbor-edge cap
+```
+Default caps (FAR/NEAR_PER_LEAF 2048, STACK 256) overflow at 200k. Next: right-size
+these caps automatically, validate energy/Lz conservation over a full run, and
+consider making the treecode walk the large_n default. This is the real A100
+"squeeze" -- the M2L-kernel work (Path A/B fused kernels) stays as validated infra
+but is not the lever.
