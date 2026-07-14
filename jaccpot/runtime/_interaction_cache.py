@@ -799,7 +799,9 @@ def _build_treecode_artifacts_strict_streamed(
     neighbor_edge_cap = _env_int(
         "JACCPOT_LARGE_N_NEIGHBOR_EDGE_PROFILE_FIXED_CAP", 1 << 21
     )
-    max_far = _env_int("JACCPOT_STATIC_STRICT_FUSED_TREECODE_FAR_PER_LEAF", auto_per_leaf)
+    max_far = _env_int(
+        "JACCPOT_STATIC_STRICT_FUSED_TREECODE_FAR_PER_LEAF", auto_per_leaf
+    )
     max_near = _env_int(
         "JACCPOT_STATIC_STRICT_FUSED_TREECODE_NEAR_PER_LEAF", auto_per_leaf
     )
