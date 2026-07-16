@@ -16,10 +16,14 @@ from jaxtyping import Array
 
 from jaccpot.operators.real_harmonics import (
     real_rotation_from_z_axis_local,
+    real_rotation_from_z_axis_multipole,
+    real_rotation_to_z_axis_local,
     real_rotation_to_z_axis_multipole,
     sh_offset,
     sh_size,
+    translate_along_z_l2l_real,
     translate_along_z_m2l_real,
+    translate_along_z_m2m_real,
 )
 
 # NOTE: ``jaccpot.pallas.m2l_core_z_real`` is imported lazily inside
@@ -174,17 +178,26 @@ def _real_rotation_blocks_padded(
 ) -> Array:
     """Padded real rotation blocks for a batch of displacement vectors.
 
-    ``which='to_z_multipole'`` builds the multipole world->z blocks;
-    ``which='from_z_local'`` builds the local z->world blocks.
+    Selects the per-degree rotation op by ``which``:
+
+    * ``'to_z_multipole'`` / ``'from_z_multipole'`` -- multipole world<->z (M2L step 1, M2M);
+    * ``'to_z_local'`` / ``'from_z_local'`` -- local world<->z (L2L, M2L step 3).
     """
     p = int(order)
     max_m = 2 * p + 1
     if which == "to_z_multipole":
         rot_fn = real_rotation_to_z_axis_multipole
+    elif which == "from_z_multipole":
+        rot_fn = real_rotation_from_z_axis_multipole
+    elif which == "to_z_local":
+        rot_fn = real_rotation_to_z_axis_local
     elif which == "from_z_local":
         rot_fn = real_rotation_from_z_axis_local
     else:
-        raise ValueError("which must be 'to_z_multipole' or 'from_z_local'")
+        raise ValueError(
+            "which must be one of 'to_z_multipole', 'from_z_multipole', "
+            "'to_z_local', 'from_z_local'"
+        )
 
     def one(delta: Array) -> Array:
         x, y, z = delta[0], delta[1], delta[2]
@@ -213,6 +226,24 @@ def real_rotation_blocks_from_z_local_batch(
     """Padded real local z->world rotation blocks, one set per delta."""
     return _real_rotation_blocks_padded(
         deltas, order=order, dtype=dtype, which="from_z_local"
+    )
+
+
+def real_rotation_blocks_from_z_multipole_batch(
+    deltas: Array, *, order: int, dtype: Any
+) -> Array:
+    """Padded real multipole z->world rotation blocks (M2M rotate-back), per delta."""
+    return _real_rotation_blocks_padded(
+        deltas, order=order, dtype=dtype, which="from_z_multipole"
+    )
+
+
+def real_rotation_blocks_to_z_local_batch(
+    deltas: Array, *, order: int, dtype: Any
+) -> Array:
+    """Padded real local world->z rotation blocks (L2L rotate-to-z), per delta."""
+    return _real_rotation_blocks_padded(
+        deltas, order=order, dtype=dtype, which="to_z_local"
     )
 
 
@@ -259,10 +290,83 @@ def m2l_rot_scale_real_batch_cached_blocks(
     )
 
 
+@partial(jax.jit, static_argnames=("order",))
+def m2m_rot_scale_real_batch_cached_blocks(
+    multipoles: Array,
+    deltas: Array,
+    blocks_to_z: Array,
+    blocks_from_z: Array,
+    *,
+    order: int,
+) -> Array:
+    """Batched real-basis M2M using precomputed per-node rotation blocks.
+
+    The real analog of :func:`m2l_rot_scale_real_batch_cached_blocks`, for the up-sweep
+    (multipole -> multipole). Equivalent to :func:`~jaccpot.operators.real_harmonics.m2m_real`
+    but the (expensive) rotation matrices are supplied precomputed (shared across all nodes in
+    a displacement class), so only the z-axis M2M translation runs per node. ``deltas`` is the
+    ``child_center - parent_center`` displacement (M2M convention, source=child); its norm is
+    the +z translation distance. ``blocks_to_z`` are multipole world->z blocks
+    (``real_rotation_blocks_to_z_multipole_batch``), ``blocks_from_z`` are multipole z->world
+    blocks (``real_rotation_blocks_from_z_multipole_batch``).
+    """
+    p = int(order)
+    mult_rot = _apply_real_rotation_blocks_padded_batch(
+        jnp.asarray(multipoles), jnp.asarray(blocks_to_z), order=p
+    )
+    radii = jnp.sqrt(
+        jnp.maximum(jnp.sum(jnp.asarray(deltas) * jnp.asarray(deltas), axis=1), 1.0e-60)
+    )
+    mult_z = jax.vmap(lambda m, rr: translate_along_z_m2m_real(m, rr, order=p))(
+        mult_rot, radii
+    )
+    return _apply_real_rotation_blocks_padded_batch(
+        mult_z, jnp.asarray(blocks_from_z), order=p
+    )
+
+
+@partial(jax.jit, static_argnames=("order",))
+def l2l_rot_scale_real_batch_cached_blocks(
+    locals_coeffs: Array,
+    deltas: Array,
+    blocks_to_z: Array,
+    blocks_from_z: Array,
+    *,
+    order: int,
+) -> Array:
+    """Batched real-basis L2L using precomputed per-node rotation blocks.
+
+    The real analog of :func:`m2l_rot_scale_real_batch_cached_blocks`, for the down-sweep
+    (local -> local). Equivalent to :func:`~jaccpot.operators.real_harmonics.l2l_real` but the
+    rotation matrices are supplied precomputed (shared across a displacement class), so only the
+    z-axis L2L translation runs per node. ``deltas`` is the ``parent_center - child_center``
+    displacement (L2L convention, source=parent -- OPPOSITE sign of M2M). ``blocks_to_z`` are
+    local world->z blocks (``real_rotation_blocks_to_z_local_batch``), ``blocks_from_z`` are
+    local z->world blocks (``real_rotation_blocks_from_z_local_batch``).
+    """
+    p = int(order)
+    loc_rot = _apply_real_rotation_blocks_padded_batch(
+        jnp.asarray(locals_coeffs), jnp.asarray(blocks_to_z), order=p
+    )
+    radii = jnp.sqrt(
+        jnp.maximum(jnp.sum(jnp.asarray(deltas) * jnp.asarray(deltas), axis=1), 1.0e-60)
+    )
+    loc_z = jax.vmap(lambda l, rr: translate_along_z_l2l_real(l, rr, order=p))(
+        loc_rot, radii
+    )
+    return _apply_real_rotation_blocks_padded_batch(
+        loc_z, jnp.asarray(blocks_from_z), order=p
+    )
+
+
 __all__ = [
     "m2l_core_z_real",
     "m2l_rot_scale_real_batch",
     "m2l_rot_scale_real_batch_cached_blocks",
+    "m2m_rot_scale_real_batch_cached_blocks",
+    "l2l_rot_scale_real_batch_cached_blocks",
     "real_rotation_blocks_to_z_multipole_batch",
     "real_rotation_blocks_from_z_local_batch",
+    "real_rotation_blocks_from_z_multipole_batch",
+    "real_rotation_blocks_to_z_local_batch",
 ]

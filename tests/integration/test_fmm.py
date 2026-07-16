@@ -247,6 +247,10 @@ def test_prepare_state_fixed_depth_tree():
 
 def test_prepare_refresh_static_radix_tree_preserves_static_shape(monkeypatch):
     monkeypatch.setattr(jax, "default_backend", lambda: "gpu")
+    # This test exercises static-radix refresh, not cap-profile strictness, and does
+    # not register a cap profile; relax the exact-match requirement like the sibling
+    # static-strict tests do (previously satisfied by a leaked module-level env).
+    monkeypatch.setenv("JACCPOT_STATIC_STRICT_REQUIRE_EXACT_CAP_PROFILE_MATCH", "0")
 
     key = jax.random.PRNGKey(123)
     core = 0.01 * jax.random.normal(key, (160, 3), dtype=jnp.float32)
@@ -300,6 +304,9 @@ def test_prepare_refresh_static_radix_tree_preserves_static_shape(monkeypatch):
 
 def test_static_radix_refresh_rebuilds_current_large_n_payloads(monkeypatch):
     monkeypatch.setattr(jax, "default_backend", lambda: "gpu")
+    # Static-radix refresh test; relax exact cap-profile matching like the sibling
+    # static-strict tests (previously satisfied by a leaked module-level env).
+    monkeypatch.setenv("JACCPOT_STATIC_STRICT_REQUIRE_EXACT_CAP_PROFILE_MATCH", "0")
     monkeypatch.setenv("JACCPOT_LARGE_N_TARGET_BLOCK_SIZE", "4")
     monkeypatch.setenv("JACCPOT_LARGE_N_SPEED_PREPARED_LAYOUT", "1")
     monkeypatch.setenv("JACCPOT_LARGE_N_STATIC_TARGET_BLOCKS", "1")
@@ -2723,7 +2730,11 @@ def test_prepare_state_cache_key_respects_center_mode():
             jit_tree=False,
         )
 
-    assert spy_build.call_count == 1
+    # Toggling grouped_interactions is a downstream reorganization of the same
+    # cached interaction pairs (the cache key hashes center_mode, not grouping),
+    # so the second prepare_state is a cache hit and the grouped buffers are
+    # materialized from cache without rebuilding neighbors.
+    assert spy_build.call_count == 0
 
 
 def test_fast_preset_sets_lbvh_defaults():
@@ -2951,6 +2962,10 @@ def test_fast_preset_adaptive_large_cpu_policy_applies():
         complex_rotation="solidfmm",
         mac_type="dehnen",
     )
+    # The adaptive CPU policy is gated behind static-sizing being off (default on
+    # since the strict fused static-radix lane landed); opt into the adaptive path
+    # this test is exercising.
+    fmm._static_runtime_fixed_sizing = False
 
     overrides = fmm._resolve_runtime_execution_overrides(
         num_particles=131072,
@@ -2975,6 +2990,9 @@ def test_fast_preset_adaptive_class_major_threshold():
         complex_rotation="solidfmm",
         mac_type="dehnen",
     )
+    # The class_major farfield selection lives past the static-sizing early return
+    # (default on); opt into the adaptive path so the threshold logic runs.
+    fmm._static_runtime_fixed_sizing = False
 
     overrides = fmm._resolve_runtime_execution_overrides(
         num_particles=262144,

@@ -75,8 +75,12 @@ from ..operators.complex_ops import (
     complex_rotation_blocks_to_z_solidfmm_batch,
 )
 from ..operators.m2l_real_rot_scale import (
+    l2l_rot_scale_real_batch_cached_blocks,
     m2l_rot_scale_real_batch_cached_blocks,
+    m2m_rot_scale_real_batch_cached_blocks,
     real_rotation_blocks_from_z_local_batch,
+    real_rotation_blocks_from_z_multipole_batch,
+    real_rotation_blocks_to_z_local_batch,
     real_rotation_blocks_to_z_multipole_batch,
 )
 from ..operators.real_harmonics import (
@@ -179,6 +183,9 @@ def _octree_far_field_grad(
     geometric_centers: bool = False,
     m2l_grouped: bool = False,
     class_capacity: int = 8192,
+    m2m_grouped: bool = False,
+    l2l_grouped: bool = False,
+    mm_class_capacity: int = 512,
     basis: str = "complex",
 ) -> Array:
     """O(N) far field: upward (P2M/M2M) -> V-list M2L -> L2L -> evaluate locals.
@@ -230,6 +237,9 @@ def _octree_far_field_grad(
             v_active_capacity=v_active_capacity,
             m2l_grouped=bool(m2l_grouped),
             class_capacity=int(class_capacity),
+            m2m_grouped=bool(m2m_grouped),
+            l2l_grouped=bool(l2l_grouped),
+            mm_class_capacity=int(mm_class_capacity),
         )
     plan = build_octree_upward_plan(octree)
     centers_override = jnp.asarray(view.centers) if bool(geometric_centers) else None
@@ -385,6 +395,9 @@ def _octree_far_field_grad_real(
     v_active_capacity: Optional[int] = None,
     m2l_grouped: bool = False,
     class_capacity: int = 8192,
+    m2m_grouped: bool = False,
+    l2l_grouped: bool = False,
+    mm_class_capacity: int = 512,
 ) -> Array:
     """Real-basis (Dehnen) octree far field: real P2M/M2M/M2L/L2L + real L2P (with grad).
 
@@ -455,15 +468,53 @@ def _octree_far_field_grad_real(
     # ---- M2M up-sweep: delta = child - parent (source=child) ----
     delta_child_minus_parent = centers - centers[parent_safe]
 
-    def m2m_body(step, mp):
-        level = n_levels - 1 - step
-        active = (depths == level) & (parent < num_nodes)
-        contrib = jax.vmap(lambda m, d: m2m_real(m, d, order=p))(
-            mp, delta_child_minus_parent
+    if m2m_grouped:
+        # GROUPED/CACHED real M2M (mirror of the grouped M2L below): box centres make the
+        # child->parent displacements quantise to ~8*n_levels classes, so group them via
+        # jnp.unique, precompute the real rotation blocks ONCE per class, and reuse them
+        # across every level -- removing the per-node, per-level rotation rebuild (the launch
+        # storm). Only the cheap z-axis M2M translation runs per node per level. Bit-identical
+        # to the per-node m2m_real for every ACTIVE node (same exact delta -> same class);
+        # zero-delta nodes use a safe one_x rotation but are masked out (never active).
+        rdt = mp.dtype
+        one_x = jnp.asarray([1.0, 0.0, 0.0], dtype=centers.dtype)
+        m2m_uniq, m2m_cls = jnp.unique(
+            delta_child_minus_parent,
+            axis=0,
+            size=int(mm_class_capacity),
+            return_inverse=True,
+            fill_value=0.0,
         )
-        return mp.at[parent_safe].add(jnp.where(active[:, None], contrib, 0.0))
+        m2m_cls = m2m_cls.reshape(-1)
+        m2m_disp = jnp.where(
+            jnp.all(m2m_uniq == 0, axis=1, keepdims=True), one_x, m2m_uniq
+        )
+        m2m_bt = real_rotation_blocks_to_z_multipole_batch(
+            m2m_disp, order=p, dtype=rdt
+        )[m2m_cls]
+        m2m_bf = real_rotation_blocks_from_z_multipole_batch(
+            m2m_disp, order=p, dtype=rdt
+        )[m2m_cls]
 
-    mp = jax.lax.fori_loop(0, n_levels - 1, m2m_body, mp)
+        def _m2m_body(step, mp):
+            level = n_levels - 1 - step
+            active = (depths == level) & (parent < num_nodes)
+            contrib = m2m_rot_scale_real_batch_cached_blocks(
+                mp, delta_child_minus_parent, m2m_bt, m2m_bf, order=p
+            )
+            return mp.at[parent_safe].add(jnp.where(active[:, None], contrib, 0.0))
+
+    else:
+
+        def _m2m_body(step, mp):
+            level = n_levels - 1 - step
+            active = (depths == level) & (parent < num_nodes)
+            contrib = jax.vmap(lambda m, d: m2m_real(m, d, order=p))(
+                mp, delta_child_minus_parent
+            )
+            return mp.at[parent_safe].add(jnp.where(active[:, None], contrib, 0.0))
+
+    mp = jax.lax.fori_loop(0, n_levels - 1, _m2m_body, mp)
 
     # ---- M2L: delta = target - source over the V-list ----
     v_src = jnp.asarray(view.v_src, dtype=INDEX_DTYPE)
@@ -549,15 +600,49 @@ def _octree_far_field_grad_real(
     # ---- L2L down-sweep: delta = PARENT - child (source=parent; OPPOSITE of M2M) ----
     delta_parent_minus_child = centers[parent_safe] - centers
 
-    def l2l_body(step, loc):
-        level = step + 1
-        active = (depths == level) & (parent < num_nodes)
-        contrib = jax.vmap(lambda lc, d: l2l_real(lc, d, order=p))(
-            loc[parent_safe], delta_parent_minus_child
+    if l2l_grouped:
+        # GROUPED/CACHED real L2L (same recipe as M2M above, opposite delta sign). Precompute
+        # the local-basis rotation blocks ONCE per parent->child displacement class; only the
+        # z-axis L2L translation runs per node per level.
+        rdt = locals_packed.dtype
+        one_x = jnp.asarray([1.0, 0.0, 0.0], dtype=centers.dtype)
+        l2l_uniq, l2l_cls = jnp.unique(
+            delta_parent_minus_child,
+            axis=0,
+            size=int(mm_class_capacity),
+            return_inverse=True,
+            fill_value=0.0,
         )
-        return loc + jnp.where(active[:, None], contrib, 0.0)
+        l2l_cls = l2l_cls.reshape(-1)
+        l2l_disp = jnp.where(
+            jnp.all(l2l_uniq == 0, axis=1, keepdims=True), one_x, l2l_uniq
+        )
+        l2l_bt = real_rotation_blocks_to_z_local_batch(l2l_disp, order=p, dtype=rdt)[
+            l2l_cls
+        ]
+        l2l_bf = real_rotation_blocks_from_z_local_batch(l2l_disp, order=p, dtype=rdt)[
+            l2l_cls
+        ]
 
-    locals_packed = jax.lax.fori_loop(0, n_levels - 1, l2l_body, locals_packed)
+        def _l2l_body(step, loc):
+            level = step + 1
+            active = (depths == level) & (parent < num_nodes)
+            contrib = l2l_rot_scale_real_batch_cached_blocks(
+                loc[parent_safe], delta_parent_minus_child, l2l_bt, l2l_bf, order=p
+            )
+            return loc + jnp.where(active[:, None], contrib, 0.0)
+
+    else:
+
+        def _l2l_body(step, loc):
+            level = step + 1
+            active = (depths == level) & (parent < num_nodes)
+            contrib = jax.vmap(lambda lc, d: l2l_real(lc, d, order=p))(
+                loc[parent_safe], delta_parent_minus_child
+            )
+            return loc + jnp.where(active[:, None], contrib, 0.0)
+
+    locals_packed = jax.lax.fori_loop(0, n_levels - 1, _l2l_body, locals_packed)
 
     # ---- L2P: real local -> field per leaf slot (delta = leaf_center - eval); scatter ----
     leaf_loc = locals_packed[leaf_node_safe]  # (L, ncoeff)
@@ -949,6 +1034,9 @@ def _octree_near_field(
         "geometric_centers",
         "m2l_grouped",
         "class_capacity",
+        "m2m_grouped",
+        "l2l_grouped",
+        "mm_class_capacity",
         "v_active_capacity",
         "near_block_size",
         "edge_capacity",
@@ -972,6 +1060,9 @@ def _octree_uvwx_device_compute(
     geometric_centers: bool = False,
     m2l_grouped: bool = False,
     class_capacity: int = 8192,
+    m2m_grouped: bool = False,
+    l2l_grouped: bool = False,
+    mm_class_capacity: int = 512,
     v_active_capacity: Optional[int] = None,
     near_block_size: Optional[int] = 128,
     edge_capacity: Optional[int] = None,
@@ -1022,6 +1113,9 @@ def _octree_uvwx_device_compute(
         geometric_centers=bool(geometric_centers),
         m2l_grouped=bool(m2l_grouped),
         class_capacity=int(class_capacity),
+        m2m_grouped=bool(m2m_grouped),
+        l2l_grouped=bool(l2l_grouped),
+        mm_class_capacity=int(mm_class_capacity),
         basis=str(basis),
     )
     far_acc = -G * far_grad
@@ -1063,6 +1157,9 @@ def octree_fmm_accelerations(
     geometric_centers: bool = False,
     m2l_grouped: bool = False,
     class_capacity: int = 8192,
+    m2m_grouped: bool = False,
+    l2l_grouped: bool = False,
+    mm_class_capacity: int = 512,
     v_active_capacity: Optional[int] = None,
     near_block_size: Optional[int] = 128,
     edge_capacity: Optional[int] = None,
@@ -1135,6 +1232,9 @@ def octree_fmm_accelerations(
                 geometric_centers=bool(geometric_centers),
                 m2l_grouped=bool(m2l_grouped),
                 class_capacity=int(class_capacity),
+                m2m_grouped=bool(m2m_grouped),
+                l2l_grouped=bool(l2l_grouped),
+                mm_class_capacity=int(mm_class_capacity),
                 v_active_capacity=v_active_capacity,
                 near_block_size=near_block_size,
                 edge_capacity=edge_capacity,
@@ -1172,6 +1272,9 @@ def octree_fmm_accelerations(
             geometric_centers=bool(geometric_centers),
             m2l_grouped=bool(m2l_grouped),
             class_capacity=int(class_capacity),
+            m2m_grouped=bool(m2m_grouped),
+            l2l_grouped=bool(l2l_grouped),
+            mm_class_capacity=int(mm_class_capacity),
             v_active_capacity=v_active_capacity,
             near_block_size=near_block_size,
             edge_capacity=edge_capacity,

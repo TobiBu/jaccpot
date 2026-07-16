@@ -113,6 +113,43 @@ def test_octree_fmm_real_basis_matches_direct(m2l_grouped):
     assert np.percentile(rel, 90) < 5e-2, f"p90 rel err {np.percentile(rel, 90):.3e}"
 
 
+@pytest.mark.parametrize("order", [4, 6])
+def test_octree_fmm_real_grouped_m2m_l2l_matches_per_node_and_direct(order):
+    """Grouped/cached real M2M + L2L (rotation blocks precomputed once per displacement
+    class, cached z-translate per node) must be BIT-IDENTICAL to the per-node
+    ``m2m_real``/``l2l_real`` cascade, and match direct N-body. Guards the
+    ``m2m_grouped``/``l2l_grouped`` branches in ``_octree_far_field_grad_real`` (the
+    launch-count refactor); the grouping reproduces exactly the same operation per class.
+    """
+    pos, mass = _points(4000, 7, "clustered")
+    common = dict(
+        depth=3,
+        order=order,
+        G=1.0,
+        softening=1e-2,
+        basis="real",
+        geometric_centers=True,
+        m2l_grouped=True,
+        v_active_capacity=1 << 16,
+    )
+    acc_ref = np.asarray(octree_fmm_accelerations(pos, mass, **common))
+    acc_grp = np.asarray(
+        octree_fmm_accelerations(
+            pos, mass, m2m_grouped=True, l2l_grouped=True, **common
+        )
+    )
+    rel_gp = np.linalg.norm(acc_grp - acc_ref, axis=1) / (
+        np.linalg.norm(acc_ref, axis=1) + 1e-30
+    )
+    assert float(rel_gp.max()) < 1e-9, f"grouped vs per-node max rel {rel_gp.max():.3e}"
+    direct = _direct(pos, mass, 1.0, 1e-2)
+    rel = np.linalg.norm(acc_grp - direct, axis=1) / (
+        np.linalg.norm(direct, axis=1) + 1e-12
+    )
+    assert np.median(rel) < 2e-2, f"median rel err {np.median(rel):.3e}"
+    assert np.percentile(rel, 90) < 5e-2, f"p90 rel err {np.percentile(rel, 90):.3e}"
+
+
 @pytest.mark.parametrize("near_block_size", [None, 64])
 def test_octree_fmm_purejax_near_matches_direct(near_block_size):
     """Explicitly pin the pure-JAX (autodiff-able / non-Ampere) near path: the compacted
