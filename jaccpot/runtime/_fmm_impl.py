@@ -12039,9 +12039,9 @@ def _propagate_solidfmm_locals_by_level(
             jnp.all(l2l_uniq == 0, axis=1, keepdims=True), one_x, l2l_uniq
         )
         rdt = coeffs_local.dtype
-        l2l_bt = real_rotation_blocks_to_z_local_batch(l2l_disp, order=order, dtype=rdt)[
-            l2l_cls
-        ]
+        l2l_bt = real_rotation_blocks_to_z_local_batch(
+            l2l_disp, order=order, dtype=rdt
+        )[l2l_cls]
         l2l_bf = real_rotation_blocks_from_z_local_batch(
             l2l_disp, order=order, dtype=rdt
         )[l2l_cls]

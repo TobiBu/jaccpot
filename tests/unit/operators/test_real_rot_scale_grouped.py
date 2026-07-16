@@ -121,7 +121,9 @@ def test_fastlane_grouped_l2l_cascade_matches_per_node(order):
     total_nodes = 7
     centers = jnp.asarray(rng.standard_normal((total_nodes, 3)))
     coeffs_np = rng.standard_normal((total_nodes, sh_size(order)))
-    kw = dict(order=order, rotation="solidfmm", total_nodes=total_nodes, basis_mode="real")
+    kw = dict(
+        order=order, rotation="solidfmm", total_nodes=total_nodes, basis_mode="real"
+    )
     ref = np.asarray(
         _propagate_solidfmm_locals_by_level(
             jnp.asarray(coeffs_np), centers, left_child, right_child, node_levels, **kw
@@ -129,8 +131,14 @@ def test_fastlane_grouped_l2l_cascade_matches_per_node(order):
     )
     grp = np.asarray(
         _propagate_solidfmm_locals_by_level(
-            jnp.asarray(coeffs_np), centers, left_child, right_child, node_levels,
-            l2l_grouped=True, mm_class_capacity=64, **kw,
+            jnp.asarray(coeffs_np),
+            centers,
+            left_child,
+            right_child,
+            node_levels,
+            l2l_grouped=True,
+            mm_class_capacity=64,
+            **kw,
         )
     )
     assert float(np.max(np.abs(grp - ref))) < 1e-11
