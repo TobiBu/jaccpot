@@ -116,16 +116,19 @@ def test_octree_fmm_real_basis_matches_direct(m2l_grouped):
 def _adaptive_caps(pos, depth, leaf_size, w, u_cap=256):
     """Eager probe: caps + max_source_tiles for the adaptive compact_wtile path."""
     import jax.numpy as jnp
-
     from yggdrax.octree_nearfield_tiles import build_octree_nearfield_tiles
     from yggdrax.octree_uvwx import build_adaptive_octree_execution_view_device
 
     n = int(pos.shape[0])
     node_cap, leaf_cap = 2 * n, n
     view = build_adaptive_octree_execution_view_device(
-        jnp.asarray(pos), depth, leaf_size,
-        node_capacity=node_cap, leaf_capacity=leaf_cap,
-        interactions=True, u_capacity=u_cap,
+        jnp.asarray(pos),
+        depth,
+        leaf_size,
+        node_capacity=node_cap,
+        leaf_capacity=leaf_cap,
+        interactions=True,
+        u_capacity=u_cap,
     )
     nr = np.asarray(view.node_ranges)
     li = np.asarray(view.leaf_indices)
@@ -134,12 +137,18 @@ def _adaptive_caps(pos, depth, leaf_size, w, u_cap=256):
     occ = np.where(real, lo_hi[:, 1] - lo_hi[:, 0] + 1, 0)
     max_occ = int(occ.max())
     probe = build_octree_nearfield_tiles(
-        view, tile_width=w, num_tiles_cap=(n + w - 1) // w + leaf_cap,
-        max_source_tiles=8192, max_leaf_occupancy=max_occ,
+        view,
+        tile_width=w,
+        num_tiles_cap=(n + w - 1) // w + leaf_cap,
+        max_source_tiles=8192,
+        max_leaf_occupancy=max_occ,
     )
     return dict(
-        node_capacity=node_cap, leaf_capacity=leaf_cap, u_capacity=u_cap,
-        leaf_size=leaf_size, max_leaf_capacity=max_occ,
+        node_capacity=node_cap,
+        leaf_capacity=leaf_cap,
+        u_capacity=u_cap,
+        leaf_size=leaf_size,
+        max_leaf_capacity=max_occ,
         max_source_tiles=int(np.asarray(probe.num_source_tiles_max)) + 8,
     )
 
@@ -153,8 +162,15 @@ def test_octree_fmm_compact_wtile_matches_direct(w):
     pos, mass = _points(4000, 7, "clustered")
     caps = _adaptive_caps(pos, depth=7, leaf_size=96, w=w)
     common = dict(
-        depth=7, order=4, G=1.0, softening=1e-2, adaptive=True,
-        near_use_pallas=False, geometric_centers=True, basis="solidfmm", **caps,
+        depth=7,
+        order=4,
+        G=1.0,
+        softening=1e-2,
+        adaptive=True,
+        near_use_pallas=False,
+        geometric_centers=True,
+        basis="solidfmm",
+        **caps,
     )
     acc_compact = np.asarray(
         octree_fmm_accelerations(
@@ -162,7 +178,9 @@ def test_octree_fmm_compact_wtile_matches_direct(w):
         )
     )
     acc_block = np.asarray(
-        octree_fmm_accelerations(pos, mass, near_mode="block", near_block_size=w, **common)
+        octree_fmm_accelerations(
+            pos, mass, near_mode="block", near_block_size=w, **common
+        )
     )
     direct = _direct(pos, mass, 1.0, 1e-2)
     rel = np.linalg.norm(acc_compact - direct, axis=1) / (
