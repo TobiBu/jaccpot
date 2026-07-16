@@ -496,7 +496,7 @@ def _octree_far_field_grad_real(
             m2m_disp, order=p, dtype=rdt
         )[m2m_cls]
 
-        def m2m_body(step, mp):
+        def _m2m_body(step, mp):
             level = n_levels - 1 - step
             active = (depths == level) & (parent < num_nodes)
             contrib = m2m_rot_scale_real_batch_cached_blocks(
@@ -506,7 +506,7 @@ def _octree_far_field_grad_real(
 
     else:
 
-        def m2m_body(step, mp):
+        def _m2m_body(step, mp):
             level = n_levels - 1 - step
             active = (depths == level) & (parent < num_nodes)
             contrib = jax.vmap(lambda m, d: m2m_real(m, d, order=p))(
@@ -514,7 +514,7 @@ def _octree_far_field_grad_real(
             )
             return mp.at[parent_safe].add(jnp.where(active[:, None], contrib, 0.0))
 
-    mp = jax.lax.fori_loop(0, n_levels - 1, m2m_body, mp)
+    mp = jax.lax.fori_loop(0, n_levels - 1, _m2m_body, mp)
 
     # ---- M2L: delta = target - source over the V-list ----
     v_src = jnp.asarray(view.v_src, dtype=INDEX_DTYPE)
@@ -624,7 +624,7 @@ def _octree_far_field_grad_real(
             l2l_cls
         ]
 
-        def l2l_body(step, loc):
+        def _l2l_body(step, loc):
             level = step + 1
             active = (depths == level) & (parent < num_nodes)
             contrib = l2l_rot_scale_real_batch_cached_blocks(
@@ -634,7 +634,7 @@ def _octree_far_field_grad_real(
 
     else:
 
-        def l2l_body(step, loc):
+        def _l2l_body(step, loc):
             level = step + 1
             active = (depths == level) & (parent < num_nodes)
             contrib = jax.vmap(lambda lc, d: l2l_real(lc, d, order=p))(
@@ -642,7 +642,7 @@ def _octree_far_field_grad_real(
             )
             return loc + jnp.where(active[:, None], contrib, 0.0)
 
-    locals_packed = jax.lax.fori_loop(0, n_levels - 1, l2l_body, locals_packed)
+    locals_packed = jax.lax.fori_loop(0, n_levels - 1, _l2l_body, locals_packed)
 
     # ---- L2P: real local -> field per leaf slot (delta = leaf_center - eval); scatter ----
     leaf_loc = locals_packed[leaf_node_safe]  # (L, ncoeff)
