@@ -57,8 +57,10 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 from jaxtyping import Array
+from yggdrax.octree_nearfield_tiles import build_octree_nearfield_tiles
 from yggdrax.octree_uvwx import (
     UniformOctreeExecutionView,
+    build_adaptive_octree_execution_view_device,
     build_sparse_uniform_octree_execution_view_device,
     build_uniform_octree_execution_view,
     build_uniform_octree_execution_view_device,
@@ -726,6 +728,25 @@ def _ulist_near_device(
     )
 
 
+def _raise_if_true(flag, message: str) -> None:
+    """Eager-only capacity gate: raise ``RuntimeError(message)`` iff ``flag`` is true.
+
+    Mirrors yggdrax's ``_raise_if_true`` -- when ``flag`` is a tracer this schedules a
+    ``jax.debug.callback`` (so it fires under jit); otherwise it checks the concrete bool.
+    Callers under a per-step integration scan should size caps from an eager probe and pass
+    ``check_capacity=False`` instead, so the callback does not serialize the device scan.
+    """
+    if isinstance(flag, jax.core.Tracer):
+
+        def _callback(value):
+            if bool(value):
+                raise RuntimeError(message)
+
+        jax.debug.callback(_callback, flag)
+    elif bool(flag):
+        raise RuntimeError(message)
+
+
 def _octree_near_field(
     positions_sorted: Array,
     masses_sorted: Array,
@@ -739,6 +760,10 @@ def _octree_near_field(
     near_block_size: Optional[int] = 128,
     edge_capacity: Optional[int] = None,
     near_chunk_size: int = 512,
+    near_mode: str = "block",
+    tile_width: int = 64,
+    max_source_tiles: int = 0,
+    check_capacity: bool = True,
 ) -> Array:
     """U-list near-field P2P over fixed-width UNITS, reusing the radix fast-lane machinery.
 
@@ -786,7 +811,39 @@ def _octree_near_field(
         num_leaves, u_cap
     )
 
-    if near_block_size is None:
+    if near_mode == "compact_wtile":
+        # Compacted, cell-respecting W-tiles (yggdrax.octree_nearfield_tiles): occupancy-bucket
+        # each ADAPTIVE cell into full width-``tile_width`` tiles, each with a source-tile list
+        # sized by the ACTUAL near work rather than the ``(1 + u_cap) * mbpl`` worst case that
+        # the block mode below pays. Same near leaf-pair SET (tiles are cell-respecting, so
+        # tile-pairs map 1:1 onto cell-pairs), just densely packed. Here we only gather
+        # positions + reshape the source ids for the shared self-block + kernel/scan tail.
+        W = int(tile_width)
+        num_tiles_cap = (n_part + W - 1) // W + num_leaves
+        s_cap = int(max_source_tiles)
+        if s_cap <= 0:
+            raise ValueError(
+                "near_mode='compact_wtile' requires max_source_tiles > 0 (size it from an "
+                "eager probe of the near CSR: max over tiles of the summed source-tile count)"
+            )
+        tiles = build_octree_nearfield_tiles(
+            view,
+            tile_width=W,
+            num_tiles_cap=num_tiles_cap,
+            max_source_tiles=s_cap,
+            max_leaf_occupancy=int(max_leaf_size),
+        )
+        if bool(check_capacity):
+            _raise_if_true(
+                tiles.overflow,
+                "octree compact_wtile near-field capacity exceeded: increase max_source_tiles "
+                "or max_leaf_size, or lower tile_width (see yggdrax OctreeNearfieldTiles).",
+            )
+        unit_pidx = jnp.clip(tiles.tile_particle_idx, 0, n_part - 1)
+        unit_mask = tiles.tile_mask
+        src_ids_3d = tiles.tile_source_ids[:, None, :]  # (num_tiles, 1, S)
+        src_valid_3d = tiles.tile_source_valid[:, None, :]
+    elif near_block_size is None:
         # one unit per leaf, width = max_leaf_size
         W = int(max_leaf_size)
         slot = jnp.arange(W, dtype=INDEX_DTYPE)
@@ -943,6 +1000,9 @@ def _octree_near_field(
         "order",
         "max_leaf_size",
         "sparse",
+        "adaptive",
+        "leaf_size",
+        "u_capacity",
         "node_capacity",
         "leaf_capacity",
         "near_use_pallas",
@@ -953,6 +1013,10 @@ def _octree_near_field(
         "near_block_size",
         "edge_capacity",
         "near_chunk_size",
+        "near_mode",
+        "tile_width",
+        "max_source_tiles",
+        "near_check_capacity",
         "basis",
     ),
 )
@@ -966,6 +1030,9 @@ def _octree_uvwx_device_compute(
     order: int,
     max_leaf_size: int,
     sparse: bool = False,
+    adaptive: bool = False,
+    leaf_size: int = 0,
+    u_capacity: int = 256,
     node_capacity: int = 0,
     leaf_capacity: int = 0,
     near_use_pallas: bool = True,
@@ -976,6 +1043,10 @@ def _octree_uvwx_device_compute(
     near_block_size: Optional[int] = 128,
     edge_capacity: Optional[int] = None,
     near_chunk_size: int = 512,
+    near_mode: str = "block",
+    tile_width: int = 64,
+    max_source_tiles: int = 0,
+    near_check_capacity: bool = True,
     basis: str = "complex",
 ) -> Array:
     """Single jitted O(N) octree-FMM compute over the static-shape device build.
@@ -993,7 +1064,20 @@ def _octree_uvwx_device_compute(
     occupancy); ``level_batch_width = leaf_capacity``. ``num_levels = depth + 1`` either way.
     """
     num_levels = int(depth) + 1
-    if sparse:
+    if adaptive:
+        # variable-depth, occupancy-bounded tree (occ <= leaf_size); drops into the SAME far
+        # (V-list M2L + L2L) + near (extended-near P2P) path as the sparse/dense views.
+        view = build_adaptive_octree_execution_view_device(
+            positions,
+            int(depth),
+            int(leaf_size),
+            node_capacity=int(node_capacity),
+            leaf_capacity=int(leaf_capacity),
+            interactions=True,
+            u_capacity=int(u_capacity),
+        )
+        level_batch_width = int(leaf_capacity)
+    elif sparse:
         view = build_sparse_uniform_octree_execution_view_device(
             positions,
             int(depth),
@@ -1036,6 +1120,10 @@ def _octree_uvwx_device_compute(
         near_block_size=near_block_size,
         edge_capacity=edge_capacity,
         near_chunk_size=int(near_chunk_size),
+        near_mode=str(near_mode),
+        tile_width=int(tile_width),
+        max_source_tiles=int(max_source_tiles),
+        check_capacity=bool(near_check_capacity),
     )
     acc_sorted = far_acc + near_acc
     inv = (
@@ -1055,6 +1143,9 @@ def octree_fmm_accelerations(
     max_leaf_capacity: Optional[int] = None,
     device: bool = True,
     sparse: bool = False,
+    adaptive: bool = False,
+    leaf_size: int = 0,
+    u_capacity: int = 256,
     node_capacity: Optional[int] = None,
     leaf_capacity: Optional[int] = None,
     bounds: Optional[tuple] = None,
@@ -1067,6 +1158,10 @@ def octree_fmm_accelerations(
     near_block_size: Optional[int] = 128,
     edge_capacity: Optional[int] = None,
     near_chunk_size: int = 512,
+    near_mode: str = "block",
+    tile_width: int = 64,
+    max_source_tiles: int = 0,
+    near_check_capacity: bool = True,
     basis: str = "complex",
 ) -> Array | tuple[Array, UniformOctreeExecutionView]:
     """O(N) octree-FMM gravitational accelerations (far V-list + near U-list P2P).
@@ -1110,6 +1205,64 @@ def octree_fmm_accelerations(
     masses = jnp.asarray(masses)
 
     if device:
+        if adaptive:
+            if node_capacity is None or leaf_capacity is None:
+                raise ValueError(
+                    "adaptive=True requires node_capacity and leaf_capacity (static caps)"
+                )
+            if int(leaf_size) <= 0:
+                raise ValueError(
+                    "adaptive=True requires leaf_size > 0 (per-leaf occupancy bound)"
+                )
+            if max_leaf_capacity is None:
+                raise ValueError(
+                    "adaptive=True requires max_leaf_capacity (>= max leaf occupancy); "
+                    "pass it explicitly to avoid a probe-build host sync/recompile"
+                )
+            if str(near_mode) == "compact_wtile" and int(max_source_tiles) <= 0:
+                raise ValueError(
+                    "near_mode='compact_wtile' requires max_source_tiles > 0 (probe the near "
+                    "CSR once with build_octree_nearfield_tiles and pass num_source_tiles_max)"
+                )
+            max_leaf_size = int(max_leaf_capacity)
+            acc = _octree_uvwx_device_compute(
+                positions,
+                masses,
+                jnp.asarray(G, dtype=positions.dtype),
+                jnp.asarray(softening, dtype=positions.dtype),
+                depth=int(depth),
+                order=int(order),
+                max_leaf_size=max_leaf_size,
+                adaptive=True,
+                leaf_size=int(leaf_size),
+                u_capacity=int(u_capacity),
+                node_capacity=int(node_capacity),
+                leaf_capacity=int(leaf_capacity),
+                near_use_pallas=bool(near_use_pallas),
+                geometric_centers=bool(geometric_centers),
+                m2l_grouped=bool(m2l_grouped),
+                class_capacity=int(class_capacity),
+                v_active_capacity=v_active_capacity,
+                near_block_size=near_block_size,
+                edge_capacity=edge_capacity,
+                near_chunk_size=int(near_chunk_size),
+                near_mode=str(near_mode),
+                tile_width=int(tile_width),
+                max_source_tiles=int(max_source_tiles),
+                near_check_capacity=bool(near_check_capacity),
+                basis=str(basis),
+            )
+            if return_view:
+                return acc, build_adaptive_octree_execution_view_device(
+                    positions,
+                    int(depth),
+                    int(leaf_size),
+                    node_capacity=int(node_capacity),
+                    leaf_capacity=int(leaf_capacity),
+                    interactions=True,
+                    u_capacity=int(u_capacity),
+                )
+            return acc
         if sparse:
             if node_capacity is None or leaf_capacity is None:
                 raise ValueError(

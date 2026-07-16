@@ -113,6 +113,70 @@ def test_octree_fmm_real_basis_matches_direct(m2l_grouped):
     assert np.percentile(rel, 90) < 5e-2, f"p90 rel err {np.percentile(rel, 90):.3e}"
 
 
+def _adaptive_caps(pos, depth, leaf_size, w, u_cap=256):
+    """Eager probe: caps + max_source_tiles for the adaptive compact_wtile path."""
+    import jax.numpy as jnp
+
+    from yggdrax.octree_nearfield_tiles import build_octree_nearfield_tiles
+    from yggdrax.octree_uvwx import build_adaptive_octree_execution_view_device
+
+    n = int(pos.shape[0])
+    node_cap, leaf_cap = 2 * n, n
+    view = build_adaptive_octree_execution_view_device(
+        jnp.asarray(pos), depth, leaf_size,
+        node_capacity=node_cap, leaf_capacity=leaf_cap,
+        interactions=True, u_capacity=u_cap,
+    )
+    nr = np.asarray(view.node_ranges)
+    li = np.asarray(view.leaf_indices)
+    real = li < node_cap
+    lo_hi = nr[np.clip(li, 0, node_cap - 1)]
+    occ = np.where(real, lo_hi[:, 1] - lo_hi[:, 0] + 1, 0)
+    max_occ = int(occ.max())
+    probe = build_octree_nearfield_tiles(
+        view, tile_width=w, num_tiles_cap=(n + w - 1) // w + leaf_cap,
+        max_source_tiles=8192, max_leaf_occupancy=max_occ,
+    )
+    return dict(
+        node_capacity=node_cap, leaf_capacity=leaf_cap, u_capacity=u_cap,
+        leaf_size=leaf_size, max_leaf_capacity=max_occ,
+        max_source_tiles=int(np.asarray(probe.num_source_tiles_max)) + 8,
+    )
+
+
+@pytest.mark.parametrize("w", [32, 64])
+def test_octree_fmm_compact_wtile_matches_direct(w):
+    """Adaptive octree + compacted W-tile near field (pure-JAX) matches direct N-body, and
+    is BIT-IDENTICAL to the dense-block near field on the same view (the compaction only
+    reorganizes the exact same near leaf-pair set). Guards the ``near_mode='compact_wtile'``
+    path in ``_octree_near_field`` + the adaptive build wiring."""
+    pos, mass = _points(4000, 7, "clustered")
+    caps = _adaptive_caps(pos, depth=7, leaf_size=96, w=w)
+    common = dict(
+        depth=7, order=4, G=1.0, softening=1e-2, adaptive=True,
+        near_use_pallas=False, geometric_centers=True, basis="solidfmm", **caps,
+    )
+    acc_compact = np.asarray(
+        octree_fmm_accelerations(
+            pos, mass, near_mode="compact_wtile", tile_width=w, **common
+        )
+    )
+    acc_block = np.asarray(
+        octree_fmm_accelerations(pos, mass, near_mode="block", near_block_size=w, **common)
+    )
+    direct = _direct(pos, mass, 1.0, 1e-2)
+    rel = np.linalg.norm(acc_compact - direct, axis=1) / (
+        np.linalg.norm(direct, axis=1) + 1e-12
+    )
+    assert np.median(rel) < 2e-2, f"median rel err {np.median(rel):.3e}"
+    assert np.percentile(rel, 90) < 5e-2, f"p90 rel err {np.percentile(rel, 90):.3e}"
+    # compaction preserves the near set exactly -> bit-identical to block mode
+    rel_cb = np.linalg.norm(acc_compact - acc_block, axis=1) / (
+        np.linalg.norm(acc_block, axis=1) + 1e-30
+    )
+    assert rel_cb.max() < 1e-6, f"compact vs block max rel err {rel_cb.max():.3e}"
+
+
 @pytest.mark.parametrize("near_block_size", [None, 64])
 def test_octree_fmm_purejax_near_matches_direct(near_block_size):
     """Explicitly pin the pure-JAX (autodiff-able / non-Ampere) near path: the compacted
