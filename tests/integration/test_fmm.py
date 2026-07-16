@@ -2723,7 +2723,11 @@ def test_prepare_state_cache_key_respects_center_mode():
             jit_tree=False,
         )
 
-    assert spy_build.call_count == 1
+    # Toggling grouped_interactions is a downstream reorganization of the same
+    # cached interaction pairs (the cache key hashes center_mode, not grouping),
+    # so the second prepare_state is a cache hit and the grouped buffers are
+    # materialized from cache without rebuilding neighbors.
+    assert spy_build.call_count == 0
 
 
 def test_fast_preset_sets_lbvh_defaults():
@@ -2951,6 +2955,10 @@ def test_fast_preset_adaptive_large_cpu_policy_applies():
         complex_rotation="solidfmm",
         mac_type="dehnen",
     )
+    # The adaptive CPU policy is gated behind static-sizing being off (default on
+    # since the strict fused static-radix lane landed); opt into the adaptive path
+    # this test is exercising.
+    fmm._static_runtime_fixed_sizing = False
 
     overrides = fmm._resolve_runtime_execution_overrides(
         num_particles=131072,
@@ -2975,6 +2983,9 @@ def test_fast_preset_adaptive_class_major_threshold():
         complex_rotation="solidfmm",
         mac_type="dehnen",
     )
+    # The class_major farfield selection lives past the static-sizing early return
+    # (default on); opt into the adaptive path so the threshold logic runs.
+    fmm._static_runtime_fixed_sizing = False
 
     overrides = fmm._resolve_runtime_execution_overrides(
         num_particles=262144,
