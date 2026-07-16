@@ -26,7 +26,14 @@ from jaccpot.operators.m2l_real_rot_scale import (
     real_rotation_blocks_to_z_local_batch,
     real_rotation_blocks_to_z_multipole_batch,
 )
-from jaccpot.operators.real_harmonics import l2l_real, m2m_real, sh_size
+from jaccpot.operators.real_harmonics import (
+    l2l_real,
+    m2m_real,
+    sh_index,
+    sh_size,
+    translate_along_z_l2l_real,
+    translate_along_z_m2m_real,
+)
 
 _TOL = 1e-10
 
@@ -36,6 +43,39 @@ def _rand(order, n, seed):
     coeffs = jnp.asarray(rng.standard_normal((n, sh_size(order))))
     deltas = jnp.asarray(rng.standard_normal((n, 3)))  # generic off-axis displacements
     return coeffs, deltas
+
+
+def _z_shift_unrolled(coeffs, dz, order, which):
+    """Reference (unrolled) real z-axis M2M/L2L shift: out[n,m]=sum_k dz^k/k! * src."""
+    import math
+
+    p = int(order)
+    out = np.zeros((sh_size(p),), dtype=np.float64)
+    c = np.asarray(coeffs, dtype=np.float64)
+    for n in range(p + 1):
+        for m in range(-n, n + 1):
+            acc = 0.0
+            krange = range(n - abs(m) + 1) if which == "m2m" else range(p - n + 1)
+            for k in krange:
+                src_n = n - k if which == "m2m" else n + k
+                if src_n < abs(m) or src_n > p:
+                    continue
+                acc += (dz**k) / math.factorial(k) * c[sh_index(src_n, m)]
+            out[sh_index(n, m)] = acc
+    return out
+
+
+@pytest.mark.parametrize("order", [2, 4, 6])
+@pytest.mark.parametrize("which", ["m2m", "l2l"])
+def test_z_translate_vectorized_matches_unrolled(order, which):
+    """The table-vectorised M2M/L2L z-translate == the per-(n,m) unrolled reference."""
+    rng = np.random.default_rng(int(order) * 10 + (which == "l2l"))
+    coeffs = rng.standard_normal(sh_size(order))
+    dz = float(abs(rng.standard_normal()) + 0.3)
+    fn = translate_along_z_m2m_real if which == "m2m" else translate_along_z_l2l_real
+    got = np.asarray(fn(jnp.asarray(coeffs), jnp.asarray(dz), order=order))
+    ref = _z_shift_unrolled(coeffs, dz, order, which)
+    assert float(np.max(np.abs(got - ref))) < 1e-12
 
 
 @pytest.mark.parametrize("order", [2, 4, 6])
