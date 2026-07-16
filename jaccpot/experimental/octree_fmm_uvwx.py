@@ -489,9 +489,9 @@ def _octree_far_field_grad_real(
         m2m_disp = jnp.where(
             jnp.all(m2m_uniq == 0, axis=1, keepdims=True), one_x, m2m_uniq
         )
-        m2m_bt = real_rotation_blocks_to_z_multipole_batch(m2m_disp, order=p, dtype=rdt)[
-            m2m_cls
-        ]
+        m2m_bt = real_rotation_blocks_to_z_multipole_batch(
+            m2m_disp, order=p, dtype=rdt
+        )[m2m_cls]
         m2m_bf = real_rotation_blocks_from_z_multipole_batch(
             m2m_disp, order=p, dtype=rdt
         )[m2m_cls]

@@ -42,8 +42,12 @@ def _rand(order, n, seed):
 def test_m2m_cached_matches_m2m_real(order):
     coeffs, deltas = _rand(order, 24, 11)
     ref = jax.vmap(lambda c, d: m2m_real(c, d, order=order))(coeffs, deltas)
-    bt = real_rotation_blocks_to_z_multipole_batch(deltas, order=order, dtype=coeffs.dtype)
-    bf = real_rotation_blocks_from_z_multipole_batch(deltas, order=order, dtype=coeffs.dtype)
+    bt = real_rotation_blocks_to_z_multipole_batch(
+        deltas, order=order, dtype=coeffs.dtype
+    )
+    bf = real_rotation_blocks_from_z_multipole_batch(
+        deltas, order=order, dtype=coeffs.dtype
+    )
     got = m2m_rot_scale_real_batch_cached_blocks(coeffs, deltas, bt, bf, order=order)
     assert float(np.max(np.abs(np.asarray(got - ref)))) < _TOL
 
@@ -53,7 +57,9 @@ def test_l2l_cached_matches_l2l_real(order):
     coeffs, deltas = _rand(order, 24, 22)
     ref = jax.vmap(lambda c, d: l2l_real(c, d, order=order))(coeffs, deltas)
     bt = real_rotation_blocks_to_z_local_batch(deltas, order=order, dtype=coeffs.dtype)
-    bf = real_rotation_blocks_from_z_local_batch(deltas, order=order, dtype=coeffs.dtype)
+    bf = real_rotation_blocks_from_z_local_batch(
+        deltas, order=order, dtype=coeffs.dtype
+    )
     got = l2l_rot_scale_real_batch_cached_blocks(coeffs, deltas, bt, bf, order=order)
     assert float(np.max(np.abs(np.asarray(got - ref)))) < _TOL
 

@@ -119,11 +119,18 @@ def test_octree_fmm_real_grouped_m2m_l2l_matches_per_node_and_direct(order):
     class, cached z-translate per node) must be BIT-IDENTICAL to the per-node
     ``m2m_real``/``l2l_real`` cascade, and match direct N-body. Guards the
     ``m2m_grouped``/``l2l_grouped`` branches in ``_octree_far_field_grad_real`` (the
-    launch-count refactor); the grouping reproduces exactly the same operation per class."""
+    launch-count refactor); the grouping reproduces exactly the same operation per class.
+    """
     pos, mass = _points(4000, 7, "clustered")
     common = dict(
-        depth=3, order=order, G=1.0, softening=1e-2, basis="real",
-        geometric_centers=True, m2l_grouped=True, v_active_capacity=1 << 16,
+        depth=3,
+        order=order,
+        G=1.0,
+        softening=1e-2,
+        basis="real",
+        geometric_centers=True,
+        m2l_grouped=True,
+        v_active_capacity=1 << 16,
     )
     acc_ref = np.asarray(octree_fmm_accelerations(pos, mass, **common))
     acc_grp = np.asarray(
