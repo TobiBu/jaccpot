@@ -614,8 +614,13 @@ def test_propagate_local_expansions_accumulates_parent():
 
 
 @pytest.mark.parametrize(
+    # chunk_size is the per-batch buffer size, so peak memory scales with it
+    # regardless of this fixture's tiny interaction list (6 pairs). 256 already
+    # far exceeds that count, exercising the same single-oversized-chunk padding
+    # path as DEFAULT_M2L_CHUNK_SIZE without the ~60 GB allocation the former
+    # 10**6 value forced (which OOM'd on the GPU CI runner).
     "chunk_size",
-    [1, 2, DEFAULT_M2L_CHUNK_SIZE, 10**6],
+    [1, 2, 256, DEFAULT_M2L_CHUNK_SIZE],
 )
 def test_accumulate_m2l_matches_pairwise_translations(chunk_size, prepared_m2l_tree):
     tree, upward, interactions = prepared_m2l_tree
