@@ -41,7 +41,11 @@ Documentation = "https://github.com/AstroAI-Lab/jaccpot#readme"
 [project.optional-dependencies]
 dev = [
   "black>=24.8.0",
-  "isort>=5.13.2",
+  # Pinned to match .pre-commit-config.yaml. isort 7.0.0/8.0.1 regressed the
+  # black profile (force-wraps single-name imports); 9.0.0b1 fixes it. A
+  # floating ">=" here lets CI's `isort --check-only .` resolve to the broken
+  # 8.0.1 and disagree with pre-commit, so keep this equal to the hook rev.
+  "isort==9.0.0b1",
   "pytest>=8.3.0",
   "pytest-cov>=5.0.0",
   "pytest-xdist>=3.6.0",
