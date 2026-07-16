@@ -104,6 +104,38 @@ def test_l2l_cached_matches_l2l_real(order):
     assert float(np.max(np.abs(np.asarray(got - ref)))) < _TOL
 
 
+@pytest.mark.parametrize("order", [2, 4, 6])
+def test_fastlane_grouped_l2l_cascade_matches_per_node(order):
+    """The grouped real L2L branch of the runtime cascade
+    ``_propagate_solidfmm_locals_by_level(l2l_grouped=True)`` is bit-identical to the
+    per-node `_l2l_real_batch_kernel` path, for any tree/centres (grouping only precomputes
+    the rotation blocks once per displacement class). Guards the Phase-4 fast-lane building
+    block."""
+    from jaccpot.runtime._fmm_impl import _propagate_solidfmm_locals_by_level
+
+    rng = np.random.default_rng(order)
+    # small binary tree: internal {0,1,2}, leaves {3,4,5,6}
+    left_child = jnp.asarray([1, 3, 5])
+    right_child = jnp.asarray([2, 4, 6])
+    node_levels = jnp.asarray([0, 1, 1, 2, 2, 2, 2])
+    total_nodes = 7
+    centers = jnp.asarray(rng.standard_normal((total_nodes, 3)))
+    coeffs_np = rng.standard_normal((total_nodes, sh_size(order)))
+    kw = dict(order=order, rotation="solidfmm", total_nodes=total_nodes, basis_mode="real")
+    ref = np.asarray(
+        _propagate_solidfmm_locals_by_level(
+            jnp.asarray(coeffs_np), centers, left_child, right_child, node_levels, **kw
+        )
+    )
+    grp = np.asarray(
+        _propagate_solidfmm_locals_by_level(
+            jnp.asarray(coeffs_np), centers, left_child, right_child, node_levels,
+            l2l_grouped=True, mm_class_capacity=64, **kw,
+        )
+    )
+    assert float(np.max(np.abs(grp - ref))) < 1e-11
+
+
 @pytest.mark.parametrize("op", ["m2m", "l2l"])
 def test_class_grouping_matches_ungrouped(op):
     """Mirror the octree wiring: jnp.unique -> per-class blocks -> blocks[cls_id]."""

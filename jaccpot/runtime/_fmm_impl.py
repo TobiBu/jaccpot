@@ -98,9 +98,11 @@ from jaccpot.operators.complex_ops import (
     m2l_complex_reference_batch_cached_blocks,
 )
 from jaccpot.operators.m2l_real_rot_scale import (
+    l2l_rot_scale_real_batch_cached_blocks,
     m2l_rot_scale_real_batch,
     m2l_rot_scale_real_batch_cached_blocks,
     real_rotation_blocks_from_z_local_batch,
+    real_rotation_blocks_to_z_local_batch,
     real_rotation_blocks_to_z_multipole_batch,
 )
 from jaccpot.operators.multipole_utils import (
@@ -11961,7 +11963,14 @@ def _propagate_solidfmm_locals_to_children(
 
 @partial(
     jax.jit,
-    static_argnames=("order", "rotation", "total_nodes", "basis_mode"),
+    static_argnames=(
+        "order",
+        "rotation",
+        "total_nodes",
+        "basis_mode",
+        "l2l_grouped",
+        "mm_class_capacity",
+    ),
     donate_argnums=(0,),
 )
 def _propagate_solidfmm_locals_by_level(
@@ -11975,6 +11984,8 @@ def _propagate_solidfmm_locals_by_level(
     rotation: str,
     total_nodes: int,
     basis_mode: str = "complex",
+    l2l_grouped: bool = False,
+    mm_class_capacity: int = 512,
 ) -> Array:
     """Top-down, level-by-level L2L cascade over a binary tree.
 
@@ -12004,6 +12015,37 @@ def _propagate_solidfmm_locals_by_level(
     max_level = jnp.max(parent_levels)
     minus_one = jnp.asarray(-1, dtype=left_internal.dtype)
 
+    # GROUPED/CACHED real L2L: the parent->child displacement set is FIXED by the tree, so
+    # precompute the real rotation blocks ONCE per displacement class (jnp.unique over all
+    # internal->child pairs) and cached-apply per level, instead of rebuilding the rotation
+    # matrices for every node at every level. Only helps when the class count is small (box/
+    # geometric centres quantise the displacements); with COM centres it still works but each
+    # pair is its own class. Bit-identical to the per-node kernel either way.
+    use_grouped_l2l = bool(l2l_grouped) and real_basis
+    if use_grouped_l2l:
+        children_full = jnp.concatenate([left_internal, right_internal], axis=0)
+        safe_full = jnp.where(children_full >= 0, children_full, 0)
+        full_deltas = centers[parent_rep] - centers[safe_full]
+        one_x = jnp.asarray([1.0, 0.0, 0.0], dtype=centers.dtype)
+        l2l_uniq, l2l_cls = jnp.unique(
+            full_deltas,
+            axis=0,
+            size=int(mm_class_capacity),
+            return_inverse=True,
+            fill_value=0.0,
+        )
+        l2l_cls = l2l_cls.reshape(-1)
+        l2l_disp = jnp.where(
+            jnp.all(l2l_uniq == 0, axis=1, keepdims=True), one_x, l2l_uniq
+        )
+        rdt = coeffs_local.dtype
+        l2l_bt = real_rotation_blocks_to_z_local_batch(l2l_disp, order=order, dtype=rdt)[
+            l2l_cls
+        ]
+        l2l_bf = real_rotation_blocks_from_z_local_batch(
+            l2l_disp, order=order, dtype=rdt
+        )[l2l_cls]
+
     def level_body(level: Array, state: Array) -> Array:
         active = parent_levels == level
         lc = jnp.where(active, left_internal, minus_one)
@@ -12019,7 +12061,11 @@ def _propagate_solidfmm_locals_by_level(
         # theta>=0.5) regardless of expansion order, while looking fine at small
         # theta where the L2L cascade is shallow.
         deltas = centers[parent_rep] - centers[safe_child]
-        if real_basis:
+        if use_grouped_l2l:
+            translated = l2l_rot_scale_real_batch_cached_blocks(
+                parent_coeffs, deltas, l2l_bt, l2l_bf, order=order
+            ).astype(state.dtype)
+        elif real_basis:
             translated = _l2l_real_batch_kernel(
                 parent_coeffs, deltas, order=order
             ).astype(state.dtype)
