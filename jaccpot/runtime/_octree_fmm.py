@@ -359,6 +359,69 @@ def accumulate_octree_solidfmm_m2l(
     )
 
 
+def _topological_level_partition(
+    parent: Array,
+    valid_mask: Array,
+) -> tuple[Array, Array, Array]:
+    """Recover a true topological level partition from the explicit parent table.
+
+    The compressed octree's ``node_depths`` is a Morton box-subdivision level: it can skip
+    levels (a leaf at box-depth ``D`` whose direct parent lives at box-depth ``D - k`` for
+    ``k > 1``) and, on degenerate (e.g. collinear) point sets, place a child at the SAME
+    box-depth as its parent. The level-major M2M/L2L walks assume ``child_level ==
+    parent_level + 1``; driving them from ``node_depths`` therefore aggregates some
+    parent/child pairs in the same level batch, so the parent reads a not-yet-populated
+    child (e.g. root monopole comes out ~3x too small on the collinear sample octree).
+
+    Relaxing ``depth[i] = depth[parent[i]] + 1`` to a fixpoint from the parent links yields
+    the topological level (root at 0, every child exactly one level below its parent), which
+    restores that invariant. Returns ``(node_depths, nodes_by_level, level_offsets)`` in the
+    same layout the kernels consume from the octree view: invalid/padding nodes are pushed
+    to the tail of ``nodes_by_level`` and excluded from the per-level counts, and
+    ``level_offsets`` has length ``num_nodes + 1`` (a safe upper bound on the level count,
+    since topological depth is at most ``num_nodes - 1``).
+    """
+
+    parent = jnp.asarray(parent, dtype=INDEX_DTYPE)
+    valid_mask = jnp.asarray(valid_mask, dtype=jnp.bool_)
+    num_nodes = int(parent.shape[0])
+    has_parent = valid_mask & (parent >= 0)
+    safe_parent = jnp.where(has_parent, parent, 0)
+
+    def cond(state: tuple[Array, Array]) -> Array:
+        _, changed = state
+        return changed
+
+    def body(state: tuple[Array, Array]) -> tuple[Array, Array]:
+        depth, _ = state
+        new_depth = jnp.where(has_parent, depth[safe_parent] + 1, 0)
+        return new_depth, jnp.any(new_depth != depth)
+
+    depth0 = jnp.zeros((num_nodes,), dtype=INDEX_DTYPE)
+    depth, _ = jax.lax.while_loop(
+        cond, body, (depth0, jnp.asarray(True, dtype=jnp.bool_))
+    )
+    node_depths = jnp.where(valid_mask, depth, -1)
+
+    # Push invalid/padding nodes past every real level so per-level slices never see them.
+    sort_key = jnp.where(valid_mask, node_depths, num_nodes)
+    nodes_by_level = jnp.argsort(sort_key, stable=True).astype(INDEX_DTYPE)
+
+    level_counts = jnp.bincount(
+        jnp.clip(node_depths, 0, num_nodes - 1),
+        weights=valid_mask.astype(INDEX_DTYPE),
+        length=num_nodes,
+    ).astype(INDEX_DTYPE)
+    level_offsets = jnp.concatenate(
+        [
+            jnp.zeros((1,), dtype=INDEX_DTYPE),
+            jnp.cumsum(level_counts, dtype=INDEX_DTYPE),
+        ],
+        axis=0,
+    )
+    return node_depths, nodes_by_level, level_offsets
+
+
 @partial(
     jax.jit,
     static_argnames=("order", "num_levels", "level_batch_width"),
@@ -473,12 +536,18 @@ def propagate_octree_solidfmm_l2l(
     """
 
     order = int(downward.order)
+    # Drive the level walk from the TOPOLOGICAL level partition (parent-relaxed), not the
+    # Morton node_depths view: the compressed octree can skip levels / repeat a box-depth,
+    # which breaks the child_level == parent_level + 1 invariant the L2L walk relies on.
+    topo_depths, topo_nodes_by_level, topo_level_offsets = _topological_level_partition(
+        octree.parent, octree.valid_mask
+    )
     if num_levels is None:
-        num_levels = int(octree.num_levels)
+        num_levels = int(jnp.max(jnp.where(octree.valid_mask, topo_depths, 0))) + 1
     else:
         num_levels = int(num_levels)
     active_level_offsets = jnp.asarray(
-        octree.level_offsets[: num_levels + 1], dtype=INDEX_DTYPE
+        topo_level_offsets[: num_levels + 1], dtype=INDEX_DTYPE
     )
     # Per-level dynamic_slice window: max per-level count from level_offsets, NOT
     # num_valid_nodes (total). See prepare_octree_solidfmm_complex_multipoles.
@@ -490,7 +559,7 @@ def propagate_octree_solidfmm_l2l(
         jnp.asarray(downward.locals_packed),
         jnp.asarray(downward.centers),
         jnp.asarray(octree.children, dtype=INDEX_DTYPE),
-        jnp.asarray(octree.nodes_by_level, dtype=INDEX_DTYPE),
+        topo_nodes_by_level,
         active_level_offsets,
         order=order,
         num_levels=num_levels,
@@ -750,12 +819,19 @@ def prepare_octree_solidfmm_complex_multipoles(
         max_leaf_size=max_leaf_size,
     )
 
+    # Drive the M2M level loop from the TOPOLOGICAL level partition (parent-relaxed), not
+    # the Morton node_depths view: the compressed octree can skip levels / repeat a
+    # box-depth, breaking the child_level == parent_level + 1 invariant the aggregation
+    # relies on (children then land in the parent's own batch and read as zero).
+    topo_depths, topo_nodes_by_level, topo_level_offsets = _topological_level_partition(
+        plan.parent, plan.valid_mask
+    )
     if num_levels is None:
-        num_levels = int(plan.num_levels)
+        num_levels = int(jnp.max(jnp.where(plan.valid_mask, topo_depths, 0))) + 1
     else:
         num_levels = int(num_levels)
     active_level_offsets = jnp.asarray(
-        plan.level_offsets[: num_levels + 1], dtype=INDEX_DTYPE
+        topo_level_offsets[: num_levels + 1], dtype=INDEX_DTYPE
     )
     # level_batch_width is the per-level dynamic_slice window for the M2M level loop:
     # it MUST be the max per-level node count (from level_offsets), NOT num_valid_nodes
@@ -769,7 +845,7 @@ def prepare_octree_solidfmm_complex_multipoles(
         packed,
         centers,
         plan.children,
-        plan.nodes_by_level,
+        topo_nodes_by_level,
         active_level_offsets,
         order=int(max_order),
         num_levels=num_levels,

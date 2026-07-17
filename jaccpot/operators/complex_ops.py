@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import math
 from functools import lru_cache, partial
 
 import jax
@@ -13,7 +12,6 @@ from .complex_harmonics import complex_R_solidfmm, complex_R_solidfmm_preserve_d
 from .dtypes import complex_dtype_for_real
 from .real_harmonics import (
     _compute_dehnen_B_matrix_complex,
-    _rotation_to_z_angles,
     sh_offset,
     sh_size,
 )
@@ -91,87 +89,6 @@ def enforce_conjugate_symmetry_batch(
     mirrored = signs * jnp.conjugate(out[..., pos_idx])
     out = out.at[..., neg_idx].set(mirrored)
     return out
-
-
-def _wigner_d_small_jax(ell: int, beta: Array, *, dtype: jnp.dtype) -> Array:
-    """Compute Wigner small-d matrix d^ell(beta) in JAX."""
-    l = int(ell)
-    beta = jnp.asarray(beta)
-    rdtype = jnp.real(jnp.zeros((), dtype=dtype)).dtype
-
-    m_vals = range(-l, l + 1)
-    n = 2 * l + 1
-    dmat = jnp.zeros((n, n), dtype=dtype)
-
-    cb2 = jnp.cos(beta / 2.0).astype(rdtype)
-    sb2 = jnp.sin(beta / 2.0).astype(rdtype)
-
-    def lgamma(x: Array) -> Array:
-        return jax.lax.lgamma(x)
-
-    for i, m in enumerate(m_vals):
-        for j, mp in enumerate(m_vals):
-            # k range
-            k_min = max(0, m - mp)
-            k_max = min(l + m, l - mp)
-            if k_min > k_max:
-                continue
-
-            pref = jnp.exp(
-                0.5
-                * (
-                    lgamma(l + m + 1.0)
-                    + lgamma(l - m + 1.0)
-                    + lgamma(l + mp + 1.0)
-                    + lgamma(l - mp + 1.0)
-                )
-            ).astype(rdtype)
-
-            acc = jnp.asarray(0.0, dtype=rdtype)
-            for k in range(k_min, k_max + 1):
-                denom = (
-                    lgamma(l + m - k + 1.0)
-                    + lgamma(k + 1.0)
-                    + lgamma(mp - m + k + 1.0)
-                    + lgamma(l - mp - k + 1.0)
-                )
-                sign = (-1.0) ** k
-                pow_c = 2 * l + m - mp - 2 * k
-                pow_s = mp - m + 2 * k
-                term = sign * jnp.exp(-denom) * (cb2**pow_c) * (sb2**pow_s)
-                acc = acc + term
-
-            dmat = dmat.at[i, j].set(pref * acc)
-
-    return dmat.astype(dtype)
-
-
-def wigner_D_complex_jax(
-    ell: int,
-    alpha: Array,
-    beta: Array,
-    gamma: Array,
-    *,
-    dtype: jnp.dtype,
-    no_condon_shortley: bool = True,
-) -> Array:
-    """Compute complex Wigner D^ell(alpha,beta,gamma) in JAX."""
-    l = int(ell)
-    alpha = jnp.asarray(alpha)
-    beta = jnp.asarray(beta)
-    gamma = jnp.asarray(gamma)
-
-    dsmall = _wigner_d_small_jax(l, beta, dtype=dtype)
-    m_vals = jnp.arange(-l, l + 1, dtype=jnp.int32)
-    phase_left = jnp.exp(-1j * m_vals * alpha).astype(dtype)
-    phase_right = jnp.exp(-1j * m_vals * gamma).astype(dtype)
-    D = jnp.diag(phase_left) @ dsmall @ jnp.diag(phase_right)
-
-    if no_condon_shortley:
-        S = jnp.diag(((-1.0) ** m_vals).astype(dtype))
-        D = S @ D @ S
-
-    return D
 
 
 @lru_cache(maxsize=None)
@@ -1041,14 +958,6 @@ def _solidfmm_rotscale(
     return re_out, im_out
 
 
-def _angles_from_delta(delta: Array) -> tuple[Array, Array]:
-    x, y, z = delta[0], delta[1], delta[2]
-    rho = jnp.sqrt(x * x + y * y)
-    alpha = jnp.arctan2(y, x)
-    beta = jnp.arctan2(rho, z)
-    return alpha, beta
-
-
 def _angles_from_delta_solidfmm(delta: Array) -> tuple[Array, Array]:
     """Angles matching solidfmm's euler() convention.
 
@@ -1062,123 +971,6 @@ def _angles_from_delta_solidfmm(delta: Array) -> tuple[Array, Array]:
     alpha = jnp.arctan2(x, y)
     beta = jnp.arctan2(-rho, z)
     return alpha, beta
-
-
-def _rotate_multipole_to_z(block_complex: Array, delta: Array, ell: int) -> Array:
-    alpha, beta = _angles_from_delta(delta)
-    B_T, B_U = _complex_swap_matrices(ell, dtype=block_complex.dtype)
-    Dz_alpha = _complex_Dz(ell, -alpha, dtype=block_complex.dtype)
-    Dz_beta = _complex_Dz(ell, -beta, dtype=block_complex.dtype)
-    D = B_U @ Dz_beta @ B_U @ Dz_alpha
-    return D @ block_complex
-
-
-def _rotate_local_from_z(block_complex: Array, delta: Array, ell: int) -> Array:
-    alpha, beta = _angles_from_delta(delta)
-    B_T, _ = _complex_swap_matrices(ell, dtype=block_complex.dtype)
-    Dz_alpha = _complex_Dz(ell, alpha, dtype=block_complex.dtype)
-    Dz_beta = _complex_Dz(ell, beta, dtype=block_complex.dtype)
-    D = Dz_alpha @ B_T @ Dz_beta @ B_T
-    return D @ block_complex
-
-
-@partial(jax.jit, static_argnames=("order",))
-def rotate_complex_multipole_to_z(
-    multipole: Array,
-    delta: Array,
-    *,
-    order: int,
-) -> Array:
-    """Rotate packed complex multipoles into the z-aligned frame."""
-    p = int(order)
-    multipole = jnp.asarray(multipole)
-    delta = jnp.asarray(delta)
-
-    blocks = _complex_rotation_blocks_to_z(
-        delta, order=p, basis="multipole", dtype=multipole.dtype
-    )
-    return _apply_complex_rotation_blocks_batched(multipole, blocks, order=p)
-
-
-@partial(jax.jit, static_argnames=("order",))
-def rotate_complex_multipole_from_z(
-    multipole: Array,
-    delta: Array,
-    *,
-    order: int,
-) -> Array:
-    """Rotate packed complex multipoles back from the z-aligned frame."""
-    p = int(order)
-    multipole = jnp.asarray(multipole)
-    delta = jnp.asarray(delta)
-
-    blocks = _complex_rotation_blocks_from_z(
-        delta, order=p, basis="multipole", dtype=multipole.dtype
-    )
-    return _apply_complex_rotation_blocks_batched(multipole, blocks, order=p)
-
-
-@partial(jax.jit, static_argnames=("order",))
-def rotate_complex_local_from_z(
-    local: Array,
-    delta: Array,
-    *,
-    order: int,
-) -> Array:
-    """Rotate packed complex locals back from the z-aligned frame."""
-    p = int(order)
-    local = jnp.asarray(local)
-    delta = jnp.asarray(delta)
-
-    blocks = _complex_rotation_blocks_from_z(
-        delta, order=p, basis="local", dtype=local.dtype
-    )
-    return _apply_complex_rotation_blocks_batched(local, blocks, order=p)
-
-
-@partial(jax.jit, static_argnames=("order",))
-def rotate_complex_local_to_z(
-    local: Array,
-    delta: Array,
-    *,
-    order: int,
-) -> Array:
-    """Rotate packed complex locals into the z-aligned frame."""
-    p = int(order)
-    local = jnp.asarray(local)
-    delta = jnp.asarray(delta)
-
-    blocks = _complex_rotation_blocks_to_z(
-        delta, order=p, basis="local", dtype=local.dtype
-    )
-    return _apply_complex_rotation_blocks_batched(local, blocks, order=p)
-
-
-def _complex_rotation_blocks_to_z(
-    delta: Array,
-    *,
-    order: int,
-    basis: str,
-    dtype: jnp.dtype,
-) -> tuple[Array, ...]:
-    """Precompute complex rotation blocks mapping to the z-aligned frame."""
-    if basis not in ("multipole", "local"):
-        raise ValueError("basis must be 'multipole' or 'local'")
-    p = int(order)
-    delta = jnp.asarray(delta)
-    alpha, beta = _angles_from_delta(delta)
-
-    blocks = []
-    for ell in range(p + 1):
-        B_T, B_U = _complex_swap_matrices(ell, dtype=dtype)
-        Dz_alpha = _complex_Dz(ell, -alpha, dtype=dtype)
-        Dz_beta = _complex_Dz(ell, -beta, dtype=dtype)
-        if basis == "multipole":
-            D = B_U @ Dz_beta @ B_U @ Dz_alpha
-        else:
-            D = B_T @ Dz_beta @ B_T @ Dz_alpha
-        blocks.append(D)
-    return tuple(blocks)
 
 
 def _complex_rotation_blocks_to_z_solidfmm(
@@ -1204,33 +996,6 @@ def _complex_rotation_blocks_to_z_solidfmm(
             D = B_U @ Dz_beta @ B_U @ Dz_alpha
         else:
             D = B_T @ Dz_beta @ B_T @ Dz_alpha
-        blocks.append(D)
-    return tuple(blocks)
-
-
-def _complex_rotation_blocks_from_z(
-    delta: Array,
-    *,
-    order: int,
-    basis: str,
-    dtype: jnp.dtype,
-) -> tuple[Array, ...]:
-    """Precompute complex rotation blocks mapping from the z-aligned frame."""
-    if basis not in ("multipole", "local"):
-        raise ValueError("basis must be 'multipole' or 'local'")
-    p = int(order)
-    delta = jnp.asarray(delta)
-    alpha, beta = _angles_from_delta(delta)
-
-    blocks = []
-    for ell in range(p + 1):
-        B_T, B_U = _complex_swap_matrices(ell, dtype=dtype)
-        Dz_alpha = _complex_Dz(ell, alpha, dtype=dtype)
-        Dz_beta = _complex_Dz(ell, beta, dtype=dtype)
-        if basis == "multipole":
-            D = Dz_alpha @ B_U @ Dz_beta @ B_U
-        else:
-            D = Dz_alpha @ B_T @ Dz_beta @ B_T
         blocks.append(D)
     return tuple(blocks)
 
@@ -1309,30 +1074,6 @@ def _blocks_to_padded_array(
     return out
 
 
-def _complex_rotation_blocks_to_z_padded(
-    delta: Array,
-    *,
-    order: int,
-    basis: str,
-    dtype: jnp.dtype,
-) -> Array:
-    blocks = _complex_rotation_blocks_to_z(delta, order=order, basis=basis, dtype=dtype)
-    return _blocks_to_padded_array(blocks, order=order, dtype=dtype)
-
-
-def _complex_rotation_blocks_from_z_padded(
-    delta: Array,
-    *,
-    order: int,
-    basis: str,
-    dtype: jnp.dtype,
-) -> Array:
-    blocks = _complex_rotation_blocks_from_z(
-        delta, order=order, basis=basis, dtype=dtype
-    )
-    return _blocks_to_padded_array(blocks, order=order, dtype=dtype)
-
-
 def _complex_rotation_blocks_to_z_solidfmm_padded(
     delta: Array,
     *,
@@ -1366,25 +1107,6 @@ def _complex_rotation_blocks_from_z_solidfmm_padded(
 
 
 @partial(jax.jit, static_argnames=("order", "basis", "dtype"))
-def complex_rotation_blocks_to_z_batch(
-    deltas: Array,
-    *,
-    order: int,
-    basis: str,
-    dtype: jnp.dtype,
-) -> Array:
-    """Batch padded rotation blocks to z-aligned frame."""
-    return jax.vmap(
-        lambda d: _complex_rotation_blocks_to_z_padded(
-            d,
-            order=order,
-            basis=basis,
-            dtype=dtype,
-        )
-    )(deltas)
-
-
-@partial(jax.jit, static_argnames=("order", "basis", "dtype"))
 def complex_rotation_blocks_to_z_solidfmm_batch(
     deltas: Array,
     *,
@@ -1395,25 +1117,6 @@ def complex_rotation_blocks_to_z_solidfmm_batch(
     """Batch padded rotation blocks to z using solidfmm convention."""
     return jax.vmap(
         lambda d: _complex_rotation_blocks_to_z_solidfmm_padded(
-            d,
-            order=order,
-            basis=basis,
-            dtype=dtype,
-        )
-    )(deltas)
-
-
-@partial(jax.jit, static_argnames=("order", "basis", "dtype"))
-def complex_rotation_blocks_from_z_batch(
-    deltas: Array,
-    *,
-    order: int,
-    basis: str,
-    dtype: jnp.dtype,
-) -> Array:
-    """Batch padded rotation blocks from z-aligned frame."""
-    return jax.vmap(
-        lambda d: _complex_rotation_blocks_from_z_padded(
             d,
             order=order,
             basis=basis,
@@ -1470,19 +1173,6 @@ def _apply_complex_rotation_blocks_padded_batch(
     return jax.vmap(lambda c: _unpack_coeffs_by_ell(c, order=order))(rotated)
 
 
-def rotate_complex_multipole_to_z_cached(
-    multipole: Array,
-    delta: Array,
-    *,
-    order: int,
-) -> Array:
-    """Rotate packed complex multipoles using precomputed blocks."""
-    blocks = _complex_rotation_blocks_to_z(
-        delta, order=order, basis="multipole", dtype=jnp.asarray(multipole).dtype
-    )
-    return _apply_complex_rotation_blocks_batched(multipole, blocks, order=order)
-
-
 def rotate_complex_multipole_to_z_solidfmm(
     multipole: Array,
     delta: Array,
@@ -1491,19 +1181,6 @@ def rotate_complex_multipole_to_z_solidfmm(
 ) -> Array:
     """Rotate multipoles to z using solidfmm's swap+z-rotation convention."""
     blocks = _complex_rotation_blocks_to_z_solidfmm(
-        delta, order=order, basis="multipole", dtype=jnp.asarray(multipole).dtype
-    )
-    return _apply_complex_rotation_blocks_batched(multipole, blocks, order=order)
-
-
-def rotate_complex_multipole_from_z_cached(
-    multipole: Array,
-    delta: Array,
-    *,
-    order: int,
-) -> Array:
-    """Rotate packed complex multipoles back using precomputed blocks."""
-    blocks = _complex_rotation_blocks_from_z(
         delta, order=order, basis="multipole", dtype=jnp.asarray(multipole).dtype
     )
     return _apply_complex_rotation_blocks_batched(multipole, blocks, order=order)
@@ -1522,19 +1199,6 @@ def rotate_complex_multipole_from_z_solidfmm(
     return _apply_complex_rotation_blocks_batched(multipole, blocks, order=order)
 
 
-def rotate_complex_local_to_z_cached(
-    local: Array,
-    delta: Array,
-    *,
-    order: int,
-) -> Array:
-    """Rotate packed complex locals using precomputed blocks."""
-    blocks = _complex_rotation_blocks_to_z(
-        delta, order=order, basis="local", dtype=jnp.asarray(local).dtype
-    )
-    return _apply_complex_rotation_blocks_batched(local, blocks, order=order)
-
-
 def rotate_complex_local_to_z_solidfmm(
     local: Array,
     delta: Array,
@@ -1543,19 +1207,6 @@ def rotate_complex_local_to_z_solidfmm(
 ) -> Array:
     """Rotate locals to z using solidfmm's swap+z-rotation convention."""
     blocks = _complex_rotation_blocks_to_z_solidfmm(
-        delta, order=order, basis="local", dtype=jnp.asarray(local).dtype
-    )
-    return _apply_complex_rotation_blocks_batched(local, blocks, order=order)
-
-
-def rotate_complex_local_from_z_cached(
-    local: Array,
-    delta: Array,
-    *,
-    order: int,
-) -> Array:
-    """Rotate packed complex locals back using precomputed blocks."""
-    blocks = _complex_rotation_blocks_from_z(
         delta, order=order, basis="local", dtype=jnp.asarray(local).dtype
     )
     return _apply_complex_rotation_blocks_batched(local, blocks, order=order)
@@ -1574,212 +1225,25 @@ def rotate_complex_local_from_z_solidfmm(
     return _apply_complex_rotation_blocks_batched(local, blocks, order=order)
 
 
-def rotate_complex_multipole_to_z_wigner(
-    multipole: Array,
-    delta: Array,
-    *,
-    order: int,
-) -> Array:
-    """Rotate multipoles to z-axis using Wigner D matrices (JAX)."""
-    p = int(order)
-    multipole = jnp.asarray(multipole)
-    delta = jnp.asarray(delta)
-    alpha, beta, gamma = _rotation_to_z_angles(delta[0], delta[1], delta[2])
-
-    out = jnp.zeros_like(multipole)
-    for ell in range(p + 1):
-        sl = slice(sh_offset(ell), sh_offset(ell + 1))
-        D = wigner_D_complex_jax(
-            ell,
-            alpha,
-            beta,
-            gamma,
-            dtype=multipole.dtype,
-            no_condon_shortley=True,
-        )
-        out = out.at[sl].set(D @ multipole[sl])
-    return out
-
-
-def rotate_complex_multipole_from_z_wigner(
-    multipole: Array,
-    delta: Array,
-    *,
-    order: int,
-) -> Array:
-    """Rotate multipoles back from z-axis using Wigner D matrices (JAX)."""
-    p = int(order)
-    multipole = jnp.asarray(multipole)
-    delta = jnp.asarray(delta)
-    alpha, beta, gamma = _rotation_to_z_angles(delta[0], delta[1], delta[2])
-
-    out = jnp.zeros_like(multipole)
-    for ell in range(p + 1):
-        sl = slice(sh_offset(ell), sh_offset(ell + 1))
-        D = wigner_D_complex_jax(
-            ell,
-            -gamma,
-            -beta,
-            -alpha,
-            dtype=multipole.dtype,
-            no_condon_shortley=True,
-        )
-        out = out.at[sl].set(D @ multipole[sl])
-    return out
-
-
-def rotate_complex_local_to_z_wigner(
-    local: Array,
-    delta: Array,
-    *,
-    order: int,
-) -> Array:
-    """Rotate locals to z-axis using Wigner D matrices (JAX)."""
-    p = int(order)
-    local = jnp.asarray(local)
-    delta = jnp.asarray(delta)
-    alpha, beta, gamma = _rotation_to_z_angles(delta[0], delta[1], delta[2])
-
-    out = jnp.zeros_like(local)
-    for ell in range(p + 1):
-        sl = slice(sh_offset(ell), sh_offset(ell + 1))
-        D = wigner_D_complex_jax(
-            ell,
-            alpha,
-            beta,
-            gamma,
-            dtype=local.dtype,
-            no_condon_shortley=True,
-        )
-        out = out.at[sl].set(D @ local[sl])
-    return out
-
-
-def rotate_complex_local_from_z_wigner(
-    local: Array,
-    delta: Array,
-    *,
-    order: int,
-) -> Array:
-    """Rotate locals back from z-axis using Wigner D matrices (JAX)."""
-    p = int(order)
-    local = jnp.asarray(local)
-    delta = jnp.asarray(delta)
-    alpha, beta, gamma = _rotation_to_z_angles(delta[0], delta[1], delta[2])
-
-    out = jnp.zeros_like(local)
-    for ell in range(p + 1):
-        sl = slice(sh_offset(ell), sh_offset(ell + 1))
-        D = wigner_D_complex_jax(
-            ell,
-            -gamma,
-            -beta,
-            -alpha,
-            dtype=local.dtype,
-            no_condon_shortley=True,
-        )
-        out = out.at[sl].set(D @ local[sl])
-    return out
-
-
-@partial(jax.jit, static_argnames=("order",))
-def rotate_complex_multipole_to_z_batch(
-    multipoles: Array,
-    deltas: Array,
-    *,
-    order: int,
-) -> Array:
-    """Batch rotate complex multipoles into z-aligned frame."""
-    return jax.vmap(
-        lambda m, d: rotate_complex_multipole_to_z_cached(m, d, order=order),
-        in_axes=(0, 0),
-        out_axes=0,
-    )(multipoles, deltas)
-
-
-@partial(jax.jit, static_argnames=("order",))
-def rotate_complex_multipole_from_z_batch(
-    multipoles: Array,
-    deltas: Array,
-    *,
-    order: int,
-) -> Array:
-    """Batch rotate complex multipoles back from z-aligned frame."""
-    return jax.vmap(
-        lambda m, d: rotate_complex_multipole_from_z_cached(m, d, order=order),
-        in_axes=(0, 0),
-        out_axes=0,
-    )(multipoles, deltas)
-
-
-@partial(jax.jit, static_argnames=("order",))
-def rotate_complex_local_to_z_batch(
-    locals: Array,
-    deltas: Array,
-    *,
-    order: int,
-) -> Array:
-    """Batch rotate complex locals into z-aligned frame."""
-    return jax.vmap(
-        lambda m, d: rotate_complex_local_to_z_cached(m, d, order=order),
-        in_axes=(0, 0),
-        out_axes=0,
-    )(locals, deltas)
-
-
-@partial(jax.jit, static_argnames=("order",))
-def rotate_complex_local_from_z_batch(
-    locals: Array,
-    deltas: Array,
-    *,
-    order: int,
-) -> Array:
-    """Batch rotate complex locals back from z-aligned frame."""
-    return jax.vmap(
-        lambda m, d: rotate_complex_local_from_z_cached(m, d, order=order),
-        in_axes=(0, 0),
-        out_axes=0,
-    )(locals, deltas)
-
-
 @partial(jax.jit, static_argnames=("order", "rotation"))
 def m2m_complex(
     multipole: Array,
     delta: Array,
     *,
     order: int,
-    rotation: str = "bdz",
+    rotation: str = "solidfmm",
 ) -> Array:
     """Complex M2M using A6: rotate → z-translate → rotate back."""
+    if rotation != "solidfmm":
+        raise ValueError("rotation must be 'solidfmm'")
     p = int(order)
     multipole = jnp.asarray(multipole)
     delta = jnp.asarray(delta)
-    delta_m2m = -delta
-    if rotation == "solidfmm":
-        delta_m2m = delta
 
     r = jnp.sqrt(jnp.maximum(jnp.dot(delta, delta), 1e-60))
-    if rotation == "wigner":
-        M_rot = rotate_complex_multipole_to_z_wigner(multipole, delta_m2m, order=p)
-    elif rotation == "cached":
-        M_rot = rotate_complex_multipole_to_z_cached(multipole, delta_m2m, order=p)
-    elif rotation == "solidfmm":
-        M_rot = rotate_complex_multipole_to_z_solidfmm(multipole, delta_m2m, order=p)
-    elif rotation == "bdz":
-        M_rot = rotate_complex_multipole_to_z(multipole, delta_m2m, order=p)
-    else:
-        raise ValueError("rotation must be 'bdz', 'cached', 'solidfmm', or 'wigner'")
-    if rotation == "solidfmm":
-        M_z = translate_along_z_m2m_complex_solidfmm(M_rot, r, order=p)
-    else:
-        M_z = translate_along_z_m2m_complex(M_rot, r, order=p)
-    if rotation == "wigner":
-        return rotate_complex_multipole_from_z_wigner(M_z, delta_m2m, order=p)
-    if rotation == "cached":
-        return rotate_complex_multipole_from_z_cached(M_z, delta_m2m, order=p)
-    if rotation == "solidfmm":
-        return rotate_complex_multipole_from_z_solidfmm(M_z, delta_m2m, order=p)
-    return rotate_complex_multipole_from_z(M_z, delta_m2m, order=p)
+    M_rot = rotate_complex_multipole_to_z_solidfmm(multipole, delta, order=p)
+    M_z = translate_along_z_m2m_complex_solidfmm(M_rot, r, order=p)
+    return rotate_complex_multipole_from_z_solidfmm(M_z, delta, order=p)
 
 
 @partial(jax.jit, static_argnames=("order", "rotation"))
@@ -1788,32 +1252,19 @@ def l2l_complex(
     delta: Array,
     *,
     order: int,
-    rotation: str = "bdz",
+    rotation: str = "solidfmm",
 ) -> Array:
     """Complex L2L using A6: rotate → z-translate → rotate back."""
+    if rotation != "solidfmm":
+        raise ValueError("rotation must be 'solidfmm'")
     p = int(order)
     local = jnp.asarray(local)
     delta = jnp.asarray(delta)
 
     r = jnp.sqrt(jnp.maximum(jnp.dot(delta, delta), 1e-60))
-    if rotation == "wigner":
-        L_rot = rotate_complex_local_to_z_wigner(local, delta, order=p)
-    elif rotation == "cached":
-        L_rot = rotate_complex_local_to_z_cached(local, delta, order=p)
-    elif rotation == "solidfmm":
-        L_rot = rotate_complex_local_to_z_solidfmm(local, delta, order=p)
-    elif rotation == "bdz":
-        L_rot = rotate_complex_local_to_z(local, delta, order=p)
-    else:
-        raise ValueError("rotation must be 'bdz', 'cached', 'solidfmm', or 'wigner'")
+    L_rot = rotate_complex_local_to_z_solidfmm(local, delta, order=p)
     L_z = translate_along_z_l2l_complex(L_rot, r, order=p)
-    if rotation == "wigner":
-        return rotate_complex_local_from_z_wigner(L_z, delta, order=p)
-    if rotation == "cached":
-        return rotate_complex_local_from_z_cached(L_z, delta, order=p)
-    if rotation == "solidfmm":
-        return rotate_complex_local_from_z_solidfmm(L_z, delta, order=p)
-    return rotate_complex_local_from_z(L_z, delta, order=p)
+    return rotate_complex_local_from_z_solidfmm(L_z, delta, order=p)
 
 
 def m2l_complex_reference(
@@ -1821,9 +1272,11 @@ def m2l_complex_reference(
     delta: Array,
     *,
     order: int,
-    rotation: str = "bdz",
+    rotation: str = "solidfmm",
 ) -> Array:
     """Reference M2L in complex basis (rotate → z-translate → rotate back)."""
+    if rotation != "solidfmm":
+        raise ValueError("rotation must be 'solidfmm'")
     p = int(order)
     multipole = jnp.asarray(multipole)
     delta = jnp.asarray(delta)
@@ -1831,27 +1284,12 @@ def m2l_complex_reference(
     ncoeff = sh_size(p)
     multipole = multipole[:ncoeff]
 
-    if rotation == "wigner":
-        M_rotated = rotate_complex_multipole_to_z_wigner(multipole, delta, order=p)
-    elif rotation == "cached":
-        M_rotated = rotate_complex_multipole_to_z_cached(multipole, delta, order=p)
-    elif rotation == "solidfmm":
-        M_rotated = rotate_complex_multipole_to_z_solidfmm(multipole, delta, order=p)
-    elif rotation == "bdz":
-        M_rotated = rotate_complex_multipole_to_z(multipole, delta, order=p)
-    else:
-        raise ValueError("rotation must be 'bdz', 'cached', 'solidfmm', or 'wigner'")
+    M_rotated = rotate_complex_multipole_to_z_solidfmm(multipole, delta, order=p)
 
     r = jnp.sqrt(jnp.maximum(jnp.dot(delta, delta), 1e-60))
     local_z = translate_along_z_m2l_complex(M_rotated, r, order=p)
 
-    if rotation == "wigner":
-        return rotate_complex_local_from_z_wigner(local_z, delta, order=p)
-    if rotation == "cached":
-        return rotate_complex_local_from_z_cached(local_z, delta, order=p)
-    if rotation == "solidfmm":
-        return rotate_complex_local_from_z_solidfmm(local_z, delta, order=p)
-    return rotate_complex_local_from_z(local_z, delta, order=p)
+    return rotate_complex_local_from_z_solidfmm(local_z, delta, order=p)
 
 
 @partial(jax.jit, static_argnames=("order", "rotation"))
@@ -1860,7 +1298,7 @@ def m2l_complex_reference_batch(
     deltas: Array,
     *,
     order: int,
-    rotation: str = "bdz",
+    rotation: str = "solidfmm",
 ) -> Array:
     """Batch M2L in complex basis (rotate → z-translate → rotate back)."""
     return jax.vmap(
@@ -1946,7 +1384,7 @@ def l2l_complex_batch(
     deltas: Array,
     *,
     order: int,
-    rotation: str = "bdz",
+    rotation: str = "solidfmm",
 ) -> Array:
     """Batch L2L in complex basis."""
     return jax.vmap(
