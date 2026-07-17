@@ -11760,6 +11760,70 @@ def _m2l_real_batch_kernel_pallas(
     return m2l_rot_scale_real_batch(multipoles, deltas, order=order, use_pallas=True)
 
 
+def _real_m2l_pallas_active() -> bool:
+    """Whether to route the real-basis M2L z-core through the Pallas kernel.
+
+    Gated by ``JACCPOT_STATIC_STRICT_FUSED_M2L_PALLAS`` and the sm_80+ real-M2L
+    support check (falls back to the pure-JAX rot-scale otherwise). Trace-time;
+    the flag does not change within a compiled run.
+    """
+    flag = (
+        str(os.environ.get("JACCPOT_STATIC_STRICT_FUSED_M2L_PALLAS", "0"))
+        .strip()
+        .lower()
+    )
+    if flag not in {"1", "true", "yes", "on"}:
+        return False
+    try:
+        from jaccpot.pallas.m2l_core_z_real import pallas_m2l_real_supported
+
+        return bool(pallas_m2l_real_supported())
+    except Exception:
+        return False
+
+
+def _m2l_real_batch_kernel_fused_pallas(
+    multipoles: Array,
+    deltas: Array,
+    *,
+    order: int,
+    m2l_impl: str,
+) -> Array:
+    """Real-basis M2L via the FULLY-fused Pallas kernel (rotate+z-translate+rotate
+    in one launch). Builds the real rotation blocks + radii from deltas."""
+    mode = str(m2l_impl).strip().lower()
+    if mode != "rot_scale":
+        raise ValueError("real-basis m2l_impl must be 'rot_scale'")
+    from jaccpot.operators.m2l_real_rot_scale import (
+        real_rotation_blocks_from_z_local_batch,
+        real_rotation_blocks_to_z_multipole_batch,
+    )
+    from jaccpot.pallas.m2l_real_fused import m2l_real_fused_pallas
+
+    r = jnp.linalg.norm(deltas, axis=1)
+    bto = real_rotation_blocks_to_z_multipole_batch(
+        deltas, order=order, dtype=multipoles.dtype
+    )
+    bfr = real_rotation_blocks_from_z_local_batch(
+        deltas, order=order, dtype=multipoles.dtype
+    )
+    return m2l_real_fused_pallas(multipoles, bto, bfr, r, order=order)
+
+
+def _apply_real_m2l(src_mult, deltas, *, order, m2l_impl):
+    """Real-basis batched M2L: fully-fused Pallas kernel when enabled, else pure-JAX.
+
+    When the fused-M2L Pallas flag is active, route through the single-launch fused
+    kernel (rotate -> z-translate -> rotate-back on-chip), collapsing the per-pair
+    JAX rotation launches. Otherwise the pure-JAX rot-scale path.
+    """
+    if _real_m2l_pallas_active():
+        return _m2l_real_batch_kernel_fused_pallas(
+            src_mult, deltas, order=order, m2l_impl=m2l_impl
+        )
+    return _m2l_real_batch_kernel(src_mult, deltas, order=order, m2l_impl=m2l_impl)
+
+
 @partial(jax.jit, static_argnames=("order",))
 def _l2l_real_batch_kernel(
     coeffs: Array,
@@ -11769,6 +11833,120 @@ def _l2l_real_batch_kernel(
 ) -> Array:
     """Vectorized real-basis L2L translation kernel."""
     return jax.vmap(lambda c, d: l2l_real(c, d, order=order))(coeffs, deltas)
+
+
+def _fused_complex_m2l_pallas_active() -> bool:
+    """Whether to route the complex-basis M2L through the fused Pallas kernel.
+
+    Gated by ``JACCPOT_STATIC_STRICT_FUSED_M2L_PALLAS`` and the sm_80+ support
+    check; falls back to the solidfmm reference batch on unsupported hardware.
+    Evaluated at trace time; the flag does not change within a compiled run.
+
+    Returns
+    -------
+    bool
+        ``True`` when the flag is set and an Ampere+ GPU is available.
+    """
+    flag = (
+        str(os.environ.get("JACCPOT_STATIC_STRICT_FUSED_M2L_PALLAS", "0"))
+        .strip()
+        .lower()
+    )
+    if flag not in {"1", "true", "yes", "on"}:
+        return False
+    try:
+        from jaccpot.pallas.m2l_complex_fused import (
+            pallas_m2l_complex_fused_supported,
+        )
+
+        return bool(pallas_m2l_complex_fused_supported())
+    except Exception:
+        return False
+
+
+def _m2l_complex_batch_kernel_fused_pallas(
+    src_mult: Array,
+    deltas: Array,
+    *,
+    order: int,
+) -> Array:
+    """Complex-basis M2L via the fully-fused Pallas kernel.
+
+    Adapter over solidfmm: solidfmm is the sole rotation strategy, and it already
+    materialises the block-diagonal rotate-to-z / rotate-from-z matrices the fused
+    kernel consumes (``complex_rotation_blocks_*_z_solidfmm_batch``, padded to
+    ``[N, p+1, 2p+1, 2p+1]``). This builds those blocks plus the pair radii and
+    hands them to the kernel, which keeps the rotate -> z-translate -> rotate-back
+    intermediates on-chip. Numerically equivalent to ``_m2l_complex_batch_kernel``
+    (the solidfmm reference); the kernel is purely an execution accelerator.
+
+    Parameters
+    ----------
+    src_mult : Array
+        Complex multipole coefficients ``[N, (p+1)^2]`` for each pair.
+    deltas : Array
+        Target-minus-source center displacements ``[N, 3]``.
+    order : int
+        Expansion order ``p``.
+
+    Returns
+    -------
+    Array
+        Complex local contributions ``[N, (p+1)^2]``.
+    """
+    from jaccpot.pallas.m2l_complex_fused import m2l_complex_fused_pallas
+
+    r = jnp.sqrt(jnp.sum(deltas * deltas, axis=-1))
+    blocks_to_z = complex_rotation_blocks_to_z_solidfmm_batch(
+        deltas,
+        order=order,
+        basis="multipole",
+        dtype=src_mult.dtype,
+    )
+    blocks_from_z = complex_rotation_blocks_from_z_solidfmm_batch(
+        deltas,
+        order=order,
+        basis="local",
+        dtype=src_mult.dtype,
+    )
+    return m2l_complex_fused_pallas(
+        src_mult, blocks_to_z, blocks_from_z, r, order=order
+    )
+
+
+def _apply_complex_m2l(
+    src_mult: Array,
+    deltas: Array,
+    *,
+    order: int,
+    rotation: str,
+) -> Array:
+    """Complex-basis batched M2L: fused Pallas kernel when enabled, else solidfmm.
+
+    When the fused-M2L Pallas flag is active (and the GPU is Ampere+), route
+    through the single-launch fused kernel fed by solidfmm rotation blocks.
+    Otherwise use the default solidfmm rotate/z-translate/rotate-back reference
+    batch. Both paths are numerically equivalent.
+
+    Parameters
+    ----------
+    src_mult : Array
+        Complex multipole coefficients ``[N, (p+1)^2]`` for each pair.
+    deltas : Array
+        Target-minus-source center displacements ``[N, 3]``.
+    order : int
+        Expansion order ``p``.
+    rotation : str
+        Rotation strategy; must be ``"solidfmm"``.
+
+    Returns
+    -------
+    Array
+        Complex local contributions ``[N, (p+1)^2]``.
+    """
+    if _fused_complex_m2l_pallas_active():
+        return _m2l_complex_batch_kernel_fused_pallas(src_mult, deltas, order=order)
+    return _m2l_complex_batch_kernel(src_mult, deltas, order=order, rotation=rotation)
 
 
 @partial(
@@ -11798,7 +11976,7 @@ def _accumulate_solidfmm_m2l_fullbatch(
     src_mult = multip_packed[safe_src]
     deltas = centers[safe_tgt] - centers[safe_src]
 
-    contribs = _m2l_complex_batch_kernel(
+    contribs = _apply_complex_m2l(
         src_mult,
         deltas,
         order=order,
@@ -11851,7 +12029,7 @@ def _accumulate_solidfmm_m2l_chunked_scan(
             src_mult = multip_packed[src_chunk]
             deltas = centers[tgt_chunk] - centers[src_chunk]
 
-            contribs = _m2l_complex_batch_kernel(
+            contribs = _apply_complex_m2l(
                 src_mult,
                 deltas,
                 order=order,
@@ -12064,7 +12242,7 @@ def _accumulate_real_m2l_fullbatch(
     safe_tgt = jnp.where(valid, raw_tgt, 0)
     src_mult = multip_packed_real[safe_src]
     deltas = centers[safe_tgt] - centers[safe_src]
-    contribs = _m2l_real_batch_kernel(
+    contribs = _apply_real_m2l(
         src_mult,
         deltas,
         order=order,
@@ -12142,7 +12320,7 @@ def _accumulate_real_m2l_chunked_scan(
             tgt_chunk = jnp.where(valid, tgt_chunk_raw, 0)
             src_mult = multip_packed_real[src_chunk]
             deltas = centers[tgt_chunk] - centers[src_chunk]
-            contribs = _m2l_real_batch_kernel(
+            contribs = _apply_real_m2l(
                 src_mult,
                 deltas,
                 order=order,
