@@ -135,12 +135,18 @@ def test_octree_complex_multipoles_match_radix_upward_on_mapped_nodes(octree_sta
         state.masses_sorted,
         max_order=3,
     )
+    # Compare like-for-like: the octree M2M uses the "solidfmm" rotation, so the radix
+    # reference must too. The radix default ("cached") is a different M2M operator and
+    # disagrees with a direct P2M about the root center, so comparing against it would
+    # test operator-equality, not tree-equivalence. (Both octree and radix "solidfmm"
+    # results match the direct P2M ground truth to float precision.)
     radix_upward = prepare_solidfmm_complex_upward_sweep(
         state.tree,
         state.positions_sorted,
         state.masses_sorted,
         max_order=3,
         max_leaf_size=8,
+        rotation="solidfmm",
     )
 
     root_oct = int(np.asarray(state.octree.radix_node_to_oct)[0])

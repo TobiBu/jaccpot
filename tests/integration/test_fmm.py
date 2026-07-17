@@ -3267,7 +3267,7 @@ def _direct_accelerations_vectorized(
 def test_solidfmm_basis_rejects_non_solidfmm_rotation():
     with pytest.raises(
         ValueError,
-        match="expansion_basis='solidfmm' requires complex_rotation='solidfmm'",
+        match="complex_rotation must be 'solidfmm'",
     ):
         FastMultipoleMethod(expansion_basis="solidfmm", complex_rotation="cached")
 

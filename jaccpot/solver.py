@@ -216,7 +216,7 @@ def _pop_legacy_runtime_overrides(
     """Resolve runtime-facing legacy kwargs while preserving old behavior."""
     complex_rotation = advanced_cfg.farfield.rotation
     if complex_rotation is None:
-        complex_rotation = "solidfmm" if basis == "solidfmm" else "cached"
+        complex_rotation = "solidfmm"
     legacy_rotation = legacy_kwargs.pop("complex_rotation", None)
     if legacy_rotation is not None:
         complex_rotation = str(legacy_rotation)
