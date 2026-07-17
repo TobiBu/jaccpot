@@ -85,7 +85,12 @@ def _m2l_core_z_real_kernel(
 
 
 def m2l_core_z_real_pallas(
-    multipole_rot: Array, radii: Array, *, order: int, interpret: bool = False
+    multipole_rot: Array,
+    radii: Array,
+    *,
+    order: int,
+    interpret: bool = False,
+    backend: str = "triton",
 ) -> Array:
     """Apply batched z-axis M2L translation with Pallas when supported.
 
@@ -93,6 +98,11 @@ def m2l_core_z_real_pallas(
     callers should fall back to the pure-JAX implementation. ``interpret=True``
     runs the kernel in Pallas interpret mode (works on CPU) -- used by the
     parity test to exercise the kernel logic without a GPU.
+
+    ``backend`` selects the Pallas GPU lowering; default ``"triton"`` (the
+    Mosaic-GPU backend rejects the small per-(pair,coeff) tiles -- its TMA copies
+    must be a multiple of the 128-byte warpgroup size, whereas one coeff row is
+    (p+1)^2 elements = 100/200 bytes). Consistent with the fused complex M2L path.
     """
 
     if pl is None:
@@ -146,6 +156,7 @@ def m2l_core_z_real_pallas(
             (1, 1), lambda batch_idx, coeff_idx: (batch_idx, coeff_idx)
         ),
         interpret=bool(interpret),
+        backend=(None if bool(interpret) else str(backend)),
         name=f"m2l_core_z_real_p{int(order)}",
     )
     return kernel(

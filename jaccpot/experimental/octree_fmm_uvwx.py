@@ -22,6 +22,30 @@ FMM kernels' static args (``num_levels=L+1``, ``level_batch_width=8^L``, node co
 functions of ``depth`` alone -- so it can be reused across ODISSEO time-integration steps
 without retracing. ``device=False`` uses the host-numpy reference build + a sequential
 ``lax.map`` near field. Both give identical forces.
+
+================================================================================
+TRANSLATION-OPERATOR SIGN CONVENTION  (read this before touching M2M / M2L / L2L)
+================================================================================
+Every translation operator here (complex ``m2m_complex``/``l2l_complex`` and real
+``m2m_real``/``l2l_real``) takes ``delta = source_center - destination_center`` -- the
+vector FROM the destination TO the source. The trap is that "source" and "destination"
+mean OPPOSITE things for the up-sweep vs the down-sweep, so the cell-relative sign FLIPS:
+
+  * M2M (up-sweep):   translate a child's multipole INTO its parent.
+                      source = CHILD, destination = PARENT
+                      -> ``delta = child_center - parent_center``
+  * M2L:              source = far node, destination = target node
+                      -> ``delta = target_center - source_center``
+  * L2L (down-sweep): translate a parent's local INTO its child.
+                      source = PARENT, destination = CHILD
+                      -> ``delta = parent_center - child_center``   (<-- OPPOSITE of M2M!)
+
+So M2M uses ``child - parent`` but L2L uses ``parent - child``. This is NOT a bug and NOT
+a per-operator quirk -- it is the single ``source - destination`` rule applied to the two
+sweep directions. Using ``child - parent`` for L2L (the "obvious" symmetry) is WRONG and
+silently corrupts the far field for a subset of particles (validated: 4e-16 with
+parent-child vs 2.9e-2 with child-parent). This has bitten this code repeatedly; the L2L
+cascades below carry an inline reminder. See ``l2l_real`` / ``m2m_real`` docstrings.
 """
 
 from __future__ import annotations
@@ -41,29 +65,44 @@ from yggdrax.octree_uvwx import (
 )
 
 from ..downward.local_expansions import LocalExpansionData
-from ..nearfield.near_field import _compute_leaf_p2p_impl
-from ..runtime._fmm_impl import _evaluate_local_expansions_for_particles
+from ..nearfield.near_field import (
+    _compute_leaf_p2p_impl,
+    _compute_leaf_p2p_prepared_large_n_self_only_impl,
+    _radix_fast_lane_prepacked_pallas,
+)
+from ..operators.complex_ops import (
+    complex_rotation_blocks_from_z_solidfmm_batch,
+    complex_rotation_blocks_to_z_solidfmm_batch,
+)
+from ..operators.m2l_real_rot_scale import (
+    m2l_rot_scale_real_batch_cached_blocks,
+    real_rotation_blocks_from_z_local_batch,
+    real_rotation_blocks_to_z_multipole_batch,
+)
+from ..operators.real_harmonics import (
+    evaluate_local_real_with_grad,
+    l2l_real,
+    m2m_real,
+    p2m_real_direct,
+    sh_size,
+)
+from ..runtime._fmm_impl import (
+    _accumulate_real_m2l_chunked_scan,
+    _accumulate_solidfmm_m2l_chunked_scan,
+    _evaluate_local_expansions_for_particles,
+    _m2l_complex_batch_cached_kernel,
+)
 from ..runtime._octree_adapter import OctreeExecutionData
 from ..runtime._octree_fmm import (
-    accumulate_octree_solidfmm_m2l,
-    build_octree_downward_plan,
-    build_octree_interaction_plan_from_native_pairs,
+    _propagate_octree_l2l_complex_by_level,
     build_octree_upward_plan,
     prepare_octree_solidfmm_complex_multipoles,
-    propagate_octree_solidfmm_l2l,
 )
 
 try:
     from ..runtime.dtypes import INDEX_DTYPE
 except Exception:  # pragma: no cover - dtype module always present in practice
     INDEX_DTYPE = jnp.int64
-
-try:
-    from yggdrax.interactions import CompactTaggedOctreeFarPairs
-except Exception as exc:  # pragma: no cover
-    raise ImportError(
-        "octree_fmm_uvwx requires yggdrax.interactions.CompactTaggedOctreeFarPairs"
-    ) from exc
 
 
 def octree_execution_data_from_view(
@@ -135,16 +174,65 @@ def _octree_far_field_grad(
     max_leaf_size: int,
     num_levels: Optional[int] = None,
     level_batch_width: Optional[int] = None,
+    m2l_chunk_size: int = 4096,
+    v_active_capacity: Optional[int] = None,
+    geometric_centers: bool = False,
+    m2l_grouped: bool = False,
+    class_capacity: int = 8192,
+    basis: str = "complex",
 ) -> Array:
     """O(N) far field: upward (P2M/M2M) -> V-list M2L -> L2L -> evaluate locals.
+
+    ``basis="real"`` runs the whole far field in the real (Dehnen) harmonic basis
+    (:func:`_octree_far_field_grad_real`) instead of the complex solidfmm basis -- half the
+    coefficients ((p+1)^2 vs 2(p+1)^2) and an O(p^3) rotate-scale M2L. It always uses box
+    centres and ignores ``geometric_centers``/``m2l_grouped``/``class_capacity``. Returns the
+    same ``grad`` (caller applies ``far_acc = -G * grad``).
+
+    ``geometric_centers=True`` expands about the octree box centres (``view.centers``)
+    instead of centres of mass, making M2L displacements grid-quantised (the prerequisite
+    for grouped/cached M2L). Slightly looser truncation error than COM at fixed order.
+
+    ``m2l_grouped=True`` (requires ``geometric_centers=True`` + ``v_active_capacity``) runs the
+    CACHED/GROUPED M2L: it groups the compacted V-pairs by their (now bit-identical)
+    box-centre displacement via ``jnp.unique`` into ``<= class_capacity`` interaction classes,
+    precomputes the solidfmm rotation blocks ONCE per class, and applies them with the cached
+    kernel -- so per-pair work is a cheap cached z-translate instead of a full rotation
+    recompute. This is the radix fast-lane's M2L trick; ~3.6x faster than the per-pair
+    ``rotation="solidfmm"`` chunked scan @200k (190 -> 53 ms). ``class_capacity`` MUST exceed
+    the true class count (else ``jnp.unique`` truncates and mis-assigns pairs).
 
     ``num_levels`` / ``level_batch_width`` are static (from tree depth) so the M2M/L2L
     kernels' ``static_argnames`` stay fixed -- the whole far field runs inside one jit.
     Pass them for the DENSE device build (num_levels=depth+1, level_batch_width=8**depth);
     leave ``None`` for the compact host build so they are derived from its actual per-level
     node counts (the dense 8**depth would over-run the compact node arrays).
+
+    M2L runs as a fixed-chunk scatter-add scan (radix ``_accumulate_solidfmm_m2l_chunked_scan``)
+    DIRECTLY over the yggdrax V-list pairs -- no global interaction plan / lexsort. The V-list
+    is padded to ``node_capacity * v_capacity`` slots (~3.45M @200k, ~4x the ~800k real pairs),
+    so ``v_active_capacity`` (static) STREAM-COMPACTS the real pairs into a fixed buffer of
+    that size (sentinel -> -1, masked by the kernel) -- the M2L scan then iterates
+    ``v_active_capacity / m2l_chunk_size`` chunks instead of the full padded count, which is
+    the dominant far-field cost at 200k. Leave ``None`` to skip compaction (argsort real-first
+    over the full padded array; correct but slow). ``v_active_capacity`` must be >= the true
+    pair count or the excess pairs are silently dropped.
     """
+    if str(basis).strip().lower() == "real":
+        return _octree_far_field_grad_real(
+            view,
+            positions_sorted,
+            masses_sorted,
+            order=int(order),
+            max_leaf_size=int(max_leaf_size),
+            num_levels=num_levels,
+            m2l_chunk_size=int(m2l_chunk_size),
+            v_active_capacity=v_active_capacity,
+            m2l_grouped=bool(m2l_grouped),
+            class_capacity=int(class_capacity),
+        )
     plan = build_octree_upward_plan(octree)
+    centers_override = jnp.asarray(view.centers) if bool(geometric_centers) else None
     multipoles = prepare_octree_solidfmm_complex_multipoles(
         plan,
         positions_sorted,
@@ -153,26 +241,124 @@ def _octree_far_field_grad(
         max_leaf_size=int(max_leaf_size),
         num_levels=num_levels,
         level_batch_width=level_batch_width,
+        centers_override=centers_override,
     )
-    far_pairs = CompactTaggedOctreeFarPairs(
-        sources=jnp.asarray(view.v_src, dtype=INDEX_DTYPE),
-        targets=jnp.asarray(view.v_tgt, dtype=INDEX_DTYPE),
-        tags=jnp.zeros(int(view.v_src.shape[0]), dtype=INDEX_DTYPE),
+    # M2L: route the yggdrax V-list pairs through the RADIX fast-lane's streamed complex
+    # M2L kernel (_accumulate_solidfmm_m2l_chunked_scan) -- same solidfmm math as the
+    # octree-native kernel but with active_pair_count chunk-skipping + the efficient
+    # _chunk_segment_scatter_add. The octree-native _accumulate_octree_m2l_complex_chunked
+    # was ~40000x slower/pair (full per-chunk argsort, no chunk-skip). Compact the real
+    # pairs to the front (sentinel node_capacity -> -1, which the kernel masks) so the
+    # chunk-skip actually engages and the padded tail costs ~nothing.
+    num_nodes = int(view.parent.shape[0])
+    v_src = jnp.asarray(view.v_src, dtype=INDEX_DTYPE)
+    v_tgt = jnp.asarray(view.v_tgt, dtype=INDEX_DTYPE)
+    valid_pairs = (v_src < num_nodes) & (v_tgt < num_nodes)
+    n_valid = jnp.sum(valid_pairs.astype(INDEX_DTYPE))
+    packed = jnp.asarray(multipoles.packed)
+    centers_arr = jnp.asarray(multipoles.centers)
+    if m2l_grouped:
+        # CACHED/GROUPED M2L (requires geometric centres so displacements quantise).
+        if not bool(geometric_centers):
+            raise ValueError("m2l_grouped=True requires geometric_centers=True")
+        if v_active_capacity is None:
+            raise ValueError("m2l_grouped=True requires v_active_capacity")
+        cap = int(v_active_capacity)
+        dest = jnp.where(
+            valid_pairs, jnp.cumsum(valid_pairs.astype(INDEX_DTYPE)) - 1, cap
+        )
+        src_c = jnp.full((cap,), 0, dtype=INDEX_DTYPE).at[dest].set(v_src, mode="drop")
+        tgt_c = jnp.full((cap,), 0, dtype=INDEX_DTYPE).at[dest].set(v_tgt, mode="drop")
+        pad = jnp.arange(cap) >= jnp.minimum(n_valid, cap)
+        cdt = packed.dtype
+        deltas = centers_arr[tgt_c] - centers_arr[src_c]
+        # group pairs by exact box-centre displacement -> interaction classes
+        uniq, cls_id = jnp.unique(
+            deltas,
+            axis=0,
+            size=int(class_capacity),
+            return_inverse=True,
+            fill_value=0.0,
+        )
+        cls_id = cls_id.reshape(-1)
+        one_x = jnp.asarray([1.0, 0.0, 0.0], dtype=centers_arr.dtype)
+        safe_disp = jnp.where(jnp.all(uniq == 0, axis=1, keepdims=True), one_x, uniq)
+        blocks_to = complex_rotation_blocks_to_z_solidfmm_batch(
+            safe_disp, order=int(order), basis="multipole", dtype=cdt
+        )
+        blocks_from = complex_rotation_blocks_from_z_solidfmm_batch(
+            safe_disp, order=int(order), basis="local", dtype=cdt
+        )
+        deltas_safe = jnp.where(pad[:, None], one_x, deltas)  # avoid r=0 on padding
+        contribs = _m2l_complex_batch_cached_kernel(
+            packed[src_c],
+            deltas_safe,
+            blocks_to[cls_id],
+            blocks_from[cls_id],
+            order=int(order),
+        ).astype(cdt)
+        contribs = jnp.where(pad[:, None], 0, contribs)  # zero padding pairs
+        locals_packed = jnp.zeros_like(packed).at[tgt_c].add(contribs)
+    else:
+        if v_active_capacity is None:
+            # No compaction: sort real pairs to the front over the full padded array.
+            pair_perm = jnp.argsort(jnp.logical_not(valid_pairs))
+            src_pairs = jnp.where(valid_pairs, v_src, -1)[pair_perm]
+            tgt_pairs = jnp.where(valid_pairs, v_tgt, -1)[pair_perm]
+            active_pairs = n_valid
+        else:
+            # Stream-compact the real pairs into a fixed v_active_capacity buffer (cumsum
+            # scatter, cheaper than argsort); the scan then touches ~real/chunk chunks.
+            cap = int(v_active_capacity)
+            dest = jnp.where(
+                valid_pairs, jnp.cumsum(valid_pairs.astype(INDEX_DTYPE)) - 1, cap
+            )
+            src_pairs = (
+                jnp.full((cap,), -1, dtype=INDEX_DTYPE).at[dest].set(v_src, mode="drop")
+            )
+            tgt_pairs = (
+                jnp.full((cap,), -1, dtype=INDEX_DTYPE).at[dest].set(v_tgt, mode="drop")
+            )
+            active_pairs = jnp.minimum(n_valid, cap)
+        locals_packed = _accumulate_solidfmm_m2l_chunked_scan(
+            jnp.zeros_like(packed),
+            packed,
+            centers_arr,
+            src_pairs,
+            tgt_pairs,
+            active_pairs,
+            order=int(order),
+            rotation="solidfmm",
+            total_nodes=num_nodes,
+            chunk_size=int(m2l_chunk_size),
+        )
+    # L2L level cascade over the octree child table (parent - child delta; the complex
+    # kernel is exact only with that sign). Derive the static level count / per-level
+    # dynamic_slice window when not supplied (host build), matching
+    # propagate_octree_solidfmm_l2l.
+    l2l_levels = int(octree.num_levels) if num_levels is None else int(num_levels)
+    active_level_offsets = jnp.asarray(
+        octree.level_offsets[: l2l_levels + 1], dtype=INDEX_DTYPE
     )
-    interactions = build_octree_interaction_plan_from_native_pairs(octree, far_pairs)
-    downward = build_octree_downward_plan(octree, multipoles, interactions)
-    downward = accumulate_octree_solidfmm_m2l(downward, multipoles, chunk_size=1024)
-    downward = propagate_octree_solidfmm_l2l(
-        downward,
-        octree,
-        num_levels=num_levels,
-        level_batch_width=level_batch_width,
+    if level_batch_width is None:
+        l2l_batch_width = max(int(jnp.max(jnp.diff(active_level_offsets))), 1)
+    else:
+        l2l_batch_width = int(level_batch_width)
+    locals_packed = _propagate_octree_l2l_complex_by_level(
+        locals_packed,
+        jnp.asarray(multipoles.centers),
+        jnp.asarray(octree.children, dtype=INDEX_DTYPE),
+        jnp.asarray(octree.nodes_by_level, dtype=INDEX_DTYPE),
+        active_level_offsets,
+        order=int(order),
+        num_levels=l2l_levels,
+        level_batch_width=l2l_batch_width,
     )
 
     local_data = LocalExpansionData(
         order=int(order),
-        centers=downward.centers,
-        coefficients=downward.locals_packed,
+        centers=jnp.asarray(multipoles.centers),
+        coefficients=locals_packed,
     )
     grad = _evaluate_local_expansions_for_particles(
         local_data,
@@ -184,6 +370,211 @@ def _octree_far_field_grad(
         expansion_basis="solidfmm",
         return_potential=False,
     )[0]
+    return grad
+
+
+def _octree_far_field_grad_real(
+    view: UniformOctreeExecutionView,
+    positions_sorted: Array,
+    masses_sorted: Array,
+    *,
+    order: int,
+    max_leaf_size: int,
+    num_levels: Optional[int] = None,
+    m2l_chunk_size: int = 4096,
+    v_active_capacity: Optional[int] = None,
+    m2l_grouped: bool = False,
+    class_capacity: int = 8192,
+) -> Array:
+    """Real-basis (Dehnen) octree far field: real P2M/M2M/M2L/L2L + real L2P (with grad).
+
+    Expands about the octree BOX centres (``view.centers``) throughout -- real harmonics need
+    consistent centres. Uses the ``(p+1)^2`` real coefficient layout (half the complex
+    ``2(p+1)^2``) and the O(p^3) rotate-scale M2L (``_accumulate_real_m2l_chunked_scan``).
+    Returns ``grad`` (caller applies ``far_acc = -G * grad``, matching the complex path).
+
+    SIGN CONVENTION (see the module docstring -- ``delta = source_center - dest_center``):
+
+    * P2M  : ``delta = particle - leaf_center``
+    * M2M  : ``delta = child_center - parent_center``   (up-sweep: source=child)
+    * M2L  : ``delta = target_center - source_center``
+    * L2L  : ``delta = parent_center - child_center``   (down-sweep: source=parent;
+             THIS IS THE OPPOSITE SIGN OF M2M -- using child-parent here silently corrupts
+             the far field. Confirmed: parent-child 4e-16 vs child-parent 2.9e-2 vs direct.)
+    * L2P  : ``delta = leaf_center - eval_point``; acceleration ``= -grad`` (caller's -G).
+
+    Leaf particles are gathered by ``node_ranges`` (NOT a searchsorted-on-starts map, which
+    mis-assigns particles of empty leaves and corrupts a subset of the L2P output).
+    """
+    num_nodes = int(view.parent.shape[0])
+    num_leaves = int(view.leaf_indices.shape[0])
+    n_part = int(positions_sorted.shape[0])
+    p = int(order)
+    ncoeff = sh_size(p)
+    W = int(max_leaf_size)
+    n_levels = int(view.num_levels) if num_levels is None else int(num_levels)
+
+    centers = jnp.asarray(view.centers)
+    depths = jnp.asarray(view.node_depths, dtype=INDEX_DTYPE)
+    parent = jnp.asarray(view.parent, dtype=INDEX_DTYPE)
+    parent_safe = jnp.clip(parent, 0, num_nodes - 1)
+
+    # ---- leaf-major particle packing via node_ranges (no searchsorted) ----
+    leaf_node = jnp.asarray(view.leaf_indices, dtype=INDEX_DTYPE)
+    node_ranges = jnp.asarray(view.node_ranges, dtype=INDEX_DTYPE)
+    valid_leaf = leaf_node < num_nodes
+    leaf_node_safe = jnp.where(valid_leaf, leaf_node, 0)
+    lo = node_ranges[leaf_node_safe, 0]
+    occ = jnp.where(
+        valid_leaf,
+        node_ranges[leaf_node_safe, 1] - node_ranges[leaf_node_safe, 0] + 1,
+        0,
+    )
+    slot = jnp.arange(W, dtype=INDEX_DTYPE)
+    leaf_mask = (slot[None, :] < occ[:, None]) & valid_leaf[:, None]  # (L, W)
+    leaf_pidx = jnp.where(
+        leaf_mask, jnp.clip(lo[:, None] + slot[None, :], 0, n_part - 1), 0
+    )
+    leaf_pos = positions_sorted[leaf_pidx]  # (L, W, 3)
+    leaf_mass = masses_sorted[leaf_pidx]  # (L, W)
+    leaf_center = centers[leaf_node_safe]  # (L, 3)
+
+    # ---- P2M: sum_i p2m_real_direct(particle_i - leaf_center) per leaf ----
+    d_p2m = leaf_pos - leaf_center[:, None, :]  # (L, W, 3)
+    mp_slot = jax.vmap(jax.vmap(lambda d, m: p2m_real_direct(d, m, order=p)))(
+        d_p2m, leaf_mass
+    )  # (L, W, ncoeff)
+    mp_slot = jnp.where(leaf_mask[:, :, None], mp_slot, 0.0)
+    leaf_mp = jnp.sum(mp_slot, axis=1)  # (L, ncoeff)
+    mp = (
+        jnp.zeros((num_nodes, ncoeff), dtype=leaf_mp.dtype)
+        .at[leaf_node_safe]
+        .add(jnp.where(valid_leaf[:, None], leaf_mp, 0.0))
+    )
+
+    # ---- M2M up-sweep: delta = child - parent (source=child) ----
+    delta_child_minus_parent = centers - centers[parent_safe]
+
+    def m2m_body(step, mp):
+        level = n_levels - 1 - step
+        active = (depths == level) & (parent < num_nodes)
+        contrib = jax.vmap(lambda m, d: m2m_real(m, d, order=p))(
+            mp, delta_child_minus_parent
+        )
+        return mp.at[parent_safe].add(jnp.where(active[:, None], contrib, 0.0))
+
+    mp = jax.lax.fori_loop(0, n_levels - 1, m2m_body, mp)
+
+    # ---- M2L: delta = target - source over the V-list ----
+    v_src = jnp.asarray(view.v_src, dtype=INDEX_DTYPE)
+    v_tgt = jnp.asarray(view.v_tgt, dtype=INDEX_DTYPE)
+    valid_pairs = (v_src < num_nodes) & (v_tgt < num_nodes)
+    n_valid = jnp.sum(valid_pairs.astype(INDEX_DTYPE))
+    if m2l_grouped:
+        # GROUPED/CACHED real M2L -- the real analog of the complex grouped path: box centres
+        # (used throughout this real far field) make the V-pair displacements grid-quantised,
+        # so group them into <= class_capacity interaction classes via jnp.unique, precompute
+        # the REAL rotation blocks ONCE per class, and apply with the cached kernel (only the
+        # z-translation runs per pair). Removes the per-pair rotation build that makes the
+        # ungrouped real M2L slow. Requires v_active_capacity (static compaction buffer).
+        if v_active_capacity is None:
+            raise ValueError("m2l_grouped=True requires v_active_capacity")
+        cap = int(v_active_capacity)
+        dest = jnp.where(
+            valid_pairs, jnp.cumsum(valid_pairs.astype(INDEX_DTYPE)) - 1, cap
+        )
+        src_c = jnp.full((cap,), 0, dtype=INDEX_DTYPE).at[dest].set(v_src, mode="drop")
+        tgt_c = jnp.full((cap,), 0, dtype=INDEX_DTYPE).at[dest].set(v_tgt, mode="drop")
+        pad = jnp.arange(cap) >= jnp.minimum(n_valid, cap)
+        rdt = mp.dtype
+        deltas = centers[tgt_c] - centers[src_c]
+        uniq, cls_id = jnp.unique(
+            deltas,
+            axis=0,
+            size=int(class_capacity),
+            return_inverse=True,
+            fill_value=0.0,
+        )
+        cls_id = cls_id.reshape(-1)
+        one_x = jnp.asarray([1.0, 0.0, 0.0], dtype=centers.dtype)
+        safe_disp = jnp.where(jnp.all(uniq == 0, axis=1, keepdims=True), one_x, uniq)
+        blocks_to = real_rotation_blocks_to_z_multipole_batch(
+            safe_disp, order=p, dtype=rdt
+        )
+        blocks_from = real_rotation_blocks_from_z_local_batch(
+            safe_disp, order=p, dtype=rdt
+        )
+        deltas_safe = jnp.where(pad[:, None], one_x, deltas)  # avoid r=0 on padding
+        contribs = m2l_rot_scale_real_batch_cached_blocks(
+            mp[src_c],
+            deltas_safe,
+            blocks_to[cls_id],
+            blocks_from[cls_id],
+            order=p,
+        ).astype(rdt)
+        contribs = jnp.where(pad[:, None], 0, contribs)
+        locals_packed = jnp.zeros_like(mp).at[tgt_c].add(contribs)
+    else:
+        # ungrouped: compact real pairs -> per-pair rotate-scale chunked scan
+        if v_active_capacity is None:
+            pair_perm = jnp.argsort(jnp.logical_not(valid_pairs))
+            src_pairs = jnp.where(valid_pairs, v_src, -1)[pair_perm]
+            tgt_pairs = jnp.where(valid_pairs, v_tgt, -1)[pair_perm]
+            active_pairs = n_valid
+        else:
+            cap = int(v_active_capacity)
+            dest = jnp.where(
+                valid_pairs, jnp.cumsum(valid_pairs.astype(INDEX_DTYPE)) - 1, cap
+            )
+            src_pairs = (
+                jnp.full((cap,), -1, dtype=INDEX_DTYPE).at[dest].set(v_src, mode="drop")
+            )
+            tgt_pairs = (
+                jnp.full((cap,), -1, dtype=INDEX_DTYPE).at[dest].set(v_tgt, mode="drop")
+            )
+            active_pairs = jnp.minimum(n_valid, cap)
+        locals_packed = _accumulate_real_m2l_chunked_scan(
+            jnp.zeros_like(mp),
+            mp,
+            centers,
+            src_pairs,
+            tgt_pairs,
+            active_pairs,
+            order=p,
+            m2l_impl="rot_scale",
+            total_nodes=num_nodes,
+            chunk_size=int(m2l_chunk_size),
+        )
+
+    # ---- L2L down-sweep: delta = PARENT - child (source=parent; OPPOSITE of M2M) ----
+    delta_parent_minus_child = centers[parent_safe] - centers
+
+    def l2l_body(step, loc):
+        level = step + 1
+        active = (depths == level) & (parent < num_nodes)
+        contrib = jax.vmap(lambda lc, d: l2l_real(lc, d, order=p))(
+            loc[parent_safe], delta_parent_minus_child
+        )
+        return loc + jnp.where(active[:, None], contrib, 0.0)
+
+    locals_packed = jax.lax.fori_loop(0, n_levels - 1, l2l_body, locals_packed)
+
+    # ---- L2P: real local -> field per leaf slot (delta = leaf_center - eval); scatter ----
+    leaf_loc = locals_packed[leaf_node_safe]  # (L, ncoeff)
+    d_l2p = leaf_center[:, None, :] - leaf_pos  # (L, W, 3) = center - eval
+    grad_slot = jax.vmap(
+        lambda lc, d_row: jax.vmap(
+            lambda d: evaluate_local_real_with_grad(lc, d, order=p)[0]
+        )(d_row)
+    )(
+        leaf_loc, d_l2p
+    )  # (L, W, 3)
+    grad_slot = jnp.where(leaf_mask[:, :, None], grad_slot, 0.0)
+    grad = (
+        jnp.zeros((n_part, 3), dtype=positions_sorted.dtype)
+        .at[leaf_pidx.reshape(-1)]
+        .add(jnp.where(leaf_mask.reshape(-1)[:, None], grad_slot.reshape(-1, 3), 0.0))
+    )
     return grad
 
 
@@ -335,6 +726,216 @@ def _ulist_near_device(
     )
 
 
+def _octree_near_field(
+    positions_sorted: Array,
+    masses_sorted: Array,
+    view: UniformOctreeExecutionView,
+    *,
+    G: float,
+    softening: float,
+    max_leaf_size: int,
+    use_pallas: bool = True,
+    pallas_interpret: bool = False,
+    near_block_size: Optional[int] = 128,
+    edge_capacity: Optional[int] = None,
+    near_chunk_size: int = 512,
+) -> Array:
+    """U-list near-field P2P over fixed-width UNITS, reusing the radix fast-lane machinery.
+
+    Packs particles into units, builds each unit's source-unit id list, then adds the
+    intra-unit self block (``i != j``, via ``_compute_leaf_p2p_prepared_large_n_self_only_impl``)
+    plus the cross-unit pairs. With ``use_pallas`` + a supported accelerator this uses the
+    Pallas ``nearfield_leafpair`` kernel (``_radix_fast_lane_prepacked_pallas``: gathers
+    sources by id + cheaply cond-skips padded slots; fastest, ~200 ms @200k). Otherwise it
+    uses a memory-safe pure-JAX CHUNKED EDGE SCAN over the (target, source) unit pairs -- the
+    AUTODIFF-ABLE / non-Ampere path (~780 ms @200k; the radix prepacked pure-JAX impl OOMs at
+    36-132 GiB). ``edge_capacity`` (static; default ``num_units * source_slots``) bounds the
+    compacted edge list and ``near_chunk_size`` is the per-chunk pair block. Morton order.
+
+    ``near_block_size`` selects the unit:
+
+    * ``None`` -> one unit per leaf, width ``max_leaf_size``. An adaptive octree's leaves are
+      badly under-full (8-way split: mean occ << ``max_leaf_size``), so every leaf pads to the
+      global max occupancy -- the ``W^2`` particle term is dominated by padding.
+    * ``B`` (default 128) -> DENSE-BLOCK packing: each leaf is chunked into ``ceil(occ/B)``
+      fixed-``B`` blocks (respecting leaf boundaries), and blocks are the units (width ``B``,
+      not max occ). A block's sources = its leaf's OTHER blocks (intra-leaf near) + its
+      U-neighbour leaves' blocks. Decoupling the width from max occupancy cuts the near-field
+      ~2x on the 200k disk (leaf occ mean ~34 vs max 256). Block count is bounded statically by
+      ``ceil(N/B) + num_leaves``.
+    """
+    num_nodes = int(view.parent.shape[0])
+    num_leaves = int(view.leaf_indices.shape[0])
+    n_part = int(positions_sorted.shape[0])
+    u_cap = int(view.u_neighbors.shape[0] // max(num_leaves, 1))
+    dtype = positions_sorted.dtype
+    softening_sq = jnp.asarray(softening, dtype=dtype) ** 2  # traced-safe (no float())
+
+    # ---- leaf geometry from node ranges (shared by both unit modes) ----
+    leaf_node = jnp.asarray(view.leaf_indices, dtype=INDEX_DTYPE)
+    node_ranges = jnp.asarray(view.node_ranges, dtype=INDEX_DTYPE)
+    valid_leaf = leaf_node < num_nodes
+    leaf_node_safe = jnp.where(valid_leaf, leaf_node, 0)
+    lo = node_ranges[leaf_node_safe, 0]
+    occ = jnp.where(
+        valid_leaf,
+        node_ranges[leaf_node_safe, 1] - node_ranges[leaf_node_safe, 0] + 1,
+        0,
+    )
+    src_rows = jnp.asarray(view.u_neighbors, dtype=INDEX_DTYPE).reshape(
+        num_leaves, u_cap
+    )
+
+    if near_block_size is None:
+        # one unit per leaf, width = max_leaf_size
+        W = int(max_leaf_size)
+        slot = jnp.arange(W, dtype=INDEX_DTYPE)
+        unit_mask = (slot[None, :] < occ[:, None]) & valid_leaf[:, None]
+        unit_pidx = jnp.where(
+            unit_mask, jnp.clip(lo[:, None] + slot[None, :], 0, n_part - 1), 0
+        )
+        self_row = jnp.arange(num_leaves, dtype=INDEX_DTYPE)[:, None]
+        s_valid = (src_rows < num_leaves) & (src_rows != self_row)
+        src_ids_3d = jnp.where(s_valid, src_rows, 0)[:, None, :]  # (L, 1, u_cap)
+        src_valid_3d = s_valid[:, None, :]
+    else:
+        # dense-block units: chunk each leaf into fixed-B blocks (width B, not max occ)
+        B = int(near_block_size)
+        block_cap = (n_part + B - 1) // B + num_leaves  # tight upper bound on #blocks
+        mbpl = (int(max_leaf_size) + B - 1) // B  # static max blocks per leaf
+        bpl = (occ + B - 1) // B  # blocks per leaf (0 if empty/invalid)
+        cum = jnp.cumsum(bpl)
+        block_start = cum - bpl
+        total_blocks = jnp.sum(bpl)
+        g = jnp.arange(block_cap, dtype=INDEX_DTYPE)
+        block_leaf = jnp.clip(jnp.searchsorted(cum, g, side="right"), 0, num_leaves - 1)
+        valid_block = g < total_blocks
+        block_local = g - block_start[block_leaf]
+        slot = jnp.arange(B, dtype=INDEX_DTYPE)
+        within = block_local[:, None] * B + slot[None, :]
+        unit_mask = valid_block[:, None] & (within < occ[block_leaf][:, None])
+        unit_pidx = jnp.where(
+            unit_mask, jnp.clip(lo[block_leaf][:, None] + within, 0, n_part - 1), 0
+        )
+        # sources: own leaf's other blocks (intra-leaf near) + U-neighbour leaves' blocks
+        r = block_leaf
+        nbrs = jnp.concatenate(
+            [r[:, None], src_rows[r]], axis=1
+        )  # (block_cap, 1+u_cap)
+        nbr_valid = jnp.concatenate(
+            [valid_block[:, None], src_rows[r] < num_leaves], axis=1
+        )
+        k = jnp.arange(mbpl, dtype=INDEX_DTYPE)
+        sb = (
+            block_start[nbrs][:, :, None] + k[None, None, :]
+        )  # (block_cap, 1+u_cap, mbpl)
+        sb_valid = (
+            nbr_valid[:, :, None]
+            & (k[None, None, :] < bpl[nbrs][:, :, None])
+            & (sb != g[:, None, None])  # exclude the target block itself
+        )
+        n_src = (1 + u_cap) * mbpl
+        src_ids_3d = jnp.where(sb_valid, jnp.clip(sb, 0, block_cap - 1), 0).reshape(
+            block_cap, 1, n_src
+        )
+        src_valid_3d = sb_valid.reshape(block_cap, 1, n_src)
+
+    unit_positions = positions_sorted[unit_pidx]
+    unit_masses = masses_sorted[unit_pidx]
+    num_units = int(unit_pidx.shape[0])
+
+    self_acc = _compute_leaf_p2p_prepared_large_n_self_only_impl(
+        positions_sorted,
+        unit_positions,
+        unit_masses,
+        unit_mask,
+        unit_pidx,
+        G=G,
+        softening_sq=softening_sq,
+    )
+
+    pallas_ok = False
+    if bool(use_pallas):
+        if bool(pallas_interpret):
+            pallas_ok = True
+        else:
+            try:
+                from ..pallas.nearfield_fused_leaf import (
+                    pallas_nearfield_fused_supported,
+                )
+
+                pallas_ok = pallas_nearfield_fused_supported()
+            except Exception:  # pragma: no cover - pallas import is env-dependent
+                pallas_ok = False
+
+    if pallas_ok:
+        pair_acc = _radix_fast_lane_prepacked_pallas(
+            src_ids_3d,
+            src_valid_3d,
+            unit_positions,
+            unit_masses,
+            unit_mask,
+            unit_pidx,
+            positions_sorted,
+            G=G,
+            softening_sq=softening_sq,
+            compute_potential=False,
+            interpret=bool(pallas_interpret),
+        )
+    else:
+        # Memory-safe pure-JAX cross-pairs (autodiff-able / non-Ampere path): enumerate the
+        # (target-unit, source-unit) edges from the source lists, stream-compact the real
+        # edges to the front, and lax.scan over fixed-size chunks -- per-chunk memory is only
+        # (near_chunk_size, W, W, 3), bounded, and whole padding chunks are cond-skipped. The
+        # radix prepacked impl OOMs here (materializes dense tiles: 36-132 GiB @200k).
+        n_src = int(src_ids_3d.shape[2])
+        cap = int(edge_capacity) if edge_capacity is not None else num_units * n_src
+        chunk = int(near_chunk_size)
+        tgt_flat = jnp.repeat(jnp.arange(num_units, dtype=INDEX_DTYPE), n_src)
+        src_flat = src_ids_3d.reshape(-1)
+        edge_valid = src_valid_3d.reshape(-1)
+        dest = jnp.where(
+            edge_valid, jnp.cumsum(edge_valid.astype(INDEX_DTYPE)) - 1, cap
+        )
+        tgt_e = (
+            jnp.full((cap,), 0, dtype=INDEX_DTYPE).at[dest].set(tgt_flat, mode="drop")
+        )
+        src_e = (
+            jnp.full((cap,), 0, dtype=INDEX_DTYPE).at[dest].set(src_flat, mode="drop")
+        )
+        n_edges = jnp.minimum(jnp.sum(edge_valid.astype(INDEX_DTYPE)), cap)
+        starts = jnp.arange(0, cap, chunk, dtype=INDEX_DTYPE)
+
+        def _edge_body(near, start):
+            def _active(near):
+                rng = start + jnp.arange(chunk, dtype=INDEX_DTYPE)
+                idx = jnp.clip(rng, 0, cap - 1)
+                inr = rng < n_edges
+                tb = tgt_e[idx]
+                sbk = src_e[idx]
+                tpos = unit_positions[tb]
+                tmask = unit_mask[tb] & inr[:, None]
+                tpidx = unit_pidx[tb]
+                spos = unit_positions[sbk]
+                smass = unit_masses[sbk]
+                smask = unit_mask[sbk]
+                d = tpos[:, :, None, :] - spos[:, None, :, :]
+                d2 = jnp.sum(d * d, axis=-1) + softening_sq
+                pv = tmask[:, :, None] & smask[:, None, :]
+                inv = jnp.where(pv, d2 ** (-1.5), 0.0)
+                ac = -G * jnp.sum(smass[:, None, :, None] * d * inv[..., None], axis=2)
+                return near.at[tpidx.reshape(-1)].add(
+                    jnp.where(tmask.reshape(-1)[:, None], ac.reshape(-1, 3), 0.0)
+                )
+
+            return jax.lax.cond(start < n_edges, _active, lambda nr: nr, near), None
+
+        pair_acc, _ = jax.lax.scan(
+            _edge_body, jnp.zeros((n_part, 3), dtype=positions_sorted.dtype), starts
+        )
+    return self_acc + pair_acc
+
+
 @partial(
     jax.jit,
     static_argnames=(
@@ -344,6 +945,15 @@ def _ulist_near_device(
         "sparse",
         "node_capacity",
         "leaf_capacity",
+        "near_use_pallas",
+        "geometric_centers",
+        "m2l_grouped",
+        "class_capacity",
+        "v_active_capacity",
+        "near_block_size",
+        "edge_capacity",
+        "near_chunk_size",
+        "basis",
     ),
 )
 def _octree_uvwx_device_compute(
@@ -358,6 +968,15 @@ def _octree_uvwx_device_compute(
     sparse: bool = False,
     node_capacity: int = 0,
     leaf_capacity: int = 0,
+    near_use_pallas: bool = True,
+    geometric_centers: bool = False,
+    m2l_grouped: bool = False,
+    class_capacity: int = 8192,
+    v_active_capacity: Optional[int] = None,
+    near_block_size: Optional[int] = 128,
+    edge_capacity: Optional[int] = None,
+    near_chunk_size: int = 512,
+    basis: str = "complex",
 ) -> Array:
     """Single jitted O(N) octree-FMM compute over the static-shape device build.
 
@@ -399,15 +1018,24 @@ def _octree_uvwx_device_compute(
         max_leaf_size=int(max_leaf_size),
         num_levels=num_levels,
         level_batch_width=level_batch_width,
+        v_active_capacity=v_active_capacity,
+        geometric_centers=bool(geometric_centers),
+        m2l_grouped=bool(m2l_grouped),
+        class_capacity=int(class_capacity),
+        basis=str(basis),
     )
     far_acc = -G * far_grad
-    near_acc = _ulist_near_device(
+    near_acc = _octree_near_field(
         positions_sorted,
         masses_sorted,
         view,
         G=G,
         softening=softening,
         max_leaf_size=int(max_leaf_size),
+        use_pallas=bool(near_use_pallas),
+        near_block_size=near_block_size,
+        edge_capacity=edge_capacity,
+        near_chunk_size=int(near_chunk_size),
     )
     acc_sorted = far_acc + near_acc
     inv = (
@@ -431,11 +1059,42 @@ def octree_fmm_accelerations(
     leaf_capacity: Optional[int] = None,
     bounds: Optional[tuple] = None,
     return_view: bool = False,
+    near_use_pallas: bool = True,
+    geometric_centers: bool = False,
+    m2l_grouped: bool = False,
+    class_capacity: int = 8192,
+    v_active_capacity: Optional[int] = None,
+    near_block_size: Optional[int] = 128,
+    edge_capacity: Optional[int] = None,
+    near_chunk_size: int = 512,
+    basis: str = "complex",
 ) -> Array | tuple[Array, UniformOctreeExecutionView]:
     """O(N) octree-FMM gravitational accelerations (far V-list + near U-list P2P).
 
     ``positions`` (N, 3), ``masses`` (N,); returns accelerations in the SAME order as the
     inputs. ``depth`` = uniform octree levels, ``order`` = multipole expansion order.
+
+    Fast/opt-in knobs (all static, default to the safe COM + chunked-M2L + Pallas-near path):
+
+    * ``near_use_pallas`` (default True) -- Pallas leaf-pair near (fastest); ``False`` uses the
+      memory-safe chunked pure-JAX near (autodiff-able; runs on non-Ampere/CPU).
+    * ``geometric_centers`` + ``m2l_grouped`` (+ ``v_active_capacity``, ``class_capacity``) --
+      the grouped/cached M2L on box centres (~3.6x faster M2L). ``m2l_grouped`` requires
+      ``geometric_centers=True`` and a ``v_active_capacity`` >= the true V-pair count.
+    * ``near_block_size`` / ``edge_capacity`` / ``near_chunk_size`` -- near-field packing knobs.
+      TUNING (measured @200k adaptive, order 4, A100): the near field is the dominant cost and
+      is padding-bound. ``mbpl=1`` (``near_block_size >= max_leaf_size``, or ``None`` for leaf
+      mode) is fastest for BOTH backends -- shorter source lists beat tighter within-tile fill
+      (Pallas 222 vs 258 ms @ B=128; pure-JAX 834 vs 1281 ms). Size the build's ``u_capacity``
+      to ~1.15x the true max U-neighbours/leaf (measured 138 here; 256 wastes ~1.9x, but 64
+      TRUNCATES -> wrong forces). The pure-JAX near runs ~3.8x the Pallas near (chunk-scan
+      overhead); it is the autodiff-able / non-Ampere fallback, not the fast path. CEILING: even
+      tuned, the near field carries ~(max_leaf_size/mean_occ)^2 within-tile padding (~48x here;
+      leaves are ~15% full on clustered data) that neither ``near_block_size`` nor ``u_capacity``
+      removes -- killing it needs a compacted/occupancy-bucketed near (leaf-respecting tiles are
+      required for clean P2P, so dense leaf-ignoring tiles would need per-pair leaf-adjacency
+      masking). This is why the octree is not competitive with the radix fast lane @200k
+      single-GPU (build+far already exceed its full step); the octree's edge is large-N / multi-GPU.
 
     With ``device=True`` (default) the ENTIRE compute runs inside a single jax.jit over the
     static-shape device build (:func:`_octree_uvwx_device_compute`): for a fixed
@@ -472,6 +1131,15 @@ def octree_fmm_accelerations(
                 sparse=True,
                 node_capacity=int(node_capacity),
                 leaf_capacity=int(leaf_capacity),
+                near_use_pallas=bool(near_use_pallas),
+                geometric_centers=bool(geometric_centers),
+                m2l_grouped=bool(m2l_grouped),
+                class_capacity=int(class_capacity),
+                v_active_capacity=v_active_capacity,
+                near_block_size=near_block_size,
+                edge_capacity=edge_capacity,
+                near_chunk_size=int(near_chunk_size),
+                basis=str(basis),
             )
             if return_view:
                 return acc, build_sparse_uniform_octree_execution_view_device(
@@ -500,6 +1168,15 @@ def octree_fmm_accelerations(
             depth=int(depth),
             order=int(order),
             max_leaf_size=max_leaf_size,
+            near_use_pallas=bool(near_use_pallas),
+            geometric_centers=bool(geometric_centers),
+            m2l_grouped=bool(m2l_grouped),
+            class_capacity=int(class_capacity),
+            v_active_capacity=v_active_capacity,
+            near_block_size=near_block_size,
+            edge_capacity=edge_capacity,
+            near_chunk_size=int(near_chunk_size),
+            basis=str(basis),
         )
         if return_view:
             return acc, build_uniform_octree_execution_view_device(
