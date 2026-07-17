@@ -76,9 +76,7 @@ from jaccpot.nearfield.near_field import (
     prepare_leaf_neighbor_pairs,
 )
 from jaccpot.operators.complex_ops import (
-    complex_rotation_blocks_from_z_batch,
     complex_rotation_blocks_from_z_solidfmm_batch,
-    complex_rotation_blocks_to_z_batch,
     complex_rotation_blocks_to_z_solidfmm_batch,
     enforce_conjugate_symmetry_batch,
     evaluate_local_complex_derivative_tower_batch,
@@ -1675,10 +1673,8 @@ def _prepare_solidfmm_downward_multipole_inputs(
         else None
     )
     if basis_mode_norm == "complex":
-        if rotation_mode not in ("bdz", "cached", "wigner", "solidfmm"):
-            raise ValueError(
-                "complex_rotation must be 'bdz', 'cached', 'wigner', or 'solidfmm'"
-            )
+        if rotation_mode != "solidfmm":
+            raise ValueError("complex_rotation must be 'solidfmm'")
         multip_packed = packed_raw.astype(dtype)
         source_motion_multip_packed = (
             source_motion_raw.astype(dtype) if source_motion_raw is not None else None
@@ -2119,14 +2115,8 @@ class FastMultipoleMethod:
         self._in_force_scale_prepass = False
 
         rotation_norm = str(complex_rotation).strip().lower()
-        if rotation_norm not in ("bdz", "cached", "wigner", "solidfmm"):
-            raise ValueError(
-                "complex_rotation must be 'bdz', 'cached', 'wigner', or 'solidfmm'"
-            )
-        if basis_norm == "solidfmm" and rotation_norm != "solidfmm":
-            raise ValueError(
-                "expansion_basis='solidfmm' requires complex_rotation='solidfmm'"
-            )
+        if rotation_norm != "solidfmm":
+            raise ValueError("complex_rotation must be 'solidfmm'")
         self.complex_rotation = rotation_norm
         farfield_mode_norm = str(farfield_mode).strip().lower()
         if farfield_mode_norm not in ("auto", "pair_grouped", "class_major"):
@@ -11261,22 +11251,9 @@ def _rotation_blocks_for_grouped_classes(
             basis="local",
             dtype=dtype,
         )
-    elif rotation == "cached":
-        blocks_to = complex_rotation_blocks_to_z_batch(
-            deltas,
-            order=order,
-            basis="multipole",
-            dtype=dtype,
-        )
-        blocks_from = complex_rotation_blocks_from_z_batch(
-            deltas,
-            order=order,
-            basis="local",
-            dtype=dtype,
-        )
     else:
         raise ValueError(
-            "grouped operator cache currently supports rotation='cached' or 'solidfmm'"
+            "grouped operator cache currently supports rotation='solidfmm'"
         )
     if cache_key is not None:
         _grouped_operator_cache_put(cache_key, (blocks_to, blocks_from))
@@ -11583,7 +11560,7 @@ def _accumulate_solidfmm_m2l_grouped_class_major(
         grouped_segment_unique_targets,
     )
 
-    if rotation not in ("cached", "solidfmm"):
+    if rotation not in ("solidfmm",):
         src = grouped.class_sources
         tgt = grouped.class_targets
         return _accumulate_solidfmm_m2l_fullbatch(
@@ -11655,7 +11632,7 @@ def _accumulate_solidfmm_m2l_grouped(
 ) -> Array:
     """Grouped M2L accumulation using cached class blocks and pair chunking."""
 
-    if rotation not in ("cached", "solidfmm"):
+    if rotation not in ("solidfmm",):
         # Keep existing sparse path semantics for other conventions.
         src = grouped.class_sources
         tgt = grouped.class_targets
@@ -11794,33 +11771,12 @@ def _accumulate_solidfmm_m2l_fullbatch(
     src_mult = multip_packed[safe_src]
     deltas = centers[safe_tgt] - centers[safe_src]
 
-    if rotation == "cached":
-        blocks_to_z = complex_rotation_blocks_to_z_batch(
-            deltas,
-            order=order,
-            basis="multipole",
-            dtype=src_mult.dtype,
-        )
-        blocks_from_z = complex_rotation_blocks_from_z_batch(
-            deltas,
-            order=order,
-            basis="local",
-            dtype=src_mult.dtype,
-        )
-        contribs = _m2l_complex_batch_cached_kernel(
-            src_mult,
-            deltas,
-            blocks_to_z,
-            blocks_from_z,
-            order=order,
-        )
-    else:
-        contribs = _m2l_complex_batch_kernel(
-            src_mult,
-            deltas,
-            order=order,
-            rotation=rotation,
-        )
+    contribs = _m2l_complex_batch_kernel(
+        src_mult,
+        deltas,
+        order=order,
+        rotation=rotation,
+    )
     contribs = contribs.astype(locals_coeffs.dtype)
     contribs = jnp.where(valid[:, None], contribs, 0)
     return locals_coeffs + jax.ops.segment_sum(contribs, safe_tgt, total_nodes)
@@ -11868,33 +11824,12 @@ def _accumulate_solidfmm_m2l_chunked_scan(
             src_mult = multip_packed[src_chunk]
             deltas = centers[tgt_chunk] - centers[src_chunk]
 
-            if rotation == "cached":
-                blocks_to_z = complex_rotation_blocks_to_z_batch(
-                    deltas,
-                    order=order,
-                    basis="multipole",
-                    dtype=src_mult.dtype,
-                )
-                blocks_from_z = complex_rotation_blocks_from_z_batch(
-                    deltas,
-                    order=order,
-                    basis="local",
-                    dtype=src_mult.dtype,
-                )
-                contribs = _m2l_complex_batch_cached_kernel(
-                    src_mult,
-                    deltas,
-                    blocks_to_z,
-                    blocks_from_z,
-                    order=order,
-                )
-            else:
-                contribs = _m2l_complex_batch_kernel(
-                    src_mult,
-                    deltas,
-                    order=order,
-                    rotation=rotation,
-                )
+            contribs = _m2l_complex_batch_kernel(
+                src_mult,
+                deltas,
+                order=order,
+                rotation=rotation,
+            )
 
             contribs = contribs.astype(locals_coeffs.dtype)
             return _chunk_segment_scatter_add(
