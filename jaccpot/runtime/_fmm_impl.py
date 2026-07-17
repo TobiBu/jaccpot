@@ -2610,6 +2610,22 @@ class FastMultipoleMethod:
         self._static_runtime_fixed_sizing: bool = str(
             os.environ.get("JACCPOT_STATIC_RUNTIME_FIXED_SIZING", "1")
         ).strip().lower() in {"1", "true", "yes", "on"}
+        # Opt-in geometric (box/aabb) centres for the real-basis large-N fast lane,
+        # decoupled from grouped_interactions. This selects center_mode="aabb" in the
+        # production fast lane (see _resolve_runtime_execution_overrides) for the real
+        # (Dehnen) basis only, without engaging grouped_interactions (so the streamed
+        # pair_grouped near/far payload is unchanged). Default OFF: the fast lane keeps
+        # its data-dependent COM centres. This is enabling infrastructure -- box centres
+        # quantise far-field displacements into interaction classes, a prerequisite for
+        # class-cached far-field kernels. NB such caching is only effective on a REGULAR
+        # cell grid (e.g. a uniform octree); the radix binary tree's box centres do not
+        # grid-quantise, so class-cached grouping does NOT transfer to this lane
+        # (measured: the distinct-class count explodes past any fixed capacity at
+        # production N). On its own the knob is speed-neutral and ~2x looser (still
+        # ~1e-3 in forces) vs COM.
+        self._fastlane_geometric_centers: bool = str(
+            os.environ.get("JACCPOT_LARGE_N_FASTLANE_GEOMETRIC_CENTERS", "0")
+        ).strip().lower() in {"1", "true", "yes", "on"}
         self._apply_large_n_gpu_production_contract()
 
     def _is_large_n_gpu_production_profile(self) -> bool:
@@ -5589,6 +5605,15 @@ class FastMultipoleMethod:
         if production_large_n:
             grouped_interactions = False
             farfield_mode = "pair_grouped"
+            # Opt-in geometric (box/aabb) centres for the real-basis fast lane,
+            # decoupled from grouped_interactions (which stays False here to keep
+            # the streamed pair_grouped near/far payload). Centres flow
+            # upward->M2L->L2L->L2P via upward.multipoles.centers. Default OFF.
+            if (
+                bool(getattr(self, "_fastlane_geometric_centers", False))
+                and self._solidfmm_basis_mode() == "real"
+            ):
+                center_mode = "aabb"
 
         if static_runtime_fixed_sizing:
             # Static sizing mode: keep traversal/chunk execution knobs fixed to
