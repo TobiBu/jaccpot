@@ -71,7 +71,7 @@ from jaccpot.operators.complex_ops import (
 )
 from jaccpot.operators.real_harmonics import sh_size
 from jaccpot.runtime.kernels.core import (
-    _accumulate_solidfmm_m2l_fullbatch,
+    _accumulate_m2l_fullbatch,
     _evaluate_local_expansions_for_particles,
     _propagate_solidfmm_locals_by_level,
 )
@@ -347,7 +347,7 @@ def test_distributed_solidfmm_far_matches_direct():
         s_src = jnp.asarray(inter.sources, INDEX_DTYPE)
         s_tgt = jnp.asarray(inter.targets, INDEX_DTYPE)
         s_active = jnp.sum((s_tgt >= 0).astype(INDEX_DTYPE))
-        loc_self = _accumulate_solidfmm_m2l_fullbatch(
+        loc_self = _accumulate_m2l_fullbatch(
             zeros,
             packed,
             centers,
@@ -355,6 +355,7 @@ def test_distributed_solidfmm_far_matches_direct():
             s_tgt,
             s_active,
             order=_P,
+            basis_mode="complex",
             rotation=_ROT,
             total_nodes=int(total_nodes),
         )

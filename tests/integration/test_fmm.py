@@ -2902,7 +2902,7 @@ def test_solidfmm_m2l_ignores_padded_compact_far_pairs():
     tgt_padded = jnp.array([0, -1, -1, -1], dtype=INDEX_DTYPE)
     active_count = jnp.array(1, dtype=INDEX_DTYPE)
 
-    exact_full = kernels_core._accumulate_solidfmm_m2l_fullbatch(
+    exact_full = kernels_core._accumulate_m2l_fullbatch(
         jnp.zeros_like(multipoles),
         multipoles,
         centers,
@@ -2910,10 +2910,11 @@ def test_solidfmm_m2l_ignores_padded_compact_far_pairs():
         tgt_exact,
         active_count,
         order=order,
+        basis_mode="complex",
         rotation="solidfmm",
         total_nodes=int(centers.shape[0]),
     )
-    padded_full = kernels_core._accumulate_solidfmm_m2l_fullbatch(
+    padded_full = kernels_core._accumulate_m2l_fullbatch(
         jnp.zeros_like(multipoles),
         multipoles,
         centers,
@@ -2921,10 +2922,11 @@ def test_solidfmm_m2l_ignores_padded_compact_far_pairs():
         tgt_padded,
         active_count,
         order=order,
+        basis_mode="complex",
         rotation="solidfmm",
         total_nodes=int(centers.shape[0]),
     )
-    padded_chunked = kernels_core._accumulate_solidfmm_m2l_chunked_scan(
+    padded_chunked = kernels_core._accumulate_m2l_chunked_scan(
         jnp.zeros_like(multipoles),
         multipoles,
         centers,
@@ -2932,6 +2934,7 @@ def test_solidfmm_m2l_ignores_padded_compact_far_pairs():
         tgt_padded,
         active_count,
         order=order,
+        basis_mode="complex",
         rotation="solidfmm",
         total_nodes=int(centers.shape[0]),
         chunk_size=2,

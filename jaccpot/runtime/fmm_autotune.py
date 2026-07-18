@@ -31,9 +31,8 @@ from .fmm_caches import (
     _m2l_autotune_store,
 )
 from .kernels.core import (
-    _accumulate_real_m2l_chunked_scan,
+    _accumulate_m2l_chunked_scan,
     _accumulate_real_m2l_chunked_scan_pallas,
-    _accumulate_solidfmm_m2l_chunked_scan,
 )
 
 
@@ -189,7 +188,7 @@ class AutotuneMixin:
                 continue
             try:
                 if basis_mode == "complex":
-                    _ = _accumulate_solidfmm_m2l_chunked_scan(
+                    _ = _accumulate_m2l_chunked_scan(
                         locals0,
                         multip,
                         centers,
@@ -197,12 +196,13 @@ class AutotuneMixin:
                         tgt_sample,
                         jnp.asarray(src_sample.shape[0], dtype=INDEX_DTYPE),
                         order=order_int,
+                        basis_mode="complex",
                         rotation=str(self.complex_rotation),
                         total_nodes=total_nodes,
                         chunk_size=chunk_int,
                     ).block_until_ready()
                     t0 = time.perf_counter()
-                    _ = _accumulate_solidfmm_m2l_chunked_scan(
+                    _ = _accumulate_m2l_chunked_scan(
                         locals0,
                         multip,
                         centers,
@@ -210,6 +210,7 @@ class AutotuneMixin:
                         tgt_sample,
                         jnp.asarray(src_sample.shape[0], dtype=INDEX_DTYPE),
                         order=order_int,
+                        basis_mode="complex",
                         rotation=str(self.complex_rotation),
                         total_nodes=total_nodes,
                         chunk_size=chunk_int,
@@ -243,7 +244,7 @@ class AutotuneMixin:
                             chunk_size=chunk_int,
                         ).block_until_ready()
                     else:
-                        _ = _accumulate_real_m2l_chunked_scan(
+                        _ = _accumulate_m2l_chunked_scan(
                             locals0,
                             multip,
                             centers,
@@ -251,12 +252,13 @@ class AutotuneMixin:
                             tgt_sample,
                             jnp.asarray(src_sample.shape[0], dtype=INDEX_DTYPE),
                             order=order_int,
+                            basis_mode="real",
                             m2l_impl=m2l_impl,
                             total_nodes=total_nodes,
                             chunk_size=chunk_int,
                         ).block_until_ready()
                         t0 = time.perf_counter()
-                        _ = _accumulate_real_m2l_chunked_scan(
+                        _ = _accumulate_m2l_chunked_scan(
                             locals0,
                             multip,
                             centers,
@@ -264,6 +266,7 @@ class AutotuneMixin:
                             tgt_sample,
                             jnp.asarray(src_sample.shape[0], dtype=INDEX_DTYPE),
                             order=order_int,
+                            basis_mode="real",
                             m2l_impl=m2l_impl,
                             total_nodes=total_nodes,
                             chunk_size=chunk_int,

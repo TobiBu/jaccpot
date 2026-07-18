@@ -93,8 +93,7 @@ from ..runtime._octree_fmm import (
     prepare_octree_solidfmm_complex_multipoles,
 )
 from ..runtime.kernels.core import (
-    _accumulate_real_m2l_chunked_scan,
-    _accumulate_solidfmm_m2l_chunked_scan,
+    _accumulate_m2l_chunked_scan,
     _evaluate_local_expansions_for_particles,
     _m2l_complex_batch_cached_kernel,
 )
@@ -208,7 +207,7 @@ def _octree_far_field_grad(
     leave ``None`` for the compact host build so they are derived from its actual per-level
     node counts (the dense 8**depth would over-run the compact node arrays).
 
-    M2L runs as a fixed-chunk scatter-add scan (radix ``_accumulate_solidfmm_m2l_chunked_scan``)
+    M2L runs as a fixed-chunk scatter-add scan (radix ``_accumulate_m2l_chunked_scan``)
     DIRECTLY over the yggdrax V-list pairs -- no global interaction plan / lexsort. The V-list
     is padded to ``node_capacity * v_capacity`` slots (~3.45M @200k, ~4x the ~800k real pairs),
     so ``v_active_capacity`` (static) STREAM-COMPACTS the real pairs into a fixed buffer of
@@ -244,7 +243,7 @@ def _octree_far_field_grad(
         centers_override=centers_override,
     )
     # M2L: route the yggdrax V-list pairs through the RADIX fast-lane's streamed complex
-    # M2L kernel (_accumulate_solidfmm_m2l_chunked_scan) -- same solidfmm math as the
+    # M2L kernel (_accumulate_m2l_chunked_scan) -- same solidfmm math as the
     # octree-native kernel but with active_pair_count chunk-skipping + the efficient
     # _chunk_segment_scatter_add. The octree-native _accumulate_octree_m2l_complex_chunked
     # was ~40000x slower/pair (full per-chunk argsort, no chunk-skip). Compact the real
@@ -320,7 +319,7 @@ def _octree_far_field_grad(
                 jnp.full((cap,), -1, dtype=INDEX_DTYPE).at[dest].set(v_tgt, mode="drop")
             )
             active_pairs = jnp.minimum(n_valid, cap)
-        locals_packed = _accumulate_solidfmm_m2l_chunked_scan(
+        locals_packed = _accumulate_m2l_chunked_scan(
             jnp.zeros_like(packed),
             packed,
             centers_arr,
@@ -328,6 +327,7 @@ def _octree_far_field_grad(
             tgt_pairs,
             active_pairs,
             order=int(order),
+            basis_mode="complex",
             rotation="solidfmm",
             total_nodes=num_nodes,
             chunk_size=int(m2l_chunk_size),
@@ -390,7 +390,7 @@ def _octree_far_field_grad_real(
 
     Expands about the octree BOX centres (``view.centers``) throughout -- real harmonics need
     consistent centres. Uses the ``(p+1)^2`` real coefficient layout (half the complex
-    ``2(p+1)^2``) and the O(p^3) rotate-scale M2L (``_accumulate_real_m2l_chunked_scan``).
+    ``2(p+1)^2``) and the O(p^3) rotate-scale M2L (``_accumulate_m2l_chunked_scan``).
     Returns ``grad`` (caller applies ``far_acc = -G * grad``, matching the complex path).
 
     SIGN CONVENTION (see the module docstring -- ``delta = source_center - dest_center``):
@@ -533,7 +533,7 @@ def _octree_far_field_grad_real(
                 jnp.full((cap,), -1, dtype=INDEX_DTYPE).at[dest].set(v_tgt, mode="drop")
             )
             active_pairs = jnp.minimum(n_valid, cap)
-        locals_packed = _accumulate_real_m2l_chunked_scan(
+        locals_packed = _accumulate_m2l_chunked_scan(
             jnp.zeros_like(mp),
             mp,
             centers,
@@ -541,6 +541,7 @@ def _octree_far_field_grad_real(
             tgt_pairs,
             active_pairs,
             order=p,
+            basis_mode="real",
             m2l_impl="rot_scale",
             total_nodes=num_nodes,
             chunk_size=int(m2l_chunk_size),

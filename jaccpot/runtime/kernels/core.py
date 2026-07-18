@@ -435,35 +435,9 @@ def _solidfmm_downward_accumulate_from_multipoles(
                 chunk_size=chunk_size,
                 basis_mode=basis_mode,
             )
-    elif real_basis:
-        if pair_count <= chunk_size:
-            locals_updated = _accumulate_real_m2l_fullbatch(
-                initial_locals_coeffs,
-                multipoles_coeffs,
-                centers,
-                src,
-                tgt,
-                active_pair_count,
-                order=order,
-                m2l_impl=m2l_impl,
-                total_nodes=total_nodes,
-            )
-        else:
-            locals_updated = _accumulate_real_m2l_chunked_scan(
-                initial_locals_coeffs,
-                multipoles_coeffs,
-                centers,
-                src,
-                tgt,
-                active_pair_count,
-                order=order,
-                m2l_impl=m2l_impl,
-                total_nodes=total_nodes,
-                chunk_size=chunk_size,
-            )
     else:
         if pair_count <= chunk_size:
-            locals_updated = _accumulate_solidfmm_m2l_fullbatch(
+            locals_updated = _accumulate_m2l_fullbatch(
                 initial_locals_coeffs,
                 multipoles_coeffs,
                 centers,
@@ -471,11 +445,13 @@ def _solidfmm_downward_accumulate_from_multipoles(
                 tgt,
                 active_pair_count,
                 order=order,
+                basis_mode=basis_mode,
                 rotation=rotation_mode,
+                m2l_impl=m2l_impl,
                 total_nodes=total_nodes,
             )
         else:
-            locals_updated = _accumulate_solidfmm_m2l_chunked_scan(
+            locals_updated = _accumulate_m2l_chunked_scan(
                 initial_locals_coeffs,
                 multipoles_coeffs,
                 centers,
@@ -483,7 +459,9 @@ def _solidfmm_downward_accumulate_from_multipoles(
                 tgt,
                 active_pair_count,
                 order=order,
+                basis_mode=basis_mode,
                 rotation=rotation_mode,
+                m2l_impl=m2l_impl,
                 total_nodes=total_nodes,
                 chunk_size=chunk_size,
             )
@@ -1379,7 +1357,7 @@ def _accumulate_solidfmm_m2l_grouped_class_major(
     if rotation not in ("solidfmm",):
         src = grouped.class_sources
         tgt = grouped.class_targets
-        return _accumulate_solidfmm_m2l_fullbatch(
+        return _accumulate_m2l_fullbatch(
             locals_coeffs,
             multip_packed,
             centers,
@@ -1387,6 +1365,7 @@ def _accumulate_solidfmm_m2l_grouped_class_major(
             tgt,
             jnp.asarray(src.shape[0], dtype=INDEX_DTYPE),
             order=order,
+            basis_mode=basis_mode,
             rotation=rotation,
             total_nodes=total_nodes,
         )
@@ -1452,7 +1431,7 @@ def _accumulate_solidfmm_m2l_grouped(
         # Keep existing sparse path semantics for other conventions.
         src = grouped.class_sources
         tgt = grouped.class_targets
-        return _accumulate_solidfmm_m2l_fullbatch(
+        return _accumulate_m2l_fullbatch(
             locals_coeffs,
             multip_packed,
             centers,
@@ -1460,6 +1439,7 @@ def _accumulate_solidfmm_m2l_grouped(
             tgt,
             jnp.asarray(src.shape[0], dtype=INDEX_DTYPE),
             order=order,
+            basis_mode=basis_mode,
             rotation=rotation,
             total_nodes=total_nodes,
         )
@@ -1738,12 +1718,33 @@ def _apply_complex_m2l(
     return _m2l_complex_batch_kernel(src_mult, deltas, order=order, rotation=rotation)
 
 
+def _apply_m2l(
+    src_mult: Array,
+    deltas: Array,
+    *,
+    order: int,
+    basis_mode: str,
+    rotation: Optional[str] = None,
+    m2l_impl: Optional[str] = None,
+) -> Array:
+    """Basis-dispatched batched M2L apply seam.
+
+    ``basis_mode`` is a static discriminator, so XLA specialises each branch to
+    the exact HLO of the corresponding single-basis kernel. Real basis routes
+    through :func:`_apply_real_m2l` (``m2l_impl``); solidfmm/complex through
+    :func:`_apply_complex_m2l` (``rotation``).
+    """
+    if str(basis_mode).strip().lower() == "real":
+        return _apply_real_m2l(src_mult, deltas, order=order, m2l_impl=m2l_impl)
+    return _apply_complex_m2l(src_mult, deltas, order=order, rotation=rotation)
+
+
 @partial(
     jax.jit,
-    static_argnames=("order", "rotation", "total_nodes"),
+    static_argnames=("order", "basis_mode", "rotation", "m2l_impl", "total_nodes"),
     donate_argnums=(0,),
 )
-def _accumulate_solidfmm_m2l_fullbatch(
+def _accumulate_m2l_fullbatch(
     locals_coeffs: Array,
     multip_packed: Array,
     centers: Array,
@@ -1752,36 +1753,49 @@ def _accumulate_solidfmm_m2l_fullbatch(
     active_pair_count: Array,
     *,
     order: int,
-    rotation: str,
+    basis_mode: str,
     total_nodes: int,
+    rotation: Optional[str] = None,
+    m2l_impl: Optional[str] = None,
 ) -> Array:
-    """Accumulate solidfmm M2L contributions in one full interaction batch."""
+    """Accumulate M2L contributions in one full interaction batch (both bases).
+
+    Unifies the former ``_accumulate_{solidfmm,real}_m2l_fullbatch`` behind the
+    static ``basis_mode`` seam. Numerics-preserving: every discriminator is a
+    ``static_argname`` so XLA specialises the merged jit per basis to the exact
+    HLO each single-basis kernel produced.
+    """
     idx = jnp.arange(src.shape[0], dtype=INDEX_DTYPE)
-    raw_src = src
-    raw_tgt = tgt
-    valid = (idx < active_pair_count) & (raw_src >= 0) & (raw_tgt >= 0)
-    safe_src = jnp.where(valid, raw_src, 0)
-    safe_tgt = jnp.where(valid, raw_tgt, 0)
+    valid = (idx < active_pair_count) & (src >= 0) & (tgt >= 0)
+    safe_src = jnp.where(valid, src, 0)
+    safe_tgt = jnp.where(valid, tgt, 0)
     src_mult = multip_packed[safe_src]
     deltas = centers[safe_tgt] - centers[safe_src]
-
-    contribs = _apply_complex_m2l(
+    contribs = _apply_m2l(
         src_mult,
         deltas,
         order=order,
+        basis_mode=basis_mode,
         rotation=rotation,
-    )
-    contribs = contribs.astype(locals_coeffs.dtype)
+        m2l_impl=m2l_impl,
+    ).astype(locals_coeffs.dtype)
     contribs = jnp.where(valid[:, None], contribs, 0)
     return locals_coeffs + jax.ops.segment_sum(contribs, safe_tgt, total_nodes)
 
 
 @partial(
     jax.jit,
-    static_argnames=("order", "rotation", "total_nodes", "chunk_size"),
+    static_argnames=(
+        "order",
+        "basis_mode",
+        "rotation",
+        "m2l_impl",
+        "total_nodes",
+        "chunk_size",
+    ),
     donate_argnums=(0,),
 )
-def _accumulate_solidfmm_m2l_chunked_scan(
+def _accumulate_m2l_chunked_scan(
     locals_coeffs: Array,
     multip_packed: Array,
     centers: Array,
@@ -1790,11 +1804,18 @@ def _accumulate_solidfmm_m2l_chunked_scan(
     active_pair_count: Array,
     *,
     order: int,
-    rotation: str,
+    basis_mode: str,
     total_nodes: int,
     chunk_size: int,
+    rotation: Optional[str] = None,
+    m2l_impl: Optional[str] = None,
 ) -> Array:
-    """Accumulate solidfmm M2L contributions with chunked scan reduction."""
+    """Accumulate M2L contributions with chunked scan reduction (both bases).
+
+    Unifies the former ``_accumulate_{solidfmm,real}_m2l_chunked_scan`` behind
+    the static ``basis_mode`` seam; numerics-preserving (identical HLO per
+    basis, single shared ``lax.scan`` body).
+    """
     pair_count = src.shape[0]
     starts = jnp.arange(0, pair_count, chunk_size, dtype=INDEX_DTYPE)
 
@@ -1804,7 +1825,6 @@ def _accumulate_solidfmm_m2l_chunked_scan(
             idx = start_idx + offset
             valid = idx < pair_count
             safe_idx = jnp.where(valid, idx, 0)
-
             src_chunk_raw = src[safe_idx]
             tgt_chunk_raw = tgt[safe_idx]
             valid = (
@@ -1817,15 +1837,14 @@ def _accumulate_solidfmm_m2l_chunked_scan(
             tgt_chunk = jnp.where(valid, tgt_chunk_raw, 0)
             src_mult = multip_packed[src_chunk]
             deltas = centers[tgt_chunk] - centers[src_chunk]
-
-            contribs = _apply_complex_m2l(
+            contribs = _apply_m2l(
                 src_mult,
                 deltas,
                 order=order,
+                basis_mode=basis_mode,
                 rotation=rotation,
-            )
-
-            contribs = contribs.astype(locals_coeffs.dtype)
+                m2l_impl=m2l_impl,
+            ).astype(locals_coeffs.dtype)
             return _chunk_segment_scatter_add(
                 accum,
                 contribs,
@@ -1966,42 +1985,6 @@ def _propagate_solidfmm_locals_by_level(
     static_argnames=("order", "m2l_impl", "total_nodes"),
     donate_argnums=(0,),
 )
-def _accumulate_real_m2l_fullbatch(
-    locals_coeffs: Array,
-    multip_packed_real: Array,
-    centers: Array,
-    src: Array,
-    tgt: Array,
-    active_pair_count: Array,
-    *,
-    order: int,
-    m2l_impl: str,
-    total_nodes: int,
-) -> Array:
-    """Accumulate real-basis M2L contributions in one full interaction batch."""
-    idx = jnp.arange(src.shape[0], dtype=INDEX_DTYPE)
-    raw_src = src
-    raw_tgt = tgt
-    valid = (idx < active_pair_count) & (raw_src >= 0) & (raw_tgt >= 0)
-    safe_src = jnp.where(valid, raw_src, 0)
-    safe_tgt = jnp.where(valid, raw_tgt, 0)
-    src_mult = multip_packed_real[safe_src]
-    deltas = centers[safe_tgt] - centers[safe_src]
-    contribs = _apply_real_m2l(
-        src_mult,
-        deltas,
-        order=order,
-        m2l_impl=m2l_impl,
-    ).astype(locals_coeffs.dtype)
-    contribs = jnp.where(valid[:, None], contribs, 0)
-    return locals_coeffs + jax.ops.segment_sum(contribs, safe_tgt, total_nodes)
-
-
-@partial(
-    jax.jit,
-    static_argnames=("order", "m2l_impl", "total_nodes"),
-    donate_argnums=(0,),
-)
 def _accumulate_real_m2l_fullbatch_pallas(
     locals_coeffs: Array,
     multip_packed_real: Array,
@@ -2023,72 +2006,6 @@ def _accumulate_real_m2l_fullbatch_pallas(
         m2l_impl=m2l_impl,
     ).astype(locals_coeffs.dtype)
     return locals_coeffs + jax.ops.segment_sum(contribs, tgt, total_nodes)
-
-
-@partial(
-    jax.jit,
-    static_argnames=("order", "m2l_impl", "total_nodes", "chunk_size"),
-    donate_argnums=(0,),
-)
-def _accumulate_real_m2l_chunked_scan(
-    locals_coeffs: Array,
-    multip_packed_real: Array,
-    centers: Array,
-    src: Array,
-    tgt: Array,
-    active_pair_count: Array,
-    *,
-    order: int,
-    m2l_impl: str,
-    total_nodes: int,
-    chunk_size: int,
-) -> Array:
-    """Accumulate real-basis M2L contributions with chunked scan reduction."""
-    pair_count = src.shape[0]
-    starts = jnp.arange(0, pair_count, chunk_size, dtype=INDEX_DTYPE)
-
-    def body(local_accum: Array, start_idx: Array) -> tuple[Array, None]:
-        def active_chunk(accum: Array) -> Array:
-            offset = jnp.arange(chunk_size, dtype=INDEX_DTYPE)
-            idx = start_idx + offset
-            valid = idx < pair_count
-            safe_idx = jnp.where(valid, idx, 0)
-            src_chunk_raw = src[safe_idx]
-            tgt_chunk_raw = tgt[safe_idx]
-            valid = (
-                valid
-                & (idx < active_pair_count)
-                & (src_chunk_raw >= 0)
-                & (tgt_chunk_raw >= 0)
-            )
-            src_chunk = jnp.where(valid, src_chunk_raw, 0)
-            tgt_chunk = jnp.where(valid, tgt_chunk_raw, 0)
-            src_mult = multip_packed_real[src_chunk]
-            deltas = centers[tgt_chunk] - centers[src_chunk]
-            contribs = _apply_real_m2l(
-                src_mult,
-                deltas,
-                order=order,
-                m2l_impl=m2l_impl,
-            ).astype(locals_coeffs.dtype)
-            return _chunk_segment_scatter_add(
-                accum,
-                contribs,
-                tgt_chunk,
-                valid,
-                chunk_size=chunk_size,
-            )
-
-        local_accum = jax.lax.cond(
-            start_idx < active_pair_count,
-            active_chunk,
-            lambda accum: accum,
-            local_accum,
-        )
-        return local_accum, None
-
-    local_accum, _ = jax.lax.scan(body, locals_coeffs, starts)
-    return local_accum
 
 
 @partial(
