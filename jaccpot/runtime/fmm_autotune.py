@@ -30,10 +30,7 @@ from .fmm_caches import (
     _m2l_autotune_lookup,
     _m2l_autotune_store,
 )
-from .kernels.core import (
-    _accumulate_m2l_chunked_scan,
-    _accumulate_real_m2l_chunked_scan_pallas,
-)
+from .kernels.core import _accumulate_m2l_chunked_scan
 
 
 class AutotuneMixin:
@@ -219,58 +216,37 @@ class AutotuneMixin:
                     m2l_impl = (
                         "rot_scale" if self.m2l_impl is None else str(self.m2l_impl)
                     )
-                    if self.use_pallas:
-                        _ = _accumulate_real_m2l_chunked_scan_pallas(
-                            locals0,
-                            multip,
-                            centers,
-                            src_sample,
-                            tgt_sample,
-                            order=order_int,
-                            m2l_impl=m2l_impl,
-                            total_nodes=total_nodes,
-                            chunk_size=chunk_int,
-                        ).block_until_ready()
-                        t0 = time.perf_counter()
-                        _ = _accumulate_real_m2l_chunked_scan_pallas(
-                            locals0,
-                            multip,
-                            centers,
-                            src_sample,
-                            tgt_sample,
-                            order=order_int,
-                            m2l_impl=m2l_impl,
-                            total_nodes=total_nodes,
-                            chunk_size=chunk_int,
-                        ).block_until_ready()
-                    else:
-                        _ = _accumulate_m2l_chunked_scan(
-                            locals0,
-                            multip,
-                            centers,
-                            src_sample,
-                            tgt_sample,
-                            jnp.asarray(src_sample.shape[0], dtype=INDEX_DTYPE),
-                            order=order_int,
-                            basis_mode="real",
-                            m2l_impl=m2l_impl,
-                            total_nodes=total_nodes,
-                            chunk_size=chunk_int,
-                        ).block_until_ready()
-                        t0 = time.perf_counter()
-                        _ = _accumulate_m2l_chunked_scan(
-                            locals0,
-                            multip,
-                            centers,
-                            src_sample,
-                            tgt_sample,
-                            jnp.asarray(src_sample.shape[0], dtype=INDEX_DTYPE),
-                            order=order_int,
-                            basis_mode="real",
-                            m2l_impl=m2l_impl,
-                            total_nodes=total_nodes,
-                            chunk_size=chunk_int,
-                        ).block_until_ready()
+                    # Benchmark the real M2L kernel evaluation actually runs
+                    # (merged _accumulate_m2l_chunked_scan -> _apply_real_m2l,
+                    # pure-JAX or fused-Pallas). The old non-fused Pallas
+                    # accumulate variant is not on the evaluation path.
+                    _ = _accumulate_m2l_chunked_scan(
+                        locals0,
+                        multip,
+                        centers,
+                        src_sample,
+                        tgt_sample,
+                        jnp.asarray(src_sample.shape[0], dtype=INDEX_DTYPE),
+                        order=order_int,
+                        basis_mode="real",
+                        m2l_impl=m2l_impl,
+                        total_nodes=total_nodes,
+                        chunk_size=chunk_int,
+                    ).block_until_ready()
+                    t0 = time.perf_counter()
+                    _ = _accumulate_m2l_chunked_scan(
+                        locals0,
+                        multip,
+                        centers,
+                        src_sample,
+                        tgt_sample,
+                        jnp.asarray(src_sample.shape[0], dtype=INDEX_DTYPE),
+                        order=order_int,
+                        basis_mode="real",
+                        m2l_impl=m2l_impl,
+                        total_nodes=total_nodes,
+                        chunk_size=chunk_int,
+                    ).block_until_ready()
                 elapsed = float(time.perf_counter() - t0)
             except Exception:
                 continue

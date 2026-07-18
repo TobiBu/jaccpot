@@ -278,7 +278,6 @@ from .kernels.core import (
     ExpansionBasis,
     NearfieldInteropData,
     PackedAccelerationDerivatives,
-    _accumulate_real_m2l_chunked_scan_pallas,
     _build_nearfield_interop_data,
     _build_target_nearfield_source_index_matrix,
     _compute_targeted_nearfield,

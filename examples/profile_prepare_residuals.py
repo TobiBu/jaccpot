@@ -271,7 +271,6 @@ def profile_prepare_residuals(
         (_rt_mod, "_accumulate_m2l_chunked_scan", "M2L"),
         (_rt_mod, "_accumulate_solidfmm_m2l_grouped", "M2L"),
         (_rt_mod, "_accumulate_solidfmm_m2l_grouped_class_major", "M2L"),
-        (_rt_mod, "_accumulate_real_m2l_chunked_scan_pallas", "M2L"),
         (_rt_mod, "_propagate_solidfmm_locals_to_children", "L2L"),
         (_rt_mod, "_propagate_real_locals_to_children", "L2L"),
         (_rt_mod, "_build_nearfield_interop_data", "nearfield_interop"),

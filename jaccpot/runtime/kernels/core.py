@@ -1514,21 +1514,6 @@ def _m2l_real_batch_kernel(
     return m2l_rot_scale_real_batch(multipoles, deltas, order=order, use_pallas=False)
 
 
-@partial(jax.jit, static_argnames=("order", "m2l_impl"))
-def _m2l_real_batch_kernel_pallas(
-    multipoles: Array,
-    deltas: Array,
-    *,
-    order: int,
-    m2l_impl: str,
-) -> Array:
-    """Vectorized real-basis M2L translation kernel using the optional Pallas core."""
-    mode = str(m2l_impl).strip().lower()
-    if mode != "rot_scale":
-        raise ValueError("real-basis m2l_impl must be 'rot_scale'")
-    return m2l_rot_scale_real_batch(multipoles, deltas, order=order, use_pallas=True)
-
-
 def _real_m2l_pallas_active() -> bool:
     """Whether to route the real-basis M2L z-core through the Pallas kernel.
 
@@ -1978,83 +1963,6 @@ def _propagate_solidfmm_locals_by_level(
         return state + updates
 
     return jax.lax.fori_loop(0, max_level + 1, level_body, coeffs_local)
-
-
-@partial(
-    jax.jit,
-    static_argnames=("order", "m2l_impl", "total_nodes"),
-    donate_argnums=(0,),
-)
-def _accumulate_real_m2l_fullbatch_pallas(
-    locals_coeffs: Array,
-    multip_packed_real: Array,
-    centers: Array,
-    src: Array,
-    tgt: Array,
-    *,
-    order: int,
-    m2l_impl: str,
-    total_nodes: int,
-) -> Array:
-    """Accumulate real-basis M2L contributions using the optional Pallas core."""
-    src_mult = multip_packed_real[src]
-    deltas = centers[tgt] - centers[src]
-    contribs = _m2l_real_batch_kernel_pallas(
-        src_mult,
-        deltas,
-        order=order,
-        m2l_impl=m2l_impl,
-    ).astype(locals_coeffs.dtype)
-    return locals_coeffs + jax.ops.segment_sum(contribs, tgt, total_nodes)
-
-
-@partial(
-    jax.jit,
-    static_argnames=("order", "m2l_impl", "total_nodes", "chunk_size"),
-    donate_argnums=(0,),
-)
-def _accumulate_real_m2l_chunked_scan_pallas(
-    locals_coeffs: Array,
-    multip_packed_real: Array,
-    centers: Array,
-    src: Array,
-    tgt: Array,
-    *,
-    order: int,
-    m2l_impl: str,
-    total_nodes: int,
-    chunk_size: int,
-) -> Array:
-    """Chunked real-basis M2L accumulation using the optional Pallas core."""
-    pair_count = src.shape[0]
-    starts = jnp.arange(0, pair_count, chunk_size, dtype=INDEX_DTYPE)
-
-    def body(local_accum: Array, start_idx: Array) -> tuple[Array, None]:
-        offset = jnp.arange(chunk_size, dtype=INDEX_DTYPE)
-        idx = start_idx + offset
-        valid = idx < pair_count
-        safe_idx = jnp.where(valid, idx, 0)
-        src_chunk = src[safe_idx]
-        tgt_chunk = tgt[safe_idx]
-        src_mult = multip_packed_real[src_chunk]
-        deltas = centers[tgt_chunk] - centers[src_chunk]
-        contribs = _m2l_real_batch_kernel_pallas(
-            src_mult,
-            deltas,
-            order=order,
-            m2l_impl=m2l_impl,
-        ).astype(locals_coeffs.dtype)
-        local_accum = _chunk_segment_scatter_add(
-            local_accum,
-            contribs,
-            tgt_chunk,
-            valid,
-            chunk_size=chunk_size,
-        )
-        return local_accum, None
-
-    local_accum, _ = jax.lax.scan(body, locals_coeffs, starts)
-    return local_accum
 
 
 @partial(
