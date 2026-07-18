@@ -144,7 +144,9 @@ class DistributedFMMConfig:
     cross_max_neighbors_per_leaf: int = 128
     cross_max_pair_queue: int = 1 << 15
 
-    def with_scaled_caps(self, factor: float) -> "DistributedFMMConfig":
+    def with_scaled_caps(
+        self: "DistributedFMMConfig", factor: float
+    ) -> "DistributedFMMConfig":
         """Return a copy with every capacity multiplied by ``factor`` (rounded up).
 
         Handy for the overflow-retry loop in capacity calibration.
@@ -180,7 +182,7 @@ class DistributedFMMResult:
     config: DistributedFMMConfig
 
     @property
-    def overflow(self) -> bool:
+    def overflow(self: "DistributedFMMResult") -> bool:
         return bool(self.diagnostics.get("overflow", False))
 
 
@@ -341,7 +343,9 @@ def _make_fn(config: DistributedFMMConfig, ndev: int, cap: int) -> Callable:
         offsets = jnp.concatenate([jnp.zeros((1,), INDEX_DTYPE), jnp.cumsum(counts)])
         return offsets, src_s, counts, u_leaves
 
-    def fn(pos, mass, gid, count):
+    def fn(
+        pos: jax.Array, mass: jax.Array, gid: jax.Array, count: jax.Array
+    ) -> tuple[jax.Array, jax.Array, jax.Array]:
         bounds = global_bounds(pos)
         pos_s, mass_s = sanitize_padding(pos, mass, count)
         tree = Tree.from_particles(
@@ -632,7 +636,7 @@ def make_force_evaluator(
     config: DistributedFMMConfig,
     ndev: int,
     cap: int,
-    mesh,
+    mesh: Any,
     *,
     jit: bool = True,
 ) -> Callable:
@@ -647,7 +651,12 @@ def make_force_evaluator(
 
     fn = _make_fn(config, ndev, cap)
 
-    def evaluate(pos_flat, mass_flat, gid_flat, counts):
+    def evaluate(
+        pos_flat: jax.Array,
+        mass_flat: jax.Array,
+        gid_flat: jax.Array,
+        counts: jax.Array,
+    ) -> tuple[jax.Array, jax.Array, jax.Array]:
         return shard_map(
             fn,
             mesh=mesh,
@@ -664,7 +673,7 @@ def distributed_fmm_accelerations(
     masses: np.ndarray,
     *,
     config: DistributedFMMConfig | None = None,
-    mesh=None,
+    mesh: Any = None,
     ndev: int | None = None,
     jit: bool = False,
 ) -> DistributedFMMResult:
