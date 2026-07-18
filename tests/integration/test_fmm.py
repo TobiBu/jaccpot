@@ -247,6 +247,11 @@ def test_prepare_state_fixed_depth_tree():
 
 def test_prepare_refresh_static_radix_tree_preserves_static_shape(monkeypatch):
     monkeypatch.setattr(jax, "default_backend", lambda: "gpu")
+    # This test profiles the strict cap on the fly (there is no pre-recorded
+    # profile for its key), so do not require an exact cap-profile match --
+    # otherwise it depends on another test having recorded one first (order
+    # dependence). Matches the sibling strict-lane tests below.
+    monkeypatch.setenv("JACCPOT_STATIC_STRICT_REQUIRE_EXACT_CAP_PROFILE_MATCH", "0")
 
     key = jax.random.PRNGKey(123)
     core = 0.01 * jax.random.normal(key, (160, 3), dtype=jnp.float32)
@@ -300,6 +305,9 @@ def test_prepare_refresh_static_radix_tree_preserves_static_shape(monkeypatch):
 
 def test_static_radix_refresh_rebuilds_current_large_n_payloads(monkeypatch):
     monkeypatch.setattr(jax, "default_backend", lambda: "gpu")
+    # Profile the strict cap on the fly rather than requiring a pre-recorded
+    # profile match (which would make this test depend on run order).
+    monkeypatch.setenv("JACCPOT_STATIC_STRICT_REQUIRE_EXACT_CAP_PROFILE_MATCH", "0")
     monkeypatch.setenv("JACCPOT_LARGE_N_TARGET_BLOCK_SIZE", "4")
     monkeypatch.setenv("JACCPOT_LARGE_N_SPEED_PREPARED_LAYOUT", "1")
     monkeypatch.setenv("JACCPOT_LARGE_N_STATIC_TARGET_BLOCKS", "1")
@@ -640,6 +648,15 @@ def test_strict_run_v2_api(monkeypatch):
     monkeypatch.setattr(jax, "default_backend", lambda: "gpu")
     monkeypatch.setenv("JACCPOT_STATIC_STRICT_GPU_MODE", "on")
     monkeypatch.setenv("JACCPOT_STATIC_STRICT_REQUIRE_EXACT_CAP_PROFILE_MATCH", "0")
+    # Pin the fused static-sizing caps to fixed adequate values (mirroring the
+    # sibling strict-fused tests below). Without this the fused lane sizes the
+    # static neighbour-edge cap from the *first* build's active-edge count, which
+    # is sensitive to leaked process-global tree/neighbour construction state
+    # from earlier tests on the same xdist worker; an undersized first-build cap
+    # then overflows on a later scan step ("neighbor-edge cap exceeded"). Fixed
+    # caps make the run deterministic and order-independent.
+    monkeypatch.setenv("JACCPOT_LARGE_N_NEIGHBOR_EDGE_PROFILE_FIXED_CAP", "65536")
+    monkeypatch.setenv("JACCPOT_LARGE_N_STATIC_TARGET_BLOCKS_MAX_PER_LEAF", "32")
 
     key = jax.random.PRNGKey(20260513)
     key_pos, key_mass = jax.random.split(key)
