@@ -2700,6 +2700,11 @@ def test_prepare_state_cache_key_respects_center_mode():
         mac_type="dehnen",
         grouped_interactions=False,
     )
+    # The cache-key-vs-center_mode behaviour depends on the adaptive resolver
+    # setting center_mode="aabb" when grouped_interactions flips on. That is an
+    # adaptive rewrite which the production-default static fixed sizing skips, so
+    # disable it here to exercise the center_mode-sensitive cache-key path.
+    fmm._static_runtime_fixed_sizing = False
     fmm.prepare_state(
         positions,
         masses,
@@ -2951,6 +2956,11 @@ def test_fast_preset_adaptive_large_cpu_policy_applies():
         complex_rotation="solidfmm",
         mac_type="dehnen",
     )
+    # This test exercises the adaptive large-CPU runtime policy, which is the
+    # non-default opt-out path: the production default is static fixed sizing
+    # (JACCPOT_STATIC_RUNTIME_FIXED_SIZING=1), which deliberately skips adaptive
+    # runtime rewrites. Disable it so the adaptive policy is resolved and asserted.
+    fmm._static_runtime_fixed_sizing = False
 
     overrides = fmm._resolve_runtime_execution_overrides(
         num_particles=131072,
@@ -2975,6 +2985,10 @@ def test_fast_preset_adaptive_class_major_threshold():
         complex_rotation="solidfmm",
         mac_type="dehnen",
     )
+    # Adaptive class-major farfield policy is the non-default opt-out path;
+    # static fixed sizing (the production default) skips it. Disable it here so
+    # the adaptive threshold behaviour is resolved and asserted.
+    fmm._static_runtime_fixed_sizing = False
 
     overrides = fmm._resolve_runtime_execution_overrides(
         num_particles=262144,
