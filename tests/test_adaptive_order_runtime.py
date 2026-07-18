@@ -13,6 +13,7 @@ pytest.importorskip("yggdrax")
 from yggdrax.interactions import DualTreeTraversalConfig
 
 import jaccpot.runtime._fmm_impl as fmm_impl_private
+import jaccpot.runtime.fmm_prepare as fmm_prepare_private
 from jaccpot import FastMultipoleMethod, FMMAdvancedConfig, RuntimePolicyConfig
 
 
@@ -287,7 +288,7 @@ def test_dehnen_error_uses_adaptive_pair_policy(monkeypatch):
         fake_build_adaptive_policy_state,
     )
     monkeypatch.setattr(
-        fmm_impl_private,
+        fmm_prepare_private,
         "_build_dual_tree_artifacts",
         fake_build_dual_tree_artifacts,
     )

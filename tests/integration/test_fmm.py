@@ -15,6 +15,7 @@ from yggdrax.tree import build_tree
 
 import jaccpot.runtime._fmm_impl as fmm_impl_private
 import jaccpot.runtime.fmm as fmm_module
+import jaccpot.runtime.fmm_prepare as fmm_prepare_private
 import jaccpot.runtime.kernels.core as kernels_core
 from jaccpot import FMMPreset
 from jaccpot.downward.local_expansions import (
@@ -2574,9 +2575,9 @@ def test_prepare_state_rebuilds_topology_after_rebuild_every_steps():
     assert fmm.recent_topology_reused is True
 
     with mock.patch.object(
-        fmm_impl_private,
+        fmm_prepare_private,
         "_build_tree_with_config",
-        wraps=fmm_impl_private._build_tree_with_config,
+        wraps=fmm_prepare_private._build_tree_with_config,
     ) as spy_build:
         state_third = fmm.prepare_state(
             moved_b,
