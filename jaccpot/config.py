@@ -6,7 +6,11 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import Any, Literal, Optional
 
-BASIS_DOC = "Preferred production basis is 'solidfmm'."
+BASIS_DOC = (
+    "Preferred production basis is 'real' (Dehnen no-sqrt2 harmonics): the radix "
+    "large-N fast lane runs pure-real end to end with no complex<->real "
+    "conversion. 'solidfmm'/'complex' are retained for cross-checking only."
+)
 FARFIELD_MODE_DOC = (
     "For large_n_gpu production, far-field execution is canonicalized to "
     "'pair_grouped'."

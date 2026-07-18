@@ -106,7 +106,6 @@ from jaccpot.operators.multipole_utils import (
     total_coefficients,
 )
 from jaccpot.operators.real_harmonics import (
-    complex_to_dehnen_real_coeffs,
     evaluate_local_real_derivative_tower_batch,
     evaluate_local_real_with_grad,
     l2l_real,
@@ -115,6 +114,9 @@ from jaccpot.operators.real_harmonics import (
 from jaccpot.operators.symmetric_tensors import (
     component_lift_index_map_3d,
     contract_symmetric_one_axis_3d,
+)
+from jaccpot.upward.real_tree_expansions import (
+    prepare_real_upward_sweep,
 )
 from jaccpot.upward.solidfmm_complex_tree_expansions import (
     prepare_solidfmm_complex_source_motion_multipoles,
@@ -1665,7 +1667,10 @@ def _prepare_solidfmm_downward_multipole_inputs(
     p = int(upward.multipoles.order)
     basis_mode_norm = str(basis_mode).strip().lower()
     rotation_mode = str(complex_rotation).strip().lower()
-    # The upward sweep always produces packed COMPLEX solidfmm multipoles.
+    # Complex basis: upward produces packed COMPLEX solidfmm multipoles.
+    # Real basis: the native real upward sweep (prepare_real_upward_sweep) produces
+    # packed REAL (Dehnen no-sqrt2) coefficients directly -- there is NO complex
+    # intermediate and NO complex<->real conversion on the real path.
     packed_raw = jnp.asarray(upward.multipoles.packed)
     source_motion_raw = (
         jnp.asarray(upward.multipoles.source_motion_packed)
@@ -1681,21 +1686,24 @@ def _prepare_solidfmm_downward_multipole_inputs(
         )
         multip_packed_kernel = multip_packed
     else:
-        # Real (Dehnen no-sqrt2) basis: convert the FULL complex multipoles with
-        # the Dehnen Q transform (consistent with the real M2L/L2L/L2P operators).
-        # NOTE: do NOT use jaccpot.basis.real_sh.complex_to_real_coeffs here --
-        # that is the unitary sqrt(2) tesseral basis and is incompatible with the
-        # Dehnen operators (it silently caps far-field accuracy). Also must NOT
-        # cast the complex packed to a real dtype first (that would drop the
-        # imaginary part / sin channels).
-        multip_packed = packed_raw
-        multip_packed_kernel = complex_to_dehnen_real_coeffs(
-            packed_raw, order=p
-        ).astype(dtype)
+        # Real (Dehnen no-sqrt2) basis: pass the native real multipoles straight
+        # through to the real M2L/L2L/L2P operators. The complex->real Dehnen Q
+        # conversion (complex_to_dehnen_real_coeffs) has been REMOVED from the real
+        # path per the "real everywhere, never convert bases" contract; the native
+        # real upward sweep is the single source of real multipoles. Hard-error if
+        # complex-packed multipoles ever reach here (a wiring regression) rather
+        # than silently reintroducing a basis conversion.
+        if jnp.iscomplexobj(packed_raw):
+            raise TypeError(
+                "real basis_mode expects REAL multipole coefficients from the "
+                "native real upward sweep (prepare_real_upward_sweep), but received "
+                "complex-packed multipoles. The complex->real conversion has been "
+                "removed from the real path; check prepare_upward_sweep wiring."
+            )
+        multip_packed = packed_raw.astype(dtype)
+        multip_packed_kernel = multip_packed
         source_motion_multip_packed = (
-            complex_to_dehnen_real_coeffs(source_motion_raw, order=p).astype(dtype)
-            if source_motion_raw is not None
-            else None
+            source_motion_raw.astype(dtype) if source_motion_raw is not None else None
         )
     return _SolidFMMDownwardMultipoleInputs(
         multip_packed=multip_packed,
@@ -4034,6 +4042,18 @@ class FastMultipoleMethod:
             self._strict_fused_fallback_count += 1
             self._strict_fused_last_fallback_reason = (
                 "particle_count_not_in_JACCPOT_STATIC_STRICT_FUSED_PROFILE_SET"
+            )
+            # Fused mode was requested but this particle count is not in the
+            # configured profile set. Refuse to silently disable the fused fast
+            # lane and run a slower non-fused path -- raise so the profile set is
+            # fixed (or cleared to allow all N) instead.
+            raise RuntimeError(
+                "strict fused mode requested but particle count "
+                f"N={int(state_arr.shape[0])} is not in "
+                "JACCPOT_STATIC_STRICT_FUSED_PROFILE_SET="
+                f"{os.environ.get('JACCPOT_STATIC_STRICT_FUSED_PROFILE_SET', '')!r}; "
+                "refusing to silently fall back to a slower non-fused path. Add "
+                "this N to the profile set, or leave it empty to allow all N."
             )
         else:
             self._strict_fused_last_fallback_reason = ""
@@ -7017,10 +7037,7 @@ class FastMultipoleMethod:
                 or bool(strict_fused_device_only_hot_path)
             )
         )
-        if bool(strict_fused_device_only_hot_path) and bool(
-            getattr(self, "_strict_fused_fastlane_diag_enabled", True)
-        ):
-            self._strict_fused_fastlane_attempts += 1
+        if bool(strict_fused_device_only_hot_path):
             blockers: list[str] = []
             if not bool(strict_mode_active):
                 blockers.append("strict_mode_inactive")
@@ -7038,16 +7055,36 @@ class FastMultipoleMethod:
                 blockers.append("mixed_order_farfield_active")
             if bool(traced_prepare_inputs) and not bool(strict_streamed_fast_path):
                 blockers.append("compact_streamed_tracer_unsupported")
-            if bool(strict_streamed_fast_path):
-                self._strict_fused_fastlane_hits += 1
-                self._strict_fused_fastlane_last_blockers = tuple()
-            else:
-                self._strict_fused_fastlane_misses += 1
-                self._strict_fused_fastlane_last_blockers = tuple(blockers)
-                counts = dict(getattr(self, "_strict_fused_fastlane_block_counts", {}))
-                for key in blockers:
-                    counts[str(key)] = int(counts.get(str(key), 0)) + 1
-                self._strict_fused_fastlane_block_counts = counts
+            if bool(getattr(self, "_strict_fused_fastlane_diag_enabled", True)):
+                self._strict_fused_fastlane_attempts += 1
+                if bool(strict_streamed_fast_path):
+                    self._strict_fused_fastlane_hits += 1
+                    self._strict_fused_fastlane_last_blockers = tuple()
+                else:
+                    self._strict_fused_fastlane_misses += 1
+                    self._strict_fused_fastlane_last_blockers = tuple(blockers)
+                    counts = dict(
+                        getattr(self, "_strict_fused_fastlane_block_counts", {})
+                    )
+                    for key in blockers:
+                        counts[str(key)] = int(counts.get(str(key), 0)) + 1
+                    self._strict_fused_fastlane_block_counts = counts
+            if not bool(strict_streamed_fast_path):
+                # Production fused device-only hot path MUST engage the radix
+                # streamed fast lane. Never silently fall back to the slower
+                # generic build -- raise loudly with the blocking reasons so a
+                # misconfiguration is caught instead of quietly running the
+                # ~10x-slower generic path.
+                self._strict_fused_fallback_count += 1
+                self._strict_fused_last_fallback_reason = (
+                    "fused_device_only_hot_path_fastlane_blocked:" + ",".join(blockers)
+                )
+                raise RuntimeError(
+                    "strict fused device-only production lane could not engage the "
+                    "radix streamed fast lane and must not silently fall back to a "
+                    f"slower path (blockers={blockers}). This indicates a "
+                    "misconfiguration of the large-N GPU production profile."
+                )
         if strict_streamed_fast_path:
             if not suppress_host_side_effects:
                 self._refresh_dual_planner_cache_hits += 1
@@ -8523,6 +8560,70 @@ class FastMultipoleMethod:
         self._ensure_execution_backend_supported(tree=tree)
 
         if self.expansion_basis == "solidfmm":
+            if self._solidfmm_basis_mode() == "real":
+                # Native real (Dehnen no-sqrt2) upward sweep: P2M + M2M produce real
+                # multipoles directly -- NO complex intermediate, NO complex<->real
+                # conversion (the "real everywhere / never convert bases" contract).
+                # prepare_real_upward_sweep uses COM centers (what the large-N fast
+                # lane uses) and is bit-equivalent to the complex sweep +
+                # complex_to_dehnen_real_coeffs it replaces.
+                center_mode_norm = str(center_mode).strip().lower()
+                if center_mode_norm != "com":
+                    raise ValueError(
+                        "native real-basis upward sweep supports center_mode='com' "
+                        f"only (got '{center_mode}'); the large-N fast lane uses COM"
+                    )
+                resolved_leaf_cap = max_leaf_size
+                if resolved_leaf_cap is None:
+                    num_internal_real = int(jnp.asarray(tree.left_child).shape[0])
+                    leaf_ranges_real = jax.device_get(tree.node_ranges)[
+                        num_internal_real:
+                    ]
+                    if leaf_ranges_real.shape[0] == 0:
+                        resolved_leaf_cap = 0
+                    else:
+                        counts_real = (
+                            leaf_ranges_real[:, 1] - leaf_ranges_real[:, 0] + 1
+                        )
+                        resolved_leaf_cap = int(counts_real.max())
+                geometry_real = (
+                    precomputed_geometry
+                    if precomputed_geometry is not None
+                    else (
+                        None
+                        if bool(defer_geometry)
+                        else compute_tree_geometry(
+                            tree,
+                            positions_sorted,
+                            max_leaf_size=int(resolved_leaf_cap),
+                        )
+                    )
+                )
+                mass_moments_real = compute_tree_mass_moments(
+                    tree, positions_sorted, masses_sorted
+                )
+                real_upward = prepare_real_upward_sweep(
+                    tree,
+                    positions_sorted,
+                    masses_sorted,
+                    max_order=max_order,
+                    max_leaf_size=int(resolved_leaf_cap),
+                    leaf_batch_size=self.upward_leaf_batch_size,
+                    static_num_levels=self._resolve_upward_num_levels(tree),
+                )
+                real_multipoles = NodeMultipoleData(
+                    order=int(real_upward.multipoles.order),
+                    centers=real_upward.multipoles.centers,
+                    moments=None,  # type: ignore[arg-type]
+                    packed=real_upward.multipoles.packed,
+                    component_matrix=None,
+                    source_motion_packed=None,
+                )
+                return TreeUpwardData(
+                    geometry=geometry_real,
+                    mass_moments=mass_moments_real,
+                    multipoles=real_multipoles,
+                )
 
             def _record_upward_stage(name: str, elapsed: float) -> None:
                 if not bool(getattr(self, "_refresh_timing_active", False)):
