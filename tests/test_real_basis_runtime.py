@@ -159,7 +159,10 @@ def test_real_basis_acceleration_derivatives_match_complex():
     if not jax.config.jax_enable_x64:
         pytest.skip("requires x64 for stable tolerance")
 
-    n = 400
+    # Parity claim (real derivative tower == complex derivative tower on the
+    # same tree) holds at any order/N, so a small n + moderate order keeps the
+    # regression coverage while cutting the compile cost of this test.
+    n = 128
     dtype = jnp.float64
     key = jax.random.PRNGKey(5)
     key_pos, key_mass = jax.random.split(key)
@@ -173,7 +176,7 @@ def test_real_basis_acceleration_derivatives_match_complex():
     def run(basis: str, k: int):
         fmm = FastMultipoleMethod(preset="accurate", basis=basis, theta=0.4)
         return fmm.compute_accelerations(
-            positions, masses, leaf_size=16, max_order=6, max_acc_derivative_order=k
+            positions, masses, leaf_size=16, max_order=4, max_acc_derivative_order=k
         )
 
     for k in (1, 2):
