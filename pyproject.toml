@@ -101,6 +101,18 @@ addopts = "-q --strict-markers --ignore=tests/perf -n auto -m \"not experimental
 [tool.coverage.run]
 source = ["jaccpot"]
 branch = true
+omit = [
+  # Opt-in experimental prototypes (octree/treecode): deselected by the
+  # `experimental` marker in the default suite, so they are exercised only by
+  # `pytest -m experimental`, not by the coverage-gated CPU run. Covering them
+  # here would just dilute the metric with code the default suite does not run.
+  "jaccpot/experimental/*",
+  # GPU-only fused real-basis Pallas kernel (Ampere+). Unlike the other Pallas
+  # kernels (which the CPU CI exercises via interpret=True), this one has no
+  # interpret path, so CPU CI structurally cannot reach it; it is validated by
+  # the manual A100 Pallas parity runs.
+  "jaccpot/pallas/m2l_real_fused.py",
+]
 
 [tool.coverage.report]
 show_missing = true
