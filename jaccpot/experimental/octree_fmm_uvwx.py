@@ -455,7 +455,7 @@ def _octree_far_field_grad_real(
     # ---- M2M up-sweep: delta = child - parent (source=child) ----
     delta_child_minus_parent = centers - centers[parent_safe]
 
-    def m2m_body(step, mp):
+    def m2m_body(step: int, mp: jax.Array) -> jax.Array:
         level = n_levels - 1 - step
         active = (depths == level) & (parent < num_nodes)
         contrib = jax.vmap(lambda m, d: m2m_real(m, d, order=p))(
@@ -549,7 +549,7 @@ def _octree_far_field_grad_real(
     # ---- L2L down-sweep: delta = PARENT - child (source=parent; OPPOSITE of M2M) ----
     delta_parent_minus_child = centers[parent_safe] - centers
 
-    def l2l_body(step, loc):
+    def l2l_body(step: int, loc: jax.Array) -> jax.Array:
         level = step + 1
         active = (depths == level) & (parent < num_nodes)
         contrib = jax.vmap(lambda lc, d: l2l_real(lc, d, order=p))(

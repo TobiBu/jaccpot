@@ -235,15 +235,15 @@ def m2l_real_fused_pallas(
     )
     rr = jnp.asarray(r, dtype=real_dtype)
 
-    def bs_vec(cols):
+    def bs_vec(cols: int) -> pl.BlockSpec:
         return pl.BlockSpec((1, cols), lambda i: (i, 0))
 
-    def bs_blocks():
+    def bs_blocks() -> pl.BlockSpec:
         return pl.BlockSpec((1, Bp, mdp, mdp), lambda i: (i, 0, 0, 0))
 
     table_arrays = [tables[k] for k in _TABLE_KEYS]
 
-    def bs_full(arr):
+    def bs_full(arr: Array) -> pl.BlockSpec:
         shp = tuple(arr.shape)
         return pl.BlockSpec(shp, (lambda *_: (0,) * len(shp)))
 
