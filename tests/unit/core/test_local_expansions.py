@@ -615,7 +615,10 @@ def test_propagate_local_expansions_accumulates_parent():
 
 @pytest.mark.parametrize(
     "chunk_size",
-    [1, 2, DEFAULT_M2L_CHUNK_SIZE, 10**6],
+    # The tree has a handful of interactions (<< DEFAULT), so DEFAULT and 10**6
+    # both exercise the single full-batch path identically; keep one. [1, 2]
+    # cover the small-chunk scan path.
+    [1, 2, DEFAULT_M2L_CHUNK_SIZE],
 )
 def test_accumulate_m2l_matches_pairwise_translations(chunk_size, prepared_m2l_tree):
     tree, upward, interactions = prepared_m2l_tree
