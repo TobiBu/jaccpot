@@ -4043,6 +4043,18 @@ class FastMultipoleMethod:
             self._strict_fused_last_fallback_reason = (
                 "particle_count_not_in_JACCPOT_STATIC_STRICT_FUSED_PROFILE_SET"
             )
+            # Fused mode was requested but this particle count is not in the
+            # configured profile set. Refuse to silently disable the fused fast
+            # lane and run a slower non-fused path -- raise so the profile set is
+            # fixed (or cleared to allow all N) instead.
+            raise RuntimeError(
+                "strict fused mode requested but particle count "
+                f"N={int(state_arr.shape[0])} is not in "
+                "JACCPOT_STATIC_STRICT_FUSED_PROFILE_SET="
+                f"{os.environ.get('JACCPOT_STATIC_STRICT_FUSED_PROFILE_SET', '')!r}; "
+                "refusing to silently fall back to a slower non-fused path. Add "
+                "this N to the profile set, or leave it empty to allow all N."
+            )
         else:
             self._strict_fused_last_fallback_reason = ""
 
@@ -7025,10 +7037,7 @@ class FastMultipoleMethod:
                 or bool(strict_fused_device_only_hot_path)
             )
         )
-        if bool(strict_fused_device_only_hot_path) and bool(
-            getattr(self, "_strict_fused_fastlane_diag_enabled", True)
-        ):
-            self._strict_fused_fastlane_attempts += 1
+        if bool(strict_fused_device_only_hot_path):
             blockers: list[str] = []
             if not bool(strict_mode_active):
                 blockers.append("strict_mode_inactive")
@@ -7046,16 +7055,36 @@ class FastMultipoleMethod:
                 blockers.append("mixed_order_farfield_active")
             if bool(traced_prepare_inputs) and not bool(strict_streamed_fast_path):
                 blockers.append("compact_streamed_tracer_unsupported")
-            if bool(strict_streamed_fast_path):
-                self._strict_fused_fastlane_hits += 1
-                self._strict_fused_fastlane_last_blockers = tuple()
-            else:
-                self._strict_fused_fastlane_misses += 1
-                self._strict_fused_fastlane_last_blockers = tuple(blockers)
-                counts = dict(getattr(self, "_strict_fused_fastlane_block_counts", {}))
-                for key in blockers:
-                    counts[str(key)] = int(counts.get(str(key), 0)) + 1
-                self._strict_fused_fastlane_block_counts = counts
+            if bool(getattr(self, "_strict_fused_fastlane_diag_enabled", True)):
+                self._strict_fused_fastlane_attempts += 1
+                if bool(strict_streamed_fast_path):
+                    self._strict_fused_fastlane_hits += 1
+                    self._strict_fused_fastlane_last_blockers = tuple()
+                else:
+                    self._strict_fused_fastlane_misses += 1
+                    self._strict_fused_fastlane_last_blockers = tuple(blockers)
+                    counts = dict(
+                        getattr(self, "_strict_fused_fastlane_block_counts", {})
+                    )
+                    for key in blockers:
+                        counts[str(key)] = int(counts.get(str(key), 0)) + 1
+                    self._strict_fused_fastlane_block_counts = counts
+            if not bool(strict_streamed_fast_path):
+                # Production fused device-only hot path MUST engage the radix
+                # streamed fast lane. Never silently fall back to the slower
+                # generic build -- raise loudly with the blocking reasons so a
+                # misconfiguration is caught instead of quietly running the
+                # ~10x-slower generic path.
+                self._strict_fused_fallback_count += 1
+                self._strict_fused_last_fallback_reason = (
+                    "fused_device_only_hot_path_fastlane_blocked:" + ",".join(blockers)
+                )
+                raise RuntimeError(
+                    "strict fused device-only production lane could not engage the "
+                    "radix streamed fast lane and must not silently fall back to a "
+                    f"slower path (blockers={blockers}). This indicates a "
+                    "misconfiguration of the large-N GPU production profile."
+                )
         if strict_streamed_fast_path:
             if not suppress_host_side_effects:
                 self._refresh_dual_planner_cache_hits += 1
