@@ -1579,7 +1579,6 @@ def test_large_n_gpu_profile_coerces_conflicting_runtime_knobs():
                 retain_interactions=True,
             ),
         ),
-        runtime_path="legacy",
     )
     impl = fmm._impl
     assert impl.runtime_path == "large_n"
@@ -1609,20 +1608,7 @@ def test_large_n_gpu_profile_emits_deprecation_warnings_for_conflicting_knobs():
                 ),
                 runtime=RuntimePolicyConfig(memory_objective="throughput"),
             ),
-            runtime_path="legacy",
         )
-
-
-def test_large_n_prepare_path_ignores_legacy_runtime_path_request(monkeypatch):
-    positions, masses = _sample_problem(n=64)
-    fmm = FastMultipoleMethod(
-        preset=FMMPreset.LARGE_N_GPU,
-        basis="solidfmm",
-        runtime_path="legacy",
-    )
-    monkeypatch.setattr(fmm_impl_private.jax, "default_backend", lambda: "gpu")
-    state = fmm.prepare_state(positions, masses, leaf_size=16, max_order=3)
-    assert state.execution_backend == "large_n"
 
 
 def test_large_n_compiled_eval_uses_specialized_nearfield(monkeypatch):

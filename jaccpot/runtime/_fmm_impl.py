@@ -385,7 +385,7 @@ class FastMultipoleMethod(
         mixed_order_farfield: bool = False,
         mixed_order_min_order: Optional[int] = None,
         nearfield_mode: NearFieldMode = "auto",
-        runtime_path: Literal["auto", "legacy", "large_n"] = "auto",
+        runtime_path: Literal["auto", "large_n"] = "auto",
         execution_backend: FMMExecutionBackend = "auto",
         nearfield_edge_chunk_size: int = 256,
         precompute_nearfield_scatter_schedules: bool = True,
@@ -511,15 +511,8 @@ class FastMultipoleMethod(
         if nearfield_mode_norm not in ("auto", "baseline", "bucketed"):
             raise ValueError("nearfield_mode must be 'auto', 'baseline', or 'bucketed'")
         runtime_path_norm = str(runtime_path).strip().lower()
-        if runtime_path_norm not in ("auto", "legacy", "large_n"):
-            raise ValueError("runtime_path must be 'auto', 'legacy', or 'large_n'")
-        if runtime_path_norm == "legacy":
-            warnings.warn(
-                "runtime_path='legacy' is deprecated and will be removed; "
-                "use runtime_path='large_n' or runtime_path='auto'.",
-                FutureWarning,
-                stacklevel=2,
-            )
+        if runtime_path_norm not in ("auto", "large_n"):
+            raise ValueError("runtime_path must be 'auto' or 'large_n'")
         execution_backend_norm = str(execution_backend).strip().lower()
         if execution_backend_norm not in ("auto", "radix", "octree"):
             raise ValueError("execution_backend must be 'auto', 'radix', or 'octree'")

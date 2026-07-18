@@ -1892,7 +1892,7 @@ def can_use_large_n_prepare_path(
     """Decide whether prepare_state should dispatch to the large-N path."""
 
     runtime_path = str(getattr(fmm, "runtime_path", "auto")).strip().lower()
-    if runtime_path not in ("auto", "legacy", "large_n"):
+    if runtime_path not in ("auto", "large_n"):
         return False
     if (
         runtime_path == "auto"

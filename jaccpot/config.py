@@ -80,7 +80,6 @@ class RuntimePolicyConfig:
     """Execution-policy overrides for tree build and traversal.
 
     Notes:
-    - `runtime_path='legacy'` is deprecated and will be removed.
     - For `preset='large_n_gpu'`, runtime policy is canonicalized to the
       production low-memory fast path (minimum_memory + streamed pair_grouped
       + bucketed nearfield).
