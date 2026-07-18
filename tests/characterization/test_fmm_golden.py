@@ -97,9 +97,7 @@ def _make_inputs(distribution: str, n: int) -> tuple[np.ndarray, np.ndarray]:
     return np.asarray(positions), np.asarray(masses)
 
 
-def _direct_sum_accelerations(
-    positions: np.ndarray, masses: np.ndarray
-) -> np.ndarray:
+def _direct_sum_accelerations(positions: np.ndarray, masses: np.ndarray) -> np.ndarray:
     """Reference O(N^2) accelerations (self-interaction removed)."""
     n = int(positions.shape[0])
     out = np.zeros_like(positions)
@@ -183,6 +181,9 @@ def test_fmm_golden(
 
     golden = np.load(path)["accel"]
     np.testing.assert_allclose(
-        accel, golden, rtol=INERT_RTOL, atol=INERT_ATOL,
+        accel,
+        golden,
+        rtol=INERT_RTOL,
+        atol=INERT_ATOL,
         err_msg=f"{case_id}: output drifted from committed golden",
     )
