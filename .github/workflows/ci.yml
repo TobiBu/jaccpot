@@ -6,50 +6,100 @@ on:
   pull_request:
 
 jobs:
-  lint-and-test:
+  lint:
+    # Format/import checks are Python-version independent -- run once.
     runs-on: ubuntu-latest
-    env:
-      JAX_ENABLE_X64: "1"
-    strategy:
-      fail-fast: false
-      matrix:
-        python-version: ["3.11", "3.12", "3.13"]
-
     steps:
       - name: Checkout
         uses: actions/checkout@v4
-
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
-          python-version: ${{ matrix.python-version }}
+          python-version: "3.13"
           cache: pip
-
       - name: Install package + dev tools
         run: |
           python -m pip install --upgrade pip
           pip install git+https://github.com/TobiBu/yggdrax.git
           pip install -e ".[dev]"
-
       - name: Black
         run: black --check .
-
       - name: isort
         run: isort --check-only .
 
-      - name: Unit tests with coverage
-        # Cap pytest-xdist workers on CI. pyproject sets `-n auto`, which spawns
-        # one worker per logical core; on the memory-limited GitHub runner each
-        # worker loads JAX and runs float64 FMM, and their combined footprint
-        # OOMs the runner (it is reclaimed mid-run with a "shutdown signal").
-        # Two workers fit; `-n auto` still applies for local high-core hosts.
-        run: pytest -n 2
-
+  test-full:
+    # Complete suite (including the compile-bound `slow` tests) on the dev
+    # Python version, with coverage. This is the comprehensive gate.
+    runs-on: ubuntu-latest
+    env:
+      JAX_ENABLE_X64: "1"
+      # Persist JAX's compiled executables across runs so the heavy FMM
+      # compiles become warm-cache hits (conftest enables the disk cache only
+      # when this dir is set).
+      JACCPOT_TEST_JAX_CACHE_DIR: ${{ github.workspace }}/.jax_cache
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+      - name: Restore JAX compilation cache
+        uses: actions/cache@v4
+        with:
+          path: ${{ github.workspace }}/.jax_cache
+          # Recompiles are keyed on source; bust the cache when jaccpot changes.
+          key: jax-compile-py313-${{ hashFiles('jaccpot/**/*.py') }}
+          restore-keys: |
+            jax-compile-py313-
+      - name: Install package + dev tools
+        run: |
+          python -m pip install --upgrade pip
+          pip install git+https://github.com/TobiBu/yggdrax.git
+          pip install -e ".[dev]"
+      - name: Full suite with coverage
+        # `-n 2`: the memory-limited 2-core runner OOMs with more float64-FMM
+        # workers (overrides pyproject's `-n auto`). `-m "not experimental"`
+        # matches the default addopts; all `slow` tests DO run here.
+        run: |
+          pytest -n 2 -m "not experimental" \
+            --cov=jaccpot --cov-branch \
+            --cov-report=xml --cov-report=term:skip-covered
       - name: Upload coverage XML artifact
         uses: actions/upload-artifact@v4
         with:
-          name: coverage-xml-py${{ matrix.python-version }}
+          name: coverage-xml
           path: coverage.xml
+
+  test-smoke:
+    # Fast (non-slow) suite on the other supported Python versions for
+    # version-compatibility. The ~50 compile-bound `slow` tests run only in
+    # test-full (on 3.13); keeping them out of the matrix is where most of the
+    # CI wall-clock reduction comes from.
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.12"]
+    env:
+      JAX_ENABLE_X64: "1"
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+      - name: Install package + dev tools
+        run: |
+          python -m pip install --upgrade pip
+          pip install git+https://github.com/TobiBu/yggdrax.git
+          pip install -e ".[dev]"
+      - name: Smoke tests (fast subset)
+        # Override the default addopts marker to also drop `slow`.
+        run: pytest -n 2 -m "not slow and not experimental"
 
   benchmark-guard:
     runs-on: ubuntu-latest
