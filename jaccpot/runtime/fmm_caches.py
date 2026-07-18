@@ -8,10 +8,7 @@ for this shared state lives in one place. Depends only on stdlib + jax + numpy
 without cycles.
 
 The cache objects are module-level singletons mutated in place (never
-reassigned); importers get a shared reference. NOTE: ``_operator_blocks_cache``
-and its ``_operator_cache_get/_operator_cache_put`` accessors are currently
-unreferenced (dead) -- moved here verbatim to keep this step inert; flagged for
-removal in the Phase 3 dead-code pass.
+reassigned); importers get a shared reference.
 """
 
 from __future__ import annotations
@@ -27,8 +24,6 @@ from jaxtyping import Array
 
 from .fmm_constants import _env_int
 
-_OPERATOR_CACHE_MAX = _env_int("JACCPOT_OPERATOR_CACHE_MAX", 512)
-_operator_blocks_cache: "OrderedDict[tuple, tuple[Array, Array]]" = OrderedDict()
 _GROUPED_OPERATOR_CACHE_MAX = _env_int("JACCPOT_GROUPED_OPERATOR_CACHE_MAX", 32)
 _grouped_operator_blocks_cache: "OrderedDict[tuple, tuple[Array, Array]]" = (
     OrderedDict()
@@ -178,7 +173,6 @@ def _restore_m2l_autotune_payload(
 
 def _clear_global_runtime_caches(*, clear_jax_compilation: bool = False) -> None:
     """Drop process-level runtime caches that can retain large array payloads."""
-    _operator_blocks_cache.clear()
     _grouped_operator_blocks_cache.clear()
     _grouped_segment_cache.clear()
     if clear_jax_compilation:
@@ -281,20 +275,3 @@ def _grouped_segment_cache_put(
         > _GROUPED_SEGMENT_CACHE_TOTAL_MAX_BYTES
     ):
         _grouped_segment_cache.popitem(last=False)
-
-
-def _operator_cache_get(key: tuple) -> Optional[tuple[Array, Array]]:
-    """Read cached grouped-rotation blocks and update LRU order."""
-    blocks = _operator_blocks_cache.get(key)
-    if blocks is None:
-        return None
-    _operator_blocks_cache.move_to_end(key)
-    return blocks
-
-
-def _operator_cache_put(key: tuple, value: tuple[Array, Array]) -> None:
-    """Insert grouped-rotation blocks and evict stale entries by LRU policy."""
-    _operator_blocks_cache[key] = value
-    _operator_blocks_cache.move_to_end(key)
-    while len(_operator_blocks_cache) > _OPERATOR_CACHE_MAX:
-        _operator_blocks_cache.popitem(last=False)
