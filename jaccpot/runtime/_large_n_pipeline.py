@@ -1589,7 +1589,7 @@ def evaluate_large_n_state(
     implemented.
     """
 
-    from ._fmm_impl import (
+    from .kernels.core import (
         _evaluate_local_expansions_for_particles,
         _evaluate_tree_compiled_impl,
     )

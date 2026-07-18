@@ -36,7 +36,7 @@ from jaccpot.pallas.m2l_complex_fused import (
     m2l_complex_fused_jax,
     m2l_complex_fused_pallas,
 )
-from jaccpot.runtime._fmm_impl import _m2l_complex_batch_kernel
+from jaccpot.runtime.kernels.core import _m2l_complex_batch_kernel
 
 
 def _build_case(order, dtype, n=17, seed=0):

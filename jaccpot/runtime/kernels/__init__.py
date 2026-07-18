@@ -1,19 +1,81 @@
 """Reusable FMM numerical kernel library (leaf package).
 
-This package is the destination for the free-function numerical core currently
-living at the bottom of ``jaccpot/runtime/_fmm_impl.py`` -- the M2L / L2L batch
-kernels, the solidfmm/real accumulate + propagate routines, the Pallas
-fast-lane gates, the downward-sweep driver, and the tree/prepared-state
-evaluation helpers.
+The numerical core currently lives in :mod:`jaccpot.runtime.kernels.core` (a
+single module extracted from ``_fmm_impl``); it will be subdivided into
+m2l/l2l/pallas_gates/downward/eval submodules as a follow-up. This package
+re-exports the core's symbols so consumers import from ``jaccpot.runtime.kernels``.
 
-Design contract (the hinge of the refactor): this package MUST remain a leaf --
-it may depend on ``operators/``, ``downward/``, ``nearfield/``, ``upward/``,
-``pallas/``, and the shared ``runtime/fmm_constants`` + ``runtime/fmm_caches``
-modules, but it MUST NOT import the orchestrator (``runtime.fmm.engine`` or the
-prepare pipeline). Keeping it a leaf is what lets ``distributed/``,
-``experimental/``, ``_interaction_cache`` and ``_large_n_pipeline`` import the
-kernels without dragging in the engine, dissolving the lazy-import cycles that
-exist today.
-
-Populated during Phase 2 (mechanical extraction); intentionally empty for now.
+Leaf contract: this package and ``core`` must NOT import the engine
+(``runtime.fmm.engine`` / the prepare pipeline), so ``distributed`` and
+``experimental`` can use the kernels without dragging in the orchestrator.
 """
+
+from .core import (
+    _STRICT_REFRESH_DETAIL_DIAG_MODES,
+    ExpansionBasis,
+    NearfieldInteropData,
+    PackedAccelerationDerivatives,
+    _accumulate_real_m2l_chunked_scan,
+    _accumulate_real_m2l_chunked_scan_pallas,
+    _accumulate_real_m2l_fullbatch,
+    _accumulate_real_m2l_fullbatch_pallas,
+    _accumulate_solidfmm_m2l_chunked_scan,
+    _accumulate_solidfmm_m2l_class_major_chunked_scan,
+    _accumulate_solidfmm_m2l_fullbatch,
+    _accumulate_solidfmm_m2l_grouped,
+    _accumulate_solidfmm_m2l_grouped_chunked_scan,
+    _accumulate_solidfmm_m2l_grouped_class_major,
+    _accumulate_solidfmm_m2l_grouped_fullbatch,
+    _apply_complex_m2l,
+    _apply_real_m2l,
+    _build_grouped_class_segments,
+    _build_nearfield_interop_data,
+    _build_target_nearfield_source_index_matrix,
+    _chunk_segment_scatter_add,
+    _compute_targeted_nearfield,
+    _empty_interaction_storage_for_tree,
+    _evaluate_local_cartesian_with_grad_batch,
+    _evaluate_local_expansions_for_particles,
+    _evaluate_local_expansions_for_target_particles,
+    _evaluate_prepared_tree,
+    _evaluate_prepared_tree_targets,
+    _evaluate_tree_compiled_impl,
+    _EvaluationNodeViews,
+    _FarPairCOO,
+    _fused_complex_m2l_pallas_active,
+    _infer_bounds,
+    _infer_order_from_coeff_count,
+    _l2l_complex_batch_kernel,
+    _l2l_real_batch_kernel,
+    _m2l_cached_kernel_dispatch,
+    _m2l_complex_batch_cached_kernel,
+    _m2l_complex_batch_kernel,
+    _m2l_complex_batch_kernel_fused_pallas,
+    _m2l_real_batch_kernel,
+    _m2l_real_batch_kernel_fused_pallas,
+    _m2l_real_batch_kernel_pallas,
+    _map_targets_to_leaf_positions,
+    _max_leaf_size_from_tree,
+    _normalize_strict_refresh_detail_diag_mode,
+    _prepare_solidfmm_downward_child_inputs,
+    _prepare_solidfmm_downward_init,
+    _prepare_solidfmm_downward_interaction_inputs,
+    _prepare_solidfmm_downward_multipole_inputs,
+    _prepare_solidfmm_downward_sweep,
+    _prepare_tree_evaluation_inputs,
+    _propagate_real_locals_to_children,
+    _propagate_solidfmm_locals_by_level,
+    _propagate_solidfmm_locals_to_children,
+    _real_m2l_pallas_active,
+    _resolve_evaluation_node_views,
+    _rotation_blocks_for_grouped_classes,
+    _scatter_rank3,
+    _scatter_scalars,
+    _scatter_vectors,
+    _solidfmm_downward_accumulate_from_multipoles,
+    _SolidFMMDownwardChildInputs,
+    _SolidFMMDownwardInit,
+    _SolidFMMDownwardInteractionInputs,
+    _SolidFMMDownwardMultipoleInputs,
+    _TreeEvaluationSetup,
+)

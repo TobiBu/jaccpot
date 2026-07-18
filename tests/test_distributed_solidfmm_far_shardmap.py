@@ -70,7 +70,7 @@ from jaccpot.operators.complex_ops import (
     m2l_complex_reference_batch,
 )
 from jaccpot.operators.real_harmonics import sh_size
-from jaccpot.runtime._fmm_impl import (
+from jaccpot.runtime.kernels.core import (
     _accumulate_solidfmm_m2l_fullbatch,
     _evaluate_local_expansions_for_particles,
     _propagate_solidfmm_locals_by_level,

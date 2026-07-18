@@ -86,17 +86,17 @@ from ..operators.real_harmonics import (
     p2m_real_direct,
     sh_size,
 )
-from ..runtime._fmm_impl import (
-    _accumulate_real_m2l_chunked_scan,
-    _accumulate_solidfmm_m2l_chunked_scan,
-    _evaluate_local_expansions_for_particles,
-    _m2l_complex_batch_cached_kernel,
-)
 from ..runtime._octree_adapter import OctreeExecutionData
 from ..runtime._octree_fmm import (
     _propagate_octree_l2l_complex_by_level,
     build_octree_upward_plan,
     prepare_octree_solidfmm_complex_multipoles,
+)
+from ..runtime.kernels.core import (
+    _accumulate_real_m2l_chunked_scan,
+    _accumulate_solidfmm_m2l_chunked_scan,
+    _evaluate_local_expansions_for_particles,
+    _m2l_complex_batch_cached_kernel,
 )
 
 try:
