@@ -36,6 +36,7 @@ from yggdrax.tree import Tree
 from jaccpot.downward.local_expansions import LocalExpansionData, TreeDownwardData
 from jaccpot.upward.tree_expansions import TreeUpwardData
 
+from ..config import FMMPreset
 from ._interaction_cache import _InteractionCacheEntry
 from ._octree_adapter import OctreeExecutionData
 from ._octree_fmm import (
@@ -50,7 +51,7 @@ from ._octree_fmm import (
     propagate_octree_solidfmm_l2l,
 )
 from .dtypes import INDEX_DTYPE
-from .fmm_presets import FMMPreset, FMMPresetConfig
+from .fmm_presets import FMMPresetConfig
 from .kernels.core import (
     ExpansionBasis,
     _FarPairCOO,

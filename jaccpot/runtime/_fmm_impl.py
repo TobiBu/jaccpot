@@ -55,7 +55,7 @@ from yggdrax.tree import (
 from yggdrax.tree_moments import compute_tree_mass_moments
 
 from jaccpot.basis.real_sh import complex_to_real_coeffs
-from jaccpot.config import FMMExecutionBackend, MemoryObjective
+from jaccpot.config import FMMExecutionBackend, FMMPreset, MemoryObjective
 from jaccpot.downward.local_expansions import (
     LocalExpansionData,
     TreeDownwardData,
@@ -245,7 +245,7 @@ from .fmm_evaluate import EvaluateMixin
 from .fmm_overrides import OverridesMixin
 from .fmm_policy import PolicyMixin
 from .fmm_prepare import PrepareMixin
-from .fmm_presets import FMMPreset, FMMPresetConfig, get_preset_config
+from .fmm_presets import get_preset_config
 from .fmm_state import (
     FMMPreparedState,
     TreeBuilderConfig,
