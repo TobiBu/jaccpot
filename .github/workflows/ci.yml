@@ -31,6 +31,9 @@ jobs:
     # Complete suite (including the compile-bound `slow` tests) on the dev
     # Python version, with coverage. This is the comprehensive gate.
     runs-on: ubuntu-latest
+    # Hard cap so a memory-bomb / hung-worker never burns the 6h workflow
+    # ceiling again (an OOM-killed xdist worker makes the job hang otherwise).
+    timeout-minutes: 45
     env:
       JAX_ENABLE_X64: "1"
       # Persist JAX's compiled executables across runs so the heavy FMM
@@ -78,6 +81,7 @@ jobs:
     # test-full (on 3.13); keeping them out of the matrix is where most of the
     # CI wall-clock reduction comes from.
     runs-on: ubuntu-latest
+    timeout-minutes: 25
     strategy:
       fail-fast: false
       matrix:
