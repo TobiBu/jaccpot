@@ -82,11 +82,18 @@ skip_gitignore = true
 [tool.pytest.ini_options]
 minversion = "7.4"
 testpaths = ["tests"]
+markers = [
+    "slow: long-running / compile-heavy test (deselect with -m 'not slow')",
+    "experimental: exercises experimental, non-production FMM code (octree/treecode prototypes); deselected by default, run explicitly with -m experimental",
+]
 # `-n auto` runs the (compilation-bound) JAX test suite across all logical cores
 # via pytest-xdist. On a 72-core host this cuts wall-clock from ~25 min to ~2 min;
 # a fixed `-n 32` measured marginally faster there. Override with `-n 0` to run
 # serially (e.g. for pdb/`-x` debugging, which xdist does not support).
-addopts = "-q --strict-markers --ignore=tests/perf -n auto"
+# `-m "not experimental"` keeps the everyday run on the production (radix real
+# fast-lane) paths; the long-compile octree/treecode prototypes are opt-in via
+# `pytest -m experimental`.
+addopts = "-q --strict-markers --ignore=tests/perf -n auto -m \"not experimental\""
 
 [tool.coverage.run]
 source = ["jaccpot"]
