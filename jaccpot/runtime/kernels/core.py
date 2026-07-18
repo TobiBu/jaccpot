@@ -21,7 +21,10 @@ import numpy as np
 from beartype.typing import Callable, Tuple
 from jaxtyping import Array
 from yggdrax.dense_interactions import DenseInteractionBuffers
-from yggdrax.grouped_interactions import GroupedInteractionBuffers
+from yggdrax.grouped_interactions import (
+    GroupedInteractionBuffers,
+    build_grouped_interactions,
+)
 from yggdrax.interactions import (
     DualTreeRetryEvent,
     DualTreeTraversalConfig,
