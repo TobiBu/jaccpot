@@ -12,7 +12,7 @@ import jax.numpy as jnp
 from jaxtyping import DTypeLike
 
 
-def _resolve_index_dtype() -> jnp.dtype:
+def _resolve_index_dtype() -> DTypeLike:
     """Resolve index dtype from environment.
 
     Supported values:
@@ -40,7 +40,7 @@ def as_index(x: object) -> jnp.ndarray:
     return jnp.asarray(x, dtype=INDEX_DTYPE)
 
 
-def complex_dtype_for_real(real_dtype: DTypeLike) -> jnp.dtype:
+def complex_dtype_for_real(real_dtype: DTypeLike) -> DTypeLike:
     """Return complex dtype paired with a real floating dtype."""
 
     dtype = jnp.asarray(0, dtype=real_dtype).dtype
