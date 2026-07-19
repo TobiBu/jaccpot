@@ -199,5 +199,7 @@ def test_driver_auto_scale_caps():
     err = float(
         np.linalg.norm(r1.accelerations - direct) / (np.linalg.norm(direct) + 1e-30)
     )
-    print(f"auto_scale_caps aggL2 vs direct = {err:.6f}  retries={r1.diagnostics['cap_retries']}")
+    print(
+        f"auto_scale_caps aggL2 vs direct = {err:.6f}  retries={r1.diagnostics['cap_retries']}"
+    )
     assert err < 5e-2, f"forces wrong after cap retry: {err:.6f}"
