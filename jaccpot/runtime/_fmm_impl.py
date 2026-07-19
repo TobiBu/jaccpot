@@ -5511,136 +5511,27 @@ class FastMultipoleMethod:
             return False
         return True
 
-    def _resolve_runtime_execution_overrides(
+    def _clamp_gpu_traversal_config_for_memory(
         self,
         *,
-        num_particles: int,
-        backend: Optional[str] = None,
-    ) -> _RuntimeExecutionOverrides:
-        """Resolve adaptive runtime traversal/chunk settings."""
+        traversal_config: Optional[DualTreeTraversalConfig],
+        backend_name: str,
+        n_particles: int,
+        minimum_memory: bool,
+        production_large_n: bool,
+        grouped_interactions: bool,
+    ) -> Optional[DualTreeTraversalConfig]:
+        """Apply the deterministic GPU traversal memory-safety caps.
 
-        traversal_config = self.traversal_config
-        m2l_chunk_size = self.m2l_chunk_size
-        l2l_chunk_size = self.l2l_chunk_size
-        grouped_interactions = (
-            False
-            if self.grouped_interactions is None
-            else bool(self.grouped_interactions)
-        )
-        farfield_mode = self.farfield_mode
-        center_mode = "com"
-        refine_local_override: Optional[bool] = None
-        adaptive_applied = False
+        These caps are closed-form in ``num_particles`` (no count-pass kernel):
+        they bound the streamed GPU traversal buffers on the minimum-memory /
+        large-N production lane. They are *memory-safety* clamps, not adaptive
+        performance rewrites, so they must apply even under static fixed sizing
+        -- otherwise an oversized preset/explicit seed (e.g. the large_n_gpu
+        262144 pair-queue default) reaches the GPU traversal build unclamped and
+        inflates device-memory footprint (a minimum-memory OOM regression).
+        """
 
-        backend_name = jax.default_backend() if backend is None else str(backend)
-        n_particles = int(num_particles)
-        production_large_n = self._is_large_n_gpu_production_profile()
-        static_runtime_fixed_sizing = bool(
-            getattr(self, "_static_runtime_fixed_sizing", True)
-        )
-        minimum_memory = self.memory_objective == "minimum_memory" or production_large_n
-        large_cpu = (
-            backend_name == "cpu" and n_particles >= _LARGE_CPU_PARTICLE_THRESHOLD
-        )
-        class_major_cpu = (
-            backend_name == "cpu" and n_particles >= _CLASS_MAJOR_CPU_PARTICLE_THRESHOLD
-        )
-        class_major_gpu = (
-            backend_name == "gpu" and n_particles >= _GPU_LARGE_PARTICLE_THRESHOLD
-        )
-
-        if self.host_refine_mode == "off":
-            refine_local_override = False
-        elif self.host_refine_mode == "on":
-            refine_local_override = True
-        elif (
-            large_cpu
-            and self.tree_type == "radix"
-            and self.preset == "fast"
-            and self.expansion_basis == "solidfmm"
-            and self.mac_type == "dehnen"
-        ):
-            refine_local_override = False
-
-        if (
-            self.tree_type == "kdtree"
-            and not self._explicit_traversal_config
-            and not self._explicit_max_pair_queue
-            and not self._explicit_pair_process_block
-        ):
-            traversal_config = _KDTREE_DEFAULT_TRAVERSAL_CONFIG
-
-        if (
-            not self._explicit_grouped_interactions
-            and self.preset == "fast"
-            and self.expansion_basis == "solidfmm"
-            and self.mac_type == "dehnen"
-            and self.tree_type == "radix"
-            and large_cpu
-            and not minimum_memory
-        ):
-            grouped_interactions = True
-        if (
-            not self._explicit_grouped_interactions
-            and self.preset in ("fast", "large_n_gpu")
-            and self.expansion_basis == "solidfmm"
-            and self.mac_type == "dehnen"
-            and self.tree_type == "radix"
-            and backend_name == "gpu"
-            and n_particles >= _GPU_LARGE_PARTICLE_THRESHOLD
-            and not minimum_memory
-        ):
-            grouped_interactions = True
-
-        if production_large_n:
-            grouped_interactions = False
-            farfield_mode = "pair_grouped"
-
-        if static_runtime_fixed_sizing:
-            # Static sizing mode: keep traversal/chunk execution knobs fixed to
-            # constructor/global-input values and skip adaptive runtime rewrites.
-            if self.streamed_far_pairs and grouped_interactions:
-                grouped_interactions = False
-                farfield_mode = "pair_grouped"
-            if not grouped_interactions:
-                farfield_mode = "pair_grouped"
-            return _RuntimeExecutionOverrides(
-                traversal_config=traversal_config,
-                m2l_chunk_size=m2l_chunk_size,
-                l2l_chunk_size=l2l_chunk_size,
-                grouped_interactions=grouped_interactions,
-                farfield_mode=farfield_mode,
-                center_mode=center_mode,
-                refine_local_override=refine_local_override,
-                adaptive_applied=False,
-            )
-
-        if self.streamed_far_pairs and grouped_interactions:
-            # Streamed far-pair execution and grouped/class-major M2L are
-            # competing strategies. The grouped path overrides streaming in the
-            # downward sweep, so keeping both enabled only pays the grouped
-            # traversal/materialization cost while defeating the user's request
-            # for streamed execution.
-            grouped_interactions = False
-            farfield_mode = "pair_grouped"
-
-        if (
-            self.preset == "fast"
-            and self.expansion_basis == "solidfmm"
-            and self.mac_type == "dehnen"
-            and self.tree_type == "radix"
-            and large_cpu
-            and not self._explicit_traversal_config
-            and not self._explicit_max_pair_queue
-            and not self._explicit_pair_process_block
-        ):
-            traversal_config = _LARGE_CPU_TRAVERSAL_CONFIG
-            adaptive_applied = True
-
-            if not self._explicit_m2l_chunk_size:
-                m2l_chunk_size = _LARGE_CPU_M2L_CHUNK_SIZE
-            if not self._explicit_l2l_chunk_size:
-                l2l_chunk_size = self.l2l_chunk_size
         if (
             backend_name == "gpu"
             and self.tree_type == "radix"
@@ -5793,6 +5684,159 @@ class FastMultipoleMethod:
                 max_interactions_per_node=int(capped_interactions),
                 max_neighbors_per_leaf=int(capped_neighbors),
             )
+        return traversal_config
+
+    def _resolve_runtime_execution_overrides(
+        self,
+        *,
+        num_particles: int,
+        backend: Optional[str] = None,
+    ) -> _RuntimeExecutionOverrides:
+        """Resolve adaptive runtime traversal/chunk settings."""
+
+        traversal_config = self.traversal_config
+        m2l_chunk_size = self.m2l_chunk_size
+        l2l_chunk_size = self.l2l_chunk_size
+        grouped_interactions = (
+            False
+            if self.grouped_interactions is None
+            else bool(self.grouped_interactions)
+        )
+        farfield_mode = self.farfield_mode
+        center_mode = "com"
+        refine_local_override: Optional[bool] = None
+        adaptive_applied = False
+
+        backend_name = jax.default_backend() if backend is None else str(backend)
+        n_particles = int(num_particles)
+        production_large_n = self._is_large_n_gpu_production_profile()
+        static_runtime_fixed_sizing = bool(
+            getattr(self, "_static_runtime_fixed_sizing", True)
+        )
+        minimum_memory = self.memory_objective == "minimum_memory" or production_large_n
+        large_cpu = (
+            backend_name == "cpu" and n_particles >= _LARGE_CPU_PARTICLE_THRESHOLD
+        )
+        class_major_cpu = (
+            backend_name == "cpu" and n_particles >= _CLASS_MAJOR_CPU_PARTICLE_THRESHOLD
+        )
+        class_major_gpu = (
+            backend_name == "gpu" and n_particles >= _GPU_LARGE_PARTICLE_THRESHOLD
+        )
+
+        if self.host_refine_mode == "off":
+            refine_local_override = False
+        elif self.host_refine_mode == "on":
+            refine_local_override = True
+        elif (
+            large_cpu
+            and self.tree_type == "radix"
+            and self.preset == "fast"
+            and self.expansion_basis == "solidfmm"
+            and self.mac_type == "dehnen"
+        ):
+            refine_local_override = False
+
+        if (
+            self.tree_type == "kdtree"
+            and not self._explicit_traversal_config
+            and not self._explicit_max_pair_queue
+            and not self._explicit_pair_process_block
+        ):
+            traversal_config = _KDTREE_DEFAULT_TRAVERSAL_CONFIG
+
+        if (
+            not self._explicit_grouped_interactions
+            and self.preset == "fast"
+            and self.expansion_basis == "solidfmm"
+            and self.mac_type == "dehnen"
+            and self.tree_type == "radix"
+            and large_cpu
+            and not minimum_memory
+        ):
+            grouped_interactions = True
+        if (
+            not self._explicit_grouped_interactions
+            and self.preset in ("fast", "large_n_gpu")
+            and self.expansion_basis == "solidfmm"
+            and self.mac_type == "dehnen"
+            and self.tree_type == "radix"
+            and backend_name == "gpu"
+            and n_particles >= _GPU_LARGE_PARTICLE_THRESHOLD
+            and not minimum_memory
+        ):
+            grouped_interactions = True
+
+        if production_large_n:
+            grouped_interactions = False
+            farfield_mode = "pair_grouped"
+
+        if static_runtime_fixed_sizing:
+            # Static sizing mode: keep traversal/chunk execution knobs fixed to
+            # constructor/global-input values and skip adaptive runtime rewrites.
+            if self.streamed_far_pairs and grouped_interactions:
+                grouped_interactions = False
+                farfield_mode = "pair_grouped"
+            if not grouped_interactions:
+                farfield_mode = "pair_grouped"
+            # Deterministic GPU memory-safety traversal caps are NOT adaptive
+            # rewrites -- they bound the streamed GPU traversal buffers on the
+            # minimum-memory / large-N production lane and must still apply here,
+            # otherwise oversized preset/explicit seeds reach the GPU build
+            # unclamped and inflate device memory (a minimum-memory OOM regression).
+            traversal_config = self._clamp_gpu_traversal_config_for_memory(
+                traversal_config=traversal_config,
+                backend_name=backend_name,
+                n_particles=n_particles,
+                minimum_memory=minimum_memory,
+                production_large_n=production_large_n,
+                grouped_interactions=grouped_interactions,
+            )
+            return _RuntimeExecutionOverrides(
+                traversal_config=traversal_config,
+                m2l_chunk_size=m2l_chunk_size,
+                l2l_chunk_size=l2l_chunk_size,
+                grouped_interactions=grouped_interactions,
+                farfield_mode=farfield_mode,
+                center_mode=center_mode,
+                refine_local_override=refine_local_override,
+                adaptive_applied=False,
+            )
+
+        if self.streamed_far_pairs and grouped_interactions:
+            # Streamed far-pair execution and grouped/class-major M2L are
+            # competing strategies. The grouped path overrides streaming in the
+            # downward sweep, so keeping both enabled only pays the grouped
+            # traversal/materialization cost while defeating the user's request
+            # for streamed execution.
+            grouped_interactions = False
+            farfield_mode = "pair_grouped"
+
+        if (
+            self.preset == "fast"
+            and self.expansion_basis == "solidfmm"
+            and self.mac_type == "dehnen"
+            and self.tree_type == "radix"
+            and large_cpu
+            and not self._explicit_traversal_config
+            and not self._explicit_max_pair_queue
+            and not self._explicit_pair_process_block
+        ):
+            traversal_config = _LARGE_CPU_TRAVERSAL_CONFIG
+            adaptive_applied = True
+
+            if not self._explicit_m2l_chunk_size:
+                m2l_chunk_size = _LARGE_CPU_M2L_CHUNK_SIZE
+            if not self._explicit_l2l_chunk_size:
+                l2l_chunk_size = self.l2l_chunk_size
+        traversal_config = self._clamp_gpu_traversal_config_for_memory(
+            traversal_config=traversal_config,
+            backend_name=backend_name,
+            n_particles=n_particles,
+            minimum_memory=minimum_memory,
+            production_large_n=production_large_n,
+            grouped_interactions=grouped_interactions,
+        )
         if grouped_interactions:
             center_mode = "aabb"
             if farfield_mode == "auto":
