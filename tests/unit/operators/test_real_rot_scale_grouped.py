@@ -111,7 +111,7 @@ def test_fastlane_grouped_l2l_cascade_matches_per_node(order):
     per-node `_l2l_real_batch_kernel` path, for any tree/centres (grouping only precomputes
     the rotation blocks once per displacement class). Guards the Phase-4 fast-lane building
     block."""
-    from jaccpot.runtime._fmm_impl import _propagate_solidfmm_locals_by_level
+    from jaccpot.runtime.kernels.core import _propagate_solidfmm_locals_by_level
 
     rng = np.random.default_rng(order)
     # small binary tree: internal {0,1,2}, leaves {3,4,5,6}

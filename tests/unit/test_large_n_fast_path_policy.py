@@ -29,6 +29,8 @@ def test_large_n_fast_lane_defaults_on(monkeypatch):
     assert str(cfg.nearfield_mode) == "bucketed"
     assert bool(cfg.retain_leaf_groups)
     assert bool(cfg.precompute_scatter) is False
+    # The fast-lane default target block size was retuned 8 -> 32 (static radix
+    # refresh path); the default is now _RADIX_FAST_LANE_DEFAULT_TARGET_BLOCK_SIZE.
     assert int(cfg.target_owned_block_size) == 32
     assert bool(cfg.speed_prepared_layout)
 
@@ -39,6 +41,8 @@ def test_large_n_fast_lane_legacy_opt_out_env_is_noop(monkeypatch):
 
     cfg = resolve_large_n_execution_config(_make_large_n_fmm(), num_particles=2048)
     assert bool(cfg.radix_fast_lane)
+    # JACCPOT_LARGE_N_TARGET_BLOCK_SIZE="0" means "use default"; the default is
+    # now 32 (retuned from 8). The legacy fast-lane opt-out env remains a no-op.
     assert int(cfg.target_owned_block_size) == 32
 
 

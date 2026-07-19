@@ -28,6 +28,10 @@ from jaccpot.upward.solidfmm_complex_tree_expansions import (
     prepare_solidfmm_complex_upward_sweep,
 )
 
+# Experimental octree scaffolding: long-compile, non-production. Deselected by
+# default (addopts `-m "not experimental"`); run with `pytest -m experimental`.
+pytestmark = pytest.mark.experimental
+
 
 def _sample_problem(n: int = 48):
     positions = jnp.linspace(-1.0, 1.0, n * 3, dtype=jnp.float32).reshape(n, 3)

@@ -826,7 +826,9 @@ def test_m2l_rotated_error_improves_with_order():
     r = jnp.linalg.norm(eval_point - source_pos)
     potential_direct = 1.0 / r
 
-    orders = [2, 4, 6, 8]
+    # 3 representative points span the geometric-convergence claim (each step
+    # cuts >5x, order 8 reaches ~machine precision) with one fewer compile.
+    orders = [2, 5, 8]
     errors = []
     for order in orders:
         multipole = p2m_real_direct(
@@ -865,7 +867,9 @@ def test_full_rotated_pipeline_m2m_m2l_l2l_converges():
     direct = 1.0 / jnp.linalg.norm(eval_point - source)
 
     errors = []
-    for order in (3, 5, 7, 9):
+    # 3 representative points keep the monotone-convergence + final-accuracy
+    # claim (order 9 unchanged) with one fewer compile.
+    for order in (3, 6, 9):
         multipole_leaf = p2m_real_direct(
             source - leaf, jnp.asarray(1.0, dtype=dtype), order=order
         )

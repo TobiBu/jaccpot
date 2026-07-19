@@ -414,7 +414,7 @@ def prepare_solidfmm_complex_upward_sweep(
     explicit_centers: Optional[Array] = None,
     max_leaf_size: Optional[int] = None,
     leaf_batch_size: Optional[int] = None,
-    rotation: str = "cached",
+    rotation: str = "solidfmm",
     precomputed_geometry: Optional[TreeGeometry] = None,
     upward_timing_callback: Optional[Callable[[str, float], None]] = None,
     defer_geometry: bool = False,
@@ -622,7 +622,7 @@ def prepare_solidfmm_complex_source_motion_multipoles(
     centers: Array,
     time_derivative_order: int = 1,
     max_leaf_size: Optional[int] = None,
-    rotation: str = "cached",
+    rotation: str = "solidfmm",
 ) -> Array:
     """Compute packed source-motion multipoles for fixed expansion centers."""
 

@@ -30,16 +30,6 @@ class BasisInterface(Protocol):
     def unpack_coeffs(self: "BasisInterface", packed: Array, *, order: int) -> Array:
         """Unpack runtime 1D coefficient layout into structured basis form."""
 
-    def rotate_to_z(
-        self: "BasisInterface", coeffs: Array, directions: Array, *, order: int
-    ) -> Array:
-        """Rotate batched coefficients into a frame where direction maps to ``+z``."""
-
-    def rotate_from_z(
-        self: "BasisInterface", coeffs: Array, directions: Array, *, order: int
-    ) -> Array:
-        """Rotate batched coefficients back from the ``+z`` frame."""
-
     def m2l_rot_scale(
         self: "BasisInterface", sources: Array, deltas: Array, *, order: int
     ) -> Array:

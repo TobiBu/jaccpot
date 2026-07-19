@@ -613,14 +613,16 @@ def test_propagate_local_expansions_accumulates_parent():
     assert jnp.allclose(propagated.coefficients[leaf_index], expected_leaf)
 
 
+# The largest chunk exercises the degenerate "chunk >> pair_count" single-chunk
+# path (the fixture has only a handful of interaction pairs). It must stay
+# bounded: _accumulate_level materialises a (chunk_size, coeffs) translate batch,
+# so a chunk of 10**6 allocated ~60 GB and OOM'd / hung the memory-limited CI
+# runner. The tree has far fewer interactions than DEFAULT_M2L_CHUNK_SIZE, so
+# DEFAULT already exercises that single full-batch path without the pathological
+# allocation; [1, 2] cover the small-chunk scan path.
 @pytest.mark.parametrize(
-    # chunk_size is the per-batch buffer size, so peak memory scales with it
-    # regardless of this fixture's tiny interaction list (6 pairs). 256 already
-    # far exceeds that count, exercising the same single-oversized-chunk padding
-    # path as DEFAULT_M2L_CHUNK_SIZE without the ~60 GB allocation the former
-    # 10**6 value forced (which OOM'd on the GPU CI runner).
     "chunk_size",
-    [1, 2, 256, DEFAULT_M2L_CHUNK_SIZE],
+    [1, 2, DEFAULT_M2L_CHUNK_SIZE],
 )
 def test_accumulate_m2l_matches_pairwise_translations(chunk_size, prepared_m2l_tree):
     tree, upward, interactions = prepared_m2l_tree

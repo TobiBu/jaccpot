@@ -44,16 +44,16 @@ from jaccpot.runtime._adaptive_policy import (
     adaptive_pair_policy,
     adaptive_policy_tolerance,
 )
-from jaccpot.runtime._fmm_impl import (
-    _build_nearfield_interop_data,
-    _cap_minimum_memory_streamed_gpu_traversal_config_for_tree,
-)
+from jaccpot.runtime._fmm_impl import _build_nearfield_interop_data
 from jaccpot.runtime._interaction_cache import (
     _build_dual_tree_artifacts,
     _build_dual_tree_artifacts_split,
     _can_split_dual_tree_build,
     _dual_tree_build_raw,
     _dual_tree_unpack_build_output,
+)
+from jaccpot.runtime.fmm_constants import (
+    _cap_minimum_memory_streamed_gpu_traversal_config_for_tree,
 )
 
 
@@ -1167,7 +1167,7 @@ def main() -> None:
     parser.add_argument("--basis", type=str, default="solidfmm")
     parser.add_argument(
         "--runtime-path",
-        choices=("auto", "legacy", "large_n"),
+        choices=("auto", "large_n"),
         default="large_n",
     )
     parser.add_argument("--dtype", type=str, default="float32")
