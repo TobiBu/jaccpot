@@ -15,6 +15,8 @@ from yggdrax.tree import build_tree
 
 import jaccpot.runtime._fmm_impl as fmm_impl_private
 import jaccpot.runtime.fmm as fmm_module
+import jaccpot.runtime.fmm_prepare as fmm_prepare_private
+import jaccpot.runtime.kernels.core as kernels_core
 from jaccpot import FMMPreset
 from jaccpot.downward.local_expansions import (
     TreeDownwardData,
@@ -2590,9 +2592,9 @@ def test_prepare_state_rebuilds_topology_after_rebuild_every_steps():
     assert fmm.recent_topology_reused is True
 
     with mock.patch.object(
-        fmm_impl_private,
+        fmm_prepare_private,
         "_build_tree_with_config",
-        wraps=fmm_impl_private._build_tree_with_config,
+        wraps=fmm_prepare_private._build_tree_with_config,
     ) as spy_build:
         state_third = fmm.prepare_state(
             moved_b,
@@ -2922,7 +2924,7 @@ def test_solidfmm_m2l_ignores_padded_compact_far_pairs():
     tgt_padded = jnp.array([0, -1, -1, -1], dtype=INDEX_DTYPE)
     active_count = jnp.array(1, dtype=INDEX_DTYPE)
 
-    exact_full = fmm_impl_private._accumulate_solidfmm_m2l_fullbatch(
+    exact_full = kernels_core._accumulate_m2l_fullbatch(
         jnp.zeros_like(multipoles),
         multipoles,
         centers,
@@ -2930,10 +2932,11 @@ def test_solidfmm_m2l_ignores_padded_compact_far_pairs():
         tgt_exact,
         active_count,
         order=order,
+        basis_mode="complex",
         rotation="solidfmm",
         total_nodes=int(centers.shape[0]),
     )
-    padded_full = fmm_impl_private._accumulate_solidfmm_m2l_fullbatch(
+    padded_full = kernels_core._accumulate_m2l_fullbatch(
         jnp.zeros_like(multipoles),
         multipoles,
         centers,
@@ -2941,10 +2944,11 @@ def test_solidfmm_m2l_ignores_padded_compact_far_pairs():
         tgt_padded,
         active_count,
         order=order,
+        basis_mode="complex",
         rotation="solidfmm",
         total_nodes=int(centers.shape[0]),
     )
-    padded_chunked = fmm_impl_private._accumulate_solidfmm_m2l_chunked_scan(
+    padded_chunked = kernels_core._accumulate_m2l_chunked_scan(
         jnp.zeros_like(multipoles),
         multipoles,
         centers,
@@ -2952,6 +2956,7 @@ def test_solidfmm_m2l_ignores_padded_compact_far_pairs():
         tgt_padded,
         active_count,
         order=order,
+        basis_mode="complex",
         rotation="solidfmm",
         total_nodes=int(centers.shape[0]),
         chunk_size=2,

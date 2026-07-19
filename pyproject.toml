@@ -7,7 +7,7 @@ name = "jaccpot"
 version = "0.0.1"
 description = "JAX Fast Multipole Method solver package built on yggdrax tree artifacts"
 readme = "README.md"
-requires-python = ">=3.10"
+requires-python = ">=3.11"
 license = "MIT"
 authors = [
   { name = "AstroAI Lab", email = "astroai@iwr.uni-heidelberg.de" },
@@ -19,9 +19,9 @@ classifiers = [
   "Development Status :: 3 - Alpha",
   "Intended Audience :: Science/Research",
   "Programming Language :: Python :: 3",
-  "Programming Language :: Python :: 3.10",
   "Programming Language :: Python :: 3.11",
   "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
   "Topic :: Scientific/Engineering :: Physics",
 ]
 dependencies = [
@@ -47,7 +47,10 @@ Documentation = "https://github.com/AstroAI-Lab/jaccpot#readme"
 
 [project.optional-dependencies]
 dev = [
-  "black>=24.8.0",
+  # Pinned to match .pre-commit-config.yaml's black-pre-commit-mirror rev so a
+  # local `black` and the hook/CI format identically (a floating ">=" let CI
+  # resolve to a different black whose style disagreed with the hook).
+  "black==26.5.1",
   # Pinned to match .pre-commit-config.yaml. isort 7.0.0/8.0.1 regressed the
   # black profile (force-wraps single-name imports); 9.0.0b1 fixes it. A
   # floating ">=" here lets CI's `isort --check-only .` resolve to the broken
@@ -70,7 +73,7 @@ jaccpot = ["py.typed"]
 
 [tool.black]
 line-length = 88
-target-version = ["py310", "py311", "py312"]
+target-version = ["py311", "py312", "py313"]
 include = "\\.pyi?$"
 exclude = '''
 /(
@@ -105,6 +108,18 @@ addopts = "-q --strict-markers --ignore=tests/perf -n auto -m \"not experimental
 [tool.coverage.run]
 source = ["jaccpot"]
 branch = true
+omit = [
+  # Opt-in experimental prototypes (octree/treecode): deselected by the
+  # `experimental` marker in the default suite, so they are exercised only by
+  # `pytest -m experimental`, not by the coverage-gated CPU run. Covering them
+  # here would just dilute the metric with code the default suite does not run.
+  "jaccpot/experimental/*",
+  # GPU-only fused real-basis Pallas kernel (Ampere+). Unlike the other Pallas
+  # kernels (which the CPU CI exercises via interpret=True), this one has no
+  # interpret path, so CPU CI structurally cannot reach it; it is validated by
+  # the manual A100 Pallas parity runs.
+  "jaccpot/pallas/m2l_real_fused.py",
+]
 
 [tool.coverage.report]
 show_missing = true

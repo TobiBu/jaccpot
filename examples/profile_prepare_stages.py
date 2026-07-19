@@ -47,7 +47,7 @@ def main() -> None:
     parser.add_argument("--basis", type=str, default="solidfmm")
     parser.add_argument(
         "--runtime-path",
-        choices=("auto", "legacy", "large_n"),
+        choices=("auto", "large_n"),
         default="auto",
     )
     args = parser.parse_args()

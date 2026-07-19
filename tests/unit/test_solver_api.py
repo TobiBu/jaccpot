@@ -13,6 +13,7 @@ import jaccpot.runtime._fmm_impl as fmm_impl_private
 import jaccpot.runtime._interaction_cache as interaction_cache_private
 import jaccpot.runtime._large_n_nearfield as large_n_nearfield_private
 import jaccpot.runtime.fmm as runtime_fmm
+import jaccpot.runtime.fmm_constants as fmm_constants_private
 import jaccpot.upward.solidfmm_complex_tree_expansions as upward_private
 from jaccpot import (
     ComplexSHBasis,
@@ -289,13 +290,11 @@ def test_large_gpu_minimum_memory_streamed_tree_guard_caps_overflowing_seed():
         max_neighbors_per_leaf=16_384,
     )
 
-    capped = (
-        fmm_impl_private._cap_minimum_memory_streamed_gpu_traversal_config_for_tree(
-            traversal_config=cfg,
-            total_nodes=262_143,
-            num_leaves=131_072,
-            num_particles=16_777_216,
-        )
+    capped = fmm_constants_private._cap_minimum_memory_streamed_gpu_traversal_config_for_tree(
+        traversal_config=cfg,
+        total_nodes=262_143,
+        num_leaves=131_072,
+        num_particles=16_777_216,
     )
 
     assert capped is not None
@@ -313,7 +312,7 @@ def test_large_gpu_minimum_memory_streamed_tree_guard_keeps_safe_seed():
         max_neighbors_per_leaf=8_192,
     )
 
-    kept = fmm_impl_private._cap_minimum_memory_streamed_gpu_traversal_config_for_tree(
+    kept = fmm_constants_private._cap_minimum_memory_streamed_gpu_traversal_config_for_tree(
         traversal_config=cfg,
         total_nodes=65_535,
         num_leaves=32_768,
@@ -1585,7 +1584,6 @@ def test_large_n_gpu_profile_coerces_conflicting_runtime_knobs():
                 retain_interactions=True,
             ),
         ),
-        runtime_path="legacy",
     )
     impl = fmm._impl
     assert impl.runtime_path == "large_n"
@@ -1619,20 +1617,7 @@ def test_large_n_gpu_profile_emits_deprecation_warnings_for_conflicting_knobs():
                 ),
                 runtime=RuntimePolicyConfig(memory_objective="throughput"),
             ),
-            runtime_path="legacy",
         )
-
-
-def test_large_n_prepare_path_ignores_legacy_runtime_path_request(monkeypatch):
-    positions, masses = _sample_problem(n=64)
-    fmm = FastMultipoleMethod(
-        preset=FMMPreset.LARGE_N_GPU,
-        basis="solidfmm",
-        runtime_path="legacy",
-    )
-    monkeypatch.setattr(fmm_impl_private.jax, "default_backend", lambda: "gpu")
-    state = fmm.prepare_state(positions, masses, leaf_size=16, max_order=3)
-    assert state.execution_backend == "large_n"
 
 
 def test_large_n_compiled_eval_uses_specialized_nearfield(monkeypatch):
