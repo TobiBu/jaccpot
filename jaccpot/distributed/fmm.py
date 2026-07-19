@@ -292,7 +292,9 @@ def _make_fn(config: DistributedFMMConfig, ndev: int, cap: int) -> Callable:
         use_pallas_near = nf_backend == "pallas"
     # Padded source-leaf-id width for the fused leafpair kernel: per target leaf the
     # combined CSR holds at most (local self-near + cross-near) neighbour leaves.
-    S_near = int(config.max_neighbors_per_leaf) + int(config.cross_max_neighbors_per_leaf)
+    S_near = int(config.max_neighbors_per_leaf) + int(
+        config.cross_max_neighbors_per_leaf
+    )
     soft2 = float(soft) ** 2
 
     C = sh_size(p)
