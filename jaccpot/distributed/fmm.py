@@ -66,7 +66,12 @@ from yggdrax.tree import (
 from yggdrax.tree_moments import compute_tree_mass_moments
 
 from jaccpot.downward.local_expansions import LocalExpansionData
-from jaccpot.nearfield.near_field import compute_leaf_p2p_accelerations
+from jaccpot.nearfield.near_field import (
+    _compute_leaf_p2p_prepared_large_n_self_only_impl,
+    _prepare_leaf_data_from_groups,
+    _radix_fast_lane_prepacked_pallas,
+    compute_leaf_p2p_accelerations,
+)
 from jaccpot.operators.complex_ops import (
     enforce_conjugate_symmetry_batch,
     m2l_complex_reference_batch,
@@ -134,6 +139,11 @@ class DistributedFMMConfig:
     # JACCPOT_STATIC_STRICT_FUSED_M2L_PALLAS is set). Upward sweep + coarse M2M stay
     # complex; multipoles are converted to Dehnen real coeffs at the M2L boundary.
     basis: str = "real"
+    # Near-field backend: "baseline" (pure-JAX combined [local;halo] P2P) or
+    # "pallas" (fused leafpair Pallas kernel, sm_80+, the single-GPU fast-lane
+    # near-field). "auto" (DEFAULT) picks pallas on Ampere+, baseline elsewhere.
+    # Numerically equivalent to baseline (validated), only the cross-leaf P2P is fused.
+    nearfield_backend: str = "auto"
     # self dual-tree walk capacities
     max_interactions_per_node: int = 512
     max_neighbors_per_leaf: int = 128
@@ -265,6 +275,25 @@ def _make_fn(config: DistributedFMMConfig, ndev: int, cap: int) -> Callable:
     theta = config.theta
     theta_cross = config.theta_cross
     is_real = str(config.basis).strip().lower() == "real"
+
+    # Near-field backend resolution (trace-time; sm_80+ gate mirrors the single-GPU
+    # lane). "auto" -> fused leafpair Pallas on Ampere+, pure-JAX baseline elsewhere.
+    nf_backend = str(config.nearfield_backend).strip().lower()
+    if nf_backend not in {"auto", "pallas", "baseline"}:
+        raise ValueError(
+            "nearfield_backend must be 'auto', 'pallas' or 'baseline'; "
+            f"got {config.nearfield_backend!r}"
+        )
+    if nf_backend == "auto":
+        from jaccpot.pallas.nearfield_fused_leaf import pallas_nearfield_fused_supported
+
+        use_pallas_near = bool(pallas_nearfield_fused_supported())
+    else:
+        use_pallas_near = nf_backend == "pallas"
+    # Padded source-leaf-id width for the fused leafpair kernel: per target leaf the
+    # combined CSR holds at most (local self-near + cross-near) neighbour leaves.
+    S_near = int(config.max_neighbors_per_leaf) + int(config.cross_max_neighbors_per_leaf)
+    soft2 = float(soft) ** 2
 
     C = sh_size(p)
     if cap % leaf != 0:
@@ -588,22 +617,77 @@ def _make_fn(config: DistributedFMMConfig, ndev: int, cap: int) -> Callable:
         )
         lp_idx = jnp.concatenate([loc_idx, halo_idx], axis=0)
         lp_mask = jnp.concatenate([loc_mask, halo_mask], axis=0)
-        near_full = compute_leaf_p2p_accelerations(
-            tree,
-            nbr,
-            concat_pos,
-            concat_mass,
-            G=G,
-            softening=soft,
-            nearfield_mode="baseline",
-            node_ranges_override=jnp.zeros((u_leaves + 1, 2), INDEX_DTYPE),
-            leaf_nodes_override=jnp.arange(u_leaves, dtype=INDEX_DTYPE),
-            neighbor_offsets_override=offsets,
-            neighbor_indices_override=src_s,
-            neighbor_counts_override=counts,
-            leaf_particle_indices_override=lp_idx,
-            leaf_particle_mask_override=lp_mask,
-        )
+        if use_pallas_near:
+            # Fused leafpair Pallas near-field (single-GPU fast-lane kernel): the
+            # intra-leaf self block is computed separately and the cross-leaf
+            # neighbour pairs run through the leafpair kernel (sources gathered by
+            # id in-kernel). Mirrors compute_leaf_p2p_accelerations_radix_fast_lane;
+            # numerically equal to the baseline combined P2P (CPU-validated 2e-16).
+            soft2_a = jnp.asarray(soft2, concat_pos.dtype)
+            (
+                leaf_positions,
+                leaf_masses,
+                leaf_mask_g,
+                safe_idx,
+            ) = _prepare_leaf_data_from_groups(lp_idx, lp_mask, concat_pos, concat_mass)
+            self_acc = _compute_leaf_p2p_prepared_large_n_self_only_impl(
+                concat_pos,
+                leaf_positions,
+                leaf_masses,
+                leaf_mask_g,
+                safe_idx,
+                G=G,
+                softening_sq=soft2_a,
+            )
+            # Densify the combined CSR (offsets/src_s/counts, sorted by target) into a
+            # padded [u_leaves, S_near] source-leaf-id table + validity mask.
+            e = jnp.arange(src_s.shape[0], dtype=INDEX_DTYPE)
+            t_of_e = jnp.searchsorted(offsets, e, side="right") - 1
+            rank = e - offsets[jnp.clip(t_of_e, 0, u_leaves)]
+            in_range = (t_of_e >= 0) & (t_of_e < u_leaves) & (rank < S_near)
+            flat = jnp.where(in_range, t_of_e * S_near + rank, -1)
+            sids = (
+                jnp.zeros((u_leaves * S_near,), INDEX_DTYPE)
+                .at[flat]
+                .set(src_s, mode="drop")
+                .reshape(u_leaves, S_near)
+            )
+            svalid = (
+                jnp.zeros((u_leaves * S_near,), bool)
+                .at[flat]
+                .set(jnp.ones_like(flat, bool), mode="drop")
+                .reshape(u_leaves, S_near)
+            )
+            pair_acc = _radix_fast_lane_prepacked_pallas(
+                sids.reshape(u_leaves, S_near, 1),
+                svalid.reshape(u_leaves, S_near, 1),
+                leaf_positions,
+                leaf_masses,
+                leaf_mask_g,
+                safe_idx,
+                concat_pos,
+                G=G,
+                softening_sq=soft2_a,
+                compute_potential=False,
+            )
+            near_full = self_acc + pair_acc
+        else:
+            near_full = compute_leaf_p2p_accelerations(
+                tree,
+                nbr,
+                concat_pos,
+                concat_mass,
+                G=G,
+                softening=soft,
+                nearfield_mode="baseline",
+                node_ranges_override=jnp.zeros((u_leaves + 1, 2), INDEX_DTYPE),
+                leaf_nodes_override=jnp.arange(u_leaves, dtype=INDEX_DTYPE),
+                neighbor_offsets_override=offsets,
+                neighbor_indices_override=src_s,
+                neighbor_counts_override=counts,
+                leaf_particle_indices_override=lp_idx,
+                leaf_particle_mask_override=lp_mask,
+            )
 
         # far_full is (cap,3) already; near_full is (cap + halo, 3) -> keep the
         # local rows.  (The validated test slices BOTH to [:cap] on return.)
