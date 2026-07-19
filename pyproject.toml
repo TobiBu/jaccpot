@@ -25,8 +25,13 @@ classifiers = [
   "Topic :: Scientific/Engineering :: Physics",
 ]
 dependencies = [
-  "jax[cuda]>=0.8.0",
-  "jaxlib>=0.4.0",
+  # Cap below 0.10: JAX 0.10 removed the `backend=` kwarg from
+  # `jax.experimental.pallas.pallas_call`, which the fused M2L Pallas kernels
+  # (jaccpot/pallas/*) still pass. Tested/developed against 0.9.x; the unpinned
+  # `>=0.8.0` let CI resolve 0.10.2 and broke the Pallas tests. Lift this ceiling
+  # once the Pallas call sites are ported to the 0.10 API.
+  "jax[cuda]>=0.8.0,<0.10",
+  "jaxlib>=0.4.0,<0.10",
   "jaxtyping>=0.2.23",
   "beartype>=0.14.0",
   "yggdrax>=0.0.1,<0.1.0",
