@@ -342,7 +342,9 @@ def _make_fn(config: DistributedFMMConfig, ndev: int, cap: int) -> Callable:
         offsets = jnp.concatenate([jnp.zeros((1,), INDEX_DTYPE), jnp.cumsum(counts)])
         return offsets, src_s, counts, u_leaves
 
-    def fn(pos: jax.Array, mass: jax.Array, gid: jax.Array, count: jax.Array) -> Any:
+    def fn(
+        pos: jax.Array, mass: jax.Array, gid: jax.Array, count: jax.Array
+    ) -> tuple[jax.Array, jax.Array, jax.Array]:
         bounds = global_bounds(pos)
         pos_s, mass_s = sanitize_padding(pos, mass, count)
         tree = Tree.from_particles(
@@ -655,7 +657,7 @@ def make_force_evaluator(
         mass_flat: jax.Array,
         gid_flat: jax.Array,
         counts: jax.Array,
-    ) -> Any:
+    ) -> tuple[jax.Array, jax.Array, jax.Array]:
         return shard_map(
             fn,
             mesh=mesh,

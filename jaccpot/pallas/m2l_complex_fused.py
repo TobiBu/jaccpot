@@ -322,7 +322,7 @@ def m2l_complex_fused_jax(
         bfr: Array,
         bfi: Array,
         rr: Array,
-    ) -> Array:
+    ) -> tuple[Array, Array]:
         return _m2l_one(mr, mi, btr, bti, bfr, bfi, rr, t)
 
     or_r, or_i = jax.vmap(one)(mr, mi, bto_r, bto_i, bfr_r, bfr_i, r)

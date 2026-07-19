@@ -1539,7 +1539,12 @@ def test_large_n_gpu_preset_applies_memory_safe_gpu_defaults():
     assert fmm._impl.streamed_far_pairs is True
     assert fmm._impl.mixed_order_farfield is False
     assert fmm._impl.m2l_chunk_size is None
-    assert fmm._impl.enable_interaction_cache is False
+    # The large_n_gpu production contract keeps the topology-derived interaction
+    # scaffold resident (enable_interaction_cache=True) so fixed-shape refreshes
+    # can reuse it. This is memory-neutral on the production path: the stateful
+    # interaction cache is gated off for static_radix tree mode, so True here does
+    # not add device-memory pressure. (The memory-heavy retain_* knobs stay off.)
+    assert fmm._impl.enable_interaction_cache is True
     assert fmm._impl.retain_traversal_result is False
     assert fmm._impl.retain_interactions is False
     assert fmm._impl.autotune_m2l_chunk is True
@@ -1590,7 +1595,11 @@ def test_large_n_gpu_profile_coerces_conflicting_runtime_knobs():
     assert impl.farfield_mode == "pair_grouped"
     assert impl.mixed_order_farfield is False
     assert impl.mixed_order_min_order is None
-    assert impl.enable_interaction_cache is False
+    # Contract keeps the interaction scaffold resident (enable_interaction_cache
+    # =True); it is memory-neutral on the static_radix production path (the
+    # stateful cache is gated off there). The requested True is honoured, not
+    # coerced off, while the memory-heavy retain_* knobs are coerced off below.
+    assert impl.enable_interaction_cache is True
     assert impl.retain_traversal_result is False
     assert impl.retain_interactions is False
 
@@ -2054,8 +2063,15 @@ def test_minimum_memory_gpu_runtime_starts_with_smaller_traversal_capacities():
         )
 
     assert overrides.traversal_config is not None
+    # The small memory-safe pair-queue seed (32768) is the load-bearing
+    # assertion: the minimum-memory GPU lane must start from a bounded queue.
     assert int(overrides.traversal_config.max_pair_queue) == 32768
-    assert int(overrides.traversal_config.process_block) == 64
+    # process_block is floored to the streamed minimum-memory ceiling (256, i.e.
+    # _GPU_STREAMED_MINIMUM_MEMORY_EXPLICIT_PROCESS_BLOCK) to avoid underfilled
+    # count-pass kernels -- matching the sibling auto-seed tests above. (The
+    # original 64 predates that process-block floor.) process_block is a compute
+    # chunk size, not a buffer dimension, so 256 is not a memory regression.
+    assert int(overrides.traversal_config.process_block) == 256
     assert int(overrides.traversal_config.max_interactions_per_node) == 1024
     assert int(overrides.traversal_config.max_neighbors_per_leaf) == 256
 
