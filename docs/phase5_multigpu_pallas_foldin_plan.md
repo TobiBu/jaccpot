@@ -17,11 +17,28 @@ _Bookkeeping + plan, 2026-07-14._
     direct (beats bh's 0.24%), no overflow; solidfmm/bh kept behind explicit config + test.
   - Tests: `tests/test_distributed_fmm_driver.py` (default real+dehnen, real+bh, legacy
     solidfmm, jit==eager) + `tests/test_real_upward_sweep.py` — all green on CPU.
-- **NEXT — 5c (needs GPU):** set `JACCPOT_STATIC_STRICT_FUSED_M2L_PALLAS=1` (M2L already
-  routes through `_apply_real_m2l` → fused real M2L Pallas engages automatically) + swap the
-  near-field from `nearfield_mode="baseline"` to the fused Pallas P2P. Validate on Ampere.
-- **NEXT — 5d (needs GPU):** weak/strong multi-GPU scaling via `benchmark_multigpu/`; compare
-  per-device throughput to the single-GPU O(N) curve; watch LET/comm overhead.
+- **DONE — 5c (A100, 2026-07-19):**
+  - **Fused real M2L Pallas** engaged via `JACCPOT_STATIC_STRICT_FUSED_M2L_PALLAS=1` — no code
+    change; both self-M2L (`_accumulate_real_m2l_fullbatch`) and cross-M2L route through
+    `_apply_real_m2l`. Parity-neutral: flag-on vs flag-off forces match to **4.4e-9**.
+  - **Fused leafpair Pallas near-field**: new `DistributedFMMConfig.nearfield_backend`
+    {`auto`,`pallas`,`baseline`} (auto→pallas on sm_80+). The pallas branch computes the
+    intra-leaf self block via `_compute_leaf_p2p_prepared_large_n_self_only_impl` and the
+    cross-leaf pairs via `_radix_fast_lane_prepacked_pallas` over the `_combined_neighbors`
+    CSR densified to a padded `[u_leaves, S_near]` source-leaf table. Parity vs baseline P2P
+    = **2.1e-7** (CPU `interpret=True` de-risk 2e-16), aggL2 vs direct **1.78e-4** @ per=8000.
+  - **The near-field was the entire bottleneck.** Build-once steady-state whole-eval
+    (ndev=2, per=8000/leaf=128): baseline near **10.7 s → 43.5 ms with Pallas (~245x)**.
+    traversal + far-field are only ~40 ms — the ~10 s previously attributed to the
+    overhead-bound traversal was actually the pure-JAX baseline near-field leaf-pair P2P.
+    M2L-Pallas on/off is negligible at this near-field-dominated config.
+  - `jit=True` is STABLE with both backends (the earlier illegal-address crash did not
+    reproduce). NB: `distributed_fmm_accelerations` rebuilds+recompiles per call (~50-80 s) —
+    build once via `make_force_evaluator(...,jit=True)` for steady-state timing.
+- **NEXT — 5d (now feasible):** weak-scaling of the pallas config (per=8000/GPU) is near-flat
+  ndev 2→5 (~42-48 ms), so the driver actually scales — BUT the default traversal caps
+  **overflow at ndev≥4** (cross-domain LET grows with device count → `cross_max_pair_queue`);
+  grow via `DistributedFMMConfig.with_scaled_caps` before a real strong/weak scaling study.
 
 ---
 
