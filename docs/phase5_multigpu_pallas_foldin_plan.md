@@ -35,10 +35,30 @@ _Bookkeeping + plan, 2026-07-14._
   - `jit=True` is STABLE with both backends (the earlier illegal-address crash did not
     reproduce). NB: `distributed_fmm_accelerations` rebuilds+recompiles per call (~50-80 s) —
     build once via `make_force_evaluator(...,jit=True)` for steady-state timing.
-- **NEXT — 5d (now feasible):** weak-scaling of the pallas config (per=8000/GPU) is near-flat
-  ndev 2→5 (~42-48 ms), so the driver actually scales — BUT the default traversal caps
-  **overflow at ndev≥4** (cross-domain LET grows with device count → `cross_max_pair_queue`);
-  grow via `DistributedFMMConfig.with_scaled_caps` before a real strong/weak scaling study.
+- **DONE — 5d (A100, cap-calibrated build-once steady-state; 2026-07-20):**
+  - `distributed_fmm_accelerations` gained `auto_scale_caps` (retry with `with_scaled_caps`
+    on a traversal-buffer overflow) — the cross-domain LET grows with device count so the
+    fixed default caps overflow at ndev≥4. Test `test_driver_auto_scale_caps`.
+  - **Weak scaling** (per=8000/GPU, pallas near + fused M2L, overflow-free after calibration):
+
+    | ndev | N | cap× | min ms | throughput (part/s) |
+    |---|---|---|---|---|
+    | 2 | 16 000 | 1 | 41.6 | 3.8e5 |
+    | 3 | 24 000 | 1 | 46.6 | 5.2e5 |
+    | 4 | 32 000 | 2 | 59.6 | 5.4e5 |
+    | 5 | 40 000 | 2 | 64.3 | 6.2e5 |
+
+    Throughput RISES with GPU count (positive weak scaling); per-eval grows 42→64 ms from
+    LET comm + the ×2 padded-cap overhead at ndev≥4.
+  - **Strong scaling** (total N=40 000) is **density-limited**: at per-GPU N > ~8000 (ndev 2-4:
+    per=20000/13333/10000) the fixed-topology traversal caps explode and STILL overflow at
+    cap×64 (max retries) → forces truncated, 400-720 ms (padded pair-queue overhead dominates).
+    Only ndev=5 (per=8000) is valid (64.7 ms). **Healthy regime = per-GPU N ≈ 8000**; scale by
+    adding GPUs to keep per-GPU N there (= weak scaling).
+  - **CAVEAT: the jit=True illegal-address crash is INTERMITTENT** (nondeterministic OOB) — most
+    runs succeed but one recurred at weak ndev=2; run each eval in its own process. Root-cause +
+    a padded-pair-queue right-sizing (to lift the per-GPU-N ceiling for strong scaling) are the
+    two remaining follow-ups.
 
 ---
 
