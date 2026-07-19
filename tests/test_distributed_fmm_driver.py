@@ -11,6 +11,8 @@ N-body sum to within 1%.
         pytest tests/test_distributed_fmm_driver.py -o addopts="" -q
 """
 
+import dataclasses
+
 import jax.numpy as jnp
 import numpy as np
 import pytest
@@ -150,3 +152,52 @@ def test_driver_jit_matches_eager():
     )
     print(f"jit-vs-eager aggL2 = {diff:.3e}")
     assert diff < 1e-6, f"jit path diverged from eager: {diff:.3e}"
+
+
+def test_driver_auto_scale_caps():
+    """``auto_scale_caps`` grows the traversal buffers on overflow until the
+    walk fits, without changing the forces.
+
+    The cross-domain LET grows with device count, so the fixed default caps can
+    overflow at higher ``ndev``. Deliberately tiny caps force the overflow here;
+    the retry must clear it and still match direct N-body.
+    """
+    ndev = min(4, device_count())
+    mesh = make_mesh(ndev)
+    per = 64
+    pts, mass = _separated_clusters(ndev, per)
+    tiny = dataclasses.replace(
+        DistributedFMMConfig(),
+        nearfield_backend="baseline",  # pallas is GPU-only; CI runs on CPU
+        max_pair_queue=64,
+        cross_max_pair_queue=64,
+        max_interactions_per_node=16,
+        cross_max_interactions_per_node=16,
+        max_neighbors_per_leaf=16,
+        cross_max_neighbors_per_leaf=16,
+    )
+
+    r0 = distributed_fmm_accelerations(pts, mass, config=tiny, mesh=mesh, jit=False)
+    assert r0.overflow, "tiny caps should overflow without auto_scale_caps"
+
+    r1 = distributed_fmm_accelerations(
+        pts,
+        mass,
+        config=tiny,
+        mesh=mesh,
+        jit=False,
+        auto_scale_caps=True,
+        cap_scale_factor=2.0,
+        max_cap_retries=6,
+    )
+    assert not r1.overflow, "auto_scale_caps should clear the overflow"
+    assert r1.diagnostics["cap_retries"] >= 1
+
+    direct = np.asarray(
+        _direct(jnp.asarray(pts), jnp.asarray(mass), tiny.G, tiny.softening)
+    )
+    err = float(
+        np.linalg.norm(r1.accelerations - direct) / (np.linalg.norm(direct) + 1e-30)
+    )
+    print(f"auto_scale_caps aggL2 vs direct = {err:.6f}  retries={r1.diagnostics['cap_retries']}")
+    assert err < 5e-2, f"forces wrong after cap retry: {err:.6f}"

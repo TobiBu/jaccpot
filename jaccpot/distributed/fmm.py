@@ -745,6 +745,22 @@ def make_force_evaluator(
     return jax.jit(evaluate) if jit else evaluate
 
 
+_OVERFLOW_FIELDS = (
+    "cross_queue_overflow",
+    "cross_far_overflow",
+    "cross_near_overflow",
+    "self_queue_overflow",
+    "self_far_overflow",
+    "self_near_overflow",
+)
+
+
+def _reduce_overflow(diag_o: np.ndarray) -> bool:
+    """True if any device flagged a traversal-buffer overflow."""
+    idx = [DIAG_FIELDS.index(k) for k in _OVERFLOW_FIELDS]
+    return bool(np.any(diag_o[:, idx] > 0))
+
+
 def distributed_fmm_accelerations(
     positions: np.ndarray,
     masses: np.ndarray,
@@ -753,12 +769,21 @@ def distributed_fmm_accelerations(
     mesh=None,
     ndev: int | None = None,
     jit: bool = False,
+    auto_scale_caps: bool = False,
+    cap_scale_factor: float = 2.0,
+    max_cap_retries: int = 4,
 ) -> DistributedFMMResult:
     """Evaluate distributed FMM accelerations for all particles.
 
     Handles the host-side SFC decomposition + padding + global-id tracking,
     runs the ``shard_map`` force pipeline, and scatters the per-device forces
     back into the original input order.
+
+    When ``auto_scale_caps`` is set, a traversal-buffer overflow (which grows
+    with device count as the cross-domain LET expands) triggers a retry with the
+    capacities scaled by ``cap_scale_factor`` (up to ``max_cap_retries`` times),
+    rebuilding the evaluator each time. The ``config`` on the returned result is
+    the one that actually produced the (non-overflowing) forces.
 
     Returns a :class:`DistributedFMMResult`; ``.accelerations`` has shape
     ``(N, 3)`` in input order, ``.diagnostics`` includes the per-device pair
@@ -777,17 +802,22 @@ def distributed_fmm_accelerations(
     part = partition_for_devices(positions, masses, ndev, leaf_size=config.leaf_size)
     cap = part["cap"]
     counts_dev = jnp.asarray(part["counts"], INDEX_DTYPE)
+    pos_f = jnp.asarray(part["pos_flat"])
+    mass_f = jnp.asarray(part["mass_flat"])
+    gid_f = jnp.asarray(part["gid_flat"])
 
-    evaluate = make_force_evaluator(config, ndev, cap, mesh, jit=jit)
-    accel_o, gid_o, diag_o = evaluate(
-        jnp.asarray(part["pos_flat"]),
-        jnp.asarray(part["mass_flat"]),
-        jnp.asarray(part["gid_flat"]),
-        counts_dev,
-    )
+    attempt = 0
+    while True:
+        evaluate = make_force_evaluator(config, ndev, cap, mesh, jit=jit)
+        accel_o, gid_o, diag_o = evaluate(pos_f, mass_f, gid_f, counts_dev)
+        diag_o = np.asarray(diag_o)
+        overflow = _reduce_overflow(diag_o)
+        if not overflow or not auto_scale_caps or attempt >= max_cap_retries:
+            break
+        config = config.with_scaled_caps(cap_scale_factor)
+        attempt += 1
     accel_o = np.asarray(accel_o)
     gid_o = np.asarray(gid_o).reshape(-1).astype(np.int64)
-    diag_o = np.asarray(diag_o)
 
     n = part["n"]
     accel = np.zeros((n, 3), np.float64)
@@ -804,26 +834,8 @@ def distributed_fmm_accelerations(
         )
 
     diag = {name: diag_o[:, i] for i, name in enumerate(DIAG_FIELDS)}
-    overflow = bool(
-        np.any(
-            diag_o[
-                :,
-                [
-                    DIAG_FIELDS.index(k)
-                    for k in (
-                        "cross_queue_overflow",
-                        "cross_far_overflow",
-                        "cross_near_overflow",
-                        "self_queue_overflow",
-                        "self_far_overflow",
-                        "self_near_overflow",
-                    )
-                ],
-            ]
-            > 0
-        )
-    )
     diag["overflow"] = overflow
+    diag["cap_retries"] = attempt
 
     return DistributedFMMResult(
         accelerations=accel,
