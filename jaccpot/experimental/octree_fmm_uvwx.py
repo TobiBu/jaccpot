@@ -57,8 +57,10 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 from jaxtyping import Array
+from yggdrax.octree_nearfield_tiles import build_octree_nearfield_tiles
 from yggdrax.octree_uvwx import (
     UniformOctreeExecutionView,
+    build_adaptive_octree_execution_view_device,
     build_sparse_uniform_octree_execution_view_device,
     build_uniform_octree_execution_view,
     build_uniform_octree_execution_view_device,
@@ -75,8 +77,12 @@ from ..operators.complex_ops import (
     complex_rotation_blocks_to_z_solidfmm_batch,
 )
 from ..operators.m2l_real_rot_scale import (
+    l2l_rot_scale_real_batch_cached_blocks,
     m2l_rot_scale_real_batch_cached_blocks,
+    m2m_rot_scale_real_batch_cached_blocks,
     real_rotation_blocks_from_z_local_batch,
+    real_rotation_blocks_from_z_multipole_batch,
+    real_rotation_blocks_to_z_local_batch,
     real_rotation_blocks_to_z_multipole_batch,
 )
 from ..operators.real_harmonics import (
@@ -178,6 +184,9 @@ def _octree_far_field_grad(
     geometric_centers: bool = False,
     m2l_grouped: bool = False,
     class_capacity: int = 8192,
+    m2m_grouped: bool = False,
+    l2l_grouped: bool = False,
+    mm_class_capacity: int = 512,
     basis: str = "complex",
 ) -> Array:
     """O(N) far field: upward (P2M/M2M) -> V-list M2L -> L2L -> evaluate locals.
@@ -229,6 +238,9 @@ def _octree_far_field_grad(
             v_active_capacity=v_active_capacity,
             m2l_grouped=bool(m2l_grouped),
             class_capacity=int(class_capacity),
+            m2m_grouped=bool(m2m_grouped),
+            l2l_grouped=bool(l2l_grouped),
+            mm_class_capacity=int(mm_class_capacity),
         )
     plan = build_octree_upward_plan(octree)
     centers_override = jnp.asarray(view.centers) if bool(geometric_centers) else None
@@ -385,6 +397,9 @@ def _octree_far_field_grad_real(
     v_active_capacity: Optional[int] = None,
     m2l_grouped: bool = False,
     class_capacity: int = 8192,
+    m2m_grouped: bool = False,
+    l2l_grouped: bool = False,
+    mm_class_capacity: int = 512,
 ) -> Array:
     """Real-basis (Dehnen) octree far field: real P2M/M2M/M2L/L2L + real L2P (with grad).
 
@@ -455,15 +470,53 @@ def _octree_far_field_grad_real(
     # ---- M2M up-sweep: delta = child - parent (source=child) ----
     delta_child_minus_parent = centers - centers[parent_safe]
 
-    def m2m_body(step: Array, mp: Array) -> Array:
-        level = n_levels - 1 - step
-        active = (depths == level) & (parent < num_nodes)
-        contrib = jax.vmap(lambda m, d: m2m_real(m, d, order=p))(
-            mp, delta_child_minus_parent
+    if m2m_grouped:
+        # GROUPED/CACHED real M2M (mirror of the grouped M2L below): box centres make the
+        # child->parent displacements quantise to ~8*n_levels classes, so group them via
+        # jnp.unique, precompute the real rotation blocks ONCE per class, and reuse them
+        # across every level -- removing the per-node, per-level rotation rebuild (the launch
+        # storm). Only the cheap z-axis M2M translation runs per node per level. Bit-identical
+        # to the per-node m2m_real for every ACTIVE node (same exact delta -> same class);
+        # zero-delta nodes use a safe one_x rotation but are masked out (never active).
+        rdt = mp.dtype
+        one_x = jnp.asarray([1.0, 0.0, 0.0], dtype=centers.dtype)
+        m2m_uniq, m2m_cls = jnp.unique(
+            delta_child_minus_parent,
+            axis=0,
+            size=int(mm_class_capacity),
+            return_inverse=True,
+            fill_value=0.0,
         )
-        return mp.at[parent_safe].add(jnp.where(active[:, None], contrib, 0.0))
+        m2m_cls = m2m_cls.reshape(-1)
+        m2m_disp = jnp.where(
+            jnp.all(m2m_uniq == 0, axis=1, keepdims=True), one_x, m2m_uniq
+        )
+        m2m_bt = real_rotation_blocks_to_z_multipole_batch(
+            m2m_disp, order=p, dtype=rdt
+        )[m2m_cls]
+        m2m_bf = real_rotation_blocks_from_z_multipole_batch(
+            m2m_disp, order=p, dtype=rdt
+        )[m2m_cls]
 
-    mp = jax.lax.fori_loop(0, n_levels - 1, m2m_body, mp)
+        def _m2m_body(step, mp):
+            level = n_levels - 1 - step
+            active = (depths == level) & (parent < num_nodes)
+            contrib = m2m_rot_scale_real_batch_cached_blocks(
+                mp, delta_child_minus_parent, m2m_bt, m2m_bf, order=p
+            )
+            return mp.at[parent_safe].add(jnp.where(active[:, None], contrib, 0.0))
+
+    else:
+
+        def _m2m_body(step, mp):
+            level = n_levels - 1 - step
+            active = (depths == level) & (parent < num_nodes)
+            contrib = jax.vmap(lambda m, d: m2m_real(m, d, order=p))(
+                mp, delta_child_minus_parent
+            )
+            return mp.at[parent_safe].add(jnp.where(active[:, None], contrib, 0.0))
+
+    mp = jax.lax.fori_loop(0, n_levels - 1, _m2m_body, mp)
 
     # ---- M2L: delta = target - source over the V-list ----
     v_src = jnp.asarray(view.v_src, dtype=INDEX_DTYPE)
@@ -550,15 +603,49 @@ def _octree_far_field_grad_real(
     # ---- L2L down-sweep: delta = PARENT - child (source=parent; OPPOSITE of M2M) ----
     delta_parent_minus_child = centers[parent_safe] - centers
 
-    def l2l_body(step: Array, loc: Array) -> Array:
-        level = step + 1
-        active = (depths == level) & (parent < num_nodes)
-        contrib = jax.vmap(lambda lc, d: l2l_real(lc, d, order=p))(
-            loc[parent_safe], delta_parent_minus_child
+    if l2l_grouped:
+        # GROUPED/CACHED real L2L (same recipe as M2M above, opposite delta sign). Precompute
+        # the local-basis rotation blocks ONCE per parent->child displacement class; only the
+        # z-axis L2L translation runs per node per level.
+        rdt = locals_packed.dtype
+        one_x = jnp.asarray([1.0, 0.0, 0.0], dtype=centers.dtype)
+        l2l_uniq, l2l_cls = jnp.unique(
+            delta_parent_minus_child,
+            axis=0,
+            size=int(mm_class_capacity),
+            return_inverse=True,
+            fill_value=0.0,
         )
-        return loc + jnp.where(active[:, None], contrib, 0.0)
+        l2l_cls = l2l_cls.reshape(-1)
+        l2l_disp = jnp.where(
+            jnp.all(l2l_uniq == 0, axis=1, keepdims=True), one_x, l2l_uniq
+        )
+        l2l_bt = real_rotation_blocks_to_z_local_batch(l2l_disp, order=p, dtype=rdt)[
+            l2l_cls
+        ]
+        l2l_bf = real_rotation_blocks_from_z_local_batch(l2l_disp, order=p, dtype=rdt)[
+            l2l_cls
+        ]
 
-    locals_packed = jax.lax.fori_loop(0, n_levels - 1, l2l_body, locals_packed)
+        def _l2l_body(step, loc):
+            level = step + 1
+            active = (depths == level) & (parent < num_nodes)
+            contrib = l2l_rot_scale_real_batch_cached_blocks(
+                loc[parent_safe], delta_parent_minus_child, l2l_bt, l2l_bf, order=p
+            )
+            return loc + jnp.where(active[:, None], contrib, 0.0)
+
+    else:
+
+        def _l2l_body(step, loc):
+            level = step + 1
+            active = (depths == level) & (parent < num_nodes)
+            contrib = jax.vmap(lambda lc, d: l2l_real(lc, d, order=p))(
+                loc[parent_safe], delta_parent_minus_child
+            )
+            return loc + jnp.where(active[:, None], contrib, 0.0)
+
+    locals_packed = jax.lax.fori_loop(0, n_levels - 1, _l2l_body, locals_packed)
 
     # ---- L2P: real local -> field per leaf slot (delta = leaf_center - eval); scatter ----
     leaf_loc = locals_packed[leaf_node_safe]  # (L, ncoeff)
@@ -727,6 +814,25 @@ def _ulist_near_device(
     )
 
 
+def _raise_if_true(flag, message: str) -> None:
+    """Eager-only capacity gate: raise ``RuntimeError(message)`` iff ``flag`` is true.
+
+    Mirrors yggdrax's ``_raise_if_true`` -- when ``flag`` is a tracer this schedules a
+    ``jax.debug.callback`` (so it fires under jit); otherwise it checks the concrete bool.
+    Callers under a per-step integration scan should size caps from an eager probe and pass
+    ``check_capacity=False`` instead, so the callback does not serialize the device scan.
+    """
+    if isinstance(flag, jax.core.Tracer):
+
+        def _callback(value):
+            if bool(value):
+                raise RuntimeError(message)
+
+        jax.debug.callback(_callback, flag)
+    elif bool(flag):
+        raise RuntimeError(message)
+
+
 def _octree_near_field(
     positions_sorted: Array,
     masses_sorted: Array,
@@ -740,6 +846,10 @@ def _octree_near_field(
     near_block_size: Optional[int] = 128,
     edge_capacity: Optional[int] = None,
     near_chunk_size: int = 512,
+    near_mode: str = "block",
+    tile_width: int = 64,
+    max_source_tiles: int = 0,
+    check_capacity: bool = True,
 ) -> Array:
     """U-list near-field P2P over fixed-width UNITS, reusing the radix fast-lane machinery.
 
@@ -787,7 +897,39 @@ def _octree_near_field(
         num_leaves, u_cap
     )
 
-    if near_block_size is None:
+    if near_mode == "compact_wtile":
+        # Compacted, cell-respecting W-tiles (yggdrax.octree_nearfield_tiles): occupancy-bucket
+        # each ADAPTIVE cell into full width-``tile_width`` tiles, each with a source-tile list
+        # sized by the ACTUAL near work rather than the ``(1 + u_cap) * mbpl`` worst case that
+        # the block mode below pays. Same near leaf-pair SET (tiles are cell-respecting, so
+        # tile-pairs map 1:1 onto cell-pairs), just densely packed. Here we only gather
+        # positions + reshape the source ids for the shared self-block + kernel/scan tail.
+        W = int(tile_width)
+        num_tiles_cap = (n_part + W - 1) // W + num_leaves
+        s_cap = int(max_source_tiles)
+        if s_cap <= 0:
+            raise ValueError(
+                "near_mode='compact_wtile' requires max_source_tiles > 0 (size it from an "
+                "eager probe of the near CSR: max over tiles of the summed source-tile count)"
+            )
+        tiles = build_octree_nearfield_tiles(
+            view,
+            tile_width=W,
+            num_tiles_cap=num_tiles_cap,
+            max_source_tiles=s_cap,
+            max_leaf_occupancy=int(max_leaf_size),
+        )
+        if bool(check_capacity):
+            _raise_if_true(
+                tiles.overflow,
+                "octree compact_wtile near-field capacity exceeded: increase max_source_tiles "
+                "or max_leaf_size, or lower tile_width (see yggdrax OctreeNearfieldTiles).",
+            )
+        unit_pidx = jnp.clip(tiles.tile_particle_idx, 0, n_part - 1)
+        unit_mask = tiles.tile_mask
+        src_ids_3d = tiles.tile_source_ids[:, None, :]  # (num_tiles, 1, S)
+        src_valid_3d = tiles.tile_source_valid[:, None, :]
+    elif near_block_size is None:
         # one unit per leaf, width = max_leaf_size
         W = int(max_leaf_size)
         slot = jnp.arange(W, dtype=INDEX_DTYPE)
@@ -944,16 +1086,26 @@ def _octree_near_field(
         "order",
         "max_leaf_size",
         "sparse",
+        "adaptive",
+        "leaf_size",
+        "u_capacity",
         "node_capacity",
         "leaf_capacity",
         "near_use_pallas",
         "geometric_centers",
         "m2l_grouped",
         "class_capacity",
+        "m2m_grouped",
+        "l2l_grouped",
+        "mm_class_capacity",
         "v_active_capacity",
         "near_block_size",
         "edge_capacity",
         "near_chunk_size",
+        "near_mode",
+        "tile_width",
+        "max_source_tiles",
+        "near_check_capacity",
         "basis",
     ),
 )
@@ -967,16 +1119,26 @@ def _octree_uvwx_device_compute(
     order: int,
     max_leaf_size: int,
     sparse: bool = False,
+    adaptive: bool = False,
+    leaf_size: int = 0,
+    u_capacity: int = 256,
     node_capacity: int = 0,
     leaf_capacity: int = 0,
     near_use_pallas: bool = True,
     geometric_centers: bool = False,
     m2l_grouped: bool = False,
     class_capacity: int = 8192,
+    m2m_grouped: bool = False,
+    l2l_grouped: bool = False,
+    mm_class_capacity: int = 512,
     v_active_capacity: Optional[int] = None,
     near_block_size: Optional[int] = 128,
     edge_capacity: Optional[int] = None,
     near_chunk_size: int = 512,
+    near_mode: str = "block",
+    tile_width: int = 64,
+    max_source_tiles: int = 0,
+    near_check_capacity: bool = True,
     basis: str = "complex",
 ) -> Array:
     """Single jitted O(N) octree-FMM compute over the static-shape device build.
@@ -994,7 +1156,20 @@ def _octree_uvwx_device_compute(
     occupancy); ``level_batch_width = leaf_capacity``. ``num_levels = depth + 1`` either way.
     """
     num_levels = int(depth) + 1
-    if sparse:
+    if adaptive:
+        # variable-depth, occupancy-bounded tree (occ <= leaf_size); drops into the SAME far
+        # (V-list M2L + L2L) + near (extended-near P2P) path as the sparse/dense views.
+        view = build_adaptive_octree_execution_view_device(
+            positions,
+            int(depth),
+            int(leaf_size),
+            node_capacity=int(node_capacity),
+            leaf_capacity=int(leaf_capacity),
+            interactions=True,
+            u_capacity=int(u_capacity),
+        )
+        level_batch_width = int(leaf_capacity)
+    elif sparse:
         view = build_sparse_uniform_octree_execution_view_device(
             positions,
             int(depth),
@@ -1023,6 +1198,9 @@ def _octree_uvwx_device_compute(
         geometric_centers=bool(geometric_centers),
         m2l_grouped=bool(m2l_grouped),
         class_capacity=int(class_capacity),
+        m2m_grouped=bool(m2m_grouped),
+        l2l_grouped=bool(l2l_grouped),
+        mm_class_capacity=int(mm_class_capacity),
         basis=str(basis),
     )
     far_acc = -G * far_grad
@@ -1037,6 +1215,10 @@ def _octree_uvwx_device_compute(
         near_block_size=near_block_size,
         edge_capacity=edge_capacity,
         near_chunk_size=int(near_chunk_size),
+        near_mode=str(near_mode),
+        tile_width=int(tile_width),
+        max_source_tiles=int(max_source_tiles),
+        check_capacity=bool(near_check_capacity),
     )
     acc_sorted = far_acc + near_acc
     inv = (
@@ -1056,6 +1238,9 @@ def octree_fmm_accelerations(
     max_leaf_capacity: Optional[int] = None,
     device: bool = True,
     sparse: bool = False,
+    adaptive: bool = False,
+    leaf_size: int = 0,
+    u_capacity: int = 256,
     node_capacity: Optional[int] = None,
     leaf_capacity: Optional[int] = None,
     bounds: Optional[tuple] = None,
@@ -1064,10 +1249,17 @@ def octree_fmm_accelerations(
     geometric_centers: bool = False,
     m2l_grouped: bool = False,
     class_capacity: int = 8192,
+    m2m_grouped: bool = False,
+    l2l_grouped: bool = False,
+    mm_class_capacity: int = 512,
     v_active_capacity: Optional[int] = None,
     near_block_size: Optional[int] = 128,
     edge_capacity: Optional[int] = None,
     near_chunk_size: int = 512,
+    near_mode: str = "block",
+    tile_width: int = 64,
+    max_source_tiles: int = 0,
+    near_check_capacity: bool = True,
     basis: str = "complex",
 ) -> Array | tuple[Array, UniformOctreeExecutionView]:
     """O(N) octree-FMM gravitational accelerations (far V-list + near U-list P2P).
@@ -1111,6 +1303,64 @@ def octree_fmm_accelerations(
     masses = jnp.asarray(masses)
 
     if device:
+        if adaptive:
+            if node_capacity is None or leaf_capacity is None:
+                raise ValueError(
+                    "adaptive=True requires node_capacity and leaf_capacity (static caps)"
+                )
+            if int(leaf_size) <= 0:
+                raise ValueError(
+                    "adaptive=True requires leaf_size > 0 (per-leaf occupancy bound)"
+                )
+            if max_leaf_capacity is None:
+                raise ValueError(
+                    "adaptive=True requires max_leaf_capacity (>= max leaf occupancy); "
+                    "pass it explicitly to avoid a probe-build host sync/recompile"
+                )
+            if str(near_mode) == "compact_wtile" and int(max_source_tiles) <= 0:
+                raise ValueError(
+                    "near_mode='compact_wtile' requires max_source_tiles > 0 (probe the near "
+                    "CSR once with build_octree_nearfield_tiles and pass num_source_tiles_max)"
+                )
+            max_leaf_size = int(max_leaf_capacity)
+            acc = _octree_uvwx_device_compute(
+                positions,
+                masses,
+                jnp.asarray(G, dtype=positions.dtype),
+                jnp.asarray(softening, dtype=positions.dtype),
+                depth=int(depth),
+                order=int(order),
+                max_leaf_size=max_leaf_size,
+                adaptive=True,
+                leaf_size=int(leaf_size),
+                u_capacity=int(u_capacity),
+                node_capacity=int(node_capacity),
+                leaf_capacity=int(leaf_capacity),
+                near_use_pallas=bool(near_use_pallas),
+                geometric_centers=bool(geometric_centers),
+                m2l_grouped=bool(m2l_grouped),
+                class_capacity=int(class_capacity),
+                v_active_capacity=v_active_capacity,
+                near_block_size=near_block_size,
+                edge_capacity=edge_capacity,
+                near_chunk_size=int(near_chunk_size),
+                near_mode=str(near_mode),
+                tile_width=int(tile_width),
+                max_source_tiles=int(max_source_tiles),
+                near_check_capacity=bool(near_check_capacity),
+                basis=str(basis),
+            )
+            if return_view:
+                return acc, build_adaptive_octree_execution_view_device(
+                    positions,
+                    int(depth),
+                    int(leaf_size),
+                    node_capacity=int(node_capacity),
+                    leaf_capacity=int(leaf_capacity),
+                    interactions=True,
+                    u_capacity=int(u_capacity),
+                )
+            return acc
         if sparse:
             if node_capacity is None or leaf_capacity is None:
                 raise ValueError(
@@ -1136,6 +1386,9 @@ def octree_fmm_accelerations(
                 geometric_centers=bool(geometric_centers),
                 m2l_grouped=bool(m2l_grouped),
                 class_capacity=int(class_capacity),
+                m2m_grouped=bool(m2m_grouped),
+                l2l_grouped=bool(l2l_grouped),
+                mm_class_capacity=int(mm_class_capacity),
                 v_active_capacity=v_active_capacity,
                 near_block_size=near_block_size,
                 edge_capacity=edge_capacity,
@@ -1173,6 +1426,9 @@ def octree_fmm_accelerations(
             geometric_centers=bool(geometric_centers),
             m2l_grouped=bool(m2l_grouped),
             class_capacity=int(class_capacity),
+            m2m_grouped=bool(m2m_grouped),
+            l2l_grouped=bool(l2l_grouped),
+            mm_class_capacity=int(mm_class_capacity),
             v_active_capacity=v_active_capacity,
             near_block_size=near_block_size,
             edge_capacity=edge_capacity,

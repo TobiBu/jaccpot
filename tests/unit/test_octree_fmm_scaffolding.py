@@ -113,6 +113,13 @@ def test_octree_execution_view_exposes_native_box_geometry(octree_state):
     assert np.all(box_max_extents[valid_mask] > 0.0)
 
 
+# Previously xfailed: the level-major octree M2M
+# (_aggregate_octree_m2m_complex_by_level) drove its level walk from the octree's
+# Morton node_depths, which is not a topological level partition on the degenerate
+# (collinear) sample octree, so a parent aggregated some children in its own batch and
+# read 0 (root monopole 30.095 vs total mass 96.0, ~3x). Fixed by _topological_level_
+# partition (M2M/L2L now walk true topological levels recovered from the parent table);
+# the sweep is exact on this fixture again, so the marker is removed.
 def test_octree_complex_multipoles_match_radix_upward_on_mapped_nodes(octree_state):
     _, state = octree_state
 

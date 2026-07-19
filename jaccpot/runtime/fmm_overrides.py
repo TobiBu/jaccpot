@@ -379,6 +379,15 @@ class OverridesMixin:
         if production_large_n:
             grouped_interactions = False
             farfield_mode = "pair_grouped"
+            # Opt-in geometric (box/aabb) centres for the real-basis fast lane,
+            # decoupled from grouped_interactions (which stays False here to keep
+            # the streamed pair_grouped near/far payload). Centres flow
+            # upward->M2L->L2L->L2P via upward.multipoles.centers. Default OFF.
+            if (
+                bool(getattr(self, "_fastlane_geometric_centers", False))
+                and self._solidfmm_basis_mode() == "real"
+            ):
+                center_mode = "aabb"
 
         if static_runtime_fixed_sizing:
             # Static sizing mode: keep traversal/chunk execution knobs fixed to

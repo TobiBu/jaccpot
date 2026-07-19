@@ -617,13 +617,11 @@ def test_propagate_local_expansions_accumulates_parent():
 # path (the fixture has only a handful of interaction pairs). It must stay
 # bounded: _accumulate_level materialises a (chunk_size, coeffs) translate batch,
 # so a chunk of 10**6 allocated ~60 GB and OOM'd / hung the memory-limited CI
-# runner. 2**16 is still far larger than the pair count, so it covers the same
-# single-chunk path without the pathological allocation.
+# runner. The tree has far fewer interactions than DEFAULT_M2L_CHUNK_SIZE, so
+# DEFAULT already exercises that single full-batch path without the pathological
+# allocation; [1, 2] cover the small-chunk scan path.
 @pytest.mark.parametrize(
     "chunk_size",
-    # The tree has a handful of interactions (<< DEFAULT), so DEFAULT and 10**6
-    # both exercise the single full-batch path identically; keep one. [1, 2]
-    # cover the small-chunk scan path.
     [1, 2, DEFAULT_M2L_CHUNK_SIZE],
 )
 def test_accumulate_m2l_matches_pairwise_translations(chunk_size, prepared_m2l_tree):

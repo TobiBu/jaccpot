@@ -240,6 +240,10 @@ def test_large_gpu_minimum_memory_streamed_path_caps_oversized_explicit_traversa
             max_neighbors_per_leaf=16_384,
         ),
     )
+    # Adaptive minimum-memory capping now only runs when static-sizing is off
+    # (static sizing, default-on, passes the constructor config through unchanged).
+    # Exercise the capping path this test covers.
+    impl._static_runtime_fixed_sizing = False
 
     overrides = impl._resolve_runtime_execution_overrides(
         num_particles=2_097_152,
@@ -332,6 +336,8 @@ def test_large_gpu_minimum_memory_streamed_path_clamps_auto_traversal_seed():
         memory_objective="minimum_memory",
         fail_fast=True,
     )
+    # Adaptive auto-seed clamping runs on the adaptive path (static-sizing off).
+    impl._static_runtime_fixed_sizing = False
 
     overrides = impl._resolve_runtime_execution_overrides(
         num_particles=2_097_152,
@@ -352,6 +358,8 @@ def test_large_gpu_minimum_memory_streamed_seed_scales_for_xl_particle_counts():
         memory_objective="minimum_memory",
         fail_fast=True,
     )
+    # Adaptive seed scaling runs on the adaptive path (static-sizing off).
+    impl._static_runtime_fixed_sizing = False
 
     overrides = impl._resolve_runtime_execution_overrides(
         num_particles=4_194_304,
@@ -1452,6 +1460,8 @@ def test_gpu_runtime_overrides_cap_traversal_capacities_for_large_n():
         preset=FMMPreset.FAST,
         basis="solidfmm",
     )
+    # GPU capacity capping runs on the adaptive path (static-sizing off).
+    fmm._impl._static_runtime_fixed_sizing = False
     overrides = fmm._impl._resolve_runtime_execution_overrides(
         num_particles=131072,
         backend="gpu",
@@ -2055,6 +2065,9 @@ def test_minimum_memory_gpu_runtime_starts_with_smaller_traversal_capacities():
         preset=FMMPreset.LARGE_N_GPU,
         basis="solidfmm",
     )
+    # The smaller adaptive seeds run on the adaptive path (static-sizing off);
+    # static sizing (default-on) ships the larger preset traversal config instead.
+    fmm._impl._static_runtime_fixed_sizing = False
 
     with pytest.MonkeyPatch.context() as mp:
         mp.setattr(jax, "default_backend", lambda: "gpu")
