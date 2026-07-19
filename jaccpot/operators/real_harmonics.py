@@ -1095,7 +1095,11 @@ def compute_real_B_matrix_local(ell: int, *, dtype: DTypeLike) -> Array:
         Real B_T matrix of shape (2*ell+1, 2*ell+1).
     """
     B_T, _ = _compute_B_real_dehnen_via_Q(ell, str(dtype))
-    return jnp.asarray(B_T)
+    # Honor the requested dtype: the B matrix is computed in float64 for accuracy
+    # but must be cast down to the working dtype so the downstream rotation GEMMs
+    # (M2M/L2L/M2L rotate-to-z/from-z) run in that dtype rather than promoting the
+    # float32 coefficient vectors to float64 (the fp64 cuBLAS GEMM slowdown).
+    return jnp.asarray(B_T, dtype=dtype)
 
 
 def compute_real_B_matrix_multipole(ell: int, *, dtype: DTypeLike) -> Array:
@@ -1119,7 +1123,10 @@ def compute_real_B_matrix_multipole(ell: int, *, dtype: DTypeLike) -> Array:
         Real B_U matrix of shape (2*ell+1, 2*ell+1).
     """
     _, B_U = _compute_B_real_dehnen_via_Q(ell, str(dtype))
-    return jnp.asarray(B_U)
+    # Honor the requested dtype (see compute_real_B_matrix_local): cast the
+    # float64-computed B matrix down to the working dtype so the rotation GEMMs
+    # do not run in float64.
+    return jnp.asarray(B_U, dtype=dtype)
 
 
 def verify_real_B_matrix(ell: int, *, dtype: DTypeLike) -> Tuple[bool, float, float]:
