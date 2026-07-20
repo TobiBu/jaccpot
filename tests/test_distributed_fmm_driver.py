@@ -237,9 +237,19 @@ def test_driver_local_walk_treecode():
         + np.asarray(d["self_far_overflow"]).sum()
         + np.asarray(d["self_near_overflow"]).sum()
     )
-    direct = np.asarray(_direct(jnp.asarray(pts), jnp.asarray(mass), base.G, base.softening))
-    err = float(np.linalg.norm(r.accelerations - direct) / (np.linalg.norm(direct) + 1e-30))
-    print(f"treecode local_walk: self_ovf={self_ovf} overflow={r.overflow} aggL2 vs direct={err:.4e}")
-    assert self_ovf == 0, "treecode self-walk must not overflow (that is the point of the swap)"
-    assert not r.overflow, "auto_scale_caps should clear the (dual-tree) cross-walk overflow"
+    direct = np.asarray(
+        _direct(jnp.asarray(pts), jnp.asarray(mass), base.G, base.softening)
+    )
+    err = float(
+        np.linalg.norm(r.accelerations - direct) / (np.linalg.norm(direct) + 1e-30)
+    )
+    print(
+        f"treecode local_walk: self_ovf={self_ovf} overflow={r.overflow} aggL2 vs direct={err:.4e}"
+    )
+    assert (
+        self_ovf == 0
+    ), "treecode self-walk must not overflow (that is the point of the swap)"
+    assert (
+        not r.overflow
+    ), "auto_scale_caps should clear the (dual-tree) cross-walk overflow"
     assert err < 5e-2, f"treecode local force wrong vs direct: {err:.4e}"
