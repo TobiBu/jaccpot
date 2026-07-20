@@ -195,6 +195,14 @@ class DistributedFMMConfig:
     cross_max_interactions_per_node: int = 512
     cross_max_neighbors_per_leaf: int = 128
     cross_max_pair_queue: int = 1 << 15
+    # Static length of the cross-far M2L input. The cross walk sizes its far buffer at
+    # t_total * cross_max_interactions_per_node but PACKS the valid interactions into the
+    # front; feeding the whole (mostly-invalid) buffer to the fused real-M2L pads it to a
+    # power of two and OOMs (~6 GiB at N>=400k/GPU). When None the driver right-sizes the
+    # M2L input to cross_max_interactions_per_node * num_target_leaves (~2x tighter than
+    # the buffer, and >= the far volume on the ICs measured), overflowing into
+    # cross_far_overflow so auto_scale grows it. Set an explicit value to override.
+    cross_far_cap: Optional[int] = None
 
     def with_scaled_caps(
         self: "DistributedFMMConfig", factor: float
@@ -215,6 +223,9 @@ class DistributedFMMConfig:
             cross_max_interactions_per_node=g(self.cross_max_interactions_per_node),
             cross_max_neighbors_per_leaf=g(self.cross_max_neighbors_per_leaf),
             cross_max_pair_queue=g(self.cross_max_pair_queue),
+            cross_far_cap=(
+                None if self.cross_far_cap is None else g(self.cross_far_cap)
+            ),
             # Grow the treecode buffers on retry too. When these are None the driver
             # sizes the near buffer off ``max_neighbors_per_leaf`` (scaled above), so the
             # retry already grows the effective near cap; scale any explicit values here.
@@ -263,6 +274,7 @@ class DistributedFMMConfig:
         # effective self buffers for both the dual-tree and treecode walks.
         grow_self_far = flagged("self_far_overflow")
         grow_self_near = flagged("self_near_overflow")
+        grow_cross_far = flagged("cross_far_overflow")
         return dataclasses.replace(
             self,
             max_interactions_per_node=maybe(
@@ -280,6 +292,14 @@ class DistributedFMMConfig:
             ),
             cross_max_pair_queue=maybe(
                 "cross_queue_overflow", self.cross_max_pair_queue
+            ),
+            # cross_far_overflow also covers the M2L-input right-size (far volume >
+            # cross_far_cap); grow an explicit cap so the retry widens the M2L slice. When
+            # None the slice derives from cross_max_interactions_per_node (grown above).
+            cross_far_cap=(
+                g(self.cross_far_cap)
+                if (grow_cross_far and self.cross_far_cap is not None)
+                else self.cross_far_cap
             ),
             treecode_near_cap=(
                 g(self.treecode_near_cap)
@@ -777,9 +797,24 @@ def _make_fn(config: DistributedFMMConfig, ndev: int, cap: int) -> Callable:
                 total_nodes=int(total_nodes),
             )
 
-        # cross M2L: separate source (coarse) / target (local) centres
-        x_src = jnp.asarray(cross.interaction_sources, INDEX_DTYPE)
-        x_tgt = jnp.asarray(cross.interaction_targets, INDEX_DTYPE)
+        # cross M2L: separate source (coarse) / target (local) centres.
+        # The cross walk sizes interaction_sources at t_total * KC but PACKS the valid far
+        # interactions into the front [0, far_pair_count); the tail is -1. Feeding the
+        # whole buffer to the fused real-M2L pads that length to a power of two and OOMs
+        # (~6 GiB at N>=400k/GPU). Slice to a right-sized cross-far cap so the M2L only
+        # spans the actual far volume. KC * num_target_leaves mirrors the self treecode
+        # far cap and is ~2x tighter than the t_total*KC buffer; cross_far_cap overrides.
+        # A far volume above the cap is surfaced (cross_far_overflow, below) so auto_scale
+        # widens it -- so the slice never silently drops interactions.
+        max_far = int(jnp.asarray(cross.interaction_sources).shape[0])
+        num_tgt_leaves = int(jnp.asarray(nbr.leaf_indices).shape[0])
+        if config.cross_far_cap is not None:
+            xfar_cap = int(config.cross_far_cap)
+        else:
+            xfar_cap = max(1 << 14, KC * num_tgt_leaves)
+        xfar_cap = min(xfar_cap, max_far)
+        x_src = jnp.asarray(cross.interaction_sources, INDEX_DTYPE)[:xfar_cap]
+        x_tgt = jnp.asarray(cross.interaction_targets, INDEX_DTYPE)[:xfar_cap]
         x_valid = x_tgt >= 0
         xs = jnp.where(x_valid, x_src, 0)
         xt = jnp.where(x_valid, x_tgt, 0)
@@ -889,12 +924,18 @@ def _make_fn(config: DistributedFMMConfig, ndev: int, cap: int) -> Callable:
         # local rows.  (The validated test slices BOTH to [:cap] on return.)
         accel = far_full[:cap] + near_full[:cap]
 
+        # cross-far overflow = per-node far-buffer overflow (KC) OR the M2L-input slice
+        # dropping interactions (far volume > xfar_cap); either way auto_scale grows it.
+        cross_far_ovf = jnp.maximum(
+            cross.far_overflow.astype(jnp.float64),
+            (cross.far_pair_count > xfar_cap).astype(jnp.float64),
+        )
         diag = jnp.array(
             [
                 cross.far_pair_count.astype(jnp.float64),
                 cross.near_pair_count.astype(jnp.float64),
                 cross.queue_overflow.astype(jnp.float64),
-                cross.far_overflow.astype(jnp.float64),
+                cross_far_ovf,
                 cross.near_overflow.astype(jnp.float64),
                 self_res.far_pair_count.astype(jnp.float64),
                 self_res.near_pair_count.astype(jnp.float64),
@@ -971,6 +1012,7 @@ def distributed_fmm_accelerations(
     auto_scale_caps: bool = False,
     cap_scale_factor: float = 2.0,
     max_cap_retries: int = 4,
+    cap_presets_path: str | None = None,
 ) -> DistributedFMMResult:
     """Evaluate distributed FMM accelerations for all particles.
 
@@ -1005,6 +1047,20 @@ def distributed_fmm_accelerations(
     mass_f = jnp.asarray(part["mass_flat"])
     gid_f = jnp.asarray(part["gid_flat"])
 
+    # Seed the caps from a saved preset for this (per-GPU N, ndev) so a repeat run at a
+    # known size starts already-sized and skips the auto_scale recompiles. auto_scale
+    # stays on as the safety net; the converged caps refresh the preset below.
+    total_n = int(part["n"])
+    per_gpu_n = -(-total_n // ndev)  # ceil
+    presets = {}
+    if cap_presets_path is not None:
+        from . import cap_presets as _cp
+
+        presets = _cp.load_presets(cap_presets_path)
+        seed = _cp.lookup(presets, per_gpu_n, ndev)
+        if seed is not None:
+            config = _cp.apply_caps(config, seed)
+
     attempt = 0
     while True:
         evaluate = make_force_evaluator(config, ndev, cap, mesh, jit=jit)
@@ -1038,6 +1094,15 @@ def distributed_fmm_accelerations(
     diag = {name: diag_o[:, i] for i, name in enumerate(DIAG_FIELDS)}
     diag["overflow"] = overflow
     diag["cap_retries"] = attempt
+
+    # Persist the converged caps as the preset for this size (only when overflow-free, so
+    # we never cache a truncated/wrong config). Next run at this (per-GPU N, ndev) reuses
+    # them and skips the retries.
+    if cap_presets_path is not None and not overflow:
+        from . import cap_presets as _cp
+
+        _cp.record(presets, per_gpu_n, ndev, total_n, _cp.caps_of(config))
+        _cp.save_presets(cap_presets_path, presets)
 
     return DistributedFMMResult(
         accelerations=accel,
