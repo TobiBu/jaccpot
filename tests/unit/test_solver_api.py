@@ -13,6 +13,7 @@ import jaccpot.runtime._fmm_impl as fmm_impl_private
 import jaccpot.runtime._interaction_cache as interaction_cache_private
 import jaccpot.runtime._large_n_nearfield as large_n_nearfield_private
 import jaccpot.runtime.fmm as runtime_fmm
+import jaccpot.runtime.fmm_constants as fmm_constants_private
 import jaccpot.upward.solidfmm_complex_tree_expansions as upward_private
 from jaccpot import (
     ComplexSHBasis,
@@ -239,6 +240,10 @@ def test_large_gpu_minimum_memory_streamed_path_caps_oversized_explicit_traversa
             max_neighbors_per_leaf=16_384,
         ),
     )
+    # Adaptive minimum-memory capping now only runs when static-sizing is off
+    # (static sizing, default-on, passes the constructor config through unchanged).
+    # Exercise the capping path this test covers.
+    impl._static_runtime_fixed_sizing = False
 
     overrides = impl._resolve_runtime_execution_overrides(
         num_particles=2_097_152,
@@ -289,13 +294,11 @@ def test_large_gpu_minimum_memory_streamed_tree_guard_caps_overflowing_seed():
         max_neighbors_per_leaf=16_384,
     )
 
-    capped = (
-        fmm_impl_private._cap_minimum_memory_streamed_gpu_traversal_config_for_tree(
-            traversal_config=cfg,
-            total_nodes=262_143,
-            num_leaves=131_072,
-            num_particles=16_777_216,
-        )
+    capped = fmm_constants_private._cap_minimum_memory_streamed_gpu_traversal_config_for_tree(
+        traversal_config=cfg,
+        total_nodes=262_143,
+        num_leaves=131_072,
+        num_particles=16_777_216,
     )
 
     assert capped is not None
@@ -313,7 +316,7 @@ def test_large_gpu_minimum_memory_streamed_tree_guard_keeps_safe_seed():
         max_neighbors_per_leaf=8_192,
     )
 
-    kept = fmm_impl_private._cap_minimum_memory_streamed_gpu_traversal_config_for_tree(
+    kept = fmm_constants_private._cap_minimum_memory_streamed_gpu_traversal_config_for_tree(
         traversal_config=cfg,
         total_nodes=65_535,
         num_leaves=32_768,
@@ -333,6 +336,8 @@ def test_large_gpu_minimum_memory_streamed_path_clamps_auto_traversal_seed():
         memory_objective="minimum_memory",
         fail_fast=True,
     )
+    # Adaptive auto-seed clamping runs on the adaptive path (static-sizing off).
+    impl._static_runtime_fixed_sizing = False
 
     overrides = impl._resolve_runtime_execution_overrides(
         num_particles=2_097_152,
@@ -353,6 +358,8 @@ def test_large_gpu_minimum_memory_streamed_seed_scales_for_xl_particle_counts():
         memory_objective="minimum_memory",
         fail_fast=True,
     )
+    # Adaptive seed scaling runs on the adaptive path (static-sizing off).
+    impl._static_runtime_fixed_sizing = False
 
     overrides = impl._resolve_runtime_execution_overrides(
         num_particles=4_194_304,
@@ -1453,6 +1460,8 @@ def test_gpu_runtime_overrides_cap_traversal_capacities_for_large_n():
         preset=FMMPreset.FAST,
         basis="solidfmm",
     )
+    # GPU capacity capping runs on the adaptive path (static-sizing off).
+    fmm._impl._static_runtime_fixed_sizing = False
     overrides = fmm._impl._resolve_runtime_execution_overrides(
         num_particles=131072,
         backend="gpu",
@@ -1540,7 +1549,12 @@ def test_large_n_gpu_preset_applies_memory_safe_gpu_defaults():
     assert fmm._impl.streamed_far_pairs is True
     assert fmm._impl.mixed_order_farfield is False
     assert fmm._impl.m2l_chunk_size is None
-    assert fmm._impl.enable_interaction_cache is False
+    # The large_n_gpu production contract keeps the topology-derived interaction
+    # scaffold resident (enable_interaction_cache=True) so fixed-shape refreshes
+    # can reuse it. This is memory-neutral on the production path: the stateful
+    # interaction cache is gated off for static_radix tree mode, so True here does
+    # not add device-memory pressure. (The memory-heavy retain_* knobs stay off.)
+    assert fmm._impl.enable_interaction_cache is True
     assert fmm._impl.retain_traversal_result is False
     assert fmm._impl.retain_interactions is False
     assert fmm._impl.autotune_m2l_chunk is True
@@ -1580,7 +1594,6 @@ def test_large_n_gpu_profile_coerces_conflicting_runtime_knobs():
                 retain_interactions=True,
             ),
         ),
-        runtime_path="legacy",
     )
     impl = fmm._impl
     assert impl.runtime_path == "large_n"
@@ -1592,7 +1605,11 @@ def test_large_n_gpu_profile_coerces_conflicting_runtime_knobs():
     assert impl.farfield_mode == "pair_grouped"
     assert impl.mixed_order_farfield is False
     assert impl.mixed_order_min_order is None
-    assert impl.enable_interaction_cache is False
+    # Contract keeps the interaction scaffold resident (enable_interaction_cache
+    # =True); it is memory-neutral on the static_radix production path (the
+    # stateful cache is gated off there). The requested True is honoured, not
+    # coerced off, while the memory-heavy retain_* knobs are coerced off below.
+    assert impl.enable_interaction_cache is True
     assert impl.retain_traversal_result is False
     assert impl.retain_interactions is False
 
@@ -1610,20 +1627,7 @@ def test_large_n_gpu_profile_emits_deprecation_warnings_for_conflicting_knobs():
                 ),
                 runtime=RuntimePolicyConfig(memory_objective="throughput"),
             ),
-            runtime_path="legacy",
         )
-
-
-def test_large_n_prepare_path_ignores_legacy_runtime_path_request(monkeypatch):
-    positions, masses = _sample_problem(n=64)
-    fmm = FastMultipoleMethod(
-        preset=FMMPreset.LARGE_N_GPU,
-        basis="solidfmm",
-        runtime_path="legacy",
-    )
-    monkeypatch.setattr(fmm_impl_private.jax, "default_backend", lambda: "gpu")
-    state = fmm.prepare_state(positions, masses, leaf_size=16, max_order=3)
-    assert state.execution_backend == "large_n"
 
 
 def test_large_n_compiled_eval_uses_specialized_nearfield(monkeypatch):
@@ -2061,6 +2065,9 @@ def test_minimum_memory_gpu_runtime_starts_with_smaller_traversal_capacities():
         preset=FMMPreset.LARGE_N_GPU,
         basis="solidfmm",
     )
+    # The smaller adaptive seeds run on the adaptive path (static-sizing off);
+    # static sizing (default-on) ships the larger preset traversal config instead.
+    fmm._impl._static_runtime_fixed_sizing = False
 
     with pytest.MonkeyPatch.context() as mp:
         mp.setattr(jax, "default_backend", lambda: "gpu")
@@ -2069,8 +2076,15 @@ def test_minimum_memory_gpu_runtime_starts_with_smaller_traversal_capacities():
         )
 
     assert overrides.traversal_config is not None
+    # The small memory-safe pair-queue seed (32768) is the load-bearing
+    # assertion: the minimum-memory GPU lane must start from a bounded queue.
     assert int(overrides.traversal_config.max_pair_queue) == 32768
-    assert int(overrides.traversal_config.process_block) == 64
+    # process_block is floored to the streamed minimum-memory ceiling (256, i.e.
+    # _GPU_STREAMED_MINIMUM_MEMORY_EXPLICIT_PROCESS_BLOCK) to avoid underfilled
+    # count-pass kernels -- matching the sibling auto-seed tests above. (The
+    # original 64 predates that process-block floor.) process_block is a compute
+    # chunk size, not a buffer dimension, so 256 is not a memory regression.
+    assert int(overrides.traversal_config.process_block) == 256
     assert int(overrides.traversal_config.max_interactions_per_node) == 1024
     assert int(overrides.traversal_config.max_neighbors_per_leaf) == 256
 

@@ -23,7 +23,7 @@ Tree construction and traversal artifacts are provided by the companion package
 ## Features
 
 - High-level `FastMultipoleMethod` API with `fast`, `balanced`, `accurate`, and `large_n_gpu` presets
-- Configurable expansion basis (`complex`/`solidfmm`, `real`, `cartesian`)
+- Configurable expansion basis — **`real` (Dehnen) is the default** production basis (the radix large-N fast lane runs pure-real end to end, no complex↔real conversion); `complex`/`solidfmm` are retained for cross-checking; `cartesian` also available
 - Pure-JAX real spherical harmonic rotate+scale M2L path
 - Adaptive-order far-field evaluation with fixed `p_gears` buckets
 - Optional topology reuse for multiple nearby timesteps
@@ -70,7 +70,8 @@ key_pos, key_mass = jax.random.split(key)
 positions = jax.random.uniform(key_pos, (1024, 3), minval=-1.0, maxval=1.0)
 masses = jax.random.uniform(key_mass, (1024,), minval=0.5, maxval=1.5)
 
-solver = FastMultipoleMethod(preset="balanced", basis="solidfmm")
+# basis defaults to "real" (Dehnen); pass basis="solidfmm" only to cross-check.
+solver = FastMultipoleMethod(preset="balanced")
 accelerations = solver.compute_accelerations(positions, masses)
 print(accelerations.shape)
 ```

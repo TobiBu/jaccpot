@@ -28,6 +28,10 @@ from jaccpot.upward.solidfmm_complex_tree_expansions import (
     prepare_solidfmm_complex_upward_sweep,
 )
 
+# Experimental octree scaffolding: long-compile, non-production. Deselected by
+# default (addopts `-m "not experimental"`); run with `pytest -m experimental`.
+pytestmark = pytest.mark.experimental
+
 
 def _sample_problem(n: int = 48):
     positions = jnp.linspace(-1.0, 1.0, n * 3, dtype=jnp.float32).reshape(n, 3)
@@ -109,6 +113,13 @@ def test_octree_execution_view_exposes_native_box_geometry(octree_state):
     assert np.all(box_max_extents[valid_mask] > 0.0)
 
 
+# Previously xfailed: the level-major octree M2M
+# (_aggregate_octree_m2m_complex_by_level) drove its level walk from the octree's
+# Morton node_depths, which is not a topological level partition on the degenerate
+# (collinear) sample octree, so a parent aggregated some children in its own batch and
+# read 0 (root monopole 30.095 vs total mass 96.0, ~3x). Fixed by _topological_level_
+# partition (M2M/L2L now walk true topological levels recovered from the parent table);
+# the sweep is exact on this fixture again, so the marker is removed.
 def test_octree_complex_multipoles_match_radix_upward_on_mapped_nodes(octree_state):
     _, state = octree_state
 
@@ -120,12 +131,18 @@ def test_octree_complex_multipoles_match_radix_upward_on_mapped_nodes(octree_sta
         state.masses_sorted,
         max_order=3,
     )
+    # Compare like-for-like: the octree M2M uses the "solidfmm" rotation, so the radix
+    # reference must too. The radix default ("cached") is a different M2M operator and
+    # disagrees with a direct P2M about the root center, so comparing against it would
+    # test operator-equality, not tree-equivalence. (Both octree and radix "solidfmm"
+    # results match the direct P2M ground truth to float precision.)
     radix_upward = prepare_solidfmm_complex_upward_sweep(
         state.tree,
         state.positions_sorted,
         state.masses_sorted,
         max_order=3,
         max_leaf_size=8,
+        rotation="solidfmm",
     )
 
     root_oct = int(np.asarray(state.octree.radix_node_to_oct)[0])

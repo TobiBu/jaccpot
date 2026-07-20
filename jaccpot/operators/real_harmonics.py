@@ -1095,7 +1095,11 @@ def compute_real_B_matrix_local(ell: int, *, dtype: DTypeLike) -> Array:
         Real B_T matrix of shape (2*ell+1, 2*ell+1).
     """
     B_T, _ = _compute_B_real_dehnen_via_Q(ell, str(dtype))
-    return jnp.asarray(B_T)
+    # Honor the requested dtype: the B matrix is computed in float64 for accuracy
+    # but must be cast down to the working dtype so the downstream rotation GEMMs
+    # (M2M/L2L/M2L rotate-to-z/from-z) run in that dtype rather than promoting the
+    # float32 coefficient vectors to float64 (the fp64 cuBLAS GEMM slowdown).
+    return jnp.asarray(B_T, dtype=dtype)
 
 
 def compute_real_B_matrix_multipole(ell: int, *, dtype: DTypeLike) -> Array:
@@ -1119,7 +1123,10 @@ def compute_real_B_matrix_multipole(ell: int, *, dtype: DTypeLike) -> Array:
         Real B_U matrix of shape (2*ell+1, 2*ell+1).
     """
     _, B_U = _compute_B_real_dehnen_via_Q(ell, str(dtype))
-    return jnp.asarray(B_U)
+    # Honor the requested dtype (see compute_real_B_matrix_local): cast the
+    # float64-computed B matrix down to the working dtype so the rotation GEMMs
+    # do not run in float64.
+    return jnp.asarray(B_U, dtype=dtype)
 
 
 def verify_real_B_matrix(ell: int, *, dtype: DTypeLike) -> Tuple[bool, float, float]:
@@ -1397,6 +1404,70 @@ def real_rotation_to_z_axis_local_wigner(
 # ===========================================================================
 
 
+@lru_cache(maxsize=None)
+def z_shift_translation_tables(order: int, which: str) -> Tuple[np.ndarray, np.ndarray]:
+    """Static per-term structure for the real z-axis M2M / L2L shift (same-type translate).
+
+    Both the M2M (``M'_n^m = sum_k (dz)^k/k! * M_{n-k}^m``) and L2L
+    (``F'_n^m = sum_k (dz)^k/k! * F_{n+k}^m``) z-shifts have the identical coefficient
+    ``(dz)^k/k!`` per slot ``k`` (shared across all outputs); they differ ONLY in the source
+    degree and the valid range:
+
+    * ``which='m2m'``: source degree ``n - k``, valid when ``|m| <= n - k`` (k in ``0..n-|m|``);
+    * ``which='l2l'``: source degree ``n + k``, valid when ``n + k <= p`` (k in ``0..p-n``).
+
+    Returns ``(src_index, valid)`` indexed by ``[out, k]`` where ``out = sh_index(n, m)`` and
+    ``k in [0, p]``: ``src_index`` is the packed index of the source coeff (0 on invalid slots,
+    read harmlessly then zeroed), ``valid`` the contribution mask. Mirrors
+    :func:`z_m2l_translation_tables` so the recurrence is defined once and the vectorised kernel
+    cannot drift from the reference.
+    """
+    p = int(order)
+    if p < 0:
+        raise ValueError("order must be >= 0")
+    if which not in ("m2m", "l2l"):
+        raise ValueError("which must be 'm2m' or 'l2l'")
+    coeff_count = sh_size(p)
+    n_slots = p + 1
+    src_index = np.zeros((coeff_count, n_slots), dtype=np.int32)
+    valid = np.zeros((coeff_count, n_slots), dtype=np.bool_)
+    for n in range(p + 1):
+        for m in range(-n, n + 1):
+            out_idx = sh_index(n, m)
+            m_abs = abs(m)
+            for k in range(n_slots):
+                src_n = n - k if which == "m2m" else n + k
+                ok = (src_n >= m_abs) if which == "m2m" else (src_n <= p)
+                if ok:
+                    src_index[out_idx, k] = sh_index(src_n, m)
+                    valid[out_idx, k] = True
+    return src_index, valid
+
+
+def _translate_along_z_shift_real(
+    coeffs: Array, dz: Array, *, order: int, which: str
+) -> Array:
+    """Vectorised real z-axis same-type shift (M2M/L2L), shared kernel.
+
+    ``out[n,m] = sum_k (dz)^k/k! * coeffs[src(n,m,k)]`` over the static tables from
+    :func:`z_shift_translation_tables`. Summation is over slot ``k`` in ascending order, so
+    this is bit-identical (same fp ops, same order) to the per-(n,m) unrolled reference.
+    """
+    p = int(order)
+    coeffs = jnp.asarray(coeffs)
+    dz = jnp.asarray(dz).reshape(())
+    dtype = coeffs.dtype
+    fact = _factorial_table_jax(p, dtype)
+    src_index_np, valid_np = z_shift_translation_tables(p, which)
+    src_index = jnp.asarray(src_index_np)
+    valid = jnp.asarray(valid_np)
+    # coeff_k = (dz)^k / k!, shared across outputs (integer exponents match the unrolled form).
+    coeff_k = (dz ** jnp.arange(p + 1)) / fact[: p + 1]  # (p+1,)
+    src = coeffs[src_index]  # (ncoeff, p+1)
+    terms = jnp.where(valid, src * coeff_k[None, :], jnp.asarray(0.0, dtype=dtype))
+    return jnp.sum(terms, axis=1).astype(dtype)
+
+
 @partial(jax.jit, static_argnames=("order",))
 def translate_along_z_m2m_real(
     multipole: Array,
@@ -1410,34 +1481,9 @@ def translate_along_z_m2m_real(
 
     For real harmonics, this is the SAME formula as for complex harmonics
     because the z-axis translation is diagonal in m (doesn't mix different m).
+    Vectorised over the shared per-term tables (:func:`z_shift_translation_tables`).
     """
-    p = int(order)
-    multipole = jnp.asarray(multipole)
-    dz = jnp.asarray(dz).reshape(())
-    dtype = multipole.dtype
-
-    fact = _factorial_table_jax(p, dtype)
-
-    ncoeff = sh_size(p)
-    out = jnp.zeros((ncoeff,), dtype=dtype)
-
-    for n in range(p + 1):
-        for m in range(-n, n + 1):
-            m_abs = abs(m)
-            acc = jnp.asarray(0.0, dtype=dtype)
-
-            # Sum over k from 0 to n - |m|
-            for k in range(n - m_abs + 1):
-                src_n = n - k
-                if m_abs > src_n:
-                    continue
-                src_idx = sh_index(src_n, m)
-                coeff = (dz**k) / fact[k]
-                acc = acc + coeff * multipole[src_idx]
-
-            out = out.at[sh_index(n, m)].set(acc)
-
-    return out
+    return _translate_along_z_shift_real(multipole, dz, order=order, which="m2m")
 
 
 @lru_cache(maxsize=None)
@@ -1563,33 +1609,7 @@ def translate_along_z_l2l_real(
     Array
         Packed real local coefficients at new (translated) center.
     """
-    p = int(order)
-    local = jnp.asarray(local)
-    dz = jnp.asarray(dz).reshape(())
-    dtype = local.dtype
-
-    fact = _factorial_table_jax(p + 1, dtype)
-
-    ncoeff = sh_size(p)
-    out = jnp.zeros((ncoeff,), dtype=dtype)
-
-    for n in range(p + 1):
-        for m in range(-n, n + 1):
-            acc = jnp.asarray(0.0, dtype=dtype)
-
-            # Sum over k from 0 to p - n
-            for k in range(p - n + 1):
-                src_n = n + k
-                if src_n > p:
-                    continue
-                src_idx = sh_index(src_n, m)
-                # Coefficient is R_k^0(dz) = (dz)^k / k! in this normalization.
-                coeff = (dz**k) / fact[k]
-                acc = acc + coeff * local[src_idx]
-
-            out = out.at[sh_index(n, m)].set(acc)
-
-    return out
+    return _translate_along_z_shift_real(local, dz, order=order, which="l2l")
 
 
 # ===========================================================================

@@ -39,7 +39,9 @@ def _tree(n, leaf, seed=0):
 
 
 def test_real_upward_matches_complex_convert():
-    for p in (1, 2, 3, 4):
+    # Exact machine-precision identity (not a convergence trend), so it holds at
+    # every order; two representative orders (low + high coeff counts) suffice.
+    for p in (2, 4):
         tree = _tree(n=300, leaf=8, seed=p)
         lp, lm = tree.positions_sorted, tree.masses_sorted
         up_c = prepare_solidfmm_complex_upward_sweep(

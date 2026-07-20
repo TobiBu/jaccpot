@@ -20,8 +20,19 @@ def differentiable_gravitational_acceleration(
     leaf_size: int = 16,
     max_order: int = 4,
 ) -> Array:
-    """Differentiable gravitational accelerations via direct summation."""
+    """Differentiable gravitational accelerations via direct O(N^2) summation.
 
+    The FMM solver is forward-only (not autodiff-able through the tree
+    traversal), so this is the intended differentiable path: a plain,
+    fully-differentiable direct sum. It deliberately accepts the same
+    FMM-shaped keyword arguments (``theta``, ``bounds``, ``leaf_size``,
+    ``max_order``) purely for drop-in signature compatibility with the FMM
+    call -- they do not apply to direct summation and are ignored. Only
+    ``G`` and ``softening`` affect the result. O(N^2) cost: intended for
+    gradient work at modest N, not large-scale evaluation.
+    """
+
+    # FMM-shaped args accepted for API parity only; direct sum ignores them.
     del theta, bounds, leaf_size, max_order
 
     diffs = positions[:, None, :] - positions[None, :, :]

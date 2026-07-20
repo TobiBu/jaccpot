@@ -77,9 +77,8 @@ from jaccpot.operators.complex_ops import (
     m2l_complex_reference_batch,
 )
 from jaccpot.operators.real_harmonics import sh_size
-from jaccpot.runtime._fmm_impl import (
-    _accumulate_real_m2l_fullbatch,
-    _accumulate_solidfmm_m2l_fullbatch,
+from jaccpot.runtime.kernels.core import (
+    _accumulate_m2l_fullbatch,
     _apply_real_m2l,
     _evaluate_local_expansions_for_particles,
     _propagate_solidfmm_locals_by_level,
@@ -181,7 +180,9 @@ class DistributedFMMConfig:
     cross_max_neighbors_per_leaf: int = 128
     cross_max_pair_queue: int = 1 << 15
 
-    def with_scaled_caps(self, factor: float) -> "DistributedFMMConfig":
+    def with_scaled_caps(
+        self: "DistributedFMMConfig", factor: float
+    ) -> "DistributedFMMConfig":
         """Return a copy with every capacity multiplied by ``factor`` (rounded up).
 
         Handy for the overflow-retry loop in capacity calibration.
@@ -217,7 +218,7 @@ class DistributedFMMResult:
     config: DistributedFMMConfig
 
     @property
-    def overflow(self) -> bool:
+    def overflow(self: "DistributedFMMResult") -> bool:
         return bool(self.diagnostics.get("overflow", False))
 
 
@@ -408,7 +409,9 @@ def _make_fn(config: DistributedFMMConfig, ndev: int, cap: int) -> Callable:
         offsets = jnp.concatenate([jnp.zeros((1,), INDEX_DTYPE), jnp.cumsum(counts)])
         return offsets, src_s, counts, u_leaves
 
-    def fn(pos, mass, gid, count):
+    def fn(
+        pos: jax.Array, mass: jax.Array, gid: jax.Array, count: jax.Array
+    ) -> tuple[jax.Array, jax.Array, jax.Array]:
         bounds = global_bounds(pos)
         pos_s, mass_s = sanitize_padding(pos, mass, count)
         tree = Tree.from_particles(
@@ -623,7 +626,7 @@ def _make_fn(config: DistributedFMMConfig, ndev: int, cap: int) -> Callable:
         else:
             s_active = jnp.sum((s_tgt >= 0).astype(INDEX_DTYPE))
         if is_real:
-            loc_self = _accumulate_real_m2l_fullbatch(
+            loc_self = _accumulate_m2l_fullbatch(
                 zeros,
                 packed_use,
                 centers,
@@ -631,11 +634,12 @@ def _make_fn(config: DistributedFMMConfig, ndev: int, cap: int) -> Callable:
                 s_tgt,
                 s_active,
                 order=p,
+                basis_mode="real",
                 m2l_impl="rot_scale",
                 total_nodes=int(total_nodes),
             )
         else:
-            loc_self = _accumulate_solidfmm_m2l_fullbatch(
+            loc_self = _accumulate_m2l_fullbatch(
                 zeros,
                 packed_use,
                 centers,
@@ -643,6 +647,7 @@ def _make_fn(config: DistributedFMMConfig, ndev: int, cap: int) -> Callable:
                 s_tgt,
                 s_active,
                 order=p,
+                basis_mode="complex",
                 rotation=rot,
                 total_nodes=int(total_nodes),
             )
@@ -782,7 +787,7 @@ def make_force_evaluator(
     config: DistributedFMMConfig,
     ndev: int,
     cap: int,
-    mesh,
+    mesh: Any,
     *,
     jit: bool = True,
 ) -> Callable:
@@ -797,7 +802,12 @@ def make_force_evaluator(
 
     fn = _make_fn(config, ndev, cap)
 
-    def evaluate(pos_flat, mass_flat, gid_flat, counts):
+    def evaluate(
+        pos_flat: jax.Array,
+        mass_flat: jax.Array,
+        gid_flat: jax.Array,
+        counts: jax.Array,
+    ) -> tuple[jax.Array, jax.Array, jax.Array]:
         return shard_map(
             fn,
             mesh=mesh,
@@ -830,7 +840,7 @@ def distributed_fmm_accelerations(
     masses: np.ndarray,
     *,
     config: DistributedFMMConfig | None = None,
-    mesh=None,
+    mesh: Any = None,
     ndev: int | None = None,
     jit: bool = False,
     auto_scale_caps: bool = False,

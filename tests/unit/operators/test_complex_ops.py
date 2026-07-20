@@ -17,25 +17,12 @@ from jaccpot.operators.complex_ops import (
     regular_solid_harmonic_directional_derivative_batch,
     regular_solid_harmonic_directional_derivative_order,
     regular_solid_harmonic_directional_derivative_order_batch,
-    rotate_complex_local_from_z,
-    rotate_complex_local_from_z_batch,
-    rotate_complex_local_from_z_cached,
-    rotate_complex_local_to_z,
-    rotate_complex_local_to_z_batch,
-    rotate_complex_local_to_z_cached,
-    rotate_complex_multipole_from_z,
-    rotate_complex_multipole_from_z_batch,
-    rotate_complex_multipole_from_z_cached,
-    rotate_complex_multipole_to_z,
-    rotate_complex_multipole_to_z_batch,
-    rotate_complex_multipole_to_z_cached,
     translate_along_z_l2l_complex,
     translate_along_z_l2l_complex_batch,
     translate_along_z_m2l_complex,
     translate_along_z_m2l_complex_batch,
     translate_along_z_m2m_complex,
     translate_along_z_m2m_complex_batch,
-    wigner_D_complex_jax,
 )
 from jaccpot.operators.real_harmonics import sh_size
 from jaccpot.operators.solidfmm_reference import (
@@ -237,11 +224,9 @@ def test_l2l_complex_matches_z_axis_translation() -> None:
     ref = translate_along_z_l2l_complex(
         jnp.asarray(local), jnp.asarray(dz), order=order
     )
-    got = l2l_complex(jnp.asarray(local), delta, order=order)
-    got_wigner = l2l_complex(jnp.asarray(local), delta, order=order, rotation="wigner")
+    got = l2l_complex(jnp.asarray(local), delta, order=order, rotation="solidfmm")
 
     assert np.allclose(np.asarray(got), np.asarray(ref), rtol=1e-12, atol=1e-12)
-    assert np.allclose(np.asarray(got_wigner), np.asarray(ref), rtol=1e-12, atol=1e-12)
 
 
 def test_l2l_complex_solidfmm_matches_direct_reference() -> None:
@@ -342,149 +327,6 @@ def test_contract_spatial_derivative_with_velocity_matches_hessian_times_v() -> 
         dtype=jnp.float64,
     )
     assert jnp.allclose(got, expected, rtol=0.0, atol=0.0)
-
-
-def test_cached_rotation_blocks_match_direct_multipole() -> None:
-    order = 4
-    multipole = _complex_coeffs(order, 9)
-    delta = jnp.array([0.3, -0.2, 0.7], dtype=jnp.float64)
-
-    ref_to = rotate_complex_multipole_to_z(jnp.asarray(multipole), delta, order=order)
-    got_to = rotate_complex_multipole_to_z_cached(
-        jnp.asarray(multipole), delta, order=order
-    )
-    assert np.allclose(np.asarray(got_to), np.asarray(ref_to), rtol=1e-12, atol=1e-12)
-
-    ref_from = rotate_complex_multipole_from_z(
-        jnp.asarray(multipole), delta, order=order
-    )
-    got_from = rotate_complex_multipole_from_z_cached(
-        jnp.asarray(multipole), delta, order=order
-    )
-    assert np.allclose(
-        np.asarray(got_from), np.asarray(ref_from), rtol=1e-12, atol=1e-12
-    )
-
-
-def test_cached_rotation_blocks_match_direct_local() -> None:
-    order = 4
-    local = _complex_coeffs(order, 10)
-    delta = jnp.array([-0.4, 0.1, 1.2], dtype=jnp.float64)
-
-    ref_to = rotate_complex_local_to_z(jnp.asarray(local), delta, order=order)
-    got_to = rotate_complex_local_to_z_cached(jnp.asarray(local), delta, order=order)
-    assert np.allclose(np.asarray(got_to), np.asarray(ref_to), rtol=1e-12, atol=1e-12)
-
-    ref_from = rotate_complex_local_from_z(jnp.asarray(local), delta, order=order)
-    got_from = rotate_complex_local_from_z_cached(
-        jnp.asarray(local), delta, order=order
-    )
-    assert np.allclose(
-        np.asarray(got_from), np.asarray(ref_from), rtol=1e-12, atol=1e-12
-    )
-
-
-def test_batched_rotation_matches_single() -> None:
-    order = 3
-    rng = np.random.default_rng(11)
-    ncoeff = sh_size(order)
-    batch = 4
-    multipoles = rng.normal(size=(batch, ncoeff)) + 1j * rng.normal(
-        size=(batch, ncoeff)
-    )
-    locals_ = rng.normal(size=(batch, ncoeff)) + 1j * rng.normal(size=(batch, ncoeff))
-    deltas = rng.normal(size=(batch, 3))
-
-    ref_m_to = np.stack(
-        [
-            np.asarray(
-                rotate_complex_multipole_to_z_cached(
-                    jnp.asarray(m), jnp.asarray(d), order=order
-                )
-            )
-            for m, d in zip(multipoles, deltas)
-        ],
-        axis=0,
-    )
-    got_m_to = rotate_complex_multipole_to_z_batch(
-        jnp.asarray(multipoles), jnp.asarray(deltas), order=order
-    )
-    assert np.allclose(np.asarray(got_m_to), ref_m_to, rtol=1e-12, atol=1e-12)
-
-    ref_m_from = np.stack(
-        [
-            np.asarray(
-                rotate_complex_multipole_from_z_cached(
-                    jnp.asarray(m), jnp.asarray(d), order=order
-                )
-            )
-            for m, d in zip(multipoles, deltas)
-        ],
-        axis=0,
-    )
-    got_m_from = rotate_complex_multipole_from_z_batch(
-        jnp.asarray(multipoles), jnp.asarray(deltas), order=order
-    )
-    assert np.allclose(np.asarray(got_m_from), ref_m_from, rtol=1e-12, atol=1e-12)
-
-    ref_l_to = np.stack(
-        [
-            np.asarray(
-                rotate_complex_local_to_z_cached(
-                    jnp.asarray(m), jnp.asarray(d), order=order
-                )
-            )
-            for m, d in zip(locals_, deltas)
-        ],
-        axis=0,
-    )
-    got_l_to = rotate_complex_local_to_z_batch(
-        jnp.asarray(locals_), jnp.asarray(deltas), order=order
-    )
-    assert np.allclose(np.asarray(got_l_to), ref_l_to, rtol=1e-12, atol=1e-12)
-
-    ref_l_from = np.stack(
-        [
-            np.asarray(
-                rotate_complex_local_from_z_cached(
-                    jnp.asarray(m), jnp.asarray(d), order=order
-                )
-            )
-            for m, d in zip(locals_, deltas)
-        ],
-        axis=0,
-    )
-    got_l_from = rotate_complex_local_from_z_batch(
-        jnp.asarray(locals_), jnp.asarray(deltas), order=order
-    )
-    assert np.allclose(np.asarray(got_l_from), ref_l_from, rtol=1e-12, atol=1e-12)
-
-
-def test_wigner_d_jax_matches_sympy_small_ell() -> None:
-    sympy = pytest.importorskip("sympy")
-    from jaccpot.operators.real_harmonics import _wigner_D_complex as wigner_sympy
-
-    alpha = 0.3
-    beta = 0.7
-    gamma = -0.2
-
-    for ell in range(0, 4):
-        D_ref = wigner_sympy(ell, alpha, beta, gamma)
-        # Apply same no-Condon-Shortley adjustment used in real_harmonics
-        m_vals = np.arange(-ell, ell + 1)
-        S = np.diag(((-1.0) ** m_vals).astype(np.complex128))
-        D_ref = S @ D_ref @ S
-
-        D_jax = wigner_D_complex_jax(
-            ell,
-            jnp.asarray(alpha),
-            jnp.asarray(beta),
-            jnp.asarray(gamma),
-            dtype=jnp.complex128,
-            no_condon_shortley=True,
-        )
-
-        assert np.allclose(np.asarray(D_jax), D_ref, rtol=1e-10, atol=1e-10)
 
 
 @pytest.mark.parametrize(

@@ -216,7 +216,7 @@ def _pop_legacy_runtime_overrides(
     """Resolve runtime-facing legacy kwargs while preserving old behavior."""
     complex_rotation = advanced_cfg.farfield.rotation
     if complex_rotation is None:
-        complex_rotation = "solidfmm" if basis == "solidfmm" else "cached"
+        complex_rotation = "solidfmm"
     legacy_rotation = legacy_kwargs.pop("complex_rotation", None)
     if legacy_rotation is not None:
         complex_rotation = str(legacy_rotation)
@@ -329,7 +329,10 @@ class FastMultipoleMethod:
         self,
         *,
         preset: Union[FMMPreset, str] = FMMPreset.FAST,
-        basis: Union[Basis, BasisInterface, str] = "complex",
+        # Real (Dehnen) harmonics is the production default everywhere: the radix
+        # large-N fast lane runs pure-real end to end (no complex<->real
+        # conversion). 'solidfmm'/'complex' remain selectable for cross-checking.
+        basis: Union[Basis, BasisInterface, str] = "real",
         m2l_impl: Optional[str] = None,
         adaptive_order: bool = False,
         p_gears: Optional[Sequence[int]] = None,

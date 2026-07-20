@@ -30,6 +30,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 from jax.experimental import pallas as pl
+from jaxtyping import Array
 
 from jaccpot.operators.real_harmonics import sh_offset, sh_size
 
@@ -286,7 +287,14 @@ def _pair_pad_dims(order):
     return (t["C"], t["Cp"], t["p"] + 1, t["Bp"], t["md"], t["mdp"])
 
 
-def m2l_complex_fused_jax(multipoles, blocks_to_z, blocks_from_z, r, *, order):
+def m2l_complex_fused_jax(
+    multipoles: Array,
+    blocks_to_z: Array,
+    blocks_from_z: Array,
+    r: Array,
+    *,
+    order: int,
+) -> Array:
     """Pure-jnp reference for the fused kernel (vmapped over pairs).
 
     multipoles: [N, C] complex; blocks_*: [N, p+1, md, md] complex; r: [N].
@@ -306,7 +314,15 @@ def m2l_complex_fused_jax(multipoles, blocks_to_z, blocks_from_z, r, *, order):
         dims,
     )
 
-    def one(mr, mi, btr, bti, bfr, bfi, rr):
+    def one(
+        mr: Array,
+        mi: Array,
+        btr: Array,
+        bti: Array,
+        bfr: Array,
+        bfi: Array,
+        rr: Array,
+    ) -> tuple[Array, Array]:
         return _m2l_one(mr, mi, btr, bti, bfr, bfi, rr, t)
 
     or_r, or_i = jax.vmap(one)(mr, mi, bto_r, bto_i, bfr_r, bfr_i, r)
@@ -357,15 +373,15 @@ def _m2l_complex_fused_kernel(
 
 
 def m2l_complex_fused_pallas(
-    multipoles,
-    blocks_to_z,
-    blocks_from_z,
-    r,
+    multipoles: Array,
+    blocks_to_z: Array,
+    blocks_from_z: Array,
+    r: Array,
     *,
-    order,
-    interpret=False,
-    backend="triton",
-):
+    order: int,
+    interpret: bool = False,
+    backend: str = "triton",
+) -> Array:
     """Fused complex-basis M2L via a Pallas kernel (one program per pair).
 
     Same signature/semantics as ``m2l_complex_fused_jax``. Requires an Ampere+
@@ -396,17 +412,17 @@ def m2l_complex_fused_pallas(
     )
     rr = jnp.asarray(r, dtype=real_dtype)
 
-    def bs_vec(cols):
+    def bs_vec(cols: int) -> pl.BlockSpec:
         return pl.BlockSpec((1, cols), lambda i: (i, 0))
 
-    def bs_blocks():
+    def bs_blocks() -> pl.BlockSpec:
         return pl.BlockSpec((1, Bp, mdp, mdp), lambda i: (i, 0, 0, 0))
 
     # tables are identical across pairs: replicate them to every program via a
     # full-array BlockSpec whose index_map ignores the pair index.
     table_arrays = [tables[k] for k in _TABLE_KEYS]
 
-    def bs_full(arr):
+    def bs_full(arr: Array) -> pl.BlockSpec:
         shp = tuple(arr.shape)
         return pl.BlockSpec(shp, (lambda *_: (0,) * len(shp)))
 

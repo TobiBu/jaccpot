@@ -15,6 +15,8 @@ from yggdrax.tree import build_tree
 
 import jaccpot.runtime._fmm_impl as fmm_impl_private
 import jaccpot.runtime.fmm as fmm_module
+import jaccpot.runtime.fmm_prepare as fmm_prepare_private
+import jaccpot.runtime.kernels.core as kernels_core
 from jaccpot import FMMPreset
 from jaccpot.downward.local_expansions import (
     TreeDownwardData,
@@ -247,6 +249,11 @@ def test_prepare_state_fixed_depth_tree():
 
 def test_prepare_refresh_static_radix_tree_preserves_static_shape(monkeypatch):
     monkeypatch.setattr(jax, "default_backend", lambda: "gpu")
+    # This test profiles the strict cap on the fly (there is no pre-recorded
+    # profile for its key), so do not require an exact cap-profile match --
+    # otherwise it depends on another test having recorded one first (order
+    # dependence). Matches the sibling strict-lane tests below.
+    monkeypatch.setenv("JACCPOT_STATIC_STRICT_REQUIRE_EXACT_CAP_PROFILE_MATCH", "0")
 
     key = jax.random.PRNGKey(123)
     core = 0.01 * jax.random.normal(key, (160, 3), dtype=jnp.float32)
@@ -300,6 +307,9 @@ def test_prepare_refresh_static_radix_tree_preserves_static_shape(monkeypatch):
 
 def test_static_radix_refresh_rebuilds_current_large_n_payloads(monkeypatch):
     monkeypatch.setattr(jax, "default_backend", lambda: "gpu")
+    # Profile the strict cap on the fly rather than requiring a pre-recorded
+    # profile match (which would make this test depend on run order).
+    monkeypatch.setenv("JACCPOT_STATIC_STRICT_REQUIRE_EXACT_CAP_PROFILE_MATCH", "0")
     monkeypatch.setenv("JACCPOT_LARGE_N_TARGET_BLOCK_SIZE", "4")
     monkeypatch.setenv("JACCPOT_LARGE_N_SPEED_PREPARED_LAYOUT", "1")
     monkeypatch.setenv("JACCPOT_LARGE_N_STATIC_TARGET_BLOCKS", "1")
@@ -640,6 +650,15 @@ def test_strict_run_v2_api(monkeypatch):
     monkeypatch.setattr(jax, "default_backend", lambda: "gpu")
     monkeypatch.setenv("JACCPOT_STATIC_STRICT_GPU_MODE", "on")
     monkeypatch.setenv("JACCPOT_STATIC_STRICT_REQUIRE_EXACT_CAP_PROFILE_MATCH", "0")
+    # Pin the fused static-sizing caps to fixed adequate values (mirroring the
+    # sibling strict-fused tests below). Without this the fused lane sizes the
+    # static neighbour-edge cap from the *first* build's active-edge count, which
+    # is sensitive to leaked process-global tree/neighbour construction state
+    # from earlier tests on the same xdist worker; an undersized first-build cap
+    # then overflows on a later scan step ("neighbor-edge cap exceeded"). Fixed
+    # caps make the run deterministic and order-independent.
+    monkeypatch.setenv("JACCPOT_LARGE_N_NEIGHBOR_EDGE_PROFILE_FIXED_CAP", "65536")
+    monkeypatch.setenv("JACCPOT_LARGE_N_STATIC_TARGET_BLOCKS_MAX_PER_LEAF", "32")
 
     key = jax.random.PRNGKey(20260513)
     key_pos, key_mass = jax.random.split(key)
@@ -2573,9 +2592,9 @@ def test_prepare_state_rebuilds_topology_after_rebuild_every_steps():
     assert fmm.recent_topology_reused is True
 
     with mock.patch.object(
-        fmm_impl_private,
+        fmm_prepare_private,
         "_build_tree_with_config",
-        wraps=fmm_impl_private._build_tree_with_config,
+        wraps=fmm_prepare_private._build_tree_with_config,
     ) as spy_build:
         state_third = fmm.prepare_state(
             moved_b,
@@ -2700,6 +2719,11 @@ def test_prepare_state_cache_key_respects_center_mode():
         mac_type="dehnen",
         grouped_interactions=False,
     )
+    # The cache-key-vs-center_mode behaviour depends on the adaptive resolver
+    # setting center_mode="aabb" when grouped_interactions flips on. That is an
+    # adaptive rewrite which the production-default static fixed sizing skips, so
+    # disable it here to exercise the center_mode-sensitive cache-key path.
+    fmm._static_runtime_fixed_sizing = False
     fmm.prepare_state(
         positions,
         masses,
@@ -2900,7 +2924,7 @@ def test_solidfmm_m2l_ignores_padded_compact_far_pairs():
     tgt_padded = jnp.array([0, -1, -1, -1], dtype=INDEX_DTYPE)
     active_count = jnp.array(1, dtype=INDEX_DTYPE)
 
-    exact_full = fmm_impl_private._accumulate_solidfmm_m2l_fullbatch(
+    exact_full = kernels_core._accumulate_m2l_fullbatch(
         jnp.zeros_like(multipoles),
         multipoles,
         centers,
@@ -2908,10 +2932,11 @@ def test_solidfmm_m2l_ignores_padded_compact_far_pairs():
         tgt_exact,
         active_count,
         order=order,
+        basis_mode="complex",
         rotation="solidfmm",
         total_nodes=int(centers.shape[0]),
     )
-    padded_full = fmm_impl_private._accumulate_solidfmm_m2l_fullbatch(
+    padded_full = kernels_core._accumulate_m2l_fullbatch(
         jnp.zeros_like(multipoles),
         multipoles,
         centers,
@@ -2919,10 +2944,11 @@ def test_solidfmm_m2l_ignores_padded_compact_far_pairs():
         tgt_padded,
         active_count,
         order=order,
+        basis_mode="complex",
         rotation="solidfmm",
         total_nodes=int(centers.shape[0]),
     )
-    padded_chunked = fmm_impl_private._accumulate_solidfmm_m2l_chunked_scan(
+    padded_chunked = kernels_core._accumulate_m2l_chunked_scan(
         jnp.zeros_like(multipoles),
         multipoles,
         centers,
@@ -2930,6 +2956,7 @@ def test_solidfmm_m2l_ignores_padded_compact_far_pairs():
         tgt_padded,
         active_count,
         order=order,
+        basis_mode="complex",
         rotation="solidfmm",
         total_nodes=int(centers.shape[0]),
         chunk_size=2,
@@ -2951,6 +2978,11 @@ def test_fast_preset_adaptive_large_cpu_policy_applies():
         complex_rotation="solidfmm",
         mac_type="dehnen",
     )
+    # This test exercises the adaptive large-CPU runtime policy, which is the
+    # non-default opt-out path: the production default is static fixed sizing
+    # (JACCPOT_STATIC_RUNTIME_FIXED_SIZING=1), which deliberately skips adaptive
+    # runtime rewrites. Disable it so the adaptive policy is resolved and asserted.
+    fmm._static_runtime_fixed_sizing = False
 
     overrides = fmm._resolve_runtime_execution_overrides(
         num_particles=131072,
@@ -2975,6 +3007,10 @@ def test_fast_preset_adaptive_class_major_threshold():
         complex_rotation="solidfmm",
         mac_type="dehnen",
     )
+    # Adaptive class-major farfield policy is the non-default opt-out path;
+    # static fixed sizing (the production default) skips it. Disable it here so
+    # the adaptive threshold behaviour is resolved and asserted.
+    fmm._static_runtime_fixed_sizing = False
 
     overrides = fmm._resolve_runtime_execution_overrides(
         num_particles=262144,
@@ -3249,7 +3285,7 @@ def _direct_accelerations_vectorized(
 def test_solidfmm_basis_rejects_non_solidfmm_rotation():
     with pytest.raises(
         ValueError,
-        match="expansion_basis='solidfmm' requires complex_rotation='solidfmm'",
+        match="complex_rotation must be 'solidfmm'",
     ):
         FastMultipoleMethod(expansion_basis="solidfmm", complex_rotation="cached")
 

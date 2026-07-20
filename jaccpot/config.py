@@ -6,7 +6,11 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import Any, Literal, Optional
 
-BASIS_DOC = "Preferred production basis is 'solidfmm'."
+BASIS_DOC = (
+    "Preferred production basis is 'real' (Dehnen no-sqrt2 harmonics): the radix "
+    "large-N fast lane runs pure-real end to end with no complex<->real "
+    "conversion. 'solidfmm'/'complex' are retained for cross-checking only."
+)
 FARFIELD_MODE_DOC = (
     "For large_n_gpu production, far-field execution is canonicalized to "
     "'pair_grouped'."
@@ -76,7 +80,6 @@ class RuntimePolicyConfig:
     """Execution-policy overrides for tree build and traversal.
 
     Notes:
-    - `runtime_path='legacy'` is deprecated and will be removed.
     - For `preset='large_n_gpu'`, runtime policy is canonicalized to the
       production low-memory fast path (minimum_memory + streamed pair_grouped
       + bucketed nearfield).
