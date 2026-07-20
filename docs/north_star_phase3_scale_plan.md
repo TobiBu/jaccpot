@@ -3,6 +3,17 @@
 _Resume doc for a fresh session. Phases 1–2 are DONE and pushed; this is the remaining
 scale work. Written 2026-07-20._
 
+## Progress log
+
+- **2026-07-20 (later): branch reconciled onto main + Phase 3a DONE (local, not committed).**
+  Pulled `feat/phase5-multigpu-foldin` (was 83 behind); the fast-forward included merge
+  `53f0bc4` "Merge branch 'main'…" — this IS the §"Branch / merge note" reconciliation
+  (driver now imports M2L/L2L/L2P from `runtime.kernels.core`, treecode builder still from
+  `runtime._interaction_cache`; `local_walk` treecode work + the `far_pair_count` 0-pad seam
+  survived intact). Verified: CPU driver suite 6/6 green; GPU treecode parity ndev=2 per=1000
+  `self_ovf=0`, `overflow=False`, aggL2 7.77e-4 (better than the memo's 3.2e-3 — main's gains).
+  **Phase 3a (below) implemented + GPU/CPU validated.** NOT yet committed to the branch.
+
 ## Where we are (Phases 1–2, DONE + pushed)
 
 **Goal of the North-star:** lift the distributed FMM's per-GPU-N ceiling by replacing the
@@ -47,7 +58,29 @@ final lists (at leaf=128/per=20000 the final lists are tiny yet the queue blows 
 
 ## Phase 3 tasks (in order)
 
-### 3a — Right-size the treecode `near_cap` (do FIRST; correctness + perf)
+### 3a — Right-size the treecode `near_cap` (DONE 2026-07-20, local; correctness + perf)
+**DONE.** `DistributedFMMConfig` gained `treecode_near_cap` / `treecode_far_cap`
+(`Optional[int]`, default None). In the driver's treecode branch (`_make_fn`/`fn`,
+`jaccpot/distributed/fmm.py`) the flat buffers are now right-sized from the STATIC local
+tree instead of the builder's fixed defaults: `near_cap = max(1<<14,
+max_neighbors_per_leaf * num_leaves)` and `far_cap = max(1<<14, max_interactions_per_node
+* num_leaves)` (both keyed off `with_scaled_caps`-scaled fields, so the auto-scale retry
+grows them). `_build_treecode_artifacts_strict_streamed` gained an optional `near_cap`
+kwarg (explicit override wins; None keeps the old env/1<<21 default → single-GPU fast lane
+byte-identical). The `_TreecodeWalkDiag` now surfaces REAL `far_overflow` (`far_pair_count
+>= far_cap`, clamped) / `near_overflow` (`near_pair_count > near_cap`, unclamped counts) —
+previously forced to 0, i.e. SILENT truncation with no diagnostic — so `_reduce_overflow`
+→ `auto_scale_caps` self-heals both, exactly like the dual-tree caps.
+VALIDATED (GPU A100 ndev=2 per=1000, `treecode_swap_gpu.py`): default caps give bit-identical
+parity to the 2M-buffer baseline (aggL2 7.7657e-4, `cap_retries=0`); forcing a tiny
+`treecode_near_cap=4000` → `near_overflow` fires → auto_scale retries 4000→8000→16000
+(`cap_retries=2`) → clears with identical forces; same for `treecode_far_cap=100`
+(`cap_retries=1`). CPU driver suite 6/6 green before AND after the edits.
+NOTE: the near-source-leaf table `S_near = max_neighbors_per_leaf + cross_max_neighbors_per_leaf`
+(Pallas near backend densification) is a SEPARATE truncation not touched here — watch it at scale.
+
+_(original 3a spec, for reference:)_
+### ~~3a — Right-size the treecode `near_cap`~~ (spec)
 The treecode near buffer defaults to `1<<21` (env `JACCPOT_STATIC_STRICT_FUSED_TREECODE_NEAR_CAP`,
 read in `_build_treecode_artifacts_strict_streamed`, `jaccpot/runtime/_interaction_cache.py`).
 Two problems: (1) `_combined_neighbors` then chews a 2M-edge array per device (slow); (2) **at

@@ -32,7 +32,7 @@ from __future__ import annotations
 
 import dataclasses
 from dataclasses import dataclass
-from typing import Any, Callable, NamedTuple
+from typing import Any, Callable, NamedTuple, Optional
 
 import jax
 import jax.numpy as jnp
@@ -113,9 +113,12 @@ DIAG_FIELDS = (
 class _TreecodeWalkDiag(NamedTuple):
     """Minimal self-walk diagnostic shim for the treecode local walk.
 
-    The treecode walk emits no ``DualTreeWalkResult``; it auto-sizes per-leaf caps
-    (overflow raises in the eager prepare pass, so the flags are 0 here) and exposes
-    the far/near counts we surface in the per-device diagnostic vector.
+    The treecode walk emits no ``DualTreeWalkResult``; it auto-sizes per-leaf caps and
+    exposes the far/near counts we surface in the per-device diagnostic vector. There is
+    no transient pair-queue (``queue_overflow`` is always 0 -- that is the point of the
+    swap), but the flat far/near buffers can still overflow, so ``far_overflow`` /
+    ``near_overflow`` are set from the true counts vs the (right-sized) caps and drive
+    ``auto_scale_caps`` -- the eager-only builder guard is skipped under the trace.
     """
 
     far_pair_count: Any
@@ -170,6 +173,19 @@ class DistributedFMMConfig:
     local_walk: str = "dual_tree"
     # Sphere-radius scale for the treecode dehnen MAC (matches the dual-tree extents).
     dehnen_radius_scale: float = 1.0
+    # Treecode local-walk flat buffer sizes (only used when local_walk="treecode").
+    # The builder's own default is a fixed 1<<21 (2M) near-edge buffer, which makes the
+    # combined-P2P neighbour build chew a 2M-edge array per device AND can SILENTLY
+    # truncate the near list at ~1M/GPU (the treecode overflow guard is eager-only, so
+    # it is skipped under the shard_map trace -> wrong forces with no diagnostic). When
+    # these are None the driver right-sizes them from the local tree: the near buffer to
+    # ``max_neighbors_per_leaf * num_leaves`` (the same per-leaf near budget the dual-tree
+    # walk uses, and already grown by ``with_scaled_caps`` on the auto-scale retry) and
+    # the far buffer to ``treecode_far_cap`` or 131072. The true per-device far/near
+    # counts and an accurate overflow flag are surfaced in the ``self_*`` diagnostics so
+    # ``auto_scale_caps`` grows them on overflow exactly like the dual-tree caps.
+    treecode_near_cap: Optional[int] = None
+    treecode_far_cap: Optional[int] = None
     # self dual-tree walk capacities
     max_interactions_per_node: int = 512
     max_neighbors_per_leaf: int = 128
@@ -199,6 +215,82 @@ class DistributedFMMConfig:
             cross_max_interactions_per_node=g(self.cross_max_interactions_per_node),
             cross_max_neighbors_per_leaf=g(self.cross_max_neighbors_per_leaf),
             cross_max_pair_queue=g(self.cross_max_pair_queue),
+            # Grow the treecode buffers on retry too. When these are None the driver
+            # sizes the near buffer off ``max_neighbors_per_leaf`` (scaled above), so the
+            # retry already grows the effective near cap; scale any explicit values here.
+            treecode_near_cap=(
+                None if self.treecode_near_cap is None else g(self.treecode_near_cap)
+            ),
+            treecode_far_cap=(
+                None if self.treecode_far_cap is None else g(self.treecode_far_cap)
+            ),
+        )
+
+    def with_selective_scaled_caps(
+        self: "DistributedFMMConfig", diag_o: Any, factor: float
+    ) -> "DistributedFMMConfig":
+        """Return a copy scaling ONLY the caps whose overflow flag actually fired.
+
+        ``diag_o`` is the per-device diagnostic matrix (shape ``(ndev, len(DIAG_FIELDS))``)
+        from the last evaluation; a cap is grown by ``factor`` iff its overflow flag is
+        nonzero on any device.
+
+        Unlike :meth:`with_scaled_caps` (which grows *every* cap uniformly), this grows
+        only the buffer a device actually overflowed. Uniform scaling couples the
+        self/cross x far/near/queue caps, so a single overflowing buffer drags up an
+        unrelated, already-oversized cap. Concretely: on a connected IC only the
+        cross-near buffer overflows, but uniform scaling also doubles
+        ``cross_max_interactions_per_node`` (the cross-*far* cap) each retry -- and the
+        cross-far list feeds the fused real-M2L, whose Pallas buffer pads to a power of
+        two and OOMs (~6 GiB at N>=200k/2GPU) even though the true cross-far volume is
+        ~10^3 pairs. Selective scaling grows just the buffer that overflowed, lifting the
+        connected-IC ceiling without inflating the M2L.
+        """
+        diag = np.asarray(diag_o)
+
+        def flagged(name: str) -> bool:
+            return bool(np.any(diag[:, DIAG_FIELDS.index(name)] > 0))
+
+        def g(v: int) -> int:
+            return int(np.ceil(v * factor))
+
+        def maybe(name: str, value: int) -> int:
+            return g(value) if flagged(name) else value
+
+        # Under the treecode local walk the self near/far caps derive from
+        # max_neighbors_per_leaf / max_interactions_per_node (times num_leaves) when the
+        # explicit treecode_*_cap overrides are None, so scaling those knobs grows the
+        # effective self buffers for both the dual-tree and treecode walks.
+        grow_self_far = flagged("self_far_overflow")
+        grow_self_near = flagged("self_near_overflow")
+        return dataclasses.replace(
+            self,
+            max_interactions_per_node=maybe(
+                "self_far_overflow", self.max_interactions_per_node
+            ),
+            max_neighbors_per_leaf=maybe(
+                "self_near_overflow", self.max_neighbors_per_leaf
+            ),
+            max_pair_queue=maybe("self_queue_overflow", self.max_pair_queue),
+            cross_max_interactions_per_node=maybe(
+                "cross_far_overflow", self.cross_max_interactions_per_node
+            ),
+            cross_max_neighbors_per_leaf=maybe(
+                "cross_near_overflow", self.cross_max_neighbors_per_leaf
+            ),
+            cross_max_pair_queue=maybe(
+                "cross_queue_overflow", self.cross_max_pair_queue
+            ),
+            treecode_near_cap=(
+                g(self.treecode_near_cap)
+                if (grow_self_near and self.treecode_near_cap is not None)
+                else self.treecode_near_cap
+            ),
+            treecode_far_cap=(
+                g(self.treecode_far_cap)
+                if (grow_self_far and self.treecode_far_cap is not None)
+                else self.treecode_far_cap
+            ),
         )
 
 
@@ -450,23 +542,56 @@ def _make_fn(config: DistributedFMMConfig, ndev: int, cap: int) -> Callable:
             # Fast-lane device-resident treecode walk in place of the dual-tree walk.
             # Drop-in: compact_far_pairs (leaf-only far targets -> L2L no-op) feed the
             # same real M2L; the self-excluded near CSR feeds the same combined P2P.
+            #
+            # Right-size the flat far/near buffers from the (static) local tree instead
+            # of the builder's fixed 1<<21 near default: the near buffer is what the
+            # combined-P2P neighbour build iterates over, so an oversized buffer is pure
+            # overhead, and at ~1M/GPU the fixed 2M could be EXCEEDED (silent truncation:
+            # the treecode overflow guard is eager-only, skipped under this trace). The
+            # near budget mirrors the dual-tree walk's per-leaf bound (already grown by
+            # with_scaled_caps on the auto-scale retry).
+            num_internal = int(tree.topology.left_child.shape[0])
+            num_leaves = int(total_nodes) - num_internal
+            if config.treecode_near_cap is not None:
+                tc_near_cap = int(config.treecode_near_cap)
+            else:
+                tc_near_cap = max(
+                    1 << 14, int(config.max_neighbors_per_leaf) * num_leaves
+                )
+            # Far mirrors near: the compact far list holds <= (interaction-list size) far
+            # pairs per leaf, so budget max_interactions_per_node * num_leaves. Keyed off
+            # a with_scaled_caps-scaled field so the auto-scale retry grows it too, and
+            # num_leaves-proportional so it does not under-size at ~1M/GPU (the fixed
+            # 131072 could be exceeded by a spread IC -> silent far truncation).
+            if config.treecode_far_cap is not None:
+                tc_far_cap = int(config.treecode_far_cap)
+            else:
+                tc_far_cap = max(
+                    1 << 14, int(config.max_interactions_per_node) * num_leaves
+                )
             _art = _build_treecode_artifacts_strict_streamed(
                 tree=tree,
                 geometry=geom,
                 theta=theta,
                 mac_type=mac,
                 dehnen_radius_scale=dehnen_radius_scale,
-                compact_far_pair_capacity=None,
+                compact_far_pair_capacity=tc_far_cap,
+                near_cap=tc_near_cap,
             )
             inter = _art.compact_far_pairs
             nbr = _art.neighbor_list
             _z = jnp.zeros((), jnp.int64)
+            # near_counts are UNCLAMPED true counts (see _compact_near), so > cap is exact
+            # truncation; far_pair_count is clamped to far_cap, so == cap flags a possible
+            # overflow. Surfaced so _reduce_overflow/auto_scale_caps grow the caps.
+            far_cnt = jnp.asarray(inter.far_pair_count)
+            near_cnt = jnp.sum(jnp.asarray(nbr.counts))
             self_res = _TreecodeWalkDiag(
-                far_pair_count=jnp.asarray(inter.far_pair_count),
-                near_pair_count=jnp.sum(jnp.asarray(nbr.counts)),
+                far_pair_count=far_cnt,
+                near_pair_count=near_cnt,
                 queue_overflow=_z,
-                far_overflow=_z,
-                near_overflow=_z,
+                far_overflow=(far_cnt >= tc_far_cap).astype(jnp.int64),
+                near_overflow=(near_cnt > tc_near_cap).astype(jnp.int64),
             )
         else:
             inter, nbr, self_res = build_interactions_and_neighbors(
@@ -888,7 +1013,10 @@ def distributed_fmm_accelerations(
         overflow = _reduce_overflow(diag_o)
         if not overflow or not auto_scale_caps or attempt >= max_cap_retries:
             break
-        config = config.with_scaled_caps(cap_scale_factor)
+        # Grow only the buffers that actually overflowed. Uniform scaling couples the
+        # cross-far cap (which feeds the fused-M2L Pallas buffer) to unrelated overflows
+        # and OOMs on connected ICs; see with_selective_scaled_caps.
+        config = config.with_selective_scaled_caps(diag_o, cap_scale_factor)
         attempt += 1
     accel_o = np.asarray(accel_o)
     gid_o = np.asarray(gid_o).reshape(-1).astype(np.int64)

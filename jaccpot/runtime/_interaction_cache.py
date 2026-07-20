@@ -737,6 +737,7 @@ def _build_treecode_artifacts_strict_streamed(
     mac_type: MACType,
     dehnen_radius_scale: float,
     compact_far_pair_capacity: Optional[int],
+    near_cap: Optional[int] = None,
 ) -> _DualTreeArtifacts:
     """Strict fast-lane far/near build from the per-leaf treecode walk.
 
@@ -863,9 +864,18 @@ def _build_treecode_artifacts_strict_streamed(
         "JACCPOT_STATIC_STRICT_FUSED_TREECODE_NEAR_PER_LEAF", auto_per_leaf
     )
     max_stack = _env_int("JACCPOT_STATIC_STRICT_FUSED_TREECODE_STACK", 512)
-    near_cap = _env_int(
-        "JACCPOT_STATIC_STRICT_FUSED_TREECODE_NEAR_CAP", neighbor_edge_cap
-    )
+    # An explicit ``near_cap`` (right-sized by the caller, e.g. the distributed driver
+    # to ~max_neighbors_per_leaf * num_leaves) overrides the env/1<<21 default. The
+    # 1<<21 default keeps the single-GPU fast lane byte-identical when no cap is passed;
+    # the fixed 2M buffer both wastes the downstream neighbour build and can SILENTLY
+    # truncate at very large N (the overflow guard below is eager-only). Callers that
+    # trace this (shard_map) should pass an explicit, validated ``near_cap``.
+    if near_cap is not None:
+        near_cap = int(near_cap)
+    else:
+        near_cap = _env_int(
+            "JACCPOT_STATIC_STRICT_FUSED_TREECODE_NEAR_CAP", neighbor_edge_cap
+        )
     far_cap = int(compact_far_pair_capacity) if compact_far_pair_capacity else 131072
 
     prod = build_treecode_far_pairs_and_neighbors(
