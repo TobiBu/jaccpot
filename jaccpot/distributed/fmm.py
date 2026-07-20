@@ -77,14 +77,14 @@ from jaccpot.operators.complex_ops import (
     m2l_complex_reference_batch,
 )
 from jaccpot.operators.real_harmonics import sh_size
+from jaccpot.runtime._interaction_cache import (
+    _build_treecode_artifacts_strict_streamed,
+)
 from jaccpot.runtime.kernels.core import (
     _accumulate_m2l_fullbatch,
     _apply_real_m2l,
     _evaluate_local_expansions_for_particles,
     _propagate_solidfmm_locals_by_level,
-)
-from jaccpot.runtime._interaction_cache import (
-    _build_treecode_artifacts_strict_streamed,
 )
 from jaccpot.upward.real_tree_expansions import (
     aggregate_m2m_real_by_level,
