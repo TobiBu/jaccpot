@@ -32,7 +32,7 @@ from __future__ import annotations
 
 import dataclasses
 from dataclasses import dataclass
-from typing import Any, Callable
+from typing import Any, Callable, NamedTuple
 
 import jax
 import jax.numpy as jnp
@@ -84,6 +84,9 @@ from jaccpot.runtime._fmm_impl import (
     _evaluate_local_expansions_for_particles,
     _propagate_solidfmm_locals_by_level,
 )
+from jaccpot.runtime._interaction_cache import (
+    _build_treecode_artifacts_strict_streamed,
+)
 from jaccpot.upward.real_tree_expansions import (
     aggregate_m2m_real_by_level,
     prepare_real_upward_sweep,
@@ -106,6 +109,21 @@ DIAG_FIELDS = (
     "self_far_overflow",
     "self_near_overflow",
 )
+
+
+class _TreecodeWalkDiag(NamedTuple):
+    """Minimal self-walk diagnostic shim for the treecode local walk.
+
+    The treecode walk emits no ``DualTreeWalkResult``; it auto-sizes per-leaf caps
+    (overflow raises in the eager prepare pass, so the flags are 0 here) and exposes
+    the far/near counts we surface in the per-device diagnostic vector.
+    """
+
+    far_pair_count: Any
+    near_pair_count: Any
+    queue_overflow: Any
+    far_overflow: Any
+    near_overflow: Any
 
 
 @dataclass(frozen=True)
@@ -144,6 +162,15 @@ class DistributedFMMConfig:
     # near-field). "auto" (DEFAULT) picks pallas on Ampere+, baseline elsewhere.
     # Numerically equivalent to baseline (validated), only the cross-leaf P2P is fused.
     nearfield_backend: str = "auto"
+    # Local self-interaction walk: "dual_tree" (yggdrax dual-tree walk, DEFAULT) or
+    # "treecode" (the single-GPU fast-lane device-resident treecode walk). The dual-tree
+    # walk's transient pair-queue caps per-GPU N (self_queue_overflow); the treecode walk
+    # streams far/near with no such queue, so per-GPU N scales like the single-GPU lane.
+    # Parity with dual_tree at mac_type="dehnen" (accuracy-profile parity, leaf-only far
+    # targets -> L2L no-op, self-excluded near CSR). Cross-domain LET is unchanged.
+    local_walk: str = "dual_tree"
+    # Sphere-radius scale for the treecode dehnen MAC (matches the dual-tree extents).
+    dehnen_radius_scale: float = 1.0
     # self dual-tree walk capacities
     max_interactions_per_node: int = 512
     max_neighbors_per_leaf: int = 128
@@ -276,6 +303,15 @@ def _make_fn(config: DistributedFMMConfig, ndev: int, cap: int) -> Callable:
     theta_cross = config.theta_cross
     is_real = str(config.basis).strip().lower() == "real"
 
+    # Local self-walk selection: dual-tree (default) or the fast-lane treecode walk.
+    lw = str(config.local_walk).strip().lower()
+    if lw not in {"dual_tree", "treecode"}:
+        raise ValueError(
+            f"local_walk must be 'dual_tree' or 'treecode'; got {config.local_walk!r}"
+        )
+    use_treecode_local = lw == "treecode"
+    dehnen_radius_scale = float(config.dehnen_radius_scale)
+
     # Near-field backend resolution (trace-time; sm_80+ gate mirrors the single-GPU
     # lane). "auto" -> fused leafpair Pallas on Ampere+, pure-JAX baseline elsewhere.
     nf_backend = str(config.nearfield_backend).strip().lower()
@@ -407,14 +443,37 @@ def _make_fn(config: DistributedFMMConfig, ndev: int, cap: int) -> Callable:
         coeff_dtype = lp.dtype if is_real else cdtype
         packed_use = packed
 
-        inter, nbr, self_res = build_interactions_and_neighbors(
-            tree,
-            geom,
-            theta=theta,
-            traversal_config=cfg,
-            mac_type=mac,
-            return_result=True,
-        )
+        if use_treecode_local:
+            # Fast-lane device-resident treecode walk in place of the dual-tree walk.
+            # Drop-in: compact_far_pairs (leaf-only far targets -> L2L no-op) feed the
+            # same real M2L; the self-excluded near CSR feeds the same combined P2P.
+            _art = _build_treecode_artifacts_strict_streamed(
+                tree=tree,
+                geometry=geom,
+                theta=theta,
+                mac_type=mac,
+                dehnen_radius_scale=dehnen_radius_scale,
+                compact_far_pair_capacity=None,
+            )
+            inter = _art.compact_far_pairs
+            nbr = _art.neighbor_list
+            _z = jnp.zeros((), jnp.int64)
+            self_res = _TreecodeWalkDiag(
+                far_pair_count=jnp.asarray(inter.far_pair_count),
+                near_pair_count=jnp.sum(jnp.asarray(nbr.counts)),
+                queue_overflow=_z,
+                far_overflow=_z,
+                near_overflow=_z,
+            )
+        else:
+            inter, nbr, self_res = build_interactions_and_neighbors(
+                tree,
+                geom,
+                theta=theta,
+                traversal_config=cfg,
+                mac_type=mac,
+                return_result=True,
+            )
 
         # remote coarse tree over frontier (leaf COM + mass)
         mm = compute_tree_mass_moments(tree, lp, lm)
@@ -557,7 +616,12 @@ def _make_fn(config: DistributedFMMConfig, ndev: int, cap: int) -> Callable:
         zeros = jnp.zeros((int(total_nodes), C), dtype=coeff_dtype)
         s_src = jnp.asarray(inter.sources, INDEX_DTYPE)
         s_tgt = jnp.asarray(inter.targets, INDEX_DTYPE)
-        s_active = jnp.sum((s_tgt >= 0).astype(INDEX_DTYPE))
+        # The treecode compact far pairs are 0-padded (not -1) with the true count in
+        # far_pair_count; the dual-tree list is trimmed, so a >=0 test recovers its count.
+        if use_treecode_local:
+            s_active = jnp.asarray(inter.far_pair_count, INDEX_DTYPE)
+        else:
+            s_active = jnp.sum((s_tgt >= 0).astype(INDEX_DTYPE))
         if is_real:
             loc_self = _accumulate_real_m2l_fullbatch(
                 zeros,

@@ -203,3 +203,43 @@ def test_driver_auto_scale_caps():
         f"auto_scale_caps aggL2 vs direct = {err:.6f}  retries={r1.diagnostics['cap_retries']}"
     )
     assert err < 5e-2, f"forces wrong after cap retry: {err:.6f}"
+
+
+def test_driver_local_walk_treecode():
+    """The fast-lane treecode self-walk replaces the dual-tree self-walk.
+
+    The dual-tree self-walk's transient pair-queue caps per-GPU N (``self_queue_overflow``);
+    the device-resident treecode walk streams far/near with no such queue. This checks the
+    swap is a faithful drop-in: correct forces vs direct with ZERO self-overflow. (The
+    cross-domain LET walk is still dual-tree, so ``auto_scale_caps`` keeps the whole eval
+    overflow-free; the ceiling win itself is exercised at larger ``per`` off-CI.)
+    """
+    ndev = min(4, device_count())
+    mesh = make_mesh(ndev)
+    per = 256
+    pts, mass = _separated_clusters(ndev, per)
+    base = DistributedFMMConfig()
+    cfg = dataclasses.replace(base, local_walk="treecode")
+
+    r = distributed_fmm_accelerations(
+        pts,
+        mass,
+        config=cfg,
+        mesh=mesh,
+        jit=False,
+        auto_scale_caps=True,
+        cap_scale_factor=2.0,
+        max_cap_retries=6,
+    )
+    d = r.diagnostics
+    self_ovf = float(
+        np.asarray(d["self_queue_overflow"]).sum()
+        + np.asarray(d["self_far_overflow"]).sum()
+        + np.asarray(d["self_near_overflow"]).sum()
+    )
+    direct = np.asarray(_direct(jnp.asarray(pts), jnp.asarray(mass), base.G, base.softening))
+    err = float(np.linalg.norm(r.accelerations - direct) / (np.linalg.norm(direct) + 1e-30))
+    print(f"treecode local_walk: self_ovf={self_ovf} overflow={r.overflow} aggL2 vs direct={err:.4e}")
+    assert self_ovf == 0, "treecode self-walk must not overflow (that is the point of the swap)"
+    assert not r.overflow, "auto_scale_caps should clear the (dual-tree) cross-walk overflow"
+    assert err < 5e-2, f"treecode local force wrong vs direct: {err:.4e}"
