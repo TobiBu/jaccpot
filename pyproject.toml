@@ -40,8 +40,12 @@ Documentation = "https://github.com/AstroAI-Lab/jaccpot#readme"
 
 [project.optional-dependencies]
 dev = [
-  "black>=24.8.0",
-  "isort>=5.13.2",
+  # Pin black + isort to the .pre-commit-config.yaml hook revs so local, the
+  # pre-commit hooks, and CI's `black --check .` / `isort --check-only .` all
+  # format identically. A floating ">=" let CI resolve to a newer isort whose
+  # style disagreed with the pinned hook (single-import collapsing regression).
+  "black==26.5.1",
+  "isort==9.0.0b1",
   "pytest>=8.3.0",
   "pytest-cov>=5.0.0",
   "pytest-xdist>=3.6.0",
