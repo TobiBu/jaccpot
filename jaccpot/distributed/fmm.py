@@ -203,6 +203,12 @@ class DistributedFMMConfig:
     # the buffer, and >= the far volume on the ICs measured), overflowing into
     # cross_far_overflow so auto_scale grows it. Set an explicit value to override.
     cross_far_cap: Optional[int] = None
+    # Run the far-field M2L (self + cross) in fp32. The per-pair rotation blocks
+    # [N, Bp, mdp, mdp] dominate M2L peak memory; fp32 halves it (≈2x more particles/GPU)
+    # at negligible accuracy cost (fp32 ~1e-7 << the order-p FMM truncation error). The
+    # accumulation into the local expansions stays coeff_dtype (fp64). Opt-in; the
+    # single-GPU fast lane is unaffected (this field is distributed-only).
+    far_m2l_fp32: bool = False
 
     def with_scaled_caps(
         self: "DistributedFMMConfig", factor: float
@@ -762,6 +768,9 @@ def _make_fn(config: DistributedFMMConfig, ndev: int, cap: int) -> Callable:
         # tgt-minus-src delta convention; the real path routes through the same
         # Pallas-aware _apply_real_m2l kernel used by the single-GPU fast lane.
         zeros = jnp.zeros((int(total_nodes), C), dtype=coeff_dtype)
+        # Far-M2L compute dtype: fp32 halves the per-pair rotation-block memory (the M2L
+        # peak) at negligible accuracy cost; accumulation stays coeff_dtype (fp64).
+        m2l_dtype = jnp.float32 if config.far_m2l_fp32 else coeff_dtype
         s_src = jnp.asarray(inter.sources, INDEX_DTYPE)
         s_tgt = jnp.asarray(inter.targets, INDEX_DTYPE)
         # The treecode compact far pairs are 0-padded (not -1) with the true count in
@@ -773,8 +782,8 @@ def _make_fn(config: DistributedFMMConfig, ndev: int, cap: int) -> Callable:
         if is_real:
             loc_self = _accumulate_m2l_fullbatch(
                 zeros,
-                packed_use,
-                centers,
+                packed_use.astype(m2l_dtype),
+                centers.astype(m2l_dtype),
                 s_src,
                 s_tgt,
                 s_active,
@@ -821,7 +830,10 @@ def _make_fn(config: DistributedFMMConfig, ndev: int, cap: int) -> Callable:
         x_deltas = centers[xt] - c_centers[xs]
         if is_real:
             x_contribs = _apply_real_m2l(
-                coarse_packed_use[xs], x_deltas, order=p, m2l_impl="rot_scale"
+                coarse_packed_use[xs].astype(m2l_dtype),
+                x_deltas.astype(m2l_dtype),
+                order=p,
+                m2l_impl="rot_scale",
             ).astype(coeff_dtype)
         else:
             x_contribs = m2l_complex_reference_batch(
