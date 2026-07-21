@@ -441,7 +441,10 @@ def _chunked_real_m2l_accumulate(
     tg = jnp.pad(tgt, (0, pad_n)).reshape(nblk, block)
     vd = jnp.pad(valid, (0, pad_n), constant_values=False).reshape(nblk, block)
 
-    def body(loc: jax.Array, blk):
+    def body(
+        loc: jax.Array,
+        blk: tuple[jax.Array, jax.Array, jax.Array, jax.Array],
+    ) -> tuple[jax.Array, None]:
         smb, dlb, tgb, vdb = blk
         contribs = _apply_real_m2l(
             smb.astype(m2l_dtype),
