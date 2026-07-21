@@ -12,6 +12,7 @@ the newly converged values. Caps are per-device, so the natural key is (per-GPU 
 total N is recorded too. A preset is a validated STARTING POINT that transfers within an
 IC family (same morphology), not a guarantee across wildly different distributions.
 """
+
 from __future__ import annotations
 
 import dataclasses
@@ -45,9 +46,7 @@ def apply_caps(
     config: DistributedFMMConfig, caps: dict[str, Any]
 ) -> DistributedFMMConfig:
     """Return a copy of ``config`` with the cap fields present in ``caps`` applied."""
-    return dataclasses.replace(
-        config, **{f: caps[f] for f in CAP_FIELDS if f in caps}
-    )
+    return dataclasses.replace(config, **{f: caps[f] for f in CAP_FIELDS if f in caps})
 
 
 def _key(per_gpu_n: int, ndev: int) -> str:
