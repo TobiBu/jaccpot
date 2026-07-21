@@ -209,11 +209,12 @@ class DistributedFMMConfig:
     # accumulation into the local expansions stays coeff_dtype (fp64). Opt-in; the
     # single-GPU fast lane is unaffected (this field is distributed-only).
     far_m2l_fp32: bool = False
-    # Chunk the cross-far M2L over pairs in blocks of this many pairs (None = one full
-    # batch). The fused M2L builds per-pair rotation blocks [Npairs, Bp, mdp, mdp]; doing
-    # the whole cross-far list at once is the >200k/GPU OOM. Scanning fixed-size blocks
-    # bounds peak M2L memory to ~block pairs regardless of the total, removing the per-GPU
-    # ceiling at some throughput cost. Numerics-identical (associative accumulation).
+    # Chunk the far-field M2L (both self and cross) over pairs in blocks of this many
+    # pairs (None = one full batch). The fused M2L builds per-pair rotation blocks
+    # [Npairs, Bp, mdp, mdp]; doing a whole far list at once is the M2L OOM (cross-far
+    # >200k/GPU; self-far >1.2M/GPU). Scanning fixed-size blocks bounds peak M2L memory to
+    # ~block pairs regardless of the total, removing the M2L per-GPU ceiling at some
+    # throughput cost. Numerics-identical (associative masked segment-sum accumulation).
     m2l_chunk: Optional[int] = None
 
     def with_scaled_caps(
@@ -835,7 +836,29 @@ def _make_fn(config: DistributedFMMConfig, ndev: int, cap: int) -> Callable:
             s_active = jnp.asarray(inter.far_pair_count, INDEX_DTYPE)
         else:
             s_active = jnp.sum((s_tgt >= 0).astype(INDEX_DTYPE))
-        if is_real:
+        if is_real and config.m2l_chunk:
+            # Blockwise self-far M2L (same bound as the cross-far path): the per-pair
+            # rotation blocks are the >1.2M/GPU OOM here too. Reproduce the fullbatch
+            # gather (valid mask, safe src/tgt, tgt-minus-src deltas) then scan in blocks.
+            s_idx = jnp.arange(s_src.shape[0], dtype=INDEX_DTYPE)
+            s_valid = (s_idx < s_active) & (s_src >= 0) & (s_tgt >= 0)
+            s_safe_src = jnp.where(s_valid, s_src, 0)
+            s_safe_tgt = jnp.where(s_valid, s_tgt, 0)
+            # Match the full-batch path exactly (pure refactor): its centers are cast to
+            # m2l_dtype before the delta subtraction, so do the same here.
+            centers_m = centers.astype(m2l_dtype)
+            loc_self = _chunked_real_m2l_accumulate(
+                zeros,
+                packed_use[s_safe_src],
+                centers_m[s_safe_tgt] - centers_m[s_safe_src],
+                s_safe_tgt,
+                s_valid,
+                order=p,
+                block=int(config.m2l_chunk),
+                total_nodes=int(total_nodes),
+                m2l_dtype=m2l_dtype,
+            )
+        elif is_real:
             loc_self = _accumulate_m2l_fullbatch(
                 zeros,
                 packed_use.astype(m2l_dtype),
