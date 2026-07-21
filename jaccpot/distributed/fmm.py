@@ -444,12 +444,13 @@ def _chunked_real_m2l_accumulate(
     def body(loc: jax.Array, blk):
         smb, dlb, tgb, vdb = blk
         contribs = _apply_real_m2l(
-            smb.astype(m2l_dtype), dlb.astype(m2l_dtype), order=order, m2l_impl="rot_scale"
+            smb.astype(m2l_dtype),
+            dlb.astype(m2l_dtype),
+            order=order,
+            m2l_impl="rot_scale",
         ).astype(out_dtype)
         contribs = jnp.where(vdb[:, None], contribs, 0)
-        loc = loc + jax.ops.segment_sum(
-            contribs, jnp.where(vdb, tgb, 0), total_nodes
-        )
+        loc = loc + jax.ops.segment_sum(contribs, jnp.where(vdb, tgb, 0), total_nodes)
         return loc, None
 
     loc, _ = jax.lax.scan(body, loc_init, (sm, dl, tg, vd))
