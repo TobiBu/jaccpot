@@ -209,6 +209,12 @@ class DistributedFMMConfig:
     # accumulation into the local expansions stays coeff_dtype (fp64). Opt-in; the
     # single-GPU fast lane is unaffected (this field is distributed-only).
     far_m2l_fp32: bool = False
+    # Chunk the cross-far M2L over pairs in blocks of this many pairs (None = one full
+    # batch). The fused M2L builds per-pair rotation blocks [Npairs, Bp, mdp, mdp]; doing
+    # the whole cross-far list at once is the >200k/GPU OOM. Scanning fixed-size blocks
+    # bounds peak M2L memory to ~block pairs regardless of the total, removing the per-GPU
+    # ceiling at some throughput cost. Numerics-identical (associative accumulation).
+    m2l_chunk: Optional[int] = None
 
     def with_scaled_caps(
         self: "DistributedFMMConfig", factor: float
@@ -402,6 +408,52 @@ def partition_for_devices(
         "n": n,
         "ndev": ndev,
     }
+
+
+def _chunked_real_m2l_accumulate(
+    loc_init: jax.Array,
+    src_mult: jax.Array,
+    deltas: jax.Array,
+    tgt: jax.Array,
+    valid: jax.Array,
+    *,
+    order: int,
+    block: int,
+    total_nodes: int,
+    m2l_dtype: Any,
+) -> jax.Array:
+    """Accumulate the real-basis M2L over pairs in fixed-size blocks (bounded peak mem).
+
+    The fused M2L builds per-pair rotation blocks ``[Npairs, Bp, mdp, mdp]``; running the
+    whole cross-far list in one batch is the >200k/GPU OOM. Scan over ``ceil(Npairs/block)``
+    blocks so peak M2L memory is ~``block`` pairs, independent of the total. The block M2Ls
+    are masked and segment-summed into ``loc_init`` -- associative, so numerics-identical to
+    the full batch. ``src_mult``/``deltas`` are gathered [Npairs, *] (cheap, ~C or 3 per pair);
+    only the per-pair rotation blocks (built inside the kernel) are memory-heavy, hence blocked.
+    """
+    C = src_mult.shape[1]
+    npairs = src_mult.shape[0]
+    nblk = -(-npairs // block)  # ceil
+    pad_n = nblk * block - npairs
+    out_dtype = loc_init.dtype
+    sm = jnp.pad(src_mult, ((0, pad_n), (0, 0))).reshape(nblk, block, C)
+    dl = jnp.pad(deltas, ((0, pad_n), (0, 0))).reshape(nblk, block, 3)
+    tg = jnp.pad(tgt, (0, pad_n)).reshape(nblk, block)
+    vd = jnp.pad(valid, (0, pad_n), constant_values=False).reshape(nblk, block)
+
+    def body(loc: jax.Array, blk):
+        smb, dlb, tgb, vdb = blk
+        contribs = _apply_real_m2l(
+            smb.astype(m2l_dtype), dlb.astype(m2l_dtype), order=order, m2l_impl="rot_scale"
+        ).astype(out_dtype)
+        contribs = jnp.where(vdb[:, None], contribs, 0)
+        loc = loc + jax.ops.segment_sum(
+            contribs, jnp.where(vdb, tgb, 0), total_nodes
+        )
+        return loc, None
+
+    loc, _ = jax.lax.scan(body, loc_init, (sm, dl, tg, vd))
+    return loc
 
 
 def _make_fn(config: DistributedFMMConfig, ndev: int, cap: int) -> Callable:
@@ -828,19 +880,34 @@ def _make_fn(config: DistributedFMMConfig, ndev: int, cap: int) -> Callable:
         xs = jnp.where(x_valid, x_src, 0)
         xt = jnp.where(x_valid, x_tgt, 0)
         x_deltas = centers[xt] - c_centers[xs]
-        if is_real:
-            x_contribs = _apply_real_m2l(
-                coarse_packed_use[xs].astype(m2l_dtype),
-                x_deltas.astype(m2l_dtype),
+        if is_real and config.m2l_chunk:
+            # Blockwise cross-far M2L: bounds peak memory to ~m2l_chunk pairs (removes the
+            # >200k/GPU OOM). Numerics-identical to the full batch (associative accumulate).
+            loc_full = _chunked_real_m2l_accumulate(
+                loc_self,
+                coarse_packed_use[xs],
+                x_deltas,
+                xt,
+                x_valid,
                 order=p,
-                m2l_impl="rot_scale",
-            ).astype(coeff_dtype)
+                block=int(config.m2l_chunk),
+                total_nodes=int(total_nodes),
+                m2l_dtype=m2l_dtype,
+            )
         else:
-            x_contribs = m2l_complex_reference_batch(
-                coarse_packed_use[xs], x_deltas, order=p, rotation=rot
-            ).astype(cdtype)
-        x_contribs = jnp.where(x_valid[:, None], x_contribs, 0)
-        loc_full = loc_self + jax.ops.segment_sum(x_contribs, xt, int(total_nodes))
+            if is_real:
+                x_contribs = _apply_real_m2l(
+                    coarse_packed_use[xs].astype(m2l_dtype),
+                    x_deltas.astype(m2l_dtype),
+                    order=p,
+                    m2l_impl="rot_scale",
+                ).astype(coeff_dtype)
+            else:
+                x_contribs = m2l_complex_reference_batch(
+                    coarse_packed_use[xs], x_deltas, order=p, rotation=rot
+                ).astype(cdtype)
+            x_contribs = jnp.where(x_valid[:, None], x_contribs, 0)
+            loc_full = loc_self + jax.ops.segment_sum(x_contribs, xt, int(total_nodes))
         far_full = _l2p(loc_full)
 
         # near: leaf particle-index groups into [local ; halo] buffer
