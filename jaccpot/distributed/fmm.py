@@ -413,9 +413,11 @@ def partition_for_devices(
 
 def _chunked_real_m2l_accumulate(
     loc_init: jax.Array,
-    src_mult: jax.Array,
-    deltas: jax.Array,
-    tgt: jax.Array,
+    multip: jax.Array,
+    src_idx: jax.Array,
+    tgt_idx: jax.Array,
+    src_centers: jax.Array,
+    tgt_centers: jax.Array,
     valid: jax.Array,
     *,
     order: int,
@@ -425,39 +427,40 @@ def _chunked_real_m2l_accumulate(
 ) -> jax.Array:
     """Accumulate the real-basis M2L over pairs in fixed-size blocks (bounded peak mem).
 
-    The fused M2L builds per-pair rotation blocks ``[Npairs, Bp, mdp, mdp]``; running the
-    whole cross-far list in one batch is the >200k/GPU OOM. Scan over ``ceil(Npairs/block)``
-    blocks so peak M2L memory is ~``block`` pairs, independent of the total. The block M2Ls
-    are masked and segment-summed into ``loc_init`` -- associative, so numerics-identical to
-    the full batch. ``src_mult``/``deltas`` are gathered [Npairs, *] (cheap, ~C or 3 per pair);
-    only the per-pair rotation blocks (built inside the kernel) are memory-heavy, hence blocked.
+    The fused M2L builds per-pair rotation blocks ``[Npairs, Bp, mdp, mdp]``; running a whole
+    far list in one batch is the M2L OOM. Scan over ``ceil(Npairs/block)`` blocks so peak M2L
+    memory is ~``block`` pairs, independent of the total. The block M2Ls are masked and
+    segment-summed into ``loc_init`` -- associative, so numerics-identical to the full batch.
+
+    Index-based (not pre-gathered): only the compact ``multip`` (``[total_nodes, C]``), the
+    index arrays, and the centre arrays are resident; the per-pair source multipoles and deltas
+    are gathered ``[block, *]`` INSIDE the scan. This avoids materialising the full
+    ``[Npairs, C]`` gather (itself a >1GB peak at high N), so the only large intermediates are
+    the per-block rotation blocks. Deltas are ``tgt - src`` in the source dtype then cast.
     """
-    C = src_mult.shape[1]
-    npairs = src_mult.shape[0]
+    npairs = src_idx.shape[0]
     nblk = -(-npairs // block)  # ceil
     pad_n = nblk * block - npairs
     out_dtype = loc_init.dtype
-    sm = jnp.pad(src_mult, ((0, pad_n), (0, 0))).reshape(nblk, block, C)
-    dl = jnp.pad(deltas, ((0, pad_n), (0, 0))).reshape(nblk, block, 3)
-    tg = jnp.pad(tgt, (0, pad_n)).reshape(nblk, block)
+    si = jnp.pad(src_idx, (0, pad_n)).reshape(nblk, block)
+    ti = jnp.pad(tgt_idx, (0, pad_n)).reshape(nblk, block)
     vd = jnp.pad(valid, (0, pad_n), constant_values=False).reshape(nblk, block)
 
     def body(
         loc: jax.Array,
-        blk: tuple[jax.Array, jax.Array, jax.Array, jax.Array],
+        blk: tuple[jax.Array, jax.Array, jax.Array],
     ) -> tuple[jax.Array, None]:
-        smb, dlb, tgb, vdb = blk
+        sib, tib, vdb = blk
+        smb = multip[sib].astype(m2l_dtype)
+        dlb = (tgt_centers[tib] - src_centers[sib]).astype(m2l_dtype)
         contribs = _apply_real_m2l(
-            smb.astype(m2l_dtype),
-            dlb.astype(m2l_dtype),
-            order=order,
-            m2l_impl="rot_scale",
+            smb, dlb, order=order, m2l_impl="rot_scale"
         ).astype(out_dtype)
         contribs = jnp.where(vdb[:, None], contribs, 0)
-        loc = loc + jax.ops.segment_sum(contribs, jnp.where(vdb, tgb, 0), total_nodes)
+        loc = loc + jax.ops.segment_sum(contribs, jnp.where(vdb, tib, 0), total_nodes)
         return loc, None
 
-    loc, _ = jax.lax.scan(body, loc_init, (sm, dl, tg, vd))
+    loc, _ = jax.lax.scan(body, loc_init, (si, ti, vd))
     return loc
 
 
@@ -844,14 +847,16 @@ def _make_fn(config: DistributedFMMConfig, ndev: int, cap: int) -> Callable:
             s_valid = (s_idx < s_active) & (s_src >= 0) & (s_tgt >= 0)
             s_safe_src = jnp.where(s_valid, s_src, 0)
             s_safe_tgt = jnp.where(s_valid, s_tgt, 0)
-            # Match the full-batch path exactly (pure refactor): its centers are cast to
-            # m2l_dtype before the delta subtraction, so do the same here.
-            centers_m = centers.astype(m2l_dtype)
+            # Index-based: gather the source multipoles + deltas inside the scan (avoids the
+            # full [Npairs, C] gather that otherwise peaks >1GB at high N). Self tree = single
+            # centre array for both src and tgt.
             loc_self = _chunked_real_m2l_accumulate(
                 zeros,
-                packed_use[s_safe_src],
-                centers_m[s_safe_tgt] - centers_m[s_safe_src],
+                packed_use,
+                s_safe_src,
                 s_safe_tgt,
+                centers,
+                centers,
                 s_valid,
                 order=p,
                 block=int(config.m2l_chunk),
@@ -906,15 +911,17 @@ def _make_fn(config: DistributedFMMConfig, ndev: int, cap: int) -> Callable:
         x_valid = x_tgt >= 0
         xs = jnp.where(x_valid, x_src, 0)
         xt = jnp.where(x_valid, x_tgt, 0)
-        x_deltas = centers[xt] - c_centers[xs]
         if is_real and config.m2l_chunk:
-            # Blockwise cross-far M2L: bounds peak memory to ~m2l_chunk pairs (removes the
-            # >200k/GPU OOM). Numerics-identical to the full batch (associative accumulate).
+            # Blockwise cross-far M2L, index-based (gathers source multipoles + deltas per
+            # block, so no full [Npairs, C] materialisation). Bounds peak memory; numerics-
+            # identical to the full batch (associative accumulate). src=coarse tree/centres.
             loc_full = _chunked_real_m2l_accumulate(
                 loc_self,
-                coarse_packed_use[xs],
-                x_deltas,
+                coarse_packed_use,
+                xs,
                 xt,
+                c_centers,
+                centers,
                 x_valid,
                 order=p,
                 block=int(config.m2l_chunk),
@@ -922,6 +929,7 @@ def _make_fn(config: DistributedFMMConfig, ndev: int, cap: int) -> Callable:
                 m2l_dtype=m2l_dtype,
             )
         else:
+            x_deltas = centers[xt] - c_centers[xs]
             if is_real:
                 x_contribs = _apply_real_m2l(
                     coarse_packed_use[xs].astype(m2l_dtype),
