@@ -527,7 +527,13 @@ def _chunked_pallas_nearfield_accumulate(
 
         # self term (block): pure-JAX per-leaf; scatters to global-order [cap+halo, 3].
         self_blk = _compute_leaf_p2p_prepared_large_n_self_only_impl(
-            concat_pos, tgt_pos, tgt_mass, tgt_mask, tgt_idx, G=G, softening_sq=softening_sq
+            concat_pos,
+            tgt_pos,
+            tgt_mass,
+            tgt_mask,
+            tgt_idx,
+            G=G,
+            softening_sq=softening_sq,
         )
 
         # per-block densification built DIRECTLY from the CSR (no [num_edges] window):

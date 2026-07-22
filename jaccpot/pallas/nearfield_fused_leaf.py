@@ -648,7 +648,9 @@ def nearfield_leafpair_pallas_decoupled(
     pad_t = width_pad - leaf_width
 
     tgt_pos_padded = (
-        jnp.pad(tgt_pos_padded, ((0, 0), (0, pad_t), (0, 0))) if pad_t else tgt_pos_padded
+        jnp.pad(tgt_pos_padded, ((0, 0), (0, pad_t), (0, 0)))
+        if pad_t
+        else tgt_pos_padded
     )
     tgt_mask_padded = jnp.pad(target_mask, ((0, 0), (0, pad_t)))
 
