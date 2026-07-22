@@ -70,6 +70,7 @@ from jaccpot.nearfield.near_field import (
     _compute_leaf_p2p_prepared_large_n_self_only_impl,
     _prepare_leaf_data_from_groups,
     _radix_fast_lane_prepacked_pallas,
+    _radix_fast_lane_prepacked_pallas_decoupled,
     compute_leaf_p2p_accelerations,
 )
 from jaccpot.operators.complex_ops import (
@@ -216,6 +217,15 @@ class DistributedFMMConfig:
     # ~block pairs regardless of the total, removing the M2L per-GPU ceiling at some
     # throughput cost. Numerics-identical (associative masked segment-sum accumulation).
     m2l_chunk: Optional[int] = None
+    # Chunk the fused-Pallas NEAR field over blocks of this many TARGET leaves (None = one
+    # full batch). The near field densifies the combined CSR into [u_leaves, S_near] tables
+    # + [num_edges] temporaries and runs the leafpair P2P over all u_leaves at once -- the
+    # ~40GB aggregate wall at >1.2M/GPU. Scanning fixed-size target-leaf blocks bounds both
+    # the densification and the P2P peak to ~block*S_near (source pool stays resident),
+    # removing the near-field per-GPU ceiling at some throughput cost. Numerics-identical
+    # (disjoint target blocks + scatter-add). Applies ONLY when the pallas near-field is
+    # active (nearfield_backend "pallas", or "auto" on Ampere+); ignored for baseline.
+    nearfield_chunk: Optional[int] = None
 
     def with_scaled_caps(
         self: "DistributedFMMConfig", factor: float
@@ -462,6 +472,95 @@ def _chunked_real_m2l_accumulate(
 
     loc, _ = jax.lax.scan(body, loc_init, (si, ti, vd))
     return loc
+
+
+def _chunked_pallas_nearfield_accumulate(
+    leaf_positions: jax.Array,
+    leaf_masses: jax.Array,
+    leaf_mask_g: jax.Array,
+    safe_idx: jax.Array,
+    concat_pos: jax.Array,
+    offsets: jax.Array,
+    counts: jax.Array,
+    src_s: jax.Array,
+    *,
+    n_lloc: int,
+    S_near: int,
+    block: int,
+    G: Any,
+    softening_sq: jax.Array,
+) -> jax.Array:
+    """Fused-Pallas near field over blocks of TARGET leaves (bounded peak memory).
+
+    Full-batch near field densifies the combined CSR into ``[u_leaves, S_near]`` tables (+
+    ``[num_edges]`` temporaries) and runs the leafpair P2P over all ``u_leaves`` at once -- the
+    ~40GB aggregate wall at >1.2M/GPU. This scans ``ceil(n_lloc/block)`` target-leaf blocks,
+    building each block's ``[block, S_near]`` densification + running self + pairs on the block,
+    so peak drops from ``u_leaves*S_near`` to ``block*S_near``. The SOURCE gather pool
+    (``leaf_positions``/``leaf_masses``/``leaf_mask_g``) stays fully resident (sources span all
+    ``u_leaves`` rows). Only target rows ``[0, n_lloc)`` produce kept output; per-block partials
+    scatter-add into a ``[cap+halo, 3]`` accumulator, so it is numerics-identical to the full batch
+    (disjoint target blocks -> exactly identical, not merely associative).
+
+    The per-block densification is built DIRECTLY from the CSR (``offsets``/``counts``/``src_s``):
+    ``sids_blk[i, j] = src_s[offsets[b0+i] + j]`` for ``j < min(counts[b0+i], S_near)`` -- the first
+    (up to) ``S_near`` sources of each target leaf, exactly what the full densification keeps (rank
+    ``< S_near``). This is ``[block, S_near]`` throughout (no ``[num_edges]`` temporaries) and is
+    bit-identical to the full batch: same ``src_s`` order, same per-leaf truncation, so raw per-leaf
+    counts exceeding ``S_near`` (offsets uncapped, counts from bincount) are truncated identically.
+    """
+    nblk = -(-n_lloc // block)  # ceil
+    num_edges = int(src_s.shape[0])
+    near0 = jnp.zeros_like(concat_pos)
+    cols = jnp.arange(S_near, dtype=INDEX_DTYPE)  # [S_near]
+    src_zero = jnp.asarray(0, src_s.dtype)
+
+    def _body(near: jax.Array, k: jax.Array) -> tuple[jax.Array, None]:
+        b0 = k * block
+        rows = b0 + jnp.arange(block, dtype=INDEX_DTYPE)
+        valid_t = rows < n_lloc
+        safe_rows = jnp.where(valid_t, rows, 0)
+        tgt_pos = leaf_positions[safe_rows]  # [block, W, 3]
+        tgt_mass = leaf_masses[safe_rows]  # [block, W]
+        tgt_mask = leaf_mask_g[safe_rows] & valid_t[:, None]  # [block, W]
+        tgt_idx = safe_idx[safe_rows]  # [block, W] global scatter targets
+
+        # self term (block): pure-JAX per-leaf; scatters to global-order [cap+halo, 3].
+        self_blk = _compute_leaf_p2p_prepared_large_n_self_only_impl(
+            concat_pos, tgt_pos, tgt_mass, tgt_mask, tgt_idx, G=G, softening_sq=softening_sq
+        )
+
+        # per-block densification built DIRECTLY from the CSR (no [num_edges] window):
+        # sids_blk[i, j] = src_s[offsets[b0+i] + j] for j < min(counts[b0+i], S_near).
+        leaf_off = offsets[safe_rows]  # [block] each target leaf's edge start
+        leaf_cnt = counts[safe_rows]  # [block] raw near count per target leaf
+        keep_col = (cols[None, :] < jnp.minimum(leaf_cnt, S_near)[:, None]) & valid_t[
+            :, None
+        ]  # [block, S_near]
+        edge_idx = leaf_off[:, None] + cols[None, :]  # [block, S_near]
+        safe_edge = jnp.clip(edge_idx, 0, num_edges - 1)
+        sids_blk = jnp.where(keep_col, src_s[safe_edge], src_zero)  # [block, S_near]
+        svalid_blk = keep_col
+
+        # pair term (block): full source pool resident, target restricted to the block.
+        pair_blk = _radix_fast_lane_prepacked_pallas_decoupled(
+            sids_blk[:, :, None],
+            svalid_blk[:, :, None],
+            tgt_pos,
+            tgt_mask,
+            tgt_idx,
+            leaf_positions,
+            leaf_masses,
+            leaf_mask_g,
+            concat_pos,
+            G=G,
+            softening_sq=softening_sq,
+            compute_potential=False,
+        )
+        return near + self_blk + pair_blk, None
+
+    near, _ = jax.lax.scan(_body, near0, jnp.arange(nblk, dtype=INDEX_DTYPE))
+    return near
 
 
 def _make_fn(config: DistributedFMMConfig, ndev: int, cap: int) -> Callable:
@@ -977,54 +1076,75 @@ def _make_fn(config: DistributedFMMConfig, ndev: int, cap: int) -> Callable:
                 leaf_mask_g,
                 safe_idx,
             ) = _prepare_leaf_data_from_groups(lp_idx, lp_mask, concat_pos, concat_mass)
-            self_acc = _compute_leaf_p2p_prepared_large_n_self_only_impl(
-                concat_pos,
-                leaf_positions,
-                leaf_masses,
-                leaf_mask_g,
-                safe_idx,
-                G=G,
-                softening_sq=soft2_a,
-            )
-            # Densify the combined CSR (offsets/src_s/counts, sorted by target) into a
-            # padded [u_leaves, S_near] source-leaf-id table + validity mask.
-            # int32 index math: e/t_of_e/rank/flat are pure [num_edges] index temporaries
-            # (values < u_leaves*S_near << 2^31 at any feasible per-GPU N), so int32 halves
-            # the near-field densification peak (the aggregate wall at >1.2M/GPU). Kernel-
-            # facing arrays (offsets/src_s/counts/sids) stay INDEX_DTYPE.
-            _i32 = jnp.int32
-            e = jnp.arange(src_s.shape[0], dtype=_i32)
-            t_of_e = (jnp.searchsorted(offsets, e, side="right") - 1).astype(_i32)
-            rank = (e - offsets[jnp.clip(t_of_e, 0, u_leaves)].astype(_i32)).astype(
-                _i32
-            )
-            in_range = (t_of_e >= 0) & (t_of_e < u_leaves) & (rank < S_near)
-            flat = jnp.where(in_range, t_of_e * _i32(S_near) + rank, _i32(-1))
-            sids = (
-                jnp.zeros((u_leaves * S_near,), INDEX_DTYPE)
-                .at[flat]
-                .set(src_s, mode="drop")
-                .reshape(u_leaves, S_near)
-            )
-            svalid = (
-                jnp.zeros((u_leaves * S_near,), bool)
-                .at[flat]
-                .set(jnp.ones_like(flat, bool), mode="drop")
-                .reshape(u_leaves, S_near)
-            )
-            pair_acc = _radix_fast_lane_prepacked_pallas(
-                sids.reshape(u_leaves, S_near, 1),
-                svalid.reshape(u_leaves, S_near, 1),
-                leaf_positions,
-                leaf_masses,
-                leaf_mask_g,
-                safe_idx,
-                concat_pos,
-                G=G,
-                softening_sq=soft2_a,
-                compute_potential=False,
-            )
-            near_full = self_acc + pair_acc
+            if config.nearfield_chunk:
+                # Bounded-memory path: scan target-leaf blocks (densification + leafpair
+                # P2P per block) instead of materialising the full [u_leaves, S_near] tables
+                # and running all u_leaves at once. Numerics-identical (disjoint target
+                # blocks + scatter-add). See _chunked_pallas_nearfield_accumulate.
+                near_full = _chunked_pallas_nearfield_accumulate(
+                    leaf_positions,
+                    leaf_masses,
+                    leaf_mask_g,
+                    safe_idx,
+                    concat_pos,
+                    offsets,
+                    counts,
+                    src_s,
+                    n_lloc=int(loc_idx.shape[0]),
+                    S_near=S_near,
+                    block=int(config.nearfield_chunk),
+                    G=G,
+                    softening_sq=soft2_a,
+                )
+            else:
+                self_acc = _compute_leaf_p2p_prepared_large_n_self_only_impl(
+                    concat_pos,
+                    leaf_positions,
+                    leaf_masses,
+                    leaf_mask_g,
+                    safe_idx,
+                    G=G,
+                    softening_sq=soft2_a,
+                )
+                # Densify the combined CSR (offsets/src_s/counts, sorted by target) into a
+                # padded [u_leaves, S_near] source-leaf-id table + validity mask.
+                # int32 index math: e/t_of_e/rank/flat are pure [num_edges] index temporaries
+                # (values < u_leaves*S_near << 2^31 at any feasible per-GPU N), so int32 halves
+                # the near-field densification peak (the aggregate wall at >1.2M/GPU). Kernel-
+                # facing arrays (offsets/src_s/counts/sids) stay INDEX_DTYPE.
+                _i32 = jnp.int32
+                e = jnp.arange(src_s.shape[0], dtype=_i32)
+                t_of_e = (jnp.searchsorted(offsets, e, side="right") - 1).astype(_i32)
+                rank = (e - offsets[jnp.clip(t_of_e, 0, u_leaves)].astype(_i32)).astype(
+                    _i32
+                )
+                in_range = (t_of_e >= 0) & (t_of_e < u_leaves) & (rank < S_near)
+                flat = jnp.where(in_range, t_of_e * _i32(S_near) + rank, _i32(-1))
+                sids = (
+                    jnp.zeros((u_leaves * S_near,), INDEX_DTYPE)
+                    .at[flat]
+                    .set(src_s, mode="drop")
+                    .reshape(u_leaves, S_near)
+                )
+                svalid = (
+                    jnp.zeros((u_leaves * S_near,), bool)
+                    .at[flat]
+                    .set(jnp.ones_like(flat, bool), mode="drop")
+                    .reshape(u_leaves, S_near)
+                )
+                pair_acc = _radix_fast_lane_prepacked_pallas(
+                    sids.reshape(u_leaves, S_near, 1),
+                    svalid.reshape(u_leaves, S_near, 1),
+                    leaf_positions,
+                    leaf_masses,
+                    leaf_mask_g,
+                    safe_idx,
+                    concat_pos,
+                    G=G,
+                    softening_sq=soft2_a,
+                    compute_potential=False,
+                )
+                near_full = self_acc + pair_acc
         else:
             near_full = compute_leaf_p2p_accelerations(
                 tree,
