@@ -453,9 +453,9 @@ def _chunked_real_m2l_accumulate(
         sib, tib, vdb = blk
         smb = multip[sib].astype(m2l_dtype)
         dlb = (tgt_centers[tib] - src_centers[sib]).astype(m2l_dtype)
-        contribs = _apply_real_m2l(
-            smb, dlb, order=order, m2l_impl="rot_scale"
-        ).astype(out_dtype)
+        contribs = _apply_real_m2l(smb, dlb, order=order, m2l_impl="rot_scale").astype(
+            out_dtype
+        )
         contribs = jnp.where(vdb[:, None], contribs, 0)
         loc = loc + jax.ops.segment_sum(contribs, jnp.where(vdb, tib, 0), total_nodes)
         return loc, None
