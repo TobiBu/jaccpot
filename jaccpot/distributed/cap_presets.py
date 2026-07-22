@@ -69,20 +69,37 @@ def save_presets(path: str, presets: dict) -> None:
     os.replace(tmp, path)
 
 
+def _scale_caps(caps: dict[str, Any], num: int, den: int) -> dict[str, Any]:
+    """Scale integer caps by num/den (ceil); None stays None."""
+    return {
+        f: (None if caps.get(f) is None else int((int(caps[f]) * num + den - 1) // den))
+        for f in CAP_FIELDS
+    }
+
+
 def lookup(presets: dict, per_gpu_n: int, ndev: int) -> Optional[dict]:
     """Caps for (per_gpu_n, ndev): exact match, else the nearest LARGER per-GPU N at the
-    same ndev (a safe over-estimate). None if nothing usable."""
+    same ndev (a safe over-estimate), else the nearest SMALLER preset SCALED UP by the
+    per-GPU-N ratio. The scaled seed is only a starting point -- auto_scale refines it (and
+    the caller can refresh the preset), so a slight under/over-estimate just costs a retry
+    or a little memory, not correctness. Extrapolating from a nearby preset is what makes
+    calibration cheap at an unmeasured N (few retries instead of the full doubling ladder
+    from the small defaults). None if no preset at this ndev at all."""
     k = _key(per_gpu_n, ndev)
     if k in presets:
         return presets[k]["caps"]
-    larger = [
+    same = [
         (int(kk.split(":")[0]), v["caps"])
         for kk, v in presets.items()
-        if kk.endswith(f":{int(ndev)}") and int(kk.split(":")[0]) >= int(per_gpu_n)
+        if kk.endswith(f":{int(ndev)}")
     ]
+    if not same:
+        return None
+    larger = [(n, c) for n, c in same if n >= int(per_gpu_n)]
     if larger:
         return min(larger, key=lambda t: t[0])[1]
-    return None
+    n0, c0 = max(same, key=lambda t: t[0])  # largest smaller
+    return _scale_caps(c0, int(per_gpu_n), n0)
 
 
 def record(
