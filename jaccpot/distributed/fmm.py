@@ -995,11 +995,11 @@ def _make_fn(config: DistributedFMMConfig, ndev: int, cap: int) -> Callable:
             _i32 = jnp.int32
             e = jnp.arange(src_s.shape[0], dtype=_i32)
             t_of_e = (jnp.searchsorted(offsets, e, side="right") - 1).astype(_i32)
-            rank = (e - offsets[jnp.clip(t_of_e, 0, u_leaves)].astype(_i32)).astype(_i32)
-            in_range = (t_of_e >= 0) & (t_of_e < u_leaves) & (rank < S_near)
-            flat = jnp.where(
-                in_range, t_of_e * _i32(S_near) + rank, _i32(-1)
+            rank = (e - offsets[jnp.clip(t_of_e, 0, u_leaves)].astype(_i32)).astype(
+                _i32
             )
+            in_range = (t_of_e >= 0) & (t_of_e < u_leaves) & (rank < S_near)
+            flat = jnp.where(in_range, t_of_e * _i32(S_near) + rank, _i32(-1))
             sids = (
                 jnp.zeros((u_leaves * S_near,), INDEX_DTYPE)
                 .at[flat]
