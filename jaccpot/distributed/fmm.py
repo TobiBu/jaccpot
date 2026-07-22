@@ -578,7 +578,9 @@ def _make_fn(config: DistributedFMMConfig, ndev: int, cap: int) -> Callable:
             src = jnp.concatenate([l_src_row, r_src_row])
             valid = jnp.concatenate([l_valid, r_valid])
         sentinel = jnp.asarray(u_leaves, INDEX_DTYPE)
-        tgt = jnp.where(valid, tgt, sentinel)
+        # tgt holds target leaf-row ids (<= u_leaves << 2^31), so int32 halves the argsort
+        # value array and the bincount scatter (the 1.27GiB near-field alloc at high N).
+        tgt = jnp.where(valid, tgt, sentinel).astype(jnp.int32)
         src = jnp.where(valid, src, sentinel)
 
         srt = jnp.argsort(tgt)
@@ -986,11 +988,18 @@ def _make_fn(config: DistributedFMMConfig, ndev: int, cap: int) -> Callable:
             )
             # Densify the combined CSR (offsets/src_s/counts, sorted by target) into a
             # padded [u_leaves, S_near] source-leaf-id table + validity mask.
-            e = jnp.arange(src_s.shape[0], dtype=INDEX_DTYPE)
-            t_of_e = jnp.searchsorted(offsets, e, side="right") - 1
-            rank = e - offsets[jnp.clip(t_of_e, 0, u_leaves)]
+            # int32 index math: e/t_of_e/rank/flat are pure [num_edges] index temporaries
+            # (values < u_leaves*S_near << 2^31 at any feasible per-GPU N), so int32 halves
+            # the near-field densification peak (the aggregate wall at >1.2M/GPU). Kernel-
+            # facing arrays (offsets/src_s/counts/sids) stay INDEX_DTYPE.
+            _i32 = jnp.int32
+            e = jnp.arange(src_s.shape[0], dtype=_i32)
+            t_of_e = (jnp.searchsorted(offsets, e, side="right") - 1).astype(_i32)
+            rank = (e - offsets[jnp.clip(t_of_e, 0, u_leaves)].astype(_i32)).astype(_i32)
             in_range = (t_of_e >= 0) & (t_of_e < u_leaves) & (rank < S_near)
-            flat = jnp.where(in_range, t_of_e * S_near + rank, -1)
+            flat = jnp.where(
+                in_range, t_of_e * _i32(S_near) + rank, _i32(-1)
+            )
             sids = (
                 jnp.zeros((u_leaves * S_near,), INDEX_DTYPE)
                 .at[flat]
