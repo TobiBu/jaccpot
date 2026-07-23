@@ -582,6 +582,127 @@ def nearfield_leafpair_pallas(
     return out
 
 
+def nearfield_leafpair_pallas_decoupled(
+    target_positions: Array,
+    target_mask: Array,
+    source_positions: Array,
+    source_masses: Array,
+    source_mask: Array,
+    source_leaf_ids: Array,
+    source_valid: Array,
+    *,
+    softening_sq: Array,
+    G: Array,
+    num_warps: int | None = None,
+    num_stages: int = 1,
+    target_subtile: int | None = None,
+    interpret: bool = False,
+) -> Array:
+    """Leaf-pair near-field with the target set decoupled from the source gather pool.
+
+    Identical kernel/math to :func:`nearfield_leafpair_pallas`, but the target rows
+    (``target_positions``/``target_mask``, shape ``[num_targets, W, 3]`` / ``[num_targets, W]``)
+    and the source gather tables (``source_positions``/``source_masses``/``source_mask``, shape
+    ``[num_sources, W, *]``) are SEPARATE arrays. ``source_leaf_ids``/``source_valid`` are
+    ``[num_targets, S]`` and reference source rows by global id in ``[0, num_sources)``. This
+    lets a caller compute a BLOCK of target leaves while keeping the full source pool resident
+    (the near-field leaf-block chunking used by the distributed driver). Passing the same array
+    as both target and source reproduces :func:`nearfield_leafpair_pallas` bit-for-bit.
+
+    Returns ``[num_targets, W, _OUT_WIDTH]`` (accel lanes 0:3, potential lane 3).
+    """
+
+    if pl is None or plgpu is None:
+        raise RuntimeError("jax.experimental.pallas is not available")
+
+    target_positions = jnp.asarray(target_positions)
+    dtype = target_positions.dtype
+    target_mask = jnp.asarray(target_mask, dtype=bool)
+    source_positions = jnp.asarray(source_positions, dtype=dtype)
+    source_masses = jnp.asarray(source_masses, dtype=dtype)
+    source_mask = jnp.asarray(source_mask, dtype=bool)
+    source_leaf_ids = jnp.asarray(source_leaf_ids)
+    source_valid = jnp.asarray(source_valid, dtype=bool)
+    softening_sq_arr = jnp.asarray([softening_sq], dtype=dtype)
+    g_arr = jnp.asarray([G], dtype=dtype)
+
+    if target_positions.ndim != 3 or target_positions.shape[-1] != 3:
+        raise ValueError("target_positions must have shape (num_targets, W, 3)")
+    if source_positions.ndim != 3 or source_positions.shape[-1] != 3:
+        raise ValueError("source_positions must have shape (num_sources, W, 3)")
+
+    num_targets = int(target_positions.shape[0])
+    leaf_width = int(target_positions.shape[1])
+    num_sources = int(source_positions.shape[0])
+    num_source_slots = int(source_leaf_ids.shape[1])
+
+    if num_targets == 0 or leaf_width == 0 or num_source_slots == 0 or num_sources == 0:
+        return jnp.zeros((num_targets, leaf_width, _OUT_WIDTH), dtype=dtype)
+
+    tgt_pos_padded = jnp.pad(target_positions, ((0, 0), (0, 0), (0, _POS_WIDTH - 3)))
+    src_pos_padded = jnp.pad(source_positions, ((0, 0), (0, 0), (0, _POS_WIDTH - 3)))
+
+    bt = _resolve_subtile(target_subtile, leaf_width)
+    width_pad = ((leaf_width + bt - 1) // bt) * bt
+    n_sub = width_pad // bt
+    pad_t = width_pad - leaf_width
+
+    tgt_pos_padded = (
+        jnp.pad(tgt_pos_padded, ((0, 0), (0, pad_t), (0, 0)))
+        if pad_t
+        else tgt_pos_padded
+    )
+    tgt_mask_padded = jnp.pad(target_mask, ((0, 0), (0, pad_t)))
+
+    if num_warps is None:
+        num_warps = max(1, bt // 32)
+
+    def _kernel(*refs: object) -> None:
+        return _nearfield_leafpair_kernel(
+            *refs, num_source_slots=num_source_slots, leaf_width=leaf_width
+        )
+
+    kernel = pl.pallas_call(
+        _kernel,
+        out_shape=jax.ShapeDtypeStruct((num_targets, width_pad, _OUT_WIDTH), dtype),
+        in_specs=[
+            pl.BlockSpec((1, bt, _POS_WIDTH), lambda leaf, sub: (leaf, sub, 0)),
+            pl.BlockSpec((1, bt), lambda leaf, sub: (leaf, sub)),
+            # Full source gather tables (indexed by data-dependent global source leaf id).
+            pl.BlockSpec(
+                (num_sources, leaf_width, _POS_WIDTH), lambda leaf, sub: (0, 0, 0)
+            ),
+            pl.BlockSpec((num_sources, leaf_width), lambda leaf, sub: (0, 0)),
+            pl.BlockSpec((num_sources, leaf_width), lambda leaf, sub: (0, 0)),
+            pl.BlockSpec((1, num_source_slots), lambda leaf, sub: (leaf, 0)),
+            pl.BlockSpec((1, num_source_slots), lambda leaf, sub: (leaf, 0)),
+            pl.BlockSpec((1,), lambda leaf, sub: (0,)),
+            pl.BlockSpec((1,), lambda leaf, sub: (0,)),
+        ],
+        out_specs=pl.BlockSpec((1, bt, _OUT_WIDTH), lambda leaf, sub: (leaf, sub, 0)),
+        grid=(num_targets, n_sub),
+        compiler_params=plgpu.CompilerParams(
+            num_warps=int(num_warps), num_stages=int(num_stages)
+        ),
+        interpret=bool(interpret),
+        name=f"nearfield_leafpair_dec_t{bt}_s{num_source_slots}_w{leaf_width}",
+    )
+    out = kernel(
+        tgt_pos_padded,
+        tgt_mask_padded,
+        src_pos_padded,
+        source_masses,
+        source_mask,
+        source_leaf_ids,
+        source_valid,
+        softening_sq_arr,
+        g_arr,
+    )
+    if pad_t:
+        out = out[:, :leaf_width, :]
+    return out
+
+
 __all__ = [
     "nearfield_fused_leaf",
     "nearfield_fused_leaf_backend",
@@ -589,5 +710,6 @@ __all__ = [
     "nearfield_fused_leaf_pallas",
     "nearfield_leafpair_jax",
     "nearfield_leafpair_pallas",
+    "nearfield_leafpair_pallas_decoupled",
     "pallas_nearfield_fused_supported",
 ]

@@ -3219,6 +3219,95 @@ def _radix_fast_lane_prepacked_pallas(
     return pair_acc
 
 
+def _radix_fast_lane_prepacked_pallas_decoupled(
+    source_leaf_ids_padded: Array,
+    source_valid_mask_padded: Array,
+    target_positions: Array,
+    target_mask: Array,
+    target_particle_idx: Array,
+    source_positions: Array,
+    source_masses: Array,
+    source_mask: Array,
+    positions: Array,
+    *,
+    G: Union[float, Array],
+    softening_sq: Array,
+    compute_potential: bool = False,
+    num_warps: Optional[int] = None,
+    num_stages: int = 1,
+    target_subtile: Optional[int] = None,
+    interpret: bool = False,
+) -> Union[Array, Tuple[Array, Array]]:
+    """Decoupled twin of :func:`_radix_fast_lane_prepacked_pallas`.
+
+    The TARGET leaves (``target_positions``/``target_mask``/``target_particle_idx``, a block of
+    ``[num_targets, W, *]``) are separate from the full SOURCE gather pool
+    (``source_positions``/``source_masses``/``source_mask``, ``[num_sources, W, *]``). Source-leaf
+    ids in ``source_leaf_ids_padded`` reference global source rows in ``[0, num_sources)``. This
+    lets a caller run one block of target leaves against the full source pool (near-field leaf-block
+    chunking). Scatters the block's per-particle accel into a ``zeros_like(positions)`` buffer via
+    the global ``target_particle_idx`` (scatter-add) so per-block partials compose by ``+``. Target
+    masses are unused by the pair term. The intra-leaf self term is handled separately by the caller.
+    """
+    from jaccpot.pallas.nearfield_fused_leaf import (
+        nearfield_leafpair_pallas_decoupled,
+    )
+
+    dtype = positions.dtype
+    g_const = jnp.asarray(G, dtype=dtype)
+
+    num_targets = int(source_leaf_ids_padded.shape[0])
+    num_source_slots = int(source_leaf_ids_padded.shape[1]) * int(
+        source_leaf_ids_padded.shape[2]
+    )
+
+    accelerations = jnp.zeros_like(positions)
+    empty = (
+        num_targets == 0
+        or num_source_slots == 0
+        or int(target_positions.shape[1]) == 0
+        or int(source_positions.shape[0]) == 0
+    )
+    if empty:
+        if compute_potential:
+            return accelerations, jnp.zeros(positions.shape[:1], dtype=dtype)
+        return accelerations
+
+    source_leaf_ids_flat = source_leaf_ids_padded.reshape(
+        (num_targets, num_source_slots)
+    )
+    source_valid_flat = source_valid_mask_padded.reshape(
+        (num_targets, num_source_slots)
+    )
+
+    out = nearfield_leafpair_pallas_decoupled(
+        target_positions,
+        target_mask,
+        source_positions,
+        source_masses,
+        source_mask,
+        source_leaf_ids_flat,
+        source_valid_flat,
+        softening_sq=softening_sq,
+        G=g_const,
+        num_warps=num_warps,
+        num_stages=num_stages,
+        target_subtile=target_subtile,
+        interpret=interpret,
+    )
+
+    pair_acc = _scatter_contributions(
+        accelerations, target_particle_idx, out[..., :3], target_mask
+    )
+    if compute_potential:
+        potentials = jnp.zeros(positions.shape[:1], dtype=dtype)
+        pair_pot = _scatter_scalar_contributions(
+            potentials, target_particle_idx, out[..., 3], target_mask
+        )
+        return pair_acc, pair_pot
+    return pair_acc
+
+
 def compute_leaf_p2p_accelerations_radix_fast_lane(
     *,
     positions_sorted: Array,

@@ -17,11 +17,48 @@ _Bookkeeping + plan, 2026-07-14._
     direct (beats bh's 0.24%), no overflow; solidfmm/bh kept behind explicit config + test.
   - Tests: `tests/test_distributed_fmm_driver.py` (default real+dehnen, real+bh, legacy
     solidfmm, jit==eager) + `tests/test_real_upward_sweep.py` — all green on CPU.
-- **NEXT — 5c (needs GPU):** set `JACCPOT_STATIC_STRICT_FUSED_M2L_PALLAS=1` (M2L already
-  routes through `_apply_real_m2l` → fused real M2L Pallas engages automatically) + swap the
-  near-field from `nearfield_mode="baseline"` to the fused Pallas P2P. Validate on Ampere.
-- **NEXT — 5d (needs GPU):** weak/strong multi-GPU scaling via `benchmark_multigpu/`; compare
-  per-device throughput to the single-GPU O(N) curve; watch LET/comm overhead.
+- **DONE — 5c (A100, 2026-07-19):**
+  - **Fused real M2L Pallas** engaged via `JACCPOT_STATIC_STRICT_FUSED_M2L_PALLAS=1` — no code
+    change; both self-M2L (`_accumulate_real_m2l_fullbatch`) and cross-M2L route through
+    `_apply_real_m2l`. Parity-neutral: flag-on vs flag-off forces match to **4.4e-9**.
+  - **Fused leafpair Pallas near-field**: new `DistributedFMMConfig.nearfield_backend`
+    {`auto`,`pallas`,`baseline`} (auto→pallas on sm_80+). The pallas branch computes the
+    intra-leaf self block via `_compute_leaf_p2p_prepared_large_n_self_only_impl` and the
+    cross-leaf pairs via `_radix_fast_lane_prepacked_pallas` over the `_combined_neighbors`
+    CSR densified to a padded `[u_leaves, S_near]` source-leaf table. Parity vs baseline P2P
+    = **2.1e-7** (CPU `interpret=True` de-risk 2e-16), aggL2 vs direct **1.78e-4** @ per=8000.
+  - **The near-field was the entire bottleneck.** Build-once steady-state whole-eval
+    (ndev=2, per=8000/leaf=128): baseline near **10.7 s → 43.5 ms with Pallas (~245x)**.
+    traversal + far-field are only ~40 ms — the ~10 s previously attributed to the
+    overhead-bound traversal was actually the pure-JAX baseline near-field leaf-pair P2P.
+    M2L-Pallas on/off is negligible at this near-field-dominated config.
+  - `jit=True` is STABLE with both backends (the earlier illegal-address crash did not
+    reproduce). NB: `distributed_fmm_accelerations` rebuilds+recompiles per call (~50-80 s) —
+    build once via `make_force_evaluator(...,jit=True)` for steady-state timing.
+- **DONE — 5d (A100, cap-calibrated build-once steady-state; 2026-07-20):**
+  - `distributed_fmm_accelerations` gained `auto_scale_caps` (retry with `with_scaled_caps`
+    on a traversal-buffer overflow) — the cross-domain LET grows with device count so the
+    fixed default caps overflow at ndev≥4. Test `test_driver_auto_scale_caps`.
+  - **Weak scaling** (per=8000/GPU, pallas near + fused M2L, overflow-free after calibration):
+
+    | ndev | N | cap× | min ms | throughput (part/s) |
+    |---|---|---|---|---|
+    | 2 | 16 000 | 1 | 41.6 | 3.8e5 |
+    | 3 | 24 000 | 1 | 46.6 | 5.2e5 |
+    | 4 | 32 000 | 2 | 59.6 | 5.4e5 |
+    | 5 | 40 000 | 2 | 64.3 | 6.2e5 |
+
+    Throughput RISES with GPU count (positive weak scaling); per-eval grows 42→64 ms from
+    LET comm + the ×2 padded-cap overhead at ndev≥4.
+  - **Strong scaling** (total N=40 000) is **density-limited**: at per-GPU N > ~8000 (ndev 2-4:
+    per=20000/13333/10000) the fixed-topology traversal caps explode and STILL overflow at
+    cap×64 (max retries) → forces truncated, 400-720 ms (padded pair-queue overhead dominates).
+    Only ndev=5 (per=8000) is valid (64.7 ms). **Healthy regime = per-GPU N ≈ 8000**; scale by
+    adding GPUs to keep per-GPU N there (= weak scaling).
+  - **CAVEAT: the jit=True illegal-address crash is INTERMITTENT** (nondeterministic OOB) — most
+    runs succeed but one recurred at weak ndev=2; run each eval in its own process. Root-cause +
+    a padded-pair-queue right-sizing (to lift the per-GPU-N ceiling for strong scaling) are the
+    two remaining follow-ups.
 
 ---
 
