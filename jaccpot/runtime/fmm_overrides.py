@@ -129,6 +129,7 @@ class OverridesMixin:
         minimum_memory: bool,
         production_large_n: bool,
         grouped_interactions: bool,
+        honor_explicit_traversal: bool = False,
     ) -> Optional[DualTreeTraversalConfig]:
         """Apply the deterministic GPU traversal memory-safety caps.
 
@@ -220,11 +221,20 @@ class OverridesMixin:
         if (
             production_large_n
             and backend_name == "gpu"
+            and not (self._explicit_traversal_config and honor_explicit_traversal)
             and traversal_config is not None
         ):
-            # Production large-N radix path should not allow oversized explicit
-            # traversal seeds to inflate memory footprint. Keep user overrides
-            # only within the bounded streamed minimum-memory ceiling.
+            # Bound the production large-N radix traversal to the streamed
+            # minimum-memory ceiling so an oversized *preset* seed cannot inflate the
+            # device footprint. But when the caps were supplied EXPLICITLY and the
+            # caller is in static fixed-sizing mode (``honor_explicit_traversal``),
+            # pass them through unclamped: static sizing means "use the sizes I gave
+            # you", and this ceiling is a fixed constant (524288 pair-queue) far below
+            # the frontier a concentrated multi-million-particle disk needs -- clamping
+            # an explicit cap there turned a deliberate, memory-fitting override into a
+            # fail-fast traversal overflow at N >= ~2M on >=40 GB GPUs. Auto-sized
+            # (non-explicit) preset seeds are still bounded here, and the adaptive path
+            # (static sizing off) still clamps explicit caps for adaptive memory mgmt.
             explicit_ceiling = _minimum_memory_streamed_gpu_traversal_ceiling(
                 num_particles=n_particles
             )
@@ -400,8 +410,11 @@ class OverridesMixin:
             # Deterministic GPU memory-safety traversal caps are NOT adaptive
             # rewrites -- they bound the streamed GPU traversal buffers on the
             # minimum-memory / large-N production lane and must still apply here,
-            # otherwise oversized preset/explicit seeds reach the GPU build
-            # unclamped and inflate device memory (a minimum-memory OOM regression).
+            # otherwise an oversized *preset* seed reaches the GPU build unclamped
+            # and inflates device memory (a minimum-memory OOM regression). Static
+            # fixed sizing keeps EXPLICIT caps as-given (honor_explicit_traversal),
+            # so a caller who sized the traversal for their GPU is not clamped into
+            # a fail-fast overflow at large N.
             traversal_config = self._clamp_gpu_traversal_config_for_memory(
                 traversal_config=traversal_config,
                 backend_name=backend_name,
@@ -409,6 +422,7 @@ class OverridesMixin:
                 minimum_memory=minimum_memory,
                 production_large_n=production_large_n,
                 grouped_interactions=grouped_interactions,
+                honor_explicit_traversal=True,
             )
             return _RuntimeExecutionOverrides(
                 traversal_config=traversal_config,
