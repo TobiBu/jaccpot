@@ -157,3 +157,45 @@ outer-jittable at arbitrary N is a scoped follow-up.
   (rotate-to-z kink risk), **mass-gradient traceability**, and **forward parity** vs
   `compute_accelerations`.
 - Golden oracle and public-API-surface tests stay green throughout.
+
+## PR-1 outcomes — reverse-pass performance (analytic rules + outer-jit)
+
+Follow-up work (`feat/fmm-analytic-custom-vjp`) profiled and optimized the reverse pass.
+The measured ~9x reverse overhead (and a startling ~360ms forward at N=1024/p=4) turned
+out to be dominated **entirely by the near-field P2P**, not L2P/M2L/L2L:
+
+| stage | fwd | reverse ratio |
+|---|---|---|
+| upward P2M+M2M | 3.1ms | 4.2x |
+| downward M2L+L2L | 0.08ms | 1.1x (linear) |
+| L2P (far) | 0.16ms | 1.56x (analytic custom_vjp) |
+| **near-field P2P** | **411ms** | **7.7x** |
+
+Delivered:
+
+1. **Near-field `"bucketed"` mode on the differentiable path (dominant win).** The path
+   was running the serialized `"baseline"` near-field (a per-leaf `lax.scan`, gated to
+   large-N only); a dense O(N²) direct sum at N=1024 is 0.2ms. Forcing the vectorized
+   `"bucketed"` mode (bit-identical, rel-L2 3e-16) via a `nearfield_mode_override` threaded
+   from `differentiable_accelerations` → seam → `_evaluate_prepared_tree` → `evaluate_tree`
+   gives **fwd 20.3ms→0.48ms (N=256), 357ms→1.11ms (N=1024)** and drops the reverse ratio
+   to ~2.5–4x. Forward `compute_accelerations` is unchanged (override defaults `None`).
+2. **Outer-jit at large N.** Two `int(jnp.max(node_levels…))` host ops in the re-run
+   sweeps (`_resolve_upward_num_levels`, and the L2L level-count in
+   `_prepare_solidfmm_downward_sweep`) are resolved on the host (device_get the *full*
+   concrete array, then slice+reduce in numpy). `jax.jit(jax.grad(differentiable_accelerations))`
+   now works at N=4096/8192 (gradients bit-identical to bare grad, rel ~1e-16; N=4096
+   jitted reverse ratio 1.26).
+3. **Real-basis L2P analytic `custom_vjp`** (`evaluate_local_real_with_grad`): a linear
+   coefficient VJP + a Hessian-vector product replace the second-order-autodiff blow-up
+   (isolated L2P reverse 1.56x). Byte-identical forward. Off-switch
+   `JACCPOT_ANALYTIC_L2P_VJP=0`. Matters for L2P-dominated configs; negligible in the
+   near-field-dominated default.
+4. **`custom_vjp` parity harness** (`tests/unit/test_custom_vjp_parity.py`): bit-for-bit
+   VJP-vs-autodiff verification for every analytic rule.
+
+**Remaining (optional, now-modest ROI):** a P2P analytic `custom_vjp` (symmetric tidal
+tensor) on the clean pairwise kernel `nearfield/near_field.py:_pair_contributions_batched`
+would cut the near-field reverse from ~4x toward ~2x — the paper's analytic-derivative-
+speedup figure — but the reverse ratio is already 1.3–4x after the bucketed fix. Complex-
+basis L2P `custom_vjp` (analytic tower already in-tree) is similarly low-ROI now.
