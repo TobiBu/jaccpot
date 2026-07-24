@@ -384,6 +384,7 @@ class EvaluateMixin:
         masses_sorted: Optional[Array] = None,
         target_indices: Optional[Array] = None,
         jit_traversal: bool = True,
+        nearfield_mode_override: Optional[str] = None,
     ) -> Array:
         """Evaluate accelerations for updated sorted positions on a fixed topology.
 
@@ -474,6 +475,7 @@ class EvaluateMixin:
                 return_potential=False,
                 jit_traversal=jit_traversal,
                 max_acc_derivative_order=0,
+                nearfield_mode_override=nearfield_mode_override,
             )
         else:
             target_sorted_indices = jnp.asarray(
@@ -519,6 +521,7 @@ class EvaluateMixin:
         *,
         target_indices: Optional[Array] = None,
         jit_traversal: bool = False,
+        nearfield_mode_override: Optional[str] = None,
     ) -> Array:
         """Fixed-topology re-eval at live sorted positions AND masses.
 
@@ -533,6 +536,7 @@ class EvaluateMixin:
             masses_sorted=masses_sorted,
             target_indices=target_indices,
             jit_traversal=jit_traversal,
+            nearfield_mode_override=nearfield_mode_override,
         )
 
     @jaxtyped(typechecker=beartype)
@@ -631,12 +635,18 @@ class EvaluateMixin:
             forward_permutation
         ]
         # The seam already returns accelerations in the original input order.
+        # Force the vectorized "bucketed" near-field: it is bit-identical to the
+        # default "baseline" scan (which is gated to large-N only) but ~600x
+        # faster at moderate N and has a cheaper reverse pass. At very large N its
+        # higher memory footprint may matter; the reverse pass bounds N here
+        # anyway. See docs/differentiable_fmm_design.md.
         return self._evaluate_prepared_state_at_positions_and_masses_sorted(
             state,
             positions_sorted,
             masses_sorted,
             target_indices=target_indices,
             jit_traversal=jit_traversal,
+            nearfield_mode_override="bucketed",
         )
 
     @jaxtyped(typechecker=beartype)
@@ -660,8 +670,16 @@ class EvaluateMixin:
         precomputed_chunk_unique_indices: Optional[Array] = None,
         max_leaf_size: Optional[int] = None,
         return_potential: bool = False,
+        nearfield_mode_override: Optional[str] = None,
     ) -> Union[Array, Tuple[Array, Array]]:
-        """Combine far- and near-field effects for leaf particles."""
+        """Combine far- and near-field effects for leaf particles.
+
+        ``nearfield_mode_override`` forces the near-field execution mode instead
+        of the policy resolution (used by the differentiable path to select the
+        vectorized ``"bucketed"`` near-field, which is bit-identical to the
+        default ``"baseline"`` scan but orders of magnitude faster and has a
+        cheaper reverse pass). ``None`` keeps the resolved policy unchanged.
+        """
 
         setup = _prepare_tree_evaluation_inputs(
             tree,
@@ -687,8 +705,10 @@ class EvaluateMixin:
         resolved_max_leaf = setup.max_leaf_size
 
         order = int(locals_data.order)
-        nearfield_mode = self._resolve_nearfield_mode(
-            num_particles=int(positions.shape[0])
+        nearfield_mode = (
+            str(nearfield_mode_override).strip().lower()
+            if nearfield_mode_override is not None
+            else self._resolve_nearfield_mode(num_particles=int(positions.shape[0]))
         )
         nearfield_edge_chunk_size = self._resolve_nearfield_edge_chunk_size(
             num_particles=int(positions.shape[0]),

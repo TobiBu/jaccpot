@@ -2697,13 +2697,19 @@ def _evaluate_prepared_tree(
     return_potential: bool,
     jit_traversal: bool,
     max_acc_derivative_order: int = 0,
+    nearfield_mode_override: Optional[str] = None,
 ) -> Union[
     Array,
     Tuple[Array, Array],
     Tuple[Array, PackedAccelerationDerivatives],
     Tuple[Array, Array, PackedAccelerationDerivatives],
 ]:
-    """Run the prepared-tree evaluation returning Morton-sorted outputs."""
+    """Run the prepared-tree evaluation returning Morton-sorted outputs.
+
+    ``nearfield_mode_override`` forces the near-field mode (the differentiable
+    path passes ``"bucketed"`` for the fast, bit-identical, vectorized
+    near-field); ``None`` keeps the resolved policy.
+    """
 
     if int(max_acc_derivative_order) > 0:
         nearfield_mode = fmm._resolve_nearfield_mode(
@@ -2761,10 +2767,15 @@ def _evaluate_prepared_tree(
             return near_acc + far_acc, near_pot + far_pot, acc_derivatives
         return near + far_acc, acc_derivatives
 
+    # Only the non-compiled evaluate_tree accepts a near-field mode override;
+    # the compiled traversal resolves its own policy. The differentiable path
+    # uses jit_traversal=False, so the override reaches the near-field there.
+    extra_kwargs = {}
     if jit_traversal:
         evaluate_fn = fmm.evaluate_tree_compiled
     else:
         evaluate_fn = fmm.evaluate_tree
+        extra_kwargs["nearfield_mode_override"] = nearfield_mode_override
 
     return evaluate_fn(
         tree,
@@ -2784,6 +2795,7 @@ def _evaluate_prepared_tree(
         precomputed_chunk_unique_indices=nearfield_chunk_unique_indices,
         max_leaf_size=max_leaf_size,
         return_potential=return_potential,
+        **extra_kwargs,
     )
 
 
