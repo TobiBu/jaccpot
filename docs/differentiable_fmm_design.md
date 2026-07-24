@@ -107,6 +107,19 @@ def differentiable_accelerations(
   P2M→M2M→M2L→L2L source-side chain — the *wrong* gradient. The differentiable path must
   **re-run the sweeps** on live inputs.
 
+**jit limitation (known, scoped).** Bare `jax.grad`/`jax.vjp` over
+`differentiable_accelerations` give exact gradients at **every N** (verified to N=4096).
+Wrapping the *entire* call in an outer `jax.jit` (`jax.jit(jax.grad(loss))`) works at
+moderate N but fails at large N with a `ConcretizationTypeError`: the re-run of
+`prepare_upward_sweep`/`prepare_downward_sweep` still contains host-side ops
+(`int(jnp.max(...))`, `device_get`, numpy level-offset construction — audit finding B2)
+that JAX cannot stage once they stop being constant-folded. Two of these were made
+jit-safe here (the input permutation is resolved host-side to a compile-time constant;
+`_resolve_upward_num_levels` reduces on the host), but fully jit-tracing the prepared
+sweeps is a separate effort. Recommended usage is therefore bare `jax.grad(loss)` (the
+inner numeric kernels are already `@jax.jit`-compiled); making the whole re-eval
+outer-jittable at arbitrary N is a scoped follow-up.
+
 **Guards** (raise with a clear message):
 - `isinstance(state, LargeNPreparedState)` → reject (keeps Pallas near-field off the
   grad path).

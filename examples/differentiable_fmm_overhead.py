@@ -6,6 +6,13 @@ single GPU. Because the FMM translation cascade (M2M/M2L/L2L + rotations) is
 linear, its reverse pass is a transpose and the expected overhead is a small
 constant factor over the forward.
 
+Exact gradients via bare ``jax.grad``/``jax.vjp`` work at every N. Wrapping the
+*entire* call (which re-runs the upward/downward sweeps) in an outer ``jax.jit``
+is supported at moderate N; at large N it hits host-side ops in the prepared-
+state sweeps (see ``docs/differentiable_fmm_design.md`` "jit limitation"), so
+this benchmark times the jitted path where available and otherwise reports the
+bare (eager-dispatch) timing.
+
 Run (selects a free GPU via autocvd, per the repo policy):
 
     python examples/differentiable_fmm_overhead.py
@@ -41,17 +48,25 @@ def _bench(n, *, basis="complex", theta=0.5, order=4, leaf=32, reps=5, seed=0):
     fmm = FastMultipoleMethod(basis=basis, use_pallas=False, theta=theta, G=1.0, softening=1e-2)
     state = fmm.prepare_state(positions, masses, max_order=order, leaf_size=leaf)
 
-    fwd = jax.jit(lambda p, m: fmm.differentiable_accelerations(state, p, m))
-
     def scalar(p, m):
         return jnp.sum(fmm.differentiable_accelerations(state, p, m) ** 2)
 
-    vg = jax.jit(jax.value_and_grad(scalar, argnums=(0, 1)))
+    fwd_eager = lambda p, m: fmm.differentiable_accelerations(state, p, m)
+    vg_eager = jax.value_and_grad(scalar, argnums=(0, 1))
 
-    # warm up (compile)
-    jax.block_until_ready(fwd(positions, masses))
-    v, g = vg(positions, masses)
-    jax.block_until_ready((v, g))
+    # Prefer the jitted path; fall back to bare eager dispatch when the whole
+    # call is not jit-traceable at this N (host ops in the prepared sweeps).
+    mode = "jit"
+    try:
+        fwd = jax.jit(fwd_eager)
+        vg = jax.jit(vg_eager)
+        jax.block_until_ready(fwd(positions, masses))
+        jax.block_until_ready(vg(positions, masses))
+    except Exception:
+        mode = "eager"
+        fwd, vg = fwd_eager, vg_eager
+        jax.block_until_ready(fwd(positions, masses))
+        jax.block_until_ready(vg(positions, masses))
 
     def timeit(fn):
         best = float("inf")
@@ -63,14 +78,24 @@ def _bench(n, *, basis="complex", theta=0.5, order=4, leaf=32, reps=5, seed=0):
 
     t_fwd = timeit(lambda: fwd(positions, masses))
     t_vg = timeit(lambda: vg(positions, masses))
-    return t_fwd, t_vg
+    return t_fwd, t_vg, mode
 
 
 def main():
-    print(f"{'N':>8} {'fwd (ms)':>12} {'fwd+bwd (ms)':>14} {'ratio':>8}")
-    for n in (256, 1024, 4096, 16384):
-        t_fwd, t_vg = _bench(n)
-        print(f"{n:>8} {1e3 * t_fwd:>12.2f} {1e3 * t_vg:>14.2f} {t_vg / t_fwd:>8.2f}")
+    print(
+        f"{'N':>8} {'mode':>6} {'fwd (ms)':>12} {'fwd+bwd (ms)':>14} {'ratio':>8}",
+        flush=True,
+    )
+    for n in (256, 1024, 4096):
+        try:
+            t_fwd, t_vg, mode = _bench(n)
+            print(
+                f"{n:>8} {mode:>6} {1e3 * t_fwd:>12.2f} {1e3 * t_vg:>14.2f} "
+                f"{t_vg / t_fwd:>8.2f}",
+                flush=True,
+            )
+        except Exception as exc:  # noqa: BLE001 -- report and continue (e.g. OOM at large N)
+            print(f"{n:>8} skipped: {type(exc).__name__}", flush=True)
 
 
 if __name__ == "__main__":

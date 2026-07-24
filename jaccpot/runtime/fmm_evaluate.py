@@ -10,6 +10,7 @@ from typing import Any, Optional, Union
 
 import jax
 import jax.numpy as jnp
+import numpy as np
 from beartype import beartype
 from beartype.typing import Tuple
 from jaxtyping import Array, jaxtyped
@@ -575,6 +576,14 @@ class EvaluateMixin:
         jit_traversal : bool
             Kept ``False`` on the gradient path (fully pure-JAX ``evaluate_tree``).
 
+        Notes
+        -----
+        Bare ``jax.grad``/``jax.vjp`` over this method give exact gradients at every
+        N. Wrapping the *entire* call in an outer ``jax.jit`` is supported at moderate
+        N but can fail at large N (the re-run of the prepared sweeps retains host-side
+        ops); prefer ``jax.grad(loss)`` -- the inner numeric kernels are already
+        jit-compiled. See ``docs/differentiable_fmm_design.md`` ("jit limitation").
+
         Returns
         -------
         Array
@@ -603,15 +612,17 @@ class EvaluateMixin:
         # Reorder live inputs into Morton/sorted order using the FROZEN integer
         # permutation. ``state.inverse_permutation`` maps sorted -> original
         # (original[i] == sorted[inverse_permutation[i]]); its inverse ``fwd``
-        # maps original -> sorted. Both are integer-index gathers (VJP =
-        # scatter-add), so cotangents flow to positions/masses but never to the
-        # index arrays.
-        num_particles = int(state.inverse_permutation.shape[0])
-        inverse_permutation = jnp.asarray(state.inverse_permutation, dtype=INDEX_DTYPE)
-        forward_permutation = (
-            jnp.zeros((num_particles,), dtype=INDEX_DTYPE)
-            .at[inverse_permutation]
-            .set(jnp.arange(num_particles, dtype=INDEX_DTYPE))
+        # maps original -> sorted, so ``positions_sorted = positions[fwd]``.
+        # Resolve ``fwd`` on the HOST from the concrete prepared permutation so
+        # it embeds as a compile-time constant: a traced scatter would not be
+        # constant-folded under ``jax.jit`` for large N and would force
+        # concretization downstream. The gather VJP is scatter-add, so
+        # cotangents flow to positions/masses but never to the index array.
+        inverse_permutation_host = np.asarray(
+            jax.device_get(state.inverse_permutation)
+        )
+        forward_permutation = jnp.asarray(
+            np.argsort(inverse_permutation_host, kind="stable"), dtype=INDEX_DTYPE
         )
         positions_sorted = jnp.asarray(positions, dtype=state.working_dtype)[
             forward_permutation
