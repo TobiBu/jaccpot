@@ -208,3 +208,95 @@ Delivered:
 Pallas near-field/M2L kernels in `custom_vjp` (near-field reuses the P2P tidal-tensor
 reverse above; M2L reuses the adjoint-M2L) and lift the `LargeNPreparedState`/Pallas
 guard. Lower urgency since the bucketed pure-JAX path is already fast and differentiable.
+
+## PR-2 outcomes — differentiable fused-Pallas M2L fast lane (`feat/fmm-pallas-vjp`)
+
+`pallas_call` has no JVP/transpose rule, so the fused-Pallas M2L kernels were
+non-differentiable and `differentiable_accelerations` rejected the
+`JACCPOT_STATIC_STRICT_FUSED_M2L_PALLAS` flag outright. PR-2 makes the fused M2L a
+differentiable **opt-in fast lane** on the grad path.
+
+**Scope decision — the near-field Pallas wrapper was descoped (the reality check paid
+off).** Before wrapping the near-field, we measured the fused-Pallas near-field forward
+vs its pure-JAX twin on an A100 (`nearfield_fused_leaf_pallas` vs
+`nearfield_fused_leaf_jax`, identical leaf-major inputs):
+
+| config | pure-JAX | Pallas | speedup |
+|---|---|---|---|
+| N~1024, leaf 64 | 0.077 ms | 0.067 ms | 1.14x |
+| N~1024, leaf 32 | 0.080 ms | 0.069 ms | 1.17x |
+| N~4096, leaf 64 | 0.084 ms | 0.085 ms | 0.99x |
+| N~4096, leaf 64, K=1024 | 0.099 ms | 0.145 ms | 0.68x (slower) |
+| N~16384, leaf 64 | 0.160 ms | 0.087 ms | 1.85x |
+
+At the N the reverse pass bounds (~1k) the fused near-field is only ~1.1x, and it is
+*slower* at moderate N with denser sources; it wins only at large N (≥16k). The
+bucketed pure-JAX near-field is already differentiable and essentially as fast there,
+so the near-field `custom_vjp` is not worth the leafpair gather-structure pair-matching
+its analytic reverse would need. **The grad path keeps the bucketed near-field.**
+
+**Delivered:**
+
+1. **`custom_vjp` on the three fused Pallas M2L kernels** (`jaccpot/pallas/`):
+   `m2l_core_z_real_pallas_cvjp`, `m2l_complex_fused_pallas_cvjp`,
+   `m2l_real_fused_pallas_cvjp`. Each runs the Pallas kernel forward and takes the
+   reverse from autodiff of the in-file pure-jnp twin — the kernel's verified literal
+   port / recurrence (`bwd = grad(twin)`, correct-by-construction). Module-level rules
+   following the PR-1 `_pair_accel_cvjp` pattern: statics (`order`/`interpret`/`backend`)
+   in positional `nondiff_argnums`, all else explicit array args, **no closure over
+   tracers**. The M2L is linear in the multipoles, non-linear in the radius, and
+   b/tri-linear in the rotation blocks; autodiff of the twin handles every input exactly.
+   (Started with `bwd = grad(twin)` per the plan; the analytic adjoint-M2L is a later
+   refinement only if the twin autodiff ever becomes a bottleneck — it is not: M2L+L2L
+   is ~0.08 ms of the forward, see the PR-1 table above.)
+
+2. **Fast lane wired into dispatch + guard lifted.**
+   `_m2l_{complex,real}_batch_kernel_fused_pallas` (`runtime/kernels/core.py`) route
+   through the `_cvjp` wrappers, so the fused M2L is differentiable wherever it runs
+   (the `custom_vjp` forward *is* the Pallas kernel — byte-identical forward, negligible
+   overhead). `differentiable_accelerations` no longer rejects
+   `JACCPOT_STATIC_STRICT_FUSED_M2L_PALLAS`; setting it (Ampere+) opts into the
+   differentiable fused-Pallas M2L, else the default pure-JAX M2L. Off by default;
+   `LargeNPreparedState` stays rejected.
+
+3. **sm_80 gate fix.** The real-M2L routing gate `_real_m2l_pallas_active` now checks
+   `pallas_m2l_real_fused_supported()` (Ampere+, matching the complex gate) instead of
+   the gpu/tpu-only z-core `pallas_m2l_real_supported()`, so it no longer routes to a
+   Triton lowering that fails on a pre-Ampere GPU. `pallas_m2l_real_fused_supported()`
+   itself was hardened with the sm_80 check.
+
+4. **Coverage.** Added the missing forward parity test for `m2l_real_fused`
+   (`tests/test_m2l_real_fused_pallas.py`: Pallas-interpret vs the twin and vs the
+   rot-scale reference it accelerates). VJP parity for all three kernels via
+   `assert_vjp_matches` — interpret on CPU CI + real Pallas on the A100 (12 passed).
+   Gradient-correctness + grad-vs-direct-sum re-run with the flag ON on the A100
+   (17 passed: FD-vs-AD positions/masses complex+real, grad(FMM) vs grad(direct sum),
+   NaN/inf hygiene).
+
+**fwd/bwd consistency:** the reverse is the gradient of the pure-jnp twin, not
+bit-exactly of the Pallas forward (Pallas ≈ twin to ~1e-10 for the M2L literal ports).
+Both are valid FMM gradients to force accuracy — standard for a Pallas `custom_vjp`.
+
+**End-to-end overhead (`differentiable_accelerations`, A100, order 4, jitted;
+`examples/differentiable_fmm_overhead.py` run once per M2L mode):**
+
+| N | basis | fwd: pure-JAX → fused-Pallas | fwd+bwd: pure-JAX → fused-Pallas |
+|---|---|---|---|
+| 256 | complex | 0.84 → 0.49 ms (1.7x) | 1.68 → 1.20 ms (1.4x) |
+| 1024 | complex | 2.50 → 1.10 ms (2.3x) | 5.52 → 4.17 ms (1.3x) |
+| 256 | real | 0.91 → 0.49 ms (1.9x) | 1.77 → 1.19 ms (1.5x) |
+| 1024 | real | 2.33 → 1.15 ms (2.0x) | 5.68 → 4.18 ms (1.4x) |
+
+The fused-Pallas M2L roughly **halves the forward** and cuts fwd+bwd by ~1.3–1.5x on the
+grad path — a real win (the differentiable downward re-eval issues many small per-pair
+rotate/z-translate/rotate-back launches that the single fused kernel collapses; the
+per-stage PR-1 profile above under-counts this because it timed the M2L in isolation, not
+the re-eval's launch overhead). **The reverse does not get the Pallas speedup:** the
+`custom_vjp` backward runs the pure-jnp twin's autodiff, so only the forward M2L is fused
+— hence the fwd speedup exceeds the fwd+bwd speedup (the fwd+bwd/fwd ratio rises, e.g.
+2.2→3.8 at N=1024 complex). Swapping the twin-autodiff reverse for the analytic
+adjoint-M2L (`linear_transpose` in the multipoles, plus autodiff for the blocks/radius)
+would extend the speedup to the reverse — deferred, since `bwd=grad(twin)` is
+correct-by-construction and the near-field still dominates the total for many configs.
+(N≥4096 trends the same or better but was measured under concurrent-GPU contention here,
+so only the clean N=256/1024 rows are quoted.)

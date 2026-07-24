@@ -1,6 +1,10 @@
 # PR-2 implementation spec — differentiable Pallas fast lane (custom_vjp)
 
-**Status:** ready to implement in a fresh session. Self-contained; assumes no prior context.
+**Status:** IMPLEMENTED (`feat/fmm-pallas-vjp`). M2L fast lane done (Steps 1–3, 5);
+near-field Pallas wrapper (Step 4) **descoped** after the Step-0 ROI check showed the
+fused near-field is only ~1.1× at N~1024 (and slower at moderate N) — the bucketed
+pure-JAX near-field already wins there. Outcomes recorded in
+`docs/differentiable_fmm_design.md` ("PR-2 outcomes"). Original self-contained spec below.
 
 ## 0. Goal & context
 

@@ -166,8 +166,12 @@ derivative/jerk towers, and cached-vs-uncached M2L dispatch.
   `jax.vjp` transpose it exactly (Route A; the translation cascade is linear so its VJP
   is free). `prepare_state` (tree build) is not traceable, so `state` must be built once,
   concretely, before `jax.grad`. Requires a radix `FMMPreparedState` with a solidfmm
-  basis (complex or real submode) and Pallas off on the grad path. See
-  `docs/differentiable_fmm_audit.md` and `docs/differentiable_fmm_design.md`.
+  basis (complex or real submode). The M2L defaults to the pure-JAX path but can opt
+  into the differentiable **fused-Pallas M2L fast lane** with
+  `JACCPOT_STATIC_STRICT_FUSED_M2L_PALLAS=1` on an Ampere+ GPU (the fused kernels now
+  carry a `custom_vjp`, PR-2); the near-field always uses the bucketed pure-JAX path,
+  and `LargeNPreparedState` stays rejected. See `docs/differentiable_fmm_audit.md` and
+  `docs/differentiable_fmm_design.md`.
 - `differentiable_gravitational_acceleration` remains the deliberately differentiable
   **direct O(N²) sum** — retained as the simple exact-gradient reference and the
   **gradient oracle** for tests (`grad(FMM)` must match `grad(direct-sum)` to FMM force
@@ -180,8 +184,15 @@ auto-gated off and the pure-JAX path runs (CPU CI can still lower Pallas with
 `interpret=True` as a smoke test).
 
 - Fused M2L Pallas is gated by `JACCPOT_STATIC_STRICT_FUSED_M2L_PALLAS=1` **and**
-  the hardware support check (`_real_m2l_pallas_active` /
-  `_fused_complex_m2l_pallas_active`, evaluated at trace time).
+  the Ampere+ hardware support check (`_real_m2l_pallas_active` /
+  `_fused_complex_m2l_pallas_active`, evaluated at trace time; both now gate on the
+  fused kernels' own sm_80 support functions).
+- The fused M2L kernels are **differentiable** via module-level `custom_vjp` wrappers
+  (`m2l_{core_z_real,complex_fused,real_fused}_pallas_cvjp`): Pallas forward +
+  autodiff-of-the-pure-jnp-twin reverse. `_apply_{real,complex}_m2l` route through the
+  wrappers, so the same flag enables the fused M2L on both the forward and the
+  `differentiable_accelerations` grad path (PR-2). `pallas_call` itself still has no
+  autodiff rule — the wrapper supplies it.
 - Nearfield Pallas is resolved from `pallas_nearfield_fused_supported()` into the
   engine's `use_pallas`.
 - **Org rule for GPU runs:** select a free GPU with autocvd *before* `import jax`:
