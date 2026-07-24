@@ -429,6 +429,146 @@ def _pair_contributions(
     return accels, None
 
 
+# Analytic near-field P2P reverse is on by default; JACCPOT_ANALYTIC_P2P_VJP=0
+# restores plain autodiff for A/B measurement.
+_ANALYTIC_P2P_VJP = os.environ.get(
+    "JACCPOT_ANALYTIC_P2P_VJP", "1"
+).strip().lower() not in (
+    "0",
+    "false",
+    "no",
+)
+
+
+def _pair_accel_masked_accels(
+    target_positions: Array,
+    source_positions: Array,
+    source_masses: Array,
+    target_mask: Array,
+    source_mask: Array,
+    softening_sq: Union[float, Array],
+    G: Array,
+) -> Array:
+    """Accel-only batched pair contributions (matches the accel output of
+    :func:`_pair_contributions_batched`)."""
+    diff = target_positions[:, :, None, :] - source_positions[:, None, :, :]
+    dist_sq = jnp.sum(diff * diff, axis=-1) + softening_sq
+    pair_mask = target_mask[:, :, None] & source_mask[:, None, :]
+    safe_dist_sq = jnp.where(pair_mask, dist_sq, jnp.ones_like(dist_sq))
+    inv_r = jnp.where(pair_mask, lax.rsqrt(safe_dist_sq), 0.0)
+    inv_dist3 = jnp.where(pair_mask, inv_r * inv_r * inv_r, 0.0)
+    weighted = inv_dist3 * source_masses[:, None, :]
+    accels = -G * jnp.sum(weighted[..., None] * diff, axis=2)
+    return jnp.where(target_mask[..., None], accels, 0.0)
+
+
+@jax.custom_vjp
+def _pair_accel_cvjp(
+    target_positions: Array,
+    source_positions: Array,
+    source_masses: Array,
+    target_mask_f: Array,
+    source_mask_f: Array,
+    softening_sq: Array,
+    G: Array,
+) -> Array:
+    """Accel-only batched near-field pair kernel with an analytic reverse rule.
+
+    All arguments are float arrays (masks as 0/1 floats), so the reverse returns
+    ordinary zero cotangents for the non-differentiated inputs (masks, softening,
+    G) -- no closure over tracers (which ``custom_vjp`` forbids). The forward is
+    byte-identical to the accel output of :func:`_pair_contributions_batched`; the
+    reverse is the analytic symmetric near-field tidal tensor
+    ``J = -G Σ_s m_s (I/r³ − 3 r rᵀ/r⁵)`` contracted with the output cotangent
+    (``Jᵀc = Jc``) in one extra pair pass -- exactly the reverse rule a future
+    fused-Pallas near-field ``custom_vjp`` reuses. Verified bit-for-bit against
+    autodiff in ``tests/unit/test_custom_vjp_parity.py``.
+    """
+    target_mask = target_mask_f > 0.5
+    source_mask = source_mask_f > 0.5
+    return _pair_accel_masked_accels(
+        target_positions,
+        source_positions,
+        source_masses,
+        target_mask,
+        source_mask,
+        softening_sq,
+        G,
+    )
+
+
+def _pair_accel_cvjp_fwd(
+    target_positions,
+    source_positions,
+    source_masses,
+    target_mask_f,
+    source_mask_f,
+    softening_sq,
+    G,
+):
+    target_mask = target_mask_f > 0.5
+    source_mask = source_mask_f > 0.5
+    diff = target_positions[:, :, None, :] - source_positions[:, None, :, :]
+    dist_sq = jnp.sum(diff * diff, axis=-1) + softening_sq
+    pair_mask = target_mask[:, :, None] & source_mask[:, None, :]
+    safe_dist_sq = jnp.where(pair_mask, dist_sq, jnp.ones_like(dist_sq))
+    inv_r = jnp.where(pair_mask, lax.rsqrt(safe_dist_sq), 0.0)
+    inv_dist3 = jnp.where(pair_mask, inv_r * inv_r * inv_r, 0.0)
+    inv_dist5 = jnp.where(pair_mask, inv_dist3 * inv_r * inv_r, 0.0)
+    weighted = inv_dist3 * source_masses[:, None, :]
+    accels = -G * jnp.sum(weighted[..., None] * diff, axis=2)
+    accels = jnp.where(target_mask[..., None], accels, 0.0)
+    residual = (
+        diff,
+        inv_dist3,
+        inv_dist5,
+        source_masses,
+        target_mask_f,
+        source_mask_f,
+        jnp.asarray(softening_sq),
+        jnp.asarray(G),
+    )
+    return accels, residual
+
+
+def _pair_accel_cvjp_bwd(residual, cotangent):
+    (
+        diff,
+        inv_dist3,
+        inv_dist5,
+        source_masses,
+        target_mask_f,
+        source_mask_f,
+        softening_sq,
+        G,
+    ) = residual
+    # Forward masks accels by target_mask, so mask the incoming cotangent alike.
+    cot = jnp.where(target_mask_f[..., None] > 0.5, cotangent, 0.0)  # (B, Wt, 3)
+    cd = jnp.sum(cot[:, :, None, :] * diff, axis=-1)  # (B, Wt, Ws) = c_t · r_ts
+    m = source_masses[:, None, :, None]  # (B, 1, Ws, 1)
+    # per-pair P_{t,s,l} = m_s [ inv_dist3 c_{t,l} - 3 inv_dist5 (c_t·r) r_l ]
+    pair = m * (
+        inv_dist3[..., None] * cot[:, :, None, :]
+        - 3.0 * inv_dist5[..., None] * cd[..., None] * diff
+    )  # (B, Wt, Ws, 3)
+    target_positions_bar = -G * jnp.sum(pair, axis=2)  # sum over sources
+    source_positions_bar = G * jnp.sum(pair, axis=1)  # sum over targets (3rd law)
+    source_masses_bar = -G * jnp.sum(inv_dist3 * cd, axis=1)  # sum over targets
+    # Zero cotangents for the non-differentiated inputs (masks, softening, G).
+    return (
+        target_positions_bar,
+        source_positions_bar,
+        source_masses_bar,
+        jnp.zeros_like(target_mask_f),
+        jnp.zeros_like(source_mask_f),
+        jnp.zeros_like(softening_sq),
+        jnp.zeros_like(G),
+    )
+
+
+_pair_accel_cvjp.defvjp(_pair_accel_cvjp_fwd, _pair_accel_cvjp_bwd)
+
+
 @partial(jax.jit, static_argnames=("compute_potential",))
 def _pair_contributions_batched(
     target_positions: Array,
@@ -442,6 +582,22 @@ def _pair_contributions_batched(
     compute_potential: bool,
 ) -> Tuple[Array, Optional[Array]]:
     """Vectorized pair contributions for a batch of target/source leaf pairs."""
+    if _ANALYTIC_P2P_VJP and not compute_potential:
+        # Accel-only path (the differentiable path): route through the analytic
+        # symmetric-tidal-tensor custom_vjp. Forward is byte-identical; masks are
+        # passed as 0/1 floats and softening/G as arrays so the reverse needs no
+        # closure over tracers.
+        dtype = target_positions.dtype
+        accels = _pair_accel_cvjp(
+            target_positions,
+            source_positions,
+            source_masses,
+            target_mask.astype(dtype),
+            source_mask.astype(dtype),
+            jnp.asarray(softening_sq, dtype=dtype),
+            jnp.asarray(G, dtype=dtype),
+        )
+        return accels, None
     diff = target_positions[:, :, None, :] - source_positions[:, None, :, :]
     dist_sq = jnp.sum(diff * diff, axis=-1) + softening_sq
     pair_mask = target_mask[:, :, None] & source_mask[:, None, :]

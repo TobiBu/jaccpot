@@ -2276,8 +2276,14 @@ def _prepare_solidfmm_downward_sweep(
         if isinstance(node_levels, jax.core.Tracer):
             l2l_num_levels: Optional[int] = None
         else:
+            # ``node_levels`` is concrete here, but under an outer ``jax.jit`` any
+            # jnp op on it (even a slice) is staged into the jaxpr and cannot be
+            # read by ``int()``. Pull the whole array to the host FIRST, then
+            # slice + reduce in numpy, so the level count is a plain Python int in
+            # every trace context (mirrors ``_resolve_upward_num_levels``).
+            node_levels_host = jax.device_get(node_levels)
             l2l_num_levels = int(
-                jnp.max(node_levels[: child_inputs.num_internal_nodes])
+                node_levels_host[: child_inputs.num_internal_nodes].max()
             )
         stage_t0 = time.perf_counter()
         locals_updated = _propagate_solidfmm_locals_by_level(
@@ -2697,13 +2703,19 @@ def _evaluate_prepared_tree(
     return_potential: bool,
     jit_traversal: bool,
     max_acc_derivative_order: int = 0,
+    nearfield_mode_override: Optional[str] = None,
 ) -> Union[
     Array,
     Tuple[Array, Array],
     Tuple[Array, PackedAccelerationDerivatives],
     Tuple[Array, Array, PackedAccelerationDerivatives],
 ]:
-    """Run the prepared-tree evaluation returning Morton-sorted outputs."""
+    """Run the prepared-tree evaluation returning Morton-sorted outputs.
+
+    ``nearfield_mode_override`` forces the near-field mode (the differentiable
+    path passes ``"bucketed"`` for the fast, bit-identical, vectorized
+    near-field); ``None`` keeps the resolved policy.
+    """
 
     if int(max_acc_derivative_order) > 0:
         nearfield_mode = fmm._resolve_nearfield_mode(
@@ -2761,10 +2773,15 @@ def _evaluate_prepared_tree(
             return near_acc + far_acc, near_pot + far_pot, acc_derivatives
         return near + far_acc, acc_derivatives
 
+    # Only the non-compiled evaluate_tree accepts a near-field mode override;
+    # the compiled traversal resolves its own policy. The differentiable path
+    # uses jit_traversal=False, so the override reaches the near-field there.
+    extra_kwargs = {}
     if jit_traversal:
         evaluate_fn = fmm.evaluate_tree_compiled
     else:
         evaluate_fn = fmm.evaluate_tree
+        extra_kwargs["nearfield_mode_override"] = nearfield_mode_override
 
     return evaluate_fn(
         tree,
@@ -2784,6 +2801,7 @@ def _evaluate_prepared_tree(
         precomputed_chunk_unique_indices=nearfield_chunk_unique_indices,
         max_leaf_size=max_leaf_size,
         return_potential=return_potential,
+        **extra_kwargs,
     )
 
 
