@@ -1000,9 +1000,18 @@ def _rotation_to_z_angles(x: Array, y: Array, z: Array) -> tuple[Array, Array, A
     with alpha_z = atan2(y, x) and beta = atan2(rho, z).
     We convert this rotation into ZYZ Euler angles for Wigner-D.
     """
-    rho = jnp.sqrt(x * x + y * y)
-    alpha_z = jnp.arctan2(y, x)
-    beta = jnp.arctan2(rho, z)
+    # NaN-safe (double-where) angles. ``sqrt`` has an infinite reverse grad at 0
+    # and ``arctan2`` a 0/0 grad at the origin; the fixed-topology M2L/L2L reverse
+    # pass genuinely hits zero displacements (single-child COM nodes) and
+    # z-axis-aligned displacements (rho == 0, e.g. lattice-aligned pairs). Guard
+    # those directions so the cotangents stay finite. Forward values are
+    # unchanged (arctan2(0,0)=0, sqrt(0)=0), so the golden oracle is byte-stable.
+    rho_sq = x * x + y * y
+    rho_pos = rho_sq > 0
+    rho = jnp.where(rho_pos, jnp.sqrt(jnp.where(rho_pos, rho_sq, 1.0)), 0.0)
+    alpha_z = jnp.where(rho_pos, jnp.arctan2(y, jnp.where(rho_pos, x, 1.0)), 0.0)
+    r_pos = (rho_sq + z * z) > 0
+    beta = jnp.where(r_pos, jnp.arctan2(rho, jnp.where(r_pos, z, 1.0)), 0.0)
 
     ca = jnp.cos(-alpha_z)
     sa = jnp.sin(-alpha_z)
@@ -1020,9 +1029,22 @@ def _rotation_to_z_angles(x: Array, y: Array, z: Array) -> tuple[Array, Array, A
     R21 = sb * sa
     R22 = cb
 
-    beta_zyz = jnp.arccos(R22)
-    alpha_zyz = jnp.arctan2(R12, R02)
-    gamma_zyz = jnp.arctan2(R21, -R20)
+    # NaN-safe extraction of ZYZ angles. ``arccos`` has an infinite reverse grad
+    # at +/-1 (axis-aligned, sb == 0) and ``arctan2`` a 0/0 grad at the origin
+    # (which both derived angles hit when sb == 0). Guard the poles; forward
+    # values are unchanged (arccos(+/-1) in {0, pi}, arctan2(0,0)=0, and
+    # cos() is already bounded to [-1, 1] so the clip is a no-op for valid input).
+    R22c = jnp.clip(R22, -1.0, 1.0)
+    inside = jnp.abs(R22c) < 1.0
+    beta_zyz = jnp.where(
+        inside,
+        jnp.arccos(jnp.where(inside, R22c, 0.0)),
+        jnp.where(R22c > 0.0, 0.0, jnp.pi),
+    )
+    a_ok = (R02 * R02) > 0  # R12 is identically 0.0
+    alpha_zyz = jnp.where(a_ok, jnp.arctan2(R12, jnp.where(a_ok, R02, 1.0)), 0.0)
+    g_ok = (R21 * R21 + R20 * R20) > 0
+    gamma_zyz = jnp.where(g_ok, jnp.arctan2(R21, jnp.where(g_ok, -R20, 1.0)), 0.0)
 
     return alpha_zyz, beta_zyz, gamma_zyz
 
@@ -1244,9 +1266,20 @@ def _multipole_align_to_z_block(
     ``ax = atan2(rho, z)``. In coordinate space ``g = Rx(ax) @ Rz(az)`` whose
     multipole representation is ``B_U @ Dz(-ax) @ B_U @ Dz(az)``.
     """
-    rho = jnp.sqrt(x * x + y * y)
-    az = jnp.arctan2(x, y)
-    ax = jnp.arctan2(rho, z)
+    # NaN-safe (double-where) alignment angles. ``sqrt`` (infinite reverse grad
+    # at 0) and ``arctan2`` (0/0 grad at the origin) would inject NaNs into the
+    # real-basis M2L/L2L reverse pass at the degenerate directions the
+    # fixed-topology FMM hits: zero displacement (single-child COM L2L pairs) and
+    # z-axis-aligned displacement (rho == 0, lattice-aligned M2L pairs). Forward
+    # values are unchanged (arctan2(0,0)=0, sqrt(0)=0), so the golden oracle stays
+    # byte-stable; the azimuth is undefined there and the rotation is a pure polar
+    # turn / identity, so a zero cotangent is the correct subgradient.
+    rho_sq = x * x + y * y
+    rho_pos = rho_sq > 0
+    rho = jnp.where(rho_pos, jnp.sqrt(jnp.where(rho_pos, rho_sq, 1.0)), 0.0)
+    az = jnp.where(rho_pos, jnp.arctan2(jnp.where(rho_pos, x, 1.0), y), 0.0)
+    r_pos = (rho_sq + z * z) > 0
+    ax = jnp.where(r_pos, jnp.arctan2(rho, jnp.where(r_pos, z, 1.0)), 0.0)
     B_U = compute_real_B_matrix_multipole(ell, dtype=dtype)
     return (
         B_U
@@ -1261,9 +1294,20 @@ def _multipole_align_from_z_block(
 ) -> Array:
     """Inverse of :func:`_multipole_align_to_z_block` (multipole z-frame ->
     world). Equals ``Dz(-az) @ B_U @ Dz(ax) @ B_U`` with the same angles."""
-    rho = jnp.sqrt(x * x + y * y)
-    az = jnp.arctan2(x, y)
-    ax = jnp.arctan2(rho, z)
+    # NaN-safe (double-where) alignment angles. ``sqrt`` (infinite reverse grad
+    # at 0) and ``arctan2`` (0/0 grad at the origin) would inject NaNs into the
+    # real-basis M2L/L2L reverse pass at the degenerate directions the
+    # fixed-topology FMM hits: zero displacement (single-child COM L2L pairs) and
+    # z-axis-aligned displacement (rho == 0, lattice-aligned M2L pairs). Forward
+    # values are unchanged (arctan2(0,0)=0, sqrt(0)=0), so the golden oracle stays
+    # byte-stable; the azimuth is undefined there and the rotation is a pure polar
+    # turn / identity, so a zero cotangent is the correct subgradient.
+    rho_sq = x * x + y * y
+    rho_pos = rho_sq > 0
+    rho = jnp.where(rho_pos, jnp.sqrt(jnp.where(rho_pos, rho_sq, 1.0)), 0.0)
+    az = jnp.where(rho_pos, jnp.arctan2(jnp.where(rho_pos, x, 1.0), y), 0.0)
+    r_pos = (rho_sq + z * z) > 0
+    ax = jnp.where(r_pos, jnp.arctan2(rho, jnp.where(r_pos, z, 1.0)), 0.0)
     B_U = compute_real_B_matrix_multipole(ell, dtype=dtype)
     return (
         real_Dz_diagonal(ell, -az, dtype=dtype)

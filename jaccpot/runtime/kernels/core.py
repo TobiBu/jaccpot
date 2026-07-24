@@ -1758,6 +1758,13 @@ def _accumulate_m2l_fullbatch(
     safe_tgt = jnp.where(valid, tgt, 0)
     src_mult = multip_packed[safe_src]
     deltas = centers[safe_tgt] - centers[safe_src]
+    # Invalid/padded pairs collapse to safe_src == safe_tgt == 0, giving a zero
+    # displacement whose M2L rotate-to-z ``norm(delta)`` has a 0/0 (NaN)
+    # reverse-mode cotangent. Substitute a nonzero delta for invalid pairs
+    # BEFORE the M2L apply (double-where): the forward contribution is still
+    # masked to 0 below, so the output is byte-identical, but the gradient no
+    # longer sees a singular delta on padded lanes.
+    deltas = jnp.where(valid[:, None], deltas, jnp.ones_like(deltas))
     contribs = _apply_m2l(
         src_mult,
         deltas,
@@ -1824,6 +1831,11 @@ def _accumulate_m2l_chunked_scan(
             tgt_chunk = jnp.where(valid, tgt_chunk_raw, 0)
             src_mult = multip_packed[src_chunk]
             deltas = centers[tgt_chunk] - centers[src_chunk]
+            # Double-where guard (see ``_accumulate_m2l_fullbatch``): give
+            # invalid/padded pairs a nonzero displacement so the M2L
+            # ``norm(delta)`` reverse-mode cotangent is finite; the contribution
+            # is masked to 0 in the scatter below, so the forward is unchanged.
+            deltas = jnp.where(valid[:, None], deltas, jnp.ones_like(deltas))
             contribs = _apply_m2l(
                 src_mult,
                 deltas,
@@ -1901,6 +1913,7 @@ def _propagate_solidfmm_locals_to_children(
         "basis_mode",
         "l2l_grouped",
         "mm_class_capacity",
+        "num_levels",
     ),
     donate_argnums=(0,),
 )
@@ -1917,6 +1930,7 @@ def _propagate_solidfmm_locals_by_level(
     basis_mode: str = "complex",
     l2l_grouped: bool = False,
     mm_class_capacity: int = 512,
+    num_levels: Optional[int] = None,
 ) -> Array:
     """Top-down, level-by-level L2L cascade over a binary tree.
 
@@ -1943,7 +1957,14 @@ def _propagate_solidfmm_locals_by_level(
     parent_levels = node_levels[:num_internal].astype(INDEX_DTYPE)
     parent_idx = jnp.arange(num_internal, dtype=INDEX_DTYPE)
     parent_rep = jnp.concatenate([parent_idx, parent_idx], axis=0)
-    max_level = jnp.max(parent_levels)
+    # ``num_levels`` (the max node level) is pure tree topology. When a caller
+    # that holds the tree concretely passes it as a static int, use it as the
+    # loop bound so the level cascade runs with STATIC ``fori_loop`` bounds --
+    # required for reverse-mode autodiff, which rejects ``fori_loop`` with
+    # dynamic start/stop. Falls back to the dynamic device reduction when it is
+    # unknown; numerics are identical either way (the loop performs exactly
+    # ``max_level + 1`` iterations regardless of how the bound is obtained).
+    max_level = int(num_levels) if num_levels is not None else jnp.max(parent_levels)
     minus_one = jnp.asarray(-1, dtype=left_internal.dtype)
 
     # GROUPED/CACHED real L2L: the parent->child displacement set is FIXED by the tree, so
@@ -2246,6 +2267,18 @@ def _prepare_solidfmm_downward_sweep(
         left_child = child_inputs.left_child
         right_child = child_inputs.right_child
         node_levels = get_node_levels(tree)
+        # Resolve the max node level to a STATIC int when the tree is held
+        # concretely (e.g. the fixed-topology differentiable re-eval, where the
+        # tree is a captured constant), so the L2L level cascade uses static
+        # ``fori_loop`` bounds and is reverse-mode differentiable. When
+        # ``node_levels`` is a tracer (jitted tree/traversal), fall back to the
+        # kernel's internal dynamic reduction -- numerics are identical.
+        if isinstance(node_levels, jax.core.Tracer):
+            l2l_num_levels: Optional[int] = None
+        else:
+            l2l_num_levels = int(
+                jnp.max(node_levels[: child_inputs.num_internal_nodes])
+            )
         stage_t0 = time.perf_counter()
         locals_updated = _propagate_solidfmm_locals_by_level(
             locals_updated,
@@ -2257,6 +2290,7 @@ def _prepare_solidfmm_downward_sweep(
             rotation=rotation_mode,
             total_nodes=total_nodes,
             basis_mode=basis_mode,
+            num_levels=l2l_num_levels,
         )
         locals_updated = _record_timed_array(
             "_refresh_timing_dual_l2l_compute_seconds",
@@ -2305,6 +2339,7 @@ def _prepare_solidfmm_downward_sweep(
                 rotation=rotation_mode,
                 total_nodes=total_nodes,
                 basis_mode=basis_mode,
+                num_levels=l2l_num_levels,
             )
             source_motion_locals_updated = _record_timed_array(
                 "_refresh_timing_dual_source_motion_seconds",

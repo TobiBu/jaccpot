@@ -111,7 +111,12 @@ def m2l_rot_scale_real_batch(
     if delta.ndim != 2 or int(delta.shape[1]) != 3:
         raise ValueError("deltas must have shape (batch, 3)")
 
-    radii = jnp.linalg.norm(delta, axis=1)
+    # NaN-safe radius: ``linalg.norm`` has a 0/0 reverse grad at delta==0.
+    # Double-where keeps the cotangent finite (0) there; forward is unchanged
+    # (sqrt of the squared norm equals the norm for every input).
+    r2 = jnp.sum(delta * delta, axis=1)
+    r2_pos = r2 > 0
+    radii = jnp.where(r2_pos, jnp.sqrt(jnp.where(r2_pos, r2, 1.0)), 0.0)
     mult_rot = jax.vmap(
         lambda m, d: _rotate_multipole_to_z_single(m, d, order=int(order))
     )(
