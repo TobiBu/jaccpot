@@ -5,7 +5,6 @@ engine class inherits this mixin. Sibling of _fmm_impl at runtime level.
 
 from __future__ import annotations
 
-import os
 from typing import Any, Optional, Union
 
 import jax
@@ -588,6 +587,14 @@ class EvaluateMixin:
         ops); prefer ``jax.grad(loss)`` -- the inner numeric kernels are already
         jit-compiled. See ``docs/differentiable_fmm_design.md`` ("jit limitation").
 
+        The M2L uses the pure-JAX path by default. Setting
+        ``JACCPOT_STATIC_STRICT_FUSED_M2L_PALLAS=1`` opts into the fused-Pallas M2L
+        fast lane on an Ampere+ (sm_80) GPU: the fused kernels now carry a
+        ``custom_vjp`` (Pallas forward + autodiff-of-twin reverse), so the fast lane
+        is differentiable. It falls back to the pure-JAX M2L on unsupported hardware.
+        The near-field always uses the bucketed pure-JAX path (the fused-Pallas
+        near-field ROI is marginal at the N the reverse pass bounds).
+
         Returns
         -------
         Array
@@ -605,13 +612,16 @@ class EvaluateMixin:
                 "expansion_basis='solidfmm' (basis 'complex'/'solidfmm' or 'real') "
                 f"only; got {getattr(state, 'expansion_basis', None)!r}."
             )
-        pallas_m2l = os.environ.get("JACCPOT_STATIC_STRICT_FUSED_M2L_PALLAS", "")
-        if pallas_m2l not in ("", "0", "false", "False"):
-            raise NotImplementedError(
-                "differentiable_accelerations requires the pure-JAX M2L path; unset "
-                "JACCPOT_STATIC_STRICT_FUSED_M2L_PALLAS (the fused Pallas M2L kernel "
-                "has no autodiff rule)."
-            )
+        # The fused Pallas M2L kernels now carry a custom_vjp reverse rule (the
+        # forward is the Pallas kernel; the reverse is autodiff of the pure-jnp
+        # twin -- see jaccpot/pallas/m2l_{complex,real}_fused.py), so
+        # JACCPOT_STATIC_STRICT_FUSED_M2L_PALLAS is an OPT-IN fast lane on the grad
+        # path rather than a hard reject. When set (and the GPU is Ampere+), the
+        # M2L dispatch routes through the differentiable fused kernel; otherwise
+        # the default pure-JAX M2L runs. The near-field is still forced to the
+        # bucketed pure-JAX path below (the fused-Pallas near-field ROI does not
+        # justify wrapping it at the N the reverse pass bounds -- see
+        # docs/differentiable_fmm_design.md). Left off by default until proven.
 
         # Reorder live inputs into Morton/sorted order using the FROZEN integer
         # permutation. ``state.inverse_permutation`` maps sorted -> original
@@ -622,9 +632,7 @@ class EvaluateMixin:
         # constant-folded under ``jax.jit`` for large N and would force
         # concretization downstream. The gather VJP is scatter-add, so
         # cotangents flow to positions/masses but never to the index array.
-        inverse_permutation_host = np.asarray(
-            jax.device_get(state.inverse_permutation)
-        )
+        inverse_permutation_host = np.asarray(jax.device_get(state.inverse_permutation))
         forward_permutation = jnp.asarray(
             np.argsort(inverse_permutation_host, kind="stable"), dtype=INDEX_DTYPE
         )
