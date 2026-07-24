@@ -46,7 +46,7 @@ ODISSEO coupling) depends on. It is frozen by
 | `MemoryObjective` | memory-policy literal |
 | `ComplexSHBasis`, `RealSHBasis` | expansion bases |
 | `OdisseoFMMCoupler` | ODISSEO integration adapter |
-| `differentiable_gravitational_acceleration` | autodiff-able **direct-sum** (see section 6) |
+| `differentiable_gravitational_acceleration` | autodiff-able **direct-sum** oracle (the differentiable FMM itself is `FastMultipoleMethod.differentiable_accelerations`; see section 6) |
 
 `FastMultipoleMethod` in `solver.py` is the sole public class name; the runtime
 engine class (currently also named `FastMultipoleMethod` in `_fmm_impl.py`) is
@@ -157,9 +157,21 @@ derivative/jerk towers, and cached-vs-uncached M2L dispatch.
 - **Advanced config** is the `FMMAdvancedConfig` group (tree / farfield /
   nearfield / runtime); `fmm_state._resolve_fmm_config` normalises constructor
   inputs into a validated `FMMResolvedConfig`.
-- `differentiable_gravitational_acceleration` is **not** an autodiff FMM — FMM is
-  forward-only here. It is the deliberately differentiable **direct O(N²) sum**,
-  provided for gradient-based use where the FMM approximation is not needed.
+- **End-to-end differentiable FMM.** `FastMultipoleMethod.differentiable_accelerations(state, positions, masses)`
+  gives exact gradients of the FMM force w.r.t. particle **positions** and **masses**
+  under a fixed-topology contract: the tree (Morton order, node membership, MAC
+  accept/reject, the M2L interaction list, near/far partition) is held constant from a
+  pre-built `state` while the numeric pipeline (P2M, COM centers, the linear M2M/M2L/L2L
+  translations, L2P, near-field P2P) is re-evaluated on the live inputs, so `jax.grad`/
+  `jax.vjp` transpose it exactly (Route A; the translation cascade is linear so its VJP
+  is free). `prepare_state` (tree build) is not traceable, so `state` must be built once,
+  concretely, before `jax.grad`. Requires a radix `FMMPreparedState` with a solidfmm
+  basis (complex or real submode) and Pallas off on the grad path. See
+  `docs/differentiable_fmm_audit.md` and `docs/differentiable_fmm_design.md`.
+- `differentiable_gravitational_acceleration` remains the deliberately differentiable
+  **direct O(N²) sum** — retained as the simple exact-gradient reference and the
+  **gradient oracle** for tests (`grad(FMM)` must match `grad(direct-sum)` to FMM force
+  accuracy), not as "the" differentiable path.
 
 ## 7. Pallas / A100 gating
 

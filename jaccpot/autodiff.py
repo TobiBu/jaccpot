@@ -22,14 +22,19 @@ def differentiable_gravitational_acceleration(
 ) -> Array:
     """Differentiable gravitational accelerations via direct O(N^2) summation.
 
-    The FMM solver is forward-only (not autodiff-able through the tree
-    traversal), so this is the intended differentiable path: a plain,
-    fully-differentiable direct sum. It deliberately accepts the same
-    FMM-shaped keyword arguments (``theta``, ``bounds``, ``leaf_size``,
-    ``max_order``) purely for drop-in signature compatibility with the FMM
-    call -- they do not apply to direct summation and are ignored. Only
-    ``G`` and ``softening`` affect the result. O(N^2) cost: intended for
-    gradient work at modest N, not large-scale evaluation.
+    A plain, fully-differentiable direct sum. The FMM force *itself* is now
+    end-to-end differentiable at fixed topology via
+    :meth:`jaccpot.FastMultipoleMethod.differentiable_accelerations` (exact
+    gradients w.r.t. positions and masses; see ``docs/differentiable_fmm_design.md``).
+    This direct sum is retained as the simple exact-gradient reference and as the
+    **gradient oracle** for tests: ``jax.grad`` of the FMM must match ``jax.grad``
+    of this sum to the FMM's own force accuracy.
+
+    It deliberately accepts the same FMM-shaped keyword arguments (``theta``,
+    ``bounds``, ``leaf_size``, ``max_order``) purely for drop-in signature
+    compatibility with the FMM call -- they do not apply to direct summation and
+    are ignored. Only ``G`` and ``softening`` affect the result. O(N^2) cost:
+    intended for gradient work at modest N, not large-scale evaluation.
     """
 
     # FMM-shaped args accepted for API parity only; direct sum ignores them.
