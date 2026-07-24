@@ -191,11 +191,20 @@ Delivered:
    (isolated L2P reverse 1.56x). Byte-identical forward. Off-switch
    `JACCPOT_ANALYTIC_L2P_VJP=0`. Matters for L2P-dominated configs; negligible in the
    near-field-dominated default.
-4. **`custom_vjp` parity harness** (`tests/unit/test_custom_vjp_parity.py`): bit-for-bit
-   VJP-vs-autodiff verification for every analytic rule.
+4. **P2P near-field analytic `custom_vjp`** (`_pair_contributions_batched` →
+   `_pair_accel_cvjp`): the reverse is the analytic symmetric tidal tensor
+   `J = -G Σ_s m_s(I/r³ − 3rrᵀ/r⁵)` contracted with the output cotangent (`Jᵀc = Jc`) in
+   one extra pair pass. Robust module-level rule (all-float args, zero cotangents for the
+   non-differentiated masks/softening/G — a closure over those tracers is unsupported).
+   End-to-end reverse ratio (real, N=1024) 4.13→3.81; isolated near-field reverse ~4x→~2x.
+   Off-switch `JACCPOT_ANALYTIC_P2P_VJP=0`. **This analytic reverse is exactly the rule a
+   future fused-Pallas near-field `custom_vjp` reuses as its backward** — the main reason
+   to build it now despite the modest pure-JAX ROI.
+5. **`custom_vjp` parity harness** (`tests/unit/test_custom_vjp_parity.py`): bit-for-bit
+   VJP-vs-autodiff verification for every analytic rule (real-L2P + P2P).
 
-**Remaining (optional, now-modest ROI):** a P2P analytic `custom_vjp` (symmetric tidal
-tensor) on the clean pairwise kernel `nearfield/near_field.py:_pair_contributions_batched`
-would cut the near-field reverse from ~4x toward ~2x — the paper's analytic-derivative-
-speedup figure — but the reverse ratio is already 1.3–4x after the bucketed fix. Complex-
-basis L2P `custom_vjp` (analytic tower already in-tree) is similarly low-ROI now.
+**Remaining (optional):** complex-basis L2P `custom_vjp` (analytic tower already in-tree)
+— low-ROI now that the reverse is 1.3–4x. **PR-2 (Pallas fast lane):** wrap the fused
+Pallas near-field/M2L kernels in `custom_vjp` (near-field reuses the P2P tidal-tensor
+reverse above; M2L reuses the adjoint-M2L) and lift the `LargeNPreparedState`/Pallas
+guard. Lower urgency since the bucketed pure-JAX path is already fast and differentiable.
