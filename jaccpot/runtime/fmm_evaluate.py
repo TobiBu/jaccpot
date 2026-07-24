@@ -618,9 +618,7 @@ class EvaluateMixin:
         # constant-folded under ``jax.jit`` for large N and would force
         # concretization downstream. The gather VJP is scatter-add, so
         # cotangents flow to positions/masses but never to the index array.
-        inverse_permutation_host = np.asarray(
-            jax.device_get(state.inverse_permutation)
-        )
+        inverse_permutation_host = np.asarray(jax.device_get(state.inverse_permutation))
         forward_permutation = jnp.asarray(
             np.argsort(inverse_permutation_host, kind="stable"), dtype=INDEX_DTYPE
         )

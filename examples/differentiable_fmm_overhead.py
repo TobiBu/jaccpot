@@ -45,7 +45,9 @@ def _bench(n, *, basis="complex", theta=0.5, order=4, leaf=32, reps=5, seed=0):
     rng = np.random.default_rng(seed)
     positions = jnp.asarray(rng.normal(size=(n, 3)), dtype=jnp.float64)
     masses = jnp.asarray(rng.uniform(0.5, 1.5, size=(n,)), dtype=jnp.float64)
-    fmm = FastMultipoleMethod(basis=basis, use_pallas=False, theta=theta, G=1.0, softening=1e-2)
+    fmm = FastMultipoleMethod(
+        basis=basis, use_pallas=False, theta=theta, G=1.0, softening=1e-2
+    )
     state = fmm.prepare_state(positions, masses, max_order=order, leaf_size=leaf)
 
     def scalar(p, m):
@@ -94,7 +96,9 @@ def main():
                 f"{t_vg / t_fwd:>8.2f}",
                 flush=True,
             )
-        except Exception as exc:  # noqa: BLE001 -- report and continue (e.g. OOM at large N)
+        except (
+            Exception
+        ) as exc:  # noqa: BLE001 -- report and continue (e.g. OOM at large N)
             print(f"{n:>8} skipped: {type(exc).__name__}", flush=True)
 
 
