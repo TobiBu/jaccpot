@@ -39,6 +39,7 @@ __all__ = [
     "m2l_complex_fused_tables",
     "m2l_complex_fused_jax",
     "m2l_complex_fused_pallas",
+    "m2l_complex_fused_pallas_cvjp",
 ]
 
 
@@ -452,3 +453,76 @@ def m2l_complex_fused_pallas(
     )(mr, mi, btr, bti, bfr, bfi, rr, *table_arrays)
 
     return jax.lax.complex(out_r[:, :C], out_i[:, :C])
+
+
+# --------------------------------------------------------------------------
+# Differentiable wrapper: fused Pallas forward + autodiff-of-twin reverse.
+# --------------------------------------------------------------------------
+# ``pallas_call`` has no JVP/transpose, so the fused complex M2L is
+# non-differentiable on its own. This ``custom_vjp`` (mirroring the module-level
+# pattern of ``jaccpot.nearfield.near_field._pair_accel_cvjp``) runs the Pallas
+# kernel forward and takes the reverse from autodiff of the pure-jnp twin
+# ``m2l_complex_fused_jax`` -- the literal port the Pallas kernel is verified
+# against to ~1e-10, so the gradient is a faithful FMM gradient (fwd Pallas ==
+# twin to the port tolerance, not bit-exactly). The M2L is linear in
+# ``multipoles`` and b/tri-linear in the rotation ``blocks`` and non-linear in
+# ``r`` (enters as ``r**-(n+k+1)``); autodiff of the twin handles all four
+# exactly. ``order`` / ``interpret`` / ``backend`` are the hashable Pallas
+# statics -> ``nondiff_argnums`` (positional; the kernel takes them keyword-only,
+# so this wrapper is the thin positional adapter).
+
+
+@functools.partial(jax.custom_vjp, nondiff_argnums=(4, 5, 6))
+def m2l_complex_fused_pallas_cvjp(
+    multipoles: Array,
+    blocks_to_z: Array,
+    blocks_from_z: Array,
+    r: Array,
+    order: int,
+    interpret: bool,
+    backend: str,
+) -> Array:
+    """Differentiable fused complex-basis M2L (see module comment above).
+
+    Forward is byte-identical to :func:`m2l_complex_fused_pallas`; the reverse is
+    autodiff through :func:`m2l_complex_fused_jax`.
+    """
+    return m2l_complex_fused_pallas(
+        multipoles,
+        blocks_to_z,
+        blocks_from_z,
+        r,
+        order=order,
+        interpret=interpret,
+        backend=backend,
+    )
+
+
+def _m2l_complex_fused_pallas_cvjp_fwd(
+    multipoles, blocks_to_z, blocks_from_z, r, order, interpret, backend
+):
+    out = m2l_complex_fused_pallas(
+        multipoles,
+        blocks_to_z,
+        blocks_from_z,
+        r,
+        order=order,
+        interpret=interpret,
+        backend=backend,
+    )
+    return out, (multipoles, blocks_to_z, blocks_from_z, r)
+
+
+def _m2l_complex_fused_pallas_cvjp_bwd(order, interpret, backend, residual, cotangent):
+    multipoles, blocks_to_z, blocks_from_z, r = residual
+
+    def _twin(mult, bto, bfr, rr):
+        return m2l_complex_fused_jax(mult, bto, bfr, rr, order=int(order))
+
+    _, vjp_fn = jax.vjp(_twin, multipoles, blocks_to_z, blocks_from_z, r)
+    return vjp_fn(cotangent)
+
+
+m2l_complex_fused_pallas_cvjp.defvjp(
+    _m2l_complex_fused_pallas_cvjp_fwd, _m2l_complex_fused_pallas_cvjp_bwd
+)

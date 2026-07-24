@@ -42,14 +42,34 @@ __all__ = [
     "m2l_real_fused_tables",
     "m2l_real_fused_jax",
     "m2l_real_fused_pallas",
+    "m2l_real_fused_pallas_cvjp",
 ]
 
 
 def pallas_m2l_real_fused_supported() -> bool:
-    """Return whether the active backend can run the fused real M2L Pallas kernel."""
+    """True only on a GPU with compute capability >= 8.0 (Ampere+).
+
+    Matches :func:`jaccpot.pallas.m2l_complex_fused.pallas_m2l_complex_fused_supported`:
+    real Pallas GPU execution needs Ampere (sm_80+), so a plain ``gpu``/``tpu``
+    backend check is not sufficient -- on a pre-Ampere GPU the Triton lowering
+    fails at runtime. Callers must fall back to the pure-JAX rot-scale otherwise.
+    """
     if pl is None:
         return False
-    return jax.default_backend() in ("gpu", "tpu")
+    try:
+        dev = jax.devices()[0]
+    except Exception:  # pragma: no cover
+        return False
+    if dev.platform != "gpu":
+        return False
+    cc = getattr(dev, "compute_capability", None)
+    if cc is None:
+        return False
+    try:
+        major = int(str(cc).split(".")[0])
+    except Exception:  # pragma: no cover
+        return False
+    return major >= 8
 
 
 def _next_pow2(n: int) -> int:
@@ -264,3 +284,72 @@ def m2l_real_fused_pallas(
         name=f"m2l_real_fused_p{int(order)}",
     )(mult, btr, bfrr, rr, *table_arrays)
     return out[:, :C]
+
+
+# --------------------------------------------------------------------------
+# Differentiable wrapper: fused Pallas forward + autodiff-of-twin reverse.
+# --------------------------------------------------------------------------
+# Real analogue of ``m2l_complex_fused_pallas_cvjp``. ``pallas_call`` has no
+# JVP/transpose, so this ``custom_vjp`` runs the fused Pallas kernel forward and
+# takes the reverse from autodiff of the pure-jnp twin ``m2l_real_fused_jax`` --
+# the literal port the kernel is verified against, so the gradient is a faithful
+# FMM gradient. Linear in ``multipoles``, b/tri-linear in the rotation ``blocks``,
+# non-linear in ``r`` (``r**-(n+k+1)``); autodiff of the twin handles all four.
+# ``order`` / ``interpret`` / ``backend`` are the hashable Pallas statics ->
+# ``nondiff_argnums`` (positional adapter; the kernel takes them keyword-only).
+
+
+@functools.partial(jax.custom_vjp, nondiff_argnums=(4, 5, 6))
+def m2l_real_fused_pallas_cvjp(
+    multipoles: Array,
+    blocks_to_z: Array,
+    blocks_from_z: Array,
+    r: Array,
+    order: int,
+    interpret: bool,
+    backend: str,
+) -> Array:
+    """Differentiable fully-fused real-basis M2L (see module comment above).
+
+    Forward is byte-identical to :func:`m2l_real_fused_pallas`; the reverse is
+    autodiff through :func:`m2l_real_fused_jax`.
+    """
+    return m2l_real_fused_pallas(
+        multipoles,
+        blocks_to_z,
+        blocks_from_z,
+        r,
+        order=order,
+        interpret=interpret,
+        backend=backend,
+    )
+
+
+def _m2l_real_fused_pallas_cvjp_fwd(
+    multipoles, blocks_to_z, blocks_from_z, r, order, interpret, backend
+):
+    out = m2l_real_fused_pallas(
+        multipoles,
+        blocks_to_z,
+        blocks_from_z,
+        r,
+        order=order,
+        interpret=interpret,
+        backend=backend,
+    )
+    return out, (multipoles, blocks_to_z, blocks_from_z, r)
+
+
+def _m2l_real_fused_pallas_cvjp_bwd(order, interpret, backend, residual, cotangent):
+    multipoles, blocks_to_z, blocks_from_z, r = residual
+
+    def _twin(mult, bto, bfr, rr):
+        return m2l_real_fused_jax(mult, bto, bfr, rr, order=int(order))
+
+    _, vjp_fn = jax.vjp(_twin, multipoles, blocks_to_z, blocks_from_z, r)
+    return vjp_fn(cotangent)
+
+
+m2l_real_fused_pallas_cvjp.defvjp(
+    _m2l_real_fused_pallas_cvjp_fwd, _m2l_real_fused_pallas_cvjp_bwd
+)
