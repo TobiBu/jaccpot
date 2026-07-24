@@ -597,7 +597,9 @@ def evaluate_local_real(
 
 # Analytic custom_vjp reverse for the real-basis L2P is on by default; set
 # JACCPOT_ANALYTIC_L2P_VJP=0 to fall back to plain autodiff (A/B measurement).
-_ANALYTIC_L2P_VJP = os.environ.get("JACCPOT_ANALYTIC_L2P_VJP", "1").strip().lower() not in (
+_ANALYTIC_L2P_VJP = os.environ.get(
+    "JACCPOT_ANALYTIC_L2P_VJP", "1"
+).strip().lower() not in (
     "0",
     "false",
     "no",
@@ -664,9 +666,9 @@ def _evaluate_local_real_with_grad_cvjp_bwd(
     # ∇²φ · grad_bar (forward-over-reverse), plus ∇φ · potential_bar for the
     # potential output. One HVP per particle -- no reverse-over-reverse.
     def _grad_phi(d: Array) -> Array:
-        return jax.grad(
-            lambda dd: evaluate_local_real(local_coeffs, dd, order=order)
-        )(d)
+        return jax.grad(lambda dd: evaluate_local_real(local_coeffs, dd, order=order))(
+            d
+        )
 
     primal_grad, hvp = jax.jvp(_grad_phi, (delta,), (grad_bar,))
     delta_bar = hvp + primal_grad * potential_bar

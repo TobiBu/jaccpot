@@ -42,9 +42,7 @@ def assert_vjp_matches(f_custom, f_ref, primals, *, seed=0, rtol=1e-11, atol=1e-
     for gc, gr in zip(
         jax.tree_util.tree_leaves(grads_c), jax.tree_util.tree_leaves(grads_r)
     ):
-        np.testing.assert_allclose(
-            np.asarray(gc), np.asarray(gr), rtol=rtol, atol=atol
-        )
+        np.testing.assert_allclose(np.asarray(gc), np.asarray(gr), rtol=rtol, atol=atol)
 
 
 # --------------------------------------------------------------------------
@@ -86,7 +84,9 @@ def test_real_l2p_custom_vjp_batched_matches_autodiff(order):
     deltas = jnp.asarray(rng.normal(size=(n, 3)), dtype=jnp.float64)
 
     def f_custom(c, d):
-        return jax.vmap(lambda dd: evaluate_local_real_with_grad(c, dd, order=order)[0])(d)
+        return jax.vmap(
+            lambda dd: evaluate_local_real_with_grad(c, dd, order=order)[0]
+        )(d)
 
     def f_ref(c, d):
         def one(dd):
