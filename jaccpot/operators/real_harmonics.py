@@ -189,6 +189,7 @@ Example usage::
 from __future__ import annotations
 
 import math
+import os
 from functools import lru_cache, partial
 from typing import Any, Tuple
 
@@ -594,6 +595,90 @@ def evaluate_local_real(
     return total
 
 
+# Analytic custom_vjp reverse for the real-basis L2P is on by default; set
+# JACCPOT_ANALYTIC_L2P_VJP=0 to fall back to plain autodiff (A/B measurement).
+_ANALYTIC_L2P_VJP = os.environ.get("JACCPOT_ANALYTIC_L2P_VJP", "1").strip().lower() not in (
+    "0",
+    "false",
+    "no",
+)
+
+
+@partial(jax.custom_vjp, nondiff_argnums=(2,))
+def _evaluate_local_real_with_grad_cvjp(
+    local_coeffs: Array, delta: Array, order: int
+) -> tuple[Array, Array]:
+    """``(local_coeffs, delta) -> (grad = ∇_δ φ, potential)`` with a custom
+    reverse rule that avoids the second-order-autodiff blow-up.
+
+    The primal is byte-identical to the ``value_and_grad`` path, so forward
+    outputs (and the golden oracle) are unchanged; only the reverse pass differs.
+    Under an outer ``grad`` the naive reverse differentiates ``value_and_grad``
+    again -- reverse-over-reverse through the per-particle Chebyshev/Legendre/
+    factorial recurrences, the dominant real-basis L2P reverse cost. The custom
+    rule replaces that, per particle, with a single linear coefficient VJP (delta
+    fixed, so no recurrence re-differentiation) plus one Hessian-vector product in
+    delta. It is verified bit-for-bit against autodiff in
+    ``tests/unit/test_custom_vjp_parity.py``.
+    """
+
+    def phi_fn(d: Array) -> Array:
+        return evaluate_local_real(local_coeffs, d, order=order)
+
+    potential, grad = jax.value_and_grad(phi_fn)(delta)
+    return grad, potential
+
+
+def _evaluate_local_real_with_grad_cvjp_fwd(
+    local_coeffs: Array, delta: Array, order: int
+) -> tuple[tuple[Array, Array], tuple[Array, Array]]:
+    def phi_fn(d: Array) -> Array:
+        return evaluate_local_real(local_coeffs, d, order=order)
+
+    potential, grad = jax.value_and_grad(phi_fn)(delta)
+    return (grad, potential), (local_coeffs, delta)
+
+
+def _evaluate_local_real_with_grad_cvjp_bwd(
+    order: int,
+    residual: tuple[Array, Array],
+    cotangents: tuple[Array, Array],
+) -> tuple[Array, Array]:
+    local_coeffs, delta = residual
+    grad_bar, potential_bar = cotangents
+
+    # Coefficient leg: (grad, potential) is linear in the coefficients at fixed
+    # delta, so this VJP is one cheap linear reverse pass (the harmonic
+    # recurrences are constant w.r.t. the coefficients).
+    def _out_of_coeffs(coeffs: Array) -> tuple[Array, Array]:
+        def phi_fn(d: Array) -> Array:
+            return evaluate_local_real(coeffs, d, order=order)
+
+        potential, grad = jax.value_and_grad(phi_fn)(delta)
+        return grad, potential
+
+    _, vjp_coeffs = jax.vjp(_out_of_coeffs, local_coeffs)
+    (local_bar,) = vjp_coeffs((grad_bar, potential_bar))
+
+    # Delta leg: grad = ∇_δ φ, so its VJP is the Hessian-vector product
+    # ∇²φ · grad_bar (forward-over-reverse), plus ∇φ · potential_bar for the
+    # potential output. One HVP per particle -- no reverse-over-reverse.
+    def _grad_phi(d: Array) -> Array:
+        return jax.grad(
+            lambda dd: evaluate_local_real(local_coeffs, dd, order=order)
+        )(d)
+
+    primal_grad, hvp = jax.jvp(_grad_phi, (delta,), (grad_bar,))
+    delta_bar = hvp + primal_grad * potential_bar
+    return (local_bar, delta_bar)
+
+
+_evaluate_local_real_with_grad_cvjp.defvjp(
+    _evaluate_local_real_with_grad_cvjp_fwd,
+    _evaluate_local_real_with_grad_cvjp_bwd,
+)
+
+
 @partial(jax.jit, static_argnames=("order",))
 def evaluate_local_real_with_grad(
     local_coeffs: Array,
@@ -632,15 +717,20 @@ def evaluate_local_real_with_grad(
         scalar.
         Note: gradient is ∇φ (not the acceleration -∇φ).
     """
-    p = int(order)
+    # Delegate to the custom_vjp-wrapped kernel: the forward is byte-identical to
+    # value_and_grad(evaluate_local_real), but the reverse uses an analytic-
+    # structured rule (linear coefficient VJP + Hessian-vector product) that
+    # avoids the second-order-autodiff blow-up under an outer grad. The env
+    # switch ``JACCPOT_ANALYTIC_L2P_VJP=0`` restores the plain-autodiff reverse
+    # for A/B measurement (see examples/differentiable_fmm_overhead.py).
+    if _ANALYTIC_L2P_VJP:
+        return _evaluate_local_real_with_grad_cvjp(
+            jnp.asarray(local_coeffs), jnp.asarray(delta), int(order)
+        )
 
     def phi_fn(d: Array) -> Array:
-        return evaluate_local_real(local_coeffs, d, order=p)
+        return evaluate_local_real(local_coeffs, d, order=int(order))
 
-    # Note: The gradient returned is with respect to delta.
-    # Since delta = center - eval_point, and center is fixed,
-    # d(delta)/d(eval_point) = -I, so ∇_{eval}φ = -∇_delta φ.
-    # We return ∇_delta φ; caller should negate if needed for force.
     potential, grad = jax.value_and_grad(phi_fn)(delta)
     return grad, potential
 
