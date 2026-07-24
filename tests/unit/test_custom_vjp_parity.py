@@ -125,9 +125,6 @@ def test_p2p_analytic_custom_vjp_matches_autodiff(seed):
         return _pair_accel_cvjp(tp, sp, sm, tmask_f, smask_f, softening_sq, G)
 
     def f_ref(tp, sp, sm):
-        return _pair_accel_masked_accels(
-            tp, sp, sm, tmask, smask, softening_sq, G
-        )
+        return _pair_accel_masked_accels(tp, sp, sm, tmask, smask, softening_sq, G)
 
     assert_vjp_matches(f_custom, f_ref, (tpos, spos, smass))
-

@@ -431,7 +431,9 @@ def _pair_contributions(
 
 # Analytic near-field P2P reverse is on by default; JACCPOT_ANALYTIC_P2P_VJP=0
 # restores plain autodiff for A/B measurement.
-_ANALYTIC_P2P_VJP = os.environ.get("JACCPOT_ANALYTIC_P2P_VJP", "1").strip().lower() not in (
+_ANALYTIC_P2P_VJP = os.environ.get(
+    "JACCPOT_ANALYTIC_P2P_VJP", "1"
+).strip().lower() not in (
     "0",
     "false",
     "no",
@@ -496,7 +498,13 @@ def _pair_accel_cvjp(
 
 
 def _pair_accel_cvjp_fwd(
-    target_positions, source_positions, source_masses, target_mask_f, source_mask_f, softening_sq, G
+    target_positions,
+    source_positions,
+    source_masses,
+    target_mask_f,
+    source_mask_f,
+    softening_sq,
+    G,
 ):
     target_mask = target_mask_f > 0.5
     source_mask = source_mask_f > 0.5
@@ -524,9 +532,16 @@ def _pair_accel_cvjp_fwd(
 
 
 def _pair_accel_cvjp_bwd(residual, cotangent):
-    (diff, inv_dist3, inv_dist5, source_masses, target_mask_f, source_mask_f, softening_sq, G) = (
-        residual
-    )
+    (
+        diff,
+        inv_dist3,
+        inv_dist5,
+        source_masses,
+        target_mask_f,
+        source_mask_f,
+        softening_sq,
+        G,
+    ) = residual
     # Forward masks accels by target_mask, so mask the incoming cotangent alike.
     cot = jnp.where(target_mask_f[..., None] > 0.5, cotangent, 0.0)  # (B, Wt, 3)
     cd = jnp.sum(cot[:, :, None, :] * diff, axis=-1)  # (B, Wt, Ws) = c_t · r_ts
