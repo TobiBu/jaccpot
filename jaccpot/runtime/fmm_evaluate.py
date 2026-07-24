@@ -5,6 +5,7 @@ engine class inherits this mixin. Sibling of _fmm_impl at runtime level.
 
 from __future__ import annotations
 
+import os
 from typing import Any, Optional, Union
 
 import jax
@@ -379,16 +380,39 @@ class EvaluateMixin:
         state: FMMPreparedState,
         positions_sorted: Array,
         *,
+        masses_sorted: Optional[Array] = None,
         target_indices: Optional[Array] = None,
         jit_traversal: bool = True,
     ) -> Array:
-        """Evaluate accelerations for updated sorted positions on a fixed topology."""
+        """Evaluate accelerations for updated sorted positions on a fixed topology.
+
+        Re-runs the upward sweep (P2M + COM centers) and the downward sweep (M2L
+        on the frozen ``state.interactions`` list, then L2L) on the live
+        ``positions_sorted``, followed by L2P + pure-JAX P2P. Every discrete
+        artifact -- the tree, interaction list, neighbor list, and near-field
+        index buffers -- is taken from ``state`` unchanged. When ``masses_sorted``
+        is provided it is threaded through P2M and the near-field in place of
+        ``state.masses_sorted`` (the differentiable-w.r.t.-mass path); otherwise
+        the prepared masses are reused. Both ``positions_sorted`` and
+        ``masses_sorted`` are differentiable inputs, and the result never reads
+        ``state.upward``/``state.downward``, so ``jax.grad`` over this method is an
+        exact fixed-topology gradient.
+        """
         positions_sorted_arr = jnp.asarray(positions_sorted, dtype=state.working_dtype)
         if positions_sorted_arr.shape != state.positions_sorted.shape:
             raise ValueError(
                 "positions_sorted must have shape "
                 f"{tuple(state.positions_sorted.shape)}, got {tuple(positions_sorted_arr.shape)}"
             )
+        if masses_sorted is None:
+            masses_sorted_arr = state.masses_sorted
+        else:
+            masses_sorted_arr = jnp.asarray(masses_sorted, dtype=state.working_dtype)
+            if masses_sorted_arr.shape != state.masses_sorted.shape:
+                raise ValueError(
+                    "masses_sorted must have shape "
+                    f"{tuple(state.masses_sorted.shape)}, got {tuple(masses_sorted_arr.shape)}"
+                )
 
         runtime_overrides = self._resolve_runtime_execution_overrides(
             num_particles=int(positions_sorted_arr.shape[0]),
@@ -396,7 +420,7 @@ class EvaluateMixin:
         upward = self.prepare_upward_sweep(
             state.tree,
             positions_sorted_arr,
-            state.masses_sorted,
+            masses_sorted_arr,
             max_order=int(state.downward.locals.order),
             center_mode=runtime_overrides.center_mode,
             max_leaf_size=int(state.max_leaf_size),
@@ -432,7 +456,7 @@ class EvaluateMixin:
                 fmm=self,
                 tree=state.tree,
                 positions_sorted=positions_sorted_arr,
-                masses_sorted=state.masses_sorted,
+                masses_sorted=masses_sorted_arr,
                 downward=downward,
                 neighbor_list=state.neighbor_list,
                 nearfield_interop=state.nearfield_interop,
@@ -459,7 +483,7 @@ class EvaluateMixin:
                 fmm=self,
                 tree=state.tree,
                 positions_sorted=positions_sorted_arr,
-                masses_sorted=state.masses_sorted,
+                masses_sorted=masses_sorted_arr,
                 downward=downward,
                 neighbor_list=state.neighbor_list,
                 nearfield_interop=state.nearfield_interop,
@@ -484,6 +508,125 @@ class EvaluateMixin:
         else:
             accelerations = jnp.asarray(evaluation)
         return accelerations.astype(output_dtype)
+
+    @jaxtyped(typechecker=beartype)
+    def _evaluate_prepared_state_at_positions_and_masses_sorted(
+        self: "FastMultipoleMethod",
+        state: FMMPreparedState,
+        positions_sorted: Array,
+        masses_sorted: Array,
+        *,
+        target_indices: Optional[Array] = None,
+        jit_traversal: bool = False,
+    ) -> Array:
+        """Fixed-topology re-eval at live sorted positions AND masses.
+
+        Named differentiable seam used by :meth:`differentiable_accelerations`.
+        Thin front for :meth:`_evaluate_prepared_state_at_positions_sorted` with
+        ``masses_sorted`` threaded through P2M and the near-field, so gradients
+        flow w.r.t. both positions and masses at fixed topology.
+        """
+        return self._evaluate_prepared_state_at_positions_sorted(
+            state,
+            positions_sorted,
+            masses_sorted=masses_sorted,
+            target_indices=target_indices,
+            jit_traversal=jit_traversal,
+        )
+
+    @jaxtyped(typechecker=beartype)
+    def differentiable_accelerations(
+        self: "FastMultipoleMethod",
+        state: FMMPreparedState,
+        positions: Array,
+        masses: Array,
+        *,
+        target_indices: Optional[Array] = None,
+        jit_traversal: bool = False,
+    ) -> Array:
+        """Exact fixed-topology gradients of the FMM force w.r.t. positions/masses.
+
+        End-to-end differentiable single-GPU FMM acceleration. The tree topology
+        (Morton order, node membership, MAC accept/reject, the M2L interaction
+        list, and the near-field partition) is taken as a **constant** from the
+        pre-built ``state``; the numeric pipeline (P2M, COM centers, M2M/M2L/L2L
+        translations, L2P, near-field P2P) is re-evaluated on the live
+        ``positions``/``masses`` so ``jax.grad``/``jax.vjp`` over this method give
+        exact gradients at fixed topology (see ``docs/differentiable_fmm_design.md``).
+
+        Because tree construction (:meth:`prepare_state`) is not traceable, build
+        ``state`` once, concretely, then differentiate this method::
+
+            state = fmm.prepare_state(pos0, mass0, max_order=p, leaf_size=...)
+            g = jax.grad(lambda p, m:
+                (fmm.differentiable_accelerations(state, p, m) ** 2).sum()
+            )(pos, mass)
+
+        Parameters
+        ----------
+        state : FMMPreparedState
+            Topology + buffers built by :meth:`prepare_state`. Captured as a
+            constant; must be a radix ``FMMPreparedState`` with
+            ``expansion_basis == "solidfmm"``.
+        positions, masses : Array
+            Differentiated inputs, in the ORIGINAL (unsorted) particle order.
+        target_indices : Optional[Array]
+            Optional targets to return (all particles are still sources).
+        jit_traversal : bool
+            Kept ``False`` on the gradient path (fully pure-JAX ``evaluate_tree``).
+
+        Returns
+        -------
+        Array
+            ``(N, 3)`` accelerations in the original input order.
+        """
+        if isinstance(state, LargeNPreparedState):
+            raise NotImplementedError(
+                "differentiable_accelerations requires a radix FMMPreparedState, "
+                "not LargeNPreparedState: the large-N pipeline runs non-differentiable "
+                "fused Pallas kernels. Build the state without the LARGE_N_GPU preset."
+            )
+        if getattr(state, "expansion_basis", None) != "solidfmm":
+            raise NotImplementedError(
+                "differentiable_accelerations currently supports "
+                "expansion_basis='solidfmm' (basis 'complex'/'solidfmm' or 'real') "
+                f"only; got {getattr(state, 'expansion_basis', None)!r}."
+            )
+        pallas_m2l = os.environ.get("JACCPOT_STATIC_STRICT_FUSED_M2L_PALLAS", "")
+        if pallas_m2l not in ("", "0", "false", "False"):
+            raise NotImplementedError(
+                "differentiable_accelerations requires the pure-JAX M2L path; unset "
+                "JACCPOT_STATIC_STRICT_FUSED_M2L_PALLAS (the fused Pallas M2L kernel "
+                "has no autodiff rule)."
+            )
+
+        # Reorder live inputs into Morton/sorted order using the FROZEN integer
+        # permutation. ``state.inverse_permutation`` maps sorted -> original
+        # (original[i] == sorted[inverse_permutation[i]]); its inverse ``fwd``
+        # maps original -> sorted. Both are integer-index gathers (VJP =
+        # scatter-add), so cotangents flow to positions/masses but never to the
+        # index arrays.
+        num_particles = int(state.inverse_permutation.shape[0])
+        inverse_permutation = jnp.asarray(state.inverse_permutation, dtype=INDEX_DTYPE)
+        forward_permutation = (
+            jnp.zeros((num_particles,), dtype=INDEX_DTYPE)
+            .at[inverse_permutation]
+            .set(jnp.arange(num_particles, dtype=INDEX_DTYPE))
+        )
+        positions_sorted = jnp.asarray(positions, dtype=state.working_dtype)[
+            forward_permutation
+        ]
+        masses_sorted = jnp.asarray(masses, dtype=state.working_dtype)[
+            forward_permutation
+        ]
+        # The seam already returns accelerations in the original input order.
+        return self._evaluate_prepared_state_at_positions_and_masses_sorted(
+            state,
+            positions_sorted,
+            masses_sorted,
+            target_indices=target_indices,
+            jit_traversal=jit_traversal,
+        )
 
     @jaxtyped(typechecker=beartype)
     def evaluate_tree(

@@ -765,6 +765,33 @@ class FastMultipoleMethod:
             max_acc_derivative_order=max_acc_derivative_order,
         )
 
+    def differentiable_accelerations(
+        self: "FastMultipoleMethod",
+        state: FMMPreparedState,
+        positions: Array,
+        masses: Array,
+        *,
+        target_indices: Optional[Array] = None,
+        jit_traversal: bool = False,
+    ) -> Array:
+        """Exact fixed-topology gradients of the FMM force w.r.t. positions/masses.
+
+        Differentiable single-GPU FMM acceleration: the tree topology carried by
+        ``state`` is held constant while the numeric pipeline is re-evaluated on
+        the live ``positions``/``masses``, so ``jax.grad``/``jax.vjp`` over this
+        call yield exact gradients at fixed topology. Build ``state`` once with
+        :meth:`prepare_state` (tree construction is not traceable), then
+        differentiate this method. Requires a radix ``FMMPreparedState`` with a
+        solidfmm basis. See ``docs/differentiable_fmm_design.md``.
+        """
+        return self._impl.differentiable_accelerations(
+            state,
+            positions,
+            masses,
+            target_indices=target_indices,
+            jit_traversal=jit_traversal,
+        )
+
     def evaluate_prepared_state_with_jerk(
         self: "FastMultipoleMethod",
         state: FMMPreparedState,
