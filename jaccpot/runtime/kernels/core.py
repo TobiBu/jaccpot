@@ -2276,8 +2276,14 @@ def _prepare_solidfmm_downward_sweep(
         if isinstance(node_levels, jax.core.Tracer):
             l2l_num_levels: Optional[int] = None
         else:
+            # ``node_levels`` is concrete here, but under an outer ``jax.jit`` any
+            # jnp op on it (even a slice) is staged into the jaxpr and cannot be
+            # read by ``int()``. Pull the whole array to the host FIRST, then
+            # slice + reduce in numpy, so the level count is a plain Python int in
+            # every trace context (mirrors ``_resolve_upward_num_levels``).
+            node_levels_host = jax.device_get(node_levels)
             l2l_num_levels = int(
-                jnp.max(node_levels[: child_inputs.num_internal_nodes])
+                node_levels_host[: child_inputs.num_internal_nodes].max()
             )
         stage_t0 = time.perf_counter()
         locals_updated = _propagate_solidfmm_locals_by_level(
