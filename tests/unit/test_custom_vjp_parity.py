@@ -95,3 +95,39 @@ def test_real_l2p_custom_vjp_batched_matches_autodiff(order):
         return jax.vmap(one)(d)
 
     assert_vjp_matches(f_custom, f_ref, (local, deltas))
+
+
+# --------------------------------------------------------------------------
+# Near-field P2P analytic custom_vjp (symmetric tidal tensor)
+# --------------------------------------------------------------------------
+from jaccpot.nearfield.near_field import (  # noqa: E402
+    _pair_accel_cvjp,
+    _pair_accel_masked_accels,
+)
+
+
+@pytest.mark.parametrize("seed", [0, 1, 2])
+def test_p2p_analytic_custom_vjp_matches_autodiff(seed):
+    rng = np.random.default_rng(seed)
+    B, Wt, Ws = 2, 5, 7
+    tpos = jnp.asarray(rng.normal(size=(B, Wt, 3)), dtype=jnp.float64)
+    spos = jnp.asarray(rng.normal(size=(B, Ws, 3)), dtype=jnp.float64)
+    smass = jnp.asarray(rng.uniform(0.5, 1.5, size=(B, Ws)), dtype=jnp.float64)
+    # Exercise masking: some invalid targets/sources.
+    tmask = jnp.asarray(rng.random((B, Wt)) > 0.2)
+    smask = jnp.asarray(rng.random((B, Ws)) > 0.2)
+    tmask_f = tmask.astype(jnp.float64)
+    smask_f = smask.astype(jnp.float64)
+    softening_sq = jnp.asarray(1e-2**2, dtype=jnp.float64)
+    G = jnp.asarray(1.5, dtype=jnp.float64)
+
+    def f_custom(tp, sp, sm):
+        return _pair_accel_cvjp(tp, sp, sm, tmask_f, smask_f, softening_sq, G)
+
+    def f_ref(tp, sp, sm):
+        return _pair_accel_masked_accels(
+            tp, sp, sm, tmask, smask, softening_sq, G
+        )
+
+    assert_vjp_matches(f_custom, f_ref, (tpos, spos, smass))
+
