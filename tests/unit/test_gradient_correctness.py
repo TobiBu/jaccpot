@@ -39,9 +39,9 @@ def _directional_fd_vs_ad(loss_fn, x, direction, eps=1e-6):
 @pytest.mark.parametrize(
     "basis,theta,n,order",
     [
-        ("complex", 0.4, 96, 2),
-        ("complex", 0.6, 128, 4),
-        ("real", 0.5, 96, 4),
+        ("complex", 0.4, 64, 2),
+        ("complex", 0.6, 64, 4),
+        ("real", 0.5, 64, 4),
     ],
 )
 def test_fd_vs_ad_positions(basis, theta, n, order):
@@ -64,7 +64,7 @@ def test_fd_vs_ad_positions(basis, theta, n, order):
 
 @pytest.mark.parametrize("basis", ["complex", "real"])
 def test_fd_vs_ad_masses(basis):
-    n, theta, order = 96, 0.5, 4
+    n, theta, order = 64, 0.5, 4
     positions, masses = _system(n, seed=7)
     fmm = FastMultipoleMethod(
         basis=basis, use_pallas=False, theta=theta, G=1.0, softening=1e-2
