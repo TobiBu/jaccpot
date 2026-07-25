@@ -42,11 +42,14 @@ def _rel_l2(a, b):
     return float(np.linalg.norm(a - b) / (np.linalg.norm(b) + 1e-300))
 
 
-# theta tight enough that the far field is accurate; both solidfmm submodes.
+# Both solidfmm submodes. A single (theta, order) point: the reverse pass is
+# order-independent to validate, and each extra (order, N) combo compiles and
+# *retains* another large reverse-mode FMM executable in the worker's in-process
+# cache -- that accumulation, not any single test, is what OOMs the CI runner.
 @pytest.mark.parametrize("basis", ["complex", "real"])
-@pytest.mark.parametrize("theta,order,tol", [(0.3, 6, 5e-3), (0.5, 6, 2e-2)])
+@pytest.mark.parametrize("theta,order,tol", [(0.4, 4, 5e-3)])
 def test_grad_fmm_matches_grad_directsum_positions(basis, theta, order, tol):
-    n = 128
+    n = 64
     positions, masses, probe = _system(n)
     softening, G = 1e-2, 1.5
     fmm = FastMultipoleMethod(
@@ -58,20 +61,24 @@ def test_grad_fmm_matches_grad_directsum_positions(basis, theta, order, tol):
         return jnp.sum(fmm.differentiable_accelerations(state, pos, masses) * probe)
 
     def dense_loss(pos):
-        return jnp.sum(_direct_sum_accelerations(pos, masses, softening=softening, G=G) * probe)
+        return jnp.sum(
+            _direct_sum_accelerations(pos, masses, softening=softening, G=G) * probe
+        )
 
     g_fmm = jax.grad(fmm_loss)(positions)
     g_dense = jax.grad(dense_loss)(positions)
     assert jnp.all(jnp.isfinite(g_fmm))
     err = _rel_l2(g_fmm, g_dense)
-    assert err < tol, f"position grad rel-L2 {err:.3e} exceeds {tol:.1e} (basis={basis}, theta={theta})"
+    assert (
+        err < tol
+    ), f"position grad rel-L2 {err:.3e} exceeds {tol:.1e} (basis={basis}, theta={theta})"
 
 
 @pytest.mark.parametrize("basis", ["complex", "real"])
 def test_grad_fmm_matches_grad_directsum_masses(basis):
-    n = 128
+    n = 64
     positions, masses, probe = _system(n, seed=1)
-    softening, G, theta, order = 1e-2, 1.5, 0.3, 6
+    softening, G, theta, order = 1e-2, 1.5, 0.4, 4
     fmm = FastMultipoleMethod(
         basis=basis, use_pallas=False, theta=theta, G=G, softening=softening
     )
@@ -81,7 +88,9 @@ def test_grad_fmm_matches_grad_directsum_masses(basis):
         return jnp.sum(fmm.differentiable_accelerations(state, positions, m) * probe)
 
     def dense_loss(m):
-        return jnp.sum(_direct_sum_accelerations(positions, m, softening=softening, G=G) * probe)
+        return jnp.sum(
+            _direct_sum_accelerations(positions, m, softening=softening, G=G) * probe
+        )
 
     g_fmm = jax.grad(fmm_loss)(masses)
     g_dense = jax.grad(dense_loss)(masses)
@@ -92,9 +101,11 @@ def test_grad_fmm_matches_grad_directsum_masses(basis):
 
 def test_differentiable_matches_forward_compute_accelerations():
     """The differentiable path must reproduce the forward FMM force it differentiates."""
-    n = 128
+    n = 64
     positions, masses, _ = _system(n, seed=2)
-    fmm = FastMultipoleMethod(basis="complex", use_pallas=False, theta=0.4, G=1.0, softening=1e-2)
+    fmm = FastMultipoleMethod(
+        basis="complex", use_pallas=False, theta=0.4, G=1.0, softening=1e-2
+    )
     state = fmm.prepare_state(positions, masses, max_order=4, leaf_size=16)
     a_diff = fmm.differentiable_accelerations(state, positions, masses)
     a_fwd = fmm.compute_accelerations(positions, masses, max_order=4, theta=0.4)
