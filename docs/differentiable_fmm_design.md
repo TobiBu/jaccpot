@@ -216,8 +216,8 @@ non-differentiable and `differentiable_accelerations` rejected the
 `JACCPOT_STATIC_STRICT_FUSED_M2L_PALLAS` flag outright. PR-2 makes the fused M2L a
 differentiable **opt-in fast lane** on the grad path.
 
-**Scope decision — the near-field Pallas wrapper was descoped (the reality check paid
-off).** Before wrapping the near-field, we measured the fused-Pallas near-field forward
+**Scope decision — near-field Pallas is wrapped for completeness, but NOT put on the
+grad path (the reality check paid off).** We measured the fused-Pallas near-field forward
 vs its pure-JAX twin on an A100 (`nearfield_fused_leaf_pallas` vs
 `nearfield_fused_leaf_jax`, identical leaf-major inputs):
 
@@ -231,9 +231,11 @@ vs its pure-JAX twin on an A100 (`nearfield_fused_leaf_pallas` vs
 
 At the N the reverse pass bounds (~1k) the fused near-field is only ~1.1x, and it is
 *slower* at moderate N with denser sources; it wins only at large N (≥16k). The
-bucketed pure-JAX near-field is already differentiable and essentially as fast there,
-so the near-field `custom_vjp` is not worth the leafpair gather-structure pair-matching
-its analytic reverse would need. **The grad path keeps the bucketed near-field.**
+bucketed pure-JAX near-field is already differentiable (analytic tidal-tensor
+`custom_vjp`, PR-1) and essentially as fast there. So the fused near-field kernels are
+wrapped with `custom_vjp` for completeness (they are now differentiable, so they *can*
+be opted onto the grad path — see item 5 below), but **the grad path keeps the bucketed
+near-field by default.**
 
 **Delivered:**
 
@@ -272,6 +274,16 @@ its analytic reverse would need. **The grad path keeps the bucketed near-field.*
    Gradient-correctness + grad-vs-direct-sum re-run with the flag ON on the A100
    (17 passed: FD-vs-AD positions/masses complex+real, grad(FMM) vs grad(direct sum),
    NaN/inf hygiene).
+
+5. **Fused-Pallas near-field `custom_vjp`** (`jaccpot/pallas/nearfield_fused_leaf.py`):
+   `nearfield_fused_leaf_pallas_cvjp` (pairs lane) and `nearfield_leafpair_pallas_cvjp`
+   (prepacked production lane, in-kernel leaf-id gather). Pallas forward +
+   autodiff-of-twin reverse; non-diff mask/id arrays passed as floats (reconstructed
+   inside) so cotangents are ordinary zeros with no closure over tracers. VJP parity
+   interpret + A100 (4 passed). These make the fused near-field differentiable so it
+   *can* be opted onto the grad path, but per the ROI table above the grad path keeps
+   the bucketed near-field by default (the fused near-field's forward edge only shows at
+   N≥16k). No grad-path wiring is added — the near-field mode stays bucketed.
 
 **fwd/bwd consistency:** the reverse is the gradient of the pure-jnp twin, not
 bit-exactly of the Pallas forward (Pallas ≈ twin to ~1e-10 for the M2L literal ports).

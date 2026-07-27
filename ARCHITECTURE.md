@@ -189,12 +189,19 @@ auto-gated off and the pure-JAX path runs (CPU CI can still lower Pallas with
   fused kernels' own sm_80 support functions).
 - The fused M2L kernels are **differentiable** via module-level `custom_vjp` wrappers
   (`m2l_{core_z_real,complex_fused,real_fused}_pallas_cvjp`): Pallas forward +
-  autodiff-of-the-pure-jnp-twin reverse. `_apply_{real,complex}_m2l` route through the
-  wrappers, so the same flag enables the fused M2L on both the forward and the
-  `differentiable_accelerations` grad path (PR-2). `pallas_call` itself still has no
-  autodiff rule — the wrapper supplies it.
+  reverse. `_apply_{real,complex}_m2l` route through the wrappers, so the same flag
+  enables the fused M2L on both the forward and the `differentiable_accelerations`
+  grad path (PR-2). `pallas_call` itself still has no autodiff rule — the wrapper
+  supplies it. The reverse is a **fully-fused analytic VJP kernel**
+  (`m2l_{real,complex}_fused_vjp_pallas`, default; `JACCPOT_FUSED_M2L_VJP=0` falls back
+  to autodiff of the twin), so both forward and reverse run as single Pallas launches.
 - Nearfield Pallas is resolved from `pallas_nearfield_fused_supported()` into the
-  engine's `use_pallas`.
+  engine's `use_pallas`. The fused near-field kernels are **also differentiable** via
+  `custom_vjp` (`nearfield_fused_leaf_pallas_cvjp` / `nearfield_leafpair_pallas_cvjp`,
+  Pallas forward + autodiff-of-twin reverse), but the `differentiable_accelerations`
+  grad path keeps the bucketed pure-JAX near-field (already differentiable via the
+  analytic tidal-tensor `custom_vjp`, and as fast at the relevant N); the fused
+  near-field `custom_vjp` is available for opt-in but not the default.
 - **Org rule for GPU runs:** select a free GPU with autocvd *before* `import jax`:
   `from autocvd import autocvd; autocvd(num_gpus=1, least_used=True)`.
 
