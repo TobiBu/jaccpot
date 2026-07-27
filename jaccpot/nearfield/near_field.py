@@ -462,6 +462,31 @@ def _pair_accel_masked_accels(
     return jnp.where(target_mask[..., None], accels, 0.0)
 
 
+def _pair_accel_pair_terms(
+    target_positions: Array,
+    source_positions: Array,
+    target_mask: Array,
+    source_mask: Array,
+    softening_sq: Union[float, Array],
+) -> Tuple[Array, Array, Array]:
+    """``(diff, inv_dist3, inv_dist5)`` exactly as :func:`_pair_accel_masked_accels`
+    forms them.
+
+    Factored out so the analytic reverse rule can REMATERIALIZE these
+    ``(B, Wt, Ws)``-shaped pair intermediates instead of carrying them in the
+    ``custom_vjp`` residual, without the forward and reverse expressions drifting
+    apart. See :func:`_pair_accel_cvjp_fwd` for why that matters.
+    """
+    diff = target_positions[:, :, None, :] - source_positions[:, None, :, :]
+    dist_sq = jnp.sum(diff * diff, axis=-1) + softening_sq
+    pair_mask = target_mask[:, :, None] & source_mask[:, None, :]
+    safe_dist_sq = jnp.where(pair_mask, dist_sq, jnp.ones_like(dist_sq))
+    inv_r = jnp.where(pair_mask, lax.rsqrt(safe_dist_sq), 0.0)
+    inv_dist3 = jnp.where(pair_mask, inv_r * inv_r * inv_r, 0.0)
+    inv_dist5 = jnp.where(pair_mask, inv_dist3 * inv_r * inv_r, 0.0)
+    return diff, inv_dist3, inv_dist5
+
+
 @jax.custom_vjp
 def _pair_accel_cvjp(
     target_positions: Array,
@@ -506,22 +531,29 @@ def _pair_accel_cvjp_fwd(
     softening_sq,
     G,
 ):
-    target_mask = target_mask_f > 0.5
-    source_mask = source_mask_f > 0.5
-    diff = target_positions[:, :, None, :] - source_positions[:, None, :, :]
-    dist_sq = jnp.sum(diff * diff, axis=-1) + softening_sq
-    pair_mask = target_mask[:, :, None] & source_mask[:, None, :]
-    safe_dist_sq = jnp.where(pair_mask, dist_sq, jnp.ones_like(dist_sq))
-    inv_r = jnp.where(pair_mask, lax.rsqrt(safe_dist_sq), 0.0)
-    inv_dist3 = jnp.where(pair_mask, inv_r * inv_r * inv_r, 0.0)
-    inv_dist5 = jnp.where(pair_mask, inv_dist3 * inv_r * inv_r, 0.0)
-    weighted = inv_dist3 * source_masses[:, None, :]
-    accels = -G * jnp.sum(weighted[..., None] * diff, axis=2)
-    accels = jnp.where(target_mask[..., None], accels, 0.0)
+    # The residual carries only the O(B*W) INPUTS; the O(B*Wt*Ws) pair
+    # intermediates are rematerialized in the reverse pass. Storing
+    # (diff, inv_dist3, inv_dist5) instead cost 5 doubles per particle PAIR, and
+    # because the bucketed near-field drives this kernel from a ``lax.scan`` over
+    # edge chunks, reverse mode retained EVERY chunk's residual -- i.e.
+    # ``40 * near_field_edges * max_leaf_size**2`` bytes in total, independent of
+    # ``edge_chunk_size``. Measured: a single 52.14 GiB ``diff`` allocation at
+    # N=65536 / leaf 64 on a 40 GB A100, versus 1.13 GB for the whole forward.
+    # Recomputing costs one extra pair pass inside a backward that already
+    # materializes a (B, Wt, Ws, 3) array, and keeps the reverse residual
+    # O(edges * max_leaf_size) so galaxy-scale N fits.
+    accels = _pair_accel_masked_accels(
+        target_positions,
+        source_positions,
+        source_masses,
+        target_mask_f > 0.5,
+        source_mask_f > 0.5,
+        softening_sq,
+        G,
+    )
     residual = (
-        diff,
-        inv_dist3,
-        inv_dist5,
+        target_positions,
+        source_positions,
         source_masses,
         target_mask_f,
         source_mask_f,
@@ -533,15 +565,24 @@ def _pair_accel_cvjp_fwd(
 
 def _pair_accel_cvjp_bwd(residual, cotangent):
     (
-        diff,
-        inv_dist3,
-        inv_dist5,
+        target_positions,
+        source_positions,
         source_masses,
         target_mask_f,
         source_mask_f,
         softening_sq,
         G,
     ) = residual
+    # Rematerialize the pair intermediates the forward deliberately did not save
+    # (see _pair_accel_cvjp_fwd). Same expressions, so the analytic reverse below
+    # is unchanged bit-for-bit.
+    diff, inv_dist3, inv_dist5 = _pair_accel_pair_terms(
+        target_positions,
+        source_positions,
+        target_mask_f > 0.5,
+        source_mask_f > 0.5,
+        softening_sq,
+    )
     # Forward masks accels by target_mask, so mask the incoming cotangent alike.
     cot = jnp.where(target_mask_f[..., None] > 0.5, cotangent, 0.0)  # (B, Wt, 3)
     cd = jnp.sum(cot[:, :, None, :] * diff, axis=-1)  # (B, Wt, Ws) = c_t · r_ts
