@@ -325,3 +325,122 @@ The fused reverse is kept default-on (validated, equal-cost, and the on-chip for
 matter at high expansion order, where the M2L share grows, or for reverse-pass memory at
 scale), but the reverse bottleneck is the near-field, not M2L. Fusing the near-field
 reverse (or its analytic tidal-tensor VJP) is where the remaining reverse ROI lives.
+
+## PR-3 outcomes — reaching galaxy N (200k–1M)
+
+PR-1/PR-2 optimized the reverse pass at N≲4k. Measuring at the canonical galaxy
+scale (200k–1M) showed gradients are **accurate but did not scale**: FD-vs-AD on the
+frozen-topology function is 1.2e-9 (N=1024), 7.9e-10 (N=4096) and **2.9e-9 at
+N=16384 with the far field live** (3626 M2L pairs), with forward parity 1e-16 and
+grad(FMM)-vs-grad(direct-sum) at 2.5e-4 — but the reverse pass *failed outright* at
+N=65536, three independent blockers deep. All four fixes below are in this PR.
+
+**Correction to a claim in this doc / the docstring.** "Bare `jax.grad`/`jax.vjp`
+give exact gradients at every N" was false above 65536: the host-side ops that the
+"jit limitation" section attributes to outer `jax.jit` also bit the *bare* reverse
+once the grouped M2L auto-enabled. Fixed by (A); the docstring is corrected.
+
+### A. The grad path must not route through the host-side grouped classifier
+At `n_particles >= _GPU_LARGE_PARTICLE_THRESHOLD` (65536) the resolver auto-enables
+`grouped_interactions`, whose class construction runs on the host — yggdrax
+`build_grouped_interactions_from_pairs` does
+`np.asarray(jax.device_get(geometry.center))`. Under `jax.grad` the centres are
+tracers, so the reverse died with `TracerArrayConversionError float64[2047,3]`. The
+forward survived only because eager execution keeps the centres concrete.
+`_evaluate_prepared_state_at_positions_sorted` gains `force_ungrouped_farfield`
+(default ON for the differentiable seam). **`center_mode` is passed through
+unchanged** — the grouped classification *requires* geometric (aabb) centres, and
+rewriting them would change the force the gradient is taken of.
+
+**The grouped and ungrouped M2L are NOT the same force** (measured, and worth
+recording because the obvious assumption is wrong). The grouped path quantises pair
+displacements onto a lattice (`np.rint(delta / cell_size)`) and applies ONE
+representative displacement per class, so it is an approximation, not a re-spelling
+of the same arithmetic. At n=512, θ=0.6, p=4, `leaf_size=4` (a deliberately deep
+tree, so the classes are sparsely populated and the quantisation is stressed),
+against the exact direct sum:
+
+| path | rel-L2 vs exact direct sum |
+|---|---|
+| grouped M2L forward | 7.08e-02 |
+| **ungrouped M2L (the grad path)** | **1.07e-02** |
+| grouped vs ungrouped | 6.58e-02 |
+
+So the grad path is ~6.6x *more* accurate here, not merely different. Consequence:
+if a caller explicitly requests `grouped_interactions=True`, their forward force and
+the force the gradient is taken of differ at the grouped path's own accuracy. With
+(D) the default path no longer enables grouping at n>=65536, so forward and grad
+path agree exactly there; the mismatch is reachable only via an explicit request.
+A leaf_size of 4 stresses the quantisation far harder than the production leaf
+64--256, so treat 7e-02 as a worst case, not a typical figure.
+
+### B. Reverse-pass memory was O(near-field pairs), not O(N) — the real wall
+`_pair_accel_cvjp_fwd` stored `(diff, inv_dist3, inv_dist5)` = 5 doubles per particle
+**pair**, and because the bucketed near-field drives the kernel from a `lax.scan` over
+edge chunks, reverse mode retained *every* chunk's residual:
+`40 * near_field_edges * max_leaf_size**2` bytes in total, independent of
+`edge_chunk_size`. Measured at N=65536 (galaxy disk, θ=0.7, leaf 64, 569,220 edges):
+a single **52.14 GiB** `diff` allocation — matching `edges*W*W*3*8` to 0.03 GiB — on a
+38.2 GB A100, against **1.13 GB for the whole forward** (the forward streams; the
+reverse does not). No `jax.checkpoint` existed anywhere in the tree.
+
+The residual now carries only the O(B*W) inputs and the pair intermediates are
+**rematerialized** in `_pair_accel_cvjp_bwd` via the shared `_pair_accel_pair_terms`
+helper (so forward and reverse expressions cannot drift). Residual: **86.9 GiB →
+1.90 GiB (46x)**; the extra pair pass lands in a backward that already materializes a
+`(B, Wt, Ws, 3)` array. Gated bit-for-bit by
+`test_p2p_analytic_custom_vjp_matches_autodiff` (rtol 1e-11).
+
+### C. fp32 far-field gradients were NaN — the `1e-60` floors flushed to zero
+fp32 is the precision the large-N production path uses, yet every gradient test ran
+float64. Measured: fp32 gradients are finite with an empty M2L list (rel-L2 1.96e-6
+vs float64, worst component 2.5e-3) but **all-NaN once the far field is active**.
+
+Cause: `jnp.maximum(r2, 1e-60)` in the translation/harmonics operators. `1e-60`
+**underflows to exactly 0.0 in float32** (smallest subnormal ~1.4e-45), so the clamp
+became a no-op. That clamp is load-bearing for *reverse* safety, not just the
+forward: when the floor wins, `jnp.maximum` routes a zero cotangent, which is what
+keeps `d sqrt/dr2 = 1/(2r)` finite at the exact-zero displacements the fixed-topology
+FMM genuinely hits (a single-child internal node shares its child's COM ⇒ a zero L2L
+translation — see B6 above). With the floor gone, float32 evaluated `sqrt(0)`.
+
+`operators/dtypes.squared_radius_floor(dtype)` returns `max(1e-60, finfo(dtype).tiny)`
+— **float64 is unchanged bit-for-bit** (1e-60), float32 becomes 1.1755e-38. Applied at
+all 8 real-basis and 4 complex-basis sites. Two real-basis sites paired the floor with
+a `rho > 1e-30` test (`== sqrt(1e-60)`, i.e. "was the floor applied?"); that predicate
+silently inverted in float32, taking the `x/rho` branch on the z axis and giving
+`cos_phi = 0` instead of the correct `1.0`, so it is now expressed as
+`rho2 > squared_radius_floor(...)` — identical in float64, correct in float32. The
+`is_zero = r < 1e-30` sites are left alone deliberately: they are unreachable in
+float64 (`r >= sqrt(1e-60)`), and the dtype-aware floor makes float32 agree.
+
+### D. `farfield_mode="auto"` reached the kernels — breaking the FORWARD too
+The `static_runtime_fixed_sizing` branch of the resolver (**on by default**,
+`JACCPOT_STATIC_RUNTIME_FIXED_SIZING=1`) never resolved `farfield_mode` away from
+`"auto"`, so once the grouped M2L auto-enabled at n>=65536 the grouped branch of
+`_solidfmm_downward_accumulate_from_multipoles` raised
+`ValueError: farfield_mode must be 'pair_grouped' or 'class_major'` — from
+`prepare_state` **and `compute_accelerations`**. Pre-existing (identical on `main`)
+and independent of gradients. That branch also never coupled `center_mode="aabb"` to
+the grouping the way the adaptive branch does, so resolving only `farfield_mode`
+would have traded a crash for *wrong forces* (the grouped path quantises pair
+displacements onto a lattice and applies one representative displacement per class).
+Fix: static sizing no longer inherits the adaptive auto-grouping rewrite (it is an
+adaptive rewrite, which that branch exists to skip), and an *explicit*
+`grouped_interactions=True` now resolves `farfield_mode` and couples `aabb` exactly
+as the adaptive branch does.
+
+**Why nothing caught A–D:** the largest real particle count in the suite is n=1500;
+the `num_particles=1000000` references only unit-test chunk-size resolvers, and the
+one N=65536 test uses `preset="large_n_gpu"` (which forces `pair_grouped`) and is
+env-gated off. `tests/unit/test_large_n_grad_path.py` now covers the resolver policy
+(host-only, instant), the grouped-vs-ungrouped grad equivalence, and fp32 far-field
+gradient finiteness.
+
+**Still open:** `LargeNPreparedState` remains rejected, so
+`canonical_large_n_production_config()` (preset `large_n_gpu`, fp32, leaf 256) — the
+config the README recommends for 200k–1M — is still not differentiable; its Pallas
+kernels already carry `custom_vjp` (PR-2), so the gap is the eval seam.
+`OdisseoFMMCoupler.accelerations` still yields **exactly zero** gradients silently
+(it routes to `evaluate_prepared_state`, which takes no live positions/masses).
+Reverse-pass *compile* time is ~10 min at N=16384 and grows.
