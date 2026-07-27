@@ -384,6 +384,7 @@ class EvaluateMixin:
         target_indices: Optional[Array] = None,
         jit_traversal: bool = True,
         nearfield_mode_override: Optional[str] = None,
+        force_ungrouped_farfield: bool = False,
     ) -> Array:
         """Evaluate accelerations for updated sorted positions on a fixed topology.
 
@@ -418,6 +419,23 @@ class EvaluateMixin:
         runtime_overrides = self._resolve_runtime_execution_overrides(
             num_particles=int(positions_sorted_arr.shape[0]),
         )
+        grouped_interactions = runtime_overrides.grouped_interactions
+        farfield_mode = runtime_overrides.farfield_mode
+        if force_ungrouped_farfield and grouped_interactions:
+            # The grouped/class-major M2L builds its pair classes on the HOST
+            # (yggdrax ``build_grouped_interactions_from_pairs`` does
+            # ``np.asarray(jax.device_get(geometry.center))``), so it raises
+            # ``TracerArrayConversionError`` as soon as the expansion centres are
+            # traced -- i.e. on every reverse pass. The ungrouped M2L applies each
+            # pair's exact displacement instead of one representative per lattice
+            # class, so it is the MORE accurate of the two (measured ~6.6x closer to
+            # the exact direct sum on a deep-tree config) -- not merely a different
+            # execution strategy. NOTE the expansion centres
+            # (``runtime_overrides.center_mode``) are passed through UNCHANGED: the
+            # grouped classification requires geometric (aabb) centres, and rewriting
+            # them here would change the force the gradient is taken of.
+            grouped_interactions = False
+            farfield_mode = "pair_grouped"
         upward = self.prepare_upward_sweep(
             state.tree,
             positions_sorted_arr,
@@ -435,8 +453,8 @@ class EvaluateMixin:
             interactions=state.interactions,
             m2l_chunk_size=runtime_overrides.m2l_chunk_size,
             l2l_chunk_size=runtime_overrides.l2l_chunk_size,
-            grouped_interactions=runtime_overrides.grouped_interactions,
-            farfield_mode=runtime_overrides.farfield_mode,
+            grouped_interactions=grouped_interactions,
+            farfield_mode=farfield_mode,
             dehnen_radius_scale=self.dehnen_radius_scale,
         )
         resolved_target_indices = self._resolve_target_indices(
@@ -521,6 +539,7 @@ class EvaluateMixin:
         target_indices: Optional[Array] = None,
         jit_traversal: bool = False,
         nearfield_mode_override: Optional[str] = None,
+        force_ungrouped_farfield: bool = True,
     ) -> Array:
         """Fixed-topology re-eval at live sorted positions AND masses.
 
@@ -528,6 +547,12 @@ class EvaluateMixin:
         Thin front for :meth:`_evaluate_prepared_state_at_positions_sorted` with
         ``masses_sorted`` threaded through P2M and the near-field, so gradients
         flow w.r.t. both positions and masses at fixed topology.
+
+        ``force_ungrouped_farfield`` defaults to ``True`` here: the grouped M2L
+        classifies pairs on the host and is therefore not traceable, so the
+        differentiable seam always takes the ungrouped M2L -- which is also the more
+        accurate of the two, see
+        :meth:`_evaluate_prepared_state_at_positions_sorted`.
         """
         return self._evaluate_prepared_state_at_positions_sorted(
             state,
@@ -536,6 +561,7 @@ class EvaluateMixin:
             target_indices=target_indices,
             jit_traversal=jit_traversal,
             nearfield_mode_override=nearfield_mode_override,
+            force_ungrouped_farfield=force_ungrouped_farfield,
         )
 
     @jaxtyped(typechecker=beartype)
@@ -581,11 +607,26 @@ class EvaluateMixin:
 
         Notes
         -----
-        Bare ``jax.grad``/``jax.vjp`` over this method give exact gradients at every
-        N. Wrapping the *entire* call in an outer ``jax.jit`` is supported at moderate
-        N but can fail at large N (the re-run of the prepared sweeps retains host-side
-        ops); prefer ``jax.grad(loss)`` -- the inner numeric kernels are already
-        jit-compiled. See ``docs/differentiable_fmm_design.md`` ("jit limitation").
+        Bare ``jax.grad``/``jax.vjp`` over this method give exact gradients, and are
+        the recommended usage -- the inner numeric kernels are already jit-compiled.
+        Wrapping the *entire* call in an outer ``jax.jit`` is supported at moderate N
+        but can fail at large N (the re-run of the prepared sweeps retains host-side
+        ops). See ``docs/differentiable_fmm_design.md`` ("jit limitation").
+
+        This method forces the **ungrouped** M2L (``force_ungrouped_farfield``): the
+        grouped/class-major M2L builds its pair classes on the host, so it is not
+        traceable and used to break the *bare* reverse pass -- not just the outer-jit
+        one -- at ``n >= 65536``, where the resolver auto-enables it. Expansion
+        centres are untouched.
+
+        Note this is **not** merely a different execution strategy: the grouped M2L
+        quantises pair displacements onto a lattice and applies one representative
+        displacement per class, so it is an approximation, while the ungrouped M2L
+        uses each pair's exact displacement. The grad path is therefore at least as
+        accurate as the grouped forward (measured ~6.6x closer to the exact direct
+        sum on a deep-tree config), but a caller who explicitly requests
+        ``grouped_interactions=True`` gets a forward force that differs from the
+        force this gradient is taken of, at the grouped path's own accuracy.
 
         The M2L uses the pure-JAX path by default. Setting
         ``JACCPOT_STATIC_STRICT_FUSED_M2L_PALLAS=1`` opts into the fused-Pallas M2L
