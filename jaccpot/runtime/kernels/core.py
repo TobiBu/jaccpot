@@ -1519,9 +1519,16 @@ def _m2l_real_batch_kernel(
 def _real_m2l_pallas_active() -> bool:
     """Whether to route the real-basis M2L z-core through the Pallas kernel.
 
-    Gated by ``JACCPOT_STATIC_STRICT_FUSED_M2L_PALLAS`` and the sm_80+ real-M2L
-    support check (falls back to the pure-JAX rot-scale otherwise). Trace-time;
-    the flag does not change within a compiled run.
+    Gated by ``JACCPOT_STATIC_STRICT_FUSED_M2L_PALLAS`` and the sm_80+ support
+    check for the FUSED real kernel this routes to (falls back to the pure-JAX
+    rot-scale otherwise). Trace-time; the flag does not change within a compiled
+    run.
+
+    Uses :func:`pallas_m2l_real_fused_supported` (the gate for the kernel actually
+    dispatched, :func:`_m2l_real_batch_kernel_fused_pallas`), which requires
+    Ampere+ (sm_80) -- matching the complex gate. The z-core
+    ``pallas_m2l_real_supported`` used previously only checks gpu/tpu, so it would
+    route to Pallas on a pre-Ampere GPU where the Triton lowering fails.
     """
     flag = (
         str(os.environ.get("JACCPOT_STATIC_STRICT_FUSED_M2L_PALLAS", "0"))
@@ -1531,9 +1538,9 @@ def _real_m2l_pallas_active() -> bool:
     if flag not in {"1", "true", "yes", "on"}:
         return False
     try:
-        from jaccpot.pallas.m2l_core_z_real import pallas_m2l_real_supported
+        from jaccpot.pallas.m2l_real_fused import pallas_m2l_real_fused_supported
 
-        return bool(pallas_m2l_real_supported())
+        return bool(pallas_m2l_real_fused_supported())
     except Exception:
         return False
 
@@ -1554,7 +1561,7 @@ def _m2l_real_batch_kernel_fused_pallas(
         real_rotation_blocks_from_z_local_batch,
         real_rotation_blocks_to_z_multipole_batch,
     )
-    from jaccpot.pallas.m2l_real_fused import m2l_real_fused_pallas
+    from jaccpot.pallas.m2l_real_fused import m2l_real_fused_pallas_cvjp
 
     r = jnp.linalg.norm(deltas, axis=1)
     bto = real_rotation_blocks_to_z_multipole_batch(
@@ -1563,7 +1570,9 @@ def _m2l_real_batch_kernel_fused_pallas(
     bfr = real_rotation_blocks_from_z_local_batch(
         deltas, order=order, dtype=multipoles.dtype
     )
-    return m2l_real_fused_pallas(multipoles, bto, bfr, r, order=order)
+    # custom_vjp wrapper (forward == raw kernel) so this fused path is also
+    # differentiable; see the complex counterpart above.
+    return m2l_real_fused_pallas_cvjp(multipoles, bto, bfr, r, order, False, "triton")
 
 
 def _apply_real_m2l(src_mult, deltas, *, order, m2l_impl):
@@ -1650,7 +1659,7 @@ def _m2l_complex_batch_kernel_fused_pallas(
     Array
         Complex local contributions ``[N, (p+1)^2]``.
     """
-    from jaccpot.pallas.m2l_complex_fused import m2l_complex_fused_pallas
+    from jaccpot.pallas.m2l_complex_fused import m2l_complex_fused_pallas_cvjp
 
     r = jnp.sqrt(jnp.sum(deltas * deltas, axis=-1))
     blocks_to_z = complex_rotation_blocks_to_z_solidfmm_batch(
@@ -1665,8 +1674,14 @@ def _m2l_complex_batch_kernel_fused_pallas(
         basis="local",
         dtype=src_mult.dtype,
     )
-    return m2l_complex_fused_pallas(
-        src_mult, blocks_to_z, blocks_from_z, r, order=order
+    # Route through the custom_vjp wrapper (not the raw kernel): the forward is
+    # byte-identical to m2l_complex_fused_pallas, but the wrapper carries the
+    # reverse rule (autodiff of the pure-jnp twin) so this fused path is also
+    # differentiable -- required for FastMultipoleMethod.differentiable_accelerations
+    # to run the fast lane. interpret=False, backend="triton" (the runtime always
+    # runs the real Pallas GPU kernel here).
+    return m2l_complex_fused_pallas_cvjp(
+        src_mult, blocks_to_z, blocks_from_z, r, order, False, "triton"
     )
 
 

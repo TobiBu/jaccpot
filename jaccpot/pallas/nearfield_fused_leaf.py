@@ -22,6 +22,8 @@ the pure-JAX reference ``_pair_contributions_batched``.
 
 from __future__ import annotations
 
+from functools import partial
+
 import jax
 import jax.numpy as jnp
 from jax import lax
@@ -703,13 +705,259 @@ def nearfield_leafpair_pallas_decoupled(
     return out
 
 
+# ---------------------------------------------------------------------------
+# Differentiable wrappers: fused Pallas near-field forward + autodiff-of-twin
+# reverse. Mirrors the M2L custom_vjp pattern and PR #50's
+# ``jaccpot.nearfield.near_field._pair_accel_cvjp``: ``pallas_call`` has no
+# autodiff rule, so each wrapper runs the Pallas kernel forward and takes the
+# reverse from autodiff of the in-file pure-JAX twin (the kernel's verified
+# reference; the near-field twins gather/reduce in plain JAX, so autodiff handles
+# the positions/masses cotangents exactly, incl. the leaf-id gather's scatter-add).
+# Non-differentiated mask/id arrays are passed as 0/1 (and id) FLOATS -- bools are
+# reconstructed via ``> 0.5`` and ids via ``round().astype(int32)`` inside -- so
+# their returned cotangents are ordinary float zeros (no ``float0``), and nothing
+# is closed over as a tracer. Hashable Pallas statics (num_warps, num_stages,
+# target_subtile, interpret) go in positional ``nondiff_argnums``.
+#
+# NOTE: the differentiable FMM grad path uses the bucketed pure-JAX near-field
+# (already differentiable via the analytic tidal-tensor custom_vjp, PR #50); these
+# wrappers make the *fused Pallas* near-field differentiable too, so it can be
+# opted onto the grad path (its forward ROI is marginal at moderate N -- see
+# docs/differentiable_fmm_design.md -- so it is not the default).
+
+
+@partial(jax.custom_vjp, nondiff_argnums=(7, 8, 9, 10))
+def nearfield_fused_leaf_pallas_cvjp(
+    target_positions: Array,
+    target_mask_f: Array,
+    source_positions: Array,
+    source_masses: Array,
+    source_mask_f: Array,
+    softening_sq: Array,
+    G: Array,
+    num_warps: int | None,
+    num_stages: int,
+    target_subtile: int | None,
+    interpret: bool,
+) -> Array:
+    """Differentiable fused leaf-major near-field (pairs lane); see module comment."""
+    return nearfield_fused_leaf_pallas(
+        target_positions,
+        target_mask_f > 0.5,
+        source_positions,
+        source_masses,
+        source_mask_f > 0.5,
+        softening_sq=softening_sq,
+        G=G,
+        num_warps=num_warps,
+        num_stages=num_stages,
+        target_subtile=target_subtile,
+        interpret=interpret,
+    )
+
+
+def _nearfield_fused_leaf_cvjp_fwd(
+    target_positions,
+    target_mask_f,
+    source_positions,
+    source_masses,
+    source_mask_f,
+    softening_sq,
+    G,
+    num_warps,
+    num_stages,
+    target_subtile,
+    interpret,
+):
+    out = nearfield_fused_leaf_pallas(
+        target_positions,
+        target_mask_f > 0.5,
+        source_positions,
+        source_masses,
+        source_mask_f > 0.5,
+        softening_sq=softening_sq,
+        G=G,
+        num_warps=num_warps,
+        num_stages=num_stages,
+        target_subtile=target_subtile,
+        interpret=interpret,
+    )
+    residual = (
+        target_positions,
+        target_mask_f,
+        source_positions,
+        source_masses,
+        source_mask_f,
+        jnp.asarray(softening_sq),
+        jnp.asarray(G),
+    )
+    return out, residual
+
+
+def _nearfield_fused_leaf_cvjp_bwd(
+    num_warps, num_stages, target_subtile, interpret, residual, cotangent
+):
+    (
+        target_positions,
+        target_mask_f,
+        source_positions,
+        source_masses,
+        source_mask_f,
+        softening_sq,
+        G,
+    ) = residual
+    target_mask = target_mask_f > 0.5
+    source_mask = source_mask_f > 0.5
+
+    def _twin(tp, sp, sm):
+        return nearfield_fused_leaf_jax(
+            tp, target_mask, sp, sm, source_mask, softening_sq=softening_sq, G=G
+        )
+
+    _, vjp_fn = jax.vjp(_twin, target_positions, source_positions, source_masses)
+    tp_bar, sp_bar, sm_bar = vjp_fn(cotangent)
+    return (
+        tp_bar,
+        jnp.zeros_like(target_mask_f),
+        sp_bar,
+        sm_bar,
+        jnp.zeros_like(source_mask_f),
+        jnp.zeros_like(softening_sq),
+        jnp.zeros_like(G),
+    )
+
+
+nearfield_fused_leaf_pallas_cvjp.defvjp(
+    _nearfield_fused_leaf_cvjp_fwd, _nearfield_fused_leaf_cvjp_bwd
+)
+
+
+@partial(jax.custom_vjp, nondiff_argnums=(7, 8, 9, 10))
+def nearfield_leafpair_pallas_cvjp(
+    leaf_positions: Array,
+    leaf_masses: Array,
+    leaf_mask_f: Array,
+    source_leaf_ids_f: Array,
+    source_valid_f: Array,
+    softening_sq: Array,
+    G: Array,
+    num_warps: int | None,
+    num_stages: int,
+    target_subtile: int | None,
+    interpret: bool,
+) -> Array:
+    """Differentiable leaf-pair (prepacked production lane) near-field.
+
+    ``source_leaf_ids_f`` carries the gather ids as floats (exact for the small
+    non-negative leaf ids); reconstructed via ``round().astype(int32)`` inside.
+    """
+    return nearfield_leafpair_pallas(
+        leaf_positions,
+        leaf_masses,
+        leaf_mask_f > 0.5,
+        jnp.round(source_leaf_ids_f).astype(jnp.int32),
+        source_valid_f > 0.5,
+        softening_sq=softening_sq,
+        G=G,
+        num_warps=num_warps,
+        num_stages=num_stages,
+        target_subtile=target_subtile,
+        interpret=interpret,
+    )
+
+
+def _nearfield_leafpair_cvjp_fwd(
+    leaf_positions,
+    leaf_masses,
+    leaf_mask_f,
+    source_leaf_ids_f,
+    source_valid_f,
+    softening_sq,
+    G,
+    num_warps,
+    num_stages,
+    target_subtile,
+    interpret,
+):
+    out = nearfield_leafpair_pallas(
+        leaf_positions,
+        leaf_masses,
+        leaf_mask_f > 0.5,
+        jnp.round(source_leaf_ids_f).astype(jnp.int32),
+        source_valid_f > 0.5,
+        softening_sq=softening_sq,
+        G=G,
+        num_warps=num_warps,
+        num_stages=num_stages,
+        target_subtile=target_subtile,
+        interpret=interpret,
+    )
+    residual = (
+        leaf_positions,
+        leaf_masses,
+        leaf_mask_f,
+        source_leaf_ids_f,
+        source_valid_f,
+        jnp.asarray(softening_sq),
+        jnp.asarray(G),
+    )
+    return out, residual
+
+
+def _nearfield_leafpair_cvjp_bwd(
+    num_warps, num_stages, target_subtile, interpret, residual, cotangent
+):
+    (
+        leaf_positions,
+        leaf_masses,
+        leaf_mask_f,
+        source_leaf_ids_f,
+        source_valid_f,
+        softening_sq,
+        G,
+    ) = residual
+    leaf_mask = leaf_mask_f > 0.5
+    source_leaf_ids = jnp.round(source_leaf_ids_f).astype(jnp.int32)
+    source_valid = source_valid_f > 0.5
+
+    def _twin(lp, lm):
+        return nearfield_leafpair_jax(
+            lp,
+            lm,
+            leaf_mask,
+            source_leaf_ids,
+            source_valid,
+            softening_sq=softening_sq,
+            G=G,
+        )
+
+    _, vjp_fn = jax.vjp(_twin, leaf_positions, leaf_masses)
+    lp_bar, lm_bar = vjp_fn(cotangent)
+    return (
+        lp_bar,
+        lm_bar,
+        jnp.zeros_like(leaf_mask_f),
+        jnp.zeros_like(source_leaf_ids_f),
+        jnp.zeros_like(source_valid_f),
+        jnp.zeros_like(softening_sq),
+        jnp.zeros_like(G),
+    )
+
+
+nearfield_leafpair_pallas_cvjp.defvjp(
+    _nearfield_leafpair_cvjp_fwd, _nearfield_leafpair_cvjp_bwd
+)
+
+
 __all__ = [
     "nearfield_fused_leaf",
     "nearfield_fused_leaf_backend",
     "nearfield_fused_leaf_jax",
     "nearfield_fused_leaf_pallas",
+    "nearfield_fused_leaf_pallas_cvjp",
     "nearfield_leafpair_jax",
     "nearfield_leafpair_pallas",
+    "nearfield_leafpair_pallas_cvjp",
     "nearfield_leafpair_pallas_decoupled",
     "pallas_nearfield_fused_supported",
 ]

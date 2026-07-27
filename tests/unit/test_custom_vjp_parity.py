@@ -128,3 +128,295 @@ def test_p2p_analytic_custom_vjp_matches_autodiff(seed):
         return _pair_accel_masked_accels(tp, sp, sm, tmask, smask, softening_sq, G)
 
     assert_vjp_matches(f_custom, f_ref, (tpos, spos, smass))
+
+
+# --------------------------------------------------------------------------
+# Fused Pallas z-axis real M2L custom_vjp (fwd=Pallas, bwd=autodiff-of-twin)
+# --------------------------------------------------------------------------
+from jaccpot.operators.real_harmonics import (  # noqa: E402
+    sh_size,
+    translate_along_z_m2l_real,
+)
+from jaccpot.pallas.m2l_core_z_real import (  # noqa: E402
+    m2l_core_z_real_pallas_cvjp,
+    pallas_m2l_real_supported,
+)
+
+
+@pytest.mark.parametrize("interpret", [True, False])
+@pytest.mark.parametrize("order", [2, 4])
+def test_m2l_core_z_pallas_custom_vjp_matches_twin(order, interpret):
+    """Pallas z-M2L custom_vjp reverse == autodiff of the pure-JAX twin.
+
+    ``interpret=True`` exercises the kernel + custom_vjp on CPU CI (float64, tight
+    tolerance); ``interpret=False`` runs the real Pallas GPU kernel (float32, the
+    kernel's GPU tolerance), skipped off-GPU or when the backend rejects the tile.
+    The reverse is autodiff of ``vmap(translate_along_z_m2l_real)`` -- identical to
+    ``f_ref`` -- so gradients match to round-off; only the Pallas-vs-twin forward
+    is loosened.
+    """
+    if not interpret and not pallas_m2l_real_supported():
+        pytest.skip("real Pallas M2L kernel requires a GPU/TPU backend")
+    if interpret and not jax.config.jax_enable_x64:
+        pytest.skip("interpret parity requires x64 for a tight tolerance")
+
+    dtype = jnp.float64 if interpret else jnp.float32
+    tol = 1.0e-10 if interpret else 1.0e-5
+    rng = np.random.default_rng(order)
+    ncoeff = sh_size(order)
+    mult = jnp.asarray(rng.normal(size=(8, ncoeff)), dtype=dtype)
+    radii = jnp.asarray(rng.uniform(2.0, 5.0, size=(8,)), dtype=dtype)
+
+    def f_custom(m, r):
+        return m2l_core_z_real_pallas_cvjp(m, r, order, interpret, "triton")
+
+    def f_ref(m, r):
+        return jax.vmap(lambda mm, rr: translate_along_z_m2l_real(mm, rr, order=order))(
+            m, r
+        )
+
+    try:
+        assert_vjp_matches(f_custom, f_ref, (mult, radii), rtol=tol, atol=tol)
+    except Exception as exc:  # pragma: no cover - GPU/runtime dependent
+        msg = str(exc).lower()
+        if not interpret and ("warpgroup" in msg or "ptx" in msg or "triton" in msg):
+            pytest.skip(f"Pallas kernel unavailable on this GPU/runtime: {exc}")
+        raise
+
+
+# --------------------------------------------------------------------------
+# Fused complex-basis M2L custom_vjp (fwd=Pallas, bwd=autodiff-of-twin)
+# --------------------------------------------------------------------------
+from jaccpot.operators.complex_ops import (  # noqa: E402
+    complex_rotation_blocks_from_z_solidfmm_batch,
+    complex_rotation_blocks_to_z_solidfmm_batch,
+)
+from jaccpot.pallas.m2l_complex_fused import (  # noqa: E402
+    m2l_complex_fused_jax,
+    m2l_complex_fused_pallas_cvjp,
+    pallas_m2l_complex_fused_supported,
+)
+
+
+def _complex_m2l_case(order, seed=0, n=9):
+    """Build a well-separated complex M2L pair batch (mirrors the parity template)."""
+    rng = np.random.default_rng(seed)
+    c = sh_size(order)
+    mult = (rng.standard_normal((n, c)) + 1j * rng.standard_normal((n, c))).astype(
+        np.complex128
+    )
+    deltas = (rng.standard_normal((n, 3)) * 2.0).astype(np.float64)
+    deltas[:, 2] += 3.0  # keep |delta| well away from 0 (well-separated pairs)
+    deltas = jnp.asarray(deltas)
+    r = jnp.sqrt(jnp.sum(deltas * deltas, axis=1))
+    bto = complex_rotation_blocks_to_z_solidfmm_batch(
+        deltas, order=order, basis="multipole", dtype=jnp.complex128
+    )
+    bfr = complex_rotation_blocks_from_z_solidfmm_batch(
+        deltas, order=order, basis="local", dtype=jnp.complex128
+    )
+    return jnp.asarray(mult), bto, bfr, r
+
+
+@pytest.mark.parametrize("interpret", [True, False])
+@pytest.mark.parametrize("order", [2, 4])
+def test_m2l_complex_fused_pallas_custom_vjp_matches_twin(order, interpret):
+    """Fused complex-M2L custom_vjp reverse == autodiff of the pure-jnp twin.
+
+    Differentiates w.r.t. all four kernel inputs (multipoles, both rotation-block
+    stacks, and the radius). ``interpret=True`` runs on CPU CI; ``interpret=False``
+    runs the real Pallas GPU kernel (skipped off Ampere+ or on backend reject).
+    """
+    if not jax.config.jax_enable_x64:
+        pytest.skip("requires x64 for a tight tolerance")
+    if not interpret and not pallas_m2l_complex_fused_supported():
+        pytest.skip("fused complex Pallas M2L requires an Ampere+ (sm_80) GPU")
+
+    tol = 1.0e-10 if interpret else 1.0e-8
+    mult, bto, bfr, r = _complex_m2l_case(order, seed=order)
+
+    def f_custom(m, bt, bf, rr):
+        return m2l_complex_fused_pallas_cvjp(m, bt, bf, rr, order, interpret, "triton")
+
+    def f_ref(m, bt, bf, rr):
+        return m2l_complex_fused_jax(m, bt, bf, rr, order=order)
+
+    try:
+        assert_vjp_matches(f_custom, f_ref, (mult, bto, bfr, r), rtol=tol, atol=tol)
+    except Exception as exc:  # pragma: no cover - GPU/runtime dependent
+        msg = str(exc).lower()
+        if not interpret and (
+            "warpgroup" in msg or "ptx" in msg or "triton" in msg or "mosaic" in msg
+        ):
+            pytest.skip(f"Pallas kernel unavailable on this GPU/runtime: {exc}")
+        raise
+
+
+# --------------------------------------------------------------------------
+# Fully-fused real-basis M2L custom_vjp (fwd=Pallas, bwd=autodiff-of-twin)
+# --------------------------------------------------------------------------
+from jaccpot.operators.m2l_real_rot_scale import (  # noqa: E402
+    real_rotation_blocks_from_z_local_batch,
+    real_rotation_blocks_to_z_multipole_batch,
+)
+from jaccpot.pallas.m2l_real_fused import (  # noqa: E402
+    m2l_real_fused_jax,
+    m2l_real_fused_pallas_cvjp,
+    pallas_m2l_real_fused_supported,
+)
+
+
+def _real_m2l_case(order, seed=0, n=9):
+    """Build a well-separated real M2L pair batch + the runtime's real blocks."""
+    rng = np.random.default_rng(seed)
+    c = sh_size(order)
+    mult = jnp.asarray(rng.standard_normal((n, c)).astype(np.float64))
+    deltas = (rng.standard_normal((n, 3)) * 2.0).astype(np.float64)
+    deltas[:, 2] += 3.0  # keep |delta| well away from 0 (well-separated pairs)
+    deltas = jnp.asarray(deltas)
+    r = jnp.linalg.norm(deltas, axis=1)
+    bto = real_rotation_blocks_to_z_multipole_batch(
+        deltas, order=order, dtype=jnp.float64
+    )
+    bfr = real_rotation_blocks_from_z_local_batch(
+        deltas, order=order, dtype=jnp.float64
+    )
+    return mult, bto, bfr, r
+
+
+@pytest.mark.parametrize("interpret", [True, False])
+@pytest.mark.parametrize("order", [2, 4])
+def test_m2l_real_fused_pallas_custom_vjp_matches_twin(order, interpret):
+    """Fused real-M2L custom_vjp reverse == autodiff of the pure-jnp twin.
+
+    Differentiates w.r.t. all four kernel inputs (multipoles, both rotation-block
+    stacks, and the radius). ``interpret=True`` runs on CPU CI; ``interpret=False``
+    runs the real Pallas GPU kernel (skipped off Ampere+ or on backend reject).
+    """
+    if not jax.config.jax_enable_x64:
+        pytest.skip("requires x64 for a tight tolerance")
+    if not interpret and not pallas_m2l_real_fused_supported():
+        pytest.skip("fused real Pallas M2L requires an Ampere+ (sm_80) GPU")
+
+    tol = 1.0e-10 if interpret else 1.0e-8
+    mult, bto, bfr, r = _real_m2l_case(order, seed=order)
+
+    def f_custom(m, bt, bf, rr):
+        return m2l_real_fused_pallas_cvjp(m, bt, bf, rr, order, interpret, "triton")
+
+    def f_ref(m, bt, bf, rr):
+        return m2l_real_fused_jax(m, bt, bf, rr, order=order)
+
+    try:
+        assert_vjp_matches(f_custom, f_ref, (mult, bto, bfr, r), rtol=tol, atol=tol)
+    except Exception as exc:  # pragma: no cover - GPU/runtime dependent
+        msg = str(exc).lower()
+        if not interpret and (
+            "warpgroup" in msg or "ptx" in msg or "triton" in msg or "mosaic" in msg
+        ):
+            pytest.skip(f"Pallas kernel unavailable on this GPU/runtime: {exc}")
+        raise
+
+
+# --------------------------------------------------------------------------
+# Fused Pallas near-field custom_vjp (fwd=Pallas, bwd=autodiff-of-twin)
+# --------------------------------------------------------------------------
+from jaccpot.pallas.nearfield_fused_leaf import (  # noqa: E402
+    nearfield_fused_leaf_jax,
+    nearfield_fused_leaf_pallas_cvjp,
+    nearfield_leafpair_jax,
+    nearfield_leafpair_pallas_cvjp,
+    pallas_nearfield_fused_supported,
+)
+
+
+def _nf_skip_if_needed(interpret, exc):
+    msg = str(exc).lower()
+    if not interpret and (
+        "warpgroup" in msg or "ptx" in msg or "triton" in msg or "mosaic" in msg
+    ):
+        pytest.skip(f"Pallas kernel unavailable on this GPU/runtime: {exc}")
+    raise exc
+
+
+@pytest.mark.parametrize("interpret", [True, False])
+def test_nearfield_fused_leaf_pallas_custom_vjp_matches_twin(interpret):
+    """Fused leaf-major near-field (pairs lane) custom_vjp == autodiff of the twin."""
+    if not jax.config.jax_enable_x64:
+        pytest.skip("requires x64 for a tight tolerance")
+    if not interpret and not pallas_nearfield_fused_supported():
+        pytest.skip("fused near-field Pallas requires an Ampere+ (sm_80) GPU")
+
+    tol = 1.0e-9 if interpret else 1.0e-6
+    rng = np.random.default_rng(0)
+    nl, wt, k = 3, 8, 12
+    tpos = jnp.asarray(rng.standard_normal((nl, wt, 3)), dtype=jnp.float64)
+    spos = jnp.asarray(rng.standard_normal((nl, k, 3)), dtype=jnp.float64)
+    spos = spos.at[:, :, 2].add(2.0)  # modest target/source separation
+    smass = jnp.asarray(rng.uniform(0.5, 1.5, (nl, k)), dtype=jnp.float64)
+    tmask = jnp.asarray(rng.random((nl, wt)) > 0.2)
+    smask = jnp.asarray(rng.random((nl, k)) > 0.2)
+    tmask_f = tmask.astype(jnp.float64)
+    smask_f = smask.astype(jnp.float64)
+    soft = jnp.asarray(1e-2, dtype=jnp.float64)
+    G = jnp.asarray(1.5, dtype=jnp.float64)
+
+    def f_custom(tp, sp, sm):
+        return nearfield_fused_leaf_pallas_cvjp(
+            tp, tmask_f, sp, sm, smask_f, soft, G, None, 1, None, interpret
+        )
+
+    def f_ref(tp, sp, sm):
+        return nearfield_fused_leaf_jax(
+            tp, tmask, sp, sm, smask, softening_sq=soft, G=G
+        )
+
+    try:
+        assert_vjp_matches(f_custom, f_ref, (tpos, spos, smass), rtol=tol, atol=tol)
+    except Exception as exc:  # pragma: no cover - GPU/runtime dependent
+        _nf_skip_if_needed(interpret, exc)
+
+
+@pytest.mark.parametrize("interpret", [True, False])
+def test_nearfield_leafpair_pallas_custom_vjp_matches_twin(interpret):
+    """Leaf-pair (prepacked) near-field custom_vjp == autodiff of the twin.
+
+    Exercises the in-kernel leaf-id gather (ids passed as floats through the rule);
+    the twin's gather reverse (scatter-add) is what the custom_vjp must reproduce.
+    """
+    if not jax.config.jax_enable_x64:
+        pytest.skip("requires x64 for a tight tolerance")
+    if not interpret and not pallas_nearfield_fused_supported():
+        pytest.skip("fused near-field Pallas requires an Ampere+ (sm_80) GPU")
+
+    tol = 1.0e-9 if interpret else 1.0e-6
+    rng = np.random.default_rng(1)
+    ll, w, s = 4, 8, 3
+    leaf_positions = jnp.asarray(rng.standard_normal((ll, w, 3)), dtype=jnp.float64)
+    leaf_masses = jnp.asarray(rng.uniform(0.5, 1.5, (ll, w)), dtype=jnp.float64)
+    leaf_mask = jnp.asarray(rng.random((ll, w)) > 0.2)
+    # each target leaf gathers `s` neighbour source leaves (ids in [0, ll))
+    source_leaf_ids = jnp.asarray(rng.integers(0, ll, size=(ll, s)), dtype=jnp.int32)
+    source_valid = jnp.asarray(rng.random((ll, s)) > 0.2)
+    leaf_mask_f = leaf_mask.astype(jnp.float64)
+    ids_f = source_leaf_ids.astype(jnp.float64)
+    valid_f = source_valid.astype(jnp.float64)
+    soft = jnp.asarray(1e-2, dtype=jnp.float64)
+    G = jnp.asarray(1.5, dtype=jnp.float64)
+
+    def f_custom(lp, lm):
+        return nearfield_leafpair_pallas_cvjp(
+            lp, lm, leaf_mask_f, ids_f, valid_f, soft, G, None, 1, None, interpret
+        )
+
+    def f_ref(lp, lm):
+        return nearfield_leafpair_jax(
+            lp, lm, leaf_mask, source_leaf_ids, source_valid, softening_sq=soft, G=G
+        )
+
+    try:
+        assert_vjp_matches(
+            f_custom, f_ref, (leaf_positions, leaf_masses), rtol=tol, atol=tol
+        )
+    except Exception as exc:  # pragma: no cover - GPU/runtime dependent
+        _nf_skip_if_needed(interpret, exc)

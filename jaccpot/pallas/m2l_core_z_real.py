@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import math
-from functools import lru_cache
+from functools import lru_cache, partial
 
 import jax
 import jax.numpy as jnp
@@ -13,6 +13,7 @@ from jaxtyping import Array
 
 from jaccpot.operators.real_harmonics import (
     sh_size,
+    translate_along_z_m2l_real,
     z_m2l_translation_tables,
 )
 
@@ -164,4 +165,69 @@ def m2l_core_z_real_pallas(
     )
 
 
-__all__ = ["m2l_core_z_real_pallas", "pallas_m2l_real_supported"]
+# ---------------------------------------------------------------------------
+# Differentiable wrapper: fused Pallas forward + autodiff-of-twin reverse.
+# ---------------------------------------------------------------------------
+# ``pallas_call`` has no JVP/transpose, so the fused Pallas z-M2L is
+# non-differentiable on its own. This ``custom_vjp`` supplies the missing
+# reverse rule (mirrors the module-level pattern of
+# ``jaccpot.nearfield.near_field._pair_accel_cvjp``): forward runs the Pallas
+# kernel; reverse is autodiff through the pure-JAX recurrence twin
+# ``vmap(translate_along_z_m2l_real)`` -- the SAME twin the parity test verifies
+# the kernel against to ~1e-12. The z-M2L is linear in ``multipole_rot`` (so its
+# multipole cotangent is the transpose) and non-linear in ``radii`` (enters as
+# ``r^-(n+k+1)``); autodiff of the twin handles both exactly. ``order`` /
+# ``interpret`` / ``backend`` are the hashable Pallas statics -> ``nondiff_argnums``
+# (positional; the kernel itself takes them keyword-only, so this wrapper is the
+# thin positional adapter).
+
+
+@partial(jax.custom_vjp, nondiff_argnums=(2, 3, 4))
+def m2l_core_z_real_pallas_cvjp(
+    multipole_rot: Array,
+    radii: Array,
+    order: int,
+    interpret: bool,
+    backend: str,
+) -> Array:
+    """Differentiable fused-Pallas z-axis real M2L (see module comment above).
+
+    Forward is byte-identical to :func:`m2l_core_z_real_pallas`; the reverse is
+    autodiff of the pure-JAX twin, so the returned gradient is a faithful FMM
+    gradient (the Pallas forward matches the twin to ~1e-12, not bit-exactly --
+    standard for a Pallas ``custom_vjp``).
+    """
+    return m2l_core_z_real_pallas(
+        multipole_rot, radii, order=order, interpret=interpret, backend=backend
+    )
+
+
+def _m2l_core_z_real_pallas_cvjp_fwd(multipole_rot, radii, order, interpret, backend):
+    out = m2l_core_z_real_pallas(
+        multipole_rot, radii, order=order, interpret=interpret, backend=backend
+    )
+    return out, (multipole_rot, radii)
+
+
+def _m2l_core_z_real_pallas_cvjp_bwd(order, interpret, backend, residual, cotangent):
+    multipole_rot, radii = residual
+
+    def _twin(mult, r):
+        return jax.vmap(
+            lambda m, rr: translate_along_z_m2l_real(m, rr, order=int(order))
+        )(mult, r)
+
+    _, vjp_fn = jax.vjp(_twin, multipole_rot, radii)
+    return vjp_fn(cotangent)
+
+
+m2l_core_z_real_pallas_cvjp.defvjp(
+    _m2l_core_z_real_pallas_cvjp_fwd, _m2l_core_z_real_pallas_cvjp_bwd
+)
+
+
+__all__ = [
+    "m2l_core_z_real_pallas",
+    "m2l_core_z_real_pallas_cvjp",
+    "pallas_m2l_real_supported",
+]

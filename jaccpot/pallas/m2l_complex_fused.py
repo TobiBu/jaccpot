@@ -25,6 +25,7 @@ kernel, so the two are trivially equivalent.
 from __future__ import annotations
 
 import functools
+import os
 
 import jax
 import jax.numpy as jnp
@@ -39,7 +40,25 @@ __all__ = [
     "m2l_complex_fused_tables",
     "m2l_complex_fused_jax",
     "m2l_complex_fused_pallas",
+    "m2l_complex_fused_vjp_pallas",
+    "m2l_complex_fused_pallas_cvjp",
 ]
+
+
+def _fused_m2l_vjp_enabled() -> bool:
+    """Whether the M2L custom_vjp reverse uses the fused Pallas VJP kernel.
+
+    Default ON: the reverse runs as a single fused Pallas launch instead of pure-JAX
+    autodiff of the twin. Set ``JACCPOT_FUSED_M2L_VJP=0`` to fall back to autodiff of
+    the pure-jnp twin (the correctness reference -- identical to round-off). Shared
+    env switch with the real fused kernel.
+    """
+    return os.environ.get("JACCPOT_FUSED_M2L_VJP", "1").strip().lower() not in {
+        "0",
+        "false",
+        "no",
+        "off",
+    }
 
 
 def pallas_m2l_complex_fused_supported() -> bool:
@@ -255,6 +274,99 @@ def _m2l_one(mult_r, mult_i, bto_r, bto_i, bfrom_r, bfrom_i, r, t):
     )
 
 
+def _matvec_T(mat, vec):
+    """out[j] = sum_i mat[i,j] * vec[i]  ==  (mat^T @ vec); the adjoint of _matvec."""
+    return jnp.sum(mat * vec[:, None], axis=0)
+
+
+def _block_matmul_vjp(block_r, block_i, vec_r, vec_i, or_bar, oi_bar):
+    """Reverse of :func:`_block_matmul` (complex block-diagonal matmul).
+
+    Forward: ``o = block @ vec`` in complex (real/imag), i.e.
+    ``o_r = Br vr - Bi vi``, ``o_i = Br vi + Bi vr`` (sum over j).
+    Returns ``(vr_bar, vi_bar, br_bar, bi_bar)`` -- all standard real adjoints.
+    """
+    # vec cotangents: sum over output index i (axis 1).
+    vr_bar = jnp.sum(block_r * or_bar[:, :, None], axis=1) + jnp.sum(
+        block_i * oi_bar[:, :, None], axis=1
+    )
+    vi_bar = -jnp.sum(block_i * or_bar[:, :, None], axis=1) + jnp.sum(
+        block_r * oi_bar[:, :, None], axis=1
+    )
+    # block cotangents: outer products (i,j) of output cotangent with vec.
+    br_bar = (
+        or_bar[:, :, None] * vec_r[:, None, :] + oi_bar[:, :, None] * vec_i[:, None, :]
+    )
+    bi_bar = (
+        -or_bar[:, :, None] * vec_i[:, None, :] + oi_bar[:, :, None] * vec_r[:, None, :]
+    )
+    return vr_bar, vi_bar, br_bar, bi_bar
+
+
+def _m2l_one_vjp(
+    mult_r, mult_i, bto_r, bto_i, bfr_r, bfr_i, r, out_r_bar, out_i_bar, t
+):
+    """Fused reverse of :func:`_m2l_one` in the real/imag representation, for one pair.
+
+    Takes the cotangents of the REAL outputs ``(out_r, out_i)`` and returns the
+    cotangents of the real/imag PARTS of every input:
+    ``(mult_r_bar, mult_i_bar, bto_r_bar, bto_i_bar, bfr_r_bar, bfr_i_bar, r_bar)``.
+    The complex<->(real,imag) boundary convention (``lax.complex``/``real``/``imag``
+    transposes) is applied by the caller ``m2l_complex_fused_vjp_pallas``; this
+    routine is a pure real-multilinear reverse, so it needs no complex convention.
+    """
+    Ppack = t["Ppack"]
+    Uunpack = t["Uunpack"]
+    Bp = bto_r.shape[0]
+    mdp = bto_r.shape[1]
+
+    # --- recompute forward intermediates ---
+    pk_r = _matvec(Ppack, mult_r).reshape(Bp, mdp)
+    pk_i = _matvec(Ppack, mult_i).reshape(Bp, mdp)
+    mr_r, mr_i = _block_matmul(bto_r, bto_i, pk_r, pk_i)
+    mrf_r = _matvec(Uunpack, mr_r.reshape(Bp * mdp))
+    mrf_i = _matvec(Uunpack, mr_i.reshape(Bp * mdp))
+    r_safe = jnp.where(r > 0.0, r, 1.0)
+    Z = t["Zsign"] * t["Zfact"] * jnp.exp(-t["Zexp"] * jnp.log(r_safe))
+    lz_r = _matvec(Z, mrf_r)
+    lz_i = _matvec(Z, mrf_i)
+    pl_r = _matvec(Ppack, lz_r).reshape(Bp, mdp)
+    pl_i = _matvec(Ppack, lz_i).reshape(Bp, mdp)
+
+    # --- adjoint chain ---
+    or_r_bar = _matvec_T(Uunpack, out_r_bar).reshape(Bp, mdp)  # adj (7)
+    or_i_bar = _matvec_T(Uunpack, out_i_bar).reshape(Bp, mdp)
+    pl_r_bar, pl_i_bar, bfr_r_bar, bfr_i_bar = _block_matmul_vjp(  # adj (6)
+        bfr_r, bfr_i, pl_r, pl_i, or_r_bar, or_i_bar
+    )
+    lz_r_bar = _matvec_T(Ppack, pl_r_bar.reshape(Bp * mdp))  # adj (5)
+    lz_i_bar = _matvec_T(Ppack, pl_i_bar.reshape(Bp * mdp))
+    mrf_r_bar = _matvec_T(Z, lz_r_bar)  # adj (4) w.r.t. mrf
+    mrf_i_bar = _matvec_T(Z, lz_i_bar)
+    dZ = Z * (-t["Zexp"] / r_safe)  # adj (4) w.r.t. r
+    r_bar = jnp.where(
+        r > 0.0,
+        jnp.sum(lz_r_bar * _matvec(dZ, mrf_r)) + jnp.sum(lz_i_bar * _matvec(dZ, mrf_i)),
+        0.0,
+    )
+    mr_r_bar = _matvec_T(Uunpack, mrf_r_bar).reshape(Bp, mdp)  # adj (3)
+    mr_i_bar = _matvec_T(Uunpack, mrf_i_bar).reshape(Bp, mdp)
+    pk_r_bar, pk_i_bar, bto_r_bar, bto_i_bar = _block_matmul_vjp(  # adj (2)
+        bto_r, bto_i, pk_r, pk_i, mr_r_bar, mr_i_bar
+    )
+    mult_r_bar = _matvec_T(Ppack, pk_r_bar.reshape(Bp * mdp))  # adj (1)
+    mult_i_bar = _matvec_T(Ppack, pk_i_bar.reshape(Bp * mdp))
+    return (
+        mult_r_bar,
+        mult_i_bar,
+        bto_r_bar,
+        bto_i_bar,
+        bfr_r_bar,
+        bfr_i_bar,
+        r_bar,
+    )
+
+
 def _tables_to_jnp(order, real_dtype):
     t = m2l_complex_fused_tables(order)
     return dict(
@@ -452,3 +564,233 @@ def m2l_complex_fused_pallas(
     )(mr, mi, btr, bti, bfr, bfi, rr, *table_arrays)
 
     return jax.lax.complex(out_r[:, :C], out_i[:, :C])
+
+
+def _m2l_complex_fused_vjp_kernel(
+    mult_r_ref,
+    mult_i_ref,
+    bto_r_ref,
+    bto_i_ref,
+    bfr_r_ref,
+    bfr_i_ref,
+    r_ref,
+    obar_r_ref,
+    obar_i_ref,
+    *table_and_out_refs,
+):
+    table_refs = table_and_out_refs[: len(_TABLE_KEYS)]
+    (
+        mr_bar_ref,
+        mi_bar_ref,
+        btor_bar_ref,
+        btoi_bar_ref,
+        bfrr_bar_ref,
+        bfri_bar_ref,
+        r_bar_ref,
+    ) = table_and_out_refs[len(_TABLE_KEYS) :]
+    tables = {k: ref[...] for k, ref in zip(_TABLE_KEYS, table_refs)}
+    mrb, mib, btorb, btoib, bfrrb, bfrib, rb = _m2l_one_vjp(
+        mult_r_ref[0],
+        mult_i_ref[0],
+        bto_r_ref[0],
+        bto_i_ref[0],
+        bfr_r_ref[0],
+        bfr_i_ref[0],
+        r_ref[0],
+        obar_r_ref[0],
+        obar_i_ref[0],
+        tables,
+    )
+    mr_bar_ref[0, :] = mrb
+    mi_bar_ref[0, :] = mib
+    btor_bar_ref[0, :, :, :] = btorb
+    btoi_bar_ref[0, :, :, :] = btoib
+    bfrr_bar_ref[0, :, :, :] = bfrrb
+    bfri_bar_ref[0, :, :, :] = bfrib
+    r_bar_ref[0] = rb
+
+
+def m2l_complex_fused_vjp_pallas(
+    multipoles: Array,
+    blocks_to_z: Array,
+    blocks_from_z: Array,
+    r: Array,
+    out_bar: Array,
+    *,
+    order: int,
+    interpret: bool = False,
+    backend: str = "triton",
+) -> tuple[Array, Array, Array, Array]:
+    """Fully-fused reverse of :func:`m2l_complex_fused_pallas` (one launch/pair).
+
+    Returns ``(mult_bar, bto_bar, bfr_bar, r_bar)`` matching the ORIGINAL (unpadded)
+    complex input shapes, computed on-chip. The complex<->(real,imag) VJP boundary is
+    applied here around the real-multilinear kernel: JAX's ``lax.complex``/``imag``
+    transposes use the conjugate convention, so we feed ``out_i_bar = -imag(out_bar)``
+    and recombine each complex input cotangent as ``complex(re_bar, -im_bar)`` (this
+    reproduces ``jax.vjp`` of the twin exactly -- verified in the parity tests).
+    """
+    p = int(order)
+    N = multipoles.shape[0]
+    dims = _pair_pad_dims(order)  # (C, Cp, B, Bp, md, mdp)
+    C, Cp, B, Bp, md, mdp = dims
+    real_dtype = jnp.asarray(multipoles).real.dtype
+    tables = _tables_to_jnp(p, real_dtype)
+
+    mr, mi, btr, bti, bfr, bfi = _pad_pair_inputs(
+        jnp.real(multipoles).astype(real_dtype),
+        jnp.imag(multipoles).astype(real_dtype),
+        jnp.real(blocks_to_z).astype(real_dtype),
+        jnp.imag(blocks_to_z).astype(real_dtype),
+        jnp.real(blocks_from_z).astype(real_dtype),
+        jnp.imag(blocks_from_z).astype(real_dtype),
+        dims,
+    )
+    rr = jnp.asarray(r, dtype=real_dtype)
+    obar = jnp.asarray(out_bar)
+    # complex boundary: out_r_bar = real(out_bar); out_i_bar = -imag(out_bar).
+    obar_r = jnp.pad(jnp.real(obar).astype(real_dtype), ((0, 0), (0, Cp - C)))
+    obar_i = jnp.pad((-jnp.imag(obar)).astype(real_dtype), ((0, 0), (0, Cp - C)))
+
+    def bs_vec(cols: int) -> pl.BlockSpec:
+        return pl.BlockSpec((1, cols), lambda i: (i, 0))
+
+    def bs_blocks() -> pl.BlockSpec:
+        return pl.BlockSpec((1, Bp, mdp, mdp), lambda i: (i, 0, 0, 0))
+
+    table_arrays = [tables[k] for k in _TABLE_KEYS]
+
+    def bs_full(arr: Array) -> pl.BlockSpec:
+        shp = tuple(arr.shape)
+        return pl.BlockSpec(shp, (lambda *_: (0,) * len(shp)))
+
+    outs = pl.pallas_call(
+        _m2l_complex_fused_vjp_kernel,
+        grid=(N,),
+        in_specs=[
+            bs_vec(Cp),
+            bs_vec(Cp),  # mult r/i
+            bs_blocks(),
+            bs_blocks(),  # bto r/i
+            bs_blocks(),
+            bs_blocks(),  # bfr r/i
+            pl.BlockSpec((1,), lambda i: (i,)),  # r
+            bs_vec(Cp),
+            bs_vec(Cp),  # out_bar r/i
+            *[bs_full(a) for a in table_arrays],
+        ],
+        out_specs=[
+            bs_vec(Cp),
+            bs_vec(Cp),  # mult_bar r/i
+            bs_blocks(),
+            bs_blocks(),  # bto_bar r/i
+            bs_blocks(),
+            bs_blocks(),  # bfr_bar r/i
+            pl.BlockSpec((1,), lambda i: (i,)),  # r_bar
+        ],
+        out_shape=[
+            jax.ShapeDtypeStruct((N, Cp), real_dtype),
+            jax.ShapeDtypeStruct((N, Cp), real_dtype),
+            jax.ShapeDtypeStruct((N, Bp, mdp, mdp), real_dtype),
+            jax.ShapeDtypeStruct((N, Bp, mdp, mdp), real_dtype),
+            jax.ShapeDtypeStruct((N, Bp, mdp, mdp), real_dtype),
+            jax.ShapeDtypeStruct((N, Bp, mdp, mdp), real_dtype),
+            jax.ShapeDtypeStruct((N,), real_dtype),
+        ],
+        interpret=interpret,
+        backend=(None if interpret else backend),
+        name=f"m2l_complex_fused_vjp_p{p}",
+    )(mr, mi, btr, bti, bfr, bfi, rr, obar_r, obar_i, *table_arrays)
+
+    mrb, mib, btorb, btoib, bfrrb, bfrib, rb = outs
+    # Unpad and recombine with the conjugate convention: complex(re_bar, -im_bar).
+    mult_bar = jax.lax.complex(mrb[:, :C], -mib[:, :C])
+    bto_bar = jax.lax.complex(btorb[:, :B, :md, :md], -btoib[:, :B, :md, :md])
+    bfr_bar = jax.lax.complex(bfrrb[:, :B, :md, :md], -bfrib[:, :B, :md, :md])
+    return mult_bar, bto_bar, bfr_bar, rb
+
+
+# --------------------------------------------------------------------------
+# Differentiable wrapper: fused Pallas forward + autodiff-of-twin reverse.
+# --------------------------------------------------------------------------
+# ``pallas_call`` has no JVP/transpose, so the fused complex M2L is
+# non-differentiable on its own. This ``custom_vjp`` (mirroring the module-level
+# pattern of ``jaccpot.nearfield.near_field._pair_accel_cvjp``) runs the Pallas
+# kernel forward and takes the reverse from autodiff of the pure-jnp twin
+# ``m2l_complex_fused_jax`` -- the literal port the Pallas kernel is verified
+# against to ~1e-10, so the gradient is a faithful FMM gradient (fwd Pallas ==
+# twin to the port tolerance, not bit-exactly). The M2L is linear in
+# ``multipoles`` and b/tri-linear in the rotation ``blocks`` and non-linear in
+# ``r`` (enters as ``r**-(n+k+1)``); autodiff of the twin handles all four
+# exactly. ``order`` / ``interpret`` / ``backend`` are the hashable Pallas
+# statics -> ``nondiff_argnums`` (positional; the kernel takes them keyword-only,
+# so this wrapper is the thin positional adapter).
+
+
+@functools.partial(jax.custom_vjp, nondiff_argnums=(4, 5, 6))
+def m2l_complex_fused_pallas_cvjp(
+    multipoles: Array,
+    blocks_to_z: Array,
+    blocks_from_z: Array,
+    r: Array,
+    order: int,
+    interpret: bool,
+    backend: str,
+) -> Array:
+    """Differentiable fused complex-basis M2L (see module comment above).
+
+    Forward is byte-identical to :func:`m2l_complex_fused_pallas`; the reverse is
+    autodiff through :func:`m2l_complex_fused_jax`.
+    """
+    return m2l_complex_fused_pallas(
+        multipoles,
+        blocks_to_z,
+        blocks_from_z,
+        r,
+        order=order,
+        interpret=interpret,
+        backend=backend,
+    )
+
+
+def _m2l_complex_fused_pallas_cvjp_fwd(
+    multipoles, blocks_to_z, blocks_from_z, r, order, interpret, backend
+):
+    out = m2l_complex_fused_pallas(
+        multipoles,
+        blocks_to_z,
+        blocks_from_z,
+        r,
+        order=order,
+        interpret=interpret,
+        backend=backend,
+    )
+    return out, (multipoles, blocks_to_z, blocks_from_z, r)
+
+
+def _m2l_complex_fused_pallas_cvjp_bwd(order, interpret, backend, residual, cotangent):
+    multipoles, blocks_to_z, blocks_from_z, r = residual
+    if _fused_m2l_vjp_enabled():
+        # Fully-fused reverse: one Pallas launch computes all four cotangents.
+        return m2l_complex_fused_vjp_pallas(
+            multipoles,
+            blocks_to_z,
+            blocks_from_z,
+            r,
+            cotangent,
+            order=int(order),
+            interpret=interpret,
+            backend=backend,
+        )
+
+    # Fallback: autodiff of the pure-jnp twin (correctness reference).
+    def _twin(mult, bto, bfr, rr):
+        return m2l_complex_fused_jax(mult, bto, bfr, rr, order=int(order))
+
+    _, vjp_fn = jax.vjp(_twin, multipoles, blocks_to_z, blocks_from_z, r)
+    return vjp_fn(cotangent)
+
+
+m2l_complex_fused_pallas_cvjp.defvjp(
+    _m2l_complex_fused_pallas_cvjp_fwd, _m2l_complex_fused_pallas_cvjp_bwd
+)
