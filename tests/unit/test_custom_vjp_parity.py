@@ -316,3 +316,107 @@ def test_m2l_real_fused_pallas_custom_vjp_matches_twin(order, interpret):
         ):
             pytest.skip(f"Pallas kernel unavailable on this GPU/runtime: {exc}")
         raise
+
+
+# --------------------------------------------------------------------------
+# Fused Pallas near-field custom_vjp (fwd=Pallas, bwd=autodiff-of-twin)
+# --------------------------------------------------------------------------
+from jaccpot.pallas.nearfield_fused_leaf import (  # noqa: E402
+    nearfield_fused_leaf_jax,
+    nearfield_fused_leaf_pallas_cvjp,
+    nearfield_leafpair_jax,
+    nearfield_leafpair_pallas_cvjp,
+    pallas_nearfield_fused_supported,
+)
+
+
+def _nf_skip_if_needed(interpret, exc):
+    msg = str(exc).lower()
+    if not interpret and (
+        "warpgroup" in msg or "ptx" in msg or "triton" in msg or "mosaic" in msg
+    ):
+        pytest.skip(f"Pallas kernel unavailable on this GPU/runtime: {exc}")
+    raise exc
+
+
+@pytest.mark.parametrize("interpret", [True, False])
+def test_nearfield_fused_leaf_pallas_custom_vjp_matches_twin(interpret):
+    """Fused leaf-major near-field (pairs lane) custom_vjp == autodiff of the twin."""
+    if not jax.config.jax_enable_x64:
+        pytest.skip("requires x64 for a tight tolerance")
+    if not interpret and not pallas_nearfield_fused_supported():
+        pytest.skip("fused near-field Pallas requires an Ampere+ (sm_80) GPU")
+
+    tol = 1.0e-9 if interpret else 1.0e-6
+    rng = np.random.default_rng(0)
+    nl, wt, k = 3, 8, 12
+    tpos = jnp.asarray(rng.standard_normal((nl, wt, 3)), dtype=jnp.float64)
+    spos = jnp.asarray(rng.standard_normal((nl, k, 3)), dtype=jnp.float64)
+    spos = spos.at[:, :, 2].add(2.0)  # modest target/source separation
+    smass = jnp.asarray(rng.uniform(0.5, 1.5, (nl, k)), dtype=jnp.float64)
+    tmask = jnp.asarray(rng.random((nl, wt)) > 0.2)
+    smask = jnp.asarray(rng.random((nl, k)) > 0.2)
+    tmask_f = tmask.astype(jnp.float64)
+    smask_f = smask.astype(jnp.float64)
+    soft = jnp.asarray(1e-2, dtype=jnp.float64)
+    G = jnp.asarray(1.5, dtype=jnp.float64)
+
+    def f_custom(tp, sp, sm):
+        return nearfield_fused_leaf_pallas_cvjp(
+            tp, tmask_f, sp, sm, smask_f, soft, G, None, 1, None, interpret
+        )
+
+    def f_ref(tp, sp, sm):
+        return nearfield_fused_leaf_jax(
+            tp, tmask, sp, sm, smask, softening_sq=soft, G=G
+        )
+
+    try:
+        assert_vjp_matches(f_custom, f_ref, (tpos, spos, smass), rtol=tol, atol=tol)
+    except Exception as exc:  # pragma: no cover - GPU/runtime dependent
+        _nf_skip_if_needed(interpret, exc)
+
+
+@pytest.mark.parametrize("interpret", [True, False])
+def test_nearfield_leafpair_pallas_custom_vjp_matches_twin(interpret):
+    """Leaf-pair (prepacked) near-field custom_vjp == autodiff of the twin.
+
+    Exercises the in-kernel leaf-id gather (ids passed as floats through the rule);
+    the twin's gather reverse (scatter-add) is what the custom_vjp must reproduce.
+    """
+    if not jax.config.jax_enable_x64:
+        pytest.skip("requires x64 for a tight tolerance")
+    if not interpret and not pallas_nearfield_fused_supported():
+        pytest.skip("fused near-field Pallas requires an Ampere+ (sm_80) GPU")
+
+    tol = 1.0e-9 if interpret else 1.0e-6
+    rng = np.random.default_rng(1)
+    ll, w, s = 4, 8, 3
+    leaf_positions = jnp.asarray(rng.standard_normal((ll, w, 3)), dtype=jnp.float64)
+    leaf_masses = jnp.asarray(rng.uniform(0.5, 1.5, (ll, w)), dtype=jnp.float64)
+    leaf_mask = jnp.asarray(rng.random((ll, w)) > 0.2)
+    # each target leaf gathers `s` neighbour source leaves (ids in [0, ll))
+    source_leaf_ids = jnp.asarray(rng.integers(0, ll, size=(ll, s)), dtype=jnp.int32)
+    source_valid = jnp.asarray(rng.random((ll, s)) > 0.2)
+    leaf_mask_f = leaf_mask.astype(jnp.float64)
+    ids_f = source_leaf_ids.astype(jnp.float64)
+    valid_f = source_valid.astype(jnp.float64)
+    soft = jnp.asarray(1e-2, dtype=jnp.float64)
+    G = jnp.asarray(1.5, dtype=jnp.float64)
+
+    def f_custom(lp, lm):
+        return nearfield_leafpair_pallas_cvjp(
+            lp, lm, leaf_mask_f, ids_f, valid_f, soft, G, None, 1, None, interpret
+        )
+
+    def f_ref(lp, lm):
+        return nearfield_leafpair_jax(
+            lp, lm, leaf_mask, source_leaf_ids, source_valid, softening_sq=soft, G=G
+        )
+
+    try:
+        assert_vjp_matches(
+            f_custom, f_ref, (leaf_positions, leaf_masses), rtol=tol, atol=tol
+        )
+    except Exception as exc:  # pragma: no cover - GPU/runtime dependent
+        _nf_skip_if_needed(interpret, exc)
