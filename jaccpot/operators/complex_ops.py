@@ -9,7 +9,7 @@ import jax.numpy as jnp
 import numpy as np
 
 from .complex_harmonics import complex_R_solidfmm, complex_R_solidfmm_preserve_dtype
-from .dtypes import complex_dtype_for_real
+from .dtypes import complex_dtype_for_real, floor_squared_radius
 from .real_harmonics import (
     _compute_dehnen_B_matrix_complex,
     sh_offset,
@@ -1252,7 +1252,7 @@ def m2m_complex(
     multipole = jnp.asarray(multipole)
     delta = jnp.asarray(delta)
 
-    r = jnp.sqrt(jnp.maximum(jnp.dot(delta, delta), 1e-60))
+    r = jnp.sqrt(floor_squared_radius(jnp.dot(delta, delta)))
     M_rot = rotate_complex_multipole_to_z_solidfmm(multipole, delta, order=p)
     M_z = translate_along_z_m2m_complex_solidfmm(M_rot, r, order=p)
     return rotate_complex_multipole_from_z_solidfmm(M_z, delta, order=p)
@@ -1273,7 +1273,7 @@ def l2l_complex(
     local = jnp.asarray(local)
     delta = jnp.asarray(delta)
 
-    r = jnp.sqrt(jnp.maximum(jnp.dot(delta, delta), 1e-60))
+    r = jnp.sqrt(floor_squared_radius(jnp.dot(delta, delta)))
     L_rot = rotate_complex_local_to_z_solidfmm(local, delta, order=p)
     L_z = translate_along_z_l2l_complex(L_rot, r, order=p)
     return rotate_complex_local_from_z_solidfmm(L_z, delta, order=p)
@@ -1298,7 +1298,7 @@ def m2l_complex_reference(
 
     M_rotated = rotate_complex_multipole_to_z_solidfmm(multipole, delta, order=p)
 
-    r = jnp.sqrt(jnp.maximum(jnp.dot(delta, delta), 1e-60))
+    r = jnp.sqrt(floor_squared_radius(jnp.dot(delta, delta)))
     local_z = translate_along_z_m2l_complex(M_rotated, r, order=p)
 
     return rotate_complex_local_from_z_solidfmm(local_z, delta, order=p)
@@ -1336,7 +1336,7 @@ def m2l_complex_reference_batch_cached_blocks(
         blocks_to_z,
         order=p,
     )
-    r = jnp.sqrt(jnp.maximum(jnp.sum(deltas * deltas, axis=1), 1e-60))
+    r = jnp.sqrt(floor_squared_radius(jnp.sum(deltas * deltas, axis=1)))
     local_z = translate_along_z_m2l_complex_batch(M_rot, r, order=p)
     return _apply_complex_rotation_blocks_padded_batch(
         local_z,
