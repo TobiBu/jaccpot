@@ -291,12 +291,25 @@ The fused-Pallas M2L roughly **halves the forward** and cuts fwd+bwd by ~1.3–1
 grad path — a real win (the differentiable downward re-eval issues many small per-pair
 rotate/z-translate/rotate-back launches that the single fused kernel collapses; the
 per-stage PR-1 profile above under-counts this because it timed the M2L in isolation, not
-the re-eval's launch overhead). **The reverse does not get the Pallas speedup:** the
-`custom_vjp` backward runs the pure-jnp twin's autodiff, so only the forward M2L is fused
-— hence the fwd speedup exceeds the fwd+bwd speedup (the fwd+bwd/fwd ratio rises, e.g.
-2.2→3.8 at N=1024 complex). Swapping the twin-autodiff reverse for the analytic
-adjoint-M2L (`linear_transpose` in the multipoles, plus autodiff for the blocks/radius)
-would extend the speedup to the reverse — deferred, since `bwd=grad(twin)` is
-correct-by-construction and the near-field still dominates the total for many configs.
-(N≥4096 trends the same or better but was measured under concurrent-GPU contention here,
-so only the clean N=256/1024 rows are quoted.)
+the re-eval's launch overhead). (N≥4096 trends the same or better but was measured under
+concurrent-GPU contention here, so only the clean N=256/1024 rows are quoted.)
+
+**Fused reverse (`custom_vjp` bwd).** The reverse is a fully-fused, on-chip analytic VJP
+kernel (`m2l_{real,complex}_fused_vjp_pallas`): it recomputes the forward intermediates
+and walks the adjoint chain (operator transposes for the linear stages, per-block outer
+products for the two rotation-block cotangents, and the analytic
+`r_bar = -(1/r) lz_bar^T (Z ⊙ Zexp) mrf` for the radius), so the reverse pass runs as a
+single Pallas launch rather than pure-JAX autodiff of the twin. Default ON
+(`JACCPOT_FUSED_M2L_VJP=1`); `=0` falls back to autodiff of the twin (the correctness
+reference — the fused reverse matches it to round-off, VJP parity 20 passed on the A100,
+and grad-correctness with the fused fwd+reverse 17 passed). The complex boundary uses
+JAX's conjugate convention (`out_i_bar = -imag(out_bar)`; recombine
+`complex(re_bar, -im_bar)`), verified empirically against `jax.vjp`.
+
+**Measured reverse ROI is ~0 at N=1024/p4** (A100): with the fused M2L forward engaged,
+the total reverse (~3.6 ms) is **near-field-bound**, so fusing the M2L reverse moves it
+only 3.62→3.58 ms (complex, 1.01×) / 3.70→3.56 ms (real, 1.04×) — within timing noise.
+The fused reverse is kept default-on (validated, equal-cost, and the on-chip form should
+matter at high expansion order, where the M2L share grows, or for reverse-pass memory at
+scale), but the reverse bottleneck is the near-field, not M2L. Fusing the near-field
+reverse (or its analytic tidal-tensor VJP) is where the remaining reverse ROI lives.
