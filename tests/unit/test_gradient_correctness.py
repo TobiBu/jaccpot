@@ -25,6 +25,23 @@ def _system(n, seed=0):
     return positions, masses
 
 
+def _num_far_pairs(state):
+    """Number of M2L (multipole->local) interactions in the frozen topology.
+
+    Zero means the tree is too shallow for the MAC to accept any box pair, so the
+    far-field (M2M/M2L/L2L) reverse path is never traced and FD-vs-AD reduces to a
+    near-field-only self-consistency check. The deep configs assert this is
+    positive so they exercise the M2L reverse pass.
+    """
+    inter = state.interactions
+    if inter is not None:
+        return int(jnp.sum(inter.counts))
+    dual = state.dual_tree_result
+    if dual is not None:
+        return int(jnp.sum(dual.far_pair_count))
+    return 0
+
+
 def _directional_fd_vs_ad(loss_fn, x, direction, eps=1e-6):
     grad = jax.grad(loss_fn)(x)
     ad = float(jnp.sum(grad * direction))
@@ -36,20 +53,31 @@ def _directional_fd_vs_ad(loss_fn, x, direction, eps=1e-6):
     return finite, rel, fd, ad
 
 
+# ``leaf``/``min_far`` make the far field explicit: the deep configs (small leaf)
+# build a non-empty M2L list so FD-vs-AD self-consistency actually covers the
+# multipole->local reverse pass; the real-basis deep config covers the
+# rotation-angle M2L path this PR guards. The first (shallow, low-order) config
+# keeps a cheap near-field-only point. FD-vs-AD is a self-consistency check, so
+# the 1e-4 tolerance is config-independent (it holds to ~1e-9 either way) -- adding
+# the far field does not loosen it. The ``_bound_diff_fmm_compile_cache`` fixture
+# (tests/conftest.py) drops JAX's compile cache after each of these tests, so the
+# deep-config memory plateaus (~1.5 GB) rather than accumulating -- CI-safe.
 @pytest.mark.parametrize(
-    "basis,theta,n,order",
+    "basis,theta,n,order,leaf,min_far",
     [
-        ("complex", 0.4, 64, 2),
-        ("complex", 0.6, 64, 4),
-        ("real", 0.5, 64, 4),
+        ("complex", 0.4, 64, 2, 16, 0),  # shallow, low order: near-field only
+        ("complex", 0.6, 64, 4, 4, 1),  # deep: non-empty M2L reverse path
+        ("real", 0.6, 64, 4, 4, 1),  # deep real basis: rotation-angle M2L
     ],
 )
-def test_fd_vs_ad_positions(basis, theta, n, order):
+def test_fd_vs_ad_positions(basis, theta, n, order, leaf, min_far):
     positions, masses = _system(n, seed=int(10 * theta) + n + order)
     fmm = FastMultipoleMethod(
         basis=basis, use_pallas=False, theta=theta, G=1.0, softening=1e-2
     )
-    state = fmm.prepare_state(positions, masses, max_order=order, leaf_size=16)
+    state = fmm.prepare_state(positions, masses, max_order=order, leaf_size=leaf)
+    n_far = _num_far_pairs(state)
+    assert n_far >= min_far, f"expected >= {min_far} M2L pairs, got {n_far}"
 
     def loss(pos):
         return jnp.sum(fmm.differentiable_accelerations(state, pos, masses) ** 2)
@@ -64,12 +92,16 @@ def test_fd_vs_ad_positions(basis, theta, n, order):
 
 @pytest.mark.parametrize("basis", ["complex", "real"])
 def test_fd_vs_ad_masses(basis):
-    n, theta, order = 64, 0.5, 4
+    # Deep tree (leaf_size=4, theta=0.6) so the mass gradient's FD-vs-AD
+    # self-consistency covers the far-field (M2L) reverse path, not just P2P.
+    n, theta, order, leaf = 64, 0.6, 4, 4
     positions, masses = _system(n, seed=7)
     fmm = FastMultipoleMethod(
         basis=basis, use_pallas=False, theta=theta, G=1.0, softening=1e-2
     )
-    state = fmm.prepare_state(positions, masses, max_order=order, leaf_size=16)
+    state = fmm.prepare_state(positions, masses, max_order=order, leaf_size=leaf)
+    n_far = _num_far_pairs(state)
+    assert n_far > 0, f"config must exercise the far field (got {n_far} M2L pairs)"
 
     def loss(m):
         return jnp.sum(fmm.differentiable_accelerations(state, positions, m) ** 2)
