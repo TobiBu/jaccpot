@@ -342,10 +342,21 @@ def _self_contributions(
 
         return accel_leaf, pot_leaf
 
+    # Rematerialize the per-leaf block. ``compute_single`` builds (W, W, 3) and
+    # (W, W) intermediates, and the scan retains them for EVERY leaf, so the
+    # residual is O(leaves * W^2) -- N*W in practice, i.e. ~1.4 GB at N=200000 and
+    # ~7.5 GB at N=1048576 on the canonical leaf-256 config. Its inputs are only
+    # the (W, 3) / (W,) slices of one leaf, so remat trades one extra intra-leaf
+    # pass for a W-fold reduction.
+    #
+    # Note this term is NOT covered by ``_pair_accel_cvjp``: that rule handles
+    # cross-leaf pair blocks, while intra-leaf self interaction is computed here.
+    _compute_single_remat = jax.checkpoint(compute_single)
+
     def scan_step(
         carry: Any, args: tuple[Array, Array, Array]
     ) -> tuple[Any, tuple[Array, Array]]:
-        accel_leaf, pot_leaf = compute_single(args)
+        accel_leaf, pot_leaf = _compute_single_remat(args)
         return carry, (accel_leaf, pot_leaf)
 
     _, (accels, potentials) = lax.scan(

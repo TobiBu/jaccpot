@@ -49,6 +49,7 @@ jax.config.update("jax_enable_x64", True)
 from jax._src.ad_checkpoint import saved_residuals
 
 from jaccpot import FastMultipoleMethod
+from jaccpot.config import FMMAdvancedConfig, NearFieldConfig
 
 # Map a residual's originating function to a cost model. Order matters: the first
 # matching pattern wins, so put the specific patterns first.
@@ -97,8 +98,16 @@ def _nbytes(aval) -> int:
     return count * aval.dtype.itemsize
 
 
-def audit(*, n, leaf, order, theta, dtype, softening, wrt):
+def audit(*, n, leaf, order, theta, dtype, softening, wrt, precompute_scatter=True):
     positions, masses = galaxy(n, dtype)
+    # ``precompute_scatter`` matters a lot for the near-field reverse residual and
+    # the canonical large-N production config sets it FALSE. The precomputed
+    # schedule stacks three int32 (chunk*W) index arrays per chunk, where the plain
+    # scatter needs only flat indices plus a mask -- so measuring with the default
+    # True overstates the near field for the production configuration.
+    advanced = FMMAdvancedConfig(
+        nearfield=NearFieldConfig(precompute_scatter_schedules=bool(precompute_scatter))
+    )
     fmm = FastMultipoleMethod(
         basis="complex",
         use_pallas=False,
@@ -106,6 +115,7 @@ def audit(*, n, leaf, order, theta, dtype, softening, wrt):
         G=1.0,
         softening=softening,
         working_dtype=dtype,
+        advanced=advanced,
     )
     state = fmm.prepare_state(positions, masses, max_order=order, leaf_size=leaf)
 
@@ -294,6 +304,11 @@ def main():
     parser.add_argument("--dtype", choices=["float32", "float64"], default="float32")
     parser.add_argument("--softening", type=float, default=1e-2)
     parser.add_argument("--wrt", choices=["positions", "masses"], default="positions")
+    parser.add_argument(
+        "--no-precompute-scatter",
+        action="store_true",
+        help="match the canonical large-N config (precompute_scatter_schedules=False)",
+    )
     parser.add_argument(
         "--predict",
         type=str,
