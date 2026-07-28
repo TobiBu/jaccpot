@@ -3581,6 +3581,139 @@ def _check_float_id_range(num_particles: int, dtype: Any, *, what: str) -> None:
         )
 
 
+def _leafpair_accel_analytic_vjp(
+    leaf_positions: Array,
+    leaf_masses: Array,
+    leaf_mask: Array,
+    leaf_particle_idx: Array,
+    source_leaf_ids: Array,
+    source_valid: Array,
+    cotangent: Array,
+    *,
+    softening_sq: Array,
+    G: Array,
+    leaf_batch: int,
+    slot_tile: int,
+) -> Tuple[Array, Array]:
+    """Analytic reverse of the leaf-pair near field in **O(N) memory**.
+
+    Returns ``(leaf_positions_bar, leaf_masses_bar)`` for a particle-order output
+    ``cotangent``.
+
+    Why hand-written rather than ``jax.vjp`` of a pure-JAX twin: a ``bwd`` rule is
+    never itself differentiated, so everything it computes is a *transient* bounded
+    by the tile size instead of a *residual* retained per scan iteration. Taking
+    the reverse from ``jax.vjp(twin)`` is correct but linearizes the twin, which
+    reinstates the twin's own O(edges * W) scan residuals as a peak during the
+    backward -- ~67 GB at N=1048576 on the canonical leaf-256 config. This form
+    keeps only O(N) accumulators, which is what makes 1M gradients reachable.
+
+    The contraction is the same symmetric near-field tidal tensor already used by
+    :func:`_pair_accel_cvjp_bwd`,
+    ``J = -G sum_s m_s (I/r^3 - 3 r r^T / r^5)`` with ``J^T c = J c``, just applied
+    per leaf pair and accumulated leaf-major so no particle-order scatter is
+    needed (cotangents are w.r.t. the leaf-major tensors; the caller's gather
+    transposes them back to particle order).
+
+    Newton's third law supplies the source-side term: the contribution a target
+    leaf receives from a source leaf gives equal and opposite position sensitivity
+    to that source leaf, scattered by source leaf id.
+    """
+    dtype = leaf_positions.dtype
+    num_leaves = int(leaf_positions.shape[0])
+    width = int(leaf_positions.shape[1])
+    num_slots = int(source_leaf_ids.shape[1]) * int(source_leaf_ids.shape[2])
+    if num_leaves == 0 or width == 0 or num_slots == 0:
+        return jnp.zeros_like(leaf_positions), jnp.zeros_like(leaf_masses)
+
+    slot_ids = jnp.reshape(source_leaf_ids, (num_leaves, num_slots))
+    slot_valid = jnp.reshape(source_valid, (num_leaves, num_slots))
+
+    # Cotangent, gathered leaf-major and masked exactly as the forward masks its
+    # output. O(N).
+    cot_leaf = jnp.where(
+        leaf_mask[..., None], cotangent[leaf_particle_idx], jnp.zeros((), dtype)
+    )
+
+    batch = max(1, min(int(leaf_batch), num_leaves))
+    tile = max(1, min(int(slot_tile), num_slots))
+    leaf_starts = jnp.arange(0, num_leaves, batch, dtype=INDEX_DTYPE)
+    slot_starts = jnp.arange(0, num_slots, tile, dtype=INDEX_DTYPE)
+    leaf_offsets = jnp.arange(batch, dtype=INDEX_DTYPE)
+    slot_offsets = jnp.arange(tile, dtype=INDEX_DTYPE)
+
+    def leaf_body(carry, leaf_start):
+        pos_bar, mass_bar = carry
+        tgt_idx = leaf_start + leaf_offsets
+        tgt_in_range = tgt_idx < num_leaves
+        safe_tgt = jnp.where(tgt_in_range, tgt_idx, 0)
+
+        tgt_pos = leaf_positions[safe_tgt]  # (B, W, 3)
+        tgt_mask = leaf_mask[safe_tgt] & tgt_in_range[:, None]
+        cot_t = jnp.where(tgt_mask[..., None], cot_leaf[safe_tgt], jnp.zeros((), dtype))
+
+        def slot_body(inner, slot_start):
+            pos_acc, mass_acc, tgt_acc = inner
+            sl = slot_start + slot_offsets
+            sl_in_range = sl < num_slots
+            safe_sl = jnp.where(sl_in_range, sl, 0)
+
+            src_leaf = slot_ids[safe_tgt][:, safe_sl]  # (B, T)
+            valid_slot = slot_valid[safe_tgt][:, safe_sl] & sl_in_range[None, :]
+            valid_slot = valid_slot & tgt_in_range[:, None]
+            safe_src = jnp.where(valid_slot, src_leaf, 0)
+
+            src_pos = leaf_positions[safe_src]  # (B, T, W, 3)
+            src_mass = leaf_masses[safe_src]  # (B, T, W)
+            src_mask = leaf_mask[safe_src] & valid_slot[..., None]
+
+            # (B, T, Wt, Ws, 3)
+            diff = tgt_pos[:, None, :, None, :] - src_pos[:, :, None, :, :]
+            dist_sq = jnp.sum(diff * diff, axis=-1) + softening_sq
+            pair_mask = tgt_mask[:, None, :, None] & src_mask[:, :, None, :]
+            safe_dist_sq = jnp.where(pair_mask, dist_sq, jnp.ones_like(dist_sq))
+            inv_r = jnp.where(pair_mask, lax.rsqrt(safe_dist_sq), 0.0)
+            inv_dist3 = jnp.where(pair_mask, inv_r * inv_r * inv_r, 0.0)
+            inv_dist5 = jnp.where(pair_mask, inv_dist3 * inv_r * inv_r, 0.0)
+
+            cot_b = cot_t[:, None, :, None, :]  # (B, 1, Wt, 1, 3)
+            cd = jnp.sum(cot_b * diff, axis=-1)  # (B, T, Wt, Ws)
+            m = src_mass[:, :, None, :, None]  # (B, T, 1, Ws, 1)
+            pair = m * (
+                inv_dist3[..., None] * cot_b
+                - 3.0 * inv_dist5[..., None] * cd[..., None] * diff
+            )
+
+            # Target side: sum over sources (slots and their particles).
+            tgt_contrib = -G * jnp.sum(pair, axis=(1, 3))  # (B, Wt, 3)
+            # Source side (third law): sum over targets, scattered by source leaf.
+            src_contrib = G * jnp.sum(pair, axis=2)  # (B, T, Ws, 3)
+            src_mass_contrib = -G * jnp.sum(inv_dist3 * cd, axis=2)  # (B, T, Ws)
+
+            src_contrib = jnp.where(valid_slot[..., None, None], src_contrib, 0.0)
+            src_mass_contrib = jnp.where(valid_slot[..., None], src_mass_contrib, 0.0)
+
+            pos_acc = pos_acc.at[safe_src].add(src_contrib)
+            mass_acc = mass_acc.at[safe_src].add(src_mass_contrib)
+            return (pos_acc, mass_acc, tgt_acc + tgt_contrib), None
+
+        (pos_bar, mass_bar, tgt_total), _ = lax.scan(
+            slot_body,
+            (pos_bar, mass_bar, jnp.zeros_like(tgt_pos)),
+            slot_starts,
+        )
+        tgt_total = jnp.where(tgt_in_range[:, None, None], tgt_total, 0.0)
+        pos_bar = pos_bar.at[safe_tgt].add(tgt_total)
+        return (pos_bar, mass_bar), None
+
+    (positions_bar, masses_bar), _ = lax.scan(
+        leaf_body,
+        (jnp.zeros_like(leaf_positions), jnp.zeros_like(leaf_masses)),
+        leaf_starts,
+    )
+    return positions_bar, masses_bar
+
+
 @partial(jax.custom_vjp, nondiff_argnums=(9, 10, 11, 12, 13, 14, 15, 16))
 def _radix_fast_lane_prepacked_accel_cvjp(
     leaf_positions: Array,
@@ -3719,35 +3852,26 @@ def _radix_fast_lane_prepacked_accel_bwd(
         G,
     ) = residual
 
-    def twin(leaf_pos, leaf_mass):
-        return _compute_leaf_p2p_prepared_large_n_pairs_target_blocks_prepacked_impl(
-            positions,
-            jnp.round(source_leaf_ids_f).astype(INDEX_DTYPE),
-            source_valid_f > 0.5,
-            leaf_pos,
-            leaf_mass,
-            leaf_mask_f > 0.5,
-            jnp.round(leaf_particle_idx_f).astype(INDEX_DTYPE),
-            G=G,
-            softening_sq=softening_sq,
-            target_leaf_batch_size=int(rev_leaf_batch),
-            target_block_tile_size=int(rev_block_tile),
-            target_block_tile_scan_unroll=int(rev_tile_unroll),
-            target_block_batch_scan_unroll=int(rev_batch_unroll),
-            # occupancy_sort permutes leaves and remaps ids; skip_empty_tiles adds a
-            # data-dependent cond. Both are forward-schedule optimisations that are
-            # only *believed* numerics-preserving, so the reverse pins them off
-            # rather than trusting them (see the grouped-M2L lesson).
-            occupancy_sort=False,
-            skip_empty_tiles=False,
-            # The default True routes to the componentwise pair kernel, which
-            # bypasses the analytic ``_pair_accel_cvjp`` and would reintroduce the
-            # O(pairs) residual that rematerialization just removed.
-            componentwise_pairs=False,
-        )
-
-    _, vjp_fn = jax.vjp(twin, leaf_positions, leaf_masses)
-    leaf_positions_bar, leaf_masses_bar = vjp_fn(cotangent)
+    # Analytic reverse, NOT ``jax.vjp`` of the tiled twin. Both are correct and
+    # agree to round-off, but ``jax.vjp`` linearizes the twin and so reinstates its
+    # O(edges * W) scan residuals as a transient peak during the backward (~67 GB at
+    # N=1048576). A hand-written bwd is never differentiated, so its intermediates
+    # are tile-bounded transients and the memory is O(N) -- which is what makes
+    # galaxy-scale gradients reachable. ``jax.vjp`` of the twin remains the
+    # correctness oracle in tests/unit/test_custom_vjp_parity.py.
+    leaf_positions_bar, leaf_masses_bar = _leafpair_accel_analytic_vjp(
+        leaf_positions,
+        leaf_masses,
+        leaf_mask_f > 0.5,
+        jnp.round(leaf_particle_idx_f).astype(INDEX_DTYPE),
+        jnp.round(source_leaf_ids_f).astype(INDEX_DTYPE),
+        source_valid_f > 0.5,
+        cotangent,
+        softening_sq=softening_sq,
+        G=G,
+        leaf_batch=int(rev_leaf_batch),
+        slot_tile=int(rev_block_tile),
+    )
     return (
         leaf_positions_bar,
         leaf_masses_bar,
