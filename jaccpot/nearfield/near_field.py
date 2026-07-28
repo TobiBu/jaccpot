@@ -696,6 +696,57 @@ def _pair_contributions_batched_componentwise(
     return accels, None
 
 
+def _bucketed_chunk_pair_accels(
+    leaf_positions: Array,
+    leaf_masses: Array,
+    leaf_mask: Array,
+    target_leaf_local: Array,
+    source_leaf_local: Array,
+    valid_edge: Array,
+    softening_sq: Array,
+    G: Array,
+) -> Tuple[Array, Array]:
+    """Gather one edge chunk's leaf tensors and evaluate its near-field pair block.
+
+    Deliberately takes the **leaf-major buffers plus leaf-id index vectors** rather
+    than pre-gathered positions, so callers can wrap it in ``jax.checkpoint``:
+    ``lax.scan``'s partial-eval hoists the scan-invariant leaf buffers out and
+    counts them once, leaving only two integer leaf-id vectors and a mask stacked
+    per chunk.
+
+    That is the single largest reverse-pass term at galaxy scale. The gather sits
+    *outside* :func:`_pair_accel_cvjp`, which explicitly saves its own inputs, so
+    rematerializing only the gather would achieve nothing -- the consumer would
+    save the gather's outputs anyway. Rematerializing the composite (gather **and**
+    pair evaluation) is what collapses it: measured **77.8 B per (edge x
+    max_leaf_size)** by ``bench/audit_reverse_residuals.py``, i.e. 8.7 GB at
+    N=200000 and 124 GB at N=1048576 on the canonical leaf-256 config, versus
+    ~14 B per *edge* once rematerialized.
+
+    Returns ``(pair_accelerations, target_mask)``; the caller applies the scatter,
+    which is linear and therefore needs only indices and the mask in reverse.
+    """
+    target_positions = leaf_positions[target_leaf_local]
+    target_mask = leaf_mask[target_leaf_local] & valid_edge[:, None]
+    source_positions = leaf_positions[source_leaf_local]
+    source_masses = leaf_masses[source_leaf_local]
+    source_mask = leaf_mask[source_leaf_local] & valid_edge[:, None]
+    pair_acc, _ = _pair_contributions_batched(
+        target_positions,
+        target_mask,
+        source_positions,
+        source_masses,
+        source_mask,
+        softening_sq=softening_sq,
+        G=G,
+        compute_potential=False,
+    )
+    return pair_acc, target_mask
+
+
+_bucketed_chunk_pair_accels_remat = jax.checkpoint(_bucketed_chunk_pair_accels)
+
+
 def _scatter_contributions(
     base_acc: Array,
     indices: Array,
@@ -2086,21 +2137,18 @@ def _compute_leaf_p2p_impl(
                             tgt_leaf_local = jnp.where(valid_edge, tgt_leaf, 0)
                             src_leaf_local = jnp.where(valid_edge, src_leaf, 0)
 
-                            tgt_pos = leaf_positions[tgt_leaf_local]
-                            tgt_mask = leaf_mask[tgt_leaf_local] & valid_edge[:, None]
-                            src_pos = leaf_positions[src_leaf_local]
-                            src_mass = leaf_masses[src_leaf_local]
-                            src_mask = leaf_mask[src_leaf_local] & valid_edge[:, None]
-
-                            pair_acc, _ = _pair_contributions_batched(
-                                tgt_pos,
-                                tgt_mask,
-                                src_pos,
-                                src_mass,
-                                src_mask,
-                                softening_sq=soft_sq,
-                                G=g_const,
-                                compute_potential=False,
+                            # Gather + pair evaluation, rematerialized: the
+                            # composite is the dominant reverse-pass residual at
+                            # galaxy N (see ``_bucketed_chunk_pair_accels``).
+                            pair_acc, tgt_mask = _bucketed_chunk_pair_accels_remat(
+                                leaf_positions,
+                                leaf_masses,
+                                leaf_mask,
+                                tgt_leaf_local,
+                                src_leaf_local,
+                                valid_edge,
+                                soft_sq,
+                                g_const,
                             )
                             return _scatter_vectors_with_schedule(
                                 acc_in,
@@ -2145,22 +2193,19 @@ def _compute_leaf_p2p_impl(
                             tgt_leaf_local = jnp.where(valid_edge, tgt_leaf, 0)
                             src_leaf_local = jnp.where(valid_edge, src_leaf, 0)
 
-                            tgt_pos = leaf_positions[tgt_leaf_local]
-                            tgt_mask = leaf_mask[tgt_leaf_local] & valid_edge[:, None]
                             tgt_ids = leaf_particle_idx[tgt_leaf_local]
-                            src_pos = leaf_positions[src_leaf_local]
-                            src_mass = leaf_masses[src_leaf_local]
-                            src_mask = leaf_mask[src_leaf_local] & valid_edge[:, None]
-
-                            pair_acc, _ = _pair_contributions_batched(
-                                tgt_pos,
-                                tgt_mask,
-                                src_pos,
-                                src_mass,
-                                src_mask,
-                                softening_sq=soft_sq,
-                                G=g_const,
-                                compute_potential=False,
+                            # Gather + pair evaluation, rematerialized: the
+                            # composite is the dominant reverse-pass residual at
+                            # galaxy N (see ``_bucketed_chunk_pair_accels``).
+                            pair_acc, tgt_mask = _bucketed_chunk_pair_accels_remat(
+                                leaf_positions,
+                                leaf_masses,
+                                leaf_mask,
+                                tgt_leaf_local,
+                                src_leaf_local,
+                                valid_edge,
+                                soft_sq,
+                                g_const,
                             )
                             return _scatter_contributions(
                                 acc_in,
@@ -2578,21 +2623,18 @@ def _compute_leaf_p2p_from_prepared_leaf_data_impl(
                             tgt_leaf_local = jnp.where(valid_edge, tgt_leaf, 0)
                             src_leaf_local = jnp.where(valid_edge, src_leaf, 0)
 
-                            tgt_pos = leaf_positions[tgt_leaf_local]
-                            tgt_mask = leaf_mask[tgt_leaf_local] & valid_edge[:, None]
-                            src_pos = leaf_positions[src_leaf_local]
-                            src_mass = leaf_masses[src_leaf_local]
-                            src_mask = leaf_mask[src_leaf_local] & valid_edge[:, None]
-
-                            pair_acc, _ = _pair_contributions_batched(
-                                tgt_pos,
-                                tgt_mask,
-                                src_pos,
-                                src_mass,
-                                src_mask,
-                                softening_sq=soft_sq,
-                                G=g_const,
-                                compute_potential=False,
+                            # Gather + pair evaluation, rematerialized: the
+                            # composite is the dominant reverse-pass residual at
+                            # galaxy N (see ``_bucketed_chunk_pair_accels``).
+                            pair_acc, tgt_mask = _bucketed_chunk_pair_accels_remat(
+                                leaf_positions,
+                                leaf_masses,
+                                leaf_mask,
+                                tgt_leaf_local,
+                                src_leaf_local,
+                                valid_edge,
+                                soft_sq,
+                                g_const,
                             )
                             return _scatter_vectors_with_schedule(
                                 acc_in,
@@ -2637,22 +2679,19 @@ def _compute_leaf_p2p_from_prepared_leaf_data_impl(
                             tgt_leaf_local = jnp.where(valid_edge, tgt_leaf, 0)
                             src_leaf_local = jnp.where(valid_edge, src_leaf, 0)
 
-                            tgt_pos = leaf_positions[tgt_leaf_local]
-                            tgt_mask = leaf_mask[tgt_leaf_local] & valid_edge[:, None]
                             tgt_ids = leaf_particle_idx[tgt_leaf_local]
-                            src_pos = leaf_positions[src_leaf_local]
-                            src_mass = leaf_masses[src_leaf_local]
-                            src_mask = leaf_mask[src_leaf_local] & valid_edge[:, None]
-
-                            pair_acc, _ = _pair_contributions_batched(
-                                tgt_pos,
-                                tgt_mask,
-                                src_pos,
-                                src_mass,
-                                src_mask,
-                                softening_sq=soft_sq,
-                                G=g_const,
-                                compute_potential=False,
+                            # Gather + pair evaluation, rematerialized: the
+                            # composite is the dominant reverse-pass residual at
+                            # galaxy N (see ``_bucketed_chunk_pair_accels``).
+                            pair_acc, tgt_mask = _bucketed_chunk_pair_accels_remat(
+                                leaf_positions,
+                                leaf_masses,
+                                leaf_mask,
+                                tgt_leaf_local,
+                                src_leaf_local,
+                                valid_edge,
+                                soft_sq,
+                                g_const,
                             )
                             return _scatter_contributions(
                                 acc_in,
