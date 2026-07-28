@@ -350,6 +350,42 @@ def _aggregate_m2m_complex_by_level(
         in_axes=(0, 0),
     )
 
+    def _m2m_level_apply(
+        state_in: Array,
+        node_centers_all: Array,
+        safe_child_idx: Array,
+        gather_nodes: Array,
+        child_mask: Array,
+    ) -> Array:
+        """Gather one level's children, M2M-translate them, reduce onto the parents.
+
+        Wrapped in ``jax.checkpoint`` below so reverse mode retains only these
+        inputs. Un-rematerialized, the level loop keeps every level's rotate-to-z /
+        rotate-from-z blocks *and* their bilinear construction intermediates:
+        measured at **14.2 kB per (level x node)** by
+        ``bench/audit_reverse_residuals.py``, and because ``level_batch_width`` is
+        deliberately ``num_internal`` (a narrower width is unsafe, see below) that
+        is ``depth x nodes``, not ``nodes`` -- 5.4 GB at N=1048576.
+
+        ``node_centers_all`` is loop-invariant so ``scan``'s partial-eval hoists it
+        out and counts it once; only the carry and three integer/bool index arrays
+        are retained per level.
+
+        The zero-displacement case (a single-child internal node shares its child's
+        centre of mass) is guarded inside ``m2m_complex`` itself, which is enclosed
+        here, so the recomputed ``deltas`` keep that protection.
+        """
+        child_coeffs = state_in[safe_child_idx]
+        child_centers = node_centers_all[safe_child_idx]
+        parent_centers = node_centers_all[gather_nodes][:, None, :]
+        deltas = child_centers - parent_centers
+        translated = translate_children(child_coeffs, deltas)
+        translated = translated * child_mask[..., None]
+        node_coeffs = jnp.sum(translated, axis=1, dtype=translated.dtype)
+        return enforce_conjugate_symmetry_batch(node_coeffs, order=p)
+
+    _m2m_level = jax.checkpoint(_m2m_level_apply)
+
     # Scatter target for invalid / padding slots. All padding slots must route
     # to a dead row rather than a real node: with duplicate scatter indices XLA
     # takes the last write, so if padding collapsed onto a real node id (e.g. 0,
@@ -385,15 +421,11 @@ def _aggregate_m2m_complex_by_level(
         )
         child_mask = child_idx_pair >= 0
         safe_child_idx = jnp.where(child_mask, child_idx_pair, 0)
-        child_coeffs = state[safe_child_idx]
-        child_centers = centers[safe_child_idx]
-        node_centers = centers[gather_nodes][:, None, :]
-        deltas = child_centers - node_centers
 
-        translated = translate_children(child_coeffs, deltas)
-        translated = translated * child_mask[..., None]
-        node_coeffs = jnp.sum(translated, axis=1, dtype=translated.dtype)
-        node_coeffs = enforce_conjugate_symmetry_batch(node_coeffs, order=p)
+        # Gather + translate + reduce, rematerialized (see ``_m2m_level_apply``).
+        node_coeffs = _m2m_level(
+            state, centers, safe_child_idx, gather_nodes, child_mask
+        )
 
         return state.at[scatter_nodes].set(node_coeffs)
 
