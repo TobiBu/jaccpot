@@ -441,6 +441,10 @@ class FastMultipoleMethod:
                 advanced_cfg.tree.aspect_threshold,
             ),
             grouped_interactions=runtime_overrides.grouped_interactions,
+            retain_far_pairs_for_grad=legacy_kwargs.pop(
+                "retain_far_pairs_for_grad",
+                advanced_cfg.farfield.retain_far_pairs_for_grad,
+            ),
             farfield_mode=runtime_overrides.farfield_mode,
             streamed_far_pairs=legacy_kwargs.pop(
                 "streamed_far_pairs",

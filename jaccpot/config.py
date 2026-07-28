@@ -64,6 +64,11 @@ class FarFieldConfig:
     streamed_far_pairs: Optional[bool] = None
     mixed_order: bool = False
     mixed_order_min_order: Optional[int] = None
+    # Keep the frozen M2L pair list on the prepared state so a gradient path can
+    # re-run the downward sweep against it. Costs ~24 B/pair of steady state
+    # memory, so it is off by default (the large-N preset targets minimum memory);
+    # required for differentiating the large-N path.
+    retain_far_pairs_for_grad: bool = False
 
 
 @dataclass(frozen=True)

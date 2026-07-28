@@ -377,6 +377,7 @@ class FastMultipoleMethod(
         interaction_retry_logger: Optional[Callable[[DualTreeRetryEvent], None]] = None,
         use_dense_interactions: Optional[bool] = None,
         grouped_interactions: Optional[bool] = None,
+        retain_far_pairs_for_grad: bool = False,
         farfield_mode: FarFieldMode = "auto",
         streamed_far_pairs: Optional[bool] = None,
         mixed_order_farfield: bool = False,
@@ -957,6 +958,20 @@ class FastMultipoleMethod(
         )
         self._static_runtime_fixed_sizing: bool = str(
             os.environ.get("JACCPOT_STATIC_RUNTIME_FIXED_SIZING", "1")
+        ).strip().lower() in {"1", "true", "yes", "on"}
+        # Retain the frozen M2L pair list (``compact_far_pairs``) on the prepared
+        # state so a gradient path can re-run the downward sweep against it.
+        # ``prepare_state`` builds those pairs whenever the streamed-compact policy
+        # holds -- which the canonical large-N production config satisfies -- but
+        # then discards them (see fmm_prepare, _PrepareStateDualDownwardArtifacts),
+        # because retaining them costs ~24 B/pair and the large-N preset targets
+        # ``memory_objective="minimum_memory"``. Without them a differentiable
+        # large-N seam has nothing to re-run: the far field would be treated as a
+        # constant, which is a SILENTLY WRONG gradient (zero mass-sensitivity
+        # through P2M/M2M/M2L/L2L) rather than an error. Default OFF so the
+        # production forward and its memory profile are untouched.
+        self.retain_far_pairs_for_grad: bool = bool(retain_far_pairs_for_grad) or str(
+            os.environ.get("JACCPOT_RETAIN_FAR_PAIRS_FOR_GRAD", "0")
         ).strip().lower() in {"1", "true", "yes", "on"}
         # Opt-in geometric (box/aabb) centres for the real-basis large-N fast lane,
         # decoupled from grouped_interactions. This selects center_mode="aabb" in the
