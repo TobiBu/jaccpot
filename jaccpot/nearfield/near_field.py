@@ -3555,6 +3555,217 @@ def _radix_fast_lane_prepacked_pallas_decoupled(
     return pair_acc
 
 
+_FLOAT32_EXACT_INT_LIMIT = 2**24
+
+
+def _check_float_id_range(num_particles: int, dtype: Any, *, what: str) -> None:
+    """Refuse float id encoding when the ids would not be exactly representable.
+
+    ``custom_vjp`` rules must not close over tracers, so index/mask arrays have to
+    be passed as ordinary arguments -- and integer args would yield ``float0``
+    cotangents rather than plain zeros. The differentiable lanes therefore encode
+    ids as floats (reconstructed with ``round().astype``), which is exact only
+    below the mantissa bound.
+    """
+    if (
+        jnp.dtype(dtype) == jnp.float32
+        and int(num_particles) > _FLOAT32_EXACT_INT_LIMIT
+    ):
+        raise ValueError(
+            f"{what}: float32 represents integers exactly only up to "
+            f"{_FLOAT32_EXACT_INT_LIMIT} but N={int(num_particles)}. The "
+            "differentiable near-field lane encodes particle ids as floats (a "
+            "custom_vjp rule may not close over tracers, and integer args would "
+            "yield float0 cotangents), so ids beyond that bound would be silently "
+            "rounded. Use float64, or split the evaluation."
+        )
+
+
+@partial(jax.custom_vjp, nondiff_argnums=(9, 10, 11, 12, 13, 14, 15, 16))
+def _radix_fast_lane_prepacked_accel_cvjp(
+    leaf_positions: Array,
+    leaf_masses: Array,
+    positions: Array,
+    source_leaf_ids_f: Array,
+    source_valid_f: Array,
+    leaf_mask_f: Array,
+    leaf_particle_idx_f: Array,
+    softening_sq: Array,
+    G: Array,
+    num_warps: Optional[int],
+    num_stages: int,
+    target_subtile: Optional[int],
+    interpret: bool,
+    rev_leaf_batch: int,
+    rev_block_tile: int,
+    rev_tile_unroll: int,
+    rev_batch_unroll: int,
+) -> Array:
+    """Differentiable prepacked-lane near field: Pallas forward, tiled-twin reverse.
+
+    The forward IS the production fused Pallas call, so it is byte-identical and
+    the grad path runs exactly the kernel the forward ships. The reverse is
+    ``jax.vjp`` of the lane's own tiled pure-JAX fallback
+    (:func:`_compute_leaf_p2p_prepared_large_n_pairs_target_blocks_prepacked_impl`),
+    which is already routed through the rematerialized analytic P2P rule.
+
+    Using the tiled fallback -- not the dense reference twin in
+    ``jaccpot/pallas/nearfield_fused_leaf.py`` -- is essential: that reference
+    materialises a ``(leaves, W_t, K, 3)`` difference tensor, which is ~50 TB at
+    the fiducial configuration and is documented "test-scale only". It stays in the
+    tree as the unit-level VJP oracle, not as a production reverse.
+
+    Measured Pallas-vs-fallback force agreement at the canonical config: rel-L2
+    4.2e-06 at N=65536 and 8.4e-06 at N=200000, i.e. fp32 summation reordering.
+    That check is the gate on this whole approach -- the reverse is the derivative
+    of the fallback, so if the two lanes disagreed materially we would be
+    differentiating a different function (cf. the grouped-M2L lesson, where an
+    assumed equivalence was really 7.1e-02 vs 1.1e-02 against the exact sum).
+
+    Reverse tiling is deliberately independent of the forward's: the backward
+    materialises per-tile pair tensors, so small ``rev_*`` tiles keep it bounded.
+    """
+    return _radix_fast_lane_prepacked_pallas(
+        jnp.round(source_leaf_ids_f).astype(INDEX_DTYPE),
+        source_valid_f > 0.5,
+        leaf_positions,
+        leaf_masses,
+        leaf_mask_f > 0.5,
+        jnp.round(leaf_particle_idx_f).astype(INDEX_DTYPE),
+        positions,
+        G=G,
+        softening_sq=softening_sq,
+        compute_potential=False,
+        num_warps=num_warps,
+        num_stages=num_stages,
+        target_subtile=target_subtile,
+        interpret=interpret,
+    )
+
+
+def _radix_fast_lane_prepacked_accel_fwd(
+    leaf_positions,
+    leaf_masses,
+    positions,
+    source_leaf_ids_f,
+    source_valid_f,
+    leaf_mask_f,
+    leaf_particle_idx_f,
+    softening_sq,
+    G,
+    num_warps,
+    num_stages,
+    target_subtile,
+    interpret,
+    rev_leaf_batch,
+    rev_block_tile,
+    rev_tile_unroll,
+    rev_batch_unroll,
+):
+    out = _radix_fast_lane_prepacked_accel_cvjp(
+        leaf_positions,
+        leaf_masses,
+        positions,
+        source_leaf_ids_f,
+        source_valid_f,
+        leaf_mask_f,
+        leaf_particle_idx_f,
+        softening_sq,
+        G,
+        num_warps,
+        num_stages,
+        target_subtile,
+        interpret,
+        rev_leaf_batch,
+        rev_block_tile,
+        rev_tile_unroll,
+        rev_batch_unroll,
+    )
+    residual = (
+        leaf_positions,
+        leaf_masses,
+        positions,
+        source_leaf_ids_f,
+        source_valid_f,
+        leaf_mask_f,
+        leaf_particle_idx_f,
+        jnp.asarray(softening_sq),
+        jnp.asarray(G),
+    )
+    return out, residual
+
+
+def _radix_fast_lane_prepacked_accel_bwd(
+    num_warps,
+    num_stages,
+    target_subtile,
+    interpret,
+    rev_leaf_batch,
+    rev_block_tile,
+    rev_tile_unroll,
+    rev_batch_unroll,
+    residual,
+    cotangent,
+):
+    (
+        leaf_positions,
+        leaf_masses,
+        positions,
+        source_leaf_ids_f,
+        source_valid_f,
+        leaf_mask_f,
+        leaf_particle_idx_f,
+        softening_sq,
+        G,
+    ) = residual
+
+    def twin(leaf_pos, leaf_mass):
+        return _compute_leaf_p2p_prepared_large_n_pairs_target_blocks_prepacked_impl(
+            positions,
+            jnp.round(source_leaf_ids_f).astype(INDEX_DTYPE),
+            source_valid_f > 0.5,
+            leaf_pos,
+            leaf_mass,
+            leaf_mask_f > 0.5,
+            jnp.round(leaf_particle_idx_f).astype(INDEX_DTYPE),
+            G=G,
+            softening_sq=softening_sq,
+            target_leaf_batch_size=int(rev_leaf_batch),
+            target_block_tile_size=int(rev_block_tile),
+            target_block_tile_scan_unroll=int(rev_tile_unroll),
+            target_block_batch_scan_unroll=int(rev_batch_unroll),
+            # occupancy_sort permutes leaves and remaps ids; skip_empty_tiles adds a
+            # data-dependent cond. Both are forward-schedule optimisations that are
+            # only *believed* numerics-preserving, so the reverse pins them off
+            # rather than trusting them (see the grouped-M2L lesson).
+            occupancy_sort=False,
+            skip_empty_tiles=False,
+            # The default True routes to the componentwise pair kernel, which
+            # bypasses the analytic ``_pair_accel_cvjp`` and would reintroduce the
+            # O(pairs) residual that rematerialization just removed.
+            componentwise_pairs=False,
+        )
+
+    _, vjp_fn = jax.vjp(twin, leaf_positions, leaf_masses)
+    leaf_positions_bar, leaf_masses_bar = vjp_fn(cotangent)
+    return (
+        leaf_positions_bar,
+        leaf_masses_bar,
+        jnp.zeros_like(positions),
+        jnp.zeros_like(source_leaf_ids_f),
+        jnp.zeros_like(source_valid_f),
+        jnp.zeros_like(leaf_mask_f),
+        jnp.zeros_like(leaf_particle_idx_f),
+        jnp.zeros_like(softening_sq),
+        jnp.zeros_like(G),
+    )
+
+
+_radix_fast_lane_prepacked_accel_cvjp.defvjp(
+    _radix_fast_lane_prepacked_accel_fwd, _radix_fast_lane_prepacked_accel_bwd
+)
+
+
 def compute_leaf_p2p_accelerations_radix_fast_lane(
     *,
     positions_sorted: Array,
@@ -3564,8 +3775,16 @@ def compute_leaf_p2p_accelerations_radix_fast_lane(
     softening: float = 0.0,
     return_potential: bool = False,
     use_pallas: bool = False,
+    differentiable: bool = False,
 ) -> Union[Array, Tuple[Array, Array]]:
-    """Payload-driven nearfield entry for the radix fast lane."""
+    """Payload-driven nearfield entry for the radix fast lane.
+
+    ``differentiable`` routes the fused Pallas lanes through their ``custom_vjp``
+    wrappers so ``jax.grad`` works. ``pallas_call`` has no autodiff rule, so the
+    raw lanes hard-fail in reverse mode; the wrapper keeps the Pallas forward
+    (byte-identical) and takes the reverse from this lane's tiled pure-JAX
+    fallback. Defaults False so the production forward path is untouched.
+    """
     positions = jnp.asarray(positions_sorted)
     masses = jnp.asarray(masses_sorted)
     want_potential = bool(return_potential)
@@ -3694,6 +3913,35 @@ def compute_leaf_p2p_accelerations_radix_fast_lane(
                 1, _env_int("JACCPOT_NEARFIELD_PALLAS_NUM_STAGES", 1)
             )
             pallas_subtile = _env_int("JACCPOT_NEARFIELD_PALLAS_TARGET_SUBTILE", 0)
+            if differentiable and not want_potential:
+                # Differentiable prepacked lane: the SAME Pallas forward wrapped in
+                # a custom_vjp whose reverse is autodiff of this lane's own tiled
+                # pure-JAX fallback. Forward is byte-identical, so the grad path
+                # runs exactly the kernel production ships.
+                _check_float_id_range(
+                    int(positions.shape[0]),
+                    dtype,
+                    what="differentiable prepacked near-field lane",
+                )
+                return self_acc + _radix_fast_lane_prepacked_accel_cvjp(
+                    leaf_positions,
+                    leaf_masses,
+                    positions,
+                    source_leaf_ids_padded.astype(dtype),
+                    source_valid_mask_padded.astype(dtype),
+                    leaf_mask.astype(dtype),
+                    leaf_particle_idx.astype(dtype),
+                    softening_sq,
+                    jnp.asarray(G, dtype=dtype),
+                    (pallas_num_warps if pallas_num_warps > 0 else None),
+                    pallas_num_stages,
+                    (pallas_subtile if pallas_subtile > 0 else None),
+                    pallas_interpret,
+                    _env_int("JACCPOT_GRAD_REV_LEAF_BATCH", 8),
+                    _env_int("JACCPOT_GRAD_REV_BLOCK_TILE", 8),
+                    1,
+                    1,
+                )
             prepacked_result = _radix_fast_lane_prepacked_pallas(
                 source_leaf_ids_padded,
                 source_valid_mask_padded,

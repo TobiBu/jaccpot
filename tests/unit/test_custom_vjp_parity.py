@@ -420,3 +420,100 @@ def test_nearfield_leafpair_pallas_custom_vjp_matches_twin(interpret):
         )
     except Exception as exc:  # pragma: no cover - GPU/runtime dependent
         _nf_skip_if_needed(interpret, exc)
+
+
+# ---------------------------------------------------------------------------
+# Differentiable radix fast-lane near field (production prepacked lane)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("interpret", [True, False])
+def test_radix_fast_lane_prepacked_accel_cvjp_matches_tiled_twin(interpret):
+    """The differentiable prepacked lane must match its TILED pure-JAX fallback.
+
+    The reference here is deliberately the lane's own tiled fallback, not the dense
+    twin used by the other near-field parity tests: that dense reference
+    materialises a (leaves, W_t, K, 3) difference tensor (~50 TB at the fiducial
+    config, "test-scale only" per its docstring), whereas the tiled fallback is
+    what production falls back to and what the reverse rule differentiates.
+
+    The forward is the Pallas kernel, so the forward comparison is the load-bearing
+    one -- it is what makes the gradient a gradient of the shipped force. On a real
+    GPU in fp32 it agrees to ~4e-6..8e-6 (summation reordering); in fp64 interpret
+    mode it is at round-off.
+    """
+    from jaccpot.nearfield import near_field as nf
+
+    if not jax.config.jax_enable_x64:
+        pytest.skip("requires x64 for a tight tolerance")
+    if not interpret and not pallas_nearfield_fused_supported():
+        pytest.skip("fused near-field Pallas requires an Ampere+ (sm_80) GPU")
+
+    rng = np.random.default_rng(0)
+    num_leaves, width, max_blocks, block_size = 6, 8, 2, 3
+    num_particles = num_leaves * width
+    dtype = jnp.float64
+
+    leaf_particle_idx = jnp.asarray(
+        np.arange(num_particles).reshape(num_leaves, width), nf.INDEX_DTYPE
+    )
+    leaf_mask = jnp.ones((num_leaves, width), bool)
+    positions = jnp.asarray(rng.normal(size=(num_particles, 3)), dtype)
+    masses = jnp.asarray(rng.uniform(0.5, 1.5, size=num_particles), dtype)
+    leaf_positions = positions[leaf_particle_idx]
+    leaf_masses = masses[leaf_particle_idx]
+    source_leaf_ids = jnp.asarray(
+        rng.integers(0, num_leaves, size=(num_leaves, max_blocks, block_size)),
+        nf.INDEX_DTYPE,
+    )
+    source_valid = jnp.asarray(rng.random((num_leaves, max_blocks, block_size)) > 0.3)
+    soft = jnp.asarray(1e-2, dtype=dtype)
+    G = jnp.asarray(1.0, dtype=dtype)
+
+    def f_custom(leaf_pos, leaf_mass):
+        return nf._radix_fast_lane_prepacked_accel_cvjp(
+            leaf_pos,
+            leaf_mass,
+            positions,
+            source_leaf_ids.astype(dtype),
+            source_valid.astype(dtype),
+            leaf_mask.astype(dtype),
+            leaf_particle_idx.astype(dtype),
+            soft,
+            G,
+            None,
+            1,
+            None,
+            interpret,
+            2,
+            2,
+            1,
+            1,
+        )
+
+    def f_ref(leaf_pos, leaf_mass):
+        return nf._compute_leaf_p2p_prepared_large_n_pairs_target_blocks_prepacked_impl(
+            positions,
+            source_leaf_ids,
+            source_valid,
+            leaf_pos,
+            leaf_mass,
+            leaf_mask,
+            leaf_particle_idx,
+            G=G,
+            softening_sq=soft,
+            target_leaf_batch_size=2,
+            target_block_tile_size=2,
+            target_block_tile_scan_unroll=1,
+            target_block_batch_scan_unroll=1,
+            occupancy_sort=False,
+            skip_empty_tiles=False,
+            componentwise_pairs=False,
+        )
+
+    try:
+        assert_vjp_matches(
+            f_custom, f_ref, (leaf_positions, leaf_masses), rtol=1e-9, atol=1e-9
+        )
+    except Exception as exc:  # pragma: no cover - GPU/runtime dependent
+        _nf_skip_if_needed(interpret, exc)
