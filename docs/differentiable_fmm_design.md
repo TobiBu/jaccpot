@@ -437,10 +437,345 @@ env-gated off. `tests/unit/test_large_n_grad_path.py` now covers the resolver po
 (host-only, instant), the grouped-vs-ungrouped grad equivalence, and fp32 far-field
 gradient finiteness.
 
-**Still open:** `LargeNPreparedState` remains rejected, so
-`canonical_large_n_production_config()` (preset `large_n_gpu`, fp32, leaf 256) — the
-config the README recommends for 200k–1M — is still not differentiable; its Pallas
-kernels already carry `custom_vjp` (PR-2), so the gap is the eval seam.
+**Still open at the time of PR-3:** `LargeNPreparedState` remained rejected, so the
+preset `large_n_gpu` (fp32, leaf 256) — the config the README recommends for 200k–1M —
+was not differentiable; its Pallas kernels already carried `custom_vjp` (PR-2), so the
+gap was the eval seam. **Since closed** by `runtime/_large_n_grad.py`; see "Galaxy scale
+reached" under PR-4 below for the measurements.
 `OdisseoFMMCoupler.accelerations` still yields **exactly zero** gradients silently
 (it routes to `evaluate_prepared_state`, which takes no live positions/masses).
-Reverse-pass *compile* time is ~10 min at N=16384 and grows.
+Reverse-pass *compile* time is ~10 min at N=16384 and grows (25 min at N=1M).
+
+## PR-4 outcomes — the differentiable near field on the leaf-major fast lane
+
+(Specified in `docs/differentiable_fmm_nearfield_fastlane_plan.md`, which calls itself
+"PR-3"; the numbering diverged because the galaxy-N work above landed first.)
+
+The plan's in-context ablation of `differentiable_accelerations` (N=1024, complex,
+order 4, leaf 32, A100) attributes **~83% of the forward and ~91% of the reverse to the
+near field**, with the M2L accumulate at ~0%. Its order sweep is flat (p 2→6) so it is
+not the far-field FLOP cascade, and its leaf sweep (reverse 5.07 → 2.12 → 0.66 ms at
+leaf 16/32/64) points at bucket/pair count, i.e. the bucketing overhead itself: ~0.9M
+near-field interactions is ~2 µs of A100 f64 compute against ~2.4 ms measured, so it is
+gather/scatter and padding, not arithmetic. The absolute baseline reproduces here
+(N=1024: 1.04 ms fwd / 2.66 ms reverse against the plan's 1.02 / 2.61), so the
+attribution carries over to this box.
+
+**What was built.** The grad path can now take the near field leaf-major instead of
+through the bucketed edge-list kernel:
+
+1. **`runtime/_nearfield_fastlane.py`** transposes the radix state's CSR neighbour list
+   into the `RadixFastNearfieldPayload` the fast lane consumes — for each target leaf, a
+   padded `(leaf, block, lane)` array of source-leaf ids. The radix `FMMPreparedState`
+   carries no such payload (only the large-N pipeline bakes one at `prepare_state`), so
+   this is the piece that was missing. `-1` padding inside a leaf's CSR slice is masked
+   exactly the way `prepare_leaf_neighbor_pairs` masks it for the bucketed lane, so both
+   lanes enumerate the *same edge set*.
+2. **`nearfield_mode_override="fast_lane"`** in `evaluate_tree` dispatches to
+   `compute_leaf_p2p_accelerations_radix_fast_lane(..., differentiable=True)`;
+   `differentiable_accelerations` selects it under
+   `JACCPOT_DIFFERENTIABLE_NEARFIELD_FAST_LANE=1`, bucketed otherwise.
+3. **Which reverse you get depends on `use_pallas`.** With it on (Ampere+) the lane is
+   the fused Pallas kernel behind `_radix_fast_lane_prepacked_accel_cvjp`, whose backward
+   is the analytic O(N) leaf-pair reverse. With it off, the same flag still selects the
+   leaf-major traversal but runs the tiled pure-JAX prepacked kernel under ordinary
+   autodiff. Same force either way; only the former buys the O(N) reverse memory.
+
+**The payload is built on the HOST, in NumPy** — this is load-bearing, not a style
+choice. Under an outer `jax.jit` every `jnp` op is staged out *even on concrete
+constants*, so the `max(counts)` reduction that sizes the padded block came back as a
+tracer and the whole call died with `ConcretizationTypeError`. A first fix that reduced
+in NumPy but returned `jnp` arrays then leaked *those* across traces via the payload
+memo (`UnexpectedTracerError`), because the memo hands trace-1 arrays to trace-2. NumPy
+in and NumPy out is the only stable answer; it also puts the frozen topology in the
+jaxpr as a constant instead of restaging index arithmetic every call. Both failures are
+pinned by `test_fast_lane_survives_an_outer_jit` and
+`test_payload_builder_rejects_traced_topology`.
+
+**Correctness (the precondition for reading any timing).** The two lanes agree to
+round-off on `differentiable_accelerations` end to end — forward rel-L2 ~1.5e-16,
+d/d(positions) ~2.4e-16, d/d(masses) ~1.2e-16 at N=256 and 1024, complex and real — and
+every benchmark row below reports a bit-identical loss checksum across modes. This is
+the check that matters most, and it is the one the grouped-M2L episode above shows you
+cannot skip: an assumed equivalence there was really 7.1e-02 vs 1.1e-02 against the
+exact sum.
+
+**Reconciling the two near-field `custom_vjp`s** (the plan's open item 6). PR-2's
+`nearfield_{fused_leaf,leafpair}_pallas_cvjp` are **kept as unit-level VJP oracles**, not
+promoted to the grad path: their reverse is `jax.vjp` of a dense twin that materialises a
+`(leaves, W_t, K, 3)` tensor (~50 TB at the fiducial large-N config). The production rule
+is `_radix_fast_lane_prepacked_accel_cvjp`. The module comment in
+`pallas/nearfield_fused_leaf.py` now says so, so nobody wires a second grad-path caller.
+
+### The measurement — and why the default did NOT flip
+
+`differentiable_accelerations`, A100, complex basis, order 4, leaf 32, θ=0.5, float64,
+jitted, min of 8 steady-state reps; `reverse = (fwd+bwd) − fwd`. The loss checksum is
+**bit-identical across all three modes at every N**, so these are three traversals of one
+force, not three forces.
+
+| N | bucketed fwd / rev (ms) | leaf-major pure-JAX | leaf-major fused-Pallas |
+|---|---|---|---|
+| 256 | 0.469 / 0.719 | 0.490 / 1.358 | **0.451 / 0.618** |
+| 1024 | 1.039 / 2.656 | **0.770** / **2.419** | 1.233 / 2.544 |
+| 4096 | 35.03 / 0.647 | 34.20 / 3.953 | 33.92 / n/a |
+
+**Verdict at small N: no time win.** The plan predicted ~6× forward and ~20× reverse
+from the isolated leaf-major numbers (0.147/0.113 ms pure-JAX, 0.532/0.170 fused vs
+~0.85/~2.4 bucketed in-context). In context the spread is ±20%, with no mode winning at
+both N: fused-Pallas is best at 256 (1.04× fwd, 1.16× rev) and *worse* than bucketed at
+1024 (0.84× fwd); pure-JAX leaf-major is best at 1024 (1.35× fwd, 1.10× rev) and 1.9×
+*worse* on the 256 reverse.
+
+**But N≤4096 was the wrong scale to judge this at — see "the galaxy-scale result" below.
+The payoff is reverse-pass MEMORY at 200k, where it is the difference between an OOM and
+a working gradient.** The lane is wired, gated, and opt-in behind
+`JACCPOT_DIFFERENTIABLE_NEARFIELD_FAST_LANE=1`; at galaxy N it is not optional, it is
+the only radix configuration that runs.
+
+**Why — measured, not inferred.** Re-running the plan's ablation (patch the near field to
+return zeros; share = (full − ablated)/full) in *both* modes at N=1024 isolates the
+near-field cost inside each lane:
+
+| mode | full fwd / rev (ms) | near field off | near-field share | near field itself |
+|---|---|---|---|---|
+| bucketed | 1.050 / 2.512 | 0.186 / 0.198 | 82.3% / 92.1% | 0.864 / **2.314** |
+| leaf-major fused-Pallas | 1.250 / 2.476 | 0.176 / 0.221 | 85.9% / 91.1% | 1.074 / **2.255** |
+
+The attribution reproduces exactly (82/92% here vs the plan's 83/91%), so the near field
+really is the dominant term — but **the leaf-major near field costs the same in context
+as the bucketed one**, 2.26 ms of reverse against 2.31 ms, even though it measures
+0.170 ms in isolation. That is a ~13× in-context inflation for leaf-major, alongside the
+~30× already known for bucketed. The overhead is therefore **not the bucketing
+representation**; it is the per-particle gather into leaf-major layout and the scatter
+back out, which *both* lanes pay. The remaining lever is reducing near-field pair/padding
+*count* (`leaf_size`, `theta`), not re-spelling the traversal.
+
+That makes this the third time an isolated micro-benchmark has mispredicted this
+subsystem — by 30× (bucketed), then by ~6–20× (leaf-major). Attribute in-context or not
+at all.
+
+**Caveats on the table.** The N=4096 row is not usable: the forward is ~34 ms in *all
+three* modes (so whatever dominates there is not the near field), its run-to-run variance
+exceeds the whole backward, and the subtracted reverse came out negative for
+fused-Pallas. That N needs a harness that times the backward directly rather than by
+subtraction. The fused-Pallas column also carries `use_pallas=True`, which additionally
+selects the Pallas M2L rot-scale on the *real* basis — inert here (complex basis,
+identical checksums), but not a clean A/B if these numbers are ever re-measured on real.
+
+### Galaxy scale reached — 200k AND 1M, forward and reverse
+
+Everything above is N≤4096, which turned out to be the wrong scale to judge the fast lane
+at. Measured at the target scale (A100 40 GB, fp32, θ=0.7, order 4, clustered galaxy
+disc; each stage's own peak device memory; "steady" is the min of 3 warm reps, so first
+call = compile + execute):
+
+| N | config | prepare | fwd 1st / steady | reverse 1st / steady | reverse peak |
+|---|---|---|---|---|---|
+| 200k | radix, leaf 64, **bucketed** | 114 s / 3.61 GB | 6.9 s / — | **OOM** | 30.11 GB, then a 7.68 GiB request failed |
+| 200k | radix, leaf 64, **fast lane** | 116 s / 3.61 GB | 7.0 s / **1.60 s** | 424 s / **6.27 s** | **6.82 GB** |
+| 200k | **`large_n_gpu`**, leaf 256 | 57 s / 0.29 GB | 6.1 s / **0.86 s** | 889 s / **2.59 s** | **2.62 GB** |
+| 1M | **`large_n_gpu`**, leaf 256 | 79 s / 1.97 GB | 8.0 s / **2.50 s** | 1470 s / **66.4 s** | **11.07 GB** |
+
+All gradients finite in both positions and masses at every surviving row. Forward
+agreement between the two radix lanes at 200k: mean |a| 1.244721e-01 vs 1.244722e-01
+(fp32 summation order).
+
+**The radix OOM, identified.** The failing allocation is 8,243,200,000 B = exactly
+`503,125 × 64 × 64` fp32 — **one scalar per particle pair over every near-field edge**.
+Same residual class PR-3 fixed one lane over (§B above), and precisely what
+`_leafpair_accel_analytic_vjp` never constructs: a hand-written `bwd` is never itself
+differentiated, so its intermediates are tile-bounded transients rather than retained
+per-scan residuals. Hence >4.4× lower reverse peak and, more to the point, **the
+difference between OOM and a working gradient**.
+
+**Correction to the framing above.** The ±20% wall-clock wash at N≤4096 is real but it is
+not the figure of merit for this lane. It buys *asymptotic reverse memory*, invisible
+until the pair count is large enough for the retained tile to dominate — and by then it
+is not a speedup, it is feasibility. Sizing the optimisation by time at small N missed
+that as thoroughly as isolated micro-benchmarks missed the in-context cost.
+**Recommendation: enable `JACCPOT_DIFFERENTIABLE_NEARFIELD_FAST_LANE=1` for any
+differentiable radix run at N ≳ 10^5.**
+
+**The `large_n_gpu` production preset is now differentiable** — `LargeNPreparedState` is
+no longer rejected (see `runtime/_large_n_grad.py`, the re-evaluation seam that re-runs
+P2M→M2M→M2L→L2L on live inputs against the frozen `compact_far_pairs` list, requiring
+`retain_far_pairs_for_grad=True`). It is also the *best* configuration at galaxy scale on
+every axis measured: 2.62 GB reverse peak at 200k against the radix fast lane's 6.82 GB,
+and 2.59 s against 6.27 s. This closes the "Still open" item recorded under PR-3.
+
+### Why the 1M reverse is 27× the forward — attributed
+
+`prepare_state` first: **it is not slow, it is compiling.** At N=1M the first call is
+82.3 s and the second and third are **1.47 s** — faster than the 2.50 s forward. Setting
+`jax_compilation_cache_dir` takes a *cold process* from 81 s to **16.8 s** (4.8×). The
+stage timers (nested, so they do not partition) put the cold cost in the dual-tree
+artifact build (38 s), downward compute (16 s), upward compute (13 s) and tree build
+(13 s); near-field prep is 1.45 s. Nothing in the computation is worth optimising.
+
+The reverse is a different story. Ablating the seam's own `include_near`/`include_far`
+split (no monkeypatching) at both N:
+
+| N | config | fwd ms | reverse ms |
+|---|---|---|---|
+| 200k | near+far | 118.1 | 1731.4 |
+| 200k | near only | 90.5 | **1632.1** (94.3% of the reverse) |
+| 200k | far only | 27.7 | 61.9 |
+| 1M | near+far | 1659.5 | 66326.3 |
+| 1M | near only | 1023.3 | **64702.4** (97.6% of the reverse) |
+| 1M | far only | 638.8 | 699.1 |
+
+So the M2L/L2L/P2M cascade is irrelevant (0.7 s of 66 s at 1M) and the near field is
+everything. Three compounding causes, each measured:
+
+**1. The reverse tracks PADDED slots, not real work.** The prepacked payload is a
+rectangle padded to the *global maximum* neighbour count:
+
+| N | leaves | slots | padded slots | valid | fill | max nbrs | mean nbrs |
+|---|---|---|---|---|---|---|---|
+| 200k | 782 | 1024 | 800,768 | 362,528 | 45.3% | 781 | 463.6 |
+| 1M | 3907 | 8192 | 32,006,144 | 4,642,572 | 14.5% | 3906 | 1188.3 |
+
+Padded slots grow **40×** for 5× N; valid pairs grow only 12.8×; the measured reverse
+grows **38.3×**. It tracks the padding almost exactly.
+
+**2. `max nbrs == leaves − 1`, at every N and every geometry.** Some leaf is a near-field
+neighbour of *every other leaf* — verified on a flattened disc, a Plummer sphere **and a
+uniform cube**, at both N. That single leaf sets the padding width for all of them. The
+mean also grows with N (uniform 168→233, Plummer 339→524, disc 464→1188), so valid
+near-field pairs themselves grow 6.9–12.8× per 5× in N. This is a **tree/MAC** property,
+not a gradient one — it inflates the forward too, and it is accuracy-safe (an
+over-inclusive near field is more exact, just slower). Worth its own investigation.
+
+**3. The reverse had no empty-tile skip while the forward does.** The forward's
+`_accumulate_target_block_tile_sequence` wraps each tile in
+`lax.cond(jnp.any(tile_source_valid), ...)`; `_leafpair_accel_analytic_vjp` did not, so it
+paid full price on pure padding. That is why the near-field reverse/forward ratio is 18×
+at 200k and **63×** at 1M — it worsens exactly as fill drops from 45% to 14.5%.
+
+**Fix applied (partial):** the same skip is now in `_leafpair_accel_analytic_vjp`, gated
+by `JACCPOT_GRAD_REV_SKIP_EMPTY_TILES` (default on). It is semantics-preserving — every
+term is already masked by `valid_slot`, so an all-invalid tile contributes exactly zero.
+
+| | 200k reverse | 1M reverse |
+|---|---|---|
+| skip off | 1731.4 ms | 66326.3 ms |
+| skip on | 1723.4 ms (1.00×) | **53358.6 ms (1.24×)** |
+
+Only ~20% at 1M and nothing at 200k, because the `lax.cond` predicate spans a batch of
+**8 different leaves** — a tile survives if *any* of them still has a valid slot there,
+and leaves have very different neighbour counts.
+
+**Occupancy sort was the obvious next step. It was implemented, measured, and reverted:
+it is ~7× SLOWER.** The forward pairs its skip with `occupancy_sort` for exactly this
+reason, so grouping leaves by neighbour count should have let whole tiles drop. Measured
+on the near-only reverse, against a contention factor taken from the *far-only* row (the
+change cannot touch the far field, so any movement there is the shared GPU):
+
+| N | near-only, skip | near-only, +sort | far-only probe | corrected |
+|---|---|---|---|---|
+| 200k | 1632 ms | 20987 ms | 61.9 → 119.5 ms (1.9×) | **~6.8× worse** |
+| 1M | 53284 ms | 66138 ms | 701.8 → 854.2 ms (1.22×) | **~2% worse (noise)** |
+
+So it is catastrophic at 200k and a wash at 1M — the lower 14.5% fill there gives the sort
+~7× more tiles to drop, and that only just pays for what it costs.
+Cause: leaves arrive in **Morton order**, which makes the per-tile source
+gather `leaf_positions[safe_src]` and the `.at[safe_src].add` scatter spatially coherent;
+reordering by occupancy destroys that locality and the extra memory traffic dwarfs the
+arithmetic the skip saves. The forward tolerates its own sort because its flattened
+`batch × tile × block` gather has a different access pattern. The reverse keeps its
+Morton order; see the comment block in `_leafpair_accel_analytic_vjp` so this is not
+retried blind.
+
+### Occupancy tiers — the padding fix, and its crossover
+
+Salvaging the sort: tier the leaves by occupancy but change **only which target leaves a
+pass visits and how wide a slot window it reads**. Source ids are never renumbered and
+`leaf_positions` is never permuted, so the source-side locality that killed the sort is
+untouched; leaves keep Morton order *within* a tier. Widths are static, computed on the
+host by `build_leafpair_reverse_tiers` from the frozen validity mask (concrete there;
+inside the bwd rule it is a residual, hence a tracer), and ride through the `custom_vjp`
+in `nondiff_argnums`.
+
+Predicted slot-visit reduction, canonical galaxy config:
+
+| N | 2 tiers | 4 tiers | 6 tiers | 8 tiers | ceiling (1/fill) |
+|---|---|---|---|---|---|
+| 200k | 1.31× | 1.64× | 1.93× | 1.95× | 2.2× |
+| 1M | 2.09× | **4.33×** | 5.02× | 5.61× | 6.9× |
+
+Measured, near-field reverse only, contention-corrected against the untouched far-only row:
+
+| N | baseline (skip only) | tiered | far-only probe | verdict |
+|---|---|---|---|---|
+| 200k | 1612 ms | 13701 ms | 62.1 → 121.7 ms (1.96×) | **4.3× worse** |
+| 1M | 53284 ms | 31305 ms | 701.8 → 786.2 ms (1.12×) | **1.91× faster** |
+
+A real crossover, and it tracks the predicted reduction. Tiering costs throughput — the
+target gather goes through an index array instead of a consecutive range, and one scan
+becomes several smaller ones whose fixed cost is amortised over less work — so it only
+pays once the saving is large. `build_leafpair_reverse_tiers` therefore **declines unless
+the predicted reduction is ≥ 3.0×** (`JACCPOT_GRAD_REV_TIER_MIN_GAIN`), which classifies
+both measured points correctly: 200k declines at every tier count, 1M accepts at 4+.
+Calibrated on two points on one A100 — re-measure elsewhere. Off-switch
+`JACCPOT_GRAD_REV_TIERED=0`; tier count `JACCPOT_GRAD_REV_TIERS` (default 4).
+
+**The padded near field is O(N²).** The leaf/θ sweep below makes this concrete: padded
+particle-pair work is ~5.2e10 in *every* configuration, because slots ≈ leaves so
+`leaves × slots × leaf² = (leaves × leaf)² = N²`. The reverse, which pays padded cost,
+has been running a direct sum. That is the real content of the 38× scaling.
+
+### Configuration: what leaf_size and theta actually buy (N=200000, disc)
+
+| leaf | θ | leaves | mean nbrs | fill | valid pair-work | padded pair-work | far pairs |
+|---|---|---|---|---|---|---|---|
+| 64 | 0.5 | 3125 | 1492 | 36% | 1.91e10 | 5.24e10 | 1232126 |
+| 64 | 0.7 | 3125 | 844 | 21% | 1.08e10 | 5.24e10 | 902414 |
+| 64 | **0.9** | 3125 | 561 | 14% | **7.18e9** | 5.24e10 | 681994 |
+| 128 | 0.7 | 1563 | 650 | 32% | 1.66e10 | 5.24e10 | 273962 |
+| 256 | 0.7 (default) | 782 | 464 | 45% | 2.37e10 | 5.25e10 | 73066 |
+| 256 | 0.9 | 782 | 318 | 31% | 1.63e10 | 5.25e10 | 73668 |
+
+Real near-field work is **3.3× lower at leaf 64 / θ 0.9** than at the default leaf 256 /
+θ 0.7, traded for 9.3× more M2L pairs (far pairs are far cheaper per pair — the far-field
+reverse is 62 ms against the near field's 1632 ms at 200k). But note padded work is
+*constant*: **leaf/θ tuning cannot help the reverse until the padding is gone**, so these
+levers are sequential, not independent.
+
+### Why the near field is so large: the MAC, not the gradient
+
+At N=50000, uniform cube, leaf 256, θ=0.7 (196 leaves): neighbour counts min 34, **median
+100**, max 195 = `leaves − 1`; **105 of 196 leaves neighbour more than half the tree**;
+`corr(leaf radius, neighbour count) = 0.75`. Leaf half-extents show why — leaf 97 is
+`[1.0, 0.992, 0.25]` in a `[-1,1]` box, i.e. a Morton-range leaf spanning the *entire*
+domain in x and y. With median leaf radius 0.415 and θ=0.7 the MAC keeps every pair
+closer than `2 × 0.415 / 0.7 ≈ 1.19`, which is ~88% of the domain volume.
+
+Note the single all-neighbouring leaf sets the **padding width** but is only ~1% of real
+pairs (leaves with radius > 3× median: 1). The cost is the *median* leaf, and that is a
+**tree/MAC** property — accuracy-safe (an over-inclusive near field is more exact) but it
+inflates the forward too. Not a differentiability issue; the biggest single lever left,
+and untouched.
+
+**Remaining levers.** (a) Fix the MAC / leaf compactness — Morton-range leaves are not
+spatially compact, and that is upstream of padding, valid work, and the forward.
+(b) CSR sources instead of a rectangle, which would remove padding at any N rather than
+only where tiering pays. Reverse peak is 11.07 GB of 40 GB, so all of this is throughput,
+not a memory wall. Reverse *compile* is ~25 min at 1M.
+
+**Method note.** Three of the four optimisations attempted across PR-4 and this section
+were predicted to win and did not: the leaf-major traversal (±20% at N≤4096, though it
+turned out decisive for *memory* at 200k), the empty-tile skip (1.00× at 200k, 1.24× at
+1M), and the occupancy sort (~7× worse). The one clear win — the fast lane's analytic
+reverse turning a 200k OOM into a working gradient — was not predicted by any of the
+small-N benchmarks. Measure in context, at the target scale, before and after.
+
+**Gates.** Golden byte-stability 13/13 with the flag off (the shipped path is untouched).
+With the flag **on**, on the A100: 56/56 across `test_gradient_correctness.py`,
+`test_grad_fmm_vs_directsum.py`, `test_custom_vjp_parity.py` and the new
+`tests/unit/test_nearfield_fastlane_grad_path.py` — FD-vs-AD in positions and masses on
+both bases, `grad(FMM)` vs `grad(direct-sum)`, NaN/inf hygiene, and the fast-lane cvjp
+against its tiled twin on real Pallas. The new module adds the edge-set-count identity,
+bucketed-vs-fast-lane value and gradient parity (near field alone and end to end), a
+fused-Pallas end-to-end comparison gated on sm_80, the two outer-`jax.jit` regressions,
+and the opt-in check.

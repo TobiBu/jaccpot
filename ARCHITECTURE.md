@@ -169,9 +169,18 @@ derivative/jerk towers, and cached-vs-uncached M2L dispatch.
   basis (complex or real submode). The M2L defaults to the pure-JAX path but can opt
   into the differentiable **fused-Pallas M2L fast lane** with
   `JACCPOT_STATIC_STRICT_FUSED_M2L_PALLAS=1` on an Ampere+ GPU (the fused kernels now
-  carry a `custom_vjp`, PR-2); the near-field always uses the bucketed pure-JAX path,
-  and `LargeNPreparedState` stays rejected. See `docs/differentiable_fmm_audit.md` and
-  `docs/differentiable_fmm_design.md`.
+  carry a `custom_vjp`, PR-2). The near-field defaults to the bucketed pure-JAX
+  edge-list kernel; `JACCPOT_DIFFERENTIABLE_NEARFIELD_FAST_LANE=1` re-expresses it
+  **leaf-major** and routes it through the radix fast lane (PR-4) — the same edge set
+  and the same force (bit-identical checksums), a different traversal. It stays
+  **opt-in**, but the recommendation is N-dependent: at N≤4096 the two traversals are
+  within ±20% with no consistent winner, while at **N=200000 the bucketed reverse OOMs
+  (30 GB peak) and the fast lane completes in 6.8 GB** — turn it on for any
+  differentiable radix run at N ≳ 10^5. `LargeNPreparedState` is differentiable via
+  `runtime/_large_n_grad.py` (needs `retain_far_pairs_for_grad=True`), and the
+  `large_n_gpu` preset is the leanest galaxy-scale option measured: **1M particles,
+  forward 2.5 s and forward+backward 69 s at 11 GB peak**. See
+  `docs/differentiable_fmm_audit.md` and `docs/differentiable_fmm_design.md`.
 - `differentiable_gravitational_acceleration` remains the deliberately differentiable
   **direct O(N²) sum** — retained as the simple exact-gradient reference and the
   **gradient oracle** for tests (`grad(FMM)` must match `grad(direct-sum)` to FMM force
@@ -196,12 +205,22 @@ auto-gated off and the pure-JAX path runs (CPU CI can still lower Pallas with
   (`m2l_{real,complex}_fused_vjp_pallas`, default; `JACCPOT_FUSED_M2L_VJP=0` falls back
   to autodiff of the twin), so both forward and reverse run as single Pallas launches.
 - Nearfield Pallas is resolved from `pallas_nearfield_fused_supported()` into the
-  engine's `use_pallas`. The fused near-field kernels are **also differentiable** via
-  `custom_vjp` (`nearfield_fused_leaf_pallas_cvjp` / `nearfield_leafpair_pallas_cvjp`,
-  Pallas forward + autodiff-of-twin reverse), but the `differentiable_accelerations`
-  grad path keeps the bucketed pure-JAX near-field (already differentiable via the
-  analytic tidal-tensor `custom_vjp`, and as fast at the relevant N); the fused
-  near-field `custom_vjp` is available for opt-in but not the default.
+  engine's `use_pallas`. Two differentiable near-field lanes exist and they are **not**
+  interchangeable:
+  - `_radix_fast_lane_prepacked_accel_cvjp` (`nearfield/near_field.py`) is the
+    **production** rule: Pallas forward + an analytic O(N) leaf-pair reverse. It is what
+    `JACCPOT_DIFFERENTIABLE_NEARFIELD_FAST_LANE=1` puts on the
+    `differentiable_accelerations` grad path (PR-4), driven by a leaf-major payload
+    that `runtime/_nearfield_fastlane.py` transposes on the host from the radix state's
+    CSR neighbour list. It engages only when the engine's `use_pallas` is on (Ampere+);
+    with `use_pallas=False` the same flag still selects the leaf-major traversal but
+    runs the tiled pure-JAX prepacked kernel under ordinary autodiff — same force,
+    but no O(N) reverse.
+  - `nearfield_fused_leaf_pallas_cvjp` / `nearfield_leafpair_pallas_cvjp`
+    (`pallas/nearfield_fused_leaf.py`, PR-2) are **unit-level VJP oracles**. Their
+    reverse is `jax.vjp` of a dense twin that materialises a `(leaves, W_t, K, 3)`
+    tensor — fine at test scale, ~50 TB at the fiducial large-N config. Keep them for
+    `tests/unit/test_custom_vjp_parity.py`; do not add a second grad-path caller.
 - **Org rule for GPU runs:** select a free GPU with autocvd *before* `import jax`:
   `from autocvd import autocvd; autocvd(num_gpus=1, least_used=True)`.
 
