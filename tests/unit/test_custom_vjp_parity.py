@@ -489,6 +489,7 @@ def test_radix_fast_lane_prepacked_accel_cvjp_matches_tiled_twin(interpret):
             2,
             1,
             1,
+            None,
         )
 
     def f_ref(leaf_pos, leaf_mass):
