@@ -737,10 +737,21 @@ has been running a direct sum. That is the real content of the 38× scaling.
 | 256 | 0.9 | 782 | 318 | 31% | 1.63e10 | 5.25e10 | 73668 |
 
 Real near-field work is **3.3× lower at leaf 64 / θ 0.9** than at the default leaf 256 /
-θ 0.7, traded for 9.3× more M2L pairs (far pairs are far cheaper per pair — the far-field
-reverse is 62 ms against the near field's 1632 ms at 200k). But note padded work is
-*constant*: **leaf/θ tuning cannot help the reverse until the padding is gone**, so these
-levers are sequential, not independent.
+θ 0.7, traded for 9.3× more M2L pairs. Two cautions, both important:
+
+1. Padded work is *constant* across every row (~5.2e10). **leaf/θ tuning cannot help the
+   reverse until the padding is gone** — these levers are sequential, not independent.
+2. **This table is WORK, not TIME, and the trade is not obviously favourable.** Per-unit
+   costs derived from the 200k near/far split: the near field runs at
+   `90.5 ms / 2.37e10 = 3.8 ps` per particle-pair, so a full 256×256 leaf-pair block is
+   ≈**0.25 µs**; the far field is `27.7 ms / 73066` ≈ 0.38 µs per pair, and solving the
+   200k-vs-1M pair against an N-proportional fixed term gives a marginal ≈**0.45 µs per
+   M2L pair**. So **one M2L pair costs ~1.5–1.8× a full near-field leaf-pair block** on
+   this hardware — the near field is at ~25% of A100 fp32 peak while the M2L path is
+   ~1000× off peak. Trading near pairs for far pairs one-for-one therefore makes the
+   forward *slower*, which is presumably why the production preset picked leaf 256. No
+   forward/reverse timing was measured across these configs; do that before changing the
+   default.
 
 ### Why the near field is so large: the MAC, not the gradient
 
@@ -753,9 +764,18 @@ closer than `2 × 0.415 / 0.7 ≈ 1.19`, which is ~88% of the domain volume.
 
 Note the single all-neighbouring leaf sets the **padding width** but is only ~1% of real
 pairs (leaves with radius > 3× median: 1). The cost is the *median* leaf, and that is a
-**tree/MAC** property — accuracy-safe (an over-inclusive near field is more exact) but it
-inflates the forward too. Not a differentiability issue; the biggest single lever left,
-and untouched.
+**tree/MAC** property, not a differentiability one: the forward is 77% near field at 200k
+(90.5 of 118.1 ms) and 62% at 1M, so the same over-inclusive lists are paying for most of
+the forward as well.
+
+**Whether fixing leaf compactness would speed the forward up is genuinely open.** Given
+the per-pair costs above (an M2L pair ≈ 1.5–1.8× a full near-field leaf-pair block), a
+one-for-one near→far conversion would be a *regression*. The win exists only if compact
+leaves let the dual-tree walk accept at **coarse** levels, so a single M2L replaces many
+leaf-leaf pairs — which is the FMM mechanism that non-compact leaves defeat by forcing
+descent to leaf level. That is the hypothesis worth testing, and it is not tested here.
+Accuracy is safe either way: a compact node makes the multipole expansion *more* valid,
+so any pair the MAC newly accepts is legitimately far-field.
 
 **Remaining levers.** (a) Fix the MAC / leaf compactness — Morton-range leaves are not
 spatially compact, and that is upstream of padding, valid work, and the forward.
