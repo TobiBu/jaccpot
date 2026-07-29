@@ -725,33 +725,51 @@ particle-pair work is ~5.2e10 in *every* configuration, because slots ≈ leaves
 `leaves × slots × leaf² = (leaves × leaf)² = N²`. The reverse, which pays padded cost,
 has been running a direct sum. That is the real content of the 38× scaling.
 
-### Configuration: what leaf_size and theta actually buy (N=200000, disc)
+### Configuration: leaf_size and theta are the ACCURACY dial, not free performance
 
-| leaf | θ | leaves | mean nbrs | fill | valid pair-work | padded pair-work | far pairs |
-|---|---|---|---|---|---|---|---|
-| 64 | 0.5 | 3125 | 1492 | 36% | 1.91e10 | 5.24e10 | 1232126 |
-| 64 | 0.7 | 3125 | 844 | 21% | 1.08e10 | 5.24e10 | 902414 |
-| 64 | **0.9** | 3125 | 561 | 14% | **7.18e9** | 5.24e10 | 681994 |
-| 128 | 0.7 | 1563 | 650 | 32% | 1.66e10 | 5.24e10 | 273962 |
-| 256 | 0.7 (default) | 782 | 464 | 45% | 2.37e10 | 5.25e10 | 73066 |
-| 256 | 0.9 | 782 | 318 | 31% | 1.63e10 | 5.25e10 | 73668 |
+An earlier revision of this section presented a leaf/theta sweep of near-field *work* as
+an optimisation opportunity. That was wrong, and the correction is the useful part.
 
-Real near-field work is **3.3× lower at leaf 64 / θ 0.9** than at the default leaf 256 /
-θ 0.7, traded for 9.3× more M2L pairs. Two cautions, both important:
+Measured at N=200000 (disc, order 4, fp32): timing from the near/far ablation, accuracy as
+rel-L2 against an **exact direct sum** on 512 random targets against all N sources.
 
-1. Padded work is *constant* across every row (~5.2e10). **leaf/θ tuning cannot help the
-   reverse until the padding is gone** — these levers are sequential, not independent.
-2. **This table is WORK, not TIME, and the trade is not obviously favourable.** Per-unit
-   costs derived from the 200k near/far split: the near field runs at
-   `90.5 ms / 2.37e10 = 3.8 ps` per particle-pair, so a full 256×256 leaf-pair block is
-   ≈**0.25 µs**; the far field is `27.7 ms / 73066` ≈ 0.38 µs per pair, and solving the
-   200k-vs-1M pair against an N-proportional fixed term gives a marginal ≈**0.45 µs per
-   M2L pair**. So **one M2L pair costs ~1.5–1.8× a full near-field leaf-pair block** on
-   this hardware — the near field is at ~25% of A100 fp32 peak while the M2L path is
-   ~1000× off peak. Trading near pairs for far pairs one-for-one therefore makes the
-   forward *slower*, which is presumably why the production preset picked leaf 256. No
-   forward/reverse timing was measured across these configs; do that before changing the
-   default.
+| leaf | θ | near-field work | forward | reverse | rel-L2 vs exact | worst |
+|---|---|---|---|---|---|---|
+| **256** | **0.70 (default)** | 2.37e10 | **119.2 ms** | **1706 ms** | **6.14e-02** | 27% |
+| 256 | 0.90 | 1.63e10 | 98.6 ms | 1434 ms | 1.07e-01 | 33% |
+| 128 | 0.90 | 1.12e10 | — | — | 1.64e-01 | 43% |
+| 64 | 0.70 | 1.08e10 | — | — | 1.73e-01 | 44% |
+| 64 | 0.90 | 7.18e9 | 432.7 ms | 3155 ms | 2.36e-01 | 71% |
+
+**Near-field work and force error are monotonically related.** That is not a coincidence
+to be optimised away — near-field work *is* the exact part of the calculation, so every
+configuration that does less of it is proportionally more approximate. The default sits at
+the accurate end of that dial. There is no free lunch in this table.
+
+**leaf 64 / θ0.9 is dominated on every axis**: 3.6x slower forward, 1.85x slower reverse,
+3.8x worse error. **leaf 256 / θ0.9 is a genuine dial position** — 1.21x forward and 1.19x
+reverse for 1.7x the error, with far-field cost unchanged (73066 -> 73668 pairs, far-only
+27.6 -> 27.1 ms) because the released near pairs are absorbed by *existing* coarse M2L
+pairs. Take it only if ~10% force error is acceptable; it usually is not.
+
+**Why less near-field work costs more time.** The far field is the expensive kernel per
+unit of work. Far-only forward is 27.6 ms at 73066 pairs and 327.6 ms at 681994 pairs --
+11.9x the time for 9.3x the pairs, so ~**0.48 µs per M2L pair**. The near field runs at
+90.5 ms / 2.37e10 = 3.8 ps per particle-pair, so a full 256x256 leaf-pair block is
+~**0.25 µs**. An M2L pair therefore costs **~1.9x a full near-field leaf-pair block**: the
+near field is at ~25% of A100 fp32 peak, the M2L path ~1000x off peak. Shrinking the near
+field by pushing work to the far field is a net loss here, which is presumably why the
+production preset chose leaf 256.
+
+Caveat on the data: the leaf-64 near-only reverse row (9678 ms) exceeds its own near+far
+total (3155 ms), which is impossible; that single measurement is unreliable and the
+near+far totals are used instead. They are self-consistent with the additive forward
+decomposition (87.9 + 327.6 = 415.5 vs 432.7 measured).
+
+**Independent of all the above: the default config has ~6% force error** (rel-L2 6.14e-02,
+worst component 27%) at order 4 on this clustered disc. That is high for an FMM and is a
+property of the shipped preset, not of anything in this PR -- but it is the accuracy the
+galaxy-scale gradients below are gradients *of*, so it is worth knowing.
 
 ### Why the near field is so large: the MAC, not the gradient
 
