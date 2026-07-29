@@ -567,12 +567,13 @@ class EvaluateMixin:
     @jaxtyped(typechecker=beartype)
     def differentiable_accelerations(
         self: "FastMultipoleMethod",
-        state: FMMPreparedState,
+        state: Union[FMMPreparedState, LargeNPreparedState],
         positions: Array,
         masses: Array,
         *,
         target_indices: Optional[Array] = None,
         jit_traversal: bool = False,
+        grad_plan: Optional[Any] = None,
     ) -> Array:
         """Exact fixed-topology gradients of the FMM force w.r.t. positions/masses.
 
@@ -642,10 +643,54 @@ class EvaluateMixin:
             ``(N, 3)`` accelerations in the original input order.
         """
         if isinstance(state, LargeNPreparedState):
-            raise NotImplementedError(
-                "differentiable_accelerations requires a radix FMMPreparedState, "
-                "not LargeNPreparedState: the large-N pipeline runs non-differentiable "
-                "fused Pallas kernels. Build the state without the LARGE_N_GPU preset."
+            # Large-N production path. NOT a variant of the radix branch below: the
+            # large-N state carries no interaction list and a compat ``downward``
+            # view with no ``.locals``, so the frozen M2L list comes from
+            # ``compact_far_pairs`` and the near field is the fused Pallas fast lane
+            # driven through its ``custom_vjp``. See runtime/_large_n_grad.py.
+            from ._large_n_grad import (
+                evaluate_large_n_state_at_positions_and_masses_sorted,
+                prepare_large_n_grad_plan,
+            )
+
+            if target_indices is not None:
+                raise NotImplementedError(
+                    "differentiable_accelerations does not support target_indices "
+                    "on the large-N path (matching evaluate_large_n_state)."
+                )
+            plan = (
+                grad_plan
+                if grad_plan is not None
+                else prepare_large_n_grad_plan(self, state)
+            )
+            inverse_permutation_host = np.asarray(
+                jax.device_get(state.inverse_permutation)
+            )
+            forward_permutation = jnp.asarray(
+                np.argsort(inverse_permutation_host, kind="stable"), dtype=INDEX_DTYPE
+            )
+            positions_sorted = jnp.asarray(positions, dtype=state.working_dtype)[
+                forward_permutation
+            ]
+            masses_sorted = jnp.asarray(masses, dtype=state.working_dtype)[
+                forward_permutation
+            ]
+            accelerations_sorted = (
+                evaluate_large_n_state_at_positions_and_masses_sorted(
+                    self,
+                    state,
+                    positions_sorted,
+                    masses_sorted,
+                    plan=plan,
+                )
+            )
+            output_dtype = (
+                state.input_dtype
+                if jnp.issubdtype(state.input_dtype, jnp.floating)
+                else state.working_dtype
+            )
+            return jnp.asarray(accelerations_sorted)[state.inverse_permutation].astype(
+                output_dtype
             )
         if getattr(state, "expansion_basis", None) != "solidfmm":
             raise NotImplementedError(

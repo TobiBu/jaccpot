@@ -16,6 +16,7 @@ from .config import (
     FMMAdvancedConfig,
     FMMPreset,
 )
+from .runtime._large_n_types import LargeNPreparedState
 from .runtime.fmm import FastMultipoleMethod as _RuntimeFMM
 from .runtime.fmm import FMMPreparedState
 
@@ -771,12 +772,13 @@ class FastMultipoleMethod:
 
     def differentiable_accelerations(
         self: "FastMultipoleMethod",
-        state: FMMPreparedState,
+        state: Union[FMMPreparedState, LargeNPreparedState],
         positions: Array,
         masses: Array,
         *,
         target_indices: Optional[Array] = None,
         jit_traversal: bool = False,
+        grad_plan: Optional[Any] = None,
     ) -> Array:
         """Exact fixed-topology gradients of the FMM force w.r.t. positions/masses.
 
@@ -794,6 +796,7 @@ class FastMultipoleMethod:
             masses,
             target_indices=target_indices,
             jit_traversal=jit_traversal,
+            grad_plan=grad_plan,
         )
 
     def evaluate_prepared_state_with_jerk(
