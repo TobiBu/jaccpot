@@ -16,6 +16,7 @@ from .config import (
     FMMAdvancedConfig,
     FMMPreset,
 )
+from .runtime._large_n_types import LargeNPreparedState
 from .runtime.fmm import FastMultipoleMethod as _RuntimeFMM
 from .runtime.fmm import FMMPreparedState
 
@@ -441,6 +442,10 @@ class FastMultipoleMethod:
                 advanced_cfg.tree.aspect_threshold,
             ),
             grouped_interactions=runtime_overrides.grouped_interactions,
+            retain_far_pairs_for_grad=legacy_kwargs.pop(
+                "retain_far_pairs_for_grad",
+                advanced_cfg.farfield.retain_far_pairs_for_grad,
+            ),
             farfield_mode=runtime_overrides.farfield_mode,
             streamed_far_pairs=legacy_kwargs.pop(
                 "streamed_far_pairs",
@@ -767,12 +772,13 @@ class FastMultipoleMethod:
 
     def differentiable_accelerations(
         self: "FastMultipoleMethod",
-        state: FMMPreparedState,
+        state: Union[FMMPreparedState, LargeNPreparedState],
         positions: Array,
         masses: Array,
         *,
         target_indices: Optional[Array] = None,
         jit_traversal: bool = False,
+        grad_plan: Optional[Any] = None,
     ) -> Array:
         """Exact fixed-topology gradients of the FMM force w.r.t. positions/masses.
 
@@ -783,6 +789,11 @@ class FastMultipoleMethod:
         :meth:`prepare_state` (tree construction is not traceable), then
         differentiate this method. Requires a radix ``FMMPreparedState`` with a
         solidfmm basis. See ``docs/differentiable_fmm_design.md``.
+
+        Two opt-in fast lanes, both off by default:
+        ``JACCPOT_STATIC_STRICT_FUSED_M2L_PALLAS=1`` for the fused-Pallas M2L and
+        ``JACCPOT_DIFFERENTIABLE_NEARFIELD_FAST_LANE=1`` for the leaf-major near
+        field (the dominant term in both directions).
         """
         return self._impl.differentiable_accelerations(
             state,
@@ -790,6 +801,7 @@ class FastMultipoleMethod:
             masses,
             target_indices=target_indices,
             jit_traversal=jit_traversal,
+            grad_plan=grad_plan,
         )
 
     def evaluate_prepared_state_with_jerk(

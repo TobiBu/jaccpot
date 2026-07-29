@@ -17,12 +17,20 @@ from yggdrax.interactions import NodeNeighborList
 from yggdrax.tree import Tree
 
 from jaccpot.downward.local_expansions import LocalExpansionData, TreeDownwardData
-from jaccpot.nearfield.near_field import compute_leaf_p2p_accelerations
+from jaccpot.nearfield.near_field import (
+    compute_leaf_p2p_accelerations,
+    compute_leaf_p2p_accelerations_radix_fast_lane,
+)
 
 from ._large_n_pipeline import evaluate_large_n_state
 from ._large_n_types import LargeNPreparedState
+from ._nearfield_fastlane import (
+    leaf_major_nearfield_payload_cached,
+    nearfield_topology_arrays,
+)
 from .dtypes import INDEX_DTYPE
 from .fmm_caches import _contains_tracer
+from .fmm_constants import _env_flag
 from .fmm_state import FMMPreparedState, _octree_farfield_eval_inputs
 from .kernels.core import (
     NearfieldInteropData,
@@ -36,6 +44,11 @@ from .kernels.core import (
     _prepare_tree_evaluation_inputs,
 )
 from .reference import direct_sum as reference_direct_sum
+
+# Opt-in: route the differentiable near field through the leaf-major fast lane
+# instead of the bucketed edge-list kernel. Off by default so the shipped grad
+# path is unchanged until the in-context win is proven on the target hardware.
+_DIFFERENTIABLE_NEARFIELD_FAST_LANE = "JACCPOT_DIFFERENTIABLE_NEARFIELD_FAST_LANE"
 
 
 class EvaluateMixin:
@@ -384,6 +397,7 @@ class EvaluateMixin:
         target_indices: Optional[Array] = None,
         jit_traversal: bool = True,
         nearfield_mode_override: Optional[str] = None,
+        force_ungrouped_farfield: bool = False,
     ) -> Array:
         """Evaluate accelerations for updated sorted positions on a fixed topology.
 
@@ -418,6 +432,23 @@ class EvaluateMixin:
         runtime_overrides = self._resolve_runtime_execution_overrides(
             num_particles=int(positions_sorted_arr.shape[0]),
         )
+        grouped_interactions = runtime_overrides.grouped_interactions
+        farfield_mode = runtime_overrides.farfield_mode
+        if force_ungrouped_farfield and grouped_interactions:
+            # The grouped/class-major M2L builds its pair classes on the HOST
+            # (yggdrax ``build_grouped_interactions_from_pairs`` does
+            # ``np.asarray(jax.device_get(geometry.center))``), so it raises
+            # ``TracerArrayConversionError`` as soon as the expansion centres are
+            # traced -- i.e. on every reverse pass. The ungrouped M2L applies each
+            # pair's exact displacement instead of one representative per lattice
+            # class, so it is the MORE accurate of the two (measured ~6.6x closer to
+            # the exact direct sum on a deep-tree config) -- not merely a different
+            # execution strategy. NOTE the expansion centres
+            # (``runtime_overrides.center_mode``) are passed through UNCHANGED: the
+            # grouped classification requires geometric (aabb) centres, and rewriting
+            # them here would change the force the gradient is taken of.
+            grouped_interactions = False
+            farfield_mode = "pair_grouped"
         upward = self.prepare_upward_sweep(
             state.tree,
             positions_sorted_arr,
@@ -435,8 +466,8 @@ class EvaluateMixin:
             interactions=state.interactions,
             m2l_chunk_size=runtime_overrides.m2l_chunk_size,
             l2l_chunk_size=runtime_overrides.l2l_chunk_size,
-            grouped_interactions=runtime_overrides.grouped_interactions,
-            farfield_mode=runtime_overrides.farfield_mode,
+            grouped_interactions=grouped_interactions,
+            farfield_mode=farfield_mode,
             dehnen_radius_scale=self.dehnen_radius_scale,
         )
         resolved_target_indices = self._resolve_target_indices(
@@ -521,6 +552,7 @@ class EvaluateMixin:
         target_indices: Optional[Array] = None,
         jit_traversal: bool = False,
         nearfield_mode_override: Optional[str] = None,
+        force_ungrouped_farfield: bool = True,
     ) -> Array:
         """Fixed-topology re-eval at live sorted positions AND masses.
 
@@ -528,6 +560,12 @@ class EvaluateMixin:
         Thin front for :meth:`_evaluate_prepared_state_at_positions_sorted` with
         ``masses_sorted`` threaded through P2M and the near-field, so gradients
         flow w.r.t. both positions and masses at fixed topology.
+
+        ``force_ungrouped_farfield`` defaults to ``True`` here: the grouped M2L
+        classifies pairs on the host and is therefore not traceable, so the
+        differentiable seam always takes the ungrouped M2L -- which is also the more
+        accurate of the two, see
+        :meth:`_evaluate_prepared_state_at_positions_sorted`.
         """
         return self._evaluate_prepared_state_at_positions_sorted(
             state,
@@ -536,17 +574,19 @@ class EvaluateMixin:
             target_indices=target_indices,
             jit_traversal=jit_traversal,
             nearfield_mode_override=nearfield_mode_override,
+            force_ungrouped_farfield=force_ungrouped_farfield,
         )
 
     @jaxtyped(typechecker=beartype)
     def differentiable_accelerations(
         self: "FastMultipoleMethod",
-        state: FMMPreparedState,
+        state: Union[FMMPreparedState, LargeNPreparedState],
         positions: Array,
         masses: Array,
         *,
         target_indices: Optional[Array] = None,
         jit_traversal: bool = False,
+        grad_plan: Optional[Any] = None,
     ) -> Array:
         """Exact fixed-topology gradients of the FMM force w.r.t. positions/masses.
 
@@ -581,19 +621,48 @@ class EvaluateMixin:
 
         Notes
         -----
-        Bare ``jax.grad``/``jax.vjp`` over this method give exact gradients at every
-        N. Wrapping the *entire* call in an outer ``jax.jit`` is supported at moderate
-        N but can fail at large N (the re-run of the prepared sweeps retains host-side
-        ops); prefer ``jax.grad(loss)`` -- the inner numeric kernels are already
-        jit-compiled. See ``docs/differentiable_fmm_design.md`` ("jit limitation").
+        Bare ``jax.grad``/``jax.vjp`` over this method give exact gradients, and are
+        the recommended usage -- the inner numeric kernels are already jit-compiled.
+        Wrapping the *entire* call in an outer ``jax.jit`` is supported at moderate N
+        but can fail at large N (the re-run of the prepared sweeps retains host-side
+        ops). See ``docs/differentiable_fmm_design.md`` ("jit limitation").
+
+        This method forces the **ungrouped** M2L (``force_ungrouped_farfield``): the
+        grouped/class-major M2L builds its pair classes on the host, so it is not
+        traceable and used to break the *bare* reverse pass -- not just the outer-jit
+        one -- at ``n >= 65536``, where the resolver auto-enables it. Expansion
+        centres are untouched.
+
+        Note this is **not** merely a different execution strategy: the grouped M2L
+        quantises pair displacements onto a lattice and applies one representative
+        displacement per class, so it is an approximation, while the ungrouped M2L
+        uses each pair's exact displacement. The grad path is therefore at least as
+        accurate as the grouped forward (measured ~6.6x closer to the exact direct
+        sum on a deep-tree config), but a caller who explicitly requests
+        ``grouped_interactions=True`` gets a forward force that differs from the
+        force this gradient is taken of, at the grouped path's own accuracy.
 
         The M2L uses the pure-JAX path by default. Setting
         ``JACCPOT_STATIC_STRICT_FUSED_M2L_PALLAS=1`` opts into the fused-Pallas M2L
         fast lane on an Ampere+ (sm_80) GPU: the fused kernels now carry a
         ``custom_vjp`` (Pallas forward + autodiff-of-twin reverse), so the fast lane
         is differentiable. It falls back to the pure-JAX M2L on unsupported hardware.
-        The near-field always uses the bucketed pure-JAX path (the fused-Pallas
-        near-field ROI is marginal at the N the reverse pass bounds).
+
+        The near field uses the bucketed pure-JAX edge-list kernel by default.
+        ``JACCPOT_DIFFERENTIABLE_NEARFIELD_FAST_LANE=1`` re-expresses it leaf-major
+        and routes it through the radix fast lane instead. Same edge set, same
+        force -- a different traversal -- and profiling put the near field at ~83%
+        of this method's forward and ~91% of its reverse, so it is where the
+        remaining time is.
+
+        Which reverse you get depends on ``use_pallas``, and the difference is
+        large: with ``use_pallas=True`` on an Ampere+ GPU the lane is the fused
+        Pallas kernel wrapped in a ``custom_vjp`` whose backward is the **analytic
+        O(N) leaf-pair reverse**; with ``use_pallas=False`` it is the tiled pure-JAX
+        prepacked kernel, differentiated by ordinary autodiff. Only the former buys
+        the O(N) reverse memory. Opt-in either way: measure on your hardware before
+        switching, because the leaf-major traversal also gathers and scatters and
+        its in-context cost is not predicted by isolated micro-benchmarks.
 
         Returns
         -------
@@ -601,10 +670,54 @@ class EvaluateMixin:
             ``(N, 3)`` accelerations in the original input order.
         """
         if isinstance(state, LargeNPreparedState):
-            raise NotImplementedError(
-                "differentiable_accelerations requires a radix FMMPreparedState, "
-                "not LargeNPreparedState: the large-N pipeline runs non-differentiable "
-                "fused Pallas kernels. Build the state without the LARGE_N_GPU preset."
+            # Large-N production path. NOT a variant of the radix branch below: the
+            # large-N state carries no interaction list and a compat ``downward``
+            # view with no ``.locals``, so the frozen M2L list comes from
+            # ``compact_far_pairs`` and the near field is the fused Pallas fast lane
+            # driven through its ``custom_vjp``. See runtime/_large_n_grad.py.
+            from ._large_n_grad import (
+                evaluate_large_n_state_at_positions_and_masses_sorted,
+                prepare_large_n_grad_plan,
+            )
+
+            if target_indices is not None:
+                raise NotImplementedError(
+                    "differentiable_accelerations does not support target_indices "
+                    "on the large-N path (matching evaluate_large_n_state)."
+                )
+            plan = (
+                grad_plan
+                if grad_plan is not None
+                else prepare_large_n_grad_plan(self, state)
+            )
+            inverse_permutation_host = np.asarray(
+                jax.device_get(state.inverse_permutation)
+            )
+            forward_permutation = jnp.asarray(
+                np.argsort(inverse_permutation_host, kind="stable"), dtype=INDEX_DTYPE
+            )
+            positions_sorted = jnp.asarray(positions, dtype=state.working_dtype)[
+                forward_permutation
+            ]
+            masses_sorted = jnp.asarray(masses, dtype=state.working_dtype)[
+                forward_permutation
+            ]
+            accelerations_sorted = (
+                evaluate_large_n_state_at_positions_and_masses_sorted(
+                    self,
+                    state,
+                    positions_sorted,
+                    masses_sorted,
+                    plan=plan,
+                )
+            )
+            output_dtype = (
+                state.input_dtype
+                if jnp.issubdtype(state.input_dtype, jnp.floating)
+                else state.working_dtype
+            )
+            return jnp.asarray(accelerations_sorted)[state.inverse_permutation].astype(
+                output_dtype
             )
         if getattr(state, "expansion_basis", None) != "solidfmm":
             raise NotImplementedError(
@@ -643,8 +756,8 @@ class EvaluateMixin:
             forward_permutation
         ]
         # The seam already returns accelerations in the original input order.
-        # Force the vectorized "bucketed" near-field: it is bit-identical to the
-        # default "baseline" scan (which is gated to large-N only) but ~600x
+        # Default to the vectorized "bucketed" near-field: it is bit-identical to
+        # the default "baseline" scan (which is gated to large-N only) but ~600x
         # faster at moderate N and has a cheaper reverse pass. At very large N its
         # higher memory footprint may matter; the reverse pass bounds N here
         # anyway. See docs/differentiable_fmm_design.md.
@@ -654,7 +767,59 @@ class EvaluateMixin:
             masses_sorted,
             target_indices=target_indices,
             jit_traversal=jit_traversal,
-            nearfield_mode_override="bucketed",
+            nearfield_mode_override=(
+                "fast_lane"
+                if _env_flag(_DIFFERENTIABLE_NEARFIELD_FAST_LANE, False)
+                else "bucketed"
+            ),
+        )
+
+    def _evaluate_leaf_major_nearfield(
+        self: "FastMultipoleMethod",
+        tree: Tree,
+        neighbor_list: NodeNeighborList,
+        nearfield_interop: Optional[NearfieldInteropData],
+        positions: Array,
+        masses: Array,
+        *,
+        max_leaf_size: int,
+        return_potential: bool,
+    ) -> Array:
+        """Near field via the leaf-major radix fast lane instead of the edge list.
+
+        The payload is a pure function of the frozen topology, so it is built
+        once per neighbour list, on the host, and memoized; only the
+        position/mass gathers are re-executed per call. ``differentiable=True``
+        costs nothing on the forward (the ``custom_vjp`` forward *is* the same
+        kernel) and is what makes the lane usable under ``jax.grad`` at all,
+        since ``pallas_call`` has no autodiff rule.
+
+        The topology is read straight off ``tree``/``neighbor_list`` when the
+        state carries no interop view -- deliberately NOT through
+        ``_build_nearfield_interop_data``, whose device-side index work would be
+        traced (and so unusable as a static shape) under an outer ``jax.jit``.
+        """
+        if bool(return_potential):
+            raise NotImplementedError(
+                "nearfield_mode='fast_lane' is an acceleration-only lane; it is "
+                "the differentiable near field, and the potential half of the "
+                "leaf-pair custom_vjp is not wired. Use 'bucketed' or 'baseline' "
+                "for potentials."
+            )
+        payload = leaf_major_nearfield_payload_cached(
+            num_particles=int(positions.shape[0]),
+            max_leaf_size=int(max_leaf_size),
+            **nearfield_topology_arrays(tree, neighbor_list, nearfield_interop),
+        )
+        return compute_leaf_p2p_accelerations_radix_fast_lane(
+            positions_sorted=positions,
+            masses_sorted=masses,
+            payload=payload,
+            G=self.G,
+            softening=float(self.softening),
+            return_potential=False,
+            use_pallas=bool(getattr(self, "use_pallas", False)),
+            differentiable=True,
         )
 
     @jaxtyped(typechecker=beartype)
@@ -687,6 +852,12 @@ class EvaluateMixin:
         vectorized ``"bucketed"`` near-field, which is bit-identical to the
         default ``"baseline"`` scan but orders of magnitude faster and has a
         cheaper reverse pass). ``None`` keeps the resolved policy unchanged.
+
+        The extra value ``"fast_lane"`` is not a mode of the edge-list kernel at
+        all: it re-expresses the near field leaf-major and routes it through
+        :func:`compute_leaf_p2p_accelerations_radix_fast_lane`, which owns the
+        analytic O(N) leaf-pair reverse. Same edge set, same force; a different
+        traversal. See :mod:`jaccpot.runtime._nearfield_fastlane`.
         """
 
         setup = _prepare_tree_evaluation_inputs(
@@ -718,41 +889,51 @@ class EvaluateMixin:
             if nearfield_mode_override is not None
             else self._resolve_nearfield_mode(num_particles=int(positions.shape[0]))
         )
-        nearfield_edge_chunk_size = self._resolve_nearfield_edge_chunk_size(
-            num_particles=int(positions.shape[0]),
-            nearfield_mode=nearfield_mode,
-        )
-        nearfield_view = (
-            _build_nearfield_interop_data(tree, neighbor_list)
-            if nearfield_interop is None
-            else nearfield_interop
-        )
-
-        near = compute_leaf_p2p_accelerations(
-            tree,
-            neighbor_list,
-            positions,
-            masses,
-            G=self.G,
-            softening=self.softening,
-            max_leaf_size=resolved_max_leaf,
-            return_potential=return_potential,
-            nearfield_mode=nearfield_mode,
-            edge_chunk_size=nearfield_edge_chunk_size,
-            precomputed_target_leaf_ids=precomputed_target_leaf_ids,
-            precomputed_source_leaf_ids=precomputed_source_leaf_ids,
-            precomputed_valid_pairs=precomputed_valid_pairs,
-            precomputed_chunk_sort_indices=precomputed_chunk_sort_indices,
-            precomputed_chunk_group_ids=precomputed_chunk_group_ids,
-            precomputed_chunk_unique_indices=precomputed_chunk_unique_indices,
-            node_ranges_override=nearfield_view.node_ranges,
-            leaf_nodes_override=nearfield_view.leaf_nodes,
-            neighbor_offsets_override=nearfield_view.offsets,
-            neighbor_indices_override=nearfield_view.neighbors,
-            neighbor_counts_override=nearfield_view.counts,
-            leaf_particle_indices_override=nearfield_view.leaf_particle_indices,
-            leaf_particle_mask_override=nearfield_view.leaf_particle_mask,
-        )
+        if nearfield_mode == "fast_lane":
+            near = self._evaluate_leaf_major_nearfield(
+                tree,
+                neighbor_list,
+                nearfield_interop,
+                positions,
+                masses,
+                max_leaf_size=resolved_max_leaf,
+                return_potential=return_potential,
+            )
+        else:
+            nearfield_view = (
+                _build_nearfield_interop_data(tree, neighbor_list)
+                if nearfield_interop is None
+                else nearfield_interop
+            )
+            nearfield_edge_chunk_size = self._resolve_nearfield_edge_chunk_size(
+                num_particles=int(positions.shape[0]),
+                nearfield_mode=nearfield_mode,
+            )
+            near = compute_leaf_p2p_accelerations(
+                tree,
+                neighbor_list,
+                positions,
+                masses,
+                G=self.G,
+                softening=self.softening,
+                max_leaf_size=resolved_max_leaf,
+                return_potential=return_potential,
+                nearfield_mode=nearfield_mode,
+                edge_chunk_size=nearfield_edge_chunk_size,
+                precomputed_target_leaf_ids=precomputed_target_leaf_ids,
+                precomputed_source_leaf_ids=precomputed_source_leaf_ids,
+                precomputed_valid_pairs=precomputed_valid_pairs,
+                precomputed_chunk_sort_indices=precomputed_chunk_sort_indices,
+                precomputed_chunk_group_ids=precomputed_chunk_group_ids,
+                precomputed_chunk_unique_indices=precomputed_chunk_unique_indices,
+                node_ranges_override=nearfield_view.node_ranges,
+                leaf_nodes_override=nearfield_view.leaf_nodes,
+                neighbor_offsets_override=nearfield_view.offsets,
+                neighbor_indices_override=nearfield_view.neighbors,
+                neighbor_counts_override=nearfield_view.counts,
+                leaf_particle_indices_override=nearfield_view.leaf_particle_indices,
+                leaf_particle_mask_override=nearfield_view.leaf_particle_mask,
+            )
 
         far_grad, far_potential_pre, _ = _evaluate_local_expansions_for_particles(
             locals_data,

@@ -85,6 +85,7 @@ _DIFF_FMM_TEST_FILES = frozenset(
         "test_grad_fmm_vs_directsum.py",
         "test_gradient_correctness.py",
         "test_custom_vjp_parity.py",
+        "test_nearfield_fastlane_grad_path.py",
     }
 )
 

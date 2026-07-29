@@ -198,6 +198,7 @@ import jax.numpy as jnp
 import numpy as np
 from jaxtyping import Array, DTypeLike
 
+from jaccpot.operators.dtypes import floor_squared_radius, squared_radius_floor
 from jaccpot.operators.symmetric_tensors import symmetric_multi_indices_3d
 
 # ===========================================================================
@@ -329,16 +330,22 @@ def p2m_real_direct(
 
     x, y, z = d[0], d[1], d[2]
     r2 = jnp.dot(d, d)
-    r = jnp.sqrt(jnp.maximum(r2, 1e-60))
+    r = jnp.sqrt(floor_squared_radius(r2))
     rho2 = x * x + y * y
-    rho = jnp.sqrt(jnp.maximum(rho2, 1e-60))
+    rho = jnp.sqrt(floor_squared_radius(rho2))
 
     cos_theta = z / r
     sin_theta = rho / r
 
-    # cos φ = x/ρ, sin φ = y/ρ (with safe handling when rho ~ 0)
-    cos_phi = jnp.where(rho > 1e-30, x / rho, 1.0)
-    sin_phi = jnp.where(rho > 1e-30, y / rho, 0.0)
+    # cos φ = x/ρ, sin φ = y/ρ (with safe handling when rho ~ 0). The degeneracy
+    # test must be the SAME predicate as "the floor was applied", so compare rho2
+    # against the floor rather than rho against a hard-coded sqrt of it: in float64
+    # `rho2 > 1e-60` is exactly the old `rho > 1e-30`, but the old form silently
+    # inverted in float32 (where the 1e-60 floor flushed to zero), picking the
+    # x/rho branch on the z axis and yielding cos_phi=0 instead of the correct 1.0.
+    rho_nonzero = rho2 > squared_radius_floor(rho2.dtype)
+    cos_phi = jnp.where(rho_nonzero, x / rho, 1.0)
+    sin_phi = jnp.where(rho_nonzero, y / rho, 0.0)
 
     # Precompute factorials
     fact = _factorial_table_jax(2 * p, dtype)
@@ -500,16 +507,22 @@ def evaluate_local_real(
 
     x, y, z = d[0], d[1], d[2]
     r2 = jnp.dot(d, d)
-    r = jnp.sqrt(jnp.maximum(r2, 1e-60))
+    r = jnp.sqrt(floor_squared_radius(r2))
     rho2 = x * x + y * y
-    rho = jnp.sqrt(jnp.maximum(rho2, 1e-60))
+    rho = jnp.sqrt(floor_squared_radius(rho2))
 
     cos_theta = z / r
     sin_theta = rho / r
 
-    # cos φ = x/ρ, sin φ = y/ρ (with safe handling when rho ~ 0)
-    cos_phi = jnp.where(rho > 1e-30, x / rho, 1.0)
-    sin_phi = jnp.where(rho > 1e-30, y / rho, 0.0)
+    # cos φ = x/ρ, sin φ = y/ρ (with safe handling when rho ~ 0). The degeneracy
+    # test must be the SAME predicate as "the floor was applied", so compare rho2
+    # against the floor rather than rho against a hard-coded sqrt of it: in float64
+    # `rho2 > 1e-60` is exactly the old `rho > 1e-30`, but the old form silently
+    # inverted in float32 (where the 1e-60 floor flushed to zero), picking the
+    # x/rho branch on the z axis and yielding cos_phi=0 instead of the correct 1.0.
+    rho_nonzero = rho2 > squared_radius_floor(rho2.dtype)
+    cos_phi = jnp.where(rho_nonzero, x / rho, 1.0)
+    sin_phi = jnp.where(rho_nonzero, y / rho, 0.0)
 
     # Precompute factorials
     fact = _factorial_table_jax(2 * p, dtype)
@@ -1776,7 +1789,7 @@ def m2l_a6_real_only(
     # Extract delta components
     x, y, z = delta[0], delta[1], delta[2]
     r2 = jnp.dot(delta, delta)
-    r = jnp.sqrt(jnp.maximum(r2, 1e-60))
+    r = jnp.sqrt(floor_squared_radius(r2))
 
     # Step 1: Rotate MULTIPOLE into the z-aligned frame.
     M_rotated = jnp.zeros_like(multipole)
@@ -1812,7 +1825,7 @@ def m2l_a6_real_only_wigner(
 
     x, y, z = delta[0], delta[1], delta[2]
     r2 = jnp.dot(delta, delta)
-    r = jnp.sqrt(jnp.maximum(r2, 1e-60))
+    r = jnp.sqrt(floor_squared_radius(r2))
 
     M_rotated = jnp.zeros_like(multipole)
     for ell in range(p + 1):
@@ -1910,7 +1923,7 @@ def m2m_real(
     # Extract delta components
     x, y, z = delta[0], delta[1], delta[2]
     r2 = jnp.dot(delta, delta)
-    r = jnp.sqrt(jnp.maximum(r2, 1e-60))
+    r = jnp.sqrt(floor_squared_radius(r2))
 
     # Handle zero displacement case
     # (return original multipole if |delta| ~ 0)
@@ -1973,7 +1986,7 @@ def l2l_real(
     # Extract delta components
     x, y, z = delta[0], delta[1], delta[2]
     r2 = jnp.dot(delta, delta)
-    r = jnp.sqrt(jnp.maximum(r2, 1e-60))
+    r = jnp.sqrt(floor_squared_radius(r2))
 
     # Handle zero displacement case
     is_zero = r < 1e-30

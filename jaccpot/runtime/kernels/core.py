@@ -1741,6 +1741,59 @@ def _apply_m2l(
     return _apply_complex_m2l(src_mult, deltas, order=order, rotation=rotation)
 
 
+def _m2l_chunk_contributions(
+    multip_packed: Array,
+    centers: Array,
+    src_idx: Array,
+    tgt_idx: Array,
+    valid: Array,
+    *,
+    order: int,
+    basis_mode: str,
+    rotation: Optional[str],
+    m2l_impl: Optional[str],
+    out_dtype: Any,
+) -> Array:
+    """Gather the multipoles/centre displacements for one pair batch, apply the M2L.
+
+    Deliberately takes the loop-invariant arrays plus **index vectors**, not
+    pre-gathered values, so that a caller can wrap it in ``jax.checkpoint`` and
+    have reverse mode retain only these inputs. ``lax.scan``'s partial-eval hoists
+    scan-invariant residuals out of the loop, so ``multip_packed``/``centers`` are
+    counted **once** rather than once per chunk, leaving only two integer index
+    vectors and a mask stacked per chunk.
+
+    That matters a lot. Un-rematerialized, the retained residual is the
+    rotate-to-z / rotate-from-z blocks *and* their bilinear construction
+    intermediates (``D = B_U @ Dz_beta @ B_U @ Dz_alpha`` is bilinear, so the
+    partial products are residuals too, for both directions and both the padded
+    and per-degree forms). Measured with ``bench/audit_reverse_residuals.py``:
+    **28.7 kB per pair** (fp32, order 4) versus ~34 B per pair once
+    rematerialized -- i.e. ~28.7 GB at N=200000, which is what made the reverse
+    pass OOM there.
+
+    The double-``where`` delta guard MUST stay inside this function. Remat re-runs
+    exactly what is enclosed here, so hoisting the guard out would let the
+    *recomputed* ``deltas`` collapse to zero on padded lanes and reintroduce the
+    singular-radius NaN cotangent the guard exists to prevent.
+    """
+    src_mult = multip_packed[src_idx]
+    deltas = centers[tgt_idx] - centers[src_idx]
+    # Invalid/padded pairs collapse to src_idx == tgt_idx == 0, giving a zero
+    # displacement whose M2L rotate-to-z ``norm(delta)`` has a 0/0 (NaN)
+    # reverse-mode cotangent. Substitute a nonzero delta BEFORE the apply; the
+    # contribution is masked to 0 by the caller, so the forward is unchanged.
+    deltas = jnp.where(valid[:, None], deltas, jnp.ones_like(deltas))
+    return _apply_m2l(
+        src_mult,
+        deltas,
+        order=order,
+        basis_mode=basis_mode,
+        rotation=rotation,
+        m2l_impl=m2l_impl,
+    ).astype(out_dtype)
+
+
 @partial(
     jax.jit,
     static_argnames=("order", "basis_mode", "rotation", "m2l_impl", "total_nodes"),
@@ -1771,23 +1824,24 @@ def _accumulate_m2l_fullbatch(
     valid = (idx < active_pair_count) & (src >= 0) & (tgt >= 0)
     safe_src = jnp.where(valid, src, 0)
     safe_tgt = jnp.where(valid, tgt, 0)
-    src_mult = multip_packed[safe_src]
-    deltas = centers[safe_tgt] - centers[safe_src]
-    # Invalid/padded pairs collapse to safe_src == safe_tgt == 0, giving a zero
-    # displacement whose M2L rotate-to-z ``norm(delta)`` has a 0/0 (NaN)
-    # reverse-mode cotangent. Substitute a nonzero delta for invalid pairs
-    # BEFORE the M2L apply (double-where): the forward contribution is still
-    # masked to 0 below, so the output is byte-identical, but the gradient no
-    # longer sees a singular delta on padded lanes.
-    deltas = jnp.where(valid[:, None], deltas, jnp.ones_like(deltas))
-    contribs = _apply_m2l(
-        src_mult,
-        deltas,
+    # Shares the gather + double-where + apply with the chunked scan below via
+    # ``_m2l_chunk_contributions`` so the two paths cannot drift apart (the same
+    # reasoning as ``_pair_accel_pair_terms`` in the near field). NOT wrapped in
+    # ``jax.checkpoint`` here: fullbatch only runs at pair_count <=
+    # _M2L_FULLBATCH_MAX_PAIRS, where the retained blocks are tens of MB, so remat
+    # would buy nothing and would perturb the small-N forward schedule.
+    contribs = _m2l_chunk_contributions(
+        multip_packed,
+        centers,
+        safe_src,
+        safe_tgt,
+        valid,
         order=order,
         basis_mode=basis_mode,
         rotation=rotation,
         m2l_impl=m2l_impl,
-    ).astype(locals_coeffs.dtype)
+        out_dtype=locals_coeffs.dtype,
+    )
     contribs = jnp.where(valid[:, None], contribs, 0)
     return locals_coeffs + jax.ops.segment_sum(contribs, safe_tgt, total_nodes)
 
@@ -1828,6 +1882,35 @@ def _accumulate_m2l_chunked_scan(
     pair_count = src.shape[0]
     starts = jnp.arange(0, pair_count, chunk_size, dtype=INDEX_DTYPE)
 
+    # Rematerialize the M2L apply. Reverse mode retains one residual set per scan
+    # iteration, and un-rematerialized that residual is the rotation blocks plus
+    # their bilinear construction intermediates -- 28.7 kB per pair (fp32, p=4),
+    # i.e. ~28.7 GB at N=200000, which is what made the reverse pass OOM there.
+    # Checkpointing drops it to ~34 B per pair: only two integer index vectors and
+    # a mask are stacked, while the scan-invariant multipoles/centres are hoisted
+    # out and counted once (see ``_m2l_chunk_contributions``).
+    #
+    # The wrapper sits OUTSIDE ``_apply_m2l``, which also fixes the fused-Pallas
+    # M2L lane: that kernel's ``custom_vjp`` saves the blocks as its residual, and
+    # being inside the recomputed region means that residual is discarded too.
+    # Statics are captured by closure rather than passed through
+    # ``jax.checkpoint``, which flattens (args, kwargs) and would trace them.
+    def _m2l_chunk_apply(multip, cent, src_idx, tgt_idx, valid_mask):
+        return _m2l_chunk_contributions(
+            multip,
+            cent,
+            src_idx,
+            tgt_idx,
+            valid_mask,
+            order=order,
+            basis_mode=basis_mode,
+            rotation=rotation,
+            m2l_impl=m2l_impl,
+            out_dtype=locals_coeffs.dtype,
+        )
+
+    _m2l_chunk = jax.checkpoint(_m2l_chunk_apply)
+
     def body(local_accum: Array, start_idx: Array) -> tuple[Array, None]:
         def active_chunk(accum: Array) -> Array:
             offset = jnp.arange(chunk_size, dtype=INDEX_DTYPE)
@@ -1844,21 +1927,8 @@ def _accumulate_m2l_chunked_scan(
             )
             src_chunk = jnp.where(valid, src_chunk_raw, 0)
             tgt_chunk = jnp.where(valid, tgt_chunk_raw, 0)
-            src_mult = multip_packed[src_chunk]
-            deltas = centers[tgt_chunk] - centers[src_chunk]
-            # Double-where guard (see ``_accumulate_m2l_fullbatch``): give
-            # invalid/padded pairs a nonzero displacement so the M2L
-            # ``norm(delta)`` reverse-mode cotangent is finite; the contribution
-            # is masked to 0 in the scatter below, so the forward is unchanged.
-            deltas = jnp.where(valid[:, None], deltas, jnp.ones_like(deltas))
-            contribs = _apply_m2l(
-                src_mult,
-                deltas,
-                order=order,
-                basis_mode=basis_mode,
-                rotation=rotation,
-                m2l_impl=m2l_impl,
-            ).astype(locals_coeffs.dtype)
+            # Gather + double-where guard + M2L apply, rematerialized (see above).
+            contribs = _m2l_chunk(multip_packed, centers, src_chunk, tgt_chunk, valid)
             return _chunk_segment_scatter_add(
                 accum,
                 contribs,
@@ -2013,6 +2083,46 @@ def _propagate_solidfmm_locals_by_level(
             l2l_disp, order=order, dtype=rdt
         )[l2l_cls]
 
+    def _l2l_level_apply(
+        state_in: Array,
+        centers_all: Array,
+        safe_child: Array,
+        valid: Array,
+    ) -> Array:
+        """Gather one level's parents, L2L-translate them onto their children.
+
+        Wrapped in ``jax.checkpoint`` below so reverse mode retains only these
+        inputs. Un-rematerialized the level cascade keeps every level's rotation
+        blocks and their bilinear construction intermediates -- measured at
+        **14.2 kB per (level x node)** by ``bench/audit_reverse_residuals.py``,
+        i.e. ``depth x nodes`` and 5.4 GB at N=1048576. ``centers_all`` is
+        loop-invariant so it is hoisted and counted once.
+
+        L2L uses the old_center - new_center (parent - child) displacement in BOTH
+        bases. The complex path previously used child - parent here, which is the
+        wrong sign: the far field was left uncorrected in proportion to the
+        cascade depth, capping accuracy (~3e-3 at theta>=0.5) regardless of
+        expansion order, while looking fine at small theta where the cascade is
+        shallow.
+        """
+        parent_coeffs = state_in[parent_rep]
+        deltas = centers_all[parent_rep] - centers_all[safe_child]
+        if use_grouped_l2l:
+            translated = l2l_rot_scale_real_batch_cached_blocks(
+                parent_coeffs, deltas, l2l_bt, l2l_bf, order=order
+            ).astype(state_in.dtype)
+        elif real_basis:
+            translated = _l2l_real_batch_kernel(
+                parent_coeffs, deltas, order=order
+            ).astype(state_in.dtype)
+        else:
+            translated = _l2l_complex_batch_kernel(
+                parent_coeffs, deltas, order=order, rotation=rotation
+            ).astype(state_in.dtype)
+        return jnp.where(valid[:, None], translated, 0)
+
+    _l2l_level = jax.checkpoint(_l2l_level_apply)
+
     def level_body(level: Array, state: Array) -> Array:
         active = parent_levels == level
         lc = jnp.where(active, left_internal, minus_one)
@@ -2020,27 +2130,8 @@ def _propagate_solidfmm_locals_by_level(
         child_idx = jnp.concatenate([lc, rc], axis=0)
         valid = child_idx >= 0
         safe_child = jnp.where(valid, child_idx, 0)
-        parent_coeffs = state[parent_rep]
-        # L2L uses the old_center - new_center (parent - child) displacement in
-        # BOTH bases. The complex path previously used child - parent here,
-        # which is the wrong sign: the far field was left uncorrected in
-        # proportion to the cascade depth, capping accuracy (~3e-3 at
-        # theta>=0.5) regardless of expansion order, while looking fine at small
-        # theta where the L2L cascade is shallow.
-        deltas = centers[parent_rep] - centers[safe_child]
-        if use_grouped_l2l:
-            translated = l2l_rot_scale_real_batch_cached_blocks(
-                parent_coeffs, deltas, l2l_bt, l2l_bf, order=order
-            ).astype(state.dtype)
-        elif real_basis:
-            translated = _l2l_real_batch_kernel(
-                parent_coeffs, deltas, order=order
-            ).astype(state.dtype)
-        else:
-            translated = _l2l_complex_batch_kernel(
-                parent_coeffs, deltas, order=order, rotation=rotation
-            ).astype(state.dtype)
-        translated = jnp.where(valid[:, None], translated, 0)
+        # Gather + translate + mask, rematerialized (see ``_l2l_level_apply``).
+        translated = _l2l_level(state, centers, safe_child, valid)
         updates = jax.ops.segment_sum(translated, safe_child, total_nodes)
         return state + updates
 

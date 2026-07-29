@@ -1564,6 +1564,16 @@ class PrepareMixin:
                 if (
                     bool(adaptive_order_active)
                     or bool(strict_streamed_direct_far_pairs)
+                    # Gradients need the FROZEN M2L pair list to re-run the
+                    # downward sweep against. The pairs are already built here
+                    # whenever ``use_compact_streamed_pairs`` holds (which the
+                    # canonical large-N production config satisfies), but were
+                    # then discarded, leaving the differentiable seam with nothing
+                    # to re-run and no way to produce a far-field source-side
+                    # gradient. Retaining them costs ~24 B/pair of steady state
+                    # memory, which is a deliberate deviation from
+                    # ``memory_objective="minimum_memory"`` -- hence opt-in.
+                    or bool(getattr(self, "retain_far_pairs_for_grad", False))
                 )
                 else None
             ),

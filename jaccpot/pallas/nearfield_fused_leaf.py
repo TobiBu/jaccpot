@@ -719,11 +719,16 @@ def nearfield_leafpair_pallas_decoupled(
 # is closed over as a tracer. Hashable Pallas statics (num_warps, num_stages,
 # target_subtile, interpret) go in positional ``nondiff_argnums``.
 #
-# NOTE: the differentiable FMM grad path uses the bucketed pure-JAX near-field
-# (already differentiable via the analytic tidal-tensor custom_vjp, PR #50); these
-# wrappers make the *fused Pallas* near-field differentiable too, so it can be
-# opted onto the grad path (its forward ROI is marginal at moderate N -- see
-# docs/differentiable_fmm_design.md -- so it is not the default).
+# SCOPE -- read before wiring either wrapper into a runtime path. These two are
+# **unit-level VJP oracles**, not the production differentiable near field. The
+# rule the grad path actually runs is
+# ``jaccpot.nearfield.near_field._radix_fast_lane_prepacked_accel_cvjp``: same
+# Pallas forward, but an ANALYTIC O(N) leaf-pair reverse. The reverse below is
+# ``jax.vjp`` of ``nearfield_leafpair_jax``, whose dense ``(leaves, W_t, K, 3)``
+# difference tensor is ~50 TB at the fiducial large-N config -- correct, and
+# exactly what makes it a good oracle at test scale, but unusable in production.
+# Keep both: the oracle is what pins the kernel's own gradient
+# (tests/unit/test_custom_vjp_parity.py). Do not add a second grad-path caller.
 
 
 @partial(jax.custom_vjp, nondiff_argnums=(7, 8, 9, 10))
