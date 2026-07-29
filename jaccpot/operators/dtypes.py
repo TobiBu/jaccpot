@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import jax.numpy as jnp
 import numpy as np
-from jaxtyping import Array
+from jaxtyping import Array, DTypeLike
 from yggdrax.dtypes import INDEX_DTYPE, as_index, complex_dtype_for_real
 
 # Historical squared-radius floor. Load-bearing for REVERSE-mode safety, not just
@@ -23,7 +23,7 @@ from yggdrax.dtypes import INDEX_DTYPE, as_index, complex_dtype_for_real
 _LEGACY_SQUARED_RADIUS_FLOOR = 1e-60
 
 
-def squared_radius_floor(dtype) -> float:
+def squared_radius_floor(dtype: DTypeLike) -> float:
     """Smallest squared radius representable enough to keep ``sqrt`` differentiable.
 
     Returns the historical ``1e-60`` wherever it is a normal number of ``dtype``

@@ -3771,7 +3771,9 @@ def _leafpair_accel_analytic_vjp(
         leaf_starts = jnp.arange(0, tier_count, batch, dtype=INDEX_DTYPE)
         slot_starts = jnp.arange(0, tier_slots, tile, dtype=INDEX_DTYPE)
 
-        def leaf_body(carry, leaf_start):
+        def leaf_body(
+            carry: Tuple[Array, Array], leaf_start: Array
+        ) -> Tuple[Tuple[Array, Array], None]:
             pos_bar, mass_bar = carry
             pos_in_tier = leaf_start + leaf_offsets
             tgt_in_range = pos_in_tier < tier_count
@@ -3784,7 +3786,9 @@ def _leafpair_accel_analytic_vjp(
                 tgt_mask[..., None], cot_leaf[safe_tgt], jnp.zeros((), dtype)
             )
 
-            def slot_body(inner, slot_start):
+            def slot_body(
+                inner: Tuple[Array, Array, Array], slot_start: Array
+            ) -> Tuple[Tuple[Array, Array, Array], None]:
                 pos_acc, mass_acc, tgt_acc = inner
                 sl = slot_start + slot_offsets
                 sl_in_range = sl < tier_slots
