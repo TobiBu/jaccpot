@@ -13,15 +13,24 @@ state sweeps (see ``docs/differentiable_fmm_design.md`` "jit limitation"), so
 this benchmark times the jitted path where available and otherwise reports the
 bare (eager-dispatch) timing.
 
-The M2L path is a toggle: by default the differentiable path uses the pure-JAX
-M2L, but setting ``JACCPOT_STATIC_STRICT_FUSED_M2L_PALLAS=1`` (Ampere+ GPU) opts
-into the differentiable fused-Pallas M2L fast lane (the fused kernels carry a
-``custom_vjp``; see ``docs/differentiable_fmm_design.md`` PR-2). Run the script
-once per mode to A/B them -- the flag is read at trace time, so use separate
-process invocations to avoid a stale compilation cache:
+Two paths are toggles, both read at trace time -- A/B them with separate process
+invocations so a stale compilation cache cannot leak across modes:
 
-    python examples/differentiable_fmm_overhead.py                              # pure-JAX M2L
-    JACCPOT_STATIC_STRICT_FUSED_M2L_PALLAS=1 python examples/differentiable_fmm_overhead.py  # fused Pallas
+* **M2L.** By default the differentiable path uses the pure-JAX M2L;
+  ``JACCPOT_STATIC_STRICT_FUSED_M2L_PALLAS=1`` (Ampere+ GPU) opts into the
+  differentiable fused-Pallas M2L fast lane (the fused kernels carry a
+  ``custom_vjp``; see ``docs/differentiable_fmm_design.md`` PR-2).
+* **Near field.** By default the grad path uses the bucketed edge-list kernel;
+  ``JACCPOT_DIFFERENTIABLE_NEARFIELD_FAST_LANE=1`` re-expresses the near field
+  leaf-major and routes it through the radix fast lane and its analytic O(N)
+  leaf-pair reverse (PR-3). Same edge set, same force -- a different traversal.
+  Pair it with ``--use-pallas`` to run the fused-Pallas leaf-major kernel rather
+  than the pure-JAX leaf-major fallback.
+
+    python examples/differentiable_fmm_overhead.py                              # pure-JAX M2L, bucketed near field
+    JACCPOT_STATIC_STRICT_FUSED_M2L_PALLAS=1 python examples/differentiable_fmm_overhead.py  # fused Pallas M2L
+    JACCPOT_DIFFERENTIABLE_NEARFIELD_FAST_LANE=1 python examples/differentiable_fmm_overhead.py  # leaf-major near field
+    JACCPOT_DIFFERENTIABLE_NEARFIELD_FAST_LANE=1 python examples/differentiable_fmm_overhead.py --use-pallas
 
 Run (selects a free GPU via autocvd, per the repo policy):
 
@@ -30,6 +39,7 @@ Run (selects a free GPU via autocvd, per the repo policy):
 
 from __future__ import annotations
 
+import sys
 import time
 
 from autocvd import autocvd
@@ -51,12 +61,14 @@ import numpy as np
 from jaccpot import FastMultipoleMethod
 
 
-def _bench(n, *, basis="complex", theta=0.5, order=4, leaf=32, reps=5, seed=0):
+def _bench(
+    n, *, basis="complex", theta=0.5, order=4, leaf=32, reps=5, seed=0, use_pallas=False
+):
     rng = np.random.default_rng(seed)
     positions = jnp.asarray(rng.normal(size=(n, 3)), dtype=jnp.float64)
     masses = jnp.asarray(rng.uniform(0.5, 1.5, size=(n,)), dtype=jnp.float64)
     fmm = FastMultipoleMethod(
-        basis=basis, use_pallas=False, theta=theta, G=1.0, softening=1e-2
+        basis=basis, use_pallas=use_pallas, theta=theta, G=1.0, softening=1e-2
     )
     state = fmm.prepare_state(positions, masses, max_order=order, leaf_size=leaf)
 
@@ -93,13 +105,13 @@ def _bench(n, *, basis="complex", theta=0.5, order=4, leaf=32, reps=5, seed=0):
     return t_fwd, t_vg, mode
 
 
-def _fused_m2l_flag() -> bool:
-    return os.environ.get(
-        "JACCPOT_STATIC_STRICT_FUSED_M2L_PALLAS", "0"
-    ).strip().lower() in {"1", "true", "yes", "on"}
+def _env_on(name: str) -> bool:
+    return os.environ.get(name, "0").strip().lower() in {"1", "true", "yes", "on"}
 
 
 def main():
+    use_pallas = "--use-pallas" in sys.argv
+
     # Report whether the fused-Pallas M2L fast lane is requested AND actually
     # engaged on this hardware (the gates require an Ampere+ GPU; they fall back
     # to the pure-JAX M2L otherwise).
@@ -108,12 +120,23 @@ def main():
         _real_m2l_pallas_active,
     )
 
-    requested = _fused_m2l_flag()
+    requested = _env_on("JACCPOT_STATIC_STRICT_FUSED_M2L_PALLAS")
     engaged = bool(_fused_complex_m2l_pallas_active() and _real_m2l_pallas_active())
     m2l = "fused-Pallas" if (requested and engaged) else "pure-JAX"
     if requested and not engaged:
         m2l = "pure-JAX (fused-Pallas requested but unsupported here)"
     print(f"M2L path: {m2l}", flush=True)
+
+    if _env_on("JACCPOT_DIFFERENTIABLE_NEARFIELD_FAST_LANE"):
+        near = "leaf-major fast lane " + (
+            "(fused Pallas)" if use_pallas else "(pure-JAX)"
+        )
+    else:
+        near = "bucketed edge list"
+        if use_pallas:
+            near += " (--use-pallas ignored: it only steers the fast lane)"
+    print(f"Near-field path: {near}", flush=True)
+
     print(
         f"{'N':>8} {'basis':>8} {'mode':>6} {'fwd (ms)':>12} {'fwd+bwd (ms)':>14} {'ratio':>8}",
         flush=True,
@@ -121,7 +144,7 @@ def main():
     for basis in ("complex", "real"):
         for n in (256, 1024, 4096):
             try:
-                t_fwd, t_vg, mode = _bench(n, basis=basis)
+                t_fwd, t_vg, mode = _bench(n, basis=basis, use_pallas=use_pallas)
                 print(
                     f"{n:>8} {basis:>8} {mode:>6} {1e3 * t_fwd:>12.2f} "
                     f"{1e3 * t_vg:>14.2f} {t_vg / t_fwd:>8.2f}",

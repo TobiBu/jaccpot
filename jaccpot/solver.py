@@ -789,6 +789,11 @@ class FastMultipoleMethod:
         :meth:`prepare_state` (tree construction is not traceable), then
         differentiate this method. Requires a radix ``FMMPreparedState`` with a
         solidfmm basis. See ``docs/differentiable_fmm_design.md``.
+
+        Two opt-in fast lanes, both off by default:
+        ``JACCPOT_STATIC_STRICT_FUSED_M2L_PALLAS=1`` for the fused-Pallas M2L and
+        ``JACCPOT_DIFFERENTIABLE_NEARFIELD_FAST_LANE=1`` for the leaf-major near
+        field (the dominant term in both directions).
         """
         return self._impl.differentiable_accelerations(
             state,
