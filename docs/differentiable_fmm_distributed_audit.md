@@ -260,6 +260,32 @@ buffer instead of exchanging ragged blocks point-to-point, i.e.
 O(ndev × capacity) rather than O(actual halo). That is why it is scoped to the
 gradient path and the forward keeps the native exchange.
 
+**Do we even need the ragged primitive?** No. The halo exchange only has to move
+each requested leaf's particles from owner to requester; `ragged_all_to_all` is a
+*padding* optimisation for irregular sizes, not a requirement. Measured on 2xA100,
+all three alternatives are exact under `jit` + `grad` **and** leave the forward
+intact afterwards:
+
+| exchange | VJP vs FD | forward after grad | communication |
+| --- | --- | --- | --- |
+| `jax.lax.ragged_all_to_all` | exact | **CORRUPT** | O(actual halo) |
+| `jax.lax.all_to_all`, fixed per-peer block | 7.0e-09 | stable | O(ndev x block) |
+| `jax.lax.ppermute` ring, ndev-1 shifts | 2.2e-09 | stable | O(ndev x block) |
+| `jax.lax.all_gather` (the `"buf"` path we ship) | 7.0e-09 | stable | O(ndev^2 x block) |
+
+So the workaround we ship is the *most* expensive of the three safe options, by a
+factor `ndev`. **`all_to_all` is the better replacement**, and
+`yggdrax.distributed.comm.all_to_all_dense` already implements exactly that shape
+(`[ndev, capacity, *feat]` in, per-source blocks out) — `import_near_halo` simply
+does not route through it. Upgrading means either teaching `import_near_halo` to
+take an exchange backend or writing a jaccpot-side halo exchange over
+`all_to_all_dense`.
+
+Not done here, deliberately: at the only device count we have verified (ndev=2)
+the win is 2x on one stage of a pipeline whose hotspot is unprofiled, so it is a
+**scaling** improvement to make when >2 GPUs are actually in play — and the cost
+model above says the gap widens as `ndev` grows (8x at ndev=8).
+
 **Guard.** `tests/test_distributed_grad_correctness.py::test_forward_survives_a_gradient`
 asserts a forward evaluated after a gradient is bit-identical, for both the
 differentiable and the forward-only evaluator. Without that assertion this class
