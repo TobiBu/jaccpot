@@ -31,7 +31,8 @@ Tree construction and traversal artifacts are provided by the companion package
 - Modular runtime with grouped/dense interaction pathways
 - Near-field and far-field execution paths with optional prepared state reuse
 - Explicit octree execution backend for `basis="solidfmm"`
-- Differentiable gravitational acceleration helper via JAX autodiff
+- **End-to-end differentiable FMM force** — exact `jax.grad`/`jax.vjp` gradients w.r.t. positions and masses at fixed topology, verified from N=64 to N=1,000,000 (see [Differentiable FMM](#differentiable-fmm))
+- Differentiable direct-sum helper via JAX autodiff, retained as the exact-gradient oracle
 
 ## Installation
 
@@ -139,7 +140,7 @@ Current higher-order status:
 
 There is also a worked example notebook for jerk, snap, and crackle, including
 a small-`N` direct-sum accuracy check:
-[`examples/time_derivatives_demo.ipynb`](/Users/buck/Documents/Nexus/Projects/jaccpot/examples/time_derivatives_demo.ipynb).
+[`examples/time_derivatives_demo.ipynb`](examples/time_derivatives_demo.ipynb).
 
 ### Jerk Mode Guide
 
@@ -288,8 +289,8 @@ Other available knobs:
 
 Examples:
 
-- [examples/real_sh_adaptive_order.ipynb](/Users/buck/Documents/Nexus/Projects/jaccpot/examples/real_sh_adaptive_order.ipynb)
-- [examples/real_sh_rot_scale_demo.py](/Users/buck/Documents/Nexus/Projects/jaccpot/examples/real_sh_rot_scale_demo.py)
+- [examples/real_sh_adaptive_order.ipynb](examples/real_sh_adaptive_order.ipynb)
+- [examples/real_sh_rot_scale_demo.py](examples/real_sh_rot_scale_demo.py)
 
 ## Reproducible Comparison Modes
 
@@ -398,7 +399,76 @@ Current behavior:
 On the current `expanse` CPU environment, the example reports fallback rather
 than true Pallas execution:
 
-- [examples/pallas_m2l_speed.py](/Users/buck/Documents/Nexus/Projects/jaccpot/examples/pallas_m2l_speed.py)
+- [examples/pallas_m2l_speed.py](examples/pallas_m2l_speed.py)
+
+## Differentiable FMM
+
+`FastMultipoleMethod.differentiable_accelerations` gives **exact gradients of the
+FMM force** with respect to particle positions and masses. The tree topology is
+held fixed from a pre-built state while the numeric pipeline (P2M, centre-of-mass
+expansion centres, the M2M/M2L/L2L translations, L2P, near-field P2P) is
+re-evaluated on the live inputs, so `jax.grad` transposes it exactly.
+
+```python
+import jax, jax.numpy as jnp
+from jaccpot import FastMultipoleMethod
+
+fmm = FastMultipoleMethod(basis="real", theta=0.6, softening=1e-3)
+
+# Build the topology ONCE, outside the differentiated function --
+# prepare_state does host-side tree construction and is not traceable.
+state = fmm.prepare_state(positions0, masses0, max_order=4, leaf_size=64)
+
+def loss(positions, masses):
+    return jnp.sum(fmm.differentiable_accelerations(state, positions, masses) ** 2)
+
+grad_positions, grad_masses = jax.grad(loss, argnums=(0, 1))(positions, masses)
+```
+
+Gradients match `jax.grad` of an exact direct O(N²) sum to the FMM's own **force**
+accuracy, not to machine precision.
+
+### At galaxy scale
+
+The `large_n_gpu` preset is differentiable and is the leanest configuration
+measured. It needs `retain_far_pairs_for_grad=True` so the frozen M2L pair list
+survives `prepare_state`:
+
+```python
+fmm = FastMultipoleMethod(preset="large_n_gpu", basis="real")
+state = fmm.prepare_state(
+    positions0, masses0, max_order=4, leaf_size=256,
+    retain_far_pairs_for_grad=True,
+)
+```
+
+A100 40 GB, fp32, θ=0.7, order 4, clustered galaxy disc (steady-state):
+
+| N | forward | forward+backward | reverse peak memory |
+|---|---|---|---|
+| 200 k | 0.86 s | 2.59 s | 2.62 GB |
+| 1 M | 2.50 s | 66.4 s | 11.07 GB |
+
+### Tuning
+
+Pass a `GradConfig`. Its most important field is `nearfield_lane`, which selects
+the near-field traversal — the near field is ~83% of the forward and ~91% of the
+reverse. It defaults to `"auto"`, which switches to the leaf-major fast lane at
+N ≥ 100 000 because the bucketed reverse **OOMs** at that scale (30 GB peak at
+200 k against the fast lane's 6.8 GB):
+
+```python
+from jaccpot import GradConfig
+
+cfg = GradConfig(nearfield_lane="fast_lane", fused_m2l_pallas=True)
+accel = fmm.differentiable_accelerations(state, positions, masses, grad_config=cfg)
+```
+
+Every field falls back to a `JACCPOT_*` environment variable when left `None`, so
+existing env-configured scripts keep working; an explicit field always wins.
+
+Full guide, contract, limits, and troubleshooting:
+**[docs/differentiable_fmm.md](docs/differentiable_fmm.md)**.
 
 ## Topology Reuse
 
@@ -420,7 +490,7 @@ topology/traversal artifacts when the Morton ordering key remains unchanged.
 
 Example:
 
-- [examples/reuse_topology_demo.py](/Users/buck/Documents/Nexus/Projects/jaccpot/examples/reuse_topology_demo.py)
+- [examples/reuse_topology_demo.py](examples/reuse_topology_demo.py)
 
 ## Development
 
@@ -448,9 +518,9 @@ pytest --cov=jaccpot --cov-report=term-missing
 
 CI also runs a benchmark regression guard based on:
 
-- [bench/bench_parallel_paths.py](/Users/buck/Documents/Nexus/Projects/jaccpot/bench/bench_parallel_paths.py)
-- [bench/ci_benchmark_guard.py](/Users/buck/Documents/Nexus/Projects/jaccpot/bench/ci_benchmark_guard.py)
-- [bench/benchmark_baseline.json](/Users/buck/Documents/Nexus/Projects/jaccpot/bench/benchmark_baseline.json)
+- [bench/bench_parallel_paths.py](bench/bench_parallel_paths.py)
+- [bench/ci_benchmark_guard.py](bench/ci_benchmark_guard.py)
+- [bench/benchmark_baseline.json](bench/benchmark_baseline.json)
 
 Run the lightweight runtime-path benchmark and CI guard locally:
 

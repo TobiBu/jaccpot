@@ -1,5 +1,11 @@
 # Differentiable FMM — Phase 1 design
 
+> **Looking for how to *use* this?** See
+> [`differentiable_fmm.md`](differentiable_fmm.md) — contract, recipes, the
+> `GradConfig` tuning table, limits, and troubleshooting. This document is the
+> engineering record: what was measured, what was tried and reverted, and why.
+> Read it before changing the reverse pass.
+
 Scope: exact gradients of the **single-GPU** FMM force w.r.t. particle **positions**
 and **masses** (self-gravity). Out of scope (deferred): external-potential-parameter
 gradients, multi-step trajectory differentiation, distributed/multi-GPU gradients, and
@@ -800,6 +806,17 @@ spatially compact, and that is upstream of padding, valid work, and the forward.
 (b) CSR sources instead of a rectangle, which would remove padding at any N rather than
 only where tiering pays. Reverse peak is 11.07 GB of 40 GB, so all of this is throughput,
 not a memory wall. Reverse *compile* is ~25 min at 1M.
+
+**(b) has since been measured — see `differentiable_fmm_csr_sources_plan.md`.** The
+short version, and it corrects an assumption implicit above: fill is dominated by
+**geometry**, not by the pathological leaf or by N alone. At N=200000, leaf 256, with
+everything else equal, a uniform cube fills 21.8% of the rectangle and a clustered disc
+fills 80.8%; at 1M it is 5.9% vs 39.9%. The "45.3% at 200k / 14.5% at 1M" recorded above
+is therefore a property of the particle distribution being measured, not of the payload
+representation. Consequence for the decision: after the tiering that already ships, CSR's
+residual gain is 1.16-1.78x on a galaxy disc (decline) but 2.50x against a 16.8x raw
+ceiling on a uniform 1M volume (worth building, if cosmological volumes are a target).
+`bench/audit_nearfield_padding.py` reproduces all of it without running a reverse pass.
 
 **Method note.** Three of the four optimisations attempted across PR-4 and this section
 were predicted to win and did not: the leaf-major traversal (±20% at N≤4096, though it

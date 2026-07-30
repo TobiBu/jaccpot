@@ -13,24 +13,26 @@ state sweeps (see ``docs/differentiable_fmm_design.md`` "jit limitation"), so
 this benchmark times the jitted path where available and otherwise reports the
 bare (eager-dispatch) timing.
 
-Two paths are toggles, both read at trace time -- A/B them with separate process
-invocations so a stale compilation cache cannot leak across modes:
+Two paths are toggles, both read at TRACE time -- A/B them with separate process
+invocations so a stale compilation cache cannot leak across modes. Both are set
+here through ``GradConfig`` (the supported interface); the ``JACCPOT_*``
+environment variables remain equivalent fallbacks.
 
-* **M2L.** By default the differentiable path uses the pure-JAX M2L;
-  ``JACCPOT_STATIC_STRICT_FUSED_M2L_PALLAS=1`` (Ampere+ GPU) opts into the
-  differentiable fused-Pallas M2L fast lane (the fused kernels carry a
-  ``custom_vjp``; see ``docs/differentiable_fmm_design.md`` PR-2).
-* **Near field.** By default the grad path uses the bucketed edge-list kernel;
-  ``JACCPOT_DIFFERENTIABLE_NEARFIELD_FAST_LANE=1`` re-expresses the near field
+* **M2L.** ``--fused-m2l`` sets ``GradConfig(fused_m2l_pallas=True)``, opting into
+  the differentiable fused-Pallas M2L on an Ampere+ GPU (the fused kernels carry
+  a ``custom_vjp``). Default is the pure-JAX M2L.
+* **Near field.** ``--near-field {auto,bucketed,fast_lane}`` sets
+  ``GradConfig(nearfield_lane=...)``. ``fast_lane`` re-expresses the near field
   leaf-major and routes it through the radix fast lane and its analytic O(N)
-  leaf-pair reverse (PR-3). Same edge set, same force -- a different traversal.
-  Pair it with ``--use-pallas`` to run the fused-Pallas leaf-major kernel rather
-  than the pure-JAX leaf-major fallback.
+  leaf-pair reverse. Same edge set, same force -- a different traversal. Pair it
+  with ``--use-pallas`` to run the fused-Pallas leaf-major kernel rather than the
+  pure-JAX leaf-major fallback. The default ``auto`` picks bucketed below
+  N=100000 and the fast lane at or above it.
 
-    python examples/differentiable_fmm_overhead.py                              # pure-JAX M2L, bucketed near field
-    JACCPOT_STATIC_STRICT_FUSED_M2L_PALLAS=1 python examples/differentiable_fmm_overhead.py  # fused Pallas M2L
-    JACCPOT_DIFFERENTIABLE_NEARFIELD_FAST_LANE=1 python examples/differentiable_fmm_overhead.py  # leaf-major near field
-    JACCPOT_DIFFERENTIABLE_NEARFIELD_FAST_LANE=1 python examples/differentiable_fmm_overhead.py --use-pallas
+    python examples/differentiable_fmm_overhead.py                                    # defaults
+    python examples/differentiable_fmm_overhead.py --fused-m2l                        # fused Pallas M2L
+    python examples/differentiable_fmm_overhead.py --near-field fast_lane             # leaf-major near field
+    python examples/differentiable_fmm_overhead.py --near-field fast_lane --use-pallas
 
 Run (selects a free GPU via autocvd, per the repo policy):
 
@@ -58,11 +60,20 @@ jax.config.update("jax_enable_x64", True)
 
 import numpy as np
 
-from jaccpot import FastMultipoleMethod
+from jaccpot import FastMultipoleMethod, GradConfig
 
 
 def _bench(
-    n, *, basis="complex", theta=0.5, order=4, leaf=32, reps=5, seed=0, use_pallas=False
+    n,
+    *,
+    basis="complex",
+    theta=0.5,
+    order=4,
+    leaf=32,
+    reps=5,
+    seed=0,
+    use_pallas=False,
+    grad_config=None,
 ):
     rng = np.random.default_rng(seed)
     positions = jnp.asarray(rng.normal(size=(n, 3)), dtype=jnp.float64)
@@ -72,10 +83,13 @@ def _bench(
     )
     state = fmm.prepare_state(positions, masses, max_order=order, leaf_size=leaf)
 
-    def scalar(p, m):
-        return jnp.sum(fmm.differentiable_accelerations(state, p, m) ** 2)
+    def accel(p, m):
+        return fmm.differentiable_accelerations(state, p, m, grad_config=grad_config)
 
-    fwd_eager = lambda p, m: fmm.differentiable_accelerations(state, p, m)
+    def scalar(p, m):
+        return jnp.sum(accel(p, m) ** 2)
+
+    fwd_eager = accel
     vg_eager = jax.value_and_grad(scalar, argnums=(0, 1))
 
     # Prefer the jitted path; fall back to bare eager dispatch when the whole
@@ -111,23 +125,37 @@ def _env_on(name: str) -> bool:
 
 def main():
     use_pallas = "--use-pallas" in sys.argv
+    fused_m2l = "--fused-m2l" in sys.argv or _env_on(
+        "JACCPOT_STATIC_STRICT_FUSED_M2L_PALLAS"
+    )
+    lane = "auto"
+    if "--near-field" in sys.argv:
+        lane = sys.argv[sys.argv.index("--near-field") + 1]
+    elif _env_on("JACCPOT_DIFFERENTIABLE_NEARFIELD_FAST_LANE"):
+        lane = "fast_lane"
+    grad_config = GradConfig(nearfield_lane=lane, fused_m2l_pallas=fused_m2l)
 
     # Report whether the fused-Pallas M2L fast lane is requested AND actually
     # engaged on this hardware (the gates require an Ampere+ GPU; they fall back
-    # to the pure-JAX M2L otherwise).
+    # to the pure-JAX M2L otherwise). The gates are context-locals, so ask them
+    # inside the same override scope the benchmark will run under.
+    from jaccpot.runtime.grad_options import grad_option_overrides, resolve_grad_options
     from jaccpot.runtime.kernels.core import (
         _fused_complex_m2l_pallas_active,
         _real_m2l_pallas_active,
     )
 
-    requested = _env_on("JACCPOT_STATIC_STRICT_FUSED_M2L_PALLAS")
-    engaged = bool(_fused_complex_m2l_pallas_active() and _real_m2l_pallas_active())
-    m2l = "fused-Pallas" if (requested and engaged) else "pure-JAX"
-    if requested and not engaged:
+    options = resolve_grad_options(
+        grad_config, num_particles=0, supports_fast_lane=True
+    )
+    with grad_option_overrides(options):
+        engaged = bool(_fused_complex_m2l_pallas_active() and _real_m2l_pallas_active())
+    m2l = "fused-Pallas" if (fused_m2l and engaged) else "pure-JAX"
+    if fused_m2l and not engaged:
         m2l = "pure-JAX (fused-Pallas requested but unsupported here)"
     print(f"M2L path: {m2l}", flush=True)
 
-    if _env_on("JACCPOT_DIFFERENTIABLE_NEARFIELD_FAST_LANE"):
+    if lane == "fast_lane":
         near = "leaf-major fast lane " + (
             "(fused Pallas)" if use_pallas else "(pure-JAX)"
         )
@@ -144,7 +172,9 @@ def main():
     for basis in ("complex", "real"):
         for n in (256, 1024, 4096):
             try:
-                t_fwd, t_vg, mode = _bench(n, basis=basis, use_pallas=use_pallas)
+                t_fwd, t_vg, mode = _bench(
+                    n, basis=basis, use_pallas=use_pallas, grad_config=grad_config
+                )
                 print(
                     f"{n:>8} {basis:>8} {mode:>6} {1e3 * t_fwd:>12.2f} "
                     f"{1e3 * t_vg:>14.2f} {t_vg / t_fwd:>8.2f}",

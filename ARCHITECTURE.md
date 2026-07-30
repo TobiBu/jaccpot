@@ -179,8 +179,25 @@ derivative/jerk towers, and cached-vs-uncached M2L dispatch.
   differentiable radix run at N ≳ 10^5. `LargeNPreparedState` is differentiable via
   `runtime/_large_n_grad.py` (needs `retain_far_pairs_for_grad=True`), and the
   `large_n_gpu` preset is the leanest galaxy-scale option measured: **1M particles,
-  forward 2.5 s and forward+backward 69 s at 11 GB peak**. See
-  `docs/differentiable_fmm_audit.md` and `docs/differentiable_fmm_design.md`.
+  forward 2.5 s and forward+backward 69 s at 11 GB peak**.
+- **Configuring the grad path.** `GradConfig` (`jaccpot/config.py`) is the
+  supported interface; `runtime/grad_options.py` resolves it under
+  `explicit field > JACCPOT_* env var > measured default`, so the environment
+  variables above remain a working fallback. `nearfield_lane` defaults to
+  `"auto"` and switches to the fast lane at N >= 100000 — the bucketed reverse
+  OOMs there, so the crossover is applied rather than documented. Three gates
+  (fused-Pallas M2L, the two analytic VJP rules) are read at trace time deep in
+  the kernels with no argument channel; `grad_option_overrides` installs them as
+  context-locals for the duration of one call.
+- **Where the reverse rules live.** `nearfield/grad.py` holds both analytic
+  near-field reverses — `_pair_accel_cvjp` (bucketed, rematerialized pair terms)
+  and `_leafpair_accel_analytic_vjp` (leaf-major, O(N) memory) — plus the
+  occupancy-tier builder and its cache. The `custom_vjp` wrappers stay in
+  `near_field.py` next to the forward kernels they wrap, which is what keeps the
+  two modules acyclic.
+- **User guide:** `docs/differentiable_fmm.md`. Engineering history and the
+  measurement record: `docs/differentiable_fmm_audit.md` and
+  `docs/differentiable_fmm_design.md`.
 - `differentiable_gravitational_acceleration` remains the deliberately differentiable
   **direct O(N²) sum** — retained as the simple exact-gradient reference and the
   **gradient oracle** for tests (`grad(FMM)` must match `grad(direct-sum)` to FMM force
