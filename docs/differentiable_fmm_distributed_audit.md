@@ -292,18 +292,27 @@ mind** (see below); the ratios are order-of-magnitude, not benchmark-grade.
 | --- | --- | --- | --- | --- | --- |
 | 512 | default | 1.98 s | 22.3 s | 11.2x | 193 s |
 | 512 | default *(repeat, fresh process)* | 2.35 s | 17.1 s | 7.3x | 182 s |
-| 512 | 12 | 2.45 s | 16.1 s | 6.6x | 188 s |
+| 512 | 12 | 2.45 s | 16.13 s | 6.6x | 188 s |
+| 512 | 12 *(repeat, fresh process)* | 1.63 s | 16.17 s | 9.9x | 188 s |
 | 2048 | default | 10.6 s | 92.2 s | 8.7x | 269 s |
 | 2048 | 12 | 9.06 s | 96.4 s | 10.6x | 263 s |
 | 8192 | default | 27.3 s | 156.9 s | 5.7x | 377 s |
 
-**The measurement noise is large.** The *same* configuration (N=512, default)
-measured 22.3 s and 17.1 s in two runs -- ~30% -- because the host is shared and
-was under heavy load from other users. Do not read the absolute per-call times as
-throughput: they are implausible next to the single-GPU path (1 M particles forward
-in 2.5 s). The slow forward is pre-existing and not from the gradient work; it is
-the shipped distributed forward, dominated by fixed-size traversal buffers and a
-per-call topology rebuild rather than by N.
+**Compare forward+backward times, not ratios.** The repeats localise the noise: on
+a fresh process `forward+backward` reproduces to **0.2%** (16.13 s vs 16.17 s at
+N=512, `l2l=12`), while the *forward* alone swings ~50% on the same config
+(1.63-2.45 s) because the host is shared and was under load from other users. The
+**ratio column inherits that noise through its denominator** -- which is how the
+same tightened config reads 6.6x in one run and 9.9x in the next despite an
+identical backward. Across differently-conditioned processes even
+`forward+backward` moves (N=512 default: 22.3 s in a multi-config process, 17.1 s
+fresh), so only same-shape comparisons are meaningful.
+
+Do not read the absolute per-call times as throughput either: they are implausible
+next to the single-GPU path (1 M particles forward in 2.5 s). The slow forward is
+pre-existing and not from the gradient work; it is the shipped distributed forward,
+dominated by fixed-size traversal buffers and a per-call topology rebuild rather
+than by N.
 
 What survives the noise:
 
@@ -318,11 +327,11 @@ What does **not** hold up — and it is the claim this document made first:
   reported that tightening it cut the N=512 reverse from 11.2x to 6.3x (~1.8x) and
   called it "the first thing to fix for speed". That compared two runs made under
   different conditions. Controlled, same-conditions comparisons show
-  **~6% at N=512** (17.1 s -> 16.1 s) and **nothing at N=2048** (92.2 s -> 96.4 s,
-  i.e. inside the noise, if anything worse) -- despite the tightened bound running
-  13 L2L iterations instead of 127. So `l2l_num_levels` is a correctness knob with
-  a marginal performance effect, not a speed lever, and the safe default costs
-  little.
+  **~6% at N=512** (17.1 s -> 16.13/16.17 s, the tightened figure reproduced twice
+  to 0.2%) and **nothing at N=2048** (92.2 s -> 96.4 s, i.e. inside the noise, if
+  anything worse) -- despite the tightened bound running 13 L2L iterations instead
+  of 127. So `l2l_num_levels` is a correctness knob with a marginal performance
+  effect, not a speed lever, and the safe default costs little.
 * Which means **the real hotspot is unidentified**. By analogy with the single-GPU
   path (reverse 94-98% near field) the near field is the place to look, but that is
   an inference; no profile of the distributed reverse has been taken. Anyone
