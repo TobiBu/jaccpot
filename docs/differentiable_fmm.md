@@ -195,6 +195,31 @@ N=1 M.
 evaluates prebaked expansions and reads no live input, so differentiating it
 would return exactly zero; it now raises instead.
 
+**Multi-GPU** gradients are a separate entry point, not this one:
+
+```python
+from jaccpot.distributed import DistributedFMMConfig
+from jaccpot.distributed.fmm import make_force_evaluator, partition_for_devices
+
+part = partition_for_devices(positions, masses, ndev, leaf_size=config.leaf_size)
+evaluate = make_force_evaluator(
+    config, ndev, part["cap"], mesh, jit=True, differentiable=True
+)
+# gradients are w.r.t. the PADDED, per-device layout `part` produces;
+# `accel` rows come back in per-device Morton order -- map them with the gid output.
+g = jax.grad(lambda p, m: jnp.sum(evaluate(p, m, gid, counts)[0] ** 2))(pos_f, mass_f)
+```
+
+Same fixed-topology contract, but the topology is rebuilt inside every call (the
+tree build lives inside `shard_map`), so there is no state to hoist. Differentiate
+the evaluator, **not** `distributed_fmm_accelerations` — that one partitions and
+reassembles in NumPy and is not traceable. `nearfield_chunk` raises on this path.
+Verified for correctness on 2 GPUs only, and **not** characterised for
+performance; two knowingly slow choices are in force there (a loose static L2L
+level bound, tightenable with `l2l_num_levels`, and an `all_gather`-based halo
+exchange that works around an upstream ragged-collective bug). Details and
+measurements: `docs/differentiable_fmm_distributed_audit.md`.
+
 ---
 
 ## Performance notes

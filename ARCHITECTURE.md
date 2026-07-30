@@ -157,7 +157,7 @@ derivative/jerk towers, and cached-vs-uncached M2L dispatch.
 - **Advanced config** is the `FMMAdvancedConfig` group (tree / farfield /
   nearfield / runtime); `fmm_state._resolve_fmm_config` normalises constructor
   inputs into a validated `FMMResolvedConfig`.
-- **End-to-end differentiable FMM.** `FastMultipoleMethod.differentiable_accelerations(state, positions, masses)`
+- **End-to-end differentiable FMM (single GPU).** `FastMultipoleMethod.differentiable_accelerations(state, positions, masses)`
   gives exact gradients of the FMM force w.r.t. particle **positions** and **masses**
   under a fixed-topology contract: the tree (Morton order, node membership, MAC
   accept/reject, the M2L interaction list, near/far partition) is held constant from a
@@ -195,9 +195,31 @@ derivative/jerk towers, and cached-vs-uncached M2L dispatch.
   occupancy-tier builder and its cache. The `custom_vjp` wrappers stay in
   `near_field.py` next to the forward kernels they wrap, which is what keeps the
   two modules acyclic.
+- **Differentiable multi-GPU FMM.** `distributed.make_force_evaluator(config, ndev,
+  cap, mesh, differentiable=True)` puts the `shard_map` pipeline under
+  `jax.grad`/`jax.vjp` under the same fixed-topology contract. Because the tree is
+  built *inside* `shard_map` (there is no host-side `prepare_state` here), the seam
+  is in the body: topology from `stop_gradient`-ed inputs, numerics re-evaluated on
+  the live ones. Forward values are bit-identical. Three distributed-specific
+  points: the near field must go through `_radix_fast_lane_prepacked_accel_cvjp`
+  (raw `pallas_call` has no autodiff rule) and `nearfield_chunk` therefore raises;
+  the L2L cascade needs a **static** level bound, whose safe default
+  (`num_internal - 1`) is loose, tightenable via `l2l_num_levels`, and reports
+  truncation as `l2l_level_overflow`; and the halo exchange is forced onto the
+  `all_gather`-based ragged path, because executing the reverse of
+  `jax.lax.ragged_all_to_all` corrupts every later ragged exchange in the process
+  (`_buffered_ragged_exchange`, and the guard test
+  `test_forward_survives_a_gradient`). Verified on 2 GPUs at N=64: FD-vs-AD 2.7e-08
+  (positions) / 5.9e-09 (masses), `grad(FMM)` vs `grad(direct sum)` 1.1e-03 /
+  4.5e-03 against a 5.9e-03 forward force error. **Not** characterised for
+  performance, and untested above 2 devices — see
+  `docs/differentiable_fmm_distributed_audit.md` ("What is not covered"). The
+  host-side `distributed_fmm_accelerations` stays non-differentiable (NumPy
+  partition + reassembly).
 - **User guide:** `docs/differentiable_fmm.md`. Engineering history and the
-  measurement record: `docs/differentiable_fmm_audit.md` and
-  `docs/differentiable_fmm_design.md`.
+  measurement record: `docs/differentiable_fmm_audit.md`,
+  `docs/differentiable_fmm_design.md`, and for multi-GPU
+  `docs/differentiable_fmm_distributed_audit.md`.
 - `differentiable_gravitational_acceleration` remains the deliberately differentiable
   **direct O(N²) sum** — retained as the simple exact-gradient reference and the
   **gradient oracle** for tests (`grad(FMM)` must match `grad(direct-sum)` to FMM force
