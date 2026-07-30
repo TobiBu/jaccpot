@@ -284,36 +284,49 @@ cluster per Morton domain, so the cross-domain path is genuinely engaged).
 
 ## Cost: correct, not fast
 
-First measurement, same 2xA100 host, `jit=True`, steady state (median of 3 after
-warmup), forward = the shipped `differentiable=False` evaluator:
+2xA100 host, `jit=True`, steady state (median of 3 after warmup), forward = the
+shipped `differentiable=False` evaluator. **Read this table with its noise in
+mind** (see below); the ratios are order-of-magnitude, not benchmark-grade.
 
-| N | forward | forward+backward | ratio | reverse compile |
-| --- | --- | --- | --- | --- |
-| 512 | 1.98 s | 22.3 s | **11.2x** | 193 s |
-| 2048 | 10.6 s | 92.2 s | **8.7x** | 269 s |
-| 8192 | 27.3 s | 156.9 s | **5.7x** | 377 s |
-| 512, `l2l_num_levels=12` | 2.65 s | 16.7 s | **6.3x** | 146 s |
+| N | `l2l_num_levels` | forward | forward+backward | ratio | reverse compile |
+| --- | --- | --- | --- | --- | --- |
+| 512 | default | 1.98 s | 22.3 s | 11.2x | 193 s |
+| 512 | default *(repeat, fresh process)* | 2.35 s | 17.1 s | 7.3x | 182 s |
+| 512 | 12 | 2.45 s | 16.1 s | 6.6x | 188 s |
+| 2048 | default | 10.6 s | 92.2 s | 8.7x | 269 s |
+| 2048 | 12 | 9.06 s | 96.4 s | 10.6x | 263 s |
+| 8192 | default | 27.3 s | 156.9 s | 5.7x | 377 s |
 
-Read the **ratios**, not the absolute times: the host is shared and was under
-heavy load from other users during the run, and the absolute per-call figures are
-implausible next to the single-GPU path (1 M particles forward in 2.5 s). The slow
-forward is pre-existing and not from the gradient work -- it is the shipped
-distributed forward, dominated by fixed-size traversal buffers and a per-call
-topology rebuild rather than by N. Peak memory is not reported per row because
-`peak_bytes_in_use` is a process high-water mark and the sweep shared one process.
+**The measurement noise is large.** The *same* configuration (N=512, default)
+measured 22.3 s and 17.1 s in two runs -- ~30% -- because the host is shared and
+was under heavy load from other users. Do not read the absolute per-call times as
+throughput: they are implausible next to the single-GPU path (1 M particles forward
+in 2.5 s). The slow forward is pre-existing and not from the gradient work; it is
+the shipped distributed forward, dominated by fixed-size traversal buffers and a
+per-call topology rebuild rather than by N.
 
-What the numbers do support:
+What survives the noise:
 
-* The reverse costs a **single-digit-to-low-double-digit multiple** of the
-  forward, improving with N (11.2x -> 5.7x from 512 to 8192) as fixed overheads
-  amortise.
-* **The loose static L2L bound is a real, measurable tax**: tightening it at N=512
-  cut the reverse from 11.2x to 6.3x (~1.8x on the backward) and the reverse
-  compile from 193 s to 146 s. It is the first thing to fix for speed, and
-  `l2l_num_levels` already exposes the lever -- what is missing is a *safe* tight
-  bound derived on the host rather than a shape.
-* **Reverse compile time (2.5-6 min) is itself a usability problem** at these
-  sizes, mirroring the single-GPU path's known ~10 min at N=16384.
+* The reverse costs a **single-digit multiple of the forward**, roughly 6-11x at
+  these sizes.
+* **Reverse compile time (3-6 min) is a usability problem** in its own right,
+  mirroring the single-GPU path's known ~10 min at N=16384.
+
+What does **not** hold up — and it is the claim this document made first:
+
+* **The loose static L2L bound is not the bottleneck.** An earlier revision
+  reported that tightening it cut the N=512 reverse from 11.2x to 6.3x (~1.8x) and
+  called it "the first thing to fix for speed". That compared two runs made under
+  different conditions. Controlled, same-conditions comparisons show
+  **~6% at N=512** (17.1 s -> 16.1 s) and **nothing at N=2048** (92.2 s -> 96.4 s,
+  i.e. inside the noise, if anything worse) -- despite the tightened bound running
+  13 L2L iterations instead of 127. So `l2l_num_levels` is a correctness knob with
+  a marginal performance effect, not a speed lever, and the safe default costs
+  little.
+* Which means **the real hotspot is unidentified**. By analogy with the single-GPU
+  path (reverse 94-98% near field) the near field is the place to look, but that is
+  an inference; no profile of the distributed reverse has been taken. Anyone
+  optimising this should start by profiling, not by tightening the L2L bound.
 
 **The obvious escape route does not work.** Since the JAX bug needs `jax.jit` to
 trigger, `jit=False` plus the *fast* native ragged exchange should have been
