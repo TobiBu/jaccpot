@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import os
+import warnings
+from collections import OrderedDict
 from dataclasses import dataclass
 from functools import partial
 from typing import Any, Optional, Union
@@ -18,6 +20,22 @@ from yggdrax.dtypes import INDEX_DTYPE, as_index
 from yggdrax.interactions import NodeNeighborList
 from yggdrax.tree import Tree
 
+from jaccpot._env import env_flag, env_float, env_int
+from jaccpot.runtime.grad_options import (
+    LeafPairReverseOptions,
+    analytic_p2p_vjp_enabled,
+)
+
+from .grad import (
+    _check_float_id_range,
+    _leafpair_accel_analytic_vjp,
+    _leafpair_reverse_tiers_cached,
+    _pair_accel_cvjp,
+    _pair_accel_masked_accels,
+    build_leafpair_reverse_tiers,
+    clear_leafpair_reverse_tier_cache,
+)
+
 _LARGE_N_NEARFIELD_DIAG_MODES = frozenset(("full", "self_only", "pairs_only", "zero"))
 
 
@@ -30,21 +48,11 @@ def _large_n_nearfield_diag_mode() -> str:
     return mode if mode in _LARGE_N_NEARFIELD_DIAG_MODES else "full"
 
 
-def _env_flag(name: str, default: bool = False) -> bool:
-    raw = os.environ.get(name)
-    if raw is None:
-        return bool(default)
-    return str(raw).strip().lower() in {"1", "true", "yes", "on"}
-
-
-def _env_int(name: str, default: int = 0) -> int:
-    raw = os.environ.get(name)
-    if raw is None:
-        return int(default)
-    try:
-        return int(str(raw).strip())
-    except (TypeError, ValueError):
-        return int(default)
+# Unclamped by design: several near-field knobs use 0 as "unset, pick a default"
+# (JACCPOT_NEARFIELD_PALLAS_NUM_WARPS, ..._TARGET_SUBTILE), so a minimum of 1
+# would turn "auto" into a real, wrong value.
+_env_flag = env_flag
+_env_int = env_int
 
 
 @dataclass(frozen=True)
@@ -441,187 +449,6 @@ def _pair_contributions(
     return accels, None
 
 
-# Analytic near-field P2P reverse is on by default; JACCPOT_ANALYTIC_P2P_VJP=0
-# restores plain autodiff for A/B measurement.
-_ANALYTIC_P2P_VJP = os.environ.get(
-    "JACCPOT_ANALYTIC_P2P_VJP", "1"
-).strip().lower() not in (
-    "0",
-    "false",
-    "no",
-)
-
-
-def _pair_accel_masked_accels(
-    target_positions: Array,
-    source_positions: Array,
-    source_masses: Array,
-    target_mask: Array,
-    source_mask: Array,
-    softening_sq: Union[float, Array],
-    G: Array,
-) -> Array:
-    """Accel-only batched pair contributions (matches the accel output of
-    :func:`_pair_contributions_batched`)."""
-    diff = target_positions[:, :, None, :] - source_positions[:, None, :, :]
-    dist_sq = jnp.sum(diff * diff, axis=-1) + softening_sq
-    pair_mask = target_mask[:, :, None] & source_mask[:, None, :]
-    safe_dist_sq = jnp.where(pair_mask, dist_sq, jnp.ones_like(dist_sq))
-    inv_r = jnp.where(pair_mask, lax.rsqrt(safe_dist_sq), 0.0)
-    inv_dist3 = jnp.where(pair_mask, inv_r * inv_r * inv_r, 0.0)
-    weighted = inv_dist3 * source_masses[:, None, :]
-    accels = -G * jnp.sum(weighted[..., None] * diff, axis=2)
-    return jnp.where(target_mask[..., None], accels, 0.0)
-
-
-def _pair_accel_pair_terms(
-    target_positions: Array,
-    source_positions: Array,
-    target_mask: Array,
-    source_mask: Array,
-    softening_sq: Union[float, Array],
-) -> Tuple[Array, Array, Array]:
-    """``(diff, inv_dist3, inv_dist5)`` exactly as :func:`_pair_accel_masked_accels`
-    forms them.
-
-    Factored out so the analytic reverse rule can REMATERIALIZE these
-    ``(B, Wt, Ws)``-shaped pair intermediates instead of carrying them in the
-    ``custom_vjp`` residual, without the forward and reverse expressions drifting
-    apart. See :func:`_pair_accel_cvjp_fwd` for why that matters.
-    """
-    diff = target_positions[:, :, None, :] - source_positions[:, None, :, :]
-    dist_sq = jnp.sum(diff * diff, axis=-1) + softening_sq
-    pair_mask = target_mask[:, :, None] & source_mask[:, None, :]
-    safe_dist_sq = jnp.where(pair_mask, dist_sq, jnp.ones_like(dist_sq))
-    inv_r = jnp.where(pair_mask, lax.rsqrt(safe_dist_sq), 0.0)
-    inv_dist3 = jnp.where(pair_mask, inv_r * inv_r * inv_r, 0.0)
-    inv_dist5 = jnp.where(pair_mask, inv_dist3 * inv_r * inv_r, 0.0)
-    return diff, inv_dist3, inv_dist5
-
-
-@jax.custom_vjp
-def _pair_accel_cvjp(
-    target_positions: Array,
-    source_positions: Array,
-    source_masses: Array,
-    target_mask_f: Array,
-    source_mask_f: Array,
-    softening_sq: Array,
-    G: Array,
-) -> Array:
-    """Accel-only batched near-field pair kernel with an analytic reverse rule.
-
-    All arguments are float arrays (masks as 0/1 floats), so the reverse returns
-    ordinary zero cotangents for the non-differentiated inputs (masks, softening,
-    G) -- no closure over tracers (which ``custom_vjp`` forbids). The forward is
-    byte-identical to the accel output of :func:`_pair_contributions_batched`; the
-    reverse is the analytic symmetric near-field tidal tensor
-    ``J = -G Σ_s m_s (I/r³ − 3 r rᵀ/r⁵)`` contracted with the output cotangent
-    (``Jᵀc = Jc``) in one extra pair pass -- exactly the reverse rule a future
-    fused-Pallas near-field ``custom_vjp`` reuses. Verified bit-for-bit against
-    autodiff in ``tests/unit/test_custom_vjp_parity.py``.
-    """
-    target_mask = target_mask_f > 0.5
-    source_mask = source_mask_f > 0.5
-    return _pair_accel_masked_accels(
-        target_positions,
-        source_positions,
-        source_masses,
-        target_mask,
-        source_mask,
-        softening_sq,
-        G,
-    )
-
-
-def _pair_accel_cvjp_fwd(
-    target_positions,
-    source_positions,
-    source_masses,
-    target_mask_f,
-    source_mask_f,
-    softening_sq,
-    G,
-):
-    # The residual carries only the O(B*W) INPUTS; the O(B*Wt*Ws) pair
-    # intermediates are rematerialized in the reverse pass. Storing
-    # (diff, inv_dist3, inv_dist5) instead cost 5 doubles per particle PAIR, and
-    # because the bucketed near-field drives this kernel from a ``lax.scan`` over
-    # edge chunks, reverse mode retained EVERY chunk's residual -- i.e.
-    # ``40 * near_field_edges * max_leaf_size**2`` bytes in total, independent of
-    # ``edge_chunk_size``. Measured: a single 52.14 GiB ``diff`` allocation at
-    # N=65536 / leaf 64 on a 40 GB A100, versus 1.13 GB for the whole forward.
-    # Recomputing costs one extra pair pass inside a backward that already
-    # materializes a (B, Wt, Ws, 3) array, and keeps the reverse residual
-    # O(edges * max_leaf_size) so galaxy-scale N fits.
-    accels = _pair_accel_masked_accels(
-        target_positions,
-        source_positions,
-        source_masses,
-        target_mask_f > 0.5,
-        source_mask_f > 0.5,
-        softening_sq,
-        G,
-    )
-    residual = (
-        target_positions,
-        source_positions,
-        source_masses,
-        target_mask_f,
-        source_mask_f,
-        jnp.asarray(softening_sq),
-        jnp.asarray(G),
-    )
-    return accels, residual
-
-
-def _pair_accel_cvjp_bwd(residual, cotangent):
-    (
-        target_positions,
-        source_positions,
-        source_masses,
-        target_mask_f,
-        source_mask_f,
-        softening_sq,
-        G,
-    ) = residual
-    # Rematerialize the pair intermediates the forward deliberately did not save
-    # (see _pair_accel_cvjp_fwd). Same expressions, so the analytic reverse below
-    # is unchanged bit-for-bit.
-    diff, inv_dist3, inv_dist5 = _pair_accel_pair_terms(
-        target_positions,
-        source_positions,
-        target_mask_f > 0.5,
-        source_mask_f > 0.5,
-        softening_sq,
-    )
-    # Forward masks accels by target_mask, so mask the incoming cotangent alike.
-    cot = jnp.where(target_mask_f[..., None] > 0.5, cotangent, 0.0)  # (B, Wt, 3)
-    cd = jnp.sum(cot[:, :, None, :] * diff, axis=-1)  # (B, Wt, Ws) = c_t · r_ts
-    m = source_masses[:, None, :, None]  # (B, 1, Ws, 1)
-    # per-pair P_{t,s,l} = m_s [ inv_dist3 c_{t,l} - 3 inv_dist5 (c_t·r) r_l ]
-    pair = m * (
-        inv_dist3[..., None] * cot[:, :, None, :]
-        - 3.0 * inv_dist5[..., None] * cd[..., None] * diff
-    )  # (B, Wt, Ws, 3)
-    target_positions_bar = -G * jnp.sum(pair, axis=2)  # sum over sources
-    source_positions_bar = G * jnp.sum(pair, axis=1)  # sum over targets (3rd law)
-    source_masses_bar = -G * jnp.sum(inv_dist3 * cd, axis=1)  # sum over targets
-    # Zero cotangents for the non-differentiated inputs (masks, softening, G).
-    return (
-        target_positions_bar,
-        source_positions_bar,
-        source_masses_bar,
-        jnp.zeros_like(target_mask_f),
-        jnp.zeros_like(source_mask_f),
-        jnp.zeros_like(softening_sq),
-        jnp.zeros_like(G),
-    )
-
-
-_pair_accel_cvjp.defvjp(_pair_accel_cvjp_fwd, _pair_accel_cvjp_bwd)
-
-
 @partial(jax.jit, static_argnames=("compute_potential",))
 def _pair_contributions_batched(
     target_positions: Array,
@@ -635,7 +462,7 @@ def _pair_contributions_batched(
     compute_potential: bool,
 ) -> Tuple[Array, Optional[Array]]:
     """Vectorized pair contributions for a batch of target/source leaf pairs."""
-    if _ANALYTIC_P2P_VJP and not compute_potential:
+    if analytic_p2p_vjp_enabled() and not compute_potential:
         # Accel-only path (the differentiable path): route through the analytic
         # symmetric-tidal-tensor custom_vjp. Forward is byte-identical; masks are
         # passed as 0/1 floats and softening/G as arrays so the reverse needs no
@@ -3556,339 +3383,7 @@ def _radix_fast_lane_prepacked_pallas_decoupled(
     return pair_acc
 
 
-_FLOAT32_EXACT_INT_LIMIT = 2**24
-
-
-def _check_float_id_range(num_particles: int, dtype: Any, *, what: str) -> None:
-    """Refuse float id encoding when the ids would not be exactly representable.
-
-    ``custom_vjp`` rules must not close over tracers, so index/mask arrays have to
-    be passed as ordinary arguments -- and integer args would yield ``float0``
-    cotangents rather than plain zeros. The differentiable lanes therefore encode
-    ids as floats (reconstructed with ``round().astype``), which is exact only
-    below the mantissa bound.
-    """
-    if (
-        jnp.dtype(dtype) == jnp.float32
-        and int(num_particles) > _FLOAT32_EXACT_INT_LIMIT
-    ):
-        raise ValueError(
-            f"{what}: float32 represents integers exactly only up to "
-            f"{_FLOAT32_EXACT_INT_LIMIT} but N={int(num_particles)}. The "
-            "differentiable near-field lane encodes particle ids as floats (a "
-            "custom_vjp rule may not close over tracers, and integer args would "
-            "yield float0 cotangents), so ids beyond that bound would be silently "
-            "rounded. Use float64, or split the evaluation."
-        )
-
-
-_GRAD_REV_TIER_MAX = _env_int("JACCPOT_GRAD_REV_TIERS", 4)
-# Minimum predicted slot-visit reduction before tiering is worth its
-# indirection. See build_leafpair_reverse_tiers for the measurements behind 3.0.
-_GRAD_REV_TIER_MIN_GAIN = float(
-    os.environ.get("JACCPOT_GRAD_REV_TIER_MIN_GAIN", "3.0") or 3.0
-)
-
-
-def build_leafpair_reverse_tiers(
-    source_valid: Any,
-    *,
-    slot_tile: int,
-    max_tiers: Optional[int] = None,
-) -> Optional[Tuple[Tuple[Tuple[int, ...], int], ...]]:
-    """Partition leaves into static occupancy tiers for the analytic reverse.
-
-    The prepacked payload is a rectangle whose width is the GLOBAL maximum
-    neighbour count. That maximum comes from a single pathological leaf (measured:
-    exactly ``leaves - 1``, i.e. it neighbours every other leaf, at every N and
-    every geometry tried), while the median leaf uses a fraction of it -- fill is
-    45% at N=200000 and 14.5% at N=1000000. Every leaf therefore pays the worst
-    leaf's width.
-
-    This splits the leaves into a few groups by how many slots they actually use,
-    so each group's reverse pass reads only its own width. Two properties matter:
-
-    * widths are **static** (computed here, on the host, from the frozen topology),
-      so each pass compiles to a right-sized ``lax.scan``; and
-    * leaves keep their **Morton order within a tier** -- only the visiting order
-      across tiers changes, and source ids are never renumbered. A global
-      occupancy sort was tried instead and ran ~7x slower precisely because it
-      broke that locality.
-
-    Returns ``None`` when tiering cannot pay (one tier, or no usable split), which
-    keeps the single-pass path byte-identical. Leaf ids come back as plain int
-    tuples so the result is hashable -- it rides through the ``custom_vjp`` in
-    ``nondiff_argnums``, which JAX requires to be hashable and comparable.
-    """
-    valid = np.asarray(jax.device_get(source_valid))
-    num_leaves = int(valid.shape[0])
-    if num_leaves == 0:
-        return None
-    slots = int(np.prod(valid.shape[1:]))
-    counts = valid.reshape(num_leaves, slots).sum(axis=1)
-    tile = max(1, int(slot_tile))
-    # Round each leaf's occupancy up to a whole tile: that is the width its pass
-    # must read.
-    widths = (np.maximum(counts, 1) + tile - 1) // tile * tile
-    limit = int(_GRAD_REV_TIER_MAX if max_tiers is None else max_tiers)
-    if limit <= 1:
-        return None
-
-    unique = np.unique(widths)
-    if unique.size <= 1:
-        return None  # uniform occupancy: the rectangle is already right-sized
-    # Geometric tier edges: cheap, and matches how occupancy is distributed (a long
-    # tail of near-empty leaves under one very wide outlier).
-    edges = np.unique(
-        np.round(
-            np.geomspace(max(unique[0], tile), unique[-1], num=min(limit, unique.size))
-        ).astype(np.int64)
-    )
-    edges = (edges + tile - 1) // tile * tile
-
-    tiers: list[tuple[tuple[int, ...], int]] = []
-    lower = 0
-    for edge in edges:
-        members = np.nonzero((widths > lower) & (widths <= edge))[0]
-        if members.size:
-            # np.nonzero returns ascending indices => Morton order preserved.
-            tiers.append((tuple(int(i) for i in members), int(min(edge, slots))))
-        lower = int(edge)
-    if not tiers or len(tiers) == 1:
-        return None
-    covered = sum(len(t[0]) for t in tiers)
-    if covered != num_leaves:  # defensive: never silently drop a leaf
-        raise ValueError(
-            f"reverse tiering covered {covered} of {num_leaves} leaves; "
-            "every leaf must appear in exactly one tier"
-        )
-    # Accept only when the slot-visit saving is big enough to pay for the extra
-    # indirection. Tiering makes the target-side gather go through an index array
-    # instead of a consecutive range, and splits one scan into several smaller
-    # ones; both cost throughput, and at small leaf counts the per-pass fixed cost
-    # is amortised over very little work. MEASURED, near-field reverse only,
-    # contention-corrected against the untouched far-field row:
-    #
-    #   N=200000  (782 leaves): predicted 1.64x fewer slot visits -> 4.3x SLOWER
-    #   N=1000000 (3907 leaves): predicted 4.33x fewer slot visits -> 1.91x FASTER
-    #
-    # So the break-even predicted reduction lies between those; 3.0 is the
-    # conservative pick. Calibrated on exactly two points on one A100 -- re-measure
-    # before trusting it on other hardware or a very different occupancy profile.
-    tiered_slots = sum(len(t[0]) * int(t[1]) for t in tiers)
-    if tiered_slots <= 0:
-        return None
-    reduction = float(num_leaves * slots) / float(tiered_slots)
-    if reduction < _GRAD_REV_TIER_MIN_GAIN:
-        return None
-    return tuple(tiers)
-
-
-def _leafpair_accel_analytic_vjp(
-    leaf_positions: Array,
-    leaf_masses: Array,
-    leaf_mask: Array,
-    leaf_particle_idx: Array,
-    source_leaf_ids: Array,
-    source_valid: Array,
-    cotangent: Array,
-    *,
-    softening_sq: Array,
-    G: Array,
-    leaf_batch: int,
-    slot_tile: int,
-    skip_empty_tiles: bool = True,
-    occupancy_sort: bool = False,
-    tiers: Optional[Tuple[Tuple[Any, int], ...]] = None,
-) -> Tuple[Array, Array]:
-    """Analytic reverse of the leaf-pair near field in **O(N) memory**.
-
-    Returns ``(leaf_positions_bar, leaf_masses_bar)`` for a particle-order output
-    ``cotangent``.
-
-    Why hand-written rather than ``jax.vjp`` of a pure-JAX twin: a ``bwd`` rule is
-    never itself differentiated, so everything it computes is a *transient* bounded
-    by the tile size instead of a *residual* retained per scan iteration. Taking
-    the reverse from ``jax.vjp(twin)`` is correct but linearizes the twin, which
-    reinstates the twin's own O(edges * W) scan residuals as a peak during the
-    backward -- ~67 GB at N=1048576 on the canonical leaf-256 config. This form
-    keeps only O(N) accumulators, which is what makes 1M gradients reachable.
-
-    The contraction is the same symmetric near-field tidal tensor already used by
-    :func:`_pair_accel_cvjp_bwd`,
-    ``J = -G sum_s m_s (I/r^3 - 3 r r^T / r^5)`` with ``J^T c = J c``, just applied
-    per leaf pair and accumulated leaf-major so no particle-order scatter is
-    needed (cotangents are w.r.t. the leaf-major tensors; the caller's gather
-    transposes them back to particle order).
-
-    Newton's third law supplies the source-side term: the contribution a target
-    leaf receives from a source leaf gives equal and opposite position sensitivity
-    to that source leaf, scattered by source leaf id.
-    """
-    dtype = leaf_positions.dtype
-    num_leaves = int(leaf_positions.shape[0])
-    width = int(leaf_positions.shape[1])
-    num_slots = int(source_leaf_ids.shape[1]) * int(source_leaf_ids.shape[2])
-    if num_leaves == 0 or width == 0 or num_slots == 0:
-        return jnp.zeros_like(leaf_positions), jnp.zeros_like(leaf_masses)
-
-    slot_ids = jnp.reshape(source_leaf_ids, (num_leaves, num_slots))
-    slot_valid = jnp.reshape(source_valid, (num_leaves, num_slots))
-
-    # Cotangent, gathered leaf-major and masked exactly as the forward masks its
-    # output. O(N).
-    cot_leaf = jnp.where(
-        leaf_mask[..., None], cotangent[leaf_particle_idx], jnp.zeros((), dtype)
-    )
-
-    # DO NOT occupancy-SORT here (permuting the leaf arrays themselves). Tried and
-    # measured **~6.8x SLOWER** at N=200000 (near-only reverse 1632 -> 20987 ms,
-    # after dividing out a 1.9x GPU-contention factor read off the untouched
-    # far-field row) and a wash at 1M. Leaves arrive in Morton order, which keeps
-    # the per-tile source gather ``leaf_positions[safe_src]`` and the
-    # ``.at[safe_src].add`` scatter spatially coherent; a global permutation
-    # destroys that and the extra memory traffic dwarfs the arithmetic saved.
-    #
-    # ``tiers`` is the salvaged version of that idea. It changes only WHICH TARGET
-    # leaves each pass visits and how many slots that pass reads -- source ids are
-    # never renumbered and ``leaf_positions`` is never permuted, so source-side
-    # locality is untouched. Each tier is a (leaf-index array, slot width) pair with
-    # STATIC width, built on the host from the occupancy histogram, and leaves stay
-    # in Morton order within a tier. A tier of near-empty leaves then reads only its
-    # own narrow slot window instead of the global maximum, which is what actually
-    # removes the padding: measured fill is 45% at N=200000 and 14.5% at N=1000000,
-    # i.e. most of the rectangle is padding set by a single pathological leaf.
-    del occupancy_sort
-
-    batch = max(1, min(int(leaf_batch), num_leaves))
-    tile = max(1, min(int(slot_tile), num_slots))
-    leaf_offsets = jnp.arange(batch, dtype=INDEX_DTYPE)
-    slot_offsets = jnp.arange(tile, dtype=INDEX_DTYPE)
-
-    def _pass(carry, tier_leaves, tier_slots):
-        """One occupancy tier: ``tier_leaves`` targets against ``tier_slots`` slots."""
-        tier_count = int(tier_leaves.shape[0])
-        leaf_starts = jnp.arange(0, tier_count, batch, dtype=INDEX_DTYPE)
-        slot_starts = jnp.arange(0, tier_slots, tile, dtype=INDEX_DTYPE)
-
-        def leaf_body(
-            carry: Tuple[Array, Array], leaf_start: Array
-        ) -> Tuple[Tuple[Array, Array], None]:
-            pos_bar, mass_bar = carry
-            pos_in_tier = leaf_start + leaf_offsets
-            tgt_in_range = pos_in_tier < tier_count
-            # Target leaf ids stay GLOBAL: only the visiting order changes.
-            safe_tgt = tier_leaves[jnp.where(tgt_in_range, pos_in_tier, 0)]
-
-            tgt_pos = leaf_positions[safe_tgt]  # (B, W, 3)
-            tgt_mask = leaf_mask[safe_tgt] & tgt_in_range[:, None]
-            cot_t = jnp.where(
-                tgt_mask[..., None], cot_leaf[safe_tgt], jnp.zeros((), dtype)
-            )
-
-            def slot_body(
-                inner: Tuple[Array, Array, Array], slot_start: Array
-            ) -> Tuple[Tuple[Array, Array, Array], None]:
-                pos_acc, mass_acc, tgt_acc = inner
-                sl = slot_start + slot_offsets
-                sl_in_range = sl < tier_slots
-                safe_sl = jnp.where(sl_in_range, sl, 0)
-
-                src_leaf = slot_ids[safe_tgt][:, safe_sl]  # (B, T)
-                valid_slot = slot_valid[safe_tgt][:, safe_sl] & sl_in_range[None, :]
-                valid_slot = valid_slot & tgt_in_range[:, None]
-                safe_src = jnp.where(valid_slot, src_leaf, 0)
-
-                def _apply(acc_in):
-                    pos_in, mass_in, tgt_in = acc_in
-                    src_pos = leaf_positions[safe_src]  # (B, T, W, 3)
-                    src_mass = leaf_masses[safe_src]  # (B, T, W)
-                    src_mask = leaf_mask[safe_src] & valid_slot[..., None]
-
-                    # (B, T, Wt, Ws, 3)
-                    diff = tgt_pos[:, None, :, None, :] - src_pos[:, :, None, :, :]
-                    dist_sq = jnp.sum(diff * diff, axis=-1) + softening_sq
-                    pair_mask = tgt_mask[:, None, :, None] & src_mask[:, :, None, :]
-                    safe_dist_sq = jnp.where(pair_mask, dist_sq, jnp.ones_like(dist_sq))
-                    inv_r = jnp.where(pair_mask, lax.rsqrt(safe_dist_sq), 0.0)
-                    inv_dist3 = jnp.where(pair_mask, inv_r * inv_r * inv_r, 0.0)
-                    inv_dist5 = jnp.where(pair_mask, inv_dist3 * inv_r * inv_r, 0.0)
-
-                    cot_b = cot_t[:, None, :, None, :]  # (B, 1, Wt, 1, 3)
-                    cd = jnp.sum(cot_b * diff, axis=-1)  # (B, T, Wt, Ws)
-                    m = src_mass[:, :, None, :, None]  # (B, T, 1, Ws, 1)
-                    pair = m * (
-                        inv_dist3[..., None] * cot_b
-                        - 3.0 * inv_dist5[..., None] * cd[..., None] * diff
-                    )
-
-                    # Target side: sum over sources (slots and their particles).
-                    tgt_contrib = -G * jnp.sum(pair, axis=(1, 3))  # (B, Wt, 3)
-                    # Source side (third law): sum over targets, scattered by source leaf.
-                    src_contrib = G * jnp.sum(pair, axis=2)  # (B, T, Ws, 3)
-                    src_mass_contrib = -G * jnp.sum(
-                        inv_dist3 * cd, axis=2
-                    )  # (B, T, Ws)
-
-                    src_contrib = jnp.where(
-                        valid_slot[..., None, None], src_contrib, 0.0
-                    )
-                    src_mass_contrib = jnp.where(
-                        valid_slot[..., None], src_mass_contrib, 0.0
-                    )
-
-                    return (
-                        pos_in.at[safe_src].add(src_contrib),
-                        mass_in.at[safe_src].add(src_mass_contrib),
-                        tgt_in + tgt_contrib,
-                    )
-
-                # Skip whole tiles that carry no valid source slot. Every term above is
-                # masked by ``valid_slot``, so an all-invalid tile contributes exactly
-                # zero -- this is a pure work saving, not an approximation. It matters
-                # because the prepacked payload is padded to the GLOBAL maximum neighbour
-                # count (one leaf typically neighbours every other), so the fill is
-                # 45% at N=200000 and 14.5% at N=1000000 on the canonical galaxy config:
-                # most tiles are pure padding. The forward lane has had this skip all
-                # along (``_accumulate_target_block_tile_sequence``); its absence here is
-                # why the near-field reverse ran ~18x its own forward.
-                if skip_empty_tiles:
-                    return (
-                        lax.cond(jnp.any(valid_slot), _apply, lambda acc: acc, inner),
-                        None,
-                    )
-                return _apply(inner), None
-
-            (pos_bar, mass_bar, tgt_total), _ = lax.scan(
-                slot_body,
-                (pos_bar, mass_bar, jnp.zeros_like(tgt_pos)),
-                slot_starts,
-            )
-            tgt_total = jnp.where(tgt_in_range[:, None, None], tgt_total, 0.0)
-            pos_bar = pos_bar.at[safe_tgt].add(tgt_total)
-            return (pos_bar, mass_bar), None
-
-        return lax.scan(leaf_body, carry, leaf_starts)[0]
-
-    carry = (jnp.zeros_like(leaf_positions), jnp.zeros_like(leaf_masses))
-    if tiers is None:
-        carry = _pass(carry, jnp.arange(num_leaves, dtype=INDEX_DTYPE), num_slots)
-    else:
-        # Python loop: tier count and each tier's slot width are STATIC, so every
-        # pass compiles to its own right-sized scan.
-        for tier_leaves, tier_slots in tiers:
-            if len(tier_leaves) == 0 or int(tier_slots) == 0:
-                continue
-            carry = _pass(
-                carry,
-                jnp.asarray(tier_leaves, dtype=INDEX_DTYPE),
-                int(tier_slots),
-            )
-    positions_bar, masses_bar = carry
-    return positions_bar, masses_bar
-
-
-@partial(jax.custom_vjp, nondiff_argnums=(9, 10, 11, 12, 13, 14, 15, 16, 17))
+@partial(jax.custom_vjp, nondiff_argnums=(9, 10, 11, 12, 13, 14, 15, 16))
 def _radix_fast_lane_prepacked_accel_cvjp(
     leaf_positions: Array,
     leaf_masses: Array,
@@ -3905,8 +3400,7 @@ def _radix_fast_lane_prepacked_accel_cvjp(
     interpret: bool,
     rev_leaf_batch: int,
     rev_block_tile: int,
-    rev_tile_unroll: int,
-    rev_batch_unroll: int,
+    rev_skip_empty: bool,
     rev_tiers: Optional[Tuple[Tuple[Tuple[int, ...], int], ...]],
 ) -> Array:
     """Differentiable prepacked-lane near field: Pallas forward, tiled-twin reverse.
@@ -3967,8 +3461,7 @@ def _radix_fast_lane_prepacked_accel_fwd(
     interpret,
     rev_leaf_batch,
     rev_block_tile,
-    rev_tile_unroll,
-    rev_batch_unroll,
+    rev_skip_empty,
     rev_tiers,
 ):
     out = _radix_fast_lane_prepacked_accel_cvjp(
@@ -3987,8 +3480,7 @@ def _radix_fast_lane_prepacked_accel_fwd(
         interpret,
         rev_leaf_batch,
         rev_block_tile,
-        rev_tile_unroll,
-        rev_batch_unroll,
+        rev_skip_empty,
         rev_tiers,
     )
     residual = (
@@ -4012,8 +3504,7 @@ def _radix_fast_lane_prepacked_accel_bwd(
     interpret,
     rev_leaf_batch,
     rev_block_tile,
-    rev_tile_unroll,
-    rev_batch_unroll,
+    rev_skip_empty,
     rev_tiers,
     residual,
     cotangent,
@@ -4049,7 +3540,7 @@ def _radix_fast_lane_prepacked_accel_bwd(
         G=G,
         leaf_batch=int(rev_leaf_batch),
         slot_tile=int(rev_block_tile),
-        skip_empty_tiles=_env_flag("JACCPOT_GRAD_REV_SKIP_EMPTY_TILES", True),
+        skip_empty_tiles=bool(rev_skip_empty),
         tiers=rev_tiers,
     )
     return (
@@ -4080,6 +3571,7 @@ def compute_leaf_p2p_accelerations_radix_fast_lane(
     return_potential: bool = False,
     use_pallas: bool = False,
     differentiable: bool = False,
+    reverse_options: Optional["LeafPairReverseOptions"] = None,
 ) -> Union[Array, Tuple[Array, Array]]:
     """Payload-driven nearfield entry for the radix fast lane.
 
@@ -4088,7 +3580,19 @@ def compute_leaf_p2p_accelerations_radix_fast_lane(
     raw lanes hard-fail in reverse mode; the wrapper keeps the Pallas forward
     (byte-identical) and takes the reverse from this lane's tiled pure-JAX
     fallback. Defaults False so the production forward path is untouched.
+
+    ``reverse_options`` carries the resolved reverse-pass tuning (tiering, tile
+    sizes, the empty-tile skip). ``None`` means "resolve from the environment",
+    which is what the forward-only production callers get; the differentiable
+    entry point resolves a :class:`~jaccpot.config.GradConfig` once, outside the
+    trace, and passes the result down so nothing reads the environment per call.
     """
+    if reverse_options is None:
+        from jaccpot.runtime.grad_options import resolve_grad_options
+
+        reverse_options = resolve_grad_options(
+            None, num_particles=0, supports_fast_lane=False
+        ).reverse
     positions = jnp.asarray(positions_sorted)
     masses = jnp.asarray(masses_sorted)
     want_potential = bool(return_potential)
@@ -4227,7 +3731,7 @@ def compute_leaf_p2p_accelerations_radix_fast_lane(
                     dtype,
                     what="differentiable prepacked near-field lane",
                 )
-                rev_block_tile = _env_int("JACCPOT_GRAD_REV_BLOCK_TILE", 8)
+                rev_block_tile = int(reverse_options.block_tile)
                 # Occupancy tiers for the reverse, built HERE rather than inside the
                 # bwd rule: the payload's validity mask is frozen topology and is
                 # concrete at this point, whereas inside the rule it is a residual
@@ -4235,15 +3739,14 @@ def compute_leaf_p2p_accelerations_radix_fast_lane(
                 # read. Rides through as a nondiff arg, so each tier's width is a
                 # compile-time constant.
                 rev_tiers = None
-                if _env_flag("JACCPOT_GRAD_REV_TIERED", True):
-                    try:
-                        rev_tiers = build_leafpair_reverse_tiers(
-                            source_valid_mask_padded, slot_tile=rev_block_tile
-                        )
-                    except Exception:
-                        # Tracer, or anything else non-concrete: fall back to the
-                        # single full-width pass, which is always correct.
-                        rev_tiers = None
+                if reverse_options.tiered:
+                    rev_tiers = _leafpair_reverse_tiers_cached(
+                        payload.source_leaf_valid_mask,
+                        source_valid_mask_padded,
+                        slot_tile=rev_block_tile,
+                        max_tiers=reverse_options.max_tiers,
+                        min_gain=reverse_options.tier_min_gain,
+                    )
                 return self_acc + _radix_fast_lane_prepacked_accel_cvjp(
                     leaf_positions,
                     leaf_masses,
@@ -4258,10 +3761,9 @@ def compute_leaf_p2p_accelerations_radix_fast_lane(
                     pallas_num_stages,
                     (pallas_subtile if pallas_subtile > 0 else None),
                     pallas_interpret,
-                    _env_int("JACCPOT_GRAD_REV_LEAF_BATCH", 8),
+                    int(reverse_options.leaf_batch),
                     rev_block_tile,
-                    1,
-                    1,
+                    bool(reverse_options.skip_empty_tiles),
                     rev_tiers,
                 )
             prepacked_result = _radix_fast_lane_prepacked_pallas(

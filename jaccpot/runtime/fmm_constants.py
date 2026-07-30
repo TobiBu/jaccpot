@@ -10,11 +10,12 @@ import it without cycles.
 
 from __future__ import annotations
 
-import os
 from typing import Optional
 
 import numpy as np
 from yggdrax.interactions import DualTreeTraversalConfig
+
+from jaccpot._env import env_flag, env_int
 
 _MINIMUM_MEMORY_GPU_M2L_CHUNK_SIZE = 1024
 _MINIMUM_MEMORY_CPU_M2L_CHUNK_SIZE = 4096
@@ -75,23 +76,17 @@ _KDTREE_DEFAULT_TRAVERSAL_CONFIG = DualTreeTraversalConfig(
 
 
 def _env_int(name: str, default: int, *, minimum: int = 1) -> int:
-    """Read a positive integer from env with a defensive fallback."""
-    raw = os.environ.get(name)
-    if raw is None:
-        return int(default)
-    try:
-        val = int(str(raw).strip())
-    except Exception:
-        return int(default)
-    return int(max(val, int(minimum)))
+    """Read a positive integer from env with a defensive fallback.
+
+    Clamps to ``minimum`` (default 1): every caller here sizes a buffer or a
+    chunk, where a 0 would be a shape error rather than a slow configuration.
+    """
+    return env_int(name, default, minimum=minimum)
 
 
 def _env_flag(name: str, default: bool = False) -> bool:
     """Read a boolean env flag with a defensive fallback."""
-    raw = os.environ.get(name)
-    if raw is None:
-        return bool(default)
-    return str(raw).strip().lower() in ("1", "true", "yes", "on")
+    return env_flag(name, default)
 
 
 def _minimum_memory_streamed_gpu_traversal_ceiling(
@@ -268,10 +263,12 @@ def _cap_minimum_memory_streamed_gpu_traversal_config_for_tree(
     return capped
 
 
-_PREPARE_DIAGNOSTICS = _env_flag("JACCPOT_PREPARE_DIAGNOSTICS", False)
-
-
 def _prepare_diag(message: str) -> None:
-    """Emit opt-in prepare diagnostics to stdout."""
-    if _PREPARE_DIAGNOSTICS:
+    """Emit opt-in prepare diagnostics to stdout.
+
+    The flag is read per call, not captured at import: a user who sets
+    ``JACCPOT_PREPARE_DIAGNOSTICS=1`` after importing jaccpot (in a notebook,
+    say) should get diagnostics, not silence.
+    """
+    if _env_flag("JACCPOT_PREPARE_DIAGNOSTICS", False):
         print(f"[jaccpot.prepare] {message}", flush=True)

@@ -7,7 +7,6 @@ kept separate from the Dehnen real-basis implementation.
 
 from __future__ import annotations
 
-import os
 import time
 from functools import partial
 from typing import NamedTuple, Optional
@@ -24,6 +23,7 @@ from yggdrax.geometry import TreeGeometry, compute_tree_geometry
 from yggdrax.tree import Tree, get_level_offsets, get_nodes_by_level
 from yggdrax.tree_moments import TreeMassMoments, compute_tree_mass_moments
 
+from jaccpot._env import env_flag
 from jaccpot.operators.complex_harmonics import p2m_complex_batch
 from jaccpot.operators.complex_ops import (
     enforce_conjugate_symmetry,
@@ -55,18 +55,17 @@ _CENTER_MODES = ("com", "aabb", "explicit")
 _DEFAULT_LEAF_BATCH_SIZE = 2048
 
 
-def _env_flag(name: str, default: bool = False) -> bool:
-    raw = os.environ.get(name)
-    if raw is None:
-        return bool(default)
-    return str(raw).strip().lower() in ("1", "true", "yes", "on")
+def _upward_diagnostics() -> bool:
+    """Whether opt-in upward-sweep diagnostics are enabled.
 
-
-_UPWARD_DIAGNOSTICS = _env_flag("JACCPOT_PREPARE_DIAGNOSTICS", False)
+    Read per call rather than captured at import, so setting
+    ``JACCPOT_PREPARE_DIAGNOSTICS=1`` after importing jaccpot takes effect.
+    """
+    return env_flag("JACCPOT_PREPARE_DIAGNOSTICS", False)
 
 
 def _upward_diag(message: str) -> None:
-    if _UPWARD_DIAGNOSTICS:
+    if _upward_diagnostics():
         print(f"[jaccpot.upward] {message}", flush=True)
 
 
@@ -90,7 +89,7 @@ def _diag_upward_stage_estimates(
     positions_dtype: jnp.dtype,
     masses_dtype: jnp.dtype,
 ) -> None:
-    if not _UPWARD_DIAGNOSTICS:
+    if not _upward_diagnostics():
         return
 
     pos_itemsize = np.dtype(positions_dtype).itemsize
@@ -473,9 +472,8 @@ def prepare_solidfmm_complex_upward_sweep(
     p = int(max_order)
     if p < 0:
         raise ValueError("max_order must be >= 0")
-    profile_stages = (
-        upward_timing_callback is not None
-        and os.environ.get("JACCPOT_PROFILE_UPWARD_STAGES", "0") == "1"
+    profile_stages = upward_timing_callback is not None and env_flag(
+        "JACCPOT_PROFILE_UPWARD_STAGES", False
     )
 
     def _record_stage(name: str, start: float, value) -> None:

@@ -78,6 +78,7 @@ from jaccpot.operators.real_harmonics import (
     sh_size,
 )
 from jaccpot.operators.symmetric_tensors import component_lift_index_map_3d
+from jaccpot.runtime.grad_options import fused_m2l_pallas_enabled
 from jaccpot.upward.tree_expansions import TreeUpwardData
 
 from .._octree_adapter import OctreeExecutionData
@@ -1530,12 +1531,7 @@ def _real_m2l_pallas_active() -> bool:
     ``pallas_m2l_real_supported`` used previously only checks gpu/tpu, so it would
     route to Pallas on a pre-Ampere GPU where the Triton lowering fails.
     """
-    flag = (
-        str(os.environ.get("JACCPOT_STATIC_STRICT_FUSED_M2L_PALLAS", "0"))
-        .strip()
-        .lower()
-    )
-    if flag not in {"1", "true", "yes", "on"}:
+    if not fused_m2l_pallas_enabled():
         return False
     try:
         from jaccpot.pallas.m2l_real_fused import pallas_m2l_real_fused_supported
@@ -1612,12 +1608,7 @@ def _fused_complex_m2l_pallas_active() -> bool:
     bool
         ``True`` when the flag is set and an Ampere+ GPU is available.
     """
-    flag = (
-        str(os.environ.get("JACCPOT_STATIC_STRICT_FUSED_M2L_PALLAS", "0"))
-        .strip()
-        .lower()
-    )
-    if flag not in {"1", "true", "yes", "on"}:
+    if not fused_m2l_pallas_enabled():
         return False
     try:
         from jaccpot.pallas.m2l_complex_fused import (
@@ -2810,6 +2801,7 @@ def _evaluate_prepared_tree(
     jit_traversal: bool,
     max_acc_derivative_order: int = 0,
     nearfield_mode_override: Optional[str] = None,
+    nearfield_reverse_options: Optional[Any] = None,
 ) -> Union[
     Array,
     Tuple[Array, Array],
@@ -2819,8 +2811,10 @@ def _evaluate_prepared_tree(
     """Run the prepared-tree evaluation returning Morton-sorted outputs.
 
     ``nearfield_mode_override`` forces the near-field mode (the differentiable
-    path passes ``"bucketed"`` for the fast, bit-identical, vectorized
-    near-field); ``None`` keeps the resolved policy.
+    path passes ``"bucketed"`` or ``"fast_lane"``); ``None`` keeps the resolved
+    policy. ``nearfield_reverse_options`` carries the grad path's resolved
+    reverse-pass tuning down to the leaf-major lane; it is inert on every other
+    mode and ``None`` everywhere except the differentiable seam.
     """
 
     if int(max_acc_derivative_order) > 0:
@@ -2888,6 +2882,7 @@ def _evaluate_prepared_tree(
     else:
         evaluate_fn = fmm.evaluate_tree
         extra_kwargs["nearfield_mode_override"] = nearfield_mode_override
+        extra_kwargs["nearfield_reverse_options"] = nearfield_reverse_options
 
     return evaluate_fn(
         tree,

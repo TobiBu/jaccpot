@@ -15,6 +15,7 @@ from .config import (
     Basis,
     FMMAdvancedConfig,
     FMMPreset,
+    GradConfig,
 )
 from .runtime._large_n_types import LargeNPreparedState
 from .runtime.fmm import FastMultipoleMethod as _RuntimeFMM
@@ -779,6 +780,7 @@ class FastMultipoleMethod:
         target_indices: Optional[Array] = None,
         jit_traversal: bool = False,
         grad_plan: Optional[Any] = None,
+        grad_config: Optional[GradConfig] = None,
     ) -> Array:
         """Exact fixed-topology gradients of the FMM force w.r.t. positions/masses.
 
@@ -787,13 +789,44 @@ class FastMultipoleMethod:
         the live ``positions``/``masses``, so ``jax.grad``/``jax.vjp`` over this
         call yield exact gradients at fixed topology. Build ``state`` once with
         :meth:`prepare_state` (tree construction is not traceable), then
-        differentiate this method. Requires a radix ``FMMPreparedState`` with a
-        solidfmm basis. See ``docs/differentiable_fmm_design.md``.
+        differentiate this method::
 
-        Two opt-in fast lanes, both off by default:
-        ``JACCPOT_STATIC_STRICT_FUSED_M2L_PALLAS=1`` for the fused-Pallas M2L and
-        ``JACCPOT_DIFFERENTIABLE_NEARFIELD_FAST_LANE=1`` for the leaf-major near
-        field (the dominant term in both directions).
+            state = fmm.prepare_state(pos0, mass0, max_order=4, leaf_size=64)
+            g = jax.grad(lambda p, m:
+                (fmm.differentiable_accelerations(state, p, m) ** 2).sum()
+            )(pos, mass)
+
+        Works on a radix ``FMMPreparedState`` (solidfmm basis) and on a
+        ``LargeNPreparedState`` from ``preset="large_n_gpu"``, which additionally
+        needs ``retain_far_pairs_for_grad=True``. See ``docs/differentiable_fmm.md``.
+
+        Parameters
+        ----------
+        state : Union[FMMPreparedState, LargeNPreparedState]
+            Frozen topology from :meth:`prepare_state`, captured as a constant.
+        positions, masses : Array
+            Differentiated inputs, in the original (unsorted) particle order.
+        target_indices : Optional[Array]
+            Optional subset of targets to return; all particles remain sources.
+            Not supported on the large-N path.
+        jit_traversal : bool
+            Kept ``False`` on the gradient path.
+        grad_plan : Optional[LargeNGradPlan]
+            Large-N only. Build once with
+            :func:`~jaccpot.runtime._large_n_grad.prepare_large_n_grad_plan` and
+            pass it here to hoist validation and pair-list setup out of an
+            optimisation loop.
+        grad_config : Optional[GradConfig]
+            Gradient-path execution options -- chiefly ``nearfield_lane``, which
+            defaults to ``"auto"`` and selects the leaf-major fast lane at
+            N >= 100000 because the bucketed reverse OOMs at galaxy scale. Each
+            field falls back to its ``JACCPOT_*`` environment variable when left
+            ``None``, so existing env-configured scripts are unaffected.
+
+        Returns
+        -------
+        Array
+            ``(N, 3)`` accelerations in the original input order.
         """
         return self._impl.differentiable_accelerations(
             state,
@@ -802,6 +835,7 @@ class FastMultipoleMethod:
             target_indices=target_indices,
             jit_traversal=jit_traversal,
             grad_plan=grad_plan,
+            grad_config=grad_config,
         )
 
     def evaluate_prepared_state_with_jerk(

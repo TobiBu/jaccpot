@@ -189,7 +189,6 @@ Example usage::
 from __future__ import annotations
 
 import math
-import os
 from functools import lru_cache, partial
 from typing import Any, Tuple
 
@@ -200,6 +199,7 @@ from jaxtyping import Array, DTypeLike
 
 from jaccpot.operators.dtypes import floor_squared_radius, squared_radius_floor
 from jaccpot.operators.symmetric_tensors import symmetric_multi_indices_3d
+from jaccpot.runtime.grad_options import analytic_l2p_vjp_enabled
 
 # ===========================================================================
 # Index utilities
@@ -608,17 +608,6 @@ def evaluate_local_real(
     return total
 
 
-# Analytic custom_vjp reverse for the real-basis L2P is on by default; set
-# JACCPOT_ANALYTIC_L2P_VJP=0 to fall back to plain autodiff (A/B measurement).
-_ANALYTIC_L2P_VJP = os.environ.get(
-    "JACCPOT_ANALYTIC_L2P_VJP", "1"
-).strip().lower() not in (
-    "0",
-    "false",
-    "no",
-)
-
-
 @partial(jax.custom_vjp, nondiff_argnums=(2,))
 def _evaluate_local_real_with_grad_cvjp(
     local_coeffs: Array, delta: Array, order: int
@@ -738,7 +727,7 @@ def evaluate_local_real_with_grad(
     # avoids the second-order-autodiff blow-up under an outer grad. The env
     # switch ``JACCPOT_ANALYTIC_L2P_VJP=0`` restores the plain-autodiff reverse
     # for A/B measurement (see examples/differentiable_fmm_overhead.py).
-    if _ANALYTIC_L2P_VJP:
+    if analytic_l2p_vjp_enabled():
         return _evaluate_local_real_with_grad_cvjp(
             jnp.asarray(local_coeffs), jnp.asarray(delta), int(order)
         )

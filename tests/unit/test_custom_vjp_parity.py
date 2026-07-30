@@ -481,15 +481,15 @@ def test_radix_fast_lane_prepacked_accel_cvjp_matches_tiled_twin(interpret):
             leaf_particle_idx.astype(dtype),
             soft,
             G,
-            None,
-            1,
-            None,
+            # nondiff args, positional because custom_vjp requires it:
+            None,  # num_warps
+            1,  # num_stages
+            None,  # target_subtile
             interpret,
-            2,
-            2,
-            1,
-            1,
-            None,
+            2,  # rev_leaf_batch
+            2,  # rev_block_tile
+            False,  # rev_skip_empty -- matches f_ref's skip_empty_tiles=False
+            None,  # rev_tiers (single full-width reverse pass)
         )
 
     def f_ref(leaf_pos, leaf_mass):
