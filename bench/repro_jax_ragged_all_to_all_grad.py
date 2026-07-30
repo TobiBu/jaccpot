@@ -118,9 +118,7 @@ def main() -> None:
 
     corrupt = not np.array_equal(before, after)
     print(f"jit={args.jit}  variant={args.variant}")
-    print(
-        f"before={before}  after={after}  -> {'CORRUPT' if corrupt else 'CLEAN'}"
-    )
+    print(f"before={before}  after={after}  -> {'CORRUPT' if corrupt else 'CLEAN'}")
     raise SystemExit(1 if corrupt else 0)
 
 
