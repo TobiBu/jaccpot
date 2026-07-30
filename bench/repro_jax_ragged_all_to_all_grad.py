@@ -1,17 +1,25 @@
 """Upstream-bug reproducer: jit + ragged_all_to_all + grad breaks later forwards.
 
+**FIXED IN JAX 0.9.1** -- this now doubles as the version probe for that fix, which
+is documented in neither the JAX changelog nor a tracked issue. Measured: 6/6
+CORRUPT on 0.9.0.1, 4/4 CLEAN on 0.9.1. ``JAX_RAGGED_GRAD_FIXED_VERSION`` in
+``jaccpot/distributed/fmm.py`` encodes that boundary, and
+``halo_exchange="auto"`` uses it to pick the ragged exchange only where it is
+safe. Keep this script: it is how the boundary was established and how a
+regression would be caught.
+
 Pure JAX -- no jaccpot, no yggdrax -- so it attributes the defect unambiguously.
-This is the artifact to attach to a jax-ml/jax issue; see
-``docs/differentiable_fmm_distributed_audit.md`` for how it was found and what it
-cost us (the multi-GPU FMM gradient path has to avoid
-``jax.lax.ragged_all_to_all`` because of it).
+See ``docs/differentiable_fmm_distributed_audit.md`` for how it was found and what
+it cost (on an affected JAX the multi-GPU FMM gradient path must avoid
+``jax.lax.ragged_all_to_all``, at a bandwidth premium).
 
 The bug: take a ``jax.jit``-wrapped ``shard_map`` containing one
 ``ragged_all_to_all``, evaluate it, execute a gradient of it, then evaluate it
 again -- the second evaluation returns the output buffer's *fill value*, i.e. the
 exchange no longer writes its output. The damage persists for the process.
 
-Observed on jax/jaxlib 0.9.0.1, 2xA100-PCIE-40GB, CUDA::
+Observed on **jax/jaxlib 0.9.0.1**, 2xA100-PCIE-40GB, CUDA (on 0.9.1 both lines
+report CLEAN)::
 
     $ python bench/repro_jax_ragged_all_to_all_grad.py --jit
     before=[1. 2. 5. 6. 3. 4. 7. 8.]  after=[ 1.  2.  5.  6. -1. -1. -1. -1.]  -> CORRUPT
