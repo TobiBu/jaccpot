@@ -192,16 +192,62 @@ returns nothing, silently, for the rest of the process. Further properties:
   JACCPOT_ANALYTIC_L2P_VJP=0` reproduced it identically too; the rules are not on
   this path.
 
-**Likely mechanism** (inference from the evidence, not a verified XLA-level
-diagnosis). `jax.lax.ragged_all_to_all` takes an `output` operand that XLA
-input/output-aliases and writes in place. JAX's transpose rule
-(`_ragged_all_to_all_transpose`, `jax/_src/lax/parallel.py`) passes
-`ad.zeros_like_aval(operand.aval)` as that operand — a *constant* zeros buffer.
-An in-place write into a shared XLA constant explains every observed property:
-already-compiled executables that embed the same constant break, freshly compiled
-ones do not, tracing is harmless, and the input arrays are untouched. This belongs
-upstream (JAX, or yggdrax by not taking that path under autodiff); it is
-diagnosed here, not fixed here.
+### It is a JAX bug, reproducible in 40 lines with none of our code
+
+Attribution is not a judgement call — it is measured. The following uses only
+`jax.lax.ragged_all_to_all` inside `shard_map`; no jaccpot, no yggdrax. It is
+checked in as `bench/repro_jax_ragged_all_to_all_grad.py`:
+
+```python
+def body(x, s, i, o, r):
+    out = jnp.full((CAP,), -1.0, x.dtype)          # the ragged output buffer
+    return jax.lax.ragged_all_to_all(x, out, i[0], s[0], o[0], r[0], axis_name="gpus")
+
+run = maybe_jit(lambda x: shard_map(body, mesh=mesh, in_specs=(P("gpus"),) * 5,
+                                    out_specs=P("gpus"), check_vma=False)(x, so, io, oo, ro))
+before = run(x)
+jax.grad(lambda v: jnp.sum(run(v) ** 2))(x)        # execute a gradient
+after = run(x)                                     # <-- differs from `before`
+```
+
+```
+bare shard_map(...)        before=[1. 2. 5. 6. 3. 4. 7. 8.]  after=[1. 2. 5. 6. 3. 4. 7. 8.]  CLEAN
+jax.jit(shard_map(...))    before=[1. 2. 5. 6. 3. 4. 7. 8.]  after=[ 1. 2. 5. 6. -1. -1. -1. -1.]  CORRUPT
+```
+
+`-1.0` is the *fill value*: after the gradient, the exchange no longer writes its
+output — the forward returns the untouched buffer. jax/jaxlib 0.9.0.1, 2xA100,
+CUDA. The trigger is **`jax.jit` around the `shard_map`**; the bare `shard_map` is
+clean, which is also why the corruption never showed up in the isolated VJP-value
+test (that one never re-ran a jitted forward afterwards).
+
+Two things about the reproducer worth knowing before trusting a run of it. *Which*
+device's rows are lost varies run to run (either half, sometimes both), though
+whether a jitted run corrupts does not. And it must exercise **one configuration
+per process**: a case that corrupts in a fresh process can report CLEAN if another
+jit+grad sequence ran earlier in the same process — which is exactly how a first
+version of this reproducer briefly appeared to exonerate the constant-buffer case.
+In fresh processes the outcome is deterministic: 6/6 CORRUPT under `--jit` for both
+the constant and the data-dependent output buffer.
+
+**What this rules out, including one of our own earlier hypotheses.** An earlier
+revision of this document blamed XLA input/output aliasing on the `output`
+operand: JAX's transpose rule passes `ad.zeros_like_aval(...)` there, and an
+in-place write into a *shared constant* would have explained the
+already-compiled-executables-break pattern. **That is wrong.** Making the output
+buffer data-dependent (`jnp.full(...) + jnp.zeros_like(x[:CAP]) * x[:CAP]`), so it
+cannot be a shared constant, corrupts identically — and in that variant *every*
+row comes back as fill, not just one device's. The fixed
+`channel_id = mlir.COLLECTIVE_CHANNEL_ID` in `_ragged_all_to_all_lowering` is
+likewise not a distinguishing suspect: every JAX collective uses that same id, and
+`psum`/`all_gather` differentiate correctly. The defect is somewhere in the
+`ragged_all_to_all` custom call's interaction with jit + autodiff, below the level
+this audit can settle; the reproducer above is what an upstream fix needs, not a
+mechanism story from us.
+
+**Upstream status.** No matching issue found in jax-ml/jax as of 2026-07-30, and
+not fixed in 0.9.0.1 (the version measured). Filing the reproducer above is the
+open action item.
 
 **Fix on our side.** `_buffered_ragged_exchange` forces the `all_gather`-based
 `"buf"` exchange for the halo import on the differentiable path. It computes the
@@ -236,6 +282,45 @@ cluster per Morton domain, so the cross-domain path is genuinely engaged).
 | `grad(FMM)` vs `grad(direct sum)` | 1.13e-03 | 4.49e-03 |
 | forward force error, same configuration | 5.86e-03 | — |
 
+## Cost: correct, not fast
+
+First measurement, same 2xA100 host, `jit=True`, steady state (median of 3 after
+warmup), forward = the shipped `differentiable=False` evaluator:
+
+| N | forward | forward+backward | ratio | reverse compile |
+| --- | --- | --- | --- | --- |
+| 512 | 1.98 s | 22.3 s | **11.2x** | 193 s |
+| 2048 | 10.6 s | 92.2 s | **8.7x** | 269 s |
+| 8192 | 27.3 s | 156.9 s | **5.7x** | 377 s |
+| 512, `l2l_num_levels=12` | 2.65 s | 16.7 s | **6.3x** | 146 s |
+
+Read the **ratios**, not the absolute times: the host is shared and was under
+heavy load from other users during the run, and the absolute per-call figures are
+implausible next to the single-GPU path (1 M particles forward in 2.5 s). The slow
+forward is pre-existing and not from the gradient work -- it is the shipped
+distributed forward, dominated by fixed-size traversal buffers and a per-call
+topology rebuild rather than by N. Peak memory is not reported per row because
+`peak_bytes_in_use` is a process high-water mark and the sweep shared one process.
+
+What the numbers do support:
+
+* The reverse costs a **single-digit-to-low-double-digit multiple** of the
+  forward, improving with N (11.2x -> 5.7x from 512 to 8192) as fixed overheads
+  amortise.
+* **The loose static L2L bound is a real, measurable tax**: tightening it at N=512
+  cut the reverse from 11.2x to 6.3x (~1.8x on the backward) and the reverse
+  compile from 193 s to 146 s. It is the first thing to fix for speed, and
+  `l2l_num_levels` already exposes the lever -- what is missing is a *safe* tight
+  bound derived on the host rather than a shape.
+* **Reverse compile time (2.5-6 min) is itself a usability problem** at these
+  sizes, mirroring the single-GPU path's known ~10 min at N=16384.
+
+**The obvious escape route does not work.** Since the JAX bug needs `jax.jit` to
+trigger, `jit=False` plus the *fast* native ragged exchange should have been
+strictly better. Measured: it failed to complete one gradient at N=64 in 10
+minutes (eager dispatch of the whole body), so it is not a viable alternative and
+the `buf` exchange stays.
+
 The oracle agreement is *better* than the forward force accuracy it
 differentiates, which is the expected relationship and the strongest available
 signal that the reverse pass is the exact reverse of what the forward computes.
@@ -260,11 +345,10 @@ Scoped honestly, so nothing here reads as a broader claim than was measured.
 * **2 devices, N=64.** No 4/8-GPU run, and no scale sweep. Nothing in the design
   is device-count-specific (`ndev` is already a parameter everywhere), but it is
   untested above 2.
-* **Performance is uncharacterised.** No forward-vs-reverse ratio, no peak-memory
-  figure for the distributed gradient. Two known costs push the wrong way: the
-  loose static L2L bound (#3) and the `"buf"` halo exchange. Distributed
-  gradients are *correct*, not yet *fast* — treat the Phase-4 overhead numbers as
-  single-GPU only.
+* **Performance is only coarsely characterised** (see "Cost" above): reverse/forward
+  ratios on a contended host at N <= 8192, no reliable peak-memory figure, no
+  4/8-GPU scaling. Distributed gradients are *correct*, not *fast* — treat the
+  Phase-4 overhead numbers as single-GPU only.
 * **Configurations not exercised:** the `treecode` local walk, the complex
   (`basis="solidfmm"`) far field, `m2l_chunk`, `far_m2l_fp32`, and potentials
   (`return_potential`). The seam is basis-agnostic by construction, but only the

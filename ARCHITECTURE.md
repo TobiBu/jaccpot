@@ -211,8 +211,10 @@ derivative/jerk towers, and cached-vs-uncached M2L dispatch.
   (`_buffered_ragged_exchange`, and the guard test
   `test_forward_survives_a_gradient`). Verified on 2 GPUs at N=64: FD-vs-AD 2.7e-08
   (positions) / 5.9e-09 (masses), `grad(FMM)` vs `grad(direct sum)` 1.1e-03 /
-  4.5e-03 against a 5.9e-03 forward force error. **Not** characterised for
-  performance, and untested above 2 devices — see
+  4.5e-03 against a 5.9e-03 forward force error. Correct, **not fast**: the reverse
+  costs 5.7-11.2x the forward at N=512-8192 with a 2.5-6 min reverse compile, and
+  tightening `l2l_num_levels` alone cut the N=512 ratio from 11.2x to 6.3x. Untested
+  above 2 devices — see
   `docs/differentiable_fmm_distributed_audit.md` ("What is not covered"). The
   host-side `distributed_fmm_accelerations` stays non-differentiable (NumPy
   partition + reassembly).

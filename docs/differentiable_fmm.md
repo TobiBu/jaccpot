@@ -214,11 +214,14 @@ Same fixed-topology contract, but the topology is rebuilt inside every call (the
 tree build lives inside `shard_map`), so there is no state to hoist. Differentiate
 the evaluator, **not** `distributed_fmm_accelerations` — that one partitions and
 reassembles in NumPy and is not traceable. `nearfield_chunk` raises on this path.
-Verified for correctness on 2 GPUs only, and **not** characterised for
-performance; two knowingly slow choices are in force there (a loose static L2L
-level bound, tightenable with `l2l_num_levels`, and an `all_gather`-based halo
-exchange that works around an upstream ragged-collective bug). Details and
-measurements: `docs/differentiable_fmm_distributed_audit.md`.
+Verified for correctness on 2 GPUs only. It is **correct, not fast**: the reverse
+costs 5.7-11.2x the forward at N=512-8192 and the reverse compile is 2.5-6 min.
+Two knowingly slow choices are in force — a loose static L2L level bound, and an
+`all_gather`-based halo exchange that works around an upstream ragged-collective
+bug. If you need it faster, **set `l2l_num_levels`**: at N=512 that alone took the
+reverse from 11.2x to 6.3x. Pass a value >= your per-device tree depth and check
+`l2l_level_overflow` in the diagnostics, which fires if it was too small. Details
+and measurements: `docs/differentiable_fmm_distributed_audit.md`.
 
 ---
 
