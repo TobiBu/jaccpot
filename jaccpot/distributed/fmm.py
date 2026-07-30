@@ -33,6 +33,7 @@ from __future__ import annotations
 import contextlib
 import dataclasses
 import functools
+import itertools
 from dataclasses import dataclass
 from typing import Any, Callable, Iterator, NamedTuple, Optional
 
@@ -586,9 +587,56 @@ def _chunked_pallas_nearfield_accumulate(
     return near
 
 
-#: Halo-exchange implementations selectable on the gradient path, and the one
-#: reason each exists. The default is the safe one; see :func:`_grad_halo_exchange`.
-GRAD_HALO_EXCHANGES = ("buf", "native")
+#: Halo-exchange implementations selectable on the gradient path, plus ``"auto"``.
+#: See :func:`_grad_halo_exchange` for what each is and :func:`resolve_grad_halo_exchange`
+#: for how ``"auto"`` decides.
+GRAD_HALO_EXCHANGES = ("auto", "buf", "native")
+
+#: First JAX release whose ``jax.lax.ragged_all_to_all`` survives having its reverse
+#: pass executed. On 0.9.0.x, running one gradient makes every later ragged exchange
+#: in the process return its un-written output buffer, so a forward evaluated after a
+#: gradient silently loses the whole cross-domain near field (rel-L2 0.42 against the
+#: true force). **Measured**, not read off a changelog -- the fix is documented in
+#: neither the JAX changelog nor a tracked issue: on 0.9.0.1 the reproducer
+#: ``bench/repro_jax_ragged_all_to_all_grad.py --jit`` is 6/6 CORRUPT and
+#: ``test_native_halo_exchange_is_fixed_upstream`` fails (drift 4.194e-01), while on
+#: 0.9.1 the reproducer is 4/4 CLEAN and that test passes.
+JAX_RAGGED_GRAD_FIXED_VERSION = (0, 9, 1)
+
+
+def _jax_version_tuple() -> tuple[int, ...]:
+    """``jax.__version__`` as a comparable int tuple ("0.9.0.1" -> (0, 9, 0, 1))."""
+    parts: list[int] = []
+    for chunk in str(jax.__version__).split("."):
+        digits = "".join(itertools.takewhile(str.isdigit, chunk))
+        if not digits:
+            break
+        parts.append(int(digits))
+    return tuple(parts)
+
+
+def resolve_grad_halo_exchange(method: str = "auto") -> str:
+    """Resolve the grad-path halo exchange, version-gating the ragged one.
+
+    ``"auto"`` picks ``"native"`` (``jax.lax.ragged_all_to_all``, which sends only
+    the actual halo) on JAX >= :data:`JAX_RAGGED_GRAD_FIXED_VERSION`, and the
+    bandwidth-hungry but safe ``"buf"`` below it. That keeps a user on an affected
+    JAX from silently computing wrong forces after their first gradient, while
+    anyone on a fixed JAX gets the cheap exchange with no action required.
+
+    The gate is a floor, not a range: no upper bound is asserted because a
+    regression would be caught by
+    ``test_native_halo_exchange_is_fixed_upstream``, which is the check this
+    constant is derived from.
+    """
+
+    if method not in GRAD_HALO_EXCHANGES:
+        raise ValueError(
+            f"halo_exchange must be one of {GRAD_HALO_EXCHANGES}; got {method!r}"
+        )
+    if method != "auto":
+        return method
+    return "native" if _jax_version_tuple() >= JAX_RAGGED_GRAD_FIXED_VERSION else "buf"
 
 
 @contextlib.contextmanager
@@ -619,11 +667,10 @@ def _grad_halo_exchange(method: str) -> Iterator[None]:
     send buffer, O(ndev^2 x block) rather than the ragged O(actual halo) -- which
     is why the forward keeps the native path and only the gradient path is pinned.
 
-    ``"native"`` is kept **only so the upstream fix can be verified in one
-    argument**: once JAX repairs this, run the gradient tests with
-    ``halo_exchange="native"`` and, if
-    ``test_forward_survives_a_gradient`` stays green, make it the default and
-    delete this shim. Do not use it for real work before then.
+    ``"native"`` is **verified fixed on JAX >= 0.9.1** and is what ``"auto"``
+    selects there; see :func:`resolve_grad_halo_exchange`. Below that it is kept
+    only so the fix could be verified (and re-verified) by changing one argument.
+    Do not select it explicitly on an affected JAX.
 
     A cheaper safe option exists but is deliberately not offered yet:
     ``jax.lax.all_to_all`` with a fixed per-peer block is exact under jit+grad and
@@ -638,12 +685,11 @@ def _grad_halo_exchange(method: str) -> Iterator[None]:
     it cannot leak into a concurrent forward evaluation.
     """
 
-    if method not in GRAD_HALO_EXCHANGES:
-        raise ValueError(
-            f"halo_exchange must be one of {GRAD_HALO_EXCHANGES}; got {method!r}"
-        )
+    resolved = resolve_grad_halo_exchange(method)
     original = _yggdrax_let.ragged_all_to_all_exchange
-    _yggdrax_let.ragged_all_to_all_exchange = functools.partial(original, method=method)
+    _yggdrax_let.ragged_all_to_all_exchange = functools.partial(
+        original, method=resolved
+    )
     try:
         yield
     finally:
@@ -689,7 +735,7 @@ def _make_fn(
     *,
     differentiable: bool = False,
     l2l_num_levels: Optional[int] = None,
-    halo_exchange: str = "buf",
+    halo_exchange: str = "auto",
 ) -> Callable:
     """Build the per-device ``shard_map`` body closing over static shapes.
 
@@ -1465,7 +1511,7 @@ def make_force_evaluator(
     jit: bool = True,
     differentiable: bool = False,
     l2l_num_levels: Optional[int] = None,
-    halo_exchange: str = "buf",
+    halo_exchange: str = "auto",
 ) -> Callable:
     """Build a callable ``(pos_flat, mass_flat, gid_flat, counts) -> (accel, gid, diag)``.
 
@@ -1504,9 +1550,11 @@ def make_force_evaluator(
     override it.
 
     ``halo_exchange`` (differentiable mode only) selects the ragged halo
-    exchange's implementation. The default ``"buf"`` is the safe one;
-    ``"native"`` exists so a future JAX fix can be verified by changing one
-    argument, and is known to corrupt subsequent forwards today. See
+    exchange's implementation. The default ``"auto"`` uses the cheap
+    ``jax.lax.ragged_all_to_all`` on JAX >= 0.9.1, where its reverse pass is
+    verified safe, and the bandwidth-hungry ``all_gather`` fallback below that,
+    where executing a gradient corrupts every later exchange. Force one with
+    ``"native"`` / ``"buf"``. See :func:`resolve_grad_halo_exchange` and
     :func:`_grad_halo_exchange`.
     """
 

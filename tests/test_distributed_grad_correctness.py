@@ -234,6 +234,39 @@ def test_nearfield_chunk_rejected_on_grad_path():
         )
 
 
+def test_auto_halo_exchange_version_gate(monkeypatch):
+    """``auto`` must pick the ragged exchange only on a JAX where it is safe.
+
+    Pure resolver test -- no devices, no compile. The boundary is measured, not
+    read off a changelog: 0.9.0.1 corrupts (6/6 in the reproducer), 0.9.1 does not
+    (4/4 clean, and the tripwire below passes there).
+    """
+    import jaccpot.distributed.fmm as dfmm
+
+    cases = {
+        "0.8.0": "buf",
+        "0.9.0": "buf",
+        "0.9.0.1": "buf",  # the version the bug was found on
+        "0.9.1": "native",  # first fixed release
+        "0.10.2": "native",
+        "0.11.0": "native",
+        "1.0.0": "native",
+    }
+    for version, expected in cases.items():
+        monkeypatch.setattr(dfmm.jax, "__version__", version, raising=False)
+        assert (
+            dfmm.resolve_grad_halo_exchange("auto") == expected
+        ), f"jax {version} should resolve to {expected!r}"
+        # an explicit choice is never overridden by the gate
+        assert dfmm.resolve_grad_halo_exchange("buf") == "buf"
+        assert dfmm.resolve_grad_halo_exchange("native") == "native"
+
+    # non-numeric suffixes (dev/rc builds) must not crash the parse
+    for version in ("0.9.1.dev20260301", "0.10.0rc1", "0.9"):
+        monkeypatch.setattr(dfmm.jax, "__version__", version, raising=False)
+        assert dfmm.resolve_grad_halo_exchange("auto") in ("buf", "native")
+
+
 def test_rejects_unknown_halo_exchange():
     """Only the vetted halo-exchange implementations are selectable."""
     with pytest.raises(ValueError, match="halo_exchange"):
@@ -251,18 +284,21 @@ def test_rejects_unknown_halo_exchange():
 @pytest.mark.skipif(
     os.environ.get("JACCPOT_CHECK_UPSTREAM_RAGGED_FIX", "0") != "1",
     reason=(
-        "opt-in: asserts the upstream jax.lax.ragged_all_to_all bug is FIXED. "
-        "Run with JACCPOT_CHECK_UPSTREAM_RAGGED_FIX=1 after a JAX upgrade; if it "
-        "passes, make halo_exchange='native' the default and drop the shim."
+        "opt-in: differentiates through halo_exchange='native' and checks the "
+        "forward afterwards. Run with JACCPOT_CHECK_UPSTREAM_RAGGED_FIX=1 to "
+        "(re-)establish the JAX_RAGGED_GRAD_FIXED_VERSION floor on a given JAX. "
+        "Verified: FAILS on 0.9.0.1 (drift 4.194e-01), PASSES on 0.9.1."
     ),
 )
 def test_native_halo_exchange_is_fixed_upstream(setup):
-    """Tripwire for the JAX fix: is `native` safe to differentiate through yet?
+    """Is `native` safe to differentiate through on the installed JAX?
 
-    Today this FAILS by design -- executing a gradient through
-    ``jax.lax.ragged_all_to_all`` makes every later forward drop the cross-domain
-    near field (see ``bench/repro_jax_ragged_all_to_all_grad.py``). It is the
-    one-argument check that tells us when the workaround can go away.
+    This is the measurement that ``JAX_RAGGED_GRAD_FIXED_VERSION`` encodes, and
+    the reason ``halo_exchange="auto"`` can be trusted: on 0.9.0.1 it fails with a
+    0.42 rel-L2 forward drift, on 0.9.1 it passes. Keep it opt-in -- it is
+    deliberately expected to fail on an affected JAX, so it must not run in the
+    default suite. See ``bench/repro_jax_ragged_all_to_all_grad.py`` for the same
+    fact with no jaccpot involved.
     """
     config = setup["config"]
     positions, masses = _clusters(NDEV, PER)

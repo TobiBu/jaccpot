@@ -246,9 +246,26 @@ likewise not a distinguishing suspect: every JAX collective uses that same id, a
 this audit can settle; the reproducer above is what an upstream fix needs, not a
 mechanism story from us.
 
-**Upstream status.** No matching issue found in jax-ml/jax as of 2026-07-30, and
-not fixed in 0.9.0.1 (the version measured). Filing the reproducer above is the
-open action item.
+**Upstream status: FIXED in JAX 0.9.1.** Measured, not read off a changelog --
+the fix appears in neither the JAX changelog nor any tracked issue. On 0.9.0.1 the
+reproducer is 6/6 CORRUPT under `--jit`; on 0.9.1 it is 4/4 CLEAN, and
+`test_native_halo_exchange_is_fixed_upstream` passes against the real pipeline
+(it fails on 0.9.0.1 with a 0.42 rel-L2 forward drift). No issue was filed, so
+`docs/jax_ragged_all_to_all_bug_report.md` is now only of historical interest --
+though it is still the artifact to send if a regression shows up.
+
+`halo_exchange="auto"` (the default) acts on this: it selects the cheap ragged
+exchange on JAX >= `JAX_RAGGED_GRAD_FIXED_VERSION` = 0.9.1 and the safe
+`all_gather` fallback below it, so a user on an affected JAX cannot silently
+compute wrong forces and a user on a fixed one needs no action.
+
+**But the package cannot get there yet.** `pyproject.toml` caps JAX at `<0.9.1`,
+and 0.9.1 is *also* where `pallas_call`'s `backend=` kwarg was removed -- which
+jaccpot's fused M2L kernels still pass, so 0.9.1 raises
+`TypeError: pallas_call() got an unexpected keyword argument 'backend'`. The two
+changes collide in one release. Until the Pallas call sites are ported, the
+shipped configuration resolves to `"buf"`, and the ragged win is unrealised. See
+the dependency comment in `pyproject.toml`.
 
 **Fix on our side.** `_grad_halo_exchange` pins the halo import to the `all_gather`-based
 `"buf"` exchange for the halo import on the differentiable path. It computes the
