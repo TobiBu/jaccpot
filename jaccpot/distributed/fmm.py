@@ -586,42 +586,64 @@ def _chunked_pallas_nearfield_accumulate(
     return near
 
 
-@contextlib.contextmanager
-def _buffered_ragged_exchange() -> Iterator[None]:
-    """Force the ``all_gather``-based ragged halo exchange inside this block.
+#: Halo-exchange implementations selectable on the gradient path, and the one
+#: reason each exists. The default is the safe one; see :func:`_grad_halo_exchange`.
+GRAD_HALO_EXCHANGES = ("buf", "native")
 
-    REQUIRED on the gradient path. ``jax.lax.ragged_all_to_all`` -- the "native"
-    GPU implementation ``yggdrax.distributed.comm`` selects by default -- is
+
+@contextlib.contextmanager
+def _grad_halo_exchange(method: str) -> Iterator[None]:
+    """Pin the ragged halo exchange's implementation inside this block.
+
+    The gradient path must NOT use ``"native"``
+    (:func:`jax.lax.ragged_all_to_all`), yggdrax's default on GPU. It is
     *value*-correct under autodiff, but **executing** its reverse pass corrupts
     every later ragged exchange in the process: measured on 2xA100, a forward
-    evaluated after one gradient silently drops the entire cross-domain near
-    field and reproduces the LOCAL-ONLY direct sum to 2e-16 (rel-L2 0.42 against
-    the true force). It is not confined to the callable that was differentiated
-    -- every evaluator built *before* the gradient is affected, while a freshly
-    built one is clean, and merely tracing the gradient does no damage.
+    evaluated after one gradient silently drops the entire cross-domain near field
+    and reproduces the LOCAL-ONLY direct sum to 2e-16 (rel-L2 0.42 against the
+    true force). It is not confined to the callable that was differentiated --
+    every evaluator built *before* the gradient is affected, while a freshly built
+    one is clean, and merely tracing the gradient does no damage.
 
-    That signature points at XLA's input/output aliasing on the ragged op:
-    JAX's transpose rule (``_ragged_all_to_all_transpose``) passes
-    ``ad.zeros_like_aval(...)`` as the aliased ``output`` operand, so the
-    in-place write lands in a *shared zeros constant* that previously compiled
-    executables also embed. Diagnosed here, not fixed here: the fix belongs in
-    JAX (or in yggdrax, by not taking that path under autodiff).
+    It is an upstream defect, not ours: ``jax.jit(shard_map(ragged_all_to_all))``
+    reproduces it in ~40 lines with no jaccpot and no yggdrax involved
+    (``bench/repro_jax_ragged_all_to_all_grad.py``; ``jax.jit`` is the trigger, the
+    bare ``shard_map`` is clean). No mechanism is claimed here -- an earlier guess
+    at one (XLA aliasing a shared zeros constant through the transpose rule) was
+    tested and disproved. See ``docs/differentiable_fmm_distributed_audit.md``.
 
-    The ``"buf"`` exchange computes the identical result out of an
-    ``all_gather`` plus an index gather, whose reverse is an ordinary
-    psum/scatter-add, and is corruption-free -- verified: forward bit-identical
-    before and after a gradient, FD-vs-AD 1.9e-6. The price is communication
-    volume: it gathers every device's whole send buffer rather than exchanging
-    ragged blocks point-to-point, i.e. O(ndev x capacity) instead of O(actual
-    halo). That is why it is scoped to the differentiable path and not made the
-    default for the forward.
+    ``"buf"`` (default) computes the identical result out of an ``all_gather``
+    plus an index gather, whose reverse is an ordinary psum/scatter-add. Verified
+    corruption-free: forward bit-identical before and after a gradient, FD-vs-AD
+    1.9e-6. It costs bandwidth -- every device gathers every other device's whole
+    send buffer, O(ndev^2 x block) rather than the ragged O(actual halo) -- which
+    is why the forward keeps the native path and only the gradient path is pinned.
+
+    ``"native"`` is kept **only so the upstream fix can be verified in one
+    argument**: once JAX repairs this, run the gradient tests with
+    ``halo_exchange="native"`` and, if
+    ``test_forward_survives_a_gradient`` stays green, make it the default and
+    delete this shim. Do not use it for real work before then.
+
+    A cheaper safe option exists but is deliberately not offered yet:
+    ``jax.lax.all_to_all`` with a fixed per-peer block is exact under jit+grad and
+    survives it (measured VJP-vs-FD 7.0e-09), but its bandwidth win requires
+    assuming the halo is balanced across peers -- a *safe* per-peer block width
+    equals the whole send buffer, which recovers no saving at all. Making it pay
+    means sizing the block at ~C_in/ndev and adding a truncation guard, i.e. a new
+    silent-wrong-force failure mode. Worth doing when ndev > 2 actually matters,
+    not before.
 
     Tracing is single-threaded and the rebind covers exactly one traced call, so
     it cannot leak into a concurrent forward evaluation.
     """
 
+    if method not in GRAD_HALO_EXCHANGES:
+        raise ValueError(
+            f"halo_exchange must be one of {GRAD_HALO_EXCHANGES}; got {method!r}"
+        )
     original = _yggdrax_let.ragged_all_to_all_exchange
-    _yggdrax_let.ragged_all_to_all_exchange = functools.partial(original, method="buf")
+    _yggdrax_let.ragged_all_to_all_exchange = functools.partial(original, method=method)
     try:
         yield
     finally:
@@ -667,6 +689,7 @@ def _make_fn(
     *,
     differentiable: bool = False,
     l2l_num_levels: Optional[int] = None,
+    halo_exchange: str = "buf",
 ) -> Callable:
     """Build the per-device ``shard_map`` body closing over static shapes.
 
@@ -695,6 +718,10 @@ def _make_fn(
             )
         if int(l2l_num_levels) < 0:
             raise ValueError(f"l2l_num_levels must be >= 0; got {l2l_num_levels}")
+    if halo_exchange not in GRAD_HALO_EXCHANGES:
+        raise ValueError(
+            f"halo_exchange must be one of {GRAD_HALO_EXCHANGES}; got {halo_exchange!r}"
+        )
 
     p = config.order
     leaf = config.leaf_size
@@ -1048,10 +1075,12 @@ def _make_fn(
             max_pair_queue=x_queue,
         )
         # The halo exchange is the one place cotangents cross devices. On the grad
-        # path it must run through the all_gather-based ragged exchange -- see
-        # _buffered_ragged_exchange for the corruption the native path causes.
+        # path its implementation is pinned -- see _grad_halo_exchange for why the
+        # native ragged path must not be used there.
         with (
-            _buffered_ragged_exchange() if differentiable else contextlib.nullcontext()
+            _grad_halo_exchange(halo_exchange)
+            if differentiable
+            else contextlib.nullcontext()
         ):
             halo = import_near_halo(
                 rct,
@@ -1436,6 +1465,7 @@ def make_force_evaluator(
     jit: bool = True,
     differentiable: bool = False,
     l2l_num_levels: Optional[int] = None,
+    halo_exchange: str = "buf",
 ) -> Callable:
     """Build a callable ``(pos_flat, mass_flat, gid_flat, counts) -> (accel, gid, diag)``.
 
@@ -1472,6 +1502,12 @@ def make_force_evaluator(
     site. Setting it too low truncates the cascade and is reported as
     ``l2l_level_overflow`` in the diagnostics -- check that flag whenever you
     override it.
+
+    ``halo_exchange`` (differentiable mode only) selects the ragged halo
+    exchange's implementation. The default ``"buf"`` is the safe one;
+    ``"native"`` exists so a future JAX fix can be verified by changing one
+    argument, and is known to corrupt subsequent forwards today. See
+    :func:`_grad_halo_exchange`.
     """
 
     fn = _make_fn(
@@ -1480,6 +1516,7 @@ def make_force_evaluator(
         cap,
         differentiable=differentiable,
         l2l_num_levels=l2l_num_levels,
+        halo_exchange=halo_exchange,
     )
 
     def evaluate(

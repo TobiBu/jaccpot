@@ -24,6 +24,7 @@ Run on >= 2 GPUs:
 from __future__ import annotations
 
 import dataclasses
+import os
 
 import jax
 import jax.numpy as jnp
@@ -231,6 +232,66 @@ def test_nearfield_chunk_rejected_on_grad_path():
         make_force_evaluator(
             config, NDEV, 32, make_mesh(NDEV), jit=False, differentiable=True
         )
+
+
+def test_rejects_unknown_halo_exchange():
+    """Only the vetted halo-exchange implementations are selectable."""
+    with pytest.raises(ValueError, match="halo_exchange"):
+        make_force_evaluator(
+            DistributedFMMConfig(),
+            NDEV,
+            32,
+            make_mesh(NDEV),
+            jit=False,
+            differentiable=True,
+            halo_exchange="ragged",
+        )
+
+
+@pytest.mark.skipif(
+    os.environ.get("JACCPOT_CHECK_UPSTREAM_RAGGED_FIX", "0") != "1",
+    reason=(
+        "opt-in: asserts the upstream jax.lax.ragged_all_to_all bug is FIXED. "
+        "Run with JACCPOT_CHECK_UPSTREAM_RAGGED_FIX=1 after a JAX upgrade; if it "
+        "passes, make halo_exchange='native' the default and drop the shim."
+    ),
+)
+def test_native_halo_exchange_is_fixed_upstream(setup):
+    """Tripwire for the JAX fix: is `native` safe to differentiate through yet?
+
+    Today this FAILS by design -- executing a gradient through
+    ``jax.lax.ragged_all_to_all`` makes every later forward drop the cross-domain
+    near field (see ``bench/repro_jax_ragged_all_to_all_grad.py``). It is the
+    one-argument check that tells us when the workaround can go away.
+    """
+    config = setup["config"]
+    positions, masses = _clusters(NDEV, PER)
+    part = partition_for_devices(positions, masses, NDEV, leaf_size=config.leaf_size)
+    args = (
+        jnp.asarray(part["pos_flat"]),
+        jnp.asarray(part["mass_flat"]),
+        jnp.asarray(part["gid_flat"]),
+        jnp.asarray(part["counts"]),
+    )
+    native = make_force_evaluator(
+        config,
+        NDEV,
+        part["cap"],
+        make_mesh(NDEV),
+        jit=True,
+        differentiable=True,
+        halo_exchange="native",
+    )
+    before = np.asarray(native(*args)[0])
+    grad = jax.grad(lambda p, m: jnp.sum(native(p, m, args[2], args[3])[0] ** 2))(
+        args[0], args[1]
+    )
+    jax.block_until_ready(grad)
+    after = np.asarray(native(*args)[0])
+    assert np.array_equal(before, after), (
+        "jax.lax.ragged_all_to_all still corrupts the forward after a gradient "
+        f"(rel-L2 drift {_rel_l2(after, before):.3e}) -- keep halo_exchange='buf'"
+    )
 
 
 def test_l2l_num_levels_requires_differentiable():

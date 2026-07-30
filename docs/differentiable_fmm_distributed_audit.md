@@ -124,8 +124,9 @@ default can be ~2 orders of magnitude loose at scale). Too small a value
 truncates the cascade, so it is reported as `l2l_level_overflow` in the
 diagnostics rather than silently producing a wrong force and gradient.
 
-This is the one blocker whose fix has a real performance cost, and it is the
-first thing to revisit if distributed gradients need to be fast.
+This looked like the one blocker whose fix carried a real performance cost. It
+does not: see "Cost" below — tightening the bound is worth ~6% at N=512 and
+nothing at N=2048, so the safe default is cheap and this is a correctness knob.
 
 ### 4. A JAX host-side literal reaching the analytic near-field reverse
 
@@ -249,7 +250,7 @@ mechanism story from us.
 not fixed in 0.9.0.1 (the version measured). Filing the reproducer above is the
 open action item.
 
-**Fix on our side.** `_buffered_ragged_exchange` forces the `all_gather`-based
+**Fix on our side.** `_grad_halo_exchange` pins the halo import to the `all_gather`-based
 `"buf"` exchange for the halo import on the differentiable path. It computes the
 identical result out of an `all_gather` plus an index gather, whose reverse is an
 ordinary psum/scatter-add. After the fix: forward bit-identical before and after a
@@ -413,10 +414,14 @@ Scoped honestly, so nothing here reads as a broader claim than was measured.
   point, where a `state` is built once and reused: there is nothing to hoist here,
   and the topology build cost is paid per gradient (forward-only — no cotangent
   path through it).
-* **The upstream ragged bug is worked around, not fixed.** If a future JAX or
-  yggdrax release fixes it, drop `_buffered_ragged_exchange` and recover the
-  point-to-point exchange on the gradient path. The regression test above will
-  say whether it is safe.
+* **The upstream ragged bug is worked around, not fixed.** The workaround is one
+  argument: `make_force_evaluator(..., halo_exchange=...)`, defaulting to the safe
+  `"buf"`. After a JAX upgrade, run
+  `JACCPOT_CHECK_UPSTREAM_RAGGED_FIX=1 pytest tests/test_distributed_grad_correctness.py`
+  -- `test_native_halo_exchange_is_fixed_upstream` differentiates through
+  `"native"` and checks the forward afterwards. When it passes, make `"native"` the
+  default and delete `_grad_halo_exchange`. A draft of the upstream report is in
+  `docs/jax_ragged_all_to_all_bug_report.md`.
 
 ---
 
