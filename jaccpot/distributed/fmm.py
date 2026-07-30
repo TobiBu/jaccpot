@@ -30,9 +30,11 @@ Correctness notes carried over from the validated test (do not "simplify"):
 
 from __future__ import annotations
 
+import contextlib
 import dataclasses
+import functools
 from dataclasses import dataclass
-from typing import Any, Callable, NamedTuple, Optional
+from typing import Any, Callable, Iterator, NamedTuple, Optional
 
 import jax
 import jax.numpy as jnp
@@ -45,7 +47,9 @@ except ImportError:  # pragma: no cover
     from jax.experimental.shard_map import shard_map
 
 from yggdrax import build_interactions_and_neighbors, compute_tree_geometry
-from yggdrax.distributed import device_count, make_mesh
+from yggdrax.distributed import device_count
+from yggdrax.distributed import let as _yggdrax_let
+from yggdrax.distributed import make_mesh
 from yggdrax.distributed.cross_walk import dual_tree_walk_cross_impl
 from yggdrax.distributed.let import (
     build_coarse_frontier,
@@ -69,6 +73,7 @@ from jaccpot.downward.local_expansions import LocalExpansionData
 from jaccpot.nearfield.near_field import (
     _compute_leaf_p2p_prepared_large_n_self_only_impl,
     _prepare_leaf_data_from_groups,
+    _radix_fast_lane_prepacked_accel_cvjp,
     _radix_fast_lane_prepacked_pallas,
     _radix_fast_lane_prepacked_pallas_decoupled,
     compute_leaf_p2p_accelerations,
@@ -96,6 +101,12 @@ from jaccpot.upward.solidfmm_complex_tree_expansions import (
     prepare_solidfmm_complex_upward_sweep,
 )
 
+# Reverse-pass tiling for the differentiable fused near field. Mirrors the
+# single-GPU defaults in ``runtime/grad_options.py`` (leaf_batch/block_tile = 8);
+# the distributed body has no GradConfig channel, so they are fixed here.
+_GRAD_NEARFIELD_REV_LEAF_BATCH = 8
+_GRAD_NEARFIELD_REV_BLOCK_TILE = 8
+
 # Order of the per-device diagnostic vector returned alongside the forces.
 DIAG_FIELDS = (
     "cross_far_pairs",
@@ -108,6 +119,12 @@ DIAG_FIELDS = (
     "self_queue_overflow",
     "self_far_overflow",
     "self_near_overflow",
+    # differentiable mode only: the L2L cascade ran with a STATIC level bound and
+    # that bound was smaller than the tree's actual depth, so the cascade was
+    # truncated (both force and gradient wrong). Always 0 on the forward path and
+    # whenever ``l2l_num_levels`` is left to its safe default. Deliberately NOT in
+    # ``_OVERFLOW_FIELDS``: no capacity retry can fix a caller-supplied bound.
+    "l2l_level_overflow",
 )
 
 
@@ -569,13 +586,115 @@ def _chunked_pallas_nearfield_accumulate(
     return near
 
 
-def _make_fn(config: DistributedFMMConfig, ndev: int, cap: int) -> Callable:
+@contextlib.contextmanager
+def _buffered_ragged_exchange() -> Iterator[None]:
+    """Force the ``all_gather``-based ragged halo exchange inside this block.
+
+    REQUIRED on the gradient path. ``jax.lax.ragged_all_to_all`` -- the "native"
+    GPU implementation ``yggdrax.distributed.comm`` selects by default -- is
+    *value*-correct under autodiff, but **executing** its reverse pass corrupts
+    every later ragged exchange in the process: measured on 2xA100, a forward
+    evaluated after one gradient silently drops the entire cross-domain near
+    field and reproduces the LOCAL-ONLY direct sum to 2e-16 (rel-L2 0.42 against
+    the true force). It is not confined to the callable that was differentiated
+    -- every evaluator built *before* the gradient is affected, while a freshly
+    built one is clean, and merely tracing the gradient does no damage.
+
+    That signature points at XLA's input/output aliasing on the ragged op:
+    JAX's transpose rule (``_ragged_all_to_all_transpose``) passes
+    ``ad.zeros_like_aval(...)`` as the aliased ``output`` operand, so the
+    in-place write lands in a *shared zeros constant* that previously compiled
+    executables also embed. Diagnosed here, not fixed here: the fix belongs in
+    JAX (or in yggdrax, by not taking that path under autodiff).
+
+    The ``"buf"`` exchange computes the identical result out of an
+    ``all_gather`` plus an index gather, whose reverse is an ordinary
+    psum/scatter-add, and is corruption-free -- verified: forward bit-identical
+    before and after a gradient, FD-vs-AD 1.9e-6. The price is communication
+    volume: it gathers every device's whole send buffer rather than exchanging
+    ragged blocks point-to-point, i.e. O(ndev x capacity) instead of O(actual
+    halo). That is why it is scoped to the differentiable path and not made the
+    default for the forward.
+
+    Tracing is single-threaded and the rebind covers exactly one traced call, so
+    it cannot leak into a concurrent forward evaluation.
+    """
+
+    original = _yggdrax_let.ragged_all_to_all_exchange
+    _yggdrax_let.ragged_all_to_all_exchange = functools.partial(original, method="buf")
+    try:
+        yield
+    finally:
+        _yggdrax_let.ragged_all_to_all_exchange = original
+
+
+def _live_coarse_payload(
+    frontier: Any, rct: Any, ndev: int
+) -> tuple[jax.Array, jax.Array]:
+    """Live coarse-particle COMs/masses in the *frozen* coarse-tree order.
+
+    Mirrors the gather ``yggdrax.distributed.let.build_remote_coarse_tree``
+    performs internally: ``all_gather`` every domain's frontier, drop own domain,
+    then reorder by the coarse tree's particle permutation. The selection is
+    integer-only (it depends on the axis index, never on a float), so recomputing
+    it here reproduces ``rct.positions_sorted`` / ``rct.masses_sorted`` exactly --
+    but as a differentiable gather of the *live* frontier rather than a constant
+    produced alongside a (non-differentiable) tree build.
+
+    Needed because the coarse leaves' COMs ARE the coarse expansion centres: if
+    they were frozen while the seeded multipoles stay live, the coarse M2M would
+    translate live multipoles by stale centre deltas and silently drop a real
+    gradient term (this is not a measure-zero topology effect).
+    """
+
+    n_top = frontier.mass.shape[0]
+    me = jax.lax.axis_index("gpus")
+    domain = jax.lax.all_gather(
+        jnp.broadcast_to(me, (n_top,)).astype(INDEX_DTYPE), "gpus", tiled=True
+    )
+    n_remote = (ndev - 1) * n_top
+    sel = jnp.nonzero(domain != me, size=n_remote, fill_value=0)[0]
+    pidx = jnp.asarray(rct.tree.particle_indices, INDEX_DTYPE)
+    coarse_positions = jax.lax.all_gather(frontier.com, "gpus", tiled=True)[sel][pidx]
+    coarse_masses = jax.lax.all_gather(frontier.mass, "gpus", tiled=True)[sel][pidx]
+    return coarse_positions, coarse_masses
+
+
+def _make_fn(
+    config: DistributedFMMConfig,
+    ndev: int,
+    cap: int,
+    *,
+    differentiable: bool = False,
+    l2l_num_levels: Optional[int] = None,
+) -> Callable:
     """Build the per-device ``shard_map`` body closing over static shapes.
 
     This is a faithful copy of ``fn`` / ``_combined_neighbors`` from
     ``tests/test_distributed_solidfmm_far_shardmap.py`` with the module-level
     constants promoted to ``config`` fields and only the *full* force path kept.
+
+    ``differentiable`` switches on the fixed-topology gradient seam (see
+    :func:`make_force_evaluator`). It never changes the forward values: every
+    difference it introduces is either a ``stop_gradient`` (identity on the
+    primal) or a re-gather that reproduces the same array by construction.
     """
+
+    if differentiable and config.nearfield_chunk:
+        raise NotImplementedError(
+            "differentiable=True does not support nearfield_chunk: the chunked "
+            "lane calls the DECOUPLED fused Pallas kernel, which has no autodiff "
+            "rule (only the non-chunked prepacked kernel carries a custom_vjp). "
+            "Set nearfield_chunk=None, or nearfield_backend='baseline'."
+        )
+    if l2l_num_levels is not None:
+        if not differentiable:
+            raise ValueError(
+                "l2l_num_levels only applies to differentiable=True (the forward "
+                "path resolves the L2L depth exactly, on device)."
+            )
+        if int(l2l_num_levels) < 0:
+            raise ValueError(f"l2l_num_levels must be >= 0; got {l2l_num_levels}")
 
     p = config.order
     leaf = config.leaf_size
@@ -697,8 +816,19 @@ def _make_fn(config: DistributedFMMConfig, ndev: int, cap: int) -> Callable:
     def fn(
         pos: jax.Array, mass: jax.Array, gid: jax.Array, count: jax.Array
     ) -> tuple[jax.Array, jax.Array, jax.Array]:
-        bounds = global_bounds(pos)
-        pos_s, mass_s = sanitize_padding(pos, mass, count)
+        # Fixed-topology seam. In differentiable mode the tree, its geometry and
+        # every walk below are built from stop_gradient'ed inputs, so no cotangent
+        # can reach the discrete topology (global bounds, Morton order, node
+        # membership, MAC accept/reject, the interaction lists) -- which is what
+        # keeps the reverse pass off the walks' lax.while_loop (not reverse-mode
+        # differentiable) and off the tree build's dynamic fori_loops. The numeric
+        # pipeline is then re-evaluated on the LIVE pos/mass, gathered into that
+        # frozen Morton order: the distributed analogue of the single-GPU
+        # ``differentiable_accelerations`` re-evaluation seam.
+        pos_topo = jax.lax.stop_gradient(pos) if differentiable else pos
+        mass_topo = jax.lax.stop_gradient(mass) if differentiable else mass
+        bounds = global_bounds(pos_topo)
+        pos_s, mass_s = sanitize_padding(pos_topo, mass_topo, count)
         tree = Tree.from_particles(
             pos_s,
             mass_s,
@@ -707,10 +837,24 @@ def _make_fn(config: DistributedFMMConfig, ndev: int, cap: int) -> Callable:
             return_reordered=True,
             leaf_size=leaf,
         )
-        lp = tree.positions_sorted
-        lm = tree.masses_sorted
-        gid_sorted = gid[jnp.asarray(tree.particle_indices, INDEX_DTYPE)]
-        geom = compute_tree_geometry(tree, lp, max_leaf_size=leaf)
+        perm = jnp.asarray(tree.particle_indices, INDEX_DTYPE)
+        if differentiable:
+            # Live re-gather in the frozen order. The gather's VJP is a scatter-add
+            # and ``perm`` is integer, so cotangents reach pos/mass and never the
+            # permutation. ``sanitize_padding`` is a pair of ``where``s, so padding
+            # rows correctly receive no gradient of their own (they alias row 0's
+            # position, whose cotangent they do contribute to -- as the forward
+            # dependence requires).
+            pos_live, mass_live = sanitize_padding(pos, mass, count)
+            lp = pos_live[perm]
+            lm = mass_live[perm]
+        else:
+            lp = tree.positions_sorted
+            lm = tree.masses_sorted
+        gid_sorted = gid[perm]
+        # Geometry feeds the MAC only, so it always takes the frozen positions
+        # (the same values as ``lp``; identical forward, no cotangent path).
+        geom = compute_tree_geometry(tree, tree.positions_sorted, max_leaf_size=leaf)
         total_nodes = jnp.asarray(tree.node_ranges).shape[0]
         cdtype = complex_dtype_for_real(lp.dtype)
 
@@ -799,22 +943,41 @@ def _make_fn(config: DistributedFMMConfig, ndev: int, cap: int) -> Callable:
         # remote coarse tree over frontier (leaf COM + mass)
         mm = compute_tree_mass_moments(tree, lp, lm)
         fr = build_coarse_frontier(tree, mm.mass, mm.center_of_mass)
-        rct = build_remote_coarse_tree(fr, ndev, bounds=bounds)
+        if differentiable:
+            # The coarse tree's topology is discrete -> build it from a frozen
+            # frontier (its own Tree.from_particles has the same non-transposable
+            # loops as the local one). Its float payload stays LIVE; see
+            # _live_coarse_payload for why freezing the coarse centres would drop a
+            # real gradient term rather than a measure-zero one.
+            rct = build_remote_coarse_tree(
+                build_coarse_frontier(
+                    tree,
+                    jax.lax.stop_gradient(mm.mass),
+                    jax.lax.stop_gradient(mm.center_of_mass),
+                ),
+                ndev,
+                bounds=bounds,
+            )
+            coarse_pos_sorted, coarse_mass_sorted = _live_coarse_payload(fr, rct, ndev)
+        else:
+            rct = build_remote_coarse_tree(fr, ndev, bounds=bounds)
+            coarse_pos_sorted = rct.positions_sorted
+            coarse_mass_sorted = rct.masses_sorted
 
         # coarse centres (COM) + level structure (same basis as the local sweep)
         if is_real:
             upc = prepare_real_upward_sweep(
                 rct.tree,
-                rct.positions_sorted,
-                rct.masses_sorted,
+                coarse_pos_sorted,
+                coarse_mass_sorted,
                 max_order=p,
                 max_leaf_size=1,
             )
         else:
             upc = prepare_solidfmm_complex_upward_sweep(
                 rct.tree,
-                rct.positions_sorted,
-                rct.masses_sorted,
+                coarse_pos_sorted,
+                coarse_mass_sorted,
                 max_order=p,
                 max_leaf_size=1,
                 rotation=rot,
@@ -884,22 +1047,55 @@ def _make_fn(config: DistributedFMMConfig, ndev: int, cap: int) -> Callable:
             max_neighbors_per_leaf=KN,
             max_pair_queue=x_queue,
         )
-        halo = import_near_halo(
-            rct,
-            cross,
-            lp,
-            lm,
-            ndev,
-            leaf_size=leaf,
-            max_req_leaves=max_req,
-            max_recv_leaves=max_recv,
-        )
+        # The halo exchange is the one place cotangents cross devices. On the grad
+        # path it must run through the all_gather-based ragged exchange -- see
+        # _buffered_ragged_exchange for the corruption the native path causes.
+        with (
+            _buffered_ragged_exchange() if differentiable else contextlib.nullcontext()
+        ):
+            halo = import_near_halo(
+                rct,
+                cross,
+                lp,
+                lm,
+                ndev,
+                leaf_size=leaf,
+                max_req_leaves=max_req,
+                max_recv_leaves=max_recv,
+            )
 
         leaf_nodes = jnp.asarray(nbr.leaf_indices, INDEX_DTYPE)
         nr = jnp.asarray(tree.node_ranges, INDEX_DTYPE)
         node_levels = get_node_levels(tree)
         lc_full = jnp.asarray(tree.left_child, INDEX_DTYPE)
         rc_full = jnp.asarray(tree.right_child, INDEX_DTYPE)
+
+        # L2L level bound. The kernel's default is a device-side ``jnp.max`` over the
+        # internal node levels, which makes the cascade a dynamic-bound ``fori_loop``
+        # -- the ONE remaining reverse-mode blocker once the topology seam is in
+        # place (JAX rejects the transpose). The tree is built inside shard_map, so
+        # no caller can hand us the concrete depth; the only static bound available
+        # is a shape. ``num_internal - 1`` is the tightest such bound (a binary tree
+        # with ``num_internal`` internal nodes cannot have an internal node deeper
+        # than ``num_internal - 1``) and is safe for any distribution. Levels past
+        # the real depth have no active parents, so they contribute exactly zero and
+        # the force is bit-identical -- they cost time, not accuracy. Pass an
+        # explicit ``l2l_num_levels`` to cut that cost when the depth is known
+        # (a balanced tree is ~log2(num_leaves) deep, not num_internal): too small a
+        # value truncates the cascade, which is why it is checked below.
+        num_internal_static = int(lc_full.shape[0])
+        if differentiable:
+            l2l_levels: Optional[int] = (
+                int(l2l_num_levels)
+                if l2l_num_levels is not None
+                else max(num_internal_static - 1, 0)
+            )
+            l2l_overflow = (
+                jnp.max(node_levels[:num_internal_static]) > jnp.asarray(l2l_levels)
+            ).astype(jnp.float64)
+        else:
+            l2l_levels = None
+            l2l_overflow = jnp.zeros((), jnp.float64)
 
         def _l2p(loc_coeffs):
             # Real coeffs carry no conjugate symmetry -> skip the complex-only fixup.
@@ -915,6 +1111,7 @@ def _make_fn(config: DistributedFMMConfig, ndev: int, cap: int) -> Callable:
                 rotation=rot,
                 total_nodes=int(total_nodes),
                 basis_mode="real" if is_real else "complex",
+                num_levels=l2l_levels,
             )
             ld = LocalExpansionData(order=p, centers=centers, coefficients=loc_coeffs)
             # L2P auto-selects the real path from the (real-typed) coefficients;
@@ -1138,18 +1335,49 @@ def _make_fn(config: DistributedFMMConfig, ndev: int, cap: int) -> Callable:
                     .set(jnp.ones_like(flat, bool), mode="drop")
                     .reshape(u_leaves, S_near)
                 )
-                pair_acc = _radix_fast_lane_prepacked_pallas(
-                    sids.reshape(u_leaves, S_near, 1),
-                    svalid.reshape(u_leaves, S_near, 1),
-                    leaf_positions,
-                    leaf_masses,
-                    leaf_mask_g,
-                    safe_idx,
-                    concat_pos,
-                    G=G,
-                    softening_sq=soft2_a,
-                    compute_potential=False,
-                )
+                if differentiable:
+                    # Same fused Pallas forward, reached through the custom_vjp
+                    # wrapper that supplies the reverse (pallas_call has no autodiff
+                    # rule of its own). Byte-identical forward; the reverse is the
+                    # production analytic leaf-pair rule. Index/mask arrays ride in
+                    # as floats because custom_vjp differentiates every non-static
+                    # argument -- the wrapper rounds them back to INDEX_DTYPE.
+                    ids_dtype = concat_pos.dtype
+                    pair_acc = _radix_fast_lane_prepacked_accel_cvjp(
+                        leaf_positions,
+                        leaf_masses,
+                        concat_pos,
+                        sids.reshape(u_leaves, S_near, 1).astype(ids_dtype),
+                        svalid.reshape(u_leaves, S_near, 1).astype(ids_dtype),
+                        leaf_mask_g.astype(ids_dtype),
+                        safe_idx.astype(ids_dtype),
+                        soft2_a,
+                        jnp.asarray(G, dtype=ids_dtype),
+                        None,
+                        1,
+                        None,
+                        False,
+                        _GRAD_NEARFIELD_REV_LEAF_BATCH,
+                        _GRAD_NEARFIELD_REV_BLOCK_TILE,
+                        True,
+                        # Occupancy tiers need a CONCRETE validity mask to read each
+                        # tier's static slot width from; here the mask is a tracer
+                        # built inside shard_map, so the reverse runs untiered.
+                        None,
+                    )
+                else:
+                    pair_acc = _radix_fast_lane_prepacked_pallas(
+                        sids.reshape(u_leaves, S_near, 1),
+                        svalid.reshape(u_leaves, S_near, 1),
+                        leaf_positions,
+                        leaf_masses,
+                        leaf_mask_g,
+                        safe_idx,
+                        concat_pos,
+                        G=G,
+                        softening_sq=soft2_a,
+                        compute_potential=False,
+                    )
                 near_full = self_acc + pair_acc
         else:
             near_full = compute_leaf_p2p_accelerations(
@@ -1191,6 +1419,7 @@ def _make_fn(config: DistributedFMMConfig, ndev: int, cap: int) -> Callable:
                 self_res.queue_overflow.astype(jnp.float64),
                 self_res.far_overflow.astype(jnp.float64),
                 self_res.near_overflow.astype(jnp.float64),
+                l2l_overflow,
             ]
         )
         return accel, gid_sorted[:cap, None].astype(jnp.int64), diag[None, :]
@@ -1205,6 +1434,8 @@ def make_force_evaluator(
     mesh: Any,
     *,
     jit: bool = True,
+    differentiable: bool = False,
+    l2l_num_levels: Optional[int] = None,
 ) -> Callable:
     """Build a callable ``(pos_flat, mass_flat, gid_flat, counts) -> (accel, gid, diag)``.
 
@@ -1213,9 +1444,43 @@ def make_force_evaluator(
     a warmup call, repeated invocations measure steady-state device time
     (the natural per-force-evaluation metric).  Pass ``jit=False`` to run the
     eager ``shard_map`` (used by the correctness path, matching the test).
+
+    ``differentiable=True`` makes the returned callable safe to put under
+    ``jax.grad`` / ``jax.vjp`` w.r.t. ``pos_flat`` and ``mass_flat``, under the
+    same fixed-topology contract as the single-GPU
+    :meth:`~jaccpot.FastMultipoleMethod.differentiable_accelerations`: the tree,
+    the coarse (LET) tree, the MAC decisions and both interaction lists are built
+    from ``stop_gradient``-ed inputs and treated as constants, while the numeric
+    pipeline (P2M, COM centres, M2M/M2L/L2L, L2P, the halo exchange and the
+    near-field P2P) is re-evaluated on the live inputs. Unlike the single-GPU
+    entry point the topology is rebuilt inside every call (the tree build lives
+    inside ``shard_map``), so it always tracks the current positions -- forward
+    cost only, nothing to hoist, and no cotangent path through it.
+
+    Forward values are unaffected: differences are confined to
+    ``stop_gradient`` (identity on the primal) and re-gathers that reproduce the
+    same arrays. Differentiate the returned callable directly; do not wrap it in
+    the host-side :func:`distributed_fmm_accelerations`, which reassembles in
+    NumPy and is not traceable.
+
+    Gradients are w.r.t. the *padded, per-device-partitioned* layout that
+    :func:`partition_for_devices` produces, and ``accel`` rows are in that same
+    per-device Morton order -- map them back with the returned ``gid``.
+
+    ``l2l_num_levels`` (differentiable mode only) is the static level bound for
+    the L2L cascade, whose default is safe but loose; see the note at its use
+    site. Setting it too low truncates the cascade and is reported as
+    ``l2l_level_overflow`` in the diagnostics -- check that flag whenever you
+    override it.
     """
 
-    fn = _make_fn(config, ndev, cap)
+    fn = _make_fn(
+        config,
+        ndev,
+        cap,
+        differentiable=differentiable,
+        l2l_num_levels=l2l_num_levels,
+    )
 
     def evaluate(
         pos_flat: jax.Array,
