@@ -359,7 +359,8 @@ class FastMultipoleMethod(
         mac_force_scale_mode: str = "prev",
         adaptive_error_model: str = "tail_proxy",
         adaptive_eps: Optional[float] = None,
-        dehnen_geometry_mode: str = "tree",
+        dehnen_geometry_mode: str = "com",
+        mac_theta_max: float = 1.0,
         mac_type: MACType = "bh",
         complex_rotation: str = "solidfmm",  # "cached",
         dehnen_radius_scale: float = 1.0,
@@ -473,11 +474,21 @@ class FastMultipoleMethod(
             )
         self.adaptive_error_model = adaptive_error_model_norm
         dehnen_geometry_mode_norm = str(dehnen_geometry_mode).strip().lower()
-        if dehnen_geometry_mode_norm not in ("exact", "tree", "tree_approx", "runtime"):
+        if dehnen_geometry_mode_norm not in (
+            "com",
+            "exact",
+            "tree",
+            "tree_approx",
+            "runtime",
+        ):
             raise ValueError(
-                "dehnen_geometry_mode must be 'exact', 'tree', 'tree_approx', or 'runtime'"
+                "dehnen_geometry_mode must be 'com', 'exact', 'tree', "
+                "'tree_approx', or 'runtime'"
             )
         self.dehnen_geometry_mode = dehnen_geometry_mode_norm
+        self.mac_theta_max = float(mac_theta_max)
+        if not (0.0 < self.mac_theta_max <= 1.0):
+            raise ValueError("mac_theta_max must be in (0, 1]")
         self.adaptive_eps = None if adaptive_eps is None else float(adaptive_eps)
         if self.adaptive_eps is not None and self.adaptive_eps <= 0.0:
             raise ValueError("adaptive_eps must be > 0 when provided")
@@ -623,6 +634,27 @@ class FastMultipoleMethod(
                 self.adaptive_error_model = "dehnen_paper"
             if self.mac_force_scale_mode == "prev":
                 self.mac_force_scale_mode = "paper"
+        # Dehnen eq (16a) is parameterised by a relative force-accuracy target
+        # `eps`, not by an opening angle: acceptance is gated only by the error
+        # test plus eq (16a)'s own `theta < 1` convergence guard, so `theta` has
+        # no effect on which pairs are accepted. Falling back to the tail-proxy
+        # heuristic `theta**(p+2)` therefore silently invents an eps that has
+        # nothing to do with the criterion -- at theta=0.6, p=4 it is 0.047, a
+        # 4.7% per-interaction tolerance, two to three decades looser than the
+        # range Dehnen works in. Require it explicitly instead.
+        if (
+            self._uses_paper_style_traversal_policy()
+            and not self.adaptive_order
+            and self.adaptive_eps is None
+        ):
+            raise ValueError(
+                "the Dehnen paper MAC (mac_type='dehnen_error' or "
+                "adaptive_error_model='dehnen_paper') requires an explicit "
+                "adaptive_eps: it is the relative force-accuracy target of "
+                "eq (16a). The theta-derived default is a tail_proxy heuristic "
+                "and is far too loose here. Note that theta itself does not "
+                "gate acceptance in this mode."
+            )
         self.G = resolved.G
         self.softening = resolved.softening
         self.working_dtype = resolved.working_dtype

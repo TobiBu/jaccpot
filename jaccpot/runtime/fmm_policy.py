@@ -147,6 +147,8 @@ class PolicyMixin:
         """Build the solver-owned adaptive policy state from upward data."""
 
         return build_adaptive_policy_state(
+            gravitational_constant=float(self.G),
+            mac_theta_max=float(getattr(self, "mac_theta_max", 1.0)),
             upward=upward,
             tree=tree,
             positions_sorted=positions_sorted,

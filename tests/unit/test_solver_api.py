@@ -445,6 +445,9 @@ def test_dehnen_error_defaults_to_paper_policy_settings():
     fmm = FastMultipoleMethod(
         preset=FMMPreset.FAST,
         basis="solidfmm",
+        # eps is the accuracy knob of Dehnen eq (16a) and must be explicit; the
+        # theta-derived fallback is a tail_proxy heuristic unrelated to it.
+        adaptive_eps=1.0e-4,
         advanced=FMMAdvancedConfig(mac_type="dehnen_error"),
     )
     assert fmm.mac_type == "dehnen_error"
@@ -458,11 +461,45 @@ def test_dehnen_error_preserves_explicit_policy_overrides():
         basis="solidfmm",
         adaptive_error_model="dehnen_degree",
         mac_force_scale_mode="prepass",
+        adaptive_eps=1.0e-4,
         advanced=FMMAdvancedConfig(mac_type="dehnen_error"),
     )
     assert fmm.mac_type == "dehnen_error"
     assert fmm._impl.adaptive_error_model == "dehnen_degree"
     assert fmm._impl.mac_force_scale_mode == "prepass"
+
+
+def test_dehnen_error_requires_explicit_adaptive_eps():
+    """The paper MAC must not silently inherit the theta-derived tolerance.
+
+    In paper mode theta does not gate acceptance at all -- eq (16a) supplies its
+    own ``theta < 1`` convergence guard -- so ``theta**(p+2)`` is an unrelated
+    heuristic. At theta=0.6, p=4 it evaluates to 0.047, a 4.7% per-interaction
+    tolerance, which is how a wildly loose eps reached the accuracy notebooks.
+    """
+
+    with pytest.raises(ValueError, match="requires an explicit adaptive_eps"):
+        FastMultipoleMethod(
+            preset=FMMPreset.FAST,
+            basis="solidfmm",
+            advanced=FMMAdvancedConfig(mac_type="dehnen_error"),
+        )
+
+    with pytest.raises(ValueError, match="requires an explicit adaptive_eps"):
+        FastMultipoleMethod(
+            preset=FMMPreset.FAST,
+            basis="solidfmm",
+            adaptive_error_model="dehnen_paper",
+        )
+
+    # Adaptive order keeps the validated theta-derived default.
+    FastMultipoleMethod(
+        preset=FMMPreset.FAST,
+        basis="solidfmm",
+        adaptive_order=True,
+        p_gears=(2, 3, 4),
+        adaptive_error_model="dehnen_paper",
+    )
 
 
 def test_tree_type_flows_from_advanced_config():

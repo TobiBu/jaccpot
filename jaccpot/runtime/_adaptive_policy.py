@@ -13,6 +13,8 @@ from yggdrax.tree import Tree
 
 from jaccpot.upward.tree_expansions import TreeUpwardData
 
+from .fmm_caches import _contains_tracer
+
 _ACTION_ACCEPT = 0
 _ACTION_NEAR = 1
 _ACTION_REFINE = 2
@@ -41,6 +43,19 @@ class AdaptivePolicyState(NamedTuple):
     dehnen_exponent_by_order: Array
     relaxed_theta_sq: Array
     error_model_code: Array
+    #: Newton constant. eq (16a) compares a *force* error ``G Etilde M_A / r^2``
+    #: against ``eps * min_b |a_b|``, and the force scales on the right come from
+    #: a G-scaled prepass -- so omitting G here runs the criterion at an effective
+    #: tolerance of ``eps * G``. Defaults to 1 so existing hand-built states in
+    #: the tests keep working unchanged.
+    gravitational_constant: float = 1.0
+    #: Geometric cap on the opening angle ``(rho_z + rho_s) / r`` for pairs the
+    #: error test accepts. eq (16a) caps it only at 1.0, which is the *boundary of
+    #: convergence* of the multipole series, not a safe operating point: at
+    #: opening 0.99 a p=4 expansion has O(1) error, and eq (15)'s bound is derived
+    #: under an assumption of convergence, so it under-predicts there. 1.0
+    #: reproduces eq (16a) verbatim; a smaller value is a disclosed deviation.
+    mac_theta_max: float = 1.0
 
 
 def adaptive_policy_tolerance(
@@ -75,15 +90,29 @@ def source_power_by_degree_from_multipoles(*, multipole_packed: Array) -> Array:
 def dehnen_multipole_power_by_degree(*, multipole_packed: Array) -> Array:
     """Return Dehnen's exact per-degree source power ``P_n`` from packed moments.
 
-    For the real-Dehnen basis used by the real SH runtime, equation (12) maps
-    directly onto the packed coefficients ``M_n^m``:
+    Dehnen (2014) equation (12) sums over the *complex* moments::
 
-    ``P_n^2 = sum_m (n-m)! (n+m)! |M_n^m|^2``.
+        P_n^2 = sum_{m=-n}^{n} (n-m)! (n+m)! |M_n^m|^2
+
+    The complex-basis packing stores ``M_n^m`` directly at ``m = -n..n``, so the
+    sum maps onto the slice as written. The real (Dehnen no-sqrt2) packing
+    instead stores the pair ``(Re M_n^{|m|}, Im M_n^{|m|})`` at slots ``+|m|``
+    and ``-|m|``, so ``|M_n^{|m|}|^2`` is split across two real slots -- and
+    because the weight is symmetric under ``m -> -m``, each ``|m| != 0``
+    magnitude contributes to eq (12) *twice*. Summing the real slots once
+    therefore under-estimates ``P_n`` by up to a factor sqrt(2), which makes the
+    acceptance criterion correspondingly too permissive and, worse, makes the
+    estimator basis-dependent. Double the ``m != 0`` weights in the real basis.
+
+    Invariant pinned by the unit tests: for a single point mass ``m`` at
+    distance ``d`` the exact power is ``P_n = m * d**n`` for every degree,
+    independent of direction and of the packed representation.
     """
 
     packed = jnp.asarray(multipole_packed)
     total_p = _packed_total_order(packed)
-    dtype = packed.real.dtype if jnp.iscomplexobj(packed) else packed.dtype
+    is_complex = jnp.iscomplexobj(packed)
+    dtype = packed.real.dtype if is_complex else packed.dtype
     factorial = jnp.exp(jax.lax.lgamma(jnp.arange(2 * total_p + 1, dtype=dtype) + 1.0))
     powers: list[Array] = []
     for ell in range(total_p + 1):
@@ -91,7 +120,14 @@ def dehnen_multipole_power_by_degree(*, multipole_packed: Array) -> Array:
         stop = (ell + 1) * (ell + 1)
         degree_slice = packed[:, start:stop]
         m_vals = jnp.arange(-ell, ell + 1, dtype=jnp.int32)
-        weights = factorial[ell - m_vals] * factorial[ell + m_vals]
+        m_abs = jnp.abs(m_vals)
+        weights = factorial[ell - m_abs] * factorial[ell + m_abs]
+        if not is_complex:
+            weights = weights * jnp.where(
+                m_vals == 0,
+                jnp.asarray(1.0, dtype=dtype),
+                jnp.asarray(2.0, dtype=dtype),
+            )
         weighted_sq = jnp.square(jnp.abs(degree_slice)) * weights[None, :]
         powers.append(jnp.sqrt(jnp.sum(weighted_sq, axis=1)))
     return jnp.stack(powers, axis=1)
@@ -257,7 +293,15 @@ def compute_node_force_scale_from_sorted_acc(
                 if use_min
                 else jnp.max(leaf_values, axis=1)
             )
-            leaf_scale = jnp.where(counts > 0, leaf_scale, jnp.zeros_like(leaf_scale))
+            # Empty leaves must take the reduction *identity*, not zero. Under the
+            # `min` reduction used by the paper MAC, a zero here propagates all the
+            # way to the root and drives `target_accept_threshold` to its floor, so
+            # a single padded leaf refuses every far pair on its whole ancestor
+            # chain. Capacity-fixed static_radix trees have padded leaves by
+            # construction, so this is the common case, not a corner case.
+            leaf_scale = jnp.where(
+                counts > 0, leaf_scale, jnp.full_like(leaf_scale, identity)
+            )
             leaf_nodes = jnp.arange(num_internal, num_nodes, dtype=jnp.int32)
             scales = scales.at[leaf_nodes].set(leaf_scale)
 
@@ -293,7 +337,20 @@ def compute_node_force_scale_from_sorted_acc(
         node_value = jnp.where(left_valid | right_valid, node_value, zero)
         return current.at[node_idx].set(node_value)
 
-    return jax.lax.fori_loop(0, num_internal, body, scales)
+    scales = jax.lax.fori_loop(0, num_internal, body, scales)
+    # Nodes spanning no particles at all retain the reduction identity, which is
+    # non-finite. They can never be a meaningful interaction target, but leaving
+    # +/-inf in the array would poison any downstream arithmetic, so collapse them
+    # onto the global finite extremum.
+    finite = jnp.isfinite(scales)
+    fallback = jnp.where(
+        jnp.any(finite),
+        jnp.min(jnp.where(finite, scales, jnp.inf))
+        if use_min
+        else jnp.max(jnp.where(finite, scales, -jnp.inf)),
+        jnp.asarray(0.0, dtype=dtype),
+    )
+    return jnp.where(finite, scales, fallback)
 
 
 def _sphere_from_support(points: np.ndarray) -> tuple[np.ndarray, float]:
@@ -560,6 +617,84 @@ def compute_leaf_ritter_sphere_geometry(
     return centers, radii
 
 
+def compute_center_referenced_radius_geometry(
+    *, tree: Tree, positions_sorted: Array, centers: Array
+) -> Array:
+    """Return per-node radii measured about ``centers``, not about a fitted sphere.
+
+    Dehnen's error estimate (eqs 13/15) needs ``rho`` measured about the point
+    the expansion is actually taken about. Feeding it a *smallest-enclosing-
+    sphere* radius while the multipoles are expanded about the centre of mass
+    under-bounds the true radius (the SES radius is minimal by construction) and
+    over-accepts. This helper measures the radius about whatever centre the
+    runtime actually uses, so the MAC distance and the M2L displacement are the
+    same quantity.
+
+    Exact at leaves; a valid upper bound at internal nodes, via the standard
+    ``|c_child - c_parent| + rho_child`` merge. Fully device-side and
+    differentiable, unlike the Welzl/Ritter sphere fits.
+    """
+
+    node_ranges = jnp.asarray(tree.node_ranges, dtype=jnp.int32)
+    pos = jnp.asarray(positions_sorted)
+    node_centers = jnp.asarray(centers, dtype=pos.dtype)
+    num_nodes = int(node_ranges.shape[0])
+    num_internal = int(tree.num_internal_nodes)
+    dtype = pos.dtype
+    radii = jnp.zeros((num_nodes,), dtype=dtype)
+    if num_nodes == 0:
+        return radii
+
+    leaf_ranges = node_ranges[num_internal:] if num_internal > 0 else node_ranges
+    if int(leaf_ranges.shape[0]) > 0:
+        counts = jnp.maximum(leaf_ranges[:, 1] - leaf_ranges[:, 0] + 1, 0)
+        max_leaf = int(jnp.max(counts))
+        if max_leaf > 0:
+            idx = jnp.arange(max_leaf, dtype=jnp.int32)
+            particle_idx = leaf_ranges[:, 0:1] + idx[None, :]
+            valid = idx[None, :] < counts[:, None]
+            safe_idx = jnp.clip(particle_idx, 0, pos.shape[0] - 1)
+            leaf_nodes = jnp.arange(num_internal, num_nodes, dtype=jnp.int32)
+            offsets = pos[safe_idx] - node_centers[leaf_nodes][:, None, :]
+            reach = jnp.linalg.norm(offsets, axis=2)
+            reach = jnp.where(valid, reach, jnp.asarray(0.0, dtype=dtype))
+            leaf_radii = jnp.max(reach, axis=1)
+            leaf_radii = jnp.where(counts > 0, leaf_radii, jnp.zeros_like(leaf_radii))
+            radii = radii.at[leaf_nodes].set(leaf_radii)
+
+    if num_internal <= 0:
+        return radii
+
+    left_child = jnp.asarray(tree.left_child, dtype=jnp.int32)
+    right_child = jnp.asarray(tree.right_child, dtype=jnp.int32)
+    # Ascending node span so children are populated before parents; radix
+    # internal-node indices are not stored in postorder.
+    internal_ranges = node_ranges[:num_internal]
+    internal_order = jnp.argsort(
+        internal_ranges[:, 1] - internal_ranges[:, 0], stable=True
+    )
+
+    def body(iter_idx: Array, state: Array) -> Array:
+        node_idx = internal_order[iter_idx]
+        center = node_centers[node_idx]
+
+        def child_reach(child_idx: Array) -> Array:
+            safe = jnp.maximum(child_idx, 0)
+            offset = jnp.linalg.norm(node_centers[safe] - center)
+            return jnp.where(
+                child_idx >= 0,
+                offset + state[safe],
+                jnp.asarray(0.0, dtype=dtype),
+            )
+
+        merged = jnp.maximum(
+            child_reach(left_child[node_idx]), child_reach(right_child[node_idx])
+        )
+        return state.at[node_idx].set(merged)
+
+    return jax.lax.fori_loop(0, num_internal, body, radii)
+
+
 def merge_bounding_spheres(
     center_a: Array, radius_a: Array, center_b: Array, radius_b: Array
 ) -> tuple[Array, Array]:
@@ -614,10 +749,20 @@ def compute_tree_merged_sphere_geometry(
         return centers, radii
     left_child = jnp.asarray(tree.left_child, dtype=jnp.int32)
     right_child = jnp.asarray(tree.right_child, dtype=jnp.int32)
+    # Internal-node indices are not guaranteed to be stored in postorder, so a
+    # descending-index sweep can visit a parent before its children and merge
+    # spheres that are still unpopulated -- the resulting node sphere then fails
+    # to contain its own particles, which silently breaks the MAC's `theta < 1`
+    # convergence guard. Merge in ascending node span instead, matching
+    # `compute_node_force_scale_from_sorted_acc`.
+    node_ranges = jnp.asarray(tree.node_ranges, dtype=jnp.int32)
+    internal_ranges = node_ranges[:num_internal]
+    internal_width = internal_ranges[:, 1] - internal_ranges[:, 0]
+    internal_order = jnp.argsort(internal_width, stable=True)
 
     def body(iter_idx: Array, state: tuple[Array, Array]) -> tuple[Array, Array]:
         center_state, radius_state = state
-        node_idx = num_internal - 1 - iter_idx
+        node_idx = internal_order[iter_idx]
         left_idx = left_child[node_idx]
         right_idx = right_child[node_idx]
 
@@ -649,17 +794,64 @@ def compute_tree_merged_sphere_geometry(
     )
 
 
+#: Geometry modes whose leaf pass is a numpy host loop and therefore cannot be
+#: traced. ``exact`` runs an exact smallest-enclosing-sphere solve per node;
+#: ``tree`` runs the same solve per leaf before the device-side merge.
+_HOST_ONLY_DEHNEN_GEOMETRY_MODES = ("exact", "tree")
+
+
 def resolve_dehnen_geometry(
     *,
-    geometry_mode: Literal["exact", "tree", "tree_approx", "runtime"],
+    geometry_mode: Literal["com", "exact", "tree", "tree_approx", "runtime"],
     tree: Tree,
     positions_sorted: Array,
     upward: TreeUpwardData,
     dtype: Array,
 ) -> tuple[Array, Array]:
-    """Return MAC centres and radii for the requested Dehnen geometry mode."""
+    """Return MAC centres and radii for the requested Dehnen geometry mode.
+
+    ``com`` (the default) references both the centres and the radii to the
+    runtime's own expansion centres, so the distance entering eqs (13)/(15) is
+    exactly the M2L displacement. The remaining modes fit a separate bounding
+    sphere per node and are kept as opt-in reference modes for comparing
+    Dehnen's section 5.1 centre recommendations; because their radii are
+    measured about the fitted sphere centre rather than the expansion centre,
+    they are inflated by the centre offset to stay valid bounds.
+    """
 
     mode = str(geometry_mode).strip().lower()
+    if mode in _HOST_ONLY_DEHNEN_GEOMETRY_MODES and _contains_tracer(
+        (positions_sorted, tree.node_ranges)
+    ):
+        raise RuntimeError(
+            f"dehnen_geometry_mode={mode!r} runs a numpy host loop over nodes and "
+            "cannot be traced; use 'com' (recommended), 'tree_approx', or "
+            "'runtime' under jax.jit/jax.grad"
+        )
+    if mode == "com":
+        mac_centers = jnp.asarray(upward.multipoles.centers, dtype=dtype)
+        # Two independent valid bounds on the radius about the expansion centre:
+        #   (1) leaf-exact, merged upward as |c_child - c_i| + rho_child. Tight
+        #       near the leaves but accumulates slack with depth.
+        #   (2) the exact farthest-corner distance from the centre to the node's
+        #       axis-aligned bounding box. Depth-independent, but loose whenever
+        #       the box is emptier than it is large.
+        # Neither dominates, so take the elementwise minimum -- still a bound,
+        # and tighter than either alone.
+        merged_bound = compute_center_referenced_radius_geometry(
+            tree=tree,
+            positions_sorted=positions_sorted,
+            centers=mac_centers,
+        )
+        geometry_centers = jnp.asarray(upward.geometry.center, dtype=dtype)
+        half_extent = jnp.asarray(upward.geometry.half_extent, dtype=dtype)
+        aabb_bound = jnp.linalg.norm(
+            jnp.abs(mac_centers - geometry_centers) + half_extent, axis=1
+        )
+        radius_bound = jnp.minimum(
+            jnp.asarray(merged_bound, dtype=dtype), aabb_bound
+        )
+        return mac_centers, radius_bound
     if mode == "exact":
         mac_centers, radius_bound = compute_smallest_enclosing_sphere_geometry(
             node_ranges=tree.node_ranges,
@@ -678,17 +870,23 @@ def resolve_dehnen_geometry(
             leaf_mode="approx",
         )
     elif mode == "runtime":
-        expansion_centers = jnp.asarray(upward.multipoles.centers, dtype=dtype)
-        geometry_centers = jnp.asarray(upward.geometry.center, dtype=dtype)
-        geometry_radius = jnp.asarray(upward.geometry.radius, dtype=dtype)
-        center_offset = jnp.linalg.norm(expansion_centers - geometry_centers, axis=1)
-        radius_bound = geometry_radius + center_offset
-        mac_centers = geometry_centers
+        mac_centers = jnp.asarray(upward.geometry.center, dtype=dtype)
+        radius_bound = jnp.asarray(upward.geometry.radius, dtype=dtype)
     else:
         raise ValueError(
-            "dehnen_geometry_mode must be 'exact', 'tree', 'tree_approx', or 'runtime'"
+            "dehnen_geometry_mode must be 'com', 'exact', 'tree', 'tree_approx', "
+            "or 'runtime'"
         )
-    return jnp.asarray(mac_centers, dtype=dtype), jnp.asarray(radius_bound, dtype=dtype)
+    # Every sphere-fit mode measures its radius about the *fitted* centre, but
+    # the multipoles are expanded -- and the M2L translation applied -- about
+    # `upward.multipoles.centers`. Re-reference to the expansion centre and
+    # inflate by the offset so the pair distance entering eqs (13)/(15) is the
+    # true M2L displacement and the radius stays a valid bound about it.
+    expansion_centers = jnp.asarray(upward.multipoles.centers, dtype=dtype)
+    fitted_centers = jnp.asarray(mac_centers, dtype=dtype)
+    center_offset = jnp.linalg.norm(expansion_centers - fitted_centers, axis=1)
+    radius_bound = jnp.asarray(radius_bound, dtype=dtype) + center_offset
+    return expansion_centers, radius_bound
 
 
 def _dehnen_binomial_matrix(
@@ -712,6 +910,8 @@ def build_adaptive_policy_state(
     theta: Array,
     error_model_code: Array,
     dehnen_geometry_mode: str = "exact",
+    gravitational_constant: float = 1.0,
+    mac_theta_max: float = 1.0,
 ) -> AdaptivePolicyState:
     """Build the solver-owned adaptive traversal state from upward data."""
 
@@ -817,6 +1017,8 @@ def build_adaptive_policy_state(
         dehnen_exponent_by_order=exponent_by_order,
         relaxed_theta_sq=jnp.square(relaxed_theta),
         error_model_code=error_model_code_arr,
+        gravitational_constant=float(gravitational_constant),
+        mac_theta_max=float(mac_theta_max),
     )
 
 
@@ -863,15 +1065,16 @@ def adaptive_pair_policy(
         )
         return pair_error < target_threshold[:, None]
 
-    def _dehnen_paper(_: None) -> Array:
-        source_dehnen_power = jnp.asarray(policy_state.source_dehnen_power)[
-            safe_sources, :
-        ]
-        source_mass = jnp.asarray(policy_state.source_mass)[safe_sources]
-        source_radius = jnp.asarray(policy_state.source_radius_bound)[safe_sources]
-        target_radius = jnp.asarray(policy_state.target_radius_bound)[safe_targets]
-        source_mac_center = jnp.asarray(policy_state.source_mac_center)[safe_sources]
-        target_mac_center = jnp.asarray(policy_state.target_mac_center)[safe_targets]
+    def _dehnen_paper_directional(src: Array, tgt: Array) -> Array:
+        """Evaluate eq (16a) for sources ``src`` acting on targets ``tgt``."""
+
+        source_dehnen_power = jnp.asarray(policy_state.source_dehnen_power)[src, :]
+        source_mass = jnp.asarray(policy_state.source_mass)[src]
+        source_radius = jnp.asarray(policy_state.source_radius_bound)[src]
+        target_radius = jnp.asarray(policy_state.target_radius_bound)[tgt]
+        source_mac_center = jnp.asarray(policy_state.source_mac_center)[src]
+        target_mac_center = jnp.asarray(policy_state.target_mac_center)[tgt]
+        threshold = jnp.asarray(policy_state.target_accept_threshold)[tgt]
         paper_distance = jnp.maximum(
             jnp.linalg.norm(source_mac_center - target_mac_center, axis=1),
             jnp.asarray(1e-24, dtype=dist_sq.dtype),
@@ -886,16 +1089,41 @@ def adaptive_pair_policy(
             masked_binomial_by_order=policy_state.dehnen_binomial_masked_by_order,
             exponent_by_order=policy_state.dehnen_exponent_by_order,
         )
+        # eq (16a) left-hand side: the estimated *force* error contributed by this
+        # single interaction, G Etilde M_A / r^2.
         est_force_error = (
             pair_error
+            * jnp.asarray(
+                policy_state.gravitational_constant, dtype=pair_error.dtype
+            )
             * source_mass[:, None]
             / jnp.maximum(
                 jnp.square(paper_distance[:, None]),
                 jnp.asarray(1e-24, dtype=pair_error.dtype),
             )
         )
-        convergent = (source_radius + target_radius) < paper_distance
-        return convergent[:, None] & (est_force_error < target_threshold[:, None])
+        # eq (16a) first clause, generalised: `theta < mac_theta_max` with
+        # mac_theta_max = 1 giving the paper's own `theta < 1`.
+        convergent = (source_radius + target_radius) < (
+            jnp.asarray(policy_state.mac_theta_max, dtype=paper_distance.dtype)
+            * paper_distance
+        )
+        return convergent[:, None] & (est_force_error < threshold[:, None])
+
+    def _dehnen_paper(_: None) -> Array:
+        # eq (16a) is genuinely asymmetric in A<->B: it uses the *source* mass and
+        # multipole power against the *sink's* own force scale. The traversal,
+        # however, evaluates this policy in both orientations and only accepts on
+        # `accept_both` / marks near on `near_both`; a leaf-leaf pair whose two
+        # orientations disagree therefore falls through to REFINE, and a leaf-leaf
+        # pair cannot be refined -- so it is dropped entirely, receiving neither an
+        # M2L nor a P2P contribution. Paper mode is uniquely exposed because it is
+        # the one model that does not gate acceptance on `allow_solver_override`.
+        # Symmetrize here so both orientations return the same decision; the
+        # effective tolerance is then the stricter of the two directions.
+        return _dehnen_paper_directional(
+            safe_sources, safe_targets
+        ) & _dehnen_paper_directional(safe_targets, safe_sources)
 
     passes = jax.lax.switch(
         jnp.asarray(policy_state.error_model_code, dtype=jnp.int32),
@@ -958,6 +1186,7 @@ __all__ = [
     "bucket_far_pairs_by_tag",
     "build_adaptive_policy_state",
     "compute_node_force_scale_from_sorted_acc",
+    "compute_center_referenced_radius_geometry",
     "compute_leaf_enclosing_sphere_geometry",
     "compute_leaf_ritter_sphere_geometry",
     "compute_smallest_enclosing_sphere_geometry",

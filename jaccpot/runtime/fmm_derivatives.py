@@ -215,19 +215,6 @@ class DerivativesMixin:
             max_time_derivative_order=max_time_derivative_order,
             mode=mode,
         )
-        if target_indices is None and not _contains_tracer((state, evaluation)):
-            accelerations_out = evaluation[0] if return_potential else evaluation
-            inv = jnp.asarray(state.inverse_permutation)
-            sorted_idx = jnp.argsort(inv)
-            accelerations_sorted = jnp.asarray(accelerations_out)[sorted_idx]
-            self._last_force_scale_nodes = (
-                self._compute_node_force_scale_from_sorted_acc(
-                    tree=state.tree,
-                    accelerations_sorted=accelerations_sorted,
-                    reduction=self._force_scale_reduction_mode(),
-                )
-            )
-        return evaluation
 
     @jaxtyped(typechecker=beartype)
     def evaluate_prepared_state_with_jerk(

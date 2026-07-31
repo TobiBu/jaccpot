@@ -797,6 +797,21 @@ class PrepareMixin:
             and bool(getattr(self, "_strict_fused_mode_active", False))
             and bool(getattr(self, "_strict_fused_device_only", False))
         ):
+            # This lane cannot carry a solver-owned pair policy, so the Dehnen
+            # mass-dependent MAC would silently degrade to the plain geometric
+            # MAC underneath it -- producing a different force with no signal to
+            # the caller, and quietly invalidating any measurement taken here.
+            # Refuse, in the same spirit as the streamed-fast-lane refusal below.
+            if use_paper_fixed_policy:
+                raise RuntimeError(
+                    "the strict fused device-only lane cannot carry the Dehnen "
+                    "paper MAC (mac_type='dehnen_error' / "
+                    "adaptive_error_model='dehnen_paper'): it requires a "
+                    "solver-owned pair policy, which this lane does not support. "
+                    "Silently falling back would run the geometric MAC instead. "
+                    "Use mac_type='dehnen' for this lane, or disable the strict "
+                    "fused device-only path."
+                )
             use_paper_fixed_policy = False
 
         # A static-radix topology key describes the capacity-fixed tree shape,
