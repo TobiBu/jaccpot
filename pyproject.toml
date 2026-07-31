@@ -25,55 +25,47 @@ classifiers = [
   "Topic :: Scientific/Engineering :: Physics",
 ]
 dependencies = [
-  # JAX >= 0.9.1 is REQUIRED for the differentiable multi-GPU path, and the
-  # ceiling that used to forbid it is gone (see below).
+  # JAX FLOOR IS 0.11.0, and it is a hard floor: 0.9.1 and 0.9.2 CRASH on the CPU
+  # backend. `tests/characterization/test_fmm_golden.py::test_fmm_golden[uni_real_n256_p6]`
+  # dies with `Fatal Python error: Floating-point exception` -- a SIGFPE inside
+  # XLA's CPU compiler while compiling the real-basis P2M `lax.scan`
+  # (`upward/real_tree_expansions.py::_p2m_leaves_real`). Not ours to fix and not
+  # catchable: it kills the worker. Measured on the CPU backend:
   #
-  # Why the floor: 0.9.1 is the first release whose `jax.lax.ragged_all_to_all`
-  # survives having its reverse pass executed. Below it, one gradient silently
-  # breaks every later halo exchange in the process, so a forward evaluated after
-  # a gradient loses the whole cross-domain near field (rel-L2 0.42 against the
-  # true force). Measured, since it is in no changelog and no tracked issue:
-  # `bench/repro_jax_ragged_all_to_all_grad.py --jit` is 6/6 CORRUPT on 0.9.0.1
-  # and 4/4 CLEAN on 0.9.1. See docs/differentiable_fmm_distributed_audit.md.
+  #     jax 0.9.1   core dump        <- was briefly the floor here; CI red
+  #     jax 0.9.2   core dump        <- what a `<0.10` ceiling resolved to
+  #     jax 0.10.2  passes (23.1 s)
+  #     jax 0.11.0  passes (23.5 s)
   #
-  # The code itself still works below the floor -- `jaccpot/pallas/_compat.py`
-  # handles the pallas_call API on both sides, and `halo_exchange="auto"` falls
-  # back to the slower all_gather exchange on an affected JAX. So this floor is a
-  # policy choice (make the fast, correct exchange the only configuration we ship)
-  # rather than a hard requirement; relax it to >=0.8.0 if wider compatibility
-  # matters more than guaranteeing the fast path.
+  # It is not Python-version specific (reproduced on 3.12 locally and 3.13 in CI).
+  # This is why CI went red on this branch: bumping the floor to 0.9.1 made the
+  # resolver pick 0.9.2, straight into the broken window. GPU-only validation does
+  # not see it -- the CPU backend must be exercised for any JAX bump.
   #
-  # Why the ceiling is now just "next major": 0.11.0 is validated (see below), and
-  # the one failure that used to block it was a false-negative TEST, not a code
-  # defect -- it asserted padded == exact while both fp32 paths were identically
-  # wrong, and 0.11.0 merely stopped the two TF32 errors cancelling. Fixed in
-  # tests/integration/test_fmm.py (float64 reference), so 0.11.0 is green. Neither
-  # documented 0.10 hazard applies: jaccpot uses no `pmap`, and the `shard_map`
-  # import already falls back to `jax.experimental.shard_map`.
+  # Also 0.9.1+ is what the differentiable multi-GPU path wants: 0.9.1 is the first
+  # release whose `jax.lax.ragged_all_to_all` survives having its reverse pass
+  # executed (XLA fixed the stale peer-address rendezvous in `4e0cc7e356`). Below
+  # it, one gradient silently breaks every later halo exchange and a forward loses
+  # the whole cross-domain near field. `halo_exchange="auto"` still falls back
+  # safely below the floor, so that part is policy, not requirement; the CPU crash
+  # is the requirement. See docs/differentiable_fmm_distributed_audit.md.
   #
-  # 0.9.2 and 0.10.x are still uninstalled-untested; both ENDPOINTS of the allowed
-  # range are green and nothing we use changed in between, which is inference for
-  # the middle, not measurement.
+  # 0.11.0 is validated on BOTH backends (2xA100 + CPU): broad suite 506 passed,
+  # Pallas M2L + custom_vjp 51 passed, gradient suites 20 passed, golden 13 passed;
+  # plus the golden CPU test above. 0.10.x is only CPU-spot-checked, never run on
+  # GPU, which is why the floor is 0.11.0 and not 0.10.
   #
-  # What was validated for this pin (2xA100, sm_80), over tests/ with
-  # `-m "not slow and not experimental"`:
-  #
-  #                     broad suite        Pallas M2L +      distributed   ragged
-  #                                        custom_vjp (51)   grad suite    repro
-  #   jax 0.9.0.1   503 passed / 12 skip   51 passed         10 passed     CORRUPT
-  #   jax 0.9.1     503 passed / 12 skip   51 passed         10 passed     CLEAN
-  #   jax 0.11.0    502 passed / 1 FAIL    51 passed         10 passed     CLEAN
-  #
-  # The 0.11.0 failure passes on both 0.9.x, so it is a real change there and not
-  # pre-existing; see "Why the ceiling". 0.9.2 and 0.10.x were never installed --
-  # genuinely untested, unlike 0.11.0.
+  # NO UPPER BOUND, by request. Note the history: an unbounded `>=0.8.0` previously
+  # let CI resolve 0.9.2/0.10.2 and broke the Pallas tests, and `pip install
+  # yggdrax` pulls JAX unconstrained *before* this constraint applies. If a future
+  # release breaks, add a ceiling here rather than re-deriving the window.
   #
   # HISTORY: the ceiling used to be `<0.9.1` because `pallas_call`'s `backend=`
   # kwarg was removed in 0.9.1 and the fused M2L kernels passed it. They now go
   # through `jaccpot/pallas/_compat.pallas_backend_kwargs`, which selects Triton
   # via `backend=` on the old API and via `triton.CompilerParams` on the new one.
-  "jax[cuda]>=0.9.1,<0.12",
-  "jaxlib>=0.9.1,<0.12",
+  "jax[cuda]>=0.11.0",
+  "jaxlib>=0.11.0",
   "jaxtyping>=0.2.23",
   "beartype>=0.14.0",
   "yggdrax>=0.0.1,<0.1.0",
