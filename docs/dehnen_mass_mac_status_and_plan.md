@@ -1,7 +1,7 @@
 # Dehnen mass-dependent MAC: status and next steps
 
-Handoff document, 2026-07-31. Self-contained: a fresh session should be able to pick
-this up without prior context.
+Handoff document, 2026-07-31; Step 1 completed and folded in 2026-08-01.
+Self-contained: a fresh session should be able to pick this up without prior context.
 
 ## TL;DR
 
@@ -22,10 +22,12 @@ still cannot reach any fast lane, and nothing has been measured at Dehnen's N (1
 
 ## Where the work lives
 
-Branch **`fix/dehnen-mass-mac`**, four commits off `ce5bd36` on
+Branch **`fix/dehnen-mass-mac`**, off `ce5bd36` on
 `chore/pallas-call-backend-port`:
 
 ```
+a342eac  perf(mac): cache the Dehnen force-scale prepass -- 5.87x prepare to 0.98x
+25df4e3  docs(mac): point the handoff at the branch and its verified state
 ad34a75  test(api): register mac_theta_max on the frozen facade surface
 796f5cb  bench(mac): error-distribution sweep, measurements, and the four next steps
 eb83875  test(mac): pin Dehnen eqs (12)/(13)/(15)/(16a) and the far/near partition
@@ -33,10 +35,10 @@ eb83875  test(mac): pin Dehnen eqs (12)/(13)/(15)/(16a) and the far/near partiti
 ```
 
 It is branched off the pallas branch rather than `main` deliberately: `main` is 69
-commits behind, and four of the touched files (`_fmm_impl.py`, `fmm_derivatives.py`,
-`fmm_prepare.py`, `solver.py`) differ between `main` and that tip, so the edits were
-authored against the newer versions. Rebasing onto `main` before the pallas work lands
-would need conflict resolution in those four files.
+commits behind, and the touched runtime files (`_fmm_impl.py`, `fmm_derivatives.py`,
+`fmm_evaluate.py`, `fmm_policy.py`, `fmm_prepare.py`, `solver.py`) differ between `main`
+and that tip, so the edits were authored against the newer versions. Rebasing onto
+`main` before the pallas work lands would need conflict resolution in those files.
 
 Regression on the final commit: `tests/unit` + `tests/characterization` +
 adaptive/force-scale suites → **0 failures** (exit 0), including the characterization
@@ -306,14 +308,20 @@ grep confirms no `f_b` anywhere in `jaccpot/`.
 `bench/validation/mac_error_distribution.py` already computes exact `f_b`. Inject it:
 
 - construct with `adaptive_error_model="dehnen_paper"` **directly**, not
-  `mac_type="dehnen_error"` — the latter force-rewrites `"prev"→"paper"` at
-  `jaccpot/runtime/_fmm_impl.py` ~:631;
+  `mac_type="dehnen_error"` — the latter force-rewrites `"prev"→"paper_cached"` at
+  `jaccpot/runtime/_fmm_impl.py` ~:635;
 - set `mac_force_scale_mode="prev"` and assign `fmm._last_force_scale_nodes` to the
   min-reduced `f_b`, reusing `compute_node_force_scale_from_sorted_acc(reduction="min")`;
 - add a third bench arm (`--arm mass_16b`).
 
-There is no `force_scale_nodes` parameter on `prepare_state`; consider adding one, which
-is cleaner than the `_last_force_scale_nodes` back door.
+**Read this before using that back door.** Step 1 gave `_last_force_scale_nodes` a live
+writer: `_record_force_scale_from_evaluation` overwrites it after *every* full-order
+`evaluate_prepared_state`. An injected `f_b` therefore survives exactly one
+`prepare_state`, and is silently replaced by `min_b |a_b|` the moment you evaluate — so
+a naive prepare/evaluate loop would measure (16a) while believing it measured (16b).
+Either re-inject before each `prepare_state`, or add the `force_scale_nodes` parameter
+to `prepare_state` first. There is still no such parameter, and it is now clearly the
+right move rather than merely the cleaner one.
 
 **Production path.** `f_b` needs an O(N) estimate. Dehnen states p=0 suffices: a
 monopole-only pass accumulating `Σ m/d²` as a **scalar** (no vector cancellation)
