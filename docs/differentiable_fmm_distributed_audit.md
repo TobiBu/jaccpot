@@ -241,13 +241,23 @@ cannot be a shared constant, corrupts identically — and in that variant *every
 row comes back as fill, not just one device's. The fixed
 `channel_id = mlir.COLLECTIVE_CHANNEL_ID` in `_ragged_all_to_all_lowering` is
 likewise not a distinguishing suspect: every JAX collective uses that same id, and
-`psum`/`all_gather` differentiate correctly. The defect is somewhere in the
-`ragged_all_to_all` custom call's interaction with jit + autodiff, below the level
-this audit can settle; the reproducer above is what an upstream fix needs, not a
-mechanism story from us.
+`psum`/`all_gather` differentiate correctly. **The mechanism is now known, and it is not JAX.** It is XLA:GPU
+`ragged_all_to_all_thunk.cc`: in the XLA that jaxlib 0.9.0.1 pins,
+`RaggedAllToAllStartThunk::Initialize` early-returns once a stream state exists, so
+the rendezvous exchanging peer output-buffer *device addresses* runs only once and
+caches addresses from the first execution -- while `Thunk::Initialize` really does
+run every execution with fresh `buffer_allocations`. After allocator churn (running
+a gradient) the one-shot kernel P2P-writes to stale addresses and the true output
+buffer keeps its fill value, which is exactly the observed symptom. Introduced in
+XLA `bf4fd02e5a` (2026-01-15), fixed in `4e0cc7e356` (2026-02-06). It requires GPU
+peer access, so it cannot reproduce on a box without P2P -- a CLEAN result there
+proves nothing. **Do not file the draft in
+`docs/jax_ragged_all_to_all_bug_report.md`**; JAX's autodiff rules for the
+collective are correct.
 
-**Upstream status: FIXED in JAX 0.9.1.** Measured, not read off a changelog --
-the fix appears in neither the JAX changelog nor any tracked issue. On 0.9.0.1 the
+**Upstream status: FIXED in JAX 0.9.1** (XLA-side; see the mechanism above).
+Measured, not read off a changelog -- the fix appears in neither the JAX changelog
+nor any tracked JAX issue, because the repair was in XLA. On 0.9.0.1 the
 reproducer is 6/6 CORRUPT under `--jit`; on 0.9.1 it is 4/4 CLEAN, and
 `test_native_halo_exchange_is_fixed_upstream` passes against the real pipeline
 (it fails on 0.9.0.1 with a 0.42 rel-L2 forward drift). No issue was filed, so
