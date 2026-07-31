@@ -424,7 +424,7 @@ def _evaluate_derivative_table(displacement: Array, max_level: int) -> Array:
         -jnp.ones_like(levels, dtype=dtype),
     )
 
-    r2 = jnp.dot(displacement, displacement)
+    r2 = jnp.dot(displacement, displacement, precision=lax.Precision.HIGHEST)
     eps = jnp.finfo(dtype).tiny
     inv_r = jnp.reciprocal(jnp.sqrt(jnp.maximum(r2, eps)))
 

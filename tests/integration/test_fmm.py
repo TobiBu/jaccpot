@@ -2904,71 +2904,139 @@ def test_solidfmm_chunked_m2l_matches_fullbatch():
 
 
 def test_solidfmm_m2l_ignores_padded_compact_far_pairs():
+    """Sentinel (-1) padding in the far-pair list must not corrupt the M2L.
+
+    Both the exact-length and the padded list are checked against a **float64
+    reference**, not against each other. The earlier padded-vs-exact form was a
+    false negative: on JAX 0.9.x the two fp32 paths were *identically* wrong
+    (difference exactly 0.0) while both sat 3.7e-04 from the true value, so the
+    assertion passed on a coincidence. JAX 0.11.0 fuses the padded case
+    differently, the two errors stopped cancelling, and the test failed even
+    though nothing had become less accurate -- the padded path was in fact
+    *closer* to truth there (1.1e-04 vs 3.7e-04). Comparing to a reference also
+    tests the actual intent better: a leaking sentinel would move the result by
+    order 1, not by 1e-04.
+
+    The tolerance is set by TF32, not by this kernel's algebra. XLA lowers fp32
+    matmuls on Ampere to TF32 (~10-bit mantissa) by default, which caps M2L
+    relative accuracy at ~6e-04 from order 4 up, *regardless of expansion order*
+    (real basis, jax 0.9.0.1, max rel err vs float64)::
+
+        order    default matmul    jax.default_matmul_precision("highest")
+          2         2.1e-06                     2.1e-06
+          4         5.7e-04                     1.5e-06
+          6         5.7e-04                     2.4e-06
+          8         5.6e-04                     1.8e-06
+
+    So the bound below is what is achievable, not slack. Tightening it means
+    setting the matmul precision in the M2L kernels -- jaccpot does that in the
+    L2P path (``jaccpot/downward/local_expansions.py``, ``Precision.HIGHEST``)
+    but not here. Left as-is deliberately; see ARCHITECTURE.md section 7.
+
+    What this does and does not discriminate, measured by mutation:
+
+    * A ``-1``-sentinel row is dropped by the **index masking** (``tgt >= 0``),
+      not by ``active_count`` -- forcing ``active_count=4`` on the padded list
+      returns a byte-identical result. So this test verifies the *outcome* for
+      sentinel padding; it cannot tell which of the two guards did the work.
+    * The leak it does catch is the ``0``-padded form (what the treecode compact
+      far-pair list produces, with the true count in ``far_pair_count``), where
+      ``active_count`` is the only guard: honest ``active_count=1`` lands at
+      3.7e-04, while ``active_count=4`` returns NaN and fails both the isfinite
+      assertion and the bound below.
+    """
     order = 2
-    coeff_count = fmm_impl_private.sh_size(order)
-    centers = jnp.array(
-        [
-            [0.0, 0.0, 0.0],
-            [1.0, 0.25, -0.5],
-            [-0.75, 0.5, 0.25],
-            [0.5, -0.5, 1.0],
-        ],
-        dtype=jnp.float32,
-    )
-    multipoles = jnp.arange(centers.shape[0] * coeff_count, dtype=jnp.float32).reshape(
-        (centers.shape[0], coeff_count)
-    ).astype(jnp.complex64) * jnp.array(0.01 + 0.02j, dtype=jnp.complex64)
     src_exact = jnp.array([1], dtype=INDEX_DTYPE)
     tgt_exact = jnp.array([0], dtype=INDEX_DTYPE)
     src_padded = jnp.array([1, -1, -1, -1], dtype=INDEX_DTYPE)
     tgt_padded = jnp.array([0, -1, -1, -1], dtype=INDEX_DTYPE)
     active_count = jnp.array(1, dtype=INDEX_DTYPE)
 
-    exact_full = kernels_core._accumulate_m2l_fullbatch(
-        jnp.zeros_like(multipoles),
-        multipoles,
-        centers,
-        src_exact,
-        tgt_exact,
-        active_count,
-        order=order,
-        basis_mode="complex",
-        rotation="solidfmm",
-        total_nodes=int(centers.shape[0]),
-    )
-    padded_full = kernels_core._accumulate_m2l_fullbatch(
-        jnp.zeros_like(multipoles),
-        multipoles,
-        centers,
-        src_padded,
-        tgt_padded,
-        active_count,
-        order=order,
-        basis_mode="complex",
-        rotation="solidfmm",
-        total_nodes=int(centers.shape[0]),
-    )
-    padded_chunked = kernels_core._accumulate_m2l_chunked_scan(
-        jnp.zeros_like(multipoles),
-        multipoles,
-        centers,
-        src_padded,
-        tgt_padded,
-        active_count,
-        order=order,
-        basis_mode="complex",
-        rotation="solidfmm",
-        total_nodes=int(centers.shape[0]),
-        chunk_size=2,
+    def accumulate(src, tgt, complex_dtype, real_dtype):
+        coeff_count = fmm_impl_private.sh_size(order)
+        centers = jnp.array(
+            [
+                [0.0, 0.0, 0.0],
+                [1.0, 0.25, -0.5],
+                [-0.75, 0.5, 0.25],
+                [0.5, -0.5, 1.0],
+            ],
+            dtype=real_dtype,
+        )
+        multipoles = jnp.arange(
+            centers.shape[0] * coeff_count, dtype=real_dtype
+        ).reshape((centers.shape[0], coeff_count)).astype(complex_dtype) * jnp.array(
+            0.01 + 0.02j, dtype=complex_dtype
+        )
+        return kernels_core._accumulate_m2l_fullbatch(
+            jnp.zeros_like(multipoles),
+            multipoles,
+            centers,
+            src,
+            tgt,
+            active_count,
+            order=order,
+            basis_mode="complex",
+            rotation="solidfmm",
+            total_nodes=int(centers.shape[0]),
+        )
+
+    # The reference is only a reference if x64 is actually on; without it
+    # complex128 silently degrades to complex64 and the comparison is vacuous.
+    if not jax.config.read("jax_enable_x64"):
+        pytest.skip("float64 reference needs JAX_ENABLE_X64=1")
+    reference = np.asarray(
+        accumulate(src_exact, tgt_exact, jnp.complex128, jnp.float64)
     )
 
-    exact_np = np.asarray(exact_full)
-    padded_full_np = np.asarray(padded_full)
-    padded_chunked_np = np.asarray(padded_chunked)
+    exact_np = np.asarray(accumulate(src_exact, tgt_exact, jnp.complex64, jnp.float32))
+    padded_full_np = np.asarray(
+        accumulate(src_padded, tgt_padded, jnp.complex64, jnp.float32)
+    )
+    padded_chunked_np = np.asarray(
+        kernels_core._accumulate_m2l_chunked_scan(
+            jnp.zeros((4, fmm_impl_private.sh_size(order)), dtype=jnp.complex64),
+            jnp.arange(4 * fmm_impl_private.sh_size(order), dtype=jnp.float32)
+            .reshape((4, fmm_impl_private.sh_size(order)))
+            .astype(jnp.complex64)
+            * jnp.array(0.01 + 0.02j, dtype=jnp.complex64),
+            jnp.array(
+                [
+                    [0.0, 0.0, 0.0],
+                    [1.0, 0.25, -0.5],
+                    [-0.75, 0.5, 0.25],
+                    [0.5, -0.5, 1.0],
+                ],
+                dtype=jnp.float32,
+            ),
+            src_padded,
+            tgt_padded,
+            active_count,
+            order=order,
+            basis_mode="complex",
+            rotation="solidfmm",
+            total_nodes=4,
+            chunk_size=2,
+        )
+    )
+
     assert np.isfinite(padded_full_np).all()
     assert np.isfinite(padded_chunked_np).all()
-    assert np.allclose(padded_full_np, exact_np, rtol=1e-6, atol=1e-6)
-    assert np.allclose(padded_chunked_np, exact_np, rtol=1e-6, atol=1e-6)
+
+    # 2e-3 leaves headroom over the ~6e-4 TF32 floor documented above without
+    # admitting a leaked sentinel contribution, which would be order 1.
+    scale = np.max(np.abs(reference))
+    for name, got in (
+        ("exact", exact_np),
+        ("padded fullbatch", padded_full_np),
+        ("padded chunked", padded_chunked_np),
+    ):
+        err = float(np.max(np.abs(got - reference)) / scale)
+        assert err < 2e-3, (
+            f"{name} M2L differs from the float64 reference by {err:.3e} "
+            "(rel); a leaked sentinel pair would be O(1), while TF32 alone "
+            "accounts for ~6e-4"
+        )
 
 
 def test_fast_preset_adaptive_large_cpu_policy_applies():

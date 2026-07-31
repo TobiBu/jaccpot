@@ -34,6 +34,7 @@ from jax.experimental import pallas as pl
 from jaxtyping import Array
 
 from jaccpot.operators.real_harmonics import sh_offset, sh_size
+from jaccpot.pallas._compat import pallas_backend_kwargs
 
 __all__ = [
     "pallas_m2l_complex_fused_supported",
@@ -559,7 +560,7 @@ def m2l_complex_fused_pallas(
             jax.ShapeDtypeStruct((N, Cp), real_dtype),
         ],
         interpret=interpret,
-        backend=(None if interpret else backend),
+        **pallas_backend_kwargs(backend, interpret),
         name=f"m2l_complex_fused_p{p}",
     )(mr, mi, btr, bti, bfr, bfi, rr, *table_arrays)
 
@@ -698,7 +699,7 @@ def m2l_complex_fused_vjp_pallas(
             jax.ShapeDtypeStruct((N,), real_dtype),
         ],
         interpret=interpret,
-        backend=(None if interpret else backend),
+        **pallas_backend_kwargs(backend, interpret),
         name=f"m2l_complex_fused_vjp_p{p}",
     )(mr, mi, btr, bti, bfr, bfi, rr, obar_r, obar_i, *table_arrays)
 

@@ -241,13 +241,23 @@ cannot be a shared constant, corrupts identically — and in that variant *every
 row comes back as fill, not just one device's. The fixed
 `channel_id = mlir.COLLECTIVE_CHANNEL_ID` in `_ragged_all_to_all_lowering` is
 likewise not a distinguishing suspect: every JAX collective uses that same id, and
-`psum`/`all_gather` differentiate correctly. The defect is somewhere in the
-`ragged_all_to_all` custom call's interaction with jit + autodiff, below the level
-this audit can settle; the reproducer above is what an upstream fix needs, not a
-mechanism story from us.
+`psum`/`all_gather` differentiate correctly. **The mechanism is now known, and it is not JAX.** It is XLA:GPU
+`ragged_all_to_all_thunk.cc`: in the XLA that jaxlib 0.9.0.1 pins,
+`RaggedAllToAllStartThunk::Initialize` early-returns once a stream state exists, so
+the rendezvous exchanging peer output-buffer *device addresses* runs only once and
+caches addresses from the first execution -- while `Thunk::Initialize` really does
+run every execution with fresh `buffer_allocations`. After allocator churn (running
+a gradient) the one-shot kernel P2P-writes to stale addresses and the true output
+buffer keeps its fill value, which is exactly the observed symptom. Introduced in
+XLA `bf4fd02e5a` (2026-01-15), fixed in `4e0cc7e356` (2026-02-06). It requires GPU
+peer access, so it cannot reproduce on a box without P2P -- a CLEAN result there
+proves nothing. **Do not file the draft in
+`docs/jax_ragged_all_to_all_bug_report.md`**; JAX's autodiff rules for the
+collective are correct.
 
-**Upstream status: FIXED in JAX 0.9.1.** Measured, not read off a changelog --
-the fix appears in neither the JAX changelog nor any tracked issue. On 0.9.0.1 the
+**Upstream status: FIXED in JAX 0.9.1** (XLA-side; see the mechanism above).
+Measured, not read off a changelog -- the fix appears in neither the JAX changelog
+nor any tracked JAX issue, because the repair was in XLA. On 0.9.0.1 the
 reproducer is 6/6 CORRUPT under `--jit`; on 0.9.1 it is 4/4 CLEAN, and
 `test_native_halo_exchange_is_fixed_upstream` passes against the real pipeline
 (it fails on 0.9.0.1 with a 0.42 rel-L2 forward drift). No issue was filed, so
@@ -259,13 +269,14 @@ exchange on JAX >= `JAX_RAGGED_GRAD_FIXED_VERSION` = 0.9.1 and the safe
 `all_gather` fallback below it, so a user on an affected JAX cannot silently
 compute wrong forces and a user on a fixed one needs no action.
 
-**But the package cannot get there yet.** `pyproject.toml` caps JAX at `<0.9.1`,
-and 0.9.1 is *also* where `pallas_call`'s `backend=` kwarg was removed -- which
-jaccpot's fused M2L kernels still pass, so 0.9.1 raises
-`TypeError: pallas_call() got an unexpected keyword argument 'backend'`. The two
-changes collide in one release. Until the Pallas call sites are ported, the
-shipped configuration resolves to `"buf"`, and the ragged win is unrealised. See
-the dependency comment in `pyproject.toml`.
+**The package is now on it.** That took removing a ceiling: `pyproject.toml` used
+to cap JAX at `<0.9.1` because 0.9.1 *also* removed `pallas_call`'s `backend=`
+kwarg, which the fused M2L kernels passed -- so the ragged fix and a Pallas break
+arrived in the same release. `jaccpot/pallas/_compat.pallas_backend_kwargs` now
+selects Triton on either API (`backend=` below 0.9.1, `triton.CompilerParams`
+from 0.9.1 on), the floor is `>=0.9.1`, and `"auto"` therefore resolves to
+`"native"` in every supported configuration. The `"buf"` path stays as the
+fallback a regression would need.
 
 **Fix on our side.** `_grad_halo_exchange` pins the halo import to the `all_gather`-based
 `"buf"` exchange for the halo import on the differentiable path. It computes the

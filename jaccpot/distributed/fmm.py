@@ -656,9 +656,14 @@ def _grad_halo_exchange(method: str) -> Iterator[None]:
     It is an upstream defect, not ours: ``jax.jit(shard_map(ragged_all_to_all))``
     reproduces it in ~40 lines with no jaccpot and no yggdrax involved
     (``bench/repro_jax_ragged_all_to_all_grad.py``; ``jax.jit`` is the trigger, the
-    bare ``shard_map`` is clean). No mechanism is claimed here -- an earlier guess
-    at one (XLA aliasing a shared zeros constant through the transpose rule) was
-    tested and disproved. See ``docs/differentiable_fmm_distributed_audit.md``.
+    bare ``shard_map`` is clean). The cause is XLA:GPU, not JAX: in the XLA that
+    jaxlib 0.9.0.1 pins, ``RaggedAllToAllStartThunk::Initialize`` caches peer
+    output-buffer device addresses from the first execution, so after allocator
+    churn (a gradient) the one-shot kernel writes to stale addresses and the real
+    output keeps its fill value. Fixed in XLA ``4e0cc7e356``, shipped in jax 0.9.1
+    -- which is what :data:`JAX_RAGGED_GRAD_FIXED_VERSION` encodes. It needs GPU
+    peer access, so it cannot reproduce without P2P. See
+    ``docs/differentiable_fmm_distributed_audit.md``.
 
     ``"buf"`` (default) computes the identical result out of an ``all_gather``
     plus an index gather, whose reverse is an ordinary psum/scatter-add. Verified

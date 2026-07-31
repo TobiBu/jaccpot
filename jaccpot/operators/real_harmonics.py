@@ -153,6 +153,7 @@ All operations are:
 Example usage::
 
     import jax.numpy as jnp
+
     from jaccpot.operators.real_harmonics import (
         p2m_real_direct, m2l_real, evaluate_local_real_with_grad
     )
@@ -195,11 +196,14 @@ from typing import Any, Tuple
 import jax
 import jax.numpy as jnp
 import numpy as np
+from jax import lax
 from jaxtyping import Array, DTypeLike
 
 from jaccpot.operators.dtypes import floor_squared_radius, squared_radius_floor
 from jaccpot.operators.symmetric_tensors import symmetric_multi_indices_3d
 from jaccpot.runtime.grad_options import analytic_l2p_vjp_enabled
+
+from ._precision import highest_matmul_precision
 
 # ===========================================================================
 # Index utilities
@@ -329,7 +333,7 @@ def p2m_real_direct(
     dtype = d.dtype
 
     x, y, z = d[0], d[1], d[2]
-    r2 = jnp.dot(d, d)
+    r2 = jnp.dot(d, d, precision=lax.Precision.HIGHEST)
     r = jnp.sqrt(floor_squared_radius(r2))
     rho2 = x * x + y * y
     rho = jnp.sqrt(floor_squared_radius(rho2))
@@ -506,7 +510,7 @@ def evaluate_local_real(
     # No sign flip needed - caller provides the correct convention.
 
     x, y, z = d[0], d[1], d[2]
-    r2 = jnp.dot(d, d)
+    r2 = jnp.dot(d, d, precision=lax.Precision.HIGHEST)
     r = jnp.sqrt(floor_squared_radius(r2))
     rho2 = x * x + y * y
     rho = jnp.sqrt(floor_squared_radius(rho2))
@@ -963,6 +967,7 @@ def _dehnen_real_Q_full(order: int) -> np.ndarray:
 
 
 @partial(jax.jit, static_argnames=("order",))
+@highest_matmul_precision
 def complex_to_dehnen_real_coeffs(complex_coeffs: Array, *, order: int) -> Array:
     """Convert packed complex solidfmm coefficients to Dehnen no-sqrt2 real ones.
 
@@ -1014,6 +1019,7 @@ def _wigner_D_complex(ell: int, alpha: float, beta: float, gamma: float) -> np.n
     return np.array(D_sym.evalf(30).tolist(), dtype=np.complex128)
 
 
+@highest_matmul_precision
 def _real_wigner_rotation(
     ell: int,
     alpha: Array,
@@ -1144,6 +1150,7 @@ def _rotation_to_z_angles(x: Array, y: Array, z: Array) -> tuple[Array, Array, A
 
 
 @lru_cache(maxsize=None)
+@highest_matmul_precision
 def _compute_B_real_dehnen_via_Q(
     ell: int, dtype_key: str
 ) -> Tuple[np.ndarray, np.ndarray]:
@@ -1245,6 +1252,7 @@ def compute_real_B_matrix_multipole(ell: int, *, dtype: DTypeLike) -> Array:
     return jnp.asarray(B_U, dtype=dtype)
 
 
+@highest_matmul_precision
 def verify_real_B_matrix(ell: int, *, dtype: DTypeLike) -> Tuple[bool, float, float]:
     """Verify properties of the real B matrices (both B_T and B_U).
 
@@ -1341,6 +1349,7 @@ def real_Dz_diagonal(ell: int, angle: Array, *, dtype: DTypeLike) -> Array:
     return D
 
 
+@highest_matmul_precision
 def _multipole_align_to_z_block(
     x: Array, y: Array, z: Array, ell: int, *, dtype: DTypeLike
 ) -> Array:
@@ -1383,6 +1392,7 @@ def _multipole_align_to_z_block(
     )
 
 
+@highest_matmul_precision
 def _multipole_align_from_z_block(
     x: Array, y: Array, z: Array, ell: int, *, dtype: DTypeLike
 ) -> Array:
@@ -1756,6 +1766,7 @@ def translate_along_z_l2l_real(
 
 
 @partial(jax.jit, static_argnames=("order",))
+@highest_matmul_precision
 def m2l_a6_real_only(
     multipole: Array,
     delta: Array,
@@ -1777,7 +1788,7 @@ def m2l_a6_real_only(
 
     # Extract delta components
     x, y, z = delta[0], delta[1], delta[2]
-    r2 = jnp.dot(delta, delta)
+    r2 = jnp.dot(delta, delta, precision=lax.Precision.HIGHEST)
     r = jnp.sqrt(floor_squared_radius(r2))
 
     # Step 1: Rotate MULTIPOLE into the z-aligned frame.
@@ -1800,6 +1811,7 @@ def m2l_a6_real_only(
     return out
 
 
+@highest_matmul_precision
 def m2l_a6_real_only_wigner(
     multipole: Array,
     delta: Array,
@@ -1813,7 +1825,7 @@ def m2l_a6_real_only_wigner(
     p = int(order)
 
     x, y, z = delta[0], delta[1], delta[2]
-    r2 = jnp.dot(delta, delta)
+    r2 = jnp.dot(delta, delta, precision=lax.Precision.HIGHEST)
     r = jnp.sqrt(floor_squared_radius(r2))
 
     M_rotated = jnp.zeros_like(multipole)
@@ -1878,6 +1890,7 @@ def m2l_optimized_real(
 
 
 @partial(jax.jit, static_argnames=("order",))
+@highest_matmul_precision
 def m2m_real(
     multipole: Array,
     delta: Array,
@@ -1911,7 +1924,7 @@ def m2m_real(
 
     # Extract delta components
     x, y, z = delta[0], delta[1], delta[2]
-    r2 = jnp.dot(delta, delta)
+    r2 = jnp.dot(delta, delta, precision=lax.Precision.HIGHEST)
     r = jnp.sqrt(floor_squared_radius(r2))
 
     # Handle zero displacement case
@@ -1940,6 +1953,7 @@ def m2m_real(
 
 
 @partial(jax.jit, static_argnames=("order",))
+@highest_matmul_precision
 def l2l_real(
     local: Array,
     delta: Array,
@@ -1974,7 +1988,7 @@ def l2l_real(
 
     # Extract delta components
     x, y, z = delta[0], delta[1], delta[2]
-    r2 = jnp.dot(delta, delta)
+    r2 = jnp.dot(delta, delta, precision=lax.Precision.HIGHEST)
     r = jnp.sqrt(floor_squared_radius(r2))
 
     # Handle zero displacement case

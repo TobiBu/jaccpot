@@ -16,6 +16,7 @@ from jaccpot.operators.real_harmonics import (
     translate_along_z_m2l_real,
     z_m2l_translation_tables,
 )
+from jaccpot.pallas._compat import pallas_backend_kwargs
 
 try:
     import jax.experimental.pallas as pl
@@ -157,7 +158,7 @@ def m2l_core_z_real_pallas(
             (1, 1), lambda batch_idx, coeff_idx: (batch_idx, coeff_idx)
         ),
         interpret=bool(interpret),
-        backend=(None if bool(interpret) else str(backend)),
+        **pallas_backend_kwargs(str(backend), bool(interpret)),
         name=f"m2l_core_z_real_p{int(order)}",
     )
     return kernel(
