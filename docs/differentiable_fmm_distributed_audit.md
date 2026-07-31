@@ -259,13 +259,14 @@ exchange on JAX >= `JAX_RAGGED_GRAD_FIXED_VERSION` = 0.9.1 and the safe
 `all_gather` fallback below it, so a user on an affected JAX cannot silently
 compute wrong forces and a user on a fixed one needs no action.
 
-**But the package cannot get there yet.** `pyproject.toml` caps JAX at `<0.9.1`,
-and 0.9.1 is *also* where `pallas_call`'s `backend=` kwarg was removed -- which
-jaccpot's fused M2L kernels still pass, so 0.9.1 raises
-`TypeError: pallas_call() got an unexpected keyword argument 'backend'`. The two
-changes collide in one release. Until the Pallas call sites are ported, the
-shipped configuration resolves to `"buf"`, and the ragged win is unrealised. See
-the dependency comment in `pyproject.toml`.
+**The package is now on it.** That took removing a ceiling: `pyproject.toml` used
+to cap JAX at `<0.9.1` because 0.9.1 *also* removed `pallas_call`'s `backend=`
+kwarg, which the fused M2L kernels passed -- so the ragged fix and a Pallas break
+arrived in the same release. `jaccpot/pallas/_compat.pallas_backend_kwargs` now
+selects Triton on either API (`backend=` below 0.9.1, `triton.CompilerParams`
+from 0.9.1 on), the floor is `>=0.9.1`, and `"auto"` therefore resolves to
+`"native"` in every supported configuration. The `"buf"` path stays as the
+fallback a regression would need.
 
 **Fix on our side.** `_grad_halo_exchange` pins the halo import to the `all_gather`-based
 `"buf"` exchange for the halo import on the differentiable path. It computes the

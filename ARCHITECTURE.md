@@ -234,6 +234,16 @@ Pallas GPU kernels require **Ampere+ (sm_80)**; on older GPUs and CPU they are
 auto-gated off and the pure-JAX path runs (CPU CI can still lower Pallas with
 `interpret=True` as a smoke test).
 
+**Backend selection is version-dependent** and funnelled through one place:
+`jaccpot/pallas/_compat.pallas_backend_kwargs`. JAX <= 0.9.0.x took
+`pallas_call(backend="triton")`; 0.9.1 removed that kwarg and infers the backend
+from the `compiler_params` dataclass type instead. The M2L kernels must name
+Triton either way -- Mosaic-GPU rejects them (small per-(pair, coeff) tiles its TMA
+cannot express; fp64 in the complex kernel) -- so the shim raises rather than
+letting a non-Triton request fall through to a default. The near-field and
+treecode kernels already passed `pallas.triton.CompilerParams` and needed no
+change.
+
 - Fused M2L Pallas is gated by `JACCPOT_STATIC_STRICT_FUSED_M2L_PALLAS=1` **and**
   the Ampere+ hardware support check (`_real_m2l_pallas_active` /
   `_fused_complex_m2l_pallas_active`, evaluated at trace time; both now gate on the
