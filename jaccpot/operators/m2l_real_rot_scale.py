@@ -12,6 +12,7 @@ from typing import Any
 
 import jax
 import jax.numpy as jnp
+from jax import lax
 from jaxtyping import Array
 
 from jaccpot.operators.real_harmonics import (
@@ -26,6 +27,8 @@ from jaccpot.operators.real_harmonics import (
     translate_along_z_m2m_real,
 )
 
+from ._precision import highest_matmul_precision
+
 # NOTE: ``jaccpot.pallas.m2l_core_z_real`` is imported lazily inside
 # ``m2l_core_z_real`` below. A top-level import creates a circular import
 # (``jaccpot.pallas.__init__`` -> ``m2l_core_z_real`` -> ``jaccpot.operators``
@@ -33,6 +36,7 @@ from jaccpot.operators.real_harmonics import (
 # ``from jaccpot.pallas import ...`` when it is the first jaccpot import.
 
 
+@highest_matmul_precision
 def _rotate_multipole_to_z_single(
     multipole: Array, delta: Array, *, order: int
 ) -> Array:
@@ -46,6 +50,7 @@ def _rotate_multipole_to_z_single(
     return out
 
 
+@highest_matmul_precision
 def _rotate_local_from_z_single(local_z: Array, delta: Array, *, order: int) -> Array:
     """Rotate one real local expansion from z-frame back to world frame."""
     x, y, z = delta[0], delta[1], delta[2]
@@ -174,7 +179,9 @@ def _apply_real_rotation_blocks_padded_batch(
     degree, zero-padded); ``coeffs`` has shape ``(batch, (p+1)^2)``.
     """
     packed = jax.vmap(lambda c: _pack_by_ell(c, order=order))(coeffs)
-    rotated = jnp.einsum("nbij,nbj->nbi", blocks_array, packed)
+    rotated = jnp.einsum(
+        "nbij,nbj->nbi", blocks_array, packed, precision=lax.Precision.HIGHEST
+    )
     return jax.vmap(lambda c: _unpack_by_ell(c, order=order))(rotated)
 
 

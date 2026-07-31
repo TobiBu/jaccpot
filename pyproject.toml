@@ -43,21 +43,17 @@ dependencies = [
   # rather than a hard requirement; relax it to >=0.8.0 if wider compatibility
   # matters more than guaranteeing the fast path.
   #
-  # Why the ceiling: 0.11.0 has now had that validation pass, and it is
-  # 502 passed / 1 FAILED, so the ceiling stays until the one failure is dealt
-  # with. The failure is not an API break -- the two documented 0.10 hazards do
-  # not apply here (jaccpot uses no `pmap`, and the `shard_map` import already
-  # falls back to `jax.experimental.shard_map`) and the Pallas, distributed-
-  # gradient and ragged-exchange checks are all green on 0.11.0. It is
-  # `tests/integration/test_fmm.py::test_solidfmm_m2l_ignores_padded_compact_far_pairs`:
-  # padding the far-pair list with -1 sentinels no longer reproduces the
-  # exact-length result to `rtol=1e-6` in complex64 (0.34508935+1.0060287j vs
-  # 0.3452706+1.0063277j, ~2e-4 relative) because a newer XLA fuses the masked
-  # contributions differently. That is fp32 reassociation, most likely benign
-  # against the order-p truncation error -- but padded far-pair lists are the
-  # normal case at scale, so it deserves a decision (loosen the invariance
-  # tolerance, or explain the 2e-4) rather than being waved through on a
-  # dependency bump. Lift the ceiling as its own change, coupled to that.
+  # Why the ceiling is now just "next major": 0.11.0 is validated (see below), and
+  # the one failure that used to block it was a false-negative TEST, not a code
+  # defect -- it asserted padded == exact while both fp32 paths were identically
+  # wrong, and 0.11.0 merely stopped the two TF32 errors cancelling. Fixed in
+  # tests/integration/test_fmm.py (float64 reference), so 0.11.0 is green. Neither
+  # documented 0.10 hazard applies: jaccpot uses no `pmap`, and the `shard_map`
+  # import already falls back to `jax.experimental.shard_map`.
+  #
+  # 0.9.2 and 0.10.x are still uninstalled-untested; both ENDPOINTS of the allowed
+  # range are green and nothing we use changed in between, which is inference for
+  # the middle, not measurement.
   #
   # What was validated for this pin (2xA100, sm_80), over tests/ with
   # `-m "not slow and not experimental"`:
@@ -76,8 +72,8 @@ dependencies = [
   # kwarg was removed in 0.9.1 and the fused M2L kernels passed it. They now go
   # through `jaccpot/pallas/_compat.pallas_backend_kwargs`, which selects Triton
   # via `backend=` on the old API and via `triton.CompilerParams` on the new one.
-  "jax[cuda]>=0.9.1,<0.10",
-  "jaxlib>=0.9.1,<0.10",
+  "jax[cuda]>=0.9.1,<0.12",
+  "jaxlib>=0.9.1,<0.12",
   "jaxtyping>=0.2.23",
   "beartype>=0.14.0",
   "yggdrax>=0.0.1,<0.1.0",
