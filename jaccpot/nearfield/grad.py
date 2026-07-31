@@ -315,6 +315,15 @@ def _leafpair_accel_analytic_vjp(
     if num_leaves == 0 or width == 0 or num_slots == 0:
         return jnp.zeros_like(leaf_positions), jnp.zeros_like(leaf_masses)
 
+    # Normalise the scalars to arrays. A caller whose ``G``/``softening_sq`` are
+    # Python constants inside a jitted region hands them over as JAX host-side
+    # literals (``TypedNdArray``), which reach this rule through the custom_vjp
+    # residual and do not implement ``__neg__`` -- ``-G`` below then raises. The
+    # single-GPU caller happens to pass concrete device arrays, so only a jitted
+    # caller (e.g. the distributed shard_map body) trips it.
+    G = jnp.asarray(G, dtype)
+    softening_sq = jnp.asarray(softening_sq, dtype)
+
     slot_ids = jnp.reshape(source_leaf_ids, (num_leaves, num_slots))
     slot_valid = jnp.reshape(source_valid, (num_leaves, num_slots))
 
