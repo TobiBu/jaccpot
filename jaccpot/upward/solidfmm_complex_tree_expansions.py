@@ -7,7 +7,6 @@ kept separate from the Dehnen real-basis implementation.
 
 from __future__ import annotations
 
-import os
 import time
 from functools import partial
 from typing import NamedTuple, Optional
@@ -24,6 +23,7 @@ from yggdrax.geometry import TreeGeometry, compute_tree_geometry
 from yggdrax.tree import Tree, get_level_offsets, get_nodes_by_level
 from yggdrax.tree_moments import TreeMassMoments, compute_tree_mass_moments
 
+from jaccpot._env import env_flag
 from jaccpot.operators.complex_harmonics import p2m_complex_batch
 from jaccpot.operators.complex_ops import (
     enforce_conjugate_symmetry,
@@ -55,18 +55,17 @@ _CENTER_MODES = ("com", "aabb", "explicit")
 _DEFAULT_LEAF_BATCH_SIZE = 2048
 
 
-def _env_flag(name: str, default: bool = False) -> bool:
-    raw = os.environ.get(name)
-    if raw is None:
-        return bool(default)
-    return str(raw).strip().lower() in ("1", "true", "yes", "on")
+def _upward_diagnostics() -> bool:
+    """Whether opt-in upward-sweep diagnostics are enabled.
 
-
-_UPWARD_DIAGNOSTICS = _env_flag("JACCPOT_PREPARE_DIAGNOSTICS", False)
+    Read per call rather than captured at import, so setting
+    ``JACCPOT_PREPARE_DIAGNOSTICS=1`` after importing jaccpot takes effect.
+    """
+    return env_flag("JACCPOT_PREPARE_DIAGNOSTICS", False)
 
 
 def _upward_diag(message: str) -> None:
-    if _UPWARD_DIAGNOSTICS:
+    if _upward_diagnostics():
         print(f"[jaccpot.upward] {message}", flush=True)
 
 
@@ -90,7 +89,7 @@ def _diag_upward_stage_estimates(
     positions_dtype: jnp.dtype,
     masses_dtype: jnp.dtype,
 ) -> None:
-    if not _UPWARD_DIAGNOSTICS:
+    if not _upward_diagnostics():
         return
 
     pos_itemsize = np.dtype(positions_dtype).itemsize
@@ -350,6 +349,42 @@ def _aggregate_m2m_complex_by_level(
         in_axes=(0, 0),
     )
 
+    def _m2m_level_apply(
+        state_in: Array,
+        node_centers_all: Array,
+        safe_child_idx: Array,
+        gather_nodes: Array,
+        child_mask: Array,
+    ) -> Array:
+        """Gather one level's children, M2M-translate them, reduce onto the parents.
+
+        Wrapped in ``jax.checkpoint`` below so reverse mode retains only these
+        inputs. Un-rematerialized, the level loop keeps every level's rotate-to-z /
+        rotate-from-z blocks *and* their bilinear construction intermediates:
+        measured at **14.2 kB per (level x node)** by
+        ``bench/audit_reverse_residuals.py``, and because ``level_batch_width`` is
+        deliberately ``num_internal`` (a narrower width is unsafe, see below) that
+        is ``depth x nodes``, not ``nodes`` -- 5.4 GB at N=1048576.
+
+        ``node_centers_all`` is loop-invariant so ``scan``'s partial-eval hoists it
+        out and counts it once; only the carry and three integer/bool index arrays
+        are retained per level.
+
+        The zero-displacement case (a single-child internal node shares its child's
+        centre of mass) is guarded inside ``m2m_complex`` itself, which is enclosed
+        here, so the recomputed ``deltas`` keep that protection.
+        """
+        child_coeffs = state_in[safe_child_idx]
+        child_centers = node_centers_all[safe_child_idx]
+        parent_centers = node_centers_all[gather_nodes][:, None, :]
+        deltas = child_centers - parent_centers
+        translated = translate_children(child_coeffs, deltas)
+        translated = translated * child_mask[..., None]
+        node_coeffs = jnp.sum(translated, axis=1, dtype=translated.dtype)
+        return enforce_conjugate_symmetry_batch(node_coeffs, order=p)
+
+    _m2m_level = jax.checkpoint(_m2m_level_apply)
+
     # Scatter target for invalid / padding slots. All padding slots must route
     # to a dead row rather than a real node: with duplicate scatter indices XLA
     # takes the last write, so if padding collapsed onto a real node id (e.g. 0,
@@ -385,15 +420,11 @@ def _aggregate_m2m_complex_by_level(
         )
         child_mask = child_idx_pair >= 0
         safe_child_idx = jnp.where(child_mask, child_idx_pair, 0)
-        child_coeffs = state[safe_child_idx]
-        child_centers = centers[safe_child_idx]
-        node_centers = centers[gather_nodes][:, None, :]
-        deltas = child_centers - node_centers
 
-        translated = translate_children(child_coeffs, deltas)
-        translated = translated * child_mask[..., None]
-        node_coeffs = jnp.sum(translated, axis=1, dtype=translated.dtype)
-        node_coeffs = enforce_conjugate_symmetry_batch(node_coeffs, order=p)
+        # Gather + translate + reduce, rematerialized (see ``_m2m_level_apply``).
+        node_coeffs = _m2m_level(
+            state, centers, safe_child_idx, gather_nodes, child_mask
+        )
 
         return state.at[scatter_nodes].set(node_coeffs)
 
@@ -441,9 +472,8 @@ def prepare_solidfmm_complex_upward_sweep(
     p = int(max_order)
     if p < 0:
         raise ValueError("max_order must be >= 0")
-    profile_stages = (
-        upward_timing_callback is not None
-        and os.environ.get("JACCPOT_PROFILE_UPWARD_STAGES", "0") == "1"
+    profile_stages = upward_timing_callback is not None and env_flag(
+        "JACCPOT_PROFILE_UPWARD_STAGES", False
     )
 
     def _record_stage(name: str, start: float, value) -> None:

@@ -3,12 +3,15 @@
 from __future__ import annotations
 
 import os
+import warnings
+from collections import OrderedDict
 from dataclasses import dataclass
 from functools import partial
 from typing import Any, Optional, Union
 
 import jax
 import jax.numpy as jnp
+import numpy as np
 from beartype import beartype
 from beartype.typing import Tuple
 from jax import lax
@@ -16,6 +19,22 @@ from jaxtyping import Array, jaxtyped
 from yggdrax.dtypes import INDEX_DTYPE, as_index
 from yggdrax.interactions import NodeNeighborList
 from yggdrax.tree import Tree
+
+from jaccpot._env import env_flag, env_float, env_int
+from jaccpot.runtime.grad_options import (
+    LeafPairReverseOptions,
+    analytic_p2p_vjp_enabled,
+)
+
+from .grad import (
+    _check_float_id_range,
+    _leafpair_accel_analytic_vjp,
+    _leafpair_reverse_tiers_cached,
+    _pair_accel_cvjp,
+    _pair_accel_masked_accels,
+    build_leafpair_reverse_tiers,
+    clear_leafpair_reverse_tier_cache,
+)
 
 _LARGE_N_NEARFIELD_DIAG_MODES = frozenset(("full", "self_only", "pairs_only", "zero"))
 
@@ -29,21 +48,11 @@ def _large_n_nearfield_diag_mode() -> str:
     return mode if mode in _LARGE_N_NEARFIELD_DIAG_MODES else "full"
 
 
-def _env_flag(name: str, default: bool = False) -> bool:
-    raw = os.environ.get(name)
-    if raw is None:
-        return bool(default)
-    return str(raw).strip().lower() in {"1", "true", "yes", "on"}
-
-
-def _env_int(name: str, default: int = 0) -> int:
-    raw = os.environ.get(name)
-    if raw is None:
-        return int(default)
-    try:
-        return int(str(raw).strip())
-    except (TypeError, ValueError):
-        return int(default)
+# Unclamped by design: several near-field knobs use 0 as "unset, pick a default"
+# (JACCPOT_NEARFIELD_PALLAS_NUM_WARPS, ..._TARGET_SUBTILE), so a minimum of 1
+# would turn "auto" into a real, wrong value.
+_env_flag = env_flag
+_env_int = env_int
 
 
 @dataclass(frozen=True)
@@ -342,10 +351,21 @@ def _self_contributions(
 
         return accel_leaf, pot_leaf
 
+    # Rematerialize the per-leaf block. ``compute_single`` builds (W, W, 3) and
+    # (W, W) intermediates, and the scan retains them for EVERY leaf, so the
+    # residual is O(leaves * W^2) -- N*W in practice, i.e. ~1.4 GB at N=200000 and
+    # ~7.5 GB at N=1048576 on the canonical leaf-256 config. Its inputs are only
+    # the (W, 3) / (W,) slices of one leaf, so remat trades one extra intra-leaf
+    # pass for a W-fold reduction.
+    #
+    # Note this term is NOT covered by ``_pair_accel_cvjp``: that rule handles
+    # cross-leaf pair blocks, while intra-leaf self interaction is computed here.
+    _compute_single_remat = jax.checkpoint(compute_single)
+
     def scan_step(
         carry: Any, args: tuple[Array, Array, Array]
     ) -> tuple[Any, tuple[Array, Array]]:
-        accel_leaf, pot_leaf = compute_single(args)
+        accel_leaf, pot_leaf = _compute_single_remat(args)
         return carry, (accel_leaf, pot_leaf)
 
     _, (accels, potentials) = lax.scan(
@@ -442,6 +462,22 @@ def _pair_contributions_batched(
     compute_potential: bool,
 ) -> Tuple[Array, Optional[Array]]:
     """Vectorized pair contributions for a batch of target/source leaf pairs."""
+    if analytic_p2p_vjp_enabled() and not compute_potential:
+        # Accel-only path (the differentiable path): route through the analytic
+        # symmetric-tidal-tensor custom_vjp. Forward is byte-identical; masks are
+        # passed as 0/1 floats and softening/G as arrays so the reverse needs no
+        # closure over tracers.
+        dtype = target_positions.dtype
+        accels = _pair_accel_cvjp(
+            target_positions,
+            source_positions,
+            source_masses,
+            target_mask.astype(dtype),
+            source_mask.astype(dtype),
+            jnp.asarray(softening_sq, dtype=dtype),
+            jnp.asarray(G, dtype=dtype),
+        )
+        return accels, None
     diff = target_positions[:, :, None, :] - source_positions[:, None, :, :]
     dist_sq = jnp.sum(diff * diff, axis=-1) + softening_sq
     pair_mask = target_mask[:, :, None] & source_mask[:, None, :]
@@ -497,6 +533,57 @@ def _pair_contributions_batched_componentwise(
         return accels, potentials
 
     return accels, None
+
+
+def _bucketed_chunk_pair_accels(
+    leaf_positions: Array,
+    leaf_masses: Array,
+    leaf_mask: Array,
+    target_leaf_local: Array,
+    source_leaf_local: Array,
+    valid_edge: Array,
+    softening_sq: Array,
+    G: Array,
+) -> Tuple[Array, Array]:
+    """Gather one edge chunk's leaf tensors and evaluate its near-field pair block.
+
+    Deliberately takes the **leaf-major buffers plus leaf-id index vectors** rather
+    than pre-gathered positions, so callers can wrap it in ``jax.checkpoint``:
+    ``lax.scan``'s partial-eval hoists the scan-invariant leaf buffers out and
+    counts them once, leaving only two integer leaf-id vectors and a mask stacked
+    per chunk.
+
+    That is the single largest reverse-pass term at galaxy scale. The gather sits
+    *outside* :func:`_pair_accel_cvjp`, which explicitly saves its own inputs, so
+    rematerializing only the gather would achieve nothing -- the consumer would
+    save the gather's outputs anyway. Rematerializing the composite (gather **and**
+    pair evaluation) is what collapses it: measured **77.8 B per (edge x
+    max_leaf_size)** by ``bench/audit_reverse_residuals.py``, i.e. 8.7 GB at
+    N=200000 and 124 GB at N=1048576 on the canonical leaf-256 config, versus
+    ~14 B per *edge* once rematerialized.
+
+    Returns ``(pair_accelerations, target_mask)``; the caller applies the scatter,
+    which is linear and therefore needs only indices and the mask in reverse.
+    """
+    target_positions = leaf_positions[target_leaf_local]
+    target_mask = leaf_mask[target_leaf_local] & valid_edge[:, None]
+    source_positions = leaf_positions[source_leaf_local]
+    source_masses = leaf_masses[source_leaf_local]
+    source_mask = leaf_mask[source_leaf_local] & valid_edge[:, None]
+    pair_acc, _ = _pair_contributions_batched(
+        target_positions,
+        target_mask,
+        source_positions,
+        source_masses,
+        source_mask,
+        softening_sq=softening_sq,
+        G=G,
+        compute_potential=False,
+    )
+    return pair_acc, target_mask
+
+
+_bucketed_chunk_pair_accels_remat = jax.checkpoint(_bucketed_chunk_pair_accels)
 
 
 def _scatter_contributions(
@@ -1889,21 +1976,18 @@ def _compute_leaf_p2p_impl(
                             tgt_leaf_local = jnp.where(valid_edge, tgt_leaf, 0)
                             src_leaf_local = jnp.where(valid_edge, src_leaf, 0)
 
-                            tgt_pos = leaf_positions[tgt_leaf_local]
-                            tgt_mask = leaf_mask[tgt_leaf_local] & valid_edge[:, None]
-                            src_pos = leaf_positions[src_leaf_local]
-                            src_mass = leaf_masses[src_leaf_local]
-                            src_mask = leaf_mask[src_leaf_local] & valid_edge[:, None]
-
-                            pair_acc, _ = _pair_contributions_batched(
-                                tgt_pos,
-                                tgt_mask,
-                                src_pos,
-                                src_mass,
-                                src_mask,
-                                softening_sq=soft_sq,
-                                G=g_const,
-                                compute_potential=False,
+                            # Gather + pair evaluation, rematerialized: the
+                            # composite is the dominant reverse-pass residual at
+                            # galaxy N (see ``_bucketed_chunk_pair_accels``).
+                            pair_acc, tgt_mask = _bucketed_chunk_pair_accels_remat(
+                                leaf_positions,
+                                leaf_masses,
+                                leaf_mask,
+                                tgt_leaf_local,
+                                src_leaf_local,
+                                valid_edge,
+                                soft_sq,
+                                g_const,
                             )
                             return _scatter_vectors_with_schedule(
                                 acc_in,
@@ -1948,22 +2032,19 @@ def _compute_leaf_p2p_impl(
                             tgt_leaf_local = jnp.where(valid_edge, tgt_leaf, 0)
                             src_leaf_local = jnp.where(valid_edge, src_leaf, 0)
 
-                            tgt_pos = leaf_positions[tgt_leaf_local]
-                            tgt_mask = leaf_mask[tgt_leaf_local] & valid_edge[:, None]
                             tgt_ids = leaf_particle_idx[tgt_leaf_local]
-                            src_pos = leaf_positions[src_leaf_local]
-                            src_mass = leaf_masses[src_leaf_local]
-                            src_mask = leaf_mask[src_leaf_local] & valid_edge[:, None]
-
-                            pair_acc, _ = _pair_contributions_batched(
-                                tgt_pos,
-                                tgt_mask,
-                                src_pos,
-                                src_mass,
-                                src_mask,
-                                softening_sq=soft_sq,
-                                G=g_const,
-                                compute_potential=False,
+                            # Gather + pair evaluation, rematerialized: the
+                            # composite is the dominant reverse-pass residual at
+                            # galaxy N (see ``_bucketed_chunk_pair_accels``).
+                            pair_acc, tgt_mask = _bucketed_chunk_pair_accels_remat(
+                                leaf_positions,
+                                leaf_masses,
+                                leaf_mask,
+                                tgt_leaf_local,
+                                src_leaf_local,
+                                valid_edge,
+                                soft_sq,
+                                g_const,
                             )
                             return _scatter_contributions(
                                 acc_in,
@@ -2381,21 +2462,18 @@ def _compute_leaf_p2p_from_prepared_leaf_data_impl(
                             tgt_leaf_local = jnp.where(valid_edge, tgt_leaf, 0)
                             src_leaf_local = jnp.where(valid_edge, src_leaf, 0)
 
-                            tgt_pos = leaf_positions[tgt_leaf_local]
-                            tgt_mask = leaf_mask[tgt_leaf_local] & valid_edge[:, None]
-                            src_pos = leaf_positions[src_leaf_local]
-                            src_mass = leaf_masses[src_leaf_local]
-                            src_mask = leaf_mask[src_leaf_local] & valid_edge[:, None]
-
-                            pair_acc, _ = _pair_contributions_batched(
-                                tgt_pos,
-                                tgt_mask,
-                                src_pos,
-                                src_mass,
-                                src_mask,
-                                softening_sq=soft_sq,
-                                G=g_const,
-                                compute_potential=False,
+                            # Gather + pair evaluation, rematerialized: the
+                            # composite is the dominant reverse-pass residual at
+                            # galaxy N (see ``_bucketed_chunk_pair_accels``).
+                            pair_acc, tgt_mask = _bucketed_chunk_pair_accels_remat(
+                                leaf_positions,
+                                leaf_masses,
+                                leaf_mask,
+                                tgt_leaf_local,
+                                src_leaf_local,
+                                valid_edge,
+                                soft_sq,
+                                g_const,
                             )
                             return _scatter_vectors_with_schedule(
                                 acc_in,
@@ -2440,22 +2518,19 @@ def _compute_leaf_p2p_from_prepared_leaf_data_impl(
                             tgt_leaf_local = jnp.where(valid_edge, tgt_leaf, 0)
                             src_leaf_local = jnp.where(valid_edge, src_leaf, 0)
 
-                            tgt_pos = leaf_positions[tgt_leaf_local]
-                            tgt_mask = leaf_mask[tgt_leaf_local] & valid_edge[:, None]
                             tgt_ids = leaf_particle_idx[tgt_leaf_local]
-                            src_pos = leaf_positions[src_leaf_local]
-                            src_mass = leaf_masses[src_leaf_local]
-                            src_mask = leaf_mask[src_leaf_local] & valid_edge[:, None]
-
-                            pair_acc, _ = _pair_contributions_batched(
-                                tgt_pos,
-                                tgt_mask,
-                                src_pos,
-                                src_mass,
-                                src_mask,
-                                softening_sq=soft_sq,
-                                G=g_const,
-                                compute_potential=False,
+                            # Gather + pair evaluation, rematerialized: the
+                            # composite is the dominant reverse-pass residual at
+                            # galaxy N (see ``_bucketed_chunk_pair_accels``).
+                            pair_acc, tgt_mask = _bucketed_chunk_pair_accels_remat(
+                                leaf_positions,
+                                leaf_masses,
+                                leaf_mask,
+                                tgt_leaf_local,
+                                src_leaf_local,
+                                valid_edge,
+                                soft_sq,
+                                g_const,
                             )
                             return _scatter_contributions(
                                 acc_in,
@@ -3308,6 +3383,184 @@ def _radix_fast_lane_prepacked_pallas_decoupled(
     return pair_acc
 
 
+@partial(jax.custom_vjp, nondiff_argnums=(9, 10, 11, 12, 13, 14, 15, 16))
+def _radix_fast_lane_prepacked_accel_cvjp(
+    leaf_positions: Array,
+    leaf_masses: Array,
+    positions: Array,
+    source_leaf_ids_f: Array,
+    source_valid_f: Array,
+    leaf_mask_f: Array,
+    leaf_particle_idx_f: Array,
+    softening_sq: Array,
+    G: Array,
+    num_warps: Optional[int],
+    num_stages: int,
+    target_subtile: Optional[int],
+    interpret: bool,
+    rev_leaf_batch: int,
+    rev_block_tile: int,
+    rev_skip_empty: bool,
+    rev_tiers: Optional[Tuple[Tuple[Tuple[int, ...], int], ...]],
+) -> Array:
+    """Differentiable prepacked-lane near field: Pallas forward, tiled-twin reverse.
+
+    The forward IS the production fused Pallas call, so it is byte-identical and
+    the grad path runs exactly the kernel the forward ships. The reverse is
+    ``jax.vjp`` of the lane's own tiled pure-JAX fallback
+    (:func:`_compute_leaf_p2p_prepared_large_n_pairs_target_blocks_prepacked_impl`),
+    which is already routed through the rematerialized analytic P2P rule.
+
+    Using the tiled fallback -- not the dense reference twin in
+    ``jaccpot/pallas/nearfield_fused_leaf.py`` -- is essential: that reference
+    materialises a ``(leaves, W_t, K, 3)`` difference tensor, which is ~50 TB at
+    the fiducial configuration and is documented "test-scale only". It stays in the
+    tree as the unit-level VJP oracle, not as a production reverse.
+
+    Measured Pallas-vs-fallback force agreement at the canonical config: rel-L2
+    4.2e-06 at N=65536 and 8.4e-06 at N=200000, i.e. fp32 summation reordering.
+    That check is the gate on this whole approach -- the reverse is the derivative
+    of the fallback, so if the two lanes disagreed materially we would be
+    differentiating a different function (cf. the grouped-M2L lesson, where an
+    assumed equivalence was really 7.1e-02 vs 1.1e-02 against the exact sum).
+
+    Reverse tiling is deliberately independent of the forward's: the backward
+    materialises per-tile pair tensors, so small ``rev_*`` tiles keep it bounded.
+    """
+    return _radix_fast_lane_prepacked_pallas(
+        jnp.round(source_leaf_ids_f).astype(INDEX_DTYPE),
+        source_valid_f > 0.5,
+        leaf_positions,
+        leaf_masses,
+        leaf_mask_f > 0.5,
+        jnp.round(leaf_particle_idx_f).astype(INDEX_DTYPE),
+        positions,
+        G=G,
+        softening_sq=softening_sq,
+        compute_potential=False,
+        num_warps=num_warps,
+        num_stages=num_stages,
+        target_subtile=target_subtile,
+        interpret=interpret,
+    )
+
+
+def _radix_fast_lane_prepacked_accel_fwd(
+    leaf_positions,
+    leaf_masses,
+    positions,
+    source_leaf_ids_f,
+    source_valid_f,
+    leaf_mask_f,
+    leaf_particle_idx_f,
+    softening_sq,
+    G,
+    num_warps,
+    num_stages,
+    target_subtile,
+    interpret,
+    rev_leaf_batch,
+    rev_block_tile,
+    rev_skip_empty,
+    rev_tiers,
+):
+    out = _radix_fast_lane_prepacked_accel_cvjp(
+        leaf_positions,
+        leaf_masses,
+        positions,
+        source_leaf_ids_f,
+        source_valid_f,
+        leaf_mask_f,
+        leaf_particle_idx_f,
+        softening_sq,
+        G,
+        num_warps,
+        num_stages,
+        target_subtile,
+        interpret,
+        rev_leaf_batch,
+        rev_block_tile,
+        rev_skip_empty,
+        rev_tiers,
+    )
+    residual = (
+        leaf_positions,
+        leaf_masses,
+        positions,
+        source_leaf_ids_f,
+        source_valid_f,
+        leaf_mask_f,
+        leaf_particle_idx_f,
+        jnp.asarray(softening_sq),
+        jnp.asarray(G),
+    )
+    return out, residual
+
+
+def _radix_fast_lane_prepacked_accel_bwd(
+    num_warps,
+    num_stages,
+    target_subtile,
+    interpret,
+    rev_leaf_batch,
+    rev_block_tile,
+    rev_skip_empty,
+    rev_tiers,
+    residual,
+    cotangent,
+):
+    (
+        leaf_positions,
+        leaf_masses,
+        positions,
+        source_leaf_ids_f,
+        source_valid_f,
+        leaf_mask_f,
+        leaf_particle_idx_f,
+        softening_sq,
+        G,
+    ) = residual
+
+    # Analytic reverse, NOT ``jax.vjp`` of the tiled twin. Both are correct and
+    # agree to round-off, but ``jax.vjp`` linearizes the twin and so reinstates its
+    # O(edges * W) scan residuals as a transient peak during the backward (~67 GB at
+    # N=1048576). A hand-written bwd is never differentiated, so its intermediates
+    # are tile-bounded transients and the memory is O(N) -- which is what makes
+    # galaxy-scale gradients reachable. ``jax.vjp`` of the twin remains the
+    # correctness oracle in tests/unit/test_custom_vjp_parity.py.
+    leaf_positions_bar, leaf_masses_bar = _leafpair_accel_analytic_vjp(
+        leaf_positions,
+        leaf_masses,
+        leaf_mask_f > 0.5,
+        jnp.round(leaf_particle_idx_f).astype(INDEX_DTYPE),
+        jnp.round(source_leaf_ids_f).astype(INDEX_DTYPE),
+        source_valid_f > 0.5,
+        cotangent,
+        softening_sq=softening_sq,
+        G=G,
+        leaf_batch=int(rev_leaf_batch),
+        slot_tile=int(rev_block_tile),
+        skip_empty_tiles=bool(rev_skip_empty),
+        tiers=rev_tiers,
+    )
+    return (
+        leaf_positions_bar,
+        leaf_masses_bar,
+        jnp.zeros_like(positions),
+        jnp.zeros_like(source_leaf_ids_f),
+        jnp.zeros_like(source_valid_f),
+        jnp.zeros_like(leaf_mask_f),
+        jnp.zeros_like(leaf_particle_idx_f),
+        jnp.zeros_like(softening_sq),
+        jnp.zeros_like(G),
+    )
+
+
+_radix_fast_lane_prepacked_accel_cvjp.defvjp(
+    _radix_fast_lane_prepacked_accel_fwd, _radix_fast_lane_prepacked_accel_bwd
+)
+
+
 def compute_leaf_p2p_accelerations_radix_fast_lane(
     *,
     positions_sorted: Array,
@@ -3317,8 +3570,29 @@ def compute_leaf_p2p_accelerations_radix_fast_lane(
     softening: float = 0.0,
     return_potential: bool = False,
     use_pallas: bool = False,
+    differentiable: bool = False,
+    reverse_options: Optional["LeafPairReverseOptions"] = None,
 ) -> Union[Array, Tuple[Array, Array]]:
-    """Payload-driven nearfield entry for the radix fast lane."""
+    """Payload-driven nearfield entry for the radix fast lane.
+
+    ``differentiable`` routes the fused Pallas lanes through their ``custom_vjp``
+    wrappers so ``jax.grad`` works. ``pallas_call`` has no autodiff rule, so the
+    raw lanes hard-fail in reverse mode; the wrapper keeps the Pallas forward
+    (byte-identical) and takes the reverse from this lane's tiled pure-JAX
+    fallback. Defaults False so the production forward path is untouched.
+
+    ``reverse_options`` carries the resolved reverse-pass tuning (tiering, tile
+    sizes, the empty-tile skip). ``None`` means "resolve from the environment",
+    which is what the forward-only production callers get; the differentiable
+    entry point resolves a :class:`~jaccpot.config.GradConfig` once, outside the
+    trace, and passes the result down so nothing reads the environment per call.
+    """
+    if reverse_options is None:
+        from jaccpot.runtime.grad_options import resolve_grad_options
+
+        reverse_options = resolve_grad_options(
+            None, num_particles=0, supports_fast_lane=False
+        ).reverse
     positions = jnp.asarray(positions_sorted)
     masses = jnp.asarray(masses_sorted)
     want_potential = bool(return_potential)
@@ -3447,6 +3721,51 @@ def compute_leaf_p2p_accelerations_radix_fast_lane(
                 1, _env_int("JACCPOT_NEARFIELD_PALLAS_NUM_STAGES", 1)
             )
             pallas_subtile = _env_int("JACCPOT_NEARFIELD_PALLAS_TARGET_SUBTILE", 0)
+            if differentiable and not want_potential:
+                # Differentiable prepacked lane: the SAME Pallas forward wrapped in
+                # a custom_vjp whose reverse is autodiff of this lane's own tiled
+                # pure-JAX fallback. Forward is byte-identical, so the grad path
+                # runs exactly the kernel production ships.
+                _check_float_id_range(
+                    int(positions.shape[0]),
+                    dtype,
+                    what="differentiable prepacked near-field lane",
+                )
+                rev_block_tile = int(reverse_options.block_tile)
+                # Occupancy tiers for the reverse, built HERE rather than inside the
+                # bwd rule: the payload's validity mask is frozen topology and is
+                # concrete at this point, whereas inside the rule it is a residual
+                # (a tracer under jit) from which no static slot width could be
+                # read. Rides through as a nondiff arg, so each tier's width is a
+                # compile-time constant.
+                rev_tiers = None
+                if reverse_options.tiered:
+                    rev_tiers = _leafpair_reverse_tiers_cached(
+                        payload.source_leaf_valid_mask,
+                        source_valid_mask_padded,
+                        slot_tile=rev_block_tile,
+                        max_tiers=reverse_options.max_tiers,
+                        min_gain=reverse_options.tier_min_gain,
+                    )
+                return self_acc + _radix_fast_lane_prepacked_accel_cvjp(
+                    leaf_positions,
+                    leaf_masses,
+                    positions,
+                    source_leaf_ids_padded.astype(dtype),
+                    source_valid_mask_padded.astype(dtype),
+                    leaf_mask.astype(dtype),
+                    leaf_particle_idx.astype(dtype),
+                    softening_sq,
+                    jnp.asarray(G, dtype=dtype),
+                    (pallas_num_warps if pallas_num_warps > 0 else None),
+                    pallas_num_stages,
+                    (pallas_subtile if pallas_subtile > 0 else None),
+                    pallas_interpret,
+                    int(reverse_options.leaf_batch),
+                    rev_block_tile,
+                    bool(reverse_options.skip_empty_tiles),
+                    rev_tiers,
+                )
             prepacked_result = _radix_fast_lane_prepacked_pallas(
                 source_leaf_ids_padded,
                 source_valid_mask_padded,

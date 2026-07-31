@@ -46,7 +46,7 @@ ODISSEO coupling) depends on. It is frozen by
 | `MemoryObjective` | memory-policy literal |
 | `ComplexSHBasis`, `RealSHBasis` | expansion bases |
 | `OdisseoFMMCoupler` | ODISSEO integration adapter |
-| `differentiable_gravitational_acceleration` | autodiff-able **direct-sum** (see section 6) |
+| `differentiable_gravitational_acceleration` | autodiff-able **direct-sum** oracle (the differentiable FMM itself is `FastMultipoleMethod.differentiable_accelerations`; see section 6) |
 
 `FastMultipoleMethod` in `solver.py` is the sole public class name; the runtime
 engine class (currently also named `FastMultipoleMethod` in `_fmm_impl.py`) is
@@ -157,9 +157,76 @@ derivative/jerk towers, and cached-vs-uncached M2L dispatch.
 - **Advanced config** is the `FMMAdvancedConfig` group (tree / farfield /
   nearfield / runtime); `fmm_state._resolve_fmm_config` normalises constructor
   inputs into a validated `FMMResolvedConfig`.
-- `differentiable_gravitational_acceleration` is **not** an autodiff FMM — FMM is
-  forward-only here. It is the deliberately differentiable **direct O(N²) sum**,
-  provided for gradient-based use where the FMM approximation is not needed.
+- **End-to-end differentiable FMM (single GPU).** `FastMultipoleMethod.differentiable_accelerations(state, positions, masses)`
+  gives exact gradients of the FMM force w.r.t. particle **positions** and **masses**
+  under a fixed-topology contract: the tree (Morton order, node membership, MAC
+  accept/reject, the M2L interaction list, near/far partition) is held constant from a
+  pre-built `state` while the numeric pipeline (P2M, COM centers, the linear M2M/M2L/L2L
+  translations, L2P, near-field P2P) is re-evaluated on the live inputs, so `jax.grad`/
+  `jax.vjp` transpose it exactly (Route A; the translation cascade is linear so its VJP
+  is free). `prepare_state` (tree build) is not traceable, so `state` must be built once,
+  concretely, before `jax.grad`. Requires a radix `FMMPreparedState` with a solidfmm
+  basis (complex or real submode). The M2L defaults to the pure-JAX path but can opt
+  into the differentiable **fused-Pallas M2L fast lane** with
+  `JACCPOT_STATIC_STRICT_FUSED_M2L_PALLAS=1` on an Ampere+ GPU (the fused kernels now
+  carry a `custom_vjp`, PR-2). The near-field defaults to the bucketed pure-JAX
+  edge-list kernel; `JACCPOT_DIFFERENTIABLE_NEARFIELD_FAST_LANE=1` re-expresses it
+  **leaf-major** and routes it through the radix fast lane (PR-4) — the same edge set
+  and the same force (bit-identical checksums), a different traversal. It stays
+  **opt-in**, but the recommendation is N-dependent: at N≤4096 the two traversals are
+  within ±20% with no consistent winner, while at **N=200000 the bucketed reverse OOMs
+  (30 GB peak) and the fast lane completes in 6.8 GB** — turn it on for any
+  differentiable radix run at N ≳ 10^5. `LargeNPreparedState` is differentiable via
+  `runtime/_large_n_grad.py` (needs `retain_far_pairs_for_grad=True`), and the
+  `large_n_gpu` preset is the leanest galaxy-scale option measured: **1M particles,
+  forward 2.5 s and forward+backward 69 s at 11 GB peak**.
+- **Configuring the grad path.** `GradConfig` (`jaccpot/config.py`) is the
+  supported interface; `runtime/grad_options.py` resolves it under
+  `explicit field > JACCPOT_* env var > measured default`, so the environment
+  variables above remain a working fallback. `nearfield_lane` defaults to
+  `"auto"` and switches to the fast lane at N >= 100000 — the bucketed reverse
+  OOMs there, so the crossover is applied rather than documented. Three gates
+  (fused-Pallas M2L, the two analytic VJP rules) are read at trace time deep in
+  the kernels with no argument channel; `grad_option_overrides` installs them as
+  context-locals for the duration of one call.
+- **Where the reverse rules live.** `nearfield/grad.py` holds both analytic
+  near-field reverses — `_pair_accel_cvjp` (bucketed, rematerialized pair terms)
+  and `_leafpair_accel_analytic_vjp` (leaf-major, O(N) memory) — plus the
+  occupancy-tier builder and its cache. The `custom_vjp` wrappers stay in
+  `near_field.py` next to the forward kernels they wrap, which is what keeps the
+  two modules acyclic.
+- **Differentiable multi-GPU FMM.** `distributed.make_force_evaluator(config, ndev,
+  cap, mesh, differentiable=True)` puts the `shard_map` pipeline under
+  `jax.grad`/`jax.vjp` under the same fixed-topology contract. Because the tree is
+  built *inside* `shard_map` (there is no host-side `prepare_state` here), the seam
+  is in the body: topology from `stop_gradient`-ed inputs, numerics re-evaluated on
+  the live ones. Forward values are bit-identical. Three distributed-specific
+  points: the near field must go through `_radix_fast_lane_prepacked_accel_cvjp`
+  (raw `pallas_call` has no autodiff rule) and `nearfield_chunk` therefore raises;
+  the L2L cascade needs a **static** level bound, whose safe default
+  (`num_internal - 1`) is loose, tightenable via `l2l_num_levels`, and reports
+  truncation as `l2l_level_overflow`; and the halo exchange is forced onto the
+  `all_gather`-based ragged path, because executing the reverse of
+  `jax.lax.ragged_all_to_all` corrupts every later ragged exchange in the process
+  (`_buffered_ragged_exchange`, and the guard test
+  `test_forward_survives_a_gradient`). Verified on 2 GPUs at N=64: FD-vs-AD 2.7e-08
+  (positions) / 5.9e-09 (masses), `grad(FMM)` vs `grad(direct sum)` 1.1e-03 /
+  4.5e-03 against a 5.9e-03 forward force error. Correct, **not fast**: the reverse
+  costs roughly 6-11x the forward at N=512-8192, with a 3-6 min reverse compile and
+  ~30% run-to-run noise on a shared host. The reverse hotspot is **unprofiled** —
+  tightening `l2l_num_levels` is worth ~6% at N=512 and nothing at N=2048, so it is
+  a correctness knob, not the speed lever. Untested above 2 devices — see
+  `docs/differentiable_fmm_distributed_audit.md` ("What is not covered"). The
+  host-side `distributed_fmm_accelerations` stays non-differentiable (NumPy
+  partition + reassembly).
+- **User guide:** `docs/differentiable_fmm.md`. Engineering history and the
+  measurement record: `docs/differentiable_fmm_audit.md`,
+  `docs/differentiable_fmm_design.md`, and for multi-GPU
+  `docs/differentiable_fmm_distributed_audit.md`.
+- `differentiable_gravitational_acceleration` remains the deliberately differentiable
+  **direct O(N²) sum** — retained as the simple exact-gradient reference and the
+  **gradient oracle** for tests (`grad(FMM)` must match `grad(direct-sum)` to FMM force
+  accuracy), not as "the" differentiable path.
 
 ## 7. Pallas / A100 gating
 
@@ -167,11 +234,61 @@ Pallas GPU kernels require **Ampere+ (sm_80)**; on older GPUs and CPU they are
 auto-gated off and the pure-JAX path runs (CPU CI can still lower Pallas with
 `interpret=True` as a smoke test).
 
+**Backend selection is version-dependent** and funnelled through one place:
+`jaccpot/pallas/_compat.pallas_backend_kwargs`. JAX <= 0.9.0.x took
+`pallas_call(backend="triton")`; 0.9.1 removed that kwarg and infers the backend
+from the `compiler_params` dataclass type instead. The M2L kernels must name
+Triton either way -- Mosaic-GPU rejects them (small per-(pair, coeff) tiles its TMA
+cannot express; fp64 in the complex kernel) -- so the shim raises rather than
+letting a non-Triton request fall through to a default. The near-field and
+treecode kernels already passed `pallas.triton.CompilerParams` and needed no
+change.
+
 - Fused M2L Pallas is gated by `JACCPOT_STATIC_STRICT_FUSED_M2L_PALLAS=1` **and**
-  the hardware support check (`_real_m2l_pallas_active` /
-  `_fused_complex_m2l_pallas_active`, evaluated at trace time).
+  the Ampere+ hardware support check (`_real_m2l_pallas_active` /
+  `_fused_complex_m2l_pallas_active`, evaluated at trace time; both now gate on the
+  fused kernels' own sm_80 support functions).
+- The fused M2L kernels are **differentiable** via module-level `custom_vjp` wrappers
+  (`m2l_{core_z_real,complex_fused,real_fused}_pallas_cvjp`): Pallas forward +
+  reverse. `_apply_{real,complex}_m2l` route through the wrappers, so the same flag
+  enables the fused M2L on both the forward and the `differentiable_accelerations`
+  grad path (PR-2). `pallas_call` itself still has no autodiff rule — the wrapper
+  supplies it. The reverse is a **fully-fused analytic VJP kernel**
+  (`m2l_{real,complex}_fused_vjp_pallas`, default; `JACCPOT_FUSED_M2L_VJP=0` falls back
+  to autodiff of the twin), so both forward and reverse run as single Pallas launches.
 - Nearfield Pallas is resolved from `pallas_nearfield_fused_supported()` into the
-  engine's `use_pallas`.
+  engine's `use_pallas`. Two differentiable near-field lanes exist and they are **not**
+  interchangeable:
+  - `_radix_fast_lane_prepacked_accel_cvjp` (`nearfield/near_field.py`) is the
+    **production** rule: Pallas forward + an analytic O(N) leaf-pair reverse. It is what
+    `JACCPOT_DIFFERENTIABLE_NEARFIELD_FAST_LANE=1` puts on the
+    `differentiable_accelerations` grad path (PR-4), driven by a leaf-major payload
+    that `runtime/_nearfield_fastlane.py` transposes on the host from the radix state's
+    CSR neighbour list. It engages only when the engine's `use_pallas` is on (Ampere+);
+    with `use_pallas=False` the same flag still selects the leaf-major traversal but
+    runs the tiled pure-JAX prepacked kernel under ordinary autodiff — same force,
+    but no O(N) reverse.
+  - `nearfield_fused_leaf_pallas_cvjp` / `nearfield_leafpair_pallas_cvjp`
+    (`pallas/nearfield_fused_leaf.py`, PR-2) are **unit-level VJP oracles**. Their
+    reverse is `jax.vjp` of a dense twin that materialises a `(leaves, W_t, K, 3)`
+    tensor — fine at test scale, ~50 TB at the fiducial large-N config. Keep them for
+    `tests/unit/test_custom_vjp_parity.py`; do not add a second grad-path caller.
+- **fp32 matmul precision is a known accuracy floor in the M2L.** XLA lowers fp32
+  matmuls on Ampere to **TF32** (~10-bit mantissa) by default, and neither M2L
+  basis sets `precision=`. Measured against a float64 reference (real basis, max
+  rel err): 5.7e-04 at order 4, 5.7e-04 at order 6, 5.6e-04 at order 8 —
+  i.e. **~6e-04 regardless of expansion order**, so raising the order past 4 buys
+  nothing in fp32. Under `jax.default_matmul_precision("highest")` the same cases
+  give 1.5e-06 / 2.4e-06 / 1.8e-06 (~300x better). The complex basis behaves the
+  same (3.7e-04 -> 5.6e-08 at order 2). The L2P path *does* set
+  `lax.Precision.HIGHEST` (`downward/local_expansions.py`), so this is an
+  inconsistency rather than a considered trade. Not changed: fixing it moves
+  forward numerics package-wide (the golden oracle would need regenerating) and
+  costs throughput, so it wants a preset-level decision. This floor is also why
+  `tests/integration/test_fmm.py::test_solidfmm_m2l_ignores_padded_compact_far_pairs`
+  compares against a float64 reference with a 2e-03 bound instead of asserting
+  padded == exact — the latter passed on JAX 0.9.x only because both fp32 paths
+  were identically wrong.
 - **Org rule for GPU runs:** select a free GPU with autocvd *before* `import jax`:
   `from autocvd import autocvd; autocvd(num_gpus=1, least_used=True)`.
 

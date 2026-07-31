@@ -153,6 +153,7 @@ All operations are:
 Example usage::
 
     import jax.numpy as jnp
+
     from jaccpot.operators.real_harmonics import (
         p2m_real_direct, m2l_real, evaluate_local_real_with_grad
     )
@@ -195,9 +196,14 @@ from typing import Any, Tuple
 import jax
 import jax.numpy as jnp
 import numpy as np
+from jax import lax
 from jaxtyping import Array, DTypeLike
 
+from jaccpot.operators.dtypes import floor_squared_radius, squared_radius_floor
 from jaccpot.operators.symmetric_tensors import symmetric_multi_indices_3d
+from jaccpot.runtime.grad_options import analytic_l2p_vjp_enabled
+
+from ._precision import highest_matmul_precision
 
 # ===========================================================================
 # Index utilities
@@ -327,17 +333,23 @@ def p2m_real_direct(
     dtype = d.dtype
 
     x, y, z = d[0], d[1], d[2]
-    r2 = jnp.dot(d, d)
-    r = jnp.sqrt(jnp.maximum(r2, 1e-60))
+    r2 = jnp.dot(d, d, precision=lax.Precision.HIGHEST)
+    r = jnp.sqrt(floor_squared_radius(r2))
     rho2 = x * x + y * y
-    rho = jnp.sqrt(jnp.maximum(rho2, 1e-60))
+    rho = jnp.sqrt(floor_squared_radius(rho2))
 
     cos_theta = z / r
     sin_theta = rho / r
 
-    # cos φ = x/ρ, sin φ = y/ρ (with safe handling when rho ~ 0)
-    cos_phi = jnp.where(rho > 1e-30, x / rho, 1.0)
-    sin_phi = jnp.where(rho > 1e-30, y / rho, 0.0)
+    # cos φ = x/ρ, sin φ = y/ρ (with safe handling when rho ~ 0). The degeneracy
+    # test must be the SAME predicate as "the floor was applied", so compare rho2
+    # against the floor rather than rho against a hard-coded sqrt of it: in float64
+    # `rho2 > 1e-60` is exactly the old `rho > 1e-30`, but the old form silently
+    # inverted in float32 (where the 1e-60 floor flushed to zero), picking the
+    # x/rho branch on the z axis and yielding cos_phi=0 instead of the correct 1.0.
+    rho_nonzero = rho2 > squared_radius_floor(rho2.dtype)
+    cos_phi = jnp.where(rho_nonzero, x / rho, 1.0)
+    sin_phi = jnp.where(rho_nonzero, y / rho, 0.0)
 
     # Precompute factorials
     fact = _factorial_table_jax(2 * p, dtype)
@@ -498,17 +510,23 @@ def evaluate_local_real(
     # No sign flip needed - caller provides the correct convention.
 
     x, y, z = d[0], d[1], d[2]
-    r2 = jnp.dot(d, d)
-    r = jnp.sqrt(jnp.maximum(r2, 1e-60))
+    r2 = jnp.dot(d, d, precision=lax.Precision.HIGHEST)
+    r = jnp.sqrt(floor_squared_radius(r2))
     rho2 = x * x + y * y
-    rho = jnp.sqrt(jnp.maximum(rho2, 1e-60))
+    rho = jnp.sqrt(floor_squared_radius(rho2))
 
     cos_theta = z / r
     sin_theta = rho / r
 
-    # cos φ = x/ρ, sin φ = y/ρ (with safe handling when rho ~ 0)
-    cos_phi = jnp.where(rho > 1e-30, x / rho, 1.0)
-    sin_phi = jnp.where(rho > 1e-30, y / rho, 0.0)
+    # cos φ = x/ρ, sin φ = y/ρ (with safe handling when rho ~ 0). The degeneracy
+    # test must be the SAME predicate as "the floor was applied", so compare rho2
+    # against the floor rather than rho against a hard-coded sqrt of it: in float64
+    # `rho2 > 1e-60` is exactly the old `rho > 1e-30`, but the old form silently
+    # inverted in float32 (where the 1e-60 floor flushed to zero), picking the
+    # x/rho branch on the z axis and yielding cos_phi=0 instead of the correct 1.0.
+    rho_nonzero = rho2 > squared_radius_floor(rho2.dtype)
+    cos_phi = jnp.where(rho_nonzero, x / rho, 1.0)
+    sin_phi = jnp.where(rho_nonzero, y / rho, 0.0)
 
     # Precompute factorials
     fact = _factorial_table_jax(2 * p, dtype)
@@ -594,6 +612,81 @@ def evaluate_local_real(
     return total
 
 
+@partial(jax.custom_vjp, nondiff_argnums=(2,))
+def _evaluate_local_real_with_grad_cvjp(
+    local_coeffs: Array, delta: Array, order: int
+) -> tuple[Array, Array]:
+    """``(local_coeffs, delta) -> (grad = ∇_δ φ, potential)`` with a custom
+    reverse rule that avoids the second-order-autodiff blow-up.
+
+    The primal is byte-identical to the ``value_and_grad`` path, so forward
+    outputs (and the golden oracle) are unchanged; only the reverse pass differs.
+    Under an outer ``grad`` the naive reverse differentiates ``value_and_grad``
+    again -- reverse-over-reverse through the per-particle Chebyshev/Legendre/
+    factorial recurrences, the dominant real-basis L2P reverse cost. The custom
+    rule replaces that, per particle, with a single linear coefficient VJP (delta
+    fixed, so no recurrence re-differentiation) plus one Hessian-vector product in
+    delta. It is verified bit-for-bit against autodiff in
+    ``tests/unit/test_custom_vjp_parity.py``.
+    """
+
+    def phi_fn(d: Array) -> Array:
+        return evaluate_local_real(local_coeffs, d, order=order)
+
+    potential, grad = jax.value_and_grad(phi_fn)(delta)
+    return grad, potential
+
+
+def _evaluate_local_real_with_grad_cvjp_fwd(
+    local_coeffs: Array, delta: Array, order: int
+) -> tuple[tuple[Array, Array], tuple[Array, Array]]:
+    def phi_fn(d: Array) -> Array:
+        return evaluate_local_real(local_coeffs, d, order=order)
+
+    potential, grad = jax.value_and_grad(phi_fn)(delta)
+    return (grad, potential), (local_coeffs, delta)
+
+
+def _evaluate_local_real_with_grad_cvjp_bwd(
+    order: int,
+    residual: tuple[Array, Array],
+    cotangents: tuple[Array, Array],
+) -> tuple[Array, Array]:
+    local_coeffs, delta = residual
+    grad_bar, potential_bar = cotangents
+
+    # Coefficient leg: (grad, potential) is linear in the coefficients at fixed
+    # delta, so this VJP is one cheap linear reverse pass (the harmonic
+    # recurrences are constant w.r.t. the coefficients).
+    def _out_of_coeffs(coeffs: Array) -> tuple[Array, Array]:
+        def phi_fn(d: Array) -> Array:
+            return evaluate_local_real(coeffs, d, order=order)
+
+        potential, grad = jax.value_and_grad(phi_fn)(delta)
+        return grad, potential
+
+    _, vjp_coeffs = jax.vjp(_out_of_coeffs, local_coeffs)
+    (local_bar,) = vjp_coeffs((grad_bar, potential_bar))
+
+    # Delta leg: grad = ∇_δ φ, so its VJP is the Hessian-vector product
+    # ∇²φ · grad_bar (forward-over-reverse), plus ∇φ · potential_bar for the
+    # potential output. One HVP per particle -- no reverse-over-reverse.
+    def _grad_phi(d: Array) -> Array:
+        return jax.grad(lambda dd: evaluate_local_real(local_coeffs, dd, order=order))(
+            d
+        )
+
+    primal_grad, hvp = jax.jvp(_grad_phi, (delta,), (grad_bar,))
+    delta_bar = hvp + primal_grad * potential_bar
+    return (local_bar, delta_bar)
+
+
+_evaluate_local_real_with_grad_cvjp.defvjp(
+    _evaluate_local_real_with_grad_cvjp_fwd,
+    _evaluate_local_real_with_grad_cvjp_bwd,
+)
+
+
 @partial(jax.jit, static_argnames=("order",))
 def evaluate_local_real_with_grad(
     local_coeffs: Array,
@@ -632,15 +725,20 @@ def evaluate_local_real_with_grad(
         scalar.
         Note: gradient is ∇φ (not the acceleration -∇φ).
     """
-    p = int(order)
+    # Delegate to the custom_vjp-wrapped kernel: the forward is byte-identical to
+    # value_and_grad(evaluate_local_real), but the reverse uses an analytic-
+    # structured rule (linear coefficient VJP + Hessian-vector product) that
+    # avoids the second-order-autodiff blow-up under an outer grad. The env
+    # switch ``JACCPOT_ANALYTIC_L2P_VJP=0`` restores the plain-autodiff reverse
+    # for A/B measurement (see examples/differentiable_fmm_overhead.py).
+    if analytic_l2p_vjp_enabled():
+        return _evaluate_local_real_with_grad_cvjp(
+            jnp.asarray(local_coeffs), jnp.asarray(delta), int(order)
+        )
 
     def phi_fn(d: Array) -> Array:
-        return evaluate_local_real(local_coeffs, d, order=p)
+        return evaluate_local_real(local_coeffs, d, order=int(order))
 
-    # Note: The gradient returned is with respect to delta.
-    # Since delta = center - eval_point, and center is fixed,
-    # d(delta)/d(eval_point) = -I, so ∇_{eval}φ = -∇_delta φ.
-    # We return ∇_delta φ; caller should negate if needed for force.
     potential, grad = jax.value_and_grad(phi_fn)(delta)
     return grad, potential
 
@@ -869,6 +967,7 @@ def _dehnen_real_Q_full(order: int) -> np.ndarray:
 
 
 @partial(jax.jit, static_argnames=("order",))
+@highest_matmul_precision
 def complex_to_dehnen_real_coeffs(complex_coeffs: Array, *, order: int) -> Array:
     """Convert packed complex solidfmm coefficients to Dehnen no-sqrt2 real ones.
 
@@ -920,6 +1019,7 @@ def _wigner_D_complex(ell: int, alpha: float, beta: float, gamma: float) -> np.n
     return np.array(D_sym.evalf(30).tolist(), dtype=np.complex128)
 
 
+@highest_matmul_precision
 def _real_wigner_rotation(
     ell: int,
     alpha: Array,
@@ -1000,9 +1100,18 @@ def _rotation_to_z_angles(x: Array, y: Array, z: Array) -> tuple[Array, Array, A
     with alpha_z = atan2(y, x) and beta = atan2(rho, z).
     We convert this rotation into ZYZ Euler angles for Wigner-D.
     """
-    rho = jnp.sqrt(x * x + y * y)
-    alpha_z = jnp.arctan2(y, x)
-    beta = jnp.arctan2(rho, z)
+    # NaN-safe (double-where) angles. ``sqrt`` has an infinite reverse grad at 0
+    # and ``arctan2`` a 0/0 grad at the origin; the fixed-topology M2L/L2L reverse
+    # pass genuinely hits zero displacements (single-child COM nodes) and
+    # z-axis-aligned displacements (rho == 0, e.g. lattice-aligned pairs). Guard
+    # those directions so the cotangents stay finite. Forward values are
+    # unchanged (arctan2(0,0)=0, sqrt(0)=0), so the golden oracle is byte-stable.
+    rho_sq = x * x + y * y
+    rho_pos = rho_sq > 0
+    rho = jnp.where(rho_pos, jnp.sqrt(jnp.where(rho_pos, rho_sq, 1.0)), 0.0)
+    alpha_z = jnp.where(rho_pos, jnp.arctan2(y, jnp.where(rho_pos, x, 1.0)), 0.0)
+    r_pos = (rho_sq + z * z) > 0
+    beta = jnp.where(r_pos, jnp.arctan2(rho, jnp.where(r_pos, z, 1.0)), 0.0)
 
     ca = jnp.cos(-alpha_z)
     sa = jnp.sin(-alpha_z)
@@ -1020,14 +1129,28 @@ def _rotation_to_z_angles(x: Array, y: Array, z: Array) -> tuple[Array, Array, A
     R21 = sb * sa
     R22 = cb
 
-    beta_zyz = jnp.arccos(R22)
-    alpha_zyz = jnp.arctan2(R12, R02)
-    gamma_zyz = jnp.arctan2(R21, -R20)
+    # NaN-safe extraction of ZYZ angles. ``arccos`` has an infinite reverse grad
+    # at +/-1 (axis-aligned, sb == 0) and ``arctan2`` a 0/0 grad at the origin
+    # (which both derived angles hit when sb == 0). Guard the poles; forward
+    # values are unchanged (arccos(+/-1) in {0, pi}, arctan2(0,0)=0, and
+    # cos() is already bounded to [-1, 1] so the clip is a no-op for valid input).
+    R22c = jnp.clip(R22, -1.0, 1.0)
+    inside = jnp.abs(R22c) < 1.0
+    beta_zyz = jnp.where(
+        inside,
+        jnp.arccos(jnp.where(inside, R22c, 0.0)),
+        jnp.where(R22c > 0.0, 0.0, jnp.pi),
+    )
+    a_ok = (R02 * R02) > 0  # R12 is identically 0.0
+    alpha_zyz = jnp.where(a_ok, jnp.arctan2(R12, jnp.where(a_ok, R02, 1.0)), 0.0)
+    g_ok = (R21 * R21 + R20 * R20) > 0
+    gamma_zyz = jnp.where(g_ok, jnp.arctan2(R21, jnp.where(g_ok, -R20, 1.0)), 0.0)
 
     return alpha_zyz, beta_zyz, gamma_zyz
 
 
 @lru_cache(maxsize=None)
+@highest_matmul_precision
 def _compute_B_real_dehnen_via_Q(
     ell: int, dtype_key: str
 ) -> Tuple[np.ndarray, np.ndarray]:
@@ -1129,6 +1252,7 @@ def compute_real_B_matrix_multipole(ell: int, *, dtype: DTypeLike) -> Array:
     return jnp.asarray(B_U, dtype=dtype)
 
 
+@highest_matmul_precision
 def verify_real_B_matrix(ell: int, *, dtype: DTypeLike) -> Tuple[bool, float, float]:
     """Verify properties of the real B matrices (both B_T and B_U).
 
@@ -1225,6 +1349,7 @@ def real_Dz_diagonal(ell: int, angle: Array, *, dtype: DTypeLike) -> Array:
     return D
 
 
+@highest_matmul_precision
 def _multipole_align_to_z_block(
     x: Array, y: Array, z: Array, ell: int, *, dtype: DTypeLike
 ) -> Array:
@@ -1244,9 +1369,20 @@ def _multipole_align_to_z_block(
     ``ax = atan2(rho, z)``. In coordinate space ``g = Rx(ax) @ Rz(az)`` whose
     multipole representation is ``B_U @ Dz(-ax) @ B_U @ Dz(az)``.
     """
-    rho = jnp.sqrt(x * x + y * y)
-    az = jnp.arctan2(x, y)
-    ax = jnp.arctan2(rho, z)
+    # NaN-safe (double-where) alignment angles. ``sqrt`` (infinite reverse grad
+    # at 0) and ``arctan2`` (0/0 grad at the origin) would inject NaNs into the
+    # real-basis M2L/L2L reverse pass at the degenerate directions the
+    # fixed-topology FMM hits: zero displacement (single-child COM L2L pairs) and
+    # z-axis-aligned displacement (rho == 0, lattice-aligned M2L pairs). Forward
+    # values are unchanged (arctan2(0,0)=0, sqrt(0)=0), so the golden oracle stays
+    # byte-stable; the azimuth is undefined there and the rotation is a pure polar
+    # turn / identity, so a zero cotangent is the correct subgradient.
+    rho_sq = x * x + y * y
+    rho_pos = rho_sq > 0
+    rho = jnp.where(rho_pos, jnp.sqrt(jnp.where(rho_pos, rho_sq, 1.0)), 0.0)
+    az = jnp.where(rho_pos, jnp.arctan2(jnp.where(rho_pos, x, 1.0), y), 0.0)
+    r_pos = (rho_sq + z * z) > 0
+    ax = jnp.where(r_pos, jnp.arctan2(rho, jnp.where(r_pos, z, 1.0)), 0.0)
     B_U = compute_real_B_matrix_multipole(ell, dtype=dtype)
     return (
         B_U
@@ -1256,14 +1392,26 @@ def _multipole_align_to_z_block(
     )
 
 
+@highest_matmul_precision
 def _multipole_align_from_z_block(
     x: Array, y: Array, z: Array, ell: int, *, dtype: DTypeLike
 ) -> Array:
     """Inverse of :func:`_multipole_align_to_z_block` (multipole z-frame ->
     world). Equals ``Dz(-az) @ B_U @ Dz(ax) @ B_U`` with the same angles."""
-    rho = jnp.sqrt(x * x + y * y)
-    az = jnp.arctan2(x, y)
-    ax = jnp.arctan2(rho, z)
+    # NaN-safe (double-where) alignment angles. ``sqrt`` (infinite reverse grad
+    # at 0) and ``arctan2`` (0/0 grad at the origin) would inject NaNs into the
+    # real-basis M2L/L2L reverse pass at the degenerate directions the
+    # fixed-topology FMM hits: zero displacement (single-child COM L2L pairs) and
+    # z-axis-aligned displacement (rho == 0, lattice-aligned M2L pairs). Forward
+    # values are unchanged (arctan2(0,0)=0, sqrt(0)=0), so the golden oracle stays
+    # byte-stable; the azimuth is undefined there and the rotation is a pure polar
+    # turn / identity, so a zero cotangent is the correct subgradient.
+    rho_sq = x * x + y * y
+    rho_pos = rho_sq > 0
+    rho = jnp.where(rho_pos, jnp.sqrt(jnp.where(rho_pos, rho_sq, 1.0)), 0.0)
+    az = jnp.where(rho_pos, jnp.arctan2(jnp.where(rho_pos, x, 1.0), y), 0.0)
+    r_pos = (rho_sq + z * z) > 0
+    ax = jnp.where(r_pos, jnp.arctan2(rho, jnp.where(r_pos, z, 1.0)), 0.0)
     B_U = compute_real_B_matrix_multipole(ell, dtype=dtype)
     return (
         real_Dz_diagonal(ell, -az, dtype=dtype)
@@ -1618,6 +1766,7 @@ def translate_along_z_l2l_real(
 
 
 @partial(jax.jit, static_argnames=("order",))
+@highest_matmul_precision
 def m2l_a6_real_only(
     multipole: Array,
     delta: Array,
@@ -1639,8 +1788,8 @@ def m2l_a6_real_only(
 
     # Extract delta components
     x, y, z = delta[0], delta[1], delta[2]
-    r2 = jnp.dot(delta, delta)
-    r = jnp.sqrt(jnp.maximum(r2, 1e-60))
+    r2 = jnp.dot(delta, delta, precision=lax.Precision.HIGHEST)
+    r = jnp.sqrt(floor_squared_radius(r2))
 
     # Step 1: Rotate MULTIPOLE into the z-aligned frame.
     M_rotated = jnp.zeros_like(multipole)
@@ -1662,6 +1811,7 @@ def m2l_a6_real_only(
     return out
 
 
+@highest_matmul_precision
 def m2l_a6_real_only_wigner(
     multipole: Array,
     delta: Array,
@@ -1675,8 +1825,8 @@ def m2l_a6_real_only_wigner(
     p = int(order)
 
     x, y, z = delta[0], delta[1], delta[2]
-    r2 = jnp.dot(delta, delta)
-    r = jnp.sqrt(jnp.maximum(r2, 1e-60))
+    r2 = jnp.dot(delta, delta, precision=lax.Precision.HIGHEST)
+    r = jnp.sqrt(floor_squared_radius(r2))
 
     M_rotated = jnp.zeros_like(multipole)
     for ell in range(p + 1):
@@ -1740,6 +1890,7 @@ def m2l_optimized_real(
 
 
 @partial(jax.jit, static_argnames=("order",))
+@highest_matmul_precision
 def m2m_real(
     multipole: Array,
     delta: Array,
@@ -1773,8 +1924,8 @@ def m2m_real(
 
     # Extract delta components
     x, y, z = delta[0], delta[1], delta[2]
-    r2 = jnp.dot(delta, delta)
-    r = jnp.sqrt(jnp.maximum(r2, 1e-60))
+    r2 = jnp.dot(delta, delta, precision=lax.Precision.HIGHEST)
+    r = jnp.sqrt(floor_squared_radius(r2))
 
     # Handle zero displacement case
     # (return original multipole if |delta| ~ 0)
@@ -1802,6 +1953,7 @@ def m2m_real(
 
 
 @partial(jax.jit, static_argnames=("order",))
+@highest_matmul_precision
 def l2l_real(
     local: Array,
     delta: Array,
@@ -1836,8 +1988,8 @@ def l2l_real(
 
     # Extract delta components
     x, y, z = delta[0], delta[1], delta[2]
-    r2 = jnp.dot(delta, delta)
-    r = jnp.sqrt(jnp.maximum(r2, 1e-60))
+    r2 = jnp.dot(delta, delta, precision=lax.Precision.HIGHEST)
+    r = jnp.sqrt(floor_squared_radius(r2))
 
     # Handle zero displacement case
     is_zero = r < 1e-30

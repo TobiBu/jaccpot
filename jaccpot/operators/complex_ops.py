@@ -7,9 +7,11 @@ from functools import lru_cache, partial
 import jax
 import jax.numpy as jnp
 import numpy as np
+from jax import lax
 
+from ._precision import highest_matmul_precision
 from .complex_harmonics import complex_R_solidfmm, complex_R_solidfmm_preserve_dtype
-from .dtypes import complex_dtype_for_real
+from .dtypes import complex_dtype_for_real, floor_squared_radius
 from .real_harmonics import (
     _compute_dehnen_B_matrix_complex,
     sh_offset,
@@ -919,6 +921,7 @@ def _solidfmm_swap_mats(
     return real_mat, imag_mat
 
 
+@highest_matmul_precision
 def _solidfmm_swap_apply(
     re: Array,
     im: Array,
@@ -967,12 +970,25 @@ def _angles_from_delta_solidfmm(delta: Array) -> tuple[Array, Array]:
     so alpha=atan2(x,y), beta=atan2(-rxy,z).
     """
     x, y, z = delta[0], delta[1], delta[2]
-    rho = jnp.sqrt(x * x + y * y)
-    alpha = jnp.arctan2(x, y)
-    beta = jnp.arctan2(-rho, z)
+    # NaN-safe (double-where) angle computation. The forward values are
+    # unchanged for every displacement, but the reverse-mode cotangents stay
+    # finite at the degenerate directions the fixed-topology FMM genuinely hits:
+    #   * zero displacement (COM of a single-child internal node == its child),
+    #   * z-axis-aligned displacement (rho == 0), e.g. lattice-aligned M2L pairs.
+    # At those points ``sqrt`` (infinite grad at 0) and ``arctan2`` (0/0 grad at
+    # the origin) would otherwise inject NaNs into the M2L/L2L reverse pass. The
+    # azimuth is undefined there and the rotation reduces to a pure polar turn /
+    # identity, so returning 0 with a zero cotangent is the correct subgradient.
+    rho_sq = x * x + y * y
+    rho_pos = rho_sq > 0
+    rho = jnp.where(rho_pos, jnp.sqrt(jnp.where(rho_pos, rho_sq, 1.0)), 0.0)
+    alpha = jnp.where(rho_pos, jnp.arctan2(jnp.where(rho_pos, x, 1.0), y), 0.0)
+    r_pos = (rho_sq + z * z) > 0
+    beta = jnp.where(r_pos, jnp.arctan2(-rho, jnp.where(r_pos, z, 1.0)), 0.0)
     return alpha, beta
 
 
+@highest_matmul_precision
 def _complex_rotation_blocks_to_z_solidfmm(
     delta: Array,
     *,
@@ -1000,6 +1016,7 @@ def _complex_rotation_blocks_to_z_solidfmm(
     return tuple(blocks)
 
 
+@highest_matmul_precision
 def _complex_rotation_blocks_from_z_solidfmm(
     delta: Array,
     *,
@@ -1156,7 +1173,9 @@ def _apply_complex_rotation_blocks_batched(
     dtype = coeffs.dtype
     blocks_array = _blocks_to_padded_array(blocks, order=p, dtype=dtype)
     packed = _pack_coeffs_by_ell(coeffs, order=p)
-    rotated = jnp.einsum("bij,bj->bi", blocks_array, packed)
+    rotated = jnp.einsum(
+        "bij,bj->bi", blocks_array, packed, precision=lax.Precision.HIGHEST
+    )
     return _unpack_coeffs_by_ell(rotated, order=p)
 
 
@@ -1169,7 +1188,9 @@ def _apply_complex_rotation_blocks_padded_batch(
 ) -> Array:
     """Apply padded rotation blocks to a batch of coefficients."""
     packed = jax.vmap(lambda c: _pack_coeffs_by_ell(c, order=order))(coeffs)
-    rotated = jnp.einsum("nbij,nbj->nbi", blocks_array, packed)
+    rotated = jnp.einsum(
+        "nbij,nbj->nbi", blocks_array, packed, precision=lax.Precision.HIGHEST
+    )
     return jax.vmap(lambda c: _unpack_coeffs_by_ell(c, order=order))(rotated)
 
 
@@ -1240,7 +1261,9 @@ def m2m_complex(
     multipole = jnp.asarray(multipole)
     delta = jnp.asarray(delta)
 
-    r = jnp.sqrt(jnp.maximum(jnp.dot(delta, delta), 1e-60))
+    r = jnp.sqrt(
+        floor_squared_radius(jnp.dot(delta, delta, precision=lax.Precision.HIGHEST))
+    )
     M_rot = rotate_complex_multipole_to_z_solidfmm(multipole, delta, order=p)
     M_z = translate_along_z_m2m_complex_solidfmm(M_rot, r, order=p)
     return rotate_complex_multipole_from_z_solidfmm(M_z, delta, order=p)
@@ -1261,7 +1284,9 @@ def l2l_complex(
     local = jnp.asarray(local)
     delta = jnp.asarray(delta)
 
-    r = jnp.sqrt(jnp.maximum(jnp.dot(delta, delta), 1e-60))
+    r = jnp.sqrt(
+        floor_squared_radius(jnp.dot(delta, delta, precision=lax.Precision.HIGHEST))
+    )
     L_rot = rotate_complex_local_to_z_solidfmm(local, delta, order=p)
     L_z = translate_along_z_l2l_complex(L_rot, r, order=p)
     return rotate_complex_local_from_z_solidfmm(L_z, delta, order=p)
@@ -1286,7 +1311,9 @@ def m2l_complex_reference(
 
     M_rotated = rotate_complex_multipole_to_z_solidfmm(multipole, delta, order=p)
 
-    r = jnp.sqrt(jnp.maximum(jnp.dot(delta, delta), 1e-60))
+    r = jnp.sqrt(
+        floor_squared_radius(jnp.dot(delta, delta, precision=lax.Precision.HIGHEST))
+    )
     local_z = translate_along_z_m2l_complex(M_rotated, r, order=p)
 
     return rotate_complex_local_from_z_solidfmm(local_z, delta, order=p)
@@ -1324,7 +1351,7 @@ def m2l_complex_reference_batch_cached_blocks(
         blocks_to_z,
         order=p,
     )
-    r = jnp.sqrt(jnp.maximum(jnp.sum(deltas * deltas, axis=1), 1e-60))
+    r = jnp.sqrt(floor_squared_radius(jnp.sum(deltas * deltas, axis=1)))
     local_z = translate_along_z_m2l_complex_batch(M_rot, r, order=p)
     return _apply_complex_rotation_blocks_padded_batch(
         local_z,

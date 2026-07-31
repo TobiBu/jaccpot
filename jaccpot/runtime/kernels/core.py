@@ -78,6 +78,7 @@ from jaccpot.operators.real_harmonics import (
     sh_size,
 )
 from jaccpot.operators.symmetric_tensors import component_lift_index_map_3d
+from jaccpot.runtime.grad_options import fused_m2l_pallas_enabled
 from jaccpot.upward.tree_expansions import TreeUpwardData
 
 from .._octree_adapter import OctreeExecutionData
@@ -1519,21 +1520,23 @@ def _m2l_real_batch_kernel(
 def _real_m2l_pallas_active() -> bool:
     """Whether to route the real-basis M2L z-core through the Pallas kernel.
 
-    Gated by ``JACCPOT_STATIC_STRICT_FUSED_M2L_PALLAS`` and the sm_80+ real-M2L
-    support check (falls back to the pure-JAX rot-scale otherwise). Trace-time;
-    the flag does not change within a compiled run.
+    Gated by ``JACCPOT_STATIC_STRICT_FUSED_M2L_PALLAS`` and the sm_80+ support
+    check for the FUSED real kernel this routes to (falls back to the pure-JAX
+    rot-scale otherwise). Trace-time; the flag does not change within a compiled
+    run.
+
+    Uses :func:`pallas_m2l_real_fused_supported` (the gate for the kernel actually
+    dispatched, :func:`_m2l_real_batch_kernel_fused_pallas`), which requires
+    Ampere+ (sm_80) -- matching the complex gate. The z-core
+    ``pallas_m2l_real_supported`` used previously only checks gpu/tpu, so it would
+    route to Pallas on a pre-Ampere GPU where the Triton lowering fails.
     """
-    flag = (
-        str(os.environ.get("JACCPOT_STATIC_STRICT_FUSED_M2L_PALLAS", "0"))
-        .strip()
-        .lower()
-    )
-    if flag not in {"1", "true", "yes", "on"}:
+    if not fused_m2l_pallas_enabled():
         return False
     try:
-        from jaccpot.pallas.m2l_core_z_real import pallas_m2l_real_supported
+        from jaccpot.pallas.m2l_real_fused import pallas_m2l_real_fused_supported
 
-        return bool(pallas_m2l_real_supported())
+        return bool(pallas_m2l_real_fused_supported())
     except Exception:
         return False
 
@@ -1554,7 +1557,7 @@ def _m2l_real_batch_kernel_fused_pallas(
         real_rotation_blocks_from_z_local_batch,
         real_rotation_blocks_to_z_multipole_batch,
     )
-    from jaccpot.pallas.m2l_real_fused import m2l_real_fused_pallas
+    from jaccpot.pallas.m2l_real_fused import m2l_real_fused_pallas_cvjp
 
     r = jnp.linalg.norm(deltas, axis=1)
     bto = real_rotation_blocks_to_z_multipole_batch(
@@ -1563,7 +1566,9 @@ def _m2l_real_batch_kernel_fused_pallas(
     bfr = real_rotation_blocks_from_z_local_batch(
         deltas, order=order, dtype=multipoles.dtype
     )
-    return m2l_real_fused_pallas(multipoles, bto, bfr, r, order=order)
+    # custom_vjp wrapper (forward == raw kernel) so this fused path is also
+    # differentiable; see the complex counterpart above.
+    return m2l_real_fused_pallas_cvjp(multipoles, bto, bfr, r, order, False, "triton")
 
 
 def _apply_real_m2l(src_mult, deltas, *, order, m2l_impl):
@@ -1603,12 +1608,7 @@ def _fused_complex_m2l_pallas_active() -> bool:
     bool
         ``True`` when the flag is set and an Ampere+ GPU is available.
     """
-    flag = (
-        str(os.environ.get("JACCPOT_STATIC_STRICT_FUSED_M2L_PALLAS", "0"))
-        .strip()
-        .lower()
-    )
-    if flag not in {"1", "true", "yes", "on"}:
+    if not fused_m2l_pallas_enabled():
         return False
     try:
         from jaccpot.pallas.m2l_complex_fused import (
@@ -1650,7 +1650,7 @@ def _m2l_complex_batch_kernel_fused_pallas(
     Array
         Complex local contributions ``[N, (p+1)^2]``.
     """
-    from jaccpot.pallas.m2l_complex_fused import m2l_complex_fused_pallas
+    from jaccpot.pallas.m2l_complex_fused import m2l_complex_fused_pallas_cvjp
 
     r = jnp.sqrt(jnp.sum(deltas * deltas, axis=-1))
     blocks_to_z = complex_rotation_blocks_to_z_solidfmm_batch(
@@ -1665,8 +1665,14 @@ def _m2l_complex_batch_kernel_fused_pallas(
         basis="local",
         dtype=src_mult.dtype,
     )
-    return m2l_complex_fused_pallas(
-        src_mult, blocks_to_z, blocks_from_z, r, order=order
+    # Route through the custom_vjp wrapper (not the raw kernel): the forward is
+    # byte-identical to m2l_complex_fused_pallas, but the wrapper carries the
+    # reverse rule (autodiff of the pure-jnp twin) so this fused path is also
+    # differentiable -- required for FastMultipoleMethod.differentiable_accelerations
+    # to run the fast lane. interpret=False, backend="triton" (the runtime always
+    # runs the real Pallas GPU kernel here).
+    return m2l_complex_fused_pallas_cvjp(
+        src_mult, blocks_to_z, blocks_from_z, r, order, False, "triton"
     )
 
 
@@ -1726,6 +1732,59 @@ def _apply_m2l(
     return _apply_complex_m2l(src_mult, deltas, order=order, rotation=rotation)
 
 
+def _m2l_chunk_contributions(
+    multip_packed: Array,
+    centers: Array,
+    src_idx: Array,
+    tgt_idx: Array,
+    valid: Array,
+    *,
+    order: int,
+    basis_mode: str,
+    rotation: Optional[str],
+    m2l_impl: Optional[str],
+    out_dtype: Any,
+) -> Array:
+    """Gather the multipoles/centre displacements for one pair batch, apply the M2L.
+
+    Deliberately takes the loop-invariant arrays plus **index vectors**, not
+    pre-gathered values, so that a caller can wrap it in ``jax.checkpoint`` and
+    have reverse mode retain only these inputs. ``lax.scan``'s partial-eval hoists
+    scan-invariant residuals out of the loop, so ``multip_packed``/``centers`` are
+    counted **once** rather than once per chunk, leaving only two integer index
+    vectors and a mask stacked per chunk.
+
+    That matters a lot. Un-rematerialized, the retained residual is the
+    rotate-to-z / rotate-from-z blocks *and* their bilinear construction
+    intermediates (``D = B_U @ Dz_beta @ B_U @ Dz_alpha`` is bilinear, so the
+    partial products are residuals too, for both directions and both the padded
+    and per-degree forms). Measured with ``bench/audit_reverse_residuals.py``:
+    **28.7 kB per pair** (fp32, order 4) versus ~34 B per pair once
+    rematerialized -- i.e. ~28.7 GB at N=200000, which is what made the reverse
+    pass OOM there.
+
+    The double-``where`` delta guard MUST stay inside this function. Remat re-runs
+    exactly what is enclosed here, so hoisting the guard out would let the
+    *recomputed* ``deltas`` collapse to zero on padded lanes and reintroduce the
+    singular-radius NaN cotangent the guard exists to prevent.
+    """
+    src_mult = multip_packed[src_idx]
+    deltas = centers[tgt_idx] - centers[src_idx]
+    # Invalid/padded pairs collapse to src_idx == tgt_idx == 0, giving a zero
+    # displacement whose M2L rotate-to-z ``norm(delta)`` has a 0/0 (NaN)
+    # reverse-mode cotangent. Substitute a nonzero delta BEFORE the apply; the
+    # contribution is masked to 0 by the caller, so the forward is unchanged.
+    deltas = jnp.where(valid[:, None], deltas, jnp.ones_like(deltas))
+    return _apply_m2l(
+        src_mult,
+        deltas,
+        order=order,
+        basis_mode=basis_mode,
+        rotation=rotation,
+        m2l_impl=m2l_impl,
+    ).astype(out_dtype)
+
+
 @partial(
     jax.jit,
     static_argnames=("order", "basis_mode", "rotation", "m2l_impl", "total_nodes"),
@@ -1756,16 +1815,24 @@ def _accumulate_m2l_fullbatch(
     valid = (idx < active_pair_count) & (src >= 0) & (tgt >= 0)
     safe_src = jnp.where(valid, src, 0)
     safe_tgt = jnp.where(valid, tgt, 0)
-    src_mult = multip_packed[safe_src]
-    deltas = centers[safe_tgt] - centers[safe_src]
-    contribs = _apply_m2l(
-        src_mult,
-        deltas,
+    # Shares the gather + double-where + apply with the chunked scan below via
+    # ``_m2l_chunk_contributions`` so the two paths cannot drift apart (the same
+    # reasoning as ``_pair_accel_pair_terms`` in the near field). NOT wrapped in
+    # ``jax.checkpoint`` here: fullbatch only runs at pair_count <=
+    # _M2L_FULLBATCH_MAX_PAIRS, where the retained blocks are tens of MB, so remat
+    # would buy nothing and would perturb the small-N forward schedule.
+    contribs = _m2l_chunk_contributions(
+        multip_packed,
+        centers,
+        safe_src,
+        safe_tgt,
+        valid,
         order=order,
         basis_mode=basis_mode,
         rotation=rotation,
         m2l_impl=m2l_impl,
-    ).astype(locals_coeffs.dtype)
+        out_dtype=locals_coeffs.dtype,
+    )
     contribs = jnp.where(valid[:, None], contribs, 0)
     return locals_coeffs + jax.ops.segment_sum(contribs, safe_tgt, total_nodes)
 
@@ -1806,6 +1873,35 @@ def _accumulate_m2l_chunked_scan(
     pair_count = src.shape[0]
     starts = jnp.arange(0, pair_count, chunk_size, dtype=INDEX_DTYPE)
 
+    # Rematerialize the M2L apply. Reverse mode retains one residual set per scan
+    # iteration, and un-rematerialized that residual is the rotation blocks plus
+    # their bilinear construction intermediates -- 28.7 kB per pair (fp32, p=4),
+    # i.e. ~28.7 GB at N=200000, which is what made the reverse pass OOM there.
+    # Checkpointing drops it to ~34 B per pair: only two integer index vectors and
+    # a mask are stacked, while the scan-invariant multipoles/centres are hoisted
+    # out and counted once (see ``_m2l_chunk_contributions``).
+    #
+    # The wrapper sits OUTSIDE ``_apply_m2l``, which also fixes the fused-Pallas
+    # M2L lane: that kernel's ``custom_vjp`` saves the blocks as its residual, and
+    # being inside the recomputed region means that residual is discarded too.
+    # Statics are captured by closure rather than passed through
+    # ``jax.checkpoint``, which flattens (args, kwargs) and would trace them.
+    def _m2l_chunk_apply(multip, cent, src_idx, tgt_idx, valid_mask):
+        return _m2l_chunk_contributions(
+            multip,
+            cent,
+            src_idx,
+            tgt_idx,
+            valid_mask,
+            order=order,
+            basis_mode=basis_mode,
+            rotation=rotation,
+            m2l_impl=m2l_impl,
+            out_dtype=locals_coeffs.dtype,
+        )
+
+    _m2l_chunk = jax.checkpoint(_m2l_chunk_apply)
+
     def body(local_accum: Array, start_idx: Array) -> tuple[Array, None]:
         def active_chunk(accum: Array) -> Array:
             offset = jnp.arange(chunk_size, dtype=INDEX_DTYPE)
@@ -1822,16 +1918,8 @@ def _accumulate_m2l_chunked_scan(
             )
             src_chunk = jnp.where(valid, src_chunk_raw, 0)
             tgt_chunk = jnp.where(valid, tgt_chunk_raw, 0)
-            src_mult = multip_packed[src_chunk]
-            deltas = centers[tgt_chunk] - centers[src_chunk]
-            contribs = _apply_m2l(
-                src_mult,
-                deltas,
-                order=order,
-                basis_mode=basis_mode,
-                rotation=rotation,
-                m2l_impl=m2l_impl,
-            ).astype(locals_coeffs.dtype)
+            # Gather + double-where guard + M2L apply, rematerialized (see above).
+            contribs = _m2l_chunk(multip_packed, centers, src_chunk, tgt_chunk, valid)
             return _chunk_segment_scatter_add(
                 accum,
                 contribs,
@@ -1901,6 +1989,7 @@ def _propagate_solidfmm_locals_to_children(
         "basis_mode",
         "l2l_grouped",
         "mm_class_capacity",
+        "num_levels",
     ),
     donate_argnums=(0,),
 )
@@ -1917,6 +2006,7 @@ def _propagate_solidfmm_locals_by_level(
     basis_mode: str = "complex",
     l2l_grouped: bool = False,
     mm_class_capacity: int = 512,
+    num_levels: Optional[int] = None,
 ) -> Array:
     """Top-down, level-by-level L2L cascade over a binary tree.
 
@@ -1943,7 +2033,14 @@ def _propagate_solidfmm_locals_by_level(
     parent_levels = node_levels[:num_internal].astype(INDEX_DTYPE)
     parent_idx = jnp.arange(num_internal, dtype=INDEX_DTYPE)
     parent_rep = jnp.concatenate([parent_idx, parent_idx], axis=0)
-    max_level = jnp.max(parent_levels)
+    # ``num_levels`` (the max node level) is pure tree topology. When a caller
+    # that holds the tree concretely passes it as a static int, use it as the
+    # loop bound so the level cascade runs with STATIC ``fori_loop`` bounds --
+    # required for reverse-mode autodiff, which rejects ``fori_loop`` with
+    # dynamic start/stop. Falls back to the dynamic device reduction when it is
+    # unknown; numerics are identical either way (the loop performs exactly
+    # ``max_level + 1`` iterations regardless of how the bound is obtained).
+    max_level = int(num_levels) if num_levels is not None else jnp.max(parent_levels)
     minus_one = jnp.asarray(-1, dtype=left_internal.dtype)
 
     # GROUPED/CACHED real L2L: the parent->child displacement set is FIXED by the tree, so
@@ -1977,6 +2074,46 @@ def _propagate_solidfmm_locals_by_level(
             l2l_disp, order=order, dtype=rdt
         )[l2l_cls]
 
+    def _l2l_level_apply(
+        state_in: Array,
+        centers_all: Array,
+        safe_child: Array,
+        valid: Array,
+    ) -> Array:
+        """Gather one level's parents, L2L-translate them onto their children.
+
+        Wrapped in ``jax.checkpoint`` below so reverse mode retains only these
+        inputs. Un-rematerialized the level cascade keeps every level's rotation
+        blocks and their bilinear construction intermediates -- measured at
+        **14.2 kB per (level x node)** by ``bench/audit_reverse_residuals.py``,
+        i.e. ``depth x nodes`` and 5.4 GB at N=1048576. ``centers_all`` is
+        loop-invariant so it is hoisted and counted once.
+
+        L2L uses the old_center - new_center (parent - child) displacement in BOTH
+        bases. The complex path previously used child - parent here, which is the
+        wrong sign: the far field was left uncorrected in proportion to the
+        cascade depth, capping accuracy (~3e-3 at theta>=0.5) regardless of
+        expansion order, while looking fine at small theta where the cascade is
+        shallow.
+        """
+        parent_coeffs = state_in[parent_rep]
+        deltas = centers_all[parent_rep] - centers_all[safe_child]
+        if use_grouped_l2l:
+            translated = l2l_rot_scale_real_batch_cached_blocks(
+                parent_coeffs, deltas, l2l_bt, l2l_bf, order=order
+            ).astype(state_in.dtype)
+        elif real_basis:
+            translated = _l2l_real_batch_kernel(
+                parent_coeffs, deltas, order=order
+            ).astype(state_in.dtype)
+        else:
+            translated = _l2l_complex_batch_kernel(
+                parent_coeffs, deltas, order=order, rotation=rotation
+            ).astype(state_in.dtype)
+        return jnp.where(valid[:, None], translated, 0)
+
+    _l2l_level = jax.checkpoint(_l2l_level_apply)
+
     def level_body(level: Array, state: Array) -> Array:
         active = parent_levels == level
         lc = jnp.where(active, left_internal, minus_one)
@@ -1984,27 +2121,8 @@ def _propagate_solidfmm_locals_by_level(
         child_idx = jnp.concatenate([lc, rc], axis=0)
         valid = child_idx >= 0
         safe_child = jnp.where(valid, child_idx, 0)
-        parent_coeffs = state[parent_rep]
-        # L2L uses the old_center - new_center (parent - child) displacement in
-        # BOTH bases. The complex path previously used child - parent here,
-        # which is the wrong sign: the far field was left uncorrected in
-        # proportion to the cascade depth, capping accuracy (~3e-3 at
-        # theta>=0.5) regardless of expansion order, while looking fine at small
-        # theta where the L2L cascade is shallow.
-        deltas = centers[parent_rep] - centers[safe_child]
-        if use_grouped_l2l:
-            translated = l2l_rot_scale_real_batch_cached_blocks(
-                parent_coeffs, deltas, l2l_bt, l2l_bf, order=order
-            ).astype(state.dtype)
-        elif real_basis:
-            translated = _l2l_real_batch_kernel(
-                parent_coeffs, deltas, order=order
-            ).astype(state.dtype)
-        else:
-            translated = _l2l_complex_batch_kernel(
-                parent_coeffs, deltas, order=order, rotation=rotation
-            ).astype(state.dtype)
-        translated = jnp.where(valid[:, None], translated, 0)
+        # Gather + translate + mask, rematerialized (see ``_l2l_level_apply``).
+        translated = _l2l_level(state, centers, safe_child, valid)
         updates = jax.ops.segment_sum(translated, safe_child, total_nodes)
         return state + updates
 
@@ -2246,6 +2364,24 @@ def _prepare_solidfmm_downward_sweep(
         left_child = child_inputs.left_child
         right_child = child_inputs.right_child
         node_levels = get_node_levels(tree)
+        # Resolve the max node level to a STATIC int when the tree is held
+        # concretely (e.g. the fixed-topology differentiable re-eval, where the
+        # tree is a captured constant), so the L2L level cascade uses static
+        # ``fori_loop`` bounds and is reverse-mode differentiable. When
+        # ``node_levels`` is a tracer (jitted tree/traversal), fall back to the
+        # kernel's internal dynamic reduction -- numerics are identical.
+        if isinstance(node_levels, jax.core.Tracer):
+            l2l_num_levels: Optional[int] = None
+        else:
+            # ``node_levels`` is concrete here, but under an outer ``jax.jit`` any
+            # jnp op on it (even a slice) is staged into the jaxpr and cannot be
+            # read by ``int()``. Pull the whole array to the host FIRST, then
+            # slice + reduce in numpy, so the level count is a plain Python int in
+            # every trace context (mirrors ``_resolve_upward_num_levels``).
+            node_levels_host = jax.device_get(node_levels)
+            l2l_num_levels = int(
+                node_levels_host[: child_inputs.num_internal_nodes].max()
+            )
         stage_t0 = time.perf_counter()
         locals_updated = _propagate_solidfmm_locals_by_level(
             locals_updated,
@@ -2257,6 +2393,7 @@ def _prepare_solidfmm_downward_sweep(
             rotation=rotation_mode,
             total_nodes=total_nodes,
             basis_mode=basis_mode,
+            num_levels=l2l_num_levels,
         )
         locals_updated = _record_timed_array(
             "_refresh_timing_dual_l2l_compute_seconds",
@@ -2305,6 +2442,7 @@ def _prepare_solidfmm_downward_sweep(
                 rotation=rotation_mode,
                 total_nodes=total_nodes,
                 basis_mode=basis_mode,
+                num_levels=l2l_num_levels,
             )
             source_motion_locals_updated = _record_timed_array(
                 "_refresh_timing_dual_source_motion_seconds",
@@ -2662,13 +2800,22 @@ def _evaluate_prepared_tree(
     return_potential: bool,
     jit_traversal: bool,
     max_acc_derivative_order: int = 0,
+    nearfield_mode_override: Optional[str] = None,
+    nearfield_reverse_options: Optional[Any] = None,
 ) -> Union[
     Array,
     Tuple[Array, Array],
     Tuple[Array, PackedAccelerationDerivatives],
     Tuple[Array, Array, PackedAccelerationDerivatives],
 ]:
-    """Run the prepared-tree evaluation returning Morton-sorted outputs."""
+    """Run the prepared-tree evaluation returning Morton-sorted outputs.
+
+    ``nearfield_mode_override`` forces the near-field mode (the differentiable
+    path passes ``"bucketed"`` or ``"fast_lane"``); ``None`` keeps the resolved
+    policy. ``nearfield_reverse_options`` carries the grad path's resolved
+    reverse-pass tuning down to the leaf-major lane; it is inert on every other
+    mode and ``None`` everywhere except the differentiable seam.
+    """
 
     if int(max_acc_derivative_order) > 0:
         nearfield_mode = fmm._resolve_nearfield_mode(
@@ -2726,10 +2873,16 @@ def _evaluate_prepared_tree(
             return near_acc + far_acc, near_pot + far_pot, acc_derivatives
         return near + far_acc, acc_derivatives
 
+    # Only the non-compiled evaluate_tree accepts a near-field mode override;
+    # the compiled traversal resolves its own policy. The differentiable path
+    # uses jit_traversal=False, so the override reaches the near-field there.
+    extra_kwargs = {}
     if jit_traversal:
         evaluate_fn = fmm.evaluate_tree_compiled
     else:
         evaluate_fn = fmm.evaluate_tree
+        extra_kwargs["nearfield_mode_override"] = nearfield_mode_override
+        extra_kwargs["nearfield_reverse_options"] = nearfield_reverse_options
 
     return evaluate_fn(
         tree,
@@ -2749,6 +2902,7 @@ def _evaluate_prepared_tree(
         precomputed_chunk_unique_indices=nearfield_chunk_unique_indices,
         max_leaf_size=max_leaf_size,
         return_potential=return_potential,
+        **extra_kwargs,
     )
 
 

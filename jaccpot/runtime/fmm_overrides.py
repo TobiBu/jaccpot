@@ -402,10 +402,34 @@ class OverridesMixin:
         if static_runtime_fixed_sizing:
             # Static sizing mode: keep traversal/chunk execution knobs fixed to
             # constructor/global-input values and skip adaptive runtime rewrites.
+            if not self._explicit_grouped_interactions:
+                # Auto-enabling the grouped/class-major M2L above is itself an
+                # adaptive rewrite, so static sizing must not inherit it. It used
+                # to leak through at n >= _GPU_LARGE_PARTICLE_THRESHOLD and left
+                # two invariants broken: ``farfield_mode`` stayed at "auto" (the
+                # grouped branch of _solidfmm_downward_accumulate_from_multipoles
+                # rejects that, so prepare_state/compute_accelerations raised), and
+                # it was decoupled from the geometric centres the grouped
+                # classification requires -- that path quantises pair
+                # displacements onto a lattice and applies ONE representative
+                # displacement per class, which is only valid with
+                # ``center_mode="aabb"`` (see the adaptive branch below).
+                grouped_interactions = False
             if self.streamed_far_pairs and grouped_interactions:
                 grouped_interactions = False
-                farfield_mode = "pair_grouped"
-            if not grouped_interactions:
+            if grouped_interactions:
+                center_mode = "aabb"
+                if farfield_mode == "auto":
+                    farfield_mode = (
+                        "pair_grouped"
+                        if minimum_memory
+                        else (
+                            "class_major"
+                            if (class_major_cpu or class_major_gpu)
+                            else "pair_grouped"
+                        )
+                    )
+            else:
                 farfield_mode = "pair_grouped"
             # Deterministic GPU memory-safety traversal caps are NOT adaptive
             # rewrites -- they bound the streamed GPU traversal buffers on the

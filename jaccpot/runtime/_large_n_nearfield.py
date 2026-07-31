@@ -375,10 +375,27 @@ def evaluate_large_n_nearfield_fast_lane(
     state: LargeNPreparedState,
     *,
     return_potential: bool,
+    positions_sorted: Any = None,
+    masses_sorted: Any = None,
+    differentiable: bool = False,
 ) -> Any:
-    """Evaluate the radix fast-lane nearfield path (payload-driven)."""
+    """Evaluate the radix fast-lane nearfield path (payload-driven).
+
+    ``positions_sorted`` / ``masses_sorted`` override the prepared state's frozen
+    arrays so a gradient path can evaluate at LIVE inputs on a frozen topology;
+    both default to the state's own arrays, so production callers are unaffected.
+    ``differentiable`` routes the fused Pallas lanes through their ``custom_vjp``
+    wrappers (``pallas_call`` itself has no autodiff rule).
+    """
 
     use_pallas = bool(getattr(fmm, "use_pallas", False))
+    # Resolve once: every read below goes through these, never through the state,
+    # so a live-input gradient evaluation cannot silently pick up frozen arrays
+    # for part of the near field (which would be a subtly wrong gradient).
+    live_positions = (
+        state.positions_sorted if positions_sorted is None else positions_sorted
+    )
+    live_masses = state.masses_sorted if masses_sorted is None else masses_sorted
 
     if bool(return_potential):
         # Fused Pallas potential fast lane: only for the clean case with no
@@ -401,15 +418,15 @@ def evaluate_large_n_nearfield_fast_lane(
             if pallas_nearfield_fused_supported():
                 diag_mode_pot = normalize_large_n_nearfield_diag_mode()
                 if diag_mode_pot == "zero":
-                    zeros_acc = jnp.zeros_like(state.positions_sorted)
+                    zeros_acc = jnp.zeros_like(live_positions)
                     zeros_pot = jnp.zeros(
-                        state.positions_sorted.shape[:1],
-                        dtype=state.positions_sorted.dtype,
+                        live_positions.shape[:1],
+                        dtype=live_positions.dtype,
                     )
                     return zeros_acc, zeros_pot
                 return compute_leaf_p2p_accelerations_radix_fast_lane(
-                    positions_sorted=state.positions_sorted,
-                    masses_sorted=state.masses_sorted,
+                    positions_sorted=live_positions,
+                    masses_sorted=live_masses,
                     payload=state.radix_fast_payload,
                     G=getattr(fmm, "G"),
                     softening=float(getattr(fmm, "softening")),
@@ -429,8 +446,8 @@ def evaluate_large_n_nearfield_fast_lane(
         return compute_leaf_p2p_accelerations(
             state.tree,
             state.neighbor_list,
-            state.positions_sorted,
-            state.masses_sorted,
+            live_positions,
+            live_masses,
             G=getattr(fmm, "G"),
             softening=float(getattr(fmm, "softening")),
             max_leaf_size=int(state.max_leaf_size),
@@ -449,29 +466,30 @@ def evaluate_large_n_nearfield_fast_lane(
 
     diag_mode = normalize_large_n_nearfield_diag_mode()
     if diag_mode == "zero":
-        return jnp.zeros_like(state.positions_sorted)
+        return jnp.zeros_like(live_positions)
 
     if state.radix_fast_payload is None:
         raise RuntimeError(
             "radix fast-lane evaluate requires radix_fast_payload to be present"
         )
 
-    near_acc = jnp.zeros_like(state.positions_sorted)
+    near_acc = jnp.zeros_like(live_positions)
     if diag_mode != "overflow_only":
         near_acc = compute_leaf_p2p_accelerations_radix_fast_lane(
-            positions_sorted=state.positions_sorted,
-            masses_sorted=state.masses_sorted,
+            positions_sorted=live_positions,
+            masses_sorted=live_masses,
             payload=state.radix_fast_payload,
             G=getattr(fmm, "G"),
             softening=float(getattr(fmm, "softening")),
             return_potential=False,
             use_pallas=use_pallas,
+            differentiable=differentiable,
         )
     overflow_payload = getattr(state, "radix_overflow_payload", None)
     if overflow_payload is not None and diag_mode in ("full", "overflow_only"):
         return near_acc + compute_leaf_p2p_accelerations_radix_payload_pairs_only(
-            positions_sorted=state.positions_sorted,
-            masses_sorted=state.masses_sorted,
+            positions_sorted=live_positions,
+            masses_sorted=live_masses,
             payload=overflow_payload,
             G=getattr(fmm, "G"),
             softening=float(getattr(fmm, "softening")),
@@ -489,8 +507,8 @@ def evaluate_large_n_nearfield_fast_lane(
         return near_acc
 
     overflow_acc = compute_leaf_p2p_accelerations_target_block_pairs_only(
-        state.positions_sorted,
-        state.masses_sorted,
+        live_positions,
+        live_masses,
         state.nearfield_leaf_particle_indices,
         state.nearfield_leaf_particle_mask,
         state.nearfield_target_block_offsets,

@@ -67,6 +67,43 @@ def pytest_collection_modifyitems(config, items):
             item.add_marker(slow)
 
 
+# --- Bound peak memory of the differentiable-FMM tests ----------------------
+# `jax.grad` of the fixed-topology FMM (differentiable_accelerations) compiles a
+# large reverse-mode XLA program, and each distinct (basis, order, N, tree)
+# config leaves its executable in JAX's *in-process* compilation cache. Across a
+# long-lived `pytest-xdist` worker these accumulate -- the three differentiable
+# modules alone climb to ~4.6 GB, which (stacked on the ~50 `slow` FMM tests the
+# `test-full` job also runs, times two workers) OOM-reclaims the ~7 GB CI runner
+# ("The runner has received a shutdown signal"). Trimming N/order does NOT help:
+# the peak is the retained-executable pile, not the per-test tape. Dropping the
+# in-memory cache after each of these tests holds the added footprint to ~1 GB.
+# The persistent on-disk cache survives `clear_caches()`, so the follow-up
+# recompiles are warm-cache reads; scoped to just these modules so the rest of
+# the suite keeps its warm in-process cache.
+_DIFF_FMM_TEST_FILES = frozenset(
+    {
+        "test_grad_fmm_vs_directsum.py",
+        "test_gradient_correctness.py",
+        "test_custom_vjp_parity.py",
+        "test_nearfield_fastlane_grad_path.py",
+    }
+)
+
+
+@pytest.fixture(autouse=True)
+def _bound_diff_fmm_compile_cache(request):
+    """Free JAX's in-process compiled-executable cache after each heavy
+    differentiable-FMM test (see note above)."""
+    yield
+    if request.node.path.name in _DIFF_FMM_TEST_FILES:
+        import gc
+
+        import jax
+
+        jax.clear_caches()
+        gc.collect()
+
+
 @pytest.fixture(autouse=True)
 def _isolate_process_env(tmp_path):
     """Isolate ``os.environ`` per test to stop env-var leakage across tests.

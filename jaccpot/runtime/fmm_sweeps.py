@@ -120,7 +120,11 @@ class SweepsMixin:
             levels = get_node_levels(tree)
             if isinstance(levels, jax.core.Tracer):
                 return self._static_upward_num_levels
-            self._static_upward_num_levels = int(jnp.max(levels)) + 1
+            # ``levels`` is concrete here (the tracer branch returned above), but
+            # under an outer ``jax.jit`` a ``jnp.max`` would be staged as a
+            # (possibly un-folded) op whose ``int()`` then fails. Reduce on the
+            # host so the depth is a plain Python int in every trace context.
+            self._static_upward_num_levels = int(jax.device_get(levels).max()) + 1
         except Exception:
             return self._static_upward_num_levels
         return self._static_upward_num_levels
