@@ -18,37 +18,33 @@ which is why an earlier p=4-only benchmark produced a spurious negative result.
 Open: steady-state prepare cost is 3.5× (one specific, fixable cause), eq (16b) is not
 implemented, and nothing has been measured at Dehnen's N (10⁵–10⁷).
 
-## READ THIS FIRST: the work is uncommitted
+## Where the work lives
 
-At time of writing: branch `chore/pallas-call-backend-port`, 10 modified files plus
-three untracked directories (`tests/unit/runtime/`, `bench/validation/`, `results/`).
-
-**Commit before doing anything else.** Two reasons:
-
-1. Other commits landed on this branch *during* the session (HEAD moved from `b06e1b2`
-   → `25d2744` → `ce5bd36` while work was in progress), so the branch is being written
-   to concurrently.
-2. A `git reset` mid-session already wiped the working tree once. The changes were
-   recovered from `stash@{0}`, but only because they happened to have been stashed.
+Branch **`fix/dehnen-mass-mac`**, four commits off `ce5bd36` on
+`chore/pallas-call-backend-port`:
 
 ```
- M jaccpot/runtime/_adaptive_policy.py   (+287/-…)  the four fixes + com geometry + theta_max
- M jaccpot/runtime/_fmm_impl.py                    eps guard, mac_theta_max, defaults
- M jaccpot/runtime/_large_n_pipeline.py            large-N decline reason + raise
- M jaccpot/runtime/fmm_derivatives.py    (-13)     deleted unreachable block
- M jaccpot/runtime/fmm_diagnostics.py              large_n_path_declined_reason
- M jaccpot/runtime/fmm_policy.py                   thread G + mac_theta_max
- M jaccpot/runtime/fmm_prepare.py                  raise instead of silent downgrade
- M jaccpot/solver.py                               dehnen_geometry_mode default, mac_theta_max
- M tests/test_adaptive_order_runtime.py            explicit adaptive_eps
- M tests/unit/test_solver_api.py                   explicit adaptive_eps + guard test
-?? tests/unit/runtime/                             3 new test files, 56 cases
-?? bench/validation/                               mac_error_distribution.py
-?? results/validation/                             7 JSON sweep artifacts
+ad34a75  test(api): register mac_theta_max on the frozen facade surface
+796f5cb  bench(mac): error-distribution sweep, measurements, and the four next steps
+eb83875  test(mac): pin Dehnen eqs (12)/(13)/(15)/(16a) and the far/near partition
+96d5a44  fix(mac): correct four defects in the Dehnen mass-dependent MAC
 ```
 
-Regression at time of handoff: `tests/unit` + `tests/characterization` +
-adaptive/force-scale suites → **506 passed, 0 failed**.
+It is branched off the pallas branch rather than `main` deliberately: `main` is 69
+commits behind, and four of the touched files (`_fmm_impl.py`, `fmm_derivatives.py`,
+`fmm_prepare.py`, `solver.py`) differ between `main` and that tip, so the edits were
+authored against the newer versions. Rebasing onto `main` before the pallas work lands
+would need conflict resolution in those four files.
+
+Regression on the final commit: `tests/unit` + `tests/characterization` +
+adaptive/force-scale suites → **0 failures** (exit 0), including the characterization
+goldens. `tests/unit/runtime/` is 56 cases across 18 test functions.
+
+Note for whoever extends the public surface next: `mac_theta_max` had to be registered
+in `EXPECTED_FMM_INIT_KWARGS` (`tests/unit/test_public_api_surface.py`). That
+frozen-surface guard caught the widened constructor on the first full run after the
+change — it is doing its job, so expect to update it deliberately rather than treating
+the failure as noise.
 
 ## What is already done — do not redo
 
