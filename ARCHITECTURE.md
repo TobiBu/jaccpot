@@ -273,6 +273,22 @@ change.
     reverse is `jax.vjp` of a dense twin that materialises a `(leaves, W_t, K, 3)`
     tensor — fine at test scale, ~50 TB at the fiducial large-N config. Keep them for
     `tests/unit/test_custom_vjp_parity.py`; do not add a second grad-path caller.
+- **fp32 matmul precision is a known accuracy floor in the M2L.** XLA lowers fp32
+  matmuls on Ampere to **TF32** (~10-bit mantissa) by default, and neither M2L
+  basis sets `precision=`. Measured against a float64 reference (real basis, max
+  rel err): 5.7e-04 at order 4, 5.7e-04 at order 6, 5.6e-04 at order 8 —
+  i.e. **~6e-04 regardless of expansion order**, so raising the order past 4 buys
+  nothing in fp32. Under `jax.default_matmul_precision("highest")` the same cases
+  give 1.5e-06 / 2.4e-06 / 1.8e-06 (~300x better). The complex basis behaves the
+  same (3.7e-04 -> 5.6e-08 at order 2). The L2P path *does* set
+  `lax.Precision.HIGHEST` (`downward/local_expansions.py`), so this is an
+  inconsistency rather than a considered trade. Not changed: fixing it moves
+  forward numerics package-wide (the golden oracle would need regenerating) and
+  costs throughput, so it wants a preset-level decision. This floor is also why
+  `tests/integration/test_fmm.py::test_solidfmm_m2l_ignores_padded_compact_far_pairs`
+  compares against a float64 reference with a 2e-03 bound instead of asserting
+  padded == exact — the latter passed on JAX 0.9.x only because both fp32 paths
+  were identically wrong.
 - **Org rule for GPU runs:** select a free GPU with autocvd *before* `import jax`:
   `from autocvd import autocvd; autocvd(num_gpus=1, least_used=True)`.
 
