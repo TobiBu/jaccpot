@@ -8,6 +8,7 @@ from typing import NamedTuple, Optional, Union
 import jax
 import jax.numpy as jnp
 from beartype import beartype
+from jax import lax
 from jaxtyping import Array, jaxtyped
 
 
@@ -68,8 +69,10 @@ def compute_expansion(
     )
 
     def quad_compute() -> Array:
-        rr = jnp.einsum("ni,nj,n->ij", rel, rel, masses)
-        r2_sum = jnp.einsum("n->", masses * r2)
+        rr = jnp.einsum(
+            "ni,nj,n->ij", rel, rel, masses, precision=lax.Precision.HIGHEST
+        )
+        r2_sum = jnp.einsum("n->", masses * r2, precision=lax.Precision.HIGHEST)
         return 3.0 * rr - eye3 * r2_sum
 
     quadrupole = jax.lax.cond(
@@ -80,11 +83,19 @@ def compute_expansion(
     )
 
     def oct_compute() -> Array:
-        t3 = jnp.einsum("ni,nj,nk,n->ijk", rel, rel, rel, masses)
+        t3 = jnp.einsum(
+            "ni,nj,nk,n->ijk", rel, rel, rel, masses, precision=lax.Precision.HIGHEST
+        )
         mr2 = masses * r2
-        term_a = jnp.einsum("ij,nk,n->ijk", eye3, rel, mr2)
-        term_b = jnp.einsum("ik,nj,n->ijk", eye3, rel, mr2)
-        term_c = jnp.einsum("jk,ni,n->ijk", eye3, rel, mr2)
+        term_a = jnp.einsum(
+            "ij,nk,n->ijk", eye3, rel, mr2, precision=lax.Precision.HIGHEST
+        )
+        term_b = jnp.einsum(
+            "ik,nj,n->ijk", eye3, rel, mr2, precision=lax.Precision.HIGHEST
+        )
+        term_c = jnp.einsum(
+            "jk,ni,n->ijk", eye3, rel, mr2, precision=lax.Precision.HIGHEST
+        )
         return 5.0 * t3 - (term_a + term_b + term_c)
 
     octupole = jax.lax.cond(
@@ -95,19 +106,39 @@ def compute_expansion(
     )
 
     def hexa_compute() -> Array:
-        t4 = jnp.einsum("ni,nj,nk,nl,n->ijkl", rel, rel, rel, rel, masses)
+        t4 = jnp.einsum(
+            "ni,nj,nk,nl,n->ijkl",
+            rel,
+            rel,
+            rel,
+            rel,
+            masses,
+            precision=lax.Precision.HIGHEST,
+        )
         mr2 = masses * r2
-        term_ij = jnp.einsum("ij,nk,nl,n->ijkl", eye3, rel, rel, mr2)
-        term_ik = jnp.einsum("ik,nj,nl,n->ijkl", eye3, rel, rel, mr2)
-        term_il = jnp.einsum("il,nj,nk,n->ijkl", eye3, rel, rel, mr2)
-        term_jk = jnp.einsum("jk,ni,nl,n->ijkl", eye3, rel, rel, mr2)
-        term_jl = jnp.einsum("jl,ni,nk,n->ijkl", eye3, rel, rel, mr2)
-        term_kl = jnp.einsum("kl,ni,nj,n->ijkl", eye3, rel, rel, mr2)
-        s_r4 = jnp.einsum("n->", masses * (r2 * r2))
+        term_ij = jnp.einsum(
+            "ij,nk,nl,n->ijkl", eye3, rel, rel, mr2, precision=lax.Precision.HIGHEST
+        )
+        term_ik = jnp.einsum(
+            "ik,nj,nl,n->ijkl", eye3, rel, rel, mr2, precision=lax.Precision.HIGHEST
+        )
+        term_il = jnp.einsum(
+            "il,nj,nk,n->ijkl", eye3, rel, rel, mr2, precision=lax.Precision.HIGHEST
+        )
+        term_jk = jnp.einsum(
+            "jk,ni,nl,n->ijkl", eye3, rel, rel, mr2, precision=lax.Precision.HIGHEST
+        )
+        term_jl = jnp.einsum(
+            "jl,ni,nk,n->ijkl", eye3, rel, rel, mr2, precision=lax.Precision.HIGHEST
+        )
+        term_kl = jnp.einsum(
+            "kl,ni,nj,n->ijkl", eye3, rel, rel, mr2, precision=lax.Precision.HIGHEST
+        )
+        s_r4 = jnp.einsum("n->", masses * (r2 * r2), precision=lax.Precision.HIGHEST)
         delta_delta = (
-            jnp.einsum("ij,kl->ijkl", eye3, eye3)
-            + jnp.einsum("ik,jl->ijkl", eye3, eye3)
-            + jnp.einsum("il,jk->ijkl", eye3, eye3)
+            jnp.einsum("ij,kl->ijkl", eye3, eye3, precision=lax.Precision.HIGHEST)
+            + jnp.einsum("ik,jl->ijkl", eye3, eye3, precision=lax.Precision.HIGHEST)
+            + jnp.einsum("il,jk->ijkl", eye3, eye3, precision=lax.Precision.HIGHEST)
         )
         combined_terms = term_ij + term_ik + term_il + term_jk + term_jl + term_kl
         return 35.0 * t4 - 5.0 * combined_terms + s_r4 * delta_delta
@@ -150,21 +181,34 @@ def evaluate_expansion(
 
     def phi_at(x: Array) -> Array:
         r_vec = x - expansion.center
-        r2 = jnp.dot(r_vec, r_vec)
+        r2 = jnp.dot(r_vec, r_vec, precision=lax.Precision.HIGHEST)
         r_soft = jnp.sqrt(r2 + softening * softening)
 
         phi = -G * (expansion.monopole / r_soft)
 
         if order >= 1:
-            d_dot_r = jnp.dot(expansion.dipole, r_vec)
+            d_dot_r = jnp.dot(expansion.dipole, r_vec, precision=lax.Precision.HIGHEST)
             phi = phi + (-G) * d_dot_r / (r_soft**3)
 
         if order >= 2:
-            q_rr = jnp.einsum("ij,i,j->", expansion.quadrupole, r_vec, r_vec)
+            q_rr = jnp.einsum(
+                "ij,i,j->",
+                expansion.quadrupole,
+                r_vec,
+                r_vec,
+                precision=lax.Precision.HIGHEST,
+            )
             phi = phi + (-G) * 0.5 * q_rr / (r_soft**5)
 
         if order >= 3:
-            o_rrr = jnp.einsum("ijk,i,j,k->", expansion.octupole, r_vec, r_vec, r_vec)
+            o_rrr = jnp.einsum(
+                "ijk,i,j,k->",
+                expansion.octupole,
+                r_vec,
+                r_vec,
+                r_vec,
+                precision=lax.Precision.HIGHEST,
+            )
             phi = phi + (-G) * ((1.0 / 6.0) * o_rrr) / (r_soft**7)
 
         if order >= 4:
@@ -175,6 +219,7 @@ def evaluate_expansion(
                 r_vec,
                 r_vec,
                 r_vec,
+                precision=lax.Precision.HIGHEST,
             )
             phi = phi + (-G) * ((1.0 / 24.0) * h_rrrr) / (r_soft**9)
 

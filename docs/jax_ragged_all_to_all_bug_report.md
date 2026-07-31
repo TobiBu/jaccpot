@@ -1,5 +1,28 @@
 # Draft upstream bug report: jit + ragged_all_to_all + grad
 
+> **DO NOT FILE. This is not a JAX bug and is already fixed upstream.** Kept only
+> as the write-up of how it was found and as a regression description.
+>
+> Root cause (established after this draft was written): XLA:GPU
+> `ragged_all_to_all_thunk.cc`. jaxlib 0.9.0.1 pins XLA `bb760b047`, where
+> `RaggedAllToAllStartThunk::Initialize` early-returns on
+> `per_stream_states_.contains(executor)`, so the rendezvous that exchanges peer
+> output-buffer *device addresses* runs only once and caches addresses from the
+> first execution. `Thunk::Initialize` does run every execution with fresh
+> `buffer_allocations`, so after allocator churn -- such as running a gradient --
+> the one-shot kernel P2P-writes into stale addresses and the real output buffer
+> keeps its fill value. Introduced in XLA `bf4fd02e5a` (2026-01-15), fixed in
+> `4e0cc7e356` (2026-02-06, "Re-runs the Rendezvous every time Initialize is
+> called"). jaxlib 0.9.0.1 sits in that ~3-week window; jax 0.9.1 and later are
+> clean, which is what `JAX_RAGGED_GRAD_FIXED_VERSION` encodes.
+>
+> It needs GPU peer access (`should_use_one_shot_kernel`), so it reproduces on
+> A100-PCIE but **not** on a box without P2P -- a CLEAN result there proves
+> nothing. Workaround without upgrading:
+> `XLA_FLAGS=--xla_gpu_unsupported_use_ragged_all_to_all_one_shot_kernel=false`.
+>
+> JAX's autodiff rules for the collective are fine.
+
 Outbound draft for <https://github.com/jax-ml/jax/issues>, not project
 documentation. Paste as-is (trim to taste); the reproducer is
 `bench/repro_jax_ragged_all_to_all_grad.py`. Background and how it was found:

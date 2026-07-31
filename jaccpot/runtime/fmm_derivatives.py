@@ -12,6 +12,7 @@ import jax
 import jax.numpy as jnp
 from beartype import beartype
 from beartype.typing import Tuple
+from jax import lax
 from jaxtyping import Array, jaxtyped
 from yggdrax.geometry import compute_tree_geometry
 from yggdrax.tree_moments import compute_tree_mass_moments
@@ -312,7 +313,9 @@ class DerivativesMixin:
                 if resolved_target_indices is None
                 else vel_arr[resolved_target_indices]
             )
-            far_convective_jerk = jnp.einsum("nij,nj->ni", acc_jac, vel_targets)
+            far_convective_jerk = jnp.einsum(
+                "nij,nj->ni", acc_jac, vel_targets, precision=lax.Precision.HIGHEST
+            )
             far_source_motion_jerk = (
                 self._evaluate_farfield_time_derivative_orders(
                     state=state,
@@ -348,7 +351,9 @@ class DerivativesMixin:
             if resolved_target_indices is None
             else vel_arr[resolved_target_indices]
         )
-        far_jerk = jnp.einsum("nij,nj->ni", acc_jac, vel_targets)
+        far_jerk = jnp.einsum(
+            "nij,nj->ni", acc_jac, vel_targets, precision=lax.Precision.HIGHEST
+        )
 
         near_jerk = self._evaluate_target_nearfield_jerk(
             state=state,

@@ -17,6 +17,7 @@ from typing import Tuple
 import jax.numpy as jnp
 import numpy as np
 
+from ._precision import highest_matmul_precision
 from .real_harmonics import (
     _compute_dehnen_B_matrix_complex,
     build_Q_dehnen_no_sqrt2,
@@ -48,18 +49,21 @@ def _angles_from_delta(delta: np.ndarray) -> Tuple[float, float]:
     return alpha, beta
 
 
+@highest_matmul_precision
 def _real_block_to_complex(block_real: np.ndarray, ell: int) -> np.ndarray:
     Q = build_Q_dehnen_no_sqrt2(ell)
     Q_inv = np.linalg.inv(Q)
     return Q_inv @ block_real
 
 
+@highest_matmul_precision
 def _complex_block_to_real(block_complex: np.ndarray, ell: int) -> np.ndarray:
     Q = build_Q_dehnen_no_sqrt2(ell)
     block_real = Q @ block_complex
     return np.real(block_real)
 
 
+@highest_matmul_precision
 def _rotate_multipole_to_z(
     block_complex: np.ndarray, delta: np.ndarray, ell: int
 ) -> np.ndarray:
@@ -72,6 +76,7 @@ def _rotate_multipole_to_z(
     return D @ block_complex
 
 
+@highest_matmul_precision
 def _rotate_local_from_z(
     block_complex: np.ndarray, delta: np.ndarray, ell: int
 ) -> np.ndarray:

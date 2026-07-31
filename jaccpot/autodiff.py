@@ -6,6 +6,7 @@ from typing import Optional, Tuple
 
 import jax
 import jax.numpy as jnp
+from jax import lax
 from jaxtyping import Array
 
 
@@ -46,7 +47,9 @@ def differentiable_gravitational_acceleration(
     inv_dist3 = inv_dist**3
     weights = masses[None, :] * inv_dist3
     weights = weights * (1.0 - jnp.eye(positions.shape[0], dtype=positions.dtype))
-    return -G * jnp.einsum("ij,ijk->ik", weights, diffs)
+    return -G * jnp.einsum(
+        "ij,ijk->ik", weights, diffs, precision=lax.Precision.HIGHEST
+    )
 
 
 __all__ = ["differentiable_gravitational_acceleration"]

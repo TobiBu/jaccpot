@@ -37,6 +37,7 @@ from jaccpot.operators.real_harmonics import (
     sh_size,
     z_m2l_translation_tables,
 )
+from jaccpot.pallas._compat import pallas_backend_kwargs
 
 
 def _fused_m2l_vjp_enabled() -> bool:
@@ -363,7 +364,7 @@ def m2l_real_fused_pallas(
         out_specs=bs_vec(Cp),
         out_shape=jax.ShapeDtypeStruct((N, Cp), real_dtype),
         interpret=interpret,
-        backend=(None if interpret else backend),
+        **pallas_backend_kwargs(backend, interpret),
         name=f"m2l_real_fused_p{int(order)}",
     )(mult, btr, bfrr, rr, *table_arrays)
     return out[:, :C]
@@ -454,7 +455,7 @@ def m2l_real_fused_vjp_pallas(
             jax.ShapeDtypeStruct((N,), real_dtype),
         ],
         interpret=interpret,
-        backend=(None if interpret else backend),
+        **pallas_backend_kwargs(backend, interpret),
         name=f"m2l_real_fused_vjp_p{int(order)}",
     )(mult, btr, bfrr, rr, obar, *table_arrays)
     # Unpad to the original input shapes.
