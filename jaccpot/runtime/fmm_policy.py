@@ -5,7 +5,8 @@ engine class inherits this mixin. Sibling of _fmm_impl at runtime level.
 
 from __future__ import annotations
 
-from typing import Optional
+import contextlib
+from typing import Iterator, Optional
 
 import jax.numpy as jnp
 from beartype.typing import Callable
@@ -27,6 +28,7 @@ from ._adaptive_policy import (
     source_error_proxy_by_order_from_multipoles,
 )
 from ._octree_adapter import build_octree_execution_data_with_status
+from .fmm_caches import _contains_tracer
 from .fmm_state import (
     FMMPreparedState,
     _build_octree_downward_artifacts,
@@ -61,6 +63,41 @@ class PolicyMixin:
             tree=tree,
             accelerations_sorted=accelerations_sorted,
             reduction=reduction,
+        )
+
+    def _record_force_scale_from_evaluation(
+        self: "FastMultipoleMethod",
+        *,
+        state: FMMPreparedState,
+        evaluation: object,
+        full_evaluation: bool,
+    ) -> None:
+        """Cache node force scales from a completed full-order evaluation.
+
+        This is what makes ``mac_force_scale_mode='prev'`` mean anything: it is the
+        only writer of ``_last_force_scale_nodes`` outside the prepass, so without
+        it 'prev' silently fell back to a unit force scale on the non-paper path
+        and to a prepass on every call on the paper path.
+
+        The accelerations of the step just evaluated are a strictly better estimate
+        of Dehnen's ``a_b`` than the low-order prepass is -- they *are* ``a_b``, one
+        step stale -- which is the reuse §5.4 licenses. Skipped when tracing (an
+        instance attribute must never capture a tracer), during a prepass (the
+        caller reduces that result itself), and for target-subset evaluations,
+        whose accelerations do not cover every node.
+        """
+
+        if not full_evaluation or self._in_force_scale_prepass:
+            return
+        if not self._uses_paper_style_force_scale():
+            return
+        acc_sorted = evaluation[0] if isinstance(evaluation, tuple) else evaluation
+        if _contains_tracer((acc_sorted, state.tree)):
+            return
+        self._last_force_scale_nodes = self._compute_node_force_scale_from_sorted_acc(
+            tree=state.tree,
+            accelerations_sorted=jnp.asarray(acc_sorted),
+            reduction=self._force_scale_reduction_mode(),
         )
 
     def _source_error_proxy_by_order_from_multipoles(
@@ -160,6 +197,48 @@ class PolicyMixin:
             dehnen_geometry_mode=dehnen_geometry_mode,
         )
 
+    @contextlib.contextmanager
+    def _force_scale_prepass_scope(
+        self: "FastMultipoleMethod", *, low_order: int
+    ) -> Iterator[None]:
+        """Run a force-scale prepass with solver state restored on the way out.
+
+        A prepass is an inner solve on the same particles, so it necessarily
+        overwrites solver attributes that the enclosing ``prepare_state`` still
+        needs. Two kinds have to be restored:
+
+        - the knobs the prepass deliberately overrides (a single low order, no
+          adaptive order, the geometric MAC), and
+        - the bookkeeping the inner solve updates as a side effect. That includes
+          ``_topology_reuse_entry``: the non-paper prepass re-enters
+          ``prepare_state``, whose reuse block increments ``reuse_count``, so
+          without this every outer call consumed two slots of the ``rebuild_every``
+          cadence and the tree was rebuilt twice as often as requested.
+
+        Both prepass branches share this scope so they cannot drift apart again.
+        """
+
+        saved_p_gears = self.p_gears
+        saved_adaptive_order = self.adaptive_order
+        saved_adaptive_error_model = self.adaptive_error_model
+        saved_mac_type = self.mac_type
+        saved_recent_counts = self._recent_far_pairs_by_gear_counts
+        saved_topology_reuse_entry = self._topology_reuse_entry
+        saved_recent_topology_reused = bool(self._recent_topology_reused)
+        self._in_force_scale_prepass = True
+        try:
+            self.p_gears = (int(low_order),)
+            yield
+        finally:
+            self.p_gears = saved_p_gears
+            self.adaptive_order = saved_adaptive_order
+            self.adaptive_error_model = saved_adaptive_error_model
+            self.mac_type = saved_mac_type
+            self._recent_far_pairs_by_gear_counts = saved_recent_counts
+            self._topology_reuse_entry = saved_topology_reuse_entry
+            self._recent_topology_reused = saved_recent_topology_reused
+            self._in_force_scale_prepass = False
+
     def _compute_force_scale_paper_prepass_from_tree_artifacts(
         self: "FastMultipoleMethod",
         *,
@@ -206,14 +285,7 @@ class PolicyMixin:
             locals_template=low_locals_template,
         )
 
-        saved_p_gears = self.p_gears
-        saved_adaptive_order = self.adaptive_order
-        saved_adaptive_error_model = self.adaptive_error_model
-        saved_mac_type = self.mac_type
-        saved_recent_counts = self._recent_far_pairs_by_gear_counts
-        self._in_force_scale_prepass = True
-        try:
-            self.p_gears = (int(low_order),)
+        with self._force_scale_prepass_scope(low_order=int(low_order)):
             self.adaptive_order = False
             self.adaptive_error_model = "tail_proxy"
             self.mac_type = "dehnen"
@@ -350,13 +422,6 @@ class PolicyMixin:
                 return_potential=False,
                 jit_traversal=False,
             )
-        finally:
-            self.p_gears = saved_p_gears
-            self.adaptive_order = saved_adaptive_order
-            self.adaptive_error_model = saved_adaptive_error_model
-            self.mac_type = saved_mac_type
-            self._recent_far_pairs_by_gear_counts = saved_recent_counts
-            self._in_force_scale_prepass = False
 
         sorted_idx = jnp.argsort(low_tree_artifacts.inverse_permutation)
         return jnp.asarray(prepass_acc)[sorted_idx]

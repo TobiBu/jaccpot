@@ -2551,19 +2551,40 @@ class PrepareMixin:
             policy_orders = self._policy_orders_for_prepare_state(
                 max_order=int(max_order)
             )
-            if self.mac_force_scale_mode == "paper":
-                need_prepass = True
-            elif self.mac_force_scale_mode == "prev" or self._in_force_scale_prepass:
-                if (
-                    previous_force_scale is not None
-                    and int(previous_force_scale.shape[0]) == node_count
-                ):
+            reusable_force_scale = (
+                previous_force_scale is not None
+                and int(previous_force_scale.shape[0]) == node_count
+            )
+            if self._in_force_scale_prepass:
+                # A prepass is already running and this is its inner prepare_state.
+                # It must never ask for a prepass of its own: 'paper' and 'prepass'
+                # both set need_prepass unconditionally, and the non-paper prepass
+                # re-enters prepare_state, so a mode that requests one on every call
+                # recursed until the interpreter stack ran out. Reachable from public
+                # kwargs (adaptive_order=True, adaptive_error_model='tail_proxy',
+                # mac_force_scale_mode='paper'). The inner solve only needs *some*
+                # force scale, so take the cached one or fall back to unity.
+                if reusable_force_scale:
                     force_scale_nodes = jnp.asarray(
                         previous_force_scale,
                         dtype=positions_arr.dtype,
                     )
-                elif self._uses_paper_style_traversal_policy() and (
-                    not self._in_force_scale_prepass
+                else:
+                    force_scale_nodes = jnp.ones(
+                        (node_count,),
+                        dtype=positions_arr.dtype,
+                    )
+            elif self.mac_force_scale_mode == "paper":
+                need_prepass = True
+            elif self.mac_force_scale_mode in ("prev", "paper_cached"):
+                if reusable_force_scale:
+                    force_scale_nodes = jnp.asarray(
+                        previous_force_scale,
+                        dtype=positions_arr.dtype,
+                    )
+                elif (
+                    self.mac_force_scale_mode == "paper_cached"
+                    or self._uses_paper_style_traversal_policy()
                 ):
                     need_prepass = True
                 else:
@@ -2576,16 +2597,21 @@ class PrepareMixin:
             if need_prepass:
                 if len(policy_orders) == 0:
                     raise ValueError(
-                        "mac_force_scale_mode='prepass' requires non-empty orders"
+                        f"mac_force_scale_mode={self.mac_force_scale_mode!r} needs a "
+                        "force-scale prepass, which requires non-empty orders"
                     )
+                use_paper_prepass = (
+                    self.mac_force_scale_mode
+                    in (
+                        "paper",
+                        "paper_cached",
+                    )
+                    and self._uses_paper_style_traversal_policy()
+                )
                 low_order = int(min(policy_orders))
-                if self.mac_force_scale_mode == "paper" and (
-                    self._uses_paper_style_traversal_policy()
-                ):
+                if use_paper_prepass:
                     low_order = 1 if int(max_order) >= 1 else 0
-                if self.mac_force_scale_mode == "paper" and (
-                    self._uses_paper_style_traversal_policy()
-                ):
+                if use_paper_prepass:
                     prepass_sorted = (
                         self._compute_force_scale_paper_prepass_from_tree_artifacts(
                             tree_artifacts=tree_artifacts,
@@ -2604,14 +2630,7 @@ class PrepareMixin:
                         )
                     )
                 else:
-                    self._in_force_scale_prepass = True
-                    saved_p_gears = self.p_gears
-                    saved_adaptive_order = self.adaptive_order
-                    saved_adaptive_error_model = self.adaptive_error_model
-                    saved_mac_type = self.mac_type
-                    try:
-                        self.p_gears = (low_order,)
-                        self.adaptive_order = bool(saved_adaptive_order)
+                    with self._force_scale_prepass_scope(low_order=low_order):
                         prepass_acc = self.compute_accelerations(
                             positions_arr,
                             masses_arr,
@@ -2624,12 +2643,6 @@ class PrepareMixin:
                             jit_tree=jit_tree,
                             jit_traversal=False,
                         )
-                    finally:
-                        self.p_gears = saved_p_gears
-                        self.adaptive_order = saved_adaptive_order
-                        self.adaptive_error_model = saved_adaptive_error_model
-                        self.mac_type = saved_mac_type
-                        self._in_force_scale_prepass = False
                     prepass_sorted = jnp.asarray(prepass_acc)[
                         jnp.argsort(tree_artifacts.inverse_permutation)
                     ]

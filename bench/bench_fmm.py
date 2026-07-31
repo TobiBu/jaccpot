@@ -291,7 +291,7 @@ def _prime_paper_force_scales(fmm: FastMultipoleMethod, positions, masses) -> No
         return
     if impl.adaptive_error_model != "dehnen_paper":
         return
-    if impl.mac_force_scale_mode != "paper":
+    if impl.mac_force_scale_mode not in ("paper", "paper_cached"):
         return
     fmm.compute_accelerations(
         positions,

@@ -452,7 +452,10 @@ def test_dehnen_error_defaults_to_paper_policy_settings():
     )
     assert fmm.mac_type == "dehnen_error"
     assert fmm._impl.adaptive_error_model == "dehnen_paper"
-    assert fmm._impl.mac_force_scale_mode == "paper"
+    # 'prev' is promoted to 'paper_cached', not 'paper': the paper prepass is a full
+    # extra FMM solve, and re-running it every prepare_state costs ~3.5x steady
+    # state for a force scale Dehnen §5.4 explicitly licenses reusing.
+    assert fmm._impl.mac_force_scale_mode == "paper_cached"
 
 
 def test_dehnen_error_preserves_explicit_policy_overrides():

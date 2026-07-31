@@ -458,9 +458,10 @@ class FastMultipoleMethod(
         self._static_radix_m2l_chunk_count: int = 0
         self._static_radix_l2l_edge_count: int = 0
         force_scale_mode_norm = str(mac_force_scale_mode).strip().lower()
-        if force_scale_mode_norm not in ("prev", "prepass", "paper"):
+        if force_scale_mode_norm not in ("prev", "prepass", "paper", "paper_cached"):
             raise ValueError(
-                "mac_force_scale_mode must be 'prev', 'prepass', or 'paper'"
+                "mac_force_scale_mode must be 'prev', 'prepass', 'paper', "
+                "or 'paper_cached'"
             )
         self.mac_force_scale_mode = force_scale_mode_norm
         adaptive_error_model_norm = str(adaptive_error_model).strip().lower()
@@ -633,7 +634,13 @@ class FastMultipoleMethod(
             if self.adaptive_error_model == "tail_proxy":
                 self.adaptive_error_model = "dehnen_paper"
             if self.mac_force_scale_mode == "prev":
-                self.mac_force_scale_mode = "paper"
+                # 'prev' means "reuse the last force scale", which in paper mode is
+                # exactly 'paper_cached' -- a low-order prepass on the cold call,
+                # the cached scale after that. Dehnen §5.4 licenses the reuse
+                # ("only very slightly worse" than the exact a_b), and 'paper'
+                # re-runs the full prepass on *every* prepare_state, which costs
+                # ~3.5x steady state. Keep 'paper' for whoever asks for it.
+                self.mac_force_scale_mode = "paper_cached"
         # Dehnen eq (16a) is parameterised by a relative force-accuracy target
         # `eps`, not by an opening angle: acceptance is gated only by the error
         # test plus eq (16a)'s own `theta < 1` convergence guard, so `theta` has

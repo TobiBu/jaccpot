@@ -7,16 +7,18 @@ this up without prior context.
 
 jaccpot implements Dehnen (2014, arXiv:1405.2255) §5's mass-dependent multipole
 acceptance criterion — eqs (12), (13), (15), (16a) plus the §5.4 low-order prepass —
-reachable via `mac_type="dehnen_error"`. That transcription is now **proven** by 56
-unit tests against independent numpy float64 references, not merely asserted.
+reachable via `mac_type="dehnen_error"`. That transcription is now **proven** by unit
+tests against independent numpy float64 references, not merely asserted.
 
 Four real correctness bugs were found and fixed (all on shipped default paths). After
 the fixes, **at p=8 with Dehnen's own error measure the criterion wins the error tail**
 on his own test distribution at equal-or-less interaction work. At p=4 it is a wash,
 which is why an earlier p=4-only benchmark produced a spurious negative result.
 
-Open: steady-state prepare cost is 3.5× (one specific, fixable cause), eq (16b) is not
-implemented, and nothing has been measured at Dehnen's N (10⁵–10⁷).
+Step 1 is done: steady-state prepare overhead went from **5.87× to 0.98×** at
+N=16384/p=8, and two further defects (an unbounded recursion and the predicted
+reentrancy bug) were fixed on the way. Open: eq (16b) is not implemented, the mass MAC
+still cannot reach any fast lane, and nothing has been measured at Dehnen's N (10⁵–10⁷).
 
 ## Where the work lives
 
@@ -38,7 +40,7 @@ would need conflict resolution in those four files.
 
 Regression on the final commit: `tests/unit` + `tests/characterization` +
 adaptive/force-scale suites → **0 failures** (exit 0), including the characterization
-goldens. `tests/unit/runtime/` is 56 cases across 18 test functions.
+goldens. `tests/unit/runtime/` is 76 cases across 33 test functions.
 
 Note for whoever extends the public surface next: `mac_theta_max` had to be registered
 in `EXPECTED_FMM_INIT_KWARGS` (`tests/unit/test_public_api_surface.py`). That
@@ -75,7 +77,7 @@ round-trip folded out.
   (`_large_n_pipeline.py` ~:1918). The large-N decline reason is surfaced in
   `get_runtime_diagnostics()` as `large_n_path_declined_reason`.
 
-### Tests: `tests/unit/runtime/`, 56 cases / 18 functions
+### Tests: `tests/unit/runtime/`, 76 cases / 33 functions
 
 - `test_dehnen_mac_reference.py` (39) — pins eqs (12)/(13)/(15)/(16a) against numpy
   float64 references. The load-bearing one is
@@ -89,14 +91,27 @@ round-trip folded out.
 - `test_dehnen_mac_gradients.py` (11) — FD-vs-AD, grad-vs-direct-sum, a verified
   no-boundary-crossing mass perturbation, cotangent isolation of `force_scale_nodes`,
   and traceability of each geometry mode.
+- `test_force_scale_prepass_cost.py` (20) — the Step 1 contracts: the prepass runs once
+  under `paper_cached` and every call under `paper`, `prepare_state` is bit-idempotent,
+  a prepass never recurses into itself, the prepass restores the enclosing call's
+  `rebuild_every` budget and gear bookkeeping, and a stale cached scale does not move
+  the δa/f error tail at a per-step displacement where the two arms provably disagree
+  about the accept mask.
 
-### Benchmark: `bench/validation/mac_error_distribution.py`
+### Benchmarks: `bench/validation/`
 
-Sweeps fixed-θ vs the mass MAC, records the full per-particle error distribution plus
-hardware-independent cost proxies, and matches the arms at equal 90th percentile.
-Implements three error families (`--metric relative|scaled|dehnen`), Plummer /
-uniform / mass-spectrum / bulge-halo generators, a chunked direct-sum reference, and
-`chunked_force_scale` for Dehnen's `f_b`.
+`mac_error_distribution.py` sweeps fixed-θ vs the mass MAC, records the full
+per-particle error distribution plus hardware-independent cost proxies, and matches the
+arms at equal 90th percentile. Implements three error families
+(`--metric relative|scaled|dehnen`), Plummer / uniform / mass-spectrum / bulge-halo
+generators, a chunked direct-sum reference, and `chunked_force_scale` for Dehnen's `f_b`.
+
+`force_scale_prepare_cost.py` measures warm-call `prepare_state` medians for the
+geometric MAC against `paper` and `paper_cached`. It exists because the prepare-cost
+figure below was originally produced by hand, and the two traps that make hand
+measurement wrong — cold wall-clock and unmaterialised device arrays — are both easy to
+fall into twice. It also reports the live far-pair count per arm, so an arm that has
+degenerated to all-near-field cannot be compared by accident.
 
 ## Measured results
 
@@ -117,11 +132,25 @@ uniform (global-rms metric): p99 0.93–1.10, max 1.06–2.45, work 0.93–1.01.
 
 ### Prepare cost (N=16384, p=8, fp64, `real` basis, FAST preset, A100)
 
-```
-              cold      warm     warm
-geometric   155.00s    33.45s   35.08s
-mass MAC    182.32s   125.26s  114.78s     -> 3.5x steady-state
-```
+Warm-call medians of 5 timed `prepare_state` calls, after a cold call and one
+discarded warm-up, via `bench/validation/force_scale_prepare_cost.py`
+(`results/validation/force_scale_prepare_cost_n16384_p8.json`):
+
+| arm | cold | warm median | warm calls | ratio | prepasses | far pairs |
+|---|---|---|---|---|---|---|
+| geometric | 320.60s | 40.04s | 39.2 / 39.2 / 40.1 / 40.0 / 52.2 | 1.00× | 0 | 168388 |
+| mass MAC, `paper` | 305.42s | 235.05s | 236 / 386 / 227 / 231 / 235 | **5.87×** | 7 | 82246 |
+| mass MAC, `paper_cached` | 214.63s | 39.23s | 41.1 / 39.2 / 38.4 / 40.2 / 38.7 | **0.98×** | 1 | 82246 |
+
+Step 1 took the steady-state overhead from 5.87× to **0.98×** — the prepass is no
+longer a cost at all. The mass MAC's `prepare_state` is now marginally *cheaper* than
+the geometric one, which is consistent with it accepting half as many far pairs
+(82246 vs 168388) and so building a smaller interaction list.
+
+Two caveats on the 5.87×. It is worse than the 3.5× previously recorded here, which
+was measured by hand with no committed harness; the box is contended and the 386s
+outlier among otherwise ~230s calls shows it. And this is `prepare_state` only —
+end-to-end wall-clock at Dehnen's N is still Step 4's job.
 
 ### Differentiability
 
@@ -139,10 +168,11 @@ is the **scaled error δa/f** with `f_b ≡ Σ_{a≠b} G μ_a / |x_a−x_b|²`.
 
 ## Traps — these cost real time in the last session
 
-1. **Never quote a cold-start wall-clock.** `prepare_state` at N=16384/p=8 is 155s cold
-   and 34s warm; ~120s is JAX compilation. A cold-vs-cold comparison across two
-   processes gave a 1.29× overhead where the true steady-state figure is 3.5×. Always
-   report warm-call medians.
+1. **Never quote a cold-start wall-clock.** `prepare_state` at N=16384/p=8 is ~320s cold
+   and ~40s warm; the difference is JAX compilation. A cold-vs-cold comparison across
+   two processes gave a 1.29× overhead where the true steady-state figure was 5.87×.
+   Always report warm-call medians, and materialise the result —
+   `bench/validation/force_scale_prepare_cost.py` does both.
 2. **Per-particle relative error δa/a is invalid for clustered systems.** Wherever the
    vector sum `a_b → 0` — a force null between clumps, the centre of a
    centrally-concentrated profile — it diverges for *any* MAC, identically. On
@@ -160,40 +190,109 @@ is the **scaled error δa/f** with `f_b ≡ Σ_{a≠b} G μ_a / |x_a−x_b|²`.
    the target cell, so the least-accelerated particle sets the budget. At N=64/leaf=4
    it accepts *nothing* for any ε in [1e-5, 1e-2]. Gradient tests need N≥512/leaf=8 at
    ε=3e-3 to get a non-empty M2L list.
-6. **Don't pipe long-running output through `tail`** — it buffers until exit, so a
+6. **A reused force scale is not unconditionally safe, and the failure is silent and
+   inverted.** A cached `min_b|a_b|` that is too *large* loosens the eq (16a) threshold,
+   so the criterion over-accepts — a stale scale makes the solver **faster and wronger**,
+   which means no cost measurement can detect it. Measured at N=512/p=4/ε=3e-3, stepping
+   a system forward and comparing `paper_cached` against `paper` on identical final
+   positions with the δa/f measure (two seeds, per-step displacement as a fraction of
+   r_rms):
+
+   | displacement / r_rms | 0.006 | 0.017 | 0.028 | 0.045 | 0.062 | 0.085 | **0.114** |
+   |---|---|---|---|---|---|---|---|
+   | p99 error ratio, seed 7 | 1.00 | 0.50 | 1.00 | 0.99 | 1.00 | 0.99 | **41.1** |
+   | p99 error ratio, seed 11 | 1.00 | 1.41 | 0.92 | 1.00 | 1.01 | 0.94 | **15.8** |
+
+   Flat to within mask-reshuffling scatter up to ~8.5% of r_rms per step, then a cliff.
+   At the cliff the cached arm accepted 198 far pairs where the fresh one accepted 150.
+   Real timesteps are two or more decades below that, so `paper_cached` is the right
+   default — but Dehnen's "only very slightly worse" is a claim about *small* steps, and
+   nothing in the code currently detects that the scale has gone stale. If large steps
+   are ever needed, the mitigation is a refresh cadence (re-prepass every K calls,
+   costing 1/K of `paper`), not a tolerance. `test_a_stale_cached_force_scale_does_not_
+   degrade_the_error_tail` pins the safe regime at 0.028 and asserts the two arms
+   actually disagree about the accept mask there, so it cannot go vacuous.
+7. **Don't pipe long-running output through `tail`** — it buffers until exit, so a
    killed job shows nothing. Redirect to a file.
-7. **The fast lanes were never active in any of these measurements.** The large-N path
+8. **The fast lanes were never active in any of these measurements.** The large-N path
    requires `expansion_basis="solidfmm"` *and* `preset="large_n_gpu"`; the benchmark
    uses `basis="real"`, so everything ran the generic path. Do not attribute the slow
    baseline to a lane fallback.
 
 ## The four steps
 
-### Step 1 — Cache the force-scale prepass (~half a day)
+### Step 1 — Cache the force-scale prepass — **DONE (2026-08-01)**
 
-**Why.** `mac_force_scale_mode="paper"` sets `need_prepass = True` unconditionally at
-`jaccpot/runtime/fmm_prepare.py` ~:2539, so **every** `prepare_state` pays a full extra
-p=1 FMM. This is essentially all of the 3.5× steady-state overhead. Dehnen §5.4
-explicitly licenses reuse ("only very slightly worse" than exact `a_b`), and a real
-simulation always has the previous step's accelerations.
+**Result: 5.87× → 0.98×** warm-call prepare overhead at N=16384/p=8, against an
+acceptance bar of ≤ 1.3×. Table and caveats under "Prepare cost" above.
 
-**Do.** Add `mac_force_scale_mode="paper_cached"`: reuse `self._last_force_scale_nodes`
-when its length matches the node count, else run the prepass once. Keep `"paper"` as
-the cold upper bound. Note `"prev"` is currently inert for the non-paper path (its only
-writer was the dead block deleted from `fmm_derivatives.py`) — either give it a live
-writer or retire it, but decide explicitly.
+**What shipped.** `mac_force_scale_mode="paper_cached"`: the paper prepass runs on the
+cold call, and every call after that reuses the cached per-node scale. It is now what
+`mac_type="dehnen_error"` selects by default — the `"prev"→"paper"` promotion at
+`_fmm_impl.py` ~:635 became `"prev"→"paper_cached"`, because promoting a request to
+*reuse* into the most expensive mode available was the whole defect. `"paper"` is
+retained deliberately as the history-free upper bound, and is now the only mode that
+guarantees a given `prepare_state` depends on nothing but its arguments.
 
-While here, fix the reentrancy defect: the *non*-paper prepass branch
-(`fmm_prepare.py` ~:2594) calls `self.compute_accelerations(...)`, which re-enters
-`prepare_state` and bumps `_topology_reuse_entry.reuse_count`, halving the requested
-`rebuild_every` cadence; it also fails to save/restore
-`_recent_far_pairs_by_gear_counts`, unlike the paper branch. Extract the save/restore
-set into one `contextlib.contextmanager` used by both branches.
+**The `"prev"` decision: given a live writer, not retired.** It was inert on the
+non-paper path — its only writer was the dead block deleted in `96d5a44` — so it fell
+through to a *unit* force scale and stayed there, silently, for the whole run. A unit
+scale is finite and non-`None`, which is why nothing caught it. There is now one writer,
+`_record_force_scale_from_evaluation`, called from `evaluate_prepared_state`: after any
+full-order evaluation it min/max-reduces that step's accelerations onto the nodes. Those
+accelerations *are* Dehnen's `a_b`, one step stale, so this is a strictly better estimate
+than the p=1 prepass and is exactly the reuse §5.4 licenses. It is skipped while tracing
+(an instance attribute must never capture a tracer), during a prepass, and for
+target-subset evaluations, which do not cover every node.
 
-**Accept when.** Warm-call median prepare overhead vs the geometric MAC is ≤ 1.3× at
-N=16384/p=8 (from 3.5×), and `prepare_state` called twice on one solver gives
-bit-identical accelerations (idempotency — this also guards the `_last_force_scale_nodes`
-statefulness).
+Consequence worth knowing: with reuse live, `compute_accelerations` called twice on
+identical inputs no longer returns identical answers — the second call sees a refreshed
+scale. That is inherent to any reuse scheme and is the point of the mode; use `"paper"`
+when a call must be a pure function of its arguments. `prepare_state` on its own *is*
+still idempotent, and there is a test pinning it to the bit.
+
+**Two further defects found while in this code.**
+
+- *Unbounded recursion*, pre-existing and reachable straight from public kwargs
+  (`adaptive_order=True`, `adaptive_error_model="tail_proxy"`,
+  `mac_force_scale_mode="paper"`, `mac_type="dehnen"`): `"paper"` set
+  `need_prepass = True` *ahead* of the `_in_force_scale_prepass` guard, and the non-paper
+  prepass re-enters `prepare_state`, so the inner call requested a prepass of its own,
+  and so on to `RecursionError`. Confirmed against the parent commit before fixing. The
+  guard is now hoisted above the mode dispatch: an inner prepare takes the cached scale
+  or unity, never another prepass.
+- *Reentrancy*, as predicted: the non-paper branch bumped
+  `_topology_reuse_entry.reuse_count` twice per outer call. Measured at
+  `rebuild_every=4`, the pre-fix sequence was `1, 3, 1, 3, …` — the tree rebuilt every
+  second call instead of every fourth — and `recent_topology_reused` reported a reuse on
+  calls that had just rebuilt. Now `0, 1, 2, 3, 0, 1`. Both prepass branches share one
+  `_force_scale_prepass_scope` contextmanager, which also restores
+  `_recent_far_pairs_by_gear_counts` (the non-paper branch never did).
+
+**Where.** `fmm_policy.py` (the scope + the recorder), `fmm_prepare.py` (mode dispatch,
+hoisted guard), `fmm_evaluate.py` (one call site), `_fmm_impl.py` (validation + the
+promotion), README force-scale section.
+
+**The accuracy half, which the plan did not ask for and should have.** A cost-only
+acceptance bar cannot see the failure mode that matters here: an over-large cached scale
+loosens eq (16a)'s threshold, so a stale scale over-accepts and is *faster and wronger*.
+Measured, and it is real — see trap 6 for the cliff at ~11% of r_rms per step. It sits
+two or more decades beyond any real timestep, so `paper_cached` stands as the default,
+but the claim is now bounded by measurement rather than by §5.4's assertion.
+
+**Tests.** `tests/unit/runtime/test_force_scale_prepass_cost.py`, 20 cases / 15
+functions. Each fix has a test that provably bit before it: the prepass-count assertions
+(1 vs 3 over three `prepare_state` calls), the `0,1,2,3,0,1` cadence, the four-mode
+recursion parametrisation, `_last_force_scale_nodes` going from `None` to a non-unit
+array across one evaluation, and a δa/f error-tail comparison against a direct sum that
+also asserts the two arms genuinely disagree about the accept mask, so it cannot pass
+vacuously.
+
+**Harness.** `bench/validation/force_scale_prepare_cost.py` — warm-call medians with
+forced materialisation, a discarded warm-up call, per-step position drift so the cached
+scale is genuinely stale, and a live-far-pair count so an arm that has degenerated to
+all-near-field cannot be compared by accident. The 3.5× figure in this document had no
+committed harness; this one is reproducible.
 
 ### Step 2 — Implement eq (16b) (~half a day to validate, 2–3 days for production)
 
@@ -304,9 +403,9 @@ Be honest about magnitude: the measured effect is **1.2–1.9× on p99**, not th
 final configuration uses a cap below 1 — that is a deviation from eq (16a), justified by
 the convergence-boundary argument in trap 4.
 
-If it loses, the four bug fixes and the 56 tests stay regardless (they fix shipped
-defaults), and the negative result is worth writing up with the tests as evidence that
-the transcription was faithful.
+If it loses, the bug fixes and the 76 tests stay regardless (they fix shipped defaults),
+and the negative result is worth writing up with the tests as evidence that the
+transcription was faithful.
 
 ## Commands
 
@@ -326,10 +425,18 @@ JAX_PLATFORMS=cpu JAX_ENABLE_X64=1 .venv/bin/python -m bench.validation.mac_erro
 # GPU (pick a free device; the box is often contended)
 eval $(.venv/bin/autocvd -l -q)
 XLA_PYTHON_CLIENT_PREALLOCATE=false JAX_ENABLE_X64=1 .venv/bin/python -m bench.validation.mac_error_distribution ...
+
+# prepare-cost of the force-scale prepass (warm-call medians; ~50 min at this size)
+eval $(.venv/bin/autocvd -l -q)
+XLA_PYTHON_CLIENT_PREALLOCATE=false JAX_ENABLE_X64=1 \
+    .venv/bin/python -m bench.validation.force_scale_prepare_cost \
+    --n 16384 --leaf-size 16 --order 8 --repeats 5 --eps 2e-7 \
+    --json-out results/validation/force_scale_prepare_cost_n16384_p8.json
 ```
 
 Existing artifacts in `results/validation/` — `mac_dehnen_metric_p8.json` is the
-headline p=8 run; `mac_plummer_p8_cap07.json` is the `mac_theta_max=0.7` arm.
+headline p=8 run; `mac_plummer_p8_cap07.json` is the `mac_theta_max=0.7` arm;
+`force_scale_prepare_cost_n16384_p8.json` is the Step 1 prepare-cost measurement.
 
 ## References
 
