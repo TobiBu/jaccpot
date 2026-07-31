@@ -66,18 +66,24 @@ dependencies = [
   # uni_real_n256_p6 passes. 0.11.0: GPU broad 506 / Pallas 51 / gradients 20 /
   # golden 13, CPU golden passes -- so 0.11.0 is *usable*, just not the floor.
   #
-  # NO UPPER BOUND, by request. Note the history: an unbounded `>=0.8.0` previously
-  # let CI resolve 0.9.2/0.10.2 and broke the Pallas tests, and `pip install
-  # yggdrax` pulls JAX unconstrained *before* this constraint applies -- which is
-  # how 0.11.0 (2.6x slower, py3.12-only) can still end up installed. If a future
-  # release breaks, add a ceiling here rather than re-deriving the window.
+  # THE `<0.11` CEILING IS LOAD-BEARING, not caution. A floor alone does not stop
+  # the resolver taking 0.11.0, and CI proved it in one run: with `>=0.10.2` and no
+  # ceiling, the py3.11 leg got 0.10.2 and PASSED in 22.9 min, while the py3.12 and
+  # py3.13 legs got 0.11.0 and blew 30- and 50-minute caps. Same code, same runner,
+  # one variable -- which also confirms the 2.6x CPU slowdown in situ. py3.11 was
+  # only green because 0.11.0 refuses to install there.
+  #
+  # So: lifting this ceiling means either accepting ~2.6x CPU CI time or first
+  # finding out why 0.11.0 is that much slower for this workload. Note also that
+  # `pip install yggdrax` pulls JAX unconstrained BEFORE this constraint applies, so
+  # the ceiling is what downgrades it back.
   #
   # HISTORY: the ceiling used to be `<0.9.1` because `pallas_call`'s `backend=`
   # kwarg was removed in 0.9.1 and the fused M2L kernels passed it. They now go
   # through `jaccpot/pallas/_compat.pallas_backend_kwargs`, which selects Triton
   # via `backend=` on the old API and via `triton.CompilerParams` on the new one.
-  "jax[cuda]>=0.10.2",
-  "jaxlib>=0.10.2",
+  "jax[cuda]>=0.10.2,<0.11",
+  "jaxlib>=0.10.2,<0.11",
   "jaxtyping>=0.2.23",
   "beartype>=0.14.0",
   "yggdrax>=0.0.1,<0.1.0",
