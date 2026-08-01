@@ -596,16 +596,36 @@ if not recs:
         "strict refresh path, which is GPU-only -- rerun the bench on a GPU."
     )
 
-ORDER = [
-    ("tree_build", "tree build"),
-    ("p2m_m2m", "P2M + M2M"),
-    ("traversal_setup", "traversal setup"),
-    ("m2l", "M2L"),
-    ("l2l", "L2L"),
-    ("nearfield_p2p", "near field (P2P)"),
-    ("other_measured", "other measured"),
-    ("unattributed", "unattributed"),
-]
+# Band list derived from the artifact, not hardcoded. A hardcoded list silently
+# dropped `upward_geometry` when the bench script gained it -- 56-59% of the step,
+# so the bars stopped summing to the wall clock and the figure understated
+# per-step time by a factor of two while looking perfectly plausible. Known keys
+# get a display order and a label; anything unrecognised is still plotted, at the
+# end, under its raw name.
+LABELS = {
+    "tree_build": "tree build",
+    "upward_geometry": "upward geometry",
+    "p2m_m2m": "P2M + M2M",
+    "traversal_setup": "traversal setup",
+    "m2l": "M2L",
+    "l2l": "L2L",
+    "nearfield_p2p": "near field (P2P)",
+    "other_measured": "other measured",
+    "unattributed": "unattributed (incl. downward)",
+}
+present = {k for r in recs for k in r["stages_s"]}
+ORDER = [(k, LABELS.get(k, k)) for k in LABELS if k in present]
+ORDER += [(k, k) for k in sorted(present - set(LABELS))]
+
+# The bands must account for the measured wall clock; if they do not, the figure
+# is understating per-step cost and should say so rather than be believed.
+for r in recs:
+    total = sum(r["stages_s"].get(k, 0.0) for k, _ in ORDER)
+    if r["per_step_wall_s"] > 0 and abs(total - r["per_step_wall_s"]) / r["per_step_wall_s"] > 0.01:
+        print(
+            f"WARNING N={r['n']}: bands sum to {total*1e3:.1f} ms but the step took "
+            f"{r['per_step_wall_s']*1e3:.1f} ms -- a stage is missing from LABELS"
+        )
 ns = [r["n"] for r in recs]
 x = np.arange(len(ns), dtype=float)
 
@@ -635,8 +655,10 @@ for ax, normalise in ((axes[0], False), (axes[1], True)):
     ax.set_xticklabels([f"$2^{{{int(round(np.log2(n)))}}}$" for n in ns])
     ax.set_xlabel("$N$")
     ax.set_ylabel("share of per-step time [%]" if normalise else "per-step time [s]")
-    if not normalise:
-        ax.set_yscale("log")
+    # Linear, not log. A stacked bar on a log axis is a misread waiting to happen:
+    # segment *heights* stop being proportional to the values they represent, so a
+    # 2% band can look comparable to a 60% one. The absolute panel spans well under
+    # a decade here, so linear costs nothing.
     ax.grid(True, axis="y")
     ax.grid(False, axis="x")
     style.finish(ax, legend=normalise, legend_kwargs={"loc": "center left",
