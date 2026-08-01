@@ -197,6 +197,35 @@ nobody re-derives it from the committed JSON and believes it:
 
 ~~uniform (global-rms metric): p99 0.93–1.10, max 1.06–2.45, work 0.93–1.01.~~
 
+### p=8 headline, POST-FIX — the valid measurement
+
+`results/validation/mac_postfix_headline_p8.json`. N=4096, p=8, softening 1e-6,
+Dehnen δa/f, eq (16a) **verbatim** (no θ cap), matched at equal p90. Both arms overlap
+genuinely across the whole matched range — the θ grid is dense enough that no row is
+interpolated across the far-field switch-on, which is what invalidated the first
+post-fix attempt.
+
+| distribution | p99 × | **max ×** | work × |
+|---|---|---|---|
+| **Plummer** (Dehnen's case) | 1.32 – 2.18 | **7.5 – 57.2** | 1.00 – 1.06 |
+| uniform | 1.33 – 1.46 | **3.6 – 7.7** | 1.00 – 1.05 |
+
+**Read this on the max, not the p99.** The p99 gain is modest and roughly matches what
+the pre-fix run accidentally reported (1.3×); the tail gain is large and was understated
+by more than an order of magnitude (pre-fix max ratio 1.51×). Tail *shape* at comparable
+accuracy on Plummer makes it concrete:
+
+| arm | p99 | p99.99 | p99.99 / p99 |
+|---|---|---|---|
+| mass MAC, ε=1e-4 | 8.3×10⁻⁵ | 3.6×10⁻⁴ | **4.3** |
+| fixed θ=0.62 | 6.0×10⁻⁴ | 5.0×10⁻² | **83** |
+
+That is Dehnen §5.3's actual claim — a reduction in the large-error tail at comparable
+median — and it is now supported. **Report p99.99 as the headline metric, not p99**;
+Dehnen quotes rms and p99.99 for the same reason, and the bench already computes it.
+
+Cost is a wash (work 1.00–1.06×), so the criterion buys tail accuracy rather than speed.
+
 ### What the M2M fix did to absolute accuracy
 
 Plummer N=4096, p=8, Dehnen δa/f p99, geometric MAC, before → after `8afd705`:
@@ -509,16 +538,25 @@ within 1.3× of the geometric MAC.
 
 ## Go/no-go for the paper
 
-Claim the mass-dependent MAC iff, at p ≥ 8 on Plummer with Dehnen's δa/f measure:
+**Re-based 2026-08-01** after the M2M fix invalidated the earlier basis. Three of the
+four original conditions are now met at N=4096; only the N ≥ 10⁵ scaling is open.
 
-- the tail advantage (p99 and max) holds at N ≥ 10⁵, and
-- interaction work is ≤ the fixed-θ arm's at matched p90, and
-- warm-call wall-clock overhead is ≤ 1.3× after Step 1.
+| condition | status |
+|---|---|
+| tail advantage at p ≥ 8 on Plummer, δa/f | **met at N=4096**: max 7.5–57×, p99 1.3–2.2× |
+| interaction work ≤ fixed-θ at matched p90 | **met, marginally**: 1.00–1.06× — a wash, not a saving |
+| warm-call prepare overhead ≤ 1.3× | **met**: 0.98× after Step 1 |
+| holds at N ≥ 10⁵ | **open** — needs Step 3 then Step 4 |
 
-Be honest about magnitude: the measured effect is **1.2–1.9× on p99**, not the
-"remarkable" reduction §5.3's language suggests. And disclose `mac_theta_max` if the
-final configuration uses a cap below 1 — that is a deviation from eq (16a), justified by
-the convergence-boundary argument in trap 4.
+**Frame the claim on the tail, and quote p99.99.** The honest statement is not "the
+criterion is faster" (work is a wash) and not "p99 improves 1.3–2.2×" (true but
+unremarkable). It is that the *large-error tail collapses*: p99.99/p99 is 4.3 for the
+mass MAC against 83 for fixed-θ at comparable accuracy on Plummer. That is §5.3's claim
+and it is the one the data supports.
+
+**No deviation from the paper to disclose any more.** `mac_theta_max` was the one
+disclosed deviation; trap 4 showed it was compensating for the M2M bug, and eq (16a)
+verbatim never exceeds opening 0.786 post-fix. Run and report it verbatim.
 
 If it loses, the bug fixes and the 94 tests stay regardless (they fix shipped defaults),
 and the negative result is worth writing up with the tests as evidence that the
