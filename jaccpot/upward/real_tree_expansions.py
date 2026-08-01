@@ -166,6 +166,23 @@ def aggregate_m2m_real_by_level(
     batch_width = int(max(level_batch_width, 1))
     level_offsets = jnp.asarray(level_offsets, dtype=INDEX_DTYPE)
     nodes_by_level = jnp.asarray(nodes_by_level, dtype=INDEX_DTYPE)
+    # `dynamic_slice_in_dim` CLAMPS an out-of-range start rather than erroring, so
+    # for any level whose offset satisfies `start + batch_width > len`, the window
+    # silently slides back to `len - batch_width` and the slot mask -- which is
+    # positional -- then selects the wrong nodes entirely. The real level's
+    # internal nodes were never written (they kept a zero expansion) while
+    # unrelated shallower nodes were clobbered with their aggregation.
+    #
+    # `batch_width` is `num_internal`, so this bites every level starting past
+    # `num_leaves`, i.e. the deepest levels of any tree: at N=1024/leaf=16 that
+    # was levels 7, 8 and 9 of 9, and 10-23% of the system mass went missing from
+    # the root monopole. Pad so the widest window is always in range.
+    nodes_by_level = jnp.concatenate(
+        [
+            nodes_by_level,
+            jnp.full((batch_width,), -1, dtype=INDEX_DTYPE),
+        ]
+    )
     level_slot = jnp.arange(batch_width, dtype=INDEX_DTYPE)
 
     def _translate_one(coeffs: Array, delta: Array) -> Array:
@@ -193,7 +210,11 @@ def aggregate_m2m_real_by_level(
             nodes_by_level, start_index=start, slice_size=batch_width, axis=0
         )
         valid = level_slot < count
-        internal_valid = valid & (batch_nodes < as_index(num_internal))
+        internal_valid = (
+            valid
+            & (batch_nodes >= as_index(0))
+            & (batch_nodes < as_index(num_internal))
+        )
         gather_nodes = jnp.where(internal_valid, batch_nodes, as_index(0))
         scatter_nodes = jnp.where(internal_valid, batch_nodes, dead_row)
 
