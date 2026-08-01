@@ -175,6 +175,7 @@ def test_dehnen_error_fixed_order_runs():
         theta=0.6,
         softening=1.0e-2,
         adaptive_order=False,
+        adaptive_eps=1.0e-4,
         advanced=_advanced_cfg(mac_type="dehnen_error"),
     )
 
@@ -193,6 +194,7 @@ def test_dehnen_error_uses_adaptive_pair_policy(monkeypatch):
         theta=0.6,
         softening=1.0e-2,
         adaptive_order=False,
+        adaptive_eps=1.0e-4,
         advanced=_advanced_cfg(mac_type="dehnen_error"),
     )
 

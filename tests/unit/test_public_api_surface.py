@@ -59,6 +59,7 @@ EXPECTED_FMM_INIT_KWARGS = {
     "adaptive_error_model",
     "adaptive_eps",
     "dehnen_geometry_mode",
+    "mac_theta_max",
     "theta",
     "G",
     "softening",
