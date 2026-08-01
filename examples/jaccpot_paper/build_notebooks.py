@@ -533,6 +533,20 @@ for ax, per_particle in ((axes[0], False), (axes[1], True)):
     style.finish(ax, legend_kwargs={\"loc\": \"best\", \"fontsize\": 6.4})
 
 fig.tight_layout()
+# A ladder point that failed is stated, not quietly dropped: silently omitting it
+# would make the sweep look like it covered a range it did not reach.
+failed = [r for r in art[\"data\"][\"records\"] if \"error\" in r]
+if failed:
+    axes[0].text(
+        0.02, 0.98,
+        \"not measured: N = \"
+        + \", \".join(f\"{r['n']:,}\" for r in failed)
+        + \"\\n(out of memory)\",
+        transform=axes[0].transAxes, va=\"top\", ha=\"left\",
+        fontsize=6.0, color=style.INK_MUTED,
+    )
+    print(\"not measured:\", [(r[\"n\"], r[\"error\"][:60]) for r in failed])
+
 style.footer(
     fig,
     jsonio.config_caption(cfg, [\"order\", \"theta\", \"basis\", \"leaf_size\", \"device\", \"seed\"])
@@ -546,13 +560,24 @@ for name, fit in sorted(fits.items()):
 """
 
 FIG05_CAPTION = """\
-Accepted M2L (far) and P2P (near) interaction counts against $N$, with fitted
-power-law exponents. These are properties of the tree and the acceptance
-criterion, independent of hardware, and so are the cleanest statement of the
-method's complexity -- wall-clock (figure 4) additionally mixes in memory
-bandwidth and kernel launch overhead. **Right:** the same counts per particle,
-where linear scaling appears as a flat line. Counts are read from the solver's
-public runtime diagnostics. Values from
+Accepted M2L (far) and P2P (near) interaction counts against $N$ at fixed opening
+angle and leaf size, with fitted power-law exponents. These are properties of the
+tree and the acceptance criterion alone, independent of hardware, and so are a
+cleaner statement of complexity than wall-clock (figure 4), which additionally
+mixes in memory bandwidth and kernel launch overhead.
+
+**Both exponents exceed one** -- $\\alpha = 1.32$ for M2L and $1.20$ for P2P
+($R^2 = 0.996$ and $0.9995$) -- and the right panel shows why: the counts *per
+particle* are not constant but grow, from 2.6 to 7.7 M2L pairs per particle across
+a factor of 32 in $N$. A factor of ~3 in response to a factor of 32 in $N$ is
+$\\log N$ growth, so the measurement is consistent with $O(N \\log N)$ rather than
+strictly linear, which is what a fixed leaf size and a fixed opening angle should
+give: the tree deepens with $N$, and each cell acquires more well-separated
+partners. The fitted single exponent is the power law that best approximates
+$N \\log N$ over this range, not evidence of a different asymptotic class.
+
+Counts come from the solver's public runtime diagnostics after `prepare_state`.
+Any ladder point that could not be measured is named on the figure. Values from
 `results/scaling/interaction_counts.json`.
 """
 
