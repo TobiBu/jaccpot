@@ -89,7 +89,15 @@ def _default_advanced_for_preset(preset: FMMPreset) -> FMMAdvancedConfig:
         cfg,
         tree=replace(cfg.tree, mode="lbvh", refine_local=True, max_refine_levels=1),
         farfield=replace(cfg.farfield, mode="pair_grouped"),
-        nearfield=replace(cfg.nearfield, mode="baseline"),
+        # "auto", not "baseline". This preset's accuracy comes from the tree
+        # (refine_local + an extra refinement level) and from the expansion, not
+        # from how the near field is traversed: baseline and bucketed visit the
+        # same leaf pairs and agree to one ulp at fp64 (4.2e-16 rel-L2 at
+        # N=8192). Pinning "baseline" only forced the per-pair reference scan,
+        # which on an A100 cost 507x at N=4096 and made this preset 139x slower
+        # than large_n_gpu. On a CPU "auto" still resolves to baseline here, so
+        # this changes the GPU answer only.
+        nearfield=replace(cfg.nearfield, mode="auto"),
         runtime=replace(cfg.runtime, host_refine_mode="on"),
     )
 

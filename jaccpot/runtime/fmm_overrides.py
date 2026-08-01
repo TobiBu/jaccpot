@@ -727,7 +727,27 @@ class OverridesMixin:
         )
 
     def _resolve_nearfield_mode(self, *, num_particles: int) -> str:
-        """Resolve near-field execution mode from configured policy."""
+        """Resolve near-field execution mode from configured policy.
+
+        The ``"auto"`` GPU answer is ``"bucketed"`` at every N, because
+        ``"baseline"`` is a ``lax.scan`` over leaf pairs *one pair at a time*
+        with a ``lax.cond`` per pair. That is the readable reference traversal
+        and it is competitive on a CPU, but on a GPU it serialises one launch
+        per leaf pair. Measured on an idle A100 at N=4096, leaf 64, p=4, real
+        basis, ``preset="accurate"``: 5.23 s baseline against 0.0103 s bucketed,
+        a factor of **507**, which is what made ``accurate`` on an A100 ~30x
+        slower than ``accurate`` on the CPU beside it.
+
+        The two traversals visit the same leaf pairs, so this is a scheduling
+        choice and not an accuracy one. Measured at fp64 on CPU, N=8192/leaf 64:
+        both sit at 4.4075521942e-05 rel-L2 against a direct O(N^2) sum
+        (agreeing to 13 significant figures), and differ from each other by
+        4.2e-16 -- one ulp of reassociation.
+
+        Deliberately GPU-only: on a CPU the per-pair scan has no launch cost to
+        pay and the existing CPU crossovers below stay as they were measured.
+        """
+
         if self._is_large_n_gpu_production_profile():
             if (
                 not bool(self._explicit_nearfield_mode)
@@ -740,18 +760,14 @@ class OverridesMixin:
         if mode != "auto":
             return mode
         backend = jax.default_backend()
-        large_gpu = (
-            backend == "gpu"
-            and int(num_particles) >= 262_144
-            and str(self.preset).strip().lower() == "large_n_gpu"
-            and str(self.expansion_basis).strip().lower() == "solidfmm"
-        )
+        if backend == "gpu":
+            # See the docstring: the per-pair baseline scan cannot win on a GPU
+            # at any size, so there is no crossover to tune here.
+            return "bucketed"
         large_cpu = (
             backend == "cpu"
             and int(num_particles) >= _NEARFIELD_BUCKETED_CPU_PARTICLE_THRESHOLD
         )
-        if large_gpu:
-            return "bucketed"
         if (
             large_cpu
             and self.preset == "fast"
