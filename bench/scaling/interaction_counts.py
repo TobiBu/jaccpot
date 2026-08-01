@@ -102,6 +102,14 @@ def main() -> int:
             softening=float(args.softening),
         )
         try:
+            # `prepare_state` alone is enough: the counts are produced by the dual
+            # tree traversal, and `recent_dual_far_pair_count` /
+            # `recent_dual_neighbor_count` are already populated when it returns.
+            # Verified identical with and without a following evaluate (far=2740,
+            # near=12136 at N=4096). Evaluating anyway made this figure the
+            # slowest in the set for no extra information -- it stalled past
+            # N=262144 because the `accurate` preset's evaluate is minutes per
+            # call on a GPU at that size (see the preset note in wallclock.py).
             state = solver.prepare_state(
                 points,
                 charges,
@@ -109,8 +117,7 @@ def main() -> int:
                 max_order=int(args.order),
                 theta=float(args.theta),
             )
-            accel = solver.evaluate_prepared_state(state)
-            jax.block_until_ready(accel)
+            jax.block_until_ready(state.tree.node_ranges)
         except Exception as exc:
             print(f"N={n:<9d} FAILED: {str(exc)[:140]}")
             records.append({"n": int(n), "error": str(exc)[:300]})
