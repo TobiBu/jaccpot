@@ -312,6 +312,34 @@ def test_evaluate_local_complex_derivative_tower_matches_third_order_autodiff() 
     assert np.allclose(np.asarray(d3), d3_ref, rtol=1e-11, atol=1e-11)
 
 
+@pytest.mark.parametrize(
+    "delta",
+    [[0.0, 0.0, 0.0], [0.0, 0.0, 0.37], [0.0, 0.0, -0.37]],
+    ids=["origin", "plus_z", "minus_z"],
+)
+@pytest.mark.parametrize("order", [1, 2, 4])
+def test_evaluate_local_complex_grad_at_rho_zero_matches_limit(delta, order) -> None:
+    """The complex L2P has no azimuthal degeneracy -- keep it that way.
+
+    ``complex_R_solidfmm`` is a pure polynomial recursion in (x, y, z): it never
+    forms an azimuth, so it is smooth at the expansion centre and on its z axis
+    where the real-basis L2P used to lose both transverse gradient components.
+    """
+    local = jnp.asarray(_complex_coeffs(order, 23))
+    delta = jnp.asarray(delta, dtype=jnp.float64)
+
+    grad, pot = evaluate_local_complex_with_grad(local, delta, order=order)
+    grad_off, pot_off = evaluate_local_complex_with_grad(
+        local, delta + jnp.asarray([3e-15, -4e-15, 0.0]), order=order
+    )
+
+    assert np.all(np.isfinite(np.asarray(grad)))
+    assert np.allclose(np.asarray(grad), np.asarray(grad_off), rtol=1e-9, atol=1e-12)
+    assert np.allclose(float(pot), float(pot_off), rtol=1e-9, atol=1e-12)
+    assert abs(float(grad[0])) > 1e-6
+    assert abs(float(grad[1])) > 1e-6
+
+
 def test_contract_spatial_derivative_with_velocity_matches_hessian_times_v() -> None:
     # Packed Hessian layout: xx, xy, xz, yy, yz, zz
     hessian_packed = jnp.array([2.0, -1.0, 4.0, 3.0, -2.0, 5.0], dtype=jnp.float64)
