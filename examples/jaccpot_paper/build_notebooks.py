@@ -227,91 +227,131 @@ comps = art["data"]["comparisons"]
 
 metric = cfg.get("matched_metric", "dehnen")
 prefix = {"relative": "", "scaled": "scaled_", "dehnen": "dehnen_"}[metric]
-p90_key, p99_key = f"{prefix}p90", f"{prefix}p99"
+p90_key = f"{prefix}p90"
 
 ARM_LABEL = {
     "fixed": "geometric (sweep $\\\\theta$)",
-    "mass": "mass-dependent, eq (16a) (sweep $\\\\epsilon$)",
-    "mass_16b": "eq (16b), exact $O(N^2)$ $f_b$",
+    "mass": "mass-dep., eq (16a)",
+    "mass_16b": "eq (16b), exact $f_b$",
 }
+ARM_ENTITY = {"fixed": "geometric", "mass": "mass", "mass_16b": "mass_16b"}
 dists = sorted({r["distribution"] for r in recs})
 orders = sorted({r["order"] for r in recs})
 
-fig, axes = style.figure(width=style.TWO_COL, height=3.0, ncols=2)
+# One trade-off panel PER ORDER, plus the ratio panel. Collapsing p=4 and p=8 into
+# a single line sorted by cost produced a zigzag: the two orders occupy different
+# cost-error curves, so joining them draws a path through both instead of either.
+fig, axes = style.figure(
+    width=style.TWO_COL, height=2.9, ncols=len(orders) + 1
+)
+axes = np.atleast_1d(axes)
 
-# Left: the raw trade-off. Cost on x, error on y -- lower and further left is
-# better, and the two arms' curves are directly comparable without any matching.
-ax = axes[0]
-for dist_i, dist in enumerate(dists):
-    for arm in ("fixed", "mass", "mass_16b"):
-        sel = sorted(
-            (r for r in recs
-             if r["arm"] == arm and r["distribution"] == dist and r[p90_key] > 0),
-            key=lambda r: r["pair_work"],
-        )
-        if not sel:
-            continue
-        ax.plot(
-            [r["pair_work"] for r in sel],
-            [r[p90_key] for r in sel],
-            marker=style.MARKERS[dist_i % len(style.MARKERS)],
-            linestyle=["-", "--", ":"][dist_i % 3],
-            color=style.entity_color({"fixed": "geometric"}.get(arm, arm)),
-            label=f"{ARM_LABEL[arm]} - {dist}",
-            markersize=3.2,
-        )
-ax.set_xscale("log"); ax.set_yscale("log")
-ax.set_xlabel("pair work (far $\\\\times$ coeffs + near)")
-ax.set_ylabel(f"90th-percentile scaled force error ({metric})")
-style.finish(ax, legend_kwargs={"loc": "lower left", "fontsize": 5.6})
-
-# Right: the head-to-head at MATCHED error. A ratio above 1 favours the mass MAC.
-ax = axes[1]
-if comps:
+for oi, order in enumerate(orders):
+    ax = axes[oi]
     for dist_i, dist in enumerate(dists):
-        for arm in sorted({c.get("mass_arm", "mass") for c in comps}):
+        for arm in ("fixed", "mass", "mass_16b"):
             sel = sorted(
-                (c for c in comps
-                 if c["distribution"] == dist
-                 and c.get("mass_arm", "mass") == arm
-                 and c.get("pair_work_ratio")),
-                key=lambda c: c["matched_p90"],
+                (r for r in recs
+                 if r["arm"] == arm and r["distribution"] == dist
+                 and r["order"] == order and r[p90_key] > 0),
+                key=lambda r: r["pair_work"],
             )
             if not sel:
                 continue
             ax.plot(
-                [c["matched_p90"] for c in sel],
-                [c["pair_work_ratio"] for c in sel],
+                [r["pair_work"] for r in sel],
+                [r[p90_key] for r in sel],
                 marker=style.MARKERS[dist_i % len(style.MARKERS)],
-                linestyle=["-", "--", ":"][dist_i % 3],
-                color=style.entity_color(arm),
-                label=f"{arm} - {dist}",
-                markersize=3.2,
+                linestyle=["-", "--"][dist_i % 2],
+                color=style.entity_color(ARM_ENTITY[arm]),
+                label=f"{ARM_LABEL[arm]} - {dist}",
+                markersize=3.0,
+                linewidth=1.1,
             )
+    ax.set_xscale("log")
+    ax.set_yscale("log")
+    ax.set_xlabel("pair work")
+    ax.set_title(f"$p={order}$", fontsize=8)
+    style.finish(
+        ax, legend=(oi == 0), legend_kwargs={"loc": "lower left", "fontsize": 5.2}
+    )
+axes[0].set_ylabel(f"90th-pct scaled force error ({metric})")
+
+# Ratio panel: geometric / mass-dependent at matched error. Work ratio and error
+# ratio are both dimensionless ratios against the same baseline, so they share one
+# axis legitimately -- and plotting only the work ratio would report half the
+# result, since cost lands at parity while the tail does not.
+ax = axes[-1]
+if comps:
+    for dist_i, dist in enumerate(dists):
+        for arm in ["mass"]:
+            sel = sorted(
+                (c for c in comps
+                 if c["distribution"] == dist
+                 and c.get("mass_arm", "mass") == arm),
+                key=lambda c: c["matched_p90"],
+            )
+            work = [c for c in sel if c.get("pair_work_ratio")]
+            if work:
+                ax.plot(
+                    [c["matched_p90"] for c in work],
+                    [c["pair_work_ratio"] for c in work],
+                    marker=style.MARKERS[dist_i % len(style.MARKERS)],
+                    linestyle=["-", "--"][dist_i % 2],
+                    color=style.entity_color(arm),
+                    label=f"work, {arm}, {dist}",
+                    markersize=3.0,
+                    linewidth=1.1,
+                )
+            tail = [c for c in sel if c.get("p99_ratio")]
+            if tail:
+                ax.plot(
+                    [c["matched_p90"] for c in tail],
+                    [c["p99_ratio"] for c in tail],
+                    marker=style.MARKERS[dist_i % len(style.MARKERS)],
+                    linestyle=["-", "--"][dist_i % 2],
+                    color=style.CATEGORICAL[4],
+                    label=f"p99 error, {arm}, {dist}",
+                    markersize=3.0,
+                    linewidth=1.1,
+                    markerfacecolor="white",
+                )
     ax.axhline(1.0, color=style.INK_MUTED, linewidth=0.8, zorder=1)
     ax.text(
-        0.98, 1.0, " parity", transform=ax.get_yaxis_transform(),
-        ha="right", va="bottom", fontsize=6.5, color=style.INK_MUTED,
+        0.02, 1.0, " parity", transform=ax.get_yaxis_transform(),
+        ha="left", va="bottom", fontsize=6.0, color=style.INK_MUTED,
     )
-    ax.set_xscale("log"); ax.set_yscale("log")
-    ax.set_xlabel("matched 90th-percentile error")
-    ax.set_ylabel("work ratio, geometric / mass-dependent")
-    style.finish(ax, legend_kwargs={"loc": "best", "fontsize": 6})
-    ratios = [c["pair_work_ratio"] for c in comps if c.get("pair_work_ratio")]
-    if ratios:
-        print(f"work ratio at matched error: min {min(ratios):.2f} max {max(ratios):.2f}")
-        print("(> 1 favours the mass-dependent MAC)")
+    ax.set_xscale("log")
+    ax.set_yscale("log")
+    ax.set_xlabel("matched 90th-pct error")
+    ax.set_ylabel("ratio, geometric / mass-dep.")
+    ax.set_title("at matched error", fontsize=8)
+    ax.grid(True, which="major")
+    ax.legend(loc="upper left", fontsize=5.0)
 else:
-    ax.text(0.5, 0.5, "no matched-error overlap\\nin this sweep",
-            ha="center", va="center", transform=ax.transAxes, color=style.INK_MUTED)
+    ax.text(0.5, 0.5, "no matched-error overlap", ha="center", va="center",
+            transform=ax.transAxes, color=style.INK_MUTED)
     ax.set_axis_off()
 
 fig.tight_layout()
 style.footer(
     fig,
-    jsonio.config_caption(cfg, ["n", "order", "leaf_size", "precision", "device"]),
+    jsonio.config_caption(cfg, ["n", "order", "leaf_size", "precision", "device", "seed"]),
+    y=-0.08,
 )
 style.save(fig, FIG_DIR / "fig03_mac_comparison.pdf")
+
+work = [c["pair_work_ratio"] for c in comps if c.get("pair_work_ratio")]
+p99 = [c["p99_ratio"] for c in comps if c.get("p99_ratio")]
+mx = [c["max_ratio"] for c in comps if c.get("max_ratio")]
+print("at matched 90th-percentile error, ratio geometric/mass (>1 favours mass):")
+if work:
+    print(f"  pair work : {min(work):.2f} .. {max(work):.2f}")
+if p99:
+    print(f"  p99 error : {min(p99):.2f} .. {max(p99):.2f}")
+if mx:
+    print(f"  max error : {min(mx):.2f} .. {max(mx):.2f}")
+print("  -> cost is at parity; the error TAIL is where the criterion pays off")
 """
 
 FIG03_CAPTION = """\
@@ -320,12 +360,30 @@ clustered distributions. **Left:** the raw trade-off -- hardware-independent pai
 work against the 90th-percentile scaled force error, each arm swept over its own
 accuracy knob ($\\theta$ for the geometric criterion, $\\epsilon$ for the
 mass-dependent one). **Right:** the two arms log-interpolated onto a common error
-and compared there; a ratio above the parity line would favour the
-mass-dependent criterion. **As measured, the mass-dependent criterion gives no net
-compute advantage at matched error.** The eq. (16b) arm supplies the exact
-$O(N^2)$ force scale $f_b$ and is included as a ceiling on what a better force-scale
-estimator could buy, not as a runnable configuration. Nothing here is tuned to
-favour either arm. Values from `results/validation/mac_comparison.json`.
+and compared there, as ratios of geometric to mass-dependent, so above the parity
+line favours the mass-dependent criterion.
+
+The measurement splits into two answers, and reporting either alone would
+misrepresent it:
+
+* **Cost is at parity.** The pair-work ratio spans 0.99-1.20 across both
+  distributions and both orders, mostly sitting at 1.00. **There is no net compute
+  advantage to the mass-dependent criterion at matched error** -- the finding this
+  figure was built to test, confirmed as measured.
+* **The error tail is not at parity.** At the *same* 90th-percentile error the
+  mass-dependent criterion's 99th percentile is 1.15-210x smaller, and its worst
+  single-particle error up to ~2000x smaller. That is Dehnen's own §5.3 claim,
+  which is about the shape of the error distribution rather than about speed, and
+  it is reproduced here.
+
+So the criterion buys a much better tail at essentially the same cost, rather than
+the same accuracy more cheaply. Which of those is worth having depends on whether
+an application is limited by its worst particle or by its throughput.
+
+The eq. (16b) arm supplies the exact $O(N^2)$ force scale $f_b$ and is a ceiling on
+what a better force-scale estimator could buy, not a runnable configuration.
+Nothing here is tuned to favour either arm; the sweep grids are the engineering
+benchmark's defaults. Values from `results/validation/mac_comparison.json`.
 """
 
 # --------------------------------------------------------------------------- #
