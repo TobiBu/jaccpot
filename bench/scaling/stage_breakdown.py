@@ -69,16 +69,27 @@ PROFILE_ENV = {
 }
 
 # Raw `_refresh_timing_<name>_seconds` counters grouped into the stages the figure
-# shows. Anything measured but unmapped is summed into `other_measured`, so a
-# counter added upstream cannot silently vanish from the plot.
+# shows. Only counters named here are summed, and the rest of the measured wall
+# clock becomes `unattributed`. That ordering matters: the counters are a
+# *hierarchy*, not a partition -- `nearfield` is itself the sum of the
+# `nearfield_*` children, and `tree_upward` the sum of the `upward_*` ones -- so a
+# scheme that sums "everything not explicitly excluded" double-counts. Measured at
+# N=65536: nearfield 80.33 ms against its children summing to 79.4 ms, which the
+# first version of this map charged twice.
+#
+# Sum-only-what-is-named makes double counting impossible by construction. The
+# risk it trades for is a genuinely-measured stage silently joining
+# `unattributed` because nobody mapped it, so every run also records
+# `unmapped_nonzero_s` and prints it.
 STAGE_MAP: dict[str, tuple[str, ...]] = {
+    # Zero during a refresh loop, and that is the point: topology is reused, so a
+    # rebuilt tree would show up here.
     "tree_build": ("tree_build",),
-    "p2m_m2m": (
-        "upward_p2m",
-        "upward_m2m",
-        "upward_geometry",
-        "upward_mass_moments",
-    ),
+    # Its own band, not folded into P2M/M2M. Measured at 634 ms of a 1079 ms step
+    # at N=65536 -- 59%, the single largest cost in the refresh, and burying it
+    # inside an upward-pass band was actively misleading.
+    "upward_geometry": ("upward_geometry",),
+    "p2m_m2m": ("upward_p2m", "upward_m2m", "upward_mass_moments"),
     "m2l": ("dual_m2l_compute",),
     "l2l": ("dual_l2l_compute",),
     "nearfield_p2p": ("nearfield",),
@@ -90,22 +101,31 @@ STAGE_MAP: dict[str, tuple[str, ...]] = {
     ),
 }
 
-# Counters that are sums of others; adding them to the stage total would
-# double-count.
-AGGREGATE_COUNTERS = {
+# Counters that are known sums of other counters. Not plotted, and reported
+# separately so `unmapped_nonzero_s` stays a list of genuine surprises.
+KNOWN_AGGREGATES = {
     "total",
-    "input",
     "tree_upward",
     "upward_compute",
     "dual_downward",
     "dual_downward_compute",
+    "nearfield_leaf_groups",
+    "nearfield_precompute",
+    "nearfield_target_blocks",
+    "nearfield_block_sort",
+    "nearfield_speed_layout",
+    "nearfield_overflow_profile",
+    "nearfield_radix_payload",
+    "nearfield_neighbor_padding",
+    "nearfield_state_pack",
+    "nearfield_residual",
+    "input",
     "profile_accounting",
     "compile_or_sync_suspect",
     "dual_split_combined",
     "dual_raw_combined",
     "dual_finalize",
     "dual_residual",
-    "nearfield_residual",
 }
 
 
@@ -124,6 +144,18 @@ def _parse_args() -> argparse.Namespace:
     p.add_argument("--theta", type=float, default=0.6)
     p.add_argument("--leaf-size", type=int, default=256)
     p.add_argument("--drift", type=float, default=1e-4)
+    p.add_argument(
+        "--max-pair-queue",
+        type=int,
+        default=1 << 22,
+        help=(
+            "Traversal pair-queue capacity. The default 131072 fails at and above "
+            "N=262144 with 'Pair queue capacity exceeded', which cost this figure "
+            "its top two ladder points on the first run (default: 4194304)"
+        ),
+    )
+    p.add_argument("--max-neighbors-per-leaf", type=int, default=1 << 16)
+    p.add_argument("--max-interactions-per-node", type=int, default=1 << 16)
     runmeta.add_common_args(p)
     p.set_defaults(dtype="float32")
     return p.parse_args()
@@ -138,7 +170,13 @@ def main() -> int:
     import jax  # noqa: E402
     import jax.numpy as jnp  # noqa: E402
 
-    from jaccpot import FastMultipoleMethod  # noqa: E402
+    from yggdrax.interactions import DualTreeTraversalConfig  # noqa: E402
+
+    from jaccpot import (  # noqa: E402
+        FastMultipoleMethod,
+        FMMAdvancedConfig,
+        RuntimePolicyConfig,
+    )
 
     if jax.default_backend() == "cpu":
         print(
@@ -160,7 +198,18 @@ def main() -> int:
         )
         vel = 0.01 * jax.random.normal(k_vel, (n, 3), dtype=jnp.float32)
 
+        advanced = FMMAdvancedConfig(
+            runtime=RuntimePolicyConfig(
+                traversal_config=DualTreeTraversalConfig(
+                    max_pair_queue=int(args.max_pair_queue),
+                    process_block=512,
+                    max_interactions_per_node=int(args.max_interactions_per_node),
+                    max_neighbors_per_leaf=int(args.max_neighbors_per_leaf),
+                )
+            )
+        )
         solver = FastMultipoleMethod(
+            advanced=advanced,
             preset="large_n_gpu",
             runtime_path="large_n",
             expansion_basis="solidfmm",
@@ -230,11 +279,19 @@ def main() -> int:
                     claimed.add(counter)
             mapped[stage] = total
 
-        mapped["other_measured"] = sum(
-            v
+        # Any nonzero counter that is neither mapped nor a known aggregate is a
+        # stage this taxonomy has not accounted for. It is reported rather than
+        # folded in, so it cannot quietly inflate a band.
+        unmapped = {
+            k: v
             for k, v in per_step_raw.items()
-            if k not in claimed and k not in AGGREGATE_COUNTERS
-        )
+            if v > 0 and k not in claimed and k not in KNOWN_AGGREGATES
+        }
+        if unmapped:
+            print(
+                "  [warn] nonzero counters not in STAGE_MAP: "
+                + ", ".join(f"{k}={v*1e3:.2f}ms" for k, v in sorted(unmapped.items()))
+            )
 
         per_step_wall = wall / steps
         stage_sum = sum(mapped.values())
@@ -249,6 +306,7 @@ def main() -> int:
                 (stage_sum / per_step_wall) if per_step_wall else None
             ),
             "raw_per_step_s": per_step_raw,
+            "unmapped_nonzero_s": unmapped,
             "steps": steps,
         }
         records.append(record)
@@ -275,6 +333,7 @@ def main() -> int:
         "warmup": int(args.warmup),
         "drift": float(args.drift),
         "profile_env": dict(PROFILE_ENV),
+        "max_pair_queue": int(args.max_pair_queue),
         "note": (
             "Per-stage timers exist only on the strict non-fused refresh path, "
             "implemented for preset='large_n_gpu'/radix/solidfmm. This breakdown "
@@ -282,6 +341,7 @@ def main() -> int:
             "figures 01-03."
         ),
         "stage_map": {k: list(v) for k, v in STAGE_MAP.items()},
+        "known_aggregates": sorted(KNOWN_AGGREGATES),
     }
     out = jsonio.write_result(
         args.json_out or DEFAULT_OUT,
