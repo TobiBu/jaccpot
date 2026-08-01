@@ -1304,13 +1304,17 @@ class StrictRunMixin:
 
         if refresh_timing_active:
             elapsed = time.perf_counter() - dual_t0
-            recorded = float(
-                getattr(self, "_refresh_timing_dual_downward_seconds", 0.0)
-            )
-            # _prepare_state_dual_and_downward records detailed timing itself.
-            # Keep this branch intentionally empty except to make the elapsed
-            # value visible while avoiding double accounting.
-            _ = (elapsed, recorded)
+            if reuse_static_compact_pairs:
+                # The compact-far-pair reuse branch above does NOT go through
+                # _prepare_state_dual_and_downward, so nothing else records this
+                # stage -- and this is the steady-state route once topology is
+                # frozen, which is precisely when a per-step breakdown is being
+                # read. Leaving it unrecorded made the entire downward pass
+                # (~30% of per-step time at N=65536) land in "unattributed", and
+                # made every dual_* counter read as a hard zero.
+                self._refresh_timing_dual_downward_seconds += elapsed
+            # Otherwise _prepare_state_dual_and_downward has already recorded
+            # this stage and its children; adding elapsed here would double-count.
 
         if (
             tree_config.mode != "static_radix"

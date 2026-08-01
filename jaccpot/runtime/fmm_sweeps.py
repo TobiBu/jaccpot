@@ -340,13 +340,23 @@ class SweepsMixin:
             p_gears_val = (
                 self.p_gears if p_gears is None else tuple(int(v) for v in p_gears)
             )
+            # Substage (M2L / L2L) timing defaults ON whenever refresh timing is
+            # active. It costs a device sync per substage, which is why it is
+            # switchable at all -- but JACCPOT_REFRESH_TIMING_ENABLE already
+            # means "I am profiling this step", and the previous default of OFF
+            # meant refresh_dual_m2l_compute_seconds and its L2L sibling were
+            # reported as a hard 0.0 in exactly the mode where someone was
+            # reading them. A zero that means "not measured" is worse than no
+            # number: it drew an M2L band at zero and pushed the whole far field
+            # into "unattributed". Set the variable to 0 to opt back out.
             timing_recorder = None
             sync_substage_timing = str(
-                os.environ.get("JACCPOT_REFRESH_TIMING_SYNC_SUBSTAGES", "0")
+                os.environ.get("JACCPOT_REFRESH_TIMING_SYNC_SUBSTAGES", "1")
             ).strip().lower() in {"1", "true", "yes", "on"}
             if bool(getattr(self, "_refresh_timing_active", False)) and bool(
                 sync_substage_timing
             ):
+                self._refresh_timing_substages_measured = True
 
                 def timing_recorder(attr: str, elapsed: float) -> None:
                     setattr(self, attr, float(getattr(self, attr, 0.0)) + elapsed)
