@@ -92,6 +92,20 @@ def _parse_args() -> argparse.Namespace:
         ),
     )
     p.add_argument(
+        "--no-jit",
+        action="store_true",
+        help=(
+            "Skip the jax.jit attempt and time eager dispatch directly. The jit "
+            "attempt is not merely slow at large N -- measured on an A100 it had "
+            "not finished compiling after 18 minutes even at N=256, so the cost is "
+            "the unrolled differentiable pipeline rather than the problem size, and "
+            "the try/except fallback never fires because slowness is not an "
+            "exception. With this set, both arms run eagerly and the ratio is "
+            "self-consistent but includes per-call re-tracing on both sides, which "
+            "makes it an upper bound rather than a compute ratio"
+        ),
+    )
+    p.add_argument(
         "--nearfield-lane",
         default="auto",
         choices=("auto", "bucketed", "fast_lane"),
@@ -245,11 +259,15 @@ def main() -> int:
                     return out
 
                 try:
-                    try:
-                        row = measure("jit")
-                    except Exception as jit_exc:
+                    if args.no_jit:
                         row = measure("eager")
-                        row["jit_fallback_reason"] = str(jit_exc)[:200]
+                        row["jit_skipped"] = "--no-jit"
+                    else:
+                        try:
+                            row = measure("jit")
+                        except Exception as jit_exc:
+                            row = measure("eager")
+                            row["jit_fallback_reason"] = str(jit_exc)[:200]
                     mode = row["mode"]
                     t_fwd = row["forward_min_s"]
                     records.append(row)
