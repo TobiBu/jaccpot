@@ -18,10 +18,11 @@ the ``dehnen_paper`` model needs an explicit symmetrization.
 
 from __future__ import annotations
 
+from dataclasses import replace
+
 import jax.numpy as jnp
 import numpy as np
 import pytest
-from dataclasses import replace
 
 from jaccpot.config import FMMAdvancedConfig
 from jaccpot.solver import FastMultipoleMethod
@@ -44,9 +45,7 @@ def _problem(seed: int = 0, clustered: bool = False):
                 rng.normal(scale=0.15, size=(N - half, 3)) + np.array([3.0, 0.0, 0.0]),
             ]
         )
-        mass = np.concatenate(
-            [np.full(half, 1.0), np.full(N - half, 0.01)]
-        )
+        mass = np.concatenate([np.full(half, 1.0), np.full(N - half, 0.01)])
     else:
         pos = rng.uniform(-1.0, 1.0, size=(N, 3))
         mass = rng.uniform(0.5, 1.5, size=N)
@@ -137,17 +136,16 @@ def test_far_near_partition_is_complete(mac_type, adaptive_eps, clustered):
     advanced = replace(
         advanced,
         mac_type=mac_type,
-        runtime=replace(advanced.runtime, retain_traversal_result=True,
-                        retain_interactions=True),
+        runtime=replace(
+            advanced.runtime, retain_traversal_result=True, retain_interactions=True
+        ),
     )
     kwargs = dict(theta=0.6, advanced=advanced)
     if adaptive_eps is not None:
         kwargs["adaptive_eps"] = adaptive_eps
 
     fmm = FastMultipoleMethod(**kwargs)
-    state = fmm.prepare_state(
-        positions, masses, leaf_size=LEAF, max_order=ORDER
-    )
+    state = fmm.prepare_state(positions, masses, leaf_size=LEAF, max_order=ORDER)
 
     counts = _coverage_counts(state)
     missing = int(np.sum(counts == 0))

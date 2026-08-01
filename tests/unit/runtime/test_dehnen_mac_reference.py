@@ -92,8 +92,8 @@ def test_dehnen_power_of_point_mass_equals_mass_times_distance_pow_n(basis, delt
     the coordinate axes -- breaks it.
     """
 
-    packed = _packed_real(delta, MASS) if basis == "real" else _packed_complex(
-        delta, MASS
+    packed = (
+        _packed_real(delta, MASS) if basis == "real" else _packed_complex(delta, MASS)
     )
     power = np.asarray(dehnen_multipole_power_by_degree(multipole_packed=packed))[0]
 
@@ -268,9 +268,7 @@ def _paper_state(
         order_tags=jnp.asarray([0], dtype=jnp.int32),
         order_values=jnp.asarray(order_arr, dtype=jnp.int32),
         order_values_float=jnp.asarray(order_arr, dtype=jnp.float64),
-        dehnen_binomial_masked_by_order=jnp.asarray(
-            masked_binomial, dtype=jnp.float64
-        ),
+        dehnen_binomial_masked_by_order=jnp.asarray(masked_binomial, dtype=jnp.float64),
         dehnen_exponent_by_order=jnp.asarray(exponent, dtype=jnp.int32),
         relaxed_theta_sq=jnp.asarray(1.0, dtype=jnp.float64),
         error_model_code=jnp.asarray(_ERROR_MODEL_DEHNEN_PAPER, dtype=jnp.int32),
@@ -399,7 +397,9 @@ def test_node_sphere_contains_every_particle(leaf_mode):
         if reach > radii[node] + 1e-9:
             failures.append((node, reach, float(radii[node])))
 
-    assert not failures, f"{len(failures)} nodes do not contain their particles: {failures[:5]}"
+    assert (
+        not failures
+    ), f"{len(failures)} nodes do not contain their particles: {failures[:5]}"
 
 
 def _upward_fixture(n: int = 512, seed: int = 3):
@@ -428,9 +428,7 @@ def _upward_fixture(n: int = 512, seed: int = 3):
     return tree, positions_sorted, upward
 
 
-@pytest.mark.parametrize(
-    "mode", ["com", "exact", "tree", "tree_approx", "runtime"]
-)
+@pytest.mark.parametrize("mode", ["com", "exact", "tree", "tree_approx", "runtime"])
 def test_resolved_mac_radius_is_a_valid_bound_about_the_expansion_centre(mode):
     """Every geometry mode must bound the radius about the M2L expansion centre.
 
@@ -463,7 +461,9 @@ def test_resolved_mac_radius_is_a_valid_bound_about_the_expansion_centre(mode):
         if end < start:
             continue
         reach = float(
-            np.max(np.linalg.norm(pos[start : end + 1] - expansion_centers[node], axis=1))
+            np.max(
+                np.linalg.norm(pos[start : end + 1] - expansion_centers[node], axis=1)
+            )
         )
         if reach > radii[node] + 1e-9:
             failures.append((node, reach, float(radii[node])))
@@ -567,9 +567,9 @@ def test_force_scale_min_ignores_empty_leaves():
     )
     num_internal = int(real_tree.num_internal_nodes)
     node_ranges = np.asarray(real_tree.node_ranges).copy()
-    assert np.all(node_ranges[num_internal:, 1] >= node_ranges[num_internal:, 0]), (
-        "fixture assumes the freshly built tree starts with no empty leaves"
-    )
+    assert np.all(
+        node_ranges[num_internal:, 1] >= node_ranges[num_internal:, 0]
+    ), "fixture assumes the freshly built tree starts with no empty leaves"
 
     # Blank one leaf so it spans nothing, exactly as capacity padding does.
     blanked = num_internal

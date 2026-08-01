@@ -24,11 +24,12 @@ Note on what each test can and cannot see:
 
 from __future__ import annotations
 
+from dataclasses import replace
+
 import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
-from dataclasses import replace
 
 from jaccpot import FastMultipoleMethod
 from jaccpot.config import FMMAdvancedConfig
@@ -76,8 +77,9 @@ def _mass_mac_solver(*, theta=1.0, eps=EPS_MAC, softening=1e-2, G=1.0, geometry=
     advanced = replace(
         cfg,
         mac_type="dehnen_error",
-        runtime=replace(cfg.runtime, retain_traversal_result=True,
-                        retain_interactions=True),
+        runtime=replace(
+            cfg.runtime, retain_traversal_result=True, retain_interactions=True
+        ),
     )
     return FastMultipoleMethod(
         basis="real",
@@ -113,20 +115,24 @@ def test_fd_vs_ad_under_mass_dependent_mac(wrt):
 
     positions, masses, probe = _system(N_PARTICLES, seed=1)
     fmm = _mass_mac_solver()
-    state = fmm.prepare_state(positions, masses, leaf_size=LEAF_SIZE, max_order=MAX_ORDER)
+    state = fmm.prepare_state(
+        positions, masses, leaf_size=LEAF_SIZE, max_order=MAX_ORDER
+    )
     assert _num_far_pairs(state) > 0, "config must exercise the M2L reverse pass"
 
     if wrt == "positions":
+
         def loss(x):
-            return jnp.sum(
-                probe * fmm.differentiable_accelerations(state, x, masses)
-            )
+            return jnp.sum(probe * fmm.differentiable_accelerations(state, x, masses))
+
         x0, direction = positions, probe
     else:
+
         def loss(m):
             return jnp.sum(
                 probe * fmm.differentiable_accelerations(state, positions, m)
             )
+
         x0 = masses
         direction = jnp.asarray(
             np.random.default_rng(2).normal(size=masses.shape), dtype=jnp.float64
@@ -158,7 +164,9 @@ def test_grad_matches_direct_sum_under_mass_dependent_mac(wrt):
     positions, masses, probe = _system(N_PARTICLES, seed=1)
     softening, G = 1e-2, 1.0
     fmm = _mass_mac_solver(softening=softening, G=G)
-    state = fmm.prepare_state(positions, masses, leaf_size=LEAF_SIZE, max_order=MAX_ORDER)
+    state = fmm.prepare_state(
+        positions, masses, leaf_size=LEAF_SIZE, max_order=MAX_ORDER
+    )
     assert _num_far_pairs(state) > 0, "config must exercise the M2L reverse pass"
 
     def fmm_loss(pos, m):
@@ -194,7 +202,9 @@ def test_grad_matches_direct_sum_under_mass_dependent_mac(wrt):
 def _accept_signature(fmm, positions, masses) -> tuple[int, ...]:
     """A rebuilt topology fingerprint: the sorted accepted (target, source) pairs."""
 
-    state = fmm.prepare_state(positions, masses, leaf_size=LEAF_SIZE, max_order=MAX_ORDER)
+    state = fmm.prepare_state(
+        positions, masses, leaf_size=LEAF_SIZE, max_order=MAX_ORDER
+    )
     inter = state.interactions
     assert inter is not None
     src = np.asarray(inter.sources)
@@ -213,7 +223,9 @@ def test_mass_perturbation_that_crosses_no_mac_boundary_is_smooth():
 
     positions, masses, probe = _system(N_PARTICLES, seed=1)
     fmm = _mass_mac_solver()
-    state = fmm.prepare_state(positions, masses, leaf_size=LEAF_SIZE, max_order=MAX_ORDER)
+    state = fmm.prepare_state(
+        positions, masses, leaf_size=LEAF_SIZE, max_order=MAX_ORDER
+    )
     assert _num_far_pairs(state) > 0
 
     rng = np.random.default_rng(5)
@@ -260,7 +272,9 @@ def test_force_scale_nodes_receives_no_cotangent():
 
     positions, masses, probe = _system(N_PARTICLES, seed=1)
     fmm = _mass_mac_solver()
-    state = fmm.prepare_state(positions, masses, leaf_size=LEAF_SIZE, max_order=MAX_ORDER)
+    state = fmm.prepare_state(
+        positions, masses, leaf_size=LEAF_SIZE, max_order=MAX_ORDER
+    )
     if state.force_scale_nodes is None:
         pytest.skip("this configuration does not populate force_scale_nodes")
 
@@ -295,7 +309,9 @@ def test_device_side_geometry_modes_are_differentiable(mode):
 
     positions, masses, probe = _system(N_PARTICLES, seed=1)
     fmm = _mass_mac_solver(geometry=mode)
-    state = fmm.prepare_state(positions, masses, leaf_size=LEAF_SIZE, max_order=MAX_ORDER)
+    state = fmm.prepare_state(
+        positions, masses, leaf_size=LEAF_SIZE, max_order=MAX_ORDER
+    )
 
     @jax.jit
     def loss(pos, m):
@@ -314,14 +330,19 @@ def test_host_loop_geometry_modes_reject_tracers_clearly(mode):
     inside the policy builder.
     """
 
+    from yggdrax.tree import Tree
+
     from jaccpot.runtime._adaptive_policy import resolve_dehnen_geometry
     from jaccpot.upward.tree_expansions import prepare_upward_sweep
-    from yggdrax.tree import Tree
 
     positions, masses, _ = _system(N_PARTICLES, seed=1)
     tree = Tree.from_particles(
-        positions, masses, leaf_size=LEAF_SIZE, tree_type="radix",
-        target_leaf_particles=LEAF_SIZE, refine_local=False,
+        positions,
+        masses,
+        leaf_size=LEAF_SIZE,
+        tree_type="radix",
+        target_leaf_particles=LEAF_SIZE,
+        refine_local=False,
     )
     positions_sorted = positions[tree.particle_indices]
     masses_sorted = masses[tree.particle_indices]
