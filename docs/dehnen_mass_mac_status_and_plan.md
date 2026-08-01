@@ -79,7 +79,9 @@ they belong at the top of this document rather than in a changelog.
 
 An FMM's far field substitutes a node's multipole expansion for its particles. If a
 node spans particles but its expansion is zero, every M2L sourced from it contributes
-nothing and that mass vanishes from those targets. Two independent defects did that:
+nothing and that mass vanishes from those targets. Two independent defects did that. Both are fixed on this branch in `8afd705` and
+submitted to `main` separately as **PR #56** (`fix/upward-m2m-mass-loss`), which is
+where they should be reviewed — they are not MAC work and should not wait behind it:
 
 | # | Where | Cause | Mass lost at N=1024 |
 |---|---|---|---|
@@ -123,8 +125,10 @@ tolerance.
   `theta**(p+2)` — a `tail_proxy` heuristic that at θ=0.6, p=4 gives **0.047**, a 4.7 %
   per-interaction tolerance. That is how a wildly loose ε reached the accuracy
   notebooks. Note θ does **not** gate acceptance in paper mode at all.
-- **`mac_theta_max`** (default 1.0 = eq (16a) verbatim) caps the opening angle. See
-  "why this is needed" below.
+- **`mac_theta_max`** (default 1.0 = eq (16a) verbatim) caps the opening angle. It was
+  added because acceptance appeared to reach opening 0.997; that turned out to be the
+  M2M mass-loss bug, and post-fix eq (16a) verbatim never exceeds 0.786. The knob stays
+  (it is cheap and occasionally useful) but **is no longer needed** — see trap 4.
 - Silent downgrades now raise: the strict fused device-only lane
   (`fmm_prepare.py` ~:795) and an explicit `runtime_path="large_n"` request
   (`_large_n_pipeline.py` ~:1918). The large-N decline reason is surfaced in
@@ -262,11 +266,23 @@ is the **scaled error δa/f** with `f_b ≡ Σ_{a≠b} G μ_a / |x_a−x_b|²`.
    distributions build the deepest trees, so they were hit hardest (clu_solidfmm went
    2.5e-2 to 3.5e-4). Re-measure bulge+halo post-fix before treating it as a bad
    discriminator, and before drawing any MAC conclusion from it either way.
-4. **eq (16a) alone admits near-divergent pairs.** Its only geometric guard is θ < 1,
-   which is the *boundary of convergence*; measured acceptance reached opening 0.997,
-   where a p=4 expansion has O(1) error and eq (15)'s bound — derived assuming
-   convergence — under-predicts. No ε protects against this; only `mac_theta_max` does.
-   Capping below 1 is a **disclosed deviation** from the paper, not a bug fix.
+4. ~~**eq (16a) alone admits near-divergent pairs.**~~ **VOID — this was the M2M bug.**
+   The original observation (acceptance at opening up to 0.997, ε powerless against it)
+   was made when zero-multipole nodes made eq (15)'s estimate collapse to zero, so those
+   pairs passed any threshold. Re-measured post-`8afd705` on Plummer N=4096 p=8 with
+   eq (16a) **verbatim** (`mac_theta_max=1.0`):
+
+   | ε | far pairs | median opening | max opening | frac > 0.9 |
+   |---|---|---|---|---|
+   | 1e-4 | 7988 | 0.586 | 0.786 | 0.000 |
+   | 1e-5 | 2374 | 0.469 | 0.595 | 0.000 |
+   | 1e-6 | 122 | 0.381 | 0.435 | 0.000 |
+
+   Nothing above 0.786 is ever accepted, and the maximum opening *falls* as ε tightens
+   — the correct convergent behaviour. **`mac_theta_max` is therefore not needed**, and
+   the "disclosed deviation from the paper" it required goes away: eq (16a) as written
+   is safe. Keep the knob (default 1.0 = verbatim), but do not set it below 1 without a
+   fresh reason, and do not describe it as necessary.
 5. **eq (16a) is very conservative at small N.** The threshold is `ε·min_b|a_b|` over
    the target cell, so the least-accelerated particle sets the budget. At N=64/leaf=4
    it accepts *nothing* for any ε in [1e-5, 1e-2]. Gradient tests need N≥512/leaf=8 at
