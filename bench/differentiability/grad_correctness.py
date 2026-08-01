@@ -37,8 +37,7 @@ CPU smoke::
 
 Paper run::
 
-    python -m bench.differentiability.grad_correctness \\
-        --n 512 --thetas 0.3,0.4,0.5,0.6,0.7,0.8 --fd-samples 24
+    python -m bench.differentiability.grad_correctness
 """
 
 from __future__ import annotations
@@ -61,11 +60,18 @@ def _parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
     )
-    p.add_argument("--n", type=int, default=512)
-    p.add_argument("--thetas", default="0.3,0.4,0.5,0.6,0.7,0.8")
+    # N=4096 with an 8-particle leaf, not N=512 with 16. Measured far-pair counts
+    # on Plummer: N=512/leaf=16 has an EMPTY far field at every theta up to 0.8,
+    # so the whole sweep would check only the near-field gradient and never the
+    # M2L/L2L cascade -- which is the part of the FMM gradient worth verifying.
+    # N=4096/leaf=8 keeps it populated across the range (4218 far pairs at
+    # theta=0.3 up to 49382 at 0.5). `far_pairs` is recorded per point so an empty
+    # far field is always visible rather than assumed away.
+    p.add_argument("--n", type=int, default=4096)
+    p.add_argument("--thetas", default="0.3,0.5,0.7")
     p.add_argument("--orders", default="4")
     p.add_argument("--basis", default="real,solidfmm")
-    p.add_argument("--leaf-size", type=int, default=16)
+    p.add_argument("--leaf-size", type=int, default=8)
     p.add_argument("--preset", default="accurate")
     p.add_argument("--distribution", default="plummer")
     p.add_argument(
@@ -76,11 +82,11 @@ def _parse_args() -> argparse.Namespace:
     p.add_argument(
         "--fd-samples",
         type=int,
-        default=24,
+        default=12,
         help=(
             "Number of randomly chosen coordinates to finite-difference. Each "
             "costs two extra forward evaluations, so the full array is not "
-            "affordable; a fixed-seed subsample is (default: 24)"
+            "affordable; a fixed-seed subsample is (default: 12)"
         ),
     )
     p.add_argument(
