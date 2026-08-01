@@ -288,13 +288,32 @@ is the **scaled error δa/f** with `f_b ≡ Σ_{a≠b} G μ_a / |x_a−x_b|²`.
    centrally-concentrated profile — it diverges for *any* MAC, identically. On
    bulge+halo it reported p99 = 0.27 where Dehnen's δa/f gave 9.6e-3, a factor 28 of
    pure artifact. Use `--metric dehnen`.
-3. **`bulge_halo` order-independence — likely the M2M bug, RETRACT OR RECONFIRM.** This
-   trap recorded an *order-independent* error tail (identical at p=4 and p=8) and read
-   it as a divergent series. The M2M defects fixed in `8afd705` produce exactly that
-   signature — dropped mass is order-independent by construction — and clustered
-   distributions build the deepest trees, so they were hit hardest (clu_solidfmm went
-   2.5e-2 to 3.5e-4). Re-measure bulge+halo post-fix before treating it as a bad
-   discriminator, and before drawing any MAC conclusion from it either way.
+3. **`bulge_halo` — HALF RETRACTED, and it is now the criterion's best case.** This trap
+   recorded an *order-independent* error tail and read it as a divergent series. Post-fix
+   that is only true at large θ. Fixed arm at identical θ, so identical accept masks
+   (far-pair counts match exactly across orders):
+
+   | θ | p=4 p99 | p=8 p99 | order gain | p=4 p99.99 | p=8 p99.99 |
+   |---|---|---|---|---|---|
+   | 0.42 | 3.6e-8 | 5.7e-10 | **63×** | 5.2e-4 | 7.0e-6 |
+   | 0.46 | 8.0e-4 | 8.9e-6 | **90×** | 2.3e-2 | 1.7e-3 |
+   | 0.50 | 8.3e-3 | 2.1e-4 | **40×** | 1.3e-1 | 2.1e-2 |
+   | 0.54 | 3.0e-2 | 1.4e-3 | 21× | 1.2e+0 | **2.3e+0** |
+   | 0.58 | 5.7e-2 | 5.2e-3 | 11× | 3.0e+0 | **7.0e+0** |
+   | 0.62 | 1.1e-1 | 1.6e-2 | 7× | 3.7e+0 | **8.9e+0** |
+
+   At θ ≲ 0.50 the error is strongly **order-dependent** (p=8 beats p=4 by 40–90×) —
+   ordinary truncation error, so the original premise fails there; it was reading the M2M
+   bug. At θ ≳ 0.54 the p99.99 *exceeds 1.0* and *grows* with order, which is a genuine
+   divergence signature. **So bulge_halo is a valid discriminator provided you stay at
+   θ ≲ 0.5 and discard any row whose absolute error approaches unity.**
+
+   And it is where the criterion wins biggest: p99 **5.9–85×**, max **400–2000×**
+   (`results/validation/mac_postfix_bulge_halo.json`), against Plummer's 1.3–2.2× / 7.5–57×.
+   That fits — bulge+halo is exactly the case where accelerations span decades, which
+   `ε·min_b|a_b|` exploits and a fixed opening angle cannot see. Discard the
+   machine-precision matched rows (p90 ≲ 1e-9); those are the log-interpolation artifact
+   described in trap 8.
 4. ~~**eq (16a) alone admits near-divergent pairs.**~~ **VOID — this was the M2M bug.**
    The original observation (acceptance at opening up to 0.997, ε powerless against it)
    was made when zero-multipole nodes made eq (15)'s estimate collapse to zero, so those
@@ -340,7 +359,17 @@ is the **scaled error δa/f** with `f_b ≡ Σ_{a≠b} G μ_a / |x_a−x_b|²`.
    actually disagree about the accept mask there, so it cannot go vacuous.
 7. **Don't pipe long-running output through `tail`** — it buffers until exit, so a
    killed job shows nothing. Redirect to a file.
-8. **The fast lanes were never active in any of these measurements.** The large-N path
+8. **`compare_arms` will happily interpolate across the far-field switch-on, and the
+   ratios it reports there are meaningless.** The fixed-θ arm's p90 jumps many orders of
+   magnitude between the last θ that accepts almost nothing and the first that accepts a
+   real far field — on Plummer p=8 it went 8e-16 at θ=0.38 to 2.7e-7 at θ=0.46. A
+   matched-p90 target inside that gap is log-interpolated across a discontinuity, and the
+   comparison then reports ratios of round-off: it produced p99 ratios of 34.8 once and
+   2.9e7 on bulge+halo, both pure artifact. Guard: only trust a matched row whose target
+   p90 lies **inside both arms' measured ranges**, and use a θ grid dense enough to bridge
+   the switch-on (0.42–0.66 in steps of 0.04 worked at N=4096/p=8). Sanity check: a p90
+   target below ~1e-9 at p=8 is almost certainly in the gap.
+9. **The fast lanes were never active in any of these measurements.** The large-N path
    requires `expansion_basis="solidfmm"` *and* `preset="large_n_gpu"`; the benchmark
    uses `basis="real"`, so everything ran the generic path. Do not attribute the slow
    baseline to a lane fallback.
@@ -420,7 +449,7 @@ scale is genuinely stale, and a live-far-pair count so an arm that has degenerat
 all-near-field cannot be compared by accident. The 3.5× figure in this document had no
 committed harness; this one is reproducible.
 
-### Step 2 — eq (16b) — **VALIDATED, NEGATIVE (2026-08-01)**
+### Step 2 — eq (16b) — **VALIDATED, POSITIVE (2026-08-01, re-measured post-M2M-fix)**
 
 **What eq (16b) actually is.** It replaces `min_b a_b` with `min_b f_b`, the
 cancellation-free force scale `f_b = Σ_{a≠b} G m_a / |x_a−x_b|²`. Nothing else changes:
@@ -440,35 +469,52 @@ was needed to test it.
 - `--arm mass_16b` in the bench, injecting exact O(N²) `f_b` to measure the ceiling
   before building an estimator for it.
 
-**Verdict.** Two findings, one structural and one measured.
+**Verdict: (16b) wins.** Plummer p=8, eq (16a) verbatim, matched at equal p90, both
+arms against the same fixed-θ baseline
+(`results/validation/mac_postfix_16b_plummer.json`):
 
-*Structural, and the more important:* (16b) **cannot** remove the need for
-`mac_theta_max`, which was the main hope for it. The θ cap addresses acceptance at the
-convergence boundary, where the eq (15) bound on the criterion's **left**-hand side
-stops being trustworthy. (16b) changes the **right**-hand side. Different sides of the
-same inequality — no choice of force scale excludes a pair whose left-hand estimate is
-already small. This holds independently of the M2M bug.
+| matched p90 | (16a) p99× | **(16b) p99×** | (16a) max× | **(16b) max×** | work× |
+|---|---|---|---|---|---|
+| 3.7e-8 | 1.32 | **1.82** | 7.52 | **8.86** | 1.00 |
+| ~2.2e-7 | 1.61 | **2.07** | 8.53 | **20.67** | 1.00 |
+| ~1.3e-6 | 2.07 | **2.90** | 7.98 | **24.13** | 1.00 |
+| ~7.7e-6 | 2.18 | **3.33** | 24.22 | **47.53** | 1.01 |
+| ~4.6e-5 | 1.81 | **3.20** | 57.20 | **121.79** | 1.04 |
 
-*Measured, and provisional:* with `mac_theta_max=0.7` on Plummer p=8, matched at equal
-p90, (16b) did not beat (16a) — p99 ratios 1.75 / 1.10 / 0.70 / 0.54 across the
-matched range, degrading as tolerance loosens. **These numbers predate the M2M fix and
-must be redone before being quoted.** The structural argument above does not depend on
-them.
+Uniformly better than (16a) on both p99 and max at identical work — roughly 1.5× on p99
+and 2× on the tail. **Build the O(N) estimator**, and carry `f_b` through Step 3
+alongside `a_min`.
 
-**Do not build the O(N) estimator yet.** It was scoped at 2–3 days on the assumption
-that `f_b` is near-field dominated. It is not: measured at N=4096, the 16 largest
-contributors capture a median 13 % of `f_b` on Plummer (18 % uniform, 7 % bulge+halo),
-and even the largest 256 capture only 41 %. In 3D the shell population grows like
-`r²ρ` while each contribution falls like `1/r²`, so every logarithmic shell contributes
-comparably and the sum is a global quantity. A near-field-only estimator would be wrong
-by nearly an order of magnitude, so the far-field monopole pass is mandatory — Dehnen's
-"p=0 suffices" is right about the *order*, not about the *locality*. Given the negative
-verdict, this work is not currently justified.
+*An earlier pre-fix measurement said the opposite* (p99 ratios 1.75 / 1.10 / 0.70 /
+0.54, degrading with tolerance) and this document recorded Step 2 as negative. That was
+measured with 10–23 % of the system mass missing from the far field. Void.
 
-**Also settled:** the bulge+halo floor is not evidence for (16b). Both criteria floored
-at the identical value pre-fix because of the M2M bug, and trap 3's "order-independent
-tail" observation has the same likely cause. Re-measure bulge+halo post-fix before
-drawing any conclusion from it.
+*One structural note survives but is now moot:* (16b) changes the criterion's
+right-hand side, so it could never have fixed a left-hand-side problem such as
+acceptance at the convergence boundary — which was the original hope for it. Post-fix
+there is no such problem (trap 4), so the point no longer bears on the decision.
+
+**The measured gain uses exact O(N²) `f_b`.** A production estimator is approximate, so
+part of this may not survive. Treat this arm as the *ceiling* and re-measure the
+estimator against it before quoting these ratios for anything else.
+
+**Building the O(N) estimator: the far-field pass is mandatory.** It was scoped at 2–3
+days on the assumption that `f_b` is near-field dominated. It is not: measured at
+N=4096, the 16 largest contributors capture a median 13 % of `f_b` on Plummer (18 %
+uniform, 7 % bulge+halo), and even the largest 256 capture only 41 %. In 3D the shell
+population grows like `r²ρ` while each contribution falls like `1/r²`, so every
+logarithmic shell contributes comparably and the sum is a global quantity. A
+near-field-only estimator would be wrong by nearly an order of magnitude — Dehnen's
+"p=0 suffices" is right about the *order*, not about the *locality*.
+
+Shape: a monopole-only far-field accumulation over the existing interaction lists
+(`Σ_A G M_A / |c_A − x_b|²`, a scalar sum with no cancellation) plus the exact
+near-field scalar sum. Reuses the tree, traversal and node reduction. On device, one
+jit, no host round trip.
+
+**Also settled:** the pre-fix bulge+halo "floor" was the M2M bug, not evidence for
+either criterion. See trap 3, now re-measured — bulge+halo turns out to be the criterion's
+*strongest* case, not an invalid one.
 
 ### Step 3 — Per-node effective θ, so the mass MAC reaches the fast lanes (~2–3 days)
 
