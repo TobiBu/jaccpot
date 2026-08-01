@@ -255,6 +255,27 @@ def compute_node_force_scale_from_sorted_acc(
 ) -> Array:
     """Estimate per-node force scales from sorted per-particle accelerations.
 
+    This is Dehnen eq (16a)'s right-hand side: the scale is ``|a_b|``, so the
+    vector accelerations are reduced to magnitudes first. For eq (16b)'s
+    cancellation-free ``f_b``, which is already a scalar per particle, call
+    :func:`compute_node_force_scale_from_sorted_magnitudes` directly.
+    """
+
+    return compute_node_force_scale_from_sorted_magnitudes(
+        tree=tree,
+        magnitudes_sorted=jnp.linalg.norm(jnp.asarray(accelerations_sorted), axis=1),
+        reduction=reduction,
+    )
+
+
+def compute_node_force_scale_from_sorted_magnitudes(
+    *,
+    tree: Tree,
+    magnitudes_sorted: Array,
+    reduction: str = "max",
+) -> Array:
+    """Reduce a sorted per-particle scalar scale onto every node of the tree.
+
     This is implemented as a JAX-native tree reduction: compute per-leaf scales
     from the contiguous particle blocks, then propagate scales upward through the
     binary tree using child reductions.
@@ -265,7 +286,12 @@ def compute_node_force_scale_from_sorted_acc(
         raise ValueError("reduction must be 'max' or 'min'")
     use_min = reduction_norm == "min"
 
-    magnitudes = jnp.linalg.norm(jnp.asarray(accelerations_sorted), axis=1)
+    magnitudes = jnp.asarray(magnitudes_sorted)
+    if magnitudes.ndim != 1:
+        raise ValueError(
+            "magnitudes_sorted must be 1-D (one scalar scale per particle); "
+            f"got shape {tuple(magnitudes.shape)}"
+        )
     dtype = magnitudes.dtype
     node_ranges = jnp.asarray(tree.node_ranges, dtype=jnp.int32)
     num_nodes = int(node_ranges.shape[0])
@@ -345,9 +371,11 @@ def compute_node_force_scale_from_sorted_acc(
     finite = jnp.isfinite(scales)
     fallback = jnp.where(
         jnp.any(finite),
-        jnp.min(jnp.where(finite, scales, jnp.inf))
-        if use_min
-        else jnp.max(jnp.where(finite, scales, -jnp.inf)),
+        (
+            jnp.min(jnp.where(finite, scales, jnp.inf))
+            if use_min
+            else jnp.max(jnp.where(finite, scales, -jnp.inf))
+        ),
         jnp.asarray(0.0, dtype=dtype),
     )
     return jnp.where(finite, scales, fallback)
@@ -848,9 +876,7 @@ def resolve_dehnen_geometry(
         aabb_bound = jnp.linalg.norm(
             jnp.abs(mac_centers - geometry_centers) + half_extent, axis=1
         )
-        radius_bound = jnp.minimum(
-            jnp.asarray(merged_bound, dtype=dtype), aabb_bound
-        )
+        radius_bound = jnp.minimum(jnp.asarray(merged_bound, dtype=dtype), aabb_bound)
         return mac_centers, radius_bound
     if mode == "exact":
         mac_centers, radius_bound = compute_smallest_enclosing_sphere_geometry(
@@ -1093,9 +1119,7 @@ def adaptive_pair_policy(
         # single interaction, G Etilde M_A / r^2.
         est_force_error = (
             pair_error
-            * jnp.asarray(
-                policy_state.gravitational_constant, dtype=pair_error.dtype
-            )
+            * jnp.asarray(policy_state.gravitational_constant, dtype=pair_error.dtype)
             * source_mass[:, None]
             / jnp.maximum(
                 jnp.square(paper_distance[:, None]),
@@ -1186,6 +1210,7 @@ __all__ = [
     "bucket_far_pairs_by_tag",
     "build_adaptive_policy_state",
     "compute_node_force_scale_from_sorted_acc",
+    "compute_node_force_scale_from_sorted_magnitudes",
     "compute_center_referenced_radius_geometry",
     "compute_leaf_enclosing_sphere_geometry",
     "compute_leaf_ritter_sphere_geometry",

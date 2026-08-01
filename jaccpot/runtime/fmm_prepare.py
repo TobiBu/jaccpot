@@ -2432,6 +2432,7 @@ class PrepareMixin:
         refine_local: Optional[bool] = None,
         max_refine_levels: Optional[int] = None,
         aspect_threshold: Optional[float] = None,
+        force_scale_nodes: Optional[Array] = None,
         runtime_overrides_override: Optional[_RuntimeExecutionOverrides] = None,
         fused_device_mode: bool = False,
     ) -> PreparedStateLike:
@@ -2440,12 +2441,28 @@ class PrepareMixin:
         When ``tree_build_mode`` is ``"fixed_depth"`` the optional
         ``refine_local``, ``max_refine_levels``, and ``aspect_threshold``
         arguments control the host-side leaf refinement pass.
+
+        ``force_scale_nodes`` supplies the per-node force scale on the right-hand
+        side of the adaptive acceptance test directly, for this call only. It
+        skips the prepass, is not written to the reuse cache, and is how an
+        externally computed scale -- Dehnen eq (16b)'s exact ``f_b``, say -- is
+        injected without reaching into ``_last_force_scale_nodes``. Its length
+        must equal the node count of the tree this call builds, which the caller
+        generally learns from a prior ``prepare_state`` on the same
+        positions/`leaf_size`.
         """
 
         self._validate_prepare_state_request(
             leaf_size=int(leaf_size),
             max_order=int(max_order),
         )
+        if force_scale_nodes is not None and not self._uses_paper_style_force_scale():
+            raise ValueError(
+                "force_scale_nodes was supplied but this solver has no adaptive "
+                "force-scale path to use it: set adaptive_order=True, or "
+                "adaptive_error_model='dehnen_paper', or mac_type='dehnen_error'. "
+                "Passing it here would otherwise be silently ignored."
+            )
 
         refine_local_val = (
             self.refine_local if refine_local is None else bool(refine_local)
@@ -2541,9 +2558,24 @@ class PrepareMixin:
             upward_center_mode=upward_center_mode,
             allow_stateful_cache=allow_stateful_cache,
         )
+        supplied_force_scale = force_scale_nodes
         force_scale_nodes = None
         use_paper_force_scale = self._uses_paper_style_force_scale()
-        if use_paper_force_scale:
+        if supplied_force_scale is not None:
+            # An explicitly supplied scale wins outright: no prepass, no cache read,
+            # and no cache *write* either. Seeding the cache here would make the next
+            # prepare_state silently inherit an externally injected scale, which is
+            # the confusion this parameter exists to remove.
+            node_count = int(tree_artifacts.tree.parent.shape[0])
+            supplied = jnp.asarray(supplied_force_scale, dtype=positions_arr.dtype)
+            if supplied.ndim != 1 or int(supplied.shape[0]) != node_count:
+                raise ValueError(
+                    "force_scale_nodes must be a 1-D array of length "
+                    f"{node_count} (the node count of the tree this call built); "
+                    f"got shape {tuple(supplied.shape)}"
+                )
+            force_scale_nodes = supplied
+        elif use_paper_force_scale:
             node_count = int(tree_artifacts.tree.parent.shape[0])
             previous_force_scale = self._last_force_scale_nodes
             reduction_mode = self._force_scale_reduction_mode()

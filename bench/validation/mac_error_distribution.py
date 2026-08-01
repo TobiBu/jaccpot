@@ -55,6 +55,9 @@ import jax.numpy as jnp  # noqa: E402
 import numpy as np  # noqa: E402
 
 from jaccpot.config import FMMAdvancedConfig  # noqa: E402
+from jaccpot.runtime._adaptive_policy import (  # noqa: E402
+    compute_node_force_scale_from_sorted_magnitudes,
+)
 from jaccpot.solver import FastMultipoleMethod  # noqa: E402
 
 QUANTILES = (0.5, 0.9, 0.99, 0.999)
@@ -69,7 +72,9 @@ def _plummer(rng: np.random.Generator, n: int, scale: float = 1.0) -> np.ndarray
     """Sample positions from a Plummer sphere by inverse transform."""
 
     u = rng.uniform(size=n)
-    radius = scale * u ** (1.0 / 3.0) / np.sqrt(np.maximum(1.0 - u ** (2.0 / 3.0), 1e-12))
+    radius = (
+        scale * u ** (1.0 / 3.0) / np.sqrt(np.maximum(1.0 - u ** (2.0 / 3.0), 1e-12))
+    )
     radius = np.minimum(radius, 20.0 * scale)
     cos_t = rng.uniform(-1.0, 1.0, size=n)
     sin_t = np.sqrt(np.maximum(1.0 - cos_t**2, 0.0))
@@ -80,9 +85,7 @@ def _plummer(rng: np.random.Generator, n: int, scale: float = 1.0) -> np.ndarray
     )
 
 
-def make_distribution(
-    name: str, n: int, seed: int
-) -> tuple[np.ndarray, np.ndarray]:
+def make_distribution(name: str, n: int, seed: int) -> tuple[np.ndarray, np.ndarray]:
     """Return (positions, masses) for the named distribution."""
 
     rng = np.random.default_rng(seed)
@@ -188,12 +191,19 @@ def chunked_force_scale(
     """Dehnen's per-particle force scale ``f_b = sum_{a!=b} G m_a / |x_a - x_b|^2``.
 
     This is the sum of pairwise force *magnitudes*, i.e. the acceleration a
-    particle would feel if none of its interactions cancelled. Unlike ``|a_b|``
-    it never vanishes, and it is dominated by the nearest neighbour -- which is
-    exactly the scale a truncation error at a given opening angle should be
-    judged against. Dehnen (2014) section 3.1 defines the "scaled error"
-    ``delta_a / f`` on it, and equation (16b) uses ``min_b f_b`` on the
-    criterion's right-hand side for the same reason.
+    particle would feel if none of its interactions cancelled. Unlike ``|a_b|`` it
+    never vanishes, which is why Dehnen (2014) section 3.1 defines the "scaled
+    error" ``delta_a / f`` on it and equation (16b) puts ``min_b f_b`` on the
+    criterion's right-hand side.
+
+    It is *not* a local quantity, despite the single largest term being the
+    nearest neighbour. In 3D the particle count in a shell grows like ``r^2 rho``
+    while each contribution falls like ``1/r^2``, so every logarithmic shell
+    contributes comparably and the sum converges slowly. Measured at N=4096,
+    the 16 largest contributors capture a median 13% of ``f_b`` on Plummer (18%
+    uniform, 7% bulge+halo) and even the largest 256 capture only 41%. Any
+    O(N) estimator therefore needs the far-field monopole term -- a near-field
+    sum alone is wrong by nearly an order of magnitude, not by a few percent.
     """
 
     pos = jnp.asarray(positions)
@@ -226,9 +236,7 @@ def per_particle_dehnen_scaled_error(
     est = np.asarray(estimate, dtype=np.float64)
     ref = np.asarray(reference, dtype=np.float64)
     f = np.asarray(force_scale, dtype=np.float64)
-    return np.linalg.norm(est - ref, axis=1) / np.maximum(
-        f, np.finfo(np.float64).tiny
-    )
+    return np.linalg.norm(est - ref, axis=1) / np.maximum(f, np.finfo(np.float64).tiny)
 
 
 def per_particle_scaled_error(
@@ -282,8 +290,9 @@ def _advanced(mac_type: str) -> FMMAdvancedConfig:
         # the streamed fast lane. Without this the mass arm would be charged for
         # a lane fallback the geometric arm avoids, and the cost comparison would
         # measure plumbing rather than the criterion.
-        runtime=replace(cfg.runtime, retain_traversal_result=True,
-                        retain_interactions=True),
+        runtime=replace(
+            cfg.runtime, retain_traversal_result=True, retain_interactions=True
+        ),
     )
 
 
@@ -305,9 +314,7 @@ def measure(
     """Run one (arm, knob) configuration and return its record."""
 
     if arm == "fixed":
-        kwargs: dict[str, Any] = dict(
-            theta=float(knob), advanced=_advanced("dehnen")
-        )
+        kwargs: dict[str, Any] = dict(theta=float(knob), advanced=_advanced("dehnen"))
     else:
         kwargs = dict(
             # theta does not gate acceptance in paper mode -- eq (16a) supplies
@@ -326,9 +333,30 @@ def measure(
     fmm = FastMultipoleMethod(**kwargs)
 
     t0 = time.perf_counter()
-    state = fmm.prepare_state(
-        positions, masses, leaf_size=leaf_size, max_order=order
-    )
+    state = fmm.prepare_state(positions, masses, leaf_size=leaf_size, max_order=order)
+    if arm == "mass_16b":
+        # eq (16b) is eq (16a) with `min_b f_b` on the right-hand side instead of
+        # `min_b |a_b|`; the criterion, the traversal and the error estimator are
+        # untouched. So the whole of (16b) is a different force scale, and this arm
+        # supplies the *exact* f_b -- an O(N^2) sum no production path would run --
+        # to measure the ceiling before anyone builds an estimator for it.
+        #
+        # The first prepare_state above exists only to learn the tree; the node
+        # count and particle ordering are MAC-independent, so re-preparing with the
+        # injected scale reuses the same topology.
+        f_b_sorted = jnp.asarray(force_scale)[state.tree.particle_indices]
+        f_b_nodes = compute_node_force_scale_from_sorted_magnitudes(
+            tree=state.tree,
+            magnitudes_sorted=f_b_sorted,
+            reduction="min",
+        )
+        state = fmm.prepare_state(
+            positions,
+            masses,
+            leaf_size=leaf_size,
+            max_order=order,
+            force_scale_nodes=f_b_nodes,
+        )
     prepare_s = time.perf_counter() - t0
 
     t0 = time.perf_counter()
@@ -366,7 +394,9 @@ def measure(
             source_leaf = int(nb_neighbors[start + k])
             if source_leaf < 0:
                 continue
-            slo, shi = int(node_ranges[source_leaf, 0]), int(node_ranges[source_leaf, 1])
+            slo, shi = int(node_ranges[source_leaf, 0]), int(
+                node_ranges[source_leaf, 1]
+            )
             near_pairs += 1
             near_work += n_t * max(shi - slo + 1, 0)
         near_work += n_t * n_t  # self block
@@ -448,9 +478,7 @@ def compare_arms(
         ok = True
         for label, records in (("fixed", fixed), ("mass", mass)):
             for name in ("p99", "max", "median", "pair_work", "far_pairs"):
-                field = (
-                    f"{metric}{name}" if name in ("p99", "max", "median") else name
-                )
+                field = f"{metric}{name}" if name in ("p99", "max", "median") else name
                 val = log_interp_at(
                     records, target_p90=float(target), field=field, p90_key=p90
                 )
@@ -510,11 +538,18 @@ def main() -> int:
     ap.add_argument("--leaf-size", type=int, default=16)
     ap.add_argument("--order", default="4")
     ap.add_argument("--distribution", default="uniform")
-    ap.add_argument(
-        "--theta", default="0.30,0.35,0.40,0.45,0.50,0.55,0.60,0.70,0.80"
-    )
+    ap.add_argument("--theta", default="0.30,0.35,0.40,0.45,0.50,0.55,0.60,0.70,0.80")
     ap.add_argument("--eps", default="1e-3,3e-4,1e-4,3e-5,1e-5,3e-6,1e-6")
     ap.add_argument("--geometry-mode", default="com")
+    ap.add_argument(
+        "--arm",
+        default="fixed,mass",
+        help=(
+            "comma-separated arms. 'fixed' = geometric MAC swept over theta; "
+            "'mass' = Dehnen eq (16a) swept over eps; 'mass_16b' = eq (16b), the "
+            "same criterion with exact O(N^2) f_b as the force scale."
+        ),
+    )
     ap.add_argument("--theta-max", type=float, default=None)
     ap.add_argument("--softening", type=float, default=1e-3)
     ap.add_argument("--G", type=float, default=1.0)
@@ -532,6 +567,16 @@ def main() -> int:
     )
     ap.add_argument("--json-out", default=None)
     args = ap.parse_args()
+
+    known_arms = ("fixed", "mass", "mass_16b")
+    arms = tuple(a.strip() for a in str(args.arm).split(",") if a.strip())
+    unknown = [a for a in arms if a not in known_arms]
+    if unknown:
+        ap.error(f"unknown --arm value(s) {unknown}; choose from {list(known_arms)}")
+    if "fixed" not in arms:
+        # compare_arms measures every mass arm against the geometric baseline, so
+        # dropping it would silently produce an empty comparison table.
+        ap.error("--arm must include 'fixed'; it is the comparison baseline")
 
     records: list[dict[str, Any]] = []
     comparisons: list[dict[str, Any]] = []
@@ -554,10 +599,10 @@ def main() -> int:
             jax.block_until_ready(force_scale)
 
             for order in _ints(args.order):
-                by_arm: dict[str, list[dict[str, Any]]] = {"fixed": [], "mass": []}
-                sweeps = (
-                    ("fixed", _floats(args.theta)),
-                    ("mass", _floats(args.eps)),
+                by_arm: dict[str, list[dict[str, Any]]] = {arm: [] for arm in arms}
+                sweeps = tuple(
+                    (arm, _floats(args.theta) if arm == "fixed" else _floats(args.eps))
+                    for arm in arms
                 )
                 for arm, knobs in sweeps:
                     for knob in knobs:
@@ -576,13 +621,17 @@ def main() -> int:
                             G=args.G,
                         )
                         rec.update(
-                            {"distribution": dist, "n": n, "order": order,
-                             "leaf_size": args.leaf_size}
+                            {
+                                "distribution": dist,
+                                "n": n,
+                                "order": order,
+                                "leaf_size": args.leaf_size,
+                            }
                         )
                         by_arm[arm].append(rec)
                         records.append(rec)
                         print(
-                            f"{dist:>14s} N={n:<7d} p={order} {arm:>5s} "
+                            f"{dist:>14s} N={n:<7d} p={order} {arm:>9s} "
                             f"knob={knob:<8.3g} far={rec['far_pairs']:<7d} "
                             f"rel(med/p90/p99/max)="
                             f"{rec['median']:.1e}/{rec['p90']:.1e}/"
@@ -597,20 +646,29 @@ def main() -> int:
                     "scaled": "scaled_",
                     "dehnen": "dehnen_",
                 }[args.metric]
-                for row in compare_arms(
-                    by_arm["fixed"], by_arm["mass"], metric=metric_prefix
-                ):
-                    row.update({"distribution": dist, "n": n, "order": order})
-                    comparisons.append(row)
+                for mass_arm in (a for a in arms if a != "fixed"):
+                    for row in compare_arms(
+                        by_arm["fixed"], by_arm[mass_arm], metric=metric_prefix
+                    ):
+                        row.update(
+                            {
+                                "distribution": dist,
+                                "n": n,
+                                "order": order,
+                                "mass_arm": mass_arm,
+                            }
+                        )
+                        comparisons.append(row)
 
     print("\n=== matched at equal p90 (ratio > 1 favours the mass MAC) ===")
     print(
-        f"{'dist':>14s} {'N':>7s} {'p':>2s} {'p90':>9s} "
+        f"{'dist':>14s} {'N':>7s} {'p':>2s} {'arm':>9s} {'p90':>9s} "
         f"{'p99 x':>7s} {'max x':>7s} {'work x':>7s}"
     )
     for row in comparisons:
         print(
             f"{row['distribution']:>14s} {row['n']:>7d} {row['order']:>2d} "
+            f"{row.get('mass_arm', 'mass'):>9s} "
             f"{row['matched_p90']:.3e} {row['p99_ratio'] or float('nan'):7.2f} "
             f"{row['max_ratio'] or float('nan'):7.2f} "
             f"{row['pair_work_ratio'] or float('nan'):7.2f}"
