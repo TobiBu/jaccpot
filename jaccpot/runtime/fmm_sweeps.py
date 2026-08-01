@@ -14,7 +14,6 @@ from beartype import beartype
 from beartype.typing import Callable
 from jaxtyping import Array, jaxtyped
 from yggdrax.dense_interactions import DenseInteractionBuffers
-from yggdrax.geometry import compute_tree_geometry
 from yggdrax.grouped_interactions import GroupedInteractionBuffers
 from yggdrax.interactions import (
     DualTreeRetryEvent,
@@ -46,6 +45,7 @@ from jaccpot.upward.tree_expansions import (
 from jaccpot.upward.tree_expansions import (
     prepare_upward_sweep as prepare_tree_upward_sweep,
 )
+from jaccpot.upward.tree_geometry import compute_tree_geometry_compiled
 
 from .kernels.core import _FarPairCOO, _prepare_solidfmm_downward_sweep
 from .reference import MultipoleExpansion
@@ -178,7 +178,7 @@ class SweepsMixin:
                     else (
                         None
                         if bool(defer_geometry)
-                        else compute_tree_geometry(
+                        else compute_tree_geometry_compiled(
                             tree,
                             positions_sorted,
                             max_leaf_size=int(resolved_leaf_cap),

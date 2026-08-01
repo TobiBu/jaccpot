@@ -11,7 +11,7 @@ from beartype import beartype
 from jax import lax
 from jaxtyping import Array, jaxtyped
 from yggdrax.dtypes import INDEX_DTYPE
-from yggdrax.geometry import TreeGeometry, compute_tree_geometry
+from yggdrax.geometry import TreeGeometry
 from yggdrax.multipole_utils import total_coefficients
 from yggdrax.tree import Tree
 from yggdrax.tree_moments import (
@@ -23,6 +23,8 @@ from yggdrax.tree_moments import (
     translate_packed_moments,
     tree_moments_from_raw,
 )
+
+from .tree_geometry import compute_tree_geometry_compiled
 
 _CENTER_MODES = ("com", "aabb", "explicit")
 
@@ -159,7 +161,7 @@ def compute_node_multipoles(
             raise ValueError("explicit_centers must have shape (num_nodes, 3)")
         centers = jnp.asarray(explicit_centers, dtype=positions_sorted.dtype)
     elif mode == "aabb":
-        geom = compute_tree_geometry(tree, positions_sorted)
+        geom = compute_tree_geometry_compiled(tree, positions_sorted)
         centers = geom.center
     else:
         centers = None
@@ -244,7 +246,7 @@ def prepare_upward_sweep(
     geometry = (
         precomputed_geometry
         if precomputed_geometry is not None
-        else compute_tree_geometry(tree, positions_sorted)
+        else compute_tree_geometry_compiled(tree, positions_sorted)
     )
     mass_moments = compute_tree_mass_moments(
         tree,

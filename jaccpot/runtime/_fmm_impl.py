@@ -25,7 +25,6 @@ from beartype.typing import Callable, Tuple
 from jaxtyping import Array, DTypeLike, jaxtyped
 from yggdrax import build_tree
 from yggdrax.dense_interactions import DenseInteractionBuffers
-from yggdrax.geometry import compute_tree_geometry
 from yggdrax.grouped_interactions import GroupedInteractionBuffers
 from yggdrax.interactions import (
     CompactTaggedFarPairs,

@@ -14,7 +14,6 @@ from beartype import beartype
 from beartype.typing import Tuple
 from jax import lax
 from jaxtyping import Array, jaxtyped
-from yggdrax.geometry import compute_tree_geometry
 from yggdrax.tree_moments import compute_tree_mass_moments
 
 from jaccpot.downward.local_expansions import LocalExpansionData
@@ -23,6 +22,7 @@ from jaccpot.upward.solidfmm_complex_tree_expansions import (
     prepare_solidfmm_complex_source_motion_multipoles,
 )
 from jaccpot.upward.tree_expansions import NodeMultipoleData, TreeUpwardData
+from jaccpot.upward.tree_geometry import compute_tree_geometry_compiled
 
 from .dtypes import INDEX_DTYPE
 from .fmm_caches import _contains_tracer
@@ -606,7 +606,7 @@ class DerivativesMixin:
             source_motion_packed=None,
         )
         source_motion_upward = TreeUpwardData(
-            geometry=compute_tree_geometry(state.tree, state.positions_sorted),
+            geometry=compute_tree_geometry_compiled(state.tree, state.positions_sorted),
             mass_moments=compute_tree_mass_moments(
                 state.tree,
                 state.positions_sorted,
@@ -749,7 +749,7 @@ class DerivativesMixin:
 
         # Build local coefficient streams L_k = ∂t^k L, including k=0.
         locals_by_k: list[LocalExpansionData] = [state.downward.locals]
-        geometry = compute_tree_geometry(state.tree, state.positions_sorted)
+        geometry = compute_tree_geometry_compiled(state.tree, state.positions_sorted)
         mass_moments = compute_tree_mass_moments(
             state.tree, state.positions_sorted, state.masses_sorted
         )

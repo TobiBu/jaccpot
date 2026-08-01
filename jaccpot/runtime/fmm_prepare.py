@@ -17,7 +17,6 @@ from beartype import beartype
 from beartype.typing import Callable, Tuple
 from jaxtyping import Array, jaxtyped
 from yggdrax.dense_interactions import DenseInteractionBuffers
-from yggdrax.geometry import compute_tree_geometry
 from yggdrax.grouped_interactions import GroupedInteractionBuffers
 from yggdrax.interactions import (
     CompactTaggedFarPairs,
@@ -50,6 +49,7 @@ from jaccpot.nearfield.near_field import (
 )
 from jaccpot.operators.multipole_utils import MAX_MULTIPOLE_ORDER, total_coefficients
 from jaccpot.upward.tree_expansions import TreeUpwardData
+from jaccpot.upward.tree_geometry import compute_tree_geometry_compiled
 
 from ._adaptive_policy import (
     adaptive_pair_policy,
@@ -1316,7 +1316,7 @@ class PrepareMixin:
         geometry_factory = (
             None
             if tree_artifacts.upward.geometry is not None
-            else lambda: compute_tree_geometry(
+            else lambda: compute_tree_geometry_compiled(
                 tree_artifacts.tree,
                 tree_artifacts.positions_sorted,
                 max_leaf_size=int(tree_artifacts.leaf_cap),
@@ -2259,7 +2259,7 @@ class PrepareMixin:
         geometry_factory = (
             None
             if tree_artifacts.upward.geometry is not None
-            else lambda: compute_tree_geometry(
+            else lambda: compute_tree_geometry_compiled(
                 tree_artifacts.tree,
                 tree_artifacts.positions_sorted,
                 max_leaf_size=int(tree_artifacts.leaf_cap),
