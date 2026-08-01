@@ -30,6 +30,18 @@ from jaccpot import (
 )
 from tests.unit.runtime._reproducibility import assert_reproducible
 
+# Compile-bound: every test here builds a solver and runs at least one full FMM
+# solve, measured at 26-95 s each on CPU. `ci.yml` runs the version-compatibility
+# matrix (`test-smoke`) with `-m "not slow and not experimental"` on a 30 minute
+# budget and reserves the compile-heavy tests for `test-full` on 3.13. Leaving
+# these unmarked put 94 such cases into that matrix and timed it out.
+#
+# `test_dehnen_mac_reference.py` is deliberately NOT marked: it checks eqs (12),
+# (13), (15) and (16a) against independent numpy references at 1-10 s per test, so
+# the criterion's correctness is still verified on every supported Python.
+pytestmark = pytest.mark.slow
+
+
 # eq (16a) is very conservative at small N: the threshold is set by the
 # *least*-accelerated particle in the target cell, so N=64/leaf=4 accepts nothing
 # at any eps in [1e-5, 1e-2]. N=512/leaf=8 at eps=3e-3 is the smallest setting
