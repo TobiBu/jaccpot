@@ -15,6 +15,8 @@ from yggdrax.tree import build_tree
 
 import jaccpot.runtime._fmm_impl as fmm_impl_private
 import jaccpot.runtime.fmm as fmm_module
+import jaccpot.runtime.fmm_prepare as fmm_prepare_private
+import jaccpot.runtime.kernels.core as kernels_core
 from jaccpot import FMMPreset
 from jaccpot.downward.local_expansions import (
     TreeDownwardData,
@@ -247,6 +249,11 @@ def test_prepare_state_fixed_depth_tree():
 
 def test_prepare_refresh_static_radix_tree_preserves_static_shape(monkeypatch):
     monkeypatch.setattr(jax, "default_backend", lambda: "gpu")
+    # This test profiles the strict cap on the fly (there is no pre-recorded
+    # profile for its key), so do not require an exact cap-profile match --
+    # otherwise it depends on another test having recorded one first (order
+    # dependence). Matches the sibling strict-lane tests below.
+    monkeypatch.setenv("JACCPOT_STATIC_STRICT_REQUIRE_EXACT_CAP_PROFILE_MATCH", "0")
 
     key = jax.random.PRNGKey(123)
     core = 0.01 * jax.random.normal(key, (160, 3), dtype=jnp.float32)
@@ -300,6 +307,9 @@ def test_prepare_refresh_static_radix_tree_preserves_static_shape(monkeypatch):
 
 def test_static_radix_refresh_rebuilds_current_large_n_payloads(monkeypatch):
     monkeypatch.setattr(jax, "default_backend", lambda: "gpu")
+    # Profile the strict cap on the fly rather than requiring a pre-recorded
+    # profile match (which would make this test depend on run order).
+    monkeypatch.setenv("JACCPOT_STATIC_STRICT_REQUIRE_EXACT_CAP_PROFILE_MATCH", "0")
     monkeypatch.setenv("JACCPOT_LARGE_N_TARGET_BLOCK_SIZE", "4")
     monkeypatch.setenv("JACCPOT_LARGE_N_SPEED_PREPARED_LAYOUT", "1")
     monkeypatch.setenv("JACCPOT_LARGE_N_STATIC_TARGET_BLOCKS", "1")
@@ -640,6 +650,15 @@ def test_strict_run_v2_api(monkeypatch):
     monkeypatch.setattr(jax, "default_backend", lambda: "gpu")
     monkeypatch.setenv("JACCPOT_STATIC_STRICT_GPU_MODE", "on")
     monkeypatch.setenv("JACCPOT_STATIC_STRICT_REQUIRE_EXACT_CAP_PROFILE_MATCH", "0")
+    # Pin the fused static-sizing caps to fixed adequate values (mirroring the
+    # sibling strict-fused tests below). Without this the fused lane sizes the
+    # static neighbour-edge cap from the *first* build's active-edge count, which
+    # is sensitive to leaked process-global tree/neighbour construction state
+    # from earlier tests on the same xdist worker; an undersized first-build cap
+    # then overflows on a later scan step ("neighbor-edge cap exceeded"). Fixed
+    # caps make the run deterministic and order-independent.
+    monkeypatch.setenv("JACCPOT_LARGE_N_NEIGHBOR_EDGE_PROFILE_FIXED_CAP", "65536")
+    monkeypatch.setenv("JACCPOT_LARGE_N_STATIC_TARGET_BLOCKS_MAX_PER_LEAF", "32")
 
     key = jax.random.PRNGKey(20260513)
     key_pos, key_mass = jax.random.split(key)
@@ -2573,9 +2592,9 @@ def test_prepare_state_rebuilds_topology_after_rebuild_every_steps():
     assert fmm.recent_topology_reused is True
 
     with mock.patch.object(
-        fmm_impl_private,
+        fmm_prepare_private,
         "_build_tree_with_config",
-        wraps=fmm_impl_private._build_tree_with_config,
+        wraps=fmm_prepare_private._build_tree_with_config,
     ) as spy_build:
         state_third = fmm.prepare_state(
             moved_b,
@@ -2700,6 +2719,11 @@ def test_prepare_state_cache_key_respects_center_mode():
         mac_type="dehnen",
         grouped_interactions=False,
     )
+    # The cache-key-vs-center_mode behaviour depends on the adaptive resolver
+    # setting center_mode="aabb" when grouped_interactions flips on. That is an
+    # adaptive rewrite which the production-default static fixed sizing skips, so
+    # disable it here to exercise the center_mode-sensitive cache-key path.
+    fmm._static_runtime_fixed_sizing = False
     fmm.prepare_state(
         positions,
         masses,
@@ -2880,68 +2904,139 @@ def test_solidfmm_chunked_m2l_matches_fullbatch():
 
 
 def test_solidfmm_m2l_ignores_padded_compact_far_pairs():
+    """Sentinel (-1) padding in the far-pair list must not corrupt the M2L.
+
+    Both the exact-length and the padded list are checked against a **float64
+    reference**, not against each other. The earlier padded-vs-exact form was a
+    false negative: on JAX 0.9.x the two fp32 paths were *identically* wrong
+    (difference exactly 0.0) while both sat 3.7e-04 from the true value, so the
+    assertion passed on a coincidence. JAX 0.11.0 fuses the padded case
+    differently, the two errors stopped cancelling, and the test failed even
+    though nothing had become less accurate -- the padded path was in fact
+    *closer* to truth there (1.1e-04 vs 3.7e-04). Comparing to a reference also
+    tests the actual intent better: a leaking sentinel would move the result by
+    order 1, not by 1e-04.
+
+    The tolerance is set by TF32, not by this kernel's algebra. XLA lowers fp32
+    matmuls on Ampere to TF32 (~10-bit mantissa) by default, which caps M2L
+    relative accuracy at ~6e-04 from order 4 up, *regardless of expansion order*
+    (real basis, jax 0.9.0.1, max rel err vs float64)::
+
+        order    default matmul    jax.default_matmul_precision("highest")
+          2         2.1e-06                     2.1e-06
+          4         5.7e-04                     1.5e-06
+          6         5.7e-04                     2.4e-06
+          8         5.6e-04                     1.8e-06
+
+    So the bound below is what is achievable, not slack. Tightening it means
+    setting the matmul precision in the M2L kernels -- jaccpot does that in the
+    L2P path (``jaccpot/downward/local_expansions.py``, ``Precision.HIGHEST``)
+    but not here. Left as-is deliberately; see ARCHITECTURE.md section 7.
+
+    What this does and does not discriminate, measured by mutation:
+
+    * A ``-1``-sentinel row is dropped by the **index masking** (``tgt >= 0``),
+      not by ``active_count`` -- forcing ``active_count=4`` on the padded list
+      returns a byte-identical result. So this test verifies the *outcome* for
+      sentinel padding; it cannot tell which of the two guards did the work.
+    * The leak it does catch is the ``0``-padded form (what the treecode compact
+      far-pair list produces, with the true count in ``far_pair_count``), where
+      ``active_count`` is the only guard: honest ``active_count=1`` lands at
+      3.7e-04, while ``active_count=4`` returns NaN and fails both the isfinite
+      assertion and the bound below.
+    """
     order = 2
-    coeff_count = fmm_impl_private.sh_size(order)
-    centers = jnp.array(
-        [
-            [0.0, 0.0, 0.0],
-            [1.0, 0.25, -0.5],
-            [-0.75, 0.5, 0.25],
-            [0.5, -0.5, 1.0],
-        ],
-        dtype=jnp.float32,
-    )
-    multipoles = jnp.arange(centers.shape[0] * coeff_count, dtype=jnp.float32).reshape(
-        (centers.shape[0], coeff_count)
-    ).astype(jnp.complex64) * jnp.array(0.01 + 0.02j, dtype=jnp.complex64)
     src_exact = jnp.array([1], dtype=INDEX_DTYPE)
     tgt_exact = jnp.array([0], dtype=INDEX_DTYPE)
     src_padded = jnp.array([1, -1, -1, -1], dtype=INDEX_DTYPE)
     tgt_padded = jnp.array([0, -1, -1, -1], dtype=INDEX_DTYPE)
     active_count = jnp.array(1, dtype=INDEX_DTYPE)
 
-    exact_full = fmm_impl_private._accumulate_solidfmm_m2l_fullbatch(
-        jnp.zeros_like(multipoles),
-        multipoles,
-        centers,
-        src_exact,
-        tgt_exact,
-        active_count,
-        order=order,
-        rotation="solidfmm",
-        total_nodes=int(centers.shape[0]),
-    )
-    padded_full = fmm_impl_private._accumulate_solidfmm_m2l_fullbatch(
-        jnp.zeros_like(multipoles),
-        multipoles,
-        centers,
-        src_padded,
-        tgt_padded,
-        active_count,
-        order=order,
-        rotation="solidfmm",
-        total_nodes=int(centers.shape[0]),
-    )
-    padded_chunked = fmm_impl_private._accumulate_solidfmm_m2l_chunked_scan(
-        jnp.zeros_like(multipoles),
-        multipoles,
-        centers,
-        src_padded,
-        tgt_padded,
-        active_count,
-        order=order,
-        rotation="solidfmm",
-        total_nodes=int(centers.shape[0]),
-        chunk_size=2,
+    def accumulate(src, tgt, complex_dtype, real_dtype):
+        coeff_count = fmm_impl_private.sh_size(order)
+        centers = jnp.array(
+            [
+                [0.0, 0.0, 0.0],
+                [1.0, 0.25, -0.5],
+                [-0.75, 0.5, 0.25],
+                [0.5, -0.5, 1.0],
+            ],
+            dtype=real_dtype,
+        )
+        multipoles = jnp.arange(
+            centers.shape[0] * coeff_count, dtype=real_dtype
+        ).reshape((centers.shape[0], coeff_count)).astype(complex_dtype) * jnp.array(
+            0.01 + 0.02j, dtype=complex_dtype
+        )
+        return kernels_core._accumulate_m2l_fullbatch(
+            jnp.zeros_like(multipoles),
+            multipoles,
+            centers,
+            src,
+            tgt,
+            active_count,
+            order=order,
+            basis_mode="complex",
+            rotation="solidfmm",
+            total_nodes=int(centers.shape[0]),
+        )
+
+    # The reference is only a reference if x64 is actually on; without it
+    # complex128 silently degrades to complex64 and the comparison is vacuous.
+    if not jax.config.read("jax_enable_x64"):
+        pytest.skip("float64 reference needs JAX_ENABLE_X64=1")
+    reference = np.asarray(
+        accumulate(src_exact, tgt_exact, jnp.complex128, jnp.float64)
     )
 
-    exact_np = np.asarray(exact_full)
-    padded_full_np = np.asarray(padded_full)
-    padded_chunked_np = np.asarray(padded_chunked)
+    exact_np = np.asarray(accumulate(src_exact, tgt_exact, jnp.complex64, jnp.float32))
+    padded_full_np = np.asarray(
+        accumulate(src_padded, tgt_padded, jnp.complex64, jnp.float32)
+    )
+    padded_chunked_np = np.asarray(
+        kernels_core._accumulate_m2l_chunked_scan(
+            jnp.zeros((4, fmm_impl_private.sh_size(order)), dtype=jnp.complex64),
+            jnp.arange(4 * fmm_impl_private.sh_size(order), dtype=jnp.float32)
+            .reshape((4, fmm_impl_private.sh_size(order)))
+            .astype(jnp.complex64)
+            * jnp.array(0.01 + 0.02j, dtype=jnp.complex64),
+            jnp.array(
+                [
+                    [0.0, 0.0, 0.0],
+                    [1.0, 0.25, -0.5],
+                    [-0.75, 0.5, 0.25],
+                    [0.5, -0.5, 1.0],
+                ],
+                dtype=jnp.float32,
+            ),
+            src_padded,
+            tgt_padded,
+            active_count,
+            order=order,
+            basis_mode="complex",
+            rotation="solidfmm",
+            total_nodes=4,
+            chunk_size=2,
+        )
+    )
+
     assert np.isfinite(padded_full_np).all()
     assert np.isfinite(padded_chunked_np).all()
-    assert np.allclose(padded_full_np, exact_np, rtol=1e-6, atol=1e-6)
-    assert np.allclose(padded_chunked_np, exact_np, rtol=1e-6, atol=1e-6)
+
+    # 2e-3 leaves headroom over the ~6e-4 TF32 floor documented above without
+    # admitting a leaked sentinel contribution, which would be order 1.
+    scale = np.max(np.abs(reference))
+    for name, got in (
+        ("exact", exact_np),
+        ("padded fullbatch", padded_full_np),
+        ("padded chunked", padded_chunked_np),
+    ):
+        err = float(np.max(np.abs(got - reference)) / scale)
+        assert err < 2e-3, (
+            f"{name} M2L differs from the float64 reference by {err:.3e} "
+            "(rel); a leaked sentinel pair would be O(1), while TF32 alone "
+            "accounts for ~6e-4"
+        )
 
 
 def test_fast_preset_adaptive_large_cpu_policy_applies():
@@ -2951,6 +3046,11 @@ def test_fast_preset_adaptive_large_cpu_policy_applies():
         complex_rotation="solidfmm",
         mac_type="dehnen",
     )
+    # This test exercises the adaptive large-CPU runtime policy, which is the
+    # non-default opt-out path: the production default is static fixed sizing
+    # (JACCPOT_STATIC_RUNTIME_FIXED_SIZING=1), which deliberately skips adaptive
+    # runtime rewrites. Disable it so the adaptive policy is resolved and asserted.
+    fmm._static_runtime_fixed_sizing = False
 
     overrides = fmm._resolve_runtime_execution_overrides(
         num_particles=131072,
@@ -2975,6 +3075,10 @@ def test_fast_preset_adaptive_class_major_threshold():
         complex_rotation="solidfmm",
         mac_type="dehnen",
     )
+    # Adaptive class-major farfield policy is the non-default opt-out path;
+    # static fixed sizing (the production default) skips it. Disable it here so
+    # the adaptive threshold behaviour is resolved and asserted.
+    fmm._static_runtime_fixed_sizing = False
 
     overrides = fmm._resolve_runtime_execution_overrides(
         num_particles=262144,

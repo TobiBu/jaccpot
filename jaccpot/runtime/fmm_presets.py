@@ -3,17 +3,11 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from enum import Enum
 from typing import Literal, Optional, Union
 
 from yggdrax.interactions import DualTreeTraversalConfig
 
-
-class FMMPreset(str, Enum):
-    """Named presets offering curated FMM parameter selections."""
-
-    FAST = "fast"
-    LARGE_N_GPU = "large_n_gpu"
+from jaccpot.config import FMMPreset
 
 
 @dataclass(frozen=True)

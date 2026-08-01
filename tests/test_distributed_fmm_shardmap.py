@@ -266,7 +266,7 @@ def test_distributed_fmm_shardmap_matches_direct():
         seed = jnp.zeros((c_total, total_coefficients(_P)), dtype=leafp.dtype)
         seed = seed.at[c_leaves].set(leafp)
         full_packed = _aggregate_m2m_impl(
-            seed, c_centers, c_lc, c_rc, order=_P, num_internal=c_nint
+            seed, c_centers, c_lc, c_rc, c_nr, order=_P, num_internal=c_nint
         )
         rmp = NodeMultipoleData(
             order=_P,

@@ -73,7 +73,7 @@ def _parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--runtime-path",
-        choices=("auto", "legacy", "large_n"),
+        choices=("auto", "large_n"),
         default="auto",
         help="Select the legacy or dedicated large-N runtime path",
     )

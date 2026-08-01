@@ -67,3 +67,50 @@ def test_coupler_requires_masses_on_first_call():
     coupler = OdisseoFMMCoupler(solver=solver)
     with pytest.raises(ValueError, match="masses must be provided"):
         coupler.accelerations(state)
+
+
+def test_coupler_forward_path_rejects_traced_inputs(prepared_coupler):
+    """The forward path evaluates PREBAKED expansions and reads no live input.
+
+    Differentiating it therefore used to return exactly zero -- a silently wrong
+    gradient, which is worse than any error. It must reject tracers instead.
+    """
+    coupler, state, masses = prepared_coupler
+
+    with pytest.raises(NotImplementedError, match="differentiable=True"):
+        jax.grad(lambda s: jnp.sum(coupler.accelerations(s, masses) ** 2))(state)
+
+
+def test_coupler_differentiable_path_gives_nonzero_gradients(prepared_coupler):
+    """``differentiable=True`` routes to the fixed-topology re-evaluation."""
+    coupler, state, masses = prepared_coupler
+
+    def loss(s, m):
+        return jnp.sum(coupler.accelerations(s, m, differentiable=True) ** 2)
+
+    grad_state, grad_masses = jax.grad(loss, argnums=(0, 1))(state, masses)
+
+    assert jnp.all(jnp.isfinite(grad_state))
+    assert jnp.all(jnp.isfinite(grad_masses))
+    # Positions live in slot 0 and carry the whole sensitivity; velocities are
+    # not an input to the force, so slot 1 must stay exactly zero.
+    assert float(jnp.linalg.norm(grad_state[:, 0, :])) > 0.0
+    assert float(jnp.linalg.norm(grad_masses)) > 0.0
+    assert jnp.all(grad_state[:, 1, :] == 0)
+
+
+def test_coupler_differentiable_path_matches_the_solver_entry_point(prepared_coupler):
+    """The coupler is a thin adapter; it must not perturb the force it wraps."""
+    coupler, state, masses = prepared_coupler
+
+    via_coupler = coupler.accelerations(state, masses, differentiable=True)
+    via_solver = coupler.solver.differentiable_accelerations(
+        coupler._prepared_state, state[:, 0, :], masses
+    )
+    assert np.allclose(np.asarray(via_coupler), np.asarray(via_solver))
+
+
+def test_coupler_differentiable_path_rejects_potential(prepared_coupler):
+    coupler, state, masses = prepared_coupler
+    with pytest.raises(NotImplementedError, match="acceleration-only"):
+        coupler.accelerations(state, masses, differentiable=True, return_potential=True)

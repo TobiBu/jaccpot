@@ -13,6 +13,7 @@ pytest.importorskip("yggdrax")
 from yggdrax.interactions import DualTreeTraversalConfig
 
 import jaccpot.runtime._fmm_impl as fmm_impl_private
+import jaccpot.runtime.fmm_prepare as fmm_prepare_private
 from jaccpot import FastMultipoleMethod, FMMAdvancedConfig, RuntimePolicyConfig
 
 
@@ -102,7 +103,11 @@ def test_adaptive_order_true_runs_and_matches_fixed_order():
     assert len(adaptive._impl._recent_far_pairs_by_gear_counts) == 3
 
 
-def test_dehnen_degree_adaptive_order_runs():
+@pytest.mark.parametrize(
+    "adaptive_error_model, adaptive_eps",
+    [("dehnen_degree", 0.005), ("dehnen_paper", 1.0e-2)],
+)
+def test_dehnen_adaptive_order_runs(adaptive_error_model, adaptive_eps):
     positions, masses = _sample_problem(80)
     adaptive = FastMultipoleMethod(
         preset="accurate",
@@ -111,8 +116,8 @@ def test_dehnen_degree_adaptive_order_runs():
         softening=1.0e-2,
         adaptive_order=True,
         p_gears=(2, 3, 4),
-        adaptive_error_model="dehnen_degree",
-        adaptive_eps=0.005,
+        adaptive_error_model=adaptive_error_model,
+        adaptive_eps=adaptive_eps,
         advanced=_advanced_cfg(),
     )
 
@@ -125,30 +130,22 @@ def test_dehnen_degree_adaptive_order_runs():
     assert len(adaptive._impl._recent_far_pairs_by_gear_counts) == 3
 
 
-def test_dehnen_paper_adaptive_order_runs():
-    positions, masses = _sample_problem(80)
-    adaptive = FastMultipoleMethod(
-        preset="accurate",
-        basis="real",
-        theta=0.7,
-        softening=1.0e-2,
-        adaptive_order=True,
-        p_gears=(2, 3, 4),
-        adaptive_error_model="dehnen_paper",
-        adaptive_eps=1.0e-2,
-        advanced=_advanced_cfg(),
-    )
-
-    acc = np.asarray(
-        adaptive.compute_accelerations(positions, masses, leaf_size=8, max_order=4)
-    )
-
-    assert acc.shape == positions.shape
-    assert np.all(np.isfinite(acc))
-    assert len(adaptive._impl._recent_far_pairs_by_gear_counts) == 3
-
-
-def test_dehnen_paper_fixed_order_runs():
+@pytest.mark.parametrize(
+    "extra_kwargs",
+    [
+        pytest.param({}, id="base"),
+        pytest.param({"mac_force_scale_mode": "paper"}, id="paper_force_scale"),
+        pytest.param(
+            {"mac_force_scale_mode": "paper", "dehnen_geometry_mode": "tree"},
+            id="tree_geometry",
+        ),
+        pytest.param(
+            {"mac_force_scale_mode": "paper", "dehnen_geometry_mode": "tree_approx"},
+            id="tree_approx_geometry",
+        ),
+    ],
+)
+def test_dehnen_paper_fixed_order_runs(extra_kwargs):
     positions, masses = _sample_problem(80)
     fixed = FastMultipoleMethod(
         preset="accurate",
@@ -159,74 +156,7 @@ def test_dehnen_paper_fixed_order_runs():
         adaptive_error_model="dehnen_paper",
         adaptive_eps=1.0e-3,
         advanced=_advanced_cfg(),
-    )
-
-    acc = np.asarray(
-        fixed.compute_accelerations(positions, masses, leaf_size=8, max_order=4)
-    )
-
-    assert acc.shape == positions.shape
-    assert np.all(np.isfinite(acc))
-
-
-def test_dehnen_paper_fixed_order_runs_with_paper_force_scale_mode():
-    positions, masses = _sample_problem(80)
-    fixed = FastMultipoleMethod(
-        preset="accurate",
-        basis="real",
-        theta=0.6,
-        softening=1.0e-2,
-        adaptive_order=False,
-        adaptive_error_model="dehnen_paper",
-        adaptive_eps=1.0e-3,
-        mac_force_scale_mode="paper",
-        advanced=_advanced_cfg(),
-    )
-
-    acc = np.asarray(
-        fixed.compute_accelerations(positions, masses, leaf_size=8, max_order=4)
-    )
-
-    assert acc.shape == positions.shape
-    assert np.all(np.isfinite(acc))
-
-
-def test_dehnen_paper_fixed_order_runs_with_tree_geometry_mode():
-    positions, masses = _sample_problem(80)
-    fixed = FastMultipoleMethod(
-        preset="accurate",
-        basis="real",
-        theta=0.6,
-        softening=1.0e-2,
-        adaptive_order=False,
-        adaptive_error_model="dehnen_paper",
-        dehnen_geometry_mode="tree",
-        adaptive_eps=1.0e-3,
-        mac_force_scale_mode="paper",
-        advanced=_advanced_cfg(),
-    )
-
-    acc = np.asarray(
-        fixed.compute_accelerations(positions, masses, leaf_size=8, max_order=4)
-    )
-
-    assert acc.shape == positions.shape
-    assert np.all(np.isfinite(acc))
-
-
-def test_dehnen_paper_fixed_order_runs_with_tree_approx_geometry_mode():
-    positions, masses = _sample_problem(80)
-    fixed = FastMultipoleMethod(
-        preset="accurate",
-        basis="real",
-        theta=0.6,
-        softening=1.0e-2,
-        adaptive_order=False,
-        adaptive_error_model="dehnen_paper",
-        dehnen_geometry_mode="tree_approx",
-        adaptive_eps=1.0e-3,
-        mac_force_scale_mode="paper",
-        advanced=_advanced_cfg(),
+        **extra_kwargs,
     )
 
     acc = np.asarray(
@@ -287,7 +217,7 @@ def test_dehnen_error_uses_adaptive_pair_policy(monkeypatch):
         fake_build_adaptive_policy_state,
     )
     monkeypatch.setattr(
-        fmm_impl_private,
+        fmm_prepare_private,
         "_build_dual_tree_artifacts",
         fake_build_dual_tree_artifacts,
     )

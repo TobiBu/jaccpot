@@ -16,7 +16,7 @@ def evaluate_large_n_farfield(
 ) -> tuple[Array, Array, Array]:
     """Evaluate leaf-local expansions for every particle in sorted order."""
     # Import lazily to avoid a circular dependency during module import.
-    from ._fmm_impl import _evaluate_local_expansions_for_particles
+    from .kernels.core import _evaluate_local_expansions_for_particles
 
     return _evaluate_local_expansions_for_particles(
         state.local_data,

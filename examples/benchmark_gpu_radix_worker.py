@@ -85,10 +85,8 @@ def _load_jaccpot_internal_symbols() -> dict[str, Any]:
         "_M2L_FULLBATCH_MAX_PAIRS": runtime_impl._M2L_FULLBATCH_MAX_PAIRS,
         "INDEX_DTYPE": runtime_impl.INDEX_DTYPE,
         "_build_nearfield_interop_data": runtime_impl._build_nearfield_interop_data,
-        "_accumulate_real_m2l_chunked_scan": runtime_impl._accumulate_real_m2l_chunked_scan,
-        "_accumulate_real_m2l_fullbatch": runtime_impl._accumulate_real_m2l_fullbatch,
-        "_accumulate_solidfmm_m2l_chunked_scan": runtime_impl._accumulate_solidfmm_m2l_chunked_scan,
-        "_accumulate_solidfmm_m2l_fullbatch": runtime_impl._accumulate_solidfmm_m2l_fullbatch,
+        "_accumulate_m2l_chunked_scan": runtime_impl._accumulate_m2l_chunked_scan,
+        "_accumulate_m2l_fullbatch": runtime_impl._accumulate_m2l_fullbatch,
         "_accumulate_solidfmm_m2l_grouped": runtime_impl._accumulate_solidfmm_m2l_grouped,
         "_accumulate_solidfmm_m2l_grouped_class_major": runtime_impl._accumulate_solidfmm_m2l_grouped_class_major,
         "_build_dual_tree_artifacts": _build_dual_tree_artifacts,
@@ -775,10 +773,12 @@ def _run_m2l_stage_once(
     acc_grouped_class_major = internal_symbols[
         "_accumulate_solidfmm_m2l_grouped_class_major"
     ]
-    acc_complex_fullbatch = internal_symbols["_accumulate_solidfmm_m2l_fullbatch"]
-    acc_complex_chunked = internal_symbols["_accumulate_solidfmm_m2l_chunked_scan"]
-    acc_real_fullbatch = internal_symbols["_accumulate_real_m2l_fullbatch"]
-    acc_real_chunked = internal_symbols["_accumulate_real_m2l_chunked_scan"]
+    acc_fullbatch = internal_symbols["_accumulate_m2l_fullbatch"]
+    acc_chunked = internal_symbols["_accumulate_m2l_chunked_scan"]
+    acc_complex_fullbatch = partial(acc_fullbatch, basis_mode="complex")
+    acc_complex_chunked = partial(acc_chunked, basis_mode="complex")
+    acc_real_fullbatch = partial(acc_fullbatch, basis_mode="real")
+    acc_real_chunked = partial(acc_chunked, basis_mode="real")
 
     impl = fmm._impl
     pair_count = int(stage_inputs.src.shape[0])

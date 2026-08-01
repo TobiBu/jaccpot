@@ -101,7 +101,7 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--index-precision", default="int32")
     parser.add_argument(
         "--runtime-path",
-        choices=("auto", "legacy", "large_n"),
+        choices=("auto", "large_n"),
         default="auto",
     )
     return parser.parse_args()

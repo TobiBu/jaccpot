@@ -14,23 +14,6 @@ Requires an Ampere+ GPU (the large-N fused lane is GPU-only); skipped otherwise.
 
 from __future__ import annotations
 
-import os
-
-# Strict-fused device-only knobs (mirror odisseo _large_n_environment_overrides).
-# Set before constructing the solver so __init__ captures them.
-for _k, _v in {
-    "JACCPOT_STATIC_STRICT_GPU_MODE": "on",
-    "JACCPOT_STATIC_STRICT_FUSED_MODE": "on",
-    "JACCPOT_STATIC_STRICT_FUSED_DEVICE_ONLY": "1",
-    "JACCPOT_STATIC_STRICT_FUSED_DISALLOW_HOST_SEGMENT_FALLBACK": "1",
-    "JACCPOT_STATIC_STRICT_FUSED_FLAT_COMPACT_FAR_PAIRS": "1",
-    "JACCPOT_STATIC_STRICT_FUSED_COMPACT_FAR_PAIR_CAP": "131072",
-    "JACCPOT_STATIC_STRICT_REQUIRE_EXACT_CAP_PROFILE_MATCH": "0",
-    "JACCPOT_LARGE_N_COMPILED_STATE_MODE": "on",
-    "JACCPOT_LARGE_N_RADIX_FAST_PAYLOAD_IN_FUSED": "1",
-}.items():
-    os.environ.setdefault(_k, _v)
-
 import jax
 import jax.numpy as jnp
 import numpy as np
@@ -50,8 +33,32 @@ try:
 except Exception:  # pragma: no cover
     from yggdrax.interactions import CompactTaggedFarPairs
 
-_FAR_CAP = int(os.environ["JACCPOT_STATIC_STRICT_FUSED_COMPACT_FAR_PAIR_CAP"])
+_FAR_CAP = 131072
+
+# Strict-fused device-only knobs (mirror odisseo _large_n_environment_overrides),
+# applied per-test via monkeypatch so FastMultipoleMethod.__init__ captures them and
+# they are CLEANLY RESTORED afterwards. Previously these were written to os.environ at
+# module import time, which leaked into unrelated tests under `pytest -n`: every xdist
+# worker imports this module (even though its GPU-only tests are skipped), permanently
+# setting e.g. STRICT_FUSED_MODE/DISALLOW_HOST_SEGMENT_FALLBACK process-wide.
+_STRICT_FUSED_ENV = {
+    "JACCPOT_STATIC_STRICT_GPU_MODE": "on",
+    "JACCPOT_STATIC_STRICT_FUSED_MODE": "on",
+    "JACCPOT_STATIC_STRICT_FUSED_DEVICE_ONLY": "1",
+    "JACCPOT_STATIC_STRICT_FUSED_DISALLOW_HOST_SEGMENT_FALLBACK": "1",
+    "JACCPOT_STATIC_STRICT_FUSED_FLAT_COMPACT_FAR_PAIRS": "1",
+    "JACCPOT_STATIC_STRICT_FUSED_COMPACT_FAR_PAIR_CAP": str(_FAR_CAP),
+    "JACCPOT_STATIC_STRICT_REQUIRE_EXACT_CAP_PROFILE_MATCH": "0",
+    "JACCPOT_LARGE_N_COMPILED_STATE_MODE": "on",
+    "JACCPOT_LARGE_N_RADIX_FAST_PAYLOAD_IN_FUSED": "1",
+}
 _THETA, _G, _SOFT, _LEAF, _ORDER = 0.5, 1.0, 1e-2, 16, 4
+
+
+@pytest.fixture(autouse=True)
+def _apply_strict_fused_env(monkeypatch):
+    for _k, _v in _STRICT_FUSED_ENV.items():
+        monkeypatch.setenv(_k, _v)
 
 
 def _direct(pos, mass):
