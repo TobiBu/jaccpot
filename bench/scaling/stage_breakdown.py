@@ -153,15 +153,17 @@ def _parse_args() -> argparse.Namespace:
     p.add_argument(
         "--max-pair-queue",
         type=int,
-        default=131072,
+        default=None,
         help=(
-            "Traversal pair-queue capacity. The shipped 131072 raises 'Pair queue "
-            "capacity exceeded' at and above N=262144, so it bounds this figure's "
-            "ladder. Raising it is NOT a free way past that: measured at N=65536, "
-            "going to 4194304 took per-step time from 1079 ms to 3473 ms (3.2x) and "
-            "moved 70% of the step into uninstrumented code, i.e. it measures a "
-            "different configuration rather than extending this one. Default is "
-            "therefore the shipped value, which is also what a user gets"
+            "Override the traversal pair-queue capacity. Left unset by default, and "
+            "that default matters: supplying ANY explicit traversal_config replaces "
+            "the preset's tuned values, and measured at N=65536 that alone took "
+            "per-step time from 1079 ms to ~3200 ms and pushed the attributed "
+            "fraction from 76% down to 27% -- with the queue set to the same 131072 "
+            "the preset uses. The cost is the override, not the capacity. Set this "
+            "only to push past the 'Pair queue capacity exceeded' ceiling above "
+            "N=131072, and read the resulting per-step numbers as a differently "
+            "configured solver rather than as a longer ladder"
         ),
     )
     p.add_argument("--max-neighbors-per-leaf", type=int, default=1 << 16)
@@ -208,18 +210,23 @@ def main() -> int:
         )
         vel = 0.01 * jax.random.normal(k_vel, (n, 3), dtype=jnp.float32)
 
-        advanced = FMMAdvancedConfig(
-            runtime=RuntimePolicyConfig(
-                traversal_config=DualTreeTraversalConfig(
-                    max_pair_queue=int(args.max_pair_queue),
-                    process_block=512,
-                    max_interactions_per_node=int(args.max_interactions_per_node),
-                    max_neighbors_per_leaf=int(args.max_neighbors_per_leaf),
+        # Only build an advanced config when an override was actually asked for:
+        # passing one unconditionally, even carrying the preset's own queue size,
+        # replaced the preset's tuned traversal values and tripled per-step time.
+        extra: dict[str, Any] = {}
+        if args.max_pair_queue is not None:
+            extra["advanced"] = FMMAdvancedConfig(
+                runtime=RuntimePolicyConfig(
+                    traversal_config=DualTreeTraversalConfig(
+                        max_pair_queue=int(args.max_pair_queue),
+                        process_block=512,
+                        max_interactions_per_node=int(args.max_interactions_per_node),
+                        max_neighbors_per_leaf=int(args.max_neighbors_per_leaf),
+                    )
                 )
             )
-        )
         solver = FastMultipoleMethod(
-            advanced=advanced,
+            **extra,
             preset="large_n_gpu",
             runtime_path="large_n",
             expansion_basis="solidfmm",
@@ -343,7 +350,11 @@ def main() -> int:
         "warmup": int(args.warmup),
         "drift": float(args.drift),
         "profile_env": dict(PROFILE_ENV),
-        "max_pair_queue": int(args.max_pair_queue),
+        "max_pair_queue": (
+            int(args.max_pair_queue)
+            if args.max_pair_queue is not None
+            else "preset default (no traversal_config override)"
+        ),
         "note": (
             "Per-stage timers exist only on the strict non-fused refresh path, "
             "implemented for preset='large_n_gpu'/radix/solidfmm. This breakdown "
