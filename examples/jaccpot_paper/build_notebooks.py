@@ -355,7 +355,28 @@ for i, (key, label, entity) in enumerate(SERIES):
         continue
     fit = fits.get(f"{set_name}:{key}", {})
     alpha = fit.get("exponent")
-    suffix = f"  ($\\\\alpha={alpha:.2f}$)" if alpha and np.isfinite(alpha) else ""
+    # An exponent is a complexity statement only if the power law actually fits
+    # AND the series actually grew. Measured here, over N = 27554 -> 881744 (a
+    # factor of 32): jaccpot_potential grows 39x and fits alpha=1.08 at R^2=0.98,
+    # a real near-linear result; jaccpot_acceleration grows only 2.2x and fits
+    # alpha=0.20 at R^2=0.89, which is a fixed overhead being fitted rather than
+    # O(N). Requiring R^2 >= 0.95 and >= 4x growth separates the two; anything
+    # failing that is labelled overhead-bound instead of given a spurious number.
+    fit_lo = fit.get("fit_min_n") or 0
+    span = [r["timings"][key]["min_s"] for r in sel if r["n"] >= fit_lo]
+    dynamic = (max(span) / min(span)) if span and min(span) > 0 else 0.0
+    if (
+        alpha is not None
+        and np.isfinite(alpha)
+        and fit.get("n_points", 0) >= 3
+        and dynamic >= 4.0
+        and (fit.get("r_squared") or 0.0) >= 0.95
+    ):
+        suffix = f"  ($\\\\alpha={alpha:.2f}$)"
+    elif dynamic and dynamic < 4.0:
+        suffix = "  (overhead-bound)"
+    else:
+        suffix = ""
     ax.plot(
         [r["n"] for r in sel],
         [r["timings"][key]["min_s"] for r in sel],
@@ -370,7 +391,7 @@ for i, (key, label, entity) in enumerate(SERIES):
 ax.set_xscale("log"); ax.set_yscale("log")
 ax.set_xlabel("$N$")
 ax.set_ylabel("wall-clock per evaluation [s]")
-style.finish(ax, legend_kwargs={"loc": "upper left", "fontsize": 6.2})
+style.finish(ax, legend_kwargs={"loc": "lower right", "fontsize": 6.0})
 fig.tight_layout()
 style.footer(
     fig,
@@ -380,9 +401,26 @@ style.footer(
 style.save(fig, FIG_DIR / "fig04_wallclock_vs_n.pdf")
 
 for name, fit in sorted(fits.items()):
-    if name.startswith(set_name):
-        print(f"{name:<45s} alpha={fit['exponent']:.3f} R2={fit['r_squared']:.4f} "
-              f"n={fit['n_points']} over N={fit.get('fit_min_n')}..{fit.get('fit_max_n')}")
+    if not name.startswith(set_name):
+        continue
+    series_key = name.split(":", 1)[1]
+    span = [
+        r["timings"][series_key]["min_s"]
+        for r in recs
+        if r["param_set"] == set_name
+        and r["timings"].get(series_key, {}).get("min_s")
+        and r["n"] >= (fit.get("fit_min_n") or 0)
+    ]
+    dynamic = (max(span) / min(span)) if span and min(span) > 0 else float("nan")
+    ok = (
+        fit["n_points"] >= 3
+        and dynamic >= 4.0
+        and (fit.get("r_squared") or 0.0) >= 0.95
+    )
+    note = "" if ok else "   <- NOT a complexity exponent"
+    print(f"{name:<45s} alpha={fit['exponent']:.3f} R2={fit['r_squared']:.4f} "
+          f"n={fit['n_points']} N={fit.get('fit_min_n')}..{fit.get('fit_max_n')} "
+          f"range={dynamic:.2f}x{note}")
 """
 
 FIG04_CAPTION = """\

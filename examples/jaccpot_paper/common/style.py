@@ -158,7 +158,16 @@ def apply(*, dark: bool = False) -> None:
             "lines.linewidth": 1.4,
             "lines.markersize": 4.0,
             "lines.markeredgewidth": 0.8,
-            "legend.frameon": False,
+            # A light backing rather than no frame at all: with a frameless
+            # legend, any curve crossing the legend area runs through the label
+            # text (figure 04's jaxFMM series did exactly that). Near-opaque
+            # white with no edge keeps the legend recessive while still winning
+            # against the data underneath it.
+            "legend.frameon": True,
+            "legend.framealpha": 0.88,
+            "legend.facecolor": surface,
+            "legend.edgecolor": "none",
+            "legend.borderpad": 0.35,
             "legend.handlelength": 1.8,
             "legend.columnspacing": 1.2,
             "legend.labelspacing": 0.3,
@@ -268,22 +277,36 @@ def annotate_config(ax, text: str, *, loc: str = "lower left") -> None:
     )
 
 
-def footer(fig, text: str, *, y: float = -0.06) -> None:
+def footer(fig, text: str, *, y: float = -0.06, fontsize: float = 6.5) -> None:
     """Put the provenance line under the whole figure, in muted ink.
 
     Preferred over :func:`annotate_config` for the run configuration: inside an
     axes a long ``k=v`` string reliably collides with a y-axis label or a legend,
     and a caption that overlaps the data is worse than no caption.
+
+    The text is **wrapped to the figure width** rather than left as one line.
+    ``savefig`` runs with ``bbox_inches="tight"``, so a single long line silently
+    widens the exported PDF to fit itself -- a one-column figure came out nearly
+    twice its column width, with the axes shrunk to make room for a provenance
+    string. Wrapping keeps the figure the size it was asked for.
     """
+
+    import textwrap
+
+    width_in = fig.get_size_inches()[0]
+    # ~0.5 em per character at this size; 72 pt per inch.
+    chars = max(24, int(width_in * 72.0 / (0.52 * fontsize)))
+    wrapped = "\n".join(textwrap.wrap(text, width=chars)) or text
 
     fig.text(
         0.5,
         y,
-        text,
+        wrapped,
         ha="center",
         va="top",
-        fontsize=6.5,
+        fontsize=fontsize,
         color=INK_MUTED,
+        linespacing=1.5,
     )
 
 
