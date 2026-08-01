@@ -66,46 +66,66 @@ FIG01 = """\
 art = jsonio.read_result("validation/force_error_vs_order.json")
 cfg, recs = art["config"], art["data"]["records"]
 
-fig, axes = style.figure(width=style.TWO_COL, height=2.7, ncols=2, sharex=True)
-bases = [b for b in cfg["basis"]]
-dists = [d for d in cfg["distribution"]]
-# Dash pattern carries the distribution and colour carries the basis, so the two
-# axes of the sweep are never confused for one another.
-dashes = {d: ls for d, ls in zip(dists, ["-", "--", ":"])}
+bases = list(cfg["basis"])
+dists = list(cfg["distribution"])
 
+# The real and solidfmm bases agree to float64 round-off at every point of this
+# sweep (ratio 1.0000, max |diff| 4.5e-13 -- solidfmm and complex are in fact
+# bit-identical, being the same code path). Drawing them as two curves therefore
+# hides one behind the other and says nothing. Plot one basis, and report the
+# cross-basis agreement as its own number: two independent expansion bases
+# reproducing each other to round-off is a stronger cross-validation statement
+# than two indistinguishable lines.
+ref_basis = bases[0]
+idx = {(r["basis"], r["distribution"], r["order"]): r for r in recs}
+worst_gap, worst_at = 0.0, None
+for (b, d, o), r in idx.items():
+    other = idx.get((ref_basis, d, o))
+    if b == ref_basis or other is None or not other["rel_l2"]:
+        continue
+    gap = abs(r["rel_l2"] - other["rel_l2"]) / other["rel_l2"]
+    if gap > worst_gap:
+        worst_gap, worst_at = gap, (b, d, o)
+
+fig, axes = style.figure(width=style.TWO_COL, height=2.7, ncols=2, sharex=True)
 for ax, field, label in (
     (axes[0], "rel_l2", "relative $L_2$ force error"),
     (axes[1], "worst_component", "worst component error / rms$|a|$"),
 ):
-    for bi, basis in enumerate(bases):
-        for dist in dists:
-            sel = sorted(
-                (r for r in recs if r["basis"] == basis and r["distribution"] == dist),
-                key=lambda r: r["order"],
-            )
-            if not sel:
-                continue
-            ax.plot(
-                [r["order"] for r in sel],
-                [r[field] for r in sel],
-                marker=style.MARKERS[bi % len(style.MARKERS)],
-                linestyle=dashes[dist],
-                color=style.entity_color(basis, bi),
-                label=f"{basis}, {dist}",
-                markerfacecolor="white",
-                markeredgecolor=style.entity_color(basis, bi),
-            )
+    for di, dist in enumerate(dists):
+        sel = sorted(
+            (r for r in recs if r["basis"] == ref_basis and r["distribution"] == dist),
+            key=lambda r: r["order"],
+        )
+        if not sel:
+            continue
+        ax.plot(
+            [r["order"] for r in sel],
+            [r[field] for r in sel],
+            marker=style.MARKERS[di % len(style.MARKERS)],
+            color=style.CATEGORICAL[di % len(style.CATEGORICAL)],
+            label=dist,
+        )
     ax.set_yscale("log")
     ax.set_xlabel("expansion order $p$")
     ax.set_ylabel(label)
     style.finish(ax, legend=(ax is axes[0]), legend_kwargs={"loc": "lower left"})
 
-style.annotate_config(
-    axes[1],
-    jsonio.config_caption(cfg, ["n", "theta", "leaf_size", "preset", "precision", "device"]),
-    loc="upper right",
-)
+agreement = ""
+if worst_at is not None:
+    agreement = f"   {' vs '.join(bases)} agree to {worst_gap:.1e} over the sweep"
+    print(f"worst cross-basis relative gap {worst_gap:.3e} at {worst_at}")
+
 fig.tight_layout()
+# Both the config and the cross-basis agreement go in the footer: inside the axes
+# the note grazed the first Plummer marker, and a caption over data is worse than
+# a caption below the figure.
+style.footer(
+    fig,
+    f"basis {ref_basis}  " + jsonio.config_caption(
+        cfg, ["n", "theta", "leaf_size", "preset", "precision", "device", "seed"]
+    ) + agreement,
+)
 style.save(fig, FIG_DIR / "fig01_force_error_vs_order.pdf")
 """
 
@@ -176,10 +196,9 @@ if any(r.get("far_field_empty") for r in recs):
         transform=axes[0].transAxes, va="top", ha="left",
         fontsize=6.5, color=style.INK_MUTED,
     )
-style.annotate_config(
-    axes[-1],
-    jsonio.config_caption(cfg, ["n", "basis", "leaf_size", "preset", "precision", "device"]),
-    loc="lower left",
+style.footer(
+    fig,
+    jsonio.config_caption(cfg, ["n", "basis", "leaf_size", "preset", "precision", "device"]),,
 )
 fig.tight_layout()
 style.save(fig, FIG_DIR / "fig02_error_vs_theta.pdf")
@@ -287,10 +306,9 @@ else:
             ha="center", va="center", transform=ax.transAxes, color=style.INK_MUTED)
     ax.set_axis_off()
 
-style.annotate_config(
-    axes[0],
-    jsonio.config_caption(cfg, ["n", "order", "leaf_size", "precision", "device"]),
-    loc="upper right",
+style.footer(
+    fig,
+    jsonio.config_caption(cfg, ["n", "order", "leaf_size", "precision", "device"]),,
 )
 fig.tight_layout()
 style.save(fig, FIG_DIR / "fig03_mac_comparison.pdf")
@@ -353,11 +371,10 @@ ax.set_xscale("log"); ax.set_yscale("log")
 ax.set_xlabel("$N$")
 ax.set_ylabel("wall-clock per evaluation [s]")
 style.finish(ax, legend_kwargs={"loc": "upper left", "fontsize": 6.2})
-style.annotate_config(
-    ax,
-    jsonio.config_caption(cfg, ["order", "theta", "basis", "preset", "precision", "device"])
-    + f"\\nexponent fitted for N >= {cfg.get('fit_min_n')}",
-    loc="lower right",
+style.footer(
+    fig,
+    jsonio.config_caption(cfg, ["order", "theta", "basis", "preset", "precision", "device", "seed"])
+    + f"   exponent fitted for N >= {cfg.get('fit_min_n')}",
 )
 fig.tight_layout()
 style.save(fig, FIG_DIR / "fig04_wallclock_vs_n.pdf")
@@ -419,11 +436,10 @@ for ax, per_particle in ((axes[0], False), (axes[1], True)):
     ax.set_ylabel(\"interactions per particle\" if per_particle else \"interaction count\")
     style.finish(ax, legend_kwargs={\"loc\": \"best\", \"fontsize\": 6.4})
 
-style.annotate_config(
-    axes[0],
-    jsonio.config_caption(cfg, [\"order\", \"theta\", \"basis\", \"leaf_size\", \"device\"])
-    + f\"\\nexponent fitted for N >= {cfg.get('fit_min_n')}\",
-    loc=\"lower right\",
+style.footer(
+    fig,
+    jsonio.config_caption(cfg, [\"order\", \"theta\", \"basis\", \"leaf_size\", \"device\", \"seed\"])
+    + f\"   exponent fitted for N >= {cfg.get('fit_min_n')}\",
 )
 fig.tight_layout()
 style.save(fig, FIG_DIR / \"fig05_interaction_counts.pdf\")
@@ -509,10 +525,9 @@ for ax, normalise in ((axes[0], False), (axes[1], True)):
 frac = [r.get("attributed_fraction") for r in recs if r.get("attributed_fraction")]
 if frac:
     print(f"attributed fraction of wall clock: {min(frac):.2%} .. {max(frac):.2%}")
-style.annotate_config(
-    axes[0],
-    jsonio.config_caption(cfg, ["order", "theta", "basis", "preset", "leaf_size", "device"]),
-    loc="lower left",
+style.footer(
+    fig,
+    jsonio.config_caption(cfg, ["order", "theta", "basis", "preset", "leaf_size", "device"]),,
 )
 fig.tight_layout()
 style.save(fig, FIG_DIR / "fig06_stage_breakdown.pdf")
@@ -581,10 +596,9 @@ if skipped:
         transform=ax.transAxes, va="top", ha="left",
         fontsize=6.5, color=style.INK_MUTED,
     )
-style.annotate_config(
-    axes[0],
-    jsonio.config_caption(cfg, ["order", "theta", "basis", "preset", "leaf_size", "precision"]),
-    loc="lower right",
+style.footer(
+    fig,
+    jsonio.config_caption(cfg, ["order", "theta", "basis", "preset", "leaf_size", "precision"]),,
 )
 fig.tight_layout()
 style.save(fig, FIG_DIR / "fig07_gpu_vs_cpu.pdf")
@@ -678,10 +692,9 @@ modes = sorted({r["mode"] for r in recs})
 axes[1].text(0.02, 0.98, "timed mode: " + ", ".join(modes),
              transform=axes[1].transAxes, va="top", ha="left",
              fontsize=6.5, color=style.INK_MUTED)
-style.annotate_config(
-    axes[0],
-    jsonio.config_caption(cfg, ["order", "theta", "leaf_size", "precision", "device"]),
-    loc="lower right",
+style.footer(
+    fig,
+    jsonio.config_caption(cfg, ["order", "theta", "leaf_size", "precision", "device"]),,
 )
 fig.tight_layout()
 style.save(fig, FIG_DIR / "fig12_autodiff_overhead.pdf")
@@ -755,11 +768,10 @@ for ax, field, title in (
     ax.set_title(title, fontsize=8)
     style.finish(ax, legend=(ax is axes[0]), legend_kwargs={"loc": "best", "fontsize": 6.2})
 
-style.annotate_config(
-    axes[0],
+style.footer(
+    fig,
     jsonio.config_caption(cfg, ["n", "order", "leaf_size", "precision", "device"])
-    + f"\\nFD: {cfg['fd_samples']} coords, eps={cfg['fd_eps']:g}",
-    loc="lower left",
+    + f"\\nFD: {cfg['fd_samples']} coords, eps={cfg['fd_eps']:g}",,
 )
 fig.tight_layout()
 style.save(fig, FIG_DIR / "fig13_grad_correctness.pdf")
