@@ -83,7 +83,12 @@ def _parse_args() -> argparse.Namespace:
         "--param-set", default="1_default", choices=tuple(PARAM_SETS) + ("all",)
     )
     p.add_argument("--basis", default="real")
-    p.add_argument("--preset", default="accurate")
+    # `large_n_gpu`, not `accurate`. Measured on an A100 at N=16384, leaf=64, p=4,
+    # evaluating a prebuilt tree: accurate 27.3 s vs large_n_gpu 197 ms, a factor
+    # of 139, in steady state rather than compilation. `accurate` does not take
+    # the radix fast lane, so timing it on a GPU would publish a preset artefact
+    # as a scaling result. The accuracy figures (01-03) stay on `accurate`.
+    p.add_argument("--preset", default="large_n_gpu")
     p.add_argument(
         "--leaf-size",
         type=int,
