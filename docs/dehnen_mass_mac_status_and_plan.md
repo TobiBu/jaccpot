@@ -516,101 +516,99 @@ jit, no host round trip.
 either criterion. See trap 3, now re-measured — bulge+halo turns out to be the criterion's
 *strongest* case, not an invalid one.
 
-### Step 3 — Per-node effective θ, so the mass MAC reaches the fast lanes (~2–3 days)
+### Step 3 — Per-node effective θ — **REFUTED (2026-08-01). Both variants.**
 
-**Why.** The exact criterion needs a `pair_policy`, and that vetoes every production
-fast lane — `can_use_large_n_prepare_path` returns False on
-`_uses_paper_style_force_scale()`, the split/streamed builds require
-`pair_policy is None`, and the treecode/Pallas walks have no hook at all. This step is
-a **prerequisite for Step 4**.
+**The plan was:** collapse eq (16a) into one opening angle per node, feed it as
+rescaled `geometry.radius`, and the lanes' existing scalar-θ test carries the
+criterion with no `pair_policy` and therefore no lane veto. All three yggdrax facts
+the plan rested on were verified true (`_build_mac_extents` reads `geometry.radius`;
+`_propagate_extents` only fills `<= 0` and takes no maxima; `dehnen_radius_scale` is
+traced). They were not sufficient.
 
-**The mechanism (verified).** Bounding `P_n/M ≤ ρⁿ` collapses eq (16a)'s sum to
-`θ^(p+2)`, giving a per-node
+**One thing the plan got better than expected.** The inversion is *closed form* — in
+eq (15) the distance enters only as `r^(p+2)` and `improvement` depends solely on the
+two radii, so the LHS is exactly `C_i·r^-(p+2)`. Verified two ways: `LHS·(r/ρ)^(p+2)`
+constant to full double precision over a 6× range of `r`, and evaluating eq (16a) at
+`r = 2ρ_i/θ_i` reproduces `ε·s_i` to 2.7e-15. **No Newton, no bisection, no iteration,
+and the measured multipole spectrum is retained** rather than discarded by the crude
+`P_n/M ≤ ρⁿ` bound. `per_node_effective_theta` in `_adaptive_policy.py`.
 
-```
-θ_i = clip( [ ε · a_min(i) · ρ_i² / (8 M_i) ]^(1/(p+2)), θ_floor, 1 )
-```
+**Variant A — tight on average (`mac_type="dehnen_theta"`): unsound.**
+N=4096/p=8 against the exact criterion
+(`results/validation/theta_fidelity_p8.json`):
 
-(the `1/(p+2)` exponent is the one `adaptive_policy_tolerance` already uses — the code
-knows this relation, it just applies it backwards). Feeding extents
-`e_i = ρ_i · θ_g/θ_i` makes the lanes' existing scalar-θ test `(e_t+e_s)² ≤ θ_g²d²`
-**algebraically identical** to `ρ_t/θ_t + ρ_s/θ_s ≤ d`. So this is a per-node rescale of
-`geometry.radius`, not a new comparison — no `pair_policy`, hence no lane veto.
+| distribution | ε | far exact | far θ | p99 exact | p99 θ | p99.99 θ | work × |
+|---|---|---|---|---|---|---|---|
+| Plummer | 3e-4 | 10666 | 14440 | 2.83e-4 | 3.58e-2 | 5.10e+0 | 1.35 |
+| Plummer | 3e-6 | 688 | 2154 | 7.71e-7 | 9.35e-6 | 1.48e-4 | 3.13 |
+| bulge_halo | 3e-4 | 6492 | 10476 | 1.26e-3 | 1.28e+0 | **2.33e+2** | 1.61 |
+| bulge_halo | 3e-6 | 268 | 4042 | 9.38e-7 | 8.69e-3 | 2.68e-1 | **15.08** |
 
-Two facts that make it work, both checked in yggdrax `_interactions_impl.py`:
-`_build_mac_extents` (~:993) reads `geometry.radius` for `mac_type="dehnen"`, and
-`_propagate_extents` (~:876) only fills nodes whose extent is `<= 0` — **it takes no
-maxima**, so a per-node scaling survives. `dehnen_radius_scale` is also *not* in
-`static_argnames`, so it is traced and could even accept a per-node array directly.
+12–9300× worse error at 1.35–15× *more* work. No favourable operating point. Retained
+behind a `FutureWarning` only so the negative result stays reproducible.
 
-**Do.** New `per_node_effective_theta(...)` beside `resolve_dehnen_geometry` in
-`_adaptive_policy.py`; one substitution point where `tree_artifacts.upward.geometry` is
-handed to the dual build; a `mac_type` value to select it. Zero yggdrax changes; reaches
-the generic walk, split build, compact-streamed build, treecode **and Pallas**.
+**Variant B — provably conservative (`per_node_conservative_extent`): sound but empty.**
+Sound by construction (zero violations measured) via the AM-GM split
+`√(M_A/s_B) ≤ ½(M_A/λ + λ/s_B)`, giving
+`e_i = max(c·ρ_i, K·M_i/λ, K·λ/s_i)`. Best achievable acceptance, optimised over 13
+decades of λ and six values of `c`: **0.08 %–0.58 %** of the exact criterion's far
+pairs. At that rate the far field does not exist.
 
-**Traps.** Zero-radius single-particle leaves hit `_compute_leaf_effective_extents`'
-depth padding and would bypass the scale — clamp to a tiny positive before scaling.
-Keep `dehnen_radius_scale` at 1.0 in this mode or fold it in, and pin that with a test.
+**The structural reason, which is the durable finding.** eq (16a) accepts when
+`r^(p+2)` exceeds a **product** of a source term (mass, power) and a sink term (force
+scale). Any per-node-extent test is a **sum**, `e_A + e_B ≤ θ_g·r`. A sum cannot
+represent a product: make it safe for every pair and it must absorb the full dynamic
+range of `M` and `s` (variant B, empty); make it tight on average and it is unsound
+exactly on the tails that matter (variant A). **Separate source/target extent arrays
+would not help** — the mismatch is sum-vs-product, not role-vs-role.
 
-**What it gives up.** Per-sink `a_b` fidelity (each node uses its own scale) and the
-measured multipole spectrum. Two variants:
+Consequence: **the criterion is intrinsically a pair test.** It will always require a
+`pair_policy`, so it can never be folded into the cheapest purely geometric lanes.
+That is a permanent ceiling on its achievable speed, not a gap to be closed.
 
-- *Crude bound* (`P_n/M ≤ ρⁿ`). The eq (15) sum then collapses binomially to
-  `M(ρ_z+ρ_s)^p` and the whole test reduces to `θ^(p+2) < ε·a_min·ρ²/(8GM)`, so θ_i is
-  **closed form** — no solve. This is the formula above. It discards the measured
-  spectrum, which is where the criterion's selectivity comes from, and the win is
-  specifically in the *tail*, so this is the part most at risk.
-- *Measured spectrum.* Keeping the real `P_n`, the sum `Σ_n c_{p,n} P_n ρ_s^{e(p,n)}`
-  does not collapse to `(ρ_z+ρ_s)^p`, so there is no closed-form inverse and θ_i must be
-  solved for numerically. Recovers most of the selectivity; **treat as mandatory, not
-  optional**, given where the advantage lives.
+### Step 3′ — Carry the pair policy into the lanes instead (revised scope)
 
-**Solve it on device, with a fixed trip count.** An earlier draft of this document
-suggested "~5 Newton steps per node on the host". That is wrong and contradicts the
-direction this code already took — `dehnen_geometry_mode='tree'` was *removed as a
-defect* for running a numpy host loop, and `resolve_dehnen_geometry` now raises rather
-than run one under trace. `prepare_state` being eager does not mean host numpy; it means
-eager JAX ops on device arrays.
+The handoff claimed "the split/streamed builds require `pair_policy is None`" and framed
+this as a yggdrax change. **That is wrong.** yggdrax accepts `pair_policy` in four walks
+including `_dual_tree_walk_count_impl` and `_dual_tree_walk_compact_fill_impl` — which
+*are* the split/streamed build. Every `pair_policy is None` gate is jaccpot-side:
 
-`F_i(θ)` is a polynomial in θ with positive coefficients, hence strictly increasing
-(measured: 1.7e-8 at opening 0.2 rising monotonically to 1.6e-1 at 0.995), and the
-bracket `[θ_floor, 1]` is known a priori. So use **fixed-count bisection**, vmapped over
-nodes inside one `lax.fori_loop`:
+| gate | blocks | fundamental? |
+|---|---|---|
+| `_can_split_dual_tree_build` | the split build outright | **no** — its own docstring says "intentionally narrow" |
+| `can_use_large_n_prepare_path` | the whole large-N lane, on `_uses_paper_style_force_scale()` | no — a jaccpot policy decision |
+| `_interaction_cache.py` ~:443 | interaction caching | yes, correctly (the key omits the policy) — perf only |
+| `strict_split_fastlane` hint | a route-probing shortcut | perf only |
+| `_large_n_pipeline.py` | never threads `pair_policy` at all | plumbing |
 
-```python
-def per_node_effective_theta(power, mass, radius, a_min, *, order, G, eps, iters=24):
-    lo = jnp.full_like(mass, THETA_FLOOR)
-    hi = jnp.ones_like(mass)
+So this is mostly threading an existing yggdrax capability through jaccpot, plus running
+the force-scale prepass inside `prepare_large_n_state`.
 
-    def body(_, bounds):
-        lo, hi = bounds
-        mid = 0.5 * (lo + hi)
-        over = _eq15_force_error(power, mass, radius, mid, order=order, G=G) > eps * a_min
-        return jnp.where(over, lo, mid), jnp.where(over, mid, hi)
-
-    lo, _ = jax.lax.fori_loop(0, iters, body, (lo, hi))
-    return lo          # conservative side of the bracket
-```
-
-Bisection beats Newton here for a specific reason: it needs no derivative, cannot
-diverge, and has a **static** trip count. Newton would want a convergence test, and a
-convergence test is exactly what forces a device-to-host read. Returning `lo` rather
-than `mid` keeps rounding on the under-accepting side, which is the right default given
-that over-acceptance has been the silent failure mode in every defect found so far.
-
-Cost: `num_nodes × iters × (p+1)` FMAs, one fused kernel, no transfers. 24 iterations
-gives 2⁻²⁴ ≈ 6e-8 absolute on θ. At 1M particles: ~1.7 MFLOP at leaf 256 (~8k nodes),
-~27 MFLOP at leaf 16 (~125k nodes). Free beside a p=8 FMM.
-
-**Accept when.** Accept-mask agreement and matched-work force error against the exact
-criterion on the generic lane, before claiming fast-lane parity.
+**The real risk:** `store_far_tags = pair_policy is not None` in both passes, so supplying
+a policy allocates a far-tag buffer — in the *minimum-memory streamed* regime that lane
+exists for, at 1M, where the reverse peak is already 11.07 GB of 40 GB. Measure the peak
+before committing to the design. Fallback: make tag storage conditional on the caller
+actually needing tags (jaccpot needs the actions, possibly not the retained tags).
 
 ### Step 4 — Measure at Dehnen's regime: 1M Plummer, p=8 (~1–2 days)
 
-**Feasibility is established.** 1M runs on one A100-40GB: `large_n_gpu`, leaf 256,
-fp32, order 4 — 11.07 GB reverse peak, 2.50 s forward, 68.9 s forward+backward.
-Forward-only error measurement is well under that. Requires
-`expansion_basis="solidfmm"` + the large-N lane, hence Step 3 first.
+**Do the N=10⁵ measurement first, on the generic lane — it needs no lane work.** This
+document previously coupled the scientific claim to the engineering by asserting Step 4
+"requires the large-N lane, hence Step 3 first". That is true for 10⁶, not for 10⁵: the
+error measurement is forward-only, and the generic lane runs it. Since Step 3 is refuted
+and Step 3′ is a multi-day effort with a memory risk, establishing whether the tail
+advantage survives to 10⁵ is both the cheaper question and the one that decides whether
+any of the lane work is worth doing. Nothing above N=4096 has ever been measured.
+
+Note also that interaction work is a **wash** (1.00–1.06×), so the criterion buys tail
+accuracy at equal cost, not speed. If it stays on the generic lane while fixed-θ runs
+the fast lane, end-to-end it is *slower*. That tension is unquantified and bears on
+whether Step 3′ is worth it even if the claim holds.
+
+**Feasibility at 1M is established.** One A100-40GB: `large_n_gpu`, leaf 256, fp32,
+order 4 — 11.07 GB reverse peak, 2.50 s forward, 68.9 s forward+backward. Forward-only
+error measurement is well under that, but it does need `expansion_basis="solidfmm"` plus
+the large-N lane, hence Step 3′.
 
 **Reference strategy.** Direct sum at 10⁶ is 10¹² pairs — infeasible. Use **target
 subsampling**: exact direct force for ~10⁴ random targets against all 10⁶ sources is

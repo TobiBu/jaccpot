@@ -827,6 +827,272 @@ def compute_tree_merged_sphere_geometry(
 #: ``tree`` runs the same solve per leaf before the device-side merge.
 _HOST_ONLY_DEHNEN_GEOMETRY_MODES = ("exact", "tree")
 
+#: Smallest per-node opening angle the effective-theta mode will emit. A node
+#: demanding a smaller opening than this needs an extent large enough to dominate
+#: the pair queue; in practice such nodes are better refined than accepted.
+_EFFECTIVE_THETA_FLOOR = 1e-3
+
+#: Radius floor, as a fraction of the root radius, applied before the extent
+#: rescale. Not cosmetic: ``_propagate_extents`` replaces any extent ``<= 0`` with
+#: an ancestor's, and ``_compute_leaf_effective_extents`` replaces zero-extent
+#: *leaves* with a root-derived depth padding -- either path silently discards the
+#: per-node scale. A single-particle leaf has radius exactly 0, so this is the
+#: common case, not a corner case.
+_EFFECTIVE_THETA_RADIUS_FLOOR_FRAC = 1e-9
+
+
+def per_node_effective_theta(
+    *,
+    source_power: Array,
+    radius_bound: Array,
+    force_scale: Array,
+    masked_binomial: Array,
+    exponent: Array,
+    order: int,
+    eps: float,
+    gravitational_constant: float = 1.0,
+    theta_floor: float = _EFFECTIVE_THETA_FLOOR,
+    theta_max: float = 1.0,
+) -> Array:
+    """Collapse Dehnen eq (16a)/(16b) into one opening angle per node.
+
+    The exact criterion needs a solver-owned ``pair_policy``, and that vetoes every
+    production fast lane. This turns it into a *per-node* opening angle so
+    acceptance becomes the plain scalar-theta comparison the lanes already run; see
+    :func:`per_node_mac_radius` for how the two are made algebraically identical.
+
+    **The inversion is closed form.** In eq (15) the distance enters only as
+    ``r**(p+2)``, and ``improvement`` depends solely on the two radii, so for fixed
+    radii the eq (16a) left-hand side is exactly ``C_i / r**(p+2)``. Verified
+    numerically: ``est_force_error * (r/rho)**(p+2)`` is constant to full double
+    precision across a 6x range of ``r``. Hence
+
+        theta_i = (rho_z + rho_s) * (eps * s_i / C_i) ** (1 / (p + 2))
+        C_i     = improvement * G * sum_n C(p, n) * P_n^(i) * rho_s ** (p - n)
+
+    with ``s_i`` the node's force scale -- ``min_b |a_b|`` for eq (16a) or
+    ``min_b f_b`` for eq (16b), which is just a different array here.
+
+    No root-find is required, so nothing leaves the device: this is one fused
+    expression over concrete arrays. An earlier plan called for ~5 Newton/bisection
+    steps per node *on the host*; that was predicated on the relation being
+    non-invertible, which it is not.
+
+    ``P_n`` is used **as measured**. The cruder ``P_n/M <= rho**n`` bound collapses
+    the sum to ``M(2 rho)**p`` and costs the entire multipole spectrum -- and since
+    the criterion's measured advantage is concentrated in the error *tail*, the
+    spectrum is exactly what must not be discarded.
+
+    **The approximation that remains, and it is not small.** eq (16a) pairs the
+    *source's* mass and power against the *sink's* force scale. A per-node angle
+    cannot express that: yggdrax's ``mac_extents`` is a single array indexed by both
+    ``safe_targets`` and ``safe_sources``, so a node's extent is identical in either
+    role. This function therefore pairs each node's own power with its own force
+    scale, under the self-similar assumption ``rho_z = rho_s = rho_i`` (whence
+    ``improvement == 4`` and ``rho_z + rho_s == 2 rho_i``).
+
+    That conflation is *not* guaranteed conservative. A massive node sitting where
+    accelerations are high gets a permissive ``theta_i``, yet as a source acting on
+    a distant low-acceleration sink the exact criterion would demand far more
+    separation. Those are precisely the large-dynamic-range configurations the
+    criterion exists to exploit, and where it wins biggest (bulge+halo p99 5.9-85x
+    against Plummer's 1.3-2.2x). **Accept-mask agreement and matched-work tail error
+    against the exact criterion must be measured before this mode is used for
+    anything quantitative**, bulge+halo especially.
+
+    Parameters
+    ----------
+    source_power
+        Dehnen per-degree power ``P_n``, shape ``(num_nodes, total_p + 1)``.
+    radius_bound
+        Per-node radius about the expansion centre, shape ``(num_nodes,)``.
+    force_scale
+        Per-node force scale on the criterion's right-hand side, ``(num_nodes,)``.
+    masked_binomial
+        ``C(p, n)`` for ``n <= p`` else 0, for the chosen order: ``(total_p + 1,)``.
+    exponent
+        ``max(p - n, 0)`` for the chosen order, shape ``(total_p + 1,)``.
+    order
+        Expansion order ``p`` these weights correspond to.
+    eps
+        Relative force-accuracy target of eq (16a).
+    gravitational_constant
+        ``G``. eq (16a) compares a force error against ``eps * min_b |a_b|`` and the
+        force scale is G-scaled, so omitting it runs at an effective ``eps * G``.
+    theta_floor, theta_max
+        Clamp range. ``theta_max`` at 1.0 keeps the paper's own convergence guard.
+
+    Returns
+    -------
+    Array
+        Per-node effective opening angle, shape ``(num_nodes,)``.
+    """
+
+    power = jnp.asarray(source_power)
+    dtype = power.dtype
+    rho = jnp.asarray(radius_bound, dtype=dtype)
+    scale = jnp.asarray(force_scale, dtype=dtype)
+    weights = jnp.asarray(masked_binomial, dtype=dtype)
+    powers = jnp.asarray(exponent, dtype=dtype)
+    tiny = jnp.asarray(1e-300, dtype=dtype)
+    p = int(order)
+
+    # Self-similar pairing: rho_z = rho_s = rho, so `improvement` collapses to the
+    # constant 4 and the pair separation is 2 * rho.
+    improvement = jnp.asarray(4.0, dtype=dtype)
+    rho_safe = jnp.maximum(rho, tiny)
+    aggregate = jnp.sum(
+        weights[None, :] * power * jnp.power(rho_safe[:, None], powers[None, :]),
+        axis=1,
+    )
+    coefficient = (
+        improvement * jnp.asarray(gravitational_constant, dtype=dtype) * aggregate
+    )
+
+    # A node whose power vanishes above the monopole is a point mass: C -> 0 sends
+    # theta -> inf and the clamp takes it to theta_max, which is correct -- its
+    # expansion is exact at any opening.
+    ratio = (jnp.asarray(eps, dtype=dtype) * jnp.maximum(scale, tiny)) / jnp.maximum(
+        coefficient, tiny
+    )
+    theta = (
+        jnp.asarray(2.0, dtype=dtype)
+        * rho_safe
+        * jnp.power(ratio, jnp.asarray(1.0 / (p + 2.0), dtype=dtype))
+    )
+    theta = jnp.where(jnp.isfinite(theta), theta, jnp.asarray(theta_max, dtype=dtype))
+    return jnp.clip(
+        theta,
+        jnp.asarray(theta_floor, dtype=dtype),
+        jnp.asarray(theta_max, dtype=dtype),
+    )
+
+
+def per_node_conservative_extent(
+    *,
+    source_mass: Array,
+    radius_bound: Array,
+    force_scale: Array,
+    order: int,
+    eps: float,
+    gravitational_constant: float = 1.0,
+    geometric_gain: float = 2.0,
+    split_lambda: Optional[float] = None,
+) -> tuple[Array, float]:
+    """Per-node MAC extents that provably never over-accept relative to eq (16a).
+
+    Motivation: :func:`per_node_effective_theta` matches eq (16a) exactly for a
+    self-similar pair but pairs each node's own power with its own force scale,
+    which measured 12-9300x worse than the exact criterion at up to 15x more work.
+    This instead builds a *sound* bound -- if the traversal accepts, eq (16a) would
+    have accepted too. It will accept strictly less than the exact criterion; the
+    question it exists to answer is whether it still beats fixed-theta.
+
+    **Derivation.** eq (16a) for source A on sink B is satisfied when
+
+        8 G M_A (rho_A + rho_B)**p / (eps s_B) <= r**(p+2)
+
+    (using the crude source bound ``P_n <= M rho**n``, which collapses the eq (15)
+    sum to ``M (rho_A + rho_B)**p``, and ``improvement <= 8``). Enforcing
+    ``e_i >= c rho_i`` makes ``e_A + e_B <= r`` imply ``rho_A + rho_B <= r / c``,
+    so ``(rho_A+rho_B)**p <= r**p / c**p`` and the requirement reduces to
+
+        r**2 >= 8 G M_A / (eps s_B c**p)
+
+    The remaining ``M_A / s_B`` is a *product* of a source quantity and a sink
+    quantity, and the lane test is a *sum*, so it cannot be represented exactly --
+    this is the same obstruction that sinks the effective-theta mode. Split it with
+    AM-GM, ``sqrt(x y) <= (x/lam + lam y)/2``:
+
+        e_i = max( c rho_i,  K M_i / lam,  K lam / s_i ),
+        K   = sqrt(8 G / (eps c**p)) / 2
+
+    Taking the max over both roles makes one array serve as source and sink.
+
+    **Where this is loose, by construction.** AM-GM is tight only when
+    ``lam**2 == M_A s_B``. A single global ``lam`` must therefore absorb the whole
+    dynamic range of mass and force scale across the tree -- and that range is
+    precisely what the mass-dependent criterion exploits. Expect the bound to be
+    weakest on the distributions where the criterion is most valuable (bulge+halo).
+
+    ``geometric_gain`` (``c``) trades the two terms: raising it shrinks the mass
+    term by ``c**(p/2)`` while growing the geometric term linearly, so at p=8 a
+    modest ``c=2`` buys a 16x reduction for a 2x cost. There is an optimum; the
+    default is a starting point, not a tuned value.
+
+    Returns
+    -------
+    tuple[Array, float]
+        Per-node extents, and the ``split_lambda`` actually used (handy when it was
+        chosen automatically).
+    """
+
+    mass = jnp.asarray(source_mass)
+    dtype = mass.dtype
+    rho = jnp.asarray(radius_bound, dtype=dtype)
+    scale = jnp.asarray(force_scale, dtype=dtype)
+    tiny = jnp.asarray(1e-300, dtype=dtype)
+    p = int(order)
+    c = float(geometric_gain)
+
+    scale_safe = jnp.maximum(scale, tiny)
+    if split_lambda is None:
+        # Equalise the two AM-GM terms at the geometric median of the pair
+        # distribution: lam**2 ~ typical(M) * typical(s).
+        typical_mass = jnp.exp(jnp.mean(jnp.log(jnp.maximum(mass, tiny))))
+        typical_scale = jnp.exp(jnp.mean(jnp.log(scale_safe)))
+        lam_arr = jnp.sqrt(typical_mass * typical_scale)
+        lam = float(lam_arr)
+    else:
+        lam = float(split_lambda)
+    lam_safe = max(lam, float(jnp.finfo(dtype).tiny))
+
+    coefficient = jnp.sqrt(
+        jnp.asarray(
+            8.0 * float(gravitational_constant) / (float(eps) * c**p), dtype=dtype
+        )
+    ) / jnp.asarray(2.0, dtype=dtype)
+    source_term = coefficient * mass / jnp.asarray(lam_safe, dtype=dtype)
+    sink_term = coefficient * jnp.asarray(lam_safe, dtype=dtype) / scale_safe
+    geometric_term = jnp.asarray(c, dtype=dtype) * rho
+    extents = jnp.maximum(geometric_term, jnp.maximum(source_term, sink_term))
+    return extents, lam_safe
+
+
+def per_node_mac_radius(
+    *,
+    radius_bound: Array,
+    theta_nodes: Array,
+    theta_global: float,
+    radius_floor_frac: float = _EFFECTIVE_THETA_RADIUS_FLOOR_FRAC,
+) -> Array:
+    """Rescale node radii so a scalar-theta lane test reproduces per-node angles.
+
+    The lanes compare ``(e_t + e_s)**2 <= theta_g**2 * d**2``. Feeding
+    ``e_i = rho_i * theta_g / theta_i`` makes that *algebraically identical* to
+
+        rho_t / theta_t + rho_s / theta_s <= d
+
+    so ``theta_g`` cancels out of acceptance entirely -- the desired property, since
+    it matches paper mode where the global theta does not gate. The result is a
+    per-node rescale of ``geometry.radius``, not a new comparison, so no
+    ``pair_policy`` is needed and none of the lane vetoes trigger.
+
+    The radius floor is load-bearing, not defensive -- see
+    ``_EFFECTIVE_THETA_RADIUS_FLOOR_FRAC``.
+    """
+
+    rho = jnp.asarray(radius_bound)
+    dtype = rho.dtype
+    theta = jnp.asarray(theta_nodes, dtype=dtype)
+    root_radius = jnp.max(rho)
+    floor = jnp.maximum(
+        jnp.asarray(radius_floor_frac, dtype=dtype) * root_radius,
+        jnp.asarray(float(jnp.finfo(dtype).tiny), dtype=dtype),
+    )
+    rho_floored = jnp.maximum(rho, floor)
+    return rho_floored * (jnp.asarray(theta_global, dtype=dtype) / theta)
+
 
 def resolve_dehnen_geometry(
     *,
@@ -1211,6 +1477,8 @@ __all__ = [
     "build_adaptive_policy_state",
     "compute_node_force_scale_from_sorted_acc",
     "compute_node_force_scale_from_sorted_magnitudes",
+    "per_node_effective_theta",
+    "per_node_mac_radius",
     "compute_center_referenced_radius_geometry",
     "compute_leaf_enclosing_sphere_geometry",
     "compute_leaf_ritter_sphere_geometry",
