@@ -338,6 +338,24 @@ def _aggregate_m2m_complex_by_level(
     batch_width = int(max(level_batch_width, 1))
     level_offsets = jnp.asarray(level_offsets, dtype=INDEX_DTYPE)
     nodes_by_level = jnp.asarray(nodes_by_level, dtype=INDEX_DTYPE)
+    # `dynamic_slice_in_dim` clamps an out-of-range start rather than erroring, so
+    # the window slides whenever `start + batch_width > len(nodes_by_level)`. The
+    # slot mask is positional, so a slid window selects the *wrong* nodes: the
+    # level's own internal nodes are never written (they keep a zero expansion)
+    # and unrelated shallower nodes are clobbered.
+    #
+    # Keeping `batch_width == num_internal` does NOT avoid this, contrary to the
+    # note in `prepare_solidfmm_complex_upward_sweep`: `total_nodes` is
+    # `2*num_internal + 1`, so every level starting past `num_internal + 1` still
+    # overruns -- i.e. the deepest levels of any tree. Measured at N=1024/leaf=16:
+    # levels 7, 8 and 9 of 9 were corrupted and 23% of the system mass was missing
+    # from the root monopole. Pad instead, so the widest window is always in range.
+    nodes_by_level = jnp.concatenate(
+        [
+            nodes_by_level,
+            jnp.full((batch_width,), -1, dtype=INDEX_DTYPE),
+        ]
+    )
     level_slot = jnp.arange(batch_width, dtype=INDEX_DTYPE)
 
     def _translate_one(coeffs: Array, delta: Array) -> Array:
@@ -374,7 +392,11 @@ def _aggregate_m2m_complex_by_level(
             axis=0,
         )
         valid = level_slot < count
-        internal_valid = valid & (batch_nodes < as_index(num_internal))
+        internal_valid = (
+            valid
+            & (batch_nodes >= as_index(0))
+            & (batch_nodes < as_index(num_internal))
+        )
         # Clamped index for gathers (children / centers); dead row for scatters.
         gather_nodes = jnp.where(internal_valid, batch_nodes, as_index(0))
         scatter_nodes = jnp.where(internal_valid, batch_nodes, dead_row)
@@ -432,11 +454,14 @@ def prepare_solidfmm_complex_upward_sweep(
     static int (it feeds an ``@jax.jit`` static arg) and is safe to omit, in which
     case the padded shape-derived depth is used (correct, just slower).
 
-    Note: the M2M per-level batch width stays at ``num_internal``. It cannot be
-    shrunk to the max internal-level width because the level loop's
-    ``dynamic_slice_in_dim`` clamps its start index to ``total_nodes - width``, so
-    a narrower width silently shifts the window for deep levels and corrupts the
-    aggregation."""
+    Note: the M2M per-level batch width stays at ``num_internal``, and the level
+    node list is *padded* by that width. The level loop's ``dynamic_slice_in_dim``
+    clamps its start index rather than erroring, so any level with
+    ``start + width > len`` silently shifts its window and corrupts the
+    aggregation. This note previously claimed that keeping the width at
+    ``num_internal`` was sufficient to avoid that; it is not -- ``total_nodes`` is
+    ``2 * num_internal + 1``, so the deepest levels overrun regardless. The
+    padding is what makes any width safe."""
 
     p = int(max_order)
     if p < 0:

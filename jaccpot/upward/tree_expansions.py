@@ -44,11 +44,36 @@ def _aggregate_m2m_impl(
     centers: Array,
     left_child: Array,
     right_child: Array,
+    node_ranges: Array,
     *,
     order: int,
     num_internal: int,
 ) -> Array:
+    """Translate child expansions into their parents, children first.
+
+    The iteration order is the whole correctness content of this function: a
+    parent must be visited only after both of its children hold their final
+    expansions, or it aggregates whatever the array happened to contain -- zeros.
+
+    This used to walk descending node index, which assumes children are stored
+    after their parents. Radix internal nodes are *not* in postorder: measured on
+    a 1024-particle radix tree, 26 of 63 internal nodes have an internal child
+    with a lower index than the parent. Those parents were built from a zero
+    child, and the hole propagated to the root, so 10-23% of the system mass was
+    missing from the root monopole on default settings and every M2L sourced from
+    an affected node silently dropped its particles' contribution.
+
+    Reduce in ascending node span instead. Children partition their parent, so a
+    parent's span is strictly wider than either child's, which makes ascending
+    span a valid topological order for any tree shape. This matches the pattern
+    ``compute_tree_merged_sphere_geometry`` and the force-scale node reduction
+    already use for the same reason.
+    """
+
     prototype = packed[0]
+    internal_ranges = jnp.asarray(node_ranges)[:num_internal]
+    internal_width = internal_ranges[:, 1] - internal_ranges[:, 0]
+    internal_order = jnp.argsort(internal_width, stable=True)
 
     def add_child(
         node_coeff: Array,
@@ -73,7 +98,7 @@ def _aggregate_m2m_impl(
         )
 
     def body(iter_idx: Array, state: Array) -> Array:
-        node_idx = num_internal - 1 - iter_idx
+        node_idx = internal_order[iter_idx]
         node_coeff = jnp.zeros_like(prototype)
         node_coeff = add_child(
             node_coeff,
@@ -187,6 +212,7 @@ def _aggregate_multipoles_via_m2m(
             centers,
             left_child,
             right_child,
+            jnp.asarray(tree.node_ranges),
             order=order,
             num_internal=num_internal,
         )
