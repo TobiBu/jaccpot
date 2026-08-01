@@ -28,6 +28,7 @@ from jaccpot import (
     FMMPreset,
     RuntimePolicyConfig,
 )
+from tests.unit.runtime._reproducibility import assert_reproducible
 
 # eq (16a) is very conservative at small N: the threshold is set by the
 # *least*-accelerated particle in the target cell, so N=64/leaf=4 accepts nothing
@@ -185,9 +186,16 @@ def test_paper_cached_rebuilds_the_scale_when_the_node_count_changes():
 def test_repeated_prepare_state_gives_bit_identical_accelerations():
     """Idempotency guard on the ``_last_force_scale_nodes`` statefulness.
 
-    Two ``prepare_state`` calls on identical inputs must agree to the bit: the
-    first writes the cache, the second reads it back, and reading it back must
-    reproduce exactly what writing it produced.
+    Two ``prepare_state`` calls on identical inputs must agree: the first writes
+    the cache, the second reads it back, and reading it back must reproduce what
+    writing it produced.
+
+    The cached scale itself is compared to the bit -- that is the stateful thing
+    under test, and it is exactly reproducible on every backend. The accelerations
+    derived from it are compared within the atomic-reduction noise band, because
+    on GPU the near-field/M2L scatter-adds commit in nondeterministic order and no
+    repeat of *any* computation is bit-identical there. See
+    ``_reproducibility.py`` for the measurement.
     """
 
     positions, masses = _sample_problem()
@@ -200,9 +208,10 @@ def test_repeated_prepare_state_gives_bit_identical_accelerations():
         np.asarray(first.force_scale_nodes),
         np.asarray(second.force_scale_nodes),
     )
-    np.testing.assert_array_equal(
+    assert_reproducible(
         np.asarray(fmm.evaluate_prepared_state(first)),
         np.asarray(fmm.evaluate_prepared_state(second)),
+        err_msg="cache read-back changed the force beyond reduction noise",
     )
 
 
@@ -221,7 +230,10 @@ def test_paper_mode_is_history_free_across_repeated_solves():
             )
         )
 
-    np.testing.assert_array_equal(solve(), solve())
+    # History leaking between solves would move the force by far more than the
+    # GPU's last-bit reduction noise -- a stale force scale shifts the error tail
+    # by 15-41x when it bites at all.
+    assert_reproducible(solve(), solve())
 
 
 # --------------------------------------------------------------------------- #

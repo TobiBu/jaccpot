@@ -33,6 +33,7 @@ import pytest
 
 from jaccpot import FastMultipoleMethod
 from jaccpot.config import FMMAdvancedConfig
+from tests.unit.runtime._reproducibility import assert_reproducible
 
 # eq (16a) thresholds on `eps * min_b |a_b|` over the *target* cell, so the least
 # accelerated particle in a cell sets that cell's budget. At small N that makes the
@@ -288,14 +289,21 @@ def test_force_scale_nodes_receives_no_cotangent():
     assert float(jnp.max(jnp.abs(grad))) == 0.0
 
     # Stronger and metric-free: perturbing the frozen force scales must not move
-    # the force at all, because the seam never reads them.
+    # the force, because the seam never reads them. A 1.5x perturbation that *was*
+    # read would shift the accept mask and move the force by orders of magnitude,
+    # so comparing within the GPU's atomic-reduction noise band still makes this
+    # bite -- and on CPU it is still exact. See ``_reproducibility.py``.
     baseline = fmm.differentiable_accelerations(state, positions, masses)
     perturbed = fmm.differentiable_accelerations(
         replace(state, force_scale_nodes=state.force_scale_nodes * 1.5),
         positions,
         masses,
     )
-    assert np.array_equal(np.asarray(baseline), np.asarray(perturbed))
+    assert_reproducible(
+        np.asarray(perturbed),
+        np.asarray(baseline),
+        err_msg="scaling force_scale_nodes moved the force: the seam read it",
+    )
 
 
 # ---------------------------------------------------------------------------
