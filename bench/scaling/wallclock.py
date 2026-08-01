@@ -97,10 +97,29 @@ def _parse_args() -> argparse.Namespace:
     )
     p.add_argument("--distribution", default="uniform_cube")
     p.add_argument(
+        "--full-repeats",
+        type=int,
+        default=3,
+        help=(
+            "Repeats for the build+evaluate series only. It is 40x more expensive "
+            "per call than the evaluate-only series (measured 8.5 s vs 0.19 s at "
+            "N=2048), because it rebuilds the tree every call, and at --repeats it "
+            "dominates the entire sweep's wall time. It is context for the "
+            "per-step numbers rather than the headline, so it gets a smaller "
+            "sample -- recorded in the config (default: 3)"
+        ),
+    )
+    p.add_argument(
         "--direct-max-n",
         type=int,
         default=1 << 15,
         help="Skip the O(N^2) direct-sum timing above this N (default: 32768)",
+    )
+    p.add_argument(
+        "--full-max-n",
+        type=int,
+        default=1 << 17,
+        help="Skip the build+evaluate series above this N (default: 131072)",
     )
     p.add_argument(
         "--accuracy-max-n",
@@ -180,11 +199,16 @@ def main() -> int:
                 G=float(args.g),
             )
 
-            def _time(label: str, fn) -> Optional[float]:
+            def _time(
+                label: str,
+                fn,
+                repeats: Optional[int] = None,
+                warmup: Optional[int] = None,
+            ) -> Optional[float]:
+                reps = int(args.repeats) if repeats is None else int(repeats)
+                warm = int(args.warmup) if warmup is None else int(warmup)
                 try:
-                    tmin, tmean, tstd = T.time_min_repeat(
-                        fn, warmup=int(args.warmup), repeats=int(args.repeats)
-                    )
+                    tmin, tmean, tstd = T.time_min_repeat(fn, warmup=warm, repeats=reps)
                 except Exception as exc:
                     print(f"  [{label}] N={n} failed: {str(exc)[:120]}")
                     row["timings"][label] = {
@@ -227,16 +251,22 @@ def main() -> int:
                 )
 
             # Build + evaluate, so the figure cannot be read as claiming the
-            # per-step number includes tree construction.
-            _time(
-                "jaccpot_acceleration_full",
-                lambda: solver.compute_accelerations(
-                    points,
-                    charges,
-                    leaf_size=int(args.leaf_size),
-                    max_order=int(ps["p"]),
-                ),
-            )
+            # per-step number includes tree construction. Fewer repeats and its
+            # own N cap: it rebuilds the tree on every call, which makes it ~40x
+            # the cost of the evaluate-only series and would otherwise set the
+            # wall time of the whole sweep.
+            if n <= int(args.full_max_n):
+                _time(
+                    "jaccpot_acceleration_full",
+                    lambda: solver.compute_accelerations(
+                        points,
+                        charges,
+                        leaf_size=int(args.leaf_size),
+                        max_order=int(ps["p"]),
+                    ),
+                    repeats=int(args.full_repeats),
+                    warmup=1,
+                )
 
             # -- jaxFMM, evaluation on a prebuilt hierarchy -------------------
             if have_jaxfmm:
@@ -363,6 +393,8 @@ def main() -> int:
         "param_sets": {s: PARAM_SETS[s] for s in sets},
         "repeats": int(args.repeats),
         "warmup": int(args.warmup),
+        "full_repeats": int(args.full_repeats),
+        "full_max_n": int(args.full_max_n),
         "softening": float(args.softening),
         "G": float(args.g),
         "timed_region": (
