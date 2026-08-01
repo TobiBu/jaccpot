@@ -507,10 +507,54 @@ depth padding and would bypass the scale — clamp to a tiny positive before sca
 Keep `dehnen_radius_scale` at 1.0 in this mode or fold it in, and pin that with a test.
 
 **What it gives up.** Per-sink `a_b` fidelity (each node uses its own scale) and the
-measured multipole spectrum (the `P_n/M ≤ ρⁿ` bound discards it). The latter is
-recoverable with ~5 Newton/bisection steps per node on the host —
-`O(num_nodes · p)` over concrete arrays, negligible beside the prepass — and doing so
-restores most of the criterion's selectivity. Strongly recommended.
+measured multipole spectrum. Two variants:
+
+- *Crude bound* (`P_n/M ≤ ρⁿ`). The eq (15) sum then collapses binomially to
+  `M(ρ_z+ρ_s)^p` and the whole test reduces to `θ^(p+2) < ε·a_min·ρ²/(8GM)`, so θ_i is
+  **closed form** — no solve. This is the formula above. It discards the measured
+  spectrum, which is where the criterion's selectivity comes from, and the win is
+  specifically in the *tail*, so this is the part most at risk.
+- *Measured spectrum.* Keeping the real `P_n`, the sum `Σ_n c_{p,n} P_n ρ_s^{e(p,n)}`
+  does not collapse to `(ρ_z+ρ_s)^p`, so there is no closed-form inverse and θ_i must be
+  solved for numerically. Recovers most of the selectivity; **treat as mandatory, not
+  optional**, given where the advantage lives.
+
+**Solve it on device, with a fixed trip count.** An earlier draft of this document
+suggested "~5 Newton steps per node on the host". That is wrong and contradicts the
+direction this code already took — `dehnen_geometry_mode='tree'` was *removed as a
+defect* for running a numpy host loop, and `resolve_dehnen_geometry` now raises rather
+than run one under trace. `prepare_state` being eager does not mean host numpy; it means
+eager JAX ops on device arrays.
+
+`F_i(θ)` is a polynomial in θ with positive coefficients, hence strictly increasing
+(measured: 1.7e-8 at opening 0.2 rising monotonically to 1.6e-1 at 0.995), and the
+bracket `[θ_floor, 1]` is known a priori. So use **fixed-count bisection**, vmapped over
+nodes inside one `lax.fori_loop`:
+
+```python
+def per_node_effective_theta(power, mass, radius, a_min, *, order, G, eps, iters=24):
+    lo = jnp.full_like(mass, THETA_FLOOR)
+    hi = jnp.ones_like(mass)
+
+    def body(_, bounds):
+        lo, hi = bounds
+        mid = 0.5 * (lo + hi)
+        over = _eq15_force_error(power, mass, radius, mid, order=order, G=G) > eps * a_min
+        return jnp.where(over, lo, mid), jnp.where(over, mid, hi)
+
+    lo, _ = jax.lax.fori_loop(0, iters, body, (lo, hi))
+    return lo          # conservative side of the bracket
+```
+
+Bisection beats Newton here for a specific reason: it needs no derivative, cannot
+diverge, and has a **static** trip count. Newton would want a convergence test, and a
+convergence test is exactly what forces a device-to-host read. Returning `lo` rather
+than `mid` keeps rounding on the under-accepting side, which is the right default given
+that over-acceptance has been the silent failure mode in every defect found so far.
+
+Cost: `num_nodes × iters × (p+1)` FMAs, one fused kernel, no transfers. 24 iterations
+gives 2⁻²⁴ ≈ 6e-8 absolute on θ. At 1M particles: ~1.7 MFLOP at leaf 256 (~8k nodes),
+~27 MFLOP at leaf 16 (~125k nodes). Free beside a p=8 FMM.
 
 **Accept when.** Accept-mask agreement and matched-work force error against the exact
 criterion on the generic lane, before claiming fast-lane parity.
