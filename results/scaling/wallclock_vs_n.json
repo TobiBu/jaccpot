@@ -1,0 +1,397 @@
+{
+  "config": {
+    "n": [
+      2048,
+      4871,
+      11585,
+      27554,
+      65536,
+      155872,
+      370728,
+      881744,
+      2097152
+    ],
+    "theta": [
+      0.77
+    ],
+    "order": [
+      3
+    ],
+    "basis": "real",
+    "seed": 0,
+    "device": "NVIDIA A100-PCIE-40GB",
+    "precision": "float32",
+    "leaf_size": 128,
+    "preset": "large_n_gpu",
+    "distribution": "uniform_cube",
+    "param_sets": {
+      "1_default": {
+        "p": 3,
+        "theta": 0.77,
+        "s": 3
+      }
+    },
+    "repeats": 10,
+    "warmup": 3,
+    "full_repeats": 3,
+    "full_max_n": 65536,
+    "softening": 0.001,
+    "G": 1.0,
+    "timed_region": "evaluation on a prebuilt tree/hierarchy for jaccpot_* and jaxfmm_potential; jaccpot_acceleration_full additionally includes tree construction",
+    "jaxfmm_available": true,
+    "jaxfmm_kernel": "1/(4 pi r), unsoftened; rescaled by 4 pi for the accuracy check",
+    "softening_applies_to": "jaccpot and direct-sum arms only",
+    "fit_min_n": 16384
+  },
+  "meta": {
+    "git_sha": "b0c9cedff54b697ca3d8b080e6a42aedde99e3f7",
+    "git_branch": "paper/jaccpot-i-tranche1",
+    "git_dirty": false,
+    "jax_version": "0.9.0.1",
+    "jax_backend": "gpu",
+    "devices": [
+      "cuda:0"
+    ],
+    "device_kind": "NVIDIA A100-PCIE-40GB",
+    "jax_enable_x64": true,
+    "cuda_visible_devices": "6",
+    "argv": [
+      "--n-min-exp",
+      "11",
+      "--n-max-exp",
+      "21",
+      "--n-steps",
+      "9",
+      "--repeats",
+      "10",
+      "--warmup",
+      "3",
+      "--param-set",
+      "1_default",
+      "--leaf-size",
+      "128",
+      "--full-repeats",
+      "3",
+      "--full-max-n",
+      "65536",
+      "--direct-max-n",
+      "32768",
+      "--accuracy-max-n",
+      "16384",
+      "--fit-min-n",
+      "16384"
+    ]
+  },
+  "data": {
+    "records": [
+      {
+        "n": 2048,
+        "param_set": "1_default",
+        "p": 3,
+        "theta": 0.77,
+        "s": 3,
+        "timings": {
+          "jaccpot_potential": {
+            "min_s": 0.00448481272906065,
+            "mean_s": 0.0052523728460073475,
+            "std_s": 0.0005398203415469323
+          },
+          "jaccpot_acceleration": {
+            "min_s": 0.21119162254035473,
+            "mean_s": 0.22756285341456534,
+            "std_s": 0.009475034527784905
+          },
+          "jaccpot_acceleration_full": {
+            "min_s": 8.375055180862546,
+            "mean_s": 8.772479549981654,
+            "std_s": 0.4478212152060609
+          },
+          "jaxfmm_potential": {
+            "min_s": 0.0015026368200778961,
+            "mean_s": 0.002023441903293133,
+            "std_s": 0.0008771057470610486
+          },
+          "direct_acceleration": {
+            "min_s": 0.25791476015001535,
+            "mean_s": 0.2745191398076713,
+            "std_s": 0.012702965268848121
+          }
+        },
+        "accuracy": {
+          "jaccpot_acceleration_rel_l2": 5.860773028188959e-07,
+          "jaxfmm_potential_rel_l2": 0.00022022760681213903
+        }
+      },
+      {
+        "n": 4871,
+        "param_set": "1_default",
+        "p": 3,
+        "theta": 0.77,
+        "s": 3,
+        "timings": {
+          "jaccpot_potential": {
+            "min_s": 0.007179304026067257,
+            "mean_s": 0.014128918573260308,
+            "std_s": 0.003862565454050428
+          },
+          "jaccpot_acceleration": {
+            "min_s": 0.2171922316774726,
+            "mean_s": 0.27598192896693946,
+            "std_s": 0.048991574872013596
+          },
+          "jaccpot_acceleration_full": {
+            "min_s": 7.83687352295965,
+            "mean_s": 8.007639322429895,
+            "std_s": 0.16654543240089362
+          },
+          "jaxfmm_potential": {
+            "min_s": 0.0018231989815831184,
+            "mean_s": 0.001887566316872835,
+            "std_s": 7.917042059753003e-05
+          },
+          "direct_acceleration": {
+            "min_s": 0.272235163487494,
+            "mean_s": 0.352646279707551,
+            "std_s": 0.06435744169116117
+          }
+        },
+        "accuracy": {
+          "jaccpot_acceleration_rel_l2": 0.0034864270435899804,
+          "jaxfmm_potential_rel_l2": 0.00021358737269891898
+        }
+      },
+      {
+        "n": 11585,
+        "param_set": "1_default",
+        "p": 3,
+        "theta": 0.77,
+        "s": 3,
+        "timings": {
+          "jaccpot_potential": {
+            "min_s": 0.012313890270888805,
+            "mean_s": 0.02718621212989092,
+            "std_s": 0.01771326305099085
+          },
+          "jaccpot_acceleration": {
+            "min_s": 0.22297481447458267,
+            "mean_s": 0.2594822118990123,
+            "std_s": 0.03348238453162192
+          },
+          "jaccpot_acceleration_full": {
+            "min_s": 7.852207783609629,
+            "mean_s": 8.111945686240992,
+            "std_s": 0.20628630156345668
+          },
+          "jaxfmm_potential": {
+            "min_s": 0.0028170039877295494,
+            "mean_s": 0.00363633381202817,
+            "std_s": 0.0010020278817204165
+          },
+          "direct_acceleration": {
+            "min_s": 0.2849348960444331,
+            "mean_s": 0.3008182611316442,
+            "std_s": 0.017566271689043896
+          }
+        },
+        "accuracy": {
+          "jaccpot_acceleration_rel_l2": 0.0059988820968090465,
+          "jaxfmm_potential_rel_l2": 0.00023220385643315356
+        }
+      },
+      {
+        "n": 27554,
+        "param_set": "1_default",
+        "p": 3,
+        "theta": 0.77,
+        "s": 3,
+        "timings": {
+          "jaccpot_potential": {
+            "min_s": 0.01904888264834881,
+            "mean_s": 0.021341991610825062,
+            "std_s": 0.0021954872226585785
+          },
+          "jaccpot_acceleration": {
+            "min_s": 0.21933504659682512,
+            "mean_s": 0.25070937918499114,
+            "std_s": 0.019944351872801632
+          },
+          "jaccpot_acceleration_full": {
+            "min_s": 7.198202271014452,
+            "mean_s": 8.139277534248928,
+            "std_s": 0.6731728927583047
+          },
+          "jaxfmm_potential": {
+            "min_s": 0.0031734658405184746,
+            "mean_s": 0.003955136239528656,
+            "std_s": 0.0010985508391072036
+          },
+          "direct_acceleration": {
+            "min_s": 0.3313409723341465,
+            "mean_s": 0.3838806003332138,
+            "std_s": 0.041714322022162575
+          }
+        },
+        "accuracy": {}
+      },
+      {
+        "n": 65536,
+        "param_set": "1_default",
+        "p": 3,
+        "theta": 0.77,
+        "s": 3,
+        "timings": {
+          "jaccpot_potential": {
+            "min_s": 0.03301096986979246,
+            "mean_s": 0.040782281383872035,
+            "std_s": 0.007063878239197241
+          },
+          "jaccpot_acceleration": {
+            "min_s": 0.2688041953369975,
+            "mean_s": 0.297048135753721,
+            "std_s": 0.02205674390612838
+          },
+          "jaccpot_acceleration_full": {
+            "min_s": 7.965426187962294,
+            "mean_s": 8.222358582851788,
+            "std_s": 0.24691640892433805
+          },
+          "jaxfmm_potential": {
+            "min_s": 0.0040061501786112785,
+            "mean_s": 0.004209728352725506,
+            "std_s": 0.00046495618000270684
+          }
+        },
+        "accuracy": {}
+      },
+      {
+        "n": 155872,
+        "param_set": "1_default",
+        "p": 3,
+        "theta": 0.77,
+        "s": 3,
+        "timings": {
+          "jaccpot_potential": {
+            "min_s": 0.0787538830190897,
+            "mean_s": 0.0808073490858078,
+            "std_s": 0.0021066800502099726
+          },
+          "jaccpot_acceleration": {
+            "min_s": 0.2884313128888607,
+            "mean_s": 0.30997987603768706,
+            "std_s": 0.018078574702009156
+          },
+          "jaxfmm_potential": {
+            "min_s": 0.00858968123793602,
+            "mean_s": 0.009277641121298075,
+            "std_s": 0.0007672330000467902
+          }
+        },
+        "accuracy": {}
+      },
+      {
+        "n": 370728,
+        "param_set": "1_default",
+        "p": 3,
+        "theta": 0.77,
+        "s": 3,
+        "timings": {
+          "jaccpot_potential": {
+            "min_s": 0.25158770475536585,
+            "mean_s": 0.25600206162780526,
+            "std_s": 0.0025625943740257
+          },
+          "jaccpot_acceleration": {
+            "min_s": 0.3140184283256531,
+            "mean_s": 0.35961392112076285,
+            "std_s": 0.05094031373527568
+          },
+          "jaxfmm_potential": {
+            "min_s": 0.012445489875972271,
+            "mean_s": 0.01823973162099719,
+            "std_s": 0.0038523203614440663
+          }
+        },
+        "accuracy": {}
+      },
+      {
+        "n": 881744,
+        "param_set": "1_default",
+        "p": 3,
+        "theta": 0.77,
+        "s": 3,
+        "timings": {
+          "jaccpot_potential": {
+            "min_s": 0.7457295348867774,
+            "mean_s": 0.7691840024664998,
+            "std_s": 0.03541735003391281
+          },
+          "jaccpot_acceleration": {
+            "min_s": 0.4725404819473624,
+            "mean_s": 0.5365475948899985,
+            "std_s": 0.04907811670870719
+          },
+          "jaxfmm_potential": {
+            "min_s": 0.034657979384064674,
+            "mean_s": 0.03672705888748169,
+            "std_s": 0.001865467346293496
+          }
+        },
+        "accuracy": {}
+      },
+      {
+        "n": 2097152,
+        "param_set": "1_default",
+        "p": 3,
+        "theta": 0.77,
+        "s": 3,
+        "timings": {
+          "jaxfmm_potential": {
+            "min_s": 0.06302635744214058,
+            "mean_s": 0.06485204230993986,
+            "std_s": 0.0017637047026184407
+          }
+        },
+        "accuracy": {}
+      }
+    ],
+    "fits": {
+      "1_default:direct_acceleration": {
+        "exponent": NaN,
+        "r_squared": NaN,
+        "n_points": 1
+      },
+      "1_default:jaccpot_acceleration": {
+        "exponent": 0.1951108295514993,
+        "intercept": -3.529330538913634,
+        "r_squared": 0.8933185576210598,
+        "n_points": 5,
+        "fit_min_n": 27554,
+        "fit_max_n": 881744
+      },
+      "1_default:jaccpot_acceleration_full": {
+        "exponent": 0.11688951217848424,
+        "intercept": 0.7787642766648287,
+        "r_squared": 1.0,
+        "n_points": 2,
+        "fit_min_n": 27554,
+        "fit_max_n": 65536
+      },
+      "1_default:jaccpot_potential": {
+        "exponent": 1.0809381382611962,
+        "intercept": -15.241835003625106,
+        "r_squared": 0.9831430869645423,
+        "n_points": 5,
+        "fit_min_n": 27554,
+        "fit_max_n": 881744
+      },
+      "1_default:jaxfmm_potential": {
+        "exponent": 0.7184607233206195,
+        "intercept": -13.32554338450657,
+        "r_squared": 0.9740791217188414,
+        "n_points": 6,
+        "fit_min_n": 27554,
+        "fit_max_n": 2097152
+      }
+    }
+  }
+}
