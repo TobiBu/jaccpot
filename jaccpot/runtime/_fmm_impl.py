@@ -769,6 +769,10 @@ class FastMultipoleMethod(
             raise ValueError("adaptive_eps must be > 0 when provided")
         self._last_force_scale_nodes: Optional[Array] = None
         self._in_force_scale_prepass = False
+        #: Per-node effective opening angles from the most recent prepare_state under
+        #: mac_type='dehnen_theta'. Diagnostic only -- the traversal consumes them as
+        #: rescaled geometry.radius, not from here.
+        self._recent_effective_theta_nodes: Optional[Array] = None
 
         rotation_norm = str(complex_rotation).strip().lower()
         if rotation_norm != "solidfmm":
@@ -932,6 +936,18 @@ class FastMultipoleMethod(
         self.preset = resolved.preset
         self.theta = resolved.theta
         self.mac_type = mac_type
+        if self._uses_per_node_effective_theta():
+            warnings.warn(
+                "mac_type='dehnen_theta' is a refuted experiment retained only so "
+                "its negative result stays reproducible. Measured against the exact "
+                "criterion at N=4096/p=8: 12-9300x worse force error at 1.35-15x "
+                "more interaction work (p99.99 reached 2.3e+02 on bulge+halo). A "
+                "per-node opening angle cannot carry eq (16a), whose acceptance "
+                "needs a product of a source and a sink term where the traversal "
+                "test is a sum. Use mac_type='dehnen_error' for the exact criterion.",
+                FutureWarning,
+                stacklevel=2,
+            )
         if self._uses_dehnen_error_policy():
             if self.adaptive_error_model == "tail_proxy":
                 self.adaptive_error_model = "dehnen_paper"

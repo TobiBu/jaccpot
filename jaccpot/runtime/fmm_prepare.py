@@ -1308,8 +1308,14 @@ class PrepareMixin:
             streamed fast lane. Both refuse loudly rather than degrading the
             acceptance criterion silently (STYLE_GUIDE §9).
         """
+        # `dehnen_theta` evaluates the same criterion but has already folded it into
+        # per-node opening angles (rescaled `geometry.radius`), so the traversal's
+        # own scalar-theta test carries it. Installing a pair policy here would both
+        # double-apply the criterion and re-impose the fast-lane vetoes this mode
+        # exists to avoid.
         use_paper_fixed_policy = (not self.adaptive_order) and (
             self._uses_paper_style_traversal_policy()
+            and not self._uses_per_node_effective_theta()
         )
         if (
             bool(suppress_host_side_effects)
@@ -2981,8 +2987,27 @@ class PrepareMixin:
                     reduction=reduction_mode,
                 ).astype(positions_arr.dtype)
                 self._last_force_scale_nodes = force_scale_nodes
+        dual_tree_artifacts = tree_artifacts
+        if self._uses_per_node_effective_theta():
+            # Fold the criterion into geometry.radius *before* the dual build, since
+            # that is what `_build_mac_extents` reads. `dehnen_radius_scale` must stay
+            # at 1.0 here: it multiplies the same radii, so any other value silently
+            # rescales every per-node angle.
+            if float(self.dehnen_radius_scale) != 1.0:
+                raise ValueError(
+                    "mac_type='dehnen_theta' requires dehnen_radius_scale=1.0; it "
+                    "scales the same geometry.radius the per-node opening angles are "
+                    f"folded into (got {self.dehnen_radius_scale})"
+                )
+            dual_tree_artifacts = self._apply_per_node_effective_theta(
+                tree_artifacts=tree_artifacts,
+                force_scale_nodes=force_scale_nodes,
+                max_order=int(max_order),
+                theta_val=theta_val,
+            )
+
         dual_downward_artifacts = self._prepare_state_dual_and_downward(
-            tree_artifacts=tree_artifacts,
+            tree_artifacts=dual_tree_artifacts,
             force_scale_nodes=force_scale_nodes,
             upward_center_mode=upward_center_mode,
             theta_val=theta_val,
