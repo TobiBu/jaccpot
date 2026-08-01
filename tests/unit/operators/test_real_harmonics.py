@@ -194,6 +194,98 @@ def test_evaluate_local_real_with_grad_consistency():
     assert jnp.allclose(grad, grad_num, atol=1e-4)
 
 
+# The displacements where the cylindrical radius rho = sqrt(x^2+y^2) collapses onto
+# the squared-radius floor: the expansion centre itself (a particle at its leaf's
+# centre of mass -- guaranteed for a one-particle leaf) and the centre's z axis.
+DEGENERATE_L2P_DELTAS = [
+    ("origin", [0.0, 0.0, 0.0]),
+    ("plus_z", [0.0, 0.0, 0.37]),
+    ("minus_z", [0.0, 0.0, -0.37]),
+]
+
+
+@pytest.mark.parametrize("label,delta", DEGENERATE_L2P_DELTAS, ids=lambda v: str(v))
+@pytest.mark.parametrize("order", [1, 2, 4, 6])
+def test_evaluate_local_real_grad_at_rho_zero_matches_limit(label, delta, order):
+    """L2P gradient at rho == 0 equals the limit from a tiny transverse nudge.
+
+    Regression: the azimuth used to be selected as a *constant* (cos phi, sin phi)
+    = (1, 0) wherever rho hit the floor. That is harmless in the forward pass (the
+    sin^|m| theta factor annihilates the arbitrary azimuth) but under ``jax.grad``
+    a constant has no x/y derivative, so the transverse gradient of every m != 0
+    term was dropped -- the far-field force came back with x and y exactly zero.
+    """
+    rng = np.random.default_rng(0)
+    local_coeffs = jnp.array(rng.standard_normal(sh_size(order)))
+    delta = jnp.asarray(delta)
+
+    grad, pot = evaluate_local_real_with_grad(local_coeffs, delta, order=order)
+
+    # The limit is direction independent, so any tiny transverse displacement off
+    # the degeneracy gives the answer the degenerate point must reproduce.
+    for nudge in ([1e-14, 0.0, 0.0], [0.0, 1e-14, 0.0], [3e-15, -4e-15, 0.0]):
+        grad_off, pot_off = evaluate_local_real_with_grad(
+            local_coeffs, delta + jnp.asarray(nudge), order=order
+        )
+        assert jnp.allclose(
+            grad, grad_off, rtol=1e-9, atol=1e-12
+        ), f"{label}: gradient at rho == 0 disagrees with the limit from {nudge}"
+        assert jnp.allclose(pot, pot_off, rtol=1e-9, atol=1e-12)
+
+    # Guard against a vacuous pass: the transverse components are genuinely
+    # nonzero here, which is exactly what the old code zeroed out. The bound only
+    # has to separate them from *exactly* 0.0 -- their size varies with the random
+    # coefficients and the order.
+    assert jnp.abs(grad[0]) > 1e-6
+    assert jnp.abs(grad[1]) > 1e-6
+
+
+def test_evaluate_local_real_grad_at_origin_is_the_degree_one_term():
+    """At delta == 0 only the degree-1 coefficients survive in the gradient.
+
+    U_1^1 = x/2!, U_1^-1 = y/2!, U_1^0 = z, so the gradient is closed form.
+    """
+    order = 4
+    rng = np.random.default_rng(0)
+    local_coeffs = jnp.array(rng.standard_normal(sh_size(order)))
+
+    grad, _ = evaluate_local_real_with_grad(local_coeffs, jnp.zeros(3), order=order)
+    expected = jnp.array(
+        [
+            local_coeffs[sh_index(1, 1)] / 2.0,
+            local_coeffs[sh_index(1, -1)] / 2.0,
+            local_coeffs[sh_index(1, 0)],
+        ]
+    )
+    assert jnp.allclose(grad, expected, rtol=1e-12, atol=1e-14)
+
+
+@pytest.mark.parametrize("label,delta", DEGENERATE_L2P_DELTAS, ids=lambda v: str(v))
+@pytest.mark.parametrize("order", [1, 2, 4])
+def test_p2m_real_direct_jacobian_at_rho_zero_matches_limit(label, delta, order):
+    """P2M has the same rho == 0 degeneracy as L2P, and the same fix.
+
+    The multipole Jacobian w.r.t. the particle position is what the
+    differentiable FMM backpropagates through, and a particle sitting exactly at
+    its leaf's expansion centre is the degenerate case.
+    """
+    delta = jnp.asarray(delta)
+    mass = jnp.asarray(1.7)
+
+    def jac(d):
+        return jax.jacrev(lambda dd: p2m_real_direct(dd, mass, order=order))(d)
+
+    J = jac(delta)
+    J_off = jac(delta + jnp.asarray([3e-15, -4e-15, 0.0]))
+    assert jnp.allclose(
+        J, J_off, rtol=1e-9, atol=1e-12
+    ), f"{label}: P2M Jacobian at rho == 0 disagrees with the nearby limit"
+
+    # d M_1^{+-1} / d(x, y) = mass / 2! -- the entries the old code zeroed.
+    assert jnp.isclose(J[sh_index(1, 1), 0], mass / 2.0, rtol=1e-12)
+    assert jnp.isclose(J[sh_index(1, -1), 1], mass / 2.0, rtol=1e-12)
+
+
 # ===========================================================================
 # B matrix tests
 # ===========================================================================
