@@ -41,7 +41,7 @@ CPU smoke::
 
 Paper run::
 
-    python -m bench.differentiability.autodiff_overhead --n 4096,16384,65536
+    python -m bench.differentiability.autodiff_overhead
 """
 
 from __future__ import annotations
@@ -64,7 +64,14 @@ def _parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
     )
-    p.add_argument("--n", default="4096,16384,65536")
+    # N = 256/1024/4096, matching examples/differentiable_fmm_overhead.py, and for
+    # the reason that example uses them: the outer jax.jit over the whole
+    # differentiable call becomes impractical to COMPILE above ~10^4. Measured at
+    # N=16384/float64 on an A100, XLA spent 3m21s on `jit__accumulate_m2l_fullbatch`
+    # alone and had not finished the module after 30 minutes at 0% GPU utilisation.
+    # That is not a runtime cost this figure could report -- it is a compile wall,
+    # and it is why the ratio is measured where the jitted path is reachable.
+    p.add_argument("--n", default="256,1024,4096")
     p.add_argument("--order", type=int, default=4)
     p.add_argument("--theta", type=float, default=0.5)
     p.add_argument(
@@ -293,6 +300,11 @@ def main() -> int:
             "tree construction is outside both arms"
         ),
         "loss": "sum(probe * a), fixed-seed standard-normal probe",
+        "jit_compile_wall": (
+            "the outer jax.jit over the whole differentiable call does not finish "
+            "compiling in a usable time above N ~ 10^4 (measured: >30 min at "
+            "N=16384 float64 on an A100), so this sweep stays where it is reachable"
+        ),
         "note": (
             "Each row records `mode` (jit or eager). Eager rows include per-call "
             "re-tracing and must not be compared against jitted rows; the ratio "
