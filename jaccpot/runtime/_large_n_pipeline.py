@@ -1573,6 +1573,74 @@ def prepare_large_n_state(
     return out_state
 
 
+def _large_n_fastlane_eval_fn(
+    fmm: Any,
+    state: Any,
+    *,
+    body: Callable[[Any], Array],
+    cache_key: tuple[Any, ...],
+) -> Optional[Callable[[Any], Array]]:
+    """Return a cached ``jax.jit`` of ``body``, or None to run it eagerly.
+
+    The radix fast-lane acceleration evaluate was dispatched **op by op**: the
+    index gathers, the fused Pallas near-field call, the L2P expansion gradient
+    and the scatter-add each went to the device as their own executable, with
+    nothing able to fuse or overlap across the boundaries. That is the fixed cost
+    behind the paper's figure 04 -- measured on an idle A100, ``large_n_gpu``,
+    leaf 64, p=4, real basis, evaluating a prebuilt tree:
+
+    =======  =========  ========  =======
+    N        op-by-op   compiled  factor
+    =======  =========  ========  =======
+    4096      187.2 ms   13.9 ms   13.5x
+    16384     189.0 ms   16.7 ms   11.3x
+    =======  =========  ========  =======
+
+    ...and the output is **bit-identical** (max abs diff 0.0): compiling the same
+    graph does not reassociate it. The near field alone accounted for 185 ms of
+    the 187 (measured via JACCPOT_LARGE_N_EVAL_DIAG_MODE: zero 1.0 ms,
+    permutation_only 2.5 ms, far_only 1.7 ms, near_only 185.2 ms), and it barely
+    moved from N=2048 to N=65536 -- a constant, which is why figure 04's fit gave
+    alpha=0.20 at R^2=0.89 over three decades.
+
+    Returns None -- meaning "run eagerly" -- when compiling would be wrong or
+    pointless:
+
+    * the state already contains tracers, i.e. an outer ``jax.jit``/``grad`` is
+      in charge and nesting a second one would only re-trace;
+    * ``JACCPOT_LARGE_N_EVAL_JIT=0``, the escape hatch for A/B measurement and
+      for bisecting a suspected compile problem.
+
+    The compile is paid once per (state structure, shapes, tuning) and cached on
+    the solver, so a refresh loop reusing topology recompiles nothing. ``jax.jit``
+    keys on the pytree structure and leaf avals by itself; ``cache_key`` adds the
+    Python-level constants the body closes over, which jit cannot see.
+    """
+
+    if not str(os.environ.get("JACCPOT_LARGE_N_EVAL_JIT", "1")).strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }:
+        return None
+    if _contains_jax_tracer(state):
+        return None
+
+    cache = getattr(fmm, "_large_n_fastlane_eval_jit_cache", None)
+    if cache is None:
+        cache = {}
+        try:
+            setattr(fmm, "_large_n_fastlane_eval_jit_cache", cache)
+        except Exception:  # pragma: no cover - defensive, fmm is a normal object
+            return None
+    cached = cache.get(cache_key)
+    if cached is None:
+        cached = jax.jit(body)
+        cache[cache_key] = cached
+    return cached
+
+
 def evaluate_large_n_state(
     fmm: object,
     state: Union[LargeNPreparedState, LargeNCompiledState],
@@ -1676,39 +1744,66 @@ def evaluate_large_n_state(
             output_dtype = state_prepared.working_dtype
         if eval_diag_mode == "zero":
             return jnp.zeros_like(state_prepared.positions_sorted).astype(output_dtype)
-        if bool(disable_near_eval):
-            near_acc = jnp.zeros_like(state_prepared.positions_sorted)
-        else:
-            near_acc = evaluate_large_n_nearfield_fast_lane(
-                fmm,
-                state_prepared,
-                return_potential=False,
-            )
-        if bool(disable_far_eval):
-            far_acc = jnp.zeros_like(state_prepared.positions_sorted)
-        else:
-            far_grad, _, _ = _evaluate_local_expansions_for_particles(
-                state_prepared.local_data,
-                state_prepared.positions_sorted,
-                leaf_nodes=leaf_nodes,
-                node_ranges=node_ranges,
-                max_leaf_size=max_leaf_size,
-                order=local_order,
-                expansion_basis="solidfmm",
-                return_potential=False,
-                max_acc_derivative_order=0,
-            )
-            far_acc = -float(getattr(fmm, "G")) * far_grad
-        if eval_diag_mode == "permutation_only":
-            accelerations_sorted = state_prepared.positions_sorted * jnp.asarray(
-                0.0,
-                dtype=state_prepared.positions_sorted.dtype,
-            )
-        else:
-            accelerations_sorted = near_acc + far_acc
-        return jnp.asarray(accelerations_sorted)[
-            state_prepared.inverse_permutation
-        ].astype(output_dtype)
+
+        def _fastlane_body(state_in: Any) -> Array:
+            if bool(disable_near_eval):
+                near_acc = jnp.zeros_like(state_in.positions_sorted)
+            else:
+                near_acc = evaluate_large_n_nearfield_fast_lane(
+                    fmm,
+                    state_in,
+                    return_potential=False,
+                )
+            if bool(disable_far_eval):
+                far_acc = jnp.zeros_like(state_in.positions_sorted)
+            else:
+                far_grad, _, _ = _evaluate_local_expansions_for_particles(
+                    state_in.local_data,
+                    state_in.positions_sorted,
+                    leaf_nodes=jnp.asarray(
+                        state_in.neighbor_list.leaf_indices, dtype=INDEX_DTYPE
+                    ),
+                    node_ranges=jnp.asarray(
+                        state_in.tree.node_ranges, dtype=INDEX_DTYPE
+                    ),
+                    max_leaf_size=max_leaf_size,
+                    order=local_order,
+                    expansion_basis="solidfmm",
+                    return_potential=False,
+                    max_acc_derivative_order=0,
+                )
+                far_acc = -float(getattr(fmm, "G")) * far_grad
+            if eval_diag_mode == "permutation_only":
+                accelerations_sorted = state_in.positions_sorted * jnp.asarray(
+                    0.0,
+                    dtype=state_in.positions_sorted.dtype,
+                )
+            else:
+                accelerations_sorted = near_acc + far_acc
+            return jnp.asarray(accelerations_sorted)[
+                state_in.inverse_permutation
+            ].astype(output_dtype)
+
+        compiled = _large_n_fastlane_eval_fn(
+            fmm,
+            state_prepared,
+            body=_fastlane_body,
+            cache_key=(
+                "fastlane_accel",
+                str(eval_diag_mode),
+                bool(disable_near_eval),
+                bool(disable_far_eval),
+                int(max_leaf_size),
+                int(local_order),
+                jnp.dtype(output_dtype).name,
+                float(getattr(fmm, "G")),
+                float(getattr(fmm, "softening")),
+                bool(getattr(fmm, "use_pallas", False)),
+            ),
+        )
+        if compiled is not None:
+            return compiled(state_prepared)
+        return _fastlane_body(state_prepared)
 
     nearfield_edge_chunk_size = int(state_prepared.nearfield_edge_chunk_size)
     eval_out = _evaluate_tree_compiled_impl(

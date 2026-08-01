@@ -966,6 +966,11 @@ class FastMultipoleMethod(
         self._strict_fused_jit_function_cache: dict[
             tuple[Any, ...], tuple[Any, ...]
         ] = {}
+        # Compiled radix fast-lane acceleration evaluates, keyed by the
+        # Python constants the traced body closes over (jax.jit keys on the
+        # pytree structure and avals itself). See
+        # _large_n_pipeline._large_n_fastlane_eval_fn.
+        self._large_n_fastlane_eval_jit_cache: dict[tuple[Any, ...], Any] = {}
         self._strict_profiled_max_pair_queue: int = 0
         self._strict_profiled_pair_process_block: int = 0
         self._strict_profiled_context_key: str = ""
