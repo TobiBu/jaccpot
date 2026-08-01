@@ -709,13 +709,35 @@ ax.set_xscale("log"); ax.set_yscale("log")
 ax.set_xlabel("$N$"); ax.set_ylabel("speedup, CPU time / GPU time")
 style.finish(ax, legend=False)
 
+# With only a few matched points the log minor-tick labels collide into an
+# unreadable band, so tick exactly at the measured N.
+ticks = [r["n"] for r in sel]
+if ticks:
+    ax.set_xticks(ticks)
+    ax.set_xticklabels([f"$2^{{{int(round(np.log2(n)))}}}$" for n in ticks])
+    ax.minorticks_off()
+
+notes = []
 skipped = [r["n"] for r in recs if r.get("cpu_skipped")]
 if skipped:
+    notes.append(
+        f"CPU arm not run above $N={min(skipped):,}$; curve is not extrapolated"
+    )
+# A point that failed is named, not dropped: the alternative is a figure that
+# looks like it covered a range it never reached.
+failed = [(r["n"], r["gpu_error"]) for r in recs if r.get("gpu_error")]
+if failed:
+    notes.append(
+        "not measured: $N="
+        + ", ".join(f"{n:,}" for n, _ in failed)
+        + "$ (out of memory)"
+    )
+    print("not measured:", [(n, e[:60]) for n, e in failed])
+if notes:
     ax.text(
-        0.02, 0.98,
-        f"CPU arm not run above $N={min(skipped):,}$\\n(curve is not extrapolated)",
-        transform=ax.transAxes, va="top", ha="left",
-        fontsize=6.5, color=style.INK_MUTED,
+        0.98, 0.03, "  |  ".join(notes),
+        transform=ax.transAxes, va="bottom", ha="right",
+        fontsize=5.6, color=style.INK_MUTED,
     )
 fig.tight_layout()
 style.footer(
