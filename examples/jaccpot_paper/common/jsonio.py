@@ -159,6 +159,18 @@ def config_caption(config: Mapping[str, Any], keys: Iterable[str] = ()) -> str:
     selected = tuple(keys) or tuple(config.keys())
     parts = []
     for key in selected:
-        if key in config and config[key] is not None:
-            parts.append(f"{key}={config[key]}")
+        if key not in config or config[key] is None:
+            continue
+        value = config[key]
+        if isinstance(value, (list, tuple)):
+            # A swept axis is stored as a list. Rendering it raw puts Python
+            # syntax in a figure caption (`basis=['real']`), so collapse a
+            # single value to a scalar and abbreviate a long grid to its range.
+            if len(value) == 1:
+                value = value[0]
+            elif len(value) > 3:
+                value = f"{value[0]}..{value[-1]}"
+            else:
+                value = ",".join(str(v) for v in value)
+        parts.append(f"{key}={value}")
     return "  ".join(parts)

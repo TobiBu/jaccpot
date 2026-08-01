@@ -120,6 +120,7 @@ fig.tight_layout()
 # Both the config and the cross-basis agreement go in the footer: inside the axes
 # the note grazed the first Plummer marker, and a caption over data is worse than
 # a caption below the figure.
+fig.tight_layout()
 style.footer(
     fig,
     f"basis {ref_basis}  " + jsonio.config_caption(
@@ -198,9 +199,8 @@ if any(r.get("far_field_empty") for r in recs):
     )
 style.footer(
     fig,
-    jsonio.config_caption(cfg, ["n", "basis", "leaf_size", "preset", "precision", "device"]),,
+    jsonio.config_caption(cfg, ["n", "basis", "leaf_size", "preset", "precision", "device"]),
 )
-fig.tight_layout()
 style.save(fig, FIG_DIR / "fig02_error_vs_theta.pdf")
 """
 
@@ -306,11 +306,11 @@ else:
             ha="center", va="center", transform=ax.transAxes, color=style.INK_MUTED)
     ax.set_axis_off()
 
+fig.tight_layout()
 style.footer(
     fig,
-    jsonio.config_caption(cfg, ["n", "order", "leaf_size", "precision", "device"]),,
+    jsonio.config_caption(cfg, ["n", "order", "leaf_size", "precision", "device"]),
 )
-fig.tight_layout()
 style.save(fig, FIG_DIR / "fig03_mac_comparison.pdf")
 """
 
@@ -371,12 +371,12 @@ ax.set_xscale("log"); ax.set_yscale("log")
 ax.set_xlabel("$N$")
 ax.set_ylabel("wall-clock per evaluation [s]")
 style.finish(ax, legend_kwargs={"loc": "upper left", "fontsize": 6.2})
+fig.tight_layout()
 style.footer(
     fig,
     jsonio.config_caption(cfg, ["order", "theta", "basis", "preset", "precision", "device", "seed"])
     + f"   exponent fitted for N >= {cfg.get('fit_min_n')}",
 )
-fig.tight_layout()
 style.save(fig, FIG_DIR / "fig04_wallclock_vs_n.pdf")
 
 for name, fit in sorted(fits.items()):
@@ -436,12 +436,12 @@ for ax, per_particle in ((axes[0], False), (axes[1], True)):
     ax.set_ylabel(\"interactions per particle\" if per_particle else \"interaction count\")
     style.finish(ax, legend_kwargs={\"loc\": \"best\", \"fontsize\": 6.4})
 
+fig.tight_layout()
 style.footer(
     fig,
     jsonio.config_caption(cfg, [\"order\", \"theta\", \"basis\", \"leaf_size\", \"device\", \"seed\"])
     + f\"   exponent fitted for N >= {cfg.get('fit_min_n')}\",
 )
-fig.tight_layout()
 style.save(fig, FIG_DIR / \"fig05_interaction_counts.pdf\")
 
 for name, fit in sorted(fits.items()):
@@ -525,11 +525,11 @@ for ax, normalise in ((axes[0], False), (axes[1], True)):
 frac = [r.get("attributed_fraction") for r in recs if r.get("attributed_fraction")]
 if frac:
     print(f"attributed fraction of wall clock: {min(frac):.2%} .. {max(frac):.2%}")
+fig.tight_layout()
 style.footer(
     fig,
-    jsonio.config_caption(cfg, ["order", "theta", "basis", "preset", "leaf_size", "device"]),,
+    jsonio.config_caption(cfg, ["order", "theta", "basis", "preset", "leaf_size", "device"]),
 )
-fig.tight_layout()
 style.save(fig, FIG_DIR / "fig06_stage_breakdown.pdf")
 """
 
@@ -596,11 +596,11 @@ if skipped:
         transform=ax.transAxes, va="top", ha="left",
         fontsize=6.5, color=style.INK_MUTED,
     )
+fig.tight_layout()
 style.footer(
     fig,
-    jsonio.config_caption(cfg, ["order", "theta", "basis", "preset", "leaf_size", "precision"]),,
+    jsonio.config_caption(cfg, ["order", "theta", "basis", "preset", "leaf_size", "precision"]),
 )
-fig.tight_layout()
 style.save(fig, FIG_DIR / "fig07_gpu_vs_cpu.pdf")
 print(cfg.get("shared_host", ""))
 """
@@ -692,11 +692,11 @@ modes = sorted({r["mode"] for r in recs})
 axes[1].text(0.02, 0.98, "timed mode: " + ", ".join(modes),
              transform=axes[1].transAxes, va="top", ha="left",
              fontsize=6.5, color=style.INK_MUTED)
+fig.tight_layout()
 style.footer(
     fig,
-    jsonio.config_caption(cfg, ["order", "theta", "leaf_size", "precision", "device"]),,
+    jsonio.config_caption(cfg, ["order", "theta", "leaf_size", "precision", "device"]),
 )
-fig.tight_layout()
 style.save(fig, FIG_DIR / "fig12_autodiff_overhead.pdf")
 
 for r in recs:
@@ -768,12 +768,12 @@ for ax, field, title in (
     ax.set_title(title, fontsize=8)
     style.finish(ax, legend=(ax is axes[0]), legend_kwargs={"loc": "best", "fontsize": 6.2})
 
+fig.tight_layout()
 style.footer(
     fig,
     jsonio.config_caption(cfg, ["n", "order", "leaf_size", "precision", "device"])
-    + f"\\nFD: {cfg['fd_samples']} coords, eps={cfg['fd_eps']:g}",,
+    + f"\\nFD: {cfg['fd_samples']} coords, eps={cfg['fd_eps']:g}",
 )
-fig.tight_layout()
 style.save(fig, FIG_DIR / "fig13_grad_correctness.pdf")
 
 for r in recs:

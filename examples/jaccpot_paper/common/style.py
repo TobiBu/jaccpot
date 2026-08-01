@@ -268,7 +268,7 @@ def annotate_config(ax, text: str, *, loc: str = "lower left") -> None:
     )
 
 
-def footer(fig, text: str, *, y: float = -0.02) -> None:
+def footer(fig, text: str, *, y: float = -0.06) -> None:
     """Put the provenance line under the whole figure, in muted ink.
 
     Preferred over :func:`annotate_config` for the run configuration: inside an
