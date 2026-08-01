@@ -33,6 +33,7 @@ EXPECTED_ALL = {
     "OdisseoFMMCoupler",
     "RealSHBasis",
     "RuntimePolicyConfig",
+    "TraversalOverrides",
     "TreeConfig",
     "differentiable_gravitational_acceleration",
 }
@@ -116,6 +117,7 @@ def test_export_kinds() -> None:
         "OdisseoFMMCoupler",
         "RealSHBasis",
         "RuntimePolicyConfig",
+        "TraversalOverrides",
         "TreeConfig",
     ):
         assert inspect.isclass(getattr(jaccpot, name)), f"{name} should be a class"
