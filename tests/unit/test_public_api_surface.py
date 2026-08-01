@@ -22,6 +22,7 @@ import jaccpot
 
 # The frozen top-level export set. Changing this set is a public-API change.
 EXPECTED_ALL = {
+    "BlockStepFMM",
     "ComplexSHBasis",
     "FMMAdvancedConfig",
     "FMMPreset",
@@ -107,6 +108,7 @@ def test_every_export_is_importable_from_top_level() -> None:
 def test_export_kinds() -> None:
     # Classes / dataclasses.
     for name in (
+        "BlockStepFMM",
         "ComplexSHBasis",
         "FMMAdvancedConfig",
         "FarFieldConfig",
