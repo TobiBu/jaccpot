@@ -31,11 +31,17 @@ wall clock -- which would inflate whichever stage happens to be largest -- the
 remainder is reported explicitly as ``unattributed``, and the notebook plots it.
 If it is a large share, the figure should say so rather than hide it.
 
+Ladder limit
+------------
+The default traversal pair queue overflows above N=131072, so that is where the
+sweep stops. Raising it works but changes the configuration rather than extending
+it -- see ``--max-pair-queue``.
+
 Usage
 -----
 This figure needs a GPU; the strict path is GPU-only::
 
-    python -m bench.scaling.stage_breakdown --n 65536,262144,1048576 --steps 10
+    python -m bench.scaling.stage_breakdown --n 32768,65536,131072 --steps 8
 """
 
 from __future__ import annotations
@@ -135,7 +141,7 @@ def _parse_args() -> argparse.Namespace:
     )
     p.add_argument(
         "--n",
-        default="65536,131072,262144,524288,1048576",
+        default="32768,65536,131072",
         help="Comma-separated particle counts",
     )
     p.add_argument("--steps", type=int, default=10)
@@ -147,11 +153,15 @@ def _parse_args() -> argparse.Namespace:
     p.add_argument(
         "--max-pair-queue",
         type=int,
-        default=1 << 22,
+        default=131072,
         help=(
-            "Traversal pair-queue capacity. The default 131072 fails at and above "
-            "N=262144 with 'Pair queue capacity exceeded', which cost this figure "
-            "its top two ladder points on the first run (default: 4194304)"
+            "Traversal pair-queue capacity. The shipped 131072 raises 'Pair queue "
+            "capacity exceeded' at and above N=262144, so it bounds this figure's "
+            "ladder. Raising it is NOT a free way past that: measured at N=65536, "
+            "going to 4194304 took per-step time from 1079 ms to 3473 ms (3.2x) and "
+            "moved 70% of the step into uninstrumented code, i.e. it measures a "
+            "different configuration rather than extending this one. Default is "
+            "therefore the shipped value, which is also what a user gets"
         ),
     )
     p.add_argument("--max-neighbors-per-leaf", type=int, default=1 << 16)
