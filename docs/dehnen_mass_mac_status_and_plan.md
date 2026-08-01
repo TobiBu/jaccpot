@@ -10,15 +10,21 @@ acceptance criterion — eqs (12), (13), (15), (16a) plus the §5.4 low-order pr
 reachable via `mac_type="dehnen_error"`. That transcription is now **proven** by unit
 tests against independent numpy float64 references, not merely asserted.
 
-Four real correctness bugs were found and fixed (all on shipped default paths). After
-the fixes, **at p=8 with Dehnen's own error measure the criterion wins the error tail**
-on his own test distribution at equal-or-less interaction work. At p=4 it is a wash,
-which is why an earlier p=4-only benchmark produced a spurious negative result.
+> **⚠ Every force-error number recorded in this document before 2026-08-01 is void.**
+> Two defects in the upward M2M pass were silently dropping 10–23 % of the system mass
+> out of the far field on shipped default settings (97 % on the cartesian basis). All
+> error benchmarks on this branch were therefore measuring that bug, not the MAC. Both
+> are fixed (`8afd705`); the numbers below marked **VOID** have not yet been redone.
+> The Step 1 *cost* result is unaffected — it measures prepare time, not accuracy.
 
-Step 1 is done: steady-state prepare overhead went from **5.87× to 0.98×** at
-N=16384/p=8, and two further defects (an unbounded recursion and the predicted
-reentrancy bug) were fixed on the way. Open: eq (16b) is not implemented, the mass MAC
-still cannot reach any fast lane, and nothing has been measured at Dehnen's N (10⁵–10⁷).
+Four correctness bugs in the criterion were found and fixed, plus, later, two in the
+upward pass that the criterion work uncovered. Step 1 (cache the force-scale prepass)
+is done: steady-state prepare overhead went from **5.87× to 0.98×** at N=16384/p=8.
+Step 2 (eq 16b) is validated and **negative** — see below.
+
+Open: the MAC comparison must be re-measured post-M2M-fix before any accuracy claim is
+made; the mass MAC still cannot reach any fast lane; nothing has been measured at
+Dehnen's N (10⁵–10⁷); and the cartesian basis has an unexplained ~1.8×10⁻¹ error.
 
 ## Where the work lives
 
@@ -42,7 +48,7 @@ and that tip, so the edits were authored against the newer versions. Rebasing on
 
 Regression on the final commit: `tests/unit` + `tests/characterization` +
 adaptive/force-scale suites → **0 failures** (exit 0), including the characterization
-goldens. `tests/unit/runtime/` is 76 cases across 33 test functions.
+goldens. `tests/unit/runtime/` is 94 cases across 46 test functions.
 
 Note for whoever extends the public surface next: `mac_theta_max` had to be registered
 in `EXPECTED_FMM_INIT_KWARGS` (`tests/unit/test_public_api_surface.py`). That
@@ -66,6 +72,51 @@ took `0` instead of the `min` identity and zeroed the force scale up to the root
 unreachable dead block in `fmm_derivatives.py`; the `safe_mass` divide-then-multiply
 round-trip folded out.
 
+### Two upward-M2M defects — found 2026-08-01, fixed in `8afd705`
+
+Not MAC bugs, but they invalidate every accuracy measurement taken before them, so
+they belong at the top of this document rather than in a changelog.
+
+An FMM's far field substitutes a node's multipole expansion for its particles. If a
+node spans particles but its expansion is zero, every M2L sourced from it contributes
+nothing and that mass vanishes from those targets. Two independent defects did that:
+
+| # | Where | Cause | Mass lost at N=1024 |
+|---|---|---|---|
+| M1 | `_aggregate_m2m_impl` (cartesian / generic) | walked internal nodes in **descending index**, assuming children are stored after parents. Radix internal nodes are not in postorder — 26 of 63 have an internal child with a *lower* index. | **97 %** (root monopole 32/1024) |
+| M2 | by-level M2M in `real_tree_expansions` and `solidfmm_complex_tree_expansions` | `dynamic_slice_in_dim` **clamps** an out-of-range start rather than erroring, so the level window slides and the positional slot mask then selects the wrong nodes. Bites every level starting past `num_internal`, i.e. the deepest levels of any tree. | **23 %** |
+
+M1 is the same defect as D2, which `96d5a44` fixed in
+`compute_tree_merged_sphere_geometry`; the sibling occurrence in the M2M kernel was
+missed. Both are now span-ordered — a parent's span is strictly wider than either
+child's whenever every internal node has two non-empty children, which radix
+guarantees.
+
+For M2, the docstring in `prepare_solidfmm_complex_upward_sweep` *already described the
+clamping* but concluded that keeping `batch_width == num_internal` avoided it. It does
+not: `total_nodes = 2·num_internal + 1`, so deep levels overrun regardless. Fixed by
+padding the level list; the note is corrected in place.
+
+**Why nothing caught it.** The far/near partition invariant checks index bookkeeping
+and counts a source node as covering the particles in its `node_ranges`, so a
+zero-multipole node read as perfectly covered. The golden physics anchor was a single
+`rel_L2 < 0.35`, which a 23 % mass loss passes comfortably — and it was that loose in
+order to accommodate the cartesian basis. Error benchmarks saw a median at machine
+precision with a heavy tail, which reads as ordinary truncation error.
+
+**New guard:** `tests/unit/runtime/test_upward_node_mass_conservation.py` (6 cases) —
+every node reachable from the root that spans particles must have a non-zero expansion,
+and its monopole must equal the mass it spans. The golden anchor is now per-basis:
+10⁻² for real and solidfmm (worst observed 7.2×10⁻⁴, so it can actually fail), 0.35
+only for cartesian.
+
+**Open, and separate: the cartesian basis is ~1.8×10⁻¹ rel-L2** at both p=2 and p=4,
+before *and* after these fixes. Order-independent error is a divergent-series
+signature, not truncation, and solidfmm is 8.1×10⁻⁵ at the same configuration — 2000×
+better. Nobody should use the cartesian basis for anything quantitative until that is
+understood. It is now documented at the anchor rather than hidden behind a blanket
+tolerance.
+
 ### Guard-rails added
 
 - **`adaptive_eps` is now required** in paper mode. It used to fall back to
@@ -79,7 +130,7 @@ round-trip folded out.
   (`_large_n_pipeline.py` ~:1918). The large-N decline reason is surfaced in
   `get_runtime_diagnostics()` as `large_n_path_declined_reason`.
 
-### Tests: `tests/unit/runtime/`, 76 cases / 33 functions
+### Tests: `tests/unit/runtime/`, 94 cases / 46 functions
 
 - `test_dehnen_mac_reference.py` (39) — pins eqs (12)/(13)/(15)/(16a) against numpy
   float64 references. The load-bearing one is
@@ -93,6 +144,13 @@ round-trip folded out.
 - `test_dehnen_mac_gradients.py` (11) — FD-vs-AD, grad-vs-direct-sum, a verified
   no-boundary-crossing mass perturbation, cotangent isolation of `force_scale_nodes`,
   and traceability of each geometry mode.
+- `test_upward_node_mass_conservation.py` (6) — every node reachable from the root that
+  spans particles must have a non-zero expansion and a monopole equal to the mass it
+  spans. The invariant the two M2M defects violated, which nothing else could see.
+- `test_force_scale_injection.py` (12) — the `force_scale_nodes` parameter (used
+  verbatim, cache untouched, prepass skipped, shape validated, rejected when unusable),
+  the scalar node reduction, and that eq (16b)'s injected `f_b` really reaches the
+  criterion.
 - `test_force_scale_prepass_cost.py` (20) — the Step 1 contracts: the prepass runs once
   under `paper_cached` and every call under `paper`, `prepare_state` is bit-idempotent,
   a prepass never recurses into itself, the prepass restores the enclosing call's
@@ -120,17 +178,34 @@ degenerated to all-near-field cannot be compared by accident.
 All at N=4096 unless stated. Ratios > 1 favour the mass MAC. "work" is
 `far_pairs·(p+1)² + Σ n_t·n_s`, i.e. hardware-independent interaction work.
 
-### p=8 with Dehnen's own δa/f measure — the headline
+### p=8 with Dehnen's own δa/f measure — the headline — **VOID**
+
+Measured with 10–23 % of the system mass missing from the far field. Retained only so
+nobody re-derives it from the committed JSON and believes it:
 
 | distribution | p99 | max | work |
 |---|---|---|---|
-| **Plummer** (his test case), eq (16a) verbatim | **1.34** | **1.51** | **0.89** |
-| uniform, eq (16a) verbatim | 1.21–1.33 | 1.31–3.53 | 0.99–1.01 |
-| Plummer, `mac_theta_max=0.7` | **1.82–1.95** | **1.53–1.65** | **0.94** |
+| ~~Plummer (his test case), eq (16a) verbatim~~ | ~~1.34~~ | ~~1.51~~ | ~~0.89~~ |
+| ~~uniform, eq (16a) verbatim~~ | ~~1.21–1.33~~ | ~~1.31–3.53~~ | ~~0.99–1.01~~ |
+| ~~Plummer, `mac_theta_max=0.7`~~ | ~~1.82–1.95~~ | ~~1.53–1.65~~ | ~~0.94~~ |
 
-### p=4 — a wash, which is why the earlier negative was spurious
+### p=4 — **VOID** for the same reason
 
-uniform (global-rms metric): p99 0.93–1.10, max 1.06–2.45, work 0.93–1.01.
+~~uniform (global-rms metric): p99 0.93–1.10, max 1.06–2.45, work 0.93–1.01.~~
+
+### What the M2M fix did to absolute accuracy
+
+Plummer N=4096, p=8, Dehnen δa/f p99, geometric MAC, before → after `8afd705`:
+
+| θ | far pairs | before | after | factor |
+|---|---|---|---|---|
+| 0.46 | 1310 | 1.2×10⁻² | **3.5×10⁻⁶** | 3400× |
+| 0.54 | 4718 | 7.7×10⁻² | **6.7×10⁻⁵** | 1150× |
+| 0.62 | 8774 | 1.6×10⁻¹ | **6.0×10⁻⁴** | 270× |
+
+θ ≤ 0.38 is unchanged: it accepts ≤ 62 far pairs, all shallow, so the bug never bit.
+The FMM was not functioning as an accurate method on any configuration with a deep
+enough tree, which is the context for every "the criterion wins the tail" claim above.
 
 ### Prepare cost (N=16384, p=8, fp64, `real` basis, FAST preset, A100)
 
@@ -180,9 +255,13 @@ is the **scaled error δa/f** with `f_b ≡ Σ_{a≠b} G μ_a / |x_a−x_b|²`.
    centrally-concentrated profile — it diverges for *any* MAC, identically. On
    bulge+halo it reported p99 = 0.27 where Dehnen's δa/f gave 9.6e-3, a factor 28 of
    pure artifact. Use `--metric dehnen`.
-3. **`bulge_halo` is not a valid discriminator.** Its error tail is *order-independent*
-   (identical at p=4 and p=8), which is the signature of a divergent series rather than
-   truncation error. Do not draw MAC conclusions from it. `plummer` is the right case.
+3. **`bulge_halo` order-independence — likely the M2M bug, RETRACT OR RECONFIRM.** This
+   trap recorded an *order-independent* error tail (identical at p=4 and p=8) and read
+   it as a divergent series. The M2M defects fixed in `8afd705` produce exactly that
+   signature — dropped mass is order-independent by construction — and clustered
+   distributions build the deepest trees, so they were hit hardest (clu_solidfmm went
+   2.5e-2 to 3.5e-4). Re-measure bulge+halo post-fix before treating it as a bad
+   discriminator, and before drawing any MAC conclusion from it either way.
 4. **eq (16a) alone admits near-divergent pairs.** Its only geometric guard is θ < 1,
    which is the *boundary of convergence*; measured acceptance reached opening 0.997,
    where a p=4 expansion has O(1) error and eq (15)'s bound — derived assuming
@@ -296,41 +375,55 @@ scale is genuinely stale, and a live-far-pair count so an arm that has degenerat
 all-near-field cannot be compared by accident. The 3.5× figure in this document had no
 committed harness; this one is reproducible.
 
-### Step 2 — Implement eq (16b) (~half a day to validate, 2–3 days for production)
+### Step 2 — eq (16b) — **VALIDATED, NEGATIVE (2026-08-01)**
 
-**Why.** Dehnen's eq (16b) replaces `min_b a_b` with `min_b f_b`, the cancellation-free
-force scale. `f_b` cannot be driven to zero by force cancellation, which is the
-pathology that makes `min_b a_b` erratic and is the prime suspect for the bulge+halo
-floor. It may remove the need for `mac_theta_max` entirely. Only (16a) exists today —
-grep confirms no `f_b` anywhere in `jaccpot/`.
+**What eq (16b) actually is.** It replaces `min_b a_b` with `min_b f_b`, the
+cancellation-free force scale `f_b = Σ_{a≠b} G m_a / |x_a−x_b|²`. Nothing else changes:
+the criterion, the traversal and the eq (15) error estimator are untouched. So the
+whole of (16b) is a *different per-node force scale*, which is why no traversal work
+was needed to test it.
 
-**Validation path (do this first).** `chunked_force_scale` in
-`bench/validation/mac_error_distribution.py` already computes exact `f_b`. Inject it:
+**Infrastructure that shipped** (`357814e`, keep regardless of the verdict):
 
-- construct with `adaptive_error_model="dehnen_paper"` **directly**, not
-  `mac_type="dehnen_error"` — the latter force-rewrites `"prev"→"paper_cached"` at
-  `jaccpot/runtime/_fmm_impl.py` ~:635;
-- set `mac_force_scale_mode="prev"` and assign `fmm._last_force_scale_nodes` to the
-  min-reduced `f_b`, reusing `compute_node_force_scale_from_sorted_acc(reduction="min")`;
-- add a third bench arm (`--arm mass_16b`).
+- `prepare_state(..., force_scale_nodes=...)` — supplies the scale directly, skipping
+  the prepass and leaving the reuse cache untouched. This replaces the
+  `_last_force_scale_nodes` back door, which Step 1's live writer overwrites after
+  every evaluation; an injected `f_b` survived exactly one `prepare_state`, so a naive
+  prepare/evaluate loop measured (16a) while believing it measured (16b).
+- `compute_node_force_scale_from_sorted_magnitudes` — scalar node reduction. `f_b` is
+  already scalar per particle; the vector entry point now takes a norm and delegates.
+- `--arm mass_16b` in the bench, injecting exact O(N²) `f_b` to measure the ceiling
+  before building an estimator for it.
 
-**Read this before using that back door.** Step 1 gave `_last_force_scale_nodes` a live
-writer: `_record_force_scale_from_evaluation` overwrites it after *every* full-order
-`evaluate_prepared_state`. An injected `f_b` therefore survives exactly one
-`prepare_state`, and is silently replaced by `min_b |a_b|` the moment you evaluate — so
-a naive prepare/evaluate loop would measure (16a) while believing it measured (16b).
-Either re-inject before each `prepare_state`, or add the `force_scale_nodes` parameter
-to `prepare_state` first. There is still no such parameter, and it is now clearly the
-right move rather than merely the cleaner one.
+**Verdict.** Two findings, one structural and one measured.
 
-**Production path.** `f_b` needs an O(N) estimate. Dehnen states p=0 suffices: a
-monopole-only pass accumulating `Σ m/d²` as a **scalar** (no vector cancellation)
-instead of the usual vector sum. New small kernel plus a prepass mode; reuses the tree,
-traversal, and node reduction.
+*Structural, and the more important:* (16b) **cannot** remove the need for
+`mac_theta_max`, which was the main hope for it. The θ cap addresses acceptance at the
+convergence boundary, where the eq (15) bound on the criterion's **left**-hand side
+stops being trustworthy. (16b) changes the **right**-hand side. Different sides of the
+same inequality — no choice of force scale excludes a pair whose left-hand estimate is
+already small. This holds independently of the M2M bug.
 
-**Accept when.** On Plummer at p=8, (16b) matches or beats (16a) on p99/max at equal
-work; and the bulge+halo error floor either disappears without `mac_theta_max` or is
-shown to be unrelated.
+*Measured, and provisional:* with `mac_theta_max=0.7` on Plummer p=8, matched at equal
+p90, (16b) did not beat (16a) — p99 ratios 1.75 / 1.10 / 0.70 / 0.54 across the
+matched range, degrading as tolerance loosens. **These numbers predate the M2M fix and
+must be redone before being quoted.** The structural argument above does not depend on
+them.
+
+**Do not build the O(N) estimator yet.** It was scoped at 2–3 days on the assumption
+that `f_b` is near-field dominated. It is not: measured at N=4096, the 16 largest
+contributors capture a median 13 % of `f_b` on Plummer (18 % uniform, 7 % bulge+halo),
+and even the largest 256 capture only 41 %. In 3D the shell population grows like
+`r²ρ` while each contribution falls like `1/r²`, so every logarithmic shell contributes
+comparably and the sum is a global quantity. A near-field-only estimator would be wrong
+by nearly an order of magnitude, so the far-field monopole pass is mandatory — Dehnen's
+"p=0 suffices" is right about the *order*, not about the *locality*. Given the negative
+verdict, this work is not currently justified.
+
+**Also settled:** the bulge+halo floor is not evidence for (16b). Both criteria floored
+at the identical value pre-fix because of the M2M bug, and trap 3's "order-independent
+tail" observation has the same likely cause. Re-measure bulge+halo post-fix before
+drawing any conclusion from it.
 
 ### Step 3 — Per-node effective θ, so the mass MAC reaches the fast lanes (~2–3 days)
 
@@ -411,7 +504,7 @@ Be honest about magnitude: the measured effect is **1.2–1.9× on p99**, not th
 final configuration uses a cap below 1 — that is a deviation from eq (16a), justified by
 the convergence-boundary argument in trap 4.
 
-If it loses, the bug fixes and the 76 tests stay regardless (they fix shipped defaults),
+If it loses, the bug fixes and the 94 tests stay regardless (they fix shipped defaults),
 and the negative result is worth writing up with the tests as evidence that the
 transcription was faithful.
 
