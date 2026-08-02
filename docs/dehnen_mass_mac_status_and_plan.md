@@ -13,7 +13,12 @@ Self-contained: a fresh session should be able to pick this up without prior con
 | **5. `dehnen_theta`** | **Keep.** Its retention is now pinned by `tests/unit/runtime/test_refuted_dehnen_theta_mode.py` (4 cases) instead of asserted in prose — nothing previously tested the `FutureWarning` or that the mode still ran. |
 | **1. Dehnen's ε / 2. N-scaling** | **The specified configuration was wrong and is corrected below.** At leaf 256 the sweep is degenerate: see trap 11. Re-running at leaf 16. |
 
-Two defects found on the way, both in shipped behaviour:
+Two defects found on the way, both in shipped behaviour — and the first of them
+means **eq (16a) was measurably weaker than it should have been in every prior
+run**: the prepass estimated its force scale badly, so the criterion over-accepted.
+Fixing it made eq (16a) simultaneously more accurate (rms 1.4×, p99.99 1.6×),
+*less* work (2374 → 2166 far pairs), and 2.4× faster to cold-prepare. Details and
+the table under the first bullet.
 
 - **The force-scale prepass ran at the solver's `theta`, which paper mode pins at
   1.0.** `theta` is documented as not gating acceptance — true of the criterion,
@@ -25,17 +30,50 @@ Two defects found on the way, both in shipped behaviour:
   acceleration prepass was running at θ=1.0 too.
 
   > ⚠ **This changes the eq (16a) arm, so it is a seam in the artifact record.**
-  > Every `mass`-arm number recorded before 2026-08-02 — including the post-fix
+  > Every `mass`-arm number recorded before 2026-08-02 — including the post-M2M-fix
   > headline table below — was measured with the θ=1.0 prepass, because
   > `paper_cached` derives the criterion's scale from the *cold-call* prepass and
-  > the bench does one prepare then one evaluate. New runs use θ=0.5. Do not
-  > compare a pre- and post-change `mass` arm directly; re-run the baseline
-  > instead. The eq (16b) benefit was measured *for* this change, but the eq (16a)
-  > side was changed by analogy, and the direction is not obvious a priori: a
-  > lower-quality `|a_b|` could make the scale too *large*, which per trap 6 means
-  > the old measurements may have been over-accepting (faster and less accurate)
-  > rather than under-accepting. Quantifying that is the one loose thread from this
-  > pass.
+  > the bench does one prepare then one evaluate. Do not compare a pre- and
+  > post-change `mass` arm directly; re-run the baseline.
+
+  **Measured, and the old prepass was over-accepting exactly as trap 6 predicts.**
+  Plummer N=4096, leaf 16, p=8, ε=1e-5, δa/f:
+
+  | mode | prepass θ | far pairs | cold prepare | warm | rms | p99.99 | `f_b` fidelity |
+  |---|---|---|---|---|---|---|---|
+  | `paper` (16a) | **1.0 = old** | 2374 | 52.89 s | 10.92 s | 1.10e-6 | 2.65e-5 | — |
+  | `paper` (16a) | **0.5 = new** | 2166 | **22.24 s** | 10.92 s | **7.89e-7** | **1.66e-5** | — |
+  | `paper` (16a) | 0.3 | 2124 | 17.53 s | 9.26 s | 7.17e-7 | 1.19e-5 | — |
+  | `paper_fb` (16b) | 1.0 | 2450 | 19.43 s | 9.46 s | 9.35e-7 | 1.10e-5 | 0.736 |
+  | `paper_fb` (16b) | **0.5 = default** | 2994 | 17.05 s | 8.86 s | 1.24e-6 | 1.57e-5 | **0.997** |
+  | `paper_fb` (16b) | 0.3 | 3018 | 13.38 s | 8.70 s | 1.25e-6 | 1.75e-5 | 1.000 |
+
+  For **eq (16a)** the change is a win on every axis at once: it accepts *fewer*
+  far pairs (2374 → 2166) *and* is more accurate (rms 1.4×, p99.99 1.6×) *and* the
+  cold prepare is 2.4× faster. So every pre-2026-08-02 `mass` arm ran a criterion
+  more permissive than its nominal ε — faster and less accurate than eq (16a)
+  actually is — and **the corrected arm should make the criterion's advantage larger
+  than recorded, not smaller.**
+
+  Two things this does *not* say, both checked. It is **not** a uniform
+  over-estimate of `min_b |a_b|`: the per-node scale moves in both directions when
+  the prepass angle is tightened (one node went 32.1 → 50.8, i.e. *up*), so the
+  first draft of this note — "the old scale was simply too large" — was wrong and an
+  inequality test asserting it failed. The property that does hold, and is now
+  pinned against an exact direct-sum `min_b |a_b|` reduced onto nodes, is that the
+  tighter prepass lands **closer to the truth**; the net effect on acceptance
+  follows from that rather than from a monotone shift. And the cost worry that
+  prompted the measurement — that a smaller prepass θ means a bigger prepass near
+  field and so a slower prepass — was simply backwards. Warm-call prepare is
+  unchanged (10.92 s both), so the "≤ 1.3× warm prepare" bar is untouched either
+  way.
+
+  For **eq (16b)** the raw error at fixed ε gets *worse* as fidelity improves
+  (rms 9.35e-7 → 1.24e-6), and that is not a defect: a faithful, larger `f_b` is a
+  looser `ε·f_b`, so more pairs are accepted (2450 → 2994) and less near-field work
+  is done. At fixed ε the rows are not comparable — only matched accuracy is, and
+  there the estimator tracks the exact-`f_b` ceiling. What θ=0.5 buys for (16b) is
+  **fidelity to eq (16b) as written** (0.736 → 0.997), which is the whole point.
 - **The `|a_b|` recorder would have overwritten an `f_b` scale.**
   `_record_force_scale_from_evaluation` writes each evaluation's accelerations
   into the force-scale cache, which is what makes reuse mean anything for (16a).
