@@ -359,6 +359,8 @@ class FastMultipoleMethod(
         reuse_topology: bool = False,
         rebuild_every: int = 1,
         mac_force_scale_mode: str = "prev",
+        mac_force_scale_prepass_theta: Optional[float] = None,
+        mac_force_scale_fb_inflation: float = 1.0,
         adaptive_error_model: str = "tail_proxy",
         adaptive_eps: Optional[float] = None,
         dehnen_geometry_mode: str = "com",
@@ -732,12 +734,31 @@ class FastMultipoleMethod(
             If a MAC/adaptive option is outside its documented domain, or a paper-style MAC is given a non-positive ``adaptive_eps``.
         """
         force_scale_mode_norm = str(mac_force_scale_mode).strip().lower()
-        if force_scale_mode_norm not in ("prev", "prepass", "paper", "paper_cached"):
+        if force_scale_mode_norm not in (
+            "prev",
+            "prepass",
+            "paper",
+            "paper_cached",
+            "paper_fb",
+            "paper_fb_cached",
+        ):
             raise ValueError(
                 "mac_force_scale_mode must be 'prev', 'prepass', 'paper', "
-                "or 'paper_cached'"
+                "'paper_cached', 'paper_fb', or 'paper_fb_cached'"
             )
         self.mac_force_scale_mode = force_scale_mode_norm
+        self.mac_force_scale_prepass_theta = (
+            None
+            if mac_force_scale_prepass_theta is None
+            else float(mac_force_scale_prepass_theta)
+        )
+        if self.mac_force_scale_prepass_theta is not None and not (
+            0.0 < self.mac_force_scale_prepass_theta <= 1.0
+        ):
+            raise ValueError("mac_force_scale_prepass_theta must be in (0, 1]")
+        self.mac_force_scale_fb_inflation = float(mac_force_scale_fb_inflation)
+        if self.mac_force_scale_fb_inflation < 0.0:
+            raise ValueError("mac_force_scale_fb_inflation must be >= 0")
         adaptive_error_model_norm = str(adaptive_error_model).strip().lower()
         if adaptive_error_model_norm not in (
             "tail_proxy",
@@ -768,6 +789,12 @@ class FastMultipoleMethod(
         if self.adaptive_eps is not None and self.adaptive_eps <= 0.0:
             raise ValueError("adaptive_eps must be > 0 when provided")
         self._last_force_scale_nodes: Optional[Array] = None
+        #: Per-particle force scale from the most recent eq (16b) prepass, in sorted
+        #: (tree) order. Diagnostic only -- the criterion consumes the node-reduced
+        #: array above. It exists so the estimator can be scored against an exact
+        #: O(N^2) f_b without re-running the prepass, which is how the O(N) estimate
+        #: was validated (see bench/validation/fb_estimator_fidelity.py).
+        self._last_force_scale_particles: Optional[Array] = None
         self._in_force_scale_prepass = False
         #: Per-node effective opening angles from the most recent prepare_state under
         #: mac_type='dehnen_theta'. Diagnostic only -- the traversal consumes them as
@@ -1646,6 +1673,7 @@ class FastMultipoleMethod(
         self._interaction_cache_misses = 0
         self._tree_workspace = None
         self._last_force_scale_nodes = None
+        self._last_force_scale_particles = None
         self._recent_retry_events = tuple()
         self._recent_far_pairs_by_gear_counts = tuple()
         self._recent_dual_node_count = 0

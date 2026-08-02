@@ -383,6 +383,341 @@ def compute_node_force_scale_from_sorted_magnitudes(
     return jnp.where(finite, scales, fallback)
 
 
+def node_span_mass(*, tree: Tree, masses_sorted: Array) -> Array:
+    """Total mass spanned by every node, from a prefix sum over sorted masses.
+
+    Deliberately independent of the upward pass: this is the *reference* node mass,
+    computed straight from ``node_ranges``, so it cannot inherit a multipole defect.
+    That matters here because the two M2M bugs this branch fixed were both
+    "a node spans particles but its expansion is zero", and an ``f_b`` estimator
+    sourced from ``multipole_packed[:, 0]`` would have silently reproduced them.
+
+    ``node_ranges`` is inclusive on both ends, and a node spanning nothing has
+    ``hi < lo``, which yields zero rather than a negative mass.
+    """
+
+    masses = jnp.asarray(masses_sorted)
+    dtype = masses.dtype
+    node_ranges = jnp.asarray(tree.node_ranges, dtype=jnp.int32)
+    n = int(masses.shape[0])
+    cumulative = jnp.concatenate(
+        [jnp.zeros((1,), dtype=dtype), jnp.cumsum(masses)],
+    )
+    lo = jnp.clip(node_ranges[:, 0], 0, n)
+    hi_exclusive = jnp.clip(node_ranges[:, 1] + 1, 0, n)
+    return jnp.maximum(cumulative[hi_exclusive] - cumulative[lo], 0.0)
+
+
+def _particle_leaf_ids(*, tree: Tree, num_particles: int, max_leaf_size: int) -> Array:
+    """Map every sorted particle index to the leaf node that spans it.
+
+    Scatter-based rather than ``searchsorted`` on leaf starts, because empty
+    leaves -- which capacity-fixed ``static_radix`` trees have by construction --
+    share a start index with a populated neighbour and would win the lookup.
+    """
+
+    node_ranges = jnp.asarray(tree.node_ranges, dtype=jnp.int32)
+    num_nodes = int(node_ranges.shape[0])
+    num_internal = int(tree.num_internal_nodes)
+    leaf_ids = jnp.full((num_particles,), -1, dtype=jnp.int32)
+    if num_internal >= num_nodes or max_leaf_size <= 0:
+        return leaf_ids
+    leaf_nodes = jnp.arange(num_internal, num_nodes, dtype=jnp.int32)
+    leaf_ranges = node_ranges[num_internal:]
+    counts = jnp.maximum(leaf_ranges[:, 1] - leaf_ranges[:, 0] + 1, 0)
+    offsets = jnp.arange(max_leaf_size, dtype=jnp.int32)
+    particle_idx = leaf_ranges[:, 0:1] + offsets[None, :]
+    valid = offsets[None, :] < counts[:, None]
+    safe_idx = jnp.clip(particle_idx, 0, num_particles - 1)
+    payload = jnp.where(valid, leaf_nodes[:, None], -1)
+    # Spans are disjoint, so `max` behaves as a plain scatter while ignoring the
+    # padded lanes (-1). `.at[].set` would let a padded lane overwrite a real one.
+    return leaf_ids.at[safe_idx].max(payload)
+
+
+def estimate_particle_force_scale(
+    *,
+    tree: Tree,
+    positions_sorted: Array,
+    masses_sorted: Array,
+    node_centers: Array,
+    node_radii: Array,
+    interaction_sources: Array,
+    interaction_targets: Array,
+    neighbor_offsets: Array,
+    neighbor_counts: Array,
+    neighbor_leaf_indices: Array,
+    neighbor_indices: Array,
+    max_leaf_size: int,
+    softening: float = 0.0,
+    gravitational_constant: float = 1.0,
+    far_center_inflation: float = 1.0,
+    near_pair_chunk: int = 32,
+) -> Array:
+    """Estimate Dehnen eq (16b)'s force scale ``f_b`` in O(N) work, on device.
+
+    ``f_b = sum_{a != b} G m_a / |x_a - x_b|^2`` is the cancellation-free force
+    scale eq (16b) puts on the criterion's right-hand side. The exact sum is
+    O(N^2); this reproduces it from the interaction lists the traversal already
+    built, splitting it the way the FMM splits the force itself:
+
+    * **near field, exact.** For every near pair (target leaf, source leaf) plus
+      every leaf's self block, the scalar sum over particle pairs, excluding
+      ``a == b``. This is the same pair set P2P evaluates, so it is exact.
+    * **far field, monopole.** Each far pair ``(U, A)`` contributes
+      ``G M_A / (|c_A - c_U| + rho_U)^2`` to every particle under ``U``. The
+      contribution is computed once per pair and accumulated *downward*, so a
+      particle picks up the far lists of its whole ancestor chain -- which is
+      exactly the set the far/near partition invariant says covers it.
+
+    The far term is **mandatory, not a refinement**: ``f_b`` is not near-field
+    dominated. Measured at N=4096, the 16 largest contributors capture a median
+    13% of ``f_b`` on Plummer (18% uniform, 7% bulge+halo) and even the largest
+    256 capture only 41%, because in 3D the shell population grows like
+    ``r^2 rho`` while each term falls like ``1/r^2`` and every logarithmic shell
+    contributes comparably. A near-only estimator is wrong by nearly an order of
+    magnitude. Dehnen's "p = 0 suffices" is a statement about the required
+    *order*, not about locality.
+
+    **The estimate is a lower bound on the exact ``f_b``**, and that direction is
+    deliberate. ``far_center_inflation`` (1.0 by default) inflates the source-to-
+    target distance by the target node's radius, so ``|c_A - c_U| + rho_U`` bounds
+    ``|c_A - x_b|`` from above for every ``b`` under ``U`` and each far term is
+    therefore an under-estimate. eq (16a)'s threshold is ``eps * s``, so an
+    over-large scale *loosens* acceptance -- a stale or inflated scale makes the
+    solver faster and wronger, which no cost measurement can detect (see the
+    force-scale staleness cliff in ``docs/dehnen_mass_mac_status_and_plan.md``).
+    Erring low costs a little work and cannot cost accuracy. Set
+    ``far_center_inflation=0.0`` to get the plain centre-to-centre distance, which
+    is neither bound but is closer to the exact value; that is a measurement knob,
+    not a production setting.
+
+    Because far pairs satisfy the opening criterion, ``rho_U / |c_A - c_U|`` is at
+    most the opening angle, so the inflation costs at most a factor ``(1+theta)^2``
+    per term.
+
+    Returns the per-particle estimate in *sorted* (tree) order, so it can be fed
+    straight to :func:`compute_node_force_scale_from_sorted_magnitudes` with
+    ``reduction="min"`` exactly like an exact ``f_b`` array would be.
+    """
+
+    positions = jnp.asarray(positions_sorted)
+    masses = jnp.asarray(masses_sorted, dtype=positions.dtype)
+    dtype = positions.dtype
+    num_particles = int(positions.shape[0])
+    if num_particles == 0:
+        return jnp.zeros((0,), dtype=dtype)
+
+    leaf_cap = max(int(max_leaf_size), 1)
+    g = jnp.asarray(float(gravitational_constant), dtype=dtype)
+    eps_sq = jnp.asarray(float(softening) ** 2, dtype=dtype)
+    node_ranges = jnp.asarray(tree.node_ranges, dtype=jnp.int32)
+
+    near = _near_field_force_scale(
+        positions=positions,
+        masses=masses,
+        node_ranges=node_ranges,
+        neighbor_offsets=jnp.asarray(neighbor_offsets, dtype=jnp.int32),
+        neighbor_counts=jnp.asarray(neighbor_counts, dtype=jnp.int32),
+        neighbor_leaf_indices=jnp.asarray(neighbor_leaf_indices, dtype=jnp.int32),
+        neighbor_indices=jnp.asarray(neighbor_indices, dtype=jnp.int32),
+        leaf_cap=leaf_cap,
+        g=g,
+        eps_sq=eps_sq,
+        chunk=max(int(near_pair_chunk), 1),
+    )
+
+    far_by_node = _far_field_force_scale_by_node(
+        tree=tree,
+        masses=masses,
+        node_centers=jnp.asarray(node_centers, dtype=dtype),
+        node_radii=jnp.asarray(node_radii, dtype=dtype),
+        interaction_sources=jnp.asarray(interaction_sources, dtype=jnp.int32),
+        interaction_targets=jnp.asarray(interaction_targets, dtype=jnp.int32),
+        g=g,
+        eps_sq=eps_sq,
+        inflation=jnp.asarray(float(far_center_inflation), dtype=dtype),
+    )
+
+    leaf_of_particle = _particle_leaf_ids(
+        tree=tree,
+        num_particles=num_particles,
+        max_leaf_size=leaf_cap,
+    )
+    far = jnp.where(
+        leaf_of_particle >= 0,
+        far_by_node[jnp.maximum(leaf_of_particle, 0)],
+        jnp.asarray(0.0, dtype=dtype),
+    )
+    return near + far
+
+
+def _near_field_force_scale(
+    *,
+    positions: Array,
+    masses: Array,
+    node_ranges: Array,
+    neighbor_offsets: Array,
+    neighbor_counts: Array,
+    neighbor_leaf_indices: Array,
+    neighbor_indices: Array,
+    leaf_cap: int,
+    g: Array,
+    eps_sq: Array,
+    chunk: int,
+) -> Array:
+    """Exact ``sum G m_a / |x_a - x_b|^2`` over the near-field pair set."""
+
+    dtype = positions.dtype
+    num_particles = int(positions.shape[0])
+    num_slots = int(neighbor_leaf_indices.shape[0])
+    flat_len = int(neighbor_indices.shape[0])
+    if num_slots == 0:
+        return jnp.zeros((num_particles,), dtype=dtype)
+
+    # One flat (target leaf, source leaf) pair list: each slot's self block first,
+    # then the neighbour entries. Padding to a per-slot maximum would need a
+    # concrete `max(counts)` and so would not trace; recovering each flat entry's
+    # slot by searchsorted keeps every shape static.
+    flat = jnp.arange(flat_len, dtype=jnp.int32)
+    slot_of_flat = (
+        jnp.searchsorted(neighbor_offsets, flat, side="right").astype(jnp.int32) - 1
+    )
+    slot_of_flat = jnp.clip(slot_of_flat, 0, num_slots - 1)
+    within = flat < (neighbor_offsets[slot_of_flat] + neighbor_counts[slot_of_flat])
+    neighbor_source = neighbor_indices[flat]
+
+    flat_target = neighbor_leaf_indices[slot_of_flat]
+    pair_target = jnp.concatenate([neighbor_leaf_indices, flat_target])
+    pair_source = jnp.concatenate([neighbor_leaf_indices, neighbor_source])
+    pair_valid = jnp.concatenate(
+        [
+            neighbor_leaf_indices >= 0,
+            within & (neighbor_source >= 0) & (flat_target >= 0),
+        ]
+    )
+    num_pairs = num_slots + flat_len
+
+    lane = jnp.arange(leaf_cap, dtype=jnp.int32)
+    padded = -(-num_pairs // chunk) * chunk
+
+    def body(step: Array, acc: Array) -> Array:
+        idx = step * chunk + jnp.arange(chunk, dtype=jnp.int32)
+        safe = jnp.clip(idx, 0, num_pairs - 1)
+        live = (idx < num_pairs) & pair_valid[safe]
+        tgt = jnp.maximum(pair_target[safe], 0)
+        src = jnp.maximum(pair_source[safe], 0)
+
+        t_lo = node_ranges[tgt, 0]
+        t_n = jnp.maximum(node_ranges[tgt, 1] - t_lo + 1, 0)
+        s_lo = node_ranges[src, 0]
+        s_n = jnp.maximum(node_ranges[src, 1] - s_lo + 1, 0)
+
+        t_idx = t_lo[:, None] + lane[None, :]
+        t_ok = (lane[None, :] < t_n[:, None]) & live[:, None]
+        t_safe = jnp.clip(t_idx, 0, num_particles - 1)
+        s_idx = s_lo[:, None] + lane[None, :]
+        s_ok = (lane[None, :] < s_n[:, None]) & live[:, None]
+        s_safe = jnp.clip(s_idx, 0, num_particles - 1)
+
+        delta = positions[s_safe][:, None, :, :] - positions[t_safe][:, :, None, :]
+        dist_sq = jnp.sum(delta * delta, axis=3) + eps_sq
+        contrib = masses[s_safe][:, None, :] / dist_sq
+        # Exclude a == b, and every padded lane on either side.
+        keep = (
+            t_ok[:, :, None]
+            & s_ok[:, None, :]
+            & (t_safe[:, :, None] != s_safe[:, None, :])
+        )
+        contrib = jnp.where(keep, contrib, jnp.asarray(0.0, dtype=dtype))
+        per_target = g * jnp.sum(contrib, axis=2)
+        return acc.at[t_safe].add(jnp.where(t_ok, per_target, 0.0))
+
+    return jax.lax.fori_loop(
+        0,
+        padded // chunk,
+        body,
+        jnp.zeros((num_particles,), dtype=dtype),
+    )
+
+
+def _far_field_force_scale_by_node(
+    *,
+    tree: Tree,
+    masses: Array,
+    node_centers: Array,
+    node_radii: Array,
+    interaction_sources: Array,
+    interaction_targets: Array,
+    g: Array,
+    eps_sq: Array,
+    inflation: Array,
+) -> Array:
+    """Accumulate the monopole far-field force scale down the tree.
+
+    ``own[U]`` is the contribution of ``U``'s own far list; the returned array is
+    ``own[U] + own[parent(U)] + ...`` up to the root, which for a leaf is the
+    complete far field the partition invariant assigns to its particles.
+    """
+
+    dtype = masses.dtype
+    node_ranges = jnp.asarray(tree.node_ranges, dtype=jnp.int32)
+    num_nodes = int(node_ranges.shape[0])
+    if num_nodes == 0:
+        return jnp.zeros((0,), dtype=dtype)
+
+    node_mass = node_span_mass(tree=tree, masses_sorted=masses)
+    src = interaction_sources
+    tgt = interaction_targets
+    live = (src >= 0) & (tgt >= 0)
+    src_safe = jnp.maximum(src, 0)
+    tgt_safe = jnp.maximum(tgt, 0)
+    delta = node_centers[src_safe] - node_centers[tgt_safe]
+    distance = jnp.sqrt(jnp.sum(delta * delta, axis=1))
+    reach = distance + inflation * node_radii[tgt_safe]
+    contrib = g * node_mass[src_safe] / (reach * reach + eps_sq)
+    contrib = jnp.where(live & (reach > 0), contrib, jnp.asarray(0.0, dtype=dtype))
+    own = jax.ops.segment_sum(
+        contrib,
+        tgt_safe,
+        num_segments=num_nodes,
+        indices_are_sorted=False,
+    )
+
+    left_child = jnp.asarray(tree.left_child, dtype=jnp.int32)
+    right_child = jnp.asarray(tree.right_child, dtype=jnp.int32)
+    num_internal = int(tree.num_internal_nodes)
+    if num_internal <= 0:
+        return own
+
+    # Parents must be accumulated before their children. Internal-node indices are
+    # NOT stored in postorder in a radix tree -- 26 of 63 internal nodes at N=1024
+    # have an internal child with a *lower* index -- so descend by span width,
+    # which is strictly decreasing from parent to child. This is the same ordering
+    # trap that dropped 97% of the system mass in the M2M pass.
+    internal_ranges = node_ranges[:num_internal]
+    internal_width = internal_ranges[:, 1] - internal_ranges[:, 0]
+    descending = jnp.argsort(-internal_width, stable=True)
+
+    def body(i: int, current: Array) -> Array:
+        node_idx = descending[i]
+        value = current[node_idx]
+        left_idx = left_child[node_idx]
+        right_idx = right_child[node_idx]
+        current = jnp.where(
+            left_idx >= 0,
+            current.at[jnp.maximum(left_idx, 0)].add(value),
+            current,
+        )
+        return jnp.where(
+            right_idx >= 0,
+            current.at[jnp.maximum(right_idx, 0)].add(value),
+            current,
+        )
+
+    return jax.lax.fori_loop(0, num_internal, body, own)
+
+
 def _sphere_from_support(points: np.ndarray) -> tuple[np.ndarray, float]:
     """Return the exact sphere defined by up to four support points."""
 
