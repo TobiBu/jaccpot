@@ -346,7 +346,8 @@ class FastMultipoleMethod:
         mac_force_scale_mode: str = "prev",
         adaptive_error_model: str = "tail_proxy",
         adaptive_eps: Optional[float] = None,
-        dehnen_geometry_mode: str = "tree",
+        dehnen_geometry_mode: str = "com",
+        mac_theta_max: float = 1.0,
         theta: float = 0.6,
         G: float = 1.0,
         softening: float = 1e-3,
@@ -426,6 +427,7 @@ class FastMultipoleMethod:
             adaptive_error_model=adaptive_error_model,
             adaptive_eps=adaptive_eps,
             dehnen_geometry_mode=dehnen_geometry_mode,
+            mac_theta_max=mac_theta_max,
             complex_rotation=runtime_overrides.complex_rotation,
             tree_type=runtime_overrides.tree_type or "radix",
             execution_backend=runtime_overrides.execution_backend,
@@ -631,10 +633,17 @@ class FastMultipoleMethod:
         max_order: int = 4,
         theta: Optional[float] = None,
         cache_policy: str = "auto",
+        force_scale_nodes: Optional[Array] = None,
         runtime_overrides_override: Optional[Any] = None,
         fused_device_mode: bool = False,
     ) -> FMMPreparedState:
-        """Prepare and cache tree/interactions for repeated evaluations."""
+        """Prepare and cache tree/interactions for repeated evaluations.
+
+        ``force_scale_nodes`` overrides the per-node force scale used by the
+        adaptive acceptance test for this call only, skipping the prepass and
+        leaving the reuse cache untouched. Its length must match the node count of
+        the tree this call builds.
+        """
         return self._impl.prepare_state(
             positions,
             masses,
@@ -643,6 +652,7 @@ class FastMultipoleMethod:
             max_order=max_order,
             theta=theta,
             jit_tree=self.advanced.runtime.jit_tree,
+            force_scale_nodes=force_scale_nodes,
             runtime_overrides_override=runtime_overrides_override,
             fused_device_mode=bool(fused_device_mode),
         )

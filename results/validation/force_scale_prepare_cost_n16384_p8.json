@@ -1,0 +1,86 @@
+{
+  "config": {
+    "n": 16384,
+    "leaf_size": 16,
+    "order": 8,
+    "repeats": 5,
+    "theta": 0.6,
+    "eps": 2e-07,
+    "softening": 1e-06,
+    "preset": "fast",
+    "basis": "real",
+    "precision": "fp64",
+    "seed": 20260801,
+    "jitter": 0.0001,
+    "max_pair_queue": 2097152,
+    "max_interactions_per_node": 131072,
+    "max_neighbors_per_leaf": 131072,
+    "json_out": "results/validation/force_scale_prepare_cost_n16384_p8.json"
+  },
+  "environment": {
+    "jax_version": "0.9.0.1",
+    "platform": "Linux-6.8.0-134-generic-x86_64-with-glibc2.39",
+    "devices": [
+      "cuda:0"
+    ],
+    "x64_enabled": true
+  },
+  "arms": [
+    {
+      "name": "geometric",
+      "force_scale_mode": null,
+      "cold_seconds": 320.5979164801538,
+      "warm_seconds": [
+        39.16683704126626,
+        39.16295313416049,
+        40.1090497020632,
+        40.03737808391452,
+        52.234036297071725
+      ],
+      "warm_median_seconds": 40.03737808391452,
+      "warm_min_seconds": 39.16295313416049,
+      "prepass_calls": 0,
+      "node_count": 2047,
+      "far_pairs": 168388
+    },
+    {
+      "name": "mass_paper",
+      "force_scale_mode": "paper",
+      "cold_seconds": 305.4155938560143,
+      "warm_seconds": [
+        236.0515793147497,
+        386.37946115108207,
+        226.9283506590873,
+        231.44278828892857,
+        235.05279410770163
+      ],
+      "warm_median_seconds": 235.05279410770163,
+      "warm_min_seconds": 226.9283506590873,
+      "prepass_calls": 7,
+      "node_count": 2047,
+      "far_pairs": 82246
+    },
+    {
+      "name": "mass_paper_cached",
+      "force_scale_mode": "paper_cached",
+      "cold_seconds": 214.6268000579439,
+      "warm_seconds": [
+        41.07092219591141,
+        39.234000673983246,
+        38.36214184388518,
+        40.24059600522742,
+        38.668422165792435
+      ],
+      "warm_median_seconds": 39.234000673983246,
+      "warm_min_seconds": 38.36214184388518,
+      "prepass_calls": 1,
+      "node_count": 2047,
+      "far_pairs": 82246
+    }
+  ],
+  "ratios_vs_geometric": {
+    "geometric": 1.0,
+    "mass_paper": 5.870833839694833,
+    "mass_paper_cached": 0.9799343151729999
+  }
+}
