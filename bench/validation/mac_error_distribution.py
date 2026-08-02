@@ -143,24 +143,37 @@ def chunked_direct_accelerations(
     softening: float,
     G: float,
     block: int = 512,
+    targets: Optional[np.ndarray] = None,
 ) -> jnp.ndarray:
     """Exact direct-sum accelerations, chunked over targets.
 
     The dense O(N^2) formulation the notebooks use needs 6.4 GB at N=16384 in
     float64; this streams over target blocks instead so the reference survives
     the N values the claim has to be checked at.
+
+    ``targets`` restricts evaluation to a subset of target indices while still
+    summing over *all* sources, which is what makes N=1e6 tractable: 1e4 targets
+    against 1e6 sources is 1e10 pairs rather than 1e12. Returns one row per entry
+    of ``targets``, in that order.
     """
 
     pos = jnp.asarray(positions)
     mass = jnp.asarray(masses)
     n = int(pos.shape[0])
     eps_sq = jnp.asarray(softening * softening, dtype=pos.dtype)
+    target_idx = (
+        jnp.arange(n, dtype=jnp.int32)
+        if targets is None
+        else jnp.asarray(targets, dtype=jnp.int32)
+    )
+    num_targets = int(target_idx.shape[0])
 
     def block_acc(start: jnp.ndarray) -> jnp.ndarray:
-        idx = start + jnp.arange(block)
-        safe = jnp.clip(idx, 0, n - 1)
-        targets = pos[safe]
-        delta = pos[None, :, :] - targets[:, None, :]
+        slot = start + jnp.arange(block)
+        safe_slot = jnp.clip(slot, 0, num_targets - 1)
+        safe = target_idx[safe_slot]
+        target_pos = pos[safe]
+        delta = pos[None, :, :] - target_pos[:, None, :]
         dist_sq = jnp.sum(delta * delta, axis=2) + eps_sq
         inv = jnp.where(
             jnp.arange(n)[None, :] == safe[:, None],
@@ -171,9 +184,9 @@ def chunked_direct_accelerations(
             "ij,j,ijk->ik", inv, mass, delta
         )
 
-    starts = jnp.arange(0, n, block)
+    starts = jnp.arange(0, num_targets, block)
     out = jax.lax.map(block_acc, starts)
-    return out.reshape(-1, 3)[:n]
+    return out.reshape(-1, 3)[:num_targets]
 
 
 def per_particle_relative_error(
@@ -195,8 +208,16 @@ def chunked_force_scale(
     softening: float,
     G: float,
     block: int = 512,
+    targets: Optional[np.ndarray] = None,
 ) -> jnp.ndarray:
     """Dehnen's per-particle force scale ``f_b = sum_{a!=b} G m_a / |x_a - x_b|^2``.
+
+    ``targets`` restricts evaluation to a subset of target indices while summing
+    over all sources, matching :func:`chunked_direct_accelerations`. Note that the
+    ``mass_16b`` arm needs ``f_b`` for **every** particle, not just the measured
+    subset, because it feeds the node reduction -- so that arm is unavailable under
+    subsampling, and the driver rejects the combination rather than silently
+    injecting a partial scale.
 
     This is the sum of pairwise force *magnitudes*, i.e. the acceleration a
     particle would feel if none of its interactions cancelled. Unlike ``|a_b|`` it
@@ -218,12 +239,19 @@ def chunked_force_scale(
     mass = jnp.asarray(masses)
     n = int(pos.shape[0])
     eps_sq = jnp.asarray(softening * softening, dtype=pos.dtype)
+    target_idx = (
+        jnp.arange(n, dtype=jnp.int32)
+        if targets is None
+        else jnp.asarray(targets, dtype=jnp.int32)
+    )
+    num_targets = int(target_idx.shape[0])
 
     def block_scale(start: jnp.ndarray) -> jnp.ndarray:
-        idx = start + jnp.arange(block)
-        safe = jnp.clip(idx, 0, n - 1)
-        targets = pos[safe]
-        delta = pos[None, :, :] - targets[:, None, :]
+        slot = start + jnp.arange(block)
+        safe_slot = jnp.clip(slot, 0, num_targets - 1)
+        safe = target_idx[safe_slot]
+        target_pos = pos[safe]
+        delta = pos[None, :, :] - target_pos[:, None, :]
         dist_sq = jnp.sum(delta * delta, axis=2) + eps_sq
         contrib = jnp.where(
             jnp.arange(n)[None, :] == safe[:, None],
@@ -232,8 +260,8 @@ def chunked_force_scale(
         )
         return jnp.asarray(G, dtype=pos.dtype) * jnp.sum(contrib, axis=1)
 
-    starts = jnp.arange(0, n, block)
-    return jax.lax.map(block_scale, starts).reshape(-1)[:n]
+    starts = jnp.arange(0, num_targets, block)
+    return jax.lax.map(block_scale, starts).reshape(-1)[:num_targets]
 
 
 def per_particle_dehnen_scaled_error(
@@ -346,8 +374,15 @@ def measure(
     G: float,
     max_pair_queue: Optional[int] = None,
     max_interactions_per_node: Optional[int] = None,
+    reference_targets: Optional[np.ndarray] = None,
 ) -> dict[str, Any]:
-    """Run one (arm, knob) configuration and return its record."""
+    """Run one (arm, knob) configuration and return its record.
+
+    ``reference_targets`` is the subset of particle indices the reference covers;
+    when set, every error statistic is computed over that subset only. The FMM
+    itself still runs on all N particles -- only the O(N^2) comparison is
+    subsampled.
+    """
 
     caps = dict(
         max_pair_queue=max_pair_queue,
@@ -414,9 +449,15 @@ def measure(
     jax.block_until_ready(acc)
     evaluate_s = time.perf_counter() - t0
 
-    errors = per_particle_relative_error(acc, reference)
-    scaled_errors = per_particle_scaled_error(acc, reference)
-    dehnen_errors = per_particle_dehnen_scaled_error(acc, reference, force_scale)
+    # Under subsampling the reference and force scale cover only the measured
+    # targets, so the FMM result has to be restricted to the same rows -- in the
+    # same order -- before any error is taken.
+    acc_measured = acc if reference_targets is None else acc[reference_targets]
+    errors = per_particle_relative_error(acc_measured, reference)
+    scaled_errors = per_particle_scaled_error(acc_measured, reference)
+    dehnen_errors = per_particle_dehnen_scaled_error(
+        acc_measured, reference, force_scale
+    )
 
     node_ranges = np.asarray(state.tree.node_ranges)
     interactions = state.interactions
@@ -481,7 +522,10 @@ def measure(
     # on the tree.
     fb_fidelity = None
     estimated_fb = getattr(fmm._impl, "_last_force_scale_particles", None)
-    if estimated_fb is not None:
+    # Fidelity needs the exact f_b for every particle to line up with the
+    # estimator's per-particle output; under subsampling `force_scale` covers only
+    # the measured targets, so scoring it would silently compare mismatched rows.
+    if estimated_fb is not None and reference_targets is None:
         est = np.asarray(estimated_fb, dtype=np.float64)
         exact = np.asarray(force_scale, dtype=np.float64)[
             np.asarray(state.tree.particle_indices)
@@ -508,8 +552,10 @@ def measure(
         "pair_work": int(far_work + near_work),
         "prepare_s": prepare_s,
         "evaluate_s": evaluate_s,
+        # Over the measured targets only when subsampling -- so under subsampling
+        # this is a rel-L2 of the sample, not of the system.
         "rel_l2": float(
-            np.linalg.norm(np.asarray(acc) - np.asarray(reference))
+            np.linalg.norm(np.asarray(acc_measured) - np.asarray(reference))
             / np.linalg.norm(np.asarray(reference))
         ),
     }
@@ -774,6 +820,20 @@ def main() -> int:
         ),
     )
     ap.add_argument(
+        "--reference-subsample",
+        type=int,
+        default=None,
+        help=(
+            "evaluate the O(N^2) reference for only this many randomly chosen "
+            "targets (against ALL sources), which is what makes N=1e6 tractable: "
+            "1e4 targets x 1e6 sources is 1e10 pairs, not 1e12. The FMM still runs "
+            "on every particle; only the comparison is subsampled. Costs tail "
+            "resolution -- p99.99 of K targets is K/1e4 particles, so K=1e4 leaves "
+            "the headline statistic resting on ONE particle and K>=1e5 is needed to "
+            "quote it. Omit below N~3e5, where keeping all targets is affordable."
+        ),
+    )
+    ap.add_argument(
         "--max-pair-queue",
         type=int,
         default=None,
@@ -803,6 +863,36 @@ def main() -> int:
         # compare_arms measures every mass arm against the geometric baseline, so
         # dropping it would silently produce an empty comparison table.
         ap.error("--arm must include 'fixed'; it is the comparison baseline")
+
+    if args.reference_subsample is not None:
+        if int(args.reference_subsample) < 1:
+            ap.error("--reference-subsample must be >= 1")
+        if "mass_16b" in arms:
+            # The exact-f_b arm injects a per-node force scale reduced from f_b for
+            # *every* particle. A subsampled f_b would reduce to a scale built from
+            # a tenth of a percent of the system and the arm would still run, just
+            # measuring something else entirely.
+            ap.error(
+                "--arm mass_16b needs the exact f_b for every particle (it feeds "
+                "the node reduction), which --reference-subsample does not compute. "
+                "Use --arm mass_16b_est, whose estimator is O(N) and needs no "
+                "reference at all."
+            )
+        smallest = min(_ints(args.n))
+        if int(args.reference_subsample) >= smallest:
+            print(
+                f"NOTE: --reference-subsample {args.reference_subsample} >= N="
+                f"{smallest}; that tier will use all targets and pay full O(N^2).",
+                flush=True,
+            )
+        elif int(args.reference_subsample) < 100_000:
+            print(
+                f"WARNING: --reference-subsample {args.reference_subsample} puts "
+                f"p99.99 at {int(args.reference_subsample) / 10_000:.1f} particles. "
+                "Dehnen's headline statistic is the 99.99th percentile; below "
+                "~1e5 targets it is not resolved and only rms/p99 are quotable.",
+                flush=True,
+            )
 
     if (args.max_pair_queue is None) != (args.max_interactions_per_node is None):
         # Pinning one and leaving the other to grow still pays the recompile per
@@ -843,12 +933,26 @@ def main() -> int:
         pos_np, mass_np = make_distribution(dist, n, seed)
         positions = jnp.asarray(pos_np, dtype=jnp.float64)
         masses = jnp.asarray(mass_np, dtype=jnp.float64)
+
+        reference_targets = None
+        if args.reference_subsample is not None and int(args.reference_subsample) < n:
+            # Derived from the realisation seed so the target set is reproducible
+            # and differs between seeds, rather than fixing the same targets for
+            # every realisation (which would correlate the seeds it exists to
+            # average over).
+            reference_targets = np.sort(
+                np.random.default_rng(1_000_003 + seed).choice(
+                    n, size=int(args.reference_subsample), replace=False
+                )
+            ).astype(np.int32)
+
         reference = chunked_direct_accelerations(
             positions,
             masses,
             softening=args.softening,
             G=args.G,
             block=int(args.reference_block),
+            targets=reference_targets,
         )
         jax.block_until_ready(reference)
         force_scale = chunked_force_scale(
@@ -857,6 +961,7 @@ def main() -> int:
             softening=args.softening,
             G=args.G,
             block=int(args.reference_block),
+            targets=reference_targets,
         )
         jax.block_until_ready(force_scale)
 
@@ -883,6 +988,7 @@ def main() -> int:
                         G=args.G,
                         max_pair_queue=args.max_pair_queue,
                         max_interactions_per_node=args.max_interactions_per_node,
+                        reference_targets=reference_targets,
                     )
                     rec.update(
                         {
@@ -891,6 +997,11 @@ def main() -> int:
                             "seed": seed,
                             "order": order,
                             "leaf_size": args.leaf_size,
+                            "measured_targets": (
+                                n
+                                if reference_targets is None
+                                else int(reference_targets.shape[0])
+                            ),
                         }
                     )
                     by_arm[arm].append(rec)
