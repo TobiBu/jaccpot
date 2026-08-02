@@ -837,12 +837,23 @@ class EvaluateMixin:
         permutation = state.inverse_permutation
         cached = getattr(self, "_forward_permutation_memo", None)
         if cached is not None and cached[0] is permutation:
-            return cached[1]
+            # Never hand back a cached tracer. A memo written during a trace that
+            # outlives it makes the NEXT call fail with UnexpectedTracerError
+            # pointing here, which reads as a bug in the caller. Dropping the
+            # entry costs one host sort and cannot be wrong.
+            if not _contains_tracer(cached):
+                return cached[1]
+            self._forward_permutation_memo = None
         inverse_permutation_host = np.asarray(jax.device_get(permutation))
         forward_permutation = jnp.asarray(
             np.argsort(inverse_permutation_host, kind="stable"), dtype=INDEX_DTYPE
         )
-        self._forward_permutation_memo = (permutation, forward_permutation)
+        # Only memoise concrete values, for the same reason: this method is called
+        # from inside `jax.jit`/`jax.grad` traces by design (see
+        # differentiable_step_fn), and the memo lives on the solver, which
+        # outlives any single trace.
+        if not _contains_tracer((permutation, forward_permutation)):
+            self._forward_permutation_memo = (permutation, forward_permutation)
         return forward_permutation
 
     def _sorted_inputs(

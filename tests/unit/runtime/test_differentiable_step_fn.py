@@ -29,7 +29,13 @@ ORDER = 3
 THETA = 0.5
 
 
-@pytest.fixture(scope="module")
+# Function-scoped ON PURPOSE, not module-scoped. The solver carries stateful
+# memo caches (`_forward_permutation_memo`, the prepared-state cache), and a
+# trace that writes one leaves a tracer behind that makes a LATER test fail with
+# UnexpectedTracerError -- an order-dependent flake that appears or vanishes with
+# the xdist distribution. bench/differentiability/autodiff_overhead.py rebuilds
+# its solver per attempt for exactly this reason.
+@pytest.fixture()
 def setup():
     key = jax.random.PRNGKey(N)
     k1, k2, k3 = jax.random.split(key, 3)
