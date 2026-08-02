@@ -157,6 +157,16 @@ addopts = "-q --strict-markers --ignore=tests/perf -n auto -m \"not experimental
 
 [tool.coverage.run]
 source = ["jaccpot"]
+# Kept ON. Turning it off was tried as a fix for the `test-full` OOM and is not
+# worth it: measured on `tests/integration` with `-n 2 --cov`, peak RSS was
+# 12,686 MB with branch coverage and 12,677 MB without -- a 9 MB (0.07%)
+# difference, i.e. noise. The job's memory is JAX's retained compiled
+# executables, not coverage's arc table, so this would have cost branch data for
+# nothing. See `tests/conftest.py::_DIFF_FMM_TEST_FILES` for the fix that works.
+#
+# (Note for anyone retrying it: `--cov-branch` on the command line cannot turn
+# this off -- setting it True here enables branch coverage regardless of the
+# flag, so it has to change here.)
 branch = true
 omit = [
   # Opt-in experimental prototypes (octree/treecode): deselected by the

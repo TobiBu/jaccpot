@@ -86,6 +86,19 @@ _DIFF_FMM_TEST_FILES = frozenset(
         "test_gradient_correctness.py",
         "test_custom_vjp_parity.py",
         "test_nearfield_fastlane_grad_path.py",
+        # The mutual FMM suite belongs in this set for exactly the reason above
+        # and was simply never added: it is the heaviest file in
+        # `tests/integration`, and its gradient tests (FD-vs-AD, vs-direct-sum,
+        # rollout, per-level, and the Pallas backend) each leave another
+        # reverse-mode executable behind. Omitting it is what let `test-full`
+        # drift back to the ceiling and start OOM-killing the runner.
+        #
+        # Measured on `tests/integration` at `-n 2 --cov`, adding it here moves
+        # peak RSS 12.68 GB -> 5.47 GB (-57%) for +66% wall (17:02 -> 28:20).
+        # That wall cost is why `test-full` is also sharded; the recompiles are
+        # warm reads from the on-disk cache but are not free.
+        "test_mutual_fmm.py",
+        "test_mutual_fmm_nornax.py",
     }
 )
 
