@@ -20,8 +20,14 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--runner",
         choices=("jaxfmm", "jaccpot", "both"),
-        default="both",
-        help="Which implementation(s) to benchmark.",
+        default=None,
+        help=(
+            "Which implementation(s) to benchmark (default: both). Naming a "
+            "runner EXPLICITLY makes it required: if it cannot be imported the "
+            "script exits non-zero instead of writing status=error rows, because "
+            "a CSV full of error rows reads like a measurement and hid a dead "
+            "jaxfmm arm for months. Leave it unset to tolerate a missing arm."
+        ),
     )
     parser.add_argument(
         "--distribution",
@@ -128,8 +134,11 @@ def _parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-ARGS = _parse_args()
-if ARGS.device:
+# Parsed at import only when run as a script. Importing this module used to
+# parse sys.argv, so `import bench.bench_jaxfmm_paper_compare` inside anything
+# with its own arguments -- pytest, say -- died on "unrecognized arguments".
+ARGS = _parse_args() if __name__ == "__main__" else None
+if ARGS is not None and ARGS.device:
     os.environ["JAX_PLATFORM_NAME"] = ARGS.device
 
 REPO_ROOT = pathlib.Path(__file__).resolve().parents[1]
@@ -145,13 +154,24 @@ import jax.numpy as jnp
 
 from jaccpot import FastMultipoleMethod
 
+# Both layouts: jaxFMM >= 0.3 exports these at the package root, and removed the
+# `jaxfmm.fmm` / `jaxfmm.hierarchy` submodules this script used to import from.
+# That removal is why the comparison arm was dead for months -- the import raised,
+# HAVE_JAXFMM went False, and every jaxfmm row was written as status=error, so the
+# CSV still looked like output. The reason is now retained (JAXFMM_IMPORT_ERROR)
+# and, when the runner was explicitly requested, it is fatal. See E14.
+JAXFMM_IMPORT_ERROR: str = ""
 try:
-    from jaxfmm.fmm import eval_potential
-    from jaxfmm.hierarchy import gen_hierarchy
+    try:
+        from jaxfmm import eval_potential, gen_hierarchy
+    except ImportError:
+        from jaxfmm.fmm import eval_potential
+        from jaxfmm.hierarchy import gen_hierarchy
 
     HAVE_JAXFMM = True
-except Exception:
+except Exception as _jaxfmm_exc:  # pragma: no cover - environment dependent
     HAVE_JAXFMM = False
+    JAXFMM_IMPORT_ERROR = f"{type(_jaxfmm_exc).__name__}: {_jaxfmm_exc}"
 
 
 @dataclass(frozen=True)
@@ -276,7 +296,41 @@ def _run_jaccpot_case(
     return _time_min_repeat(fn, warmup=warmup, repeats=repeats)
 
 
+def resolve_runner(requested, *, have_jaxfmm: bool) -> str:
+    """Normalise ``--runner`` and refuse an explicitly requested dead arm.
+
+    ``requested is None`` means the flag was not given: default to "both" and
+    tolerate a missing jaxFMM, so a machine without it can still measure jaccpot.
+    Naming a runner makes it required -- writing ``status=error`` rows for a
+    runner the caller explicitly asked for produces a CSV that looks like a
+    measurement, which is how the jaxfmm arm stayed dead for months after jaxFMM
+    removed the ``jaxfmm.fmm`` submodule this script used to import.
+    """
+
+    explicit = requested is not None
+    runner = "both" if requested is None else str(requested)
+    if runner in ("jaxfmm", "both") and not have_jaxfmm:
+        if explicit:
+            raise SystemExit(
+                f"--runner {runner} requires jaxFMM, which is not importable: "
+                f"{JAXFMM_IMPORT_ERROR or 'unknown import error'}. Install it or "
+                "place the package in external/jaxfmm. Refusing to write "
+                "status=error rows for a runner that was explicitly requested -- "
+                "rerun without --runner to measure only what is available."
+            )
+        print(
+            f"[bench] jaxFMM unavailable ({JAXFMM_IMPORT_ERROR}); its rows will be "
+            "recorded as status=error. Pass --runner jaccpot to omit them, or "
+            "--runner both to make it fatal.",
+            file=sys.stderr,
+        )
+    return runner
+
+
 def main() -> None:
+    # Checked before any measurement, so a failed invocation writes nothing.
+    ARGS.runner = resolve_runner(ARGS.runner, have_jaxfmm=HAVE_JAXFMM)
+
     dtype = jnp.float32 if ARGS.dtype == "float32" else jnp.float64
     ns = _n_values(ARGS.n_min_exp, ARGS.n_max_exp, ARGS.n_steps)
     key = jax.random.PRNGKey(int(ARGS.seed))

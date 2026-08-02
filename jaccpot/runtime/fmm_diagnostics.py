@@ -528,6 +528,7 @@ class DiagnosticsMixin:
             "refresh_nearfield_residual_seconds": float(
                 self._refresh_timing_nearfield_residual_seconds
             ),
+            "refresh_evaluate_seconds": float(self._refresh_timing_evaluate_seconds),
             "refresh_timing_calls": int(self._refresh_timing_calls),
             # False means the M2L/L2L substage timers did not run, so their
             # counters above are 0.0 for want of measurement rather than for want

@@ -768,6 +768,7 @@ class FastMultipoleMethod(
         self._refresh_timing_nearfield_neighbor_padding_seconds: float = 0.0
         self._refresh_timing_nearfield_state_pack_seconds: float = 0.0
         self._refresh_timing_nearfield_residual_seconds: float = 0.0
+        self._refresh_timing_evaluate_seconds: float = 0.0
         # Whether the M2L/L2L substage timers actually ran. They cost a device
         # sync per substage, so they are conditional -- and a conditional timer
         # that reports 0.0 when it did not run is indistinguishable from a stage
@@ -1260,6 +1261,7 @@ class FastMultipoleMethod(
         self._refresh_timing_nearfield_neighbor_padding_seconds = 0.0
         self._refresh_timing_nearfield_state_pack_seconds = 0.0
         self._refresh_timing_nearfield_residual_seconds = 0.0
+        self._refresh_timing_evaluate_seconds = 0.0
         self._refresh_timing_substages_measured = False
         self._refresh_timing_calls = 0
         self._refresh_timing_active = False

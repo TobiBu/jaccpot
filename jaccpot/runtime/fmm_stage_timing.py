@@ -54,6 +54,11 @@ STAGE_TREE: dict[str, tuple[str, ...]] = {
         "tree_upward",
         "dual_downward",
         "nearfield",
+        # The evaluate is part of a step even though it is not part of a
+        # refresh: strict_prepare_refresh_and_evaluate does both, and leaving
+        # this out made the evaluate the largest single term inside
+        # "unattributed". Populated only on that entry point.
+        "evaluate",
         "profile_accounting",
         "compile_or_sync_suspect",
     ),

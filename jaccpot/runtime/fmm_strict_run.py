@@ -275,6 +275,13 @@ class StrictRunMixin:
                 )
             next_state = next_state_try
 
+        # Timed, because "per step" for a caller means refresh AND evaluate, while
+        # every refresh_* counter covers only the refresh. Leaving the evaluate
+        # out made it the single largest term in "unattributed" -- and an
+        # unattributed remainder that is really one named stage is a gap in the
+        # taxonomy, not a measurement.
+        evaluate_timing_active = bool(getattr(self, "_refresh_timing_active", False))
+        evaluate_t0 = time.perf_counter() if evaluate_timing_active else 0.0
         acc = self.evaluate_prepared_state(
             next_state,
             target_indices=None,
@@ -286,7 +293,15 @@ class StrictRunMixin:
             ),
             max_acc_derivative_order=0,
         )
-        return next_state, jnp.asarray(acc)
+        acc = jnp.asarray(acc)
+        if evaluate_timing_active:
+            # Block, or this records dispatch rather than the evaluate: the
+            # counter's whole purpose is to be comparable with the refresh
+            # stages, which are blocked.
+            if not _contains_tracer(acc):
+                jax.block_until_ready(acc)
+            self._refresh_timing_evaluate_seconds += time.perf_counter() - evaluate_t0
+        return next_state, acc
 
     def strict_run_segmented(
         self: "FastMultipoleMethod",

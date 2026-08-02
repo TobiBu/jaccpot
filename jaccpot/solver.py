@@ -10,6 +10,7 @@ import jax
 import jax.numpy as jnp
 from jaxtyping import Array, DTypeLike
 
+from ._env import env_flag
 from .basis import BasisInterface, ComplexSHBasis, RealSHBasis
 from .config import (
     Basis,
@@ -117,11 +118,48 @@ class _BasisResolution(NamedTuple):
     basis_impl: Optional[BasisInterface]
 
 
+def _warn_cartesian_basis_is_experimental() -> None:
+    """Say that ``basis="cartesian"`` is not fit for quantitative work.
+
+    Its relative L2 force error is ~1.8e-1 *independent of expansion order*,
+    which is a divergent-series signature rather than truncation: raising the
+    order does not improve it. solidfmm is 8.1e-5 on the same configuration,
+    ~2000x better, and the characterization anchor carries a 0.35 tolerance for
+    cartesian alone to accommodate this.
+
+    Warned rather than removed: it is the only Cartesian-multipole implementation
+    here and is useful for cross-checking the harmonic paths' *structure*. But an
+    error that does not fall with order is not something anyone should select by
+    accident, and until this tranche nothing said so at the call site.
+    """
+
+    if env_flag("JACCPOT_ALLOW_CARTESIAN_BASIS", False):
+        return
+    warnings.warn(
+        "basis='cartesian' is EXPERIMENTAL and unsuitable for quantitative work: "
+        "its relative L2 force error is ~1.8e-1 independent of expansion order "
+        "(a divergent-series signature, not truncation), against 8.1e-5 for "
+        "basis='solidfmm' on the same configuration. Raising max_order will not "
+        "improve it. Use basis='real' (default) or 'solidfmm'. Set "
+        "JACCPOT_ALLOW_CARTESIAN_BASIS=1 to silence this.",
+        UserWarning,
+        stacklevel=4,
+    )
+
+
 def _resolve_basis_input(basis: Union[Basis, BasisInterface, str]) -> _BasisResolution:
-    """Normalize basis string/object to runtime expansion basis + metadata."""
+    """Normalize basis string/object to runtime expansion basis + metadata.
+
+    ``"complex"`` is an **alias** for ``"solidfmm"``, not a third basis: both
+    return the same runtime basis and the same ``ComplexSHBasis`` implementation,
+    so they produce bit-identical forces (measured at N=2048/p=4/theta=0.5, max
+    difference exactly 0.0). The genuine independent-basis cross-check is
+    ``real`` against ``solidfmm``, which agree to 4.5e-13 there.
+    """
     if isinstance(basis, str):
         basis_norm = basis.strip().lower()
         if basis_norm in ("solidfmm", "complex"):
+            # Deliberately one branch for both spellings -- see the docstring.
             return _BasisResolution(
                 public_name="complex",
                 runtime_basis="solidfmm",
@@ -134,6 +172,7 @@ def _resolve_basis_input(basis: Union[Basis, BasisInterface, str]) -> _BasisReso
                 basis_impl=RealSHBasis(),
             )
         if basis_norm == "cartesian":
+            _warn_cartesian_basis_is_experimental()
             return _BasisResolution(
                 public_name="cartesian",
                 runtime_basis="cartesian",
