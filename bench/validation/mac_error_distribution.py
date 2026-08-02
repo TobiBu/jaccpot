@@ -13,8 +13,15 @@ cost proxies for each, and matches the two arms at equal 90th-percentile error.
 
 Arms
 ----
-``fixed``   ``mac_type="dehnen"``, sweep theta. The baseline.
-``mass``    ``mac_type="dehnen_error"``, sweep eps. eq (16a) verbatim.
+``fixed``          ``mac_type="dehnen"``, sweep theta. The baseline.
+``mass``           ``mac_type="dehnen_error"``, sweep eps. eq (16a) verbatim.
+``mass_16b``       eq (16b) with an *exact* O(N^2) ``f_b`` injected. A ceiling, not
+                   a production path.
+``mass_16b_est``   eq (16b) with the O(N) ``f_b`` estimator
+                   (``mac_force_scale_mode="paper_fb"``) -- what production would
+                   actually run. Compare it against ``mass_16b`` to see how much of
+                   the ceiling survives; each record carries its own
+                   ``fb_fidelity`` against the exact sum.
 
 Matching on the 90th percentile rather than the median is deliberate: when the
 far field is shallow, most particles are pure near-field and the median error
@@ -53,6 +60,7 @@ if str(REPO_ROOT) not in sys.path:
 import jax  # noqa: E402
 import jax.numpy as jnp  # noqa: E402
 import numpy as np  # noqa: E402
+from yggdrax.interactions import DualTreeTraversalConfig  # noqa: E402
 
 from jaccpot.config import FMMAdvancedConfig  # noqa: E402
 from jaccpot.runtime._adaptive_policy import (  # noqa: E402
@@ -281,19 +289,45 @@ def error_summary(errors: np.ndarray, prefix: str = "") -> dict[str, float]:
 # ---------------------------------------------------------------------------
 
 
-def _advanced(mac_type: str) -> FMMAdvancedConfig:
+def _advanced(
+    mac_type: str,
+    *,
+    max_pair_queue: Optional[int] = None,
+    max_interactions_per_node: Optional[int] = None,
+) -> FMMAdvancedConfig:
     cfg = FMMAdvancedConfig()
-    return replace(
-        cfg,
-        mac_type=mac_type,
+    runtime = replace(
+        cfg.runtime,
         # Both arms retain the traversal result so both pay the identical loss of
         # the streamed fast lane. Without this the mass arm would be charged for
         # a lane fallback the geometric arm avoids, and the cost comparison would
         # measure plumbing rather than the criterion.
-        runtime=replace(
-            cfg.runtime, retain_traversal_result=True, retain_interactions=True
-        ),
+        retain_traversal_result=True,
+        retain_interactions=True,
     )
+    if max_pair_queue is not None and max_interactions_per_node is not None:
+        # Pre-sized traversal buffers, to skip the retry-recompile cycle. Each
+        # overflow retry recompiles, which at tight eps was 6 attempts and minutes
+        # per config -- indistinguishable from a hang. Feed back the caps a previous
+        # run reported as converged, and do NOT round them up: buffers are
+        # num_nodes * interaction_capacity, so an oversized cap OOMs (1<<18 at
+        # N=16384 tried to allocate 4 GiB on top of 32 and died).
+        base = cfg.runtime.traversal_config
+        fields: dict[str, Any] = {
+            "max_pair_queue": int(max_pair_queue),
+            "max_interactions_per_node": int(max_interactions_per_node),
+        }
+        runtime = replace(
+            runtime,
+            traversal_config=(
+                replace(base, **fields)
+                if base is not None
+                # process_block is a scheduling knob rather than a capacity, so it
+                # is not something the caller should have to pin to pin the caps.
+                else DualTreeTraversalConfig(process_block=512, **fields)
+            ),
+        )
+    return replace(cfg, mac_type=mac_type, runtime=runtime)
 
 
 def measure(
@@ -310,21 +344,37 @@ def measure(
     theta_max: Optional[float],
     softening: float,
     G: float,
+    max_pair_queue: Optional[int] = None,
+    max_interactions_per_node: Optional[int] = None,
 ) -> dict[str, Any]:
     """Run one (arm, knob) configuration and return its record."""
 
+    caps = dict(
+        max_pair_queue=max_pair_queue,
+        max_interactions_per_node=max_interactions_per_node,
+    )
     if arm == "fixed":
-        kwargs: dict[str, Any] = dict(theta=float(knob), advanced=_advanced("dehnen"))
+        kwargs: dict[str, Any] = dict(
+            theta=float(knob), advanced=_advanced("dehnen", **caps)
+        )
     else:
         kwargs = dict(
             # theta does not gate acceptance in paper mode -- eq (16a) supplies
             # its own `theta < 1` convergence guard -- so it is pinned at 1.0 and
             # eps is the accuracy knob.
+            #
+            # It does still gate the *prepass* traversal underneath the criterion,
+            # which is a separate thing entirely and is why the runtime resolves the
+            # prepass angle from `mac_force_scale_prepass_theta` instead of from
+            # this. Pinning theta=1.0 here used to hand the prepass an opening angle
+            # of 1.0 as a side effect.
             theta=1.0,
             adaptive_eps=float(knob),
             dehnen_geometry_mode=geometry_mode,
-            advanced=_advanced("dehnen_error"),
+            advanced=_advanced("dehnen_error", **caps),
         )
+        if arm == "mass_16b_est":
+            kwargs["mac_force_scale_mode"] = "paper_fb"
         if theta_max is not None:
             kwargs["mac_theta_max"] = float(theta_max)
     kwargs["G"] = G
@@ -423,9 +473,33 @@ def measure(
             "status": str(last.status),
         }
 
+    # How much of the exact-f_b ceiling the O(N) estimator actually retains. The
+    # eq (16b) gain was measured with an exact O(N^2) f_b, which is a ceiling and
+    # not a prediction, so an estimator arm that does not report its own fidelity
+    # cannot distinguish "the criterion is worse than hoped" from "the estimator
+    # is". Recorded per config because it depends on the prepass traversal, and so
+    # on the tree.
+    fb_fidelity = None
+    estimated_fb = getattr(fmm._impl, "_last_force_scale_particles", None)
+    if estimated_fb is not None:
+        est = np.asarray(estimated_fb, dtype=np.float64)
+        exact = np.asarray(force_scale, dtype=np.float64)[
+            np.asarray(state.tree.particle_indices)
+        ]
+        ratio = est / np.maximum(exact, np.finfo(np.float64).tiny)
+        fb_fidelity = {
+            "median": float(np.median(ratio)),
+            "p01": float(np.quantile(ratio, 0.01)),
+            "p99": float(np.quantile(ratio, 0.99)),
+            "min": float(ratio.min()),
+            "max": float(ratio.max()),
+            "frac_above_one": float((ratio > 1.0 + 1e-9).mean()),
+        }
+
     record = {
         "arm": arm,
         "knob": float(knob),
+        "fb_fidelity": fb_fidelity,
         "retry_final_caps": final_caps,
         "far_pairs": far_pairs,
         "near_pairs": near_pairs,
@@ -512,12 +586,16 @@ def compare_arms(
     )
     if not (hi > lo):
         return out
-    for target in np.exp(np.linspace(np.log(lo), np.log(hi), 5)):
-        row: dict[str, Any] = {"matched_p90": float(target)}
+    # rms and p99.99 are the two statistics Dehnen quotes ("the rms error is always
+    # ten times smaller"), so they are reported as ratios alongside p99/max rather
+    # than left for whoever post-processes the JSON to rediscover.
+    error_fields = ("rms", "p9999", "p99", "max", "median")
+    for index, target in enumerate(np.exp(np.linspace(np.log(lo), np.log(hi), 5))):
+        row: dict[str, Any] = {"matched_p90": float(target), "match_index": index}
         ok = True
         for label, records in (("fixed", fixed), ("mass", mass)):
-            for name in ("p99", "max", "median", "pair_work", "far_pairs"):
-                field = f"{metric}{name}" if name in ("p99", "max", "median") else name
+            for name in error_fields + ("pair_work", "far_pairs"):
+                field = f"{metric}{name}" if name in error_fields else name
                 val = log_interp_at(
                     records, target_p90=float(target), field=field, p90_key=p90
                 )
@@ -526,18 +604,66 @@ def compare_arms(
                 row[f"{label}_{name}"] = val
         if not ok:
             continue
-        row["p99_ratio"] = (
-            row["fixed_p99"] / row["mass_p99"] if row["mass_p99"] else None
-        )
-        row["max_ratio"] = (
-            row["fixed_max"] / row["mass_max"] if row["mass_max"] else None
-        )
+        for name in error_fields:
+            mass_val = row[f"mass_{name}"]
+            row[f"{name}_ratio"] = row[f"fixed_{name}"] / mass_val if mass_val else None
         row["pair_work_ratio"] = (
             row["fixed_pair_work"] / row["mass_pair_work"]
             if row["mass_pair_work"]
             else None
         )
         out.append(row)
+    return out
+
+
+def aggregate_over_seeds(comparisons: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Collapse per-seed matched rows into a median and a min/max spread.
+
+    Joined on ``match_index`` -- the position in the five log-spaced matched
+    targets -- rather than on the target value, because each seed's usable range
+    differs slightly so the absolute targets never coincide.
+
+    The spread is the point of this: the N-scaling trend was previously read off
+    one seed at each end of the ladder, where a decaying advantage and a flat one
+    are indistinguishable.
+    """
+
+    keys = ("rms_ratio", "p9999_ratio", "p99_ratio", "max_ratio", "pair_work_ratio")
+    grouped: dict[tuple, list[dict[str, Any]]] = {}
+    for row in comparisons:
+        key = (
+            row.get("distribution"),
+            row.get("n"),
+            row.get("order"),
+            row.get("mass_arm"),
+            row.get("match_index"),
+        )
+        grouped.setdefault(key, []).append(row)
+    out = []
+    for (dist, n, order, arm, index), rows in sorted(
+        grouped.items(), key=lambda kv: (str(kv[0][0]), kv[0][1] or 0, kv[0][4] or 0)
+    ):
+        agg: dict[str, Any] = {
+            "distribution": dist,
+            "n": n,
+            "order": order,
+            "mass_arm": arm,
+            "match_index": index,
+            "seeds": sorted({r.get("seed") for r in rows if r.get("seed") is not None}),
+            "n_seeds": len(rows),
+            "matched_p90_median": float(np.median([r["matched_p90"] for r in rows])),
+        }
+        for key in keys:
+            vals = [r[key] for r in rows if r.get(key)]
+            if not vals:
+                agg[f"{key}_median"] = None
+                agg[f"{key}_min"] = None
+                agg[f"{key}_max"] = None
+                continue
+            agg[f"{key}_median"] = float(np.median(vals))
+            agg[f"{key}_min"] = float(np.min(vals))
+            agg[f"{key}_max"] = float(np.max(vals))
+        out.append(agg)
     return out
 
 
@@ -602,7 +728,17 @@ def main() -> int:
     ap.add_argument("--theta-max", type=float, default=None)
     ap.add_argument("--softening", type=float, default=1e-3)
     ap.add_argument("--G", type=float, default=1.0)
-    ap.add_argument("--seed", type=int, default=0)
+    ap.add_argument(
+        "--seed",
+        default="0",
+        help=(
+            "comma-separated seeds. More than one turns on the cross-seed "
+            "aggregate: matched rows are joined on their position in the matched "
+            "ladder and reported as median [min, max]. Use >= 3 for any claim "
+            "about a trend -- the N-scaling question was open for a session "
+            "because it rested on one seed at each end with no spread."
+        ),
+    )
     ap.add_argument(
         "--metric",
         choices=("relative", "scaled", "dehnen"),
@@ -637,10 +773,28 @@ def main() -> int:
             "~10 particles, and subsampling targets would leave the tail unmeasurable."
         ),
     )
+    ap.add_argument(
+        "--max-pair-queue",
+        type=int,
+        default=None,
+        help=(
+            "pre-size the traversal pair queue, skipping the retry-recompile cycle. "
+            "Use the value a previous run reported as converged; do not round up."
+        ),
+    )
+    ap.add_argument(
+        "--max-interactions-per-node",
+        type=int,
+        default=None,
+        help=(
+            "pre-size the per-node interaction list. Buffers are num_nodes * this, "
+            "so an oversized value OOMs -- pass the converged value verbatim."
+        ),
+    )
     ap.add_argument("--json-out", default=None)
     args = ap.parse_args()
 
-    known_arms = ("fixed", "mass", "mass_16b")
+    known_arms = ("fixed", "mass", "mass_16b", "mass_16b_est")
     arms = tuple(a.strip() for a in str(args.arm).split(",") if a.strip())
     unknown = [a for a in arms if a not in known_arms]
     if unknown:
@@ -649,6 +803,14 @@ def main() -> int:
         # compare_arms measures every mass arm against the geometric baseline, so
         # dropping it would silently produce an empty comparison table.
         ap.error("--arm must include 'fixed'; it is the comparison baseline")
+
+    if (args.max_pair_queue is None) != (args.max_interactions_per_node is None):
+        # Pinning one and leaving the other to grow still pays the recompile per
+        # retry, so the run would look pinned while behaving exactly as before.
+        ap.error(
+            "--max-pair-queue and --max-interactions-per-node must be given "
+            "together; pinning only one leaves the other in the retry cycle"
+        )
 
     # Guard the leaf-size / N interaction. With too few leaves the tree has no far
     # field to speak of and the MAC comparison is vacuous -- measured at N=16384 /
@@ -671,111 +833,177 @@ def main() -> int:
     records: list[dict[str, Any]] = []
     comparisons: list[dict[str, Any]] = []
 
-    for dist in str(args.distribution).split(","):
-        dist = dist.strip()
-        if not dist:
-            continue
-        for n in _ints(args.n):
-            pos_np, mass_np = make_distribution(dist, n, args.seed)
-            positions = jnp.asarray(pos_np, dtype=jnp.float64)
-            masses = jnp.asarray(mass_np, dtype=jnp.float64)
-            reference = chunked_direct_accelerations(
-                positions,
-                masses,
-                softening=args.softening,
-                G=args.G,
-                block=int(args.reference_block),
-            )
-            jax.block_until_ready(reference)
-            force_scale = chunked_force_scale(
-                positions,
-                masses,
-                softening=args.softening,
-                G=args.G,
-                block=int(args.reference_block),
-            )
-            jax.block_until_ready(force_scale)
+    metric_prefix = {"relative": "", "scaled": "scaled_", "dehnen": "dehnen_"}[
+        args.metric
+    ]
 
-            for order in _ints(args.order):
-                by_arm: dict[str, list[dict[str, Any]]] = {arm: [] for arm in arms}
-                sweeps = tuple(
-                    (arm, _floats(args.theta) if arm == "fixed" else _floats(args.eps))
-                    for arm in arms
-                )
-                for arm, knobs in sweeps:
-                    for knob in knobs:
-                        rec = measure(
-                            arm=arm,
-                            knob=knob,
-                            positions=positions,
-                            masses=masses,
-                            reference=reference,
-                            force_scale=force_scale,
-                            leaf_size=args.leaf_size,
-                            order=order,
-                            geometry_mode=args.geometry_mode,
-                            theta_max=args.theta_max,
-                            softening=args.softening,
-                            G=args.G,
-                        )
-                        rec.update(
-                            {
-                                "distribution": dist,
-                                "n": n,
-                                "order": order,
-                                "leaf_size": args.leaf_size,
-                            }
-                        )
-                        by_arm[arm].append(rec)
-                        records.append(rec)
-                        print(
-                            f"{dist:>14s} N={n:<7d} p={order} {arm:>9s} "
-                            f"knob={knob:<8.3g} far={rec['far_pairs']:<7d} "
-                            f"rel(med/p90/p99/max)="
-                            f"{rec['median']:.1e}/{rec['p90']:.1e}/"
-                            f"{rec['p99']:.1e}/{rec['max']:.1e}  "
-                            f"dehnen(rms/p90/p99/p9999)="
-                            f"{rec['dehnen_rms']:.1e}/{rec['dehnen_p90']:.1e}/"
-                            f"{rec['dehnen_p99']:.1e}/{rec['dehnen_p9999']:.1e}",
-                            flush=True,
-                        )
-                metric_prefix = {
-                    "relative": "",
-                    "scaled": "scaled_",
-                    "dehnen": "dehnen_",
-                }[args.metric]
-                for mass_arm in (a for a in arms if a != "fixed"):
-                    for row in compare_arms(
-                        by_arm["fixed"],
-                        by_arm[mass_arm],
-                        metric=metric_prefix,
-                        match_on=str(args.match_on),
-                    ):
-                        row.update(
-                            {
-                                "distribution": dist,
-                                "n": n,
-                                "order": order,
-                                "mass_arm": mass_arm,
-                            }
-                        )
-                        comparisons.append(row)
+    def run_case(dist: str, n: int, seed: int) -> None:
+        """Sweep every arm over one (distribution, N, seed) realisation."""
+
+        pos_np, mass_np = make_distribution(dist, n, seed)
+        positions = jnp.asarray(pos_np, dtype=jnp.float64)
+        masses = jnp.asarray(mass_np, dtype=jnp.float64)
+        reference = chunked_direct_accelerations(
+            positions,
+            masses,
+            softening=args.softening,
+            G=args.G,
+            block=int(args.reference_block),
+        )
+        jax.block_until_ready(reference)
+        force_scale = chunked_force_scale(
+            positions,
+            masses,
+            softening=args.softening,
+            G=args.G,
+            block=int(args.reference_block),
+        )
+        jax.block_until_ready(force_scale)
+
+        for order in _ints(args.order):
+            by_arm: dict[str, list[dict[str, Any]]] = {arm: [] for arm in arms}
+            sweeps = tuple(
+                (arm, _floats(args.theta) if arm == "fixed" else _floats(args.eps))
+                for arm in arms
+            )
+            for arm, knobs in sweeps:
+                for knob in knobs:
+                    rec = measure(
+                        arm=arm,
+                        knob=knob,
+                        positions=positions,
+                        masses=masses,
+                        reference=reference,
+                        force_scale=force_scale,
+                        leaf_size=args.leaf_size,
+                        order=order,
+                        geometry_mode=args.geometry_mode,
+                        theta_max=args.theta_max,
+                        softening=args.softening,
+                        G=args.G,
+                        max_pair_queue=args.max_pair_queue,
+                        max_interactions_per_node=args.max_interactions_per_node,
+                    )
+                    rec.update(
+                        {
+                            "distribution": dist,
+                            "n": n,
+                            "seed": seed,
+                            "order": order,
+                            "leaf_size": args.leaf_size,
+                        }
+                    )
+                    by_arm[arm].append(rec)
+                    records.append(rec)
+                    fid = rec.get("fb_fidelity")
+                    fid_text = (
+                        f"  fb_est/exact med={fid['median']:.3f} min={fid['min']:.3f}"
+                        if fid
+                        else ""
+                    )
+                    print(
+                        f"{dist:>14s} N={n:<7d} s={seed} p={order} {arm:>12s} "
+                        f"knob={knob:<8.3g} far={rec['far_pairs']:<7d} "
+                        f"rel(med/p90/p99/max)="
+                        f"{rec['median']:.1e}/{rec['p90']:.1e}/"
+                        f"{rec['p99']:.1e}/{rec['max']:.1e}  "
+                        f"dehnen(rms/p90/p99/p9999)="
+                        f"{rec['dehnen_rms']:.1e}/{rec['dehnen_p90']:.1e}/"
+                        f"{rec['dehnen_p99']:.1e}/{rec['dehnen_p9999']:.1e}"
+                        f"{fid_text}",
+                        flush=True,
+                    )
+            for mass_arm in (a for a in arms if a != "fixed"):
+                for row in compare_arms(
+                    by_arm["fixed"],
+                    by_arm[mass_arm],
+                    metric=metric_prefix,
+                    match_on=str(args.match_on),
+                ):
+                    row.update(
+                        {
+                            "distribution": dist,
+                            "n": n,
+                            "seed": seed,
+                            "order": order,
+                            "mass_arm": mass_arm,
+                        }
+                    )
+                    comparisons.append(row)
+
+    seeds = _ints(args.seed)
+    for dist_name in str(args.distribution).split(","):
+        dist_name = dist_name.strip()
+        if not dist_name:
+            continue
+        for n_val in _ints(args.n):
+            for seed_val in seeds:
+                run_case(dist_name, n_val, seed_val)
+
+    def _num(value: Optional[float]) -> float:
+        return float("nan") if not value else float(value)
 
     print(
         f"\n=== matched at equal {args.match_on} "
         "(ratio > 1 favours the mass MAC) ==="
     )
+    # rms and p99.99 lead: they are what Dehnen quotes, and the honest headline is
+    # the tail, not p99. Reporting p99 alone understated the effect by more than an
+    # order of magnitude.
     print(
-        f"{'dist':>14s} {'N':>7s} {'p':>2s} {'arm':>9s} {'matched':>9s} "
-        f"{'p99 x':>7s} {'max x':>7s} {'work x':>7s}"
+        f"{'dist':>12s} {'N':>7s} {'s':>2s} {'p':>2s} {'arm':>12s} {'matched':>9s} "
+        f"{'rms x':>7s} {'p9999 x':>8s} {'p99 x':>7s} {'max x':>7s} {'work x':>7s}"
     )
     for row in comparisons:
         print(
-            f"{row['distribution']:>14s} {row['n']:>7d} {row['order']:>2d} "
-            f"{row.get('mass_arm', 'mass'):>9s} "
-            f"{row['matched_p90']:.3e} {row['p99_ratio'] or float('nan'):7.2f} "
-            f"{row['max_ratio'] or float('nan'):7.2f} "
-            f"{row['pair_work_ratio'] or float('nan'):7.2f}"
+            f"{row['distribution']:>12s} {row['n']:>7d} {row.get('seed', 0):>2d} "
+            f"{row['order']:>2d} {row.get('mass_arm', 'mass'):>12s} "
+            f"{row['matched_p90']:.3e} {_num(row.get('rms_ratio')):7.2f} "
+            f"{_num(row.get('p9999_ratio')):8.2f} {_num(row.get('p99_ratio')):7.2f} "
+            f"{_num(row['max_ratio']):7.2f} {_num(row['pair_work_ratio']):7.2f}"
+        )
+
+    aggregates: list[dict[str, Any]] = []
+    if len(seeds) > 1:
+        aggregates = aggregate_over_seeds(comparisons)
+        print(
+            f"\n=== across {len(seeds)} seeds: median [min, max] "
+            f"(matched at equal {args.match_on}) ==="
+        )
+        print(
+            f"{'dist':>12s} {'N':>7s} {'p':>2s} {'arm':>12s} {'#':>2s} "
+            f"{'matched':>9s} {'rms x':>21s} {'p9999 x':>21s} {'work x':>21s}"
+        )
+        for agg in aggregates:
+
+            def band(key: str, agg: dict[str, Any] = agg) -> str:
+                med = agg.get(f"{key}_median")
+                if med is None:
+                    return f"{'n/a':>21s}"
+                return (
+                    f"{med:7.2f} [{agg[f'{key}_min']:6.2f},"
+                    f"{agg[f'{key}_max']:6.2f}]"
+                )
+
+            print(
+                f"{agg['distribution']:>12s} {agg['n']:>7d} {agg['order']:>2d} "
+                f"{agg['mass_arm']:>12s} {agg['n_seeds']:>2d} "
+                f"{agg['matched_p90_median']:.3e} {band('rms_ratio')} "
+                f"{band('p9999_ratio')} {band('pair_work_ratio')}"
+            )
+
+    fidelity = [r for r in records if r.get("fb_fidelity")]
+    if fidelity:
+        meds = [r["fb_fidelity"]["median"] for r in fidelity]
+        mins = [r["fb_fidelity"]["min"] for r in fidelity]
+        above = max(r["fb_fidelity"]["frac_above_one"] for r in fidelity)
+        print(
+            f"\n=== O(N) f_b estimator vs exact O(N^2) f_b, over "
+            f"{len(fidelity)} configs ===\n"
+            f"    ratio median: {min(meds):.4f} .. {max(meds):.4f}   "
+            f"worst single particle: {min(mins):.4f}\n"
+            f"    fraction above 1 (i.e. not a lower bound): {above:.2e}  "
+            "-- must be 0 while mac_force_scale_fb_inflation >= 1"
         )
 
     capped = [r for r in records if r.get("retry_final_caps")]
@@ -804,6 +1032,7 @@ def main() -> int:
                     "meta": {**_git_meta(), "args": vars(args)},
                     "records": records,
                     "comparisons": comparisons,
+                    "seed_aggregates": aggregates,
                 },
                 indent=2,
             )

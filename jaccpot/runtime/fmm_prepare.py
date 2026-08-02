@@ -55,6 +55,7 @@ from ._adaptive_policy import (
     adaptive_pair_policy,
     adaptive_policy_tolerance,
     bucket_far_pairs_by_tag,
+    compute_node_force_scale_from_sorted_magnitudes,
 )
 from ._interaction_cache import (
     _build_dual_tree_artifacts,
@@ -2673,16 +2674,20 @@ class PrepareMixin:
                         (node_count,),
                         dtype=positions_arr.dtype,
                     )
-            elif self.mac_force_scale_mode == "paper":
+            elif self.mac_force_scale_mode in ("paper", "paper_fb"):
                 need_prepass = True
-            elif self.mac_force_scale_mode in ("prev", "paper_cached"):
+            elif self.mac_force_scale_mode in (
+                "prev",
+                "paper_cached",
+                "paper_fb_cached",
+            ):
                 if reusable_force_scale:
                     force_scale_nodes = jnp.asarray(
                         previous_force_scale,
                         dtype=positions_arr.dtype,
                     )
                 elif (
-                    self.mac_force_scale_mode == "paper_cached"
+                    self.mac_force_scale_mode in ("paper_cached", "paper_fb_cached")
                     or self._uses_paper_style_traversal_policy()
                 ):
                     need_prepass = True
@@ -2699,6 +2704,7 @@ class PrepareMixin:
                         f"mac_force_scale_mode={self.mac_force_scale_mode!r} needs a "
                         "force-scale prepass, which requires non-empty orders"
                     )
+                use_fb_prepass = self._uses_fb_force_scale()
                 use_paper_prepass = (
                     self.mac_force_scale_mode
                     in (
@@ -2710,12 +2716,38 @@ class PrepareMixin:
                 low_order = int(min(policy_orders))
                 if use_paper_prepass:
                     low_order = 1 if int(max_order) >= 1 else 0
-                if use_paper_prepass:
+                if use_fb_prepass:
+                    # eq (16b): the scale is `min_b f_b`, a scalar per particle, so
+                    # it goes through the magnitude reduction directly rather than
+                    # through the vector `|a_b|` entry point.
+                    fb_sorted = (
+                        self._compute_force_scale_fb_prepass_from_tree_artifacts(
+                            tree_artifacts=tree_artifacts,
+                            upward_center_mode=upward_center_mode,
+                            runtime_traversal_config=runtime_traversal_config,
+                            runtime_m2l_chunk_size=runtime_m2l_chunk_size,
+                            runtime_l2l_chunk_size=runtime_l2l_chunk_size,
+                            grouped_interactions=grouped_interactions,
+                            farfield_mode=farfield_mode,
+                            record_retry=record_retry,
+                            refine_local_val=refine_local_val,
+                            max_refine_levels_val=max_refine_levels_val,
+                            aspect_threshold_val=aspect_threshold_val,
+                        )
+                    )
+                    force_scale_nodes = compute_node_force_scale_from_sorted_magnitudes(
+                        tree=tree_artifacts.tree,
+                        magnitudes_sorted=fb_sorted,
+                        reduction=reduction_mode,
+                    ).astype(positions_arr.dtype)
+                    self._last_force_scale_nodes = force_scale_nodes
+                    self._last_force_scale_particles = fb_sorted
+                elif use_paper_prepass:
                     prepass_sorted = (
                         self._compute_force_scale_paper_prepass_from_tree_artifacts(
                             tree_artifacts=tree_artifacts,
                             low_order=low_order,
-                            theta_val=theta_val,
+                            theta_val=self._force_scale_prepass_theta(),
                             upward_center_mode=upward_center_mode,
                             runtime_traversal_config=runtime_traversal_config,
                             runtime_m2l_chunk_size=runtime_m2l_chunk_size,
@@ -2737,7 +2769,7 @@ class PrepareMixin:
                             leaf_size=int(leaf_size),
                             max_order=low_order,
                             return_potential=False,
-                            theta=theta_val,
+                            theta=self._force_scale_prepass_theta(),
                             reuse_prepared_state=False,
                             jit_tree=jit_tree,
                             jit_traversal=False,
@@ -2745,12 +2777,13 @@ class PrepareMixin:
                     prepass_sorted = jnp.asarray(prepass_acc)[
                         jnp.argsort(tree_artifacts.inverse_permutation)
                     ]
-                force_scale_nodes = self._compute_node_force_scale_from_sorted_acc(
-                    tree=tree_artifacts.tree,
-                    accelerations_sorted=prepass_sorted,
-                    reduction=reduction_mode,
-                ).astype(positions_arr.dtype)
-                self._last_force_scale_nodes = force_scale_nodes
+                if not use_fb_prepass:
+                    force_scale_nodes = self._compute_node_force_scale_from_sorted_acc(
+                        tree=tree_artifacts.tree,
+                        accelerations_sorted=prepass_sorted,
+                        reduction=reduction_mode,
+                    ).astype(positions_arr.dtype)
+                    self._last_force_scale_nodes = force_scale_nodes
         dual_tree_artifacts = tree_artifacts
         if self._uses_per_node_effective_theta():
             # Fold the criterion into geometry.radius *before* the dual build, since

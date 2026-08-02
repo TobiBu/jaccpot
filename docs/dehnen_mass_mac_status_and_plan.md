@@ -1,7 +1,35 @@
 # Dehnen mass-dependent MAC: status and next steps
 
-Handoff document, 2026-07-31; Steps 1–3 folded in 2026-08-01/02.
+Handoff document, 2026-07-31; Steps 1–3 folded in 2026-08-01/02; the START HERE
+plan worked through on 2026-08-02.
 Self-contained: a fresh session should be able to pick this up without prior context.
+
+## What the 2026-08-02 pass settled
+
+| plan item | outcome |
+|---|---|
+| **3. O(N) `f_b` estimator** | **DONE and it costs nothing.** `mac_force_scale_mode="paper_fb"`. Retains a median 99.7 % of the exact O(N²) `f_b`, is a strict lower bound, and at matched p90 the estimator arm is indistinguishable from the exact-`f_b` ceiling (rms 7.90× vs 7.87×, p99.99 23.8× vs 22.6×, inside the two-seed spread). eq (16b) is now a production path, not a ceiling. |
+| **4. Step 3′ memory gate** | **MEASURED, and it clears.** A pair policy costs **+977 MiB at 1M** (split/streamed build; +969 MiB monolithic), against the 11.07 GB reverse peak on a 40 GB card. Harness: `bench/validation/pair_policy_far_tag_memory.py`; artifact: `results/validation/pair_policy_far_tag_memory_1m.json`. The plumbing itself is **not** done — see Step 3′ for the cache-key hazard that has to be handled first. |
+| **5. `dehnen_theta`** | **Keep.** Its retention is now pinned by `tests/unit/runtime/test_refuted_dehnen_theta_mode.py` (4 cases) instead of asserted in prose — nothing previously tested the `FutureWarning` or that the mode still ran. |
+| **1. Dehnen's ε / 2. N-scaling** | **The specified configuration was wrong and is corrected below.** At leaf 256 the sweep is degenerate: see trap 11. Re-running at leaf 16. |
+
+Two defects found on the way, both in shipped behaviour:
+
+- **The force-scale prepass ran at the solver's `theta`, which paper mode pins at
+  1.0.** `theta` is documented as not gating acceptance — true of the criterion,
+  false of the geometric traversal underneath it. At θ=1.0 the `f_b` estimate
+  degrades to a median 0.74 of the exact value against 0.997 at θ=0.5. Now
+  resolved independently via `mac_force_scale_prepass_theta` (default 0.5, near
+  Dehnen §5.2's θ_crit ≈ 0.46), and pinned by a test that fails if it is ever
+  reconnected to the solver's `theta`. **This also affected eq (16a)**: the p=1
+  acceleration prepass was running at θ=1.0 too.
+- **The `|a_b|` recorder would have overwritten an `f_b` scale.**
+  `_record_force_scale_from_evaluation` writes each evaluation's accelerations
+  into the force-scale cache, which is what makes reuse mean anything for (16a).
+  Under (16b) that silently reverts to the other criterion after one evaluation —
+  the same failure that made an injected `f_b` survive exactly one
+  `prepare_state`. Now suppressed for `f_b` modes, with a control test asserting
+  the (16a) recorder is *not* inert, so the stability test cannot pass vacuously.
 
 ## START HERE — remaining work, in priority order
 
@@ -17,8 +45,15 @@ there.
 
 ### 1. The open question that decides the paper — does the benefit hold at Dehnen's ε?
 
-Everything is measured at ε = 3e-4…1e-5. **Dehnen uses 2e-7.** Seven attempts failed on
-configuration, not on the criterion; the run is now cheap and fully specified:
+Everything is measured at ε = 3e-4…1e-5. **Dehnen uses 2e-7.** Still open, but the
+configuration is now known-good rather than guessed. **Read trap 11 first**: the
+previously-specified run (N=1e5, leaf 256) is degenerate — the fixed arm accepts 0/0/4/218
+far pairs at θ = 0.30/0.34/0.38/0.42, so it sits at machine precision and has no error
+range to match against. Eight attempts have now failed on configuration.
+
+Use **leaf 16**, where the same N=1e5 accepts 6.19 M far pairs at θ=0.34 and 1.15 M at
+θ=0.74 — a real far field across the whole grid. Start at N=16384, which reaches ε=2e-7
+for a twentieth of the cost and answers the ε question on its own:
 
 ```bash
 cd /export/home/tbuck/jaccpot-mac-wt
@@ -26,47 +61,126 @@ eval $(/export/home/tbuck/jaccpot/.venv/bin/autocvd -l -q)
 XLA_PYTHON_CLIENT_PREALLOCATE=false PYTHONPATH=$PWD JAX_ENABLE_X64=1 \
   setsid nohup /export/home/tbuck/jaccpot/.venv/bin/python -u \
   -m bench.validation.mac_error_distribution \
-    --n 100000 --leaf-size 256 --order 8 --distribution plummer,bulge_halo \
-    --theta 0.30,0.34,0.38,0.42,0.46,0.50 --eps 1e-5,1e-6,3e-7,2e-7,1e-7 \
-    --softening 1e-6 --metric dehnen --match-on median --reference-block 64 \
-    --arm fixed,mass --json-out results/validation/mac_dehnen_eps_n1e5.json \
+    --n 16384 --leaf-size 16 --order 8 --distribution plummer,bulge_halo \
+    --theta 0.30,0.34,0.38,0.42,0.46,0.50,0.58 --eps 1e-5,1e-6,3e-7,2e-7,1e-7 \
+    --softening 1e-6 --metric dehnen --match-on median --reference-block 256 \
+    --max-pair-queue 131072 --max-interactions-per-node 8192 \
+    --arm fixed,mass,mass_16b,mass_16b_est \
+    --json-out results/validation/mac_dehnen_eps_n16384_leaf16.json \
   > /tmp/eps.log 2>&1 < /dev/null &
 ```
 
-Report **rms and p99.99** (what Dehnen quotes), matched on **median** (his comparison).
-Expect traversal retries on the tight-ε configs; the run prints the converged caps at the
-end — feed them back via `DualTreeTraversalConfig` for the rerun and *do not round up*.
+The bench now reports **rms and p99.99 ratios directly** (they are what Dehnen quotes;
+p99 alone understated the effect by more than an order of magnitude), and
+`--max-pair-queue`/`--max-interactions-per-node` pre-size the traversal so the tight-ε
+configs skip the retry-recompile cycle. They must be given together — pinning one leaves
+the other retrying, so the run would look pinned and behave exactly as before.
 
 ### 2. Settle the N-scaling trend properly
 
 At matched p90 the advantage looked like it decayed 4096 → 1e5; at matched median it did
 not. One seed at each end, no error bars, and the two matchings disagree — so the trend
-is not established either way. Run a clean ladder **N = 3e4, 1e5, 3e5** × **3 seeds** at
-leaf 256, one methodology (`--match-on median`), and report rms/p99.99 with spread. This
-is cheap and it decides whether the claim is "holds at scale" or "decays with N".
+is not established either way. Run a clean ladder × **3 seeds**, one methodology
+(`--match-on median`), and report rms/p99.99 with spread.
 
-### 3. Step 2 production — the O(N) `f_b` estimator
+`--seed` now takes a comma list and prints a cross-seed aggregate as
+`median [min, max]`, joined on position in the matched ladder rather than on the target
+value (each seed's usable range differs slightly, so the absolute targets never coincide).
+**Hold leaf_size fixed across the ladder at 16, not 256** — per trap 11 the far field at
+leaf 256 is trivial below N ≈ 10⁶, so a leaf-256 ladder would be comparing a real far
+field at large N against nothing at all at small N and reading the difference as an
+N-trend.
 
-eq (16b) beats eq (16a) (~1.5× p99, ~2× tail) but only measured with *exact* O(N²) `f_b`,
-which is a ceiling, not a prediction. Build the estimator (monopole-only far-field
-accumulation over the existing interaction lists plus the exact near-field scalar sum;
-all on device, one jit) and measure it against the exact-`f_b` arm. The far-field term is
-**mandatory** — `f_b` is not near-field dominated (16 largest contributors capture ~13 %).
+### 3. Step 2 production — the O(N) `f_b` estimator — **DONE (2026-08-02)**
+
+`estimate_particle_force_scale` in `_adaptive_policy.py`, reached via
+`mac_force_scale_mode="paper_fb"` (or `"paper_fb_cached"`). Exact scalar sums over the near
+pairs, monopoles over the far ones, accumulated down the tree so each particle picks up its
+whole ancestor chain's far lists. One jit, on device, no host round trip.
+
+**It gives up nothing.** Median 99.7 % of the exact O(N²) `f_b`, a strict lower bound, and
+at matched p90 against the fixed-θ baseline the estimator arm and the exact-`f_b` arm agree
+inside the two-seed spread:
+
+| arm | rms × | p99.99 × | work × |
+|---|---|---|---|
+| eq (16a) | 5.33 [5.03, 5.62] | 10.05 [9.97, 10.13] | 1.00 |
+| eq (16b), exact O(N²) `f_b` | 7.87 [7.78, 7.96] | 22.62 [21.95, 23.29] | 1.00 |
+| eq (16b), **O(N) estimator** | **7.90 [7.82, 7.99]** | **23.79 [23.37, 24.21]** | 1.00 |
+
+Plummer, N=4096, p=8, matched p90, 2 seeds, `median [min, max]`. So eq (16b) is a
+production path now, and the ~2× tail gain over (16a) is real rather than a ceiling.
+
+The far-field term is **mandatory**, as predicted: a near-only estimate captures only
+53–66 % of `f_b` once there are enough leaves for the far field to matter (0.989 at 64
+leaves, 0.807 at 256, 0.534 at 512 — so the obvious small test configuration is exactly
+the one where a near-only bug hides). Pinned by
+`tests/unit/runtime/test_fb_force_scale_estimator.py` (11 cases).
+
+**Two design points worth not re-deriving.** The estimate errs *low* on purpose:
+eq (16a)'s threshold is `ε·s`, so an over-large scale loosens acceptance and makes the
+solver faster *and* wronger, which no cost measurement can detect.
+`mac_force_scale_fb_inflation=0.0` gives the tighter non-bounding variant for measurement
+only. And node masses come from a prefix sum over `node_ranges`, never from
+`multipole_packed[:, 0]` — the two M2M defects this branch fixed left nodes that span
+particles with a zero expansion, and an estimator sourced from the multipoles would have
+inherited both while reading as ordinary truncation error.
 
 ### 4. Step 3′ — carry the pair policy into the fast lanes
 
-The only remaining route to 10⁶ (Step 3 is refuted; see below). Mostly jaccpot plumbing,
-not a yggdrax change. **Measure `store_far_tags` memory first** — supplying a pair policy
-allocates a far-tag buffer in the minimum-memory lane, where the 1M reverse peak is
-already 11.07 GB of 40 GB.
+The only remaining route to 10⁶ (Step 3 is refuted; see below).
+
+**The memory gate is measured and it clears.** `bench/validation/pair_policy_far_tag_memory.py`,
+artifact `results/validation/pair_policy_far_tag_memory_1m.json`. At N=10⁶, leaf 256,
+fp32, θ=0.5 (7813 nodes, capacity 8192), same far-pair count in both arms so the delta is
+the policy and not a different accept mask:
+
+| build | no policy | with policy | delta |
+|---|---|---|---|
+| split / streamed | 3634.0 MiB | 4610.6 MiB | **+976.6** |
+| monolithic | 4041.6 MiB | 5010.6 MiB | **+968.9** |
+
+≈ 1 GB against an 11.07 GB reverse peak on a 40 GB card — affordable. Two corrections to
+the concern as recorded: the cost is **not** specific to the streamed lane (both builds pay
+about the same), and it is **not** mostly the far-tag buffer (that is only 244 MiB of the
+970; the rest is `_resolve_pair_actions` evaluating the policy twice, forward and reverse,
+and materialising both tag arrays). Reading the allocation sites alone would have got this
+wrong in both directions — the streamed fill allocates `far_tags` unconditionally, with no
+`store_far_tags` gate, which looks like "a policy is free here" and is not.
+
+Measuring it needs one subprocess per arm: `peak_bytes_in_use` is process-cumulative and
+cannot be reset, so measuring both arms in one process reports the running maximum for both
+and the delta is always exactly zero. That first read looked like a clean null result.
+
+**What remains, and the hazard to handle first.** `_interaction_cache_key` takes **no**
+`pair_policy` argument, so the interaction cache cannot distinguish a policy-built list
+from a geometrically-built one. Today that is safe only because the cache is per-solver-
+instance and `eps` is fixed on a live solver — two `dehnen_error` solvers at different
+`eps` already hash identically (`_base_mac_type()` is `"dehnen"` and paper mode pins
+θ=1.0). Relaxing the policy gates without keying or disabling the cache would silently
+serve the wrong accept mask, which is the "faster and wronger" failure this whole document
+keeps running into. So: key the cache on the policy (or disable it under one) **before**
+touching the gates. The gates themselves are small — `_can_split_dual_tree_build`
+(`_interaction_cache.py` ~:443) plus threading `pair_policy`/`policy_state` into
+`_build_dual_tree_artifacts_split`'s three yggdrax calls, all of which already accept it —
+and then `can_use_large_n_prepare_path` and `_large_n_pipeline.py`, which never thread it
+at all, plus running the force-scale prepass inside `prepare_large_n_state`. This was
+deliberately not started in the 2026-08-02 pass: it is untestable at 1M until the
+target-subsampled reference (`--reference-subsample`, Step 4) exists, and shipping
+unvalidated lane code that can bypass the criterion is worse than not shipping it.
 
 ### 5. Loose ends
 
-- **`mac_type="dehnen_theta"` is refuted** and retained only behind a `FutureWarning` so
-  its negative result stays reproducible. Delete it if it stops earning that keep.
+- **`mac_type="dehnen_theta"`: keep.** It earns its retention, and that retention is now
+  *pinned* rather than asserted: `tests/unit/runtime/test_refuted_dehnen_theta_mode.py`
+  checks the `FutureWarning` fires, that `dehnen_error` does **not** warn (so the warning
+  cannot be widened until users learn to ignore it), and that the mode still runs and still
+  publishes the per-node angles `bench/validation/per_node_theta_fidelity.py` reads.
+  Nothing tested any of that before. If that file becomes a maintenance cost, that is the
+  signal to delete the mode and keep the refutation in prose.
 - **The cartesian basis is broken** (~1.8e-1 rel-L2 at both p=2 and p=4, versus solidfmm's
   8.1e-5). Pre-existing, out of scope here, now documented at the per-basis golden anchor
-  rather than hidden behind a blanket tolerance. Worth its own issue.
+  rather than hidden behind a blanket tolerance. Worth its own issue — **not yet filed.**
 - Interaction **work is a wash to a win** (1.00–1.06× at N=4096, mass uses 17–51 % *less*
   at N=1e5 matched p90). Frame the claim as tail accuracy at equal-or-less cost, never as
   speed.
@@ -478,6 +592,37 @@ is the **scaled error δa/f** with `f_b ≡ Σ_{a≠b} G μ_a / |x_a−x_b|²`.
    requires `expansion_basis="solidfmm"` *and* `preset="large_n_gpu"`; the benchmark
    uses `basis="real"`, so everything ran the generic path. Do not attribute the slow
    baseline to a lane fallback.
+11. **"≥ 128 leaves" is necessary but nowhere near sufficient. leaf 256 has no far field
+   below N ≈ 10⁶.** This is trap 9's leaf/N coupling again, one level deeper, and it
+   silently invalidated the run this document specified for its own top-priority item.
+   The bench's guard checks *leaf count*, and N=1e5 / leaf 256 gives 390 leaves, so it
+   passes — but leaf count is not the thing that matters. Bigger leaves have bigger radii,
+   so the same θ accepts dramatically fewer pairs. Measured far-pair counts, N=1e5, p=8,
+   Plummer, fixed arm:
+
+   | θ | leaf 256 | leaf 16 |
+   |---|---|---|
+   | 0.30 | **0** | — |
+   | 0.34 | **0** | 6 186 986 |
+   | 0.38 | **4** | — |
+   | 0.42 | **218** | 4 422 164 |
+   | 0.50 | — | 3 053 358 |
+   | 0.74 | — | 1 149 054 |
+
+   Four orders of magnitude apart at θ=0.42. At leaf 256 the whole fixed arm sits at
+   machine precision (median 5e-16, rms 3e-16) with nothing to match the mass arm
+   against, *and* it is slow, because with no far field accepted the run degenerates to
+   all-to-all direct summation — 25 minutes per config at N=1e5, which reads as "the
+   tight-ε configs are just expensive". It is not expensive, it is empty.
+
+   **Diagnose this before committing to any sweep.** A prepare-only far-pair census is
+   minutes, not hours: build the tree, count `interactions.sources >= 0`, skip the O(N²)
+   reference and the evaluation entirely. If the fixed arm's far count is not in the
+   millions at your N, the grid is not measuring the criterion.
+
+   Corollary for the N-ladder: **leaf_size must be held fixed across it.** A ladder that
+   keeps leaf 256 while N grows crosses from "no far field" to "real far field" partway
+   up, and reports that crossing as an N-scaling trend.
 
 ## The four steps
 
@@ -599,23 +744,37 @@ right-hand side, so it could never have fixed a left-hand-side problem such as
 acceptance at the convergence boundary — which was the original hope for it. Post-fix
 there is no such problem (trap 4), so the point no longer bears on the decision.
 
-**The measured gain uses exact O(N²) `f_b`.** A production estimator is approximate, so
-part of this may not survive. Treat this arm as the *ceiling* and re-measure the
-estimator against it before quoting these ratios for anything else.
+**The O(N) estimator is built, and the ceiling survives it entirely (2026-08-02).**
+`estimate_particle_force_scale`, reached via `mac_force_scale_mode="paper_fb"`. The
+caution below — "a production estimator is approximate, so part of this may not
+survive" — turned out to be unnecessary: at matched p90 the estimator arm and the
+exact-O(N²) arm agree inside the two-seed spread (rms 7.90 vs 7.87×, p99.99 23.8 vs
+22.6×), because the estimate retains a median 99.7 % of the exact `f_b`. Table and
+design notes under START HERE item 3.
 
-**Building the O(N) estimator: the far-field pass is mandatory.** It was scoped at 2–3
-days on the assumption that `f_b` is near-field dominated. It is not: measured at
+**The far-field pass is mandatory, as predicted.** It was scoped at 2–3 days on the
+assumption that `f_b` is near-field dominated. It is not: measured at
 N=4096, the 16 largest contributors capture a median 13 % of `f_b` on Plummer (18 %
 uniform, 7 % bulge+halo), and even the largest 256 capture only 41 %. In 3D the shell
 population grows like `r²ρ` while each contribution falls like `1/r²`, so every
 logarithmic shell contributes comparably and the sum is a global quantity. A
 near-field-only estimator would be wrong by nearly an order of magnitude — Dehnen's
-"p=0 suffices" is right about the *order*, not about the *locality*.
+"p=0 suffices" is right about the *order*, not about the *locality*. Confirmed
+end-to-end: a near-only estimate captures 0.989 / 0.807 / 0.534 of the exact `f_b` at
+64 / 256 / 512 leaves.
 
-Shape: a monopole-only far-field accumulation over the existing interaction lists
-(`Σ_A G M_A / |c_A − x_b|²`, a scalar sum with no cancellation) plus the exact
-near-field scalar sum. Reuses the tree, traversal and node reduction. On device, one
-jit, no host round trip.
+Shape as built: a monopole-only far-field accumulation over the existing interaction
+lists plus the exact near-field scalar sum. Reuses the tree, traversal and node
+reduction. On device, one jit, no host round trip.
+
+One implementation subtlety that is easy to get wrong. The natural form
+`Σ_A G M_A / |c_A − x_b|²` needs a per-particle distance, which would cost
+`Σ_pairs span(target)` work. Instead each far pair contributes
+`G M_A / (|c_A − c_U| + ρ_U)²` **once**, and the result is accumulated *downward* so a
+particle picks up its whole ancestor chain — O(pairs + nodes), and the ρ_U inflation is
+what makes it a lower bound. That downward accumulation must run in **descending span
+width**, not descending node index: radix internal nodes are not stored in postorder,
+which is the same ordering trap as D2 and M1.
 
 **Also settled:** the pre-fix bulge+halo "floor" was the M2M bug, not evidence for
 either criterion. See trap 3, now re-measured — bulge+halo turns out to be the criterion's
@@ -680,20 +839,36 @@ including `_dual_tree_walk_count_impl` and `_dual_tree_walk_compact_fill_impl` �
 
 | gate | blocks | fundamental? |
 |---|---|---|
-| `_can_split_dual_tree_build` | the split build outright | **no** — its own docstring says "intentionally narrow" |
+| `_can_split_dual_tree_build` (`_interaction_cache.py` ~:443) | the split build outright | **no** — its own docstring says "intentionally narrow"; the three yggdrax calls in `_build_dual_tree_artifacts_split` all already accept `pair_policy`, they are just never passed it |
 | `can_use_large_n_prepare_path` | the whole large-N lane, on `_uses_paper_style_force_scale()` | no — a jaccpot policy decision |
-| `_interaction_cache.py` ~:443 | interaction caching | yes, correctly (the key omits the policy) — perf only |
+| `_interaction_cache_key` | nothing — and that is the problem, see below | **the one real blocker** |
 | `strict_split_fastlane` hint | a route-probing shortcut | perf only |
 | `_large_n_pipeline.py` | never threads `pair_policy` at all | plumbing |
 
 So this is mostly threading an existing yggdrax capability through jaccpot, plus running
 the force-scale prepass inside `prepare_large_n_state`.
 
-**The real risk:** `store_far_tags = pair_policy is not None` in both passes, so supplying
-a policy allocates a far-tag buffer — in the *minimum-memory streamed* regime that lane
-exists for, at 1M, where the reverse peak is already 11.07 GB of 40 GB. Measure the peak
-before committing to the design. Fallback: make tag storage conditional on the caller
-actually needing tags (jaccpot needs the actions, possibly not the retained tags).
+**The memory risk is measured, and it is not the blocker (2026-08-02).** ≈ 1 GB at 1M
+(+976.6 MiB split, +968.9 MiB monolithic) against an 11.07 GB reverse peak on 40 GB.
+Table and method under START HERE item 4. Two things the concern as written got wrong:
+the cost is not specific to the streamed lane, and it is not mostly the far-tag buffer
+(244 MiB of 970) — most of it is `_resolve_pair_actions` evaluating the policy twice,
+forward and reverse. The suggested fallback of making tag storage conditional would
+therefore recover well under a third of it, and in the streamed build nothing at all:
+`_dual_tree_walk_compact_fill_impl` allocates `far_tags` unconditionally, with no
+`store_far_tags` gate. Note also that this is *prepare*-side traversal memory, whereas
+the 11.07 GB figure is the reverse-pass peak, so the two do not simply add.
+
+**The actual blocker is the interaction cache key.** `_interaction_cache_key` takes no
+`pair_policy` argument, so a cached entry cannot record which criterion built it. It is
+safe today only by accident of scoping — the cache is per-solver-instance and `eps` is
+fixed on a live solver — but two `dehnen_error` solvers at different `eps` already hash
+identically, since `_base_mac_type()` returns `"dehnen"` and paper mode pins θ=1.0.
+Relax the policy gates without first keying the cache on the policy (or disabling it
+under one) and a geometrically-built interaction list can be served to a
+criterion-driven request: the accept mask is silently wrong, the run is *faster*, and
+per trap 6 no cost measurement can see it. **Key or disable the cache first, then touch
+the gates.**
 
 ### Step 4 — Measure at Dehnen's regime: 1M Plummer, p=8 (~1–2 days)
 
@@ -736,24 +911,27 @@ four original conditions are now met at N=4096; only the N ≥ 10⁵ scaling is 
 
 | condition | status |
 |---|---|
-| tail advantage at p ≥ 8 on Plummer, δa/f | **met at N=4096**: max 7.5–57×, p99 1.3–2.2× |
+| tail advantage at p ≥ 8 on Plummer, δa/f | **met at N=4096**: max 7.5–57×, p99 1.3–2.2×; on the rms/p99.99 statistics Dehnen actually quotes, 5.3× / 10.1× for (16a) and 7.9× / 22.6× for (16b) at matched p90 |
 | interaction work ≤ fixed-θ at matched p90 | **met, marginally**: 1.00–1.06× — a wash, not a saving |
-| warm-call prepare overhead ≤ 1.3× | **met**: 0.98× after Step 1 |
-| holds at N ≥ 10⁵ | **open** — needs Step 3 then Step 4 |
+| warm-call prepare overhead ≤ 1.3× | **met**: 0.98× after Step 1. eq (16b) is *cheaper* still — its prepass needs only the traversal, not a low-order FMM evaluation |
+| eq (16b) reachable in O(N) | **met (2026-08-02)**: the estimator retains the exact-`f_b` result inside seed spread, so the ~2× tail gain over (16a) is production-reachable |
+| holds at N ≥ 10⁵ | **still open**, and no longer blocked on Step 3′. Blocked only on running the corrected sweep — the prior attempts measured a degenerate configuration (trap 11), not the criterion |
 
 **Frame the claim on the tail, and quote p99.99.** The honest statement is not "the
 criterion is faster" (work is a wash) and not "p99 improves 1.3–2.2×" (true but
 unremarkable). It is that the *large-error tail collapses*: p99.99/p99 is 4.3 for the
 mass MAC against 83 for fixed-θ at comparable accuracy on Plummer. That is §5.3's claim
-and it is the one the data supports.
+and it is the one the data supports. `compare_arms` now reports rms and p99.99 ratios
+directly, so there is no longer any reason to quote p99.
 
 **No deviation from the paper to disclose any more.** `mac_theta_max` was the one
 disclosed deviation; trap 4 showed it was compensating for the M2M bug, and eq (16a)
 verbatim never exceeds opening 0.786 post-fix. Run and report it verbatim.
 
-If it loses, the bug fixes and the 94 tests stay regardless (they fix shipped defaults),
-and the negative result is worth writing up with the tests as evidence that the
-transcription was faithful.
+If it loses, the bug fixes and the tests stay regardless — they fix shipped defaults, and
+two of the defects found on 2026-08-02 (the prepass running at θ=1.0, the `|a_b|` recorder
+overwriting an `f_b` scale) are in that category too. The negative result is worth writing
+up with the tests as evidence that the transcription was faithful.
 
 ## Commands
 

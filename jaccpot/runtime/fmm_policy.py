@@ -25,6 +25,7 @@ from jaccpot.upward.tree_expansions import TreeUpwardData
 from ._adaptive_policy import (
     build_adaptive_policy_state,
     compute_node_force_scale_from_sorted_acc,
+    estimate_particle_force_scale,
     per_node_effective_theta,
     per_node_mac_radius,
     source_error_proxy_by_order_from_multipoles,
@@ -41,6 +42,10 @@ from .fmm_state import (
     _PrepareStateTreeUpwardArtifacts,
 )
 from .kernels.core import _build_nearfield_interop_data
+
+#: Opening angle the force-scale prepass traversal defaults to. See
+#: :meth:`PolicyMixin._force_scale_prepass_theta` for the measurement behind it.
+_DEFAULT_FORCE_SCALE_PREPASS_THETA = 0.5
 
 
 class PolicyMixin:
@@ -92,6 +97,18 @@ class PolicyMixin:
         if not full_evaluation or self._in_force_scale_prepass:
             return
         if not self._uses_paper_style_force_scale():
+            return
+        if self._uses_fb_force_scale():
+            # eq (16b)'s scale is `min_b f_b`, not `min_b |a_b|`, and the two are
+            # different quantities -- f_b is the cancellation-free *sum of pairwise
+            # magnitudes*, so it is strictly larger and does not vanish. Recording
+            # accelerations here would silently replace the f_b cache with a (16a)
+            # scale after the first evaluation, which is exactly the back-door
+            # failure `force_scale_nodes=` was added to remove: an injected f_b used
+            # to survive exactly one prepare_state, so a prepare/evaluate loop
+            # measured (16a) while believing it measured (16b). f_b depends only on
+            # positions and masses, so there is nothing an evaluation can contribute
+            # to it anyway.
             return
         acc_sorted = evaluation[0] if isinstance(evaluation, tuple) else evaluation
         if _contains_tracer((acc_sorted, state.tree)):
@@ -186,6 +203,49 @@ class PolicyMixin:
         """Return the node reduction mode used for adaptive force scales."""
 
         return "min" if self._uses_dehnen_paper_error_model() else "max"
+
+    def _uses_fb_force_scale(self: "FastMultipoleMethod") -> bool:
+        """Return whether the force scale is eq (16b)'s ``f_b`` rather than ``|a_b|``.
+
+        eq (16b) is eq (16a) with ``min_b f_b`` on the right-hand side instead of
+        ``min_b |a_b|``. The criterion, the traversal and the eq (15) error
+        estimator are untouched, so the whole of (16b) is a different per-node
+        force scale -- which is why it needs no traversal work, only a different
+        prepass.
+        """
+
+        return str(self.mac_force_scale_mode) in ("paper_fb", "paper_fb_cached")
+
+    def _force_scale_prepass_theta(self: "FastMultipoleMethod") -> float:
+        """Return the opening angle the force-scale prepass traversal should use.
+
+        The prepass runs a *geometric* traversal, so its own theta decides how much
+        of the scale comes from the exact near field and how much from the monopole
+        far-field approximation. That is easy to get wrong, because paper mode pins
+        the solver's ``theta`` at 1.0 on the grounds that it does not gate
+        acceptance -- true for the criterion, false for the prepass underneath it.
+
+        Measured effect on the ``f_b`` estimate against the exact O(N^2) sum
+        (Plummer, N=4096, ratio estimate/exact):
+
+        ===== ========== =========
+        theta median     minimum
+        ===== ========== =========
+        0.3   1.000      1.000
+        0.5   0.997      0.911
+        0.7   0.929      0.645
+        1.0   0.736      0.334
+        ===== ========== =========
+
+        So the default is 0.5, near Dehnen §5.2's ``theta_crit ~ 0.46``, where the
+        estimate is essentially exact. ``mac_force_scale_prepass_theta`` overrides
+        it.
+        """
+
+        override = getattr(self, "mac_force_scale_prepass_theta", None)
+        if override is not None:
+            return float(override)
+        return _DEFAULT_FORCE_SCALE_PREPASS_THETA
 
     def _uses_paper_style_force_scale(self: "FastMultipoleMethod") -> bool:
         """Return whether prepare_state needs paper-style force-scale handling."""
@@ -340,6 +400,92 @@ class PolicyMixin:
             self._topology_reuse_entry = saved_topology_reuse_entry
             self._recent_topology_reused = saved_recent_topology_reused
             self._in_force_scale_prepass = False
+
+    def _compute_force_scale_fb_prepass_from_tree_artifacts(
+        self: "FastMultipoleMethod",
+        *,
+        tree_artifacts: _PrepareStateTreeUpwardArtifacts,
+        upward_center_mode: str,
+        runtime_traversal_config: Optional[DualTreeTraversalConfig],
+        runtime_m2l_chunk_size: Optional[int],
+        runtime_l2l_chunk_size: Optional[int],
+        grouped_interactions: bool,
+        farfield_mode: str,
+        record_retry: Callable[[DualTreeRetryEvent], None],
+        refine_local_val: bool,
+        max_refine_levels_val: int,
+        aspect_threshold_val: float,
+    ) -> Array:
+        """Estimate eq (16b)'s ``f_b`` for every particle, in sorted order.
+
+        Cheaper than the eq (16a) prepass, not just different: that one runs a
+        whole low-order FMM *evaluation* (upward sweep, M2L, L2L, L2P) to get
+        ``|a_b|``, whereas ``f_b`` is a sum of pairwise force magnitudes and needs
+        only the traversal's pair partition -- near pairs get an exact scalar sum,
+        far pairs a monopole. No expansions are built or applied at any order.
+
+        The traversal runs with the geometric MAC at
+        :meth:`_force_scale_prepass_theta` and with no pair policy, so it cannot
+        recurse into the criterion it is computing the scale for.
+        """
+
+        prepass_theta = self._force_scale_prepass_theta()
+        with self._force_scale_prepass_scope(
+            low_order=int(min(self.p_gears)) if self.p_gears else 0
+        ):
+            self.adaptive_order = False
+            self.adaptive_error_model = "tail_proxy"
+            self.mac_type = "dehnen"
+            dual_downward_artifacts = self._prepare_state_dual_and_downward(
+                tree_artifacts=tree_artifacts,
+                force_scale_nodes=None,
+                upward_center_mode=upward_center_mode,
+                theta_val=prepass_theta,
+                mac_type_val=self.mac_type,
+                dehnen_radius_scale=self.dehnen_radius_scale,
+                runtime_traversal_config=runtime_traversal_config,
+                runtime_m2l_chunk_size=runtime_m2l_chunk_size,
+                runtime_l2l_chunk_size=runtime_l2l_chunk_size,
+                grouped_interactions=grouped_interactions,
+                farfield_mode=farfield_mode,
+                record_retry=record_retry,
+                refine_local_val=refine_local_val,
+                max_refine_levels_val=max_refine_levels_val,
+                aspect_threshold_val=aspect_threshold_val,
+                allow_stateful_cache=False,
+            )
+
+        interactions = dual_downward_artifacts.interactions
+        neighbor_list = dual_downward_artifacts.neighbor_list
+        if interactions is None or neighbor_list is None:
+            raise RuntimeError(
+                "the f_b force-scale prepass needs both the far interaction list "
+                "and the near neighbour list; the traversal returned "
+                f"interactions={interactions is not None}, "
+                f"neighbors={neighbor_list is not None}. Without both, the "
+                "near/far partition is incomplete and f_b would be silently "
+                "under-counted rather than approximated."
+            )
+        geometry = tree_artifacts.upward.geometry
+        return estimate_particle_force_scale(
+            tree=tree_artifacts.tree,
+            positions_sorted=tree_artifacts.positions_sorted,
+            masses_sorted=tree_artifacts.masses_sorted,
+            node_centers=geometry.center,
+            node_radii=geometry.radius,
+            interaction_sources=interactions.sources,
+            interaction_targets=interactions.targets,
+            neighbor_offsets=neighbor_list.offsets,
+            neighbor_counts=neighbor_list.counts,
+            neighbor_leaf_indices=neighbor_list.leaf_indices,
+            neighbor_indices=neighbor_list.neighbors,
+            max_leaf_size=int(tree_artifacts.leaf_cap),
+            softening=float(self.softening),
+            gravitational_constant=float(self.G),
+            far_center_inflation=float(
+                getattr(self, "mac_force_scale_fb_inflation", 1.0)
+            ),
+        )
 
     def _compute_force_scale_paper_prepass_from_tree_artifacts(
         self: "FastMultipoleMethod",
