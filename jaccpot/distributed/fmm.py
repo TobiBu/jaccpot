@@ -47,7 +47,7 @@ try:
 except ImportError:  # pragma: no cover
     from jax.experimental.shard_map import shard_map
 
-from yggdrax import build_interactions_and_neighbors, compute_tree_geometry
+from yggdrax import build_interactions_and_neighbors
 from yggdrax.distributed import device_count
 from yggdrax.distributed import let as _yggdrax_let
 from yggdrax.distributed import make_mesh
@@ -101,6 +101,7 @@ from jaccpot.upward.solidfmm_complex_tree_expansions import (
     _aggregate_m2m_complex_by_level,
     prepare_solidfmm_complex_upward_sweep,
 )
+from jaccpot.upward.tree_geometry import compute_tree_geometry_compiled
 
 # Reverse-pass tiling for the differentiable fused near field. Mirrors the
 # single-GPU defaults in ``runtime/grad_options.py`` (leaf_batch/block_tile = 8);
@@ -932,7 +933,9 @@ def _make_fn(
         gid_sorted = gid[perm]
         # Geometry feeds the MAC only, so it always takes the frozen positions
         # (the same values as ``lp``; identical forward, no cotangent path).
-        geom = compute_tree_geometry(tree, tree.positions_sorted, max_leaf_size=leaf)
+        geom = compute_tree_geometry_compiled(
+            tree, tree.positions_sorted, max_leaf_size=leaf
+        )
         total_nodes = jnp.asarray(tree.node_ranges).shape[0]
         cdtype = complex_dtype_for_real(lp.dtype)
 

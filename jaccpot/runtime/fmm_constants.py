@@ -117,12 +117,39 @@ def _minimum_memory_streamed_gpu_traversal_ceiling(
     )
 
 
+def _sub_million_minimum_memory_pair_queue(*, num_particles: int) -> int:
+    """Pair-queue seed below N = 1048576, scaled with the particle count.
+
+    This was a flat ``_GPU_MINIMUM_MEMORY_PAIR_QUEUE`` (32768) for every N below a
+    million, while the number of node pairs a traversal has in flight grows with
+    the tree. Measured on an A100, ``large_n_gpu``/static_radix/leaf 256/order
+    4/theta 0.6: N=131072 fits, N=262144 raises "Pair queue capacity exceeded;
+    increase max_pair_queue and rebuild" -- a hard ceiling in the middle of the
+    range the paper's figures sweep, from a constant rather than from the device.
+
+    The queue is ``N/4`` rounded up to a power of two, floored at the historical
+    32768 so nothing at or below N=131072 changes, and it meets the >= 1048576
+    branch's 262144 exactly at N=1048576, so the two are continuous. Cost is
+    ~8 bytes per slot (a node pair of int32s): 2 MB at N=1048576, which is
+    nothing against the buffers this path already carries, so scaling it does not
+    compromise the minimum-memory objective this seed exists to serve.
+    """
+
+    n = max(1, int(num_particles))
+    target = max(int(_GPU_MINIMUM_MEMORY_PAIR_QUEUE), n // 4)
+    # Round up to a power of two: each distinct capacity is a distinct compiled
+    # shape, and a ladder keeps the number of recompiles across an N sweep to
+    # log2(N) rather than one per N.
+    return 1 << max(0, (int(target) - 1).bit_length())
+
+
 def _minimum_memory_streamed_gpu_traversal_seed(
     *, num_particles: int
 ) -> DualTreeTraversalConfig:
     """Return deterministic minimum-memory traversal seed for production GPU runs.
 
-    Keep a small queue seed for sub-million workloads, but use the streamed
+    The queue seed scales with the particle count below a million (see
+    :func:`_sub_million_minimum_memory_pair_queue`) and uses the streamed
     process-block floor to avoid underfilled count-pass kernels. Multi-million
     particle runs use a larger fixed seed to avoid early fail-fast traversal
     overflow.
@@ -166,7 +193,7 @@ def _minimum_memory_streamed_gpu_traversal_seed(
         )
     else:
         default_config = DualTreeTraversalConfig(
-            max_pair_queue=int(_GPU_MINIMUM_MEMORY_PAIR_QUEUE),
+            max_pair_queue=_sub_million_minimum_memory_pair_queue(num_particles=n),
             process_block=int(_GPU_MINIMUM_MEMORY_PROCESS_BLOCK),
             max_interactions_per_node=int(_GPU_MINIMUM_MEMORY_INTERACTIONS_PER_NODE),
             max_neighbors_per_leaf=int(_GPU_MINIMUM_MEMORY_NEIGHBORS_PER_LEAF),

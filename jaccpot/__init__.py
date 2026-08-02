@@ -14,6 +14,7 @@ from .config import (
     MemoryObjective,
     NearFieldConfig,
     RuntimePolicyConfig,
+    TraversalOverrides,
     TreeConfig,
 )
 from .odisseo import OdisseoFMMCoupler
@@ -31,6 +32,7 @@ __all__ = [
     "NearFieldConfig",
     "OdisseoFMMCoupler",
     "RuntimePolicyConfig",
+    "TraversalOverrides",
     "TreeConfig",
     "differentiable_gravitational_acceleration",
 ]

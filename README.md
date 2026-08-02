@@ -203,14 +203,46 @@ Example:
 
 ## Basis Selection
 
-- `basis="complex"` or `basis="solidfmm"`:
-  default complex solidFMM-compatible path
-- `basis="real"`:
-  real spherical harmonic coefficient layout with rotate+scale-to-z M2L
-- `basis="cartesian"`:
-  cartesian multipole/local expansion path
+- `basis="real"` (**the default, and the production choice**):
+  real spherical harmonic coefficient layout (Dehnen, no sqrt-2) with
+  rotate+scale-to-z M2L. The large-N radix fast lane runs pure-real end to end,
+  with no complex<->real conversion.
+- `basis="solidfmm"` — complex solid-harmonic path, kept for cross-checking.
+  `real` vs `solidfmm` agree to 4.5e-13 at N=2048/p=4/theta=0.5, which is a
+  genuine independent-basis check and a good result.
+- `basis="complex"` — **an alias for `solidfmm`**, not a third basis. The two
+  select the same code path and produce bit-identical forces (measured at
+  N=2048/p=4/theta=0.5: max difference exactly 0.0). Prefer spelling it
+  `"solidfmm"`; `"complex"` is retained for backwards compatibility.
+- `basis="cartesian"` — **experimental; not for quantitative work.**
+  Its relative L2 force error is ~1.8e-1 *independent of expansion order*, which
+  is a divergent-series signature rather than truncation error: raising the order
+  does not improve it. solidfmm is 8.1e-5 on the same configuration, ~2000x
+  better. Selecting it emits a `UserWarning`; set
+  `JACCPOT_ALLOW_CARTESIAN_BASIS=1` to silence it. It is the sole reason the
+  characterization anchor for cartesian carries a 0.35 tolerance. See
+  `docs/dehnen_mass_mac_status_and_plan.md`.
 
-The default remains the existing complex solidFMM-compatible path.
+## Reproducibility on a GPU
+
+**GPU results are reproducible to a few ulps, not to the bit.** The near field
+and M2L accumulate via scatter-add, which XLA lowers to atomics, and floating
+point addition is not associative, so the summation order varies run to run.
+
+Measured on an A100 at N=512/leaf=16/p=4/float64, 8 runs on identical inputs:
+**0 of the 7 later runs were bit-identical to the first**; the worst elementwise
+deviation was **3.8 eps** (8.1e-17 relative to the rms |a|). This is normal for a
+GPU FMM rather than a defect, but it means a test must not assert bit equality
+between two GPU runs — see `tests/unit/runtime/_reproducibility.py` for the
+helpers the suite uses instead.
+
+`XLA_FLAGS=--xla_gpu_deterministic_ops=true` does restore bit equality, at a cost
+that makes it unusable for a suite: with it set, three tests in
+`tests/unit/runtime` did not finish in 50 minutes. Use it for a one-off
+investigation, not as a default.
+
+CPU results *are* bit-reproducible run to run, which is why the characterization
+goldens are generated and checked there.
 
 ## Precision Control
 

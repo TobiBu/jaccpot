@@ -15,7 +15,7 @@ from collections import OrderedDict
 from dataclasses import dataclass, replace
 from functools import lru_cache, partial
 from math import comb
-from typing import Any, Literal, NamedTuple, Optional, Union
+from typing import Any, Literal, Mapping, NamedTuple, Optional, Union
 
 import jax
 import jax.numpy as jnp
@@ -25,7 +25,6 @@ from beartype.typing import Callable, Tuple
 from jaxtyping import Array, DTypeLike, jaxtyped
 from yggdrax import build_tree
 from yggdrax.dense_interactions import DenseInteractionBuffers
-from yggdrax.geometry import compute_tree_geometry
 from yggdrax.grouped_interactions import GroupedInteractionBuffers
 from yggdrax.interactions import (
     CompactTaggedFarPairs,
@@ -55,7 +54,12 @@ from yggdrax.tree import (
 from yggdrax.tree_moments import compute_tree_mass_moments
 
 from jaccpot.basis.real_sh import complex_to_real_coeffs
-from jaccpot.config import FMMExecutionBackend, FMMPreset, MemoryObjective
+from jaccpot.config import (
+    FMMExecutionBackend,
+    FMMPreset,
+    MemoryObjective,
+    TraversalOverrides,
+)
 from jaccpot.downward.local_expansions import (
     LocalExpansionData,
     TreeDownwardData,
@@ -242,7 +246,11 @@ from .fmm_constants import (
 from .fmm_derivatives import DerivativesMixin
 from .fmm_diagnostics import DiagnosticsMixin
 from .fmm_evaluate import EvaluateMixin
-from .fmm_overrides import OverridesMixin
+from .fmm_overrides import (
+    OverridesMixin,
+    normalize_traversal_config_request,
+    warn_full_traversal_config_replacement,
+)
 from .fmm_policy import PolicyMixin
 from .fmm_prepare import PrepareMixin
 from .fmm_presets import get_preset_config
@@ -368,7 +376,12 @@ class FastMultipoleMethod(
         l2l_chunk_size: Optional[int] = None,
         max_pair_queue: Optional[int] = None,
         pair_process_block: Optional[int] = None,
-        traversal_config: Optional[DualTreeTraversalConfig] = None,
+        # DualTreeTraversalConfig (replace all four capacities), or a
+        # TraversalOverrides / mapping of named capacities (merge onto the
+        # preset's resolved sizing). See normalize_traversal_config_request.
+        traversal_config: Optional[
+            Union[DualTreeTraversalConfig, TraversalOverrides, Mapping[str, int]]
+        ] = None,
         tree_build_mode: Optional[str] = None,
         tree_type: str = "radix",
         target_leaf_particles: Optional[int] = None,
@@ -607,6 +620,24 @@ class FastMultipoleMethod(
 
         preset_config = get_preset_config(preset) if preset is not None else None
 
+        # Split the traversal request before resolution. A full
+        # DualTreeTraversalConfig keeps its historical "replace everything"
+        # meaning (and warns, because that also replaces the capacities the
+        # caller did not intend to touch); a TraversalOverrides/mapping becomes a
+        # field-by-field merge applied after the policy has sized for this N, so
+        # naming one capacity cannot move the other three.
+        traversal_config, traversal_field_overrides = (
+            normalize_traversal_config_request(traversal_config)
+        )
+        self._traversal_field_overrides: dict[str, int] = traversal_field_overrides
+        if traversal_config is not None:
+            warn_full_traversal_config_replacement(
+                supplied=traversal_config,
+                preset_name=(
+                    str(preset_config.name.value) if preset_config is not None else None
+                ),
+            )
+
         resolved = _resolve_fmm_config(
             theta=theta,
             G=G,
@@ -776,6 +807,12 @@ class FastMultipoleMethod(
         self._refresh_timing_nearfield_neighbor_padding_seconds: float = 0.0
         self._refresh_timing_nearfield_state_pack_seconds: float = 0.0
         self._refresh_timing_nearfield_residual_seconds: float = 0.0
+        self._refresh_timing_evaluate_seconds: float = 0.0
+        # Whether the M2L/L2L substage timers actually ran. They cost a device
+        # sync per substage, so they are conditional -- and a conditional timer
+        # that reports 0.0 when it did not run is indistinguishable from a stage
+        # that was free. Surfaced as refresh_substages_measured.
+        self._refresh_timing_substages_measured: bool = False
         self._refresh_timing_calls: int = 0
         self._refresh_timing_active: bool = False
         self._refresh_timing_enabled: bool = str(
@@ -968,6 +1005,11 @@ class FastMultipoleMethod(
         self._strict_fused_jit_function_cache: dict[
             tuple[Any, ...], tuple[Any, ...]
         ] = {}
+        # Compiled radix fast-lane acceleration evaluates, keyed by the
+        # Python constants the traced body closes over (jax.jit keys on the
+        # pytree structure and avals itself). See
+        # _large_n_pipeline._large_n_fastlane_eval_fn.
+        self._large_n_fastlane_eval_jit_cache: dict[tuple[Any, ...], Any] = {}
         self._strict_profiled_max_pair_queue: int = 0
         self._strict_profiled_pair_process_block: int = 0
         self._strict_profiled_context_key: str = ""
@@ -1258,6 +1300,8 @@ class FastMultipoleMethod(
         self._refresh_timing_nearfield_neighbor_padding_seconds = 0.0
         self._refresh_timing_nearfield_state_pack_seconds = 0.0
         self._refresh_timing_nearfield_residual_seconds = 0.0
+        self._refresh_timing_evaluate_seconds = 0.0
+        self._refresh_timing_substages_measured = False
         self._refresh_timing_calls = 0
         self._refresh_timing_active = False
         self._refresh_dual_planner_cache = {}

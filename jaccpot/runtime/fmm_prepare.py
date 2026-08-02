@@ -17,7 +17,6 @@ from beartype import beartype
 from beartype.typing import Callable, Tuple
 from jaxtyping import Array, jaxtyped
 from yggdrax.dense_interactions import DenseInteractionBuffers
-from yggdrax.geometry import compute_tree_geometry
 from yggdrax.grouped_interactions import GroupedInteractionBuffers
 from yggdrax.interactions import (
     CompactTaggedFarPairs,
@@ -50,6 +49,7 @@ from jaccpot.nearfield.near_field import (
 )
 from jaccpot.operators.multipole_utils import MAX_MULTIPOLE_ORDER, total_coefficients
 from jaccpot.upward.tree_expansions import TreeUpwardData
+from jaccpot.upward.tree_geometry import compute_tree_geometry_compiled
 
 from ._adaptive_policy import (
     adaptive_pair_policy,
@@ -72,6 +72,10 @@ from ._nearfield_cache import (
     with_nearfield_cache_artifacts,
 )
 from ._octree_adapter import build_octree_execution_data_with_status
+from .capacity_diagnostics import (
+    is_capacity_failure,
+    reraise_with_capacity_report,
+)
 from .dtypes import INDEX_DTYPE
 from .fmm_caches import _contains_tracer, _estimate_payload_nbytes, _format_nbytes
 from .fmm_constants import (
@@ -1331,7 +1335,7 @@ class PrepareMixin:
         geometry_factory = (
             None
             if tree_artifacts.upward.geometry is not None
-            else lambda: compute_tree_geometry(
+            else lambda: compute_tree_geometry_compiled(
                 tree_artifacts.tree,
                 tree_artifacts.positions_sorted,
                 max_leaf_size=int(tree_artifacts.leaf_cap),
@@ -2274,7 +2278,7 @@ class PrepareMixin:
         geometry_factory = (
             None
             if tree_artifacts.upward.geometry is not None
-            else lambda: compute_tree_geometry(
+            else lambda: compute_tree_geometry_compiled(
                 tree_artifacts.tree,
                 tree_artifacts.positions_sorted,
                 max_leaf_size=int(tree_artifacts.leaf_cap),
@@ -2423,6 +2427,59 @@ class PrepareMixin:
         self: "FastMultipoleMethod",
         positions: Array,
         masses: Array,
+        **kwargs: Any,
+    ) -> PreparedStateLike:
+        """Precompute tree and interaction data for repeated evaluations.
+
+        Keyword arguments are those of :meth:`_prepare_state_uncaught`, which
+        holds the implementation and the full signature; the public facade in
+        ``jaccpot.solver`` documents them for users. They are forwarded verbatim
+        as ``**kwargs`` ON PURPOSE: an earlier version of this wrapper repeated
+        the parameter list, and a parameter added to the implementation would
+        then have been silently dropped here -- the exact failure mode the rest
+        of this change set is about.
+
+        This wrapper exists to turn an allocation or traversal-capacity failure
+        into something actionable: the error is re-raised with the
+        statically-sized buffers for this configuration largest-first, the knob
+        that sizes each, and a configuration that would fit, with the original
+        chained. "Out of memory while trying to allocate 8.00GiB" on a 40 GB card
+        named neither the buffer nor a way forward. See
+        :mod:`jaccpot.runtime.capacity_diagnostics`.
+        """
+
+        try:
+            return self._prepare_state_uncaught(positions, masses, **kwargs)
+        except Exception as exc:
+            if not is_capacity_failure(exc):
+                raise
+            try:
+                num_particles = int(jnp.asarray(positions).shape[0])
+            except Exception:
+                num_particles = 0
+            traversal_config = None
+            try:
+                traversal_config = self._resolve_runtime_execution_overrides(
+                    num_particles=num_particles
+                ).traversal_config
+            except Exception:
+                pass
+            reraise_with_capacity_report(
+                exc,
+                num_particles=num_particles,
+                leaf_size=int(kwargs.get("leaf_size", 16)),
+                max_order=int(kwargs.get("max_order", 2)),
+                working_dtype=self.working_dtype,
+                preset=self.preset,
+                traversal_config=traversal_config,
+                nearfield_mode=str(self.nearfield_mode),
+            )
+            raise  # pragma: no cover - reraise_with_capacity_report always raises
+
+    def _prepare_state_uncaught(
+        self: "FastMultipoleMethod",
+        positions: Array,
+        masses: Array,
         *,
         bounds: Optional[Tuple[Array, Array]] = None,
         leaf_size: int = 16,
@@ -2450,6 +2507,9 @@ class PrepareMixin:
         must equal the node count of the tree this call builds, which the caller
         generally learns from a prior ``prepare_state`` on the same
         positions/`leaf_size`.
+
+        See :meth:`prepare_state` for the capacity-failure reporting that
+        wraps this method; it forwards ``**kwargs`` here verbatim.
         """
 
         self._validate_prepare_state_request(

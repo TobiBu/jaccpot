@@ -81,6 +81,77 @@ class NearFieldConfig:
     precompute_scatter_schedules: bool = True
 
 
+#: The four capacities a traversal config carries, in ``DualTreeTraversalConfig``
+#: declaration order. Kept here so ``TraversalOverrides`` and the runtime
+#: normalizer cannot drift apart, and so an unknown key can be rejected by name.
+TRAVERSAL_OVERRIDE_FIELDS = (
+    "max_pair_queue",
+    "process_block",
+    "max_interactions_per_node",
+    "max_neighbors_per_leaf",
+)
+
+
+@dataclass(frozen=True)
+class TraversalOverrides:
+    """Field-by-field traversal-capacity overrides, merged onto the preset's own.
+
+    Prefer this over passing a bare ``DualTreeTraversalConfig`` as
+    ``RuntimePolicyConfig.traversal_config``.
+
+    ``DualTreeTraversalConfig`` has no defaults for three of its four fields, so
+    a caller who wants to raise ``max_pair_queue`` alone has to invent values for
+    ``process_block`` and the two caps -- and supplying the object at all makes
+    the runtime treat every capacity as caller-owned, which switches off the
+    preset's N-dependent traversal sizing entirely. Measured on ``large_n_gpu``
+    at N=65536: passing an explicit config whose ``max_pair_queue`` equalled the
+    value already in force took per-step time from 1085 ms to ~3200 ms, purely
+    because ``process_block`` and the interaction/neighbour caps reverted to
+    whatever the caller had typed.
+
+    Every field here defaults to ``None``, meaning "leave this one to the
+    preset". Only the fields set explicitly are applied, on top of the sizing the
+    runtime resolved for the current particle count -- so overriding one
+    capacity cannot silently move the others.
+
+    Examples
+    --------
+    Raise the pair queue and change nothing else::
+
+        FMMAdvancedConfig(
+            runtime=RuntimePolicyConfig(
+                traversal_config=TraversalOverrides(max_pair_queue=1 << 19)
+            )
+        )
+
+    A plain ``dict`` with the same keys is accepted and means the same thing.
+    """
+
+    max_pair_queue: Optional[int] = None
+    process_block: Optional[int] = None
+    max_interactions_per_node: Optional[int] = None
+    max_neighbors_per_leaf: Optional[int] = None
+
+    def __post_init__(self) -> None:
+        for name in TRAVERSAL_OVERRIDE_FIELDS:
+            value = getattr(self, name)
+            if value is None:
+                continue
+            if int(value) < 1:
+                raise ValueError(
+                    f"TraversalOverrides.{name} must be >= 1 when set; got {value!r}"
+                )
+
+    def as_dict(self: "TraversalOverrides") -> dict[str, int]:
+        """Return only the fields that were set, as ``{name: int}``."""
+
+        return {
+            name: int(getattr(self, name))
+            for name in TRAVERSAL_OVERRIDE_FIELDS
+            if getattr(self, name) is not None
+        }
+
+
 @dataclass(frozen=True)
 class RuntimePolicyConfig:
     """Execution-policy overrides for tree build and traversal.
@@ -89,6 +160,11 @@ class RuntimePolicyConfig:
     - For `preset='large_n_gpu'`, runtime policy is canonicalized to the
       production low-memory fast path (minimum_memory + streamed pair_grouped
       + bucketed nearfield).
+    - ``traversal_config`` accepts a :class:`TraversalOverrides` (or a ``dict``
+      with the same keys) for a field-by-field merge onto the preset's resolved
+      capacities, or a full ``DualTreeTraversalConfig`` for the legacy
+      replace-everything behaviour. The latter warns, because replacing the
+      object also replaces the capacities you did not mean to change.
     """
 
     execution_backend: FMMExecutionBackend = "auto"
