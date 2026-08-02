@@ -181,7 +181,6 @@ def main() -> int:
 
     import jax  # noqa: E402
     import jax.numpy as jnp  # noqa: E402
-
     from yggdrax.interactions import DualTreeTraversalConfig  # noqa: E402
 
     from jaccpot import (  # noqa: E402
