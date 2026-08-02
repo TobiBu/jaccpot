@@ -217,30 +217,61 @@ def test_total_force_matches_direct_sum_within_fmm_tolerance(theta, order, toler
 
 @pytest.mark.parametrize("theta", [0.5, 0.7, 1.0])
 @pytest.mark.parametrize("order", [2, 4, 6])
-@pytest.mark.parametrize("backend", ["jax", "pallas"])
-def test_momentum_is_exact_independently_of_theta_and_order(theta, order, backend):
+def test_momentum_is_exact_independently_of_theta_and_order(theta, order):
     """The defining property: momentum error is round-off, not truncation error.
 
     Sweeping ``theta`` and the order changes the *force* error by orders of
     magnitude while the momentum residual must stay pinned at round-off. A
     non-mutual FMM fails this immediately -- its residual tracks the force error.
 
-    The Pallas backend runs here in interpret mode, so the real kernel logic is
-    executed on CPU CI. That matters more for this test than for any other: the
-    mutual P2P kernel's whole reason to exist is that it computes ``dr`` once and
-    *negates* it, and a port that recomputed ``dr`` for the source-leaf pass
-    would produce forces that pass every accuracy assertion in this file while
-    moving this residual from 1e-17 to the force accuracy. Hence the 1e-13 bound
-    rather than anything resembling a force tolerance.
+    The Pallas backend gets the same sweep in
+    :func:`test_pallas_momentum_is_exact_independently_of_theta_and_order`, at a
+    smaller size and marked ``slow``; see there for why it is a separate test.
     """
     positions, masses, topology, state = _build(
-        1024,
+        1024, theta=theta, order=order, leaf_size=16
+    )
+    accelerations = mutual_accelerations(state, positions, masses)
+    assert _momentum_residual(accelerations, masses) < 1e-13
+
+
+@pytest.mark.slow
+@pytest.mark.parametrize("theta, order", [(0.5, 2), (1.0, 6)])
+def test_pallas_momentum_is_exact_independently_of_theta_and_order(theta, order):
+    """The momentum property above, but executing the real Pallas P2P kernel.
+
+    This is the test that would catch a kernel recomputing ``dr`` for the
+    source-leaf pass instead of negating it: such a port produces forces that
+    pass every accuracy assertion in this file while moving the residual from
+    1e-17 to the force accuracy (~1e-3). Hence the 1e-13 bound, which is nowhere
+    near a force tolerance.
+
+    Deliberately a separate test rather than a ``backend`` parametrization of the
+    one above, for CI cost. The two backends cost about the same per case (~84 s
+    vs ~88 s at order 6, θ=0.7), so parametrizing doubled an already-expensive
+    nine-case sweep and pushed both CI jobs past their timeouts.
+
+    The two cases here are the opposite *corners* of the θ × order plane, not a
+    grid: the defect this guards against (recomputing ``dr`` rather than negating
+    it) is independent of θ and order and would show at any configuration, so the
+    sweep is defence in depth rather than the primary signal. Two corners at a
+    quarter the particle count keep that defence at ~1/8 the cost of the full
+    grid. ``slow`` additionally keeps it out of ``test-smoke``, which has no JAX
+    compile cache and, per the workflow's own comment, no headroom.
+
+    The residual is flat in N (see the scaling table in
+    ``docs/momentum_conserving_fmm.md``), so the smaller system costs no coverage
+    of the property being asserted.
+    """
+    positions, masses, topology, state = _build(
+        512,
         theta=theta,
         order=order,
-        leaf_size=16,
-        backend=backend,
-        interpret=(backend == "pallas"),
+        leaf_size=8,
+        backend="pallas",
+        interpret=True,
     )
+    assert topology.num_near_pairs > 0
     accelerations = mutual_accelerations(state, positions, masses)
     assert _momentum_residual(accelerations, masses) < 1e-13
 
@@ -670,6 +701,7 @@ def test_pallas_backend_is_differentiable():
     assert error < 1e-8
 
 
+@pytest.mark.slow
 def test_pallas_near_field_kernel_matches_pure_jax_in_interpret_mode():
     """Run the mutual P2P kernel itself, on CPU, and compare the near field alone.
 
@@ -750,6 +782,7 @@ def test_pallas_near_field_kernel_actually_runs_in_interpret_mode(monkeypatch):
     assert len(calls) >= 2
 
 
+@pytest.mark.slow
 def test_pallas_near_field_analytic_reverse_matches_pure_jax():
     """The hand-written analytic reverse must equal the pure-JAX autodiff gradient.
 
@@ -794,6 +827,7 @@ def test_pallas_near_field_analytic_reverse_matches_pure_jax():
     assert error < 1e-8
 
 
+@pytest.mark.slow
 def test_pallas_near_field_respects_level_weights():
     """The level weight must be applied inside the kernel, symmetrically.
 
@@ -834,8 +868,8 @@ def test_pallas_near_field_respects_level_weights():
     assert float(jnp.linalg.norm(total) / jnp.linalg.norm(scale)) < 1e-13
 
 
-@pytest.mark.parametrize("order", [4, 6])
-def test_far_field_chunk_padding_cannot_poison_the_expansion(monkeypatch, order):
+@pytest.mark.slow
+def test_far_field_chunk_padding_cannot_poison_the_expansion(monkeypatch):
     """Padding slots in the M2L scan must not produce a non-finite expansion.
 
     ``_dual_m2l`` pads its directed pair list out to a whole number of chunks with
@@ -859,6 +893,9 @@ def test_far_field_chunk_padding_cannot_poison_the_expansion(monkeypatch, order)
     """
     import jaccpot.mutual.farfield as farfield
 
+    order = (
+        4  # the production order; order 6 reproduces it identically but costs 30% more
+    )
     positions, masses = _system(512)
     positions = positions.astype(jnp.float32)
     masses = masses.astype(jnp.float32)
