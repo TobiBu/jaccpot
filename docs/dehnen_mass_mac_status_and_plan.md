@@ -23,6 +23,19 @@ Two defects found on the way, both in shipped behaviour:
   Dehnen §5.2's θ_crit ≈ 0.46), and pinned by a test that fails if it is ever
   reconnected to the solver's `theta`. **This also affected eq (16a)**: the p=1
   acceleration prepass was running at θ=1.0 too.
+
+  > ⚠ **This changes the eq (16a) arm, so it is a seam in the artifact record.**
+  > Every `mass`-arm number recorded before 2026-08-02 — including the post-fix
+  > headline table below — was measured with the θ=1.0 prepass, because
+  > `paper_cached` derives the criterion's scale from the *cold-call* prepass and
+  > the bench does one prepare then one evaluate. New runs use θ=0.5. Do not
+  > compare a pre- and post-change `mass` arm directly; re-run the baseline
+  > instead. The eq (16b) benefit was measured *for* this change, but the eq (16a)
+  > side was changed by analogy, and the direction is not obvious a priori: a
+  > lower-quality `|a_b|` could make the scale too *large*, which per trap 6 means
+  > the old measurements may have been over-accepting (faster and less accurate)
+  > rather than under-accepting. Quantifying that is the one loose thread from this
+  > pass.
 - **The `|a_b|` recorder would have overwritten an `f_b` scale.**
   `_record_force_scale_from_evaluation` writes each evaluation's accelerations
   into the force-scale cache, which is what makes reuse mean anything for (16a).
