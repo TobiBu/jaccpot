@@ -351,6 +351,12 @@ class EvaluateMixin:
                 max_acc_derivative_order=derivative_order,
             )
 
+        self._record_force_scale_from_evaluation(
+            state=state,
+            evaluation=evaluation,
+            full_evaluation=(resolved_target_indices is None),
+        )
+
         if jnp.issubdtype(state.input_dtype, jnp.floating):
             output_dtype = state.input_dtype
         else:

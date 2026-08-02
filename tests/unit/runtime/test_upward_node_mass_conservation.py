@@ -30,6 +30,17 @@ import pytest
 
 from jaccpot import FastMultipoleMethod, FMMAdvancedConfig, FMMPreset
 
+# Compile-bound: every test here builds a solver and runs at least one full FMM
+# solve, measured at 26-95 s each on CPU. `ci.yml` runs the version-compatibility
+# matrix (`test-smoke`) with `-m "not slow and not experimental"` on a 30 minute
+# budget and reserves the compile-heavy tests for `test-full` on 3.13. Leaving
+# these unmarked put 94 such cases into that matrix and timed it out.
+#
+# `test_dehnen_mac_reference.py` is deliberately NOT marked: it checks eqs (12),
+# (13), (15) and (16a) against independent numpy references at 1-10 s per test, so
+# the criterion's correctness is still verified on every supported Python.
+pytestmark = pytest.mark.slow
+
 
 def _uniform_problem(n: int, *, seed: int = 0):
     key_pos = jax.random.PRNGKey(seed)

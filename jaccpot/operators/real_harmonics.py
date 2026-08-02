@@ -199,7 +199,7 @@ import numpy as np
 from jax import lax
 from jaxtyping import Array, DTypeLike
 
-from jaccpot.operators.dtypes import floor_squared_radius, squared_radius_floor
+from jaccpot.operators.dtypes import floor_squared_radius
 from jaccpot.operators.symmetric_tensors import symmetric_multi_indices_3d
 from jaccpot.runtime.grad_options import analytic_l2p_vjp_enabled
 
@@ -283,6 +283,36 @@ def _factorial_table_jax(max_n: int, dtype: DTypeLike) -> Array:
     return jnp.exp(jax.lax.lgamma(n + 1.0)).astype(dtype)
 
 
+def _azimuth_from_floored_rho(x: Array, y: Array, rho: Array) -> tuple[Array, Array]:
+    """``(cos φ, sin φ) = (x/ρ, y/ρ)`` with NO degenerate branch.
+
+    ``rho`` must be the *floored* cylindrical radius
+    ``sqrt(floor_squared_radius(x*x + y*y))``, which is a normal number in every
+    supported dtype (:func:`~jaccpot.operators.dtypes.squared_radius_floor` is
+    dtype-aware), so the division is always finite. ``|x|, |y| <= ρ`` also holds
+    when the floor bites, so both results stay in ``[-1, 1]`` and the Chebyshev
+    ``cos(mφ)``/``sin(mφ)`` recurrences downstream stay bounded.
+
+    Deliberately branch-free. Selecting a *constant* ``(cos φ, sin φ) = (1, 0)``
+    where ``ρ`` hits the floor -- what this used to do -- is harmless in the
+    forward pass, because every ``|m| >= 1`` term carries a ``sin^|m| θ = (ρ/r)^|m|``
+    factor that annihilates the arbitrary azimuth. Under ``jax.grad`` it is not: a
+    constant has no ``x``/``y`` derivative, so the *entire* transverse gradient of
+    the ``m != 0`` terms was dropped, silently zeroing the x and y components of
+    the far-field force for any particle sitting exactly at its expansion centre
+    (guaranteed for a one-particle leaf) or exactly on that centre's z axis.
+
+    Keeping the division lets the limit come out of the algebra instead of being
+    branched away. The floored ``ρ`` cancels analytically:
+    ``sin θ cos φ = (ρ/r)(x/ρ) = x/r``, so e.g. ``U_1^1 = r sin θ cos φ / 2!``
+    differentiates to ``(1/2, 0, 0)`` at ``delta == 0`` as it must. For ``|m| >= 2``
+    the ``O(1/ρ_floor)`` derivative of ``cos(mφ)`` is multiplied by
+    ``(ρ_floor/r)^|m|`` and vanishes -- which is also the true limit, since those
+    terms are products of at least two coordinates.
+    """
+    return x / rho, y / rho
+
+
 @partial(jax.jit, static_argnames=("order",))
 def p2m_real_direct(
     delta: Array,
@@ -341,15 +371,12 @@ def p2m_real_direct(
     cos_theta = z / r
     sin_theta = rho / r
 
-    # cos φ = x/ρ, sin φ = y/ρ (with safe handling when rho ~ 0). The degeneracy
-    # test must be the SAME predicate as "the floor was applied", so compare rho2
-    # against the floor rather than rho against a hard-coded sqrt of it: in float64
-    # `rho2 > 1e-60` is exactly the old `rho > 1e-30`, but the old form silently
-    # inverted in float32 (where the 1e-60 floor flushed to zero), picking the
-    # x/rho branch on the z axis and yielding cos_phi=0 instead of the correct 1.0.
-    rho_nonzero = rho2 > squared_radius_floor(rho2.dtype)
-    cos_phi = jnp.where(rho_nonzero, x / rho, 1.0)
-    sin_phi = jnp.where(rho_nonzero, y / rho, 0.0)
+    # cos φ = x/ρ, sin φ = y/ρ, unconditionally -- see
+    # `_azimuth_from_floored_rho` for why a degenerate branch here breaks the
+    # transverse gradient. The L2P case is the one that reached production, but
+    # this P2M has the identical structure and the identical defect: the gradient
+    # w.r.t. a particle position exactly at its leaf's expansion centre.
+    cos_phi, sin_phi = _azimuth_from_floored_rho(x, y, rho)
 
     # Precompute factorials
     fact = _factorial_table_jax(2 * p, dtype)
@@ -518,15 +545,10 @@ def evaluate_local_real(
     cos_theta = z / r
     sin_theta = rho / r
 
-    # cos φ = x/ρ, sin φ = y/ρ (with safe handling when rho ~ 0). The degeneracy
-    # test must be the SAME predicate as "the floor was applied", so compare rho2
-    # against the floor rather than rho against a hard-coded sqrt of it: in float64
-    # `rho2 > 1e-60` is exactly the old `rho > 1e-30`, but the old form silently
-    # inverted in float32 (where the 1e-60 floor flushed to zero), picking the
-    # x/rho branch on the z axis and yielding cos_phi=0 instead of the correct 1.0.
-    rho_nonzero = rho2 > squared_radius_floor(rho2.dtype)
-    cos_phi = jnp.where(rho_nonzero, x / rho, 1.0)
-    sin_phi = jnp.where(rho_nonzero, y / rho, 0.0)
+    # cos φ = x/ρ, sin φ = y/ρ, unconditionally -- see
+    # `_azimuth_from_floored_rho` for why a degenerate branch here breaks the
+    # transverse gradient, i.e. the x and y components of the far-field force.
+    cos_phi, sin_phi = _azimuth_from_floored_rho(x, y, rho)
 
     # Precompute factorials
     fact = _factorial_table_jax(2 * p, dtype)

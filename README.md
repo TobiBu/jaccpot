@@ -390,20 +390,30 @@ Adaptive traversal can weight its solver-side policy state with per-node force
 scales. Select how those scales are estimated with `mac_force_scale_mode`:
 
 - `"prev"`:
-  reuse the previous full-step per-node force-scale estimate (`self._last_force_scale_nodes`).
+  reuse the previous full-step per-node force-scale estimate
+  (`self._last_force_scale_nodes`, refreshed after every full-order evaluation).
   This is the cheapest option and is the practical default for `tail_proxy`.
 - `"prepass"`:
   run a cheap lowest-order prepass for the current configuration and derive force
-  scales from that pass.
+  scales from that pass, on every `prepare_state`.
 - `"paper"`:
   run the stricter paper-style current-step prepass used by
-  `adaptive_error_model="dehnen_paper"`.
+  `adaptive_error_model="dehnen_paper"`, on every `prepare_state`.
+- `"paper_cached"`:
+  run the paper-style prepass once, on the cold call, then reuse the cached scale
+  (refreshed from each full evaluation). This is what `mac_type="dehnen_error"`
+  selects by default.
 
 Interpretation:
 
 - `prev` is a runtime-oriented reuse mode.
 - `paper` is the more publication/reference-oriented mode because it derives the
   threshold from a dedicated current-step prepass rather than from historical state.
+  It is also the most expensive: the extra prepass on every step dominates
+  `prepare_state`.
+- `paper_cached` is the production form of `paper`. Dehnen §5.4 licenses the reuse
+  explicitly -- the previous step's accelerations are "only very slightly worse"
+  than the exact `a_b` -- and a real simulation always has them.
 - `prepass` sits between the two as a generic current-step estimate that is not
   specifically tied to the paper-style Dehnen path.
 

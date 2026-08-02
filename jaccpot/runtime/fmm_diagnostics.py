@@ -145,6 +145,13 @@ class DiagnosticsMixin:
     def get_runtime_diagnostics(self: "FastMultipoleMethod") -> dict[str, Any]:
         """Return read-only runtime diagnostics for compile/profile reuse audits."""
         return {
+            # Why the large-N prepare path declined, or None if it was not
+            # declined for a recorded reason. The lane is selected silently, so
+            # without this a configuration the lane cannot support (e.g. the
+            # Dehnen paper MAC) reads as an unexplained slowdown.
+            "large_n_path_declined_reason": getattr(
+                self, "_large_n_path_declined_reason", None
+            ),
             "compiled_profile_fingerprint_last": self._compiled_profile_fingerprint_last,
             "compiled_profile_transitions": int(self._compiled_profile_transitions),
             "refresh_prepare_calls": int(self._compiled_profile_refresh_calls),

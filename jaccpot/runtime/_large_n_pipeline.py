@@ -1977,6 +1977,20 @@ def evaluate_large_n_state(
     return accelerations, potentials
 
 
+def _record_large_n_decline(fmm: Any, reason: str) -> None:
+    """Record why the large-N prepare path declined, for runtime diagnostics.
+
+    The lane is selected silently, so a caller that configures a feature the lane
+    does not support sees only an unexplained slowdown. Surfacing the reason makes
+    "my large-N run is slow" answerable without bisecting the selection predicate.
+    """
+
+    try:
+        fmm._large_n_path_declined_reason = str(reason)
+    except AttributeError:  # pragma: no cover - defensive, fmm is always a solver
+        pass
+
+
 def can_use_large_n_prepare_path(
     fmm: object,
     *,
@@ -2014,6 +2028,20 @@ def can_use_large_n_prepare_path(
         bool(getattr(fmm, "_uses_paper_style_force_scale"))
         and fmm._uses_paper_style_force_scale()
     ):
+        # The Dehnen paper MAC needs a solver-owned pair policy plus a p=1 force
+        # scale prepass, neither of which this lane supports, so the whole large-N
+        # prepare path is skipped. Record why: without this the caller sees only a
+        # slowdown and has no way to tell the requested lane never engaged.
+        _record_large_n_decline(fmm, "paper_style_force_scale")
+        if runtime_path == "large_n":
+            raise RuntimeError(
+                "runtime_path='large_n' was requested explicitly, but the large-N "
+                "prepare path cannot run the Dehnen paper MAC "
+                "(mac_type='dehnen_error' / adaptive_error_model='dehnen_paper'), "
+                "which requires a solver-owned pair policy and a low-order force "
+                "scale prepass. Use mac_type='dehnen', or runtime_path='auto' to "
+                "fall back to the generic radix lane."
+            )
         return False
     if int(positions_arr.shape[0]) != int(masses_arr.shape[0]):
         return False
