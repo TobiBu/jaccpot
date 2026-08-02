@@ -2412,47 +2412,29 @@ class PrepareMixin:
         self: "FastMultipoleMethod",
         positions: Array,
         masses: Array,
-        *,
-        bounds: Optional[Tuple[Array, Array]] = None,
-        leaf_size: int = 16,
-        max_order: int = 2,
-        theta: Optional[float] = None,
-        jit_tree: Optional[bool] = None,
-        refine_local: Optional[bool] = None,
-        max_refine_levels: Optional[int] = None,
-        aspect_threshold: Optional[float] = None,
-        runtime_overrides_override: Optional[_RuntimeExecutionOverrides] = None,
-        fused_device_mode: bool = False,
+        **kwargs: Any,
     ) -> PreparedStateLike:
         """Precompute tree and interaction data for repeated evaluations.
 
-        When ``tree_build_mode`` is ``"fixed_depth"`` the optional
-        ``refine_local``, ``max_refine_levels``, and ``aspect_threshold``
-        arguments control the host-side leaf refinement pass.
+        Keyword arguments are those of :meth:`_prepare_state_uncaught`, which
+        holds the implementation and the full signature; the public facade in
+        ``jaccpot.solver`` documents them for users. They are forwarded verbatim
+        as ``**kwargs`` ON PURPOSE: an earlier version of this wrapper repeated
+        the parameter list, and a parameter added to the implementation would
+        then have been silently dropped here -- the exact failure mode the rest
+        of this change set is about.
 
-        On an allocation or traversal-capacity failure the error is re-raised
-        with the statically-sized buffers for this configuration, largest first,
-        the knob that sizes each, and a configuration that would fit. An
-        "Out of memory while trying to allocate 8.00GiB" on a 40 GB card names
-        neither the buffer nor a way forward; see
+        This wrapper exists to turn an allocation or traversal-capacity failure
+        into something actionable: the error is re-raised with the
+        statically-sized buffers for this configuration largest-first, the knob
+        that sizes each, and a configuration that would fit, with the original
+        chained. "Out of memory while trying to allocate 8.00GiB" on a 40 GB card
+        named neither the buffer nor a way forward. See
         :mod:`jaccpot.runtime.capacity_diagnostics`.
         """
 
         try:
-            return self._prepare_state_uncaught(
-                positions,
-                masses,
-                bounds=bounds,
-                leaf_size=leaf_size,
-                max_order=max_order,
-                theta=theta,
-                jit_tree=jit_tree,
-                refine_local=refine_local,
-                max_refine_levels=max_refine_levels,
-                aspect_threshold=aspect_threshold,
-                runtime_overrides_override=runtime_overrides_override,
-                fused_device_mode=fused_device_mode,
-            )
+            return self._prepare_state_uncaught(positions, masses, **kwargs)
         except Exception as exc:
             if not is_capacity_failure(exc):
                 raise
@@ -2470,8 +2452,8 @@ class PrepareMixin:
             reraise_with_capacity_report(
                 exc,
                 num_particles=num_particles,
-                leaf_size=int(leaf_size),
-                max_order=int(max_order),
+                leaf_size=int(kwargs.get("leaf_size", 16)),
+                max_order=int(kwargs.get("max_order", 2)),
                 working_dtype=self.working_dtype,
                 preset=self.preset,
                 traversal_config=traversal_config,
