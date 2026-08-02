@@ -358,7 +358,8 @@ is the **scaled error δa/f** with `f_b ≡ Σ_{a≠b} G μ_a / |x_a−x_b|²`.
    degrade_the_error_tail` pins the safe regime at 0.028 and asserts the two arms
    actually disagree about the accept mask there, so it cannot go vacuous.
 7. **Don't pipe long-running output through `tail`** — it buffers until exit, so a
-   killed job shows nothing. Redirect to a file.
+   killed job shows nothing. Redirect to a file, and use `python -u`; see trap 9, where
+   this cost several diagnostic runs their entire output.
 8. **`compare_arms` will happily interpolate across the far-field switch-on, and the
    ratios it reports there are meaningless.** The fixed-θ arm's p90 jumps many orders of
    magnitude between the last θ that accepts almost nothing and the first that accepts a
@@ -369,7 +370,41 @@ is the **scaled error δa/f** with `f_b ≡ Σ_{a≠b} G μ_a / |x_a−x_b|²`.
    p90 lies **inside both arms' measured ranges**, and use a θ grid dense enough to bridge
    the switch-on (0.42–0.66 in steps of 0.04 worked at N=4096/p=8). Sanity check: a p90
    target below ~1e-9 at p=8 is almost certainly in the gap.
-9. **The fast lanes were never active in any of these measurements.** The large-N path
+9. **Benchmark configuration, hard-won. Read before running any sweep.**
+
+   - **Match on the statistic the claim is about.** Dehnen section 5.3 claims a reduced
+     tail at comparable *median*; we matched *p90* for a long time. On identical N=1e5
+     data that one choice is the difference between "parity" (p99 0.91-1.23) and
+     "rms 2.0-23.6x, p99.99 1.7-27.2x at ~38% less work". p90 is itself partly a tail
+     statistic, so equalising it surrenders the property being measured. Now
+     `--match-on {p90,median}`. p90 was originally correct -- at N=4096 the far field is
+     shallow and the median saturates at machine precision -- but that stopped applying
+     once the far field got deep, and nobody rechecked.
+   - **eps has to be Dehnen's.** Sweeps ran at 3e-4..1e-5 for a long time; Dehnen uses
+     **2e-7**, i.e. 50-1500x tighter. Inherited from N=4096, where trap 5 meant tight eps
+     accepted nothing. It is reachable at larger N.
+   - **Tight eps is slow, not broken.** eps=2e-7 at N=16384/leaf 16 takes ~271 s with
+     **6 traversal retries**, each of which recompiles. That reads exactly like a hang
+     (long wall time, low GPU utilisation, no output) and cost several wasted runs.
+     Converged capacities, pass them up front to skip the cycle:
+     `max_pair_queue=131072`, `max_interactions_per_node=8192`. The bench now records
+     these per config (`retry_final_caps`) and prints them at the end of a run.
+   - **Do not round the caps up.** Traversal buffers are `num_nodes *
+     interaction_capacity`. Setting `max_interactions_per_node=1<<18` (32x the converged
+     8192) tried to allocate 4 GiB on top of 32 and OOMed. Bigger is not safer here.
+   - **leaf_size and N are coupled, and getting it wrong fails silently.** leaf 256 is
+     the production value (what the 1M runs use) and is now the bench default, but at
+     N=16384 it gives only 64 leaves: the criterion accepted **zero** far pairs at
+     eps=2e-7 and the run degenerated to all-to-all direct summation. It was *faster*
+     (95.9 s vs 271 s) and measured nothing. Rule of thumb: keep >= 128 leaves, so leaf
+     256 wants N >= ~3e4 and really N >= 1e5. The bench now warns.
+   - **Use `python -u` and never pipe a long run through `tail`.** Block-buffered stdout
+     is discarded when `timeout` sends SIGTERM, so a killed run reports nothing at all;
+     and `tail -N` silently threw away the far/near counts a diagnostic run existed to
+     produce.
+   - **Pick the GPU with `autocvd`, every time.** One sweep was launched onto a device
+     with 25 GB already in use and OOMed for that reason alone.
+10. **The fast lanes were never active in any of these measurements.** The large-N path
    requires `expansion_basis="solidfmm"` *and* `preset="large_n_gpu"`; the benchmark
    uses `basis="real"`, so everything ran the generic path. Do not attribute the slow
    baseline to a lane fallback.
