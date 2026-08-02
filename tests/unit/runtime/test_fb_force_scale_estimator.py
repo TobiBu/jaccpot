@@ -404,6 +404,39 @@ def test_an_evaluation_does_not_overwrite_the_fb_cache():
     ), "the |a_b| recorder is inert, so the f_b stability test proves nothing"
 
 
+def test_the_fb_prepass_does_not_break_the_reverse_pass():
+    """FD must still agree with AD with the ``f_b`` prepass in the path.
+
+    The MAC lives entirely on the frozen side of the differentiability seam, so
+    this is not evidence that the criterion is differentiable -- it is a guard that
+    a *new* prepass has not leaked a tracer into an instance attribute or broken
+    the reverse pass. Both are live risks here: the estimator writes
+    ``_last_force_scale_particles``, and the M2M mass-conservation and force-scale
+    caches on this class are exactly the kind of state that must never capture a
+    tracer.
+    """
+
+    positions, masses = _sample_problem(512)
+    probe = jax.random.normal(jax.random.PRNGKey(3), (512, 3), dtype=jnp.float64)
+    fmm = _fb_solver(mac_force_scale_mode="paper_fb")
+    state = fmm.prepare_state(
+        positions, masses, leaf_size=LEAF_SIZE, max_order=MAX_ORDER
+    )
+    assert _far_pairs(state) > 0, "config must exercise the M2L reverse pass"
+
+    def loss(x):
+        return jnp.sum(probe * fmm.differentiable_accelerations(state, x, masses))
+
+    grad = jax.grad(loss)(positions)
+    assert bool(jnp.all(jnp.isfinite(grad)))
+    step = 1e-6
+    ad = float(jnp.sum(grad * probe))
+    fd = float(
+        (loss(positions + step * probe) - loss(positions - step * probe)) / (2 * step)
+    )
+    assert abs(fd - ad) / (abs(fd) + 1e-300) < 1e-4
+
+
 def test_the_prepass_angle_is_independent_of_the_solver_theta():
     """Changing ``theta`` must not move the ``f_b`` estimate.
 
