@@ -693,6 +693,26 @@ is the **scaled error δa/f** with `f_b ≡ Σ_{a≠b} G μ_a / |x_a−x_b|²`.
    reference and the evaluation entirely. If the fixed arm's far count is not in the
    millions at your N, the grid is not measuring the criterion.
 
+   **leaf 64 at N=1e5 is the usable compromise.** Censused, and every configuration has
+   a real far field — so the leaf-16 result can be checked at a production-scale leaf
+   rather than only at the small one:
+
+   | arm | knob | far pairs | near leaf pairs | prepare |
+   |---|---|---|---|---|
+   | fixed | θ=0.38 | 281 950 | 1 965 018 | 152.5 s |
+   | fixed | θ=0.46 | 380 424 | 1 469 408 | 42.0 s |
+   | fixed | θ=0.54 | 359 636 | 1 068 500 | 42.8 s |
+   | fixed | θ=0.62 | 303 958 | 792 436 | 45.4 s |
+   | mass | ε=1e-6 | 409 574 | 1 684 898 | **1337.5 s** |
+   | mass | ε=2e-7 | 284 634 | 2 025 376 | **1295.5 s** |
+
+   Budget for the mass arm's prepare: ~22 minutes per config at this size, against ~45 s
+   for the geometric arm. That is the criterion's prepass plus traversal retries, and it
+   is why a leaf-64 × 3-seed × full-grid run is a many-hour job rather than an
+   afternoon's. Note the far count is **not** monotone in θ — it peaks near θ=0.46 and
+   falls after, because larger θ accepts higher up the tree, giving fewer but bigger
+   pairs. Do not read a falling far count as a tightening criterion.
+
    Corollary for the N-ladder: **leaf_size must be held fixed across it.** A ladder that
    keeps leaf 256 while N grows crosses from "no far field" to "real far field" partway
    up, and reports that crossing as an N-scaling trend.
