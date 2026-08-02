@@ -1,7 +1,76 @@
 # Dehnen mass-dependent MAC: status and next steps
 
-Handoff document, 2026-07-31; Step 1 completed and folded in 2026-08-01.
+Handoff document, 2026-07-31; Steps 1–3 folded in 2026-08-01/02.
 Self-contained: a fresh session should be able to pick this up without prior context.
+
+## START HERE — remaining work, in priority order
+
+Branch **`feat/dehnen-mass-dependent-mac`**, worktree
+**`/export/home/tbuck/jaccpot-mac-wt`**, off `main`. The upward-M2M fixes are already in
+`main` (PR #56). Everything below runs from the worktree with
+`PYTHONPATH=/export/home/tbuck/jaccpot-mac-wt` (the venv's editable install points at
+the *other* checkout, so without this you silently test the wrong code).
+
+**Read trap 9 before running any sweep.** Every item below is one measurement away from
+being answered, and each was previously derailed by a configuration trap now recorded
+there.
+
+### 1. The open question that decides the paper — does the benefit hold at Dehnen's ε?
+
+Everything is measured at ε = 3e-4…1e-5. **Dehnen uses 2e-7.** Seven attempts failed on
+configuration, not on the criterion; the run is now cheap and fully specified:
+
+```bash
+cd /export/home/tbuck/jaccpot-mac-wt
+eval $(/export/home/tbuck/jaccpot/.venv/bin/autocvd -l -q)
+XLA_PYTHON_CLIENT_PREALLOCATE=false PYTHONPATH=$PWD JAX_ENABLE_X64=1 \
+  setsid nohup /export/home/tbuck/jaccpot/.venv/bin/python -u \
+  -m bench.validation.mac_error_distribution \
+    --n 100000 --leaf-size 256 --order 8 --distribution plummer,bulge_halo \
+    --theta 0.30,0.34,0.38,0.42,0.46,0.50 --eps 1e-5,1e-6,3e-7,2e-7,1e-7 \
+    --softening 1e-6 --metric dehnen --match-on median --reference-block 64 \
+    --arm fixed,mass --json-out results/validation/mac_dehnen_eps_n1e5.json \
+  > /tmp/eps.log 2>&1 < /dev/null &
+```
+
+Report **rms and p99.99** (what Dehnen quotes), matched on **median** (his comparison).
+Expect traversal retries on the tight-ε configs; the run prints the converged caps at the
+end — feed them back via `DualTreeTraversalConfig` for the rerun and *do not round up*.
+
+### 2. Settle the N-scaling trend properly
+
+At matched p90 the advantage looked like it decayed 4096 → 1e5; at matched median it did
+not. One seed at each end, no error bars, and the two matchings disagree — so the trend
+is not established either way. Run a clean ladder **N = 3e4, 1e5, 3e5** × **3 seeds** at
+leaf 256, one methodology (`--match-on median`), and report rms/p99.99 with spread. This
+is cheap and it decides whether the claim is "holds at scale" or "decays with N".
+
+### 3. Step 2 production — the O(N) `f_b` estimator
+
+eq (16b) beats eq (16a) (~1.5× p99, ~2× tail) but only measured with *exact* O(N²) `f_b`,
+which is a ceiling, not a prediction. Build the estimator (monopole-only far-field
+accumulation over the existing interaction lists plus the exact near-field scalar sum;
+all on device, one jit) and measure it against the exact-`f_b` arm. The far-field term is
+**mandatory** — `f_b` is not near-field dominated (16 largest contributors capture ~13 %).
+
+### 4. Step 3′ — carry the pair policy into the fast lanes
+
+The only remaining route to 10⁶ (Step 3 is refuted; see below). Mostly jaccpot plumbing,
+not a yggdrax change. **Measure `store_far_tags` memory first** — supplying a pair policy
+allocates a far-tag buffer in the minimum-memory lane, where the 1M reverse peak is
+already 11.07 GB of 40 GB.
+
+### 5. Loose ends
+
+- **`mac_type="dehnen_theta"` is refuted** and retained only behind a `FutureWarning` so
+  its negative result stays reproducible. Delete it if it stops earning that keep.
+- **The cartesian basis is broken** (~1.8e-1 rel-L2 at both p=2 and p=4, versus solidfmm's
+  8.1e-5). Pre-existing, out of scope here, now documented at the per-basis golden anchor
+  rather than hidden behind a blanket tolerance. Worth its own issue.
+- Interaction **work is a wash to a win** (1.00–1.06× at N=4096, mass uses 17–51 % *less*
+  at N=1e5 matched p90). Frame the claim as tail accuracy at equal-or-less cost, never as
+  speed.
+
 
 ## TL;DR
 
@@ -20,11 +89,12 @@ tests against independent numpy float64 references, not merely asserted.
 Four correctness bugs in the criterion were found and fixed, plus, later, two in the
 upward pass that the criterion work uncovered. Step 1 (cache the force-scale prepass)
 is done: steady-state prepare overhead went from **5.87× to 0.98×** at N=16384/p=8.
-Step 2 (eq 16b) is validated and **negative** — see below.
+Step 2 (eq 16b) is validated and **positive** — it beats eq (16a). Step 3 (fold the
+criterion into per-node opening angles) is **refuted**, structurally.
 
-Open: the MAC comparison must be re-measured post-M2M-fix before any accuracy claim is
-made; the mass MAC still cannot reach any fast lane; nothing has been measured at
-Dehnen's N (10⁵–10⁷); and the cartesian basis has an unexplained ~1.8×10⁻¹ error.
+Open: whether the benefit holds at Dehnen's ε = 2×10⁻⁷ (never measured); the N-scaling
+trend; the O(N) `f_b` estimator; fast-lane access; and the cartesian basis's unexplained
+~1.8×10⁻¹ error. See **START HERE** above for the ordered plan.
 
 ## Where the work lives
 
