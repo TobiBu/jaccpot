@@ -37,12 +37,22 @@ import jax.numpy as jnp
 from jax import lax
 from jaxtyping import Array
 
-__all__ = ["mutual_near_field_forces", "resolve_near_chunk_size"]
+__all__ = [
+    "mutual_near_field_forces",
+    "resolve_near_chunk_size",
+    "mutual_nearfield_pallas_active",
+]
 
 # Peak bytes the (chunk, S, S, 3) pair tensor is allowed to reach. The reverse
 # pass materialises tensors of this shape, so it is the knob that bounds
 # gradient memory as well as forward memory.
 _PAIR_TENSOR_BUDGET_BYTES = 64 << 20
+
+# The Pallas lane never materialises the S x S tile in HBM -- it lives in
+# registers and only the (chunk, S, 4) reductions are written -- so its chunk is
+# bounded by a much smaller per-pair footprint and can be far larger. Fewer,
+# bigger grids beat many small launches.
+_PALLAS_OUTPUT_BUDGET_BYTES = 256 << 20
 
 
 def resolve_near_chunk_size(
@@ -53,6 +63,29 @@ def resolve_near_chunk_size(
         return max(1, int(requested))
     per_pair = max(1, int(max_leaf_size) ** 2 * 3 * int(itemsize))
     return max(1, _PAIR_TENSOR_BUDGET_BYTES // per_pair)
+
+
+def _resolve_pallas_chunk_size(
+    max_leaf_size: int, itemsize: int, requested: Optional[int] = None
+) -> int:
+    """Pick the scan chunk for the Pallas lane, bounded by its output tensors."""
+    if requested is not None:
+        return max(1, int(requested))
+    # Two (chunk, S, 4) outputs, forward; the analytic reverse writes the same
+    # shape again for positions plus (chunk, S) for masses.
+    per_pair = max(1, 2 * int(max_leaf_size) * 4 * int(itemsize))
+    return max(1, _PALLAS_OUTPUT_BUDGET_BYTES // per_pair)
+
+
+def mutual_nearfield_pallas_active(use_pallas: bool, interpret: bool) -> bool:
+    """Whether the near field should dispatch the mutual Pallas kernel."""
+    if not use_pallas:
+        return False
+    if interpret:
+        return True
+    from jaccpot.pallas.nearfield_mutual import pallas_nearfield_mutual_supported
+
+    return bool(pallas_nearfield_mutual_supported())
 
 
 def _pair_weights(
@@ -131,6 +164,8 @@ def mutual_near_field_forces(
     rung: Optional[Array] = None,
     level_weights: Optional[Array] = None,
     chunk_size: Optional[int] = None,
+    use_pallas: bool = False,
+    interpret: bool = False,
 ) -> Array:
     """Return the mutual near-field **force** on every particle.
 
@@ -147,6 +182,12 @@ def mutual_near_field_forces(
         ``(L,)`` leaf-list indices whose intra-leaf interactions are evaluated.
     rung, level_weights :
         Optional block-step level weighting; see the module docstring.
+    use_pallas, interpret :
+        Route the leaf-pair blocks through
+        :mod:`jaccpot.pallas.nearfield_mutual` (Pallas forward + hand-written
+        analytic reverse) instead of the pure-JAX tensors. ``interpret`` runs the
+        same kernel logic under CPU semantics, which is what keeps the parity
+        tests non-vacuous off-GPU.
 
     Returns
     -------
@@ -162,7 +203,63 @@ def mutual_near_field_forces(
     leaf_particles = jnp.asarray(leaf_particles)
     leaf_particle_valid = jnp.asarray(leaf_particle_valid)
     max_leaf_size = int(leaf_particles.shape[1])
-    chunk = resolve_near_chunk_size(max_leaf_size, dtype.itemsize, chunk_size)
+    pallas = mutual_nearfield_pallas_active(use_pallas, interpret)
+    if pallas:
+        chunk = _resolve_pallas_chunk_size(max_leaf_size, dtype.itemsize, chunk_size)
+    else:
+        chunk = resolve_near_chunk_size(max_leaf_size, dtype.itemsize, chunk_size)
+
+    # The kernel takes masks and rungs as FLOAT arrays: they cross a `custom_vjp`
+    # boundary, and a bool/int argument there has tangent type `float0`, which a
+    # `bwd` cannot hand back a `zeros_like` for. Same `_f` convention the radix
+    # fast lane's custom_vjp uses.
+    num_levels = (
+        0 if level_weights is None or rung is None else int(level_weights.shape[0])
+    )
+    lw_arr = (
+        jnp.ones((1,), dtype=dtype)
+        if num_levels <= 0
+        else jnp.asarray(level_weights, dtype=dtype)
+    )
+    # Match the pure-JAX lane's `mode="clip"` take: a rung above k_max is clamped
+    # onto the last level rather than silently dropped.
+    rung_f = (
+        None
+        if rung is None
+        else jnp.clip(jnp.asarray(rung), 0, max(num_levels - 1, 0)).astype(dtype)
+    )
+    soft_sq = jnp.asarray(softening, dtype=dtype) ** 2
+    g_arr = jnp.asarray(G, dtype=dtype)
+
+    def _pallas_block(la, lb, va, vb, *, exclude_diagonal, emit_b):
+        """Gather two leaf blocks, run the kernel, return ``(F_a, F_b)``."""
+        from jaccpot.pallas.nearfield_mutual import mutual_leafpair_block_cvjp
+
+        pa, pb = leaf_particles[la], leaf_particles[lb]
+        xa = positions[pa]
+        xb = positions[pb]
+        ma = jnp.where(va, masses[pa], jnp.zeros_like(masses[pa]))
+        mb = jnp.where(vb, masses[pb], jnp.zeros_like(masses[pb]))
+        ra = jnp.zeros(ma.shape, dtype=dtype) if rung_f is None else rung_f[pa]
+        rb = jnp.zeros(mb.shape, dtype=dtype) if rung_f is None else rung_f[pb]
+        f_a, f_b = mutual_leafpair_block_cvjp(
+            xa,
+            ma,
+            va.astype(dtype),
+            xb,
+            mb,
+            vb.astype(dtype),
+            ra,
+            rb,
+            lw_arr,
+            soft_sq,
+            g_arr,
+            num_levels,
+            bool(exclude_diagonal),
+            bool(emit_b),
+            bool(interpret),
+        )
+        return pa, pb, f_a, f_b
 
     # ---- intra-leaf (self) blocks -------------------------------------------
     # The full L x L block is evaluated (minus the diagonal) rather than an upper
@@ -172,8 +269,12 @@ def mutual_near_field_forces(
     self_leaves = jnp.asarray(self_leaves)
     n_self = int(self_leaves.shape[0])
     if n_self:
-        self_steps = (n_self + chunk - 1) // chunk
-        self_pad = self_steps * chunk - n_self
+        # Clamp to the actual count: the chunk is a memory *budget*, and a budget
+        # larger than the work would otherwise pad the scan out to a full chunk
+        # of dead slots -- which the kernels still evaluate.
+        self_chunk = min(chunk, n_self)
+        self_steps = (n_self + self_chunk - 1) // self_chunk
+        self_pad = self_steps * self_chunk - n_self
         padded_self = jnp.concatenate(
             [self_leaves, jnp.zeros((self_pad,), dtype=self_leaves.dtype)]
         )
@@ -185,11 +286,25 @@ def mutual_near_field_forces(
         )
 
         def self_body(acc: Array, idx: Array) -> tuple[Array, None]:
-            start = idx * chunk
-            leaves = lax.dynamic_slice_in_dim(padded_self, start, chunk)
-            live = lax.dynamic_slice_in_dim(self_live, start, chunk)
-            particles = leaf_particles[leaves]
+            start = idx * self_chunk
+            leaves = lax.dynamic_slice_in_dim(padded_self, start, self_chunk)
+            live = lax.dynamic_slice_in_dim(self_live, start, self_chunk)
             valid_slot = leaf_particle_valid[leaves] & live[:, None]
+            if pallas:
+                # Intra-leaf: the full block minus its diagonal is already exactly
+                # antisymmetric, so only the `a` side is emitted -- applying both
+                # sides to the same particles would double count.
+                particles, _, contrib, _ = _pallas_block(
+                    leaves,
+                    leaves,
+                    valid_slot,
+                    valid_slot,
+                    exclude_diagonal=True,
+                    emit_b=False,
+                )
+                contrib = jnp.where(valid_slot[..., None], contrib, 0.0)
+                return acc.at[particles].add(contrib.astype(acc.dtype)), None
+            particles = leaf_particles[leaves]
             x, m, r = _gather_leaf_block(positions, masses, rung, particles, valid_slot)
             pair_valid = valid_slot[:, :, None] & valid_slot[:, None, :]
             pair_valid = pair_valid & ~jnp.eye(max_leaf_size, dtype=bool)[None, :, :]
@@ -209,21 +324,31 @@ def mutual_near_field_forces(
     n_pairs = int(near_a.shape[0])
     if n_pairs == 0:
         return forces
-    steps = (n_pairs + chunk - 1) // chunk
-    pad = steps * chunk - n_pairs
+    pair_chunk = min(chunk, n_pairs)
+    steps = (n_pairs + pair_chunk - 1) // pair_chunk
+    pad = steps * pair_chunk - n_pairs
     if pad:
         near_a = jnp.concatenate([near_a, jnp.zeros((pad,), dtype=near_a.dtype)])
         near_b = jnp.concatenate([near_b, jnp.zeros((pad,), dtype=near_b.dtype)])
         near_valid = jnp.concatenate([near_valid, jnp.zeros((pad,), dtype=bool)])
 
     def pair_body(acc: Array, idx: Array) -> tuple[Array, None]:
-        start = idx * chunk
-        la = lax.dynamic_slice_in_dim(near_a, start, chunk)
-        lb = lax.dynamic_slice_in_dim(near_b, start, chunk)
-        live = lax.dynamic_slice_in_dim(near_valid, start, chunk)
-        pa, pb = leaf_particles[la], leaf_particles[lb]
+        start = idx * pair_chunk
+        la = lax.dynamic_slice_in_dim(near_a, start, pair_chunk)
+        lb = lax.dynamic_slice_in_dim(near_b, start, pair_chunk)
+        live = lax.dynamic_slice_in_dim(near_valid, start, pair_chunk)
         va = leaf_particle_valid[la] & live[:, None]
         vb = leaf_particle_valid[lb] & live[:, None]
+        if pallas:
+            pa, pb, contrib_a, contrib_b = _pallas_block(
+                la, lb, va, vb, exclude_diagonal=False, emit_b=True
+            )
+            contrib_a = jnp.where(va[..., None], contrib_a, 0.0)
+            contrib_b = jnp.where(vb[..., None], contrib_b, 0.0)
+            acc = acc.at[pa].add(contrib_a.astype(acc.dtype))
+            acc = acc.at[pb].add(contrib_b.astype(acc.dtype))
+            return acc, None
+        pa, pb = leaf_particles[la], leaf_particles[lb]
         xa, ma, ra = _gather_leaf_block(positions, masses, rung, pa, va)
         xb, mb, rb = _gather_leaf_block(positions, masses, rung, pb, vb)
         pair_valid = va[:, :, None] & vb[:, None, :]
