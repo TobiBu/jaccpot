@@ -67,17 +67,18 @@ jobs:
     # see the note in pyproject.toml's `[tool.coverage.run]`.
     name: test-full (${{ matrix.shard }})
     runs-on: ubuntu-latest
-    # Per shard. The long pole is `integration` at ~28 min locally once the
-    # conftest cache-clearing applies; the others are ~12 and ~4. 45 rather than
-    # 35 because a push invalidates the .jax_cache key, so the first run after a
-    # source change recompiles cold AND now re-compiles after each cleared test
-    # -- the two costs land together. A cancelled job never SAVES the cache
-    # either, so too tight a cap self-perpetuates.
+    # Per shard. Measured on CI: integration 33.8 min, unit 20.6, rest 9.3. The
+    # long pole pays two costs at once on the first run after a push, since that
+    # invalidates the .jax_cache key: cold compiles AND a recompile after each
+    # cleared test. A cancelled job never SAVES the cache either, so too tight a
+    # cap self-perpetuates.
     #
-    # Still bounded on purpose: the JAX floor is 0.10.2 precisely because 0.11.0
-    # is ~2.6x slower on the CPU backend, and a cap large enough to absorb that
-    # would hide the regression instead of surfacing it.
-    timeout-minutes: 45
+    # 50 is chosen against the thing these caps exist to catch, not against the
+    # current runtime: the JAX floor is 0.10.2 because 0.11.0 is ~2.6x slower on
+    # the CPU backend, and 2.6 x 33.8 min = ~88 min would still blow a 50 min
+    # cap comfortably. So this leaves ~16 min of slack for runner variance while
+    # a real interpreter-level slowdown still trips it.
+    timeout-minutes: 50
     strategy:
       # Both shards always report: one shard's failure must not mask the other's
       # result, since they cover disjoint halves of the suite.
@@ -153,7 +154,21 @@ jobs:
     runs-on: ubuntu-latest
     # 25 -> 30: this job was already finishing at 24.6 of its 25 min before any
     # JAX change, so it had no headroom at all. See test-full's cap note.
-    timeout-minutes: 30
+    #
+    # 30 -> 45: it still had none. Recent runs: 22-26 min on main, 27.9 and
+    # 29.9 min here -- the 3.11 job passed with six seconds to spare, and the
+    # same job has been cancelled at the cap twice in this PR's history. Unlike
+    # test-full this job is not memory-bound, so there is nothing to shard
+    # around; it is simply a large suite on a 2-core runner with no JAX
+    # compilation cache (that is test-full's alone), and every addition to the
+    # suite lands on it directly.
+    #
+    # 45 is chosen against the thing these caps exist to catch, not against the
+    # current runtime: the JAX floor is 0.10.2 because 0.11.0 is ~2.6x slower on
+    # the CPU backend, and 2.6 x 25 min = ~65 min would still blow a 45 min cap.
+    # So this keeps ~20 min of slack for runner variance while a real
+    # interpreter-level slowdown still trips it.
+    timeout-minutes: 45
     strategy:
       fail-fast: false
       matrix:
