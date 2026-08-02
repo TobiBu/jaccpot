@@ -420,7 +420,16 @@ def mutual_leafpair_block_jax(
     """
     num_levels = 0 if level_weights is None else int(level_weights.shape[0])
 
-    def one(xa_i, ma_i, va_i, xb_i, mb_i, vb_i, ra_i, rb_i):
+    def one(
+        xa_i: Array,
+        ma_i: Array,
+        va_i: Array,
+        xb_i: Array,
+        mb_i: Array,
+        vb_i: Array,
+        ra_i: Array,
+        rb_i: Array,
+    ) -> tuple[Array, Array]:
         weight = (
             None
             if num_levels <= 0

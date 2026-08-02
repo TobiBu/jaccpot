@@ -763,6 +763,9 @@ def test_pallas_near_field_kernel_actually_runs_in_interpret_mode(monkeypatch):
 
     monkeypatch.setattr(nfm, "mutual_leafpair_block_pallas", spy)
 
+    # Stays out of the `slow` set so `test-smoke` keeps a canary. Its ~20 s is
+    # compile-bound, not size-bound (N=128 measured the same as N=256), so there
+    # is nothing to gain by shrinking it.
     positions, masses, topology, state = _build(256, theta=1.0, order=4, leaf_size=8)
     fwd = state.forward_permutation
     mutual_near_field_forces(
