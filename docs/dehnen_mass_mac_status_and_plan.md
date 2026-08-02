@@ -11,7 +11,8 @@ Self-contained: a fresh session should be able to pick this up without prior con
 | **3. O(N) `f_b` estimator** | **DONE and it costs nothing.** `mac_force_scale_mode="paper_fb"`. Retains a median 99.7 % of the exact O(N²) `f_b`, is a strict lower bound, and at matched p90 the estimator arm is indistinguishable from the exact-`f_b` ceiling (rms 7.90× vs 7.87×, p99.99 23.8× vs 22.6×, inside the two-seed spread). eq (16b) is now a production path, not a ceiling. |
 | **4. Step 3′ memory gate** | **MEASURED, and it clears.** A pair policy costs **+977 MiB at 1M** (split/streamed build; +969 MiB monolithic), against the 11.07 GB reverse peak on a 40 GB card. Harness: `bench/validation/pair_policy_far_tag_memory.py`; artifact: `bench/results/validation/pair_policy_far_tag_memory_1m.json`. The plumbing itself is **not** done — see Step 3′ for the cache-key hazard that has to be handled first. |
 | **5. `dehnen_theta`** | **Keep.** Its retention is now pinned by `tests/unit/runtime/test_refuted_dehnen_theta_mode.py` (4 cases) instead of asserted in prose — nothing previously tested the `FutureWarning` or that the mode still ran. |
-| **1. Dehnen's ε / 2. N-scaling** | **The specified configuration was wrong and is corrected below.** At leaf 256 the sweep is degenerate: see trap 11. Re-running at leaf 16. |
+| **1. Dehnen's ε** | **ANSWERED: the benefit holds at ε=2e-7, and is larger than at N=4096.** Matched on median at N=16384/leaf 16: Plummer rms **5.8–11.1×** and p99.99 **9.6–18.9×** for eq (16a), **9.4–24.9×** and **22.8–47.3×** for eq (16b) via the O(N) estimator, at 1.00–1.04× work; bulge+halo **70–218×** rms at **0.92–0.98×** work. The specified configuration had to be corrected first — at leaf 256 the sweep is degenerate, see trap 11. |
+| **2. N-scaling** | Running at leaf 16 across N=16384/32768/65536 × 3 seeds, plus a leaf-64 tier at N=1e5 for production relevance. |
 
 Two defects found on the way, both in shipped behaviour — and the first of them
 means **eq (16a) was measurably weaker than it should have been in every prior
@@ -96,28 +97,58 @@ there.
 
 ### 1. The open question that decides the paper — does the benefit hold at Dehnen's ε?
 
-**Preliminary answer: yes, and by more than the N=4096 numbers suggested.** Plummer,
-N=16384, leaf 16, p=8, one seed, matched at equal **dehnen p90** (the *conservative*
-matching — median-matching favours the criterion further), ε swept down to 1e-7 so
-Dehnen's 2e-7 is inside the range:
+**ANSWERED (2026-08-02): yes, decisively, and by more than the N=4096 numbers
+suggested.** `results/validation/mac_dehnen_eps_n16384_leaf16.json`. N=16384, leaf 16,
+p=8, one seed, softening 1e-6, eq (16a) verbatim, matched at equal **median** —
+Dehnen §5.3's own comparison — with ε swept 1e-5 → 1e-7 so **2e-7 sits inside the
+range** rather than at an endpoint.
 
-| matched p90 | (16a) rms × | (16a) p99.99 × | (16b) est rms × | (16b) est p99.99 × |
+**Plummer** (his test case). All seven fixed-θ rows have a real far field (33 782 →
+172 300 pairs), the matched targets lie inside both arms' measured ranges, and the worst
+p99.99 anywhere is 7.9e-2 — so traps 3 and 8 are both satisfied and every row is usable:
+
+| matched median | (16a) rms × | (16a) p99.99 × | (16b) est rms × | (16b) est p99.99 × | work × |
+|---|---|---|---|---|---|
+| 1.9e-9 | 5.80 | 9.60 | 9.41 | 22.76 | 1.00 |
+| 7.7e-9 | 6.10 | 10.90 | 11.38 | 26.46 | 1.00 |
+| 3.0e-8 | 5.86 | 9.72 | 13.14 | 27.70 | 1.01 |
+| 1.2e-7 | 7.34 | 11.67 | 18.41 | 37.37 | 1.04 |
+| 4.8e-7 | 11.10 | 18.93 | 24.90 | 47.34 | 1.04 |
+
+**bulge+halo**, after applying the document's own guards — discard fixed θ=0.58
+(p99.99 = 8.89, trap 3) and treat the two tightest matched rows as suspect because they
+sit adjacent to the far-field switch-on between θ=0.30 (3072 pairs, median 1.6e-15) and
+θ=0.34 (19 412 pairs, median 1.5e-10), which is trap 8's gap:
+
+| matched median | (16a) rms × | (16a) p99.99 × | (16b) est rms × | work × |
 |---|---|---|---|---|
-| 2.0e-8 | 4.59 | 7.51 | 8.86 | 21.92 |
-| 2.6e-7 | 5.97 | 9.88 | 14.34 | 30.36 |
-| 3.3e-6 | 12.81 | 21.49 | 29.90 | 56.04 |
+| 9.3e-9 | 218 | 405 | 433 | 0.95 |
+| 5.4e-8 | 111 | 266 | 206 | 0.96 |
+| 3.2e-7 | 70 | 126 | 137 | 0.97 |
 
-The advantage is smallest at the tightest tolerance and grows as the tolerance loosens,
-but it never disappears: even at the tight end eq (16a) is ~4.6× on rms and ~7.5× on
-p99.99, and the criterion accepts **fewer** far pairs than the matched fixed-θ arm
-(0.81–0.94×). And the O(N) estimator again tracks the exact-`f_b` ceiling
-(8.86/21.92 vs 9.19/20.67) — now confirmed at a second N and in the tight-ε regime.
+Two decades of advantage, and it comes with **less work, not more** (0.92–0.98×). The
+mechanism is visible directly in the raw rows rather than only in the ratio: at ε=1e-7
+the criterion reaches median 2.7e-10 / rms 4.7e-8 with 16 792 far pairs, where fixed
+θ=0.34 reaches a *comparable* median 1.5e-10 with a *comparable* 19 412 far pairs but
+rms 1.9e-5 — 400× worse. Same median, same cost, collapsed tail. That is §5.3's claim
+stated as plainly as the data can state it.
 
-Caveats, both real: **one seed**, and the 0.81–0.94× is *far pairs only* — the log does
-not print `near_work`, so it is not the full interaction-work ratio. Take the cost claim
-from the JSON. The bulge_halo half of this run is still in flight.
+**The O(N) estimator matches or beats the exact-`f_b` ceiling here too**, despite its
+fidelity being lower at this N/leaf than at N=4096 (median 0.918–0.947, worst single
+particle 0.289, and always a lower bound). Plummer at matched median 4.8e-7: estimator
+rms 24.90× / p99.99 47.34× against the exact arm's 24.14× / 46.17×. An ~8 % median
+under-estimate of `f_b` is absorbed by the ε sweep, which is why fidelity in that range
+costs nothing at matched accuracy.
 
-The configuration is now known-good rather than guessed. **Read trap 11 first**: the
+Cost note for the record: `work ×` here is the bench's full `pair_work`
+(`far_pairs·(p+1)² + Σ n_t·n_s`) from the JSON, not the far-pair-only proxy an earlier
+in-flight reading of this run used.
+
+Remaining caveat: **one seed.** Item 2's ladder supplies the spread.
+
+Retries fired on only 1 of 44 configs and converged to exactly the caps passed in
+(`max_pair_queue=131072`, `max_interactions_per_node=8192`), so those values are right
+for leaf 16 at this N. **Read trap 11 first**: the
 previously-specified run (N=1e5, leaf 256) is degenerate — the fixed arm accepts 0/0/4/218
 far pairs at θ = 0.30/0.34/0.38/0.42, so it sits at machine precision and has no error
 range to match against. Eight attempts have now failed on configuration.
@@ -1008,7 +1039,8 @@ four original conditions are now met at N=4096; only the N ≥ 10⁵ scaling is 
 | interaction work ≤ fixed-θ at matched p90 | **met, marginally**: 1.00–1.06× — a wash, not a saving |
 | warm-call prepare overhead ≤ 1.3× | **met**: 0.98× after Step 1. eq (16b) is *cheaper* still — its prepass needs only the traversal, not a low-order FMM evaluation |
 | eq (16b) reachable in O(N) | **met (2026-08-02)**: the estimator retains the exact-`f_b` result inside seed spread, so the ~2× tail gain over (16a) is production-reachable |
-| holds at N ≥ 10⁵ | **still open**, and no longer blocked on Step 3′. Blocked only on running the corrected sweep — the prior attempts measured a degenerate configuration (trap 11), not the criterion |
+| holds at Dehnen's ε = 2e-7 | **met (2026-08-02)**: matched on median at N=16384/leaf 16, Plummer rms 5.8–11.1× / p99.99 9.6–18.9× for (16a) and 9.4–24.9× / 22.8–47.3× for (16b); bulge+halo 70–218× rms at 0.92–0.98× work. ε=2e-7 is inside the swept range, not at an endpoint |
+| holds at N ≥ 10⁵ | **still open**, and no longer blocked on Step 3′. Blocked only on running the corrected sweep — the prior attempts measured a degenerate configuration (trap 11), not the criterion. In flight at leaf 16 (N ≤ 65536, 3 seeds) and leaf 64 (N=1e5) |
 
 **Frame the claim on the tail, and quote p99.99.** The honest statement is not "the
 criterion is faster" (work is a wash) and not "p99 improves 1.3–2.2×" (true but
