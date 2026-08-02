@@ -2076,9 +2076,16 @@ def test_minimum_memory_gpu_runtime_starts_with_smaller_traversal_capacities():
         )
 
     assert overrides.traversal_config is not None
-    # The small memory-safe pair-queue seed (32768) is the load-bearing
-    # assertion: the minimum-memory GPU lane must start from a bounded queue.
-    assert int(overrides.traversal_config.max_pair_queue) == 32768
+    # A *bounded* pair queue is the load-bearing assertion, and it now scales with
+    # the particle count rather than being one constant for every N below a
+    # million. At N=524288 that is 131072 (N/4 rounded to a power of two); the
+    # historical flat 32768 remains the floor and is what N <= 131072 still gets,
+    # asserted in tests/unit/runtime/test_capacity_replanning.py. The constant was
+    # a hard ceiling in the middle of the measured range: N=262144 raised
+    # "Pair queue capacity exceeded" on an A100 with 29.62 GiB free and the
+    # largest static buffer at 0.31 GiB.
+    assert int(overrides.traversal_config.max_pair_queue) == 131072
+    assert int(overrides.traversal_config.max_pair_queue) >= 32768
     # process_block is floored to the streamed minimum-memory ceiling (256, i.e.
     # _GPU_STREAMED_MINIMUM_MEMORY_EXPLICIT_PROCESS_BLOCK) to avoid underfilled
     # count-pass kernels -- matching the sibling auto-seed tests above. (The

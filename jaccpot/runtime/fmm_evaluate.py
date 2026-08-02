@@ -5,6 +5,7 @@ engine class inherits this mixin. Sibling of _fmm_impl at runtime level.
 
 from __future__ import annotations
 
+import warnings
 from typing import Any, Callable, Optional, Union
 
 import jax
@@ -45,6 +46,46 @@ from .kernels.core import (
     _prepare_tree_evaluation_inputs,
 )
 from .reference import direct_sum as reference_direct_sum
+
+_OUTER_JIT_WARNED = False
+
+
+def _warn_if_traced_under_an_outer_jit(positions: Any, masses: Any) -> None:
+    """Say, once, that an outer ``jax.jit`` here means a long compile.
+
+    XLA gives no progress output, so the compile of this pipeline reads exactly
+    like a hang -- and it defeats every ``try: jit / except: fall back``, because
+    slowness is not an exception. Measured on an A100 at N=4096, leaf 32, p=4,
+    fp64: 19.1 s to compile the forward on ``preset="accurate"``, 159.6 s for the
+    gradient, and a single inner module (``jit__accumulate_m2l_fullbatch``)
+    taking 3m28s on the default preset. Those are real one-time costs, not
+    failures -- but a user watching a silent terminal has no way to know that,
+    and the tranche-1 measurement recorded it as "did not finish".
+
+    Warned rather than raised: an outer jit is legitimate and, on the radix path,
+    worth it (measured 264x on the steady-state forward). The warning names
+    ``differentiable_step_fn``, which pays the same compile at a point the caller
+    chose instead of inside a timed region.
+    """
+
+    global _OUTER_JIT_WARNED
+    if _OUTER_JIT_WARNED:
+        return
+    if not any(isinstance(value, jax.core.Tracer) for value in (positions, masses)):
+        return
+    _OUTER_JIT_WARNED = True
+    warnings.warn(
+        "differentiable_accelerations is being traced (an outer jax.jit or "
+        "jax.grad is in charge). Compiling this pipeline takes tens of seconds "
+        "to minutes and XLA reports no progress, so it looks like a hang: "
+        "measured on an A100 at N=4096/fp64, 19 s for the forward, 160 s for the "
+        "gradient, and one inner module alone at 3m28s. It is a one-time cost. "
+        "To pay it deliberately rather than inside a timed region, use "
+        "FastMultipoleMethod.differentiable_step_fn(state, compile_now=(pos, "
+        "mass)). This warning is issued once per process.",
+        UserWarning,
+        stacklevel=3,
+    )
 
 
 class EvaluateMixin:
@@ -624,6 +665,7 @@ class EvaluateMixin:
         explicitly requests ``grouped_interactions=True`` gets a forward force
         that differs from the force this gradient is taken of.
         """
+        _warn_if_traced_under_an_outer_jit(positions, masses)
         options = resolve_grad_options(
             grad_config,
             num_particles=int(jnp.asarray(positions).shape[0]),

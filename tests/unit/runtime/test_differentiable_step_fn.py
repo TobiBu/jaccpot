@@ -94,11 +94,20 @@ def test_the_gradient_matches_the_eager_gradient(setup) -> None:
 
 
 def test_compile_now_does_not_change_the_answer(setup) -> None:
+    """Warming the cache is not allowed to change the result.
+
+    Compared to a tolerance rather than bit-for-bit: the near field and M2L
+    accumulate via scatter-add, which XLA lowers to atomics on a GPU, so two runs
+    of the SAME graph differ by a few ulps (measured 0 of 7 repeats bit-identical
+    on an A100, worst 3.8 eps). A bit-equality assertion here passes on CPU and
+    fails on GPU -- which is exactly what it did before this comment existed.
+    """
+
     solver, state, positions, masses, _ = setup
     warm = solver.differentiable_step_fn(state, compile_now=(positions, masses))
     cold = solver.differentiable_step_fn(state)
     assert jnp.allclose(
-        warm(positions, masses), cold(positions, masses), rtol=0, atol=0
+        warm(positions, masses), cold(positions, masses), rtol=1e-12, atol=0.0
     )
 
 

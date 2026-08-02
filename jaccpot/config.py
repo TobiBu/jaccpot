@@ -142,7 +142,7 @@ class TraversalOverrides:
                     f"TraversalOverrides.{name} must be >= 1 when set; got {value!r}"
                 )
 
-    def as_dict(self) -> dict[str, int]:
+    def as_dict(self: "TraversalOverrides") -> dict[str, int]:
         """Return only the fields that were set, as ``{name: int}``."""
 
         return {
