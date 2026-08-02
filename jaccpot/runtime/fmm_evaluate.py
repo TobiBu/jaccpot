@@ -5,7 +5,7 @@ engine class inherits this mixin. Sibling of _fmm_impl at runtime level.
 
 from __future__ import annotations
 
-from typing import Any, Optional, Union
+from typing import Any, Callable, Optional, Union
 
 import jax
 import jax.numpy as jnp
@@ -650,6 +650,117 @@ class EvaluateMixin:
                 jit_traversal=jit_traversal,
                 options=options,
             )
+
+    def differentiable_step_fn(
+        self: "FastMultipoleMethod",
+        state: Union[FMMPreparedState, LargeNPreparedState],
+        *,
+        target_indices: Optional[Array] = None,
+        grad_config: Optional[GradConfig] = None,
+        jit_traversal: bool = False,
+        compile_now: Optional[Tuple[Array, Array]] = None,
+    ) -> Callable[[Array, Array], Array]:
+        """Return a compiled ``f(positions, masses) -> accelerations``.
+
+        The step seam for a training or inference loop: build ``state`` once with
+        :meth:`prepare_state`, then call this once, then call the result per step.
+        The compile is paid once and amortised; the returned function is
+        differentiable, so ``jax.grad`` over it works and is compiled too.
+
+        Why this exists rather than "just wrap it in ``jax.jit``". Eagerly,
+        ``differentiable_accelerations`` re-traces its whole pipeline on every
+        call, and the re-tracing dominates. Measured on an idle A100 at N=4096,
+        leaf 64, p=4, real basis, evaluating a prebuilt tree:
+
+        ==============  ===========  =============  =========  =========
+        preset          eager        compile once   compiled   factor
+        ==============  ===========  =============  =========  =========
+        ``accurate``       6.681 s        18.88 s    0.0110 s      607x
+        ``large_n_gpu``    2.843 s         6.11 s    4.036 s       0.7x
+        ==============  ===========  =============  =========  =========
+
+        Both numbers are reported because they disagree, and the disagreement is
+        the useful part: on the radix path compiling is transformative, while on
+        the large-N production path the fast-lane kernels are already compiled
+        individually and folding them into one module is slightly *worse*. The
+        reverse pass on ``large_n_gpu`` behaves the same way (eager 12.62 s,
+        compiled 15.11 s after a 19.3 s compile). So this is a seam to reach for
+        on the radix path, and to measure before adopting on the large-N one.
+
+        The forward is bit-identical on ``large_n_gpu`` (max abs diff 0.0) and
+        agrees to 2.3e-12 on ``accurate`` at fp64, which is reassociation.
+
+        Parameters
+        ----------
+        state
+            A prepared state from :meth:`prepare_state`. Closed over as a
+            constant, exactly as :meth:`differentiable_accelerations` treats it.
+        target_indices, grad_config, jit_traversal
+            Passed through to :meth:`differentiable_accelerations` unchanged.
+            ``grad_config`` is resolved **once**, here, rather than per call.
+        compile_now
+            ``(positions, masses)`` to compile against immediately, so the
+            one-time cost lands here rather than inside the first timed step.
+            Recommended when benchmarking.
+
+        Raises
+        ------
+        TypeError
+            If ``state`` holds tracers, i.e. it was built inside a trace. Tree
+            construction is host-side and not traceable, so such a state cannot
+            be a compile-time constant. Raised here rather than deep inside the
+            trace, where it surfaces as a leaked-tracer error naming an internal
+            cache.
+        """
+
+        from .fmm_caches import _contains_tracer
+
+        if _contains_tracer(state):
+            raise TypeError(
+                "differentiable_step_fn needs a concrete prepared state, but this "
+                "one holds tracers -- it was built inside a jax transform. "
+                "prepare_state does host-side tree construction and is not "
+                "traceable; build the state outside, then call this."
+            )
+        options = resolve_grad_options(
+            grad_config,
+            num_particles=int(
+                getattr(getattr(state, "inverse_permutation", None), "shape", (0,))[0]
+            ),
+            supports_fast_lane=not isinstance(state, LargeNPreparedState),
+        )
+
+        def _step(positions: Array, masses: Array) -> Array:
+            with grad_option_overrides(options):
+                if isinstance(state, LargeNPreparedState):
+                    return self._differentiable_accelerations_large_n(
+                        state,
+                        positions,
+                        masses,
+                        target_indices=target_indices,
+                        grad_plan=None,
+                        options=options,
+                    )
+                return self._differentiable_accelerations_radix(
+                    state,
+                    positions,
+                    masses,
+                    target_indices=target_indices,
+                    jit_traversal=jit_traversal,
+                    options=options,
+                )
+
+        compiled = jax.jit(_step)
+        if compile_now is not None:
+            # Warm the jit cache by CALLING it, not by returning
+            # `.lower(...).compile()`: an AOT-compiled object is specialised to
+            # one signature and rejects JAX transformations, so returning it
+            # would make the seam undifferentiable -- the one thing it exists
+            # for. (`jax.grad` over it fails with "Cannot apply JAX
+            # transformations to a function lowered and compiled for a
+            # particular signature".)
+            jax.block_until_ready(compiled(*compile_now))
+        return compiled
 
     def _forward_permutation(
         self: "FastMultipoleMethod",

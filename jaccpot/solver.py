@@ -885,6 +885,47 @@ class FastMultipoleMethod:
             grad_config=grad_config,
         )
 
+    def differentiable_step_fn(
+        self: "FastMultipoleMethod",
+        state: Union[FMMPreparedState, LargeNPreparedState],
+        *,
+        target_indices: Optional[Array] = None,
+        grad_config: Optional[GradConfig] = None,
+        jit_traversal: bool = False,
+        compile_now: Optional[Tuple[Array, Array]] = None,
+    ) -> Callable[[Array, Array], Array]:
+        """Return a compiled ``f(positions, masses) -> accelerations``.
+
+        The step seam for a training or inference loop: :meth:`prepare_state`
+        once, this once, then the returned function per step. The compile is paid
+        once instead of a re-trace per call, and the result is differentiable, so
+        ``jax.grad`` over it is compiled too::
+
+            state = fmm.prepare_state(pos0, mass0, max_order=4, leaf_size=64)
+            step = fmm.differentiable_step_fn(state, compile_now=(pos0, mass0))
+            for _ in range(steps):
+                g = jax.grad(lambda p: (step(p, mass) ** 2).sum())(pos)
+
+        Measured on an idle A100 at N=4096, leaf 64, p=4, real basis:
+        ``preset="accurate"`` goes from 6.681 s eager to 0.0110 s compiled, a
+        factor of 607 after an 18.9 s one-time compile. On ``preset="large_n_gpu"``
+        it is the other way round (2.843 s eager, 4.036 s compiled), because that
+        path's fast-lane kernels are already compiled individually -- measure
+        before adopting it there.
+
+        Raises ``TypeError`` immediately if ``state`` holds tracers, rather than
+        letting the failure surface deep inside the trace as a leaked-tracer
+        error naming an internal cache.
+        """
+
+        return self._impl.differentiable_step_fn(
+            state,
+            target_indices=target_indices,
+            grad_config=grad_config,
+            jit_traversal=jit_traversal,
+            compile_now=compile_now,
+        )
+
     def evaluate_prepared_state_with_jerk(
         self: "FastMultipoleMethod",
         state: FMMPreparedState,

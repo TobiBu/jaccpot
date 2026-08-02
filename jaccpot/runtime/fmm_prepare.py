@@ -72,6 +72,10 @@ from ._nearfield_cache import (
     with_nearfield_cache_artifacts,
 )
 from ._octree_adapter import build_octree_execution_data_with_status
+from .capacity_diagnostics import (
+    is_capacity_failure,
+    reraise_with_capacity_report,
+)
 from .dtypes import INDEX_DTYPE
 from .fmm_caches import _contains_tracer, _estimate_payload_nbytes, _format_nbytes
 from .fmm_constants import (
@@ -2425,7 +2429,73 @@ class PrepareMixin:
         When ``tree_build_mode`` is ``"fixed_depth"`` the optional
         ``refine_local``, ``max_refine_levels``, and ``aspect_threshold``
         arguments control the host-side leaf refinement pass.
+
+        On an allocation or traversal-capacity failure the error is re-raised
+        with the statically-sized buffers for this configuration, largest first,
+        the knob that sizes each, and a configuration that would fit. An
+        "Out of memory while trying to allocate 8.00GiB" on a 40 GB card names
+        neither the buffer nor a way forward; see
+        :mod:`jaccpot.runtime.capacity_diagnostics`.
         """
+
+        try:
+            return self._prepare_state_uncaught(
+                positions,
+                masses,
+                bounds=bounds,
+                leaf_size=leaf_size,
+                max_order=max_order,
+                theta=theta,
+                jit_tree=jit_tree,
+                refine_local=refine_local,
+                max_refine_levels=max_refine_levels,
+                aspect_threshold=aspect_threshold,
+                runtime_overrides_override=runtime_overrides_override,
+                fused_device_mode=fused_device_mode,
+            )
+        except Exception as exc:
+            if not is_capacity_failure(exc):
+                raise
+            try:
+                num_particles = int(jnp.asarray(positions).shape[0])
+            except Exception:
+                num_particles = 0
+            traversal_config = None
+            try:
+                traversal_config = self._resolve_runtime_execution_overrides(
+                    num_particles=num_particles
+                ).traversal_config
+            except Exception:
+                pass
+            reraise_with_capacity_report(
+                exc,
+                num_particles=num_particles,
+                leaf_size=int(leaf_size),
+                max_order=int(max_order),
+                working_dtype=self.working_dtype,
+                preset=self.preset,
+                traversal_config=traversal_config,
+                nearfield_mode=str(self.nearfield_mode),
+            )
+            raise  # pragma: no cover - reraise_with_capacity_report always raises
+
+    def _prepare_state_uncaught(
+        self: "FastMultipoleMethod",
+        positions: Array,
+        masses: Array,
+        *,
+        bounds: Optional[Tuple[Array, Array]] = None,
+        leaf_size: int = 16,
+        max_order: int = 2,
+        theta: Optional[float] = None,
+        jit_tree: Optional[bool] = None,
+        refine_local: Optional[bool] = None,
+        max_refine_levels: Optional[int] = None,
+        aspect_threshold: Optional[float] = None,
+        runtime_overrides_override: Optional[_RuntimeExecutionOverrides] = None,
+        fused_device_mode: bool = False,
+    ) -> PreparedStateLike:
+        """The prepare_state body; see :meth:`prepare_state` for the contract."""
 
         self._validate_prepare_state_request(
             leaf_size=int(leaf_size),

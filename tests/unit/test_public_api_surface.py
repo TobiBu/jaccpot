@@ -76,6 +76,7 @@ EXPECTED_FMM_PUBLIC_METHODS = {
     "compute_accelerations_and_jerk",
     "compute_accelerations_with_time_derivatives",
     "differentiable_accelerations",
+    "differentiable_step_fn",
     "evaluate_prepared_state",
     "evaluate_prepared_state_with_jerk",
     "evaluate_prepared_state_with_time_derivatives",
