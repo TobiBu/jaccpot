@@ -146,8 +146,17 @@ import jax.numpy as jnp
 from jaccpot import FastMultipoleMethod
 
 try:
-    from jaxfmm.fmm import eval_potential
-    from jaxfmm.hierarchy import gen_hierarchy
+    # jaxFMM flattened its public API somewhere before 0.3.3: `eval_potential`
+    # and `gen_hierarchy` are now top-level, and the `jaxfmm.fmm` /
+    # `jaxfmm.hierarchy` submodules this script was written against no longer
+    # exist. Without this the import silently failed and every jaxfmm row was
+    # recorded as `status=error` -- the comparison arm was dead rather than
+    # merely absent. Call signatures are unchanged, so both paths are accepted.
+    try:
+        from jaxfmm import eval_potential, gen_hierarchy
+    except ImportError:  # jaxFMM < 0.3
+        from jaxfmm.fmm import eval_potential
+        from jaxfmm.hierarchy import gen_hierarchy
 
     HAVE_JAXFMM = True
 except Exception:
@@ -170,71 +179,13 @@ PAPER_PARAM_SETS = (
 )
 
 
-def _block_until_ready(value: Any) -> Any:
-    def _maybe_block(x: Any) -> Any:
-        if hasattr(x, "block_until_ready"):
-            return x.block_until_ready()
-        return x
-
-    return jax.tree_util.tree_map(_maybe_block, value)
-
-
-def _time_min_repeat(
-    fn: Callable[[], Any], *, warmup: int, repeats: int
-) -> tuple[float, float, float]:
-    if warmup < 0:
-        raise ValueError("warmup must be non-negative")
-    if repeats <= 0:
-        raise ValueError("repeats must be positive")
-
-    for _ in range(warmup):
-        _block_until_ready(fn())
-
-    samples = []
-    for _ in range(repeats):
-        start = time.perf_counter()
-        out = fn()
-        _block_until_ready(out)
-        end = time.perf_counter()
-        samples.append(end - start)
-
-    return (
-        float(min(samples)),
-        float(statistics.mean(samples)),
-        float(statistics.pstdev(samples)),
-    )
-
-
-def _n_values(min_exp: int, max_exp: int, steps: int) -> list[int]:
-    if steps <= 1:
-        return [int(round(2 ** float(min_exp)))]
-    xs = jnp.linspace(float(min_exp), float(max_exp), steps)
-    vals = [int(round(2 ** float(x))) for x in xs]
-    out: list[int] = []
-    seen = set()
-    for v in vals:
-        if v not in seen:
-            seen.add(v)
-            out.append(v)
-    return out
-
-
-def _distribution(
-    key: jax.Array, n: int, name: str, dtype: jnp.dtype
-) -> tuple[jax.Array, jax.Array]:
-    k1, k2 = jax.random.split(key)
-    if name == "uniform_cube":
-        pts = jax.random.uniform(k1, (n, 3), minval=-1.0, maxval=1.0, dtype=dtype)
-    elif name == "sphere_surface":
-        raw = jax.random.normal(k1, (n, 3), dtype=dtype)
-        norm = jnp.linalg.norm(raw, axis=1, keepdims=True)
-        pts = raw / jnp.maximum(norm, jnp.asarray(1e-12, dtype=dtype))
-    elif name == "normal":
-        pts = jax.random.normal(k1, (n, 3), dtype=dtype)
-    else:
-        raise ValueError(f"unknown distribution: {name}")
-    charges = jax.random.uniform(k2, (n,), minval=0.0, maxval=1.0, dtype=dtype)
-    return pts, charges
+# Timing protocol and the N ladder live in bench/scaling/_timing.py so that the
+# paper's scaling figures and this head-to-head measure the same way. Pure move;
+# the aliases keep this script's internal names unchanged.
+from bench.scaling._timing import block_until_ready as _block_until_ready  # noqa: E402
+from bench.scaling._timing import distribution as _distribution
+from bench.scaling._timing import n_values as _n_values
+from bench.scaling._timing import time_min_repeat as _time_min_repeat
 
 
 def _run_jaxfmm_case(
