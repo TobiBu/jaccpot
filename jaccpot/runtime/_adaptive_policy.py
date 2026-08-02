@@ -584,7 +584,16 @@ def _near_field_force_scale(
         jnp.searchsorted(neighbor_offsets, flat, side="right").astype(jnp.int32) - 1
     )
     slot_of_flat = jnp.clip(slot_of_flat, 0, num_slots - 1)
-    within = flat < (neighbor_offsets[slot_of_flat] + neighbor_counts[slot_of_flat])
+    # Both ends of the slot's window. The lower bound is not redundant: if the
+    # offsets ever start above zero, `searchsorted(..., 'right') - 1` returns -1 for
+    # the entries below `offsets[0]`, the clip pulls them onto slot 0, and an
+    # upper-bound-only test would accept them as slot 0's neighbours. Today they
+    # would be filtered anyway because the unused prefix holds -1, i.e. the code
+    # would be correct by accident rather than by construction.
+    slot_start = neighbor_offsets[slot_of_flat]
+    within = (flat >= slot_start) & (
+        flat < (slot_start + neighbor_counts[slot_of_flat])
+    )
     neighbor_source = neighbor_indices[flat]
 
     flat_target = neighbor_leaf_indices[slot_of_flat]
