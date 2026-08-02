@@ -180,7 +180,9 @@ unvalidated lane code that can bypass the criterion is worse than not shipping i
   signal to delete the mode and keep the refutation in prose.
 - **The cartesian basis is broken** (~1.8e-1 rel-L2 at both p=2 and p=4, versus solidfmm's
   8.1e-5). Pre-existing, out of scope here, now documented at the per-basis golden anchor
-  rather than hidden behind a blanket tolerance. Worth its own issue — **not yet filed.**
+  rather than hidden behind a blanket tolerance. **Filed as issue #62** (2026-08-02) with
+  the order-independence argument and three suggested first checks. Off this document's
+  critical path from here.
 - Interaction **work is a wash to a win** (1.00–1.06× at N=4096, mass uses 17–51 % *less*
   at N=1e5 matched p90). Frame the claim as tail accuracy at equal-or-less cost, never as
   speed.
