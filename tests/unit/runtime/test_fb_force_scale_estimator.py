@@ -39,6 +39,7 @@ from jaccpot import (
     RuntimePolicyConfig,
 )
 from jaccpot.runtime._adaptive_policy import (
+    compute_node_force_scale_from_sorted_magnitudes,
     estimate_particle_force_scale,
     node_span_mass,
 )
@@ -435,6 +436,76 @@ def test_the_fb_prepass_does_not_break_the_reverse_pass():
         (loss(positions + step * probe) - loss(positions - step * probe)) / (2 * step)
     )
     assert abs(fd - ad) / (abs(fd) + 1e-300) < 1e-4
+
+
+def test_a_tighter_prepass_angle_gets_the_eq_16a_scale_closer_to_the_truth():
+    """The eq (16a) prepass at theta=1.0 estimates ``min_b |a_b|`` badly.
+
+    The prepass used to run at the solver's theta, which paper mode pins at 1.0, and
+    a p=1 evaluation at opening angle 1.0 is a poor estimate of ``|a_b|``. Measured
+    at Plummer N=4096/leaf 16/p=8/eps=1e-5, tightening it to 0.5 accepts *fewer* far
+    pairs (2374 -> 2166) and is *more* accurate (rms 1.10e-6 -> 7.89e-7) with a 2.4x
+    faster cold prepare.
+
+    The error is **not** a uniform over-estimate -- checked, and the per-node scale
+    moves in both directions -- so this asserts the property that actually holds:
+    the tighter prepass lands closer to the exact ``min_b |a_b|``, reduced onto nodes
+    the same way the runtime reduces it. That is what makes 0.5 the right default,
+    and it is what a refactor reconnecting the prepass to the solver's theta would
+    break.
+    """
+
+    positions, masses = _sample_problem(512)
+
+    # Exact min_b |a_b| per node, from a direct sum -- the thing the prepass is an
+    # estimate *of*.
+    pos = np.asarray(positions, dtype=np.float64)
+    mass = np.asarray(masses, dtype=np.float64)
+    diff = pos[None, :, :] - pos[:, None, :]
+    dist_sq = np.sum(diff * diff, axis=-1) + SOFTENING**2
+    inv = np.where(dist_sq > 0, dist_sq**-1.5, 0.0)
+    np.fill_diagonal(inv, 0.0)
+    exact_acc = np.einsum("ij,j,ijk->ik", inv, mass, diff)
+
+    def scale_and_error(prepass_theta):
+        fmm = FastMultipoleMethod(
+            preset=FMMPreset.FAST,
+            basis="real",
+            theta=1.0,
+            softening=SOFTENING,
+            adaptive_eps=PAPER_EPS,
+            mac_force_scale_mode="paper",
+            mac_force_scale_prepass_theta=prepass_theta,
+            advanced=FMMAdvancedConfig(
+                mac_type="dehnen_error", runtime=_traversal_cfg()
+            ),
+        )
+        state = fmm.prepare_state(
+            positions, masses, leaf_size=LEAF_SIZE, max_order=MAX_ORDER
+        )
+        order = np.asarray(state.tree.particle_indices)
+        truth = np.asarray(
+            compute_node_force_scale_from_sorted_magnitudes(
+                tree=state.tree,
+                magnitudes_sorted=jnp.asarray(np.linalg.norm(exact_acc[order], axis=1)),
+                reduction="min",
+            )
+        )
+        got = np.asarray(state.force_scale_nodes)
+        rel = np.abs(got - truth) / np.maximum(np.abs(truth), 1e-300)
+        return float(np.median(rel)), got
+
+    loose_err, loose = scale_and_error(1.0)
+    tight_err, tight = scale_and_error(0.5)
+
+    assert tight_err < loose_err, (
+        "the tighter prepass angle did not get the force scale closer to the exact "
+        f"min_b |a_b| (median rel err {tight_err:.3e} vs {loose_err:.3e})"
+    )
+    assert not np.allclose(loose, tight), (
+        "the prepass angle had no effect on the force scale at all, so this test "
+        "and the default that depends on it are both vacuous"
+    )
 
 
 def test_the_prepass_angle_is_independent_of_the_solver_theta():
