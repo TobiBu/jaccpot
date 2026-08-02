@@ -964,7 +964,7 @@ JAX_PLATFORMS=cpu JAX_ENABLE_X64=1 .venv/bin/python -m pytest \
     tests/unit tests/characterization tests/test_adaptive_policy_runtime.py \
     tests/test_adaptive_order_runtime.py tests/test_force_scale_runtime.py -q
 
-# CPU sweep (Dehnen's metric)
+# CPU sweep (Dehnen's metric). leaf 16 -- NOT 256, see trap 11
 JAX_PLATFORMS=cpu JAX_ENABLE_X64=1 .venv/bin/python -m bench.validation.mac_error_distribution \
     --n 4096 --leaf-size 16 --order 8 --distribution plummer,uniform \
     --theta 0.30,0.38,0.46,0.54,0.62 --eps 1e-5,1e-6,2e-7,1e-7,3e-8 \
@@ -974,17 +974,43 @@ JAX_PLATFORMS=cpu JAX_ENABLE_X64=1 .venv/bin/python -m bench.validation.mac_erro
 eval $(.venv/bin/autocvd -l -q)
 XLA_PYTHON_CLIENT_PREALLOCATE=false JAX_ENABLE_X64=1 .venv/bin/python -m bench.validation.mac_error_distribution ...
 
+# ALWAYS do this before a big sweep: prepare-only far-pair census (trap 11).
+# Minutes, not hours -- no O(N^2) reference and no evaluation. If the fixed arm's
+# far count is not in the millions, the grid is not measuring the criterion.
+#   build the tree, then count `interactions.sources >= 0` per (leaf_size, knob)
+
 # prepare-cost of the force-scale prepass (warm-call medians; ~50 min at this size)
 eval $(.venv/bin/autocvd -l -q)
 XLA_PYTHON_CLIENT_PREALLOCATE=false JAX_ENABLE_X64=1 \
     .venv/bin/python -m bench.validation.force_scale_prepare_cost \
     --n 16384 --leaf-size 16 --order 8 --repeats 5 --eps 2e-7 \
     --json-out results/validation/force_scale_prepare_cost_n16384_p8.json
+
+# what a pair policy costs the traversal in memory (one subprocess per arm --
+# peak_bytes_in_use is process-cumulative and cannot be reset)
+eval $(.venv/bin/autocvd -l -q)
+XLA_PYTHON_CLIENT_PREALLOCATE=false PYTHONPATH=$PWD \
+    .venv/bin/python -m bench.validation.pair_policy_far_tag_memory \
+    --n 1000000 --leaf-size 256 \
+    --json-out results/validation/pair_policy_far_tag_memory_1m.json
 ```
 
-Existing artifacts in `results/validation/` — `mac_dehnen_metric_p8.json` is the
-headline p=8 run; `mac_plummer_p8_cap07.json` is the `mac_theta_max=0.7` arm;
-`force_scale_prepare_cost_n16384_p8.json` is the Step 1 prepare-cost measurement.
+Bench flags added 2026-08-02, all of which exist because of a trap above:
+
+| flag | why |
+|---|---|
+| `--arm mass_16b_est` | eq (16b) via the O(N) estimator — the production path, versus `mass_16b`'s O(N²) ceiling. Records per-config `fb_fidelity` against the exact sum. |
+| `--seed 0,1,2` | cross-seed `median [min, max]`, joined on ladder position. Any trend claim needs ≥ 3. |
+| `--max-pair-queue` / `--max-interactions-per-node` | pre-size the traversal, skipping the retry-recompile cycle. Must be given together; never round up. |
+| `--reference-subsample` | subsample reference *targets* (all sources) so N=1e6 is 1e10 pairs, not 1e12. Rejects `--arm mass_16b`, and warns that p99.99 of K targets rests on K/1e4 particles. |
+
+Artifacts in `results/validation/` — `mac_dehnen_metric_p8.json` is the pre-fix
+headline p=8 run (**VOID**, see the M2M note); `mac_postfix_headline_p8.json` the valid
+one; `mac_plummer_p8_cap07.json` the `mac_theta_max=0.7` arm;
+`force_scale_prepare_cost_n16384_p8.json` the Step 1 prepare-cost measurement;
+`pair_policy_far_tag_memory_1m.json` the Step 3′ memory gate;
+`mac_dehnen_eps_n16384_leaf16.json` the tight-ε run (item 1) and
+`mac_n_ladder_leaf16_3seeds.json` the N-ladder (item 2), both from 2026-08-02.
 
 ## References
 
