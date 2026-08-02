@@ -45,8 +45,28 @@ there.
 
 ### 1. The open question that decides the paper — does the benefit hold at Dehnen's ε?
 
-Everything is measured at ε = 3e-4…1e-5. **Dehnen uses 2e-7.** Still open, but the
-configuration is now known-good rather than guessed. **Read trap 11 first**: the
+**Preliminary answer: yes, and by more than the N=4096 numbers suggested.** Plummer,
+N=16384, leaf 16, p=8, one seed, matched at equal **dehnen p90** (the *conservative*
+matching — median-matching favours the criterion further), ε swept down to 1e-7 so
+Dehnen's 2e-7 is inside the range:
+
+| matched p90 | (16a) rms × | (16a) p99.99 × | (16b) est rms × | (16b) est p99.99 × |
+|---|---|---|---|---|
+| 2.0e-8 | 4.59 | 7.51 | 8.86 | 21.92 |
+| 2.6e-7 | 5.97 | 9.88 | 14.34 | 30.36 |
+| 3.3e-6 | 12.81 | 21.49 | 29.90 | 56.04 |
+
+The advantage is smallest at the tightest tolerance and grows as the tolerance loosens,
+but it never disappears: even at the tight end eq (16a) is ~4.6× on rms and ~7.5× on
+p99.99, and the criterion accepts **fewer** far pairs than the matched fixed-θ arm
+(0.81–0.94×). And the O(N) estimator again tracks the exact-`f_b` ceiling
+(8.86/21.92 vs 9.19/20.67) — now confirmed at a second N and in the tight-ε regime.
+
+Caveats, both real: **one seed**, and the 0.81–0.94× is *far pairs only* — the log does
+not print `near_work`, so it is not the full interaction-work ratio. Take the cost claim
+from the JSON. The bulge_halo half of this run is still in flight.
+
+The configuration is now known-good rather than guessed. **Read trap 11 first**: the
 previously-specified run (N=1e5, leaf 256) is degenerate — the fixed arm accepts 0/0/4/218
 far pairs at θ = 0.30/0.34/0.38/0.42, so it sits at machine precision and has no error
 range to match against. Eight attempts have now failed on configuration.
