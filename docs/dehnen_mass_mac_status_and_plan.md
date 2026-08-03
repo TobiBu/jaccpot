@@ -12,7 +12,8 @@ Self-contained: a fresh session should be able to pick this up without prior con
 | **4. Step 3′ memory gate** | **MEASURED, and it clears.** A pair policy costs **+977 MiB at 1M** (split/streamed build; +969 MiB monolithic), against the 11.07 GB reverse peak on a 40 GB card. Harness: `bench/validation/pair_policy_far_tag_memory.py`; artifact: `bench/results/validation/pair_policy_far_tag_memory_1m.json`. The plumbing itself is **not** done — see Step 3′ for the cache-key hazard that has to be handled first. |
 | **5. `dehnen_theta`** | **Keep.** Its retention is now pinned by `tests/unit/runtime/test_refuted_dehnen_theta_mode.py` (4 cases) instead of asserted in prose — nothing previously tested the `FutureWarning` or that the mode still ran. |
 | **1. Dehnen's ε** | **ANSWERED: the benefit holds at ε=2e-7, and is larger than at N=4096.** Matched on median at N=16384/leaf 16: Plummer rms **5.8–11.1×** and p99.99 **9.6–18.9×** for eq (16a), **9.4–24.9×** and **22.8–47.3×** for eq (16b) via the O(N) estimator, at 1.00–1.04× work; bulge+halo **70–218×** rms at **0.92–0.98×** work. The specified configuration had to be corrected first — at leaf 256 the sweep is degenerate, see trap 11. |
-| **2. N-scaling** | Running at leaf 16 across N=16384/32768/65536 × 3 seeds, plus a leaf-64 tier at N=1e5 for production relevance. |
+| **1b. N=10⁵ at a production leaf** | **DONE and stronger there.** Leaf 64, 2 seeds, matched median: eq (16a) rms **18.4×** / p99.99 **22.0×**, eq (16b) estimator **35.9×** / **53.9×**, work 1.01–1.05×. |
+| **2. N-scaling *trend*** | Running at fixed leaf 16 across N=16384/32768/65536 × 3 seeds — the only clean way to separate an N-trend from a leaf-size effect. |
 
 Two defects found on the way, both in shipped behaviour — and the first of them
 means **eq (16a) was measurably weaker than it should have been in every prior
@@ -177,6 +178,36 @@ p99 alone understated the effect by more than an order of magnitude), and
 `--max-pair-queue`/`--max-interactions-per-node` pre-size the traversal so the tight-ε
 configs skip the retry-recompile cycle. They must be given together — pinning one leaves
 the other retrying, so the run would look pinned and behave exactly as before.
+
+### 1b. Production-scale leaf at N=10⁵ — **DONE, and the advantage is bigger there**
+
+`results/validation/mac_leaf64_n1e5_2seeds.json`. N=10⁵, **leaf 64**, p=8, Plummer,
+**2 seeds**, matched at equal median, ε ∈ {1e-6, 3e-7, 2e-7}. Run because the item-1
+answer came from leaf 16, and leaf 16 is not what production uses — this checks the
+result survives a leaf size four times larger, at a decade more particles:
+
+| arm | rms × | p99.99 × | work × |
+|---|---|---|---|
+| eq (16a) | **18.37** [15.65, 21.09] | **21.95** [19.14, 24.75] | 1.04 [1.03, 1.05] |
+| eq (16b), O(N) estimator | **35.92** [30.86, 40.97] | **53.93** [47.72, 60.14] | 1.02 [1.01, 1.03] |
+
+`median [min, max]` over the 2 seeds, at matched median 1.05e-8. The seed spread is
+±15 % on rms and ±13 % on p99.99, so the effect is not a realisation artifact. Work is a
+wash (1.01–1.05×), as everywhere else.
+
+**Do not read this as the N-trend.** It is larger than the N=16384/leaf 16 numbers
+(rms 5.8–11.1× → 18.4×), but N *and* leaf_size both changed, which is exactly the
+confound trap 11's corollary warns about. What it does establish is that the criterion's
+advantage survives — and here strengthens — at a production leaf size and at 10⁵
+particles, which is what the go/no-go condition actually needed. Item 2's ladder holds
+leaf fixed and is the clean trend measurement.
+
+eq (16b)'s estimator again roughly **doubles** eq (16a)'s advantage, with fidelity
+median 0.913–0.914 (worst particle 0.578, always a lower bound) — so the ~9 % median
+under-estimate continues to cost nothing at matched accuracy.
+
+Converged traversal caps differ at this leaf size: **`max_pair_queue=262144`**,
+`max_interactions_per_node=8192`. Pass those, not leaf 16's 131072.
 
 ### 2. Settle the N-scaling trend properly
 
@@ -1040,7 +1071,8 @@ four original conditions are now met at N=4096; only the N ≥ 10⁵ scaling is 
 | warm-call prepare overhead ≤ 1.3× | **met**: 0.98× after Step 1. eq (16b) is *cheaper* still — its prepass needs only the traversal, not a low-order FMM evaluation |
 | eq (16b) reachable in O(N) | **met (2026-08-02)**: the estimator retains the exact-`f_b` result inside seed spread, so the ~2× tail gain over (16a) is production-reachable |
 | holds at Dehnen's ε = 2e-7 | **met (2026-08-02)**: matched on median at N=16384/leaf 16, Plummer rms 5.8–11.1× / p99.99 9.6–18.9× for (16a) and 9.4–24.9× / 22.8–47.3× for (16b); bulge+halo 70–218× rms at 0.92–0.98× work. ε=2e-7 is inside the swept range, not at an endpoint |
-| holds at N ≥ 10⁵ | **still open**, and no longer blocked on Step 3′. Blocked only on running the corrected sweep — the prior attempts measured a degenerate configuration (trap 11), not the criterion. In flight at leaf 16 (N ≤ 65536, 3 seeds) and leaf 64 (N=1e5) |
+| holds at N ≥ 10⁵ | **met (2026-08-02)**: at N=10⁵ with a production leaf 64, 2 seeds, matched median — eq (16a) rms **18.4×** [15.7, 21.1] and p99.99 **22.0×** [19.1, 24.8]; eq (16b) via the O(N) estimator **35.9×** / **53.9×**; work 1.01–1.05×. Larger than at N=16384/leaf 16, though N and leaf changed together so it is not by itself an N-trend |
+| the N-*trend* at fixed leaf | **open**, in flight: N=16384/32768/65536 × 3 seeds at leaf 16. This is what distinguishes "holds at scale" from "decays with N" |
 
 **Frame the claim on the tail, and quote p99.99.** The honest statement is not "the
 criterion is faster" (work is a wash) and not "p99 improves 1.3–2.2×" (true but
