@@ -209,20 +209,62 @@ under-estimate continues to cost nothing at matched accuracy.
 Converged traversal caps differ at this leaf size: **`max_pair_queue=262144`**,
 `max_interactions_per_node=8192`. Pass those, not leaf 16's 131072.
 
-### 2. Settle the N-scaling trend properly
+### 2. The N-scaling trend — **MEASURED, and at fixed leaf 16 it DECAYS (2026-08-03)**
 
-At matched p90 the advantage looked like it decayed 4096 → 1e5; at matched median it did
-not. One seed at each end, no error bars, and the two matchings disagree — so the trend
-is not established either way. Run a clean ladder × **3 seeds**, one methodology
-(`--match-on median`), and report rms/p99.99 with spread.
+`results/validation/mac_n_ladder_leaf16_3seeds.json`. N = 16384 / 32768 / 65536, **leaf
+16 held fixed**, p=8, Plummer, **3 seeds**, matched at equal median, eq (16a). Per-seed
+p99.99 and work ratios, so the spread is visible rather than averaged away:
 
-`--seed` now takes a comma list and prints a cross-seed aggregate as
-`median [min, max]`, joined on position in the matched ladder rather than on the target
-value (each seed's usable range differs slightly, so the absolute targets never coincide).
-**Hold leaf_size fixed across the ladder at 16, not 256** — per trap 11 the far field at
-leaf 256 is trivial below N ≈ 10⁶, so a leaf-256 ladder would be comparing a real far
-field at large N against nothing at all at small N and reading the difference as an
-N-trend.
+| N | leaves | p99.99 × (all 3 seeds, across the matched range) | work × |
+|---|---|---|---|
+| 16 384 | 1024 | 7.9 – 25.5 | 0.98 – 1.07 |
+| 32 768 | 2048 | 9.6 – 15.6 | 1.01 – 1.13 |
+| **65 536** | 4096 | **3.0 – 8.5** | **1.07 – 1.20** |
+
+**Every seed shows the decline**, so it is not a realisation artifact: at fixed leaf size
+the advantage shrinks and the cost grows as N rises. The question this item was written
+to decide — "holds at scale" or "decays with N" — answers **decays**, at leaf 16.
+
+> ⚠ **This conflicts with item 1b**, which measured 22× at 1.04× work at N=10⁵ with leaf
+> 64. At N=65536 with leaf 16 the same statistic is ~5× at ~1.15×. The two runs differ in
+> leaf size, so either leaf size is the controlling variable (and leaf 16 at large N is
+> simply an unrepresentative configuration — 4096 leaves and 3.3 M far pairs, far deeper
+> than production would build), or the criterion genuinely decays and item 1b's leaf-64
+> point is the outlier. **Resolving this by explanation would be exactly the kind of
+> story-telling this document keeps punishing**, so it is being resolved by measurement:
+> a leaf-size sweep 16 → 32 → 64 → 128 → **256** (the fiducial production value) at fixed
+> N. See item 2b.
+
+Two methodology notes for whoever repeats this:
+
+- **Do not read the go/no-go "holds at N ≥ 10⁵" row off item 1b alone.** It was recorded
+  as met on that single leaf-64 point before this ladder existed, which was premature —
+  the fixed-leaf trend was already identified as the clean measurement and should have
+  been waited for.
+- The mass arm's far-pair count stops falling with tightening ε as N grows: at N=16384
+  ε 1e-5 → 1e-7 gives 207 952 → 69 776 far pairs, but at N=65536 it gives
+  2 021 314 → **3 295 822**, i.e. tightening ε pushes acceptance *deeper* rather than
+  reducing it. That is why the work ratio climbs with N.
+- 29 of 81 configs hit traversal retries (max 11 attempts), converging to
+  **`max_pair_queue=1048320`**. The 131072 that is right for N=16384 is far too small at
+  N ≥ 32768; that cost wall-clock, not correctness.
+
+`--seed` takes a comma list and prints a cross-seed aggregate as `median [min, max]`,
+joined on position in the matched ladder rather than on the target value (each seed's
+usable range differs slightly, so the absolute targets never coincide).
+
+### 2b. Leaf-size sweep at fixed N — **the deciding measurement, in flight**
+
+Sweeps leaf ∈ {16, 32, 64, 128, **256**} at one N so leaf size is the only thing that
+changes. 256 is the fiducial production value (what the 1M runs use), which is the whole
+reason this matters: if the advantage is a function of tree depth rather than of N, then
+the claim has to be stated at the leaf size production actually uses.
+
+**A single θ grid cannot serve the whole range** — trap 11's table shows leaf 16 and leaf
+256 differ by four orders of magnitude in far-pair count at the same θ — so the far-pair
+census comes first and sets a per-leaf θ range. Expect leaf 256 to be thin at N=10⁵
+(390 leaves); recording *how* thin, with numbers, is itself the quantitative form of
+trap 11 and is what explains the conflict above.
 
 ### 3. Step 2 production — the O(N) `f_b` estimator — **DONE (2026-08-02)**
 
@@ -1071,8 +1113,8 @@ four original conditions are now met at N=4096; only the N ≥ 10⁵ scaling is 
 | warm-call prepare overhead ≤ 1.3× | **met**: 0.98× after Step 1. eq (16b) is *cheaper* still — its prepass needs only the traversal, not a low-order FMM evaluation |
 | eq (16b) reachable in O(N) | **met (2026-08-02)**: the estimator retains the exact-`f_b` result inside seed spread, so the ~2× tail gain over (16a) is production-reachable |
 | holds at Dehnen's ε = 2e-7 | **met (2026-08-02)**: matched on median at N=16384/leaf 16, Plummer rms 5.8–11.1× / p99.99 9.6–18.9× for (16a) and 9.4–24.9× / 22.8–47.3× for (16b); bulge+halo 70–218× rms at 0.92–0.98× work. ε=2e-7 is inside the swept range, not at an endpoint |
-| holds at N ≥ 10⁵ | **met (2026-08-02)**: at N=10⁵ with a production leaf 64, 2 seeds, matched median — eq (16a) rms **18.4×** [15.7, 21.1] and p99.99 **22.0×** [19.1, 24.8]; eq (16b) via the O(N) estimator **35.9×** / **53.9×**; work 1.01–1.05×. Larger than at N=16384/leaf 16, though N and leaf changed together so it is not by itself an N-trend |
-| the N-*trend* at fixed leaf | **open**, in flight: N=16384/32768/65536 × 3 seeds at leaf 16. This is what distinguishes "holds at scale" from "decays with N" |
+| holds at N ≥ 10⁵ | **CONTESTED — do not quote either way yet.** One N=10⁵ point at leaf 64 (2 seeds) gives eq (16a) rms 18.4× / p99.99 22.0× at 1.01–1.05× work. But the fixed-leaf-16 ladder decays: p99.99 3.0–8.5× at N=65536, at 1.07–1.20× work, consistently across 3 seeds. This row was marked "met" on the leaf-64 point alone before the ladder existed; that was premature. Item 2b decides it |
+| the N-*trend* at fixed leaf | **measured, and it decays** at leaf 16: p99.99 ~12× → ~12× → ~5× over N = 16384 → 32768 → 65536, work 1.0 → 1.1 → 1.2×. Whether that is an N effect or a tree-depth effect is item 2b |
 
 **Frame the claim on the tail, and quote p99.99.** The honest statement is not "the
 criterion is faster" (work is a wash) and not "p99 improves 1.3–2.2×" (true but
