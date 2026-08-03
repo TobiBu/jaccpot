@@ -14,11 +14,17 @@ reference for the property under test and not just for the force values.
 
 from __future__ import annotations
 
+import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
 
-from jaccpot.mutual import active_level_floor, is_sync_boundary, n_sub
+from jaccpot.mutual import (
+    active_level_floor,
+    boundary_weight_table,
+    is_sync_boundary,
+    n_sub,
+)
 from jaccpot.nornax_adapter import BlockStepFMM
 
 # nornax is a test-only dependency, so skip cleanly when it is absent. The
@@ -33,6 +39,9 @@ try:  # pragma: no cover - environment dependent
     from nornax.blockstep.schedule import (
         active_level_floor as nornax_active_level_floor,
     )
+    from nornax.blockstep.schedule import (
+        boundary_weight_table as nornax_boundary_weight_table,
+    )
     from nornax.blockstep.schedule import is_sync_boundary as nornax_is_sync_boundary
     from nornax.blockstep.schedule import n_sub as nornax_n_sub
     from nornax.forces.base import FusedMutualForceModel, MutualForceModel
@@ -43,6 +52,7 @@ try:  # pragma: no cover - environment dependent
         fused_boundary_model,
         initialize_block_state,
         leapfrog_kdk_rollout,
+        supports_traced_level_weights,
     )
     from nornax.state import BlockStepState
 except Exception as exc:  # pragma: no cover - environment dependent
@@ -94,6 +104,26 @@ def test_block_schedule_matches_nornax():
         for s in range(n_sub(k_max) + 1):
             assert active_level_floor(s, k_max) == nornax_active_level_floor(s, k_max)
             assert is_sync_boundary(s, k_max) == nornax_is_sync_boundary(s, k_max)
+
+
+def test_boundary_weight_table_matches_nornax():
+    """The two repos' weight tables must be the same numbers, bit for bit.
+
+    Both sides build the table independently -- jaccpot's takes ``dt_max``
+    directly, nornax's is ``dt_max``-free and scaled by the integrator -- so this
+    is the test that keeps the duplication honest. It is also the reason the split
+    is safe: ``half`` and ``1 / 2**k`` are powers of two, so scaling only shifts an
+    exponent and ``dt_max * (half / 2**k)`` lands on the same float as
+    ``half * dt_max / 2**k``.
+    """
+    dt_max = 0.0125
+    for k_max in range(5):
+        ours = boundary_weight_table(k_max, dt_max, dtype=jnp.float64)
+        theirs = dt_max * jnp.asarray(
+            nornax_boundary_weight_table(k_max), dtype=jnp.float64
+        )
+        assert ours.shape == theirs.shape == (n_sub(k_max) + 1, k_max + 1)
+        assert jnp.array_equal(ours, theirs), f"k_max={k_max}"
 
 
 def test_total_force_matches_the_direct_sum_oracle():
@@ -154,7 +184,8 @@ def test_single_rung_leapfrog_rollout_conserves_momentum():
 def test_multi_rung_block_rollout_conserves_momentum():
     """Phase-3 gate: the real multi-rung block-step integrator on the FMM force.
 
-    This now exercises nornax's *fused* path, since the adapter satisfies
+    This now exercises nornax's *fused* path -- and, since the adapter takes a
+    traced ``level_weights`` vector, its scanned form: the adapter satisfies
     ``FusedMutualForceModel`` and the integrator opts in automatically. The
     assertion below pins that: if fusion silently stopped being selected the
     rollout would still pass, just at one traversal per active level instead of
@@ -233,6 +264,128 @@ class _PerLevelOnly:
         )
 
 
+class _StaticWeightsOnly:
+    """Expose the fused primitive in its *static* form only, so nornax unrolls.
+
+    nornax probes a fused backend for traced ``level_weights`` support
+    (``supports_traced_level_weights``) and, when it is there, walks the sub-step
+    boundaries with a ``lax.scan`` over a weight table instead of unrolling them.
+    ``BlockStepFMM`` has it, so comparing the two integrator paths needs a model
+    that deliberately fails the probe: this wrapper's ``boundary_kick`` has no
+    ``level_weights`` parameter at all -- the original cross-repo contract, and
+    what a backend written before the traced-weight seam looks like. It delegates
+    to the same FMM, so the two runs differ only in how nornax drives it.
+    """
+
+    def __init__(self, fmm):
+        self._fmm = fmm
+        self.k_max = fmm.k_max
+
+    def level_accelerations(self, positions, masses, *, rung, level, args=None):
+        return self._fmm.level_accelerations(
+            positions, masses, rung=rung, level=level, args=args
+        )
+
+    def total_accelerations(self, positions, masses, *, rung=None, args=None):
+        return self._fmm.total_accelerations(positions, masses, rung=rung, args=args)
+
+    def boundary_kick(
+        self,
+        positions,
+        velocities,
+        masses,
+        *,
+        rung,
+        active_floor,
+        dt_max,
+        half=1.0,
+        args=None,
+    ):
+        return self._fmm.boundary_kick(
+            positions,
+            velocities,
+            masses,
+            rung=rung,
+            active_floor=active_floor,
+            dt_max=dt_max,
+            half=half,
+            args=args,
+        )
+
+
+def test_adapter_advertises_traced_level_weights_to_nornax():
+    """nornax must detect that this backend takes a traced weight vector.
+
+    That detection is what decides whether nornax scans the boundaries (one traced
+    boundary kick for the whole base step) or unrolls them (``2**k_max`` of them,
+    each a full traversal's worth of graph for an FMM). It works off
+    :meth:`BlockStepFMM.boundary_kick`'s signature, so renaming or dropping the
+    ``level_weights`` parameter would silently cost the trace-size win -- this is
+    the test that would catch it.
+    """
+    fmm = BlockStepFMM(softening=SOFTENING, k_max=2)
+    assert supports_traced_level_weights(fmm)
+    # And the static-only spelling of the same backend must decline it, or the
+    # comparison in the parity test below would not compare two paths.
+    assert not supports_traced_level_weights(_StaticWeightsOnly(fmm))
+    assert fused_boundary_model(_StaticWeightsOnly(fmm), 2) is not None
+
+
+def test_nornax_scanned_and_unrolled_fused_paths_agree_on_the_fmm_force():
+    """Scanning the boundaries changes the graph, not the trajectory -- on the real FMM.
+
+    nornax's own suite pins this against its direct sum; here the same claim is
+    checked with the backend the primitive exists for, where each boundary is a
+    genuine mutual traversal. Both runs use nornax's ``advance_base_step`` and the
+    same prepared tree: one drives the FMM through ``level_weights=table[s]`` from
+    inside a ``lax.scan``, the other through static ``active_floor``/``half`` in an
+    unrolled Python loop. Agreement is to round-off (the weights are bit-identical;
+    the two graph shapes let XLA associate and contract differently).
+    """
+    n, k_max, dt_max = 256, 2, 1.0e-3
+    positions, velocities, masses = _system(n, seed=10)
+    rung = jnp.asarray(
+        np.random.default_rng(11).integers(0, k_max + 1, n), dtype=jnp.int32
+    )
+    fmm = BlockStepFMM(
+        softening=SOFTENING, k_max=k_max, theta=0.9, max_order=4, leaf_size=16
+    )
+    fmm.prepare(positions, masses)
+    state = BlockStepState(
+        positions=positions,
+        velocities=velocities,
+        masses=masses,
+        acc=jnp.zeros_like(positions),
+        rung=rung,
+        base_index=jnp.asarray(0, dtype=jnp.int32),
+    )
+
+    scanned = advance_base_step(state, dt_max, fmm, k_max=k_max)
+    # The scanned path inlines the whole traversal into one scan program, where the
+    # unrolled one reuses the inner kernels' cached executables -- so this test
+    # compiles two distinct programs, and holding the first while building the
+    # second is the memory pattern that put ``test_scanned_base_step_matches_the
+    # _unrolled_one`` near the CI worker's ceiling. Drop the first before the
+    # second, as that test does: measured peak RSS 1.64 -> 1.46 GB.
+    jax.clear_caches()
+    unrolled = advance_base_step(state, dt_max, _StaticWeightsOnly(fmm), k_max=k_max)
+
+    for got, want, name in (
+        (scanned.positions, unrolled.positions, "positions"),
+        (scanned.velocities, unrolled.velocities, "velocities"),
+        (scanned.acc, unrolled.acc, "acc"),
+    ):
+        error = float(jnp.linalg.norm(got - want) / jnp.linalg.norm(want))
+        assert error < 1e-13, f"{name}: {error}"
+
+    # Neither path may erode momentum: the weights multiply an already-mutual
+    # +f/-f pair force, so this holds however the boundaries are walked.
+    for label, result in (("scanned", scanned), ("unrolled", unrolled)):
+        drift = _momentum(masses, result.velocities) - _momentum(masses, velocities)
+        scale = float(jnp.sum(jnp.abs(masses[:, None] * result.velocities)))
+        assert float(jnp.linalg.norm(drift)) / scale < 1e-13, label
+
+
 def test_adapter_is_selected_for_the_fused_path():
     """nornax must actually *choose* fusion for this backend, not just tolerate it.
 
@@ -260,7 +413,7 @@ def test_nornax_fused_path_matches_its_per_level_path_on_the_fmm_force():
     the code path differs -- ``n_sub + 2`` fused evaluations against
     ``sum_s (active levels at s)`` per-level ones. Agreement is to round-off
     rather than bit-for-bit, because the per-level path's ``half`` is a traced
-    ``where`` while the fused path's is a Python float.
+    ``where`` while the fused path carries it baked into its weight table.
     """
     n, k_max, dt_max = 256, 2, 1.0e-3
     positions, velocities, masses = _system(n, seed=6)
