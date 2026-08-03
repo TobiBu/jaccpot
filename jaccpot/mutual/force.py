@@ -44,7 +44,9 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, NamedTuple, Optional
 
+import jax
 import jax.numpy as jnp
+from jax import lax
 from jaxtyping import Array
 
 from jaccpot.mutual.farfield import MutualTreeArrays, mutual_far_field_forces
@@ -59,6 +61,7 @@ __all__ = [
     "mutual_level_accelerations",
     "mutual_weighted_accelerations",
     "boundary_level_weights",
+    "boundary_weight_table",
     "level_weights_from_floor",
     "n_sub",
     "active_level_floor",
@@ -212,12 +215,62 @@ def level_weights_from_floor(
 
     Level ``k`` is kicked with ``half * dt_max / 2**k``; levels below the floor
     are not active at this boundary and get zero.
+
+    ``active_floor``, ``half`` and ``dt_max`` may be **tracers**. That is what lets
+    a caller drive the boundaries with ``lax.scan`` instead of unrolling them: with
+    static-only weights an integrator has to emit one traced boundary kick per
+    boundary, so its graph grows like ``2**k_max``. The concrete path is kept
+    separate and unchanged rather than folded into the traced one, so existing
+    callers keep bit-identical weights (the traced form evaluates the product in
+    ``dtype`` where the Python form evaluates it in double and then casts, which can
+    differ by an ulp in float32).
     """
-    weights = [
-        (float(half) * float(dt_max) / float(1 << k)) if k >= int(active_floor) else 0.0
-        for k in range(int(k_max) + 1)
-    ]
-    return jnp.asarray(weights, dtype=dtype)
+    k_max = int(k_max)
+    if all(
+        not isinstance(jnp.asarray(v), jax.core.Tracer)
+        for v in (active_floor, half, dt_max)
+    ):
+        weights = [
+            (
+                (float(half) * float(dt_max) / float(1 << k))
+                if k >= int(active_floor)
+                else 0.0
+            )
+            for k in range(k_max + 1)
+        ]
+        return jnp.asarray(weights, dtype=dtype)
+
+    # Traced form. `1 / 2**k` is exact in binary floating point, so scaling by it
+    # is the same operation as dividing by `2**k` -- no accuracy is given up for
+    # traceability.
+    levels = jnp.arange(k_max + 1)
+    inverse = jnp.asarray([1.0 / float(1 << k) for k in range(k_max + 1)], dtype=dtype)
+    scale = jnp.asarray(half, dtype=dtype) * jnp.asarray(dt_max, dtype=dtype)
+    return jnp.where(levels >= jnp.asarray(active_floor), scale * inverse, 0.0)
+
+
+def boundary_weight_table(
+    k_max: int, dt_max: Any, *, dtype: Any = jnp.float64
+) -> Array:
+    """Return the ``(n_sub + 1, k_max + 1)`` table of every boundary's kick weights.
+
+    Row ``s`` is :func:`boundary_level_weights` for boundary ``s``. The point of
+    materialising it is that an integrator can then index it with a **traced**
+    boundary index -- ``table[s]`` inside a ``lax.scan`` -- and hand the row
+    straight to ``boundary_kick(..., level_weights=...)``. That is what lifts a
+    fused base step from ``2**k_max`` unrolled boundary kicks in the traced graph
+    to a single one, without giving up the runtime win of one traversal per
+    boundary.
+
+    The schedule is data-independent, so the table is a compile-time constant; it
+    is ``(2**k_max + 1) x (k_max + 1)`` floats, i.e. 72 values at ``k_max = 3``.
+    """
+    return jnp.stack(
+        [
+            boundary_level_weights(s, int(k_max), dt_max, dtype=dtype)
+            for s in range(n_sub(int(k_max)) + 1)
+        ]
+    )
 
 
 def boundary_level_weights(

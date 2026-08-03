@@ -30,9 +30,11 @@ import pytest
 from jaccpot.mutual import (
     active_level_floor,
     boundary_level_weights,
+    boundary_weight_table,
     build_mutual_state,
     build_mutual_topology,
     is_sync_boundary,
+    level_weights_from_floor,
     mutual_accelerations,
     mutual_level_accelerations,
     mutual_weighted_accelerations,
@@ -956,3 +958,175 @@ def test_force_call_under_tracing_without_prepare_raises():
 
     with pytest.raises(RuntimeError, match="prepare"):
         run(positions)
+
+
+# ---------------------------------------------------------------------------
+# Traced boundary index -- the seam that lets an integrator scan the fused path
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("k_max", [1, 3])
+def test_traced_level_weights_match_the_concrete_ones_bit_for_bit(k_max):
+    """The traced weight path must not perturb the schedule by even an ulp.
+
+    The weights multiply an antisymmetric per-pair force, so a perturbation here
+    would not break momentum -- it would silently change the *integrator*, which
+    is far harder to notice. Powers of two are exact in binary floating point, so
+    bit equality is the right bar, not a tolerance.
+    """
+    dt_max = 0.05
+    traced = jax.jit(
+        lambda floor, half: level_weights_from_floor(
+            floor, k_max, dt_max, half=half, dtype=jnp.float64
+        )
+    )
+    for floor in range(k_max + 1):
+        for half in (0.5, 1.0):
+            want = level_weights_from_floor(
+                floor, k_max, dt_max, half=half, dtype=jnp.float64
+            )
+            got = traced(jnp.int32(floor), jnp.float64(half))
+            assert jnp.array_equal(got, want), (floor, half)
+
+
+@pytest.mark.parametrize("k_max", [1, 2, 3])
+def test_boundary_weight_table_rows_are_the_per_boundary_weights(k_max):
+    """Row ``s`` of the table is exactly what boundary ``s`` would have used."""
+    dt_max = 0.05
+    table = boundary_weight_table(k_max, dt_max, dtype=jnp.float64)
+    assert table.shape == (n_sub(k_max) + 1, k_max + 1)
+    for s in range(n_sub(k_max) + 1):
+        want = boundary_level_weights(s, k_max, dt_max, dtype=jnp.float64)
+        assert jnp.array_equal(table[s], want), s
+
+
+def test_boundary_kick_accepts_supplied_level_weights():
+    """Handing in a weight row must equal deriving it from floor/half/dt_max."""
+    n = 512
+    positions, masses = _system(n)
+    velocities = jnp.zeros_like(positions)
+    rung = _rungs(n)
+    dt_max = 0.05
+    fmm = BlockStepFMM(
+        softening=SOFTENING, k_max=K_MAX, theta=0.9, max_order=4, leaf_size=16
+    )
+    fmm.prepare(positions, masses)
+    table = boundary_weight_table(K_MAX, dt_max, dtype=positions.dtype)
+
+    for s in range(n_sub(K_MAX) + 1):
+        derived = fmm.boundary_kick(
+            positions,
+            velocities,
+            masses,
+            rung=rung,
+            active_floor=active_level_floor(s, K_MAX),
+            dt_max=dt_max,
+            half=0.5 if is_sync_boundary(s, K_MAX) else 1.0,
+        )
+        supplied = fmm.boundary_kick(
+            positions, velocities, masses, rung=rung, level_weights=table[s]
+        )
+        assert jnp.allclose(supplied, derived, rtol=0, atol=0), s
+
+
+def test_boundary_kick_runs_under_jit_with_a_traced_boundary_index():
+    """The whole point: a traced ``s`` must drive the fused kick.
+
+    With static-only weights an integrator has to emit one traced boundary kick
+    per boundary, so its graph grows like ``2**k_max``. Indexing the weight table
+    with a traced index is what collapses that to a single traced kick.
+    """
+    n = 256
+    positions, masses = _system(n)
+    velocities = jnp.zeros_like(positions)
+    rung = _rungs(n)
+    dt_max = 0.05
+    fmm = BlockStepFMM(
+        softening=SOFTENING, k_max=K_MAX, theta=1.0, max_order=4, leaf_size=8
+    )
+    fmm.prepare(positions, masses)
+    table = boundary_weight_table(K_MAX, dt_max, dtype=positions.dtype)
+
+    @jax.jit
+    def kick(s):
+        return fmm.boundary_kick(
+            positions, velocities, masses, rung=rung, level_weights=table[s]
+        )
+
+    for s in range(n_sub(K_MAX) + 1):
+        traced = kick(jnp.int32(s))
+        eager = fmm.boundary_kick(
+            positions, velocities, masses, rung=rung, level_weights=table[s]
+        )
+        assert jnp.allclose(traced, eager, rtol=1e-12, atol=0), s
+        delta_v = traced - velocities
+        terms = masses[:, None] * delta_v
+        scale = jnp.linalg.norm(jnp.sum(jnp.abs(terms), axis=0))
+        assert (
+            float(jnp.linalg.norm(jnp.sum(terms, axis=0)) / (float(scale) + 1e-300))
+            < 1e-13
+        )
+
+
+def test_scanned_base_step_matches_the_unrolled_one():
+    """The scanned base step must be the same map, not merely a similar one.
+
+    Same arithmetic in the same order, weights read from a table instead of built
+    per boundary -- so this is a round-off-level check, and any real disagreement
+    means the scan's drift-select or weight indexing is off by a boundary.
+    """
+    n = 512
+    positions, masses = _system(n, seed=3)
+    velocities = jnp.asarray(
+        np.random.default_rng(4).normal(0.0, 0.05, (n, 3)), dtype=jnp.float64
+    )
+    rung = _rungs(n, k_max=2, seed=6)
+    fmm = BlockStepFMM(
+        softening=SOFTENING, k_max=2, theta=0.9, max_order=4, leaf_size=16
+    )
+    fmm.prepare(positions, masses)
+
+    x_s, v_s, a_s = fmm.advance_base_step(
+        positions, velocities, masses, rung=rung, dt_max=2.0e-3, scan_boundaries=True
+    )
+    x_u, v_u, a_u = fmm.advance_base_step(
+        positions, velocities, masses, rung=rung, dt_max=2.0e-3, scan_boundaries=False
+    )
+    for got, want, name in ((x_s, x_u, "x"), (v_s, v_u, "v"), (a_s, a_u, "acc")):
+        error = float(jnp.linalg.norm(got - want) / jnp.linalg.norm(want))
+        assert error < 1e-12, f"{name}: {error}"
+
+
+def test_scanned_base_step_traces_one_boundary_kick_not_two_to_the_k():
+    """Confirm the compile-size win is real, by counting equations in the jaxpr.
+
+    Unrolling emits one force evaluation per boundary, so the traced graph grows
+    like ``2**k_max``; the scan emits one (plus the end-of-step field, which is a
+    separate evaluation either way). At ``k_max = 3`` that is 10 units against 2,
+    and the measured top-level equation ratio is ~10x.
+
+    The metric is ``len(jaxpr.eqns)``, deliberately not ``len(str(jaxpr))``: the
+    printed form is dominated by the embedded topology constants, which are the
+    same on both paths, so it reads only ~2x and understates the difference by
+    five-fold. A ratio is asserted rather than an absolute size so kernel changes
+    do not churn the bound.
+    """
+    n = 128
+    positions, masses = _system(n)
+    velocities = jnp.zeros_like(positions)
+    rung = _rungs(n, k_max=3)
+    fmm = BlockStepFMM(
+        softening=SOFTENING, k_max=3, theta=1.0, max_order=2, leaf_size=8
+    )
+    fmm.prepare(positions, masses)
+
+    def equations(scan):
+        jaxpr = jax.make_jaxpr(
+            lambda p, v: fmm.advance_base_step(
+                p, v, masses, rung=rung, dt_max=1.0e-3, scan_boundaries=scan
+            )
+        )(positions, velocities)
+        return len(jaxpr.jaxpr.eqns)
+
+    scanned, unrolled = equations(True), equations(False)
+    assert unrolled > 4 * scanned, (unrolled, scanned)

@@ -108,6 +108,42 @@ Because each weight is a single symmetric scalar per pair, it multiplies `+f` an
 `−f` identically and cannot break the cancellation — momentum is exact for *any*
 weighting.
 
+### Driving the boundaries with a scan
+
+`boundary_kick` takes `active_floor`/`half`, which an integrator naturally has as
+*static* Python values — one per boundary. That makes a fused base step unroll:
+the traced graph carries `2**k_max` boundary kicks even though the runtime cost is
+only `n_sub + 1` traversals. For an FMM each of those is a whole tree traversal's
+worth of graph.
+
+`boundary_weight_table(k_max, dt_max)` returns the `(n_sub + 1, k_max + 1)` table
+of every boundary's weights, so a caller can index it with a **traced** boundary
+index and pass the row through `boundary_kick(..., level_weights=...)`:
+
+```python
+table = boundary_weight_table(k_max, dt_max, dtype=positions.dtype)
+
+def body(carry, s):
+    pos, vel = carry
+    vel = fmm.boundary_kick(pos, vel, masses, rung=rung, level_weights=table[s])
+    pos = pos + jnp.where(s < n_sub(k_max), dt_min, 0.0) * vel
+    return (pos, vel), None
+```
+
+`level_weights_from_floor` also accepts tracers for `active_floor`/`half`/`dt_max`,
+so either shape works. Both are bit-identical to the static weights — powers of two
+are exact in binary floating point, so scaling by `1 / 2**k` is the same operation
+as dividing by `2**k`.
+
+`BlockStepFMM.advance_base_step` uses the table by default
+(`scan_boundaries=True`): measured **10.35×** fewer top-level jaxpr equations at
+`k_max = 3` than the unrolled form, for the same trajectory to round-off. Pass
+`scan_boundaries=False` for the unrolled reference the tests compare against.
+
+> Measure this with `len(jaxpr.jaxpr.eqns)`, not `len(str(jaxpr))`. The printed
+> form is dominated by the embedded topology constants, which are identical on both
+> paths, so it reads only ~2× and understates the difference five-fold.
+
 ### Exact vs. cell-level splitting
 
 | | predicate | exactness |
@@ -537,16 +573,18 @@ python -m bench.bench_mutual_fmm --sizes 4096 16384 65536 --theta 0.7 --order 4
 
 ### Running the cross-repo tests
 
-nornax is a test-only dependency and is not installed in jaccpot's environment.
-It also fails to *import* against `equinox < 0.13` / `diffrax < 0.7.2`
-(`nornax.terms.NBodyTerm` is a non-frozen dataclass inheriting a frozen
-`AbstractTerm`), so the module skips rather than errors on a version mismatch.
-To run them without disturbing the environment, overlay the newer versions:
+nornax is a test-only dependency; the library never imports it. `tests/conftest.py`
+puts a sibling `nornax` checkout on `sys.path` (searching upward through
+`REPO_ROOT`'s ancestors, so a git worktree at `<repo>/.claude/worktrees/<name>`
+finds it too), and the module skips when it is absent — so no `PYTHONPATH` and no
+version overlay are needed.
 
-```bash
-pip install --target /tmp/overlay --no-deps "diffrax==0.7.2" "equinox==0.13.6"
-PYTHONPATH=/tmp/overlay:/path/to/nornax pytest tests/integration/test_mutual_fmm_nornax.py
-```
+An earlier version of this doc carried a `pip install --target` overlay recipe,
+because nornax could not be imported alongside `equinox < 0.13` / `diffrax < 0.7.2`
+(`nornax.terms.NBodyTerm` was a non-frozen dataclass inheriting a frozen
+`AbstractTerm`). That is fixed upstream; the tests now run in a stock environment.
+The skip guard still catches `Exception` rather than `ImportError`, so a future
+import-time incompatibility reports as *skipped* rather than *errored*.
 
 ## Resolved: the shared real-basis L2P azimuth gradient
 

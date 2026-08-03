@@ -50,11 +50,13 @@ from typing import Any, Optional, Tuple
 import jax
 import jax.numpy as jnp
 import numpy as np
+from jax import lax
 from jaxtyping import Array
 
 from jaccpot.mutual.force import (
     MutualFMMState,
     active_level_floor,
+    boundary_weight_table,
     build_mutual_state,
     is_sync_boundary,
     level_weights_from_floor,
@@ -199,6 +201,13 @@ class BlockStepFMM:
         """Rebuild the frozen topology (alias of :meth:`prepare`)."""
         return self.prepare(positions, masses)
 
+    _NO_TOPOLOGY_UNDER_TRACE = (
+        "BlockStepFMM has no prepared topology and cannot build one while tracing "
+        "(the dual-tree traversal is a host operation). Call "
+        "prepare(positions, masses) on concrete arrays once per base step, then "
+        "differentiate/jit the force evaluation."
+    )
+
     def _require_state(self, positions: Array, masses: Array) -> MutualFMMState:
         """Return the cached state, building it if that is legal here."""
         state = self._state
@@ -206,28 +215,35 @@ class BlockStepFMM:
             jnp.asarray(positions).shape[0]
         ):
             return state
-        if isinstance(jnp.asarray(positions), jax.core.Tracer):
-            raise RuntimeError(
-                "BlockStepFMM has no prepared topology and cannot build one from "
-                "traced positions (the dual-tree traversal is a host operation). "
-                "Call prepare(positions, masses) on concrete arrays once per base "
-                "step, then differentiate/jit the force evaluation."
-            )
-        return self.prepare(positions, masses)
+        try:
+            return self.prepare(positions, masses)
+        except jax.errors.JAXTypeError as exc:
+            # Building needs to read the positions on the host. Translate the
+            # low-level concretization failure into the actionable instruction.
+            raise RuntimeError(self._NO_TOPOLOGY_UNDER_TRACE) from exc
 
     def _validate_rung(self, rung: Array) -> Array:
-        """Reject rungs outside ``[0, k_max]`` while they are still concrete.
+        """Reject rungs outside ``[0, k_max]`` when the bound can be read.
 
         A rung above ``k_max`` has no kick weight, so the traversal would have to
         either invent one or drop the interaction -- both of which quietly
-        integrate the wrong equations. Caught here it is an obvious
-        configuration error; caught nowhere it surfaces as a NaN velocity many
-        steps later.
+        integrate the wrong equations. Caught here it is an obvious configuration
+        error; caught nowhere it surfaces as a NaN velocity many steps later.
+
+        The check is attempted and skipped on failure, rather than gated on
+        ``isinstance(rung, jax.core.Tracer)``. That test looks equivalent and is
+        not: a **concrete** array closed over by a ``lax.cond``/``lax.scan`` branch
+        is not a ``Tracer``, yet reducing it still yields a tracer inside the
+        trace, so ``int(...)`` raises. nornax's per-level integrator path closes
+        over exactly such a rung array, and the isinstance form let it through into
+        a ``ConcretizationTypeError``. Attempting the read is the only test that
+        actually asks the question "can a value be read here".
         """
         rung = jnp.asarray(rung)
-        if isinstance(rung, jax.core.Tracer):
+        try:
+            lo, hi = int(jnp.min(rung)), int(jnp.max(rung))
+        except jax.errors.JAXTypeError:
             return rung
-        lo, hi = int(jnp.min(rung)), int(jnp.max(rung))
         if lo < 0 or hi > self.k_max:
             raise ValueError(
                 f"rung values must lie in [0, k_max={self.k_max}]; got "
@@ -301,9 +317,10 @@ class BlockStepFMM:
         masses: Array,
         *,
         rung: Array,
-        active_floor: int,
-        dt_max: float,
-        half: float = 1.0,
+        active_floor: Any = None,
+        dt_max: Any = None,
+        half: Any = 1.0,
+        level_weights: Optional[Array] = None,
         args: object = None,
     ) -> Array:
         """Apply one sub-step boundary's kick in a single mutual traversal.
@@ -320,9 +337,24 @@ class BlockStepFMM:
         ----------
         active_floor :
             Smallest level kicked at this boundary (nornax's
-            ``active_level_floor(s, k_max)``).
+            ``active_level_floor(s, k_max)``). May be a tracer.
         half :
-            ``0.5`` at the base step's synchronized ends, ``1.0`` inside.
+            ``0.5`` at the base step's synchronized ends, ``1.0`` inside. May be
+            a tracer.
+        level_weights :
+            The ``(k_max + 1,)`` weight vector, supplied directly instead of being
+            derived from ``active_floor``/``half``/``dt_max``. Takes precedence
+            over all three, which are then ignored.
+
+            This is the seam that lets an integrator drive the boundaries with
+            ``lax.scan`` rather than unrolling them. With the weights derived
+            from *static* ``active_floor``/``half``, a fused base step has to emit
+            one traced boundary kick per boundary, so the traced graph grows like
+            ``2**k_max`` even though the runtime cost is only ``n_sub + 1``
+            traversals. Handing in a row of
+            :func:`~jaccpot.mutual.force.boundary_weight_table` -- indexable with a
+            traced boundary index -- collapses that to a single traced kick while
+            keeping the runtime win.
 
         Returns
         -------
@@ -332,15 +364,30 @@ class BlockStepFMM:
         del args
         state = self._require_state(positions, masses)
         rung = self._validate_rung(rung)
-        weights = level_weights_from_floor(
-            int(active_floor),
-            self.k_max,
-            float(dt_max),
-            half=float(half),
-            dtype=jnp.asarray(positions).dtype,
-        )
+        if level_weights is None:
+            if dt_max is None or active_floor is None:
+                raise ValueError(
+                    "boundary_kick needs either level_weights, or both "
+                    "active_floor and dt_max"
+                )
+            level_weights = level_weights_from_floor(
+                active_floor,
+                self.k_max,
+                dt_max,
+                half=half,
+                dtype=jnp.asarray(positions).dtype,
+            )
+        else:
+            level_weights = jnp.asarray(
+                level_weights, dtype=jnp.asarray(positions).dtype
+            )
+            if int(level_weights.shape[-1]) != self.k_max + 1:
+                raise ValueError(
+                    f"level_weights must have {self.k_max + 1} entries for "
+                    f"k_max={self.k_max}; got shape {tuple(level_weights.shape)}"
+                )
         delta_v = mutual_weighted_accelerations(
-            state, positions, masses, rung=rung, level_weights=weights
+            state, positions, masses, rung=rung, level_weights=level_weights
         )
         return jnp.asarray(velocities) + delta_v
 
@@ -379,6 +426,7 @@ class BlockStepFMM:
         *,
         rung: Array,
         dt_max: float,
+        scan_boundaries: bool = True,
     ) -> Tuple[Array, Array, Array]:
         """Run one full base step on the fused path, at one traversal per boundary.
 
@@ -388,9 +436,19 @@ class BlockStepFMM:
         rung assignment is held fixed for the whole step, which is what makes the
         map symplectic and time-reversible.
 
+        ``scan_boundaries`` (default) walks the boundaries with a ``lax.scan`` over
+        a precomputed weight table, so the *traced* graph holds **one** boundary
+        kick regardless of ``k_max`` while the runtime still performs ``n_sub + 1``
+        traversals. Unrolling instead traces ``2**k_max`` kicks -- 9 at
+        ``k_max = 3``, 33 at ``k_max = 5`` -- and for an FMM each of those is a
+        whole tree traversal's worth of graph. Set it ``False`` for the unrolled
+        form, which is the parity reference in the tests.
+
         Returns ``(positions, velocities, acceleration)`` where the acceleration
         is the full field at the end-of-step positions, ready to seed the next
-        base step's rung assignment.
+        base step's rung assignment. It is a separate evaluation on purpose: a
+        boundary kick returns *weighted* levels, and the unweighted total cannot be
+        recovered from them.
         """
         state = self._require_state(positions, masses)
         rung = self._validate_rung(rung)
@@ -399,19 +457,39 @@ class BlockStepFMM:
         dt_min = jnp.asarray(dt_max, dtype=dtype) / steps
         pos, vel = jnp.asarray(positions), jnp.asarray(velocities)
 
-        for s in range(steps + 1):
-            weights = level_weights_from_floor(
-                active_level_floor(s, self.k_max),
-                self.k_max,
-                float(dt_max),
-                half=0.5 if is_sync_boundary(s, self.k_max) else 1.0,
-                dtype=dtype,
+        if scan_boundaries:
+            table = boundary_weight_table(self.k_max, dt_max, dtype=dtype)
+            zero = jnp.asarray(0.0, dtype=dtype)
+
+            def body(
+                carry: Tuple[Array, Array], s: Array
+            ) -> Tuple[Tuple[Array, Array], None]:
+                position, velocity = carry
+                velocity = velocity + mutual_weighted_accelerations(
+                    state, position, masses, rung=rung, level_weights=table[s]
+                )
+                # The drift is a no-op after the final kick, expressed as a select
+                # so every scan iteration has the same shape.
+                position = position + jnp.where(s < steps, dt_min, zero) * velocity
+                return (position, velocity), None
+
+            (pos, vel), _ = lax.scan(
+                body, (pos, vel), jnp.arange(steps + 1, dtype=jnp.int32)
             )
-            vel = vel + mutual_weighted_accelerations(
-                state, pos, masses, rung=rung, level_weights=weights
-            )
-            if s < steps:
-                pos = pos + dt_min * vel
+        else:
+            for s in range(steps + 1):
+                weights = level_weights_from_floor(
+                    active_level_floor(s, self.k_max),
+                    self.k_max,
+                    float(dt_max),
+                    half=0.5 if is_sync_boundary(s, self.k_max) else 1.0,
+                    dtype=dtype,
+                )
+                vel = vel + mutual_weighted_accelerations(
+                    state, pos, masses, rung=rung, level_weights=weights
+                )
+                if s < steps:
+                    pos = pos + dt_min * vel
 
         acc = mutual_weighted_accelerations(state, pos, masses)
         return pos, vel, acc

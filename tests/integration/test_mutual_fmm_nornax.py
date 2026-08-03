@@ -21,10 +21,13 @@ import pytest
 from jaccpot.mutual import active_level_floor, is_sync_boundary, n_sub
 from jaccpot.nornax_adapter import BlockStepFMM
 
-# nornax fails to *import* (not merely to be found) against some diffrax
-# releases -- `nornax.terms.NBodyTerm` is a non-frozen dataclass inheriting
-# `diffrax.AbstractTerm`, which is frozen in diffrax < 0.7.2. Skip on any
-# exception so an environment mismatch reports as "skipped", not "errored".
+# nornax is a test-only dependency, so skip cleanly when it is absent. The
+# `except Exception` (rather than ImportError) is deliberate: nornax used to fail
+# to *import* against equinox < 0.13 / diffrax < 0.7.2, because
+# `nornax.terms.NBodyTerm` was a non-frozen dataclass inheriting a frozen
+# `AbstractTerm`. That is fixed upstream and no version overlay is needed any
+# more, but an import-time TypeError should still report as "skipped", not
+# "errored".
 try:  # pragma: no cover - environment dependent
     from nornax.blockstep.rungs import assign_rungs
     from nornax.blockstep.schedule import (
@@ -32,13 +35,16 @@ try:  # pragma: no cover - environment dependent
     )
     from nornax.blockstep.schedule import is_sync_boundary as nornax_is_sync_boundary
     from nornax.blockstep.schedule import n_sub as nornax_n_sub
-    from nornax.forces.base import MutualForceModel
+    from nornax.forces.base import FusedMutualForceModel, MutualForceModel
     from nornax.forces.mutual_direct import MutualDirectSumGravity
     from nornax.solvers.leapfrog_kdk import (
+        advance_base_step,
         block_kdk_rollout,
+        fused_boundary_model,
         initialize_block_state,
         leapfrog_kdk_rollout,
     )
+    from nornax.state import BlockStepState
 except Exception as exc:  # pragma: no cover - environment dependent
     pytest.skip(f"nornax unavailable: {exc!r}", allow_module_level=True)
 
@@ -63,10 +69,18 @@ def _relative_momentum(masses, vectors):
     return float(jnp.linalg.norm(jnp.sum(terms, axis=0)) / (float(scale) + 1e-300))
 
 
-def test_adapter_satisfies_the_mutual_force_model_protocol():
-    """The whole point of the structural design: no nornax import, still a match."""
+def test_adapter_satisfies_the_mutual_force_model_protocols():
+    """The whole point of the structural design: no nornax import, still a match.
+
+    Both protocols, with no adapter changes: ``MutualForceModel`` for the per-level
+    contract and ``FusedMutualForceModel`` for the per-boundary one. The fused
+    protocol is separate precisely because ``MutualForceModel`` is
+    ``runtime_checkable`` -- widening it would have made ``isinstance`` reject
+    every existing implementation.
+    """
     fmm = BlockStepFMM(softening=SOFTENING, k_max=2)
     assert isinstance(fmm, MutualForceModel)
+    assert isinstance(fmm, FusedMutualForceModel)
 
 
 def test_block_schedule_matches_nornax():
@@ -138,7 +152,14 @@ def test_single_rung_leapfrog_rollout_conserves_momentum():
 
 
 def test_multi_rung_block_rollout_conserves_momentum():
-    """Phase-3 gate: the real multi-rung block-step integrator on the FMM force."""
+    """Phase-3 gate: the real multi-rung block-step integrator on the FMM force.
+
+    This now exercises nornax's *fused* path, since the adapter satisfies
+    ``FusedMutualForceModel`` and the integrator opts in automatically. The
+    assertion below pins that: if fusion silently stopped being selected the
+    rollout would still pass, just at one traversal per active level instead of
+    one per boundary.
+    """
     n, k_max = 256, 1
     positions, velocities, masses = _system(n, seed=3)
     rung = jnp.asarray(
@@ -148,6 +169,7 @@ def test_multi_rung_block_rollout_conserves_momentum():
         softening=SOFTENING, k_max=k_max, theta=0.9, max_order=4, leaf_size=16
     )
     fmm.prepare(positions, masses)
+    assert fused_boundary_model(fmm, k_max) is fmm
 
     state = initialize_block_state(
         positions, velocities, masses, fmm, k_max=k_max, rung=rung
@@ -191,17 +213,55 @@ def test_rung_assignment_round_trips_through_the_adapter():
     assert error < 1e-12
 
 
-def test_fused_boundary_matches_the_per_level_integrator_path():
-    """The fused primitive must reproduce nornax's per-level base step exactly.
+class _PerLevelOnly:
+    """Expose only ``level_accelerations``, to force nornax's per-level path.
 
-    nornax's ``advance_base_step`` kicks level by level; the adapter's
-    ``advance_base_step`` folds every active level into one traversal per
-    boundary. Same arithmetic, fewer tree walks -- so the trajectories must agree
-    to round-off, not merely to FMM tolerance.
+    ``advance_base_step`` probes for fusion with
+    ``isinstance(force, FusedMutualForceModel)``, and ``BlockStepFMM`` satisfies
+    it -- so passing the adapter directly now takes the *fused* path. Comparing
+    the two paths therefore needs a model that deliberately fails the probe. It
+    delegates to the same FMM, so the two runs differ only in how the integrator
+    drives it.
     """
-    from nornax.solvers.leapfrog_kdk import advance_base_step
-    from nornax.state import BlockStepState
 
+    def __init__(self, fmm):
+        self._fmm = fmm
+
+    def level_accelerations(self, positions, masses, *, rung, level, args=None):
+        return self._fmm.level_accelerations(
+            positions, masses, rung=rung, level=level, args=args
+        )
+
+
+def test_adapter_is_selected_for_the_fused_path():
+    """nornax must actually *choose* fusion for this backend, not just tolerate it.
+
+    ``fused_boundary_model`` is the opt-in gate: it requires the
+    ``FusedMutualForceModel`` protocol *and* a ``k_max`` matching the integrator's.
+    If either drifted, the integrator would silently fall back to the per-level
+    path -- correct, but paying one traversal per active level, which is the whole
+    cost the fused primitive exists to avoid.
+    """
+    fmm = BlockStepFMM(softening=SOFTENING, k_max=2)
+    assert isinstance(fmm, FusedMutualForceModel)
+    assert fused_boundary_model(fmm, 2) is fmm
+    # A model whose k_max disagrees is a misconfiguration, not a fallback: its
+    # fused weights would span the wrong level range.
+    with pytest.raises(ValueError, match="k_max"):
+        fused_boundary_model(fmm, 3)
+    # And a per-level-only model must decline fusion rather than crash.
+    assert fused_boundary_model(_PerLevelOnly(fmm), 2) is None
+
+
+def test_nornax_fused_path_matches_its_per_level_path_on_the_fmm_force():
+    """The core cross-repo claim: fusing changes cost, not the trajectory.
+
+    Both runs use nornax's own ``advance_base_step`` and the same FMM force; only
+    the code path differs -- ``n_sub + 2`` fused evaluations against
+    ``sum_s (active levels at s)`` per-level ones. Agreement is to round-off
+    rather than bit-for-bit, because the per-level path's ``half`` is a traced
+    ``where`` while the fused path's is a Python float.
+    """
     n, k_max, dt_max = 256, 2, 1.0e-3
     positions, velocities, masses = _system(n, seed=6)
     rung = jnp.asarray(
@@ -211,7 +271,6 @@ def test_fused_boundary_matches_the_per_level_integrator_path():
         softening=SOFTENING, k_max=k_max, theta=0.9, max_order=4, leaf_size=16
     )
     fmm.prepare(positions, masses)
-
     state = BlockStepState(
         positions=positions,
         velocities=velocities,
@@ -220,21 +279,57 @@ def test_fused_boundary_matches_the_per_level_integrator_path():
         rung=rung,
         base_index=jnp.asarray(0, dtype=jnp.int32),
     )
-    per_level = advance_base_step(state, dt_max, fmm, k_max=k_max)
-    fused_x, fused_v, _ = fmm.advance_base_step(
+
+    fused = advance_base_step(state, dt_max, fmm, k_max=k_max)
+    per_level = advance_base_step(state, dt_max, _PerLevelOnly(fmm), k_max=k_max)
+
+    for got, want, name in (
+        (fused.positions, per_level.positions, "positions"),
+        (fused.velocities, per_level.velocities, "velocities"),
+        (fused.acc, per_level.acc, "acc"),
+    ):
+        error = float(jnp.linalg.norm(got - want) / jnp.linalg.norm(want))
+        assert error < 1e-10, f"{name}: {error}"
+
+    # Both paths must conserve momentum; fusion cannot be allowed to erode it.
+    for label, result in (("fused", fused), ("per-level", per_level)):
+        drift = _momentum(masses, result.velocities) - _momentum(masses, velocities)
+        scale = float(jnp.sum(jnp.abs(masses[:, None] * result.velocities)))
+        assert float(jnp.linalg.norm(drift)) / scale < 1e-13, label
+
+
+def test_jaccpot_base_step_matches_nornax_fused_base_step():
+    """The adapter's own base step and nornax's fused one must be the same map.
+
+    The adapter provides `advance_base_step` so jaccpot can be driven without
+    nornax at all; this keeps the two implementations of the same palindrome from
+    drifting apart.
+    """
+    n, k_max, dt_max = 256, 2, 1.0e-3
+    positions, velocities, masses = _system(n, seed=8)
+    rung = jnp.asarray(
+        np.random.default_rng(9).integers(0, k_max + 1, n), dtype=jnp.int32
+    )
+    fmm = BlockStepFMM(
+        softening=SOFTENING, k_max=k_max, theta=0.9, max_order=4, leaf_size=16
+    )
+    fmm.prepare(positions, masses)
+    state = BlockStepState(
+        positions=positions,
+        velocities=velocities,
+        masses=masses,
+        acc=jnp.zeros_like(positions),
+        rung=rung,
+        base_index=jnp.asarray(0, dtype=jnp.int32),
+    )
+    nornax_result = advance_base_step(state, dt_max, fmm, k_max=k_max)
+    x, v, acc = fmm.advance_base_step(
         positions, velocities, masses, rung=rung, dt_max=dt_max
     )
-    assert (
-        float(
-            jnp.linalg.norm(fused_x - per_level.positions)
-            / jnp.linalg.norm(per_level.positions)
-        )
-        < 1e-12
-    )
-    assert (
-        float(
-            jnp.linalg.norm(fused_v - per_level.velocities)
-            / jnp.linalg.norm(per_level.velocities)
-        )
-        < 1e-10
-    )
+    for got, want, name in (
+        (x, nornax_result.positions, "positions"),
+        (v, nornax_result.velocities, "velocities"),
+        (acc, nornax_result.acc, "acc"),
+    ):
+        error = float(jnp.linalg.norm(got - want) / jnp.linalg.norm(want))
+        assert error < 1e-10, f"{name}: {error}"

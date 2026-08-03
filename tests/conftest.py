@@ -12,6 +12,28 @@ YGGDRAX_ROOT = REPO_ROOT.parent / "yggdrax"
 if YGGDRAX_ROOT.exists() and str(YGGDRAX_ROOT) not in sys.path:
     sys.path.insert(0, str(YGGDRAX_ROOT))
 
+
+# nornax is a TEST-ONLY dependency, used by the cross-repo momentum/block-step
+# checks. The library never imports it -- the dependency graph is
+# Jaccpot -> Yggdrax, Nornax standalone, ODISSEO -> both -- so it is put on the
+# path here rather than declared as a package dependency. Absent, those tests skip.
+#
+# Searched across REPO_ROOT's ancestors rather than just `REPO_ROOT.parent`,
+# because a git worktree checkout sits at `<repo>/.claude/worktrees/<name>`, so its
+# parent is `worktrees/` and the plain sibling lookup finds nothing.
+def _find_sibling_checkout(name: str) -> pathlib.Path | None:
+    """Return a sibling source checkout of ``name``, searching upward."""
+    for ancestor in (REPO_ROOT, *REPO_ROOT.parents):
+        candidate = ancestor.parent / name
+        if (candidate / name / "__init__.py").exists():
+            return candidate
+    return None
+
+
+NORNAX_ROOT = _find_sibling_checkout("nornax")
+if NORNAX_ROOT is not None and str(NORNAX_ROOT) not in sys.path:
+    sys.path.insert(0, str(NORNAX_ROOT))
+
 # --- Test-suite performance setup -------------------------------------------
 # The FMM correctness tests assume float64; set it once here so individual
 # tests/modules do not each have to depend on the ambient environment.
