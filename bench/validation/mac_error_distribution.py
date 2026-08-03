@@ -597,8 +597,20 @@ def compare_arms(
     *,
     metric: str = "scaled_",
     match_on: str = "p90",
+    min_far_pairs: int = 0,
 ) -> list[dict[str, Any]]:
     """Compare the arms at a matched error statistic.
+
+    ``min_far_pairs`` drops configs with fewer than that many accepted far pairs
+    from the interpolation basis entirely. A config that accepts (almost) no far
+    field is pure near-field direct summation: its error sits at machine precision,
+    which *widens* the arm's apparent range and lets the matched target be
+    log-interpolated straight across the far-field switch-on. That is trap 8, and it
+    has produced p99 ratios of 34.8 and 2.9e7 out of pure round-off. It is not
+    hypothetical at large leaf sizes -- measured at N=1e5, theta=0.30 accepts 63 866
+    far pairs at leaf 64, **48** at leaf 128 and **0** at leaf 256 -- so any sweep
+    that varies leaf_size needs this on. Left at 0 by default so existing runs are
+    unchanged.
 
     ``metric`` selects the error family: ``""`` for Dehnen's per-particle
     relative error, ``"scaled_"`` for the globally-normalised one (the default,
@@ -622,6 +634,29 @@ def compare_arms(
 
     out = []
     p90 = f"{metric}{match_on}"
+    if min_far_pairs > 0:
+        dropped_fixed = [r for r in fixed if r.get("far_pairs", 0) < min_far_pairs]
+        dropped_mass = [r for r in mass if r.get("far_pairs", 0) < min_far_pairs]
+        fixed = [r for r in fixed if r.get("far_pairs", 0) >= min_far_pairs]
+        mass = [r for r in mass if r.get("far_pairs", 0) >= min_far_pairs]
+        if dropped_fixed or dropped_mass:
+            # Announced, not silent: a dropped row is a knob value that measured
+            # nothing, and knowing which ones went is how you tell "the grid is too
+            # coarse here" from "the grid is fine and one endpoint was degenerate".
+            print(
+                f"    compare_arms: dropped {len(dropped_fixed)} fixed + "
+                f"{len(dropped_mass)} mass config(s) with < {min_far_pairs} far "
+                "pairs (all-near-field, error at machine precision)"
+                + (
+                    "  fixed knobs: "
+                    + ",".join(f"{r['knob']:g}" for r in dropped_fixed)
+                    if dropped_fixed
+                    else ""
+                ),
+                flush=True,
+            )
+    if len(fixed) < 2 or len(mass) < 2:
+        return out
     lo = max(
         min(r[p90] for r in fixed if r[p90] > 0),
         min(r[p90] for r in mass if r[p90] > 0),
@@ -817,6 +852,20 @@ def main() -> int:
             "block * N * 3 * 8 bytes, so 512 needs ~3.6 GB at N=1e5 -- drop it to 64 "
             "there. Keep ALL targets rather than subsampling: p99.99 at N=1e5 is only "
             "~10 particles, and subsampling targets would leave the tail unmeasurable."
+        ),
+    )
+    ap.add_argument(
+        "--min-far-pairs",
+        type=int,
+        default=0,
+        help=(
+            "drop configs accepting fewer than this many far pairs from the matched "
+            "comparison. A config with (almost) no far field is direct summation: "
+            "its error is machine precision, which widens the arm's apparent range "
+            "and lets the matched target interpolate across the far-field switch-on "
+            "(trap 8, which has produced ratios of 34.8 and 2.9e7 out of round-off). "
+            "REQUIRED for any sweep that varies leaf_size -- at N=1e5, theta=0.30 "
+            "accepts 63866 far pairs at leaf 64, 48 at leaf 128 and 0 at leaf 256."
         ),
     )
     ap.add_argument(
@@ -1030,6 +1079,7 @@ def main() -> int:
                     by_arm[mass_arm],
                     metric=metric_prefix,
                     match_on=str(args.match_on),
+                    min_far_pairs=int(args.min_far_pairs),
                 ):
                     row.update(
                         {
