@@ -222,6 +222,12 @@ def sh_size(order: int) -> int:
     -------
     int
         Total number of coefficients: (p+1)^2.
+
+    Raises
+    ------
+    ValueError
+        If ``order`` is negative. A pure-Python host-side check on a static
+        value; nothing here is traced.
     """
     p = int(order)
     if p < 0:
@@ -241,6 +247,11 @@ def sh_offset(ell: int) -> int:
     -------
     int
         Starting index for degree ell: ell^2.
+
+    Raises
+    ------
+    ValueError
+        If ``ell`` is negative. A pure-Python host-side check on a static value.
     """
     ll = int(ell)
     if ll < 0:
@@ -262,6 +273,12 @@ def sh_index(ell: int, m: int) -> int:
     -------
     int
         Linear index in the packed coefficient array.
+
+    Raises
+    ------
+    ValueError
+        If ``ell`` is negative, or ``m`` falls outside ``[-ell, ell]``. Both are
+        pure-Python host-side checks on static values.
     """
     ll = int(ell)
     mm = int(m)
@@ -348,11 +365,17 @@ def p2m_real_direct(
     The cos(mφ) and sin(mφ) terms are computed via Chebyshev recurrence
     from cos φ = x/ρ and sin φ = y/ρ, avoiding trigonometric functions.
 
-    Validation
-    ----------
-    The resulting real-valued polynomials (scaled by (n-m)!(n+m)!) match
-    Table 3 of Dehnen (2014) for n ≤ 6 when derived via
-    scripts/derive_table3_polynomials.py.
+    *Validation.* The resulting real-valued polynomials (scaled by (n-m)!(n+m)!)
+    match Table 3 of Dehnen (2014) for n ≤ 6 when derived via
+    ``scripts/derive_table3_polynomials.py``.
+    TODO(docs): that script is not in the repository -- was the derivation ever
+    committed, and if not, is this Table 3 agreement asserted anywhere that runs?
+
+    Raises
+    ------
+    ValueError
+        If ``order`` is negative. ``order`` is static under ``jit``, so this
+        fires at trace time.
     """
     p = int(order)
     if p < 0:
@@ -1014,6 +1037,23 @@ def complex_to_dehnen_real_coeffs(complex_coeffs: Array, *, order: int) -> Array
     Array
         Packed real coefficients of shape ``(..., (p+1)^2)`` with the real dtype
         matching the input's real component.
+
+    Raises
+    ------
+    ValueError
+        If the trailing axis of ``complex_coeffs`` is not ``(p+1)^2``. A static
+        shape check on a static ``order``, so it fires at trace time.
+
+    Notes
+    -----
+    A single matmul against a fixed basis-change matrix, so differentiable in
+    ``complex_coeffs``. Note that only the real part is kept: the VJP therefore
+    discards the imaginary cotangent, which is correct for coefficient arrays
+    that satisfy the ``M_n^{-m} = (-1)^m conj(M_n^m)`` symmetry and lossy for
+    ones that do not.
+
+    Runs under :func:`~jaccpot.operators._precision.highest_matmul_precision`;
+    the matmul must not be dropped back to TF32.
     """
     coeffs = jnp.asarray(complex_coeffs)
     expected = sh_size(int(order))
@@ -1053,11 +1093,47 @@ def _real_wigner_rotation(
 ) -> Array:
     """Real rotation block from complex Wigner D via Dehnen Q transform.
 
+    The SymPy/NumPy baseline correctness path, not a production kernel: the
+    Wigner-D itself comes from :func:`_wigner_D_complex` at 30 digits. The
+    closed-form production builders are
+    :func:`real_rotation_to_z_axis_multipole` and friends; this exists to check
+    them.
+
     Parameters
     ----------
-    basis : {"multipole", "local"}
-        Selects the diagonal similarity scaling that maps the Wigner real
+    ell : int
+        Spherical harmonic degree, giving a ``[2*ell+1, 2*ell+1]`` block.
+    alpha : Array
+        First Euler angle (z), radians. Must be a **concrete** value -- it is
+        read via ``float()``, so this function cannot be traced or jitted.
+    beta : Array
+        Second Euler angle (y), radians. Concrete, as ``alpha``.
+    gamma : Array
+        Third Euler angle (z), radians. Concrete, as ``alpha``.
+    dtype : DTypeLike
+        Output dtype. The internal algebra is float64/complex128 regardless;
+        this only casts the result.
+    basis : str
+        Either ``"multipole"`` or ``"local"``; selects the diagonal similarity
+        scaling that maps the Wigner real
         basis to the Dehnen real basis used for multipoles or locals.
+
+    Returns
+    -------
+    Array
+        Real rotation block ``[2*ell+1, 2*ell+1]`` in the Dehnen no-sqrt2 real
+        basis, indexed ``m = -ell..ell``.
+
+    Raises
+    ------
+    ValueError
+        If ``basis`` is neither ``"multipole"`` nor ``"local"``.
+
+    Notes
+    -----
+    Not differentiable in the Euler angles: they are pulled out to the host with
+    ``float()`` and the block is rebuilt in NumPy, so the angles do not appear in
+    any jaxpr and carry no cotangent.
     """
     D_complex = _wigner_D_complex(ell, float(alpha), float(beta), float(gamma))
     # Adjust for the no-Condon-Shortley convention used in p2m_real_direct.
@@ -1231,8 +1307,11 @@ def compute_real_B_matrix_local(ell: int, *, dtype: DTypeLike) -> Array:
     ----------
     ell : int
         Spherical harmonic degree.
-    dtype : jnp.dtype
-        Real dtype (float32 or float64).
+    dtype : DTypeLike
+        Real working dtype (float32 or float64). The B matrix is built in
+        float64 for accuracy and cast down to this, so that the downstream
+        rotation GEMMs run in the working dtype instead of promoting float32
+        coefficient vectors to float64.
 
     Returns
     -------
@@ -1259,8 +1338,11 @@ def compute_real_B_matrix_multipole(ell: int, *, dtype: DTypeLike) -> Array:
     ----------
     ell : int
         Spherical harmonic degree.
-    dtype : jnp.dtype
-        Real dtype (float32 or float64).
+    dtype : DTypeLike
+        Real working dtype (float32 or float64). The B matrix is built in
+        float64 for accuracy and cast down to this, so that the downstream
+        rotation GEMMs run in the working dtype instead of promoting float32
+        coefficient vectors to float64.
 
     Returns
     -------
@@ -1277,6 +1359,16 @@ def compute_real_B_matrix_multipole(ell: int, *, dtype: DTypeLike) -> Array:
 @highest_matmul_precision
 def verify_real_B_matrix(ell: int, *, dtype: DTypeLike) -> Tuple[bool, float, float]:
     """Verify properties of the real B matrices (both B_T and B_U).
+
+    Parameters
+    ----------
+    ell : int
+        Spherical harmonic degree to check.
+    dtype : DTypeLike
+        Real working dtype the matrices are cast to before checking, so the
+        result reflects what the rotation GEMMs will actually see. The
+        ``1e-10`` sparsity threshold below is a float64 threshold and is not
+        adjusted for float32 -- read a float32 verdict with that in mind.
 
     Returns
     -------
