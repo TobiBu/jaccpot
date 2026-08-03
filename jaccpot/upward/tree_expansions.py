@@ -134,17 +134,63 @@ def compute_node_multipoles(
 
     Parameters
     ----------
-    tree:
-        Radix tree built from Morton-sorted particles.
-    positions_sorted, masses_sorted:
-        Particle data reordered to match ``tree.particle_indices``.
-    max_order:
-        Highest multipole order to keep.
-    center_mode:
-        ``"com"`` uses each node's centre of mass, ``"aabb"`` uses the
-        geometry centre, and ``"explicit"`` consumes ``explicit_centers``.
-    explicit_centers:
-        User-provided expansion centres when ``center_mode == "explicit"``.
+    tree : Tree
+        Radix tree built from Morton-sorted particles, as produced by
+        ``yggdrax``. Its ``left_child`` / ``right_child`` / ``node_ranges``
+        arrays define the aggregation order.
+    positions_sorted : Array
+        Particle positions ``[N, 3]``, reordered to match
+        ``tree.particle_indices``. Passing unsorted positions is silently wrong,
+        not an error.
+    masses_sorted : Array
+        Particle masses ``[N]``, in the same order as ``positions_sorted``. G=1
+        is a caller convention; no gravitational constant is applied here.
+    max_order : int
+        Highest Cartesian multipole order to keep. Static under ``jit``: it fixes
+        the packed coefficient count.
+    center_mode : str
+        ``"com"`` uses each node's centre of mass, ``"aabb"`` uses the geometry
+        centre, and ``"explicit"`` consumes ``explicit_centers``. Static under
+        ``jit`` -- it selects a Python branch, not a traced one.
+    explicit_centers : Optional[Array]
+        User-provided expansion centres ``[num_nodes, 3]``, required when
+        ``center_mode == "explicit"`` and ignored otherwise.
+
+    Returns
+    -------
+    NodeMultipoleData
+        Packed expansions for every node plus the metadata needed downstream:
+        the realised ``order``, the per-node ``centers`` ``[num_nodes, 3]``, the
+        raw ``moments``, and the ``packed`` coefficients. ``source_motion_packed``
+        is always ``None`` here -- only the derivative/jerk paths populate it.
+
+    Raises
+    ------
+    ValueError
+        If ``center_mode`` is not one of ``"com"``, ``"aabb"``, ``"explicit"``;
+        or if ``center_mode == "explicit"`` and ``explicit_centers`` is missing
+        or is not ``[num_nodes, 3]``. All three are host-side checks on static
+        values, so they fire before tracing.
+
+    Notes
+    -----
+    Differentiable in ``positions_sorted``, ``masses_sorted``, and
+    ``explicit_centers``. Not differentiable in ``tree``, which carries integer
+    topology only.
+
+    A node holding a single particle, or several coincident particles, gives a
+    zero-radius expansion: valid, and exactly the case where the far-field
+    accuracy depends entirely on the caller's MAC. Empty nodes carry zero mass
+    and contribute nothing.
+
+    ``center_mode="com"`` makes the expansion centres a *differentiable function
+    of the particle positions*, so a gradient through this function includes the
+    centre's own motion; ``"aabb"`` and ``"explicit"`` do not have that coupling
+    in the same way.
+    TODO(docs): is the "com" centre-motion term actually carried through the
+    downward sweep's gradient, or does something downstream stop_gradient the
+    centres? `docs/differentiable_fmm_design.md` does not say either way, and
+    the answer decides whether a "com" gradient is exact or approximate.
     """
 
     mode = center_mode.lower()
