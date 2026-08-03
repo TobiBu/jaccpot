@@ -135,10 +135,28 @@ so either shape works. Both are bit-identical to the static weights — powers o
 are exact in binary floating point, so scaling by `1 / 2**k` is the same operation
 as dividing by `2**k`.
 
-`BlockStepFMM.advance_base_step` uses the table by default
-(`scan_boundaries=True`): measured **10.35×** fewer top-level jaxpr equations at
-`k_max = 3` than the unrolled form, for the same trajectory to round-off. Pass
-`scan_boundaries=False` for the unrolled reference the tests compare against.
+`BlockStepFMM.advance_base_step` can use the table (`scan_boundaries=True`):
+measured **10.35×** fewer top-level jaxpr equations at `k_max = 3` than the
+unrolled form, for the same trajectory to round-off.
+
+It is **off by default**, because that win costs peak memory rather than saving
+it. Jaccpot's inner kernels are individually jitted, so the unrolled Python loop
+reuses their cached executables, while the scan must inline the whole force into
+one program and compile that. Over a 6 base-step rollout at `k_max = 2`, float64:
+
+| | N = 512 | N = 256 |
+|---|---|---|
+| scan | 2.67 GB | 2.70 GB |
+| unroll | 2.08 GB | 1.92 GB |
+
+`N` barely moves either number — this is compile/executable memory, not data, so
+shrinking the problem does not help. Turning the scan on by default regressed the
+CI integration shard from passing to OOM-killing its workers.
+
+Use the scan when *trace size* is what binds — an outer `jax.jit` over a rollout,
+or a deep `k_max` where `2**k_max` unrolled kicks stop fitting. An integrator that
+wants small traces *and* one traversal per boundary should drive `boundary_kick`
+with rows of the table from its own scan, which is the seam nornax uses.
 
 > Measure this with `len(jaxpr.jaxpr.eqns)`, not `len(str(jaxpr))`. The printed
 > form is dominated by the embedded topology constants, which are identical on both

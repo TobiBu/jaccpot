@@ -1089,6 +1089,10 @@ def test_scanned_base_step_matches_the_unrolled_one():
     x_s, v_s, a_s = fmm.advance_base_step(
         positions, velocities, masses, rung=rung, dt_max=2.0e-3, scan_boundaries=True
     )
+    # Two distinct programs get compiled here, and holding the first while
+    # building the second is what puts this test near the CI worker's ceiling.
+    # Measured peak RSS 1.87 -> 1.72 GB.
+    jax.clear_caches()
     x_u, v_u, a_u = fmm.advance_base_step(
         positions, velocities, masses, rung=rung, dt_max=2.0e-3, scan_boundaries=False
     )

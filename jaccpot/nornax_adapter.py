@@ -426,7 +426,7 @@ class BlockStepFMM:
         *,
         rung: Array,
         dt_max: float,
-        scan_boundaries: bool = True,
+        scan_boundaries: bool = False,
     ) -> Tuple[Array, Array, Array]:
         """Run one full base step on the fused path, at one traversal per boundary.
 
@@ -436,13 +436,30 @@ class BlockStepFMM:
         rung assignment is held fixed for the whole step, which is what makes the
         map symplectic and time-reversible.
 
-        ``scan_boundaries`` (default) walks the boundaries with a ``lax.scan`` over
-        a precomputed weight table, so the *traced* graph holds **one** boundary
-        kick regardless of ``k_max`` while the runtime still performs ``n_sub + 1``
-        traversals. Unrolling instead traces ``2**k_max`` kicks -- 9 at
-        ``k_max = 3``, 33 at ``k_max = 5`` -- and for an FMM each of those is a
-        whole tree traversal's worth of graph. Set it ``False`` for the unrolled
-        form, which is the parity reference in the tests.
+        ``scan_boundaries`` walks the boundaries with a ``lax.scan`` over a
+        precomputed weight table, so the *traced* graph holds **one** boundary kick
+        regardless of ``k_max`` -- 10.35x fewer top-level jaxpr equations at
+        ``k_max = 3`` -- while the runtime still performs ``n_sub + 1`` traversals.
+
+        It is **off by default**, because that win costs peak memory rather than
+        saving it. Jaccpot's inner kernels are individually jitted, so the unrolled
+        Python loop reuses their cached executables, whereas the scan has to inline
+        the whole force into one program and compile that. Measured over a 6
+        base-step rollout at ``k_max = 2``, float64:
+
+            scan   2.67 GB (N=512)   2.70 GB (N=256)
+            unroll 2.08 GB (N=512)   1.92 GB (N=256)
+
+        Note how little ``N`` moves either number: this is compile/executable
+        memory, not data. Turning the scan on by default regressed the CI
+        integration shard from passing to OOM-killing its workers.
+
+        So: leave it off for ordinary eager stepping, and turn it on when trace
+        size is what binds -- an outer ``jax.jit`` over the rollout, or a deep
+        ``k_max`` where ``2**k_max`` unrolled kicks stop fitting. An integrator that
+        wants both (small traces *and* per-boundary traversals) should drive
+        :meth:`boundary_kick` with rows of
+        :func:`~jaccpot.mutual.force.boundary_weight_table` from its own scan.
 
         Returns ``(positions, velocities, acceleration)`` where the acceleration
         is the full field at the end-of-step positions, ready to seed the next
