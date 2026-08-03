@@ -42,8 +42,16 @@ class DiagnosticsMixin:
 
         Parameters
         ----------
-        per_call
-            Divide by ``refresh_timing_calls`` to get per-step seconds.
+        per_call : bool
+            Divide every ``seconds`` value by ``refresh_timing_calls`` to get
+            per-step seconds instead of cumulative ones.
+
+        Returns
+        -------
+        dict[str, Any]
+            The stage tree, one entry per top-level stage. Each node carries
+            ``seconds``, ``measured`` and ``counter``; parents additionally carry
+            ``children``, ``children_seconds`` and ``unattributed_seconds``.
 
         See Also
         --------
