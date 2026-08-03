@@ -548,18 +548,36 @@ pip install --target /tmp/overlay --no-deps "diffrax==0.7.2" "equinox==0.13.6"
 PYTHONPATH=/tmp/overlay:/path/to/nornax pytest tests/integration/test_mutual_fmm_nornax.py
 ```
 
-## Known issue in the shared real-basis L2P
+## Resolved: the shared real-basis L2P azimuth gradient
 
-`evaluate_local_real_with_grad(coeffs, delta)` loses the x and y components of its
-gradient when `delta` is **exactly** zero: `evaluate_local_real` builds the azimuth
-from `x / rho` with `rho` clamped by `squared_radius_floor`, which keeps the
-potential finite but collapses the azimuth. A leaf holding a single particle hits
-this every time, because the particle *is* the leaf's centre of mass — it produced
-a force with only a z-component in a two-body test.
+Bringing this path up found a defect in the *production* real-basis L2P.
+`evaluate_local_real` built the azimuth as
+`cos_phi = where(rho2 > floor, x / rho, 1.0)`. The constant branch is harmless in
+the forward pass — every `|m| >= 1` term carries a `sin^|m| θ = (rho/r)^|m|`
+factor that annihilates the arbitrary azimuth — but a constant has no x/y
+derivative, so under `jax.grad` the entire transverse gradient of the `m != 0`
+terms was dropped.
 
-This is a pre-existing defect in `jaccpot/operators/real_harmonics.py` affecting
-the production L2P too, not only the mutual path. It is worked around here in
-`mutual/farfield.py::_nondegenerate_offsets`, which nudges exactly-degenerate
-offsets just above the floor (~1e-27 in float64, ~1e-16 in float32) where the
-gradient is recovered to full precision. Fixing the operator itself is a separate,
-wider-blast-radius change.
+The mutual path surfaced it as a two-body far-field force pointing along z only:
+a leaf holding a single particle hits `delta == 0` every time, because the
+particle *is* its leaf's centre of mass. It was worked around here by nudging
+degenerate offsets off the centre.
+
+Fixed at the source instead, and the fix is broader than the workaround was: the
+operator now divides by the **floored** `rho` unconditionally, so the degree-1
+limit falls out of the algebra (`sin θ cos φ = (rho/r)(x/rho) = x/r`) rather than
+being branched away. That also covers `rho == 0` with `z != 0` — anywhere on the
+expansion centre's z axis, reachable at *any* leaf size in axis-aligned or
+symmetric configurations — which the offset nudge never triggered on, since such a
+point has `r2 >> floor`. `p2m_real_direct` had the same branch and the same fix.
+
+The workaround is gone from `mutual/farfield.py`; no guard is needed at the L2P
+call site.
+
+**Transferable lesson.** A `where(cond, expr, constant)` guard placed to keep a
+*forward* value finite silently zeroes the corresponding reverse-mode component,
+and no forward-only test can see it. Prefer making the degeneracy cancel
+analytically (divide by a floored quantity) over branching it away; where a branch
+is unavoidable, use the double-`where` form so both branches stay
+differentiable — the same discipline the rest of this module follows before every
+reciprocal.

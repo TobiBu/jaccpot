@@ -181,31 +181,6 @@ def _safe_translate(
     return jnp.where(live[:, None], out, coeffs)
 
 
-def _nondegenerate_offsets(offsets: Array) -> Array:
-    """Nudge L2P evaluation offsets off the expansion centre.
-
-    ``evaluate_local_real`` builds the azimuth from ``x / rho`` with ``rho``
-    clamped to :func:`~jaccpot.operators.dtypes.squared_radius_floor`. At an
-    evaluation point sitting *exactly* on the expansion centre that clamp keeps
-    the potential finite but collapses the azimuth, and the returned gradient
-    loses its x and y components entirely -- only ``d/dz`` survives. A leaf
-    holding a single particle hits this every time, because the particle *is* the
-    leaf's centre of mass.
-
-    The limit as the offset goes to zero is direction-independent (it is just the
-    degree-1 term), so substituting a displacement just above the floor recovers
-    the correct gradient to full precision while being physically nil: ~1e-27 in
-    float64, ~1e-16 in float32, against expansion scales of order unity.
-    """
-    dtype = offsets.dtype
-    floor = jnp.asarray(squared_radius_floor(dtype), dtype)
-    nudge = jnp.sqrt(floor) * jnp.asarray(1024.0, dtype)
-    r2 = jnp.sum(offsets * offsets, axis=-1)
-    degenerate = r2 <= floor
-    axis = jnp.zeros_like(offsets).at[..., 0].set(nudge)
-    return jnp.where(degenerate[..., None], axis, offsets)
-
-
 def _m2l_batch(
     multipoles: Array,
     deltas: Array,
@@ -464,7 +439,15 @@ def _l2p_forces(
     leaf_locals = locals_[tree.leaf_nodes]
     # L2P convention: delta = expansion centre - evaluation point, and the
     # returned gradient is d(phi)/d(delta); the acceleration is its negation.
-    offsets = _nondegenerate_offsets(centers[tree.leaf_nodes][:, None, :] - x)
+    #
+    # A degenerate offset needs no guard here. `evaluate_local_real` used to
+    # branch the azimuth to a constant at rho == 0, which is forward-safe but has
+    # no x/y derivative, so the transverse gradient vanished -- hit every time by
+    # a leaf holding a single particle, since the particle IS its leaf's centre of
+    # mass. That is fixed at the source: the operator now divides by the floored
+    # rho unconditionally, so the degree-1 limit falls out of the algebra. This
+    # module carried a nudge-the-offset workaround until then.
+    offsets = centers[tree.leaf_nodes][:, None, :] - x
     grads = jax.vmap(
         lambda coeffs, offs: jax.vmap(
             lambda o: evaluate_local_real_with_grad(coeffs, o, order=p)[0]
