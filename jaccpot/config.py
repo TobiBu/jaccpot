@@ -125,6 +125,17 @@ class TraversalOverrides:
         )
 
     A plain ``dict`` with the same keys is accepted and means the same thing.
+
+    Attributes
+    ----------
+    max_pair_queue : Optional[int]
+        Capacity of the dual-tree pair queue.
+    process_block : Optional[int]
+        Pair-queue block size processed per traversal step.
+    max_interactions_per_node : Optional[int]
+        Cap on far-field (M2L) interactions recorded per node.
+    max_neighbors_per_leaf : Optional[int]
+        Cap on near-field neighbour leaves recorded per leaf.
     """
 
     max_pair_queue: Optional[int] = None
@@ -229,10 +240,12 @@ class GradConfig:
         ``JACCPOT_STATIC_STRICT_FUSED_M2L_PALLAS``. Roughly halves the forward
         at small N; the reverse is near-field-bound, so the end-to-end win is
         ~1.3-1.5x.
-    analytic_p2p_vjp, analytic_l2p_vjp : Optional[bool]
-        Analytic reverse rules for the near-field P2P and the real-basis L2P,
-        both on by default. Turning them off restores plain autodiff and is for
-        A/B measurement, not production.
+    analytic_p2p_vjp : Optional[bool]
+        Analytic reverse rule for the near-field P2P, on by default. Turning it
+        off restores plain autodiff and is for A/B measurement, not production.
+    analytic_l2p_vjp : Optional[bool]
+        Analytic reverse rule for the real-basis L2P, on by default. Same
+        caveat as ``analytic_p2p_vjp``.
     reverse_tiers : Optional[int]
         Maximum occupancy tiers for the analytic leaf-pair reverse (default 4).
         The prepacked payload is padded to the global maximum neighbour count,
@@ -246,10 +259,13 @@ class GradConfig:
     reverse_skip_empty_tiles : Optional[bool]
         Skip reverse tiles carrying no valid source slot (default on).
         Semantics-preserving; worth ~1.24x at N=1000000 and nothing at 200000.
-    reverse_leaf_batch, reverse_block_tile : Optional[int]
-        Reverse-pass tiling (defaults 8 and 8). Deliberately independent of the
-        forward's: the backward materialises per-tile pair tensors, so small
+    reverse_leaf_batch : Optional[int]
+        Reverse-pass leaf batch size (default 8). Deliberately independent of
+        the forward's: the backward materialises per-tile pair tensors, so small
         tiles are what keep its memory bounded.
+    reverse_block_tile : Optional[int]
+        Reverse-pass block tile size (default 8). Same reasoning as
+        ``reverse_leaf_batch``.
     """
 
     nearfield_lane: GradNearFieldLane = "auto"

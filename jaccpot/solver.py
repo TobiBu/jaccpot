@@ -649,11 +649,59 @@ class FastMultipoleMethod:
 
         Parameters
         ----------
-        max_acc_derivative_order:
+        positions : Array
+            Source and target particle positions ``[N, 3]``.
+        masses : Array
+            Particle masses ``[N]``, aligned with ``positions``. G=1 unless the
+            solver was configured otherwise.
+        target_indices : Optional[Array]
+            1-D indices selecting which targets to return. All particles remain
+            sources.
+        bounds : Optional[Tuple[Array, Array]]
+            Explicit ``(lower, upper)`` domain bounds for tree construction.
+            Defaults to the particle bounding box.
+        leaf_size : int
+            Target maximum particles per leaf.
+        max_order : int
+            Expansion order ``p`` for the upward and downward passes. Note this
+            defaults to 4 here, while the underlying
+            :class:`~jaccpot.runtime.fmm_evaluate.EvaluateMixin` method defaults
+            to 2 -- the public default is the one that applies.
+        return_potential : bool
+            Also return the potential ``[N]``.
+        theta : Optional[float]
+            Per-call MAC opening-angle override. Tightening it lowers the
+            far-field truncation error at the cost of more near-field work.
+        reuse_prepared_state : bool
+            Reuse the last prepared state when the array objects and preparation
+            parameters are identical. An object-identity check, not a value
+            comparison: mutating an array in place and passing it again reuses a
+            stale tree.
+        max_acc_derivative_order : int
             Request packed spatial derivatives of acceleration in addition to
             acceleration itself. ``0`` disables derivatives.
             ``1`` returns the acceleration Jacobian with shape ``(N, 3, 3)`` in
-            packed-symmetric layout across the trailing axis.
+            packed-symmetric layout across the trailing axis. Non-zero requires
+            ``expansion_basis="solidfmm"``.
+
+        Returns
+        -------
+        Union[Array, Tuple[Array, Array], Tuple[Array, tuple[Array, ...]], Tuple[Array, Array, tuple[Array, ...]]]
+            Accelerations ``[N, 3]``, or ``[len(target_indices), 3]`` when
+            ``target_indices`` is given. ``return_potential`` inserts the
+            potentials next and ``max_acc_derivative_order > 0`` appends the
+            packed derivative tuple last, giving ``a``, ``(a, pot)``,
+            ``(a, derivs)`` or ``(a, pot, derivs)``.
+
+        Notes
+        -----
+        The forward-only entry point: it builds a tree per call. Use
+        :meth:`prepare_state` plus :meth:`evaluate_prepared_state` to amortise
+        the build, and :meth:`differentiable_accelerations` for gradients -- this
+        method falls back to an O(N^2) direct sum under an outer trace.
+
+        Accuracy is set by ``max_order`` and ``theta`` together; neither alone
+        determines it, and a convergence check must vary both.
         """
         return self._impl.compute_accelerations(
             positions,
@@ -723,14 +771,52 @@ class FastMultipoleMethod:
 
         Parameters
         ----------
-        jerk_mode:
+        positions : Array
+            Particle positions ``[N, 3]``.
+        masses : Array
+            Particle masses ``[N]``.
+        velocities : Array
+            Particle velocities ``[N, 3]``. Used only for the jerk; the
+            acceleration does not depend on them.
+        target_indices : Optional[Array]
+            1-D indices selecting which targets to return; all particles remain
+            sources.
+        bounds : Optional[Tuple[Array, Array]]
+            Explicit ``(lower, upper)`` domain bounds for tree construction.
+        leaf_size : int
+            Target maximum particles per leaf.
+        max_order : int
+            Expansion order ``p``.
+        theta : Optional[float]
+            Per-call MAC opening-angle override.
+        reuse_prepared_state : bool
+            Reuse the last prepared state when the array objects and preparation
+            parameters are identical.
+        jerk_mode : str
             ``"fast_approx"`` uses exact near-field jerk plus far-field
             convective jerk from the acceleration Jacobian.
             ``"accurate"`` uses an analytic far-field source-motion term
             (`dM -> dL`) plus the convective and exact near-field terms.
-        jerk_fd_dt:
+        jerk_fd_dt : float
             Finite-difference step used only for non-``solidfmm`` fallback
             in ``jerk_mode="accurate"``.
+
+        Returns
+        -------
+        tuple[Array, Array]
+            ``(accelerations, jerk)``, each ``[N, 3]`` (or
+            ``[len(target_indices), 3]``).
+
+        Notes
+        -----
+        The two ``jerk_mode`` values are *not* equivalent: ``"fast_approx"``
+        omits the far-field source-motion term that ``"accurate"`` includes, so
+        they differ by a physical contribution rather than by round-off. Choose
+        by accuracy requirement, not by speed alone.
+        TODO(docs): what is the size of that difference? `docs/derivatives_and_jerk.md`
+        describes both schemes but I did not find a measured error for
+        ``"fast_approx"`` against ``"accurate"`` or against a direct sum, and
+        without one there is no way to say when the fast mode is good enough.
         """
         return self._impl.compute_accelerations_and_jerk(
             positions,
@@ -861,15 +947,20 @@ class FastMultipoleMethod:
         ----------
         state : Union[FMMPreparedState, LargeNPreparedState]
             Frozen topology from :meth:`prepare_state`, captured as a constant.
-        positions, masses : Array
-            Differentiated inputs, in the original (unsorted) particle order.
+        positions : Array
+            Differentiated positions ``[N, 3]``, in the original (unsorted)
+            particle order -- the method applies ``state``'s permutation itself.
+        masses : Array
+            Differentiated masses ``[N]``, in the same original order.
         target_indices : Optional[Array]
             Optional subset of targets to return; all particles remain sources.
             Not supported on the large-N path.
         jit_traversal : bool
             Kept ``False`` on the gradient path.
-        grad_plan : Optional[LargeNGradPlan]
-            Large-N only. Build once with
+        grad_plan : Optional[Any]
+            A ``LargeNGradPlan``; annotated ``Any`` here only to keep the
+            public module from importing the large-N internals. Large-N only.
+            Build once with
             :func:`~jaccpot.runtime._large_n_grad.prepare_large_n_grad_plan` and
             pass it here to hoist validation and pair-list setup out of an
             optimisation loop.
@@ -949,12 +1040,36 @@ class FastMultipoleMethod:
 
         Parameters
         ----------
-        jerk_mode:
+        state : FMMPreparedState
+            Tree and interaction lists from :meth:`prepare_state`. Reused as-is;
+            the topology is not rebuilt, so this is only valid while the
+            positions it was built from remain appropriate.
+        velocities : Array
+            Particle velocities ``[N, 3]`` in the original (unsorted) particle
+            order.
+        target_indices : Optional[Array]
+            1-D indices selecting which targets to return; all particles remain
+            sources.
+        jerk_mode : str
             ``"fast_approx"`` or ``"accurate"``; see
-            :meth:`compute_accelerations_and_jerk`.
-        jerk_fd_dt:
+            :meth:`compute_accelerations_and_jerk`, including the note that the
+            two are not numerically equivalent.
+        jerk_fd_dt : float
             Finite-difference step for non-``solidfmm`` fallback in
             ``"accurate"`` mode.
+
+        Returns
+        -------
+        tuple[Array, Array]
+            ``(accelerations, jerk)``, each ``[N, 3]`` (or
+            ``[len(target_indices), 3]``).
+
+        Notes
+        -----
+        Unlike :meth:`compute_accelerations_and_jerk` this evaluates the
+        *prebaked* expansions carried by ``state``. It takes no live positions or
+        masses, so it must not be differentiated -- see
+        :meth:`differentiable_accelerations` for that.
         """
         jit_traversal = (
             True

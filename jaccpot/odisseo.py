@@ -87,6 +87,11 @@ class OdisseoFMMCoupler:
             Also return the potential. Not available on the differentiable path.
         rebuild_sources : bool
             Rebuild the tree from ``state`` before evaluating.
+        bounds : Optional[Tuple[Array, Array]]
+            Explicit ``(lower, upper)`` domain bounds for tree construction,
+            forwarded to :meth:`prepare`. Used only when a rebuild actually
+            happens -- i.e. when ``rebuild_sources=True`` or no state is cached
+            yet; otherwise it is silently ignored.
         differentiable : bool
             Route through :meth:`~jaccpot.FastMultipoleMethod.differentiable_accelerations`
             so ``jax.grad`` over this call gives exact fixed-topology gradients
@@ -110,6 +115,19 @@ class OdisseoFMMCoupler:
             positions or masses. Differentiating it therefore returns **exactly
             zero** rather than failing -- the worst outcome available, so it is
             rejected explicitly instead. Pass ``differentiable=True``.
+
+            Also raised on the differentiable path when a rebuild is needed while
+            tracing (``prepare_state`` is not traceable, so the source tree must
+            be built outside the differentiated function), and when
+            ``return_potential=True`` is combined with ``differentiable=True``
+            (the potential half of the near-field ``custom_vjp`` is not wired).
+        ValueError
+            If ``masses`` is ``None`` on a call that needs to build or rebuild
+            the tree and nothing has been cached by a previous
+            :meth:`prepare`/evaluation.
+        RuntimeError
+            If the prepared state is missing after a successful prepare. A
+            defensive invariant check, not a reachable user error.
         """
         traced = _contains_tracer(state) or _contains_tracer(masses)
         if traced and not differentiable:
