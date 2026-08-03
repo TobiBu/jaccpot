@@ -15,8 +15,12 @@ Run these before opening a pull request:
 ```bash
 black --check .
 isort --check-only .
+pydoclint --config pyproject.toml jaccpot/
 pytest
 ```
+
+`pydoclint` also runs as a pre-commit hook, so it blocks the commit rather than the PR. The
+`--config pyproject.toml` form above reproduces the hook exactly.
 
 ## Pre-commit
 

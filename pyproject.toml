@@ -106,6 +106,10 @@ dev = [
   # floating ">=" here lets CI's `isort --check-only .` resolve to the broken
   # 8.0.1 and disagree with pre-commit, so keep this equal to the hook rev.
   "isort==9.0.0b1",
+  # Pinned to match .pre-commit-config.yaml's pydoclint rev, for the same reason as
+  # black and isort above: the hook runs on every commit now, and a floating ">="
+  # would let a local pydoclint disagree with it about what counts as a violation.
+  "pydoclint==0.9.1",
   "pytest>=8.3.0",
   "pytest-cov>=5.0.0",
   "pytest-xdist>=3.6.0",
@@ -133,6 +137,10 @@ exclude = '''
  |dist
 )/
 '''
+
+[tool.pydoclint]
+style = "numpy"
+exclude = '\.git|\.venv|build|dist|jaccpot/experimental'
 
 [tool.isort]
 profile = "black"

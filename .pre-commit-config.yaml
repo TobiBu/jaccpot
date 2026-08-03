@@ -13,8 +13,10 @@ repos:
     rev: 0.9.1
     hooks:
       - id: pydoclint
-        args: ["--style", "numpy"]
-        stages: [manual]
+        # Runs on commit. Docstring drift is cheap to catch now and expensive to fix
+        # in bulk later. Config lives in pyproject.toml so that
+        # `pydoclint --config pyproject.toml jaccpot/` reproduces the hook exactly.
+        args: ["--config", "pyproject.toml"]
 
   - repo: local
     hooks:
