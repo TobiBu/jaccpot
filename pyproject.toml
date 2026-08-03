@@ -25,7 +25,7 @@ classifiers = [
   "Topic :: Scientific/Engineering :: Physics",
 ]
 dependencies = [
-  # JAX FLOOR IS 0.11.0, and it is a hard floor: 0.9.1 and 0.9.2 CRASH on the CPU
+  # JAX FLOOR IS 0.10.2, and it is a hard floor: 0.9.1 and 0.9.2 CRASH on the CPU
   # backend. `tests/characterization/test_fmm_golden.py::test_fmm_golden[uni_real_n256_p6]`
   # dies with `Fatal Python error: Floating-point exception` -- a SIGFPE inside
   # XLA's CPU compiler while compiling the real-basis P2M `lax.scan`
