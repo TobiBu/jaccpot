@@ -32,6 +32,7 @@ bounds over tree levels, so the whole sweep transposes cleanly under
 
 from __future__ import annotations
 
+import os
 from typing import NamedTuple, Optional, Tuple
 
 import jax
@@ -49,6 +50,8 @@ from jaccpot.operators.dtypes import squared_radius_floor
 from jaccpot.operators.m2l_real_rot_scale import (
     _rotate_local_from_z_single,
     _rotate_multipole_to_z_single,
+    real_rotation_blocks_from_z_local_batch,
+    real_rotation_blocks_to_z_multipole_batch,
 )
 from jaccpot.operators.real_harmonics import (
     evaluate_local_real_with_grad,
@@ -66,6 +69,74 @@ __all__ = [
 ]
 
 _M2L_BATCH_BUDGET = 1 << 16
+
+# Peak bytes one chunk's *padded* rotation-block tensors may reach on the fused
+# Pallas lane. The fused kernel takes the world<->z rotations as explicit
+# ``(pairs, Bp, mdp, mdp)`` operands, so a chunk costs far more memory per pair
+# than the three-stage sandwich (which only ever materialises ``(pairs, C)``
+# coefficient vectors). At order 4 in float64 that is ~16 KB per pair per block
+# against ~0.2 KB, so reusing the 65536-pair count would ask for gigabytes.
+_M2L_FUSED_BLOCK_BUDGET_BYTES = 128 << 20
+
+
+def _m2l_lane(use_pallas: bool, interpret: bool) -> str:
+    """Which M2L implementation to dispatch: ``"jax"``, ``"fused"`` or ``"zcore"``.
+
+    Selected by ``JACCPOT_MUTUAL_M2L``; ``"auto"`` (the default) resolves to:
+
+    * ``"fused"`` under ``interpret`` -- interpret mode exists to execute the
+      real kernel logic on CPU, so the parity and differentiability tests must
+      keep reaching it. Routing interpret to pure JAX would make them vacuous;
+    * ``"jax"`` on real hardware, **because the Pallas M2L is measurably slower
+      here**. On an A100 at N=10^4 the whole far field costs 17.1 ms in pure JAX
+      against 20.0 ms fused and 20.3 ms z-core -- a ~0.85x regression that both
+      Pallas shapes share.
+
+    That the two shapes are indistinguishable is the informative part. Fusing the
+    rotations away changes nothing, so the rotation ``vmap``s were never what
+    dominated the far field. What the fused kernel *does* change is its operand
+    traffic: it takes the world<->z rotations as explicit ``(pairs, Bp, mdp,
+    mdp)`` arrays, 32 KB per pair at order 4 in float64 against the sandwich's
+    0.39 KB of coefficient vectors -- an 82x amplification. The sandwich builds
+    the same blocks inside a fused XLA kernel and never spills them to HBM.
+
+    The production real-M2L path does not contradict this: it faces the same
+    trade and simply has different pair statistics. Here every directed pair has
+    its own ``delta``, so no rotation block is ever reused.
+
+    Both Pallas lanes stay wired, differentiable and covered by the interpret
+    tests; set ``JACCPOT_MUTUAL_M2L=fused`` (or ``zcore``) to force one on
+    hardware and reproduce the A/B.
+    """
+    if not use_pallas:
+        return "jax"
+    choice = os.environ.get("JACCPOT_MUTUAL_M2L", "auto").strip().lower()
+    if choice not in {"auto", "jax", "fused", "zcore"}:
+        raise ValueError(
+            "JACCPOT_MUTUAL_M2L must be one of 'auto', 'jax', 'fused', 'zcore'; "
+            f"got {choice!r}"
+        )
+    if choice == "auto":
+        choice = "fused" if interpret else "jax"
+    if choice == "jax":
+        return "jax"
+    if interpret:
+        return choice
+    # The fused gate is `pallas_m2l_real_fused_supported` (Ampere sm_80+), not the
+    # z-core's `pallas_m2l_real_supported` (any gpu/tpu): the latter would route a
+    # pre-Ampere GPU into a Triton lowering that fails at runtime.
+    from jaccpot.pallas.m2l_real_fused import pallas_m2l_real_fused_supported
+
+    return choice if pallas_m2l_real_fused_supported() else "jax"
+
+
+def _fused_m2l_chunk(order: int, itemsize: int) -> int:
+    """Pairs per scan step that keep the fused lane's block tensors in budget."""
+    from jaccpot.pallas.m2l_real_fused import m2l_real_fused_tables
+
+    tables = m2l_real_fused_tables(int(order))
+    per_pair = max(1, int(tables["Bp"]) * int(tables["mdp"]) ** 2 * int(itemsize))
+    return max(1, _M2L_FUSED_BLOCK_BUDGET_BYTES // per_pair)
 
 
 class MutualTreeArrays(NamedTuple):
@@ -145,41 +216,66 @@ def _m2l_batch(
 ) -> Array:
     """Batched rotate + z-translate + rotate-back real M2L, differentiable either way.
 
-    This mirrors
-    :func:`~jaccpot.operators.m2l_real_rot_scale.m2l_rot_scale_real_batch` but
-    routes the z-translation core through
-    :func:`~jaccpot.pallas.m2l_core_z_real.m2l_core_z_real_pallas_cvjp` rather
-    than the bare Pallas kernel.
+    Three lanes, all computing the same operator as
+    :func:`~jaccpot.operators.m2l_real_rot_scale.m2l_rot_scale_real_batch`:
 
-    That distinction is load-bearing, not cosmetic. ``pallas_call`` has no
-    JVP/transpose rule, and the production helper calls the *bare* kernel, so
-    ``use_pallas=True`` yields a forward that cannot be differentiated -- on CPU
-    the Pallas path is simply unsupported and silently falls back, so the failure
-    only appears on an actual GPU. Jaccpot already ships the missing reverse rule
-    as a ``custom_vjp`` (Pallas forward, autodiff of the pure-JAX recurrence twin);
-    using it is what keeps ``backend="pallas"`` differentiable.
+    * **fused Pallas** (``use_pallas`` and Ampere+, or ``interpret``) -- one
+      launch per chunk does rotate -> z-translate -> rotate-back on chip via
+      :func:`~jaccpot.pallas.m2l_real_fused.m2l_real_fused_pallas_cvjp`. The
+      rotations are handed over as explicit per-degree blocks, built by the *same*
+      ``real_rotation_*`` ops the single-pair helpers use, so the two lanes are
+      the same arithmetic in a different order.
+    * **z-core Pallas** (``JACCPOT_MUTUAL_FUSED_M2L=0``) -- the original
+      three-stage sandwich, kept as the A/B reference for the fused lane.
+    * **pure JAX** -- the fallback and the correctness/AD oracle.
+
+    Both Pallas lanes go through a ``custom_vjp`` wrapper rather than the bare
+    kernel, and that distinction is load-bearing, not cosmetic. ``pallas_call``
+    has no JVP/transpose rule, and jaccpot's own ``m2l_core_z_real`` helper calls
+    the *bare* kernel, so routing through it would yield a forward that cannot be
+    differentiated -- and on CPU the Pallas path is simply unsupported and
+    silently falls back, so the failure would only appear on an actual GPU.
 
     ``interpret`` runs the Pallas kernel in interpret mode, which works on CPU and
-    is how the parity test exercises the kernel logic without a GPU.
+    is how the parity tests exercise the kernel logic without a GPU.
     """
-    from jaccpot.pallas.m2l_core_z_real import (
-        m2l_core_z_real_pallas_cvjp,
-        pallas_m2l_real_supported,
-    )
-
     p = int(order)
     # NaN-safe radius: `norm` has a 0/0 reverse gradient at delta == 0. The
     # double-`where` keeps the cotangent finite there; the forward is unchanged.
     r2 = jnp.sum(deltas * deltas, axis=1)
     positive = r2 > 0
     radii = jnp.where(positive, jnp.sqrt(jnp.where(positive, r2, 1.0)), 0.0)
+    floored = jnp.maximum(radii, jnp.asarray(1.0e-30, dtype=radii.dtype))
+
+    lane = _m2l_lane(use_pallas, interpret)
+
+    if lane == "fused":
+        from jaccpot.pallas.m2l_real_fused import m2l_real_fused_pallas_cvjp
+
+        dtype = multipoles.dtype
+        blocks_to_z = real_rotation_blocks_to_z_multipole_batch(
+            deltas, order=p, dtype=dtype
+        )
+        blocks_from_z = real_rotation_blocks_from_z_local_batch(
+            deltas, order=p, dtype=dtype
+        )
+        return m2l_real_fused_pallas_cvjp(
+            multipoles,
+            blocks_to_z,
+            blocks_from_z,
+            floored,
+            p,
+            bool(interpret),
+            "triton",
+        )
 
     rotated = jax.vmap(lambda m, d: _rotate_multipole_to_z_single(m, d, order=p))(
         multipoles, deltas
     )
 
-    floored = jnp.maximum(radii, jnp.asarray(1.0e-30, dtype=radii.dtype))
-    if use_pallas and (interpret or pallas_m2l_real_supported()):
+    if lane == "zcore":
+        from jaccpot.pallas.m2l_core_z_real import m2l_core_z_real_pallas_cvjp
+
         locals_z = m2l_core_z_real_pallas_cvjp(
             rotated, floored, p, bool(interpret), "triton"
         )
@@ -281,7 +377,10 @@ def _dual_m2l(
     if n_pairs == 0:
         return locals_
 
-    chunk = min(max(1, _M2L_BATCH_BUDGET), n_pairs)
+    budget = _M2L_BATCH_BUDGET
+    if _m2l_lane(use_pallas, interpret) == "fused":
+        budget = min(budget, _fused_m2l_chunk(p, dtype.itemsize))
+    chunk = min(max(1, budget), n_pairs)
     steps = (n_pairs + chunk - 1) // chunk
     pad = steps * chunk - n_pairs
     source = tree.far_source
@@ -306,6 +405,23 @@ def _dual_m2l(
         w = lax.dynamic_slice_in_dim(weights, start, chunk)
         # M2L convention: delta = target centre - source centre.
         delta = centers[tgt] - centers[src]
+        # Padding slots carry src == tgt == 0, so their delta is exactly zero and
+        # `_m2l_batch` floors the radius to 1e-30. The z-core then evaluates
+        # r**-(p+1), which at that floor is 5.6e151 at order 4 and 2.0e213 at
+        # order 6: finite in float64, but far past **inf in float32**. The
+        # trailing `* where(live, w, 0)` below then turns inf * 0 into NaN rather
+        # than dropping the slot, poisoning its target node -- which the L2L
+        # cascade proceeds to broadcast across the tree.
+        #
+        # Substitute a unit axis *before* the reciprocal, the same double-`where`
+        # discipline the kernels use; the zero weight still drops the slot.
+        #
+        # Two things kept this hidden: it needs float32 (float64 only overflows
+        # from order 10, where 30*(p+1) passes 308), and it needs the directed
+        # pair list not to divide the chunk -- which takes > 65536 directed far
+        # pairs, i.e. roughly N > 10^4.
+        safe_axis = jnp.zeros_like(delta).at[:, 2].set(jnp.ones_like(delta[:, 2]))
+        delta = jnp.where(live[:, None], delta, safe_axis)
         contrib = _m2l_batch(
             multipoles[src],
             delta,

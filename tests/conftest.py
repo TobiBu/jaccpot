@@ -89,13 +89,41 @@ _DIFF_FMM_TEST_FILES = frozenset(
     }
 )
 
+# Cleared only when the on-disk JAX cache is available to serve the recompiles.
+#
+# The mutual FMM suite belongs in the set above for exactly the reason given
+# there and was simply never added: it is the heaviest file in
+# `tests/integration`, and its gradient tests (FD-vs-AD, vs-direct-sum, rollout,
+# per-level, and the Pallas backend) each leave another reverse-mode executable
+# behind. Omitting it is what let `test-full` drift back to the ceiling and
+# start OOM-killing the runner. Measured on `tests/integration` at `-n 2 --cov`,
+# clearing here moves peak RSS 12.68 GB -> 5.47 GB (-57%).
+#
+# It is gated because that trade is only good when the recompiles are warm. The
+# note above ("the follow-up recompiles are warm-cache reads") holds only where
+# JACCPOT_TEST_JAX_CACHE_DIR is set -- `test-full` sets it, `test-smoke` does
+# not. Ungated, this cost +66% wall on the mutual tests and pushed both
+# test-smoke jobs from 27.9/29.9 min straight into their 30 min cap, trading one
+# CI failure for another. test-smoke does not need it anyway: it skips the
+# `slow` tests, so it never accumulates the executables this guards against.
+_DIFF_FMM_TEST_FILES_WARM_ONLY = frozenset(
+    {
+        "test_mutual_fmm.py",
+        "test_mutual_fmm_nornax.py",
+    }
+)
+
 
 @pytest.fixture(autouse=True)
 def _bound_diff_fmm_compile_cache(request):
     """Free JAX's in-process compiled-executable cache after each heavy
     differentiable-FMM test (see note above)."""
     yield
-    if request.node.path.name in _DIFF_FMM_TEST_FILES:
+    name = request.node.path.name
+    clears = name in _DIFF_FMM_TEST_FILES or (
+        bool(_jax_cache_dir) and name in _DIFF_FMM_TEST_FILES_WARM_ONLY
+    )
+    if clears:
         import gc
 
         import jax

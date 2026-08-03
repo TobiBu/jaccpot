@@ -174,71 +174,324 @@ gives its rung schedule. `test_rollout_gradient_finite_difference` checks
 
 ## Backends
 
-`backend="jax"` (default) runs the pure-JAX kernels. `backend="pallas"` routes the
-real-basis z-axis M2L translation — the far-field hotspot — through jaccpot's
-Pallas kernel where the hardware supports it, and falls back to pure JAX
-otherwise.
+`backend="jax"` (default) runs the pure-JAX kernels everywhere. `backend="pallas"`
+routes each stage to whichever implementation *measured* fastest on an Ampere+
+GPU, and falls back to pure JAX wherever the hardware cannot run the kernel:
 
-Crucially it goes through `m2l_core_z_real_pallas_cvjp`, **not** the bare kernel.
-`pallas_call` has no JVP/transpose rule, so a path reaching the bare kernel is
+| stage | what `backend="pallas"` dispatches | measured effect |
+|---|---|---|
+| near field | `pallas/nearfield_mutual.py` — Pallas forward + hand-written analytic reverse | **2.2–3.6× forward, 3.1–4.1× reverse** |
+| far field | pure JAX | both Pallas M2L shapes measured *slower* (0.84×/0.61×) |
+
+The far-field routing is a measured decision, not an oversight — see
+[Phase 5 outcome](#phase-5-outcome). Both Pallas M2L lanes remain wired,
+differentiable and covered by tests; `JACCPOT_MUTUAL_M2L=fused|zcore|jax` forces
+one on hardware to reproduce the A/B.
+
+Every Pallas lane goes through a `custom_vjp` wrapper, **not** the bare kernel.
+`pallas_call` has no JVP/transpose rule, so a path reaching a bare kernel is
 silently non-differentiable — and jaccpot's own `m2l_core_z_real` helper calls the
 bare kernel, so `use_pallas=True` there cannot be differentiated. On CPU the
 Pallas path is simply unsupported and falls back, which means the defect is
-invisible off-GPU. `mutual/farfield.py::_m2l_batch` therefore reimplements the
-rotate → translate → rotate-back sandwich around the `custom_vjp` wrapper.
+invisible off-GPU.
 
-`pallas_interpret=True` runs the Pallas kernel in interpret mode, which works on
+`pallas_interpret=True` runs the Pallas kernels in interpret mode, which works on
 CPU. That is what makes the Pallas tests non-vacuous without a GPU: they execute
-the real kernel logic and assert both forward parity (< 1e-10) and gradient parity
-against pure JAX (< 1e-8).
+the real kernel logic and assert forward parity (< 1e-10), gradient parity against
+pure JAX (< 1e-8) and the momentum residual (< 1e-13). Interpret mode is also why
+`JACCPOT_MUTUAL_M2L=auto` still selects the *fused* M2L under `interpret` — CI has
+no GPU, and routing interpret to pure JAX would make those assertions compare pure
+JAX against itself.
 
-**Not yet done — see "Completing Phase 5" below**: a Pallas port of the mutual
-near-field P2P, use of the *fused* real M2L (rotate+translate+rotate in one
-kernel) rather than only the z-core, and a hand-written analytic reverse for the
-mutual kernels. The pure-JAX kernels are the correctness and AD oracle each such
-kernel is checked against.
+> That failure mode is not hypothetical. A parity test on this branch was once
+> vacuous for exactly this reason, and during Phase 5 a scratch check reported a
+> flattering `0.0e+00` forward error purely because its configuration produced no
+> far pairs at all. `test_pallas_near_field_kernel_actually_runs_in_interpret_mode`
+> now counts kernel invocations instead of trusting the flag, and the accuracy
+> tests assert `num_far_pairs > 0`.
 
-### Completing Phase 5
+### Phase 5 outcome
 
-Ordered by value, and grounded in what the repo already learned in
-`docs/differentiable_fmm_pallas_vjp_plan.md` (PR-2):
+All measurements: 1× A100-PCIE-40GB (sm_80), jax 0.9.0.1, float64 unless stated,
+θ = 0.7, order 4, leaf 32, best of 3 after a discarded compile call. Reproduce
+with
 
-1. **Re-run the ROI check for the mutual near field.** PR-2 *descoped* the fused
-   Pallas near-field after measuring only ~1.1× at N≈1024 and slower at moderate
-   N against the pure-JAX bucketed lane. That verdict does not transfer
-   unexamined: the mutual kernel evaluates each pair **once** instead of twice, so
-   its arithmetic intensity and its bandwidth profile are different. Measure
-   before building — on an Ampere+ GPU, selecting it with `autocvd` before
-   `import jax` per org policy.
-2. **Use the fused real M2L, not just the z-core.** `pallas/m2l_real_fused.py`
-   already fuses rotate+translate+rotate and already ships
-   `m2l_real_fused_pallas_cvjp`. Swapping `_m2l_batch`'s three-stage sandwich for
-   that single call removes the two pure-JAX rotation `vmap`s, which dominate the
-   remaining far-field time. This is the cheapest real win and needs no new
-   kernel.
-3. **Mutual near-field Pallas kernel.** No existing kernel fits: every near-field
-   Pallas lane in the tree is a *gather*, and the mutual kernel needs a
-   double-sided scatter (`+F` to the target leaf, `−F` to the source leaf).
-   **The correctness trap**: the exactness of the momentum cancellation depends on
-   the kernel computing `dr` once and *negating* it. A port that recomputes `dr`
-   for the source-leaf pass reintroduces the residual at the force accuracy —
-   which is exactly why the momentum tests assert `< 1e-13` rather than `< 1e-3`.
-4. **Analytic reverse.** `near_field.py::_leafpair_accel_analytic_vjp` is the
-   template, and its docstring records why a hand-written reverse rather than
-   `jax.vjp` of the twin: linearizing the twin reinstates O(edges × W) scan
-   residuals (~67 GB at N=2²⁰), while a hand-written `bwd` is never
-   differentiated, so its intermediates stay tile-bounded and memory is O(N). The
-   mutual version must accumulate the cotangent from **both** endpoints of each
-   pair, which the existing gather-shaped rule does not do.
-5. **Characterise fp32.** The Pallas near-field lanes run fp32 (measured rel-L2
-   ~4e-6 against the fallback, i.e. summation reordering). Bit-level antisymmetry
-   of the pair force survives fp32 — the negation is exact — so what degrades is
-   only the *reduction* order. Expect a momentum residual around fp32 round-off
-   rather than the fp64 ~1e-17, still far below the force error. Worth measuring
-   and stating, not assuming.
+```bash
+python -m bench.bench_mutual_backends --sizes 10000 100000 --theta 0.7 --order 4
+python -m bench.bench_mutual_farfield_stages --sizes 10000 100000
+```
 
-Steps 1–3 need a GPU for throughput; all of them can be developed and checked for
-*correctness* on CPU in interpret mode, as the current Pallas tests do.
+#### 1. Near-field ROI — re-measured, and the PR-2 verdict does **not** transfer
+
+PR-2 descoped its fused near field after measuring ~1.1× at N≈1024 against the
+pure-JAX bucketed lane. That kernel was a *gather*. The mutual kernel is a
+double-sided scatter that evaluates each pair once, and it wins decisively:
+
+| | N = 10⁴ | N = 10⁵ |
+|---|---|---|
+| near forward | 2.84 → 1.32 ms (**2.15×**) | 43.18 → 11.85 ms (**3.64×**) |
+| near reverse | 12.79 → 3.15 ms (**4.06×**) | 154.60 → 49.62 ms (**3.12×**) |
+
+Forward parity vs pure JAX 3.8e-16 / 6.0e-16, gradient parity 2.4e-16 / 6.4e-16 —
+summation reordering only. The win grows with N and is largest on the *reverse*,
+which is what the hand-written analytic rule buys: the pure-JAX reverse
+re-materialises `(chunk, S, S, 3)` pair tensors per scan step, while the analytic
+kernel keeps the `S × S` tile in registers and moves only `O(pairs × S)`.
+
+#### 2. Fused real M2L — implemented, tested, and **not** the default
+
+The plan expected this to be "the cheapest real win", on the reasoning that the
+two pure-JAX rotation `vmap`s dominate the remaining far-field time. Measured on
+the whole far field:
+
+| lane | fwd (N=10⁴) | rev (N=10⁴) | fwd (N=10⁵) |
+|---|---|---|---|
+| pure JAX | 17.11 ms | 29.64 ms | 75.16 ms |
+| Pallas fused | 20.03 ms (0.85×) | 48.70 ms (0.61×) | 116.33 ms (**0.65×**) |
+| Pallas z-core sandwich | 20.28 ms (0.84×) | 34.81 ms (0.85×) | 129.66 ms (**0.58×**) |
+
+Both shapes are *regressions at both sizes*, and at N=10⁴ the forward numbers are
+within 1% of each other. They cannot be, if the rotations dominated — so the
+premise was wrong. The regression deepens at N=10⁵ (0.65×/0.58×) precisely
+because that is where the M2L becomes 80% of the far field, so the kernel's
+overhead is no longer diluted by stages it does not touch.
+
+Two independent reasons:
+
+* **Operand traffic.** The fused kernel takes the world↔z rotations as explicit
+  `(pairs, Bp, mdp, mdp)` arrays: at order 4 in float64 that is 32 KB per pair
+  against the sandwich's 0.39 KB of coefficient vectors, an **82×**
+  amplification (5× of it pure power-of-two padding, `5×9×9 → 8×16×16`). The
+  sandwich builds the same blocks inside a fused XLA kernel and never spills them
+  to HBM. The reverse is worse still (0.61×) because its VJP kernel writes
+  `bto_bar`/`bfr_bar` — the same 32 KB per pair back *out*.
+* **At N=10⁴, the M2L is not even the far-field hotspot** (20.5% — see the stage
+  split below), so the lane swap could not have moved much either way there. That
+  is *not* an excuse for the regression, though: at N=10⁵ the M2L is 80.5% of the
+  far field, and the Pallas lanes lose by more, not less. The two sizes together
+  rule out "it just needs a bigger problem to amortise".
+
+A kernel that took `deltas` and built the rotations *on chip* would avoid the
+traffic entirely, but that is a new kernel (Wigner-d recurrences in Triton), not
+a wiring change.
+
+So `_m2l_batch` gained the fused lane exactly as specified — it is wired,
+differentiable through `m2l_real_fused_pallas_cvjp`, and exercised on every CI run
+in interpret mode — but `JACCPOT_MUTUAL_M2L=auto` resolves to pure JAX on
+hardware. Set `fused` or `zcore` to force it.
+
+#### 3–4. Mutual P2P kernel and its analytic reverse — landed
+
+`jaccpot/pallas/nearfield_mutual.py`. One program per leaf pair builds the
+`S × S` tile **once** and emits `+F` by reducing over `j` and `−F` by reducing the
+*same* tile over `i`; the sign is applied on the way out. The level weight
+`level_weights[max(rung_i, rung_j)]` is applied inside the kernel before the
+reductions, as one symmetric scalar per pair.
+
+The reverse is hand-written, never `jax.vjp` of the twin, for the reason
+`_radix_fast_lane_prepacked_accel_bwd` records: a hand-written `bwd` is never
+itself differentiated, so its intermediates stay tile-bounded. Its one structural
+difference from the existing gather-shaped rule is that each pair's cotangent is
+`Fbar_a[i] − Fbar_b[j]`, fed from **both** endpoints, because the forward wrote to
+both. `jax.vjp` of the pure-jnp twin is kept as the oracle in
+`tests/unit/test_custom_vjp_parity.py`; agreement is ~6e-16 on all four
+differentiable inputs, in both block modes.
+
+Defects found and fixed while building it:
+
+* **The near-field scan never clamped its chunk to the pair count**
+  (pre-existing, `mutual/nearfield.py`). The chunk is a memory budget; when it
+  exceeded the work, the scan padded out to a full chunk of dead slots that the
+  kernels still evaluated. Mild on the JAX lane, pathological on the Pallas one,
+  whose budget is much larger.
+* **Two Pallas-GPU lowering failures that interpret mode cannot see** — see below.
+
+##### Interpret mode validates *logic*, not *lowerability*
+
+This is the operational lesson of Phase 5, and it cuts against how the existing
+tests are structured. `interpret=True` runs the kernel's jaxpr under CPU
+semantics, so it happily accepts primitives the Triton backend does not implement.
+Two kernels passed every CPU interpret test and then failed on the first GPU run:
+
+| written as | lowers to | Pallas GPU |
+|---|---|---|
+| `xa_ref[0][:, None, 0]` — slice a component out of a packed `(S, 3)` array | `gather` | **unimplemented** |
+| `level_weights[k]` — read one scalar from the table with a *static* `k` | `slice` | **unimplemented** |
+
+Both now use whole-array forms: components come straight off their refs
+(`xa_ref[0, :, 0]`, a strided load), and the weight tile is a masked reduction
+over a broadcast `(K, 1, 1)` table (`_pair_weight_tile`).
+
+The second one is the more instructive failure. It only appears on the
+*level-weighted* path, which the throughput benchmark never exercises — the
+benchmark runs unweighted. It was caught solely because
+`test_mutual_nearfield_pallas_custom_vjp_matches_twin` is parametrized over
+`interpret ∈ {True, False}` and always passes level weights, so the
+`interpret=False` variants run the real Triton lowering on a GPU. Keep that
+parametrization: CI (no GPU) will skip those cases, which means **a GPU run is
+the only thing standing between a lowering regression and a broken
+`backend="pallas"`**.
+
+#### End to end, and the result that matters more than the speedup
+
+| whole force | `backend="jax"` | `backend="pallas"` | | parity |
+|---|---|---|---|---|
+| N=10⁴ forward | 19.35 ms | 16.62 ms | 1.16× | 3.5e-16 |
+| N=10⁴ reverse | 37.13 ms | 35.58 ms | 1.04× | 8.5e-16 |
+| N=10⁵ forward | 96.47 ms | 80.77 ms | **1.19×** | 2.9e-16 |
+| N=10⁵ reverse | **out of memory** | **258.94 ms** | — | n/a |
+
+| momentum residual | `backend="jax"` | `backend="pallas"` |
+|---|---|---|
+| N=10⁴ | 2.446e-17 | 3.039e-17 |
+| N=10⁵ | 1.166e-16 | 1.188e-16 |
+
+The forward factor is far below the near field's 3.64× because the near field is
+only ~45% of the total at N=10⁵ — Amdahl, not a kernel problem. The N=10⁴ reverse
+barely moves (1.04×) for the same reason from the other side: there the far field
+is ~70% of the reverse, so a 4× near-field win is nearly invisible.
+
+The reverse row is the real outcome. `backend="jax"` does not get a slower
+gradient at N=10⁵; it does not get one **at all**. It requests a single 30.50 GiB
+allocation and dies `RESOURCE_EXHAUSTED` on a 40 GB A100, because the pure-JAX
+reverse stacks a `(chunk, S, S, 3)` pair tensor per scan step, so its memory grows
+as `pairs × S²` — 512 326 leaf pairs × 32² × 3 × 8 B alone is ~12.6 GB before the
+far field. The analytic reverse keeps the `S × S` tile in registers and moves only
+`O(pairs × S)`, and completes. This is exactly the argument
+`_radix_fast_lane_prepacked_accel_bwd`'s docstring makes for hand-writing the
+reverse rather than linearizing a twin, now reproduced on the mutual kernel.
+
+Because the baseline OOMs, that row is a **feasibility** result and not a parity
+measurement — there is nothing to compare against at N=10⁵. Gradient parity is
+established where both lanes fit: 2.4e-16 (near, N=10⁴), 6.4e-16 (near, N=10⁵),
+and < 1e-8 end-to-end in the CPU interpret tests.
+
+#### Where the far field actually spends its time
+
+`python -m bench.bench_mutual_farfield_stages --sizes 10000 100000`:
+
+| stage | N = 10⁴ | N = 10⁵ |
+|---|---|---|
+| upward (P2M + M2M) | 5.85 ms (38.6%) | 9.33 ms (12.1%) |
+| M2L (dual) | 3.10 ms (20.5%) | **61.91 ms (80.5%)** |
+| L2L | 6.00 ms (39.7%) | 5.37 ms (7.0%) |
+| L2P | 0.18 ms (1.2%) | 0.27 ms (0.3%) |
+| sum | 15.13 ms | 76.88 ms |
+
+
+The composition inverts between the two sizes, and both halves matter:
+
+* **At N=10⁴ the M2L is a fifth of the far field** and the two cascades are
+  four fifths. L2L costs 6.00 ms at N=10⁴ and *5.37 ms* at N=10⁵ — flat across a
+  10× problem, which is the signature of launch-bound work: both cascades are
+  Python loops over tree *levels*, emitting a kernel per level whose cost is
+  dominated by launch overhead, not by N. No M2L kernel can touch that, which is
+  why swapping the M2L lane moved the N=10⁴ far field by only ±3 ms.
+* **At N=10⁵ the M2L is 80% of the far field**, and therefore ~44% of the whole
+  force. That makes it the single largest remaining target — and it is precisely
+  the stage where the current Pallas kernels lose, for the operand-traffic reason
+  above. A rewritten kernel that takes `deltas` and builds the Wigner-d rotations
+  *on chip* would attack the largest block of remaining time; the existing
+  block-operand kernels cannot.
+
+#### 5. float32
+
+`python -m bench.bench_mutual_backends --dtype float32 --lanes near,total --no-grad`:
+
+| float32 | N = 10⁴ | N = 10⁵ |
+|---|---|---|
+| near forward speedup | 2.05× | 1.90× |
+| total forward speedup | 0.99× | **1.71×** |
+| near Pallas vs pure JAX (rel-L2) | 2.32e-07 | 3.95e-07 |
+| momentum residual, `backend="jax"` | 1.882e-08 | 6.476e-08 |
+| momentum residual, `backend="pallas"` | 2.079e-08 | 6.370e-08 |
+
+(These are the numbers *after* the padding fix below. Before it, the whole N=10⁵
+float32 column was NaN on both backends.)
+
+This is exactly the predicted behaviour and worth stating precisely: the pair
+antisymmetry is **not** what degrades in float32 — the negation `−fl(dr)` is exact
+at any precision, and the prefactor is still one symmetric float. What degrades is
+only the order in which the two sides are *reduced*. The residual duly lands at
+float32 round-off — ~2e-8 at N=10⁴, ~6e-8 at N=10⁵, growing with the reduction
+width as expected — which is nine orders coarser than the float64 ~3e-17 and still
+~5 orders below the float32 force error (~1e-3).
+
+The Pallas and pure-JAX residuals differ in the last digit and in *either*
+direction (2.079e-08 vs 1.882e-08 at N=10⁴; 6.370e-08 vs 6.476e-08 at N=10⁵).
+That is noise between two different summation orders, not evidence that either
+lane conserves momentum better: both sit at machine epsilon for the reduction
+width, which is the claim being made.
+
+**The N=10⁵ float32 column was NaN on _both_ backends** — pure JAX included, so
+not something the Pallas kernels introduced. Localising it turned up a real
+latent defect, now fixed; the 1.09× total-forward number measured alongside it was
+the cost of computing NaNs, not a speedup.
+
+##### The float32 NaN: a padding-slot defect in `_dual_m2l`
+
+Stage-by-stage, the NaNs first appear in the M2L locals — **exactly 25 entries**,
+which is `sh_size(4)`, i.e. one single node's expansion — and the L2L cascade then
+spreads them to 156 225 and L2P to all 300 000.
+
+`_dual_m2l` pads its directed pair list out to a whole number of chunks with
+`src == tgt == 0`. Those slots have `delta == 0`, so `_m2l_batch` floors the
+radius to 1e-30 and the z-core evaluates `r**-(p+1)`:
+
+| | order 4 | order 6 |
+|---|---|---|
+| `r**-(p+1)` at r = 1e-30 | 5.6e151 | 2.0e213 |
+| float64 (max 1.8e308) | finite | finite |
+| float32 (max 3.4e38) | **inf** | **inf** |
+
+The trailing `contrib * where(live, w, 0)` then computes `inf * 0 = NaN` instead
+of dropping the slot — the single-trailing-mask antipattern this codebase warns
+about everywhere else. One poisoned node is all it takes; L2L does the rest.
+
+Two independent conditions kept it hidden, which is why every existing test and
+the whole N=10⁴ sweep missed it:
+
+* it needs **float32** — float64 only overflows from order 10, where
+  `30 × (p + 1)` passes 308;
+* it needs the directed pair list **not to divide the chunk**, i.e. > 65536
+  directed far pairs. At N=10⁴ the list is 17 438 and fits one chunk exactly; at
+  N=10⁵ it is 562 392 and pads by 27 432.
+
+The fix substitutes a unit axis *before* the reciprocal, so no `inf` is ever
+formed; the zero weight still discards the slot, and float64 results are
+bit-unchanged. `test_far_field_chunk_padding_cannot_poison_the_expansion` pins it
+by shrinking `_M2L_BATCH_BUDGET` to force padding at test scale — verified to fail
+(all-NaN accelerations, orders 4 and 6) with the guard removed.
+
+With the guard in place every stage is finite at N=10⁵ in both dtypes. float64
+remains the supported configuration; no test asserts a float64 tolerance on a
+float32 path.
+
+#### Status against the Phase 5 exit criteria
+
+| criterion | outcome |
+|---|---|
+| `backend="pallas"` faster than `backend="jax"` on GPU at N ≥ 10⁵ | **yes** — 1.19× forward float64, 1.71× forward float32; and the reverse runs at all, where pure JAX OOMs |
+| forward parity ~1e-6 (fp32) / ~1e-10 (fp64) | **yes** — 1.7e-07 fp32, 2.9e-16 fp64 |
+| gradient parity vs pure-JAX autodiff | **yes** — 8.5e-16 end-to-end at N=10⁴, ~6e-16 at the kernel level, < 1e-8 in the CPU interpret tests |
+| momentum residual characterised per dtype, far below force error | **yes** — float64 ~3e-17, float32 ~2e-8 (N=10⁴) / ~6e-8 (N=10⁵), against a force error of ~1e-3 |
+| full mutual suite green on GPU | **yes** — 101 passed |
+| CPU interpret tests green (the CI gate) | **yes** |
+
+#### What is still open
+
+* **The M2L at scale.** It is 80% of the far field at N=10⁵ and ~44% of the whole
+  force, and no lane in the tree currently beats pure JAX on it. A kernel taking
+  `deltas` and building the Wigner-d rotations on chip is the one change that
+  would attack it; the block-operand kernels structurally cannot.
+* **The cascades at small N.** `upward` + `L2L` are 78% of the far field at N=10⁴
+  and flat in N — launch-bound, one kernel per tree level. A batched-across-levels
+  formulation, not a kernel, is what that needs.
+* **N=10⁶ was not measured.** The ROI question was settled at 10⁴/10⁵ and the
+  trend is monotone in N for the near field, but the largest size named in the
+  brief is unmeasured here.
+* **float32 above N=10⁵** is unvalidated; the padding defect is fixed but no
+  accuracy budget has been established for it.
 
 ## Scaling
 
@@ -265,7 +518,17 @@ python -m bench.bench_mutual_fmm --sizes 4096 16384 65536 --theta 0.7 --order 4
 * `tests/integration/test_mutual_fmm.py` — topology coverage, near/far accuracy,
   momentum independence from θ and order, level partition, fused boundary,
   gradients (FD-vs-AD and vs. the direct-sum gradient), rollout momentum/energy,
-  backend parity.
+  backend parity. `test_momentum_is_exact_independently_of_theta_and_order` is
+  parametrized over **both** backends, so the Pallas P2P kernel is held to the
+  same 1e-13 residual as pure JAX across the whole θ × order sweep — that test is
+  the one that would catch a kernel recomputing `dr` instead of negating it.
+  `test_pallas_near_field_kernel_actually_runs_in_interpret_mode` counts kernel
+  invocations so the parity tests cannot quietly become vacuous.
+* `tests/unit/test_custom_vjp_parity.py` — the mutual P2P `custom_vjp` against
+  `jax.vjp` of its pure-jnp twin, in both block modes (cross-leaf and intra-leaf),
+  plus a direct bitwise-antisymmetry assertion on the kernel's two outputs. The
+  analytic reverse is hand-written, so this oracle comparison is the only thing
+  standing between a sign slip in it and a silently wrong gradient.
 * `tests/integration/test_mutual_fmm_nornax.py` — cross-repo. Protocol
   conformance, schedule identity against nornax's own, agreement with
   `MutualDirectSumGravity`, and nornax's real `leapfrog_kdk_rollout` /

@@ -312,6 +312,8 @@ def mutual_weighted_accelerations(
         rung=rung_sorted,
         level_weights=level_weights,
         chunk_size=state.near_chunk_size,
+        use_pallas=state.use_pallas,
+        interpret=state.pallas_interpret,
     )
     far = mutual_far_field_forces(
         pos_sorted,

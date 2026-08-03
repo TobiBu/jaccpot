@@ -92,13 +92,26 @@ def _momentum_residual(accelerations, masses):
     )
 
 
-def _build(n, *, theta, order, leaf_size, seed=0, softening=SOFTENING, backend="jax"):
+def _build(
+    n,
+    *,
+    theta,
+    order,
+    leaf_size,
+    seed=0,
+    softening=SOFTENING,
+    backend="jax",
+    interpret=False,
+):
     positions, masses = _system(n, seed=seed)
     topology, _ = build_mutual_topology(
         positions, masses, theta=theta, order=order, leaf_size=leaf_size
     )
     state = build_mutual_state(
-        topology, softening=softening, use_pallas=(backend == "pallas")
+        topology,
+        softening=softening,
+        use_pallas=(backend == "pallas"),
+        pallas_interpret=bool(interpret),
     )
     return positions, masses, topology, state
 
@@ -210,10 +223,55 @@ def test_momentum_is_exact_independently_of_theta_and_order(theta, order):
     Sweeping ``theta`` and the order changes the *force* error by orders of
     magnitude while the momentum residual must stay pinned at round-off. A
     non-mutual FMM fails this immediately -- its residual tracks the force error.
+
+    The Pallas backend gets the same sweep in
+    :func:`test_pallas_momentum_is_exact_independently_of_theta_and_order`, at a
+    smaller size and marked ``slow``; see there for why it is a separate test.
     """
     positions, masses, topology, state = _build(
         1024, theta=theta, order=order, leaf_size=16
     )
+    accelerations = mutual_accelerations(state, positions, masses)
+    assert _momentum_residual(accelerations, masses) < 1e-13
+
+
+@pytest.mark.slow
+@pytest.mark.parametrize("theta, order", [(0.5, 2), (1.0, 6)])
+def test_pallas_momentum_is_exact_independently_of_theta_and_order(theta, order):
+    """The momentum property above, but executing the real Pallas P2P kernel.
+
+    This is the test that would catch a kernel recomputing ``dr`` for the
+    source-leaf pass instead of negating it: such a port produces forces that
+    pass every accuracy assertion in this file while moving the residual from
+    1e-17 to the force accuracy (~1e-3). Hence the 1e-13 bound, which is nowhere
+    near a force tolerance.
+
+    Deliberately a separate test rather than a ``backend`` parametrization of the
+    one above, for CI cost. The two backends cost about the same per case (~84 s
+    vs ~88 s at order 6, θ=0.7), so parametrizing doubled an already-expensive
+    nine-case sweep and pushed both CI jobs past their timeouts.
+
+    The two cases here are the opposite *corners* of the θ × order plane, not a
+    grid: the defect this guards against (recomputing ``dr`` rather than negating
+    it) is independent of θ and order and would show at any configuration, so the
+    sweep is defence in depth rather than the primary signal. Two corners at a
+    quarter the particle count keep that defence at ~1/8 the cost of the full
+    grid. ``slow`` additionally keeps it out of ``test-smoke``, which has no JAX
+    compile cache and, per the workflow's own comment, no headroom.
+
+    The residual is flat in N (see the scaling table in
+    ``docs/momentum_conserving_fmm.md``), so the smaller system costs no coverage
+    of the property being asserted.
+    """
+    positions, masses, topology, state = _build(
+        512,
+        theta=theta,
+        order=order,
+        leaf_size=8,
+        backend="pallas",
+        interpret=True,
+    )
+    assert topology.num_near_pairs > 0
     accelerations = mutual_accelerations(state, positions, masses)
     assert _momentum_residual(accelerations, masses) < 1e-13
 
@@ -641,6 +699,232 @@ def test_pallas_backend_is_differentiable():
     assert jnp.all(jnp.isfinite(g_pallas))
     error = float(jnp.linalg.norm(g_pallas - g_jax) / jnp.linalg.norm(g_jax))
     assert error < 1e-8
+
+
+@pytest.mark.slow
+def test_pallas_near_field_kernel_matches_pure_jax_in_interpret_mode():
+    """Run the mutual P2P kernel itself, on CPU, and compare the near field alone.
+
+    Isolating the near field matters: at these sizes the far field dominates the
+    *difference* between two total forces, so a broken near-field kernel could
+    hide inside a total-force comparison. Here the far field is not evaluated at
+    all.
+    """
+    from jaccpot.mutual.nearfield import mutual_near_field_forces
+
+    positions, masses, topology, state = _build(512, theta=1.0, order=4, leaf_size=8)
+    assert topology.num_near_pairs > 0
+    fwd = state.forward_permutation
+    pos_sorted, mass_sorted = positions[fwd], masses[fwd]
+
+    def near(use_pallas, interpret):
+        return mutual_near_field_forces(
+            pos_sorted,
+            mass_sorted,
+            leaf_particles=state.leaf_particles,
+            leaf_particle_valid=state.leaf_particle_valid,
+            near_a=state.near_a,
+            near_b=state.near_b,
+            near_valid=state.near_valid,
+            self_leaves=state.self_leaves,
+            softening=SOFTENING,
+            use_pallas=use_pallas,
+            interpret=interpret,
+        )
+
+    f_jax = near(False, False)
+    f_pallas = near(True, True)
+    error = float(jnp.linalg.norm(f_pallas - f_jax) / jnp.linalg.norm(f_jax))
+    assert error < 1e-10
+    # The near field alone must already conserve momentum exactly -- it is a
+    # closed set of equal-and-opposite pair impulses.
+    total = jnp.sum(f_pallas, axis=0)
+    scale = jnp.sum(jnp.abs(f_pallas), axis=0)
+    assert float(jnp.linalg.norm(total) / jnp.linalg.norm(scale)) < 1e-13
+
+
+def test_pallas_near_field_kernel_actually_runs_in_interpret_mode(monkeypatch):
+    """Guard the parity test above against becoming vacuous.
+
+    ``use_pallas`` degrades to pure JAX wherever the hardware cannot run the
+    kernel, so a parity assertion can silently compare pure JAX against itself --
+    which is exactly how a real bug survived on this branch once. Count the
+    kernel invocations rather than trusting the flag.
+    """
+    import jaccpot.pallas.nearfield_mutual as nfm
+    from jaccpot.mutual.nearfield import mutual_near_field_forces
+
+    calls = []
+    original = nfm.mutual_leafpair_block_pallas
+
+    def spy(*args, **kwargs):
+        calls.append(1)
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(nfm, "mutual_leafpair_block_pallas", spy)
+
+    # Stays out of the `slow` set so `test-smoke` keeps a canary. Its ~20 s is
+    # compile-bound, not size-bound (N=128 measured the same as N=256), so there
+    # is nothing to gain by shrinking it.
+    positions, masses, topology, state = _build(256, theta=1.0, order=4, leaf_size=8)
+    fwd = state.forward_permutation
+    mutual_near_field_forces(
+        positions[fwd],
+        masses[fwd],
+        leaf_particles=state.leaf_particles,
+        leaf_particle_valid=state.leaf_particle_valid,
+        near_a=state.near_a,
+        near_b=state.near_b,
+        near_valid=state.near_valid,
+        self_leaves=state.self_leaves,
+        softening=SOFTENING,
+        use_pallas=True,
+        interpret=True,
+    )
+    # One launch for the intra-leaf blocks, one for the cross-leaf pairs.
+    assert len(calls) >= 2
+
+
+@pytest.mark.slow
+def test_pallas_near_field_analytic_reverse_matches_pure_jax():
+    """The hand-written analytic reverse must equal the pure-JAX autodiff gradient.
+
+    The mutual reverse differs from the gather-shaped rule in
+    ``near_field.py::_leafpair_accel_analytic_vjp`` in one substantive way: each
+    pair's cotangent is ``Fbar_a[i] - Fbar_b[j]``, fed from *both* endpoints,
+    because the forward wrote to both. Dropping either term leaves a gradient
+    that is wrong by roughly a factor of two on the cross terms and by nothing at
+    all on a symmetric test function -- so the check is against a general
+    (asymmetric) loss.
+    """
+    from jaccpot.mutual.nearfield import mutual_near_field_forces
+
+    positions, masses, topology, state = _build(256, theta=1.0, order=4, leaf_size=8)
+    fwd = state.forward_permutation
+    mass_sorted = masses[fwd]
+    weights = jnp.asarray(
+        np.random.default_rng(3).normal(0.0, 1.0, (int(positions.shape[0]), 3))
+    )
+
+    def loss(p, use_pallas, interpret):
+        forces = mutual_near_field_forces(
+            p,
+            mass_sorted,
+            leaf_particles=state.leaf_particles,
+            leaf_particle_valid=state.leaf_particle_valid,
+            near_a=state.near_a,
+            near_b=state.near_b,
+            near_valid=state.near_valid,
+            self_leaves=state.self_leaves,
+            softening=SOFTENING,
+            use_pallas=use_pallas,
+            interpret=interpret,
+        )
+        return jnp.sum(forces * weights)
+
+    pos_sorted = positions[fwd]
+    g_jax = jax.grad(lambda p: loss(p, False, False))(pos_sorted)
+    g_pallas = jax.grad(lambda p: loss(p, True, True))(pos_sorted)
+    assert jnp.all(jnp.isfinite(g_pallas))
+    error = float(jnp.linalg.norm(g_pallas - g_jax) / jnp.linalg.norm(g_jax))
+    assert error < 1e-8
+
+
+@pytest.mark.slow
+def test_pallas_near_field_respects_level_weights():
+    """The level weight must be applied inside the kernel, symmetrically.
+
+    A weight applied to only one side of the pair, or applied outside the kernel
+    after the two reductions have already been rounded separately, breaks the
+    exact cancellation. Both the value and the momentum residual are checked.
+    """
+    from jaccpot.mutual.nearfield import mutual_near_field_forces
+
+    n = 512
+    positions, masses, topology, state = _build(n, theta=1.0, order=4, leaf_size=8)
+    fwd = state.forward_permutation
+    rung = jnp.asarray(np.random.default_rng(4).integers(0, 4, n), dtype=jnp.int32)[fwd]
+    level_weights = jnp.asarray([1.0, 0.5, 0.25, 0.125])
+
+    def near(use_pallas, interpret):
+        return mutual_near_field_forces(
+            positions[fwd],
+            masses[fwd],
+            leaf_particles=state.leaf_particles,
+            leaf_particle_valid=state.leaf_particle_valid,
+            near_a=state.near_a,
+            near_b=state.near_b,
+            near_valid=state.near_valid,
+            self_leaves=state.self_leaves,
+            softening=SOFTENING,
+            rung=rung,
+            level_weights=level_weights,
+            use_pallas=use_pallas,
+            interpret=interpret,
+        )
+
+    f_jax = near(False, False)
+    f_pallas = near(True, True)
+    assert float(jnp.linalg.norm(f_pallas - f_jax) / jnp.linalg.norm(f_jax)) < 1e-10
+    total = jnp.sum(f_pallas, axis=0)
+    scale = jnp.sum(jnp.abs(f_pallas), axis=0)
+    assert float(jnp.linalg.norm(total) / jnp.linalg.norm(scale)) < 1e-13
+
+
+@pytest.mark.slow
+def test_far_field_chunk_padding_cannot_poison_the_expansion(monkeypatch):
+    """Padding slots in the M2L scan must not produce a non-finite expansion.
+
+    ``_dual_m2l`` pads its directed pair list out to a whole number of chunks with
+    ``src == tgt == 0``, so a padding slot's ``delta`` is exactly zero and its
+    radius is floored to 1e-30. The z-core then evaluates ``r**-(p+1)``, which at
+    that floor is 5.6e151 at order 4 and 2.0e213 at order 6 — comfortably finite
+    in float64, and far past ``inf`` in **float32**. The trailing
+    ``* where(live, w, 0)`` then turns that ``inf`` into ``NaN`` rather than
+    dropping it, poisoning the padded slot's target node, which the L2L cascade
+    proceeds to broadcast across the whole tree.
+
+    So this is a float32 defect at any practical order (float64 only overflows
+    from order 10, where ``30 * (p + 1)`` passes 308), and it is reproduced here
+    in float32 for that reason.
+
+    It also needs padding to exist at all, which at the default 65536-pair budget
+    takes > 65536 directed far pairs — larger than any test system. Shrinking the
+    budget is what makes it reachable, and is exactly why the defect survived
+    every existing size: at N=10⁴ the directed list is 17438 and fits one chunk,
+    while at N=10⁵ it is 562392 and pads by 27432.
+    """
+    import jaccpot.mutual.farfield as farfield
+
+    order = (
+        4  # the production order; order 6 reproduces it identically but costs 30% more
+    )
+    positions, masses = _system(512)
+    positions = positions.astype(jnp.float32)
+    masses = masses.astype(jnp.float32)
+    topology, _ = build_mutual_topology(
+        positions, masses, theta=1.0, order=order, leaf_size=8
+    )
+    assert topology.num_far_pairs > 0
+    directed = 2 * topology.num_far_pairs
+    # A budget one short of the list guarantees two chunks and a partial tail.
+    monkeypatch.setattr(farfield, "_M2L_BATCH_BUDGET", max(1, directed - 1))
+
+    state = build_mutual_state(topology, softening=SOFTENING)
+    accelerations = mutual_accelerations(state, positions, masses)
+    assert jnp.all(jnp.isfinite(accelerations))
+
+    # The guard must be inert, not merely finite: the padded run has to agree with
+    # the unpadded one, which never builds a degenerate slot in the first place.
+    monkeypatch.setattr(farfield, "_M2L_BATCH_BUDGET", 1 << 16)
+    reference = mutual_accelerations(
+        build_mutual_state(topology, softening=SOFTENING), positions, masses
+    )
+    assert jnp.all(jnp.isfinite(reference))
+    error = float(
+        jnp.linalg.norm(accelerations - reference) / jnp.linalg.norm(reference)
+    )
+    assert error < 1e-5  # float32
 
 
 def test_rung_above_k_max_is_rejected():
