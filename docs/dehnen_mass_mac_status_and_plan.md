@@ -832,6 +832,38 @@ is the **scaled error δa/f** with `f_b ≡ Σ_{a≠b} G μ_a / |x_a−x_b|²`.
    reference and the evaluation entirely. If the fixed arm's far count is not in the
    millions at your N, the grid is not measuring the criterion.
 
+   **Traps 3 and 8 are now enforced in code, not just described here.** They stopped
+   being avoidable by care once `leaf_size` became a swept axis, so `compare_arms` takes
+   two filters and both should be on for any leaf sweep:
+
+   - `--min-far-pairs 5000` drops all-near-field configs, whose error sits at machine
+     precision and would *widen* the arm's apparent range enough to let the matched
+     target be interpolated across the far-field switch-on (trap 8).
+   - `--max-p9999 1.0` drops diverged configs. An absolute error at or above 1 is a
+     series evaluated outside its convergence region, not a coarse point on the same
+     curve, so interpolating through it is meaningless (trap 3). These sit at the *top*
+     of the fixed arm's range, which is exactly where matching reaches.
+
+   Both announce what they dropped, with knob values. And when fewer than two configs
+   survive, `compare_arms` now says so and tells you to widen the grid — it used to
+   return an empty table, which reads identically to "no effect found".
+
+   **Measured need for both, at N=1e5/leaf 256:** the fixed arm has < 5000 far pairs at
+   θ ≤ 0.46 *and* p99.99 of 10 and 290 at θ = 0.78 and 0.90. Only θ ∈ {0.54, 0.62, 0.70}
+   is usable — a three-point basis, and the two guards are what make that visible
+   instead of silently interpolating from 0 far pairs to a diverged expansion.
+
+   **The criterion's usable ε range shifts about two decades across the leaf range.** At
+   leaf 16 / N=1e5 it wants ε ≈ 1e-5…1e-7; at leaf 256 the same N wants ε ≈ 1e-3…1e-5
+   (ε=1e-6 accepts 406 far pairs, 3e-7 accepts 30, 1e-7 accepts 0). So a leaf sweep needs
+   a **per-leaf** knob grid bracketed from the census. That is bracketing, not
+   cherry-picking, provided the methodology — matched statistic, both guards, seed count
+   — is identical across leaf sizes, and provided the cross-leaf comparison is finally
+   read at a **common absolute matched target** rather than at each leaf's own range
+   midpoint. Each leaf reaches a different accuracy window, and the advantage grows as
+   the tolerance loosens, so comparing midpoints would confound leaf size with accuracy
+   level.
+
    **leaf 64 at N=1e5 is the usable compromise.** Censused, and every configuration has
    a real far field — so the leaf-16 result can be checked at a production-scale leaf
    rather than only at the small one:
