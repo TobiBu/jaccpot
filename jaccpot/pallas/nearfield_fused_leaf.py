@@ -95,25 +95,47 @@ def nearfield_fused_leaf_jax(
 ) -> Array:
     """Reference leaf-major fused near-field update in pure JAX.
 
+    The pure-JAX counterpart of :func:`nearfield_fused_leaf_pallas`, and the
+    reference that path is checked against; the kernel is an execution
+    accelerator only.
+
     Parameters
     ----------
-    target_positions:
-        ``(num_leaves, W_t, 3)`` leaf-major target positions.
-    target_mask:
-        ``(num_leaves, W_t)`` boolean validity of each target lane.
-    source_positions:
-        ``(num_leaves, K, 3)`` flattened source positions for each target leaf
+    target_positions : Array
+        ``[num_leaves, W_t, 3]`` leaf-major target positions.
+    target_mask : Array
+        ``[num_leaves, W_t]`` boolean validity of each target lane.
+    source_positions : Array
+        ``[num_leaves, K, 3]`` flattened source positions for each target leaf
         (``K = num_source_slots * W_s``).
-    source_masses:
-        ``(num_leaves, K)`` flattened source masses.
-    source_mask:
-        ``(num_leaves, K)`` boolean validity of each flattened source.
+    source_masses : Array
+        ``[num_leaves, K]`` flattened source masses.
+    source_mask : Array
+        ``[num_leaves, K]`` boolean validity of each flattened source.
+    softening_sq : Array
+        Scalar *squared* Plummer softening, added to every squared separation.
+    G : Array
+        Scalar gravitational constant, applied as a plain multiplier.
 
     Returns
     -------
     Array
-        ``(num_leaves, W_t, 4)`` with acceleration in lanes ``0:3`` and
+        ``[num_leaves, W_t, 4]`` with acceleration in lanes ``0:3`` and
         potential in lane ``3``.
+
+    Notes
+    -----
+    Differentiable in the positions, ``source_masses``, ``softening_sq`` and
+    ``G``; the masks are boolean and carry no gradient.
+
+    Masked pairs use the double-``where`` idiom: the squared distance is replaced
+    by 1 *before* ``rsqrt`` and the result masked to 0 after. Both halves are
+    needed -- masking only the output still evaluates ``rsqrt(0) = inf`` on the
+    padded lanes, and the reverse pass then propagates ``inf * 0 = NaN``. Do not
+    "simplify" this to a single ``where``.
+
+    With ``softening_sq == 0`` a coincident valid pair is still singular; the
+    guard covers padding, not physics.
     """
 
     diff = target_positions[:, :, None, :] - source_positions[:, None, :, :]
@@ -372,21 +394,54 @@ def nearfield_leafpair_jax(
 ) -> Array:
     """Reference leaf-pair near-field update in pure JAX (dense; test-scale only).
 
+    The pure-JAX counterpart of :func:`nearfield_leafpair_pallas`, and the
+    reference that path is checked against. It materialises the full
+    ``[L, W_t, S, W_s]`` pair block, which is exactly the padding blow-up the
+    Pallas kernel exists to avoid, so it is usable at test scale only.
+
     Parameters
     ----------
-    leaf_positions:
-        ``(num_leaves, W, 3)`` leaf-major particle positions (target = source).
-    leaf_masses / leaf_mask:
-        ``(num_leaves, W)`` per-particle mass / validity.
-    source_leaf_ids:
-        ``(num_leaves, S)`` neighbour source-leaf ids for each target leaf.
-    source_valid:
-        ``(num_leaves, S)`` validity of each source slot.
+    leaf_positions : Array
+        ``[num_leaves, W, 3]`` leaf-major particle positions. Targets and sources
+        are drawn from this same table.
+    leaf_masses : Array
+        ``[num_leaves, W]`` per-particle masses, aligned with ``leaf_positions``.
+    leaf_mask : Array
+        ``[num_leaves, W]`` per-particle validity.
+    source_leaf_ids : Array
+        ``[num_leaves, S]`` neighbour source-leaf ids for each target leaf.
+        Entries where ``source_valid`` is false are never read, so they may hold
+        anything -- they are clamped to 0 before the gather.
+    source_valid : Array
+        ``[num_leaves, S]`` validity of each source slot.
+    softening_sq : Array
+        Scalar *squared* Plummer softening, added to every squared separation.
+    G : Array
+        Scalar gravitational constant, applied as a plain multiplier.
 
     Returns
     -------
     Array
-        ``(num_leaves, W, 4)`` leaf-major acceleration (0:3) + potential (3).
+        ``[num_leaves, W, 4]`` leaf-major acceleration in lanes ``0:3`` and
+        potential in lane ``3``.
+
+    Notes
+    -----
+    Differentiable in ``leaf_positions``, ``leaf_masses``, ``softening_sq`` and
+    ``G``; the masks and id arrays are integer/boolean and carry no gradient.
+
+    Same double-``where`` requirement as :func:`nearfield_fused_leaf_jax`: the
+    squared distance is replaced by 1 before ``rsqrt`` and masked to 0 after,
+    because masking only the output leaves ``rsqrt(0) = inf`` on padded lanes and
+    the reverse pass turns that into ``NaN``.
+
+    **A leaf must not appear in its own ``source_leaf_ids``.** Nothing here masks
+    ``i == j``: a self-pair has ``diff == 0``, which leaves the acceleration
+    unchanged but adds a spurious ``-G * m_i * rsqrt(softening_sq)`` to that
+    particle's potential, and at ``softening_sq == 0`` makes the acceleration
+    ``inf * 0 == NaN``. The unit tests honour this by construction
+    (``tests/unit/operators/test_pallas_nearfield_fused.py`` draws sources from
+    ``x != i``); it is a precondition, not a check.
     """
     safe_sids = jnp.where(source_valid, source_leaf_ids, 0)
     src_pos = leaf_positions[safe_sids]  # (L, S, W, 3)
