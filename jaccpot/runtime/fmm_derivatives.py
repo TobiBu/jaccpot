@@ -14,7 +14,6 @@ from beartype import beartype
 from beartype.typing import Tuple
 from jax import lax
 from jaxtyping import Array, jaxtyped
-from yggdrax.geometry import compute_tree_geometry
 from yggdrax.tree_moments import compute_tree_mass_moments
 
 from jaccpot.downward.local_expansions import LocalExpansionData
@@ -23,6 +22,7 @@ from jaccpot.upward.solidfmm_complex_tree_expansions import (
     prepare_solidfmm_complex_source_motion_multipoles,
 )
 from jaccpot.upward.tree_expansions import NodeMultipoleData, TreeUpwardData
+from jaccpot.upward.tree_geometry import compute_tree_geometry_compiled
 
 from .dtypes import INDEX_DTYPE
 from .fmm_caches import _contains_tracer
@@ -215,19 +215,6 @@ class DerivativesMixin:
             max_time_derivative_order=max_time_derivative_order,
             mode=mode,
         )
-        if target_indices is None and not _contains_tracer((state, evaluation)):
-            accelerations_out = evaluation[0] if return_potential else evaluation
-            inv = jnp.asarray(state.inverse_permutation)
-            sorted_idx = jnp.argsort(inv)
-            accelerations_sorted = jnp.asarray(accelerations_out)[sorted_idx]
-            self._last_force_scale_nodes = (
-                self._compute_node_force_scale_from_sorted_acc(
-                    tree=state.tree,
-                    accelerations_sorted=accelerations_sorted,
-                    reduction=self._force_scale_reduction_mode(),
-                )
-            )
-        return evaluation
 
     @jaxtyped(typechecker=beartype)
     def evaluate_prepared_state_with_jerk(
@@ -606,7 +593,7 @@ class DerivativesMixin:
             source_motion_packed=None,
         )
         source_motion_upward = TreeUpwardData(
-            geometry=compute_tree_geometry(state.tree, state.positions_sorted),
+            geometry=compute_tree_geometry_compiled(state.tree, state.positions_sorted),
             mass_moments=compute_tree_mass_moments(
                 state.tree,
                 state.positions_sorted,
@@ -749,7 +736,7 @@ class DerivativesMixin:
 
         # Build local coefficient streams L_k = ∂t^k L, including k=0.
         locals_by_k: list[LocalExpansionData] = [state.downward.locals]
-        geometry = compute_tree_geometry(state.tree, state.positions_sorted)
+        geometry = compute_tree_geometry_compiled(state.tree, state.positions_sorted)
         mass_moments = compute_tree_mass_moments(
             state.tree, state.positions_sorted, state.masses_sorted
         )

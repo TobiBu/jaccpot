@@ -10,6 +10,7 @@ import jax
 import jax.numpy as jnp
 from jaxtyping import Array, DTypeLike
 
+from ._env import env_flag
 from .basis import BasisInterface, ComplexSHBasis, RealSHBasis
 from .config import (
     Basis,
@@ -89,7 +90,15 @@ def _default_advanced_for_preset(preset: FMMPreset) -> FMMAdvancedConfig:
         cfg,
         tree=replace(cfg.tree, mode="lbvh", refine_local=True, max_refine_levels=1),
         farfield=replace(cfg.farfield, mode="pair_grouped"),
-        nearfield=replace(cfg.nearfield, mode="baseline"),
+        # "auto", not "baseline". This preset's accuracy comes from the tree
+        # (refine_local + an extra refinement level) and from the expansion, not
+        # from how the near field is traversed: baseline and bucketed visit the
+        # same leaf pairs and agree to one ulp at fp64 (4.2e-16 rel-L2 at
+        # N=8192). Pinning "baseline" only forced the per-pair reference scan,
+        # which on an A100 cost 507x at N=4096 and made this preset 139x slower
+        # than large_n_gpu. On a CPU "auto" still resolves to baseline here, so
+        # this changes the GPU answer only.
+        nearfield=replace(cfg.nearfield, mode="auto"),
         runtime=replace(cfg.runtime, host_refine_mode="on"),
     )
 
@@ -109,11 +118,48 @@ class _BasisResolution(NamedTuple):
     basis_impl: Optional[BasisInterface]
 
 
+def _warn_cartesian_basis_is_experimental() -> None:
+    """Say that ``basis="cartesian"`` is not fit for quantitative work.
+
+    Its relative L2 force error is ~1.8e-1 *independent of expansion order*,
+    which is a divergent-series signature rather than truncation: raising the
+    order does not improve it. solidfmm is 8.1e-5 on the same configuration,
+    ~2000x better, and the characterization anchor carries a 0.35 tolerance for
+    cartesian alone to accommodate this.
+
+    Warned rather than removed: it is the only Cartesian-multipole implementation
+    here and is useful for cross-checking the harmonic paths' *structure*. But an
+    error that does not fall with order is not something anyone should select by
+    accident, and until this tranche nothing said so at the call site.
+    """
+
+    if env_flag("JACCPOT_ALLOW_CARTESIAN_BASIS", False):
+        return
+    warnings.warn(
+        "basis='cartesian' is EXPERIMENTAL and unsuitable for quantitative work: "
+        "its relative L2 force error is ~1.8e-1 independent of expansion order "
+        "(a divergent-series signature, not truncation), against 8.1e-5 for "
+        "basis='solidfmm' on the same configuration. Raising max_order will not "
+        "improve it. Use basis='real' (default) or 'solidfmm'. Set "
+        "JACCPOT_ALLOW_CARTESIAN_BASIS=1 to silence this.",
+        UserWarning,
+        stacklevel=4,
+    )
+
+
 def _resolve_basis_input(basis: Union[Basis, BasisInterface, str]) -> _BasisResolution:
-    """Normalize basis string/object to runtime expansion basis + metadata."""
+    """Normalize basis string/object to runtime expansion basis + metadata.
+
+    ``"complex"`` is an **alias** for ``"solidfmm"``, not a third basis: both
+    return the same runtime basis and the same ``ComplexSHBasis`` implementation,
+    so they produce bit-identical forces (measured at N=2048/p=4/theta=0.5, max
+    difference exactly 0.0). The genuine independent-basis cross-check is
+    ``real`` against ``solidfmm``, which agree to 4.5e-13 there.
+    """
     if isinstance(basis, str):
         basis_norm = basis.strip().lower()
         if basis_norm in ("solidfmm", "complex"):
+            # Deliberately one branch for both spellings -- see the docstring.
             return _BasisResolution(
                 public_name="complex",
                 runtime_basis="solidfmm",
@@ -126,6 +172,7 @@ def _resolve_basis_input(basis: Union[Basis, BasisInterface, str]) -> _BasisReso
                 basis_impl=RealSHBasis(),
             )
         if basis_norm == "cartesian":
+            _warn_cartesian_basis_is_experimental()
             return _BasisResolution(
                 public_name="cartesian",
                 runtime_basis="cartesian",
@@ -346,7 +393,8 @@ class FastMultipoleMethod:
         mac_force_scale_mode: str = "prev",
         adaptive_error_model: str = "tail_proxy",
         adaptive_eps: Optional[float] = None,
-        dehnen_geometry_mode: str = "tree",
+        dehnen_geometry_mode: str = "com",
+        mac_theta_max: float = 1.0,
         theta: float = 0.6,
         G: float = 1.0,
         softening: float = 1e-3,
@@ -426,6 +474,7 @@ class FastMultipoleMethod:
             adaptive_error_model=adaptive_error_model,
             adaptive_eps=adaptive_eps,
             dehnen_geometry_mode=dehnen_geometry_mode,
+            mac_theta_max=mac_theta_max,
             complex_rotation=runtime_overrides.complex_rotation,
             tree_type=runtime_overrides.tree_type or "radix",
             execution_backend=runtime_overrides.execution_backend,
@@ -631,10 +680,17 @@ class FastMultipoleMethod:
         max_order: int = 4,
         theta: Optional[float] = None,
         cache_policy: str = "auto",
+        force_scale_nodes: Optional[Array] = None,
         runtime_overrides_override: Optional[Any] = None,
         fused_device_mode: bool = False,
     ) -> FMMPreparedState:
-        """Prepare and cache tree/interactions for repeated evaluations."""
+        """Prepare and cache tree/interactions for repeated evaluations.
+
+        ``force_scale_nodes`` overrides the per-node force scale used by the
+        adaptive acceptance test for this call only, skipping the prepass and
+        leaving the reuse cache untouched. Its length must match the node count of
+        the tree this call builds.
+        """
         return self._impl.prepare_state(
             positions,
             masses,
@@ -643,6 +699,7 @@ class FastMultipoleMethod:
             max_order=max_order,
             theta=theta,
             jit_tree=self.advanced.runtime.jit_tree,
+            force_scale_nodes=force_scale_nodes,
             runtime_overrides_override=runtime_overrides_override,
             fused_device_mode=bool(fused_device_mode),
         )
@@ -836,6 +893,47 @@ class FastMultipoleMethod:
             jit_traversal=jit_traversal,
             grad_plan=grad_plan,
             grad_config=grad_config,
+        )
+
+    def differentiable_step_fn(
+        self: "FastMultipoleMethod",
+        state: Union[FMMPreparedState, LargeNPreparedState],
+        *,
+        target_indices: Optional[Array] = None,
+        grad_config: Optional[GradConfig] = None,
+        jit_traversal: bool = False,
+        compile_now: Optional[Tuple[Array, Array]] = None,
+    ) -> Callable[[Array, Array], Array]:
+        """Return a compiled ``f(positions, masses) -> accelerations``.
+
+        The step seam for a training or inference loop: :meth:`prepare_state`
+        once, this once, then the returned function per step. The compile is paid
+        once instead of a re-trace per call, and the result is differentiable, so
+        ``jax.grad`` over it is compiled too::
+
+            state = fmm.prepare_state(pos0, mass0, max_order=4, leaf_size=64)
+            step = fmm.differentiable_step_fn(state, compile_now=(pos0, mass0))
+            for _ in range(steps):
+                g = jax.grad(lambda p: (step(p, mass) ** 2).sum())(pos)
+
+        Measured on an idle A100 at N=4096, leaf 64, p=4, real basis:
+        ``preset="accurate"`` goes from 6.681 s eager to 0.0110 s compiled, a
+        factor of 607 after an 18.9 s one-time compile. On ``preset="large_n_gpu"``
+        it is the other way round (2.843 s eager, 4.036 s compiled), because that
+        path's fast-lane kernels are already compiled individually -- measure
+        before adopting it there.
+
+        Raises ``TypeError`` immediately if ``state`` holds tracers, rather than
+        letting the failure surface deep inside the trace as a leaked-tracer
+        error naming an internal cache.
+        """
+
+        return self._impl.differentiable_step_fn(
+            state,
+            target_indices=target_indices,
+            grad_config=grad_config,
+            jit_traversal=jit_traversal,
+            compile_now=compile_now,
         )
 
     def evaluate_prepared_state_with_jerk(

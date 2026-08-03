@@ -5,7 +5,8 @@ engine class inherits this mixin. Sibling of _fmm_impl at runtime level.
 
 from __future__ import annotations
 
-from typing import Any, Optional, Union
+import warnings
+from typing import Any, Callable, Optional, Union
 
 import jax
 import jax.numpy as jnp
@@ -45,6 +46,46 @@ from .kernels.core import (
     _prepare_tree_evaluation_inputs,
 )
 from .reference import direct_sum as reference_direct_sum
+
+_OUTER_JIT_WARNED = False
+
+
+def _warn_if_traced_under_an_outer_jit(positions: Any, masses: Any) -> None:
+    """Say, once, that an outer ``jax.jit`` here means a long compile.
+
+    XLA gives no progress output, so the compile of this pipeline reads exactly
+    like a hang -- and it defeats every ``try: jit / except: fall back``, because
+    slowness is not an exception. Measured on an A100 at N=4096, leaf 32, p=4,
+    fp64: 19.1 s to compile the forward on ``preset="accurate"``, 159.6 s for the
+    gradient, and a single inner module (``jit__accumulate_m2l_fullbatch``)
+    taking 3m28s on the default preset. Those are real one-time costs, not
+    failures -- but a user watching a silent terminal has no way to know that,
+    and the tranche-1 measurement recorded it as "did not finish".
+
+    Warned rather than raised: an outer jit is legitimate and, on the radix path,
+    worth it (measured 264x on the steady-state forward). The warning names
+    ``differentiable_step_fn``, which pays the same compile at a point the caller
+    chose instead of inside a timed region.
+    """
+
+    global _OUTER_JIT_WARNED
+    if _OUTER_JIT_WARNED:
+        return
+    if not any(isinstance(value, jax.core.Tracer) for value in (positions, masses)):
+        return
+    _OUTER_JIT_WARNED = True
+    warnings.warn(
+        "differentiable_accelerations is being traced (an outer jax.jit or "
+        "jax.grad is in charge). Compiling this pipeline takes tens of seconds "
+        "to minutes and XLA reports no progress, so it looks like a hang: "
+        "measured on an A100 at N=4096/fp64, 19 s for the forward, 160 s for the "
+        "gradient, and one inner module alone at 3m28s. It is a one-time cost. "
+        "To pay it deliberately rather than inside a timed region, use "
+        "FastMultipoleMethod.differentiable_step_fn(state, compile_now=(pos, "
+        "mass)). This warning is issued once per process.",
+        UserWarning,
+        stacklevel=3,
+    )
 
 
 class EvaluateMixin:
@@ -309,6 +350,12 @@ class EvaluateMixin:
                 return_potential=return_potential,
                 max_acc_derivative_order=derivative_order,
             )
+
+        self._record_force_scale_from_evaluation(
+            state=state,
+            evaluation=evaluation,
+            full_evaluation=(resolved_target_indices is None),
+        )
 
         if jnp.issubdtype(state.input_dtype, jnp.floating):
             output_dtype = state.input_dtype
@@ -624,6 +671,7 @@ class EvaluateMixin:
         explicitly requests ``grouped_interactions=True`` gets a forward force
         that differs from the force this gradient is taken of.
         """
+        _warn_if_traced_under_an_outer_jit(positions, masses)
         options = resolve_grad_options(
             grad_config,
             num_particles=int(jnp.asarray(positions).shape[0]),
@@ -650,6 +698,117 @@ class EvaluateMixin:
                 jit_traversal=jit_traversal,
                 options=options,
             )
+
+    def differentiable_step_fn(
+        self: "FastMultipoleMethod",
+        state: Union[FMMPreparedState, LargeNPreparedState],
+        *,
+        target_indices: Optional[Array] = None,
+        grad_config: Optional[GradConfig] = None,
+        jit_traversal: bool = False,
+        compile_now: Optional[Tuple[Array, Array]] = None,
+    ) -> Callable[[Array, Array], Array]:
+        """Return a compiled ``f(positions, masses) -> accelerations``.
+
+        The step seam for a training or inference loop: build ``state`` once with
+        :meth:`prepare_state`, then call this once, then call the result per step.
+        The compile is paid once and amortised; the returned function is
+        differentiable, so ``jax.grad`` over it works and is compiled too.
+
+        Why this exists rather than "just wrap it in ``jax.jit``". Eagerly,
+        ``differentiable_accelerations`` re-traces its whole pipeline on every
+        call, and the re-tracing dominates. Measured on an idle A100 at N=4096,
+        leaf 64, p=4, real basis, evaluating a prebuilt tree:
+
+        ==============  ===========  =============  =========  =========
+        preset          eager        compile once   compiled   factor
+        ==============  ===========  =============  =========  =========
+        ``accurate``       6.681 s        18.88 s    0.0110 s      607x
+        ``large_n_gpu``    2.843 s         6.11 s    4.036 s       0.7x
+        ==============  ===========  =============  =========  =========
+
+        Both numbers are reported because they disagree, and the disagreement is
+        the useful part: on the radix path compiling is transformative, while on
+        the large-N production path the fast-lane kernels are already compiled
+        individually and folding them into one module is slightly *worse*. The
+        reverse pass on ``large_n_gpu`` behaves the same way (eager 12.62 s,
+        compiled 15.11 s after a 19.3 s compile). So this is a seam to reach for
+        on the radix path, and to measure before adopting on the large-N one.
+
+        The forward is bit-identical on ``large_n_gpu`` (max abs diff 0.0) and
+        agrees to 2.3e-12 on ``accurate`` at fp64, which is reassociation.
+
+        Parameters
+        ----------
+        state
+            A prepared state from :meth:`prepare_state`. Closed over as a
+            constant, exactly as :meth:`differentiable_accelerations` treats it.
+        target_indices, grad_config, jit_traversal
+            Passed through to :meth:`differentiable_accelerations` unchanged.
+            ``grad_config`` is resolved **once**, here, rather than per call.
+        compile_now
+            ``(positions, masses)`` to compile against immediately, so the
+            one-time cost lands here rather than inside the first timed step.
+            Recommended when benchmarking.
+
+        Raises
+        ------
+        TypeError
+            If ``state`` holds tracers, i.e. it was built inside a trace. Tree
+            construction is host-side and not traceable, so such a state cannot
+            be a compile-time constant. Raised here rather than deep inside the
+            trace, where it surfaces as a leaked-tracer error naming an internal
+            cache.
+        """
+
+        from .fmm_caches import _contains_tracer
+
+        if _contains_tracer(state):
+            raise TypeError(
+                "differentiable_step_fn needs a concrete prepared state, but this "
+                "one holds tracers -- it was built inside a jax transform. "
+                "prepare_state does host-side tree construction and is not "
+                "traceable; build the state outside, then call this."
+            )
+        options = resolve_grad_options(
+            grad_config,
+            num_particles=int(
+                getattr(getattr(state, "inverse_permutation", None), "shape", (0,))[0]
+            ),
+            supports_fast_lane=not isinstance(state, LargeNPreparedState),
+        )
+
+        def _step(positions: Array, masses: Array) -> Array:
+            with grad_option_overrides(options):
+                if isinstance(state, LargeNPreparedState):
+                    return self._differentiable_accelerations_large_n(
+                        state,
+                        positions,
+                        masses,
+                        target_indices=target_indices,
+                        grad_plan=None,
+                        options=options,
+                    )
+                return self._differentiable_accelerations_radix(
+                    state,
+                    positions,
+                    masses,
+                    target_indices=target_indices,
+                    jit_traversal=jit_traversal,
+                    options=options,
+                )
+
+        compiled = jax.jit(_step)
+        if compile_now is not None:
+            # Warm the jit cache by CALLING it, not by returning
+            # `.lower(...).compile()`: an AOT-compiled object is specialised to
+            # one signature and rejects JAX transformations, so returning it
+            # would make the seam undifferentiable -- the one thing it exists
+            # for. (`jax.grad` over it fails with "Cannot apply JAX
+            # transformations to a function lowered and compiled for a
+            # particular signature".)
+            jax.block_until_ready(compiled(*compile_now))
+        return compiled
 
     def _forward_permutation(
         self: "FastMultipoleMethod",
@@ -678,12 +837,23 @@ class EvaluateMixin:
         permutation = state.inverse_permutation
         cached = getattr(self, "_forward_permutation_memo", None)
         if cached is not None and cached[0] is permutation:
-            return cached[1]
+            # Never hand back a cached tracer. A memo written during a trace that
+            # outlives it makes the NEXT call fail with UnexpectedTracerError
+            # pointing here, which reads as a bug in the caller. Dropping the
+            # entry costs one host sort and cannot be wrong.
+            if not _contains_tracer(cached):
+                return cached[1]
+            self._forward_permutation_memo = None
         inverse_permutation_host = np.asarray(jax.device_get(permutation))
         forward_permutation = jnp.asarray(
             np.argsort(inverse_permutation_host, kind="stable"), dtype=INDEX_DTYPE
         )
-        self._forward_permutation_memo = (permutation, forward_permutation)
+        # Only memoise concrete values, for the same reason: this method is called
+        # from inside `jax.jit`/`jax.grad` traces by design (see
+        # differentiable_step_fn), and the memo lives on the solver, which
+        # outlives any single trace.
+        if not _contains_tracer((permutation, forward_permutation)):
+            self._forward_permutation_memo = (permutation, forward_permutation)
         return forward_permutation
 
     def _sorted_inputs(

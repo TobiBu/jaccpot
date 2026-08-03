@@ -445,11 +445,17 @@ def test_dehnen_error_defaults_to_paper_policy_settings():
     fmm = FastMultipoleMethod(
         preset=FMMPreset.FAST,
         basis="solidfmm",
+        # eps is the accuracy knob of Dehnen eq (16a) and must be explicit; the
+        # theta-derived fallback is a tail_proxy heuristic unrelated to it.
+        adaptive_eps=1.0e-4,
         advanced=FMMAdvancedConfig(mac_type="dehnen_error"),
     )
     assert fmm.mac_type == "dehnen_error"
     assert fmm._impl.adaptive_error_model == "dehnen_paper"
-    assert fmm._impl.mac_force_scale_mode == "paper"
+    # 'prev' is promoted to 'paper_cached', not 'paper': the paper prepass is a full
+    # extra FMM solve, and re-running it every prepare_state costs ~3.5x steady
+    # state for a force scale Dehnen §5.4 explicitly licenses reusing.
+    assert fmm._impl.mac_force_scale_mode == "paper_cached"
 
 
 def test_dehnen_error_preserves_explicit_policy_overrides():
@@ -458,11 +464,45 @@ def test_dehnen_error_preserves_explicit_policy_overrides():
         basis="solidfmm",
         adaptive_error_model="dehnen_degree",
         mac_force_scale_mode="prepass",
+        adaptive_eps=1.0e-4,
         advanced=FMMAdvancedConfig(mac_type="dehnen_error"),
     )
     assert fmm.mac_type == "dehnen_error"
     assert fmm._impl.adaptive_error_model == "dehnen_degree"
     assert fmm._impl.mac_force_scale_mode == "prepass"
+
+
+def test_dehnen_error_requires_explicit_adaptive_eps():
+    """The paper MAC must not silently inherit the theta-derived tolerance.
+
+    In paper mode theta does not gate acceptance at all -- eq (16a) supplies its
+    own ``theta < 1`` convergence guard -- so ``theta**(p+2)`` is an unrelated
+    heuristic. At theta=0.6, p=4 it evaluates to 0.047, a 4.7% per-interaction
+    tolerance, which is how a wildly loose eps reached the accuracy notebooks.
+    """
+
+    with pytest.raises(ValueError, match="requires an explicit adaptive_eps"):
+        FastMultipoleMethod(
+            preset=FMMPreset.FAST,
+            basis="solidfmm",
+            advanced=FMMAdvancedConfig(mac_type="dehnen_error"),
+        )
+
+    with pytest.raises(ValueError, match="requires an explicit adaptive_eps"):
+        FastMultipoleMethod(
+            preset=FMMPreset.FAST,
+            basis="solidfmm",
+            adaptive_error_model="dehnen_paper",
+        )
+
+    # Adaptive order keeps the validated theta-derived default.
+    FastMultipoleMethod(
+        preset=FMMPreset.FAST,
+        basis="solidfmm",
+        adaptive_order=True,
+        p_gears=(2, 3, 4),
+        adaptive_error_model="dehnen_paper",
+    )
 
 
 def test_tree_type_flows_from_advanced_config():
@@ -2076,9 +2116,16 @@ def test_minimum_memory_gpu_runtime_starts_with_smaller_traversal_capacities():
         )
 
     assert overrides.traversal_config is not None
-    # The small memory-safe pair-queue seed (32768) is the load-bearing
-    # assertion: the minimum-memory GPU lane must start from a bounded queue.
-    assert int(overrides.traversal_config.max_pair_queue) == 32768
+    # A *bounded* pair queue is the load-bearing assertion, and it now scales with
+    # the particle count rather than being one constant for every N below a
+    # million. At N=524288 that is 131072 (N/4 rounded to a power of two); the
+    # historical flat 32768 remains the floor and is what N <= 131072 still gets,
+    # asserted in tests/unit/runtime/test_capacity_replanning.py. The constant was
+    # a hard ceiling in the middle of the measured range: N=262144 raised
+    # "Pair queue capacity exceeded" on an A100 with 29.62 GiB free and the
+    # largest static buffer at 0.31 GiB.
+    assert int(overrides.traversal_config.max_pair_queue) == 131072
+    assert int(overrides.traversal_config.max_pair_queue) >= 32768
     # process_block is floored to the streamed minimum-memory ceiling (256, i.e.
     # _GPU_STREAMED_MINIMUM_MEMORY_EXPLICIT_PROCESS_BLOCK) to avoid underfilled
     # count-pass kernels -- matching the sibling auto-seed tests above. (The

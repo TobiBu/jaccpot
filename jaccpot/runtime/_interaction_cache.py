@@ -29,6 +29,8 @@ from yggdrax.interactions import (
 )
 from yggdrax.tree import Tree
 
+from jaccpot._env import env_flag
+
 
 @dataclass(frozen=True)
 class _DualTreeArtifacts:
@@ -558,6 +560,32 @@ def _build_dual_tree_artifacts_split(
     )
 
 
+# Bounded capacity re-planning for the strict streamed walk. Floors are the
+# smallest values the policy ever hands out; the ceiling is where a capacity
+# stops being the plausible explanation (2^25 slots is ~268 MB of pair indices)
+# and the caller should be told rather than retried at.
+_STRICT_STREAMED_QUEUE_FLOOR = 32_768
+_STRICT_STREAMED_FAR_PAIR_FLOOR = 131_072
+_STRICT_STREAMED_RETRY_LIMIT = 1 << 25
+_STRICT_STREAMED_RETRY_ATTEMPTS = 12
+
+
+def _strict_streamed_retry_diag(grew: list[str]) -> None:
+    """Report a successful re-plan, so a silent 2x memory bump is visible.
+
+    Opt-in via JACCPOT_PREPARE_DIAGNOSTICS, matching the other prepare-time
+    diagnostics. Silence here would trade one invisible failure for another.
+    """
+
+    if not env_flag("JACCPOT_PREPARE_DIAGNOSTICS", False):
+        return
+    print(
+        "[jaccpot.prepare] strict streamed dual-tree walk re-planned: "
+        + "; ".join(grew),
+        flush=True,
+    )
+
+
 def _build_dual_tree_artifacts_split_strict_streamed(
     *,
     tree: Tree,
@@ -620,21 +648,85 @@ def _build_dual_tree_artifacts_split_strict_streamed(
             compact_far_pair_capacity=compact_far_pair_capacity,
         )
 
-    compact_far_pairs, neighbor_list = build_compact_far_pairs_and_leaf_neighbor_lists(
-        tree,
-        geometry,
-        theta=theta,
-        mac_type=mac_type,
-        dehnen_radius_scale=dehnen_radius_scale,
-        max_interactions_per_node=max_interactions_per_node,
-        max_neighbors_per_leaf=max_neighbors_per_leaf,
-        max_pair_queue=max_pair_queue_resolved,
-        process_block=process_block_resolved,
-        traversal_config=None,
-        retry_logger=None,
-        timing_callback=None,
-        compact_far_pair_capacity=compact_far_pair_capacity,
-    )
+    # Re-plan on a capacity overflow instead of surfacing it. The generic
+    # `_build_dual_tree_artifacts` has retried since it was written; this strict
+    # streamed path -- the one `large_n_gpu`/static_radix actually takes -- never
+    # did, so a capacity ceiling reached the caller as a hard wall. Measured on an
+    # A100, large_n_gpu/static_radix/leaf 256/order 4/theta 0.6: N=262144 raised
+    # "Pair queue capacity exceeded" with the queue resolved to 65536, while the
+    # device had 29.62 GiB free and the largest static buffer was 0.31 GiB. It was
+    # never a memory limit. Growing the queue then hit the NEXT flat constant, the
+    # compact far-pair cap of 131072 -- same shape of bug, one layer down.
+    #
+    # Both are grown by doubling rather than predicted, because predicting either
+    # needs a model of the interaction-list length that theta, the distribution
+    # and the leaf size all move. Each retry is one extra traversal; the queue
+    # costs ~8 B a slot and a far pair ~8 B, so even the last rung is megabytes.
+    attempt_queue = max_pair_queue_resolved
+    attempt_far_cap = compact_far_pair_capacity
+    grew: list[str] = []
+    for attempt in range(_STRICT_STREAMED_RETRY_ATTEMPTS):
+        try:
+            (
+                compact_far_pairs,
+                neighbor_list,
+            ) = build_compact_far_pairs_and_leaf_neighbor_lists(
+                tree,
+                geometry,
+                theta=theta,
+                mac_type=mac_type,
+                dehnen_radius_scale=dehnen_radius_scale,
+                max_interactions_per_node=max_interactions_per_node,
+                max_neighbors_per_leaf=max_neighbors_per_leaf,
+                max_pair_queue=attempt_queue,
+                process_block=process_block_resolved,
+                traversal_config=None,
+                retry_logger=None,
+                timing_callback=None,
+                compact_far_pair_capacity=attempt_far_cap,
+            )
+            if grew:
+                _strict_streamed_retry_diag(grew)
+            break
+        except Exception as exc:
+            text = str(exc).lower()
+            if "queue capacity exceeded" in text:
+                which, current = "max_pair_queue", (
+                    _STRICT_STREAMED_QUEUE_FLOOR
+                    if attempt_queue is None
+                    else int(attempt_queue)
+                )
+            elif "compact far-pair cap exceeded" in text:
+                which, current = "compact_far_pair_capacity", (
+                    _STRICT_STREAMED_FAR_PAIR_FLOOR
+                    if attempt_far_cap is None
+                    else int(attempt_far_cap)
+                )
+            else:
+                raise
+            grown = current * 2
+            if (
+                attempt == _STRICT_STREAMED_RETRY_ATTEMPTS - 1
+                or grown > _STRICT_STREAMED_RETRY_LIMIT
+            ):
+                raise RuntimeError(
+                    f"{which} overflowed on the strict streamed dual-tree walk and "
+                    f"re-planning did not fit it: grew to {current} (ceiling "
+                    f"{_STRICT_STREAMED_RETRY_LIMIT}) over {attempt + 1} attempts"
+                    + (f" after also growing {', '.join(grew)}" if grew else "")
+                    + ". Raise leaf_size to reduce the leaf count, or set "
+                    "JACCPOT_STATIC_STRICT_FUSED_COMPACT_FAR_PAIR_CAP / pass "
+                    "jaccpot.TraversalOverrides(max_pair_queue=...) explicitly. "
+                    "A TraversalOverrides merges onto the preset's other tuning "
+                    "rather than replacing it."
+                ) from exc
+            grew.append(f"{which} {current}->{grown}")
+            if which == "max_pair_queue":
+                attempt_queue = grown
+            else:
+                attempt_far_cap = grown
+    else:  # pragma: no cover - the loop always breaks or raises
+        raise RuntimeError("strict streamed dual-tree walk did not run")
     return _DualTreeArtifacts(
         interactions=None,
         neighbor_list=neighbor_list,

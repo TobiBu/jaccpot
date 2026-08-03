@@ -19,7 +19,7 @@ from beartype.typing import Callable
 from jax import lax
 from jaxtyping import Array, jaxtyped
 from yggdrax.dtypes import INDEX_DTYPE, as_index, complex_dtype_for_real
-from yggdrax.geometry import TreeGeometry, compute_tree_geometry
+from yggdrax.geometry import TreeGeometry
 from yggdrax.tree import Tree, get_level_offsets, get_nodes_by_level
 from yggdrax.tree_moments import TreeMassMoments, compute_tree_mass_moments
 
@@ -32,6 +32,8 @@ from jaccpot.operators.complex_ops import (
     regular_solid_harmonic_directional_derivative_order_batch,
 )
 from jaccpot.operators.real_harmonics import sh_size
+
+from .tree_geometry import compute_tree_geometry_compiled
 
 
 class SolidFMMComplexNodeMultipoleData(NamedTuple):
@@ -520,7 +522,7 @@ def prepare_solidfmm_complex_upward_sweep(
         else (
             None
             if bool(defer_geometry)
-            else compute_tree_geometry(
+            else compute_tree_geometry_compiled(
                 tree,
                 positions_sorted,
                 max_leaf_size=int(max_leaf_size) if max_leaf_size is not None else None,

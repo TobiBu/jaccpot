@@ -17,7 +17,6 @@ from beartype import beartype
 from beartype.typing import Callable, Tuple
 from jaxtyping import Array, jaxtyped
 from yggdrax.dense_interactions import DenseInteractionBuffers
-from yggdrax.geometry import compute_tree_geometry
 from yggdrax.grouped_interactions import GroupedInteractionBuffers
 from yggdrax.interactions import (
     CompactTaggedFarPairs,
@@ -50,6 +49,7 @@ from jaccpot.nearfield.near_field import (
 )
 from jaccpot.operators.multipole_utils import MAX_MULTIPOLE_ORDER, total_coefficients
 from jaccpot.upward.tree_expansions import TreeUpwardData
+from jaccpot.upward.tree_geometry import compute_tree_geometry_compiled
 
 from ._adaptive_policy import (
     adaptive_pair_policy,
@@ -72,6 +72,10 @@ from ._nearfield_cache import (
     with_nearfield_cache_artifacts,
 )
 from ._octree_adapter import build_octree_execution_data_with_status
+from .capacity_diagnostics import (
+    is_capacity_failure,
+    reraise_with_capacity_report,
+)
 from .dtypes import INDEX_DTYPE
 from .fmm_caches import _contains_tracer, _estimate_payload_nbytes, _format_nbytes
 from .fmm_constants import (
@@ -797,6 +801,21 @@ class PrepareMixin:
             and bool(getattr(self, "_strict_fused_mode_active", False))
             and bool(getattr(self, "_strict_fused_device_only", False))
         ):
+            # This lane cannot carry a solver-owned pair policy, so the Dehnen
+            # mass-dependent MAC would silently degrade to the plain geometric
+            # MAC underneath it -- producing a different force with no signal to
+            # the caller, and quietly invalidating any measurement taken here.
+            # Refuse, in the same spirit as the streamed-fast-lane refusal below.
+            if use_paper_fixed_policy:
+                raise RuntimeError(
+                    "the strict fused device-only lane cannot carry the Dehnen "
+                    "paper MAC (mac_type='dehnen_error' / "
+                    "adaptive_error_model='dehnen_paper'): it requires a "
+                    "solver-owned pair policy, which this lane does not support. "
+                    "Silently falling back would run the geometric MAC instead. "
+                    "Use mac_type='dehnen' for this lane, or disable the strict "
+                    "fused device-only path."
+                )
             use_paper_fixed_policy = False
 
         # A static-radix topology key describes the capacity-fixed tree shape,
@@ -1316,7 +1335,7 @@ class PrepareMixin:
         geometry_factory = (
             None
             if tree_artifacts.upward.geometry is not None
-            else lambda: compute_tree_geometry(
+            else lambda: compute_tree_geometry_compiled(
                 tree_artifacts.tree,
                 tree_artifacts.positions_sorted,
                 max_leaf_size=int(tree_artifacts.leaf_cap),
@@ -2259,7 +2278,7 @@ class PrepareMixin:
         geometry_factory = (
             None
             if tree_artifacts.upward.geometry is not None
-            else lambda: compute_tree_geometry(
+            else lambda: compute_tree_geometry_compiled(
                 tree_artifacts.tree,
                 tree_artifacts.positions_sorted,
                 max_leaf_size=int(tree_artifacts.leaf_cap),
@@ -2408,6 +2427,59 @@ class PrepareMixin:
         self: "FastMultipoleMethod",
         positions: Array,
         masses: Array,
+        **kwargs: Any,
+    ) -> PreparedStateLike:
+        """Precompute tree and interaction data for repeated evaluations.
+
+        Keyword arguments are those of :meth:`_prepare_state_uncaught`, which
+        holds the implementation and the full signature; the public facade in
+        ``jaccpot.solver`` documents them for users. They are forwarded verbatim
+        as ``**kwargs`` ON PURPOSE: an earlier version of this wrapper repeated
+        the parameter list, and a parameter added to the implementation would
+        then have been silently dropped here -- the exact failure mode the rest
+        of this change set is about.
+
+        This wrapper exists to turn an allocation or traversal-capacity failure
+        into something actionable: the error is re-raised with the
+        statically-sized buffers for this configuration largest-first, the knob
+        that sizes each, and a configuration that would fit, with the original
+        chained. "Out of memory while trying to allocate 8.00GiB" on a 40 GB card
+        named neither the buffer nor a way forward. See
+        :mod:`jaccpot.runtime.capacity_diagnostics`.
+        """
+
+        try:
+            return self._prepare_state_uncaught(positions, masses, **kwargs)
+        except Exception as exc:
+            if not is_capacity_failure(exc):
+                raise
+            try:
+                num_particles = int(jnp.asarray(positions).shape[0])
+            except Exception:
+                num_particles = 0
+            traversal_config = None
+            try:
+                traversal_config = self._resolve_runtime_execution_overrides(
+                    num_particles=num_particles
+                ).traversal_config
+            except Exception:
+                pass
+            reraise_with_capacity_report(
+                exc,
+                num_particles=num_particles,
+                leaf_size=int(kwargs.get("leaf_size", 16)),
+                max_order=int(kwargs.get("max_order", 2)),
+                working_dtype=self.working_dtype,
+                preset=self.preset,
+                traversal_config=traversal_config,
+                nearfield_mode=str(self.nearfield_mode),
+            )
+            raise  # pragma: no cover - reraise_with_capacity_report always raises
+
+    def _prepare_state_uncaught(
+        self: "FastMultipoleMethod",
+        positions: Array,
+        masses: Array,
         *,
         bounds: Optional[Tuple[Array, Array]] = None,
         leaf_size: int = 16,
@@ -2417,6 +2489,7 @@ class PrepareMixin:
         refine_local: Optional[bool] = None,
         max_refine_levels: Optional[int] = None,
         aspect_threshold: Optional[float] = None,
+        force_scale_nodes: Optional[Array] = None,
         runtime_overrides_override: Optional[_RuntimeExecutionOverrides] = None,
         fused_device_mode: bool = False,
     ) -> PreparedStateLike:
@@ -2425,12 +2498,31 @@ class PrepareMixin:
         When ``tree_build_mode`` is ``"fixed_depth"`` the optional
         ``refine_local``, ``max_refine_levels``, and ``aspect_threshold``
         arguments control the host-side leaf refinement pass.
+
+        ``force_scale_nodes`` supplies the per-node force scale on the right-hand
+        side of the adaptive acceptance test directly, for this call only. It
+        skips the prepass, is not written to the reuse cache, and is how an
+        externally computed scale -- Dehnen eq (16b)'s exact ``f_b``, say -- is
+        injected without reaching into ``_last_force_scale_nodes``. Its length
+        must equal the node count of the tree this call builds, which the caller
+        generally learns from a prior ``prepare_state`` on the same
+        positions/`leaf_size`.
+
+        See :meth:`prepare_state` for the capacity-failure reporting that
+        wraps this method; it forwards ``**kwargs`` here verbatim.
         """
 
         self._validate_prepare_state_request(
             leaf_size=int(leaf_size),
             max_order=int(max_order),
         )
+        if force_scale_nodes is not None and not self._uses_paper_style_force_scale():
+            raise ValueError(
+                "force_scale_nodes was supplied but this solver has no adaptive "
+                "force-scale path to use it: set adaptive_order=True, or "
+                "adaptive_error_model='dehnen_paper', or mac_type='dehnen_error'. "
+                "Passing it here would otherwise be silently ignored."
+            )
 
         refine_local_val = (
             self.refine_local if refine_local is None else bool(refine_local)
@@ -2526,9 +2618,24 @@ class PrepareMixin:
             upward_center_mode=upward_center_mode,
             allow_stateful_cache=allow_stateful_cache,
         )
+        supplied_force_scale = force_scale_nodes
         force_scale_nodes = None
         use_paper_force_scale = self._uses_paper_style_force_scale()
-        if use_paper_force_scale:
+        if supplied_force_scale is not None:
+            # An explicitly supplied scale wins outright: no prepass, no cache read,
+            # and no cache *write* either. Seeding the cache here would make the next
+            # prepare_state silently inherit an externally injected scale, which is
+            # the confusion this parameter exists to remove.
+            node_count = int(tree_artifacts.tree.parent.shape[0])
+            supplied = jnp.asarray(supplied_force_scale, dtype=positions_arr.dtype)
+            if supplied.ndim != 1 or int(supplied.shape[0]) != node_count:
+                raise ValueError(
+                    "force_scale_nodes must be a 1-D array of length "
+                    f"{node_count} (the node count of the tree this call built); "
+                    f"got shape {tuple(supplied.shape)}"
+                )
+            force_scale_nodes = supplied
+        elif use_paper_force_scale:
             node_count = int(tree_artifacts.tree.parent.shape[0])
             previous_force_scale = self._last_force_scale_nodes
             reduction_mode = self._force_scale_reduction_mode()
@@ -2536,19 +2643,40 @@ class PrepareMixin:
             policy_orders = self._policy_orders_for_prepare_state(
                 max_order=int(max_order)
             )
-            if self.mac_force_scale_mode == "paper":
-                need_prepass = True
-            elif self.mac_force_scale_mode == "prev" or self._in_force_scale_prepass:
-                if (
-                    previous_force_scale is not None
-                    and int(previous_force_scale.shape[0]) == node_count
-                ):
+            reusable_force_scale = (
+                previous_force_scale is not None
+                and int(previous_force_scale.shape[0]) == node_count
+            )
+            if self._in_force_scale_prepass:
+                # A prepass is already running and this is its inner prepare_state.
+                # It must never ask for a prepass of its own: 'paper' and 'prepass'
+                # both set need_prepass unconditionally, and the non-paper prepass
+                # re-enters prepare_state, so a mode that requests one on every call
+                # recursed until the interpreter stack ran out. Reachable from public
+                # kwargs (adaptive_order=True, adaptive_error_model='tail_proxy',
+                # mac_force_scale_mode='paper'). The inner solve only needs *some*
+                # force scale, so take the cached one or fall back to unity.
+                if reusable_force_scale:
                     force_scale_nodes = jnp.asarray(
                         previous_force_scale,
                         dtype=positions_arr.dtype,
                     )
-                elif self._uses_paper_style_traversal_policy() and (
-                    not self._in_force_scale_prepass
+                else:
+                    force_scale_nodes = jnp.ones(
+                        (node_count,),
+                        dtype=positions_arr.dtype,
+                    )
+            elif self.mac_force_scale_mode == "paper":
+                need_prepass = True
+            elif self.mac_force_scale_mode in ("prev", "paper_cached"):
+                if reusable_force_scale:
+                    force_scale_nodes = jnp.asarray(
+                        previous_force_scale,
+                        dtype=positions_arr.dtype,
+                    )
+                elif (
+                    self.mac_force_scale_mode == "paper_cached"
+                    or self._uses_paper_style_traversal_policy()
                 ):
                     need_prepass = True
                 else:
@@ -2561,16 +2689,21 @@ class PrepareMixin:
             if need_prepass:
                 if len(policy_orders) == 0:
                     raise ValueError(
-                        "mac_force_scale_mode='prepass' requires non-empty orders"
+                        f"mac_force_scale_mode={self.mac_force_scale_mode!r} needs a "
+                        "force-scale prepass, which requires non-empty orders"
                     )
+                use_paper_prepass = (
+                    self.mac_force_scale_mode
+                    in (
+                        "paper",
+                        "paper_cached",
+                    )
+                    and self._uses_paper_style_traversal_policy()
+                )
                 low_order = int(min(policy_orders))
-                if self.mac_force_scale_mode == "paper" and (
-                    self._uses_paper_style_traversal_policy()
-                ):
+                if use_paper_prepass:
                     low_order = 1 if int(max_order) >= 1 else 0
-                if self.mac_force_scale_mode == "paper" and (
-                    self._uses_paper_style_traversal_policy()
-                ):
+                if use_paper_prepass:
                     prepass_sorted = (
                         self._compute_force_scale_paper_prepass_from_tree_artifacts(
                             tree_artifacts=tree_artifacts,
@@ -2589,14 +2722,7 @@ class PrepareMixin:
                         )
                     )
                 else:
-                    self._in_force_scale_prepass = True
-                    saved_p_gears = self.p_gears
-                    saved_adaptive_order = self.adaptive_order
-                    saved_adaptive_error_model = self.adaptive_error_model
-                    saved_mac_type = self.mac_type
-                    try:
-                        self.p_gears = (low_order,)
-                        self.adaptive_order = bool(saved_adaptive_order)
+                    with self._force_scale_prepass_scope(low_order=low_order):
                         prepass_acc = self.compute_accelerations(
                             positions_arr,
                             masses_arr,
@@ -2609,12 +2735,6 @@ class PrepareMixin:
                             jit_tree=jit_tree,
                             jit_traversal=False,
                         )
-                    finally:
-                        self.p_gears = saved_p_gears
-                        self.adaptive_order = saved_adaptive_order
-                        self.adaptive_error_model = saved_adaptive_error_model
-                        self.mac_type = saved_mac_type
-                        self._in_force_scale_prepass = False
                     prepass_sorted = jnp.asarray(prepass_acc)[
                         jnp.argsort(tree_artifacts.inverse_permutation)
                     ]

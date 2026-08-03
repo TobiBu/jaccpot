@@ -86,10 +86,16 @@ jobs:
       matrix:
         include:
           # Split by path so the set is a partition with no test left behind:
-          # `tests/experimental` is excluded by the marker and `tests/perf` by
-          # the default addopts, and everything else lives under exactly one of
-          # these three entries. Verified by collection count: 421 + 125 + 102
-          # == 648 == the unsharded total.
+          # `tests/experimental` is excluded by the marker and `tests/perf` (3
+          # cases) by the default addopts, and everything else lives under
+          # exactly one of these three entries or the `test-mac-runtime` job.
+          # Verified by collection count, with `--ignore=tests/unit/runtime` as
+          # the step applies it:
+          #   integration 125 + unit 466 + rest 102  = 693  (these three shards)
+          #                        + tests/unit/runtime 193 = 886
+          # and 886 is the whole selectable universe. Re-measure this when adding
+          # a test directory -- a stale sum here would hide a whole path silently
+          # dropping out of CI, which is the one thing the split must not do.
           - shard: integration
             paths: tests/integration
           - shard: unit
@@ -130,10 +136,20 @@ jobs:
         # (overrides pyproject's `-n auto`). `-m "not experimental"` matches the
         # default addopts; all `slow` tests DO run here.
         #
-        # Branch coverage is off (see `[tool.coverage.run]` in pyproject.toml) --
-        # it is the other half of the memory fix.
+        # `--ignore=tests/unit/runtime`: the Dehnen-MAC suite there is 94 cases
+        # that each build a solver and run a full FMM solve (26-95 s apiece on
+        # CPU). It has the `test-mac-runtime` job below to itself, so the `unit`
+        # shard must exclude it or the work runs twice -- and the shard would
+        # absorb ~20 min it has no cap headroom for. The ignore is harmless on
+        # the other two shards, whose paths never reach it.
+        #
+        # Branch coverage is NOT set here on purpose: `[tool.coverage.run]` in
+        # pyproject.toml sets `branch = true`, and its note records that
+        # `--cov-branch` on the command line cannot override that either way, so
+        # passing the flag would be inert decoration.
         run: |
           pytest -n 2 -m "not experimental" ${{ matrix.paths }} \
+            --ignore=tests/unit/runtime \
             --cov=jaccpot \
             --cov-report=xml --cov-report=term:skip-covered
       - name: Upload coverage XML artifact
@@ -145,6 +161,58 @@ jobs:
         with:
           name: coverage-xml-${{ matrix.shard }}
           path: coverage.xml
+
+  test-mac-runtime:
+    # The Dehnen mass-dependent MAC suite (tests/unit/runtime), split out of
+    # test-full. 94 cases, every one building a solver and running a full FMM
+    # solve: 26-95 s each on CPU, which is 20+ minutes this job absorbs so that
+    # test-full keeps both its ~36 min profile and the meaning of its cap.
+    #
+    # Splitting also halves the COLD-cache cost per job, which matters more than it
+    # looks: the .jax_cache key is hashFiles('jaccpot/**/*.py'), so any runtime
+    # change starts cold, and a cancelled job never saves the cache -- so one
+    # over-budget run makes the next one cold too, indefinitely. Two smaller jobs
+    # each finish and each save.
+    runs-on: ubuntu-latest
+    timeout-minutes: 50
+    env:
+      JAX_ENABLE_X64: "1"
+      JACCPOT_TEST_JAX_CACHE_DIR: ${{ github.workspace }}/.jax_cache
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+      - name: Restore JAX compilation cache
+        uses: actions/cache@v4
+        with:
+          path: ${{ github.workspace }}/.jax_cache
+          # Separate key from test-full's: the two jobs compile disjoint sets, so
+          # sharing one key would have them overwrite each other's entries.
+          key: jax-compile-macrt-py313-${{ hashFiles('jaccpot/**/*.py') }}
+          restore-keys: |
+            jax-compile-macrt-py313-
+      - name: Install package + dev tools
+        run: |
+          python -m pip install --upgrade pip
+          pip install git+https://github.com/TobiBu/yggdrax.git
+          pip install -e ".[dev]"
+      - name: Dehnen MAC runtime suite
+        # Same `-n 2` memory ceiling as test-full, and `slow` runs here too: this
+        # job exists precisely to run the compile-bound cases.
+        run: |
+          pytest tests/unit/runtime -n 2 -m "not experimental" \
+            --cov=jaccpot --cov-branch \
+            --cov-report=xml:coverage-mac-runtime.xml \
+            --cov-report=term:skip-covered
+      - name: Upload coverage XML artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-xml-mac-runtime
+          path: coverage-mac-runtime.xml
 
   test-smoke:
     # Fast (non-slow) suite on the other supported Python versions for

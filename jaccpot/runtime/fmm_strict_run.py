@@ -275,6 +275,13 @@ class StrictRunMixin:
                 )
             next_state = next_state_try
 
+        # Timed, because "per step" for a caller means refresh AND evaluate, while
+        # every refresh_* counter covers only the refresh. Leaving the evaluate
+        # out made it the single largest term in "unattributed" -- and an
+        # unattributed remainder that is really one named stage is a gap in the
+        # taxonomy, not a measurement.
+        evaluate_timing_active = bool(getattr(self, "_refresh_timing_active", False))
+        evaluate_t0 = time.perf_counter() if evaluate_timing_active else 0.0
         acc = self.evaluate_prepared_state(
             next_state,
             target_indices=None,
@@ -286,7 +293,15 @@ class StrictRunMixin:
             ),
             max_acc_derivative_order=0,
         )
-        return next_state, jnp.asarray(acc)
+        acc = jnp.asarray(acc)
+        if evaluate_timing_active:
+            # Block, or this records dispatch rather than the evaluate: the
+            # counter's whole purpose is to be comparable with the refresh
+            # stages, which are blocked.
+            if not _contains_tracer(acc):
+                jax.block_until_ready(acc)
+            self._refresh_timing_evaluate_seconds += time.perf_counter() - evaluate_t0
+        return next_state, acc
 
     def strict_run_segmented(
         self: "FastMultipoleMethod",
@@ -1304,13 +1319,17 @@ class StrictRunMixin:
 
         if refresh_timing_active:
             elapsed = time.perf_counter() - dual_t0
-            recorded = float(
-                getattr(self, "_refresh_timing_dual_downward_seconds", 0.0)
-            )
-            # _prepare_state_dual_and_downward records detailed timing itself.
-            # Keep this branch intentionally empty except to make the elapsed
-            # value visible while avoiding double accounting.
-            _ = (elapsed, recorded)
+            if reuse_static_compact_pairs:
+                # The compact-far-pair reuse branch above does NOT go through
+                # _prepare_state_dual_and_downward, so nothing else records this
+                # stage -- and this is the steady-state route once topology is
+                # frozen, which is precisely when a per-step breakdown is being
+                # read. Leaving it unrecorded made the entire downward pass
+                # (~30% of per-step time at N=65536) land in "unattributed", and
+                # made every dual_* counter read as a hard zero.
+                self._refresh_timing_dual_downward_seconds += elapsed
+            # Otherwise _prepare_state_dual_and_downward has already recorded
+            # this stage and its children; adding elapsed here would double-count.
 
         if (
             tree_config.mode != "static_radix"

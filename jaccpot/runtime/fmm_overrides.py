@@ -5,12 +5,15 @@ engine class inherits this mixin. Sibling of _fmm_impl at runtime level.
 
 from __future__ import annotations
 
-from typing import Any, Optional
+import warnings
+from typing import Any, Mapping, Optional
 
 import jax
 import jax.numpy as jnp
 from jaxtyping import Array
 from yggdrax.interactions import DualTreeTraversalConfig
+
+from jaccpot.config import TRAVERSAL_OVERRIDE_FIELDS, TraversalOverrides
 
 from .fmm_caches import _contains_tracer
 from .fmm_constants import (
@@ -46,8 +49,139 @@ from .fmm_constants import (
 )
 from .fmm_state import _RuntimeExecutionOverrides
 
+# Merge base for a field-by-field override that arrives on a route with no
+# resolved config at all (no preset, no policy default). Only the fields the
+# caller did not name are read from here.
+_TRAVERSAL_MERGE_FALLBACK = {
+    "max_pair_queue": int(_KDTREE_DEFAULT_TRAVERSAL_CONFIG.max_pair_queue),
+    "process_block": int(_KDTREE_DEFAULT_TRAVERSAL_CONFIG.process_block),
+    "max_interactions_per_node": int(
+        _KDTREE_DEFAULT_TRAVERSAL_CONFIG.max_interactions_per_node
+    ),
+    "max_neighbors_per_leaf": int(
+        _KDTREE_DEFAULT_TRAVERSAL_CONFIG.max_neighbors_per_leaf
+    ),
+}
+
+
+def normalize_traversal_config_request(
+    traversal_config: Any,
+) -> tuple[Optional[DualTreeTraversalConfig], dict[str, int]]:
+    """Split a ``traversal_config`` request into (full replacement, field merge).
+
+    Returns ``(full, fields)`` where at most one is non-empty:
+
+    * a ``DualTreeTraversalConfig`` instance is a **full replacement** -- the
+      historical behaviour, kept so existing callers are unaffected. It comes
+      back as ``full`` with an empty ``fields``, and the caller warns.
+    * a :class:`~jaccpot.config.TraversalOverrides` or a ``Mapping`` of the same
+      keys is a **field merge**: it comes back as ``fields``, with ``full`` None,
+      to be applied on top of whatever capacities the runtime resolved for the
+      current particle count.
+    * ``None`` (or an all-``None`` ``TraversalOverrides``) is neither.
+
+    Rejecting an unknown mapping key by name matters more than it looks: a typo
+    in a dict key would otherwise be a silently ignored tuning request, which is
+    the exact failure this whole seam exists to prevent.
+    """
+
+    if traversal_config is None:
+        return None, {}
+    if isinstance(traversal_config, DualTreeTraversalConfig):
+        return traversal_config, {}
+    if isinstance(traversal_config, TraversalOverrides):
+        return None, traversal_config.as_dict()
+    if isinstance(traversal_config, Mapping):
+        unknown = sorted(
+            set(map(str, traversal_config.keys())) - set(TRAVERSAL_OVERRIDE_FIELDS)
+        )
+        if unknown:
+            known = ", ".join(TRAVERSAL_OVERRIDE_FIELDS)
+            raise ValueError(
+                f"traversal_config has unknown field(s) {unknown}; "
+                f"valid fields are: {known}"
+            )
+        fields: dict[str, int] = {}
+        for name in TRAVERSAL_OVERRIDE_FIELDS:
+            value = traversal_config.get(name)
+            if value is None:
+                continue
+            if int(value) < 1:
+                raise ValueError(
+                    f"traversal_config['{name}'] must be >= 1 when set; got {value!r}"
+                )
+            fields[name] = int(value)
+        return None, fields
+    raise TypeError(
+        "traversal_config must be a DualTreeTraversalConfig (full replacement), a "
+        "jaccpot.config.TraversalOverrides, a mapping of "
+        f"{{{', '.join(TRAVERSAL_OVERRIDE_FIELDS)}}}, or None; got "
+        f"{type(traversal_config).__name__}"
+    )
+
+
+def warn_full_traversal_config_replacement(
+    *,
+    supplied: DualTreeTraversalConfig,
+    preset_name: Optional[str],
+) -> None:
+    """Warn that a full ``DualTreeTraversalConfig`` replaces the preset's sizing.
+
+    Not a deprecation: a full config remains the right tool when a caller has
+    measured all four capacities together. But the failure mode it caused
+    (measured 3x slower at N=65536 from an override intended to be a no-op) was
+    silent, and the fix for silence is to say something.
+    """
+
+    warnings.warn(
+        "traversal_config was given as a full DualTreeTraversalConfig"
+        + (f" alongside preset={preset_name!r}" if preset_name else "")
+        + ", which replaces ALL FOUR traversal capacities "
+        f"(max_pair_queue={int(supplied.max_pair_queue)}, "
+        f"process_block={int(supplied.process_block)}, "
+        f"max_interactions_per_node={int(supplied.max_interactions_per_node)}, "
+        f"max_neighbors_per_leaf={int(supplied.max_neighbors_per_leaf)}) and "
+        "switches off the particle-count-dependent sizing the preset would have "
+        "applied. To change one capacity and leave the rest to the preset, pass "
+        "jaccpot.config.TraversalOverrides(...) instead.",
+        UserWarning,
+        stacklevel=3,
+    )
+
 
 class OverridesMixin:
+    def _apply_traversal_field_overrides(
+        self,
+        traversal_config: Optional[DualTreeTraversalConfig],
+    ) -> Optional[DualTreeTraversalConfig]:
+        """Merge the caller's named capacities onto a runtime-resolved config.
+
+        Applied last, after every policy clamp, so a field the caller named wins
+        and a field they did not name keeps the value the preset resolved for
+        this N. Idempotent, so calling it on more than one route is safe.
+        """
+
+        fields = getattr(self, "_traversal_field_overrides", None)
+        if not fields:
+            return traversal_config
+        if traversal_config is None:
+            # No base to merge onto (no preset config, and no policy default on
+            # this route). Fall back to the yggdrax defaults for what the caller
+            # did not name; a partial request must not become a shape error.
+            base = dict(_TRAVERSAL_MERGE_FALLBACK)
+        else:
+            base = {
+                name: int(getattr(traversal_config, name))
+                for name in TRAVERSAL_OVERRIDE_FIELDS
+            }
+        base.update(fields)
+        if traversal_config is not None and all(
+            base[name] == int(getattr(traversal_config, name))
+            for name in TRAVERSAL_OVERRIDE_FIELDS
+        ):
+            return traversal_config
+        return DualTreeTraversalConfig(**base)
+
     def _prepared_state_cache_lookup(
         self,
         *,
@@ -448,6 +582,11 @@ class OverridesMixin:
                 grouped_interactions=grouped_interactions,
                 honor_explicit_traversal=True,
             )
+            # Last, after every clamp: see the matching call on the adaptive
+            # return below. Both exits of this method must merge, or which
+            # capacities a caller's override reaches would depend on
+            # JACCPOT_STATIC_RUNTIME_FIXED_SIZING.
+            traversal_config = self._apply_traversal_field_overrides(traversal_config)
             return _RuntimeExecutionOverrides(
                 traversal_config=traversal_config,
                 m2l_chunk_size=m2l_chunk_size,
@@ -493,6 +632,9 @@ class OverridesMixin:
             production_large_n=production_large_n,
             grouped_interactions=grouped_interactions,
         )
+        # Last, after every clamp: a capacity the caller named explicitly wins,
+        # and one they did not name keeps the value resolved above for this N.
+        traversal_config = self._apply_traversal_field_overrides(traversal_config)
         if grouped_interactions:
             center_mode = "aabb"
             if farfield_mode == "auto":
@@ -538,6 +680,26 @@ class OverridesMixin:
 
         if traversal_config is None or self._explicit_traversal_config:
             return traversal_config
+        if getattr(self, "_traversal_field_overrides", None):
+            # A named capacity is an explicit request on this route too: capping
+            # it back down to the tracing ceiling would reintroduce exactly the
+            # silent substitution this seam removes. Fields the caller did not
+            # name are still clamped, below.
+            return self._apply_traversal_field_overrides(
+                self._resolve_tracing_traversal_config_unchecked(
+                    traversal_config=traversal_config
+                )
+            )
+        return self._resolve_tracing_traversal_config_unchecked(
+            traversal_config=traversal_config
+        )
+
+    def _resolve_tracing_traversal_config_unchecked(
+        self,
+        *,
+        traversal_config: DualTreeTraversalConfig,
+    ) -> DualTreeTraversalConfig:
+        """Apply the traced-capacity ceilings unconditionally."""
 
         current_queue = int(traversal_config.max_pair_queue)
         capped_queue = min(current_queue, _TRACING_MAX_PAIR_QUEUE)
@@ -565,7 +727,27 @@ class OverridesMixin:
         )
 
     def _resolve_nearfield_mode(self, *, num_particles: int) -> str:
-        """Resolve near-field execution mode from configured policy."""
+        """Resolve near-field execution mode from configured policy.
+
+        The ``"auto"`` GPU answer is ``"bucketed"`` at every N, because
+        ``"baseline"`` is a ``lax.scan`` over leaf pairs *one pair at a time*
+        with a ``lax.cond`` per pair. That is the readable reference traversal
+        and it is competitive on a CPU, but on a GPU it serialises one launch
+        per leaf pair. Measured on an idle A100 at N=4096, leaf 64, p=4, real
+        basis, ``preset="accurate"``: 5.23 s baseline against 0.0103 s bucketed,
+        a factor of **507**, which is what made ``accurate`` on an A100 ~30x
+        slower than ``accurate`` on the CPU beside it.
+
+        The two traversals visit the same leaf pairs, so this is a scheduling
+        choice and not an accuracy one. Measured at fp64 on CPU, N=8192/leaf 64:
+        both sit at 4.4075521942e-05 rel-L2 against a direct O(N^2) sum
+        (agreeing to 13 significant figures), and differ from each other by
+        4.2e-16 -- one ulp of reassociation.
+
+        Deliberately GPU-only: on a CPU the per-pair scan has no launch cost to
+        pay and the existing CPU crossovers below stay as they were measured.
+        """
+
         if self._is_large_n_gpu_production_profile():
             if (
                 not bool(self._explicit_nearfield_mode)
@@ -578,18 +760,14 @@ class OverridesMixin:
         if mode != "auto":
             return mode
         backend = jax.default_backend()
-        large_gpu = (
-            backend == "gpu"
-            and int(num_particles) >= 262_144
-            and str(self.preset).strip().lower() == "large_n_gpu"
-            and str(self.expansion_basis).strip().lower() == "solidfmm"
-        )
+        if backend == "gpu":
+            # See the docstring: the per-pair baseline scan cannot win on a GPU
+            # at any size, so there is no crossover to tune here.
+            return "bucketed"
         large_cpu = (
             backend == "cpu"
             and int(num_particles) >= _NEARFIELD_BUCKETED_CPU_PARTICLE_THRESHOLD
         )
-        if large_gpu:
-            return "bucketed"
         if (
             large_cpu
             and self.preset == "fast"

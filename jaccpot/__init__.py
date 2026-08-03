@@ -14,6 +14,7 @@ from .config import (
     MemoryObjective,
     NearFieldConfig,
     RuntimePolicyConfig,
+    TraversalOverrides,
     TreeConfig,
 )
 from .nornax_adapter import BlockStepFMM
@@ -33,6 +34,7 @@ __all__ = [
     "NearFieldConfig",
     "OdisseoFMMCoupler",
     "RuntimePolicyConfig",
+    "TraversalOverrides",
     "TreeConfig",
     "differentiable_gravitational_acceleration",
 ]

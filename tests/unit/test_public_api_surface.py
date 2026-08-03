@@ -34,6 +34,7 @@ EXPECTED_ALL = {
     "OdisseoFMMCoupler",
     "RealSHBasis",
     "RuntimePolicyConfig",
+    "TraversalOverrides",
     "TreeConfig",
     "differentiable_gravitational_acceleration",
 }
@@ -60,6 +61,7 @@ EXPECTED_FMM_INIT_KWARGS = {
     "adaptive_error_model",
     "adaptive_eps",
     "dehnen_geometry_mode",
+    "mac_theta_max",
     "theta",
     "G",
     "softening",
@@ -76,6 +78,7 @@ EXPECTED_FMM_PUBLIC_METHODS = {
     "compute_accelerations_and_jerk",
     "compute_accelerations_with_time_derivatives",
     "differentiable_accelerations",
+    "differentiable_step_fn",
     "evaluate_prepared_state",
     "evaluate_prepared_state_with_jerk",
     "evaluate_prepared_state_with_time_derivatives",
@@ -118,6 +121,7 @@ def test_export_kinds() -> None:
         "OdisseoFMMCoupler",
         "RealSHBasis",
         "RuntimePolicyConfig",
+        "TraversalOverrides",
         "TreeConfig",
     ):
         assert inspect.isclass(getattr(jaccpot, name)), f"{name} should be a class"
