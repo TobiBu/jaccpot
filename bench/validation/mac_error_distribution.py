@@ -598,8 +598,17 @@ def compare_arms(
     metric: str = "scaled_",
     match_on: str = "p90",
     min_far_pairs: int = 0,
+    max_p9999: Optional[float] = None,
 ) -> list[dict[str, Any]]:
     """Compare the arms at a matched error statistic.
+
+    ``max_p9999`` drops configs whose 99.99th-percentile error exceeds it. An
+    absolute error at or above 1 is a *diverged* expansion, not a coarse point on
+    the same accuracy curve, so interpolating through it is meaningless (trap 3).
+    Like ``min_far_pairs`` this stops being optional once leaf_size varies: at
+    N=1e5/leaf 256 the fixed arm reaches p99.99 = 1.0e+01 at theta=0.78 and
+    2.9e+02 at theta=0.90.
+
 
     ``min_far_pairs`` drops configs with fewer than that many accepted far pairs
     from the interpolation basis entirely. A config that accepts (almost) no far
@@ -655,7 +664,38 @@ def compare_arms(
                 ),
                 flush=True,
             )
+    if max_p9999 is not None:
+        key = f"{metric}p9999"
+        diverged_fixed = [r for r in fixed if r.get(key, 0.0) > max_p9999]
+        diverged_mass = [r for r in mass if r.get(key, 0.0) > max_p9999]
+        fixed = [r for r in fixed if r.get(key, 0.0) <= max_p9999]
+        mass = [r for r in mass if r.get(key, 0.0) <= max_p9999]
+        if diverged_fixed or diverged_mass:
+            # Trap 3: an absolute error approaching or exceeding 1 is not a large
+            # truncation error, it is a diverged expansion -- the multipole series
+            # evaluated outside its region of convergence. Such a row is not a
+            # coarser point on the same accuracy curve, so interpolating through it
+            # is meaningless. Measured at N=1e5/leaf 256: the fixed arm reaches
+            # p99.99 = 1.0e+01 at theta=0.78 and 2.9e+02 at theta=0.90.
+            print(
+                f"    compare_arms: dropped {len(diverged_fixed)} fixed + "
+                f"{len(diverged_mass)} mass config(s) with {key} > {max_p9999:g} "
+                "(diverged expansion, not truncation -- trap 3)"
+                + (
+                    "  fixed knobs: "
+                    + ",".join(f"{r['knob']:g}" for r in diverged_fixed)
+                    if diverged_fixed
+                    else ""
+                ),
+                flush=True,
+            )
     if len(fixed) < 2 or len(mass) < 2:
+        print(
+            f"    compare_arms: only {len(fixed)} fixed / {len(mass)} mass config(s) "
+            "survived the guards -- no comparison. Widen the knob grid for this "
+            "configuration rather than relaxing the guards.",
+            flush=True,
+        )
         return out
     lo = max(
         min(r[p90] for r in fixed if r[p90] > 0),
@@ -852,6 +892,19 @@ def main() -> int:
             "block * N * 3 * 8 bytes, so 512 needs ~3.6 GB at N=1e5 -- drop it to 64 "
             "there. Keep ALL targets rather than subsampling: p99.99 at N=1e5 is only "
             "~10 particles, and subsampling targets would leave the tail unmeasurable."
+        ),
+    )
+    ap.add_argument(
+        "--max-p9999",
+        type=float,
+        default=None,
+        help=(
+            "drop configs whose 99.99th-percentile error exceeds this from the "
+            "matched comparison. An absolute error at or above 1 is a diverged "
+            "expansion rather than a coarse point on the same curve (trap 3), so "
+            "interpolating through it is meaningless. Use 1.0. Like "
+            "--min-far-pairs, required once leaf_size varies: at N=1e5/leaf 256 the "
+            "fixed arm reaches p99.99 = 10 at theta=0.78 and 290 at theta=0.90."
         ),
     )
     ap.add_argument(
@@ -1080,6 +1133,7 @@ def main() -> int:
                     metric=metric_prefix,
                     match_on=str(args.match_on),
                     min_far_pairs=int(args.min_far_pairs),
+                    max_p9999=args.max_p9999,
                 ):
                     row.update(
                         {
