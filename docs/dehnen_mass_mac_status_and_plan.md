@@ -209,6 +209,41 @@ under-estimate continues to cost nothing at matched accuracy.
 Converged traversal caps differ at this leaf size: **`max_pair_queue=262144`**,
 `max_interactions_per_node=8192`. Pass those, not leaf 16's 131072.
 
+### 1c. p = 10 — **DONE. Dehnen's other order, never measured before 2026-08-03**
+
+Every number in this document was p ≤ 8; Dehnen quotes **p = 8 and p = 10**, and Step 4's
+config asks for both. `results/validation/mac_dehnen_p10_n16384_leaf16.json` — N=16384,
+leaf 16, p=10, one seed, matched median, ε ∈ {1e-5, 1e-6, **5.62e-7 = 10^−6.25**, 2e-7,
+1e-7}, bracketing the ε Dehnen uses at p=10.
+
+Sanity check first: the fixed arm's far-pair counts are **identical** to the p=8 run
+(33 782 / 85 288 / 133 470 / 166 840 …), the expected signature of an order-independent
+geometric acceptance, and the errors are ~9× lower (median 4.0e-11 at θ=0.30 against
+3.7e-10 at p=8). So the extra order really is being applied.
+
+Plummer:
+
+| matched median | (16a) rms × | (16a) p99.99 × | (16b) est rms × | (16b) est p99.99 × | work × |
+|---|---|---|---|---|---|
+| 2.3e-9 | 6.65 | 12.08 | 12.29 | 30.80 | 1.03 |
+| 2.7e-8 | 11.14 | 16.91 | 23.53 | 48.83 | 1.07 |
+| 9.0e-8 | 14.14 | 19.34 | 29.44 | 44.88 | 1.11 |
+| 3.1e-7 | 15.52 | 12.19 | 32.92 | 33.59 | 1.15 |
+
+bulge+halo, fixed θ=0.58 discarded (p99.99 = 9.80, trap 3): eq (16a) rms **101–388×**,
+p99.99 **166–712×**; the (16b) estimator **196–703×** / **327–1140×**; work 0.95–1.05×.
+
+**The advantage survives the order increase**, mildly better than p=8 on rms (6.7–15.5×
+against 5.8–11.1×). Two wrinkles worth not hiding:
+
+- **p99.99 is not monotone in the tolerance** (12.08 → 11.55 → 16.91 → 19.34 → 12.19),
+  and the loosest row is the weakest. At p=10 the fixed-θ arm's own tail is already small
+  in the loose regime, so there is less tail left to collapse.
+- **Work drifts above parity as the tolerance loosens** — 1.03 → 1.15× on Plummer, where
+  p=8 stayed within 1.00–1.06×. At p=10 the criterion buys its tail with a few per cent
+  more interaction work in the loose regime. Still a wash, but no longer free: the
+  "equal-or-less cost" framing should say "at p=8", or quote 1.15× alongside it.
+
 ### 2. The N-scaling trend — **MEASURED, and at fixed leaf 16 it DECAYS (2026-08-03)**
 
 `results/validation/mac_n_ladder_leaf16_3seeds.json`. N = 16384 / 32768 / 65536, **leaf
