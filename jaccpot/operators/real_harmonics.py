@@ -1047,10 +1047,14 @@ def complex_to_dehnen_real_coeffs(complex_coeffs: Array, *, order: int) -> Array
     Notes
     -----
     A single matmul against a fixed basis-change matrix, so differentiable in
-    ``complex_coeffs``. Note that only the real part is kept: the VJP therefore
-    discards the imaginary cotangent, which is correct for coefficient arrays
-    that satisfy the ``M_n^{-m} = (-1)^m conj(M_n^m)`` symmetry and lossy for
-    ones that do not.
+    ``complex_coeffs``. Only the real part is kept, so the VJP discards the
+    imaginary cotangent: a gradient taken through this conversion sees no
+    dependence on the imaginary components of its input.
+    TODO(docs): is that loss benign? It should be for coefficient arrays
+    satisfying the reality condition that makes the conversion exact in the
+    forward direction, but I could not confirm which convention that is in this
+    normalisation, and the answer decides whether a gradient through the
+    complex-to-real seam is exact or merely projected.
 
     Runs under :func:`~jaccpot.operators._precision.highest_matmul_precision`;
     the matmul must not be dropped back to TF32.
