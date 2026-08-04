@@ -2837,11 +2837,20 @@ def compute_leaf_p2p_accelerations(
     ``softening == 0`` a coincident pair is a genuine singularity that this
     function does not guard.
 
-    TODO(docs): are ``nearfield_mode="baseline"`` and ``"bucketed"`` asserted
-    bit-equal anywhere, or only equal to a tolerance? They differ in edge order,
-    which changes the accumulation order, so bit-equality is not obviously
-    expected -- but STYLE_GUIDE §3 wants the equivalence stated precisely and I
-    could not find the assertion.
+    ``nearfield_mode="baseline"`` and ``"bucketed"`` agree **to a tolerance, not
+    bit-exactly**, and that is the correct contract rather than a gap: the two
+    deliberately differ in edge order (``sort_by_source``), which changes the
+    order of the floating-point accumulation, so bit-equality is not expected.
+    Asserted by
+    ``tests/integration/test_fmm.py::test_nearfield_bucketed_matches_baseline``
+    at ``np.allclose(rtol=1e-5, atol=1e-5)``.
+
+    That coverage is thinner than the claim deserves: one configuration (N=96,
+    float32, order 3, leaf 16, ``theta=0.6``, ``edge_chunk_size=128``, solidfmm
+    basis, a single PRNG seed), no parametrisation over N, order, dtype, or chunk
+    size, and the test is marked ``slow`` so the smoke leg does not run it. At
+    fp32 and N=96 a ``1e-5`` band is loose enough to admit a real algorithmic
+    divergence, not only reassociation.
     TODO(docs): what is the contract on the ``precomputed_*`` arrays when only
     *some* are passed? The scatter path checks three of them together, but
     ``precomputed_target_leaf_ids``/``precomputed_valid_pairs`` are checked

@@ -1106,9 +1106,17 @@ class EvaluateMixin:
 
         ``nearfield_mode_override`` forces the near-field execution mode instead
         of the policy resolution (used by the differentiable path to select the
-        vectorized ``"bucketed"`` near-field, which is bit-identical to the
-        default ``"baseline"`` scan but orders of magnitude faster and has a
-        cheaper reverse pass). ``None`` keeps the resolved policy unchanged.
+        vectorized ``"bucketed"`` near-field, which is orders of magnitude faster
+        than the default ``"baseline"`` scan and has a cheaper reverse pass).
+        ``None`` keeps the resolved policy unchanged.
+
+        ``"bucketed"`` agrees with ``"baseline"`` **to a tolerance, not
+        bit-exactly** -- the two differ in edge order, hence in accumulation
+        order. Asserted by
+        ``tests/integration/test_fmm.py::test_nearfield_bucketed_matches_baseline``
+        at ``rtol=atol=1e-5``; see
+        :func:`~jaccpot.nearfield.near_field.compute_leaf_p2p_accelerations` for
+        what that one configuration does and does not cover.
 
         The extra value ``"fast_lane"`` is not a mode of the edge-list kernel at
         all: it re-expresses the near field leaf-major and routes it through
