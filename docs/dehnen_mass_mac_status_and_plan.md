@@ -495,6 +495,16 @@ the monolithic build and still gets `state.dual_tree_result`, which
 `tests/unit/runtime/test_criterion_reaches_the_split_build.py` pins as a control so the
 split build cannot quietly become unconditional.
 
+> **Open observation, not yet explained.** At N=10⁶ / fp32 the two builds agree exactly
+> at four of the five ε values, and differ by **2 far pairs in 1 783 416** (1.1×10⁻⁶) at
+> ε=3×10⁻⁵: 1 783 414 monolithic against 1 783 416 split. Bit-identical at N≤2048/fp64
+> (the table above), so the likely cause is two pairs sitting within fp32's ~1.2×10⁻⁷
+> relative precision of the acceptance boundary and being rounded differently by the
+> split build's separate pass — a boundary-set effect, not a criterion difference. **It
+> has not been A/B'd directly** (that needs two 10⁶ prepares with the split build forced
+> on and off), so treat it as unverified. Worth closing before quoting either build's
+> far-pair count to more than ~5 significant figures.
+
 Split-vs-monolithic accept masks, `_build_dual_tree_artifacts` called twice on identical
 inputs (`tests/unit/runtime/test_split_build_carries_pair_policy.py`):
 
@@ -567,6 +577,67 @@ same "tightening ε pushes acceptance deeper" behaviour item 2 recorded at N=655
 **And the whole census took ~9 minutes.** The lane is why: prepare is 13–90 s per config
 at N=10⁶, against the ~22 *minutes* per config the generic lane needed at N=10⁵ / leaf 64
 (trap 11's table). That is the point of Step 3′ stated as a number.
+
+### The N = 10⁶ measurement — **the first one ever taken, and it does NOT reproduce the N=10⁵ / leaf 256 headline**
+
+`results/validation/mac_1e6_leaf256_lane.json`. N=10⁶, **leaf 256**, p=8, Plummer, fp32,
+zero softening, one seed, δa/f against a float64 direct sum over a 10⁵-target subsample,
+matched at equal **median**, both guards on. All 15 records carry
+`prepared_state_type="LargeNPreparedState"`, `large_n_path_declined_reason=null` and
+`solver_dtype="float32"`, so the lane demonstrably ran the whole sweep.
+
+**`work ×` is `fixed_pair_work / mass_pair_work`, so > 1 means the criterion does LESS
+work.** Verified against the raw rows, not just the header: at matched median 6.44×10⁻⁶
+the fixed arm (θ=0.6) does 1.78×10¹¹ pair-work against the criterion's ≈1.36×10¹¹.
+
+| arm | matched median | rms × | p99.99 × | p99 × | work × |
+|---|---|---|---|---|---|
+| eq (16a) | 3.47e-6 | 7.13 | 4.67 | 1.50 | 1.23 |
+| eq (16a) | 4.72e-6 | 8.44 | 4.47 | 1.46 | 1.28 |
+| eq (16a) | 6.44e-6 | 11.14 | 4.85 | 1.42 | 1.31 |
+| eq (16b) est | 3.52e-6 | 18.14 | **11.94** | 2.10 | 1.12 |
+| eq (16b) est | 4.76e-6 | 21.94 | **11.37** | 2.08 | 1.14 |
+| eq (16b) est | 6.44e-6 | 26.50 | **10.83** | 2.05 | 1.16 |
+
+**Against the go/no-go bar this run was set — "p99.99 ≳ 20× at ≤ 1.05× interaction work"
+— the cost half passes with room to spare and the tail half does not.** The criterion is
+*cheaper* than fixed θ at matched median (12–31 % fewer interactions, not 5 % more), but
+p99.99 is 4.5–4.9× for eq (16a) and 10.8–11.9× for eq (16b), against **21–41×** measured
+at N=10⁵ / leaf 256. Do not report the N=10⁵ number as the production figure.
+
+**This confirms item 2b's mechanism rather than overturning it.** Item 2b concluded the
+advantage is controlled by tree *depth*, not N. Holding leaf 256 fixed and going
+10⁵ → 10⁶ takes the tree from 390 nodes to **7813** — about 4½ levels deeper — so depth
+grew, and the advantage fell exactly as the depth story predicts. The practical
+consequence is the useful part: **leaf 256 is not depth-proof.** If the 10⁵/leaf-256
+regime is what the paper wants to quote at 10⁶, the next measurement is a *leaf* sweep at
+N=10⁶ (512, 1024, 2048), not another N point.
+
+eq (16b)'s estimator again roughly **doubles to triples** eq (16a)'s tail advantage
+(10.8–11.9× against 4.5–4.9×) *and* costs less work than it, consistent with every
+previous measurement of the pair.
+
+Two methodology notes, both load-bearing:
+
+- **The δa/f median saturates at the fp32 noise floor, and matched-median rows below it
+  are matching round-off.** The fixed arm's median is **non-monotone in θ**: 2.44e-6
+  (θ=0.4), 1.91e-6 (0.45), **1.87e-6** (0.5), 2.87e-6 (0.55), 6.44e-6 (0.6). A *tighter*
+  opening angle cannot raise truncation error, so θ ≤ 0.5 is floored at ≈1.9–2.4×10⁻⁶ —
+  fp32 summation error over a 10⁶-particle near field, which is the right order for
+  ~√N · 1.2e-7. This is trap 8 in a new guise: previously the median saturated at *fp64*
+  machine precision when the far field was shallow; here it saturates at the **fp32**
+  floor when N is large. The two lowest matched rows for each arm (targets 1.87e-6 /
+  2.54e-6 and 1.93e-6 / 2.61e-6) are therefore **discarded above**, and one of them is
+  visibly the artifact: eq (16a) at target 2.54e-6 reported rms 1.05, p99.99 **0.57**,
+  p99 0.69 at work 2.02 — an outlier in every column at once. Rule of thumb for fp32 at
+  N=10⁶: distrust a matched median below ~3×10⁻⁶.
+- **Traversal retries fired on 15 of 15 configs, up to 16 attempts each.** Every config
+  paid the recompile cycle, which is most of why the sweep took ~1½ hours rather than
+  ~20 minutes. The converged caps for **N=10⁶ / leaf 256 on the lane** are
+  `max_pair_queue=690804`, `max_interactions_per_node=1024`. Pass them next time, and
+  note how far they are from leaf 256's N=10⁵ values (16384 / 8192) — trap 4 again, and
+  in *both* directions this time: the queue is 42× larger and the interaction capacity 8×
+  *smaller*.
 
 ### N = 10⁷ — **NOT reached, and the blocker is identified rather than guessed**
 
