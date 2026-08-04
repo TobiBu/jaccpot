@@ -490,6 +490,12 @@ class PolicyMixin:
                 max_refine_levels_val=max_refine_levels_val,
                 aspect_threshold_val=aspect_threshold_val,
                 allow_stateful_cache=False,
+                # The streamed lane builds compact far pairs and then discards them
+                # unless something asks; this is that ask. Without it the prepass
+                # gets the near list only, and a near-only `f_b` captures 53-66% of
+                # the true value once the far field matters -- a silent under-estimate
+                # rather than a visible failure.
+                retain_compact_far_pairs=True,
             )
 
         interactions = dual_downward_artifacts.interactions

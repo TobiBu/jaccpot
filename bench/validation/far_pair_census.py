@@ -74,8 +74,20 @@ def _solver(
     cfg = FMMAdvancedConfig()
     if runtime_lane == "large_n":
         cfg = replace(cfg, tree=replace(cfg.tree, tree_type="radix"))
+    # `prepare_stage_memory_split_enabled` has to be set EXPLICITLY for the lane's
+    # low-peak split build. Its default,
+    # `_streamed_minimum_memory_gpu_default_split_build`, is computed in
+    # `__init__` from `memory_objective`/`streamed_far_pairs` *before*
+    # `_apply_large_n_gpu_production_contract` coerces them -- so on the
+    # `large_n_gpu` preset the predicate reads `memory_objective="balanced"` and
+    # comes out False, and the preset silently runs the monolithic build it exists
+    # to avoid. Measured consequence: the N=1e7 census OOMed in
+    # `_dual_tree_build_raw` trying to allocate 4.77 GiB.
     runtime = replace(
-        cfg.runtime, retain_traversal_result=True, retain_interactions=True
+        cfg.runtime,
+        retain_traversal_result=True,
+        retain_interactions=True,
+        prepare_stage_memory_split_enabled=(runtime_lane == "large_n"),
     )
     if max_pair_queue is not None and max_interactions_per_node is not None:
         base = runtime.traversal_config

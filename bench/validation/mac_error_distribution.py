@@ -334,8 +334,18 @@ def _advanced(
         # asserts it actually engaged rather than trusting it (a silent fallback
         # would reproduce the generic-lane numbers and read as success).
         cfg = replace(cfg, tree=replace(cfg.tree, tree_type="radix"))
+        # And the low-peak split build has to be asked for explicitly: its default,
+        # `_streamed_minimum_memory_gpu_default_split_build`, is computed in
+        # `__init__` from `memory_objective`/`streamed_far_pairs` *before*
+        # `_apply_large_n_gpu_production_contract` coerces them, so on this preset the
+        # predicate reads `memory_objective="balanced"` and comes out False. The
+        # preset then runs the monolithic build it exists to avoid -- measured: the
+        # N=1e7 census OOMed in `_dual_tree_build_raw` on a 4.77 GiB allocation.
     runtime = replace(
         cfg.runtime,
+        prepare_stage_memory_split_enabled=(
+            True if runtime_lane == "large_n" else None
+        ),
         # Both arms retain the traversal result so both pay the identical loss of
         # the streamed fast lane. Without this the mass arm would be charged for
         # a lane fallback the geometric arm avoids, and the cost comparison would

@@ -738,6 +738,7 @@ class PrepareMixin:
         aspect_threshold_val: float,
         allow_stateful_cache: bool,
         suppress_host_side_effects: bool = False,
+        retain_compact_far_pairs: bool = False,
     ) -> _PrepareStateDualDownwardArtifacts:
         """Build/reuse interactions and prepare downward artifacts.
 
@@ -1080,6 +1081,13 @@ class PrepareMixin:
             and not bool(need_traversal_result)
             and not adaptive_order_active
             and not mixed_order_farfield_active
+            # `_prepare_state_dual_and_downward_strict_streamed_fast` hardcodes
+            # `pair_policy=None`, so this lane cannot carry the Dehnen criterion --
+            # it would run the geometric MAC underneath a caller that asked for the
+            # criterion, cheaper and with no signal. Until the forcing below was
+            # dropped, `need_traversal_result` happened to exclude paper mode here;
+            # relying on that again would be relying on an accident.
+            and not bool(use_paper_fixed_policy)
             and (
                 not bool(traced_prepare_inputs)
                 or bool(strict_fused_device_only_hot_path)
@@ -1641,6 +1649,15 @@ class PrepareMixin:
                 if (
                     bool(adaptive_order_active)
                     or bool(strict_streamed_direct_far_pairs)
+                    # eq (16b)'s prepass needs the far/near partition it just built:
+                    # `f_b` sums exact scalar terms over near pairs and monopoles over
+                    # far ones, so discarding the far list here leaves it with the near
+                    # field only -- which captures 53-66% of `f_b` once there are
+                    # enough leaves for the far field to matter, and reads as an
+                    # ordinary under-estimate rather than a missing term. The streamed
+                    # lane produces compact pairs and no node interaction list, so
+                    # without this the whole of eq (16b) is unreachable at 1e6.
+                    or bool(retain_compact_far_pairs)
                     # Gradients need the FROZEN M2L pair list to re-run the
                     # downward sweep against. The pairs are already built here
                     # whenever ``use_compact_streamed_pairs`` holds (which the
