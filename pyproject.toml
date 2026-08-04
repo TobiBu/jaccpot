@@ -167,11 +167,27 @@ addopts = "-q --strict-markers --ignore=tests/perf -n auto -m \"not experimental
 source = ["jaccpot"]
 branch = true
 omit = [
-  # Opt-in experimental prototypes (octree/treecode): deselected by the
-  # `experimental` marker in the default suite, so they are exercised only by
-  # `pytest -m experimental`, not by the coverage-gated CPU run. Covering them
-  # here would just dilute the metric with code the default suite does not run.
-  "jaccpot/experimental/*",
+  # Opt-in experimental prototypes, listed INDIVIDUALLY rather than as
+  # `jaccpot/experimental/*`, because that glob was hiding a module the default
+  # suite fully covers. Measured:
+  #
+  #   octree_fmm_uvwx.py    0%    reached only under `pytest -m experimental`
+  #   treecode_far_near.py  0%    reached only from the distributed treecode lane
+  #                               (`local_walk="treecode"`), whose test skips
+  #                               below 2 devices, so CPU CI never enters it
+  #   treecode_walk.py    100%    NOT omitted -- see below
+  #
+  # `treecode_walk.py` is the pure-JAX reference that
+  # `tests/unit/operators/test_pallas_treecode_walk.py` checks the Pallas walk
+  # against. That test is neither `experimental`- nor `slow`-marked, so it runs on
+  # every commit and covers the module 62/62 statements. Omitting it understated
+  # coverage and, worse, the stated reason for omitting it was untrue.
+  #
+  # Keeping this an explicit list means a new file under `jaccpot/experimental/`
+  # is measured until someone decides otherwise -- which is the right default,
+  # since the failure this replaces was a glob quietly absorbing covered code.
+  "jaccpot/experimental/octree_fmm_uvwx.py",
+  "jaccpot/experimental/treecode_far_near.py",
   # GPU-only fused real-basis Pallas kernel (Ampere+). Unlike the other Pallas
   # kernels (which the CPU CI exercises via interpret=True), this one has no
   # interpret path, so CPU CI structurally cannot reach it; it is validated by

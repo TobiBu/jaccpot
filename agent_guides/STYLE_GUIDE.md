@@ -195,6 +195,31 @@ Keep the seams in the layout clean and the import graph acyclic:
 Physics must not live in a utility module; runtime policy must not leak into operators. If
 you find yourself importing "up" that list, report it rather than adding the import.
 
+**Existing upward imports, and which of them are deliberate.** The rule above is about not
+adding new ones. Four such relationships already exist, across five import statements
+(`nearfield/near_field.py` has both a module-scope and a function-local one), and they are
+not equivalent:
+
+- `operators/real_harmonics.py` and `nearfield/near_field.py` both import
+  `runtime.grad_options` to read a trace-time gate (`analytic_l2p_vjp_enabled`,
+  `analytic_p2p_vjp_enabled`). **This is deliberate and the alternative was considered and
+  rejected** — see the comment block above the `ContextVar` overrides in
+  `runtime/grad_options.py`, which explains that these gates are consulted several layers
+  below the public entry point with no argument channel reaching them, and that threading a
+  config object down every one of those paths would touch forward-only production code for
+  no forward-only benefit. Do not "fix" this: replacing it with dependency injection is
+  what the `GradConfig`/`ContextVar` mechanism exists to avoid, and the fields it backs go
+  silently inert if the gate stops being readable from where it is read.
+- `pallas/treecode_walk_pallas.py` imports the `TreecodeLeafLists` **NamedTuple** from
+  `experimental/treecode_walk.py`. A data type, not logic, and the kernel's only consumer is
+  `experimental/treecode_far_near.py` — so this is an accelerated twin of a prototype that
+  happens to live one directory up, rather than production reaching into `experimental/`.
+- `runtime/_interaction_cache.py` imports `experimental/treecode_far_near.py` (function-local)
+  from `_build_treecode_artifacts_strict_streamed`, which `distributed/fmm.py` calls for
+  `local_walk="treecode"`. This one **is** production depending on `experimental/`. It is
+  reachable only with >= 2 devices, so CI never enters it; that makes it the weakest-covered
+  production option in the tree, not merely a style wrinkle.
+
 Function-local imports are used deliberately in a few places to break cycles or defer heavy
 Pallas imports (see `runtime/kernels/core.py`). Leave them; do not hoist them to module
 scope as a cleanup.
