@@ -467,16 +467,30 @@ wildly loose rather than merely different. Under the production preset,
 `_apply_large_n_gpu_production_contract` pins `runtime_path="large_n"`, so that decline
 **raises** rather than falling back.
 
-**Still not reachable end-to-end: the split/streamed build under the criterion.** The
-gate now allows it and the mask is bit-identical to the monolithic build (below), but
-`need_traversal_result` is forced true by `use_paper_fixed_policy`
-(`fmm_prepare.py` ~:851), which alone disqualifies the split path — and the traversal
-result is only ever *consumed* under `adaptive_order`, which paper mode excludes. So the
-criterion currently always takes the monolithic build, materialising node-interaction
-buffers of `num_nodes × max_interactions_per_node`. At 10⁶ / leaf 256 that is ~256 MiB
-and irrelevant; at 10⁷ it is ~2.5 GiB and probably the binding constraint. Dropping that
-forcing is the next step for 10⁷, and it changes the far-pair payload shape, so it wants
-its own measurement rather than a hopeful edit.
+**The split/streamed build is now reachable end-to-end, and that took a second fix.**
+Relaxing `_can_split_dual_tree_build` was not enough: `need_traversal_result` was forced
+true by `use_paper_fixed_policy` (`fmm_prepare.py` ~:851), and the split build refuses
+whenever the traversal result is needed — so the criterion still always took the
+monolithic build and materialised `num_nodes × max_interactions_per_node`. That is
+~256 MiB at 10⁶ / leaf 256 and irrelevant; at 10⁷ it is ~2.5 GiB and plausibly the
+binding constraint.
+
+Nothing consumed that traversal result. It feeds
+`_prepare_state_extract_adaptive_far_pairs`, which runs only under `adaptive_order`, and
+`use_paper_fixed_policy` requires `not adaptive_order`. Dropping the forcing changes the
+far-pair payload from a node interaction list to compact COO pairs, so it was measured
+rather than reasoned — N=8192 / leaf 32 / p=4 / ε=1e-3, same solver, same inputs:
+
+| config | far pairs | `|a|_rms` | vs the other path |
+|---|---|---|---|
+| node interactions + retain | 5708 | 2.514572614e+03 | — |
+| streamed + no retain | 5708 | 2.514572614e+03 | max rel **2.4e-16** |
+
+Same accept mask, and a difference at float64 round-off — a different summation order,
+not a different criterion. A caller that *does* retain the traversal result still gets
+the monolithic build and still gets `state.dual_tree_result`, which
+`tests/unit/runtime/test_criterion_reaches_the_split_build.py` pins as a control so the
+split build cannot quietly become unconditional.
 
 Split-vs-monolithic accept masks, `_build_dual_tree_artifacts` called twice on identical
 inputs (`tests/unit/runtime/test_split_build_carries_pair_policy.py`):
@@ -523,7 +537,33 @@ prepare, so on that lane the accept mask is simply not on the state.
 `mac_error_distribution.py` also takes **`--runtime-lane {generic,large_n}`** now, which
 selects preset + basis + radix tree together and *asserts* the lane engaged. Trap 10
 recorded that every number in this document ran the generic path; it stayed that way
-because the bench asked for none of the three things the lane requires.
+because the bench asked for none of the three things the lane requires. It also takes
+**`--precision {fp32,fp64}`**, because the lane runs fp32 in production and
+`JAX_ENABLE_X64=0` cannot select that (trap 12); the O(N²) reference stays float64 on the
+same values regardless, so it remains a reference.
+
+**The N=10⁶ / leaf 256 census: the grid is healthy, and it is the first configuration
+where leaf 256 has a real far field at every knob.**
+`results/validation/census_1e6_leaf256.json`, fp32, on the large-N lane, 7813 nodes:
+
+| arm | knob | far pairs | near leaf pairs | prepare |
+|---|---|---|---|---|
+| fixed | θ=0.4 | 2 247 484 | 7 175 306 | 333.1 s (cold) |
+| fixed | θ=0.5 | 1 706 946 | 4 315 276 | 15.0 s |
+| fixed | θ=0.6 | 1 185 164 | 2 712 116 | 21.7 s |
+| fixed | θ=0.7 | 837 826 | 1 747 918 | 13.2 s |
+| mass | ε=1e-3 | 926 616 | 1 176 720 | 88.6 s |
+| mass | ε=1e-4 | 1 468 118 | 2 157 254 | 22.3 s |
+| mass | ε=1e-5 | 2 102 686 | 3 843 496 | 63.3 s |
+
+This is what trap 11 predicted: leaf 256 becomes meaningful at N ≳ 10⁶, and at exactly
+10⁶ every θ from 0.4 to 0.7 accepts millions of far pairs, against **0 / 0 / 4 / 218** at
+N=10⁵. The mass arm's far count again *rises* as ε tightens (926k → 1.47M → 2.10M), the
+same "tightening ε pushes acceptance deeper" behaviour item 2 recorded at N=65536.
+
+**And the whole census took ~9 minutes.** The lane is why: prepare is 13–90 s per config
+at N=10⁶, against the ~22 *minutes* per config the generic lane needed at N=10⁵ / leaf 64
+(trap 11's table). That is the point of Step 3′ stated as a number.
 
 ### 5. Loose ends
 
