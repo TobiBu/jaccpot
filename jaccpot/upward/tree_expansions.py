@@ -184,13 +184,42 @@ def compute_node_multipoles(
     and contribute nothing.
 
     ``center_mode="com"`` makes the expansion centres a *differentiable function
-    of the particle positions*, so a gradient through this function includes the
-    centre's own motion; ``"aabb"`` and ``"explicit"`` do not have that coupling
-    in the same way.
-    TODO(docs): is the "com" centre-motion term actually carried through the
-    downward sweep's gradient, or does something downstream stop_gradient the
-    centres? `docs/differentiable_fmm_design.md` does not say either way, and
-    the answer decides whether a "com" gradient is exact or approximate.
+    of the particle positions*, and that coupling **is carried all the way
+    through** -- a ``"com"`` gradient is exact for the fixed-topology force, not
+    an approximation that drops the centre-motion term. ``"explicit"`` has no
+    such coupling; ``"aabb"`` does have one, via the min/max subgradient of
+    :func:`~jaccpot.upward.tree_geometry.compute_tree_geometry_compiled`, which
+    is also a live function of the positions.
+
+    The chain, for anyone tempted to insert a ``stop_gradient`` here:
+    :meth:`~jaccpot.runtime.fmm_evaluate.EvaluateMixin.differentiable_accelerations`
+    re-derives the centres from the live inputs on every call -- it calls
+    ``prepare_upward_sweep`` on the live ``positions``/``masses`` and reads only
+    ``int(state.downward.locals.order)``, a Python int, off the frozen state. The
+    M2L/L2L pair displacements are then ``centers[tgt] - centers[src]`` on those
+    live centres, and L2P uses ``leaf_positions - centers``. There is no
+    ``stop_gradient`` anywhere on the single-GPU path; the only ones in the tree
+    are in :mod:`jaccpot.distributed.fmm`, where they freeze the frontier used to
+    *build* the coarse tree while ``_live_coarse_payload`` deliberately keeps the
+    coarse COMs live -- its docstring records that freezing them "would silently
+    drop a real gradient term".
+
+    Guarded by ``tests/unit/test_gradient_correctness.py::test_fd_vs_ad_positions``,
+    whose finite-difference reference perturbs the *same* frozen-topology
+    function and therefore moves the COM centres too; it would fail if the
+    centre-motion term were dropped from the reverse pass. Measured agreement
+    ~1e-9. ``"com"`` is also the production default (resolved in
+    :mod:`jaccpot.runtime.fmm_overrides`), and the real-basis upward sweep
+    accepts nothing else.
+
+    See ``docs/differentiable_fmm_design.md`` ("COM centers are differentiated
+    through, not held fixed") and ``docs/differentiable_fmm_audit.md`` for the
+    audit that established this.
+
+    The one caveat: on degenerate displacements -- exactly-zero (structural under
+    COM, since a single-child internal node shares its child's COM) and
+    z-axis-aligned -- the rotation-angle builders return a zero cotangent by
+    construction. See :func:`jaccpot.operators.complex_ops._angles_from_delta_solidfmm`.
     """
 
     mode = center_mode.lower()
