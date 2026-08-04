@@ -94,12 +94,36 @@ def contract_symmetric_one_axis_3d(
 
     Parameters
     ----------
-    packed:
-        Symmetric order-``order`` tensor in packed representation.
-    vector:
-        Shape ``(3,)`` contraction vector.
-    order:
-        Tensor order. Must be positive.
+    packed : Array
+        Symmetric order-``n`` tensor in the packed representation,
+        ``[symmetric_component_count(n)]``, ordered by
+        :func:`symmetric_multi_indices_3d`.
+    vector : Array
+        Contraction vector ``[3]``, in the same Cartesian frame as the tensor.
+    order : int
+        Tensor order ``n``, which must be positive. Static under ``jit``
+        (declared in ``static_argnames``) -- the gather index map is built from
+        it in Python.
+
+    Returns
+    -------
+    Array
+        The contracted symmetric tensor of order ``n-1``, packed,
+        ``[symmetric_component_count(n - 1)]``. Dtype follows the
+        ``packed * vector`` promotion.
+
+    Raises
+    ------
+    ValueError
+        If ``order <= 0``. Order 0 has no axis to contract; because ``order`` is
+        static this fires at trace time.
+
+    Notes
+    -----
+    Differentiable in ``packed`` and ``vector`` -- a gather followed by a
+    multiply and a single ``sum`` over the length-3 axis, with no degenerate
+    branch. The reduction is that one ``sum`` over three terms; its order is
+    part of the numerics and should not be rewritten.
     """
     if order <= 0:
         raise ValueError("order must be positive")

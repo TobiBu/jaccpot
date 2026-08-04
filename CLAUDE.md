@@ -1,0 +1,127 @@
+# jaccpot — contributor & agent guide
+
+`jaccpot` is a JAX Fast Multipole Method solver built on `yggdrax` tree artifacts:
+GPU-native, **differentiable**, with a Pallas kernel path and a distributed path. It is
+research software *and* a performance-critical numerical library. When goals conflict:
+
+1. **Numerical accuracy** — a wrong number that looks plausible is the worst thing this
+   library can produce.
+2. **Readability and maintainability** — optimise for a physicist reading the code
+   top-to-bottom for the first time.
+3. **Performance** — near the top, not a nice-to-have.
+
+## The two guides
+
+- **`agent_guides/STYLE_GUIDE.md`** — house code style. Read it and apply it.
+- **`agent_guides/NUMERICS_AND_JAX.md`** — invariants that must not be broken, JAX rules,
+  and how we test and benchmark. **Read it before touching `jaccpot/operators/`,
+  `jaccpot/upward/`, `jaccpot/downward/`, `jaccpot/nearfield/`, `jaccpot/pallas/`, or
+  `jaccpot/distributed/`.**
+
+You may draft in whatever style you find natural, but **convert touched files back to house
+style before finishing**, using the checklist at the end of `STYLE_GUIDE.md`.
+
+Also read `ARCHITECTURE.md` and `CONTRIBUTING.md`. The `docs/` directory holds design notes
+and audits (`differentiable_fmm_design.md`, `differentiable_fmm_audit.md`,
+`differentiable_fmm_distributed_audit.md`, the profiling and plan documents). If you are
+about to reason from first principles about why something is the way it is, check `docs/`
+first — the answer is usually already written down, with measurements.
+
+## Non-negotiables
+
+These override any instruction to "clean up", "optimise", or "simplify":
+
+- **Do not change what the code computes.** Refactoring preserves numerics within the stated
+  tolerance. If `tests/characterization/test_fmm_golden.py` moves, the change was wrong —
+  revert it, do not update the golden or relax the tolerance.
+- **Do not change the order or associativity of floating-point reductions**, accumulation
+  dtypes, or matmul precision. See `jaccpot/operators/_precision.py` — fp32 matmul precision
+  is pinned deliberately and the accuracy floor it protects is measured.
+- **Do not break differentiability.** The value of this library is that you can take
+  gradients through it. A change that preserves the forward pass and silently breaks the VJP
+  is a broken change.
+- **Do not break `jit`.** No Python control flow on traced values, no `.item()` / `bool()`,
+  no host sync inside a jitted path.
+- **Do not touch the JAX version floor or ceiling in `pyproject.toml`.** Both are
+  load-bearing and the reasoning — CPU SIGFPE below the floor, a 2.6× CPU slowdown above the
+  ceiling, the `ragged_all_to_all` reverse-pass fix — is written out there in full.
+- **Do not "improve" an algorithm or numerical scheme** while doing something else. If you
+  think one is wrong, say so and stop; that is its own PR with its own test.
+- **Do not add, remove, or bump dependencies** without asking. The `black` and `isort` pins
+  are deliberately equal to the pre-commit hook revs; unpinning them makes CI and local
+  formatting disagree.
+- **Do not weaken a test, relax a tolerance, or delete a test.** Ever.
+- **Do not rename anything public** without asking.
+- **Do not reformat files you are not otherwise touching.**
+
+## Workflow
+
+- Feature branch, finalise via PR. Never commit to `main`.
+- **Test-first for production library code.** `examples/`, `bench/`, and anything under
+  `jaccpot/experimental/` are exempt — that distinction is deliberate, do not "fix" it. The
+  `experimental` marker deselects the *tests* (`tests/experimental/`), which is what keeps
+  `jaccpot/experimental/` out of the default run; it is also omitted from coverage in
+  `pyproject.toml`.
+- Atomic commits, conventional-commit format (`feat:`, `fix:`, `refactor:`, `test:`,
+  `docs:`, `perf:`, `build:`, `ci:`). One logical change per commit so `git bisect` and
+  review work.
+- Changes over ~400 modified lines get split. Large diffs get rubber-stamped, not reviewed.
+- Keep PRs focused; include tests for behaviour changes; update README and docs when
+  user-facing APIs change.
+- Run the verification block below before saying you are done, and paste the result.
+
+## Verification
+
+```bash
+black --check .
+isort --check-only .
+pre-commit run --all-files                     # includes pydoclint (numpy style)
+JAX_ENABLE_X64=1 pytest -q                     # xdist -n auto; use -n 0 for pdb / -x
+JAX_ENABLE_X64=1 pytest -q tests/characterization   # golden reference — must not move
+```
+
+`pytest -q` is not the whole suite: the `addopts` in `pyproject.toml` add
+`-m "not experimental"` and `--ignore=tests/perf`, so the octree/treecode prototypes and the
+performance assertions are opt-in (`pytest -m experimental`, `pytest tests/perf`).
+
+Faster inner loop while iterating:
+
+```bash
+pytest -n 2 -m "not slow and not experimental"      # the CI smoke subset
+JACCPOT_RUNTIME_TYPECHECK=1 pytest -q tests/unit    # jaxtyping + beartype runtime checks
+```
+
+Coverage is measured and uploaded in CI (`--cov=jaccpot --cov-branch`), but there is no
+`fail_under` threshold — a coverage drop will not fail the build on its own. Locally:
+`pytest --cov=jaccpot --cov-report=term-missing`.
+
+Prefer CPU for correctness and style work — GPUs on this machine are shared. Confirm which
+device you may use before launching anything that occupies one, and before running
+`bench/` or `tests/perf/`.
+
+## Layout
+
+```
+jaccpot/basis/         real and complex solid-harmonic bases
+jaccpot/operators/     expansion algebra: harmonics, M2L rotate/scale, precision pinning
+jaccpot/upward/        P2M / M2M sweep
+jaccpot/downward/      M2L / L2L / L2P sweep
+jaccpot/nearfield/     P2P and its gradient
+jaccpot/pallas/        fused Pallas kernels + custom_vjp
+jaccpot/runtime/       orchestration, config resolution, lane selection, kernel dispatch
+jaccpot/distributed/   domain decomposition, halo exchange, collectives
+jaccpot/experimental/  octree/treecode prototypes — NOT production, opt-in marker only
+
+tests/unit/            does the function do what its docstring says
+tests/integration/     end-to-end paths
+tests/characterization/ golden references — the tripwire for silent numerics changes
+tests/perf/            performance assertions
+tests/experimental/    prototypes; deselected by default
+
+bench/                 profiling, audits, microbenchmarks, ci_benchmark_guard.py
+docs/                  design notes, audits, profiling records
+```
+
+Public API surface: `jaccpot/__init__.py`. Everything exported there is a contract.
+
+Sibling codebases sharing these conventions: `astronomix`, `yggdrax`, `nornax`.

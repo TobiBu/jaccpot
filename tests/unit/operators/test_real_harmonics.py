@@ -18,7 +18,10 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 
+from jaccpot.operators.complex_harmonics import _pack_complex, complex_R_solidfmm
 from jaccpot.operators.real_harmonics import (  # Index utilities; P2M; L2P; B matrices; Rotation; Z-axis translations;; Full operators
+    _dehnen_real_Q_full,
+    complex_to_dehnen_real_coeffs,
     compute_real_B_matrix_local,
     compute_real_B_matrix_multipole,
     evaluate_local_real,
@@ -1165,3 +1168,206 @@ def test_functions_vmappable():
         deltas, masses
     )
     assert multipoles.shape == (n_particles, sh_size(order))
+
+
+# ===========================================================================
+# Complex -> Dehnen-real conversion: the identity the docstring promises
+# ===========================================================================
+
+
+# Geometries chosen to cover the degenerate azimuths as well as a generic point:
+# `rho == 0` (z-aligned) is where the azimuth is undefined, and the axis cases
+# are where a per-m sign or normalisation error shows up most cleanly.
+_CONVERSION_DELTAS = [
+    pytest.param([0.7, -0.3, 0.45], id="generic-off-axis"),
+    pytest.param([0.0, 0.0, 0.8], id="z-aligned-rho-zero"),
+    pytest.param([0.9, 0.0, 0.0], id="x-aligned"),
+    pytest.param([0.0, -0.6, 0.0], id="y-aligned"),
+    pytest.param([0.5, 0.5, 0.0], id="xy-plane"),
+    pytest.param([1e-8, -2e-8, 3e-8], id="near-origin"),
+]
+
+
+@pytest.mark.parametrize("delta", _CONVERSION_DELTAS)
+@pytest.mark.parametrize("order", [0, 1, 2, 3, 4, 6])
+def test_complex_to_dehnen_real_matches_p2m_real_direct(delta, order):
+    """``complex_to_dehnen_real_coeffs(complex_R_solidfmm(d)) == p2m_real_direct(d)``.
+
+    This is the equivalence ``complex_to_dehnen_real_coeffs`` claims in its own
+    docstring and that nothing asserted until now. It is the seam between the
+    complex solidfmm basis and the Dehnen no-sqrt2 real operators, so a per-``m``
+    sign or normalisation error here silently corrupts every real-basis M2L.
+
+    The two proxies that existed cannot catch that:
+    ``tests/test_real_upward_sweep.py::test_real_upward_matches_complex_convert``
+    checks an aggregate relative L2 over a whole tree, where a single-``m`` error
+    is diluted, and ``test_dehnen_power_is_basis_invariant`` checks only the
+    degree-wise Dehnen power, which is a rotational invariant and therefore blind
+    to sign errors within a degree.
+
+    Tolerance: this is an exact algebraic identity, not a truncation, so the only
+    admissible error is float64 round-off in the two independent recurrences.
+    Measured worst case across these 36 combinations is 8.9e-16 relative L2
+    (~4 eps); 1e-13 leaves ~2 orders of headroom without admitting a real defect.
+    """
+    if not jax.config.jax_enable_x64:
+        pytest.skip("exact-identity tolerance requires float64 (JAX_ENABLE_X64=1)")
+
+    d = jnp.asarray(delta, dtype=jnp.float64)
+    unit_mass = jnp.asarray(1.0, dtype=jnp.float64)
+
+    converted = complex_to_dehnen_real_coeffs(
+        complex_R_solidfmm(d, order=order), order=order
+    )
+    direct = p2m_real_direct(d, unit_mass, order=order)
+
+    assert converted.shape == direct.shape == (sh_size(order),)
+
+    converted_np = np.asarray(converted)
+    direct_np = np.asarray(direct)
+    rel_l2 = float(
+        np.linalg.norm(converted_np - direct_np)
+        / max(float(np.linalg.norm(direct_np)), 1e-300)
+    )
+    assert rel_l2 < 1e-13, (
+        f"complex->real conversion disagrees with p2m_real_direct at "
+        f"delta={delta}, order={order}: rel-L2 {rel_l2:.3e}"
+    )
+
+
+def _conjugate_symmetric_packed(order: int, *, m0_real: bool, seed: int):
+    """Build a packed complex array via ``_pack_complex``, m=0 real or not.
+
+    ``_pack_complex`` enforces ``H_n^{-m} = (-1)^m conj(H_n^m)`` for the negative
+    ``m`` slots, but it copies ``m = 0`` through verbatim -- so whether the array
+    satisfies the *full* reality condition depends on whether the caller made the
+    m=0 entries real. That is the distinction this helper exists to expose.
+    """
+    rng = np.random.default_rng(seed)
+    half = np.zeros((order + 1, order + 1), dtype=np.complex128)
+    for n in range(order + 1):
+        for m in range(n + 1):
+            imag = 0.0 if (m == 0 and m0_real) else rng.normal()
+            half[n, m] = rng.normal() + 1j * imag
+    return _pack_complex(jnp.asarray(half))
+
+
+@pytest.mark.parametrize("order", [1, 2, 3, 4])
+def test_complex_to_dehnen_real_discards_only_exact_zero_for_conforming_input(order):
+    """``Im(coeffs @ Q^T)`` is EXACTLY zero when the reality condition holds.
+
+    That is what makes ``jnp.real`` lossless here rather than a projection. The
+    condition is ``H_n^{-m} = (-1)^m conj(H_n^m)``, whose ``m = 0`` case reads
+    ``H_n^0 = conj(H_n^0)`` -- i.e. **the m=0 coefficients must be real**. That half
+    is easy to miss, and it is the half this test pins: with m=0 real the imaginary
+    part of the product is identically 0.0, and with m=0 complex it is a substantial
+    fraction of the real part, so ``jnp.real`` would be discarding real information
+    rather than round-off.
+    """
+    if not jax.config.jax_enable_x64:
+        pytest.skip("exact-zero check requires float64")
+
+    q_full = np.asarray(_dehnen_real_Q_full(order))
+
+    conforming = np.asarray(_conjugate_symmetric_packed(order, m0_real=True, seed=9))
+    product = conforming @ q_full.T
+    assert np.max(np.abs(product.imag)) == 0.0, (
+        "the imaginary part must vanish exactly for conforming coefficients, "
+        f"got max {np.max(np.abs(product.imag)):.3e}"
+    )
+    assert np.linalg.norm(product.real) > 0.0
+
+    # And the near-miss: conjugate-symmetric for m != 0 but complex at m = 0.
+    non_conforming = np.asarray(
+        _conjugate_symmetric_packed(order, m0_real=False, seed=9)
+    )
+    bad = non_conforming @ q_full.T
+    discarded = np.linalg.norm(bad.imag) / max(np.linalg.norm(bad.real), 1e-300)
+    assert discarded > 1e-3, (
+        "a complex m=0 entry should make the discarded imaginary part significant, "
+        f"so that this precondition is worth documenting; got ratio {discarded:.3e}"
+    )
+
+
+def test_complex_to_dehnen_real_vjp_carries_the_imaginary_part():
+    """The VJP is the complete adjoint -- it is NOT blind to ``Im(coeffs)``.
+
+    ``jnp.real`` on the *output* does not decouple the input's imaginary part,
+    because ``Q`` is complex and ``Im(coeffs)`` therefore contributes to
+    ``Re(coeffs @ Q^T)``. This asserts both halves of that: the returned cotangent
+    has a nonzero imaginary component, and the directional derivative it predicts
+    matches finite differences along an **imaginary** perturbation as well as a real
+    one.
+
+    Written because an earlier revision of this function's docstring claimed the
+    opposite -- that the VJP discarded the imaginary cotangent -- inferred from the
+    presence of ``jnp.real`` rather than measured. A test is what stops that
+    reappearing.
+    """
+    if not jax.config.jax_enable_x64:
+        pytest.skip("finite-difference comparison requires float64")
+
+    order = 3
+    size = sh_size(order)
+    rng = np.random.default_rng(4)
+    coeffs = jnp.asarray(
+        rng.normal(size=size) + 1j * rng.normal(size=size), dtype=jnp.complex128
+    )
+    cotangent = jnp.asarray(rng.normal(size=size), dtype=jnp.float64)
+
+    def convert(z):
+        return complex_to_dehnen_real_coeffs(z, order=order)
+
+    _, vjp_fn = jax.vjp(convert, coeffs)
+    (grad,) = vjp_fn(cotangent)
+
+    assert jnp.linalg.norm(jnp.imag(grad)) > 0.0, (
+        "the cotangent must carry an imaginary component; a purely real one would "
+        "mean the gradient is blind to Im(coeffs)"
+    )
+
+    step = 1e-7
+    for name, direction in (
+        ("real", jnp.asarray(rng.normal(size=size), dtype=jnp.complex128)),
+        ("imaginary", jnp.asarray(1j * rng.normal(size=size), dtype=jnp.complex128)),
+    ):
+        finite_difference = float(
+            np.dot(
+                np.asarray(cotangent),
+                (
+                    np.asarray(convert(coeffs + step * direction))
+                    - np.asarray(convert(coeffs - step * direction))
+                )
+                / (2 * step),
+            )
+        )
+        predicted = float(jnp.real(jnp.sum(grad * direction)))
+        rel = abs(predicted - finite_difference) / max(abs(finite_difference), 1e-300)
+        assert rel < 1e-6, (
+            f"VJP disagrees with the finite difference along the {name} direction: "
+            f"predicted {predicted:.10e} vs fd {finite_difference:.10e} "
+            f"(rel {rel:.3e})"
+        )
+
+
+def test_complex_to_dehnen_real_scales_linearly_in_mass():
+    """The conversion is mass-independent; P2M is linear in it.
+
+    Guards the other half of the identity above: ``complex_R_solidfmm`` carries no
+    mass, so the equivalence only holds because ``p2m_real_direct`` factorises as
+    ``mass * U_n^m(delta)``. If that factorisation broke, the unit-mass test above
+    would still pass.
+    """
+    if not jax.config.jax_enable_x64:
+        pytest.skip("exact-identity tolerance requires float64 (JAX_ENABLE_X64=1)")
+
+    order = 4
+    d = jnp.asarray([0.35, 0.2, -0.5], dtype=jnp.float64)
+    mass = 3.75
+
+    unit = p2m_real_direct(d, jnp.asarray(1.0, dtype=jnp.float64), order=order)
+    scaled = p2m_real_direct(d, jnp.asarray(mass, dtype=jnp.float64), order=order)
+
+    np.testing.assert_allclose(
+        np.asarray(scaled), mass * np.asarray(unit), rtol=1e-14, atol=1e-300
+    )

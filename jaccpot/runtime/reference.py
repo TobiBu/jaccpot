@@ -15,20 +15,34 @@ from jaxtyping import Array, jaxtyped
 class MultipoleExpansion(NamedTuple):
     """Multipole coefficients around a shared expansion center.
 
+    Cartesian *reduced* (trace-free) moments, not solid harmonics: the
+    quadrupole is ``3 * sum(m r_i r_j) - delta_ij * sum(m r^2)`` and the higher
+    orders carry the matching delta subtractions. This is the reference
+    implementation, independent of the harmonic operators in
+    :mod:`jaccpot.operators`.
+
     Attributes
     ----------
-    monopole:
-        Zeroth-order mass moment.
-    dipole:
-        First-order vector moment.
-    center:
-        Expansion center (center of mass in ``compute_expansion``).
-    quadrupole:
-        Second-order symmetric trace-free tensor.
-    octupole:
-        Third-order symmetric trace-free tensor.
-    hexadecapole:
-        Fourth-order symmetric trace-free tensor.
+    monopole : jnp.ndarray
+        Total mass, a 0-d array.
+    dipole : jnp.ndarray
+        First-order vector moment ``[3]``. When built by
+        :func:`compute_expansion` the moments are taken about the centre of
+        mass, so this is zero up to round-off rather than meaningfully nonzero.
+    center : jnp.ndarray
+        Expansion centre ``[3]`` (the centre of mass in
+        :func:`compute_expansion`; zero when the total mass is zero).
+    quadrupole : jnp.ndarray
+        Second-order symmetric trace-free tensor ``[3, 3]``.
+    octupole : jnp.ndarray
+        Third-order symmetric trace-free tensor ``[3, 3, 3]``.
+    hexadecapole : jnp.ndarray
+        Fourth-order symmetric trace-free tensor ``[3, 3, 3, 3]``.
+
+    Notes
+    -----
+    Moments above the requested ``order`` are returned as exact zeros of the
+    right shape, so the tuple always has all six fields regardless of ``order``.
     """
 
     monopole: jnp.ndarray

@@ -25,7 +25,7 @@ classifiers = [
   "Topic :: Scientific/Engineering :: Physics",
 ]
 dependencies = [
-  # JAX FLOOR IS 0.11.0, and it is a hard floor: 0.9.1 and 0.9.2 CRASH on the CPU
+  # JAX FLOOR IS 0.10.2, and it is a hard floor: 0.9.1 and 0.9.2 CRASH on the CPU
   # backend. `tests/characterization/test_fmm_golden.py::test_fmm_golden[uni_real_n256_p6]`
   # dies with `Fatal Python error: Floating-point exception` -- a SIGFPE inside
   # XLA's CPU compiler while compiling the real-basis P2M `lax.scan`
@@ -106,6 +106,10 @@ dev = [
   # floating ">=" here lets CI's `isort --check-only .` resolve to the broken
   # 8.0.1 and disagree with pre-commit, so keep this equal to the hook rev.
   "isort==9.0.0b1",
+  # Pinned to match .pre-commit-config.yaml's pydoclint rev, for the same reason as
+  # black and isort above: the hook runs on every commit now, and a floating ">="
+  # would let a local pydoclint disagree with it about what counts as a violation.
+  "pydoclint==0.9.1",
   "pytest>=8.3.0",
   "pytest-cov>=5.0.0",
   "pytest-xdist>=3.6.0",
@@ -134,6 +138,10 @@ exclude = '''
 )/
 '''
 
+[tool.pydoclint]
+style = "numpy"
+exclude = '\.git|\.venv|build|dist|jaccpot/experimental'
+
 [tool.isort]
 profile = "black"
 line_length = 88
@@ -159,11 +167,27 @@ addopts = "-q --strict-markers --ignore=tests/perf -n auto -m \"not experimental
 source = ["jaccpot"]
 branch = true
 omit = [
-  # Opt-in experimental prototypes (octree/treecode): deselected by the
-  # `experimental` marker in the default suite, so they are exercised only by
-  # `pytest -m experimental`, not by the coverage-gated CPU run. Covering them
-  # here would just dilute the metric with code the default suite does not run.
-  "jaccpot/experimental/*",
+  # Opt-in experimental prototypes, listed INDIVIDUALLY rather than as
+  # `jaccpot/experimental/*`, because that glob was hiding a module the default
+  # suite fully covers. Measured:
+  #
+  #   octree_fmm_uvwx.py    0%    reached only under `pytest -m experimental`
+  #   treecode_far_near.py  0%    reached only from the distributed treecode lane
+  #                               (`local_walk="treecode"`), whose test skips
+  #                               below 2 devices, so CPU CI never enters it
+  #   treecode_walk.py    100%    NOT omitted -- see below
+  #
+  # `treecode_walk.py` is the pure-JAX reference that
+  # `tests/unit/operators/test_pallas_treecode_walk.py` checks the Pallas walk
+  # against. That test is neither `experimental`- nor `slow`-marked, so it runs on
+  # every commit and covers the module 62/62 statements. Omitting it understated
+  # coverage and, worse, the stated reason for omitting it was untrue.
+  #
+  # Keeping this an explicit list means a new file under `jaccpot/experimental/`
+  # is measured until someone decides otherwise -- which is the right default,
+  # since the failure this replaces was a glob quietly absorbing covered code.
+  "jaccpot/experimental/octree_fmm_uvwx.py",
+  "jaccpot/experimental/treecode_far_near.py",
   # GPU-only fused real-basis Pallas kernel (Ampere+). Unlike the other Pallas
   # kernels (which the CPU CI exercises via interpret=True), this one has no
   # interpret path, so CPU CI structurally cannot reach it; it is validated by

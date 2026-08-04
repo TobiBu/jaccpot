@@ -125,7 +125,21 @@ def prepare_leaf_neighbor_pairs(
     *,
     sort_by_source: bool = True,
 ) -> Tuple[Array, Array, Array]:
-    """Precompute neighbor-edge leaf mappings and reorder for source locality."""
+    """Precompute neighbor-edge leaf mappings and reorder for source locality.
+
+    WARNING: the default ``sort_by_source=True`` is the **unsafe** value if the
+    result is going to be stored and handed back as one of
+    :func:`compute_leaf_p2p_accelerations`'s ``precomputed_*`` arrays. That
+    contract requires positional alignment with ``neighbors``, because a consumer
+    that is given ``target_leaf_ids`` but not ``source_leaf_ids`` re-derives the
+    latter as ``leaf_lookup[neighbors]`` -- unsorted. Source-sorted and unsorted
+    vectors have identical shapes, so nothing downstream can detect the mismatch;
+    it produces wrong forces silently. Every producer in this repository that
+    feeds the precomputed path passes ``sort_by_source=False`` explicitly.
+
+    The default stays ``True`` because the non-bucketed path uses it live for
+    gather locality and does not persist the result.
+    """
     total_nodes = node_ranges.shape[0]
     leaf_lookup = jnp.full((total_nodes,), -1, dtype=INDEX_DTYPE)
     leaf_lookup = leaf_lookup.at[leaf_nodes].set(
@@ -2735,31 +2749,148 @@ def compute_leaf_p2p_accelerations(
 
     Parameters
     ----------
-    tree, neighbor_list:
-        Tree structure and precomputed neighbor metadata.
-    positions_sorted, masses_sorted:
-        Particle data in Morton order.
-    G, softening:
-        Gravitational constant and Plummer softening length.
-    max_leaf_size:
-        Optional static bound for per-leaf particle counts. When evaluating
-        under ``jax.jit`` this must be supplied to avoid tracing-time shape
-        inference.
-    return_potential:
-        When ``True`` also accumulate gravitational potentials in addition to
-        accelerations.
-    collect_neighbor_pairs:
-        When ``True`` also return the (target, source) leaf pair indices
-        that were processed in the near-field evaluation.
+    tree : Tree
+        Radix tree whose ``node_ranges`` map leaves to particle spans.
+    neighbor_list : NodeNeighborList
+        Precomputed leaf-neighbour CSR metadata (``leaf_indices``, ``offsets``,
+        ``neighbors``, ``counts``). Each ``*_override`` below replaces exactly
+        one of these fields.
+    positions_sorted : Array
+        Particle positions ``[N, 3]`` in Morton order.
+    masses_sorted : Array
+        Particle masses ``[N]`` in Morton order.
+    G : Union[float, Array]
+        Gravitational constant, applied as a plain multiplier.
+    softening : float
+        Plummer softening length. Squared host-side via ``float(softening)``, so
+        it must be a concrete Python float, not a tracer.
+    max_leaf_size : Optional[int]
+        Static bound on per-leaf particle count. **Required under ``jit``**: when
+        it is ``None`` the code reads the true maximum with ``.item()``, which
+        only works on concrete values (see ``Raises``).
+    return_potential : bool
+        Also accumulate potentials. Static under ``jit`` -- it changes the number
+        of returned arrays.
+    collect_neighbor_pairs : bool
+        Also return the processed ``(target, source)`` leaf-pair buffer. Static
+        under ``jit``, and it additionally flips the internal edge ordering
+        (``sort_by_source``), so enabling it is not purely additive.
+    nearfield_mode : str
+        Either ``"baseline"`` or ``"bucketed"``; static under ``jit``.
+        ``"bucketed"`` is the minimum-memory large-N GPU path and preserves
+        target-local edge order for scatter locality. The two modes are meant to
+        produce the same accelerations.
+    edge_chunk_size : int
+        Chunk width for the bucketed edge scan. Static under ``jit``; a
+        performance knob, not a numerical one.
+    precomputed_target_leaf_ids : Optional[Array]
+        Leaf-pair schedule buffer: target leaf id per edge. Supplied together
+        with the other ``precomputed_*`` arrays by prepared state to skip
+        re-deriving the schedule. Must match the neighbour-list edge order the
+        rest of the schedule was built against.
+    precomputed_source_leaf_ids : Optional[Array]
+        Source leaf id per edge, same ordering contract.
+    precomputed_valid_pairs : Optional[Array]
+        Boolean mask marking which padded edge slots are real.
+    precomputed_chunk_sort_indices : Optional[Array]
+        Scatter-schedule permutation for the chunked accumulation.
+    precomputed_chunk_group_ids : Optional[Array]
+        Chunk group id per sorted edge.
+    precomputed_chunk_unique_indices : Optional[Array]
+        Unique-chunk boundary indices. This and the previous two are consumed as
+        a set: the precomputed scatter path only engages when all three are given.
+    node_ranges_override : Optional[Array]
+        Replaces ``tree.node_ranges``.
+    leaf_nodes_override : Optional[Array]
+        Replaces ``neighbor_list.leaf_indices``.
+    neighbor_offsets_override : Optional[Array]
+        Replaces ``neighbor_list.offsets``.
+    neighbor_indices_override : Optional[Array]
+        Replaces ``neighbor_list.neighbors``.
+    neighbor_counts_override : Optional[Array]
+        Replaces ``neighbor_list.counts``.
+    leaf_particle_indices_override : Optional[Array]
+        Explicit per-leaf particle index table ``[num_leaves, max_leaf_size]``.
+        Supplying it *sets* ``max_leaf_size`` from its second axis, overriding
+        the argument.
+    leaf_particle_mask_override : Optional[Array]
+        Validity mask matching ``leaf_particle_indices_override``.
 
     Returns
     -------
-    Array or tuple of Arrays
-        Accelerations in Morton order and optionally potentials. When
-        ``collect_neighbor_pairs`` is enabled the tuple is extended with the
-        full (target, source) neighbor pair buffer followed by the scalar
-        count of valid entries (use ``neighbor_pairs[:neighbor_pair_count]``
-        to inspect only the processed pairs).
+    Union[Array, Tuple[Array, Array], Tuple[Array, Array, Array], Tuple[Array, Array, Array, Array]]
+        Accelerations ``[N, 3]`` in Morton order, returned bare when neither flag
+        is set. ``return_potential`` appends potentials ``[N]``;
+        ``collect_neighbor_pairs`` appends the full ``(target, source)`` pair
+        buffer and then the scalar count of valid entries (slice with
+        ``neighbor_pairs[:neighbor_pair_count]``). With both flags the order is
+        ``(accelerations, potentials, neighbor_pairs, pair_count)``.
+
+    Raises
+    ------
+    ValueError
+        If ``max_leaf_size`` is ``None`` while tracing. The bound is otherwise
+        read from the data with ``.item()``; under a tracer that raises
+        ``TypeError``, which is re-raised as this ``ValueError``. It is the one
+        place in this function where a host sync is attempted deliberately, and
+        it is the reason ``max_leaf_size`` must be passed by every jitted caller.
+
+    Notes
+    -----
+    Differentiable in ``positions_sorted``, ``masses_sorted``, and ``G``. Not
+    differentiable in ``softening`` (pulled to the host) or in any of the
+    integer index/topology arrays.
+
+    Every extent here is padded to a static bound -- leaf occupancy via
+    ``max_leaf_size``, the edge list via the valid-pair mask. Padded slots must
+    contribute exactly zero and must never form ``0 * inf``; see
+    ``bench/audit_nearfield_padding.py``.
+
+    An empty leaf set short-circuits to zeros of the right shape. Self-pairs and
+    coincident particles are handled by the ``softening`` term; with
+    ``softening == 0`` a coincident pair is a genuine singularity that this
+    function does not guard.
+
+    ``nearfield_mode="baseline"`` and ``"bucketed"`` agree **to a tolerance, not
+    bit-exactly**, and that is the correct contract rather than a gap: the two
+    deliberately differ in edge order (``sort_by_source``), which changes the
+    order of the floating-point accumulation, so bit-equality is not expected.
+    Asserted by
+    ``tests/integration/test_fmm.py::test_nearfield_bucketed_matches_baseline``
+    at ``np.allclose(rtol=1e-5, atol=1e-5)``.
+
+    That coverage is thinner than the claim deserves: one configuration (N=96,
+    float32, order 3, leaf 16, ``theta=0.6``, ``edge_chunk_size=128``, solidfmm
+    basis, a single PRNG seed), no parametrisation over N, order, dtype, or chunk
+    size, and the test is marked ``slow`` so the smoke leg does not run it. At
+    fp32 and N=96 a ``1e-5`` band is loose enough to admit a real algorithmic
+    divergence, not only reassociation.
+    **The ``precomputed_*`` contract is shape-encoded, and partial sets are
+    supported by design.** An earlier note here called this unvalidated; that was
+    wrong. The mechanism: a ``None`` is converted to a zero-size sentinel by the
+    caller in :mod:`jaccpot.runtime.fmm_evaluate`, and
+    :mod:`jaccpot.runtime.kernels.core` then admits an array only if its leading
+    dimension equals ``neighbor_list.neighbors.shape[0]`` (the scatter schedules
+    must match ``(chunk_count, chunk_flat_size)``). Anything else -- including the
+    sentinel -- is ignored and recomputed.
+
+    Three groups fall back **independently**: the target/valid pair vectors, the
+    source leaf ids, and the scatter schedules. That is what makes
+    ``_prepare_bucketed_scatter_schedules_safe`` in
+    :mod:`jaccpot.runtime.fmm_prepare` sound when it returns ``(None, None, None)``
+    on int32 overflow, on exceeding the schedule cap, or on any exception, while
+    the pair vectors stay populated. A 3-of-6 set is a normal production state,
+    not an error.
+
+    **The invariant that is *not* checked is edge order.** Precomputed vectors
+    must be positionally aligned with ``neighbor_list.neighbors`` -- i.e. built
+    with ``sort_by_source=False``. When ``precomputed_source_leaf_ids`` is absent
+    the source ids are re-derived positionally as ``leaf_lookup[neighbors]``, so a
+    source-sorted ``target_leaf_ids`` would be silently paired against unsorted
+    sources. Both orderings have the same length, so no shape check can catch it,
+    and the result is wrong forces with no error and no NaN. All in-repo producers
+    pass ``sort_by_source=False``; see :func:`prepare_leaf_neighbor_pairs`, whose
+    default is the *unsafe* value for this contract.
     """
 
     positions = jnp.asarray(positions_sorted)

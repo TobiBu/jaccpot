@@ -979,6 +979,28 @@ def _angles_from_delta_solidfmm(delta: Array) -> tuple[Array, Array]:
     # the origin) would otherwise inject NaNs into the M2L/L2L reverse pass. The
     # azimuth is undefined there and the rotation reduces to a pure polar turn /
     # identity, so returning 0 with a zero cotangent is the correct subgradient.
+    #
+    # That last sentence used to be an argument from construction. It is now
+    # measured. On a system built so the guard actually fires -- four z-stacked
+    # clusters sharing one (x,y) point set, whose COM displacements come out
+    # exactly (0, 0, +-8), so rho == 0 on every M2L pair -- reverse-mode AD agrees
+    # with finite differences to ~10 significant digits, both along a purely
+    # transverse (azimuth-plane) direction and along a full 3N direction
+    # (N=32, order 4, theta 0.7, fp64, complex basis). The transverse one-sided
+    # derivatives converge to the same value from both sides rather than to equal
+    # and opposite values, i.e. the loss is smooth through the degeneracy and the
+    # zeroed azimuth cotangent drops nothing: the m != 0 terms carry
+    # sin^|m|(theta) = (rho/r)^|m| factors that annihilate the arbitrary azimuth.
+    #
+    # WARNING for anyone extending the coverage: a *uniform lattice* does not
+    # exercise this guard, despite what
+    # ``tests/unit/test_gradient_correctness.py::test_no_nan_axis_aligned_grid``
+    # says. Centres are COM, not geometric box centres, so lattice leaf COMs are
+    # generically off-axis relative to each other -- measured on that test's own
+    # 5^3 grid, zero of its 22 M2L pairs have rho == 0 and the minimum rho^2 is
+    # 5.64. Use the z-stacked-cluster construction above to reach the degeneracy.
+    # Also note a central difference cannot validate a subgradient choice at a
+    # symmetric kink: it returns 0 there whether or not 0 is correct.
     rho_sq = x * x + y * y
     rho_pos = rho_sq > 0
     rho = jnp.where(rho_pos, jnp.sqrt(jnp.where(rho_pos, rho_sq, 1.0)), 0.0)

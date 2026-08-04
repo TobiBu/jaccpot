@@ -174,15 +174,23 @@ def stage_timing_tree(
 
     Parameters
     ----------
-    impl
+    impl : Any
         The runtime engine (``FastMultipoleMethod._impl``) holding the
-        ``_refresh_timing_*_seconds`` accumulators.
-    counters
+        ``_refresh_timing_*_seconds`` accumulators. Ignored except as the counter
+        source when ``counters`` is supplied.
+    counters : Optional[Mapping[str, float]]
         Pre-read counter values keyed by ``<path>``. Defaults to reading them off
         ``impl``. Supplying them lets a caller build the tree from a snapshot.
-    per_call
+    per_call : bool
         Divide every value by ``refresh_timing_calls``, giving per-step seconds.
         Returns the accumulated totals when the call count is zero.
+
+    Returns
+    -------
+    dict[str, Any]
+        The stage tree, keyed by top-level stage name. Host-side bookkeeping
+        only -- these are Python floats read off the engine, never traced values,
+        so this must not be called from inside a jitted path.
 
     Notes
     -----

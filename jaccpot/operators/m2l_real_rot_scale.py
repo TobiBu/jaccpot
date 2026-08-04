@@ -98,16 +98,69 @@ def m2l_rot_scale_real_batch(
 ) -> Array:
     """Batched rotate+scale real-basis M2L translation.
 
+    Applies the rotate -> z-translate -> rotate-back decomposition per pair:
+    :func:`_rotate_multipole_to_z_single`, then :func:`m2l_core_z_real`, then
+    :func:`_rotate_local_from_z_single`. The ordering is load-bearing for
+    cancellation and must not be restructured.
+
     Parameters
     ----------
-    multipoles:
-        Source multipoles with shape ``(batch, (order+1)^2)``.
-    deltas:
-        Source-to-target vectors with shape ``(batch, 3)``.
-    order:
-        Maximum SH order.
-    use_pallas:
-        Enable the optional Pallas z-translation kernel when supported.
+    multipoles : Array
+        Source multipole coefficients ``[N, (p+1)^2]``, real (no-sqrt2) Dehnen
+        basis, packed by :func:`~jaccpot.operators.real_harmonics.sh_offset`.
+    deltas : Array
+        Source-to-target centre displacements ``[N, 3]``. Same length convention
+        as the coefficients; G=1 is a caller convention, not applied here.
+    order : int
+        Maximum SH degree ``p``. Static under ``jit`` -- it sets the Python-level
+        loop bounds in the rotation builders.
+    use_pallas : bool
+        Route the z-translation through the optional Pallas kernel when the
+        backend supports it. Static under ``jit``. The kernel is an execution
+        accelerator only; see :func:`m2l_core_z_real` for the equivalence.
+
+    Returns
+    -------
+    Array
+        Real local expansion contributions ``[N, (p+1)^2]``, same dtype and
+        packing as ``multipoles``.
+
+    Raises
+    ------
+    ValueError
+        If ``multipoles`` is not 2-D, or ``deltas`` is not ``[N, 3]``. Raised at
+        trace time on static shapes, so it cannot fire inside a compiled step.
+
+    Notes
+    -----
+    Differentiable in ``multipoles`` and ``deltas`` under both forward and
+    reverse mode. The radius is computed as a double-``where`` guarded
+    ``sqrt`` rather than ``linalg.norm``, because the latter has a 0/0 reverse
+    gradient at ``delta == 0``; the guard keeps that cotangent finite (zero)
+    while leaving the forward value unchanged.
+
+    ``delta == 0`` is degenerate for M2L and this function does not reject it:
+    :func:`m2l_core_z_real` floors the radius at ``1e-30``, so the result is
+    finite but physically meaningless. The MAC that makes a pair well-separated
+    is the caller's responsibility -- nothing here checks it.
+
+    **On accuracy: this function is the reference, and its own accuracy is not
+    measured.** Every test that touches the rotate+scale path compares something
+    else *to it* -- ``tests/test_m2l_real_fused_pallas.py`` checks the fused
+    pure-jnp twin and the Pallas kernel against it (rel err <1e-10 at fp64 for
+    orders 2, 3, 4; <3e-4 at fp32), and
+    ``tests/unit/operators/test_m2l_real_rot_scale.py::test_cached_blocks_m2l_matches_direct_batch``
+    checks the cached-block variant against it (order 3, 5 pairs, ``atol=1e-9``).
+    Those pin *consistency*, not correctness: they would all still pass if this
+    decomposition were uniformly wrong.
+
+    Neither axis of the accuracy regime is measured anywhere: not the truncation
+    error against a direct-summation or analytic reference as a function of ``p``,
+    and not the dependence on the source-target separation ratio. What ``docs/``
+    does record is the ~6e-04 TF32 floor this path avoids via
+    :mod:`jaccpot.operators._precision` -- a floor on the arithmetic, not a bound
+    on the scheme. Treat a required accuracy here as something to verify for your
+    own configuration rather than something this docstring can promise.
     """
     mult = jnp.asarray(multipoles)
     delta = jnp.asarray(deltas)
@@ -276,16 +329,41 @@ def m2l_rot_scale_real_batch_cached_blocks(
 
     Parameters
     ----------
-    multipoles:
-        Source multipoles ``(batch, (order+1)^2)``.
-    deltas:
-        Source-to-target vectors ``(batch, 3)`` (used for the translation radius).
-    blocks_to_z:
-        Multipole world->z blocks ``(batch, order+1, 2*order+1, 2*order+1)``.
-    blocks_from_z:
-        Local z->world blocks with the same shape.
-    order:
-        Maximum SH order.
+    multipoles : Array
+        Source multipole coefficients ``[N, (p+1)^2]``, real Dehnen basis.
+    deltas : Array
+        Source-to-target centre displacements ``[N, 3]``. Used *only* for the
+        translation radius here -- the direction already lives in the supplied
+        blocks, so passing blocks built from different deltas is silently wrong
+        and is not checked.
+    blocks_to_z : Array
+        Multipole world->z rotation blocks ``[N, p+1, 2p+1, 2p+1]``,
+        block-diagonal per degree and zero-padded, as built by
+        :func:`real_rotation_blocks_to_z_multipole_batch`.
+    blocks_from_z : Array
+        Local z->world rotation blocks, same shape and padding, as built by
+        :func:`real_rotation_blocks_from_z_local_batch`.
+    order : int
+        Maximum SH degree ``p``. Static under ``jit`` (declared in
+        ``static_argnames``).
+
+    Returns
+    -------
+    Array
+        Real local expansion contributions ``[N, (p+1)^2]``.
+
+    Notes
+    -----
+    Differentiable in ``multipoles``, ``deltas``, and both block arrays.
+
+    Equivalent to :func:`m2l_rot_scale_real_batch` when the blocks are the ones
+    that function would have built for the same ``deltas``; asserted by
+    ``tests/unit/operators/test_m2l_real_rot_scale.py::test_cached_blocks_m2l_matches_direct_batch``.
+    It reaches the degenerate radius differently, though -- ``sqrt(maximum(r2,
+    1e-60))`` here versus a double-``where`` plus the ``1e-30`` floor inside
+    :func:`m2l_core_z_real` there. Both land on a ``1e-30`` radius and a zero
+    ``delta`` cotangent at ``delta == 0``, so the pair still agrees, but the two
+    guards are not the same expression and should not be assumed to stay in step.
     """
     p = int(order)
     mult_rot = _apply_real_rotation_blocks_padded_batch(

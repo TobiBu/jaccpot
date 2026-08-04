@@ -120,16 +120,32 @@ def pack_tensor(level: int, tensor: Array) -> Array:
 
     Parameters
     ----------
-    level:
-        Tensor order ``l``.
-    tensor:
-        Array of shape ``(l + 1, l + 1, l + 1)`` containing Cartesian
-        components.  Only entries with ``i + j + k = l`` are read.
+    level : int
+        Tensor order ``l``. Static under ``jit``: it fixes the output length and
+        is read with ``int()``.
+    tensor : Array
+        Cartesian components ``[l+1, l+1, l+1]``. Only the entries with
+        ``i + j + k == l`` are read; everything off that simplex is ignored
+        rather than checked, so a caller who fills the wrong slots gets zeros
+        with no error.
 
     Returns
     -------
     Array
-        1-D flattened packed representation with length ``level_size(level)``.
+        1-D packed representation, length ``level_size(level)``, ordered by
+        :func:`triangular_indices`. Same dtype as ``tensor``.
+
+    Raises
+    ------
+    ValueError
+        If ``tensor`` is not exactly ``[l+1, l+1, l+1]``. A static-shape check,
+        so it fires at trace time and never inside a compiled step.
+
+    Notes
+    -----
+    A pure gather, so differentiable in ``tensor`` (the VJP is the matching
+    scatter, which is what :func:`unpack_tensor` computes) and independent of
+    ``level`` as a differentiable quantity.
     """
 
     lvl = int(level)

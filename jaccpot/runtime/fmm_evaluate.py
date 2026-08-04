@@ -153,12 +153,37 @@ class EvaluateMixin:
         reuse_prepared_state : bool
             Reuse the most recent prepared state when identical array objects
             and preparation parameters are provided.
+        max_acc_derivative_order : int
+            Highest acceleration-derivative order to return alongside the
+            accelerations. ``0`` (the default) returns none. Non-zero requires
+            ``expansion_basis="solidfmm"`` and is rejected on the traced
+            fallback; see ``Raises``.
 
         Returns
         -------
-        Union[Array, Tuple[Array, Array]]
-            Accelerations for all particles or selected targets. When
-            ``return_potential`` is ``True``, also returns the potential.
+        Union[Array, Tuple[Array, Array], Tuple[Array, PackedAccelerationDerivatives], Tuple[Array, Array, PackedAccelerationDerivatives]]
+            Accelerations ``[N, 3]`` for all particles, or ``[len(target_indices), 3]``
+            when ``target_indices`` is given. ``return_potential`` inserts the
+            potentials next, and ``max_acc_derivative_order > 0`` appends a
+            :class:`PackedAccelerationDerivatives` last, so the four shapes are
+            ``a``, ``(a, pot)``, ``(a, derivs)`` and ``(a, pot, derivs)``.
+
+        Raises
+        ------
+        NotImplementedError
+            If ``positions`` or ``masses`` is a tracer (an outer ``jit``/``grad``
+            is in charge) *and* either ``return_potential`` is ``True`` or
+            ``max_acc_derivative_order`` is non-zero. The traced path falls back
+            to a direct sum that supports neither.
+
+        Notes
+        -----
+        This is the forward-only convenience entry point. For gradients use
+        :meth:`differentiable_accelerations`, or
+        :meth:`differentiable_step_fn` to pay the compile at a chosen moment --
+        under an outer trace this method falls back to an O(N^2) direct sum
+        rather than running the FMM pipeline, which is correct but not what a
+        caller timing "the FMM" is measuring.
         """
 
         cache_key: Optional[tuple[Any, ...]] = None
@@ -625,8 +650,12 @@ class EvaluateMixin:
             ``LargeNPreparedState`` (the ``large_n_gpu`` preset) additionally
             needs ``retain_far_pairs_for_grad=True`` so the frozen M2L pair list
             survives ``prepare_state``.
-        positions, masses : Array
-            Differentiated inputs, in the ORIGINAL (unsorted) particle order.
+        positions : Array
+            Differentiated source/target positions ``[N, 3]``, in the ORIGINAL
+            (unsorted) particle order -- this method applies ``state``'s
+            permutation itself.
+        masses : Array
+            Differentiated masses ``[N]``, in the same original order.
         target_indices : Optional[Array]
             Optional targets to return (all particles are still sources). Not
             supported on the large-N path.
@@ -740,16 +769,30 @@ class EvaluateMixin:
 
         Parameters
         ----------
-        state
+        state : Union[FMMPreparedState, LargeNPreparedState]
             A prepared state from :meth:`prepare_state`. Closed over as a
             constant, exactly as :meth:`differentiable_accelerations` treats it.
-        target_indices, grad_config, jit_traversal
+        target_indices : Optional[Array]
+            Optional targets to return; all particles remain sources. Passed
+            through to :meth:`differentiable_accelerations` unchanged.
+        grad_config : Optional[GradConfig]
+            Grad-path options, passed through unchanged but resolved **once**,
+            here, rather than per call -- so a later environment change does not
+            take effect on an already-returned step function.
+        jit_traversal : bool
             Passed through to :meth:`differentiable_accelerations` unchanged.
-            ``grad_config`` is resolved **once**, here, rather than per call.
-        compile_now
+        compile_now : Optional[Tuple[Array, Array]]
             ``(positions, masses)`` to compile against immediately, so the
             one-time cost lands here rather than inside the first timed step.
             Recommended when benchmarking.
+
+        Returns
+        -------
+        Callable[[Array, Array], Array]
+            A compiled ``f(positions, masses) -> accelerations`` closing over
+            ``state``. Differentiable, so ``jax.grad`` over it works and is
+            itself compiled. Positions and masses are in the original (unsorted)
+            particle order, as for :meth:`differentiable_accelerations`.
 
         Raises
         ------
@@ -1063,9 +1106,17 @@ class EvaluateMixin:
 
         ``nearfield_mode_override`` forces the near-field execution mode instead
         of the policy resolution (used by the differentiable path to select the
-        vectorized ``"bucketed"`` near-field, which is bit-identical to the
-        default ``"baseline"`` scan but orders of magnitude faster and has a
-        cheaper reverse pass). ``None`` keeps the resolved policy unchanged.
+        vectorized ``"bucketed"`` near-field, which is orders of magnitude faster
+        than the default ``"baseline"`` scan and has a cheaper reverse pass).
+        ``None`` keeps the resolved policy unchanged.
+
+        ``"bucketed"`` agrees with ``"baseline"`` **to a tolerance, not
+        bit-exactly** -- the two differ in edge order, hence in accumulation
+        order. Asserted by
+        ``tests/integration/test_fmm.py::test_nearfield_bucketed_matches_baseline``
+        at ``rtol=atol=1e-5``; see
+        :func:`~jaccpot.nearfield.near_field.compute_leaf_p2p_accelerations` for
+        what that one configuration does and does not cover.
 
         The extra value ``"fast_lane"`` is not a mode of the edge-list kernel at
         all: it re-expresses the near field leaf-major and routes it through

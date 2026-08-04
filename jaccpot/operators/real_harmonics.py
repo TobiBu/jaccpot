@@ -222,6 +222,12 @@ def sh_size(order: int) -> int:
     -------
     int
         Total number of coefficients: (p+1)^2.
+
+    Raises
+    ------
+    ValueError
+        If ``order`` is negative. A pure-Python host-side check on a static
+        value; nothing here is traced.
     """
     p = int(order)
     if p < 0:
@@ -241,6 +247,11 @@ def sh_offset(ell: int) -> int:
     -------
     int
         Starting index for degree ell: ell^2.
+
+    Raises
+    ------
+    ValueError
+        If ``ell`` is negative. A pure-Python host-side check on a static value.
     """
     ll = int(ell)
     if ll < 0:
@@ -262,6 +273,12 @@ def sh_index(ell: int, m: int) -> int:
     -------
     int
         Linear index in the packed coefficient array.
+
+    Raises
+    ------
+    ValueError
+        If ``ell`` is negative, or ``m`` falls outside ``[-ell, ell]``. Both are
+        pure-Python host-side checks on static values.
     """
     ll = int(ell)
     mm = int(m)
@@ -348,11 +365,25 @@ def p2m_real_direct(
     The cos(mφ) and sin(mφ) terms are computed via Chebyshev recurrence
     from cos φ = x/ρ and sin φ = y/ρ, avoiding trigonometric functions.
 
-    Validation
-    ----------
-    The resulting real-valued polynomials (scaled by (n-m)!(n+m)!) match
-    Table 3 of Dehnen (2014) for n ≤ 6 when derived via
-    scripts/derive_table3_polynomials.py.
+    *Validation.* What actually runs is
+    ``tests/unit/operators/test_real_harmonics.py::test_p2m_real_direct_dehnen_table3``,
+    which checks the Dehnen (2014) Table 3 entries for **degree 1 only**
+    (``U_1^{-1} = y/2``, ``U_1^{0} = z``, ``U_1^{+1} = x/2``) at the three unit
+    axis directions, to ``atol=1e-10``. Degree 0 is covered separately by
+    ``test_p2m_real_direct_monopole``.
+
+    The broader claim that the scaled polynomials match Table 3 up to ``n = 6``
+    rests on a one-off derivation via ``scripts/derive_table3_polynomials.py``,
+    which was **never committed** -- there is no ``scripts/`` directory. So
+    degrees 2-6 are unverified in-repo, and the coverage that exists cannot see a
+    per-``m`` normalisation or sign error above degree 1, which is exactly the
+    class of error this packing is prone to.
+
+    Raises
+    ------
+    ValueError
+        If ``order`` is negative. ``order`` is static under ``jit``, so this
+        fires at trace time.
     """
     p = int(order)
     if p < 0:
@@ -1014,6 +1045,62 @@ def complex_to_dehnen_real_coeffs(complex_coeffs: Array, *, order: int) -> Array
     Array
         Packed real coefficients of shape ``(..., (p+1)^2)`` with the real dtype
         matching the input's real component.
+
+    Raises
+    ------
+    ValueError
+        If the trailing axis of ``complex_coeffs`` is not ``(p+1)^2``. A static
+        shape check on a static ``order``, so it fires at trace time.
+
+    Notes
+    -----
+    A single matmul against a fixed basis-change matrix, so differentiable in
+    ``complex_coeffs``.
+
+    **Forward: nothing is lost, for conforming input.** The reality condition is
+    stated in :mod:`jaccpot.operators.complex_harmonics` -- Dehnen normalization,
+    no Condon-Shortley phase, and ``H_n^{-m} = (-1)^m conj(H_n^m)`` -- and the
+    ``(p+1)^2`` layout is *redundant* rather than packed:
+    :func:`~jaccpot.operators.complex_harmonics._pack_complex` fills the negative
+    ``m`` slots as ``(-1)^|m| conj(coeff[n, |m|])``, so both ``+m`` and ``-m`` are
+    present and conjugate-related. ``build_Q_dehnen_no_sqrt2`` recombines each
+    conjugate pair, and the imaginary part of the product comes out **exactly**
+    zero -- measured, not merely bounded.
+
+    Note the easily-missed half of that condition: at ``m = 0`` it reads
+    ``H_n^0 = conj(H_n^0)``, i.e. **the m=0 coefficients must be real**.
+    ``complex_R_solidfmm`` satisfies this (its m=0 entries have exactly zero
+    imaginary part). An array that is conjugate-symmetric for ``m != 0`` but has
+    complex ``m = 0`` entries does *not* conform, and for such input
+    ``Im(coeffs @ q_full.T)`` is a substantial fraction of the real part
+    (measured ~0.6 at order 3) -- so ``jnp.real`` would silently discard real
+    information. Nothing here validates the condition; it is a precondition.
+
+    **Reverse: the gradient is complete.** ``jnp.real`` does not make the VJP blind
+    to the imaginary components -- ``Q`` is complex, so ``Im(coeffs)`` contributes
+    to ``Re(coeffs @ q_full.T)`` and the returned cotangent has a nonzero imaginary
+    part. This is the correct adjoint of the R-linear map, and it agrees with finite
+    differences along both real and imaginary perturbation directions.
+
+    The claim above -- that this composes with ``complex_R_solidfmm`` to reproduce
+    :func:`p2m_real_direct` -- is asserted directly by
+    ``tests/unit/operators/test_real_harmonics.py::test_complex_to_dehnen_real_matches_p2m_real_direct``
+    over six geometries (including the ``rho == 0`` z-aligned degeneracy and the
+    three coordinate axes) at orders 0-6, to a relative L2 of 1e-13 against a
+    measured worst case of 8.9e-16.
+
+    That test exists because the two indirect proxies cannot substitute for it:
+    ``tests/test_real_upward_sweep.py::test_real_upward_matches_complex_convert``
+    checks an aggregate relative L2 over a whole 300-particle P2M+M2M tree, where
+    a single-``m`` error is diluted, and
+    ``tests/unit/runtime/test_dehnen_mac_reference.py::test_dehnen_power_is_basis_invariant``
+    checks only the degree-wise Dehnen power -- a rotational invariant, therefore
+    blind to sign errors within a degree. Verified by mutation: flipping the sign
+    of one row of the degree-2 Q block fails the direct test and leaves the power
+    proxy passing.
+
+    Runs under :func:`~jaccpot.operators._precision.highest_matmul_precision`;
+    the matmul must not be dropped back to TF32.
     """
     coeffs = jnp.asarray(complex_coeffs)
     expected = sh_size(int(order))
@@ -1053,11 +1140,47 @@ def _real_wigner_rotation(
 ) -> Array:
     """Real rotation block from complex Wigner D via Dehnen Q transform.
 
+    The SymPy/NumPy baseline correctness path, not a production kernel: the
+    Wigner-D itself comes from :func:`_wigner_D_complex` at 30 digits. The
+    closed-form production builders are
+    :func:`real_rotation_to_z_axis_multipole` and friends; this exists to check
+    them.
+
     Parameters
     ----------
-    basis : {"multipole", "local"}
-        Selects the diagonal similarity scaling that maps the Wigner real
+    ell : int
+        Spherical harmonic degree, giving a ``[2*ell+1, 2*ell+1]`` block.
+    alpha : Array
+        First Euler angle (z), radians. Must be a **concrete** value -- it is
+        read via ``float()``, so this function cannot be traced or jitted.
+    beta : Array
+        Second Euler angle (y), radians. Concrete, as ``alpha``.
+    gamma : Array
+        Third Euler angle (z), radians. Concrete, as ``alpha``.
+    dtype : DTypeLike
+        Output dtype. The internal algebra is float64/complex128 regardless;
+        this only casts the result.
+    basis : str
+        Either ``"multipole"`` or ``"local"``; selects the diagonal similarity
+        scaling that maps the Wigner real
         basis to the Dehnen real basis used for multipoles or locals.
+
+    Returns
+    -------
+    Array
+        Real rotation block ``[2*ell+1, 2*ell+1]`` in the Dehnen no-sqrt2 real
+        basis, indexed ``m = -ell..ell``.
+
+    Raises
+    ------
+    ValueError
+        If ``basis`` is neither ``"multipole"`` nor ``"local"``.
+
+    Notes
+    -----
+    Not differentiable in the Euler angles: they are pulled out to the host with
+    ``float()`` and the block is rebuilt in NumPy, so the angles do not appear in
+    any jaxpr and carry no cotangent.
     """
     D_complex = _wigner_D_complex(ell, float(alpha), float(beta), float(gamma))
     # Adjust for the no-Condon-Shortley convention used in p2m_real_direct.
@@ -1231,8 +1354,11 @@ def compute_real_B_matrix_local(ell: int, *, dtype: DTypeLike) -> Array:
     ----------
     ell : int
         Spherical harmonic degree.
-    dtype : jnp.dtype
-        Real dtype (float32 or float64).
+    dtype : DTypeLike
+        Real working dtype (float32 or float64). The B matrix is built in
+        float64 for accuracy and cast down to this, so that the downstream
+        rotation GEMMs run in the working dtype instead of promoting float32
+        coefficient vectors to float64.
 
     Returns
     -------
@@ -1259,8 +1385,11 @@ def compute_real_B_matrix_multipole(ell: int, *, dtype: DTypeLike) -> Array:
     ----------
     ell : int
         Spherical harmonic degree.
-    dtype : jnp.dtype
-        Real dtype (float32 or float64).
+    dtype : DTypeLike
+        Real working dtype (float32 or float64). The B matrix is built in
+        float64 for accuracy and cast down to this, so that the downstream
+        rotation GEMMs run in the working dtype instead of promoting float32
+        coefficient vectors to float64.
 
     Returns
     -------
@@ -1277,6 +1406,16 @@ def compute_real_B_matrix_multipole(ell: int, *, dtype: DTypeLike) -> Array:
 @highest_matmul_precision
 def verify_real_B_matrix(ell: int, *, dtype: DTypeLike) -> Tuple[bool, float, float]:
     """Verify properties of the real B matrices (both B_T and B_U).
+
+    Parameters
+    ----------
+    ell : int
+        Spherical harmonic degree to check.
+    dtype : DTypeLike
+        Real working dtype the matrices are cast to before checking, so the
+        result reflects what the rotation GEMMs will actually see. The
+        ``1e-10`` sparsity threshold below is a float64 threshold and is not
+        adjusted for float32 -- read a float32 verdict with that in mind.
 
     Returns
     -------
@@ -1620,8 +1759,18 @@ def _translate_along_z_shift_real(
     """Vectorised real z-axis same-type shift (M2M/L2L), shared kernel.
 
     ``out[n,m] = sum_k (dz)^k/k! * coeffs[src(n,m,k)]`` over the static tables from
-    :func:`z_shift_translation_tables`. Summation is over slot ``k`` in ascending order, so
-    this is bit-identical (same fp ops, same order) to the per-(n,m) unrolled reference.
+    :func:`z_shift_translation_tables`.
+
+    Summation runs over slot ``k`` in **ascending order**, matching the term order of
+    the ``(dz)^k/k!`` series, so the accumulation order is fixed by construction and
+    reproducible across orders and batch shapes. That ordering is part of the numerics
+    and must not be rewritten -- reassociating this sum, or letting a reduction library
+    choose the order, changes results (see ``NUMERICS_AND_JAX.md``).
+
+    This docstring used to claim bit-identity to a "per-(n,m) unrolled reference". That
+    reference no longer exists -- it was replaced when the M2M/L2L z-translates were
+    table-vectorised -- so the claim was untestable as written and has been replaced by
+    the property above, which is the one this implementation actually guarantees.
     """
     p = int(order)
     coeffs = jnp.asarray(coeffs)
