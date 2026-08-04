@@ -435,8 +435,6 @@ def _measure_prepare_stage_split(
             split_enabled=True,
             grouped_interactions=ctx["grouped_interactions"],
             need_traversal_result=need_traversal_result,
-            pair_policy=pair_policy,
-            policy_state=policy_state,
         ):
             raise RuntimeError("split dual-tree build is not eligible for this config")
         traversal_config = _effective_runtime_traversal_config(tree_artifacts)
@@ -453,6 +451,8 @@ def _measure_prepare_stage_split(
             need_node_interactions=need_node_interactions,
             need_compact_far_pairs=need_compact_far_pairs,
             use_dense_interactions=use_dense_interactions_for_prepare,
+            pair_policy=pair_policy,
+            policy_state=policy_state,
         )
 
     def dual_tree_split_far_only_fn(tree_artifacts):
@@ -479,8 +479,6 @@ def _measure_prepare_stage_split(
             split_enabled=True,
             grouped_interactions=ctx["grouped_interactions"],
             need_traversal_result=need_traversal_result,
-            pair_policy=pair_policy,
-            policy_state=policy_state,
         ):
             raise RuntimeError(
                 "split dual-tree far-only build is not eligible for this config"
@@ -509,8 +507,6 @@ def _measure_prepare_stage_split(
             split_enabled=True,
             grouped_interactions=ctx["grouped_interactions"],
             need_traversal_result=need_traversal_result,
-            pair_policy=pair_policy,
-            policy_state=policy_state,
         ):
             raise RuntimeError(
                 "split dual-tree near-only build is not eligible for this config"

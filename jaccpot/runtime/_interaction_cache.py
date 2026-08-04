@@ -110,8 +110,6 @@ def _compiled_refresh_dual_planner_route(
     allow_split_build_flag: Array,
     grouped_interactions_flag: Array,
     need_traversal_result_flag: Array,
-    has_pair_policy_flag: Array,
-    has_policy_state_flag: Array,
     leaf_count: Array,
     need_node_interactions_flag: Array,
     need_compact_far_pairs_flag: Array,
@@ -121,14 +119,18 @@ def _compiled_refresh_dual_planner_route(
 
     This keeps steady-state route/plan branching in JAX control flow so the
     refresh hot path avoids repeated Python-side conditional orchestration.
+
+    A pair policy no longer routes away from the split build; it is threaded into
+    it instead. That also closes a hole: the caller's planner cache key never
+    included the policy flags, so a routing decision cached by a no-policy call
+    could be replayed for a policy call, sending it down a split build that
+    dropped the policy silently.
     """
 
     use_split_build = (
         allow_split_build_flag
         & (~grouped_interactions_flag)
         & (~need_traversal_result_flag)
-        & (~has_pair_policy_flag)
-        & (~has_policy_state_flag)
     )
     need_far_payload = (
         need_node_interactions_flag
@@ -427,23 +429,28 @@ def _can_split_dual_tree_build(
     split_enabled: bool,
     grouped_interactions: bool,
     need_traversal_result: bool,
-    pair_policy,
-    policy_state,
 ) -> bool:
     """Return whether far/near traversal can be built in separate passes.
 
-    This path is intentionally narrow. It is meant for the minimum-memory
-    streamed GPU regime where we do not need traversal tags/results and can
-    trade extra prepare work for a lower peak by never materializing far and
-    near traversal buffers in the same kernel.
+    This path is meant for the minimum-memory streamed GPU regime where we do
+    not need traversal tags/results and can trade extra prepare work for a lower
+    peak by never materializing far and near traversal buffers in the same
+    kernel.
+
+    It used to decline whenever a ``pair_policy`` or ``policy_state`` was
+    installed, which shut the Dehnen mass-dependent MAC out of the lane
+    entirely. The three yggdrax entry points the split build calls all take a
+    ``pair_policy``; jaccpot simply never passed it. They do now, so the policy
+    is carried rather than routed around -- which matters at N >= 10^7, where the
+    node-interaction buffers the monolithic build materializes
+    (``num_nodes x max_interactions_per_node``) are the binding memory
+    constraint.
     """
 
     return (
         bool(split_enabled)
         and not bool(grouped_interactions)
         and not bool(need_traversal_result)
-        and pair_policy is None
-        and policy_state is None
     )
 
 
@@ -461,9 +468,17 @@ def _build_dual_tree_artifacts_split(
     need_node_interactions: bool,
     need_compact_far_pairs: bool,
     use_dense_interactions: bool,
+    pair_policy,
+    policy_state,
     timing_callback: Optional[Callable[[str, float], None]] = None,
 ) -> _DualTreeArtifacts:
-    """Build far and near traversal products in separate Yggdrax calls."""
+    """Build far and near traversal products in separate Yggdrax calls.
+
+    ``pair_policy``/``policy_state`` have no default: every branch below runs a
+    separate traversal, and a branch that forgot to forward the policy would
+    silently fall back to the geometric MAC underneath it -- the exact
+    "faster and wronger" failure this criterion keeps producing.
+    """
     timing_enabled = timing_callback is not None
 
     def _record(name: str, start: Optional[float]) -> None:
@@ -490,6 +505,8 @@ def _build_dual_tree_artifacts_split(
                 traversal_config=traversal_config,
                 retry_logger=retry_logger,
                 timing_callback=timing_callback,
+                pair_policy=pair_policy,
+                policy_state=policy_state,
             )
         )
         _record("dual_split_shared_far_pairs_leaf_neighbors", stage_t0)
@@ -511,6 +528,8 @@ def _build_dual_tree_artifacts_split(
             process_block=pair_process_block,
             traversal_config=traversal_config,
             retry_logger=retry_logger,
+            pair_policy=pair_policy,
+            policy_state=policy_state,
         )
         _record("dual_split_interactions_and_neighbors", stage_t0)
         compact_far_pairs = None
@@ -533,6 +552,8 @@ def _build_dual_tree_artifacts_split(
             process_block=pair_process_block,
             traversal_config=traversal_config,
             retry_logger=retry_logger,
+            pair_policy=pair_policy,
+            policy_state=policy_state,
         )
         _record("dual_split_leaf_neighbors", stage_t0)
     stage_t0 = time.perf_counter() if timing_enabled else None
@@ -596,12 +617,19 @@ def _build_dual_tree_artifacts_split_strict_streamed(
     max_pair_queue: Optional[int],
     pair_process_block: Optional[int],
     traversal_config: Optional[DualTreeTraversalConfig],
+    pair_policy,
+    policy_state,
 ) -> _DualTreeArtifacts:
     """Strict static fast-lane: single compact shared far+near build call.
 
     This path intentionally avoids generic split-builder host branching and
     callback plumbing. It is valid only for streamed compact far-pairs with no
     dense/grouped/interactions payload requests.
+
+    ``pair_policy``/``policy_state`` are forwarded rather than assumed absent:
+    this branch is selected on payload shape (``fail_fast`` + compact far pairs),
+    not on whether a criterion is installed, so dropping them here would run the
+    geometric MAC under a caller that asked for the Dehnen one.
     """
 
     if traversal_config is not None:
@@ -639,6 +667,19 @@ def _build_dual_tree_artifacts_split_strict_streamed(
         "JACCPOT_STATIC_STRICT_FUSED_TREECODE_WALK", "0"
     ) not in ("0", "false", "False", "off", "OFF")
     if treecode_enabled:
+        if pair_policy is not None or policy_state is not None:
+            # The treecode walk evaluates its own device-resident `_mac_ok` from
+            # per-node extents; there is no seam for a solver-owned pair policy.
+            # Running it anyway would answer the geometric MAC while the caller
+            # asked for the Dehnen mass-dependent one, and cost nothing visible.
+            raise RuntimeError(
+                "JACCPOT_STATIC_STRICT_FUSED_TREECODE_WALK cannot carry a "
+                "solver-owned pair policy (mac_type='dehnen_error' / "
+                "adaptive_error_model='dehnen_paper'): its acceptance test is a "
+                "per-node geometric extent comparison with no policy seam, so "
+                "the criterion would be silently replaced by the geometric MAC. "
+                "Unset the env flag, or use mac_type='dehnen'."
+            )
         return _build_treecode_artifacts_strict_streamed(
             tree=tree,
             geometry=geometry,
@@ -684,6 +725,8 @@ def _build_dual_tree_artifacts_split_strict_streamed(
                 retry_logger=None,
                 timing_callback=None,
                 compact_far_pair_capacity=attempt_far_cap,
+                pair_policy=pair_policy,
+                policy_state=policy_state,
             )
             if grew:
                 _strict_streamed_retry_diag(grew)
@@ -1510,8 +1553,6 @@ def _build_dual_tree_artifacts(
                 split_enabled=bool(allow_split_build),
                 grouped_interactions=grouped_interactions,
                 need_traversal_result=need_traversal_result,
-                pair_policy=pair_policy,
-                policy_state=policy_state,
             )
         if use_split_build:
             strict_streamed_split = bool(
@@ -1532,6 +1573,8 @@ def _build_dual_tree_artifacts(
                     max_pair_queue=max_pair_queue,
                     pair_process_block=pair_process_block,
                     traversal_config=traversal_config,
+                    pair_policy=pair_policy,
+                    policy_state=policy_state,
                 )
                 if strict_streamed_split
                 else _build_dual_tree_artifacts_split(
@@ -1547,6 +1590,8 @@ def _build_dual_tree_artifacts(
                     need_node_interactions=need_node_interactions,
                     need_compact_far_pairs=need_compact_far_pairs,
                     use_dense_interactions=use_dense_interactions,
+                    pair_policy=pair_policy,
+                    policy_state=policy_state,
                     timing_callback=timing_callback,
                 )
             )
