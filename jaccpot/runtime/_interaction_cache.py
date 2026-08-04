@@ -1220,6 +1220,118 @@ def _format_capacity_error_hint(
     return " ".join(details)
 
 
+#: Identity meaning "this request must not be served from, or written to, the
+#: interaction cache at all". See :func:`pair_policy_cache_identity`.
+POLICY_IDENTITY_UNCACHEABLE = "pair_policy_identity_uncacheable_v1"
+
+
+def _hash_array_or_none(hasher: Any, label: bytes, value: Optional[Array]) -> bool:
+    """Fold ``value`` into ``hasher``; return False if it cannot be read on host."""
+
+    hasher.update(label)
+    if value is None:
+        hasher.update(b"none")
+        return True
+    try:
+        arr = np.asarray(jax.device_get(value))
+    except Exception:
+        return False
+    hasher.update(str(arr.dtype).encode("utf8"))
+    hasher.update(np.asarray(arr.shape, dtype=np.int64).tobytes())
+    hasher.update(np.ascontiguousarray(arr).tobytes())
+    return True
+
+
+def pair_policy_cache_identity(
+    *,
+    pair_policy: Any,
+    policy_state: Any,
+    eps: Optional[float],
+    force_scale_mode: Optional[str],
+    geometry_mode: Optional[str],
+    theta_max: Optional[float],
+    error_model_code: Optional[int],
+    force_scale_nodes: Optional[Array],
+    mac_geometry_radius: Optional[Array],
+) -> str:
+    """Return an identity for the *acceptance criterion* behind a build request.
+
+    :func:`_interaction_cache_key` describes geometry: topology, ``theta``, the
+    base ``mac_type``, ``dehnen_radius_scale``, basis, centre mode, caps and
+    refinement. Under the Dehnen mass-dependent MAC none of that describes what
+    is actually accepted. ``mac_type="dehnen_error"`` reports the geometric base
+    MAC ``"dehnen"`` (see ``_base_mac_type``) and paper mode pins ``theta`` at
+    1.0 because it does not gate acceptance -- so two solvers at different
+    ``adaptive_eps`` hash identically while answering different criteria.
+
+    Serving one criterion's interaction list to another request makes the solver
+    *cheaper* and silently wrong, which no cost measurement can detect (trap 6
+    in ``docs/dehnen_mass_mac_status_and_plan.md``). Measured before this
+    existed, at N=2048 / leaf 8 / eps=1e-3 with ``mac_type="dehnen_theta"``:
+    injected per-node force scales of 1e-3, 1.0 and 1e+3 -- the whole right-hand
+    side of eq (16a), across six orders of magnitude -- all returned the same
+    17520 far pairs, because the second prepare hit the cache.
+
+    Three outcomes:
+
+    * ``""`` -- nothing criterion-shaped is in play, so the geometric key is
+      already complete and keys stay exactly what they were.
+    * :data:`POLICY_IDENTITY_UNCACHEABLE` -- a solver-owned ``pair_policy`` or
+      ``policy_state`` is installed, or an input is a tracer. **Refuse to
+      cache.** A pair policy is evaluated against ``policy_state``, which is
+      built from the multipole power (hence the *masses*) and the per-particle
+      positions; the geometric key hashes neither, so no entry can honestly be
+      shown to match. Caching is a perf optimisation, so it yields -- and the
+      large-N production profile does not depend on it, because the interaction
+      cache is already off for ``static_radix`` trees.
+    * a hex digest -- the criterion is carried by data this function *can* see,
+      which is the ``dehnen_theta`` case: the criterion is folded into
+      ``geometry.radius``, so hashing those radii pins acceptance regardless of
+      what produced them.
+    """
+
+    if pair_policy is not None or policy_state is not None:
+        return POLICY_IDENTITY_UNCACHEABLE
+    if (
+        eps is None
+        and force_scale_mode is None
+        and geometry_mode is None
+        and theta_max is None
+        and error_model_code is None
+        and force_scale_nodes is None
+        and mac_geometry_radius is None
+    ):
+        return ""
+
+    hasher = hashlib.sha256()
+    hasher.update(b"pair_policy_identity_v1")
+    hasher.update(b"eps")
+    hasher.update(
+        b"none" if eps is None else np.asarray(float(eps), dtype=np.float64).tobytes()
+    )
+    hasher.update(b"force_scale_mode")
+    hasher.update(str(force_scale_mode).encode("utf8"))
+    hasher.update(b"geometry_mode")
+    hasher.update(str(geometry_mode).encode("utf8"))
+    hasher.update(b"theta_max")
+    hasher.update(
+        b"none"
+        if theta_max is None
+        else np.asarray(float(theta_max), dtype=np.float64).tobytes()
+    )
+    hasher.update(b"error_model_code")
+    hasher.update(
+        b"none"
+        if error_model_code is None
+        else np.asarray(int(error_model_code), dtype=np.int64).tobytes()
+    )
+    if not _hash_array_or_none(hasher, b"force_scale_nodes", force_scale_nodes):
+        return POLICY_IDENTITY_UNCACHEABLE
+    if not _hash_array_or_none(hasher, b"mac_geometry_radius", mac_geometry_radius):
+        return POLICY_IDENTITY_UNCACHEABLE
+    return hasher.hexdigest()
+
+
 def _interaction_cache_key(
     tree: Tree,
     *,
@@ -1237,12 +1349,21 @@ def _interaction_cache_key(
     refine_local: Optional[bool],
     max_refine_levels: Optional[int],
     aspect_threshold: Optional[float],
+    pair_policy_identity: str,
 ) -> Optional[str]:
     """Return a hash for the interaction list of a tree/theta configuration.
 
     If any tree arrays are tracers (for example under grad/jit), return ``None``
     to disable caching and avoid host round-trips on traced values.
+
+    ``pair_policy_identity`` carries everything about the *acceptance criterion*
+    that the geometric fields below cannot see; it has no default on purpose,
+    because a silent default is how the criterion came to be missing from this
+    key in the first place. See :func:`pair_policy_cache_identity`.
     """
+
+    if pair_policy_identity == POLICY_IDENTITY_UNCACHEABLE:
+        return None
 
     hasher = hashlib.sha256()
 
@@ -1311,6 +1432,8 @@ def _interaction_cache_key(
     hasher.update(np.asarray(refine_val, dtype=np.int64).tobytes())
     hasher.update(np.asarray(max_refine_val, dtype=np.int64).tobytes())
     hasher.update(np.asarray(aspect_val, dtype=np.float64).tobytes())
+    hasher.update(b"pair_policy_identity")
+    hasher.update(str(pair_policy_identity).encode("utf8"))
     return hasher.hexdigest()
 
 
