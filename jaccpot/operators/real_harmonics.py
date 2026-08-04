@@ -365,11 +365,19 @@ def p2m_real_direct(
     The cos(mφ) and sin(mφ) terms are computed via Chebyshev recurrence
     from cos φ = x/ρ and sin φ = y/ρ, avoiding trigonometric functions.
 
-    *Validation.* The resulting real-valued polynomials (scaled by (n-m)!(n+m)!)
-    match Table 3 of Dehnen (2014) for n ≤ 6 when derived via
-    ``scripts/derive_table3_polynomials.py``.
-    TODO(docs): that script is not in the repository -- was the derivation ever
-    committed, and if not, is this Table 3 agreement asserted anywhere that runs?
+    *Validation.* What actually runs is
+    ``tests/unit/operators/test_real_harmonics.py::test_p2m_real_direct_dehnen_table3``,
+    which checks the Dehnen (2014) Table 3 entries for **degree 1 only**
+    (``U_1^{-1} = y/2``, ``U_1^{0} = z``, ``U_1^{+1} = x/2``) at the three unit
+    axis directions, to ``atol=1e-10``. Degree 0 is covered separately by
+    ``test_p2m_real_direct_monopole``.
+
+    The broader claim that the scaled polynomials match Table 3 up to ``n = 6``
+    rests on a one-off derivation via ``scripts/derive_table3_polynomials.py``,
+    which was **never committed** -- there is no ``scripts/`` directory. So
+    degrees 2-6 are unverified in-repo, and the coverage that exists cannot see a
+    per-``m`` normalisation or sign error above degree 1, which is exactly the
+    class of error this packing is prone to.
 
     Raises
     ------
