@@ -1034,6 +1034,43 @@ is the **scaled error δa/f** with `f_b ≡ Σ_{a≠b} G μ_a / |x_a−x_b|²`.
    keeps leaf 256 while N grows crosses from "no far field" to "real far field" partway
    up, and reports that crossing as an N-scaling trend.
 
+   **A census harness now exists**: `bench/validation/far_pair_census.py`. Use it. It
+   also enforces traps 13 and 15 below, which are the two ways a census can lie to you.
+12. **`JAX_ENABLE_X64=0` does not give you fp32.** `yggdrax/__init__.py` calls
+   `jax.config.update("jax_enable_x64", True)` unconditionally at import, so the
+   environment variable is silently overridden and `jax.config.jax_enable_x64` reads
+   `True` either way. The first attempt at the trap-3 fp32 measurement produced
+   *bit-identical* numbers for both "precisions" and would have been reported as "fp32
+   changes nothing" — which is the right conclusion reached for entirely the wrong
+   reason. Precision is selected by the **input array dtype**, which is what the solver
+   derives `working_dtype` and the policy-state dtype from; `far_pair_census.py` and
+   `mac_error_distribution.py` take `--precision` for exactly this.
+13. **The large-N lane's prepared state carries no accept mask, so a bench that reads
+   `state.interactions` there measures zero far pairs.**
+   `_apply_large_n_gpu_production_contract` pins `retain_traversal_result=False` and
+   `retain_interactions=False` regardless of what the caller asked for, and the far field
+   is consumed into the downward locals during prepare. The failure is not a crash: the
+   count comes back 0 (or `-1`), every `--min-far-pairs` guard drops the config, and the
+   run reports **"NO configuration reaches N far pairs -- this grid measures nothing"**.
+   That happened on the first census here, for configurations that actually had 2116 and
+   13 884 far pairs. Read the count from `bench/validation/_lane_probe.py`, which hooks
+   `_build_dual_tree_artifacts` upstream of every discard; it is verified to return
+   exactly `state.interactions`' count on the generic lane.
+14. **A `None` force scale is not an error and not a no-op -- it is a *unit* force
+   scale.** `build_adaptive_policy_state` substitutes `jnp.ones(...)` when
+   `force_scale_nodes is None`, so a lane that forgets the prepass runs eq (16a) against
+   a threshold of `ε·1` instead of `ε·min_b|a_b|`: a different criterion, accepting far
+   more, running faster, reported nowhere. `AdaptivePolicyState` does not keep the scale,
+   only `target_accept_threshold = max(ε·s, 1e-24)`, so the fallback's signature is a
+   **constant** threshold across all nodes rather than an obviously wrong value.
+   `_lane_probe.check_criterion_was_applied()` raises on it, and on a build that carried
+   no `pair_policy` at all.
+15. **`preset="large_n_gpu"` pins `runtime_path="large_n"`.** So on the production preset
+   every large-N lane decline *raises* instead of quietly falling back -- which is the
+   behaviour you want, and also means the silent-decline branch is unreachable there and
+   cannot be tested under that preset. Do not add a decline reason expecting a graceful
+   fallback for preset users; they get an exception.
+
 ## The four steps
 
 ### Step 1 — Cache the force-scale prepass — **DONE (2026-08-01)**
