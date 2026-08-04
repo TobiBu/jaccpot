@@ -594,6 +594,7 @@ def measure(
         "arm": arm,
         "knob": float(knob),
         "runtime_lane": runtime_lane,
+        "solver_dtype": str(np.asarray(positions).dtype),
         "prepared_state_type": type(state).__name__,
         "large_n_path_declined_reason": declined_reason,
         "fb_fidelity": fb_fidelity,
@@ -1020,6 +1021,17 @@ def main() -> int:
             "fallback would reproduce the generic-lane numbers and read as success."
         ),
     )
+    ap.add_argument(
+        "--precision",
+        choices=("fp32", "fp64"),
+        default="fp64",
+        help=(
+            "Solver input dtype. The large-N GPU lane runs fp32 in production, so "
+            "measure it there. The O(N^2) reference is always float64 on the same "
+            "values regardless. JAX_ENABLE_X64=0 does NOT select fp32 -- yggdrax "
+            "forces x64 on at import -- so this flag is the only lever (trap 12)."
+        ),
+    )
     ap.add_argument("--json-out", default=None)
     args = ap.parse_args()
 
@@ -1100,8 +1112,19 @@ def main() -> int:
         """Sweep every arm over one (distribution, N, seed) realisation."""
 
         pos_np, mass_np = make_distribution(dist, n, seed)
-        positions = jnp.asarray(pos_np, dtype=jnp.float64)
-        masses = jnp.asarray(mass_np, dtype=jnp.float64)
+        # The solver runs at `--precision`; the reference always runs in float64 on
+        # the SAME values, cast up. Two things this gets right that the obvious
+        # spellings do not: feeding fp32 arrays straight to the reference would
+        # compute it in fp32 and it would stop being a reference, and generating the
+        # positions twice at two precisions would compare the solver against a
+        # slightly different system. Note `JAX_ENABLE_X64=0` cannot be used to select
+        # fp32 -- yggdrax forces x64 on at import (trap 12) -- so the dtype is the
+        # only lever, and it is the one the large-N lane actually runs at.
+        solver_dtype = jnp.float32 if args.precision == "fp32" else jnp.float64
+        positions = jnp.asarray(pos_np, dtype=solver_dtype)
+        masses = jnp.asarray(mass_np, dtype=solver_dtype)
+        ref_positions = jnp.asarray(np.asarray(positions), dtype=jnp.float64)
+        ref_masses = jnp.asarray(np.asarray(masses), dtype=jnp.float64)
 
         reference_targets = None
         if args.reference_subsample is not None and int(args.reference_subsample) < n:
@@ -1116,8 +1139,8 @@ def main() -> int:
             ).astype(np.int32)
 
         reference = chunked_direct_accelerations(
-            positions,
-            masses,
+            ref_positions,
+            ref_masses,
             softening=args.softening,
             G=args.G,
             block=int(args.reference_block),
@@ -1125,8 +1148,8 @@ def main() -> int:
         )
         jax.block_until_ready(reference)
         force_scale = chunked_force_scale(
-            positions,
-            masses,
+            ref_positions,
+            ref_masses,
             softening=args.softening,
             G=args.G,
             block=int(args.reference_block),

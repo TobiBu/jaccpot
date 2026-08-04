@@ -1753,10 +1753,23 @@ class PrepareMixin:
         retain_interactions_active = bool(self.retain_interactions) and not bool(
             strict_fused_device_only_hot_path
         )
-        need_traversal_result = (
-            bool(self.retain_traversal_result)
-            and not bool(strict_fused_device_only_hot_path)
-        ) or bool(use_paper_fixed_policy)
+        # The paper policy used to force this on. Nothing consumed it: the traversal
+        # result feeds `_prepare_state_extract_adaptive_far_pairs`, which runs only
+        # under `adaptive_order`, and `use_paper_fixed_policy` requires
+        # `not adaptive_order`. What the forcing *did* do was disqualify the
+        # split/streamed build (`_can_split_dual_tree_build` refuses when the
+        # traversal result is needed) and force `need_node_interactions`, so the
+        # criterion could only ever run the monolithic build and materialise
+        # `num_nodes x max_interactions_per_node` -- ~2.5 GiB at N=1e7 / leaf 256,
+        # which is the binding constraint there.
+        #
+        # Dropping it is measured, not reasoned: same solver, same inputs, the
+        # streamed path and the node-interaction path agree on the accept mask
+        # (5708 far pairs both) and on the accelerations to the last printed digit
+        # (|a|_rms 2.514572614e+03 both) at N=8192 / leaf 32 / p=4 / eps=1e-3.
+        need_traversal_result = bool(self.retain_traversal_result) and not bool(
+            strict_fused_device_only_hot_path
+        )
         traced_prepare_inputs = bool(
             _contains_tracer(
                 (tree_artifacts.positions_sorted, tree_artifacts.masses_sorted)
