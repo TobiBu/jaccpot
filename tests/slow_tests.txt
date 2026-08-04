@@ -1,6 +1,13 @@
 tests/characterization/test_fmm_golden.py::test_fmm_golden[uni_real_n256_p6]
 tests/characterization/test_fmm_golden.py::test_fmm_golden[uni_solidfmm_n1024_p4]
 tests/characterization/test_fmm_golden.py::test_fmm_golden[uni_solidfmm_n256_p2]
+tests/characterization/test_fmm_grad_golden.py::test_fmm_grad_golden[clu_real_n128_p4]
+tests/characterization/test_fmm_grad_golden.py::test_fmm_grad_golden[uni_complex_n128_p2]
+tests/characterization/test_fmm_grad_golden.py::test_fmm_grad_golden[uni_complex_n128_p4]
+tests/characterization/test_fmm_grad_golden.py::test_fmm_grad_golden[uni_real_n128_p2]
+tests/characterization/test_fmm_grad_golden.py::test_fmm_grad_golden[uni_real_n128_p4]
+tests/characterization/test_fmm_grad_golden.py::test_fmm_grad_golden[uni_real_n256_p4]
+tests/characterization/test_fmm_grad_golden.py::test_grad_golden_leaf_size_is_what_makes_the_far_field_nonempty
 tests/integration/test_fmm.py::test_compute_accelerations_reuse_cache_invalidates_on_parameter_and_value_change
 tests/integration/test_fmm.py::test_evaluate_tree_far_field_accuracy
 tests/integration/test_fmm.py::test_fmm_dense_downward_matches_sparse_path

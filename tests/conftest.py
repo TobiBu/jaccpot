@@ -86,6 +86,11 @@ _DIFF_FMM_TEST_FILES = frozenset(
         "test_gradient_correctness.py",
         "test_custom_vjp_parity.py",
         "test_nearfield_fastlane_grad_path.py",
+        # The gradient golden compiles one reverse program per (basis, order, N)
+        # case and measures 1.1-1.5 GB peak each, so it belongs on this list for
+        # exactly the reason above -- it is a characterization test, but the
+        # footprint is a differentiable-FMM footprint.
+        "test_fmm_grad_golden.py",
     }
 )
 
