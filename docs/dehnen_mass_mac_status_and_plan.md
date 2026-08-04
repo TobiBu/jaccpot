@@ -495,20 +495,35 @@ the monolithic build and still gets `state.dual_tree_result`, which
 `tests/unit/runtime/test_criterion_reaches_the_split_build.py` pins as a control so the
 split build cannot quietly become unconditional.
 
-> **A 2-pair discrepancy at 10⁶, and the split build is NOT the cause.** Two runs of the
-> same ε=3×10⁻⁵ configuration reported 1 783 414 and 1 783 416 far pairs. The obvious
-> reading — the split build disagrees with the monolithic one — was checked and is
-> **wrong**: forcing the split build on (`far_pair_census.py --split-build on`, added for
-> this) reproduces **1 783 414**, the same number the monolithic run gave. So the two
-> builds agree and something else varies by 2 pairs in 1.8 M (1.1×10⁻⁶).
+> **RESOLVED: the accept mask is not bit-reproducible at 10⁶ in fp32, and the split build
+> has nothing to do with it.** Two runs of the same ε=3×10⁻⁵ configuration reported
+> 1 783 414 and 1 783 416 far pairs, which looked like the split build disagreeing with
+> the monolithic one. It is not. Each setting run twice
+> (`far_pair_census.py --split-build {on,off}`, the flag added for this):
 >
-> The remaining candidate is that the accept mask is not bit-reproducible at 10⁶ in fp32,
-> because the force-scale prepass is not: it runs a low-order FMM evaluation whose
+> | run | `--split-build` | far pairs | prepare |
+> |---|---|---|---|
+> | 1 | on | 1 783 41**4** | 259.0 s |
+> | 1 | off | 1 783 41**6** | 751.5 s |
+> | 2 | on | 1 783 41**6** | 256.8 s |
+> | 2 | off | 1 783 41**4** | 472.4 s |
+>
+> **Both values occur under both settings**, so it is run-to-run variation, not the build
+> path. Near leaf pairs (2 964 516) and the threshold range are identical in all four.
+> The mechanism is the force-scale prepass: it runs a low-order FMM *evaluation*, whose
 > scatter-adds are order-nondeterministic on a GPU, so a 1-ulp change in one node's
 > `min_b |a_b|` flips a pair sitting inside fp32's ~1.2×10⁻⁷ relative precision of the
-> acceptance boundary. **State it as a candidate, not a conclusion** — see the
-> reproducibility check below. Either way: do not quote a 10⁶ far-pair count to more than
-> ~5 significant figures, and do not diff two runs' masks expecting exact equality.
+> acceptance boundary — the same boundary-set effect trap 3's fp32 check found to be
+> harmless in magnitude. Two pairs in 1.8 M is 1.1×10⁻⁶ of the far field.
+>
+> Operational rules: **do not quote a 10⁶ far-pair count to more than ~5 significant
+> figures, and do not diff two runs' accept masks expecting exact equality.** A
+> reproducibility test at 10⁶ must compare *statistics*, not masks.
+>
+> Bonus finding from the same four runs: **the split build is 1.8–2.9× faster**, not
+> merely lower-peak (257–259 s against 472–751 s). That strengthens the case for fixing
+> the stale predicate described under 10⁷ below — the preset is currently paying for the
+> monolithic build in both memory *and* time.
 
 Split-vs-monolithic accept masks, `_build_dual_tree_artifacts` called twice on identical
 inputs (`tests/unit/runtime/test_split_build_carries_pair_policy.py`):
