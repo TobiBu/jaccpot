@@ -144,10 +144,23 @@ def m2l_rot_scale_real_batch(
     finite but physically meaningless. The MAC that makes a pair well-separated
     is the caller's responsibility -- nothing here checks it.
 
-    TODO(docs): what is the accuracy regime as a function of ``p`` and the
-    separation ratio? ``docs/`` records the ~6e-04 TF32 floor this path avoids
-    via :mod:`jaccpot.operators._precision`, but not a truncation-error bound
-    for the rotate+scale decomposition itself.
+    **On accuracy: this function is the reference, and its own accuracy is not
+    measured.** Every test that touches the rotate+scale path compares something
+    else *to it* -- ``tests/test_m2l_real_fused_pallas.py`` checks the fused
+    pure-jnp twin and the Pallas kernel against it (rel err <1e-10 at fp64 for
+    orders 2, 3, 4; <3e-4 at fp32), and
+    ``tests/unit/operators/test_m2l_real_rot_scale.py::test_cached_blocks_m2l_matches_direct_batch``
+    checks the cached-block variant against it (order 3, 5 pairs, ``atol=1e-9``).
+    Those pin *consistency*, not correctness: they would all still pass if this
+    decomposition were uniformly wrong.
+
+    Neither axis of the accuracy regime is measured anywhere: not the truncation
+    error against a direct-summation or analytic reference as a function of ``p``,
+    and not the dependence on the source-target separation ratio. What ``docs/``
+    does record is the ~6e-04 TF32 floor this path avoids via
+    :mod:`jaccpot.operators._precision` -- a floor on the arithmetic, not a bound
+    on the scheme. Treat a required accuracy here as something to verify for your
+    own configuration rather than something this docstring can promise.
     """
     mult = jnp.asarray(multipoles)
     delta = jnp.asarray(deltas)
