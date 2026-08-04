@@ -1841,12 +1841,6 @@ class PrepareMixin:
                         need_traversal_result_flag=jnp.asarray(
                             bool(need_traversal_result), dtype=jnp.bool_
                         ),
-                        has_pair_policy_flag=jnp.asarray(
-                            has_pair_policy, dtype=jnp.bool_
-                        ),
-                        has_policy_state_flag=jnp.asarray(
-                            has_policy_state, dtype=jnp.bool_
-                        ),
                         leaf_count=jnp.asarray(leaf_count_planner, dtype=jnp.int32),
                         need_node_interactions_flag=jnp.asarray(
                             bool(need_node_interactions), dtype=jnp.bool_
