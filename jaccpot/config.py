@@ -226,9 +226,14 @@ class GradConfig:
           (30 GB peak at N=200000 against the fast lane's 6.8 GB), and requiring
           a user to know that in advance is a trap.
         * ``"bucketed"`` -- the edge-list kernel. Best at small N.
-        * ``"fast_lane"`` -- leaf-major traversal. Same edge set and the same
-          force (bit-identical checksums), different traversal. With
-          ``use_pallas`` on an Ampere+ GPU its reverse is the analytic O(N)
+        * ``"fast_lane"`` -- leaf-major traversal. Same edge set, same force, a
+          different traversal. What the suite asserts is relative L2 below 1e-13
+          on the forward and below 1e-12 on both the position and mass gradients
+          (``tests/unit/test_nearfield_fastlane_grad_path.py``, fp64) -- not
+          bit-equality. The bit-identical *force checksums* reported in
+          ``docs/differentiable_fmm.md`` come from the benchmark harness, which is
+          not part of the test suite; do not read this as an asserted invariant.
+          With ``use_pallas`` on an Ampere+ GPU the reverse is the analytic O(N)
           leaf-pair rule, which is what makes 200k--1M gradients feasible.
     nearfield_fast_lane_min_particles : int
         Crossover for ``nearfield_lane="auto"``. The default 100000 comes from

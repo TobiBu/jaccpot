@@ -182,7 +182,11 @@ class DistributedFMMConfig:
     # Near-field backend: "baseline" (pure-JAX combined [local;halo] P2P) or
     # "pallas" (fused leafpair Pallas kernel, sm_80+, the single-GPU fast-lane
     # near-field). "auto" (DEFAULT) picks pallas on Ampere+, baseline elsewhere.
-    # Numerically equivalent to baseline (validated), only the cross-leaf P2P is fused.
+    # Intended to be numerically equivalent to baseline -- only the cross-leaf P2P is
+    # fused -- but that equivalence is NOT asserted by the test suite: the pallas arm
+    # needs sm_80+ and CI runs on CPU, so `tests/test_distributed_fmm_driver.py` and
+    # `tests/test_distributed_grad_correctness.py` both pin `nearfield_backend="baseline"`.
+    # It was validated off-CI on Ampere+; treat it as a manual result, not a guarded one.
     nearfield_backend: str = "auto"
     # Local self-interaction walk: "dual_tree" (yggdrax dual-tree walk, DEFAULT) or
     # "treecode" (the single-GPU fast-lane device-resident treecode walk). The dual-tree

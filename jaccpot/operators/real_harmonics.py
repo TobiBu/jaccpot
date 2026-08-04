@@ -1745,8 +1745,18 @@ def _translate_along_z_shift_real(
     """Vectorised real z-axis same-type shift (M2M/L2L), shared kernel.
 
     ``out[n,m] = sum_k (dz)^k/k! * coeffs[src(n,m,k)]`` over the static tables from
-    :func:`z_shift_translation_tables`. Summation is over slot ``k`` in ascending order, so
-    this is bit-identical (same fp ops, same order) to the per-(n,m) unrolled reference.
+    :func:`z_shift_translation_tables`.
+
+    Summation runs over slot ``k`` in **ascending order**, matching the term order of
+    the ``(dz)^k/k!`` series, so the accumulation order is fixed by construction and
+    reproducible across orders and batch shapes. That ordering is part of the numerics
+    and must not be rewritten -- reassociating this sum, or letting a reduction library
+    choose the order, changes results (see ``NUMERICS_AND_JAX.md``).
+
+    This docstring used to claim bit-identity to a "per-(n,m) unrolled reference". That
+    reference no longer exists -- it was replaced when the M2M/L2L z-translates were
+    table-vectorised -- so the claim was untestable as written and has been replaced by
+    the property above, which is the one this implementation actually guarantees.
     """
     p = int(order)
     coeffs = jnp.asarray(coeffs)

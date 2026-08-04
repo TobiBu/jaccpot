@@ -153,8 +153,20 @@ def _resolve_basis_input(basis: Union[Basis, BasisInterface, str]) -> _BasisReso
     ``"complex"`` is an **alias** for ``"solidfmm"``, not a third basis: both
     return the same runtime basis and the same ``ComplexSHBasis`` implementation,
     so they produce bit-identical forces (measured at N=2048/p=4/theta=0.5, max
-    difference exactly 0.0). The genuine independent-basis cross-check is
-    ``real`` against ``solidfmm``, which agree to 4.5e-13 there.
+    difference exactly 0.0). Bit-equality here is structural rather than a
+    numerical coincidence, and the test that pins it is structural too:
+    ``tests/unit/test_basis_and_runner_hygiene.py`` asserts the two resolve to the
+    same object, which is the only way to pin an alias.
+
+    The genuine independent-basis cross-check is ``real`` against ``solidfmm``.
+    The 4.5e-13 figure is a **float64** result at that same N=2048/p=4/theta=0.5
+    configuration; it is not what the suite enforces, and it does not carry to
+    fp32. What the suite asserts is relative L2 below 1e-6 for the fp64
+    acceleration-and-derivative-tower parity
+    (``tests/test_real_basis_runtime.py::test_real_basis_acceleration_derivatives_match_complex``,
+    N=128) and below 3e-2 for the fp32 tracking test at N=96 -- the latter being
+    considerably slacker than fp32 basis-change round-off should require, which is
+    a tolerance worth re-measuring rather than a difference worth expecting.
     """
     if isinstance(basis, str):
         basis_norm = basis.strip().lower()
