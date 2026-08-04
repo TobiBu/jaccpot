@@ -495,15 +495,20 @@ the monolithic build and still gets `state.dual_tree_result`, which
 `tests/unit/runtime/test_criterion_reaches_the_split_build.py` pins as a control so the
 split build cannot quietly become unconditional.
 
-> **Open observation, not yet explained.** At N=10⁶ / fp32 the two builds agree exactly
-> at four of the five ε values, and differ by **2 far pairs in 1 783 416** (1.1×10⁻⁶) at
-> ε=3×10⁻⁵: 1 783 414 monolithic against 1 783 416 split. Bit-identical at N≤2048/fp64
-> (the table above), so the likely cause is two pairs sitting within fp32's ~1.2×10⁻⁷
-> relative precision of the acceptance boundary and being rounded differently by the
-> split build's separate pass — a boundary-set effect, not a criterion difference. **It
-> has not been A/B'd directly** (that needs two 10⁶ prepares with the split build forced
-> on and off), so treat it as unverified. Worth closing before quoting either build's
-> far-pair count to more than ~5 significant figures.
+> **A 2-pair discrepancy at 10⁶, and the split build is NOT the cause.** Two runs of the
+> same ε=3×10⁻⁵ configuration reported 1 783 414 and 1 783 416 far pairs. The obvious
+> reading — the split build disagrees with the monolithic one — was checked and is
+> **wrong**: forcing the split build on (`far_pair_census.py --split-build on`, added for
+> this) reproduces **1 783 414**, the same number the monolithic run gave. So the two
+> builds agree and something else varies by 2 pairs in 1.8 M (1.1×10⁻⁶).
+>
+> The remaining candidate is that the accept mask is not bit-reproducible at 10⁶ in fp32,
+> because the force-scale prepass is not: it runs a low-order FMM evaluation whose
+> scatter-adds are order-nondeterministic on a GPU, so a 1-ulp change in one node's
+> `min_b |a_b|` flips a pair sitting inside fp32's ~1.2×10⁻⁷ relative precision of the
+> acceptance boundary. **State it as a candidate, not a conclusion** — see the
+> reproducibility check below. Either way: do not quote a 10⁶ far-pair count to more than
+> ~5 significant figures, and do not diff two runs' masks expecting exact equality.
 
 Split-vs-monolithic accept masks, `_build_dual_tree_artifacts` called twice on identical
 inputs (`tests/unit/runtime/test_split_build_carries_pair_policy.py`):
@@ -703,6 +708,15 @@ upward pass that the criterion work uncovered. Step 1 (cache the force-scale pre
 is done: steady-state prepare overhead went from **5.87× to 0.98×** at N=16384/p=8.
 Step 2 (eq 16b) is validated and **positive** — it beats eq (16a). Step 3 (fold the
 criterion into per-node opening angles) is **refuted**, structurally.
+
+**Step 3′ is done (2026-08-04): the criterion runs on the large-N GPU lane, and N=10⁶ has
+been measured.** At leaf 256 the criterion is 12–31 % *cheaper* than fixed θ at matched
+median while collapsing the tail by 4.5–4.9× (eq 16a) or 10.8–11.9× (eq 16b's O(N)
+estimator) — real, but well short of the 21–41× measured at N=10⁵ with the same leaf.
+Holding leaf fixed while N grows deepens the tree, which is exactly what item 2b says
+erodes the advantage, so **the next measurement is a leaf sweep at 10⁶ (512/1024/2048),
+not another N point.** N=10⁷ is blocked on a stale split-build predicate — one line, and
+identified. See item 4.
 
 Open: whether the benefit holds at Dehnen's ε = 2×10⁻⁷ (never measured); the N-scaling
 trend; the O(N) `f_b` estimator; fast-lane access; and the cartesian basis's unexplained

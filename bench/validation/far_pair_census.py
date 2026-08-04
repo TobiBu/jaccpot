@@ -68,6 +68,7 @@ def _solver(
     G: float,
     runtime_lane: str,
     force_scale_mode: str,
+    split_build: str,
     max_pair_queue: Optional[int],
     max_interactions_per_node: Optional[int],
 ) -> FastMultipoleMethod:
@@ -87,7 +88,11 @@ def _solver(
         cfg.runtime,
         retain_traversal_result=True,
         retain_interactions=True,
-        prepare_stage_memory_split_enabled=(runtime_lane == "large_n"),
+        prepare_stage_memory_split_enabled=(
+            True
+            if split_build == "on"
+            else (False if split_build == "off" else (runtime_lane == "large_n"))
+        ),
     )
     if max_pair_queue is not None and max_interactions_per_node is not None:
         base = runtime.traversal_config
@@ -141,6 +146,17 @@ def main() -> None:
         help="paper_cached = eq (16a); paper_fb = eq (16b)'s O(N) estimator.",
     )
     ap.add_argument("--runtime-lane", choices=("generic", "large_n"), default="generic")
+    ap.add_argument(
+        "--split-build",
+        choices=("auto", "on", "off"),
+        default="auto",
+        help=(
+            "Force the low-peak split traversal build on or off. 'auto' means on for "
+            "--runtime-lane large_n. Use 'on'/'off' to A/B the two builds' accept "
+            "masks: they are bit-identical at small N in fp64, but at N=1e6 in fp32 "
+            "they differed by 2 far pairs in 1783416 at eps=3e-5."
+        ),
+    )
     ap.add_argument("--precision", choices=("fp32", "fp64"), default="fp32")
     ap.add_argument(
         "--min-far-pairs",
@@ -180,6 +196,7 @@ def main() -> None:
                 G=args.G,
                 runtime_lane=args.runtime_lane,
                 force_scale_mode=args.force_scale_mode,
+                split_build=args.split_build,
                 max_pair_queue=None,
                 max_interactions_per_node=None,
             )
