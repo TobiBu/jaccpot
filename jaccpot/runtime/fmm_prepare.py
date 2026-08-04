@@ -64,6 +64,7 @@ from ._interaction_cache import (
     _interaction_cache_key,
     _InteractionCacheEntry,
     _RefreshDualPlannerHint,
+    pair_policy_cache_identity,
 )
 from ._large_n_pipeline import can_use_large_n_prepare_path, prepare_large_n_state
 from ._nearfield_cache import (
@@ -921,24 +922,66 @@ class PrepareMixin:
                 dehnen_geometry_mode=self.dehnen_geometry_mode,
             )
             pair_policy = adaptive_pair_policy
-        else:
-            cache_key = _interaction_cache_key(
-                tree_artifacts.tree,
-                topology_key=tree_artifacts.topology_key,
-                tree_mode=tree_artifacts.tree_mode,
-                leaf_parameter=tree_artifacts.leaf_parameter,
-                theta=theta_val,
-                mac_type=mac_type_val,
-                dehnen_radius_scale=dehnen_radius_scale,
-                expansion_basis=self.expansion_basis,
-                center_mode=upward_center_mode,
-                max_pair_queue=self.max_pair_queue,
-                pair_process_block=self.pair_process_block,
-                traversal_config=runtime_traversal_config,
-                refine_local=refine_local_val,
-                max_refine_levels=max_refine_levels_val,
-                aspect_threshold=aspect_threshold_val,
-            )
+
+        # The cache key has to see the *acceptance criterion*, not only geometry.
+        # `dehnen_error` reports the geometric base MAC "dehnen" and paper mode
+        # pins theta at 1.0, so nothing else in the key separates two solvers at
+        # different `adaptive_eps` -- and serving one criterion's interaction list
+        # to another request is cheaper *and* silently wrong, which no cost
+        # measurement can detect. A solver-owned pair policy resolves to
+        # "uncacheable" (key None), which is what the old control flow achieved by
+        # accident: it computed the key only on the no-policy branch. Stating it
+        # here is what makes it survive the fast-lane relaxation in Step 3'.
+        criterion_active = self._uses_paper_style_force_scale()
+        folded_geometry = tree_artifacts.upward.geometry if criterion_active else None
+        cache_key = _interaction_cache_key(
+            tree_artifacts.tree,
+            topology_key=tree_artifacts.topology_key,
+            tree_mode=tree_artifacts.tree_mode,
+            leaf_parameter=tree_artifacts.leaf_parameter,
+            theta=theta_val,
+            mac_type=mac_type_val,
+            dehnen_radius_scale=dehnen_radius_scale,
+            expansion_basis=self.expansion_basis,
+            center_mode=upward_center_mode,
+            max_pair_queue=self.max_pair_queue,
+            pair_process_block=self.pair_process_block,
+            traversal_config=runtime_traversal_config,
+            refine_local=refine_local_val,
+            max_refine_levels=max_refine_levels_val,
+            aspect_threshold=aspect_threshold_val,
+            pair_policy_identity=pair_policy_cache_identity(
+                pair_policy=pair_policy,
+                policy_state=policy_state,
+                eps=(self.adaptive_eps if criterion_active else None),
+                force_scale_mode=(
+                    self.mac_force_scale_mode if criterion_active else None
+                ),
+                geometry_mode=(self.dehnen_geometry_mode if criterion_active else None),
+                theta_max=(
+                    float(getattr(self, "mac_theta_max", 1.0))
+                    if criterion_active
+                    else None
+                ),
+                error_model_code=(
+                    self._traversal_policy_error_model_code()
+                    if criterion_active
+                    else None
+                ),
+                force_scale_nodes=force_scale_nodes if criterion_active else None,
+                # `dehnen_theta` carries the criterion in `geometry.radius`
+                # rather than in a policy, so the radii the traversal will
+                # actually read are what pins acceptance here.
+                mac_geometry_radius=(
+                    folded_geometry.radius
+                    if (
+                        self._uses_per_node_effective_theta()
+                        and folded_geometry is not None
+                    )
+                    else None
+                ),
+            ),
+        )
         has_pair_policy = pair_policy is not None
         has_policy_state = policy_state is not None
         planner_hint, planner_cache_hit = self._resolve_dual_downward_planner_hint(
