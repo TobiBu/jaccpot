@@ -813,10 +813,25 @@ class FastMultipoleMethod:
         omits the far-field source-motion term that ``"accurate"`` includes, so
         they differ by a physical contribution rather than by round-off. Choose
         by accuracy requirement, not by speed alone.
-        TODO(docs): what is the size of that difference? `docs/derivatives_and_jerk.md`
-        describes both schemes but I did not find a measured error for
-        ``"fast_approx"`` against ``"accurate"`` or against a direct sum, and
-        without one there is no way to say when the fast mode is good enough.
+
+        **The difference is small, and measured.** At N=512, leaf 16, ``p=4``,
+        ``theta=0.6``, float32 the source-motion term contributes
+        **3.826e-05 relative L2** on the jerk -- a correction, not a
+        leading-order effect. The acceleration is unaffected (the same
+        measurement bounds the two modes' acceleration drift below 1e-4, which is
+        fp32 reassociation). Both figures come from
+        :func:`bench.ci_benchmark_guard._validate_accurate_jerk_differs_from_fast`,
+        which CI runs on every push; it asserts ``jerk_delta >= 1e-6``, ~40x below
+        the measured value, so it is a tripwire for the term going *missing* and
+        not an upper bound on the error.
+
+        Note what is *not* measured: the two direct-sum accuracy tests
+        (``tests/unit/test_solver_api.py``, ``5e-2`` for the default mode and
+        ``2e-3`` for ``"accurate"``) both run at ``theta=1e-4``, where almost
+        nothing is accepted as far-field. They therefore barely exercise the
+        far-field term that distinguishes the modes, and the gap between those two
+        tolerances should not be read as its size -- 3.826e-05 above is the figure
+        to use.
         """
         return self._impl.compute_accelerations_and_jerk(
             positions,
