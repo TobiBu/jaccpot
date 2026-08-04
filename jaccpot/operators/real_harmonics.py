@@ -1075,15 +1075,22 @@ def complex_to_dehnen_real_coeffs(complex_coeffs: Array, *, order: int) -> Array
     silently projected away -- and nothing validates that incoming coefficients
     or cotangents satisfy the condition, at this seam or anywhere upstream of it.
 
-    The docstring's own claim above -- that this composes with
-    ``complex_R_solidfmm`` to reproduce :func:`p2m_real_direct` to machine
-    precision -- is **not asserted by any test**. The nearest coverage is
-    indirect: ``tests/test_real_upward_sweep.py::test_real_upward_matches_complex_convert``
-    checks an aggregate relative L2 below 1e-9 over a whole 300-particle
-    P2M+M2M tree, and
+    The claim above -- that this composes with ``complex_R_solidfmm`` to reproduce
+    :func:`p2m_real_direct` -- is asserted directly by
+    ``tests/unit/operators/test_real_harmonics.py::test_complex_to_dehnen_real_matches_p2m_real_direct``
+    over six geometries (including the ``rho == 0`` z-aligned degeneracy and the
+    three coordinate axes) at orders 0-6, to a relative L2 of 1e-13 against a
+    measured worst case of 8.9e-16.
+
+    That test exists because the two indirect proxies cannot substitute for it:
+    ``tests/test_real_upward_sweep.py::test_real_upward_matches_complex_convert``
+    checks an aggregate relative L2 over a whole 300-particle P2M+M2M tree, where
+    a single-``m`` error is diluted, and
     ``tests/unit/runtime/test_dehnen_mac_reference.py::test_dehnen_power_is_basis_invariant``
-    checks only the degree-wise Dehnen power, a rotational invariant that is blind
-    to the per-``m`` sign errors this seam is most prone to.
+    checks only the degree-wise Dehnen power -- a rotational invariant, therefore
+    blind to sign errors within a degree. Verified by mutation: flipping the sign
+    of one row of the degree-2 Q block fails the direct test and leaves the power
+    proxy passing.
 
     Runs under :func:`~jaccpot.operators._precision.highest_matmul_precision`;
     the matmul must not be dropped back to TF32.

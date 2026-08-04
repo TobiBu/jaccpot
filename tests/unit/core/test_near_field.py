@@ -1040,3 +1040,105 @@ def test_collect_radix_fast_lane_counters_matches_payload_formula():
     assert int(counters.scatter_ops) == int(expected_scatter_ops)
     assert int(counters.target_batches) >= 1
     assert int(counters.source_slot_tiles) >= 0
+
+
+# ===========================================================================
+# Edge-order invariant behind the precomputed_* contract
+# ===========================================================================
+
+
+def _synthetic_neighbor_csr():
+    """A small CSR leaf-neighbour list that is deliberately not source-sorted.
+
+    Seven nodes; nodes 3..6 are the leaves. Each leaf has two neighbours, listed
+    in an order that ``argsort(source_leaf_ids)`` will genuinely permute -- which
+    is what makes the assertions below non-vacuous.
+    """
+    node_ranges = jnp.asarray(
+        [[0, 7], [0, 3], [4, 7], [0, 1], [2, 3], [4, 5], [6, 7]], dtype=INDEX_DTYPE
+    )
+    leaf_nodes = jnp.asarray([3, 4, 5, 6], dtype=INDEX_DTYPE)
+    offsets = jnp.asarray([0, 2, 4, 6, 8], dtype=INDEX_DTYPE)
+    neighbors = jnp.asarray([5, 6, 6, 3, 3, 4, 4, 5], dtype=INDEX_DTYPE)
+    return node_ranges, leaf_nodes, offsets, neighbors
+
+
+def test_prepare_leaf_neighbor_pairs_unsorted_is_positionally_aligned():
+    """``sort_by_source=False`` must keep the pair vectors aligned with ``neighbors``.
+
+    This is the unchecked half of the ``precomputed_*`` contract on
+    :func:`compute_leaf_p2p_accelerations`. A consumer handed
+    ``precomputed_target_leaf_ids`` but no ``precomputed_source_leaf_ids``
+    re-derives the sources positionally as ``leaf_lookup[neighbors]``. If the
+    stored vectors were source-sorted instead, they would be paired against
+    unsorted sources -- and because both orderings have identical shapes, no shape
+    check anywhere can detect it. The result is wrong forces with no error and no
+    NaN, which is why this invariant is worth a test rather than a comment alone.
+    """
+    node_ranges, leaf_nodes, offsets, neighbors = _synthetic_neighbor_csr()
+
+    target_ids, source_ids, valid = prepare_leaf_neighbor_pairs(
+        node_ranges, leaf_nodes, offsets, neighbors, sort_by_source=False
+    )
+
+    # Exactly the derivation a consumer performs when source ids are absent.
+    total_nodes = int(node_ranges.shape[0])
+    leaf_lookup = jnp.full((total_nodes,), -1, dtype=INDEX_DTYPE)
+    leaf_lookup = leaf_lookup.at[leaf_nodes].set(
+        jnp.arange(leaf_nodes.shape[0], dtype=INDEX_DTYPE)
+    )
+    rederived = leaf_lookup[jnp.clip(neighbors, 0, total_nodes - 1)]
+
+    assert jnp.array_equal(source_ids, rederived), (
+        "sort_by_source=False must leave source ids positionally aligned with "
+        "`neighbors`, or the consumer-side re-derivation silently mispairs edges"
+    )
+    # Targets follow the CSR row structure, so they are non-decreasing.
+    assert bool(jnp.all(jnp.diff(target_ids) >= 0))
+    assert bool(jnp.all(valid))
+
+
+def test_prepare_leaf_neighbor_pairs_sorted_breaks_positional_alignment():
+    """``sort_by_source=True`` permutes the edges -- the value the contract forbids.
+
+    Documents by assertion why the default is unsafe for anything persisted: the
+    sorted variant is a permutation of the same edge set, so it is equally valid
+    on its own, but it no longer satisfies the positional identity above.
+    """
+    node_ranges, leaf_nodes, offsets, neighbors = _synthetic_neighbor_csr()
+
+    unsorted_t, unsorted_s, unsorted_v = prepare_leaf_neighbor_pairs(
+        node_ranges, leaf_nodes, offsets, neighbors, sort_by_source=False
+    )
+    sorted_t, sorted_s, sorted_v = prepare_leaf_neighbor_pairs(
+        node_ranges, leaf_nodes, offsets, neighbors, sort_by_source=True
+    )
+
+    # Non-vacuity: if these ever coincided the test above would prove nothing.
+    assert not jnp.array_equal(unsorted_t, sorted_t)
+    assert not jnp.array_equal(unsorted_s, sorted_s)
+
+    # Same edge set, different order -- and now source-major.
+    assert jnp.array_equal(jnp.sort(unsorted_t), jnp.sort(sorted_t))
+    assert jnp.array_equal(jnp.sort(unsorted_s), jnp.sort(sorted_s))
+    assert bool(jnp.all(jnp.diff(sorted_s) >= 0))
+    assert int(jnp.sum(unsorted_v)) == int(jnp.sum(sorted_v))
+
+
+def test_prepare_leaf_neighbor_pairs_drops_padding_edges():
+    """Negative ``neighbors`` padding must be masked out, not wrapped to leaf 0.
+
+    ``leaf_lookup[-1]`` would index the last row, so the implementation clips and
+    masks. Without the mask a padded edge becomes a real interaction.
+    """
+    node_ranges, leaf_nodes, offsets, _ = _synthetic_neighbor_csr()
+    padded = jnp.asarray([5, -1, 6, -1, 3, -1, 4, -1], dtype=INDEX_DTYPE)
+
+    _, source_ids, valid = prepare_leaf_neighbor_pairs(
+        node_ranges, leaf_nodes, offsets, padded, sort_by_source=False
+    )
+
+    expected_valid = jnp.asarray([True, False] * 4)
+    assert jnp.array_equal(valid, expected_valid)
+    # The masked-out slots may hold anything; only the valid ones are contractual.
+    assert bool(jnp.all(source_ids[valid] >= 0))
