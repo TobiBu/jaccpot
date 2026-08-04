@@ -70,6 +70,7 @@ def prepare_large_n_state(
     collected_retries: list[DualTreeRetryEvent],
     tree_artifacts: Optional[Any] = None,
     dual_downward_artifacts: Optional[Any] = None,
+    supplied_force_scale: Optional[Array] = None,
     fused_device_mode: bool = False,
     execution_config_override: Optional[Any] = None,
     large_n_env_cfg_override: Optional[dict[str, Any]] = None,
@@ -99,8 +100,22 @@ def prepare_large_n_state(
     built_tree_artifacts = tree_artifacts is None
     built_dual_downward_artifacts = dual_downward_artifacts is None
 
+    # The Dehnen mass-dependent MAC needs its per-node force scale resolved
+    # *between* the tree/upward build and the dual build: the criterion's
+    # threshold is `eps * min_b |a_b|` (eq 16a) or `eps * min_b f_b` (eq 16b), and
+    # `_prepare_state_dual_and_downward` builds the policy state from whatever
+    # `force_scale_nodes` it is handed. Handing it None is not a no-op --
+    # `build_adaptive_policy_state` substitutes `jnp.ones(...)`, so the traversal
+    # would run a threshold of `eps * 1`: a different criterion, entirely
+    # silently. The fused tree+dual helper leaves no seam for the prepass, so a
+    # criterion run takes the unfused path.
+    criterion_active = bool(
+        getattr(fmm, "_uses_paper_style_force_scale", None)
+    ) and bool(fmm._uses_paper_style_force_scale())
+
     if (
         not bool(disable_fused_tree_dual_prepare)
+        and not criterion_active
         and tree_artifacts is None
         and dual_downward_artifacts is None
     ):
@@ -164,10 +179,41 @@ def prepare_large_n_state(
             )
 
         stage_t0 = _now()
+        force_scale_nodes = None
+        if criterion_active and dual_downward_artifacts is None:
+            force_scale_nodes = fmm._resolve_force_scale_nodes_for_prepare(
+                tree_artifacts=tree_artifacts,
+                supplied_force_scale=supplied_force_scale,
+                positions_arr=positions_arr,
+                masses_arr=masses_arr,
+                bounds=bounds,
+                leaf_size=int(leaf_size),
+                max_order=int(max_order),
+                jit_tree=jit_tree_override,
+                upward_center_mode=upward_center_mode,
+                runtime_traversal_config=runtime_traversal_config,
+                runtime_m2l_chunk_size=runtime_m2l_chunk_size,
+                runtime_l2l_chunk_size=runtime_l2l_chunk_size,
+                grouped_interactions=False,
+                farfield_mode="pair_grouped",
+                record_retry=record_retry,
+                refine_local_val=refine_local_val,
+                max_refine_levels_val=max_refine_levels_val,
+                aspect_threshold_val=aspect_threshold_val,
+            )
+            if force_scale_nodes is None:
+                # Unreachable via the public surface, but the consequence of it
+                # ever becoming reachable is a silent unit force scale, so refuse.
+                raise RuntimeError(
+                    "the large-N lane was asked to run the Dehnen paper MAC but "
+                    "no per-node force scale could be resolved; the traversal "
+                    "would silently fall back to a unit scale, i.e. a threshold "
+                    "of eps*1 rather than eps*min_b|a_b|"
+                )
         if dual_downward_artifacts is None:
             dual_downward_artifacts = fmm._prepare_state_dual_and_downward(
                 tree_artifacts=tree_artifacts,
-                force_scale_nodes=None,
+                force_scale_nodes=force_scale_nodes,
                 upward_center_mode=upward_center_mode,
                 theta_val=theta_val,
                 mac_type_val=mac_type_val,
@@ -1753,22 +1799,24 @@ def can_use_large_n_prepare_path(
     if str(getattr(fmm, "complex_rotation", "")).strip().lower() != "solidfmm":
         return False
     if (
-        bool(getattr(fmm, "_uses_paper_style_force_scale"))
-        and fmm._uses_paper_style_force_scale()
+        bool(getattr(fmm, "_uses_per_node_effective_theta", None))
+        and fmm._uses_per_node_effective_theta()
     ):
-        # The Dehnen paper MAC needs a solver-owned pair policy plus a p=1 force
-        # scale prepass, neither of which this lane supports, so the whole large-N
-        # prepare path is skipped. Record why: without this the caller sees only a
-        # slowdown and has no way to tell the requested lane never engaged.
-        _record_large_n_decline(fmm, "paper_style_force_scale")
+        # `dehnen_theta` folds the criterion into `geometry.radius` *before* the
+        # dual build, via `_apply_per_node_effective_theta`. This lane has no such
+        # step, so it would run the plain geometric MAC at the solver's theta --
+        # and paper mode pins that at 1.0, so acceptance would be wildly loose
+        # rather than merely different. The mode is refuted anyway (see
+        # `_uses_per_node_effective_theta`), so decline rather than plumb it.
+        _record_large_n_decline(fmm, "per_node_effective_theta")
         if runtime_path == "large_n":
             raise RuntimeError(
                 "runtime_path='large_n' was requested explicitly, but the large-N "
-                "prepare path cannot run the Dehnen paper MAC "
-                "(mac_type='dehnen_error' / adaptive_error_model='dehnen_paper'), "
-                "which requires a solver-owned pair policy and a low-order force "
-                "scale prepass. Use mac_type='dehnen', or runtime_path='auto' to "
-                "fall back to the generic radix lane."
+                "prepare path cannot run mac_type='dehnen_theta': the criterion is "
+                "folded into per-node opening angles before the dual build, which "
+                "this lane does not do, so it would silently run the geometric MAC "
+                "at theta=1.0. Use mac_type='dehnen_error' (which this lane does "
+                "carry) or mac_type='dehnen'."
             )
         return False
     if int(positions_arr.shape[0]) != int(masses_arr.shape[0]):
