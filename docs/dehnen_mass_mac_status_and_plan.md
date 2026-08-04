@@ -379,9 +379,12 @@ only. And node masses come from a prefix sum over `node_ranges`, never from
 particles with a zero expansion, and an estimator sourced from the multipoles would have
 inherited both while reading as ordinary truncation error.
 
-### 4. Step 3′ — carry the pair policy into the fast lanes
+### 4. Step 3′ — carry the pair policy into the fast lanes — **DONE (2026-08-04)**
 
-The only remaining route to 10⁶ (Step 3 is refuted; see below).
+The only remaining route to 10⁶ (Step 3 is refuted; see below), and it works:
+`mac_type="dehnen_error"` now runs on the large-N GPU lane, and the N=10⁶ / leaf 256
+census clears in ~9 minutes where the generic lane needed ~22 minutes *per config* at
+N=10⁵. **10⁷ does not work yet** — see the end of this section.
 
 **The memory gate is measured and it clears.** `bench/validation/pair_policy_far_tag_memory.py`,
 artifact `bench/results/validation/pair_policy_far_tag_memory_1m.json`. At N=10⁶, leaf 256,
@@ -564,6 +567,32 @@ same "tightening ε pushes acceptance deeper" behaviour item 2 recorded at N=655
 **And the whole census took ~9 minutes.** The lane is why: prepare is 13–90 s per config
 at N=10⁶, against the ~22 *minutes* per config the generic lane needed at N=10⁵ / leaf 64
 (trap 11's table). That is the point of Step 3′ stated as a number.
+
+### N = 10⁷ — **NOT reached, and the blocker is identified rather than guessed**
+
+The 10⁷ census **OOMed on a 4.77 GiB allocation inside `_dual_tree_build_raw`** — i.e.
+inside the *monolithic* dual-tree walk, on a lane whose whole purpose is to avoid it. The
+cause is a stale predicate, not a capacity that needs raising:
+
+`allow_split_build` falls back to `_streamed_minimum_memory_gpu_default_split_build`,
+which is computed in `__init__` from `memory_objective == "minimum_memory"` and
+`streamed_far_pairs` — **before** `_apply_large_n_gpu_production_contract` coerces those
+very fields. So on `preset="large_n_gpu"` the predicate reads
+`memory_objective="balanced"`, comes out **False**, and the preset silently runs the
+monolithic build it exists to avoid. Both bench harnesses now pass
+`prepare_stage_memory_split_enabled=True` explicitly on the lane, which is why the
+smaller runs are unaffected.
+
+That is left as a **finding, not a fix**: flipping the default build path for every
+`large_n_gpu` user is a performance change (the split build trades extra prepare work for
+a lower peak) and deserves its own measurement, which is not this document's item. Fixing
+it is one line in the contract — recompute the predicate after the coercions.
+
+So the next session's 10⁷ attempt should (a) re-run the census with the split build
+explicitly on, which is now the harness default, and (b) expect to size
+`max_pair_queue`/`max_interactions_per_node` fresh, per trap 4 — the caps converged at
+10⁶ are not the caps for 10⁷, and an oversized *interaction* capacity OOMs where an
+oversized queue is merely wasteful.
 
 ### 5. Loose ends
 
