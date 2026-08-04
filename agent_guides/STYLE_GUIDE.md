@@ -148,7 +148,7 @@ Long modules and functions are broken up with a plain dashed rule and a label:
 
 A unit needing more than about four such sections is usually asking to be split — but split
 along conceptual seams (upward sweep / traversal / operator algebra / accumulation), never
-by line count. `jaccpot/nearfield/near_field.py` (4182 lines) and
+by line count. `jaccpot/nearfield/near_field.py` (4268 lines) and
 `jaccpot/runtime/kernels/core.py` (3827 lines) are the standing counter-examples; new code
 should not grow that way.
 
