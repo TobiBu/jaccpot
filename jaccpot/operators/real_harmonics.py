@@ -1047,14 +1047,35 @@ def complex_to_dehnen_real_coeffs(complex_coeffs: Array, *, order: int) -> Array
     Notes
     -----
     A single matmul against a fixed basis-change matrix, so differentiable in
-    ``complex_coeffs``. Only the real part is kept, so the VJP discards the
-    imaginary cotangent: a gradient taken through this conversion sees no
-    dependence on the imaginary components of its input.
-    TODO(docs): is that loss benign? It should be for coefficient arrays
-    satisfying the reality condition that makes the conversion exact in the
-    forward direction, but I could not confirm which convention that is in this
-    normalisation, and the answer decides whether a gradient through the
-    complex-to-real seam is exact or merely projected.
+    ``complex_coeffs``.
+
+    **Forward: nothing is lost.** The reality condition is stated in
+    :mod:`jaccpot.operators.complex_harmonics` -- Dehnen normalization, no
+    Condon-Shortley phase, and ``H_n^{-m} = (-1)^m conj(H_n^m)`` -- and the
+    ``(p+1)^2`` layout is *redundant* rather than packed:
+    :func:`~jaccpot.operators.complex_harmonics._pack_complex` fills the negative
+    ``m`` slots as ``(-1)^|m| conj(coeff[n, |m|])``, so both ``+m`` and ``-m`` are
+    present and conjugate-related. ``build_Q_dehnen_no_sqrt2`` recombines each
+    conjugate pair, which makes the imaginary part of the product structurally
+    zero. Taking ``jnp.real`` therefore discards only round-off, for any input
+    satisfying the condition.
+
+    **Reverse: the cotangent is projected, and that is not checked.** Only the
+    real part is kept, so the VJP has no dependence on the imaginary components
+    of its input. For a cotangent that itself respects the conjugate symmetry
+    this is the right adjoint. For one that does not, the violating part is
+    silently projected away -- and nothing validates that incoming coefficients
+    or cotangents satisfy the condition, at this seam or anywhere upstream of it.
+
+    The docstring's own claim above -- that this composes with
+    ``complex_R_solidfmm`` to reproduce :func:`p2m_real_direct` to machine
+    precision -- is **not asserted by any test**. The nearest coverage is
+    indirect: ``tests/test_real_upward_sweep.py::test_real_upward_matches_complex_convert``
+    checks an aggregate relative L2 below 1e-9 over a whole 300-particle
+    P2M+M2M tree, and
+    ``tests/unit/runtime/test_dehnen_mac_reference.py::test_dehnen_power_is_basis_invariant``
+    checks only the degree-wise Dehnen power, a rotational invariant that is blind
+    to the per-``m`` sign errors this seam is most prone to.
 
     Runs under :func:`~jaccpot.operators._precision.highest_matmul_precision`;
     the matmul must not be dropped back to TF32.
