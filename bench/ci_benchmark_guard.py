@@ -57,15 +57,28 @@ def _validate_metrics(metrics: dict[str, float]) -> None:
             f"jerk_accurate_over_fast out of guard range: {ratio_acc:.3f} "
             "(expected 0.9..15.0)"
         )
-    if not (1.0 <= ratio_td2 <= 12.0):
+    # Lower bounds 1.0 -> 0.8 on both derivative ratios. The 1.0 floor asserted
+    # that each extra time derivative costs at least as much as the previous one,
+    # which is true in expectation but sits *inside* the run-to-run spread of a
+    # 3-sample timing on a shared runner -- so it was a knife-edge, not a guard.
+    #
+    # Measured over 5 consecutive local CPU runs at the CI configuration
+    # (n=512, runs=3, warmup=1, float32): td3/td2 = 1.008, 1.038, 1.094, 1.119
+    # and one run below 1.0 -- a ~20% false-failure rate. CI itself produced
+    # 0.953. td2/jerk sits equally close, at 1.074..1.225.
+    #
+    # 0.8 keeps the check meaningful (a derivative becoming dramatically cheaper
+    # than the one below it still trips it) while clearing the observed spread,
+    # which is what this module's docstring already says it is trying to do.
+    if not (0.8 <= ratio_td2 <= 12.0):
         raise RuntimeError(
             f"time_deriv2_accurate_over_jerk_accurate out of guard range: {ratio_td2:.3f} "
-            "(expected 1.0..12.0)"
+            "(expected 0.8..12.0)"
         )
-    if not (1.0 <= ratio_td3 <= 12.0):
+    if not (0.8 <= ratio_td3 <= 12.0):
         raise RuntimeError(
             f"time_deriv3_accurate_over_time_deriv2_accurate out of guard range: {ratio_td3:.3f} "
-            "(expected 1.0..12.0)"
+            "(expected 0.8..12.0)"
         )
 
 
