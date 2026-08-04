@@ -1057,23 +1057,30 @@ def complex_to_dehnen_real_coeffs(complex_coeffs: Array, *, order: int) -> Array
     A single matmul against a fixed basis-change matrix, so differentiable in
     ``complex_coeffs``.
 
-    **Forward: nothing is lost.** The reality condition is stated in
-    :mod:`jaccpot.operators.complex_harmonics` -- Dehnen normalization, no
-    Condon-Shortley phase, and ``H_n^{-m} = (-1)^m conj(H_n^m)`` -- and the
+    **Forward: nothing is lost, for conforming input.** The reality condition is
+    stated in :mod:`jaccpot.operators.complex_harmonics` -- Dehnen normalization,
+    no Condon-Shortley phase, and ``H_n^{-m} = (-1)^m conj(H_n^m)`` -- and the
     ``(p+1)^2`` layout is *redundant* rather than packed:
     :func:`~jaccpot.operators.complex_harmonics._pack_complex` fills the negative
     ``m`` slots as ``(-1)^|m| conj(coeff[n, |m|])``, so both ``+m`` and ``-m`` are
     present and conjugate-related. ``build_Q_dehnen_no_sqrt2`` recombines each
-    conjugate pair, which makes the imaginary part of the product structurally
-    zero. Taking ``jnp.real`` therefore discards only round-off, for any input
-    satisfying the condition.
+    conjugate pair, and the imaginary part of the product comes out **exactly**
+    zero -- measured, not merely bounded.
 
-    **Reverse: the cotangent is projected, and that is not checked.** Only the
-    real part is kept, so the VJP has no dependence on the imaginary components
-    of its input. For a cotangent that itself respects the conjugate symmetry
-    this is the right adjoint. For one that does not, the violating part is
-    silently projected away -- and nothing validates that incoming coefficients
-    or cotangents satisfy the condition, at this seam or anywhere upstream of it.
+    Note the easily-missed half of that condition: at ``m = 0`` it reads
+    ``H_n^0 = conj(H_n^0)``, i.e. **the m=0 coefficients must be real**.
+    ``complex_R_solidfmm`` satisfies this (its m=0 entries have exactly zero
+    imaginary part). An array that is conjugate-symmetric for ``m != 0`` but has
+    complex ``m = 0`` entries does *not* conform, and for such input
+    ``Im(coeffs @ q_full.T)`` is a substantial fraction of the real part
+    (measured ~0.6 at order 3) -- so ``jnp.real`` would silently discard real
+    information. Nothing here validates the condition; it is a precondition.
+
+    **Reverse: the gradient is complete.** ``jnp.real`` does not make the VJP blind
+    to the imaginary components -- ``Q`` is complex, so ``Im(coeffs)`` contributes
+    to ``Re(coeffs @ q_full.T)`` and the returned cotangent has a nonzero imaginary
+    part. This is the correct adjoint of the R-linear map, and it agrees with finite
+    differences along both real and imaginary perturbation directions.
 
     The claim above -- that this composes with ``complex_R_solidfmm`` to reproduce
     :func:`p2m_real_direct` -- is asserted directly by
