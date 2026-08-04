@@ -13,7 +13,8 @@ Self-contained: a fresh session should be able to pick this up without prior con
 | **5. `dehnen_theta`** | **Keep.** Its retention is now pinned by `tests/unit/runtime/test_refuted_dehnen_theta_mode.py` (4 cases) instead of asserted in prose — nothing previously tested the `FutureWarning` or that the mode still ran. |
 | **1. Dehnen's ε** | **ANSWERED: the benefit holds at ε=2e-7, and is larger than at N=4096.** Matched on median at N=16384/leaf 16: Plummer rms **5.8–11.1×** and p99.99 **9.6–18.9×** for eq (16a), **9.4–24.9×** and **22.8–47.3×** for eq (16b) via the O(N) estimator, at 1.00–1.04× work; bulge+halo **70–218×** rms at **0.92–0.98×** work. The specified configuration had to be corrected first — at leaf 256 the sweep is degenerate, see trap 11. |
 | **1b. N=10⁵ at a production leaf** | **DONE and stronger there.** Leaf 64, 2 seeds, matched median: eq (16a) rms **18.4×** / p99.99 **22.0×**, eq (16b) estimator **35.9×** / **53.9×**, work 1.01–1.05×. |
-| **2. N-scaling *trend*** | Running at fixed leaf 16 across N=16384/32768/65536 × 3 seeds — the only clean way to separate an N-trend from a leaf-size effect. |
+| **2. N-scaling *trend*** | **Measured; at fixed leaf 16 it decays** (p99.99 ~12× → ~5× over N = 16384 → 65536, work 1.0 → 1.2×, all 3 seeds agreeing). |
+| **2b. Leaf-size sweep** | **RESOLVED, and it is the session's main finding: the advantage is controlled by tree DEPTH, not N.** At N=10⁵, p99.99 rises 5× → 7× → 16× → 35× → 31× and work falls 1.17× → 1.14× → 1.07× → 1.02× → **1.00×** across leaf 16 → 32 → 64 → 128 → **256**. The ladder was deepening the tree, not probing N. At leaf 16 the criterion is actually **worse than fixed θ on p99** (0.76–0.83×). |
 
 Two defects found on the way, both in shipped behaviour — and the first of them
 means **eq (16a) was measurably weaker than it should have been in every prior
@@ -288,18 +289,60 @@ Two methodology notes for whoever repeats this:
 joined on position in the matched ladder rather than on the target value (each seed's
 usable range differs slightly, so the absolute targets never coincide).
 
-### 2b. Leaf-size sweep at fixed N — **the deciding measurement, in flight**
+### 2b. Leaf-size sweep — **RESOLVED: tree depth is the controlling variable, not N**
 
-Sweeps leaf ∈ {16, 32, 64, 128, **256**} at one N so leaf size is the only thing that
-changes. 256 is the fiducial production value (what the 1M runs use), which is the whole
-reason this matters: if the advantage is a function of tree depth rather than of N, then
-the claim has to be stated at the leaf size production actually uses.
+`results/validation/mac_leafsweep_n1e5_leaf{16,32,64,128,256}.json`. N=10⁵ fixed, p=8,
+Plummer, 2 seeds, matched on median, per-leaf knob grids bracketed from a census, both
+guards on (`--min-far-pairs 5000`, `--max-p9999 1.0`).
 
-**A single θ grid cannot serve the whole range** — trap 11's table shows leaf 16 and leaf
-256 differ by four orders of magnitude in far-pair count at the same θ — so the far-pair
-census comes first and sets a per-leaf θ range. Expect leaf 256 to be thin at N=10⁵
-(390 leaves); recording *how* thin, with numbers, is itself the quantitative form of
-trap 11 and is what explains the conflict above.
+Read at a **common absolute matched median** — the same target at every leaf size, not
+each leaf's own range midpoint, because the advantage grows as the tolerance loosens and
+midpoint-reading would confound leaf size with accuracy level. Both seeds shown
+individually; the scatter matters:
+
+**matched median = 7.5×10⁻⁸**
+
+| leaf | leaves | rms × | p99.99 × | p99 × | work × | fixed's far pairs |
+|---|---|---|---|---|---|---|
+| 16 | 6250 | 5.6, 7.4 | 5.2, 4.6 | **0.83, 0.76** | 1.16, 1.18 | 5 509 383 |
+| 32 | 3125 | 7.3, 7.7 | 7.0, 5.2 | 1.30, 1.09 | 1.12, 1.16 | 1 560 266 |
+| 64 | 1562 | 9.5, 16.5 | 14.2, 17.7 | 2.73, 2.19 | 1.06, 1.08 | 354 029 |
+| 128 | 781 | 18.5, 20.6 | 33.3, 37.6 | 3.45, 3.27 | 1.02, 1.02 | 63 716 |
+| **256** (fiducial) | 390 | 20.3, 13.4 | **41.3, 21.1** | 3.37, 3.25 | **1.00, 1.00** | 9 640 |
+
+**Monotone in every column, and the same ordering holds at all three common targets**
+(7.5e-8, 5.4e-7, 3.9e-6). At the loosest, leaf 256 reaches p99.99 165×/65× against leaf
+16's 4.1×/3.6×.
+
+**This resolves the item-2 conflict.** Nothing was decaying with N. The ladder held leaf
+16 fixed while N grew, which *deepens the tree*, and depth is what erodes the advantage —
+so the ladder was walking down this table rather than measuring an N effect. Item 1b's
+leaf-64 point and this sweep agree once leaf size is controlled for.
+
+**The finding that only appears if you look past the tail: at leaf 16 the p99 ratio is
+0.76–0.83.** The criterion is *worse* than fixed θ on p99 there, at 16–18 % more work.
+On deep trees it is a net loss on p99 and only the extreme tail still favours it. This
+document's insistence on quoting p99.99 rather than p99 is what kept that hidden — the
+tail ratio is 4.6–5.2× at leaf 16 and looks like a win.
+
+**Mechanism**, visible in the last column: to reach the same median accuracy the fixed-θ
+arm needs 5.5 M far pairs at leaf 16 but only 9 640 at leaf 256 — 570× less far field for
+the criterion to be selective about. eq (16a) earns its advantage by *declining*
+interactions a fixed angle would accept; when the far field is already thin, there is
+little left to decline, and the acceptance decisions it does make are individually much
+more valuable.
+
+Caveats. **2 seeds only**, and the scatter is real — leaf 256 gives p99.99 41.3 and 21.1
+on the two seeds, so **leaf 128 and leaf 256 are not separable** at this sample size, and
+neither is any claim finer than the monotone trend. The **work** column is the more
+reliable signal: 1.16–1.18 → 1.12–1.16 → 1.06–1.08 → 1.02 → 1.00, monotone with no
+overlap between adjacent leaf sizes at all.
+
+**Consequence for the paper.** State the claim at production leaf sizes and say so. At
+leaf 256, N=10⁵: p99.99 21–41× at **1.00×** interaction work. Do not state it as a
+general property of the criterion — at leaf 16 it is ~5× on the tail and a *loss* on p99.
+And note that leaf 256 is only meaningful at N ≳ 10⁵ in the first place (trap 11), so the
+regime where the criterion looks best is also the regime production actually runs.
 
 ### 3. Step 2 production — the O(N) `f_b` estimator — **DONE (2026-08-02)**
 
@@ -1180,8 +1223,9 @@ four original conditions are now met at N=4096; only the N ≥ 10⁵ scaling is 
 | warm-call prepare overhead ≤ 1.3× | **met**: 0.98× after Step 1. eq (16b) is *cheaper* still — its prepass needs only the traversal, not a low-order FMM evaluation |
 | eq (16b) reachable in O(N) | **met (2026-08-02)**: the estimator retains the exact-`f_b` result inside seed spread, so the ~2× tail gain over (16a) is production-reachable |
 | holds at Dehnen's ε = 2e-7 | **met (2026-08-02)**: matched on median at N=16384/leaf 16, Plummer rms 5.8–11.1× / p99.99 9.6–18.9× for (16a) and 9.4–24.9× / 22.8–47.3× for (16b); bulge+halo 70–218× rms at 0.92–0.98× work. ε=2e-7 is inside the swept range, not at an endpoint |
-| holds at N ≥ 10⁵ | **CONTESTED — do not quote either way yet.** One N=10⁵ point at leaf 64 (2 seeds) gives eq (16a) rms 18.4× / p99.99 22.0× at 1.01–1.05× work. But the fixed-leaf-16 ladder decays: p99.99 3.0–8.5× at N=65536, at 1.07–1.20× work, consistently across 3 seeds. This row was marked "met" on the leaf-64 point alone before the ladder existed; that was premature. Item 2b decides it |
-| the N-*trend* at fixed leaf | **measured, and it decays** at leaf 16: p99.99 ~12× → ~12× → ~5× over N = 16384 → 32768 → 65536, work 1.0 → 1.1 → 1.2×. Whether that is an N effect or a tree-depth effect is item 2b |
+| holds at N ≥ 10⁵ **at a production leaf size** | **met, and this is the form the claim must take.** N=10⁵, leaf 256 (fiducial), matched median, 2 seeds: p99.99 **21–41×**, rms 13–20×, at **1.00×** interaction work. It is *not* a leaf-independent property — see the next row |
+| holds at N ≥ 10⁵ on *deep* trees | **no.** At leaf 16 / N=10⁵ the tail advantage is only 4.6–5.2× and the **p99 ratio is 0.76–0.83, i.e. worse than fixed θ**, at 16–18 % more work. Quote the claim with its leaf size attached |
+| the N-*trend* at fixed leaf | measured, and it decays at leaf 16 (p99.99 ~12× → ~5× over N = 16384 → 65536). **Item 2b showed this is a tree-depth effect, not an N effect** — the ladder was deepening the tree, and depth is what erodes the advantage |
 
 **Frame the claim on the tail, and quote p99.99.** The honest statement is not "the
 criterion is faster" (work is a wash) and not "p99 improves 1.3–2.2×" (true but
@@ -1189,6 +1233,15 @@ unremarkable). It is that the *large-error tail collapses*: p99.99/p99 is 4.3 fo
 mass MAC against 83 for fixed-θ at comparable accuracy on Plummer. That is §5.3's claim
 and it is the one the data supports. `compare_arms` now reports rms and p99.99 ratios
 directly, so there is no longer any reason to quote p99.
+
+**And attach the leaf size to it.** Item 2b makes this non-negotiable: the advantage is a
+function of tree depth, and quoting a leaf-independent number is not supportable. At the
+fiducial leaf 256 the criterion gives p99.99 21–41× at 1.00× work; at leaf 16 it gives
+4.6–5.2× on the tail and is *worse than fixed θ on p99* (0.76–0.83×) at 16–18 % more
+work. Both are true statements about the same criterion. The paper should state the
+production configuration and disclose the deep-tree behaviour rather than let a reader
+assume the headline generalises — which is exactly the mistake this document made when it
+recorded "holds at N ≥ 10⁵" as met from a single leaf-64 point.
 
 **No deviation from the paper to disclose any more.** `mac_theta_max` was the one
 disclosed deviation; trap 4 showed it was compensating for the M2M bug, and eq (16a)
