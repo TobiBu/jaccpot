@@ -125,7 +125,21 @@ def prepare_leaf_neighbor_pairs(
     *,
     sort_by_source: bool = True,
 ) -> Tuple[Array, Array, Array]:
-    """Precompute neighbor-edge leaf mappings and reorder for source locality."""
+    """Precompute neighbor-edge leaf mappings and reorder for source locality.
+
+    WARNING: the default ``sort_by_source=True`` is the **unsafe** value if the
+    result is going to be stored and handed back as one of
+    :func:`compute_leaf_p2p_accelerations`'s ``precomputed_*`` arrays. That
+    contract requires positional alignment with ``neighbors``, because a consumer
+    that is given ``target_leaf_ids`` but not ``source_leaf_ids`` re-derives the
+    latter as ``leaf_lookup[neighbors]`` -- unsorted. Source-sorted and unsorted
+    vectors have identical shapes, so nothing downstream can detect the mismatch;
+    it produces wrong forces silently. Every producer in this repository that
+    feeds the precomputed path passes ``sort_by_source=False`` explicitly.
+
+    The default stays ``True`` because the non-bucketed path uses it live for
+    gather locality and does not persist the result.
+    """
     total_nodes = node_ranges.shape[0]
     leaf_lookup = jnp.full((total_nodes,), -1, dtype=INDEX_DTYPE)
     leaf_lookup = leaf_lookup.at[leaf_nodes].set(
@@ -2851,10 +2865,32 @@ def compute_leaf_p2p_accelerations(
     size, and the test is marked ``slow`` so the smoke leg does not run it. At
     fp32 and N=96 a ``1e-5`` band is loose enough to admit a real algorithmic
     divergence, not only reassociation.
-    TODO(docs): what is the contract on the ``precomputed_*`` arrays when only
-    *some* are passed? The scatter path checks three of them together, but
-    ``precomputed_target_leaf_ids``/``precomputed_valid_pairs`` are checked
-    separately, and nothing validates that a caller's partial set is coherent.
+    **The ``precomputed_*`` contract is shape-encoded, and partial sets are
+    supported by design.** An earlier note here called this unvalidated; that was
+    wrong. The mechanism: a ``None`` is converted to a zero-size sentinel by the
+    caller in :mod:`jaccpot.runtime.fmm_evaluate`, and
+    :mod:`jaccpot.runtime.kernels.core` then admits an array only if its leading
+    dimension equals ``neighbor_list.neighbors.shape[0]`` (the scatter schedules
+    must match ``(chunk_count, chunk_flat_size)``). Anything else -- including the
+    sentinel -- is ignored and recomputed.
+
+    Three groups fall back **independently**: the target/valid pair vectors, the
+    source leaf ids, and the scatter schedules. That is what makes
+    ``_prepare_bucketed_scatter_schedules_safe`` in
+    :mod:`jaccpot.runtime.fmm_prepare` sound when it returns ``(None, None, None)``
+    on int32 overflow, on exceeding the schedule cap, or on any exception, while
+    the pair vectors stay populated. A 3-of-6 set is a normal production state,
+    not an error.
+
+    **The invariant that is *not* checked is edge order.** Precomputed vectors
+    must be positionally aligned with ``neighbor_list.neighbors`` -- i.e. built
+    with ``sort_by_source=False``. When ``precomputed_source_leaf_ids`` is absent
+    the source ids are re-derived positionally as ``leaf_lookup[neighbors]``, so a
+    source-sorted ``target_leaf_ids`` would be silently paired against unsorted
+    sources. Both orderings have the same length, so no shape check can catch it,
+    and the result is wrong forces with no error and no NaN. All in-repo producers
+    pass ``sort_by_source=False``; see :func:`prepare_leaf_neighbor_pairs`, whose
+    default is the *unsafe* value for this contract.
     """
 
     positions = jnp.asarray(positions_sorted)
