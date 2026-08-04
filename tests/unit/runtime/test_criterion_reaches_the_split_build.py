@@ -46,7 +46,7 @@ def _problem(seed: int = 0):
     )
 
 
-def _solver(*, streamed: bool, retain: bool):
+def _solver(*, streamed: bool, retain: bool, force_scale_mode: str = "paper_cached"):
     cfg = FMMAdvancedConfig()
     cfg = replace(
         cfg,
@@ -65,6 +65,7 @@ def _solver(*, streamed: bool, retain: bool):
         adaptive_eps=EPS,
         expansion_basis="solidfmm",
         softening=0.0,
+        mac_force_scale_mode=force_scale_mode,
         advanced=cfg,
     )
 
@@ -168,4 +169,44 @@ def test_the_two_far_pair_payloads_agree():
     assert rel.max() < 1e-12, (
         f"the streamed and node-interaction far-pair payloads disagree by "
         f"{rel.max():.3e} -- that is a different accept mask, not round-off"
+    )
+
+
+def test_eq_16b_runs_on_the_streamed_path_and_keeps_its_far_term():
+    """eq (16b)'s prepass must survive the streamed payload, far term included.
+
+    This is the failure that killed the first N=1e6 sweep on the lane. The prepass
+    sums exact scalar terms over near pairs and monopoles over far ones, and the
+    streamed build produced compact far pairs and then *discarded* them before the
+    estimator ran -- so `_compute_force_scale_fb_prepass_from_tree_artifacts` saw
+    neither a node interaction list nor compact pairs and raised.
+
+    The assertion that matters is not "it runs" but "the far term is still there":
+    a near-only `f_b` captures only 53-66% of the true value once there are enough
+    leaves for the far field to matter, which reads as an ordinary under-estimate
+    rather than a missing term. So compare against the node-interaction path, which
+    is the configuration eq (16b) was validated on.
+    """
+
+    positions, masses = _problem()
+
+    scales = []
+    for streamed, retain in ((False, True), (True, False)):
+        fmm = _solver(streamed=streamed, retain=retain, force_scale_mode="paper_fb")
+        engine = getattr(fmm, "_impl", fmm)
+        fmm.prepare_state(positions, masses, leaf_size=LEAF, max_order=ORDER)
+        scale = engine._last_force_scale_nodes
+        assert scale is not None, "the eq (16b) prepass produced no force scale"
+        scales.append(np.asarray(jax.device_get(scale), dtype=np.float64))
+
+    node_path, streamed_path = scales
+    assert node_path.min() != node_path.max(), (
+        "the eq (16b) force scale is constant, so this comparison cannot see a "
+        "missing far term"
+    )
+    rel = np.abs(streamed_path - node_path) / np.maximum(np.abs(node_path), 1e-300)
+    assert rel.max() < 1e-6, (
+        f"the streamed path's f_b differs from the node-interaction path's by "
+        f"{rel.max():.3e}; a dropped far term shows up here as a systematic "
+        "under-estimate of tens of percent"
     )
