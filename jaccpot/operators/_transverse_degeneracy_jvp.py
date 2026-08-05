@@ -36,17 +36,17 @@ choice produces.
 
 HOW IT IS APPLIED. Only the tangent changes:
 
-    primal : unchanged                              -> forward stays bit-identical
-    tangent: where(rho_sq > 0, existing, analytic)   -> a select, not a superposition
+    primal : unchanged                                    -> forward bit-identical
+    tangent: where(rho_sq <= eps r_sq, analytic, polar)    -> a select, not a sum
 
-The transverse tangent is routed to whichever branch can differentiate it, on exactly
-the predicate the guards themselves use (``rho_sq > 0``) -- see
-:func:`split_transverse_tangent`. Off the degenerate axis the routed tangent is
-bit-identical to the incoming one and the analytic term is exactly zero, so every
-currently-correct gradient is preserved to the last bit and both characterization
-goldens stay unmoved. On it, the guards' contribution is exactly zero anyway, so the
-select and a bare addition agree; the select is what the correctness argument rests on,
-and it is what makes the predicate the single place a future widening would go.
+The transverse tangent is routed to whichever branch can actually differentiate it --
+see :func:`split_transverse_tangent`, which also derives where the boundary goes and
+why it is wider than the ``rho_sq > 0`` the guards themselves switch on. Outside the
+band the routed tangent is bit-identical to the incoming one and the analytic term is
+exactly zero, so every gradient the polar route can still resolve is preserved to the
+last bit and both characterization goldens stay unmoved. Inside it the polar
+contribution is not zero but garbage, which is why this is a select and not a
+correction added on top.
 
 COST. Applied to a coefficient vector the formula would need one extra cascade
 evaluation per transverse axis. It needs none: the cascade is linear in its coefficient
@@ -64,6 +64,7 @@ from typing import Any, Callable, NamedTuple, Tuple
 
 import jax
 import jax.numpy as jnp
+import numpy as np
 from jaxtyping import Array
 
 from ._precision import highest_matmul_precision
@@ -113,34 +114,50 @@ def split_transverse_tangent(
     """Route the transverse tangent to whichever branch can differentiate it.
 
     Returns the tangent to hand to the cascade -- with its ``x`` and ``y`` components
-    removed wherever the azimuth is degenerate, so the guards' unusable contribution
-    never enters -- together with ``(dx/z, dy/z)``, the coefficients formula (2)/(3)
-    multiplies its commutators by, nonzero on exactly the complementary set. The two
-    branches therefore partition the input rather than superpose, which is what makes
-    the rule a select and not an approximation.
+    removed wherever the azimuth cannot be resolved, so the polar route's unusable
+    contribution never enters -- together with ``(dx/z, dy/z)``, the coefficients
+    formula (2)/(3) multiplies its commutators by, nonzero on exactly the complementary
+    set. The two branches partition the input rather than superpose, so this is a
+    select, not a correction added on top of something wrong.
 
-    On the degenerate set the removed contribution is *exactly zero* anyway -- the
-    guards select a constant, so no derivative flows -- so removing it is currently a
-    no-op and this could equally have been written as a bare addition. It is written
-    as a split because that is the property the correctness argument needs, and
-    because it is what would have to be true if the predicate were ever widened. **The
-    predicate is the place to widen it**, and there is a measured reason to want to:
-    the polar route loses transverse gradient accuracy like ``eps / rho``, so a
-    ``rho`` at round-off level is nearly as bad as ``rho == 0`` while landing on the
-    other side of this boundary. That is a separate defect from the one this module
-    fixes and it is *not* fixed here -- see the note in
+    WHERE THE BOUNDARY GOES, AND WHY IT IS NOT ``rho_sq > 0``. The polar
+    parametrisation does not only fail *at* ``rho == 0``; it degrades on approach.
+    ``d(az)/dy = -x/rho^2`` grows without bound while the ``(rho/r)^|m|`` factor that
+    annihilates the azimuth shrinks, and the transverse gradient comes out of that
+    cancellation with relative error ``~eps r / rho``. Measured on ``l2l_real`` at
+    ``z = -3``, order 4:
+
+        rho          1e-17    1e-16    1e-12    1e-9     1e-6
+        rel error    2.6e+02  1.8e+01  6.8e-04  3.5e-06  1.0e-09
+
+    The analytic branch has the complementary error: it is the ``rho -> 0`` limit, so it
+    errs ``O(rho/r)``. Setting the two equal puts the crossover at ``(rho/r)^2 == eps``,
+    i.e. ``rho_sq <= eps * r_sq``, which is what is coded below. That choice is minimax:
+    the worst relative error over all ``rho`` becomes ``~sqrt(eps)`` -- 1.5e-08 in
+    float64, 3.4e-04 in float32 -- where before it was unbounded, and it is reached only
+    on the boundary itself.
+
+    Widening the predicate this far is what makes the *split* load-bearing rather than
+    decorative. Inside the band the polar contribution is not zero, it is garbage, so it
+    has to be removed rather than added to. That is why this function returns a routed
+    tangent instead of just the scales.
+
+    A displacement lands inside the band for real reasons, not only synthetic ones: two
+    tree nodes whose ``(x, y)`` centres are mathematically equal -- same particles, same
+    masses, summed in a different order -- differ by one ulp instead of zero, which is
+    ``rho/r ~ 1e-17``. That is measured; see
     ``docs/rotation_degeneracy_derivative.md``.
 
-    The predicate is spelled ``not (rho_sq > 0)`` rather than ``rho_sq == 0`` so that
-    it is the exact complement of the ``rho_pos`` guard in the alignment builders: the
-    corrected branch must cover precisely the set those guards zero, no more and no
-    less. An ``x`` small enough that ``x * x`` underflows to zero is on the guarded
-    side for both, which keeps the two in step.
+    The band is a superset of the set the alignment guards zero, which is the ordering
+    the split needs: everything those guards hand over is covered, and so is the
+    neighbourhood where they hand over a usable-looking but wrong derivative instead.
 
     ``z != 0`` is the third regime, not a numerical safety margin. At ``delta == 0``
     formula (2)/(3) does not apply -- it divides by ``z`` -- so the scales stay zero
-    there and the existing zero cotangent stands. That case is the identity
-    translation for M2M/L2L and unphysical for M2L.
+    there and the existing zero cotangent stands. That case is the identity translation
+    for M2M/L2L and unphysical for M2L. It is also the only point the band could
+    otherwise swallow: with ``r_sq == rho_sq`` the test ``rho_sq <= eps * r_sq`` holds
+    only for ``rho_sq == 0``.
 
     Parameters
     ----------
@@ -152,16 +169,20 @@ def split_transverse_tangent(
     Returns
     -------
     cascade_tangent : Array
-        ``delta_tangent``'s shape, bit-identical to it off the degenerate set and with
-        the transverse components zeroed on it.
+        ``delta_tangent``'s shape, bit-identical to it outside the band and with the
+        transverse components zeroed inside it.
     scale_x : Array
-        ``dx / z``, shape ``delta.shape[:-1]``, exactly zero off the degenerate set.
+        ``dx / z``, shape ``delta.shape[:-1]``, exactly zero outside the band.
     scale_y : Array
         ``dy / z``, likewise.
     """
     x, y, z = delta[..., 0], delta[..., 1], delta[..., 2]
     rho_sq = x * x + y * y
-    on_axis = jnp.logical_and(jnp.logical_not(rho_sq > 0), z != 0)
+    r_sq = rho_sq + z * z
+    # ``eps`` is read at trace time from a static dtype, so the threshold is a compiled
+    # constant -- there is no runtime cost and no host sync.
+    epsilon = float(np.finfo(jnp.result_type(delta)).eps)
+    on_axis = jnp.logical_and(rho_sq <= epsilon * r_sq, z != 0)
     resolvable = jnp.logical_not(on_axis)[..., None]
     cascade_tangent = jnp.concatenate(
         [
@@ -246,9 +267,9 @@ def with_transverse_degeneracy_jvp(
     Notes
     -----
     Differentiable in ``coeffs`` and ``delta``, forward and reverse. The primal is
-    bit-identical to ``cascade``'s; the tangent is bit-identical wherever
-    ``rho > 0``. Only ``d/dx`` and ``d/dy`` on the ``rho == 0`` axis change, and only
-    where ``z != 0``.
+    bit-identical to ``cascade``'s. The tangent is bit-identical outside the band
+    :func:`split_transverse_tangent` defines; inside it, only ``d/dx`` and ``d/dy``
+    change, and only where ``z != 0``.
     """
 
     @functools.partial(jax.custom_jvp, nondiff_argnums=(2,))

@@ -207,13 +207,13 @@ def m2l_rot_scale_real_batch(
     gradient at ``delta == 0``; the guard keeps that cotangent finite (zero)
     while leaving the forward value unchanged.
 
-    A ``custom_jvp`` supplies the transverse (``d/dx``, ``d/dy``) derivative on the
-    ``rho == 0`` axis, where the alignment azimuth is undefined and the guards in
-    :func:`~jaccpot.operators.real_harmonics._multipole_align_to_z_block` would
-    otherwise return a zero cotangent -- exact forward, wrong derivative. That
-    correction is exactly zero for every ``rho > 0``, so the primal and every
-    off-axis gradient are bit-identical to what this function computed before it was
-    added. See :mod:`jaccpot.operators._transverse_degeneracy_jvp`.
+    A ``custom_jvp`` supplies the transverse (``d/dx``, ``d/dy``) derivative near the
+    ``rho == 0`` axis, where the alignment azimuth is undefined -- the guards in
+    :func:`~jaccpot.operators.real_harmonics._multipole_align_to_z_block` return a zero
+    cotangent there, exact forward and wrong derivative -- and where the polar route
+    degrades like ``eps / (rho / r)`` on approach. The analytic branch applies inside
+    exactly zero outside a narrow band around that axis (``rho <= sqrt(eps) * |delta|``, the measured crossover between the two routes' errors); outside it the primal and the gradient are bit-identical to what this
+    function computed before. See :mod:`jaccpot.operators._transverse_degeneracy_jvp`.
 
     ``delta == 0`` is degenerate for M2L and this function does not reject it:
     :func:`m2l_core_z_real` floors the radius at ``1e-30``, so the result is

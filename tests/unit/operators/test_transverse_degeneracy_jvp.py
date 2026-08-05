@@ -72,17 +72,21 @@ def _complex_coeffs(seed):
     "delta",
     [
         pytest.param([1.3, -0.7, 2.1], id="generic"),
-        pytest.param([1.0e-8, 0.0, 2.5], id="rho tiny but positive"),
+        pytest.param([1.0e-6, 0.0, 2.5], id="just outside the band"),
         pytest.param([0.0, 0.0, 0.0], id="delta == 0"),
     ],
 )
-def test_split_leaves_the_tangent_untouched_wherever_the_guards_do_not_fire(delta):
-    """Off the degenerate axis, the split must be an exact identity.
+def test_split_leaves_the_tangent_untouched_outside_the_band(delta):
+    """Outside the band, the split must be an exact identity.
 
     ``np.array_equal``, not ``allclose``: the claim in
-    :mod:`jaccpot.operators._transverse_degeneracy_jvp` is that every gradient that was
-    already correct stays correct *to the last bit*, and that only holds if the routed
-    tangent is the incoming one unchanged and both scales are exactly zero.
+    :mod:`jaccpot.operators._transverse_degeneracy_jvp` is that a gradient the polar
+    route can still resolve is left alone *to the last bit*, and that only holds if the
+    routed tangent is the incoming one unchanged and both scales are exactly zero.
+
+    ``rho = 1e-6`` at ``r = 2.5`` gives ``rho/r = 4e-7``, a factor ~27 outside the
+    ``sqrt(eps) = 1.5e-08`` boundary -- comfortably clear of it without being so far
+    away that the test stops guarding the boundary's location.
     """
     tangent = jnp.asarray([0.3, -1.7, 0.9], dtype=jnp.float64)
     routed, scale_x, scale_y = split_transverse_tangent(
@@ -94,21 +98,60 @@ def test_split_leaves_the_tangent_untouched_wherever_the_guards_do_not_fire(delt
     assert float(scale_y) == 0.0
 
 
-def test_split_and_the_alignment_guards_agree_on_the_underflow_boundary():
-    """An ``x`` whose square underflows counts as on-axis, for both.
+@pytest.mark.parametrize(
+    "delta, label",
+    [
+        pytest.param(
+            [1.0e-200, 0.0, _Z], "below the squaring underflow", id="underflow"
+        ),
+        pytest.param([5.551e-17, 0.0, _Z], "one ulp of COM cancellation", id="one ulp"),
+        pytest.param([1.0e-9, 0.0, _Z], "well inside the band", id="1e-9"),
+    ],
+)
+def test_split_claims_the_whole_band_not_just_exact_zero(delta, label):
+    """Everything the polar route cannot resolve must reach the analytic branch.
 
-    The alignment builders test ``rho_sq > 0``, and ``x = 1e-200`` gives
-    ``x * x == 0.0`` in float64, so they take their degenerate branch and emit a zero
-    transverse cotangent. The split has to put that same input on the analytic side or
-    the two stop partitioning and the point gets no transverse derivative from either.
+    The band is ``rho_sq <= eps * r_sq``, wider than the ``rho_sq > 0`` the alignment
+    guards themselves switch on, and deliberately so: inside it the polar route returns
+    a finite, plausible, wrong number rather than an obvious zero. ``1e-200`` (whose
+    square underflows, so the guards *do* fire) and ``5.551e-17`` (which is what one ulp
+    of centre-of-mass cancellation between two mathematically equal centres looks like,
+    and where the guards do *not* fire) must both land here, or a displacement gets its
+    transverse derivative from neither branch.
     """
     tangent = jnp.asarray([1.0, 1.0, 1.0], dtype=jnp.float64)
     routed, scale_x, scale_y = split_transverse_tangent(
-        jnp.asarray([1.0e-200, 0.0, _Z], dtype=jnp.float64), tangent
+        jnp.asarray(delta, dtype=jnp.float64), tangent
     )
-    assert np.array_equal(np.asarray(routed), np.array([0.0, 0.0, 1.0]))
+    assert np.array_equal(
+        np.asarray(routed), np.array([0.0, 0.0, 1.0])
+    ), f"{label}: transverse tangent was not withdrawn from the polar route"
     assert float(scale_x) == pytest.approx(1.0 / _Z, rel=1e-15)
     assert float(scale_y) == pytest.approx(1.0 / _Z, rel=1e-15)
+
+
+def test_the_band_boundary_sits_at_the_measured_crossover():
+    """``rho/r == sqrt(eps)``, and the two sides of it are actually different.
+
+    Pins the threshold itself, because it is a numerical choice rather than a
+    consequence: the analytic branch errs ``O(rho/r)`` and the polar route ``O(eps r /
+    rho)``, so equating them puts the crossover at ``(rho/r)^2 == eps`` and makes the
+    worst error over all ``rho`` about ``sqrt(eps)`` instead of unbounded. If someone
+    changes the constant, this is what says so.
+    """
+    boundary = float(np.sqrt(np.finfo(np.float64).eps)) * _Z
+    tangent = jnp.asarray([1.0, 0.0, 0.0], dtype=jnp.float64)
+    for factor, expect_analytic in ((0.5, True), (2.0, False)):
+        rho = boundary * factor
+        _, scale_x, _ = split_transverse_tangent(
+            jnp.asarray([rho, 0.0, _Z], dtype=jnp.float64), tangent
+        )
+        took_analytic = float(scale_x) != 0.0
+        assert took_analytic is expect_analytic, (
+            f"rho/r = {rho / _Z:.3e} took the "
+            f"{'analytic' if took_analytic else 'polar'} branch; sqrt(eps) = "
+            f"{np.sqrt(np.finfo(np.float64).eps):.3e}"
+        )
 
 
 def test_split_removes_the_transverse_tangent_only_on_the_axis():

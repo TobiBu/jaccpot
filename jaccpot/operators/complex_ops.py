@@ -1562,10 +1562,10 @@ def m2l_complex_reference(
 ) -> Array:
     """Reference M2L in complex basis (rotate → z-translate → rotate back).
 
-    Differentiable in both arguments, forward and reverse. On the ``rho == 0`` axis
+    Differentiable in both arguments, forward and reverse. Near the ``rho == 0`` axis
     the ``d/dx`` and ``d/dy`` cotangents come from a ``custom_jvp`` rather than from
-    differentiating ``_angles_from_delta_solidfmm``'s guarded azimuth; the correction
-    is exactly zero for every ``rho > 0``.
+    differentiating ``_angles_from_delta_solidfmm``'s guarded azimuth; the analytic
+    branch applies inside exactly zero outside a narrow band around that axis (``rho <= sqrt(eps) * |delta|``, the measured crossover between the two routes' errors).
     """
     if rotation != "solidfmm":
         raise ValueError("rotation must be 'solidfmm'")

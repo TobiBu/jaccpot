@@ -2015,10 +2015,11 @@ def m2l_a6_real_only(
     This implementation rotates multipoles using real B_U/Dz blocks, applies
     the real-only z-axis M2L recurrence, and rotates locals back with B_T/Dz.
 
-    Differentiable in both arguments, forward and reverse. On the ``rho == 0`` axis
+    Differentiable in both arguments, forward and reverse. Near the ``rho == 0`` axis
     the ``d/dx`` and ``d/dy`` cotangents come from a ``custom_jvp`` rather than from
-    differentiating the alignment azimuth, which is undefined there; the correction is
-    exactly zero for every ``rho > 0``.
+    differentiating the alignment azimuth, which is undefined there and ill-conditioned
+    nearby; the analytic branch applies inside exactly zero outside a narrow band around that axis (``rho <= sqrt(eps) * |delta|``, the measured crossover between the two routes' errors) and the polar route is left
+    untouched outside it.
     """
     multipole = jnp.asarray(multipole)
     delta = jnp.asarray(delta)
@@ -2118,11 +2119,12 @@ def m2m_real(
 
     Notes
     -----
-    Differentiable in both arguments, forward and reverse. On the ``rho == 0`` axis the
+    Differentiable in both arguments, forward and reverse. Near the ``rho == 0`` axis the
     ``d/dx`` and ``d/dy`` cotangents come from a ``custom_jvp`` rather than from
-    differentiating the alignment azimuth, which is undefined there; the correction is
-    exactly zero for every ``rho > 0``. At ``delta == 0`` -- the identity translation --
-    the cotangent stays zero, because ``|delta|`` has no derivative at the origin.
+    differentiating the alignment azimuth, which is undefined there and ill-conditioned
+    nearby; the analytic branch applies inside exactly zero outside a narrow band around that axis (``rho <= sqrt(eps) * |delta|``, the measured crossover between the two routes' errors). At ``delta == 0`` -- the identity
+    translation -- the cotangent stays zero, because ``|delta|`` has no derivative at the
+    origin.
     """
     multipole = jnp.asarray(multipole)
     delta = jnp.asarray(delta)

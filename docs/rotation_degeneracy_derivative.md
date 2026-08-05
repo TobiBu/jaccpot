@@ -8,9 +8,10 @@ Written up separately from the code because the result is reusable (it applies t
 operator built on the cascade, in both bases) and because the calibration steps below
 are the part that is easy to get wrong and expensive to redo.
 
-**Status.** The formula is derived and validated (this document). It is **not yet wired
-into the operators** — see "Implementation surface" at the end for what remains, and
-G.10 in [`refactor_audit_2026-08.md`](refactor_audit_2026-08.md) for the defect itself.
+**Status.** Derived, validated, and **wired into the operators** — §5 is what landed
+where, §6 is where the switchover boundary goes and why it is wider than `rho == 0`, §7 is
+the one set of lanes this cannot reach. G.10 in
+[`refactor_audit_2026-08.md`](refactor_audit_2026-08.md) records the defect itself.
 
 ---
 
@@ -139,47 +140,156 @@ separations):
 | `m2m_real` | 3.6e-10 |
 | `l2l_real` | 2.7e-10 |
 
-## 5. Implementation surface, and the constraint that shapes it
+## 5. What landed
 
-The rule must **not** perturb anything that currently works. The structure that
-guarantees this:
+The rule is attached at the **cascade** level, never at the alignment blocks. That is
+forced, not stylistic: at `rho == 0` an individual alignment block *is*
+direction-dependent — with `ax = 0` it reduces to `Dz(az)` for an arbitrary `az` — while
+the product is not. Only the assembled operator has a derivative to supply.
+
+The plumbing lives in `jaccpot/operators/_transverse_degeneracy_jvp.py`; each basis
+owns its own generators, next to the rotation builders they are calibrated against
+(`real_transverse_generators`, `complex_transverse_generators`).
+
+| site | operators | reached from |
+|---|---|---|
+| `operators/m2l_real_rot_scale.py` | `m2l_rot_scale_real_batch` | **production** real M2L, via `runtime/kernels/core.py::_m2l_real_batch_kernel` |
+| `operators/real_harmonics.py` | `m2l_a6_real_only` (so `m2l_real`, `m2l_optimized_real`), `m2m_real`, `l2l_real` | **production** real M2M (`upward/real_tree_expansions.py::aggregate_m2m_real_by_level`) and L2L (`runtime/kernels/core.py::_l2l_real_batch_kernel`) — these are not only reference operators |
+| `operators/complex_ops.py` | `m2l_complex_reference` (so `m2l_complex_reference_batch`), `m2m_complex`, `l2l_complex` | production complex far field |
+
+**The structure.** Only the tangent changes, and it changes as a *select*:
 
 ```
-primal : unchanged                       -> forward stays bit-identical
-tangent: where(rho_sq > 0, <existing JVP>, <analytic (2)/(3)>)
+primal : unchanged                              -> forward bit-identical
+tangent: where(rho_sq > 0, existing, analytic)   -> partitioned, not superposed
 ```
 
-so the existing derivative is preserved exactly for every `rho > 0`, and the analytic
-branch applies only on the measure-zero degenerate set the guards currently mishandle.
-Three regimes, not two:
+Off the axis the routed tangent is the incoming one bit-for-bit and the analytic term is
+exactly zero, so every gradient that was already right is preserved to the last bit. On
+it, the guards contribute exactly zero anyway, so select and add agree — the select is
+written because it is the property the correctness argument needs, and because the
+predicate is then the single place a future widening would go (§6).
 
-1. `rho_sq > 0` — existing behaviour, untouched.
-2. `rho_sq == 0` and `z != 0` — formula (2)/(3).
-3. `delta == 0` (so `z == 0` as well) — **(2)/(3) does not apply**, it divides by `z`.
-   Keep the current zero. For `m2m`/`l2l` a zero displacement is the identity
-   translation; for `m2l` a zero separation is unphysical.
+Three regimes, as designed: `rho_sq > 0` untouched; `rho_sq == 0` with `z != 0` analytic;
+`delta == 0` keeps the existing zero, because (2)/(3) divides by `z` and `|delta|` has no
+derivative at the origin.
 
-Sites needing the rule, in priority order — the production path first, since fixing
-only the reference operators would flip the operator-level tracking test while leaving
-the force gradient wrong:
+**Cost.** None in the forward pass — `custom_jvp` leaves the primal alone. None in the
+tangent either, beyond four static block-diagonal matmuls: the cascade is linear in its
+coefficient argument, so the two `F0 · G_in` terms fold into the incoming coefficient
+tangent and ride the JVP that was going to run regardless. The naive form would have cost
+one extra cascade evaluation per transverse axis.
 
-- `operators/m2l_real_rot_scale.py` — `m2l_rot_scale_real_batch`, the **production**
-  real-basis M2L (reached from `runtime/kernels/core.py::_m2l_real_batch_kernel`).
-- `operators/complex_ops.py` — `m2l_complex_reference` and the batched complex path;
-  the complex basis has the same defect, measured.
-- `operators/real_harmonics.py` — `m2l_real`, `m2m_real`, `l2l_real` (reference
-  operators; these are what the operator-level tracking test targets).
-- the M2M / L2L cascades in `upward/` and `downward/`, which share the alignment.
+**Complex-basis calibration.** Redone from scratch rather than transported from the real
+basis, and the two signs were *searched*. At order 4, `z = 2.5`, `eps = 1e-5` on
+`m2l_complex_reference` the four combinations give 2.0e+00, 1.5e+00, 9.6e-01 and
+**7.4e-11**. The survivor is `G = −B_swap Λ B_swap` with `Λ = diag(i m)`, matching the
+real basis' sign. One structural difference: the complex local rotation is built from its
+own swap matrix `B_T`, not as the transpose of the multipole one, so each representation
+takes its generator from the swap matrix its rotation blocks actually use — `G^L = −(G^M)ᵀ`
+holds in the real basis and would be a coincidence to rely on here.
 
-Two things to verify at each site beyond the obvious: that `custom_jvp` transposes
-correctly for reverse mode (the rule is linear in the tangents, so it should, but the
-FMM uses `jax.grad`, not `jax.jvp`), and that no new `@jit` boundary or host sync is
-introduced.
+Reverse-mode agreement with forward mode, at `rho == 0` and with an asymmetric direction,
+is asserted for all six operators in
+`tests/unit/operators/test_transverse_degeneracy_jvp.py`. The rule is linear in the
+tangents, so JAX transposes it; that test is what says it was written that way.
 
-The two tracking tests that must flip, both `xfail(strict=True)` so they become hard
-errors the moment they start passing:
+**Measured at the force level**, on the `_z_stacked_system(8, 4, 6.0, 3)` construction the
+tracking test uses (6 of 24 M2L pairs exactly on axis), FD versus AD:
 
-- `tests/unit/operators/test_real_harmonics.py::test_rotation_cascade_transverse_gradient_at_rho_zero`
-- `tests/unit/test_gradient_correctness.py::test_fd_vs_ad_along_a_transverse_direction_at_rho_zero`
+| basis | before | after |
+|---|---|---|
+| real | 1.9e-03 | 9.5e-06 |
+| complex | 1.8e-05 | 9.7e-06 |
 
-And both characterization oracles must stay byte-unmoved, since the primal is unchanged.
+The two bases converging on the same number is the point: what is left is a cause they
+share, and it is not this one.
+
+## 6. Where the boundary goes, and why it is not `rho == 0`
+
+The polar route does not only fail *at* `rho == 0`. It degrades on approach, and the
+first implementation of §5 — which switched on the guards' own `rho_sq > 0` — left that
+uncovered. Found while verifying this fix, and closed by widening the band.
+
+`d(az)/dy = −x/rho²` grows without bound while the `(rho/r)^|m|` factor that annihilates
+the azimuth shrinks, and the transverse gradient comes out of that cancellation with
+relative error `~eps·r/rho`. Measured on `l2l_real`, order 4, `z = −3`:
+
+| `rho` | 1e-17 | 1e-16 | 1e-12 | 1e-9 | 1e-6 |
+|---|---|---|---|---|---|
+| relative error in `d/dy` | 2.6e+02 | 1.8e+01 | 6.8e-04 | 3.5e-06 | 1.0e-09 |
+
+That is not academic, and it does not need a contrived input. **Two tree nodes whose
+`(x, y)` centres are mathematically equal — same particles, same masses, summed in a
+different order — differ by one ulp instead of zero.** In the force-level tracking test's
+own system, node 11's L2L displacement is `(5.551e-17, 0.0, +3.0)`: `rho_sq = 3.1e-33` is
+strictly positive, the guards never fire, and the polar route computes
+`d(az)/dy = −1.8e+16` — the exact derivative of a function varying that fast, evaluated
+with catastrophic cancellation. It was `y`-only there because `y == 0` exactly makes
+`d(az)/dx = y/rho² = 0`, which is both the computed and the true value, and it was
+confined to the eight particles under node 5, with per-particle errors in equal pairs
+across the two clusters as one mis-scaled delta cotangent distributed by mass must give.
+
+**The crossover.** The analytic branch is the `rho → 0` limit, so it errs `O(rho/r)`; the
+polar route errs `O(eps·r/rho)`. Equating them puts the boundary at
+
+```
+(rho/r)² == eps          i.e.   rho_sq <= eps · r_sq
+```
+
+which is what `split_transverse_tangent` codes. The choice is minimax: the worst relative
+error over all `rho` becomes `~sqrt(eps)` — 1.5e-08 in float64, 3.4e-04 in float32 — and
+is reached only on the boundary itself, where before it was unbounded. `z != 0` still
+excludes `delta == 0`, and it is the only point the band could otherwise swallow: with
+`r_sq == rho_sq` the test holds only for `rho_sq == 0`.
+
+Widening this far is what makes the **split** load-bearing rather than decorative. Inside
+the band the polar contribution is not zero, it is garbage, so it must be *removed*
+rather than added to — hence a routed tangent and not just a pair of scales.
+
+**Measured across the boundary**, worst analytic-versus-finite-difference relative error
+over `z ∈ {+2.5, −3.0}` and `rho ∈ {0, 1e-17, 1e-14, 1e-12, 1e-10, 1e-8, 4.4e-8, 5e-8,
+1e-7, 1e-5, 1e-3}` — so inside the band, on the boundary, and well outside it:
+
+| operator | worst | operator | worst |
+|---|---|---|---|
+| `m2l_real` | 1.2e-08 | `m2l_complex_reference` | 4.0e-09 |
+| `m2m_real` | 4.4e-08 | `m2m_complex` | 1.5e-07 |
+| `l2l_real` | 1.1e-07 | `l2l_complex` | 2.0e-07 |
+
+The worst cases all sit at `rho ≈ 4e-8` to `1e-7`, straddling the boundary, which is what
+a minimax crossover looks like — and at those `rho` the finite difference is itself only
+good to `O(step/r) ≈ 3e-07`, so this is a bound on the measurement as much as on the
+branch. The `rho = 1e-17` column, which was 2.6e+02 before, now reads 4.5e-09.
+
+**At the force level**, on `_z_stacked_system(8, 4, 6.0, 3)` (6 of 24 M2L pairs exactly on
+axis, plus the one-ulp L2L displacement above), FD versus AD:
+
+| basis | before G.10 | rho == 0 only | full band |
+|---|---|---|---|
+| real | 1.9e-03 | 9.5e-06 | **2.7e-10** |
+| complex | 1.8e-05 | 9.7e-06 | **2.7e-10** |
+
+Both bases now produce the *same* AD value to every digit printed, which is the tell that
+the last shared cause is gone. Pinned by
+`tests/unit/test_gradient_correctness.py::test_fd_vs_ad_along_a_transverse_direction_at_rho_zero`,
+no longer an xfail.
+
+**Both characterization goldens stay unmoved**, including the gradient golden. That is not
+automatic once the band is wider than a measure-zero set, and it is the check to repeat if
+the constant is ever changed: the golden's uniform distributions have no two nodes with
+equal `(x, y)` centres, so nothing in them enters the band.
+
+## 7. Not covered: the precomputed-block lanes
+
+The rule needs `delta` and the assembled operator in the same place. Three lanes split
+them — `m2l_rot_scale_real_batch_cached_blocks`,
+`m2l_complex_reference_batch_cached_blocks`, and the fused Pallas real M2L — because the
+rotation blocks arrive as separate arguments, built once per interaction class and reused,
+so no single function sees both the displacement and the operator built from it.
+
+Their forward values stay bit-identical to the direct lanes. Their gradients do not:
+measured on `m2l_rot_scale_real_batch_cached_blocks` against
+`m2l_rot_scale_real_batch` with the blocks the latter would have built, the on-axis
+transverse gradient is `(0, 0)` where the direct lane gives `(−0.270, −1.303)` — a
+difference of 1.30 on that row, and exact agreement on the off-axis rows.
