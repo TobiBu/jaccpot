@@ -11,7 +11,7 @@ This document is about *where the code lives and why*.
 ## 1. Layering at a glance
 
 ```
-jaccpot/__init__.py            public surface (12 __all__ names)
+jaccpot/__init__.py            public surface (14 __all__ names)
         |
 jaccpot/solver.py              FastMultipoleMethod  <-- the ONLY public class
         |                      preset-first facade; resolves preset/basis/advanced
@@ -43,6 +43,8 @@ ODISSEO coupling) depends on. It is frozen by
 | `FastMultipoleMethod` | the solver class (in `solver.py`) |
 | `FMMPreset` | preset enum (FAST / BALANCED / ACCURATE / LARGE_N_GPU) |
 | `FMMAdvancedConfig`, `FarFieldConfig`, `NearFieldConfig`, `RuntimePolicyConfig`, `TreeConfig` | advanced config dataclasses |
+| `TraversalOverrides` | named traversal capacities, merged onto a preset's sizing |
+| `GradConfig` | the supported interface for configuring the differentiable path (section 6) |
 | `MemoryObjective` | memory-policy literal |
 | `ComplexSHBasis`, `RealSHBasis` | expansion bases |
 | `OdisseoFMMCoupler` | ODISSEO integration adapter |
@@ -85,9 +87,12 @@ import cycle (section 8).
 
 ## 4. The engine: coordinator + mixins
 
-`_fmm_impl.FastMultipoleMethod` is a thin coordinator (constructor, backend
-plumbing, cache lifecycle, autotune-cache IO) that inherits its behaviour from
-**10 method-cluster mixins**, each a sibling `runtime/fmm_<cluster>.py` module.
+`_fmm_impl.FastMultipoleMethod` coordinates (constructor, backend plumbing, cache
+lifecycle, autotune-cache IO) and inherits its behaviour from **10 method-cluster
+mixins**, each a sibling `runtime/fmm_<cluster>.py` module. It used to be described
+as *thin*, which the mixin split achieved for everything except the constructor:
+`__init__` is 722 lines with 60 parameters, against 316 lines for the rest of the
+class combined. The mixins are the part that worked.
 Methods were moved verbatim during the god-class breakup; `self` is unchanged;
 cross-cluster calls resolve through the MRO.
 
@@ -310,10 +315,20 @@ at the `runtime/` level until the engine is fully dissolved into `fmm/engine.py`
 
 ## 9. Validation harness
 
+- **Gradient golden** —
+  [`tests/characterization/test_fmm_grad_golden.py`](tests/characterization/test_fmm_grad_golden.py)
+  snapshots `jax.grad` of a fixed-cotangent loss on `differentiable_accelerations`
+  w.r.t. positions and masses, over 6 cases, with the same two gates as the forward
+  oracle (inertness at `rtol=1e-12`; physics anchor against `jax.grad` of the direct
+  sum, per-order bounds). The forward oracle cannot see a reverse-only regression:
+  measured, scaling the analytic real L2P reverse rule by `1+1e-6` leaves the forward
+  golden green and turns this one red. `leaf_size=4` is load-bearing -- at leaf >= 8
+  these systems accept **zero** M2L pairs, so the far-field reverse would not be
+  traced at all; a vacuity gate asserts the pair count per case.
 - **Golden characterization oracle** —
   [`tests/characterization/test_fmm_golden.py`](tests/characterization/test_fmm_golden.py)
-  drives the FMM over a grid (N, order, basis, farfield modes, outputs) and applies
-  two gates: (1) an **inertness** gate — outputs match the committed `.npz` goldens
+  drives the FMM over a grid of (distribution, N, basis, order) -- 13 cases, all
+  `preset="accurate"`, **accelerations only** -- and applies two gates: (1) an **inertness** gate — outputs match the committed `.npz` goldens
   under `tests/characterization/golden/` to float64 round-off (`atol=0, rtol≈1e-12`),
   and (2) a **physics** gate — each output is anchored to a direct O(N²) sum to a
   loose relative-L2 bound, so a regenerated golden can never silently encode a wrong
@@ -321,7 +336,7 @@ at the `runtime/` level until the engine is fully dissolved into `fmm/engine.py`
   numerical one. Regenerate goldens intentionally with `JACCPOT_REGEN_GOLDEN=1`.
 - **Public-API guard** —
   [`tests/unit/test_public_api_surface.py`](tests/unit/test_public_api_surface.py)
-  freezes the 12 `__all__` names + `FMMPreset` members. Red = the refactor leaked
+  freezes the 14 `__all__` names + `FMMPreset` members. Red = the refactor leaked
   into the public contract.
 - **Runtime typecheck** — set `JACCPOT_RUNTIME_TYPECHECK=1` to enable beartype
   runtime checks over the suite.

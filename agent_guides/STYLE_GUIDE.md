@@ -196,9 +196,9 @@ Physics must not live in a utility module; runtime policy must not leak into ope
 you find yourself importing "up" that list, report it rather than adding the import.
 
 **Existing upward imports, and which of them are deliberate.** The rule above is about not
-adding new ones. Four such relationships already exist, across five import statements
-(`nearfield/near_field.py` has both a module-scope and a function-local one), and they are
-not equivalent:
+adding new ones. **Seven** such relationships exist, across **eleven** import statements
+(`nearfield/near_field.py` alone has six), and they are not equivalent. The four
+substantive ones first:
 
 - `operators/real_harmonics.py` and `nearfield/near_field.py` both import
   `runtime.grad_options` to read a trace-time gate (`analytic_l2p_vjp_enabled`,
@@ -218,7 +218,28 @@ not equivalent:
   from `_build_treecode_artifacts_strict_streamed`, which `distributed/fmm.py` calls for
   `local_walk="treecode"`. This one **is** production depending on `experimental/`. It is
   reachable only with >= 2 devices, so CI never enters it; that makes it the weakest-covered
-  production option in the tree, not merely a style wrinkle.
+  production option in the tree, not merely a style wrinkle. Measured: that module sits at
+  **0%** coverage.
+
+And three that the earlier count missed. None is a new violation to fix; they are listed so a
+reader auditing the layering does not have to rediscover them:
+
+- `nearfield/near_field.py` imports `pallas/nearfield_fused_leaf.py` at **five** function-local
+  sites. This is the production Pallas near-field path (`_radix_fast_lane_prepacked_accel_cvjp`,
+  see ARCHITECTURE §7), and function-local is the deliberate "defer the heavy Pallas import"
+  pattern named at the end of this section. Deliberate.
+- `operators/m2l_real_rot_scale.py` imports `pallas/m2l_core_z_real.py` (function-local). This
+  is the one that is genuinely arguable: this section defines `operators/` as pure algebra, and
+  an accelerator import is not algebra. Left as-is pending a decision, not endorsed.
+- `basis/complex_sh.py` imports `operators/{complex_ops,real_harmonics}`. Within the single
+  "mathematical algebra" tier this section defines, so benign.
+
+Separately, and worth knowing because this section's wording implies otherwise: `runtime/` is
+**not** the only place that reads environment variables. `jaccpot/_env.py` exists so that any
+layer can, and its module docstring says so explicitly; there are 16 such reads outside
+`runtime/` (13 in `nearfield/near_field.py`, two in `pallas/`, one in `upward/`). Either that
+sentence should say *resolves `"auto"` policies* rather than *reads environment variables*, or
+`_env.py`'s docstring is wrong. Unresolved.
 
 Function-local imports are used deliberately in a few places to break cycles or defer heavy
 Pallas imports (see `runtime/kernels/core.py`). Leave them; do not hoist them to module
