@@ -18,7 +18,7 @@ at fixed topology. What is asserted here:
 Run on >= 2 GPUs:
 
     CUDA_VISIBLE_DEVICES=$(autocvd -n 2 -l -o) \
-        pytest tests/test_distributed_grad_correctness.py -o addopts="" -q
+        pytest tests/distributed/test_distributed_grad_correctness.py -o addopts="" -q
 """
 
 from __future__ import annotations

@@ -163,7 +163,7 @@ def _resolve_basis_input(basis: Union[Basis, BasisInterface, str]) -> _BasisReso
     configuration; it is not what the suite enforces, and it does not carry to
     fp32. What the suite asserts is relative L2 below 1e-6 for the fp64
     acceleration-and-derivative-tower parity
-    (``tests/test_real_basis_runtime.py::test_real_basis_acceleration_derivatives_match_complex``,
+    (``tests/integration/test_real_basis_runtime.py::test_real_basis_acceleration_derivatives_match_complex``,
     N=128) and below 3e-2 for the fp32 tracking test at N=96 -- the latter being
     considerably slacker than fp32 basis-change round-off should require, which is
     a tolerance worth re-measuring rather than a difference worth expecting.

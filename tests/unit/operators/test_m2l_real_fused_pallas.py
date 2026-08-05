@@ -1,6 +1,6 @@
 """Parity tests for the fully-fused real-basis M2L Pallas kernel.
 
-Real analogue of ``tests/test_m2l_complex_fused_pallas.py`` for the real (Dehnen
+Real analogue of ``tests/unit/operators/test_m2l_complex_fused_pallas.py`` for the real (Dehnen
 no-sqrt2) fully-fused kernel (rotate -> z-translate -> rotate-back in one launch).
 Closes a coverage gap: ``m2l_real_fused`` previously had no forward parity test.
 

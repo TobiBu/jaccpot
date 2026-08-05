@@ -612,8 +612,8 @@ transcription was faithful.
 # tests (MEMORY: autocvd + XLA_PYTHON_CLIENT_PREALLOCATE=false for GPU/xdist)
 JAX_PLATFORMS=cpu JAX_ENABLE_X64=1 .venv/bin/python -m pytest tests/unit/runtime/ -q
 JAX_PLATFORMS=cpu JAX_ENABLE_X64=1 .venv/bin/python -m pytest \
-    tests/unit tests/characterization tests/test_adaptive_policy_runtime.py \
-    tests/test_adaptive_order_runtime.py tests/test_force_scale_runtime.py -q
+    tests/unit tests/characterization tests/unit/test_adaptive_policy_runtime.py \
+    tests/integration/test_adaptive_order_runtime.py tests/integration/test_force_scale_runtime.py -q
 
 # CPU sweep (Dehnen's metric)
 JAX_PLATFORMS=cpu JAX_ENABLE_X64=1 .venv/bin/python -m bench.validation.mac_error_distribution \

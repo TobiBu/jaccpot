@@ -1557,7 +1557,7 @@ def test_complex_to_dehnen_real_matches_p2m_real_direct(delta, order):
     sign or normalisation error here silently corrupts every real-basis M2L.
 
     The two proxies that existed cannot catch that:
-    ``tests/test_real_upward_sweep.py::test_real_upward_matches_complex_convert``
+    ``tests/unit/core/test_real_upward_sweep.py::test_real_upward_matches_complex_convert``
     checks an aggregate relative L2 over a whole tree, where a single-``m`` error
     is diluted, and ``test_dehnen_power_is_basis_invariant`` checks only the
     degree-wise Dehnen power, which is a rotational invariant and therefore blind

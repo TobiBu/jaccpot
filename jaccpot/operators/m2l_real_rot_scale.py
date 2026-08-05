@@ -146,7 +146,7 @@ def m2l_rot_scale_real_batch(
 
     **On accuracy: this function is the reference, and its own accuracy is not
     measured.** Every test that touches the rotate+scale path compares something
-    else *to it* -- ``tests/test_m2l_real_fused_pallas.py`` checks the fused
+    else *to it* -- ``tests/unit/operators/test_m2l_real_fused_pallas.py`` checks the fused
     pure-jnp twin and the Pallas kernel against it (rel err <1e-10 at fp64 for
     orders 2, 3, 4; <3e-4 at fp32), and
     ``tests/unit/operators/test_m2l_real_rot_scale.py::test_cached_blocks_m2l_matches_direct_batch``

@@ -54,7 +54,7 @@ final lists (at leaf=128/per=20000 the final lists are tiny yet the queue blows 
   cap-calibration). Copies of the earlier ones live in
   `Odisseo/benchmark_a100/phase5_5c_multigpu/`.
 - **Test:** `XLA_FLAGS=--xla_force_host_platform_device_count=4 JAX_PLATFORMS=cpu pytest
-  tests/test_distributed_fmm_driver.py -o addopts="" -q` (CPU); drop the env + `autocvd` for GPU.
+  tests/distributed/test_distributed_fmm_driver.py -o addopts="" -q` (CPU); drop the env + `autocvd` for GPU.
 
 ## Phase 3 tasks (in order)
 
