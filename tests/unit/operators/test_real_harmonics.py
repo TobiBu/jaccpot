@@ -1304,26 +1304,21 @@ def test_rotation_cascade_radial_gradient_at_rho_zero_is_correct(operator):
     ), f"d/dz at rho == 0 is {at_zero[2]:.9f}, off-axis limit is {limit[2]:.9f}"
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "KNOWN DEFECT, tracked as G.10 in docs/refactor_audit_2026-08.md. The "
-        "degeneracy guards in _multipole_align_{to,from}_z_block return a zero "
-        "cotangent for the two transverse components at rho == 0, but the assembled "
-        "cascade is differentiable there and the true derivative is nonzero "
-        "(m2l_real: -1.502050 / -0.523434; m2m_real: -6.416905 / +1.769043; "
-        "l2l_real: +0.305315 / +0.003498). It is the same defect class d5cb13b fixed "
-        "for L2P/P2M, but the fix does not transfer: the code reaches (x, y) only via "
-        "rho = sqrt(x^2+y^2) and az = atan2(x, y), so every chain-rule route carries "
-        "x/rho or y/rho^2 and no guard choice can produce the O(rho) coefficient the "
-        "polar parametrisation divided out. Recovering it is a scheme change, not a "
-        "guard change. strict=True so this becomes a hard error the moment G.10 is "
-        "fixed, forcing the marker's removal."
-    ),
-)
 @pytest.mark.parametrize("operator", _ROTATION_CASCADE_OPERATORS)
 def test_rotation_cascade_transverse_gradient_at_rho_zero(operator):
-    """``d/dx`` and ``d/dy`` at ``rho == 0`` must equal the off-axis limit."""
+    """``d/dx`` and ``d/dy`` at ``rho == 0`` must equal the off-axis limit.
+
+    This was G.10, a strict xfail: the degeneracy guards in
+    ``_multipole_align_{to,from}_z_block`` returned a zero cotangent for both
+    transverse components (true values m2l_real -1.502050 / -0.523434, m2m_real
+    -6.416905 / +1.769043, l2l_real +0.305315 / +0.003498), and no guard choice could
+    recover them -- the code reaches ``(x, y)`` only through ``rho`` and
+    ``atan2(x, y)``, so the polar parametrisation has already divided out the
+    ``O(rho)`` coefficient the derivative needs. The three operators now carry a
+    ``custom_jvp`` that supplies it analytically instead; see
+    :mod:`jaccpot.operators._transverse_degeneracy_jvp` and
+    ``docs/rotation_degeneracy_derivative.md``.
+    """
     if not jax.config.jax_enable_x64:
         pytest.skip("gradient limits require float64 (JAX_ENABLE_X64=1)")
 
