@@ -20,11 +20,29 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 
-from jaccpot.operators._transverse_degeneracy_jvp import split_transverse_tangent
+from jaccpot.operators._transverse_degeneracy_jvp import (
+    split_transverse_tangent,
+    withdraw_unresolvable_transverse,
+)
 from jaccpot.operators.complex_ops import (
+    complex_rotation_blocks_from_z_solidfmm_batch,
+    complex_rotation_blocks_to_z_solidfmm_batch,
     l2l_complex,
     m2l_complex_reference,
+    m2l_complex_reference_batch,
+    m2l_complex_reference_batch_cached_blocks,
     m2m_complex,
+)
+from jaccpot.operators.m2l_real_rot_scale import (
+    l2l_rot_scale_real_batch_cached_blocks,
+    m2l_real_fused_carry_axis_derivative,
+    m2l_rot_scale_real_batch,
+    m2l_rot_scale_real_batch_cached_blocks,
+    m2m_rot_scale_real_batch_cached_blocks,
+    real_rotation_blocks_from_z_local_batch,
+    real_rotation_blocks_from_z_multipole_batch,
+    real_rotation_blocks_to_z_local_batch,
+    real_rotation_blocks_to_z_multipole_batch,
 )
 from jaccpot.operators.real_harmonics import (
     l2l_real,
@@ -273,3 +291,292 @@ def test_the_primal_at_rho_zero_is_still_the_pure_z_translation():
         )
     )
     assert np.allclose(through_cascade, z_only, rtol=1e-13, atol=1e-13)
+
+
+# ---------------------------------------------------------------------------
+# The precomputed-block lanes
+# ---------------------------------------------------------------------------
+#
+# These lanes receive their rotation blocks as separate arguments, built once per
+# interaction class and reused, so no single function sees both the displacement and
+# the operator built from it. The fix is therefore split in two: the block builder
+# withdraws the transverse tangent it cannot resolve, and the consumer supplies the
+# cascade-level term. Neither half is correct alone, so what has to be asserted is
+# that they compose -- and the only convincing statement of that is equality with the
+# lane that never needed splitting.
+
+
+def _real_blocks(deltas, which_pair, dtype):
+    to_z, from_z = which_pair
+    return to_z(deltas, order=_ORDER, dtype=dtype), from_z(
+        deltas, order=_ORDER, dtype=dtype
+    )
+
+
+def _lane_pair(name):
+    """``(direct, cached)`` losses over the same displacement batch, for one lane."""
+    order = _ORDER
+    width = sh_size(order)
+    real_coeffs = jax.random.normal(
+        jax.random.PRNGKey(1), (3, width), dtype=jnp.float64
+    )
+    real_weights = jax.random.normal(
+        jax.random.PRNGKey(2), (3, width), dtype=jnp.float64
+    )
+    rng = np.random.default_rng(3)
+    cplx_coeffs = jnp.asarray(
+        rng.normal(size=(3, width)) + 1j * rng.normal(size=(3, width)),
+        dtype=jnp.complex128,
+    )
+    cplx_weights = jnp.asarray(
+        rng.normal(size=(3, width)) + 1j * rng.normal(size=(3, width)),
+        dtype=jnp.complex128,
+    )
+
+    if name == "m2l_real":
+
+        def direct(d):
+            return jnp.sum(
+                real_weights * m2l_rot_scale_real_batch(real_coeffs, d, order=order)
+            )
+
+        def cached(d):
+            to_z, from_z = _real_blocks(
+                d,
+                (
+                    real_rotation_blocks_to_z_multipole_batch,
+                    real_rotation_blocks_from_z_local_batch,
+                ),
+                real_coeffs.dtype,
+            )
+            return jnp.sum(
+                real_weights
+                * m2l_rot_scale_real_batch_cached_blocks(
+                    real_coeffs, d, to_z, from_z, order=order
+                )
+            )
+
+    elif name == "m2m_real":
+
+        def direct(d):
+            return jnp.sum(
+                real_weights
+                * jax.vmap(lambda c, dd: m2m_real(c, dd, order=order))(real_coeffs, d)
+            )
+
+        def cached(d):
+            to_z, from_z = _real_blocks(
+                d,
+                (
+                    real_rotation_blocks_to_z_multipole_batch,
+                    real_rotation_blocks_from_z_multipole_batch,
+                ),
+                real_coeffs.dtype,
+            )
+            return jnp.sum(
+                real_weights
+                * m2m_rot_scale_real_batch_cached_blocks(
+                    real_coeffs, d, to_z, from_z, order=order
+                )
+            )
+
+    elif name == "l2l_real":
+
+        def direct(d):
+            return jnp.sum(
+                real_weights
+                * jax.vmap(lambda c, dd: l2l_real(c, dd, order=order))(real_coeffs, d)
+            )
+
+        def cached(d):
+            to_z, from_z = _real_blocks(
+                d,
+                (
+                    real_rotation_blocks_to_z_local_batch,
+                    real_rotation_blocks_from_z_local_batch,
+                ),
+                real_coeffs.dtype,
+            )
+            return jnp.sum(
+                real_weights
+                * l2l_rot_scale_real_batch_cached_blocks(
+                    real_coeffs, d, to_z, from_z, order=order
+                )
+            )
+
+    else:
+
+        def direct(d):
+            return jnp.real(
+                jnp.sum(
+                    cplx_weights
+                    * m2l_complex_reference_batch(cplx_coeffs, d, order=order)
+                )
+            )
+
+        def cached(d):
+            to_z = complex_rotation_blocks_to_z_solidfmm_batch(
+                d, order=order, basis="multipole", dtype=cplx_coeffs.dtype
+            )
+            from_z = complex_rotation_blocks_from_z_solidfmm_batch(
+                d, order=order, basis="local", dtype=cplx_coeffs.dtype
+            )
+            return jnp.real(
+                jnp.sum(
+                    cplx_weights
+                    * m2l_complex_reference_batch_cached_blocks(
+                        cplx_coeffs, d, to_z, from_z, order=order
+                    )
+                )
+            )
+
+    return direct, cached
+
+
+@pytest.mark.parametrize(
+    "lane", ["m2l_real", "m2m_real", "l2l_real", "m2l_complex_reference"]
+)
+def test_precomputed_block_lanes_match_their_direct_twin_in_gradient(lane):
+    """The cached-blocks lanes must agree with the direct lanes on the *gradient* too.
+
+    The forward equivalence was already asserted elsewhere and never in doubt. The
+    gradient one is the load-bearing claim here, and it is what caught the gap: before
+    the block builders withdrew their unresolvable transverse tangent, the real M2L lane
+    returned ``(0, 0)`` for the on-axis transverse gradient where the direct lane gave
+    ``(-0.270, -1.303)`` -- a discrepancy of 1.30 that no forward comparison could see.
+
+    The batch deliberately contains all three regimes at once, because they take
+    different branches: exactly on axis, one ulp off it (what centre-of-mass cancellation
+    between two mathematically equal centres actually produces), and generic. Tolerance
+    is round-off on a handful of float64 matmuls -- the two lanes compute the same
+    quantity by different groupings, not to within a scheme difference.
+    """
+    if not jax.config.jax_enable_x64:
+        pytest.skip("requires float64 (JAX_ENABLE_X64=1)")
+
+    deltas = jnp.asarray(
+        [[0.0, 0.0, 2.5], [5.551e-17, 0.0, -3.0], [1.1, -0.4, 3.0]], dtype=jnp.float64
+    )
+    direct, cached = _lane_pair(lane)
+
+    assert float(direct(deltas)) == pytest.approx(
+        float(cached(deltas)), rel=1e-13, abs=1e-13
+    )
+    grad_direct = np.asarray(jax.grad(direct)(deltas))
+    grad_cached = np.asarray(jax.grad(cached)(deltas))
+    worst = float(np.max(np.abs(grad_direct - grad_cached)))
+    assert worst <= 1.0e-12, (
+        f"{lane}: cached-blocks gradient differs from the direct lane by {worst:.3e}\n"
+        f"  direct: {grad_direct}\n  cached: {grad_cached}"
+    )
+    # And the on-axis row is not accidentally zero in both -- otherwise the two could
+    # agree by sharing the defect this whole change removes.
+    assert np.max(np.abs(grad_direct[0, :2])) > 1.0e-3, (
+        "the on-axis transverse gradient is ~0 in the direct lane too, so this "
+        "comparison would pass without testing anything"
+    )
+
+
+def test_passing_blocks_by_keyword_fails_loudly():
+    """An array in the keyword position must name itself, not surface as unhashable.
+
+    The wrapper carries keyword arguments as ``custom_jvp`` ``nondiff_argnums``, so they
+    must be hashable and non-differentiable. Every caller in the tree passes the rotation
+    blocks positionally; someone who does not would otherwise get an unhashable-type
+    failure from inside ``custom_jvp`` with nothing pointing at their call site.
+    """
+    width = sh_size(2)
+    multipoles = jnp.ones((1, width), dtype=jnp.float64)
+    deltas = jnp.asarray([[0.0, 0.0, 2.5]], dtype=jnp.float64)
+    blocks = jnp.zeros((1, 3, 5, 5), dtype=jnp.float64)
+
+    with pytest.raises(TypeError, match="'blocks_from_z', 'blocks_to_z'"):
+        m2l_rot_scale_real_batch_cached_blocks(
+            multipoles, deltas, blocks_to_z=blocks, blocks_from_z=blocks, order=2
+        )
+    # And the positional form is untouched.
+    assert m2l_rot_scale_real_batch_cached_blocks(
+        multipoles, deltas, blocks, blocks, order=2
+    ).shape == (1, width)
+
+
+@pytest.mark.parametrize("interpret", [True, False])
+def test_fused_pallas_m2l_matches_the_pure_jax_lane_in_gradient(interpret):
+    """The fused Pallas M2L composite must agree with the pure-JAX lane on the gradient.
+
+    This lane could not take the ``custom_jvp`` the others did: its middle is
+    ``m2l_real_fused_pallas_cvjp``, a ``custom_vjp``, and JAX refuses forward-mode
+    through one ("can't apply forward-mode autodiff (jvp) to a custom_vjp function"). It
+    is covered instead by the pair
+    :func:`~jaccpot.operators._transverse_degeneracy_jvp.withdraw_unresolvable_transverse`
+    (before the blocks and radius are built) and
+    :func:`~jaccpot.operators.m2l_real_rot_scale.m2l_real_fused_carry_axis_derivative`
+    (after the kernel), neither of which differentiates the kernel.
+
+    Measured without the carrier the on-axis rows come back as exactly ``(0, 0)`` and the
+    lanes are **1.98** apart; with it, 2.7e-15. ``interpret=True`` runs the kernel's
+    reference lowering on CPU, which is where this is verified; ``interpret=False`` runs
+    the real Triton kernel and is skipped off Ampere+, so the same assertion covers the
+    hardware the lane actually ships on.
+    """
+    if not jax.config.jax_enable_x64:
+        pytest.skip("requires float64 (JAX_ENABLE_X64=1)")
+    from jaccpot.pallas.m2l_real_fused import (
+        m2l_real_fused_pallas_cvjp,
+        pallas_m2l_real_fused_supported,
+    )
+
+    if not interpret and not pallas_m2l_real_fused_supported():
+        pytest.skip("the fused real Pallas M2L requires an Ampere+ (sm_80) GPU")
+
+    width = sh_size(_ORDER)
+    multipoles = jax.random.normal(jax.random.PRNGKey(1), (3, width), dtype=jnp.float64)
+    weights = jax.random.normal(jax.random.PRNGKey(2), (3, width), dtype=jnp.float64)
+    deltas = jnp.asarray(
+        [[0.0, 0.0, 2.5], [5.551e-17, 0.0, -3.0], [1.1, -0.4, 3.0]], dtype=jnp.float64
+    )
+
+    def direct(d):
+        return jnp.sum(weights * m2l_rot_scale_real_batch(multipoles, d, order=_ORDER))
+
+    def fused(d):
+        aligned = withdraw_unresolvable_transverse(d)
+        radii = jnp.linalg.norm(aligned, axis=1)
+        to_z = real_rotation_blocks_to_z_multipole_batch(
+            aligned, order=_ORDER, dtype=multipoles.dtype
+        )
+        from_z = real_rotation_blocks_from_z_local_batch(
+            aligned, order=_ORDER, dtype=multipoles.dtype
+        )
+        out = m2l_real_fused_pallas_cvjp(
+            multipoles, to_z, from_z, radii, _ORDER, interpret, "triton"
+        )
+        out = m2l_real_fused_carry_axis_derivative(
+            out, multipoles, d, to_z, from_z, radii, order=_ORDER
+        )
+        return jnp.sum(weights * out)
+
+    try:
+        grad_direct = np.asarray(jax.grad(direct)(deltas))
+        grad_fused = np.asarray(jax.grad(fused)(deltas))
+    except Exception as exc:  # pragma: no cover - GPU/runtime dependent
+        message = str(exc).lower()
+        if not interpret and any(
+            token in message for token in ("warpgroup", "ptx", "triton", "mosaic")
+        ):
+            pytest.skip(f"Pallas kernel unavailable on this GPU/runtime: {exc}")
+        raise
+
+    # The fused kernel and the rotate/scale cascade are separate implementations, so the
+    # bound is their asserted forward agreement (<1e-10 at fp64 per
+    # tests/test_m2l_real_fused_pallas.py) rather than pure round-off; measured 2.7e-15.
+    tolerance = 1.0e-10 if interpret else 1.0e-8
+    worst = float(np.max(np.abs(grad_direct - grad_fused)))
+    assert worst <= tolerance, (
+        f"fused Pallas gradient differs from the pure-JAX lane by {worst:.3e}\n"
+        f"  direct: {grad_direct}\n  fused:  {grad_fused}"
+    )
+    assert np.max(np.abs(grad_direct[0, :2])) > 1.0e-3, (
+        "the on-axis transverse gradient is ~0 in the direct lane too, so this "
+        "comparison would pass without testing anything"
+    )

@@ -1549,26 +1549,71 @@ def _m2l_real_batch_kernel_fused_pallas(
     m2l_impl: str,
 ) -> Array:
     """Real-basis M2L via the FULLY-fused Pallas kernel (rotate+z-translate+rotate
-    in one launch). Builds the real rotation blocks + radii from deltas."""
+    in one launch). Builds the real rotation blocks + radii from deltas.
+
+    Notes
+    -----
+    **This lane's transverse gradient near ``rho == 0`` is covered in two pieces rather
+    than one, and neither is optional.** It could not take the ``custom_jvp`` the pure-JAX
+    lanes did: ``m2l_real_fused_pallas_cvjp`` is a ``custom_vjp``, and JAX refuses
+    forward-mode through one ("can't apply forward-mode autodiff (jvp) to a custom_vjp
+    function"), so a rule that differentiates the operator cannot wrap it. Instead:
+
+    * :data:`~jaccpot.operators.m2l_real_rot_scale.m2l_real_fused_align_deltas` runs on
+      ``deltas`` **before** the radius and both block stacks are built, so
+      everything the kernel sees comes from a displacement whose unusable transverse
+      tangent has already been removed;
+    * :func:`~jaccpot.operators.m2l_real_rot_scale.m2l_real_fused_carry_axis_derivative`
+      runs on the output and adds the analytic term back, computing the one operator
+      application it needs with the pure-JAX twin the kernel's own ``custom_vjp`` already
+      uses as its correctness reference.
+
+    Neither differentiates the kernel, and both primals return their input unchanged with
+    no arithmetic performed on it, so the forward pass is untouched -- not even in the sign
+    of zero. Drop either piece and the gradient is wrong: without the withdrawal the
+    analytic term lands on top of the polar route's contribution, and without the carrier
+    this lane's on-axis ``d/dx`` and ``d/dy`` come back as exactly zero, measured **1.98**
+    away from the pure-JAX lane.
+
+    Asserted by
+    ``tests/unit/operators/test_transverse_degeneracy_jvp.py::test_fused_pallas_m2l_matches_the_pure_jax_lane_in_gradient``,
+    which runs the kernel's reference lowering on CPU (``interpret=True``; agreement
+    2.7e-15) and the real Triton kernel where the hardware allows. What still wants a GPU
+    is the ``interpret=False`` half of that test, the fully-fused reverse kernel under
+    ``JACCPOT_FUSED_M2L_VJP=1``, and a ``bench/audit_reverse_residuals.py`` re-run --
+    nothing here changes what the ``custom_vjp`` saves, but the linearised block
+    construction around it now carries one extra select.
+    """
     mode = str(m2l_impl).strip().lower()
     if mode != "rot_scale":
         raise ValueError("real-basis m2l_impl must be 'rot_scale'")
     from jaccpot.operators.m2l_real_rot_scale import (
+        m2l_real_fused_align_deltas,
+        m2l_real_fused_carry_axis_derivative,
         real_rotation_blocks_from_z_local_batch,
         real_rotation_blocks_to_z_multipole_batch,
     )
     from jaccpot.pallas.m2l_real_fused import m2l_real_fused_pallas_cvjp
 
-    r = jnp.linalg.norm(deltas, axis=1)
+    # Everything the kernel sees is built from a displacement whose unusable transverse
+    # tangent has already been withdrawn, so the radius and the two block stacks all
+    # agree on where the band is; the carrier below then puts the analytic term back.
+    # Splitting it this way is what lets a custom_vjp kernel sit in the middle -- JAX
+    # cannot forward-differentiate one, so the usual single decorator does not apply.
+    aligned = m2l_real_fused_align_deltas(deltas)
+    r = jnp.linalg.norm(aligned, axis=1)
     bto = real_rotation_blocks_to_z_multipole_batch(
-        deltas, order=order, dtype=multipoles.dtype
+        aligned, order=order, dtype=multipoles.dtype
     )
     bfr = real_rotation_blocks_from_z_local_batch(
-        deltas, order=order, dtype=multipoles.dtype
+        aligned, order=order, dtype=multipoles.dtype
     )
     # custom_vjp wrapper (forward == raw kernel) so this fused path is also
     # differentiable; see the complex counterpart above.
-    return m2l_real_fused_pallas_cvjp(multipoles, bto, bfr, r, order, False, "triton")
+    out = m2l_real_fused_pallas_cvjp(multipoles, bto, bfr, r, order, False, "triton")
+    return m2l_real_fused_carry_axis_derivative(
+        out, multipoles, deltas, bto, bfr, r, order=order
+    )
 
 
 def _apply_real_m2l(src_mult, deltas, *, order, m2l_impl):

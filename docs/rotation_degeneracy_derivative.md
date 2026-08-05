@@ -8,9 +8,10 @@ Written up separately from the code because the result is reusable (it applies t
 operator built on the cascade, in both bases) and because the calibration steps below
 are the part that is easy to get wrong and expensive to redo.
 
-**Status.** Derived, validated, and **wired into the operators** — §5 is what landed
-where, §6 is where the switchover boundary goes and why it is wider than `rho == 0`, §7 is
-the one set of lanes this cannot reach. G.10 in
+**Status.** Derived, validated, and **wired into every M2L / M2M / L2L lane in both
+bases** — §5 is what landed where, §6 is where the switchover boundary goes and why it is
+wider than `rho == 0`, §7 is the precomputed-block lanes and the fused Pallas kernel,
+which each needed a different shape of the same rule. G.10 in
 [`refactor_audit_2026-08.md`](refactor_audit_2026-08.md) records the defect itself.
 
 ---
@@ -280,16 +281,74 @@ automatic once the band is wider than a measure-zero set, and it is the check to
 the constant is ever changed: the golden's uniform distributions have no two nodes with
 equal `(x, y)` centres, so nothing in them enters the band.
 
-## 7. Not covered: the precomputed-block lanes
+## 7. The precomputed-block lanes
 
-The rule needs `delta` and the assembled operator in the same place. Three lanes split
-them — `m2l_rot_scale_real_batch_cached_blocks`,
-`m2l_complex_reference_batch_cached_blocks`, and the fused Pallas real M2L — because the
-rotation blocks arrive as separate arguments, built once per interaction class and reused,
-so no single function sees both the displacement and the operator built from it.
+Four lanes receive their rotation blocks as separate arguments, built once per
+interaction class and reused, so **no single function sees both the displacement and the
+operator built from it** — and the §5 rule needs both. Their forward values were
+bit-identical to the direct lanes; their gradients were not. Measured before the fix, on
+`m2l_rot_scale_real_batch_cached_blocks` against `m2l_rot_scale_real_batch` with the
+blocks the latter would have built: the on-axis transverse gradient was `(0, 0)` where
+the direct lane gave `(−0.270, −1.303)` — 1.30 apart, with exact agreement on the
+off-axis rows, so no forward comparison could see it.
 
-Their forward values stay bit-identical to the direct lanes. Their gradients do not:
-measured on `m2l_rot_scale_real_batch_cached_blocks` against
-`m2l_rot_scale_real_batch` with the blocks the latter would have built, the on-axis
-transverse gradient is `(0, 0)` where the direct lane gives `(−0.270, −1.303)` — a
-difference of 1.30 on that row, and exact agreement on the off-axis rows.
+**The fix is two halves that only work together.**
+
+1. The **block builder** withdraws the transverse tangent it cannot resolve
+   (`without_unresolvable_transverse_jvp` on `_real_rotation_blocks_padded` and on the
+   complex padded builders). An individual alignment block is the one thing here that
+   genuinely has *no* transverse derivative at `rho == 0`: with `ax == 0` it reduces to
+   `Dz(az)` for an arbitrary `az`, so its limit is approach-dependent even though the
+   assembled cascade's is not. Inside the band it has a derivative but not one worth
+   having. So it now hands its caller nothing rather than something wrong.
+2. The **consumer** supplies the cascade-level term, via the same
+   `with_transverse_degeneracy_jvp` the direct lanes use — generalised to pass extra
+   differentiable array arguments (the blocks) through untouched.
+
+Without (1), (2) would add the analytic term *on top of* whatever the builder's guards
+produced: zero at `rho == 0`, garbage just off it. That is why the builder half exists.
+
+Covered: `m2l_rot_scale_real_batch_cached_blocks`,
+`m2m_rot_scale_real_batch_cached_blocks`, `l2l_rot_scale_real_batch_cached_blocks`,
+`m2l_complex_reference_batch_cached_blocks`. Asserted against their direct twins in
+`tests/unit/operators/test_transverse_degeneracy_jvp.py::test_precomputed_block_lanes_match_their_direct_twin_in_gradient`,
+over a batch holding all three regimes at once — exactly on axis, one ulp off it, and
+generic:
+
+| lane | forward | gradient |
+|---|---|---|
+| real M2L | 0 | 3.9e-16 |
+| real M2M | 7.1e-15 | 7.3e-15 |
+| real L2L | 0 | 2.5e-14 |
+| complex M2L | 0 | 0 |
+
+That test also asserts the direct lane's on-axis transverse gradient is not itself ~0,
+so the two cannot agree by sharing the defect.
+
+**The fused Pallas real M2L needed a third shape.** It could not take the consumer
+decorator at all: `m2l_real_fused_pallas_cvjp` is a `custom_vjp`, and JAX refuses
+forward-mode through one — confirmed, not assumed ("can't apply forward-mode autodiff
+(jvp) to a custom_vjp function"). What covers it instead never touches the kernel:
+
+* `m2l_real_fused_align_deltas(deltas)` runs *before* the radius and both block
+  stacks are built. Its primal returns `deltas` with no arithmetic performed on it, so it
+  is invisible to a forward-only caller; what it removes is the in-band transverse
+  tangent, so radius and blocks all agree on where the band is.
+* `m2l_real_fused_carry_axis_derivative(out, …)` runs *after* the kernel. Its primal
+  returns `out` unchanged — again no arithmetic, so no forward footprint, not even in the
+  sign of zero — and its tangent adds the analytic term, computing the one operator
+  application it needs with `m2l_real_fused_jax`, the same pure-JAX twin the kernel's own
+  `custom_vjp` uses as its correctness reference.
+
+Measured against the pure-JAX lane on the same three-regime batch: **1.98 apart without
+the carrier** (the on-axis rows come back exactly `(0, 0)`), **2.7e-15 with it**, forward
+unchanged to the bit. Asserted by
+`test_fused_pallas_m2l_matches_the_pure_jax_lane_in_gradient`, parametrised over
+`interpret` so the same assertion covers the reference lowering on CPU and the real Triton
+kernel where the hardware allows.
+
+**What still wants a GPU**, and is now the only thing that does: the `interpret=False`
+half of that test, the fully-fused reverse kernel under `JACCPOT_FUSED_M2L_VJP=1`, a
+`bench/audit_reverse_residuals.py` re-run (nothing here changes what the `custom_vjp`
+saves, but the linearised block construction around it now carries one extra select), and
+a per-stage benchmark of the M2L stage.

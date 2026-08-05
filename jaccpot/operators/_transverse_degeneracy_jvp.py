@@ -73,6 +73,9 @@ __all__ = [
     "TransverseGenerators",
     "split_transverse_tangent",
     "with_transverse_degeneracy_jvp",
+    "with_transverse_degeneracy_tangent",
+    "withdraw_unresolvable_transverse",
+    "without_unresolvable_transverse_jvp",
 ]
 
 
@@ -229,6 +232,46 @@ def _apply_generator(coeffs: Array, generator: Array) -> Array:
     return jnp.concatenate([image, jnp.zeros_like(coeffs[..., width:])], axis=-1)
 
 
+def _static_kwargs_tuple(static_kwargs: dict, owner: str) -> tuple:
+    """Hashable ``nondiff_argnums`` payload, with a loud error for array arguments.
+
+    The keyword arguments ride along as ``nondiff_argnums``, so they have to be
+    hashable. An array passed by keyword instead of positionally -- a rotation block,
+    typically -- would otherwise surface as an unhashable-type failure from inside
+    ``custom_jvp`` with nothing pointing at the call site.
+
+    Parameters
+    ----------
+    static_kwargs : dict
+        The keyword arguments the caller supplied.
+    owner : str
+        Name of the wrapped function, for the error message.
+
+    Returns
+    -------
+    tuple
+        ``sorted(static_kwargs.items())``.
+
+    Raises
+    ------
+    TypeError
+        If any value is an array, naming every offending argument. Raised at trace time.
+    """
+    arrays = sorted(
+        name
+        for name, value in static_kwargs.items()
+        if hasattr(value, "shape") and hasattr(value, "dtype")
+    )
+    if arrays:
+        raise TypeError(
+            f"{owner}: {', '.join(repr(name) for name in arrays)} passed by keyword but "
+            "is an array. Keyword arguments here are carried as custom_jvp "
+            "nondiff_argnums, which must be hashable and non-differentiable; pass "
+            "differentiable arrays positionally."
+        )
+    return tuple(sorted(static_kwargs.items()))
+
+
 def with_transverse_degeneracy_jvp(
     cascade: Callable[..., Array],
     *,
@@ -249,10 +292,16 @@ def with_transverse_degeneracy_jvp(
     Parameters
     ----------
     cascade : Callable[..., Array]
-        ``cascade(coeffs, delta, **static_kwargs) -> Array``. Must be linear in
+        ``cascade(coeffs, delta, *extra, **static_kwargs) -> Array``. Must be linear in
         ``coeffs`` -- the whole cost saving rests on it -- and every keyword argument
         must be hashable, because they are carried as ``nondiff_argnums``. One of them
-        must be ``order``.
+        must be ``order``. Any positional arguments after ``delta`` stay differentiable
+        and are passed through untouched; that is how the precomputed-block lanes are
+        covered, since their rotation blocks arrive as separate arrays. Those blocks must
+        have been built from this same ``delta`` -- with
+        :func:`without_unresolvable_transverse_jvp` on the builder, so that the tangent
+        arriving through them carries nothing inside the band that this rule then
+        double-counts.
     generators : Callable[[int, Any], TransverseGenerators]
         ``generators(order, dtype) -> TransverseGenerators`` for the basis and the pair
         of representations this operator maps between. Called at trace time with the
@@ -272,19 +321,21 @@ def with_transverse_degeneracy_jvp(
     change, and only where ``z != 0``.
     """
 
-    @functools.partial(jax.custom_jvp, nondiff_argnums=(2,))
-    def cascade_with_rule(coeffs: Array, delta: Array, static_kwargs: tuple) -> Array:
-        return cascade(coeffs, delta, **dict(static_kwargs))
+    @functools.partial(jax.custom_jvp, nondiff_argnums=(0,))
+    def cascade_with_rule(
+        static_kwargs: tuple, coeffs: Array, delta: Array, *extra: Array
+    ) -> Array:
+        return cascade(coeffs, delta, *extra, **dict(static_kwargs))
 
     @cascade_with_rule.defjvp
     @highest_matmul_precision
     def cascade_with_rule_jvp(
         static_kwargs: tuple,
-        primals: Tuple[Array, Array],
-        tangents: Tuple[Array, Array],
+        primals: Tuple[Array, ...],
+        tangents: Tuple[Array, ...],
     ) -> Tuple[Array, Array]:
-        coeffs, delta = primals
-        coeffs_tangent, delta_tangent = tangents
+        coeffs, delta, *extra = primals
+        coeffs_tangent, delta_tangent, *extra_tangents = tangents
         static = dict(static_kwargs)
         generator = generators(int(static["order"]), coeffs.dtype)
 
@@ -305,9 +356,9 @@ def with_transverse_degeneracy_jvp(
             - scale_y * _apply_generator(coeffs, generator.in_x)
         )
         primal_out, tangent_out = jax.jvp(
-            lambda c, d: cascade(c, d, **static),
-            (coeffs, delta),
-            (coeffs_tangent, cascade_tangent),
+            lambda c, d, *e: cascade(c, d, *e, **static),
+            (coeffs, delta, *extra),
+            (coeffs_tangent, cascade_tangent, *extra_tangents),
         )
         # ``+G_out @ F0``. ``primal_out`` *is* ``F0`` on the degenerate axis, where
         # ``delta == (0, 0, z)``, so the formula needs no separate evaluation of it.
@@ -317,11 +368,239 @@ def with_transverse_degeneracy_jvp(
         )
 
     @functools.wraps(cascade)
-    def cascade_corrected(coeffs: Array, delta: Array, **static_kwargs: Any) -> Array:
+    def cascade_corrected(
+        coeffs: Array, delta: Array, *extra: Array, **static_kwargs: Any
+    ) -> Array:
         return cascade_with_rule(
+            _static_kwargs_tuple(
+                static_kwargs, getattr(cascade, "__name__", "cascade")
+            ),
             jnp.asarray(coeffs),
             jnp.asarray(delta),
-            tuple(sorted(static_kwargs.items())),
+            *(jnp.asarray(e) for e in extra),
         )
 
     return cascade_corrected
+
+
+def without_unresolvable_transverse_jvp(
+    builder: Callable[..., Any],
+) -> Callable[..., Any]:
+    """Stop a ``delta -> rotation blocks`` builder claiming a derivative it has not got.
+
+    The alignment blocks are the one thing in this file's story that genuinely has **no**
+    transverse derivative at ``rho == 0``: with ``ax == 0`` a block reduces to
+    ``Dz(az)`` for an arbitrary ``az``, so its limit depends on the approach direction
+    even though the assembled cascade's does not. Inside the band it has a derivative but
+    not one worth having -- the same ``eps / (rho / r)`` cancellation
+    :func:`split_transverse_tangent` documents.
+
+    So a builder should hand *nothing* transverse to its caller inside the band, and let
+    the caller supply the cascade-level term instead. Withdrawing it is what makes the
+    two halves compose: without this, a consumer wrapped by
+    :func:`with_transverse_degeneracy_jvp` would add the analytic term on top of whatever
+    the builder's guards happened to produce, which is zero at ``rho == 0`` but garbage
+    just off it.
+
+    Outside the band nothing changes, bit for bit. The primal is untouched everywhere, so
+    a forward-only caller cannot tell this decorator is here.
+
+    Parameters
+    ----------
+    builder : Callable[..., Any]
+        ``builder(deltas, **static_kwargs) -> Array`` or a pytree of arrays. Every
+        keyword argument must be hashable; they are carried as ``nondiff_argnums``.
+
+    Returns
+    -------
+    Callable[..., Any]
+        ``builder`` with the in-band transverse tangent withdrawn, same call signature.
+    """
+
+    @functools.partial(jax.custom_jvp, nondiff_argnums=(0,))
+    def builder_with_rule(static_kwargs: tuple, deltas: Array) -> Any:
+        return builder(deltas, **dict(static_kwargs))
+
+    @builder_with_rule.defjvp
+    def builder_with_rule_jvp(
+        static_kwargs: tuple, primals: Tuple[Array], tangents: Tuple[Array]
+    ) -> Tuple[Any, Any]:
+        (deltas,) = primals
+        (deltas_tangent,) = tangents
+        routed, _, _ = split_transverse_tangent(deltas, deltas_tangent)
+        return jax.jvp(
+            lambda d: builder(d, **dict(static_kwargs)), (deltas,), (routed,)
+        )
+
+    @functools.wraps(builder)
+    def builder_without_unresolvable(deltas: Array, **static_kwargs: Any) -> Any:
+        return builder_with_rule(
+            _static_kwargs_tuple(
+                static_kwargs, getattr(builder, "__name__", "builder")
+            ),
+            jnp.asarray(deltas),
+        )
+
+    return builder_without_unresolvable
+
+
+def withdraw_unresolvable_transverse(delta: Array) -> Array:
+    """Identity on ``delta``, minus the transverse tangent nothing can resolve.
+
+    The primal is ``delta`` itself, returned unchanged with no arithmetic performed on
+    it, so this is invisible to a forward-only caller -- not merely numerically equal to
+    it, but the same buffer's values bit for bit. What it removes is the in-band
+    transverse *tangent*, so that everything downstream of it -- rotation blocks, the
+    translation radius, anything else built from the displacement -- is derived from a
+    displacement whose unusable transverse derivative has already been withdrawn.
+
+    Use this where a composite cannot be wrapped by
+    :func:`with_transverse_degeneracy_jvp` because something inside it is not
+    forward-differentiable, and pair it with
+    :func:`with_transverse_degeneracy_tangent` to put the analytic term back.
+    Withdrawing twice is idempotent, so it is safe to apply on top of a builder that
+    already carries :func:`without_unresolvable_transverse_jvp`.
+
+    Parameters
+    ----------
+    delta : Array
+        Displacement ``[..., 3]``.
+
+    Returns
+    -------
+    Array
+        ``delta``, unchanged.
+    """
+    return _withdraw_transverse(delta)
+
+
+@jax.custom_jvp
+def _withdraw_transverse(delta: Array) -> Array:
+    """Primal half of :func:`withdraw_unresolvable_transverse`.
+
+    Parameters
+    ----------
+    delta : Array
+        Displacement ``[..., 3]``.
+
+    Returns
+    -------
+    Array
+        ``delta``, unchanged.
+    """
+    return delta
+
+
+@_withdraw_transverse.defjvp
+def _withdraw_transverse_jvp(
+    primals: Tuple[Array], tangents: Tuple[Array]
+) -> Tuple[Array, Array]:
+    """JVP half: pass the primal through, route the tangent.
+
+    Parameters
+    ----------
+    primals : Tuple[Array]
+        ``(delta,)``.
+    tangents : Tuple[Array]
+        ``(delta_tangent,)``.
+
+    Returns
+    -------
+    delta : Array
+        Unchanged.
+    routed_tangent : Array
+        The tangent with its in-band transverse components removed.
+    """
+    (delta,) = primals
+    (delta_tangent,) = tangents
+    routed, _, _ = split_transverse_tangent(delta, delta_tangent)
+    return delta, routed
+
+
+def with_transverse_degeneracy_tangent(
+    cascade: Callable[..., Array],
+    *,
+    generators: Callable[[int, Any], TransverseGenerators],
+) -> Callable[..., Array]:
+    """Add the analytic transverse term to an already-computed output.
+
+    The counterpart of :func:`with_transverse_degeneracy_jvp` for a composite whose
+    operator **cannot be forward-differentiated** -- specifically the fused Pallas M2L,
+    which is a ``custom_vjp``, and JAX refuses ``jax.jvp`` through one. That rules out
+    the usual rule, which differentiates the operator. This one never touches it: its
+    primal returns the output unchanged, and its tangent adds the same analytic term,
+    computing the ``F0 @ G_in`` piece with a pure-JAX ``cascade`` twin instead of by
+    differentiation.
+
+    The caller is responsible for the other half -- routing the displacement through
+    :func:`withdraw_unresolvable_transverse` before building anything from it, so the
+    unusable transverse tangent never enters. Without that, this would add the analytic
+    term on top of whatever the polar route produced.
+
+    Parameters
+    ----------
+    cascade : Callable[..., Array]
+        Pure-JAX twin, ``cascade(coeffs, *extra, **static_kwargs) -> Array``, applied to
+        a generator image of the coefficients. Note it does **not** take ``delta``: the
+        ``extra`` arguments are what the operator was actually built from (rotation
+        blocks, radius), so the twin needs nothing else. Must be linear in ``coeffs``.
+    generators : Callable[[int, Any], TransverseGenerators]
+        As in :func:`with_transverse_degeneracy_jvp`.
+
+    Returns
+    -------
+    Callable[..., Array]
+        ``carry(out, coeffs, delta, *extra, **static_kwargs) -> out``.
+
+    Notes
+    -----
+    The tangents of ``out``, ``coeffs`` and ``extra`` other than through the analytic
+    term are legitimately ignored: the term is already first order in the displacement
+    tangent, so their contributions are products of two tangents and vanish from a JVP.
+    """
+
+    @functools.partial(jax.custom_jvp, nondiff_argnums=(0,))
+    def carry_with_rule(
+        static_kwargs: tuple, out: Array, coeffs: Array, delta: Array, *extra: Array
+    ) -> Array:
+        return out
+
+    @carry_with_rule.defjvp
+    @highest_matmul_precision
+    def carry_with_rule_jvp(
+        static_kwargs: tuple,
+        primals: Tuple[Array, ...],
+        tangents: Tuple[Array, ...],
+    ) -> Tuple[Array, Array]:
+        out, coeffs, delta, *extra = primals
+        out_tangent, _, delta_tangent, *_ = tangents
+        static = dict(static_kwargs)
+        generator = generators(int(static["order"]), coeffs.dtype)
+
+        _, scale_x, scale_y = split_transverse_tangent(delta, delta_tangent)
+        scale_x = scale_x[..., None].astype(coeffs.dtype)
+        scale_y = scale_y[..., None].astype(coeffs.dtype)
+
+        coeffs_shift = scale_x * _apply_generator(
+            coeffs, generator.in_y
+        ) - scale_y * _apply_generator(coeffs, generator.in_x)
+        out_shift = scale_x * _apply_generator(
+            out, generator.out_y
+        ) - scale_y * _apply_generator(out, generator.out_x)
+        return out, out_tangent + (out_shift - cascade(coeffs_shift, *extra, **static))
+
+    @functools.wraps(cascade)
+    def carry_axis_derivative(
+        out: Array, coeffs: Array, delta: Array, *extra: Array, **static_kwargs: Any
+    ) -> Array:
+        return carry_with_rule(
+            _static_kwargs_tuple(
+                static_kwargs, getattr(cascade, "__name__", "cascade")
+            ),
+            jnp.asarray(out),
+            jnp.asarray(coeffs),
+            jnp.asarray(delta),
+            *(jnp.asarray(e) for e in extra),
+        )
+
+    return carry_axis_derivative

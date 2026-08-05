@@ -13,6 +13,7 @@ from ._precision import highest_matmul_precision
 from ._transverse_degeneracy_jvp import (
     TransverseGenerators,
     with_transverse_degeneracy_jvp,
+    without_unresolvable_transverse_jvp,
 )
 from .complex_harmonics import complex_R_solidfmm, complex_R_solidfmm_preserve_dtype
 from .dtypes import complex_dtype_for_real, floor_squared_radius
@@ -1344,6 +1345,14 @@ def _blocks_to_padded_array(
     return out
 
 
+# Withdraws its in-band transverse tangent: an individual alignment block has no
+# transverse derivative near rho == 0 (its limit is approach-dependent, unlike the
+# assembled cascade's), so it hands the caller nothing there rather than something
+# wrong, and the caller supplies the cascade-level term. Applied to the *padded*
+# per-delta builder, which is what the batch (precomputed-block) lanes go through; the
+# unpadded one feeds m2l_complex_reference / m2m_complex / l2l_complex, which already
+# carry the cascade-level rule themselves.
+@without_unresolvable_transverse_jvp
 def _complex_rotation_blocks_to_z_solidfmm_padded(
     delta: Array,
     *,
@@ -1360,6 +1369,14 @@ def _complex_rotation_blocks_to_z_solidfmm_padded(
     return _blocks_to_padded_array(blocks, order=order, dtype=dtype)
 
 
+# Withdraws its in-band transverse tangent: an individual alignment block has no
+# transverse derivative near rho == 0 (its limit is approach-dependent, unlike the
+# assembled cascade's), so it hands the caller nothing there rather than something
+# wrong, and the caller supplies the cascade-level term. Applied to the *padded*
+# per-delta builder, which is what the batch (precomputed-block) lanes go through; the
+# unpadded one feeds m2l_complex_reference / m2m_complex / l2l_complex, which already
+# carry the cascade-level rule themselves.
+@without_unresolvable_transverse_jvp
 def _complex_rotation_blocks_from_z_solidfmm_padded(
     delta: Array,
     *,
@@ -1603,6 +1620,7 @@ def m2l_complex_reference_batch(
 
 
 @partial(jax.jit, static_argnames=("order",))
+@partial(with_transverse_degeneracy_jvp, generators=_M2L_TRANSVERSE_GENERATORS)
 def m2l_complex_reference_batch_cached_blocks(
     multipoles: Array,
     deltas: Array,
