@@ -1183,6 +1183,162 @@ def test_local_rotation_blocks_leave_the_evaluated_potential_invariant(direction
             )
 
 
+# The rotate -> z-translate -> rotate-back cascade, at the degenerate separation
+# rho == 0 where the alignment azimuth is undefined. Kept together because one half
+# of the behaviour is correct and must not regress, and the other half is a tracked
+# defect (docs/refactor_audit_2026-08.md G.10).
+_ROTATION_CASCADE_OPERATORS = [
+    pytest.param(m2l_real, id="m2l_real"),
+    pytest.param(m2m_real, id="m2m_real"),
+    pytest.param(l2l_real, id="l2l_real"),
+]
+
+_CASCADE_ORDER = 4
+_CASCADE_Z = 2.5
+
+
+def _cascade_multipole():
+    """A fixed multipole with nonzero m != 0 content, so the azimuth matters."""
+    coeffs = np.zeros(sh_size(_CASCADE_ORDER))
+    coeffs[0] = 1.0
+    coeffs[1] = 0.3
+    coeffs[4] = -0.2
+    coeffs[7] = 0.15
+    return jnp.asarray(coeffs, dtype=jnp.float64)
+
+
+def _cascade_gradient(operator, delta):
+    """``grad`` of a fixed-cotangent scalar loss on ``operator`` w.r.t. ``delta``."""
+    multipole = _cascade_multipole()
+    weights = jax.random.normal(
+        jax.random.PRNGKey(5), (sh_size(_CASCADE_ORDER),), dtype=jnp.float64
+    )
+
+    def loss(d):
+        return jnp.sum(weights * operator(multipole, d, order=_CASCADE_ORDER))
+
+    return np.asarray(
+        jax.grad(loss)(jnp.asarray(delta, dtype=jnp.float64)), dtype=np.float64
+    )
+
+
+def _cascade_offaxis_gradient_limit(operator, num_directions=8, rho=1.0e-9):
+    """The rho -> 0 limit of the gradient, averaged over approach directions.
+
+    Averaging is safe *because* the limit is direction-independent, which
+    :func:`test_rotation_cascade_gradient_limit_is_direction_independent` asserts
+    separately -- so this helper is never hiding a spread.
+    """
+    grads = [
+        _cascade_gradient(
+            operator,
+            [
+                rho * np.cos(2.0 * np.pi * k / num_directions),
+                rho * np.sin(2.0 * np.pi * k / num_directions),
+                _CASCADE_Z,
+            ],
+        )
+        for k in range(num_directions)
+    ]
+    return np.mean(np.array(grads), axis=0)
+
+
+@pytest.mark.parametrize("operator", _ROTATION_CASCADE_OPERATORS)
+def test_rotation_cascade_gradient_limit_is_direction_independent(operator):
+    """The cascade is genuinely differentiable at ``rho == 0``.
+
+    This is the premise the next two tests rest on, so it is asserted rather than
+    assumed. If the gradient limit depended on the approach direction there would be
+    no derivative at ``rho == 0``, a zero cotangent would be a defensible subgradient
+    choice, and G.10 would not be a defect.
+
+    Measured spread across eight approach directions at ``rho = 1e-9`` is ~1.4e-07,
+    which is finite-difference noise at that step, not structure. The bound is 1e-5:
+    loose enough not to be measuring round-off, tight enough that a genuinely
+    direction-dependent limit (which would be O(1) here -- the components themselves
+    are order unity) fails it.
+    """
+    if not jax.config.jax_enable_x64:
+        pytest.skip("gradient limits require float64 (JAX_ENABLE_X64=1)")
+
+    grads = np.array(
+        [
+            _cascade_gradient(
+                operator,
+                [
+                    1.0e-9 * np.cos(2.0 * np.pi * k / 8),
+                    1.0e-9 * np.sin(2.0 * np.pi * k / 8),
+                    _CASCADE_Z,
+                ],
+            )
+            for k in range(8)
+        ]
+    )
+    spread = float(np.max(grads.max(axis=0) - grads.min(axis=0)))
+    assert spread < 1.0e-5, (
+        "the rho -> 0 gradient limit must be direction-independent for the "
+        f"derivative to exist; spread across 8 directions is {spread:.3e}"
+    )
+
+
+@pytest.mark.parametrize("operator", _ROTATION_CASCADE_OPERATORS)
+def test_rotation_cascade_radial_gradient_at_rho_zero_is_correct(operator):
+    """The ``d/dz`` component at ``rho == 0`` is right, and finite -- do not regress it.
+
+    The degeneracy guards in ``_multipole_align_{to,from}_z_block`` lose the two
+    transverse components (the next test), but they do *not* damage the radial one,
+    and they do keep the whole gradient finite. Both halves are worth pinning: the
+    finiteness is the guards' actual purpose, and a future fix for G.10 must not
+    trade a wrong transverse component for a wrong radial one.
+    """
+    if not jax.config.jax_enable_x64:
+        pytest.skip("gradient limits require float64 (JAX_ENABLE_X64=1)")
+
+    at_zero = _cascade_gradient(operator, [0.0, 0.0, _CASCADE_Z])
+    limit = _cascade_offaxis_gradient_limit(operator)
+
+    assert np.all(np.isfinite(at_zero)), f"gradient is not finite: {at_zero}"
+    # Relative bound: these components span ~0.07 to ~9.7 across the three operators.
+    assert abs(at_zero[2] - limit[2]) <= 1.0e-6 * max(
+        abs(limit[2]), 1.0
+    ), f"d/dz at rho == 0 is {at_zero[2]:.9f}, off-axis limit is {limit[2]:.9f}"
+
+
+@pytest.mark.xfail(
+    strict=True,
+    reason=(
+        "KNOWN DEFECT, tracked as G.10 in docs/refactor_audit_2026-08.md. The "
+        "degeneracy guards in _multipole_align_{to,from}_z_block return a zero "
+        "cotangent for the two transverse components at rho == 0, but the assembled "
+        "cascade is differentiable there and the true derivative is nonzero "
+        "(m2l_real: -1.502050 / -0.523434; m2m_real: -6.416905 / +1.769043; "
+        "l2l_real: +0.305315 / +0.003498). It is the same defect class d5cb13b fixed "
+        "for L2P/P2M, but the fix does not transfer: the code reaches (x, y) only via "
+        "rho = sqrt(x^2+y^2) and az = atan2(x, y), so every chain-rule route carries "
+        "x/rho or y/rho^2 and no guard choice can produce the O(rho) coefficient the "
+        "polar parametrisation divided out. Recovering it is a scheme change, not a "
+        "guard change. strict=True so this becomes a hard error the moment G.10 is "
+        "fixed, forcing the marker's removal."
+    ),
+)
+@pytest.mark.parametrize("operator", _ROTATION_CASCADE_OPERATORS)
+def test_rotation_cascade_transverse_gradient_at_rho_zero(operator):
+    """``d/dx`` and ``d/dy`` at ``rho == 0`` must equal the off-axis limit."""
+    if not jax.config.jax_enable_x64:
+        pytest.skip("gradient limits require float64 (JAX_ENABLE_X64=1)")
+
+    at_zero = _cascade_gradient(operator, [0.0, 0.0, _CASCADE_Z])
+    limit = _cascade_offaxis_gradient_limit(operator)
+
+    for component, axis in ((0, "x"), (1, "y")):
+        assert abs(at_zero[component] - limit[component]) <= 1.0e-5 * max(
+            abs(limit[component]), 1.0
+        ), (
+            f"d/d{axis} at rho == 0 is {at_zero[component]:.9f}, but the "
+            f"off-axis limit is {limit[component]:.9f}"
+        )
+
+
 def test_rotation_to_from_z_axis_are_inverses():
     """Rotation to/from z-axis should compose to identity per degree."""
     dtype = jnp.float64

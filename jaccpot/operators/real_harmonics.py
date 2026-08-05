@@ -1375,8 +1375,31 @@ def _multipole_align_to_z_block(
     # fixed-topology FMM hits: zero displacement (single-child COM L2L pairs) and
     # z-axis-aligned displacement (rho == 0, lattice-aligned M2L pairs). Forward
     # values are unchanged (arctan2(0,0)=0, sqrt(0)=0), so the golden oracle stays
-    # byte-stable; the azimuth is undefined there and the rotation is a pure polar
-    # turn / identity, so a zero cotangent is the correct subgradient.
+    # byte-stable.
+    #
+    # WARNING: the guards are NOT gradient-correct, and an earlier version of this
+    # comment claimed they were ("a zero cotangent is the correct subgradient").
+    # They are not. Measured on the assembled cascade at z=2.5, grad w.r.t. the
+    # displacement, limit taken from eight approach directions at rho=1e-9:
+    #
+    #     m2l_real  true (-1.502050, -0.523434, +0.834153)  returned (0, 0, +0.834153)
+    #     m2m_real  true (-6.416905, +1.769043, -9.651272)  returned (0, 0, -9.651272)
+    #     l2l_real  true (+0.305315, +0.003498, +0.072012)  returned (0, 0, +0.072012)
+    #
+    # The limit is direction-independent to ~1e-07 and
+    # ``(f(rho, phi) - f(0)) / rho`` equals ``a cos(phi) + b sin(phi)`` to 1.4e-06,
+    # so the cascade genuinely IS differentiable here and the true derivative is
+    # ``(a, b)``. The radial component is right; both transverse components are lost.
+    #
+    # Why no guard tweak fixes it: the code reaches ``(x, y)`` only through
+    # ``rho = sqrt(x^2 + y^2)`` and ``az = atan2(x, y)``, so at ``x == y == 0`` every
+    # chain-rule route carries a factor ``x / rho`` or ``y / rho^2``. Flooring rho
+    # (the `_azimuth_from_floored_rho` trick that fixed the same defect class in
+    # L2P/P2M, `d5cb13b`) makes those exactly 0; leaving them bare makes them NaN.
+    # Neither can produce ``a`` or ``b``, whose O(rho) coefficient the polar
+    # parametrisation has already divided out. Recovering it needs a scheme change,
+    # not a guard change -- see `docs/refactor_audit_2026-08.md` G.10. Tracked by
+    # ``test_rotation_cascade_transverse_gradient_at_rho_zero`` (strict xfail).
     rho_sq = x * x + y * y
     rho_pos = rho_sq > 0
     rho = jnp.where(rho_pos, jnp.sqrt(jnp.where(rho_pos, rho_sq, 1.0)), 0.0)
@@ -1404,8 +1427,31 @@ def _multipole_align_from_z_block(
     # fixed-topology FMM hits: zero displacement (single-child COM L2L pairs) and
     # z-axis-aligned displacement (rho == 0, lattice-aligned M2L pairs). Forward
     # values are unchanged (arctan2(0,0)=0, sqrt(0)=0), so the golden oracle stays
-    # byte-stable; the azimuth is undefined there and the rotation is a pure polar
-    # turn / identity, so a zero cotangent is the correct subgradient.
+    # byte-stable.
+    #
+    # WARNING: the guards are NOT gradient-correct, and an earlier version of this
+    # comment claimed they were ("a zero cotangent is the correct subgradient").
+    # They are not. Measured on the assembled cascade at z=2.5, grad w.r.t. the
+    # displacement, limit taken from eight approach directions at rho=1e-9:
+    #
+    #     m2l_real  true (-1.502050, -0.523434, +0.834153)  returned (0, 0, +0.834153)
+    #     m2m_real  true (-6.416905, +1.769043, -9.651272)  returned (0, 0, -9.651272)
+    #     l2l_real  true (+0.305315, +0.003498, +0.072012)  returned (0, 0, +0.072012)
+    #
+    # The limit is direction-independent to ~1e-07 and
+    # ``(f(rho, phi) - f(0)) / rho`` equals ``a cos(phi) + b sin(phi)`` to 1.4e-06,
+    # so the cascade genuinely IS differentiable here and the true derivative is
+    # ``(a, b)``. The radial component is right; both transverse components are lost.
+    #
+    # Why no guard tweak fixes it: the code reaches ``(x, y)`` only through
+    # ``rho = sqrt(x^2 + y^2)`` and ``az = atan2(x, y)``, so at ``x == y == 0`` every
+    # chain-rule route carries a factor ``x / rho`` or ``y / rho^2``. Flooring rho
+    # (the `_azimuth_from_floored_rho` trick that fixed the same defect class in
+    # L2P/P2M, `d5cb13b`) makes those exactly 0; leaving them bare makes them NaN.
+    # Neither can produce ``a`` or ``b``, whose O(rho) coefficient the polar
+    # parametrisation has already divided out. Recovering it needs a scheme change,
+    # not a guard change -- see `docs/refactor_audit_2026-08.md` G.10. Tracked by
+    # ``test_rotation_cascade_transverse_gradient_at_rho_zero`` (strict xfail).
     rho_sq = x * x + y * y
     rho_pos = rho_sq > 0
     rho = jnp.where(rho_pos, jnp.sqrt(jnp.where(rho_pos, rho_sq, 1.0)), 0.0)
