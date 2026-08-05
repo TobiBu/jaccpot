@@ -172,6 +172,39 @@ def test_the_band_boundary_sits_at_the_measured_crossover():
         )
 
 
+def test_the_band_boundary_follows_the_dtype_and_is_not_a_float64_constant():
+    """At float32 the boundary must move to ``sqrt(eps32)``, four orders wider.
+
+    ``split_transverse_tangent`` reads ``eps`` from the displacement's dtype, so the
+    band is ``rho/r <= 1.5e-08`` at float64 but ``3.4e-04`` at float32. That is not a
+    detail: the fused real M2L may well run float32 in production, and a float64
+    constant hard-coded here would leave four orders of magnitude of approach --
+    where the polar route errs ``O(eps r / rho)`` -- on the wrong branch. A float32
+    displacement at ``rho/r = 1e-05`` is inside its own band and outside float64's,
+    which is what makes this test distinguish the two.
+    """
+    boundary32 = float(np.sqrt(np.finfo(np.float32).eps)) * _Z
+    tangent = jnp.asarray([1.0, 0.0, 0.0], dtype=jnp.float32)
+    for factor, expect_analytic in ((0.5, True), (2.0, False)):
+        rho = boundary32 * factor
+        _, scale_x, _ = split_transverse_tangent(
+            jnp.asarray([rho, 0.0, _Z], dtype=jnp.float32), tangent
+        )
+        took_analytic = float(scale_x) != 0.0
+        assert took_analytic is expect_analytic, (
+            f"float32 rho/r = {rho / _Z:.3e} took the "
+            f"{'analytic' if took_analytic else 'polar'} branch; sqrt(eps32) = "
+            f"{np.sqrt(np.finfo(np.float32).eps):.3e}"
+        )
+    # And the same rho is *outside* the float64 band, so this is not just re-testing
+    # the float64 threshold under a different name.
+    _, scale_x64, _ = split_transverse_tangent(
+        jnp.asarray([boundary32 * 0.5, 0.0, _Z], dtype=jnp.float64),
+        jnp.asarray([1.0, 0.0, 0.0], dtype=jnp.float64),
+    )
+    assert float(scale_x64) == 0.0
+
+
 def test_split_removes_the_transverse_tangent_only_on_the_axis():
     """On the axis the transverse tangent is handed to the analytic branch instead."""
     delta = jnp.asarray([0.0, 0.0, _Z], dtype=jnp.float64)
@@ -259,6 +292,91 @@ def test_the_rule_transposes_so_reverse_mode_agrees_with_forward(operator, is_co
     # Both evaluate the same linear functional; they differ only by the order of a
     # handful of float64 multiply-adds, hence a round-off-level tolerance.
     assert reverse == pytest.approx(forward, rel=1e-12, abs=1e-12)
+
+
+# ---------------------------------------------------------------------------
+# float32
+# ---------------------------------------------------------------------------
+#
+# Everything above runs at float64, where the band is a 1.5e-08-wide sliver that only
+# exact zeros and centre-of-mass cancellation reach. At float32 it is 3.4e-04 wide, so
+# ordinary tree geometry lands in it, and the fused real M2L may run float32 in
+# production. A finite difference cannot referee this -- a float32 central difference is
+# good to ~1e-03 at best -- so the reference is the same operator's float64 gradient.
+
+
+_FP32_RHOS = [
+    pytest.param(0.0, id="exactly on axis"),
+    pytest.param(1.0e-12, id="deep inside the band"),
+    pytest.param(1.0e-6, id="inside the band"),
+]
+
+
+@pytest.mark.parametrize(
+    "operator, is_complex",
+    [pytest.param(p.values[0], False, id=p.id) for p in _REAL_CASCADES]
+    + [pytest.param(p.values[0], True, id=p.id) for p in _COMPLEX_CASCADES],
+)
+@pytest.mark.parametrize("rho", _FP32_RHOS)
+def test_the_analytic_branch_holds_at_float32(operator, is_complex, rho):
+    """Inside the float32 band the float32 transverse gradient must track float64.
+
+    This is the claim the float64 tests cannot make, because float32's band admits
+    ``rho`` values four orders of magnitude larger. Inside it the analytic branch is the
+    ``rho -> 0`` limit and errs ``O(rho/r)``, so agreement with the float64 gradient
+    should be at float32 round-off and nowhere near the ``3.4e-04`` worst case the
+    minimax crossover permits *on the boundary*. Measured worst over these three ``rho``
+    and both signs of ``z``: 1.1e-06.
+
+    What the tolerance is really guarding is that the error does not *blow up* inside
+    the band. The polar route errs ``O(eps r / rho)``, which at ``rho = 1e-12``,
+    ``eps = 1.2e-07`` is unbounded -- so a regression that narrowed the band back to
+    ``rho_sq > 0``, or that read ``eps`` from a float64 constant, fails here by orders of
+    magnitude rather than marginally.
+
+    Parameters
+    ----------
+    operator : Callable
+        The cascade under test, in either basis.
+    is_complex : bool
+        Whether ``operator`` takes complex coefficients.
+    rho : float
+        Cylindrical radius, inside the float32 band at ``r ~ 2.5``.
+    """
+    if not jax.config.jax_enable_x64:
+        pytest.skip("the float64 reference requires JAX_ENABLE_X64=1")
+
+    def transverse_gradient(dtype):
+        if is_complex:
+            complex_dtype = jnp.complex64 if dtype == jnp.float32 else jnp.complex128
+            coeffs = _complex_coeffs(5).astype(complex_dtype)
+            weights = _complex_coeffs(6).astype(complex_dtype)
+        else:
+            coeffs = _real_coeffs(5).astype(dtype)
+            weights = _real_coeffs(6).astype(dtype)
+
+        def loss(delta):
+            out = operator(coeffs, delta, order=_ORDER)
+            return jnp.real(jnp.sum(weights * out))
+
+        gradient = jax.grad(loss)(jnp.asarray([rho, 0.0, _Z], dtype=dtype))
+        return np.asarray(gradient, dtype=np.float64)[:2]
+
+    single = transverse_gradient(jnp.float32)
+    double = transverse_gradient(jnp.float64)
+
+    # Not vacuous: the defect this rule fixes returned exactly (0, 0) here, so a
+    # reference that were itself ~0 would let the comparison pass without testing
+    # anything -- the same way a symmetric construction let G.10 survive review.
+    assert np.max(np.abs(double)) > 1.0e-3, (
+        "the float64 transverse gradient is ~0, so this comparison would pass "
+        "without testing anything"
+    )
+    relative = float(np.max(np.abs(single - double)) / np.max(np.abs(double)))
+    assert relative < 1.0e-5, (
+        f"float32 transverse gradient differs from float64 by {relative:.3e} at "
+        f"rho = {rho:.1e}\n  float32: {single}\n  float64: {double}"
+    )
 
 
 # ---------------------------------------------------------------------------
