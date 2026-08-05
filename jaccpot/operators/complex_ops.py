@@ -978,19 +978,34 @@ def _angles_from_delta_solidfmm(delta: Array) -> tuple[Array, Array]:
     # At those points ``sqrt`` (infinite grad at 0) and ``arctan2`` (0/0 grad at
     # the origin) would otherwise inject NaNs into the M2L/L2L reverse pass. The
     # azimuth is undefined there and the rotation reduces to a pure polar turn /
-    # identity, so returning 0 with a zero cotangent is the correct subgradient.
+    # identity, so returning 0 keeps the forward exact.
     #
-    # That last sentence used to be an argument from construction. It is now
-    # measured. On a system built so the guard actually fires -- four z-stacked
-    # clusters sharing one (x,y) point set, whose COM displacements come out
-    # exactly (0, 0, +-8), so rho == 0 on every M2L pair -- reverse-mode AD agrees
-    # with finite differences to ~10 significant digits, both along a purely
-    # transverse (azimuth-plane) direction and along a full 3N direction
-    # (N=32, order 4, theta 0.7, fp64, complex basis). The transverse one-sided
-    # derivatives converge to the same value from both sides rather than to equal
-    # and opposite values, i.e. the loss is smooth through the degeneracy and the
-    # zeroed azimuth cotangent drops nothing: the m != 0 terms carry
-    # sin^|m|(theta) = (rho/r)^|m| factors that annihilate the arbitrary azimuth.
+    # THE ZERO COTANGENT IS NOT CORRECT, and this comment used to say it was. The
+    # retracted claim, kept here because its measurement was real and its scope is
+    # the instructive part: on four z-stacked clusters sharing one (x,y) point set
+    # (COM displacements exactly (0, 0, +-8), so rho == 0 on every M2L pair),
+    # reverse-mode AD agreed with finite differences to ~10 significant digits, and
+    # the transverse one-sided derivatives converged to the same value from both
+    # sides -- read at the time as "the loss is smooth and nothing is dropped".
+    #
+    # What that construction could not see is that it is symmetric: the same (x,y)
+    # set and the same intra-cluster masses in every cluster, so the per-pair
+    # transverse errors cancel in the sum. Re-measured with an ASYMMETRIC random
+    # cotangent and an asymmetric purely-transverse perturbation direction, on a
+    # system with 6 of 24 M2L pairs at rho == 0 exactly, FD and AD disagree by
+    # 1.8e-05 relative in this (complex) basis and 1.9e-03 in the real one --
+    # stable across step size, so not finite-difference noise. Pinned by
+    # ``tests/unit/test_gradient_correctness.py::test_fd_vs_ad_along_a_transverse_direction_at_rho_zero``
+    # (strict xfail).
+    #
+    # The forward argument still holds and is worth keeping: the m != 0 terms carry
+    # sin^|m|(theta) = (rho/r)^|m| factors that annihilate the arbitrary azimuth, so
+    # the VALUE at rho == 0 is exact. It is the derivative that is not -- the
+    # cascade is differentiable there (the limit is direction-independent) and the
+    # true transverse derivative is nonzero. Fixing it is a scheme change, not a
+    # guard change: the code reaches (x, y) only through rho and the azimuth, so
+    # every chain-rule route carries x/rho or y/rho^2. See G.10 in
+    # docs/refactor_audit_2026-08.md.
     #
     # WARNING for anyone extending the coverage: a *uniform lattice* does not
     # exercise this guard, despite what

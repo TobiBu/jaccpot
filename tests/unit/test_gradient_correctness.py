@@ -295,3 +295,122 @@ def test_reorders_to_original_particle_order():
     a_fwd = fmm.compute_accelerations(positions, masses, max_order=4, theta=0.4)
     assert a.shape == positions.shape
     assert jnp.allclose(a, a_fwd, rtol=1e-6, atol=1e-6)
+
+
+# ---------------------------------------------------------------------------
+# The rho == 0 degeneracy (docs/refactor_audit_2026-08.md G.10)
+# ---------------------------------------------------------------------------
+
+
+def _z_stacked_system(num_per_cluster=8, num_clusters=4, z_spacing=6.0, seed=3):
+    """Clusters stacked along z that share one ``(x, y)`` point set and masses.
+
+    Every cluster therefore has the *same* centre-of-mass ``(x, y)``, so the M2L
+    displacements between them have ``rho == 0`` exactly rather than
+    approximately. A uniform lattice does **not** do this -- centres are COM, not
+    geometric box centres, so lattice leaf COMs are generically off-axis relative
+    to each other (see the WARNING in
+    :func:`jaccpot.operators.complex_ops.m2l_complex_reference`).
+    """
+    rng = np.random.default_rng(seed)
+    xy = rng.normal(size=(num_per_cluster, 2)) * 0.35
+    intra_masses = rng.uniform(0.6, 1.4, size=num_per_cluster)
+    offsets = [(i - (num_clusters - 1) / 2) * z_spacing for i in range(num_clusters)]
+    positions = np.concatenate(
+        [
+            np.column_stack([xy[:, 0], xy[:, 1], np.full(num_per_cluster, dz)])
+            for dz in offsets
+        ]
+    )
+    masses = np.tile(intra_masses, num_clusters)
+    return (
+        jnp.asarray(positions, dtype=jnp.float64),
+        jnp.asarray(masses, dtype=jnp.float64),
+    )
+
+
+def _count_degenerate_m2l_pairs(state):
+    """How many accepted M2L displacements have ``rho == 0`` exactly."""
+    interactions = state.interactions
+    centers = np.asarray(state.upward.multipoles.centers)
+    valid = int(np.sum(np.asarray(interactions.counts)))
+    targets = np.asarray(interactions.targets)[:valid]
+    sources = np.asarray(interactions.sources)[:valid]
+    delta = centers[targets] - centers[sources]
+    rho_sq = delta[:, 0] ** 2 + delta[:, 1] ** 2
+    return int(np.sum(rho_sq == 0.0)), valid
+
+
+@pytest.mark.xfail(
+    strict=True,
+    reason=(
+        "KNOWN DEFECT, G.10 in docs/refactor_audit_2026-08.md. Both bases zero the "
+        "TRANSVERSE cotangent of the rotate -> z-translate -> rotate-back cascade at "
+        "rho == 0 (real: _multipole_align_{to,from}_z_block; complex: "
+        "m2l_complex_reference), but the cascade is differentiable there and the true "
+        "derivative is nonzero. Measured FD-vs-AD disagreement on this construction, "
+        "stable across step size: 1.9e-03 relative (real), 1.8e-05 (complex). "
+        "The operator-level error therefore does reach the force gradient -- it is not "
+        "an artefact that cancels. strict=True so this becomes a hard error once G.10 "
+        "is fixed, forcing the marker's removal."
+    ),
+)
+@pytest.mark.parametrize("basis", ["real", "complex"])
+def test_fd_vs_ad_along_a_transverse_direction_at_rho_zero(basis):
+    """FD and AD must agree when M2L displacements are exactly z-aligned.
+
+    This is the user-facing statement of G.10: the operator-level defect is easy to
+    dismiss as an isolated helper's subgradient choice, so what matters is whether it
+    survives into ``grad`` of the force. It does.
+
+    Two things make this test bite where the existing coverage does not. The
+    perturbation direction is **purely transverse** (x and y only), because the radial
+    component is unaffected and would dilute the comparison; and both the cotangent and
+    the direction are **asymmetric random**, because a symmetric construction lets the
+    per-pair errors cancel in the sum -- which is why an earlier measurement recorded in
+    ``m2l_complex_reference``'s comment concluded, on a symmetric system, that nothing
+    was lost.
+    """
+    if not jax.config.jax_enable_x64:
+        pytest.skip("FD-vs-AD at this tolerance requires float64")
+
+    positions, masses = _z_stacked_system()
+    fmm = FastMultipoleMethod(
+        basis=basis, use_pallas=False, theta=0.5, G=1.0, softening=1e-3
+    )
+    state = fmm.prepare_state(positions, masses, max_order=4, leaf_size=4)
+
+    degenerate, total = _count_degenerate_m2l_pairs(state)
+    assert total > 0, "no M2L pairs: the far field is not exercised at all"
+    assert degenerate > 0, (
+        f"none of the {total} M2L pairs has rho == 0, so the degeneracy guard never "
+        "fires and this test would pass without testing anything"
+    )
+
+    rng = np.random.default_rng(11)
+    cotangent = jnp.asarray(rng.normal(size=positions.shape), dtype=jnp.float64)
+
+    def loss(pos):
+        return jnp.sum(cotangent * fmm.differentiable_accelerations(state, pos, masses))
+
+    direction = np.zeros(positions.shape)
+    direction[:, 0] = rng.normal(size=positions.shape[0])
+    direction[:, 1] = rng.normal(size=positions.shape[0])
+    direction /= np.linalg.norm(direction)
+    direction_j = jnp.asarray(direction, dtype=jnp.float64)
+
+    ad = float(jnp.sum(jax.grad(loss)(positions) * direction_j))
+    step = 1.0e-6
+    fd = float(
+        (loss(positions + step * direction_j) - loss(positions - step * direction_j))
+        / (2 * step)
+    )
+
+    # 1e-6 is comfortably above central-difference truncation at this step (the
+    # measured FD value is stable to ~1e-9 between h=1e-6 and h=1e-7) and far below
+    # the 1.9e-03 / 1.8e-05 discrepancies the defect produces.
+    rel = abs(fd - ad) / max(abs(fd), 1e-300)
+    assert rel < 1.0e-6, (
+        f"{basis} basis: FD {fd:.10e} vs AD {ad:.10e} disagree by {rel:.3e} with "
+        f"{degenerate}/{total} M2L pairs at rho == 0"
+    )
