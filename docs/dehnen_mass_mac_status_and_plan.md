@@ -199,7 +199,7 @@ nobody re-derives it from the committed JSON and believes it:
 
 ### p=8 headline, POST-FIX — the valid measurement
 
-`results/validation/mac_postfix_headline_p8.json`. N=4096, p=8, softening 1e-6,
+`bench/results/validation/mac_postfix_headline_p8.json`. N=4096, p=8, softening 1e-6,
 Dehnen δa/f, eq (16a) **verbatim** (no θ cap), matched at equal p90. Both arms overlap
 genuinely across the whole matched range — the θ grid is dense enough that no row is
 interpolated across the far-field switch-on, which is what invalidated the first
@@ -244,7 +244,7 @@ enough tree, which is the context for every "the criterion wins the tail" claim 
 
 Warm-call medians of 5 timed `prepare_state` calls, after a cold call and one
 discarded warm-up, via `bench/validation/force_scale_prepare_cost.py`
-(`results/validation/force_scale_prepare_cost_n16384_p8.json`):
+(`bench/results/validation/force_scale_prepare_cost_n16384_p8.json`):
 
 | arm | cold | warm median | warm calls | ratio | prepasses | far pairs |
 |---|---|---|---|---|---|---|
@@ -619,7 +619,7 @@ JAX_PLATFORMS=cpu JAX_ENABLE_X64=1 .venv/bin/python -m pytest \
 JAX_PLATFORMS=cpu JAX_ENABLE_X64=1 .venv/bin/python -m bench.validation.mac_error_distribution \
     --n 4096 --leaf-size 16 --order 8 --distribution plummer,uniform \
     --theta 0.30,0.38,0.46,0.54,0.62 --eps 1e-5,1e-6,2e-7,1e-7,3e-8 \
-    --softening 1e-6 --metric dehnen --json-out results/validation/<name>.json
+    --softening 1e-6 --metric dehnen --json-out bench/results/validation/<name>.json
 
 # GPU (pick a free device; the box is often contended)
 eval $(.venv/bin/autocvd -l -q)
@@ -630,10 +630,10 @@ eval $(.venv/bin/autocvd -l -q)
 XLA_PYTHON_CLIENT_PREALLOCATE=false JAX_ENABLE_X64=1 \
     .venv/bin/python -m bench.validation.force_scale_prepare_cost \
     --n 16384 --leaf-size 16 --order 8 --repeats 5 --eps 2e-7 \
-    --json-out results/validation/force_scale_prepare_cost_n16384_p8.json
+    --json-out bench/results/validation/force_scale_prepare_cost_n16384_p8.json
 ```
 
-Existing artifacts in `results/validation/` — `mac_dehnen_metric_p8.json` is the
+Existing artifacts in `bench/results/validation/` — `mac_dehnen_metric_p8.json` is the
 headline p=8 run; `mac_plummer_p8_cap07.json` is the `mac_theta_max=0.7` arm;
 `force_scale_prepare_cost_n16384_p8.json` is the Step 1 prepare-cost measurement.
 
