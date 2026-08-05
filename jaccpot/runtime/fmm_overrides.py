@@ -6,7 +6,7 @@ engine class inherits this mixin. Sibling of _fmm_impl at runtime level.
 from __future__ import annotations
 
 import warnings
-from typing import Any, Mapping, Optional
+from typing import TYPE_CHECKING, Any, Mapping, Optional
 
 import jax
 import jax.numpy as jnp
@@ -48,6 +48,15 @@ from .fmm_constants import (
     _minimum_memory_streamed_gpu_traversal_seed,
 )
 from .fmm_state import _RuntimeExecutionOverrides
+
+if TYPE_CHECKING:  # pragma: no cover - annotations only, no runtime import
+    # The mixins annotate `self` as the engine they are mixed into, which lives in
+    # `_fmm_impl` and imports *them* -- so this must stay under TYPE_CHECKING or it
+    # would form the cycle ARCHITECTURE §8 forbids. Before this block the names were
+    # dangling: `typing.get_type_hints` raised NameError on every mixin method, so the
+    # annotations documented an intent no tool could check.
+    from ._fmm_impl import PreparedStateLike
+
 
 # Merge base for a field-by-field override that arrives on a route with no
 # resolved config at all (no preset, no policy default). Only the fields the
