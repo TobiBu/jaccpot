@@ -189,7 +189,6 @@ Example usage::
 
 from __future__ import annotations
 
-import math
 from functools import lru_cache, partial
 from typing import Any, Tuple
 
@@ -1117,183 +1116,6 @@ def complex_to_dehnen_real_coeffs(complex_coeffs: Array, *, order: int) -> Array
     return converted.astype(coeffs.real.dtype)
 
 
-def _wigner_D_complex(ell: int, alpha: float, beta: float, gamma: float) -> np.ndarray:
-    """Compute complex Wigner D^ell using SymPy (baseline correctness path)."""
-    try:
-        from sympy.physics import wigner
-    except Exception as exc:  # pragma: no cover - optional dependency
-        raise ImportError("sympy is required for Wigner-D baseline rotation") from exc
-
-    D_sym = wigner.wigner_d(ell, float(alpha), float(beta), float(gamma))
-    return np.array(D_sym.evalf(30).tolist(), dtype=np.complex128)
-
-
-@highest_matmul_precision
-def _real_wigner_rotation(
-    ell: int,
-    alpha: Array,
-    beta: Array,
-    gamma: Array,
-    *,
-    dtype: DTypeLike,
-    basis: str = "multipole",
-) -> Array:
-    """Real rotation block from complex Wigner D via Dehnen Q transform.
-
-    The SymPy/NumPy baseline correctness path, not a production kernel: the
-    Wigner-D itself comes from :func:`_wigner_D_complex` at 30 digits. The
-    closed-form production builders are
-    :func:`real_rotation_to_z_axis_multipole` and friends; this exists to check
-    them.
-
-    Parameters
-    ----------
-    ell : int
-        Spherical harmonic degree, giving a ``[2*ell+1, 2*ell+1]`` block.
-    alpha : Array
-        First Euler angle (z), radians. Must be a **concrete** value -- it is
-        read via ``float()``, so this function cannot be traced or jitted.
-    beta : Array
-        Second Euler angle (y), radians. Concrete, as ``alpha``.
-    gamma : Array
-        Third Euler angle (z), radians. Concrete, as ``alpha``.
-    dtype : DTypeLike
-        Output dtype. The internal algebra is float64/complex128 regardless;
-        this only casts the result.
-    basis : str
-        Either ``"multipole"`` or ``"local"``; selects the diagonal similarity
-        scaling that maps the Wigner real
-        basis to the Dehnen real basis used for multipoles or locals.
-
-    Returns
-    -------
-    Array
-        Real rotation block ``[2*ell+1, 2*ell+1]`` in the Dehnen no-sqrt2 real
-        basis, indexed ``m = -ell..ell``.
-
-    Raises
-    ------
-    ValueError
-        If ``basis`` is neither ``"multipole"`` nor ``"local"``.
-
-    Notes
-    -----
-    Not differentiable in the Euler angles: they are pulled out to the host with
-    ``float()`` and the block is rebuilt in NumPy, so the angles do not appear in
-    any jaxpr and carry no cotangent.
-    """
-    D_complex = _wigner_D_complex(ell, float(alpha), float(beta), float(gamma))
-    # Adjust for the no-Condon-Shortley convention used in p2m_real_direct.
-    # This applies a diagonal phase S_m = (-1)^m to change basis.
-    m_vals = np.arange(-ell, ell + 1)
-    S = np.diag((-1.0) ** m_vals)
-    D_complex = S @ D_complex @ S
-    Q = build_Q_dehnen_no_sqrt2(ell)
-    Q_inv = np.linalg.inv(Q)
-    D_real = np.real(Q @ D_complex @ Q_inv)
-
-    if basis == "multipole":
-        S = _dehnen_real_basis_scale_diag_multipole(ell)
-    elif basis == "local":
-        S = _dehnen_real_basis_scale_diag_local(ell)
-    else:
-        raise ValueError(f"Unknown basis: {basis}")
-
-    D_real = S @ D_real @ np.linalg.inv(S)
-    return jnp.asarray(D_real, dtype=dtype)
-
-
-@lru_cache(maxsize=None)
-def _dehnen_real_basis_scale_diag_multipole(ell: int) -> np.ndarray:
-    """Scaling from Wigner real basis to Dehnen real basis (multipoles).
-
-    C_mm ∝ sqrt(binomial(2ℓ, ℓ-m)) with a sign flip for m >= 0.
-    Overall scalar cancels in similarity.
-    """
-    m_vals = np.arange(-ell, ell + 1)
-    scale = np.array(
-        [math.comb(2 * ell, ell - int(m)) ** 0.5 for m in m_vals], dtype=np.float64
-    )
-    sign = np.where(m_vals >= 0, -1.0, 1.0)
-    return np.diag(sign * scale)
-
-
-@lru_cache(maxsize=None)
-def _dehnen_real_basis_scale_diag_local(ell: int) -> np.ndarray:
-    """Scaling from Wigner real basis to Dehnen real basis (locals).
-
-    C_mm ∝ (ℓ-|m|)!(ℓ+|m|)! * sqrt(binomial(2ℓ, ℓ-m)) with sign flip for m>=0.
-    This accounts for the local basis scaling relative to multipoles.
-    """
-    m_vals = np.arange(-ell, ell + 1)
-    scale = []
-    for m in m_vals:
-        m_abs = abs(int(m))
-        comb = math.comb(2 * ell, ell - int(m))
-        fac = math.factorial(ell - m_abs) * math.factorial(ell + m_abs)
-        scale.append((comb**0.5) * fac)
-    scale = np.array(scale, dtype=np.float64)
-    sign = np.where(m_vals >= 0, -1.0, 1.0)
-    return np.diag(sign * scale)
-
-
-def _rotation_to_z_angles(x: Array, y: Array, z: Array) -> tuple[Array, Array, Array]:
-    """ZYZ angles equivalent to Dehnen's alignment rotation.
-
-    The Dehnen A6 alignment uses the sequence:
-        R_align = R_y(-beta) @ R_z(-alpha_z)
-    with alpha_z = atan2(y, x) and beta = atan2(rho, z).
-    We convert this rotation into ZYZ Euler angles for Wigner-D.
-    """
-    # NaN-safe (double-where) angles. ``sqrt`` has an infinite reverse grad at 0
-    # and ``arctan2`` a 0/0 grad at the origin; the fixed-topology M2L/L2L reverse
-    # pass genuinely hits zero displacements (single-child COM nodes) and
-    # z-axis-aligned displacements (rho == 0, e.g. lattice-aligned pairs). Guard
-    # those directions so the cotangents stay finite. Forward values are
-    # unchanged (arctan2(0,0)=0, sqrt(0)=0), so the golden oracle is byte-stable.
-    rho_sq = x * x + y * y
-    rho_pos = rho_sq > 0
-    rho = jnp.where(rho_pos, jnp.sqrt(jnp.where(rho_pos, rho_sq, 1.0)), 0.0)
-    alpha_z = jnp.where(rho_pos, jnp.arctan2(y, jnp.where(rho_pos, x, 1.0)), 0.0)
-    r_pos = (rho_sq + z * z) > 0
-    beta = jnp.where(r_pos, jnp.arctan2(rho, jnp.where(r_pos, z, 1.0)), 0.0)
-
-    ca = jnp.cos(-alpha_z)
-    sa = jnp.sin(-alpha_z)
-    cb = jnp.cos(-beta)
-    sb = jnp.sin(-beta)
-
-    # R = Ry(-beta) @ Rz(-alpha_z)
-    R00 = cb * ca
-    R01 = -cb * sa
-    R02 = sb
-    R10 = sa
-    R11 = ca
-    R12 = 0.0
-    R20 = -sb * ca
-    R21 = sb * sa
-    R22 = cb
-
-    # NaN-safe extraction of ZYZ angles. ``arccos`` has an infinite reverse grad
-    # at +/-1 (axis-aligned, sb == 0) and ``arctan2`` a 0/0 grad at the origin
-    # (which both derived angles hit when sb == 0). Guard the poles; forward
-    # values are unchanged (arccos(+/-1) in {0, pi}, arctan2(0,0)=0, and
-    # cos() is already bounded to [-1, 1] so the clip is a no-op for valid input).
-    R22c = jnp.clip(R22, -1.0, 1.0)
-    inside = jnp.abs(R22c) < 1.0
-    beta_zyz = jnp.where(
-        inside,
-        jnp.arccos(jnp.where(inside, R22c, 0.0)),
-        jnp.where(R22c > 0.0, 0.0, jnp.pi),
-    )
-    a_ok = (R02 * R02) > 0  # R12 is identically 0.0
-    alpha_zyz = jnp.where(a_ok, jnp.arctan2(R12, jnp.where(a_ok, R02, 1.0)), 0.0)
-    g_ok = (R21 * R21 + R20 * R20) > 0
-    gamma_zyz = jnp.where(g_ok, jnp.arctan2(R21, jnp.where(g_ok, -R20, 1.0)), 0.0)
-
-    return alpha_zyz, beta_zyz, gamma_zyz
-
-
 @lru_cache(maxsize=None)
 @highest_matmul_precision
 def _compute_B_real_dehnen_via_Q(
@@ -1468,6 +1290,23 @@ def verify_real_B_matrix(ell: int, *, dtype: DTypeLike) -> Tuple[bool, float, fl
 # ===========================================================================
 # Real rotation via B @ D_z @ B
 # ===========================================================================
+#
+# These closed-form Dehnen builders are the only rotation path. A SymPy Wigner-D
+# baseline used to sit alongside them as a "correctness reference"; it was removed
+# because it never actually checked anything (nothing called it) and it could not
+# have: it imported `sympy`, which is not a dependency of this package, so every
+# entry point raised `ImportError`. The Wigner route is also the slow one -- the
+# whole point of the B @ D_z @ B decomposition is to avoid it.
+#
+# What replaces it is stronger, because it tests against physics rather than
+# against a second implementation that could share a convention error:
+# `tests/unit/operators/test_real_harmonics.py::test_multipole_rotation_blocks_match_p2m_of_the_rotated_source`
+# asserts `D_to @ p2m(s) == p2m(g @ s)` for the physical rotation `g`, and
+# `::test_local_rotation_blocks_leave_the_evaluated_potential_invariant` asserts
+# that rotating a local expansion and its evaluation point cancels exactly.
+# Measured agreement ~2.5e-15 (~10 eps_f64); writing the alignment azimuth as
+# `atan2(y, x)` instead of the `atan2(x, y)` flagged CRITICAL below fails both at
+# 1.8e+00.
 
 
 def real_Dz_diagonal(ell: int, angle: Array, *, dtype: DTypeLike) -> Array:
@@ -1600,19 +1439,6 @@ def real_rotation_to_z_axis_multipole(
     return _multipole_align_to_z_block(x, y, z, ell, dtype=dtype)
 
 
-def real_rotation_to_z_axis_multipole_wigner(
-    x: Array,
-    y: Array,
-    z: Array,
-    ell: int,
-    *,
-    dtype: DTypeLike,
-) -> Array:
-    """Baseline rotation to z-axis using Wigner-D (complex) + Q transform."""
-    alpha, beta, gamma = _rotation_to_z_angles(x, y, z)
-    return _real_wigner_rotation(ell, alpha, beta, gamma, dtype=dtype)
-
-
 def real_rotation_from_z_axis_local(
     x: Array,
     y: Array,
@@ -1632,19 +1458,6 @@ def real_rotation_from_z_axis_local(
     return _multipole_align_to_z_block(x, y, z, ell, dtype=dtype).T
 
 
-def real_rotation_from_z_axis_local_wigner(
-    x: Array,
-    y: Array,
-    z: Array,
-    ell: int,
-    *,
-    dtype: DTypeLike,
-) -> Array:
-    """Baseline inverse rotation from z-axis using Wigner-D (locals)."""
-    alpha, beta, gamma = _rotation_to_z_angles(x, y, z)
-    return _real_wigner_rotation(ell, -gamma, -beta, -alpha, dtype=dtype)
-
-
 def real_rotation_from_z_axis_multipole(
     x: Array,
     y: Array,
@@ -1659,21 +1472,6 @@ def real_rotation_from_z_axis_multipole(
     to rotate a z-frame multipole back to the world frame (``M = D @ M_z``).
     """
     return _multipole_align_from_z_block(x, y, z, ell, dtype=dtype)
-
-
-def real_rotation_from_z_axis_multipole_wigner(
-    x: Array,
-    y: Array,
-    z: Array,
-    ell: int,
-    *,
-    dtype: DTypeLike,
-) -> Array:
-    """Baseline inverse rotation from z-axis using Wigner-D."""
-    alpha, beta, gamma = _rotation_to_z_angles(x, y, z)
-    return _real_wigner_rotation(
-        ell, -gamma, -beta, -alpha, dtype=dtype, basis="multipole"
-    )
 
 
 def real_rotation_to_z_axis_local(
@@ -1693,19 +1491,6 @@ def real_rotation_to_z_axis_local(
     (:func:`real_rotation_from_z_axis_multipole`).
     """
     return _multipole_align_from_z_block(x, y, z, ell, dtype=dtype).T
-
-
-def real_rotation_to_z_axis_local_wigner(
-    x: Array,
-    y: Array,
-    z: Array,
-    ell: int,
-    *,
-    dtype: DTypeLike,
-) -> Array:
-    """Baseline rotation to z-axis using Wigner-D (locals)."""
-    alpha, beta, gamma = _rotation_to_z_angles(x, y, z)
-    return _real_wigner_rotation(ell, alpha, beta, gamma, dtype=dtype, basis="local")
 
 
 # ===========================================================================
@@ -1982,40 +1767,6 @@ def m2l_a6_real_only(
     return out
 
 
-@highest_matmul_precision
-def m2l_a6_real_only_wigner(
-    multipole: Array,
-    delta: Array,
-    *,
-    order: int,
-) -> Array:
-    """M2L using Wigner-D rotations as a correctness baseline (no JIT)."""
-    multipole = jnp.asarray(multipole)
-    delta = jnp.asarray(delta)
-    dtype = multipole.dtype
-    p = int(order)
-
-    x, y, z = delta[0], delta[1], delta[2]
-    r2 = jnp.dot(delta, delta, precision=lax.Precision.HIGHEST)
-    r = jnp.sqrt(floor_squared_radius(r2))
-
-    M_rotated = jnp.zeros_like(multipole)
-    for ell in range(p + 1):
-        sl = slice(sh_offset(ell), sh_offset(ell + 1))
-        D_inv = real_rotation_from_z_axis_multipole_wigner(x, y, z, ell, dtype=dtype)
-        M_rotated = M_rotated.at[sl].set(D_inv @ multipole[sl])
-
-    L_z = translate_along_z_m2l_real(M_rotated, r, order=p)
-
-    out = jnp.zeros_like(L_z)
-    for ell in range(p + 1):
-        sl = slice(sh_offset(ell), sh_offset(ell + 1))
-        D_fwd = real_rotation_to_z_axis_local_wigner(x, y, z, ell, dtype=dtype)
-        out = out.at[sl].set(D_fwd @ L_z[sl])
-
-    return out
-
-
 @partial(jax.jit, static_argnames=("order",))
 def m2l_real(
     multipole: Array,
@@ -2028,16 +1779,6 @@ def m2l_real(
     Uses a real-only Dehnen A6 rotation/translation path (no complex basis).
     """
     return m2l_a6_real_only(multipole, delta, order=order)
-
-
-def m2l_real_wigner(
-    multipole: Array,
-    delta: Array,
-    *,
-    order: int,
-) -> Array:
-    """Baseline M2L using Wigner-D rotations (correctness reference)."""
-    return m2l_a6_real_only_wigner(multipole, delta, order=order)
 
 
 @partial(jax.jit, static_argnames=("order",))
@@ -2216,10 +1957,6 @@ __all__ = [
     "real_rotation_to_z_axis_local",
     "real_rotation_from_z_axis_local",
     "real_rotation_from_z_axis_multipole",
-    "real_rotation_to_z_axis_multipole_wigner",
-    "real_rotation_to_z_axis_local_wigner",
-    "real_rotation_from_z_axis_local_wigner",
-    "real_rotation_from_z_axis_multipole_wigner",
     # Z-axis translations
     "translate_along_z_m2m_real",
     "translate_along_z_m2l_real",
@@ -2230,7 +1967,5 @@ __all__ = [
     "m2l_a6_real_only",
     "m2l_real",
     "m2l_optimized_real",
-    "m2l_a6_real_only_wigner",
-    "m2l_real_wigner",
     "l2l_real",
 ]
