@@ -12,14 +12,12 @@ Conventions:
 
 from __future__ import annotations
 
-import math
 from functools import partial
-from typing import Tuple
 
 import jax
 import jax.numpy as jnp
 
-from .real_harmonics import sh_index, sh_offset, sh_size
+from .real_harmonics import sh_index, sh_size
 
 
 def _pack_complex(full_nm: jnp.ndarray) -> jnp.ndarray:
