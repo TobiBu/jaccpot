@@ -15,6 +15,8 @@ three properties the *mechanism* has to have, none of which those tests can see:
 
 from __future__ import annotations
 
+from typing import Callable
+
 import jax
 import jax.numpy as jnp
 import numpy as np
@@ -318,7 +320,9 @@ _FP32_RHOS = [
     + [pytest.param(p.values[0], True, id=p.id) for p in _COMPLEX_CASCADES],
 )
 @pytest.mark.parametrize("rho", _FP32_RHOS)
-def test_the_analytic_branch_holds_at_float32(operator, is_complex, rho):
+def test_the_analytic_branch_holds_at_float32(
+    operator: Callable, is_complex: bool, rho: float
+) -> None:
     """Inside the float32 band the float32 transverse gradient must track float64.
 
     This is the claim the float64 tests cannot make, because float32's band admits
