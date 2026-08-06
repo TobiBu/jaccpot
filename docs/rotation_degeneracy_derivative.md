@@ -405,14 +405,31 @@ coefficient is **813 B per (level · internal node)** and is stable from leaf 4 
 so it projects to roughly 11 MB at N=200k and 60 MB at N=1M against budgets in the GB
 range. Nothing about what the `custom_vjp` saves changed.
 
-**The per-stage benchmark did not resolve.** At the scale the M2L stage actually runs here
-(128–1024 pairs, order 4) the lane is eager-dispatch-bound at 0.25–1.0 ms per call, and the
-harness noise exceeds the signal: an in-process A/B of the correction ON versus OFF gives
-forward deltas from **−36% to +12%** on a path where the primal is provably identical work,
-which is the noise floor stated outright. The gradient deltas (+12% to +19% fused,
-+3.3%/−2.4% direct) sit inside it. So the honest statement is that the correction's cost is
-**below what this measurement can see**, not that it is zero — and a 200k-particle
-`profile_downward_breakdown.py` run is still owed, which is what would answer it.
+**The per-stage benchmark, and what it can and cannot say.** At the scale the M2L stage
+runs here (128–1024 pairs, order 4) the lane is eager-dispatch-bound at 0.25–1.0 ms per
+call. An in-process A/B of the correction ON versus OFF — one process, minimum of 300
+repeats, so the comparison is not across checkouts — gives, on the **fused real** lane:
+
+| pairs / dtype | forward | gradient |
+|---|---|---|
+| 128 float64 | −1.4% | **+10.6%** |
+| 128 float32 | −16.7% | **+16.9%** |
+| 1024 float64 | +2.7% | **+28.2%** |
+| 1024 float32 | +5.8% | **+29.0%** |
+
+The forward column is the noise floor measured on the instrument itself: both new primals
+are identities with no arithmetic, so that path is provably identical work, and it still
+swings ±17%. The gradient column is **consistently positive across all four cases** and
+larger than that floor at 1024 pairs, so the honest reading is that the carrier costs
+roughly **+10% to +29% of the fused M2L gradient call** at these sizes — not that it is
+free. It is the twin application, and §9 measures the same thing in memory. The **direct**
+lane shows no coherent gradient cost by the same method (−24%, −12%, i.e. noise), which
+fits: there the correction is four static block-diagonal matmuls folded into a JVP that was
+running anyway.
+
+What this still cannot say is what any of it costs at production scale, where the M2L stage
+is kernel-bound rather than dispatch-bound. A 200k-particle
+`profile_downward_breakdown.py` run is owed and was not achieved here.
 
 ## 9. The complex fused Pallas M2L lane, and what the carrier costs
 
@@ -483,6 +500,14 @@ at float32 — on a 40 GB card, with the near field already the dominant consume
 gradient run at that cap uses the fused lanes is a separate question, but the number should
 be known before one is attempted.
 
-The scales are exactly zero outside the band, so this memory buys a correction that is
-identically zero on almost every pair; XLA cannot know that at trace time. Wrapping the
-twin application in `jax.checkpoint` is the obvious lever and is not attempted here.
+The same twin application is what the timing in §8 sees: +10% to +29% of the fused M2L
+gradient call at 128–1024 pairs. Memory and time agree that it is the dominant part of the
+correction on the fused lanes, and that the direct lanes — where the two `F0 @ G_in` terms
+fold into a JVP that was running anyway — pay neither.
+
+The scales are exactly zero outside the band, so both costs buy a correction that is
+identically zero on almost every pair; XLA cannot know that at trace time. Two levers, both
+untried here: `jax.checkpoint` around the twin application to trade the residuals back for
+recomputation, or predicating the whole carrier on `jnp.any(on_axis)` so a batch with no
+degenerate pair skips it — which is most batches, since the band is `rho/r <= 1.5e-08` at
+float64.
