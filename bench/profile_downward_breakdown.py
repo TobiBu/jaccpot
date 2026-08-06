@@ -174,7 +174,7 @@ _REPORTED = (
 )
 
 
-def _print_stage_timers(diagnostics):
+def _print_stage_timers(diagnostics: dict) -> dict[str, float]:
     """Report the curated counters per refresh call, marking aggregates.
 
     Expected to report nothing on the fused device-resident lane: these counters are
@@ -189,8 +189,9 @@ def _print_stage_timers(diagnostics):
 
     Returns
     -------
-    dict
-        The reported counters, in seconds per refresh call.
+    dict[str, float]
+        The reported counters, in seconds per refresh call. Empty when the counters
+        did not record.
     """
     from jaccpot.runtime.fmm_stage_timing import aggregate_counter_names
 
