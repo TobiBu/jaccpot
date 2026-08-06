@@ -45,6 +45,12 @@ from jaccpot.runtime._interaction_cache import (
 )
 from jaccpot.solver import FastMultipoleMethod
 
+from ._reproducibility import assert_same_accept_mask
+
+# Compile-bound: builds solvers and runs prepare_state at N=2048. Marked slow to
+# match the sibling MAC tests (see test_dehnen_mac_gradients.py).
+pytestmark = pytest.mark.slow
+
 N = 2048
 LEAF = 8
 ORDER = 4
@@ -151,15 +157,23 @@ def test_an_injected_force_scale_is_not_ignored_by_a_cached_interaction_list():
         )
         reused_masks.append(_accept_mask(state))
 
-    assert reused_masks[0] == fresh_masks[0], (
-        "the first cached-solver prepare disagrees with a fresh solver at the "
-        "same force scale"
+    assert_same_accept_mask(
+        reused_masks[0],
+        fresh_masks[0],
+        err_msg=(
+            "the first cached-solver prepare disagrees with a fresh solver at the "
+            "same force scale."
+        ),
     )
-    assert reused_masks[1] == fresh_masks[1], (
-        f"a cached interaction list built at force scale 1e-3 "
-        f"({len(reused_masks[1])} far pairs) was served to a request at force "
-        f"scale 1e+3 ({len(fresh_masks[1])} far pairs): the cache key cannot "
-        "see the criterion's right-hand side"
+    assert_same_accept_mask(
+        reused_masks[1],
+        fresh_masks[1],
+        err_msg=(
+            f"a cached interaction list built at force scale 1e-3 "
+            f"({len(reused_masks[1])} far pairs) was served to a request at force "
+            f"scale 1e+3 ({len(fresh_masks[1])} far pairs): the cache key cannot "
+            "see the criterion's right-hand side."
+        ),
     )
 
 

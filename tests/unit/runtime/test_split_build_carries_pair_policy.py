@@ -44,7 +44,13 @@ from jaccpot.runtime._interaction_cache import (
 )
 from jaccpot.solver import FastMultipoleMethod
 
+from ._reproducibility import assert_same_accept_mask
 from .test_far_near_partition import LEAF, ORDER, _coverage_counts, _problem
+
+# Compile-bound: every test here builds solvers and runs full traversals, so it
+# belongs behind `-m "not slow"` in the version-compatibility matrix for the same
+# reason the sibling MAC tests do. See test_dehnen_mac_gradients.py.
+pytestmark = pytest.mark.slow
 
 EPS = 3e-3
 THETA = 0.6
@@ -221,9 +227,13 @@ def test_split_and_monolithic_builds_agree_on_the_accept_mask(case):
         f"the split build with a policy accepted the same {len(split)} pairs as "
         "the split build without one: the policy is being dropped, not carried"
     )
-    assert split == monolithic, (
-        f"split build accepted {len(split)} far pairs, monolithic accepted "
-        f"{len(monolithic)}: the two builds disagree about the criterion"
+    assert_same_accept_mask(
+        split,
+        monolithic,
+        err_msg=(
+            f"split build accepted {len(split)} far pairs, monolithic accepted "
+            f"{len(monolithic)}: the two builds disagree about the criterion."
+        ),
     )
 
 
