@@ -1246,25 +1246,27 @@ def per_node_effective_theta(
 
     Parameters
     ----------
-    source_power
+    source_power : Array
         Dehnen per-degree power ``P_n``, shape ``(num_nodes, total_p + 1)``.
-    radius_bound
+    radius_bound : Array
         Per-node radius about the expansion centre, shape ``(num_nodes,)``.
-    force_scale
+    force_scale : Array
         Per-node force scale on the criterion's right-hand side, ``(num_nodes,)``.
-    masked_binomial
+    masked_binomial : Array
         ``C(p, n)`` for ``n <= p`` else 0, for the chosen order: ``(total_p + 1,)``.
-    exponent
+    exponent : Array
         ``max(p - n, 0)`` for the chosen order, shape ``(total_p + 1,)``.
-    order
+    order : int
         Expansion order ``p`` these weights correspond to.
-    eps
+    eps : float
         Relative force-accuracy target of eq (16a).
-    gravitational_constant
+    gravitational_constant : float
         ``G``. eq (16a) compares a force error against ``eps * min_b |a_b|`` and the
         force scale is G-scaled, so omitting it runs at an effective ``eps * G``.
-    theta_floor, theta_max
-        Clamp range. ``theta_max`` at 1.0 keeps the paper's own convergence guard.
+    theta_floor : float
+        Lower clamp on the returned angle.
+    theta_max : float
+        Upper clamp. At 1.0 this keeps the paper's own convergence guard.
 
     Returns
     -------
@@ -1363,6 +1365,26 @@ def per_node_conservative_extent(
     term by ``c**(p/2)`` while growing the geometric term linearly, so at p=8 a
     modest ``c=2`` buys a 16x reduction for a 2x cost. There is an optimum; the
     default is a starting point, not a tuned value.
+
+    Parameters
+    ----------
+    source_mass : Array
+        Per-node spanned mass, shape ``(num_nodes,)``.
+    radius_bound : Array
+        Per-node radius about the expansion centre, shape ``(num_nodes,)``.
+    force_scale : Array
+        Per-node force scale on the criterion's right-hand side, ``(num_nodes,)``.
+    order : int
+        Expansion order ``p``.
+    eps : float
+        Relative force-accuracy target of eq (16a).
+    gravitational_constant : float
+        ``G``. The force scale is G-scaled, so omitting it runs at ``eps * G``.
+    geometric_gain : float
+        ``c`` in the split above: grows the geometric term linearly while shrinking
+        the mass term by ``c**(p/2)``. The default is a starting point, not tuned.
+    split_lambda : Optional[float]
+        Fraction of the error budget given to the mass term; ``None`` chooses it.
 
     Returns
     -------

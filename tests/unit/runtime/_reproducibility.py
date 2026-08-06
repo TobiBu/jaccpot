@@ -30,7 +30,11 @@ from typing import Any
 
 import numpy as np
 
-__all__ = ["assert_reproducible", "reduction_noise_tolerance"]
+__all__ = [
+    "assert_reproducible",
+    "assert_same_accept_mask",
+    "reduction_noise_tolerance",
+]
 
 # Comfortably above the measured 3.8 eps (~8.4e-16 elementwise) reduction noise,
 # and far below anything that would constitute a regression.
@@ -77,3 +81,45 @@ def assert_reproducible(actual: Any, desired: Any, *, err_msg: str = "") -> None
         np.testing.assert_array_equal(a, d, err_msg=err_msg)
         return
     np.testing.assert_allclose(a, d, rtol=rtol, atol=atol, err_msg=err_msg)
+
+
+def assert_same_accept_mask(
+    actual: Any,
+    desired: Any,
+    *,
+    err_msg: str = "",
+) -> None:
+    """Assert two runs accepted the same far pairs.
+
+    An accept mask is discrete, so :func:`assert_reproducible`'s tolerance has
+    nothing to act on -- but the mask inherits the same GPU nondeterminism one
+    level up. The Dehnen criterion compares an error estimate against
+    ``eps * min_b |a_b|``, and that force scale comes from a low-order FMM
+    *evaluation*, whose scatter-adds are the atomics this module is about. A
+    1-ulp change in one node's scale flips any pair sitting that close to the
+    acceptance boundary.
+
+    Measured at N=1e6 / leaf 256 / fp32 / eps=3e-5 on an A100: repeated runs of
+    the *same* configuration returned 1 783 414 and 1 783 416 far pairs, i.e.
+    **2 in 1.8 M** (1.1e-6), and both values appeared under both dual-tree build
+    paths -- so it is run-to-run variation, not a build disagreeing. See
+    ``docs/dehnen_mass_mac_status_and_plan.md``.
+
+    So: exact on CPU, and on GPU a symmetric difference of at most a few pairs
+    or 1e-4 of the mask, whichever is larger. That band cannot hide a real
+    disagreement: a dropped pair policy changes the mask by percent, and the two
+    defects this area has produced moved it by 570x and 2688 whole incidences.
+    """
+
+    a = set(actual)
+    d = set(desired)
+    if not _on_gpu():
+        assert a == d, err_msg or f"accept masks differ by {len(a ^ d)} pairs"
+        return
+    differing = len(a ^ d)
+    allowed = max(4, int(1.0e-4 * max(len(a), len(d))))
+    assert differing <= allowed, (
+        (err_msg + " " if err_msg else "")
+        + f"accept masks differ by {differing} pairs, above the {allowed} the GPU "
+        "reduction-noise band allows -- that is a real disagreement, not atomics"
+    )

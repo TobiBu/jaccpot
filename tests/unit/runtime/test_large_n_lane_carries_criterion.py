@@ -30,6 +30,10 @@ from jaccpot.runtime import _large_n_pipeline
 from jaccpot.runtime._large_n_pipeline import can_use_large_n_prepare_path
 from jaccpot.solver import FastMultipoleMethod
 
+# Compile-bound: builds solvers and runs full prepares. Marked slow to match the
+# sibling MAC tests (see test_dehnen_mac_gradients.py).
+pytestmark = pytest.mark.slow
+
 N = 512
 LEAF = 16
 ORDER = 4

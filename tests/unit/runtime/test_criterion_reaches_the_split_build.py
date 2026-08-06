@@ -30,6 +30,10 @@ import jaccpot.runtime._interaction_cache as interaction_cache
 from jaccpot.config import FMMAdvancedConfig
 from jaccpot.solver import FastMultipoleMethod
 
+# Compile-bound: builds solvers and runs full prepares. Marked slow to match the
+# sibling MAC tests (see test_dehnen_mac_gradients.py).
+pytestmark = pytest.mark.slow
+
 N = 4096
 LEAF = 32
 ORDER = 4
