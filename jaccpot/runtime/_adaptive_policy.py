@@ -381,6 +381,350 @@ def compute_node_force_scale_from_sorted_magnitudes(
     return jnp.where(finite, scales, fallback)
 
 
+def node_span_mass(*, tree: Tree, masses_sorted: Array) -> Array:
+    """Total mass spanned by every node, from a prefix sum over sorted masses.
+
+    Deliberately independent of the upward pass: this is the *reference* node mass,
+    computed straight from ``node_ranges``, so it cannot inherit a multipole defect.
+    That matters here because the two M2M bugs this branch fixed were both
+    "a node spans particles but its expansion is zero", and an ``f_b`` estimator
+    sourced from ``multipole_packed[:, 0]`` would have silently reproduced them.
+
+    ``node_ranges`` is inclusive on both ends, and a node spanning nothing has
+    ``hi < lo``, which yields zero rather than a negative mass.
+    """
+
+    masses = jnp.asarray(masses_sorted)
+    dtype = masses.dtype
+    node_ranges = jnp.asarray(tree.node_ranges, dtype=jnp.int32)
+    n = int(masses.shape[0])
+    cumulative = jnp.concatenate(
+        [jnp.zeros((1,), dtype=dtype), jnp.cumsum(masses)],
+    )
+    lo = jnp.clip(node_ranges[:, 0], 0, n)
+    hi_exclusive = jnp.clip(node_ranges[:, 1] + 1, 0, n)
+    return jnp.maximum(cumulative[hi_exclusive] - cumulative[lo], 0.0)
+
+
+def _particle_leaf_ids(*, tree: Tree, num_particles: int, max_leaf_size: int) -> Array:
+    """Map every sorted particle index to the leaf node that spans it.
+
+    Scatter-based rather than ``searchsorted`` on leaf starts, because empty
+    leaves -- which capacity-fixed ``static_radix`` trees have by construction --
+    share a start index with a populated neighbour and would win the lookup.
+    """
+
+    node_ranges = jnp.asarray(tree.node_ranges, dtype=jnp.int32)
+    num_nodes = int(node_ranges.shape[0])
+    num_internal = int(tree.num_internal_nodes)
+    leaf_ids = jnp.full((num_particles,), -1, dtype=jnp.int32)
+    if num_internal >= num_nodes or max_leaf_size <= 0:
+        return leaf_ids
+    leaf_nodes = jnp.arange(num_internal, num_nodes, dtype=jnp.int32)
+    leaf_ranges = node_ranges[num_internal:]
+    counts = jnp.maximum(leaf_ranges[:, 1] - leaf_ranges[:, 0] + 1, 0)
+    offsets = jnp.arange(max_leaf_size, dtype=jnp.int32)
+    particle_idx = leaf_ranges[:, 0:1] + offsets[None, :]
+    valid = offsets[None, :] < counts[:, None]
+    safe_idx = jnp.clip(particle_idx, 0, num_particles - 1)
+    payload = jnp.where(valid, leaf_nodes[:, None], -1)
+    # Spans are disjoint, so `max` behaves as a plain scatter while ignoring the
+    # padded lanes (-1). `.at[].set` would let a padded lane overwrite a real one.
+    return leaf_ids.at[safe_idx].max(payload)
+
+
+def estimate_particle_force_scale(
+    *,
+    tree: Tree,
+    positions_sorted: Array,
+    masses_sorted: Array,
+    node_centers: Array,
+    node_radii: Array,
+    interaction_sources: Array,
+    interaction_targets: Array,
+    neighbor_offsets: Array,
+    neighbor_counts: Array,
+    neighbor_leaf_indices: Array,
+    neighbor_indices: Array,
+    max_leaf_size: int,
+    softening: float = 0.0,
+    gravitational_constant: float = 1.0,
+    far_center_inflation: float = 1.0,
+    near_pair_chunk: int = 32,
+) -> Array:
+    """Estimate Dehnen eq (16b)'s force scale ``f_b`` in O(N) work, on device.
+
+    ``f_b = sum_{a != b} G m_a / |x_a - x_b|^2`` is the cancellation-free force
+    scale eq (16b) puts on the criterion's right-hand side. The exact sum is
+    O(N^2); this reproduces it from the interaction lists the traversal already
+    built, splitting it the way the FMM splits the force itself:
+
+    * **near field, exact.** For every near pair (target leaf, source leaf) plus
+      every leaf's self block, the scalar sum over particle pairs, excluding
+      ``a == b``. This is the same pair set P2P evaluates, so it is exact.
+    * **far field, monopole.** Each far pair ``(U, A)`` contributes
+      ``G M_A / (|c_A - c_U| + rho_U)^2`` to every particle under ``U``. The
+      contribution is computed once per pair and accumulated *downward*, so a
+      particle picks up the far lists of its whole ancestor chain -- which is
+      exactly the set the far/near partition invariant says covers it.
+
+    The far term is **mandatory, not a refinement**: ``f_b`` is not near-field
+    dominated. Measured at N=4096, the 16 largest contributors capture a median
+    13% of ``f_b`` on Plummer (18% uniform, 7% bulge+halo) and even the largest
+    256 capture only 41%, because in 3D the shell population grows like
+    ``r^2 rho`` while each term falls like ``1/r^2`` and every logarithmic shell
+    contributes comparably. A near-only estimator is wrong by nearly an order of
+    magnitude. Dehnen's "p = 0 suffices" is a statement about the required
+    *order*, not about locality.
+
+    **The estimate is a lower bound on the exact ``f_b``**, and that direction is
+    deliberate. ``far_center_inflation`` (1.0 by default) inflates the source-to-
+    target distance by the target node's radius, so ``|c_A - c_U| + rho_U`` bounds
+    ``|c_A - x_b|`` from above for every ``b`` under ``U`` and each far term is
+    therefore an under-estimate. eq (16a)'s threshold is ``eps * s``, so an
+    over-large scale *loosens* acceptance -- a stale or inflated scale makes the
+    solver faster and wronger, which no cost measurement can detect (see the
+    force-scale staleness cliff in ``docs/dehnen_mass_mac_status_and_plan.md``).
+    Erring low costs a little work and cannot cost accuracy. Set
+    ``far_center_inflation=0.0`` to get the plain centre-to-centre distance, which
+    is neither bound but is closer to the exact value; that is a measurement knob,
+    not a production setting.
+
+    Because far pairs satisfy the opening criterion, ``rho_U / |c_A - c_U|`` is at
+    most the opening angle, so the inflation costs at most a factor ``(1+theta)^2``
+    per term.
+
+    Returns the per-particle estimate in *sorted* (tree) order, so it can be fed
+    straight to :func:`compute_node_force_scale_from_sorted_magnitudes` with
+    ``reduction="min"`` exactly like an exact ``f_b`` array would be.
+    """
+
+    positions = jnp.asarray(positions_sorted)
+    masses = jnp.asarray(masses_sorted, dtype=positions.dtype)
+    dtype = positions.dtype
+    num_particles = int(positions.shape[0])
+    if num_particles == 0:
+        return jnp.zeros((0,), dtype=dtype)
+
+    leaf_cap = max(int(max_leaf_size), 1)
+    g = jnp.asarray(float(gravitational_constant), dtype=dtype)
+    eps_sq = jnp.asarray(float(softening) ** 2, dtype=dtype)
+    node_ranges = jnp.asarray(tree.node_ranges, dtype=jnp.int32)
+
+    near = _near_field_force_scale(
+        positions=positions,
+        masses=masses,
+        node_ranges=node_ranges,
+        neighbor_offsets=jnp.asarray(neighbor_offsets, dtype=jnp.int32),
+        neighbor_counts=jnp.asarray(neighbor_counts, dtype=jnp.int32),
+        neighbor_leaf_indices=jnp.asarray(neighbor_leaf_indices, dtype=jnp.int32),
+        neighbor_indices=jnp.asarray(neighbor_indices, dtype=jnp.int32),
+        leaf_cap=leaf_cap,
+        g=g,
+        eps_sq=eps_sq,
+        chunk=max(int(near_pair_chunk), 1),
+    )
+
+    far_by_node = _far_field_force_scale_by_node(
+        tree=tree,
+        masses=masses,
+        node_centers=jnp.asarray(node_centers, dtype=dtype),
+        node_radii=jnp.asarray(node_radii, dtype=dtype),
+        interaction_sources=jnp.asarray(interaction_sources, dtype=jnp.int32),
+        interaction_targets=jnp.asarray(interaction_targets, dtype=jnp.int32),
+        g=g,
+        eps_sq=eps_sq,
+        inflation=jnp.asarray(float(far_center_inflation), dtype=dtype),
+    )
+
+    leaf_of_particle = _particle_leaf_ids(
+        tree=tree,
+        num_particles=num_particles,
+        max_leaf_size=leaf_cap,
+    )
+    far = jnp.where(
+        leaf_of_particle >= 0,
+        far_by_node[jnp.maximum(leaf_of_particle, 0)],
+        jnp.asarray(0.0, dtype=dtype),
+    )
+    return near + far
+
+
+def _near_field_force_scale(
+    *,
+    positions: Array,
+    masses: Array,
+    node_ranges: Array,
+    neighbor_offsets: Array,
+    neighbor_counts: Array,
+    neighbor_leaf_indices: Array,
+    neighbor_indices: Array,
+    leaf_cap: int,
+    g: Array,
+    eps_sq: Array,
+    chunk: int,
+) -> Array:
+    """Exact ``sum G m_a / |x_a - x_b|^2`` over the near-field pair set."""
+
+    dtype = positions.dtype
+    num_particles = int(positions.shape[0])
+    num_slots = int(neighbor_leaf_indices.shape[0])
+    flat_len = int(neighbor_indices.shape[0])
+    if num_slots == 0:
+        return jnp.zeros((num_particles,), dtype=dtype)
+
+    # One flat (target leaf, source leaf) pair list: each slot's self block first,
+    # then the neighbour entries. Padding to a per-slot maximum would need a
+    # concrete `max(counts)` and so would not trace; recovering each flat entry's
+    # slot by searchsorted keeps every shape static.
+    flat = jnp.arange(flat_len, dtype=jnp.int32)
+    slot_of_flat = (
+        jnp.searchsorted(neighbor_offsets, flat, side="right").astype(jnp.int32) - 1
+    )
+    slot_of_flat = jnp.clip(slot_of_flat, 0, num_slots - 1)
+    # Both ends of the slot's window. The lower bound is not redundant: if the
+    # offsets ever start above zero, `searchsorted(..., 'right') - 1` returns -1 for
+    # the entries below `offsets[0]`, the clip pulls them onto slot 0, and an
+    # upper-bound-only test would accept them as slot 0's neighbours. Today they
+    # would be filtered anyway because the unused prefix holds -1, i.e. the code
+    # would be correct by accident rather than by construction.
+    slot_start = neighbor_offsets[slot_of_flat]
+    within = (flat >= slot_start) & (
+        flat < (slot_start + neighbor_counts[slot_of_flat])
+    )
+    neighbor_source = neighbor_indices[flat]
+
+    flat_target = neighbor_leaf_indices[slot_of_flat]
+    pair_target = jnp.concatenate([neighbor_leaf_indices, flat_target])
+    pair_source = jnp.concatenate([neighbor_leaf_indices, neighbor_source])
+    pair_valid = jnp.concatenate(
+        [
+            neighbor_leaf_indices >= 0,
+            within & (neighbor_source >= 0) & (flat_target >= 0),
+        ]
+    )
+    num_pairs = num_slots + flat_len
+
+    lane = jnp.arange(leaf_cap, dtype=jnp.int32)
+    padded = -(-num_pairs // chunk) * chunk
+
+    def body(step: Array, acc: Array) -> Array:
+        idx = step * chunk + jnp.arange(chunk, dtype=jnp.int32)
+        safe = jnp.clip(idx, 0, num_pairs - 1)
+        live = (idx < num_pairs) & pair_valid[safe]
+        tgt = jnp.maximum(pair_target[safe], 0)
+        src = jnp.maximum(pair_source[safe], 0)
+
+        t_lo = node_ranges[tgt, 0]
+        t_n = jnp.maximum(node_ranges[tgt, 1] - t_lo + 1, 0)
+        s_lo = node_ranges[src, 0]
+        s_n = jnp.maximum(node_ranges[src, 1] - s_lo + 1, 0)
+
+        t_idx = t_lo[:, None] + lane[None, :]
+        t_ok = (lane[None, :] < t_n[:, None]) & live[:, None]
+        t_safe = jnp.clip(t_idx, 0, num_particles - 1)
+        s_idx = s_lo[:, None] + lane[None, :]
+        s_ok = (lane[None, :] < s_n[:, None]) & live[:, None]
+        s_safe = jnp.clip(s_idx, 0, num_particles - 1)
+
+        delta = positions[s_safe][:, None, :, :] - positions[t_safe][:, :, None, :]
+        dist_sq = jnp.sum(delta * delta, axis=3) + eps_sq
+        contrib = masses[s_safe][:, None, :] / dist_sq
+        # Exclude a == b, and every padded lane on either side.
+        keep = (
+            t_ok[:, :, None]
+            & s_ok[:, None, :]
+            & (t_safe[:, :, None] != s_safe[:, None, :])
+        )
+        contrib = jnp.where(keep, contrib, jnp.asarray(0.0, dtype=dtype))
+        per_target = g * jnp.sum(contrib, axis=2)
+        return acc.at[t_safe].add(jnp.where(t_ok, per_target, 0.0))
+
+    return jax.lax.fori_loop(
+        0,
+        padded // chunk,
+        body,
+        jnp.zeros((num_particles,), dtype=dtype),
+    )
+
+
+def _far_field_force_scale_by_node(
+    *,
+    tree: Tree,
+    masses: Array,
+    node_centers: Array,
+    node_radii: Array,
+    interaction_sources: Array,
+    interaction_targets: Array,
+    g: Array,
+    eps_sq: Array,
+    inflation: Array,
+) -> Array:
+    """Accumulate the monopole far-field force scale down the tree.
+
+    ``own[U]`` is the contribution of ``U``'s own far list; the returned array is
+    ``own[U] + own[parent(U)] + ...`` up to the root, which for a leaf is the
+    complete far field the partition invariant assigns to its particles.
+    """
+
+    dtype = masses.dtype
+    node_ranges = jnp.asarray(tree.node_ranges, dtype=jnp.int32)
+    num_nodes = int(node_ranges.shape[0])
+    if num_nodes == 0:
+        return jnp.zeros((0,), dtype=dtype)
+
+    node_mass = node_span_mass(tree=tree, masses_sorted=masses)
+    src = interaction_sources
+    tgt = interaction_targets
+    live = (src >= 0) & (tgt >= 0)
+    src_safe = jnp.maximum(src, 0)
+    tgt_safe = jnp.maximum(tgt, 0)
+    delta = node_centers[src_safe] - node_centers[tgt_safe]
+    distance = jnp.sqrt(jnp.sum(delta * delta, axis=1))
+    reach = distance + inflation * node_radii[tgt_safe]
+    contrib = g * node_mass[src_safe] / (reach * reach + eps_sq)
+    contrib = jnp.where(live & (reach > 0), contrib, jnp.asarray(0.0, dtype=dtype))
+    own = jax.ops.segment_sum(
+        contrib,
+        tgt_safe,
+        num_segments=num_nodes,
+        indices_are_sorted=False,
+    )
+
+    left_child = jnp.asarray(tree.left_child, dtype=jnp.int32)
+    right_child = jnp.asarray(tree.right_child, dtype=jnp.int32)
+    num_internal = int(tree.num_internal_nodes)
+    if num_internal <= 0:
+        return own
+
+    # Parents must be accumulated before their children. Internal-node indices are
+    # NOT stored in postorder in a radix tree -- 26 of 63 internal nodes at N=1024
+    # have an internal child with a *lower* index -- so descend by span width,
+    # which is strictly decreasing from parent to child. This is the same ordering
+    # trap that dropped 97% of the system mass in the M2M pass.
+    internal_ranges = node_ranges[:num_internal]
+    internal_width = internal_ranges[:, 1] - internal_ranges[:, 0]
+    descending = jnp.argsort(-internal_width, stable=True)
+
+    def body(i: int, current: Array) -> Array:
+        node_idx = descending[i]
+        value = current[node_idx]
+        left_idx = left_child[node_idx]
+        right_idx = right_child[node_idx]
+        current = jnp.where(
+            left_idx >= 0,
+            current.at[jnp.maximum(left_idx, 0)].add(value),
+            current,
+        )
+        return jnp.where(
+            right_idx >= 0,
+            current.at[jnp.maximum(right_idx, 0)].add(value),
+            current,
+        )
+
+    return jax.lax.fori_loop(0, num_internal, body, own)
+
+
 def _sphere_from_support(points: np.ndarray) -> tuple[np.ndarray, float]:
     """Return the exact sphere defined by up to four support points."""
 
@@ -827,6 +1171,294 @@ def compute_tree_merged_sphere_geometry(
 #: ``tree`` runs the same solve per leaf before the device-side merge.
 _HOST_ONLY_DEHNEN_GEOMETRY_MODES = ("exact", "tree")
 
+#: Smallest per-node opening angle the effective-theta mode will emit. A node
+#: demanding a smaller opening than this needs an extent large enough to dominate
+#: the pair queue; in practice such nodes are better refined than accepted.
+_EFFECTIVE_THETA_FLOOR = 1e-3
+
+#: Radius floor, as a fraction of the root radius, applied before the extent
+#: rescale. Not cosmetic: ``_propagate_extents`` replaces any extent ``<= 0`` with
+#: an ancestor's, and ``_compute_leaf_effective_extents`` replaces zero-extent
+#: *leaves* with a root-derived depth padding -- either path silently discards the
+#: per-node scale. A single-particle leaf has radius exactly 0, so this is the
+#: common case, not a corner case.
+_EFFECTIVE_THETA_RADIUS_FLOOR_FRAC = 1e-9
+
+
+def per_node_effective_theta(
+    *,
+    source_power: Array,
+    radius_bound: Array,
+    force_scale: Array,
+    masked_binomial: Array,
+    exponent: Array,
+    order: int,
+    eps: float,
+    gravitational_constant: float = 1.0,
+    theta_floor: float = _EFFECTIVE_THETA_FLOOR,
+    theta_max: float = 1.0,
+) -> Array:
+    """Collapse Dehnen eq (16a)/(16b) into one opening angle per node.
+
+    The exact criterion needs a solver-owned ``pair_policy``, and that vetoes every
+    production fast lane. This turns it into a *per-node* opening angle so
+    acceptance becomes the plain scalar-theta comparison the lanes already run; see
+    :func:`per_node_mac_radius` for how the two are made algebraically identical.
+
+    **The inversion is closed form.** In eq (15) the distance enters only as
+    ``r**(p+2)``, and ``improvement`` depends solely on the two radii, so for fixed
+    radii the eq (16a) left-hand side is exactly ``C_i / r**(p+2)``. Verified
+    numerically: ``est_force_error * (r/rho)**(p+2)`` is constant to full double
+    precision across a 6x range of ``r``. Hence
+
+        theta_i = (rho_z + rho_s) * (eps * s_i / C_i) ** (1 / (p + 2))
+        C_i     = improvement * G * sum_n C(p, n) * P_n^(i) * rho_s ** (p - n)
+
+    with ``s_i`` the node's force scale -- ``min_b |a_b|`` for eq (16a) or
+    ``min_b f_b`` for eq (16b), which is just a different array here.
+
+    No root-find is required, so nothing leaves the device: this is one fused
+    expression over concrete arrays. An earlier plan called for ~5 Newton/bisection
+    steps per node *on the host*; that was predicated on the relation being
+    non-invertible, which it is not.
+
+    ``P_n`` is used **as measured**. The cruder ``P_n/M <= rho**n`` bound collapses
+    the sum to ``M(2 rho)**p`` and costs the entire multipole spectrum -- and since
+    the criterion's measured advantage is concentrated in the error *tail*, the
+    spectrum is exactly what must not be discarded.
+
+    **The approximation that remains, and it is not small.** eq (16a) pairs the
+    *source's* mass and power against the *sink's* force scale. A per-node angle
+    cannot express that: yggdrax's ``mac_extents`` is a single array indexed by both
+    ``safe_targets`` and ``safe_sources``, so a node's extent is identical in either
+    role. This function therefore pairs each node's own power with its own force
+    scale, under the self-similar assumption ``rho_z = rho_s = rho_i`` (whence
+    ``improvement == 4`` and ``rho_z + rho_s == 2 rho_i``).
+
+    That conflation is *not* guaranteed conservative. A massive node sitting where
+    accelerations are high gets a permissive ``theta_i``, yet as a source acting on
+    a distant low-acceleration sink the exact criterion would demand far more
+    separation. Those are precisely the large-dynamic-range configurations the
+    criterion exists to exploit, and where it wins biggest (bulge+halo p99 5.9-85x
+    against Plummer's 1.3-2.2x). **Accept-mask agreement and matched-work tail error
+    against the exact criterion must be measured before this mode is used for
+    anything quantitative**, bulge+halo especially.
+
+    Parameters
+    ----------
+    source_power : Array
+        Dehnen per-degree power ``P_n``, shape ``(num_nodes, total_p + 1)``.
+    radius_bound : Array
+        Per-node radius about the expansion centre, shape ``(num_nodes,)``.
+    force_scale : Array
+        Per-node force scale on the criterion's right-hand side, ``(num_nodes,)``.
+    masked_binomial : Array
+        ``C(p, n)`` for ``n <= p`` else 0, for the chosen order: ``(total_p + 1,)``.
+    exponent : Array
+        ``max(p - n, 0)`` for the chosen order, shape ``(total_p + 1,)``.
+    order : int
+        Expansion order ``p`` these weights correspond to.
+    eps : float
+        Relative force-accuracy target of eq (16a).
+    gravitational_constant : float
+        ``G``. eq (16a) compares a force error against ``eps * min_b |a_b|`` and the
+        force scale is G-scaled, so omitting it runs at an effective ``eps * G``.
+    theta_floor : float
+        Lower clamp on the returned angle.
+    theta_max : float
+        Upper clamp. At 1.0 this keeps the paper's own convergence guard.
+
+    Returns
+    -------
+    Array
+        Per-node effective opening angle, shape ``(num_nodes,)``.
+    """
+
+    power = jnp.asarray(source_power)
+    dtype = power.dtype
+    rho = jnp.asarray(radius_bound, dtype=dtype)
+    scale = jnp.asarray(force_scale, dtype=dtype)
+    weights = jnp.asarray(masked_binomial, dtype=dtype)
+    powers = jnp.asarray(exponent, dtype=dtype)
+    tiny = jnp.asarray(1e-300, dtype=dtype)
+    p = int(order)
+
+    # Self-similar pairing: rho_z = rho_s = rho, so `improvement` collapses to the
+    # constant 4 and the pair separation is 2 * rho.
+    improvement = jnp.asarray(4.0, dtype=dtype)
+    rho_safe = jnp.maximum(rho, tiny)
+    aggregate = jnp.sum(
+        weights[None, :] * power * jnp.power(rho_safe[:, None], powers[None, :]),
+        axis=1,
+    )
+    coefficient = (
+        improvement * jnp.asarray(gravitational_constant, dtype=dtype) * aggregate
+    )
+
+    # A node whose power vanishes above the monopole is a point mass: C -> 0 sends
+    # theta -> inf and the clamp takes it to theta_max, which is correct -- its
+    # expansion is exact at any opening.
+    ratio = (jnp.asarray(eps, dtype=dtype) * jnp.maximum(scale, tiny)) / jnp.maximum(
+        coefficient, tiny
+    )
+    theta = (
+        jnp.asarray(2.0, dtype=dtype)
+        * rho_safe
+        * jnp.power(ratio, jnp.asarray(1.0 / (p + 2.0), dtype=dtype))
+    )
+    theta = jnp.where(jnp.isfinite(theta), theta, jnp.asarray(theta_max, dtype=dtype))
+    return jnp.clip(
+        theta,
+        jnp.asarray(theta_floor, dtype=dtype),
+        jnp.asarray(theta_max, dtype=dtype),
+    )
+
+
+def per_node_conservative_extent(
+    *,
+    source_mass: Array,
+    radius_bound: Array,
+    force_scale: Array,
+    order: int,
+    eps: float,
+    gravitational_constant: float = 1.0,
+    geometric_gain: float = 2.0,
+    split_lambda: Optional[float] = None,
+) -> tuple[Array, float]:
+    """Per-node MAC extents that provably never over-accept relative to eq (16a).
+
+    Motivation: :func:`per_node_effective_theta` matches eq (16a) exactly for a
+    self-similar pair but pairs each node's own power with its own force scale,
+    which measured 12-9300x worse than the exact criterion at up to 15x more work.
+    This instead builds a *sound* bound -- if the traversal accepts, eq (16a) would
+    have accepted too. It will accept strictly less than the exact criterion; the
+    question it exists to answer is whether it still beats fixed-theta.
+
+    **Derivation.** eq (16a) for source A on sink B is satisfied when
+
+        8 G M_A (rho_A + rho_B)**p / (eps s_B) <= r**(p+2)
+
+    (using the crude source bound ``P_n <= M rho**n``, which collapses the eq (15)
+    sum to ``M (rho_A + rho_B)**p``, and ``improvement <= 8``). Enforcing
+    ``e_i >= c rho_i`` makes ``e_A + e_B <= r`` imply ``rho_A + rho_B <= r / c``,
+    so ``(rho_A+rho_B)**p <= r**p / c**p`` and the requirement reduces to
+
+        r**2 >= 8 G M_A / (eps s_B c**p)
+
+    The remaining ``M_A / s_B`` is a *product* of a source quantity and a sink
+    quantity, and the lane test is a *sum*, so it cannot be represented exactly --
+    this is the same obstruction that sinks the effective-theta mode. Split it with
+    AM-GM, ``sqrt(x y) <= (x/lam + lam y)/2``:
+
+        e_i = max( c rho_i,  K M_i / lam,  K lam / s_i ),
+        K   = sqrt(8 G / (eps c**p)) / 2
+
+    Taking the max over both roles makes one array serve as source and sink.
+
+    **Where this is loose, by construction.** AM-GM is tight only when
+    ``lam**2 == M_A s_B``. A single global ``lam`` must therefore absorb the whole
+    dynamic range of mass and force scale across the tree -- and that range is
+    precisely what the mass-dependent criterion exploits. Expect the bound to be
+    weakest on the distributions where the criterion is most valuable (bulge+halo).
+
+    ``geometric_gain`` (``c``) trades the two terms: raising it shrinks the mass
+    term by ``c**(p/2)`` while growing the geometric term linearly, so at p=8 a
+    modest ``c=2`` buys a 16x reduction for a 2x cost. There is an optimum; the
+    default is a starting point, not a tuned value.
+
+    Parameters
+    ----------
+    source_mass : Array
+        Per-node spanned mass, shape ``(num_nodes,)``.
+    radius_bound : Array
+        Per-node radius about the expansion centre, shape ``(num_nodes,)``.
+    force_scale : Array
+        Per-node force scale on the criterion's right-hand side, ``(num_nodes,)``.
+    order : int
+        Expansion order ``p``.
+    eps : float
+        Relative force-accuracy target of eq (16a).
+    gravitational_constant : float
+        ``G``. The force scale is G-scaled, so omitting it runs at ``eps * G``.
+    geometric_gain : float
+        ``c`` in the split above: grows the geometric term linearly while shrinking
+        the mass term by ``c**(p/2)``. The default is a starting point, not tuned.
+    split_lambda : Optional[float]
+        Fraction of the error budget given to the mass term; ``None`` chooses it.
+
+    Returns
+    -------
+    tuple[Array, float]
+        Per-node extents, and the ``split_lambda`` actually used (handy when it was
+        chosen automatically).
+    """
+
+    mass = jnp.asarray(source_mass)
+    dtype = mass.dtype
+    rho = jnp.asarray(radius_bound, dtype=dtype)
+    scale = jnp.asarray(force_scale, dtype=dtype)
+    tiny = jnp.asarray(1e-300, dtype=dtype)
+    p = int(order)
+    c = float(geometric_gain)
+
+    scale_safe = jnp.maximum(scale, tiny)
+    if split_lambda is None:
+        # Equalise the two AM-GM terms at the geometric median of the pair
+        # distribution: lam**2 ~ typical(M) * typical(s).
+        typical_mass = jnp.exp(jnp.mean(jnp.log(jnp.maximum(mass, tiny))))
+        typical_scale = jnp.exp(jnp.mean(jnp.log(scale_safe)))
+        lam_arr = jnp.sqrt(typical_mass * typical_scale)
+        lam = float(lam_arr)
+    else:
+        lam = float(split_lambda)
+    lam_safe = max(lam, float(jnp.finfo(dtype).tiny))
+
+    coefficient = jnp.sqrt(
+        jnp.asarray(
+            8.0 * float(gravitational_constant) / (float(eps) * c**p), dtype=dtype
+        )
+    ) / jnp.asarray(2.0, dtype=dtype)
+    source_term = coefficient * mass / jnp.asarray(lam_safe, dtype=dtype)
+    sink_term = coefficient * jnp.asarray(lam_safe, dtype=dtype) / scale_safe
+    geometric_term = jnp.asarray(c, dtype=dtype) * rho
+    extents = jnp.maximum(geometric_term, jnp.maximum(source_term, sink_term))
+    return extents, lam_safe
+
+
+def per_node_mac_radius(
+    *,
+    radius_bound: Array,
+    theta_nodes: Array,
+    theta_global: float,
+    radius_floor_frac: float = _EFFECTIVE_THETA_RADIUS_FLOOR_FRAC,
+) -> Array:
+    """Rescale node radii so a scalar-theta lane test reproduces per-node angles.
+
+    The lanes compare ``(e_t + e_s)**2 <= theta_g**2 * d**2``. Feeding
+    ``e_i = rho_i * theta_g / theta_i`` makes that *algebraically identical* to
+
+        rho_t / theta_t + rho_s / theta_s <= d
+
+    so ``theta_g`` cancels out of acceptance entirely -- the desired property, since
+    it matches paper mode where the global theta does not gate. The result is a
+    per-node rescale of ``geometry.radius``, not a new comparison, so no
+    ``pair_policy`` is needed and none of the lane vetoes trigger.
+
+    The radius floor is load-bearing, not defensive -- see
+    ``_EFFECTIVE_THETA_RADIUS_FLOOR_FRAC``.
+    """
+
+    rho = jnp.asarray(radius_bound)
+    dtype = rho.dtype
+    theta = jnp.asarray(theta_nodes, dtype=dtype)
+    root_radius = jnp.max(rho)
+    floor = jnp.maximum(
+        jnp.asarray(radius_floor_frac, dtype=dtype) * root_radius,
+        jnp.asarray(float(jnp.finfo(dtype).tiny), dtype=dtype),
+    )
+    rho_floored = jnp.maximum(rho, floor)
+    return rho_floored * (jnp.asarray(theta_global, dtype=dtype) / theta)
+
 
 def resolve_dehnen_geometry(
     *,
@@ -1211,6 +1843,8 @@ __all__ = [
     "build_adaptive_policy_state",
     "compute_node_force_scale_from_sorted_acc",
     "compute_node_force_scale_from_sorted_magnitudes",
+    "per_node_effective_theta",
+    "per_node_mac_radius",
     "compute_center_referenced_radius_geometry",
     "compute_leaf_enclosing_sphere_geometry",
     "compute_leaf_ritter_sphere_geometry",

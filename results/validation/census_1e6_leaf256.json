@@ -1,0 +1,480 @@
+{
+  "config": {
+    "n": 1000000,
+    "leaf_size": 256,
+    "order": 8,
+    "distribution": "plummer",
+    "seed": 0,
+    "theta": "0.4,0.5,0.6,0.7",
+    "eps": "1e-3,1e-4,1e-5",
+    "arms": "fixed,mass",
+    "geometry_mode": "com",
+    "softening": 0.0,
+    "G": 1.0,
+    "force_scale_mode": "paper_cached",
+    "runtime_lane": "large_n",
+    "precision": "fp32",
+    "min_far_pairs": 5000,
+    "json_out": "results/validation/census_1e6_leaf256.json"
+  },
+  "records": [
+    {
+      "arm": "fixed",
+      "knob": 0.4,
+      "far_pairs": 2247484,
+      "near_leaf_pairs": 7175306,
+      "prepare_s": 333.07,
+      "nodes": 7813,
+      "dual_calls": 1,
+      "runtime_lane": "large_n",
+      "prepared_state_type": "LargeNPreparedState",
+      "large_n_path_declined_reason": null,
+      "threshold": null,
+      "pair_policy_installed": false,
+      "retry_final_caps": [
+        {
+          "max_pair_queue": -1,
+          "max_interactions_per_node": -1
+        },
+        {
+          "max_pair_queue": -1,
+          "max_interactions_per_node": -1
+        },
+        {
+          "max_pair_queue": -1,
+          "max_interactions_per_node": -1
+        },
+        {
+          "max_pair_queue": -1,
+          "max_interactions_per_node": -1
+        },
+        {
+          "max_pair_queue": -1,
+          "max_interactions_per_node": -1
+        },
+        {
+          "max_pair_queue": -1,
+          "max_interactions_per_node": -1
+        },
+        {
+          "max_pair_queue": -1,
+          "max_interactions_per_node": -1
+        },
+        {
+          "max_pair_queue": -1,
+          "max_interactions_per_node": -1
+        },
+        {
+          "max_pair_queue": -1,
+          "max_interactions_per_node": -1
+        },
+        {
+          "max_pair_queue": -1,
+          "max_interactions_per_node": -1
+        },
+        {
+          "max_pair_queue": -1,
+          "max_interactions_per_node": -1
+        },
+        {
+          "max_pair_queue": -1,
+          "max_interactions_per_node": -1
+        },
+        {
+          "max_pair_queue": -1,
+          "max_interactions_per_node": -1
+        },
+        {
+          "max_pair_queue": -1,
+          "max_interactions_per_node": -1
+        },
+        {
+          "max_pair_queue": -1,
+          "max_interactions_per_node": -1
+        },
+        {
+          "max_pair_queue": -1,
+          "max_interactions_per_node": -1
+        },
+        {
+          "max_pair_queue": -1,
+          "max_interactions_per_node": -1
+        },
+        {
+          "max_pair_queue": -1,
+          "max_interactions_per_node": -1
+        },
+        {
+          "max_pair_queue": -1,
+          "max_interactions_per_node": -1
+        },
+        {
+          "max_pair_queue": -1,
+          "max_interactions_per_node": -1
+        },
+        {
+          "max_pair_queue": -1,
+          "max_interactions_per_node": -1
+        },
+        {
+          "max_pair_queue": -1,
+          "max_interactions_per_node": -1
+        }
+      ]
+    },
+    {
+      "arm": "fixed",
+      "knob": 0.5,
+      "far_pairs": 1706946,
+      "near_leaf_pairs": 4315276,
+      "prepare_s": 14.98,
+      "nodes": 7813,
+      "dual_calls": 1,
+      "runtime_lane": "large_n",
+      "prepared_state_type": "LargeNPreparedState",
+      "large_n_path_declined_reason": null,
+      "threshold": null,
+      "pair_policy_installed": false,
+      "retry_final_caps": [
+        {
+          "max_pair_queue": -1,
+          "max_interactions_per_node": -1
+        },
+        {
+          "max_pair_queue": -1,
+          "max_interactions_per_node": -1
+        },
+        {
+          "max_pair_queue": -1,
+          "max_interactions_per_node": -1
+        },
+        {
+          "max_pair_queue": -1,
+          "max_interactions_per_node": -1
+        },
+        {
+          "max_pair_queue": -1,
+          "max_interactions_per_node": -1
+        },
+        {
+          "max_pair_queue": -1,
+          "max_interactions_per_node": -1
+        },
+        {
+          "max_pair_queue": -1,
+          "max_interactions_per_node": -1
+        },
+        {
+          "max_pair_queue": -1,
+          "max_interactions_per_node": -1
+        },
+        {
+          "max_pair_queue": -1,
+          "max_interactions_per_node": -1
+        },
+        {
+          "max_pair_queue": -1,
+          "max_interactions_per_node": -1
+        },
+        {
+          "max_pair_queue": -1,
+          "max_interactions_per_node": -1
+        },
+        {
+          "max_pair_queue": -1,
+          "max_interactions_per_node": -1
+        },
+        {
+          "max_pair_queue": -1,
+          "max_interactions_per_node": -1
+        },
+        {
+          "max_pair_queue": -1,
+          "max_interactions_per_node": -1
+        },
+        {
+          "max_pair_queue": -1,
+          "max_interactions_per_node": -1
+        }
+      ]
+    },
+    {
+      "arm": "fixed",
+      "knob": 0.6,
+      "far_pairs": 1185164,
+      "near_leaf_pairs": 2712116,
+      "prepare_s": 21.71,
+      "nodes": 7813,
+      "dual_calls": 1,
+      "runtime_lane": "large_n",
+      "prepared_state_type": "LargeNPreparedState",
+      "large_n_path_declined_reason": null,
+      "threshold": null,
+      "pair_policy_installed": false,
+      "retry_final_caps": [
+        {
+          "max_pair_queue": -1,
+          "max_interactions_per_node": -1
+        },
+        {
+          "max_pair_queue": -1,
+          "max_interactions_per_node": -1
+        },
+        {
+          "max_pair_queue": -1,
+          "max_interactions_per_node": -1
+        },
+        {
+          "max_pair_queue": -1,
+          "max_interactions_per_node": -1
+        },
+        {
+          "max_pair_queue": -1,
+          "max_interactions_per_node": -1
+        },
+        {
+          "max_pair_queue": -1,
+          "max_interactions_per_node": -1
+        },
+        {
+          "max_pair_queue": -1,
+          "max_interactions_per_node": -1
+        },
+        {
+          "max_pair_queue": -1,
+          "max_interactions_per_node": -1
+        },
+        {
+          "max_pair_queue": -1,
+          "max_interactions_per_node": -1
+        },
+        {
+          "max_pair_queue": -1,
+          "max_interactions_per_node": -1
+        },
+        {
+          "max_pair_queue": -1,
+          "max_interactions_per_node": -1
+        },
+        {
+          "max_pair_queue": -1,
+          "max_interactions_per_node": -1
+        },
+        {
+          "max_pair_queue": -1,
+          "max_interactions_per_node": -1
+        }
+      ]
+    },
+    {
+      "arm": "fixed",
+      "knob": 0.7,
+      "far_pairs": 837826,
+      "near_leaf_pairs": 1747918,
+      "prepare_s": 13.21,
+      "nodes": 7813,
+      "dual_calls": 1,
+      "runtime_lane": "large_n",
+      "prepared_state_type": "LargeNPreparedState",
+      "large_n_path_declined_reason": null,
+      "threshold": null,
+      "pair_policy_installed": false,
+      "retry_final_caps": [
+        {
+          "max_pair_queue": -1,
+          "max_interactions_per_node": -1
+        },
+        {
+          "max_pair_queue": -1,
+          "max_interactions_per_node": -1
+        },
+        {
+          "max_pair_queue": -1,
+          "max_interactions_per_node": -1
+        },
+        {
+          "max_pair_queue": -1,
+          "max_interactions_per_node": -1
+        }
+      ]
+    },
+    {
+      "arm": "mass",
+      "knob": 0.001,
+      "far_pairs": 926616,
+      "near_leaf_pairs": 1176720,
+      "prepare_s": 88.57,
+      "nodes": 7813,
+      "dual_calls": 2,
+      "runtime_lane": "large_n",
+      "prepared_state_type": "LargeNPreparedState",
+      "large_n_path_declined_reason": null,
+      "threshold": {
+        "dtype": "float32",
+        "nodes": 7813,
+        "min": 2.4747629165649414,
+        "max": 358.94769287109375,
+        "constant": false
+      },
+      "pair_policy_installed": true,
+      "retry_final_caps": [
+        {
+          "max_pair_queue": -1,
+          "max_interactions_per_node": -1
+        },
+        {
+          "max_pair_queue": -1,
+          "max_interactions_per_node": -1
+        },
+        {
+          "max_pair_queue": -1,
+          "max_interactions_per_node": -1
+        },
+        {
+          "max_pair_queue": -1,
+          "max_interactions_per_node": -1
+        },
+        {
+          "max_pair_queue": -1,
+          "max_interactions_per_node": -1
+        },
+        {
+          "max_pair_queue": -1,
+          "max_interactions_per_node": -1
+        },
+        {
+          "max_pair_queue": -1,
+          "max_interactions_per_node": -1
+        },
+        {
+          "max_pair_queue": -1,
+          "max_interactions_per_node": -1
+        }
+      ]
+    },
+    {
+      "arm": "mass",
+      "knob": 0.0001,
+      "far_pairs": 1468118,
+      "near_leaf_pairs": 2157254,
+      "prepare_s": 22.33,
+      "nodes": 7813,
+      "dual_calls": 2,
+      "runtime_lane": "large_n",
+      "prepared_state_type": "LargeNPreparedState",
+      "large_n_path_declined_reason": null,
+      "threshold": {
+        "dtype": "float32",
+        "nodes": 7813,
+        "min": 0.24747629463672638,
+        "max": 35.8947639465332,
+        "constant": false
+      },
+      "pair_policy_installed": true,
+      "retry_final_caps": [
+        {
+          "max_pair_queue": -1,
+          "max_interactions_per_node": -1
+        },
+        {
+          "max_pair_queue": -1,
+          "max_interactions_per_node": -1
+        },
+        {
+          "max_pair_queue": -1,
+          "max_interactions_per_node": -1
+        },
+        {
+          "max_pair_queue": -1,
+          "max_interactions_per_node": -1
+        },
+        {
+          "max_pair_queue": -1,
+          "max_interactions_per_node": -1
+        },
+        {
+          "max_pair_queue": -1,
+          "max_interactions_per_node": -1
+        },
+        {
+          "max_pair_queue": -1,
+          "max_interactions_per_node": -1
+        },
+        {
+          "max_pair_queue": -1,
+          "max_interactions_per_node": -1
+        }
+      ]
+    },
+    {
+      "arm": "mass",
+      "knob": 1e-05,
+      "far_pairs": 2102686,
+      "near_leaf_pairs": 3843496,
+      "prepare_s": 63.26,
+      "nodes": 7813,
+      "dual_calls": 2,
+      "runtime_lane": "large_n",
+      "prepared_state_type": "LargeNPreparedState",
+      "large_n_path_declined_reason": null,
+      "threshold": {
+        "dtype": "float32",
+        "nodes": 7813,
+        "min": 0.024747638031840324,
+        "max": 3.5894765853881836,
+        "constant": false
+      },
+      "pair_policy_installed": true,
+      "retry_final_caps": [
+        {
+          "max_pair_queue": -1,
+          "max_interactions_per_node": -1
+        },
+        {
+          "max_pair_queue": -1,
+          "max_interactions_per_node": -1
+        },
+        {
+          "max_pair_queue": -1,
+          "max_interactions_per_node": -1
+        },
+        {
+          "max_pair_queue": -1,
+          "max_interactions_per_node": -1
+        },
+        {
+          "max_pair_queue": -1,
+          "max_interactions_per_node": -1
+        },
+        {
+          "max_pair_queue": -1,
+          "max_interactions_per_node": -1
+        },
+        {
+          "max_pair_queue": -1,
+          "max_interactions_per_node": -1
+        },
+        {
+          "max_pair_queue": -1,
+          "max_interactions_per_node": -1
+        },
+        {
+          "max_pair_queue": -1,
+          "max_interactions_per_node": -1
+        },
+        {
+          "max_pair_queue": -1,
+          "max_interactions_per_node": -1
+        },
+        {
+          "max_pair_queue": -1,
+          "max_interactions_per_node": -1
+        },
+        {
+          "max_pair_queue": -1,
+          "max_interactions_per_node": -1
+        }
+      ]
+    }
+  ]
+}

@@ -55,6 +55,7 @@ from ._adaptive_policy import (
     adaptive_pair_policy,
     adaptive_policy_tolerance,
     bucket_far_pairs_by_tag,
+    compute_node_force_scale_from_sorted_magnitudes,
 )
 from ._interaction_cache import (
     _build_dual_tree_artifacts,
@@ -63,6 +64,7 @@ from ._interaction_cache import (
     _interaction_cache_key,
     _InteractionCacheEntry,
     _RefreshDualPlannerHint,
+    pair_policy_cache_identity,
 )
 from ._large_n_pipeline import can_use_large_n_prepare_path, prepare_large_n_state
 from ._nearfield_cache import (
@@ -736,6 +738,7 @@ class PrepareMixin:
         aspect_threshold_val: float,
         allow_stateful_cache: bool,
         suppress_host_side_effects: bool = False,
+        retain_compact_far_pairs: bool = False,
     ) -> _PrepareStateDualDownwardArtifacts:
         """Build/reuse interactions and prepare downward artifacts.
 
@@ -793,8 +796,15 @@ class PrepareMixin:
         pair_policy = None
         policy_state = None
         cache_key = None
-        use_paper_fixed_policy = (not self.adaptive_order) and (
-            self._uses_paper_style_traversal_policy()
+        # `dehnen_theta` evaluates the same criterion but has already folded it into
+        # per-node opening angles (rescaled `geometry.radius`), so the traversal's
+        # own scalar-theta test carries it. Installing a pair policy here would both
+        # double-apply the criterion and re-impose the fast-lane vetoes this mode
+        # exists to avoid.
+        use_paper_fixed_policy = (
+            (not self.adaptive_order)
+            and self._uses_paper_style_traversal_policy()
+            and not self._uses_per_node_effective_theta()
         )
         if (
             bool(suppress_host_side_effects)
@@ -843,10 +853,23 @@ class PrepareMixin:
         retain_interactions_active = bool(self.retain_interactions) and not bool(
             strict_fused_device_only_hot_path
         )
-        need_traversal_result = (
-            bool(self.retain_traversal_result)
-            and not bool(strict_fused_device_only_hot_path)
-        ) or bool(use_paper_fixed_policy)
+        # The paper policy used to force this on. Nothing consumed it: the traversal
+        # result feeds `_prepare_state_extract_adaptive_far_pairs`, which runs only
+        # under `adaptive_order`, and `use_paper_fixed_policy` requires
+        # `not adaptive_order`. What the forcing *did* do was disqualify the
+        # split/streamed build (`_can_split_dual_tree_build` refuses when the
+        # traversal result is needed) and force `need_node_interactions`, so the
+        # criterion could only ever run the monolithic build and materialise
+        # `num_nodes x max_interactions_per_node` -- ~2.5 GiB at N=1e7 / leaf 256,
+        # which is the binding constraint there.
+        #
+        # Dropping it is measured, not reasoned: same solver, same inputs, the
+        # streamed path and the node-interaction path agree on the accept mask
+        # (5708 far pairs both) and on the accelerations to the last printed digit
+        # (|a|_rms 2.514572614e+03 both) at N=8192 / leaf 32 / p=4 / eps=1e-3.
+        need_traversal_result = bool(self.retain_traversal_result) and not bool(
+            strict_fused_device_only_hot_path
+        )
         traced_prepare_inputs = bool(
             _contains_tracer(
                 (tree_artifacts.positions_sorted, tree_artifacts.masses_sorted)
@@ -1058,6 +1081,13 @@ class PrepareMixin:
             and not bool(need_traversal_result)
             and not adaptive_order_active
             and not mixed_order_farfield_active
+            # `_prepare_state_dual_and_downward_strict_streamed_fast` hardcodes
+            # `pair_policy=None`, so this lane cannot carry the Dehnen criterion --
+            # it would run the geometric MAC underneath a caller that asked for the
+            # criterion, cheaper and with no signal. Until the forcing below was
+            # dropped, `need_traversal_result` happened to exclude paper mode here;
+            # relying on that again would be relying on an accident.
+            and not bool(use_paper_fixed_policy)
             and (
                 not bool(traced_prepare_inputs)
                 or bool(strict_fused_device_only_hot_path)
@@ -1165,24 +1195,66 @@ class PrepareMixin:
                 dehnen_geometry_mode=self.dehnen_geometry_mode,
             )
             pair_policy = adaptive_pair_policy
-        else:
-            cache_key = _interaction_cache_key(
-                tree_artifacts.tree,
-                topology_key=tree_artifacts.topology_key,
-                tree_mode=tree_artifacts.tree_mode,
-                leaf_parameter=tree_artifacts.leaf_parameter,
-                theta=theta_val,
-                mac_type=mac_type_val,
-                dehnen_radius_scale=dehnen_radius_scale,
-                expansion_basis=self.expansion_basis,
-                center_mode=upward_center_mode,
-                max_pair_queue=self.max_pair_queue,
-                pair_process_block=self.pair_process_block,
-                traversal_config=runtime_traversal_config,
-                refine_local=refine_local_val,
-                max_refine_levels=max_refine_levels_val,
-                aspect_threshold=aspect_threshold_val,
-            )
+
+        # The cache key has to see the *acceptance criterion*, not only geometry.
+        # `dehnen_error` reports the geometric base MAC "dehnen" and paper mode
+        # pins theta at 1.0, so nothing else in the key separates two solvers at
+        # different `adaptive_eps` -- and serving one criterion's interaction list
+        # to another request is cheaper *and* silently wrong, which no cost
+        # measurement can detect. A solver-owned pair policy resolves to
+        # "uncacheable" (key None), which is what the old control flow achieved by
+        # accident: it computed the key only on the no-policy branch. Stating it
+        # here is what makes it survive the fast-lane relaxation in Step 3'.
+        criterion_active = self._uses_paper_style_force_scale()
+        folded_geometry = tree_artifacts.upward.geometry if criterion_active else None
+        cache_key = _interaction_cache_key(
+            tree_artifacts.tree,
+            topology_key=tree_artifacts.topology_key,
+            tree_mode=tree_artifacts.tree_mode,
+            leaf_parameter=tree_artifacts.leaf_parameter,
+            theta=theta_val,
+            mac_type=mac_type_val,
+            dehnen_radius_scale=dehnen_radius_scale,
+            expansion_basis=self.expansion_basis,
+            center_mode=upward_center_mode,
+            max_pair_queue=self.max_pair_queue,
+            pair_process_block=self.pair_process_block,
+            traversal_config=runtime_traversal_config,
+            refine_local=refine_local_val,
+            max_refine_levels=max_refine_levels_val,
+            aspect_threshold=aspect_threshold_val,
+            pair_policy_identity=pair_policy_cache_identity(
+                pair_policy=pair_policy,
+                policy_state=policy_state,
+                eps=(self.adaptive_eps if criterion_active else None),
+                force_scale_mode=(
+                    self.mac_force_scale_mode if criterion_active else None
+                ),
+                geometry_mode=(self.dehnen_geometry_mode if criterion_active else None),
+                theta_max=(
+                    float(getattr(self, "mac_theta_max", 1.0))
+                    if criterion_active
+                    else None
+                ),
+                error_model_code=(
+                    self._traversal_policy_error_model_code()
+                    if criterion_active
+                    else None
+                ),
+                force_scale_nodes=force_scale_nodes if criterion_active else None,
+                # `dehnen_theta` carries the criterion in `geometry.radius`
+                # rather than in a policy, so the radii the traversal will
+                # actually read are what pins acceptance here.
+                mac_geometry_radius=(
+                    folded_geometry.radius
+                    if (
+                        self._uses_per_node_effective_theta()
+                        and folded_geometry is not None
+                    )
+                    else None
+                ),
+            ),
+        )
         has_pair_policy = pair_policy is not None
         has_policy_state = policy_state is not None
         planner_enabled = bool(
@@ -1275,12 +1347,6 @@ class PrepareMixin:
                         ),
                         need_traversal_result_flag=jnp.asarray(
                             bool(need_traversal_result), dtype=jnp.bool_
-                        ),
-                        has_pair_policy_flag=jnp.asarray(
-                            has_pair_policy, dtype=jnp.bool_
-                        ),
-                        has_policy_state_flag=jnp.asarray(
-                            has_policy_state, dtype=jnp.bool_
                         ),
                         leaf_count=jnp.asarray(leaf_count_planner, dtype=jnp.int32),
                         need_node_interactions_flag=jnp.asarray(
@@ -1583,6 +1649,15 @@ class PrepareMixin:
                 if (
                     bool(adaptive_order_active)
                     or bool(strict_streamed_direct_far_pairs)
+                    # eq (16b)'s prepass needs the far/near partition it just built:
+                    # `f_b` sums exact scalar terms over near pairs and monopoles over
+                    # far ones, so discarding the far list here leaves it with the near
+                    # field only -- which captures 53-66% of `f_b` once there are
+                    # enough leaves for the far field to matter, and reads as an
+                    # ordinary under-estimate rather than a missing term. The streamed
+                    # lane produces compact pairs and no node interaction list, so
+                    # without this the whole of eq (16b) is unreachable at 1e6.
+                    or bool(retain_compact_far_pairs)
                     # Gradients need the FROZEN M2L pair list to re-run the
                     # downward sweep against. The pairs are already built here
                     # whenever ``use_compact_streamed_pairs`` holds (which the
@@ -2422,6 +2497,202 @@ class PrepareMixin:
             cache_entry=cache_entry,
         )
 
+    def _resolve_force_scale_nodes_for_prepare(
+        self,
+        *,
+        tree_artifacts: _PrepareStateTreeUpwardArtifacts,
+        supplied_force_scale: Optional[Array],
+        positions_arr: Array,
+        masses_arr: Array,
+        bounds: Optional[Tuple[Array, Array]],
+        leaf_size: int,
+        max_order: int,
+        jit_tree: Optional[bool],
+        upward_center_mode: str,
+        runtime_traversal_config: Optional[DualTreeTraversalConfig],
+        runtime_m2l_chunk_size: Optional[int],
+        runtime_l2l_chunk_size: Optional[int],
+        grouped_interactions: bool,
+        farfield_mode: str,
+        record_retry: Callable[[DualTreeRetryEvent], None],
+        refine_local_val: bool,
+        max_refine_levels_val: int,
+        aspect_threshold_val: float,
+    ) -> Optional[Array]:
+        """Resolve the per-node force scale the acceptance criterion needs.
+
+        Extracted from :meth:`_prepare_state_uncaught` so the large-N lane runs the
+        *same* resolution rather than a copy of it. The large-N lane used to pass
+        ``force_scale_nodes=None`` straight through to the dual build, where
+        ``build_adaptive_policy_state`` substitutes ``jnp.ones(...)`` -- a unit
+        force scale, i.e. a threshold of ``eps * 1`` instead of
+        ``eps * min_b |a_b|``. That is a different criterion, chosen silently.
+
+        Ordering matters and is deliberate: an explicitly supplied scale wins
+        outright, then the reuse modes, then a prepass. Two of the bugs this
+        branch fixed came from duplicating parts of this decision, so it lives in
+        exactly one place.
+        """
+
+        force_scale_nodes: Optional[Array] = None
+        use_paper_force_scale = self._uses_paper_style_force_scale()
+        if supplied_force_scale is not None:
+            # An explicitly supplied scale wins outright: no prepass, no cache read,
+            # and no cache *write* either. Seeding the cache here would make the next
+            # prepare_state silently inherit an externally injected scale, which is
+            # the confusion this parameter exists to remove.
+            node_count = int(tree_artifacts.tree.parent.shape[0])
+            supplied = jnp.asarray(supplied_force_scale, dtype=positions_arr.dtype)
+            if supplied.ndim != 1 or int(supplied.shape[0]) != node_count:
+                raise ValueError(
+                    "force_scale_nodes must be a 1-D array of length "
+                    f"{node_count} (the node count of the tree this call built); "
+                    f"got shape {tuple(supplied.shape)}"
+                )
+            force_scale_nodes = supplied
+        elif use_paper_force_scale:
+            node_count = int(tree_artifacts.tree.parent.shape[0])
+            previous_force_scale = self._last_force_scale_nodes
+            reduction_mode = self._force_scale_reduction_mode()
+            need_prepass = False
+            policy_orders = self._policy_orders_for_prepare_state(
+                max_order=int(max_order)
+            )
+            reusable_force_scale = (
+                previous_force_scale is not None
+                and int(previous_force_scale.shape[0]) == node_count
+            )
+            if self._in_force_scale_prepass:
+                # A prepass is already running and this is its inner prepare_state.
+                # It must never ask for a prepass of its own: 'paper' and 'prepass'
+                # both set need_prepass unconditionally, and the non-paper prepass
+                # re-enters prepare_state, so a mode that requests one on every call
+                # recursed until the interpreter stack ran out. Reachable from public
+                # kwargs (adaptive_order=True, adaptive_error_model='tail_proxy',
+                # mac_force_scale_mode='paper'). The inner solve only needs *some*
+                # force scale, so take the cached one or fall back to unity.
+                if reusable_force_scale:
+                    force_scale_nodes = jnp.asarray(
+                        previous_force_scale,
+                        dtype=positions_arr.dtype,
+                    )
+                else:
+                    force_scale_nodes = jnp.ones(
+                        (node_count,),
+                        dtype=positions_arr.dtype,
+                    )
+            elif self.mac_force_scale_mode in ("paper", "paper_fb"):
+                need_prepass = True
+            elif self.mac_force_scale_mode in (
+                "prev",
+                "paper_cached",
+                "paper_fb_cached",
+            ):
+                if reusable_force_scale:
+                    force_scale_nodes = jnp.asarray(
+                        previous_force_scale,
+                        dtype=positions_arr.dtype,
+                    )
+                elif (
+                    self.mac_force_scale_mode in ("paper_cached", "paper_fb_cached")
+                    or self._uses_paper_style_traversal_policy()
+                ):
+                    need_prepass = True
+                else:
+                    force_scale_nodes = jnp.ones(
+                        (node_count,),
+                        dtype=positions_arr.dtype,
+                    )
+            else:
+                need_prepass = True
+            if need_prepass:
+                if len(policy_orders) == 0:
+                    raise ValueError(
+                        f"mac_force_scale_mode={self.mac_force_scale_mode!r} needs a "
+                        "force-scale prepass, which requires non-empty orders"
+                    )
+                use_fb_prepass = self._uses_fb_force_scale()
+                use_paper_prepass = (
+                    self.mac_force_scale_mode
+                    in (
+                        "paper",
+                        "paper_cached",
+                    )
+                    and self._uses_paper_style_traversal_policy()
+                )
+                low_order = int(min(policy_orders))
+                if use_paper_prepass:
+                    low_order = 1 if int(max_order) >= 1 else 0
+                if use_fb_prepass:
+                    # eq (16b): the scale is `min_b f_b`, a scalar per particle, so
+                    # it goes through the magnitude reduction directly rather than
+                    # through the vector `|a_b|` entry point.
+                    fb_sorted = (
+                        self._compute_force_scale_fb_prepass_from_tree_artifacts(
+                            tree_artifacts=tree_artifacts,
+                            upward_center_mode=upward_center_mode,
+                            runtime_traversal_config=runtime_traversal_config,
+                            runtime_m2l_chunk_size=runtime_m2l_chunk_size,
+                            runtime_l2l_chunk_size=runtime_l2l_chunk_size,
+                            grouped_interactions=grouped_interactions,
+                            farfield_mode=farfield_mode,
+                            record_retry=record_retry,
+                            refine_local_val=refine_local_val,
+                            max_refine_levels_val=max_refine_levels_val,
+                            aspect_threshold_val=aspect_threshold_val,
+                        )
+                    )
+                    force_scale_nodes = compute_node_force_scale_from_sorted_magnitudes(
+                        tree=tree_artifacts.tree,
+                        magnitudes_sorted=fb_sorted,
+                        reduction=reduction_mode,
+                    ).astype(positions_arr.dtype)
+                    self._last_force_scale_nodes = force_scale_nodes
+                    self._last_force_scale_particles = fb_sorted
+                elif use_paper_prepass:
+                    prepass_sorted = (
+                        self._compute_force_scale_paper_prepass_from_tree_artifacts(
+                            tree_artifacts=tree_artifacts,
+                            low_order=low_order,
+                            theta_val=self._force_scale_prepass_theta(),
+                            upward_center_mode=upward_center_mode,
+                            runtime_traversal_config=runtime_traversal_config,
+                            runtime_m2l_chunk_size=runtime_m2l_chunk_size,
+                            runtime_l2l_chunk_size=runtime_l2l_chunk_size,
+                            grouped_interactions=grouped_interactions,
+                            farfield_mode=farfield_mode,
+                            record_retry=record_retry,
+                            refine_local_val=refine_local_val,
+                            max_refine_levels_val=max_refine_levels_val,
+                            aspect_threshold_val=aspect_threshold_val,
+                        )
+                    )
+                else:
+                    with self._force_scale_prepass_scope(low_order=low_order):
+                        prepass_acc = self.compute_accelerations(
+                            positions_arr,
+                            masses_arr,
+                            bounds=bounds,
+                            leaf_size=int(leaf_size),
+                            max_order=low_order,
+                            return_potential=False,
+                            theta=self._force_scale_prepass_theta(),
+                            reuse_prepared_state=False,
+                            jit_tree=jit_tree,
+                            jit_traversal=False,
+                        )
+                    prepass_sorted = jnp.asarray(prepass_acc)[
+                        jnp.argsort(tree_artifacts.inverse_permutation)
+                    ]
+                if not use_fb_prepass:
+                    force_scale_nodes = self._compute_node_force_scale_from_sorted_acc(
+                        tree=tree_artifacts.tree,
+                        accelerations_sorted=prepass_sorted,
+                        reduction=reduction_mode,
+                    ).astype(positions_arr.dtype)
+                    self._last_force_scale_nodes = force_scale_nodes
+        return force_scale_nodes
+
     @jaxtyped(typechecker=beartype)
     def prepare_state(
         self: "FastMultipoleMethod",
@@ -2602,6 +2873,12 @@ class PrepareMixin:
                 upward_center_mode=upward_center_mode,
                 record_retry=record_retry,
                 collected_retries=collected_retries,
+                # Threaded, not dropped: the lane now carries the criterion, so an
+                # externally injected scale has to reach it. Silently ignoring it
+                # here would make a prepare/evaluate loop measure the prepass's
+                # scale while believing it measured the injected one -- the same
+                # back-door `force_scale_nodes=` was added to close.
+                supplied_force_scale=force_scale_nodes,
                 fused_device_mode=bool(fused_device_mode),
             )
 
@@ -2618,134 +2895,47 @@ class PrepareMixin:
             upward_center_mode=upward_center_mode,
             allow_stateful_cache=allow_stateful_cache,
         )
-        supplied_force_scale = force_scale_nodes
-        force_scale_nodes = None
-        use_paper_force_scale = self._uses_paper_style_force_scale()
-        if supplied_force_scale is not None:
-            # An explicitly supplied scale wins outright: no prepass, no cache read,
-            # and no cache *write* either. Seeding the cache here would make the next
-            # prepare_state silently inherit an externally injected scale, which is
-            # the confusion this parameter exists to remove.
-            node_count = int(tree_artifacts.tree.parent.shape[0])
-            supplied = jnp.asarray(supplied_force_scale, dtype=positions_arr.dtype)
-            if supplied.ndim != 1 or int(supplied.shape[0]) != node_count:
-                raise ValueError(
-                    "force_scale_nodes must be a 1-D array of length "
-                    f"{node_count} (the node count of the tree this call built); "
-                    f"got shape {tuple(supplied.shape)}"
-                )
-            force_scale_nodes = supplied
-        elif use_paper_force_scale:
-            node_count = int(tree_artifacts.tree.parent.shape[0])
-            previous_force_scale = self._last_force_scale_nodes
-            reduction_mode = self._force_scale_reduction_mode()
-            need_prepass = False
-            policy_orders = self._policy_orders_for_prepare_state(
-                max_order=int(max_order)
-            )
-            reusable_force_scale = (
-                previous_force_scale is not None
-                and int(previous_force_scale.shape[0]) == node_count
-            )
-            if self._in_force_scale_prepass:
-                # A prepass is already running and this is its inner prepare_state.
-                # It must never ask for a prepass of its own: 'paper' and 'prepass'
-                # both set need_prepass unconditionally, and the non-paper prepass
-                # re-enters prepare_state, so a mode that requests one on every call
-                # recursed until the interpreter stack ran out. Reachable from public
-                # kwargs (adaptive_order=True, adaptive_error_model='tail_proxy',
-                # mac_force_scale_mode='paper'). The inner solve only needs *some*
-                # force scale, so take the cached one or fall back to unity.
-                if reusable_force_scale:
-                    force_scale_nodes = jnp.asarray(
-                        previous_force_scale,
-                        dtype=positions_arr.dtype,
-                    )
-                else:
-                    force_scale_nodes = jnp.ones(
-                        (node_count,),
-                        dtype=positions_arr.dtype,
-                    )
-            elif self.mac_force_scale_mode == "paper":
-                need_prepass = True
-            elif self.mac_force_scale_mode in ("prev", "paper_cached"):
-                if reusable_force_scale:
-                    force_scale_nodes = jnp.asarray(
-                        previous_force_scale,
-                        dtype=positions_arr.dtype,
-                    )
-                elif (
-                    self.mac_force_scale_mode == "paper_cached"
-                    or self._uses_paper_style_traversal_policy()
-                ):
-                    need_prepass = True
-                else:
-                    force_scale_nodes = jnp.ones(
-                        (node_count,),
-                        dtype=positions_arr.dtype,
-                    )
-            else:
-                need_prepass = True
-            if need_prepass:
-                if len(policy_orders) == 0:
-                    raise ValueError(
-                        f"mac_force_scale_mode={self.mac_force_scale_mode!r} needs a "
-                        "force-scale prepass, which requires non-empty orders"
-                    )
-                use_paper_prepass = (
-                    self.mac_force_scale_mode
-                    in (
-                        "paper",
-                        "paper_cached",
-                    )
-                    and self._uses_paper_style_traversal_policy()
-                )
-                low_order = int(min(policy_orders))
-                if use_paper_prepass:
-                    low_order = 1 if int(max_order) >= 1 else 0
-                if use_paper_prepass:
-                    prepass_sorted = (
-                        self._compute_force_scale_paper_prepass_from_tree_artifacts(
-                            tree_artifacts=tree_artifacts,
-                            low_order=low_order,
-                            theta_val=theta_val,
-                            upward_center_mode=upward_center_mode,
-                            runtime_traversal_config=runtime_traversal_config,
-                            runtime_m2l_chunk_size=runtime_m2l_chunk_size,
-                            runtime_l2l_chunk_size=runtime_l2l_chunk_size,
-                            grouped_interactions=grouped_interactions,
-                            farfield_mode=farfield_mode,
-                            record_retry=record_retry,
-                            refine_local_val=refine_local_val,
-                            max_refine_levels_val=max_refine_levels_val,
-                            aspect_threshold_val=aspect_threshold_val,
-                        )
-                    )
-                else:
-                    with self._force_scale_prepass_scope(low_order=low_order):
-                        prepass_acc = self.compute_accelerations(
-                            positions_arr,
-                            masses_arr,
-                            bounds=bounds,
-                            leaf_size=int(leaf_size),
-                            max_order=low_order,
-                            return_potential=False,
-                            theta=theta_val,
-                            reuse_prepared_state=False,
-                            jit_tree=jit_tree,
-                            jit_traversal=False,
-                        )
-                    prepass_sorted = jnp.asarray(prepass_acc)[
-                        jnp.argsort(tree_artifacts.inverse_permutation)
-                    ]
-                force_scale_nodes = self._compute_node_force_scale_from_sorted_acc(
-                    tree=tree_artifacts.tree,
-                    accelerations_sorted=prepass_sorted,
-                    reduction=reduction_mode,
-                ).astype(positions_arr.dtype)
-                self._last_force_scale_nodes = force_scale_nodes
-        dual_downward_artifacts = self._prepare_state_dual_and_downward(
+        force_scale_nodes = self._resolve_force_scale_nodes_for_prepare(
             tree_artifacts=tree_artifacts,
+            supplied_force_scale=force_scale_nodes,
+            positions_arr=positions_arr,
+            masses_arr=masses_arr,
+            bounds=bounds,
+            leaf_size=int(leaf_size),
+            max_order=int(max_order),
+            jit_tree=jit_tree,
+            upward_center_mode=upward_center_mode,
+            runtime_traversal_config=runtime_traversal_config,
+            runtime_m2l_chunk_size=runtime_m2l_chunk_size,
+            runtime_l2l_chunk_size=runtime_l2l_chunk_size,
+            grouped_interactions=grouped_interactions,
+            farfield_mode=farfield_mode,
+            record_retry=record_retry,
+            refine_local_val=refine_local_val,
+            max_refine_levels_val=max_refine_levels_val,
+            aspect_threshold_val=aspect_threshold_val,
+        )
+        dual_tree_artifacts = tree_artifacts
+        if self._uses_per_node_effective_theta():
+            # Fold the criterion into geometry.radius *before* the dual build, since
+            # that is what `_build_mac_extents` reads. `dehnen_radius_scale` must stay
+            # at 1.0 here: it multiplies the same radii, so any other value silently
+            # rescales every per-node angle.
+            if float(self.dehnen_radius_scale) != 1.0:
+                raise ValueError(
+                    "mac_type='dehnen_theta' requires dehnen_radius_scale=1.0; it "
+                    "scales the same geometry.radius the per-node opening angles are "
+                    f"folded into (got {self.dehnen_radius_scale})"
+                )
+            dual_tree_artifacts = self._apply_per_node_effective_theta(
+                tree_artifacts=tree_artifacts,
+                force_scale_nodes=force_scale_nodes,
+                max_order=int(max_order),
+                theta_val=theta_val,
+            )
+
+        dual_downward_artifacts = self._prepare_state_dual_and_downward(
+            tree_artifacts=dual_tree_artifacts,
             force_scale_nodes=force_scale_nodes,
             upward_center_mode=upward_center_mode,
             theta_val=theta_val,

@@ -25,6 +25,9 @@ from jaccpot.upward.tree_expansions import TreeUpwardData
 from ._adaptive_policy import (
     build_adaptive_policy_state,
     compute_node_force_scale_from_sorted_acc,
+    estimate_particle_force_scale,
+    per_node_effective_theta,
+    per_node_mac_radius,
     source_error_proxy_by_order_from_multipoles,
 )
 from ._octree_adapter import build_octree_execution_data_with_status
@@ -39,6 +42,47 @@ from .fmm_state import (
     _PrepareStateTreeUpwardArtifacts,
 )
 from .kernels.core import _build_nearfield_interop_data
+
+#: Opening angle the force-scale prepass traversal defaults to. See
+#: :meth:`PolicyMixin._force_scale_prepass_theta` for the measurement behind it.
+_DEFAULT_FORCE_SCALE_PREPASS_THETA = 0.5
+
+
+def _far_pair_arrays_for_fb_prepass(
+    *,
+    interactions: object,
+    compact_far_pairs: object,
+) -> tuple[Optional[Array], Optional[Array]]:
+    """Return flat (sources, targets) far-pair arrays for the eq (16b) estimator.
+
+    The estimator reads the far list as one flat COO pair array with ``-1`` for
+    inactive entries, which is exactly the node interaction list's layout -- and
+    also the streamed lane's ``CompactTaggedFarPairs``, once its padding is
+    handled. That matters because the streamed/large-N lane returns compact far
+    pairs and *no* node interaction list, so requiring the latter shut eq (16b)
+    out of the only lane that reaches 10^6.
+
+    ``far_pair_count`` is honoured explicitly rather than trusted to be encoded
+    as ``-1`` padding: yggdrax documents the arrays as "fixed-capacity padded"
+    without specifying the fill value, and a fill of ``0`` would read as the pair
+    ``(node 0, node 0)``. Node 0 is the root, so every spurious entry would add
+    mass to ``own[root]`` and the downward accumulation would push it into
+    *every* node -- inflating ``f_b``, loosening ``eps * s``, and making the
+    solver faster and wronger with nothing to show it.
+    """
+
+    if interactions is not None:
+        return interactions.sources, interactions.targets
+    if compact_far_pairs is None:
+        return None, None
+    sources = jnp.asarray(compact_far_pairs.sources)
+    targets = jnp.asarray(compact_far_pairs.targets)
+    count = getattr(compact_far_pairs, "far_pair_count", None)
+    if count is None:
+        return sources, targets
+    live = jnp.arange(sources.shape[0]) < jnp.asarray(count).reshape(())
+    sentinel = jnp.asarray(-1, dtype=sources.dtype)
+    return jnp.where(live, sources, sentinel), jnp.where(live, targets, sentinel)
 
 
 class PolicyMixin:
@@ -91,6 +135,18 @@ class PolicyMixin:
             return
         if not self._uses_paper_style_force_scale():
             return
+        if self._uses_fb_force_scale():
+            # eq (16b)'s scale is `min_b f_b`, not `min_b |a_b|`, and the two are
+            # different quantities -- f_b is the cancellation-free *sum of pairwise
+            # magnitudes*, so it is strictly larger and does not vanish. Recording
+            # accelerations here would silently replace the f_b cache with a (16a)
+            # scale after the first evaluation, which is exactly the back-door
+            # failure `force_scale_nodes=` was added to remove: an injected f_b used
+            # to survive exactly one prepare_state, so a prepare/evaluate loop
+            # measured (16a) while believing it measured (16b). f_b depends only on
+            # positions and masses, so there is nothing an evaluation can contribute
+            # to it anyway.
+            return
         acc_sorted = evaluation[0] if isinstance(evaluation, tuple) else evaluation
         if _contains_tracer((acc_sorted, state.tree)):
             return
@@ -123,9 +179,45 @@ class PolicyMixin:
         return 0
 
     def _uses_dehnen_error_policy(self: "FastMultipoleMethod") -> bool:
-        """Return whether traversal should use the Dehnen paper policy hook."""
+        """Return whether the solver evaluates the Dehnen error criterion at all.
 
-        return str(self.mac_type) == "dehnen_error"
+        True for both ``dehnen_error`` (exact, evaluated pair-by-pair through a
+        solver-owned ``pair_policy``) and ``dehnen_theta`` (the same criterion
+        folded into one opening angle per node). The two share everything that
+        feeds the criterion -- the min-reduced force scale, the mandatory
+        ``adaptive_eps``, the low-order prepass, the ``"dehnen"`` base MAC and the
+        paper error-model code. They diverge at exactly one place: whether a pair
+        policy is installed. See :meth:`_uses_per_node_effective_theta`.
+        """
+
+        return str(self.mac_type) in ("dehnen_error", "dehnen_theta")
+
+    def _uses_per_node_effective_theta(self: "FastMultipoleMethod") -> bool:
+        """Return whether the MAC is folded into a per-node opening angle.
+
+        ``dehnen_theta`` evaluates the same Dehnen criterion as ``dehnen_error``,
+        but collapses it into one opening angle per node and feeds that to the
+        traversal as rescaled ``geometry.radius`` values, so it installs no
+        ``pair_policy`` and none of the fast-lane vetoes trigger.
+
+        **REFUTED -- do not use for production.** Measured against the exact
+        criterion at N=4096/p=8 (`bench/validation/per_node_theta_fidelity.py`,
+        `results/validation/theta_fidelity_p8.json`): 12-9300x worse error at
+        1.35-15x *more* interaction work, with a p99.99 of 2.3e+02 on bulge+halo.
+        Retained only so the negative result stays reproducible; selecting it warns.
+
+        The obstruction is structural, not a tuning failure. eq (16a) accepts when
+        ``r**(p+2)`` exceeds a *product* of a source term and a sink term, while the
+        lane test is a *sum* ``e_A + e_B <= theta_g r``. A sum cannot represent a
+        product, so a per-node extent is either tight on average and unsound on the
+        tails (this mode) or sound and empty (see
+        :func:`~jaccpot.runtime._adaptive_policy.per_node_conservative_extent`,
+        which recovers <=0.6% of the exact criterion's far pairs at its optimum).
+        Carrying this criterion into the fast lanes needs pair-policy support in the
+        lanes themselves.
+        """
+
+        return str(self.mac_type) == "dehnen_theta"
 
     def _uses_dehnen_paper_error_model(self: "FastMultipoleMethod") -> bool:
         """Return whether the active adaptive error model is the paper estimator."""
@@ -148,6 +240,49 @@ class PolicyMixin:
         """Return the node reduction mode used for adaptive force scales."""
 
         return "min" if self._uses_dehnen_paper_error_model() else "max"
+
+    def _uses_fb_force_scale(self: "FastMultipoleMethod") -> bool:
+        """Return whether the force scale is eq (16b)'s ``f_b`` rather than ``|a_b|``.
+
+        eq (16b) is eq (16a) with ``min_b f_b`` on the right-hand side instead of
+        ``min_b |a_b|``. The criterion, the traversal and the eq (15) error
+        estimator are untouched, so the whole of (16b) is a different per-node
+        force scale -- which is why it needs no traversal work, only a different
+        prepass.
+        """
+
+        return str(self.mac_force_scale_mode) in ("paper_fb", "paper_fb_cached")
+
+    def _force_scale_prepass_theta(self: "FastMultipoleMethod") -> float:
+        """Return the opening angle the force-scale prepass traversal should use.
+
+        The prepass runs a *geometric* traversal, so its own theta decides how much
+        of the scale comes from the exact near field and how much from the monopole
+        far-field approximation. That is easy to get wrong, because paper mode pins
+        the solver's ``theta`` at 1.0 on the grounds that it does not gate
+        acceptance -- true for the criterion, false for the prepass underneath it.
+
+        Measured effect on the ``f_b`` estimate against the exact O(N^2) sum
+        (Plummer, N=4096, ratio estimate/exact):
+
+        ===== ========== =========
+        theta median     minimum
+        ===== ========== =========
+        0.3   1.000      1.000
+        0.5   0.997      0.911
+        0.7   0.929      0.645
+        1.0   0.736      0.334
+        ===== ========== =========
+
+        So the default is 0.5, near Dehnen §5.2's ``theta_crit ~ 0.46``, where the
+        estimate is essentially exact. ``mac_force_scale_prepass_theta`` overrides
+        it.
+        """
+
+        override = getattr(self, "mac_force_scale_prepass_theta", None)
+        if override is not None:
+            return float(override)
+        return _DEFAULT_FORCE_SCALE_PREPASS_THETA
 
     def _uses_paper_style_force_scale(self: "FastMultipoleMethod") -> bool:
         """Return whether prepare_state needs paper-style force-scale handling."""
@@ -197,6 +332,70 @@ class PolicyMixin:
             dehnen_geometry_mode=dehnen_geometry_mode,
         )
 
+    def _apply_per_node_effective_theta(
+        self: "FastMultipoleMethod",
+        *,
+        tree_artifacts: _PrepareStateTreeUpwardArtifacts,
+        force_scale_nodes: Optional[Array],
+        max_order: int,
+        theta_val: float,
+    ) -> _PrepareStateTreeUpwardArtifacts:
+        """Fold the Dehnen criterion into ``geometry.radius`` as per-node angles.
+
+        Returns ``tree_artifacts`` with the upward geometry's ``radius`` replaced by
+        ``rho_i * theta_val / theta_i``, which makes the traversal's own
+        ``(e_t + e_s)**2 <= theta**2 d**2`` test algebraically equal to
+        ``rho_t/theta_t + rho_s/theta_s <= d``. Everything downstream -- generic
+        walk, split build, streamed build, treecode, Pallas -- then carries the
+        criterion with no pair policy and no lane veto.
+
+        ``theta_val`` cancels out of acceptance, so its value does not matter here;
+        it is threaded through only because the traversal compares against it.
+        """
+
+        if force_scale_nodes is None:
+            raise ValueError(
+                "mac_type='dehnen_theta' requires a per-node force scale; "
+                "prepare_state should have produced one via the paper prepass"
+            )
+        order = int(tree_artifacts.upward.multipoles.order)
+        policy_state = self._build_adaptive_policy_state(
+            upward=tree_artifacts.upward,
+            tree=tree_artifacts.tree,
+            positions_sorted=tree_artifacts.positions_sorted,
+            p_gears=(order,),
+            force_scale_nodes=force_scale_nodes,
+            eps=jnp.asarray(float(self.adaptive_eps)),
+            theta=jnp.asarray(float(theta_val)),
+            error_model_code=jnp.asarray(
+                self._traversal_policy_error_model_code(), dtype=jnp.int32
+            ),
+            dehnen_geometry_mode=self.dehnen_geometry_mode,
+        )
+        theta_nodes = per_node_effective_theta(
+            source_power=policy_state.source_dehnen_power,
+            radius_bound=policy_state.source_radius_bound,
+            force_scale=force_scale_nodes,
+            masked_binomial=policy_state.dehnen_binomial_masked_by_order[0],
+            exponent=policy_state.dehnen_exponent_by_order[0],
+            order=order,
+            eps=float(self.adaptive_eps),
+            gravitational_constant=float(self.G),
+            theta_max=float(getattr(self, "mac_theta_max", 1.0)),
+        )
+        scaled_radius = per_node_mac_radius(
+            radius_bound=policy_state.source_radius_bound,
+            theta_nodes=theta_nodes,
+            theta_global=float(theta_val),
+        )
+        self._recent_effective_theta_nodes = theta_nodes
+        upward = tree_artifacts.upward
+        return tree_artifacts._replace(
+            upward=upward._replace(
+                geometry=upward.geometry._replace(radius=scaled_radius)
+            )
+        )
+
     @contextlib.contextmanager
     def _force_scale_prepass_scope(
         self: "FastMultipoleMethod", *, low_order: int
@@ -238,6 +437,104 @@ class PolicyMixin:
             self._topology_reuse_entry = saved_topology_reuse_entry
             self._recent_topology_reused = saved_recent_topology_reused
             self._in_force_scale_prepass = False
+
+    def _compute_force_scale_fb_prepass_from_tree_artifacts(
+        self: "FastMultipoleMethod",
+        *,
+        tree_artifacts: _PrepareStateTreeUpwardArtifacts,
+        upward_center_mode: str,
+        runtime_traversal_config: Optional[DualTreeTraversalConfig],
+        runtime_m2l_chunk_size: Optional[int],
+        runtime_l2l_chunk_size: Optional[int],
+        grouped_interactions: bool,
+        farfield_mode: str,
+        record_retry: Callable[[DualTreeRetryEvent], None],
+        refine_local_val: bool,
+        max_refine_levels_val: int,
+        aspect_threshold_val: float,
+    ) -> Array:
+        """Estimate eq (16b)'s ``f_b`` for every particle, in sorted order.
+
+        Cheaper than the eq (16a) prepass, not just different: that one runs a
+        whole low-order FMM *evaluation* (upward sweep, M2L, L2L, L2P) to get
+        ``|a_b|``, whereas ``f_b`` is a sum of pairwise force magnitudes and needs
+        only the traversal's pair partition -- near pairs get an exact scalar sum,
+        far pairs a monopole. No expansions are built or applied at any order.
+
+        The traversal runs with the geometric MAC at
+        :meth:`_force_scale_prepass_theta` and with no pair policy, so it cannot
+        recurse into the criterion it is computing the scale for.
+        """
+
+        prepass_theta = self._force_scale_prepass_theta()
+        with self._force_scale_prepass_scope(
+            low_order=int(min(self.p_gears)) if self.p_gears else 0
+        ):
+            self.adaptive_order = False
+            self.adaptive_error_model = "tail_proxy"
+            self.mac_type = "dehnen"
+            dual_downward_artifacts = self._prepare_state_dual_and_downward(
+                tree_artifacts=tree_artifacts,
+                force_scale_nodes=None,
+                upward_center_mode=upward_center_mode,
+                theta_val=prepass_theta,
+                mac_type_val=self.mac_type,
+                dehnen_radius_scale=self.dehnen_radius_scale,
+                runtime_traversal_config=runtime_traversal_config,
+                runtime_m2l_chunk_size=runtime_m2l_chunk_size,
+                runtime_l2l_chunk_size=runtime_l2l_chunk_size,
+                grouped_interactions=grouped_interactions,
+                farfield_mode=farfield_mode,
+                record_retry=record_retry,
+                refine_local_val=refine_local_val,
+                max_refine_levels_val=max_refine_levels_val,
+                aspect_threshold_val=aspect_threshold_val,
+                allow_stateful_cache=False,
+                # The streamed lane builds compact far pairs and then discards them
+                # unless something asks; this is that ask. Without it the prepass
+                # gets the near list only, and a near-only `f_b` captures 53-66% of
+                # the true value once the far field matters -- a silent under-estimate
+                # rather than a visible failure.
+                retain_compact_far_pairs=True,
+            )
+
+        interactions = dual_downward_artifacts.interactions
+        neighbor_list = dual_downward_artifacts.neighbor_list
+        compact_far_pairs = getattr(dual_downward_artifacts, "compact_far_pairs", None)
+        far_sources, far_targets = _far_pair_arrays_for_fb_prepass(
+            interactions=interactions,
+            compact_far_pairs=compact_far_pairs,
+        )
+        if far_sources is None or neighbor_list is None:
+            raise RuntimeError(
+                "the f_b force-scale prepass needs both the far pair list and the "
+                "near neighbour list; the traversal returned "
+                f"interactions={interactions is not None}, "
+                f"compact_far_pairs={compact_far_pairs is not None}, "
+                f"neighbors={neighbor_list is not None}. Without both, the "
+                "near/far partition is incomplete and f_b would be silently "
+                "under-counted rather than approximated."
+            )
+        geometry = tree_artifacts.upward.geometry
+        return estimate_particle_force_scale(
+            tree=tree_artifacts.tree,
+            positions_sorted=tree_artifacts.positions_sorted,
+            masses_sorted=tree_artifacts.masses_sorted,
+            node_centers=geometry.center,
+            node_radii=geometry.radius,
+            interaction_sources=far_sources,
+            interaction_targets=far_targets,
+            neighbor_offsets=neighbor_list.offsets,
+            neighbor_counts=neighbor_list.counts,
+            neighbor_leaf_indices=neighbor_list.leaf_indices,
+            neighbor_indices=neighbor_list.neighbors,
+            max_leaf_size=int(tree_artifacts.leaf_cap),
+            softening=float(self.softening),
+            gravitational_constant=float(self.G),
+            far_center_inflation=float(
+                getattr(self, "mac_force_scale_fb_inflation", 1.0)
+            ),
+        )
 
     def _compute_force_scale_paper_prepass_from_tree_artifacts(
         self: "FastMultipoleMethod",
