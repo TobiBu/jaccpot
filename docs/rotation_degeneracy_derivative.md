@@ -442,13 +442,21 @@ regression from this work; it is reported because the handoff asked for it and b
 puts the M2L stage's scale in context — hundreds of ms/step, against which §8's fullbatch
 gradient deltas are sub-millisecond.
 
-It also exposes a defect in the profiler, which should not be read past: the script's
-attribution assumes the cumulative diag modes are nested, and here they are not.
-`B_plan` (79.2) is *cheaper* than `A_upward` (164.9), so `plan_build = B - A` prints
-**−85.7 ms** — a negative cost — and `m2l_compute = C - B = 212.7 ms` inherits an
-anomalously low baseline. The script reports both without complaint. Whatever the M2L
-compute share is at this configuration, this run does not measure it, and the profiler
-wants fixing before it is trusted again.
+It also exposed a defect in the profiler, **since fixed**: the attribution assumed the
+`(diag_mode, detail_diag_mode)` combos were nested and they are not, so
+`plan_build = B - A` printed **−85.7 ms** — a negative cost — without complaint. The
+detail modes are per-sub-stage probes with their own keep-alive dependencies, not a
+monotone ladder; `upward_only/p2m_only` costs 17% *more* than `upward_only/full` despite
+doing strictly less. Two candidate causes were ruled out by measurement: the eval stage
+(the `detail_diag_mode == "full"` term in `self_eval_active` only sets diagnostic
+counters), and the host-side stage timers as a substitute (they are written by
+`refresh_prepared_state`, which the fused jitted scan never calls, so
+`refresh_timing_calls` returns 0).
+
+The downward split is therefore **not obtainable on the fused lane by any method
+available today**, and the script now says so rather than inventing a number. The one
+trustworthy figure is `downward_total = D − A`, both sides being `detail=full`:
+**293.1 ms/step of 535.4**. Absolute numbers move 5–10% run to run on this shared card.
 
 ## 9. The complex fused Pallas M2L lane, and what the carrier costs
 
