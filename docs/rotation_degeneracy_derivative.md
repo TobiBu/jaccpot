@@ -11,7 +11,9 @@ are the part that is easy to get wrong and expensive to redo.
 **Status.** Derived, validated, and **wired into every M2L / M2M / L2L lane in both
 bases** — §5 is what landed where, §6 is where the switchover boundary goes and why it is
 wider than `rho == 0`, §7 is the precomputed-block lanes and the fused Pallas kernel,
-which each needed a different shape of the same rule. G.10 in
+which each needed a different shape of the same rule. §8 is the GPU validation. §9 is the
+one lane this does **not** cover — the fused Pallas *complex* M2L, which now has the
+builder's withdrawal and no carrier. G.10 in
 [`refactor_audit_2026-08.md`](refactor_audit_2026-08.md) records the defect itself.
 
 ---
@@ -347,8 +349,102 @@ unchanged to the bit. Asserted by
 `interpret` so the same assertion covers the reference lowering on CPU and the real Triton
 kernel where the hardware allows.
 
-**What still wants a GPU**, and is now the only thing that does: the `interpret=False`
-half of that test, the fully-fused reverse kernel under `JACCPOT_FUSED_M2L_VJP=1`, a
-`bench/audit_reverse_residuals.py` re-run (nothing here changes what the `custom_vjp`
-saves, but the linearised block construction around it now carries one extra select), and
-a per-stage benchmark of the M2L stage.
+## 8. Validated on GPU
+
+Run on an **A100-PCIE-40GB (sm_80)**, `pallas_m2l_real_fused_supported()` `True`, x64 on.
+One caveat on the whole section: the box's environment has **JAX 0.9.0.1**, below this
+project's own `>=0.10.2` floor, so the Triton lowering went through the old
+`pallas_call(backend=)` API (`_compat.PALLAS_CALL_TAKES_BACKEND` `True`) rather than the
+`triton.CompilerParams` path a supported install takes. Everything below should be re-run
+once an in-window environment exists.
+
+**The `interpret=False` half.** Both parametrisations pass, neither skipped:
+
+| lowering | worst gradient difference vs the pure-JAX lane | tolerance | without the fix |
+|---|---|---|---|
+| `interpret=True` | 3.6e-15 | 1e-10 | 1.98 |
+| `interpret=False` (real Triton) | **4.4e-15** | 1e-8 | 1.98 |
+
+**The forward pass has no footprint**, confirmed rather than argued: the fused lane's
+output is bit-identical (compared as raw `uint64`, so a `-0.0` would show) with the
+withdrawal alone, the carrier alone, both, and under `jax.jit`.
+
+**Both reverse branches.** `JACCPOT_FUSED_M2L_VJP=1` (fully-fused reverse kernel) and `=0`
+(autodiff of the pure-jnp twin): 50 passed each over
+`test_custom_vjp_parity.py` plus `test_transverse_degeneracy_jvp.py`, identical outcome
+sets, nothing skipped.
+
+**At the force level with the fused lane engaged**
+(`JACCPOT_STATIC_STRICT_FUSED_M2L_PALLAS=1`), FD versus AD on the `_z_stacked_system`
+construction:
+
+| basis | fused lane on | fused lane off |
+|---|---|---|
+| real | 1.0e-10 | 1.0e-10 |
+| complex | **8.5e-07** | 1.0e-10 |
+
+With the fused lane off both bases agree to every digit printed, as §6 claims. With it on
+the real lane is unchanged and the complex one is three orders worse — see §9.
+
+**Reverse-pass residuals** (`bench/audit_reverse_residuals.py`, and the same audit on the
+real basis, which the shipped script does not cover because it hardcodes `basis="complex"`).
+Complex basis: **unchanged, byte for byte**. Real basis, at N=32768 / leaf 256 / float32,
+the configuration production uses:
+
+| group | before | after | delta |
+|---|---|---|---|
+| m2l | 11,128.3 B/pair | 11,542.3 B/pair | +414 B/pair (+3.7%) |
+| M2M by-level scan (the audit files this under `other`) | 18.947 MB | 20.290 MB | +1.343 MB (+7.1%) |
+| near field, P2M, L2L, L2P, tree | — | — | unchanged |
+| total | 227.157 MB | 228.518 MB | +1.361 MB (+0.6%) |
+
+Attributed to individual buffers: four `float32[13,127,2,25]`, one `bool[13,127,2,2]` —
+the extra select's predicate — and the M2L lane's own `float32[44,25]` additions. The
+coefficient is **813 B per (level · internal node)** and is stable from leaf 4 to leaf 256,
+so it projects to roughly 11 MB at N=200k and 60 MB at N=1M against budgets in the GB
+range. Nothing about what the `custom_vjp` saves changed.
+
+**The per-stage benchmark did not resolve.** At the scale the M2L stage actually runs here
+(128–1024 pairs, order 4) the lane is eager-dispatch-bound at 0.25–1.0 ms per call, and the
+harness noise exceeds the signal: an in-process A/B of the correction ON versus OFF gives
+forward deltas from **−36% to +12%** on a path where the primal is provably identical work,
+which is the noise floor stated outright. The gradient deltas (+12% to +19% fused,
++3.3%/−2.4% direct) sit inside it. So the honest statement is that the correction's cost is
+**below what this measurement can see**, not that it is zero — and a 200k-particle
+`profile_downward_breakdown.py` run is still owed, which is what would answer it.
+
+## 9. The complex fused Pallas M2L lane is not covered
+
+§7 covers `m2l_complex_reference_batch_cached_blocks`. It does **not** cover
+`runtime/kernels/core.py::_m2l_complex_batch_kernel_fused_pallas`, and that lane now has
+half the fix. It calls `complex_rotation_blocks_{to,from}_z_solidfmm_batch`, whose padded
+builders carry `without_unresolvable_transverse_jvp`, and then hands the blocks straight to
+`m2l_complex_fused_pallas_cvjp` with nothing after them — the withdrawal without the
+carrier, which §7 says is exactly the half that does not work alone.
+
+Measured on the three-regime batch, gradient with respect to `deltas`, worst difference
+between the lane and the pure-JAX complex reference:
+
+| | before this work | after |
+|---|---|---|
+| on-axis row, reference | `(0, 0)` (the defect) | `(0.469, 0.379)` |
+| on-axis row, fused lane | `(0, 0)` | `(0, 0)` |
+| one-ulp row, reference | `(−0.510, 6.5)` | `(−0.510, 0.391)` |
+| one-ulp row, fused lane | `(−0.510, 6.5)` | `(≈0, 0)` |
+| **reference versus fused** | **6.7e-16** | **5.1e-01** |
+
+The forward values still agree to 1.3e-15. What has been lost is the reference/fused
+equivalence `NUMERICS_AND_JAX.md` §1 requires: the pair agreed to round-off before and now
+disagrees by 0.51. End to end this is still an improvement — the fused complex lane's
+force-level FD-vs-AD went from the pre-fix 1.8e-05 to 8.5e-07 because M2M and L2L are
+fixed — but its M2L transverse term is missing.
+
+No existing test can see it. `test_m2l_complex_fused_pallas_custom_vjp_matches_twin`
+differentiates with respect to the kernel's four inputs — multipoles, both block stacks, the
+radius — and never with respect to `deltas`, so it is structurally blind to a degeneracy
+that lives only in the `delta -> blocks` map, and `m2l_complex_fused_jax`, the twin it
+compares against, shares the blindness. The real lane needed a delta-level test for exactly
+this reason; the complex lane has none.
+
+The fix is presumably the complex analogue of the real lane's pair, and it is its own
+change with its own test, so it is recorded here rather than made.
