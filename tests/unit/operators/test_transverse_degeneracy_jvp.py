@@ -841,3 +841,63 @@ def test_the_production_complex_fused_m2l_kernel_carries_the_axis_derivative():
         "the on-axis transverse gradient is ~0 in the reference lane too, so this "
         "comparison would pass without testing anything"
     )
+
+
+def test_the_production_real_fused_m2l_kernel_carries_the_axis_derivative() -> None:
+    """The real lane's counterpart of the test above, and for the same reason.
+
+    ``test_fused_pallas_m2l_matches_the_pure_jax_lane_in_gradient`` composes the real
+    lane by hand so that ``interpret=True`` covers the mechanism on CPU, which means it
+    passes whether or not ``runtime/kernels/core.py`` actually wires the pair up. That is
+    precisely the gap that let the *complex* lane ship with only half the rule, and the
+    real lane had no equivalent guard -- so it is the default basis that was the less
+    protected of the two.
+
+    GPU-only, unavoidably: the production function hardcodes ``interpret=False``, so
+    there is no CPU lowering of the shipped path to differentiate. It runs wherever the
+    fused kernel does.
+    """
+    if not jax.config.jax_enable_x64:
+        pytest.skip("requires float64 (JAX_ENABLE_X64=1)")
+    from jaccpot.pallas.m2l_real_fused import pallas_m2l_real_fused_supported
+    from jaccpot.runtime.kernels.core import _m2l_real_batch_kernel_fused_pallas
+
+    if not pallas_m2l_real_fused_supported():
+        pytest.skip("the fused real Pallas M2L requires an Ampere+ (sm_80) GPU")
+
+    width = sh_size(_ORDER)
+    multipoles = jax.random.normal(jax.random.PRNGKey(1), (3, width), dtype=jnp.float64)
+    weights = jax.random.normal(jax.random.PRNGKey(2), (3, width), dtype=jnp.float64)
+    deltas = jnp.asarray(
+        [[0.0, 0.0, 2.5], [5.551e-17, 0.0, -3.0], [1.1, -0.4, 3.0]], dtype=jnp.float64
+    )
+
+    def fused(d):
+        return jnp.sum(
+            weights
+            * _m2l_real_batch_kernel_fused_pallas(
+                multipoles, d, order=_ORDER, m2l_impl="rot_scale"
+            )
+        )
+
+    def direct(d):
+        return jnp.sum(weights * m2l_rot_scale_real_batch(multipoles, d, order=_ORDER))
+
+    try:
+        grad_fused = np.asarray(jax.grad(fused)(deltas))
+    except Exception as exc:  # pragma: no cover - GPU/runtime dependent
+        message = str(exc).lower()
+        if any(token in message for token in ("warpgroup", "ptx", "triton", "mosaic")):
+            pytest.skip(f"Pallas kernel unavailable on this GPU/runtime: {exc}")
+        raise
+    grad_direct = np.asarray(jax.grad(direct)(deltas))
+
+    worst = float(np.max(np.abs(grad_direct - grad_fused)))
+    assert worst <= 1.0e-8, (
+        f"the production real fused M2L gradient differs from the rot-scale lane by "
+        f"{worst:.3e}\n  direct: {grad_direct}\n  fused:  {grad_fused}"
+    )
+    assert np.max(np.abs(grad_direct[0, :2])) > 1.0e-3, (
+        "the on-axis transverse gradient is ~0 in the reference lane too, so this "
+        "comparison would pass without testing anything"
+    )
