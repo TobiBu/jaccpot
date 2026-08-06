@@ -13,8 +13,8 @@ bases** — §5 is what landed where, §6 is where the switchover boundary goes 
 wider than `rho == 0`, §7 is the precomputed-block lanes and the fused Pallas kernel,
 which each needed a different shape of the same rule. §8 is the GPU validation. §9 is the
 fused Pallas *complex* M2L, which had the builder's withdrawal and no carrier until it was
-given the same pair the real lane has, and what that pair costs in reverse-pass memory on
-both lanes. G.10 in
+given the same pair the real lane has, and what that pair costs — which, above 2048 pairs,
+is nothing, because the chunked M2L scan's existing `jax.checkpoint` already absorbs it. G.10 in
 [`refactor_audit_2026-08.md`](refactor_audit_2026-08.md) records the defect itself.
 
 ---
@@ -427,9 +427,28 @@ lane shows no coherent gradient cost by the same method (−24%, −12%, i.e. no
 fits: there the correction is four static block-diagonal matmuls folded into a JVP that was
 running anyway.
 
-What this still cannot say is what any of it costs at production scale, where the M2L stage
-is kernel-bound rather than dispatch-bound. A 200k-particle
-`profile_downward_breakdown.py` run is owed and was not achieved here.
+**At 200k particles**, `bench/profile_downward_breakdown.py` (fp32, `large_n_gpu`,
+`static_radix`, leaf 256, order 4, 40 steps) on the same A100:
+
+| combo | ms/step |
+|---|---|
+| `A_upward` (`upward_only/full`) | 164.9 |
+| `B_plan` (`downward_only/downward_artifacts_only`) | 79.2 |
+| `C_m2l` (`downward_only/m2l_only`) | 291.9 |
+| `D_full_down` (`downward_only/full`) | 397.0 |
+
+This is a **forward** profile, and the forward primal is bit-identical, so it cannot show a
+regression from this work; it is reported because the handoff asked for it and because it
+puts the M2L stage's scale in context — hundreds of ms/step, against which §8's fullbatch
+gradient deltas are sub-millisecond.
+
+It also exposes a defect in the profiler, which should not be read past: the script's
+attribution assumes the cumulative diag modes are nested, and here they are not.
+`B_plan` (79.2) is *cheaper* than `A_upward` (164.9), so `plan_build = B - A` prints
+**−85.7 ms** — a negative cost — and `m2l_compute = C - B = 212.7 ms` inherits an
+anomalously low baseline. The script reports both without complaint. Whatever the M2L
+compute share is at this configuration, this run does not measure it, and the profiler
+wants fixing before it is trusted again.
 
 ## 9. The complex fused Pallas M2L lane, and what the carrier costs
 
@@ -480,34 +499,50 @@ wiring. `test_the_production_complex_fused_m2l_kernel_carries_the_axis_derivativ
 differentiates the *shipped* function with respect to `deltas`, and that is the one that
 fails (1.630e+00) when the wiring is missing.
 
-### The carrier is not free in reverse-pass memory
+### What the carrier costs, and why it is already paid for
 
-Worth stating because nothing measured it before, and it applies to **both** fused lanes,
-not just the complex one: the carrier applies the pure-JAX twin inside its JVP, so reverse
-mode retains the twin's padded intermediates. `bench/audit_reverse_residuals.py` cannot see
-this at all — it builds its solver with `use_pallas=False` and never reaches either fused
-lane. Traced directly, at order 4, N=1024 pairs, float64:
+The carrier applies the pure-JAX twin inside its JVP, so reverse mode can retain the twin's
+padded intermediates. Traced on the bare lane at order 4, N=1024 pairs, float64 — with the
+third column being the lane wrapped in `jax.checkpoint`, which is what the production
+chunked M2L scan already does:
 
-| lane | carrier off | carrier on | delta |
+| lane | carrier off | carrier on | carrier on, under `jax.checkpoint` |
 |---|---|---|---|
-| real fused | 25.95 MB (25,347 B/pair) | 68.86 MB (67,243 B/pair) | +165%, **+41,896 B/pair** |
-| complex fused | 51.62 MB (50,413 B/pair) | 129.03 MB (126,005 B/pair) | +150%, **+75,592 B/pair** |
+| real fused | 25,347 B/pair | 67,243 B/pair (+165%) | **422 B/pair** |
+| complex fused | 50,413 B/pair | 126,005 B/pair (+150%) | **639 B/pair** |
 
-The new buffers are the twin's `float64[N,8,16,16]` and `float64[N,32,32]` padded working
-sets. At the production compact far-pair cap of 131072 that projects to roughly **5.5 GB**
-(real) and **9.9 GB** (complex) of additional reverse-pass residency at float64, half that
-at float32 — on a 40 GB card, with the near field already the dominant consumer. Whether a
-gradient run at that cap uses the fused lanes is a separate question, but the number should
-be known before one is attempted.
+**The middle column only describes a path production does not take above 2048 pairs.**
+`_accumulate_m2l_chunked_scan` wraps `_apply_m2l` in `jax.checkpoint` — deliberately
+*outside* it, so that the fused kernel's own `custom_vjp` residuals are discarded too, per
+the comment at `runtime/kernels/core.py`. The carrier sits inside that region and is
+discarded by the same wrapper. Only `_accumulate_m2l_fullbatch` is un-rematerialised, and
+it runs at `pair_count <= _M2L_FULLBATCH_MAX_PAIRS` (2048), where remat is deliberately
+declined because it "would buy nothing and would perturb the small-N forward schedule".
 
-The same twin application is what the timing in §8 sees: +10% to +29% of the fused M2L
-gradient call at 128–1024 pairs. Memory and time agree that it is the dominant part of the
-correction on the fused lanes, and that the direct lanes — where the two `F0 @ G_in` terms
-fold into a JVP that was running anyway — pay neither.
+The end-to-end audit confirms it in both regimes without any special instrumentation — the
+real-basis M2L residual row, pre-G.10 versus now:
 
-The scales are exactly zero outside the band, so both costs buy a correction that is
-identically zero on almost every pair; XLA cannot know that at trace time. Two levers, both
-untried here: `jax.checkpoint` around the twin application to trade the residuals back for
-recomputation, or predicating the whole carrier on `jnp.any(on_axis)` so a batch with no
-degenerate pair skips it — which is most batches, since the band is `rho/r <= 1.5e-08` at
-float64.
+| far pairs | path | B/pair before | after |
+|---|---|---|---|
+| 195,336 | chunked, rematted | 827.8 | **827.8 — identical** |
+| 44 | fullbatch, not rematted | 11,128.3 | 11,542.3 (+414) |
+
+So the carrier's reverse-pass exposure is **bounded by 2048 pairs**: at +414 B/pair
+end-to-end (float32, real basis) that is under 1 MB, and even the bare-lane float64
+coefficient caps out around 155 MB. An earlier draft of this section projected the
+un-rematerialised coefficient onto the 131072 compact far-pair cap and got 5.5 GB and
+9.9 GB. **That was wrong** — at 131072 pairs the path is the chunked scan, where the
+measured cost is exactly zero. The projection assumed a regime that does not occur.
+
+The timing in §8 (+10% to +29% of the fused M2L gradient call) is scoped the same way: those
+measurements are at 128–1024 pairs, which *is* the fullbatch regime, so they stand for it —
+and at those sizes the M2L stage is dispatch-bound at well under a millisecond against a
+step measured in hundreds. Above 2048 pairs the carrier's work is inside the rematerialised
+region.
+
+**Conclusion: no change is warranted.** `jax.checkpoint` around the twin was the obvious
+lever and it is already applied, by the scan wrapper, at every pair count where it would
+matter. Predicating the carrier on `jnp.any(on_axis)` would only reach the fullbatch path,
+where the cost being removed is under a megabyte and a fraction of a millisecond, and it
+would add a traced branch and its compile time to the small-N schedule the comment above
+explicitly protects.
