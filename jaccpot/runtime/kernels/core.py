@@ -55,6 +55,8 @@ from jaccpot.operators.complex_ops import (
     evaluate_local_complex_grad_order4_unrolled,
     evaluate_local_complex_with_grad_analytic_batch,
     l2l_complex_batch,
+    m2l_complex_fused_align_deltas,
+    m2l_complex_fused_carry_axis_derivative,
     m2l_complex_reference_batch,
     m2l_complex_reference_batch_cached_blocks,
 )
@@ -1694,18 +1696,45 @@ def _m2l_complex_batch_kernel_fused_pallas(
     -------
     Array
         Complex local contributions ``[N, (p+1)^2]``.
+
+    Notes
+    -----
+    **This lane's transverse gradient near ``rho == 0`` is covered in two pieces rather
+    than one, and neither is optional** -- the same shape as the real fused lane, and for
+    the same reason: ``m2l_complex_fused_pallas_cvjp`` is a ``custom_vjp``, and JAX
+    refuses forward-mode through one, so a rule that differentiates the operator cannot
+    wrap it. Instead
+    :data:`~jaccpot.operators.complex_ops.m2l_complex_fused_align_deltas` runs on
+    ``deltas`` **before** the radius and both block stacks are built, and
+    :data:`~jaccpot.operators.complex_ops.m2l_complex_fused_carry_axis_derivative` runs on
+    the output and adds the analytic term back.
+
+    The withdrawal alone was already in force here, because
+    ``_complex_rotation_blocks_{to,from}_z_solidfmm_padded`` carry
+    ``without_unresolvable_transverse_jvp`` for the cached-blocks lane's sake -- and half
+    the pair is worse than neither half. Without the carrier this lane's on-axis ``d/dx``
+    and ``d/dy`` came back exactly zero, measured **5.1e-01** from the pure-JAX reference
+    batch, where before any of the G.10 work the two agreed to 6.7e-16. Asserted by
+    ``tests/unit/operators/test_transverse_degeneracy_jvp.py::test_the_production_complex_fused_m2l_kernel_carries_the_axis_derivative``,
+    which differentiates *this function* with respect to ``deltas`` --
+    ``test_m2l_complex_fused_pallas_custom_vjp_matches_twin`` cannot see it, because it
+    differentiates the kernel's four inputs and never the displacement.
     """
     from jaccpot.pallas.m2l_complex_fused import m2l_complex_fused_pallas_cvjp
 
-    r = jnp.sqrt(jnp.sum(deltas * deltas, axis=-1))
+    # Everything the kernel sees is built from a displacement whose unusable transverse
+    # tangent has already been withdrawn, so the radius and both block stacks agree on
+    # where the band is; the carrier below then puts the analytic term back.
+    aligned = m2l_complex_fused_align_deltas(deltas)
+    r = jnp.sqrt(jnp.sum(aligned * aligned, axis=-1))
     blocks_to_z = complex_rotation_blocks_to_z_solidfmm_batch(
-        deltas,
+        aligned,
         order=order,
         basis="multipole",
         dtype=src_mult.dtype,
     )
     blocks_from_z = complex_rotation_blocks_from_z_solidfmm_batch(
-        deltas,
+        aligned,
         order=order,
         basis="local",
         dtype=src_mult.dtype,
@@ -1716,8 +1745,11 @@ def _m2l_complex_batch_kernel_fused_pallas(
     # differentiable -- required for FastMultipoleMethod.differentiable_accelerations
     # to run the fast lane. interpret=False, backend="triton" (the runtime always
     # runs the real Pallas GPU kernel here).
-    return m2l_complex_fused_pallas_cvjp(
+    out = m2l_complex_fused_pallas_cvjp(
         src_mult, blocks_to_z, blocks_from_z, r, order, False, "triton"
+    )
+    return m2l_complex_fused_carry_axis_derivative(
+        out, src_mult, deltas, blocks_to_z, blocks_from_z, r, order=order
     )
 
 
