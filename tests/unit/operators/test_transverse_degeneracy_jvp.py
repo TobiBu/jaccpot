@@ -30,6 +30,8 @@ from jaccpot.operators.complex_ops import (
     complex_rotation_blocks_from_z_solidfmm_batch,
     complex_rotation_blocks_to_z_solidfmm_batch,
     l2l_complex,
+    m2l_complex_fused_align_deltas,
+    m2l_complex_fused_carry_axis_derivative,
     m2l_complex_reference,
     m2l_complex_reference_batch,
     m2l_complex_reference_batch_cached_blocks,
@@ -700,5 +702,142 @@ def test_fused_pallas_m2l_matches_the_pure_jax_lane_in_gradient(interpret):
     )
     assert np.max(np.abs(grad_direct[0, :2])) > 1.0e-3, (
         "the on-axis transverse gradient is ~0 in the direct lane too, so this "
+        "comparison would pass without testing anything"
+    )
+
+
+@pytest.mark.parametrize("interpret", [True, False])
+def test_fused_pallas_complex_m2l_matches_the_pure_jax_lane_in_gradient(interpret):
+    """The complex fused Pallas M2L needs the same two halves the real one does.
+
+    Its middle, ``m2l_complex_fused_pallas_cvjp``, is a ``custom_vjp`` for the same
+    reason the real one is, so it takes the same pair rather than the consumer
+    decorator: withdraw the unresolvable transverse tangent from the displacement before
+    the radius and both block stacks are built, and carry the analytic term back onto the
+    output afterwards.
+
+    This lane already had the *withdrawal*, because
+    ``_complex_rotation_blocks_{to,from}_z_solidfmm_padded`` carry
+    :func:`~jaccpot.operators._transverse_degeneracy_jvp.without_unresolvable_transverse_jvp`
+    for the sake of the cached-blocks lane. Half of the pair is worse than neither half:
+    with the withdrawal alone the on-axis rows came back exactly ``(0, 0)`` and this lane
+    sat **5.1e-01** from the pure-JAX reference, where before any of this work the two
+    agreed to 6.7e-16 -- both wrong then, only one wrong after. That is the
+    reference-versus-fused equivalence ``NUMERICS_AND_JAX.md`` §1 requires.
+    """
+    if not jax.config.jax_enable_x64:
+        pytest.skip("requires float64 (JAX_ENABLE_X64=1)")
+    from jaccpot.pallas.m2l_complex_fused import (
+        m2l_complex_fused_pallas_cvjp,
+        pallas_m2l_complex_fused_supported,
+    )
+
+    if not interpret and not pallas_m2l_complex_fused_supported():
+        pytest.skip("the fused complex Pallas M2L requires an Ampere+ (sm_80) GPU")
+
+    multipoles = _complex_coeffs(1)[None, :].repeat(3, axis=0)
+    weights = _complex_coeffs(2)[None, :].repeat(3, axis=0)
+    deltas = jnp.asarray(
+        [[0.0, 0.0, 2.5], [5.551e-17, 0.0, -3.0], [1.1, -0.4, 3.0]], dtype=jnp.float64
+    )
+
+    def direct(d):
+        return jnp.real(
+            jnp.sum(weights * m2l_complex_reference_batch(multipoles, d, order=_ORDER))
+        )
+
+    def fused(d):
+        aligned = m2l_complex_fused_align_deltas(d)
+        radii = jnp.sqrt(jnp.sum(aligned * aligned, axis=-1))
+        to_z = complex_rotation_blocks_to_z_solidfmm_batch(
+            aligned, order=_ORDER, basis="multipole", dtype=multipoles.dtype
+        )
+        from_z = complex_rotation_blocks_from_z_solidfmm_batch(
+            aligned, order=_ORDER, basis="local", dtype=multipoles.dtype
+        )
+        out = m2l_complex_fused_pallas_cvjp(
+            multipoles, to_z, from_z, radii, _ORDER, interpret, "triton"
+        )
+        out = m2l_complex_fused_carry_axis_derivative(
+            out, multipoles, d, to_z, from_z, radii, order=_ORDER
+        )
+        return jnp.real(jnp.sum(weights * out))
+
+    try:
+        grad_direct = np.asarray(jax.grad(direct)(deltas))
+        grad_fused = np.asarray(jax.grad(fused)(deltas))
+    except Exception as exc:  # pragma: no cover - GPU/runtime dependent
+        message = str(exc).lower()
+        if not interpret and any(
+            token in message for token in ("warpgroup", "ptx", "triton", "mosaic")
+        ):
+            pytest.skip(f"Pallas kernel unavailable on this GPU/runtime: {exc}")
+        raise
+
+    # Separate implementations, so the bound is their asserted forward agreement rather
+    # than pure round-off -- the same reasoning as the real lane's tolerance.
+    tolerance = 1.0e-10 if interpret else 1.0e-8
+    worst = float(np.max(np.abs(grad_direct - grad_fused)))
+    assert worst <= tolerance, (
+        f"complex fused Pallas gradient differs from the pure-JAX lane by {worst:.3e}\n"
+        f"  direct: {grad_direct}\n  fused:  {grad_fused}"
+    )
+    assert np.max(np.abs(grad_direct[0, :2])) > 1.0e-3, (
+        "the on-axis transverse gradient is ~0 in the direct lane too, so this "
+        "comparison would pass without testing anything"
+    )
+
+
+def test_the_production_complex_fused_m2l_kernel_carries_the_axis_derivative():
+    """The wiring in ``runtime/kernels/core.py``, not a reconstruction of it.
+
+    The test above composes the lane itself so that ``interpret=True`` can cover it on
+    CPU. That leaves the production function free to be wired differently, which is
+    exactly how the gap arose: it built its blocks from the withdrawing builders and
+    never carried the term back. So this asserts the shipped function.
+
+    Nothing else can. ``test_m2l_complex_fused_pallas_custom_vjp_matches_twin``
+    differentiates the kernel's four inputs -- multipoles, both block stacks, the radius
+    -- and never ``deltas``, so it is structurally blind to a degeneracy that lives only
+    in the ``delta -> blocks`` map, and ``m2l_complex_fused_jax``, the twin it compares
+    against, shares the blindness.
+    """
+    if not jax.config.jax_enable_x64:
+        pytest.skip("requires float64 (JAX_ENABLE_X64=1)")
+    from jaccpot.pallas.m2l_complex_fused import pallas_m2l_complex_fused_supported
+    from jaccpot.runtime.kernels.core import _m2l_complex_batch_kernel_fused_pallas
+
+    if not pallas_m2l_complex_fused_supported():
+        pytest.skip("the fused complex Pallas M2L requires an Ampere+ (sm_80) GPU")
+
+    multipoles = _complex_coeffs(1)[None, :].repeat(3, axis=0)
+    weights = _complex_coeffs(2)[None, :].repeat(3, axis=0)
+    deltas = jnp.asarray(
+        [[0.0, 0.0, 2.5], [5.551e-17, 0.0, -3.0], [1.1, -0.4, 3.0]], dtype=jnp.float64
+    )
+
+    def loss(operator):
+        return lambda d: jnp.real(
+            jnp.sum(weights * operator(multipoles, d, order=_ORDER))
+        )
+
+    try:
+        grad_fused = np.asarray(
+            jax.grad(loss(_m2l_complex_batch_kernel_fused_pallas))(deltas)
+        )
+    except Exception as exc:  # pragma: no cover - GPU/runtime dependent
+        message = str(exc).lower()
+        if any(token in message for token in ("warpgroup", "ptx", "triton", "mosaic")):
+            pytest.skip(f"Pallas kernel unavailable on this GPU/runtime: {exc}")
+        raise
+    grad_direct = np.asarray(jax.grad(loss(m2l_complex_reference_batch))(deltas))
+
+    worst = float(np.max(np.abs(grad_direct - grad_fused)))
+    assert worst <= 1.0e-8, (
+        f"the production complex fused M2L gradient differs from the reference batch by "
+        f"{worst:.3e}\n  direct: {grad_direct}\n  fused:  {grad_fused}"
+    )
+    assert np.max(np.abs(grad_direct[0, :2])) > 1.0e-3, (
+        "the on-axis transverse gradient is ~0 in the reference lane too, so this "
         "comparison would pass without testing anything"
     )

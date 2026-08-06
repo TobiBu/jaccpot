@@ -13,6 +13,8 @@ from ._precision import highest_matmul_precision
 from ._transverse_degeneracy_jvp import (
     TransverseGenerators,
     with_transverse_degeneracy_jvp,
+    with_transverse_degeneracy_tangent,
+    withdraw_unresolvable_transverse,
     without_unresolvable_transverse_jvp,
 )
 from .complex_harmonics import complex_R_solidfmm, complex_R_solidfmm_preserve_dtype
@@ -1704,3 +1706,73 @@ def l2l_complex_batch(
         in_axes=(0, 0),
         out_axes=0,
     )(locals, deltas)
+
+
+def _m2l_complex_fused_twin(
+    multipoles: Array,
+    blocks_to_z: Array,
+    blocks_from_z: Array,
+    radii: Array,
+    *,
+    order: int,
+) -> Array:
+    """Pure-JAX twin of the fused Pallas complex M2L, for the transverse correction only.
+
+    Deferred import: :mod:`jaccpot.pallas.m2l_complex_fused` reaches back into
+    :mod:`jaccpot.operators`, so a module-scope import is a cycle. This is the same twin
+    the fused kernel's own ``custom_vjp`` uses as its correctness reference, which is why
+    it is the right thing to compute the correction with -- the kernel itself cannot be
+    used, because the correction lives inside a JVP rule and a ``custom_vjp`` is not
+    forward-differentiable.
+
+    Parameters
+    ----------
+    multipoles : Array
+        Source multipole coefficients ``[N, (p+1)^2]``, complex.
+    blocks_to_z : Array
+        Multipole world->z blocks ``[N, p+1, 2p+1, 2p+1]``, complex.
+    blocks_from_z : Array
+        Local z->world blocks, same shape.
+    radii : Array
+        Translation distances ``[N]``.
+    order : int
+        Maximum SH degree ``p``. Static under ``jit``.
+
+    Returns
+    -------
+    Array
+        Complex local expansion contributions ``[N, (p+1)^2]``.
+    """
+    from jaccpot.pallas.m2l_complex_fused import m2l_complex_fused_jax
+
+    return m2l_complex_fused_jax(
+        multipoles, blocks_to_z, blocks_from_z, radii, order=int(order)
+    )
+
+
+#: Re-exported so the complex fused lane's two halves come from one module and cannot be
+#: reached apart, exactly as
+#: :data:`~jaccpot.operators.m2l_real_rot_scale.m2l_real_fused_align_deltas` is for the
+#: real one. This withdraws the unresolvable transverse tangent from the displacement
+#: *before* anything is built from it.
+#:
+#: This lane needs it stated explicitly even though its block builders already carry
+#: :func:`~jaccpot.operators._transverse_degeneracy_jvp.without_unresolvable_transverse_jvp`:
+#: the withdrawal is idempotent, and naming it here is what makes the pairing visible at
+#: the call site instead of being an accident of which builder happens to be used.
+m2l_complex_fused_align_deltas = withdraw_unresolvable_transverse
+
+#: Puts the analytic transverse derivative back onto the fused Pallas complex M2L's
+#: output. Signature
+#: ``(out, multipoles, deltas, blocks_to_z, blocks_from_z, radii, order=p)``; the primal
+#: returns ``out`` untouched, so there is no forward footprint. Pair it with
+#: :data:`m2l_complex_fused_align_deltas` on the displacement *before* the blocks and
+#: radius are built from it -- see
+#: ``runtime/kernels/core.py::_m2l_complex_batch_kernel_fused_pallas``, its only caller.
+#: Using either half alone gives a wrong gradient: without the carrier this lane's
+#: on-axis ``d/dx`` and ``d/dy`` come back exactly zero, measured 5.1e-01 from the
+#: pure-JAX reference.
+m2l_complex_fused_carry_axis_derivative = with_transverse_degeneracy_tangent(
+    _m2l_complex_fused_twin,
+    generators=_M2L_TRANSVERSE_GENERATORS,
+)
