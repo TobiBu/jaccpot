@@ -12,8 +12,9 @@ are the part that is easy to get wrong and expensive to redo.
 bases** — §5 is what landed where, §6 is where the switchover boundary goes and why it is
 wider than `rho == 0`, §7 is the precomputed-block lanes and the fused Pallas kernel,
 which each needed a different shape of the same rule. §8 is the GPU validation. §9 is the
-one lane this does **not** cover — the fused Pallas *complex* M2L, which now has the
-builder's withdrawal and no carrier. G.10 in
+fused Pallas *complex* M2L, which had the builder's withdrawal and no carrier until it was
+given the same pair the real lane has, and what that pair costs in reverse-pass memory on
+both lanes. G.10 in
 [`refactor_audit_2026-08.md`](refactor_audit_2026-08.md) records the defect itself.
 
 ---
@@ -352,11 +353,11 @@ kernel where the hardware allows.
 ## 8. Validated on GPU
 
 Run on an **A100-PCIE-40GB (sm_80)**, `pallas_m2l_real_fused_supported()` `True`, x64 on.
-One caveat on the whole section: the box's environment has **JAX 0.9.0.1**, below this
-project's own `>=0.10.2` floor, so the Triton lowering went through the old
-`pallas_call(backend=)` API (`_compat.PALLAS_CALL_TAKES_BACKEND` `True`) rather than the
-`triton.CompilerParams` path a supported install takes. Everything below should be re-run
-once an in-window environment exists.
+Re-run on **JAX 0.10.2**, the project's own floor, so
+`_compat.PALLAS_CALL_TAKES_BACKEND` is `False` and the Triton lowering goes through the
+`triton.CompilerParams` path that ships. (The first pass was done on 0.9.0.1, one minor
+version below the floor and on the removed `pallas_call(backend=)` API; every number
+below survived the move unchanged.)
 
 **The `interpret=False` half.** Both parametrisations pass, neither skipped:
 
@@ -413,7 +414,7 @@ which is the noise floor stated outright. The gradient deltas (+12% to +19% fuse
 **below what this measurement can see**, not that it is zero — and a 200k-particle
 `profile_downward_breakdown.py` run is still owed, which is what would answer it.
 
-## 9. The complex fused Pallas M2L lane is not covered
+## 9. The complex fused Pallas M2L lane, and what the carrier costs
 
 §7 covers `m2l_complex_reference_batch_cached_blocks`. It does **not** cover
 `runtime/kernels/core.py::_m2l_complex_batch_kernel_fused_pallas`, and that lane now has
@@ -446,5 +447,42 @@ that lives only in the `delta -> blocks` map, and `m2l_complex_fused_jax`, the t
 compares against, shares the blindness. The real lane needed a delta-level test for exactly
 this reason; the complex lane has none.
 
-The fix is presumably the complex analogue of the real lane's pair, and it is its own
-change with its own test, so it is recorded here rather than made.
+**Fixed** by giving it the complex analogue of the real lane's pair —
+`m2l_complex_fused_align_deltas` before the radius and blocks, and
+`m2l_complex_fused_carry_axis_derivative` after the kernel, the latter computing its one
+operator application with `m2l_complex_fused_jax`, the twin the kernel's own `custom_vjp`
+already uses. Reference versus fused is back to **6.7e-16**, now with both sides right, and
+the force-level complex FD-vs-AD with the fused lane engaged reads 1.034e-10 — identical to
+the real basis to every digit printed. The forward pass is bit-identical to the pre-fix lane
+as raw `uint64`.
+
+Two tests, because only one of them can catch this. The parametrised
+`test_fused_pallas_complex_m2l_matches_the_pure_jax_lane_in_gradient` composes the lane so
+`interpret=True` covers it on CPU — and it passes with the mechanism alone, wiring or no
+wiring. `test_the_production_complex_fused_m2l_kernel_carries_the_axis_derivative`
+differentiates the *shipped* function with respect to `deltas`, and that is the one that
+fails (1.630e+00) when the wiring is missing.
+
+### The carrier is not free in reverse-pass memory
+
+Worth stating because nothing measured it before, and it applies to **both** fused lanes,
+not just the complex one: the carrier applies the pure-JAX twin inside its JVP, so reverse
+mode retains the twin's padded intermediates. `bench/audit_reverse_residuals.py` cannot see
+this at all — it builds its solver with `use_pallas=False` and never reaches either fused
+lane. Traced directly, at order 4, N=1024 pairs, float64:
+
+| lane | carrier off | carrier on | delta |
+|---|---|---|---|
+| real fused | 25.95 MB (25,347 B/pair) | 68.86 MB (67,243 B/pair) | +165%, **+41,896 B/pair** |
+| complex fused | 51.62 MB (50,413 B/pair) | 129.03 MB (126,005 B/pair) | +150%, **+75,592 B/pair** |
+
+The new buffers are the twin's `float64[N,8,16,16]` and `float64[N,32,32]` padded working
+sets. At the production compact far-pair cap of 131072 that projects to roughly **5.5 GB**
+(real) and **9.9 GB** (complex) of additional reverse-pass residency at float64, half that
+at float32 — on a 40 GB card, with the near field already the dominant consumer. Whether a
+gradient run at that cap uses the fused lanes is a separate question, but the number should
+be known before one is attempted.
+
+The scales are exactly zero outside the band, so this memory buys a correction that is
+identically zero on almost every pair; XLA cannot know that at trace time. Wrapping the
+twin application in `jax.checkpoint` is the obvious lever and is not attempted here.
