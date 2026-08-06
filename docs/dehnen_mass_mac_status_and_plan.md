@@ -598,6 +598,14 @@ same "tightening ε pushes acceptance deeper" behaviour item 2 recorded at N=655
 at N=10⁶, against the ~22 *minutes* per config the generic lane needed at N=10⁵ / leaf 64
 (trap 11's table). That is the point of Step 3′ stated as a number.
 
+**Re-verified after the rebase onto `main` (2026-08-04).** The rebase resolved conflicts in
+`_interaction_cache.py` and `fmm_prepare.py` — the two files the criterion's build path runs
+through — so the census was re-run on the rebased tree and diffed against the artifact
+programmatically. **All 7 configurations agree exactly**, far-pair counts, near-leaf-pair
+counts and acceptance-threshold ranges alike. Worth doing rather than assuming: main had
+replaced the strict streamed build's single traversal call with a capacity-retry loop, and
+the resolution had to thread the pair policy *into* that loop rather than pick a side.
+
 ### The N = 10⁶ measurement — **the first one ever taken, and it does NOT reproduce the N=10⁵ / leaf 256 headline**
 
 `results/validation/mac_1e6_leaf256_lane.json`. N=10⁶, **leaf 256**, p=8, Plummer, fp32,
