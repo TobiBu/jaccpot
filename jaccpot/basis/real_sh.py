@@ -90,7 +90,32 @@ def real_to_complex_coeffs(real_coeffs: Array, *, order: int) -> Array:
 
 @dataclass(frozen=True)
 class RealSHBasis:
-    """Packed real spherical-harmonic basis metadata and layout helpers."""
+    """Packed real spherical-harmonic basis metadata and layout helpers.
+
+    The production default basis. Frozen, and carries no coefficient data -- it
+    describes the layout so callers can size buffers and index coefficients without
+    duplicating the packing rule.
+
+    Coefficients are Dehnen (2014) solid harmonics in the **no-sqrt2 real basis**,
+    packed ell-major with ``m = -ell..+ell`` inside each degree, so degree ``ell``
+    occupies ``[ell**2, (ell+1)**2)`` and an order-``p`` expansion has ``(p+1)**2``
+    entries. Positive ``m`` holds the cosine channel and negative ``m`` the sine
+    channel.
+
+    Attributes
+    ----------
+    p_max : int
+        Largest expansion order this metadata is valid for.
+    name : str
+        Basis identifier, ``"real"``.
+    coefficient_ordering : str
+        Human-readable statement of the packing rule above.
+    runtime_expansion_basis : str
+        Which runtime operator family backs this basis. It is ``"solidfmm"`` rather
+        than ``"real"`` because the runtime's basis seam names the *operator*
+        family, and the real operators are reached through it via a static
+        ``basis_mode`` discriminator.
+    """
 
     p_max: int = 32
     name: str = "real"
