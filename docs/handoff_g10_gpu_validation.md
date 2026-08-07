@@ -24,21 +24,29 @@ Read first, in this order — they are binding and they already contain the answ
   scheme; `split_transverse_tangent`'s docstring explains where the switchover band goes.
 - `agent_guides/NUMERICS_AND_JAX.md` §1 and §4, and `CLAUDE.md`.
 
-Three shapes of the same rule are in play. Only the third is your concern:
+Three shapes of the same rule are in play. Only the third is your concern, and it now
+covers **both** bases:
 
 1. `with_transverse_degeneracy_jvp` — the direct lanes (`m2l_real`, `m2m_real`, `l2l_real`,
    `m2l_rot_scale_real_batch`, and the complex trio).
 2. The same, generalised over extra array arguments, plus
    `without_unresolvable_transverse_jvp` on the block builders — the precomputed-block
    lanes.
-3. `m2l_real_fused_align_deltas` **before** the radius and blocks are built, plus
-   `m2l_real_fused_carry_axis_derivative` **after** the kernel (both re-exported from
-   `operators/m2l_real_rot_scale.py` so they cannot be reached apart) — the **fused Pallas real
-   M2L**, at `jaccpot/runtime/kernels/core.py::_m2l_real_batch_kernel_fused_pallas`. It
-   needed its own shape because `m2l_real_fused_pallas_cvjp` is a `custom_vjp` and JAX
-   refuses `jax.jvp` through one, so a rule that differentiates the operator cannot wrap
-   it. Neither piece touches the kernel; both primals return their input unchanged with no
-   arithmetic, so the forward pass has no footprint at all, not even in the sign of zero.
+3. An `*_align_deltas` call **before** the radius and blocks are built, plus an
+   `*_carry_axis_derivative` call **after** the kernel — the **fused Pallas M2L lanes**, in
+   `jaccpot/runtime/kernels/core.py`:
+
+   | basis | production function | the pair |
+   |---|---|---|
+   | real | `_m2l_real_batch_kernel_fused_pallas` | `m2l_real_fused_align_deltas` / `m2l_real_fused_carry_axis_derivative` |
+   | complex | `_m2l_complex_batch_kernel_fused_pallas` | `m2l_complex_fused_align_deltas` / `m2l_complex_fused_carry_axis_derivative` |
+
+   They need their own shape because `m2l_{real,complex}_fused_pallas_cvjp` are `custom_vjp`
+   and JAX refuses `jax.jvp` through one, so a rule that differentiates the operator cannot
+   wrap them. Neither piece touches the kernel; both primals return their input unchanged
+   with no arithmetic, so the forward pass has no footprint at all, not even in the sign of
+   zero. The complex lane shipped with only *half* the pair at first — the withdrawal
+   without the carrier — and the test that caught it is item 1b below.
 
 ## Environment
 
@@ -49,16 +57,28 @@ Three shapes of the same rule are in play. Only the third is your concern:
 
 ## What to run
 
-**1. The `interpret=False` half of the new test.** This is the headline item: the same
-assertion that passes at 2.7e-15 in interpret mode on CPU, now against the real Triton
-kernel.
+**1. The four tests that never execute on CPU.** This is the headline item — the whole
+reason this handoff exists. Two of them are the `interpret=False` halves of assertions that
+pass at ~2.7e-15 in interpret mode; the other two differentiate the *shipped* production
+functions and are GPU-only outright, because those hardcode `interpret=False`.
 
 ```bash
-JAX_ENABLE_X64=1 pytest -q -n 0 tests/unit/operators/test_transverse_degeneracy_jvp.py -k "fused_pallas" -rA
+JAX_ENABLE_X64=1 pytest -q -n 0 tests/unit/operators/test_transverse_degeneracy_jvp.py \
+  -k "fused_pallas or production" -rA
 ```
 
-Both parametrisations must pass; `interpret=False` skips itself off sm_80, so **confirm it
-did not skip**. Its tolerance is 1e-8 there (kernel-versus-cascade, not round-off).
+  1a. `test_fused_pallas_m2l_matches_the_pure_jax_lane_in_gradient[False]` — real lane
+      composed by hand, against `m2l_rot_scale_real_batch`.
+  1b. `test_fused_pallas_complex_m2l_matches_the_pure_jax_lane_in_gradient[False]` — same,
+      complex.
+  1c. `test_the_production_real_fused_m2l_kernel_carries_the_axis_derivative`
+  1d. `test_the_production_complex_fused_m2l_kernel_carries_the_axis_derivative`
+
+**Confirm none of the four skipped.** They self-skip off sm_80, so a run on the wrong card
+looks green while asserting nothing — the same failure shape as the vacuous-far-field trap
+below. Tolerance is 1e-8 (kernel-versus-cascade, not round-off). The signal they carry is
+already measured from the CPU side: drop the carrier and the real lane sits **1.98** from
+the pure-JAX lane, the complex one **1.630e+00**.
 
 **2. Both reverse branches.** The kernel's `custom_vjp` has two backward implementations
 and the env gate picks between them. Run the whole parity + transverse set under each:
@@ -87,9 +107,12 @@ what it gives with the fused kernel engaged.
 JAX_ENABLE_X64=1 pytest -q
 ```
 
-CPU baseline for comparison: **880 passed, 58 skipped, 0 xfailed**, exit 0 (the branch
-point was 846 / 57 / 5). Several of those 58 skips are GPU-gated and should now run, so
-expect the passed count to *rise*; one of them is the `interpret=False` case from item 1. Any
+CPU baseline for comparison: run `JAX_ENABLE_X64=1 pytest -q` on this branch on a CPU box
+first and use *that* as the reference, because several sessions have added tests since this
+document was written. What matters is the shape, not the absolute number: **0 failures, 0
+xfailed**, and the passed count should *rise* on GPU because the four tests in item 1 stop
+skipping. Any failure not obviously pre-existing on `main` should be bisected against `main`
+before you conclude it is this branch's. Any
 failure that is not obviously pre-existing on `main` should be bisected against `main`
 before you conclude it is mine.
 
@@ -142,10 +165,13 @@ python bench/profile_downward_breakdown.py     # and the fused-stage ablation
   mathematically equal but summed in different orders differ by one ulp, giving
   `rho/r ~ 1e-17` with `rho_sq > 0`. The band exists for that case; the test batches all
   three regimes (exactly on axis, one ulp off, generic) deliberately.
-- **fp32.** The band is `rho/r <= sqrt(eps)`, so 1.5e-08 at fp64 but **3.4e-04** at fp32 —
-  a much wider band, and the fused path may well run fp32 in production. There is no fp32
-  test of the transverse correction yet. If you have the budget, add one; if not, say it is
-  missing.
+- **fp32 covers the direct cascades but not the fused lanes.** The band is
+  `rho/r <= sqrt(eps)`: 1.5e-08 at fp64 but **3.4e-04** at fp32, four orders wider, so
+  ordinary tree geometry lands inside it. `test_the_analytic_branch_holds_at_float32` pins
+  this for the six direct cascades. **It does not cover either fused Pallas lane**, which
+  is the gap that matters most here, because the fused path is the one most likely to run
+  fp32 in production. If you have the budget on the GPU, extend it; if not, report that it
+  is still open rather than letting the green run imply otherwise.
 
 ## Out of scope
 
