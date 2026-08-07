@@ -2856,15 +2856,16 @@ def compute_leaf_p2p_accelerations(
     deliberately differ in edge order (``sort_by_source``), which changes the
     order of the floating-point accumulation, so bit-equality is not expected.
     Asserted by
-    ``tests/integration/test_fmm.py::test_nearfield_bucketed_matches_baseline``
-    at ``np.allclose(rtol=1e-5, atol=1e-5)``.
+    ``tests/integration/test_fmm.py::test_nearfield_bucketed_matches_baseline``,
+    parametrised over N in {96, 256} x {float32, float64} x
+    ``edge_chunk_size`` in {64, 128}, at ``1e-6`` (fp32) and ``1e-13`` (fp64).
+    Those bounds are derived from measured round-off (~1 eps in each dtype), not
+    assumed, and the fp32/chunk-128 cases run in the CI smoke leg.
 
-    That coverage is thinner than the claim deserves: one configuration (N=96,
-    float32, order 3, leaf 16, ``theta=0.6``, ``edge_chunk_size=128``, solidfmm
-    basis, a single PRNG seed), no parametrisation over N, order, dtype, or chunk
-    size, and the test is marked ``slow`` so the smoke leg does not run it. At
-    fp32 and N=96 a ``1e-5`` band is loose enough to admit a real algorithmic
-    divergence, not only reassociation.
+    The **float64 cases are the sharp instrument**: perturbing the bucketed path's
+    softening by 3e-6 relative induces a ~1e-10 divergence, which fp64 catches
+    against its 1e-13 bound and fp32 structurally cannot, since fp32 round-off is
+    already ~1e-7.
     **The ``precomputed_*`` contract is shape-encoded, and partial sets are
     supported by design.** An earlier note here called this unvalidated; that was
     wrong. The mechanism: a ``None`` is converted to a zero-size sentinel by the

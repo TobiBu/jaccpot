@@ -254,6 +254,17 @@ def prepare_real_upward_sweep(
     ``max_leaf_size`` is required (the distributed/fast-lane callers know it): it
     keeps the leaf-bound gathers from padding out to ``num_particles`` and avoids
     a concrete device_get under trace.
+
+    ``static_num_levels`` is the same knob as on the complex sweep
+    (:func:`~jaccpot.upward.solidfmm_complex_tree_expansions.prepare_solidfmm_complex_upward_sweep`),
+    and carries the same contract: radix trees pad ``level_offsets`` to the full
+    Morton depth, so deriving the M2M level count from the array shape makes the
+    level loop iterate many empty levels, each still paying a full-width vmapped
+    translate. Passing the concrete depth collapses that waste. It must be a static
+    ``int``, it is safe to omit (the padded shape-derived depth is used -- correct,
+    just slower), and it is **bit-identical** to the padded result: asserted for
+    this sweep by
+    ``tests/test_real_upward_sweep.py::test_real_static_num_levels_bit_identical_to_padded``.
     """
 
     p = int(max_order)

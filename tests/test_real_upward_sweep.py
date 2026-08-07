@@ -59,3 +59,57 @@ def test_real_upward_matches_complex_convert():
         )
         assert cerr < 1e-9, f"centers differ (p={p}): {cerr:.3e}"
         assert rel < 1e-9, f"real upward != complex+convert (p={p}): {rel:.3e}"
+
+
+def test_real_static_num_levels_bit_identical_to_padded():
+    """``static_num_levels`` must be a pure performance knob, bit-for-bit.
+
+    The complex sweep's identical parameter has carried this claim in its docstring
+    and been pinned by
+    ``tests/unit/core/test_solidfmm_complex_tree_expansions.py::test_static_num_levels_bit_identical_to_padded``
+    for some time; the real sweep grew the same parameter with neither. This closes
+    that asymmetry.
+
+    Why it has to be *bit*-identical rather than close: the knob only skips
+    level-loop iterations over levels that are empty padding, so it removes
+    additions of exact zeros. Anything other than exact equality would mean the
+    padded levels were contributing, which is the bug the parameter could
+    plausibly introduce -- the level loop's ``dynamic_slice_in_dim`` clamps rather
+    than erroring, so a wrong level count silently shifts the window instead of
+    failing loudly (see the note in
+    :func:`~jaccpot.upward.solidfmm_complex_tree_expansions.prepare_solidfmm_complex_upward_sweep`).
+    """
+    from yggdrax.tree import get_level_offsets, get_num_levels
+
+    for p in (2, 4):
+        tree = _tree(n=300, leaf=8, seed=p)
+        lp, lm = tree.positions_sorted, tree.masses_sorted
+        concrete_num_levels = int(get_num_levels(tree))
+
+        # Non-vacuity gate. If the padded shape already equalled the concrete depth
+        # the two calls below would be the same call and this test would assert
+        # nothing while still passing. Measured here: 64 padded vs 7 real, i.e. 57
+        # empty levels skipped.
+        padded_num_levels = int(get_level_offsets(tree).shape[0] - 1)
+        assert padded_num_levels > concrete_num_levels, (
+            f"nothing to skip at p={p}: padded depth {padded_num_levels} is not "
+            f"greater than the concrete depth {concrete_num_levels}, so this test "
+            "would compare a call against itself"
+        )
+
+        padded = prepare_real_upward_sweep(tree, lp, lm, max_order=p, max_leaf_size=8)
+        optimized = prepare_real_upward_sweep(
+            tree,
+            lp,
+            lm,
+            max_order=p,
+            max_leaf_size=8,
+            static_num_levels=concrete_num_levels,
+        )
+
+        assert jnp.array_equal(
+            padded.multipoles.packed, optimized.multipoles.packed
+        ), f"static_num_levels changed the multipoles at p={p}"
+        assert jnp.array_equal(
+            padded.multipoles.centers, optimized.multipoles.centers
+        ), f"static_num_levels changed the centers at p={p}"

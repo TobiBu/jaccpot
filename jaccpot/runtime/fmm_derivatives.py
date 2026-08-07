@@ -25,7 +25,6 @@ from jaccpot.upward.tree_expansions import NodeMultipoleData, TreeUpwardData
 from jaccpot.upward.tree_geometry import compute_tree_geometry_compiled
 
 from .dtypes import INDEX_DTYPE
-from .fmm_caches import _contains_tracer
 from .fmm_state import FMMPreparedState
 from .kernels.core import (
     PackedAccelerationDerivatives,

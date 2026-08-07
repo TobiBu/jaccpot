@@ -981,6 +981,359 @@ def test_full_rotated_pipeline_m2m_m2l_l2l_converges():
     assert errors[-1] < 1e-9
 
 
+# ===========================================================================
+# Rotation blocks against the physical rotation they claim to represent
+# ===========================================================================
+
+
+def _rot_z(angle: float) -> np.ndarray:
+    """Right-handed coordinate-space rotation about +z."""
+    c, s = np.cos(angle), np.sin(angle)
+    return np.array([[c, -s, 0.0], [s, c, 0.0], [0.0, 0.0, 1.0]])
+
+
+def _rot_x(angle: float) -> np.ndarray:
+    """Right-handed coordinate-space rotation about +x."""
+    c, s = np.cos(angle), np.sin(angle)
+    return np.array([[1.0, 0.0, 0.0], [0.0, c, -s], [0.0, s, c]])
+
+
+def _physical_alignment_rotation(direction) -> np.ndarray:
+    """The coordinate-space ``g`` with ``g @ direction == (0, 0, |direction|)``.
+
+    This is the rotation named in :func:`_multipole_align_to_z_block`'s docstring:
+    ``g = Rx(ax) @ Rz(az)`` with ``az = atan2(x, y)`` and ``ax = atan2(rho, z)``.
+    Built here from first principles in NumPy so the test does not borrow the
+    production azimuth convention it is trying to check -- the assertion below
+    would fail if either the convention or the block were wrong, and
+    ``g @ direction == (0, 0, r)`` is verified inline so a wrong ``g`` cannot
+    silently make the test vacuous.
+    """
+    x, y, z = (float(t) for t in direction)
+    return _rot_x(np.arctan2(np.hypot(x, y), z)) @ _rot_z(np.arctan2(x, y))
+
+
+def _block_diagonal_rotation(builder, direction, order: int, dtype) -> np.ndarray:
+    """Assemble a builder's per-degree blocks into one ``[(p+1)^2, (p+1)^2]``."""
+    size = sh_size(order)
+    full = np.zeros((size, size))
+    args = [jnp.asarray(float(t), dtype=dtype) for t in direction]
+    for ell in range(order + 1):
+        block = np.asarray(builder(*args, ell, dtype=dtype))
+        lo, hi = ell * ell, (ell + 1) * (ell + 1)
+        full[lo:hi, lo:hi] = block
+    return full
+
+
+# Generic off-axis directions. Every component is nonzero and the octants differ,
+# so a per-``m`` sign error or a swapped azimuth cannot hide behind a symmetry.
+_ROTATION_DIRECTIONS = [
+    pytest.param([1.2, -0.7, 2.5], id="x+y-z+"),
+    pytest.param([0.7, -0.3, 0.45], id="near-diagonal"),
+    pytest.param([-1.1, 2.0, -0.4], id="x-y+z-"),
+    pytest.param([0.3, 0.9, -1.7], id="steep-negative-z"),
+]
+
+# Measured worst case across these 4 directions x 3 source/target draws x
+# ell = 0..6, for all four identities below: 2.5e-15 relative (~10 eps_f64). These
+# are exact algebraic identities, not truncations, so round-off is the only
+# admissible error. 1e-12 keeps ~400x headroom and is still a sharp instrument:
+# perturbing the alignment azimuth by a relative 1e-12 moves the multipole
+# identity to 5.1e-12, i.e. this bound catches an azimuth error of ~2e-13
+# relative. The historical defect this guards -- azimuth atan2(x, y) written as
+# atan2(y, x), the convention flagged CRITICAL at real_harmonics.py:1524 -- gives
+# 1.8e+00, so it fails by twelve orders of magnitude.
+_ROTATION_IDENTITY_TOL = 1.0e-12
+
+
+@pytest.mark.parametrize("direction", _ROTATION_DIRECTIONS)
+def test_multipole_rotation_blocks_match_p2m_of_the_rotated_source(direction):
+    """``D_to @ p2m(s) == p2m(g @ s)``, and ``D_from`` undoes it.
+
+    This is the identity :func:`_multipole_align_to_z_block` asserts in its own
+    docstring (*"(this block) @ p2m(s)[block] == p2m(g @ s)[block]"*) and that
+    nothing checked until now. It is the only assertion in this file that pins the
+    rotation blocks against something **independent** of themselves.
+
+    The four pre-existing rotation tests cannot: ``test_rotation_z_axis_is_identity``
+    uses a z-aligned direction, where a wrong azimuth is unobservable;
+    ``test_rotation_preserves_monopole`` tests ``ell=0``, true under any
+    normalisation; ``test_rotation_to_from_z_axis_are_inverses`` asserts
+    ``D_from @ D_to == I``, an involution that any consistently-wrong pair
+    satisfies; and ``test_alignment_pipeline_steps_match_p2m`` checks the ``B`` and
+    ``Dz`` *building blocks* using its own ``arctan2(y, x)``, so it never
+    constructs the assembled block and never exercises the production
+    ``arctan2(x, y)`` convention.
+
+    That matters because a wrong azimuth here does not stay local: it surfaces
+    four layers downstream as "the real basis does not converge", which is how it
+    was found the last time.
+    """
+    if not jax.config.jax_enable_x64:
+        pytest.skip("exact-identity tolerance requires float64 (JAX_ENABLE_X64=1)")
+
+    dtype = jnp.float64
+    order = 6
+    g = _physical_alignment_rotation(direction)
+
+    # Guard against a vacuous test: if `g` does not actually align `direction`
+    # with +z, the identities below would be comparing two wrong things.
+    aligned = g @ np.asarray(direction, dtype=np.float64)
+    radius = float(np.linalg.norm(direction))
+    np.testing.assert_allclose(aligned, [0.0, 0.0, radius], rtol=0, atol=1e-14)
+
+    d_to = _block_diagonal_rotation(
+        real_rotation_to_z_axis_multipole, direction, order, dtype
+    )
+    d_from = _block_diagonal_rotation(
+        real_rotation_from_z_axis_multipole, direction, order, dtype
+    )
+
+    rng = np.random.default_rng(4242)
+    for _ in range(3):
+        source = rng.normal(size=3)
+        unit_mass = jnp.asarray(1.0, dtype=dtype)
+        world = np.asarray(
+            p2m_real_direct(jnp.asarray(source, dtype=dtype), unit_mass, order=order)
+        )
+        rotated = np.asarray(
+            p2m_real_direct(
+                jnp.asarray(g @ source, dtype=dtype), unit_mass, order=order
+            )
+        )
+
+        for label, got, want in (
+            ("world->z", d_to @ world, rotated),
+            ("z->world", d_from @ rotated, world),
+        ):
+            rel_l2 = float(
+                np.linalg.norm(got - want) / max(float(np.linalg.norm(want)), 1e-300)
+            )
+            assert rel_l2 < _ROTATION_IDENTITY_TOL, (
+                f"multipole {label} rotation disagrees with the physical rotation "
+                f"of P2M at direction={direction}, source={source}: "
+                f"rel-L2 {rel_l2:.3e}"
+            )
+
+
+@pytest.mark.parametrize("direction", _ROTATION_DIRECTIONS)
+def test_local_rotation_blocks_leave_the_evaluated_potential_invariant(direction):
+    """Rotating a local expansion and its evaluation point cancels exactly.
+
+    The local blocks have no P2M analogue to compare against -- local coefficients
+    contract against the *same* ``U_n^m`` as P2M (see
+    :func:`real_rotation_from_z_axis_local`), so what pins them is the physical
+    invariant behind that choice: a potential does not care which frame it is
+    evaluated in. ``evaluate_local_real(D_to @ L, g @ t) == evaluate_local_real(L, t)``.
+
+    This is the assertion that distinguishes the transpose convention from its
+    inverse. ``real_rotation_to_z_axis_local`` is
+    ``_multipole_align_from_z_block(...).T`` -- transpose, not inverse -- and the
+    two coincide only because these blocks are orthogonal up to the Dehnen basis
+    scaling. If that ever stops holding, the potential stops being invariant and
+    this test says so; ``test_rotation_to_from_z_axis_are_inverses`` would not.
+    """
+    if not jax.config.jax_enable_x64:
+        pytest.skip("exact-identity tolerance requires float64 (JAX_ENABLE_X64=1)")
+
+    dtype = jnp.float64
+    order = 6
+    g = _physical_alignment_rotation(direction)
+
+    d_to = _block_diagonal_rotation(
+        real_rotation_to_z_axis_local, direction, order, dtype
+    )
+    d_from = _block_diagonal_rotation(
+        real_rotation_from_z_axis_local, direction, order, dtype
+    )
+
+    rng = np.random.default_rng(4243)
+    for _ in range(3):
+        coeffs = rng.normal(size=sh_size(order))
+        # Kept well inside the convergence radius of the expansion; the identity
+        # is algebraic, but a wild evaluation point makes the numbers meaningless.
+        target = 0.5 * rng.normal(size=3)
+
+        def potential(local_coeffs, delta):
+            return float(
+                evaluate_local_real(
+                    jnp.asarray(local_coeffs, dtype=dtype),
+                    jnp.asarray(delta, dtype=dtype),
+                    order=order,
+                )
+            )
+
+        for label, got, want in (
+            (
+                "world->z",
+                potential(d_to @ coeffs, g @ target),
+                potential(coeffs, target),
+            ),
+            (
+                "z->world",
+                potential(d_from @ coeffs, target),
+                potential(coeffs, g @ target),
+            ),
+        ):
+            rel = abs(got - want) / max(abs(want), 1e-300)
+            assert rel < _ROTATION_IDENTITY_TOL, (
+                f"local {label} rotation changes the evaluated potential at "
+                f"direction={direction}, target={target}: {got!r} vs {want!r} "
+                f"(rel {rel:.3e})"
+            )
+
+
+# The rotate -> z-translate -> rotate-back cascade, at the degenerate separation
+# rho == 0 where the alignment azimuth is undefined. Kept together because one half
+# of the behaviour is correct and must not regress, and the other half is a tracked
+# defect (docs/refactor_audit_2026-08.md G.10).
+_ROTATION_CASCADE_OPERATORS = [
+    pytest.param(m2l_real, id="m2l_real"),
+    pytest.param(m2m_real, id="m2m_real"),
+    pytest.param(l2l_real, id="l2l_real"),
+]
+
+_CASCADE_ORDER = 4
+_CASCADE_Z = 2.5
+
+
+def _cascade_multipole():
+    """A fixed multipole with nonzero m != 0 content, so the azimuth matters."""
+    coeffs = np.zeros(sh_size(_CASCADE_ORDER))
+    coeffs[0] = 1.0
+    coeffs[1] = 0.3
+    coeffs[4] = -0.2
+    coeffs[7] = 0.15
+    return jnp.asarray(coeffs, dtype=jnp.float64)
+
+
+def _cascade_gradient(operator, delta):
+    """``grad`` of a fixed-cotangent scalar loss on ``operator`` w.r.t. ``delta``."""
+    multipole = _cascade_multipole()
+    weights = jax.random.normal(
+        jax.random.PRNGKey(5), (sh_size(_CASCADE_ORDER),), dtype=jnp.float64
+    )
+
+    def loss(d):
+        return jnp.sum(weights * operator(multipole, d, order=_CASCADE_ORDER))
+
+    return np.asarray(
+        jax.grad(loss)(jnp.asarray(delta, dtype=jnp.float64)), dtype=np.float64
+    )
+
+
+def _cascade_offaxis_gradient_limit(operator, num_directions=8, rho=1.0e-9):
+    """The rho -> 0 limit of the gradient, averaged over approach directions.
+
+    Averaging is safe *because* the limit is direction-independent, which
+    :func:`test_rotation_cascade_gradient_limit_is_direction_independent` asserts
+    separately -- so this helper is never hiding a spread.
+    """
+    grads = [
+        _cascade_gradient(
+            operator,
+            [
+                rho * np.cos(2.0 * np.pi * k / num_directions),
+                rho * np.sin(2.0 * np.pi * k / num_directions),
+                _CASCADE_Z,
+            ],
+        )
+        for k in range(num_directions)
+    ]
+    return np.mean(np.array(grads), axis=0)
+
+
+@pytest.mark.parametrize("operator", _ROTATION_CASCADE_OPERATORS)
+def test_rotation_cascade_gradient_limit_is_direction_independent(operator):
+    """The cascade is genuinely differentiable at ``rho == 0``.
+
+    This is the premise the next two tests rest on, so it is asserted rather than
+    assumed. If the gradient limit depended on the approach direction there would be
+    no derivative at ``rho == 0``, a zero cotangent would be a defensible subgradient
+    choice, and G.10 would not be a defect.
+
+    Measured spread across eight approach directions at ``rho = 1e-9`` is ~1.4e-07,
+    which is finite-difference noise at that step, not structure. The bound is 1e-5:
+    loose enough not to be measuring round-off, tight enough that a genuinely
+    direction-dependent limit (which would be O(1) here -- the components themselves
+    are order unity) fails it.
+    """
+    if not jax.config.jax_enable_x64:
+        pytest.skip("gradient limits require float64 (JAX_ENABLE_X64=1)")
+
+    grads = np.array(
+        [
+            _cascade_gradient(
+                operator,
+                [
+                    1.0e-9 * np.cos(2.0 * np.pi * k / 8),
+                    1.0e-9 * np.sin(2.0 * np.pi * k / 8),
+                    _CASCADE_Z,
+                ],
+            )
+            for k in range(8)
+        ]
+    )
+    spread = float(np.max(grads.max(axis=0) - grads.min(axis=0)))
+    assert spread < 1.0e-5, (
+        "the rho -> 0 gradient limit must be direction-independent for the "
+        f"derivative to exist; spread across 8 directions is {spread:.3e}"
+    )
+
+
+@pytest.mark.parametrize("operator", _ROTATION_CASCADE_OPERATORS)
+def test_rotation_cascade_radial_gradient_at_rho_zero_is_correct(operator):
+    """The ``d/dz`` component at ``rho == 0`` is right, and finite -- do not regress it.
+
+    The degeneracy guards in ``_multipole_align_{to,from}_z_block`` lose the two
+    transverse components (the next test), but they do *not* damage the radial one,
+    and they do keep the whole gradient finite. Both halves are worth pinning: the
+    finiteness is the guards' actual purpose, and a future fix for G.10 must not
+    trade a wrong transverse component for a wrong radial one.
+    """
+    if not jax.config.jax_enable_x64:
+        pytest.skip("gradient limits require float64 (JAX_ENABLE_X64=1)")
+
+    at_zero = _cascade_gradient(operator, [0.0, 0.0, _CASCADE_Z])
+    limit = _cascade_offaxis_gradient_limit(operator)
+
+    assert np.all(np.isfinite(at_zero)), f"gradient is not finite: {at_zero}"
+    # Relative bound: these components span ~0.07 to ~9.7 across the three operators.
+    assert abs(at_zero[2] - limit[2]) <= 1.0e-6 * max(
+        abs(limit[2]), 1.0
+    ), f"d/dz at rho == 0 is {at_zero[2]:.9f}, off-axis limit is {limit[2]:.9f}"
+
+
+@pytest.mark.parametrize("operator", _ROTATION_CASCADE_OPERATORS)
+def test_rotation_cascade_transverse_gradient_at_rho_zero(operator):
+    """``d/dx`` and ``d/dy`` at ``rho == 0`` must equal the off-axis limit.
+
+    This was G.10, a strict xfail: the degeneracy guards in
+    ``_multipole_align_{to,from}_z_block`` returned a zero cotangent for both
+    transverse components (true values m2l_real -1.502050 / -0.523434, m2m_real
+    -6.416905 / +1.769043, l2l_real +0.305315 / +0.003498), and no guard choice could
+    recover them -- the code reaches ``(x, y)`` only through ``rho`` and
+    ``atan2(x, y)``, so the polar parametrisation has already divided out the
+    ``O(rho)`` coefficient the derivative needs. The three operators now carry a
+    ``custom_jvp`` that supplies it analytically instead; see
+    :mod:`jaccpot.operators._transverse_degeneracy_jvp` and
+    ``docs/rotation_degeneracy_derivative.md``.
+    """
+    if not jax.config.jax_enable_x64:
+        pytest.skip("gradient limits require float64 (JAX_ENABLE_X64=1)")
+
+    at_zero = _cascade_gradient(operator, [0.0, 0.0, _CASCADE_Z])
+    limit = _cascade_offaxis_gradient_limit(operator)
+
+    for component, axis in ((0, "x"), (1, "y")):
+        assert abs(at_zero[component] - limit[component]) <= 1.0e-5 * max(
+            abs(limit[component]), 1.0
+        ), (
+            f"d/d{axis} at rho == 0 is {at_zero[component]:.9f}, but the "
+            f"off-axis limit is {limit[component]:.9f}"
+        )
+
+
 def test_rotation_to_from_z_axis_are_inverses():
     """Rotation to/from z-axis should compose to identity per degree."""
     dtype = jnp.float64
