@@ -8,9 +8,14 @@ Written up separately from the code because the result is reusable (it applies t
 operator built on the cascade, in both bases) and because the calibration steps below
 are the part that is easy to get wrong and expensive to redo.
 
-**Status.** The formula is derived and validated (this document). It is **not yet wired
-into the operators** — see "Implementation surface" at the end for what remains, and
-G.10 in [`refactor_audit_2026-08.md`](refactor_audit_2026-08.md) for the defect itself.
+**Status.** Derived, validated, and **wired into every M2L / M2M / L2L lane in both
+bases** — §5 is what landed where, §6 is where the switchover boundary goes and why it is
+wider than `rho == 0`, §7 is the precomputed-block lanes and the fused Pallas kernel,
+which each needed a different shape of the same rule. §8 is the GPU validation. §9 is the
+fused Pallas *complex* M2L, which had the builder's withdrawal and no carrier until it was
+given the same pair the real lane has, and what that pair costs — which, above 2048 pairs,
+is nothing, because the chunked M2L scan's existing `jax.checkpoint` already absorbs it. G.10 in
+[`refactor_audit_2026-08.md`](refactor_audit_2026-08.md) records the defect itself.
 
 ---
 
@@ -139,47 +144,413 @@ separations):
 | `m2m_real` | 3.6e-10 |
 | `l2l_real` | 2.7e-10 |
 
-## 5. Implementation surface, and the constraint that shapes it
+## 5. What landed
 
-The rule must **not** perturb anything that currently works. The structure that
-guarantees this:
+The rule is attached at the **cascade** level, never at the alignment blocks. That is
+forced, not stylistic: at `rho == 0` an individual alignment block *is*
+direction-dependent — with `ax = 0` it reduces to `Dz(az)` for an arbitrary `az` — while
+the product is not. Only the assembled operator has a derivative to supply.
+
+The plumbing lives in `jaccpot/operators/_transverse_degeneracy_jvp.py`; each basis
+owns its own generators, next to the rotation builders they are calibrated against
+(`real_transverse_generators`, `complex_transverse_generators`).
+
+| site | operators | reached from |
+|---|---|---|
+| `operators/m2l_real_rot_scale.py` | `m2l_rot_scale_real_batch` | **production** real M2L, via `runtime/kernels/core.py::_m2l_real_batch_kernel` |
+| `operators/real_harmonics.py` | `m2l_a6_real_only` (so `m2l_real`, `m2l_optimized_real`), `m2m_real`, `l2l_real` | **production** real M2M (`upward/real_tree_expansions.py::aggregate_m2m_real_by_level`) and L2L (`runtime/kernels/core.py::_l2l_real_batch_kernel`) — these are not only reference operators |
+| `operators/complex_ops.py` | `m2l_complex_reference` (so `m2l_complex_reference_batch`), `m2m_complex`, `l2l_complex` | production complex far field |
+
+**The structure.** Only the tangent changes, and it changes as a *select*:
 
 ```
-primal : unchanged                       -> forward stays bit-identical
-tangent: where(rho_sq > 0, <existing JVP>, <analytic (2)/(3)>)
+primal : unchanged                              -> forward bit-identical
+tangent: where(rho_sq > 0, existing, analytic)   -> partitioned, not superposed
 ```
 
-so the existing derivative is preserved exactly for every `rho > 0`, and the analytic
-branch applies only on the measure-zero degenerate set the guards currently mishandle.
-Three regimes, not two:
+Off the axis the routed tangent is the incoming one bit-for-bit and the analytic term is
+exactly zero, so every gradient that was already right is preserved to the last bit. On
+it, the guards contribute exactly zero anyway, so select and add agree — the select is
+written because it is the property the correctness argument needs, and because the
+predicate is then the single place a future widening would go (§6).
 
-1. `rho_sq > 0` — existing behaviour, untouched.
-2. `rho_sq == 0` and `z != 0` — formula (2)/(3).
-3. `delta == 0` (so `z == 0` as well) — **(2)/(3) does not apply**, it divides by `z`.
-   Keep the current zero. For `m2m`/`l2l` a zero displacement is the identity
-   translation; for `m2l` a zero separation is unphysical.
+Three regimes, as designed: `rho_sq > 0` untouched; `rho_sq == 0` with `z != 0` analytic;
+`delta == 0` keeps the existing zero, because (2)/(3) divides by `z` and `|delta|` has no
+derivative at the origin.
 
-Sites needing the rule, in priority order — the production path first, since fixing
-only the reference operators would flip the operator-level tracking test while leaving
-the force gradient wrong:
+**Cost.** None in the forward pass — `custom_jvp` leaves the primal alone. None in the
+tangent either, beyond four static block-diagonal matmuls: the cascade is linear in its
+coefficient argument, so the two `F0 · G_in` terms fold into the incoming coefficient
+tangent and ride the JVP that was going to run regardless. The naive form would have cost
+one extra cascade evaluation per transverse axis.
 
-- `operators/m2l_real_rot_scale.py` — `m2l_rot_scale_real_batch`, the **production**
-  real-basis M2L (reached from `runtime/kernels/core.py::_m2l_real_batch_kernel`).
-- `operators/complex_ops.py` — `m2l_complex_reference` and the batched complex path;
-  the complex basis has the same defect, measured.
-- `operators/real_harmonics.py` — `m2l_real`, `m2m_real`, `l2l_real` (reference
-  operators; these are what the operator-level tracking test targets).
-- the M2M / L2L cascades in `upward/` and `downward/`, which share the alignment.
+**Complex-basis calibration.** Redone from scratch rather than transported from the real
+basis, and the two signs were *searched*. At order 4, `z = 2.5`, `eps = 1e-5` on
+`m2l_complex_reference` the four combinations give 2.0e+00, 1.5e+00, 9.6e-01 and
+**7.4e-11**. The survivor is `G = −B_swap Λ B_swap` with `Λ = diag(i m)`, matching the
+real basis' sign. One structural difference: the complex local rotation is built from its
+own swap matrix `B_T`, not as the transpose of the multipole one, so each representation
+takes its generator from the swap matrix its rotation blocks actually use — `G^L = −(G^M)ᵀ`
+holds in the real basis and would be a coincidence to rely on here.
 
-Two things to verify at each site beyond the obvious: that `custom_jvp` transposes
-correctly for reverse mode (the rule is linear in the tangents, so it should, but the
-FMM uses `jax.grad`, not `jax.jvp`), and that no new `@jit` boundary or host sync is
-introduced.
+Reverse-mode agreement with forward mode, at `rho == 0` and with an asymmetric direction,
+is asserted for all six operators in
+`tests/unit/operators/test_transverse_degeneracy_jvp.py`. The rule is linear in the
+tangents, so JAX transposes it; that test is what says it was written that way.
 
-The two tracking tests that must flip, both `xfail(strict=True)` so they become hard
-errors the moment they start passing:
+**Measured at the force level**, on the `_z_stacked_system(8, 4, 6.0, 3)` construction the
+tracking test uses (6 of 24 M2L pairs exactly on axis), FD versus AD:
 
-- `tests/unit/operators/test_real_harmonics.py::test_rotation_cascade_transverse_gradient_at_rho_zero`
-- `tests/unit/test_gradient_correctness.py::test_fd_vs_ad_along_a_transverse_direction_at_rho_zero`
+| basis | before | after |
+|---|---|---|
+| real | 1.9e-03 | 9.5e-06 |
+| complex | 1.8e-05 | 9.7e-06 |
 
-And both characterization oracles must stay byte-unmoved, since the primal is unchanged.
+The two bases converging on the same number is the point: what is left is a cause they
+share, and it is not this one.
+
+## 6. Where the boundary goes, and why it is not `rho == 0`
+
+The polar route does not only fail *at* `rho == 0`. It degrades on approach, and the
+first implementation of §5 — which switched on the guards' own `rho_sq > 0` — left that
+uncovered. Found while verifying this fix, and closed by widening the band.
+
+`d(az)/dy = −x/rho²` grows without bound while the `(rho/r)^|m|` factor that annihilates
+the azimuth shrinks, and the transverse gradient comes out of that cancellation with
+relative error `~eps·r/rho`. Measured on `l2l_real`, order 4, `z = −3`:
+
+| `rho` | 1e-17 | 1e-16 | 1e-12 | 1e-9 | 1e-6 |
+|---|---|---|---|---|---|
+| relative error in `d/dy` | 2.6e+02 | 1.8e+01 | 6.8e-04 | 3.5e-06 | 1.0e-09 |
+
+That is not academic, and it does not need a contrived input. **Two tree nodes whose
+`(x, y)` centres are mathematically equal — same particles, same masses, summed in a
+different order — differ by one ulp instead of zero.** In the force-level tracking test's
+own system, node 11's L2L displacement is `(5.551e-17, 0.0, +3.0)`: `rho_sq = 3.1e-33` is
+strictly positive, the guards never fire, and the polar route computes
+`d(az)/dy = −1.8e+16` — the exact derivative of a function varying that fast, evaluated
+with catastrophic cancellation. It was `y`-only there because `y == 0` exactly makes
+`d(az)/dx = y/rho² = 0`, which is both the computed and the true value, and it was
+confined to the eight particles under node 5, with per-particle errors in equal pairs
+across the two clusters as one mis-scaled delta cotangent distributed by mass must give.
+
+**The crossover.** The analytic branch is the `rho → 0` limit, so it errs `O(rho/r)`; the
+polar route errs `O(eps·r/rho)`. Equating them puts the boundary at
+
+```
+(rho/r)² == eps          i.e.   rho_sq <= eps · r_sq
+```
+
+which is what `split_transverse_tangent` codes. The choice is minimax: the worst relative
+error over all `rho` becomes `~sqrt(eps)` — 1.5e-08 in float64, 3.4e-04 in float32 — and
+is reached only on the boundary itself, where before it was unbounded. `z != 0` still
+excludes `delta == 0`, and it is the only point the band could otherwise swallow: with
+`r_sq == rho_sq` the test holds only for `rho_sq == 0`.
+
+Widening this far is what makes the **split** load-bearing rather than decorative. Inside
+the band the polar contribution is not zero, it is garbage, so it must be *removed*
+rather than added to — hence a routed tangent and not just a pair of scales.
+
+**Measured across the boundary**, worst analytic-versus-finite-difference relative error
+over `z ∈ {+2.5, −3.0}` and `rho ∈ {0, 1e-17, 1e-14, 1e-12, 1e-10, 1e-8, 4.4e-8, 5e-8,
+1e-7, 1e-5, 1e-3}` — so inside the band, on the boundary, and well outside it:
+
+| operator | worst | operator | worst |
+|---|---|---|---|
+| `m2l_real` | 1.2e-08 | `m2l_complex_reference` | 4.0e-09 |
+| `m2m_real` | 4.4e-08 | `m2m_complex` | 1.5e-07 |
+| `l2l_real` | 1.1e-07 | `l2l_complex` | 2.0e-07 |
+
+The worst cases all sit at `rho ≈ 4e-8` to `1e-7`, straddling the boundary, which is what
+a minimax crossover looks like — and at those `rho` the finite difference is itself only
+good to `O(step/r) ≈ 3e-07`, so this is a bound on the measurement as much as on the
+branch. The `rho = 1e-17` column, which was 2.6e+02 before, now reads 4.5e-09.
+
+**At the force level**, on `_z_stacked_system(8, 4, 6.0, 3)` (6 of 24 M2L pairs exactly on
+axis, plus the one-ulp L2L displacement above), FD versus AD:
+
+| basis | before G.10 | rho == 0 only | full band |
+|---|---|---|---|
+| real | 1.9e-03 | 9.5e-06 | **2.7e-10** |
+| complex | 1.8e-05 | 9.7e-06 | **2.7e-10** |
+
+Both bases now produce the *same* AD value to every digit printed, which is the tell that
+the last shared cause is gone. Pinned by
+`tests/unit/test_gradient_correctness.py::test_fd_vs_ad_along_a_transverse_direction_at_rho_zero`,
+no longer an xfail.
+
+**Both characterization goldens stay unmoved**, including the gradient golden. That is not
+automatic once the band is wider than a measure-zero set, and it is the check to repeat if
+the constant is ever changed: the golden's uniform distributions have no two nodes with
+equal `(x, y)` centres, so nothing in them enters the band.
+
+## 7. The precomputed-block lanes
+
+Four lanes receive their rotation blocks as separate arguments, built once per
+interaction class and reused, so **no single function sees both the displacement and the
+operator built from it** — and the §5 rule needs both. Their forward values were
+bit-identical to the direct lanes; their gradients were not. Measured before the fix, on
+`m2l_rot_scale_real_batch_cached_blocks` against `m2l_rot_scale_real_batch` with the
+blocks the latter would have built: the on-axis transverse gradient was `(0, 0)` where
+the direct lane gave `(−0.270, −1.303)` — 1.30 apart, with exact agreement on the
+off-axis rows, so no forward comparison could see it.
+
+**The fix is two halves that only work together.**
+
+1. The **block builder** withdraws the transverse tangent it cannot resolve
+   (`without_unresolvable_transverse_jvp` on `_real_rotation_blocks_padded` and on the
+   complex padded builders). An individual alignment block is the one thing here that
+   genuinely has *no* transverse derivative at `rho == 0`: with `ax == 0` it reduces to
+   `Dz(az)` for an arbitrary `az`, so its limit is approach-dependent even though the
+   assembled cascade's is not. Inside the band it has a derivative but not one worth
+   having. So it now hands its caller nothing rather than something wrong.
+2. The **consumer** supplies the cascade-level term, via the same
+   `with_transverse_degeneracy_jvp` the direct lanes use — generalised to pass extra
+   differentiable array arguments (the blocks) through untouched.
+
+Without (1), (2) would add the analytic term *on top of* whatever the builder's guards
+produced: zero at `rho == 0`, garbage just off it. That is why the builder half exists.
+
+Covered: `m2l_rot_scale_real_batch_cached_blocks`,
+`m2m_rot_scale_real_batch_cached_blocks`, `l2l_rot_scale_real_batch_cached_blocks`,
+`m2l_complex_reference_batch_cached_blocks`. Asserted against their direct twins in
+`tests/unit/operators/test_transverse_degeneracy_jvp.py::test_precomputed_block_lanes_match_their_direct_twin_in_gradient`,
+over a batch holding all three regimes at once — exactly on axis, one ulp off it, and
+generic:
+
+| lane | forward | gradient |
+|---|---|---|
+| real M2L | 0 | 3.9e-16 |
+| real M2M | 7.1e-15 | 7.3e-15 |
+| real L2L | 0 | 2.5e-14 |
+| complex M2L | 0 | 0 |
+
+That test also asserts the direct lane's on-axis transverse gradient is not itself ~0,
+so the two cannot agree by sharing the defect.
+
+**The fused Pallas real M2L needed a third shape.** It could not take the consumer
+decorator at all: `m2l_real_fused_pallas_cvjp` is a `custom_vjp`, and JAX refuses
+forward-mode through one — confirmed, not assumed ("can't apply forward-mode autodiff
+(jvp) to a custom_vjp function"). What covers it instead never touches the kernel:
+
+* `m2l_real_fused_align_deltas(deltas)` runs *before* the radius and both block
+  stacks are built. Its primal returns `deltas` with no arithmetic performed on it, so it
+  is invisible to a forward-only caller; what it removes is the in-band transverse
+  tangent, so radius and blocks all agree on where the band is.
+* `m2l_real_fused_carry_axis_derivative(out, …)` runs *after* the kernel. Its primal
+  returns `out` unchanged — again no arithmetic, so no forward footprint, not even in the
+  sign of zero — and its tangent adds the analytic term, computing the one operator
+  application it needs with `m2l_real_fused_jax`, the same pure-JAX twin the kernel's own
+  `custom_vjp` uses as its correctness reference.
+
+Measured against the pure-JAX lane on the same three-regime batch: **1.98 apart without
+the carrier** (the on-axis rows come back exactly `(0, 0)`), **2.7e-15 with it**, forward
+unchanged to the bit. Asserted by
+`test_fused_pallas_m2l_matches_the_pure_jax_lane_in_gradient`, parametrised over
+`interpret` so the same assertion covers the reference lowering on CPU and the real Triton
+kernel where the hardware allows.
+
+## 8. Validated on GPU
+
+Run on an **A100-PCIE-40GB (sm_80)**, `pallas_m2l_real_fused_supported()` `True`, x64 on.
+Re-run on **JAX 0.10.2**, the project's own floor, so
+`_compat.PALLAS_CALL_TAKES_BACKEND` is `False` and the Triton lowering goes through the
+`triton.CompilerParams` path that ships. (The first pass was done on 0.9.0.1, one minor
+version below the floor and on the removed `pallas_call(backend=)` API; every number
+below survived the move unchanged.)
+
+**The `interpret=False` half.** Both parametrisations pass, neither skipped:
+
+| lowering | worst gradient difference vs the pure-JAX lane | tolerance | without the fix |
+|---|---|---|---|
+| `interpret=True` | 3.6e-15 | 1e-10 | 1.98 |
+| `interpret=False` (real Triton) | **4.4e-15** | 1e-8 | 1.98 |
+
+**The forward pass has no footprint**, confirmed rather than argued: the fused lane's
+output is bit-identical (compared as raw `uint64`, so a `-0.0` would show) with the
+withdrawal alone, the carrier alone, both, and under `jax.jit`.
+
+**Both reverse branches.** `JACCPOT_FUSED_M2L_VJP=1` (fully-fused reverse kernel) and `=0`
+(autodiff of the pure-jnp twin): 50 passed each over
+`test_custom_vjp_parity.py` plus `test_transverse_degeneracy_jvp.py`, identical outcome
+sets, nothing skipped.
+
+**At the force level with the fused lane engaged**
+(`JACCPOT_STATIC_STRICT_FUSED_M2L_PALLAS=1`), FD versus AD on the `_z_stacked_system`
+construction:
+
+| basis | fused lane on | fused lane off |
+|---|---|---|
+| real | 1.0e-10 | 1.0e-10 |
+| complex | **8.5e-07** | 1.0e-10 |
+
+With the fused lane off both bases agree to every digit printed, as §6 claims. With it on
+the real lane is unchanged and the complex one is three orders worse — see §9.
+
+**Reverse-pass residuals** (`bench/audit_reverse_residuals.py`, and the same audit on the
+real basis, which the shipped script does not cover because it hardcodes `basis="complex"`).
+Complex basis: **unchanged, byte for byte**. Real basis, at N=32768 / leaf 256 / float32,
+the configuration production uses:
+
+| group | before | after | delta |
+|---|---|---|---|
+| m2l | 11,128.3 B/pair | 11,542.3 B/pair | +414 B/pair (+3.7%) |
+| M2M by-level scan (the audit files this under `other`) | 18.947 MB | 20.290 MB | +1.343 MB (+7.1%) |
+| near field, P2M, L2L, L2P, tree | — | — | unchanged |
+| total | 227.157 MB | 228.518 MB | +1.361 MB (+0.6%) |
+
+Attributed to individual buffers: four `float32[13,127,2,25]`, one `bool[13,127,2,2]` —
+the extra select's predicate — and the M2L lane's own `float32[44,25]` additions. The
+coefficient is **813 B per (level · internal node)** and is stable from leaf 4 to leaf 256,
+so it projects to roughly 11 MB at N=200k and 60 MB at N=1M against budgets in the GB
+range. Nothing about what the `custom_vjp` saves changed.
+
+**The per-stage benchmark, and what it can and cannot say.** At the scale the M2L stage
+runs here (128–1024 pairs, order 4) the lane is eager-dispatch-bound at 0.25–1.0 ms per
+call. An in-process A/B of the correction ON versus OFF — one process, minimum of 300
+repeats, so the comparison is not across checkouts — gives, on the **fused real** lane:
+
+| pairs / dtype | forward | gradient |
+|---|---|---|
+| 128 float64 | −1.4% | **+10.6%** |
+| 128 float32 | −16.7% | **+16.9%** |
+| 1024 float64 | +2.7% | **+28.2%** |
+| 1024 float32 | +5.8% | **+29.0%** |
+
+The forward column is the noise floor measured on the instrument itself: both new primals
+are identities with no arithmetic, so that path is provably identical work, and it still
+swings ±17%. The gradient column is **consistently positive across all four cases** and
+larger than that floor at 1024 pairs, so the honest reading is that the carrier costs
+roughly **+10% to +29% of the fused M2L gradient call** at these sizes — not that it is
+free. It is the twin application, and §9 measures the same thing in memory. The **direct**
+lane shows no coherent gradient cost by the same method (−24%, −12%, i.e. noise), which
+fits: there the correction is four static block-diagonal matmuls folded into a JVP that was
+running anyway.
+
+**At 200k particles**, `bench/profile_downward_breakdown.py` (fp32, `large_n_gpu`,
+`static_radix`, leaf 256, order 4, 40 steps) on the same A100:
+
+| combo | ms/step |
+|---|---|
+| `A_upward` (`upward_only/full`) | 164.9 |
+| `B_plan` (`downward_only/downward_artifacts_only`) | 79.2 |
+| `C_m2l` (`downward_only/m2l_only`) | 291.9 |
+| `D_full_down` (`downward_only/full`) | 397.0 |
+
+This is a **forward** profile, and the forward primal is bit-identical, so it cannot show a
+regression from this work; it is reported because the handoff asked for it and because it
+puts the M2L stage's scale in context — hundreds of ms/step, against which §8's fullbatch
+gradient deltas are sub-millisecond.
+
+It also exposed a defect in the profiler, **since fixed**: the attribution assumed the
+`(diag_mode, detail_diag_mode)` combos were nested and they are not, so
+`plan_build = B - A` printed **−85.7 ms** — a negative cost — without complaint. The
+detail modes are per-sub-stage probes with their own keep-alive dependencies, not a
+monotone ladder; `upward_only/p2m_only` costs 17% *more* than `upward_only/full` despite
+doing strictly less. Two candidate causes were ruled out by measurement: the eval stage
+(the `detail_diag_mode == "full"` term in `self_eval_active` only sets diagnostic
+counters), and the host-side stage timers as a substitute (they are written by
+`refresh_prepared_state`, which the fused jitted scan never calls, so
+`refresh_timing_calls` returns 0).
+
+The downward split is therefore **not obtainable on the fused lane by any method
+available today**, and the script now says so rather than inventing a number. The one
+trustworthy figure is `downward_total = D − A`, both sides being `detail=full`:
+**293.1 ms/step of 535.4**. Absolute numbers move 5–10% run to run on this shared card.
+
+## 9. The complex fused Pallas M2L lane, and what the carrier costs
+
+§7 covers `m2l_complex_reference_batch_cached_blocks`. It does **not** cover
+`runtime/kernels/core.py::_m2l_complex_batch_kernel_fused_pallas`, and that lane now has
+half the fix. It calls `complex_rotation_blocks_{to,from}_z_solidfmm_batch`, whose padded
+builders carry `without_unresolvable_transverse_jvp`, and then hands the blocks straight to
+`m2l_complex_fused_pallas_cvjp` with nothing after them — the withdrawal without the
+carrier, which §7 says is exactly the half that does not work alone.
+
+Measured on the three-regime batch, gradient with respect to `deltas`, worst difference
+between the lane and the pure-JAX complex reference:
+
+| | before this work | after |
+|---|---|---|
+| on-axis row, reference | `(0, 0)` (the defect) | `(0.469, 0.379)` |
+| on-axis row, fused lane | `(0, 0)` | `(0, 0)` |
+| one-ulp row, reference | `(−0.510, 6.5)` | `(−0.510, 0.391)` |
+| one-ulp row, fused lane | `(−0.510, 6.5)` | `(≈0, 0)` |
+| **reference versus fused** | **6.7e-16** | **5.1e-01** |
+
+The forward values still agree to 1.3e-15. What has been lost is the reference/fused
+equivalence `NUMERICS_AND_JAX.md` §1 requires: the pair agreed to round-off before and now
+disagrees by 0.51. End to end this is still an improvement — the fused complex lane's
+force-level FD-vs-AD went from the pre-fix 1.8e-05 to 8.5e-07 because M2M and L2L are
+fixed — but its M2L transverse term is missing.
+
+No existing test can see it. `test_m2l_complex_fused_pallas_custom_vjp_matches_twin`
+differentiates with respect to the kernel's four inputs — multipoles, both block stacks, the
+radius — and never with respect to `deltas`, so it is structurally blind to a degeneracy
+that lives only in the `delta -> blocks` map, and `m2l_complex_fused_jax`, the twin it
+compares against, shares the blindness. The real lane needed a delta-level test for exactly
+this reason; the complex lane has none.
+
+**Fixed** by giving it the complex analogue of the real lane's pair —
+`m2l_complex_fused_align_deltas` before the radius and blocks, and
+`m2l_complex_fused_carry_axis_derivative` after the kernel, the latter computing its one
+operator application with `m2l_complex_fused_jax`, the twin the kernel's own `custom_vjp`
+already uses. Reference versus fused is back to **6.7e-16**, now with both sides right, and
+the force-level complex FD-vs-AD with the fused lane engaged reads 1.034e-10 — identical to
+the real basis to every digit printed. The forward pass is bit-identical to the pre-fix lane
+as raw `uint64`.
+
+Two tests, because only one of them can catch this. The parametrised
+`test_fused_pallas_complex_m2l_matches_the_pure_jax_lane_in_gradient` composes the lane so
+`interpret=True` covers it on CPU — and it passes with the mechanism alone, wiring or no
+wiring. `test_the_production_complex_fused_m2l_kernel_carries_the_axis_derivative`
+differentiates the *shipped* function with respect to `deltas`, and that is the one that
+fails (1.630e+00) when the wiring is missing.
+
+### What the carrier costs, and why it is already paid for
+
+The carrier applies the pure-JAX twin inside its JVP, so reverse mode can retain the twin's
+padded intermediates. Traced on the bare lane at order 4, N=1024 pairs, float64 — with the
+third column being the lane wrapped in `jax.checkpoint`, which is what the production
+chunked M2L scan already does:
+
+| lane | carrier off | carrier on | carrier on, under `jax.checkpoint` |
+|---|---|---|---|
+| real fused | 25,347 B/pair | 67,243 B/pair (+165%) | **422 B/pair** |
+| complex fused | 50,413 B/pair | 126,005 B/pair (+150%) | **639 B/pair** |
+
+**The middle column only describes a path production does not take above 2048 pairs.**
+`_accumulate_m2l_chunked_scan` wraps `_apply_m2l` in `jax.checkpoint` — deliberately
+*outside* it, so that the fused kernel's own `custom_vjp` residuals are discarded too, per
+the comment at `runtime/kernels/core.py`. The carrier sits inside that region and is
+discarded by the same wrapper. Only `_accumulate_m2l_fullbatch` is un-rematerialised, and
+it runs at `pair_count <= _M2L_FULLBATCH_MAX_PAIRS` (2048), where remat is deliberately
+declined because it "would buy nothing and would perturb the small-N forward schedule".
+
+The end-to-end audit confirms it in both regimes without any special instrumentation — the
+real-basis M2L residual row, pre-G.10 versus now:
+
+| far pairs | path | B/pair before | after |
+|---|---|---|---|
+| 195,336 | chunked, rematted | 827.8 | **827.8 — identical** |
+| 44 | fullbatch, not rematted | 11,128.3 | 11,542.3 (+414) |
+
+So the carrier's reverse-pass exposure is **bounded by 2048 pairs**: at +414 B/pair
+end-to-end (float32, real basis) that is under 1 MB, and even the bare-lane float64
+coefficient caps out around 155 MB. An earlier draft of this section projected the
+un-rematerialised coefficient onto the 131072 compact far-pair cap and got 5.5 GB and
+9.9 GB. **That was wrong** — at 131072 pairs the path is the chunked scan, where the
+measured cost is exactly zero. The projection assumed a regime that does not occur.
+
+The timing in §8 (+10% to +29% of the fused M2L gradient call) is scoped the same way: those
+measurements are at 128–1024 pairs, which *is* the fullbatch regime, so they stand for it —
+and at those sizes the M2L stage is dispatch-bound at well under a millisecond against a
+step measured in hundreds. Above 2048 pairs the carrier's work is inside the rematerialised
+region.
+
+**Conclusion: no change is warranted.** `jax.checkpoint` around the twin was the obvious
+lever and it is already applied, by the scan wrapper, at every pair count where it would
+matter. Predicating the carrier on `jnp.any(on_axis)` would only reach the fullbatch path,
+where the cost being removed is under a megabyte and a fraction of a millisecond, and it
+would add a traced branch and its compile time to the small-N schedule the comment above
+explicitly protects.

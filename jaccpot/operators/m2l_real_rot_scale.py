@@ -20,6 +20,7 @@ from jaccpot.operators.real_harmonics import (
     real_rotation_from_z_axis_multipole,
     real_rotation_to_z_axis_local,
     real_rotation_to_z_axis_multipole,
+    real_transverse_generators,
     sh_offset,
     sh_size,
     translate_along_z_l2l_real,
@@ -28,6 +29,12 @@ from jaccpot.operators.real_harmonics import (
 )
 
 from ._precision import highest_matmul_precision
+from ._transverse_degeneracy_jvp import (
+    with_transverse_degeneracy_jvp,
+    with_transverse_degeneracy_tangent,
+    withdraw_unresolvable_transverse,
+    without_unresolvable_transverse_jvp,
+)
 
 # NOTE: ``jaccpot.pallas.m2l_core_z_real`` is imported lazily inside
 # ``m2l_core_z_real`` below. A top-level import creates a circular import
@@ -89,6 +96,72 @@ def m2l_core_z_real(
     )
 
 
+def _m2l_rot_scale_real_cascade(
+    multipoles: Array,
+    deltas: Array,
+    *,
+    order: int,
+    use_pallas: bool = False,
+) -> Array:
+    """The rotate -> z-translate -> rotate-back body of :func:`m2l_rot_scale_real_batch`.
+
+    Split out from the public entry point so the shape validation stays outside the
+    ``custom_jvp`` that :func:`~jaccpot.operators._transverse_degeneracy_jvp.with_transverse_degeneracy_jvp`
+    wraps around this. Takes already-``asarray``-ed inputs and does not re-check them.
+
+    Parameters
+    ----------
+    multipoles : Array
+        Source multipole coefficients ``[N, (p+1)^2]``.
+    deltas : Array
+        Source-to-target centre displacements ``[N, 3]``.
+    order : int
+        Maximum SH degree ``p``. Static under ``jit``.
+    use_pallas : bool
+        Route the z-translation through the Pallas kernel where supported. Static.
+
+    Returns
+    -------
+    Array
+        Real local expansion contributions ``[N, (p+1)^2]``.
+    """
+    # NaN-safe radius: ``linalg.norm`` has a 0/0 reverse grad at delta==0.
+    # Double-where keeps the cotangent finite (0) there; forward is unchanged
+    # (sqrt of the squared norm equals the norm for every input).
+    r2 = jnp.sum(deltas * deltas, axis=1)
+    r2_pos = r2 > 0
+    radii = jnp.where(r2_pos, jnp.sqrt(jnp.where(r2_pos, r2, 1.0)), 0.0)
+    mult_rot = jax.vmap(
+        lambda m, d: _rotate_multipole_to_z_single(m, d, order=int(order))
+    )(
+        multipoles,
+        deltas,
+    )
+    locals_z = m2l_core_z_real(
+        mult_rot,
+        radii,
+        order=int(order),
+        use_pallas=bool(use_pallas),
+    )
+    return jax.vmap(lambda l, d: _rotate_local_from_z_single(l, d, order=int(order)))(
+        locals_z,
+        deltas,
+    )
+
+
+#: :func:`_m2l_rot_scale_real_cascade` with the analytic transverse derivative at
+#: ``rho == 0`` attached. The primal is untouched; see
+#: :mod:`jaccpot.operators._transverse_degeneracy_jvp`.
+_m2l_rot_scale_real_cascade_with_axis_derivative = with_transverse_degeneracy_jvp(
+    _m2l_rot_scale_real_cascade,
+    generators=partial(
+        real_transverse_generators,
+        in_representation="multipole",
+        out_representation="local",
+    ),
+)
+
+
 def m2l_rot_scale_real_batch(
     multipoles: Array,
     deltas: Array,
@@ -139,6 +212,14 @@ def m2l_rot_scale_real_batch(
     gradient at ``delta == 0``; the guard keeps that cotangent finite (zero)
     while leaving the forward value unchanged.
 
+    A ``custom_jvp`` supplies the transverse (``d/dx``, ``d/dy``) derivative near the
+    ``rho == 0`` axis, where the alignment azimuth is undefined -- the guards in
+    :func:`~jaccpot.operators.real_harmonics._multipole_align_to_z_block` return a zero
+    cotangent there, exact forward and wrong derivative -- and where the polar route
+    degrades like ``eps / (rho / r)`` on approach. The analytic branch applies inside
+    exactly zero outside a narrow band around that axis (``rho <= sqrt(eps) * |delta|``, the measured crossover between the two routes' errors); outside it the primal and the gradient are bit-identical to what this
+    function computed before. See :mod:`jaccpot.operators._transverse_degeneracy_jvp`.
+
     ``delta == 0`` is degenerate for M2L and this function does not reject it:
     :func:`m2l_core_z_real` floors the radius at ``1e-30``, so the result is
     finite but physically meaningless. The MAC that makes a pair well-separated
@@ -169,27 +250,8 @@ def m2l_rot_scale_real_batch(
     if delta.ndim != 2 or int(delta.shape[1]) != 3:
         raise ValueError("deltas must have shape (batch, 3)")
 
-    # NaN-safe radius: ``linalg.norm`` has a 0/0 reverse grad at delta==0.
-    # Double-where keeps the cotangent finite (0) there; forward is unchanged
-    # (sqrt of the squared norm equals the norm for every input).
-    r2 = jnp.sum(delta * delta, axis=1)
-    r2_pos = r2 > 0
-    radii = jnp.where(r2_pos, jnp.sqrt(jnp.where(r2_pos, r2, 1.0)), 0.0)
-    mult_rot = jax.vmap(
-        lambda m, d: _rotate_multipole_to_z_single(m, d, order=int(order))
-    )(
-        mult,
-        delta,
-    )
-    locals_z = m2l_core_z_real(
-        mult_rot,
-        radii,
-        order=int(order),
-        use_pallas=bool(use_pallas),
-    )
-    return jax.vmap(lambda l, d: _rotate_local_from_z_single(l, d, order=int(order)))(
-        locals_z,
-        delta,
+    return _m2l_rot_scale_real_cascade_with_axis_derivative(
+        mult, delta, order=int(order), use_pallas=bool(use_pallas)
     )
 
 
@@ -238,6 +300,7 @@ def _apply_real_rotation_blocks_padded_batch(
     return jax.vmap(lambda c: _unpack_by_ell(c, order=order))(rotated)
 
 
+@without_unresolvable_transverse_jvp
 def _real_rotation_blocks_padded(
     deltas: Array, *, order: int, dtype: Any, which: str
 ) -> Array:
@@ -247,6 +310,16 @@ def _real_rotation_blocks_padded(
 
     * ``'to_z_multipole'`` / ``'from_z_multipole'`` -- multipole world<->z (M2L step 1, M2M);
     * ``'to_z_local'`` / ``'from_z_local'`` -- local world<->z (L2L, M2L step 3).
+
+    Differentiable in ``deltas``, but deliberately **not** transversally near the
+    ``rho == 0`` axis: an individual alignment block has no transverse derivative there
+    (its limit depends on the approach direction, unlike the assembled cascade's), so
+    inside the band of
+    :func:`~jaccpot.operators._transverse_degeneracy_jvp.split_transverse_tangent` this
+    hands its caller nothing rather than something wrong. The caller supplies the
+    cascade-level term -- see
+    :func:`m2l_rot_scale_real_batch_cached_blocks`. Outside the band nothing changes, bit
+    for bit, and the primal is untouched everywhere.
     """
     p = int(order)
     max_m = 2 * p + 1
@@ -312,7 +385,29 @@ def real_rotation_blocks_to_z_local_batch(
     )
 
 
+#: :func:`real_transverse_generators` bound to each cached-blocks lane's pair of
+#: representations. Shares the generators with the direct lanes in
+#: :mod:`jaccpot.operators.real_harmonics`; kept local because that module's copies are
+#: private to it.
+_M2L_TRANSVERSE_GENERATORS = partial(
+    real_transverse_generators,
+    in_representation="multipole",
+    out_representation="local",
+)
+_M2M_TRANSVERSE_GENERATORS = partial(
+    real_transverse_generators,
+    in_representation="multipole",
+    out_representation="multipole",
+)
+_L2L_TRANSVERSE_GENERATORS = partial(
+    real_transverse_generators,
+    in_representation="local",
+    out_representation="local",
+)
+
+
 @partial(jax.jit, static_argnames=("order",))
+@partial(with_transverse_degeneracy_jvp, generators=_M2L_TRANSVERSE_GENERATORS)
 def m2l_rot_scale_real_batch_cached_blocks(
     multipoles: Array,
     deltas: Array,
@@ -381,6 +476,7 @@ def m2l_rot_scale_real_batch_cached_blocks(
 
 
 @partial(jax.jit, static_argnames=("order",))
+@partial(with_transverse_degeneracy_jvp, generators=_M2M_TRANSVERSE_GENERATORS)
 def m2m_rot_scale_real_batch_cached_blocks(
     multipoles: Array,
     deltas: Array,
@@ -416,6 +512,7 @@ def m2m_rot_scale_real_batch_cached_blocks(
 
 
 @partial(jax.jit, static_argnames=("order",))
+@partial(with_transverse_degeneracy_jvp, generators=_L2L_TRANSVERSE_GENERATORS)
 def l2l_rot_scale_real_batch_cached_blocks(
     locals_coeffs: Array,
     deltas: Array,
@@ -449,8 +546,76 @@ def l2l_rot_scale_real_batch_cached_blocks(
     )
 
 
+# --------------------------------------------------------------------------
+# The fused Pallas M2L's transverse derivative, added rather than differentiated.
+# --------------------------------------------------------------------------
+
+
+def _m2l_real_fused_twin(
+    multipoles: Array,
+    blocks_to_z: Array,
+    blocks_from_z: Array,
+    radii: Array,
+    *,
+    order: int,
+) -> Array:
+    """Pure-JAX twin of the fused Pallas real M2L, for the transverse correction only.
+
+    Deferred import: :mod:`jaccpot.pallas.m2l_real_fused` reaches back into
+    :mod:`jaccpot.operators`, so a module-scope import is a cycle. This is the same twin
+    the fused kernel's own ``custom_vjp`` uses as its correctness reference, which is why
+    it is the right thing to compute the correction with -- the kernel itself cannot be
+    used, because the correction lives inside a JVP rule and a ``custom_vjp`` is not
+    forward-differentiable.
+
+    Parameters
+    ----------
+    multipoles : Array
+        Source multipole coefficients ``[N, (p+1)^2]``.
+    blocks_to_z : Array
+        Multipole world->z blocks ``[N, p+1, 2p+1, 2p+1]``.
+    blocks_from_z : Array
+        Local z->world blocks, same shape.
+    radii : Array
+        Translation distances ``[N]``.
+    order : int
+        Maximum SH degree ``p``. Static under ``jit``.
+
+    Returns
+    -------
+    Array
+        Real local expansion contributions ``[N, (p+1)^2]``.
+    """
+    from jaccpot.pallas.m2l_real_fused import m2l_real_fused_jax
+
+    return m2l_real_fused_jax(
+        multipoles, blocks_to_z, blocks_from_z, radii, order=int(order)
+    )
+
+
+#: Re-exported so the fused lane's two halves come from one module and cannot be reached
+#: apart: this one withdraws the unresolvable transverse tangent from the displacement
+#: *before* anything is built from it, and :data:`m2l_real_fused_carry_axis_derivative`
+#: puts the analytic term back *after* the kernel. Using either alone gives a wrong
+#: gradient. See :mod:`jaccpot.operators._transverse_degeneracy_jvp` for both.
+m2l_real_fused_align_deltas = withdraw_unresolvable_transverse
+
+#: Puts the analytic transverse derivative back onto the fused Pallas M2L's output.
+#: Signature ``(out, multipoles, deltas, blocks_to_z, blocks_from_z, radii, order=p)``;
+#: the primal returns ``out`` untouched. Pair it with
+#: :func:`~jaccpot.operators._transverse_degeneracy_jvp.withdraw_unresolvable_transverse`
+#: on the displacement *before* the blocks and radius are built from it -- see
+#: ``runtime/kernels/core.py::_m2l_real_batch_kernel_fused_pallas``, its only caller.
+m2l_real_fused_carry_axis_derivative = with_transverse_degeneracy_tangent(
+    _m2l_real_fused_twin,
+    generators=_M2L_TRANSVERSE_GENERATORS,
+)
+
+
 __all__ = [
     "m2l_core_z_real",
+    "m2l_real_fused_align_deltas",
+    "m2l_real_fused_carry_axis_derivative",
     "m2l_rot_scale_real_batch",
     "m2l_rot_scale_real_batch_cached_blocks",
     "m2m_rot_scale_real_batch_cached_blocks",

@@ -89,6 +89,22 @@ def _m2l_complex_batch_kernel_fused_pallas(src_mult, deltas, *, order):
 Public and substantial private functions get the full treatment. Tiny helpers may use a
 one-line docstring.
 
+**A one-line docstring is not merely terser than a sectioned one — it is exempt.**
+`pyproject.toml` leaves pydoclint's `--skip-checking-short-docstrings` at its default
+`True`, so a docstring with no section headers is never checked against the signature at
+all. Adding a `Parameters` or `Returns` section opts the function *in* to the full check,
+and the signature must then carry type hints that match the docstring **textually**: a
+`Returns` section saying `dict` does not satisfy a `-> dict[str, float]` annotation, or the
+reverse.
+
+Measured, same unannotated signature both times: prose-only docstring, 0 violations; with
+`Parameters` and `Returns` added, DOC105 + DOC106 + DOC107 + DOC203. So *improving* a
+docstring is what turns the check on, and it fails in CI rather than locally unless you run
+the hook. This tripped three separate changes on one branch, all in `bench/` and `tests/`
+where prose-only docstrings are the norm and neighbouring functions in the same file pass
+unannotated. **When it fires, annotate the signature to match — do not delete the section
+to silence it.**
+
 For anything numerical, the docstring must carry what the signature cannot:
 
 - **array shapes** in the `[N, (p+1)^2]` notation already used, and the units / conventions

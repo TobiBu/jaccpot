@@ -341,27 +341,13 @@ def _count_degenerate_m2l_pairs(state):
     return int(np.sum(rho_sq == 0.0)), valid
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "KNOWN DEFECT, G.10 in docs/refactor_audit_2026-08.md. Both bases zero the "
-        "TRANSVERSE cotangent of the rotate -> z-translate -> rotate-back cascade at "
-        "rho == 0 (real: _multipole_align_{to,from}_z_block; complex: "
-        "m2l_complex_reference), but the cascade is differentiable there and the true "
-        "derivative is nonzero. Measured FD-vs-AD disagreement on this construction, "
-        "stable across step size: 1.9e-03 relative (real), 1.8e-05 (complex). "
-        "The operator-level error therefore does reach the force gradient -- it is not "
-        "an artefact that cancels. strict=True so this becomes a hard error once G.10 "
-        "is fixed, forcing the marker's removal."
-    ),
-)
 @pytest.mark.parametrize("basis", ["real", "complex"])
 def test_fd_vs_ad_along_a_transverse_direction_at_rho_zero(basis):
     """FD and AD must agree when M2L displacements are exactly z-aligned.
 
     This is the user-facing statement of G.10: the operator-level defect is easy to
     dismiss as an isolated helper's subgradient choice, so what matters is whether it
-    survives into ``grad`` of the force. It does.
+    survives into ``grad`` of the force. It did, and this is what closes it.
 
     Two things make this test bite where the existing coverage does not. The
     perturbation direction is **purely transverse** (x and y only), because the radial
@@ -370,6 +356,18 @@ def test_fd_vs_ad_along_a_transverse_direction_at_rho_zero(basis):
     per-pair errors cancel in the sum -- which is why an earlier measurement recorded in
     ``m2l_complex_reference``'s comment concluded, on a symmetric system, that nothing
     was lost.
+
+    It took two fixes, and the second is why this construction is worth keeping rather
+    than simplifying. Supplying the ``rho == 0`` derivative analytically
+    (:mod:`jaccpot.operators._transverse_degeneracy_jvp`) moved it from 1.9e-03 to
+    9.5e-06 (real) and 1.8e-05 to 9.7e-06 (complex) -- and no further, because this
+    system *also* contains an L2L displacement of ``(5.551e-17, 0.0, +3.0)``: two nodes
+    whose ``(x, y)`` centres are mathematically equal but summed in different orders, so
+    ``rho_sq = 3.1e-33`` is strictly positive and the alignment guards never fire.
+    Widening that module's band to the measured ``rho/r <= sqrt(eps)`` crossover covers
+    it. Both bases now agree with the finite difference to 2.7e-10 at ``step=1e-6`` and
+    4.9e-11 at ``1e-7``, and -- the tell that one shared cause is gone -- they produce
+    the *same* AD value to every digit printed.
     """
     if not jax.config.jax_enable_x64:
         pytest.skip("FD-vs-AD at this tolerance requires float64")

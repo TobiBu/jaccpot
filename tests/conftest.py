@@ -95,12 +95,61 @@ _DIFF_FMM_TEST_FILES = frozenset(
 )
 
 
+# The same footprint, arrived at from the other direction. tests/unit/runtime is the
+# Dehnen-MAC suite: ~94 cases that each build a solver and run a full FMM solve. None takes
+# a gradient, so none qualifies for the list above, but the retained-executable pile is the
+# same pile -- measured 8.20 GB peak RSS for `pytest -n 2 tests/unit/runtime`, against the
+# ~7 GB the CI runner has. That is why its job (test-mac-runtime) OOM-kills an xdist worker
+# intermittently, and why the crash lands on an arbitrary victim -- whichever test happened
+# to be executing when the worker died, which is what made it look like a flake:
+#
+#     main, 2026-08-02   gw1  test_supplied_force_scale_rejects_a_mismatched_shape[two_dim]
+#     branch             gw0  test_supplied_force_scale_rejects_a_mismatched_shape[short]
+#     branch             gw0  test_far_near_partition_is_complete[dehnen-None-False]
+#
+# Three victims, one cause, and the first predates the branch that surfaced it. Listed as a
+# directory rather than filenames because the whole suite has this shape.
+#
+# WHAT IT COSTS, because it is more than the note above implies. Clearing after each of 94
+# solver tests takes that command from 269 s to 506 s, a 1.9x wall-clock cost, while peak
+# RSS drops to 3.33 GB. The on-disk cache recovers only ~12% of the recompiles (577 s cold
+# vs 506 s warm), NOT most of them: `JAX_PERSISTENT_CACHE_MIN_COMPILE_TIME_SECS` is 1.0
+# above, so the many sub-second compiles this suite churns through are never written to
+# disk. The trade is taken anyway -- test-mac-runtime runs ~8 min against a 50 min cap, so
+# there is room, and an intermittently-crashing job is worth more than the minutes. If that
+# ever stops being true, the lever is a coarser trigger (clear every k tests, or only above
+# an RSS watermark) rather than dropping this.
+_SOLVER_HEAVY_TEST_DIRS = frozenset(
+    {pathlib.Path(__file__).parent / "unit" / "runtime"}
+)
+
+
+def _retains_heavy_executables(node: pytest.Item) -> bool:
+    """Whether this test leaves a compiled-executable pile worth dropping.
+
+    Parameters
+    ----------
+    node : pytest.Item
+        The test item that just finished.
+
+    Returns
+    -------
+    bool
+        True when the test is one of the differentiable-FMM modules or lives in a
+        solver-heavy directory.
+    """
+    return (
+        node.path.name in _DIFF_FMM_TEST_FILES
+        or node.path.parent in _SOLVER_HEAVY_TEST_DIRS
+    )
+
+
 @pytest.fixture(autouse=True)
 def _bound_diff_fmm_compile_cache(request):
     """Free JAX's in-process compiled-executable cache after each heavy
-    differentiable-FMM test (see note above)."""
+    differentiable-FMM or solver-heavy test (see the notes above)."""
     yield
-    if request.node.path.name in _DIFF_FMM_TEST_FILES:
+    if _retains_heavy_executables(request.node):
         import gc
 
         import jax

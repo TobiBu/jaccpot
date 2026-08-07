@@ -149,6 +149,13 @@ jobs:
     runs-on: ubuntu-latest
     # 25 -> 30: this job was already finishing at 24.6 of its 25 min before any
     # JAX change, so it had no headroom at all. See test-full's cap note.
+    #
+    # This was the only compile-bound job still running a COLD JAX cache, which is
+    # why it kept being the one with no headroom: measured 23m14s, then 28m24s once
+    # the G.10 branch added 47 gradient tests, and a 30m07s cancellation in between
+    # -- with pytest itself reporting "778 passed, 47 skipped" before the axe fell.
+    # The cache below is the same mechanism test-full and test-mac-runtime already
+    # use, and it targets what CLAUDE.md names as the binding cost: compilation.
     timeout-minutes: 30
     strategy:
       fail-fast: false
@@ -156,6 +163,7 @@ jobs:
         python-version: ["3.11", "3.12"]
     env:
       JAX_ENABLE_X64: "1"
+      JACCPOT_TEST_JAX_CACHE_DIR: ${{ github.workspace }}/.jax_cache
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -164,6 +172,20 @@ jobs:
         with:
           python-version: ${{ matrix.python-version }}
           cache: pip
+      - name: Restore JAX compilation cache
+        uses: actions/cache@v4
+        with:
+          path: ${{ github.workspace }}/.jax_cache
+          # Keyed per Python version as well as per source hash: the matrix legs
+          # compile with different interpreters, and the existing keys' note about
+          # disjoint sets overwriting each other applies between them too.
+          key: jax-compile-smoke-py${{ matrix.python-version }}-${{ hashFiles('jaccpot/**/*.py') }}
+          # The prefix fallback is what makes a library change only PARTIALLY cold
+          # instead of fully: without it, any edit under jaccpot/ would put this job
+          # back to a 28-minute cold run, and a cancelled job never saves a cache --
+          # so one over-budget run would keep the next one cold indefinitely.
+          restore-keys: |
+            jax-compile-smoke-py${{ matrix.python-version }}-
       - name: Install package + dev tools
         run: |
           python -m pip install --upgrade pip
