@@ -171,23 +171,40 @@ def mutual_near_field_forces(
 
     Parameters
     ----------
-    positions, masses :
-        ``(N, 3)`` / ``(N,)`` in Morton-sorted order. Differentiable inputs.
-    leaf_particles, leaf_particle_valid :
-        ``(L, S)`` padded particle indices per leaf and their validity mask.
-    near_a, near_b, near_valid :
-        Canonical cross-leaf pairs as **leaf-list indices**, padded to a whole
-        number of chunks; ``near_valid`` masks the padding.
-    self_leaves :
+    positions : Array
+        ``(N, 3)`` particle positions in Morton-sorted order. Differentiable.
+    masses : Array
+        ``(N,)`` particle masses in Morton-sorted order. Differentiable.
+    leaf_particles : Array
+        ``(L, S)`` padded particle indices per leaf.
+    leaf_particle_valid : Array
+        ``(L, S)`` mask marking which slots of ``leaf_particles`` are real.
+    near_a : Array
+        Canonical cross-leaf pair's first leaf, as a **leaf-list index**.
+    near_b : Array
+        Canonical cross-leaf pair's second leaf, as a **leaf-list index**.
+    near_valid : Array
+        Mask over the pair list; the lists are padded to a whole number of chunks
+        and this marks the padding.
+    self_leaves : Array
         ``(L,)`` leaf-list indices whose intra-leaf interactions are evaluated.
-    rung, level_weights :
-        Optional block-step level weighting; see the module docstring.
-    use_pallas, interpret :
+    softening : float
+        Plummer softening length.
+    G : float
+        Gravitational constant.
+    rung : Optional[Array]
+        Per-particle block-step rung, or ``None`` for an unweighted evaluation.
+    level_weights : Optional[Array]
+        ``(k_max + 1,)`` per-level weights; see the module docstring.
+    chunk_size : Optional[int]
+        Leaf pairs per scan step; ``None`` derives it from the pair-tensor budget.
+    use_pallas : bool
         Route the leaf-pair blocks through
         :mod:`jaccpot.pallas.nearfield_mutual` (Pallas forward + hand-written
-        analytic reverse) instead of the pure-JAX tensors. ``interpret`` runs the
-        same kernel logic under CPU semantics, which is what keeps the parity
-        tests non-vacuous off-GPU.
+        analytic reverse) instead of the pure-JAX tensors.
+    interpret : bool
+        Run the Pallas kernel under CPU interpret semantics, which is what keeps
+        the parity tests non-vacuous off-GPU.
 
     Returns
     -------

@@ -61,31 +61,53 @@ class MutualTopology:
 
     Attributes
     ----------
-    num_particles, num_nodes, num_internal :
-        Sizes. Node ids ``[0, num_internal)`` are internal, ``[num_internal,
-        num_nodes)`` are leaves -- the yggdrax radix-tree convention.
-    left_child, right_child :
-        ``(num_internal,)`` global child node ids, ``-1`` where absent.
-    parent_of_level_nodes, level_nodes :
-        Per-depth node groupings used to drive the upward (M2M) and downward
-        (L2L) cascades as *static* Python loops -- one batched call per tree
-        level, no traced loop bound. ``level_nodes[d]`` holds the nodes at depth
-        ``d + 1`` and ``parent_of_level_nodes[d]`` their parents, so the pair is
-        exactly the translation edge set of that level.
-    leaf_nodes :
+    num_particles : int
+        Number of particles the topology was built for.
+    num_nodes : int
+        Total tree nodes. Ids ``[0, num_internal)`` are internal and
+        ``[num_internal, num_nodes)`` are leaves -- the yggdrax radix convention.
+    num_internal : int
+        Number of internal nodes, i.e. the id at which the leaves start.
+    max_leaf_size : int
+        Widest leaf, and so the padded block width ``S``.
+    order : int
+        Multipole expansion order the far-field kernels will run at.
+    theta : float
+        Multipole acceptance parameter the traversal was built with.
+    left_child : np.ndarray
+        ``(num_internal,)`` global left-child node ids, ``-1`` where absent.
+    right_child : np.ndarray
+        ``(num_internal,)`` global right-child node ids, ``-1`` where absent.
+    level_nodes : Tuple[np.ndarray, ...]
+        Per-depth node groupings driving the M2M and L2L cascades as *static*
+        Python loops -- one batched call per tree level, no traced loop bound.
+        ``level_nodes[d]`` holds the nodes at depth ``d + 1``.
+    parent_of_level_nodes : Tuple[np.ndarray, ...]
+        The parents of ``level_nodes[d]``, so the pair is exactly that level's
+        translation edge set.
+    leaf_nodes : np.ndarray
         ``(num_leaves,)`` leaf node ids in ascending order.
-    leaf_particles, leaf_particle_valid :
-        ``(num_leaves, max_leaf_size)`` padded particle indices (into the
-        Morton-sorted order) and their validity mask. Padding slots point at
-        particle 0 and are masked; they never contribute.
-    far_a, far_b :
-        ``(num_far,)`` canonical well-separated node pairs, ``far_a < far_b``.
-    near_a, near_b :
-        ``(num_near,)`` canonical near **leaf** pairs, ``near_a < near_b``.
-        Self-pairs are held separately in ``leaf_nodes``.
-    node_particle_ranges :
-        ``(num_nodes, 2)`` inclusive particle span per node, used to assign a
-        rung to a cell.
+    leaf_particles : np.ndarray
+        ``(num_leaves, max_leaf_size)`` padded particle indices into the
+        Morton-sorted order. Padding slots point at particle 0 and are masked.
+    leaf_particle_valid : np.ndarray
+        ``(num_leaves, max_leaf_size)`` mask marking the real slots.
+    far_a : np.ndarray
+        ``(num_far,)`` first node of each canonical well-separated pair.
+    far_b : np.ndarray
+        ``(num_far,)`` second node, with ``far_a < far_b``.
+    near_a : np.ndarray
+        ``(num_near,)`` first leaf of each canonical near leaf pair.
+    near_b : np.ndarray
+        ``(num_near,)`` second leaf, with ``near_a < near_b``. Leaf self-pairs are
+        held separately in ``leaf_nodes``.
+    node_particle_ranges : np.ndarray
+        ``(num_nodes, 2)`` inclusive particle span per node, used to assign a rung
+        to a cell.
+    inverse_permutation : np.ndarray
+        Morton-sorted -> original particle order.
+    forward_permutation : np.ndarray
+        Original -> Morton-sorted particle order.
     """
 
     num_particles: int

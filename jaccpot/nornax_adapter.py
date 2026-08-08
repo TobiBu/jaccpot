@@ -77,33 +77,41 @@ class BlockStepFMM:
 
     Parameters
     ----------
-    theta :
+    softening : float
+        Plummer softening ``1 / (r^2 + eps^2)^{3/2}``.
+    k_max : int
+        Highest block-step rung. Levels run ``0 .. k_max``.
+    theta : float
         Multipole acceptance parameter of the mutual MAC
         ``theta * |c_B - c_A| > R_A + R_B``. Sets the force accuracy; it has no
         effect on momentum conservation, which is structural.
-    max_order :
+    max_order : int
         Multipole expansion order ``p``.
-    softening :
-        Plummer softening ``1 / (r^2 + eps^2)^{3/2}``.
-    G :
+    G : float
         Gravitational constant.
-    k_max :
-        Highest block-step rung. Levels run ``0 .. k_max``.
-    basis :
+    basis : str
         Only ``"real"`` (the Dehnen real spherical-harmonic submode) is
         supported. It is the production basis and roughly halves the flops and
         memory of the complex submode; the cartesian basis has no mutual
         operators here.
-    backend :
+    backend : str
         ``"jax"`` (default) runs the pure-JAX kernels, differentiable by generic
         autodiff. ``"pallas"`` additionally routes the real-basis z-axis M2L
         translation -- the far-field hotspot -- through jaccpot's Pallas kernel
         where the hardware supports it, falling back to pure JAX otherwise.
-    leaf_size :
+    leaf_size : int
         Target particles per leaf for the tree build.
-    pallas_interpret :
+    near_chunk_size : Optional[int]
+        Leaf pairs per near-field scan step; ``None`` derives it from the
+        pair-tensor memory budget.
+    pallas_interpret : bool
         Run the Pallas kernels in interpret mode. Works without a GPU, so it lets
         the Pallas path's *logic* be exercised on CPU; far too slow for real use.
+
+    Raises
+    ------
+    ValueError
+        If ``basis`` or ``backend`` is unsupported, or ``k_max`` is negative.
     """
 
     def __init__(
@@ -335,13 +343,24 @@ class BlockStepFMM:
 
         Parameters
         ----------
-        active_floor :
+        positions : Array
+            ``(N, 3)`` particle positions, in the caller's original order.
+        velocities : Array
+            ``(N, 3)`` velocities to kick.
+        masses : Array
+            ``(N,)`` particle masses.
+        rung : Array
+            ``(N,)`` per-particle block-step rung, in ``[0, k_max]``.
+        active_floor : Any
             Smallest level kicked at this boundary (nornax's
             ``active_level_floor(s, k_max)``). May be a tracer.
-        half :
+        dt_max : Any
+            Base-step timestep; level ``k`` is kicked with ``half * dt_max / 2**k``.
+            May be a tracer.
+        half : Any
             ``0.5`` at the base step's synchronized ends, ``1.0`` inside. May be
             a tracer.
-        level_weights :
+        level_weights : Optional[Array]
             The ``(k_max + 1,)`` weight vector, supplied directly instead of being
             derived from ``active_floor``/``half``/``dt_max``. Takes precedence
             over all three, which are then ignored.
@@ -355,11 +374,19 @@ class BlockStepFMM:
             :func:`~jaccpot.mutual.force.boundary_weight_table` -- indexable with a
             traced boundary index -- collapses that to a single traced kick while
             keeping the runtime win.
+        args : object
+            Unused; present for the ``MutualForceModel`` protocol's signature.
 
         Returns
         -------
         Array
             Updated velocities.
+
+        Raises
+        ------
+        ValueError
+            If neither ``level_weights`` nor both ``active_floor`` and ``dt_max``
+            are given, or ``level_weights`` has the wrong length for ``k_max``.
         """
         del args
         state = self._require_state(positions, masses)
