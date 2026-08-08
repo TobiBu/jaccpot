@@ -1114,9 +1114,10 @@ class EvaluateMixin:
         bit-exactly** -- the two differ in edge order, hence in accumulation
         order. Asserted by
         ``tests/integration/test_fmm.py::test_nearfield_bucketed_matches_baseline``
-        at ``rtol=atol=1e-5``; see
+        over N x dtype x chunk size, at ``1e-6`` (fp32) and ``1e-13`` (fp64) --
+        both derived from measured round-off. See
         :func:`~jaccpot.nearfield.near_field.compute_leaf_p2p_accelerations` for
-        what that one configuration does and does not cover.
+        why the fp64 cases are the ones that can actually fail.
 
         The extra value ``"fast_lane"`` is not a mode of the edge-list kernel at
         all: it re-expresses the near field leaf-major and routes it through

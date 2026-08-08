@@ -738,11 +738,6 @@ def merge_bounding_spheres(
     a_contains_b = radius_a >= dist + radius_b
     b_contains_a = radius_b >= dist + radius_a
     merged_radius = 0.5 * (dist + radius_a + radius_b)
-    shift = (
-        ((merged_radius - radius_a) / dist)[:, None]
-        if delta.ndim == 2
-        else ((merged_radius - radius_a) / dist) * delta
-    )
     if delta.ndim == 1:
         merged_center = center_a + ((merged_radius - radius_a) / dist) * delta
         center = jnp.where(a_contains_b[..., None], center_a, merged_center)

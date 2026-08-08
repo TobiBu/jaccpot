@@ -123,6 +123,17 @@ cells, and the flattened centrally-concentrated distribution that stresses the t
 - Gradients against finite differences and against `jax.grad` of the direct sum.
 - Path equivalences: reference vs. fused, real vs. complex, fast lane vs. general.
 
+**A gradient test at a default leaf size covers no far field.** Assert the M2L pair count,
+not just the gradient. Measured at `theta=0.5`, N=128: `leaf_size=4` accepts 110 M2L pairs and
+`leaf_size` 8, 16 and 32 accept **zero** — the tree is too shallow for the MAC to accept any
+box pair, so the entire far-field reverse (M2M → M2L → L2L) is never traced. The test then
+exercises the near field only, and *passes*, looking like far-field coverage.
+`tests/unit/test_gradient_correctness.py` carries a `min_far` parameter for exactly this
+reason, and `tests/characterization/test_fmm_grad_golden.py` asserts the count per case plus a
+standalone guard that goes red if a shallow tree ever starts accepting pairs. Any new gradient
+test needs the same gate: "the test passed but covered nothing" is the failure this section
+exists to prevent.
+
 **`tests/characterization/`** — the golden references (`test_fmm_golden.py`). These exist so a
 refactor cannot silently move a number. If a golden moves:
 

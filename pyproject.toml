@@ -188,11 +188,14 @@ omit = [
   # since the failure this replaces was a glob quietly absorbing covered code.
   "jaccpot/experimental/octree_fmm_uvwx.py",
   "jaccpot/experimental/treecode_far_near.py",
-  # GPU-only fused real-basis Pallas kernel (Ampere+). Unlike the other Pallas
-  # kernels (which the CPU CI exercises via interpret=True), this one has no
-  # interpret path, so CPU CI structurally cannot reach it; it is validated by
-  # the manual A100 Pallas parity runs.
-  "jaccpot/pallas/m2l_real_fused.py",
+  # `jaccpot/pallas/m2l_real_fused.py` used to be omitted here too, on the stated
+  # grounds that it "has no interpret path, so CPU CI structurally cannot reach
+  # it". That was untrue, and it is the same failure this list already documents
+  # one entry above: an omit hiding a well-covered module behind a wrong reason.
+  # Measured on CPU, from `tests/test_m2l_real_fused_pallas.py` and
+  # `tests/unit/test_custom_vjp_parity.py` alone: 191 statements, 12 missed, 92%.
+  # Both suites call `m2l_real_fused_pallas(..., interpret=True)` and say so in
+  # their module docstrings. Removed, so the module is measured like any other.
 ]
 
 [tool.coverage.report]
