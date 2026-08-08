@@ -125,7 +125,7 @@ _kernel_cvjp.defvjp(_kernel_fwd, _kernel_bwd)
 - Dispatch (all trace-time, `runtime/kernels/core.py`): `_apply_m2l` (L1708) →
   `_apply_real_m2l` (L1569) / `_apply_complex_m2l` (L1673); gates `_real_m2l_pallas_active`
   (L1519, env `JACCPOT_STATIC_STRICT_FUSED_M2L_PALLAS` + sm_80) / `_fused_complex_m2l_pallas_active` (L1594).
-- Parity tests: `tests/test_m2l_complex_fused_pallas.py` (**cleanest template** — clone it),
+- Parity tests: `tests/unit/operators/test_m2l_complex_fused_pallas.py` (**cleanest template** — clone it),
   `tests/unit/operators/test_pallas_m2l_core_z_real.py`. **GAP: `m2l_real_fused` has NO
   parity test — add one** (forward: `m2l_real_fused_pallas` interpret vs `m2l_real_fused_jax`).
 

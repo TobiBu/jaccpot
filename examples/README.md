@@ -34,7 +34,7 @@ and scripts, each with a clear job.
 
 - [`benchmark_gpu_n_ladder_production.py`](/export/home/tbuck/jaccpot/examples/benchmark_gpu_n_ladder_production.py)
   Production-oriented large-`N` parameter sweep. Writes recommendation tables to
-  [`benchmarks/n_ladder_production/`](/export/home/tbuck/jaccpot/benchmarks/n_ladder_production).
+  [`bench/results/n_ladder_production/`](../bench/results/n_ladder_production).
 - [`profile_prepare_residuals.py`](/export/home/tbuck/jaccpot/examples/profile_prepare_residuals.py)
   Command-line profiler for breaking down `prepare_state()` residual runtime and
   separating traversal-like cost from surrounding support work.

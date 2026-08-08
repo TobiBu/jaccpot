@@ -163,7 +163,7 @@ def _resolve_basis_input(basis: Union[Basis, BasisInterface, str]) -> _BasisReso
     configuration; it is not what the suite enforces, and it does not carry to
     fp32. What the suite asserts is relative L2 below 1e-6 for the fp64
     acceleration-and-derivative-tower parity
-    (``tests/test_real_basis_runtime.py::test_real_basis_acceleration_derivatives_match_complex``,
+    (``tests/integration/test_real_basis_runtime.py::test_real_basis_acceleration_derivatives_match_complex``,
     N=128) and below 3e-2 for the fp32 tracking test at N=96 -- the latter being
     considerably slacker than fp32 basis-change round-off should require, which is
     a tolerance worth re-measuring rather than a difference worth expecting.
@@ -384,7 +384,43 @@ def _pop_legacy_runtime_overrides(
 
 
 class FastMultipoleMethod:
-    """Simplified, preset-first high-level FMM API."""
+    """Preset-first facade over the FMM engine. The only public class.
+
+    Construction is deliberately shallow: pick a :class:`~jaccpot.FMMPreset`, then
+    override individual things through ``advanced=``
+    (:class:`~jaccpot.FMMAdvancedConfig`). The 19 keyword-only constructor arguments
+    here resolve, together with the preset, into the engine's much wider argument
+    set -- so this signature is the supported surface and is frozen by
+    ``tests/unit/test_public_api_surface.py``. The engine class in
+    ``runtime/_fmm_impl.py`` happens to share this name and is an implementation
+    detail reached only through this facade.
+
+    Every argument is keyword-only. The ones worth knowing before reading the
+    per-argument docs:
+
+    * ``basis`` defaults to ``"real"`` (Dehnen real harmonics), which is what the
+      production radix large-N fast lane runs end to end with no complex<->real
+      conversion. ``"solidfmm"``/``"complex"`` are the same basis under two names
+      and stay selectable for cross-checking; ``"cartesian"`` is **experimental**
+      and warns -- its relative L2 force error is ~1.8e-1 *independent of expansion
+      order*, a divergent-series signature rather than truncation.
+    * ``use_pallas=None`` resolves at construction: Pallas near field on where it
+      can run (Ampere sm_80+), pure-JAX on sm_75 and CPU. An explicit ``True`` or
+      ``False`` wins.
+    * ``theta`` is the opening angle; smaller is more accurate and slower.
+
+    Notes
+    -----
+    Accuracy and gradient behaviour are properties of the *methods*, not the
+    constructor, and are documented there:
+    :meth:`compute_accelerations` for the forward path and
+    :meth:`differentiable_accelerations` for exact fixed-topology gradients w.r.t.
+    positions and masses. ``prepare_state`` is not traceable, so a ``state`` for the
+    differentiable path must be built once, concretely, before ``jax.grad``.
+
+    The differentiable path is configured through :class:`~jaccpot.GradConfig`, not
+    through this constructor.
+    """
 
     def __init__(
         self,

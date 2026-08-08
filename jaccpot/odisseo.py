@@ -23,7 +23,38 @@ def _extract_positions_from_state(state: Array) -> Array:
 
 @dataclass
 class OdisseoFMMCoupler:
-    """Cache-oriented adapter for coupling ODISSEO and Jaccpot FMM."""
+    """Adapter that lets ODISSEO reuse one prepared FMM state across steps.
+
+    ODISSEO integrates with a fixed particle set whose positions move each step, so
+    the expensive part -- the tree build and interaction lists -- can be built once
+    and reused while only the numerics are re-evaluated. This holds that state and
+    the masses it was built against.
+
+    Not frozen, because :meth:`prepare` and :meth:`clear` mutate the cache. Not
+    thread-safe, and not a pytree: the cached state is a host-side object, so a
+    coupler instance must not be closed over by a jitted function.
+
+    **The cache is not self-invalidating**, and that is the thing to know before
+    using this in a long run. :meth:`accelerations` reuses the cached tree unless
+    you pass ``rebuild_sources=True``; it does not measure drift and will not warn.
+    Once the particles have moved far enough that the cached partition is wrong, the
+    forces come back computed against the stale partition, with no error and no NaN.
+    The caller owns the rebuild cadence. :meth:`clear` drops the cache outright.
+
+    Two private fields hold the cache -- ``_prepared_state`` (``None`` before the
+    first :meth:`prepare`) and ``_masses`` (the masses that state was built
+    against), which is why ``masses`` is required on the first
+    :meth:`accelerations` call and optional afterwards.
+
+    Attributes
+    ----------
+    solver : FastMultipoleMethod
+        The solver used to build and evaluate state.
+    leaf_size : int
+        Default leaf size for :meth:`prepare`, overridable per call.
+    max_order : int
+        Default expansion order for :meth:`prepare`, overridable per call.
+    """
 
     solver: FastMultipoleMethod
     leaf_size: int = 16

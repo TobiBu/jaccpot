@@ -18,7 +18,7 @@ regardless of compute capability -- real Pallas GPU execution needs Ampere+
 (sm_80), which the dev box (RTX 2080 Ti, sm_75) does not have. See
 docs/phase5_pallas_plan.md.
 
-    pytest tests/test_m2l_complex_fused_pallas.py -q
+    pytest tests/unit/operators/test_m2l_complex_fused_pallas.py -q
 """
 
 import jax

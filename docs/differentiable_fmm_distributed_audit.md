@@ -315,7 +315,7 @@ the win is 2x on one stage of a pipeline whose hotspot is unprofiled, so it is a
 **scaling** improvement to make when >2 GPUs are actually in play — and the cost
 model above says the gap widens as `ndev` grows (8x at ndev=8).
 
-**Guard.** `tests/test_distributed_grad_correctness.py::test_forward_survives_a_gradient`
+**Guard.** `tests/distributed/test_distributed_grad_correctness.py::test_forward_survives_a_gradient`
 asserts a forward evaluated after a gradient is bit-identical, for both the
 differentiable and the forward-only evaluator. Without that assertion this class
 of bug is invisible: every individual gradient looks right, and the *forward*
@@ -445,7 +445,7 @@ Scoped honestly, so nothing here reads as a broader claim than was measured.
 * **The upstream ragged bug is worked around, not fixed.** The workaround is one
   argument: `make_force_evaluator(..., halo_exchange=...)`, defaulting to the safe
   `"buf"`. After a JAX upgrade, run
-  `JACCPOT_CHECK_UPSTREAM_RAGGED_FIX=1 pytest tests/test_distributed_grad_correctness.py`
+  `JACCPOT_CHECK_UPSTREAM_RAGGED_FIX=1 pytest tests/distributed/test_distributed_grad_correctness.py`
   -- `test_native_halo_exchange_is_fixed_upstream` differentiates through
   `"native"` and checks the forward afterwards. When it passes, make `"native"` the
   default and delete `_grad_halo_exchange`. A draft of the upstream report is in
@@ -458,7 +458,7 @@ Scoped honestly, so nothing here reads as a broader claim than was measured.
 ```bash
 export CUDA_VISIBLE_DEVICES=$(autocvd -n 2 -l -o)
 XLA_PYTHON_CLIENT_PREALLOCATE=false JAX_ENABLE_X64=1 \
-  pytest tests/test_distributed_grad_correctness.py -o addopts="" -q
+  pytest tests/distributed/test_distributed_grad_correctness.py -o addopts="" -q
 ```
 
 The upstream ragged-collective bug reproduces on its own with

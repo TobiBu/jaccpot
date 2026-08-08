@@ -2857,6 +2857,13 @@ def _evaluate_tree_compiled_impl(
 
 def _evaluate_prepared_tree(
     *,
+    # NOTE: deliberately an unresolvable forward reference. Every other module that
+    # annotates the engine now imports it under `if TYPE_CHECKING:`, but this one must
+    # not: `runtime/kernels/` is a true leaf and "never imports the engine" is the
+    # hinge of the layering (ARCHITECTURE §1), which `distributed/` and
+    # `experimental/` rely on by reaching past the orchestrator into here. A
+    # TYPE_CHECKING import would not run, but it would still make this file name the
+    # engine, so the annotation stays documentation-only.
     fmm: "FastMultipoleMethod",
     tree: Tree,
     positions_sorted: Array,
@@ -3400,6 +3407,13 @@ def _evaluate_local_expansions_for_target_particles(
 
 def _evaluate_prepared_tree_targets(
     *,
+    # NOTE: deliberately an unresolvable forward reference. Every other module that
+    # annotates the engine now imports it under `if TYPE_CHECKING:`, but this one must
+    # not: `runtime/kernels/` is a true leaf and "never imports the engine" is the
+    # hinge of the layering (ARCHITECTURE §1), which `distributed/` and
+    # `experimental/` rely on by reaching past the orchestrator into here. A
+    # TYPE_CHECKING import would not run, but it would still make this file name the
+    # engine, so the annotation stays documentation-only.
     fmm: "FastMultipoleMethod",
     tree: Tree,
     positions_sorted: Array,

@@ -28,12 +28,38 @@ Basis = Literal["cartesian", "solidfmm", "complex", "real"]
 FarFieldMode = Literal["auto", "pair_grouped", "class_major"]
 NearFieldMode = Literal["auto", "baseline", "bucketed"]
 GradNearFieldLane = Literal["auto", "bucketed", "fast_lane"]
+#: How the runtime should trade peak memory against throughput when it resolves
+#: chunk sizes, streaming and schedule precomputation. ``"balanced"`` is the default;
+#: ``"minimum_memory"`` is what ``FMMPreset.LARGE_N_GPU`` canonicalizes to, and is
+#: what makes galaxy-scale runs fit. Public: exported from ``jaccpot``.
 MemoryObjective = Literal["balanced", "throughput", "minimum_memory"]
 FMMExecutionBackend = Literal["auto", "radix", "octree"]
 
 
 class FMMPreset(str, Enum):
-    """User-facing quality/speed presets."""
+    """User-facing quality/speed presets.
+
+    A ``str`` enum, so ``preset="fast"`` and ``preset=FMMPreset.FAST`` are
+    interchangeable everywhere. The four members are frozen by
+    ``tests/unit/test_public_api_surface.py``.
+
+    Presets resolve by two different routes, which matters when tracing why a knob
+    took the value it did: ``FAST`` and ``LARGE_N_GPU`` resolve through first-class
+    bundles in :func:`jaccpot.runtime.fmm_presets.get_preset_config`, while
+    ``BALANCED`` and ``ACCURATE`` resolve through advanced-config defaults in
+    ``solver._default_advanced_for_preset`` and never reach ``get_preset_config``
+    at all. See ARCHITECTURE.md section 6.
+
+    The members, in increasing cost:
+
+    * ``FAST`` -- lowest accuracy, lowest cost. The default.
+    * ``BALANCED`` -- middle ground; resolves through advanced-config defaults.
+    * ``ACCURATE`` -- tightest accuracy settings. What the golden characterization
+      suite uses.
+    * ``LARGE_N_GPU`` -- galaxy-scale GPU profile, canonicalized to the low-memory
+      streamed fast path (see :class:`RuntimePolicyConfig`). Measured at 1M
+      particles: forward 2.5 s, forward+backward 69 s, 11 GB peak.
+    """
 
     FAST = "fast"
     BALANCED = "balanced"
@@ -43,7 +69,28 @@ class FMMPreset(str, Enum):
 
 @dataclass(frozen=True)
 class TreeConfig:
-    """Tree-construction overrides for advanced runtime tuning."""
+    """Tree-construction overrides for advanced runtime tuning.
+
+    Frozen. Every field defaults to ``None`` meaning "leave the preset's choice
+    alone" -- so an instance with one field set overrides exactly that one thing.
+
+    Attributes
+    ----------
+    tree_type : Optional[str]
+        Yggdrax tree family, e.g. ``"radix"`` (the production default) or
+        ``"kdtree"``.
+    mode : Optional[str]
+        Builder selector, ``"lbvh"`` or ``"fixed_depth"``.
+    leaf_target : Optional[int]
+        Desired particles per leaf for fixed-depth builds. Note this is a *target*;
+        the achieved occupancy is padded to a static bound at prepare time.
+    refine_local : Optional[bool]
+        Enable the host-side refinement pass that splits elongated leaves.
+    max_refine_levels : Optional[int]
+        Depth cap for that refinement pass.
+    aspect_threshold : Optional[float]
+        Leaf aspect ratio above which refinement splits a leaf.
+    """
 
     tree_type: Optional[str] = None
     mode: Optional[str] = None
@@ -55,7 +102,42 @@ class TreeConfig:
 
 @dataclass(frozen=True)
 class FarFieldConfig:
-    """Far-field interaction and translation-kernel overrides."""
+    """Far-field interaction and translation-kernel overrides.
+
+    Frozen. ``None`` means "leave the preset's choice alone"; the non-``None``
+    defaults below are the actual defaults, not placeholders.
+
+    Attributes
+    ----------
+    grouped_interactions : Optional[bool]
+        Group M2L pairs into displacement classes so one rotation block serves a
+        whole class. Requires geometric (not centre-of-mass) expansion centres,
+        because the classification quantises pair displacements onto a lattice and
+        applies one representative displacement per class.
+    mode : FarFieldMode
+        ``"auto"``, ``"pair_grouped"`` or ``"class_major"``. Must not be left at
+        ``"auto"`` by the time the grouped M2L runs -- an unresolved ``"auto"``
+        used to reach the kernel and raise.
+    rotation : Optional[str]
+        M2L rotation implementation, e.g. ``"solidfmm"`` or ``"cached"``.
+    m2l_chunk_size : Optional[int]
+        Pairs per chunk in the chunked M2L ``lax.scan``. A memory/throughput knob;
+        it bounds peak memory rather than changing the result.
+    l2l_chunk_size : Optional[int]
+        The same for the L2L cascade.
+    streamed_far_pairs : Optional[bool]
+        Stream the far-pair list instead of materialising it, trading recompute
+        for peak memory.
+    mixed_order : bool
+        Allow per-pair expansion orders in the far field.
+    mixed_order_min_order : Optional[int]
+        Floor on the per-pair order when ``mixed_order`` is on.
+    retain_far_pairs_for_grad : bool
+        Keep the frozen M2L pair list on the prepared state so a gradient path can
+        re-run the downward sweep against it. Costs ~24 B/pair of steady-state
+        memory, so it is off by default (the large-N preset targets minimum
+        memory); **required** to differentiate the large-N path.
+    """
 
     grouped_interactions: Optional[bool] = None
     mode: FarFieldMode = "auto"
@@ -74,7 +156,26 @@ class FarFieldConfig:
 
 @dataclass(frozen=True)
 class NearFieldConfig:
-    """Near-field direct-interaction strategy overrides."""
+    """Near-field direct-interaction strategy overrides.
+
+    Frozen.
+
+    Attributes
+    ----------
+    mode : NearFieldMode
+        ``"auto"``, ``"baseline"`` or ``"bucketed"``. The two concrete modes agree
+        **to round-off, not bit-exactly** -- they differ in edge order, hence in
+        accumulation order. See
+        :func:`jaccpot.nearfield.near_field.compute_leaf_p2p_accelerations`.
+    edge_chunk_size : int
+        Chunk width for the bucketed edge scan. A performance knob, not a
+        numerical one.
+    precompute_scatter_schedules : bool
+        Build the bucketed scatter schedules at prepare time instead of per
+        evaluation. Falls back silently and safely when the schedule would exceed
+        its cap or overflow int32, which is a normal production state rather than
+        an error.
+    """
 
     mode: NearFieldMode = "auto"
     edge_chunk_size: int = 256
@@ -165,17 +266,70 @@ class TraversalOverrides:
 
 @dataclass(frozen=True)
 class RuntimePolicyConfig:
-    """Execution-policy overrides for tree build and traversal.
+    """Execution-policy overrides for tree build, traversal and caching.
 
-    Notes:
-    - For `preset='large_n_gpu'`, runtime policy is canonicalized to the
-      production low-memory fast path (minimum_memory + streamed pair_grouped
-      + bucketed nearfield).
-    - ``traversal_config`` accepts a :class:`TraversalOverrides` (or a ``dict``
-      with the same keys) for a field-by-field merge onto the preset's resolved
-      capacities, or a full ``DualTreeTraversalConfig`` for the legacy
-      replace-everything behaviour. The latter warns, because replacing the
-      object also replaces the capacities you did not mean to change.
+    Frozen. This is the largest of the override groups and the one most likely to
+    change *how* a run executes rather than what it computes.
+
+    Notes
+    -----
+    For ``preset="large_n_gpu"``, runtime policy is canonicalized to the production
+    low-memory fast path (``minimum_memory`` + streamed ``pair_grouped`` + bucketed
+    near field), so overrides that contradict that profile are overridden back.
+
+    ``traversal_config`` accepts a :class:`TraversalOverrides` (or a ``dict`` with
+    the same keys) for a field-by-field merge onto the preset's resolved capacities,
+    or a full ``DualTreeTraversalConfig`` for the legacy replace-everything
+    behaviour. The latter warns, because replacing the object also replaces the
+    capacities you did not mean to change -- measured at N=65536, an override
+    intended as a no-op made a run 3x slower.
+
+    Attributes
+    ----------
+    execution_backend : FMMExecutionBackend
+        ``"auto"``, ``"radix"`` or ``"octree"``. ``"auto"`` may choose; an explicit
+        request is honoured or fails loudly, never silently substituted.
+    host_refine_mode : str
+        Whether leaf refinement runs on the host, on device, or by policy.
+    fail_fast : bool
+        Raise instead of falling back when a requested configuration cannot run.
+    jit_tree : Optional[bool]
+        Compile the tree build. ``None`` leaves the policy decision to the runtime.
+    jit_traversal : Optional[bool]
+        Compile the dual-tree traversal.
+    memory_objective : MemoryObjective
+        ``"balanced"``, ``"throughput"`` or ``"minimum_memory"``; steers the
+        chunk-size and streaming defaults.
+    memory_budget_bytes : Optional[int]
+        Advisory ceiling used when resolving those defaults.
+    max_pair_queue : Optional[int]
+        Legacy single-capacity override for the traversal pair queue. Prefer
+        ``traversal_config`` with :class:`TraversalOverrides`.
+    pair_process_block : Optional[int]
+        Legacy override for the traversal process-block width.
+    traversal_config : Optional[Any]
+        Traversal capacities -- see the note above for the two accepted forms and
+        why they behave differently.
+    enable_interaction_cache : bool
+        Reuse the process-level interaction-list cache across calls.
+    retain_traversal_result : bool
+        Keep the dual-tree walk result on the prepared state.
+    retain_interactions : bool
+        Keep the resolved M2L interaction list on the prepared state.
+    prepare_stage_memory_split_enabled : Optional[bool]
+        Split the prepare stage to lower peak memory at some throughput cost.
+    autotune_m2l_chunk : bool
+        Measure and pick the M2L chunk size at prepare time. Off by default, and
+        consequently the autotune path is thinly covered.
+    precompute_grouped_class_segments : Optional[bool]
+        Build grouped-class segment tables at prepare time.
+    grouped_schedule_budget_bytes : Optional[int]
+        Byte budget above which grouped-class precomputation is skipped.
+    nearfield_schedule_item_cap : Optional[int]
+        Item cap above which the near-field scatter schedules fall back to being
+        recomputed per evaluation.
+    upward_leaf_batch_size : Optional[int]
+        Leaves per batch in the P2M sweep.
     """
 
     execution_backend: FMMExecutionBackend = "auto"
@@ -300,7 +454,34 @@ class GradConfig:
 
 @dataclass(frozen=True)
 class FMMAdvancedConfig:
-    """Aggregate container for all advanced FMM override groups."""
+    """Aggregate container for all advanced FMM override groups.
+
+    Frozen, and the single ``advanced=`` argument of
+    :class:`jaccpot.FastMultipoleMethod`. Each group defaults to its own
+    all-defaults instance, so overriding one field of one group leaves everything
+    else at the preset's resolution:
+
+    >>> FMMAdvancedConfig(farfield=FarFieldConfig(retain_far_pairs_for_grad=True))
+
+    ``jaccpot.runtime.fmm_state._resolve_fmm_config`` normalises this, the preset,
+    and the constructor arguments into a single validated ``FMMResolvedConfig``.
+
+    Attributes
+    ----------
+    tree : TreeConfig
+        Tree-construction overrides.
+    farfield : FarFieldConfig
+        Far-field interaction and translation-kernel overrides.
+    nearfield : NearFieldConfig
+        Near-field strategy overrides.
+    runtime : RuntimePolicyConfig
+        Execution-policy overrides.
+    mac_type : Optional[str]
+        Multipole acceptance criterion, e.g. ``"bh"`` or ``"dehnen"``. Lives here
+        rather than in a group because it straddles traversal and accuracy.
+    dehnen_radius_scale : float
+        Scale applied to node radii in the Dehnen MAC.
+    """
 
     tree: TreeConfig = TreeConfig()
     farfield: FarFieldConfig = FarFieldConfig()

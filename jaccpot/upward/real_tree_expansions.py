@@ -264,7 +264,7 @@ def prepare_real_upward_sweep(
     ``int``, it is safe to omit (the padded shape-derived depth is used -- correct,
     just slower), and it is **bit-identical** to the padded result: asserted for
     this sweep by
-    ``tests/test_real_upward_sweep.py::test_real_static_num_levels_bit_identical_to_padded``.
+    ``tests/unit/core/test_real_upward_sweep.py::test_real_static_num_levels_bit_identical_to_padded``.
     """
 
     p = int(max_order)

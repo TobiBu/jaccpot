@@ -8,6 +8,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
+from jaxtyping import TypeCheckError
 from yggdrax.dtypes import INDEX_DTYPE
 from yggdrax.geometry import compute_tree_geometry
 from yggdrax.interactions import build_leaf_neighbor_lists
@@ -1142,3 +1143,76 @@ def test_prepare_leaf_neighbor_pairs_drops_padding_edges():
     assert jnp.array_equal(valid, expected_valid)
     # The masked-out slots may hold anything; only the valid ones are contractual.
     assert bool(jnp.all(source_ids[valid] >= 0))
+
+
+# ---------------------------------------------------------------------------
+# Staticness contracts. These are documented in
+# `compute_leaf_p2p_accelerations`'s `Raises` / `Parameters` sections and, before
+# these tests, asserted nowhere -- which is the general pattern flagged as D.7 in
+# docs/refactor_audit_2026-08.md: staticness is documented across this file and
+# almost never tested. They are cheap and they break loudly if a refactor
+# accidentally turns a static value into a traced one, which NUMERICS_AND_JAX §1
+# calls out as able to leave runtime untouched while tripling compile time.
+# ---------------------------------------------------------------------------
+
+
+def test_max_leaf_size_is_required_under_jit(accel_only_case):
+    """``max_leaf_size=None`` must fail loudly when tracing, and work when eager.
+
+    The bound is read from the data with ``.item()`` when omitted, which is the one
+    deliberate host sync in this function. Under a tracer that raises ``TypeError``,
+    re-raised as a ``ValueError`` naming the expectation -- the "fail loudly rather
+    than silently substituting" policy of STYLE_GUIDE §9.
+
+    Both directions are asserted. Without the eager half, a guard that raised
+    unconditionally would also pass, and the point of the parameter is that omitting
+    it is legal outside ``jit``.
+    """
+    case = accel_only_case
+
+    def call(positions, masses):
+        return compute_leaf_p2p_accelerations(
+            case.tree,
+            case.neighbor_list,
+            positions,
+            masses,
+            G=1.0,
+            softening=1e-2,
+            max_leaf_size=None,
+        )
+
+    with pytest.raises(ValueError, match="max_leaf_size must be provided"):
+        jax.jit(call)(case.pos_sorted, case.mass_sorted)
+
+    eager = call(case.pos_sorted, case.mass_sorted)
+    assert np.asarray(eager).shape == np.asarray(case.pos_sorted).shape
+    assert np.all(np.isfinite(np.asarray(eager)))
+
+
+def test_softening_must_be_concrete(accel_only_case):
+    """A traced ``softening`` must be rejected, not silently mis-handled.
+
+    The docstring says ``softening`` "must be a concrete Python float, not a tracer",
+    because it is squared host-side via ``float(softening)``. What actually enforces
+    this is the always-on ``@jaxtyped(typechecker=beartype)`` decorator on this
+    function -- it rejects the tracer against the ``float`` annotation before
+    ``float()`` is ever reached. That is a *stronger* guarantee than the docstring
+    describes (it fails at the boundary rather than mid-body), and it is worth pinning
+    precisely because it does not depend on ``JACCPOT_RUNTIME_TYPECHECK``: this
+    decorator is unconditional, so the contract holds in production, not only under
+    the opt-in typecheck hook.
+    """
+    case = accel_only_case
+
+    with pytest.raises(TypeCheckError):
+        jax.jit(
+            lambda soft: compute_leaf_p2p_accelerations(
+                case.tree,
+                case.neighbor_list,
+                case.pos_sorted,
+                case.mass_sorted,
+                G=1.0,
+                softening=soft,
+                max_leaf_size=2,
+            )
+        )(jnp.asarray(1e-2))

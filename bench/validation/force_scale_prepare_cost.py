@@ -27,7 +27,7 @@ Usage::
     XLA_PYTHON_CLIENT_PREALLOCATE=false JAX_ENABLE_X64=1 \\
         .venv/bin/python -m bench.validation.force_scale_prepare_cost \\
             --n 16384 --leaf-size 16 --order 8 --repeats 5 \\
-            --json-out results/validation/force_scale_prepare_cost.json
+            --json-out bench/results/validation/force_scale_prepare_cost.json
 """
 
 from __future__ import annotations

@@ -13,10 +13,30 @@ from jaccpot.operators.real_harmonics import sh_size
 
 @dataclass(frozen=True)
 class ComplexSHBasis:
-    """Adapter exposing the current solidfmm complex basis through a common API.
+    """Adapter exposing the solidfmm complex basis through the common basis API.
 
-    Coefficients use the existing packed solidfmm layout (ell-major blocks with
-    ``m=-ell..+ell`` for each degree).
+    The complex counterpart of :class:`~jaccpot.RealSHBasis`, and like it, layout
+    metadata only -- it carries no coefficient data. ``basis="complex"`` and
+    ``basis="solidfmm"`` both resolve to this same object: they are two spellings of
+    one basis, not two bases, so they produce bit-identical forces (measured at
+    N=2048, p=4, theta=0.5: max difference exactly 0.0).
+
+    Coefficients use the packed solidfmm layout -- ell-major blocks with
+    ``m = -ell..+ell`` for each degree, so degree ``ell`` occupies
+    ``[ell**2, (ell+1)**2)`` and an order-``p`` expansion has ``(p+1)**2`` entries.
+    The independent cross-check worth running is this basis against ``"real"``, not
+    against ``"solidfmm"``.
+
+    Attributes
+    ----------
+    p_max : int
+        Largest expansion order this metadata is valid for.
+    name : str
+        Basis identifier.
+    coefficient_ordering : str
+        Human-readable statement of the packing rule above.
+    runtime_expansion_basis : str
+        Which runtime operator family backs this basis.
     """
 
     p_max: int = 32

@@ -13,7 +13,7 @@ was already bit-exact -- proving the default path is now correct. Before the
 fix this diverged ~300x.
 
     CUDA_VISIBLE_DEVICES=$(autocvd -n 2 -l -o) \
-        pytest tests/test_p2p_shard_map.py -q
+        pytest tests/distributed/test_p2p_shard_map.py -q
 """
 
 import jax.numpy as jnp
