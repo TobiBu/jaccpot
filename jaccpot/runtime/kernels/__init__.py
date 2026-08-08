@@ -13,7 +13,6 @@ Leaf contract: this package and ``core`` must NOT import the engine
 from .core import (
     _STRICT_REFRESH_DETAIL_DIAG_MODES,
     ExpansionBasis,
-    NearfieldInteropData,
     PackedAccelerationDerivatives,
     _accumulate_m2l_chunked_scan,
     _accumulate_m2l_fullbatch,
@@ -67,7 +66,6 @@ from .core import (
     _scatter_rank3,
     _scatter_scalars,
     _scatter_vectors,
-    _solidfmm_downward_accumulate_from_multipoles,
     _SolidFMMDownwardChildInputs,
     _SolidFMMDownwardInit,
     _SolidFMMDownwardInteractionInputs,

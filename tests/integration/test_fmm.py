@@ -1518,22 +1518,67 @@ def test_evaluate_tree_compiled_matches_eager():
     assert np.allclose(np.asarray(eager_pot), np.asarray(jit_pot))
 
 
-def test_nearfield_bucketed_matches_baseline():
+@pytest.mark.parametrize(
+    ("num_particles", "dtype", "chunk_size", "tolerance"),
+    [
+        # (96, float32, 128) is the configuration this test has always used.
+        pytest.param(96, jnp.float32, 128, 1e-6, id="n96-f32-chunk128"),
+        pytest.param(96, jnp.float64, 128, 1e-13, id="n96-f64-chunk128"),
+        pytest.param(256, jnp.float32, 64, 1e-6, id="n256-f32-chunk64"),
+        pytest.param(256, jnp.float64, 64, 1e-13, id="n256-f64-chunk64"),
+    ],
+)
+def test_nearfield_bucketed_matches_baseline(
+    num_particles, dtype, chunk_size, tolerance
+):
+    """``nearfield_mode`` "bucketed" and "baseline" agree to round-off.
+
+    The two modes deliberately differ in edge order (``sort_by_source``), so they
+    differ in float accumulation order and are **not** expected to be bit-equal --
+    measured, they never are. What they must agree to is round-off, and this pins
+    that at a tolerance derived from measurement rather than assumed.
+
+    Measured relative L2 across 5 PRNG seeds x N in {96, 256}:
+
+        float32   6.9e-08 .. 1.03e-07     (~1 eps_f32)
+        float64   1.4e-16 .. 2.33e-16     (~1 eps_f64)
+
+    Bounds are 1e-6 (fp32, ~8 eps) and 1e-13 (fp64), leaving roughly 10x and a
+    wide margin respectively. Both are far tighter than the 1e-5 this test used
+    before, which at fp32/N=96 was ~100x looser than the round-off it was meant to
+    bound and would have admitted a real algorithmic divergence.
+
+    The **float64 cases are the sharp instrument here**, and adding them matters
+    more than tightening fp32. Mutation check: perturbing the bucketed path's
+    softening by 3e-6 relative induces a ~1e-10 relative divergence in the force.
+    The fp64 cases fail on it (1.3e-10 and 7.2e-10 against a 1e-13 bound); the fp32
+    cases cannot see it at all, because fp32 round-off is already ~1e-7. So fp32
+    can only ever catch a divergence above ~1e-6, and before this parametrisation
+    there was no fp64 case at all.
+
+    ``fixed_order`` stays at 3 rather than being parametrised: measured at orders
+    2, 3 and 4 the near-field agreement is bit-for-bit unchanged, which is expected
+    -- this exercises a near-field traversal, not the expansion. Adding that axis
+    would cost compile time and measure nothing.
+
+    The fp32/chunk-128 cases run in the CI smoke leg; the N=256 cases are listed in
+    ``slow_tests.txt``. Before parametrisation the single case was slow-only, so no
+    fast leg checked this equivalence at all.
+    """
     key = jax.random.PRNGKey(515)
-    num_particles = 96
     positions = jax.random.uniform(
         key,
         (num_particles, 3),
         minval=-1.0,
         maxval=1.0,
-        dtype=jnp.float32,
+        dtype=dtype,
     )
-    masses = jnp.abs(jax.random.normal(key, (num_particles,), dtype=jnp.float32)) + 1.0
+    masses = jnp.abs(jax.random.normal(key, (num_particles,), dtype=dtype)) + 1.0
 
     base_kwargs = dict(
         theta=0.6,
         softening=1e-3,
-        working_dtype=jnp.float32,
+        working_dtype=dtype,
         expansion_basis="solidfmm",
         complex_rotation="solidfmm",
         mac_type="dehnen",
@@ -1549,7 +1594,7 @@ def test_nearfield_bucketed_matches_baseline():
     )
     fmm_bucketed = FastMultipoleMethod(
         nearfield_mode="bucketed",
-        nearfield_edge_chunk_size=128,
+        nearfield_edge_chunk_size=chunk_size,
         **base_kwargs,
     )
 
@@ -1568,8 +1613,16 @@ def test_nearfield_bucketed_matches_baseline():
         jit_tree=False,
     )
 
-    assert np.allclose(
-        np.asarray(acc_bucketed), np.asarray(acc_baseline), rtol=1e-5, atol=1e-5
+    baseline_np = np.asarray(acc_baseline, dtype=np.float64)
+    bucketed_np = np.asarray(acc_bucketed, dtype=np.float64)
+    rel_l2 = float(
+        np.linalg.norm(bucketed_np - baseline_np)
+        / max(float(np.linalg.norm(baseline_np)), 1e-300)
+    )
+    assert rel_l2 < tolerance, (
+        f"bucketed vs baseline near-field disagree beyond round-off: rel-L2 "
+        f"{rel_l2:.3e} > {tolerance:.0e} (N={num_particles}, {np.dtype(dtype).name}, "
+        f"chunk={chunk_size})"
     )
 
 

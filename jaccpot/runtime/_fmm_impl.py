@@ -5,25 +5,15 @@ This implementation uses multipole and local expansions to compute
 gravitational forces in O(N) time instead of O(N^2) for direct summation.
 """
 
-import hashlib
 import json
-import math
 import os
-import time
 import warnings
-from collections import OrderedDict
-from dataclasses import dataclass, replace
-from functools import lru_cache, partial
-from math import comb
-from typing import Any, Literal, Mapping, NamedTuple, Optional, Union
+from typing import Any, Literal, Mapping, Optional, Union
 
 import jax
-import jax.numpy as jnp
-import numpy as np
 from beartype import beartype
 from beartype.typing import Callable, Tuple
 from jaxtyping import Array, DTypeLike, jaxtyped
-from yggdrax import build_tree
 from yggdrax.dense_interactions import DenseInteractionBuffers
 from yggdrax.grouped_interactions import GroupedInteractionBuffers
 from yggdrax.interactions import (
@@ -89,7 +79,6 @@ from jaccpot.operators.complex_ops import (
     evaluate_local_complex_grad_analytic_preserve_dtype,
     evaluate_local_complex_grad_order4_unrolled,
     evaluate_local_complex_with_grad,
-    evaluate_local_complex_with_grad_analytic_batch,
     evaluate_local_complex_with_grad_batch,
     l2l_complex,
     l2l_complex_batch,

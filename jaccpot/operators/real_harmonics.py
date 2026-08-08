@@ -189,7 +189,6 @@ Example usage::
 
 from __future__ import annotations
 
-import math
 from functools import lru_cache, partial
 from typing import Any, Tuple
 
@@ -204,6 +203,10 @@ from jaccpot.operators.symmetric_tensors import symmetric_multi_indices_3d
 from jaccpot.runtime.grad_options import analytic_l2p_vjp_enabled
 
 from ._precision import highest_matmul_precision
+from ._transverse_degeneracy_jvp import (
+    TransverseGenerators,
+    with_transverse_degeneracy_jvp,
+)
 
 # ===========================================================================
 # Index utilities
@@ -222,6 +225,12 @@ def sh_size(order: int) -> int:
     -------
     int
         Total number of coefficients: (p+1)^2.
+
+    Raises
+    ------
+    ValueError
+        If ``order`` is negative. A pure-Python host-side check on a static
+        value; nothing here is traced.
     """
     p = int(order)
     if p < 0:
@@ -241,6 +250,11 @@ def sh_offset(ell: int) -> int:
     -------
     int
         Starting index for degree ell: ell^2.
+
+    Raises
+    ------
+    ValueError
+        If ``ell`` is negative. A pure-Python host-side check on a static value.
     """
     ll = int(ell)
     if ll < 0:
@@ -262,6 +276,12 @@ def sh_index(ell: int, m: int) -> int:
     -------
     int
         Linear index in the packed coefficient array.
+
+    Raises
+    ------
+    ValueError
+        If ``ell`` is negative, or ``m`` falls outside ``[-ell, ell]``. Both are
+        pure-Python host-side checks on static values.
     """
     ll = int(ell)
     mm = int(m)
@@ -348,11 +368,25 @@ def p2m_real_direct(
     The cos(mφ) and sin(mφ) terms are computed via Chebyshev recurrence
     from cos φ = x/ρ and sin φ = y/ρ, avoiding trigonometric functions.
 
-    Validation
-    ----------
-    The resulting real-valued polynomials (scaled by (n-m)!(n+m)!) match
-    Table 3 of Dehnen (2014) for n ≤ 6 when derived via
-    scripts/derive_table3_polynomials.py.
+    *Validation.* What actually runs is
+    ``tests/unit/operators/test_real_harmonics.py::test_p2m_real_direct_dehnen_table3``,
+    which checks the Dehnen (2014) Table 3 entries for **degree 1 only**
+    (``U_1^{-1} = y/2``, ``U_1^{0} = z``, ``U_1^{+1} = x/2``) at the three unit
+    axis directions, to ``atol=1e-10``. Degree 0 is covered separately by
+    ``test_p2m_real_direct_monopole``.
+
+    The broader claim that the scaled polynomials match Table 3 up to ``n = 6``
+    rests on a one-off derivation via ``scripts/derive_table3_polynomials.py``,
+    which was **never committed** -- there is no ``scripts/`` directory. So
+    degrees 2-6 are unverified in-repo, and the coverage that exists cannot see a
+    per-``m`` normalisation or sign error above degree 1, which is exactly the
+    class of error this packing is prone to.
+
+    Raises
+    ------
+    ValueError
+        If ``order`` is negative. ``order`` is static under ``jit``, so this
+        fires at trace time.
     """
     p = int(order)
     if p < 0:
@@ -1014,6 +1048,62 @@ def complex_to_dehnen_real_coeffs(complex_coeffs: Array, *, order: int) -> Array
     Array
         Packed real coefficients of shape ``(..., (p+1)^2)`` with the real dtype
         matching the input's real component.
+
+    Raises
+    ------
+    ValueError
+        If the trailing axis of ``complex_coeffs`` is not ``(p+1)^2``. A static
+        shape check on a static ``order``, so it fires at trace time.
+
+    Notes
+    -----
+    A single matmul against a fixed basis-change matrix, so differentiable in
+    ``complex_coeffs``.
+
+    **Forward: nothing is lost, for conforming input.** The reality condition is
+    stated in :mod:`jaccpot.operators.complex_harmonics` -- Dehnen normalization,
+    no Condon-Shortley phase, and ``H_n^{-m} = (-1)^m conj(H_n^m)`` -- and the
+    ``(p+1)^2`` layout is *redundant* rather than packed:
+    :func:`~jaccpot.operators.complex_harmonics._pack_complex` fills the negative
+    ``m`` slots as ``(-1)^|m| conj(coeff[n, |m|])``, so both ``+m`` and ``-m`` are
+    present and conjugate-related. ``build_Q_dehnen_no_sqrt2`` recombines each
+    conjugate pair, and the imaginary part of the product comes out **exactly**
+    zero -- measured, not merely bounded.
+
+    Note the easily-missed half of that condition: at ``m = 0`` it reads
+    ``H_n^0 = conj(H_n^0)``, i.e. **the m=0 coefficients must be real**.
+    ``complex_R_solidfmm`` satisfies this (its m=0 entries have exactly zero
+    imaginary part). An array that is conjugate-symmetric for ``m != 0`` but has
+    complex ``m = 0`` entries does *not* conform, and for such input
+    ``Im(coeffs @ q_full.T)`` is a substantial fraction of the real part
+    (measured ~0.6 at order 3) -- so ``jnp.real`` would silently discard real
+    information. Nothing here validates the condition; it is a precondition.
+
+    **Reverse: the gradient is complete.** ``jnp.real`` does not make the VJP blind
+    to the imaginary components -- ``Q`` is complex, so ``Im(coeffs)`` contributes
+    to ``Re(coeffs @ q_full.T)`` and the returned cotangent has a nonzero imaginary
+    part. This is the correct adjoint of the R-linear map, and it agrees with finite
+    differences along both real and imaginary perturbation directions.
+
+    The claim above -- that this composes with ``complex_R_solidfmm`` to reproduce
+    :func:`p2m_real_direct` -- is asserted directly by
+    ``tests/unit/operators/test_real_harmonics.py::test_complex_to_dehnen_real_matches_p2m_real_direct``
+    over six geometries (including the ``rho == 0`` z-aligned degeneracy and the
+    three coordinate axes) at orders 0-6, to a relative L2 of 1e-13 against a
+    measured worst case of 8.9e-16.
+
+    That test exists because the two indirect proxies cannot substitute for it:
+    ``tests/test_real_upward_sweep.py::test_real_upward_matches_complex_convert``
+    checks an aggregate relative L2 over a whole 300-particle P2M+M2M tree, where
+    a single-``m`` error is diluted, and
+    ``tests/unit/runtime/test_dehnen_mac_reference.py::test_dehnen_power_is_basis_invariant``
+    checks only the degree-wise Dehnen power -- a rotational invariant, therefore
+    blind to sign errors within a degree. Verified by mutation: flipping the sign
+    of one row of the degree-2 Q block fails the direct test and leaves the power
+    proxy passing.
+
+    Runs under :func:`~jaccpot.operators._precision.highest_matmul_precision`;
+    the matmul must not be dropped back to TF32.
     """
     coeffs = jnp.asarray(complex_coeffs)
     expected = sh_size(int(order))
@@ -1028,147 +1118,6 @@ def complex_to_dehnen_real_coeffs(complex_coeffs: Array, *, order: int) -> Array
     )
     converted = jnp.real(coeffs @ q_full.T)
     return converted.astype(coeffs.real.dtype)
-
-
-def _wigner_D_complex(ell: int, alpha: float, beta: float, gamma: float) -> np.ndarray:
-    """Compute complex Wigner D^ell using SymPy (baseline correctness path)."""
-    try:
-        from sympy.physics import wigner
-    except Exception as exc:  # pragma: no cover - optional dependency
-        raise ImportError("sympy is required for Wigner-D baseline rotation") from exc
-
-    D_sym = wigner.wigner_d(ell, float(alpha), float(beta), float(gamma))
-    return np.array(D_sym.evalf(30).tolist(), dtype=np.complex128)
-
-
-@highest_matmul_precision
-def _real_wigner_rotation(
-    ell: int,
-    alpha: Array,
-    beta: Array,
-    gamma: Array,
-    *,
-    dtype: DTypeLike,
-    basis: str = "multipole",
-) -> Array:
-    """Real rotation block from complex Wigner D via Dehnen Q transform.
-
-    Parameters
-    ----------
-    basis : {"multipole", "local"}
-        Selects the diagonal similarity scaling that maps the Wigner real
-        basis to the Dehnen real basis used for multipoles or locals.
-    """
-    D_complex = _wigner_D_complex(ell, float(alpha), float(beta), float(gamma))
-    # Adjust for the no-Condon-Shortley convention used in p2m_real_direct.
-    # This applies a diagonal phase S_m = (-1)^m to change basis.
-    m_vals = np.arange(-ell, ell + 1)
-    S = np.diag((-1.0) ** m_vals)
-    D_complex = S @ D_complex @ S
-    Q = build_Q_dehnen_no_sqrt2(ell)
-    Q_inv = np.linalg.inv(Q)
-    D_real = np.real(Q @ D_complex @ Q_inv)
-
-    if basis == "multipole":
-        S = _dehnen_real_basis_scale_diag_multipole(ell)
-    elif basis == "local":
-        S = _dehnen_real_basis_scale_diag_local(ell)
-    else:
-        raise ValueError(f"Unknown basis: {basis}")
-
-    D_real = S @ D_real @ np.linalg.inv(S)
-    return jnp.asarray(D_real, dtype=dtype)
-
-
-@lru_cache(maxsize=None)
-def _dehnen_real_basis_scale_diag_multipole(ell: int) -> np.ndarray:
-    """Scaling from Wigner real basis to Dehnen real basis (multipoles).
-
-    C_mm ∝ sqrt(binomial(2ℓ, ℓ-m)) with a sign flip for m >= 0.
-    Overall scalar cancels in similarity.
-    """
-    m_vals = np.arange(-ell, ell + 1)
-    scale = np.array(
-        [math.comb(2 * ell, ell - int(m)) ** 0.5 for m in m_vals], dtype=np.float64
-    )
-    sign = np.where(m_vals >= 0, -1.0, 1.0)
-    return np.diag(sign * scale)
-
-
-@lru_cache(maxsize=None)
-def _dehnen_real_basis_scale_diag_local(ell: int) -> np.ndarray:
-    """Scaling from Wigner real basis to Dehnen real basis (locals).
-
-    C_mm ∝ (ℓ-|m|)!(ℓ+|m|)! * sqrt(binomial(2ℓ, ℓ-m)) with sign flip for m>=0.
-    This accounts for the local basis scaling relative to multipoles.
-    """
-    m_vals = np.arange(-ell, ell + 1)
-    scale = []
-    for m in m_vals:
-        m_abs = abs(int(m))
-        comb = math.comb(2 * ell, ell - int(m))
-        fac = math.factorial(ell - m_abs) * math.factorial(ell + m_abs)
-        scale.append((comb**0.5) * fac)
-    scale = np.array(scale, dtype=np.float64)
-    sign = np.where(m_vals >= 0, -1.0, 1.0)
-    return np.diag(sign * scale)
-
-
-def _rotation_to_z_angles(x: Array, y: Array, z: Array) -> tuple[Array, Array, Array]:
-    """ZYZ angles equivalent to Dehnen's alignment rotation.
-
-    The Dehnen A6 alignment uses the sequence:
-        R_align = R_y(-beta) @ R_z(-alpha_z)
-    with alpha_z = atan2(y, x) and beta = atan2(rho, z).
-    We convert this rotation into ZYZ Euler angles for Wigner-D.
-    """
-    # NaN-safe (double-where) angles. ``sqrt`` has an infinite reverse grad at 0
-    # and ``arctan2`` a 0/0 grad at the origin; the fixed-topology M2L/L2L reverse
-    # pass genuinely hits zero displacements (single-child COM nodes) and
-    # z-axis-aligned displacements (rho == 0, e.g. lattice-aligned pairs). Guard
-    # those directions so the cotangents stay finite. Forward values are
-    # unchanged (arctan2(0,0)=0, sqrt(0)=0), so the golden oracle is byte-stable.
-    rho_sq = x * x + y * y
-    rho_pos = rho_sq > 0
-    rho = jnp.where(rho_pos, jnp.sqrt(jnp.where(rho_pos, rho_sq, 1.0)), 0.0)
-    alpha_z = jnp.where(rho_pos, jnp.arctan2(y, jnp.where(rho_pos, x, 1.0)), 0.0)
-    r_pos = (rho_sq + z * z) > 0
-    beta = jnp.where(r_pos, jnp.arctan2(rho, jnp.where(r_pos, z, 1.0)), 0.0)
-
-    ca = jnp.cos(-alpha_z)
-    sa = jnp.sin(-alpha_z)
-    cb = jnp.cos(-beta)
-    sb = jnp.sin(-beta)
-
-    # R = Ry(-beta) @ Rz(-alpha_z)
-    R00 = cb * ca
-    R01 = -cb * sa
-    R02 = sb
-    R10 = sa
-    R11 = ca
-    R12 = 0.0
-    R20 = -sb * ca
-    R21 = sb * sa
-    R22 = cb
-
-    # NaN-safe extraction of ZYZ angles. ``arccos`` has an infinite reverse grad
-    # at +/-1 (axis-aligned, sb == 0) and ``arctan2`` a 0/0 grad at the origin
-    # (which both derived angles hit when sb == 0). Guard the poles; forward
-    # values are unchanged (arccos(+/-1) in {0, pi}, arctan2(0,0)=0, and
-    # cos() is already bounded to [-1, 1] so the clip is a no-op for valid input).
-    R22c = jnp.clip(R22, -1.0, 1.0)
-    inside = jnp.abs(R22c) < 1.0
-    beta_zyz = jnp.where(
-        inside,
-        jnp.arccos(jnp.where(inside, R22c, 0.0)),
-        jnp.where(R22c > 0.0, 0.0, jnp.pi),
-    )
-    a_ok = (R02 * R02) > 0  # R12 is identically 0.0
-    alpha_zyz = jnp.where(a_ok, jnp.arctan2(R12, jnp.where(a_ok, R02, 1.0)), 0.0)
-    g_ok = (R21 * R21 + R20 * R20) > 0
-    gamma_zyz = jnp.where(g_ok, jnp.arctan2(R21, jnp.where(g_ok, -R20, 1.0)), 0.0)
-
-    return alpha_zyz, beta_zyz, gamma_zyz
 
 
 @lru_cache(maxsize=None)
@@ -1231,8 +1180,11 @@ def compute_real_B_matrix_local(ell: int, *, dtype: DTypeLike) -> Array:
     ----------
     ell : int
         Spherical harmonic degree.
-    dtype : jnp.dtype
-        Real dtype (float32 or float64).
+    dtype : DTypeLike
+        Real working dtype (float32 or float64). The B matrix is built in
+        float64 for accuracy and cast down to this, so that the downstream
+        rotation GEMMs run in the working dtype instead of promoting float32
+        coefficient vectors to float64.
 
     Returns
     -------
@@ -1259,8 +1211,11 @@ def compute_real_B_matrix_multipole(ell: int, *, dtype: DTypeLike) -> Array:
     ----------
     ell : int
         Spherical harmonic degree.
-    dtype : jnp.dtype
-        Real dtype (float32 or float64).
+    dtype : DTypeLike
+        Real working dtype (float32 or float64). The B matrix is built in
+        float64 for accuracy and cast down to this, so that the downstream
+        rotation GEMMs run in the working dtype instead of promoting float32
+        coefficient vectors to float64.
 
     Returns
     -------
@@ -1277,6 +1232,16 @@ def compute_real_B_matrix_multipole(ell: int, *, dtype: DTypeLike) -> Array:
 @highest_matmul_precision
 def verify_real_B_matrix(ell: int, *, dtype: DTypeLike) -> Tuple[bool, float, float]:
     """Verify properties of the real B matrices (both B_T and B_U).
+
+    Parameters
+    ----------
+    ell : int
+        Spherical harmonic degree to check.
+    dtype : DTypeLike
+        Real working dtype the matrices are cast to before checking, so the
+        result reflects what the rotation GEMMs will actually see. The
+        ``1e-10`` sparsity threshold below is a float64 threshold and is not
+        adjusted for float32 -- read a float32 verdict with that in mind.
 
     Returns
     -------
@@ -1329,6 +1294,23 @@ def verify_real_B_matrix(ell: int, *, dtype: DTypeLike) -> Tuple[bool, float, fl
 # ===========================================================================
 # Real rotation via B @ D_z @ B
 # ===========================================================================
+#
+# These closed-form Dehnen builders are the only rotation path. A SymPy Wigner-D
+# baseline used to sit alongside them as a "correctness reference"; it was removed
+# because it never actually checked anything (nothing called it) and it could not
+# have: it imported `sympy`, which is not a dependency of this package, so every
+# entry point raised `ImportError`. The Wigner route is also the slow one -- the
+# whole point of the B @ D_z @ B decomposition is to avoid it.
+#
+# What replaces it is stronger, because it tests against physics rather than
+# against a second implementation that could share a convention error:
+# `tests/unit/operators/test_real_harmonics.py::test_multipole_rotation_blocks_match_p2m_of_the_rotated_source`
+# asserts `D_to @ p2m(s) == p2m(g @ s)` for the physical rotation `g`, and
+# `::test_local_rotation_blocks_leave_the_evaluated_potential_invariant` asserts
+# that rotating a local expansion and its evaluation point cancels exactly.
+# Measured agreement ~2.5e-15 (~10 eps_f64); writing the alignment azimuth as
+# `atan2(y, x)` instead of the `atan2(x, y)` flagged CRITICAL below fails both at
+# 1.8e+00.
 
 
 def real_Dz_diagonal(ell: int, angle: Array, *, dtype: DTypeLike) -> Array:
@@ -1371,6 +1353,216 @@ def real_Dz_diagonal(ell: int, angle: Array, *, dtype: DTypeLike) -> Array:
     return D
 
 
+# --------------------------------------------------------------------------
+# Rotation generators, for the analytic transverse derivative at rho == 0.
+# --------------------------------------------------------------------------
+#
+# These are ``d/dtheta D(R_a(theta))`` at ``theta == 0`` for the real-basis
+# representations, and they exist for exactly one purpose: to supply the derivative
+# the azimuth guards below cannot produce. See
+# :mod:`jaccpot.operators._transverse_degeneracy_jvp` for how they are used and
+# ``docs/rotation_degeneracy_derivative.md`` for the derivation.
+#
+# Every sign here was calibrated against an identity this repository already
+# verifies, not derived on paper, because the plausible alternatives are all wrong by
+# O(1) and all look right: ``Dz(ell, -theta)`` for the z-rotation gives 6.6e-02,
+# ``+B_U Lambda B_U`` for the x-rotation gives 2.5e-01, and taking the local
+# representation to be ``D^M`` or ``D^M^T`` instead of ``D^M^-T`` gives 4.1e-01 and
+# 7.5e-02. The residuals of the choices coded below are 2.4e-11 (x) and 5.2e-11 (y)
+# against central differences of ``p2m(R_a(theta) v)``.
+
+
+@lru_cache(maxsize=None)
+def _real_z_rotation_generator(ell: int) -> np.ndarray:
+    """``d/dangle`` of :func:`real_Dz_diagonal` at ``angle == 0``, degree ``ell``.
+
+    Parameters
+    ----------
+    ell : int
+        Spherical harmonic degree.
+
+    Returns
+    -------
+    np.ndarray
+        ``[2*ell+1, 2*ell+1]`` float64. Nonzero only on the two entries per
+        ``|m| >= 1`` that couple the cos and sin channels, since that is the only
+        place :func:`real_Dz_diagonal`'s ``sin(m * angle)`` appears.
+    """
+    width = 2 * ell + 1
+    generator = np.zeros((width, width), dtype=np.float64)
+    for m in range(1, ell + 1):
+        generator[ell + m, ell - m] = -float(m)
+        generator[ell - m, ell + m] = +float(m)
+    return generator
+
+
+@lru_cache(maxsize=None)
+@highest_matmul_precision
+def _real_rotation_generator_block(
+    ell: int, axis: str, representation: str
+) -> np.ndarray:
+    """Generator of rotation about ``axis`` for one degree, in one representation.
+
+    Parameters
+    ----------
+    ell : int
+        Spherical harmonic degree.
+    axis : str
+        ``'x'`` or ``'y'``. The x-generator comes from conjugating the z-generator
+        with the involutory x<->z swap ``B_U`` -- the same convention
+        :func:`_multipole_align_to_z_block` relies on -- and the y-generator is the
+        x-generator conjugated by a quarter turn about z.
+    representation : str
+        ``'multipole'`` or ``'local'``. Local coefficients contract against the same
+        regular harmonics P2M builds, so they transform **contragrediently**:
+        ``D^L = D^M^-T``, hence ``G^L = -(G^M)^T``.
+
+    Returns
+    -------
+    np.ndarray
+        ``[2*ell+1, 2*ell+1]`` float64.
+
+    Raises
+    ------
+    ValueError
+        If ``axis`` or ``representation`` is not one of the listed values.
+    """
+    # The matmuls below are numpy, in float64, so the pinned precision is inert
+    # here -- the decorator is on for policy conformance
+    # (tests/unit/operators/test_matmul_precision_pinned.py) rather than because
+    # this function could drop to TF32.
+    if axis not in ("x", "y"):
+        raise ValueError(f"axis must be 'x' or 'y', got {axis!r}")
+    if representation not in ("multipole", "local"):
+        raise ValueError(
+            f"representation must be 'multipole' or 'local', got {representation!r}"
+        )
+    # The generators are built from this module's OWN rotation builders rather than
+    # from a second closed form, because agreeing with those builders is the whole
+    # calibration -- a private numpy copy of the quarter turn could drift from
+    # ``real_Dz_diagonal`` and the resulting gradient error would be invisible in the
+    # forward pass. Both builders return ``jnp`` arrays, and under ``jax.jit``
+    # ``jnp.asarray`` of a numpy constant is a *tracer*, so pulling them back to numpy
+    # (which is what lets the result be ``lru_cache``d into a compile-time constant)
+    # needs the constant-folding context. This function is called from a ``custom_jvp``
+    # rule, i.e. always inside a trace.
+    with jax.ensure_compile_time_eval():
+        B_U = np.asarray(compute_real_B_matrix_multipole(ell, dtype=jnp.float64))
+        generator = -B_U @ _real_z_rotation_generator(ell) @ B_U
+        if axis == "y":
+            quarter = np.asarray(
+                real_Dz_diagonal(ell, jnp.asarray(np.pi / 2.0), dtype=jnp.float64)
+            )
+            quarter_back = np.asarray(
+                real_Dz_diagonal(ell, jnp.asarray(-np.pi / 2.0), dtype=jnp.float64)
+            )
+            generator = quarter @ generator @ quarter_back
+    if representation == "local":
+        generator = -generator.T
+    return generator
+
+
+@lru_cache(maxsize=None)
+def _real_transverse_generator_packed(
+    order: int, axis: str, representation: str
+) -> np.ndarray:
+    """Per-degree generator blocks assembled into one packed square matrix.
+
+    Parameters
+    ----------
+    order : int
+        Maximum SH degree ``p``.
+    axis : str
+        ``'x'`` or ``'y'``, as in :func:`_real_rotation_generator_block`.
+    representation : str
+        ``'multipole'`` or ``'local'``, as in :func:`_real_rotation_generator_block`.
+
+    Returns
+    -------
+    np.ndarray
+        ``[(p+1)^2, (p+1)^2]`` float64, block-diagonal in ``ell`` with the packing
+        of :func:`sh_offset`.
+    """
+    p = int(order)
+    packed = np.zeros((sh_size(p), sh_size(p)), dtype=np.float64)
+    for ell in range(p + 1):
+        block = slice(sh_offset(ell), sh_offset(ell + 1))
+        packed[block, block] = _real_rotation_generator_block(ell, axis, representation)
+    return packed
+
+
+def real_transverse_generators(
+    order: int,
+    dtype: DTypeLike,
+    *,
+    in_representation: str,
+    out_representation: str,
+) -> TransverseGenerators:
+    """Real-basis generators for the ``rho == 0`` transverse derivative.
+
+    Feeds :func:`~jaccpot.operators._transverse_degeneracy_jvp.with_transverse_degeneracy_jvp`,
+    which documents what the four matrices are for.
+
+    Parameters
+    ----------
+    order : int
+        Maximum SH degree ``p``.
+    dtype : DTypeLike
+        Working dtype of the coefficients. The generators are built in float64 and
+        cast down, for the same reason the B matrices are (see
+        :func:`compute_real_B_matrix_multipole`): so the generator matmuls run in the
+        working dtype instead of promoting float32 coefficients to float64.
+    in_representation : str
+        ``'multipole'`` or ``'local'`` -- which slot the operator's input occupies.
+    out_representation : str
+        Likewise for its output. M2L is multipole in, local out; M2M is multipole to
+        multipole; L2L is local to local.
+
+    Returns
+    -------
+    TransverseGenerators
+        The four ``[(p+1)^2, (p+1)^2]`` packed generators, in ``dtype``.
+    """
+    return TransverseGenerators(
+        in_x=jnp.asarray(
+            _real_transverse_generator_packed(order, "x", in_representation),
+            dtype=dtype,
+        ),
+        in_y=jnp.asarray(
+            _real_transverse_generator_packed(order, "y", in_representation),
+            dtype=dtype,
+        ),
+        out_x=jnp.asarray(
+            _real_transverse_generator_packed(order, "x", out_representation),
+            dtype=dtype,
+        ),
+        out_y=jnp.asarray(
+            _real_transverse_generator_packed(order, "y", out_representation),
+            dtype=dtype,
+        ),
+    )
+
+
+#: :func:`real_transverse_generators` bound to each cascade operator's pair of
+#: representations, ready to hand to
+#: :func:`~jaccpot.operators._transverse_degeneracy_jvp.with_transverse_degeneracy_jvp`.
+_M2L_TRANSVERSE_GENERATORS = partial(
+    real_transverse_generators,
+    in_representation="multipole",
+    out_representation="local",
+)
+_M2M_TRANSVERSE_GENERATORS = partial(
+    real_transverse_generators,
+    in_representation="multipole",
+    out_representation="multipole",
+)
+_L2L_TRANSVERSE_GENERATORS = partial(
+    real_transverse_generators,
+    in_representation="local",
+    out_representation="local",
+)
+
+
 @highest_matmul_precision
 def _multipole_align_to_z_block(
     x: Array, y: Array, z: Array, ell: int, *, dtype: DTypeLike
@@ -1397,8 +1589,38 @@ def _multipole_align_to_z_block(
     # fixed-topology FMM hits: zero displacement (single-child COM L2L pairs) and
     # z-axis-aligned displacement (rho == 0, lattice-aligned M2L pairs). Forward
     # values are unchanged (arctan2(0,0)=0, sqrt(0)=0), so the golden oracle stays
-    # byte-stable; the azimuth is undefined there and the rotation is a pure polar
-    # turn / identity, so a zero cotangent is the correct subgradient.
+    # byte-stable.
+    #
+    # WARNING: THE GUARDS ARE NOT GRADIENT-CORRECT, and this is deliberate -- the
+    # missing derivative is supplied one level up rather than here. Do not try to fix
+    # it at this site. Measured on the assembled cascade at z=2.5, grad w.r.t. the
+    # displacement, limit taken from eight approach directions at rho=1e-9:
+    #
+    #     m2l_real  true (-1.502050, -0.523434, +0.834153)  returned (0, 0, +0.834153)
+    #     m2m_real  true (-6.416905, +1.769043, -9.651272)  returned (0, 0, -9.651272)
+    #     l2l_real  true (+0.305315, +0.003498, +0.072012)  returned (0, 0, +0.072012)
+    #
+    # The radial component is right; both transverse components are lost, and the
+    # cascade genuinely IS differentiable here (the limit is direction-independent to
+    # ~1e-07), so those zeros are wrong rather than a defensible subgradient.
+    #
+    # Why no guard tweak fixes it: the code reaches ``(x, y)`` only through
+    # ``rho = sqrt(x^2 + y^2)`` and ``az = atan2(x, y)``, so at ``x == y == 0`` every
+    # chain-rule route carries a factor ``x / rho`` or ``y / rho^2``. Flooring rho
+    # (the `_azimuth_from_floored_rho` trick that fixed the same defect class in
+    # L2P/P2M, `d5cb13b`) makes those exactly 0; leaving them bare makes them NaN.
+    # Neither can produce the ``O(rho)`` coefficient the polar parametrisation has
+    # already divided out.
+    #
+    # RESOLVED at the cascade level (G.10). ``m2l_a6_real_only``, ``m2m_real``,
+    # ``l2l_real`` and the production ``m2l_rot_scale_real_batch`` each carry a
+    # ``custom_jvp`` that supplies the transverse derivative analytically, from the
+    # rotational covariance of the assembled operator -- which is available there and
+    # not here, because the individual alignment block is genuinely
+    # direction-dependent at rho == 0 while their product is not. See
+    # :mod:`jaccpot.operators._transverse_degeneracy_jvp` and
+    # ``docs/rotation_degeneracy_derivative.md``. Asserted by
+    # ``test_rotation_cascade_transverse_gradient_at_rho_zero``.
     rho_sq = x * x + y * y
     rho_pos = rho_sq > 0
     rho = jnp.where(rho_pos, jnp.sqrt(jnp.where(rho_pos, rho_sq, 1.0)), 0.0)
@@ -1426,8 +1648,38 @@ def _multipole_align_from_z_block(
     # fixed-topology FMM hits: zero displacement (single-child COM L2L pairs) and
     # z-axis-aligned displacement (rho == 0, lattice-aligned M2L pairs). Forward
     # values are unchanged (arctan2(0,0)=0, sqrt(0)=0), so the golden oracle stays
-    # byte-stable; the azimuth is undefined there and the rotation is a pure polar
-    # turn / identity, so a zero cotangent is the correct subgradient.
+    # byte-stable.
+    #
+    # WARNING: THE GUARDS ARE NOT GRADIENT-CORRECT, and this is deliberate -- the
+    # missing derivative is supplied one level up rather than here. Do not try to fix
+    # it at this site. Measured on the assembled cascade at z=2.5, grad w.r.t. the
+    # displacement, limit taken from eight approach directions at rho=1e-9:
+    #
+    #     m2l_real  true (-1.502050, -0.523434, +0.834153)  returned (0, 0, +0.834153)
+    #     m2m_real  true (-6.416905, +1.769043, -9.651272)  returned (0, 0, -9.651272)
+    #     l2l_real  true (+0.305315, +0.003498, +0.072012)  returned (0, 0, +0.072012)
+    #
+    # The radial component is right; both transverse components are lost, and the
+    # cascade genuinely IS differentiable here (the limit is direction-independent to
+    # ~1e-07), so those zeros are wrong rather than a defensible subgradient.
+    #
+    # Why no guard tweak fixes it: the code reaches ``(x, y)`` only through
+    # ``rho = sqrt(x^2 + y^2)`` and ``az = atan2(x, y)``, so at ``x == y == 0`` every
+    # chain-rule route carries a factor ``x / rho`` or ``y / rho^2``. Flooring rho
+    # (the `_azimuth_from_floored_rho` trick that fixed the same defect class in
+    # L2P/P2M, `d5cb13b`) makes those exactly 0; leaving them bare makes them NaN.
+    # Neither can produce the ``O(rho)`` coefficient the polar parametrisation has
+    # already divided out.
+    #
+    # RESOLVED at the cascade level (G.10). ``m2l_a6_real_only``, ``m2m_real``,
+    # ``l2l_real`` and the production ``m2l_rot_scale_real_batch`` each carry a
+    # ``custom_jvp`` that supplies the transverse derivative analytically, from the
+    # rotational covariance of the assembled operator -- which is available there and
+    # not here, because the individual alignment block is genuinely
+    # direction-dependent at rho == 0 while their product is not. See
+    # :mod:`jaccpot.operators._transverse_degeneracy_jvp` and
+    # ``docs/rotation_degeneracy_derivative.md``. Asserted by
+    # ``test_rotation_cascade_transverse_gradient_at_rho_zero``.
     rho_sq = x * x + y * y
     rho_pos = rho_sq > 0
     rho = jnp.where(rho_pos, jnp.sqrt(jnp.where(rho_pos, rho_sq, 1.0)), 0.0)
@@ -1461,19 +1713,6 @@ def real_rotation_to_z_axis_multipole(
     return _multipole_align_to_z_block(x, y, z, ell, dtype=dtype)
 
 
-def real_rotation_to_z_axis_multipole_wigner(
-    x: Array,
-    y: Array,
-    z: Array,
-    ell: int,
-    *,
-    dtype: DTypeLike,
-) -> Array:
-    """Baseline rotation to z-axis using Wigner-D (complex) + Q transform."""
-    alpha, beta, gamma = _rotation_to_z_angles(x, y, z)
-    return _real_wigner_rotation(ell, alpha, beta, gamma, dtype=dtype)
-
-
 def real_rotation_from_z_axis_local(
     x: Array,
     y: Array,
@@ -1493,19 +1732,6 @@ def real_rotation_from_z_axis_local(
     return _multipole_align_to_z_block(x, y, z, ell, dtype=dtype).T
 
 
-def real_rotation_from_z_axis_local_wigner(
-    x: Array,
-    y: Array,
-    z: Array,
-    ell: int,
-    *,
-    dtype: DTypeLike,
-) -> Array:
-    """Baseline inverse rotation from z-axis using Wigner-D (locals)."""
-    alpha, beta, gamma = _rotation_to_z_angles(x, y, z)
-    return _real_wigner_rotation(ell, -gamma, -beta, -alpha, dtype=dtype)
-
-
 def real_rotation_from_z_axis_multipole(
     x: Array,
     y: Array,
@@ -1520,21 +1746,6 @@ def real_rotation_from_z_axis_multipole(
     to rotate a z-frame multipole back to the world frame (``M = D @ M_z``).
     """
     return _multipole_align_from_z_block(x, y, z, ell, dtype=dtype)
-
-
-def real_rotation_from_z_axis_multipole_wigner(
-    x: Array,
-    y: Array,
-    z: Array,
-    ell: int,
-    *,
-    dtype: DTypeLike,
-) -> Array:
-    """Baseline inverse rotation from z-axis using Wigner-D."""
-    alpha, beta, gamma = _rotation_to_z_angles(x, y, z)
-    return _real_wigner_rotation(
-        ell, -gamma, -beta, -alpha, dtype=dtype, basis="multipole"
-    )
 
 
 def real_rotation_to_z_axis_local(
@@ -1554,19 +1765,6 @@ def real_rotation_to_z_axis_local(
     (:func:`real_rotation_from_z_axis_multipole`).
     """
     return _multipole_align_from_z_block(x, y, z, ell, dtype=dtype).T
-
-
-def real_rotation_to_z_axis_local_wigner(
-    x: Array,
-    y: Array,
-    z: Array,
-    ell: int,
-    *,
-    dtype: DTypeLike,
-) -> Array:
-    """Baseline rotation to z-axis using Wigner-D (locals)."""
-    alpha, beta, gamma = _rotation_to_z_angles(x, y, z)
-    return _real_wigner_rotation(ell, alpha, beta, gamma, dtype=dtype, basis="local")
 
 
 # ===========================================================================
@@ -1620,8 +1818,18 @@ def _translate_along_z_shift_real(
     """Vectorised real z-axis same-type shift (M2M/L2L), shared kernel.
 
     ``out[n,m] = sum_k (dz)^k/k! * coeffs[src(n,m,k)]`` over the static tables from
-    :func:`z_shift_translation_tables`. Summation is over slot ``k`` in ascending order, so
-    this is bit-identical (same fp ops, same order) to the per-(n,m) unrolled reference.
+    :func:`z_shift_translation_tables`.
+
+    Summation runs over slot ``k`` in **ascending order**, matching the term order of
+    the ``(dz)^k/k!`` series, so the accumulation order is fixed by construction and
+    reproducible across orders and batch shapes. That ordering is part of the numerics
+    and must not be rewritten -- reassociating this sum, or letting a reduction library
+    choose the order, changes results (see ``NUMERICS_AND_JAX.md``).
+
+    This docstring used to claim bit-identity to a "per-(n,m) unrolled reference". That
+    reference no longer exists -- it was replaced when the M2M/L2L z-translates were
+    table-vectorised -- so the claim was untestable as written and has been replaced by
+    the property above, which is the one this implementation actually guarantees.
     """
     p = int(order)
     coeffs = jnp.asarray(coeffs)
@@ -1787,7 +1995,14 @@ def translate_along_z_l2l_real(
 # ===========================================================================
 
 
+# The `with_transverse_degeneracy_jvp` layer on the three cascade operators below
+# sits *inside* the `jax.jit` (so it adds no dispatch boundary) and *outside*
+# `highest_matmul_precision` (so the pinned precision still covers the body, and the
+# JVP rule pins its own). It leaves the primal bit-identical and supplies only the
+# transverse derivative on the `rho == 0` axis; see
+# :mod:`jaccpot.operators._transverse_degeneracy_jvp`.
 @partial(jax.jit, static_argnames=("order",))
+@partial(with_transverse_degeneracy_jvp, generators=_M2L_TRANSVERSE_GENERATORS)
 @highest_matmul_precision
 def m2l_a6_real_only(
     multipole: Array,
@@ -1799,6 +2014,12 @@ def m2l_a6_real_only(
 
     This implementation rotates multipoles using real B_U/Dz blocks, applies
     the real-only z-axis M2L recurrence, and rotates locals back with B_T/Dz.
+
+    Differentiable in both arguments, forward and reverse. Near the ``rho == 0`` axis
+    the ``d/dx`` and ``d/dy`` cotangents come from a ``custom_jvp`` rather than from
+    differentiating the alignment azimuth, which is undefined there and ill-conditioned
+    nearby; the analytic branch applies inside exactly zero outside a narrow band around that axis (``rho <= sqrt(eps) * |delta|``, the measured crossover between the two routes' errors) and the polar route is left
+    untouched outside it.
     """
     multipole = jnp.asarray(multipole)
     delta = jnp.asarray(delta)
@@ -1833,40 +2054,6 @@ def m2l_a6_real_only(
     return out
 
 
-@highest_matmul_precision
-def m2l_a6_real_only_wigner(
-    multipole: Array,
-    delta: Array,
-    *,
-    order: int,
-) -> Array:
-    """M2L using Wigner-D rotations as a correctness baseline (no JIT)."""
-    multipole = jnp.asarray(multipole)
-    delta = jnp.asarray(delta)
-    dtype = multipole.dtype
-    p = int(order)
-
-    x, y, z = delta[0], delta[1], delta[2]
-    r2 = jnp.dot(delta, delta, precision=lax.Precision.HIGHEST)
-    r = jnp.sqrt(floor_squared_radius(r2))
-
-    M_rotated = jnp.zeros_like(multipole)
-    for ell in range(p + 1):
-        sl = slice(sh_offset(ell), sh_offset(ell + 1))
-        D_inv = real_rotation_from_z_axis_multipole_wigner(x, y, z, ell, dtype=dtype)
-        M_rotated = M_rotated.at[sl].set(D_inv @ multipole[sl])
-
-    L_z = translate_along_z_m2l_real(M_rotated, r, order=p)
-
-    out = jnp.zeros_like(L_z)
-    for ell in range(p + 1):
-        sl = slice(sh_offset(ell), sh_offset(ell + 1))
-        D_fwd = real_rotation_to_z_axis_local_wigner(x, y, z, ell, dtype=dtype)
-        out = out.at[sl].set(D_fwd @ L_z[sl])
-
-    return out
-
-
 @partial(jax.jit, static_argnames=("order",))
 def m2l_real(
     multipole: Array,
@@ -1879,16 +2066,6 @@ def m2l_real(
     Uses a real-only Dehnen A6 rotation/translation path (no complex basis).
     """
     return m2l_a6_real_only(multipole, delta, order=order)
-
-
-def m2l_real_wigner(
-    multipole: Array,
-    delta: Array,
-    *,
-    order: int,
-) -> Array:
-    """Baseline M2L using Wigner-D rotations (correctness reference)."""
-    return m2l_a6_real_only_wigner(multipole, delta, order=order)
 
 
 @partial(jax.jit, static_argnames=("order",))
@@ -1912,6 +2089,7 @@ def m2l_optimized_real(
 
 
 @partial(jax.jit, static_argnames=("order",))
+@partial(with_transverse_degeneracy_jvp, generators=_M2M_TRANSVERSE_GENERATORS)
 @highest_matmul_precision
 def m2m_real(
     multipole: Array,
@@ -1938,6 +2116,15 @@ def m2m_real(
     -------
     Array
         Packed real multipole coefficients at the destination center.
+
+    Notes
+    -----
+    Differentiable in both arguments, forward and reverse. Near the ``rho == 0`` axis the
+    ``d/dx`` and ``d/dy`` cotangents come from a ``custom_jvp`` rather than from
+    differentiating the alignment azimuth, which is undefined there and ill-conditioned
+    nearby; the analytic branch applies inside exactly zero outside a narrow band around that axis (``rho <= sqrt(eps) * |delta|``, the measured crossover between the two routes' errors). At ``delta == 0`` -- the identity
+    translation -- the cotangent stays zero, because ``|delta|`` has no derivative at the
+    origin.
     """
     multipole = jnp.asarray(multipole)
     delta = jnp.asarray(delta)
@@ -1975,6 +2162,7 @@ def m2m_real(
 
 
 @partial(jax.jit, static_argnames=("order",))
+@partial(with_transverse_degeneracy_jvp, generators=_L2L_TRANSVERSE_GENERATORS)
 @highest_matmul_precision
 def l2l_real(
     local: Array,
@@ -2002,6 +2190,11 @@ def l2l_real(
     -------
     Array
         Packed real local coefficients at the child center.
+
+    Notes
+    -----
+    Differentiable in both arguments, forward and reverse, with the same ``rho == 0``
+    treatment as :func:`m2m_real`.
     """
     local = jnp.asarray(local)
     delta = jnp.asarray(delta)
@@ -2063,14 +2256,11 @@ __all__ = [
     "verify_real_B_matrix",
     # Rotation building blocks
     "real_Dz_diagonal",
+    "real_transverse_generators",
     "real_rotation_to_z_axis_multipole",
     "real_rotation_to_z_axis_local",
     "real_rotation_from_z_axis_local",
     "real_rotation_from_z_axis_multipole",
-    "real_rotation_to_z_axis_multipole_wigner",
-    "real_rotation_to_z_axis_local_wigner",
-    "real_rotation_from_z_axis_local_wigner",
-    "real_rotation_from_z_axis_multipole_wigner",
     # Z-axis translations
     "translate_along_z_m2m_real",
     "translate_along_z_m2l_real",
@@ -2081,7 +2271,5 @@ __all__ = [
     "m2l_a6_real_only",
     "m2l_real",
     "m2l_optimized_real",
-    "m2l_a6_real_only_wigner",
-    "m2l_real_wigner",
     "l2l_real",
 ]

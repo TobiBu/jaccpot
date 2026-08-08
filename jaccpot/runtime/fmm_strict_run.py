@@ -143,8 +143,11 @@ class StrictRunMixin:
                 )
         finally:
             self._refresh_timing_active = was_refresh_timing_active
-        prepare_elapsed = time.perf_counter() - refresh_t0
-
+        # NOTE: the prepare stage has no timer of its own here on purpose -- its
+        # cost is already the sum of the `_refresh_timing_{input,tree_upward,
+        # dual_downward,nearfield}_seconds` fields accumulated below, and
+        # `_refresh_timing_compile_or_sync_suspect_seconds` catches whatever those
+        # do not account for. A dead `prepare_elapsed = ...` used to sit here.
         profile_t0 = time.perf_counter()
         next_profile = self._compiled_profile_from_prepared_state(next_state)
         next_fingerprint = self._compiled_profile_fingerprint(next_profile)

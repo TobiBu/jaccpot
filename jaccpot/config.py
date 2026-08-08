@@ -125,6 +125,17 @@ class TraversalOverrides:
         )
 
     A plain ``dict`` with the same keys is accepted and means the same thing.
+
+    Attributes
+    ----------
+    max_pair_queue : Optional[int]
+        Capacity of the dual-tree pair queue.
+    process_block : Optional[int]
+        Pair-queue block size processed per traversal step.
+    max_interactions_per_node : Optional[int]
+        Cap on far-field (M2L) interactions recorded per node.
+    max_neighbors_per_leaf : Optional[int]
+        Cap on near-field neighbour leaves recorded per leaf.
     """
 
     max_pair_queue: Optional[int] = None
@@ -215,9 +226,14 @@ class GradConfig:
           (30 GB peak at N=200000 against the fast lane's 6.8 GB), and requiring
           a user to know that in advance is a trap.
         * ``"bucketed"`` -- the edge-list kernel. Best at small N.
-        * ``"fast_lane"`` -- leaf-major traversal. Same edge set and the same
-          force (bit-identical checksums), different traversal. With
-          ``use_pallas`` on an Ampere+ GPU its reverse is the analytic O(N)
+        * ``"fast_lane"`` -- leaf-major traversal. Same edge set, same force, a
+          different traversal. What the suite asserts is relative L2 below 1e-13
+          on the forward and below 1e-12 on both the position and mass gradients
+          (``tests/unit/test_nearfield_fastlane_grad_path.py``, fp64) -- not
+          bit-equality. The bit-identical *force checksums* reported in
+          ``docs/differentiable_fmm.md`` come from the benchmark harness, which is
+          not part of the test suite; do not read this as an asserted invariant.
+          With ``use_pallas`` on an Ampere+ GPU the reverse is the analytic O(N)
           leaf-pair rule, which is what makes 200k--1M gradients feasible.
     nearfield_fast_lane_min_particles : int
         Crossover for ``nearfield_lane="auto"``. The default 100000 comes from
@@ -229,10 +245,12 @@ class GradConfig:
         ``JACCPOT_STATIC_STRICT_FUSED_M2L_PALLAS``. Roughly halves the forward
         at small N; the reverse is near-field-bound, so the end-to-end win is
         ~1.3-1.5x.
-    analytic_p2p_vjp, analytic_l2p_vjp : Optional[bool]
-        Analytic reverse rules for the near-field P2P and the real-basis L2P,
-        both on by default. Turning them off restores plain autodiff and is for
-        A/B measurement, not production.
+    analytic_p2p_vjp : Optional[bool]
+        Analytic reverse rule for the near-field P2P, on by default. Turning it
+        off restores plain autodiff and is for A/B measurement, not production.
+    analytic_l2p_vjp : Optional[bool]
+        Analytic reverse rule for the real-basis L2P, on by default. Same
+        caveat as ``analytic_p2p_vjp``.
     reverse_tiers : Optional[int]
         Maximum occupancy tiers for the analytic leaf-pair reverse (default 4).
         The prepacked payload is padded to the global maximum neighbour count,
@@ -246,10 +264,13 @@ class GradConfig:
     reverse_skip_empty_tiles : Optional[bool]
         Skip reverse tiles carrying no valid source slot (default on).
         Semantics-preserving; worth ~1.24x at N=1000000 and nothing at 200000.
-    reverse_leaf_batch, reverse_block_tile : Optional[int]
-        Reverse-pass tiling (defaults 8 and 8). Deliberately independent of the
-        forward's: the backward materialises per-tile pair tensors, so small
+    reverse_leaf_batch : Optional[int]
+        Reverse-pass leaf batch size (default 8). Deliberately independent of
+        the forward's: the backward materialises per-tile pair tensors, so small
         tiles are what keep its memory bounded.
+    reverse_block_tile : Optional[int]
+        Reverse-pass block tile size (default 8). Same reasoning as
+        ``reverse_leaf_batch``.
     """
 
     nearfield_lane: GradNearFieldLane = "auto"

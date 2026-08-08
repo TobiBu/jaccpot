@@ -134,17 +134,92 @@ def compute_node_multipoles(
 
     Parameters
     ----------
-    tree:
-        Radix tree built from Morton-sorted particles.
-    positions_sorted, masses_sorted:
-        Particle data reordered to match ``tree.particle_indices``.
-    max_order:
-        Highest multipole order to keep.
-    center_mode:
-        ``"com"`` uses each node's centre of mass, ``"aabb"`` uses the
-        geometry centre, and ``"explicit"`` consumes ``explicit_centers``.
-    explicit_centers:
-        User-provided expansion centres when ``center_mode == "explicit"``.
+    tree : Tree
+        Radix tree built from Morton-sorted particles, as produced by
+        ``yggdrax``. Its ``left_child`` / ``right_child`` / ``node_ranges``
+        arrays define the aggregation order.
+    positions_sorted : Array
+        Particle positions ``[N, 3]``, reordered to match
+        ``tree.particle_indices``. Passing unsorted positions is silently wrong,
+        not an error.
+    masses_sorted : Array
+        Particle masses ``[N]``, in the same order as ``positions_sorted``. G=1
+        is a caller convention; no gravitational constant is applied here.
+    max_order : int
+        Highest Cartesian multipole order to keep. Static under ``jit``: it fixes
+        the packed coefficient count.
+    center_mode : str
+        ``"com"`` uses each node's centre of mass, ``"aabb"`` uses the geometry
+        centre, and ``"explicit"`` consumes ``explicit_centers``. Static under
+        ``jit`` -- it selects a Python branch, not a traced one.
+    explicit_centers : Optional[Array]
+        User-provided expansion centres ``[num_nodes, 3]``, required when
+        ``center_mode == "explicit"`` and ignored otherwise.
+
+    Returns
+    -------
+    NodeMultipoleData
+        Packed expansions for every node plus the metadata needed downstream:
+        the realised ``order``, the per-node ``centers`` ``[num_nodes, 3]``, the
+        raw ``moments``, and the ``packed`` coefficients. ``source_motion_packed``
+        is always ``None`` here -- only the derivative/jerk paths populate it.
+
+    Raises
+    ------
+    ValueError
+        If ``center_mode`` is not one of ``"com"``, ``"aabb"``, ``"explicit"``;
+        or if ``center_mode == "explicit"`` and ``explicit_centers`` is missing
+        or is not ``[num_nodes, 3]``. All three are host-side checks on static
+        values, so they fire before tracing.
+
+    Notes
+    -----
+    Differentiable in ``positions_sorted``, ``masses_sorted``, and
+    ``explicit_centers``. Not differentiable in ``tree``, which carries integer
+    topology only.
+
+    A node holding a single particle, or several coincident particles, gives a
+    zero-radius expansion: valid, and exactly the case where the far-field
+    accuracy depends entirely on the caller's MAC. Empty nodes carry zero mass
+    and contribute nothing.
+
+    ``center_mode="com"`` makes the expansion centres a *differentiable function
+    of the particle positions*, and that coupling **is carried all the way
+    through** -- a ``"com"`` gradient is exact for the fixed-topology force, not
+    an approximation that drops the centre-motion term. ``"explicit"`` has no
+    such coupling; ``"aabb"`` does have one, via the min/max subgradient of
+    :func:`~jaccpot.upward.tree_geometry.compute_tree_geometry_compiled`, which
+    is also a live function of the positions.
+
+    The chain, for anyone tempted to insert a ``stop_gradient`` here:
+    :meth:`~jaccpot.runtime.fmm_evaluate.EvaluateMixin.differentiable_accelerations`
+    re-derives the centres from the live inputs on every call -- it calls
+    ``prepare_upward_sweep`` on the live ``positions``/``masses`` and reads only
+    ``int(state.downward.locals.order)``, a Python int, off the frozen state. The
+    M2L/L2L pair displacements are then ``centers[tgt] - centers[src]`` on those
+    live centres, and L2P uses ``leaf_positions - centers``. There is no
+    ``stop_gradient`` anywhere on the single-GPU path; the only ones in the tree
+    are in :mod:`jaccpot.distributed.fmm`, where they freeze the frontier used to
+    *build* the coarse tree while ``_live_coarse_payload`` deliberately keeps the
+    coarse COMs live -- its docstring records that freezing them "would silently
+    drop a real gradient term".
+
+    Guarded by ``tests/unit/test_gradient_correctness.py::test_fd_vs_ad_positions``,
+    whose finite-difference reference perturbs the *same* frozen-topology
+    function and therefore moves the COM centres too; it would fail if the
+    centre-motion term were dropped from the reverse pass. Measured agreement
+    ~1e-9. ``"com"`` is also the production default (resolved in
+    :mod:`jaccpot.runtime.fmm_overrides`), and the real-basis upward sweep
+    accepts nothing else.
+
+    See ``docs/differentiable_fmm_design.md`` ("COM centers are differentiated
+    through, not held fixed") and ``docs/differentiable_fmm_audit.md`` for the
+    audit that established this.
+
+    The one caveat: on degenerate displacements -- exactly-zero (structural under
+    COM, since a single-child internal node shares its child's COM) and
+    z-axis-aligned -- the rotation-angle builders return a zero cotangent by
+    construction. See :func:`jaccpot.operators.complex_ops._angles_from_delta_solidfmm`.
     """
 
     mode = center_mode.lower()
