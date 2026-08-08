@@ -385,6 +385,110 @@ def test_the_analytic_branch_holds_at_float32(
     )
 
 
+@pytest.mark.parametrize("z", [_Z, -3.0])
+@pytest.mark.parametrize("rho", _FP32_RHOS)
+def test_the_analytic_branch_holds_at_float32_on_the_fused_pallas_lanes(
+    rho: float, z: float
+) -> None:
+    """The same float32 claim, on the two lanes that most need it.
+
+    The test above covers the six direct cascades. It does **not** cover either fused
+    Pallas M2L, and that was the gap that mattered most: the band is
+    ``rho_sq <= eps r_sq``, so its width in ``rho/r`` is ``sqrt(eps)`` -- 1.5e-08 at
+    float64 but **3.4e-04** at float32, four orders wider -- and the fused path is the
+    one most likely to run float32 in production. A lane can hold at float64 and still
+    fail here, because at float32 the band admits ``rho`` that ordinary tree geometry
+    reaches rather than only exact zeros.
+
+    The **shipped** functions are differentiated, not a hand-composed rebuild of them,
+    for the reason ``test_the_production_real_fused_m2l_kernel_carries_the_axis_derivative``
+    records: a rebuild passes whether or not ``runtime/kernels/core.py`` wires the pair
+    up. GPU-only, unavoidably -- both hardcode ``interpret=False``.
+
+    Measured worst over these three ``rho`` and both signs of ``z``: 8.9e-07 on the real
+    fused lane and 1.5e-06 on the complex one, against direct-lane controls of 1.8e-06
+    and 1.5e-06 -- i.e. the fused lanes carry no float32 weakness the direct ones do not.
+    The grid deliberately stops short of ``rho = 3.4e-04``: that is the crossover
+    boundary itself, where the minimax choice makes the worst error ``~sqrt(eps)`` **by
+    design** (2.4e-04 measured there, on the fused real lane and its direct control
+    alike), so a tolerance that bound would assert nothing about this branch.
+
+    Parameters
+    ----------
+    rho : float
+        Cylindrical radius, inside the float32 band at ``r ~ 2.5``.
+    z : float
+        Axial separation; both signs, because ``z < 0`` makes the degenerate alignment
+        rotation a pi-turn rather than the identity.
+
+    Raises
+    ------
+    Exception
+        Whatever the Pallas lowering raised, re-raised unless it names a known
+        hardware/runtime incompatibility -- those are skipped instead, so a card that
+        cannot run the kernel does not read as a numerical failure.
+    """
+    if not jax.config.jax_enable_x64:
+        pytest.skip("the float64 reference requires JAX_ENABLE_X64=1")
+    from jaccpot.pallas.m2l_complex_fused import pallas_m2l_complex_fused_supported
+    from jaccpot.pallas.m2l_real_fused import pallas_m2l_real_fused_supported
+    from jaccpot.runtime.kernels.core import (
+        _m2l_complex_batch_kernel_fused_pallas,
+        _m2l_real_batch_kernel_fused_pallas,
+    )
+
+    if not (pallas_m2l_real_fused_supported() and pallas_m2l_complex_fused_supported()):
+        pytest.skip("the fused Pallas M2L lanes require an Ampere+ (sm_80) GPU")
+
+    def transverse_gradient(operator, is_complex, dtype):
+        if is_complex:
+            complex_dtype = jnp.complex64 if dtype == jnp.float32 else jnp.complex128
+            coeffs = _complex_coeffs(5).astype(complex_dtype)
+            weights = _complex_coeffs(6).astype(complex_dtype)
+        else:
+            coeffs = _real_coeffs(5).astype(dtype)
+            weights = _real_coeffs(6).astype(dtype)
+
+        def loss(delta):
+            out = operator(coeffs[None, :], delta, order=_ORDER)
+            return jnp.real(jnp.sum(weights[None, :] * out))
+
+        gradient = jax.grad(loss)(jnp.asarray([[rho, 0.0, z]], dtype=dtype))
+        return np.asarray(gradient, dtype=np.float64)[0, :2]
+
+    lanes = (
+        (
+            "real fused",
+            lambda c, d, order: _m2l_real_batch_kernel_fused_pallas(
+                c, d, order=order, m2l_impl="rot_scale"
+            ),
+            False,
+        ),
+        ("complex fused", _m2l_complex_batch_kernel_fused_pallas, True),
+    )
+    for name, operator, is_complex in lanes:
+        try:
+            single = transverse_gradient(operator, is_complex, jnp.float32)
+            double = transverse_gradient(operator, is_complex, jnp.float64)
+        except Exception as exc:  # pragma: no cover - GPU/runtime dependent
+            message = str(exc).lower()
+            if any(t in message for t in ("warpgroup", "ptx", "triton", "mosaic")):
+                pytest.skip(f"Pallas kernel unavailable on this GPU/runtime: {exc}")
+            raise
+
+        # Not vacuous: the defect this rule fixes returned exactly (0, 0) here.
+        assert np.max(np.abs(double)) > 1.0e-3, (
+            f"{name}: the float64 transverse gradient is ~0, so this comparison "
+            "would pass without testing anything"
+        )
+        relative = float(np.max(np.abs(single - double)) / np.max(np.abs(double)))
+        assert relative < 1.0e-5, (
+            f"{name}: float32 transverse gradient differs from float64 by "
+            f"{relative:.3e} at rho = {rho:.1e}, z = {z}\n"
+            f"  float32: {single}\n  float64: {double}"
+        )
+
+
 # ---------------------------------------------------------------------------
 # The primal
 # ---------------------------------------------------------------------------
