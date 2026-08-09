@@ -103,17 +103,16 @@ CASES = [
 # expansion centres, and the native real upward sweep accepts COM centres only, so a
 # real-basis grouped case raises rather than running.
 #
-# `pair_grouped` is deliberately ABSENT. Its error is order-independent -- measured
-# 1.253e-02 / 1.246e-02 / 1.245e-02 at orders 2 / 4 / 6 uniform, and 3.96e-02 / 3.94e-02
-# / 3.94e-02 clustered -- so a golden for it would need a ~4e-2 anchor, which would
-# encode that plateau as acceptable. `test_grouped_farfield_plateaus_in_order` below pins
-# the plateau as the measured fact instead.
-#
-# G.11 in `docs/refactor_audit_2026-08.md` now records this as a suspected DEFECT rather
-# than a trade: read at the source level `pair_grouped` and `class_major` are the same
-# computation with the same class blocks and the same per-pair displacements, differing
-# only in batching, so a 60x accuracy gap between them should not exist. Do not relax
-# this exclusion into a golden until that is resolved.
+# `pair_grouped` was deliberately ABSENT when this grid was written: its error was
+# order-independent at 1.253e-02 / 1.246e-02 / 1.245e-02 (orders 2 / 4 / 6 uniform) and
+# 3.96e-02 clustered, so a golden would have needed a ~4e-2 anchor -- which would have
+# encoded a defect as acceptable. G.11 in `docs/refactor_audit_2026-08.md` identified
+# that gap as exactly that: `pair_grouped` gathered its class rotation blocks with
+# `GroupedInteractionBuffers.class_ids`, which yggdrax stores in the original pair order
+# while `class_sources` / `class_targets` are sorted by class, so ~70% of pairs were
+# rotated by another class's stencil. With that fixed the mode lands on `class_major` --
+# 8.927e-04 / 2.049e-04 / 1.887e-04 uniform, 3.478e-03 clustered -- and it is now
+# goldened on the same two cases and the same anchors as `class_major`.
 MODE_CASES = [
     (
         "cm_uni_solidfmm_n256_p4",
@@ -132,6 +131,26 @@ MODE_CASES = [
         "solidfmm",
         4,
         "class_major",
+        None,
+        1.0e-2,
+    ),
+    (
+        "pg_uni_solidfmm_n256_p4",
+        "uniform",
+        256,
+        "solidfmm",
+        4,
+        "pair_grouped",
+        None,
+        1.0e-3,
+    ),
+    (
+        "pg_clu_solidfmm_n256_p4",
+        "clustered",
+        256,
+        "solidfmm",
+        4,
+        "pair_grouped",
         None,
         1.0e-2,
     ),
@@ -386,24 +405,28 @@ def test_fmm_golden_execution_modes(
 )
 @pytest.mark.parametrize("mode", ["pair_grouped", "class_major"])
 def test_grouped_farfield_plateaus_in_order(mode):
-    """Both grouped far-field modes stop converging in ``p``; ``pair_grouped`` badly.
+    """Both grouped far-field modes stop converging in ``p``, at the same level.
 
     Recorded as a test rather than a comment because it is the kind of fact that
     silently changes. Measured relative L2 versus a direct sum, uniform N=256:
 
         order       default    pair_grouped   class_major
-        2         7.230e-04       1.253e-02     8.927e-04
-        4         8.148e-05       1.246e-02     2.049e-04
-        6         1.128e-05       1.245e-02     1.887e-04
+        2         7.230e-04       8.927e-04     8.927e-04
+        4         8.148e-05       2.049e-04     2.049e-04
+        6         1.128e-05       1.887e-04     1.887e-04
 
-    The default converges as expected. ``pair_grouped`` is flat to three digits, and
-    ``class_major`` is flat from order 4. Order-independent error is the signature of a
-    fixed geometric approximation rather than expansion truncation, which is consistent
-    with a class-cached scheme applying one representative displacement per class -- so
-    this is plausibly a considered trade. Nothing in the repository says so, and
-    ARCHITECTURE section 5 presents these as execution strategies, which reads as
-    numerics-preserving. G.11 in ``docs/refactor_audit_2026-08.md`` carries the open
-    question.
+    The default converges as expected; both grouped modes are flat from order 4.
+    Order-independent error is the signature of a fixed geometric approximation rather
+    than expansion truncation, which is exactly what a class-cached scheme does: it
+    rotates by one representative lattice displacement per class instead of by each
+    pair's own direction. That residual is inherent to the grouping, and it is the
+    reason ``FarFieldConfig.mode`` documents these as an accuracy trade.
+
+    The two modes used to differ by ~60x here (``pair_grouped`` flat at 1.25e-02).
+    That was G.11 in ``docs/refactor_audit_2026-08.md`` -- a defect, not the trade:
+    ``pair_grouped`` gathered its rotation blocks with ``class_ids``, which yggdrax
+    stores in the original rather than the class-sorted pair order. Fixed; the two
+    modes now agree, so they share a ceiling here.
 
     This test asserts only the plateau, not that it is acceptable: the error at order 6
     must not be materially better than at order 4 (which would mean the plateau went
@@ -429,7 +452,7 @@ def test_grouped_farfield_plateaus_in_order(mode):
             np.linalg.norm(accel - reference) / np.linalg.norm(reference)
         )
 
-    ceiling = {"pair_grouped": 1.5e-2, "class_major": 3.0e-4}[mode]
+    ceiling = 3.0e-4
     assert errors[6] < ceiling, f"{mode} order-6 error {errors[6]:.3e} regressed"
     # The plateau itself: order 6 buys less than a factor of 2 over order 4.
     assert errors[6] > 0.5 * errors[4], (

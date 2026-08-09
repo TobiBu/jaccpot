@@ -138,7 +138,11 @@ kernel did, so consolidation is source-level dedup with no numerical change.
 - `_accumulate_m2l_fullbatch` — one full interaction batch → `segment_sum`
 - `_accumulate_m2l_chunked_scan` — chunked `lax.scan` reduction (bounded memory)
 - grouped / class-major variants (`_accumulate_solidfmm_m2l_grouped[_class_major]`)
-  — cached class blocks; already `basis_mode`-parametrised
+  — cached class blocks; already `basis_mode`-parametrised. These two are one
+  computation differently batched and agree to reassociation, but **grouping is
+  not numerics-preserving relative to the ungrouped accumulators above**: it
+  rotates by one representative lattice displacement per class, so its error does
+  not shrink with expansion order. See `FarFieldConfig.mode` for the numbers.
 
 **L2L / downward:** `_propagate_solidfmm_locals_by_level` (unifies real+complex
 behind `basis_mode`), `_propagate_{solidfmm,real}_locals_to_children`, the
