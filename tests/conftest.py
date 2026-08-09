@@ -185,6 +185,34 @@ def _isolate_process_env(tmp_path):
     across FastMultipoleMethod instances *within* one test). Tests that set env
     vars themselves (via monkeypatch or directly) are unaffected -- their
     changes simply do not survive past their own teardown.
+
+    **The restore touches only the keys that actually changed, and that is a
+    correctness requirement, not an optimisation.** It used to be
+    ``os.environ.clear(); os.environ.update(saved)``, which issues one ``unsetenv``
+    and one ``putenv`` per variable -- roughly 200 C-level environment mutations per
+    test, ~35k across the Dehnen-MAC job. ``setenv``/``unsetenv`` are **not
+    thread-safe**: glibc's ``unsetenv`` frees entries in ``environ`` while any other
+    thread calling ``getenv`` may be reading them, and both JAX and ``execnet``'s
+    receiver thread are live during teardown. That is a segfault, and it was
+    happening -- ``test-mac-runtime`` died with ``Fatal Python error: Segmentation
+    fault`` whose faulting frame is this fixture's teardown inside
+    ``os.environ.__setitem__`` -> ``os.encode``:
+
+        File ".../tests/conftest.py", line 197 in _isolate_process_env
+        File "<frozen _collections_abc>", line 991 in update
+        File "<frozen os>", line 723 in __setitem__
+        File "<frozen os>", line 875 in encode
+
+    Restoring only the diff makes that one mutation for a typical test (the
+    cap-profile path this fixture itself sets) instead of ~200, which shrinks the
+    race window by the same factor. The final environment is identical either way.
+
+    NOTE: the earlier ``worker 'gwN' crashed`` failures in ``tests/unit/runtime``
+    were attributed to memory in the note above. At least one of them was this
+    segfault instead, which is why the ``clear_caches`` mitigation did not stop them
+    -- a compiled-executable pile has nothing to do with an ``environ`` race. The
+    memory measurements in that note stand on their own; the crash attribution did
+    not.
     """
     saved_environ = dict(os.environ)
     os.environ["JACCPOT_STATIC_STRICT_CAP_PROFILE_PATH"] = str(
@@ -193,5 +221,9 @@ def _isolate_process_env(tmp_path):
     try:
         yield
     finally:
-        os.environ.clear()
-        os.environ.update(saved_environ)
+        current_environ = dict(os.environ)
+        for key in current_environ.keys() - saved_environ.keys():
+            del os.environ[key]
+        for key, value in saved_environ.items():
+            if current_environ.get(key) != value:
+                os.environ[key] = value
