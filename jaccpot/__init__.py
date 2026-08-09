@@ -1,5 +1,7 @@
 """Jaccpot: high-level FMM solver APIs built on Yggdrasil artifacts."""
 
+from __future__ import annotations
+
 from ._typecheck import enable_runtime_typecheck
 
 enable_runtime_typecheck()

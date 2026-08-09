@@ -12,6 +12,8 @@ in ``fmm/engine.py`` -- doing so would re-form the
 cycle. Consumers import the class explicitly from ``jaccpot.runtime.fmm.engine``.
 """
 
+from __future__ import annotations
+
 from .._fmm_impl import *  # noqa: F401,F403
 from .._fmm_impl import build_interactions_and_neighbors  # noqa: F401
 from ..kernels.core import _build_grouped_class_segments  # noqa: F401

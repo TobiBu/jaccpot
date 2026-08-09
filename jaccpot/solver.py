@@ -1465,3 +1465,8 @@ class FastMultipoleMethod:
                 grouped_interactions=next_value,
             ),
         )
+
+
+__all__ = [
+    "FastMultipoleMethod",
+]

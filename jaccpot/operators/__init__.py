@@ -1,5 +1,7 @@
 """Operator namespace for harmonic and translation kernels."""
 
+from __future__ import annotations
+
 from . import (
     complex_harmonics,
     complex_ops,

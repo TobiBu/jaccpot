@@ -71,3 +71,8 @@ class ComplexSHBasis:
         if delta_arr.ndim != 2 or int(delta_arr.shape[1]) != 3:
             raise ValueError("deltas must have shape (batch, 3)")
         return m2l_complex_reference_batch(src, delta_arr, order=int(order))
+
+
+__all__ = [
+    "ComplexSHBasis",
+]

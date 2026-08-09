@@ -489,3 +489,21 @@ class FMMAdvancedConfig:
     runtime: RuntimePolicyConfig = RuntimePolicyConfig()
     mac_type: Optional[str] = None
     dehnen_radius_scale: float = 1.0
+
+
+__all__ = [
+    "Basis",
+    "FMMAdvancedConfig",
+    "FMMExecutionBackend",
+    "FMMPreset",
+    "FarFieldConfig",
+    "FarFieldMode",
+    "GradConfig",
+    "GradNearFieldLane",
+    "MemoryObjective",
+    "NearFieldConfig",
+    "NearFieldMode",
+    "RuntimePolicyConfig",
+    "TraversalOverrides",
+    "TreeConfig",
+]

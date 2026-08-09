@@ -10,6 +10,8 @@ Leaf contract: this package and ``core`` must NOT import the engine
 ``experimental`` can use the kernels without dragging in the orchestrator.
 """
 
+from __future__ import annotations
+
 from .core import (
     _STRICT_REFRESH_DETAIL_DIAG_MODES,
     ExpansionBasis,

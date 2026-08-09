@@ -25,7 +25,11 @@ carried out on branch `test/close-rotation-and-grad-golden-gaps`, both test-only
 | 0.19 rename the misnamed large-N test | `d941805` | **Done.** F28 closed. |
 | 0.18 test-layout moves | `a54f29e` | **Done.** A.6 closed — 20 files into the tiers, new `tests/distributed/`, 17 `slow_tests.txt` node ids and 32 path references retargeted from git's rename mapping. Collected counts identical (911/949; 779 not-slow), so no `slow` marker was lost. |
 | 0.20 public surface | `4b2a66a` | **Done** (targeted half). All 14 public names documented; 43 dataclass fields covered. Latent pydoclint violations 2840 → 2778. The ~58 numerics functions are deferred to Tier 1.10 by your decision. |
-| **Tier 0 COMPLETE** | — | All 21 items done or explicitly deferred. |
+| ~~**Tier 0 COMPLETE**~~ | — | **This line was wrong when written.** It came from the running status block, not from checking the per-item rows — and four items were still open: 0.2, 0.5, 0.11's F07 half, and 0.16. Found by re-deriving completeness from the code rather than from this table. |
+| 0.5 + 0.11 (F07) | `8bd24a6` | **Done, differently than specified.** Not a Table 3 transcription — an absolute anchor from the derivative recurrences. See D.8. |
+| 0.2 mode/output golden axes | `ef7ce15` | **Done.** 4 new cases in a separate golden dir; potentials goldened for the first time. Surfaced **G.11**. |
+| 0.16 `__future__` / `__all__` | `23ccc9d` | **Done** (`__future__` complete at 80/80; `__all__` scoped to the public modules — the rest is the F16 star-export seam). |
+| **Tier 0 complete — verified** | — | Re-checked empirically, not from this table. |
 | G.4 + G.8 (Tier 2) — delete the Wigner family and the `sympy` dependence | `ab58c3d` | **Done, signed off by you.** 11 functions, 281 lines, 6 `__all__` names, plus the now-unused `import math`. Both goldens byte-unmoved; suite unchanged at 839/57. Closes F32, F39, and moots F19. |
 
 Full suite after both: **839 passed, 57 skipped**, exit 0. `black`, `isort`, `pydoclint`
@@ -409,7 +413,7 @@ Risk = probability the change breaks something. Effort = S (<1h), M (a day), L (
 | F33 | `runtime/fmm_strict_run.py` | test-gap | **55%** coverage (502 stmts, 227 missed), including most of `strict_run_v2` (428 lines, `:389`) and `_refresh_large_n_same_topology` (515 lines, `:890`). `runtime/fmm_strict_cap_profile.py` 35%; `runtime/fmm_autotune.py` 15% | The strict/refresh lane is the per-step hot path for science runs and carries the velocity-Verlet update. Half of it is unexercised | low | L | yes |
 | F34 | `distributed/fmm.py` | test-gap | **19%** coverage (520 stmts, 423 missed). All 8 distributed suites skip below 2 devices (`device_count() < 2`) | Documented and expected, but it means the whole `distributed/` layer is unrefactorable in this pass — record it, do not touch it | low | — | yes |
 | F35 | `runtime/_interaction_cache.py:892` | structure | Production `distributed/fmm.py` (`local_walk="treecode"`) reaches `experimental/treecode_far_near.py`. Already documented in STYLE_GUIDE §8 as *"the weakest-covered production option in the tree"*; my measurement confirms `treecode_far_near.py` at 0% | Not a new finding, but it is the one documented layering violation that is a *correctness* risk rather than a style one. Listed so the work plan does not disturb it | — | — | yes → **section G** |
-| F36 | 13 modules incl. `jaccpot/__init__.py`, `runtime/_fmm_impl.py`, `runtime/_interaction_cache.py`, `runtime/_nearfield_cache.py`, and 9 `__init__.py` | structure | Missing `from __future__ import annotations` (STYLE_GUIDE §1 says "make it 80"). 41 modules missing `__all__` | Mechanical, and the `_fmm_impl.py`/`_interaction_cache.py` cases are real modules, not just package inits | low | S | no |
+| F36 **✔`23ccc9d`** | 13 modules incl. `jaccpot/__init__.py`, `runtime/_fmm_impl.py`, `runtime/_interaction_cache.py`, `runtime/_nearfield_cache.py`, and 9 `__init__.py` | structure | Missing `from __future__ import annotations` (STYLE_GUIDE §1 says "make it 80"). 41 modules missing `__all__` | Mechanical, and the `_fmm_impl.py`/`_interaction_cache.py` cases are real modules, not just package inits | low | S | no |
 | F37 | `runtime/fmm_overrides.py:253` (`num_particles <= 8192`), `:806` (`n >= 262_144`); `runtime/_large_n_types.py:269, 415, 448` (`65536` three times); `solver.py:75` + `runtime/_fmm_impl.py:1152` (`upward_leaf_batch_size=2048` twice) | magic-number | Thresholds inline rather than in `runtime/fmm_constants.py`, which has 40 named ones | Small, but the repeated `65536` and the duplicated `2048` are the ones that will drift apart | low | S | yes (policy thresholds) |
 | F38 | `jaccpot/_env.py` vs STYLE_GUIDE §8 | structure | The guide says only `runtime/` reads env vars; `_env.py`'s docstring says any layer may. 16 reads outside `runtime/` | Contributors will follow whichever they read first | — | S | no → **section G** |
 | F39 | ~~`operators/real_harmonics.py:1123`~~ **CLOSED `ab58c3d`** | api | **`sympy` was an undeclared dependency.** The only occurrence in the repository, absent from `dependencies` and from `[dev]`. Verified absent from the whole closure (jax, jaxlib, jaxtyping, yggdrax, beartype runtime) and therefore from CI, which installs only `yggdrax` + `jaccpot[dev]`. All 6 public `*_wigner` names raise `ImportError` when called — checked one by one | A module-public name that cannot execute in any environment the project's own install instructions produce. Found by trying to use it for Tier 0.3, which is why 0.3 had to be built differently. Also means the intended fix for F32 is not free: it costs a dependency, and CLAUDE.md forbids adding one without asking | low | S | no → **section G.8** |
@@ -744,7 +748,20 @@ convergence-in-`p` suite and the real-basis goldens (`uni_real_n256_p2/p4/p6`,
 error that survived those would have to be a similarity transform of the true basis that also
 preserves the assembled potential, which is a much narrower class than "a per-`m` sign error".
 
-**What to do (Tier 0, cheap):**
+**Closed in `8bd24a6`, and not the way this section proposed.** Item 2 below said to
+transcribe Table 3 for degrees 2-6 as committed data. I did not: a transcription of a
+paper I do not have is not checkable, and re-deriving the polynomials from the formula
+`p2m_real_direct` implements would be circular. The anchor instead comes from theory —
+the 1/(n+|m|)!-normalised solid harmonics satisfy `dU_n^m/dz = U_{n-1}^m` (exact,
+verified to order 6) and transverse recurrences whose coefficients are exact multiples of
+1/2, and those recurrences plus `U_0^0 = 1` determine every `U_n^m` **uniquely**. So it is
+an absolute anchor, and a stronger one than a table: scaling any single `U_n^m` by
+`1 + 1e-3` leaves the recurrences structural (held-out residual unchanged at ~8e-15) but
+makes the coefficients non-half-integer in 6 entries for `U_3^2`, 6 for `U_4^{-3}` and 2
+for `U_6^5`. The half-integrality check is what catches the per-`m` normalisation error
+this section is about.
+
+**What was proposed (retained for the record):**
 1. **Correct the docstring** (`:371-382`) to name the test that now exists and to state the
    residual gap as *"no absolute Table 3 anchor above degree 1"* rather than *"unverified"*.
    This is a real finding — the docstring is now the misleading artefact.
@@ -1302,3 +1319,65 @@ every currently-correct gradient is preserved bit-for-bit, with a third regime f
 (`m2l_real_rot_scale.py`) first, then the complex path, then the reference operators, then the
 M2M/L2L cascades in `upward/`/`downward/`. Two tracking `xfail(strict=True)` tests must flip and
 both goldens must stay byte-unmoved.
+
+### G.11 Both grouped far-field modes stop converging in expansion order
+
+Surfaced while widening the golden (0.2, `ef7ce15`). Relative L2 versus a direct O(N²)
+sum, `preset="accurate"`, solidfmm, leaf 8, theta 0.5:
+
+| order | default | `pair_grouped` | `class_major` |
+|---|---|---|---|
+| 2 | 7.230e-04 | 1.253e-02 | 8.927e-04 |
+| 4 | 8.148e-05 | **1.246e-02** | 2.049e-04 |
+| 6 | 1.128e-05 | **1.245e-02** | 1.887e-04 |
+
+Clustered N=256 gives 3.96e-02 / 3.94e-02 / 3.94e-02 for `pair_grouped`. The default
+converges as expected; `pair_grouped` is flat to three digits, and `class_major` is flat
+from order 4.
+
+**Order-independent error is the signature of a fixed geometric approximation rather than
+expansion truncation** — which is exactly what this repository's own golden file says
+about the known-broken `cartesian` basis (*"a divergent-series signature, not
+truncation"*).
+
+**Narrowed further, and it is a bug, not a trade.** Read at the source level, the two
+modes are *the same computation, differently batched*:
+
+- `_accumulate_solidfmm_m2l_grouped_fullbatch` (`kernels/core.py:1163`) —
+  `deltas = centers[tgt_sorted] - centers[src_sorted]`, blocks indexed **per pair** by
+  `class_ids_sorted`.
+- `_accumulate_solidfmm_m2l_class_major_chunked_scan` (`kernels/core.py:1255`) — the
+  same `deltas = centers[tgt_chunk] - centers[src_chunk]`, the same
+  `blocks_{to,from}_classes`, broadcast **per class segment**.
+
+Both take their rotation from `_rotation_blocks_for_grouped_classes` and their
+translation from the true per-pair displacement. `class_major` has no fallback path —
+it builds the segment tables itself when they are not precomputed — so both genuinely
+run the class-cached scheme. Two batchings of one computation should agree to
+reassociation, not differ by 60x.
+
+**Two hypotheses eliminated by measurement.** (1) An inconsistent hybrid — class
+rotation paired with per-pair distance — is *not* the cause: forcing `pair_grouped` to
+use the class representative displacement instead, making it fully consistent, moves the
+error only from 1.246e-02 to 1.170e-02. (2) `class_major` silently falling back to an
+ungrouped path — ruled out by reading the branch; it always reaches the class-major scan.
+
+**Leading hypothesis, untested:** `grouped.class_ids` is not aligned with the ordering of
+`grouped.class_sources` / `class_targets`, so `pair_grouped`'s per-pair
+`blocks_to_classes[class_ids_sorted]` gather applies the wrong class's rotation to each
+pair, while `class_major`'s per-segment indexing is immune because it takes the class id
+from the segment table. That fits every observation: identical math, a 60x gap, and
+insensitivity to which displacement is used. **What would settle it:** for each pair,
+check that `class_displacements[class_ids[i]]` is parallel to
+`centers[class_targets[i]] - centers[class_sources[i]]`. If the angle is large for most
+pairs, the gather is misaligned and the fix is a permutation, not a scheme change.
+
+Not fixed, and not encoded into a golden anchor: giving `pair_grouped` a golden would
+have needed a ~4e-2 bound, which legitimises the plateau.
+`test_grouped_farfield_plateaus_in_order` records it as measured behaviour for both
+modes and fails if it ever changes in either direction.
+
+**What I would want to know:** whether `pair_grouped`'s ~60x gap over `class_major` is
+inherent to the coarser grouping or a defect in the representative-displacement choice.
+The two differ only in how classes are batched, so a 60x accuracy gap between them is
+the part that looks less like a trade and more like a bug.
