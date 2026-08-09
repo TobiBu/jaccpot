@@ -115,8 +115,17 @@ jaccpot/experimental/  octree/treecode prototypes — NOT production, opt-in mar
 tests/unit/            does the function do what its docstring says
 tests/integration/     end-to-end paths
 tests/characterization/ golden references — the tripwire for silent numerics changes
+                       (forward accelerations + gradients, each with an inertness
+                       gate and a direct-sum physics anchor)
+tests/distributed/     multi-GPU; every file skips below 2 devices, so CPU CI collects
+                       and skips them. Not a tier you can rely on locally.
 tests/perf/            performance assertions
 tests/experimental/    prototypes; deselected by default
+
+No test files live directly under `tests/` — only `conftest.py` and `slow_tests.txt`.
+`slow_tests.txt` marks tests `slow` **by node id**, so moving or renaming a test file
+silently un-marks its entries and pushes them into the smoke leg; update it in the same
+change and check the collected counts under `-m "not slow"` are unchanged.
 
 bench/                 profiling, audits, microbenchmarks, ci_benchmark_guard.py
 docs/                  design notes, audits, profiling records

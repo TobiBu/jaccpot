@@ -14,7 +14,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from functools import lru_cache
-from typing import Any, Literal, NamedTuple, Optional, Union
+from typing import TYPE_CHECKING, Any, Literal, NamedTuple, Optional, Union
 
 import jax
 import jax.numpy as jnp
@@ -52,6 +52,14 @@ from ._octree_fmm import (
 )
 from .dtypes import INDEX_DTYPE
 from .fmm_presets import FMMPresetConfig
+
+if TYPE_CHECKING:  # pragma: no cover - annotations only, no runtime import
+    # `FMMPreparedState.nearfield_interop` is annotated with a string forward
+    # reference to keep this module off `kernels.core`'s import path at module scope.
+    # The name was dangling before this block, so `typing.get_type_hints` on the
+    # dataclass raised NameError.
+    from .kernels.core import NearfieldInteropData
+
 from .kernels.core import (
     ExpansionBasis,
     _FarPairCOO,

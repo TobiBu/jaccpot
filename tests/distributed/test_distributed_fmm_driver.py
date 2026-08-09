@@ -8,7 +8,7 @@ genuinely engaged), the reassembled per-particle accelerations match a direct
 N-body sum to within 1%.
 
     CUDA_VISIBLE_DEVICES=$(autocvd -n 3 -l -o) \
-        pytest tests/test_distributed_fmm_driver.py -o addopts="" -q
+        pytest tests/distributed/test_distributed_fmm_driver.py -o addopts="" -q
 """
 
 import dataclasses

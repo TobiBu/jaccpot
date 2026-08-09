@@ -32,7 +32,7 @@ Full GPU run (use autocvd to pick a free device)::
     autocvd -- python -m bench.validation.mac_error_distribution \\
         --n 32768,131072 --leaf-size 32 --order 4,8 \\
         --distribution uniform,plummer,two_component,mass_spectrum \\
-        --json-out results/validation/mac_error_distribution.json
+        --json-out bench/results/validation/mac_error_distribution.json
 """
 
 from __future__ import annotations

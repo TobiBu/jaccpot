@@ -166,6 +166,6 @@ def test_treecode_graft_matches_direct(n, use_pallas_walk, monkeypatch):
     )
     got = _run(pos, mass)
     rel = np.linalg.norm(got - ref, axis=1) / (np.linalg.norm(ref, axis=1) + 1e-12)
-    # float32 large-N tolerance (cf. tests/test_gravity_vs_direct.py float32 gate).
+    # float32 large-N tolerance (cf. tests/integration/test_gravity_vs_direct.py float32 gate).
     assert np.median(rel) < 0.09, f"median rel {np.median(rel):.3e}"
     assert np.percentile(rel, 90) < 0.15, f"p90 rel {np.percentile(rel, 90):.3e}"

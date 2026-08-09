@@ -1,7 +1,7 @@
 """Multi-GPU distributed FMM force evaluation.
 
 Promotes the per-device ``jax.shard_map`` assembly that was validated in
-``tests/test_distributed_solidfmm_far_shardmap.py`` (4-GPU solidfmm far-field,
+``tests/distributed/test_distributed_solidfmm_far_shardmap.py`` (4-GPU solidfmm far-field,
 within ~0.24-1% of a direct N-body sum) into a reusable, benchmarkable API.
 
 The heavy lifting (SFC domain decomposition, per-device local tree, solidfmm

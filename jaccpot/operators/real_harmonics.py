@@ -1093,7 +1093,7 @@ def complex_to_dehnen_real_coeffs(complex_coeffs: Array, *, order: int) -> Array
     measured worst case of 8.9e-16.
 
     That test exists because the two indirect proxies cannot substitute for it:
-    ``tests/test_real_upward_sweep.py::test_real_upward_matches_complex_convert``
+    ``tests/unit/core/test_real_upward_sweep.py::test_real_upward_matches_complex_convert``
     checks an aggregate relative L2 over a whole 300-particle P2M+M2M tree, where
     a single-``m`` error is diluted, and
     ``tests/unit/runtime/test_dehnen_mac_reference.py::test_dehnen_power_is_basis_invariant``

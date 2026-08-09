@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import math
 import time
-from typing import Optional
+from typing import TYPE_CHECKING, Optional
 
 import jax
 import jax.numpy as jnp
@@ -31,6 +31,14 @@ from .fmm_caches import (
     _m2l_autotune_store,
 )
 from .kernels.core import _accumulate_m2l_chunked_scan
+
+if TYPE_CHECKING:  # pragma: no cover - annotations only, no runtime import
+    # The mixins annotate `self` as the engine they are mixed into, which lives in
+    # `_fmm_impl` and imports *them* -- so this must stay under TYPE_CHECKING or it
+    # would form the cycle ARCHITECTURE §8 forbids. Before this block the names were
+    # dangling: `typing.get_type_hints` raised NameError on every mixin method, so the
+    # annotations documented an intent no tool could check.
+    from ._fmm_impl import FastMultipoleMethod
 
 
 class AutotuneMixin:

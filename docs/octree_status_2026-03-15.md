@@ -1,3 +1,9 @@
+> **Archived handoff, 2026-03-15.** Moved here from the repository root. It records a
+> point-in-time state on branches `oct-tree` (jaccpot) / `oct-tree-updates` (yggdrax) and
+> refers to absolute paths and a specific GPU on another machine, so treat every path,
+> branch and environment name in it as historical. The live task list is
+> [`octree_fmm_task_list.md`](octree_fmm_task_list.md).
+
 # Octree FMM Status Handoff
 
 Date: 2026-03-15

@@ -33,8 +33,50 @@ def differentiable_gravitational_acceleration(
     It deliberately accepts the same FMM-shaped keyword arguments (``theta``,
     ``bounds``, ``leaf_size``, ``max_order``) purely for drop-in signature
     compatibility with the FMM call -- they do not apply to direct summation and
-    are ignored. Only ``G`` and ``softening`` affect the result. O(N^2) cost:
-    intended for gradient work at modest N, not large-scale evaluation.
+    are ignored. Only ``G`` and ``softening`` affect the result.
+
+    Parameters
+    ----------
+    positions : Array
+        Particle positions ``[N, 3]``. Any order; unlike the FMM there is no Morton
+        sort, so the output is aligned with the input.
+    masses : Array
+        Particle masses ``[N]``.
+    theta : float
+        **Ignored.** Accepted for signature compatibility with the FMM.
+    G : float
+        Gravitational constant, applied as a plain multiplier.
+    softening : float
+        Plummer softening length. Added in quadrature, so a coincident pair is
+        finite for any nonzero value; at ``softening == 0`` a coincident pair is a
+        genuine singularity that this function does not guard.
+    bounds : Optional[Tuple[Array, Array]]
+        **Ignored.** Accepted for signature compatibility with the FMM.
+    leaf_size : int
+        **Ignored.** Accepted for signature compatibility with the FMM.
+    max_order : int
+        **Ignored.** There is no expansion here, so there is no truncation error --
+        which is precisely what makes this a usable oracle.
+
+    Returns
+    -------
+    Array
+        Accelerations ``[N, 3]``, in the input particle order.
+
+    Notes
+    -----
+    Differentiable in ``positions``, ``masses`` and ``G``; not in ``softening``
+    (it is squared into a constant) and not in the ignored arguments.
+
+    ``O(N^2)`` in time and memory -- the ``[N, N, 3]`` pairwise difference tensor is
+    materialised, so this is for gradient work at modest ``N``, not evaluation at
+    scale. Self-interaction is removed by a diagonal mask rather than by skipping,
+    which keeps the computation dense and jittable.
+
+    fp32 matmul precision is pinned to ``lax.Precision.HIGHEST`` in the final
+    contraction, for the same reason it is pinned across the operators: XLA
+    otherwise lowers fp32 matmuls to TF32 on Ampere+ and an oracle with a ~6e-04
+    accuracy floor cannot validate anything below that floor.
     """
 
     # FMM-shaped args accepted for API parity only; direct sum ignores them.
