@@ -1,5 +1,7 @@
 """Dual-tree interaction cache helpers for the runtime FMM implementation."""
 
+from __future__ import annotations
+
 import hashlib
 import os
 import time

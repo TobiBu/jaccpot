@@ -5,6 +5,8 @@ This implementation uses multipole and local expansions to compute
 gravitational forces in O(N) time instead of O(N^2) for direct summation.
 """
 
+from __future__ import annotations
+
 import json
 import os
 import warnings
