@@ -3305,8 +3305,21 @@ def test_solidfmm_grouped_interactions_matches_sparse_path():
 
 
 def test_solidfmm_grouped_class_major_matches_pair_grouped():
+    """The two grouped far-field modes are one computation, differently batched.
+
+    They share the class rotation blocks and the per-pair displacement, so they
+    must agree to reassociation. This used to be asserted at 112 particles with
+    ``leaf_size=16`` and ``theta=0.6``, which produces **zero** far pairs -- the
+    assertion compared two all-zero local arrays and could not fail. It missed
+    G.11 (``docs/refactor_audit_2026-08.md``): ``pair_grouped`` gathered its
+    rotation with ``class_ids``, which yggdrax stores in the original rather than
+    the class-sorted pair order, so ~70% of pairs were rotated by another class.
+    At the sizes below that put the two modes a relative L2 of ~1.0 apart.
+
+    The far-pair count is asserted explicitly so it can never go vacuous again.
+    """
     key = jax.random.PRNGKey(31)
-    num_particles = 112
+    num_particles = 512
     positions = jax.random.uniform(
         key,
         (num_particles, 3),
@@ -3336,7 +3349,7 @@ def test_solidfmm_grouped_class_major_matches_pair_grouped():
         positions,
         masses,
         bounds,
-        leaf_size=16,
+        leaf_size=8,
         return_reordered=True,
     )
     upward = fmm.prepare_upward_sweep(
@@ -3362,11 +3375,17 @@ def test_solidfmm_grouped_class_major_matches_pair_grouped():
         farfield_mode="class_major",
     )
 
-    assert np.allclose(
-        np.asarray(downward_class.locals.coefficients),
-        np.asarray(downward_pair.locals.coefficients),
-        rtol=1e-5,
-        atol=1e-5,
+    far_pairs = int(downward_pair.interactions.sources.shape[0])
+    assert far_pairs > 0, "vacuous: no far pairs, so the M2L modes ran on nothing"
+
+    pair_locals = np.asarray(downward_pair.locals.coefficients)
+    class_locals = np.asarray(downward_class.locals.coefficients)
+    # Relative, not absolute: the local coefficients here are O(1e2), so the old
+    # atol=1e-5 would have been the only binding term.
+    rel_l2 = np.linalg.norm(pair_locals - class_locals) / np.linalg.norm(class_locals)
+    assert rel_l2 < 1e-6, (
+        f"grouped far-field modes disagree at rel-L2 {rel_l2:.3e} over "
+        f"{far_pairs} far pairs; they are the same computation, differently batched"
     )
 
 
