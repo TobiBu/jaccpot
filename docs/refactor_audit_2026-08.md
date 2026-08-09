@@ -1320,7 +1320,58 @@ every currently-correct gradient is preserved bit-for-bit, with a third regime f
 M2M/L2L cascades in `upward/`/`downward/`. Two tracking `xfail(strict=True)` tests must flip and
 both goldens must stay byte-unmoved.
 
-### G.11 Both grouped far-field modes stop converging in expansion order
+### G.11 `pair_grouped` M2L applied the wrong class's rotation — **FIXED**
+
+**Resolved.** The leading hypothesis below was right: the per-pair gather was
+misaligned. `pair_grouped` now matches `class_major` to reassociation, and the plateau
+that remains is the genuine class-cached trade shared by both modes.
+
+Measured after the fix, same configuration (relative L2 versus a direct O(N²) sum):
+
+| order | default | `pair_grouped` | `class_major` |
+|---|---|---|---|
+| 2 | 7.230e-04 | 8.927e-04 | 8.927e-04 |
+| 4 | 8.148e-05 | 2.049e-04 | 2.049e-04 |
+| 6 | 1.128e-05 | 1.887e-04 | 1.887e-04 |
+
+Clustered N=256 at order 4: 3.94e-02 → 3.478e-03, again equal to `class_major`.
+
+**The defect.** `GroupedInteractionBuffers` stores `class_sources` / `class_targets`
+sorted by displacement class, but stores `class_ids` under the *inverse* permutation, in
+the original pair order (`grouped_interactions.py:185`,
+`class_ids_original = class_ids_sorted[inv_order]`). The two are therefore not
+co-indexed. `pair_grouped` gathered `blocks_{to,from}_classes[grouped.class_ids]`,
+handing most pairs another class's rotation; `class_major` was immune because it reads
+the class id from its CSR segment table. Both the fullbatch and the chunked-scan branch
+of `pair_grouped` were affected — they shared the same `class_ids` argument.
+
+**The measurement that settled it** (the check proposed below, run on the golden's own
+uniform N=256 tree, 20 far pairs): the angle between `class_displacements[class_ids[i]]`
+and `centers[class_targets[i]] - centers[class_sources[i]]` was **mean 39.8°, median
+19.6°, max 150.1°, with 70% of pairs beyond 10°**. Deriving the class id from
+`class_offsets` instead gives **mean 0.94°, max 2.13°, none beyond 10°** — the residual
+being the AABB-centre jitter inside a lattice cell, which is the approximation the mode
+is supposed to make.
+
+**The fix** (`_pair_class_ids_from_offsets`, `runtime/kernels/core.py`): derive the
+per-pair class id from the CSR `class_offsets` — the same table `class_major` reads —
+and pass `class_offsets` to the two accumulators in place of `class_ids`, so the
+misusable array no longer reaches them. The derivation is a `searchsorted` inside the
+already-jitted kernels, so the cached class rotation the mode exists for is untouched
+and no per-pair rotation is built.
+
+**Test coverage was vacuous.** `test_solidfmm_grouped_class_major_matches_pair_grouped`
+already asserted these two modes agree — at 112 particles, `leaf_size=16`, `theta=0.6`,
+which yields **zero** far pairs. It compared two all-zero arrays. Raised to 512
+particles / `leaf_size=8` (774 far pairs) with an explicit non-vacuity assertion; it
+fails at relative L2 **1.017e+00** without the fix. `pair_grouped` is now goldened in
+`golden_modes/` on the same two cases and anchors as `class_major`, and
+`tests/unit/runtime/test_grouped_class_id_alignment.py` pins the alignment invariant
+directly.
+
+The original analysis follows.
+
+---
 
 Surfaced while widening the golden (0.2, `ef7ce15`). Relative L2 versus a direct O(N²)
 sum, `preset="accurate"`, solidfmm, leaf 8, theta 0.5:
@@ -1362,7 +1413,8 @@ use the class representative displacement instead, making it fully consistent, m
 error only from 1.246e-02 to 1.170e-02. (2) `class_major` silently falling back to an
 ungrouped path — ruled out by reading the branch; it always reaches the class-major scan.
 
-**Leading hypothesis, untested:** `grouped.class_ids` is not aligned with the ordering of
+**Leading hypothesis, untested** *(confirmed — see the resolution above)*:
+`grouped.class_ids` is not aligned with the ordering of
 `grouped.class_sources` / `class_targets`, so `pair_grouped`'s per-pair
 `blocks_to_classes[class_ids_sorted]` gather applies the wrong class's rotation to each
 pair, while `class_major`'s per-segment indexing is immune because it takes the class id
@@ -1372,12 +1424,14 @@ check that `class_displacements[class_ids[i]]` is parallel to
 `centers[class_targets[i]] - centers[class_sources[i]]`. If the angle is large for most
 pairs, the gather is misaligned and the fix is a permutation, not a scheme change.
 
-Not fixed, and not encoded into a golden anchor: giving `pair_grouped` a golden would
-have needed a ~4e-2 bound, which legitimises the plateau.
+Not fixed at the time of writing, and not encoded into a golden anchor: giving
+`pair_grouped` a golden would have needed a ~4e-2 bound, which legitimises the plateau.
 `test_grouped_farfield_plateaus_in_order` records it as measured behaviour for both
 modes and fails if it ever changes in either direction.
 
 **What I would want to know:** whether `pair_grouped`'s ~60x gap over `class_major` is
 inherent to the coarser grouping or a defect in the representative-displacement choice.
 The two differ only in how classes are batched, so a 60x accuracy gap between them is
-the part that looks less like a trade and more like a bug.
+the part that looks less like a trade and more like a bug. *(Answered: a defect. The
+residual plateau that both modes share afterwards — order-independent at ~1.9e-04
+uniform — is the real trade, and is now documented on `FarFieldConfig.mode`.)*
