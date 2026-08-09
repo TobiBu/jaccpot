@@ -1098,6 +1098,34 @@ def _chunk_segment_scatter_add(
     return local_accum.at[safe_targets].add(reduced)
 
 
+def _pair_class_ids_from_offsets(class_offsets: Array, pair_indices: Array) -> Array:
+    """Class id of each pair, addressed in the class-sorted pair order.
+
+    ``class_sources`` / ``class_targets`` are stored sorted by class, so the
+    CSR offsets alone say which class a pair index belongs to: pair ``i`` is in
+    class ``c`` when ``class_offsets[c] <= i < class_offsets[c + 1]``.
+
+    This is deliberately not ``GroupedInteractionBuffers.class_ids``, which
+    yggdrax stores in the *original* (unsorted) pair order -- see
+    :func:`_accumulate_solidfmm_m2l_grouped`.
+
+    Parameters
+    ----------
+    class_offsets : Array
+        CSR class boundaries, shape ``(num_classes + 1,)``, strictly increasing.
+    pair_indices : Array
+        Indices into the class-sorted pair arrays.
+
+    Returns
+    -------
+    Array
+        Class id per entry of ``pair_indices``.
+    """
+    return jnp.searchsorted(class_offsets[1:], pair_indices, side="right").astype(
+        INDEX_DTYPE
+    )
+
+
 @partial(
     jax.jit,
     static_argnames=("order", "total_nodes", "chunk_size", "basis_mode"),
@@ -1109,7 +1137,7 @@ def _accumulate_solidfmm_m2l_grouped_chunked_scan(
     centers: Array,
     src_sorted: Array,
     tgt_sorted: Array,
-    class_ids_sorted: Array,
+    class_offsets: Array,
     blocks_to_classes: Array,
     blocks_from_classes: Array,
     *,
@@ -1130,7 +1158,7 @@ def _accumulate_solidfmm_m2l_grouped_chunked_scan(
 
         src_chunk = src_sorted[safe_idx]
         tgt_chunk = tgt_sorted[safe_idx]
-        cls_chunk = class_ids_sorted[safe_idx]
+        cls_chunk = _pair_class_ids_from_offsets(class_offsets, safe_idx)
         src_mult = multip_packed[src_chunk]
         deltas = centers[tgt_chunk] - centers[src_chunk]
         blocks_to = blocks_to_classes[cls_chunk]
@@ -1168,7 +1196,7 @@ def _accumulate_solidfmm_m2l_grouped_fullbatch(
     centers: Array,
     src_sorted: Array,
     tgt_sorted: Array,
-    class_ids_sorted: Array,
+    class_offsets: Array,
     blocks_to_classes: Array,
     blocks_from_classes: Array,
     *,
@@ -1179,6 +1207,10 @@ def _accumulate_solidfmm_m2l_grouped_fullbatch(
     """Accumulate grouped solidfmm M2L contributions in one full batch."""
     src_mult = multip_packed[src_sorted]
     deltas = centers[tgt_sorted] - centers[src_sorted]
+    class_ids_sorted = _pair_class_ids_from_offsets(
+        class_offsets,
+        jnp.arange(src_sorted.shape[0], dtype=INDEX_DTYPE),
+    )
     blocks_to = blocks_to_classes[class_ids_sorted]
     blocks_from = blocks_from_classes[class_ids_sorted]
     contribs = _m2l_cached_kernel_dispatch(
@@ -1430,7 +1462,15 @@ def _accumulate_solidfmm_m2l_grouped(
     chunk_size: int,
     basis_mode: str = "complex",
 ) -> Array:
-    """Grouped M2L accumulation using cached class blocks and pair chunking."""
+    """Grouped M2L accumulation using cached class blocks and pair chunking.
+
+    The per-pair class id is derived from ``grouped.class_offsets`` rather than
+    read from ``grouped.class_ids``: yggdrax stores ``class_sources`` /
+    ``class_targets`` sorted by class but applies the inverse permutation to
+    ``class_ids``, so the two are not co-indexed and gathering blocks with
+    ``class_ids`` hands most pairs another class's rotation. This is the same
+    class assignment the class-major scan reads out of its segment table.
+    """
 
     if rotation not in ("solidfmm",):
         # Keep existing sparse path semantics for other conventions.
@@ -1451,7 +1491,7 @@ def _accumulate_solidfmm_m2l_grouped(
 
     src_sorted = grouped.class_sources
     tgt_sorted = grouped.class_targets
-    class_ids = jnp.asarray(grouped.class_ids, dtype=INDEX_DTYPE)
+    class_offsets = jnp.asarray(grouped.class_offsets, dtype=INDEX_DTYPE)
     class_keys = jnp.asarray(grouped.class_keys, dtype=jnp.int32)
     class_deltas = jnp.asarray(grouped.class_displacements)
 
@@ -1470,7 +1510,7 @@ def _accumulate_solidfmm_m2l_grouped(
             centers,
             src_sorted,
             tgt_sorted,
-            class_ids,
+            class_offsets,
             blocks_to_classes,
             blocks_from_classes,
             order=order,
@@ -1482,7 +1522,7 @@ def _accumulate_solidfmm_m2l_grouped(
         centers,
         src_sorted,
         tgt_sorted,
-        class_ids,
+        class_offsets,
         blocks_to_classes,
         blocks_from_classes,
         order=order,
