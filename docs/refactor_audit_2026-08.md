@@ -1338,17 +1338,39 @@ from order 4.
 **Order-independent error is the signature of a fixed geometric approximation rather than
 expansion truncation** — which is exactly what this repository's own golden file says
 about the known-broken `cartesian` basis (*"a divergent-series signature, not
-truncation"*). For a class-cached scheme it is plausibly expected: quantising pair
-displacements onto a lattice and applying one representative displacement per class
-introduces a geometric error that raising `p` cannot reduce.
+truncation"*).
 
-**The question is whether that is a considered trade, and nothing in the repository says
-it is.** ARCHITECTURE §5 presents grouped and class-major as execution strategies —
-"cached class blocks" — which reads as numerics-preserving, and §10's
-numerics-preservation argument is about the `basis_mode` merge, not this. If the trade is
-intended, it belongs in `FarFieldConfig.mode`'s docstring with these numbers, because a
-user selecting `pair_grouped` for throughput is currently unaware they are also capping
-accuracy at ~1e-2 and that raising the order will not help.
+**Narrowed further, and it is a bug, not a trade.** Read at the source level, the two
+modes are *the same computation, differently batched*:
+
+- `_accumulate_solidfmm_m2l_grouped_fullbatch` (`kernels/core.py:1163`) —
+  `deltas = centers[tgt_sorted] - centers[src_sorted]`, blocks indexed **per pair** by
+  `class_ids_sorted`.
+- `_accumulate_solidfmm_m2l_class_major_chunked_scan` (`kernels/core.py:1255`) — the
+  same `deltas = centers[tgt_chunk] - centers[src_chunk]`, the same
+  `blocks_{to,from}_classes`, broadcast **per class segment**.
+
+Both take their rotation from `_rotation_blocks_for_grouped_classes` and their
+translation from the true per-pair displacement. `class_major` has no fallback path —
+it builds the segment tables itself when they are not precomputed — so both genuinely
+run the class-cached scheme. Two batchings of one computation should agree to
+reassociation, not differ by 60x.
+
+**Two hypotheses eliminated by measurement.** (1) An inconsistent hybrid — class
+rotation paired with per-pair distance — is *not* the cause: forcing `pair_grouped` to
+use the class representative displacement instead, making it fully consistent, moves the
+error only from 1.246e-02 to 1.170e-02. (2) `class_major` silently falling back to an
+ungrouped path — ruled out by reading the branch; it always reaches the class-major scan.
+
+**Leading hypothesis, untested:** `grouped.class_ids` is not aligned with the ordering of
+`grouped.class_sources` / `class_targets`, so `pair_grouped`'s per-pair
+`blocks_to_classes[class_ids_sorted]` gather applies the wrong class's rotation to each
+pair, while `class_major`'s per-segment indexing is immune because it takes the class id
+from the segment table. That fits every observation: identical math, a 60x gap, and
+insensitivity to which displacement is used. **What would settle it:** for each pair,
+check that `class_displacements[class_ids[i]]` is parallel to
+`centers[class_targets[i]] - centers[class_sources[i]]`. If the angle is large for most
+pairs, the gather is misaligned and the fix is a permutation, not a scheme change.
 
 Not fixed, and not encoded into a golden anchor: giving `pair_grouped` a golden would
 have needed a ~4e-2 bound, which legitimises the plateau.

@@ -107,8 +107,13 @@ CASES = [
 # 1.253e-02 / 1.246e-02 / 1.245e-02 at orders 2 / 4 / 6 uniform, and 3.96e-02 / 3.94e-02
 # / 3.94e-02 clustered -- so a golden for it would need a ~4e-2 anchor, which would
 # encode that plateau as acceptable. `test_grouped_farfield_plateaus_in_order` below pins
-# the plateau as the measured fact instead, and G.11 in
-# `docs/refactor_audit_2026-08.md` tracks whether it is a considered trade or a defect.
+# the plateau as the measured fact instead.
+#
+# G.11 in `docs/refactor_audit_2026-08.md` now records this as a suspected DEFECT rather
+# than a trade: read at the source level `pair_grouped` and `class_major` are the same
+# computation with the same class blocks and the same per-pair displacements, differing
+# only in batching, so a 60x accuracy gap between them should not exist. Do not relax
+# this exclusion into a golden until that is resolved.
 MODE_CASES = [
     (
         "cm_uni_solidfmm_n256_p4",
