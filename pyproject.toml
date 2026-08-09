@@ -202,7 +202,7 @@ omit = [
   # grounds that it "has no interpret path, so CPU CI structurally cannot reach
   # it". That was untrue, and it is the same failure this list already documents
   # one entry above: an omit hiding a well-covered module behind a wrong reason.
-  # Measured on CPU, from `tests/test_m2l_real_fused_pallas.py` and
+  # Measured on CPU, from `tests/unit/operators/test_m2l_real_fused_pallas.py` and
   # `tests/unit/test_custom_vjp_parity.py` alone: 191 statements, 12 missed, 92%.
   # Both suites call `m2l_real_fused_pallas(..., interpret=True)` and say so in
   # their module docstrings. Removed, so the module is measured like any other.

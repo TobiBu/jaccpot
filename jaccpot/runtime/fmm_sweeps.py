@@ -6,7 +6,7 @@ engine class inherits this mixin. Sibling of _fmm_impl at runtime level.
 from __future__ import annotations
 
 import os
-from typing import Any, Optional
+from typing import TYPE_CHECKING, Any, Optional
 
 import jax
 import jax.numpy as jnp
@@ -52,6 +52,14 @@ from .reference import MultipoleExpansion
 from .reference import compute_expansion as reference_compute_expansion
 from .reference import direct_sum as reference_direct_sum
 from .reference import evaluate_expansion as reference_evaluate_expansion
+
+if TYPE_CHECKING:  # pragma: no cover - annotations only, no runtime import
+    # The mixins annotate `self` as the engine they are mixed into, which lives in
+    # `_fmm_impl` and imports *them* -- so this must stay under TYPE_CHECKING or it
+    # would form the cycle ARCHITECTURE §8 forbids. Before this block the names were
+    # dangling: `typing.get_type_hints` raised NameError on every mixin method, so the
+    # annotations documented an intent no tool could check.
+    from ._fmm_impl import FastMultipoleMethod
 
 
 class SweepsMixin:

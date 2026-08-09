@@ -52,6 +52,12 @@ jobs:
     #   tests/test_*.py         3:04    5.18 GB   <-  89 tests
     #   tests/characterization  1:11    3.63 GB   <-  13 tests
     #
+    # Those are the paths and counts AS MEASURED; the 20 root-level test files
+    # have since moved into the tiers, so `tests/test_*.py` is empty and its 89
+    # cases now sit under integration/distributed/unit. The relative picture is
+    # what this table is for -- integration dominates and needs its own shard --
+    # and that has not changed. The live counts are on the matrix below.
+    #
     # A count-balanced 2-way split (unit | everything else) was tried first and
     # does NOT work: it leaves 15.21 GB on one side, still at the ceiling. The
     # integration tests need a shard to themselves.
@@ -91,17 +97,22 @@ jobs:
           # exactly one of these three entries or the `test-mac-runtime` job.
           # Verified by collection count, with `--ignore=tests/unit/runtime` as
           # the step applies it and `-m "not experimental"` applied throughout:
-          #   integration 149 + unit 591 + rest 112  = 852  (these three shards)
-          #                        + tests/unit/runtime 193 = 1045
-          # and 1045 is the whole selectable universe. Re-measure this when adding
-          # a test directory -- a stale sum here would hide a whole path silently
-          # dropping out of CI, which is the one thing the split must not do.
+          #   integration 173 + unit 639 + rest 45  = 857  (these three shards)
+          #                        + tests/unit/runtime 193 = 1050
+          # and 1050 is the whole selectable universe.
+          #
+          # This is the check paying for itself, not a formality. `rest` used to be
+          # `tests/characterization tests/test_*.py`; the move of the 20 root-level
+          # test files into tiers emptied that glob and created `tests/distributed`,
+          # which belonged to no shard. Unsharded on main the directory still ran,
+          # so nothing was red -- it would simply have stopped being tested here.
+          # Re-measure when a test directory appears or moves.
           - shard: integration
             paths: tests/integration
           - shard: unit
             paths: tests/unit
           - shard: rest
-            paths: tests/characterization tests/test_*.py
+            paths: tests/characterization tests/distributed
     env:
       JAX_ENABLE_X64: "1"
       # Persist JAX's compiled executables across runs so the heavy FMM

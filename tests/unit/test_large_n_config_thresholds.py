@@ -1,4 +1,13 @@
-"""Regressions for the large-N differentiable-FMM path.
+"""Regressions for the radix differentiable-FMM path at large-N config thresholds.
+
+**This module does not exercise ``LargeNPreparedState``.** It was called
+``test_large_n_grad_path.py``, which read as though it did. It does not: the large-N
+prepare path requires a GPU backend (``can_use_large_n_prepare_path`` returns False when
+``jax.default_backend() != "gpu"``), so on CPU every test here runs the ordinary *radix*
+grad path at the *configuration thresholds* large N would cross. Measured:
+``runtime/_large_n_grad.py`` sits at 0% coverage with these 20 tests passing and none
+skipping. The genuinely uncovered large-N reverse path is tracked as F27 in
+``docs/refactor_audit_2026-08.md`` and needs a GPU CI leg, not a rename.
 
 Three distinct failures, all reachable on the DEFAULT configuration once
 ``n_particles >= _GPU_LARGE_PARTICLE_THRESHOLD`` (65536) auto-enabled the

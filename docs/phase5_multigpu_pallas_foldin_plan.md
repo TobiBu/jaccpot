@@ -15,8 +15,8 @@ _Bookkeeping + plan, 2026-07-14._
     complex+`complex_to_dehnen_real_coeffs` oracle: 1e-16 match, p=1..4.
   - Flipped the DEFAULT to the converged fast-lane config **real + dehnen** → 0.19% vs
     direct (beats bh's 0.24%), no overflow; solidfmm/bh kept behind explicit config + test.
-  - Tests: `tests/test_distributed_fmm_driver.py` (default real+dehnen, real+bh, legacy
-    solidfmm, jit==eager) + `tests/test_real_upward_sweep.py` — all green on CPU.
+  - Tests: `tests/distributed/test_distributed_fmm_driver.py` (default real+dehnen, real+bh, legacy
+    solidfmm, jit==eager) + `tests/unit/core/test_real_upward_sweep.py` — all green on CPU.
 - **DONE — 5c (A100, 2026-07-19):**
   - **Fused real M2L Pallas** engaged via `JACCPOT_STATIC_STRICT_FUSED_M2L_PALLAS=1` — no code
     change; both self-M2L (`_accumulate_real_m2l_fullbatch`) and cross-M2L route through

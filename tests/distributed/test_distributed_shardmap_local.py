@@ -7,7 +7,7 @@ compute_node_multipoles, initialize/accumulate/propagate local expansions, and
 the L2P evaluation. Small N so the compile is quick.
 
     CUDA_VISIBLE_DEVICES=$(autocvd -n 2 -l -o) \
-        pytest tests/test_distributed_shardmap_local.py -q
+        pytest tests/distributed/test_distributed_shardmap_local.py -q
 """
 
 import jax

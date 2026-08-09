@@ -6,7 +6,7 @@ engine class inherits this mixin. Sibling of _fmm_impl at runtime level.
 from __future__ import annotations
 
 import contextlib
-from typing import Iterator, Optional
+from typing import TYPE_CHECKING, Iterator, Optional
 
 import jax.numpy as jnp
 from beartype.typing import Callable
@@ -39,6 +39,14 @@ from .fmm_state import (
     _PrepareStateTreeUpwardArtifacts,
 )
 from .kernels.core import _build_nearfield_interop_data
+
+if TYPE_CHECKING:  # pragma: no cover - annotations only, no runtime import
+    # The mixins annotate `self` as the engine they are mixed into, which lives in
+    # `_fmm_impl` and imports *them* -- so this must stay under TYPE_CHECKING or it
+    # would form the cycle ARCHITECTURE §8 forbids. Before this block the names were
+    # dangling: `typing.get_type_hints` raised NameError on every mixin method, so the
+    # annotations documented an intent no tool could check.
+    from ._fmm_impl import FastMultipoleMethod
 
 
 class PolicyMixin:

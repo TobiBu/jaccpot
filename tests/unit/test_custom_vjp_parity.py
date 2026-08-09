@@ -657,3 +657,71 @@ def test_mutual_nearfield_kernel_is_bitwise_antisymmetric(interpret):
     scale = jnp.sum(jnp.abs(f_a), axis=(0, 1))
     residual = float(jnp.linalg.norm(total) / jnp.linalg.norm(scale))
     assert residual < 1e-14
+
+
+# --------------------------------------------------------------------------
+# The JACCPOT_FUSED_M2L_VJP=0 fallback
+# --------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("basis", ["real", "complex"])
+def test_fused_m2l_vjp_env_off_falls_back_and_agrees(basis, monkeypatch):
+    """``JACCPOT_FUSED_M2L_VJP=0`` must select the twin's autodiff and agree with it.
+
+    The flag's own docstring calls the fallback "the correctness reference -- identical
+    to round-off", and no test set it, so the branch it selects had never run. A
+    fallback nothing exercises is not a fallback: if it had rotted, the first person to
+    reach for it while debugging a fused-kernel discrepancy would have been comparing
+    against something equally broken.
+
+    Both halves are asserted. That the gate actually reads the environment at call time
+    (a value captured into a module constant at import would make the flag silently
+    inert -- see ``jaccpot/_env.py``), and that the reverse it selects still matches
+    autodiff of the pure-jnp twin.
+
+    Note the gate parses its own truthiness rather than going through
+    :func:`jaccpot._env.env_flag`, and the two disagree on malformed input: this one
+    treats anything outside {0, false, no, off} as ON, while ``env_flag`` would read a
+    typo as OFF. That is why ``"0"`` is asserted here specifically rather than some
+    other falsey spelling.
+    """
+    if not jax.config.jax_enable_x64:
+        pytest.skip("requires x64 for a tight tolerance")
+
+    if basis == "real":
+        from jaccpot.pallas import m2l_real_fused as module
+
+        order = 2
+        mult, bto, bfr, r = _real_m2l_case(order, seed=11)
+
+        args = (mult, bto, bfr, r)
+
+        def custom(m, bt, bf, rr):
+            return m2l_real_fused_pallas_cvjp(m, bt, bf, rr, order, True, "triton")
+
+        def ref(m, bt, bf, rr):
+            return m2l_real_fused_jax(m, bt, bf, rr, order=order)
+
+    else:
+        from jaccpot.pallas import m2l_complex_fused as module
+
+        order = 2
+        mult, bto, bfr, r = _complex_m2l_case(order, seed=11)
+        args = (mult, bto, bfr, r)
+
+        def custom(m, bt, bf, rr):
+            return m2l_complex_fused_pallas_cvjp(m, bt, bf, rr, order, True, "triton")
+
+        def ref(m, bt, bf, rr):
+            return m2l_complex_fused_jax(m, bt, bf, rr, order=order)
+
+    # The gate must be read per call, not captured at import.
+    monkeypatch.setenv("JACCPOT_FUSED_M2L_VJP", "0")
+    assert module._fused_m2l_vjp_enabled() is False
+    monkeypatch.setenv("JACCPOT_FUSED_M2L_VJP", "1")
+    assert module._fused_m2l_vjp_enabled() is True
+
+    # With the fused VJP off, the reverse is autodiff of the twin and must match it.
+    monkeypatch.setenv("JACCPOT_FUSED_M2L_VJP", "0")
+    jax.clear_caches()
+    assert_vjp_matches(custom, ref, args, rtol=1.0e-10, atol=1.0e-10)

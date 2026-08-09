@@ -8,7 +8,7 @@ from __future__ import annotations
 import os
 import time
 from dataclasses import replace
-from typing import Any, Optional
+from typing import TYPE_CHECKING, Any, Optional
 
 import jax
 import jax.numpy as jnp
@@ -31,6 +31,14 @@ from .fmm_state import (
     _velocity_verlet_state_update,
 )
 from .kernels.core import _empty_interaction_storage_for_tree, _FarPairCOO
+
+if TYPE_CHECKING:  # pragma: no cover - annotations only, no runtime import
+    # The mixins annotate `self` as the engine they are mixed into, which lives in
+    # `_fmm_impl` and imports *them* -- so this must stay under TYPE_CHECKING or it
+    # would form the cycle ARCHITECTURE §8 forbids. Before this block the names were
+    # dangling: `typing.get_type_hints` raised NameError on every mixin method, so the
+    # annotations documented an intent no tool could check.
+    from ._fmm_impl import FastMultipoleMethod, PreparedStateLike
 
 
 class StrictRunMixin:

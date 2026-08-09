@@ -6,7 +6,7 @@ engine class inherits this mixin. Sibling of _fmm_impl at runtime level.
 from __future__ import annotations
 
 import warnings
-from typing import Any, Callable, Optional, Union
+from typing import TYPE_CHECKING, Any, Callable, Optional, Union
 
 import jax
 import jax.numpy as jnp
@@ -46,6 +46,13 @@ from .kernels.core import (
     _prepare_tree_evaluation_inputs,
 )
 from .reference import direct_sum as reference_direct_sum
+
+if TYPE_CHECKING:  # pragma: no cover - annotations only, no runtime import
+    # `_fmm_impl` imports this mixin, and `_large_n_grad` is already deferred to a
+    # function-local import below for compile-time reasons, so both must stay out of
+    # the module-scope import graph. Before this block these names were dangling.
+    from ._fmm_impl import FastMultipoleMethod, PreparedStateLike
+    from ._large_n_grad import LargeNGradPlan
 
 _OUTER_JIT_WARNED = False
 

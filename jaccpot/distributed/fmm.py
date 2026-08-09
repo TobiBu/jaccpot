@@ -1,7 +1,7 @@
 """Reusable multi-GPU distributed FMM force driver.
 
 This is a faithful extraction of the per-device ``shard_map`` body validated in
-``tests/test_distributed_solidfmm_far_shardmap.py``.  The pipeline, per device,
+``tests/distributed/test_distributed_solidfmm_far_shardmap.py``.  The pipeline, per device,
 inside one ``shard_map``:
 
     global bounds + sanitize padding
@@ -184,8 +184,8 @@ class DistributedFMMConfig:
     # near-field). "auto" (DEFAULT) picks pallas on Ampere+, baseline elsewhere.
     # Intended to be numerically equivalent to baseline -- only the cross-leaf P2P is
     # fused -- but that equivalence is NOT asserted by the test suite: the pallas arm
-    # needs sm_80+ and CI runs on CPU, so `tests/test_distributed_fmm_driver.py` and
-    # `tests/test_distributed_grad_correctness.py` both pin `nearfield_backend="baseline"`.
+    # needs sm_80+ and CI runs on CPU, so `tests/distributed/test_distributed_fmm_driver.py` and
+    # `tests/distributed/test_distributed_grad_correctness.py` both pin `nearfield_backend="baseline"`.
     # It was validated off-CI on Ampere+; treat it as a manual result, not a guarded one.
     nearfield_backend: str = "auto"
     # Local self-interaction walk: "dual_tree" (yggdrax dual-tree walk, DEFAULT) or
@@ -750,7 +750,7 @@ def _make_fn(
     """Build the per-device ``shard_map`` body closing over static shapes.
 
     This is a faithful copy of ``fn`` / ``_combined_neighbors`` from
-    ``tests/test_distributed_solidfmm_far_shardmap.py`` with the module-level
+    ``tests/distributed/test_distributed_solidfmm_far_shardmap.py`` with the module-level
     constants promoted to ``config`` fields and only the *full* force path kept.
 
     ``differentiable`` switches on the fixed-topology gradient seam (see
