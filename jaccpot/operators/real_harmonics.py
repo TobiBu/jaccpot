@@ -375,12 +375,29 @@ def p2m_real_direct(
     axis directions, to ``atol=1e-10``. Degree 0 is covered separately by
     ``test_p2m_real_direct_monopole``.
 
-    The broader claim that the scaled polynomials match Table 3 up to ``n = 6``
-    rests on a one-off derivation via ``scripts/derive_table3_polynomials.py``,
-    which was **never committed** -- there is no ``scripts/`` directory. So
-    degrees 2-6 are unverified in-repo, and the coverage that exists cannot see a
-    per-``m`` normalisation or sign error above degree 1, which is exactly the
-    class of error this packing is prone to.
+    Degrees 2-6 are pinned too, by two further tests in that module rather than by a
+    table. An earlier version of this docstring said they were "unverified in-repo"
+    and that the coverage "cannot see a per-``m`` normalisation or sign error above
+    degree 1"; both statements are now false, and the second was already too
+    pessimistic when written:
+
+    * ``test_complex_to_dehnen_real_matches_p2m_real_direct`` cross-checks orders
+      0-6 against ``complex_to_dehnen_real_coeffs(complex_R_solidfmm(...))`` over six
+      geometries, to 1e-13 relative L2. This is a *relative* check -- a convention
+      error shared between ``Q`` and this function would cancel in it -- but it does
+      catch a per-``m`` error introduced here alone.
+    * ``test_solid_harmonic_z_derivative_lowers_the_degree`` and
+      ``test_solid_harmonic_transverse_derivative_coefficients_are_half_integers``
+      close the absolute gap. The 1/(n+|m|)!-normalised solid harmonics satisfy
+      ``dU_n^m/dz = U_{n-1}^m`` and transverse recurrences whose coefficients are
+      exact multiples of 1/2; those recurrences plus ``U_0^0 = 1`` determine every
+      ``U_n^m`` uniquely. Scaling any single ``U_n^m`` by ``1 + 1e-3`` keeps the
+      recurrences structural but makes the coefficients non-half-integer, so the
+      per-``m`` normalisation is anchored without transcribing Table 3.
+
+    The one-off derivation this used to lean on, ``scripts/derive_table3_polynomials.py``,
+    was never committed and is not needed; a generator that CI never runs would have
+    had the same failure mode again.
 
     Raises
     ------
