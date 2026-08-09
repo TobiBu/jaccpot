@@ -138,7 +138,16 @@ kernel did, so consolidation is source-level dedup with no numerical change.
 - `_accumulate_m2l_fullbatch` — one full interaction batch → `segment_sum`
 - `_accumulate_m2l_chunked_scan` — chunked `lax.scan` reduction (bounded memory)
 - grouped / class-major variants (`_accumulate_solidfmm_m2l_grouped[_class_major]`)
-  — cached class blocks; already `basis_mode`-parametrised
+  — cached class blocks; `basis_mode`-parametrised, but **not exercised in the real
+  basis by any production path**. `basis="real"` with `grouped_interactions=True`
+  raises in `prepare_upward_sweep` (grouped classification needs AABB expansion
+  centres; the native real-basis upward sweep accepts `center_mode="com"` only), so
+  every grouped M2L that actually runs today is complex. The real branch is therefore
+  parametrised-but-latent, and the only thing standing behind it is
+  `tests/unit/runtime/test_grouped_m2l_basis_mode.py` — which exists because
+  `_accumulate_solidfmm_m2l_grouped` did drop `basis_mode` on its fullbatch branch,
+  silently applying the complex cached kernel to real blocks (3.8e-01 relative error,
+  no exception).
 
 **L2L / downward:** `_propagate_solidfmm_locals_by_level` (unifies real+complex
 behind `basis_mode`), `_propagate_{solidfmm,real}_locals_to_children`, the
@@ -350,7 +359,12 @@ When merging real/complex kernel families, the merge is numerics-preserving
 **only** because every discriminator (`basis_mode`, `rotation`, `m2l_impl`,
 `order`, `chunk_size`) is a `static_argname`, so XLA specialises the merged
 `jax.jit` per static combination. This is source-level dedup, never a runtime
-branch inside a compiled kernel. Any consolidation PR must show:
+branch inside a compiled kernel. What that argument does **not** cover is the call
+sites: a discriminator with a default (`basis_mode: str = "complex"` on every
+accumulator) is silently satisfied by a caller that forgets to forward it, and the
+specialisation then happily compiles the wrong basis. That is exactly how
+`_accumulate_solidfmm_m2l_grouped`'s fullbatch branch went wrong — see §5. Audit the
+callers, not only the kernels. Any consolidation PR must show:
 
 1. merged-vs-old **bit-identical** output on a fixed input grid (rtol=0),
 2. the golden oracle exact-green,
