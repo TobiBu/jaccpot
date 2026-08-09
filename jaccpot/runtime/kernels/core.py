@@ -1463,6 +1463,13 @@ def _accumulate_solidfmm_m2l_grouped(
         dtype=multip_packed.dtype,
         basis_mode=basis_mode,
     )
+    # The branch below is a pure batching choice: both accumulators must be handed
+    # the same ``basis_mode``, or the rotation blocks built above (real when
+    # ``basis_mode == "real"``) get applied by the other basis' cached kernel.
+    # Omitting it on either call is silent -- both kernels default to "complex" and
+    # happily consume real-dtype blocks, so the result is wrong rather than an error:
+    # measured 3.8e-01 relative between the two branches at order 4. Pinned by
+    # ``tests/unit/runtime/test_grouped_m2l_basis_mode.py``.
     if int(src_sorted.shape[0]) <= min(int(chunk_size), _M2L_FULLBATCH_MAX_PAIRS):
         return _accumulate_solidfmm_m2l_grouped_fullbatch(
             locals_coeffs,
@@ -1475,6 +1482,7 @@ def _accumulate_solidfmm_m2l_grouped(
             blocks_from_classes,
             order=order,
             total_nodes=total_nodes,
+            basis_mode=basis_mode,
         )
     return _accumulate_solidfmm_m2l_grouped_chunked_scan(
         locals_coeffs,
