@@ -30,16 +30,19 @@ from .fmm_constants import (
     _GPU_MINIMUM_MEMORY_NEIGHBORS_PER_LEAF,
     _GPU_MINIMUM_MEMORY_PAIR_QUEUE,
     _GPU_MINIMUM_MEMORY_PROCESS_BLOCK,
+    _JIT_TREE_CPU_SMALL_N_MAX,
     _KDTREE_DEFAULT_TRAVERSAL_CONFIG,
     _LARGE_CPU_M2L_CHUNK_SIZE,
     _LARGE_CPU_PARTICLE_THRESHOLD,
     _LARGE_CPU_TRAVERSAL_CONFIG,
+    _LARGE_N_GPU_BASELINE_NEARFIELD_MAX_PARTICLES,
     _MINIMUM_MEMORY_CPU_M2L_CHUNK_SIZE,
     _MINIMUM_MEMORY_GPU_M2L_CHUNK_SIZE,
     _NEARFIELD_BUCKETED_CPU_EDGE_CHUNK_LARGE,
     _NEARFIELD_BUCKETED_CPU_EDGE_CHUNK_MEDIUM,
     _NEARFIELD_BUCKETED_CPU_EDGE_CHUNK_XL,
     _NEARFIELD_BUCKETED_CPU_PARTICLE_THRESHOLD,
+    _NEARFIELD_BUCKETED_GPU_LARGE_N_EDGE_CHUNK_THRESHOLD,
     _TRACING_MAX_INTERACTIONS_PER_NODE,
     _TRACING_MAX_NEIGHBORS_PER_LEAF,
     _TRACING_MAX_PAIR_QUEUE,
@@ -259,7 +262,7 @@ class OverridesMixin:
         backend = jax.default_backend()
         num_particles = int(jnp.asarray(positions).shape[0])
         # CPU tree build often performs better without JIT for small/medium N.
-        if backend == "cpu" and num_particles <= 8192:
+        if backend == "cpu" and num_particles <= _JIT_TREE_CPU_SMALL_N_MAX:
             return False
         return True
 
@@ -761,7 +764,7 @@ class OverridesMixin:
             if (
                 not bool(self._explicit_nearfield_mode)
                 and jax.default_backend() == "gpu"
-                and int(num_particles) < 262_144
+                and int(num_particles) < _LARGE_N_GPU_BASELINE_NEARFIELD_MAX_PARTICLES
             ):
                 return "baseline"
             return "bucketed"
@@ -812,7 +815,7 @@ class OverridesMixin:
                 str(self.preset).strip().lower() == "large_n_gpu"
                 and str(self.expansion_basis).strip().lower() == "solidfmm"
             ):
-                if n >= 262_144:
+                if n >= _NEARFIELD_BUCKETED_GPU_LARGE_N_EDGE_CHUNK_THRESHOLD:
                     return max(base_chunk, 256)
             return base_chunk
 

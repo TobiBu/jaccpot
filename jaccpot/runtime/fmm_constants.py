@@ -35,6 +35,36 @@ _NEARFIELD_SCATTER_SCHEDULE_ITEM_CAP_GPU = 4_000_000
 _NEARFIELD_GPU_PRECOMPUTE_MAX_PARTICLES = 65_536
 _NEARFIELD_SCATTER_SCHEDULE_INT32_ITEM_LIMIT = np.iinfo(np.int32).max
 _LARGE_CPU_M2L_CHUNK_SIZE = 32768
+
+#: N at or below which the CPU tree build is left un-jitted by
+#: ``jit_tree="auto"``. Tracing the build costs more than it saves for small and
+#: medium N on the CPU backend.
+_JIT_TREE_CPU_SMALL_N_MAX = 8192
+
+#: N from which the ``large_n_gpu`` + solidfmm GPU lane raises the bucketed
+#: near-field edge chunk. Distinct from
+#: :data:`_LARGE_N_GPU_BASELINE_NEARFIELD_MAX_PARTICLES` and from
+#: :data:`_CLASS_MAJOR_CPU_PARTICLE_THRESHOLD` despite sharing the value: three
+#: different policies happen to cross over at 262144, and naming them apart is
+#: what stops a future tune of one from silently moving the other two.
+_NEARFIELD_BUCKETED_GPU_LARGE_N_EDGE_CHUNK_THRESHOLD = 262_144
+
+#: N below which the ``large_n_gpu`` production profile prefers the
+#: ``"baseline"`` near-field traversal on a GPU, before the per-launch cost of
+#: the per-pair scan is amortised. See the measurement in
+#: ``FMMOverridesMixin._resolve_nearfield_mode``.
+_LARGE_N_GPU_BASELINE_NEARFIELD_MAX_PARTICLES = 262_144
+
+#: Default cap on the number of near-field target blocks the large-N overflow
+#: fast path will materialise. Also the value the pytree-unflatten
+#: backwards-compatibility branches restore for states serialised before the
+#: field existed, so all three sites must agree.
+_NEARFIELD_TARGET_BLOCK_OVERFLOW_FAST_MAX_BLOCKS = 65536
+
+#: Upward-sweep leaf batch size the ``large_n_gpu`` production contract pins
+#: when the caller leaves it unset. Named because the preset builder and the
+#: contract enforcement set it independently.
+_LARGE_N_GPU_UPWARD_LEAF_BATCH_SIZE = 2048
 _TRACING_MAX_NEIGHBORS_PER_LEAF = 512
 _TRACING_MAX_PAIR_QUEUE = 65_536
 _TRACING_MAX_PROCESS_BLOCK = 128
