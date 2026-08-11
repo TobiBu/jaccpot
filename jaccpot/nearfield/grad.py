@@ -307,6 +307,54 @@ def _leafpair_accel_analytic_vjp(
     Newton's third law supplies the source-side term: the contribution a target
     leaf receives from a source leaf gives equal and opposite position sensitivity
     to that source leaf, scattered by source leaf id.
+
+    Parameters
+    ----------
+    leaf_positions : Array
+        Padded per-leaf positions ``[num_leaves, W, 3]``.
+    leaf_masses : Array
+        Padded per-leaf masses ``[num_leaves, W]``.
+    leaf_mask : Array
+        Padded per-leaf validity ``[num_leaves, W]``; masked slots contribute
+        exactly zero.
+    leaf_particle_idx : Array
+        Particle index behind each padded slot ``[num_leaves, W]``, clipped so a
+        masked slot cannot gather out of bounds.
+    source_leaf_ids : Array
+        Source leaf id per (target leaf, block, slot); reshaped to
+        ``[num_leaves, num_slots]`` here.
+    source_valid : Array
+        Validity mask with the same shape as ``source_leaf_ids``.
+    cotangent : Array
+        Output cotangent in **particle order** ``[N, 3]``; gathered leaf-major and
+        masked exactly as the forward masks its output.
+    softening_sq : Array
+        Squared Plummer softening length.
+    G : Array
+        Gravitational constant. Normalised with ``jnp.asarray`` on entry -- a
+        jitted caller can hand these over as host-side literals that do not
+        implement ``__neg__``; see the comment at the site.
+    leaf_batch : int
+        Target leaves per scan step. Static under ``jit``; bounds the transient,
+        not the result.
+    slot_tile : int
+        Source slots per tile within a batch. Static under ``jit``.
+    skip_empty_tiles : bool
+        Skip tiles whose slots are all invalid. Static under ``jit``; default
+        ``True``.
+    occupancy_sort : bool
+        Process target leaves in occupancy order to even out tile fill. Static
+        under ``jit``; default ``False``.
+    tiers : Optional[Tuple[Tuple[Any, int], ...]]
+        A precomputed tier plan from ``build_leafpair_reverse_tiers``: groups of
+        target leaves sharing a slot width, so a low-occupancy leaf does not pay
+        the global maximum. ``None`` runs untiered.
+
+    Returns
+    -------
+    Tuple[Array, Array]
+        ``(leaf_positions_bar, leaf_masses_bar)`` in the leaf-major layout;
+        both are zero-shaped-like their primal when the tables are empty.
     """
     dtype = leaf_positions.dtype
     num_leaves = int(leaf_positions.shape[0])
