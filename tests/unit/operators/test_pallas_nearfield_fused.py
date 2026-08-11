@@ -172,7 +172,7 @@ def test_leafpair_decoupled_same_array_reproduces_the_coupled_kernel():
     both target and source reproduces :func:`nearfield_leafpair_pallas` bit-for-bit".
     That claim is load-bearing: the decoupled kernel is what
     ``distributed/fmm.py`` runs (via
-    ``nearfield.near_field._radix_fast_lane_prepacked_pallas_decoupled``) to compute a
+    ``nearfield._fast_lane._radix_fast_lane_prepacked_pallas_decoupled``) to compute a
     block of target leaves while keeping the full source pool resident. So it is the
     statement that the distributed near field computes the same force as the
     single-device one, and it was asserted nowhere -- grepping ``tests/`` for

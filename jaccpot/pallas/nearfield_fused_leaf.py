@@ -777,7 +777,7 @@ def nearfield_leafpair_pallas_decoupled(
 # SCOPE -- read before wiring either wrapper into a runtime path. These two are
 # **unit-level VJP oracles**, not the production differentiable near field. The
 # rule the grad path actually runs is
-# ``jaccpot.nearfield.near_field._radix_fast_lane_prepacked_accel_cvjp``: same
+# ``jaccpot.nearfield._fast_lane._radix_fast_lane_prepacked_accel_cvjp``: same
 # Pallas forward, but an ANALYTIC O(N) leaf-pair reverse. The reverse below is
 # ``jax.vjp`` of ``nearfield_leafpair_jax``, whose dense ``(leaves, W_t, K, 3)``
 # difference tensor is ~50 TB at the fiducial large-N config -- correct, and
