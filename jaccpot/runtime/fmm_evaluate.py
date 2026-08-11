@@ -19,10 +19,10 @@ from yggdrax.tree import Tree
 
 from jaccpot.config import GradConfig
 from jaccpot.downward.local_expansions import LocalExpansionData, TreeDownwardData
-from jaccpot.nearfield.near_field import (
-    compute_leaf_p2p_accelerations,
+from jaccpot.nearfield._fast_lane import (
     compute_leaf_p2p_accelerations_radix_fast_lane,
 )
+from jaccpot.nearfield.near_field import compute_leaf_p2p_accelerations
 
 from ._large_n_pipeline import evaluate_large_n_state
 from ._large_n_types import LargeNPreparedState

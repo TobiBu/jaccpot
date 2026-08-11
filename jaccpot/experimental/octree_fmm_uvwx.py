@@ -67,10 +67,10 @@ from yggdrax.octree_uvwx import (
 )
 
 from ..downward.local_expansions import LocalExpansionData
+from ..nearfield._fast_lane import _radix_fast_lane_prepacked_pallas
 from ..nearfield.near_field import (
     _compute_leaf_p2p_impl,
     _compute_leaf_p2p_prepared_large_n_self_only_impl,
-    _radix_fast_lane_prepacked_pallas,
 )
 from ..operators.complex_ops import (
     complex_rotation_blocks_from_z_solidfmm_batch,

@@ -3,7 +3,7 @@
 The radix prepared state carries the near field as an **edge list**: a CSR
 neighbour buffer plus the flat ``(target_leaf, source_leaf)`` vectors the
 bucketed kernel scans over. The fast lane
-(:func:`jaccpot.nearfield.near_field.compute_leaf_p2p_accelerations_radix_fast_lane`)
+(:func:`jaccpot.nearfield._fast_lane.compute_leaf_p2p_accelerations_radix_fast_lane`)
 instead wants a **leaf-major** payload -- for every target leaf, a padded block
 of source-leaf ids -- which is the layout the large-N pipeline bakes at
 ``prepare_state`` time and the radix pipeline does not.
