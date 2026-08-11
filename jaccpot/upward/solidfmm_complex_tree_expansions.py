@@ -91,6 +91,43 @@ def _diag_upward_stage_estimates(
     positions_dtype: jnp.dtype,
     masses_dtype: jnp.dtype,
 ) -> None:
+    """Log the byte cost of each upward-sweep stage, when diagnostics are on.
+
+    A no-op unless ``JACCPOT_UPWARD_DIAGNOSTICS`` is set. It exists because the
+    upward sweep's peak is not the packed coefficient array (which is obvious) but
+    the transient per-leaf-batch gather: ``leaf_batch_size * max_leaf_size *
+    (p+1)^2`` complex coefficients live at once, so a batch width chosen for
+    throughput can dominate the whole prepare. Printing the terms side by side is
+    what makes that visible before a run OOMs.
+
+    All arguments are host-side integers and dtypes -- nothing here is traced, and
+    the function returns nothing.
+
+    Parameters
+    ----------
+    num_particles : int
+        Particle count; sizes the mass and weighted-position prefix sums.
+    total_nodes : int
+        Node count; sizes the per-node centre, mass and packed-coefficient arrays.
+    num_leaves : int
+        Leaf count; caps the effective batch width.
+    max_leaf_size : int
+        Padded leaf width; the inner extent of the per-leaf gather.
+    leaf_batch_size : int
+        Requested leaves per scan step, before capping at ``num_leaves``.
+    coeffs : int
+        Coefficients per node, ``(p+1)^2``.
+    positions_dtype : jnp.dtype
+        Position dtype, for the position and centre byte counts.
+    masses_dtype : jnp.dtype
+        Mass dtype; with ``positions_dtype`` it also determines the complex
+        coefficient dtype.
+
+    Returns
+    -------
+    None
+        Nothing; the estimates are emitted through the diagnostics channel.
+    """
     if not _upward_diagnostics():
         return
 
@@ -145,7 +182,51 @@ def _p2m_leaves_complex(
     total_nodes: int,
     leaf_batch_size: int,
 ) -> Array:
-    """Leaf P2M for solidfmm-style complex SH coefficients."""
+    """Leaf P2M for solidfmm-style complex SH coefficients.
+
+    The complex twin of :func:`~jaccpot.upward.real_tree_expansions._p2m_leaves_real`
+    and, by construction, the same physics in the other basis: batched over leaves
+    with a ``lax.scan`` so the padded gather keeps a static shape, with over-run
+    slots masked to zero position and zero mass so they contribute exactly ``0``.
+
+    Differentiable in ``positions_sorted`` and ``masses_sorted``; the gather
+    indices are integer topology.
+
+    Parameters
+    ----------
+    node_ranges : Array
+        Per-node inclusive ``[start, end]`` particle spans, ``[total_nodes, 2]``.
+    positions_sorted : Array
+        Particle positions ``[N, 3]`` in Morton order.
+    masses_sorted : Array
+        Particle masses ``[N]`` in the same order.
+    centers : Array
+        Per-node expansion centres ``[total_nodes, 3]``.
+    order : int
+        Expansion order ``p``. Static under ``jit``.
+    max_leaf_size : int
+        Padded leaf width. Static under ``jit``.
+    num_internal : int
+        Number of internal nodes; leaves are ``[num_internal, total_nodes)``.
+        Static under ``jit``.
+    total_nodes : int
+        Total node count, and the leading axis of the result. Static under ``jit``.
+    leaf_batch_size : int
+        Leaves per scan step. Static under ``jit``; a tuning knob that does not
+        change the result, but see :func:`_diag_upward_stage_estimates` -- it is
+        the term that sets the sweep's transient peak.
+
+    Returns
+    -------
+    Array
+        Packed complex multipole coefficients ``[total_nodes, (p+1)^2]`` in the
+        complex dtype matching the inputs, zero on internal nodes.
+
+    Raises
+    ------
+    ValueError
+        If ``order`` is negative.
+    """
 
     p = int(order)
     if p < 0:
@@ -243,7 +324,52 @@ def _p2m_leaves_complex_source_motion(
     num_internal: int,
     total_nodes: int,
 ) -> Array:
-    """Leaf source-motion P2M: d/dt[m * R(delta)] for fixed expansion centers."""
+    """Leaf source-motion P2M: d/dt[m * R(delta)] for fixed expansion centers.
+
+    The time derivative of the leaf multipole at a **frozen** expansion centre, so
+    the only time dependence is the particle displacement: ``d/dt R(x - c) =
+    (v . grad) R(x - c)``. Holding the centre fixed is what makes this a
+    derivative of the field rather than of the tree, and it is why the caller must
+    pass ``centers`` explicitly instead of letting the sweep recompute them.
+
+    Differentiable in ``positions_sorted``, ``masses_sorted`` and
+    ``velocities_sorted``.
+
+    Parameters
+    ----------
+    node_ranges : Array
+        Per-node inclusive ``[start, end]`` particle spans, ``[total_nodes, 2]``.
+    positions_sorted : Array
+        Particle positions ``[N, 3]`` in Morton order.
+    masses_sorted : Array
+        Particle masses ``[N]`` in the same order.
+    velocities_sorted : Array
+        Particle velocities ``[N, 3]`` in the same order.
+    centers : Array
+        Frozen per-node expansion centres ``[total_nodes, 3]``.
+    order : int
+        Expansion order ``p``. Static under ``jit``.
+    time_derivative_order : int
+        How many time derivatives to carry (``1`` gives ``d/dt``). Static under
+        ``jit``; must be positive.
+    max_leaf_size : int
+        Padded leaf width. Static under ``jit``.
+    num_internal : int
+        Number of internal nodes. Static under ``jit``.
+    total_nodes : int
+        Total node count, and the leading axis of the result. Static under ``jit``.
+
+    Returns
+    -------
+    Array
+        Packed complex source-motion multipoles ``[total_nodes, (p+1)^2]``, zero
+        on internal nodes.
+
+    Raises
+    ------
+    ValueError
+        If ``order`` is negative, or ``time_derivative_order`` is not positive.
+    """
 
     p = int(order)
     if p < 0:
@@ -327,7 +453,60 @@ def _aggregate_m2m_complex_by_level(
     level_batch_width: int,
     rotation: str,
 ) -> Array:
-    """Upward aggregation by translating child multipoles level by level."""
+    """Upward aggregation by translating child multipoles level by level.
+
+    Walks levels deepest-first, translating each internal node's two children's
+    multipoles to the parent centre and summing them. Levels are processed in
+    ``level_batch_width``-wide slots to keep shapes static; **read the comment
+    below the signature before changing that width** -- ``dynamic_slice_in_dim``
+    clamps an out-of-range start rather than erroring, and because the slot mask is
+    positional, a clamped window writes the wrong nodes and leaves the level's own
+    internal nodes at a zero expansion.
+
+    Differentiable in ``packed`` and ``centers``; the child and level index arrays
+    are integer topology.
+
+    Parameters
+    ----------
+    packed : Array
+        Packed complex multipoles ``[total_nodes, (p+1)^2]`` with the leaves
+        already filled. Returned updated.
+    centers : Array
+        Per-node expansion centres ``[total_nodes, 3]``; the M2M displacement is
+        ``child_centre - parent_centre``.
+    left_child : Array
+        Left-child node index per node, ``[total_nodes]``.
+    right_child : Array
+        Right-child node index per node, ``[total_nodes]``.
+    nodes_by_level : Array
+        Internal node indices grouped by level, ``[num_internal]``.
+    level_offsets : Array
+        Start offset of each level into ``nodes_by_level``, ``[num_levels + 1]``.
+    order : int
+        Expansion order ``p``. Static under ``jit``.
+    num_internal : int
+        Number of internal nodes. Static under ``jit``; ``<= 0`` returns ``packed``
+        unchanged, since a leaf-only tree has no aggregation work.
+    num_levels : int
+        Number of levels to walk. Static under ``jit``.
+    level_batch_width : int
+        Internal nodes per slot within a level. Static under ``jit``; see the
+        clamp warning above.
+    rotation : str
+        Which rotation decomposition the M2M translation uses (``"solidfmm"``).
+        Static under ``jit``.
+
+    Returns
+    -------
+    Array
+        Packed complex multipoles ``[total_nodes, (p+1)^2]`` with the internal
+        nodes filled.
+
+    Raises
+    ------
+    ValueError
+        If ``order`` is negative.
+    """
 
     p = int(order)
     if p < 0:
@@ -494,7 +673,60 @@ def prepare_solidfmm_complex_upward_sweep(
     aggregation. This note previously claimed that keeping the width at
     ``num_internal`` was sufficient to avoid that; it is not -- ``total_nodes`` is
     ``2 * num_internal + 1``, so the deepest levels overrun regardless. The
-    padding is what makes any width safe."""
+    padding is what makes any width safe.
+
+    Differentiable in ``positions_sorted``, ``masses_sorted`` and
+    ``velocities_sorted``.
+
+    Parameters
+    ----------
+    tree : Tree
+        Radix tree supplying the topology and per-node particle spans.
+    positions_sorted : Array
+        Particle positions ``[N, 3]`` in Morton order.
+    masses_sorted : Array
+        Particle masses ``[N]`` in the same order.
+    velocities_sorted : Optional[Array]
+        Particle velocities ``[N, 3]``. Only needed for the source-motion tower;
+        ``None`` skips it.
+    max_order : int
+        Expansion order ``p``. Static under ``jit``; default ``2``.
+    center_mode : str
+        How node expansion centres are chosen -- ``"com"`` for the centre of mass.
+        Ignored when ``explicit_centers`` is given.
+    explicit_centers : Optional[Array]
+        Per-node centres ``[num_nodes, 3]`` to use instead of deriving them.
+    max_leaf_size : Optional[int]
+        Padded leaf width; derived from the tree when ``None``.
+    leaf_batch_size : Optional[int]
+        Leaves per P2M scan step. Batching only, but it is the term that sets the
+        sweep's transient memory peak -- see
+        :func:`_diag_upward_stage_estimates`.
+    rotation : str
+        Rotation decomposition for the M2M cascade; default ``"solidfmm"``.
+    precomputed_geometry : Optional[TreeGeometry]
+        Node geometry to reuse rather than recompute.
+    upward_timing_callback : Optional[Callable[[str, float], None]]
+        Called with ``(stage_name, seconds)`` per stage. Host-side; must not be
+        passed on a traced path.
+    defer_geometry : bool
+        Skip building the geometry here and leave it to the caller.
+    static_num_levels : Optional[int]
+        The tree's *actual* depth, as described above. Must be a concrete int; it
+        feeds a ``jit`` static argument. Omitting it is always correct, just
+        slower.
+
+    Returns
+    -------
+    SolidFMMComplexTreeUpwardData
+        Packed complex multipoles for every node, the resolved centres and
+        geometry, and the source-motion multipoles when velocities were given.
+
+    Raises
+    ------
+    ValueError
+        If ``max_order`` is negative.
+    """
 
     p = int(max_order)
     if p < 0:
@@ -681,7 +913,53 @@ def prepare_solidfmm_complex_source_motion_multipoles(
     max_leaf_size: Optional[int] = None,
     rotation: str = "solidfmm",
 ) -> Array:
-    """Compute packed source-motion multipoles for fixed expansion centers."""
+    """Compute packed source-motion multipoles for fixed expansion centers.
+
+    Public entry point for the source-motion tower: runs
+    :func:`_p2m_leaves_complex_source_motion` over the leaves and aggregates it up
+    the tree with the same M2M cascade as the plain multipoles. ``centers`` is
+    required rather than derived, because the whole point is that the centres are
+    **frozen** -- letting them move would fold the tree's own time dependence into
+    a quantity that is meant to describe only the sources.
+
+    Differentiable in ``positions_sorted``, ``masses_sorted`` and
+    ``velocities_sorted``.
+
+    Parameters
+    ----------
+    tree : Tree
+        Radix tree supplying the topology (``parent``, children, ``node_ranges``).
+    positions_sorted : Array
+        Particle positions ``[N, 3]`` in Morton order.
+    masses_sorted : Array
+        Particle masses ``[N]`` in the same order.
+    velocities_sorted : Array
+        Particle velocities ``[N, 3]`` in the same order; must match
+        ``positions_sorted``'s shape.
+    max_order : int
+        Expansion order ``p``. Static under ``jit``.
+    centers : Array
+        Frozen per-node expansion centres; must be exactly
+        ``(tree.parent.shape[0], 3)``.
+    time_derivative_order : int
+        How many time derivatives to carry. Must be positive; default ``1``.
+    max_leaf_size : Optional[int]
+        Padded leaf width. Derived from the tree when ``None``.
+    rotation : str
+        Rotation decomposition for the M2M cascade; default ``"solidfmm"``.
+
+    Returns
+    -------
+    Array
+        Packed complex source-motion multipoles ``[num_nodes, (p+1)^2]``.
+
+    Raises
+    ------
+    ValueError
+        If ``max_order`` is negative, ``time_derivative_order`` is not positive,
+        ``centers`` is not ``(num_nodes, 3)``, or ``velocities_sorted`` does not
+        match ``positions_sorted``'s shape.
+    """
 
     p = int(max_order)
     if p < 0:
