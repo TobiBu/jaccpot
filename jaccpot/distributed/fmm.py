@@ -71,12 +71,14 @@ from yggdrax.tree import (
 from yggdrax.tree_moments import compute_tree_mass_moments
 
 from jaccpot.downward.local_expansions import LocalExpansionData
-from jaccpot.nearfield.near_field import (
-    _compute_leaf_p2p_prepared_large_n_self_only_impl,
-    _prepare_leaf_data_from_groups,
+from jaccpot.nearfield._fast_lane import (
     _radix_fast_lane_prepacked_accel_cvjp,
     _radix_fast_lane_prepacked_pallas,
     _radix_fast_lane_prepacked_pallas_decoupled,
+)
+from jaccpot.nearfield.near_field import (
+    _compute_leaf_p2p_prepared_large_n_self_only_impl,
+    _prepare_leaf_data_from_groups,
     compute_leaf_p2p_accelerations,
 )
 from jaccpot.operators.complex_ops import (

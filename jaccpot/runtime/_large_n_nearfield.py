@@ -10,10 +10,12 @@ from jaxtyping import Array
 from yggdrax.interactions import NodeNeighborList
 from yggdrax.tree import Tree
 
-from jaccpot.nearfield.near_field import (
-    compute_leaf_p2p_accelerations,
+from jaccpot.nearfield._fast_lane import (
     compute_leaf_p2p_accelerations_radix_fast_lane,
     compute_leaf_p2p_accelerations_radix_payload_pairs_only,
+)
+from jaccpot.nearfield.near_field import (
+    compute_leaf_p2p_accelerations,
     compute_leaf_p2p_accelerations_target_block_pairs_only,
     prepare_bucketed_scatter_schedules_from_groups,
     prepare_leaf_neighbor_pairs,
