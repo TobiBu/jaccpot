@@ -502,7 +502,48 @@ def _accumulate_level(
     order: int,
     chunk_size: int,
 ) -> Array:
-    """Accumulate M2L contributions in fixed-size chunks per target node."""
+    """Accumulate M2L contributions in fixed-size chunks per target node.
+
+    The Cartesian-basis level accumulator. Interaction pairs arrive as a CSR-ish
+    ``(offsets, counts)`` slice per target node and are consumed ``chunk_size`` at
+    a time so the traced shape is fixed regardless of how many sources a target
+    actually has; ``sources`` is padded by one full chunk for that reason, and the
+    over-run slots are masked out rather than clamped into a real source.
+
+    **Accumulation order is load-bearing** (NUMERICS_AND_JAX §1): the per-chunk
+    scan-and-add is the order the goldens were taken in. ``chunk_size`` changes
+    the batching, not the sum, but reassociating the adds inside a chunk would
+    change the last digits.
+
+    Parameters
+    ----------
+    coeffs : Array
+        Local-expansion coefficients to accumulate into,
+        ``[num_targets, num_components]``. Returned updated.
+    component_matrix : Array
+        Per-source-node packed multipole components,
+        ``[num_source_nodes, num_components]``.
+    centers_target : Array
+        Target node centres ``[num_targets, 3]``.
+    centers_source : Array
+        Source node centres ``[num_source_nodes, 3]``.
+    sources : Array
+        Flat source-node index per interaction pair, ``[num_pairs]``.
+    offsets : Array
+        Start offset into ``sources`` for each target, ``[num_targets]``.
+    counts : Array
+        Number of sources for each target, ``[num_targets]``.
+    order : int
+        Expansion order ``p``. Static under ``jit``.
+    chunk_size : int
+        Pairs consumed per scan step, floored at 1. Static under ``jit``.
+
+    Returns
+    -------
+    Array
+        The updated local coefficients, same shape as ``coeffs``. Returned
+        unchanged when there are no pairs.
+    """
     pair_count = sources.shape[0]
     if pair_count == 0:
         return coeffs
@@ -574,7 +615,46 @@ def _accumulate_dense_m2l_impl(
     *,
     order: int,
 ) -> Array:
-    """Dense-buffer M2L accumulation kernel."""
+    """Dense-buffer M2L accumulation kernel.
+
+    The fixed-capacity alternative to :func:`_accumulate_level`: instead of a CSR
+    slice per target, interactions arrive already laid out as
+    ``[levels, slots_per_level, pairs_per_slot]`` with a validity ``mask``. That
+    makes every shape static without any padding arithmetic at trace time, which
+    is what the dense-interaction traversal path wants; the cost is that the
+    buffers are sized for the worst case.
+
+    Invalid slots are dropped through ``mask``, and the source index is clamped to
+    ``component_matrix``'s last row so a masked slot cannot gather out of bounds.
+    **Accumulation order is load-bearing** (NUMERICS_AND_JAX §1).
+
+    Parameters
+    ----------
+    coeffs : Array
+        Local-expansion coefficients to accumulate into,
+        ``[num_nodes, num_components]``. Returned updated.
+    component_matrix : Array
+        Per-source-node packed multipole components,
+        ``[num_source_nodes, num_components]``.
+    node_indices : Array
+        Target node index per slot, ``[levels, slots_per_level]``.
+    sources : Array
+        Source node indices, ``[levels, slots_per_level, pairs_per_slot]``.
+    mask : Array
+        Validity mask with the same shape as ``sources``; ``False`` slots
+        contribute nothing.
+    centers_target : Array
+        Node centres used for the target side, ``[num_nodes, 3]``.
+    centers_source : Array
+        Node centres used for the source side, ``[num_source_nodes, 3]``.
+    order : int
+        Expansion order ``p``. Static under ``jit``.
+
+    Returns
+    -------
+    Array
+        The updated local coefficients, same shape as ``coeffs``.
+    """
     levels = int(node_indices.shape[0])
     slots_per_level = int(node_indices.shape[1])
     total_slots = levels * slots_per_level
@@ -698,7 +778,46 @@ def _translate_multipole_to_local_impl(
     third: Array,
     fourth: Array,
 ) -> Array:
-    """Low-level Cartesian multipole-to-local translation implementation."""
+    """Low-level Cartesian multipole-to-local translation implementation.
+
+    Builds the raw component vector from the central moments and contracts it
+    against the Cartesian translation operator for ``delta``. This is the
+    implementation half of :func:`translate_multipole_to_local`, split out so the
+    moment-recovery fallback in the public wrapper stays separate from the algebra.
+
+    ZERO-DISPLACEMENT GUARD. A ``delta`` of exactly zero returns zeros rather than
+    the translation, because a coincident source and target is not a far-field
+    pair at all -- it arises only from a degenerate single-child node whose centre
+    equals its parent's. Note this guard is forward-only in intent; it is the same
+    ``where``-on-a-degenerate-branch shape that G.10 showed can zero a real
+    gradient component, and it has not been audited for that here.
+
+    Parameters
+    ----------
+    multipole : Array
+        Packed Cartesian multipole coefficients for one source node.
+    delta : Array
+        Target-minus-source centre displacement ``[3]``.
+    order : int
+        Expansion order ``p``, at most ``MAX_MULTIPOLE_ORDER``. Static under
+        ``jit``.
+    mass : Array
+        Monopole moment (scalar).
+    dipole : Array
+        Dipole moment ``[3]``.
+    second : Array
+        Second central moment, packed symmetric.
+    third : Array
+        Third central moment, packed symmetric.
+    fourth : Array
+        Fourth central moment, packed symmetric.
+
+    Returns
+    -------
+    Array
+        Local-expansion coefficients at ``delta``, in ``multipole``'s dtype; all
+        zero when ``delta`` is exactly zero.
+    """
     dtype = multipole.dtype
     component_vec = _build_component_vector(
         mass,
@@ -835,6 +954,43 @@ def translate_multipole_to_local(
     recover these moments from the packed coefficients (which may store
     symmetric trace-free tensors).  Callers that only have raw packed moments
     may omit these arguments and rely on the slower fallback path.
+
+    Cartesian basis only, and **the Cartesian basis is experimental**: its
+    relative L2 force error is ~1.8e-1 independent of expansion order -- a
+    divergent-series signature, not truncation -- so raising ``order`` does not
+    improve it. Use the real or solidfmm basis for quantitative work.
+
+    Parameters
+    ----------
+    multipole : Array
+        Packed Cartesian multipole coefficients for one source node.
+    delta : Array
+        Target-minus-source centre displacement ``[3]``.
+    order : int
+        Expansion order ``p``. Static under ``jit``.
+    raw_mass : Optional[Array]
+        Monopole moment, if the caller already has it; recovered from
+        ``multipole`` when ``None``.
+    raw_dipole : Optional[Array]
+        Dipole moment ``[3]``, same convention.
+    raw_second : Optional[Array]
+        Second central moment, packed symmetric, same convention.
+    raw_third : Optional[Array]
+        Third central moment, same convention.
+    raw_fourth : Optional[Array]
+        Fourth central moment, same convention.
+
+    Returns
+    -------
+    Array
+        Local-expansion coefficients at ``delta``.
+
+    Raises
+    ------
+    ValueError
+        If ``order`` is negative.
+    NotImplementedError
+        If ``order`` exceeds ``MAX_MULTIPOLE_ORDER`` (4).
     """
 
     order_int = int(order)
@@ -1160,7 +1316,60 @@ def prepare_downward_sweep(
     max_pair_queue: Optional[int] = None,
     process_block: Optional[int] = None,
 ) -> TreeDownwardData:
-    """Construct interactions and locals for the downward pass."""
+    """Construct interactions and locals for the downward pass.
+
+    The standalone downward driver: runs the dual-tree traversal to get the
+    well-separated interaction list (unless one is supplied), then accumulates M2L
+    into the local expansions. The runtime's own prepare path does not go through
+    here -- it uses ``runtime/kernels`` directly -- so this is the reference entry
+    point, used by tests and by callers driving the sweep themselves.
+
+    THE FOUR CAPACITY ARGUMENTS ARE A PADDING CONTRACT, not tuning. Interaction
+    counts are data-dependent and JAX needs static shapes, so the traversal writes
+    into fixed-capacity buffers and *fails* when one overflows; ``retry_logger``
+    observes those failures so a caller can grow the capacity and rebuild. Passing
+    a full ``traversal_config`` replaces all four at once; passing the individual
+    ``max_*`` / ``process_block`` arguments overrides them one at a time.
+
+    Parameters
+    ----------
+    tree : Tree
+        Radix tree supplying the topology.
+    upward : TreeUpwardData
+        Result of the upward sweep: the per-node multipoles and geometry this
+        pass translates.
+    theta : float
+        Opening angle for the acceptance criterion; smaller is more accurate and
+        slower. Default ``0.5``.
+    mac_type : MACType
+        Which multipole acceptance criterion to apply. Default ``"bh"``.
+    initial_locals : Optional[LocalExpansionData]
+        Local expansions to accumulate into; a fresh zero buffer when ``None``.
+    interactions : Optional[NodeInteractionList]
+        A precomputed interaction list. When ``None`` the traversal is run here.
+    m2l_chunk_size : Optional[int]
+        Pairs per accumulation chunk; see :func:`_accumulate_level`. Batching
+        only, not an accuracy knob.
+    dense_buffers : Optional[DenseInteractionBuffers]
+        Fixed-capacity dense interaction buffers, selecting
+        :func:`_accumulate_dense_m2l_impl` over the CSR path.
+    retry_logger : Optional[Callable[[DualTreeRetryEvent], None]]
+        Called with each traversal capacity-overflow event, so a caller can
+        resize and retry rather than guess.
+    traversal_config : Optional[DualTreeTraversalConfig]
+        Replaces **all four** traversal capacities at once.
+    max_interactions_per_node : Optional[int]
+        Per-node far-interaction capacity, overriding the config's value.
+    max_pair_queue : Optional[int]
+        Node-pair queue capacity for the traversal.
+    process_block : Optional[int]
+        Node pairs processed per traversal step.
+
+    Returns
+    -------
+    TreeDownwardData
+        The interaction list actually used and the accumulated local expansions.
+    """
 
     buffers = dense_buffers
     if buffers is not None and interactions is None:

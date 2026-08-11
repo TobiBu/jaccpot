@@ -470,6 +470,38 @@ def _chunked_real_m2l_accumulate(
     are gathered ``[block, *]`` INSIDE the scan. This avoids materialising the full
     ``[Npairs, C]`` gather (itself a >1GB peak at high N), so the only large intermediates are
     the per-block rotation blocks. Deltas are ``tgt - src`` in the source dtype then cast.
+
+    Parameters
+    ----------
+    loc_init : jax.Array
+        Local coefficients to accumulate into, ``[total_nodes, C]``.
+    multip : jax.Array
+        Compact per-node source multipoles ``[total_nodes, C]``, gathered inside
+        the scan rather than pre-gathered per pair.
+    src_idx : jax.Array
+        Source node index per far pair, ``[Npairs]``.
+    tgt_idx : jax.Array
+        Target node index per far pair, ``[Npairs]``.
+    src_centers : jax.Array
+        Per-node source centres ``[total_nodes, 3]``.
+    tgt_centers : jax.Array
+        Per-node target centres ``[total_nodes, 3]``.
+    valid : jax.Array
+        Per-pair validity mask ``[Npairs]``; padded pairs are ``False`` and
+        contribute exactly zero.
+    order : int
+        Expansion order ``p``. Static under ``jit``.
+    block : int
+        Pairs per scan step; sets the peak, not the result. Static under ``jit``.
+    total_nodes : int
+        Segment count for the scatter-add. Static under ``jit``.
+    m2l_dtype : Any
+        Working dtype for the M2L itself, which may differ from ``loc_init``'s.
+
+    Returns
+    -------
+    jax.Array
+        The accumulated local coefficients, same shape and dtype as ``loc_init``.
     """
     npairs = src_idx.shape[0]
     nblk = -(-npairs // block)  # ceil
@@ -531,6 +563,46 @@ def _chunked_pallas_nearfield_accumulate(
     ``< S_near``). This is ``[block, S_near]`` throughout (no ``[num_edges]`` temporaries) and is
     bit-identical to the full batch: same ``src_s`` order, same per-leaf truncation, so raw per-leaf
     counts exceeding ``S_near`` (offsets uncapped, counts from bincount) are truncated identically.
+
+    Parameters
+    ----------
+    leaf_positions : jax.Array
+        Padded per-leaf source positions ``[u_leaves, W, 3]``; fully resident,
+        because sources span every leaf row.
+    leaf_masses : jax.Array
+        Padded per-leaf source masses ``[u_leaves, W]``.
+    leaf_mask_g : jax.Array
+        Padded per-leaf source validity ``[u_leaves, W]``.
+    safe_idx : jax.Array
+        Particle indices behind each padded slot ``[u_leaves, W]``, clipped so a
+        masked slot cannot gather out of bounds.
+    concat_pos : jax.Array
+        Target positions in the local + halo layout; also gives the accumulator
+        its shape.
+    offsets : jax.Array
+        CSR row offsets into ``src_s``, per target leaf. Uncapped by design.
+    counts : jax.Array
+        Source count per target leaf, truncated at ``S_near`` on use.
+    src_s : jax.Array
+        Flat source-leaf index list, ``[num_edges]``.
+    n_lloc : int
+        Number of *local* target leaf rows; rows beyond it produce no kept output.
+        Static under ``jit``.
+    S_near : int
+        Densified source slots per target leaf. Static under ``jit``; the
+        per-leaf truncation bound, so changing it changes the result.
+    block : int
+        Target leaves per scan step; sets the peak, not the result. Static under
+        ``jit``.
+    G : Any
+        Gravitational constant.
+    softening_sq : jax.Array
+        Squared Plummer softening length.
+
+    Returns
+    -------
+    jax.Array
+        Near-field accelerations in the ``concat_pos`` layout, ``[cap + halo, 3]``.
     """
     nblk = -(-n_lloc // block)  # ceil
     num_edges = int(src_s.shape[0])
@@ -1568,6 +1640,40 @@ def make_force_evaluator(
     where executing a gradient corrupts every later exchange. Force one with
     ``"native"`` / ``"buf"``. See :func:`resolve_grad_halo_exchange` and
     :func:`_grad_halo_exchange`.
+
+    Parameters
+    ----------
+    config : DistributedFMMConfig
+        Decomposition, traversal-capacity and expansion settings.
+    ndev : int
+        Number of devices the mesh spans.
+    cap : int
+        Per-device particle capacity from :func:`partition_for_devices`; every
+        device array is padded to it so the shapes are static.
+    mesh : Any
+        The device mesh to ``shard_map`` over, on axis ``"gpus"``.
+    jit : bool
+        Wrap the pipeline in ``jax.jit`` so repeated calls measure steady-state
+        device time. Pass ``False`` for the eager ``shard_map`` the correctness
+        path uses.
+    differentiable : bool
+        Make the callable safe under ``jax.grad`` / ``jax.vjp`` w.r.t.
+        ``pos_flat`` and ``mass_flat``, as described above.
+    l2l_num_levels : Optional[int]
+        Static level bound for the L2L cascade (differentiable mode only). The
+        default is safe but loose; too low truncates the cascade and is reported
+        as ``l2l_level_overflow`` in the diagnostics -- check that flag whenever
+        you override it.
+    halo_exchange : str
+        Ragged halo-exchange implementation (differentiable mode only):
+        ``"auto"``, ``"native"`` or ``"buf"``. See above -- the fallback's reverse
+        pass corrupts every later exchange below JAX 0.9.1.
+
+    Returns
+    -------
+    Callable
+        ``(pos_flat, mass_flat, gid_flat, counts) -> (accel, gid, diag)``, with
+        ``accel`` in the padded per-device Morton order that ``gid`` maps back.
     """
 
     fn = _make_fn(
@@ -1637,9 +1743,40 @@ def distributed_fmm_accelerations(
     rebuilding the evaluator each time. The ``config`` on the returned result is
     the one that actually produced the (non-overflowing) forces.
 
-    Returns a :class:`DistributedFMMResult`; ``.accelerations`` has shape
-    ``(N, 3)`` in input order, ``.diagnostics`` includes the per-device pair
-    counts / overflow flags and a reduced ``overflow`` bool.
+    Parameters
+    ----------
+    positions : np.ndarray
+        Particle positions ``[N, 3]`` in input order. Host-side NumPy: this entry
+        point reassembles in NumPy and is **not traceable**, so differentiate
+        :func:`make_force_evaluator`'s callable instead.
+    masses : np.ndarray
+        Particle masses ``[N]`` in input order.
+    config : DistributedFMMConfig | None
+        Decomposition and expansion settings; defaults are used when ``None``.
+    mesh : Any
+        Device mesh to run on; built from ``ndev`` when ``None``.
+    ndev : int | None
+        Device count, defaulting to ``device_count()``. Ignored when ``mesh`` is
+        given.
+    jit : bool
+        Whether the force pipeline is jitted. Default ``False``.
+    auto_scale_caps : bool
+        Retry on a traversal-buffer overflow with scaled capacities, as described
+        above.
+    cap_scale_factor : float
+        Factor applied to the capacities on each retry. Default ``2.0``.
+    max_cap_retries : int
+        Maximum number of retries. Default ``4``.
+    cap_presets_path : str | None
+        Path to a capacity-preset file to seed the capacities from.
+
+    Returns
+    -------
+    DistributedFMMResult
+        ``.accelerations`` is ``[N, 3]`` in input order; ``.diagnostics`` carries
+        the per-device pair counts, the overflow flags and a reduced ``overflow``
+        bool; ``.config`` is the configuration that actually produced the
+        non-overflowing forces.
     """
 
     if config is None:

@@ -21,6 +21,7 @@ from .config import (
 from .runtime._large_n_types import LargeNPreparedState
 from .runtime.fmm import FastMultipoleMethod as _RuntimeFMM
 from .runtime.fmm import FMMPreparedState
+from .runtime.fmm_constants import _LARGE_N_GPU_UPWARD_LEAF_BATCH_SIZE
 
 
 def _default_advanced_for_preset(preset: FMMPreset) -> FMMAdvancedConfig:
@@ -72,7 +73,7 @@ def _default_advanced_for_preset(preset: FMMPreset) -> FMMAdvancedConfig:
                 autotune_m2l_chunk=True,
                 precompute_grouped_class_segments=False,
                 grouped_schedule_budget_bytes=8 * 1024 * 1024,
-                upward_leaf_batch_size=2048,
+                upward_leaf_batch_size=_LARGE_N_GPU_UPWARD_LEAF_BATCH_SIZE,
             ),
             mac_type="dehnen",
             dehnen_radius_scale=1.0,

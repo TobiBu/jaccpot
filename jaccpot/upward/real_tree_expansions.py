@@ -69,7 +69,52 @@ def _p2m_leaves_real(
     total_nodes: int,
     leaf_batch_size: int,
 ) -> Array:
-    """Leaf P2M in the Dehnen real basis (mirror of ``_p2m_leaves_complex``)."""
+    """Leaf P2M in the Dehnen real basis (mirror of ``_p2m_leaves_complex``).
+
+    Batched over leaves with a ``lax.scan`` so the padded per-leaf gather stays a
+    fixed shape: each step takes ``leaf_batch_size`` leaves, gathers up to
+    ``max_leaf_size`` particles per leaf, masks the over-run slots to zero
+    position and zero mass, and writes the per-leaf sum. Padded slots therefore
+    contribute exactly ``0``, never ``0 * inf``.
+
+    Differentiable in ``positions_sorted`` and ``masses_sorted``; the gather
+    indices are integer and carry no gradient.
+
+    Parameters
+    ----------
+    node_ranges : Array
+        Per-node inclusive ``[start, end]`` particle spans, ``[total_nodes, 2]``.
+    positions_sorted : Array
+        Particle positions ``[N, 3]`` in Morton order.
+    masses_sorted : Array
+        Particle masses ``[N]`` in the same order.
+    centers : Array
+        Per-node expansion centres ``[total_nodes, 3]``; the P2M displacement is
+        ``position - centre``.
+    order : int
+        Expansion order ``p``. Static under ``jit``.
+    max_leaf_size : int
+        Padded leaf width. Static under ``jit``; sets the inner gather extent.
+    num_internal : int
+        Number of internal nodes; leaves are ``[num_internal, total_nodes)``.
+        Static under ``jit``.
+    total_nodes : int
+        Total node count, and the leading axis of the result. Static under ``jit``.
+    leaf_batch_size : int
+        Leaves processed per scan step. Static under ``jit``; a tuning knob only,
+        it does not change the result because each leaf's sum is independent.
+
+    Returns
+    -------
+    Array
+        Packed real multipole coefficients ``[total_nodes, (p+1)^2]``, zero on
+        internal nodes (which the M2M sweep fills afterwards).
+
+    Raises
+    ------
+    ValueError
+        If ``order`` is negative.
+    """
 
     p = int(order)
     if p < 0:
@@ -155,6 +200,57 @@ def aggregate_m2m_real_by_level(
     """Real-basis upward M2M aggregation by level (mirror of the complex one).
 
     Reused for both the local tree upward sweep and the distributed coarse tree.
+
+    Walks levels deepest-first, translating each internal node's two children's
+    multipoles to the parent centre and summing them. Levels are processed in
+    ``level_batch_width``-wide slots so the shapes stay static; read the comment
+    below the signature before touching that width, because
+    ``dynamic_slice_in_dim`` clamps an out-of-range start instead of erroring and
+    a clamped window silently aggregates the wrong nodes.
+
+    Differentiable in ``packed`` and ``centers``. The child/level index arrays are
+    integer topology and carry no gradient.
+
+    Parameters
+    ----------
+    packed : Array
+        Packed real multipole coefficients ``[total_nodes, (p+1)^2]``, with the
+        leaves already filled by :func:`_p2m_leaves_real`. Returned updated, not
+        mutated in place.
+    centers : Array
+        Per-node expansion centres ``[total_nodes, 3]``; the M2M displacement is
+        ``child_centre - parent_centre``.
+    left_child : Array
+        Left-child node index per node, ``[total_nodes]``.
+    right_child : Array
+        Right-child node index per node, ``[total_nodes]``.
+    nodes_by_level : Array
+        Internal node indices grouped by level, ``[num_internal]``, indexed by
+        ``level_offsets``.
+    level_offsets : Array
+        Start offset of each level into ``nodes_by_level``, ``[num_levels + 1]``.
+    order : int
+        Expansion order ``p``. Static under ``jit``.
+    num_internal : int
+        Number of internal nodes. Static under ``jit``; ``<= 0`` returns ``packed``
+        unchanged.
+    num_levels : int
+        Number of levels to walk. Static under ``jit``.
+    level_batch_width : int
+        Internal nodes handled per slot within a level. Static under ``jit``.
+        Performance-only in principle, but see the clamp warning: it must not
+        exceed what the level's offset window can hold.
+
+    Returns
+    -------
+    Array
+        Packed real multipole coefficients ``[total_nodes, (p+1)^2]`` with the
+        internal nodes filled.
+
+    Raises
+    ------
+    ValueError
+        If ``order`` is negative.
     """
 
     p = int(order)
