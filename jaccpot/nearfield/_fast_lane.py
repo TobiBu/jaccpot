@@ -40,23 +40,25 @@ from yggdrax.dtypes import INDEX_DTYPE
 
 from jaccpot.runtime.grad_options import LeafPairReverseOptions
 
+from ._kernels import _pair_contributions_batched, _self_contributions
+from ._large_n_blocks import (
+    _collect_target_leaf_batch_acc,
+    _compute_leaf_p2p_prepared_large_n_pairs_target_blocks_prepacked_impl,
+    _compute_leaf_p2p_prepared_large_n_self_only_impl,
+)
+from ._scatter import _scatter_contributions, _scatter_scalar_contributions
 from .grad import (
     _check_float_id_range,
     _leafpair_accel_analytic_vjp,
     _leafpair_reverse_tiers_cached,
 )
-from .near_field import (
-    _collect_target_leaf_batch_acc,
-    _compute_leaf_p2p_prepared_large_n_pairs_target_blocks_prepacked_impl,
-    _compute_leaf_p2p_prepared_large_n_self_only_impl,
-    _env_flag,
-    _env_int,
-    _large_n_nearfield_diag_mode,
-    _pair_contributions_batched,
-    _scatter_contributions,
-    _scatter_scalar_contributions,
-    _self_contributions,
-)
+
+# The diagnostics gate and the two env-reader aliases still live in `near_field`.
+# They are the only thing this module needs from there, and after Tier 1.4 this
+# module is their only consumer -- so they arguably belong here now. Left where
+# they are deliberately: relocating them is a judgement about where the near-field
+# diagnostics surface lives, not part of a mechanical seam split.
+from .near_field import _env_flag, _env_int, _large_n_nearfield_diag_mode
 
 __all__ = [
     "compute_leaf_p2p_accelerations_radix_fast_lane",
