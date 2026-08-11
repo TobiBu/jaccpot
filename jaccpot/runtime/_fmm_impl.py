@@ -214,6 +214,7 @@ from .fmm_constants import (
     _LARGE_CPU_M2L_CHUNK_SIZE,
     _LARGE_CPU_PARTICLE_THRESHOLD,
     _LARGE_CPU_TRAVERSAL_CONFIG,
+    _LARGE_N_GPU_UPWARD_LEAF_BATCH_SIZE,
     _MINIMUM_MEMORY_CPU_M2L_CHUNK_SIZE,
     _MINIMUM_MEMORY_GPU_M2L_CHUNK_SIZE,
     _NEARFIELD_BUCKETED_CPU_EDGE_CHUNK_LARGE,
@@ -1140,7 +1141,7 @@ class FastMultipoleMethod(
         self.retain_interactions = False
         self.precompute_grouped_class_segments = False
         if self.upward_leaf_batch_size is None:
-            self.upward_leaf_batch_size = 2048
+            self.upward_leaf_batch_size = _LARGE_N_GPU_UPWARD_LEAF_BATCH_SIZE
 
     def _resolve_execution_backend(self) -> str:
         """Resolve the active FMM execution backend without altering tree choice."""
