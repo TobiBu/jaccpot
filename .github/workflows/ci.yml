@@ -33,13 +33,22 @@ jobs:
     runs-on: ubuntu-latest
     # Hard cap so a memory-bomb / hung-worker never burns the 6h workflow
     # ceiling again (an OOM-killed xdist worker makes the job hang otherwise).
-    # 45 -> 50: the suite runs 27-34 min, and a JAX bump invalidates every entry in
-    # the restored .jax_cache, so the first run after one is fully cold. A cancelled
-    # job never SAVES the cache either, so too tight a cap self-perpetuates. Kept
-    # modest on purpose: the JAX floor is 0.10.2 precisely because 0.11.0 is ~2.6x
-    # slower on the CPU backend, and a cap large enough to absorb that would hide
-    # the regression instead of surfacing it.
-    timeout-minutes: 50
+    #
+    # 50 -> 60. The cap's job is to catch the ~2.6x CPU slowdown that is the whole
+    # reason the JAX ceiling is <0.11, so it has to sit BELOW that and ABOVE the
+    # real spread. Both bounds are now measured rather than assumed:
+    #
+    #   warm on main (merge of #77)          26 min
+    #   PR branches, Tier 1 (10 PRs)         30, 36, 39, 42, 42, 43, 43, 44, 45 min
+    #   2.6x the warm time                   ~68 min
+    #
+    # A PR branch busts the exact .jax_cache key (it is keyed on
+    # hashFiles('jaccpot/**/*.py'), so ANY .py edit misses) and runs off the
+    # prefix restore, which is why every PR sits 4-19 min above main. 60 leaves
+    # 15 min over the worst observed and still trips well before 68, so the
+    # regression detector is intact. Do not raise it past ~65 without replacing
+    # the detector with something explicit.
+    timeout-minutes: 60
     env:
       JAX_ENABLE_X64: "1"
       # Persist JAX's compiled executables across runs so the heavy FMM
@@ -147,16 +156,26 @@ jobs:
     # test-full (on 3.13); keeping them out of the matrix is where most of the
     # CI wall-clock reduction comes from.
     runs-on: ubuntu-latest
-    # 25 -> 30: this job was already finishing at 24.6 of its 25 min before any
-    # JAX change, so it had no headroom at all. See test-full's cap note.
+    # 25 -> 30 -> 45. The 30 was still too tight, and the Tier 1 refactor made that
+    # unambiguous: it cancelled twice at exactly the cap (PRs #85, #86) while the
+    # 3.11 leg of the same runs passed with 43 SECONDS to spare. Measured, per leg:
     #
-    # This was the only compile-bound job still running a COLD JAX cache, which is
-    # why it kept being the one with no headroom: measured 23m14s, then 28m24s once
-    # the G.10 branch added 47 gradient tests, and a 30m07s cancellation in between
-    # -- with pytest itself reporting "778 passed, 47 skipped" before the axe fell.
-    # The cache below is the same mechanism test-full and test-mac-runtime already
-    # use, and it targets what CLAUDE.md names as the binding cost: compilation.
-    timeout-minutes: 30
+    #   warm on main (merge of #77)     3.11 24 min   3.12 19 min
+    #   Tier 1 PR branches (10 PRs)     3.11 21-29.5  3.12 20-30 (2 cancelled at 30)
+    #
+    # The spread is not tracking diff size -- #81 (7 renamed constants) ran 21/20
+    # and #88 (docstrings only) ran 29.5/28 -- so it is cache-restore luck plus
+    # runner speed, and no amount of tightening will make it predictable. Note the
+    # cause is NOT JAX's cache key including source metadata:
+    # `compilation_cache_include_metadata_in_key` is already False. It is that
+    # actions/cache keys on hashFiles('jaccpot/**/*.py'), so every PR misses the
+    # exact key and restores whatever the prefix last saved.
+    #
+    # 45 keeps the regression detector: 2.6x the 24 min warm time is ~62 min, so a
+    # JAX-0.11-class slowdown still trips this. And it breaks the self-perpetuating
+    # part -- a cancelled job never SAVES its cache, so the two cancellations left
+    # the next runs colder, which is exactly how a too-tight cap sustains itself.
+    timeout-minutes: 45
     strategy:
       fail-fast: false
       matrix:
