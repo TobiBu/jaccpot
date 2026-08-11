@@ -19,6 +19,7 @@ from yggdrax.tree import Tree
 from jaccpot.downward.local_expansions import LocalExpansionData
 
 from .dtypes import INDEX_DTYPE
+from .fmm_constants import _NEARFIELD_TARGET_BLOCK_OVERFLOW_FAST_MAX_BLOCKS
 
 
 class _CompatInteractionStorage(NamedTuple):
@@ -266,7 +267,9 @@ class LargeNPreparedState:
     nearfield_target_block_tile_size: int = 8
     nearfield_target_block_tile_scan_unroll: int = 1
     nearfield_target_block_batch_scan_unroll: int = 1
-    nearfield_target_block_overflow_fast_max_blocks: int = 65536
+    nearfield_target_block_overflow_fast_max_blocks: int = (
+        _NEARFIELD_TARGET_BLOCK_OVERFLOW_FAST_MAX_BLOCKS
+    )
     nearfield_target_block_overflow_profile_capacity: int = 0
     nearfield_target_block_overflow_active_blocks: int = 0
     speed_prepared_layout: bool = False
@@ -412,7 +415,9 @@ class LargeNPreparedState:
             nearfield_target_block_tile_size = 8
             nearfield_target_block_tile_scan_unroll = 1
             nearfield_target_block_batch_scan_unroll = 1
-            nearfield_target_block_overflow_fast_max_blocks = 65536
+            nearfield_target_block_overflow_fast_max_blocks = (
+                _NEARFIELD_TARGET_BLOCK_OVERFLOW_FAST_MAX_BLOCKS
+            )
             nearfield_target_block_overflow_profile_capacity = 0
             nearfield_target_block_overflow_active_blocks = 0
             disable_specialized_large_n_nearfield = False
@@ -445,7 +450,9 @@ class LargeNPreparedState:
             nearfield_target_block_tile_size = 8
             nearfield_target_block_tile_scan_unroll = 1
             nearfield_target_block_batch_scan_unroll = 1
-            nearfield_target_block_overflow_fast_max_blocks = 65536
+            nearfield_target_block_overflow_fast_max_blocks = (
+                _NEARFIELD_TARGET_BLOCK_OVERFLOW_FAST_MAX_BLOCKS
+            )
             nearfield_target_block_overflow_profile_capacity = 0
             nearfield_target_block_overflow_active_blocks = 0
         elif len(aux) == 29:
