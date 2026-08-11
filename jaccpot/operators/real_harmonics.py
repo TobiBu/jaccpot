@@ -1580,25 +1580,34 @@ _L2L_TRANSVERSE_GENERATORS = partial(
 )
 
 
-@highest_matmul_precision
-def _multipole_align_to_z_block(
-    x: Array, y: Array, z: Array, ell: int, *, dtype: DTypeLike
-) -> Array:
-    """Degree-``ell`` block that rotates a MULTIPOLE from the world frame into
-    the frame where the direction ``(x, y, z)`` points along ``+z``.
+def _alignment_angles(x: Array, y: Array, z: Array) -> Tuple[Array, Array]:
+    """The two NaN-safe angles that align ``(x, y, z)`` with ``+z``.
 
-    Verified identity (to machine precision):
-        (this block) @ p2m(s)[block] == p2m(g @ s)[block]
-    where ``g`` is the physical rotation with ``g @ (x,y,z)/|.| == +z_hat``.
+    Shared verbatim by :func:`_multipole_align_to_z_block` and
+    :func:`_multipole_align_from_z_block`, which differ only in the order they
+    assemble the same two rotations from these angles. Not decorated: it is
+    called from inside bodies that already carry
+    :func:`~jaccpot.operators._precision.highest_matmul_precision`, and it
+    contains no matmul of its own.
 
-    Convention (CRITICAL): the coded ``B`` matrix
-    (:func:`_compute_dehnen_B_matrix_complex`) is the **x <-> z** swap, so
-    ``B @ Dz(theta) @ B`` is a rotation about the *x* axis. Aligning
-    ``(x, y, z)`` with ``+z`` therefore requires the azimuth that removes the
-    *x*-component, ``az = atan2(x, y)`` (not ``atan2(y, x)``, which suits a
-    y-rotation swap), followed by the polar tilt about x,
-    ``ax = atan2(rho, z)``. In coordinate space ``g = Rx(ax) @ Rz(az)`` whose
-    multipole representation is ``B_U @ Dz(-ax) @ B_U @ Dz(az)``.
+    Parameters
+    ----------
+    x : Array
+        First Cartesian component of the direction to align.
+    y : Array
+        Second Cartesian component. Broadcasts against ``x`` and ``z``.
+    z : Array
+        Third Cartesian component, the axis the direction is turned onto.
+
+    Returns
+    -------
+    az : Array
+        Azimuth about ``z`` that removes the *x*-component, ``atan2(x, y)``.
+        See the convention note on :func:`_multipole_align_to_z_block` for why
+        it is ``atan2(x, y)`` and not ``atan2(y, x)``.
+    ax : Array
+        Polar tilt about ``x``, ``atan2(rho, z)`` with
+        ``rho = sqrt(x^2 + y^2)``.
     """
     # NaN-safe (double-where) alignment angles. ``sqrt`` (infinite reverse grad
     # at 0) and ``arctan2`` (0/0 grad at the origin) would inject NaNs into the
@@ -1644,6 +1653,32 @@ def _multipole_align_to_z_block(
     az = jnp.where(rho_pos, jnp.arctan2(jnp.where(rho_pos, x, 1.0), y), 0.0)
     r_pos = (rho_sq + z * z) > 0
     ax = jnp.where(r_pos, jnp.arctan2(rho, jnp.where(r_pos, z, 1.0)), 0.0)
+    return az, ax
+
+
+@highest_matmul_precision
+def _multipole_align_to_z_block(
+    x: Array, y: Array, z: Array, ell: int, *, dtype: DTypeLike
+) -> Array:
+    """Degree-``ell`` block that rotates a MULTIPOLE from the world frame into
+    the frame where the direction ``(x, y, z)`` points along ``+z``.
+
+    Verified identity (to machine precision):
+        (this block) @ p2m(s)[block] == p2m(g @ s)[block]
+    where ``g`` is the physical rotation with ``g @ (x,y,z)/|.| == +z_hat``.
+
+    Convention (CRITICAL): the coded ``B`` matrix
+    (:func:`_compute_dehnen_B_matrix_complex`) is the **x <-> z** swap, so
+    ``B @ Dz(theta) @ B`` is a rotation about the *x* axis. Aligning
+    ``(x, y, z)`` with ``+z`` therefore requires the azimuth that removes the
+    *x*-component, ``az = atan2(x, y)`` (not ``atan2(y, x)``, which suits a
+    y-rotation swap), followed by the polar tilt about x,
+    ``ax = atan2(rho, z)``. In coordinate space ``g = Rx(ax) @ Rz(az)`` whose
+    multipole representation is ``B_U @ Dz(-ax) @ B_U @ Dz(az)``.
+    """
+    # The guards inside :func:`_alignment_angles` are deliberately NOT
+    # gradient-correct at rho == 0; read the WARNING there before touching them.
+    az, ax = _alignment_angles(x, y, z)
     B_U = compute_real_B_matrix_multipole(ell, dtype=dtype)
     return (
         B_U
@@ -1659,50 +1694,9 @@ def _multipole_align_from_z_block(
 ) -> Array:
     """Inverse of :func:`_multipole_align_to_z_block` (multipole z-frame ->
     world). Equals ``Dz(-az) @ B_U @ Dz(ax) @ B_U`` with the same angles."""
-    # NaN-safe (double-where) alignment angles. ``sqrt`` (infinite reverse grad
-    # at 0) and ``arctan2`` (0/0 grad at the origin) would inject NaNs into the
-    # real-basis M2L/L2L reverse pass at the degenerate directions the
-    # fixed-topology FMM hits: zero displacement (single-child COM L2L pairs) and
-    # z-axis-aligned displacement (rho == 0, lattice-aligned M2L pairs). Forward
-    # values are unchanged (arctan2(0,0)=0, sqrt(0)=0), so the golden oracle stays
-    # byte-stable.
-    #
-    # WARNING: THE GUARDS ARE NOT GRADIENT-CORRECT, and this is deliberate -- the
-    # missing derivative is supplied one level up rather than here. Do not try to fix
-    # it at this site. Measured on the assembled cascade at z=2.5, grad w.r.t. the
-    # displacement, limit taken from eight approach directions at rho=1e-9:
-    #
-    #     m2l_real  true (-1.502050, -0.523434, +0.834153)  returned (0, 0, +0.834153)
-    #     m2m_real  true (-6.416905, +1.769043, -9.651272)  returned (0, 0, -9.651272)
-    #     l2l_real  true (+0.305315, +0.003498, +0.072012)  returned (0, 0, +0.072012)
-    #
-    # The radial component is right; both transverse components are lost, and the
-    # cascade genuinely IS differentiable here (the limit is direction-independent to
-    # ~1e-07), so those zeros are wrong rather than a defensible subgradient.
-    #
-    # Why no guard tweak fixes it: the code reaches ``(x, y)`` only through
-    # ``rho = sqrt(x^2 + y^2)`` and ``az = atan2(x, y)``, so at ``x == y == 0`` every
-    # chain-rule route carries a factor ``x / rho`` or ``y / rho^2``. Flooring rho
-    # (the `_azimuth_from_floored_rho` trick that fixed the same defect class in
-    # L2P/P2M, `d5cb13b`) makes those exactly 0; leaving them bare makes them NaN.
-    # Neither can produce the ``O(rho)`` coefficient the polar parametrisation has
-    # already divided out.
-    #
-    # RESOLVED at the cascade level (G.10). ``m2l_a6_real_only``, ``m2m_real``,
-    # ``l2l_real`` and the production ``m2l_rot_scale_real_batch`` each carry a
-    # ``custom_jvp`` that supplies the transverse derivative analytically, from the
-    # rotational covariance of the assembled operator -- which is available there and
-    # not here, because the individual alignment block is genuinely
-    # direction-dependent at rho == 0 while their product is not. See
-    # :mod:`jaccpot.operators._transverse_degeneracy_jvp` and
-    # ``docs/rotation_degeneracy_derivative.md``. Asserted by
-    # ``test_rotation_cascade_transverse_gradient_at_rho_zero``.
-    rho_sq = x * x + y * y
-    rho_pos = rho_sq > 0
-    rho = jnp.where(rho_pos, jnp.sqrt(jnp.where(rho_pos, rho_sq, 1.0)), 0.0)
-    az = jnp.where(rho_pos, jnp.arctan2(jnp.where(rho_pos, x, 1.0), y), 0.0)
-    r_pos = (rho_sq + z * z) > 0
-    ax = jnp.where(r_pos, jnp.arctan2(rho, jnp.where(r_pos, z, 1.0)), 0.0)
+    # The guards inside :func:`_alignment_angles` are deliberately NOT
+    # gradient-correct at rho == 0; read the WARNING there before touching them.
+    az, ax = _alignment_angles(x, y, z)
     B_U = compute_real_B_matrix_multipole(ell, dtype=dtype)
     return (
         real_Dz_diagonal(ell, -az, dtype=dtype)
