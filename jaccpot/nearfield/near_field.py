@@ -1779,7 +1779,74 @@ def _compute_leaf_p2p_impl(
     Tuple[Array, Array, Array],
     Tuple[Array, Array, Array, Array],
 ]:
-    """JIT near-field kernel over leaf-neighbor particle interactions."""
+    """JIT near-field kernel over leaf-neighbor particle interactions.
+
+    Pads the per-leaf particle data with :func:`_prepare_leaf_data` and then
+    defers to :func:`_compute_leaf_p2p_from_prepared_leaf_data_impl`, which is
+    the same kernel taking that padded data as arguments. The two used to be
+    separate 460-line copies that were 94.4% line-identical and had already
+    drifted apart; this follows the delegation precedent
+    :func:`_compute_leaf_p2p_prepared_large_n_accel_only_impl` already sets in
+    this module.
+
+    ``max_leaf_size`` is recovered inside the callee as
+    ``leaf_particle_idx.shape[1]``, which :func:`_prepare_leaf_data` sets to
+    exactly this argument -- so it stays a compile-time constant on both sides
+    of the call and neither side gains a traced shape.
+
+    Parameters
+    ----------
+    node_ranges : Array
+        Per-node ``[start, end]`` particle spans, ``[num_nodes, 2]``.
+    leaf_nodes : Array
+        Node indices of the leaves, ``[num_leaves]``.
+    offsets : Array
+        CSR row offsets into ``neighbors``, ``[num_leaves + 1]``.
+    neighbors : Array
+        Flat leaf-neighbour edge list, ``[num_edges]``.
+    positions : Array
+        Particle positions ``[N, 3]`` in Morton order.
+    masses : Array
+        Particle masses ``[N]`` in the same order.
+    target_leaf_ids : Array
+        Per-edge target leaf index, ``[num_edges]``.
+    source_leaf_ids : Array
+        Per-edge source leaf index, ``[num_edges]``.
+    valid_pairs : Array
+        Per-edge validity mask, ``[num_edges]``; padded edges are ``False``.
+    precomputed_chunk_sort_indices : Array
+        Scatter-schedule sort permutation, or an empty array when
+        ``use_precomputed_scatter`` is ``False``.
+    precomputed_chunk_group_ids : Array
+        Scatter-schedule group ids, same convention.
+    precomputed_chunk_unique_indices : Array
+        Scatter-schedule unique-target indices, same convention.
+    max_leaf_size : int
+        Padded leaf width. Static under ``jit`` (``static_argnums=(12,)``).
+    G : Union[float, Array]
+        Gravitational constant.
+    softening_sq : Array
+        Squared Plummer softening length.
+    return_potential : bool
+        Also return per-particle potentials. Static under ``jit``.
+    collect_neighbor_pairs : bool
+        Also return the realised ``(target, source)`` leaf pairs and their
+        count. Static under ``jit``.
+    nearfield_mode : str
+        ``"baseline"`` or ``"bucketed"``. Static under ``jit``.
+    edge_chunk_size : int
+        Edge-chunk width for ``"bucketed"``. Static under ``jit``.
+    use_precomputed_scatter : bool
+        Use the precomputed scatter schedules rather than deriving them.
+        Static under ``jit``.
+
+    Returns
+    -------
+    Union[Array, Tuple[Array, Array], Tuple[Array, Array, Array], Tuple[Array, Array, Array, Array]]
+        Accelerations ``[N, 3]``, followed by potentials ``[N]`` when
+        ``return_potential``, followed by the neighbour-pair array and count
+        when ``collect_neighbor_pairs``. A one-element result is unwrapped.
+    """
     (
         leaf_positions,
         leaf_masses,
@@ -1792,452 +1859,28 @@ def _compute_leaf_p2p_impl(
         masses,
         max_leaf_size=max_leaf_size,
     )
-
-    dtype = positions.dtype
-    g_const = jnp.asarray(G, dtype=dtype)
-    soft_sq = softening_sq
-
-    accelerations = jnp.zeros_like(positions)
-    if return_potential:
-        potentials = jnp.zeros((positions.shape[0],), dtype=dtype)
-    else:
-        potentials = None
-
-    # Self interactions within each leaf
-    self_accel, self_potential = _self_contributions(
+    return _compute_leaf_p2p_from_prepared_leaf_data_impl(
+        offsets,
+        neighbors,
+        positions,
+        target_leaf_ids,
+        source_leaf_ids,
+        valid_pairs,
+        precomputed_chunk_sort_indices,
+        precomputed_chunk_group_ids,
+        precomputed_chunk_unique_indices,
         leaf_positions,
         leaf_masses,
         leaf_mask,
-        softening_sq=soft_sq,
-        G=g_const,
-        compute_potential=return_potential,
-    )
-    accelerations = _scatter_contributions(
-        accelerations,
         leaf_particle_idx,
-        self_accel,
-        leaf_mask,
+        G=G,
+        softening_sq=softening_sq,
+        return_potential=return_potential,
+        collect_neighbor_pairs=collect_neighbor_pairs,
+        nearfield_mode=nearfield_mode,
+        edge_chunk_size=edge_chunk_size,
+        use_precomputed_scatter=use_precomputed_scatter,
     )
-    if return_potential and self_potential is not None and potentials is not None:
-        potentials = _scatter_scalar_contributions(
-            potentials,
-            leaf_particle_idx,
-            self_potential,
-            leaf_mask,
-        )
-
-    inputs = (target_leaf_ids, source_leaf_ids, valid_pairs)
-
-    if neighbors.shape[0] > 0:
-        mode = str(nearfield_mode).strip().lower()
-        if mode not in ("baseline", "bucketed"):
-            raise ValueError("nearfield_mode must be 'baseline' or 'bucketed'")
-        if mode == "bucketed":
-            chunk = int(edge_chunk_size)
-            if chunk <= 0:
-                raise ValueError("edge_chunk_size must be positive")
-            starts = jnp.arange(0, neighbors.shape[0], chunk, dtype=INDEX_DTYPE)
-            chunk_offsets = jnp.arange(chunk, dtype=INDEX_DTYPE)
-            chunk_flat_size = int(chunk * max_leaf_size)
-
-            if return_potential and potentials is not None:
-                if use_precomputed_scatter:
-
-                    def _chunk_body(carry, data):
-                        acc, pot = carry
-                        start, sort_idx, group_ids, unique_indices = data
-                        edge_idx = start + chunk_offsets
-                        in_range = edge_idx < neighbors.shape[0]
-                        safe_edge_idx = jnp.where(in_range, edge_idx, 0)
-                        valid_edge = in_range & valid_pairs[safe_edge_idx]
-
-                        def _compute(args):
-                            acc_in, pot_in = args
-                            tgt_leaf = target_leaf_ids[safe_edge_idx]
-                            src_leaf = source_leaf_ids[safe_edge_idx]
-                            tgt_leaf_local = jnp.where(valid_edge, tgt_leaf, 0)
-                            src_leaf_local = jnp.where(valid_edge, src_leaf, 0)
-
-                            tgt_pos = leaf_positions[tgt_leaf_local]
-                            tgt_mask = leaf_mask[tgt_leaf_local] & valid_edge[:, None]
-                            src_pos = leaf_positions[src_leaf_local]
-                            src_mass = leaf_masses[src_leaf_local]
-                            src_mask = leaf_mask[src_leaf_local] & valid_edge[:, None]
-
-                            pair_acc, pair_pot = _pair_contributions_batched(
-                                tgt_pos,
-                                tgt_mask,
-                                src_pos,
-                                src_mass,
-                                src_mask,
-                                softening_sq=soft_sq,
-                                G=g_const,
-                                compute_potential=True,
-                            )
-                            acc_out = _scatter_vectors_with_schedule(
-                                acc_in,
-                                pair_acc,
-                                tgt_mask,
-                                sort_idx,
-                                group_ids,
-                                unique_indices,
-                            )
-                            pot_out = _scatter_scalars_with_schedule(  # type: ignore[arg-type]
-                                pot_in,
-                                pair_pot,
-                                tgt_mask,
-                                sort_idx,
-                                group_ids,
-                                unique_indices,
-                            )
-                            return acc_out, pot_out
-
-                        return (
-                            lax.cond(
-                                jnp.any(valid_edge),
-                                _compute,
-                                lambda args: args,
-                                (acc, pot),
-                            ),
-                            None,
-                        )
-
-                    (accelerations, potentials), _ = lax.scan(
-                        _chunk_body,
-                        (accelerations, potentials),
-                        (
-                            starts,
-                            precomputed_chunk_sort_indices[:, :chunk_flat_size],
-                            precomputed_chunk_group_ids[:, :chunk_flat_size],
-                            precomputed_chunk_unique_indices[:, :chunk_flat_size],
-                        ),
-                    )
-                else:
-
-                    def _chunk_body(carry, start):
-                        acc, pot = carry
-                        edge_idx = start + chunk_offsets
-                        in_range = edge_idx < neighbors.shape[0]
-                        safe_edge_idx = jnp.where(in_range, edge_idx, 0)
-                        valid_edge = in_range & valid_pairs[safe_edge_idx]
-
-                        def _compute(args):
-                            acc_in, pot_in = args
-                            tgt_leaf = target_leaf_ids[safe_edge_idx]
-                            src_leaf = source_leaf_ids[safe_edge_idx]
-                            tgt_leaf_local = jnp.where(valid_edge, tgt_leaf, 0)
-                            src_leaf_local = jnp.where(valid_edge, src_leaf, 0)
-
-                            tgt_pos = leaf_positions[tgt_leaf_local]
-                            tgt_mask = leaf_mask[tgt_leaf_local] & valid_edge[:, None]
-                            tgt_ids = leaf_particle_idx[tgt_leaf_local]
-                            src_pos = leaf_positions[src_leaf_local]
-                            src_mass = leaf_masses[src_leaf_local]
-                            src_mask = leaf_mask[src_leaf_local] & valid_edge[:, None]
-
-                            pair_acc, pair_pot = _pair_contributions_batched(
-                                tgt_pos,
-                                tgt_mask,
-                                src_pos,
-                                src_mass,
-                                src_mask,
-                                softening_sq=soft_sq,
-                                G=g_const,
-                                compute_potential=True,
-                            )
-                            acc_out = _scatter_contributions(
-                                acc_in,
-                                tgt_ids,
-                                pair_acc,
-                                tgt_mask,
-                            )
-                            pot_out = _scatter_scalar_contributions(  # type: ignore[arg-type]
-                                pot_in,
-                                tgt_ids,
-                                pair_pot,
-                                tgt_mask,
-                            )
-                            return acc_out, pot_out
-
-                        return (
-                            lax.cond(
-                                jnp.any(valid_edge),
-                                _compute,
-                                lambda args: args,
-                                (acc, pot),
-                            ),
-                            None,
-                        )
-
-                    (accelerations, potentials), _ = lax.scan(
-                        _chunk_body,
-                        (accelerations, potentials),
-                        starts,
-                    )
-            else:
-                if use_precomputed_scatter:
-
-                    def _chunk_body(acc, data):
-                        start, sort_idx, group_ids, unique_indices = data
-                        edge_idx = start + chunk_offsets
-                        in_range = edge_idx < neighbors.shape[0]
-                        safe_edge_idx = jnp.where(in_range, edge_idx, 0)
-                        valid_edge = in_range & valid_pairs[safe_edge_idx]
-
-                        def _compute(acc_in):
-                            tgt_leaf = target_leaf_ids[safe_edge_idx]
-                            src_leaf = source_leaf_ids[safe_edge_idx]
-                            tgt_leaf_local = jnp.where(valid_edge, tgt_leaf, 0)
-                            src_leaf_local = jnp.where(valid_edge, src_leaf, 0)
-
-                            # Gather + pair evaluation, rematerialized: the
-                            # composite is the dominant reverse-pass residual at
-                            # galaxy N (see ``_bucketed_chunk_pair_accels``).
-                            pair_acc, tgt_mask = _bucketed_chunk_pair_accels_remat(
-                                leaf_positions,
-                                leaf_masses,
-                                leaf_mask,
-                                tgt_leaf_local,
-                                src_leaf_local,
-                                valid_edge,
-                                soft_sq,
-                                g_const,
-                            )
-                            return _scatter_vectors_with_schedule(
-                                acc_in,
-                                pair_acc,
-                                tgt_mask,
-                                sort_idx,
-                                group_ids,
-                                unique_indices,
-                            )
-
-                        return (
-                            lax.cond(
-                                jnp.any(valid_edge),
-                                _compute,
-                                lambda acc_in: acc_in,
-                                acc,
-                            ),
-                            None,
-                        )
-
-                    accelerations, _ = lax.scan(
-                        _chunk_body,
-                        accelerations,
-                        (
-                            starts,
-                            precomputed_chunk_sort_indices[:, :chunk_flat_size],
-                            precomputed_chunk_group_ids[:, :chunk_flat_size],
-                            precomputed_chunk_unique_indices[:, :chunk_flat_size],
-                        ),
-                    )
-                else:
-
-                    def _chunk_body(acc, start):
-                        edge_idx = start + chunk_offsets
-                        in_range = edge_idx < neighbors.shape[0]
-                        safe_edge_idx = jnp.where(in_range, edge_idx, 0)
-                        valid_edge = in_range & valid_pairs[safe_edge_idx]
-
-                        def _compute(acc_in):
-                            tgt_leaf = target_leaf_ids[safe_edge_idx]
-                            src_leaf = source_leaf_ids[safe_edge_idx]
-                            tgt_leaf_local = jnp.where(valid_edge, tgt_leaf, 0)
-                            src_leaf_local = jnp.where(valid_edge, src_leaf, 0)
-
-                            tgt_ids = leaf_particle_idx[tgt_leaf_local]
-                            # Gather + pair evaluation, rematerialized: the
-                            # composite is the dominant reverse-pass residual at
-                            # galaxy N (see ``_bucketed_chunk_pair_accels``).
-                            pair_acc, tgt_mask = _bucketed_chunk_pair_accels_remat(
-                                leaf_positions,
-                                leaf_masses,
-                                leaf_mask,
-                                tgt_leaf_local,
-                                src_leaf_local,
-                                valid_edge,
-                                soft_sq,
-                                g_const,
-                            )
-                            return _scatter_contributions(
-                                acc_in,
-                                tgt_ids,
-                                pair_acc,
-                                tgt_mask,
-                            )
-
-                        return (
-                            lax.cond(
-                                jnp.any(valid_edge),
-                                _compute,
-                                lambda acc_in: acc_in,
-                                acc,
-                            ),
-                            None,
-                        )
-
-                    accelerations, _ = lax.scan(
-                        _chunk_body,
-                        accelerations,
-                        starts,
-                    )
-        elif return_potential and potentials is not None:
-
-            def _edge_body(carry, data):
-                acc, pot = carry
-                tgt_idx, src_idx, is_valid = data
-
-                def true_branch(
-                    args: tuple[Array, Array, Array, Array],
-                ) -> tuple[Array, Array]:
-                    acc_state, pot_state, tgt, src = args
-                    target_pos = leaf_positions[tgt]
-                    target_mask = leaf_mask[tgt]
-                    target_ids = leaf_particle_idx[tgt]
-
-                    source_pos = leaf_positions[src]
-                    source_mass = leaf_masses[src]
-                    source_mask = leaf_mask[src]
-
-                    pair_accel, pair_pot = _pair_contributions(
-                        target_pos,
-                        target_mask,
-                        source_pos,
-                        source_mass,
-                        source_mask,
-                        softening_sq=soft_sq,
-                        G=g_const,
-                        compute_potential=True,
-                    )
-
-                    masked_acc = jnp.where(
-                        target_mask[:, None],
-                        pair_accel,
-                        0.0,
-                    )
-                    masked_pot = jnp.where(target_mask, pair_pot, 0.0)
-
-                    acc_state = acc_state.at[target_ids].add(masked_acc)
-                    pot_state = pot_state.at[target_ids].add(masked_pot)
-                    return acc_state, pot_state
-
-                def false_branch(
-                    args: tuple[Array, Array, Array, Array],
-                ) -> tuple[Array, Array]:
-                    acc_state, pot_state, *_ = args
-                    return acc_state, pot_state
-
-                updated = lax.cond(
-                    is_valid,
-                    true_branch,
-                    false_branch,
-                    (acc, pot, tgt_idx, src_idx),
-                )
-                return updated, None
-
-            (accelerations, potentials), _ = lax.scan(
-                _edge_body,
-                (accelerations, potentials),
-                inputs,
-            )
-        else:
-
-            def _edge_body(acc, data):
-                tgt_idx, src_idx, is_valid = data
-
-                def true_branch(args: tuple[Array, Array, Array]) -> Array:
-                    acc_state, tgt, src = args
-                    target_pos = leaf_positions[tgt]
-                    target_mask = leaf_mask[tgt]
-                    target_ids = leaf_particle_idx[tgt]
-
-                    source_pos = leaf_positions[src]
-                    source_mass = leaf_masses[src]
-                    source_mask = leaf_mask[src]
-
-                    pair_accel, _ = _pair_contributions(
-                        target_pos,
-                        target_mask,
-                        source_pos,
-                        source_mass,
-                        source_mask,
-                        softening_sq=soft_sq,
-                        G=g_const,
-                        compute_potential=False,
-                    )
-
-                    masked_acc = jnp.where(
-                        target_mask[:, None],
-                        pair_accel,
-                        0.0,
-                    )
-                    acc_state = acc_state.at[target_ids].add(masked_acc)
-                    return acc_state
-
-                def false_branch(args: tuple[Array, Array, Array]) -> Array:
-                    acc_state, *_ = args
-                    return acc_state
-
-                updated_acc = lax.cond(
-                    is_valid,
-                    true_branch,
-                    false_branch,
-                    (acc, tgt_idx, src_idx),
-                )
-                return updated_acc, None
-
-            accelerations, _ = lax.scan(
-                _edge_body,
-                accelerations,
-                inputs,
-            )
-
-    neighbor_pairs = jnp.zeros((0, 2), dtype=INDEX_DTYPE)
-    pair_count = as_index(0)
-    if collect_neighbor_pairs:
-        max_pairs = neighbors.shape[0]
-        pair_buffer = jnp.zeros((max_pairs, 2), dtype=INDEX_DTYPE)
-
-        def _pair_body(idx, state):
-            ptr, buf = state
-
-            def _add_pair(args):
-                ptr_val, buf_val = args
-                pair = jnp.stack(
-                    [target_leaf_ids[idx], source_leaf_ids[idx]],
-                    axis=0,
-                )
-                buf_val = buf_val.at[ptr_val].set(pair)
-                return ptr_val + as_index(1), buf_val
-
-            return lax.cond(
-                valid_pairs[idx],
-                _add_pair,
-                lambda args: args,
-                (ptr, buf),
-            )
-
-        pair_count, pair_buffer = lax.fori_loop(
-            0,
-            max_pairs,
-            _pair_body,
-            (as_index(0), pair_buffer),
-        )
-        neighbor_pairs = pair_buffer
-
-    outputs = (accelerations,)
-    if return_potential and potentials is not None:
-        outputs += (potentials,)
-    if collect_neighbor_pairs:
-        outputs += (
-            neighbor_pairs,
-            pair_count,
-        )
-
-    if len(outputs) == 1:
-        return outputs[0]
-    return outputs
 
 
 @partial(
