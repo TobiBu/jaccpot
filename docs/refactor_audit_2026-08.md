@@ -25,11 +25,26 @@ carried out on branch `test/close-rotation-and-grad-golden-gaps`, both test-only
 | 0.19 rename the misnamed large-N test | `d941805` | **Done.** F28 closed. |
 | 0.18 test-layout moves | `a54f29e` | **Done.** A.6 closed — 20 files into the tiers, new `tests/distributed/`, 17 `slow_tests.txt` node ids and 32 path references retargeted from git's rename mapping. Collected counts identical (911/949; 779 not-slow), so no `slow` marker was lost. |
 | 0.20 public surface | `4b2a66a` | **Done** (targeted half). All 14 public names documented; 43 dataclass fields covered. Latent pydoclint violations 2840 → 2778. The ~58 numerics functions are deferred to Tier 1.10 by your decision. |
-| **Tier 0 COMPLETE** | — | All 21 items done or explicitly deferred. |
+| ~~**Tier 0 COMPLETE**~~ | — | **This line was wrong when written.** It came from the running status block, not from checking the per-item rows — and four items were still open: 0.2, 0.5, 0.11's F07 half, and 0.16. Found by re-deriving completeness from the code rather than from this table. |
+| 0.5 + 0.11 (F07) | `8bd24a6` | **Done, differently than specified.** Not a Table 3 transcription — an absolute anchor from the derivative recurrences. See D.8. |
+| 0.2 mode/output golden axes | `ef7ce15` | **Done.** 4 new cases in a separate golden dir; potentials goldened for the first time. Surfaced **G.11**. |
+| 0.16 `__future__` / `__all__` | `23ccc9d` | **Done** (`__future__` complete at 80/80; `__all__` scoped to the public modules — the rest is the F16 star-export seam). |
+| **Tier 0 complete — verified** | — | Re-checked empirically, not from this table. |
 | G.4 + G.8 (Tier 2) — delete the Wigner family and the `sympy` dependence | `ab58c3d` | **Done, signed off by you.** 11 functions, 281 lines, 6 `__all__` names, plus the now-unused `import math`. Both goldens byte-unmoved; suite unchanged at 839/57. Closes F32, F39, and moots F19. |
+| G.11 `pair_grouped` wrong class rotation | PR #76, #77 | **FIXED and merged.** See G.11. Also added 2 `pair_grouped` mode goldens and 11 tests, which is why the suite baseline moved — see the note below. |
+| **Tier 1 — all ten items executed** | PRs #79-#88 | One PR per item, all green. Per-item outcomes in the Tier 1 table of section F, which now records what each actually did rather than what was planned. Four findings came out of the execution and are folded in below: **F40** (new), the F16 correction, the G.1 re-location, and the F23 three-part split. |
 
-Full suite after both: **839 passed, 57 skipped**, exit 0. `black`, `isort`, `pydoclint`
+Full suite after Tier 0: **839 passed, 57 skipped**, exit 0. `black`, `isort`, `pydoclint`
 clean.
+
+**The suite baseline has moved twice since, and the second move matters for reading
+this document.** After Tier 0 it was 839/57. After G.11 (PRs #76, #77) it is **926
+passed / 67 skipped**, and that is the number every Tier 1 PR was verified against.
+An earlier draft of the Tier 1 brief quoted 915/67, which was already stale when it
+was written — the 11 tests G.11 added had landed in between. Collected counts are
+**993/1031 (38 deselected), 898 under `-m "not slow"`, 38 under `-m experimental`**;
+those are the numbers to compare against when checking that a move did not silently
+un-mark a `slow` entry, and they replace A.6's 911/949/779.
 
 Everything changed by that execution, so you can see exactly what is new:
 
@@ -101,9 +116,18 @@ Six things dominate everything else in this audit:
    `_fmm_impl.FastMultipoleMethod.__init__` is **722 lines** with 60 parameters. A module
    split that leaves those intact buys very little.
 
+   *Tier 1 status:* the 883-line one is now **493** (1.7). `prepare_large_n_state` is
+   untouched by design — 1.8 confirmed its reverse path is still at 0% coverage, so
+   A.9's leave-it-whole argument holds. The 722-line constructor is Tier 2.1 and
+   remains the largest single unit in the package. The module splits did land (1.3,
+   1.4, 1.5, 1.6), so the *remaining* concentration of risk is now almost entirely in
+   that constructor.
+
 5. **Two latent `NameError`s exist in `runtime/kernels/core.py`.** Both are in reachable
    branches, both are uncovered by the suite. They are in section G, not section B — bugs are
-   not fixed inside a refactor.
+   not fixed inside a refactor. Tier 1.6 moved them to `kernels/_l2l.py:607` and
+   `kernels/_evaluate.py:1285`; G.1 carries the full re-location table, and the
+   before/after `pyflakes` correspondence that proves the split left them alone.
 
 6. **Six public names in `operators/real_harmonics.py` could not execute at all — now removed
    (`ab58c3d`).** The Wigner-D
@@ -269,6 +293,22 @@ Line counts and the largest unit inside each:
 | `operators/real_harmonics.py` | 2236 | `p2m_real_direct` 165 (`:334`), `evaluate_local_real` 159 (`:507`) |
 | `runtime/_large_n_pipeline.py` | 2048 | `prepare_large_n_state` **1253** (`:321`) |
 
+**All five line counts above are pre-Tier-1 and every one has moved.** Current state
+(`main`, plus the near-field chain still in review as PRs #80/#83/#84):
+
+| Module | audited | now | by |
+|---|---|---|---|
+| `nearfield/near_field.py` | 4313 | **1388** | 1.2, 1.4, 1.5 (PRs #80, #83, #84) |
+| `runtime/kernels/core.py` | 3827 | **101** (aggregator) | 1.6 (PR #85) |
+| `runtime/fmm_prepare.py` | 2953 | 3181, but its largest unit 883 → **493** | 1.7 (PR #86) |
+| `operators/real_harmonics.py` | 2236 | **283** (aggregator) | 1.3 (PR #82, merged) |
+| `runtime/_large_n_pipeline.py` | 2048 | **1768** | 1.8 (PR #87, merged) |
+
+`fmm_prepare.py` growing is expected and is the point: A.9 argued the *function* was
+the problem, and the module gained a bundle type plus two documented signatures in
+exchange for the driver halving. Whether the mixin still wants splitting is now a
+question you can answer against a 493-line driver.
+
 **`nearfield/near_field.py` — split, along five seams.** The 46 top-level defs partition
 cleanly by line range:
 
@@ -389,14 +429,14 @@ Risk = probability the change breaks something. Effort = S (<1h), M (a day), L (
 | F13 | `pallas/m2l_real_fused.py:43` + `pallas/m2l_complex_fused.py:49` | duplication | `_fused_m2l_vjp_enabled()` byte-identical in two modules, one shared env var | A reverse-mode kernel selector defined twice. **Do not naively route through `_env.env_flag`** — the malformed-value semantics differ (A.4) | low | S | **yes** (selects which VJP runs) |
 | F14 **✔`934c252`** | `nearfield/near_field.py:23` | dead-code | `env_float` imported, never used | — | low | S | no |
 | F15 **✔`934c252`** | `nearfield/near_field.py:54-55` | dead-code | `_env_flag`/`_env_int` aliases left from the `_env` consolidation | Two names for one function in a 4313-line file | low | S | no |
-| F16 | `runtime/_fmm_impl.py`, `runtime/kernels/__init__.py` | **CORRECTED** — was "13 unused imports"; there are **204** in `_fmm_impl.py` and 60 in `kernels/__init__.py`, and they are **not dead code**. `runtime/fmm/__init__.py` does `from .._fmm_impl import *` plus an explicit `build_interactions_and_neighbors`, and tests import `_build_nearfield_interop_data`, `_evaluate_local_expansions_for_particles`, `_prepare_solidfmm_downward_sweep` from `_fmm_impl` without it using them. ARCHITECTURE §3 calls `kernels/__init__.py` "curated re-exports"; pyflakes flags all of them only because neither module declares `__all__` | My original count came from a truncated pyflakes view — a reminder that `grep \| head` is not a measurement. Bulk-removing these would break consumers. 13 that are consumed nowhere were removed in `934c252` after checking every `from ... import` in `jaccpot/`, `tests/`, `bench/`, `examples/`; the rest need an explicit `__all__` and a decision about what the seam guarantees | med | M | no → **Tier 2**, not Tier 0 |
+| F16 | `runtime/_fmm_impl.py`, `runtime/kernels/__init__.py` | **CORRECTED** — was "13 unused imports"; there are **204** in `_fmm_impl.py` and 60 in `kernels/__init__.py`, and they are **not dead code**. `runtime/fmm/__init__.py` does `from .._fmm_impl import *` plus an explicit `build_interactions_and_neighbors`, and tests import `_build_nearfield_interop_data`, `_evaluate_local_expansions_for_particles`, `_prepare_solidfmm_downward_sweep` from `_fmm_impl` without it using them. ARCHITECTURE §3 calls `kernels/__init__.py` "curated re-exports"; pyflakes flags all of them only because neither module declares `__all__` | My original count came from a truncated pyflakes view — a reminder that `grep \| head` is not a measurement. Bulk-removing these would break consumers. 13 that are consumed nowhere were removed in `934c252` after checking every `from ... import` in `jaccpot/`, `tests/`, `bench/`, `examples/`; the rest need an explicit `__all__` and a decision about what the seam guarantees | med | M | no → **Tier 2**, not Tier 0. **CORRECTED AGAIN (Tier 1.4)** — see the sharpened statement below the table |
 | F17 **✔`934c252`** | `autodiff.py:7`; `operators/complex_harmonics.py:15,17,22`; `runtime/fmm_derivatives.py:28`; `runtime/kernels/__init__.py:13` | dead-code | 6 further unused imports (`jax`, `math`, `Tuple`, `sh_offset`, `_contains_tracer`, two unused re-exports) | — | low | S | no |
 | F18 **✔`934c252`** | `runtime/fmm_strict_run.py:146`; `runtime/_adaptive_policy.py:741` | dead-code | `prepare_elapsed` and `shift` assigned, never read | A dropped timing value in the strict lane is worth checking — it may be a lost diagnostic rather than dead code | low | S | no |
 | F19 | ~~`operators/real_harmonics.py:1267-1271`~~ | naming | **MOOT — the containing function (`_rotation_to_z_angles`) was deleted in `ab58c3d`.** Was: `R00`/`R01`/`R10`/`R11` computed and unused, which I judged to be deliberate narration rather than a defect | Recorded because the judgement still applies elsewhere: writing a full 3×3 out is the narration STYLE_GUIDE §5 asks for, and XLA eliminates it | low | S | no |
 | F20 | package-wide | typing | 1534 bare `Array` annotations; **0** shaped `jaxtyping` annotations; 350 unannotated parameters | STYLE_GUIDE §4's stated benefit is entirely unrealised; the runtime typecheck verifies nothing about shape. See §E | low | L | no (annotations only) |
 | F21 **✔`ad7b00c`** | `runtime/fmm_*.py` (12 modules) | typing | 90 dangling forward refs (`FastMultipoleMethod`, `PreparedStateLike`, `LargeNGradPlan`, `NearfieldInteropData`), no `TYPE_CHECKING` block anywhere in `runtime/` | **The benefit I stated here was wrong.** I claimed the payoff was that `typing.get_type_hints` would stop raising; measured before and after, it is **identical** (50 resolvable / 63 not) — `TYPE_CHECKING` imports cannot help runtime introspection, which is inherent Python. The real payoff, measured: `pyflakes jaccpot/` undefined names **95 → 5**, which is what makes pyflakes usable as a bug-finder on this package — those 90 false positives are exactly what buried the two genuine `NameError`s of G.1 in 397 lines of noise. The static-checker benefit is real but unconsumed: neither mypy nor pyright is in `[dev]`. `kernels/core.py`'s two sites are deliberately left dangling to preserve the leaf invariant | low | M | no |
 | F22 | `pyproject.toml:141-143` | test-gap | pydoclint runs with the default `--skip-checking-short-docstrings=True`; flipping it reveals **2840** violations (584 DOC101, 600 DOC201, 161 DOC501/503) | The "structural docstring compliance is done" premise holds only for functions that already have sections | low | L | no |
-| F23 | 73 functions in the numerics dirs (worst: `runtime/kernels/core.py:2542` 48 params/1 doc line; `nearfield/near_field.py:4067` 31/1 — a *public* name; `runtime/_large_n_pipeline.py:321` 26/1) | docstring | ≥8 parameters, no `Parameters` section | These are precisely where STYLE_GUIDE §3's "shapes, units, static args, differentiability, accuracy regime" is load-bearing | low | L | no |
+| F23 **◐ part 1 `PR #88`** | 73 functions in the numerics dirs (worst: `runtime/kernels/core.py:2542` 48 params/1 doc line; `nearfield/near_field.py:4067` 31/1 — a *public* name; `runtime/_large_n_pipeline.py:321` 26/1) | docstring | ≥8 parameters, no `Parameters` section | These are precisely where STYLE_GUIDE §3's "shapes, units, static args, differentiability, accuracy regime" is load-bearing. **Re-measured over NUMERICS §1's six numerics dirs: 60 functions** (so ~58 was right). 18 closed by PR #88. The remaining 42 **cannot** go in one PR, for two structural reasons, both measured — see the note below the table | low | L | no |
 | F24 **✔`20ba5d8`** | `upward/real_tree_expansions.py:242-257` | docstring | `prepare_real_upward_sweep` documents only `max_leaf_size`; `static_num_levels` (`:250`, used at `:272`) is undocumented, while the complex twin's identical parameter has a full bit-identity rationale (`upward/solidfmm_complex_tree_expansions.py:480-497`) *and* a test | The real sweep's copy of a documented-and-tested optimisation is neither | low | S | yes (see D.9) |
 | F25 **✔`26cef45`** | `pallas/nearfield_fused_leaf.py:667` | test-gap | *"Passing the same array as both target and source reproduces `nearfield_leafpair_pallas` bit-for-bit"* — asserted nowhere; grep for "decoupled" in `tests/` returns nothing | This is the kernel `distributed/fmm.py:575` runs via `_radix_fast_lane_prepacked_pallas_decoupled`. The distributed near-field's equivalence to the single-device one rests on an unasserted claim | low | M | yes |
 | F26 **✔`568deca`** | `pallas/m2l_real_fused.py:51`, `pallas/m2l_complex_fused.py:57` | test-gap | No test sets `JACCPOT_FUSED_M2L_VJP=0`, so the documented *"correctness reference"* fallback branch never runs | A fallback that is never exercised is not a fallback | low | S | yes |
@@ -409,10 +449,76 @@ Risk = probability the change breaks something. Effort = S (<1h), M (a day), L (
 | F33 | `runtime/fmm_strict_run.py` | test-gap | **55%** coverage (502 stmts, 227 missed), including most of `strict_run_v2` (428 lines, `:389`) and `_refresh_large_n_same_topology` (515 lines, `:890`). `runtime/fmm_strict_cap_profile.py` 35%; `runtime/fmm_autotune.py` 15% | The strict/refresh lane is the per-step hot path for science runs and carries the velocity-Verlet update. Half of it is unexercised | low | L | yes |
 | F34 | `distributed/fmm.py` | test-gap | **19%** coverage (520 stmts, 423 missed). All 8 distributed suites skip below 2 devices (`device_count() < 2`) | Documented and expected, but it means the whole `distributed/` layer is unrefactorable in this pass — record it, do not touch it | low | — | yes |
 | F35 | `runtime/_interaction_cache.py:892` | structure | Production `distributed/fmm.py` (`local_walk="treecode"`) reaches `experimental/treecode_far_near.py`. Already documented in STYLE_GUIDE §8 as *"the weakest-covered production option in the tree"*; my measurement confirms `treecode_far_near.py` at 0% | Not a new finding, but it is the one documented layering violation that is a *correctness* risk rather than a style one. Listed so the work plan does not disturb it | — | — | yes → **section G** |
-| F36 | 13 modules incl. `jaccpot/__init__.py`, `runtime/_fmm_impl.py`, `runtime/_interaction_cache.py`, `runtime/_nearfield_cache.py`, and 9 `__init__.py` | structure | Missing `from __future__ import annotations` (STYLE_GUIDE §1 says "make it 80"). 41 modules missing `__all__` | Mechanical, and the `_fmm_impl.py`/`_interaction_cache.py` cases are real modules, not just package inits | low | S | no |
+| F36 **✔`23ccc9d`** | 13 modules incl. `jaccpot/__init__.py`, `runtime/_fmm_impl.py`, `runtime/_interaction_cache.py`, `runtime/_nearfield_cache.py`, and 9 `__init__.py` | structure | Missing `from __future__ import annotations` (STYLE_GUIDE §1 says "make it 80"). 41 modules missing `__all__` | Mechanical, and the `_fmm_impl.py`/`_interaction_cache.py` cases are real modules, not just package inits | low | S | no |
 | F37 | `runtime/fmm_overrides.py:253` (`num_particles <= 8192`), `:806` (`n >= 262_144`); `runtime/_large_n_types.py:269, 415, 448` (`65536` three times); `solver.py:75` + `runtime/_fmm_impl.py:1152` (`upward_leaf_batch_size=2048` twice) | magic-number | Thresholds inline rather than in `runtime/fmm_constants.py`, which has 40 named ones | Small, but the repeated `65536` and the duplicated `2048` are the ones that will drift apart | low | S | yes (policy thresholds) |
 | F38 | `jaccpot/_env.py` vs STYLE_GUIDE §8 | structure | The guide says only `runtime/` reads env vars; `_env.py`'s docstring says any layer may. 16 reads outside `runtime/` | Contributors will follow whichever they read first | — | S | no → **section G** |
 | F39 | ~~`operators/real_harmonics.py:1123`~~ **CLOSED `ab58c3d`** | api | **`sympy` was an undeclared dependency.** The only occurrence in the repository, absent from `dependencies` and from `[dev]`. Verified absent from the whole closure (jax, jaxlib, jaxtyping, yggdrax, beartype runtime) and therefore from CI, which installs only `yggdrax` + `jaccpot[dev]`. All 6 public `*_wigner` names raise `ImportError` when called — checked one by one | A module-public name that cannot execute in any environment the project's own install instructions produce. Found by trying to use it for Tier 0.3, which is why 0.3 had to be built differently. Also means the intended fix for F32 is not free: it costs a dependency, and CLAUDE.md forbids adding one without asking | low | S | no → **section G.8** |
+| F40 **NEW** (Tier 1) | CLAUDE.md Verification block vs. `operators/complex_ops.py` and every other `lax.fori_loop` body | test-gap | **A documented verification command that has never passed.** CLAUDE.md offers `JACCPOT_RUNTIME_TYPECHECK=1 pytest -q tests/unit` as a faster inner loop. Measured on `main` (`128a0e2`, clean worktree): **126 failed, 667 passed, 44 skipped**. Dominant mode is one annotation pattern — a `lax.fori_loop` body annotated `_i: int` receives a **tracer**, so beartype raises `BeartypeCallHintParamViolation: parameter _i="JitTracer(~int64[])" violates type hint <class 'int'>`. First failure: `tests/unit/core/test_solidfmm_complex_tree_expansions.py::test_prepare_solidfmm_upward_source_motion_matches_finite_difference`, through `complex_ops.regular_solid_harmonic_directional_derivative_order` | Same defect class as F04's untrue coverage-omit reason: a stated check that does not check. Worse here, because a contributor who runs it will read 126 failures as *their* breakage — that cost time in Tier 1 before `main` was used as the control. The fix is an annotation change across many kernels (the correct hint for a loop index is not `int`), i.e. **F20/E.3, Tier 2** — and it is the same blocker that stops the `pallas/` third of F23 | low | M | no (annotations only) → **Tier 2** |
+
+### B.1 Two findings sharpened by executing Tier 1
+
+**F16, a third time: a module's *attribute* surface is wider than its *import*
+surface.** F16 has already been corrected once (13 unused imports → 204, and not
+dead code). Tier 1.4 found the next layer. After moving the radix fast lane out of
+`near_field.py`, four imports there became unused; an AST sweep of every
+`from ...near_field import X` in `jaccpot/`, `tests/`, `bench/` and `examples/` said
+they were safe to drop. They were not:
+`tests/unit/test_nearfield_fastlane_grad_path.py` reaches
+`_leafpair_accel_analytic_vjp` as `nf.<attr>` after
+`from jaccpot.nearfield import near_field as nf`, which **no import-statement scan
+can see**.
+
+So the rule F16 states — do not remove a re-export — needs a companion rule about
+how to *check* it. The reliable test is not "who imports this name" but "does the
+module's module-level surface change", which is a set difference over the AST of the
+old and new file: functions, classes, module-level assignments **and every imported
+name**. Tier 1.4 and 1.5 both used that, and 1.4's ended up showing exactly the ten
+moved functions removed and nothing else. The four imports are restored with a
+comment naming both access patterns.
+
+Generalisation worth acting on: the same blind spot applies to
+`_large_n_pipeline._read_large_n_env_config` (Tier 1.8 kept it imported for this
+reason) and to anything reached through `runtime/kernels/core`. It is also why the
+`kernels/core.py` split kept `fused_m2l_pallas_enabled` bound on the aggregator —
+`tests/unit/test_grad_config.py` asserts `core.fused_m2l_pallas_enabled` even though
+the gate is now consulted in `_m2l`.
+
+**F23 is a three-PR programme, not one item.** The 42 functions PR #88 did not do
+are blocked in two different ways, and neither is about effort:
+
+1. **24 in `nearfield/near_field.py` — must be based on PR #84.** Tier 1.5 moves 15
+   of those 24 into `_kernels.py`, `_scatter.py`, `_schedules.py` and
+   `_large_n_blocks.py`. Writing their docstrings against `main` puts them in a file
+   that will no longer contain the function, i.e. a hand-resolved conflict on every
+   one, in the most numerics-sensitive module in the package.
+2. **18 in `jaccpot/pallas/` — blocked on the Tier 2 typing decision.** The Pallas
+   kernel bodies take unannotated references (`multipole_ref`, `bto_r`, …). Probed on
+   `_m2l_core_z_real_kernel`: adding a `Parameters` section raises **DOC106, DOC107,
+   DOC109 and DOC110** — `--arg-type-hints-in-signature` and
+   `--arg-type-hints-in-docstring` are both `True`, so documenting one *requires
+   annotating its signature*. That is F20/E.3, which this document routes to Tier 2,
+   and E.1 already measures `pallas/m2l_complex_fused.py` as the highest unannotated
+   count in the package (74). Deciding it inside a docstring PR would decide it by
+   accident. Note **F40 is the same knot from the other side**: it shows the correct
+   annotation for a `fori_loop` index is *not* `int`, so the two should be settled
+   together.
+
+### B.2 One stated verification that does not hold
+
+Tier 1.3's "Verified by" column said *"`git log --follow` still works"*. **It does
+not, and cannot, for a 1 → 5 split** — git's rename detection needs one dominant
+source, and each new module is ~20% of the original, so `git log --follow` and even
+`-M -C --find-copies-harder` on `operators/real_translations.py` show only the split
+commit. Nothing is lost; the history is reached by the path that still exists:
+
+```
+git log --follow -- jaccpot/operators/real_harmonics.py      # full pre-split history
+git log -L :m2m_real:jaccpot/operators/real_translations.py  # per-function, across the move
+```
+
+Recorded because the audit sets an expectation a reviewer would otherwise try to
+check and find broken. The same applies to `nearfield/` (1.4, 1.5) and
+`runtime/kernels/` (1.6).
 
 ---
 
@@ -744,7 +850,20 @@ convergence-in-`p` suite and the real-basis goldens (`uni_real_n256_p2/p4/p6`,
 error that survived those would have to be a similarity transform of the true basis that also
 preserves the assembled potential, which is a much narrower class than "a per-`m` sign error".
 
-**What to do (Tier 0, cheap):**
+**Closed in `8bd24a6`, and not the way this section proposed.** Item 2 below said to
+transcribe Table 3 for degrees 2-6 as committed data. I did not: a transcription of a
+paper I do not have is not checkable, and re-deriving the polynomials from the formula
+`p2m_real_direct` implements would be circular. The anchor instead comes from theory —
+the 1/(n+|m|)!-normalised solid harmonics satisfy `dU_n^m/dz = U_{n-1}^m` (exact,
+verified to order 6) and transverse recurrences whose coefficients are exact multiples of
+1/2, and those recurrences plus `U_0^0 = 1` determine every `U_n^m` **uniquely**. So it is
+an absolute anchor, and a stronger one than a table: scaling any single `U_n^m` by
+`1 + 1e-3` leaves the recurrences structural (held-out residual unchanged at ~8e-15) but
+makes the coefficients non-half-integer in 6 entries for `U_3^2`, 6 for `U_4^{-3}` and 2
+for `U_6^5`. The half-integrality check is what catches the per-`m` normalisation error
+this section is about.
+
+**What was proposed (retained for the record):**
 1. **Correct the docstring** (`:371-382`) to name the test that now exists and to state the
    residual gap as *"no absolute Table 3 anchor above degree 1"* rather than *"unverified"*.
    This is a real finding — the docstring is now the misleading artefact.
@@ -978,16 +1097,16 @@ Each of these is gated on the Tier 0 characterization named in its row.
 
 | # | Item | Touches | Closes | Gated on | Verified by |
 |---|---|---|---|---|---|
-| **1.1** | Extract `_alignment_angles(x, y, z)` from `_multipole_align_{to,from}_z_block` — verbatim expression move, **no new `@jit`** | `operators/real_harmonics.py:1526-1545, 1563-1580` | F30 | 0.3, 0.4 | Goldens byte-stable; `pytest tests/unit/operators/test_real_harmonics.py` green |
-| **1.2** | **Dedupe the near-field edge-list kernels.** `_compute_leaf_p2p_impl` becomes a ~25-line wrapper: `_prepare_leaf_data` then delegate to `_compute_leaf_p2p_from_prepared_leaf_data_impl`. Preserve `static_argnums=(12,)` and every `static_argname` exactly. Follows the existing precedent at `:1687` | `nearfield/near_field.py` (−460 lines) | F12, A.10 | 0.1, 0.2 | Forward **and** gradient goldens byte-stable; bucketed/baseline parity green; **compile time measured before/after and reported** (nested-jit caveat, A.10) |
-| **1.3** | Split `operators/real_harmonics.py` along the six mathematical seams (A.9). Pure file moves + import updates. **Now gated on G.10 landing**, since the fix touches the very functions the split moves — either order is fine, but they must not be combined | new `operators/real_*.py` modules | F: `real_harmonics.py` size | 0.3 ✔, **G.10**, 0.5 | Goldens byte-stable; `git log --follow` still works; import graph re-checked acyclic |
-| **1.4** | Split `nearfield/near_field.py` seam 5 (the radix fast lane + `custom_vjp`, `:3086-4313`) into `nearfield/_fast_lane.py` | `nearfield/` | F: `near_field.py` size, and isolates the `custom_vjp` | 0.1, 1.2 | Gradient golden byte-stable; `test_nearfield_fastlane_grad_path.py` green; `custom_vjp` residuals unchanged (`bench/audit_reverse_residuals.py`) |
-| **1.5** | Split `nearfield/near_field.py` seams 1-3 | `nearfield/` | ditto | 1.4 | Goldens byte-stable; `bench/audit_nearfield_padding.py` unchanged |
-| **1.6** | Split `runtime/kernels/core.py` along the four seams (A.9), M2L moving as one unit | `runtime/kernels/` | F: `core.py` size | 0.1, 0.2 | ARCHITECTURE §10's four-item checklist: bit-identical output on a fixed grid at `rtol=0`, goldens exact-green, no new suite failures, plus a per-stage benchmark |
-| **1.7** | Extract from `PrepareMixin._prepare_state_dual_and_downward` (883 lines) — named private methods along its internal phases, no expression changes | `runtime/fmm_prepare.py` | F10 | 0.1, 0.2 | Goldens byte-stable; `tests/unit/runtime/test_capacity_replanning.py` and `test_traversal_config_merge.py` green; compile time measured |
-| **1.8** | Extract `_read_large_n_env_config` (271 lines) into `runtime/_large_n_env.py`. **Nothing else in `_large_n_pipeline.py`** — see A.9's leave-it-whole argument | `runtime/` | F11 (partly) | — | `tests/unit/test_large_n_fast_path_policy.py` green. Note in the PR that the rest is deferred pending a GPU leg |
-| **1.9** | Move F37's inline thresholds into `runtime/fmm_constants.py` with `#:` comments | `runtime/` | F37 | 0.1 | Same values; policy tests green |
-| **1.10** | Docstring completion, batch 2: the remaining ~58 numerics functions with ≥8 params | docstrings only | F23 | — | pydoclint delta reported |
+| **1.1** ✔ **PR #79** | Extract `_alignment_angles(x, y, z)` from `_multipole_align_{to,from}_z_block` — verbatim expression move, **no new `@jit`** | `operators/real_harmonics.py` | F30 | 0.3, 0.4 | **Done.** The duplication had grown, not shrunk: G.10 turned 12 shared lines + a 9-line comment into 6 + 38. Verified bit-identical *including all three JVP components* (`np.array_equal`) over 7 directions × `ell` 0..6 — the tangent check is the load-bearing one, since these are the guards G.10 proved wrong at `rho == 0`. |
+| **1.2** ✔ **PR #80** | **Dedupe the near-field edge-list kernels.** `_compute_leaf_p2p_impl` becomes a wrapper: `_prepare_leaf_data` then delegate. Preserve `static_argnums=(12,)` and every `static_argname` | `nearfield/near_field.py` (−357 net) | F12, A.10 | 0.1, 0.2 | **Done.** 240 output arrays over the full flag grid (2 distributions × 2 (N, leaf) × 2 chunk sizes × baseline/bucketed × potential × pairs × precomputed-scatter) compare equal element-wise; 0 differ, none vacuously zero. A.10's compile-time caveat measured via AOT staging: trace +0.000–0.005 s, compile −0.012–+0.016 s, i.e. inside noise on a 0.09–0.13 s compile. |
+| **1.3** ✔ **PR #82** | Split `operators/real_harmonics.py` along its mathematical seams (A.9). Pure file moves + import updates | 5 new `operators/` modules + a 283-line aggregator | F: `real_harmonics.py` size | 0.3 ✔, G.10 ✔, 0.5 ✔ | **Done, and A.9 was out of date in two ways:** every line citation had shifted (2236 → 2292 lines), and seam 4 (the Wigner family) no longer exists — `ab58c3d` deleted it. Five seams, 1698 carried lines verified verbatim. `real_harmonics.py` stays as an aggregator: 52 references across 35 files, `__all__` byte-identical at 28 names. **`git log --follow` does NOT survive this** — see the correction below. |
+| **1.4** ✔ **PR #83** | Split `nearfield/near_field.py` seam 5 (the radix fast lane + `custom_vjp`) into `nearfield/_fast_lane.py` | `nearfield/` (3957 → 2969) | F: size; isolates the `custom_vjp` | 0.1, 1.2 | **Done.** 902 carried lines verbatim. `custom_vjp` residuals byte-identical on **both** lanes — and note the default `audit_reverse_residuals.py` invocation does *not* reach the fast lane (its top residual is `_compute_leaf_p2p_impl`, the bucketed kernel), so it was re-run with `JACCPOT_DIFFERENTIABLE_NEARFIELD_FAST_LANE=1`. Surfaced the F16 correction below. |
+| **1.5** ✔ **PR #84** | Split `nearfield/near_field.py` seams 1-3 | 4 new `nearfield/` modules (2969 → 1388) | ditto | 1.4 | **Done.** 1441 carried lines verbatim; seam 2 split into `_kernels.py` / `_scatter.py` as A.9 suggests. `bench/audit_nearfield_padding.py` output identical — but it calls `autocvd` unconditionally at import, so it cannot run in the CPU env; its own `audit()` was executed with the GPU picker stubbed instead, which is backend-independent because the measurement is topology-derived. |
+| **1.6** ✔ **PR #85** | Split `runtime/kernels/core.py` along the four seams (A.9), M2L moving as one unit | 5 new `kernels/` modules + a 101-line aggregator | F: `core.py` size | 0.1, 0.2 | **Done.** A.9 names four seams; a **fifth** module (`_shared.py`) was needed, and that is the finding: after assigning the four, exactly five names were left over and both `_evaluate` and `_l2l` need one, so leaving them in `core` would have made `core` import a module that imports `core`. §10 item 1 satisfied with 102 arrays at `rtol=0`. **§10 item 4 (the A100 Pallas-vs-pure-JAX run) is still owed** — no GPU was taken. |
+| **1.7** ✔ **PR #86** | Extract from `PrepareMixin._prepare_state_dual_and_downward` (883 lines) — named private methods along its internal phases, no expression changes | `runtime/fmm_prepare.py` (883 → 493) | F10 | 0.1, 0.2 | **Done, two phases of seven.** The cut points are not guesswork: the function is already instrumented with `_record_dual_stage("..._dual_<phase>_seconds", ...)` at each boundary, and the data flow across every one was measured. Extracted the two where the interface earns a signature (317 lines → a 17-field bundle; 131 lines → 2 outputs); the PR lists the other five with the ratio that argued against them. The driver unpacks the bundle back into the same local names so no later expression changed. |
+| **1.8** ✔ **PR #87** | Extract `_read_large_n_env_config` (271 lines) into `runtime/_large_n_env.py`. **Nothing else** | `runtime/` (2048 → 1768) | F11 (partly) | — | **Done.** The "re-open if GPU coverage has landed" check was run, not assumed: CI is still ubuntu-latest with no cuda leg and `_large_n_grad.py` / `_large_n_farfield.py` are still at **0%**, so A.9's leave-it-whole argument stands and F11 stays open. Datum for the cut line: the extracted reader measures **69%** from three CPU policy test files. |
+| **1.9** ✔ **PR #81** | Move F37's inline thresholds into `runtime/fmm_constants.py` with `#:` comments | `runtime/` | F37 | 0.1 | **Done.** Note that **three different policies cross over at 262144** (`_CLASS_MAJOR_CPU_PARTICLE_THRESHOLD` plus the two named here), so they stay three constants: collapsing them would assert an equivalence that is not established. One site beyond F37's list was named too — the `< 262_144` fifty lines from its twin, the same drift hazard F37 describes. |
+| **1.10** ◐ **PR #88 = part 1 of 3** | Docstring completion, batch 2: the remaining ~58 numerics functions with ≥8 params | docstrings only | F23 | — | **Partly done, and the item is a three-PR programme — see the F23 row.** Measured target set: **60** (confirming ~58). 18 done: `upward/` and `downward/` are clear of the finding, plus `distributed/fmm.py` and `nearfield/grad.py`. pydoclint with `--skip-checking-short-docstrings=False`: **2778 → 2710**. |
 
 ### Tier 2 — numerics-sensitive or API-affecting. One PR each, your sign-off each.
 
@@ -1006,7 +1125,22 @@ Each of these is gated on the Tier 0 characterization named in its row.
 
 ### G.1 Two latent `NameError`s in `runtime/kernels/core.py` — bugs, separate PRs
 
-**G.1a — `core.py:2457`.**
+**LINE NUMBERS RE-LOCATED (Tier 1.6).** Both citations below were already stale, and
+the `kernels/core.py` split moved them again. Current locations:
+
+| bug | as first written | on `main` today | after PR #85 |
+|---|---|---|---|
+| G.1a `_accumulate_from_multipoles` | `core.py:2457` | `core.py:2582` | `kernels/_l2l.py:607` |
+| G.1b `evaluate_local_complex_with_grad_analytic` | `core.py:3265` | `core.py:3397` | `kernels/_evaluate.py:1285` |
+
+Both survived the split untouched, deliberately. The check that establishes this is
+worth reusing for any future move of that module: `pyflakes` reports **7**
+non-import findings before and 7 after, in exact one-to-one correspondence (the two
+above, the two deliberately-dangling `FastMultipoleMethod` annotations that preserve
+the leaf contract, and three unused locals). A split that silently fixed or broke
+something would not have that property.
+
+**G.1a — `core.py:2582` (`_l2l.py:607` after #85).**
 
 ```python
 source_motion_locals_updated = _accumulate_from_multipoles(
@@ -1029,7 +1163,7 @@ with zero internal nodes has no M2L pairs, so "accumulate locals from multipoles
 meaningless there and the correct fix may be `source_motion_locals_updated = None` rather than
 a call. That is a physics judgement.
 
-**G.1b — `core.py:3265`.**
+**G.1b — `core.py:3397` (`_evaluate.py:1285` after #85).**
 
 ```python
 grad, pot = evaluate_local_complex_with_grad_analytic(coeff_row, offset_row, order=int(order))
@@ -1302,3 +1436,119 @@ every currently-correct gradient is preserved bit-for-bit, with a third regime f
 (`m2l_real_rot_scale.py`) first, then the complex path, then the reference operators, then the
 M2M/L2L cascades in `upward/`/`downward/`. Two tracking `xfail(strict=True)` tests must flip and
 both goldens must stay byte-unmoved.
+
+### G.11 `pair_grouped` M2L applied the wrong class's rotation — **FIXED**
+
+**Resolved.** The leading hypothesis below was right: the per-pair gather was
+misaligned. `pair_grouped` now matches `class_major` to reassociation, and the plateau
+that remains is the genuine class-cached trade shared by both modes.
+
+Measured after the fix, same configuration (relative L2 versus a direct O(N²) sum):
+
+| order | default | `pair_grouped` | `class_major` |
+|---|---|---|---|
+| 2 | 7.230e-04 | 8.927e-04 | 8.927e-04 |
+| 4 | 8.148e-05 | 2.049e-04 | 2.049e-04 |
+| 6 | 1.128e-05 | 1.887e-04 | 1.887e-04 |
+
+Clustered N=256 at order 4: 3.94e-02 → 3.478e-03, again equal to `class_major`.
+
+**The defect.** `GroupedInteractionBuffers` stores `class_sources` / `class_targets`
+sorted by displacement class, but stores `class_ids` under the *inverse* permutation, in
+the original pair order (`grouped_interactions.py:185`,
+`class_ids_original = class_ids_sorted[inv_order]`). The two are therefore not
+co-indexed. `pair_grouped` gathered `blocks_{to,from}_classes[grouped.class_ids]`,
+handing most pairs another class's rotation; `class_major` was immune because it reads
+the class id from its CSR segment table. Both the fullbatch and the chunked-scan branch
+of `pair_grouped` were affected — they shared the same `class_ids` argument.
+
+**The measurement that settled it** (the check proposed below, run on the golden's own
+uniform N=256 tree, 20 far pairs): the angle between `class_displacements[class_ids[i]]`
+and `centers[class_targets[i]] - centers[class_sources[i]]` was **mean 39.8°, median
+19.6°, max 150.1°, with 70% of pairs beyond 10°**. Deriving the class id from
+`class_offsets` instead gives **mean 0.94°, max 2.13°, none beyond 10°** — the residual
+being the AABB-centre jitter inside a lattice cell, which is the approximation the mode
+is supposed to make.
+
+**The fix** (`_pair_class_ids_from_offsets`, `runtime/kernels/core.py`): derive the
+per-pair class id from the CSR `class_offsets` — the same table `class_major` reads —
+and pass `class_offsets` to the two accumulators in place of `class_ids`, so the
+misusable array no longer reaches them. The derivation is a `searchsorted` inside the
+already-jitted kernels, so the cached class rotation the mode exists for is untouched
+and no per-pair rotation is built.
+
+**Test coverage was vacuous.** `test_solidfmm_grouped_class_major_matches_pair_grouped`
+already asserted these two modes agree — at 112 particles, `leaf_size=16`, `theta=0.6`,
+which yields **zero** far pairs. It compared two all-zero arrays. Raised to 512
+particles / `leaf_size=8` (774 far pairs) with an explicit non-vacuity assertion; it
+fails at relative L2 **1.017e+00** without the fix. `pair_grouped` is now goldened in
+`golden_modes/` on the same two cases and anchors as `class_major`, and
+`tests/unit/runtime/test_grouped_class_id_alignment.py` pins the alignment invariant
+directly.
+
+The original analysis follows.
+
+---
+
+Surfaced while widening the golden (0.2, `ef7ce15`). Relative L2 versus a direct O(N²)
+sum, `preset="accurate"`, solidfmm, leaf 8, theta 0.5:
+
+| order | default | `pair_grouped` | `class_major` |
+|---|---|---|---|
+| 2 | 7.230e-04 | 1.253e-02 | 8.927e-04 |
+| 4 | 8.148e-05 | **1.246e-02** | 2.049e-04 |
+| 6 | 1.128e-05 | **1.245e-02** | 1.887e-04 |
+
+Clustered N=256 gives 3.96e-02 / 3.94e-02 / 3.94e-02 for `pair_grouped`. The default
+converges as expected; `pair_grouped` is flat to three digits, and `class_major` is flat
+from order 4.
+
+**Order-independent error is the signature of a fixed geometric approximation rather than
+expansion truncation** — which is exactly what this repository's own golden file says
+about the known-broken `cartesian` basis (*"a divergent-series signature, not
+truncation"*).
+
+**Narrowed further, and it is a bug, not a trade.** Read at the source level, the two
+modes are *the same computation, differently batched*:
+
+- `_accumulate_solidfmm_m2l_grouped_fullbatch` (`kernels/core.py:1163`) —
+  `deltas = centers[tgt_sorted] - centers[src_sorted]`, blocks indexed **per pair** by
+  `class_ids_sorted`.
+- `_accumulate_solidfmm_m2l_class_major_chunked_scan` (`kernels/core.py:1255`) — the
+  same `deltas = centers[tgt_chunk] - centers[src_chunk]`, the same
+  `blocks_{to,from}_classes`, broadcast **per class segment**.
+
+Both take their rotation from `_rotation_blocks_for_grouped_classes` and their
+translation from the true per-pair displacement. `class_major` has no fallback path —
+it builds the segment tables itself when they are not precomputed — so both genuinely
+run the class-cached scheme. Two batchings of one computation should agree to
+reassociation, not differ by 60x.
+
+**Two hypotheses eliminated by measurement.** (1) An inconsistent hybrid — class
+rotation paired with per-pair distance — is *not* the cause: forcing `pair_grouped` to
+use the class representative displacement instead, making it fully consistent, moves the
+error only from 1.246e-02 to 1.170e-02. (2) `class_major` silently falling back to an
+ungrouped path — ruled out by reading the branch; it always reaches the class-major scan.
+
+**Leading hypothesis, untested** *(confirmed — see the resolution above)*:
+`grouped.class_ids` is not aligned with the ordering of
+`grouped.class_sources` / `class_targets`, so `pair_grouped`'s per-pair
+`blocks_to_classes[class_ids_sorted]` gather applies the wrong class's rotation to each
+pair, while `class_major`'s per-segment indexing is immune because it takes the class id
+from the segment table. That fits every observation: identical math, a 60x gap, and
+insensitivity to which displacement is used. **What would settle it:** for each pair,
+check that `class_displacements[class_ids[i]]` is parallel to
+`centers[class_targets[i]] - centers[class_sources[i]]`. If the angle is large for most
+pairs, the gather is misaligned and the fix is a permutation, not a scheme change.
+
+Not fixed at the time of writing, and not encoded into a golden anchor: giving
+`pair_grouped` a golden would have needed a ~4e-2 bound, which legitimises the plateau.
+`test_grouped_farfield_plateaus_in_order` records it as measured behaviour for both
+modes and fails if it ever changes in either direction.
+
+**What I would want to know:** whether `pair_grouped`'s ~60x gap over `class_major` is
+inherent to the coarser grouping or a defect in the representative-displacement choice.
+The two differ only in how classes are batched, so a 60x accuracy gap between them is
+the part that looks less like a trade and more like a bug. *(Answered: a defect. The
+residual plateau that both modes share afterwards — order-independent at ~1.9e-04
+uniform — is the real trade, and is now documented on `FarFieldConfig.mode`.)*

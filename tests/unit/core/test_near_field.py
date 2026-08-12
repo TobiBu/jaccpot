@@ -14,11 +14,13 @@ from yggdrax.geometry import compute_tree_geometry
 from yggdrax.interactions import build_leaf_neighbor_lists
 from yggdrax.tree import build_tree
 
+from jaccpot.nearfield._fast_lane import (
+    compute_leaf_p2p_accelerations_radix_fast_lane,
+)
 from jaccpot.nearfield.near_field import (
     collect_radix_fast_lane_counters,
     compute_leaf_p2p_accelerations,
     compute_leaf_p2p_accelerations_large_n_accel_only,
-    compute_leaf_p2p_accelerations_radix_fast_lane,
     prepare_leaf_neighbor_pairs,
 )
 from jaccpot.runtime._large_n_types import RadixFastNearfieldPayload

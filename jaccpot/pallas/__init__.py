@@ -1,5 +1,7 @@
 """Optional Pallas kernels for Jaccpot hot paths."""
 
+from __future__ import annotations
+
 from .m2l_core_z_real import m2l_core_z_real_pallas, pallas_m2l_real_supported
 from .nearfield_fused_leaf import (
     nearfield_fused_leaf,

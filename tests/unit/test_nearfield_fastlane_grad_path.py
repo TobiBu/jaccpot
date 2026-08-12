@@ -26,10 +26,10 @@ import numpy as np
 import pytest
 
 from jaccpot import FastMultipoleMethod
-from jaccpot.nearfield.near_field import (
-    compute_leaf_p2p_accelerations,
+from jaccpot.nearfield._fast_lane import (
     compute_leaf_p2p_accelerations_radix_fast_lane,
 )
+from jaccpot.nearfield.near_field import compute_leaf_p2p_accelerations
 from jaccpot.runtime._nearfield_fastlane import (
     NearfieldTopologyNotConcrete,
     build_leaf_major_nearfield_payload,

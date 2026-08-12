@@ -117,6 +117,134 @@ def test_p2m_real_direct_dehnen_table3():
     assert jnp.isclose(M[sh_index(1, 1)], 0.0, atol=1e-10)
 
 
+# ===========================================================================
+# Absolute anchor for the Dehnen normalisation: the derivative recurrences
+# ===========================================================================
+#
+# `test_p2m_real_direct_dehnen_table3` pins degree 1 against Dehnen (2014) Table 3,
+# and `test_complex_to_dehnen_real_matches_p2m_real_direct` cross-checks degrees 0-6
+# against the complex basis. The second is a *relative* check: a convention error
+# shared between `Q` and `p2m_real_direct` cancels in it. Nothing pinned degrees 2-6
+# absolutely, which the docstring on `p2m_real_direct` used to call the most serious
+# gap in the file.
+#
+# These two tests close it without a table. The regular solid harmonics normalised
+# by 1/(n+|m|)! satisfy derivative recurrences that map degree n onto degree n-1, and
+# those recurrences plus U_0^0 = 1 determine every U_n^m UNIQUELY -- so asserting them
+# is an absolute anchor, reached from theory rather than from a transcribed table this
+# repo cannot check.
+DERIVATIVE_RECURRENCE_ORDER = 6
+
+
+def _u_and_jacobian(delta, order):
+    """``U_n^m(delta)`` for all ``(n, m)`` and its Jacobian w.r.t. ``delta``."""
+
+    def evaluate(d):
+        return p2m_real_direct(d, jnp.asarray(1.0, dtype=jnp.float64), order=order)
+
+    point = jnp.asarray(delta, dtype=jnp.float64)
+    return np.asarray(evaluate(point)), np.asarray(jax.jacobian(evaluate)(point))
+
+
+def test_solid_harmonic_z_derivative_lowers_the_degree():
+    """``dU_n^m/dz == U_{n-1}^m`` exactly, for every ``(n, m)`` up to order 6.
+
+    The cleanest of the two recurrences and the one with no case analysis. It pins the
+    normalisation *across* degrees at fixed ``m``: given ``U_{|m|}^m``, it determines
+    every higher ``U_n^m``. Combined with ``U_0^0 = 1`` (asserted here too, since it is
+    the scale the whole chain hangs from) and the transverse recurrence in the next
+    test, the entire basis is fixed.
+
+    Exact equality is the right assertion, not a tolerance: both sides come from the
+    same evaluation and the identity is algebraic, so only float64 round-off is
+    admissible. Measured worst deviation is 0 to ~1e-16, and the bound is 1e-13.
+    """
+    if not jax.config.jax_enable_x64:
+        pytest.skip("exact-identity tolerance requires float64 (JAX_ENABLE_X64=1)")
+
+    order = DERIVATIVE_RECURRENCE_ORDER
+    rng = np.random.default_rng(20260806)
+    for _ in range(4):
+        delta = rng.normal(size=3)
+        values, jacobian = _u_and_jacobian(delta, order)
+
+        # The scale the recurrences propagate from.
+        assert abs(values[sh_index(0, 0)] - 1.0) < 1e-13
+
+        for n in range(1, order + 1):
+            for m in range(-n, n + 1):
+                if abs(m) > n - 1:
+                    # U_{n-1}^m does not exist; the derivative must vanish instead.
+                    assert abs(jacobian[sh_index(n, m), 2]) < 1e-13, (
+                        f"dU_{n}^{m}/dz should vanish (no U_{n - 1}^{m}), got "
+                        f"{jacobian[sh_index(n, m), 2]:.3e}"
+                    )
+                    continue
+                got = jacobian[sh_index(n, m), 2]
+                want = values[sh_index(n - 1, m)]
+                assert abs(got - want) < 1e-13 * max(
+                    abs(want), 1.0
+                ), f"dU_{n}^{m}/dz = {got:.9e} but U_{n - 1}^{m} = {want:.9e}"
+
+
+def test_solid_harmonic_transverse_derivative_coefficients_are_half_integers():
+    """``dU_n^m/dx`` and ``/dy`` are half-integer combinations of degree ``n-1``.
+
+    This is the half that pins normalisation *between* different ``m``, which the
+    z-recurrence cannot and which the complex->real cross-check can cancel. Two
+    properties are asserted, and it is the second that does the work:
+
+    1. **Structural.** Coefficients solved from one set of points reproduce the
+       derivative at a disjoint set to round-off (measured worst absolute residual
+       8.3e-15). So this is an identity, not a per-point fit.
+    2. **Half-integrality.** Every coefficient is an exact multiple of 1/2 -- measured,
+       they are all 0, +/-1/2 or +/-1. This is what catches a per-``m`` normalisation
+       error: scaling one ``U_n^m`` keeps the relation linear and point-independent, so
+       property 1 still holds, but the coefficients pick up the erroneous ratio and stop
+       being half-integers.
+
+    Mutation check, which is the reason to trust it. Scaling a single ``U_n^m`` by
+    ``1 + 1e-3`` -- exactly the error class this is meant to catch -- leaves the
+    held-out residual unchanged at ~8e-15 and produces non-half-integer coefficients in
+    6 entries for ``U_3^2``, 6 for ``U_4^{-3}`` and 2 for ``U_6^5``. Property 1 alone
+    would not have noticed any of them.
+    """
+    if not jax.config.jax_enable_x64:
+        pytest.skip("exact-identity tolerance requires float64 (JAX_ENABLE_X64=1)")
+
+    order = DERIVATIVE_RECURRENCE_ORDER
+    fit_rng = np.random.default_rng(11)
+    check_rng = np.random.default_rng(9901)
+    fit = [_u_and_jacobian(fit_rng.normal(size=3), order) for _ in range(14)]
+    check = [_u_and_jacobian(check_rng.normal(size=3), order) for _ in range(6)]
+
+    for n in range(1, order + 1):
+        lower = list(range(-(n - 1), n))
+        fit_basis = np.array([[v[sh_index(n - 1, m2)] for m2 in lower] for v, _ in fit])
+        check_basis = np.array(
+            [[v[sh_index(n - 1, m2)] for m2 in lower] for v, _ in check]
+        )
+        for m in range(-n, n + 1):
+            for axis, axis_name in ((0, "x"), (1, "y")):
+                target = np.array([j[sh_index(n, m), axis] for _, j in fit])
+                solved, *_ = np.linalg.lstsq(fit_basis, target, rcond=None)
+
+                held_out = np.array([j[sh_index(n, m), axis] for _, j in check])
+                residual = float(np.max(np.abs(check_basis @ solved - held_out)))
+                assert residual < 1e-12, (
+                    f"dU_{n}^{m}/d{axis_name} is not a fixed combination of degree "
+                    f"{n - 1}: held-out residual {residual:.3e}"
+                )
+
+                for m2, coefficient in zip(lower, solved):
+                    doubled = 2.0 * float(coefficient)
+                    assert abs(doubled - round(doubled)) < 1e-9, (
+                        f"dU_{n}^{m}/d{axis_name} has coefficient {coefficient:.9f} on "
+                        f"U_{n - 1}^{m2}, which is not a multiple of 1/2 -- the "
+                        "signature of a per-m normalisation error"
+                    )
+
+
 def test_p2m_real_direct_monopole():
     """Monopole (ell=0) should equal mass."""
     for order in [0, 1, 2, 4]:

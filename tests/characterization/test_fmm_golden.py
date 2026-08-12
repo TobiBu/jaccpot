@@ -34,8 +34,10 @@ pytest.importorskip("yggdrax")
 from yggdrax.interactions import DualTreeTraversalConfig  # noqa: E402
 
 from jaccpot import (  # noqa: E402
+    FarFieldConfig,
     FastMultipoleMethod,
     FMMAdvancedConfig,
+    NearFieldConfig,
     RuntimePolicyConfig,
 )
 
@@ -88,6 +90,81 @@ CASES = [
     ("uni_real_n256_p6", "uniform", 256, "real", 6),
     ("uni_solidfmm_n1024_p4", "uniform", 1024, "solidfmm", 4),
     ("uni_real_n1024_p4", "uniform", 1024, "real", 4),
+]
+
+
+# Second grid, for the axes the grid above does not cover: far-field execution mode,
+# near-field execution mode, and the potential output. Kept separate so the 13 committed
+# `.npz` above are untouched -- regenerating a golden is a deliberate act, not a side
+# effect of widening coverage.
+#
+# `(id, distribution, N, basis, order, farfield_mode, nearfield_mode, anchor)`.
+# `farfield_mode` needs `basis="solidfmm"`: enabling grouped interactions selects AABB
+# expansion centres, and the native real upward sweep accepts COM centres only, so a
+# real-basis grouped case raises rather than running.
+#
+# `pair_grouped` was deliberately ABSENT when this grid was written: its error was
+# order-independent at 1.253e-02 / 1.246e-02 / 1.245e-02 (orders 2 / 4 / 6 uniform) and
+# 3.96e-02 clustered, so a golden would have needed a ~4e-2 anchor -- which would have
+# encoded a defect as acceptable. G.11 in `docs/refactor_audit_2026-08.md` identified
+# that gap as exactly that: `pair_grouped` gathered its class rotation blocks with
+# `GroupedInteractionBuffers.class_ids`, which yggdrax stores in the original pair order
+# while `class_sources` / `class_targets` are sorted by class, so ~70% of pairs were
+# rotated by another class's stencil. With that fixed the mode lands on `class_major` --
+# 8.927e-04 / 2.049e-04 / 1.887e-04 uniform, 3.478e-03 clustered -- and it is now
+# goldened on the same two cases and the same anchors as `class_major`.
+MODE_CASES = [
+    (
+        "cm_uni_solidfmm_n256_p4",
+        "uniform",
+        256,
+        "solidfmm",
+        4,
+        "class_major",
+        None,
+        1.0e-3,
+    ),
+    (
+        "cm_clu_solidfmm_n256_p4",
+        "clustered",
+        256,
+        "solidfmm",
+        4,
+        "class_major",
+        None,
+        1.0e-2,
+    ),
+    (
+        "pg_uni_solidfmm_n256_p4",
+        "uniform",
+        256,
+        "solidfmm",
+        4,
+        "pair_grouped",
+        None,
+        1.0e-3,
+    ),
+    (
+        "pg_clu_solidfmm_n256_p4",
+        "clustered",
+        256,
+        "solidfmm",
+        4,
+        "pair_grouped",
+        None,
+        1.0e-2,
+    ),
+    ("bkt_uni_real_n256_p4", "uniform", 256, "real", 4, None, "bucketed", 1.0e-2),
+    (
+        "bkt_uni_solidfmm_n256_p4",
+        "uniform",
+        256,
+        "solidfmm",
+        4,
+        None,
+        "bucketed",
+        1.0e-2,
+    ),
 ]
 
 
@@ -206,4 +283,179 @@ def test_fmm_golden(
         rtol=INERT_RTOL,
         atol=INERT_ATOL,
         err_msg=f"{case_id}: output drifted from committed golden",
+    )
+
+
+MODE_GOLDEN_DIR = Path(__file__).parent / "golden_modes"
+
+
+def _build_fmm_with_modes(basis, farfield_mode, nearfield_mode):
+    """The same solver as :func:`_build_fmm`, with execution-mode overrides applied."""
+    farfield = (
+        FarFieldConfig(mode=farfield_mode, grouped_interactions=True)
+        if farfield_mode is not None
+        else FarFieldConfig()
+    )
+    nearfield = (
+        NearFieldConfig(mode=nearfield_mode)
+        if nearfield_mode is not None
+        else NearFieldConfig()
+    )
+    return FastMultipoleMethod(
+        preset="accurate",
+        basis=basis,
+        theta=0.5,
+        G=G_CONST,
+        softening=SOFTENING,
+        advanced=FMMAdvancedConfig(
+            runtime=RuntimePolicyConfig(
+                traversal_config=DualTreeTraversalConfig(
+                    max_pair_queue=1 << 18,
+                    process_block=512,
+                    max_interactions_per_node=1 << 16,
+                    max_neighbors_per_leaf=1 << 16,
+                )
+            ),
+            farfield=farfield,
+            nearfield=nearfield,
+        ),
+    )
+
+
+@pytest.mark.skipif(
+    not jax.config.jax_enable_x64,
+    reason="golden characterization requires float64 (JAX_ENABLE_X64=1)",
+)
+@pytest.mark.parametrize(
+    (
+        "case_id",
+        "distribution",
+        "n",
+        "basis",
+        "order",
+        "farfield_mode",
+        "nearfield_mode",
+        "anchor",
+    ),
+    MODE_CASES,
+    ids=[c[0] for c in MODE_CASES],
+)
+def test_fmm_golden_execution_modes(
+    case_id, distribution, n, basis, order, farfield_mode, nearfield_mode, anchor
+):
+    """Golden coverage for the execution-mode axes, and for the potential output.
+
+    ARCHITECTURE section 9 used to describe the forward oracle as covering "farfield
+    modes, outputs"; it covered neither -- the grid above is
+    (distribution, N, basis, order), accelerations only, one preset. These are the
+    missing axes, and they matter for the refactor: splitting the M2L seam in
+    `runtime/kernels/core.py` touches the grouped and class-major accumulators
+    directly, and until now no golden constrained them.
+
+    Both outputs are snapshotted, so this is also the first golden on the potential.
+
+    The anchors are per case rather than global because the modes do not have the same
+    accuracy: `class_major` is ~2.5x looser than the default at order 4 (2.05e-04 vs
+    8.15e-05 uniform), while `bucketed` agrees with the default near field to
+    round-off (3.4e-13), being the same edge set in a different order.
+    """
+    positions, masses = _make_inputs(distribution, n)
+    fmm = _build_fmm_with_modes(basis, farfield_mode, nearfield_mode)
+    accel, potential = fmm.compute_accelerations(
+        jnp.asarray(positions),
+        jnp.asarray(masses),
+        leaf_size=8,
+        max_order=order,
+        return_potential=True,
+    )
+    accel = np.asarray(accel, dtype=np.float64)
+    potential = np.asarray(potential, dtype=np.float64)
+
+    assert np.all(np.isfinite(accel))
+    assert np.all(np.isfinite(potential))
+
+    reference = _direct_sum_accelerations(positions, masses)
+    rel_l2 = np.linalg.norm(accel - reference) / (np.linalg.norm(reference) + 1e-12)
+    assert (
+        rel_l2 < anchor
+    ), f"{case_id}: FMM vs direct-sum rel-L2 {rel_l2:.3e} exceeds anchor {anchor}"
+
+    path = MODE_GOLDEN_DIR / f"{case_id}.npz"
+    if REGEN or not path.exists():
+        MODE_GOLDEN_DIR.mkdir(parents=True, exist_ok=True)
+        np.savez_compressed(path, accel=accel, potential=potential)
+        if not REGEN:
+            pytest.skip(f"generated missing golden {path.name} (commit it)")
+        return
+
+    golden = np.load(path)
+    for label, got in (("accel", accel), ("potential", potential)):
+        np.testing.assert_allclose(
+            got,
+            golden[label],
+            rtol=INERT_RTOL,
+            atol=INERT_ATOL,
+            err_msg=f"{case_id}: {label} drifted from the committed golden",
+        )
+
+
+@pytest.mark.skipif(
+    not jax.config.jax_enable_x64,
+    reason="requires float64 (JAX_ENABLE_X64=1)",
+)
+@pytest.mark.parametrize("mode", ["pair_grouped", "class_major"])
+def test_grouped_farfield_plateaus_in_order(mode):
+    """Both grouped far-field modes stop converging in ``p``, at the same level.
+
+    Recorded as a test rather than a comment because it is the kind of fact that
+    silently changes. Measured relative L2 versus a direct sum, uniform N=256:
+
+        order       default    pair_grouped   class_major
+        2         7.230e-04       8.927e-04     8.927e-04
+        4         8.148e-05       2.049e-04     2.049e-04
+        6         1.128e-05       1.887e-04     1.887e-04
+
+    The default converges as expected; both grouped modes are flat from order 4.
+    Order-independent error is the signature of a fixed geometric approximation rather
+    than expansion truncation, which is exactly what a class-cached scheme does: it
+    rotates by one representative lattice displacement per class instead of by each
+    pair's own direction. That residual is inherent to the grouping, and it is the
+    reason ``FarFieldConfig.mode`` documents these as an accuracy trade.
+
+    The two modes used to differ by ~60x here (``pair_grouped`` flat at 1.25e-02).
+    That was G.11 in ``docs/refactor_audit_2026-08.md`` -- a defect, not the trade:
+    ``pair_grouped`` gathered its rotation blocks with ``class_ids``, which yggdrax
+    stores in the original rather than the class-sorted pair order. Fixed; the two
+    modes now agree, so they share a ceiling here.
+
+    This test asserts only the plateau, not that it is acceptable: the error at order 6
+    must not be materially better than at order 4 (which would mean the plateau went
+    away and this test is obsolete), and must not be worse than the measured value
+    (which would be a regression).
+    """
+    positions, masses = _make_inputs("uniform", 256)
+    reference = _direct_sum_accelerations(positions, masses)
+
+    errors = {}
+    for order in (4, 6):
+        fmm = _build_fmm_with_modes("solidfmm", mode, None)
+        accel = np.asarray(
+            fmm.compute_accelerations(
+                jnp.asarray(positions),
+                jnp.asarray(masses),
+                leaf_size=8,
+                max_order=order,
+            ),
+            dtype=np.float64,
+        )
+        errors[order] = float(
+            np.linalg.norm(accel - reference) / np.linalg.norm(reference)
+        )
+
+    ceiling = 3.0e-4
+    assert errors[6] < ceiling, f"{mode} order-6 error {errors[6]:.3e} regressed"
+    # The plateau itself: order 6 buys less than a factor of 2 over order 4.
+    assert errors[6] > 0.5 * errors[4], (
+        f"{mode} now converges in order (4: {errors[4]:.3e}, 6: {errors[6]:.3e}) -- "
+        "the plateau this test records has gone away, so retire it and update G.11"
     )

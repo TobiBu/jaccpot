@@ -227,3 +227,8 @@ class OdisseoFMMCoupler:
             target_indices=active_indices,
             return_potential=return_potential,
         )
+
+
+__all__ = [
+    "OdisseoFMMCoupler",
+]

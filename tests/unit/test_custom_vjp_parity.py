@@ -442,6 +442,7 @@ def test_radix_fast_lane_prepacked_accel_cvjp_matches_tiled_twin(interpret):
     GPU in fp32 it agrees to ~4e-6..8e-6 (summation reordering); in fp64 interpret
     mode it is at round-off.
     """
+    from jaccpot.nearfield import _fast_lane as fast_lane
     from jaccpot.nearfield import near_field as nf
 
     if not jax.config.jax_enable_x64:
@@ -471,7 +472,7 @@ def test_radix_fast_lane_prepacked_accel_cvjp_matches_tiled_twin(interpret):
     G = jnp.asarray(1.0, dtype=dtype)
 
     def f_custom(leaf_pos, leaf_mass):
-        return nf._radix_fast_lane_prepacked_accel_cvjp(
+        return fast_lane._radix_fast_lane_prepacked_accel_cvjp(
             leaf_pos,
             leaf_mass,
             positions,

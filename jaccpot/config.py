@@ -118,6 +118,22 @@ class FarFieldConfig:
         ``"auto"``, ``"pair_grouped"`` or ``"class_major"``. Must not be left at
         ``"auto"`` by the time the grouped M2L runs -- an unresolved ``"auto"``
         used to reach the kernel and raise.
+
+        ``"pair_grouped"`` and ``"class_major"`` are two batchings of one
+        computation and agree to reassociation; the choice between them is a
+        throughput one, not an accuracy one. Both are less accurate than the
+        ungrouped default, because grouping rotates by one representative lattice
+        displacement per class rather than by each pair's own direction. That
+        residual does not shrink with expansion order. Measured relative L2 versus
+        a direct sum (``preset="accurate"``, solidfmm, leaf 8, theta 0.5, uniform
+        N=256), orders 2 / 4 / 6:
+
+        ==============  =========  =========  =========
+        mode            p=2        p=4        p=6
+        ==============  =========  =========  =========
+        default         7.230e-04  8.148e-05  1.128e-05
+        grouped         8.927e-04  2.049e-04  1.887e-04
+        ==============  =========  =========  =========
     rotation : Optional[str]
         M2L rotation implementation, e.g. ``"solidfmm"`` or ``"cached"``.
     m2l_chunk_size : Optional[int]
@@ -489,3 +505,21 @@ class FMMAdvancedConfig:
     runtime: RuntimePolicyConfig = RuntimePolicyConfig()
     mac_type: Optional[str] = None
     dehnen_radius_scale: float = 1.0
+
+
+__all__ = [
+    "Basis",
+    "FMMAdvancedConfig",
+    "FMMExecutionBackend",
+    "FMMPreset",
+    "FarFieldConfig",
+    "FarFieldMode",
+    "GradConfig",
+    "GradNearFieldLane",
+    "MemoryObjective",
+    "NearFieldConfig",
+    "NearFieldMode",
+    "RuntimePolicyConfig",
+    "TraversalOverrides",
+    "TreeConfig",
+]
