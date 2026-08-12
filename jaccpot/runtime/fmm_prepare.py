@@ -8,7 +8,7 @@ from __future__ import annotations
 import hashlib
 import os
 import time
-from typing import TYPE_CHECKING, Any, Optional
+from typing import TYPE_CHECKING, Any, NamedTuple, Optional
 
 import jax
 import jax.numpy as jnp
@@ -121,6 +121,40 @@ if TYPE_CHECKING:  # pragma: no cover - annotations only, no runtime import
     # dangling: `typing.get_type_hints` raised NameError on every mixin method, so the
     # annotations documented an intent no tool could check.
     from ._fmm_impl import FastMultipoleMethod, PreparedStateLike
+
+
+class _DualDownwardPlan(NamedTuple):
+    """Everything the dual/downward phase resolves before it builds anything.
+
+    Seventeen host-side decisions -- which traversal build to use, whether the
+    stateful interaction cache may be reused, which far-field payload shape the
+    M2L feed needs, and whether the strict streamed fast lane is eligible --
+    resolved together because they constrain each other. ARCHITECTURE §4 and the
+    two bugs behind ``b462e45`` / ``dee46d6`` are both about *resolution order*
+    here, which is the reason this is one bundle produced by one function rather
+    than flags set at their point of use.
+
+    ``runtime_traversal_config`` is carried through rather than merely read: the
+    resolution can clamp it, and the clamped value is what the build must see.
+    """
+
+    adaptive_order_active: object
+    allow_split_build: object
+    grouped_interactions_active: object
+    jit_traversal_for_prepare: object
+    mixed_order_farfield_active: object
+    need_compact_far_pairs: object
+    need_node_interactions: object
+    need_traversal_result: object
+    retain_interactions_active: object
+    runtime_traversal_config: object
+    stateful_cache_enabled: object
+    strict_mode_active: object
+    strict_streamed_fast_path: object
+    tree_mode_static_radix: object
+    use_compact_streamed_pairs: object
+    use_dense_interactions_for_prepare: object
+    use_paper_fixed_policy: object
 
 
 class PrepareMixin:
@@ -801,6 +835,479 @@ class PrepareMixin:
         pair_policy = None
         policy_state = None
         cache_key = None
+        # The 17 interdependent build decisions, resolved together -- see
+        # `_DualDownwardPlan`. Unpacked back into locals so every expression
+        # below reads exactly as it did before the extraction.
+        (
+            adaptive_order_active,
+            allow_split_build,
+            grouped_interactions_active,
+            jit_traversal_for_prepare,
+            mixed_order_farfield_active,
+            need_compact_far_pairs,
+            need_node_interactions,
+            need_traversal_result,
+            retain_interactions_active,
+            runtime_traversal_config,
+            stateful_cache_enabled,
+            strict_mode_active,
+            strict_streamed_fast_path,
+            tree_mode_static_radix,
+            use_compact_streamed_pairs,
+            use_dense_interactions_for_prepare,
+            use_paper_fixed_policy,
+        ) = self._resolve_dual_downward_plan(
+            tree_artifacts=tree_artifacts,
+            theta_val=theta_val,
+            mac_type_val=mac_type_val,
+            runtime_traversal_config=runtime_traversal_config,
+            grouped_interactions=grouped_interactions,
+            farfield_mode=farfield_mode,
+            allow_stateful_cache=allow_stateful_cache,
+            suppress_host_side_effects=suppress_host_side_effects,
+        )
+        if strict_streamed_fast_path:
+            if not suppress_host_side_effects:
+                self._refresh_dual_planner_cache_hits += 1
+                self._refresh_dual_planner_execute_count += 1
+                self._refresh_dual_planner_steady_timing_bypass_count += 1
+            return self._prepare_state_dual_and_downward_strict_streamed_fast(
+                tree_artifacts=tree_artifacts,
+                theta_val=theta_val,
+                mac_type_val=mac_type_val,
+                dehnen_radius_scale=dehnen_radius_scale,
+                runtime_traversal_config=runtime_traversal_config,
+                runtime_m2l_chunk_size=runtime_m2l_chunk_size,
+                runtime_l2l_chunk_size=runtime_l2l_chunk_size,
+                record_retry=record_retry,
+                farfield_mode=farfield_mode,
+                retain_interactions=bool(retain_interactions_active),
+                suppress_host_side_effects=suppress_host_side_effects,
+            )
+
+        if self.adaptive_order or use_paper_fixed_policy:
+            policy_orders = self.p_gears
+            if use_paper_fixed_policy:
+                policy_orders = (int(tree_artifacts.upward.multipoles.order),)
+            if len(policy_orders) == 0:
+                raise ValueError("adaptive traversal policy requires non-empty orders")
+            policy_state = self._build_adaptive_policy_state(
+                upward=tree_artifacts.upward,
+                tree=tree_artifacts.tree,
+                positions_sorted=tree_artifacts.positions_sorted,
+                p_gears=policy_orders,
+                force_scale_nodes=force_scale_nodes,
+                eps=jnp.asarray(
+                    (
+                        self.adaptive_eps
+                        if self.adaptive_eps is not None
+                        else adaptive_policy_tolerance(
+                            theta=theta_val,
+                            p_gears=policy_orders,
+                            dtype=tree_artifacts.upward.multipoles.packed.real.dtype,
+                        )
+                    ),
+                    dtype=tree_artifacts.upward.multipoles.packed.real.dtype,
+                ),
+                theta=jnp.asarray(
+                    theta_val,
+                    dtype=tree_artifacts.upward.multipoles.packed.real.dtype,
+                ),
+                error_model_code=jnp.asarray(
+                    self._traversal_policy_error_model_code(),
+                    dtype=jnp.int32,
+                ),
+                dehnen_geometry_mode=self.dehnen_geometry_mode,
+            )
+            pair_policy = adaptive_pair_policy
+        else:
+            cache_key = _interaction_cache_key(
+                tree_artifacts.tree,
+                topology_key=tree_artifacts.topology_key,
+                tree_mode=tree_artifacts.tree_mode,
+                leaf_parameter=tree_artifacts.leaf_parameter,
+                theta=theta_val,
+                mac_type=mac_type_val,
+                dehnen_radius_scale=dehnen_radius_scale,
+                expansion_basis=self.expansion_basis,
+                center_mode=upward_center_mode,
+                max_pair_queue=self.max_pair_queue,
+                pair_process_block=self.pair_process_block,
+                traversal_config=runtime_traversal_config,
+                refine_local=refine_local_val,
+                max_refine_levels=max_refine_levels_val,
+                aspect_threshold=aspect_threshold_val,
+            )
+        has_pair_policy = pair_policy is not None
+        has_policy_state = policy_state is not None
+        planner_hint, planner_cache_hit = self._resolve_dual_downward_planner_hint(
+            tree_artifacts=tree_artifacts,
+            theta_val=theta_val,
+            mac_type_val=mac_type_val,
+            runtime_traversal_config=runtime_traversal_config,
+            plan=_DualDownwardPlan(
+                adaptive_order_active=adaptive_order_active,
+                allow_split_build=allow_split_build,
+                grouped_interactions_active=grouped_interactions_active,
+                jit_traversal_for_prepare=jit_traversal_for_prepare,
+                mixed_order_farfield_active=mixed_order_farfield_active,
+                need_compact_far_pairs=need_compact_far_pairs,
+                need_node_interactions=need_node_interactions,
+                need_traversal_result=need_traversal_result,
+                retain_interactions_active=retain_interactions_active,
+                runtime_traversal_config=runtime_traversal_config,
+                stateful_cache_enabled=stateful_cache_enabled,
+                strict_mode_active=strict_mode_active,
+                strict_streamed_fast_path=strict_streamed_fast_path,
+                tree_mode_static_radix=tree_mode_static_radix,
+                use_compact_streamed_pairs=use_compact_streamed_pairs,
+                use_dense_interactions_for_prepare=use_dense_interactions_for_prepare,
+                use_paper_fixed_policy=use_paper_fixed_policy,
+            ),
+            has_pair_policy=has_pair_policy,
+            has_policy_state=has_policy_state,
+            suppress_host_side_effects=suppress_host_side_effects,
+        )
+        planner_allow_steady_timing_bypass = bool(
+            self._planner_steady_timing_bypass_enabled
+        )
+        dual_artifact_timing_callback = _record_dual_artifact_substage
+        if (
+            planner_hint is not None
+            and planner_cache_hit
+            and bool(getattr(planner_hint, "suppress_substage_timing", False))
+            and planner_allow_steady_timing_bypass
+        ):
+            dual_artifact_timing_callback = None
+            if not suppress_host_side_effects:
+                self._refresh_dual_planner_steady_timing_bypass_count += 1
+        _record_dual_stage("_refresh_timing_dual_setup_seconds", stage_t0)
+
+        stage_t0 = time.perf_counter()
+        geometry_factory = (
+            None
+            if tree_artifacts.upward.geometry is not None
+            else lambda: compute_tree_geometry_compiled(
+                tree_artifacts.tree,
+                tree_artifacts.positions_sorted,
+                max_leaf_size=int(tree_artifacts.leaf_cap),
+            )
+        )
+        dual_artifacts, cache_entry = _build_dual_tree_artifacts(
+            tree_artifacts.tree,
+            tree_artifacts.upward.geometry,
+            geometry_factory=geometry_factory,
+            theta=theta_val,
+            mac_type=mac_type_val,
+            dehnen_radius_scale=dehnen_radius_scale,
+            cache_key=cache_key,
+            cache_entry=(self._interaction_cache if stateful_cache_enabled else None),
+            max_pair_queue=self.max_pair_queue,
+            pair_process_block=self.pair_process_block,
+            traversal_config=runtime_traversal_config,
+            retry_logger=(
+                None
+                if strict_mode_active
+                else (
+                    record_retry
+                    if bool(getattr(self, "_strict_cap_record_enabled", True))
+                    else (None if jit_traversal_for_prepare else record_retry)
+                )
+            ),
+            fail_fast=(self.fail_fast or strict_mode_active),
+            use_dense_interactions=use_dense_interactions_for_prepare,
+            grouped_interactions=grouped_interactions,
+            grouped_chunk_size=runtime_m2l_chunk_size,
+            need_traversal_result=need_traversal_result,
+            need_compact_far_pairs=need_compact_far_pairs,
+            need_node_interactions=need_node_interactions,
+            precompute_grouped_class_segments=self._should_precompute_grouped_class_segments(
+                grouped_chunk_size=runtime_m2l_chunk_size,
+                farfield_mode=farfield_mode,
+            ),
+            grouped_schedule_budget_bytes=self._grouped_schedule_item_budget(),
+            allow_split_build=allow_split_build,
+            pair_policy=pair_policy,
+            policy_state=policy_state,
+            jit_traversal=jit_traversal_for_prepare,
+            timing_callback=dual_artifact_timing_callback,
+            planner_hint=planner_hint,
+        )
+        if stateful_cache_enabled:
+            if bool(getattr(dual_artifacts, "cache_hit", False)):
+                if not suppress_host_side_effects:
+                    self._interaction_cache_hits += 1
+            else:
+                if not suppress_host_side_effects:
+                    self._interaction_cache_misses += 1
+        _record_dual_stage("_refresh_timing_dual_artifact_build_seconds", stage_t0)
+        if stateful_cache_enabled:
+            self._interaction_cache = cache_entry
+
+        stage_t0 = _stage_now()
+        (
+            interactions,
+            neighbor_list,
+            traversal_result,
+            compact_far_pairs,
+            dense_buffers,
+            grouped_buffers,
+            grouped_segment_starts,
+            grouped_segment_lengths,
+            grouped_segment_class_ids,
+            grouped_segment_sort_permutation,
+            grouped_segment_group_ids,
+            grouped_segment_unique_targets,
+        ) = self._unpack_dual_tree_artifacts(dual_artifacts)
+        if not suppress_host_side_effects:
+            far_pair_count_diag = None
+            if compact_far_pairs is not None:
+                far_pair_count_diag = int(compact_far_pairs.sources.shape[0])
+            elif interactions is not None:
+                far_pair_count_diag = int(interactions.sources.shape[0])
+            total_nodes_diag = int(tree_artifacts.tree.parent.shape[0])
+            internal_nodes_diag = int(
+                jnp.asarray(tree_artifacts.tree.left_child).shape[0]
+            )
+            leaf_count_diag = max(0, total_nodes_diag - internal_nodes_diag)
+            self._recent_dual_node_count = int(total_nodes_diag)
+            self._recent_dual_leaf_count = int(leaf_count_diag)
+            self._recent_dual_neighbor_count = int(neighbor_list.neighbors.shape[0])
+            self._recent_dual_far_pair_count = (
+                0 if far_pair_count_diag is None else int(far_pair_count_diag)
+            )
+            _prepare_diag(
+                "dual-tree done "
+                f"neighbor_count={int(neighbor_list.neighbors.shape[0])} "
+                f"far_pair_count={far_pair_count_diag} "
+                f"compact_far_pairs={compact_far_pairs is not None} "
+                f"interactions_present={interactions is not None}"
+            )
+            _prepare_diag(
+                "dual-tree bytes "
+                f"neighbors={_format_nbytes(_estimate_payload_nbytes(neighbor_list))} "
+                f"compact_far_pairs={_format_nbytes(_estimate_payload_nbytes(compact_far_pairs))} "
+                f"interactions={_format_nbytes(_estimate_payload_nbytes(interactions))} "
+                f"dense_buffers={_format_nbytes(_estimate_payload_nbytes(dense_buffers))} "
+                f"grouped_buffers={_format_nbytes(_estimate_payload_nbytes(grouped_buffers))}"
+            )
+
+        strict_streamed_direct_far_pairs = bool(
+            strict_mode_active
+            and bool(use_compact_streamed_pairs)
+            and compact_far_pairs is not None
+            and not bool(adaptive_order_active)
+            and not bool(mixed_order_farfield_active)
+        )
+        if strict_streamed_direct_far_pairs:
+            src_far = jnp.asarray(compact_far_pairs.sources, dtype=INDEX_DTYPE)
+            tgt_far = jnp.asarray(compact_far_pairs.targets, dtype=INDEX_DTYPE)
+            far_pairs_coo = _FarPairCOO(
+                sources=src_far,
+                targets=tgt_far,
+                active_count=getattr(compact_far_pairs, "far_pair_count", None),
+            )
+            far_pairs_by_gear = ((src_far, tgt_far),)
+            adaptive_order_for_downward = True
+            p_gears_for_downward = (int(tree_artifacts.upward.multipoles.order),)
+            if not suppress_host_side_effects:
+                self._recent_far_pairs_by_gear_counts = (int(src_far.shape[0]),)
+        else:
+            far_pair_plan = self._prepare_state_plan_far_pairs_for_downward(
+                interactions=interactions,
+                traversal_result=traversal_result,
+                compact_far_pairs=compact_far_pairs,
+                upward=tree_artifacts.upward,
+            )
+            far_pairs_by_gear = far_pair_plan.far_pairs_by_gear
+            far_pairs_coo = far_pair_plan.far_pairs_coo
+            adaptive_order_for_downward = far_pair_plan.adaptive_order_for_downward
+            p_gears_for_downward = far_pair_plan.p_gears_for_downward
+            if not suppress_host_side_effects:
+                self._recent_far_pairs_by_gear_counts = (
+                    far_pair_plan.recent_far_pairs_by_gear_counts
+                )
+        _record_dual_stage("_refresh_timing_dual_far_pair_plan_seconds", stage_t0)
+
+        stage_t0 = _stage_now()
+        if suppress_host_side_effects and bool(
+            getattr(self, "_static_runtime_fixed_sizing", True)
+        ):
+            runtime_m2l_chunk_size = runtime_m2l_chunk_size
+        else:
+            runtime_m2l_chunk_size = self._prepare_state_autotune_downward_chunk_size(
+                upward=tree_artifacts.upward,
+                far_pairs_by_gear=far_pairs_by_gear,
+                p_gears_for_downward=p_gears_for_downward,
+                runtime_m2l_chunk_size=runtime_m2l_chunk_size,
+            )
+        if not suppress_host_side_effects:
+            self._recent_dual_m2l_chunk_size = (
+                0 if runtime_m2l_chunk_size is None else int(runtime_m2l_chunk_size)
+            )
+        _record_dual_stage("_refresh_timing_dual_m2l_autotune_seconds", stage_t0)
+
+        stage_t0 = _stage_now()
+        interactions_for_downward = (
+            None
+            if strict_streamed_direct_far_pairs and not bool(retain_interactions_active)
+            else self._prepare_state_select_interactions_for_downward(
+                interactions=interactions,
+                far_pairs_coo=far_pairs_coo,
+            )
+        )
+        _record_dual_stage(
+            "_refresh_timing_dual_select_interactions_seconds",
+            stage_t0,
+        )
+
+        stage_t0 = _stage_now()
+        downward = self._prepare_downward_with_artifacts(
+            tree=tree_artifacts.tree,
+            upward=tree_artifacts.upward,
+            theta_val=theta_val,
+            locals_template=tree_artifacts.locals_template,
+            interactions=interactions_for_downward,
+            runtime_m2l_chunk_size=runtime_m2l_chunk_size,
+            runtime_l2l_chunk_size=runtime_l2l_chunk_size,
+            runtime_traversal_config=runtime_traversal_config,
+            record_retry=record_retry,
+            dense_buffers=dense_buffers,
+            grouped_interactions=grouped_interactions,
+            grouped_buffers=grouped_buffers,
+            grouped_segment_starts=grouped_segment_starts,
+            grouped_segment_lengths=grouped_segment_lengths,
+            grouped_segment_class_ids=grouped_segment_class_ids,
+            grouped_segment_sort_permutation=grouped_segment_sort_permutation,
+            grouped_segment_group_ids=grouped_segment_group_ids,
+            grouped_segment_unique_targets=grouped_segment_unique_targets,
+            farfield_mode=farfield_mode,
+            far_pairs_coo=far_pairs_coo,
+            far_pairs_by_gear=far_pairs_by_gear,
+            adaptive_order=adaptive_order_for_downward,
+            p_gears=p_gears_for_downward,
+        )
+        _record_dual_stage("_refresh_timing_dual_downward_compute_seconds", stage_t0)
+
+        stage_t0 = _stage_now()
+        if not suppress_host_side_effects:
+            _prepare_diag(
+                "downward done "
+                f"locals_shape={tuple(int(v) for v in downward.locals.coefficients.shape)} "
+                f"interactions_shape={tuple(int(v) for v in downward.interactions.sources.shape)}"
+            )
+            _prepare_diag(
+                "downward bytes "
+                f"locals={_format_nbytes(_estimate_payload_nbytes(downward.locals))} "
+                f"stored_interactions={_format_nbytes(_estimate_payload_nbytes(downward.interactions))}"
+            )
+        if not bool(retain_interactions_active):
+            # Prepared state only needs the locals; keep a shape-compatible
+            # placeholder so downstream code does not accidentally pin the full
+            # far-field pair payload after prepare_state completes.
+            downward = downward._replace(
+                interactions=(
+                    _empty_interaction_storage_like(interactions)
+                    if interactions is not None
+                    else _empty_interaction_storage_for_tree(tree_artifacts.tree)
+                )
+            )
+        interactions_out: Optional[NodeInteractionList]
+        if bool(retain_interactions_active):
+            interactions_out = interactions
+        else:
+            interactions_out = None
+        _record_dual_stage("_refresh_timing_dual_finalize_seconds", stage_t0)
+        if refresh_timing_active:
+            residual = max(
+                0.0,
+                float(time.perf_counter() - dual_total_t0) - float(dual_stage_sum),
+            )
+            self._refresh_timing_dual_residual_seconds += residual
+        return _PrepareStateDualDownwardArtifacts(
+            interactions=interactions_out,
+            neighbor_list=neighbor_list,
+            traversal_result=(
+                traversal_result if bool(need_traversal_result) else None
+            ),
+            compact_far_pairs=(
+                compact_far_pairs
+                if (
+                    bool(adaptive_order_active)
+                    or bool(strict_streamed_direct_far_pairs)
+                    # Gradients need the FROZEN M2L pair list to re-run the
+                    # downward sweep against. The pairs are already built here
+                    # whenever ``use_compact_streamed_pairs`` holds (which the
+                    # canonical large-N production config satisfies), but were
+                    # then discarded, leaving the differentiable seam with nothing
+                    # to re-run and no way to produce a far-field source-side
+                    # gradient. Retaining them costs ~24 B/pair of steady state
+                    # memory, which is a deliberate deviation from
+                    # ``memory_objective="minimum_memory"`` -- hence opt-in.
+                    or bool(getattr(self, "retain_far_pairs_for_grad", False))
+                )
+                else None
+            ),
+            downward=downward,
+            cache_entry=cache_entry,
+        )
+
+    def _resolve_dual_downward_plan(
+        self,
+        *,
+        tree_artifacts: _PrepareStateTreeUpwardArtifacts,
+        theta_val: float,
+        mac_type_val: MACType,
+        runtime_traversal_config: Optional[DualTreeTraversalConfig],
+        grouped_interactions: bool,
+        farfield_mode: str,
+        allow_stateful_cache: bool,
+        suppress_host_side_effects: bool,
+    ) -> _DualDownwardPlan:
+        """Resolve the dual/downward build plan: 17 interdependent host decisions.
+
+        Extracted verbatim from :meth:`_prepare_state_dual_and_downward` (Tier
+        1.7). Pure host-side policy -- it traces nothing and allocates no device
+        buffer -- but it does two things with side effects that must stay here
+        rather than move to the call site: it raises loudly when the strict fused
+        device-only lane is asked for a configuration it cannot honour (rather
+        than silently degrading the MAC, STYLE_GUIDE §9), and it sets the
+        ``YGGDRAX_DUAL_TREE_SHARED_*`` environment once for the strict lane.
+
+        Parameters
+        ----------
+        tree_artifacts : _PrepareStateTreeUpwardArtifacts
+            Tree and upward-sweep artifacts this prepare call already built.
+        theta_val : float
+            Resolved opening angle.
+        mac_type_val : MACType
+            Resolved multipole acceptance criterion.
+        runtime_traversal_config : Optional[DualTreeTraversalConfig]
+            Caller-resolved traversal capacities; may be clamped here, which is
+            why the (possibly replaced) value is returned in the plan.
+        grouped_interactions : bool
+            Whether the grouped far-field layout was requested.
+        farfield_mode : str
+            Resolved far-field batching mode.
+        allow_stateful_cache : bool
+            Whether this call may reuse cached dual-tree artifacts.
+        suppress_host_side_effects : bool
+            Traced/refresh hot path: skip counters, diagnostics and env writes.
+
+        Returns
+        -------
+        _DualDownwardPlan
+            The 17 resolved decisions, in the order the bundle declares them.
+
+        Raises
+        ------
+        RuntimeError
+            If the strict fused device-only lane is combined with a
+            configuration it cannot honour -- the Dehnen paper MAC, which needs a
+            solver-owned pair policy this lane does not carry, or a blocked
+            streamed fast lane. Both refuse loudly rather than degrading the
+            acceptance criterion silently (STYLE_GUIDE §9).
+        """
         use_paper_fixed_policy = (not self.adaptive_order) and (
             self._uses_paper_style_traversal_policy()
         )
@@ -1119,80 +1626,80 @@ class PrepareMixin:
                     f"slower path (blockers={blockers}). This indicates a "
                     "misconfiguration of the large-N GPU production profile."
                 )
-        if strict_streamed_fast_path:
-            if not suppress_host_side_effects:
-                self._refresh_dual_planner_cache_hits += 1
-                self._refresh_dual_planner_execute_count += 1
-                self._refresh_dual_planner_steady_timing_bypass_count += 1
-            return self._prepare_state_dual_and_downward_strict_streamed_fast(
-                tree_artifacts=tree_artifacts,
-                theta_val=theta_val,
-                mac_type_val=mac_type_val,
-                dehnen_radius_scale=dehnen_radius_scale,
-                runtime_traversal_config=runtime_traversal_config,
-                runtime_m2l_chunk_size=runtime_m2l_chunk_size,
-                runtime_l2l_chunk_size=runtime_l2l_chunk_size,
-                record_retry=record_retry,
-                farfield_mode=farfield_mode,
-                retain_interactions=bool(retain_interactions_active),
-                suppress_host_side_effects=suppress_host_side_effects,
-            )
+        return _DualDownwardPlan(
+            adaptive_order_active=adaptive_order_active,
+            allow_split_build=allow_split_build,
+            grouped_interactions_active=grouped_interactions_active,
+            jit_traversal_for_prepare=jit_traversal_for_prepare,
+            mixed_order_farfield_active=mixed_order_farfield_active,
+            need_compact_far_pairs=need_compact_far_pairs,
+            need_node_interactions=need_node_interactions,
+            need_traversal_result=need_traversal_result,
+            retain_interactions_active=retain_interactions_active,
+            runtime_traversal_config=runtime_traversal_config,
+            stateful_cache_enabled=stateful_cache_enabled,
+            strict_mode_active=strict_mode_active,
+            strict_streamed_fast_path=strict_streamed_fast_path,
+            tree_mode_static_radix=tree_mode_static_radix,
+            use_compact_streamed_pairs=use_compact_streamed_pairs,
+            use_dense_interactions_for_prepare=use_dense_interactions_for_prepare,
+            use_paper_fixed_policy=use_paper_fixed_policy,
+        )
 
-        if self.adaptive_order or use_paper_fixed_policy:
-            policy_orders = self.p_gears
-            if use_paper_fixed_policy:
-                policy_orders = (int(tree_artifacts.upward.multipoles.order),)
-            if len(policy_orders) == 0:
-                raise ValueError("adaptive traversal policy requires non-empty orders")
-            policy_state = self._build_adaptive_policy_state(
-                upward=tree_artifacts.upward,
-                tree=tree_artifacts.tree,
-                positions_sorted=tree_artifacts.positions_sorted,
-                p_gears=policy_orders,
-                force_scale_nodes=force_scale_nodes,
-                eps=jnp.asarray(
-                    (
-                        self.adaptive_eps
-                        if self.adaptive_eps is not None
-                        else adaptive_policy_tolerance(
-                            theta=theta_val,
-                            p_gears=policy_orders,
-                            dtype=tree_artifacts.upward.multipoles.packed.real.dtype,
-                        )
-                    ),
-                    dtype=tree_artifacts.upward.multipoles.packed.real.dtype,
-                ),
-                theta=jnp.asarray(
-                    theta_val,
-                    dtype=tree_artifacts.upward.multipoles.packed.real.dtype,
-                ),
-                error_model_code=jnp.asarray(
-                    self._traversal_policy_error_model_code(),
-                    dtype=jnp.int32,
-                ),
-                dehnen_geometry_mode=self.dehnen_geometry_mode,
-            )
-            pair_policy = adaptive_pair_policy
-        else:
-            cache_key = _interaction_cache_key(
-                tree_artifacts.tree,
-                topology_key=tree_artifacts.topology_key,
-                tree_mode=tree_artifacts.tree_mode,
-                leaf_parameter=tree_artifacts.leaf_parameter,
-                theta=theta_val,
-                mac_type=mac_type_val,
-                dehnen_radius_scale=dehnen_radius_scale,
-                expansion_basis=self.expansion_basis,
-                center_mode=upward_center_mode,
-                max_pair_queue=self.max_pair_queue,
-                pair_process_block=self.pair_process_block,
-                traversal_config=runtime_traversal_config,
-                refine_local=refine_local_val,
-                max_refine_levels=max_refine_levels_val,
-                aspect_threshold=aspect_threshold_val,
-            )
-        has_pair_policy = pair_policy is not None
-        has_policy_state = policy_state is not None
+    def _resolve_dual_downward_planner_hint(
+        self,
+        *,
+        tree_artifacts: _PrepareStateTreeUpwardArtifacts,
+        theta_val: float,
+        mac_type_val: MACType,
+        runtime_traversal_config: Optional[DualTreeTraversalConfig],
+        plan: _DualDownwardPlan,
+        has_pair_policy: bool,
+        has_policy_state: bool,
+        suppress_host_side_effects: bool,
+    ) -> Tuple[Optional[_RefreshDualPlannerHint], bool]:
+        """Look up or compile the refresh planner hint for this topology.
+
+        Extracted verbatim from :meth:`_prepare_state_dual_and_downward` (Tier
+        1.7). The planner memoises the route the dual-tree build should take for
+        a given static-radix topology, so a steady refresh does not re-probe it;
+        a hit is what allows the substage timing to be bypassed downstream.
+
+        Parameters
+        ----------
+        tree_artifacts : _PrepareStateTreeUpwardArtifacts
+            Tree and upward-sweep artifacts this prepare call already built.
+        theta_val : float
+            Resolved opening angle; part of the planner key.
+        mac_type_val : MACType
+            Resolved acceptance criterion; part of the planner key.
+        runtime_traversal_config : Optional[DualTreeTraversalConfig]
+            Traversal capacities as resolved by the plan.
+        plan : _DualDownwardPlan
+            The resolved build plan; the planner key is derived from it.
+        has_pair_policy : bool
+            Whether a solver-owned pair policy is active for this call.
+        has_policy_state : bool
+            Whether that policy carries prepass state.
+        suppress_host_side_effects : bool
+            Traced/refresh hot path: skip planner counters and cache writes.
+
+        Returns
+        -------
+        Tuple[Optional[_RefreshDualPlannerHint], bool]
+            The hint (``None`` when the planner is off) and whether it was a
+            cache hit.
+        """
+        allow_split_build = plan.allow_split_build
+        grouped_interactions_active = plan.grouped_interactions_active
+        need_compact_far_pairs = plan.need_compact_far_pairs
+        need_node_interactions = plan.need_node_interactions
+        need_traversal_result = plan.need_traversal_result
+        strict_mode_active = plan.strict_mode_active
+        tree_mode_static_radix = plan.tree_mode_static_radix
+        use_dense_interactions_for_prepare = plan.use_dense_interactions_for_prepare
+        planner_hint: Optional[_RefreshDualPlannerHint] = None
+        planner_cache_hit = False
         planner_enabled = bool(
             (
                 self._refresh_dual_planner_mode_on
@@ -1324,289 +1831,7 @@ class PrepareMixin:
                         self._refresh_dual_planner_cache_hits += 1
                 if not suppress_host_side_effects:
                     self._refresh_dual_planner_execute_count += 1
-        planner_allow_steady_timing_bypass = bool(
-            self._planner_steady_timing_bypass_enabled
-        )
-        dual_artifact_timing_callback = _record_dual_artifact_substage
-        if (
-            planner_hint is not None
-            and planner_cache_hit
-            and bool(getattr(planner_hint, "suppress_substage_timing", False))
-            and planner_allow_steady_timing_bypass
-        ):
-            dual_artifact_timing_callback = None
-            if not suppress_host_side_effects:
-                self._refresh_dual_planner_steady_timing_bypass_count += 1
-        _record_dual_stage("_refresh_timing_dual_setup_seconds", stage_t0)
-
-        stage_t0 = time.perf_counter()
-        geometry_factory = (
-            None
-            if tree_artifacts.upward.geometry is not None
-            else lambda: compute_tree_geometry_compiled(
-                tree_artifacts.tree,
-                tree_artifacts.positions_sorted,
-                max_leaf_size=int(tree_artifacts.leaf_cap),
-            )
-        )
-        dual_artifacts, cache_entry = _build_dual_tree_artifacts(
-            tree_artifacts.tree,
-            tree_artifacts.upward.geometry,
-            geometry_factory=geometry_factory,
-            theta=theta_val,
-            mac_type=mac_type_val,
-            dehnen_radius_scale=dehnen_radius_scale,
-            cache_key=cache_key,
-            cache_entry=(self._interaction_cache if stateful_cache_enabled else None),
-            max_pair_queue=self.max_pair_queue,
-            pair_process_block=self.pair_process_block,
-            traversal_config=runtime_traversal_config,
-            retry_logger=(
-                None
-                if strict_mode_active
-                else (
-                    record_retry
-                    if bool(getattr(self, "_strict_cap_record_enabled", True))
-                    else (None if jit_traversal_for_prepare else record_retry)
-                )
-            ),
-            fail_fast=(self.fail_fast or strict_mode_active),
-            use_dense_interactions=use_dense_interactions_for_prepare,
-            grouped_interactions=grouped_interactions,
-            grouped_chunk_size=runtime_m2l_chunk_size,
-            need_traversal_result=need_traversal_result,
-            need_compact_far_pairs=need_compact_far_pairs,
-            need_node_interactions=need_node_interactions,
-            precompute_grouped_class_segments=self._should_precompute_grouped_class_segments(
-                grouped_chunk_size=runtime_m2l_chunk_size,
-                farfield_mode=farfield_mode,
-            ),
-            grouped_schedule_budget_bytes=self._grouped_schedule_item_budget(),
-            allow_split_build=allow_split_build,
-            pair_policy=pair_policy,
-            policy_state=policy_state,
-            jit_traversal=jit_traversal_for_prepare,
-            timing_callback=dual_artifact_timing_callback,
-            planner_hint=planner_hint,
-        )
-        if stateful_cache_enabled:
-            if bool(getattr(dual_artifacts, "cache_hit", False)):
-                if not suppress_host_side_effects:
-                    self._interaction_cache_hits += 1
-            else:
-                if not suppress_host_side_effects:
-                    self._interaction_cache_misses += 1
-        _record_dual_stage("_refresh_timing_dual_artifact_build_seconds", stage_t0)
-        if stateful_cache_enabled:
-            self._interaction_cache = cache_entry
-
-        stage_t0 = _stage_now()
-        (
-            interactions,
-            neighbor_list,
-            traversal_result,
-            compact_far_pairs,
-            dense_buffers,
-            grouped_buffers,
-            grouped_segment_starts,
-            grouped_segment_lengths,
-            grouped_segment_class_ids,
-            grouped_segment_sort_permutation,
-            grouped_segment_group_ids,
-            grouped_segment_unique_targets,
-        ) = self._unpack_dual_tree_artifacts(dual_artifacts)
-        if not suppress_host_side_effects:
-            far_pair_count_diag = None
-            if compact_far_pairs is not None:
-                far_pair_count_diag = int(compact_far_pairs.sources.shape[0])
-            elif interactions is not None:
-                far_pair_count_diag = int(interactions.sources.shape[0])
-            total_nodes_diag = int(tree_artifacts.tree.parent.shape[0])
-            internal_nodes_diag = int(
-                jnp.asarray(tree_artifacts.tree.left_child).shape[0]
-            )
-            leaf_count_diag = max(0, total_nodes_diag - internal_nodes_diag)
-            self._recent_dual_node_count = int(total_nodes_diag)
-            self._recent_dual_leaf_count = int(leaf_count_diag)
-            self._recent_dual_neighbor_count = int(neighbor_list.neighbors.shape[0])
-            self._recent_dual_far_pair_count = (
-                0 if far_pair_count_diag is None else int(far_pair_count_diag)
-            )
-            _prepare_diag(
-                "dual-tree done "
-                f"neighbor_count={int(neighbor_list.neighbors.shape[0])} "
-                f"far_pair_count={far_pair_count_diag} "
-                f"compact_far_pairs={compact_far_pairs is not None} "
-                f"interactions_present={interactions is not None}"
-            )
-            _prepare_diag(
-                "dual-tree bytes "
-                f"neighbors={_format_nbytes(_estimate_payload_nbytes(neighbor_list))} "
-                f"compact_far_pairs={_format_nbytes(_estimate_payload_nbytes(compact_far_pairs))} "
-                f"interactions={_format_nbytes(_estimate_payload_nbytes(interactions))} "
-                f"dense_buffers={_format_nbytes(_estimate_payload_nbytes(dense_buffers))} "
-                f"grouped_buffers={_format_nbytes(_estimate_payload_nbytes(grouped_buffers))}"
-            )
-
-        strict_streamed_direct_far_pairs = bool(
-            strict_mode_active
-            and bool(use_compact_streamed_pairs)
-            and compact_far_pairs is not None
-            and not bool(adaptive_order_active)
-            and not bool(mixed_order_farfield_active)
-        )
-        if strict_streamed_direct_far_pairs:
-            src_far = jnp.asarray(compact_far_pairs.sources, dtype=INDEX_DTYPE)
-            tgt_far = jnp.asarray(compact_far_pairs.targets, dtype=INDEX_DTYPE)
-            far_pairs_coo = _FarPairCOO(
-                sources=src_far,
-                targets=tgt_far,
-                active_count=getattr(compact_far_pairs, "far_pair_count", None),
-            )
-            far_pairs_by_gear = ((src_far, tgt_far),)
-            adaptive_order_for_downward = True
-            p_gears_for_downward = (int(tree_artifacts.upward.multipoles.order),)
-            if not suppress_host_side_effects:
-                self._recent_far_pairs_by_gear_counts = (int(src_far.shape[0]),)
-        else:
-            far_pair_plan = self._prepare_state_plan_far_pairs_for_downward(
-                interactions=interactions,
-                traversal_result=traversal_result,
-                compact_far_pairs=compact_far_pairs,
-                upward=tree_artifacts.upward,
-            )
-            far_pairs_by_gear = far_pair_plan.far_pairs_by_gear
-            far_pairs_coo = far_pair_plan.far_pairs_coo
-            adaptive_order_for_downward = far_pair_plan.adaptive_order_for_downward
-            p_gears_for_downward = far_pair_plan.p_gears_for_downward
-            if not suppress_host_side_effects:
-                self._recent_far_pairs_by_gear_counts = (
-                    far_pair_plan.recent_far_pairs_by_gear_counts
-                )
-        _record_dual_stage("_refresh_timing_dual_far_pair_plan_seconds", stage_t0)
-
-        stage_t0 = _stage_now()
-        if suppress_host_side_effects and bool(
-            getattr(self, "_static_runtime_fixed_sizing", True)
-        ):
-            runtime_m2l_chunk_size = runtime_m2l_chunk_size
-        else:
-            runtime_m2l_chunk_size = self._prepare_state_autotune_downward_chunk_size(
-                upward=tree_artifacts.upward,
-                far_pairs_by_gear=far_pairs_by_gear,
-                p_gears_for_downward=p_gears_for_downward,
-                runtime_m2l_chunk_size=runtime_m2l_chunk_size,
-            )
-        if not suppress_host_side_effects:
-            self._recent_dual_m2l_chunk_size = (
-                0 if runtime_m2l_chunk_size is None else int(runtime_m2l_chunk_size)
-            )
-        _record_dual_stage("_refresh_timing_dual_m2l_autotune_seconds", stage_t0)
-
-        stage_t0 = _stage_now()
-        interactions_for_downward = (
-            None
-            if strict_streamed_direct_far_pairs and not bool(retain_interactions_active)
-            else self._prepare_state_select_interactions_for_downward(
-                interactions=interactions,
-                far_pairs_coo=far_pairs_coo,
-            )
-        )
-        _record_dual_stage(
-            "_refresh_timing_dual_select_interactions_seconds",
-            stage_t0,
-        )
-
-        stage_t0 = _stage_now()
-        downward = self._prepare_downward_with_artifacts(
-            tree=tree_artifacts.tree,
-            upward=tree_artifacts.upward,
-            theta_val=theta_val,
-            locals_template=tree_artifacts.locals_template,
-            interactions=interactions_for_downward,
-            runtime_m2l_chunk_size=runtime_m2l_chunk_size,
-            runtime_l2l_chunk_size=runtime_l2l_chunk_size,
-            runtime_traversal_config=runtime_traversal_config,
-            record_retry=record_retry,
-            dense_buffers=dense_buffers,
-            grouped_interactions=grouped_interactions,
-            grouped_buffers=grouped_buffers,
-            grouped_segment_starts=grouped_segment_starts,
-            grouped_segment_lengths=grouped_segment_lengths,
-            grouped_segment_class_ids=grouped_segment_class_ids,
-            grouped_segment_sort_permutation=grouped_segment_sort_permutation,
-            grouped_segment_group_ids=grouped_segment_group_ids,
-            grouped_segment_unique_targets=grouped_segment_unique_targets,
-            farfield_mode=farfield_mode,
-            far_pairs_coo=far_pairs_coo,
-            far_pairs_by_gear=far_pairs_by_gear,
-            adaptive_order=adaptive_order_for_downward,
-            p_gears=p_gears_for_downward,
-        )
-        _record_dual_stage("_refresh_timing_dual_downward_compute_seconds", stage_t0)
-
-        stage_t0 = _stage_now()
-        if not suppress_host_side_effects:
-            _prepare_diag(
-                "downward done "
-                f"locals_shape={tuple(int(v) for v in downward.locals.coefficients.shape)} "
-                f"interactions_shape={tuple(int(v) for v in downward.interactions.sources.shape)}"
-            )
-            _prepare_diag(
-                "downward bytes "
-                f"locals={_format_nbytes(_estimate_payload_nbytes(downward.locals))} "
-                f"stored_interactions={_format_nbytes(_estimate_payload_nbytes(downward.interactions))}"
-            )
-        if not bool(retain_interactions_active):
-            # Prepared state only needs the locals; keep a shape-compatible
-            # placeholder so downstream code does not accidentally pin the full
-            # far-field pair payload after prepare_state completes.
-            downward = downward._replace(
-                interactions=(
-                    _empty_interaction_storage_like(interactions)
-                    if interactions is not None
-                    else _empty_interaction_storage_for_tree(tree_artifacts.tree)
-                )
-            )
-        interactions_out: Optional[NodeInteractionList]
-        if bool(retain_interactions_active):
-            interactions_out = interactions
-        else:
-            interactions_out = None
-        _record_dual_stage("_refresh_timing_dual_finalize_seconds", stage_t0)
-        if refresh_timing_active:
-            residual = max(
-                0.0,
-                float(time.perf_counter() - dual_total_t0) - float(dual_stage_sum),
-            )
-            self._refresh_timing_dual_residual_seconds += residual
-        return _PrepareStateDualDownwardArtifacts(
-            interactions=interactions_out,
-            neighbor_list=neighbor_list,
-            traversal_result=(
-                traversal_result if bool(need_traversal_result) else None
-            ),
-            compact_far_pairs=(
-                compact_far_pairs
-                if (
-                    bool(adaptive_order_active)
-                    or bool(strict_streamed_direct_far_pairs)
-                    # Gradients need the FROZEN M2L pair list to re-run the
-                    # downward sweep against. The pairs are already built here
-                    # whenever ``use_compact_streamed_pairs`` holds (which the
-                    # canonical large-N production config satisfies), but were
-                    # then discarded, leaving the differentiable seam with nothing
-                    # to re-run and no way to produce a far-field source-side
-                    # gradient. Retaining them costs ~24 B/pair of steady state
-                    # memory, which is a deliberate deviation from
-                    # ``memory_objective="minimum_memory"`` -- hence opt-in.
-                    or bool(getattr(self, "retain_far_pairs_for_grad", False))
-                )
-                else None
-            ),
-            downward=downward,
-            cache_entry=cache_entry,
-        )
+        return planner_hint, planner_cache_hit
 
     def _prepare_state_extract_adaptive_far_pairs(
         self,
