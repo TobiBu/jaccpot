@@ -20,6 +20,8 @@ from __future__ import annotations
 
 from typing import Any, Optional
 
+from jaxtyping import DTypeLike
+
 __all__ = [
     "capacity_report",
     "is_capacity_failure",
@@ -29,7 +31,9 @@ __all__ = [
 _GIB = 1024.0**3
 
 
-def _bytes_per_element(dtype_name: str) -> int:
+def _bytes_per_element(dtype_name: DTypeLike) -> int:
+    # Stringifies whatever it is given, so the hint must admit JAX's scalar
+    # types too -- `jnp.float32` is a `_ScalarMeta`, not a `str` (F40).
     return 8 if "64" in str(dtype_name) else 4
 
 
