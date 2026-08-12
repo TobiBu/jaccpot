@@ -2092,7 +2092,6 @@ class PrepareMixin:
             return nearfield_from_cache(cache_entry)
 
         nearfield_artifacts = self._prepare_nearfield_precompute_artifacts(
-            neighbor_list=neighbor_list,
             nearfield_interop=nearfield_interop,
             leaf_cap=effective_leaf_cap,
             num_particles=num_particles,
@@ -2130,7 +2129,6 @@ class PrepareMixin:
     def _prepare_nearfield_precompute_artifacts(
         self,
         *,
-        neighbor_list: NodeNeighborList,
         nearfield_interop: NearfieldInteropData,
         leaf_cap: int,
         num_particles: int,

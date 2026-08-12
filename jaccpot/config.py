@@ -35,6 +35,26 @@ GradNearFieldLane = Literal["auto", "bucketed", "fast_lane"]
 MemoryObjective = Literal["balanced", "throughput", "minimum_memory"]
 FMMExecutionBackend = Literal["auto", "radix", "octree"]
 
+#: Multipole acceptance criteria a **caller** may ask for -- a strict superset of
+#: yggdrax's ``MACType``.
+#:
+#: WHY THIS EXISTS RATHER THAN REUSING ``MACType``. yggdrax declares
+#: ``MACType = Literal["bh", "engblom", "dehnen"]``, and the traversal it owns
+#: accepts exactly those three. jaccpot adds a fourth, ``"dehnen_error"``: the
+#: Dehnen (2014) §5 mass-dependent MAC, which is a *jaccpot-level policy* built on
+#: top of the geometric ``"dehnen"`` test.
+#: :meth:`~jaccpot.runtime.fmm_policy.PolicyMixin._resolve_mac_type_for_traversal`
+#: translates it to ``"dehnen"`` before yggdrax ever sees it, and
+#: ``_uses_dehnen_error_policy`` is what switches the extra machinery on.
+#:
+#: So the constructor accepts four values and hands three downstream. Annotating it
+#: with yggdrax's narrower ``MACType`` understated the accepted set on a public
+#: signature: ``mac_type="dehnen_error"`` is documented in two of the package's own
+#: error messages, yet a runtime type check rejected it 68 times (F40). Use this
+#: alias for anything a caller passes in, and yggdrax's ``MACType`` for the
+#: resolved value going out.
+MACTypeInput = Literal["bh", "engblom", "dehnen", "dehnen_error"]
+
 
 class FMMPreset(str, Enum):
     """User-facing quality/speed presets.
@@ -516,6 +536,7 @@ __all__ = [
     "FarFieldMode",
     "GradConfig",
     "GradNearFieldLane",
+    "MACTypeInput",
     "MemoryObjective",
     "NearFieldConfig",
     "NearFieldMode",

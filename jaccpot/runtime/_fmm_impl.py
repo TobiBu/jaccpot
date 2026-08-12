@@ -49,6 +49,7 @@ from jaccpot.basis.real_sh import complex_to_real_coeffs
 from jaccpot.config import (
     FMMExecutionBackend,
     FMMPreset,
+    MACTypeInput,
     MemoryObjective,
     TraversalOverrides,
 )
@@ -361,7 +362,10 @@ class FastMultipoleMethod(
         adaptive_eps: Optional[float] = None,
         dehnen_geometry_mode: str = "com",
         mac_theta_max: float = 1.0,
-        mac_type: MACType = "bh",
+        # `MACTypeInput`, not yggdrax's `MACType`: this constructor accepts a
+        # fourth value, "dehnen_error", which `_resolve_mac_type_for_traversal`
+        # maps to "dehnen" before the traversal sees it. See the alias.
+        mac_type: MACTypeInput = "bh",
         complex_rotation: str = "solidfmm",  # "cached",
         dehnen_radius_scale: float = 1.0,
         m2l_chunk_size: Optional[int] = None,

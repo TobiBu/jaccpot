@@ -3,11 +3,44 @@
 from types import SimpleNamespace
 
 import jax.numpy as jnp
+from yggdrax.geometry import compute_tree_geometry
+from yggdrax.tree import build_tree
 
 from jaccpot.runtime import _interaction_cache as interaction_cache
 
 
+def _real_tree_and_geometry():
+    """A real ``Tree`` and ``TreeGeometry``, not empty namespaces.
+
+    These tests monkeypatch ``build_interactions_and_neighbors``, so the tree is
+    never read -- which is exactly why ``SimpleNamespace()`` used to be passed. It
+    made the tests silently violate ``_build_dual_tree_artifacts``'s declared
+    ``tree: Tree`` / ``geometry: TreeGeometry`` contract, and it was part of what
+    made ``JACCPOT_RUNTIME_TYPECHECK=1 pytest tests/unit`` red (F40). Eight
+    particles is enough and costs milliseconds.
+    """
+    positions = jnp.asarray(
+        [
+            [-0.8, 0.1, 0.0],
+            [-0.9, -0.1, 0.05],
+            [0.7, 0.0, -0.05],
+            [0.9, -0.1, 0.1],
+            [0.2, 0.3, -0.2],
+            [-0.2, -0.3, 0.2],
+            [0.4, -0.4, 0.4],
+            [-0.4, 0.4, -0.4],
+        ]
+    )
+    masses = jnp.ones((positions.shape[0],))
+    bounds = (jnp.array([-1.0, -1.0, -1.0]), jnp.array([1.0, 1.0, 1.0]))
+    tree, pos_sorted, _mass_sorted, _perm = build_tree(
+        positions, masses, bounds, return_reordered=True, leaf_size=2
+    )
+    return tree, compute_tree_geometry(tree, pos_sorted)
+
+
 def test_build_dual_tree_artifacts_retries_on_capacity_overflow(monkeypatch):
+    tree, geometry = _real_tree_and_geometry()
     calls = []
     interactions = SimpleNamespace(
         sources=jnp.asarray([0], dtype=jnp.int32),
@@ -37,8 +70,8 @@ def test_build_dual_tree_artifacts_retries_on_capacity_overflow(monkeypatch):
         max_neighbors_per_leaf=128,
     )
     artifacts, _cache = interaction_cache._build_dual_tree_artifacts(
-        tree=SimpleNamespace(),
-        geometry=SimpleNamespace(),
+        tree=tree,
+        geometry=geometry,
         theta=0.6,
         mac_type="dehnen",
         dehnen_radius_scale=1.0,
@@ -92,6 +125,7 @@ def test_next_retry_traversal_settings_jump_to_retry_floor():
 def test_build_dual_tree_artifacts_fail_fast_raises_hinted_capacity_error(
     monkeypatch,
 ):
+    tree, geometry = _real_tree_and_geometry()
     calls = []
 
     def fake_build_interactions_and_neighbors(*args, **kwargs):
@@ -114,8 +148,8 @@ def test_build_dual_tree_artifacts_fail_fast_raises_hinted_capacity_error(
 
     try:
         interaction_cache._build_dual_tree_artifacts(
-            tree=SimpleNamespace(),
-            geometry=SimpleNamespace(),
+            tree=tree,
+            geometry=geometry,
             theta=0.6,
             mac_type="dehnen",
             dehnen_radius_scale=1.0,
