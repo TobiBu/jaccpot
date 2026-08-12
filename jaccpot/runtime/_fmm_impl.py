@@ -363,8 +363,8 @@ class FastMultipoleMethod(
         dehnen_geometry_mode: str = "com",
         mac_theta_max: float = 1.0,
         # `MACTypeInput`, not yggdrax's `MACType`: this constructor accepts a
-        # fourth value, "dehnen_error", which `_resolve_mac_type_for_traversal`
-        # maps to "dehnen" before the traversal sees it. See the alias.
+        # fourth value, "dehnen_error", which `_base_mac_type()` maps to "dehnen"
+        # before the traversal sees it. See the alias.
         mac_type: MACTypeInput = "bh",
         complex_rotation: str = "solidfmm",  # "cached",
         dehnen_radius_scale: float = 1.0,

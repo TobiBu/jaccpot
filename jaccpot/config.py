@@ -43,9 +43,9 @@ FMMExecutionBackend = Literal["auto", "radix", "octree"]
 #: accepts exactly those three. jaccpot adds a fourth, ``"dehnen_error"``: the
 #: Dehnen (2014) §5 mass-dependent MAC, which is a *jaccpot-level policy* built on
 #: top of the geometric ``"dehnen"`` test.
-#: :meth:`~jaccpot.runtime.fmm_policy.PolicyMixin._resolve_mac_type_for_traversal`
-#: translates it to ``"dehnen"`` before yggdrax ever sees it, and
-#: ``_uses_dehnen_error_policy`` is what switches the extra machinery on.
+#: :meth:`~jaccpot.runtime.fmm_policy.PolicyMixin._base_mac_type` translates it to
+#: ``"dehnen"`` before yggdrax ever sees it, and ``_uses_dehnen_error_policy`` is
+#: what switches the extra machinery on.
 #:
 #: So the constructor accepts four values and hands three downstream. Annotating it
 #: with yggdrax's narrower ``MACType`` understated the accepted set on a public
