@@ -1,9 +1,11 @@
 """Reusable FMM numerical kernel library (leaf package).
 
-The numerical core currently lives in :mod:`jaccpot.runtime.kernels.core` (a
-single module extracted from ``_fmm_impl``); it will be subdivided into
-m2l/l2l/pallas_gates/downward/eval submodules as a follow-up. This package
-re-exports the core's symbols so consumers import from ``jaccpot.runtime.kernels``.
+The numerical core was one module extracted from ``_fmm_impl``; Tier 1.6
+subdivided it into ``_shared`` / ``_downward_prep`` / ``_m2l`` / ``_l2l`` /
+``_evaluate``, which is the follow-up this docstring used to promise.
+:mod:`jaccpot.runtime.kernels.core` is now the aggregator over those five, and
+this package re-exports its symbols so consumers import from
+``jaccpot.runtime.kernels``.
 
 Leaf contract: this package and ``core`` must NOT import the engine
 (``runtime.fmm.engine`` / the prepare pipeline), so ``distributed`` and
