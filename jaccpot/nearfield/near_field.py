@@ -342,7 +342,82 @@ def _compute_leaf_p2p_from_prepared_leaf_data_impl(
     Tuple[Array, Array, Array],
     Tuple[Array, Array, Array, Array],
 ]:
-    """JIT near-field kernel over explicit per-leaf particle groups."""
+    """JIT near-field kernel over explicit per-leaf particle groups.
+
+    The near-field edge-list kernel proper. :func:`_compute_leaf_p2p_impl` is a
+    thin wrapper that derives the padded leaf data and delegates here (Tier 1.2 --
+    the two used to be 94.4% line-identical copies), so this is the single
+    implementation of both the ``"baseline"`` and ``"bucketed"`` traversals.
+
+    ``max_leaf_size`` is **not** a parameter: it is recovered as
+    ``leaf_particle_idx.shape[1]``, which keeps it a compile-time constant without
+    a second static argument to keep in sync.
+
+    Differentiable in ``positions``, ``leaf_positions`` and ``leaf_masses``.
+
+    Parameters
+    ----------
+    offsets : Array
+        CSR row offsets into ``neighbors``, ``[num_leaves + 1]``.
+    neighbors : Array
+        Flat leaf-neighbour edge list, ``[num_edges]``. Its length alone selects
+        whether any pair work happens.
+    positions : Array
+        Particle positions ``[N, 3]``; also fixes the output shape.
+    target_leaf_ids : Array
+        Per-edge target leaf index, ``[num_edges]``.
+    source_leaf_ids : Array
+        Per-edge source leaf index, ``[num_edges]``.
+    valid_pairs : Array
+        Per-edge validity ``[num_edges]``; padded edges contribute exactly zero.
+    precomputed_chunk_sort_indices : Array
+        Scatter-schedule sort permutation, or an empty array when
+        ``use_precomputed_scatter`` is ``False``.
+    precomputed_chunk_group_ids : Array
+        Scatter-schedule group ids, same convention.
+    precomputed_chunk_unique_indices : Array
+        Scatter-schedule unique-target indices, same convention.
+    leaf_positions : Array
+        Padded per-leaf positions ``[num_leaves, W, 3]``.
+    leaf_masses : Array
+        Padded per-leaf masses ``[num_leaves, W]``.
+    leaf_mask : Array
+        Padded per-leaf validity ``[num_leaves, W]``.
+    leaf_particle_idx : Array
+        Particle index per padded slot ``[num_leaves, W]``; its second axis is
+        where ``max_leaf_size`` comes from.
+    G : Union[float, Array]
+        Gravitational constant.
+    softening_sq : Array
+        Squared Plummer softening length.
+    return_potential : bool
+        Also return per-particle potentials. Static under ``jit``.
+    collect_neighbor_pairs : bool
+        Also return the realised ``(target, source)`` leaf pairs and their count.
+        Static under ``jit``.
+    nearfield_mode : str
+        ``"baseline"`` (per-pair scan) or ``"bucketed"`` (edge-chunked). Static
+        under ``jit``. The two visit the same pairs, so they agree to
+        reassociation -- measured 4.2e-16 apart, one ulp.
+    edge_chunk_size : int
+        Edge-chunk width for ``"bucketed"``. Static under ``jit``; batching only.
+    use_precomputed_scatter : bool
+        Consume the precomputed scatter schedules instead of deriving them. Static
+        under ``jit``.
+
+    Returns
+    -------
+    Union[Array, Tuple[Array, Array], Tuple[Array, Array, Array], Tuple[Array, Array, Array, Array]]
+        Accelerations ``[N, 3]``, followed by potentials ``[N]`` when
+        ``return_potential``, followed by the neighbour-pair array and count when
+        ``collect_neighbor_pairs``. A one-element result is unwrapped.
+
+    Raises
+    ------
+    ValueError
+        If ``nearfield_mode`` is not ``"baseline"`` or ``"bucketed"``, or
+        ``edge_chunk_size`` is not positive.
+    """
     dtype = positions.dtype
     g_const = jnp.asarray(G, dtype=dtype)
     soft_sq = softening_sq
@@ -1173,7 +1248,101 @@ def compute_leaf_p2p_accelerations_large_n_accel_only(
     target_block_batch_scan_unroll: Optional[int] = None,
     target_block_overflow_fast_max_blocks: Optional[int] = None,
 ) -> Array:
-    """Specialized accel-only bucketed near-field path for large-N prepared data."""
+    """Specialized accel-only bucketed near-field path for large-N prepared data.
+
+    The large-N entry point: self block plus cross-leaf pairs, accelerations only.
+    It selects among the kernels in :mod:`jaccpot.nearfield._large_n_blocks` from
+    which ``precomputed_*`` artefacts the caller supplies, and **the choice is
+    shape-encoded rather than validated** -- passing the padded target-block
+    tensors selects the prepacked path, passing the run-length ones selects the
+    offsets path, and passing neither falls back to the edge list. That is why
+    there are 31 parameters and most are ``Optional``.
+
+    Every ``None`` tuning knob means "resolve the default", not "off".
+
+    Differentiable in ``positions_sorted`` and ``masses_sorted``.
+
+    Parameters
+    ----------
+    tree : Tree
+        Radix tree; supplies ``node_ranges`` and the leaf list.
+    neighbor_list : NodeNeighborList
+        Leaf-neighbour CSR metadata.
+    positions_sorted : Array
+        Particle positions ``[N, 3]`` in Morton order.
+    masses_sorted : Array
+        Particle masses ``[N]`` in the same order.
+    G : Union[float, Array]
+        Gravitational constant. Default ``1.0``.
+    softening : float
+        Plummer softening **length** (squared internally). Must be a concrete
+        Python float, not a tracer. Default ``0.0``.
+    edge_chunk_size : int
+        Edge-chunk width for the edge-list path. Default ``256``.
+    precomputed_target_leaf_ids : Optional[Array]
+        Per-edge target leaf ids; derived from ``neighbor_list`` when ``None``.
+    precomputed_source_leaf_ids : Optional[Array]
+        Per-edge source leaf ids. **Must be positionally aligned with**
+        ``neighbors`` -- see the warning on
+        :func:`~jaccpot.nearfield._schedules.prepare_leaf_neighbor_pairs`: a
+        source-sorted vector has the identical shape and produces wrong forces
+        silently.
+    precomputed_valid_pairs : Optional[Array]
+        Per-edge validity, same convention.
+    leaf_particle_indices : Array
+        Explicit per-leaf particle membership ``[num_leaves, W]``. Required.
+    leaf_particle_mask : Optional[Array]
+        Validity for that table; derived when ``None``.
+    precomputed_target_block_leaf_ids : Optional[Array]
+        Target leaf id per block, for the target-owned paths.
+    precomputed_target_block_source_leaf_ids : Optional[Array]
+        Source leaf ids per block.
+    precomputed_target_block_valid_mask : Optional[Array]
+        Per-lane validity for those blocks.
+    precomputed_target_block_offsets : Optional[Array]
+        Run-length offsets per target leaf; selects the offsets kernel.
+    precomputed_target_block_source_leaf_ids_padded : Optional[Array]
+        Rectangular ``[leaf, block, lane]`` source ids; selects the prepacked
+        kernel, which is the production large-N gradient path.
+    precomputed_target_block_valid_mask_padded : Optional[Array]
+        Per-lane validity for the padded layout.
+    delayed_scatter_chunks_per_superchunk : Optional[int]
+        Chunks per superchunk before the target reduction.
+    chunk_scan_batch_size : Optional[int]
+        Chunks per scan step.
+    chunk_scan_unroll : Optional[int]
+        Unroll factor for the chunk scan.
+    superchunk_scan_unroll : Optional[int]
+        Unroll factor for the superchunk scan.
+    sorted_scatter_hint : Optional[bool]
+        Promise that the scatter indices are sorted. A *promise*: it must match
+        the data.
+    grouped_sorted_scatter : Optional[bool]
+        Use the segment-grouped scatter; same caveat.
+    superchunk_target_reduce : Optional[bool]
+        Reduce per target leaf within a superchunk before scattering. Changes the
+        summation grouping, so it can move the last digits.
+    disable_chunk_cond : Optional[bool]
+        Skip the per-chunk ``lax.cond`` early-out.
+    target_leaf_batch_size : Optional[int]
+        Target leaves per scan step on the target-owned paths.
+    target_block_tile_size : Optional[int]
+        Source lanes per tile.
+    target_block_tile_scan_unroll : Optional[int]
+        Unroll factor for the tile scan.
+    target_block_batch_scan_unroll : Optional[int]
+        Unroll factor for the target-batch scan.
+    target_block_overflow_fast_max_blocks : Optional[int]
+        Cap above which the bounded tiled overflow kernel replaces the prepacked
+        fast path. See
+        :data:`~jaccpot.runtime.fmm_constants._NEARFIELD_TARGET_BLOCK_OVERFLOW_FAST_MAX_BLOCKS`.
+
+    Returns
+    -------
+    Array
+        Per-particle accelerations ``[N, 3]``. No potentials -- that is the point
+        of the accel-only specialisation.
+    """
     positions = jnp.asarray(positions_sorted)
     masses = jnp.asarray(masses_sorted)
     node_ranges = jnp.asarray(tree.node_ranges, dtype=INDEX_DTYPE)
