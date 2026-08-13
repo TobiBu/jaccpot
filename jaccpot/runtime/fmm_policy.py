@@ -20,6 +20,7 @@ from yggdrax.interactions import (
 )
 from yggdrax.tree import Tree
 
+from jaccpot.config import MACTypeInput
 from jaccpot.upward.tree_expansions import TreeUpwardData
 
 from ._adaptive_policy import (
@@ -162,10 +163,38 @@ class PolicyMixin:
 
         return self.adaptive_order or self._uses_paper_style_traversal_policy()
 
+    @staticmethod
+    def _mac_type_for_traversal(mac_type: MACTypeInput) -> MACType:
+        """Map a caller-facing MAC type onto the one yggdrax's traversal accepts.
+
+        ``"dehnen_error"`` is a jaccpot-level policy -- the Dehnen (2014) §5
+        mass-dependent MAC -- layered on the geometric ``"dehnen"`` test. yggdrax
+        has never heard of it: its ``MACType`` is
+        ``Literal["bh", "engblom", "dehnen"]`` and its traversal raises
+        ``ValueError("Unknown mac_type: ...")`` for anything else. So every path
+        that reaches the traversal must come through here first.
+
+        A ``staticmethod`` on purpose: it maps a *value*, so it also works for an
+        explicitly-passed override rather than only for ``self.mac_type``. That is
+        what :meth:`_base_mac_type` needs, and what
+        ``fmm_sweeps.prepare_downward_sweep`` needs for its ``mac_type=`` argument.
+
+        Parameters
+        ----------
+        mac_type : MACTypeInput
+            What the caller asked for, including ``"dehnen_error"``.
+
+        Returns
+        -------
+        MACType
+            The geometric criterion to hand the traversal.
+        """
+        return "dehnen" if str(mac_type) == "dehnen_error" else mac_type
+
     def _base_mac_type(self: "FastMultipoleMethod") -> MACType:
         """Return the Yggdrax-facing geometric MAC for the active solver mode."""
 
-        return "dehnen" if self._uses_dehnen_error_policy() else self.mac_type
+        return self._mac_type_for_traversal(self.mac_type)
 
     def _policy_orders_for_prepare_state(
         self: "FastMultipoleMethod", *, max_order: int
