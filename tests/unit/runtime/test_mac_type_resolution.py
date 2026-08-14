@@ -1,8 +1,8 @@
 """No path may hand the traversal an unresolved MAC type.
 
-``"dehnen_error"`` is a **jaccpot-level** policy: the Dehnen (2014) §5
-mass-dependent MAC, layered on top of the geometric ``"dehnen"`` acceptance test.
-yggdrax has never heard of it -- its ``MACType`` is
+``"dehnen_error"`` and ``"dehnen_theta"`` are **jaccpot-level** policies: the
+Dehnen (2014) §5 mass-dependent MAC, layered on top of the geometric ``"dehnen"``
+acceptance test. yggdrax has never heard of either -- its ``MACType`` is
 ``Literal["bh", "engblom", "dehnen"]`` and its traversal raises
 ``ValueError("Unknown mac_type: ...")`` for anything else. So every jaccpot path
 that reaches the traversal has to translate first, via
@@ -18,6 +18,15 @@ rebuild -- a latent failure, not a safe one.
 
 These tests pin the property rather than the one line that was wrong: whatever a
 caller asks for, what reaches the traversal is a value yggdrax accepts.
+
+They sweep ``ALL_REQUESTABLE`` rather than naming one policy, because the
+jaccpot-level names are a *set* that has already grown once. ``_base_mac_type``
+used to key off ``_uses_dehnen_error_policy()`` -- true for both names -- and was
+rewritten to call ``_mac_type_for_traversal``, which at first mapped only
+``dehnen_error``. The two ``in`` tests fell out of step, ``dehnen_theta`` reached
+the traversal unmapped, and yggdrax's runtime type check rejected it. Add any
+future jaccpot-level MAC name to ``JACCPOT_POLICY_MAC_TYPES`` and these tests will
+demand the resolver learn it.
 """
 
 from __future__ import annotations
@@ -34,8 +43,17 @@ from jaccpot.runtime import fmm_sweeps
 #: ``MACType`` so this test tracks the dependency instead of duplicating it.
 YGGDRAX_ACCEPTED = frozenset(MACType.__args__)
 
+#: The jaccpot-level MAC names that are *not* in yggdrax's set and therefore have
+#: to be translated. Kept as a set rather than a literal because
+#: ``_mac_type_for_traversal`` and ``_uses_dehnen_error_policy`` are two
+#: independent ``in`` tests over the same names, and they must agree.
+JACCPOT_POLICY_MAC_TYPES = frozenset({"dehnen_error", "dehnen_theta"})
 
-#: ``mac_type="dehnen_error"`` is refused without one: it is the relative
+#: Every value a caller may legally pass, which is what these tests sweep.
+ALL_REQUESTABLE = YGGDRAX_ACCEPTED | JACCPOT_POLICY_MAC_TYPES
+
+
+#: The §5 policies are refused without one: ``adaptive_eps`` is the relative
 #: force-accuracy target of eq (16a), and the theta-derived default is a far looser
 #: tail_proxy heuristic. That refusal is deliberate (STYLE_GUIDE §9), so supply it.
 PAPER_EPS = 1e-3
@@ -43,7 +61,7 @@ PAPER_EPS = 1e-3
 
 def _solver(mac_type: str):
     kwargs = {}
-    if mac_type == "dehnen_error":
+    if mac_type in JACCPOT_POLICY_MAC_TYPES:
         kwargs["adaptive_eps"] = PAPER_EPS
     return fmm_impl_private.FastMultipoleMethod(
         expansion_basis="solidfmm",
@@ -95,7 +113,7 @@ def _real_tree_and_upward(solver):
     return state.tree, state.upward
 
 
-@pytest.mark.parametrize("requested", sorted(YGGDRAX_ACCEPTED | {"dehnen_error"}))
+@pytest.mark.parametrize("requested", sorted(ALL_REQUESTABLE))
 def test_downward_sweep_hands_the_traversal_a_value_yggdrax_accepts(
     monkeypatch, requested
 ):
@@ -117,6 +135,51 @@ def test_dehnen_error_resolves_to_the_geometric_dehnen_test(monkeypatch):
     assert seen == "dehnen"
 
 
+def test_dehnen_theta_resolves_to_the_geometric_dehnen_test(monkeypatch):
+    """The folded-angle mode resolves to ``"dehnen"`` as well, not to itself.
+
+    ``dehnen_theta`` carries the same §5 criterion, but pre-applied: it is folded
+    into one effective opening angle per node (a rescaled ``geometry.radius``)
+    instead of into a pair policy. The *geometric* test underneath is unchanged,
+    so the traversal must be handed ``"dehnen"`` -- and since no pair policy is
+    installed in this mode, nothing downstream would re-map it.
+    """
+    (seen,) = _capture_traversal_mac_type(monkeypatch, _solver("dehnen_theta"))
+    assert seen == "dehnen"
+
+
+def test_the_resolver_and_the_policy_flag_cover_the_same_names():
+    """``_mac_type_for_traversal`` and ``_uses_dehnen_error_policy`` must agree.
+
+    These are two independent ``in`` tests over the same set of jaccpot-level
+    names, in two different modules, and nothing but this test couples them. When
+    they disagree the failure is asymmetric and both directions are bad:
+
+    * a name the policy flag knows but the resolver does not reaches yggdrax
+      unmapped and is rejected -- loud, and how this was found;
+    * a name the resolver maps but the policy flag does not runs the plain
+      geometric MAC while the caller believes the mass-dependent criterion is
+      active -- silent, and it makes the solver *faster*, so no cost measurement
+      can see it.
+
+    Asserted against a solver instance rather than the raw functions so the
+    staticmethod and the bound method are both exercised as callers reach them.
+    """
+    solver = _solver("bh")
+    for name in JACCPOT_POLICY_MAC_TYPES:
+        assert solver._mac_type_for_traversal(name) == "dehnen", (
+            f"{name!r} is a jaccpot-level policy but _mac_type_for_traversal "
+            f"passes it through to yggdrax unchanged"
+        )
+        assert _solver(name)._uses_dehnen_error_policy() is True, (
+            f"{name!r} is translated for the traversal but does not switch the "
+            f"mass-dependent machinery on -- the silent direction"
+        )
+    for name in YGGDRAX_ACCEPTED:
+        assert solver._mac_type_for_traversal(name) == name
+        assert _solver(name)._uses_dehnen_error_policy() is False
+
+
 def test_an_explicit_dehnen_error_override_is_resolved_too(monkeypatch):
     """The override argument needs the same treatment as the default.
 
@@ -130,7 +193,7 @@ def test_an_explicit_dehnen_error_override_is_resolved_too(monkeypatch):
     assert seen == "dehnen"
 
 
-@pytest.mark.parametrize("requested", sorted(YGGDRAX_ACCEPTED | {"dehnen_error"}))
+@pytest.mark.parametrize("requested", sorted(ALL_REQUESTABLE))
 def test_the_sweep_resolves_exactly_as_base_mac_type_does(monkeypatch, requested):
     """``prepare_downward_sweep`` must resolve exactly as ``_base_mac_type`` does.
 

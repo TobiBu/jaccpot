@@ -205,12 +205,21 @@ class PolicyMixin:
     def _mac_type_for_traversal(mac_type: MACTypeInput) -> MACType:
         """Map a caller-facing MAC type onto the one yggdrax's traversal accepts.
 
-        ``"dehnen_error"`` is a jaccpot-level policy -- the Dehnen (2014) §5
-        mass-dependent MAC -- layered on the geometric ``"dehnen"`` test. yggdrax
-        has never heard of it: its ``MACType`` is
+        ``"dehnen_error"`` and ``"dehnen_theta"`` are jaccpot-level policies -- the
+        Dehnen (2014) §5 mass-dependent MAC -- layered on the geometric
+        ``"dehnen"`` test. yggdrax has never heard of either: its ``MACType`` is
         ``Literal["bh", "engblom", "dehnen"]`` and its traversal raises
         ``ValueError("Unknown mac_type: ...")`` for anything else. So every path
         that reaches the traversal must come through here first.
+
+        **Both** names map, and the set here must stay in step with
+        :meth:`_uses_dehnen_error_policy`. They differ only in *how* the criterion
+        is applied -- ``dehnen_error`` installs a solver-owned pair policy,
+        ``dehnen_theta`` folds it into one opening angle per node (rescaled
+        ``geometry.radius``) -- and neither changes the geometric test underneath,
+        so both reduce to ``"dehnen"`` here. Mapping only one of them is not a
+        narrower translation but a crash: yggdrax's runtime type check rejects the
+        unmapped literal before the traversal starts.
 
         A ``staticmethod`` on purpose: it maps a *value*, so it also works for an
         explicitly-passed override rather than only for ``self.mac_type``. That is
@@ -220,14 +229,16 @@ class PolicyMixin:
         Parameters
         ----------
         mac_type : MACTypeInput
-            What the caller asked for, including ``"dehnen_error"``.
+            What the caller asked for, including the two jaccpot-level policies.
 
         Returns
         -------
         MACType
             The geometric criterion to hand the traversal.
         """
-        return "dehnen" if str(mac_type) == "dehnen_error" else mac_type
+        return (
+            "dehnen" if str(mac_type) in ("dehnen_error", "dehnen_theta") else mac_type
+        )
 
     def _base_mac_type(self: "FastMultipoleMethod") -> MACType:
         """Return the Yggdrax-facing geometric MAC for the active solver mode."""
