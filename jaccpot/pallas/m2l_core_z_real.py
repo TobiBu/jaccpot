@@ -73,7 +73,8 @@ def _m2l_core_z_real_kernel(
     )
     acc0 = jnp.asarray(0.0, dtype=dtype)
 
-    def body(slot: int, acc: Array) -> Array:
+    # Loop index: a `fori_loop` tracer, not an `int` (F40).
+    def body(slot: Array, acc: Array) -> Array:
         is_valid = valid_ref[coeff_idx, slot]
         src_idx = src_index_ref[coeff_idx, slot]
         exponent = power_ref[coeff_idx, slot]

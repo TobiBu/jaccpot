@@ -451,7 +451,9 @@ def test_Dz_diagonal_identity_at_zero():
     """Dz(0) = I."""
     dtype = jnp.float64
     for ell in range(5):
-        Dz = real_Dz_diagonal(ell, 0.0, dtype=dtype)
+        # `jnp.asarray`, not a bare `0.0`: these builders declare `angle: Array`
+        # and passing a float made the test violate its own contract (F40).
+        Dz = real_Dz_diagonal(ell, jnp.asarray(0.0, dtype=dtype), dtype=dtype)
         eye = jnp.eye(2 * ell + 1)
         assert jnp.allclose(Dz, eye, atol=1e-10)
 
@@ -464,8 +466,9 @@ def test_rotation_z_axis_is_identity():
     """
     dtype = jnp.float64
 
-    # Direction along z-axis
-    x, y, z = 0.0, 0.0, 1.0
+    # Direction along z-axis. As arrays, because the builders declare
+    # `x, y, z: Array` -- floats worked but violated the contract (F40).
+    x, y, z = (jnp.asarray(v, dtype=dtype) for v in (0.0, 0.0, 1.0))
 
     for ell in range(4):
         D = real_rotation_to_z_axis_multipole(x, y, z, ell, dtype=dtype)
@@ -481,7 +484,8 @@ def test_rotation_preserves_monopole():
     dtype = jnp.float64
 
     # Arbitrary direction
-    x, y, z = 1.0, 2.0, 3.0
+    # Arrays, not floats: the builders declare `x, y, z: Array` (F40).
+    x, y, z = (jnp.asarray(v, dtype=dtype) for v in (1.0, 2.0, 3.0))
 
     D = real_rotation_to_z_axis_multipole(x, y, z, 0, dtype=dtype)
     # For ell=0, D should be 1x1 identity
