@@ -16,7 +16,7 @@ from jaccpot.operators.real_harmonics import (
     translate_along_z_m2l_real,
     z_m2l_translation_tables,
 )
-from jaccpot.pallas._compat import pallas_backend_kwargs
+from jaccpot.pallas._compat import KernelRef, pallas_backend_kwargs
 
 try:
     import jax.experimental.pallas as pl
@@ -25,7 +25,16 @@ except Exception:  # pragma: no cover - import is environment-dependent
 
 
 def pallas_m2l_real_supported() -> bool:
-    """Return whether the active JAX backend can run the Pallas real M2L kernel."""
+    """Return whether the active JAX backend can run the Pallas real M2L kernel.
+
+    Returns
+    -------
+    bool
+        True only on GPU or TPU with ``jax.experimental.pallas`` importable. False
+        on CPU, where callers must use the pure-JAX recurrence -- note this is a
+        *capability* check, not a correctness one: ``interpret=True`` runs the same
+        kernel logic on CPU and the parity test relies on that.
+    """
 
     if pl is None:
         return False
@@ -41,6 +50,21 @@ def _m2l_translation_tables(order: int) -> tuple[np.ndarray, ...]:
     Pallas kernel and the pure-JAX ``translate_along_z_m2l_real`` cannot drift.
     This function only adapts that metadata to the layout the kernel consumes
     (``power`` = radius exponent, plus a materialized factorial value table).
+
+    Parameters
+    ----------
+    order : int
+        Expansion order ``p``. Hashable, which is what lets this be ``lru_cache``d --
+        the tables are pure functions of the order and are rebuilt per process, not
+        per call.
+
+    Returns
+    -------
+    tuple[np.ndarray, ...]
+        ``(src_index, valid, power, fact_index, sign, factorial)``, in the order the
+        kernel's ``in_specs`` list them. NumPy rather than JAX arrays on purpose: they
+        are host-side static tables, converted by the caller at the dtype of the
+        multipoles it was handed.
     """
     p = int(order)
     src_index, valid, fact_index, r_exponent, sign = z_m2l_translation_tables(p)
@@ -53,17 +77,60 @@ def _m2l_translation_tables(order: int) -> tuple[np.ndarray, ...]:
 
 
 def _m2l_core_z_real_kernel(
-    multipole_ref,
-    radius_ref,
-    src_index_ref,
-    valid_ref,
-    power_ref,
-    fact_index_ref,
-    sign_ref,
-    factorial_ref,
-    out_ref,
-):
-    """Compute one output coefficient for one pair."""
+    multipole_ref: KernelRef,
+    radius_ref: KernelRef,
+    src_index_ref: KernelRef,
+    valid_ref: KernelRef,
+    power_ref: KernelRef,
+    fact_index_ref: KernelRef,
+    sign_ref: KernelRef,
+    factorial_ref: KernelRef,
+    out_ref: KernelRef,
+) -> None:
+    """Compute one output coefficient for one pair.
+
+    One Pallas program instance per ``(pair, coeff)``: ``program_id(axis=1)`` selects
+    the output coefficient row, and the grid's axis 0 selects the pair, so every ref
+    below is already narrowed to this pair by ``pallas_call``'s index maps.
+
+    The six table refs are the ``z_m2l_translation_tables`` metadata, which is the
+    single source shared with the pure-JAX ``translate_along_z_m2l_real`` -- see
+    :func:`_m2l_translation_tables`. They are inputs, not constants, because Pallas
+    cannot close over host arrays.
+
+    Parameters
+    ----------
+    multipole_ref : KernelRef
+        Rotated multipole coefficients for this pair, shape ``(1, ncoeff)``.
+    radius_ref : KernelRef
+        Translation distance along z for this pair, shape ``(1,)``. Floored at
+        ``1e-30`` below, so a coincident pair yields a large-but-finite coefficient
+        rather than a division by zero.
+    src_index_ref : KernelRef
+        Source coefficient index per ``(coeff, slot)``. Its ``shape[1]`` is the
+        ``fori_loop`` trip count, i.e. the maximum number of source terms any output
+        coefficient draws on.
+    valid_ref : KernelRef
+        Whether each ``(coeff, slot)`` is a real term or padding. Padded slots are
+        masked out of the accumulator rather than skipped, keeping the trip count
+        static.
+    power_ref : KernelRef
+        Radius exponent per ``(coeff, slot)``.
+    fact_index_ref : KernelRef
+        Index into ``factorial_ref`` per ``(coeff, slot)``.
+    sign_ref : KernelRef
+        Per-output-coefficient sign, shape ``(ncoeff,)``.
+    factorial_ref : KernelRef
+        Materialized ``k!`` for ``k`` in ``0..2p``, gathered through
+        ``fact_index_ref`` rather than recomputed in the kernel.
+    out_ref : KernelRef
+        Output block for this ``(pair, coeff)``, shape ``(1, 1)``. Written once.
+
+    Returns
+    -------
+    None
+        Pallas kernels return nothing; the result is the write to ``out_ref``.
+    """
 
     coeff_idx = pl.program_id(axis=1)
     dtype = multipole_ref.dtype
@@ -106,6 +173,40 @@ def m2l_core_z_real_pallas(
     Mosaic-GPU backend rejects the small per-(pair,coeff) tiles -- its TMA copies
     must be a multiple of the 128-byte warpgroup size, whereas one coeff row is
     (p+1)^2 elements = 100/200 bytes). Consistent with the fused complex M2L path.
+
+    Parameters
+    ----------
+    multipole_rot : Array
+        Multipole coefficients already rotated so the translation is along +z, shape
+        ``(batch, sh_size(order))``. The rotation is the caller's job; this kernel is
+        only the z-axis core.
+    radii : Array
+        Per-pair translation distance along z, shape ``(batch,)``.
+    order : int
+        Expansion order. Static: it fixes the table shapes and the grid, so each
+        order compiles its own kernel (hence the ``name=`` suffix).
+    interpret : bool
+        Run under Pallas interpret mode, which executes CPU semantics with no
+        backend lowering. How the parity test exercises this kernel without a GPU.
+    backend : str
+        Pallas GPU lowering, ``"triton"`` by default -- see the note above on why
+        Mosaic-GPU cannot take these tiles.
+
+    Returns
+    -------
+    Array
+        Translated coefficients, same shape and dtype as ``multipole_rot``. An empty
+        batch short-circuits to ``zeros_like`` rather than launching a zero-sized
+        grid.
+
+    Raises
+    ------
+    RuntimeError
+        If ``jax.experimental.pallas`` could not be imported at all.
+    ValueError
+        If ``multipole_rot`` is not 2-D, ``radii`` is not 1-D, or the coefficient
+        count disagrees with ``sh_size(order)`` -- a shape mismatch here would
+        otherwise be absorbed silently by the block specs.
     """
 
     if pl is None:
@@ -198,6 +299,27 @@ def m2l_core_z_real_pallas_cvjp(
     autodiff of the pure-JAX twin, so the returned gradient is a faithful FMM
     gradient (the Pallas forward matches the twin to ~1e-12, not bit-exactly --
     standard for a Pallas ``custom_vjp``).
+
+    Parameters
+    ----------
+    multipole_rot : Array
+        Rotated multipole coefficients, shape ``(batch, sh_size(order))``. The
+        z-M2L is *linear* in this argument, so its cotangent is the transpose.
+    radii : Array
+        Per-pair z translation distance, shape ``(batch,)``. Enters as
+        ``r ** -(n + k + 1)``, i.e. non-linearly, which is why the reverse rule
+        differentiates the twin instead of transposing.
+    order : int
+        Expansion order. ``nondiff_argnums`` -- a Pallas static.
+    interpret : bool
+        Whether to run the forward in interpret mode. ``nondiff_argnums``.
+    backend : str
+        Pallas GPU lowering for the forward. ``nondiff_argnums``.
+
+    Returns
+    -------
+    Array
+        Translated coefficients, identical to :func:`m2l_core_z_real_pallas`.
     """
     return m2l_core_z_real_pallas(
         multipole_rot, radii, order=order, interpret=interpret, backend=backend

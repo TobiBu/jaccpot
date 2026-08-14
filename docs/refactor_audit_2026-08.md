@@ -491,7 +491,32 @@ are blocked in two different ways, and neither is about effort:
    `_large_n_blocks.py`. Writing their docstrings against `main` puts them in a file
    that will no longer contain the function, i.e. a hand-resolved conflict on every
    one, in the most numerics-sensitive module in the package.
-2. **18 in `jaccpot/pallas/` — blocked on the Tier 2 typing decision.** The Pallas
+2. ~~**18 in `jaccpot/pallas/`**~~ **— DONE, and it was 49 functions, not 18.**
+
+   > **Closed.** The decision this was blocked on is made: `KernelRef = jax.Ref`,
+   > aliased in `pallas/_compat.py` so the ~68 annotated ref parameters depend on one
+   > line, since JAX moves the name and there is no `pallas.Ref`. Measured as accurate,
+   > not just convenient: under `interpret=True` a kernel body receives a
+   > `DynamicJaxprTracer` and `isinstance(that, jax.Ref)` is **True**. It is also not
+   > enforced — nothing in `jaccpot/pallas/` carries `@jaxtyped`/`beartype` — so the
+   > risk in choosing was nil, which is worth knowing before treating a Pallas
+   > annotation as a contract.
+   >
+   > **The "18" was wrong.** Measured with `--skip-checking-short-docstrings=False`:
+   > **49 functions, 197 violations** across five modules (`m2l_complex_fused` 63,
+   > `nearfield_fused_leaf` 51, `m2l_real_fused` 48, `treecode_walk_pallas` 19,
+   > `m2l_core_z_real` 16). Now **0**. Delivered in four parts to stay under the
+   > ~400-line rule.
+   >
+   > One finding worth carrying: pydoclint reported **nothing** against the eight
+   > kernel bodies, because it has no docstring to check a signature against. "Zero
+   > violations" and "documented" are different predicates, and the kernels — the
+   > point of the package — were the least documented things in it. Any future count
+   > based on violation totals should be read with that in mind.
+
+   The original report follows.
+
+   **18 in `jaccpot/pallas/` — blocked on the Tier 2 typing decision.** The Pallas
    kernel bodies take unannotated references (`multipole_ref`, `bto_r`, …). Probed on
    `_m2l_core_z_real_kernel`: adding a `Parameters` section raises **DOC106, DOC107,
    DOC109 and DOC110** — `--arg-type-hints-in-signature` and

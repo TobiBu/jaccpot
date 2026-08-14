@@ -34,7 +34,7 @@ from jax.experimental import pallas as pl
 from jaxtyping import Array
 
 from jaccpot.operators.real_harmonics import sh_offset, sh_size
-from jaccpot.pallas._compat import pallas_backend_kwargs
+from jaccpot.pallas._compat import KernelRef, pallas_backend_kwargs
 
 __all__ = [
     "pallas_m2l_complex_fused_supported",
@@ -53,6 +53,11 @@ def _fused_m2l_vjp_enabled() -> bool:
     autodiff of the twin. Set ``JACCPOT_FUSED_M2L_VJP=0`` to fall back to autodiff of
     the pure-jnp twin (the correctness reference -- identical to round-off). Shared
     env switch with the real fused kernel.
+
+    Returns
+    -------
+    bool
+        True unless ``JACCPOT_FUSED_M2L_VJP`` is ``0``/``false``/``no``/``off``.
     """
     return os.environ.get("JACCPOT_FUSED_M2L_VJP", "1").strip().lower() not in {
         "0",
@@ -63,7 +68,15 @@ def _fused_m2l_vjp_enabled() -> bool:
 
 
 def pallas_m2l_complex_fused_supported() -> bool:
-    """True only on a GPU with compute capability >= 8.0 (Ampere+)."""
+    """True only on a GPU with compute capability >= 8.0 (Ampere+).
+
+    Returns
+    -------
+    bool
+        True only for a GPU device reporting compute capability >= 8.0. Device
+        discovery failures return False rather than raising, since this chooses a lane
+        rather than validating one.
+    """
     try:
         dev = jax.devices()[0]
     except Exception:  # pragma: no cover
@@ -86,7 +99,19 @@ def pallas_m2l_complex_fused_supported() -> bool:
 
 
 def _next_pow2(n: int) -> int:
-    """Smallest power of 2 >= n (>=1)."""
+    """Smallest power of 2 >= n (>=1).
+
+    Parameters
+    ----------
+    n : int
+        Requested width; values below 1 clamp to 1.
+
+    Returns
+    -------
+    int
+        ``n`` rounded up to a power of two, which is what the Triton lowering requires
+        of every operand shape.
+    """
     n = max(1, int(n))
     return 1 << (n - 1).bit_length()
 
@@ -104,6 +129,18 @@ def m2l_complex_fused_tables(order: int) -> dict:
       pack_flat[Bp, mdp], pack_valid[Bp, mdp]  -- flat<-(block,col) gather
       blk[Cp], col[Cp]                          -- (block,col) of each flat coeff
       z_src[Cp, Kp], z_valid/z_sign/z_fact/z_exp[Cp, Kp]
+
+    Parameters
+    ----------
+    order : int
+        Expansion order ``p``. Hashable, which is what makes the ``lru_cache`` sound.
+
+    Returns
+    -------
+    dict
+        The pack/unpack and z-core tables plus the shape scalars ``C``, ``Cp``, ``p``,
+        ``Bp``, ``md``, ``mdp``. Every ``*p`` entry is the power-of-two padded width
+        the Triton lowering requires.
     """
     p = int(order)
     C = sh_size(p)
@@ -217,8 +254,31 @@ def m2l_complex_fused_tables(order: int) -> dict:
 # --------------------------------------------------------------------------
 
 
-def _block_matmul(block_r, block_i, vec_r, vec_i):
-    """Complex block-diagonal matmul: out[b,i] = sum_j block[b,i,j] vec[b,j]."""
+def _block_matmul(
+    block_r: Array, block_i: Array, vec_r: Array, vec_i: Array
+) -> tuple[Array, Array]:
+    """Complex block-diagonal matmul: out[b,i] = sum_j block[b,i,j] vec[b,j].
+
+    Real and imaginary parts are carried as separate real arrays throughout this
+    module, not as a complex dtype: the Triton lowering handles real arithmetic, and
+    the complex boundary is applied only at the edges by the public wrappers.
+
+    Parameters
+    ----------
+    block_r : Array
+        Real part of the per-degree rotation blocks, shape ``(Bp, mdp, mdp)``.
+    block_i : Array
+        Imaginary part, same shape.
+    vec_r : Array
+        Real part of the packed coefficients, shape ``(Bp, mdp)``.
+    vec_i : Array
+        Imaginary part, same shape.
+
+    Returns
+    -------
+    tuple[Array, Array]
+        ``(out_r, out_i)``, each shape ``(Bp, mdp)``.
+    """
     # block: [B, md, md], vec: [B, md]  ->  [B, md]
     out_r = jnp.sum(block_r * vec_r[:, None, :], axis=-1) - jnp.sum(
         block_i * vec_i[:, None, :], axis=-1
@@ -229,17 +289,63 @@ def _block_matmul(block_r, block_i, vec_r, vec_i):
     return out_r, out_i
 
 
-def _matvec(mat, vec):
-    """out[i] = sum_j mat[i,j] * vec[j]  (gather-free; Triton-GPU friendly)."""
+def _matvec(mat: Array, vec: Array) -> Array:
+    """out[i] = sum_j mat[i,j] * vec[j]  (gather-free; Triton-GPU friendly).
+
+    Parameters
+    ----------
+    mat : Array
+        Dense operator, shape ``(rows, cols)``.
+    vec : Array
+        Vector, shape ``(cols,)``.
+
+    Returns
+    -------
+    Array
+        Shape ``(rows,)``.
+    """
     return jnp.sum(mat * vec[None, :], axis=1)
 
 
-def _m2l_one(mult_r, mult_i, bto_r, bto_i, bfrom_r, bfrom_i, r, t):
+def _m2l_one(
+    mult_r: Array,
+    mult_i: Array,
+    bto_r: Array,
+    bto_i: Array,
+    bfrom_r: Array,
+    bfrom_i: Array,
+    r: Array,
+    t: dict[str, Array],
+) -> tuple[Array, Array]:
     """Full M2L for one pair in real/imag; `t` = tables dict of jnp arrays.
 
     Gather-free formulation (constant one-hot select matrices + a dense z-core
     operator) so the Pallas Triton GPU backend can lower it. Arithmetically
     identical to the index/gather form validated in interpret mode.
+
+    Parameters
+    ----------
+    mult_r : Array
+        Real part of the padded source multipoles, shape ``(Cp,)``.
+    mult_i : Array
+        Imaginary part, same shape.
+    bto_r : Array
+        Real part of the rotation-to-z blocks, shape ``(Bp, mdp, mdp)``.
+    bto_i : Array
+        Imaginary part, same shape.
+    bfrom_r : Array
+        Real part of the rotation-from-z blocks, same shape.
+    bfrom_i : Array
+        Imaginary part, same shape.
+    r : Array
+        Scalar centre separation for this pair.
+    t : dict[str, Array]
+        Tables from :func:`_tables_to_jnp`, at the working real dtype.
+
+    Returns
+    -------
+    tuple[Array, Array]
+        ``(out_r, out_i)``, the padded local coefficients, each shape ``(Cp,)``.
     """
     Ppack = t["Ppack"]  # [Bp*mdp, Cp]
     Uunpack = t["Uunpack"]  # [Cp, Bp*mdp]
@@ -275,17 +381,58 @@ def _m2l_one(mult_r, mult_i, bto_r, bto_i, bfrom_r, bfrom_i, r, t):
     )
 
 
-def _matvec_T(mat, vec):
-    """out[j] = sum_i mat[i,j] * vec[i]  ==  (mat^T @ vec); the adjoint of _matvec."""
+def _matvec_T(mat: Array, vec: Array) -> Array:
+    """out[j] = sum_i mat[i,j] * vec[i]  ==  (mat^T @ vec); the adjoint of _matvec.
+
+    Parameters
+    ----------
+    mat : Array
+        The SAME operand :func:`_matvec` takes, shape ``(rows, cols)`` -- reducing the
+        other axis avoids materialising a transpose, which keeps Triton happy.
+    vec : Array
+        Cotangent, shape ``(rows,)``.
+
+    Returns
+    -------
+    Array
+        Shape ``(cols,)``.
+    """
     return jnp.sum(mat * vec[:, None], axis=0)
 
 
-def _block_matmul_vjp(block_r, block_i, vec_r, vec_i, or_bar, oi_bar):
+def _block_matmul_vjp(
+    block_r: Array,
+    block_i: Array,
+    vec_r: Array,
+    vec_i: Array,
+    or_bar: Array,
+    oi_bar: Array,
+) -> tuple[Array, Array, Array, Array]:
     """Reverse of :func:`_block_matmul` (complex block-diagonal matmul).
 
     Forward: ``o = block @ vec`` in complex (real/imag), i.e.
     ``o_r = Br vr - Bi vi``, ``o_i = Br vi + Bi vr`` (sum over j).
-    Returns ``(vr_bar, vi_bar, br_bar, bi_bar)`` -- all standard real adjoints.
+    Parameters
+    ----------
+    block_r : Array
+        Real part of the rotation blocks, shape ``(Bp, mdp, mdp)``.
+    block_i : Array
+        Imaginary part, same shape.
+    vec_r : Array
+        Real part of the primal input, shape ``(Bp, mdp)``.
+    vec_i : Array
+        Imaginary part, same shape.
+    or_bar : Array
+        Cotangent of ``out_r``, shape ``(Bp, mdp)``.
+    oi_bar : Array
+        Cotangent of ``out_i``, same shape.
+
+    Returns
+    -------
+    tuple[Array, Array, Array, Array]
+        ``(vr_bar, vi_bar, br_bar, bi_bar)`` -- all standard real adjoints. The vector
+        cotangents reduce over the output index; the block cotangents are outer
+        products of the output cotangent with the primal input.
     """
     # vec cotangents: sum over output index i (axis 1).
     vr_bar = jnp.sum(block_r * or_bar[:, :, None], axis=1) + jnp.sum(
@@ -305,8 +452,17 @@ def _block_matmul_vjp(block_r, block_i, vec_r, vec_i, or_bar, oi_bar):
 
 
 def _m2l_one_vjp(
-    mult_r, mult_i, bto_r, bto_i, bfr_r, bfr_i, r, out_r_bar, out_i_bar, t
-):
+    mult_r: Array,
+    mult_i: Array,
+    bto_r: Array,
+    bto_i: Array,
+    bfr_r: Array,
+    bfr_i: Array,
+    r: Array,
+    out_r_bar: Array,
+    out_i_bar: Array,
+    t: dict[str, Array],
+) -> tuple[Array, Array, Array, Array, Array, Array, Array]:
     """Fused reverse of :func:`_m2l_one` in the real/imag representation, for one pair.
 
     Takes the cotangents of the REAL outputs ``(out_r, out_i)`` and returns the
@@ -315,6 +471,35 @@ def _m2l_one_vjp(
     The complex<->(real,imag) boundary convention (``lax.complex``/``real``/``imag``
     transposes) is applied by the caller ``m2l_complex_fused_vjp_pallas``; this
     routine is a pure real-multilinear reverse, so it needs no complex convention.
+
+    Parameters
+    ----------
+    mult_r : Array
+        Real part of the primal padded multipoles, shape ``(Cp,)``.
+    mult_i : Array
+        Imaginary part, same shape.
+    bto_r : Array
+        Real part of the primal rotation-to-z blocks, shape ``(Bp, mdp, mdp)``.
+    bto_i : Array
+        Imaginary part, same shape.
+    bfr_r : Array
+        Real part of the primal rotation-from-z blocks, same shape.
+    bfr_i : Array
+        Imaginary part, same shape.
+    r : Array
+        Scalar primal centre separation.
+    out_r_bar : Array
+        Cotangent of the real output part, shape ``(Cp,)``.
+    out_i_bar : Array
+        Cotangent of the imaginary output part, same shape.
+    t : dict[str, Array]
+        Tables from :func:`_tables_to_jnp`.
+
+    Returns
+    -------
+    tuple[Array, Array, Array, Array, Array, Array, Array]
+        ``(mult_r_bar, mult_i_bar, bto_r_bar, bto_i_bar, bfr_r_bar, bfr_i_bar,
+        r_bar)``.
     """
     Ppack = t["Ppack"]
     Uunpack = t["Uunpack"]
@@ -379,9 +564,43 @@ def _tables_to_jnp(order, real_dtype):
     )
 
 
-def _pad_pair_inputs(mr, mi, bto_r, bto_i, bfr_r, bfr_i, dims):
-    """Zero-pad multipoles [N,C]->[N,Cp] and blocks [N,p+1,md,md]->[N,Bp,mdp,mdp]
-    to the power-of-2 extents the tables use (inert; masked by pack/z valid)."""
+def _pad_pair_inputs(
+    mr: Array,
+    mi: Array,
+    bto_r: Array,
+    bto_i: Array,
+    bfr_r: Array,
+    bfr_i: Array,
+    dims: tuple[int, ...],
+) -> tuple[Array, Array, Array, Array, Array, Array]:
+    """Zero-pad multipoles and rotation blocks to the tables' power-of-2 extents.
+
+    ``[N, C] -> [N, Cp]`` and ``[N, p+1, md, md] -> [N, Bp, mdp, mdp]``. The padding
+    is inert: the pack/unpack one-hot matrices and the z-core have exact zeros in the
+    padded lanes, so padded entries contribute nothing to any reduction.
+
+    Parameters
+    ----------
+    mr : Array
+        Real part of the multipoles, shape ``(N, C)``.
+    mi : Array
+        Imaginary part, same shape.
+    bto_r : Array
+        Real part of the rotation-to-z blocks, shape ``(N, p+1, md, md)``.
+    bto_i : Array
+        Imaginary part, same shape.
+    bfr_r : Array
+        Real part of the rotation-from-z blocks, same shape.
+    bfr_i : Array
+        Imaginary part, same shape.
+    dims : tuple[int, ...]
+        ``(C, Cp, B, Bp, md, mdp)`` from :func:`_pair_pad_dims`.
+
+    Returns
+    -------
+    tuple[Array, Array, Array, Array, Array, Array]
+        The six inputs, padded, in the same order.
+    """
     C, Cp, B, Bp, md, mdp = dims
     mpad = ((0, 0), (0, Cp - C))
     bpad = ((0, 0), (0, Bp - B), (0, mdp - md), (0, mdp - md))
@@ -410,8 +629,30 @@ def m2l_complex_fused_jax(
 ) -> Array:
     """Pure-jnp reference for the fused kernel (vmapped over pairs).
 
-    multipoles: [N, C] complex; blocks_*: [N, p+1, md, md] complex; r: [N].
-    Returns [N, C] complex local contributions.
+    Parameters
+    ----------
+    multipoles : Array
+        Source multipole coefficients, shape ``(N, C)``, COMPLEX.
+    blocks_to_z : Array
+        Complex rotation blocks aligning each pair axis to +z, shape
+        ``(N, p+1, md, md)``.
+    blocks_from_z : Array
+        Complex rotation blocks back from +z, same shape.
+    r : Array
+        Per-pair centre separation, shape ``(N,)``.
+    order : int
+        Expansion order, fixing the tables and padded widths.
+
+    Returns
+    -------
+    Array
+        Complex local contributions, shape ``(N, C)``.
+
+    Notes
+    -----
+    The correctness reference for the Pallas forward, and what the ``custom_vjp``
+    reverse differentiates when ``JACCPOT_FUSED_M2L_VJP=0`` -- so it must remain a
+    transcription of the same operator rather than an independent implementation.
     """
     real_dtype = jnp.asarray(multipoles).real.dtype
     t = _tables_to_jnp(order, real_dtype)
@@ -457,15 +698,48 @@ _TABLE_KEYS = (
 
 
 def _m2l_complex_fused_kernel(
-    mult_r_ref,
-    mult_i_ref,
-    bto_r_ref,
-    bto_i_ref,
-    bfr_r_ref,
-    bfr_i_ref,
-    r_ref,
-    *table_and_out_refs,
-):
+    mult_r_ref: KernelRef,
+    mult_i_ref: KernelRef,
+    bto_r_ref: KernelRef,
+    bto_i_ref: KernelRef,
+    bfr_r_ref: KernelRef,
+    bfr_i_ref: KernelRef,
+    r_ref: KernelRef,
+    *table_and_out_refs: KernelRef,
+) -> None:
+    """Forward kernel: one program instance per pair, one fused complex M2L.
+
+    Real and imaginary parts arrive as SEPARATE real refs, not a complex block: the
+    Triton lowering does real arithmetic, and the complex boundary is applied by the
+    wrapper.
+
+    Parameters
+    ----------
+    mult_r_ref : KernelRef
+        Real part of the padded source multipoles for this pair, shape ``(1, Cp)``.
+    mult_i_ref : KernelRef
+        Imaginary part, same shape.
+    bto_r_ref : KernelRef
+        Real part of the rotation-to-z blocks, shape ``(1, Bp, mdp, mdp)``.
+    bto_i_ref : KernelRef
+        Imaginary part, same shape.
+    bfr_r_ref : KernelRef
+        Real part of the rotation-from-z blocks, same shape.
+    bfr_i_ref : KernelRef
+        Imaginary part, same shape.
+    r_ref : KernelRef
+        Centre separation for this pair, shape ``(1,)``.
+    *table_and_out_refs : KernelRef
+        The ``_TABLE_KEYS`` operator tables followed by the TWO output refs (real and
+        imaginary). Variadic because ``pallas_call`` passes inputs then outputs
+        positionally; the tables are replicated inputs because Pallas forbids
+        capturing them as constants.
+
+    Returns
+    -------
+    None
+        The results are the writes to the two output refs.
+    """
     # last two refs are outputs; the rest (len(_TABLE_KEYS)) are the tables,
     # passed as replicated inputs (Pallas forbids capturing them as constants).
     table_refs = table_and_out_refs[: len(_TABLE_KEYS)]
@@ -506,6 +780,30 @@ def m2l_complex_fused_pallas(
     per-pair blocks here are (p+1)^2 elements = 72/200 bytes). Triton handles the
     small, gather-heavy per-pair tiles and fp64. ``interpret=True`` ignores the
     backend and runs CPU semantics.
+
+    Parameters
+    ----------
+    multipoles : Array
+        Complex source multipole coefficients, shape ``(N, C)``.
+    blocks_to_z : Array
+        Complex rotation blocks aligning each pair axis to +z, shape
+        ``(N, p+1, md, md)``.
+    blocks_from_z : Array
+        Complex rotation blocks back from +z, same shape.
+    r : Array
+        Per-pair centre separation, shape ``(N,)``.
+    order : int
+        Expansion order. Static: it fixes the tables and the padded tile widths.
+    interpret : bool
+        Run under Pallas interpret mode (CPU semantics, no lowering).
+    backend : str
+        Pallas GPU lowering, ``"triton"`` by default.
+
+    Returns
+    -------
+    Array
+        Complex local contributions, shape ``(N, C)`` -- sliced back from the padded
+        ``Cp`` width, so callers never see the padding.
     """
     p = int(order)
     N = multipoles.shape[0]
@@ -568,17 +866,49 @@ def m2l_complex_fused_pallas(
 
 
 def _m2l_complex_fused_vjp_kernel(
-    mult_r_ref,
-    mult_i_ref,
-    bto_r_ref,
-    bto_i_ref,
-    bfr_r_ref,
-    bfr_i_ref,
-    r_ref,
-    obar_r_ref,
-    obar_i_ref,
-    *table_and_out_refs,
-):
+    mult_r_ref: KernelRef,
+    mult_i_ref: KernelRef,
+    bto_r_ref: KernelRef,
+    bto_i_ref: KernelRef,
+    bfr_r_ref: KernelRef,
+    bfr_i_ref: KernelRef,
+    r_ref: KernelRef,
+    obar_r_ref: KernelRef,
+    obar_i_ref: KernelRef,
+    *table_and_out_refs: KernelRef,
+) -> None:
+    """Reverse kernel: the analytic complex-M2L VJP for one pair, on-chip.
+
+    Parameters
+    ----------
+    mult_r_ref : KernelRef
+        Real part of the primal padded multipoles, shape ``(1, Cp)``.
+    mult_i_ref : KernelRef
+        Imaginary part, same shape.
+    bto_r_ref : KernelRef
+        Real part of the primal rotation-to-z blocks, shape ``(1, Bp, mdp, mdp)``.
+    bto_i_ref : KernelRef
+        Imaginary part, same shape.
+    bfr_r_ref : KernelRef
+        Real part of the primal rotation-from-z blocks, same shape.
+    bfr_i_ref : KernelRef
+        Imaginary part, same shape.
+    r_ref : KernelRef
+        Primal centre separation, shape ``(1,)``.
+    obar_r_ref : KernelRef
+        Cotangent of the real output part, shape ``(1, Cp)``.
+    obar_i_ref : KernelRef
+        Cotangent of the imaginary output part, same shape.
+    *table_and_out_refs : KernelRef
+        The ``_TABLE_KEYS`` tables followed by the SEVEN cotangent output refs, in the
+        order :func:`_m2l_one_vjp` returns them. Same split-by-``len(_TABLE_KEYS)``
+        convention as the forward kernel.
+
+    Returns
+    -------
+    None
+        The results are the writes to the cotangent refs.
+    """
     table_refs = table_and_out_refs[: len(_TABLE_KEYS)]
     (
         mr_bar_ref,
@@ -630,6 +960,32 @@ def m2l_complex_fused_vjp_pallas(
     transposes use the conjugate convention, so we feed ``out_i_bar = -imag(out_bar)``
     and recombine each complex input cotangent as ``complex(re_bar, -im_bar)`` (this
     reproduces ``jax.vjp`` of the twin exactly -- verified in the parity tests).
+
+    Parameters
+    ----------
+    multipoles : Array
+        Complex source multipole coefficients, shape ``(N, C)``.
+    blocks_to_z : Array
+        Complex rotation blocks aligning each pair axis to +z, shape
+        ``(N, p+1, md, md)``.
+    blocks_from_z : Array
+        Complex rotation blocks back from +z, same shape.
+    r : Array
+        Per-pair centre separation, shape ``(N,)``.
+    out_bar : Array
+        Cotangent of the forward output, shape ``(N, C)``, complex.
+    order : int
+        Expansion order. Static: it fixes the tables and the padded tile widths.
+    interpret : bool
+        Run under Pallas interpret mode (CPU semantics, no lowering).
+    backend : str
+        Pallas GPU lowering, ``"triton"`` by default.
+
+    Returns
+    -------
+    tuple[Array, Array, Array, Array]
+        ``(mult_bar, bto_bar, bfr_bar, r_bar)`` at the ORIGINAL unpadded complex
+        input shapes.
     """
     p = int(order)
     N = multipoles.shape[0]
@@ -742,6 +1098,30 @@ def m2l_complex_fused_pallas_cvjp(
 
     Forward is byte-identical to :func:`m2l_complex_fused_pallas`; the reverse is
     autodiff through :func:`m2l_complex_fused_jax`.
+
+    Parameters
+    ----------
+    multipoles : Array
+        Complex source multipole coefficients, shape ``(N, C)``.
+    blocks_to_z : Array
+        Complex rotation blocks aligning each pair axis to +z, shape
+        ``(N, p+1, md, md)``.
+    blocks_from_z : Array
+        Complex rotation blocks back from +z, same shape.
+    r : Array
+        Per-pair centre separation, shape ``(N,)``.
+    order : int
+        Expansion order. ``nondiff_argnums`` -- a Pallas static, hence positional
+        here even though the wrapped function takes it keyword-only.
+    interpret : bool
+        Interpret mode for the forward. ``nondiff_argnums``.
+    backend : str
+        Pallas GPU lowering for the forward. ``nondiff_argnums``.
+
+    Returns
+    -------
+    Array
+        Complex local contributions, shape ``(N, C)``.
     """
     return m2l_complex_fused_pallas(
         multipoles,
