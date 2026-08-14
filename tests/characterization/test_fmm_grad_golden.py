@@ -24,12 +24,28 @@ float64 round-off can.
 On every run it re-computes and asserts:
 
 1. **Inertness gate** -- gradients match the committed ``.npz`` under
-   ``tests/characterization/golden_grad/`` to float64 round-off
-   (``rtol=1e-12, atol=1e-12``). A structural refactor MUST NOT move these.
+   ``tests/characterization/golden_grad/`` to float64 round-off. A structural
+   refactor MUST NOT move these. It has two forms:
+
+   a. **per particle**, on every device: the relative error of each particle's
+      gradient *vector* is under ``INERT_PER_PARTICLE_RTOL`` (1e-12). This is the
+      portable bound, and it is the one that means something on a GPU -- see that
+      constant for why an elementwise relative tolerance is the wrong norm for a
+      vector quantity, and ``docs/g9_grad_golden_gpu_diagnosis.md`` for the
+      cross-device failure that established it.
+   b. **elementwise**, on CPU only: the stricter
+      ``rtol=atol=1e-12`` form, which additionally catches an error confined to one
+      small component of one particle. The goldens are CPU-generated and hold there
+      with ~130x margin, so this is asserted where it is a real claim rather than
+      widened into a formality elsewhere.
+
 2. **Physics anchor** -- each gradient agrees with ``jax.grad`` of the
    **direct O(N^2) sum** (:func:`differentiable_gravitational_acceleration`, the
    documented gradient oracle) to a measured per-order bound, so a regenerated
    golden can never silently snapshot a wrong gradient.
+
+:func:`test_per_particle_gate_still_rejects_a_scaled_reverse_rule` guards gate 1a
+against becoming a formality, by mutation rather than by argument.
 
 Regenerate intentionally with ``JACCPOT_REGEN_GOLDEN=1 pytest ...`` -- the same
 switch the forward oracle uses, so one command refreshes both -- then commit the
@@ -63,6 +79,37 @@ SOFTENING = 1.0e-2
 # values as the forward oracle, for the same reason.
 INERT_RTOL = 1.0e-12
 INERT_ATOL = 1.0e-12
+
+# The device-portable inertness bound: the relative error of each particle's
+# gradient, measured per particle rather than per array element.
+#
+# Why a second statistic exists. ``grad_positions`` is a 3-vector per particle, and
+# its round-off is proportional to the magnitude of the *vector* -- the three
+# components are formed by summing terms of the same size, so they inherit the same
+# absolute error. An elementwise relative tolerance divides that shared absolute
+# error by each component's own value, so a component that happens to be small
+# relative to its own vector reports a huge relative error while nothing is wrong.
+#
+# That is what audit G.9's cross-device failure turned out to be
+# (``docs/g9_grad_golden_gpu_diagnosis.md``). On an A100, ``clu_real_n128_p4``
+# particle 57 has gradient (-1.689e5, +8.747e4, -2.619e2): the 6th largest vector
+# of 128, with a z-component 726x smaller than the vector norm. The absolute drift
+# is ~2e-9 on all three components; divided by |z| it reads 7.94e-12 and breaks the
+# 1e-12 gate, while divided by the vector norm it is 1.09e-14. Diagnosed as
+# reassociation, not a defect: the accepted M2L set is bit-identical across devices,
+# ``--xla_gpu_deterministic_ops=true`` changes the number only in its 5th digit, and
+# the particle sits 6-7 orders away from any transverse-degeneracy guard.
+#
+# Measured max per-particle relative error, all six cases, jax 0.10.2:
+#
+#     grad_positions   CPU 1.4e-15 (6 ULP)    A100 1.7e-14 (77 ULP)
+#     grad_masses      CPU 2.6e-16 (1 ULP)    A100 2.0e-13 (898 ULP)
+#
+# 1e-12 keeps 58x margin on positions and 5x on masses over the worst A100 case.
+# For ``grad_masses`` this statistic *is* the elementwise one -- a scalar per
+# particle has no components to normalise across -- so nothing is loosened there;
+# it is written once and applied to both arrays for symmetry.
+INERT_PER_PARTICLE_RTOL = 1.0e-12
 
 # Physics anchor: grad(FMM) vs grad(direct sum). Keyed by expansion order, because
 # the gradient inherits the forward truncation error and a single bound would waste
@@ -227,6 +274,46 @@ def _relative_l2(got: np.ndarray, want: np.ndarray) -> float:
     return float(np.linalg.norm(got - want) / (np.linalg.norm(want) + 1e-300))
 
 
+def _per_particle_relative_error(got: np.ndarray, want: np.ndarray) -> np.ndarray:
+    """Relative error of each particle's gradient, normalised by its own magnitude.
+
+    For ``grad_positions`` (shape ``[n, 3]``) that magnitude is the 3-vector norm,
+    so the three components share one denominator instead of each dividing the
+    shared absolute round-off by its own value. For ``grad_masses`` (shape ``[n]``)
+    it reduces to the ordinary elementwise relative error. See
+    :data:`INERT_PER_PARTICLE_RTOL`.
+
+    Parameters
+    ----------
+    got : np.ndarray
+        Recomputed gradient, shape ``[n, 3]`` or ``[n]``.
+    want : np.ndarray
+        Committed golden of the same shape.
+
+    Returns
+    -------
+    np.ndarray
+        Per-particle relative error, shape ``[n]``.
+
+    Raises
+    ------
+    AssertionError
+        If ``got`` and ``want`` do not have the same shape.
+    """
+    if got.shape != want.shape:
+        raise AssertionError(f"shape mismatch: {got.shape} vs {want.shape}")
+    # axis=() for a 1-D input, which numpy treats as "reduce nothing" -- each
+    # element is already its own particle. Do NOT collapse the empty tuple to None:
+    # that would sum the whole array to a scalar.
+    axis = tuple(range(1, want.ndim))
+    magnitude = np.sqrt(np.sum(np.square(want), axis=axis))
+    residual = np.sqrt(np.sum(np.square(got - want), axis=axis))
+    # 1e-300 rather than 0 so an all-zero particle yields 0.0, not a NaN. A genuine
+    # zero gradient with a nonzero residual still reports a huge error, which is
+    # the intended behaviour.
+    return residual / np.maximum(magnitude, 1e-300)
+
+
 @pytest.mark.skipif(
     not jax.config.jax_enable_x64,
     reason="gradient golden characterization requires float64 (JAX_ENABLE_X64=1)",
@@ -281,6 +368,33 @@ def test_fmm_grad_golden(
         return
 
     golden = np.load(path)
+
+    # Gate 1a, every device: the per-particle relative error. This is the bound that
+    # is portable across devices, and it is tight -- see INERT_PER_PARTICLE_RTOL.
+    for label, got in (
+        ("grad_positions", grad_positions),
+        ("grad_masses", grad_masses),
+    ):
+        drift = _per_particle_relative_error(got, golden[label])
+        worst = int(np.argmax(drift))
+        assert drift[worst] < INERT_PER_PARTICLE_RTOL, (
+            f"{case_id}: {label} drifted from the committed golden -- "
+            f"per-particle relative error {drift[worst]:.3e} > "
+            f"{INERT_PER_PARTICLE_RTOL:.0e} at particle {worst} "
+            f"(backend={jax.default_backend()})"
+        )
+
+    # Gate 1b, CPU only: the stricter elementwise form, which additionally catches
+    # an error confined to one small component of one particle -- a sensitivity
+    # gate 1a gives up below ~1e-10 on that component. The goldens were generated
+    # on CPU and hold there with ~130x margin (measured 7.8e-15 against 1e-12), so
+    # this is asserted where it is a real claim.
+    #
+    # This is NOT the same as loosening the gate off CPU: off-CPU coverage is gate
+    # 1a at a full 1e-12 on a physically meaningful statistic, not a widened
+    # elementwise band. G.9 option (2), not option (3).
+    if jax.default_backend() != "cpu":
+        return
     for label, got in (
         ("grad_positions", grad_positions),
         ("grad_masses", grad_masses),
@@ -318,3 +432,51 @@ def test_grad_golden_leaf_size_is_what_makes_the_far_field_nonempty() -> None:
         "if a shallow tree now accepts M2L pairs, the vacuity gate is no longer "
         "guarding anything and LEAF_SIZE can be revisited"
     )
+
+
+def test_per_particle_gate_still_rejects_a_scaled_reverse_rule() -> None:
+    """The portable gate must not have become a formality.
+
+    :data:`INERT_PER_PARTICLE_RTOL` normalises by the particle's gradient magnitude
+    rather than by each component, which is what makes it device-portable. That
+    trade is only acceptable if it still rejects the regression this module exists
+    to catch, so the mutation is applied here rather than argued about: scaling the
+    analytic real L2P reverse rule by ``1 + 1e-6`` is the perturbation
+    ``ARCHITECTURE.md`` section 9 records as invisible to the *forward* golden and
+    fatal to this one.
+
+    Applied to the committed goldens it moves the gradient 1e-6 relative, six
+    orders above the bound. Also checked: a perturbation confined to a single
+    component of a single particle, which is the case the per-particle norm is
+    least sensitive to, is still caught at 1e-9 -- and 1e-9 is two orders below the
+    A100's own reproducibility floor at that element (7.9e-12), so nothing
+    detectable is being given up off CPU.
+    """
+    paths = sorted(GOLDEN_DIR.glob("*.npz"))
+    assert paths, "no gradient goldens found"
+
+    for path in paths:
+        golden = np.load(path)["grad_positions"]
+
+        scaled = golden * (1.0 + 1.0e-6)
+        drift = _per_particle_relative_error(scaled, golden).max()
+        assert drift > INERT_PER_PARTICLE_RTOL, (
+            f"{path.stem}: a 1e-6 scaling of the reverse rule slips through the "
+            f"per-particle gate ({drift:.3e} <= {INERT_PER_PARTICLE_RTOL:.0e}); it "
+            "has stopped being a tripwire"
+        )
+
+    # The single-component case, on the case that motivated the gate.
+    golden = np.load(GOLDEN_DIR / "clu_real_n128_p4.npz")["grad_positions"]
+    smallest = np.unravel_index(
+        np.argmax(np.linalg.norm(golden, axis=1, keepdims=True) / np.abs(golden)),
+        golden.shape,
+    )
+    for relative in (1.0e-6, 1.0e-9):
+        mutated = golden.copy()
+        mutated[smallest] *= 1.0 + relative
+        drift = _per_particle_relative_error(mutated, golden).max()
+        assert drift > INERT_PER_PARTICLE_RTOL, (
+            f"a {relative:.0e} perturbation of the smallest component of particle "
+            f"{smallest[0]} slips through the per-particle gate ({drift:.3e})"
+        )
