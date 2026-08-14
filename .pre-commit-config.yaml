@@ -44,12 +44,15 @@ repos:
         # satisfy the linter. The three defects this hook exists for were all
         # undefined names.
         args: ["--select=F821,F822"]
-        # Scoped to the shipped package. `examples/` and `bench/` are exempt from the
-        # test-first rule by CLAUDE.md and carry pre-existing findings of their own
-        # (14 F821 in one benchmark worker alone); pulling them in would mean
-        # reformatting files this change does not otherwise touch. Widen when someone
-        # wants to clean those up as its own PR.
-        files: ^jaccpot/
+        # NOT scoped: the whole repo, `examples/` and `bench/` and `tests/` included.
+        # It was `files: ^jaccpot/` when introduced, because
+        # `examples/benchmark_gpu_radix_worker.py` carried 14 pre-existing F821s and
+        # cleaning them was its own PR. That PR happened; the count across every
+        # tracked file is now zero, so the restriction is gone.
+        #
+        # `bench/` and `examples/` are exempt from CLAUDE.md's test-first rule, which
+        # is about *tests*, not about whether a name resolves -- an undefined name in a
+        # benchmark is still a crash waiting for the branch that reaches it.
 
   - repo: local
     hooks:
