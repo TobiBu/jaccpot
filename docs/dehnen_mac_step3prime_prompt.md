@@ -1,5 +1,24 @@
 # Session prompt — Step 3′: get the Dehnen mass MAC into the large-N lane
 
+> **CLOSED — this work is done, and this file is kept for its traps, not its task
+> list.** All three phases landed on this branch and the acceptance measurement was
+> taken: N = 10⁶, leaf 256, p = 8, fp32, on the large-N lane. The results live in
+> [`dehnen_mass_mac_status_and_plan.md`](dehnen_mass_mac_status_and_plan.md) and the
+> artifacts in `bench/results/validation/` (`mac_1e6_leaf256_lane.json`,
+> `census_1e6_leaf256.json`, `pair_policy_far_tag_memory_1m.json`).
+>
+> Do not run it as a brief. The section that still earns its place is **Traps
+> specific to this work** — Phase 0's cache-key hazard in particular, which is a
+> silent wrong-answer bug, not a slow one. CONTRIBUTING.md's *Writing a validation
+> handoff* asks that a result be recorded somewhere durable and linked, rather than
+> re-derived; this header is that link.
+>
+> Note that N = 10⁷ in the Goal below was **not** reached — 10⁶ was. The census
+> OOMed on a 4.77 GiB allocation inside `_dual_tree_build_raw`, and the blocker is
+> identified rather than guessed: a stale split-build predicate. See
+> *N = 10⁷ — NOT reached* in the status document before attempting it, and in
+> particular do not carry the 10⁶ traversal capacities over.
+
 Paste this into a fresh session. Self-contained: it names every file, gate and hazard,
 and the measurement that closes it out.
 
