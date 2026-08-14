@@ -111,7 +111,73 @@ def _compute_leaf_p2p_prepared_large_n_pairs_only_impl(
     superchunk_target_reduce: bool,
     disable_chunk_cond: bool,
 ) -> Array:
-    """Cross-leaf pair-bucket portion of the specialized large-N kernel."""
+    """Cross-leaf pair-bucket portion of the specialized large-N kernel.
+
+    The edge-list half of the large-N bucketed lane: cross-leaf pairs only, no
+    intra-leaf self block (its caller adds that). Edges are consumed in fixed-size
+    chunks grouped into superchunks so every shape is static.
+
+    Differentiable in ``positions``, ``leaf_positions`` and ``leaf_masses``.
+
+    Parameters
+    ----------
+    positions : Array
+        Particle positions ``[N, 3]``; also fixes the output shape.
+    target_leaf_ids : Array
+        Target leaf id per edge, ``[num_edges]``.
+    source_leaf_ids : Array
+        Source leaf id per edge, ``[num_edges]``.
+    valid_pairs : Array
+        Per-edge validity ``[num_edges]``; padded edges contribute exactly zero.
+    leaf_positions : Array
+        Padded per-leaf positions ``[num_leaves, W, 3]``.
+    leaf_masses : Array
+        Padded per-leaf masses ``[num_leaves, W]``.
+    leaf_mask : Array
+        Padded per-leaf validity ``[num_leaves, W]``; masked slots contribute
+        exactly zero.
+    leaf_particle_idx : Array
+        Particle index behind each padded slot ``[num_leaves, W]``, clipped so a
+        masked slot cannot gather out of bounds. Also fixes ``W``.
+    G : Union[float, Array]
+        Gravitational constant.
+    softening_sq : Array
+        Squared Plummer softening length.
+    edge_chunk_size : int
+        Edges per chunk. Static under ``jit``; batching only.
+    chunks_per_superchunk : int
+        Chunks grouped into one superchunk before the target reduction. Static
+        under ``jit``.
+    chunk_scan_batch_size : int
+        Chunks consumed per scan step. Static under ``jit``.
+    chunk_scan_unroll : int
+        Unroll factor for the chunk scan. Static under ``jit``.
+    superchunk_scan_unroll : int
+        Unroll factor for the superchunk scan. Static under ``jit``.
+    sorted_scatter_hint : bool
+        Tell the scatter its indices are sorted. Static under ``jit``. A *promise*,
+        not a request: it must match the data or the scatter is wrong.
+    grouped_sorted_scatter : bool
+        Use the segment-grouped scatter. Static under ``jit``; same caveat.
+    superchunk_target_reduce : bool
+        Reduce per target leaf within a superchunk before scattering. Static under
+        ``jit``; changes the summation *grouping*, so it can move the last digits.
+    disable_chunk_cond : bool
+        Skip the per-chunk ``lax.cond`` early-out. Static under ``jit``.
+
+    Returns
+    -------
+    Array
+        Per-particle accelerations ``[N, 3]``, zero outside this kernel's share.
+
+    Raises
+    ------
+    ValueError
+        If any of ``edge_chunk_size``, ``chunks_per_superchunk``,
+        ``chunk_scan_batch_size``, ``chunk_scan_unroll`` or
+        ``superchunk_scan_unroll`` is not positive. These size a traced shape, so a
+        zero would be a shape error rather than a slow configuration.
+    """
     dtype = positions.dtype
     g_const = jnp.asarray(G, dtype=dtype)
     accelerations = jnp.zeros_like(positions)
@@ -303,7 +369,48 @@ def _accumulate_target_block_tile_sequence(
     skip_empty_tiles: bool = False,
     componentwise_pairs: bool = False,
 ) -> Array:
-    """Accumulate target-leaf accelerations from fixed-shape tile sequences."""
+    """Accumulate target-leaf accelerations from fixed-shape tile sequences.
+
+    The innermost target-owned loop: one batch of target leaves against a sequence
+    of source tiles, accumulated in place. Every tile has the same shape, which is
+    what lets the reverse pass retain a residual proportional to the *tile* rather
+    than to the edge list -- the property that makes gradients fit at galaxy N.
+
+    Parameters
+    ----------
+    target_pos : Array
+        Target-leaf positions for this batch ``[batch, W, 3]``.
+    target_mask : Array
+        Target-leaf validity ``[batch, W]``.
+    tile_source_ids_seq : Array
+        Source leaf ids per tile, ``[num_tiles, batch, lanes]``.
+    tile_source_valid_seq : Array
+        Per-lane validity with the same shape as ``tile_source_ids_seq``.
+    leaf_positions : Array
+        Padded per-leaf positions ``[num_leaves, W, 3]``.
+    leaf_masses : Array
+        Padded per-leaf masses ``[num_leaves, W]``.
+    leaf_mask : Array
+        Padded per-leaf validity ``[num_leaves, W]``; masked slots contribute
+        exactly zero.
+    g_const : Array
+        Gravitational constant, pre-cast to the working dtype.
+    softening_sq : Array
+        Squared Plummer softening length.
+    tile_unroll : int
+        Unroll factor for the tile scan. Static under ``jit``; batching only.
+    skip_empty_tiles : bool
+        Skip tiles whose lanes are all invalid. Static under ``jit``. Safe because
+        an all-invalid tile contributes exactly zero.
+    componentwise_pairs : bool
+        Use the ``dx``/``dy``/``dz`` pair kernel instead of the vector one. Static
+        under ``jit``; avoids materialising a ``[batch, W, W, 3]`` difference.
+
+    Returns
+    -------
+    Array
+        Accumulated accelerations for this target batch, ``[batch, W, 3]``.
+    """
     dtype = target_pos.dtype
     leaf_batch = int(target_pos.shape[0])
     block_tile = int(tile_source_ids_seq.shape[2])
@@ -435,7 +542,57 @@ def _compute_target_block_pairs_from_source_tiles(
     skip_empty_tiles: bool = False,
     componentwise_pairs: bool = False,
 ) -> Array:
-    """Evaluate TONB pair contributions from canonical [tile, leaf, lane_block, lane] tensors."""
+    """Evaluate TONB pair contributions from canonical tiled source tensors.
+
+    Target-owned-neighbour-block (TONB) evaluation from the canonical
+    ``[tile, leaf, lane_block, lane]`` layout, i.e. source tiles already arranged
+    per target leaf. Wraps :func:`_accumulate_target_block_tile_sequence` in the
+    target-batch scan and scatters the result back to particle order.
+
+    Parameters
+    ----------
+    positions : Array
+        Particle positions ``[N, 3]``; also fixes the output shape.
+    source_leaf_ids_tiles : Array
+        Source leaf ids in the canonical tiled layout.
+    source_valid_tiles : Array
+        Per-lane validity with the same shape as ``source_leaf_ids_tiles``.
+    leaf_positions : Array
+        Padded per-leaf positions ``[num_leaves, W, 3]``.
+    leaf_masses : Array
+        Padded per-leaf masses ``[num_leaves, W]``.
+    leaf_mask : Array
+        Padded per-leaf validity ``[num_leaves, W]``; masked slots contribute
+        exactly zero.
+    leaf_particle_idx : Array
+        Particle index behind each padded slot ``[num_leaves, W]``, clipped so a
+        masked slot cannot gather out of bounds. Also fixes ``W``.
+    g_const : Array
+        Gravitational constant, pre-cast to the working dtype.
+    softening_sq : Array
+        Squared Plummer softening length.
+    target_leaf_batch_size : int
+        Target leaves per scan step. Static under ``jit``; batching only.
+    target_block_tile_scan_unroll : int
+        Unroll factor for the tile scan. Static under ``jit``.
+    target_block_batch_scan_unroll : int
+        Unroll factor for the target-batch scan. Static under ``jit``.
+    skip_empty_tiles : bool
+        Skip all-invalid tiles. Static under ``jit``.
+    componentwise_pairs : bool
+        Use the componentwise pair kernel. Static under ``jit``.
+
+    Returns
+    -------
+    Array
+        Per-particle accelerations ``[N, 3]``, zero outside this kernel's share.
+
+    Raises
+    ------
+    ValueError
+        If ``target_leaf_batch_size``, ``target_block_tile_scan_unroll`` or
+        ``target_block_batch_scan_unroll`` is not positive.
+    """
     num_leaves = int(leaf_positions.shape[0])
     leaf_size = int(leaf_positions.shape[1])
 
@@ -528,7 +685,57 @@ def _compute_leaf_p2p_prepared_large_n_pairs_target_blocks_impl(
     target_block_tile_scan_unroll: int,
     target_block_batch_scan_unroll: int,
 ) -> Array:
-    """Target-owned pair path over prepacked fixed-width source-leaf blocks."""
+    """Target-owned pair path over prepacked fixed-width source-leaf blocks.
+
+    TONB from a ``block_offsets`` run-length layout: each target leaf owns a
+    contiguous run of fixed-width source blocks. Cross-leaf pairs only.
+
+    Parameters
+    ----------
+    positions : Array
+        Particle positions ``[N, 3]``; also fixes the output shape.
+    block_offsets : Array
+        Start offset of each target leaf's block run, ``[num_leaves + 1]``.
+    block_target_leaf_ids : Array
+        Target leaf id per block, ``[num_blocks]``.
+    block_source_leaf_ids : Array
+        Source leaf ids per block, ``[num_blocks, lanes]``.
+    block_valid_mask : Array
+        Per-lane validity with the same shape as ``block_source_leaf_ids``.
+    leaf_positions : Array
+        Padded per-leaf positions ``[num_leaves, W, 3]``.
+    leaf_masses : Array
+        Padded per-leaf masses ``[num_leaves, W]``.
+    leaf_mask : Array
+        Padded per-leaf validity ``[num_leaves, W]``; masked slots contribute
+        exactly zero.
+    leaf_particle_idx : Array
+        Particle index behind each padded slot ``[num_leaves, W]``, clipped so a
+        masked slot cannot gather out of bounds. Also fixes ``W``.
+    G : Union[float, Array]
+        Gravitational constant.
+    softening_sq : Array
+        Squared Plummer softening length.
+    target_leaf_batch_size : int
+        Target leaves per scan step. Static under ``jit``; batching only.
+    target_block_tile_size : int
+        Source-leaf lanes per tile. Static under ``jit``; batching only.
+    target_block_tile_scan_unroll : int
+        Unroll factor for the tile scan. Static under ``jit``; batching only.
+    target_block_batch_scan_unroll : int
+        Unroll factor for the target-batch scan. Static under ``jit``; batching only.
+
+    Returns
+    -------
+    Array
+        Per-particle accelerations ``[N, 3]``, zero outside this kernel's share.
+
+    Raises
+    ------
+    ValueError
+        If any of the four ``target_block*`` / ``target_leaf_batch_size`` knobs is
+        not positive.
+    """
     del block_target_leaf_ids  # kept for API compatibility with prepared state
 
     dtype = positions.dtype
@@ -650,7 +857,67 @@ def _compute_leaf_p2p_prepared_large_n_pairs_target_blocks_prepacked_impl(
     skip_empty_tiles: bool = False,
     componentwise_pairs: bool = False,
 ) -> Array:
-    """Target-major prepacked TONB path over [leaf, block, lane] prepared layout."""
+    """Target-major prepacked TONB path over the ``[leaf, block, lane]`` layout.
+
+    The production large-N gradient path. Sources arrive already padded to a
+    rectangle per target leaf, so no offset arithmetic happens at trace time --
+    which is what keeps the reverse pass's residual proportional to the block.
+
+    That rectangle is also the cost: it is padded to the global maximum neighbour
+    count, and ``bench/audit_nearfield_padding.py`` measures the fill (45% at
+    N=200000, 14.5% at N=1000000). ``occupancy_sort`` and ``skip_empty_tiles``
+    are the cheap mitigations; tiering via ``build_leafpair_reverse_tiers`` is the
+    other.
+
+    Parameters
+    ----------
+    positions : Array
+        Particle positions ``[N, 3]``; also fixes the output shape.
+    block_source_leaf_ids_padded : Array
+        Source leaf ids ``[num_leaves, blocks, lanes]``, padded to a rectangle.
+    block_valid_mask_padded : Array
+        Per-lane validity with the same shape; padded lanes contribute exactly zero.
+    leaf_positions : Array
+        Padded per-leaf positions ``[num_leaves, W, 3]``.
+    leaf_masses : Array
+        Padded per-leaf masses ``[num_leaves, W]``.
+    leaf_mask : Array
+        Padded per-leaf validity ``[num_leaves, W]``; masked slots contribute
+        exactly zero.
+    leaf_particle_idx : Array
+        Particle index behind each padded slot ``[num_leaves, W]``, clipped so a
+        masked slot cannot gather out of bounds. Also fixes ``W``.
+    G : Union[float, Array]
+        Gravitational constant.
+    softening_sq : Array
+        Squared Plummer softening length.
+    target_leaf_batch_size : int
+        Target leaves per scan step. Static under ``jit``; batching only.
+    target_block_tile_size : int
+        Source-leaf lanes per tile. Static under ``jit``; batching only.
+    target_block_tile_scan_unroll : int
+        Unroll factor for the tile scan. Static under ``jit``; batching only.
+    target_block_batch_scan_unroll : int
+        Unroll factor for the target-batch scan. Static under ``jit``; batching only.
+    occupancy_sort : bool
+        Process target leaves in occupancy order so tiles fill more evenly. Static
+        under ``jit``; a permutation of an associative sum, so it can move the last
+        digits.
+    skip_empty_tiles : bool
+        Skip all-invalid tiles. Static under ``jit``.
+    componentwise_pairs : bool
+        Use the componentwise pair kernel. Static under ``jit``.
+
+    Returns
+    -------
+    Array
+        Per-particle accelerations ``[N, 3]``, zero outside this kernel's share.
+
+    Raises
+    ------
+    ValueError
+        If ``target_block_tile_size`` is not positive.
+    """
     dtype = positions.dtype
     g_const = jnp.asarray(G, dtype=dtype)
     num_leaves = int(leaf_positions.shape[0])
@@ -760,7 +1027,59 @@ def _compute_leaf_p2p_prepared_large_n_pairs_target_blocks_tiled_impl(
     target_block_tile_scan_unroll: int,
     target_block_batch_scan_unroll: int,
 ) -> Array:
-    """Bounded overflow TONB pair kernel using canonical tiled source tensors."""
+    """Bounded overflow TONB pair kernel using canonical tiled source tensors.
+
+    The overflow path: used when the prepacked rectangle would exceed its block
+    cap, so the blocks are re-expressed as canonical tiles with a bounded extent
+    instead. Same numbers as
+    :func:`_compute_leaf_p2p_prepared_large_n_pairs_target_blocks_impl`; it differs
+    only in how the source side is laid out.
+
+    Parameters
+    ----------
+    positions : Array
+        Particle positions ``[N, 3]``; also fixes the output shape.
+    block_offsets : Array
+        Start offset of each target leaf's block run, ``[num_leaves + 1]``.
+    block_target_leaf_ids : Array
+        Target leaf id per block, ``[num_blocks]``.
+    block_source_leaf_ids : Array
+        Source leaf ids per block, ``[num_blocks, lanes]``.
+    block_valid_mask : Array
+        Per-lane validity with the same shape as ``block_source_leaf_ids``.
+    leaf_positions : Array
+        Padded per-leaf positions ``[num_leaves, W, 3]``.
+    leaf_masses : Array
+        Padded per-leaf masses ``[num_leaves, W]``.
+    leaf_mask : Array
+        Padded per-leaf validity ``[num_leaves, W]``; masked slots contribute
+        exactly zero.
+    leaf_particle_idx : Array
+        Particle index behind each padded slot ``[num_leaves, W]``, clipped so a
+        masked slot cannot gather out of bounds. Also fixes ``W``.
+    G : Union[float, Array]
+        Gravitational constant.
+    softening_sq : Array
+        Squared Plummer softening length.
+    target_leaf_batch_size : int
+        Target leaves per scan step. Static under ``jit``; batching only.
+    target_block_tile_size : int
+        Source-leaf lanes per tile. Static under ``jit``; batching only.
+    target_block_tile_scan_unroll : int
+        Unroll factor for the tile scan. Static under ``jit``; batching only.
+    target_block_batch_scan_unroll : int
+        Unroll factor for the target-batch scan. Static under ``jit``; batching only.
+
+    Returns
+    -------
+    Array
+        Per-particle accelerations ``[N, 3]``, zero outside this kernel's share.
+
+    Raises
+    ------
+    ValueError
+        If ``target_block_tile_size`` is not positive.
+    """
     del block_target_leaf_ids  # kept for API compatibility with prepared state
 
     dtype = positions.dtype
@@ -827,7 +1146,53 @@ def compute_leaf_p2p_accelerations_target_block_pairs_only(
     target_block_batch_scan_unroll: int = 1,
     target_block_overflow_fast_max_blocks: int = 65536,
 ) -> Array:
-    """Evaluate target-block pair contributions without intra-leaf self work."""
+    """Evaluate target-block pair contributions without intra-leaf self work.
+
+    Public entry point for the TONB pair path. Cross-leaf only -- the intra-leaf
+    self block is the caller's job, which is what lets the distributed driver
+    evaluate the two on different device shares.
+
+    Parameters
+    ----------
+    positions_sorted : Array
+        Particle positions ``[N, 3]`` in Morton order.
+    masses_sorted : Array
+        Particle masses ``[N]`` in the same order.
+    leaf_particle_indices : Array
+        Explicit per-leaf particle membership ``[num_leaves, W]``.
+    leaf_particle_mask : Array
+        Validity for that membership table, same shape.
+    block_offsets : Array
+        Start offset of each target leaf's block run, ``[num_leaves + 1]``.
+    block_target_leaf_ids : Array
+        Target leaf id per block, ``[num_blocks]``.
+    block_source_leaf_ids : Array
+        Source leaf ids per block, ``[num_blocks, lanes]``.
+    block_valid_mask : Array
+        Per-lane validity with the same shape as ``block_source_leaf_ids``.
+    G : Union[float, Array]
+        Gravitational constant. Default ``1.0``.
+    softening : float
+        Plummer softening **length** (squared internally). Must be a concrete
+        Python float, not a tracer. Default ``0.0``.
+    target_leaf_batch_size : int
+        Target leaves per scan step. Static under ``jit``; batching only.
+    target_block_tile_size : int
+        Source-leaf lanes per tile. Static under ``jit``; batching only.
+    target_block_tile_scan_unroll : int
+        Unroll factor for the tile scan. Static under ``jit``; batching only.
+    target_block_batch_scan_unroll : int
+        Unroll factor for the target-batch scan. Static under ``jit``; batching only.
+    target_block_overflow_fast_max_blocks : int
+        Cap on the blocks the prepacked fast path will materialise; above it the
+        bounded tiled overflow kernel runs instead. Static under ``jit``; see
+        :data:`~jaccpot.runtime.fmm_constants._NEARFIELD_TARGET_BLOCK_OVERFLOW_FAST_MAX_BLOCKS`.
+
+    Returns
+    -------
+    Array
+        Per-particle accelerations ``[N, 3]``, zero outside this kernel's share.
+    """
     positions = jnp.asarray(positions_sorted)
     masses = jnp.asarray(masses_sorted)
     block_source_leaf_ids = jnp.asarray(block_source_leaf_ids, dtype=INDEX_DTYPE)
@@ -898,7 +1263,52 @@ def _compute_leaf_p2p_prepared_large_n_accel_only_target_blocks_impl(
     target_block_tile_scan_unroll: int,
     target_block_batch_scan_unroll: int,
 ) -> Array:
-    """Specialized accel-only kernel using prepacked target-owned source blocks."""
+    """Specialized accel-only kernel using prepacked target-owned source blocks.
+
+    Self block **plus** cross-leaf pairs, accelerations only -- no potential. The
+    accel-only specialisation exists because the potential doubles the reverse
+    pass's retained state for a quantity the force path never reads.
+
+    Parameters
+    ----------
+    positions : Array
+        Particle positions ``[N, 3]``; also fixes the output shape.
+    block_offsets : Array
+        Start offset of each target leaf's block run, ``[num_leaves + 1]``.
+    block_target_leaf_ids : Array
+        Target leaf id per block, ``[num_blocks]``.
+    block_source_leaf_ids : Array
+        Source leaf ids per block, ``[num_blocks, lanes]``.
+    block_valid_mask : Array
+        Per-lane validity with the same shape as ``block_source_leaf_ids``.
+    leaf_positions : Array
+        Padded per-leaf positions ``[num_leaves, W, 3]``.
+    leaf_masses : Array
+        Padded per-leaf masses ``[num_leaves, W]``.
+    leaf_mask : Array
+        Padded per-leaf validity ``[num_leaves, W]``; masked slots contribute
+        exactly zero.
+    leaf_particle_idx : Array
+        Particle index behind each padded slot ``[num_leaves, W]``, clipped so a
+        masked slot cannot gather out of bounds. Also fixes ``W``.
+    G : Union[float, Array]
+        Gravitational constant.
+    softening_sq : Array
+        Squared Plummer softening length.
+    target_leaf_batch_size : int
+        Target leaves per scan step. Static under ``jit``; batching only.
+    target_block_tile_size : int
+        Source-leaf lanes per tile. Static under ``jit``; batching only.
+    target_block_tile_scan_unroll : int
+        Unroll factor for the tile scan. Static under ``jit``; batching only.
+    target_block_batch_scan_unroll : int
+        Unroll factor for the target-batch scan. Static under ``jit``; batching only.
+
+    Returns
+    -------
+    Array
+        Per-particle accelerations ``[N, 3]``, zero outside this kernel's share.
+    """
     self_acc = _compute_leaf_p2p_prepared_large_n_self_only_impl(
         positions,
         leaf_positions,
@@ -964,7 +1374,65 @@ def _compute_leaf_p2p_prepared_large_n_accel_only_impl(
     superchunk_target_reduce: bool,
     disable_chunk_cond: bool,
 ) -> Array:
-    """Specialized accel-only kernel for large-N bucketed prepared leaf data."""
+    """Specialized accel-only kernel for large-N bucketed prepared leaf data.
+
+    Self block plus cross-leaf pairs on the edge-list (bucketed) layout,
+    accelerations only. A thin sum of
+    :func:`_compute_leaf_p2p_prepared_large_n_self_only_impl` and
+    :func:`_compute_leaf_p2p_prepared_large_n_pairs_only_impl`, and the delegation
+    precedent the Tier 1.2 dedupe followed.
+
+    Parameters
+    ----------
+    positions : Array
+        Particle positions ``[N, 3]``; also fixes the output shape.
+    target_leaf_ids : Array
+        Target leaf id per edge, ``[num_edges]``.
+    source_leaf_ids : Array
+        Source leaf id per edge, ``[num_edges]``.
+    valid_pairs : Array
+        Per-edge validity ``[num_edges]``; padded edges contribute exactly zero.
+    leaf_positions : Array
+        Padded per-leaf positions ``[num_leaves, W, 3]``.
+    leaf_masses : Array
+        Padded per-leaf masses ``[num_leaves, W]``.
+    leaf_mask : Array
+        Padded per-leaf validity ``[num_leaves, W]``; masked slots contribute
+        exactly zero.
+    leaf_particle_idx : Array
+        Particle index behind each padded slot ``[num_leaves, W]``, clipped so a
+        masked slot cannot gather out of bounds. Also fixes ``W``.
+    G : Union[float, Array]
+        Gravitational constant.
+    softening_sq : Array
+        Squared Plummer softening length.
+    edge_chunk_size : int
+        Edges per chunk. Static under ``jit``; batching only.
+    chunks_per_superchunk : int
+        Chunks grouped into one superchunk before the target reduction. Static
+        under ``jit``.
+    chunk_scan_batch_size : int
+        Chunks consumed per scan step. Static under ``jit``.
+    chunk_scan_unroll : int
+        Unroll factor for the chunk scan. Static under ``jit``.
+    superchunk_scan_unroll : int
+        Unroll factor for the superchunk scan. Static under ``jit``.
+    sorted_scatter_hint : bool
+        Tell the scatter its indices are sorted. Static under ``jit``. A *promise*,
+        not a request: it must match the data or the scatter is wrong.
+    grouped_sorted_scatter : bool
+        Use the segment-grouped scatter. Static under ``jit``; same caveat.
+    superchunk_target_reduce : bool
+        Reduce per target leaf within a superchunk before scattering. Static under
+        ``jit``; changes the summation *grouping*, so it can move the last digits.
+    disable_chunk_cond : bool
+        Skip the per-chunk ``lax.cond`` early-out. Static under ``jit``.
+
+    Returns
+    -------
+    Array
+        Per-particle accelerations ``[N, 3]``, zero outside this kernel's share.
+    """
     self_acc = _compute_leaf_p2p_prepared_large_n_self_only_impl(
         positions,
         leaf_positions,

@@ -91,7 +91,54 @@ def _compute_radix_fast_lane_payload_pairs_impl(
     source_slot_scan_unroll: int,
     target_batch_scan_unroll: int,
 ) -> Array:
-    """Dense payload-driven pair kernel for radix fast-lane nearfield."""
+    """Dense payload-driven pair kernel for radix fast-lane nearfield.
+
+    The pure-JAX cross-leaf pair kernel of the fast lane, driven straight off the
+    prepacked payload's dense particle-id tables rather than an edge list. This is
+    the reference the Pallas twins must match.
+
+    Differentiable in ``positions`` and ``masses``; the id tables are integer.
+
+    Parameters
+    ----------
+    positions : Array
+        Particle positions ``[N, 3]``; also fixes the output shape.
+    masses : Array
+        Particle masses ``[N]``.
+    target_particle_ids : Array
+        Target particle index per (leaf, slot), from the payload.
+    target_particle_mask : Array
+        Validity for ``target_particle_ids``, same shape.
+    source_particle_ids : Array
+        Source particle index per (leaf, slot).
+    source_particle_mask : Array
+        Validity for ``source_particle_ids``, same shape.
+    source_slot_valid_mask : Array
+        Per-slot-tile validity, used to skip wholly-empty source tiles.
+    G : Union[float, Array]
+        Gravitational constant.
+    softening_sq : Array
+        Squared Plummer softening length.
+    target_leaf_batch_size : int
+        Target leaves per scan step. Static under ``jit``; batching only.
+    source_slot_tile_size : int
+        Source slots per tile. Static under ``jit``; batching only.
+    source_slot_scan_unroll : int
+        Unroll factor for the source-slot scan. Static under ``jit``.
+    target_batch_scan_unroll : int
+        Unroll factor for the target-batch scan. Static under ``jit``.
+
+    Returns
+    -------
+    Array
+        Per-particle accelerations ``[N, 3]``.
+
+    Raises
+    ------
+    ValueError
+        If any of the four batching knobs is not positive; each sizes a traced
+        shape, so a zero is a shape error rather than a slow configuration.
+    """
     dtype = positions.dtype
     g_const = jnp.asarray(G, dtype=dtype)
 
@@ -290,6 +337,50 @@ def _radix_fast_lane_pairs_pallas(
     (no HBM ``W x W`` distance matrix), then scatters the leaf-major result back
     to particle order via the existing scatter helpers.  The intra-leaf self
     term is handled separately by the caller, matching the pure-JAX path.
+
+    **Numerically equivalent to** :func:`_compute_radix_fast_lane_payload_pairs_impl`
+    -- the kernel is an execution accelerator, not different mathematics
+    (NUMERICS_AND_JAX §1). Needs Ampere+ (sm_80) unless ``interpret``.
+
+    Parameters
+    ----------
+    positions : Array
+        Particle positions ``[N, 3]``; also fixes the output shape.
+    masses : Array
+        Particle masses ``[N]``.
+    target_particle_ids : Array
+        Target particle index per (leaf, slot).
+    target_particle_mask : Array
+        Validity for ``target_particle_ids``, same shape.
+    source_particle_ids : Array
+        Source particle index per (leaf, slot-tile, slot).
+    source_particle_mask : Array
+        Validity for ``source_particle_ids``, same shape.
+    G : Union[float, Array]
+        Gravitational constant.
+    softening_sq : Array
+        Squared Plummer softening length.
+    compute_potential : bool
+        Also return per-particle potentials. Static under ``jit``.
+    num_warps : Optional[int]
+        Triton warp count; ``None`` lets the kernel pick. **Unclamped on purpose**
+        -- 0 means "unset" for these knobs, so a minimum of 1 would turn "auto"
+        into a real, wrong value.
+    num_stages : int
+        Triton pipeline stages. Default ``1``.
+    target_subtile : Optional[int]
+        Target sub-tile width; ``None`` lets the kernel pick.
+    interpret : bool
+        Run through Pallas' reference interpreter instead of Triton. This is how
+        CPU CI exercises the kernel at all, and how the parity tests assert the
+        equivalence -- but the *shipped* callers hardcode ``interpret=False``, so
+        an ``interpret=True`` pass says nothing about the Triton lowering.
+
+    Returns
+    -------
+    Union[Array, Tuple[Array, Array]]
+        Per-particle accelerations ``[N, 3]``, or ``(accelerations, potentials)``
+        when ``compute_potential``.
     """
     from jaccpot.pallas.nearfield_fused_leaf import nearfield_fused_leaf_pallas
 
@@ -369,6 +460,50 @@ def _radix_fast_lane_prepacked_pallas(
     id inside the kernel (no dense per-particle source materialization), then the
     leaf-major result is scattered to particle order.  The intra-leaf self term
     is handled separately by the caller, matching the pure-JAX path.
+
+    This is the forward half of the production differentiable near field: it is
+    what :func:`_radix_fast_lane_prepacked_accel_cvjp` calls as its primal. Needs
+    Ampere+ (sm_80) unless ``interpret``.
+
+    Parameters
+    ----------
+    source_leaf_ids_padded : Array
+        Source leaf ids ``[num_leaves, max_blocks, block_size]``, padded to a
+        rectangle.
+    source_valid_mask_padded : Array
+        Per-lane validity with the same shape; padded lanes contribute exactly zero.
+    leaf_positions : Array
+        Padded per-leaf positions ``[num_leaves, W, 3]``.
+    leaf_masses : Array
+        Padded per-leaf masses ``[num_leaves, W]``.
+    leaf_mask : Array
+        Padded per-leaf validity ``[num_leaves, W]``.
+    leaf_particle_idx : Array
+        Particle index behind each padded slot ``[num_leaves, W]``.
+    positions : Array
+        Particle positions ``[N, 3]``; fixes the output shape.
+    G : Union[float, Array]
+        Gravitational constant.
+    softening_sq : Array
+        Squared Plummer softening length.
+    compute_potential : bool
+        Also return per-particle potentials. Static under ``jit``.
+    num_warps : Optional[int]
+        Triton warp count; ``None`` lets the kernel pick. **Unclamped on purpose**
+        -- 0 means "unset" for these knobs.
+    num_stages : int
+        Triton pipeline stages. Default ``1``.
+    target_subtile : Optional[int]
+        Target sub-tile width; ``None`` lets the kernel pick.
+    interpret : bool
+        Run through Pallas' reference interpreter rather than Triton; the shipped
+        callers hardcode ``False``.
+
+    Returns
+    -------
+    Union[Array, Tuple[Array, Array]]
+        Per-particle accelerations ``[N, 3]``, or ``(accelerations, potentials)``
+        when ``compute_potential``.
     """
     from jaccpot.pallas.nearfield_fused_leaf import nearfield_leafpair_pallas
 
@@ -446,6 +581,55 @@ def _radix_fast_lane_prepacked_pallas_decoupled(
     chunking). Scatters the block's per-particle accel into a ``zeros_like(positions)`` buffer via
     the global ``target_particle_idx`` (scatter-add) so per-block partials compose by ``+``. Target
     masses are unused by the pair term. The intra-leaf self term is handled separately by the caller.
+
+    STATED EQUIVALENCE (F25, now asserted). Passing the **same** array as both
+    target and source reproduces :func:`_radix_fast_lane_prepacked_pallas`
+    bit-for-bit -- ``tests/unit/operators/test_pallas_nearfield_fused.py`` pins it.
+    That matters because this is the kernel ``distributed/fmm.py`` runs, so the
+    distributed near field's equivalence to the single-device one rests on it.
+
+    Parameters
+    ----------
+    source_leaf_ids_padded : Array
+        Source leaf ids ``[num_targets, max_blocks, block_size]``, referencing
+        **global source rows** in ``[0, num_sources)``.
+    source_valid_mask_padded : Array
+        Per-lane validity with the same shape.
+    target_positions : Array
+        This block's target positions ``[num_targets, W, 3]``.
+    target_mask : Array
+        This block's target validity ``[num_targets, W]``.
+    target_particle_idx : Array
+        **Global** particle index per target slot ``[num_targets, W]``, so
+        per-block partials scatter-add and compose by ``+``.
+    source_positions : Array
+        The full source gather pool ``[num_sources, W, 3]``, resident.
+    source_masses : Array
+        Source masses ``[num_sources, W]``.
+    source_mask : Array
+        Source validity ``[num_sources, W]``.
+    positions : Array
+        Particle positions ``[N, 3]``; supplies the output shape only.
+    G : Union[float, Array]
+        Gravitational constant.
+    softening_sq : Array
+        Squared Plummer softening length.
+    compute_potential : bool
+        Also return per-particle potentials. Static under ``jit``; default ``False``.
+    num_warps : Optional[int]
+        Triton warp count; ``None`` lets the kernel pick. Unclamped on purpose.
+    num_stages : int
+        Triton pipeline stages. Default ``1``.
+    target_subtile : Optional[int]
+        Target sub-tile width; ``None`` lets the kernel pick.
+    interpret : bool
+        Run through Pallas' reference interpreter rather than Triton.
+
+    Returns
+    -------
+    Union[Array, Tuple[Array, Array]]
+        Per-particle accelerations ``[N, 3]`` for this target block (zero
+        elsewhere), or ``(accelerations, potentials)`` when ``compute_potential``.
     """
     from jaccpot.pallas.nearfield_fused_leaf import (
         nearfield_leafpair_pallas_decoupled,
@@ -549,6 +733,59 @@ def _radix_fast_lane_prepacked_accel_cvjp(
 
     Reverse tiling is deliberately independent of the forward's: the backward
     materialises per-tile pair tensors, so small ``rev_*`` tiles keep it bounded.
+
+    All arguments are positional because this is a ``jax.custom_vjp`` primal;
+    ``nondiff_argnums=(9, 10, 11, 12, 13, 14, 15, 16)`` marks everything from
+    ``num_warps`` on as non-differentiable, so those must not be passed by keyword.
+    The ``*_f`` suffixes mark the integer/boolean tables that were cast to float to
+    cross the ``custom_vjp`` boundary without acquiring a tangent.
+
+    Parameters
+    ----------
+    leaf_positions : Array
+        Padded per-leaf positions ``[num_leaves, W, 3]``. **Differentiable.**
+    leaf_masses : Array
+        Padded per-leaf masses ``[num_leaves, W]``. **Differentiable.**
+    positions : Array
+        Particle positions ``[N, 3]``; supplies the output shape.
+    source_leaf_ids_f : Array
+        Source leaf ids, float-cast, ``[num_leaves, blocks, lanes]``.
+    source_valid_f : Array
+        Per-lane validity, float-cast, same shape.
+    leaf_mask_f : Array
+        Padded per-leaf validity, float-cast, ``[num_leaves, W]``.
+    leaf_particle_idx_f : Array
+        Particle index per padded slot, float-cast, ``[num_leaves, W]``. See
+        ``_check_float_id_range`` -- an id beyond float exact-integer range would
+        be silently rounded, so it is validated rather than assumed.
+    softening_sq : Array
+        Squared Plummer softening length.
+    G : Array
+        Gravitational constant.
+    num_warps : Optional[int]
+        Triton warp count. Non-differentiable.
+    num_stages : int
+        Triton pipeline stages. Non-differentiable.
+    target_subtile : Optional[int]
+        Target sub-tile width. Non-differentiable.
+    interpret : bool
+        Use Pallas' reference interpreter. Non-differentiable.
+    rev_leaf_batch : int
+        Target leaves per reverse scan step. Non-differentiable; bounds the
+        backward's peak, independent of the forward's tiling.
+    rev_block_tile : int
+        Source lanes per reverse tile. Non-differentiable; same role.
+    rev_skip_empty : bool
+        Skip all-invalid tiles in the reverse. Non-differentiable.
+    rev_tiers : Optional[Tuple[Tuple[Tuple[int, ...], int], ...]]
+        Precomputed tier plan from ``build_leafpair_reverse_tiers`` -- groups of
+        target leaves sharing a slot width, so a low-occupancy leaf does not pay
+        the global maximum. ``None`` runs untiered. Non-differentiable.
+
+    Returns
+    -------
+    Array
+        Per-particle accelerations ``[N, 3]``.
     """
     return _radix_fast_lane_prepacked_pallas(
         jnp.round(source_leaf_ids_f).astype(INDEX_DTYPE),
@@ -709,6 +946,46 @@ def compute_leaf_p2p_accelerations_radix_fast_lane(
     which is what the forward-only production callers get; the differentiable
     entry point resolves a :class:`~jaccpot.config.GradConfig` once, outside the
     trace, and passes the result down so nothing reads the environment per call.
+
+    Parameters
+    ----------
+    positions_sorted : Array
+        Particle positions ``[N, 3]`` in Morton order.
+    masses_sorted : Array
+        Particle masses ``[N]`` in the same order.
+    payload : Any
+        The prepacked radix fast-lane payload
+        (:class:`~jaccpot.runtime._large_n_types.RadixFastNearfieldPayload`), which
+        carries the leaf tables **and** the batch tiling the kernels use.
+    G : Union[float, Array]
+        Gravitational constant. Default ``1.0``.
+    softening : float
+        Plummer softening **length** (squared internally). Must be a concrete
+        Python float, not a tracer. Default ``0.0``.
+    return_potential : bool
+        Also return per-particle potentials. Static under ``jit``.
+    use_pallas : bool
+        Use the fused Pallas kernels rather than the pure-JAX payload kernel.
+        Requires Ampere+ (sm_80).
+    differentiable : bool
+        Route through the ``custom_vjp`` wrappers so ``jax.grad`` works. Defaults
+        ``False`` so the production forward path is untouched.
+    reverse_options : Optional[LeafPairReverseOptions]
+        Resolved reverse-pass tuning. ``None`` resolves from the environment,
+        which is what forward-only callers get.
+
+    Returns
+    -------
+    Union[Array, Tuple[Array, Array]]
+        Per-particle accelerations ``[N, 3]``, or ``(accelerations, potentials)``
+        when ``return_potential``.
+
+    Raises
+    ------
+    NotImplementedError
+        For a requested combination this lane does not implement, rather than
+        silently substituting one it does -- ``"auto"`` may choose, an explicit
+        request may not be quietly overridden (STYLE_GUIDE §9).
     """
     if reverse_options is None:
         from jaccpot.runtime.grad_options import resolve_grad_options

@@ -491,7 +491,32 @@ are blocked in two different ways, and neither is about effort:
    `_large_n_blocks.py`. Writing their docstrings against `main` puts them in a file
    that will no longer contain the function, i.e. a hand-resolved conflict on every
    one, in the most numerics-sensitive module in the package.
-2. **18 in `jaccpot/pallas/` — blocked on the Tier 2 typing decision.** The Pallas
+2. ~~**18 in `jaccpot/pallas/`**~~ **— DONE, and it was 49 functions, not 18.**
+
+   > **Closed.** The decision this was blocked on is made: `KernelRef = jax.Ref`,
+   > aliased in `pallas/_compat.py` so the ~68 annotated ref parameters depend on one
+   > line, since JAX moves the name and there is no `pallas.Ref`. Measured as accurate,
+   > not just convenient: under `interpret=True` a kernel body receives a
+   > `DynamicJaxprTracer` and `isinstance(that, jax.Ref)` is **True**. It is also not
+   > enforced — nothing in `jaccpot/pallas/` carries `@jaxtyped`/`beartype` — so the
+   > risk in choosing was nil, which is worth knowing before treating a Pallas
+   > annotation as a contract.
+   >
+   > **The "18" was wrong.** Measured with `--skip-checking-short-docstrings=False`:
+   > **49 functions, 197 violations** across five modules (`m2l_complex_fused` 63,
+   > `nearfield_fused_leaf` 51, `m2l_real_fused` 48, `treecode_walk_pallas` 19,
+   > `m2l_core_z_real` 16). Now **0**. Delivered in four parts to stay under the
+   > ~400-line rule.
+   >
+   > One finding worth carrying: pydoclint reported **nothing** against the eight
+   > kernel bodies, because it has no docstring to check a signature against. "Zero
+   > violations" and "documented" are different predicates, and the kernels — the
+   > point of the package — were the least documented things in it. Any future count
+   > based on violation totals should be read with that in mind.
+
+   The original report follows.
+
+   **18 in `jaccpot/pallas/` — blocked on the Tier 2 typing decision.** The Pallas
    kernel bodies take unannotated references (`multipole_ref`, `bto_r`, …). Probed on
    `_m2l_core_z_real_kernel`: adding a `Parameters` section raises **DOC106, DOC107,
    DOC109 and DOC110** — `--arg-type-hints-in-signature` and
@@ -519,6 +544,124 @@ git log -L :m2m_real:jaccpot/operators/real_translations.py  # per-function, acr
 Recorded because the audit sets an expectation a reviewer would otherwise try to
 check and find broken. The same applies to `nearfield/` (1.4, 1.5) and
 `runtime/kernels/` (1.6).
+
+### B.3 The A100 validation — §10 item 4, discharged, with one finding worth more than the result
+
+Run on one **A100-PCIE-40GB** (compute capability 8.0, `autocvd(num_gpus=1,
+least_used=True)` then pinned for the session so the interleaved benchmarks compare a
+single card), jax/jaxlib **0.10.2**, `JAX_ENABLE_X64=1`. All three Pallas gates
+reported `True`, so the fused lanes were live rather than falling back.
+
+**Verdict: Tier 1 changed no number.** But the A/B had to be re-chosen first. The
+handoff prescribes branch-vs-`main`, and by the time a GPU was free all ten Tier 1 PRs
+were merged, leaving those branches 0 commits ahead of `origin/main` — that comparison
+would have measured #80 and the docs PRs, not the thing under test. The run used
+pre-Tier-1 `128a0e2` (PR #77, the commit before `cc8895e`) vs post-Tier-1 `da7ed57`
+instead, with `PYTHONPATH` pinned per side and `jaccpot.__file__` printed on every run:
+the editable-install finder appends to `meta_path`, so without that a two-worktree
+comparison silently compares a tree to itself.
+
+| Check | Result |
+|---|---|
+| Pallas-on vs pure-JAX parity | **65 passed, 0 skipped**, identical test-by-test both sides |
+| End-to-end forward, 4 cases, `deterministic_ops=true` | **exactly equal**, max abs diff `0` |
+| Reverse residuals, near-field fast lane on | JSON **identical** both sides |
+| Reverse residuals at `--leaf 4` (added) | identical, and now covers m2l/m2m/l2l/p2m |
+| Per-stage cost, interleaved post/base/post/base | no stage outside noise |
+
+The empty skip list is the load-bearing part: every `interpret=False` parametrisation
+ran against the Triton lowering — both `m2l_core_z` orders, both `m2l_complex_fused`,
+both `m2l_real_fused`, `nearfield_fused_leaf`, `nearfield_leafpair`,
+`radix_fast_lane_prepacked_accel_cvjp` — and the defensive
+`pytest.skip("Pallas kernel unavailable …")` inside their `except` blocks, which would
+read as a pass, did not fire.
+
+**The finding: the forward path is nondeterministic under default XLA, by more than the
+difference being measured.**
+
+| Comparison | Max abs diff | Fraction of \|a\| |
+|---|---|---|
+| base vs post, default XLA | 3.6e-12 … 1.5e-11 | 1.8e-15 |
+| **post vs post, same card, same code** | 3.6e-12 … 2.1e-11 | **4.4e-15** |
+| base vs base, same code | 2.3e-12 … 1.5e-11 | 1.8e-15 |
+| base vs post, `xla_gpu_deterministic_ops=true` | **0** | **0** |
+
+The same tree on the same card differs run-to-run by *more* than the cross-tree
+difference. So §10's exact-equality items are unsatisfiable on GPU as written,
+independently of any refactor — a future run will "find a difference" and it will mean
+nothing. ARCHITECTURE §10 now requires the flag; that wording fix is the durable
+outcome of this run.
+
+Two prescriptions in the handoff were also wrong in ways worth recording. Its
+residual-audit config (`N=4096 leaf=64`) reports `far_pairs=0`, so it measures the M2L
+coefficient **not at all** — D.12 again, in the document that warns about D.12. Re-run
+at `--leaf 4`: 195,336 far pairs, 298.577 MB of M2L residuals under comparison at
+1,528.5 bytes per pair. And the repo's default `-n auto` is 64 xdist workers against one
+GPU: 46,000+ `CUDA_ERROR_OUT_OF_MEMORY` lines and 331/288 "failures" that are allocation
+artifacts. The tell was that wall times (2760s vs 1309s) *and* failure sets differed
+between sides. Re-run at `-n 6` with `XLA_PYTHON_CLIENT_MEM_FRACTION=.12`: zero OOM.
+
+Suite, `-n 6`: base **966 passed / 24 skipped / 3 failed**, post **964 / 24 / 5**, against
+the CPU reference's **926 / 67 / 0**. Passed rising and skips falling by ~43 is the
+GPU-gated tests unskipping, as predicted. Every failure was re-run 3× under both XLA
+configurations: four go green under the determinism flag (so: flaky, not regressions),
+and the two extra on the post side are both
+`test_compiled_dispatch_is_bit_identical`, whose implementation
+(`jaccpot/upward/tree_geometry.py`) and test file are both untouched by Tier 1 —
+`git diff 128a0e2 015c91c` on either path is empty. The fifth is real: see G.9.
+
+The fp32 gap the G.10 handoff left open is closed with numbers rather than an
+assertion. Residual `max|grad_f32 − grad_f64| / max|grad_f64|` over the transverse
+components, worst over both signs of `z`: real fused **3.27e-07**, complex fused
+**1.60e-06**, real *direct* control **1.14e-06**. **The fused lanes carry no float32
+weakness the direct lanes do not** — the real fused lane is 3.5× better than its own
+direct control. All are two to three orders inside the 3.4e-04 band and every case is
+non-vacuous (the float64 reference exceeds 1e-3, so G.10's exact `(0, 0)` return could
+not pass). Caveat on the constants in that test's docstring: rebuilding the real
+coefficients with numpy instead of the test's `jax.random.normal` moved the real figure
+by ~3× (8.9e-07 → 3.27e-07), so they are the right order but should not be read as
+tight.
+
+### B.4 The gate could not see an undefined name, and three defects used the gap
+
+`.pre-commit-config.yaml` ran black, isort, pydoclint and pytest. **None of the four can
+see a name that is used but never imported** — and neither can the test suite, because
+every runtime module has `from __future__ import annotations`, so an unimported name
+inside an annotation is stored as a lazy string and never evaluated. It is not a
+deferred error; it is no error at all, and the annotation is simply unresolvable. E.2
+("89 dangling forward references make the mixin annotations decorative") is the same
+observation from the other side.
+
+Three real defects reached `main` through the full green gate this way:
+
+| defect | shape |
+|---|---|
+| G.1a `_accumulate_from_multipoles` | name does not exist anywhere |
+| G.1b `evaluate_local_complex_with_grad_analytic` | exists in `complex_ops`, never imported |
+| `MACTypeInput` in `fmm_sweeps.py` (PR #94) | exists in `config`, never imported |
+
+The third is the sharpest datum, because it was introduced *during this audit's
+execution*, in the PR whose subject was that the caller-facing and traversal-facing MAC
+types must not be confused — reviewed, verified against the full block, and merged. A
+gate that cannot see this class of error will keep admitting it.
+
+**Closed in PR #98** with `flake8 --select=F821,F822`, scoped `files: ^jaccpot/`. Two
+scoping decisions, both measured rather than assumed:
+
+- **F811 (redefinition) was tried and dropped.** It fires on the legitimate "assign
+  `None`, then conditionally `def` the same name" idiom at `fmm_sweeps.py:380`, so
+  keeping it would mean annotating correct code to satisfy a linter. Every defect the
+  hook exists for was an undefined name.
+- **`examples/` and `bench/` are out of scope.**
+  `examples/benchmark_gpu_radix_worker.py` alone carries 14 pre-existing F821s and
+  `bench/bench_upward_sweep.py` one F811. CLAUDE.md exempts those trees and forbids
+  reformatting files a change does not otherwise touch, so cleaning them is its own PR —
+  **still open**, and the reason the hook is narrower than it looks.
+
+No style codes are selected, so the hook cannot start disagreeing with black or isort.
+Verified it actually fires by injecting an undefined name into `fmm_policy.py`.
+Undefined names in `jaccpot/` go **4 → 2**, and both survivors are deliberate: `kernels/`
+is a true leaf and must never name the engine, even under `TYPE_CHECKING` (§1).
 
 ---
 
@@ -957,6 +1100,53 @@ Two consequences worth acting on:
    `NUMERICS_AND_JAX.md` §3 alongside the existing edge-case list, since "the test passed but
    covered nothing" is exactly the failure that section exists to prevent. Candidate for Tier 0.
 
+#### D.12 recurred twice more, and the second time it hid a fake tolerance
+
+Two further instances, both found by accident rather than by looking:
+
+**In the Tier 1 GPU handoff** (B.3): its prescribed residual-audit config, `N=4096
+leaf=64`, reports `far_pairs=0`. The document that warns about D.12 in its own "traps"
+section then specified a config that measures the M2L coefficient not at all. Re-run at
+`--leaf 4`: 195,336 far pairs.
+
+**In the source-motion downward tests** —
+`tests/unit/core/test_solidfmm_complex_tree_expansions.py`, found while writing the G.1a
+regression test. Its six-particle fixture accepts **zero** far pairs at `theta=0.6`, so
+`test_solidfmm_downward_source_motion_locals_match_finite_difference` and its
+second-derivative sibling were comparing an all-zero result against an all-zero
+reference:
+
+```python
+assert np.allclose(got, ref, rtol=3e-5, atol=1e-7)   # zero vs zero
+```
+
+Neither could have detected any error in the source-motion M2L/L2L path. That path is
+the jerk/time-derivative far field, i.e. D.3 territory: numerically load-bearing code
+with no test that could catch a wrong answer. Fixed at `theta=0.8` (4 far pairs,
+`|ref| = 1.93`, agreement `1.08e-09`), with a shared helper asserting **both** the
+accepted pair count and the reference magnitude.
+
+**The lesson beyond D.12.** Making the second test non-vacuous made it *fail*, at
+`rel = 3.0e-3` against a `2e-3` bound — and the bound was not what was wrong. A central
+second difference carries `eps / dt**2` roundoff, so its `dt = 1e-5` was the inaccurate
+side of the comparison:
+
+| `dt` | rel |
+|---|---|
+| 1e-6 | 4.0e-01 |
+| **1e-5** | **3.0e-03** ← the shipped setting |
+| 1e-4 | 3.9e-05 |
+| **1e-3** | **2.5e-07** ← chosen, near the `eps**0.25` optimum |
+| 1e-2 | 8.7e-09 |
+
+Fixing the *reference* let the bound be **tightened 200× to 1e-5** rather than relaxed.
+
+So: **a tolerance calibrated inside a vacuous regime is not a tolerance.** `2e-3` looked
+like a considered numerical bound and was in fact an arbitrary number that had never
+been compared against anything but zero. Any time a vacuity guard is added to an
+existing test, its tolerance has to be re-derived, not inherited — and a guard that
+turns a passing test red is doing its job.
+
 ---
 
 ## E. Typing debt
@@ -1069,7 +1259,7 @@ corrected below.
 
 | # | Item | Touches | Closes | Verified by |
 |---|---|---|---|---|
-| ~~**0.1**~~ **DONE `e1f1455`** | **Gradient golden.** `tests/characterization/test_fmm_grad_golden.py` + **6** `.npz` (not 8 — the reverse compile costs ~1.1-1.5 GB per case, so the grid was trimmed and `_DIFF_FMM_TEST_FILES` in `tests/conftest.py` extended). Two gates as specified | `tests/characterization/`, `tests/conftest.py`, `tests/slow_tests.txt` | F03, D.1 | Done: full suite 839 passed / 57 skipped; forward golden unmoved; reverse-only mutation caught (D.1). **Open risk in G.9** |
+| ~~**0.1**~~ **DONE `e1f1455`** | **Gradient golden.** `tests/characterization/test_fmm_grad_golden.py` + **6** `.npz` (not 8 — the reverse compile costs ~1.1-1.5 GB per case, so the grid was trimmed and `_DIFF_FMM_TEST_FILES` in `tests/conftest.py` extended). Two gates as specified | `tests/characterization/`, `tests/conftest.py`, `tests/slow_tests.txt` | F03, D.1 | Done: full suite 839 passed / 57 skipped; forward golden unmoved; reverse-only mutation caught (D.1). **G.9 risk now RESOLVED** (per-particle inertness gate; see G.9) |
 | **0.2** | **Widen the forward golden**: add a `farfield_mode` axis (`pair_grouped`, `class_major`), a `nearfield_mode` axis (`bucketed`), and a potentials output. ~8 new cases | `tests/characterization/` only | D.2, D.11 | New goldens generated with `JACCPOT_REGEN_GOLDEN=1`, each anchored to the direct sum before committing |
 | ~~**0.3**~~ **DONE `e5d8e41`** — and it should have been item 0.1, since it was the only item whose *outcome* could invalidate the plan | **Rotation blocks vs. an independent reference.** ~~vs `_real_wigner_rotation`~~ — impossible, that path raises `ImportError` (F39). Implemented instead as **physics identities**: `D_to @ p2m(s) == p2m(g @ s)` for multipoles, and frame-invariance of the evaluated potential for locals | `tests/unit/operators/test_real_harmonics.py` | F29, D.5 (**not** F32 — the family stays unused, see G.4) | Green: production builders correct to ~2.5e-15. Mutation: azimuth swap fails 8/8 new, passes 4/4 pre-existing |
 | **0.4** | ~~Degenerate rotation subgradient~~ **BLOCKED — became a bug report (G.10).** Writing the test refuted the claim it was meant to pin. Re-plan as: bug-fix PR first (G.10), *then* this test as its regression guard | `tests/unit/operators/test_real_harmonics.py` | F31, D.6 → **G.10** | Cannot be green against current behaviour. Do not land a test asserting the present (wrong) values |
@@ -1102,7 +1292,7 @@ Each of these is gated on the Tier 0 characterization named in its row.
 | **1.3** ✔ **PR #82** | Split `operators/real_harmonics.py` along its mathematical seams (A.9). Pure file moves + import updates | 5 new `operators/` modules + a 283-line aggregator | F: `real_harmonics.py` size | 0.3 ✔, G.10 ✔, 0.5 ✔ | **Done, and A.9 was out of date in two ways:** every line citation had shifted (2236 → 2292 lines), and seam 4 (the Wigner family) no longer exists — `ab58c3d` deleted it. Five seams, 1698 carried lines verified verbatim. `real_harmonics.py` stays as an aggregator: 52 references across 35 files, `__all__` byte-identical at 28 names. **`git log --follow` does NOT survive this** — see the correction below. |
 | **1.4** ✔ **PR #83** | Split `nearfield/near_field.py` seam 5 (the radix fast lane + `custom_vjp`) into `nearfield/_fast_lane.py` | `nearfield/` (3957 → 2969) | F: size; isolates the `custom_vjp` | 0.1, 1.2 | **Done.** 902 carried lines verbatim. `custom_vjp` residuals byte-identical on **both** lanes — and note the default `audit_reverse_residuals.py` invocation does *not* reach the fast lane (its top residual is `_compute_leaf_p2p_impl`, the bucketed kernel), so it was re-run with `JACCPOT_DIFFERENTIABLE_NEARFIELD_FAST_LANE=1`. Surfaced the F16 correction below. |
 | **1.5** ✔ **PR #84** | Split `nearfield/near_field.py` seams 1-3 | 4 new `nearfield/` modules (2969 → 1388) | ditto | 1.4 | **Done.** 1441 carried lines verbatim; seam 2 split into `_kernels.py` / `_scatter.py` as A.9 suggests. `bench/audit_nearfield_padding.py` output identical — but it calls `autocvd` unconditionally at import, so it cannot run in the CPU env; its own `audit()` was executed with the GPU picker stubbed instead, which is backend-independent because the measurement is topology-derived. |
-| **1.6** ✔ **PR #85** | Split `runtime/kernels/core.py` along the four seams (A.9), M2L moving as one unit | 5 new `kernels/` modules + a 101-line aggregator | F: `core.py` size | 0.1, 0.2 | **Done.** A.9 names four seams; a **fifth** module (`_shared.py`) was needed, and that is the finding: after assigning the four, exactly five names were left over and both `_evaluate` and `_l2l` need one, so leaving them in `core` would have made `core` import a module that imports `core`. §10 item 1 satisfied with 102 arrays at `rtol=0`. **§10 item 4 (the A100 Pallas-vs-pure-JAX run) is still owed** — no GPU was taken. |
+| **1.6** ✔ **PR #85** | Split `runtime/kernels/core.py` along the four seams (A.9), M2L moving as one unit | 5 new `kernels/` modules + a 101-line aggregator | F: `core.py` size | 0.1, 0.2 | **Done.** A.9 names four seams; a **fifth** module (`_shared.py`) was needed, and that is the finding: after assigning the four, exactly five names were left over and both `_evaluate` and `_l2l` need one, so leaving them in `core` would have made `core` import a module that imports `core`. §10 item 1 satisfied with 102 arrays at `rtol=0`. **§10 item 4 discharged on an A100 — see B.3.** 65 parity tests passed with an empty skip list, forward exactly equal under `deterministic_ops=true`, residuals identical on both lanes, no stage outside noise. Its finding outlived the run: the GPU forward is nondeterministic by more than the difference being measured, so §10's exactness items now name the flag. |
 | **1.7** ✔ **PR #86** | Extract from `PrepareMixin._prepare_state_dual_and_downward` (883 lines) — named private methods along its internal phases, no expression changes | `runtime/fmm_prepare.py` (883 → 493) | F10 | 0.1, 0.2 | **Done, two phases of seven.** The cut points are not guesswork: the function is already instrumented with `_record_dual_stage("..._dual_<phase>_seconds", ...)` at each boundary, and the data flow across every one was measured. Extracted the two where the interface earns a signature (317 lines → a 17-field bundle; 131 lines → 2 outputs); the PR lists the other five with the ratio that argued against them. The driver unpacks the bundle back into the same local names so no later expression changed. |
 | **1.8** ✔ **PR #87** | Extract `_read_large_n_env_config` (271 lines) into `runtime/_large_n_env.py`. **Nothing else** | `runtime/` (2048 → 1768) | F11 (partly) | — | **Done.** The "re-open if GPU coverage has landed" check was run, not assumed: CI is still ubuntu-latest with no cuda leg and `_large_n_grad.py` / `_large_n_farfield.py` are still at **0%**, so A.9's leave-it-whole argument stands and F11 stays open. Datum for the cut line: the extracted reader measures **69%** from three CPU policy test files. |
 | **1.9** ✔ **PR #81** | Move F37's inline thresholds into `runtime/fmm_constants.py` with `#:` comments | `runtime/` | F37 | 0.1 | **Done.** Note that **three different policies cross over at 262144** (`_CLASS_MAJOR_CPU_PARTICLE_THRESHOLD` plus the two named here), so they stay three constants: collapsing them would assert an equivalence that is not established. One site beyond F37's list was named too — the `< 262_144` fifty lines from its twin, the same drift hazard F37 describes. |
@@ -1123,7 +1313,41 @@ Each of these is gated on the Tier 0 characterization named in its row.
 
 ## G. Decisions for you
 
-### G.1 Two latent `NameError`s in `runtime/kernels/core.py` — bugs, separate PRs
+### G.1 ~~Two latent `NameError`s~~ **FIXED (PR #98)** — and one of them was never reachable
+
+> **Resolved 2026-08-14.** Everything below is the original report, kept because its
+> reachability analysis was **wrong** in a way worth preserving.
+>
+> **G.1a — fixed as `jnp.zeros_like(locals_coeffs)`.** The physics question this section
+> put to the reader ("is this branch supposed to be reachable at all?") was answered: with
+> no internal nodes there is no M2L to do, so the source-motion far field is exactly zero.
+> The value is not a new decision — the `pair_count == 0` guard at `_l2l.py:391` already
+> returns zeros for the identical situation, and the two now agree by construction. Zeros
+> rather than `None` because `None` already means "source motion was not requested" and
+> the consumer cannot distinguish the two.
+>
+> **The reachability claim below is wrong.** This section says the branch is reached by
+> "the `else` of `if child_inputs.num_internal_nodes > 0`, with
+> `source_motion_multip_packed is not None`". That is necessary but not sufficient:
+> getting there *also* needs `pair_count > 0`, and the `pair_count == 0` early return
+> seventeen lines above has already claimed **every** single-leaf tree. A one-node tree
+> cannot accept a far pair, so the conjunction is unsatisfiable. Measured rather than
+> argued — forcing a single-leaf tree with a foreign interaction list still does not reach
+> the line. **G.1a was dead code, not a live crash.** Worth noting that the first read of
+> this in execution went the other way (reported as "live for any N <= leaf_size", since
+> `num_internal_nodes == 0` is trivially true whenever N fits one leaf) before the guard
+> was spotted; the `> 0` conditions in a chain of guards need reading together.
+>
+> **G.1b — fixed by adding the import.** Not a wrong name: the function exists at
+> `operators/complex_ops.py:564` with exactly the signature the call site uses. Also
+> effectively unreachable, for a different reason — `fmm_derivatives` passes
+> `return_potential=False` at both of its call sites — so it is tested directly against
+> `kernels/`, which ARCHITECTURE §1 licenses as a leaf library.
+>
+> **The pyflakes invariant below still holds.** PR #98 adds `# noqa: F821` to the two
+> deliberately-dangling `FastMultipoleMethod` annotations, but `noqa` is a flake8
+> directive: `python -m pyflakes jaccpot/` still reports all four sites. What changed is
+> that two of the four are now gone for real, so the count is 2, not 4. See B.4.
 
 **LINE NUMBERS RE-LOCATED (Tier 1.6).** Both citations below were already stale, and
 the `kernels/core.py` split moved them again. Current locations:
@@ -1288,7 +1512,61 @@ set (`jax`, `jaxlib`, `jaxtyping`, `beartype`, `yggdrax`, plus what jax itself b
 `sympy` was the only instance. Note that `import jaccpot` succeeding never proved this, since
 the six broken names were reachable only by direct call — the sweep is what proves it.
 
-### G.9 Cross-platform bit-stability of the gradient golden — an accepted risk, not a settled one
+### G.9 ~~Cross-platform bit-stability of the gradient golden~~ **RESOLVED — the gate's norm was the defect, fixed by option (2)**
+
+> **Resolution.** Diagnosed in `docs/g9_grad_golden_gpu_diagnosis.md`; remediated by the
+> per-particle inertness gate in `tests/characterization/test_fmm_grad_golden.py`. The
+> element that failed is the **small component of a large vector**: `clu_real_n128_p4`
+> particle 57's gradient is `(-1.689e5, +8.747e4, -2.619e2)`, the 6th largest of 128, with
+> a z-component **726× smaller than the vector norm**. Round-off is proportional to the
+> vector's magnitude, so the absolute drift is ~2e-9 on all three components; the
+> elementwise relative test then divides that shared error by each component's own value.
+> Divided by the norm instead it is **1.09e-14**.
+>
+> **Verdict H1, benign.** The accepted M2L set is bit-identical across devices (sha256
+> match, 72 pairs); `--xla_gpu_deterministic_ops=true` changes the number only in its 5th
+> digit, so it is deterministic reassociation and not the atomics behind B.3's four flaky
+> failures; particle 57 sits 6–7 orders from any transverse-degeneracy guard
+> (`rho/|dz| = 0.966` against a band of 1.49e-08), so G.10/D.6 are not implicated; and its
+> direct-sum cancellation ratio is 1.69, ranking 126th of 128.
+>
+> The norm-scaled statistic is bounded at **55 ULP** across all six cases *and* two extra
+> clustered seeds, on both devices — so a 1e-12 gate on it has **58× margin**, where the
+> elementwise gate had 0.13× (i.e. it failed). It still bites: verified by mutation, the
+> `1+1e-6` reverse-rule scaling of D.1 is rejected with six orders of margin, and a
+> perturbation confined to one small component is rejected down to 1e-9.
+>
+> **Option (2) was taken, not (3)**, which is what the earlier update below predicted.
+> Device-gating the elementwise assertion needs a band near **1e-8** to pass on GPU, and
+> under that band a genuine 1e-9 single-component error goes undetected — the norm-scaled
+> gate at 1e-12 catches exactly that. The elementwise gate is kept **on CPU**, where the
+> goldens were generated and hold with ~130× margin, so its single-component sensitivity is
+> retained where it is a real claim. No golden was regenerated and `INERT_RTOL` is
+> unchanged. Verified: 8 passed on 2 of 2 A100 runs (was 3/3 red), 29 passed in
+> `tests/characterization/` on CPU.
+>
+> One thing this exposed and did **not** fix: `grad_masses` at particle 57 drifts **898
+> ULP** on the A100 — genuine cancellation in a scalar sum, not a small denominator (a
+> scale floor does not move it). It passes at 1e-12 with only 5× margin. Left as-is
+> deliberately; it is a thin margin, not a failure, and widening or restructuring it is a
+> separate decision.
+
+> **Update (A100 run, B.3).** The axis this section worried about **held**: macOS-generated
+> goldens are green on ubuntu CI, across every Tier 1 PR. The one that broke is
+> cross-*device*, which this section did not consider:
+> `test_fmm_grad_golden[clu_real_n128_p4]` fails on the A100 with
+> `Mismatched elements: 1 / 384 (0.26%)`, `grad_positions drifted from the committed
+> golden`, at `rtol=atol=1e-12`. It is **reproducible 3/3 under both default XLA and
+> `deterministic_ops=true`** — so unlike the four flaky failures in B.3 it is not
+> nondeterminism — and it **fails identically on pre-Tier-1 `128a0e2`**, so it is not a
+> Tier 1 regression. The golden and `INERT_RTOL` are untouched.
+>
+> This makes option (3) the live one, re-read for device rather than platform: gate the
+> inertness assertion on device, or commit a per-device golden. Note that (1) does not
+> apply — there is nothing wrong with the Linux CPU numbers. Wants its own investigation
+> and its own PR; the first question is whether one element in 384 at 1e-12 is
+> reassociation in the reverse M2L graph or something structural, and that is answered by
+> finding *which* element.
 
 The six `.npz` in `tests/characterization/golden_grad/` were generated on **macOS / CPU /
 JAX 0.10.2**; CI runs **ubuntu-latest**. The forward golden sets a precedent that float64 CPU

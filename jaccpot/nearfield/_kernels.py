@@ -113,7 +113,43 @@ def _pair_contributions(
     G: Array,
     compute_potential: bool,
 ) -> Tuple[Array, Optional[Array]]:
-    """Compute one target-leaf vs source-leaf contribution block."""
+    """Compute one target-leaf vs source-leaf contribution block.
+
+    The scalar reference form: one target leaf against one source leaf, softened
+    Newtonian. ``_pair_contributions_batched`` is the vectorised twin used in
+    production and must agree with this to reassociation.
+
+    **Accumulation order is load-bearing** (NUMERICS_AND_JAX §1): the sum over the
+    source axis, and the masking that precedes it, are what the goldens were taken
+    with.
+
+    Parameters
+    ----------
+    target_positions : Array
+        Padded target-leaf positions ``[W, 3]``.
+    target_mask : Array
+        Padded target-leaf validity ``[W]``; ``False`` slots produce zero output.
+    source_positions : Array
+        Padded source-leaf positions ``[W, 3]``.
+    source_masses : Array
+        Padded source-leaf masses ``[W]``.
+    source_mask : Array
+        Padded source-leaf validity, same shape as ``source_masses``; masked
+        sources are zeroed **before** the sum, so they contribute exactly ``0``
+        rather than ``0 * inf``.
+    softening_sq : Union[float, Array]
+        Squared Plummer softening length, added to every squared separation.
+    G : Array
+        Gravitational constant.
+    compute_potential : bool
+        Also return per-target potentials. Static under ``jit``.
+
+    Returns
+    -------
+    Tuple[Array, Optional[Array]]
+        ``(accelerations, potentials)``; the second element is ``None`` unless
+        ``compute_potential``.
+    """
     dtype = target_positions.dtype
 
     source_pos = source_positions
@@ -184,7 +220,47 @@ def _pair_contributions_batched(
     G: Array,
     compute_potential: bool,
 ) -> Tuple[Array, Optional[Array]]:
-    """Vectorized pair contributions for a batch of target/source leaf pairs."""
+    """Vectorized pair contributions for a batch of target/source leaf pairs.
+
+    The production accel path, and the one the differentiable near field runs.
+    Numerically equivalent to :func:`_pair_contributions` over a batch of leaf
+    pairs.
+
+    WHY THERE IS A BRANCH AT THE TOP. When ``analytic_p2p_vjp_enabled()`` and no
+    potential is requested, this routes through ``_pair_accel_cvjp`` -- the analytic
+    symmetric-tidal-tensor ``custom_vjp``. The **forward is byte-identical** either
+    way; the point is the reverse, which that rule computes in O(N) memory instead
+    of retaining a residual per scan iteration. Masks are handed over as 0/1 floats
+    and ``softening_sq``/``G`` as arrays specifically so the reverse rule closes
+    over no tracer.
+
+    Parameters
+    ----------
+    target_positions : Array
+        Padded target-leaf positions ``[num_pairs, W, 3]``.
+    target_mask : Array
+        Padded target-leaf validity ``[num_pairs, W]``; ``False`` slots produce zero output.
+    source_positions : Array
+        Padded source-leaf positions ``[num_pairs, W, 3]``.
+    source_masses : Array
+        Padded source-leaf masses ``[num_pairs, W]``.
+    source_mask : Array
+        Padded source-leaf validity, same shape as ``source_masses``; masked
+        sources are zeroed **before** the sum, so they contribute exactly ``0``
+        rather than ``0 * inf``.
+    softening_sq : Union[float, Array]
+        Squared Plummer softening length, added to every squared separation.
+    G : Array
+        Gravitational constant.
+    compute_potential : bool
+        Also return per-target potentials. Static under ``jit``.
+
+    Returns
+    -------
+    Tuple[Array, Optional[Array]]
+        ``(accelerations, potentials)``; the second element is ``None`` unless
+        ``compute_potential``.
+    """
     if analytic_p2p_vjp_enabled() and not compute_potential:
         # Accel-only path (the differentiable path): route through the analytic
         # symmetric-tidal-tensor custom_vjp. Forward is byte-identical; masks are
@@ -234,7 +310,42 @@ def _pair_contributions_batched_componentwise(
     G: Array,
     compute_potential: bool,
 ) -> Tuple[Array, Optional[Array]]:
-    """Vectorized pair contributions with explicit Cartesian components."""
+    """Vectorized pair contributions with explicit Cartesian components.
+
+    Same result as :func:`_pair_contributions_batched`, written with ``dx``/``dy``/
+    ``dz`` split out instead of a vector difference. That is not cosmetic: keeping
+    the three components separate lets XLA fuse the three reductions without
+    materialising a ``[pairs, W, W, 3]`` difference tensor, which is the shape that
+    dominates the large-N target-block kernels' peak. It has no ``custom_vjp``
+    branch, so it is the form used where the analytic reverse does not apply.
+
+    Parameters
+    ----------
+    target_positions : Array
+        Padded target-leaf positions ``[num_pairs, W, 3]``.
+    target_mask : Array
+        Padded target-leaf validity ``[num_pairs, W]``; ``False`` slots produce zero output.
+    source_positions : Array
+        Padded source-leaf positions ``[num_pairs, W, 3]``.
+    source_masses : Array
+        Padded source-leaf masses ``[num_pairs, W]``.
+    source_mask : Array
+        Padded source-leaf validity, same shape as ``source_masses``; masked
+        sources are zeroed **before** the sum, so they contribute exactly ``0``
+        rather than ``0 * inf``.
+    softening_sq : Union[float, Array]
+        Squared Plummer softening length, added to every squared separation.
+    G : Array
+        Gravitational constant.
+    compute_potential : bool
+        Also return per-target potentials. Static under ``jit``.
+
+    Returns
+    -------
+    Tuple[Array, Optional[Array]]
+        ``(accelerations, potentials)``; the second element is ``None`` unless
+        ``compute_potential``.
+    """
     dx = target_positions[:, :, None, 0] - source_positions[:, None, :, 0]
     dy = target_positions[:, :, None, 1] - source_positions[:, None, :, 1]
     dz = target_positions[:, :, None, 2] - source_positions[:, None, :, 2]
@@ -285,8 +396,32 @@ def _bucketed_chunk_pair_accels(
     N=200000 and 124 GB at N=1048576 on the canonical leaf-256 config, versus
     ~14 B per *edge* once rematerialized.
 
-    Returns ``(pair_accelerations, target_mask)``; the caller applies the scatter,
-    which is linear and therefore needs only indices and the mask in reverse.
+    Parameters
+    ----------
+    leaf_positions : Array
+        Padded per-leaf positions ``[num_leaves, W, 3]``, scan-invariant so
+        partial-eval hoists it out.
+    leaf_masses : Array
+        Padded per-leaf masses ``[num_leaves, W]``.
+    leaf_mask : Array
+        Padded per-leaf validity ``[num_leaves, W]``.
+    target_leaf_local : Array
+        Target leaf id per edge in this chunk, ``[chunk]``. Integer, no gradient.
+    source_leaf_local : Array
+        Source leaf id per edge in this chunk, ``[chunk]``. Integer, no gradient.
+    valid_edge : Array
+        Per-edge validity ``[chunk]``; padded edges contribute exactly zero.
+    softening_sq : Array
+        Squared Plummer softening length. An array, not a float, so the analytic
+        reverse rule closes over no tracer.
+    G : Array
+        Gravitational constant, an array for the same reason.
+
+    Returns
+    -------
+    Tuple[Array, Array]
+        ``(pair_accelerations, target_mask)``. The caller applies the scatter,
+        which is linear and therefore needs only indices and the mask in reverse.
     """
     target_positions = leaf_positions[target_leaf_local]
     target_mask = leaf_mask[target_leaf_local] & valid_edge[:, None]

@@ -8,6 +8,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 from jax import lax
+from jaxtyping import DTypeLike as _jaxtyping_DTypeLike
 
 from ._precision import highest_matmul_precision
 from ._transverse_degeneracy_jvp import (
@@ -31,6 +32,11 @@ from .symmetric_tensors import (
 )
 
 Array = jnp.ndarray
+#: `jaxtyping.DTypeLike` admits anything that names a dtype -- a `numpy.dtype`, a
+#: string, and JAX's own scalar types (`jnp.complex128` is a `_ScalarMeta`, not a
+#: `numpy.dtype`). Aliased here beside `Array` because this module deliberately
+#: defines its own `Array` alias rather than importing jaxtyping's.
+DTypeLike = _jaxtyping_DTypeLike
 
 
 @lru_cache(maxsize=None)
@@ -111,7 +117,7 @@ def _factorial_table_cached_impl(max_n: int, dtype_key: str) -> np.ndarray:
     return np.concatenate([np.ones((1,), dtype=dtype), np.cumprod(n)])
 
 
-def _factorial_table_cached(max_n: int, dtype: jnp.dtype) -> Array:
+def _factorial_table_cached(max_n: int, dtype: DTypeLike) -> Array:
     dtype_key = str(jnp.dtype(dtype))
     return jnp.asarray(_factorial_table_cached_impl(max_n, dtype_key), dtype=dtype)
 
@@ -669,7 +675,10 @@ def regular_solid_harmonic_directional_derivative_order(
     base = jnp.asarray(complex_R_solidfmm(delta, order=p))
     direction_arr = jnp.asarray(direction, dtype=jnp.real(base).dtype)
 
-    def body(_i: int, coeffs: Array) -> Array:
+    # `lax.fori_loop` hands the body a TRACER, not an `int`, so the index is
+    # annotated `Array` (matching `_adaptive_policy`'s `iter_idx: Array`). It was
+    # `int`, which `JACCPOT_RUNTIME_TYPECHECK=1` rejects at every call (F40).
+    def body(_i: Array, coeffs: Array) -> Array:
         dx = _lower_complex_harmonics_one_axis(coeffs, order=p, axis=0)
         dy = _lower_complex_harmonics_one_axis(coeffs, order=p, axis=1)
         dz = _lower_complex_harmonics_one_axis(coeffs, order=p, axis=2)
@@ -847,7 +856,7 @@ def translate_along_z_l2l_complex(
     return out
 
 
-def _complex_Dz(ell: int, angle: Array, *, dtype: jnp.dtype) -> Array:
+def _complex_Dz(ell: int, angle: Array, *, dtype: DTypeLike) -> Array:
     m_vals = jnp.arange(-ell, ell + 1, dtype=dtype)
     diag = jnp.exp(1j * m_vals * angle)
     return jnp.diag(diag)
@@ -861,7 +870,7 @@ def _complex_swap_matrices_cached(
     return B, B.T
 
 
-def _complex_swap_matrices(ell: int, *, dtype: jnp.dtype) -> tuple[Array, Array]:
+def _complex_swap_matrices(ell: int, *, dtype: DTypeLike) -> tuple[Array, Array]:
     dtype_key = str(jnp.dtype(dtype))
     B, Bt = _complex_swap_matrices_cached(ell, dtype_key)
     return jnp.asarray(B, dtype=dtype), jnp.asarray(Bt, dtype=dtype)
@@ -1001,7 +1010,7 @@ def _complex_transverse_generator_packed(
 
 def complex_transverse_generators(
     order: int,
-    dtype: jnp.dtype,
+    dtype: DTypeLike,
     *,
     in_representation: str,
     out_representation: str,
@@ -1015,7 +1024,7 @@ def complex_transverse_generators(
     ----------
     order : int
         Maximum SH degree ``p``.
-    dtype : jnp.dtype
+    dtype : DTypeLike
         Working complex dtype of the coefficients. The generators are built in
         complex128 and cast down, so the generator matmuls run in the working dtype
         rather than promoting complex64 coefficients.
@@ -1105,7 +1114,7 @@ def _solidfmm_swap_mats(
     B_swap: Array,
     *,
     ell: int,
-    dtype: jnp.dtype,
+    dtype: DTypeLike,
 ) -> tuple[Array, Array]:
     """Build real/imag swap matrices for solidfmm's m>=0 storage.
 
@@ -1250,7 +1259,7 @@ def _complex_rotation_blocks_to_z_solidfmm(
     *,
     order: int,
     basis: str,
-    dtype: jnp.dtype,
+    dtype: DTypeLike,
 ) -> tuple[Array, ...]:
     """Rotation blocks to z using solidfmm's swap+z-rotation convention."""
     if basis not in ("multipole", "local"):
@@ -1278,7 +1287,7 @@ def _complex_rotation_blocks_from_z_solidfmm(
     *,
     order: int,
     basis: str,
-    dtype: jnp.dtype,
+    dtype: DTypeLike,
 ) -> tuple[Array, ...]:
     """Rotation blocks from z using solidfmm's swap+z-rotation convention."""
     if basis not in ("multipole", "local"):
@@ -1335,7 +1344,7 @@ def _blocks_to_padded_array(
     blocks: tuple[Array, ...],
     *,
     order: int,
-    dtype: jnp.dtype,
+    dtype: DTypeLike,
 ) -> Array:
     """Pad rotation blocks to (p+1, 2p+1, 2p+1)."""
     p = int(order)
@@ -1360,7 +1369,7 @@ def _complex_rotation_blocks_to_z_solidfmm_padded(
     *,
     order: int,
     basis: str,
-    dtype: jnp.dtype,
+    dtype: DTypeLike,
 ) -> Array:
     blocks = _complex_rotation_blocks_to_z_solidfmm(
         delta,
@@ -1384,7 +1393,7 @@ def _complex_rotation_blocks_from_z_solidfmm_padded(
     *,
     order: int,
     basis: str,
-    dtype: jnp.dtype,
+    dtype: DTypeLike,
 ) -> Array:
     blocks = _complex_rotation_blocks_from_z_solidfmm(
         delta,
@@ -1401,7 +1410,7 @@ def complex_rotation_blocks_to_z_solidfmm_batch(
     *,
     order: int,
     basis: str,
-    dtype: jnp.dtype,
+    dtype: DTypeLike,
 ) -> Array:
     """Batch padded rotation blocks to z using solidfmm convention."""
     return jax.vmap(
@@ -1420,7 +1429,7 @@ def complex_rotation_blocks_from_z_solidfmm_batch(
     *,
     order: int,
     basis: str,
-    dtype: jnp.dtype,
+    dtype: DTypeLike,
 ) -> Array:
     """Batch padded rotation blocks from z using solidfmm convention."""
     return jax.vmap(

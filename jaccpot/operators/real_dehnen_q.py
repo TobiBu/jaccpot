@@ -470,4 +470,7 @@ def verify_real_B_matrix(ell: int, *, dtype: DTypeLike) -> Tuple[bool, float, fl
     B_squared_error = max(B_squared_error, B_U_squared_error)
     is_valid = B_squared_error < 1e-10
 
-    return is_valid, float(B_squared_error), sparsity_ratio
+    # `bool(...)`, because `is_valid` compares a `np.linalg.norm` result and is
+    # therefore `np.bool_`, which is not a `bool`. The `float(...)` beside it already
+    # made the intent plain: this is a host-side verdict, not an array.
+    return bool(is_valid), float(B_squared_error), sparsity_ratio

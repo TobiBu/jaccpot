@@ -79,3 +79,37 @@ export JACCPOT_RUNTIME_TYPECHECK=1
 - Keep changes focused and scoped.
 - Include tests for behavior changes.
 - Update README and docs when user-facing APIs change.
+
+## Writing a validation handoff
+
+Some validation cannot run where the work happens — the A100 Pallas parity run in
+`ARCHITECTURE.md` §10 item 4 is the standing example — so it gets written up in
+`docs/` as a handoff for someone with the right hardware. Four rules, each of
+which has already cost a real run:
+
+**Give every command the invariant it must satisfy, not just the command.** A
+handoff that says "run `audit_reverse_residuals.py --n 4096 --leaf 64`" produced a
+result covering **zero** M2L pairs: at that leaf size the MAC accepts none, so the
+far-field reverse it was meant to measure never ran. The audit script said so in
+its own output and the handoff still had to be re-run. Write "…and confirm
+`far_pairs > 0`". This is the same discipline the tests already use — see the
+`min_far` parameter in `tests/unit/test_gradient_correctness.py` and the vacuity
+gates in `tests/characterization/test_fmm_grad_golden.py`.
+
+**Pin commits, not branch names.** Branches get merged while a handoff waits. One
+naming three branches to compare against `main` was executed after all three had
+landed, so every comparison would have been a tree against itself plus unrelated
+later work. Give SHAs, or define the baseline by rule ("the last commit before the
+first Tier 1 merge") so it can be recovered later.
+
+**Say which backend each claim is for.** `rtol=0` and exact equality mean
+different things on CPU and GPU; see `ARCHITECTURE.md` §10.
+
+**Ask for the skip list, not just the pass count.** A GPU-gated test that
+self-skips is indistinguishable from one that passed, and several tests here carry
+a defensive `pytest.skip` inside an `except` block. `-rA` and an explicit "report
+which parametrisations ran" is the difference between a validated path and an
+assumption.
+
+Then record the result somewhere durable and link it from the audit, so the next
+person inherits the measurements instead of re-deriving them.

@@ -602,16 +602,28 @@ def _prepare_solidfmm_downward_sweep(
         else:
             source_motion_locals_updated = None
     else:
+        # No internal nodes: the tree is a single leaf. There is no M2L to do (a
+        # lone node has no box pair to be far from) and no parent-to-child cascade
+        # to run, so the source-motion far field is exactly ZERO -- the whole
+        # interaction is near-field, which this function does not compute. That is
+        # the same conclusion the `pair_count == 0` guard above already reaches, and
+        # zero is what it returns there; these two agree on purpose.
+        #
+        # This used to call `_accumulate_from_multipoles`, which is defined nowhere
+        # -- audit G.1a, a latent `NameError`. It never fired because the branch is
+        # unreachable: getting here needs `pair_count > 0` AND
+        # `num_internal_nodes == 0`, and the `pair_count == 0` return above already
+        # took every single-leaf tree. Measured, not assumed -- forcing a one-node
+        # tree with a foreign interaction list still does not reach this line. The
+        # audit's reachability note missed that guard.
+        #
+        # Kept as zeros rather than a raise: it is the correct value if the guard
+        # above is ever loosened, and it cannot introduce a new crash path.
+        # `None` would be wrong -- it means "source motion was not requested" (the
+        # else below), which the consumer cannot distinguish from "requested, and
+        # the far field is empty".
         if source_motion_multip_packed is not None:
-            stage_t0 = time.perf_counter()
-            source_motion_locals_updated = _accumulate_from_multipoles(
-                jnp.zeros_like(locals_coeffs), source_motion_multip_packed
-            )
-            source_motion_locals_updated = _record_timed_array(
-                "_refresh_timing_dual_source_motion_seconds",
-                stage_t0,
-                source_motion_locals_updated,
-            )
+            source_motion_locals_updated = jnp.zeros_like(locals_coeffs)
         else:
             source_motion_locals_updated = None
 

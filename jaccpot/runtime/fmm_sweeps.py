@@ -24,6 +24,7 @@ from yggdrax.interactions import (
 from yggdrax.tree import Tree, get_node_levels
 from yggdrax.tree_moments import compute_tree_mass_moments
 
+from jaccpot.config import MACTypeInput
 from jaccpot.downward.local_expansions import (
     LocalExpansionData,
     TreeDownwardData,
@@ -302,7 +303,10 @@ class SweepsMixin:
         upward_data: TreeUpwardData,
         *,
         theta: Optional[float] = None,
-        mac_type: Optional[MACType] = None,
+        # Caller-facing, so the superset: this accepts "dehnen_error" and
+        # resolves it below. The boundary between caller-facing and
+        # traversal-facing runs through this function.
+        mac_type: Optional[MACTypeInput] = None,
         initial_locals: Optional[LocalExpansionData] = None,
         interactions: Optional[NodeInteractionList] = None,
         m2l_chunk_size: Optional[int] = None,
@@ -329,7 +333,14 @@ class SweepsMixin:
         self._ensure_execution_backend_supported(tree=tree)
 
         theta_val = float(self.theta if theta is None else theta)
-        mac_type_val = self.mac_type if mac_type is None else mac_type
+        # Resolve BEFORE the traversal sees it. Both branches: an explicitly
+        # passed "dehnen_error" needs the same mapping as the solver default,
+        # and both `mac_type_val` consumers below are traversal-facing. This
+        # used to hand `self.mac_type` over raw, so the jaccpot-level policy
+        # value travelled to a boundary that rejects it.
+        mac_type_val = self._mac_type_for_traversal(
+            self.mac_type if mac_type is None else mac_type
+        )
         dehnen_scale_val = float(
             self.dehnen_radius_scale
             if dehnen_radius_scale is None

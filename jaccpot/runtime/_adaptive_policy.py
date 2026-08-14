@@ -8,7 +8,7 @@ from typing import Literal, NamedTuple, Optional
 import jax
 import jax.numpy as jnp
 import numpy as np
-from jaxtyping import Array
+from jaxtyping import Array, DTypeLike
 from yggdrax.tree import Tree
 
 from jaccpot.upward.tree_expansions import TreeUpwardData
@@ -343,7 +343,9 @@ def compute_node_force_scale_from_sorted_magnitudes(
     internal_width = internal_ranges[:, 1] - internal_ranges[:, 0]
     internal_order = jnp.argsort(internal_width, stable=True)
 
-    def body(i: int, current: Array) -> Array:
+    # Loop index: a `fori_loop` tracer, not an `int` -- see `body` below at the
+    # Ritter sweep, which already annotates it `Array` (F40).
+    def body(i: Array, current: Array) -> Array:
         node_idx = internal_order[i]
         left_idx = left_child[node_idx]
         right_idx = right_child[node_idx]
@@ -590,7 +592,8 @@ def _batched_ritter_leaf_spheres(
             center0 = 0.5 * (p1 + p2)
             radius0 = jnp.linalg.norm(p2 - center0)
 
-            def body(i: int, state: tuple[Array, Array]) -> tuple[Array, Array]:
+            # Loop index: a `fori_loop` tracer, not an `int` (F40).
+            def body(i: Array, state: tuple[Array, Array]) -> tuple[Array, Array]:
                 center, radius = state
                 point = pts[i]
                 is_valid = mask[i]
@@ -829,7 +832,7 @@ def resolve_dehnen_geometry(
     tree: Tree,
     positions_sorted: Array,
     upward: TreeUpwardData,
-    dtype: Array,
+    dtype: DTypeLike,
 ) -> tuple[Array, Array]:
     """Return MAC centres and radii for the requested Dehnen geometry mode.
 
@@ -911,7 +914,7 @@ def resolve_dehnen_geometry(
 
 
 def _dehnen_binomial_matrix(
-    *, p_gears: tuple[int, ...], total_p: int, dtype: Array
+    *, p_gears: tuple[int, ...], total_p: int, dtype: DTypeLike
 ) -> Array:
     rows = np.zeros((len(p_gears), total_p + 1), dtype=np.asarray(dtype).dtype)
     for idx, p_val in enumerate(tuple(int(v) for v in p_gears)):
