@@ -246,9 +246,10 @@ from .fmm_overrides import (
 )
 from .fmm_policy import PolicyMixin
 from .fmm_prepare import PrepareMixin
-from .fmm_presets import get_preset_config
+from .fmm_presets import FMMPresetConfig, get_preset_config
 from .fmm_state import (
     FMMPreparedState,
+    FMMResolvedConfig,
     TreeBuilderConfig,
     _bucket_far_pairs_by_level_split,
     _build_octree_downward_artifacts,
@@ -689,6 +690,55 @@ class FastMultipoleMethod(
                 "and is far too loose here. Note that theta itself does not "
                 "gate acceptance in this mode."
             )
+        self._resolve_runtime_defaults(
+            resolved=resolved,
+            preset_config=preset_config,
+            interaction_retry_logger=interaction_retry_logger,
+        )
+        self._resolve_refresh_and_strict_modes()
+        self._resolve_large_n_diag_modes()
+        self._init_compiled_lane_caches(
+            m2l_chunk_size=m2l_chunk_size,
+            l2l_chunk_size=l2l_chunk_size,
+            traversal_config=traversal_config,
+            max_pair_queue=max_pair_queue,
+            pair_process_block=pair_process_block,
+            grouped_interactions=grouped_interactions,
+            fixed_order=fixed_order,
+            fixed_max_leaf_size=fixed_max_leaf_size,
+        )
+        self._resolve_derived_lane_flags()
+        self._resolve_static_sizing_flags(
+            retain_far_pairs_for_grad=retain_far_pairs_for_grad,
+        )
+
+    def _resolve_runtime_defaults(
+        self,
+        *,
+        resolved: FMMResolvedConfig,
+        preset_config: Optional[FMMPresetConfig],
+        interaction_retry_logger: Optional[Callable[[DualTreeRetryEvent], None]],
+    ) -> None:
+        """Resolve G/softening/dtype, jit defaults, chunk sizes, traversal and tree build.
+
+        Extracted verbatim from ``__init__`` lines 692-806 (audit 2.1 step 2).
+        Called in the original position, so the resolution order is unchanged --
+        that order is load-bearing (b462e45, dee46d6).
+
+        Parameters
+        ----------
+        resolved : FMMResolvedConfig
+            Passed through from ``__init__`` unchanged.
+        preset_config : Optional[FMMPresetConfig]
+            Passed through from ``__init__`` unchanged.
+        interaction_retry_logger : Optional[Callable[[DualTreeRetryEvent], None]]
+            Passed through from ``__init__`` unchanged.
+
+        Returns
+        -------
+        None
+            Mutates ``self`` in place, exactly as the inlined code did.
+        """
         self.G = resolved.G
         self.softening = resolved.softening
         self.working_dtype = resolved.working_dtype
@@ -804,6 +854,19 @@ class FastMultipoleMethod(
         self._refresh_timing_nearfield_state_pack_seconds: float = 0.0
         self._refresh_timing_nearfield_residual_seconds: float = 0.0
         self._refresh_timing_evaluate_seconds: float = 0.0
+
+    def _resolve_refresh_and_strict_modes(self) -> None:
+        """Resolve the refresh-timing, dual-planner and strict-lane execution modes.
+
+        Extracted verbatim from ``__init__`` lines 807-901 (audit 2.1 step 2).
+        Called in the original position, so the resolution order is unchanged --
+        that order is load-bearing (b462e45, dee46d6).
+
+        Returns
+        -------
+        None
+            Mutates ``self`` in place, exactly as the inlined code did.
+        """
         # Whether the M2L/L2L substage timers actually ran. They cost a device
         # sync per substage, so they are conditional -- and a conditional timer
         # that reports 0.0 when it did not run is indistinguishable from a stage
@@ -899,6 +962,19 @@ class FastMultipoleMethod(
                 "0",
             )
         ).strip().lower() in {"1", "true", "yes", "on"}
+
+    def _resolve_large_n_diag_modes(self) -> None:
+        """Resolve the large-N fused defaults and every diagnostic-mode env switch.
+
+        Extracted verbatim from ``__init__`` lines 902-1003 (audit 2.1 step 2).
+        Called in the original position, so the resolution order is unchanged --
+        that order is load-bearing (b462e45, dee46d6).
+
+        Returns
+        -------
+        None
+            Mutates ``self`` in place, exactly as the inlined code did.
+        """
         # Default ON: the device-only fused hot path enables the streamed
         # fast-lane (_prepare_state_dual_and_downward_strict_streamed_fast),
         # which is ~10x faster than the host-routed path for the strict fused
@@ -1001,6 +1077,49 @@ class FastMultipoleMethod(
         self._strict_fused_jit_function_cache: dict[
             tuple[Any, ...], tuple[Any, ...]
         ] = {}
+
+    def _init_compiled_lane_caches(
+        self,
+        *,
+        m2l_chunk_size: Optional[int],
+        l2l_chunk_size: Optional[int],
+        traversal_config: Optional[DualTreeTraversalConfig],
+        max_pair_queue: Optional[int],
+        pair_process_block: Optional[int],
+        grouped_interactions: Optional[bool],
+        fixed_order: Optional[int],
+        fixed_max_leaf_size: Optional[int],
+    ) -> None:
+        """Initialise the compiled-lane caches and record which knobs the caller set.
+
+        Extracted verbatim from ``__init__`` lines 1004-1022 (audit 2.1 step 2).
+        Called in the original position, so the resolution order is unchanged --
+        that order is load-bearing (b462e45, dee46d6).
+
+        Parameters
+        ----------
+        m2l_chunk_size : Optional[int]
+            Passed through from ``__init__`` unchanged.
+        l2l_chunk_size : Optional[int]
+            Passed through from ``__init__`` unchanged.
+        traversal_config : Optional[DualTreeTraversalConfig]
+            Passed through from ``__init__`` unchanged.
+        max_pair_queue : Optional[int]
+            Passed through from ``__init__`` unchanged.
+        pair_process_block : Optional[int]
+            Passed through from ``__init__`` unchanged.
+        grouped_interactions : Optional[bool]
+            Passed through from ``__init__`` unchanged.
+        fixed_order : Optional[int]
+            Passed through from ``__init__`` unchanged.
+        fixed_max_leaf_size : Optional[int]
+            Passed through from ``__init__`` unchanged.
+
+        Returns
+        -------
+        None
+            Mutates ``self`` in place, exactly as the inlined code did.
+        """
         # Compiled radix fast-lane acceleration evaluates, keyed by the
         # Python constants the traced body closes over (jax.jit keys on the
         # pytree structure and avals itself). See
@@ -1020,6 +1139,19 @@ class FastMultipoleMethod(
         self._explicit_pair_process_block = pair_process_block is not None
         self._explicit_grouped_interactions = grouped_interactions is not None
         self.grouped_interactions = grouped_interactions
+
+    def _resolve_derived_lane_flags(self) -> None:
+        """Derive the two cross-cutting lane flags from the already-resolved config.
+
+        Extracted verbatim from ``__init__`` lines 1023-1035 (audit 2.1 step 2).
+        Called in the original position, so the resolution order is unchanged --
+        that order is load-bearing (b462e45, dee46d6).
+
+        Returns
+        -------
+        None
+            Mutates ``self`` in place, exactly as the inlined code did.
+        """
         self._streamed_minimum_memory_gpu_default_split_build: bool = bool(
             self.memory_objective == "minimum_memory"
             and jax.default_backend() == "gpu"
@@ -1033,6 +1165,28 @@ class FastMultipoleMethod(
             and str(self.expansion_basis).strip().lower() == "solidfmm"
             and str(self.execution_backend).strip().lower() != "octree"
         )
+
+    def _resolve_static_sizing_flags(
+        self,
+        *,
+        retain_far_pairs_for_grad: bool,
+    ) -> None:
+        """Resolve static runtime sizing, grad far-pair retention and fast-lane centres.
+
+        Extracted verbatim from ``__init__`` lines 1036-1069 (audit 2.1 step 2).
+        Called in the original position, so the resolution order is unchanged --
+        that order is load-bearing (b462e45, dee46d6).
+
+        Parameters
+        ----------
+        retain_far_pairs_for_grad : bool
+            Passed through from ``__init__`` unchanged.
+
+        Returns
+        -------
+        None
+            Mutates ``self`` in place, exactly as the inlined code did.
+        """
         self._static_runtime_fixed_sizing: bool = str(
             os.environ.get("JACCPOT_STATIC_RUNTIME_FIXED_SIZING", "1")
         ).strip().lower() in {"1", "true", "yes", "on"}
