@@ -28,6 +28,7 @@ from __future__ import annotations
 import inspect
 from typing import Any, Optional
 
+import jax
 from jax.experimental.pallas import pallas_call
 from jax.experimental.pallas import triton as plgpu
 
@@ -35,7 +36,30 @@ from jax.experimental.pallas import triton as plgpu
 #: (True on <= 0.9.0.x, False from 0.9.1 on).
 PALLAS_CALL_TAKES_BACKEND = "backend" in inspect.signature(pallas_call).parameters
 
-__all__ = ["PALLAS_CALL_TAKES_BACKEND", "pallas_backend_kwargs"]
+#: A mutable block reference inside a Pallas kernel body -- what ``pallas_call``
+#: passes for each input, output and scratch operand, read and written with
+#: ``ref[...]`` rather than used as a value.
+#:
+#: Aliased here, in the compat module, for the same reason
+#: ``PALLAS_CALL_TAKES_BACKEND`` lives here: JAX moves this name around and there is
+#: no ``pallas.Ref``. On the pinned range (``jax>=0.10.2,<0.11``) the public spelling
+#: is ``jax.Ref``, which resolves to ``jax._src.core.Ref``; if it moves again, this
+#: line changes and the ~68 annotated parameters do not.
+#:
+#: Accurate, not merely convenient: measured under ``interpret=True``, a kernel body
+#: actually receives a ``DynamicJaxprTracer``, and ``isinstance(that, jax.Ref)`` is
+#: **True** -- so the annotation would hold even if it were enforced. Today it is not:
+#: nothing in ``jaccpot/pallas/`` carries ``@jaxtyped``/``beartype``, so these
+#: annotations are documentation, and exist because pydoclint's
+#: ``--arg-type-hints-in-signature`` will not let a parameter be *documented* until it
+#: is annotated (F23/F20).
+KernelRef = jax.Ref
+
+__all__ = [
+    "PALLAS_CALL_TAKES_BACKEND",
+    "KernelRef",
+    "pallas_backend_kwargs",
+]
 
 
 def pallas_backend_kwargs(
