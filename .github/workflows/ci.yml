@@ -100,9 +100,17 @@ jobs:
 
   test-mac-runtime:
     # The Dehnen mass-dependent MAC suite (tests/unit/runtime), split out of
-    # test-full. 94 cases, every one building a solver and running a full FMM
-    # solve: 26-95 s each on CPU, which is 20+ minutes this job absorbs so that
-    # test-full keeps both its ~36 min profile and the meaning of its cap.
+    # test-full. Every case builds a solver and runs a full FMM solve: 26-95 s
+    # each on CPU, which is 20+ minutes this job absorbs so that test-full keeps
+    # both its ~36 min profile and the meaning of its cap.
+    #
+    # Collected case count, `-m "not experimental"`: 94 when this job was written,
+    # 213 on main, and 256 on this branch -- the eq (16b) estimator, the cache-key
+    # identity, the split-build and large-N-lane criterion tests, and the refuted
+    # `dehnen_theta` mode add 43. The cap below is NOT raised to fit them: it is a
+    # regression detector, and widening it to absorb new tests is what would blind
+    # it (the same argument test-full's `timeout-minutes` note makes). If this job
+    # starts timing out, the answer is another split by path, not a bigger number.
     #
     # Splitting also halves the COLD-cache cost per job, which matters more than it
     # looks: the .jax_cache key is hashFiles('jaccpot/**/*.py'), so any runtime
