@@ -597,6 +597,47 @@ coefficients with numpy instead of the test's `jax.random.normal` moved the real
 by ~3× (8.9e-07 → 3.27e-07), so they are the right order but should not be read as
 tight.
 
+### B.4 The gate could not see an undefined name, and three defects used the gap
+
+`.pre-commit-config.yaml` ran black, isort, pydoclint and pytest. **None of the four can
+see a name that is used but never imported** — and neither can the test suite, because
+every runtime module has `from __future__ import annotations`, so an unimported name
+inside an annotation is stored as a lazy string and never evaluated. It is not a
+deferred error; it is no error at all, and the annotation is simply unresolvable. E.2
+("89 dangling forward references make the mixin annotations decorative") is the same
+observation from the other side.
+
+Three real defects reached `main` through the full green gate this way:
+
+| defect | shape |
+|---|---|
+| G.1a `_accumulate_from_multipoles` | name does not exist anywhere |
+| G.1b `evaluate_local_complex_with_grad_analytic` | exists in `complex_ops`, never imported |
+| `MACTypeInput` in `fmm_sweeps.py` (PR #94) | exists in `config`, never imported |
+
+The third is the sharpest datum, because it was introduced *during this audit's
+execution*, in the PR whose subject was that the caller-facing and traversal-facing MAC
+types must not be confused — reviewed, verified against the full block, and merged. A
+gate that cannot see this class of error will keep admitting it.
+
+**Closed in PR #98** with `flake8 --select=F821,F822`, scoped `files: ^jaccpot/`. Two
+scoping decisions, both measured rather than assumed:
+
+- **F811 (redefinition) was tried and dropped.** It fires on the legitimate "assign
+  `None`, then conditionally `def` the same name" idiom at `fmm_sweeps.py:380`, so
+  keeping it would mean annotating correct code to satisfy a linter. Every defect the
+  hook exists for was an undefined name.
+- **`examples/` and `bench/` are out of scope.**
+  `examples/benchmark_gpu_radix_worker.py` alone carries 14 pre-existing F821s and
+  `bench/bench_upward_sweep.py` one F811. CLAUDE.md exempts those trees and forbids
+  reformatting files a change does not otherwise touch, so cleaning them is its own PR —
+  **still open**, and the reason the hook is narrower than it looks.
+
+No style codes are selected, so the hook cannot start disagreeing with black or isort.
+Verified it actually fires by injecting an undefined name into `fmm_policy.py`.
+Undefined names in `jaccpot/` go **4 → 2**, and both survivors are deliberate: `kernels/`
+is a true leaf and must never name the engine, even under `TYPE_CHECKING` (§1).
+
 ---
 
 ## C. Public API inventory
@@ -1034,6 +1075,53 @@ Two consequences worth acting on:
    `NUMERICS_AND_JAX.md` §3 alongside the existing edge-case list, since "the test passed but
    covered nothing" is exactly the failure that section exists to prevent. Candidate for Tier 0.
 
+#### D.12 recurred twice more, and the second time it hid a fake tolerance
+
+Two further instances, both found by accident rather than by looking:
+
+**In the Tier 1 GPU handoff** (B.3): its prescribed residual-audit config, `N=4096
+leaf=64`, reports `far_pairs=0`. The document that warns about D.12 in its own "traps"
+section then specified a config that measures the M2L coefficient not at all. Re-run at
+`--leaf 4`: 195,336 far pairs.
+
+**In the source-motion downward tests** —
+`tests/unit/core/test_solidfmm_complex_tree_expansions.py`, found while writing the G.1a
+regression test. Its six-particle fixture accepts **zero** far pairs at `theta=0.6`, so
+`test_solidfmm_downward_source_motion_locals_match_finite_difference` and its
+second-derivative sibling were comparing an all-zero result against an all-zero
+reference:
+
+```python
+assert np.allclose(got, ref, rtol=3e-5, atol=1e-7)   # zero vs zero
+```
+
+Neither could have detected any error in the source-motion M2L/L2L path. That path is
+the jerk/time-derivative far field, i.e. D.3 territory: numerically load-bearing code
+with no test that could catch a wrong answer. Fixed at `theta=0.8` (4 far pairs,
+`|ref| = 1.93`, agreement `1.08e-09`), with a shared helper asserting **both** the
+accepted pair count and the reference magnitude.
+
+**The lesson beyond D.12.** Making the second test non-vacuous made it *fail*, at
+`rel = 3.0e-3` against a `2e-3` bound — and the bound was not what was wrong. A central
+second difference carries `eps / dt**2` roundoff, so its `dt = 1e-5` was the inaccurate
+side of the comparison:
+
+| `dt` | rel |
+|---|---|
+| 1e-6 | 4.0e-01 |
+| **1e-5** | **3.0e-03** ← the shipped setting |
+| 1e-4 | 3.9e-05 |
+| **1e-3** | **2.5e-07** ← chosen, near the `eps**0.25` optimum |
+| 1e-2 | 8.7e-09 |
+
+Fixing the *reference* let the bound be **tightened 200× to 1e-5** rather than relaxed.
+
+So: **a tolerance calibrated inside a vacuous regime is not a tolerance.** `2e-3` looked
+like a considered numerical bound and was in fact an arbitrary number that had never
+been compared against anything but zero. Any time a vacuity guard is added to an
+existing test, its tolerance has to be re-derived, not inherited — and a guard that
+turns a passing test red is doing its job.
+
 ---
 
 ## E. Typing debt
@@ -1200,7 +1288,41 @@ Each of these is gated on the Tier 0 characterization named in its row.
 
 ## G. Decisions for you
 
-### G.1 Two latent `NameError`s in `runtime/kernels/core.py` — bugs, separate PRs
+### G.1 ~~Two latent `NameError`s~~ **FIXED (PR #98)** — and one of them was never reachable
+
+> **Resolved 2026-08-14.** Everything below is the original report, kept because its
+> reachability analysis was **wrong** in a way worth preserving.
+>
+> **G.1a — fixed as `jnp.zeros_like(locals_coeffs)`.** The physics question this section
+> put to the reader ("is this branch supposed to be reachable at all?") was answered: with
+> no internal nodes there is no M2L to do, so the source-motion far field is exactly zero.
+> The value is not a new decision — the `pair_count == 0` guard at `_l2l.py:391` already
+> returns zeros for the identical situation, and the two now agree by construction. Zeros
+> rather than `None` because `None` already means "source motion was not requested" and
+> the consumer cannot distinguish the two.
+>
+> **The reachability claim below is wrong.** This section says the branch is reached by
+> "the `else` of `if child_inputs.num_internal_nodes > 0`, with
+> `source_motion_multip_packed is not None`". That is necessary but not sufficient:
+> getting there *also* needs `pair_count > 0`, and the `pair_count == 0` early return
+> seventeen lines above has already claimed **every** single-leaf tree. A one-node tree
+> cannot accept a far pair, so the conjunction is unsatisfiable. Measured rather than
+> argued — forcing a single-leaf tree with a foreign interaction list still does not reach
+> the line. **G.1a was dead code, not a live crash.** Worth noting that the first read of
+> this in execution went the other way (reported as "live for any N <= leaf_size", since
+> `num_internal_nodes == 0` is trivially true whenever N fits one leaf) before the guard
+> was spotted; the `> 0` conditions in a chain of guards need reading together.
+>
+> **G.1b — fixed by adding the import.** Not a wrong name: the function exists at
+> `operators/complex_ops.py:564` with exactly the signature the call site uses. Also
+> effectively unreachable, for a different reason — `fmm_derivatives` passes
+> `return_potential=False` at both of its call sites — so it is tested directly against
+> `kernels/`, which ARCHITECTURE §1 licenses as a leaf library.
+>
+> **The pyflakes invariant below still holds.** PR #98 adds `# noqa: F821` to the two
+> deliberately-dangling `FastMultipoleMethod` annotations, but `noqa` is a flake8
+> directive: `python -m pyflakes jaccpot/` still reports all four sites. What changed is
+> that two of the four are now gone for real, so the count is 2, not 4. See B.4.
 
 **LINE NUMBERS RE-LOCATED (Tier 1.6).** Both citations below were already stale, and
 the `kernels/core.py` split moved them again. Current locations:
