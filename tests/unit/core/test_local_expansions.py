@@ -6,6 +6,7 @@ import itertools
 
 import jax
 import jax.numpy as jnp
+import numpy as np
 import pytest
 from yggdrax.dense_interactions import build_dense_interactions
 from yggdrax.geometry import compute_tree_geometry
@@ -1232,3 +1233,83 @@ def test_prepare_downward_sweep_accepts_dense_buffers(prepared_m2l_tree):
         dense_downward.locals.centers,
         sparse_downward.locals.centers,
     )
+
+
+def test_target_local_eval_returns_potential_on_the_complex_analytic_branch():
+    """The complex ``return_potential`` branch runs and agrees with the operator.
+
+    ``_evaluate_local_expansions_for_target_particles`` has four lanes, chosen by
+    ``iscomplexobj(coeffs)`` x ``max_acc_derivative_order``. The complex,
+    no-derivative-tower, ``return_potential=True`` lane called
+    ``evaluate_local_complex_with_grad_analytic`` **without importing it** -- audit
+    G.1b, a latent ``NameError``. The function exists in ``complex_ops`` with exactly
+    the signature the call site uses; only the import was missing.
+
+    Called directly rather than through the solver because no production caller
+    reaches this lane: ``fmm_derivatives`` passes ``return_potential=False`` at both
+    of its call sites, and the routes that do forward the flag take other lanes.
+    ``kernels/`` is a leaf library (ARCHITECTURE section 1), so exercising it head-on
+    is the honest way to cover the branch -- a public-API test would assert nothing
+    here.
+
+    The reference recomputes each row with the operator itself, which is the same
+    arithmetic in a different arrangement, so the comparison is exact rather than
+    toleranced.
+    """
+    from jaccpot.operators.complex_ops import (
+        evaluate_local_complex_with_grad_analytic,
+        sh_size,
+    )
+    from jaccpot.runtime.kernels._evaluate import (
+        _evaluate_local_expansions_for_target_particles,
+    )
+
+    order = 4
+    ncoeff = sh_size(order)
+    rng = np.random.default_rng(11)
+    coefficients = jnp.asarray(
+        rng.normal(size=(3, ncoeff)) + 1j * rng.normal(size=(3, ncoeff))
+    )
+    centers = jnp.asarray(rng.uniform(-0.2, 0.2, (3, 3)))
+    local_data = LocalExpansionData(
+        order=order, centers=centers, coefficients=coefficients
+    )
+    positions_sorted = jnp.asarray(rng.uniform(-1.0, 1.0, (5, 3)))
+    target_sorted_indices = jnp.arange(5, dtype=jnp.int32)
+    target_leaf_positions = jnp.asarray([0, 0, 1, 1, 2], dtype=jnp.int32)
+    leaf_nodes = jnp.asarray([0, 1, 2], dtype=jnp.int32)
+
+    grad, potential, derivatives = _evaluate_local_expansions_for_target_particles(
+        local_data=local_data,
+        positions_sorted=positions_sorted,
+        target_sorted_indices=target_sorted_indices,
+        target_leaf_positions=target_leaf_positions,
+        leaf_nodes=leaf_nodes,
+        order=order,
+        expansion_basis="solidfmm",
+        return_potential=True,
+        max_acc_derivative_order=0,
+    )
+
+    assert potential is not None, "return_potential=True must yield a potential"
+    assert derivatives is None
+    assert np.asarray(grad).shape == (5, 3)
+    assert np.asarray(potential).shape == (5,)
+
+    nodes = np.asarray(leaf_nodes)[np.asarray(target_leaf_positions)]
+    for row, node in enumerate(nodes):
+        # `centers - positions`, matching the lane's own `offsets_solid`. The opposite
+        # sign is not a rounding difference -- it changes the answer outright (-1.24
+        # vs -0.96 on row 0), which is how this reference was caught being wrong.
+        # Passed as a REAL delta, as the lane does; casting it to complex here would
+        # compare a different computation.
+        delta = centers[node] - positions_sorted[row]
+        want_grad, want_pot = evaluate_local_complex_with_grad_analytic(
+            coefficients[node], delta, order=order
+        )
+        np.testing.assert_allclose(
+            np.asarray(grad)[row], np.asarray(want_grad), rtol=0, atol=0
+        )
+        np.testing.assert_allclose(
+            np.asarray(potential)[row], np.asarray(want_pot), rtol=0, atol=0
+        )

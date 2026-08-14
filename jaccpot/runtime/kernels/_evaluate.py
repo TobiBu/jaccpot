@@ -44,11 +44,20 @@ from jaccpot.nearfield.near_field import (
     compute_leaf_p2p_accelerations,
     compute_leaf_p2p_accelerations_large_n_accel_only,
 )
+
+# `evaluate_local_complex_with_grad_analytic` below is the single-row `with_grad`
+# variant used by the complex `return_potential` branch of
+# `_evaluate_local_expansions_for_target_particles`. It was CALLED there but never
+# imported -- audit G.1b, a latent `NameError`. The name exists in `complex_ops` with
+# exactly the signature the call site uses, so the import is the whole fix.
+# (Comment kept OUTSIDE the parentheses: isort rewrites comments placed inside an
+# import block onto the `from ... import (` line, semicolon-joined and unreadable.)
 from jaccpot.operators.complex_ops import (
     evaluate_local_complex_derivative_tower_batch,
     evaluate_local_complex_grad_analytic,
     evaluate_local_complex_grad_analytic_preserve_dtype,
     evaluate_local_complex_grad_order4_unrolled,
+    evaluate_local_complex_with_grad_analytic,
     evaluate_local_complex_with_grad_analytic_batch,
 )
 from jaccpot.operators.multipole_utils import (
