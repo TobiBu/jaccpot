@@ -130,6 +130,12 @@ jaccpot/operators/     expansion algebra: harmonics, M2L rotate/scale, precision
 jaccpot/upward/        P2M / M2M sweep
 jaccpot/downward/      M2L / L2L / L2P sweep
 jaccpot/nearfield/     P2P and its gradient
+jaccpot/mutual/        momentum-conserving path — a SECOND lane beside the three sweeps
+                       above, not a variant of them: each pair is evaluated once and
+                       applied +f/-f, so momentum cancels algebraically. Reaches
+                       operators/ and pallas/, never runtime/. Faced by
+                       nornax_adapter.py (BlockStepFMM), documented in
+                       docs/momentum_conserving_fmm.md
 jaccpot/pallas/        fused Pallas kernels + custom_vjp
 jaccpot/runtime/       orchestration, config resolution, lane selection, kernel dispatch
 jaccpot/distributed/   domain decomposition, halo exchange, collectives

@@ -11,7 +11,7 @@ This document is about *where the code lives and why*.
 ## 1. Layering at a glance
 
 ```
-jaccpot/__init__.py            public surface (14 __all__ names)
+jaccpot/__init__.py            public surface (15 __all__ names)
         |
 jaccpot/solver.py              FastMultipoleMethod  <-- the ONLY public class
         |                      preset-first facade; resolves preset/basis/advanced
@@ -32,6 +32,25 @@ artifacts, and the shared constant/cache modules — never on the orchestrator.
 `distributed/` and `experimental/` reach straight past the engine into
 `kernels/`, which is what proves the leaf boundary is real.
 
+**The one path that does not go through this stack** is the mutual force:
+
+```
+jaccpot/nornax_adapter.py      BlockStepFMM  <-- the second public class
+        |                      block-step KDK facade; no nornax import
+jaccpot/mutual/               momentum-conserving evaluation path
+        topology.py            host-side symmetric dual traversal (frozen)
+        nearfield.py           leaf-pair P2P, +F/-F to both endpoints
+        farfield.py            dual M2L, one evaluation per accepted pair
+        force.py               rung/level vocabulary over the two above
+```
+
+It reaches `operators/` and `pallas/` directly and never touches
+`runtime/`, because the property it exists to provide — `sum_i m_i a_i` zero to
+round-off rather than to the truncation error — depends on evaluating each pair
+**once**, and the production runtime is target-centric by construction (each pair
+evaluated twice, independently). This is a deliberate second lane, not a
+duplicate: see [`docs/momentum_conserving_fmm.md`](docs/momentum_conserving_fmm.md).
+
 ## 2. Public API contract
 
 `jaccpot/__init__.py __all__` is the stable surface downstream code (e.g. the
@@ -48,11 +67,15 @@ ODISSEO coupling) depends on. It is frozen by
 | `MemoryObjective` | memory-policy literal |
 | `ComplexSHBasis`, `RealSHBasis` | expansion bases |
 | `OdisseoFMMCoupler` | ODISSEO integration adapter |
+| `BlockStepFMM` | momentum-conserving force for a block-step individual-timestep KDK (in `nornax_adapter.py`; see section 1) |
 | `differentiable_gravitational_acceleration` | autodiff-able **direct-sum** oracle (the differentiable FMM itself is `FastMultipoleMethod.differentiable_accelerations`; see section 6) |
 
-`FastMultipoleMethod` in `solver.py` is the sole public class name; the runtime
-engine class (currently also named `FastMultipoleMethod` in `_fmm_impl.py`) is
-an internal implementation detail reached only through the facade.
+`FastMultipoleMethod` in `solver.py` is the facade for the production force; the
+runtime engine class (currently also named `FastMultipoleMethod` in
+`_fmm_impl.py`) is an internal implementation detail reached only through it.
+`BlockStepFMM` is the only other public class, and it is **not** an alternative
+spelling of the same thing — it computes a different number (momentum-exact
+rather than target-centric) through a separate path.
 
 ## 3. runtime/ package map
 
@@ -314,6 +337,15 @@ fmm_constants -> fmm_caches -> kernels -> {_interaction_cache, _large_n_pipeline
 ```
 
 `distributed/` and `experimental/` depend only on `kernels/` (not the engine).
+
+`mutual/` sits beside the sweeps and depends on `operators/` at module scope and
+on `pallas/` from **six function-local sites** (`farfield.py` ×4,
+`nearfield.py` ×2) — the same deferred-heavy-import pattern
+`nearfield/near_field.py` uses, and deliberate for the same reason. Two further
+imports reach the `jaccpot` facade function-locally to break a cycle
+(`mutual/topology.py` and `nornax_adapter.py`, both for `FastMultipoleMethod`).
+Nothing in `mutual/` imports `runtime/`, and nothing in `runtime/` imports
+`mutual/`; `pallas/nearfield_mutual.py` depends only on `pallas/_compat`.
 
 **Cycle rule:** `runtime/fmm/__init__.py` must not eagerly import the engine
 class in a way that reforms

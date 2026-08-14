@@ -32,6 +32,7 @@ Tree construction and traversal artifacts are provided by the companion package
 - Near-field and far-field execution paths with optional prepared state reuse
 - Explicit octree execution backend for `basis="solidfmm"`
 - **End-to-end differentiable FMM force** — exact `jax.grad`/`jax.vjp` gradients w.r.t. positions and masses at fixed topology, verified from N=64 to N=1,000,000 (see [Differentiable FMM](#differentiable-fmm))
+- **Momentum-conserving (mutual) force** for block-step individual timesteps — `sum_i m_i a_i` cancels to round-off instead of to the truncation error (see [Momentum-Conserving FMM](#momentum-conserving-fmm))
 - Differentiable direct-sum helper via JAX autodiff, retained as the exact-gradient oracle
 
 ## Installation
@@ -512,6 +513,53 @@ existing env-configured scripts keep working; an explicit field always wins.
 Full guide, contract, limits, and troubleshooting:
 **[docs/differentiable_fmm.md](docs/differentiable_fmm.md)**.
 
+## Momentum-Conserving FMM
+
+`FastMultipoleMethod` is target-centric: the near field gathers and the far field
+sweeps downward, so every pair is evaluated **twice, independently**. The two
+roundings differ, and `sum_i m_i a_i` lands at the force accuracy (~1e-3 … 1e-5).
+That is fine for a global timestep and wrong for a block-step individual-timestep
+KDK, where per-level antisymmetry is the defining correctness property rather
+than a diagnostic.
+
+`BlockStepFMM` evaluates each interaction **once** and applies `+f`/`-f` to both
+endpoints, through the separate `jaccpot.mutual` path:
+
+```python
+from jaccpot import BlockStepFMM
+
+fmm = BlockStepFMM(softening=1e-2, k_max=3, theta=0.7, max_order=4, leaf_size=32)
+
+# Once per base step: build the frozen topology (host operation, not traceable).
+fmm.prepare(positions, masses)
+
+# Production path -- one mutual traversal per sub-step boundary.
+velocities = fmm.boundary_kick(
+    positions, velocities, masses,
+    rung=rung, active_floor=1, dt_max=1e-3, half=1.0,
+)
+```
+
+The force stays FMM-approximate; the momentum does not:
+
+| order `p` | force error | momentum residual |
+|---|---|---|
+| 2 | 4.0e-03 | 4.1e-16 |
+| 4 | 2.8e-05 | 4.1e-16 |
+| 6 | 1.6e-07 | 4.2e-16 |
+
+The force error moves five orders of magnitude across that range and the residual
+does not move at all — the cancellation is algebraic, not numerical, so it is flat
+in `theta` and in expansion order.
+
+Weighting each pair by `level_weights[max(rung_i, rung_j)]` lets one traversal
+serve a whole sub-step boundary, taking a base step at `k_max=3` from about 19
+traversals to `n_sub + 1 = 9` — measured 2.1×. The path is differentiable at fixed
+topology on the same terms as [Differentiable FMM](#differentiable-fmm).
+
+Details, backend comparison, and the scaling study:
+[docs/momentum_conserving_fmm.md](docs/momentum_conserving_fmm.md).
+
 ## Topology Reuse
 
 For small multi-step particle motion, you can reuse cached topology and
@@ -609,6 +657,8 @@ export JACCPOT_RUNTIME_TYPECHECK=1
 - `jaccpot/runtime`: execution internals and integration with yggdrax artifacts
 - `jaccpot/operators`: harmonic, translation, and multipole operators
 - `jaccpot/upward`, `jaccpot/downward`, `jaccpot/nearfield`: sweep and near-field modules
+- `jaccpot/mutual`: momentum-conserving (mutual) evaluation path — a separate lane, not a variant of the above
+- `jaccpot/nornax_adapter.py`: `BlockStepFMM`, the block-step KDK facade over `jaccpot/mutual`
 - `tests`: unit, integration, and performance checks
 
 ## CI
