@@ -24,6 +24,7 @@ from yggdrax.interactions import (
 from yggdrax.tree import Tree, get_node_levels
 from yggdrax.tree_moments import compute_tree_mass_moments
 
+from jaccpot.config import MACTypeInput
 from jaccpot.downward.local_expansions import (
     LocalExpansionData,
     TreeDownwardData,

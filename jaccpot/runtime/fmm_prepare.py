@@ -2406,7 +2406,13 @@ class PrepareMixin:
         self,
         dual_artifacts: _DualTreeArtifacts,
     ) -> tuple[
-        NodeInteractionList,
+        # Optional, not NodeInteractionList: the streamed path deliberately drops
+        # interaction storage (`test_prepare_state_streamed_can_drop_interaction_storage`),
+        # so `None` here is a supported outcome rather than a failure. Three other
+        # declarations of this same value already said so -- the `_DualTreeArtifacts`
+        # field it is read from, `_dual_tree_unpack_build_output`, which unpacks the
+        # same field, and `_prepare_downward_with_artifacts`, which consumes it.
+        Optional[NodeInteractionList],
         NodeNeighborList,
         Optional[DualTreeWalkResult],
         Optional[CompactTaggedFarPairs],

@@ -39,16 +39,54 @@ def _real_tree_and_geometry():
     return tree, compute_tree_geometry(tree, pos_sorted)
 
 
+def _real_build_outputs(tree, geometry):
+    """Genuine builder outputs, from one real build on the same eight particles.
+
+    The retry test needs three objects to hand back from its fake builder, and it
+    asserts *identity* on two of them -- so as far as those assertions go, any object
+    would do. That is why ``SimpleNamespace`` was enough, and it is also what kept
+    ``_dual_tree_unpack_build_output``'s declared return type violated under
+    ``JACCPOT_RUNTIME_TYPECHECK=1`` (F40): the namespaces travel through it on their
+    way into ``_DualTreeArtifacts``.
+
+    Building the real types by hand is not worth it -- ``NodeInteractionList``,
+    ``NodeNeighborList`` and ``DualTreeWalkResult`` are NamedTuples with 6, 12 and 17
+    fields and **no** defaults, so 35 hand-written fields would dwarf the test and
+    assert nothing. One real build costs milliseconds and is correct by construction.
+    """
+    artifacts, _cache = interaction_cache._build_dual_tree_artifacts(
+        tree=tree,
+        geometry=geometry,
+        theta=0.6,
+        mac_type="dehnen",
+        dehnen_radius_scale=1.0,
+        cache_key=None,
+        cache_entry=None,
+        max_pair_queue=None,
+        pair_process_block=None,
+        traversal_config=None,
+        retry_logger=None,
+        fail_fast=False,
+        use_dense_interactions=False,
+        grouped_interactions=False,
+        grouped_chunk_size=None,
+        need_traversal_result=True,
+        need_compact_far_pairs=False,
+        need_node_interactions=True,
+        precompute_grouped_class_segments=False,
+        grouped_schedule_budget_bytes=None,
+        pair_policy=None,
+        policy_state=None,
+    )
+    return artifacts.interactions, artifacts.neighbor_list, artifacts.traversal_result
+
+
 def test_build_dual_tree_artifacts_retries_on_capacity_overflow(monkeypatch):
     tree, geometry = _real_tree_and_geometry()
     calls = []
-    interactions = SimpleNamespace(
-        sources=jnp.asarray([0], dtype=jnp.int32),
-        targets=jnp.asarray([0], dtype=jnp.int32),
-        level_offsets=None,
-    )
-    neighbor_list = SimpleNamespace()
-    traversal_result = SimpleNamespace()
+    # Real objects, not namespaces -- see `_real_build_outputs`. Captured before the
+    # monkeypatch so the real builder is still installed when they are made.
+    interactions, neighbor_list, traversal_result = _real_build_outputs(tree, geometry)
 
     def fake_build_interactions_and_neighbors(*args, **kwargs):
         calls.append(kwargs)
