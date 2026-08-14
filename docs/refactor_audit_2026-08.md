@@ -520,6 +520,83 @@ Recorded because the audit sets an expectation a reviewer would otherwise try to
 check and find broken. The same applies to `nearfield/` (1.4, 1.5) and
 `runtime/kernels/` (1.6).
 
+### B.3 The A100 validation — §10 item 4, discharged, with one finding worth more than the result
+
+Run on one **A100-PCIE-40GB** (compute capability 8.0, `autocvd(num_gpus=1,
+least_used=True)` then pinned for the session so the interleaved benchmarks compare a
+single card), jax/jaxlib **0.10.2**, `JAX_ENABLE_X64=1`. All three Pallas gates
+reported `True`, so the fused lanes were live rather than falling back.
+
+**Verdict: Tier 1 changed no number.** But the A/B had to be re-chosen first. The
+handoff prescribes branch-vs-`main`, and by the time a GPU was free all ten Tier 1 PRs
+were merged, leaving those branches 0 commits ahead of `origin/main` — that comparison
+would have measured #80 and the docs PRs, not the thing under test. The run used
+pre-Tier-1 `128a0e2` (PR #77, the commit before `cc8895e`) vs post-Tier-1 `da7ed57`
+instead, with `PYTHONPATH` pinned per side and `jaccpot.__file__` printed on every run:
+the editable-install finder appends to `meta_path`, so without that a two-worktree
+comparison silently compares a tree to itself.
+
+| Check | Result |
+|---|---|
+| Pallas-on vs pure-JAX parity | **65 passed, 0 skipped**, identical test-by-test both sides |
+| End-to-end forward, 4 cases, `deterministic_ops=true` | **exactly equal**, max abs diff `0` |
+| Reverse residuals, near-field fast lane on | JSON **identical** both sides |
+| Reverse residuals at `--leaf 4` (added) | identical, and now covers m2l/m2m/l2l/p2m |
+| Per-stage cost, interleaved post/base/post/base | no stage outside noise |
+
+The empty skip list is the load-bearing part: every `interpret=False` parametrisation
+ran against the Triton lowering — both `m2l_core_z` orders, both `m2l_complex_fused`,
+both `m2l_real_fused`, `nearfield_fused_leaf`, `nearfield_leafpair`,
+`radix_fast_lane_prepacked_accel_cvjp` — and the defensive
+`pytest.skip("Pallas kernel unavailable …")` inside their `except` blocks, which would
+read as a pass, did not fire.
+
+**The finding: the forward path is nondeterministic under default XLA, by more than the
+difference being measured.**
+
+| Comparison | Max abs diff | Fraction of \|a\| |
+|---|---|---|
+| base vs post, default XLA | 3.6e-12 … 1.5e-11 | 1.8e-15 |
+| **post vs post, same card, same code** | 3.6e-12 … 2.1e-11 | **4.4e-15** |
+| base vs base, same code | 2.3e-12 … 1.5e-11 | 1.8e-15 |
+| base vs post, `xla_gpu_deterministic_ops=true` | **0** | **0** |
+
+The same tree on the same card differs run-to-run by *more* than the cross-tree
+difference. So §10's exact-equality items are unsatisfiable on GPU as written,
+independently of any refactor — a future run will "find a difference" and it will mean
+nothing. ARCHITECTURE §10 now requires the flag; that wording fix is the durable
+outcome of this run.
+
+Two prescriptions in the handoff were also wrong in ways worth recording. Its
+residual-audit config (`N=4096 leaf=64`) reports `far_pairs=0`, so it measures the M2L
+coefficient **not at all** — D.12 again, in the document that warns about D.12. Re-run
+at `--leaf 4`: 195,336 far pairs, 298.577 MB of M2L residuals under comparison at
+1,528.5 bytes per pair. And the repo's default `-n auto` is 64 xdist workers against one
+GPU: 46,000+ `CUDA_ERROR_OUT_OF_MEMORY` lines and 331/288 "failures" that are allocation
+artifacts. The tell was that wall times (2760s vs 1309s) *and* failure sets differed
+between sides. Re-run at `-n 6` with `XLA_PYTHON_CLIENT_MEM_FRACTION=.12`: zero OOM.
+
+Suite, `-n 6`: base **966 passed / 24 skipped / 3 failed**, post **964 / 24 / 5**, against
+the CPU reference's **926 / 67 / 0**. Passed rising and skips falling by ~43 is the
+GPU-gated tests unskipping, as predicted. Every failure was re-run 3× under both XLA
+configurations: four go green under the determinism flag (so: flaky, not regressions),
+and the two extra on the post side are both
+`test_compiled_dispatch_is_bit_identical`, whose implementation
+(`jaccpot/upward/tree_geometry.py`) and test file are both untouched by Tier 1 —
+`git diff 128a0e2 015c91c` on either path is empty. The fifth is real: see G.9.
+
+The fp32 gap the G.10 handoff left open is closed with numbers rather than an
+assertion. Residual `max|grad_f32 − grad_f64| / max|grad_f64|` over the transverse
+components, worst over both signs of `z`: real fused **3.27e-07**, complex fused
+**1.60e-06**, real *direct* control **1.14e-06**. **The fused lanes carry no float32
+weakness the direct lanes do not** — the real fused lane is 3.5× better than its own
+direct control. All are two to three orders inside the 3.4e-04 band and every case is
+non-vacuous (the float64 reference exceeds 1e-3, so G.10's exact `(0, 0)` return could
+not pass). Caveat on the constants in that test's docstring: rebuilding the real
+coefficients with numpy instead of the test's `jax.random.normal` moved the real figure
+by ~3× (8.9e-07 → 3.27e-07), so they are the right order but should not be read as
+tight.
+
 ---
 
 ## C. Public API inventory
@@ -1102,7 +1179,7 @@ Each of these is gated on the Tier 0 characterization named in its row.
 | **1.3** ✔ **PR #82** | Split `operators/real_harmonics.py` along its mathematical seams (A.9). Pure file moves + import updates | 5 new `operators/` modules + a 283-line aggregator | F: `real_harmonics.py` size | 0.3 ✔, G.10 ✔, 0.5 ✔ | **Done, and A.9 was out of date in two ways:** every line citation had shifted (2236 → 2292 lines), and seam 4 (the Wigner family) no longer exists — `ab58c3d` deleted it. Five seams, 1698 carried lines verified verbatim. `real_harmonics.py` stays as an aggregator: 52 references across 35 files, `__all__` byte-identical at 28 names. **`git log --follow` does NOT survive this** — see the correction below. |
 | **1.4** ✔ **PR #83** | Split `nearfield/near_field.py` seam 5 (the radix fast lane + `custom_vjp`) into `nearfield/_fast_lane.py` | `nearfield/` (3957 → 2969) | F: size; isolates the `custom_vjp` | 0.1, 1.2 | **Done.** 902 carried lines verbatim. `custom_vjp` residuals byte-identical on **both** lanes — and note the default `audit_reverse_residuals.py` invocation does *not* reach the fast lane (its top residual is `_compute_leaf_p2p_impl`, the bucketed kernel), so it was re-run with `JACCPOT_DIFFERENTIABLE_NEARFIELD_FAST_LANE=1`. Surfaced the F16 correction below. |
 | **1.5** ✔ **PR #84** | Split `nearfield/near_field.py` seams 1-3 | 4 new `nearfield/` modules (2969 → 1388) | ditto | 1.4 | **Done.** 1441 carried lines verbatim; seam 2 split into `_kernels.py` / `_scatter.py` as A.9 suggests. `bench/audit_nearfield_padding.py` output identical — but it calls `autocvd` unconditionally at import, so it cannot run in the CPU env; its own `audit()` was executed with the GPU picker stubbed instead, which is backend-independent because the measurement is topology-derived. |
-| **1.6** ✔ **PR #85** | Split `runtime/kernels/core.py` along the four seams (A.9), M2L moving as one unit | 5 new `kernels/` modules + a 101-line aggregator | F: `core.py` size | 0.1, 0.2 | **Done.** A.9 names four seams; a **fifth** module (`_shared.py`) was needed, and that is the finding: after assigning the four, exactly five names were left over and both `_evaluate` and `_l2l` need one, so leaving them in `core` would have made `core` import a module that imports `core`. §10 item 1 satisfied with 102 arrays at `rtol=0`. **§10 item 4 (the A100 Pallas-vs-pure-JAX run) is still owed** — no GPU was taken. |
+| **1.6** ✔ **PR #85** | Split `runtime/kernels/core.py` along the four seams (A.9), M2L moving as one unit | 5 new `kernels/` modules + a 101-line aggregator | F: `core.py` size | 0.1, 0.2 | **Done.** A.9 names four seams; a **fifth** module (`_shared.py`) was needed, and that is the finding: after assigning the four, exactly five names were left over and both `_evaluate` and `_l2l` need one, so leaving them in `core` would have made `core` import a module that imports `core`. §10 item 1 satisfied with 102 arrays at `rtol=0`. **§10 item 4 discharged on an A100 — see B.3.** 65 parity tests passed with an empty skip list, forward exactly equal under `deterministic_ops=true`, residuals identical on both lanes, no stage outside noise. Its finding outlived the run: the GPU forward is nondeterministic by more than the difference being measured, so §10's exactness items now name the flag. |
 | **1.7** ✔ **PR #86** | Extract from `PrepareMixin._prepare_state_dual_and_downward` (883 lines) — named private methods along its internal phases, no expression changes | `runtime/fmm_prepare.py` (883 → 493) | F10 | 0.1, 0.2 | **Done, two phases of seven.** The cut points are not guesswork: the function is already instrumented with `_record_dual_stage("..._dual_<phase>_seconds", ...)` at each boundary, and the data flow across every one was measured. Extracted the two where the interface earns a signature (317 lines → a 17-field bundle; 131 lines → 2 outputs); the PR lists the other five with the ratio that argued against them. The driver unpacks the bundle back into the same local names so no later expression changed. |
 | **1.8** ✔ **PR #87** | Extract `_read_large_n_env_config` (271 lines) into `runtime/_large_n_env.py`. **Nothing else** | `runtime/` (2048 → 1768) | F11 (partly) | — | **Done.** The "re-open if GPU coverage has landed" check was run, not assumed: CI is still ubuntu-latest with no cuda leg and `_large_n_grad.py` / `_large_n_farfield.py` are still at **0%**, so A.9's leave-it-whole argument stands and F11 stays open. Datum for the cut line: the extracted reader measures **69%** from three CPU policy test files. |
 | **1.9** ✔ **PR #81** | Move F37's inline thresholds into `runtime/fmm_constants.py` with `#:` comments | `runtime/` | F37 | 0.1 | **Done.** Note that **three different policies cross over at 262144** (`_CLASS_MAJOR_CPU_PARTICLE_THRESHOLD` plus the two named here), so they stay three constants: collapsing them would assert an equivalence that is not established. One site beyond F37's list was named too — the `< 262_144` fifty lines from its twin, the same drift hazard F37 describes. |
