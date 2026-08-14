@@ -108,17 +108,21 @@ jobs:
           # cases) by the default addopts, and everything else lives under
           # exactly one of these three entries or the `test-mac-runtime` job.
           # Verified by collection count, with `--ignore=tests/unit/runtime` as
-          # the step applies it and `-m "not experimental"` applied throughout:
-          #   integration 173 + unit 641 + rest 53  = 867  (these three shards)
-          #                        + tests/unit/runtime 202 = 1069
-          # and 1069 is the whole selectable universe.
+          # the step applies it and `-m "not experimental"` applied throughout.
+          # Re-measured after merging main at fc75fe7:
+          #   integration 161 + unit 643 + rest 54  = 858  (these three shards)
+          #                        + tests/unit/runtime 213 = 1071
+          # and 1071 is the whole selectable universe.
           #
           # This is the check paying for itself, not a formality. `rest` used to be
           # `tests/characterization tests/test_*.py`; the move of the 20 root-level
           # test files into tiers emptied that glob and created `tests/distributed`,
           # which belonged to no shard. Unsharded on main the directory still ran,
           # so nothing was red -- it would simply have stopped being tested here.
-          # Re-measure when a test directory appears or moves.
+          # Re-measure when a test directory appears or moves. The previous figures
+          # here (173 / 641 / 53 / 202 = 1069) were measured before that merge and
+          # are what the re-measurement above replaces -- the partition was still
+          # exact, only the totals had drifted.
           - shard: integration
             paths: tests/integration
           - shard: unit
