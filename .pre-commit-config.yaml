@@ -18,6 +18,39 @@ repos:
         # `pydoclint --config pyproject.toml jaccpot/` reproduces the hook exactly.
         args: ["--config", "pyproject.toml"]
 
+  - repo: https://github.com/PyCQA/flake8
+    rev: 7.3.0
+    hooks:
+      - id: flake8
+        # UNDEFINED NAMES ONLY -- deliberately not a style linter.
+        #
+        # black, isort and pydoclint cannot see a name that is used but never
+        # imported, and neither can the test suite: every runtime module has
+        # `from __future__ import annotations`, so an unimported name inside an
+        # annotation is stored as a lazy string and never evaluated. Three real
+        # defects shipped through the full green gate that way -- audit G.1a
+        # (`_accumulate_from_multipoles`), G.1b
+        # (`evaluate_local_complex_with_grad_analytic`), and PR #94's
+        # `MACTypeInput`.
+        #
+        # `--select` is the whole point: F821 undefined name and F822 undefined
+        # name in `__all__`. Line length, import order and formatting stay with
+        # black and isort, so this hook adds no style opinions and cannot start
+        # arguing with them.
+        #
+        # F811 (redefinition) was tried and dropped. It fires on the legitimate
+        # "None, then conditionally def the same name" idiom at
+        # `fmm_sweeps.py:380`, so keeping it would mean annotating correct code to
+        # satisfy the linter. The three defects this hook exists for were all
+        # undefined names.
+        args: ["--select=F821,F822"]
+        # Scoped to the shipped package. `examples/` and `bench/` are exempt from the
+        # test-first rule by CLAUDE.md and carry pre-existing findings of their own
+        # (14 F821 in one benchmark worker alone); pulling them in would mean
+        # reformatting files this change does not otherwise touch. Widen when someone
+        # wants to clean those up as its own PR.
+        files: ^jaccpot/
+
   - repo: local
     hooks:
       - id: pytest
