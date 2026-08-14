@@ -415,6 +415,188 @@ class FastMultipoleMethod(
         fixed_order: Optional[int] = None,
         fixed_max_leaf_size: Optional[int] = None,
     ):
+        self._validate_expansion_family(
+            adaptive_order=adaptive_order,
+            basis_impl=basis_impl,
+            expansion_basis=expansion_basis,
+            m2l_impl=m2l_impl,
+            p_gears=p_gears,
+            use_pallas=use_pallas,
+        )
+        self._init_recent_topology_counters(
+            rebuild_every=rebuild_every,
+            reuse_topology=reuse_topology,
+        )
+        self._resolve_mac_and_adaptive_policy(
+            adaptive_eps=adaptive_eps,
+            adaptive_error_model=adaptive_error_model,
+            complex_rotation=complex_rotation,
+            dehnen_geometry_mode=dehnen_geometry_mode,
+            farfield_mode=farfield_mode,
+            mac_force_scale_mode=mac_force_scale_mode,
+            mac_theta_max=mac_theta_max,
+            mixed_order_farfield=mixed_order_farfield,
+            mixed_order_min_order=mixed_order_min_order,
+            streamed_far_pairs=streamed_far_pairs,
+        )
+        nearfield_mode_norm = str(nearfield_mode).strip().lower()
+        if nearfield_mode_norm not in ("auto", "baseline", "bucketed"):
+            raise ValueError("nearfield_mode must be 'auto', 'baseline', or 'bucketed'")
+        runtime_path_norm = str(runtime_path).strip().lower()
+        if runtime_path_norm not in ("auto", "large_n"):
+            raise ValueError("runtime_path must be 'auto' or 'large_n'")
+        execution_backend_norm = str(execution_backend).strip().lower()
+        if execution_backend_norm not in ("auto", "radix", "octree"):
+            raise ValueError("execution_backend must be 'auto', 'radix', or 'octree'")
+        if int(nearfield_edge_chunk_size) <= 0:
+            raise ValueError("nearfield_edge_chunk_size must be positive")
+        self.nearfield_mode = nearfield_mode_norm
+        self._explicit_nearfield_mode = nearfield_mode_norm != "auto"
+        self.runtime_path = runtime_path_norm
+        self.execution_backend = execution_backend_norm
+        self.nearfield_edge_chunk_size = int(nearfield_edge_chunk_size)
+        self.precompute_nearfield_scatter_schedules = bool(
+            precompute_nearfield_scatter_schedules
+        )
+        objective_norm = str(memory_objective).strip().lower()
+        if objective_norm not in ("balanced", "throughput", "minimum_memory"):
+            raise ValueError(
+                "memory_objective must be 'balanced', 'throughput', or 'minimum_memory'"
+            )
+        self.memory_objective: MemoryObjective = objective_norm  # type: ignore[assignment]
+        self._explicit_memory_objective = objective_norm != "balanced"
+        self.memory_budget_bytes = (
+            None if memory_budget_bytes is None else int(memory_budget_bytes)
+        )
+        if self.memory_budget_bytes is not None and self.memory_budget_bytes <= 0:
+            raise ValueError("memory_budget_bytes must be > 0 when provided")
+        self.enable_interaction_cache = bool(enable_interaction_cache)
+        self.retain_traversal_result = bool(retain_traversal_result)
+        self.retain_interactions = bool(retain_interactions)
+        self.prepare_stage_memory_split_enabled = (
+            None
+            if prepare_stage_memory_split_enabled is None
+            else bool(prepare_stage_memory_split_enabled)
+        )
+        self.fail_fast = bool(fail_fast)
+        self.autotune_m2l_chunk = bool(autotune_m2l_chunk) and not self.fail_fast
+        self._resolve_schedule_budgets(
+            grouped_schedule_budget_bytes=grouped_schedule_budget_bytes,
+            nearfield_schedule_item_cap=nearfield_schedule_item_cap,
+            precompute_grouped_class_segments=precompute_grouped_class_segments,
+            upward_leaf_batch_size=upward_leaf_batch_size,
+        )
+        self._resolve_tree_options(
+            dehnen_radius_scale=dehnen_radius_scale,
+            host_refine_mode=host_refine_mode,
+            tree_type=tree_type,
+        )
+        preset_config = get_preset_config(preset) if preset is not None else None
+
+        # Split the traversal request before resolution. A full
+        # DualTreeTraversalConfig keeps its historical "replace everything"
+        # meaning (and warns, because that also replaces the capacities the
+        # caller did not intend to touch); a TraversalOverrides/mapping becomes a
+        # field-by-field merge applied after the policy has sized for this N, so
+        # naming one capacity cannot move the other three.
+        traversal_config, traversal_field_overrides = (
+            normalize_traversal_config_request(traversal_config)
+        )
+        self._traversal_field_overrides: dict[str, int] = traversal_field_overrides
+        if traversal_config is not None:
+            warn_full_traversal_config_replacement(
+                supplied=traversal_config,
+                preset_name=(
+                    str(preset_config.name.value) if preset_config is not None else None
+                ),
+            )
+
+        resolved = _resolve_fmm_config(
+            theta=theta,
+            G=G,
+            softening=softening,
+            working_dtype=working_dtype,
+            tree_build_mode=tree_build_mode,
+            target_leaf_particles=target_leaf_particles,
+            refine_local=refine_local,
+            max_refine_levels=max_refine_levels,
+            aspect_threshold=aspect_threshold,
+            m2l_chunk_size=m2l_chunk_size,
+            l2l_chunk_size=l2l_chunk_size,
+            max_pair_queue=max_pair_queue,
+            pair_process_block=pair_process_block,
+            traversal_config=traversal_config,
+            use_dense_interactions=use_dense_interactions,
+            preset_config=preset_config,
+        )
+
+        self._unpack_resolved_config(
+            mac_type=mac_type,
+            resolved=resolved,
+        )
+        self._check_dehnen_paper_requirements()
+        self._resolve_runtime_defaults(
+            resolved=resolved,
+            preset_config=preset_config,
+            interaction_retry_logger=interaction_retry_logger,
+        )
+        self._resolve_refresh_and_strict_modes()
+        self._resolve_large_n_diag_modes()
+        self._init_compiled_lane_caches(
+            m2l_chunk_size=m2l_chunk_size,
+            l2l_chunk_size=l2l_chunk_size,
+            traversal_config=traversal_config,
+            max_pair_queue=max_pair_queue,
+            pair_process_block=pair_process_block,
+            grouped_interactions=grouped_interactions,
+            fixed_order=fixed_order,
+            fixed_max_leaf_size=fixed_max_leaf_size,
+        )
+        self._resolve_derived_lane_flags()
+        self._resolve_static_sizing_flags(
+            retain_far_pairs_for_grad=retain_far_pairs_for_grad,
+        )
+
+    def _validate_expansion_family(
+        self,
+        *,
+        adaptive_order: bool,
+        basis_impl: Optional[Any],
+        expansion_basis: ExpansionBasis,
+        m2l_impl: Optional[str],
+        p_gears: Optional[tuple[int, ...]],
+        use_pallas: Optional[bool],
+    ) -> None:
+        """Validate the expansion family and resolve the Pallas near-field default.
+
+        Extracted verbatim from ``__init__`` lines 418-449 (audit 2.1 step 3),
+        called in the original position so the resolution order is unchanged.
+
+        Parameters
+        ----------
+        adaptive_order : bool
+            Passed through from ``__init__`` unchanged.
+        basis_impl : Optional[Any]
+            Passed through from ``__init__`` unchanged.
+        expansion_basis : ExpansionBasis
+            Passed through from ``__init__`` unchanged.
+        m2l_impl : Optional[str]
+            Passed through from ``__init__`` unchanged.
+        p_gears : Optional[tuple[int, ...]]
+            Passed through from ``__init__`` unchanged.
+        use_pallas : Optional[bool]
+            Passed through from ``__init__`` unchanged.
+
+        Returns
+        -------
+        None
+            Mutates ``self`` in place, exactly as the inlined code did.
+
+        Raises
+        ------
+        ValueError
+            If the expansion basis is not 'cartesian' or 'solidfmm'.
+        """
         basis_norm = str(expansion_basis).strip().lower()
         if basis_norm == "complex":
             basis_norm = "solidfmm"
@@ -447,6 +629,35 @@ class FastMultipoleMethod(
         else:
             resolved_use_pallas = bool(use_pallas)
         self.use_pallas = resolved_use_pallas
+
+    def _init_recent_topology_counters(
+        self,
+        *,
+        rebuild_every: int,
+        reuse_topology: bool,
+    ) -> None:
+        """Zero the most-recent-topology counters and the reuse/rebuild policy.
+
+        Extracted verbatim from ``__init__`` lines 450-469 (audit 2.1 step 3),
+        called in the original position so the resolution order is unchanged.
+
+        Parameters
+        ----------
+        rebuild_every : int
+            Passed through from ``__init__`` unchanged.
+        reuse_topology : bool
+            Passed through from ``__init__`` unchanged.
+
+        Returns
+        -------
+        None
+            Mutates ``self`` in place, exactly as the inlined code did.
+
+        Raises
+        ------
+        ValueError
+            If ``rebuild_every`` is not positive.
+        """
         self.reuse_topology = bool(reuse_topology)
         if int(rebuild_every) <= 0:
             raise ValueError("rebuild_every must be positive")
@@ -467,6 +678,59 @@ class FastMultipoleMethod(
         self._static_radix_far_pair_count: int = 0
         self._static_radix_m2l_chunk_count: int = 0
         self._static_radix_l2l_edge_count: int = 0
+
+    def _resolve_mac_and_adaptive_policy(
+        self,
+        *,
+        adaptive_eps: Optional[float],
+        adaptive_error_model: str,
+        complex_rotation: str,
+        dehnen_geometry_mode: str,
+        farfield_mode: FarFieldMode,
+        mac_force_scale_mode: str,
+        mac_theta_max: float,
+        mixed_order_farfield: bool,
+        mixed_order_min_order: Optional[int],
+        streamed_far_pairs: Optional[bool],
+    ) -> None:
+        """Resolve the MAC family, the adaptive-order error model and mixed order.
+
+        Extracted verbatim from ``__init__`` lines 470-529 (audit 2.1 step 3),
+        called in the original position so the resolution order is unchanged.
+
+        Parameters
+        ----------
+        adaptive_eps : Optional[float]
+            Passed through from ``__init__`` unchanged.
+        adaptive_error_model : str
+            Passed through from ``__init__`` unchanged.
+        complex_rotation : str
+            Passed through from ``__init__`` unchanged.
+        dehnen_geometry_mode : str
+            Passed through from ``__init__`` unchanged.
+        farfield_mode : FarFieldMode
+            Passed through from ``__init__`` unchanged.
+        mac_force_scale_mode : str
+            Passed through from ``__init__`` unchanged.
+        mac_theta_max : float
+            Passed through from ``__init__`` unchanged.
+        mixed_order_farfield : bool
+            Passed through from ``__init__`` unchanged.
+        mixed_order_min_order : Optional[int]
+            Passed through from ``__init__`` unchanged.
+        streamed_far_pairs : Optional[bool]
+            Passed through from ``__init__`` unchanged.
+
+        Returns
+        -------
+        None
+            Mutates ``self`` in place, exactly as the inlined code did.
+
+        Raises
+        ------
+        ValueError
+            If a MAC/adaptive option is outside its documented domain, or a paper-style MAC is given a non-positive ``adaptive_eps``.
+        """
         force_scale_mode_norm = str(mac_force_scale_mode).strip().lower()
         if force_scale_mode_norm not in ("prev", "prepass", "paper", "paper_cached"):
             raise ValueError(
@@ -527,47 +791,41 @@ class FastMultipoleMethod(
             and int(self.mixed_order_min_order) < 0
         ):
             raise ValueError("mixed_order_min_order must be >= 0")
-        nearfield_mode_norm = str(nearfield_mode).strip().lower()
-        if nearfield_mode_norm not in ("auto", "baseline", "bucketed"):
-            raise ValueError("nearfield_mode must be 'auto', 'baseline', or 'bucketed'")
-        runtime_path_norm = str(runtime_path).strip().lower()
-        if runtime_path_norm not in ("auto", "large_n"):
-            raise ValueError("runtime_path must be 'auto' or 'large_n'")
-        execution_backend_norm = str(execution_backend).strip().lower()
-        if execution_backend_norm not in ("auto", "radix", "octree"):
-            raise ValueError("execution_backend must be 'auto', 'radix', or 'octree'")
-        if int(nearfield_edge_chunk_size) <= 0:
-            raise ValueError("nearfield_edge_chunk_size must be positive")
-        self.nearfield_mode = nearfield_mode_norm
-        self._explicit_nearfield_mode = nearfield_mode_norm != "auto"
-        self.runtime_path = runtime_path_norm
-        self.execution_backend = execution_backend_norm
-        self.nearfield_edge_chunk_size = int(nearfield_edge_chunk_size)
-        self.precompute_nearfield_scatter_schedules = bool(
-            precompute_nearfield_scatter_schedules
-        )
-        objective_norm = str(memory_objective).strip().lower()
-        if objective_norm not in ("balanced", "throughput", "minimum_memory"):
-            raise ValueError(
-                "memory_objective must be 'balanced', 'throughput', or 'minimum_memory'"
-            )
-        self.memory_objective: MemoryObjective = objective_norm  # type: ignore[assignment]
-        self._explicit_memory_objective = objective_norm != "balanced"
-        self.memory_budget_bytes = (
-            None if memory_budget_bytes is None else int(memory_budget_bytes)
-        )
-        if self.memory_budget_bytes is not None and self.memory_budget_bytes <= 0:
-            raise ValueError("memory_budget_bytes must be > 0 when provided")
-        self.enable_interaction_cache = bool(enable_interaction_cache)
-        self.retain_traversal_result = bool(retain_traversal_result)
-        self.retain_interactions = bool(retain_interactions)
-        self.prepare_stage_memory_split_enabled = (
-            None
-            if prepare_stage_memory_split_enabled is None
-            else bool(prepare_stage_memory_split_enabled)
-        )
-        self.fail_fast = bool(fail_fast)
-        self.autotune_m2l_chunk = bool(autotune_m2l_chunk) and not self.fail_fast
+
+    def _resolve_schedule_budgets(
+        self,
+        *,
+        grouped_schedule_budget_bytes: Optional[int],
+        nearfield_schedule_item_cap: Optional[int],
+        precompute_grouped_class_segments: Optional[bool],
+        upward_leaf_batch_size: Optional[int],
+    ) -> None:
+        """Resolve the grouped/near-field schedule budgets and the upward batch size.
+
+        Extracted verbatim from ``__init__`` lines 571-597 (audit 2.1 step 3),
+        called in the original position so the resolution order is unchanged.
+
+        Parameters
+        ----------
+        grouped_schedule_budget_bytes : Optional[int]
+            Passed through from ``__init__`` unchanged.
+        nearfield_schedule_item_cap : Optional[int]
+            Passed through from ``__init__`` unchanged.
+        precompute_grouped_class_segments : Optional[bool]
+            Passed through from ``__init__`` unchanged.
+        upward_leaf_batch_size : Optional[int]
+            Passed through from ``__init__`` unchanged.
+
+        Returns
+        -------
+        None
+            Mutates ``self`` in place, exactly as the inlined code did.
+
+        Raises
+        ------
+        ValueError
+            If a schedule budget, item cap or batch size is not positive.
+        """
         self.precompute_grouped_class_segments = (
             None
             if precompute_grouped_class_segments is None
@@ -595,6 +853,38 @@ class FastMultipoleMethod(
         )
         if self.upward_leaf_batch_size is not None and self.upward_leaf_batch_size <= 0:
             raise ValueError("upward_leaf_batch_size must be > 0 when provided")
+
+    def _resolve_tree_options(
+        self,
+        *,
+        dehnen_radius_scale: float,
+        host_refine_mode: str,
+        tree_type: str,
+    ) -> None:
+        """Resolve the Dehnen radius scale, host refinement and tree type.
+
+        Extracted verbatim from ``__init__`` lines 598-617 (audit 2.1 step 3),
+        called in the original position so the resolution order is unchanged.
+
+        Parameters
+        ----------
+        dehnen_radius_scale : float
+            Passed through from ``__init__`` unchanged.
+        host_refine_mode : str
+            Passed through from ``__init__`` unchanged.
+        tree_type : str
+            Passed through from ``__init__`` unchanged.
+
+        Returns
+        -------
+        None
+            Mutates ``self`` in place, exactly as the inlined code did.
+
+        Raises
+        ------
+        ValueError
+            If ``host_refine_mode`` or ``tree_type`` is outside its documented domain.
+        """
         dehnen_scale_val = float(dehnen_radius_scale)
         if dehnen_scale_val <= 0.0:
             raise ValueError("dehnen_radius_scale must be > 0")
@@ -615,45 +905,29 @@ class FastMultipoleMethod(
             )
         self.tree_type: TreeType = tree_type_norm  # type: ignore[assignment]
 
-        preset_config = get_preset_config(preset) if preset is not None else None
+    def _unpack_resolved_config(
+        self,
+        *,
+        mac_type: MACTypeInput,
+        resolved: FMMResolvedConfig,
+    ) -> None:
+        """Unpack the resolved config bundle onto self and pick the force-scale mode.
 
-        # Split the traversal request before resolution. A full
-        # DualTreeTraversalConfig keeps its historical "replace everything"
-        # meaning (and warns, because that also replaces the capacities the
-        # caller did not intend to touch); a TraversalOverrides/mapping becomes a
-        # field-by-field merge applied after the policy has sized for this N, so
-        # naming one capacity cannot move the other three.
-        traversal_config, traversal_field_overrides = (
-            normalize_traversal_config_request(traversal_config)
-        )
-        self._traversal_field_overrides: dict[str, int] = traversal_field_overrides
-        if traversal_config is not None:
-            warn_full_traversal_config_replacement(
-                supplied=traversal_config,
-                preset_name=(
-                    str(preset_config.name.value) if preset_config is not None else None
-                ),
-            )
+        Extracted verbatim from ``__init__`` lines 657-671 (audit 2.1 step 3),
+        called in the original position so the resolution order is unchanged.
 
-        resolved = _resolve_fmm_config(
-            theta=theta,
-            G=G,
-            softening=softening,
-            working_dtype=working_dtype,
-            tree_build_mode=tree_build_mode,
-            target_leaf_particles=target_leaf_particles,
-            refine_local=refine_local,
-            max_refine_levels=max_refine_levels,
-            aspect_threshold=aspect_threshold,
-            m2l_chunk_size=m2l_chunk_size,
-            l2l_chunk_size=l2l_chunk_size,
-            max_pair_queue=max_pair_queue,
-            pair_process_block=pair_process_block,
-            traversal_config=traversal_config,
-            use_dense_interactions=use_dense_interactions,
-            preset_config=preset_config,
-        )
+        Parameters
+        ----------
+        mac_type : MACTypeInput
+            Passed through from ``__init__`` unchanged.
+        resolved : FMMResolvedConfig
+            Passed through from ``__init__`` unchanged.
 
+        Returns
+        -------
+        None
+            Mutates ``self`` in place, exactly as the inlined code did.
+        """
         self.config = resolved
         self.preset = resolved.preset
         self.theta = resolved.theta
@@ -669,6 +943,23 @@ class FastMultipoleMethod(
                 # re-runs the full prepass on *every* prepare_state, which costs
                 # ~3.5x steady state. Keep 'paper' for whoever asks for it.
                 self.mac_force_scale_mode = "paper_cached"
+
+    def _check_dehnen_paper_requirements(self) -> None:
+        """Reject a paper-style MAC that was given no explicit accuracy target.
+
+        Extracted verbatim from ``__init__`` lines 672-692 (audit 2.1 step 3),
+        called in the original position so the resolution order is unchanged.
+
+        Returns
+        -------
+        None
+            Mutates ``self`` in place, exactly as the inlined code did.
+
+        Raises
+        ------
+        ValueError
+            If a paper-style MAC was requested without an explicit ``adaptive_eps``.
+        """
         # Dehnen eq (16a) is parameterised by a relative force-accuracy target
         # `eps`, not by an opening angle: acceptance is gated only by the error
         # test plus eq (16a)'s own `theta < 1` convergence guard, so `theta` has
@@ -690,27 +981,6 @@ class FastMultipoleMethod(
                 "and is far too loose here. Note that theta itself does not "
                 "gate acceptance in this mode."
             )
-        self._resolve_runtime_defaults(
-            resolved=resolved,
-            preset_config=preset_config,
-            interaction_retry_logger=interaction_retry_logger,
-        )
-        self._resolve_refresh_and_strict_modes()
-        self._resolve_large_n_diag_modes()
-        self._init_compiled_lane_caches(
-            m2l_chunk_size=m2l_chunk_size,
-            l2l_chunk_size=l2l_chunk_size,
-            traversal_config=traversal_config,
-            max_pair_queue=max_pair_queue,
-            pair_process_block=pair_process_block,
-            grouped_interactions=grouped_interactions,
-            fixed_order=fixed_order,
-            fixed_max_leaf_size=fixed_max_leaf_size,
-        )
-        self._resolve_derived_lane_flags()
-        self._resolve_static_sizing_flags(
-            retain_far_pairs_for_grad=retain_far_pairs_for_grad,
-        )
 
     def _resolve_runtime_defaults(
         self,
