@@ -370,3 +370,16 @@ callers, not only the kernels. Any consolidation PR must show:
 2. the golden oracle exact-green,
 3. the full suite with no new failures vs the frozen baseline,
 4. an A100 Pallas-on vs pure-JAX parity run when the change touches Pallas.
+
+**Items 1 and 2 are unsatisfiable on GPU without `--xla_gpu_deterministic_ops=true`.**
+Measured on an A100 (`docs/refactor_audit_2026-08.md` B.3): under default XLA the *same*
+tree on the *same* card differs run-to-run by up to `2.1e-11`, which is **larger** than
+the difference a consolidation PR is trying to bound — so an exact-equality check run
+without the flag reports a difference that carries no information about the change. With
+the flag the same comparison is exactly equal, `rtol=0`, on every case. Set it on both
+sides, and say in the PR that you did.
+
+The corollary for item 3: a GPU run of the suite has four pre-existing failures that go
+green under the flag, so the "frozen baseline" for item 3 must be a baseline taken the
+same way. Run the *old* code on the *same* card in the same session — a CPU baseline is
+not a baseline for a GPU comparison.
