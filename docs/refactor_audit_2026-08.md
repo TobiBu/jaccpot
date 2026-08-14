@@ -1259,7 +1259,7 @@ corrected below.
 
 | # | Item | Touches | Closes | Verified by |
 |---|---|---|---|---|
-| ~~**0.1**~~ **DONE `e1f1455`** | **Gradient golden.** `tests/characterization/test_fmm_grad_golden.py` + **6** `.npz` (not 8 — the reverse compile costs ~1.1-1.5 GB per case, so the grid was trimmed and `_DIFF_FMM_TEST_FILES` in `tests/conftest.py` extended). Two gates as specified | `tests/characterization/`, `tests/conftest.py`, `tests/slow_tests.txt` | F03, D.1 | Done: full suite 839 passed / 57 skipped; forward golden unmoved; reverse-only mutation caught (D.1). **Open risk in G.9** |
+| ~~**0.1**~~ **DONE `e1f1455`** | **Gradient golden.** `tests/characterization/test_fmm_grad_golden.py` + **6** `.npz` (not 8 — the reverse compile costs ~1.1-1.5 GB per case, so the grid was trimmed and `_DIFF_FMM_TEST_FILES` in `tests/conftest.py` extended). Two gates as specified | `tests/characterization/`, `tests/conftest.py`, `tests/slow_tests.txt` | F03, D.1 | Done: full suite 839 passed / 57 skipped; forward golden unmoved; reverse-only mutation caught (D.1). **G.9 risk now RESOLVED** (per-particle inertness gate; see G.9) |
 | **0.2** | **Widen the forward golden**: add a `farfield_mode` axis (`pair_grouped`, `class_major`), a `nearfield_mode` axis (`bucketed`), and a potentials output. ~8 new cases | `tests/characterization/` only | D.2, D.11 | New goldens generated with `JACCPOT_REGEN_GOLDEN=1`, each anchored to the direct sum before committing |
 | ~~**0.3**~~ **DONE `e5d8e41`** — and it should have been item 0.1, since it was the only item whose *outcome* could invalidate the plan | **Rotation blocks vs. an independent reference.** ~~vs `_real_wigner_rotation`~~ — impossible, that path raises `ImportError` (F39). Implemented instead as **physics identities**: `D_to @ p2m(s) == p2m(g @ s)` for multipoles, and frame-invariance of the evaluated potential for locals | `tests/unit/operators/test_real_harmonics.py` | F29, D.5 (**not** F32 — the family stays unused, see G.4) | Green: production builders correct to ~2.5e-15. Mutation: azimuth swap fails 8/8 new, passes 4/4 pre-existing |
 | **0.4** | ~~Degenerate rotation subgradient~~ **BLOCKED — became a bug report (G.10).** Writing the test refuted the claim it was meant to pin. Re-plan as: bug-fix PR first (G.10), *then* this test as its regression guard | `tests/unit/operators/test_real_harmonics.py` | F31, D.6 → **G.10** | Cannot be green against current behaviour. Do not land a test asserting the present (wrong) values |
@@ -1512,7 +1512,44 @@ set (`jax`, `jaxlib`, `jaxtyping`, `beartype`, `yggdrax`, plus what jax itself b
 `sympy` was the only instance. Note that `import jaccpot` succeeding never proved this, since
 the six broken names were reachable only by direct call — the sweep is what proves it.
 
-### G.9 Cross-platform bit-stability of the gradient golden — **the risk is realized, on a different axis than written**
+### G.9 ~~Cross-platform bit-stability of the gradient golden~~ **RESOLVED — the gate's norm was the defect, fixed by option (2)**
+
+> **Resolution.** Diagnosed in `docs/g9_grad_golden_gpu_diagnosis.md`; remediated by the
+> per-particle inertness gate in `tests/characterization/test_fmm_grad_golden.py`. The
+> element that failed is the **small component of a large vector**: `clu_real_n128_p4`
+> particle 57's gradient is `(-1.689e5, +8.747e4, -2.619e2)`, the 6th largest of 128, with
+> a z-component **726× smaller than the vector norm**. Round-off is proportional to the
+> vector's magnitude, so the absolute drift is ~2e-9 on all three components; the
+> elementwise relative test then divides that shared error by each component's own value.
+> Divided by the norm instead it is **1.09e-14**.
+>
+> **Verdict H1, benign.** The accepted M2L set is bit-identical across devices (sha256
+> match, 72 pairs); `--xla_gpu_deterministic_ops=true` changes the number only in its 5th
+> digit, so it is deterministic reassociation and not the atomics behind B.3's four flaky
+> failures; particle 57 sits 6–7 orders from any transverse-degeneracy guard
+> (`rho/|dz| = 0.966` against a band of 1.49e-08), so G.10/D.6 are not implicated; and its
+> direct-sum cancellation ratio is 1.69, ranking 126th of 128.
+>
+> The norm-scaled statistic is bounded at **55 ULP** across all six cases *and* two extra
+> clustered seeds, on both devices — so a 1e-12 gate on it has **58× margin**, where the
+> elementwise gate had 0.13× (i.e. it failed). It still bites: verified by mutation, the
+> `1+1e-6` reverse-rule scaling of D.1 is rejected with six orders of margin, and a
+> perturbation confined to one small component is rejected down to 1e-9.
+>
+> **Option (2) was taken, not (3)**, which is what the earlier update below predicted.
+> Device-gating the elementwise assertion needs a band near **1e-8** to pass on GPU, and
+> under that band a genuine 1e-9 single-component error goes undetected — the norm-scaled
+> gate at 1e-12 catches exactly that. The elementwise gate is kept **on CPU**, where the
+> goldens were generated and hold with ~130× margin, so its single-component sensitivity is
+> retained where it is a real claim. No golden was regenerated and `INERT_RTOL` is
+> unchanged. Verified: 8 passed on 2 of 2 A100 runs (was 3/3 red), 29 passed in
+> `tests/characterization/` on CPU.
+>
+> One thing this exposed and did **not** fix: `grad_masses` at particle 57 drifts **898
+> ULP** on the A100 — genuine cancellation in a scalar sum, not a small denominator (a
+> scale floor does not move it). It passes at 1e-12 with only 5× margin. Left as-is
+> deliberately; it is a thin margin, not a failure, and widening or restructuring it is a
+> separate decision.
 
 > **Update (A100 run, B.3).** The axis this section worried about **held**: macOS-generated
 > goldens are green on ubuntu CI, across every Tier 1 PR. The one that broke is
