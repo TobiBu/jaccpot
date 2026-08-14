@@ -2909,7 +2909,73 @@ def test_solidfmm_float64_uses_complex128_locals():
         assert state.downward.locals.coefficients.dtype == jnp.complex128
 
 
+def _m2l_far_pair_count(state) -> int:
+    """M2L interactions in a prepared topology; 0 means the far field never runs."""
+    interactions = getattr(state, "interactions", None)
+    if interactions is not None:
+        return int(jnp.sum(interactions.counts))
+    dual = getattr(state, "dual_tree_result", None)
+    if dual is not None:
+        return int(jnp.sum(dual.far_pair_count))
+    return 0
+
+
+# leaf_size=4 is load-bearing: see the docstring's first paragraph.
+_CHUNKED_M2L_LEAF_SIZE = 4
+
+
 def test_solidfmm_chunked_m2l_matches_fullbatch():
+    """Chunking the M2L reduction must not change the force.
+
+    Two things about this test were previously not true of it.
+
+    First, it ran at ``leaf_size=16``, where this system accepts **zero** M2L
+    pairs -- so ``m2l_chunk_size=4096`` and ``m2l_chunk_size=32`` had nothing to
+    chunk and could not possibly differ. Measured far-pair counts at N=128,
+    ``theta=0.6``, ``mac_type="dehnen"``::
+
+        leaf_size    16      8      4      2
+        far_pairs     0      0    158   1412
+
+    The two fp32 outputs were bit-identical (difference exactly 0.0) because the
+    chunked M2L never executed, not because chunking is correct. This is the same
+    vacuity failure `NUMERICS_AND_JAX.md` section 3 describes for gradient tests.
+    ``leaf_size=4`` is now used and the pair count is asserted, so the test cannot
+    silently return to testing nothing.
+
+    Second, it compared the two **fp32** paths to each other. Two fp32 paths
+    agreeing proves nothing -- they can be identically wrong, which is exactly why
+    the neighbouring ``test_solidfmm_m2l_ignores_padded_compact_far_pairs`` was
+    rewritten to use a float64 reference. Each path is now checked against a
+    float64 reference built from the *same* particles cast up. (Re-drawing the
+    particles in float64 instead would silently compare a different physical
+    system: ``jax.random.uniform`` with the same key returns different values per
+    dtype, measured rel-L2 1.2-1.4, which looks like catastrophic error.)
+
+    Bounds, measured over 4 seeds on both backends (rel-L2 against the float64
+    reference, and the two fp32 paths against each other)::
+
+                        vs float64 ref     chunked vs fullbatch
+        CPU             1.06e-07 .. 1.79e-07     0.0 .. 1.29e-08
+        A100 (sm_80)    1.30e-07 .. 2.27e-07   3.80e-08 .. 5.89e-08
+
+    So ~1-2 eps_float32 against truth, and the two paths differ at round-off
+    because chunk boundaries reorder the M2L sum -- exact agreement is not the
+    claim and never was achievable once the far field actually runs. The bounds
+    below carry ~9x headroom over the worst measurement. They are not slack: a
+    dropped or double-counted chunk moves the result by order 1, five orders
+    above these.
+
+    The direct fp32-vs-fp32 comparison is kept as a secondary check, bounded by
+    reordering round-off rather than by the old elementwise
+    ``allclose(rtol=1e-6, atol=1e-6)``. That form was a knife edge on GPU: it is
+    elementwise, so near-zero acceleration components made ``atol`` the binding
+    term, and the test failed ~1 run in 3 on an A100 from reduction
+    nondeterminism alone (`ARCHITECTURE.md` section 10).
+    """
+    if not jax.config.read("jax_enable_x64"):
+        pytest.skip("float64 reference needs JAX_ENABLE_X64=1")
+
     key = jax.random.PRNGKey(13)
     num_particles = 128
     positions = jax.random.uniform(
@@ -2921,38 +2987,76 @@ def test_solidfmm_chunked_m2l_matches_fullbatch():
     )
     masses = jnp.abs(jax.random.normal(key, (num_particles,), dtype=jnp.float32)) + 1.0
 
-    base_kwargs = dict(
-        theta=0.6,
-        softening=1e-3,
-        working_dtype=jnp.float32,
-        expansion_basis="solidfmm",
-        complex_rotation="solidfmm",
-        mac_type="dehnen",
-        tree_build_mode="lbvh",
-        fixed_order=4,
-        fixed_max_leaf_size=16,
+    def solver(*, chunk_size, dtype):
+        return FastMultipoleMethod(
+            theta=0.6,
+            softening=1e-3,
+            working_dtype=dtype,
+            expansion_basis="solidfmm",
+            complex_rotation="solidfmm",
+            mac_type="dehnen",
+            tree_build_mode="lbvh",
+            fixed_order=4,
+            fixed_max_leaf_size=_CHUNKED_M2L_LEAF_SIZE,
+            m2l_chunk_size=chunk_size,
+        )
+
+    def accelerations(*, chunk_size, dtype):
+        return np.asarray(
+            solver(chunk_size=chunk_size, dtype=dtype).compute_accelerations(
+                positions.astype(dtype),
+                masses.astype(dtype),
+                leaf_size=_CHUNKED_M2L_LEAF_SIZE,
+                max_order=4,
+                jit_tree=False,
+            )
+        )
+
+    # Vacuity gate: without far pairs there is no M2L to chunk and both branches
+    # collapse to the same near-field-only sum.
+    far_pairs = _m2l_far_pair_count(
+        solver(chunk_size=4096, dtype=jnp.float32).prepare_state(
+            positions,
+            masses,
+            leaf_size=_CHUNKED_M2L_LEAF_SIZE,
+            max_order=4,
+        )
+    )
+    assert far_pairs > 0, (
+        f"no M2L pairs accepted at leaf_size={_CHUNKED_M2L_LEAF_SIZE}: the chunked "
+        "and fullbatch M2L cannot differ, so this test would pass vacuously"
+    )
+    # 32 < 158 so the chunked path really does take more than one chunk.
+    assert far_pairs > 32, (
+        f"only {far_pairs} far pairs: m2l_chunk_size=32 would fit them in a single "
+        "chunk and the chunked reduction would never loop"
     )
 
-    full = FastMultipoleMethod(m2l_chunk_size=4096, **base_kwargs)
-    chunked = FastMultipoleMethod(m2l_chunk_size=32, **base_kwargs)
+    reference = accelerations(chunk_size=4096, dtype=jnp.float64)
+    acc_full = accelerations(chunk_size=4096, dtype=jnp.float32)
+    acc_chunked = accelerations(chunk_size=32, dtype=jnp.float32)
 
-    acc_full = full.compute_accelerations(
-        positions,
-        masses,
-        leaf_size=16,
-        max_order=4,
-        jit_tree=False,
-    )
-    acc_chunked = chunked.compute_accelerations(
-        positions,
-        masses,
-        leaf_size=16,
-        max_order=4,
-        jit_tree=False,
-    )
+    assert np.isfinite(acc_full).all()
+    assert np.isfinite(acc_chunked).all()
 
-    assert np.allclose(
-        np.asarray(acc_chunked), np.asarray(acc_full), rtol=1e-6, atol=1e-6
+    reference_norm = np.linalg.norm(reference)
+
+    def rel_l2(candidate, other):
+        return float(np.linalg.norm(candidate - other) / reference_norm)
+
+    # 2e-6 is ~9x the worst measured 2.27e-07; a leaked or dropped chunk is order 1.
+    for label, candidate in (("fullbatch", acc_full), ("chunked", acc_chunked)):
+        error = rel_l2(candidate, reference)
+        assert error < 2.0e-6, (
+            f"{label} M2L drifted from the float64 reference: rel-L2 {error:.3e} "
+            f"> 2e-6 ({far_pairs} far pairs, leaf={_CHUNKED_M2L_LEAF_SIZE})"
+        )
+
+    # 5e-7 is ~8x the worst measured 5.89e-08 chunk-boundary reordering difference.
+    reorder = rel_l2(acc_chunked, acc_full)
+    assert reorder < 5.0e-7, (
+        f"chunked and fullbatch M2L disagree by more than reordering round-off: "
+        f"rel-L2 {reorder:.3e} > 5e-7 ({far_pairs} far pairs)"
     )
 
 

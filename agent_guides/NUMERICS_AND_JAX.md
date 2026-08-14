@@ -151,6 +151,25 @@ to "what made the test pass".
 
 **Reproducibility.** Explicit PRNG keys everywhere. Never rely on a global seed.
 
+**An exact-equality assertion is a CPU-only assertion unless you say otherwise.** On GPU the
+forward path is not run-to-run reproducible under default XLA — the same tree on the same card
+differs by more than two different trees differ from each other (measured; `ARCHITECTURE.md`
+§10). So `assert jnp.all(a == b)`, `rtol=0`, and bounds at or below ~1e-12 on a reduction will
+be intermittently red on an A100 while being perfectly green in CI. Two consequences:
+
+- Writing one: either bound it by round-off that is actually achievable on both backends, or
+  gate it and say which backend it speaks for. Four of the five known GPU-only failures in
+  `ARCHITECTURE.md` §9 are this mistake.
+- Relying on one to validate a refactor: set `XLA_FLAGS="--xla_gpu_deterministic_ops=true"` on
+  both sides **and** run the same-tree-twice control first. A harness that cannot show
+  A-vs-A identical has not yet earned the right to report A-vs-B different.
+
+**Two fp32 paths agreeing with each other proves nothing.** Compare fp32 against an fp64
+reference, not against another fp32 path — the two can be identically wrong. This already bit
+once: `test_solidfmm_m2l_ignores_padded_compact_far_pairs` asserted `padded == exact` and
+passed on JAX 0.9.x only because both fp32 paths shared the TF32 error floor (see
+`ARCHITECTURE.md` §7).
+
 **Markers.** Keep `slow` and `experimental` accurate — the smoke leg
 (`-m "not slow and not experimental"`) is what most people actually run, and a mismarked test
 either breaks it or hides from it.

@@ -99,6 +99,29 @@ Prefer CPU for correctness and style work — GPUs on this machine are shared. C
 device you may use before launching anything that occupies one, and before running
 `bench/` or `tests/perf/`.
 
+### Running the suite on a GPU
+
+**Do not use the bare `pytest` above on a GPU.** The `addopts` in `pyproject.toml` carry
+`-n auto`, which on this 64-core box is 64 xdist workers contending for one card: it produces
+tens of thousands of `CUDA_ERROR_OUT_OF_MEMORY` lines and hundreds of allocation "failures"
+that look exactly like numerical ones. Measured 2026-08-12: 331 and 288 such failures on two
+trees, with differing failure sets and a 2× wall-time gap — none of them real.
+
+Cap the workers and bound the per-worker share instead:
+
+```bash
+XLA_PYTHON_CLIENT_PREALLOCATE=false XLA_PYTHON_CLIENT_MEM_FRACTION=.12 \
+  JAX_ENABLE_X64=1 pytest -n 6            # 0 OOM lines on a 40GB A100
+```
+
+Select the card with `autocvd` before `import jax` (org rule, see `ARCHITECTURE.md` §7), and
+pin it for the whole session if you are comparing timings, so two runs cannot land on
+different GPUs.
+
+Expect a handful of GPU-only failures that are **not** yours: see `ARCHITECTURE.md` §9 for the
+current list, and §10 for why any exact-equality assertion needs
+`XLA_FLAGS="--xla_gpu_deterministic_ops=true"` before its result means anything.
+
 ## Layout
 
 ```

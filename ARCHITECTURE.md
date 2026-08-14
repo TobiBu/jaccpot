@@ -352,6 +352,32 @@ at the `runtime/` level until the engine is fully dissolved into `fmm/engine.py`
 - **GPU/Pallas parity (A100, manual/nightly):** run the fused-Pallas M2L parity
   tests + golden with `JACCPOT_STATIC_STRICT_FUSED_M2L_PALLAS=1` under
   `JAX_ENABLE_X64=1` to confirm the Pallas paths match the pure-JAX reference.
+  See `CLAUDE.md` for the worker-capped invocation — the default `-n auto` is
+  unusable on one card.
+
+### Known GPU-only failures (A100 sm_80, jax 0.10.2)
+
+These five fail on the A100 and pass on CPU. **All predate Tier 1** — they reproduce on
+`128a0e2`, before the first Tier 1 merge — so bisect against a pre-branch commit before
+attributing one to your change. Re-measured 2026-08-12, three runs per configuration:
+
+| test | fails (default XLA) | fails (deterministic ops) |
+|---|---|---|
+| `test_fmm_grad_golden[clu_real_n128_p4]` | 3/3 | **3/3** |
+| `test_real_basis_tracks_complex_basis[nearfield-only-f32]` | 3/3 | 0/3 |
+| `test_solidfmm_chunked_m2l_matches_fullbatch` | 1/3 | 0/3 |
+| `test_compiled_dispatch_is_bit_identical[None]` | 1/3 | 0/3 |
+| `test_compiled_dispatch_is_bit_identical[32]` | 1/3 | 0/3 |
+
+`XLA_FLAGS="--xla_gpu_deterministic_ops=true"` is the fast triage lever: **four of the five
+go green under it**, so still-red-with-the-flag means a real discrepancy and green-with-the-flag
+means you were looking at reduction nondeterminism (§10).
+
+The one that survives the flag is a genuine platform difference, not noise:
+`test_fmm_grad_golden[clu_real_n128_p4]` has one element of 384 sitting ~7.9e-12 relative from
+a golden that was **generated on CPU**, against `rtol=atol=1e-12`. All GPU values cluster
+~2.1e-9 below the committed value. It is not a regression and the golden has not been touched;
+whether goldens gain a platform-aware band or become explicitly CPU-only is an open decision.
 
 ## 10. Kernel-consolidation invariant
 
@@ -383,3 +409,19 @@ The corollary for item 3: a GPU run of the suite has four pre-existing failures 
 green under the flag, so the "frozen baseline" for item 3 must be a baseline taken the
 same way. Run the *old* code on the *same* card in the same session — a CPU baseline is
 not a baseline for a GPU comparison.
+
+**Run the same-tree-twice control first**, before reading any cross-tree number. Compare
+a tree against *itself* on the same card: if A-vs-A differs as much as A-vs-B, the harness
+has not yet earned the right to report A-vs-B as a difference. That control is what
+identified the problem above — the same-tree difference (`4.4e-15` of typical `|a|`, ~65%
+of entries affected) turned out to exceed the two-tree difference (`1.8e-15`).
+
+Deterministic ops serialise the scatters and are measurably slower, so use the flag for
+correctness comparisons only — **never for the timing runs** in `NUMERICS_AND_JAX.md` §4.
+
+**When item 4 actually runs.** There is no GPU runner in CI — every job is
+`ubuntu-latest` — so item 4 is a *manual* step, not an enforced merge gate, and it has
+been discharged in arrears before (Tier 1 merged ten PRs owing it; the run is recorded in
+`docs/tier1_gpu_validation_report.html`). Treat it as a release-level obligation for any
+Pallas-touching batch and say in the PR whether it was run. A nightly GPU leg is tracked
+as audit item F11.

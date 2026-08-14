@@ -120,6 +120,16 @@ def test_real_basis_far_field_converges_with_order():
     assert errors[2] < 1.0e-3
 
 
+# Used only where the backend fails the same-basis-twice control, i.e. cannot
+# reproduce its own output. Measured on an A100-PCIE-40GB (sm_80, jax 0.10.2) at
+# leaf_size=8 over 3 seeds: cross-basis 2.07e-08 .. 2.56e-08, and the same-basis
+# control 1.82e-08 .. 2.91e-08 -- the control is as large as the signal, and at one
+# seed larger. Both are ~0.2 eps_float32. 1e-6 is ~8 eps_float32 and ~40x the worst
+# measurement; a genuine basis-algebra error is orders above it (the pre-2026-08
+# form of this test used 3e-2 and caught nothing).
+_NONREPRODUCIBLE_ROUNDOFF_BOUND = {"float32": 1.0e-6, "float64": 1.0e-12}
+
+
 def _far_pair_count(state) -> int:
     """M2L interactions in a prepared topology; 0 means the far field never runs."""
     interactions = state.interactions
@@ -176,6 +186,22 @@ def test_real_basis_tracks_complex_basis(leaf_size, dtype, tolerance, expect_far
     M2L pairs (measured, they always do). Without that, a difference in the accepted
     interaction set would be indistinguishable from a difference in the algebra, and
     the tolerance above would be measuring the wrong thing.
+
+    Third -- and this is why the bound is no longer a bare constant -- ``1e-14`` on a
+    **float32** quantity is below ``eps_float32`` (1.19e-07), so it is not a
+    tolerance at all: it is an exact-equality assertion, satisfiable only if the two
+    outputs are bit-identical. That held on CPU (measured: exactly 0.0, because at
+    ``leaf_size=8`` both bases run the same basis-independent near-field code) and
+    does **not** hold on GPU, where the same kernel does not reproduce itself
+    run-to-run. On an A100 this case failed 3 of 3 runs under default XLA and 0 of 3
+    under ``--xla_gpu_deterministic_ops=true`` -- it was measuring XLA, not the bases.
+
+    So the test now runs the **same basis twice** and uses that control to pick which
+    claim it is entitled to make: bit-identity where the backend reproduces itself
+    (unchanged, still ``1e-14``, nothing relaxed), and achievable round-off where it
+    does not. The control is also asserted to be inside that bound, so a backend
+    whose own repeatability has degraded fails loudly rather than widening the bound
+    it is compared against. See ``ARCHITECTURE.md`` section 10.
     """
     if dtype is jnp.float64 and not jax.config.jax_enable_x64:
         pytest.skip("float64 case requires JAX_ENABLE_X64=1")
@@ -228,13 +254,36 @@ def test_real_basis_tracks_complex_basis(leaf_size, dtype, tolerance, expect_far
         dtype=np.float64,
     )
 
-    rel_l2 = float(
-        np.linalg.norm(acc_real - acc_complex) / (np.linalg.norm(acc_complex) + 1.0e-12)
+    # The same basis run twice, which is what tells a basis difference apart from a
+    # backend that simply does not repeat itself. Exactly 0.0 wherever the
+    # computation is reproducible, so this changes nothing on CPU.
+    acc_real_again = np.asarray(
+        fmm_real.compute_accelerations(
+            positions, masses, leaf_size=leaf_size, max_order=4
+        ),
+        dtype=np.float64,
     )
-    assert rel_l2 < tolerance, (
+
+    scale = np.linalg.norm(acc_complex) + 1.0e-12
+    rel_l2 = float(np.linalg.norm(acc_real - acc_complex) / scale)
+    nondeterminism = float(np.linalg.norm(acc_real - acc_real_again) / scale)
+
+    if nondeterminism == 0.0:
+        bound = tolerance
+    else:
+        # The backend does not reproduce itself, so the strict bound is not a claim
+        # anyone can make here; fall back to achievable round-off and say so.
+        bound = max(tolerance, _NONREPRODUCIBLE_ROUNDOFF_BOUND[np.dtype(dtype).name])
+        assert nondeterminism < bound, (
+            "the same basis run twice already differs by more than the round-off "
+            f"bound: {nondeterminism:.3e} >= {bound:.3e}. That is a backend or "
+            "capacity problem, not a basis comparison."
+        )
+
+    assert rel_l2 < bound, (
         f"real and solidfmm bases disagree beyond round-off: rel-L2 {rel_l2:.3e} > "
-        f"{tolerance:.0e} (leaf={leaf_size}, {np.dtype(dtype).name}, "
-        f"{far_real} M2L pairs)"
+        f"{bound:.3e} (leaf={leaf_size}, {np.dtype(dtype).name}, "
+        f"{far_real} M2L pairs; same-basis-twice control {nondeterminism:.3e})"
     )
 
 
