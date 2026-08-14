@@ -1365,7 +1365,24 @@ set (`jax`, `jaxlib`, `jaxtyping`, `beartype`, `yggdrax`, plus what jax itself b
 `sympy` was the only instance. Note that `import jaccpot` succeeding never proved this, since
 the six broken names were reachable only by direct call — the sweep is what proves it.
 
-### G.9 Cross-platform bit-stability of the gradient golden — an accepted risk, not a settled one
+### G.9 Cross-platform bit-stability of the gradient golden — **the risk is realized, on a different axis than written**
+
+> **Update (A100 run, B.3).** The axis this section worried about **held**: macOS-generated
+> goldens are green on ubuntu CI, across every Tier 1 PR. The one that broke is
+> cross-*device*, which this section did not consider:
+> `test_fmm_grad_golden[clu_real_n128_p4]` fails on the A100 with
+> `Mismatched elements: 1 / 384 (0.26%)`, `grad_positions drifted from the committed
+> golden`, at `rtol=atol=1e-12`. It is **reproducible 3/3 under both default XLA and
+> `deterministic_ops=true`** — so unlike the four flaky failures in B.3 it is not
+> nondeterminism — and it **fails identically on pre-Tier-1 `128a0e2`**, so it is not a
+> Tier 1 regression. The golden and `INERT_RTOL` are untouched.
+>
+> This makes option (3) the live one, re-read for device rather than platform: gate the
+> inertness assertion on device, or commit a per-device golden. Note that (1) does not
+> apply — there is nothing wrong with the Linux CPU numbers. Wants its own investigation
+> and its own PR; the first question is whether one element in 384 at 1e-12 is
+> reassociation in the reverse M2L graph or something structural, and that is answered by
+> finding *which* element.
 
 The six `.npz` in `tests/characterization/golden_grad/` were generated on **macOS / CPU /
 JAX 0.10.2**; CI runs **ubuntu-latest**. The forward golden sets a precedent that float64 CPU
