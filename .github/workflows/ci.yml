@@ -109,9 +109,9 @@ jobs:
           # exactly one of these three entries or the `test-mac-runtime` job.
           # Verified by collection count, with `--ignore=tests/unit/runtime` as
           # the step applies it and `-m "not experimental"` applied throughout:
-          #   integration 173 + unit 641 + rest 53  = 867  (these three shards)
-          #                        + tests/unit/runtime 202 = 1069
-          # and 1069 is the whole selectable universe.
+          #   integration 173 + unit 682 + rest 59  = 914  (these three shards)
+          #                        + tests/unit/runtime 213 = 1127
+          # and 1127 is the whole selectable universe.
           #
           # This is the check paying for itself, not a formality. `rest` used to be
           # `tests/characterization tests/test_*.py`; the move of the 20 root-level

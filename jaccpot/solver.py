@@ -19,7 +19,7 @@ from .config import (
     GradConfig,
 )
 from .runtime._large_n_types import LargeNPreparedState
-from .runtime.fmm import FastMultipoleMethod as _RuntimeFMM
+from .runtime.fmm import FMMEngine as _RuntimeFMM
 from .runtime.fmm import FMMPreparedState
 from .runtime.fmm_constants import _LARGE_N_GPU_UPWARD_LEAF_BATCH_SIZE
 
@@ -780,8 +780,16 @@ class FastMultipoleMethod:
         force_scale_nodes: Optional[Array] = None,
         runtime_overrides_override: Optional[Any] = None,
         fused_device_mode: bool = False,
-    ) -> FMMPreparedState:
+    ) -> Union[FMMPreparedState, LargeNPreparedState]:
         """Prepare and cache tree/interactions for repeated evaluations.
+
+        The return type is the union because ``preset="large_n_gpu"`` prepares a
+        ``LargeNPreparedState``, which is not an ``FMMPreparedState`` -- the two are
+        unrelated classes. Everything else here already said so: the delegate this
+        forwards to is annotated ``-> PreparedStateLike``, itself defined as this
+        union, and ``compute_accelerations``/``compute_potential`` below already
+        *accept* the union and document it. Only the producer's annotation disagreed,
+        which is what made ``JACCPOT_RUNTIME_TYPECHECK=1`` reject the large-N path.
 
         ``force_scale_nodes`` overrides the per-node force scale used by the
         adaptive acceptance test for this call only, skipping the prepass and
@@ -948,7 +956,12 @@ class FastMultipoleMethod:
 
     def evaluate_prepared_state(
         self: "FastMultipoleMethod",
-        state: FMMPreparedState,
+        # The union, for the same reason as `prepare_state` above: the delegate takes
+        # `PreparedStateLike`, `differentiable_accelerations` just below already takes
+        # the union, and `test_large_n_compiled_eval_uses_specialized_nearfield`
+        # demonstrates at runtime that this method handles a `LargeNPreparedState`
+        # correctly. Only the annotation said otherwise.
+        state: Union[FMMPreparedState, LargeNPreparedState],
         *,
         target_indices: Optional[Array] = None,
         return_potential: bool = False,

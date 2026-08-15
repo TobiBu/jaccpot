@@ -14,7 +14,20 @@ import threading
 import time
 from dataclasses import dataclass, replace
 from functools import partial
-from typing import Any, Optional
+from typing import TYPE_CHECKING, Any, Optional
+
+if TYPE_CHECKING:
+    # Type-checking only, and that is the whole point: this block never executes, so
+    # it cannot disturb the ordering `_configure_worker_environment()` below
+    # establishes -- the XLA allocator and `JAX_ENABLE_X64` env vars have to be set
+    # BEFORE JAX initializes, which is why the real import is deferred into
+    # `_load_jaccpot_symbols()` rather than taken at module level.
+    #
+    # Without this the 14 `fmm: FastMultipoleMethod` annotations below name something
+    # bound only inside that loader, so they are unresolvable to any checker.
+    # `from __future__ import annotations` keeps them lazy strings, which is why
+    # nothing ever raised -- the same invisible-undefined-name class as audit G.1b.
+    from jaccpot import FastMultipoleMethod
 
 
 def _configure_worker_environment() -> None:

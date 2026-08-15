@@ -87,7 +87,23 @@ def test_custom_crossover_threshold_is_honoured():
 
 
 def test_invalid_lane_is_rejected_at_construction():
-    with pytest.raises(ValueError, match="nearfield_lane"):
+    """An out-of-set lane must be refused at construction, not silently accepted.
+
+    WHICH exception depends on whether the runtime typecheck is on, and both are
+    correct refusals. `nearfield_lane` is annotated `GradNearFieldLane`, a
+    `Literal`, so under `JACCPOT_RUNTIME_TYPECHECK=1` beartype rejects the value
+    before `__post_init__`'s loud `ValueError` (STYLE_GUIDE §9) ever runs. Asserting
+    only `ValueError` made this test fail under the hook while the behaviour it
+    checks was working -- one of F40's 122. The property is "refused", so accept
+    either refusal rather than weakening it to a bare `Exception`.
+    """
+    import jaxtyping
+
+    # `jaxtyping.TypeCheckError`, not beartype's own class: the hook wraps
+    # beartype's violation, and it is the wrapper that propagates. Both messages
+    # name the parameter, so the `match` still pins WHICH field was refused.
+    refusals = (ValueError, jaxtyping.TypeCheckError)
+    with pytest.raises(refusals, match="nearfield_lane"):
         GradConfig(nearfield_lane="leaf_major")
     with pytest.raises(ValueError, match="min_particles"):
         GradConfig(nearfield_fast_lane_min_particles=-1)

@@ -1,4 +1,4 @@
-"""OverridesMixin: fmm_overrides methods extracted from the FastMultipoleMethod
+"""OverridesMixin: fmm_overrides methods extracted from the FMMEngine
 god-class (Phase 2d mixin split). Methods are verbatim (self unchanged); the
 engine class inherits this mixin. Sibling of _fmm_impl at runtime level.
 """

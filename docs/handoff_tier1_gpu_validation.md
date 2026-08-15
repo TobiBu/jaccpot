@@ -1,5 +1,21 @@
 # Handoff: GPU validation for the Tier 1 refactor
 
+> **DISCHARGED — 2026-08-14, A100-PCIE-40GB. Results in
+> `docs/refactor_audit_2026-08.md` B.3. Kept as the record of what was asked, not as
+> work outstanding.**
+>
+> Three of its prescriptions did not survive contact and are corrected in B.3; anyone
+> reusing this document as a template should fix them there first:
+>
+> 1. **The A/B is wrong now.** It says branch-vs-`main`; all ten Tier 1 PRs are merged,
+>    so those branches are 0 commits ahead. Use pre- vs post-Tier-1 commits.
+> 2. **Item 2's "Expected: exactly equal" is unsatisfiable on GPU** without
+>    `--xla_gpu_deterministic_ops=true` — run-to-run noise on one card exceeds the
+>    difference being measured. ARCHITECTURE §10 now says so.
+> 3. **Its residual-audit config covers no far field.** `N=4096 leaf=64` gives
+>    `far_pairs=0`, so the M2L coefficient is unmeasured — D.12, in the document that
+>    warns about D.12. Use `--leaf 4`.
+
 Paste the block below into a fresh session on the GPU box. It is self-contained.
 
 Why it exists: Tier 1 (PRs #79–#88) moved the fused Pallas M2L wrappers and the radix

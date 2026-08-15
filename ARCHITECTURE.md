@@ -19,7 +19,7 @@ jaccpot/solver.py              FastMultipoleMethod  <-- the ONLY public class
 jaccpot/runtime/fmm/           orchestrator package (re-export seam)
         |                      __init__ re-exports the engine; must NOT be the
         |                      import that forms a cycle (see section 8)
-jaccpot/runtime/_fmm_impl.py   FastMultipoleMethod engine (thin coordinator)
+jaccpot/runtime/_fmm_impl.py   FMMEngine (thin coordinator)
         |                      + 10 method-cluster mixins (section 4)
         |
 jaccpot/runtime/kernels/       reusable numerical core (LEAF -- never imports
@@ -48,11 +48,13 @@ ODISSEO coupling) depends on. It is frozen by
 | `MemoryObjective` | memory-policy literal |
 | `ComplexSHBasis`, `RealSHBasis` | expansion bases |
 | `OdisseoFMMCoupler` | ODISSEO integration adapter |
-| `differentiable_gravitational_acceleration` | autodiff-able **direct-sum** oracle (the differentiable FMM itself is `FastMultipoleMethod.differentiable_accelerations`; see section 6) |
+| `direct_sum_gravitational_acceleration` | autodiff-able **direct-sum** oracle (the differentiable FMM itself is `FastMultipoleMethod.differentiable_accelerations`; see section 6) |
 
-`FastMultipoleMethod` in `solver.py` is the sole public class name; the runtime
-engine class (currently also named `FastMultipoleMethod` in `_fmm_impl.py`) is
-an internal implementation detail reached only through the facade.
+`FastMultipoleMethod` in `solver.py` is the sole public class name. The runtime
+engine is `FMMEngine` in `_fmm_impl.py` -- an internal implementation detail
+reached only through the facade. The two used to share the name, which this
+document flagged as confusing; audit 2.4 renamed the engine, so a reference to
+`FastMultipoleMethod` now unambiguously means the public class.
 
 ## 3. runtime/ package map
 
@@ -87,17 +89,19 @@ import cycle (section 8).
 
 ## 4. The engine: coordinator + mixins
 
-`_fmm_impl.FastMultipoleMethod` coordinates (constructor, backend plumbing, cache
+`_fmm_impl.FMMEngine` coordinates (constructor, backend plumbing, cache
 lifecycle, autotune-cache IO) and inherits its behaviour from **10 method-cluster
 mixins**, each a sibling `runtime/fmm_<cluster>.py` module. It used to be described
-as *thin*, which the mixin split achieved for everything except the constructor:
-`__init__` is 722 lines with 60 parameters, against 316 lines for the rest of the
-class combined. The mixins are the part that worked.
+as *thin*, which the mixin split achieved for everything except the constructor.
+`__init__` was 722 lines with 60 parameters against 316 for the rest of the class;
+audit 2.1 staged it into 13 private resolvers, so the body is now **141 lines** of
+named phases. It still takes 60 parameters -- that is the public surface, not the
+body, and is item 2.4's territory.
 Methods were moved verbatim during the god-class breakup; `self` is unchanged;
 cross-cluster calls resolve through the MRO.
 
 ```python
-class FastMultipoleMethod(
+class FMMEngine(
     PrepareMixin, EvaluateMixin, StrictRunMixin, SweepsMixin, OverridesMixin,
     AutotuneMixin, PolicyMixin, DerivativesMixin, StrictCapProfileMixin,
     DiagnosticsMixin,
@@ -237,7 +241,7 @@ derivative/jerk towers, and cached-vs-uncached M2L dispatch.
   measurement record: `docs/differentiable_fmm_audit.md`,
   `docs/differentiable_fmm_design.md`, and for multi-GPU
   `docs/differentiable_fmm_distributed_audit.md`.
-- `differentiable_gravitational_acceleration` remains the deliberately differentiable
+- `direct_sum_gravitational_acceleration` remains the deliberately differentiable
   **direct O(N²) sum** — retained as the simple exact-gradient reference and the
   **gradient oracle** for tests (`grad(FMM)` must match `grad(direct-sum)` to FMM force
   accuracy), not as "the" differentiable path.
@@ -352,6 +356,32 @@ at the `runtime/` level until the engine is fully dissolved into `fmm/engine.py`
 - **GPU/Pallas parity (A100, manual/nightly):** run the fused-Pallas M2L parity
   tests + golden with `JACCPOT_STATIC_STRICT_FUSED_M2L_PALLAS=1` under
   `JAX_ENABLE_X64=1` to confirm the Pallas paths match the pure-JAX reference.
+  See `CLAUDE.md` for the worker-capped invocation — the default `-n auto` is
+  unusable on one card.
+
+### Known GPU-only failures (A100 sm_80, jax 0.10.2)
+
+These five fail on the A100 and pass on CPU. **All predate Tier 1** — they reproduce on
+`128a0e2`, before the first Tier 1 merge — so bisect against a pre-branch commit before
+attributing one to your change. Re-measured 2026-08-12, three runs per configuration:
+
+| test | fails (default XLA) | fails (deterministic ops) |
+|---|---|---|
+| `test_fmm_grad_golden[clu_real_n128_p4]` | 3/3 | **3/3** |
+| `test_real_basis_tracks_complex_basis[nearfield-only-f32]` | 3/3 | 0/3 |
+| `test_solidfmm_chunked_m2l_matches_fullbatch` | 1/3 | 0/3 |
+| `test_compiled_dispatch_is_bit_identical[None]` | 1/3 | 0/3 |
+| `test_compiled_dispatch_is_bit_identical[32]` | 1/3 | 0/3 |
+
+`XLA_FLAGS="--xla_gpu_deterministic_ops=true"` is the fast triage lever: **four of the five
+go green under it**, so still-red-with-the-flag means a real discrepancy and green-with-the-flag
+means you were looking at reduction nondeterminism (§10).
+
+The one that survives the flag is a genuine platform difference, not noise:
+`test_fmm_grad_golden[clu_real_n128_p4]` has one element of 384 sitting ~7.9e-12 relative from
+a golden that was **generated on CPU**, against `rtol=atol=1e-12`. All GPU values cluster
+~2.1e-9 below the committed value. It is not a regression and the golden has not been touched;
+whether goldens gain a platform-aware band or become explicitly CPU-only is an open decision.
 
 ## 10. Kernel-consolidation invariant
 
@@ -370,3 +400,32 @@ callers, not only the kernels. Any consolidation PR must show:
 2. the golden oracle exact-green,
 3. the full suite with no new failures vs the frozen baseline,
 4. an A100 Pallas-on vs pure-JAX parity run when the change touches Pallas.
+
+**Items 1 and 2 are unsatisfiable on GPU without `--xla_gpu_deterministic_ops=true`.**
+Measured on an A100 (`docs/refactor_audit_2026-08.md` B.3): under default XLA the *same*
+tree on the *same* card differs run-to-run by up to `2.1e-11`, which is **larger** than
+the difference a consolidation PR is trying to bound — so an exact-equality check run
+without the flag reports a difference that carries no information about the change. With
+the flag the same comparison is exactly equal, `rtol=0`, on every case. Set it on both
+sides, and say in the PR that you did.
+
+The corollary for item 3: a GPU run of the suite has four pre-existing failures that go
+green under the flag, so the "frozen baseline" for item 3 must be a baseline taken the
+same way. Run the *old* code on the *same* card in the same session — a CPU baseline is
+not a baseline for a GPU comparison.
+
+**Run the same-tree-twice control first**, before reading any cross-tree number. Compare
+a tree against *itself* on the same card: if A-vs-A differs as much as A-vs-B, the harness
+has not yet earned the right to report A-vs-B as a difference. That control is what
+identified the problem above — the same-tree difference (`4.4e-15` of typical `|a|`, ~65%
+of entries affected) turned out to exceed the two-tree difference (`1.8e-15`).
+
+Deterministic ops serialise the scatters and are measurably slower, so use the flag for
+correctness comparisons only — **never for the timing runs** in `NUMERICS_AND_JAX.md` §4.
+
+**When item 4 actually runs.** There is no GPU runner in CI — every job is
+`ubuntu-latest` — so item 4 is a *manual* step, not an enforced merge gate, and it has
+been discharged in arrears before (Tier 1 merged ten PRs owing it; the run is recorded in
+`docs/tier1_gpu_validation_report.html`). Treat it as a release-level obligation for any
+Pallas-touching batch and say in the PR whether it was run. A nightly GPU leg is tracked
+as audit item F11.

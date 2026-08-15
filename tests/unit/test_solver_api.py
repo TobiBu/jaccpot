@@ -7,7 +7,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
-from yggdrax.interactions import DualTreeTraversalConfig
+from yggdrax.interactions import DualTreeTraversalConfig, NodeInteractionList
 
 import jaccpot.runtime._fmm_impl as fmm_impl_private
 import jaccpot.runtime._interaction_cache as interaction_cache_private
@@ -225,7 +225,7 @@ def test_advanced_config_applies_to_runtime():
 
 
 def test_large_gpu_minimum_memory_streamed_path_caps_oversized_explicit_traversal():
-    impl = fmm_impl_private.FastMultipoleMethod(
+    impl = fmm_impl_private.FMMEngine(
         preset=FMMPreset.LARGE_N_GPU,
         expansion_basis="solidfmm",
         mac_type="engblom",
@@ -258,7 +258,7 @@ def test_large_gpu_minimum_memory_streamed_path_caps_oversized_explicit_traversa
 
 
 def test_large_gpu_minimum_memory_streamed_path_keeps_small_explicit_traversal():
-    impl = fmm_impl_private.FastMultipoleMethod(
+    impl = fmm_impl_private.FMMEngine(
         preset=FMMPreset.LARGE_N_GPU,
         expansion_basis="solidfmm",
         mac_type="engblom",
@@ -327,7 +327,7 @@ def test_large_gpu_minimum_memory_streamed_tree_guard_keeps_safe_seed():
 
 
 def test_large_gpu_minimum_memory_streamed_path_clamps_auto_traversal_seed():
-    impl = fmm_impl_private.FastMultipoleMethod(
+    impl = fmm_impl_private.FMMEngine(
         preset=FMMPreset.LARGE_N_GPU,
         expansion_basis="solidfmm",
         mac_type="engblom",
@@ -352,7 +352,7 @@ def test_large_gpu_minimum_memory_streamed_path_clamps_auto_traversal_seed():
 
 
 def test_large_gpu_minimum_memory_streamed_seed_scales_for_xl_particle_counts():
-    impl = fmm_impl_private.FastMultipoleMethod(
+    impl = fmm_impl_private.FMMEngine(
         preset=FMMPreset.LARGE_N_GPU,
         expansion_basis="solidfmm",
         memory_objective="minimum_memory",
@@ -374,7 +374,7 @@ def test_large_gpu_minimum_memory_streamed_seed_scales_for_xl_particle_counts():
 
 
 def test_prepare_bucketed_scatter_schedules_skips_int32_overflow_shape():
-    impl = fmm_impl_private.FastMultipoleMethod(
+    impl = fmm_impl_private.FMMEngine(
         preset=FMMPreset.LARGE_N_GPU,
         expansion_basis="solidfmm",
         memory_objective="minimum_memory",
@@ -405,7 +405,7 @@ def test_prepare_bucketed_scatter_schedules_skips_int32_overflow_shape():
 
 
 def test_large_gpu_minimum_memory_nearfield_prepare_skips_pair_vector_precompute():
-    impl = fmm_impl_private.FastMultipoleMethod(
+    impl = fmm_impl_private.FMMEngine(
         preset=FMMPreset.LARGE_N_GPU,
         expansion_basis="solidfmm",
         memory_objective="minimum_memory",
@@ -423,8 +423,11 @@ def test_large_gpu_minimum_memory_nearfield_prepare_skips_pair_vector_precompute
         particle_order_to_native_leaf=jnp.zeros((1,), dtype=jnp.int32),
     )
 
+    # `neighbor_list=None` used to be passed here with the comment "unused on the
+    # short-circuit path". It was unused on EVERY path -- 0 references in the
+    # method's 112 lines -- so the parameter is gone rather than widened to
+    # `Optional[...]` to accommodate a value nothing read (F40).
     out = impl._prepare_nearfield_precompute_artifacts(
-        neighbor_list=None,  # unused on the short-circuit path
         nearfield_interop=nearfield_interop,
         leaf_cap=128,
         num_particles=2_097_152,
@@ -1811,13 +1814,21 @@ def test_large_n_compiled_eval_uses_specialized_nearfield(monkeypatch):
 
 
 def test_bucket_far_pairs_by_level_split_returns_two_gears():
-    interactions = type(
-        "DummyInteractions",
-        (),
-        {"level_offsets": jnp.asarray([0, 2, 4], dtype=jnp.int32)},
-    )()
+    # A real `NodeInteractionList`, not a one-attribute stub. The function only
+    # reads `level_offsets`, so a stub passed -- but it also made the test assert
+    # nothing about the declared contract, and it was one of the things that made
+    # `JACCPOT_RUNTIME_TYPECHECK=1` red (F40). Building the real NamedTuple costs
+    # five more lines and means the test breaks if the contract changes.
     src = jnp.asarray([0, 1, 2, 3], dtype=jnp.int32)
     tgt = jnp.asarray([4, 5, 6, 7], dtype=jnp.int32)
+    interactions = NodeInteractionList(
+        offsets=jnp.asarray([0, 4], dtype=jnp.int32),
+        sources=src,
+        targets=tgt,
+        counts=jnp.asarray([4], dtype=jnp.int32),
+        level_offsets=jnp.asarray([0, 2, 4], dtype=jnp.int32),
+        target_levels=jnp.asarray([0, 0, 1, 1], dtype=jnp.int32),
+    )
     gears, buckets = fmm_impl_private._bucket_far_pairs_by_level_split(
         interactions=interactions,
         src_far=src,

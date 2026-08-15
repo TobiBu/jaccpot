@@ -7,11 +7,11 @@ import jax.numpy as jnp
 import pytest
 
 from jaccpot.runtime._large_n_nearfield import resolve_large_n_execution_config
-from jaccpot.runtime.fmm import FastMultipoleMethod
+from jaccpot.runtime.fmm import FMMEngine
 
 
 def _make_large_n_fmm():
-    return FastMultipoleMethod(
+    return FMMEngine(
         preset="large_n_gpu",
         expansion_basis="solidfmm",
         tree_type="radix",
