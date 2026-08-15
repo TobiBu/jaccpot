@@ -1,4 +1,4 @@
-"""AutotuneMixin: fmm_autotune methods extracted from the FastMultipoleMethod
+"""AutotuneMixin: fmm_autotune methods extracted from the FMMEngine
 god-class (Phase 2d mixin split). Methods are verbatim (self unchanged); the
 engine class inherits this mixin. Sibling of _fmm_impl at runtime level.
 """
@@ -38,7 +38,7 @@ if TYPE_CHECKING:  # pragma: no cover - annotations only, no runtime import
     # would form the cycle ARCHITECTURE §8 forbids. Before this block the names were
     # dangling: `typing.get_type_hints` raised NameError on every mixin method, so the
     # annotations documented an intent no tool could check.
-    from ._fmm_impl import FastMultipoleMethod
+    from ._fmm_impl import FMMEngine
 
 
 class AutotuneMixin:

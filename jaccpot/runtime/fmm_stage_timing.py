@@ -175,7 +175,7 @@ def stage_timing_tree(
     Parameters
     ----------
     impl : Any
-        The runtime engine (``FastMultipoleMethod._impl``) holding the
+        The runtime engine (``FMMEngine._impl``) holding the
         ``_refresh_timing_*_seconds`` accumulators. Ignored except as the counter
         source when ``counters`` is supplied.
     counters : Optional[Mapping[str, float]]

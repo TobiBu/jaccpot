@@ -19,7 +19,7 @@ jaccpot/solver.py              FastMultipoleMethod  <-- the ONLY public class
 jaccpot/runtime/fmm/           orchestrator package (re-export seam)
         |                      __init__ re-exports the engine; must NOT be the
         |                      import that forms a cycle (see section 8)
-jaccpot/runtime/_fmm_impl.py   FastMultipoleMethod engine (thin coordinator)
+jaccpot/runtime/_fmm_impl.py   FMMEngine (thin coordinator)
         |                      + 10 method-cluster mixins (section 4)
         |
 jaccpot/runtime/kernels/       reusable numerical core (LEAF -- never imports
@@ -48,11 +48,13 @@ ODISSEO coupling) depends on. It is frozen by
 | `MemoryObjective` | memory-policy literal |
 | `ComplexSHBasis`, `RealSHBasis` | expansion bases |
 | `OdisseoFMMCoupler` | ODISSEO integration adapter |
-| `differentiable_gravitational_acceleration` | autodiff-able **direct-sum** oracle (the differentiable FMM itself is `FastMultipoleMethod.differentiable_accelerations`; see section 6) |
+| `direct_sum_gravitational_acceleration` | autodiff-able **direct-sum** oracle (the differentiable FMM itself is `FastMultipoleMethod.differentiable_accelerations`; see section 6) |
 
-`FastMultipoleMethod` in `solver.py` is the sole public class name; the runtime
-engine class (currently also named `FastMultipoleMethod` in `_fmm_impl.py`) is
-an internal implementation detail reached only through the facade.
+`FastMultipoleMethod` in `solver.py` is the sole public class name. The runtime
+engine is `FMMEngine` in `_fmm_impl.py` -- an internal implementation detail
+reached only through the facade. The two used to share the name, which this
+document flagged as confusing; audit 2.4 renamed the engine, so a reference to
+`FastMultipoleMethod` now unambiguously means the public class.
 
 ## 3. runtime/ package map
 
@@ -87,17 +89,19 @@ import cycle (section 8).
 
 ## 4. The engine: coordinator + mixins
 
-`_fmm_impl.FastMultipoleMethod` coordinates (constructor, backend plumbing, cache
+`_fmm_impl.FMMEngine` coordinates (constructor, backend plumbing, cache
 lifecycle, autotune-cache IO) and inherits its behaviour from **10 method-cluster
 mixins**, each a sibling `runtime/fmm_<cluster>.py` module. It used to be described
-as *thin*, which the mixin split achieved for everything except the constructor:
-`__init__` is 722 lines with 60 parameters, against 316 lines for the rest of the
-class combined. The mixins are the part that worked.
+as *thin*, which the mixin split achieved for everything except the constructor.
+`__init__` was 722 lines with 60 parameters against 316 for the rest of the class;
+audit 2.1 staged it into 13 private resolvers, so the body is now **141 lines** of
+named phases. It still takes 60 parameters -- that is the public surface, not the
+body, and is item 2.4's territory.
 Methods were moved verbatim during the god-class breakup; `self` is unchanged;
 cross-cluster calls resolve through the MRO.
 
 ```python
-class FastMultipoleMethod(
+class FMMEngine(
     PrepareMixin, EvaluateMixin, StrictRunMixin, SweepsMixin, OverridesMixin,
     AutotuneMixin, PolicyMixin, DerivativesMixin, StrictCapProfileMixin,
     DiagnosticsMixin,
@@ -237,7 +241,7 @@ derivative/jerk towers, and cached-vs-uncached M2L dispatch.
   measurement record: `docs/differentiable_fmm_audit.md`,
   `docs/differentiable_fmm_design.md`, and for multi-GPU
   `docs/differentiable_fmm_distributed_audit.md`.
-- `differentiable_gravitational_acceleration` remains the deliberately differentiable
+- `direct_sum_gravitational_acceleration` remains the deliberately differentiable
   **direct O(N²) sum** — retained as the simple exact-gradient reference and the
   **gradient oracle** for tests (`grad(FMM)` must match `grad(direct-sum)` to FMM force
   accuracy), not as "the" differentiable path.

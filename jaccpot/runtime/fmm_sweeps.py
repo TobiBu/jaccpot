@@ -1,4 +1,4 @@
-"""SweepsMixin: fmm_sweeps methods extracted from the FastMultipoleMethod
+"""SweepsMixin: fmm_sweeps methods extracted from the FMMEngine
 god-class (Phase 2d mixin split). Methods are verbatim (self unchanged); the
 engine class inherits this mixin. Sibling of _fmm_impl at runtime level.
 """
@@ -60,7 +60,7 @@ if TYPE_CHECKING:  # pragma: no cover - annotations only, no runtime import
     # would form the cycle ARCHITECTURE §8 forbids. Before this block the names were
     # dangling: `typing.get_type_hints` raised NameError on every mixin method, so the
     # annotations documented an intent no tool could check.
-    from ._fmm_impl import FastMultipoleMethod
+    from ._fmm_impl import FMMEngine
 
 
 class SweepsMixin:
@@ -77,7 +77,7 @@ class SweepsMixin:
 
     @jaxtyped(typechecker=beartype)
     def evaluate_expansion(
-        self: "FastMultipoleMethod",
+        self: "FMMEngine",
         expansion: MultipoleExpansion,
         order: int = 1,
         eval_point: Optional[Array] = None,
@@ -94,7 +94,7 @@ class SweepsMixin:
 
     @jaxtyped(typechecker=beartype)
     def direct_sum(
-        self: "FastMultipoleMethod",
+        self: "FMMEngine",
         positions: Array,
         masses: Array,
         eval_point: Array,
@@ -139,7 +139,7 @@ class SweepsMixin:
         return self._static_upward_num_levels
 
     def prepare_upward_sweep(
-        self: "FastMultipoleMethod",
+        self: "FMMEngine",
         tree: Tree,
         positions_sorted: Array,
         masses_sorted: Array,
@@ -277,7 +277,7 @@ class SweepsMixin:
         )
 
     def run_downward_sweep(
-        self: "FastMultipoleMethod",
+        self: "FMMEngine",
         tree: Tree,
         multipoles: NodeMultipoleData,
         interactions: NodeInteractionList,
@@ -298,7 +298,7 @@ class SweepsMixin:
         )
 
     def prepare_downward_sweep(
-        self: "FastMultipoleMethod",
+        self: "FMMEngine",
         tree: Tree,
         upward_data: TreeUpwardData,
         *,

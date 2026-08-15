@@ -45,7 +45,7 @@ def _solver(mac_type: str):
     kwargs = {}
     if mac_type == "dehnen_error":
         kwargs["adaptive_eps"] = PAPER_EPS
-    return fmm_impl_private.FastMultipoleMethod(
+    return fmm_impl_private.FMMEngine(
         expansion_basis="solidfmm",
         mac_type=mac_type,
         **kwargs,

@@ -1,7 +1,7 @@
 import jax
 import jax.numpy as jnp
 
-from jaccpot import differentiable_gravitational_acceleration
+from jaccpot import direct_sum_gravitational_acceleration
 
 
 def _direct_sum_accelerations(positions, masses, *, softening, G):
@@ -32,7 +32,7 @@ def test_autodiff_matches_direct_sum():
     G = 2.0
 
     def fmm_loss(pos):
-        acc = differentiable_gravitational_acceleration(
+        acc = direct_sum_gravitational_acceleration(
             pos,
             masses,
             softening=softening,
@@ -62,19 +62,19 @@ def test_autodiff_repeated_calls_are_stable():
     )
     masses = jnp.array([1.0, 0.6, 0.9], dtype=jnp.float32)
 
-    acc1 = differentiable_gravitational_acceleration(
+    acc1 = direct_sum_gravitational_acceleration(
         positions,
         masses,
         theta=0.5,
         max_order=2,
     )
-    acc2 = differentiable_gravitational_acceleration(
+    acc2 = direct_sum_gravitational_acceleration(
         positions,
         masses,
         theta=0.5,
         max_order=2,
     )
-    acc3 = differentiable_gravitational_acceleration(
+    acc3 = direct_sum_gravitational_acceleration(
         positions,
         masses,
         theta=0.7,

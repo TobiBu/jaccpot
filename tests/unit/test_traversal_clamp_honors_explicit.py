@@ -29,7 +29,7 @@ _CEILING_PAIR_QUEUE = 262_144
 
 
 def _impl(traversal: DualTreeTraversalConfig):
-    return fmm_impl_private.FastMultipoleMethod(
+    return fmm_impl_private.FMMEngine(
         preset=FMMPreset.LARGE_N_GPU,
         expansion_basis="solidfmm",
         mac_type="engblom",

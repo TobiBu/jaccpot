@@ -67,7 +67,7 @@ def _require(condition: bool, message: str) -> None:
 
 
 def _engine(fmm: Any) -> Any:
-    """Accept either the public ``FastMultipoleMethod`` facade or the runtime engine.
+    """Accept either the public ``FMMEngine`` facade or the runtime engine.
 
     The sweeps and the override resolver live on the runtime engine; the public
     solver holds it as ``_impl``. Callers reach this module both ways -- from

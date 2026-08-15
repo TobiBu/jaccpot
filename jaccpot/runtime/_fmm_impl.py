@@ -310,7 +310,7 @@ JerkMode = Literal["fast_approx", "accurate"]
 PreparedStateLike = Union["FMMPreparedState", LargeNPreparedState]
 
 
-class FastMultipoleMethod(
+class FMMEngine(
     PrepareMixin,
     EvaluateMixin,
     StrictRunMixin,
@@ -344,7 +344,7 @@ class FastMultipoleMethod(
     """
 
     def __init__(
-        self: "FastMultipoleMethod",
+        self: "FMMEngine",
         theta: float = 0.5,
         G: float = 1.0,
         softening: float = 1e-12,
@@ -1596,19 +1596,19 @@ class FastMultipoleMethod(
 
     @property
     def recent_retry_events(
-        self: "FastMultipoleMethod",
+        self: "FMMEngine",
     ) -> Tuple[DualTreeRetryEvent, ...]:
         """Return retry telemetry collected during the latest build."""
 
         return self._recent_retry_events
 
     @property
-    def recent_topology_reused(self: "FastMultipoleMethod") -> bool:
+    def recent_topology_reused(self: "FMMEngine") -> bool:
         """Whether the most recent prepare/evaluate path reused cached topology."""
 
         return bool(self._recent_topology_reused)
 
-    def clear_prepared_state_cache(self: "FastMultipoleMethod") -> None:
+    def clear_prepared_state_cache(self: "FMMEngine") -> None:
         """Clear cached prepared-state payloads used by reuse mode."""
 
         self._prepared_state_cache_key = None
@@ -1619,7 +1619,7 @@ class FastMultipoleMethod(
         self._recent_topology_reused = False
 
     def clear_runtime_caches(
-        self: "FastMultipoleMethod", *, clear_jax_compilation: bool = False
+        self: "FMMEngine", *, clear_jax_compilation: bool = False
     ) -> None:
         """Release solver/runtime caches to reduce memory pressure."""
 
@@ -1773,13 +1773,13 @@ class FastMultipoleMethod(
         self._strict_profile_loaded_once = False
         _clear_global_runtime_caches(clear_jax_compilation=bool(clear_jax_compilation))
 
-    def export_m2l_autotune_cache(self: "FastMultipoleMethod") -> list[dict[str, Any]]:
+    def export_m2l_autotune_cache(self: "FMMEngine") -> list[dict[str, Any]]:
         """Return a JSON-serializable snapshot of global M2L autotune results."""
 
         return _m2l_autotune_payload()
 
     def import_m2l_autotune_cache(
-        self: "FastMultipoleMethod",
+        self: "FMMEngine",
         payload: list[dict[str, Any]],
         *,
         merge: bool = True,
@@ -1788,7 +1788,7 @@ class FastMultipoleMethod(
 
         return _restore_m2l_autotune_payload(payload, merge=bool(merge))
 
-    def save_m2l_autotune_cache(self: "FastMultipoleMethod", path: str) -> int:
+    def save_m2l_autotune_cache(self: "FMMEngine", path: str) -> int:
         """Write global M2L autotune cache to a JSON file."""
 
         payload = self.export_m2l_autotune_cache()
@@ -1797,7 +1797,7 @@ class FastMultipoleMethod(
         return int(len(payload))
 
     def load_m2l_autotune_cache(
-        self: "FastMultipoleMethod",
+        self: "FMMEngine",
         path: str,
         *,
         merge: bool = True,
@@ -1840,7 +1840,7 @@ def compute_gravitational_acceleration(
 ) -> Union[Array, Tuple[Array, Array]]:
     """Compute gravitational accelerations via the Fast Multipole Method."""
 
-    fmm = FastMultipoleMethod(
+    fmm = FMMEngine(
         theta=theta,
         G=G,
         softening=softening,

@@ -95,7 +95,7 @@ Two consequences worth internalising:
 ### Accuracy
 
 `jax.grad` of the FMM matches `jax.grad` of an exact direct O(N²) sum
-(`jaccpot.autodiff.differentiable_gravitational_acceleration`) to **the FMM's own
+(`jaccpot.autodiff.direct_sum_gravitational_acceleration`) to **the FMM's own
 force accuracy** — not to machine precision. If you need a tighter gradient, you
 need a more accurate force: raise the expansion order or lower θ.
 

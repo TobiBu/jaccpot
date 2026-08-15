@@ -686,7 +686,7 @@ under `tests/` that reference the name. Renames are yours to decide; I only prop
 | `ComplexSHBasis` | `basis/complex_sh.py:14` | 4 | no | no | 3 | |
 | `RealSHBasis` | `basis/real_sh.py:91` | 1 | no | no | 1 | One line, one test file, and it backs the **default** basis |
 | `OdisseoFMMCoupler` | `odisseo.py:24` | 1 | no | no | 2 | *"Cache-oriented adapter for coupling ODISSEO and Jaccpot FMM."* This is the downstream integration contract; 59 statements at 78% coverage |
-| `differentiable_gravitational_acceleration` | `autodiff.py:13` | 15 | no | no | 4 | Good prose (it correctly disclaims being "the" differentiable path). No `Parameters` section; ARCHITECTURE §2 and §6 both re-explain it, which suggests the name is the problem, not the doc |
+| `direct_sum_gravitational_acceleration` | `autodiff.py:13` | 15 | no | no | 4 | Good prose (it correctly disclaims being "the" differentiable path). No `Parameters` section; ARCHITECTURE §2 and §6 both re-explain it, which suggests the name is the problem, not the doc |
 
 Observations, no decisions:
 
@@ -699,7 +699,7 @@ Observations, no decisions:
 - **Test breadth does not track importance**: `RealSHBasis` (the default basis) has 1
   referencing file; `MemoryObjective` has 1; `GradConfig` has 2.
 - **Rename candidates, for your call only** (each would be a Tier 2 PR with an API-guard
-  update): `differentiable_gravitational_acceleration` → something that says "direct sum"
+  update): `direct_sum_gravitational_acceleration` → something that says "direct sum"
   (ARCHITECTURE §2 and §6 and its own docstring each spend a paragraph explaining it is *not*
   the differentiable FMM — three disclaimers is a naming smell); and the engine class in
   `_fmm_impl.py` sharing the name `FastMultipoleMethod` with the facade, which ARCHITECTURE §2
@@ -733,7 +733,7 @@ see that.
 **What was added.** `tests/characterization/test_fmm_grad_golden.py` + 6 `.npz` under
 `tests/characterization/golden_grad/`, mirroring the forward oracle's two-gate design:
 inertness at `rtol=atol=1e-12`, plus a physics anchor against `jax.grad` of
-`differentiable_gravitational_acceleration` (the documented gradient oracle). Same
+`direct_sum_gravitational_acceleration` (the documented gradient oracle). Same
 `JACCPOT_REGEN_GOLDEN=1` switch, so one command refreshes both.
 
 Three things about it are worth carrying forward, because they were discovered while building

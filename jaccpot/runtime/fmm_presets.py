@@ -1,4 +1,4 @@
-"""Preset configurations for :class:`FastMultipoleMethod`."""
+"""Preset configurations for :class:`FMMEngine`."""
 
 from __future__ import annotations
 
@@ -12,7 +12,7 @@ from jaccpot.config import FMMPreset
 
 @dataclass(frozen=True)
 class FMMPresetConfig:
-    """Resolved preset parameters used by :class:`FastMultipoleMethod`."""
+    """Resolved preset parameters used by :class:`FMMEngine`."""
 
     name: FMMPreset
     tree_build_mode: str
