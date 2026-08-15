@@ -1206,12 +1206,38 @@ def _m2l_real_batch_kernel_fused_pallas(
     )
 
 
-def _apply_real_m2l(src_mult, deltas, *, order, m2l_impl):
+def _apply_real_m2l(
+    src_mult: Array,
+    deltas: Array,
+    *,
+    order: int,
+    m2l_impl: Optional[str],
+) -> Array:
     """Real-basis batched M2L: fully-fused Pallas kernel when enabled, else pure-JAX.
 
     When the fused-M2L Pallas flag is active, route through the single-launch fused
     kernel (rotate -> z-translate -> rotate-back on-chip), collapsing the per-pair
     JAX rotation launches. Otherwise the pure-JAX rot-scale path.
+
+    Parameters
+    ----------
+    src_mult : Array
+        Real multipole coefficients, one row per pair.
+    deltas : Array
+        Target-minus-source centre displacements ``[N, 3]``.
+    order : int
+        Expansion order ``p``. Static under ``jit``.
+    m2l_impl : Optional[str]
+        Real M2L implementation. ``Optional`` because :func:`_apply_m2l` declares
+        it so and passes it through unresolved; both kernels below then require
+        ``"rot_scale"`` and raise otherwise, so ``None`` reaches a ValueError
+        rather than a default.
+
+    Returns
+    -------
+    Array
+        Real local contributions. The two routes are numerically equivalent --
+        the gate selects execution, not mathematics.
     """
     if _real_m2l_pallas_active():
         return _m2l_real_batch_kernel_fused_pallas(
