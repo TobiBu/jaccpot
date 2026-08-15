@@ -78,7 +78,28 @@ def _m2l_complex_batch_kernel(
     order: int,
     rotation: str,
 ) -> Array:
-    """Vectorized complex-basis M2L kernel for one interaction batch."""
+    """Vectorized complex-basis M2L kernel for one interaction batch.
+
+    The solidfmm reference: rotate to z, translate along z, rotate back. This is
+    the definition the fused Pallas twin is asserted equal to, so it is the one
+    to change if the mathematics ever must.
+
+    Parameters
+    ----------
+    src_mult : Array
+        Complex multipole coefficients ``[N, (p+1)^2]``, one row per pair.
+    deltas : Array
+        Target-minus-source centre displacements ``[N, 3]``.
+    order : int
+        Expansion order ``p``. Static under ``jit``.
+    rotation : str
+        Rotation convention; ``"solidfmm"``.
+
+    Returns
+    -------
+    Array
+        Complex local contributions ``[N, (p+1)^2]``, aligned with ``src_mult``.
+    """
     return m2l_complex_reference_batch(
         src_mult,
         deltas,
@@ -96,7 +117,30 @@ def _m2l_complex_batch_cached_kernel(
     *,
     order: int,
 ) -> Array:
-    """Vectorized complex M2L kernel using precomputed rotation blocks."""
+    """Vectorized complex M2L kernel using precomputed rotation blocks.
+
+    Same translation as :func:`_m2l_complex_batch_kernel`, with the rotation
+    blocks supplied rather than rebuilt per pair. That is the entire point of the
+    grouped path: pairs sharing a displacement class share their blocks.
+
+    Parameters
+    ----------
+    src_mult : Array
+        Complex multipole coefficients ``[N, (p+1)^2]``.
+    deltas : Array
+        Target-minus-source centre displacements ``[N, 3]``.
+    blocks_to_z : Array
+        Per-pair multipole world-to-z rotation blocks.
+    blocks_from_z : Array
+        Per-pair local z-to-world rotation blocks.
+    order : int
+        Expansion order ``p``. Static under ``jit``.
+
+    Returns
+    -------
+    Array
+        Complex local contributions ``[N, (p+1)^2]``.
+    """
     return m2l_complex_reference_batch_cached_blocks(
         src_mult,
         deltas,
@@ -120,6 +164,30 @@ def _m2l_cached_kernel_dispatch(
     ``basis_mode`` is a Python string (static under jit), so this branches at
     trace time. The real branch uses the Dehnen no-sqrt2 cached kernel; the
     complex branch is unchanged.
+
+    The blocks must have been built for the same basis this dispatches on --
+    neither kernel checks. See :func:`_accumulate_solidfmm_m2l_grouped` for what
+    a mismatch costs.
+
+    Parameters
+    ----------
+    src_mult : Array
+        Multipole coefficients in whichever basis ``basis_mode`` names.
+    deltas : Array
+        Target-minus-source centre displacements ``[N, 3]``.
+    blocks_to_z : Array
+        Multipole world-to-z rotation blocks, in the same basis.
+    blocks_from_z : Array
+        Local z-to-world rotation blocks, in the same basis.
+    order : int
+        Expansion order ``p``. Static.
+    basis_mode : str
+        ``"real"`` or anything else for complex. Static.
+
+    Returns
+    -------
+    Array
+        Local contributions, packed as the basis requires.
     """
     if str(basis_mode).strip().lower() == "real":
         return m2l_rot_scale_real_batch_cached_blocks(
@@ -144,6 +212,36 @@ def _rotation_blocks_for_grouped_classes(
     For ``basis_mode == "real"`` the Dehnen no-sqrt2 real rotation blocks are
     built (multipole world->z and local z->world) and the ``rotation`` argument
     is ignored (the real path has a single rotation construction).
+
+    Parameters
+    ----------
+    order : int
+        Expansion order ``p``; sets the block shape ``(p+1, 2p+1, 2p+1)``.
+    rotation : str
+        Rotation convention for the complex path. Ignored when ``basis_mode`` is
+        ``"real"``.
+    class_keys : Array
+        Displacement-class keys, used as the cache identity.
+    class_deltas : Array
+        One representative displacement per class ``[C, 3]``. Its length is the
+        class count.
+    dtype : jnp.dtype
+        Dtype to build the blocks in; take it from the multipoles so the cached
+        kernel does not have to promote.
+    basis_mode : str
+        ``"real"`` or ``"complex"``. Decides which rotation construction is used,
+        and therefore which cached kernel the blocks may be fed to.
+
+    Returns
+    -------
+    tuple[Array, Array]
+        ``(blocks_to_classes, blocks_from_classes)``, indexed by class id --
+        multipole world-to-z first, local z-to-world second.
+
+    Raises
+    ------
+    ValueError
+        If the rotation convention is not one this path can build blocks for.
     """
     num_classes = int(class_deltas.shape[0])
     max_m = 2 * int(order) + 1
@@ -207,7 +305,35 @@ def _chunk_segment_scatter_add(
     *,
     chunk_size: int,
 ) -> Array:
-    """Reduce one fixed-width chunk by target index and scatter-add into locals."""
+    """Reduce one fixed-width chunk by target index and scatter-add into locals.
+
+    Sorts the chunk by target so that contributions to the same target become a
+    contiguous segment, reduces within segments, then scatters once. Invalid
+    slots are given the maximum index so they sort to the end and fall outside
+    the scatter.
+
+    The sort makes the summation order a deterministic function of the target
+    indices rather than of the pair order, which is what keeps the four
+    accumulators agreeing to reassociation.
+
+    Parameters
+    ----------
+    local_accum : Array
+        Local coefficient accumulator to add into.
+    contribs : Array
+        Per-pair M2L contributions for this chunk.
+    tgt_chunk : Array
+        Target node index per pair in the chunk.
+    valid : Array
+        Validity mask; the tail chunk is padded.
+    chunk_size : int
+        Fixed chunk width. Static -- it is what makes every chunk the same shape.
+
+    Returns
+    -------
+    Array
+        ``local_accum`` with this chunk's contributions added.
+    """
     masked_targets = jnp.where(valid, tgt_chunk, jnp.iinfo(INDEX_DTYPE).max)
     sort_idx = jnp.argsort(masked_targets)
     sorted_keys = masked_targets[sort_idx]
@@ -286,7 +412,51 @@ def _accumulate_solidfmm_m2l_grouped_chunked_scan(
     chunk_size: int,
     basis_mode: str = "complex",
 ) -> Array:
-    """Accumulate grouped solidfmm M2L contributions via chunked scan."""
+    """Accumulate grouped solidfmm M2L contributions via chunked scan.
+
+    One of the four accumulators (module docstring). This is the grouped path's
+    bounded-memory form: pairs are already class-sorted, and the scan walks them
+    in fixed-width chunks so peak memory is set by ``chunk_size`` rather than by
+    the pair count. Its full-batch twin is
+    :func:`_accumulate_solidfmm_m2l_grouped_fullbatch`; they must agree to
+    reassociation only.
+
+    Parameters
+    ----------
+    locals_coeffs : Array
+        Local coefficient accumulator. Donated -- do not use the argument after
+        the call.
+    multip_packed : Array
+        Packed multipole coefficients for every node.
+    centers : Array
+        Node centres; the pair displacement is the difference of two rows.
+    src_sorted : Array
+        Source node index per pair, in class-sorted order.
+    tgt_sorted : Array
+        Target node index per pair, in the same order.
+    class_offsets : Array
+        CSR class boundaries, ``(num_classes + 1,)``. The pair's class comes from
+        these, not from ``class_ids`` -- see
+        :func:`_pair_class_ids_from_offsets`.
+    blocks_to_classes : Array
+        Per-class multipole world-to-z rotation blocks.
+    blocks_from_classes : Array
+        Per-class local z-to-world rotation blocks.
+    order : int
+        Expansion order ``p``. Static.
+    total_nodes : int
+        Node count, sizing the accumulator. Static.
+    chunk_size : int
+        Pairs per scan step. Static.
+    basis_mode : str
+        ``"real"`` or ``"complex"``. Static, and must match the basis the blocks
+        were built in.
+
+    Returns
+    -------
+    Array
+        The accumulated local coefficients.
+    """
     pair_count = src_sorted.shape[0]
     starts = jnp.arange(0, pair_count, chunk_size, dtype=INDEX_DTYPE)
 
@@ -344,7 +514,44 @@ def _accumulate_solidfmm_m2l_grouped_fullbatch(
     total_nodes: int,
     basis_mode: str = "complex",
 ) -> Array:
-    """Accumulate grouped solidfmm M2L contributions in one full batch."""
+    """Accumulate grouped solidfmm M2L contributions in one full batch.
+
+    One of the four accumulators (module docstring). The grouped path's unchunked
+    form: every pair is translated at once, so there is no scan and no per-chunk
+    scatter, at the cost of holding all contributions live.
+    :func:`_accumulate_solidfmm_m2l_grouped` picks between this and the chunked
+    twin on pair count.
+
+    Parameters
+    ----------
+    locals_coeffs : Array
+        Local coefficient accumulator.
+    multip_packed : Array
+        Packed multipole coefficients for every node.
+    centers : Array
+        Node centres.
+    src_sorted : Array
+        Source node index per pair, class-sorted.
+    tgt_sorted : Array
+        Target node index per pair, same order.
+    class_offsets : Array
+        CSR class boundaries, ``(num_classes + 1,)``.
+    blocks_to_classes : Array
+        Per-class multipole world-to-z rotation blocks.
+    blocks_from_classes : Array
+        Per-class local z-to-world rotation blocks.
+    order : int
+        Expansion order ``p``. Static.
+    total_nodes : int
+        Node count, sizing the accumulator. Static.
+    basis_mode : str
+        ``"real"`` or ``"complex"``. Static, and must match the blocks.
+
+    Returns
+    -------
+    Array
+        The accumulated local coefficients.
+    """
     src_mult = multip_packed[src_sorted]
     deltas = centers[tgt_sorted] - centers[src_sorted]
     class_ids_sorted = _pair_class_ids_from_offsets(
@@ -369,7 +576,31 @@ def _build_grouped_class_segments(
     *,
     chunk_size: int,
 ) -> tuple[Array, Array, Array]:
-    """Build compact class-major segment metadata for chunked execution."""
+    """Build compact class-major segment metadata for chunked execution.
+
+    Cuts the class-sorted pair list into segments no wider than ``chunk_size``,
+    each belonging to exactly one class. That single-class property is what lets
+    the class-major accumulators gather one rotation block per segment rather
+    than per pair.
+
+    Cached on the class layout and chunk size, since the result depends on
+    neither the multipoles nor the centres and a refresh at fixed topology can
+    reuse it.
+
+    Parameters
+    ----------
+    grouped : GroupedInteractionBuffers
+        Grouped pair buffers; supplies the class offsets and targets.
+    chunk_size : int
+        Maximum segment width. A class wider than this is split across several
+        segments.
+
+    Returns
+    -------
+    tuple[Array, Array, Array]
+        ``(segment_starts, segment_lengths, segment_class_ids)``, one entry per
+        segment.
+    """
     cache_key = _grouped_segment_cache_key(
         class_offsets=grouped.class_offsets,
         class_targets=grouped.class_targets,
@@ -443,7 +674,49 @@ def _accumulate_solidfmm_m2l_class_major_chunked_scan(
     chunk_size: int,
     basis_mode: str = "complex",
 ) -> Array:
-    """Accumulate class-major grouped M2L contributions via chunked scan."""
+    """Accumulate class-major grouped M2L contributions via chunked scan.
+
+    One of the four accumulators (module docstring). Where the grouped chunked
+    scan walks fixed-width chunks that may straddle classes, this walks the
+    segment table from :func:`_build_grouped_class_segments`, so every step has
+    exactly one class and reads exactly one pair of rotation blocks.
+
+    Parameters
+    ----------
+    locals_coeffs : Array
+        Local coefficient accumulator.
+    multip_packed : Array
+        Packed multipole coefficients for every node.
+    centers : Array
+        Node centres.
+    src_sorted : Array
+        Source node index per pair, class-sorted.
+    tgt_sorted : Array
+        Target node index per pair, same order.
+    segment_starts : Array
+        First pair index of each segment.
+    segment_lengths : Array
+        Pair count of each segment; at most ``chunk_size``.
+    segment_class_ids : Array
+        The one class id each segment belongs to.
+    blocks_to_classes : Array
+        Per-class multipole world-to-z rotation blocks.
+    blocks_from_classes : Array
+        Per-class local z-to-world rotation blocks.
+    order : int
+        Expansion order ``p``. Static.
+    total_nodes : int
+        Node count, sizing the accumulator. Static.
+    chunk_size : int
+        Segment width bound; sets the padded per-step shape. Static.
+    basis_mode : str
+        ``"real"`` or ``"complex"``. Static, and must match the blocks.
+
+    Returns
+    -------
+    Array
+        The accumulated local coefficients.
+    """
     num_segments = segment_starts.shape[0]
     if num_segments == 0:
         return locals_coeffs
@@ -524,7 +797,56 @@ def _accumulate_solidfmm_m2l_grouped_class_major(
     chunk_size: int,
     basis_mode: str = "complex",
 ) -> Array:
-    """Class-major grouped accumulation without per-pair operator gathers."""
+    """Class-major grouped accumulation without per-pair operator gathers.
+
+    One of the four accumulators (module docstring), and the entry point to the
+    class-major pair: it builds or accepts the segment table, then hands off to
+    :func:`_accumulate_solidfmm_m2l_class_major_chunked_scan`. Non-solidfmm
+    rotations fall back to :func:`_accumulate_m2l_fullbatch`, which takes the
+    sparse per-pair path.
+
+    Parameters
+    ----------
+    locals_coeffs : Array
+        Local coefficient accumulator.
+    multip_packed : Array
+        Packed multipole coefficients for every node.
+    centers : Array
+        Node centres.
+    grouped : GroupedInteractionBuffers
+        Grouped pair buffers: class-sorted sources and targets, class offsets,
+        keys and representative displacements.
+    grouped_segment_starts : Optional[Array]
+        Precomputed segment starts; ``None`` builds the table here.
+    grouped_segment_lengths : Optional[Array]
+        Precomputed segment lengths.
+    grouped_segment_class_ids : Optional[Array]
+        Precomputed per-segment class ids.
+    grouped_segment_sort_permutation : Optional[Array]
+        Accepted and immediately discarded. Kept in the signature so callers can
+        pass a whole precomputed schedule without knowing which parts this
+        accumulator happens to use.
+    grouped_segment_group_ids : Optional[Array]
+        Accepted and discarded, as above.
+    grouped_segment_unique_targets : Optional[Array]
+        Accepted and discarded, as above.
+    order : int
+        Expansion order ``p``. Static.
+    rotation : str
+        Rotation convention. Anything but ``"solidfmm"`` takes the sparse
+        fallback.
+    total_nodes : int
+        Node count, sizing the accumulator. Static.
+    chunk_size : int
+        Segment width bound. Static.
+    basis_mode : str
+        ``"real"`` or ``"complex"``. Static.
+
+    Returns
+    -------
+    Array
+        The accumulated local coefficients.
+    """
     del (
         grouped_segment_sort_permutation,
         grouped_segment_group_ids,
@@ -610,6 +932,42 @@ def _accumulate_solidfmm_m2l_grouped(
     ``class_ids``, so the two are not co-indexed and gathering blocks with
     ``class_ids`` hands most pairs another class's rotation. This is the same
     class assignment the class-major scan reads out of its segment table.
+
+    Builds the per-class rotation blocks once, then picks full-batch or chunked
+    scan on pair count. Both calls must be handed the same ``basis_mode`` as the
+    block construction: omitting it is silent, because both kernels default to
+    ``"complex"`` and will consume real-dtype blocks happily. The result is wrong
+    rather than an error -- 3.8e-01 relative between the two branches at order 4,
+    pinned by ``tests/unit/runtime/test_grouped_m2l_basis_mode.py``.
+
+    Parameters
+    ----------
+    locals_coeffs : Array
+        Local coefficient accumulator.
+    multip_packed : Array
+        Packed multipole coefficients for every node. Its dtype is what the
+        rotation blocks are built in.
+    centers : Array
+        Node centres.
+    grouped : GroupedInteractionBuffers
+        Grouped pair buffers.
+    order : int
+        Expansion order ``p``. Static.
+    rotation : str
+        Rotation convention. Anything but ``"solidfmm"`` takes the sparse
+        per-pair fallback rather than the grouped path.
+    total_nodes : int
+        Node count, sizing the accumulator. Static.
+    chunk_size : int
+        Pairs per scan step, and half of the full-batch cutoff -- the other half
+        being ``_M2L_FULLBATCH_MAX_PAIRS``. Static.
+    basis_mode : str
+        ``"real"`` or ``"complex"``. Static; see above for the cost of losing it.
+
+    Returns
+    -------
+    Array
+        The accumulated local coefficients.
     """
 
     if rotation not in ("solidfmm",):
@@ -688,7 +1046,34 @@ def _m2l_real_batch_kernel(
     order: int,
     m2l_impl: str,
 ) -> Array:
-    """Vectorized real-basis M2L translation kernel."""
+    """Vectorized real-basis M2L translation kernel.
+
+    The rot-scale reference in the Dehnen real basis, and the definition its
+    fused Pallas twin is asserted equal to.
+
+    Parameters
+    ----------
+    multipoles : Array
+        Real multipole coefficients, one row per pair.
+    deltas : Array
+        Target-minus-source centre displacements ``[N, 3]``.
+    order : int
+        Expansion order ``p``. Static under ``jit``.
+    m2l_impl : str
+        Must be ``"rot_scale"``; the real basis has no other implementation.
+        Static.
+
+    Returns
+    -------
+    Array
+        Real local contributions, aligned with ``multipoles``.
+
+    Raises
+    ------
+    ValueError
+        If ``m2l_impl`` is anything but ``"rot_scale"``. Checked here rather than
+        at the caller so the constraint holds for every route in.
+    """
     mode = str(m2l_impl).strip().lower()
     if mode != "rot_scale":
         raise ValueError("real-basis m2l_impl must be 'rot_scale'")
@@ -708,6 +1093,11 @@ def _real_m2l_pallas_active() -> bool:
     Ampere+ (sm_80) -- matching the complex gate. The z-core
     ``pallas_m2l_real_supported`` used previously only checks gpu/tpu, so it would
     route to Pallas on a pre-Ampere GPU where the Triton lowering fails.
+
+    Returns
+    -------
+    bool
+        ``True`` when the flag is set and an Ampere+ GPU is available.
     """
     if not fused_m2l_pallas_enabled():
         return False
@@ -761,6 +1151,28 @@ def _m2l_real_batch_kernel_fused_pallas(
     ``JACCPOT_FUSED_M2L_VJP=1``, and a ``bench/audit_reverse_residuals.py`` re-run --
     nothing here changes what the ``custom_vjp`` saves, but the linearised block
     construction around it now carries one extra select.
+
+    Parameters
+    ----------
+    multipoles : Array
+        Real multipole coefficients, one row per pair.
+    deltas : Array
+        Target-minus-source centre displacements ``[N, 3]``.
+    order : int
+        Expansion order ``p``. Static under ``jit``.
+    m2l_impl : str
+        Must be ``"rot_scale"``, as in the reference kernel. Static.
+
+    Returns
+    -------
+    Array
+        Real local contributions, equal to :func:`_m2l_real_batch_kernel`'s
+        output -- this is an execution accelerator, not different mathematics.
+
+    Raises
+    ------
+    ValueError
+        If ``m2l_impl`` is anything but ``"rot_scale"``.
     """
     mode = str(m2l_impl).strip().lower()
     if mode != "rot_scale":
@@ -968,6 +1380,29 @@ def _apply_m2l(
     the exact HLO of the corresponding single-basis kernel. Real basis routes
     through :func:`_apply_real_m2l` (``m2l_impl``); solidfmm/complex through
     :func:`_apply_complex_m2l` (``rotation``).
+
+    Parameters
+    ----------
+    src_mult : Array
+        Multipole coefficients in whichever basis ``basis_mode`` names, one row
+        per pair.
+    deltas : Array
+        Target-minus-source centre displacements ``[N, 3]``.
+    order : int
+        Expansion order ``p``. Static.
+    basis_mode : str
+        ``"real"`` selects the real branch; anything else the complex one.
+        Static.
+    rotation : Optional[str]
+        Rotation convention. Read by the complex branch, ignored by the real one.
+    m2l_impl : Optional[str]
+        Real M2L implementation. Read by the real branch, ignored by the complex
+        one.
+
+    Returns
+    -------
+    Array
+        Local contributions, packed as the selected basis requires.
     """
     if str(basis_mode).strip().lower() == "real":
         return _apply_real_m2l(src_mult, deltas, order=order, m2l_impl=m2l_impl)
@@ -1009,6 +1444,38 @@ def _m2l_chunk_contributions(
     exactly what is enclosed here, so hoisting the guard out would let the
     *recomputed* ``deltas`` collapse to zero on padded lanes and reintroduce the
     singular-radius NaN cotangent the guard exists to prevent.
+
+    Parameters
+    ----------
+    multip_packed : Array
+        Packed multipole coefficients for every node. Loop-invariant, so hoisted
+        out of the scan and counted once.
+    centers : Array
+        Node centres. Loop-invariant on the same terms; the pair displacement is
+        formed here rather than passed in, which is what keeps the guard inside
+        the rematerialized region.
+    src_idx : Array
+        Source node index per pair in this chunk.
+    tgt_idx : Array
+        Target node index per pair in this chunk.
+    valid : Array
+        Validity mask over the chunk. Padded lanes collapse to
+        ``src_idx == tgt_idx == 0`` and are zeroed by the double ``where``.
+    order : int
+        Expansion order ``p``. Static.
+    basis_mode : str
+        ``"real"`` or ``"complex"``. Static.
+    rotation : Optional[str]
+        Rotation convention; complex branch only.
+    m2l_impl : Optional[str]
+        Real M2L implementation; real branch only.
+    out_dtype : Any
+        Dtype to cast the contributions to before accumulation.
+
+    Returns
+    -------
+    Array
+        Per-pair M2L contributions for the chunk, zero on invalid lanes.
     """
     src_mult = multip_packed[src_idx]
     deltas = centers[tgt_idx] - centers[src_idx]
@@ -1052,6 +1519,41 @@ def _accumulate_m2l_fullbatch(
     static ``basis_mode`` seam. Numerics-preserving: every discriminator is a
     ``static_argname`` so XLA specialises the merged jit per basis to the exact
     HLO each single-basis kernel produced.
+
+    One of the four accumulators (module docstring), and the sparse per-pair one:
+    unlike the grouped pair it takes raw source/target indices with no class
+    structure, so it is also where non-solidfmm rotations end up.
+
+    Parameters
+    ----------
+    locals_coeffs : Array
+        Local coefficient accumulator.
+    multip_packed : Array
+        Packed multipole coefficients for every node.
+    centers : Array
+        Node centres.
+    src : Array
+        Source node index per pair. Negative entries are treated as padding.
+    tgt : Array
+        Target node index per pair, same convention.
+    active_pair_count : Array
+        How many leading entries are live. Traced, not static -- the arrays are
+        allocated to a fixed capacity and this says how much of it is real.
+    order : int
+        Expansion order ``p``. Static.
+    basis_mode : str
+        ``"real"`` or ``"complex"``. Static.
+    total_nodes : int
+        Node count, sizing the accumulator. Static.
+    rotation : Optional[str]
+        Rotation convention; used by the complex branch only.
+    m2l_impl : Optional[str]
+        Real M2L implementation; used by the real branch only.
+
+    Returns
+    -------
+    Array
+        The accumulated local coefficients.
     """
     idx = jnp.arange(src.shape[0], dtype=INDEX_DTYPE)
     valid = (idx < active_pair_count) & (src >= 0) & (tgt >= 0)
@@ -1111,6 +1613,44 @@ def _accumulate_m2l_chunked_scan(
     Unifies the former ``_accumulate_{solidfmm,real}_m2l_chunked_scan`` behind
     the static ``basis_mode`` seam; numerics-preserving (identical HLO per
     basis, single shared ``lax.scan`` body).
+
+    One of the four accumulators (module docstring): the sparse path's
+    bounded-memory form. Its scan body is rematerialized, which is what keeps the
+    reverse pass from retaining the rotation blocks per chunk -- see the comment
+    on the ``jax.checkpoint`` below for the measured figures.
+
+    Parameters
+    ----------
+    locals_coeffs : Array
+        Local coefficient accumulator.
+    multip_packed : Array
+        Packed multipole coefficients for every node.
+    centers : Array
+        Node centres.
+    src : Array
+        Source node index per pair; negative entries are padding.
+    tgt : Array
+        Target node index per pair, same convention.
+    active_pair_count : Array
+        How many leading entries are live. Traced; chunks entirely past it are
+        skipped by a ``lax.cond`` rather than masked.
+    order : int
+        Expansion order ``p``. Static.
+    basis_mode : str
+        ``"real"`` or ``"complex"``. Static.
+    total_nodes : int
+        Node count, sizing the accumulator. Static.
+    chunk_size : int
+        Pairs per scan step; sets peak memory. Static.
+    rotation : Optional[str]
+        Rotation convention; complex branch only.
+    m2l_impl : Optional[str]
+        Real M2L implementation; real branch only.
+
+    Returns
+    -------
+    Array
+        The accumulated local coefficients.
     """
     pair_count = src.shape[0]
     starts = jnp.arange(0, pair_count, chunk_size, dtype=INDEX_DTYPE)
