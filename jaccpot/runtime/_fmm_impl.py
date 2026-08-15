@@ -359,6 +359,8 @@ class FMMEngine(
         reuse_topology: bool = False,
         rebuild_every: int = 1,
         mac_force_scale_mode: str = "prev",
+        mac_force_scale_prepass_theta: Optional[float] = None,
+        mac_force_scale_fb_inflation: float = 1.0,
         adaptive_error_model: str = "tail_proxy",
         adaptive_eps: Optional[float] = None,
         dehnen_geometry_mode: str = "com",
@@ -433,7 +435,9 @@ class FMMEngine(
             complex_rotation=complex_rotation,
             dehnen_geometry_mode=dehnen_geometry_mode,
             farfield_mode=farfield_mode,
+            mac_force_scale_fb_inflation=mac_force_scale_fb_inflation,
             mac_force_scale_mode=mac_force_scale_mode,
+            mac_force_scale_prepass_theta=mac_force_scale_prepass_theta,
             mac_theta_max=mac_theta_max,
             mixed_order_farfield=mixed_order_farfield,
             mixed_order_min_order=mixed_order_min_order,
@@ -687,7 +691,9 @@ class FMMEngine(
         complex_rotation: str,
         dehnen_geometry_mode: str,
         farfield_mode: FarFieldMode,
+        mac_force_scale_fb_inflation: Optional[float],
         mac_force_scale_mode: str,
+        mac_force_scale_prepass_theta: Optional[float],
         mac_theta_max: float,
         mixed_order_farfield: bool,
         mixed_order_min_order: Optional[int],
@@ -710,8 +716,15 @@ class FMMEngine(
             Passed through from ``__init__`` unchanged.
         farfield_mode : FarFieldMode
             Passed through from ``__init__`` unchanged.
+        mac_force_scale_fb_inflation : Optional[float]
+            Passed through from ``__init__`` unchanged. Inflates the far-field
+            source-to-target distance so the eq (16b) scale is a strict lower
+            bound; ``None`` takes the default.
         mac_force_scale_mode : str
             Passed through from ``__init__`` unchanged.
+        mac_force_scale_prepass_theta : Optional[float]
+            Passed through from ``__init__`` unchanged. Opening angle for the
+            force-scale prepass's own traversal; ``None`` takes the default.
         mac_theta_max : float
             Passed through from ``__init__`` unchanged.
         mixed_order_farfield : bool
@@ -732,12 +745,31 @@ class FMMEngine(
             If a MAC/adaptive option is outside its documented domain, or a paper-style MAC is given a non-positive ``adaptive_eps``.
         """
         force_scale_mode_norm = str(mac_force_scale_mode).strip().lower()
-        if force_scale_mode_norm not in ("prev", "prepass", "paper", "paper_cached"):
+        if force_scale_mode_norm not in (
+            "prev",
+            "prepass",
+            "paper",
+            "paper_cached",
+            "paper_fb",
+            "paper_fb_cached",
+        ):
             raise ValueError(
                 "mac_force_scale_mode must be 'prev', 'prepass', 'paper', "
-                "or 'paper_cached'"
+                "'paper_cached', 'paper_fb', or 'paper_fb_cached'"
             )
         self.mac_force_scale_mode = force_scale_mode_norm
+        self.mac_force_scale_prepass_theta = (
+            None
+            if mac_force_scale_prepass_theta is None
+            else float(mac_force_scale_prepass_theta)
+        )
+        if self.mac_force_scale_prepass_theta is not None and not (
+            0.0 < self.mac_force_scale_prepass_theta <= 1.0
+        ):
+            raise ValueError("mac_force_scale_prepass_theta must be in (0, 1]")
+        self.mac_force_scale_fb_inflation = float(mac_force_scale_fb_inflation)
+        if self.mac_force_scale_fb_inflation < 0.0:
+            raise ValueError("mac_force_scale_fb_inflation must be >= 0")
         adaptive_error_model_norm = str(adaptive_error_model).strip().lower()
         if adaptive_error_model_norm not in (
             "tail_proxy",
@@ -768,6 +800,12 @@ class FMMEngine(
         if self.adaptive_eps is not None and self.adaptive_eps <= 0.0:
             raise ValueError("adaptive_eps must be > 0 when provided")
         self._last_force_scale_nodes: Optional[Array] = None
+        #: Per-particle force scale from the most recent eq (16b) prepass, in sorted
+        #: (tree) order. Diagnostic only -- the criterion consumes the node-reduced
+        #: array above. It exists so the estimator can be scored against an exact
+        #: O(N^2) f_b without re-running the prepass, which is how the O(N) estimate
+        #: was validated (see bench/validation/fb_estimator_fidelity.py).
+        self._last_force_scale_particles: Optional[Array] = None
         self._in_force_scale_prepass = False
         #: Per-node effective opening angles from the most recent prepare_state under
         #: mac_type='dehnen_theta'. Diagnostic only -- the traversal consumes them as
@@ -1646,6 +1684,7 @@ class FMMEngine(
         self._interaction_cache_misses = 0
         self._tree_workspace = None
         self._last_force_scale_nodes = None
+        self._last_force_scale_particles = None
         self._recent_retry_events = tuple()
         self._recent_far_pairs_by_gear_counts = tuple()
         self._recent_dual_node_count = 0

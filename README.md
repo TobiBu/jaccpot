@@ -403,6 +403,33 @@ scales. Select how those scales are estimated with `mac_force_scale_mode`:
   run the paper-style prepass once, on the cold call, then reuse the cached scale
   (refreshed from each full evaluation). This is what `mac_type="dehnen_error"`
   selects by default.
+- `"paper_fb"` / `"paper_fb_cached"`:
+  use Dehnen **eq (16b)**'s force scale `f_b = sum_{a != b} G m_a / |x_a - x_b|^2`
+  instead of eq (16a)'s `|a_b|`. `f_b` is the same sum without the vector
+  cancellation, so it never vanishes, and it measurably reduces the large-error
+  tail -- roughly 2x over (16a) at equal interaction work. Estimated in O(N) from
+  the traversal's own pair partition (exact scalar sums over near pairs, monopoles
+  over far ones), so it is cheaper than the eq (16a) prepass, which runs a whole
+  low-order FMM evaluation. Unlike `|a_b|`, `f_b` depends only on positions and
+  masses, so a completed evaluation contributes nothing to it and the `|a_b|`
+  recorder is suppressed under these modes.
+
+Two knobs apply to whichever prepass runs:
+
+- `mac_force_scale_prepass_theta` (default `0.5`): the opening angle of the
+  prepass's own geometric traversal. This is deliberately *not* the solver's
+  `theta`, which paper mode pins at 1.0 on the grounds that it does not gate
+  acceptance -- true of the criterion, false of the traversal underneath it. At
+  theta=1.0 the `f_b` estimate degrades to a median 0.74 of the exact value,
+  against 0.997 at 0.5 (near Dehnen section 5.2's `theta_crit ~ 0.46`).
+- `mac_force_scale_fb_inflation` (default `1.0`): inflates the far-field
+  source-to-target distance by the target node's radius, which makes every far
+  term an under-estimate and so makes the whole scale a strict lower bound on the
+  exact `f_b`. That direction is deliberate: eq (16a) accepts when the estimated
+  error falls below `eps * s`, so an over-large scale *loosens* acceptance and
+  makes the solver faster **and** wronger -- a failure no cost measurement can
+  detect. `0.0` gives the tighter, non-bounding variant; it is a measurement
+  setting, not a production one.
 
 Interpretation:
 
