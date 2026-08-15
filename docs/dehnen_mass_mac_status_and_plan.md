@@ -15,6 +15,7 @@ Self-contained: a fresh session should be able to pick this up without prior con
 | **1b. N=10⁵ at a production leaf** | **DONE and stronger there.** Leaf 64, 2 seeds, matched median: eq (16a) rms **18.4×** / p99.99 **22.0×**, eq (16b) estimator **35.9×** / **53.9×**, work 1.01–1.05×. |
 | **2. N-scaling *trend*** | **Measured; at fixed leaf 16 it decays** (p99.99 ~12× → ~5× over N = 16384 → 65536, work 1.0 → 1.2×, all 3 seeds agreeing). |
 | **2b. Leaf-size sweep** | **RESOLVED, and it is the session's main finding: the advantage is controlled by tree DEPTH, not N.** At N=10⁵, p99.99 rises 5× → 7× → 16× → 35× → 31× and work falls 1.17× → 1.14× → 1.07× → 1.02× → **1.00×** across leaf 16 → 32 → 64 → 128 → **256**. The ladder was deepening the tree, not probing N. At leaf 16 the criterion is actually **worse than fixed θ on p99** (0.76–0.83×). |
+| **2c. Leaf sweep at N=10⁶** (2026-08-16) | **DONE, and it restores the advantage at production scale.** Matched median 10⁻⁵, one seed: p99.99 5.6× → 7.0× → **34.4×** (eq 16a) and 8.6× → 18.3× → **71.2×** (eq 16b) across leaf 256 → 512 → **1024**, work falling 1.36× → 1.18× → 1.10×. **Leaf 1024 is the production configuration to quote at N=10⁶.** Leaf 2048 is *not measurable in fp32*: the δa/f floor rises with leaf size (1.9 → 6.9 ×10⁻⁶ over the range, tracking near-field pairs per particle) until it closes on the divergence guard. |
 
 Two defects found on the way, both in shipped behaviour — and the first of them
 means **eq (16a) was measurably weaker than it should have been in every prior
@@ -88,11 +89,12 @@ the table under the first bullet.
 ## START HERE — remaining work, in priority order
 
 > **The fresh-session prompt is `docs/dehnen_mac_next_session_prompt.md`.** It supersedes
-> `dehnen_mac_step3prime_prompt.md` (whose goal is done) and covers the post-refactor
-> situation: PR #56 *and* **PR #67** are merged into `main`, this branch still carries the
-> 38 commits after #67, and it is ~243 commits behind a `main` that has since absorbed a
-> code refactor plus new agent guides. **Rebase before measuring anything.** Two open
-> items remain: a leaf sweep at N=10⁶, and N=10⁷ behind an identified one-line blocker.
+> `dehnen_mac_step3prime_prompt.md` (whose goal is done). Its rebase step is **done**
+> (2026-08-16): all of PR #56, PR #67 and the 38 commits that followed are in `main`, and
+> the branch was reset onto `origin/main` rather than replaying patches already upstream.
+> Of the two open items, **the N=10⁶ leaf sweep is done** — see the leaf-sweep section
+> below; leaf 1024 is the production configuration. N=10⁷ remains open behind an
+> identified one-line blocker, whose trigger is narrower than first recorded.
 
 Branch **`feat/dehnen-mass-dependent-mac`**, worktree
 **`/export/home/tbuck/jaccpot-mac-wt`**, off `main`. The upward-M2M fixes are already in
@@ -648,6 +650,11 @@ consequence is the useful part: **leaf 256 is not depth-proof.** If the 10⁵/le
 regime is what the paper wants to quote at 10⁶, the next measurement is a *leaf* sweep at
 N=10⁶ (512, 1024, 2048), not another N point.
 
+> **That sweep is DONE (2026-08-16) and the answer is yes — see the leaf-sweep section
+> below.** At leaf 1024 the criterion reaches p99.99 34× (eq 16a) and 71× (eq 16b) at
+> 1.10×/1.03× work. So the figures in *this* section are a property of **leaf 256 at
+> N=10⁶**, not of the criterion at N=10⁶, and should be quoted that way.
+
 eq (16b)'s estimator again roughly **doubles to triples** eq (16a)'s tail advantage
 (10.8–11.9× against 4.5–4.9×) *and* costs less work than it, consistent with every
 previous measurement of the pair.
@@ -673,6 +680,67 @@ Two methodology notes, both load-bearing:
   note how far they are from leaf 256's N=10⁵ values (16384 / 8192) — trap 4 again, and
   in *both* directions this time: the queue is 42× larger and the interaction capacity 8×
   *smaller*.
+
+### The N = 10⁶ **leaf sweep** — **the advantage does come back, and what stops it is fp32, not the criterion**
+
+`bench/results/validation/mac_1e6_leafsweep_leaf{256,512,1024,2048}.json`, censuses
+alongside them. N=10⁶, p=8, Plummer, fp32, zero softening, **one seed**, δa/f against a
+float64 direct sum over a 10⁵-target subsample, matched at equal **median**, both guards
+on, identical knob grid at every leaf size. Read at a **common absolute matched median of
+1.0×10⁻⁵** — the same target at every leaf, not each leaf's own range midpoint.
+
+**Leaf 256 was re-measured, not reused,** because the earlier record was taken on
+jax 0.9.0.1 and the pre-refactor tree. It reproduced: 1 706 946 far pairs at θ=0.5
+exactly, and p99.99 4.85×/10.83× at work 1.31×/1.16× to three digits. So the refactor and
+the JAX bump moved nothing, and the leaf axis is the only thing varying below.
+
+| leaf | nodes | eq (16a) p99.99 × | work × | eq (16b) p99.99 × | work × | fp32 median floor |
+|---|---|---|---|---|---|---|
+| 256 (fiducial) | 7813 | 5.62 | 1.36 | 8.61 | 1.22 | 1.86×10⁻⁶ |
+| 512 | 3907 | 6.98 | 1.18 | 18.29 | 1.08 | 2.83×10⁻⁶ |
+| **1024** | 1953 | **34.4** | **1.10** | **71.2** | **1.03** | 4.67×10⁻⁶ |
+| 2048 | 977 | *(77.9)* | *(1.01)* | *(145)* | *(0.97)* | 6.85×10⁻⁶ |
+
+**Monotone in every column, and the answer to the question this run was set is yes.** At
+leaf 1024 the criterion reaches p99.99 **34×** (eq 16a) and **71×** (eq 16b) at 1.10× and
+1.03× work — that is at or past the N=10⁵/leaf-256 headline of 21–41×, and it clears the
+"≳20× at ≤1.05× work" bar outright on eq (16b). `work ×` is `fixed/mass`, so > 1 still
+means the criterion does *less* work, and it gets cheaper as the leaf grows.
+
+This is item 2b's depth story holding at a decade more particles: leaf 256 at N=10⁶ is a
+7813-node tree, leaf 1024 is 1953, and the advantage tracks the node count rather than N.
+
+**The leaf-2048 row is parenthesised because it is not a measurement.** Its fixed arm's
+median is *flat* at ≈7×10⁻⁶ across θ = 0.50, 0.55, 0.60, 0.65 (7.54, 7.06, 6.85, 7.57,
+all ×10⁻⁶) — non-monotone, so it is sitting on the round-off floor — and every θ ≥ 0.8 is
+dropped by the divergence guard (p99.99 = 6.2 and 59.9). That leaves **one** usable point,
+θ=0.7, and the matched target at 10⁻⁵ is therefore bracketed by one floored point and one
+real one. The tell is that the ratio is wildly unstable in the target: eq (16a) reads
+13.4× at 6.85×10⁻⁶, 50.1× at 8.75×10⁻⁶ and 112× at 1.12×10⁻⁵ — a factor 8 over a factor
+1.6 of target. That is trap 8 again, log-interpolation across a near-vertical segment.
+**Do not quote the leaf-2048 numbers.**
+
+**New, and the reason the leaf knob cannot simply be pushed further: the fp32 δa/f floor
+is not a constant, it rises with leaf size.** Measured minima of the fixed arm's median,
+last column above: 1.86 → 2.83 → 4.67 → 6.85 ×10⁻⁶ as the leaf goes 256 → 2048. The
+near-field particle pairs per particle rise over the same range as 2.8×10⁵ → 4.8×10⁵ →
+9.3×10⁵, and the floor tracks them — which is what it should do if the floor is fp32
+summation error over the near field, since a bigger leaf means more near pairs to sum per
+particle. The consequence is a squeeze: the leaf size that would best restore the shallow
+tree is also the one whose floor has risen to meet the accuracy window you want to measure
+in. At leaf 2048 the floor (≈7×10⁻⁶) and the divergence guard have closed on each other
+and there is no window left. **So the previous rule of thumb — "distrust a matched median
+below ~3×10⁻⁶ at N=10⁶" — is a leaf-256 rule, not a general one.** Per leaf it is roughly
+"distrust below ~2× that leaf's own measured floor", and the floor is what
+`bench/validation/leaf_sweep_common_target.py` reports and flags.
+
+**Caveats, and they are the usual ones.** *One seed.* Item 2b's two-seed sweep at N=10⁵
+found p99.99 scatter of 41.3 vs 21.1 between seeds at leaf 256, so a single-seed ratio
+carries at least that much uncertainty and **leaf 512 vs leaf 256 is not separable at this
+sample size**; the 256 → 1024 step is far larger than that scatter and is safe. The
+`work ×` column is again the more reliable signal — 1.36 → 1.18 → 1.10 → 1.01 for eq (16a),
+monotone with no overlap. Replicate seeds are being added; until they land, quote leaf 1024
+as the production configuration and label the figure single-seed.
 
 ### N = 10⁷ — **NOT reached, and the blocker is identified rather than guessed**
 
@@ -773,10 +841,16 @@ criterion into per-node opening angles) is **refuted**, structurally.
 been measured.** At leaf 256 the criterion is 12–31 % *cheaper* than fixed θ at matched
 median while collapsing the tail by 4.5–4.9× (eq 16a) or 10.8–11.9× (eq 16b's O(N)
 estimator) — real, but well short of the 21–41× measured at N=10⁵ with the same leaf.
-Holding leaf fixed while N grows deepens the tree, which is exactly what item 2b says
-erodes the advantage, so **the next measurement is a leaf sweep at 10⁶ (512/1024/2048),
-not another N point.** N=10⁷ is blocked on a stale split-build predicate — one line, and
-identified. See item 4.
+
+**The leaf sweep that resolves that is done (2026-08-16), and the advantage comes back.**
+At N=10⁶, matched median 10⁻⁵, one seed: p99.99 goes 5.6× → 7.0× → **34.4×** for eq (16a)
+and 8.6× → 18.3× → **71.2×** for eq (16b) as the leaf goes 256 → 512 → 1024, with work
+falling 1.36× → 1.18× → 1.10× (still `fixed/mass`, so > 1 means *less* work). **Quote
+leaf 1024 at N=10⁶ as the production configuration**, single-seed for now. Leaf 2048 is
+*not* measurable in fp32: the δa/f floor rises with leaf size (1.9 → 6.9 ×10⁻⁶ from leaf
+256 to 2048, tracking near-field pairs per particle) until it meets the divergence guard
+and closes the accuracy window. N=10⁷ is blocked on a split-build predicate — one line,
+identified, and narrower than first recorded. See item 4.
 
 Open: whether the benefit holds at Dehnen's ε = 2×10⁻⁷ (never measured); the N-scaling
 trend; the O(N) `f_b` estimator; fast-lane access; and the cartesian basis's unexplained
@@ -1644,6 +1718,55 @@ XLA_PYTHON_CLIENT_PREALLOCATE=false PYTHONPATH=$PWD \
     .venv/bin/python -m bench.validation.pair_policy_far_tag_memory \
     --n 1000000 --leaf-size 256 \
     --json-out bench/results/validation/pair_policy_far_tag_memory_1m.json
+
+# --- the N=1e6 leaf sweep (2026-08-16) -------------------------------------
+# One leaf size per GPU, run concurrently. PIN the device per run rather than
+# letting each call autocvd: `autocvd -l` will hand the same least-used card to
+# two simultaneous launches, and a co-tenant that arrives afterwards can put a
+# 40 GB card at 37.5/40 (it happened mid-run here, and the leaf-1024 run had to
+# be restarted elsewhere). Ask once for as many cards as you need:
+#     .venv/bin/autocvd -l -n 4 -o -q        # -> e.g. 1,2,4,5
+#
+# Census first, always -- prepare-only, and it is what tells you the theta grid
+# is in the right place for THIS leaf size (at leaf 2048 the far count RISES
+# with theta, so a grid tuned to leaf 256 measures the wrong end):
+# then run the block below once per (LEAF, DEV) pair, e.g. LEAF=512 DEV=2:
+CUDA_VISIBLE_DEVICES=$DEV XLA_PYTHON_CLIENT_PREALLOCATE=false \
+  JAX_ENABLE_X64=1 PYTHONPATH=$PWD .venv/bin/python -u \
+  -m bench.validation.far_pair_census \
+    --n 1000000 --leaf-size $LEAF --order 8 --distribution plummer \
+    --theta 0.50,0.70 --eps 3e-3,3e-5 --arms fixed,mass \
+    --geometry-mode com --softening 0.0 --runtime-lane large_n \
+    --precision fp32 --min-far-pairs 5000 \
+    --json-out bench/results/validation/census_1e6_leafsweep_leaf$LEAF.json
+
+# Then the sweep. The knob grid is deliberately WIDER at both ends than any one
+# leaf size needs, and identical across all of them, because the usable window
+# moves with leaf size; the two guards drop what is unusable per leaf. Leaf 256
+# is re-measured rather than reused -- the committed `mac_1e6_leaf256_lane.json`
+# was taken on jax 0.9.0.1 and the pre-refactor tree, and a cross-leaf
+# comparison that mixes code versions along its own axis confounds leaf size
+# with everything else that changed. (It reproduced to three digits.)
+CUDA_VISIBLE_DEVICES=$DEV XLA_PYTHON_CLIENT_PREALLOCATE=false \
+  JAX_ENABLE_X64=1 PYTHONPATH=$PWD .venv/bin/python -u \
+  -m bench.validation.mac_error_distribution \
+    --n 1000000 --leaf-size $LEAF --order 8 --distribution plummer \
+    --theta 0.50,0.55,0.60,0.65,0.70,0.80,0.90 \
+    --eps 1e-2,3e-3,1e-3,3e-4,1e-4,3e-5 \
+    --geometry-mode com --arm fixed,mass,mass_16b_est \
+    --softening 0.0 --G 1.0 --seed 0 --metric dehnen --match-on median \
+    --reference-block 64 --reference-subsample 100000 \
+    --max-p9999 1.0 --min-far-pairs 5000 \
+    --runtime-lane large_n --precision fp32 \
+    --json-out bench/results/validation/mac_1e6_leafsweep_leaf$LEAF.json
+
+# Read the sweep at a COMMON absolute matched median -- never at each leaf's own
+# range midpoint, which confounds leaf size with accuracy level. This also
+# refuses targets at or below the fp32 floor and flags any arm whose median
+# stopped rising with its knob, which is how the floor announces itself.
+PYTHONPATH=$PWD .venv/bin/python -m bench.validation.leaf_sweep_common_target \
+    bench/results/validation/mac_1e6_leafsweep_leaf{256,512,1024,2048}.json \
+    --arm mass,mass_16b_est --median-floor 3e-6
 ```
 
 Bench flags added 2026-08-02, all of which exist because of a trap above:
