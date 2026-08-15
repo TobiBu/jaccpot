@@ -87,6 +87,13 @@ the table under the first bullet.
 
 ## START HERE — remaining work, in priority order
 
+> **The fresh-session prompt is `docs/dehnen_mac_next_session_prompt.md`.** It supersedes
+> `dehnen_mac_step3prime_prompt.md` (whose goal is done) and covers the post-refactor
+> situation: PR #56 *and* **PR #67** are merged into `main`, this branch still carries the
+> 38 commits after #67, and it is ~243 commits behind a `main` that has since absorbed a
+> code refactor plus new agent guides. **Rebase before measuring anything.** Two open
+> items remain: a leaf sweep at N=10⁶, and N=10⁷ behind an identified one-line blocker.
+
 Branch **`feat/dehnen-mass-dependent-mac`**, worktree
 **`/export/home/tbuck/jaccpot-mac-wt`**, off `main`. The upward-M2M fixes are already in
 `main` (PR #56). Everything below runs from the worktree with
