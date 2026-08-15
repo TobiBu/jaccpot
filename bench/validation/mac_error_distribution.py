@@ -322,10 +322,30 @@ def _advanced(
     *,
     max_pair_queue: Optional[int] = None,
     max_interactions_per_node: Optional[int] = None,
+    runtime_lane: str = "generic",
 ) -> FMMAdvancedConfig:
     cfg = FMMAdvancedConfig()
+    if runtime_lane == "large_n":
+        # Trap 10 recorded that every measurement in the status document ran the
+        # generic path, because the large-N lane needs `expansion_basis="solidfmm"`
+        # *and* `preset="large_n_gpu"` *and* a radix tree, and the bench asked for
+        # none of them. It also used to refuse the criterion outright. Both are
+        # fixed, so the lane is now selectable -- and `--runtime-lane large_n`
+        # asserts it actually engaged rather than trusting it (a silent fallback
+        # would reproduce the generic-lane numbers and read as success).
+        cfg = replace(cfg, tree=replace(cfg.tree, tree_type="radix"))
+        # And the low-peak split build has to be asked for explicitly: its default,
+        # `_streamed_minimum_memory_gpu_default_split_build`, is computed in
+        # `__init__` from `memory_objective`/`streamed_far_pairs` *before*
+        # `_apply_large_n_gpu_production_contract` coerces them, so on this preset the
+        # predicate reads `memory_objective="balanced"` and comes out False. The
+        # preset then runs the monolithic build it exists to avoid -- measured: the
+        # N=1e7 census OOMed in `_dual_tree_build_raw` on a 4.77 GiB allocation.
     runtime = replace(
         cfg.runtime,
+        prepare_stage_memory_split_enabled=(
+            True if runtime_lane == "large_n" else None
+        ),
         # Both arms retain the traversal result so both pay the identical loss of
         # the streamed fast lane. Without this the mass arm would be charged for
         # a lane fallback the geometric arm avoids, and the cost comparison would
@@ -375,6 +395,7 @@ def measure(
     max_pair_queue: Optional[int] = None,
     max_interactions_per_node: Optional[int] = None,
     reference_targets: Optional[np.ndarray] = None,
+    runtime_lane: str = "generic",
 ) -> dict[str, Any]:
     """Run one (arm, knob) configuration and return its record.
 
@@ -387,6 +408,7 @@ def measure(
     caps = dict(
         max_pair_queue=max_pair_queue,
         max_interactions_per_node=max_interactions_per_node,
+        runtime_lane=runtime_lane,
     )
     if arm == "fixed":
         kwargs: dict[str, Any] = dict(
@@ -414,11 +436,22 @@ def measure(
             kwargs["mac_theta_max"] = float(theta_max)
     kwargs["G"] = G
     kwargs["softening"] = softening
+    if runtime_lane == "large_n":
+        kwargs["preset"] = "large_n_gpu"
+        kwargs["expansion_basis"] = "solidfmm"
 
     fmm = FastMultipoleMethod(**kwargs)
 
+    # `_lane_probe` is imported here rather than at module scope: it imports nothing
+    # from this module, but this module is what `far_pair_census` imports, and keeping
+    # the edge one-directional avoids a cycle if that ever reverses.
+    from bench.validation._lane_probe import DualBuildProbe
+
     t0 = time.perf_counter()
-    state = fmm.prepare_state(positions, masses, leaf_size=leaf_size, max_order=order)
+    with DualBuildProbe() as dual_probe:
+        state = fmm.prepare_state(
+            positions, masses, leaf_size=leaf_size, max_order=order
+        )
     if arm == "mass_16b":
         # eq (16b) is eq (16a) with `min_b f_b` on the right-hand side instead of
         # `min_b |a_b|`; the criterion, the traversal and the error estimator are
@@ -435,14 +468,36 @@ def measure(
             magnitudes_sorted=f_b_sorted,
             reduction="min",
         )
-        state = fmm.prepare_state(
-            positions,
-            masses,
-            leaf_size=leaf_size,
-            max_order=order,
-            force_scale_nodes=f_b_nodes,
-        )
+        with DualBuildProbe() as dual_probe:
+            state = fmm.prepare_state(
+                positions,
+                masses,
+                leaf_size=leaf_size,
+                max_order=order,
+                force_scale_nodes=f_b_nodes,
+            )
     prepare_s = time.perf_counter() - t0
+
+    declined_reason = fmm.get_runtime_diagnostics().get("large_n_path_declined_reason")
+    if runtime_lane == "large_n":
+        # Assert rather than hope. A silent fallback to the generic lane would
+        # reproduce the old numbers exactly and look like a successful large-N run.
+        if declined_reason is not None:
+            raise RuntimeError(
+                f"--runtime-lane large_n was requested but the lane declined: "
+                f"{declined_reason!r} (arm={arm}, knob={knob})"
+            )
+        if type(state).__name__ != "LargeNPreparedState":
+            raise RuntimeError(
+                "--runtime-lane large_n was requested but prepare_state returned "
+                f"{type(state).__name__}, not LargeNPreparedState "
+                f"(arm={arm}, knob={knob})"
+            )
+    if arm != "fixed":
+        # The criterion has to be *installed*, not merely requested: a build with no
+        # pair policy runs the geometric MAC, and a policy state built from a None
+        # force scale compares against eps*1. Both are cheaper and silent.
+        dual_probe.check_criterion_was_applied(context=f"arm={arm} knob={knob:g}")
 
     t0 = time.perf_counter()
     acc = fmm.evaluate_prepared_state(state, return_potential=False)
@@ -460,15 +515,20 @@ def measure(
     )
 
     node_ranges = np.asarray(state.tree.node_ranges)
-    interactions = state.interactions
-    far_pairs = 0
-    far_work = 0
-    if interactions is not None:
-        src = np.asarray(interactions.sources)
-        tgt = np.asarray(interactions.targets)
-        keep = (src >= 0) & (tgt >= 0)
-        far_pairs = int(keep.sum())
-        far_work = far_pairs * (order + 1) ** 2
+    # The accept mask comes from the dual-build probe, not from `state.interactions`.
+    # On the large-N lane the production contract pins `retain_interactions=False`, so
+    # reading the state there reports **zero** far pairs -- which then trips every
+    # `--min-far-pairs` guard and reads as "this configuration measures nothing" when
+    # what is actually missing is the measurement plumbing. See `_lane_probe`.
+    far_pairs = int(dual_probe.final.get("far_pairs", -1))
+    if far_pairs < 0:
+        interactions = state.interactions
+        far_pairs = 0
+        if interactions is not None:
+            src = np.asarray(interactions.sources)
+            tgt = np.asarray(interactions.targets)
+            far_pairs = int(((src >= 0) & (tgt >= 0)).sum())
+    far_work = far_pairs * (order + 1) ** 2
 
     nb = state.neighbor_list
     nb_counts = np.asarray(nb.counts)
@@ -543,6 +603,10 @@ def measure(
     record = {
         "arm": arm,
         "knob": float(knob),
+        "runtime_lane": runtime_lane,
+        "solver_dtype": str(np.asarray(positions).dtype),
+        "prepared_state_type": type(state).__name__,
+        "large_n_path_declined_reason": declined_reason,
         "fb_fidelity": fb_fidelity,
         "retry_final_caps": final_caps,
         "far_pairs": far_pairs,
@@ -953,6 +1017,31 @@ def main() -> int:
             "so an oversized value OOMs -- pass the converged value verbatim."
         ),
     )
+    ap.add_argument(
+        "--runtime-lane",
+        choices=("generic", "large_n"),
+        default="generic",
+        help=(
+            "Which runtime lane to measure on. 'large_n' selects "
+            "preset='large_n_gpu' + expansion_basis='solidfmm' + a radix tree, and "
+            "ASSERTS the lane engaged (get_runtime_diagnostics()"
+            "['large_n_path_declined_reason'] is None). Trap 10: every number in "
+            "the status document before this flag existed ran the generic path, "
+            "because the bench asked for none of those three things. A silent "
+            "fallback would reproduce the generic-lane numbers and read as success."
+        ),
+    )
+    ap.add_argument(
+        "--precision",
+        choices=("fp32", "fp64"),
+        default="fp64",
+        help=(
+            "Solver input dtype. The large-N GPU lane runs fp32 in production, so "
+            "measure it there. The O(N^2) reference is always float64 on the same "
+            "values regardless. JAX_ENABLE_X64=0 does NOT select fp32 -- yggdrax "
+            "forces x64 on at import -- so this flag is the only lever (trap 12)."
+        ),
+    )
     ap.add_argument("--json-out", default=None)
     args = ap.parse_args()
 
@@ -1033,8 +1122,19 @@ def main() -> int:
         """Sweep every arm over one (distribution, N, seed) realisation."""
 
         pos_np, mass_np = make_distribution(dist, n, seed)
-        positions = jnp.asarray(pos_np, dtype=jnp.float64)
-        masses = jnp.asarray(mass_np, dtype=jnp.float64)
+        # The solver runs at `--precision`; the reference always runs in float64 on
+        # the SAME values, cast up. Two things this gets right that the obvious
+        # spellings do not: feeding fp32 arrays straight to the reference would
+        # compute it in fp32 and it would stop being a reference, and generating the
+        # positions twice at two precisions would compare the solver against a
+        # slightly different system. Note `JAX_ENABLE_X64=0` cannot be used to select
+        # fp32 -- yggdrax forces x64 on at import (trap 12) -- so the dtype is the
+        # only lever, and it is the one the large-N lane actually runs at.
+        solver_dtype = jnp.float32 if args.precision == "fp32" else jnp.float64
+        positions = jnp.asarray(pos_np, dtype=solver_dtype)
+        masses = jnp.asarray(mass_np, dtype=solver_dtype)
+        ref_positions = jnp.asarray(np.asarray(positions), dtype=jnp.float64)
+        ref_masses = jnp.asarray(np.asarray(masses), dtype=jnp.float64)
 
         reference_targets = None
         if args.reference_subsample is not None and int(args.reference_subsample) < n:
@@ -1049,8 +1149,8 @@ def main() -> int:
             ).astype(np.int32)
 
         reference = chunked_direct_accelerations(
-            positions,
-            masses,
+            ref_positions,
+            ref_masses,
             softening=args.softening,
             G=args.G,
             block=int(args.reference_block),
@@ -1058,8 +1158,8 @@ def main() -> int:
         )
         jax.block_until_ready(reference)
         force_scale = chunked_force_scale(
-            positions,
-            masses,
+            ref_positions,
+            ref_masses,
             softening=args.softening,
             G=args.G,
             block=int(args.reference_block),
@@ -1091,6 +1191,7 @@ def main() -> int:
                         max_pair_queue=args.max_pair_queue,
                         max_interactions_per_node=args.max_interactions_per_node,
                         reference_targets=reference_targets,
+                        runtime_lane=args.runtime_lane,
                     )
                     rec.update(
                         {

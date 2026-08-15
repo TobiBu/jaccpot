@@ -46,6 +46,11 @@ FMMExecutionBackend = Literal["auto", "radix", "octree"]
 #: differ only in how the criterion is applied -- ``dehnen_error`` installs a
 #: solver-owned pair policy, ``dehnen_theta`` folds it into one opening angle per
 #: node -- and both reduce to ``"dehnen"`` for the traversal.
+#:
+#: ``dehnen_theta`` is listed here because it must be *accepted and translated*,
+#: not because it is recommended: it is a refuted experiment kept so its negative
+#: result stays reproducible, and constructing a solver with it raises a
+#: ``FutureWarning`` saying so. Use ``"dehnen_error"`` for the exact criterion.
 #: :meth:`~jaccpot.runtime.fmm_policy.PolicyMixin._mac_type_for_traversal`
 #: translates them before yggdrax ever sees them, and ``_uses_dehnen_error_policy``
 #: is what switches the extra machinery on.

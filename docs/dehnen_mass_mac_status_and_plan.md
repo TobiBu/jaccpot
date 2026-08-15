@@ -379,9 +379,12 @@ only. And node masses come from a prefix sum over `node_ranges`, never from
 particles with a zero expansion, and an estimator sourced from the multipoles would have
 inherited both while reading as ordinary truncation error.
 
-### 4. Step 3′ — carry the pair policy into the fast lanes
+### 4. Step 3′ — carry the pair policy into the fast lanes — **DONE (2026-08-04)**
 
-The only remaining route to 10⁶ (Step 3 is refuted; see below).
+The only remaining route to 10⁶ (Step 3 is refuted; see below), and it works:
+`mac_type="dehnen_error"` now runs on the large-N GPU lane, and the N=10⁶ / leaf 256
+census clears in ~9 minutes where the generic lane needed ~22 minutes *per config* at
+N=10⁵. **10⁷ does not work yet** — see the end of this section.
 
 **The memory gate is measured and it clears.** `bench/validation/pair_policy_far_tag_memory.py`,
 artifact `bench/results/validation/pair_policy_far_tag_memory_1m.json`. At N=10⁶, leaf 256,
@@ -405,22 +408,290 @@ Measuring it needs one subprocess per arm: `peak_bytes_in_use` is process-cumula
 cannot be reset, so measuring both arms in one process reports the running maximum for both
 and the delta is always exactly zero. That first read looked like a clean null result.
 
-**What remains, and the hazard to handle first.** `_interaction_cache_key` takes **no**
-`pair_policy` argument, so the interaction cache cannot distinguish a policy-built list
-from a geometrically-built one. Today that is safe only because the cache is per-solver-
-instance and `eps` is fixed on a live solver — two `dehnen_error` solvers at different
-`eps` already hash identically (`_base_mac_type()` is `"dehnen"` and paper mode pins
-θ=1.0). Relaxing the policy gates without keying or disabling the cache would silently
-serve the wrong accept mask, which is the "faster and wronger" failure this whole document
-keeps running into. So: key the cache on the policy (or disable it under one) **before**
-touching the gates. The gates themselves are small — `_can_split_dual_tree_build`
-(`_interaction_cache.py` ~:443) plus threading `pair_policy`/`policy_state` into
-`_build_dual_tree_artifacts_split`'s three yggdrax calls, all of which already accept it —
-and then `can_use_large_n_prepare_path` and `_large_n_pipeline.py`, which never thread it
-at all, plus running the force-scale prepass inside `prepare_large_n_state`. This was
-deliberately not started in the 2026-08-02 pass: it is untestable at 1M until the
-target-subsampled reference (`--reference-subsample`, Step 4) exists, and shipping
-unvalidated lane code that can bypass the criterion is worse than not shipping it.
+**The plumbing is DONE (2026-08-04) and the lane engages.** Verified on an A100 at
+N=20 000 / leaf 64 / p=8, fp32, Plummer: `mac_type="dehnen_error"` returns a
+`LargeNPreparedState` with `get_runtime_diagnostics()["large_n_path_declined_reason"]`
+`None`, and the criterion's final dual build receives a **real** per-node force scale
+(625 nodes, fp32, range [2.16×10⁻⁶, 3.37×10⁻¹], `all_ones` false) — not the unit-scale
+fallback. Two dual builds per prepare: the geometric prepass, then the criterion.
+Commits `93e937a` (cache key), `52070c5` (split build), `08364c7` (the lane).
+
+It was **not one flag flip**, and the interesting part is what each piece would have
+failed *silently*:
+
+1. **The cache-key hazard was real, and the live instance of it was `dehnen_theta`, not
+   `dehnen_error`.** `dehnen_error` escaped only by an accident of control flow:
+   `_prepare_state_dual_and_downward` computed `cache_key` in the *else* branch of the
+   policy test, so a policy request got `cache_key=None` and bypassed the cache
+   entirely. Nothing stated that. `dehnen_theta` did not escape — it folds the criterion
+   into `geometry.radius`, which the key cannot see, so it cached. Measured at N=2048 /
+   leaf 8 / ε=1e-3, injecting per-node force scales of 1e-3, 1.0 and 1e+3 (the whole
+   right-hand side of eq (16a), six orders of magnitude):
+
+   | injected force scale | far pairs before | far pairs after |
+   |---|---|---|
+   | 1e-3 | 17 520 | **0** |
+   | 1.0 | 17 520 | **32** |
+   | 1e+3 | 17 520 | **16 484** |
+
+   Every prepare after the first was served the first call's accept mask, with the
+   injected scale having no effect at all. The work was byte-for-byte identical, so per
+   trap 6 no cost measurement could see it. Fixed by `pair_policy_cache_identity()`,
+   which the key now takes as a keyword **with no default** — a silent default is how
+   the criterion came to be missing from the key. A solver-owned `pair_policy` resolves
+   to "uncacheable" (key `None`): the policy is evaluated against `policy_state`, built
+   from the multipole power (hence the *masses*) and the per-particle positions, and the
+   geometric key hashes neither, so no entry can honestly be shown to match. That costs
+   the large-N lane nothing — the interaction cache is already off for `static_radix`.
+
+2. **A `None` force scale is not a no-op.** `prepare_large_n_state` passed
+   `force_scale_nodes=None` into the dual build, and `build_adaptive_policy_state`
+   substitutes `jnp.ones(...)` for `None`. So relaxing the gate alone would have run the
+   criterion against a threshold of `ε·1` instead of `ε·min_b|a_b|` — a different
+   criterion, accepting far more, running faster, reported nowhere. The lane now resolves
+   the scale between the tree/upward build and the dual build (the fused tree+dual helper
+   leaves no seam for a prepass, so a criterion run takes the unfused path) and raises if
+   none resolves.
+
+3. **eq (16b) was structurally excluded from the only lane that matters.** Its prepass
+   raised unless `interactions` was non-`None`, but the streamed lane produces
+   `CompactTaggedFarPairs` and no node interaction list. So the *better* criterion with
+   the *cheaper* prepass could not run at 10⁶. The estimator reads the far list as a flat
+   COO pair array, which compact far pairs already are, so it now accepts either —
+   honouring `far_pair_count` explicitly rather than trusting the padding to be `-1`.
+   yggdrax documents those arrays as "fixed-capacity padded" without specifying the fill,
+   and a fill of `0` reads as the pair (root, root), whose mass the downward accumulation
+   would push into *every* node: `f_b` inflated, threshold loosened, faster and wronger.
+
+**One thing deliberately kept as a refusal:** `dehnen_theta` on this lane. It folds the
+criterion into `geometry.radius` before the dual build, which the lane does not do, so it
+would run the geometric MAC at the solver's θ — which paper mode pins at **1.0**, i.e.
+wildly loose rather than merely different. Under the production preset,
+`_apply_large_n_gpu_production_contract` pins `runtime_path="large_n"`, so that decline
+**raises** rather than falling back.
+
+**The split/streamed build is now reachable end-to-end, and that took a second fix.**
+Relaxing `_can_split_dual_tree_build` was not enough: `need_traversal_result` was forced
+true by `use_paper_fixed_policy` (`fmm_prepare.py` ~:851), and the split build refuses
+whenever the traversal result is needed — so the criterion still always took the
+monolithic build and materialised `num_nodes × max_interactions_per_node`. That is
+~256 MiB at 10⁶ / leaf 256 and irrelevant; at 10⁷ it is ~2.5 GiB and plausibly the
+binding constraint.
+
+Nothing consumed that traversal result. It feeds
+`_prepare_state_extract_adaptive_far_pairs`, which runs only under `adaptive_order`, and
+`use_paper_fixed_policy` requires `not adaptive_order`. Dropping the forcing changes the
+far-pair payload from a node interaction list to compact COO pairs, so it was measured
+rather than reasoned — N=8192 / leaf 32 / p=4 / ε=1e-3, same solver, same inputs:
+
+| config | far pairs | `|a|_rms` | vs the other path |
+|---|---|---|---|
+| node interactions + retain | 5708 | 2.514572614e+03 | — |
+| streamed + no retain | 5708 | 2.514572614e+03 | max rel **2.4e-16** |
+
+Same accept mask, and a difference at float64 round-off — a different summation order,
+not a different criterion. A caller that *does* retain the traversal result still gets
+the monolithic build and still gets `state.dual_tree_result`, which
+`tests/unit/runtime/test_criterion_reaches_the_split_build.py` pins as a control so the
+split build cannot quietly become unconditional.
+
+> **RESOLVED: the accept mask is not bit-reproducible at 10⁶ in fp32, and the split build
+> has nothing to do with it.** Two runs of the same ε=3×10⁻⁵ configuration reported
+> 1 783 414 and 1 783 416 far pairs, which looked like the split build disagreeing with
+> the monolithic one. It is not. Each setting run twice
+> (`far_pair_census.py --split-build {on,off}`, the flag added for this):
+>
+> | run | `--split-build` | far pairs | prepare |
+> |---|---|---|---|
+> | 1 | on | 1 783 41**4** | 259.0 s |
+> | 1 | off | 1 783 41**6** | 751.5 s |
+> | 2 | on | 1 783 41**6** | 256.8 s |
+> | 2 | off | 1 783 41**4** | 472.4 s |
+>
+> **Both values occur under both settings**, so it is run-to-run variation, not the build
+> path. Near leaf pairs (2 964 516) and the threshold range are identical in all four.
+> The mechanism is the force-scale prepass: it runs a low-order FMM *evaluation*, whose
+> scatter-adds are order-nondeterministic on a GPU, so a 1-ulp change in one node's
+> `min_b |a_b|` flips a pair sitting inside fp32's ~1.2×10⁻⁷ relative precision of the
+> acceptance boundary — the same boundary-set effect trap 3's fp32 check found to be
+> harmless in magnitude. Two pairs in 1.8 M is 1.1×10⁻⁶ of the far field.
+>
+> Operational rules: **do not quote a 10⁶ far-pair count to more than ~5 significant
+> figures, and do not diff two runs' accept masks expecting exact equality.** A
+> reproducibility test at 10⁶ must compare *statistics*, not masks.
+>
+> Bonus finding from the same four runs: **the split build is 1.8–2.9× faster**, not
+> merely lower-peak (257–259 s against 472–751 s). That strengthens the case for fixing
+> the stale predicate described under 10⁷ below — the preset is currently paying for the
+> monolithic build in both memory *and* time.
+
+Split-vs-monolithic accept masks, `_build_dual_tree_artifacts` called twice on identical
+inputs (`tests/unit/runtime/test_split_build_carries_pair_policy.py`):
+
+| config | monolithic + policy | split + policy | split, no policy |
+|---|---|---|---|
+| uniform N=512 leaf 16 | 4 | 4 | 4 |
+| clustered N=512 leaf 16 | 70 | 70 | 50 |
+| deep N=2048 leaf 8 | 15 680 | 15 680 | 14 632 |
+
+Bit-identical between the builds, and different from the no-policy build. The second
+column pair is what stops the first from passing trivially: a dropped policy would make
+both builds geometric and the masks would still match.
+
+**Trap 3 (fp32 acceptance) is answered: it clears.** eq (16a) compares
+`G·Ẽ·M_A/r² < ε·min_b|a_b|`, and the lane runs fp32 while every validated number was
+fp64. Measured at N=8192 / leaf 32 / p=8 / θ=0.9, sweeping the *input dtype* (see the new
+trap 12 — `JAX_ENABLE_X64=0` does **not** select fp32):
+
+| ε | far pairs fp64 | far pairs fp32 | median δa/f fp64 | median δa/f fp32 |
+|---|---|---|---|---|
+| 1e-3 | 3178 | **3178** | 2.010e-6 | 2.020e-6 |
+| 1e-4 | 434 | **434** | 2.012e-15 | 1.553e-7 |
+| 1e-5 | 12 | **12** | 1.033e-15 | 1.161e-7 |
+
+The accept mask is **bit-identical** at every ε; only the evaluation moves, by ordinary
+fp32 round-off, and it moves identically in both arms. The threshold has room to spare:
+at ε=1e-4 it spans [2.155e-10, 3.365e-05] in fp32, so even Dehnen's ε=2×10⁻⁷ lands near
+4e-13 against fp32's 1.2e-38 smallest normal — and the code floors it at 1e-24 anyway,
+which is itself representable in fp32. The dangerous direction is also the protected one:
+if the threshold ever *did* underflow, acceptance would collapse to nothing (slow, and
+visible as zero far pairs), not open up.
+
+**New harness: `bench/validation/far_pair_census.py`.** Trap 11 has demanded a
+prepare-only census since it was written, eight failed sweep attempts ago, and none
+existed — every census so far was ad hoc. It sweeps θ and ε, counts accepted far pairs
+and near leaf pairs with no reference and no evaluation, asserts the requested lane
+engaged, and **raises if the criterion's force scale is `None` or all ones**. It reads
+the count by hooking `_prepare_state_dual_and_downward` rather than the prepared state,
+because `LargeNPreparedState` carries neither the node interaction list nor (under the
+criterion) compact far pairs — the far field is consumed into the downward locals during
+prepare, so on that lane the accept mask is simply not on the state.
+
+`mac_error_distribution.py` also takes **`--runtime-lane {generic,large_n}`** now, which
+selects preset + basis + radix tree together and *asserts* the lane engaged. Trap 10
+recorded that every number in this document ran the generic path; it stayed that way
+because the bench asked for none of the three things the lane requires. It also takes
+**`--precision {fp32,fp64}`**, because the lane runs fp32 in production and
+`JAX_ENABLE_X64=0` cannot select that (trap 12); the O(N²) reference stays float64 on the
+same values regardless, so it remains a reference.
+
+**The N=10⁶ / leaf 256 census: the grid is healthy, and it is the first configuration
+where leaf 256 has a real far field at every knob.**
+`bench/results/validation/census_1e6_leaf256.json`, fp32, on the large-N lane, 7813 nodes:
+
+| arm | knob | far pairs | near leaf pairs | prepare |
+|---|---|---|---|---|
+| fixed | θ=0.4 | 2 247 484 | 7 175 306 | 333.1 s (cold) |
+| fixed | θ=0.5 | 1 706 946 | 4 315 276 | 15.0 s |
+| fixed | θ=0.6 | 1 185 164 | 2 712 116 | 21.7 s |
+| fixed | θ=0.7 | 837 826 | 1 747 918 | 13.2 s |
+| mass | ε=1e-3 | 926 616 | 1 176 720 | 88.6 s |
+| mass | ε=1e-4 | 1 468 118 | 2 157 254 | 22.3 s |
+| mass | ε=1e-5 | 2 102 686 | 3 843 496 | 63.3 s |
+
+This is what trap 11 predicted: leaf 256 becomes meaningful at N ≳ 10⁶, and at exactly
+10⁶ every θ from 0.4 to 0.7 accepts millions of far pairs, against **0 / 0 / 4 / 218** at
+N=10⁵. The mass arm's far count again *rises* as ε tightens (926k → 1.47M → 2.10M), the
+same "tightening ε pushes acceptance deeper" behaviour item 2 recorded at N=65536.
+
+**And the whole census took ~9 minutes.** The lane is why: prepare is 13–90 s per config
+at N=10⁶, against the ~22 *minutes* per config the generic lane needed at N=10⁵ / leaf 64
+(trap 11's table). That is the point of Step 3′ stated as a number.
+
+**Re-verified after the rebase onto `main` (2026-08-04).** The rebase resolved conflicts in
+`_interaction_cache.py` and `fmm_prepare.py` — the two files the criterion's build path runs
+through — so the census was re-run on the rebased tree and diffed against the artifact
+programmatically. **All 7 configurations agree exactly**, far-pair counts, near-leaf-pair
+counts and acceptance-threshold ranges alike. Worth doing rather than assuming: main had
+replaced the strict streamed build's single traversal call with a capacity-retry loop, and
+the resolution had to thread the pair policy *into* that loop rather than pick a side.
+
+### The N = 10⁶ measurement — **the first one ever taken, and it does NOT reproduce the N=10⁵ / leaf 256 headline**
+
+`bench/results/validation/mac_1e6_leaf256_lane.json`. N=10⁶, **leaf 256**, p=8, Plummer, fp32,
+zero softening, one seed, δa/f against a float64 direct sum over a 10⁵-target subsample,
+matched at equal **median**, both guards on. All 15 records carry
+`prepared_state_type="LargeNPreparedState"`, `large_n_path_declined_reason=null` and
+`solver_dtype="float32"`, so the lane demonstrably ran the whole sweep.
+
+**`work ×` is `fixed_pair_work / mass_pair_work`, so > 1 means the criterion does LESS
+work.** Verified against the raw rows, not just the header: at matched median 6.44×10⁻⁶
+the fixed arm (θ=0.6) does 1.78×10¹¹ pair-work against the criterion's ≈1.36×10¹¹.
+
+| arm | matched median | rms × | p99.99 × | p99 × | work × |
+|---|---|---|---|---|---|
+| eq (16a) | 3.47e-6 | 7.13 | 4.67 | 1.50 | 1.23 |
+| eq (16a) | 4.72e-6 | 8.44 | 4.47 | 1.46 | 1.28 |
+| eq (16a) | 6.44e-6 | 11.14 | 4.85 | 1.42 | 1.31 |
+| eq (16b) est | 3.52e-6 | 18.14 | **11.94** | 2.10 | 1.12 |
+| eq (16b) est | 4.76e-6 | 21.94 | **11.37** | 2.08 | 1.14 |
+| eq (16b) est | 6.44e-6 | 26.50 | **10.83** | 2.05 | 1.16 |
+
+**Against the go/no-go bar this run was set — "p99.99 ≳ 20× at ≤ 1.05× interaction work"
+— the cost half passes with room to spare and the tail half does not.** The criterion is
+*cheaper* than fixed θ at matched median (12–31 % fewer interactions, not 5 % more), but
+p99.99 is 4.5–4.9× for eq (16a) and 10.8–11.9× for eq (16b), against **21–41×** measured
+at N=10⁵ / leaf 256. Do not report the N=10⁵ number as the production figure.
+
+**This confirms item 2b's mechanism rather than overturning it.** Item 2b concluded the
+advantage is controlled by tree *depth*, not N. Holding leaf 256 fixed and going
+10⁵ → 10⁶ takes the tree from 390 nodes to **7813** — about 4½ levels deeper — so depth
+grew, and the advantage fell exactly as the depth story predicts. The practical
+consequence is the useful part: **leaf 256 is not depth-proof.** If the 10⁵/leaf-256
+regime is what the paper wants to quote at 10⁶, the next measurement is a *leaf* sweep at
+N=10⁶ (512, 1024, 2048), not another N point.
+
+eq (16b)'s estimator again roughly **doubles to triples** eq (16a)'s tail advantage
+(10.8–11.9× against 4.5–4.9×) *and* costs less work than it, consistent with every
+previous measurement of the pair.
+
+Two methodology notes, both load-bearing:
+
+- **The δa/f median saturates at the fp32 noise floor, and matched-median rows below it
+  are matching round-off.** The fixed arm's median is **non-monotone in θ**: 2.44e-6
+  (θ=0.4), 1.91e-6 (0.45), **1.87e-6** (0.5), 2.87e-6 (0.55), 6.44e-6 (0.6). A *tighter*
+  opening angle cannot raise truncation error, so θ ≤ 0.5 is floored at ≈1.9–2.4×10⁻⁶ —
+  fp32 summation error over a 10⁶-particle near field, which is the right order for
+  ~√N · 1.2e-7. This is trap 8 in a new guise: previously the median saturated at *fp64*
+  machine precision when the far field was shallow; here it saturates at the **fp32**
+  floor when N is large. The two lowest matched rows for each arm (targets 1.87e-6 /
+  2.54e-6 and 1.93e-6 / 2.61e-6) are therefore **discarded above**, and one of them is
+  visibly the artifact: eq (16a) at target 2.54e-6 reported rms 1.05, p99.99 **0.57**,
+  p99 0.69 at work 2.02 — an outlier in every column at once. Rule of thumb for fp32 at
+  N=10⁶: distrust a matched median below ~3×10⁻⁶.
+- **Traversal retries fired on 15 of 15 configs, up to 16 attempts each.** Every config
+  paid the recompile cycle, which is most of why the sweep took ~1½ hours rather than
+  ~20 minutes. The converged caps for **N=10⁶ / leaf 256 on the lane** are
+  `max_pair_queue=690804`, `max_interactions_per_node=1024`. Pass them next time, and
+  note how far they are from leaf 256's N=10⁵ values (16384 / 8192) — trap 4 again, and
+  in *both* directions this time: the queue is 42× larger and the interaction capacity 8×
+  *smaller*.
+
+### N = 10⁷ — **NOT reached, and the blocker is identified rather than guessed**
+
+The 10⁷ census **OOMed on a 4.77 GiB allocation inside `_dual_tree_build_raw`** — i.e.
+inside the *monolithic* dual-tree walk, on a lane whose whole purpose is to avoid it. The
+cause is a stale predicate, not a capacity that needs raising:
+
+`allow_split_build` falls back to `_streamed_minimum_memory_gpu_default_split_build`,
+which is computed in `__init__` from `memory_objective == "minimum_memory"` and
+`streamed_far_pairs` — **before** `_apply_large_n_gpu_production_contract` coerces those
+very fields. So on `preset="large_n_gpu"` the predicate reads
+`memory_objective="balanced"`, comes out **False**, and the preset silently runs the
+monolithic build it exists to avoid. Both bench harnesses now pass
+`prepare_stage_memory_split_enabled=True` explicitly on the lane, which is why the
+smaller runs are unaffected.
+
+That is left as a **finding, not a fix**: flipping the default build path for every
+`large_n_gpu` user is a performance change (the split build trades extra prepare work for
+a lower peak) and deserves its own measurement, which is not this document's item. Fixing
+it is one line in the contract — recompute the predicate after the coercions.
+
+So the next session's 10⁷ attempt should (a) re-run the census with the split build
+explicitly on, which is now the harness default, and (b) expect to size
+`max_pair_queue`/`max_interactions_per_node` fresh, per trap 4 — the caps converged at
+10⁶ are not the caps for 10⁷, and an oversized *interaction* capacity OOMs where an
+oversized queue is merely wasteful.
 
 ### 5. Loose ends
 
@@ -460,6 +731,15 @@ upward pass that the criterion work uncovered. Step 1 (cache the force-scale pre
 is done: steady-state prepare overhead went from **5.87× to 0.98×** at N=16384/p=8.
 Step 2 (eq 16b) is validated and **positive** — it beats eq (16a). Step 3 (fold the
 criterion into per-node opening angles) is **refuted**, structurally.
+
+**Step 3′ is done (2026-08-04): the criterion runs on the large-N GPU lane, and N=10⁶ has
+been measured.** At leaf 256 the criterion is 12–31 % *cheaper* than fixed θ at matched
+median while collapsing the tail by 4.5–4.9× (eq 16a) or 10.8–11.9× (eq 16b's O(N)
+estimator) — real, but well short of the 21–41× measured at N=10⁵ with the same leaf.
+Holding leaf fixed while N grows deepens the tree, which is exactly what item 2b says
+erodes the advantage, so **the next measurement is a leaf sweep at 10⁶ (512/1024/2048),
+not another N point.** N=10⁷ is blocked on a stale split-build predicate — one line, and
+identified. See item 4.
 
 Open: whether the benefit holds at Dehnen's ε = 2×10⁻⁷ (never measured); the N-scaling
 trend; the O(N) `f_b` estimator; fast-lane access; and the cartesian basis's unexplained
@@ -930,6 +1210,43 @@ is the **scaled error δa/f** with `f_b ≡ Σ_{a≠b} G μ_a / |x_a−x_b|²`.
    Corollary for the N-ladder: **leaf_size must be held fixed across it.** A ladder that
    keeps leaf 256 while N grows crosses from "no far field" to "real far field" partway
    up, and reports that crossing as an N-scaling trend.
+
+   **A census harness now exists**: `bench/validation/far_pair_census.py`. Use it. It
+   also enforces traps 13 and 15 below, which are the two ways a census can lie to you.
+12. **`JAX_ENABLE_X64=0` does not give you fp32.** `yggdrax/__init__.py` calls
+   `jax.config.update("jax_enable_x64", True)` unconditionally at import, so the
+   environment variable is silently overridden and `jax.config.jax_enable_x64` reads
+   `True` either way. The first attempt at the trap-3 fp32 measurement produced
+   *bit-identical* numbers for both "precisions" and would have been reported as "fp32
+   changes nothing" — which is the right conclusion reached for entirely the wrong
+   reason. Precision is selected by the **input array dtype**, which is what the solver
+   derives `working_dtype` and the policy-state dtype from; `far_pair_census.py` and
+   `mac_error_distribution.py` take `--precision` for exactly this.
+13. **The large-N lane's prepared state carries no accept mask, so a bench that reads
+   `state.interactions` there measures zero far pairs.**
+   `_apply_large_n_gpu_production_contract` pins `retain_traversal_result=False` and
+   `retain_interactions=False` regardless of what the caller asked for, and the far field
+   is consumed into the downward locals during prepare. The failure is not a crash: the
+   count comes back 0 (or `-1`), every `--min-far-pairs` guard drops the config, and the
+   run reports **"NO configuration reaches N far pairs -- this grid measures nothing"**.
+   That happened on the first census here, for configurations that actually had 2116 and
+   13 884 far pairs. Read the count from `bench/validation/_lane_probe.py`, which hooks
+   `_build_dual_tree_artifacts` upstream of every discard; it is verified to return
+   exactly `state.interactions`' count on the generic lane.
+14. **A `None` force scale is not an error and not a no-op -- it is a *unit* force
+   scale.** `build_adaptive_policy_state` substitutes `jnp.ones(...)` when
+   `force_scale_nodes is None`, so a lane that forgets the prepass runs eq (16a) against
+   a threshold of `ε·1` instead of `ε·min_b|a_b|`: a different criterion, accepting far
+   more, running faster, reported nowhere. `AdaptivePolicyState` does not keep the scale,
+   only `target_accept_threshold = max(ε·s, 1e-24)`, so the fallback's signature is a
+   **constant** threshold across all nodes rather than an obviously wrong value.
+   `_lane_probe.check_criterion_was_applied()` raises on it, and on a build that carried
+   no `pair_policy` at all.
+15. **`preset="large_n_gpu"` pins `runtime_path="large_n"`.** So on the production preset
+   every large-N lane decline *raises* instead of quietly falling back -- which is the
+   behaviour you want, and also means the silent-decline branch is unreachable there and
+   cannot be tested under that preset. Do not add a decline reason expecting a graceful
+   fallback for preset users; they get an exception.
 
 ## The four steps
 

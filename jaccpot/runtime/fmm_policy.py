@@ -58,6 +58,43 @@ if TYPE_CHECKING:  # pragma: no cover - annotations only, no runtime import
 _DEFAULT_FORCE_SCALE_PREPASS_THETA = 0.5
 
 
+def _far_pair_arrays_for_fb_prepass(
+    *,
+    interactions: object,
+    compact_far_pairs: object,
+) -> tuple[Optional[Array], Optional[Array]]:
+    """Return flat (sources, targets) far-pair arrays for the eq (16b) estimator.
+
+    The estimator reads the far list as one flat COO pair array with ``-1`` for
+    inactive entries, which is exactly the node interaction list's layout -- and
+    also the streamed lane's ``CompactTaggedFarPairs``, once its padding is
+    handled. That matters because the streamed/large-N lane returns compact far
+    pairs and *no* node interaction list, so requiring the latter shut eq (16b)
+    out of the only lane that reaches 10^6.
+
+    ``far_pair_count`` is honoured explicitly rather than trusted to be encoded
+    as ``-1`` padding: yggdrax documents the arrays as "fixed-capacity padded"
+    without specifying the fill value, and a fill of ``0`` would read as the pair
+    ``(node 0, node 0)``. Node 0 is the root, so every spurious entry would add
+    mass to ``own[root]`` and the downward accumulation would push it into
+    *every* node -- inflating ``f_b``, loosening ``eps * s``, and making the
+    solver faster and wronger with nothing to show it.
+    """
+
+    if interactions is not None:
+        return interactions.sources, interactions.targets
+    if compact_far_pairs is None:
+        return None, None
+    sources = jnp.asarray(compact_far_pairs.sources)
+    targets = jnp.asarray(compact_far_pairs.targets)
+    count = getattr(compact_far_pairs, "far_pair_count", None)
+    if count is None:
+        return sources, targets
+    live = jnp.arange(sources.shape[0]) < jnp.asarray(count).reshape(())
+    sentinel = jnp.asarray(-1, dtype=sources.dtype)
+    return jnp.where(live, sources, sentinel), jnp.where(live, targets, sentinel)
+
+
 class PolicyMixin:
     def _solidfmm_basis_mode(self: "FMMEngine") -> str:
         """Return active solidfmm coefficient family ('complex' or 'real')."""
@@ -502,15 +539,27 @@ class PolicyMixin:
                 max_refine_levels_val=max_refine_levels_val,
                 aspect_threshold_val=aspect_threshold_val,
                 allow_stateful_cache=False,
+                # The streamed lane builds compact far pairs and then discards them
+                # unless something asks; this is that ask. Without it the prepass
+                # gets the near list only, and a near-only `f_b` captures 53-66% of
+                # the true value once the far field matters -- a silent under-estimate
+                # rather than a visible failure.
+                retain_compact_far_pairs=True,
             )
 
         interactions = dual_downward_artifacts.interactions
         neighbor_list = dual_downward_artifacts.neighbor_list
-        if interactions is None or neighbor_list is None:
+        compact_far_pairs = getattr(dual_downward_artifacts, "compact_far_pairs", None)
+        far_sources, far_targets = _far_pair_arrays_for_fb_prepass(
+            interactions=interactions,
+            compact_far_pairs=compact_far_pairs,
+        )
+        if far_sources is None or neighbor_list is None:
             raise RuntimeError(
-                "the f_b force-scale prepass needs both the far interaction list "
-                "and the near neighbour list; the traversal returned "
+                "the f_b force-scale prepass needs both the far pair list and the "
+                "near neighbour list; the traversal returned "
                 f"interactions={interactions is not None}, "
+                f"compact_far_pairs={compact_far_pairs is not None}, "
                 f"neighbors={neighbor_list is not None}. Without both, the "
                 "near/far partition is incomplete and f_b would be silently "
                 "under-counted rather than approximated."
@@ -522,8 +571,8 @@ class PolicyMixin:
             masses_sorted=tree_artifacts.masses_sorted,
             node_centers=geometry.center,
             node_radii=geometry.radius,
-            interaction_sources=interactions.sources,
-            interaction_targets=interactions.targets,
+            interaction_sources=far_sources,
+            interaction_targets=far_targets,
             neighbor_offsets=neighbor_list.offsets,
             neighbor_counts=neighbor_list.counts,
             neighbor_leaf_indices=neighbor_list.leaf_indices,
