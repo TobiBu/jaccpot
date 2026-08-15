@@ -71,6 +71,7 @@
   "_recent_dual_m2l_chunk_size": "0",
   "_recent_dual_neighbor_count": "0",
   "_recent_dual_node_count": "0",
+  "_recent_effective_theta_nodes": "None",
   "_recent_far_pairs_by_gear_counts": "()",
   "_recent_retry_events": "()",
   "_recent_topology_reused": "False",
