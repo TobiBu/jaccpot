@@ -25,7 +25,21 @@ from .runtime.fmm_constants import _LARGE_N_GPU_UPWARD_LEAF_BATCH_SIZE
 
 
 def _default_advanced_for_preset(preset: FMMPreset) -> FMMAdvancedConfig:
-    """Return default advanced overrides for a high-level preset."""
+    """Return default advanced overrides for a high-level preset.
+
+    Parameters
+    ----------
+    preset : FMMPreset
+        Normalized preset. Any value other than the three named below falls
+        through to ``ACCURATE``, which is therefore the default rather than an
+        error case.
+
+    Returns
+    -------
+    FMMAdvancedConfig
+        A fresh config; the caller may pass its own ``advanced=`` instead, in
+        which case this is never called.
+    """
     if preset is FMMPreset.FAST:
         return FMMAdvancedConfig()
     if preset is FMMPreset.LARGE_N_GPU:
@@ -105,14 +119,41 @@ def _default_advanced_for_preset(preset: FMMPreset) -> FMMAdvancedConfig:
 
 
 def _normalize_preset(preset: Union[FMMPreset, str]) -> FMMPreset:
-    """Normalize user preset input to :class:`FMMPreset`."""
+    """Normalize user preset input to :class:`FMMPreset`.
+
+    Parameters
+    ----------
+    preset : Union[FMMPreset, str]
+        An enum member, or its value as a string. Strings are stripped and
+        lowercased, so ``" Fast "`` is accepted.
+
+    Returns
+    -------
+    FMMPreset
+        The matching member. An unrecognized string raises ``ValueError`` from
+        the enum lookup rather than from an explicit check here.
+    """
     if isinstance(preset, FMMPreset):
         return preset
     return FMMPreset(str(preset).strip().lower())
 
 
 class _BasisResolution(NamedTuple):
-    """Resolved basis routing for public API and runtime backend."""
+    """Resolved basis routing for public API and runtime backend.
+
+    Attributes
+    ----------
+    public_name : str
+        What ``FastMultipoleMethod.basis`` reports back to the user. Not always
+        the string they passed: ``"solidfmm"`` and ``"complex"`` both report
+        ``"complex"``.
+    runtime_basis : Basis
+        What the engine is constructed with. This is the name that selects the
+        expansion algebra.
+    basis_impl : Optional[BasisInterface]
+        The basis object, when one exists. ``None`` for bases the runtime
+        implements internally rather than through the interface.
+    """
 
     public_name: str
     runtime_basis: Basis
@@ -168,6 +209,25 @@ def _resolve_basis_input(basis: Union[Basis, BasisInterface, str]) -> _BasisReso
     N=128) and below 3e-2 for the fp32 tracking test at N=96 -- the latter being
     considerably slacker than fp32 basis-change round-off should require, which is
     a tolerance worth re-measuring rather than a difference worth expecting.
+
+    Parameters
+    ----------
+    basis : Union[Basis, BasisInterface, str]
+        A basis name (stripped and lowercased) or an already-constructed
+        :class:`~jaccpot.BasisInterface`. Passing an object routes it straight
+        through as ``basis_impl``.
+
+    Returns
+    -------
+    _BasisResolution
+        Public name, runtime basis and implementation object.
+
+    Raises
+    ------
+    ValueError
+        If ``basis`` is a string that names no known basis.
+    TypeError
+        If ``basis`` is neither a string nor a :class:`BasisInterface`.
     """
     if isinstance(basis, str):
         basis_norm = basis.strip().lower()
@@ -225,7 +285,36 @@ def _pop_legacy_common_overrides(
 ) -> tuple[
     Union[Basis, BasisInterface, str], float, float, float, Optional[DTypeLike], bool
 ]:
-    """Consume legacy constructor kwargs and map them to modern arguments."""
+    """Consume legacy constructor kwargs and map them to modern arguments.
+
+    Each legacy spelling, when present, *wins* over the modern argument -- a
+    caller who passes both gets the legacy value. That is deliberate: the old
+    names were positional-in-spirit and explicit, whereas the modern ones carry
+    defaults that a mixed call site would not have meant to select.
+
+    Parameters
+    ----------
+    basis : Union[Basis, BasisInterface, str]
+        Modern value, overridden by legacy ``expansion_basis``.
+    theta : float
+        Modern value, overridden by legacy ``theta``.
+    G : float
+        Modern value, overridden by legacy ``G``.
+    softening : float
+        Modern value, overridden by legacy ``softening``.
+    working_dtype : Optional[DTypeLike]
+        Modern value, overridden by legacy ``working_dtype``.
+    legacy_kwargs : dict[str, Any]
+        Mutated in place: every key consumed here is popped, so what remains
+        after the two poppers have run is by construction unrecognized.
+
+    Returns
+    -------
+    tuple[Union[Basis, BasisInterface, str], float, float, float, Optional[DTypeLike], bool]
+        ``(basis, theta, G, softening, working_dtype, legacy_used)``. The final
+        flag is what triggers the single ``DeprecationWarning``, so it must be
+        threaded through the second popper rather than tested per argument.
+    """
     used = False
     legacy_basis = legacy_kwargs.pop("expansion_basis", None)
     if legacy_basis is not None:
@@ -251,6 +340,50 @@ def _pop_legacy_common_overrides(
 
 
 class _LegacyRuntimeOverrides(NamedTuple):
+    """Runtime-facing settings after legacy kwargs have been folded in.
+
+    Every field except the last two starts from ``advanced``/the preset and is
+    then overridden if the matching legacy kwarg was supplied.
+
+    Attributes
+    ----------
+    complex_rotation : str
+        Rotation backend; falls back to ``"solidfmm"`` when the config leaves it
+        ``None``. Legacy name: ``complex_rotation``.
+    tree_type : Optional[str]
+        Tree family. ``None`` here becomes ``"radix"`` at the engine call.
+        Legacy name: ``tree_type``.
+    execution_backend : str
+        Engine execution backend. Legacy name: ``execution_backend``.
+    tree_mode : Optional[str]
+        Tree build mode. Legacy name: ``tree_build_mode``.
+    target_leaf_particles : Optional[int]
+        Leaf occupancy target. Legacy name: ``target_leaf_particles``.
+    expanse_preset : Optional[str]
+        The engine's own preset string, derived from :class:`FMMPreset`;
+        ``None`` for presets the engine has no name for. Legacy name:
+        ``preset``.
+    mac_type : str
+        Acceptance criterion; defaults to ``"dehnen"`` for the solidfmm basis
+        and ``"bh"`` otherwise. Legacy name: ``mac_type``.
+    grouped_interactions : Optional[bool]
+        Grouped traversal toggle. Legacy name: ``grouped_interactions``.
+    farfield_mode : str
+        Far-field interaction mode. Legacy name: ``farfield_mode``.
+    nearfield_mode : str
+        Near-field interaction mode. Legacy name: ``nearfield_mode``.
+    nearfield_edge_chunk_size : int
+        Bucketed near-field chunk size. Legacy name:
+        ``nearfield_edge_chunk_size``.
+    fixed_order : Optional[int]
+        Legacy-only: there is no modern spelling, so this is ``None`` unless
+        ``fixed_order`` was passed.
+    fixed_max_leaf_size : Optional[int]
+        Legacy-only, as above, for ``fixed_max_leaf_size``.
+    legacy_used : bool
+        Threaded in and out so both poppers contribute to one warning decision.
+    """
+
     complex_rotation: str
     tree_type: Optional[str]
     execution_backend: str
@@ -275,7 +408,27 @@ def _pop_legacy_runtime_overrides(
     legacy_kwargs: dict[str, Any],
     legacy_used: bool,
 ) -> _LegacyRuntimeOverrides:
-    """Resolve runtime-facing legacy kwargs while preserving old behavior."""
+    """Resolve runtime-facing legacy kwargs while preserving old behavior.
+
+    Parameters
+    ----------
+    preset_norm : FMMPreset
+        Normalized preset, used only to derive ``expanse_preset``.
+    basis : Basis
+        Resolved *runtime* basis, used only to pick the default ``mac_type``.
+    advanced_cfg : FMMAdvancedConfig
+        Supplies the starting value of every field a legacy kwarg can override.
+    legacy_kwargs : dict[str, Any]
+        Mutated in place; consumed keys are popped.
+    legacy_used : bool
+        Carried in from :func:`_pop_legacy_common_overrides` and returned
+        possibly-set, so one warning covers both poppers.
+
+    Returns
+    -------
+    _LegacyRuntimeOverrides
+        Resolved settings, with ``legacy_used`` folded in.
+    """
     complex_rotation = advanced_cfg.farfield.rotation
     if complex_rotation is None:
         complex_rotation = "solidfmm"
@@ -389,12 +542,14 @@ class FastMultipoleMethod:
 
     Construction is deliberately shallow: pick a :class:`~jaccpot.FMMPreset`, then
     override individual things through ``advanced=``
-    (:class:`~jaccpot.FMMAdvancedConfig`). The 19 keyword-only constructor arguments
+    (:class:`~jaccpot.FMMAdvancedConfig`). The keyword-only constructor arguments
     here resolve, together with the preset, into the engine's much wider argument
-    set -- so this signature is the supported surface and is frozen by
-    ``tests/unit/test_public_api_surface.py``. The engine class in
-    ``runtime/_fmm_impl.py`` happens to share this name and is an implementation
-    detail reached only through this facade.
+    set -- so this signature is the supported surface, and the exact set is frozen
+    by ``test_facade_constructor_surface_is_frozen`` in
+    ``tests/unit/test_public_api_surface.py``. That engine is
+    ``runtime._fmm_impl.FMMEngine``, an implementation detail reached only through
+    this facade; ``test_public_class_is_the_solver_facade`` pins which of the two
+    ``jaccpot.FastMultipoleMethod`` resolves to.
 
     Every argument is keyword-only. The ones worth knowing before reading the
     per-argument docs:
@@ -409,6 +564,89 @@ class FastMultipoleMethod:
       can run (Ampere sm_80+), pure-JAX on sm_75 and CPU. An explicit ``True`` or
       ``False`` wins.
     * ``theta`` is the opening angle; smaller is more accurate and slower.
+
+    Nothing is computed at construction: it only resolves configuration and builds
+    the engine.
+
+    Parameters
+    ----------
+    preset : Union[FMMPreset, str]
+        Starting point for everything below. Determines the default ``advanced``
+        config, and for ``"large_n_gpu"`` also forces fp32 when no dtype was
+        requested, because that lane's kernels are fp32-only.
+    basis : Union[Basis, BasisInterface, str]
+        ``"real"`` (default), ``"solidfmm"``/``"complex"``, or the experimental
+        ``"cartesian"``, as above. May also be a constructed
+        :class:`~jaccpot.BasisInterface`.
+    m2l_impl : Optional[str]
+        M2L translation implementation. ``None`` means "let the basis decide",
+        which selects ``"rot_scale"`` for the real basis.
+    adaptive_order : bool
+        Choose the expansion order per interaction from ``p_gears`` instead of
+        using ``max_order`` everywhere.
+    p_gears : Optional[Sequence[int]]
+        Candidate orders for ``adaptive_order``, smallest passing one wins.
+        Ignored when ``adaptive_order`` is ``False``.
+    use_pallas : Optional[bool]
+        Near-field kernel selection; ``None`` auto-detects, as above.
+    reuse_topology : bool
+        Reuse the tree across calls instead of rebuilding every time. Trades
+        accuracy for speed as the particles drift from the tree they were binned
+        into.
+    rebuild_every : int
+        With ``reuse_topology``, rebuild after this many calls. Must be positive.
+    mac_force_scale_mode : str
+        How the per-node force scale entering Dehnen's eq (16a) is obtained:
+        ``"prev"`` (default) reuses the previous full evaluation's accelerations,
+        ``"paper"``/``"paper_fb"`` run a prepass, and the ``*_cached`` variants
+        require a cached scale rather than computing one.
+    mac_force_scale_prepass_theta : Optional[float]
+        Opening angle for the force-scale prepass's own traversal. ``None`` takes
+        the default. Only consulted by the prepass modes.
+    mac_force_scale_fb_inflation : float
+        Inflates the far-field source-to-target distance so the eq (16b) scale
+        stays a strict lower bound.
+    adaptive_error_model : str
+        Error estimator for adaptive acceptance: ``"tail_proxy"`` (default),
+        ``"dehnen_degree"``, or ``"dehnen_paper"`` -- the last being the eq (15)
+        estimator, which also switches the node force-scale reduction from max to
+        min.
+    adaptive_eps : Optional[float]
+        Relative force-accuracy target of eq (16a). ``None`` takes the default.
+    dehnen_geometry_mode : str
+        How node centres and radii entering the Dehnen MAC are measured: ``"com"``
+        (default), ``"exact"``, ``"tree"``, ``"tree_approx"`` or ``"runtime"``.
+        Some modes run a host loop over nodes and warn.
+    mac_theta_max : float
+        Upper clamp on the opening angle the adaptive MAC may choose.
+    theta : float
+        Opening angle. Smaller is more accurate and slower.
+    G : float
+        Gravitational constant.
+    softening : float
+        Plummer softening length for the near-field kernel.
+    precision : Optional[Literal['fp32', 'fp64']]
+        Convenience spelling of ``working_dtype``. Passing both is an error unless
+        they agree; ``"fp64"`` additionally requires ``jax_enable_x64``.
+    working_dtype : Optional[DTypeLike]
+        Explicit working dtype. ``None`` lets the preset decide.
+    advanced : Optional[FMMAdvancedConfig]
+        Replaces the preset's advanced defaults wholesale -- it is not merged into
+        them. Build it from the preset's own config if you mean to override only a
+        few fields.
+    **legacy_kwargs : Any
+        Transitional expanse-era spellings. Any recognized key overrides its modern
+        equivalent and triggers one ``DeprecationWarning``; anything left unconsumed
+        is a ``TypeError``.
+
+    Raises
+    ------
+    ValueError
+        If ``precision`` is not one of ``"fp32"``/``"fp64"``, conflicts with an
+        explicit ``working_dtype``, or requests fp64 without ``jax_enable_x64``.
+    TypeError
+        If any keyword argument was neither in the signature nor recognized as a
+        legacy spelling.
 
     Notes
     -----
@@ -799,6 +1037,37 @@ class FastMultipoleMethod:
         adaptive acceptance test for this call only, skipping the prepass and
         leaving the reuse cache untouched. Its length must match the node count of
         the tree this call builds.
+
+        Parameters
+        ----------
+        positions : Array
+            Source and target particle positions ``[N, 3]``.
+        masses : Array
+            Particle masses ``[N]``, aligned with ``positions``.
+        bounds : Optional[Tuple[Array, Array]]
+            Explicit ``(lower, upper)`` domain bounds for tree construction.
+            Defaults to the particle bounding box.
+        leaf_size : int
+            Target maximum particles per leaf.
+        max_order : int
+            Expansion order ``p``.
+        theta : Optional[float]
+            Per-call MAC opening-angle override.
+        cache_policy : str
+            How aggressively the prepared state may be cached and reused.
+        force_scale_nodes : Optional[Array]
+            Per-node force-scale override for this call only; see above.
+        runtime_overrides_override : Optional[Any]
+            Replacement runtime overrides for this preparation. ``Any`` because
+            the override type is a runtime internal.
+        fused_device_mode : bool
+            Build the fused device-resident layout used by the strict lanes.
+
+        Returns
+        -------
+        Union[FMMPreparedState, LargeNPreparedState]
+            The prepared state. Not traceable -- build it concretely, before any
+            ``jax.grad``.
         """
         return self._impl.prepare_state(
             positions,
@@ -925,7 +1194,47 @@ class FastMultipoleMethod:
         max_time_derivative_order: int = 1,
         mode: str = "accurate",
     ) -> tuple[Array, tuple[Array, ...]]:
-        """Compute accelerations and time derivatives up to order K."""
+        """Compute accelerations and time derivatives up to order K.
+
+        The generalisation of :meth:`compute_accelerations_and_jerk`: order 1 is
+        the jerk, and the ``mode`` values mean what ``jerk_mode`` means there,
+        including that they are not numerically equivalent.
+
+        Parameters
+        ----------
+        positions : Array
+            Source and target particle positions ``[N, 3]``.
+        masses : Array
+            Particle masses ``[N]``, aligned with ``positions``.
+        velocities : Array
+            Particle velocities ``[N, 3]``. Used only for the time derivatives;
+            the acceleration does not depend on them.
+        target_indices : Optional[Array]
+            1-D indices selecting which targets to return; all particles remain
+            sources.
+        bounds : Optional[Tuple[Array, Array]]
+            Explicit ``(lower, upper)`` domain bounds for tree construction.
+        leaf_size : int
+            Target maximum particles per leaf.
+        max_order : int
+            Expansion order ``p``.
+        theta : Optional[float]
+            Per-call MAC opening-angle override.
+        reuse_prepared_state : bool
+            Reuse the last prepared state when the array objects and preparation
+            parameters are identical.
+        max_time_derivative_order : int
+            Highest time-derivative order ``K`` to return. ``1`` is the jerk.
+        mode : str
+            ``"accurate"`` (default) or ``"fast_approx"``; see
+            :meth:`compute_accelerations_and_jerk`.
+
+        Returns
+        -------
+        tuple[Array, tuple[Array, ...]]
+            ``(accelerations, derivatives)``, where ``derivatives`` holds ``K``
+            arrays of shape ``[N, 3]`` in increasing order.
+        """
         return self._impl.compute_accelerations_with_time_derivatives(
             positions,
             masses,
@@ -950,7 +1259,29 @@ class FastMultipoleMethod:
         *,
         max_order: int = 4,
     ) -> Any:
-        """Build upward multipole data for a prebuilt tree."""
+        """Build upward multipole data for a prebuilt tree.
+
+        The P2M/M2M half of :meth:`prepare_state`, for callers holding a tree
+        built elsewhere. The particle arrays must already be in that tree's sort
+        order; this method does not permute them.
+
+        Parameters
+        ----------
+        tree : Any
+            A built tree artifact. ``Any`` so this module need not import the
+            ``yggdrax`` tree types.
+        positions_sorted : Array
+            Particle positions ``[N, 3]`` in ``tree``'s sort order.
+        masses_sorted : Array
+            Particle masses ``[N]`` in the same order.
+        max_order : int
+            Expansion order ``p``.
+
+        Returns
+        -------
+        Any
+            The upward-sweep result, likewise left as ``Any``.
+        """
         return self._impl.prepare_upward_sweep(
             tree,
             positions_sorted,
@@ -977,7 +1308,36 @@ class FastMultipoleMethod:
         Tuple[Array, tuple[Array, ...]],
         Tuple[Array, Array, tuple[Array, ...]],
     ]:
-        """Evaluate a previously prepared state for all particles or a subset."""
+        """Evaluate a previously prepared state for all particles or a subset.
+
+        Evaluates the expansions ``state`` already carries. It takes no live
+        positions or masses, so it must not be differentiated -- see
+        :meth:`differentiable_accelerations` for that.
+
+        Parameters
+        ----------
+        state : Union[FMMPreparedState, LargeNPreparedState]
+            Tree and interaction lists from :meth:`prepare_state`.
+        target_indices : Optional[Array]
+            1-D indices selecting which targets to return; all particles remain
+            sources.
+        return_potential : bool
+            Also return the potential ``[N]``.
+        jit_traversal : Optional[bool]
+            Per-call override; ``None`` takes the solver's configured value,
+            itself defaulting to ``True``.
+        max_acc_derivative_order : int
+            Packed spatial derivatives of acceleration to return alongside it;
+            ``0`` disables them. Non-zero requires the solidfmm basis.
+
+        Returns
+        -------
+        Union[Array, Tuple[Array, Array], Tuple[Array, tuple[Array, ...]], Tuple[Array, Array, tuple[Array, ...]]]
+            Accelerations, with potentials inserted next when
+            ``return_potential`` and the packed derivative tuple appended last
+            when ``max_acc_derivative_order > 0`` -- the same four shapes
+            :meth:`compute_accelerations` returns.
+        """
         jit_traversal = (
             (
                 True
@@ -1098,6 +1458,28 @@ class FastMultipoleMethod:
         Raises ``TypeError`` immediately if ``state`` holds tracers, rather than
         letting the failure surface deep inside the trace as a leaked-tracer
         error naming an internal cache.
+
+        Parameters
+        ----------
+        state : Union[FMMPreparedState, LargeNPreparedState]
+            Frozen topology from :meth:`prepare_state`, captured as a constant.
+            Must hold concrete arrays, not tracers.
+        target_indices : Optional[Array]
+            Optional subset of targets to return; all particles remain sources.
+        grad_config : Optional[GradConfig]
+            Gradient-path execution options; see
+            :meth:`differentiable_accelerations`.
+        jit_traversal : bool
+            Kept ``False`` on the gradient path.
+        compile_now : Optional[Tuple[Array, Array]]
+            Representative ``(positions, masses)`` to compile against eagerly, so
+            the one-time cost is paid here rather than on the first step.
+
+        Returns
+        -------
+        Callable[[Array, Array], Array]
+            ``f(positions, masses) -> accelerations``, differentiable and
+            compiled.
         """
 
         return self._impl.differentiable_step_fn(
@@ -1175,7 +1557,36 @@ class FastMultipoleMethod:
         max_time_derivative_order: int = 1,
         mode: str = "accurate",
     ) -> tuple[Array, tuple[Array, ...]]:
-        """Evaluate accelerations and time derivatives for a prepared state."""
+        """Evaluate accelerations and time derivatives for a prepared state.
+
+        The prepared-state counterpart of
+        :meth:`compute_accelerations_with_time_derivatives`, standing to it as
+        :meth:`evaluate_prepared_state_with_jerk` stands to
+        :meth:`compute_accelerations_and_jerk` -- and carrying the same caveat:
+        it evaluates prebaked expansions and must not be differentiated.
+
+        Parameters
+        ----------
+        state : FMMPreparedState
+            Tree and interaction lists from :meth:`prepare_state`.
+        velocities : Array
+            Particle velocities ``[N, 3]`` in the original (unsorted) particle
+            order.
+        target_indices : Optional[Array]
+            1-D indices selecting which targets to return; all particles remain
+            sources.
+        max_time_derivative_order : int
+            Highest time-derivative order ``K`` to return. ``1`` is the jerk.
+        mode : str
+            ``"accurate"`` (default) or ``"fast_approx"``; see
+            :meth:`compute_accelerations_and_jerk`.
+
+        Returns
+        -------
+        tuple[Array, tuple[Array, ...]]
+            ``(accelerations, derivatives)``, where ``derivatives`` holds ``K``
+            arrays of shape ``[N, 3]`` in increasing order.
+        """
         jit_traversal = (
             True
             if self.advanced.runtime.jit_traversal is None
@@ -1202,7 +1613,43 @@ class FastMultipoleMethod:
         theta: Optional[float] = None,
         fused_device_mode: bool = False,
     ) -> FMMPreparedState:
-        """Refresh prepared state under fixed-profile large-N runtime constraints."""
+        """Refresh prepared state under fixed-profile large-N runtime constraints.
+
+        Rebinds an existing state to new particle data without paying a full
+        :meth:`prepare_state`. Together with :meth:`update_multipoles_only` and
+        :meth:`rebuild_topology_in_place` -- both of which delegate here, differing
+        only in which diagnostic counter they bump and whether ``bounds`` is
+        forwarded -- this is the refresh cadence the strict runners drive.
+
+        Supported only on the large-N production profile
+        (``preset="large_n_gpu"``, radix tree, solidfmm basis) and only for a
+        ``LargeNPreparedState``; anything else raises from the engine.
+
+        Parameters
+        ----------
+        prepared_state : FMMPreparedState
+            State to refresh.
+        positions : Array
+            New particle positions ``[N, 3]``.
+        masses : Array
+            New particle masses ``[N]``.
+        bounds : Optional[Tuple[Array, Array]]
+            Explicit ``(lower, upper)`` domain bounds.
+        leaf_size : Optional[int]
+            Leaf target; ``None`` keeps the state's own.
+        max_order : Optional[int]
+            Expansion order; ``None`` keeps the state's own.
+        theta : Optional[float]
+            Opening angle; ``None`` keeps the state's own.
+        fused_device_mode : bool
+            Refresh into the fused device-resident layout.
+
+        Returns
+        -------
+        FMMPreparedState
+            The refreshed state. A new object -- nothing is mutated in place,
+            despite what :meth:`rebuild_topology_in_place` is called.
+        """
         return self._impl.refresh_prepared_state(
             prepared_state,
             positions,
@@ -1226,7 +1673,39 @@ class FastMultipoleMethod:
         theta: Optional[float] = None,
         jit_traversal: Optional[bool] = True,
     ) -> tuple[FMMPreparedState, Array]:
-        """Strict static-radix helper: prepare/refresh and evaluate in one call."""
+        """Strict static-radix helper: prepare/refresh and evaluate in one call.
+
+        Prepares when ``prepared_state`` is ``None`` and refreshes otherwise, then
+        evaluates -- so a loop can call this unconditionally and let the first
+        iteration build. Returning the state alongside the accelerations is what
+        makes that possible. Large-N production profile only.
+
+        Parameters
+        ----------
+        prepared_state : Optional[FMMPreparedState]
+            State to refresh, or ``None`` to prepare one.
+        positions : Array
+            Particle positions ``[N, 3]``.
+        masses : Array
+            Particle masses ``[N]``.
+        bounds : Optional[Tuple[Array, Array]]
+            Explicit ``(lower, upper)`` domain bounds.
+        leaf_size : int
+            Target maximum particles per leaf.
+        max_order : int
+            Expansion order ``p``. Defaults to 4 here against 2 in the engine;
+            the public default is the one that applies.
+        theta : Optional[float]
+            Per-call MAC opening-angle override.
+        jit_traversal : Optional[bool]
+            Per-call override of jitted traversal.
+
+        Returns
+        -------
+        tuple[FMMPreparedState, Array]
+            ``(prepared_state, accelerations)``. Feed the state back in on the
+            next call.
+        """
         return self._impl.strict_prepare_refresh_and_evaluate(
             prepared_state,
             positions,
@@ -1255,7 +1734,56 @@ class FastMultipoleMethod:
         rematerialize_fn: Optional[Callable[[Any], Any]] = None,
         collect_history: bool = False,
     ) -> tuple[Any, FMMPreparedState, Optional[list[Any]]]:
-        """Run strict segmented refresh cadence with caller-provided segment kernel."""
+        """Run strict segmented refresh cadence with caller-provided segment kernel.
+
+        The integrator-agnostic runner: it owns only the refresh cadence, and the
+        caller supplies the stepping. ``num_steps`` is cut into segments of
+        ``refresh_every`` (plus a tail), the prepared state is refreshed at each
+        boundary, and ``segment_runner`` advances the caller's own state within a
+        segment. Use :meth:`strict_run_v2` instead when the caller's integrator is
+        velocity Verlet over a raw array. Large-N production profile only.
+
+        Parameters
+        ----------
+        state : Any
+            The caller's integrator state, opaque to this method: it is only
+            passed to ``segment_runner`` and ``positions_getter``.
+        masses : Array
+            Particle masses ``[N]``.
+        num_steps : int
+            Total steps. Must be positive.
+        refresh_every : int
+            Steps per segment. Must be positive.
+        segment_runner : Callable[[Any, Array, int], tuple[Any, Any]]
+            ``(state, accelerations, num_steps) -> (next_state, segment_output)``.
+            The segment output is collected only under ``collect_history``.
+        positions_getter : Callable[[Any], Array]
+            Extracts ``[N, 3]`` positions from the caller's state, so the refresh
+            knows where the particles are.
+        prepared_state : Optional[FMMPreparedState]
+            Existing state to refresh, or ``None`` to prepare on the first
+            segment.
+        leaf_size : int
+            Target maximum particles per leaf.
+        max_order : int
+            Expansion order ``p``. Defaults to 4 here against 2 in the engine.
+        theta : Optional[float]
+            Per-call MAC opening-angle override.
+        jit_traversal : Optional[bool]
+            Per-call override of jitted traversal.
+        rematerialize_fn : Optional[Callable[[Any], Any]]
+            Applied to the state between segments, for callers that must
+            reconstruct device arrays across a refresh.
+        collect_history : bool
+            Accumulate each segment's output. Off by default because the history
+            is retained on device.
+
+        Returns
+        -------
+        tuple[Any, FMMPreparedState, Optional[list[Any]]]
+            ``(final_state, prepared_state, history)``, where ``history`` is
+            ``None`` unless ``collect_history``.
+        """
         return self._impl.strict_run_segmented(
             state=state,
             masses=masses,
@@ -1300,6 +1828,61 @@ class FastMultipoleMethod:
         streaming hook inside the device-resident scan (see the impl docstring):
         ``step_callback(step_index, state)`` every ``step_callback_stride`` steps,
         for minimal-sync rendering via ``jax.debug.callback``.
+
+        Endpoint-correct velocity Verlet, run device-resident. Unlike
+        :meth:`strict_run_segmented` the integrator is fixed and the state is a
+        raw array, which is what lets the whole loop live inside one scan.
+        Large-N production profile only, and ``refresh_every`` must be 1 --
+        endpoint correctness needs the self-gravity refreshed every step.
+
+        Parameters
+        ----------
+        state : Array
+            Packed integrator state ``[N, 2, 3]``: positions and velocities
+            stacked on axis 1.
+        masses : Array
+            Particle masses ``[N]``.
+        dt : float
+            Timestep.
+        num_steps : int
+            Total steps. Must be positive.
+        refresh_every : int
+            Must be 1; see above.
+        leaf_size : int
+            Target maximum particles per leaf.
+        max_order : int
+            Expansion order ``p``.
+        theta : Optional[float]
+            Per-call MAC opening-angle override.
+        prepared_state : Optional[FMMPreparedState]
+            Existing state to refresh, or ``None`` to prepare.
+        initial_self_acceleration : Optional[Array]
+            Self-gravity at step 0 ``[N, 3]``, if already known. ``None``
+            evaluates it, costing one extra evaluation.
+        jit_traversal : Optional[bool]
+            Per-call override of jitted traversal.
+        add_external : bool
+            Add ``external_acceleration_fn`` to the self-gravity each step.
+        external_acceleration_fn : Optional[Callable[[Array], Array]]
+            ``positions -> accelerations``; traced into the scan, so it must be
+            jittable.
+        rematerialize_between_refresh : bool
+            Rebuild device arrays at refresh boundaries.
+        return_history : bool
+            Return every step's state rather than only the last.
+        return_prepared_state : bool
+            Return the prepared state, so the next call can reuse it.
+        step_callback : Optional[Callable[[Array, Array], None]]
+            Fire-and-forget streaming hook; see above.
+        step_callback_stride : int
+            Steps between ``step_callback`` invocations.
+
+        Returns
+        -------
+        tuple[Array, Optional[FMMPreparedState], Optional[Array]]
+            ``(final_state, prepared_state, history)``. The second is ``None``
+            unless ``return_prepared_state``, the third ``None`` unless
+            ``return_history``.
         """
         return self._impl.strict_run_v2(
             state=state,
@@ -1333,9 +1916,30 @@ class FastMultipoleMethod:
     ) -> tuple[FMMPreparedState, Callable[[FMMPreparedState], Array]]:
         """Fused-lane eval-only closure for apples-to-apples eval benchmarking.
 
-        Returns ``(prepared_state, eval_fn)``: the prepared state is built with the
-        fused device-mode layout, and ``eval_fn(prepared_state)`` runs the fused
-        self-force evaluation with no refresh or velocity-Verlet update.
+        The prepared state is built with the fused device-mode layout, and
+        ``eval_fn`` runs the fused self-force evaluation with no refresh and no
+        velocity-Verlet update -- which is the point: it isolates evaluation cost
+        from the refresh and integration that :meth:`strict_run_v2` bundles with
+        it. A benchmarking seam, not a simulation entry point.
+
+        Parameters
+        ----------
+        positions : Array
+            Particle positions ``[N, 3]``.
+        masses : Array
+            Particle masses ``[N]``.
+        leaf_size : int
+            Target maximum particles per leaf.
+        max_order : int
+            Expansion order ``p``.
+        theta : Optional[float]
+            Per-call MAC opening-angle override.
+
+        Returns
+        -------
+        tuple[FMMPreparedState, Callable[[FMMPreparedState], Array]]
+            ``(prepared_state, eval_fn)``. Call ``eval_fn(prepared_state)``
+            repeatedly to time evaluation alone.
         """
         return self._impl.strict_fused_prepared_eval_fn(
             positions=positions,
@@ -1355,7 +1959,33 @@ class FastMultipoleMethod:
         max_order: Optional[int] = None,
         theta: Optional[float] = None,
     ) -> FMMPreparedState:
-        """Update multipole/local payloads when topology mapping is unchanged."""
+        """Update multipole/local payloads when topology mapping is unchanged.
+
+        A :meth:`refresh_prepared_state` under a different name and counter, for
+        the case where the caller knows the tree mapping still holds. It does not
+        take ``bounds``, since changing the domain would change the mapping.
+        Large-N production profile only.
+
+        Parameters
+        ----------
+        prepared_state : FMMPreparedState
+            State whose payloads are refreshed.
+        positions : Array
+            New particle positions ``[N, 3]``.
+        masses : Array
+            New particle masses ``[N]``.
+        leaf_size : Optional[int]
+            Leaf target; ``None`` keeps the state's own.
+        max_order : Optional[int]
+            Expansion order; ``None`` keeps the state's own.
+        theta : Optional[float]
+            Opening angle; ``None`` keeps the state's own.
+
+        Returns
+        -------
+        FMMPreparedState
+            The refreshed state.
+        """
         return self._impl.update_multipoles_only(
             prepared_state,
             positions,
@@ -1376,7 +2006,36 @@ class FastMultipoleMethod:
         max_order: Optional[int] = None,
         theta: Optional[float] = None,
     ) -> FMMPreparedState:
-        """Rebuild topology while tracking profile compatibility diagnostics."""
+        """Rebuild topology while tracking profile compatibility diagnostics.
+
+        The third face of :meth:`refresh_prepared_state`: same call, its own
+        counter, and ``bounds`` forwarded because a rebuild may legitimately
+        change the domain. "In place" names the intent to stay within the
+        compiled profile's capacities, not mutation -- a new state is returned.
+        Large-N production profile only.
+
+        Parameters
+        ----------
+        prepared_state : FMMPreparedState
+            State whose topology is rebuilt.
+        positions : Array
+            New particle positions ``[N, 3]``.
+        masses : Array
+            New particle masses ``[N]``.
+        bounds : Optional[Tuple[Array, Array]]
+            Explicit ``(lower, upper)`` domain bounds.
+        leaf_size : Optional[int]
+            Leaf target; ``None`` keeps the state's own.
+        max_order : Optional[int]
+            Expansion order; ``None`` keeps the state's own.
+        theta : Optional[float]
+            Opening angle; ``None`` keeps the state's own.
+
+        Returns
+        -------
+        FMMPreparedState
+            The rebuilt state.
+        """
         return self._impl.rebuild_topology_in_place(
             prepared_state,
             positions,
@@ -1388,7 +2047,15 @@ class FastMultipoleMethod:
         )
 
     def get_runtime_diagnostics(self: "FastMultipoleMethod") -> dict[str, Any]:
-        """Return runtime diagnostics for compile/profile reuse benchmarking."""
+        """Return runtime diagnostics for compile/profile reuse benchmarking.
+
+        Returns
+        -------
+        dict[str, Any]
+            Counters the engine has accumulated -- compile counts, profile-key
+            hits and misses, per-entry-point call tallies. A snapshot for
+            benchmarking and tests, not a stable schema.
+        """
         return self._impl.get_runtime_diagnostics()
 
     def clear_prepared_state_cache(self: "FastMultipoleMethod") -> None:
@@ -1398,13 +2065,31 @@ class FastMultipoleMethod:
     def clear_runtime_caches(
         self: "FastMultipoleMethod", *, clear_jax_compilation: bool = False
     ) -> None:
-        """Clear solver/runtime caches; optionally clear JAX compilation caches."""
+        """Clear solver/runtime caches; optionally clear JAX compilation caches.
+
+        Parameters
+        ----------
+        clear_jax_compilation : bool
+            Also call ``jax.clear_caches()``. Off by default because it discards
+            compilation work belonging to the whole process, not just this
+            solver, and does not shrink XLA's allocation arena.
+        """
         self._impl.clear_runtime_caches(
             clear_jax_compilation=bool(clear_jax_compilation)
         )
 
     def export_m2l_autotune_cache(self: "FastMultipoleMethod") -> list[dict[str, Any]]:
-        """Return a JSON-serializable snapshot of M2L chunk autotune results."""
+        """Return a JSON-serializable snapshot of M2L chunk autotune results.
+
+        The cache is process-global, not per-solver, so this exports what every
+        solver in the process has autotuned. Autotuning costs real time on first
+        use, which is why it is worth persisting across runs.
+
+        Returns
+        -------
+        list[dict[str, Any]]
+            One entry per autotuned configuration.
+        """
 
         return self._impl.export_m2l_autotune_cache()
 
@@ -1414,12 +2099,39 @@ class FastMultipoleMethod:
         *,
         merge: bool = True,
     ) -> int:
-        """Restore M2L chunk autotune results from serialized payload."""
+        """Restore M2L chunk autotune results from serialized payload.
+
+        Parameters
+        ----------
+        payload : list[dict[str, Any]]
+            Entries as produced by :meth:`export_m2l_autotune_cache`.
+        merge : bool
+            Merge into the process-global cache (default) rather than clearing it
+            first.
+
+        Returns
+        -------
+        int
+            Number of entries restored. Malformed entries are skipped silently,
+            so a result below ``len(payload)`` is the only signal that the
+            payload was not fully understood.
+        """
 
         return int(self._impl.import_m2l_autotune_cache(payload, merge=bool(merge)))
 
     def save_m2l_autotune_cache(self: "FastMultipoleMethod", path: str) -> int:
-        """Write M2L chunk autotune results to a JSON file."""
+        """Write M2L chunk autotune results to a JSON file.
+
+        Parameters
+        ----------
+        path : str
+            Destination file, overwritten if it exists.
+
+        Returns
+        -------
+        int
+            Number of entries written.
+        """
 
         return int(self._impl.save_m2l_autotune_cache(path))
 
@@ -1429,7 +2141,22 @@ class FastMultipoleMethod:
         *,
         merge: bool = True,
     ) -> int:
-        """Load M2L chunk autotune results from a JSON file."""
+        """Load M2L chunk autotune results from a JSON file.
+
+        Parameters
+        ----------
+        path : str
+            Source file, as written by :meth:`save_m2l_autotune_cache`. Its
+            top-level JSON value must be a list.
+        merge : bool
+            Merge into the process-global cache (default) rather than clearing it
+            first.
+
+        Returns
+        -------
+        int
+            Number of entries restored; see :meth:`import_m2l_autotune_cache`.
+        """
 
         return int(self._impl.load_m2l_autotune_cache(path, merge=bool(merge)))
 
@@ -1471,7 +2198,17 @@ class FastMultipoleMethod:
 
     @grouped_interactions.setter
     def grouped_interactions(self: "FastMultipoleMethod", value: bool) -> None:
-        """Set grouped-interaction mode and mirror it into advanced config."""
+        """Set grouped-interaction mode and mirror it into advanced config.
+
+        Writing this marks the choice explicit in the engine, so later automatic
+        resolution will not override it, and mirrors it back into ``advanced`` so
+        the config keeps agreeing with the engine.
+
+        Parameters
+        ----------
+        value : bool
+            Whether to group interactions during traversal.
+        """
         next_value = bool(value)
         self._impl.grouped_interactions = next_value
         if hasattr(self._impl, "_explicit_grouped_interactions"):
