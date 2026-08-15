@@ -35,7 +35,7 @@ EXPECTED_ALL = {
     "RuntimePolicyConfig",
     "TraversalOverrides",
     "TreeConfig",
-    "differentiable_gravitational_acceleration",
+    "direct_sum_gravitational_acceleration",
 }
 
 # Frozen preset members (name -> value). ODISSEO selects presets by these.
@@ -128,7 +128,7 @@ def test_export_kinds() -> None:
     # Enum.
     assert issubclass(jaccpot.FMMPreset, enum.Enum)
     # Callable (function).
-    assert callable(jaccpot.differentiable_gravitational_acceleration)
+    assert callable(jaccpot.direct_sum_gravitational_acceleration)
 
 
 def test_public_class_is_the_solver_facade() -> None:

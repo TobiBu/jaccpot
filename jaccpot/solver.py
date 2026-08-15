@@ -19,7 +19,7 @@ from .config import (
     GradConfig,
 )
 from .runtime._large_n_types import LargeNPreparedState
-from .runtime.fmm import FastMultipoleMethod as _RuntimeFMM
+from .runtime.fmm import FMMEngine as _RuntimeFMM
 from .runtime.fmm import FMMPreparedState
 from .runtime.fmm_constants import _LARGE_N_GPU_UPWARD_LEAF_BATCH_SIZE
 

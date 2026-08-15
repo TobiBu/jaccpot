@@ -1,6 +1,6 @@
 """Primary correctness gate for the differentiable FMM force.
 
-The direct O(N^2) sum (:func:`differentiable_gravitational_acceleration`) is
+The direct O(N^2) sum (:func:`direct_sum_gravitational_acceleration`) is
 exactly differentiable, so ``jax.grad`` of the fixed-topology FMM
 (:meth:`FastMultipoleMethod.differentiable_accelerations`) must agree with
 ``jax.grad`` of the direct sum to the FMM's own *force* accuracy -- not to

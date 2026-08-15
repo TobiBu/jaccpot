@@ -44,7 +44,7 @@ import numpy as np
 import pytest
 
 from jaccpot import FastMultipoleMethod
-from jaccpot.autodiff import differentiable_gravitational_acceleration
+from jaccpot.autodiff import direct_sum_gravitational_acceleration
 from jaccpot.config import FarFieldConfig, FMMAdvancedConfig
 from jaccpot.runtime.fmm_constants import _GPU_LARGE_PARTICLE_THRESHOLD
 
@@ -200,7 +200,7 @@ def test_ungrouped_grad_path_is_a_valid_and_more_accurate_far_field():
     state = fmm.prepare_state(positions, masses, max_order=order, leaf_size=leaf)
     assert _num_far_pairs(state) > 0, "config must exercise the far field"
 
-    exact = differentiable_gravitational_acceleration(
+    exact = direct_sum_gravitational_acceleration(
         positions, masses, G=G, softening=softening
     )
     exact_norm = float(jnp.linalg.norm(exact))

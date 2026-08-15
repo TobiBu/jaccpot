@@ -1,4 +1,4 @@
-"""Golden snapshot of every attribute ``FastMultipoleMethod.__init__`` resolves.
+"""Golden snapshot of every attribute ``FMMEngine.__init__`` resolves.
 
 **Why this exists, and why it is in `characterization/`.** The engine constructor is
 722 lines resolving 60 parameters into 272 instance attributes, and the *order* of
@@ -33,7 +33,7 @@ import pytest
 
 import jaccpot
 from jaccpot import ComplexSHBasis, RealSHBasis
-from jaccpot.runtime._fmm_impl import FastMultipoleMethod
+from jaccpot.runtime._fmm_impl import FMMEngine
 
 GOLDEN_PATH = Path(__file__).parent / "golden_modes" / "constructor_state.json"
 REGEN = os.environ.get("JACCPOT_REGEN_GOLDEN") == "1"
@@ -172,10 +172,13 @@ def _state(**kwargs: Any) -> dict[str, str]:
     kwargs = dict(kwargs)
     via_facade = kwargs.pop(_VIA_FACADE, False)
     if via_facade:
+        # `jaccpot.FastMultipoleMethod` is the FACADE; `FMMEngine` below is the engine.
+        # This file names both, so a blanket rename over it is wrong -- audit 2.4 did
+        # exactly that here once and this line is why the golden went red.
         # Snapshot the ENGINE either way, since that is what the refactor touches.
         engine = jaccpot.FastMultipoleMethod(**kwargs)._impl
     else:
-        engine = FastMultipoleMethod(**kwargs)
+        engine = FMMEngine(**kwargs)
     return {name: repr(value) for name, value in vars(engine).items()}
 
 
@@ -361,7 +364,7 @@ def test_the_snapshot_covers_every_attribute_the_constructor_sets() -> None:
     "no JAX arrays in constructor state" property the module docstring relies on,
     since an array's `repr` is truncated and would make the comparison partial.
     """
-    fmm = FastMultipoleMethod(expansion_basis="solidfmm")
+    fmm = FMMEngine(expansion_basis="solidfmm")
     live = vars(fmm)
     snapshot = _state(expansion_basis="solidfmm")
     assert set(snapshot) == set(live), (

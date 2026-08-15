@@ -50,7 +50,7 @@ if TYPE_CHECKING:  # pragma: no cover - annotations only, no runtime import
     # would form the cycle ARCHITECTURE §8 forbids. Before this block the names were
     # dangling: `typing.get_type_hints` raised NameError on every mixin method, so the
     # annotations documented an intent no tool could check.
-    from ._fmm_impl import FastMultipoleMethod
+    from ._fmm_impl import FMMEngine
 
 
 #: Opening angle the force-scale prepass traversal defaults to. See
@@ -59,7 +59,7 @@ _DEFAULT_FORCE_SCALE_PREPASS_THETA = 0.5
 
 
 class PolicyMixin:
-    def _solidfmm_basis_mode(self: "FastMultipoleMethod") -> str:
+    def _solidfmm_basis_mode(self: "FMMEngine") -> str:
         """Return active solidfmm coefficient family ('complex' or 'real')."""
         basis_obj = self.basis_impl
         name = str(getattr(basis_obj, "name", "")).strip().lower()
@@ -68,7 +68,7 @@ class PolicyMixin:
         return "complex"
 
     def _compute_node_force_scale_from_sorted_acc(
-        self: "FastMultipoleMethod",
+        self: "FMMEngine",
         *,
         tree: Tree,
         accelerations_sorted: Array,
@@ -83,7 +83,7 @@ class PolicyMixin:
         )
 
     def _record_force_scale_from_evaluation(
-        self: "FastMultipoleMethod",
+        self: "FMMEngine",
         *,
         state: FMMPreparedState,
         evaluation: object,
@@ -130,7 +130,7 @@ class PolicyMixin:
         )
 
     def _source_error_proxy_by_order_from_multipoles(
-        self: "FastMultipoleMethod",
+        self: "FMMEngine",
         *,
         multipole_packed: Array,
         p_gears: tuple[int, ...],
@@ -142,7 +142,7 @@ class PolicyMixin:
             p_gears=p_gears,
         )
 
-    def _adaptive_error_model_code(self: "FastMultipoleMethod") -> int:
+    def _adaptive_error_model_code(self: "FMMEngine") -> int:
         """Return the integer policy code for the active adaptive error model."""
 
         if self.adaptive_error_model == "dehnen_paper":
@@ -151,7 +151,7 @@ class PolicyMixin:
             return 1
         return 0
 
-    def _uses_dehnen_error_policy(self: "FastMultipoleMethod") -> bool:
+    def _uses_dehnen_error_policy(self: "FMMEngine") -> bool:
         """Return whether the solver evaluates the Dehnen error criterion at all.
 
         True for both ``dehnen_error`` (exact, evaluated pair-by-pair through a
@@ -165,7 +165,7 @@ class PolicyMixin:
 
         return str(self.mac_type) in ("dehnen_error", "dehnen_theta")
 
-    def _uses_per_node_effective_theta(self: "FastMultipoleMethod") -> bool:
+    def _uses_per_node_effective_theta(self: "FMMEngine") -> bool:
         """Return whether the MAC is folded into a per-node opening angle.
 
         ``dehnen_theta`` evaluates the same Dehnen criterion as ``dehnen_error``,
@@ -192,29 +192,29 @@ class PolicyMixin:
 
         return str(self.mac_type) == "dehnen_theta"
 
-    def _uses_dehnen_paper_error_model(self: "FastMultipoleMethod") -> bool:
+    def _uses_dehnen_paper_error_model(self: "FMMEngine") -> bool:
         """Return whether the active adaptive error model is the paper estimator."""
 
         return self.adaptive_error_model == "dehnen_paper"
 
-    def _uses_paper_style_traversal_policy(self: "FastMultipoleMethod") -> bool:
+    def _uses_paper_style_traversal_policy(self: "FMMEngine") -> bool:
         """Return whether traversal should use the paper-style error policy."""
 
         return self._uses_dehnen_paper_error_model() or self._uses_dehnen_error_policy()
 
-    def _traversal_policy_error_model_code(self: "FastMultipoleMethod") -> int:
+    def _traversal_policy_error_model_code(self: "FMMEngine") -> int:
         """Return the policy error model code used during traversal."""
 
         if self._uses_dehnen_error_policy():
             return 2
         return self._adaptive_error_model_code()
 
-    def _force_scale_reduction_mode(self: "FastMultipoleMethod") -> str:
+    def _force_scale_reduction_mode(self: "FMMEngine") -> str:
         """Return the node reduction mode used for adaptive force scales."""
 
         return "min" if self._uses_dehnen_paper_error_model() else "max"
 
-    def _uses_fb_force_scale(self: "FastMultipoleMethod") -> bool:
+    def _uses_fb_force_scale(self: "FMMEngine") -> bool:
         """Return whether the force scale is eq (16b)'s ``f_b`` rather than ``|a_b|``.
 
         eq (16b) is eq (16a) with ``min_b f_b`` on the right-hand side instead of
@@ -226,7 +226,7 @@ class PolicyMixin:
 
         return str(self.mac_force_scale_mode) in ("paper_fb", "paper_fb_cached")
 
-    def _force_scale_prepass_theta(self: "FastMultipoleMethod") -> float:
+    def _force_scale_prepass_theta(self: "FMMEngine") -> float:
         """Return the opening angle the force-scale prepass traversal should use.
 
         The prepass runs a *geometric* traversal, so its own theta decides how much
@@ -257,7 +257,7 @@ class PolicyMixin:
             return float(override)
         return _DEFAULT_FORCE_SCALE_PREPASS_THETA
 
-    def _uses_paper_style_force_scale(self: "FastMultipoleMethod") -> bool:
+    def _uses_paper_style_force_scale(self: "FMMEngine") -> bool:
         """Return whether prepare_state needs paper-style force-scale handling."""
 
         return self.adaptive_order or self._uses_paper_style_traversal_policy()
@@ -301,13 +301,13 @@ class PolicyMixin:
             "dehnen" if str(mac_type) in ("dehnen_error", "dehnen_theta") else mac_type
         )
 
-    def _base_mac_type(self: "FastMultipoleMethod") -> MACType:
+    def _base_mac_type(self: "FMMEngine") -> MACType:
         """Return the Yggdrax-facing geometric MAC for the active solver mode."""
 
         return self._mac_type_for_traversal(self.mac_type)
 
     def _policy_orders_for_prepare_state(
-        self: "FastMultipoleMethod", *, max_order: int
+        self: "FMMEngine", *, max_order: int
     ) -> tuple[int, ...]:
         """Return candidate orders used to build adaptive traversal policy state."""
 
@@ -316,7 +316,7 @@ class PolicyMixin:
         return self.p_gears
 
     def _build_adaptive_policy_state(
-        self: "FastMultipoleMethod",
+        self: "FMMEngine",
         *,
         upward: TreeUpwardData,
         tree: Tree,
@@ -345,7 +345,7 @@ class PolicyMixin:
         )
 
     def _apply_per_node_effective_theta(
-        self: "FastMultipoleMethod",
+        self: "FMMEngine",
         *,
         tree_artifacts: _PrepareStateTreeUpwardArtifacts,
         force_scale_nodes: Optional[Array],
@@ -410,7 +410,7 @@ class PolicyMixin:
 
     @contextlib.contextmanager
     def _force_scale_prepass_scope(
-        self: "FastMultipoleMethod", *, low_order: int
+        self: "FMMEngine", *, low_order: int
     ) -> Iterator[None]:
         """Run a force-scale prepass with solver state restored on the way out.
 
@@ -451,7 +451,7 @@ class PolicyMixin:
             self._in_force_scale_prepass = False
 
     def _compute_force_scale_fb_prepass_from_tree_artifacts(
-        self: "FastMultipoleMethod",
+        self: "FMMEngine",
         *,
         tree_artifacts: _PrepareStateTreeUpwardArtifacts,
         upward_center_mode: str,
@@ -537,7 +537,7 @@ class PolicyMixin:
         )
 
     def _compute_force_scale_paper_prepass_from_tree_artifacts(
-        self: "FastMultipoleMethod",
+        self: "FMMEngine",
         *,
         tree_artifacts: _PrepareStateTreeUpwardArtifacts,
         low_order: int,

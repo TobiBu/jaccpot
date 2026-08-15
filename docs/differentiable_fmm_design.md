@@ -153,7 +153,7 @@ outer-jittable at arbitrary N is a scoped follow-up.
 
 ## 6. Correctness strategy (Phase 3)
 
-- **Primary gate:** `grad(differentiable_accelerations)` vs `grad(differentiable_gravitational_acceleration)`
+- **Primary gate:** `grad(differentiable_accelerations)` vs `grad(direct_sum_gravitational_acceleration)`
   (the exactly-differentiable direct O(N²) sum) — must agree to the FMM's own **force**
   accuracy (not machine precision), for masses and positions.
 - **FD vs AD** swept over θ, N, p; FD perturbs the *same frozen-topology function*

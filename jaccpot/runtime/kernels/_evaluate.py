@@ -809,7 +809,7 @@ def _evaluate_prepared_tree(
     # `experimental/` rely on by reaching past the orchestrator into here. A
     # TYPE_CHECKING import would not run, but it would still make this file name the
     # engine, so the annotation stays documentation-only.
-    fmm: "FastMultipoleMethod",  # noqa: F821 -- deliberate; see the comment above
+    fmm: "FMMEngine",  # noqa: F821 -- deliberate; see the comment above
     tree: Tree,
     positions_sorted: Array,
     masses_sorted: Array,
@@ -1359,7 +1359,7 @@ def _evaluate_prepared_tree_targets(
     # `experimental/` rely on by reaching past the orchestrator into here. A
     # TYPE_CHECKING import would not run, but it would still make this file name the
     # engine, so the annotation stays documentation-only.
-    fmm: "FastMultipoleMethod",  # noqa: F821 -- deliberate; see the comment above
+    fmm: "FMMEngine",  # noqa: F821 -- deliberate; see the comment above
     tree: Tree,
     positions_sorted: Array,
     masses_sorted: Array,

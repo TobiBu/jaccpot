@@ -1,4 +1,4 @@
-"""DiagnosticsMixin: fmm_diagnostics methods extracted from the FastMultipoleMethod
+"""DiagnosticsMixin: fmm_diagnostics methods extracted from the FMMEngine
 god-class (Phase 2d mixin split). Methods are verbatim (self unchanged); the
 engine class inherits this mixin. Sibling of _fmm_impl at runtime level.
 """
@@ -19,12 +19,12 @@ if TYPE_CHECKING:  # pragma: no cover - annotations only, no runtime import
     # would form the cycle ARCHITECTURE §8 forbids. Before this block the names were
     # dangling: `typing.get_type_hints` raised NameError on every mixin method, so the
     # annotations documented an intent no tool could check.
-    from ._fmm_impl import FastMultipoleMethod, PreparedStateLike
+    from ._fmm_impl import FMMEngine, PreparedStateLike
 
 
 class DiagnosticsMixin:
     def get_stage_timing(
-        self: "FastMultipoleMethod",
+        self: "FMMEngine",
         *,
         per_call: bool = False,
     ) -> dict[str, Any]:
@@ -85,7 +85,7 @@ class DiagnosticsMixin:
         }
 
     def _record_large_n_eval_shape_diagnostics(
-        self: "FastMultipoleMethod",
+        self: "FMMEngine",
         state: PreparedStateLike,
     ) -> None:
         """Record shape-only local-eval diagnostics outside compiled hot loops."""
@@ -158,7 +158,7 @@ class DiagnosticsMixin:
         )
         self._large_n_target_block_source_leaf_padded_shape = padded_source_leaf_shape
 
-    def get_runtime_diagnostics(self: "FastMultipoleMethod") -> dict[str, Any]:
+    def get_runtime_diagnostics(self: "FMMEngine") -> dict[str, Any]:
         """Return read-only runtime diagnostics for compile/profile reuse audits."""
         return {
             # Why the large-N prepare path declined, or None if it was not
