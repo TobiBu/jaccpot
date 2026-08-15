@@ -608,7 +608,7 @@ the resolution had to thread the pair policy *into* that loop rather than pick a
 
 ### The N = 10⁶ measurement — **the first one ever taken, and it does NOT reproduce the N=10⁵ / leaf 256 headline**
 
-`results/validation/mac_1e6_leaf256_lane.json`. N=10⁶, **leaf 256**, p=8, Plummer, fp32,
+`bench/results/validation/mac_1e6_leaf256_lane.json`. N=10⁶, **leaf 256**, p=8, Plummer, fp32,
 zero softening, one seed, δa/f against a float64 direct sum over a 10⁵-target subsample,
 matched at equal **median**, both guards on. All 15 records carry
 `prepared_state_type="LargeNPreparedState"`, `large_n_path_declined_reason=null` and
