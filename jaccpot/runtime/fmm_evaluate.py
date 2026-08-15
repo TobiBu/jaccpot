@@ -1,4 +1,4 @@
-"""EvaluateMixin: fmm_evaluate methods extracted from the FastMultipoleMethod
+"""EvaluateMixin: fmm_evaluate methods extracted from the FMMEngine
 god-class (Phase 2d mixin split). Methods are verbatim (self unchanged); the
 engine class inherits this mixin. Sibling of _fmm_impl at runtime level.
 """
@@ -51,7 +51,7 @@ if TYPE_CHECKING:  # pragma: no cover - annotations only, no runtime import
     # `_fmm_impl` imports this mixin, and `_large_n_grad` is already deferred to a
     # function-local import below for compile-time reasons, so both must stay out of
     # the module-scope import graph. Before this block these names were dangling.
-    from ._fmm_impl import FastMultipoleMethod, PreparedStateLike
+    from ._fmm_impl import FMMEngine, PreparedStateLike
     from ._large_n_grad import LargeNGradPlan
 
 _OUTER_JIT_WARNED = False
@@ -88,7 +88,7 @@ def _warn_if_traced_under_an_outer_jit(positions: Any, masses: Any) -> None:
         "measured on an A100 at N=4096/fp64, 19 s for the forward, 160 s for the "
         "gradient, and one inner module alone at 3m28s. It is a one-time cost. "
         "To pay it deliberately rather than inside a timed region, use "
-        "FastMultipoleMethod.differentiable_step_fn(state, compile_now=(pos, "
+        "FMMEngine.differentiable_step_fn(state, compile_now=(pos, "
         "mass)). This warning is issued once per process.",
         UserWarning,
         stacklevel=3,
@@ -98,7 +98,7 @@ def _warn_if_traced_under_an_outer_jit(positions: Any, masses: Any) -> None:
 class EvaluateMixin:
     @jaxtyped(typechecker=beartype)
     def compute_accelerations(
-        self: "FastMultipoleMethod",
+        self: "FMMEngine",
         positions: Array,
         masses: Array,
         *,
@@ -286,7 +286,7 @@ class EvaluateMixin:
 
     @jaxtyped(typechecker=beartype)
     def evaluate_prepared_state(
-        self: "FastMultipoleMethod",
+        self: "FMMEngine",
         state: PreparedStateLike,
         *,
         target_indices: Optional[Array] = None,
@@ -464,7 +464,7 @@ class EvaluateMixin:
 
     @jaxtyped(typechecker=beartype)
     def _evaluate_prepared_state_at_positions_sorted(
-        self: "FastMultipoleMethod",
+        self: "FMMEngine",
         state: FMMPreparedState,
         positions_sorted: Array,
         *,
@@ -621,7 +621,7 @@ class EvaluateMixin:
 
     @jaxtyped(typechecker=beartype)
     def differentiable_accelerations(
-        self: "FastMultipoleMethod",
+        self: "FMMEngine",
         state: Union[FMMPreparedState, LargeNPreparedState],
         positions: Array,
         masses: Array,
@@ -736,7 +736,7 @@ class EvaluateMixin:
             )
 
     def differentiable_step_fn(
-        self: "FastMultipoleMethod",
+        self: "FMMEngine",
         state: Union[FMMPreparedState, LargeNPreparedState],
         *,
         target_indices: Optional[Array] = None,
@@ -861,7 +861,7 @@ class EvaluateMixin:
         return compiled
 
     def _forward_permutation(
-        self: "FastMultipoleMethod",
+        self: "FMMEngine",
         state: Union[FMMPreparedState, LargeNPreparedState],
     ) -> Array:
         """Original-order -> Morton-sorted gather index, memoized on the state.
@@ -907,7 +907,7 @@ class EvaluateMixin:
         return forward_permutation
 
     def _sorted_inputs(
-        self: "FastMultipoleMethod",
+        self: "FMMEngine",
         state: Union[FMMPreparedState, LargeNPreparedState],
         positions: Array,
         masses: Array,
@@ -920,7 +920,7 @@ class EvaluateMixin:
         )
 
     def _grad_output_dtype(
-        self: "FastMultipoleMethod",
+        self: "FMMEngine",
         state: Union[FMMPreparedState, LargeNPreparedState],
     ) -> Any:
         """Return accelerations in the caller's float dtype where there is one."""
@@ -929,7 +929,7 @@ class EvaluateMixin:
         return state.working_dtype
 
     def _differentiable_accelerations_large_n(
-        self: "FastMultipoleMethod",
+        self: "FMMEngine",
         state: LargeNPreparedState,
         positions: Array,
         masses: Array,
@@ -987,7 +987,7 @@ class EvaluateMixin:
         )
 
     def _differentiable_accelerations_radix(
-        self: "FastMultipoleMethod",
+        self: "FMMEngine",
         state: FMMPreparedState,
         positions: Array,
         masses: Array,
@@ -1036,7 +1036,7 @@ class EvaluateMixin:
         )
 
     def _evaluate_leaf_major_nearfield(
-        self: "FastMultipoleMethod",
+        self: "FMMEngine",
         tree: Tree,
         neighbor_list: NodeNeighborList,
         nearfield_interop: Optional[NearfieldInteropData],
@@ -1087,7 +1087,7 @@ class EvaluateMixin:
 
     @jaxtyped(typechecker=beartype)
     def evaluate_tree(
-        self: "FastMultipoleMethod",
+        self: "FMMEngine",
         tree: Tree,
         positions_sorted: Array,
         masses_sorted: Array,
@@ -1241,7 +1241,7 @@ class EvaluateMixin:
 
     @jaxtyped(typechecker=beartype)
     def evaluate_tree_compiled(
-        self: "FastMultipoleMethod",
+        self: "FMMEngine",
         tree: Tree,
         positions_sorted: Array,
         masses_sorted: Array,

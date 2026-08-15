@@ -4,7 +4,7 @@ import jax.numpy as jnp
 import numpy as np
 from yggdrax.tree import build_tree
 
-from jaccpot.runtime._fmm_impl import FastMultipoleMethod
+from jaccpot.runtime._fmm_impl import FMMEngine
 from jaccpot.upward.solidfmm_complex_tree_expansions import (
     prepare_solidfmm_complex_source_motion_multipoles,
     prepare_solidfmm_complex_upward_sweep,
@@ -102,11 +102,11 @@ def test_prepare_upward_sweep_stashes_and_reuses_concrete_depth():
     import jax
     from yggdrax.tree import get_num_levels
 
-    from jaccpot.runtime._fmm_impl import FastMultipoleMethod
+    from jaccpot.runtime._fmm_impl import FMMEngine
 
     tree, ps, ms = _build_multilevel_tree()
     actual = int(get_num_levels(tree))
-    fmm = FastMultipoleMethod(expansion_basis="solidfmm")
+    fmm = FMMEngine(expansion_basis="solidfmm")
 
     concrete = fmm.prepare_upward_sweep(
         tree, ps, ms, max_order=4, center_mode="com", max_leaf_size=8
@@ -362,7 +362,7 @@ def test_solidfmm_downward_source_motion_locals_match_finite_difference():
         explicit_centers=centers,
     )
 
-    fmm = FastMultipoleMethod(expansion_basis="solidfmm")
+    fmm = FMMEngine(expansion_basis="solidfmm")
     base_down = fmm.prepare_downward_sweep(
         tree,
         _as_tree_upward_data(base),
@@ -454,7 +454,7 @@ def test_solidfmm_downward_source_motion_locals_when_the_tree_has_no_internal_no
         explicit_centers=centers,
     )
 
-    fmm = FastMultipoleMethod(expansion_basis="solidfmm")
+    fmm = FMMEngine(expansion_basis="solidfmm")
     base_down = fmm.prepare_downward_sweep(tree, _as_tree_upward_data(base), theta=0.6)
     analytic_down = fmm.prepare_downward_sweep(
         tree,
@@ -536,7 +536,7 @@ def test_solidfmm_downward_second_time_derivative_locals_match_finite_difference
         time_derivative_order=2,
     )
 
-    fmm = FastMultipoleMethod(expansion_basis="solidfmm")
+    fmm = FMMEngine(expansion_basis="solidfmm")
     base_down = fmm.prepare_downward_sweep(
         tree,
         _as_tree_upward_data(base),

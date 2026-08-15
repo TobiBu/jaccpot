@@ -225,7 +225,7 @@ def test_advanced_config_applies_to_runtime():
 
 
 def test_large_gpu_minimum_memory_streamed_path_caps_oversized_explicit_traversal():
-    impl = fmm_impl_private.FastMultipoleMethod(
+    impl = fmm_impl_private.FMMEngine(
         preset=FMMPreset.LARGE_N_GPU,
         expansion_basis="solidfmm",
         mac_type="engblom",
@@ -258,7 +258,7 @@ def test_large_gpu_minimum_memory_streamed_path_caps_oversized_explicit_traversa
 
 
 def test_large_gpu_minimum_memory_streamed_path_keeps_small_explicit_traversal():
-    impl = fmm_impl_private.FastMultipoleMethod(
+    impl = fmm_impl_private.FMMEngine(
         preset=FMMPreset.LARGE_N_GPU,
         expansion_basis="solidfmm",
         mac_type="engblom",
@@ -327,7 +327,7 @@ def test_large_gpu_minimum_memory_streamed_tree_guard_keeps_safe_seed():
 
 
 def test_large_gpu_minimum_memory_streamed_path_clamps_auto_traversal_seed():
-    impl = fmm_impl_private.FastMultipoleMethod(
+    impl = fmm_impl_private.FMMEngine(
         preset=FMMPreset.LARGE_N_GPU,
         expansion_basis="solidfmm",
         mac_type="engblom",
@@ -352,7 +352,7 @@ def test_large_gpu_minimum_memory_streamed_path_clamps_auto_traversal_seed():
 
 
 def test_large_gpu_minimum_memory_streamed_seed_scales_for_xl_particle_counts():
-    impl = fmm_impl_private.FastMultipoleMethod(
+    impl = fmm_impl_private.FMMEngine(
         preset=FMMPreset.LARGE_N_GPU,
         expansion_basis="solidfmm",
         memory_objective="minimum_memory",
@@ -374,7 +374,7 @@ def test_large_gpu_minimum_memory_streamed_seed_scales_for_xl_particle_counts():
 
 
 def test_prepare_bucketed_scatter_schedules_skips_int32_overflow_shape():
-    impl = fmm_impl_private.FastMultipoleMethod(
+    impl = fmm_impl_private.FMMEngine(
         preset=FMMPreset.LARGE_N_GPU,
         expansion_basis="solidfmm",
         memory_objective="minimum_memory",
@@ -405,7 +405,7 @@ def test_prepare_bucketed_scatter_schedules_skips_int32_overflow_shape():
 
 
 def test_large_gpu_minimum_memory_nearfield_prepare_skips_pair_vector_precompute():
-    impl = fmm_impl_private.FastMultipoleMethod(
+    impl = fmm_impl_private.FMMEngine(
         preset=FMMPreset.LARGE_N_GPU,
         expansion_basis="solidfmm",
         memory_objective="minimum_memory",

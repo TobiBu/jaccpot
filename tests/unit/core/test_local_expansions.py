@@ -33,7 +33,7 @@ from jaccpot.operators.multipole_utils import (
     multi_index_tuples,
     total_coefficients,
 )
-from jaccpot.runtime.fmm import FastMultipoleMethod
+from jaccpot.runtime.fmm import FMMEngine
 from jaccpot.upward.tree_expansions import prepare_upward_sweep
 
 DEFAULT_TEST_LEAF_SIZE = 1
@@ -1005,7 +1005,7 @@ def test_translate_multipole_to_local_far_field_matches_direct_sum():
     src_positions = 0.15 * jax.random.normal(key, (6, 3), dtype=dtype)
     src_masses = jnp.abs(jax.random.normal(key, (6,), dtype=dtype)) + dtype.type(0.2)
 
-    fmm = FastMultipoleMethod(G=1.0)
+    fmm = FMMEngine(G=1.0)
     expansion = fmm.compute_expansion(src_positions, src_masses, order=order)
     packed = _pack_multipole_from_expansion(
         expansion,

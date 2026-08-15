@@ -1,4 +1,4 @@
-"""PrepareMixin: fmm_prepare methods extracted from the FastMultipoleMethod
+"""PrepareMixin: fmm_prepare methods extracted from the FMMEngine
 god-class (Phase 2d mixin split). Methods are verbatim (self unchanged); the
 engine class inherits this mixin. Sibling of _fmm_impl at runtime level.
 """
@@ -120,7 +120,7 @@ if TYPE_CHECKING:  # pragma: no cover - annotations only, no runtime import
     # would form the cycle ARCHITECTURE §8 forbids. Before this block the names were
     # dangling: `typing.get_type_hints` raised NameError on every mixin method, so the
     # annotations documented an intent no tool could check.
-    from ._fmm_impl import FastMultipoleMethod, PreparedStateLike
+    from ._fmm_impl import FMMEngine, PreparedStateLike
 
 
 class _DualDownwardPlan(NamedTuple):
@@ -2661,7 +2661,7 @@ class PrepareMixin:
 
     @jaxtyped(typechecker=beartype)
     def prepare_state(
-        self: "FastMultipoleMethod",
+        self: "FMMEngine",
         positions: Array,
         masses: Array,
         **kwargs: Any,
@@ -2714,7 +2714,7 @@ class PrepareMixin:
             raise  # pragma: no cover - reraise_with_capacity_report always raises
 
     def _prepare_state_uncaught(
-        self: "FastMultipoleMethod",
+        self: "FMMEngine",
         positions: Array,
         masses: Array,
         *,

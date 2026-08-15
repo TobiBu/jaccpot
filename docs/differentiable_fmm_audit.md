@@ -36,7 +36,7 @@ a purely static read of the code, and the near-field-only Probe 1, both missed.
 `compute_accelerations` detects tracers (`_contains_tracer`) and `vmap`s
 `reference_direct_sum` instead of the FMM
 ([fmm_evaluate.py:117-142](../jaccpot/runtime/fmm_evaluate.py#L117-L142)).
-**Empirical:** `grad(compute_accelerations)` vs `grad(differentiable_gravitational_acceleration)`
+**Empirical:** `grad(compute_accelerations)` vs `grad(direct_sum_gravitational_acceleration)`
 agree to **rel-L2 = 7.2e-13** — i.e. the "FMM gradient" *is* the direct-sum gradient.
 It also raises `NotImplementedError` for `return_potential=True` / derivative orders
 under tracing.

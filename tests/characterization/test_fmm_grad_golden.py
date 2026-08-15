@@ -40,7 +40,7 @@ On every run it re-computes and asserts:
       widened into a formality elsewhere.
 
 2. **Physics anchor** -- each gradient agrees with ``jax.grad`` of the
-   **direct O(N^2) sum** (:func:`differentiable_gravitational_acceleration`, the
+   **direct O(N^2) sum** (:func:`direct_sum_gravitational_acceleration`, the
    documented gradient oracle) to a measured per-order bound, so a regenerated
    golden can never silently snapshot a wrong gradient.
 
@@ -66,7 +66,7 @@ pytest.importorskip("yggdrax")
 
 from jaccpot import FastMultipoleMethod  # noqa: E402
 from jaccpot.autodiff import (  # noqa: E402
-    differentiable_gravitational_acceleration,
+    direct_sum_gravitational_acceleration,
 )
 
 GOLDEN_DIR = Path(__file__).parent / "golden_grad"
@@ -252,7 +252,7 @@ def _fmm_gradients(basis: str, order: int, positions, masses):
 def _direct_sum_gradients(positions, masses):
     """The same loss differentiated through the direct O(N^2) sum.
 
-    ``differentiable_gravitational_acceleration`` is the documented gradient oracle
+    ``direct_sum_gravitational_acceleration`` is the documented gradient oracle
     (ARCHITECTURE §6: "``grad(FMM)`` must match ``grad(direct-sum)`` to FMM force
     accuracy"), so this is an independent reference rather than a second opinion
     from the same code.
@@ -262,7 +262,7 @@ def _direct_sum_gradients(positions, masses):
     def loss(pos, mass):
         return jnp.sum(
             weights
-            * differentiable_gravitational_acceleration(
+            * direct_sum_gravitational_acceleration(
                 pos, mass, G=G_CONST, softening=SOFTENING
             )
         )
