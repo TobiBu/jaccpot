@@ -6,7 +6,7 @@ from ._typecheck import enable_runtime_typecheck
 
 enable_runtime_typecheck()
 
-from .autodiff import differentiable_gravitational_acceleration
+from .autodiff import direct_sum_gravitational_acceleration
 from .basis import ComplexSHBasis, RealSHBasis
 from .config import (
     FarFieldConfig,
@@ -36,5 +36,5 @@ __all__ = [
     "RuntimePolicyConfig",
     "TraversalOverrides",
     "TreeConfig",
-    "differentiable_gravitational_acceleration",
+    "direct_sum_gravitational_acceleration",
 ]

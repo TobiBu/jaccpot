@@ -907,7 +907,7 @@ def _m2l_complex_batch_kernel_fused_pallas(
     # Route through the custom_vjp wrapper (not the raw kernel): the forward is
     # byte-identical to m2l_complex_fused_pallas, but the wrapper carries the
     # reverse rule (autodiff of the pure-jnp twin) so this fused path is also
-    # differentiable -- required for FastMultipoleMethod.differentiable_accelerations
+    # differentiable -- required for FMMEngine.differentiable_accelerations
     # to run the fast lane. interpret=False, backend="triton" (the runtime always
     # runs the real Pallas GPU kernel here).
     out = m2l_complex_fused_pallas_cvjp(

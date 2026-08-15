@@ -686,7 +686,7 @@ under `tests/` that reference the name. Renames are yours to decide; I only prop
 | `ComplexSHBasis` | `basis/complex_sh.py:14` | 4 | no | no | 3 | |
 | `RealSHBasis` | `basis/real_sh.py:91` | 1 | no | no | 1 | One line, one test file, and it backs the **default** basis |
 | `OdisseoFMMCoupler` | `odisseo.py:24` | 1 | no | no | 2 | *"Cache-oriented adapter for coupling ODISSEO and Jaccpot FMM."* This is the downstream integration contract; 59 statements at 78% coverage |
-| `differentiable_gravitational_acceleration` | `autodiff.py:13` | 15 | no | no | 4 | Good prose (it correctly disclaims being "the" differentiable path). No `Parameters` section; ARCHITECTURE §2 and §6 both re-explain it, which suggests the name is the problem, not the doc |
+| `direct_sum_gravitational_acceleration` | `autodiff.py:13` | 15 | no | no | 4 | Good prose (it correctly disclaims being "the" differentiable path). No `Parameters` section; ARCHITECTURE §2 and §6 both re-explain it, which suggests the name is the problem, not the doc |
 
 Observations, no decisions:
 
@@ -699,7 +699,7 @@ Observations, no decisions:
 - **Test breadth does not track importance**: `RealSHBasis` (the default basis) has 1
   referencing file; `MemoryObjective` has 1; `GradConfig` has 2.
 - **Rename candidates, for your call only** (each would be a Tier 2 PR with an API-guard
-  update): `differentiable_gravitational_acceleration` → something that says "direct sum"
+  update): `direct_sum_gravitational_acceleration` → something that says "direct sum"
   (ARCHITECTURE §2 and §6 and its own docstring each spend a paragraph explaining it is *not*
   the differentiable FMM — three disclaimers is a naming smell); and the engine class in
   `_fmm_impl.py` sharing the name `FastMultipoleMethod` with the facade, which ARCHITECTURE §2
@@ -733,7 +733,7 @@ see that.
 **What was added.** `tests/characterization/test_fmm_grad_golden.py` + 6 `.npz` under
 `tests/characterization/golden_grad/`, mirroring the forward oracle's two-gate design:
 inertness at `rtol=atol=1e-12`, plus a physics anchor against `jax.grad` of
-`differentiable_gravitational_acceleration` (the documented gradient oracle). Same
+`direct_sum_gravitational_acceleration` (the documented gradient oracle). Same
 `JACCPOT_REGEN_GOLDEN=1` switch, so one command refreshes both.
 
 Three things about it are worth carrying forward, because they were discovered while building
@@ -1302,11 +1302,11 @@ Each of these is gated on the Tier 0 characterization named in its row.
 
 | # | Item | Why Tier 2 | Needs from you |
 |---|---|---|---|
-| **2.1** | Break up `_fmm_impl.FastMultipoleMethod.__init__` (722 lines, 60 params) into staged private resolvers | Config-resolution *order* is load-bearing (`b462e45`, `dee46d6` are both bugs in exactly this) and 0.1/0.2 do not cover every preset | Sign-off on the staging boundaries before any code moves |
-| **2.2** | Consolidate the four hand-rolled env parsers (F13, A.4) | Changes malformed-value semantics — which reverse-mode M2L kernel runs. Requires deciding what a garbage value should mean | A decision: extend `_env` with a default-on reader, or leave the duplication with a comment |
-| **2.3** | Delete or wire up the Wigner reference family (F32, ~260 lines, 8 `__all__` names) | Removes module-public names | Section G decision, informed by whether 0.3 goes green |
+| **2.1** ✔ **PRs #103, #104** | Break up `_fmm_impl.FastMultipoleMethod.__init__` (722 lines, 60 params) into staged private resolvers | Config-resolution *order* is load-bearing (`b462e45`, `dee46d6` are both bugs in exactly this) and 0.1/0.2 do not cover every preset | **Done.** Body 653 → 141 lines, 573 lines into 13 resolvers, every one byte-verbatim and called in its original position. The "0.1/0.2 do not cover every preset" objection was answered first, in its own PR: a constructor-state golden over **46 configurations × 272 attributes**, which then gated the move. Boundaries came from a cut-cost profile, not from reading the code — and five of six step-2 boundaries landed mid-statement before being snapped to AST statement starts. Three blocks are deliberately left inline, by ratio of lines moved to parameters passed; the worst, `A6a`, would have been a 16-argument method calling a 16-argument function. |
+| **2.2** ✔ **PR #105** | Consolidate the four hand-rolled env parsers (F13, A.4) | Changes malformed-value semantics — which reverse-mode M2L kernel runs. Requires deciding what a garbage value should mean | **Done. Decided: a malformed value means THE DEFAULT, whatever it is**, plus a one-time warning naming the variable and the value ignored. That is not a new convention — `env_int`/`env_float` already did it and `env_flag` was the outlier, so `_env` disagreed with itself. The "four parsers" were really *three* semantics (denylist flag ×2, allowlist flag, enum-with-fallback), which is why they could not be deduped mechanically; `env_choice` was added for the third. Verified over 14 inputs per reader: FUSED and DIAG unchanged on all 14, JIT differs on 6 malformed inputs (False → the default), which is the intended consequence. A.4's specific warning is satisfied. `_env` also had **no tests**; it has 39 now, written first. |
+| **2.3** ✔ **CLOSED (`ab58c3d`)** | Delete or wire up the Wigner reference family (F32, ~260 lines, 8 `__all__` names) | Removes module-public names | **Already done; this row was stale.** G.4 records the decision (deleted) and `ab58c3d` carried it out. Verified 2026-08-15: `grep -ri wigner jaccpot/` returns **two prose mentions and no code** — `operators/_precision.py:5` and `operators/real_rotations.py:51-55`, both explaining why the closed-form Dehnen builders are the only rotation path. No `__all__` name remains. Nothing to do. |
 | **2.4** | Any rename from section C | Public API; `test_public_api_surface.py` must change in the same commit | Your call, per your instruction |
-| **2.5** | Turn off `--skip-checking-short-docstrings` in `pyproject.toml` | 2840 violations must be at zero first; this is the *last* commit of the docstring programme, not the first | Nothing now — it is the closing gate on 0.20 + 1.10 |
+| **2.5** ✖ **BLOCKED — measured 2026-08-15** | Turn off `--skip-checking-short-docstrings` in `pyproject.toml` | 2840 violations must be at zero first; this is the *last* commit of the docstring programme, not the first | **Cannot be done yet: 2403 violations across 524 distinct functions remain** with the flag off. Down from 2840 (0.20, 1.10 batches 1–2, F23 part 3), i.e. the programme is ~15% complete, not nearly finished. Worst files: `operators/complex_ops.py` 250, `runtime/fmm_prepare.py` 150, `downward/local_expansions.py` 117, `runtime/_interaction_cache.py` 109, `runtime/_adaptive_policy.py` 108, `solver.py` 100. By code: 507 DOC201 + 498 DOC203 (missing/mismatched `Returns`), 495 DOC101 + 495 DOC103 (missing/mismatched `Parameters`), 138 DOC501 + 138 DOC503 (missing `Raises`). `jaccpot/pallas/` is the only package-level directory at zero. **Measurement note:** pydoclint writes findings to **stderr**, so a `2>/dev/null` in the counting command reports 0 for any directory — that is how an early pass here produced "every subdirectory is clean" against a package total of 2403. |
 | **2.6** | Nightly GPU CI leg for `_large_n_*`, `distributed/`, and Pallas non-interpret | Infrastructure, and it is what unblocks F27/F33/F34 and the deferred half of F11 | A decision on GPU budget — CLAUDE.md says confirm before occupying one |
 
 ---

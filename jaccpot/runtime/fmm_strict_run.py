@@ -1,4 +1,4 @@
-"""StrictRunMixin: fmm_strict_run methods extracted from the FastMultipoleMethod
+"""StrictRunMixin: fmm_strict_run methods extracted from the FMMEngine
 god-class (Phase 2d mixin split). Methods are verbatim (self unchanged); the
 engine class inherits this mixin. Sibling of _fmm_impl at runtime level.
 """
@@ -38,12 +38,12 @@ if TYPE_CHECKING:  # pragma: no cover - annotations only, no runtime import
     # would form the cycle ARCHITECTURE §8 forbids. Before this block the names were
     # dangling: `typing.get_type_hints` raised NameError on every mixin method, so the
     # annotations documented an intent no tool could check.
-    from ._fmm_impl import FastMultipoleMethod, PreparedStateLike
+    from ._fmm_impl import FMMEngine, PreparedStateLike
 
 
 class StrictRunMixin:
     def refresh_prepared_state(
-        self: "FastMultipoleMethod",
+        self: "FMMEngine",
         prepared_state: PreparedStateLike,
         positions: Array,
         masses: Array,
@@ -205,7 +205,7 @@ class StrictRunMixin:
         return next_state
 
     def strict_prepare_refresh_and_evaluate(
-        self: "FastMultipoleMethod",
+        self: "FMMEngine",
         prepared_state: Optional[PreparedStateLike],
         positions: Array,
         masses: Array,
@@ -315,7 +315,7 @@ class StrictRunMixin:
         return next_state, acc
 
     def strict_run_segmented(
-        self: "FastMultipoleMethod",
+        self: "FMMEngine",
         *,
         state: Any,
         masses: Array,
@@ -398,7 +398,7 @@ class StrictRunMixin:
         return state_curr, prepared_curr, history
 
     def strict_run_v2(
-        self: "FastMultipoleMethod",
+        self: "FMMEngine",
         *,
         state: Array,
         masses: Array,
@@ -827,7 +827,7 @@ class StrictRunMixin:
         return state_curr, prepared_out, history_out
 
     def strict_fused_prepared_eval_fn(
-        self: "FastMultipoleMethod",
+        self: "FMMEngine",
         *,
         positions: Array,
         masses: Array,
@@ -899,7 +899,7 @@ class StrictRunMixin:
         return prepared, _eval
 
     def _refresh_large_n_same_topology(
-        self: "FastMultipoleMethod",
+        self: "FMMEngine",
         prepared_state: LargeNPreparedState,
         positions: Array,
         masses: Array,
@@ -1415,7 +1415,7 @@ class StrictRunMixin:
         return refreshed_state
 
     def _large_n_neighbor_list_matches(
-        self: "FastMultipoleMethod",
+        self: "FMMEngine",
         previous: NodeNeighborList,
         current: NodeNeighborList,
     ) -> bool:
@@ -1457,7 +1457,7 @@ class StrictRunMixin:
             return False
 
     def update_multipoles_only(
-        self: "FastMultipoleMethod",
+        self: "FMMEngine",
         prepared_state: PreparedStateLike,
         positions: Array,
         masses: Array,
@@ -1495,7 +1495,7 @@ class StrictRunMixin:
         return refreshed
 
     def rebuild_topology_in_place(
-        self: "FastMultipoleMethod",
+        self: "FMMEngine",
         prepared_state: PreparedStateLike,
         positions: Array,
         masses: Array,

@@ -154,7 +154,7 @@ class TraversalExecutionConfig:
 
 @dataclass(frozen=True)
 class FMMResolvedConfig:
-    """Container bundling all resolved FastMultipoleMethod options."""
+    """Container bundling all resolved FMMEngine options."""
 
     theta: float
     G: float

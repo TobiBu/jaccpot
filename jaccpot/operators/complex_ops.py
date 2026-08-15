@@ -43,7 +43,20 @@ DTypeLike = _jaxtyping_DTypeLike
 def _conjugate_symmetry_metadata(
     order: int,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
-    """Return packed-index metadata for conjugate-symmetry projection."""
+    """Return packed-index metadata for conjugate-symmetry projection.
+
+    Parameters
+    ----------
+    order : int
+        Expansion order ``p``. Static: it fixes every packed length and table shape.
+
+    Returns
+    -------
+    tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]
+        ``(center_idx, pos_idx, neg_idx, signs)``: the packed index of each ``m == 0``
+        entry, the indices of the ``+m`` and ``-m`` partners that must be conjugates
+        of one another, and the sign each partner carries.
+    """
 
     p = int(order)
     center_idx: list[int] = []
@@ -73,6 +86,18 @@ def enforce_conjugate_symmetry(
     """Project coefficients onto conjugate-symmetric form.
 
     Enforces C_n^{-m} = (-1)^m * conj(C_n^{m}) and Im(C_n^0)=0.
+
+    Parameters
+    ----------
+    coeffs : Array
+        Packed complex coefficients, length ``sh_size(order)``.
+    order : int
+        Expansion order ``p``. Static: it fixes every packed length and table shape.
+
+    Returns
+    -------
+    Array
+        The coefficients projected onto the conjugate-symmetric subspace.
     """
     coeffs_arr = jnp.asarray(coeffs)
     return enforce_conjugate_symmetry_batch(coeffs_arr[None, :], order=order)[0]
@@ -84,7 +109,20 @@ def enforce_conjugate_symmetry_batch(
     *,
     order: int,
 ) -> Array:
-    """Batch projection onto conjugate-symmetric form."""
+    """Batch projection onto conjugate-symmetric form.
+
+    Parameters
+    ----------
+    coeffs : Array
+        Packed complex coefficients, length ``sh_size(order)``.
+    order : int
+        Expansion order ``p``. Static: it fixes every packed length and table shape.
+
+    Returns
+    -------
+    Array
+        As :func:`enforce_conjugate_symmetry`, applied over the leading batch axis.
+    """
 
     coeffs_arr = jnp.asarray(coeffs)
     center_idx_np, pos_idx_np, neg_idx_np, signs_np = _conjugate_symmetry_metadata(
@@ -133,6 +171,22 @@ def complex_dot(
 
     When `conjugate_left` is True, computes sum(conj(left) * right),
     which matches the standard complex inner product used in solidfmm.
+
+    Parameters
+    ----------
+    left : Array
+        Left operand of the contraction.
+    right : Array
+        Right operand of the contraction.
+    order : int
+        Expansion order ``p``. Static: it fixes every packed length and table shape.
+    conjugate_left : bool
+        Whether to conjugate the left operand before contracting. True is the convention these expansions are stored in; passing False contracts them as-is.
+
+    Returns
+    -------
+    Array
+        The scalar contraction of the two packed coefficient vectors.
     """
     ncoeff = sh_size(int(order))
     left = jnp.asarray(left)[:ncoeff]
@@ -152,6 +206,22 @@ def evaluate_local_complex(
     """Evaluate complex local expansion at a displacement.
 
     Returns the real-valued potential (solidfmm normalization).
+
+    Parameters
+    ----------
+    local : Array
+        Packed complex local coefficients, length ``sh_size(order)``.
+    delta : Array
+        Displacement vector ``(3,)``, target centre minus source centre.
+    order : int
+        Expansion order ``p``. Static: it fixes every packed length and table shape.
+    conjugate_left : bool
+        Whether to conjugate the left operand before contracting. True is the convention these expansions are stored in; passing False contracts them as-is.
+
+    Returns
+    -------
+    Array
+        The scalar potential at ``delta``.
     """
     regular = complex_R_solidfmm(delta, order=order)
     pot = complex_dot(local, regular, order=order, conjugate_left=conjugate_left)
@@ -165,7 +235,24 @@ def evaluate_local_complex_with_grad(
     order: int,
     conjugate_left: bool = True,
 ) -> tuple[Array, Array]:
-    """Evaluate complex local expansion and gradient at a displacement."""
+    """Evaluate complex local expansion and gradient at a displacement.
+
+    Parameters
+    ----------
+    local : Array
+        Packed complex local coefficients, length ``sh_size(order)``.
+    delta : Array
+        Displacement vector ``(3,)``, target centre minus source centre.
+    order : int
+        Expansion order ``p``. Static: it fixes every packed length and table shape.
+    conjugate_left : bool
+        Whether to conjugate the left operand before contracting. True is the convention these expansions are stored in; passing False contracts them as-is.
+
+    Returns
+    -------
+    tuple[Array, Array]
+        ``(potential, gradient)``, the gradient having shape ``(3,)``.
+    """
     p = int(order)
 
     def phi_fn(d: Array) -> Array:
@@ -183,7 +270,24 @@ def evaluate_local_complex_with_grad_batch(
     order: int,
     conjugate_left: bool = True,
 ) -> tuple[Array, Array]:
-    """Batch evaluate complex local expansion and gradients."""
+    """Batch evaluate complex local expansion and gradients.
+
+    Parameters
+    ----------
+    local : Array
+        Packed complex local coefficients, length ``sh_size(order)``.
+    deltas : Array
+        Batched displacement vectors, shape ``(batch, 3)``.
+    order : int
+        Expansion order ``p``. Static: it fixes every packed length and table shape.
+    conjugate_left : bool
+        Whether to conjugate the left operand before contracting. True is the convention these expansions are stored in; passing False contracts them as-is.
+
+    Returns
+    -------
+    tuple[Array, Array]
+        ``(potentials, gradients)`` over the batch axis.
+    """
     return jax.vmap(
         lambda d: evaluate_local_complex_with_grad(
             local,
@@ -204,6 +308,25 @@ def _lower_complex_harmonics_one_axis(
 
     If ``coeffs`` represents ``f_n^m`` over ``0 <= n <= order``, this returns
     coefficients representing ``∂_{axis} f_n^m`` in the same packed layout.
+
+    Parameters
+    ----------
+    coeffs : Array
+        Packed complex coefficients, length ``sh_size(order)``.
+    order : int
+        Expansion order ``p``. Static: it fixes every packed length and table shape.
+    axis : int
+        Cartesian axis the operation acts along.
+
+    Returns
+    -------
+    Array
+        The packed coefficients after one Cartesian derivative along ``axis``.
+
+    Raises
+    ------
+    ValueError
+        If ``axis`` is not one of ``'x'``, ``'y'``, ``'z'``.
     """
     p = int(order)
     if axis not in (0, 1, 2):
@@ -222,7 +345,22 @@ def _lower_complex_harmonics_axis_maps(
     order: int,
     axis: int,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
-    """Precompute gather/scale maps for one Cartesian derivative axis."""
+    """Precompute gather/scale maps for one Cartesian derivative axis.
+
+    Parameters
+    ----------
+    order : int
+        Expansion order ``p``. Static: it fixes every packed length and table shape.
+    axis : int
+        Cartesian axis the operation acts along.
+
+    Returns
+    -------
+    tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]
+        ``(idx_a, idx_b, fac_a, fac_b)``: the two source indices each output entry
+        draws on and their scale factors, so the derivative is a gather plus a
+        weighted sum rather than a matrix product.
+    """
     p = int(order)
     ncoeff = sh_size(p)
     idx_a = np.zeros((ncoeff,), dtype=np.int32)
@@ -270,7 +408,27 @@ def _build_complex_harmonic_derivative_coefficients(
     order: int,
     max_derivative_order: int,
 ) -> tuple[Array, ...]:
-    """Build packed coefficient vectors for ``D^k R`` (k=0..K)."""
+    """Build packed coefficient vectors for ``D^k R`` (k=0..K).
+
+    Parameters
+    ----------
+    delta : Array
+        Displacement vector ``(3,)``, target centre minus source centre.
+    order : int
+        Expansion order ``p``. Static: it fixes every packed length and table shape.
+    max_derivative_order : int
+        Highest derivative order ``K`` to build; the tower carries ``D0..DK``.
+
+    Returns
+    -------
+    tuple[Array, ...]
+        One packed coefficient vector per derivative order ``0..K``.
+
+    Raises
+    ------
+    ValueError
+        If ``max_derivative_order`` is negative.
+    """
     p = int(order)
     k_max = int(max_derivative_order)
     if k_max < 0:
@@ -327,6 +485,29 @@ def evaluate_local_complex_derivative_tower(
     This is an order-generic API scaffold for derivative towers. It uses
     autodiff internally today; hot-path contraction kernels can replace the
     internals without changing downstream code.
+
+    Parameters
+    ----------
+    local : Array
+        Packed complex local coefficients, length ``sh_size(order)``.
+    delta : Array
+        Displacement vector ``(3,)``, target centre minus source centre.
+    order : int
+        Expansion order ``p``. Static: it fixes every packed length and table shape.
+    max_derivative_order : int
+        Highest derivative order ``K`` to build; the tower carries ``D0..DK``.
+    conjugate_left : bool
+        Whether to conjugate the left operand before contracting. True is the convention these expansions are stored in; passing False contracts them as-is.
+
+    Returns
+    -------
+    tuple[Array, ...]
+        Potential and packed spatial derivatives ``D0..DK`` at ``delta``.
+
+    Raises
+    ------
+    ValueError
+        If ``max_derivative_order`` is negative.
     """
     p = int(order)
     k_max = int(max_derivative_order)
@@ -365,7 +546,26 @@ def evaluate_local_complex_derivative_tower_batch(
     max_derivative_order: int,
     conjugate_left: bool = True,
 ) -> tuple[Array, ...]:
-    """Batch evaluate packed derivative towers for one local expansion."""
+    """Batch evaluate packed derivative towers for one local expansion.
+
+    Parameters
+    ----------
+    local : Array
+        Packed complex local coefficients, length ``sh_size(order)``.
+    deltas : Array
+        Batched displacement vectors, shape ``(batch, 3)``.
+    order : int
+        Expansion order ``p``. Static: it fixes every packed length and table shape.
+    max_derivative_order : int
+        Highest derivative order ``K`` to build; the tower carries ``D0..DK``.
+    conjugate_left : bool
+        Whether to conjugate the left operand before contracting. True is the convention these expansions are stored in; passing False contracts them as-is.
+
+    Returns
+    -------
+    tuple[Array, ...]
+        The derivative tower evaluated over the batch axis.
+    """
     return jax.vmap(
         lambda d: evaluate_local_complex_derivative_tower(
             local,
@@ -384,7 +584,22 @@ def contract_spatial_derivative_with_velocity(
     *,
     order: int,
 ) -> Array:
-    """Contract packed order-``order`` spatial derivatives with velocity."""
+    """Contract packed order-``order`` spatial derivatives with velocity.
+
+    Parameters
+    ----------
+    packed : Array
+        Packed coefficient array in this module's ``sh`` layout.
+    velocity : Array
+        Velocity vector ``(3,)`` contracted against the derivative tensor.
+    order : int
+        Expansion order ``p``. Static: it fixes every packed length and table shape.
+
+    Returns
+    -------
+    Array
+        The derivative tensor contracted with ``velocity``, one order lower.
+    """
     return contract_symmetric_one_axis_3d(packed, velocity, order=order)
 
 
@@ -394,7 +609,20 @@ def regular_solid_harmonic_gradient_coefficients(
     *,
     order: int,
 ) -> Array:
-    """Return packed ``(d/dx, d/dy, d/dz)`` coefficients of ``R_n^m(delta)``."""
+    """Return packed ``(d/dx, d/dy, d/dz)`` coefficients of ``R_n^m(delta)``.
+
+    Parameters
+    ----------
+    delta : Array
+        Displacement vector ``(3,)``, target centre minus source centre.
+    order : int
+        Expansion order ``p``. Static: it fixes every packed length and table shape.
+
+    Returns
+    -------
+    Array
+        Packed ``(d/dx, d/dy, d/dz)`` coefficients, shape ``(3, sh_size(order))``.
+    """
     p = int(order)
     base = jnp.asarray(complex_R_solidfmm(delta, order=p))
     grad_x = _lower_complex_harmonics_one_axis(base, order=p, axis=0)
@@ -409,7 +637,20 @@ def regular_solid_harmonic_gradient_coefficients_preserve_dtype(
     *,
     order: int,
 ) -> Array:
-    """Return local-gradient coefficients without widening float32 deltas."""
+    """Return local-gradient coefficients without widening float32 deltas.
+
+    Parameters
+    ----------
+    delta : Array
+        Displacement vector ``(3,)``, target centre minus source centre.
+    order : int
+        Expansion order ``p``. Static: it fixes every packed length and table shape.
+
+    Returns
+    -------
+    Array
+        As above, without widening a float32 input to complex128.
+    """
     p = int(order)
     base = jnp.asarray(complex_R_solidfmm_preserve_dtype(delta, order=p))
     grad_x = _lower_complex_harmonics_one_axis(base, order=p, axis=0)
@@ -425,7 +666,24 @@ def evaluate_local_complex_grad_analytic_preserve_dtype(
     order: int,
     conjugate_left: bool = True,
 ) -> Array:
-    """Evaluate the analytic local gradient without float32->complex128 widening."""
+    """Evaluate the analytic local gradient without float32->complex128 widening.
+
+    Parameters
+    ----------
+    local : Array
+        Packed complex local coefficients, length ``sh_size(order)``.
+    delta : Array
+        Displacement vector ``(3,)``, target centre minus source centre.
+    order : int
+        Expansion order ``p``. Static: it fixes every packed length and table shape.
+    conjugate_left : bool
+        Whether to conjugate the left operand before contracting. True is the convention these expansions are stored in; passing False contracts them as-is.
+
+    Returns
+    -------
+    Array
+        The gradient ``(3,)``, computed without a float32 to complex128 promotion.
+    """
     p = int(order)
     ncoeff = sh_size(p)
     local_coeffs = jnp.asarray(local)[:ncoeff]
@@ -439,7 +697,18 @@ def evaluate_local_complex_grad_analytic_preserve_dtype(
 
 
 def _regular_solid_harmonic_order4_scalars(delta: Array) -> tuple[Array, ...]:
-    """Return packed order-4 regular harmonics as scalar expressions."""
+    """Return packed order-4 regular harmonics as scalar expressions.
+
+    Parameters
+    ----------
+    delta : Array
+        Displacement vector ``(3,)``, target centre minus source centre.
+
+    Returns
+    -------
+    tuple[Array, ...]
+        The order-4 regular harmonics as individual scalar expressions.
+    """
     delta_arr = jnp.asarray(delta)
     real_dtype = (
         delta_arr.dtype
@@ -519,7 +788,24 @@ def evaluate_local_complex_grad_order4_unrolled(
     order: int,
     conjugate_left: bool = True,
 ) -> Array:
-    """Evaluate order-4 local gradient with scalar recurrence/contraction."""
+    """Evaluate order-4 local gradient with scalar recurrence/contraction.
+
+    Parameters
+    ----------
+    local : Array
+        Packed complex local coefficients, length ``sh_size(order)``.
+    delta : Array
+        Displacement vector ``(3,)``, target centre minus source centre.
+    order : int
+        Expansion order ``p``. Static: it fixes every packed length and table shape.
+    conjugate_left : bool
+        Whether to conjugate the left operand before contracting. True is the convention these expansions are stored in; passing False contracts them as-is.
+
+    Returns
+    -------
+    Array
+        The gradient ``(3,)`` from the unrolled order-4 recurrence.
+    """
     if int(order) != 4:
         return evaluate_local_complex_grad_analytic_preserve_dtype(
             local,
@@ -568,7 +854,24 @@ def evaluate_local_complex_with_grad_analytic(
     order: int,
     conjugate_left: bool = True,
 ) -> tuple[Array, Array]:
-    """Evaluate complex local expansion and gradient without autodiff."""
+    """Evaluate complex local expansion and gradient without autodiff.
+
+    Parameters
+    ----------
+    local : Array
+        Packed complex local coefficients, length ``sh_size(order)``.
+    delta : Array
+        Displacement vector ``(3,)``, target centre minus source centre.
+    order : int
+        Expansion order ``p``. Static: it fixes every packed length and table shape.
+    conjugate_left : bool
+        Whether to conjugate the left operand before contracting. True is the convention these expansions are stored in; passing False contracts them as-is.
+
+    Returns
+    -------
+    tuple[Array, Array]
+        ``(gradient, potential)`` computed analytically rather than by autodiff.
+    """
     p = int(order)
     ncoeff = sh_size(p)
     local_coeffs = jnp.asarray(local)[:ncoeff]
@@ -590,7 +893,24 @@ def evaluate_local_complex_grad_analytic(
     order: int,
     conjugate_left: bool = True,
 ) -> Array:
-    """Evaluate only the complex local-expansion gradient without autodiff."""
+    """Evaluate only the complex local-expansion gradient without autodiff.
+
+    Parameters
+    ----------
+    local : Array
+        Packed complex local coefficients, length ``sh_size(order)``.
+    delta : Array
+        Displacement vector ``(3,)``, target centre minus source centre.
+    order : int
+        Expansion order ``p``. Static: it fixes every packed length and table shape.
+    conjugate_left : bool
+        Whether to conjugate the left operand before contracting. True is the convention these expansions are stored in; passing False contracts them as-is.
+
+    Returns
+    -------
+    Array
+        The gradient ``(3,)`` alone, skipping the potential.
+    """
     p = int(order)
     ncoeff = sh_size(p)
     local_coeffs = jnp.asarray(local)[:ncoeff]
@@ -610,7 +930,24 @@ def evaluate_local_complex_grad_analytic_batch(
     order: int,
     conjugate_left: bool = True,
 ) -> Array:
-    """Batch evaluate only complex local-expansion gradients."""
+    """Batch evaluate only complex local-expansion gradients.
+
+    Parameters
+    ----------
+    local : Array
+        Packed complex local coefficients, length ``sh_size(order)``.
+    deltas : Array
+        Batched displacement vectors, shape ``(batch, 3)``.
+    order : int
+        Expansion order ``p``. Static: it fixes every packed length and table shape.
+    conjugate_left : bool
+        Whether to conjugate the left operand before contracting. True is the convention these expansions are stored in; passing False contracts them as-is.
+
+    Returns
+    -------
+    Array
+        Gradients over the batch axis, shape ``(batch, 3)``.
+    """
     return jax.vmap(
         lambda d: evaluate_local_complex_grad_analytic(
             local,
@@ -629,7 +966,24 @@ def evaluate_local_complex_with_grad_analytic_batch(
     order: int,
     conjugate_left: bool = True,
 ) -> tuple[Array, Array]:
-    """Batch evaluate complex local expansion gradients without autodiff."""
+    """Batch evaluate complex local expansion gradients without autodiff.
+
+    Parameters
+    ----------
+    local : Array
+        Packed complex local coefficients, length ``sh_size(order)``.
+    deltas : Array
+        Batched displacement vectors, shape ``(batch, 3)``.
+    order : int
+        Expansion order ``p``. Static: it fixes every packed length and table shape.
+    conjugate_left : bool
+        Whether to conjugate the left operand before contracting. True is the convention these expansions are stored in; passing False contracts them as-is.
+
+    Returns
+    -------
+    tuple[Array, Array]
+        ``(gradients, potentials)`` over the batch axis.
+    """
     return jax.vmap(
         lambda d: evaluate_local_complex_with_grad_analytic(
             local,
@@ -647,7 +1001,22 @@ def regular_solid_harmonic_directional_derivative(
     *,
     order: int,
 ) -> Array:
-    """Directional derivative of packed regular harmonics along ``direction``."""
+    """Directional derivative of packed regular harmonics along ``direction``.
+
+    Parameters
+    ----------
+    delta : Array
+        Displacement vector ``(3,)``, target centre minus source centre.
+    direction : Array
+        Direction vector ``(3,)`` the derivative is taken along.
+    order : int
+        Expansion order ``p``. Static: it fixes every packed length and table shape.
+
+    Returns
+    -------
+    Array
+        Packed coefficients of ``(v.grad) R``.
+    """
     return regular_solid_harmonic_directional_derivative_order(
         delta,
         direction,
@@ -664,7 +1033,29 @@ def regular_solid_harmonic_directional_derivative_order(
     order: int,
     derivative_order: int,
 ) -> Array:
-    """Order-``k`` directional derivative ``(v·∇)^k R`` in packed form."""
+    """Order-``k`` directional derivative ``(v·∇)^k R`` in packed form.
+
+    Parameters
+    ----------
+    delta : Array
+        Displacement vector ``(3,)``, target centre minus source centre.
+    direction : Array
+        Direction vector ``(3,)`` the derivative is taken along.
+    order : int
+        Expansion order ``p``. Static: it fixes every packed length and table shape.
+    derivative_order : int
+        Derivative order ``k`` to apply.
+
+    Returns
+    -------
+    Array
+        Packed coefficients of ``(v.grad)^k R``.
+
+    Raises
+    ------
+    ValueError
+        If ``derivative_order`` is negative.
+    """
     p = int(order)
     k = int(derivative_order)
     if k < 0:
@@ -694,7 +1085,22 @@ def regular_solid_harmonic_directional_derivative_batch(
     *,
     order: int,
 ) -> Array:
-    """Batch directional derivatives of packed regular harmonics."""
+    """Batch directional derivatives of packed regular harmonics.
+
+    Parameters
+    ----------
+    deltas : Array
+        Batched displacement vectors, shape ``(batch, 3)``.
+    directions : Array
+        Batched direction vectors, shape ``(batch, 3)``.
+    order : int
+        Expansion order ``p``. Static: it fixes every packed length and table shape.
+
+    Returns
+    -------
+    Array
+        Batched packed coefficients of ``(v.grad) R``.
+    """
     return jax.vmap(
         lambda d, v: regular_solid_harmonic_directional_derivative_order(
             d,
@@ -715,7 +1121,24 @@ def regular_solid_harmonic_directional_derivative_order_batch(
     order: int,
     derivative_order: int,
 ) -> Array:
-    """Batch order-``k`` directional derivatives of packed regular harmonics."""
+    """Batch order-``k`` directional derivatives of packed regular harmonics.
+
+    Parameters
+    ----------
+    deltas : Array
+        Batched displacement vectors, shape ``(batch, 3)``.
+    directions : Array
+        Batched direction vectors, shape ``(batch, 3)``.
+    order : int
+        Expansion order ``p``. Static: it fixes every packed length and table shape.
+    derivative_order : int
+        Derivative order ``k`` to apply.
+
+    Returns
+    -------
+    Array
+        Batched packed coefficients of ``(v.grad)^k R``.
+    """
     return jax.vmap(
         lambda d, v: regular_solid_harmonic_directional_derivative_order(
             d,
@@ -734,7 +1157,22 @@ def translate_along_z_m2l_complex(
     *,
     order: int,
 ) -> Array:
-    """Translate complex multipole to local along +z (Dehnen series)."""
+    """Translate complex multipole to local along +z (Dehnen series).
+
+    Parameters
+    ----------
+    multipole : Array
+        Packed complex multipole coefficients, length ``sh_size(order)``.
+    r : Array
+        Centre separation; the z-translation distance after rotation to +z.
+    order : int
+        Expansion order ``p``. Static: it fixes every packed length and table shape.
+
+    Returns
+    -------
+    Array
+        The local coefficients produced by translating the multipole along +z.
+    """
     p = int(order)
     multipole = jnp.asarray(multipole)
     r = jnp.asarray(r).reshape(())
@@ -767,7 +1205,22 @@ def translate_along_z_m2m_complex(
     *,
     order: int,
 ) -> Array:
-    """Translate complex multipole along +z (Dehnen series)."""
+    """Translate complex multipole along +z (Dehnen series).
+
+    Parameters
+    ----------
+    multipole : Array
+        Packed complex multipole coefficients, length ``sh_size(order)``.
+    dz : Array
+        Signed translation distance along +z.
+    order : int
+        Expansion order ``p``. Static: it fixes every packed length and table shape.
+
+    Returns
+    -------
+    Array
+        The multipole coefficients translated along +z.
+    """
     p = int(order)
     multipole = jnp.asarray(multipole)
     dz = jnp.asarray(dz).reshape(())
@@ -799,7 +1252,22 @@ def translate_along_z_m2m_complex_solidfmm(
     *,
     order: int,
 ) -> Array:
-    """Translate complex multipole along +z (solidfmm zm2m)."""
+    """Translate complex multipole along +z (solidfmm zm2m).
+
+    Parameters
+    ----------
+    multipole : Array
+        Packed complex multipole coefficients, length ``sh_size(order)``.
+    dz : Array
+        Signed translation distance along +z.
+    order : int
+        Expansion order ``p``. Static: it fixes every packed length and table shape.
+
+    Returns
+    -------
+    Array
+        As above, using solidfmm's zm2m convention.
+    """
     p = int(order)
     multipole = jnp.asarray(multipole)
     dz = jnp.asarray(dz).reshape(())
@@ -831,7 +1299,22 @@ def translate_along_z_l2l_complex(
     *,
     order: int,
 ) -> Array:
-    """Translate complex local expansion along +z (Dehnen series)."""
+    """Translate complex local expansion along +z (Dehnen series).
+
+    Parameters
+    ----------
+    local : Array
+        Packed complex local coefficients, length ``sh_size(order)``.
+    dz : Array
+        Signed translation distance along +z.
+    order : int
+        Expansion order ``p``. Static: it fixes every packed length and table shape.
+
+    Returns
+    -------
+    Array
+        The local coefficients translated along +z.
+    """
     p = int(order)
     local = jnp.asarray(local)
     dz = jnp.asarray(dz).reshape(())
@@ -1083,6 +1566,18 @@ def _solidfmm_pack_m_nonneg(block: Array, *, ell: int) -> tuple[Array, Array]:
     """Extract m>=0 coefficients as (re, im) arrays.
 
     Used for solidfmm-style swap/rotscale operations.
+
+    Parameters
+    ----------
+    block : Array
+        One square rotation block for a single degree.
+    ell : int
+        Spherical harmonic degree.
+
+    Returns
+    -------
+    tuple[Array, Array]
+        ``(re, im)`` for the ``m >= 0`` half of the block.
     """
     block = jnp.asarray(block)
     start = ell
@@ -1092,7 +1587,22 @@ def _solidfmm_pack_m_nonneg(block: Array, *, ell: int) -> tuple[Array, Array]:
 
 
 def _solidfmm_unpack_m_nonneg(re: Array, im: Array, *, ell: int) -> Array:
-    """Reconstruct full m in [-ell, ell] block from m>=0 real/imag arrays."""
+    """Reconstruct full m in [-ell, ell] block from m>=0 real/imag arrays.
+
+    Parameters
+    ----------
+    re : Array
+        Real parts of the ``m >= 0`` coefficients.
+    im : Array
+        Imaginary parts of the ``m >= 0`` coefficients.
+    ell : int
+        Spherical harmonic degree.
+
+    Returns
+    -------
+    Array
+        The full ``m`` in ``[-ell, ell]`` block rebuilt from the ``m >= 0`` half.
+    """
     re = jnp.asarray(re)
     im = jnp.asarray(im)
     dtype = complex_dtype_for_real(jnp.result_type(re, im))
@@ -1120,6 +1630,20 @@ def _solidfmm_swap_mats(
 
     These implement the real-linear map induced by B on coefficients with
     conjugate symmetry.
+
+    Parameters
+    ----------
+    B_swap : Array
+        Involutory swap matrix exchanging the z and x axes for this degree.
+    ell : int
+        Spherical harmonic degree.
+    dtype : DTypeLike
+        Real working dtype the tables are built at.
+
+    Returns
+    -------
+    tuple[Array, Array]
+        Real and imaginary swap matrices for solidfmm's ``m >= 0`` storage.
     """
     m_vals = jnp.arange(0, ell + 1)
     l_vals = jnp.arange(0, ell + 1)
@@ -1148,7 +1672,24 @@ def _solidfmm_swap_apply(
     *,
     ell: int,
 ) -> tuple[Array, Array]:
-    """Apply solidfmm-style swap to m>=0 real/imag arrays."""
+    """Apply solidfmm-style swap to m>=0 real/imag arrays.
+
+    Parameters
+    ----------
+    re : Array
+        Real parts of the ``m >= 0`` coefficients.
+    im : Array
+        Imaginary parts of the ``m >= 0`` coefficients.
+    B_swap : Array
+        Involutory swap matrix exchanging the z and x axes for this degree.
+    ell : int
+        Spherical harmonic degree.
+
+    Returns
+    -------
+    tuple[Array, Array]
+        The swapped ``(re, im)`` arrays.
+    """
     dtype = jnp.result_type(re, im)
     real_mat, imag_mat = _solidfmm_swap_mats(B_swap, ell=ell, dtype=dtype)
     re_out = real_mat @ re
@@ -1165,7 +1706,28 @@ def _solidfmm_rotscale(
     ell: int,
     forward: bool,
 ) -> tuple[Array, Array]:
-    """Solidfmm rotscale for m>=0 coefficients."""
+    """Solidfmm rotscale for m>=0 coefficients.
+
+    Parameters
+    ----------
+    re : Array
+        Real parts of the ``m >= 0`` coefficients.
+    im : Array
+        Imaginary parts of the ``m >= 0`` coefficients.
+    angle : Array
+        Rotation angle about z, in radians.
+    scale : Array
+        Per-order scale factor applied alongside the rotation.
+    ell : int
+        Spherical harmonic degree.
+    forward : bool
+        Direction of the rotscale: True applies it, False applies its inverse.
+
+    Returns
+    -------
+    tuple[Array, Array]
+        The rotated and scaled ``(re, im)`` arrays.
+    """
     m_vals = jnp.arange(0, ell + 1, dtype=jnp.result_type(re, im, angle))
     cos_m = jnp.cos(m_vals * angle)
     sin_m = jnp.sin(m_vals * angle)
@@ -1187,6 +1749,16 @@ def _angles_from_delta_solidfmm(delta: Array) -> tuple[Array, Array]:
         cos(alpha)=y/rxy, sin(alpha)=x/rxy
         cos(beta)=z/r, sin(beta)=-rxy/r
     so alpha=atan2(x,y), beta=atan2(-rxy,z).
+
+    Parameters
+    ----------
+    delta : Array
+        Displacement vector ``(3,)``, target centre minus source centre.
+
+    Returns
+    -------
+    tuple[Array, Array]
+        The two Euler angles in solidfmm's ``euler()`` convention.
     """
     x, y, z = delta[0], delta[1], delta[2]
     # NaN-safe (double-where) angle computation. The forward values are
@@ -1261,7 +1833,29 @@ def _complex_rotation_blocks_to_z_solidfmm(
     basis: str,
     dtype: DTypeLike,
 ) -> tuple[Array, ...]:
-    """Rotation blocks to z using solidfmm's swap+z-rotation convention."""
+    """Rotation blocks to z using solidfmm's swap+z-rotation convention.
+
+    Parameters
+    ----------
+    delta : Array
+        Displacement vector ``(3,)``, target centre minus source centre.
+    order : int
+        Expansion order ``p``. Static: it fixes every packed length and table shape.
+    basis : str
+        ``'multipole'`` (swap ``B_U``) or ``'local'`` (swap ``B_T``).
+    dtype : DTypeLike
+        Real working dtype the tables are built at.
+
+    Returns
+    -------
+    tuple[Array, ...]
+        One rotation block per degree, aligning the axis to +z.
+
+    Raises
+    ------
+    ValueError
+        If ``rotation`` is not a supported convention.
+    """
     if basis not in ("multipole", "local"):
         raise ValueError("basis must be 'multipole' or 'local'")
     p = int(order)
@@ -1289,7 +1883,29 @@ def _complex_rotation_blocks_from_z_solidfmm(
     basis: str,
     dtype: DTypeLike,
 ) -> tuple[Array, ...]:
-    """Rotation blocks from z using solidfmm's swap+z-rotation convention."""
+    """Rotation blocks from z using solidfmm's swap+z-rotation convention.
+
+    Parameters
+    ----------
+    delta : Array
+        Displacement vector ``(3,)``, target centre minus source centre.
+    order : int
+        Expansion order ``p``. Static: it fixes every packed length and table shape.
+    basis : str
+        ``'multipole'`` (swap ``B_U``) or ``'local'`` (swap ``B_T``).
+    dtype : DTypeLike
+        Real working dtype the tables are built at.
+
+    Returns
+    -------
+    tuple[Array, ...]
+        One rotation block per degree, rotating back from +z.
+
+    Raises
+    ------
+    ValueError
+        If ``rotation`` is not a supported convention.
+    """
     if basis not in ("multipole", "local"):
         raise ValueError("basis must be 'multipole' or 'local'")
     p = int(order)
@@ -1314,7 +1930,20 @@ def _pack_coeffs_by_ell(
     *,
     order: int,
 ) -> Array:
-    """Pack coefficients into (p+1, 2p+1) array with zero padding."""
+    """Pack coefficients into (p+1, 2p+1) array with zero padding.
+
+    Parameters
+    ----------
+    coeffs : Array
+        Packed complex coefficients, length ``sh_size(order)``.
+    order : int
+        Expansion order ``p``. Static: it fixes every packed length and table shape.
+
+    Returns
+    -------
+    Array
+        Coefficients as ``(p+1, 2p+1)`` with zero padding.
+    """
     p = int(order)
     coeffs = jnp.asarray(coeffs)
     max_m = 2 * p + 1
@@ -1330,7 +1959,20 @@ def _unpack_coeffs_by_ell(
     *,
     order: int,
 ) -> Array:
-    """Unpack (p+1, 2p+1) coefficients back into packed layout."""
+    """Unpack (p+1, 2p+1) coefficients back into packed layout.
+
+    Parameters
+    ----------
+    packed : Array
+        Packed coefficient array in this module's ``sh`` layout.
+    order : int
+        Expansion order ``p``. Static: it fixes every packed length and table shape.
+
+    Returns
+    -------
+    Array
+        The ``(p+1, 2p+1)`` array flattened back to the packed layout.
+    """
     p = int(order)
     dtype = jnp.asarray(packed).dtype
     out = jnp.zeros((sh_size(p),), dtype=dtype)
@@ -1346,7 +1988,22 @@ def _blocks_to_padded_array(
     order: int,
     dtype: DTypeLike,
 ) -> Array:
-    """Pad rotation blocks to (p+1, 2p+1, 2p+1)."""
+    """Pad rotation blocks to (p+1, 2p+1, 2p+1).
+
+    Parameters
+    ----------
+    blocks : tuple[Array, ...]
+        Per-degree rotation blocks, one square matrix per degree.
+    order : int
+        Expansion order ``p``. Static: it fixes every packed length and table shape.
+    dtype : DTypeLike
+        Real working dtype the tables are built at.
+
+    Returns
+    -------
+    Array
+        The blocks padded to ``(p+1, 2p+1, 2p+1)``.
+    """
     p = int(order)
     max_m = 2 * p + 1
     out = jnp.zeros((p + 1, max_m, max_m), dtype=dtype)
@@ -1412,7 +2069,24 @@ def complex_rotation_blocks_to_z_solidfmm_batch(
     basis: str,
     dtype: DTypeLike,
 ) -> Array:
-    """Batch padded rotation blocks to z using solidfmm convention."""
+    """Batch padded rotation blocks to z using solidfmm convention.
+
+    Parameters
+    ----------
+    deltas : Array
+        Batched displacement vectors, shape ``(batch, 3)``.
+    order : int
+        Expansion order ``p``. Static: it fixes every packed length and table shape.
+    basis : str
+        ``'multipole'`` (swap ``B_U``) or ``'local'`` (swap ``B_T``).
+    dtype : DTypeLike
+        Real working dtype the tables are built at.
+
+    Returns
+    -------
+    Array
+        Padded to-z rotation blocks for a batch of displacements.
+    """
     return jax.vmap(
         lambda d: _complex_rotation_blocks_to_z_solidfmm_padded(
             d,
@@ -1431,7 +2105,24 @@ def complex_rotation_blocks_from_z_solidfmm_batch(
     basis: str,
     dtype: DTypeLike,
 ) -> Array:
-    """Batch padded rotation blocks from z using solidfmm convention."""
+    """Batch padded rotation blocks from z using solidfmm convention.
+
+    Parameters
+    ----------
+    deltas : Array
+        Batched displacement vectors, shape ``(batch, 3)``.
+    order : int
+        Expansion order ``p``. Static: it fixes every packed length and table shape.
+    basis : str
+        ``'multipole'`` (swap ``B_U``) or ``'local'`` (swap ``B_T``).
+    dtype : DTypeLike
+        Real working dtype the tables are built at.
+
+    Returns
+    -------
+    Array
+        Padded from-z rotation blocks for a batch of displacements.
+    """
     return jax.vmap(
         lambda d: _complex_rotation_blocks_from_z_solidfmm_padded(
             d,
@@ -1448,7 +2139,22 @@ def _apply_complex_rotation_blocks_batched(
     *,
     order: int,
 ) -> Array:
-    """Apply rotation blocks using per-ell batched matvecs."""
+    """Apply rotation blocks using per-ell batched matvecs.
+
+    Parameters
+    ----------
+    coeffs : Array
+        Packed complex coefficients, length ``sh_size(order)``.
+    blocks : tuple[Array, ...]
+        Per-degree rotation blocks, one square matrix per degree.
+    order : int
+        Expansion order ``p``. Static: it fixes every packed length and table shape.
+
+    Returns
+    -------
+    Array
+        The coefficients with the per-degree blocks applied.
+    """
     p = int(order)
     coeffs = jnp.asarray(coeffs)
     dtype = coeffs.dtype
@@ -1467,7 +2173,22 @@ def _apply_complex_rotation_blocks_padded_batch(
     *,
     order: int,
 ) -> Array:
-    """Apply padded rotation blocks to a batch of coefficients."""
+    """Apply padded rotation blocks to a batch of coefficients.
+
+    Parameters
+    ----------
+    coeffs : Array
+        Packed complex coefficients, length ``sh_size(order)``.
+    blocks_array : Array
+        Rotation blocks padded to ``(p+1, 2p+1, 2p+1)``.
+    order : int
+        Expansion order ``p``. Static: it fixes every packed length and table shape.
+
+    Returns
+    -------
+    Array
+        The batch of coefficients with padded blocks applied.
+    """
     packed = jax.vmap(lambda c: _pack_coeffs_by_ell(c, order=order))(coeffs)
     rotated = jnp.einsum(
         "nbij,nbj->nbi", blocks_array, packed, precision=lax.Precision.HIGHEST
@@ -1481,7 +2202,22 @@ def rotate_complex_multipole_to_z_solidfmm(
     *,
     order: int,
 ) -> Array:
-    """Rotate multipoles to z using solidfmm's swap+z-rotation convention."""
+    """Rotate multipoles to z using solidfmm's swap+z-rotation convention.
+
+    Parameters
+    ----------
+    multipole : Array
+        Packed complex multipole coefficients, length ``sh_size(order)``.
+    delta : Array
+        Displacement vector ``(3,)``, target centre minus source centre.
+    order : int
+        Expansion order ``p``. Static: it fixes every packed length and table shape.
+
+    Returns
+    -------
+    Array
+        Multipoles rotated so the displacement lies along +z.
+    """
     blocks = _complex_rotation_blocks_to_z_solidfmm(
         delta, order=order, basis="multipole", dtype=jnp.asarray(multipole).dtype
     )
@@ -1494,7 +2230,22 @@ def rotate_complex_multipole_from_z_solidfmm(
     *,
     order: int,
 ) -> Array:
-    """Rotate multipoles from z using solidfmm's swap+z-rotation convention."""
+    """Rotate multipoles from z using solidfmm's swap+z-rotation convention.
+
+    Parameters
+    ----------
+    multipole : Array
+        Packed complex multipole coefficients, length ``sh_size(order)``.
+    delta : Array
+        Displacement vector ``(3,)``, target centre minus source centre.
+    order : int
+        Expansion order ``p``. Static: it fixes every packed length and table shape.
+
+    Returns
+    -------
+    Array
+        Multipoles rotated back out of the +z frame.
+    """
     blocks = _complex_rotation_blocks_from_z_solidfmm(
         delta, order=order, basis="multipole", dtype=jnp.asarray(multipole).dtype
     )
@@ -1507,7 +2258,22 @@ def rotate_complex_local_to_z_solidfmm(
     *,
     order: int,
 ) -> Array:
-    """Rotate locals to z using solidfmm's swap+z-rotation convention."""
+    """Rotate locals to z using solidfmm's swap+z-rotation convention.
+
+    Parameters
+    ----------
+    local : Array
+        Packed complex local coefficients, length ``sh_size(order)``.
+    delta : Array
+        Displacement vector ``(3,)``, target centre minus source centre.
+    order : int
+        Expansion order ``p``. Static: it fixes every packed length and table shape.
+
+    Returns
+    -------
+    Array
+        Locals rotated so the displacement lies along +z.
+    """
     blocks = _complex_rotation_blocks_to_z_solidfmm(
         delta, order=order, basis="local", dtype=jnp.asarray(local).dtype
     )
@@ -1520,7 +2286,22 @@ def rotate_complex_local_from_z_solidfmm(
     *,
     order: int,
 ) -> Array:
-    """Rotate locals from z using solidfmm's swap+z-rotation convention."""
+    """Rotate locals from z using solidfmm's swap+z-rotation convention.
+
+    Parameters
+    ----------
+    local : Array
+        Packed complex local coefficients, length ``sh_size(order)``.
+    delta : Array
+        Displacement vector ``(3,)``, target centre minus source centre.
+    order : int
+        Expansion order ``p``. Static: it fixes every packed length and table shape.
+
+    Returns
+    -------
+    Array
+        Locals rotated back out of the +z frame.
+    """
     blocks = _complex_rotation_blocks_from_z_solidfmm(
         delta, order=order, basis="local", dtype=jnp.asarray(local).dtype
     )
@@ -1541,7 +2322,29 @@ def m2m_complex(
     order: int,
     rotation: str = "solidfmm",
 ) -> Array:
-    """Complex M2M using A6: rotate → z-translate → rotate back."""
+    """Complex M2M using A6: rotate → z-translate → rotate back.
+
+    Parameters
+    ----------
+    multipole : Array
+        Packed complex multipole coefficients, length ``sh_size(order)``.
+    delta : Array
+        Displacement vector ``(3,)``, target centre minus source centre.
+    order : int
+        Expansion order ``p``. Static: it fixes every packed length and table shape.
+    rotation : str
+        Rotation convention; ``'solidfmm'`` is the only one wired to production.
+
+    Returns
+    -------
+    Array
+        The parent multipole coefficients.
+
+    Raises
+    ------
+    ValueError
+        If ``rotation`` is not a supported convention.
+    """
     if rotation != "solidfmm":
         raise ValueError("rotation must be 'solidfmm'")
     p = int(order)
@@ -1565,7 +2368,29 @@ def l2l_complex(
     order: int,
     rotation: str = "solidfmm",
 ) -> Array:
-    """Complex L2L using A6: rotate → z-translate → rotate back."""
+    """Complex L2L using A6: rotate → z-translate → rotate back.
+
+    Parameters
+    ----------
+    local : Array
+        Packed complex local coefficients, length ``sh_size(order)``.
+    delta : Array
+        Displacement vector ``(3,)``, target centre minus source centre.
+    order : int
+        Expansion order ``p``. Static: it fixes every packed length and table shape.
+    rotation : str
+        Rotation convention; ``'solidfmm'`` is the only one wired to production.
+
+    Returns
+    -------
+    Array
+        The child local coefficients.
+
+    Raises
+    ------
+    ValueError
+        If ``rotation`` is not a supported convention.
+    """
     if rotation != "solidfmm":
         raise ValueError("rotation must be 'solidfmm'")
     p = int(order)
@@ -1594,6 +2419,27 @@ def m2l_complex_reference(
     the ``d/dx`` and ``d/dy`` cotangents come from a ``custom_jvp`` rather than from
     differentiating ``_angles_from_delta_solidfmm``'s guarded azimuth; the analytic
     branch applies inside exactly zero outside a narrow band around that axis (``rho <= sqrt(eps) * |delta|``, the measured crossover between the two routes' errors).
+
+    Parameters
+    ----------
+    multipole : Array
+        Packed complex multipole coefficients, length ``sh_size(order)``.
+    delta : Array
+        Displacement vector ``(3,)``, target centre minus source centre.
+    order : int
+        Expansion order ``p``. Static: it fixes every packed length and table shape.
+    rotation : str
+        Rotation convention; ``'solidfmm'`` is the only one wired to production.
+
+    Returns
+    -------
+    Array
+        The local coefficients induced by the source multipole.
+
+    Raises
+    ------
+    ValueError
+        If ``rotation`` is not a supported convention.
     """
     if rotation != "solidfmm":
         raise ValueError("rotation must be 'solidfmm'")
@@ -1622,7 +2468,24 @@ def m2l_complex_reference_batch(
     order: int,
     rotation: str = "solidfmm",
 ) -> Array:
-    """Batch M2L in complex basis (rotate → z-translate → rotate back)."""
+    """Batch M2L in complex basis (rotate → z-translate → rotate back).
+
+    Parameters
+    ----------
+    multipoles : Array
+        Batched packed complex multipoles, shape ``(batch, sh_size(order))``.
+    deltas : Array
+        Batched displacement vectors, shape ``(batch, 3)``.
+    order : int
+        Expansion order ``p``. Static: it fixes every packed length and table shape.
+    rotation : str
+        Rotation convention; ``'solidfmm'`` is the only one wired to production.
+
+    Returns
+    -------
+    Array
+        Local coefficients for a batch of pairs.
+    """
     return jax.vmap(
         lambda m, d: m2l_complex_reference(m, d, order=order, rotation=rotation),
         in_axes=(0, 0),
@@ -1640,7 +2503,26 @@ def m2l_complex_reference_batch_cached_blocks(
     *,
     order: int,
 ) -> Array:
-    """Batch M2L using precomputed rotation blocks for each pair."""
+    """Batch M2L using precomputed rotation blocks for each pair.
+
+    Parameters
+    ----------
+    multipoles : Array
+        Batched packed complex multipoles, shape ``(batch, sh_size(order))``.
+    deltas : Array
+        Batched displacement vectors, shape ``(batch, 3)``.
+    blocks_to_z : Array
+        Padded rotation blocks aligning the pair axis to +z.
+    blocks_from_z : Array
+        Padded rotation blocks rotating back from +z.
+    order : int
+        Expansion order ``p``. Static: it fixes every packed length and table shape.
+
+    Returns
+    -------
+    Array
+        Local coefficients for a batch, reusing precomputed rotation blocks.
+    """
     p = int(order)
     M_rot = _apply_complex_rotation_blocks_padded_batch(
         multipoles,
@@ -1663,7 +2545,22 @@ def translate_along_z_m2l_complex_batch(
     *,
     order: int,
 ) -> Array:
-    """Batch translate complex multipoles to locals along +z."""
+    """Batch translate complex multipoles to locals along +z.
+
+    Parameters
+    ----------
+    multipoles : Array
+        Batched packed complex multipoles, shape ``(batch, sh_size(order))``.
+    r : Array
+        Centre separation; the z-translation distance after rotation to +z.
+    order : int
+        Expansion order ``p``. Static: it fixes every packed length and table shape.
+
+    Returns
+    -------
+    Array
+        Batched multipole-to-local translation along +z.
+    """
     return jax.vmap(
         lambda m, rr: translate_along_z_m2l_complex(m, rr, order=order),
         in_axes=(0, 0),
@@ -1678,7 +2575,22 @@ def translate_along_z_m2m_complex_batch(
     *,
     order: int,
 ) -> Array:
-    """Batch translate complex multipoles along +z."""
+    """Batch translate complex multipoles along +z.
+
+    Parameters
+    ----------
+    multipoles : Array
+        Batched packed complex multipoles, shape ``(batch, sh_size(order))``.
+    dz : Array
+        Signed translation distance along +z.
+    order : int
+        Expansion order ``p``. Static: it fixes every packed length and table shape.
+
+    Returns
+    -------
+    Array
+        Batched multipole translation along +z.
+    """
     return jax.vmap(
         lambda m, rr: translate_along_z_m2m_complex(m, rr, order=order),
         in_axes=(0, 0),
@@ -1693,7 +2605,22 @@ def translate_along_z_l2l_complex_batch(
     *,
     order: int,
 ) -> Array:
-    """Batch translate complex locals along +z."""
+    """Batch translate complex locals along +z.
+
+    Parameters
+    ----------
+    locals : Array
+        Batched packed complex locals, shape ``(batch, sh_size(order))``.
+    dz : Array
+        Signed translation distance along +z.
+    order : int
+        Expansion order ``p``. Static: it fixes every packed length and table shape.
+
+    Returns
+    -------
+    Array
+        Batched local translation along +z.
+    """
     return jax.vmap(
         lambda m, rr: translate_along_z_l2l_complex(m, rr, order=order),
         in_axes=(0, 0),
@@ -1709,7 +2636,24 @@ def l2l_complex_batch(
     order: int,
     rotation: str = "solidfmm",
 ) -> Array:
-    """Batch L2L in complex basis."""
+    """Batch L2L in complex basis.
+
+    Parameters
+    ----------
+    locals : Array
+        Batched packed complex locals, shape ``(batch, sh_size(order))``.
+    deltas : Array
+        Batched displacement vectors, shape ``(batch, 3)``.
+    order : int
+        Expansion order ``p``. Static: it fixes every packed length and table shape.
+    rotation : str
+        Rotation convention; ``'solidfmm'`` is the only one wired to production.
+
+    Returns
+    -------
+    Array
+        Child local coefficients for a batch.
+    """
     return jax.vmap(
         lambda l, d: l2l_complex(l, d, order=order, rotation=rotation),
         in_axes=(0, 0),
