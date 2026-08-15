@@ -26,6 +26,8 @@ from jaccpot.upward.tree_expansions import TreeUpwardData
 from ._adaptive_policy import (
     build_adaptive_policy_state,
     compute_node_force_scale_from_sorted_acc,
+    per_node_effective_theta,
+    per_node_mac_radius,
     source_error_proxy_by_order_from_multipoles,
 )
 from ._octree_adapter import build_octree_execution_data_with_status
@@ -132,9 +134,45 @@ class PolicyMixin:
         return 0
 
     def _uses_dehnen_error_policy(self: "FMMEngine") -> bool:
-        """Return whether traversal should use the Dehnen paper policy hook."""
+        """Return whether the solver evaluates the Dehnen error criterion at all.
 
-        return str(self.mac_type) == "dehnen_error"
+        True for both ``dehnen_error`` (exact, evaluated pair-by-pair through a
+        solver-owned ``pair_policy``) and ``dehnen_theta`` (the same criterion
+        folded into one opening angle per node). The two share everything that
+        feeds the criterion -- the min-reduced force scale, the mandatory
+        ``adaptive_eps``, the low-order prepass, the ``"dehnen"`` base MAC and the
+        paper error-model code. They diverge at exactly one place: whether a pair
+        policy is installed. See :meth:`_uses_per_node_effective_theta`.
+        """
+
+        return str(self.mac_type) in ("dehnen_error", "dehnen_theta")
+
+    def _uses_per_node_effective_theta(self: "FMMEngine") -> bool:
+        """Return whether the MAC is folded into a per-node opening angle.
+
+        ``dehnen_theta`` evaluates the same Dehnen criterion as ``dehnen_error``,
+        but collapses it into one opening angle per node and feeds that to the
+        traversal as rescaled ``geometry.radius`` values, so it installs no
+        ``pair_policy`` and none of the fast-lane vetoes trigger.
+
+        **REFUTED -- do not use for production.** Measured against the exact
+        criterion at N=4096/p=8 (`bench/validation/per_node_theta_fidelity.py`,
+        `bench/results/validation/theta_fidelity_p8.json`): 12-9300x worse error at
+        1.35-15x *more* interaction work, with a p99.99 of 2.3e+02 on bulge+halo.
+        Retained only so the negative result stays reproducible; selecting it warns.
+
+        The obstruction is structural, not a tuning failure. eq (16a) accepts when
+        ``r**(p+2)`` exceeds a *product* of a source term and a sink term, while the
+        lane test is a *sum* ``e_A + e_B <= theta_g r``. A sum cannot represent a
+        product, so a per-node extent is either tight on average and unsound on the
+        tails (this mode) or sound and empty (see
+        :func:`~jaccpot.runtime._adaptive_policy.per_node_conservative_extent`,
+        which recovers <=0.6% of the exact criterion's far pairs at its optimum).
+        Carrying this criterion into the fast lanes needs pair-policy support in the
+        lanes themselves.
+        """
+
+        return str(self.mac_type) == "dehnen_theta"
 
     def _uses_dehnen_paper_error_model(self: "FMMEngine") -> bool:
         """Return whether the active adaptive error model is the paper estimator."""
@@ -167,12 +205,21 @@ class PolicyMixin:
     def _mac_type_for_traversal(mac_type: MACTypeInput) -> MACType:
         """Map a caller-facing MAC type onto the one yggdrax's traversal accepts.
 
-        ``"dehnen_error"`` is a jaccpot-level policy -- the Dehnen (2014) §5
-        mass-dependent MAC -- layered on the geometric ``"dehnen"`` test. yggdrax
-        has never heard of it: its ``MACType`` is
+        ``"dehnen_error"`` and ``"dehnen_theta"`` are jaccpot-level policies -- the
+        Dehnen (2014) §5 mass-dependent MAC -- layered on the geometric
+        ``"dehnen"`` test. yggdrax has never heard of either: its ``MACType`` is
         ``Literal["bh", "engblom", "dehnen"]`` and its traversal raises
         ``ValueError("Unknown mac_type: ...")`` for anything else. So every path
         that reaches the traversal must come through here first.
+
+        **Both** names map, and the set here must stay in step with
+        :meth:`_uses_dehnen_error_policy`. They differ only in *how* the criterion
+        is applied -- ``dehnen_error`` installs a solver-owned pair policy,
+        ``dehnen_theta`` folds it into one opening angle per node (rescaled
+        ``geometry.radius``) -- and neither changes the geometric test underneath,
+        so both reduce to ``"dehnen"`` here. Mapping only one of them is not a
+        narrower translation but a crash: yggdrax's runtime type check rejects the
+        unmapped literal before the traversal starts.
 
         A ``staticmethod`` on purpose: it maps a *value*, so it also works for an
         explicitly-passed override rather than only for ``self.mac_type``. That is
@@ -182,14 +229,16 @@ class PolicyMixin:
         Parameters
         ----------
         mac_type : MACTypeInput
-            What the caller asked for, including ``"dehnen_error"``.
+            What the caller asked for, including the two jaccpot-level policies.
 
         Returns
         -------
         MACType
             The geometric criterion to hand the traversal.
         """
-        return "dehnen" if str(mac_type) == "dehnen_error" else mac_type
+        return (
+            "dehnen" if str(mac_type) in ("dehnen_error", "dehnen_theta") else mac_type
+        )
 
     def _base_mac_type(self: "FMMEngine") -> MACType:
         """Return the Yggdrax-facing geometric MAC for the active solver mode."""
@@ -232,6 +281,70 @@ class PolicyMixin:
             theta=theta,
             error_model_code=error_model_code,
             dehnen_geometry_mode=dehnen_geometry_mode,
+        )
+
+    def _apply_per_node_effective_theta(
+        self: "FMMEngine",
+        *,
+        tree_artifacts: _PrepareStateTreeUpwardArtifacts,
+        force_scale_nodes: Optional[Array],
+        max_order: int,
+        theta_val: float,
+    ) -> _PrepareStateTreeUpwardArtifacts:
+        """Fold the Dehnen criterion into ``geometry.radius`` as per-node angles.
+
+        Returns ``tree_artifacts`` with the upward geometry's ``radius`` replaced by
+        ``rho_i * theta_val / theta_i``, which makes the traversal's own
+        ``(e_t + e_s)**2 <= theta**2 d**2`` test algebraically equal to
+        ``rho_t/theta_t + rho_s/theta_s <= d``. Everything downstream -- generic
+        walk, split build, streamed build, treecode, Pallas -- then carries the
+        criterion with no pair policy and no lane veto.
+
+        ``theta_val`` cancels out of acceptance, so its value does not matter here;
+        it is threaded through only because the traversal compares against it.
+        """
+
+        if force_scale_nodes is None:
+            raise ValueError(
+                "mac_type='dehnen_theta' requires a per-node force scale; "
+                "prepare_state should have produced one via the paper prepass"
+            )
+        order = int(tree_artifacts.upward.multipoles.order)
+        policy_state = self._build_adaptive_policy_state(
+            upward=tree_artifacts.upward,
+            tree=tree_artifacts.tree,
+            positions_sorted=tree_artifacts.positions_sorted,
+            p_gears=(order,),
+            force_scale_nodes=force_scale_nodes,
+            eps=jnp.asarray(float(self.adaptive_eps)),
+            theta=jnp.asarray(float(theta_val)),
+            error_model_code=jnp.asarray(
+                self._traversal_policy_error_model_code(), dtype=jnp.int32
+            ),
+            dehnen_geometry_mode=self.dehnen_geometry_mode,
+        )
+        theta_nodes = per_node_effective_theta(
+            source_power=policy_state.source_dehnen_power,
+            radius_bound=policy_state.source_radius_bound,
+            force_scale=force_scale_nodes,
+            masked_binomial=policy_state.dehnen_binomial_masked_by_order[0],
+            exponent=policy_state.dehnen_exponent_by_order[0],
+            order=order,
+            eps=float(self.adaptive_eps),
+            gravitational_constant=float(self.G),
+            theta_max=float(getattr(self, "mac_theta_max", 1.0)),
+        )
+        scaled_radius = per_node_mac_radius(
+            radius_bound=policy_state.source_radius_bound,
+            theta_nodes=theta_nodes,
+            theta_global=float(theta_val),
+        )
+        self._recent_effective_theta_nodes = theta_nodes
+        upward = tree_artifacts.upward
+        return tree_artifacts._replace(
+            upward=upward._replace(
+                geometry=upward.geometry._replace(radius=scaled_radius)
+            )
         )
 
     @contextlib.contextmanager

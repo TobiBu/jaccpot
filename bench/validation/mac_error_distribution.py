@@ -401,9 +401,32 @@ def measure(
             near_work += n_t * max(shi - slo + 1, 0)
         near_work += n_t * n_t  # self block
 
+    # Converged traversal capacities. The dual-tree build retries with growing
+    # caps when the queue or per-node interaction list overflows, and *each retry
+    # recompiles* -- at eps=2e-7 that was 6 retries and minutes of wall time per
+    # config, which is what made the tight-eps sweep look like a hang. Recording
+    # the capacities the retries converged to lets a later run pass them up front
+    # via DualTreeTraversalConfig and skip the whole cycle.
+    #
+    # Do NOT round these up "for safety": the traversal allocates buffers of size
+    # num_nodes * interaction_capacity, so an oversized cap OOMs. Measured:
+    # interaction_capacity=1<<18 at N=16384 tried to allocate 4 GiB on top of 32
+    # and died, while the converged value ran fine.
+    retry_events = tuple(getattr(fmm._impl, "recent_retry_events", ()) or ())
+    final_caps = None
+    if retry_events:
+        last = retry_events[-1]
+        final_caps = {
+            "attempts": len(retry_events),
+            "queue_capacity": int(last.queue_capacity),
+            "interaction_capacity": int(last.interaction_capacity),
+            "status": str(last.status),
+        }
+
     record = {
         "arm": arm,
         "knob": float(knob),
+        "retry_final_caps": final_caps,
         "far_pairs": far_pairs,
         "near_pairs": near_pairs,
         "far_work": int(far_work),
@@ -453,16 +476,32 @@ def compare_arms(
     mass: list[dict[str, Any]],
     *,
     metric: str = "scaled_",
+    match_on: str = "p90",
 ) -> list[dict[str, Any]]:
-    """Compare the arms at matched 90th-percentile error.
+    """Compare the arms at a matched error statistic.
 
     ``metric`` selects the error family: ``""`` for Dehnen's per-particle
     relative error, ``"scaled_"`` for the globally-normalised one (the default,
     because it stays meaningful where the true acceleration vanishes).
+
+    ``match_on`` selects *which* statistic is equalised, and this matters more than
+    it looks. Dehnen section 5.3 states the claim as a reduced large-error tail at
+    comparable **median**, so ``"median"`` is the apples-to-apples comparison.
+    ``"p90"`` was the original default because at N=4096 the far field is shallow
+    enough that most particles are pure near-field and the median saturates at
+    machine precision, which makes median-matching degenerate. That reasoning stops
+    applying once the far field is deep: at N=1e5 the median runs 3e-7..4e-5.
+
+    Be aware the two disagree substantially, because p90 is itself partly a tail
+    statistic -- equalising it asks the mass MAC to give up exactly the property it
+    is good at. Measured at N=1e5/p=8: matched-p90 gives Plummer p99 ratios of
+    0.91-1.14, while matched-median on the same data gives rms 2.0x and p99.99 1.7x
+    at 38% less work. Report the statistic you matched on, and prefer showing the
+    whole distribution over any single ratio.
     """
 
     out = []
-    p90 = f"{metric}p90"
+    p90 = f"{metric}{match_on}"
     lo = max(
         min(r[p90] for r in fixed if r[p90] > 0),
         min(r[p90] for r in mass if r[p90] > 0),
@@ -535,7 +574,17 @@ def _git_meta() -> dict[str, Any]:
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--n", default="4096")
-    ap.add_argument("--leaf-size", type=int, default=16)
+    ap.add_argument(
+        "--leaf-size",
+        type=int,
+        default=256,
+        help=(
+            "particles per leaf. 256 is the production setting (it is what the 1M "
+            "large-N runs use). Small leaves are actively bad at tight eps: more "
+            "nodes means longer per-node interaction lists, which is what drives "
+            "the retry-recompile cycle -- 6 retries at leaf 16 / eps=2e-7."
+        ),
+    )
     ap.add_argument("--order", default="4")
     ap.add_argument("--distribution", default="uniform")
     ap.add_argument("--theta", default="0.30,0.35,0.40,0.45,0.50,0.55,0.60,0.70,0.80")
@@ -565,6 +614,29 @@ def main() -> int:
             "true acceleration vanishes (clustered systems)"
         ),
     )
+    ap.add_argument(
+        "--match-on",
+        default="p90",
+        choices=("p90", "median"),
+        help=(
+            "which error statistic the two arms are equalised on. 'median' is "
+            "Dehnen section 5.3's own comparison (reduced tail at comparable "
+            "median); 'p90' is the historical default, safer when the far field is "
+            "shallow enough that the median saturates. They disagree substantially "
+            "-- see compare_arms."
+        ),
+    )
+    ap.add_argument(
+        "--reference-block",
+        type=int,
+        default=512,
+        help=(
+            "target-block size for the O(N^2) reference. Peak scratch is roughly "
+            "block * N * 3 * 8 bytes, so 512 needs ~3.6 GB at N=1e5 -- drop it to 64 "
+            "there. Keep ALL targets rather than subsampling: p99.99 at N=1e5 is only "
+            "~10 particles, and subsampling targets would leave the tail unmeasurable."
+        ),
+    )
     ap.add_argument("--json-out", default=None)
     args = ap.parse_args()
 
@@ -578,6 +650,24 @@ def main() -> int:
         # dropping it would silently produce an empty comparison table.
         ap.error("--arm must include 'fixed'; it is the comparison baseline")
 
+    # Guard the leaf-size / N interaction. With too few leaves the tree has no far
+    # field to speak of and the MAC comparison is vacuous -- measured at N=16384 /
+    # leaf 256 (64 leaves): the criterion accepted ZERO far pairs at eps=2e-7 and
+    # the run degenerated to all-to-all direct summation (near_total = 64*63). It
+    # looked fast, and it measured nothing. leaf 256 is the right production value
+    # but wants N >= ~1e5 (390 leaves) to be meaningful.
+    _min_leaves = 128
+    for _n in _ints(args.n):
+        _leaves = _n // max(int(args.leaf_size), 1)
+        if _leaves < _min_leaves:
+            print(
+                f"WARNING: N={_n} with leaf_size={args.leaf_size} gives only "
+                f"~{_leaves} leaves. The far field will be trivial or empty and the "
+                f"arm comparison meaningless. Use N >= {_min_leaves * args.leaf_size} "
+                f"at this leaf size, or a smaller leaf size.",
+                flush=True,
+            )
+
     records: list[dict[str, Any]] = []
     comparisons: list[dict[str, Any]] = []
 
@@ -590,11 +680,19 @@ def main() -> int:
             positions = jnp.asarray(pos_np, dtype=jnp.float64)
             masses = jnp.asarray(mass_np, dtype=jnp.float64)
             reference = chunked_direct_accelerations(
-                positions, masses, softening=args.softening, G=args.G
+                positions,
+                masses,
+                softening=args.softening,
+                G=args.G,
+                block=int(args.reference_block),
             )
             jax.block_until_ready(reference)
             force_scale = chunked_force_scale(
-                positions, masses, softening=args.softening, G=args.G
+                positions,
+                masses,
+                softening=args.softening,
+                G=args.G,
+                block=int(args.reference_block),
             )
             jax.block_until_ready(force_scale)
 
@@ -648,7 +746,10 @@ def main() -> int:
                 }[args.metric]
                 for mass_arm in (a for a in arms if a != "fixed"):
                     for row in compare_arms(
-                        by_arm["fixed"], by_arm[mass_arm], metric=metric_prefix
+                        by_arm["fixed"],
+                        by_arm[mass_arm],
+                        metric=metric_prefix,
+                        match_on=str(args.match_on),
                     ):
                         row.update(
                             {
@@ -660,9 +761,12 @@ def main() -> int:
                         )
                         comparisons.append(row)
 
-    print("\n=== matched at equal p90 (ratio > 1 favours the mass MAC) ===")
     print(
-        f"{'dist':>14s} {'N':>7s} {'p':>2s} {'arm':>9s} {'p90':>9s} "
+        f"\n=== matched at equal {args.match_on} "
+        "(ratio > 1 favours the mass MAC) ==="
+    )
+    print(
+        f"{'dist':>14s} {'N':>7s} {'p':>2s} {'arm':>9s} {'matched':>9s} "
         f"{'p99 x':>7s} {'max x':>7s} {'work x':>7s}"
     )
     for row in comparisons:
@@ -672,6 +776,23 @@ def main() -> int:
             f"{row['matched_p90']:.3e} {row['p99_ratio'] or float('nan'):7.2f} "
             f"{row['max_ratio'] or float('nan'):7.2f} "
             f"{row['pair_work_ratio'] or float('nan'):7.2f}"
+        )
+
+    capped = [r for r in records if r.get("retry_final_caps")]
+    if capped:
+        worst_q = max(r["retry_final_caps"]["queue_capacity"] for r in capped)
+        worst_i = max(r["retry_final_caps"]["interaction_capacity"] for r in capped)
+        worst_a = max(r["retry_final_caps"]["attempts"] for r in capped)
+        print(
+            f"\n=== traversal retries fired on {len(capped)}/{len(records)} configs "
+            f"(max {worst_a} attempts) ===\n"
+            "Pass these up front to skip the retry-recompile cycle next time:\n"
+            "    DualTreeTraversalConfig(\n"
+            f"        max_pair_queue={worst_q},\n"
+            f"        max_interactions_per_node={worst_i},\n"
+            "    )\n"
+            "Do not round up -- buffers are num_nodes * interaction_capacity, and "
+            "an oversized cap OOMs."
         )
 
     if args.json_out:
