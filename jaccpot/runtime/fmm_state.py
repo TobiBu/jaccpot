@@ -14,7 +14,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from functools import lru_cache
-from typing import TYPE_CHECKING, Any, Literal, NamedTuple, Optional, Union
+from typing import TYPE_CHECKING, Any, Callable, Literal, NamedTuple, Optional, Union
 
 import jax
 import jax.numpy as jnp
@@ -401,8 +401,31 @@ class _RuntimeExecutionOverrides(NamedTuple):
     adaptive_applied: bool
 
 
-def _resolve_optional(value, preset_value, fallback):
-    """Pick explicit value, then preset value, then fallback."""
+def _resolve_optional(value: Any, preset_value: Any, fallback: Any) -> Any:
+    """Pick explicit value, then preset value, then fallback.
+
+    The three-tier resolution rule used throughout :func:`_resolve_fmm_config`.
+    ``None`` is the only "not supplied" signal, so this cannot resolve an option
+    whose ``None`` is a meaningful value -- those are handled explicitly there.
+
+    Typed ``Any`` rather than with a type variable: nothing requires the three
+    arguments to share a type, and callers do pass a ``None`` fallback, so
+    binding them together would assert an invariant the code does not enforce.
+
+    Parameters
+    ----------
+    value : Any
+        The explicitly requested value, or ``None``.
+    preset_value : Any
+        The preset's value, or ``None``.
+    fallback : Any
+        The built-in default. Returned as-is, including when it is ``None``.
+
+    Returns
+    -------
+    Any
+        The first of the three that is not ``None``, else ``fallback``.
+    """
     if value is not None:
         return value
     if preset_value is not None:
@@ -733,8 +756,27 @@ def _build_tree_with_config(
 
 
 @lru_cache(maxsize=16)
-def _jit_radix_lbvh_builder(leaf_size: int):
-    """Return cached jitted radix LBVH builder for a fixed leaf size."""
+def _jit_radix_lbvh_builder(leaf_size: int) -> Callable[..., Any]:
+    """Return cached jitted radix LBVH builder for a fixed leaf size.
+
+    The leaf size is closed over rather than passed, because it is static to the
+    build. That is also why this is cached per leaf size: each distinct value
+    costs its own compile, and the ``lru_cache`` is what stops a loop that varies
+    the leaf size from recompiling every iteration. The cache holds 16, so more
+    than 16 distinct leaf sizes in play will thrash it.
+
+    Parameters
+    ----------
+    leaf_size : int
+        Leaf-size request. Also the cache key, so pass it already normalized.
+
+    Returns
+    -------
+    Callable[..., Any]
+        ``f(positions, masses, bounds) -> (tree, positions_sorted,
+        masses_sorted, inverse_permutation)``. Loosely typed because the value is
+        a ``jax.jit`` wrapper, not a plain function.
+    """
 
     leaf_size_int = int(leaf_size)
     return jax.jit(
@@ -1305,7 +1347,9 @@ def _finalize_octree_downward_artifacts(
     return propagate_octree_solidfmm_l2l(accumulated, octree)
 
 
-def _octree_farfield_eval_inputs(state):
+def _octree_farfield_eval_inputs(
+    state: Any,
+) -> tuple[Optional[LocalExpansionData], Optional[Array], Optional[Array]]:
     """Far-field eval overrides that make the octree backend evaluate its OWN locals.
 
     For ``execution_backend == "octree"`` the octree upward/M2L/L2L pass fills octree-node-
@@ -1319,6 +1363,24 @@ def _octree_farfield_eval_inputs(state):
     derived from ``state.tree`` via ``build_octree_execution_data`` (which asserts root-range
     equality) -- so no re-permutation is needed. Returns ``(None, None, None)`` for non-octree
     backends or when the octree downward pass was not run.
+
+    Parameters
+    ----------
+    state : Any
+        A prepared state. Typed ``Any`` because one of the two call sites passes
+        ``PreparedStateLike``, so this must accept a ``LargeNPreparedState`` as
+        well as an :class:`FMMPreparedState` -- and that union is defined in the
+        engine module, which this one must not import (ARCHITECTURE §1). The
+        ``getattr`` defaults below are what actually make both safe: a state
+        lacking the octree attributes takes the ``(None, None, None)`` branch
+        rather than raising.
+
+    Returns
+    -------
+    tuple[Optional[LocalExpansionData], Optional[Array], Optional[Array]]
+        ``(farfield_local_data, farfield_leaf_nodes, farfield_node_ranges)``,
+        all three in octree node-id space, or ``(None, None, None)``. All three
+        are ``None`` together -- callers may test any one of them.
     """
     if (
         str(getattr(state, "execution_backend", "radix")).strip().lower() != "octree"
