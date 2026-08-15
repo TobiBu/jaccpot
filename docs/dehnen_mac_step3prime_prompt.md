@@ -100,7 +100,7 @@ XLA_PYTHON_CLIENT_PREALLOCATE=false PYTHONPATH=$PWD setsid nohup \
     --reference-subsample 100000 --reference-block 64 \
     --min-far-pairs 5000 --max-p9999 1.0 \
     --seed 0,1,2 --arm fixed,mass,mass_16b_est \
-    --json-out results/validation/mac_1e6_leaf256.json > /tmp/1e6.log 2>&1 < /dev/null &
+    --json-out bench/results/validation/mac_1e6_leaf256.json > /tmp/1e6.log 2>&1 < /dev/null &
 ```
 
 Note the ε grid: at leaf 256 the criterion's usable ε is ~**1e-3…1e-5**, roughly two
@@ -125,7 +125,7 @@ nothing. At N=10⁵/leaf 256, θ=0.30 accepted **zero** far pairs.
 1. **The memory gate is already measured and it clears.** A pair policy costs **+977 MiB
    at 1M** (split build; +969 monolithic), against an 11.07 GB reverse peak on 40 GB.
    Harness: `bench/validation/pair_policy_far_tag_memory.py`, artifact
-   `results/validation/pair_policy_far_tag_memory_1m.json`. Two corrections to the old
+   `bench/results/validation/pair_policy_far_tag_memory_1m.json`. Two corrections to the old
    concern: the cost is *not* specific to the streamed lane, and it is *not* mostly the
    far-tag buffer (244 MiB of 970) — most of it is `_resolve_pair_actions` evaluating the
    policy twice, forward and reverse. So "make tag storage conditional" recovers under a

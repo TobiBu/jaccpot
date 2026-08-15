@@ -100,7 +100,7 @@ there.
 ### 1. The open question that decides the paper — does the benefit hold at Dehnen's ε?
 
 **ANSWERED (2026-08-02): yes, decisively, and by more than the N=4096 numbers
-suggested.** `results/validation/mac_dehnen_eps_n16384_leaf16.json`. N=16384, leaf 16,
+suggested.** `bench/results/validation/mac_dehnen_eps_n16384_leaf16.json`. N=16384, leaf 16,
 p=8, one seed, softening 1e-6, eq (16a) verbatim, matched at equal **median** —
 Dehnen §5.3's own comparison — with ε swept 1e-5 → 1e-7 so **2e-7 sits inside the
 range** rather than at an endpoint.
@@ -182,7 +182,7 @@ the other retrying, so the run would look pinned and behave exactly as before.
 
 ### 1b. Production-scale leaf at N=10⁵ — **DONE, and the advantage is bigger there**
 
-`results/validation/mac_leaf64_n1e5_2seeds.json`. N=10⁵, **leaf 64**, p=8, Plummer,
+`bench/results/validation/mac_leaf64_n1e5_2seeds.json`. N=10⁵, **leaf 64**, p=8, Plummer,
 **2 seeds**, matched at equal median, ε ∈ {1e-6, 3e-7, 2e-7}. Run because the item-1
 answer came from leaf 16, and leaf 16 is not what production uses — this checks the
 result survives a leaf size four times larger, at a decade more particles:
@@ -213,7 +213,7 @@ Converged traversal caps differ at this leaf size: **`max_pair_queue=262144`**,
 ### 1c. p = 10 — **DONE. Dehnen's other order, never measured before 2026-08-03**
 
 Every number in this document was p ≤ 8; Dehnen quotes **p = 8 and p = 10**, and Step 4's
-config asks for both. `results/validation/mac_dehnen_p10_n16384_leaf16.json` — N=16384,
+config asks for both. `bench/results/validation/mac_dehnen_p10_n16384_leaf16.json` — N=16384,
 leaf 16, p=10, one seed, matched median, ε ∈ {1e-5, 1e-6, **5.62e-7 = 10^−6.25**, 2e-7,
 1e-7}, bracketing the ε Dehnen uses at p=10.
 
@@ -247,7 +247,7 @@ against 5.8–11.1×). Two wrinkles worth not hiding:
 
 ### 2. The N-scaling trend — **MEASURED, and at fixed leaf 16 it DECAYS (2026-08-03)**
 
-`results/validation/mac_n_ladder_leaf16_3seeds.json`. N = 16384 / 32768 / 65536, **leaf
+`bench/results/validation/mac_n_ladder_leaf16_3seeds.json`. N = 16384 / 32768 / 65536, **leaf
 16 held fixed**, p=8, Plummer, **3 seeds**, matched at equal median, eq (16a). Per-seed
 p99.99 and work ratios, so the spread is visible rather than averaged away:
 
@@ -291,7 +291,7 @@ usable range differs slightly, so the absolute targets never coincide).
 
 ### 2b. Leaf-size sweep — **RESOLVED: tree depth is the controlling variable, not N**
 
-`results/validation/mac_leafsweep_n1e5_leaf{16,32,64,128,256}.json`. N=10⁵ fixed, p=8,
+`bench/results/validation/mac_leafsweep_n1e5_leaf{16,32,64,128,256}.json`. N=10⁵ fixed, p=8,
 Plummer, 2 seeds, matched on median, per-leaf knob grids bracketed from a census, both
 guards on (`--min-far-pairs 5000`, `--max-p9999 1.0`).
 
