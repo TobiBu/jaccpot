@@ -681,18 +681,48 @@ inside the *monolithic* dual-tree walk, on a lane whose whole purpose is to avoi
 cause is a stale predicate, not a capacity that needs raising:
 
 `allow_split_build` falls back to `_streamed_minimum_memory_gpu_default_split_build`,
-which is computed in `__init__` from `memory_objective == "minimum_memory"` and
-`streamed_far_pairs` — **before** `_apply_large_n_gpu_production_contract` coerces those
-very fields. So on `preset="large_n_gpu"` the predicate reads
-`memory_objective="balanced"`, comes out **False**, and the preset silently runs the
-monolithic build it exists to avoid. Both bench harnesses now pass
-`prepare_stage_memory_split_enabled=True` explicitly on the lane, which is why the
-smaller runs are unaffected.
+which is computed from `memory_objective == "minimum_memory"` and `streamed_far_pairs`
+— **before** `_apply_large_n_gpu_production_contract` coerces those very fields. So the
+predicate comes out **False** and the preset silently runs the monolithic build it exists
+to avoid. Both bench harnesses now pass `prepare_stage_memory_split_enabled=True`
+explicitly on the lane, which is why the smaller runs are unaffected.
 
-That is left as a **finding, not a fix**: flipping the default build path for every
-`large_n_gpu` user is a performance change (the split build trades extra prepare work for
-a lower peak) and deserves its own measurement, which is not this document's item. Fixing
-it is one line in the contract — recompute the predicate after the coercions.
+**Re-measured 2026-08-16 on the post-refactor tree, and the trigger is narrower and the
+named field is the wrong one.** Tier 2.1 moved the predicate out of `__init__` into
+`_fmm_impl._resolve_derived_lane_flags` (line 1479), verbatim, so the ordering is
+unchanged; but the predicate is False only when the caller passes an `advanced=` config
+*alongside* the preset. On the bare preset it is **True** and the split build already
+runs. Measured, `preset="large_n_gpu"` + `expansion_basis="solidfmm"` on an A100:
+
+| construction | predicate |
+|---|---|
+| preset alone | **True** |
+| `advanced=FMMAdvancedConfig()` (all defaults) | False |
+| `advanced=` with `runtime.memory_objective="minimum_memory"` | **still False** |
+| `advanced=` with that *and* `streamed_far_pairs=True` | True |
+
+Row 3 is the one that matters: setting the field the note above blames does **not** fix
+it. The load-bearing conjunct is `streamed_far_pairs`, whose `FMMAdvancedConfig` default
+is `None` and which `_fmm_impl.py:826` turns into `False` — while
+`_explicit_streamed_far_pairs` correctly records it as *not* explicitly requested. So the
+predicate is derived from an unset option.
+
+Mechanism: `solver.py:65` and `:80` are where the `large_n_gpu` preset sets
+`farfield.streamed_far_pairs=True` and `runtime.memory_objective="minimum_memory"`, and
+`solver.py:791` reads `streamed_far_pairs` from `advanced_cfg.farfield`. A caller-supplied
+advanced config **replaces** the preset's, so both fields arrive at `__init__` as their
+dataclass defaults, and only `_apply_large_n_gpu_production_contract` puts the preset's
+intent back — after the predicate has already read them.
+
+Consequence for the fix: it is **not** a change to "the default build path for every
+`large_n_gpu` user" — those users already get the split build. It changes the build path
+only for callers who pass an `advanced=` config too, and it removes an inconsistency
+where the same preset behaves differently depending on whether a config object was
+supplied. That is a smaller blast radius than recorded, and it is also a
+STYLE_GUIDE §9 issue in its own right (a preset's value silently displaced by an option
+the caller never set). Still left as a **finding, not a fix**: it is a performance change
+(the split build trades extra prepare work for a lower peak) and deserves its own PR and
+its own measurement. Fixing it is one line — recompute the predicate after the coercions.
 
 So the next session's 10⁷ attempt should (a) re-run the census with the split build
 explicitly on, which is now the harness default, and (b) expect to size
