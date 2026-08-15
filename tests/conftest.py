@@ -12,6 +12,28 @@ YGGDRAX_ROOT = REPO_ROOT.parent / "yggdrax"
 if YGGDRAX_ROOT.exists() and str(YGGDRAX_ROOT) not in sys.path:
     sys.path.insert(0, str(YGGDRAX_ROOT))
 
+
+# nornax is a TEST-ONLY dependency, used by the cross-repo momentum/block-step
+# checks. The library never imports it -- the dependency graph is
+# Jaccpot -> Yggdrax, Nornax standalone, ODISSEO -> both -- so it is put on the
+# path here rather than declared as a package dependency. Absent, those tests skip.
+#
+# Searched across REPO_ROOT's ancestors rather than just `REPO_ROOT.parent`,
+# because a git worktree checkout sits at `<repo>/.claude/worktrees/<name>`, so its
+# parent is `worktrees/` and the plain sibling lookup finds nothing.
+def _find_sibling_checkout(name: str) -> pathlib.Path | None:
+    """Return a sibling source checkout of ``name``, searching upward."""
+    for ancestor in (REPO_ROOT, *REPO_ROOT.parents):
+        candidate = ancestor.parent / name
+        if (candidate / name / "__init__.py").exists():
+            return candidate
+    return None
+
+
+NORNAX_ROOT = _find_sibling_checkout("nornax")
+if NORNAX_ROOT is not None and str(NORNAX_ROOT) not in sys.path:
+    sys.path.insert(0, str(NORNAX_ROOT))
+
 # --- Test-suite performance setup -------------------------------------------
 # The FMM correctness tests assume float64; set it once here so individual
 # tests/modules do not each have to depend on the ambient environment.
@@ -94,6 +116,34 @@ _DIFF_FMM_TEST_FILES = frozenset(
     }
 )
 
+# Cleared only when the on-disk JAX cache is available to serve the recompiles.
+#
+# The mutual FMM suite belongs in the set above for exactly the reason given
+# there and was simply never added: it is the heaviest file in
+# `tests/integration`, and its gradient tests (FD-vs-AD, vs-direct-sum, rollout,
+# per-level, and the Pallas backend) each leave another reverse-mode executable
+# behind. Omitting it is what let `test-full` drift back to the ceiling and
+# start OOM-killing the runner. Measured on `tests/integration` at `-n 2 --cov`,
+# clearing here moves peak RSS 12.68 GB -> 5.47 GB (-57%).
+#
+# It is gated because that trade is only good when the recompiles are warm -- the
+# note above ("the follow-up recompiles are warm-cache reads") holds only where
+# JACCPOT_TEST_JAX_CACHE_DIR is set. Ungated, this cost +66% wall on the mutual
+# tests and pushed both test-smoke jobs from 27.9/29.9 min straight into their
+# cap, trading one CI failure for another.
+#
+# The gate is on the CONDITION, not on a job name, which is what makes it still
+# correct now that test-smoke has a JAX cache of its own: the clearing simply
+# switches itself on there, because the premise it waits for is now true. Do not
+# rewrite this as "test-full only" -- that was a symptom of which jobs had a
+# cache, not the rule.
+_DIFF_FMM_TEST_FILES_WARM_ONLY = frozenset(
+    {
+        "test_mutual_fmm.py",
+        "test_mutual_fmm_nornax.py",
+    }
+)
+
 
 # The same footprint, arrived at from the other direction. tests/unit/runtime is the
 # Dehnen-MAC suite: ~94 cases that each build a solver and run a full FMM solve. None takes
@@ -135,12 +185,14 @@ def _retains_heavy_executables(node: pytest.Item) -> bool:
     Returns
     -------
     bool
-        True when the test is one of the differentiable-FMM modules or lives in a
-        solver-heavy directory.
+        True when the test is one of the differentiable-FMM modules, lives in a
+        solver-heavy directory, or is one of the warm-only modules and the on-disk
+        JAX cache is available to serve its recompiles.
     """
     return (
         node.path.name in _DIFF_FMM_TEST_FILES
         or node.path.parent in _SOLVER_HEAVY_TEST_DIRS
+        or (bool(_jax_cache_dir) and node.path.name in _DIFF_FMM_TEST_FILES_WARM_ONLY)
     )
 
 

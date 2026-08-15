@@ -200,6 +200,11 @@ Keep the seams in the layout clean and the import graph acyclic:
   config parsing, no I/O.
 - `upward/`, `downward/`, `nearfield/` — the sweeps. Know about operators and tree
   artifacts; are not either.
+- `mutual/` — the momentum-conserving evaluation path. Same tier as the sweeps, but a
+  *second lane* rather than a variant of them: it evaluates each pair once and applies
+  `+f`/`-f`, which is what makes `sum_i m_i a_i` cancel algebraically. It must not grow
+  a dependency on `runtime/`, and `runtime/` must not reach into it — the two lanes
+  compute different numbers on purpose.
 - `pallas/` — accelerated kernels that must stay numerically equivalent to their reference
   counterparts. Equivalence is stated in both docstrings and tested.
 - `runtime/` — orchestration, config resolution, lane selection, dispatch. The only place

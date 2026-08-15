@@ -522,6 +522,145 @@ def test_radix_fast_lane_prepacked_accel_cvjp_matches_tiled_twin(interpret):
 
 
 # --------------------------------------------------------------------------
+# Mutual (double-sided) near-field P2P custom_vjp: Pallas forward, hand-written
+# analytic reverse. Unlike every other lane in this file the reverse is NOT
+# autodiff of the twin -- it is derived by hand so it is never itself linearized
+# (that is what keeps the reverse's intermediates tile-bounded at galaxy scale).
+# The twin's autodiff is therefore the oracle it is checked against, not its
+# implementation, which makes this parity test the only thing standing between a
+# sign slip in the reverse and a silently wrong gradient.
+# --------------------------------------------------------------------------
+from jaccpot.pallas.nearfield_mutual import (  # noqa: E402
+    mutual_leafpair_block_cvjp,
+    mutual_leafpair_block_jax,
+    pallas_nearfield_mutual_supported,
+)
+
+
+def _mutual_pair_case(pairs=6, slots=8, k_max=3, seed=0):
+    """A batch of leaf pairs with padding slots, mixed rungs and level weights."""
+    rng = np.random.default_rng(seed)
+    f8 = jnp.float64
+    xa = jnp.asarray(rng.normal(0.0, 1.0, (pairs, slots, 3)), f8)
+    xb = jnp.asarray(rng.normal(2.5, 1.0, (pairs, slots, 3)), f8)
+    va = jnp.asarray(rng.random((pairs, slots)) > 0.25, f8)
+    vb = jnp.asarray(rng.random((pairs, slots)) > 0.25, f8)
+    # Padding slots carry exactly zero mass, as the caller guarantees.
+    ma = jnp.asarray(rng.uniform(0.5, 1.5, (pairs, slots)), f8) * va
+    mb = jnp.asarray(rng.uniform(0.5, 1.5, (pairs, slots)), f8) * vb
+    ra = jnp.asarray(rng.integers(0, k_max + 1, (pairs, slots)), f8)
+    rb = jnp.asarray(rng.integers(0, k_max + 1, (pairs, slots)), f8)
+    lw = jnp.asarray([1.0, 0.5, 0.25, 0.125][: k_max + 1], f8)
+    soft = jnp.asarray(1.0e-2, f8) ** 2
+    g = jnp.asarray(1.0, f8)
+    return xa, ma, va, xb, mb, vb, ra, rb, lw, soft, g
+
+
+@pytest.mark.parametrize("interpret", [True, False])
+@pytest.mark.parametrize("exclude_diagonal,emit_b", [(False, True), (True, False)])
+def test_mutual_nearfield_pallas_custom_vjp_matches_twin(
+    interpret, exclude_diagonal, emit_b
+):
+    """Analytic reverse == autodiff of the pure-jnp twin, for both block modes.
+
+    ``(False, True)`` is the cross-leaf pair block (both sides emitted);
+    ``(True, False)`` is the intra-leaf block (diagonal excluded, only the ``a``
+    side, since applying both to the same particles would double count).
+    """
+    if not jax.config.jax_enable_x64:
+        pytest.skip("requires x64 for a tight tolerance")
+    if not interpret and not pallas_nearfield_mutual_supported():
+        pytest.skip("mutual near-field Pallas kernel requires an Ampere+ (sm_80) GPU")
+
+    xa, ma, va, xb, mb, vb, ra, rb, lw, soft, g = _mutual_pair_case()
+    num_levels = int(lw.shape[0])
+
+    def f_custom(xa_, ma_, xb_, mb_):
+        return mutual_leafpair_block_cvjp(
+            xa_,
+            ma_,
+            va,
+            xb_,
+            mb_,
+            vb,
+            ra,
+            rb,
+            lw,
+            soft,
+            g,
+            num_levels,
+            exclude_diagonal,
+            emit_b,
+            interpret,
+        )
+
+    def f_ref(xa_, ma_, xb_, mb_):
+        return mutual_leafpair_block_jax(
+            xa_,
+            ma_,
+            va,
+            xb_,
+            mb_,
+            vb,
+            ra,
+            rb,
+            lw,
+            soft,
+            g,
+            exclude_diagonal=exclude_diagonal,
+            emit_b=emit_b,
+        )
+
+    tol = 1.0e-10 if interpret else 1.0e-8
+    try:
+        assert_vjp_matches(f_custom, f_ref, (xa, ma, xb, mb), rtol=tol, atol=tol)
+    except Exception as exc:  # pragma: no cover - GPU/runtime dependent
+        _nf_skip_if_needed(interpret, exc)
+
+
+@pytest.mark.parametrize("interpret", [True, False])
+def test_mutual_nearfield_kernel_is_bitwise_antisymmetric(interpret):
+    """``F_b`` must be the negation of the same tile ``F_a`` reduced, not a rerun.
+
+    This is the property the whole mutual path exists for, and it is invisible to
+    any accuracy check: a kernel that recomputed ``dr`` for the ``b`` side would
+    still match the twin to ~1e-10 while pushing the momentum residual from
+    round-off up to the force accuracy. Summed over the whole block batch, the
+    two sides must cancel to round-off.
+    """
+    if not interpret and not pallas_nearfield_mutual_supported():
+        pytest.skip("mutual near-field Pallas kernel requires an Ampere+ (sm_80) GPU")
+
+    xa, ma, va, xb, mb, vb, ra, rb, lw, soft, g = _mutual_pair_case(seed=7)
+    from jaccpot.pallas.nearfield_mutual import mutual_leafpair_block_pallas
+
+    try:
+        f_a, f_b = mutual_leafpair_block_pallas(
+            xa,
+            ma,
+            va,
+            xb,
+            mb,
+            vb,
+            ra,
+            rb,
+            lw,
+            soft,
+            g,
+            emit_b=True,
+            interpret=interpret,
+        )
+    except Exception as exc:  # pragma: no cover - GPU/runtime dependent
+        _nf_skip_if_needed(interpret, exc)
+        return
+
+    total = jnp.sum(f_a, axis=(0, 1)) + jnp.sum(f_b, axis=(0, 1))
+    scale = jnp.sum(jnp.abs(f_a), axis=(0, 1))
+    residual = float(jnp.linalg.norm(total) / jnp.linalg.norm(scale))
+    assert residual < 1e-14
+
+
+# --------------------------------------------------------------------------
 # The JACCPOT_FUSED_M2L_VJP=0 fallback
 # --------------------------------------------------------------------------
 
