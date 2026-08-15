@@ -26,7 +26,7 @@ Usage::
       -m bench.validation.far_pair_census \\
         --n 1000000 --leaf-size 256 --order 8 --distribution plummer \\
         --theta 0.4,0.5,0.6,0.7 --eps 1e-3,1e-4,1e-5 \\
-        --runtime-lane large_n --json-out results/validation/census_1e6_leaf256.json
+        --runtime-lane large_n --json-out bench/results/validation/census_1e6_leaf256.json
 """
 
 from __future__ import annotations

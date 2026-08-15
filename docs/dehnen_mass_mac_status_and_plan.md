@@ -544,7 +544,7 @@ same values regardless, so it remains a reference.
 
 **The N=10⁶ / leaf 256 census: the grid is healthy, and it is the first configuration
 where leaf 256 has a real far field at every knob.**
-`results/validation/census_1e6_leaf256.json`, fp32, on the large-N lane, 7813 nodes:
+`bench/results/validation/census_1e6_leaf256.json`, fp32, on the large-N lane, 7813 nodes:
 
 | arm | knob | far pairs | near leaf pairs | prepare |
 |---|---|---|---|---|
