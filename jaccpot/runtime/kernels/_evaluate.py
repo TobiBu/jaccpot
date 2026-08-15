@@ -87,7 +87,27 @@ def _evaluate_local_cartesian_with_grad_batch(
     *,
     order: int,
 ) -> tuple[Array, Array]:
-    """Evaluate cartesian local expansions and gradients at batch offsets."""
+    """Evaluate cartesian local expansions and gradients at batch offsets.
+
+    Parameters
+    ----------
+    coeffs : Array
+        Local coefficients, ``[..., total_coefficients(order)]``.
+    offsets : Array
+        Evaluation points relative to each expansion centre, ``[..., 3]``, with
+        leading shape matching ``coeffs``.
+    order : int
+        Expansion order ``p``. Static under ``jit``.
+
+    Returns
+    -------
+    tuple[Array, Array]
+        ``(gradients, potentials)`` -- gradients first, matching the caller's
+        unpacking, with shapes ``[..., 3]`` and ``[...]``. The gradient is read
+        off the degree-1 block with its components reversed, because the
+        cartesian coefficient layout orders them ``z, y, x``. At ``order <= 0``
+        there is no degree-1 block and the gradient is zero.
+    """
     leading_shape = coeffs.shape[:-1]
     coeffs_flat = jnp.reshape(coeffs, (-1, coeffs.shape[-1]))
     offsets_flat = jnp.reshape(offsets, (-1, offsets.shape[-1]))
@@ -115,7 +135,21 @@ def _evaluate_local_cartesian_with_grad_batch(
 
 
 def _infer_bounds(positions: Array) -> tuple[Array, Array]:
-    """Infer generous bounds for tree construction from particle positions."""
+    """Infer generous bounds for tree construction from particle positions.
+
+    Parameters
+    ----------
+    positions : Array
+        Particle positions ``[N, 3]``.
+
+    Returns
+    -------
+    tuple[Array, Array]
+        ``(lower, upper)``, the bounding box padded by 5% of its span per axis,
+        floored at 1e-6 so a degenerate axis still yields a non-empty domain.
+        "Generous" is deliberate: particles exactly on a boundary are a tree
+        build hazard, and the padding costs nothing.
+    """
 
     minimum = jnp.min(positions, axis=0)
     maximum = jnp.max(positions, axis=0)
@@ -125,7 +159,21 @@ def _infer_bounds(positions: Array) -> tuple[Array, Array]:
 
 
 def _max_leaf_size_from_tree(tree: Tree) -> int:
-    """Compute maximum number of particles per leaf node."""
+    """Compute maximum number of particles per leaf node.
+
+    Parameters
+    ----------
+    tree : Tree
+        Built tree. Its leaves are the nodes after the internal ones, so the
+        internal count is what separates the two.
+
+    Returns
+    -------
+    int
+        Widest leaf occupancy, as a host ``int``. Concrete, not traced: this
+        sizes the padded leaf axis, so it cannot be a tracer. Callers inside a
+        trace must pass ``max_leaf_size`` explicitly instead.
+    """
     num_internal = int(jnp.asarray(tree.left_child).shape[0])
     leaf_ranges = tree.node_ranges[num_internal:]
     counts = leaf_ranges[:, 1] - leaf_ranges[:, 0] + as_index(1)
@@ -133,7 +181,28 @@ def _max_leaf_size_from_tree(tree: Tree) -> int:
 
 
 class _TreeEvaluationSetup(NamedTuple):
-    """Prevalidated inputs required by tree-evaluation entry points."""
+    """Prevalidated inputs required by tree-evaluation entry points.
+
+    Attributes
+    ----------
+    locals_data : LocalExpansionData
+        The local expansions to evaluate -- the far-field override when one was
+        given, otherwise the state's own.
+    positions : Array
+        Morton-sorted particle positions ``[N, 3]``.
+    masses : Array
+        Morton-sorted particle masses ``[N]``.
+    leaf_nodes : Array
+        Node ids of the leaves, in the far-field view's order.
+    node_ranges : Array
+        Per-node ``[start, end]`` particle ranges, inclusive of ``end``.
+    max_leaf_size : int
+        Resolved padded leaf width.
+    empty_output : Optional[Union[Array, Tuple[Array, Array]]]
+        Pre-built zero result for the no-leaves case, shaped to match
+        ``return_potential``. When this is not ``None`` the caller must return it
+        directly: the rest of the tuple is filled in but not meaningful.
+    """
 
     locals_data: LocalExpansionData
     positions: Array
@@ -145,7 +214,22 @@ class _TreeEvaluationSetup(NamedTuple):
 
 
 class _EvaluationNodeViews(NamedTuple):
-    """Resolved leaf/node metadata for shared nearfield and backend-specific farfield."""
+    """Resolved leaf/node metadata for shared nearfield and backend-specific farfield.
+
+    The near field and the far field are allowed to disagree about the node view,
+    which is the whole point of this split -- see
+    :func:`_resolve_evaluation_node_views`.
+
+    Attributes
+    ----------
+    nearfield : NearfieldInteropData
+        The shared radix-oriented leaf/neighbour view. Never overridden.
+    farfield_leaf_nodes : Array
+        Leaf node ids for the far field; the radix view unless a backend
+        supplied its own.
+    farfield_node_ranges : Array
+        Node ranges for the far field, overridable on the same terms.
+    """
 
     nearfield: NearfieldInteropData
     farfield_leaf_nodes: Array
@@ -157,7 +241,30 @@ def _infer_order_from_coeff_count(
     coeff_count: int,
     expansion_basis: ExpansionBasis,
 ) -> int:
-    """Infer expansion order from static coefficient-array width."""
+    """Infer expansion order from static coefficient-array width.
+
+    The two bases pack coefficients differently, so the inversion differs: the
+    solidfmm width is exactly ``(p + 1) ** 2`` and inverts in closed form, while
+    the cartesian width is searched over the supported orders.
+
+    Parameters
+    ----------
+    coeff_count : int
+        Trailing width of the coefficient array. Static, not traced.
+    expansion_basis : ExpansionBasis
+        Which packing ``coeff_count`` refers to.
+
+    Returns
+    -------
+    int
+        The expansion order ``p``.
+
+    Raises
+    ------
+    ValueError
+        If no order in the basis's packing produces this width -- which means
+        the coefficient array is malformed, not that the order is unusual.
+    """
     if expansion_basis == "solidfmm":
         root = int(round(float(np.sqrt(coeff_count))))
         order = root - 1
@@ -189,6 +296,23 @@ def _resolve_evaluation_node_views(
     Nearfield continues to use the shared radix-oriented neighbor/leaf layout.
     Farfield may override that view, which is how the octree backend evaluates
     octree-native locals without rewriting nearfield plumbing yet.
+
+    Parameters
+    ----------
+    tree : Tree
+        Built tree, supplying the radix node ranges.
+    neighbor_list : NodeNeighborList
+        Source of truth for the radix leaf ordering, and the near-field view.
+    farfield_leaf_nodes : Optional[Array]
+        Backend-specific leaf ids for the far field; ``None`` uses the radix
+        view.
+    farfield_node_ranges : Optional[Array]
+        Backend-specific node ranges for the far field; ``None`` as above.
+
+    Returns
+    -------
+    _EvaluationNodeViews
+        The near-field view and the two resolved far-field views.
     """
 
     nearfield = _build_nearfield_interop_data(tree, neighbor_list)
@@ -223,6 +347,29 @@ def _build_nearfield_interop_data(
     The source-of-truth leaf ordering comes from ``neighbor_list``. For octree
     trees, yggdrax now emits that neighbor list in octree-native order while
     still exposing the particle-order leaf mapping needed for target lookup.
+
+    Parameters
+    ----------
+    tree : Tree
+        Built tree, supplying node ranges.
+    neighbor_list : NodeNeighborList
+        Leaf ordering and neighbour lists. Used even on the octree path, for the
+        particle-order leaf mapping the native list does not carry.
+    octree : Optional[OctreeExecutionData]
+        Octree metadata. Required when ``native_neighbors`` is given, since the
+        carrier lookup is built over the octree's node count.
+    native_neighbors : Optional[OctreeNativeNeighborList]
+        Octree-native neighbour list. ``None`` takes the radix path.
+
+    Returns
+    -------
+    NearfieldInteropData
+        The explicit leaf/node view the near-field helpers consume.
+
+    Raises
+    ------
+    ValueError
+        If ``native_neighbors`` was given without ``octree``.
     """
     if native_neighbors is not None:
         if octree is None:
@@ -462,7 +609,49 @@ def _prepare_tree_evaluation_inputs(
     max_leaf_size: Optional[int],
     return_potential: bool,
 ) -> _TreeEvaluationSetup:
-    """Validate and normalize tree-evaluation inputs for eager/JIT paths."""
+    """Validate and normalize tree-evaluation inputs for eager/JIT paths.
+
+    Parameters
+    ----------
+    tree : Tree
+        Built tree.
+    positions_sorted : Array
+        Morton-sorted particle positions ``[N, 3]``.
+    masses_sorted : Array
+        Morton-sorted particle masses ``[N]``.
+    locals_or_downward : Union[LocalExpansionData, TreeDownwardData]
+        Either the locals themselves or the downward result carrying them;
+        accepting both is what lets the eager and compiled entry points share
+        this.
+    neighbor_list : NodeNeighborList
+        Leaf ordering and neighbour lists.
+    farfield_local_data : Optional[LocalExpansionData]
+        Far-field locals override; ``None`` uses the ones in
+        ``locals_or_downward``.
+    farfield_leaf_nodes : Optional[Array]
+        Far-field leaf view override; ``None`` uses the radix view.
+    farfield_node_ranges : Optional[Array]
+        Far-field node-range override; ``None`` as above.
+    max_leaf_size : Optional[int]
+        Padded leaf width. ``None`` measures it from the tree, which needs
+        concrete values -- see Raises.
+    return_potential : bool
+        Whether the caller wants potentials, which decides the shape of
+        ``empty_output``.
+
+    Returns
+    -------
+    _TreeEvaluationSetup
+        Normalized inputs. Check ``empty_output`` first: when it is not ``None``
+        there are no leaves and it is the whole answer.
+
+    Raises
+    ------
+    ValueError
+        If the local expansions do not align with the evaluation node ranges, or
+        if ``max_leaf_size`` was left ``None`` under a trace, where measuring it
+        would require concretizing a tracer.
+    """
     locals_data = (
         locals_or_downward.locals
         if isinstance(locals_or_downward, TreeDownwardData)
@@ -612,7 +801,134 @@ def _evaluate_tree_compiled_impl(
     nearfield_target_block_overflow_fast_max_blocks: int = 65536,
     disable_specialized_large_n_nearfield: bool = False,
 ) -> Union[Array, Tuple[Array, Array]]:
-    """JIT core for far/near field evaluation on a prepared tree state."""
+    """JIT core for far/near field evaluation on a prepared tree state.
+
+    The compiled near+far seam. Its width is a consequence of being under
+    ``jax.jit``: everything that selects a lane must arrive as an argument, and
+    every schedule that was precomputed on the host must arrive as an array.
+
+    **The ``precomputed_*`` arguments are opted into by shape, not by ``None``.**
+    Each group is used only if its arrays match the shape the current edge list
+    implies; anything else -- including a zero-sized dummy -- silently disables
+    that group and falls back to computing the schedule inline. This is why they
+    are not ``Optional``: a shape mismatch is the disable signal, so passing a
+    stale schedule from a different tree does not raise, it just stops being
+    used. Four groups gate independently: the pair lists, the chunk scatter
+    schedule, the target blocks, and their padded form.
+
+    Parameters
+    ----------
+    tree : Tree
+        Built tree.
+    positions : Array
+        Morton-sorted particle positions ``[N, 3]``.
+    masses : Array
+        Morton-sorted particle masses ``[N]``.
+    locals_data : LocalExpansionData
+        Local expansions to contract at the particles.
+    neighbor_list : NodeNeighborList
+        Leaf ordering and neighbour lists. Its edge count is the reference every
+        ``precomputed_*`` shape check compares against.
+    nearfield_leaf_nodes : Array
+        Near-field leaf node ids.
+    nearfield_node_ranges : Array
+        Near-field per-node particle ranges.
+    nearfield_offsets : Array
+        CSR offsets into ``nearfield_neighbors``.
+    nearfield_neighbors : Array
+        Flattened neighbour lists, one segment per leaf.
+    nearfield_counts : Array
+        Neighbour count per leaf.
+    nearfield_leaf_particle_indices : Array
+        Padded per-leaf particle indices. A non-empty leading axis is one of the
+        conditions for the specialized large-N lane.
+    nearfield_leaf_particle_mask : Array
+        Validity mask for the padding above.
+    leaf_nodes : Array
+        Far-field leaf node ids.
+    node_ranges : Array
+        Far-field per-node particle ranges.
+    precomputed_target_leaf_ids : Array
+        Per-edge target leaf id. Used only if its length equals the edge count.
+    precomputed_source_leaf_ids : Array
+        Per-edge source leaf id, gated on its own length in addition to the
+        pair-list gate -- so the target ids can be used without these.
+    precomputed_valid_pairs : Array
+        Per-edge validity mask, gated with the target ids.
+    precomputed_chunk_sort_indices : Array
+        Chunk-local sort permutation for the scatter, ``[chunks, chunk * leaf]``.
+    precomputed_chunk_group_ids : Array
+        Chunk-local scatter group ids, same shape.
+    precomputed_chunk_unique_indices : Array
+        Chunk-local unique-target indices, same shape. All three must match or
+        the scatter schedule is recomputed.
+    precomputed_target_block_offsets : Array
+        CSR offsets over target blocks, length ``leaves + 1``.
+    precomputed_target_block_leaf_ids : Array
+        Target leaf id per block.
+    precomputed_target_block_source_leaf_ids : Array
+        Source leaf id per block entry.
+    precomputed_target_block_valid_mask : Array
+        Validity mask, shaped like the source ids above.
+    precomputed_target_block_source_leaf_ids_padded : Array
+        Rectangular form of the block source ids, ``[leaves, blocks, width]``.
+    precomputed_target_block_valid_mask_padded : Array
+        Validity mask for the padded form, gated together with it.
+    G : float
+        Gravitational constant. Static.
+    softening : float
+        Plummer softening length. Static.
+    order : int
+        Expansion order ``p``. Static.
+    expansion_basis : ExpansionBasis
+        Which expansion algebra the locals are in. Static.
+    max_leaf_size : int
+        Padded leaf width; sets the chunk flat size the scatter gate checks.
+        Static.
+    return_potential : bool
+        Also return potentials. Static, and disables the specialized large-N
+        lane, which is acceleration-only.
+    nearfield_mode : str
+        Near-field lane. Only ``"bucketed"`` admits the specialized large-N
+        lane. Static.
+    nearfield_edge_chunk_size : int
+        Edges per chunk; with the edge count this fixes the chunk count. Static.
+    nearfield_delayed_scatter_chunks_per_superchunk : int
+        Chunks accumulated before a scatter is issued. Static.
+    nearfield_chunk_scan_batch_size : int
+        Chunks per scan step. Static.
+    nearfield_chunk_scan_unroll : int
+        Unroll factor for the chunk scan. Static.
+    nearfield_superchunk_scan_unroll : int
+        Unroll factor for the superchunk scan. Static.
+    nearfield_sorted_scatter_hint : bool
+        Assert the scatter indices are sorted. Static.
+    nearfield_grouped_sorted_scatter : bool
+        Use the grouped sorted-scatter path. Static.
+    nearfield_superchunk_target_reduce : bool
+        Reduce per target within a superchunk before scattering. Static.
+    nearfield_disable_chunk_cond : bool
+        Drop the per-chunk conditional. Static.
+    nearfield_target_leaf_batch_size : int
+        Target leaves per batch. Static.
+    nearfield_target_block_tile_size : int
+        Tile width for the target-block lane. Static.
+    nearfield_target_block_tile_scan_unroll : int
+        Unroll factor for the tile scan. Static.
+    nearfield_target_block_batch_scan_unroll : int
+        Unroll factor for the batch scan. Static.
+    nearfield_target_block_overflow_fast_max_blocks : int
+        Block-count ceiling above which the overflow path is taken. Static.
+    disable_specialized_large_n_nearfield : bool
+        Force the general lane even where the specialized one would apply.
+        Static.
+
+    Returns
+    -------
+    Union[Array, Tuple[Array, Array]]
+        Accelerations ``[N, 3]``, or ``(accelerations, potentials)`` under
+        ``return_potential``. Morton-sorted, matching the inputs.
+    """
     disable_specialized_large_n = bool(disable_specialized_large_n_nearfield)
     use_precomputed = (
         precomputed_target_leaf_ids.shape[0] == neighbor_list.neighbors.shape[0]
@@ -844,6 +1160,79 @@ def _evaluate_prepared_tree(
     policy. ``nearfield_reverse_options`` carries the grad path's resolved
     reverse-pass tuning down to the leaf-major lane; it is inert on every other
     mode and ``None`` everywhere except the differentiable seam.
+
+    Two routes leave here. With ``max_acc_derivative_order > 0`` this assembles
+    the answer itself, because the derivative tower has no compiled path: near
+    and far are evaluated separately and summed here. Otherwise it delegates to
+    the engine, and ``jit_traversal`` picks which entry point -- only the
+    non-compiled one accepts the two override arguments, since the compiled
+    traversal resolves its own policy.
+
+    Parameters
+    ----------
+    fmm : FMMEngine
+        The engine, for ``G``, ``softening``, the expansion basis, the near-field
+        policy resolvers and the two evaluate entry points. Annotated as an
+        unresolvable forward reference on purpose -- see the comment on the
+        signature.
+    tree : Tree
+        Built tree.
+    positions_sorted : Array
+        Morton-sorted particle positions ``[N, 3]``.
+    masses_sorted : Array
+        Morton-sorted particle masses ``[N]``.
+    downward : TreeDownwardData
+        Downward-sweep result carrying the local expansions.
+    neighbor_list : NodeNeighborList
+        Leaf ordering and neighbour lists.
+    nearfield_interop : Optional[NearfieldInteropData]
+        Prebuilt near-field view; ``None`` lets the delegate build one.
+    farfield_local_data : Optional[LocalExpansionData]
+        Far-field locals override; ``None`` uses ``downward.locals``.
+    farfield_leaf_nodes : Optional[Array]
+        Far-field leaf view override; ``None`` uses the radix view.
+    farfield_node_ranges : Optional[Array]
+        Far-field node-range override; ``None`` as above.
+    nearfield_target_leaf_ids : Optional[Array]
+        Precomputed per-edge target leaf ids. ``None`` here, unlike in
+        :func:`_evaluate_tree_compiled_impl`, genuinely means absent.
+    nearfield_source_leaf_ids : Optional[Array]
+        Precomputed per-edge source leaf ids.
+    nearfield_valid_pairs : Optional[Array]
+        Precomputed per-edge validity mask.
+    nearfield_chunk_sort_indices : Optional[Array]
+        Precomputed chunk scatter sort permutation.
+    nearfield_chunk_group_ids : Optional[Array]
+        Precomputed chunk scatter group ids.
+    nearfield_chunk_unique_indices : Optional[Array]
+        Precomputed chunk unique-target indices.
+    max_leaf_size : int
+        Padded leaf width.
+    return_potential : bool
+        Also return potentials.
+    jit_traversal : bool
+        Use the compiled traversal. ``False`` on the differentiable path, which
+        is what lets the two overrides below reach the near field.
+    max_acc_derivative_order : int
+        Spatial derivative tower depth. Non-zero takes the assemble-here route.
+    nearfield_mode_override : Optional[str]
+        Forces the near-field mode; see above.
+    nearfield_reverse_options : Optional[Any]
+        Grad-path reverse-pass tuning; see above. ``Any`` to keep this leaf
+        module from importing the grad types.
+
+    Returns
+    -------
+    Union[Array, Tuple[Array, Array], Tuple[Array, PackedAccelerationDerivatives], Tuple[Array, Array, PackedAccelerationDerivatives]]
+        Morton-sorted accelerations, with potentials inserted next under
+        ``return_potential`` and the packed derivative tower appended last under
+        ``max_acc_derivative_order > 0``.
+
+    Raises
+    ------
+    RuntimeError
+        If the derivative tower was requested but the far-field evaluation
+        returned none -- an internal inconsistency, not a user error.
     """
 
     if int(max_acc_derivative_order) > 0:
@@ -941,7 +1330,33 @@ def _map_targets_to_leaf_positions(
     leaf_nodes: Array,
     node_ranges: Array,
 ) -> Array:
-    """Map sorted particle indices to positions in the leaf-node array."""
+    """Map sorted particle indices to positions in the leaf-node array.
+
+    A binary search over leaf start indices, which works because Morton sorting
+    makes each leaf a contiguous run. The result indexes ``leaf_nodes``, not the
+    tree's node array.
+
+    Parameters
+    ----------
+    target_sorted_indices : Array
+        Target particle indices, in Morton-sorted order.
+    leaf_nodes : Array
+        Leaf node ids.
+    node_ranges : Array
+        Per-node ``[start, end]`` particle ranges, inclusive of ``end``.
+
+    Returns
+    -------
+    Array
+        Position in ``leaf_nodes`` for each target, ``[T]``.
+
+    Raises
+    ------
+    ValueError
+        If any target falls in no leaf's range. The search always lands
+        somewhere, so this is checked explicitly rather than inferred -- it means
+        the targets came from a different tree than the one prepared.
+    """
     if int(target_sorted_indices.shape[0]) == 0:
         return jnp.zeros((0,), dtype=INDEX_DTYPE)
     leaf_ranges = node_ranges[leaf_nodes]
@@ -963,7 +1378,32 @@ def _build_target_nearfield_source_index_matrix(
     target_leaf_positions: Array,
     nearfield_interop: NearfieldInteropData,
 ) -> tuple[Array, Array]:
-    """Build padded source-index lists for each target particle near-field eval."""
+    """Build padded source-index lists for each target particle near-field eval.
+
+    Gathers every near-field source each target sees into one rectangular
+    matrix, so the targeted near field is a dense masked reduction rather than a
+    ragged traversal. Each target's own leaf is concatenated with its neighbour
+    leaves, so a leaf that also appears in its own neighbour list would
+    contribute its particles twice; the sort-and-keep-first pass at the end
+    removes that, and double-counting a source is a wrong force, not a slow one.
+
+    Parameters
+    ----------
+    target_sorted_indices : Array
+        Target particle indices, in Morton-sorted order.
+    target_leaf_positions : Array
+        Each target's position in the leaf array, from
+        :func:`_map_targets_to_leaf_positions`.
+    nearfield_interop : NearfieldInteropData
+        Leaf/neighbour view supplying the sources.
+
+    Returns
+    -------
+    tuple[Array, Array]
+        ``(source_indices, source_mask)``, both ``[T, S]`` with ``S`` the padded
+        source width. Entries where the mask is ``False`` hold index 0 and must
+        not be read.
+    """
     targets = jnp.asarray(target_sorted_indices, dtype=INDEX_DTYPE)
     target_leaf_pos = jnp.asarray(target_leaf_positions, dtype=INDEX_DTYPE)
     node_ranges = jnp.asarray(nearfield_interop.node_ranges, dtype=INDEX_DTYPE)
@@ -1080,7 +1520,53 @@ def _compute_targeted_nearfield(
     return_snap: bool = False,
     return_crackle: bool = False,
 ) -> tuple[Array, Optional[Array], Optional[Array], Optional[Array], Optional[Array]]:
-    """Compute near-field contributions for target particles only."""
+    """Compute near-field contributions for target particles only.
+
+    The exact P2P sum over the padded source matrix. The time-derivative terms
+    are exact here too, not finite-differenced: they come from differentiating
+    the softened kernel analytically, which is why each needs velocities.
+
+    Parameters
+    ----------
+    positions_sorted : Array
+        Morton-sorted particle positions ``[N, 3]``. All particles are sources.
+    masses_sorted : Array
+        Morton-sorted particle masses ``[N]``.
+    target_sorted_indices : Array
+        Target particle indices ``[T]``, in the same order.
+    source_indices : Array
+        Padded per-target source indices ``[T, S]``.
+    source_mask : Array
+        Validity mask for the padding, ``[T, S]``.
+    G : Union[float, Array]
+        Gravitational constant. Accepts an array so it can be traced.
+    softening : float
+        Plummer softening length; enters squared.
+    return_potential : bool
+        Also return the potential.
+    velocities_sorted : Optional[Array]
+        Morton-sorted velocities ``[N, 3]``. Required by each of the three
+        derivative flags below.
+    return_jerk : bool
+        Also return the first time derivative.
+    return_snap : bool
+        Also return the second.
+    return_crackle : bool
+        Also return the third.
+
+    Returns
+    -------
+    tuple[Array, Optional[Array], Optional[Array], Optional[Array], Optional[Array]]
+        ``(acceleration, potential, jerk, snap, crackle)``. Every element after
+        the first is ``None`` unless its flag was set, so the arity is fixed and
+        the caller unpacks positionally.
+
+    Raises
+    ------
+    ValueError
+        If ``return_jerk``, ``return_snap`` or ``return_crackle`` was set without
+        ``velocities_sorted``.
+    """
     if return_jerk and velocities_sorted is None:
         raise ValueError("velocities_sorted must be provided when return_jerk=True")
     if return_snap and velocities_sorted is None:
@@ -1209,7 +1695,46 @@ def _evaluate_local_expansions_for_target_particles(
     return_potential: bool,
     max_acc_derivative_order: int = 0,
 ) -> tuple[Array, Optional[Array], Optional[PackedAccelerationDerivatives]]:
-    """Evaluate far-field local expansions for target particles only."""
+    """Evaluate far-field local expansions for target particles only.
+
+    The targeted twin of :func:`_evaluate_local_expansions_for_particles`: it
+    gathers each target's own leaf expansion rather than sweeping padded leaves,
+    so there is no scatter at the end.
+
+    Parameters
+    ----------
+    local_data : LocalExpansionData
+        Local expansions, indexed by node.
+    positions_sorted : Array
+        Morton-sorted particle positions ``[N, 3]``.
+    target_sorted_indices : Array
+        Target particle indices ``[T]``, in the same order.
+    target_leaf_positions : Array
+        Each target's position in ``leaf_nodes``.
+    leaf_nodes : Array
+        Leaf node ids.
+    order : int
+        Expansion order ``p``.
+    expansion_basis : ExpansionBasis
+        Which expansion algebra ``local_data`` is in.
+    return_potential : bool
+        Also return the potential.
+    max_acc_derivative_order : int
+        Spatial derivative tower depth; ``0`` returns no tower.
+
+    Returns
+    -------
+    tuple[Array, Optional[Array], Optional[PackedAccelerationDerivatives]]
+        ``(gradient, potential, derivatives)``. The first element is the
+        *gradient* of the potential, not the acceleration -- the caller applies
+        ``-G``. The other two are ``None`` unless requested.
+
+    Raises
+    ------
+    NotImplementedError
+        For orders above ``MAX_MULTIPOLE_ORDER`` in any basis but solidfmm,
+        which is the only one whose recurrences are defined that far.
+    """
     if order > MAX_MULTIPOLE_ORDER and expansion_basis != "solidfmm":
         raise NotImplementedError(
             "orders above 4 require expansion_basis='solidfmm'",
@@ -1378,7 +1903,50 @@ def _evaluate_prepared_tree_targets(
     Tuple[Array, PackedAccelerationDerivatives],
     Tuple[Array, Array, PackedAccelerationDerivatives],
 ]:
-    """Run prepared-tree evaluation for target particles only."""
+    """Run prepared-tree evaluation for target particles only.
+
+    The targeted counterpart of :func:`_evaluate_prepared_tree`. All particles
+    remain sources; only the outputs are restricted. There is no compiled route
+    here -- the near and far halves are always evaluated separately and summed.
+
+    Parameters
+    ----------
+    fmm : FMMEngine
+        The engine, for ``G``, ``softening`` and the expansion basis. Annotated
+        as an unresolvable forward reference on purpose -- see the comment on the
+        signature.
+    tree : Tree
+        Built tree.
+    positions_sorted : Array
+        Morton-sorted particle positions ``[N, 3]``.
+    masses_sorted : Array
+        Morton-sorted particle masses ``[N]``.
+    downward : TreeDownwardData
+        Downward-sweep result carrying the local expansions.
+    neighbor_list : NodeNeighborList
+        Leaf ordering and neighbour lists.
+    nearfield_interop : Optional[NearfieldInteropData]
+        Prebuilt near-field view; ``None`` builds one here.
+    farfield_local_data : Optional[LocalExpansionData]
+        Far-field locals override; ``None`` uses ``downward.locals``.
+    farfield_leaf_nodes : Optional[Array]
+        Far-field leaf view override; ``None`` uses the radix view.
+    farfield_node_ranges : Optional[Array]
+        Far-field node-range override; ``None`` as above.
+    target_sorted_indices : Array
+        Target particle indices ``[T]``, in Morton-sorted order.
+    return_potential : bool
+        Also return potentials.
+    max_acc_derivative_order : int
+        Spatial derivative tower depth; ``0`` returns no tower.
+
+    Returns
+    -------
+    Union[Array, Tuple[Array, Array], Tuple[Array, PackedAccelerationDerivatives], Tuple[Array, Array, PackedAccelerationDerivatives]]
+        Results for the targets only, ``[T, ...]``, in the order the targets were
+        given. Potentials are inserted next under ``return_potential`` and the
+        packed derivative tower appended last.
+    """
     g_const = jnp.asarray(fmm.G, dtype=positions_sorted.dtype)
     nearfield_view = (
         _build_nearfield_interop_data(tree, neighbor_list)
@@ -1484,7 +2052,45 @@ def _evaluate_local_expansions_for_particles(
     return_potential: bool,
     max_acc_derivative_order: int = 0,
 ) -> tuple[Array, Optional[Array], Optional[PackedAccelerationDerivatives]]:
-    """Evaluate node-local expansions at leaf particles and scatter results."""
+    """Evaluate node-local expansions at leaf particles and scatter results.
+
+    Sweeps every leaf as a padded ``[leaves, max_leaf_size]`` block, evaluates
+    the expansion at each slot, and scatters the valid slots back to particle
+    order. The padding is masked rather than skipped, which is what keeps the
+    shapes static under ``jit``.
+
+    Parameters
+    ----------
+    local_data : LocalExpansionData
+        Local expansions, indexed by node.
+    positions : Array
+        Morton-sorted particle positions ``[N, 3]``.
+    leaf_nodes : Array
+        Leaf node ids.
+    node_ranges : Array
+        Per-node ``[start, end]`` particle ranges, inclusive of ``end``.
+    max_leaf_size : int
+        Padded leaf width. Static: it sets the block shape.
+    order : int
+        Expansion order ``p``.
+    expansion_basis : ExpansionBasis
+        Which expansion algebra ``local_data`` is in.
+    return_potential : bool
+        Also return the potential.
+    max_acc_derivative_order : int
+        Spatial derivative tower depth; ``0`` returns no tower.
+
+    Returns
+    -------
+    tuple[Array, Optional[Array], Optional[PackedAccelerationDerivatives]]
+        ``(gradient, potential, derivatives)``, all in particle order. As in the
+        targeted twin, the first element is the gradient, not the acceleration.
+
+    Raises
+    ------
+    NotImplementedError
+        For orders above ``MAX_MULTIPOLE_ORDER`` in any basis but solidfmm.
+    """
     if order > MAX_MULTIPOLE_ORDER and expansion_basis != "solidfmm":
         raise NotImplementedError(
             "orders above 4 require expansion_basis='solidfmm'",
@@ -1818,7 +2424,29 @@ def _scatter_vectors(
     values: Array,
     mask: Array,
 ) -> Array:
-    """Scatter-add vector values into a flat particle buffer with masking."""
+    """Scatter-add vector values into a flat particle buffer with masking.
+
+    Masked entries are zeroed rather than dropped, so every padded slot still
+    scatters -- adding zero at whatever index the padding holds. That keeps the
+    shapes static, and is why the index for an invalid slot need not be valid.
+
+    Parameters
+    ----------
+    base : Array
+        Destination buffer ``[N, 3]``, added into rather than overwritten.
+    indices : Array
+        Destination particle index per slot; flattened before use.
+    values : Array
+        Values to add, ``[..., 3]``.
+    mask : Array
+        Validity mask over the slots.
+
+    Returns
+    -------
+    Array
+        ``base`` with the masked values scatter-added. Returned unchanged when
+        ``values`` is empty.
+    """
     if values.size == 0:
         return base
     flat_idx = indices.reshape(-1)
@@ -1835,7 +2463,27 @@ def _scatter_scalars(
     values: Array,
     mask: Array,
 ) -> Array:
-    """Scatter-add scalar values into a flat particle buffer with masking."""
+    """Scatter-add scalar values into a flat particle buffer with masking.
+
+    The scalar form of :func:`_scatter_vectors`, used for potentials.
+
+    Parameters
+    ----------
+    base : Array
+        Destination buffer ``[N]``, added into rather than overwritten.
+    indices : Array
+        Destination particle index per slot.
+    values : Array
+        Values to add. Tolerates ``None`` as well as empty, since the potential
+        is optional upstream.
+    mask : Array
+        Validity mask over the slots.
+
+    Returns
+    -------
+    Array
+        ``base`` with the masked values scatter-added.
+    """
     if values is None or values.size == 0:
         return base
     flat_idx = indices.reshape(-1)
@@ -1852,7 +2500,28 @@ def _scatter_rank3(
     values: Array,
     mask: Array,
 ) -> Array:
-    """Scatter-add rank-3 values into a particle-major buffer."""
+    """Scatter-add rank-3 values into a particle-major buffer.
+
+    The rank-3 form of :func:`_scatter_vectors`, used for one level of the packed
+    derivative tower, whose trailing two axes are the vector component and the
+    packed-symmetric index.
+
+    Parameters
+    ----------
+    base : Array
+        Destination buffer ``[N, 3, C]``, added into rather than overwritten.
+    indices : Array
+        Destination particle index per slot.
+    values : Array
+        Values to add, ``[..., 3, C]``.
+    mask : Array
+        Validity mask over the slots.
+
+    Returns
+    -------
+    Array
+        ``base`` with the masked values scatter-added.
+    """
     if values.size == 0:
         return base
     flat_idx = indices.reshape(-1)
