@@ -1126,6 +1126,14 @@ class PrepareMixin:
             Whether the process-level interaction cache may be used.
         suppress_host_side_effects : bool
             Whether to skip host-side caching and diagnostics.
+        retain_compact_far_pairs : bool
+            Keep the streamed lane's compact far pairs instead of discarding them
+            after the build. eq (16b)'s ``f_b`` prepass needs the far/near
+            partition it just produced -- exact scalar sums over near pairs,
+            monopoles over far ones -- and the streamed lane emits compact pairs
+            and no node interaction list, so without this the far term is simply
+            absent and the estimate reads as an ordinary under-estimate rather
+            than a missing term.
 
         Returns
         -------
