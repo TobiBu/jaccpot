@@ -32,6 +32,7 @@ import numpy as np
 from jax.experimental import pallas as pl
 from jaxtyping import Array
 
+from jaccpot._env import env_flag
 from jaccpot.operators.real_harmonics import (
     sh_offset,
     sh_size,
@@ -55,12 +56,7 @@ def _fused_m2l_vjp_enabled() -> bool:
         Default-on is deliberate: the pure-JAX fallback is the correctness reference,
         not the intended path.
     """
-    return os.environ.get("JACCPOT_FUSED_M2L_VJP", "1").strip().lower() not in {
-        "0",
-        "false",
-        "no",
-        "off",
-    }
+    return env_flag("JACCPOT_FUSED_M2L_VJP", True)
 
 
 __all__ = [

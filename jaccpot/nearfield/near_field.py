@@ -20,7 +20,7 @@ from yggdrax.dtypes import INDEX_DTYPE, as_index
 from yggdrax.interactions import NodeNeighborList
 from yggdrax.tree import Tree
 
-from jaccpot._env import env_flag, env_float, env_int
+from jaccpot._env import env_choice, env_flag, env_float, env_int
 from jaccpot.runtime.grad_options import (  # noqa: F401
     LeafPairReverseOptions,
     analytic_p2p_vjp_enabled,
@@ -84,12 +84,9 @@ _LARGE_N_NEARFIELD_DIAG_MODES = frozenset(("full", "self_only", "pairs_only", "z
 
 
 def _large_n_nearfield_diag_mode() -> str:
-    mode = (
-        str(os.environ.get("JACCPOT_LARGE_N_NEARFIELD_DIAG_MODE", "full"))
-        .strip()
-        .lower()
+    return env_choice(
+        "JACCPOT_LARGE_N_NEARFIELD_DIAG_MODE", "full", _LARGE_N_NEARFIELD_DIAG_MODES
     )
-    return mode if mode in _LARGE_N_NEARFIELD_DIAG_MODES else "full"
 
 
 # Unclamped by design: several near-field knobs use 0 as "unset, pick a default"

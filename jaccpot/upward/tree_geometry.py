@@ -38,6 +38,8 @@ from typing import Any, Callable, Optional
 import jax
 from yggdrax.geometry import TreeGeometry, compute_tree_geometry
 
+from jaccpot._env import env_flag
+
 __all__ = ["compute_tree_geometry_compiled"]
 
 # Keyed by (tree class, leaf cap). jax.jit keys on the pytree structure and leaf
@@ -49,14 +51,15 @@ _CACHE_MAX_ENTRIES = 64
 
 
 def _jit_enabled() -> bool:
-    """Read per call, so the flag can be set after import (notebooks)."""
+    """Read per call, so the flag can be set after import (notebooks).
 
-    return str(os.environ.get("JACCPOT_TREE_GEOMETRY_JIT", "1")).strip().lower() in {
-        "1",
-        "true",
-        "yes",
-        "on",
-    }
+    Returns
+    -------
+    bool
+        Whether the tree-geometry build may be jitted. Default ON.
+    """
+
+    return env_flag("JACCPOT_TREE_GEOMETRY_JIT", True)
 
 
 def compute_tree_geometry_compiled(

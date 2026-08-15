@@ -33,6 +33,7 @@ import numpy as np
 from jax.experimental import pallas as pl
 from jaxtyping import Array
 
+from jaccpot._env import env_flag
 from jaccpot.operators.real_harmonics import sh_offset, sh_size
 from jaccpot.pallas._compat import KernelRef, pallas_backend_kwargs
 
@@ -57,14 +58,13 @@ def _fused_m2l_vjp_enabled() -> bool:
     Returns
     -------
     bool
-        True unless ``JACCPOT_FUSED_M2L_VJP`` is ``0``/``false``/``no``/``off``.
+        True unless ``JACCPOT_FUSED_M2L_VJP`` is ``0``/``false``/``no``/``off``. A
+        malformed value leaves the fused reverse ON, because `env_flag` falls back to
+        the default -- which is why audit 2.2 changed that rule before deduping this
+        (the old `env_flag` would have read a typo as OFF, silently switching which
+        reverse-mode M2L kernel runs).
     """
-    return os.environ.get("JACCPOT_FUSED_M2L_VJP", "1").strip().lower() not in {
-        "0",
-        "false",
-        "no",
-        "off",
-    }
+    return env_flag("JACCPOT_FUSED_M2L_VJP", True)
 
 
 def pallas_m2l_complex_fused_supported() -> bool:
