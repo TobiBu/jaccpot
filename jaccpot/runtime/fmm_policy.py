@@ -157,7 +157,7 @@ class PolicyMixin:
 
         **REFUTED -- do not use for production.** Measured against the exact
         criterion at N=4096/p=8 (`bench/validation/per_node_theta_fidelity.py`,
-        `results/validation/theta_fidelity_p8.json`): 12-9300x worse error at
+        `bench/results/validation/theta_fidelity_p8.json`): 12-9300x worse error at
         1.35-15x *more* interaction work, with a p99.99 of 2.3e+02 on bulge+halo.
         Retained only so the negative result stays reproducible; selecting it warns.
 

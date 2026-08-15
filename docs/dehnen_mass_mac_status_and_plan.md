@@ -29,7 +29,7 @@ XLA_PYTHON_CLIENT_PREALLOCATE=false PYTHONPATH=$PWD JAX_ENABLE_X64=1 \
     --n 100000 --leaf-size 256 --order 8 --distribution plummer,bulge_halo \
     --theta 0.30,0.34,0.38,0.42,0.46,0.50 --eps 1e-5,1e-6,3e-7,2e-7,1e-7 \
     --softening 1e-6 --metric dehnen --match-on median --reference-block 64 \
-    --arm fixed,mass --json-out results/validation/mac_dehnen_eps_n1e5.json \
+    --arm fixed,mass --json-out bench/results/validation/mac_dehnen_eps_n1e5.json \
   > /tmp/eps.log 2>&1 < /dev/null &
 ```
 
@@ -379,7 +379,7 @@ is the **scaled error δa/f** with `f_b ≡ Σ_{a≠b} G μ_a / |x_a−x_b|²`.
    θ ≲ 0.5 and discard any row whose absolute error approaches unity.**
 
    And it is where the criterion wins biggest: p99 **5.9–85×**, max **400–2000×**
-   (`results/validation/mac_postfix_bulge_halo.json`), against Plummer's 1.3–2.2× / 7.5–57×.
+   (`bench/results/validation/mac_postfix_bulge_halo.json`), against Plummer's 1.3–2.2× / 7.5–57×.
    That fits — bulge+halo is exactly the case where accelerations span decades, which
    `ε·min_b|a_b|` exploits and a fixed opening angle cannot see. Discard the
    machine-precision matched rows (p90 ≲ 1e-9); those are the log-interpolation artifact
@@ -576,7 +576,7 @@ was needed to test it.
 
 **Verdict: (16b) wins.** Plummer p=8, eq (16a) verbatim, matched at equal p90, both
 arms against the same fixed-θ baseline
-(`results/validation/mac_postfix_16b_plummer.json`):
+(`bench/results/validation/mac_postfix_16b_plummer.json`):
 
 | matched p90 | (16a) p99× | **(16b) p99×** | (16a) max× | **(16b) max×** | work× |
 |---|---|---|---|---|---|
@@ -640,7 +640,7 @@ and the measured multipole spectrum is retained** rather than discarded by the c
 
 **Variant A — tight on average (`mac_type="dehnen_theta"`): unsound.**
 N=4096/p=8 against the exact criterion
-(`results/validation/theta_fidelity_p8.json`):
+(`bench/results/validation/theta_fidelity_p8.json`):
 
 | distribution | ε | far exact | far θ | p99 exact | p99 θ | p99.99 θ | work × |
 |---|---|---|---|---|---|---|---|

@@ -28,7 +28,7 @@ Usage::
     XLA_PYTHON_CLIENT_PREALLOCATE=false JAX_ENABLE_X64=1 \\
         python -m bench.validation.per_node_theta_fidelity \\
             --n 4096 --order 8 --distribution plummer,bulge_halo \\
-            --eps 1e-4,3e-5,1e-5,3e-6 --json-out results/validation/theta_fidelity.json
+            --eps 1e-4,3e-5,1e-5,3e-6 --json-out bench/results/validation/theta_fidelity.json
 """
 
 from __future__ import annotations
