@@ -136,6 +136,53 @@ class _DualDownwardPlan(NamedTuple):
 
     ``runtime_traversal_config`` is carried through rather than merely read: the
     resolution can clamp it, and the clamped value is what the build must see.
+
+    Every field is annotated ``object`` rather than its real type. That is
+    deliberate and predates this docstring: the precise types live in
+    ``yggdrax`` and importing them here would pull the traversal package into a
+    module the engine imports, which section 8 forbids. The descriptions below
+    carry what the annotations cannot.
+
+    Attributes
+    ----------
+    adaptive_order_active : object
+        Whether per-node adaptive expansion order is switched on for this build.
+    allow_split_build : object
+        Whether the prepare stage may split tree build and traversal into two
+        device passes to cap peak memory.
+    grouped_interactions_active : object
+        Whether the M2L feed uses the grouped (class-major) interaction layout.
+    jit_traversal_for_prepare : object
+        Whether this build's traversal runs jitted.
+    mixed_order_farfield_active : object
+        Whether the far field mixes expansion orders across gears.
+    need_compact_far_pairs : object
+        Whether the traversal must emit the compact tagged far-pair payload.
+    need_node_interactions : object
+        Whether the traversal must emit a node interaction list. False is the
+        streamed path, which never materialises one.
+    need_traversal_result : object
+        Whether the full walk result is retained rather than discarded once the
+        payloads are extracted.
+    retain_interactions_active : object
+        Whether the prepared state keeps its interaction list for reuse.
+    runtime_traversal_config : object
+        The traversal capacities this build must use -- possibly clamped during
+        resolution, which is why it is carried rather than re-read.
+    stateful_cache_enabled : object
+        Whether the process-level interaction cache may be consulted and written.
+    strict_mode_active : object
+        Whether the static-radix strict lane is in play.
+    strict_streamed_fast_path : object
+        Whether the strict lane additionally qualifies for the streamed fast path.
+    tree_mode_static_radix : object
+        Whether the tree build is the static radix mode the strict lane requires.
+    use_compact_streamed_pairs : object
+        Whether far pairs are consumed in the compact streamed form.
+    use_dense_interactions_for_prepare : object
+        Whether this build uses dense interaction buffers.
+    use_paper_fixed_policy : object
+        Whether the Dehnen paper-style fixed acceptance policy applies.
     """
 
     adaptive_order_active: object
@@ -164,7 +211,27 @@ class PrepareMixin:
         leaf_size: int,
         max_order: int,
     ) -> None:
-        """Validate order/leaf-size constraints for state preparation."""
+        """Validate order/leaf-size constraints for state preparation.
+
+        Parameters
+        ----------
+        leaf_size : int
+            Requested particles per leaf.
+        max_order : int
+            Expansion order ``p`` for this prepare.
+
+        Returns
+        -------
+        None
+            Nothing; it raises if the request is not supportable.
+
+        Raises
+        ------
+        NotImplementedError
+            If the requested order exceeds what the active basis supports.
+        ValueError
+            If the order or leaf size is outside its valid range.
+        """
         if leaf_size < 1:
             raise ValueError("leaf_size must be >= 1")
         if self.fixed_order is not None and int(self.fixed_order) != int(max_order):
@@ -179,7 +246,25 @@ class PrepareMixin:
         positions: Array,
         masses: Array,
     ) -> tuple[Array, Array, Any]:
-        """Validate prepare-state inputs and cast them to the working dtype."""
+        """Validate prepare-state inputs and cast them to the working dtype.
+
+        Parameters
+        ----------
+        positions : Array
+            Particle positions, shape ``(N, 3)``.
+        masses : Array
+            Particle masses, shape ``(N,)``.
+
+        Returns
+        -------
+        tuple[Array, Array, Any]
+            ``(positions, masses, dtype)`` cast to the working dtype.
+
+        Raises
+        ------
+        ValueError
+            If positions and masses disagree in shape or are not finite.
+        """
         positions_arr = jnp.asarray(positions)
         masses_arr = jnp.asarray(masses)
         input_dtype = positions_arr.dtype
@@ -204,7 +289,20 @@ class PrepareMixin:
         positions: Array,
         bounds: Optional[Tuple[Array, Array]],
     ) -> tuple[Array, Array]:
-        """Return bounds converted to the working dtype or infer them."""
+        """Return bounds converted to the working dtype or infer them.
+
+        Parameters
+        ----------
+        positions : Array
+            Particle positions, shape ``(N, 3)``.
+        bounds : Optional[Tuple[Array, Array]]
+            Explicit domain bounds, or None to infer them from the particles.
+
+        Returns
+        -------
+        tuple[Array, Array]
+            ``(lower, upper)`` domain bounds at the working dtype.
+        """
         if bounds is None:
             min_corner, max_corner = _infer_bounds(positions)
             return min_corner, max_corner
@@ -226,7 +324,32 @@ class PrepareMixin:
         aspect_threshold: float,
         allow_stateful_cache: bool,
     ) -> Optional[_TopologyReuseCandidate]:
-        """Return a radix-topology reuse signature when host-side caching is safe."""
+        """Return a radix-topology reuse signature when host-side caching is safe.
+
+        Parameters
+        ----------
+        positions : Array
+            Particle positions, shape ``(N, 3)``.
+        bounds : Tuple[Array, Array]
+            Explicit domain bounds, or None to infer them from the particles.
+        tree_config : TreeBuilderConfig
+            Resolved tree-builder settings.
+        leaf_size : int
+            Requested particles per leaf.
+        refine_local : bool
+            Whether to refine leaves locally, or None for the default.
+        max_refine_levels : int
+            Extra refinement levels, or None for the default.
+        aspect_threshold : float
+            Leaf aspect ratio triggering refinement, or None for the default.
+        allow_stateful_cache : bool
+            Whether the process-level interaction cache may be used.
+
+        Returns
+        -------
+        Optional[_TopologyReuseCandidate]
+            A reuse signature, or None when host-side caching cannot apply.
+        """
 
         if (
             (not self.reuse_topology and tree_config.mode != "static_radix")
@@ -286,7 +409,28 @@ class PrepareMixin:
         max_refine_levels: int,
         aspect_threshold: float,
     ) -> Optional[str]:
-        """Build a stable topology key from sorted Morton codes and tree options."""
+        """Build a stable topology key from sorted Morton codes and tree options.
+
+        Parameters
+        ----------
+        sorted_codes : Array
+            Morton codes in sorted order.
+        tree_config : TreeBuilderConfig
+            Resolved tree-builder settings.
+        leaf_size : int
+            Requested particles per leaf.
+        refine_local : bool
+            Whether to refine leaves locally, or None for the default.
+        max_refine_levels : int
+            Extra refinement levels, or None for the default.
+        aspect_threshold : float
+            Leaf aspect ratio triggering refinement, or None for the default.
+
+        Returns
+        -------
+        Optional[str]
+            A stable topology key, or None when one cannot be formed.
+        """
 
         try:
             hasher = hashlib.sha256()
@@ -315,7 +459,20 @@ class PrepareMixin:
         *,
         leaf_size: int,
     ) -> Optional[str]:
-        """Return a stable key for a static-radix data-structure shape."""
+        """Return a stable key for a static-radix data-structure shape.
+
+        Parameters
+        ----------
+        tree : RadixTree
+            The radix tree this prepare is building against.
+        leaf_size : int
+            Requested particles per leaf.
+
+        Returns
+        -------
+        Optional[str]
+            A stable key for the static-radix shape, or None.
+        """
 
         try:
             hasher = hashlib.sha256()
@@ -340,7 +497,29 @@ class PrepareMixin:
         positions: Array,
         masses: Array,
     ) -> _TreeBuildArtifacts:
-        """Reorder particles and attach them to a cached radix topology."""
+        """Reorder particles and attach them to a cached radix topology.
+
+        Parameters
+        ----------
+        candidate : _TopologyReuseCandidate
+            Topology reuse signature computed for this request.
+        entry : _TopologyReuseEntry
+            Cached topology entry being considered for reuse.
+        positions : Array
+            Particle positions, shape ``(N, 3)``.
+        masses : Array
+            Particle masses, shape ``(N,)``.
+
+        Returns
+        -------
+        _TreeBuildArtifacts
+            Tree artifacts with particles reordered onto the cached topology.
+
+        Raises
+        ------
+        ValueError
+            If the cached topology does not match the particle count.
+        """
 
         positions_sorted, masses_sorted, inverse = reorder_particles_by_indices(
             positions,
@@ -405,7 +584,35 @@ class PrepareMixin:
         max_leaf_size: int,
         cache_leaf_parameter: int,
     ) -> _TreeBuildArtifacts:
-        """Refresh static-radix tree artifacts from a fixed template topology."""
+        """Refresh static-radix tree artifacts from a fixed template topology.
+
+        Parameters
+        ----------
+        template_tree : RadixTree
+            Fixed template topology the static-radix lane refreshes from.
+        positions : Array
+            Particle positions, shape ``(N, 3)``.
+        masses : Array
+            Particle masses, shape ``(N,)``.
+        bounds : Optional[Tuple[Array, Array]]
+            Explicit domain bounds, or None to infer them from the particles.
+        max_leaf_size : int
+            Largest leaf occupancy in the built tree.
+        cache_leaf_parameter : int
+            Leaf parameter the cache entry was built with.
+
+        Returns
+        -------
+        _TreeBuildArtifacts
+            Tree artifacts refreshed against the fixed template topology.
+
+        Raises
+        ------
+        RuntimeError
+            If the template cannot be refreshed for this input.
+        ValueError
+            If the template topology disagrees with the request.
+        """
 
         rebuilt_result = rebuild_static_radix_tree_from_template(
             positions,
@@ -439,7 +646,24 @@ class PrepareMixin:
         max_order: int,
         pos_sorted: Array,
     ) -> Optional[LocalExpansionData]:
-        """Build initial local-expansion buffers matching the active basis."""
+        """Build initial local-expansion buffers matching the active basis.
+
+        Parameters
+        ----------
+        tree : Tree
+            The radix tree this prepare is building against.
+        upward : TreeUpwardData
+            Upward-sweep artifacts: geometry, mass moments and packed multipoles.
+        max_order : int
+            Expansion order ``p`` for this prepare.
+        pos_sorted : Array
+            Particle positions in tree order.
+
+        Returns
+        -------
+        Optional[LocalExpansionData]
+            Zeroed local-expansion buffers, or None when the basis needs none.
+        """
         if self.expansion_basis == "solidfmm":
             # Solid-FMM does not reuse a cached locals template across prepare calls.
             # Let the downward pass allocate its accumulator on demand so we do not
@@ -483,7 +707,38 @@ class PrepareMixin:
         upward_center_mode: str,
         allow_stateful_cache: bool,
     ) -> _PrepareStateTreeUpwardArtifacts:
-        """Build tree artifacts and run upward preparation for prepare_state."""
+        """Build tree artifacts and run upward preparation for prepare_state.
+
+        Parameters
+        ----------
+        positions_arr : Array
+            Particle positions already cast to the working dtype.
+        masses_arr : Array
+            Particle masses already cast to the working dtype.
+        bounds : Optional[Tuple[Array, Array]]
+            Explicit domain bounds, or None to infer them from the particles.
+        leaf_size : int
+            Requested particles per leaf.
+        max_order : int
+            Expansion order ``p`` for this prepare.
+        refine_local_val : bool
+            Resolved local-refinement flag.
+        max_refine_levels_val : int
+            Resolved extra-refinement level count.
+        aspect_threshold_val : float
+            Resolved leaf aspect-ratio threshold.
+        jit_tree_override : Optional[bool]
+            Force the tree build jitted or eager, or None to resolve it.
+        upward_center_mode : str
+            Expansion centre convention for the upward sweep.
+        allow_stateful_cache : bool
+            Whether the process-level interaction cache may be used.
+
+        Returns
+        -------
+        _PrepareStateTreeUpwardArtifacts
+            Tree build plus upward sweep, bundled for the next phase.
+        """
         tree_config = self.config.tree
         if self.tree_type != "radix" and tree_config.mode in (
             "fixed_depth",
@@ -723,7 +978,50 @@ class PrepareMixin:
         runtime_l2l_chunk_size: Optional[int],
         record_retry: Callable[[DualTreeRetryEvent], None],
     ) -> tuple[_PrepareStateTreeUpwardArtifacts, _PrepareStateDualDownwardArtifacts]:
-        """Build tree/upward and dual/downward artifacts in one helper call."""
+        """Build tree/upward and dual/downward artifacts in one helper call.
+
+        Parameters
+        ----------
+        positions_arr : Array
+            Particle positions already cast to the working dtype.
+        masses_arr : Array
+            Particle masses already cast to the working dtype.
+        bounds : Optional[Tuple[Array, Array]]
+            Explicit domain bounds, or None to infer them from the particles.
+        leaf_size : int
+            Requested particles per leaf.
+        max_order : int
+            Expansion order ``p`` for this prepare.
+        refine_local_val : bool
+            Resolved local-refinement flag.
+        max_refine_levels_val : int
+            Resolved extra-refinement level count.
+        aspect_threshold_val : float
+            Resolved leaf aspect-ratio threshold.
+        jit_tree_override : Optional[bool]
+            Force the tree build jitted or eager, or None to resolve it.
+        upward_center_mode : str
+            Expansion centre convention for the upward sweep.
+        allow_stateful_cache : bool
+            Whether the process-level interaction cache may be used.
+        theta_val : float
+            Resolved opening angle for this build.
+        mac_type_val : MACType
+            Resolved geometric MAC, already translated for the traversal.
+        runtime_traversal_config : Optional[DualTreeTraversalConfig]
+            Traversal capacities for this build, possibly already clamped.
+        runtime_m2l_chunk_size : Optional[int]
+            M2L chunk size for this run, or None to autotune.
+        runtime_l2l_chunk_size : Optional[int]
+            L2L chunk size for this run, or None for the default.
+        record_retry : Callable[[DualTreeRetryEvent], None]
+            Callback invoked when a traversal capacity retry occurs.
+
+        Returns
+        -------
+        tuple[_PrepareStateTreeUpwardArtifacts, _PrepareStateDualDownwardArtifacts]
+            Both phase bundles, built in order.
+        """
 
         tree_artifacts = self._prepare_state_tree_and_upward(
             positions_arr=positions_arr,
@@ -788,6 +1086,53 @@ class PrepareMixin:
         returned ``TreeDownwardData`` is meant to survive into prepared state;
         grouped schedules and other M2L feed artifacts are transient and should
         stay scoped to this helper.
+
+        Parameters
+        ----------
+        tree_artifacts : _PrepareStateTreeUpwardArtifacts
+            Tree and upward artifacts produced by the earlier phase.
+        force_scale_nodes : Optional[Array]
+            Per-node force scales overriding the adaptive prepass.
+        upward_center_mode : str
+            Expansion centre convention for the upward sweep.
+        theta_val : float
+            Resolved opening angle for this build.
+        mac_type_val : MACType
+            Resolved geometric MAC, already translated for the traversal.
+        dehnen_radius_scale : float
+            Multiplier on the Dehnen acceptance radius.
+        runtime_traversal_config : Optional[DualTreeTraversalConfig]
+            Traversal capacities for this build, possibly already clamped.
+        runtime_m2l_chunk_size : Optional[int]
+            M2L chunk size for this run, or None to autotune.
+        runtime_l2l_chunk_size : Optional[int]
+            L2L chunk size for this run, or None for the default.
+        grouped_interactions : bool
+            Whether the grouped class-major layout is in use.
+        farfield_mode : str
+            Far-field feed shape: ``auto``, ``pair_grouped`` or ``class_major``.
+        record_retry : Callable[[DualTreeRetryEvent], None]
+            Callback invoked when a traversal capacity retry occurs.
+        refine_local_val : bool
+            Resolved local-refinement flag.
+        max_refine_levels_val : int
+            Resolved extra-refinement level count.
+        aspect_threshold_val : float
+            Resolved leaf aspect-ratio threshold.
+        allow_stateful_cache : bool
+            Whether the process-level interaction cache may be used.
+        suppress_host_side_effects : bool
+            Whether to skip host-side caching and diagnostics.
+
+        Returns
+        -------
+        _PrepareStateDualDownwardArtifacts
+            Interactions plus downward artifacts for the prepared state.
+
+        Raises
+        ------
+        ValueError
+            If the resolved plan is internally inconsistent.
         """
         suppress_host_side_effects = bool(suppress_host_side_effects)
         refresh_timing_active = bool(
@@ -1839,7 +2184,27 @@ class PrepareMixin:
         traversal_result: Optional[DualTreeWalkResult],
         compact_far_pairs: Optional[CompactTaggedFarPairs],
     ) -> tuple[Array, Array, Array]:
-        """Extract tagged far pairs for adaptive-order downward planning."""
+        """Extract tagged far pairs for adaptive-order downward planning.
+
+        Parameters
+        ----------
+        traversal_result : Optional[DualTreeWalkResult]
+            Full dual-tree walk result, or None when not retained.
+        compact_far_pairs : Optional[CompactTaggedFarPairs]
+            Compact tagged far pairs, or None when not requested.
+
+        Returns
+        -------
+        tuple[Array, Array, Array]
+            ``(sources, targets, tags)`` for adaptive-order planning.
+
+        Raises
+        ------
+        RuntimeError
+            If the traversal produced no usable tagged far pairs.
+        ValueError
+            If the tagged pair payload has an unexpected shape.
+        """
 
         if len(self.p_gears) == 0:
             raise ValueError("adaptive_order=True requires non-empty p_gears")
@@ -1870,7 +2235,29 @@ class PrepareMixin:
         compact_far_pairs: Optional[CompactTaggedFarPairs],
         upward: TreeUpwardData,
     ) -> tuple[_FarPairCOO, tuple[tuple[Array, Array], ...], tuple[int, ...]]:
-        """Build streamed far-pair payloads and per-gear buckets."""
+        """Build streamed far-pair payloads and per-gear buckets.
+
+        Parameters
+        ----------
+        interactions : Optional[NodeInteractionList]
+            Node interaction list, or None on the streamed path.
+        compact_far_pairs : Optional[CompactTaggedFarPairs]
+            Compact tagged far pairs, or None when not requested.
+        upward : TreeUpwardData
+            Upward-sweep artifacts: geometry, mass moments and packed multipoles.
+
+        Returns
+        -------
+        tuple[_FarPairCOO, tuple[tuple[Array, Array], ...], tuple[int, ...]]
+            ``(coo, per_gear_buckets, gear_orders)``: the COO far-pair payload, the
+            source/target pairs bucketed per adaptive-order gear, and the expansion
+            order each gear runs at.
+
+        Raises
+        ------
+        RuntimeError
+            If the streamed payload could not be built.
+        """
 
         if compact_far_pairs is not None:
             src_far = jnp.asarray(compact_far_pairs.sources, dtype=INDEX_DTYPE)
@@ -1931,7 +2318,24 @@ class PrepareMixin:
         compact_far_pairs: Optional[CompactTaggedFarPairs],
         upward: TreeUpwardData,
     ) -> _PrepareStateFarPairPlan:
-        """Prepare far-pair payloads consumed by the downward sweep."""
+        """Prepare far-pair payloads consumed by the downward sweep.
+
+        Parameters
+        ----------
+        interactions : Optional[NodeInteractionList]
+            Node interaction list, or None on the streamed path.
+        traversal_result : Optional[DualTreeWalkResult]
+            Full dual-tree walk result, or None when not retained.
+        compact_far_pairs : Optional[CompactTaggedFarPairs]
+            Compact tagged far pairs, or None when not requested.
+        upward : TreeUpwardData
+            Upward-sweep artifacts: geometry, mass moments and packed multipoles.
+
+        Returns
+        -------
+        _PrepareStateFarPairPlan
+            The far-pair payloads the downward sweep will consume.
+        """
 
         far_pairs_by_gear = None
         far_pairs_coo: Optional[_FarPairCOO] = None
@@ -1986,7 +2390,24 @@ class PrepareMixin:
         p_gears_for_downward: tuple[int, ...],
         runtime_m2l_chunk_size: Optional[int],
     ) -> Optional[int]:
-        """Choose runtime M2L chunk size for the downward pass."""
+        """Choose runtime M2L chunk size for the downward pass.
+
+        Parameters
+        ----------
+        upward : TreeUpwardData
+            Upward-sweep artifacts: geometry, mass moments and packed multipoles.
+        far_pairs_by_gear : Optional[tuple[tuple[Array, Array], ...]]
+            Far pairs bucketed per adaptive-order gear.
+        p_gears_for_downward : tuple[int, ...]
+            Gear orders the downward sweep will consume.
+        runtime_m2l_chunk_size : Optional[int]
+            M2L chunk size for this run, or None to autotune.
+
+        Returns
+        -------
+        Optional[int]
+            The chosen M2L chunk size, or None to leave it unset.
+        """
 
         static_runtime_fixed_sizing = bool(
             getattr(self, "_static_runtime_fixed_sizing", True)
@@ -2040,7 +2461,20 @@ class PrepareMixin:
         interactions: Optional[NodeInteractionList],
         far_pairs_coo: Optional[_FarPairCOO],
     ) -> Optional[NodeInteractionList]:
-        """Choose whether downward should consume node interactions or COO pairs."""
+        """Choose whether downward should consume node interactions or COO pairs.
+
+        Parameters
+        ----------
+        interactions : Optional[NodeInteractionList]
+            Node interaction list, or None on the streamed path.
+        far_pairs_coo : Optional[_FarPairCOO]
+            Far pairs in coordinate form for the streamed feed.
+
+        Returns
+        -------
+        Optional[NodeInteractionList]
+            The interaction list, or None when downward consumes COO pairs instead.
+        """
 
         if (
             self.streamed_far_pairs
@@ -2063,7 +2497,28 @@ class PrepareMixin:
         cache_entry: Optional[_InteractionCacheEntry],
         allow_stateful_cache: bool,
     ) -> NearfieldPrecomputeArtifacts:
-        """Build/reuse near-field precompute artifacts for prepare_state."""
+        """Build/reuse near-field precompute artifacts for prepare_state.
+
+        Parameters
+        ----------
+        neighbor_list : NodeNeighborList
+            Near neighbour list from the traversal.
+        nearfield_interop : NearfieldInteropData
+            Near-field interop payload shared with the evaluate path.
+        leaf_cap : int
+            Resolved upper bound on particles per leaf.
+        num_particles : int
+            Particle count ``N``.
+        cache_entry : Optional[_InteractionCacheEntry]
+            Interaction cache entry, or None on a miss.
+        allow_stateful_cache : bool
+            Whether the process-level interaction cache may be used.
+
+        Returns
+        -------
+        NearfieldPrecomputeArtifacts
+            Near-field precompute artifacts, reused when already cached.
+        """
         effective_leaf_cap = (
             int(nearfield_interop.leaf_particle_indices.shape[1])
             if nearfield_interop.leaf_particle_indices is not None
@@ -2116,7 +2571,22 @@ class PrepareMixin:
         upward: TreeUpwardData,
         max_order: int,
     ) -> None:
-        """Update reusable cartesian local-expansion template after prepare_state."""
+        """Update reusable cartesian local-expansion template after prepare_state.
+
+        Parameters
+        ----------
+        locals_template : Optional[LocalExpansionData]
+            Preallocated local-expansion buffers, or None to build them.
+        upward : TreeUpwardData
+            Upward-sweep artifacts: geometry, mass moments and packed multipoles.
+        max_order : int
+            Expansion order ``p`` for this prepare.
+
+        Returns
+        -------
+        None
+            Nothing; it updates the reusable template cache in place.
+        """
         if locals_template is not None and self.expansion_basis == "cartesian":
             self._locals_template = LocalExpansionData(
                 order=max_order,
@@ -2136,7 +2606,28 @@ class PrepareMixin:
         nearfield_edge_chunk_size: Optional[int] = None,
         retain_pair_vectors: Optional[bool] = None,
     ) -> NearfieldPrecomputeArtifacts:
-        """Best-effort precompute of nearfield leaf-pair and scatter artifacts."""
+        """Best-effort precompute of nearfield leaf-pair and scatter artifacts.
+
+        Parameters
+        ----------
+        nearfield_interop : NearfieldInteropData
+            Near-field interop payload shared with the evaluate path.
+        leaf_cap : int
+            Resolved upper bound on particles per leaf.
+        num_particles : int
+            Particle count ``N``.
+        nearfield_mode : Optional[str]
+            Near-field traversal mode, or None to resolve it.
+        nearfield_edge_chunk_size : Optional[int]
+            Edge chunk size for the near field, or None for the default.
+        retain_pair_vectors : Optional[bool]
+            Whether near-field pair vectors are retained, or None to resolve.
+
+        Returns
+        -------
+        NearfieldPrecomputeArtifacts
+            Precomputed leaf-pair and scatter artifacts; best-effort, so a failure yields empty artifacts rather than raising.
+        """
         nearfield_chunk_sort_indices = None
         nearfield_chunk_group_ids = None
         nearfield_chunk_unique_indices = None
@@ -2243,7 +2734,18 @@ class PrepareMixin:
         *,
         num_particles: int,
     ) -> bool:
-        """Decide whether prepared-state near-field pair vectors should be retained."""
+        """Decide whether prepared-state near-field pair vectors should be retained.
+
+        Parameters
+        ----------
+        num_particles : int
+            Particle count ``N``.
+
+        Returns
+        -------
+        bool
+            Whether the prepared state keeps its near-field pair vectors.
+        """
         if self.memory_objective == "minimum_memory":
             return False
         if jax.default_backend() != "gpu":
@@ -2255,7 +2757,18 @@ class PrepareMixin:
         *,
         num_particles: int,
     ) -> bool:
-        """Decide whether to materialize near-field scatter schedules."""
+        """Decide whether to materialize near-field scatter schedules.
+
+        Parameters
+        ----------
+        num_particles : int
+            Particle count ``N``.
+
+        Returns
+        -------
+        bool
+            Whether to materialise near-field scatter schedules now.
+        """
         if not bool(self.precompute_nearfield_scatter_schedules):
             return False
         if jax.default_backend() != "gpu":
@@ -2269,7 +2782,20 @@ class PrepareMixin:
         *,
         nearfield_interop: NearfieldInteropData,
     ) -> tuple[Optional[Array], Optional[Array], Optional[Array]]:
-        """Best-effort leaf neighbor pair generation."""
+        """Best-effort leaf neighbor pair generation.
+
+        Parameters
+        ----------
+        nearfield_interop : NearfieldInteropData
+            Near-field interop payload shared with the evaluate path.
+
+        Returns
+        -------
+        tuple[Optional[Array], Optional[Array], Optional[Array]]
+            ``(target_leaf_ids, source_leaf_ids, valid_mask)``, or all ``None`` if
+            generation failed. Best-effort by design: a failure here costs speed, not
+            correctness, so it degrades instead of raising.
+        """
         try:
             return prepare_leaf_neighbor_pairs(
                 jnp.asarray(nearfield_interop.node_ranges, dtype=INDEX_DTYPE),
@@ -2292,7 +2818,27 @@ class PrepareMixin:
         leaf_cap: int,
         edge_chunk_size: int,
     ) -> tuple[Optional[Array], Optional[Array], Optional[Array]]:
-        """Best-effort bucketed scatter schedule generation."""
+        """Best-effort bucketed scatter schedule generation.
+
+        Parameters
+        ----------
+        nearfield_interop : NearfieldInteropData
+            Near-field interop payload shared with the evaluate path.
+        target_leaf_ids : Array
+            Leaf id per target particle.
+        valid_pairs : Array
+            Mask marking which candidate leaf pairs are real.
+        leaf_cap : int
+            Resolved upper bound on particles per leaf.
+        edge_chunk_size : int
+            Near-field edge chunk size.
+
+        Returns
+        -------
+        tuple[Optional[Array], Optional[Array], Optional[Array]]
+            ``(offsets, indices, counts)``, or all ``None`` if generation failed --
+            best-effort for the same reason as the leaf-pair helper above.
+        """
         try:
             edge_count = int(target_leaf_ids.shape[0])
             chunk = int(edge_chunk_size)
@@ -2336,7 +2882,22 @@ class PrepareMixin:
         leaf_cap: int,
         edge_chunk_size: int,
     ) -> int:
-        """Return the max near-field schedule items allowed for this workload."""
+        """Return the max near-field schedule items allowed for this workload.
+
+        Parameters
+        ----------
+        edge_count : int
+            Number of near-field edges.
+        leaf_cap : int
+            Resolved upper bound on particles per leaf.
+        edge_chunk_size : int
+            Near-field edge chunk size.
+
+        Returns
+        -------
+        int
+            Maximum near-field schedule items permitted for this workload.
+        """
         del edge_count, leaf_cap, edge_chunk_size
         if self.nearfield_schedule_item_cap is not None:
             return int(self.nearfield_schedule_item_cap)
@@ -2364,7 +2925,20 @@ class PrepareMixin:
         grouped_chunk_size: Optional[int],
         farfield_mode: str,
     ) -> bool:
-        """Decide whether grouped class-major schedules should be materialized."""
+        """Decide whether grouped class-major schedules should be materialized.
+
+        Parameters
+        ----------
+        grouped_chunk_size : Optional[int]
+            Chunk size for grouped interaction processing.
+        farfield_mode : str
+            Far-field feed shape: ``auto``, ``pair_grouped`` or ``class_major``.
+
+        Returns
+        -------
+        bool
+            Whether grouped class-major schedules should be materialised.
+        """
         if grouped_chunk_size is None:
             return False
         if str(farfield_mode).strip().lower() != "class_major":
@@ -2374,7 +2948,13 @@ class PrepareMixin:
         return self.memory_objective != "minimum_memory"
 
     def _grouped_schedule_item_budget(self) -> int:
-        """Return max bytes allowed for cached grouped schedule matrices."""
+        """Return max bytes allowed for cached grouped schedule matrices.
+
+        Returns
+        -------
+        int
+            Maximum bytes allowed for cached grouped schedule matrices.
+        """
         return int(self.grouped_schedule_budget_bytes)
 
     def _resolve_target_indices(
@@ -2383,7 +2963,25 @@ class PrepareMixin:
         target_indices: Optional[Array],
         num_particles: int,
     ) -> Optional[Array]:
-        """Validate and normalize optional target particle indices."""
+        """Validate and normalize optional target particle indices.
+
+        Parameters
+        ----------
+        target_indices : Optional[Array]
+            Subset of particles to evaluate, or None for all.
+        num_particles : int
+            Particle count ``N``.
+
+        Returns
+        -------
+        Optional[Array]
+            Normalised target indices, or None when all particles are targets.
+
+        Raises
+        ------
+        ValueError
+            If any index is out of range for the particle count.
+        """
         if target_indices is None:
             return None
         indices = jnp.asarray(target_indices)
@@ -2425,7 +3023,21 @@ class PrepareMixin:
         Optional[Array],
         Optional[Array],
     ]:
-        """Unpack dual-tree artifacts for downward preparation and state export."""
+        """Unpack dual-tree artifacts for downward preparation and state export.
+
+        Parameters
+        ----------
+        dual_artifacts : _DualTreeArtifacts
+            Bundle produced by the dual-tree build phase.
+
+        Returns
+        -------
+        tuple[Optional[NodeInteractionList], NodeNeighborList, Optional[DualTreeWalkResult], Optional[CompactTaggedFarPairs], Optional[DenseInteractionBuffers], Optional[GroupedInteractionBuffers], Optional[Array], Optional[Array], Optional[Array], Optional[Array], Optional[Array], Optional[Array]]
+            The twelve dual-tree artifacts in the order the downward phase consumes
+            them: the interaction list (``None`` on the streamed path), the neighbour
+            list, the walk result, the compact far pairs, the dense and grouped
+            buffers, and the six grouped-segment arrays.
+        """
         return (
             dual_artifacts.interactions,
             dual_artifacts.neighbor_list,
@@ -2468,7 +3080,62 @@ class PrepareMixin:
         adaptive_order: bool = False,
         p_gears: tuple[int, ...] = tuple(),
     ) -> TreeDownwardData:
-        """Prepare downward sweep using precomputed interaction artifacts."""
+        """Prepare downward sweep using precomputed interaction artifacts.
+
+        Parameters
+        ----------
+        tree : Tree
+            The radix tree this prepare is building against.
+        upward : TreeUpwardData
+            Upward-sweep artifacts: geometry, mass moments and packed multipoles.
+        theta_val : float
+            Resolved opening angle for this build.
+        locals_template : Optional[LocalExpansionData]
+            Preallocated local-expansion buffers, or None to build them.
+        interactions : Optional[NodeInteractionList]
+            Node interaction list, or None on the streamed path.
+        runtime_m2l_chunk_size : Optional[int]
+            M2L chunk size for this run, or None to autotune.
+        runtime_l2l_chunk_size : Optional[int]
+            L2L chunk size for this run, or None for the default.
+        runtime_traversal_config : Optional[DualTreeTraversalConfig]
+            Traversal capacities for this build, possibly already clamped.
+        record_retry : Callable[[DualTreeRetryEvent], None]
+            Callback invoked when a traversal capacity retry occurs.
+        dense_buffers : Optional[DenseInteractionBuffers]
+            Dense interaction buffers, or None when unused.
+        grouped_interactions : bool
+            Whether the grouped class-major layout is in use.
+        grouped_buffers : Optional[GroupedInteractionBuffers]
+            Grouped interaction buffers, or None when unused.
+        grouped_segment_starts : Optional[Array]
+            Start offset of each grouped segment.
+        grouped_segment_lengths : Optional[Array]
+            Length of each grouped segment.
+        grouped_segment_class_ids : Optional[Array]
+            Class id of each grouped segment.
+        grouped_segment_sort_permutation : Optional[Array]
+            Permutation sorting segments into class-major order.
+        grouped_segment_group_ids : Optional[Array]
+            Group id of each grouped segment.
+        grouped_segment_unique_targets : Optional[Array]
+            Unique target nodes per grouped segment.
+        farfield_mode : str
+            Far-field feed shape: ``auto``, ``pair_grouped`` or ``class_major``.
+        far_pairs_coo : Optional[_FarPairCOO]
+            Far pairs in coordinate form for the streamed feed.
+        far_pairs_by_gear : Optional[tuple[tuple[Array, Array], ...]]
+            Far pairs bucketed per adaptive-order gear.
+        adaptive_order : bool
+            Whether adaptive per-node order is active.
+        p_gears : tuple[int, ...]
+            Expansion orders available to the adaptive-order gears.
+
+        Returns
+        -------
+        TreeDownwardData
+            The downward sweep result.
+        """
         return self.prepare_downward_sweep(
             tree,
             upward,
@@ -2510,7 +3177,43 @@ class PrepareMixin:
         retain_interactions: bool = False,
         suppress_host_side_effects: bool = False,
     ) -> _PrepareStateDualDownwardArtifacts:
-        """Strict static fast path with compact streamed far-pairs only."""
+        """Strict static fast path with compact streamed far-pairs only.
+
+        Parameters
+        ----------
+        tree_artifacts : _PrepareStateTreeUpwardArtifacts
+            Tree and upward artifacts produced by the earlier phase.
+        theta_val : float
+            Resolved opening angle for this build.
+        mac_type_val : MACType
+            Resolved geometric MAC, already translated for the traversal.
+        dehnen_radius_scale : float
+            Multiplier on the Dehnen acceptance radius.
+        runtime_traversal_config : Optional[DualTreeTraversalConfig]
+            Traversal capacities for this build, possibly already clamped.
+        runtime_m2l_chunk_size : Optional[int]
+            M2L chunk size for this run, or None to autotune.
+        runtime_l2l_chunk_size : Optional[int]
+            L2L chunk size for this run, or None for the default.
+        record_retry : Callable[[DualTreeRetryEvent], None]
+            Callback invoked when a traversal capacity retry occurs.
+        farfield_mode : str
+            Far-field feed shape: ``auto``, ``pair_grouped`` or ``class_major``.
+        retain_interactions : bool
+            Whether the prepared state keeps its interaction list.
+        suppress_host_side_effects : bool
+            Whether to skip host-side caching and diagnostics.
+
+        Returns
+        -------
+        _PrepareStateDualDownwardArtifacts
+            Dual/downward artifacts built by the strict streamed fast path.
+
+        Raises
+        ------
+        RuntimeError
+            If the strict streamed preconditions do not hold at build time.
+        """
 
         geometry_factory = (
             None
@@ -2683,6 +3386,30 @@ class PrepareMixin:
         chained. "Out of memory while trying to allocate 8.00GiB" on a 40 GB card
         named neither the buffer nor a way forward. See
         :mod:`jaccpot.runtime.capacity_diagnostics`.
+
+        Parameters
+        ----------
+        positions : Array
+            Particle positions, shape ``(N, 3)``.
+        masses : Array
+            Particle masses, shape ``(N,)``.
+        **kwargs : Any
+            Forwarded verbatim to :meth:`_prepare_state_uncaught` -- see the note
+            above on why they are not repeated here.
+
+        Returns
+        -------
+        PreparedStateLike
+            The prepared state: an ``FMMPreparedState``, or a ``LargeNPreparedState``
+            under the large-N preset.
+
+        Raises
+        ------
+        Exception
+            Whatever the implementation raised, re-raised after being annotated with
+            a capacity report. The type is deliberately not narrowed: this wrapper
+            adds context to any allocation or traversal failure rather than
+            classifying it.
         """
 
         try:
@@ -2747,6 +3474,45 @@ class PrepareMixin:
 
         See :meth:`prepare_state` for the capacity-failure reporting that
         wraps this method; it forwards ``**kwargs`` here verbatim.
+
+        Parameters
+        ----------
+        positions : Array
+            Particle positions, shape ``(N, 3)``.
+        masses : Array
+            Particle masses, shape ``(N,)``.
+        bounds : Optional[Tuple[Array, Array]]
+            Explicit domain bounds, or None to infer them from the particles.
+        leaf_size : int
+            Requested particles per leaf.
+        max_order : int
+            Expansion order ``p`` for this prepare.
+        theta : Optional[float]
+            Opening angle, or None to take the solver's own.
+        jit_tree : Optional[bool]
+            Whether the tree build runs jitted, or None to resolve it.
+        refine_local : Optional[bool]
+            Whether to refine leaves locally, or None for the default.
+        max_refine_levels : Optional[int]
+            Extra refinement levels, or None for the default.
+        aspect_threshold : Optional[float]
+            Leaf aspect ratio triggering refinement, or None for the default.
+        force_scale_nodes : Optional[Array]
+            Per-node force scales overriding the adaptive prepass.
+        runtime_overrides_override : Optional[_RuntimeExecutionOverrides]
+            Explicit runtime execution overrides for this call only.
+        fused_device_mode : bool
+            Whether the device-resident fused hot path is in use.
+
+        Returns
+        -------
+        PreparedStateLike
+            As :meth:`prepare_state`, without the caller-facing error wrapping.
+
+        Raises
+        ------
+        ValueError
+            If the request or its resolved configuration is invalid.
         """
 
         self._validate_prepare_state_request(
