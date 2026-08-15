@@ -42,7 +42,17 @@ from jaccpot.upward.tree_expansions import NodeMultipoleData, TreeUpwardData
 
 
 class LocalExpansionData(NamedTuple):
-    """Local expansion coefficients and metadata."""
+    """Local expansion coefficients and metadata.
+
+    Attributes
+    ----------
+    order : int
+        Expansion order ``p`` these coefficients were built at.
+    centers : Array
+        Expansion centre per node, shape ``(num_nodes, 3)``.
+    coefficients : Array
+        Packed local coefficients per node, shape ``(num_nodes, ncoeff(p))``.
+    """
 
     order: int
     centers: Array
@@ -50,7 +60,20 @@ class LocalExpansionData(NamedTuple):
 
 
 class TreeDownwardData(NamedTuple):
-    """Bundle for interaction lists and resulting local expansions."""
+    """Bundle for interaction lists and resulting local expansions.
+
+    Attributes
+    ----------
+    interactions : NodeInteractionList
+        The accepted far-field node pairs this sweep consumed.
+    locals : LocalExpansionData
+        The local expansions the sweep produced.
+    source_motion_locals : Optional[LocalExpansionData]
+        Locals for the source-motion (time-derivative) tower, or ``None`` when no
+        source motion was requested. ``None`` means "not requested"; an all-zero
+        value means "requested, and the far field is empty" -- the two are
+        deliberately distinguishable.
+    """
 
     interactions: NodeInteractionList
     locals: LocalExpansionData
@@ -68,7 +91,22 @@ def _multipole_component_matrix(
     coeff_count: int,
     dtype: Any,
 ) -> Array:
-    """Return the packed multipole coefficients used by the M2L kernels."""
+    """Return the packed multipole coefficients used by the M2L kernels.
+
+    Parameters
+    ----------
+    multipoles : NodeMultipoleData
+        Per-node multipole data from the upward sweep.
+    coeff_count : int
+        Number of packed coefficients per node.
+    dtype : Any
+        Working dtype for the allocated buffers.
+
+    Returns
+    -------
+    Array
+        The packed multipole coefficients the Cartesian translation consumes.
+    """
     return jnp.asarray(multipoles.packed[:, :coeff_count], dtype=dtype)
 
 
@@ -85,7 +123,18 @@ _COMBO_FACTORIAL: Dict[Tuple[int, int, int], int] = {
 
 
 def _double_factorial(n: int) -> int:
-    """Compute n!! for non-negative integers."""
+    """Compute n!! for non-negative integers.
+
+    Parameters
+    ----------
+    n : int
+        Non-negative integer argument.
+
+    Returns
+    -------
+    int
+        ``n!!``, the product of every second integer down from ``n``.
+    """
     if n <= 0:
         return 1
     result = 1
@@ -111,7 +160,16 @@ ComponentPowers = Tuple[
 
 
 class _DerivativeInfo(NamedTuple):
-    """Metadata for one mixed derivative polynomial."""
+    """Metadata for one mixed derivative polynomial.
+
+    Attributes
+    ----------
+    level : int
+        Total derivative order of this polynomial.
+    terms : Tuple[Tuple[Tuple[int, int, int], int], ...]
+        The polynomial as ``((x_exp, y_exp, z_exp), coefficient)`` pairs, sorted so
+        the representation is canonical and hashable.
+    """
 
     level: int
     terms: Tuple[Tuple[Tuple[int, int, int], int], ...]
@@ -121,7 +179,20 @@ def _scale_poly(
     poly: Dict[Tuple[int, int, int], int],
     scale: int,
 ) -> Dict[Tuple[int, int, int], int]:
-    """Scale polynomial coefficients by an integer factor."""
+    """Scale polynomial coefficients by an integer factor.
+
+    Parameters
+    ----------
+    poly : Dict[Tuple[int, int, int], int]
+        Sparse polynomial as ``{(x_exp, y_exp, z_exp): coefficient}``.
+    scale : int
+        Integer factor to multiply the polynomial by.
+
+    Returns
+    -------
+    Dict[Tuple[int, int, int], int]
+        The polynomial with every coefficient multiplied by ``scale``.
+    """
     if scale == 0 or not poly:
         return {}
     return {exp: coeff * scale for exp, coeff in poly.items()}
@@ -131,7 +202,20 @@ def _add_poly(
     left: Dict[Tuple[int, int, int], int],
     right: Dict[Tuple[int, int, int], int],
 ) -> Dict[Tuple[int, int, int], int]:
-    """Add two sparse integer polynomials in 3D exponents."""
+    """Add two sparse integer polynomials in 3D exponents.
+
+    Parameters
+    ----------
+    left : Dict[Tuple[int, int, int], int]
+        Left operand polynomial, same sparse form.
+    right : Dict[Tuple[int, int, int], int]
+        Right operand polynomial, same sparse form.
+
+    Returns
+    -------
+    Dict[Tuple[int, int, int], int]
+        The sum, with zero coefficients dropped so the form stays canonical.
+    """
     if not left:
         return dict(right)
     if not right:
@@ -150,7 +234,20 @@ def _differentiate_poly(
     poly: Dict[Tuple[int, int, int], int],
     axis: int,
 ) -> Dict[Tuple[int, int, int], int]:
-    """Differentiate a sparse polynomial with respect to one axis."""
+    """Differentiate a sparse polynomial with respect to one axis.
+
+    Parameters
+    ----------
+    poly : Dict[Tuple[int, int, int], int]
+        Sparse polynomial as ``{(x_exp, y_exp, z_exp): coefficient}``.
+    axis : int
+        Cartesian axis index: 0 for x, 1 for y, 2 for z.
+
+    Returns
+    -------
+    Dict[Tuple[int, int, int], int]
+        The derivative with respect to the selected axis.
+    """
     if not poly:
         return {}
     result: Dict[Tuple[int, int, int], int] = {}
@@ -169,7 +266,20 @@ def _mul_by_axis(
     poly: Dict[Tuple[int, int, int], int],
     axis: int,
 ) -> Dict[Tuple[int, int, int], int]:
-    """Multiply a sparse polynomial by x/y/z for the selected axis."""
+    """Multiply a sparse polynomial by x/y/z for the selected axis.
+
+    Parameters
+    ----------
+    poly : Dict[Tuple[int, int, int], int]
+        Sparse polynomial as ``{(x_exp, y_exp, z_exp): coefficient}``.
+    axis : int
+        Cartesian axis index: 0 for x, 1 for y, 2 for z.
+
+    Returns
+    -------
+    Dict[Tuple[int, int, int], int]
+        The polynomial multiplied by ``x``, ``y`` or ``z``.
+    """
     if not poly:
         return {}
     result: Dict[Tuple[int, int, int], int] = {}
@@ -184,7 +294,18 @@ def _mul_by_axis(
 def _mul_by_r2(
     poly: Dict[Tuple[int, int, int], int],
 ) -> Dict[Tuple[int, int, int], int]:
-    """Multiply a sparse polynomial by r^2 = x^2 + y^2 + z^2."""
+    """Multiply a sparse polynomial by r^2 = x^2 + y^2 + z^2.
+
+    Parameters
+    ----------
+    poly : Dict[Tuple[int, int, int], int]
+        Sparse polynomial as ``{(x_exp, y_exp, z_exp): coefficient}``.
+
+    Returns
+    -------
+    Dict[Tuple[int, int, int], int]
+        The polynomial multiplied by ``r**2``.
+    """
     if not poly:
         return {}
     result: Dict[Tuple[int, int, int], int] = {}
@@ -200,7 +321,18 @@ def _mul_by_r2(
 def _term_tuple(
     poly: Dict[Tuple[int, int, int], int],
 ) -> Tuple[Tuple[Tuple[int, int, int], int], ...]:
-    """Canonicalize sparse polynomial dict into a sorted tuple."""
+    """Canonicalize sparse polynomial dict into a sorted tuple.
+
+    Parameters
+    ----------
+    poly : Dict[Tuple[int, int, int], int]
+        Sparse polynomial as ``{(x_exp, y_exp, z_exp): coefficient}``.
+
+    Returns
+    -------
+    Tuple[Tuple[Tuple[int, int, int], int], ...]
+        The polynomial as a sorted tuple, so it is hashable and comparable.
+    """
     return tuple(sorted(poly.items()))
 
 
@@ -208,7 +340,20 @@ def _generate_derivative_info() -> Tuple[
     Dict[Tuple[int, int, int], _DerivativeInfo],
     int,
 ]:
-    """Generate derivative polynomial metadata up to the supported order."""
+    """Generate derivative polynomial metadata up to the supported order.
+
+    Returns
+    -------
+    Dict[Tuple[int, int, int], _DerivativeInfo]
+        Metadata for every mixed derivative, keyed by its exponent triple.
+    int
+        The highest level the recurrence closed over, i.e. the supported order.
+
+    Raises
+    ------
+    RuntimeError
+        If the recurrence fails to close over the requested order range.
+    """
     combos_by_level = {
         level: multi_index_tuples(level) for level in range(_MAX_M2L_DERIV_ORDER + 1)
     }
@@ -264,7 +409,20 @@ def _build_component_powers(
     delta: Array,
     max_exponent: int,
 ) -> ComponentPowers:
-    """Precompute per-axis powers of displacement components."""
+    """Precompute per-axis powers of displacement components.
+
+    Parameters
+    ----------
+    delta : Array
+        Displacement vector ``(3,)``, target centre minus source centre.
+    max_exponent : int
+        Highest power of each component to precompute.
+
+    Returns
+    -------
+    ComponentPowers
+        Per-axis powers of the displacement components, precomputed once.
+    """
     dtype = delta.dtype
     powers = []
     for axis in range(3):
@@ -278,8 +436,25 @@ def _build_component_powers(
     return tuple(powers)  # type: ignore[return-value]
 
 
-def _build_derivative_tables():
-    """Materialize derivative metadata tables for vectorized lookup."""
+def _build_derivative_tables() -> (
+    Tuple[Array, Array, Array, Array, Array, Dict[Tuple[int, int, int], int]]
+):
+    """Materialize derivative metadata tables for vectorized lookup.
+
+    Returns
+    -------
+    Tuple[Array, Array, Array, Array, Array, Dict[Tuple[int, int, int], int]]
+        ``(combos, levels, term_exp, term_coeff, term_mask, lookup)``: the exponent
+        triple and level of each derivative-basis entry, its terms' exponents,
+        coefficients and validity mask padded to the widest polynomial, and a dict
+        mapping an exponent triple to its row index.
+
+        The return annotation is added by this change, and it is the one non-docstring
+        edit in the batch. It is not optional: with no annotation pydoclint demands a
+        ``Returns`` section (DOC201) but rejects a section that names a type (DOC203)
+        and cannot parse one that does not (DOC001), so the file cannot reach zero
+        without it.
+    """
     combos: List[Tuple[int, int, int]] = []
     levels: List[int] = []
     term_lists: List[List[Tuple[int, int, int]]] = []
@@ -334,7 +509,18 @@ def _build_derivative_tables():
 
 
 class _M2LStencil(NamedTuple):
-    """Precomputed index/scale stencil used by Cartesian M2L."""
+    """Precomputed index/scale stencil used by Cartesian M2L.
+
+    Attributes
+    ----------
+    gamma_indices : Array
+        Index of the derivative-basis entry each output coefficient draws on.
+    scales : Array
+        Multiplicative factor paired with each gathered entry.
+    component_sizes : Tuple[int, ...]
+        Number of coefficients per level, so the flat stencil can be split back
+        into levels without recomputing the triangular sizes.
+    """
 
     gamma_indices: Array
     scales: Array
@@ -342,7 +528,13 @@ class _M2LStencil(NamedTuple):
 
 
 def _build_m2l_stencils() -> Tuple[_M2LStencil, ...]:
-    """Build M2L stencils for every order up to MAX_MULTIPOLE_ORDER."""
+    """Build M2L stencils for every order up to MAX_MULTIPOLE_ORDER.
+
+    Returns
+    -------
+    Tuple[_M2LStencil, ...]
+        One stencil per order up to ``MAX_MULTIPOLE_ORDER``.
+    """
     stencils: List[_M2LStencil] = []
     for order in range(MAX_MULTIPOLE_ORDER + 1):
         total_targets = total_coefficients(order)
@@ -401,7 +593,20 @@ DEFAULT_M2L_CHUNK_SIZE = 8192  # 4096  # 2048  # 1024  # 512  # 256
 
 
 def _evaluate_derivative_table(displacement: Array, max_level: int) -> Array:
-    """Evaluate all derivative basis entries at one displacement."""
+    """Evaluate all derivative basis entries at one displacement.
+
+    Parameters
+    ----------
+    displacement : Array
+        Displacement the derivative basis is evaluated at.
+    max_level : int
+        Highest derivative level to tabulate.
+
+    Returns
+    -------
+    Array
+        Every derivative basis entry evaluated at one displacement.
+    """
     dtype = displacement.dtype
 
     comp_powers = _build_component_powers(displacement, _MAX_POLY_EXPONENT)
@@ -448,7 +653,22 @@ def _translate_components_to_local(
     *,
     order: int,
 ) -> Array:
-    """Translate one packed component vector into local coefficients."""
+    """Translate one packed component vector into local coefficients.
+
+    Parameters
+    ----------
+    component_vec : Array
+        Packed multipole component vector for one node.
+    delta : Array
+        Displacement vector ``(3,)``, target centre minus source centre.
+    order : int
+        Expansion order ``p``.
+
+    Returns
+    -------
+    Array
+        Local coefficients for one node.
+    """
     batched = _translate_components_batch(
         component_vec[None, :],
         delta[None, :],
@@ -464,7 +684,22 @@ def _translate_components_batch(
     *,
     order: int,
 ) -> Array:
-    """Batch version of component-to-local translation."""
+    """Batch version of component-to-local translation.
+
+    Parameters
+    ----------
+    component_chunk : Array
+        Packed component vectors for one chunk of nodes.
+    delta_chunk : Array
+        Displacement vectors for one chunk, shape ``(chunk, 3)``.
+    order : int
+        Expansion order ``p``.
+
+    Returns
+    -------
+    Array
+        Local coefficients for a chunk of nodes.
+    """
     zero_disp = jnp.all(delta_chunk == 0, axis=1)
     derivative_chunk = jax.vmap(
         lambda disp: _evaluate_derivative_table(disp, order * 2),
@@ -717,7 +952,27 @@ def accumulate_dense_m2l_contributions(
     multipoles: NodeMultipoleData,
     local_data: LocalExpansionData,
 ) -> LocalExpansionData:
-    """Accumulate M2L contributions using dense level-major buffers."""
+    """Accumulate M2L contributions using dense level-major buffers.
+
+    Parameters
+    ----------
+    dense_buffers : DenseInteractionBuffers
+        Dense level-major interaction buffers.
+    multipoles : NodeMultipoleData
+        Per-node multipole data from the upward sweep.
+    local_data : LocalExpansionData
+        The local expansions being accumulated into.
+
+    Returns
+    -------
+    LocalExpansionData
+        The local expansions with the dense M2L contributions added.
+
+    Raises
+    ------
+    ValueError
+        If the dense buffers disagree with the interaction list or the order.
+    """
 
     if multipoles.order != local_data.order:
         raise ValueError("multipole and local orders must match")
@@ -837,7 +1092,20 @@ def _translate_multipole_to_local_impl(
 
 
 def _pack_symmetric_tensor(tensor: Array, level: int) -> Array:
-    """Pack a symmetric tensor level into triangular coefficient ordering."""
+    """Pack a symmetric tensor level into triangular coefficient ordering.
+
+    Parameters
+    ----------
+    tensor : Array
+        Symmetric tensor level to pack into triangular form.
+    level : int
+        Tensor level (total derivative order).
+
+    Returns
+    -------
+    Array
+        The tensor level packed into triangular coefficient order.
+    """
     combos = _LEVEL_COMBOS[level]
     if level == 0:
         return jnp.reshape(jnp.asarray(tensor, dtype=tensor.dtype), (1,))
@@ -858,7 +1126,33 @@ def _build_component_vector(
     *,
     order: int,
 ) -> Array:
-    """Build packed multipole component vector from raw tensor moments."""
+    """Build packed multipole component vector from raw tensor moments.
+
+    Parameters
+    ----------
+    mass : Array
+        Monopole term.
+    dipole : Array
+        Dipole term.
+    second : Array
+        Second moment.
+    third : Array
+        Third moment.
+    fourth : Array
+        Fourth moment.
+    order : int
+        Expansion order ``p``.
+
+    Returns
+    -------
+    Array
+        The packed multipole component vector.
+
+    Raises
+    ------
+    ValueError
+        If the supplied moments do not match the requested order.
+    """
     tensors = (mass, dipole, second, third, fourth)
     pieces: List[Array] = []
     for level in range(order + 1):
@@ -876,7 +1170,29 @@ def translate_local_expansion(
     *,
     order: int,
 ) -> Array:
-    """Shift a local expansion by ``delta`` using explicit binomial sums."""
+    """Shift a local expansion by ``delta`` using explicit binomial sums.
+
+    Parameters
+    ----------
+    coefficients : Array
+        Packed coefficients to wrap or reinterpret.
+    delta : Array
+        Displacement vector ``(3,)``, target centre minus source centre.
+    order : int
+        Expansion order ``p``.
+
+    Returns
+    -------
+    Array
+        The local expansion shifted by ``delta``.
+
+    Raises
+    ------
+    NotImplementedError
+        If the requested order exceeds the tabulated derivative metadata.
+    ValueError
+        If ``delta`` or the coefficient length is the wrong shape.
+    """
 
     order_int = int(order)
     if order_int < 0:
@@ -1122,7 +1438,27 @@ def initialize_local_expansions(
     *,
     max_order: int,
 ) -> LocalExpansionData:
-    """Allocate zeroed local expansion buffers for every tree node."""
+    """Allocate zeroed local expansion buffers for every tree node.
+
+    Parameters
+    ----------
+    tree : Tree
+        The tree whose nodes are being swept.
+    centers : Array
+        Expansion centre per node, shape ``(num_nodes, 3)``.
+    max_order : int
+        Maximum expansion order ``p`` to allocate for.
+
+    Returns
+    -------
+    LocalExpansionData
+        Zeroed local buffers for every tree node.
+
+    Raises
+    ------
+    ValueError
+        If the order is outside the supported range.
+    """
 
     order = int(max_order)
     if order < 0:
@@ -1163,6 +1499,27 @@ def accumulate_m2l_contributions(
     limiting each JAX `vmap` call to ``chunk_size`` pairs for good fusion and
     peak memory characteristics. Override ``chunk_size`` when benchmarking
     different batching strategies; the value must stay positive.
+
+    Parameters
+    ----------
+    interactions : NodeInteractionList
+        Accepted far-field node pairs to accumulate.
+    multipoles : NodeMultipoleData
+        Per-node multipole data from the upward sweep.
+    local_data : LocalExpansionData
+        The local expansions being accumulated into.
+    chunk_size : int
+        Pairs processed per chunk, bounding peak memory.
+
+    Returns
+    -------
+    LocalExpansionData
+        The local expansions with the sparse M2L contributions added.
+
+    Raises
+    ------
+    ValueError
+        If the interaction list and local buffers disagree.
     """
 
     if int(multipoles.order) != int(local_data.order):
@@ -1192,7 +1549,26 @@ def _accumulate_m2l_contributions_impl(
     chunk_size: int,
     order: int,
 ) -> LocalExpansionData:
-    """JIT core for sparse interaction-list M2L accumulation."""
+    """JIT core for sparse interaction-list M2L accumulation.
+
+    Parameters
+    ----------
+    interactions : NodeInteractionList
+        Accepted far-field node pairs to accumulate.
+    multipoles : NodeMultipoleData
+        Per-node multipole data from the upward sweep.
+    local_data : LocalExpansionData
+        The local expansions being accumulated into.
+    chunk_size : int
+        Pairs processed per chunk, bounding peak memory.
+    order : int
+        Expansion order ``p``.
+
+    Returns
+    -------
+    LocalExpansionData
+        As :func:`accumulate_m2l_contributions`, inside the jitted core.
+    """
     centers_target = jnp.asarray(local_data.centers)
     centers_source = jnp.asarray(multipoles.centers)
     coeffs = jnp.asarray(local_data.coefficients)
@@ -1244,7 +1620,33 @@ def run_downward_sweep(
     m2l_chunk_size: Optional[int] = None,
     dense_buffers: Optional[DenseInteractionBuffers] = None,
 ) -> LocalExpansionData:
-    """Execute the full downward pass (M2L followed by L2L propagation)."""
+    """Execute the full downward pass (M2L followed by L2L propagation).
+
+    Parameters
+    ----------
+    tree : Tree
+        The tree whose nodes are being swept.
+    multipoles : NodeMultipoleData
+        Per-node multipole data from the upward sweep.
+    interactions : Optional[NodeInteractionList]
+        Accepted far-field node pairs to accumulate.
+    initial_locals : Optional[LocalExpansionData]
+        Preallocated local buffers, or None to allocate them here.
+    m2l_chunk_size : Optional[int]
+        M2L chunk size, or None for the module default.
+    dense_buffers : Optional[DenseInteractionBuffers]
+        Dense level-major interaction buffers.
+
+    Returns
+    -------
+    LocalExpansionData
+        The local expansions after M2L accumulation and the L2L cascade.
+
+    Raises
+    ------
+    ValueError
+        If the inputs are mutually inconsistent.
+    """
 
     order = int(multipoles.order)
 
@@ -1408,7 +1810,28 @@ def _propagate_local_expansions_impl(
     order: int,
     num_internal: int,
 ) -> Array:
-    """JIT L2L propagation kernel over internal tree nodes."""
+    """JIT L2L propagation kernel over internal tree nodes.
+
+    Parameters
+    ----------
+    coeffs : Array
+        Packed local coefficients per node.
+    centers : Array
+        Expansion centre per node, shape ``(num_nodes, 3)``.
+    left_child : Array
+        Left child index per internal node.
+    right_child : Array
+        Right child index per internal node.
+    order : int
+        Expansion order ``p``.
+    num_internal : int
+        Number of internal (non-leaf) nodes.
+
+    Returns
+    -------
+    Array
+        Local coefficients after the parent-to-child cascade.
+    """
     if num_internal == 0:
         return coeffs
 
@@ -1460,7 +1883,25 @@ def propagate_local_expansions(
     tree: Tree,
     local_data: LocalExpansionData,
 ) -> LocalExpansionData:
-    """Perform an L2L sweep to accumulate parent locals into children."""
+    """Perform an L2L sweep to accumulate parent locals into children.
+
+    Parameters
+    ----------
+    tree : Tree
+        The tree whose nodes are being swept.
+    local_data : LocalExpansionData
+        The local expansions being accumulated into.
+
+    Returns
+    -------
+    LocalExpansionData
+        The local expansions with each parent's contribution added to its children.
+
+    Raises
+    ------
+    NotImplementedError
+        If the tree shape is not one the L2L cascade supports.
+    """
 
     order = int(local_data.order)
     if order > MAX_MULTIPOLE_ORDER:
