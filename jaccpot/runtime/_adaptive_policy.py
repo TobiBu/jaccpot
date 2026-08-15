@@ -25,7 +25,47 @@ _ERROR_MODEL_DEHNEN_PAPER = 2
 
 
 class AdaptivePolicyState(NamedTuple):
-    """Solver-owned per-node summaries used by adaptive traversal policies."""
+    """Solver-owned per-node summaries used by adaptive traversal policies.
+
+    Attributes
+    ----------
+    source_error_proxy_by_order : Array
+        Residual tail proxy per node and candidate order.
+    source_degree_power : Array
+        Per-node multipole power grouped by spherical-harmonic degree.
+    source_dehnen_power : Array
+        Dehnen's exact per-degree source power for eq (15).
+    source_mass : Array
+        Total mass of each source node, the ``M_A`` of eq (16a).
+    source_mac_center : Array
+        MAC centre of each source node.
+    target_mac_center : Array
+        MAC centre of each target node.
+    source_radius_bound : Array
+        Bounding radius of each source node about its MAC centre.
+    target_radius_bound : Array
+        Bounding radius of each target node about its MAC centre.
+    target_accept_threshold : Array
+        Per-target acceptance threshold, ``eps * min_b |a_b|`` in eq (16a).
+    order_tags : Array
+        Integer tag identifying the gear each accepted pair was assigned.
+    order_values : Array
+        Candidate expansion orders, as integers.
+    order_values_float : Array
+        The same candidate orders as floats, for the error arithmetic.
+    dehnen_binomial_masked_by_order : Array
+        Binomial factors of eq (15), masked per candidate order.
+    dehnen_exponent_by_order : Array
+        Exponents of eq (15) per candidate order.
+    relaxed_theta_sq : Array
+        Squared opening angle used by the geometric pre-filter.
+    error_model_code : Array
+        Which error model is active, encoded for the traced path.
+    gravitational_constant : float
+        Newton constant -- see the note on the field itself.
+    mac_theta_max : float
+        Geometric cap on the opening angle -- see the note on the field itself.
+    """
 
     source_error_proxy_by_order: Array
     source_degree_power: Array
@@ -61,7 +101,27 @@ class AdaptivePolicyState(NamedTuple):
 def adaptive_policy_tolerance(
     *, theta: float, p_gears: tuple[int, ...], dtype: object
 ) -> Array:
-    """Return a conservative solver-side adaptive tolerance derived from ``theta``."""
+    """Return a conservative solver-side adaptive tolerance derived from ``theta``.
+
+    Parameters
+    ----------
+    theta : float
+        Opening angle, or its squared form where the caller pre-squares it.
+    p_gears : tuple[int, ...]
+        Candidate expansion orders the adaptive policy may choose between.
+    dtype : object
+        Working dtype for the returned arrays.
+
+    Returns
+    -------
+    Array
+        A conservative solver-side tolerance, derived so the adaptive lane never accepts more than the scalar-theta lane would.
+
+    Raises
+    ------
+    ValueError
+        If the requested tolerance is not positive.
+    """
 
     if len(p_gears) == 0:
         raise ValueError("adaptive policy tolerance requires non-empty p_gears")
@@ -74,7 +134,18 @@ def _packed_total_order(multipole_packed: Array) -> int:
 
 
 def source_power_by_degree_from_multipoles(*, multipole_packed: Array) -> Array:
-    """Return per-node multipole power grouped by spherical-harmonic degree."""
+    """Return per-node multipole power grouped by spherical-harmonic degree.
+
+    Parameters
+    ----------
+    multipole_packed : Array
+        Packed multipole coefficients per node.
+
+    Returns
+    -------
+    Array
+        Per-node multipole power grouped by spherical-harmonic degree.
+    """
 
     packed = jnp.asarray(multipole_packed)
     total_p = _packed_total_order(packed)
@@ -107,6 +178,16 @@ def dehnen_multipole_power_by_degree(*, multipole_packed: Array) -> Array:
     Invariant pinned by the unit tests: for a single point mass ``m`` at
     distance ``d`` the exact power is ``P_n = m * d**n`` for every degree,
     independent of direction and of the packed representation.
+
+    Parameters
+    ----------
+    multipole_packed : Array
+        Packed multipole coefficients per node.
+
+    Returns
+    -------
+    Array
+        Dehnen's exact per-degree source power, the input to eq (15).
     """
 
     packed = jnp.asarray(multipole_packed)
@@ -138,7 +219,20 @@ def source_error_proxy_by_order_from_degree_power(
     degree_power: Array,
     p_gears: tuple[int, ...],
 ) -> Array:
-    """Return the residual tail proxy for each candidate order from degree power."""
+    """Return the residual tail proxy for each candidate order from degree power.
+
+    Parameters
+    ----------
+    degree_power : Array
+        Per-node multipole power grouped by spherical-harmonic degree.
+    p_gears : tuple[int, ...]
+        Candidate expansion orders the adaptive policy may choose between.
+
+    Returns
+    -------
+    Array
+        The residual tail proxy for each candidate order.
+    """
 
     power = jnp.asarray(degree_power)
     if len(p_gears) == 0:
@@ -158,7 +252,27 @@ def dehnen_like_pair_error_by_order_from_degree_power(
     opening: Array,
     order_values: Array,
 ) -> Array:
-    """Return a Dehnen-style degree-weighted pair error estimate by order."""
+    """Return a Dehnen-style degree-weighted pair error estimate by order.
+
+    Parameters
+    ----------
+    degree_power : Array
+        Per-node multipole power grouped by spherical-harmonic degree.
+    opening : Array
+        Opening angle ``(rho_s + rho_t) / r``, clipped into ``[0, 1]``.
+    order_values : Array
+        Candidate expansion orders, as integers.
+
+    Returns
+    -------
+    Array
+        A degree-weighted pair error estimate per candidate order.
+
+    Raises
+    ------
+    ValueError
+        If the degree-power and order arrays disagree in shape.
+    """
 
     power = jnp.asarray(degree_power)
     opening_arr = jnp.asarray(opening, dtype=power.dtype)
@@ -199,7 +313,32 @@ def dehnen_paper_pair_error_by_order(
     masked_binomial_by_order: Array,
     exponent_by_order: Array,
 ) -> Array:
-    """Return Dehnen's equation (15) error estimate by candidate order."""
+    """Return Dehnen's equation (15) error estimate by candidate order.
+
+    Parameters
+    ----------
+    source_power : Array
+        Dehnen's per-degree source power for the source node.
+    source_mass : Array
+        Total source-node mass, the ``M_A`` of eq (16a).
+    source_radius : Array
+        Source-node bounding radius about its MAC centre.
+    target_radius : Array
+        Target-node bounding radius about its MAC centre.
+    distance : Array
+        Centre-to-centre separation of the pair.
+    order_values_float : Array
+        Candidate expansion orders as floats, for the error arithmetic.
+    masked_binomial_by_order : Array
+        Binomial factors of eq (15), masked per candidate order.
+    exponent_by_order : Array
+        Exponents of eq (15) per candidate order.
+
+    Returns
+    -------
+    Array
+        Dehnen's eq (15) error estimate per candidate order.
+    """
 
     power = jnp.asarray(source_power)
     mass = jnp.asarray(source_mass, dtype=power.dtype)
@@ -236,7 +375,20 @@ def source_error_proxy_by_order_from_multipoles(
     multipole_packed: Array,
     p_gears: tuple[int, ...],
 ) -> Array:
-    """Compute a conservative per-node residual proxy for each candidate order."""
+    """Compute a conservative per-node residual proxy for each candidate order.
+
+    Parameters
+    ----------
+    multipole_packed : Array
+        Packed multipole coefficients per node.
+    p_gears : tuple[int, ...]
+        Candidate expansion orders the adaptive policy may choose between.
+
+    Returns
+    -------
+    Array
+        A conservative per-node residual proxy per candidate order.
+    """
 
     degree_power = source_power_by_degree_from_multipoles(
         multipole_packed=multipole_packed,
@@ -259,6 +411,20 @@ def compute_node_force_scale_from_sorted_acc(
     vector accelerations are reduced to magnitudes first. For eq (16b)'s
     cancellation-free ``f_b``, which is already a scalar per particle, call
     :func:`compute_node_force_scale_from_sorted_magnitudes` directly.
+
+    Parameters
+    ----------
+    tree : Tree
+        The tree whose nodes are being summarised.
+    accelerations_sorted : Array
+        Per-particle accelerations in tree order.
+    reduction : str
+        How to reduce per-particle values onto a node: ``min``, ``mean`` or ``max``.
+
+    Returns
+    -------
+    Array
+        Per-node force scales reduced from the per-particle accelerations.
     """
 
     return compute_node_force_scale_from_sorted_magnitudes(
@@ -279,6 +445,25 @@ def compute_node_force_scale_from_sorted_magnitudes(
     This is implemented as a JAX-native tree reduction: compute per-leaf scales
     from the contiguous particle blocks, then propagate scales upward through the
     binary tree using child reductions.
+
+    Parameters
+    ----------
+    tree : Tree
+        The tree whose nodes are being summarised.
+    magnitudes_sorted : Array
+        Per-particle scalar magnitudes in tree order.
+    reduction : str
+        How to reduce per-particle values onto a node: ``min``, ``mean`` or ``max``.
+
+    Returns
+    -------
+    Array
+        Per-node scales reduced from a sorted per-particle scalar.
+
+    Raises
+    ------
+    ValueError
+        If ``reduction`` is not one of the supported reductions.
     """
 
     reduction_norm = str(reduction).strip().lower()
@@ -728,7 +913,23 @@ def _far_field_force_scale_by_node(
 
 
 def _sphere_from_support(points: np.ndarray) -> tuple[np.ndarray, float]:
-    """Return the exact sphere defined by up to four support points."""
+    """Return the exact sphere defined by up to four support points.
+
+    Parameters
+    ----------
+    points : np.ndarray
+        Point set the enclosing sphere is computed for, shape ``(k, 3)``.
+
+    Returns
+    -------
+    tuple[np.ndarray, float]
+        ``(centre, radius)`` of the sphere defined by the support set.
+
+    Raises
+    ------
+    ValueError
+        If the support set has more than four points.
+    """
 
     pts = np.asarray(points, dtype=np.float64)
     count = int(pts.shape[0])
@@ -807,7 +1008,18 @@ def _point_in_sphere(
 
 
 def _smallest_enclosing_sphere(points: np.ndarray) -> tuple[np.ndarray, float]:
-    """Return the exact smallest enclosing sphere for a 3D point set."""
+    """Return the exact smallest enclosing sphere for a 3D point set.
+
+    Parameters
+    ----------
+    points : np.ndarray
+        Point set the enclosing sphere is computed for, shape ``(k, 3)``.
+
+    Returns
+    -------
+    tuple[np.ndarray, float]
+        ``(centre, radius)`` of the exact smallest enclosing sphere.
+    """
 
     pts = np.asarray(points, dtype=np.float64)
     if pts.shape[0] == 0:
@@ -843,7 +1055,20 @@ def _smallest_enclosing_sphere(points: np.ndarray) -> tuple[np.ndarray, float]:
 def compute_smallest_enclosing_sphere_geometry(
     *, node_ranges: Array, positions_sorted: Array
 ) -> tuple[Array, Array]:
-    """Return exact SES centres and radii for each node range."""
+    """Return exact SES centres and radii for each node range.
+
+    Parameters
+    ----------
+    node_ranges : Array
+        Particle index range ``[lo, hi]`` per node.
+    positions_sorted : Array
+        Particle positions in tree order, shape ``(N, 3)``.
+
+    Returns
+    -------
+    tuple[Array, Array]
+        ``(centres, radii)`` of the exact SES for every node.
+    """
 
     ranges = np.asarray(node_ranges, dtype=np.int64)
     pos = np.asarray(positions_sorted, dtype=np.float64)
@@ -866,7 +1091,20 @@ def compute_smallest_enclosing_sphere_geometry(
 def compute_leaf_enclosing_sphere_geometry(
     *, tree: Tree, positions_sorted: Array
 ) -> tuple[Array, Array]:
-    """Return exact SES centres and radii for leaf nodes only."""
+    """Return exact SES centres and radii for leaf nodes only.
+
+    Parameters
+    ----------
+    tree : Tree
+        The tree whose nodes are being summarised.
+    positions_sorted : Array
+        Particle positions in tree order, shape ``(N, 3)``.
+
+    Returns
+    -------
+    tuple[Array, Array]
+        ``(centres, radii)`` of the exact SES for the leaf nodes.
+    """
 
     node_ranges = np.asarray(tree.node_ranges, dtype=np.int64)
     num_nodes = int(node_ranges.shape[0])
@@ -897,7 +1135,20 @@ def compute_leaf_enclosing_sphere_geometry(
 def _batched_ritter_leaf_spheres(
     leaf_points: Array, leaf_valid: Array
 ) -> tuple[Array, Array]:
-    """Return approximate bounding spheres for padded leaf particle blocks."""
+    """Return approximate bounding spheres for padded leaf particle blocks.
+
+    Parameters
+    ----------
+    leaf_points : Array
+        Padded per-leaf point block, shape ``(num_leaves, cap, 3)``.
+    leaf_valid : Array
+        See the module docstring.
+
+    Returns
+    -------
+    tuple[Array, Array]
+        ``(centres, radii)`` from Ritter's approximation, batched over padded leaves.
+    """
 
     points = jnp.asarray(leaf_points)
     valid = jnp.asarray(leaf_valid, dtype=jnp.bool_)
@@ -965,7 +1216,20 @@ def _batched_ritter_leaf_spheres(
 def compute_leaf_ritter_sphere_geometry(
     *, tree: Tree, positions_sorted: Array
 ) -> tuple[Array, Array]:
-    """Return fast approximate leaf spheres using a batched JAX Ritter pass."""
+    """Return fast approximate leaf spheres using a batched JAX Ritter pass.
+
+    Parameters
+    ----------
+    tree : Tree
+        The tree whose nodes are being summarised.
+    positions_sorted : Array
+        Particle positions in tree order, shape ``(N, 3)``.
+
+    Returns
+    -------
+    tuple[Array, Array]
+        ``(centres, radii)`` of the approximate leaf spheres.
+    """
 
     node_ranges = jnp.asarray(tree.node_ranges, dtype=jnp.int32)
     num_nodes = int(node_ranges.shape[0])
@@ -1008,6 +1272,20 @@ def compute_center_referenced_radius_geometry(
     Exact at leaves; a valid upper bound at internal nodes, via the standard
     ``|c_child - c_parent| + rho_child`` merge. Fully device-side and
     differentiable, unlike the Welzl/Ritter sphere fits.
+
+    Parameters
+    ----------
+    tree : Tree
+        The tree whose nodes are being summarised.
+    positions_sorted : Array
+        Particle positions in tree order, shape ``(N, 3)``.
+    centers : Array
+        Reference centre per node.
+
+    Returns
+    -------
+    Array
+        Per-node radii measured about the supplied centres.
     """
 
     node_ranges = jnp.asarray(tree.node_ranges, dtype=jnp.int32)
@@ -1073,7 +1351,24 @@ def compute_center_referenced_radius_geometry(
 def merge_bounding_spheres(
     center_a: Array, radius_a: Array, center_b: Array, radius_b: Array
 ) -> tuple[Array, Array]:
-    """Return the minimal sphere containing two spheres."""
+    """Return the minimal sphere containing two spheres.
+
+    Parameters
+    ----------
+    center_a : Array
+        See the module docstring.
+    radius_a : Array
+        See the module docstring.
+    center_b : Array
+        See the module docstring.
+    radius_b : Array
+        See the module docstring.
+
+    Returns
+    -------
+    tuple[Array, Array]
+        ``(centre, radius)`` of the minimal sphere containing both inputs.
+    """
 
     center_a = jnp.asarray(center_a)
     center_b = jnp.asarray(center_b, dtype=center_a.dtype)
@@ -1101,7 +1396,27 @@ def merge_bounding_spheres(
 def compute_tree_merged_sphere_geometry(
     *, tree: Tree, positions_sorted: Array, leaf_mode: str = "exact"
 ) -> tuple[Array, Array]:
-    """Return node spheres from leaf spheres and JAX upward merges."""
+    """Return node spheres from leaf spheres and JAX upward merges.
+
+    Parameters
+    ----------
+    tree : Tree
+        The tree whose nodes are being summarised.
+    positions_sorted : Array
+        Particle positions in tree order, shape ``(N, 3)``.
+    leaf_mode : str
+        See the module docstring.
+
+    Returns
+    -------
+    tuple[Array, Array]
+        ``(centres, radii)`` for every node, merged upward from the leaves.
+
+    Raises
+    ------
+    ValueError
+        If the leaf spheres and tree shape disagree.
+    """
 
     leaf_mode_norm = str(leaf_mode).strip().lower()
     if leaf_mode_norm == "exact":
@@ -1444,6 +1759,22 @@ def per_node_mac_radius(
 
     The radius floor is load-bearing, not defensive -- see
     ``_EFFECTIVE_THETA_RADIUS_FLOOR_FRAC``.
+
+    Parameters
+    ----------
+    radius_bound : Array
+        See the module docstring.
+    theta_nodes : Array
+        See the module docstring.
+    theta_global : float
+        See the module docstring.
+    radius_floor_frac : float
+        See the module docstring.
+
+    Returns
+    -------
+    Array
+        Node radii rescaled so a scalar-theta acceptance test reproduces the per-node criterion.
     """
 
     rho = jnp.asarray(radius_bound)
@@ -1475,6 +1806,31 @@ def resolve_dehnen_geometry(
     Dehnen's section 5.1 centre recommendations; because their radii are
     measured about the fitted sphere centre rather than the expansion centre,
     they are inflated by the centre offset to stay valid bounds.
+
+    Parameters
+    ----------
+    geometry_mode : Literal['com', 'exact', 'tree', 'tree_approx', 'runtime']
+        Which MAC geometry to build: com, aabb or an enclosing sphere.
+    tree : Tree
+        The tree whose nodes are being summarised.
+    positions_sorted : Array
+        Particle positions in tree order, shape ``(N, 3)``.
+    upward : TreeUpwardData
+        Upward-sweep artifacts supplying the multipoles and geometry.
+    dtype : DTypeLike
+        Working dtype for the returned arrays.
+
+    Returns
+    -------
+    tuple[Array, Array]
+        ``(mac_centres, mac_radii)`` for the requested geometry mode.
+
+    Raises
+    ------
+    RuntimeError
+        If the requested geometry could not be built for this tree.
+    ValueError
+        If ``geometry_mode`` is not a supported value.
     """
 
     mode = str(geometry_mode).strip().lower()
@@ -1569,7 +1925,43 @@ def build_adaptive_policy_state(
     gravitational_constant: float = 1.0,
     mac_theta_max: float = 1.0,
 ) -> AdaptivePolicyState:
-    """Build the solver-owned adaptive traversal state from upward data."""
+    """Build the solver-owned adaptive traversal state from upward data.
+
+    Parameters
+    ----------
+    upward : TreeUpwardData
+        Upward-sweep artifacts supplying the multipoles and geometry.
+    tree : Tree
+        The tree whose nodes are being summarised.
+    positions_sorted : Array
+        Particle positions in tree order, shape ``(N, 3)``.
+    p_gears : tuple[int, ...]
+        Candidate expansion orders the adaptive policy may choose between.
+    force_scale_nodes : Optional[Array]
+        Per-node force scale from the prepass.
+    eps : Array
+        Relative force-accuracy target of eq (16a).
+    theta : Array
+        Opening angle, or its squared form where the caller pre-squares it.
+    error_model_code : Array
+        See the module docstring.
+    dehnen_geometry_mode : str
+        See the module docstring.
+    gravitational_constant : float
+        See the module docstring.
+    mac_theta_max : float
+        See the module docstring.
+
+    Returns
+    -------
+    AdaptivePolicyState
+        The solver-owned per-node summaries the traversal policy reads.
+
+    Raises
+    ------
+    ValueError
+        If the inputs are mutually inconsistent, or a required target is missing.
+    """
 
     if len(p_gears) == 0:
         raise ValueError("adaptive policy state requires non-empty p_gears")
@@ -1681,7 +2073,26 @@ def build_adaptive_policy_state(
 def adaptive_pair_policy(
     policy_state: AdaptivePolicyState, **pair_data: Array
 ) -> tuple[Array, Array]:
-    """Return traversal actions and order tags from solver-owned adaptive state."""
+    """Return traversal actions and order tags from solver-owned adaptive state.
+
+    Parameters
+    ----------
+    policy_state : AdaptivePolicyState
+        The solver-owned adaptive policy state.
+    **pair_data : Array
+        The traversal's per-pair arrays. Keyword-splatted because yggdrax owns the
+        call and may add fields, but the keys this policy actually reads are a
+        contract: ``valid_pairs``, ``mac_ok``, ``different_nodes``, ``target_leaf``,
+        ``source_leaf``, ``target_nodes``, ``source_nodes``, ``dist_sq``,
+        ``extent_target`` and ``extent_source``. A missing key is a ``KeyError`` at
+        trace time, not a silent default.
+
+    Returns
+    -------
+    tuple[Array, Array]
+        ``(actions, order_tags)``: the traversal action per pair and the gear each
+        accepted pair was assigned.
+    """
 
     valid_pairs = jnp.asarray(pair_data["valid_pairs"], dtype=jnp.bool_)
     mac_ok = jnp.asarray(pair_data["mac_ok"], dtype=jnp.bool_)
@@ -1722,7 +2133,20 @@ def adaptive_pair_policy(
         return pair_error < target_threshold[:, None]
 
     def _dehnen_paper_directional(src: Array, tgt: Array) -> Array:
-        """Evaluate eq (16a) for sources ``src`` acting on targets ``tgt``."""
+        """Evaluate eq (16a) for sources ``src`` acting on targets ``tgt``.
+
+        Parameters
+        ----------
+        src : Array
+            Source node indices.
+        tgt : Array
+            Target node indices.
+
+        Returns
+        -------
+        Array
+            Eq (16a) evaluated for the given source acting on the given target.
+        """
 
         source_dehnen_power = jnp.asarray(policy_state.source_dehnen_power)[src, :]
         source_mass = jnp.asarray(policy_state.source_mass)[src]
@@ -1821,7 +2245,24 @@ def bucket_far_pairs_by_tag(
     interaction_tags: Array,
     num_tags: int,
 ) -> tuple[tuple[Array, Array], ...]:
-    """Group accepted far pairs by integer tag."""
+    """Group accepted far pairs by integer tag.
+
+    Parameters
+    ----------
+    interaction_sources : Array
+        See the module docstring.
+    interaction_targets : Array
+        See the module docstring.
+    interaction_tags : Array
+        See the module docstring.
+    num_tags : int
+        Number of distinct tags to bucket into.
+
+    Returns
+    -------
+    tuple[tuple[Array, Array], ...]
+        One ``(sources, targets)`` pair of arrays per tag, in tag order.
+    """
 
     buckets: list[tuple[Array, Array]] = []
     src = jnp.asarray(interaction_sources)
