@@ -435,7 +435,9 @@ class FastMultipoleMethod(
             complex_rotation=complex_rotation,
             dehnen_geometry_mode=dehnen_geometry_mode,
             farfield_mode=farfield_mode,
+            mac_force_scale_fb_inflation=mac_force_scale_fb_inflation,
             mac_force_scale_mode=mac_force_scale_mode,
+            mac_force_scale_prepass_theta=mac_force_scale_prepass_theta,
             mac_theta_max=mac_theta_max,
             mixed_order_farfield=mixed_order_farfield,
             mixed_order_min_order=mixed_order_min_order,
@@ -689,7 +691,9 @@ class FastMultipoleMethod(
         complex_rotation: str,
         dehnen_geometry_mode: str,
         farfield_mode: FarFieldMode,
+        mac_force_scale_fb_inflation: Optional[float],
         mac_force_scale_mode: str,
+        mac_force_scale_prepass_theta: Optional[float],
         mac_theta_max: float,
         mixed_order_farfield: bool,
         mixed_order_min_order: Optional[int],
@@ -712,8 +716,15 @@ class FastMultipoleMethod(
             Passed through from ``__init__`` unchanged.
         farfield_mode : FarFieldMode
             Passed through from ``__init__`` unchanged.
+        mac_force_scale_fb_inflation : Optional[float]
+            Passed through from ``__init__`` unchanged. Inflates the far-field
+            source-to-target distance so the eq (16b) scale is a strict lower
+            bound; ``None`` takes the default.
         mac_force_scale_mode : str
             Passed through from ``__init__`` unchanged.
+        mac_force_scale_prepass_theta : Optional[float]
+            Passed through from ``__init__`` unchanged. Opening angle for the
+            force-scale prepass's own traversal; ``None`` takes the default.
         mac_theta_max : float
             Passed through from ``__init__`` unchanged.
         mixed_order_farfield : bool
