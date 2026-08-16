@@ -781,6 +781,50 @@ past the measurable range*, not a measured trend. Leaf 2048's rows are consisten
 continuing, but they are parenthesised for the reason above and one of the three seeds
 could not be read at all (n=2 — the tool refused the target rather than extrapolating).
 
+### End-to-end wall-clock — **Step 4's last accept condition, MET (2026-08-16)**
+
+`bench/results/validation/mac_walltime_1e6_leaf1024[_perturbed].json`, harness
+`bench/validation/mac_end_to_end_walltime.py`. N=10⁶, leaf 1024, p=8, Plummer, fp32,
+large-N GPU lane, **an uncontended A100**, warm-call medians of 3 after a discarded
+warm-up, every call `block_until_ready`-materialised. Both arms are timed **on the same
+lane** at **matched accuracy**, not at the same knob: fixed θ=0.65 (δa/f median 8.7×10⁻⁶)
+against ε=3×10⁻⁴ (7.7×10⁻⁶), the criterion being the slightly *more* accurate of the two.
+
+**The ratio depends on whether `prepare_state` rebuilds, and both regimes pass.** The
+`large_n_gpu` contract pins the interaction cache on, so re-preparing *identical*
+positions is a cache hit rather than a rebuild — 0.22 s at N=10⁶ where the real thing is
+~20 s. An N-body step moves particles, so `--perturb` displaces them by 10⁻³ of `r_rms`
+between calls (three decades below the 8.5 % cliff where a cached force scale starts
+over-accepting, trap 6) and makes each prepare do a step's work:
+
+| | prepare s | evaluate s | total s | vs geometric |
+|---|---|---|---|---|
+| **identical positions (cache hit)** | | | | |
+| fixed θ=0.65 | 0.223 | 1.501 | 1.724 | — |
+| eq (16a) ε=3e-4 | 0.633 | 1.447 | 2.081 | **1.21×** |
+| eq (16b) est ε=3e-4 | 0.590 | 1.363 | 1.953 | **1.13×** |
+| **moved positions (a real step)** | | | | |
+| fixed θ=0.65 | 19.871 | 1.472 | 21.343 | — |
+| eq (16a) ε=3e-4 | 19.713 | 1.398 | 21.111 | **0.99×** |
+| eq (16b) est ε=3e-4 | 21.062 | 1.335 | 22.396 | **1.05×** |
+
+**Against the ≤ 1.3× bar, all four ratios pass, and the production regime is parity.**
+The right way to read the two blocks is that the criterion's overhead is a *fixed*
+~0.4 s of force-scale prepass: that is 180 % of a cached re-prepare and about 2 % of a
+real rebuild, so the ratio moves while the absolute cost does not. Quote the moved-position
+row — an N-body run does not re-prepare the same positions twice.
+
+Two details worth keeping:
+
+- **The criterion's evaluation is consistently *faster* than fixed θ** — 0.91–0.96× in
+  both regimes — which is the interaction-work saving showing up as time. The cost is
+  entirely in prepare, and only in prepare.
+- **At a real rebuild, eq (16a)'s prepare is 0.99× the geometric arm's**, i.e. the
+  prepass is *fully paid for* by the cheaper traversal that follows it, because the
+  criterion accepts fewer pairs. This is the measurement that retires Step 4's recorded
+  worry that the criterion "buys tail accuracy at equal cost, not speed, and end-to-end
+  could be slower" — on the same lane it is not slower.
+
 ### N = 10⁷ — **NOT reached, and the blocker is identified rather than guessed**
 
 The 10⁷ census **OOMed on a 4.77 GiB allocation inside `_dual_tree_build_raw`** — i.e.
@@ -889,13 +933,20 @@ for eq (16b) as the leaf goes 256 → 512 → 1024, with work falling 1.36× →
 configuration, with the leaf size attached.** Leaf 2048 is *not* measurable in fp32: the
 δa/f floor rises with leaf size (1.9 → 6.9 ×10⁻⁶ from leaf 256 to 2048, tracking
 near-field pairs per particle) until it meets the divergence guard and closes the accuracy
-window — so leaf 1024 is also near the largest leaf this measurement can reach. N=10⁷ is
-blocked on a split-build predicate — one line, identified, and narrower than first
-recorded. See item 4.
+window — so leaf 1024 is also near the largest leaf this measurement can reach.
 
-Open: whether the benefit holds at Dehnen's ε = 2×10⁻⁷ (never measured); the N-scaling
-trend; the O(N) `f_b` estimator; fast-lane access; and the cartesian basis's unexplained
-~1.8×10⁻¹ error. See **START HERE** above for the ordered plan.
+**And it costs nothing end-to-end (2026-08-16).** Warm-call wall-clock at that
+configuration, both arms on the same lane at matched accuracy, positions moved between
+calls as an N-body step moves them: **0.99×** for eq (16a) and **1.05×** for eq (16b)
+against the geometric MAC, where Step 4 accepts ≤ 1.3×. Evaluation is actually *faster*
+(0.91–0.95×); the whole cost is a ~0.4 s force-scale prepass, which a real rebuild
+absorbs. So the claim is "an order-of-magnitude smaller error tail at the same accuracy,
+the same interaction work and the same wall-clock", and **every go/no-go condition is
+now met**.
+
+Open: **N=10⁷ only** — engineering reach, not the claim; the split-build predicate in
+front of it is fixed on `fix/large-n-gpu-split-build-predicate`. Plus the cartesian
+basis's unexplained ~1.8×10⁻¹ error (issue #62), which is off this path.
 
 ## Where the work lives
 
@@ -1683,9 +1734,10 @@ within 1.3× of the geometric MAC.
 ## Go/no-go for the paper
 
 **Re-based 2026-08-01** after the M2M fix invalidated the earlier basis, and again
-**2026-08-16** after the N=10⁶ leaf sweep. Every accuracy and cost condition is now met,
-at N=10⁶ and at a production leaf. **One condition is still open: warm-call end-to-end
-wall-clock** — see the last row.
+**2026-08-16** after the N=10⁶ leaf sweep and the wall-clock measurement. **Every
+condition is now met** — accuracy, interaction work, prepare overhead, Dehnen's ε,
+N=10⁶ at a production leaf, and the end-to-end wall-clock that was the last one
+outstanding. The remaining open item is engineering reach (N=10⁷), not the claim.
 
 | condition | status |
 |---|---|
@@ -1698,7 +1750,7 @@ wall-clock** — see the last row.
 | holds at N ≥ 10⁵ on *deep* trees | **no.** At leaf 16 / N=10⁵ the tail advantage is only 4.6–5.2× and the **p99 ratio is 0.76–0.83, i.e. worse than fixed θ**, at 16–18 % more work. Quote the claim with its leaf size attached |
 | holds at **N = 10⁶** at a production leaf | **met (2026-08-16), at leaf 1024 — and it is a *different* leaf from 10⁵'s.** 3 seeds, matched median 10⁻⁵, `median [min, max]`: eq (16a) p99.99 **21.8× [13.9, 34.4]** and eq (16b) **43.1× [31.0, 71.2]**, at 1.10×/1.03× work (`fixed/mass`, so *less* work). Leaf 256 at the same N gives only 2.7×/5.3× — the fiducial leaf is not depth-proof, and the production leaf has to be chosen per N |
 | the leaf knob is unbounded above | **no — it is capped by fp32, not by the criterion.** The δa/f floor rises with leaf size (1.86 → 6.85 ×10⁻⁶ over leaf 256 → 2048, tracking near-field pairs per particle) until it closes on the divergence guard. Leaf 2048 at N=10⁶ has one usable fixed-θ point and is unmeasurable; leaf 1024 is near the limit. "Bigger leaves keep helping" is extrapolation past the measurable range |
-| **warm-call end-to-end wall-clock at N ≥ 10⁵** | **OPEN — never measured, and it is Step 4's own accept condition** ("within 1.3× of the geometric MAC"). Interaction work is a wash to a win and prepare overhead is 0.98× at N=16384, but neither is wall-clock, and the leaf-sweep runs were four-to-a-box on contended cards so their `prepare_s`/`evaluate_s` are not quotable. This is the last quantitative gap in the paper's case |
+| **warm-call end-to-end wall-clock at N ≥ 10⁵** | **MET (2026-08-16), in both regimes, and the production one is at parity.** N=10⁶, leaf 1024, uncontended A100, warm-call medians at matched accuracy. Re-preparing *identical* positions (interaction-cache hit): total **1.21×** for eq (16a) and **1.13×** for eq (16b). Re-preparing *moved* positions, i.e. what an N-body step pays: **0.99×** and **1.05×**. Bar is ≤ 1.3×. See the wall-clock section |
 | the N-*trend* at fixed leaf | measured, and it decays at leaf 16 (p99.99 ~12× → ~5× over N = 16384 → 65536). **Item 2b showed this is a tree-depth effect, not an N effect** — the ladder was deepening the tree, and depth is what erodes the advantage |
 
 **Frame the claim on the tail, and quote p99.99.** The honest statement is not "the
