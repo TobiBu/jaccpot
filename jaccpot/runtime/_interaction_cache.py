@@ -15,6 +15,7 @@ import numpy as np
 from beartype.typing import Callable
 from jaxtyping import Array
 from yggdrax.dense_interactions import DenseInteractionBuffers, densify_interactions
+from yggdrax.geometry import TreeGeometry
 from yggdrax.grouped_interactions import GroupedInteractionBuffers
 from yggdrax.interactions import (
     CompactTaggedFarPairs,
@@ -24,6 +25,7 @@ from yggdrax.interactions import (
     MACType,
     NodeInteractionList,
     NodeNeighborList,
+    PairPolicy,
     build_compact_far_pairs,
     build_compact_far_pairs_and_leaf_neighbor_lists,
     build_interactions_and_neighbors_split,
@@ -32,6 +34,17 @@ from yggdrax.interactions import (
 from yggdrax.tree import Tree
 
 from jaccpot._env import env_flag
+
+# `_adaptive_policy` reaches only `fmm_caches` and `fmm_constants`, both UPSTREAM of
+# this module in ARCHITECTURE §8's DAG (`fmm_constants -> fmm_caches -> kernels ->
+# {_interaction_cache, ...}`), so this import runs with the layering rather than
+# against it. Verified acyclic by walking the relative-import graph, not by eye.
+#
+# It exists so `policy_state` can be annotated at all. Until it, the four dual-tree
+# builders took the Dehnen policy state as an untyped parameter, which is what made
+# this file undocumentable: pydoclint refuses a Parameters section for a signature
+# with missing hints (DOC106/107), so 70 violations sat behind one missing import.
+from ._adaptive_policy import AdaptivePolicyState
 
 
 @dataclass(frozen=True)
@@ -413,7 +426,7 @@ def _dual_tree_cache_lookup(
 def _dual_tree_build_raw(
     *,
     tree: Tree,
-    geometry,
+    geometry: TreeGeometry,
     theta: float,
     mac_type: MACType,
     dehnen_radius_scale: float,
@@ -426,8 +439,8 @@ def _dual_tree_build_raw(
     need_compact_far_pairs: bool,
     need_node_interactions: bool,
     grouped_interactions: bool,
-    pair_policy,
-    policy_state,
+    pair_policy: Optional[PairPolicy],
+    policy_state: Optional[AdaptivePolicyState],
     jit_traversal: bool,
 ) -> tuple[Any, Optional[DualTreeTraversalConfig], Optional[int], Optional[int]]:
     """Run the raw dual-tree traversal builder with retry growth."""
@@ -648,7 +661,7 @@ def _can_split_dual_tree_build(
 def _build_dual_tree_artifacts_split(
     *,
     tree: Tree,
-    geometry,
+    geometry: TreeGeometry,
     theta: float,
     mac_type: MACType,
     dehnen_radius_scale: float,
@@ -659,8 +672,8 @@ def _build_dual_tree_artifacts_split(
     need_node_interactions: bool,
     need_compact_far_pairs: bool,
     use_dense_interactions: bool,
-    pair_policy,
-    policy_state,
+    pair_policy: Optional[PairPolicy],
+    policy_state: Optional[AdaptivePolicyState],
     timing_callback: Optional[Callable[[str, float], None]] = None,
 ) -> _DualTreeArtifacts:
     """Build far and near traversal products in separate Yggdrax calls.
@@ -811,15 +824,15 @@ def _strict_streamed_retry_diag(grew: list[str]) -> None:
 def _build_dual_tree_artifacts_split_strict_streamed(
     *,
     tree: Tree,
-    geometry,
+    geometry: TreeGeometry,
     theta: float,
     mac_type: MACType,
     dehnen_radius_scale: float,
     max_pair_queue: Optional[int],
     pair_process_block: Optional[int],
     traversal_config: Optional[DualTreeTraversalConfig],
-    pair_policy,
-    policy_state,
+    pair_policy: Optional[PairPolicy],
+    policy_state: Optional[AdaptivePolicyState],
 ) -> _DualTreeArtifacts:
     """Strict static fast-lane: single compact shared far+near build call.
 
@@ -988,7 +1001,13 @@ def _build_dual_tree_artifacts_split_strict_streamed(
     )
 
 
-def _treecode_neighbor_list(prod, *, num_leaves, num_internal, idx_dtype):
+def _treecode_neighbor_list(
+    prod: Any,
+    *,
+    num_leaves: int,
+    num_internal: int,
+    idx_dtype: Any,
+) -> NodeNeighborList:
     """Full yggdrax ``NodeNeighborList`` from the treecode producer's near CSR.
 
     The radix fast lane reads only ``leaf_indices``/``offsets``/``neighbors``/
@@ -1013,7 +1032,7 @@ def _treecode_neighbor_list(prod, *, num_leaves, num_internal, idx_dtype):
     )
 
 
-def _raise_if_true(flag, message: str) -> None:
+def _raise_if_true(flag: Any, message: str) -> None:
     """Raise ``message`` if ``flag`` is true, under jit (via callback) or eagerly."""
     if isinstance(flag, jax.core.Tracer):
 
@@ -1027,8 +1046,13 @@ def _raise_if_true(flag, message: str) -> None:
 
 
 def _treecode_mac_extents(
-    geometry, parent, num_internal, mac_type, dehnen_radius_scale, dtype
-):
+    geometry: TreeGeometry,
+    parent: Array,
+    num_internal: int,
+    mac_type: MACType,
+    dehnen_radius_scale: float,
+    dtype: Any,
+) -> Array:
     """Per-node MAC extents matching the yggdrax dual-tree exactly.
 
     Same recipe as ``_interactions_impl`` (bh: box ``max_extent``; dehnen/engblom:
@@ -1068,7 +1092,7 @@ def _treecode_mac_extents(
 def _build_treecode_artifacts_strict_streamed(
     *,
     tree: Tree,
-    geometry,
+    geometry: TreeGeometry,
     theta: float,
     mac_type: MACType,
     dehnen_radius_scale: float,
@@ -1277,7 +1301,7 @@ def _build_treecode_artifacts_strict_streamed(
 def _dual_tree_build_grouped_buffers(
     *,
     tree: Tree,
-    geometry,
+    geometry: TreeGeometry,
     interactions: Optional[NodeInteractionList],
 ) -> GroupedInteractionBuffers:
     """Materialize grouped interaction buffers from node interaction pairs."""
@@ -1339,7 +1363,7 @@ def _dual_tree_build_grouped_class_segments(
 def _dual_tree_build_dense_buffers(
     *,
     tree: Tree,
-    geometry,
+    geometry: TreeGeometry,
     interactions: Optional[NodeInteractionList],
     use_dense_interactions: bool,
 ) -> Optional[DenseInteractionBuffers]:
@@ -1784,7 +1808,7 @@ def _interaction_cache_key(
 
 def _build_dual_tree_artifacts(
     tree: Tree,
-    geometry,
+    geometry: TreeGeometry,
     *,
     geometry_factory: Optional[Callable[[], Any]] = None,
     theta: float,
@@ -1806,8 +1830,8 @@ def _build_dual_tree_artifacts(
     precompute_grouped_class_segments: bool,
     grouped_schedule_budget_bytes: Optional[int],
     allow_split_build: bool = False,
-    pair_policy=None,
-    policy_state=None,
+    pair_policy: Optional[PairPolicy] = None,
+    policy_state: Optional[AdaptivePolicyState] = None,
     jit_traversal: bool = True,
     timing_callback: Optional[Callable[[str, float], None]] = None,
     planner_hint: Optional[_RefreshDualPlannerHint] = None,
