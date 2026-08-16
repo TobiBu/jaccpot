@@ -379,6 +379,26 @@ leaves, 0.807 at 256, 0.534 at 512 — so the obvious small test configuration i
 the one where a near-only bug hides). Pinned by
 `tests/unit/runtime/test_fb_force_scale_estimator.py` (11 cases).
 
+**Those 11 cases were inert under `JACCPOT_RUNTIME_TYPECHECK=1` until 2026-08-16, and the
+lower-bound assertion among them.** `_far_field_force_scale_by_node`'s `fori_loop` body
+was annotated `i: int`; a loop body receives a *traced* `i64[]`, so beartype rejected it
+and every caller of `estimate_particle_force_scale` raised — all 11 tests died at the
+call, none of them reaching an assertion. **The bound itself was never in question** (the
+annotation is inert in the default suite, where these have always passed), but the
+typecheck leg of the guard against the "faster *and* wronger" failure mode was not
+running. This is audit finding **F40**, and this site was a *miss* rather than a
+deferral: the sibling reduction 360 lines up in the same module was already corrected and
+its comment names the pattern. Fixed; the file goes 11 failed / 2 passed → **13 passed**.
+
+**Consequence worth reporting upward: F40 now appears closed for `tests/unit`.** The
+audit records `JACCPOT_RUNTIME_TYPECHECK=1 pytest -q tests/unit` as *"a documented
+verification command that has never passed"* — 126 failed / 667 passed on `main` at
+`128a0e2`. Re-measured 2026-08-16 with that one annotation fixed: **891 passed, 47
+skipped, 0 failed, exit 0**, with the hook demonstrably active (93 beartype lines, calls
+routed through `jaxtyping/_decorator.py`). The other F40 sites were evidently fixed
+between the audit and now, and this was the last blocker in that tier. The audit's F40
+row is the refactor owner's to close, not this document's.
+
 **Two design points worth not re-deriving.** The estimate errs *low* on purpose:
 eq (16a)'s threshold is `ε·s`, so an over-large scale loosens acceptance and makes the
 solver faster *and* wronger, which no cost measurement can detect.
