@@ -85,7 +85,26 @@ def _load_jaccpot_symbols() -> dict[str, Any]:
 
 
 def _load_jaccpot_internal_symbols() -> dict[str, Any]:
-    from jaccpot.runtime import _fmm_impl as runtime_impl  # noqa: E402
+    """Bind the runtime internals this worker drives directly.
+
+    Every symbol comes from the module that DEFINES it. This used to pull most
+    of them off ``jaccpot.runtime._fmm_impl`` as attributes, treating the engine
+    module as a re-export hub -- and that silently rotted: the Tier 1.6 split of
+    ``kernels/core.py`` moved the six M2L/L2L entries below into
+    ``kernels/_m2l.py`` and ``kernels/_l2l.py``, ``_fmm_impl`` stopped carrying
+    them, and this function began raising ``AttributeError`` on its first line of
+    output. Nothing caught it because the guard that runs this worker
+    (``bench/guard_large_n_radix_fast_lane.py``) is GPU-only and not in CI.
+
+    Importing from the defining module is what stops that recurring: a moved
+    symbol is then an ImportError at the move, not an AttributeError months
+    later.
+    """
+    from jaccpot.basis.real_sh import complex_to_real_coeffs  # noqa: E402
+    from jaccpot.operators.complex_ops import (  # noqa: E402
+        enforce_conjugate_symmetry_batch,
+    )
+    from jaccpot.operators.real_harmonics import sh_size  # noqa: E402
     from jaccpot.runtime._adaptive_policy import (  # noqa: E402
         adaptive_pair_policy,
         adaptive_policy_tolerance,
@@ -93,24 +112,40 @@ def _load_jaccpot_internal_symbols() -> dict[str, Any]:
     from jaccpot.runtime._interaction_cache import (  # noqa: E402
         _build_dual_tree_artifacts,
     )
+    from jaccpot.runtime.dtypes import (  # noqa: E402
+        INDEX_DTYPE,
+        complex_dtype_for_real,
+    )
+    from jaccpot.runtime.fmm_caches import _M2L_FULLBATCH_MAX_PAIRS  # noqa: E402
+    from jaccpot.runtime.kernels.core import (  # noqa: E402
+        _accumulate_m2l_chunked_scan,
+        _accumulate_m2l_fullbatch,
+        _accumulate_solidfmm_m2l_grouped,
+        _accumulate_solidfmm_m2l_grouped_class_major,
+        _build_nearfield_interop_data,
+        _propagate_real_locals_to_children,
+        _propagate_solidfmm_locals_to_children,
+    )
 
     return {
-        "_M2L_FULLBATCH_MAX_PAIRS": runtime_impl._M2L_FULLBATCH_MAX_PAIRS,
-        "INDEX_DTYPE": runtime_impl.INDEX_DTYPE,
-        "_build_nearfield_interop_data": runtime_impl._build_nearfield_interop_data,
-        "_accumulate_m2l_chunked_scan": runtime_impl._accumulate_m2l_chunked_scan,
-        "_accumulate_m2l_fullbatch": runtime_impl._accumulate_m2l_fullbatch,
-        "_accumulate_solidfmm_m2l_grouped": runtime_impl._accumulate_solidfmm_m2l_grouped,
-        "_accumulate_solidfmm_m2l_grouped_class_major": runtime_impl._accumulate_solidfmm_m2l_grouped_class_major,
+        "_M2L_FULLBATCH_MAX_PAIRS": _M2L_FULLBATCH_MAX_PAIRS,
+        "INDEX_DTYPE": INDEX_DTYPE,
+        "_build_nearfield_interop_data": _build_nearfield_interop_data,
+        "_accumulate_m2l_chunked_scan": _accumulate_m2l_chunked_scan,
+        "_accumulate_m2l_fullbatch": _accumulate_m2l_fullbatch,
+        "_accumulate_solidfmm_m2l_grouped": _accumulate_solidfmm_m2l_grouped,
+        "_accumulate_solidfmm_m2l_grouped_class_major": (
+            _accumulate_solidfmm_m2l_grouped_class_major
+        ),
         "_build_dual_tree_artifacts": _build_dual_tree_artifacts,
-        "_propagate_real_locals_to_children": runtime_impl._propagate_real_locals_to_children,
-        "_propagate_solidfmm_locals_to_children": runtime_impl._propagate_solidfmm_locals_to_children,
+        "_propagate_real_locals_to_children": _propagate_real_locals_to_children,
+        "_propagate_solidfmm_locals_to_children": _propagate_solidfmm_locals_to_children,
         "adaptive_pair_policy": adaptive_pair_policy,
         "adaptive_policy_tolerance": adaptive_policy_tolerance,
-        "complex_dtype_for_real": runtime_impl.complex_dtype_for_real,
-        "complex_to_real_coeffs": runtime_impl.complex_to_real_coeffs,
-        "enforce_conjugate_symmetry_batch": runtime_impl.enforce_conjugate_symmetry_batch,
-        "sh_size": runtime_impl.sh_size,
+        "complex_dtype_for_real": complex_dtype_for_real,
+        "complex_to_real_coeffs": complex_to_real_coeffs,
+        "enforce_conjugate_symmetry_batch": enforce_conjugate_symmetry_batch,
+        "sh_size": sh_size,
     }
 
 
