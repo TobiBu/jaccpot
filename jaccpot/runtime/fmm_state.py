@@ -38,6 +38,7 @@ from jaccpot.upward.tree_expansions import TreeUpwardData
 
 from ..config import FMMPreset
 from ._interaction_cache import _InteractionCacheEntry
+from ._large_n_types import LargeNPreparedState
 from ._octree_adapter import OctreeExecutionData
 from ._octree_fmm import (
     OctreeSolidFMMComplexMultipoles,
@@ -1065,6 +1066,17 @@ class FMMPreparedState:
         )
 
 
+#: Either kind of prepared state. Defined here, beside ``FMMPreparedState``,
+#: rather than in the engine module: this is the lowest layer that can name both
+#: arms, and putting it any higher made it unusable by the modules that actually
+#: produce and consume prepared states. ``_large_n_types`` reaches only ``dtypes``
+#: and ``fmm_constants``, so the import above closes no cycle.
+#:
+#: ``_fmm_impl`` re-exports this name, so the ``if TYPE_CHECKING`` imports that
+#: already read it from there keep working unchanged.
+PreparedStateLike = Union[FMMPreparedState, LargeNPreparedState]
+
+
 class _PrepareStateTreeUpwardArtifacts(NamedTuple):
     """Tree/upward artifacts produced during prepare_state orchestration.
 
@@ -1348,7 +1360,7 @@ def _finalize_octree_downward_artifacts(
 
 
 def _octree_farfield_eval_inputs(
-    state: Any,
+    state: PreparedStateLike,
 ) -> tuple[Optional[LocalExpansionData], Optional[Array], Optional[Array]]:
     """Far-field eval overrides that make the octree backend evaluate its OWN locals.
 
@@ -1366,14 +1378,12 @@ def _octree_farfield_eval_inputs(
 
     Parameters
     ----------
-    state : Any
-        A prepared state. Typed ``Any`` because one of the two call sites passes
-        ``PreparedStateLike``, so this must accept a ``LargeNPreparedState`` as
-        well as an :class:`FMMPreparedState` -- and that union is defined in the
-        engine module, which this one must not import (ARCHITECTURE §1). The
-        ``getattr`` defaults below are what actually make both safe: a state
-        lacking the octree attributes takes the ``(None, None, None)`` branch
-        rather than raising.
+    state : PreparedStateLike
+        Either kind of prepared state -- one of the two call sites passes the
+        union, so a ``LargeNPreparedState`` does reach here as well as an
+        :class:`FMMPreparedState`. The ``getattr`` defaults below are what make
+        both safe: a state lacking the octree attributes takes the
+        ``(None, None, None)`` branch rather than raising.
 
     Returns
     -------
