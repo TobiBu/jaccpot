@@ -10,8 +10,9 @@ large-N lane and measure at 10⁶) is **done**.
 
 ## Situation
 
-The method is finished and measured. What is left is two measurements and one
-one-line fix.
+The method is finished and measured. **The leaf sweep that decided the production figure
+is done (2026-08-16) — leaf 1024 at N=10⁶, p99.99 43× [31, 71] for eq (16b) at 1.03×
+work, 3 seeds.** What is left is N=10⁷ and the one-line fix in front of it.
 
 **All of it is merged.** PR #56 (the two upward-M2M mass-loss fixes), PR #67 (the bulk of
 the mass-dependent MAC) and the 38 commits that followed it — the O(N) `f_b` estimator,
@@ -72,37 +73,44 @@ wrong code. Pick GPUs with `autocvd`, always.
 
 ## The open work
 
-### 1. Leaf sweep at N = 10⁶ — the measurement that decides the production figure
+### 1. Leaf sweep at N = 10⁶ — **DONE (2026-08-16), and it settles the production figure**
 
-N=10⁶ is measured (`bench/results/validation/mac_1e6_leaf256_lane.json`) and it **does not
-reproduce** the N=10⁵ / leaf-256 headline: p99.99 is 4.5–4.9× for eq (16a) and
-10.8–11.9× for eq (16b), against **21–41×** at N=10⁵. The criterion is *cheaper* than
-fixed θ there (12–31 % fewer interactions), so the cost half of the bar passes and the
-tail half does not.
+The N=10⁶ / leaf-256 record did not reproduce the N=10⁵ headline (p99.99 4.5–4.9× for
+eq 16a and 10.8–11.9× for eq 16b, against 21–41×). Item 2b's mechanism said that was tree
+*depth*, so the test was a leaf sweep rather than another N point. It was run at 512, 1024
+and 2048, plus a re-measured leaf 256, 3 seeds each.
 
-That is item 2b's mechanism, not a contradiction of it: the advantage is controlled by
-**tree depth**, and holding leaf 256 fixed from 10⁵ → 10⁶ takes the tree from 390 to 7813
-nodes, ~4½ levels deeper. **So the next measurement is a leaf sweep at N=10⁶ — 512, 1024,
-2048 — not another N point.** If a larger leaf restores the shallow-tree regime at 10⁶,
-that is the production figure the paper should quote; if it does not, the honest headline
-is the 10⁶ number and the 10⁵ one must be labelled as a shallow-tree result.
+**A larger leaf does restore it.** At a common absolute matched median of 10⁻⁵, 3 seeds,
+`median [min, max]`, p99.99 goes 2.7× → 7.0× → **21.8× [13.9, 34.4]** for eq (16a) and
+5.3× → 15.2× → **43.1× [31.0, 71.2]** for eq (16b) across leaf 256 → 512 → 1024, while
+work falls 1.36× → 1.21× → 1.10× (`fixed/mass`, so the criterion does *less* work).
+Monotone in every seed with non-overlapping adjacent bands. **Leaf 1024 at N=10⁶ is the
+production configuration, and the leaf size must be quoted with the number.** Full detail,
+including why leaf 2048 is not measurable in fp32, is in the leaf-sweep section of
+`dehnen_mass_mac_status_and_plan.md`.
 
-Do **not** quote the N=10⁵ / leaf-256 figure as the production number until this is
-settled.
+Hazards this run paid for, kept because they will recur:
 
-Hazards specific to this run, all already paid for once:
-
-- **fp32 median saturation.** At N=10⁶ the δa/f median floors at ≈1.9–2.4×10⁻⁶ (fp32
-  summation error over a 10⁶ near field, ~√N·1.2e-7). The fixed arm's median is
-  *non-monotone in θ* below that, which is impossible for truncation error and is the
-  tell. **Distrust any matched median below ~3×10⁻⁶** — it is matching round-off, and one
-  such row already reported p99.99 = 0.57 at work 2.02, an outlier in every column at once.
-- **Retries fired on 15 of 15 configs, up to 16 attempts**, which is most of why that
-  sweep took 1½ h instead of ~20 min. Converged caps for N=10⁶ / leaf 256 on the lane:
-  `max_pair_queue=690804`, `max_interactions_per_node=1024`. Expect to re-size per leaf —
-  those differ from leaf 256's N=10⁵ values (16384 / 8192) by 42× *up* on the queue and
-  8× *down* on the interaction capacity. An oversized interaction capacity OOMs; an
+- **fp32 median saturation, and the floor is not a constant.** It **rises with leaf size**
+  — measured 1.86, 2.83, 4.67, 6.85 ×10⁻⁶ at leaf 256, 512, 1024, 2048 — because it is
+  summation round-off over the near field and a bigger leaf means more near pairs per
+  particle. So the old rule "distrust any matched median below ~3×10⁻⁶" is a **leaf-256**
+  rule; per leaf it is roughly **2× that leaf's own measured floor**. The tell is a median
+  that fails to rise with its knob, which no truncation error can do.
+  `bench/validation/leaf_sweep_common_target.py` measures the floor, flags it, and refuses
+  targets below it instead of interpolating through them. At leaf 2048 the floor has
+  closed on the divergence guard and the ratio swings 13× → 50× → 112× over a 1.6× change
+  of target — an artifact, not a result.
+- **Retries fired on 15 of 15 configs, up to 16 attempts**, which is most of why the
+  original sweep took 1½ h instead of ~20 min. Converged caps for N=10⁶ / leaf 256 on the
+  lane: `max_pair_queue=690804`, `max_interactions_per_node=1024`. Expect to re-size per
+  leaf — those differ from leaf 256's N=10⁵ values (16384 / 8192) by 42× *up* on the queue
+  and 8× *down* on the interaction capacity. An oversized interaction capacity OOMs; an
   oversized queue is merely wasteful.
+- **Pin the GPU per run; do not let each run call `autocvd` for itself.** Two simultaneous
+  launches get handed the same least-used card. Ask once for as many as you need
+  (`autocvd -l -n 4 -o -q`) and set `CUDA_VISIBLE_DEVICES` per run. A co-tenant arriving
+  mid-run still put one 40 GB card at 37.5/40 and forced a restart.
 
 ### 2. N = 10⁷ — blocker identified, not guessed
 

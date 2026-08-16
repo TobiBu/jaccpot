@@ -15,7 +15,7 @@ Self-contained: a fresh session should be able to pick this up without prior con
 | **1b. N=10⁵ at a production leaf** | **DONE and stronger there.** Leaf 64, 2 seeds, matched median: eq (16a) rms **18.4×** / p99.99 **22.0×**, eq (16b) estimator **35.9×** / **53.9×**, work 1.01–1.05×. |
 | **2. N-scaling *trend*** | **Measured; at fixed leaf 16 it decays** (p99.99 ~12× → ~5× over N = 16384 → 65536, work 1.0 → 1.2×, all 3 seeds agreeing). |
 | **2b. Leaf-size sweep** | **RESOLVED, and it is the session's main finding: the advantage is controlled by tree DEPTH, not N.** At N=10⁵, p99.99 rises 5× → 7× → 16× → 35× → 31× and work falls 1.17× → 1.14× → 1.07× → 1.02× → **1.00×** across leaf 16 → 32 → 64 → 128 → **256**. The ladder was deepening the tree, not probing N. At leaf 16 the criterion is actually **worse than fixed θ on p99** (0.76–0.83×). |
-| **2c. Leaf sweep at N=10⁶** (2026-08-16) | **DONE, and it restores the advantage at production scale.** Matched median 10⁻⁵, one seed: p99.99 5.6× → 7.0× → **34.4×** (eq 16a) and 8.6× → 18.3× → **71.2×** (eq 16b) across leaf 256 → 512 → **1024**, work falling 1.36× → 1.18× → 1.10×. **Leaf 1024 is the production configuration to quote at N=10⁶.** Leaf 2048 is *not measurable in fp32*: the δa/f floor rises with leaf size (1.9 → 6.9 ×10⁻⁶ over the range, tracking near-field pairs per particle) until it closes on the divergence guard. |
+| **2c. Leaf sweep at N=10⁶** (2026-08-16) | **DONE, and it restores the advantage at production scale — the go/no-go bar is met.** Matched median 10⁻⁵, **3 seeds**, `median [min, max]`: p99.99 2.7× → 7.0× → **21.8× [13.9, 34.4]** (eq 16a) and 5.3× → 15.2× → **43.1× [31.0, 71.2]** (eq 16b) across leaf 256 → 512 → **1024**, with work falling 1.36× → 1.21× → 1.10× (`fixed/mass`, so the criterion does *less* work). Monotone in every seed, adjacent bands non-overlapping. **Leaf 1024 is the production configuration to quote at N=10⁶**, always with the leaf size attached. Leaf 2048 is *not measurable in fp32*: the δa/f floor rises with leaf size (1.9 → 6.9 ×10⁻⁶, tracking near-field pairs per particle) until it closes on the divergence guard. |
 
 Two defects found on the way, both in shipped behaviour — and the first of them
 means **eq (16a) was measurably weaker than it should have been in every prior
@@ -683,29 +683,45 @@ Two methodology notes, both load-bearing:
 
 ### The N = 10⁶ **leaf sweep** — **the advantage does come back, and what stops it is fp32, not the criterion**
 
-`bench/results/validation/mac_1e6_leafsweep_leaf{256,512,1024,2048}.json`, censuses
-alongside them. N=10⁶, p=8, Plummer, fp32, zero softening, **one seed**, δa/f against a
-float64 direct sum over a 10⁵-target subsample, matched at equal **median**, both guards
-on, identical knob grid at every leaf size. Read at a **common absolute matched median of
-1.0×10⁻⁵** — the same target at every leaf, not each leaf's own range midpoint.
+`bench/results/validation/mac_1e6_leafsweep_leaf{256,512,1024,2048}[_seed{1,2}].json`,
+censuses alongside them. N=10⁶, p=8, Plummer, fp32, zero softening, **3 seeds**, δa/f
+against a float64 direct sum over a 10⁵-target subsample, matched at equal **median**,
+both guards on, identical knob grid at every leaf size. Read at a **common absolute
+matched median of 1.0×10⁻⁵** — the same target at every leaf, not each leaf's own range
+midpoint — and reported `median [min, max]` across seeds.
 
 **Leaf 256 was re-measured, not reused,** because the earlier record was taken on
 jax 0.9.0.1 and the pre-refactor tree. It reproduced: 1 706 946 far pairs at θ=0.5
 exactly, and p99.99 4.85×/10.83× at work 1.31×/1.16× to three digits. So the refactor and
 the JAX bump moved nothing, and the leaf axis is the only thing varying below.
 
-| leaf | nodes | eq (16a) p99.99 × | work × | eq (16b) p99.99 × | work × | fp32 median floor |
+| leaf | nodes | eq (16a) p99.99 × | work × | eq (16b) p99.99 × | work × | fp32 floor |
 |---|---|---|---|---|---|---|
-| 256 (fiducial) | 7813 | 5.62 | 1.36 | 8.61 | 1.22 | 1.86×10⁻⁶ |
-| 512 | 3907 | 6.98 | 1.18 | 18.29 | 1.08 | 2.83×10⁻⁶ |
-| **1024** | 1953 | **34.4** | **1.10** | **71.2** | **1.03** | 4.67×10⁻⁶ |
-| 2048 | 977 | *(77.9)* | *(1.01)* | *(145)* | *(0.97)* | 6.85×10⁻⁶ |
+| 256 (fiducial) | 7813 | 2.74 [2.58, 5.62] | 1.36 | 5.25 [4.56, 8.61] | 1.23 | 1.86×10⁻⁶ |
+| 512 | 3907 | 6.98 [6.31, 7.68] | 1.21 | 15.2 [14.0, 18.3] | 1.11 | 2.83×10⁻⁶ |
+| **1024** | 1953 | **21.8 [13.9, 34.4]** | **1.10** | **43.1 [31.0, 71.2]** | **1.03** | 4.67×10⁻⁶ |
+| 2048 | 977 | *(53.3 [28.6, 77.9])* | *(1.01)* | *(99.6 [54.0, 145])* | *(0.98)* | 6.85×10⁻⁶ |
 
-**Monotone in every column, and the answer to the question this run was set is yes.** At
-leaf 1024 the criterion reaches p99.99 **34×** (eq 16a) and **71×** (eq 16b) at 1.10× and
-1.03× work — that is at or past the N=10⁵/leaf-256 headline of 21–41×, and it clears the
-"≳20× at ≤1.05× work" bar outright on eq (16b). `work ×` is `fixed/mass`, so > 1 still
-means the criterion does *less* work, and it gets cheaper as the leaf grows.
+**Monotone in every column, in every individual seed, and the adjacent bands do not
+overlap** — 256 [2.58, 5.62] against 512 [6.31, 7.68] against 1024 [13.9, 34.4] for
+eq (16a), and likewise for eq (16b). That is a stronger separation than item 2b achieved
+at N=10⁵, where leaf 128 and leaf 256 could not be told apart at 2 seeds.
+
+**The answer to the question this run was set is yes, and the go/no-go bar is met.** At
+leaf 1024 the criterion reaches p99.99 **21.8×** (eq 16a) and **43.1×** (eq 16b) at 1.10×
+and 1.03× work — squarely on the N=10⁵/leaf-256 headline of 21–41× for eq (16a) and well
+past it for eq (16b). Against "p99.99 ≳ 20× at ≤ 1.05× interaction work": `work ×` is
+`fixed/mass`, so 1.10 means the criterion does **10 % less** work, not 10 % more — the
+cost half passes at every leaf size and both arms, and eq (16b) passes the tail half from
+leaf 512 upwards.
+
+**The seed scatter is a factor ~2.5 on the tail ratio and must be quoted with it.** Leaf
+1024's eq (16a) reads 34.4, 13.9 and 21.8 on the three seeds. That is the same scatter
+item 2b measured at N=10⁵ (41.3 vs 21.1), so it is the statistic's own noise rather than a
+bad run — p99.99 of a 10⁵-target subsample rests on ~10 particles. **The `work ×` column
+is again the far tighter signal**: 1.36 → 1.21 → 1.10 → 1.01 with essentially no seed
+spread (worst case 1.09–1.14 at leaf 1024) and no overlap between adjacent leaf sizes.
+p99 behaves the same way: 1.36 → 1.88 → 2.47 → 3.96.
 
 This is item 2b's depth story holding at a decade more particles: leaf 256 at N=10⁶ is a
 7813-node tree, leaf 1024 is 1953, and the advantage tracks the node count rather than N.
@@ -734,13 +750,16 @@ below ~3×10⁻⁶ at N=10⁶" — is a leaf-256 rule, not a general one.** Per 
 "distrust below ~2× that leaf's own measured floor", and the floor is what
 `bench/validation/leaf_sweep_common_target.py` reports and flags.
 
-**Caveats, and they are the usual ones.** *One seed.* Item 2b's two-seed sweep at N=10⁵
-found p99.99 scatter of 41.3 vs 21.1 between seeds at leaf 256, so a single-seed ratio
-carries at least that much uncertainty and **leaf 512 vs leaf 256 is not separable at this
-sample size**; the 256 → 1024 step is far larger than that scatter and is safe. The
-`work ×` column is again the more reliable signal — 1.36 → 1.18 → 1.10 → 1.01 for eq (16a),
-monotone with no overlap. Replicate seeds are being added; until they land, quote leaf 1024
-as the production configuration and label the figure single-seed.
+**What to quote.** Leaf 1024 at N=10⁶ is the production configuration: eq (16b) via the
+O(N) estimator, p99.99 **43× [31, 71]** at **1.03×** work, 3 seeds, matched median 10⁻⁵.
+State the leaf size with it — item 2b's rule that the claim is meaningless without one
+applies here too, and the same criterion at leaf 256 is 5.3×.
+
+One caveat that did not exist before this sweep: **leaf 1024 is close to the largest leaf
+this measurement can reach in fp32**, so "bigger leaves keep helping" is *extrapolation
+past the measurable range*, not a measured trend. Leaf 2048's rows are consistent with it
+continuing, but they are parenthesised for the reason above and one of the three seeds
+could not be read at all (n=2 — the tool refused the target rather than extrapolating).
 
 ### N = 10⁷ — **NOT reached, and the blocker is identified rather than guessed**
 
@@ -842,15 +861,17 @@ been measured.** At leaf 256 the criterion is 12–31 % *cheaper* than fixed θ 
 median while collapsing the tail by 4.5–4.9× (eq 16a) or 10.8–11.9× (eq 16b's O(N)
 estimator) — real, but well short of the 21–41× measured at N=10⁵ with the same leaf.
 
-**The leaf sweep that resolves that is done (2026-08-16), and the advantage comes back.**
-At N=10⁶, matched median 10⁻⁵, one seed: p99.99 goes 5.6× → 7.0× → **34.4×** for eq (16a)
-and 8.6× → 18.3× → **71.2×** for eq (16b) as the leaf goes 256 → 512 → 1024, with work
-falling 1.36× → 1.18× → 1.10× (still `fixed/mass`, so > 1 means *less* work). **Quote
-leaf 1024 at N=10⁶ as the production configuration**, single-seed for now. Leaf 2048 is
-*not* measurable in fp32: the δa/f floor rises with leaf size (1.9 → 6.9 ×10⁻⁶ from leaf
-256 to 2048, tracking near-field pairs per particle) until it meets the divergence guard
-and closes the accuracy window. N=10⁷ is blocked on a split-build predicate — one line,
-identified, and narrower than first recorded. See item 4.
+**The leaf sweep that resolves that is done (2026-08-16), the advantage comes back, and
+the go/no-go bar is met.** At N=10⁶, matched median 10⁻⁵, 3 seeds: p99.99 goes
+2.7× → 7.0× → **21.8× [13.9, 34.4]** for eq (16a) and 5.3× → 15.2× → **43.1× [31.0, 71.2]**
+for eq (16b) as the leaf goes 256 → 512 → 1024, with work falling 1.36× → 1.21× → 1.10×
+(`fixed/mass`, so > 1 means *less* work). **Quote leaf 1024 at N=10⁶ as the production
+configuration, with the leaf size attached.** Leaf 2048 is *not* measurable in fp32: the
+δa/f floor rises with leaf size (1.9 → 6.9 ×10⁻⁶ from leaf 256 to 2048, tracking
+near-field pairs per particle) until it meets the divergence guard and closes the accuracy
+window — so leaf 1024 is also near the largest leaf this measurement can reach. N=10⁷ is
+blocked on a split-build predicate — one line, identified, and narrower than first
+recorded. See item 4.
 
 Open: whether the benefit holds at Dehnen's ε = 2×10⁻⁷ (never measured); the N-scaling
 trend; the O(N) `f_b` estimator; fast-lane access; and the cartesian basis's unexplained
