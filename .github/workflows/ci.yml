@@ -353,6 +353,81 @@ jobs:
         # Override the default addopts marker to also drop `slow`.
         run: pytest -n 2 -m "not slow and not experimental"
 
+  typecheck-runtime:
+    # The `JACCPOT_RUNTIME_TYPECHECK=1` gate, which nothing else runs.
+    #
+    # WHY THIS JOB EXISTS. The annotations are inert without that variable, so a
+    # wrong one is invisible to every other job here -- all of them stay green.
+    # That is not hypothetical: the gate went 126 failures -> 0 in 48c9c42
+    # ("fix(typing): correct the annotations that made the runtime typecheck
+    # unusable"), then silently regressed to 11 in b0a2227 (the eq (16b) f_b
+    # estimator), and stayed regressed until someone happened to run it by hand.
+    # A single `def body(i: int, ...)` on a `fori_loop` body did it -- the index
+    # is a traced 0-d integer, so beartype rejected it at every call and took
+    # all of tests/unit/runtime/test_fb_force_scale_estimator.py with it,
+    # including the eq (16b) lower-bound assertion. Fixed in #129; this job is
+    # what stops the next one lasting that long.
+    #
+    # SCOPE, and what it does NOT cover. `tests/unit` at `-m "not slow"`:
+    #
+    #   * `tests/unit` is where the annotated call surface is exercised most
+    #     cheaply -- the whole package gets imported through the jaxtyping hook
+    #     regardless, so the check is on every annotated callable that runs.
+    #   * `not slow` is not a compromise on THIS regression: all 11 failures
+    #     were non-slow cases, so the cheap subset catches that class. Verified
+    #     rather than assumed -- test_fb_force_scale_estimator.py has no entry
+    #     in tests/slow_tests.txt.
+    #   * It does not cover the `slow` cases, nor integration /
+    #     characterization / distributed. An annotation only ever exercised
+    #     there can still slip through. Widening this is a cost decision, not a
+    #     correctness one; the note above is here so that trade-off stays
+    #     visible instead of being mistaken for full coverage.
+    #
+    # No coverage upload: this gate is about annotations, and the same lines are
+    # already measured by test-full.
+    runs-on: ubuntu-latest
+    # Measured on one box at this exact command (typecheck on, `-n 2`,
+    # `not slow`, no coverage): 788 passed, 47 skipped in 12:04. For scale, the
+    # same box runs the whole of tests/unit under typecheck at `-n auto` in
+    # 14:57.
+    #
+    # 50 is a FIRST-RUN cap, not a fitted bound -- unlike every other cap in
+    # this file it has no CI history behind it, and the runner is slower per
+    # core than the box above. It matches test-mac-runtime's 50 for a job of
+    # broadly similar scale. Re-fit it once there are a few real runs to measure,
+    # the way test-full's 60 and smoke's 75 were; until then treat a timeout here
+    # as "the estimate was wrong", not as a detected regression.
+    timeout-minutes: 50
+    env:
+      JACCPOT_RUNTIME_TYPECHECK: "1"
+      JAX_ENABLE_X64: "1"
+      JACCPOT_TEST_JAX_CACHE_DIR: ${{ github.workspace }}/.jax_cache
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+      - name: Restore JAX compilation cache
+        uses: actions/cache@v4
+        with:
+          path: ${{ github.workspace }}/.jax_cache
+          # Own key: this job compiles the same programs the other jobs do, but
+          # under the import hook, and two jobs racing to save one key means one
+          # always loses (the same reasoning as the per-shard keys above).
+          key: jax-compile-typecheck-py313-${{ hashFiles('jaccpot/**/*.py') }}
+          restore-keys: |
+            jax-compile-typecheck-py313-
+      - name: Install package + dev tools
+        run: |
+          python -m pip install --upgrade pip
+          pip install git+https://github.com/TobiBu/yggdrax.git
+          pip install -e ".[dev]"
+      - name: Unit suite under jaxtyping + beartype
+        run: pytest tests/unit -n 2 -m "not slow and not experimental"
+
   benchmark-guard:
     runs-on: ubuntu-latest
     env:
