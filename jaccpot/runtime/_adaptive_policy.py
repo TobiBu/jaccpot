@@ -893,7 +893,15 @@ def _far_field_force_scale_by_node(
     internal_width = internal_ranges[:, 1] - internal_ranges[:, 0]
     descending = jnp.argsort(-internal_width, stable=True)
 
-    def body(i: int, current: Array) -> Array:
+    # Loop index: a `fori_loop` tracer, not an `int` (F40) -- the sibling sweep
+    # above already annotates it `Array` and this site was missed. The hint is
+    # inert until `JACCPOT_RUNTIME_TYPECHECK=1`, at which point beartype rejects
+    # the tracer and *every* caller of this function raises: that took all 11
+    # tests in `test_fb_force_scale_estimator.py` with it, the eq (16b)
+    # lower-bound assertion among them -- the one guarding the failure mode
+    # (an over-large scale makes the solver faster *and* wronger) that no cost
+    # measurement can detect.
+    def body(i: Array, current: Array) -> Array:
         node_idx = descending[i]
         value = current[node_idx]
         left_idx = left_child[node_idx]
