@@ -16,6 +16,8 @@ Self-contained: a fresh session should be able to pick this up without prior con
 | **2. N-scaling *trend*** | **Measured; at fixed leaf 16 it decays** (p99.99 ~12× → ~5× over N = 16384 → 65536, work 1.0 → 1.2×, all 3 seeds agreeing). |
 | **2b. Leaf-size sweep** | **RESOLVED, and it is the session's main finding: the advantage is controlled by tree DEPTH, not N.** At N=10⁵, p99.99 rises 5× → 7× → 16× → 35× → 31× and work falls 1.17× → 1.14× → 1.07× → 1.02× → **1.00×** across leaf 16 → 32 → 64 → 128 → **256**. The ladder was deepening the tree, not probing N. At leaf 16 the criterion is actually **worse than fixed θ on p99** (0.76–0.83×). |
 | **2c. Leaf sweep at N=10⁶** (2026-08-16) | **DONE, and it restores the advantage at production scale — the go/no-go bar is met.** Matched median 10⁻⁵, **3 seeds**, `median [min, max]`: p99.99 2.7× → 7.0× → **21.8× [13.9, 34.4]** (eq 16a) and 5.3× → 15.2× → **43.1× [31.0, 71.2]** (eq 16b) across leaf 256 → 512 → **1024**, with work falling 1.36× → 1.21× → 1.10× (`fixed/mass`, so the criterion does *less* work). Monotone in every seed, adjacent bands non-overlapping. **Leaf 1024 is the production configuration to quote at N=10⁶**, always with the leaf size attached. Leaf 2048 is *not measurable in fp32*: the δa/f floor rises with leaf size (1.9 → 6.9 ×10⁻⁶, tracking near-field pairs per particle) until it closes on the divergence guard. |
+| **2d. End-to-end wall-clock** (2026-08-16) | **Step 4's last accept condition, MET — and at parity.** N=10⁶/leaf 1024, both arms on the same lane at matched accuracy, warm-call medians on an uncontended A100. Positions moved between calls as an N-body step moves them: **0.99×** (eq 16a) and **1.05×** (eq 16b) against the geometric MAC; re-preparing *identical* positions (an interaction-cache hit) gives 1.21× / 1.13×. Bar is ≤1.3×. Evaluation is *faster* (0.91–0.96×); the whole cost is a ~0.4 s force-scale prepass, which a real rebuild absorbs. |
+| **2e. N=10⁷** (2026-08-16) | **REACHED.** Census clears on one A100-40GB with the split build on: 1 089 190 far pairs (fixed θ=0.7) and 1 019 026 (ε=3e-3), 9765 nodes, prepare 105.5 s / 247.6 s. No OOM, where the previous attempt died on a 4.77 GiB allocation inside the *monolithic* `_dual_tree_build_raw`. A 10⁷ error sweep is now a configuration question, not a blocked one. Fix in PR #127. |
 
 Two defects found on the way, both in shipped behaviour — and the first of them
 means **eq (16a) was measurably weaker than it should have been in every prior
@@ -825,7 +827,33 @@ Two details worth keeping:
   worry that the criterion "buys tail accuracy at equal cost, not speed, and end-to-end
   could be slower" — on the same lane it is not slower.
 
-### N = 10⁷ — **NOT reached, and the blocker is identified rather than guessed**
+### N = 10⁷ — **REACHED (2026-08-16)**
+
+`bench/results/validation/census_1e7_leaf2048.json`. N=10⁷, leaf 2048, p=8, Plummer,
+fp32, large-N GPU lane, **split build on**, one A100-40GB:
+
+| arm | knob | far pairs | near leaf pairs | prepare s | nodes |
+|---|---|---|---|---|---|
+| fixed | θ=0.7 | 1 089 190 | 2 269 950 | 105.5 | 9765 |
+| eq (16a) | ε=3×10⁻³ | 1 019 026 | 1 328 804 | 247.6 | 9765 |
+
+Both arms clear the far-pair guard, so a 10⁷ error sweep is now a configuration question
+rather than a blocked one. **No OOM** — where the previous attempt died on a 4.77 GiB
+allocation inside `_dual_tree_build_raw`, i.e. inside the monolithic build. That confirms
+the diagnosis below was right about *what* was failing, and the fix is
+`fix/large-n-gpu-split-build-predicate` (PR #127).
+
+Note the criterion's prepare is 2.3× the geometric arm's here (247.6 s against 105.5 s),
+against ~1.0× at N=10⁶ — but this is a **cold** pair of calls including compilation, not
+the warm-call comparison the wall-clock section makes, so it is not a wall-clock claim.
+If a 10⁷ timing is wanted, run `mac_end_to_end_walltime.py` there.
+
+Leaf 2048 at 10⁷ gives 9765 nodes — the same depth as leaf 256 at 10⁶, which the leaf
+sweep measured as the *weakest* configuration. Scaling the production leaf with N (leaf
+~8192 at 10⁷ to match leaf 1024 at 10⁶) is what the depth story implies, and the fp32
+floor is the thing that will bound it.
+
+### The original N = 10⁷ blocker — **identified rather than guessed, and now fixed**
 
 The 10⁷ census **OOMed on a 4.77 GiB allocation inside `_dual_tree_build_raw`** — i.e.
 inside the *monolithic* dual-tree walk, on a lane whose whole purpose is to avoid it. The
@@ -944,9 +972,11 @@ absorbs. So the claim is "an order-of-magnitude smaller error tail at the same a
 the same interaction work and the same wall-clock", and **every go/no-go condition is
 now met**.
 
-Open: **N=10⁷ only** — engineering reach, not the claim; the split-build predicate in
-front of it is fixed on `fix/large-n-gpu-split-build-predicate`. Plus the cartesian
-basis's unexplained ~1.8×10⁻¹ error (issue #62), which is off this path.
+Open: **nothing on the claim.** N=10⁷ is reached too (2026-08-16) — the census clears on
+one A100 with the split build on, 1.09 M far pairs at leaf 2048 — so what remains is a
+10⁷ *error* sweep at a depth-matched leaf, which is a configuration question rather than a
+blocker. The split-build predicate in front of it is fixed in PR #127. The cartesian
+basis's unexplained ~1.8×10⁻¹ error (issue #62) stays off this path.
 
 ## Where the work lives
 
