@@ -3,6 +3,47 @@ Fast Multipole Method (FMM) for computing gravitational accelerations.
 
 This implementation uses multipole and local expansions to compute
 gravitational forces in O(N) time instead of O(N^2) for direct summation.
+
+RE-EXPORTS. Eleven of the imports below are unused *here* and are not dead. Each
+carries ``# noqa: F401`` so an ``--select=F401`` sweep leaves it alone:
+
+    NearfieldInteropData                     _bucket_far_pairs_by_level_split
+    _PrepareStateTreeUpwardArtifacts         _build_nearfield_interop_data
+    _build_tree_with_config                  _prepare_solidfmm_downward_sweep
+    _evaluate_local_expansions_for_particles build_interactions_and_neighbors
+    adaptive_pair_policy                     sh_size
+    enforce_conjugate_symmetry_batch
+
+They are reached in THREE ways, and a sweep has to account for all three -- this
+cleanup removed ``_build_tree_with_config`` on the strength of the first two and
+the suite caught it:
+
+1. ``from ._fmm_impl import X``            -- greppable
+2. ``_fmm_impl.X`` on a module alias       -- greppable
+3. ``mock.patch.object(alias, "X", ...)``  -- the name is a STRING, and the call
+   is usually split across lines, so no single-line grep finds it. Only an AST
+   walk over ``patch.object``/``setattr`` calls does.
+
+``__all__`` would be the tidier mechanism and is DELIBERATELY NOT USED here.
+``runtime/fmm/__init__.py`` does ``from .._fmm_impl import *``; with no
+``__all__`` that pulls every public name, and adding one narrows the star to
+whatever the list happens to contain. Tried during this cleanup: it broke
+``jaccpot.runtime.fmm.FMMPreparedState`` and, through it, ``import jaccpot``.
+Any future ``__all__`` here has to enumerate the whole star surface, not just
+the re-exports.
+
+The ``noqa`` markers are less precise than they look, and that is a known cost
+rather than an oversight: isort hoists a trailing comment from the name onto the
+``from ... import (`` line and re-merges duplicate imports from one module, so
+three of the ten end up suppressing F401 for their whole import group. A name
+that later goes unused inside one of those groups will not be flagged. Splitting
+them apart does not survive isort -- it re-merges on the next run.
+
+Reaching internals through this module is a habit worth breaking rather than
+extending -- ``examples/benchmark_gpu_radix_worker.py`` did it for thirteen
+symbols and silently broke on six of them when ``kernels/core.py`` was split,
+because an attribute lookup fails at call time rather than at import. New
+callers should import from the module that defines the symbol.
 """
 
 from __future__ import annotations
@@ -16,36 +57,13 @@ import jax
 from beartype import beartype
 from beartype.typing import Callable, Tuple
 from jaxtyping import Array, DTypeLike, jaxtyped
-from yggdrax.dense_interactions import DenseInteractionBuffers
-from yggdrax.grouped_interactions import GroupedInteractionBuffers
-from yggdrax.interactions import (
-    CompactTaggedFarPairs,
-    CompactTaggedOctreeFarPairs,
+from yggdrax.interactions import (  # noqa: F401
     DualTreeRetryEvent,
     DualTreeTraversalConfig,
-    DualTreeWalkResult,
-    MACType,
-    NodeInteractionList,
-    NodeNeighborList,
-    OctreeNativeNeighborList,
     build_interactions_and_neighbors,
-    build_octree_native_far_pairs,
-    build_octree_native_neighbor_lists,
-    build_well_separated_interactions,
 )
-from yggdrax.morton import morton_encode
-from yggdrax.tree import (
-    RadixTree,
-    Tree,
-    TreeType,
-    available_tree_types,
-    get_node_levels,
-    rebuild_static_radix_tree_from_template,
-    reorder_particles_by_indices,
-)
-from yggdrax.tree_moments import compute_tree_mass_moments
+from yggdrax.tree import Tree, TreeType, available_tree_types
 
-from jaccpot.basis.real_sh import complex_to_real_coeffs
 from jaccpot.config import (
     FMMExecutionBackend,
     FMMPreset,
@@ -53,188 +71,24 @@ from jaccpot.config import (
     MemoryObjective,
     TraversalOverrides,
 )
-from jaccpot.downward.local_expansions import (
-    LocalExpansionData,
-    TreeDownwardData,
-    initialize_local_expansions,
-)
-from jaccpot.downward.local_expansions import (
-    prepare_downward_sweep as prepare_tree_downward_sweep,
-)
-from jaccpot.downward.local_expansions import (
-    run_downward_sweep as run_tree_downward_sweep,
-)
-from jaccpot.downward.local_expansions import translate_local_expansion
-from jaccpot.nearfield.near_field import (
-    compute_leaf_p2p_accelerations,
-    compute_leaf_p2p_accelerations_large_n_accel_only,
-    prepare_bucketed_scatter_schedules,
-    prepare_bucketed_scatter_schedules_from_groups,
-    prepare_leaf_neighbor_pairs,
-)
-from jaccpot.operators.complex_ops import (
-    complex_rotation_blocks_from_z_solidfmm_batch,
-    complex_rotation_blocks_to_z_solidfmm_batch,
+from jaccpot.downward.local_expansions import LocalExpansionData
+from jaccpot.operators.complex_ops import (  # noqa: F401
     enforce_conjugate_symmetry_batch,
-    evaluate_local_complex_derivative_tower_batch,
-    evaluate_local_complex_grad_analytic,
-    evaluate_local_complex_grad_analytic_batch,
-    evaluate_local_complex_grad_analytic_preserve_dtype,
-    evaluate_local_complex_grad_order4_unrolled,
-    evaluate_local_complex_with_grad,
-    evaluate_local_complex_with_grad_batch,
-    l2l_complex,
-    l2l_complex_batch,
-    m2l_complex_reference,
-    m2l_complex_reference_batch,
-    m2l_complex_reference_batch_cached_blocks,
 )
-from jaccpot.operators.m2l_real_rot_scale import (
-    m2l_rot_scale_real_batch,
-    m2l_rot_scale_real_batch_cached_blocks,
-    real_rotation_blocks_from_z_local_batch,
-    real_rotation_blocks_to_z_multipole_batch,
-)
-from jaccpot.operators.multipole_utils import (
-    LOCAL_LEVEL_COMBOS,
-    MAX_MULTIPOLE_ORDER,
-    level_offset,
-    total_coefficients,
-)
-from jaccpot.operators.real_harmonics import (
-    evaluate_local_real_derivative_tower_batch,
-    evaluate_local_real_with_grad,
-    l2l_real,
-    sh_size,
-)
-from jaccpot.operators.symmetric_tensors import (
-    component_lift_index_map_3d,
-    contract_symmetric_one_axis_3d,
-)
-from jaccpot.upward.real_tree_expansions import (
-    prepare_real_upward_sweep,
-)
-from jaccpot.upward.solidfmm_complex_tree_expansions import (
-    prepare_solidfmm_complex_source_motion_multipoles,
-    prepare_solidfmm_complex_upward_sweep,
-)
-from jaccpot.upward.tree_expansions import (
-    NodeMultipoleData,
-    TreeUpwardData,
-)
-from jaccpot.upward.tree_expansions import (
-    prepare_upward_sweep as prepare_tree_upward_sweep,
-)
+from jaccpot.operators.real_harmonics import sh_size  # noqa: F401
 
-from ._adaptive_policy import (
-    adaptive_pair_policy,
-    adaptive_policy_tolerance,
-    bucket_far_pairs_by_tag,
-    build_adaptive_policy_state,
-    compute_node_force_scale_from_sorted_acc,
-    source_error_proxy_by_order_from_multipoles,
-)
-from ._interaction_cache import (
-    _build_dual_tree_artifacts,
-    _compiled_refresh_dual_planner_route,
-    _DualTreeArtifacts,
-    _interaction_cache_key,
-    _InteractionCacheEntry,
-    _RefreshDualPlannerHint,
-)
-from ._large_n_pipeline import (
-    can_use_large_n_prepare_path,
-    evaluate_large_n_state,
-    prepare_large_n_state,
-)
+from ._adaptive_policy import adaptive_pair_policy  # noqa: F401
+from ._interaction_cache import _InteractionCacheEntry, _RefreshDualPlannerHint
 from ._large_n_types import LargeNPreparedState
-from ._nearfield_cache import (
-    NearfieldPrecomputeArtifacts,
-    nearfield_cache_matches,
-    nearfield_from_cache,
-    with_nearfield_cache_artifacts,
-)
-from ._octree_adapter import (
-    OctreeExecutionData,
-    build_octree_execution_data,
-    build_octree_execution_data_with_status,
-)
-from ._octree_fmm import (
-    OctreeSolidFMMComplexMultipoles,
-    OctreeSolidFMMDownwardPlan,
-    accumulate_octree_solidfmm_m2l,
-    build_octree_downward_plan,
-    build_octree_interaction_plan,
-    build_octree_interaction_plan_from_native_pairs,
-    build_octree_upward_plan,
-    prepare_octree_solidfmm_complex_multipoles,
-    propagate_octree_solidfmm_l2l,
-)
-from .dtypes import INDEX_DTYPE, as_index, complex_dtype_for_real
 from .fmm_autotune import AutotuneMixin
 from .fmm_caches import (
-    _GPU_M2L_AUTOTUNE_LARGE_CANDIDATES,
-    _GPU_M2L_AUTOTUNE_MAX_SAMPLE_NODES,
-    _GPU_M2L_AUTOTUNE_MAX_SAMPLE_PAIRS,
-    _GPU_M2L_AUTOTUNE_MEDIUM_CANDIDATES,
-    _GPU_M2L_AUTOTUNE_PAIR_BINS,
-    _GPU_M2L_AUTOTUNE_SMALL_CANDIDATES,
-    _GPU_M2L_AUTOTUNE_XL_CANDIDATES,
-    _M2L_FULLBATCH_MAX_PAIRS,
     _clear_global_runtime_caches,
-    _contains_tracer,
-    _estimate_payload_nbytes,
-    _format_nbytes,
-    _grouped_operator_cache_get,
-    _grouped_operator_cache_key,
-    _grouped_operator_cache_put,
-    _grouped_segment_cache_get,
-    _grouped_segment_cache_key,
-    _grouped_segment_cache_put,
-    _m2l_autotune_lookup,
     _m2l_autotune_payload,
-    _m2l_autotune_store,
     _restore_m2l_autotune_payload,
 )
 from .fmm_constants import (
-    _CLASS_MAJOR_CPU_PARTICLE_THRESHOLD,
-    _GPU_LARGE_PARTICLE_THRESHOLD,
-    _GPU_MAX_INTERACTIONS_PER_NODE,
-    _GPU_MAX_NEIGHBORS_PER_LEAF,
-    _GPU_MIN_INTERACTIONS_PER_NODE,
-    _GPU_MIN_NEIGHBORS_PER_LEAF,
-    _GPU_MIN_PAIR_QUEUE_LARGE,
-    _GPU_MIN_PAIR_QUEUE_MEDIUM,
-    _GPU_MIN_PAIR_QUEUE_XL,
-    _GPU_MINIMUM_MEMORY_INTERACTIONS_PER_NODE,
-    _GPU_MINIMUM_MEMORY_NEIGHBORS_PER_LEAF,
-    _GPU_MINIMUM_MEMORY_PAIR_QUEUE,
-    _GPU_MINIMUM_MEMORY_PROCESS_BLOCK,
     _GROUPED_SCHEDULE_BUDGET_DEFAULT,
-    _KDTREE_DEFAULT_TRAVERSAL_CONFIG,
-    _LARGE_CPU_M2L_CHUNK_SIZE,
-    _LARGE_CPU_PARTICLE_THRESHOLD,
-    _LARGE_CPU_TRAVERSAL_CONFIG,
     _LARGE_N_GPU_UPWARD_LEAF_BATCH_SIZE,
-    _MINIMUM_MEMORY_CPU_M2L_CHUNK_SIZE,
-    _MINIMUM_MEMORY_GPU_M2L_CHUNK_SIZE,
-    _NEARFIELD_BUCKETED_CPU_EDGE_CHUNK_LARGE,
-    _NEARFIELD_BUCKETED_CPU_EDGE_CHUNK_MEDIUM,
-    _NEARFIELD_BUCKETED_CPU_EDGE_CHUNK_XL,
-    _NEARFIELD_BUCKETED_CPU_PARTICLE_THRESHOLD,
-    _NEARFIELD_GPU_PRECOMPUTE_MAX_PARTICLES,
-    _NEARFIELD_SCATTER_SCHEDULE_INT32_ITEM_LIMIT,
-    _NEARFIELD_SCATTER_SCHEDULE_ITEM_CAP,
-    _NEARFIELD_SCATTER_SCHEDULE_ITEM_CAP_GPU,
-    _TRACING_MAX_INTERACTIONS_PER_NODE,
-    _TRACING_MAX_NEIGHBORS_PER_LEAF,
-    _TRACING_MAX_PAIR_QUEUE,
-    _TRACING_MAX_PROCESS_BLOCK,
-    _cap_minimum_memory_streamed_gpu_traversal_config_for_tree,
-    _env_int,
-    _minimum_memory_streamed_gpu_traversal_ceiling,
-    _minimum_memory_streamed_gpu_traversal_seed,
-    _prepare_diag,
 )
 from .fmm_derivatives import DerivativesMixin
 from .fmm_diagnostics import DiagnosticsMixin
@@ -247,62 +101,30 @@ from .fmm_overrides import (
 from .fmm_policy import PolicyMixin
 from .fmm_prepare import PrepareMixin
 from .fmm_presets import FMMPresetConfig, get_preset_config
-from .fmm_state import (
+from .fmm_state import (  # noqa: F401
     FMMPreparedState,
     FMMResolvedConfig,
-    TreeBuilderConfig,
     _bucket_far_pairs_by_level_split,
-    _build_octree_downward_artifacts,
-    _build_octree_upward_artifacts,
     _build_tree_with_config,
-    _empty_interaction_storage_like,
-    _finalize_octree_downward_artifacts,
     _GeometryReuseEntry,
     _normalize_strict_refresh_diag_mode,
-    _octree_farfield_eval_inputs,
-    _prepared_state_octree_upward_payload,
-    _prepared_state_upward_payload,
-    _PrepareStateDualDownwardArtifacts,
-    _PrepareStateFarPairPlan,
     _PrepareStateTreeUpwardArtifacts,
     _resolve_fmm_config,
-    _RuntimeExecutionOverrides,
     _strict_refresh_diag_stage_flags,
-    _TopologyReuseCandidate,
     _TopologyReuseEntry,
-    _TreeBuildArtifacts,
-    _velocity_verlet_state_update,
 )
 from .fmm_strict_cap_profile import StrictCapProfileMixin
 from .fmm_strict_run import StrictRunMixin
 from .fmm_sweeps import SweepsMixin
-from .kernels.core import (
+from .kernels.core import (  # noqa: F401
     ExpansionBasis,
     NearfieldInteropData,
-    PackedAccelerationDerivatives,
     _build_nearfield_interop_data,
-    _build_target_nearfield_source_index_matrix,
-    _compute_targeted_nearfield,
-    _empty_interaction_storage_for_tree,
     _evaluate_local_expansions_for_particles,
-    _evaluate_local_expansions_for_target_particles,
-    _evaluate_prepared_tree,
-    _evaluate_prepared_tree_targets,
-    _evaluate_tree_compiled_impl,
-    _FarPairCOO,
-    _infer_bounds,
-    _infer_order_from_coeff_count,
-    _map_targets_to_leaf_positions,
-    _max_leaf_size_from_tree,
     _normalize_strict_refresh_detail_diag_mode,
     _prepare_solidfmm_downward_sweep,
-    _prepare_tree_evaluation_inputs,
 )
-from .reference import MultipoleExpansion
-from .reference import compute_expansion as reference_compute_expansion
 from .reference import compute_gravitational_potential as reference_compute_potential
-from .reference import direct_sum as reference_direct_sum
-from .reference import evaluate_expansion as reference_evaluate_expansion
 
 FarFieldMode = Literal["auto", "pair_grouped", "class_major"]
 NearFieldMode = Literal["auto", "baseline", "bucketed"]
