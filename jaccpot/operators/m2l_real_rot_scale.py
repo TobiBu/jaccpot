@@ -47,7 +47,26 @@ from ._transverse_degeneracy_jvp import (
 def _rotate_multipole_to_z_single(
     multipole: Array, delta: Array, *, order: int
 ) -> Array:
-    """Rotate one real multipole expansion into the z-aligned frame."""
+    """Rotate one real multipole expansion into the z-aligned frame.
+
+    Block-diagonal by degree: each ``ell`` block is built and applied on its own,
+    because a real rotation mixes orders only within a degree.
+
+    Parameters
+    ----------
+    multipole : Array
+        Packed real multipole coefficients ``[(p+1)^2]``.
+    delta : Array
+        Displacement ``[3]`` whose direction defines the z-alignment.
+    order : int
+        Expansion order ``p``. A Python int -- the degree loop is unrolled at
+        trace time.
+
+    Returns
+    -------
+    Array
+        Coefficients in the z-aligned frame, same shape and dtype.
+    """
     x, y, z = delta[0], delta[1], delta[2]
     out = jnp.zeros_like(multipole)
     for ell in range(int(order) + 1):
@@ -59,7 +78,26 @@ def _rotate_multipole_to_z_single(
 
 @highest_matmul_precision
 def _rotate_local_from_z_single(local_z: Array, delta: Array, *, order: int) -> Array:
-    """Rotate one real local expansion from z-frame back to world frame."""
+    """Rotate one real local expansion from z-frame back to world frame.
+
+    The inverse partner of :func:`_rotate_multipole_to_z_single`, and a different
+    matrix: the local rotation is not the multipole rotation transposed. Both are
+    degree-block-diagonal.
+
+    Parameters
+    ----------
+    local_z : Array
+        Packed real local coefficients ``[(p+1)^2]`` in the z-aligned frame.
+    delta : Array
+        The same displacement ``[3]`` used to align.
+    order : int
+        Expansion order ``p``.
+
+    Returns
+    -------
+    Array
+        Coefficients back in the world frame.
+    """
     x, y, z = delta[0], delta[1], delta[2]
     out = jnp.zeros_like(local_z)
     for ell in range(int(order) + 1):
@@ -81,6 +119,31 @@ def m2l_core_z_real(
     When ``use_pallas=True``, the function dispatches to the optional Pallas
     kernel on supported accelerator backends and otherwise falls back to the
     pure-JAX recurrence.
+
+    Radii are floored at 1e-30 before use. That is not cosmetic: the z-translation
+    divides by ``r``, so a coincident pair would produce inf/NaN rather than a
+    large-but-finite contribution, and the floor keeps the kernel total rather
+    than making the caller pre-screen.
+
+    Parameters
+    ----------
+    multipole_rot : Array
+        Multipoles already rotated into their z-aligned frames,
+        ``[N, (p+1)^2]``.
+    radii : Array
+        Pair separations ``[N]``, floored as above.
+    order : int
+        Expansion order ``p``. Static.
+    use_pallas : bool
+        Prefer the Pallas kernel. Silently falls back when the backend does not
+        support it, so this is a request rather than an assertion.
+
+    Returns
+    -------
+    Array
+        Local coefficients in the z-aligned frame, ``[N, (p+1)^2]``. The two
+        routes are numerically equivalent -- see the module docstring of
+        ``runtime/kernels/_m2l.py`` for the equivalence the suite asserts.
     """
     from jaccpot.pallas.m2l_core_z_real import (
         m2l_core_z_real_pallas,
@@ -264,7 +327,23 @@ def m2l_rot_scale_real_batch(
 
 
 def _pack_by_ell(coeffs: Array, *, order: int) -> Array:
-    """Pack (p+1)^2 coefficients into a padded (p+1, 2p+1) array."""
+    """Pack (p+1)^2 coefficients into a padded (p+1, 2p+1) array.
+
+    Rectangular so a whole batch of degree blocks can go through one ``einsum``;
+    degree ``ell`` uses only the first ``2*ell+1`` columns and the rest stay zero.
+
+    Parameters
+    ----------
+    coeffs : Array
+        Packed coefficients ``[(p+1)^2]``.
+    order : int
+        Expansion order ``p``.
+
+    Returns
+    -------
+    Array
+        ``[p+1, 2p+1]``, zero-padded to the right within each row.
+    """
     p = int(order)
     max_m = 2 * p + 1
     out = jnp.zeros((p + 1, max_m), dtype=coeffs.dtype)
@@ -275,7 +354,21 @@ def _pack_by_ell(coeffs: Array, *, order: int) -> Array:
 
 
 def _unpack_by_ell(packed: Array, *, order: int) -> Array:
-    """Inverse of :func:`_pack_by_ell`."""
+    """Inverse of :func:`_pack_by_ell`.
+
+    Parameters
+    ----------
+    packed : Array
+        Padded ``[p+1, 2p+1]`` coefficients.
+    order : int
+        Expansion order ``p``.
+
+    Returns
+    -------
+    Array
+        Packed ``[(p+1)^2]``. The padding columns are dropped, so this is only
+        the inverse for arrays that came from :func:`_pack_by_ell`.
+    """
     p = int(order)
     out = jnp.zeros((sh_size(p),), dtype=packed.dtype)
     for ell in range(p + 1):
@@ -292,6 +385,25 @@ def _apply_real_rotation_blocks_padded_batch(
 
     ``blocks_array`` has shape ``(batch, p+1, 2p+1, 2p+1)`` (block-diagonal per
     degree, zero-padded); ``coeffs`` has shape ``(batch, (p+1)^2)``.
+
+    One ``einsum`` at ``Precision.HIGHEST`` over the padded form, rather than a
+    per-degree loop: the padding costs arithmetic on zeros but removes the
+    per-degree launches, and the precision is pinned here for the same reason it
+    is pinned in ``operators/_precision.py``.
+
+    Parameters
+    ----------
+    coeffs : Array
+        Coefficients to rotate, ``[N, (p+1)^2]``.
+    blocks_array : Array
+        Per-degree rotation blocks, ``[N, p+1, 2p+1, 2p+1]``.
+    order : int
+        Expansion order ``p``. Static.
+
+    Returns
+    -------
+    Array
+        Rotated coefficients, ``[N, (p+1)^2]``.
     """
     packed = jax.vmap(lambda c: _pack_by_ell(c, order=order))(coeffs)
     rotated = jnp.einsum(
@@ -320,6 +432,27 @@ def _real_rotation_blocks_padded(
     cascade-level term -- see
     :func:`m2l_rot_scale_real_batch_cached_blocks`. Outside the band nothing changes, bit
     for bit, and the primal is untouched everywhere.
+
+    Parameters
+    ----------
+    deltas : Array
+        Displacement vectors ``[N, 3]``.
+    order : int
+        Expansion order ``p``.
+    dtype : Any
+        Dtype to build the blocks in.
+    which : str
+        Which of the four rotations to build; see the list above.
+
+    Returns
+    -------
+    Array
+        Padded blocks ``[N, p+1, 2p+1, 2p+1]``.
+
+    Raises
+    ------
+    ValueError
+        If ``which`` is not one of the four names listed above.
     """
     p = int(order)
     max_m = 2 * p + 1
@@ -352,7 +485,25 @@ def _real_rotation_blocks_padded(
 def real_rotation_blocks_to_z_multipole_batch(
     deltas: Array, *, order: int, dtype: Any
 ) -> Array:
-    """Padded real multipole world->z rotation blocks, one set per delta."""
+    """Padded real multipole world->z rotation blocks, one set per delta.
+
+    Step 1 of the M2L cascade, and the rotate-to-z of M2M.
+
+    Parameters
+    ----------
+    deltas : Array
+        Displacement vectors ``[N, 3]``; each defines one alignment.
+    order : int
+        Expansion order ``p``. Sets the block shape ``(p+1, 2p+1, 2p+1)``.
+    dtype : Any
+        Dtype to build the blocks in. Take it from the coefficients, so the
+        cached kernel does not have to promote.
+
+    Returns
+    -------
+    Array
+        Padded per-degree rotation blocks, ``[N, p+1, 2p+1, 2p+1]``.
+    """
     return _real_rotation_blocks_padded(
         deltas, order=order, dtype=dtype, which="to_z_multipole"
     )
@@ -361,7 +512,26 @@ def real_rotation_blocks_to_z_multipole_batch(
 def real_rotation_blocks_from_z_local_batch(
     deltas: Array, *, order: int, dtype: Any
 ) -> Array:
-    """Padded real local z->world rotation blocks, one set per delta."""
+    """Padded real local z->world rotation blocks, one set per delta.
+
+    Step 3 of the M2L cascade. Not the transpose of the multipole world->z
+    blocks -- the local and multipole representations rotate differently.
+
+    Parameters
+    ----------
+    deltas : Array
+        Displacement vectors ``[N, 3]``; each defines one alignment.
+    order : int
+        Expansion order ``p``. Sets the block shape ``(p+1, 2p+1, 2p+1)``.
+    dtype : Any
+        Dtype to build the blocks in. Take it from the coefficients, so the
+        cached kernel does not have to promote.
+
+    Returns
+    -------
+    Array
+        Padded per-degree rotation blocks, ``[N, p+1, 2p+1, 2p+1]``.
+    """
     return _real_rotation_blocks_padded(
         deltas, order=order, dtype=dtype, which="from_z_local"
     )
@@ -370,7 +540,23 @@ def real_rotation_blocks_from_z_local_batch(
 def real_rotation_blocks_from_z_multipole_batch(
     deltas: Array, *, order: int, dtype: Any
 ) -> Array:
-    """Padded real multipole z->world rotation blocks (M2M rotate-back), per delta."""
+    """Padded real multipole z->world rotation blocks (M2M rotate-back), per delta.
+
+    Parameters
+    ----------
+    deltas : Array
+        Displacement vectors ``[N, 3]``; each defines one alignment.
+    order : int
+        Expansion order ``p``. Sets the block shape ``(p+1, 2p+1, 2p+1)``.
+    dtype : Any
+        Dtype to build the blocks in. Take it from the coefficients, so the
+        cached kernel does not have to promote.
+
+    Returns
+    -------
+    Array
+        Padded per-degree rotation blocks, ``[N, p+1, 2p+1, 2p+1]``.
+    """
     return _real_rotation_blocks_padded(
         deltas, order=order, dtype=dtype, which="from_z_multipole"
     )
@@ -379,7 +565,23 @@ def real_rotation_blocks_from_z_multipole_batch(
 def real_rotation_blocks_to_z_local_batch(
     deltas: Array, *, order: int, dtype: Any
 ) -> Array:
-    """Padded real local world->z rotation blocks (L2L rotate-to-z), per delta."""
+    """Padded real local world->z rotation blocks (L2L rotate-to-z), per delta.
+
+    Parameters
+    ----------
+    deltas : Array
+        Displacement vectors ``[N, 3]``; each defines one alignment.
+    order : int
+        Expansion order ``p``. Sets the block shape ``(p+1, 2p+1, 2p+1)``.
+    dtype : Any
+        Dtype to build the blocks in. Take it from the coefficients, so the
+        cached kernel does not have to promote.
+
+    Returns
+    -------
+    Array
+        Padded per-degree rotation blocks, ``[N, p+1, 2p+1, 2p+1]``.
+    """
     return _real_rotation_blocks_padded(
         deltas, order=order, dtype=dtype, which="to_z_local"
     )
@@ -495,6 +697,30 @@ def m2m_rot_scale_real_batch_cached_blocks(
     the +z translation distance. ``blocks_to_z`` are multipole world->z blocks
     (``real_rotation_blocks_to_z_multipole_batch``), ``blocks_from_z`` are multipole z->world
     blocks (``real_rotation_blocks_from_z_multipole_batch``).
+
+    Parameters
+    ----------
+    multipoles : Array
+        Child multipole coefficients ``[N, (p+1)^2]``.
+    deltas : Array
+        ``child_center - parent_center`` ``[N, 3]``. **Source is the child here**,
+        the OPPOSITE sign from :func:`l2l_rot_scale_real_batch_cached_blocks` --
+        the two sweeps do not share a convention, and getting it backwards is a
+        wrong force rather than an error.
+    blocks_to_z : Array
+        Multipole world->z blocks, from
+        :func:`real_rotation_blocks_to_z_multipole_batch`.
+    blocks_from_z : Array
+        Multipole z->world blocks, from
+        :func:`real_rotation_blocks_from_z_multipole_batch`. Multipole blocks in
+        both directions -- an M2M never touches the local representation.
+    order : int
+        Expansion order ``p``. Static.
+
+    Returns
+    -------
+    Array
+        Parent-frame multipole contributions ``[N, (p+1)^2]``.
     """
     p = int(order)
     mult_rot = _apply_real_rotation_blocks_padded_batch(
@@ -530,6 +756,31 @@ def l2l_rot_scale_real_batch_cached_blocks(
     displacement (L2L convention, source=parent -- OPPOSITE sign of M2M). ``blocks_to_z`` are
     local world->z blocks (``real_rotation_blocks_to_z_local_batch``), ``blocks_from_z`` are
     local z->world blocks (``real_rotation_blocks_from_z_local_batch``).
+
+    Parameters
+    ----------
+    locals_coeffs : Array
+        Parent local coefficients ``[N, (p+1)^2]``.
+    deltas : Array
+        ``parent_center - child_center`` ``[N, 3]``. **Source is the parent
+        here** -- the opposite sign from
+        :func:`m2m_rot_scale_real_batch_cached_blocks`. A sign error in the
+        equivalent complex cascade capped accuracy at ~3e-3 for theta >= 0.5
+        without failing anything, so this is worth checking rather than assuming.
+    blocks_to_z : Array
+        Local world->z blocks, from
+        :func:`real_rotation_blocks_to_z_local_batch`.
+    blocks_from_z : Array
+        Local z->world blocks, from
+        :func:`real_rotation_blocks_from_z_local_batch`. Local blocks in both
+        directions -- an L2L never touches the multipole representation.
+    order : int
+        Expansion order ``p``. Static.
+
+    Returns
+    -------
+    Array
+        Child-frame local contributions ``[N, (p+1)^2]``.
     """
     p = int(order)
     loc_rot = _apply_real_rotation_blocks_padded_batch(
