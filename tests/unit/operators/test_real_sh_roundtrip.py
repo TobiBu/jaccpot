@@ -53,3 +53,39 @@ def test_real_sh_complex_roundtrip_preserves_coefficients():
 
     err = np.max(np.abs(np.asarray(coeffs_complex_rt - coeffs_complex)))
     assert err < 1.0e-10
+
+
+def test_the_two_real_conversions_are_not_interchangeable():
+    """``real_sh`` and the Dehnen converter target DIFFERENT real bases.
+
+    ``basis.real_sh.complex_to_real_coeffs`` produces the unitary sqrt(2)
+    tesseral basis; ``operators.real_dehnen_q.complex_to_dehnen_real_coeffs``
+    produces Dehnen's no-sqrt2 real solid harmonics, which is what the real
+    M2L/M2M/L2L/L2P operators consume. Substituting one for the other is
+    silently wrong rather than an error, so this pins that they are genuinely
+    distinct -- a guard against someone reading two same-shaped converters in
+    neighbouring modules as duplicates and collapsing them.
+
+    The ``m == 0`` entries agree (no sqrt2 enters there), which is exactly what
+    makes a spot check on a monopole miss the difference; the disagreement lives
+    in ``m != 0``.
+    """
+    from jaccpot.operators.real_harmonics import complex_to_dehnen_real_coeffs
+
+    order = 4
+    coeffs = _random_conjugate_symmetric_complex_coeffs(
+        order, key=jax.random.PRNGKey(0)
+    )
+
+    tesseral = np.asarray(complex_to_real_coeffs(coeffs, order=order))
+    dehnen = np.asarray(complex_to_dehnen_real_coeffs(coeffs, order=order))
+
+    assert tesseral.shape == dehnen.shape
+
+    m_nonzero = [
+        _idx_nm(n, m) for n in range(order + 1) for m in range(-n, n + 1) if m != 0
+    ]
+    # Not merely "not allclose": the two must differ on essentially every
+    # non-zero-m entry, so a partial refactor cannot pass this by accident.
+    differing = np.abs(tesseral[m_nonzero] - dehnen[m_nonzero]) > 1e-12
+    assert differing.mean() > 0.9, (differing.mean(), len(m_nonzero))
