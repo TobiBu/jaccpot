@@ -1662,8 +1662,10 @@ within 1.3× of the geometric MAC.
 
 ## Go/no-go for the paper
 
-**Re-based 2026-08-01** after the M2M fix invalidated the earlier basis. Three of the
-four original conditions are now met at N=4096; only the N ≥ 10⁵ scaling is open.
+**Re-based 2026-08-01** after the M2M fix invalidated the earlier basis, and again
+**2026-08-16** after the N=10⁶ leaf sweep. Every accuracy and cost condition is now met,
+at N=10⁶ and at a production leaf. **One condition is still open: warm-call end-to-end
+wall-clock** — see the last row.
 
 | condition | status |
 |---|---|
@@ -1674,6 +1676,9 @@ four original conditions are now met at N=4096; only the N ≥ 10⁵ scaling is 
 | holds at Dehnen's ε = 2e-7 | **met (2026-08-02)**: matched on median at N=16384/leaf 16, Plummer rms 5.8–11.1× / p99.99 9.6–18.9× for (16a) and 9.4–24.9× / 22.8–47.3× for (16b); bulge+halo 70–218× rms at 0.92–0.98× work. ε=2e-7 is inside the swept range, not at an endpoint |
 | holds at N ≥ 10⁵ **at a production leaf size** | **met, and this is the form the claim must take.** N=10⁵, leaf 256 (fiducial), matched median, 2 seeds: p99.99 **21–41×**, rms 13–20×, at **1.00×** interaction work. It is *not* a leaf-independent property — see the next row |
 | holds at N ≥ 10⁵ on *deep* trees | **no.** At leaf 16 / N=10⁵ the tail advantage is only 4.6–5.2× and the **p99 ratio is 0.76–0.83, i.e. worse than fixed θ**, at 16–18 % more work. Quote the claim with its leaf size attached |
+| holds at **N = 10⁶** at a production leaf | **met (2026-08-16), at leaf 1024 — and it is a *different* leaf from 10⁵'s.** 3 seeds, matched median 10⁻⁵, `median [min, max]`: eq (16a) p99.99 **21.8× [13.9, 34.4]** and eq (16b) **43.1× [31.0, 71.2]**, at 1.10×/1.03× work (`fixed/mass`, so *less* work). Leaf 256 at the same N gives only 2.7×/5.3× — the fiducial leaf is not depth-proof, and the production leaf has to be chosen per N |
+| the leaf knob is unbounded above | **no — it is capped by fp32, not by the criterion.** The δa/f floor rises with leaf size (1.86 → 6.85 ×10⁻⁶ over leaf 256 → 2048, tracking near-field pairs per particle) until it closes on the divergence guard. Leaf 2048 at N=10⁶ has one usable fixed-θ point and is unmeasurable; leaf 1024 is near the limit. "Bigger leaves keep helping" is extrapolation past the measurable range |
+| **warm-call end-to-end wall-clock at N ≥ 10⁵** | **OPEN — never measured, and it is Step 4's own accept condition** ("within 1.3× of the geometric MAC"). Interaction work is a wash to a win and prepare overhead is 0.98× at N=16384, but neither is wall-clock, and the leaf-sweep runs were four-to-a-box on contended cards so their `prepare_s`/`evaluate_s` are not quotable. This is the last quantitative gap in the paper's case |
 | the N-*trend* at fixed leaf | measured, and it decays at leaf 16 (p99.99 ~12× → ~5× over N = 16384 → 65536). **Item 2b showed this is a tree-depth effect, not an N effect** — the ladder was deepening the tree, and depth is what erodes the advantage |
 
 **Frame the claim on the tail, and quote p99.99.** The honest statement is not "the
