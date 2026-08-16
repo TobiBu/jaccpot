@@ -45,7 +45,6 @@ from yggdrax.tree import (
 )
 from yggdrax.tree_moments import compute_tree_mass_moments
 
-from jaccpot.basis.real_sh import complex_to_real_coeffs
 from jaccpot.config import (
     FMMExecutionBackend,
     FMMPreset,
