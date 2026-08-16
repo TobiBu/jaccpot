@@ -1,0 +1,101 @@
+{
+ "args": {
+  "n": 1000000,
+  "leaf_size": 1024,
+  "order": 8,
+  "distribution": "plummer",
+  "seed": 0,
+  "softening": 0.0,
+  "theta": 0.65,
+  "eps": 0.0003,
+  "repeats": 3,
+  "warmups": 1,
+  "perturb": 0.001,
+  "precision": "fp32",
+  "arms": "fixed,mass,mass_16b_est",
+  "json_out": "bench/results/validation/mac_walltime_1e6_leaf1024_perturbed.json"
+ },
+ "records": [
+  {
+   "arm": "fixed",
+   "knob": 0.65,
+   "prepare_s": {
+    "median": 19.87093516578898,
+    "min": 19.52550835115835,
+    "max": 20.48566081095487,
+    "samples": [
+     19.52550835115835,
+     20.48566081095487,
+     19.87093516578898
+    ]
+   },
+   "evaluate_s": {
+    "median": 1.4722480461932719,
+    "min": 1.4721625042147934,
+    "max": 1.4886099928990006,
+    "samples": [
+     1.4886099928990006,
+     1.4721625042147934,
+     1.4722480461932719
+    ]
+   },
+   "total_s": 21.34318321198225,
+   "prepared_state_type": "LargeNPreparedState",
+   "large_n_path_declined_reason": null
+  },
+  {
+   "arm": "mass",
+   "knob": 0.0003,
+   "prepare_s": {
+    "median": 19.712596361991018,
+    "min": 19.07002509292215,
+    "max": 19.895337113644928,
+    "samples": [
+     19.07002509292215,
+     19.712596361991018,
+     19.895337113644928
+    ]
+   },
+   "evaluate_s": {
+    "median": 1.3981724111363292,
+    "min": 1.3935280027799308,
+    "max": 1.4191751573234797,
+    "samples": [
+     1.4191751573234797,
+     1.3935280027799308,
+     1.3981724111363292
+    ]
+   },
+   "total_s": 21.110768773127347,
+   "prepared_state_type": "LargeNPreparedState",
+   "large_n_path_declined_reason": null
+  },
+  {
+   "arm": "mass_16b_est",
+   "knob": 0.0003,
+   "prepare_s": {
+    "median": 21.061566215008497,
+    "min": 20.51040054485202,
+    "max": 21.117675282992423,
+    "samples": [
+     21.117675282992423,
+     20.51040054485202,
+     21.061566215008497
+    ]
+   },
+   "evaluate_s": {
+    "median": 1.3348737661726773,
+    "min": 1.3211536249145865,
+    "max": 1.35037507629022,
+    "samples": [
+     1.35037507629022,
+     1.3348737661726773,
+     1.3211536249145865
+    ]
+   },
+   "total_s": 22.396439981181175,
+   "prepared_state_type": "LargeNPreparedState",
+   "large_n_path_declined_reason": null
+  }
+ ]
+}
