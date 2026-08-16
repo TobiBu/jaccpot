@@ -454,6 +454,27 @@ def test_fused_boundary_equals_the_weighted_sum_of_levels():
         assert _momentum_residual(fused, masses) < 1e-13
 
 
+# The three block-step tests carrying this group are the memory-heaviest in the
+# suite. Measured peak RSS, each run alone on CPU/float64:
+#
+#   test_block_step_rollout_conserves_momentum_and_bounds_energy   1921 MB
+#   test_boundary_kick_conserves_momentum                          1528 MB
+#   test_scanned_base_step_matches_the_unrolled_one                1336 MB
+#
+# CI runs the integration shard at `-n 2`, which bounds the worker count but not
+# what those workers hold at once: any two of these together is ~2.9-3.4 GB of
+# solver state on top of coverage. That is what crashed a worker intermittently
+# (main at be172a52, PR #122) -- and note it was reported against whichever test
+# was unlucky, not against the heaviest, which is why it looked like a defect in
+# the scanned/unrolled comparison rather than a scheduling problem.
+#
+# `xdist_group` + the workflow's `--dist loadgroup` pins these to ONE worker, so
+# they serialise with each other and only with each other. Sizes are deliberately
+# not reduced: n and the rung structure are what the assertions are about.
+_MUTUAL_HEAVY = pytest.mark.xdist_group("mutual_block_step_heavy")
+
+
+@_MUTUAL_HEAVY
 def test_boundary_kick_conserves_momentum():
     n = 1024
     positions, masses = _system(n)
@@ -570,6 +591,7 @@ def _total_energy(positions, velocities, masses, *, softening=SOFTENING, G=1.0):
     return kinetic + potential
 
 
+@_MUTUAL_HEAVY
 def test_block_step_rollout_conserves_momentum_and_bounds_energy():
     """End-to-end: momentum to round-off, energy bounded over many base steps."""
     n = 512
@@ -1068,6 +1090,7 @@ def test_boundary_kick_runs_under_jit_with_a_traced_boundary_index():
         )
 
 
+@_MUTUAL_HEAVY
 def test_scanned_base_step_matches_the_unrolled_one():
     """The scanned base step must be the same map, not merely a similar one.
 
