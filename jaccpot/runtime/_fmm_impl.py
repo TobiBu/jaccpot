@@ -310,6 +310,60 @@ JerkMode = Literal["fast_approx", "accurate"]
 PreparedStateLike = Union["FMMPreparedState", LargeNPreparedState]
 
 
+def derive_split_build_default(
+    *,
+    memory_objective: str,
+    backend: str,
+    tree_type: str,
+    expansion_basis: str,
+    streamed_far_pairs: bool,
+) -> bool:
+    """Whether the low-peak split dual-tree build is the default for this config.
+
+    Pulled out of :meth:`FMMEngine._resolve_derived_lane_flags` so it can be
+    evaluated twice against different field values, and so the five conjuncts are
+    testable without a GPU. ``backend`` is a parameter rather than a call to
+    :func:`jax.default_backend` for exactly that second reason.
+
+    **This is evaluated twice on purpose.** The first evaluation happens while the
+    caller's configuration is still in force; the second, in
+    :meth:`FMMEngine._apply_large_n_gpu_production_contract`, after that contract
+    has coerced ``memory_objective`` and ``streamed_far_pairs`` to the values the
+    ``large_n_gpu`` preset requires. Without the second, a caller who passes an
+    ``advanced=`` config alongside the preset gets the predicate computed from
+    their config's *defaults* -- ``streamed_far_pairs=None`` becoming ``False`` --
+    and the preset silently runs the monolithic dual-tree build it exists to
+    avoid. Measured consequence: an N=1e7 census OOMed on a 4.77 GiB allocation
+    inside ``_dual_tree_build_raw``.
+
+    Parameters
+    ----------
+    memory_objective : str
+        Resolved memory objective; only ``"minimum_memory"`` selects the split build.
+    backend : str
+        JAX default backend name. The split build is a GPU-only default.
+    tree_type : str
+        Resolved tree type; the split build exists for ``"radix"``.
+    expansion_basis : str
+        Resolved expansion basis; paired with ``"solidfmm"`` on this lane.
+    streamed_far_pairs : bool
+        Whether far pairs are streamed rather than materialised.
+
+    Returns
+    -------
+    bool
+        ``True`` when every conjunct holds, i.e. the split build is the default.
+    """
+
+    return bool(
+        memory_objective == "minimum_memory"
+        and backend == "gpu"
+        and tree_type == "radix"
+        and expansion_basis == "solidfmm"
+        and bool(streamed_far_pairs)
+    )
+
+
 class FMMEngine(
     PrepareMixin,
     EvaluateMixin,
@@ -1476,12 +1530,14 @@ class FMMEngine(
         None
             Mutates ``self`` in place, exactly as the inlined code did.
         """
-        self._streamed_minimum_memory_gpu_default_split_build: bool = bool(
-            self.memory_objective == "minimum_memory"
-            and jax.default_backend() == "gpu"
-            and self.tree_type == "radix"
-            and self.expansion_basis == "solidfmm"
-            and bool(self.streamed_far_pairs)
+        self._streamed_minimum_memory_gpu_default_split_build: bool = (
+            derive_split_build_default(
+                memory_objective=self.memory_objective,
+                backend=jax.default_backend(),
+                tree_type=self.tree_type,
+                expansion_basis=self.expansion_basis,
+                streamed_far_pairs=self.streamed_far_pairs,
+            )
         )
         self._large_n_gpu_production_profile_cached: bool = (
             str(self.preset).strip().lower() == "large_n_gpu"
@@ -1624,6 +1680,26 @@ class FMMEngine(
         self.precompute_grouped_class_segments = False
         if self.upward_leaf_batch_size is None:
             self.upward_leaf_batch_size = _LARGE_N_GPU_UPWARD_LEAF_BATCH_SIZE
+
+        # Re-derive the split-build default from the fields this contract has just
+        # coerced. `_resolve_derived_lane_flags` ran BEFORE them, so it saw whatever
+        # the caller supplied: on the bare preset that is already correct, but a
+        # caller who also passes `advanced=FMMAdvancedConfig(...)` replaces the
+        # preset's config with their own, whose defaults are
+        # `memory_objective="balanced"` and `streamed_far_pairs=None` -> False. The
+        # predicate then came out False and this preset silently ran the monolithic
+        # dual-tree build it exists to avoid. Note `streamed_far_pairs` is the
+        # load-bearing conjunct, not `memory_objective`: setting only the latter in
+        # an advanced config left the predicate False.
+        self._streamed_minimum_memory_gpu_default_split_build = (
+            derive_split_build_default(
+                memory_objective=self.memory_objective,
+                backend=jax.default_backend(),
+                tree_type=self.tree_type,
+                expansion_basis=self.expansion_basis,
+                streamed_far_pairs=self.streamed_far_pairs,
+            )
+        )
 
     def _resolve_execution_backend(self) -> str:
         """Resolve the active FMM execution backend without altering tree choice."""
