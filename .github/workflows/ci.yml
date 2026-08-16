@@ -163,6 +163,21 @@ jobs:
         # (overrides pyproject's `-n auto`). `-m "not experimental"` matches the
         # default addopts; all `slow` tests DO run here.
         #
+        # `--dist loadgroup`: `-n 2` bounds the worker COUNT but not what those
+        # two workers hold at once, and tests/integration/test_mutual_fmm.py has
+        # several block-step tests whose peak RSS is measured at 1.3-1.9 GB each
+        # (see the `xdist_group` note there). Any two of them scheduled together
+        # is ~2.9-3.4 GB of solver state plus coverage, which is what crashed
+        # `gw1` intermittently -- on main at be172a52 and on PR #122, both times
+        # reported as the *test that was unlucky* rather than the heaviest one.
+        # `loadgroup` keeps `load`'s scheduling for everything else and only
+        # pins same-group tests to one worker, so the heavy ones serialise with
+        # each other and nothing else changes.
+        #
+        # Measured cost of serialising them, this shard end to end on one box:
+        # 12:03 -> 13:27, +84 s (+11.6%), identical 171 passed / 2 skipped. On the
+        # runner's 36 min that is ~4 min against a 60 min cap.
+        #
         # `--ignore=tests/unit/runtime`: the Dehnen-MAC suite there is 94 cases
         # that each build a solver and run a full FMM solve (26-95 s apiece on
         # CPU). It has the `test-mac-runtime` job below to itself, so the `unit`
@@ -175,7 +190,7 @@ jobs:
         # `--cov-branch` on the command line cannot override that either way, so
         # passing the flag would be inert decoration.
         run: |
-          pytest -n 2 -m "not experimental" ${{ matrix.paths }} \
+          pytest -n 2 --dist loadgroup -m "not experimental" ${{ matrix.paths }} \
             --ignore=tests/unit/runtime \
             --cov=jaccpot \
             --cov-report=xml --cov-report=term:skip-covered
@@ -274,7 +289,32 @@ jobs:
     # JAX-0.11-class slowdown still trips this. And it breaks the self-perpetuating
     # part -- a cancelled job never SAVES its cache, so the two cancellations left
     # the next runs colder, which is exactly how a too-tight cap sustains itself.
-    timeout-minutes: 45
+    #
+    # 45 -> 75. The 24 min warm time the paragraph above reasons from is gone: the
+    # 3.11 leg now lands within a minute of the cap on essentially every run.
+    # Measured across six recent runs (main and PR branches):
+    #
+    #   3.11   44.2  44.9  44.3  35.9      3.12   32.0  30.6  37.2  32.5
+    #
+    # PR #125 is what this cost: BOTH legs were cancelled at 45m03s with the tests
+    # themselves GREEN -- `914 passed, 60 skipped in 2578.14s (0:42:58)` -- and the
+    # job killed during the post-job cache save. A red X on a passing suite, and by
+    # the paragraph above, a cache that never got written.
+    #
+    # Be honest about what 75 buys: it restores headroom, NOT the detector. At a
+    # ~45 min warm baseline a 2.6x slowdown is ~117 min, so no cap that is also a
+    # sane wall-clock can still catch that class of regression here -- the detector
+    # was lost when the suite grew, not when this number changed. The job now
+    # collects 980 non-slow cases, of which tests/unit is 835.
+    #
+    # So the real fix is the one test-mac-runtime's note already prescribes for
+    # exactly this situation: "another split by path, not a bigger number". Smoke
+    # is still one un-sharded job per Python version while test-full has been split
+    # four ways. Splitting it (tests/unit/runtime | tests/unit | rest) would put the
+    # longest leg near 30 min and make a 45-50 cap meaningful again. That is a
+    # bigger change than unblocking the queue, so it is written down here rather
+    # than done silently alongside it.
+    timeout-minutes: 75
     strategy:
       fail-fast: false
       matrix:
