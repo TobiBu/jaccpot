@@ -247,9 +247,17 @@ from .fmm_overrides import (
 from .fmm_policy import PolicyMixin
 from .fmm_prepare import PrepareMixin
 from .fmm_presets import FMMPresetConfig, get_preset_config
+
+# `PreparedStateLike` below is re-exported, not defined here. It used to live in
+# this module, which put it out of reach of `fmm_state` -- the module that defines
+# one of its two arms and has a function taking the union. Importing it keeps every
+# existing `from ._fmm_impl import PreparedStateLike` working unchanged.
+# (Comment kept OUTSIDE the parentheses: isort rewrites comments placed inside an
+# import block onto the `from ... import (` line, semicolon-joined and unreadable.)
 from .fmm_state import (
     FMMPreparedState,
     FMMResolvedConfig,
+    PreparedStateLike,
     TreeBuilderConfig,
     _bucket_far_pairs_by_level_split,
     _build_octree_downward_artifacts,
@@ -307,7 +315,6 @@ from .reference import evaluate_expansion as reference_evaluate_expansion
 FarFieldMode = Literal["auto", "pair_grouped", "class_major"]
 NearFieldMode = Literal["auto", "baseline", "bucketed"]
 JerkMode = Literal["fast_approx", "accurate"]
-PreparedStateLike = Union["FMMPreparedState", LargeNPreparedState]
 
 
 class FMMEngine(
