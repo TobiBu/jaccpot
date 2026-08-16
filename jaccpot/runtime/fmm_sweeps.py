@@ -1,4 +1,4 @@
-"""SweepsMixin: fmm_sweeps methods extracted from the FastMultipoleMethod
+"""SweepsMixin: fmm_sweeps methods extracted from the FMMEngine
 god-class (Phase 2d mixin split). Methods are verbatim (self unchanged); the
 engine class inherits this mixin. Sibling of _fmm_impl at runtime level.
 """
@@ -6,7 +6,7 @@ engine class inherits this mixin. Sibling of _fmm_impl at runtime level.
 from __future__ import annotations
 
 import os
-from typing import Any, Optional
+from typing import TYPE_CHECKING, Any, Optional
 
 import jax
 import jax.numpy as jnp
@@ -14,7 +14,6 @@ from beartype import beartype
 from beartype.typing import Callable
 from jaxtyping import Array, jaxtyped
 from yggdrax.dense_interactions import DenseInteractionBuffers
-from yggdrax.geometry import compute_tree_geometry
 from yggdrax.grouped_interactions import GroupedInteractionBuffers
 from yggdrax.interactions import (
     DualTreeRetryEvent,
@@ -25,6 +24,7 @@ from yggdrax.interactions import (
 from yggdrax.tree import Tree, get_node_levels
 from yggdrax.tree_moments import compute_tree_mass_moments
 
+from jaccpot.config import MACTypeInput
 from jaccpot.downward.local_expansions import (
     LocalExpansionData,
     TreeDownwardData,
@@ -46,12 +46,21 @@ from jaccpot.upward.tree_expansions import (
 from jaccpot.upward.tree_expansions import (
     prepare_upward_sweep as prepare_tree_upward_sweep,
 )
+from jaccpot.upward.tree_geometry import compute_tree_geometry_compiled
 
 from .kernels.core import _FarPairCOO, _prepare_solidfmm_downward_sweep
 from .reference import MultipoleExpansion
 from .reference import compute_expansion as reference_compute_expansion
 from .reference import direct_sum as reference_direct_sum
 from .reference import evaluate_expansion as reference_evaluate_expansion
+
+if TYPE_CHECKING:  # pragma: no cover - annotations only, no runtime import
+    # The mixins annotate `self` as the engine they are mixed into, which lives in
+    # `_fmm_impl` and imports *them* -- so this must stay under TYPE_CHECKING or it
+    # would form the cycle ARCHITECTURE §8 forbids. Before this block the names were
+    # dangling: `typing.get_type_hints` raised NameError on every mixin method, so the
+    # annotations documented an intent no tool could check.
+    from ._fmm_impl import FMMEngine
 
 
 class SweepsMixin:
@@ -68,7 +77,7 @@ class SweepsMixin:
 
     @jaxtyped(typechecker=beartype)
     def evaluate_expansion(
-        self: "FastMultipoleMethod",
+        self: "FMMEngine",
         expansion: MultipoleExpansion,
         order: int = 1,
         eval_point: Optional[Array] = None,
@@ -85,7 +94,7 @@ class SweepsMixin:
 
     @jaxtyped(typechecker=beartype)
     def direct_sum(
-        self: "FastMultipoleMethod",
+        self: "FMMEngine",
         positions: Array,
         masses: Array,
         eval_point: Array,
@@ -130,7 +139,7 @@ class SweepsMixin:
         return self._static_upward_num_levels
 
     def prepare_upward_sweep(
-        self: "FastMultipoleMethod",
+        self: "FMMEngine",
         tree: Tree,
         positions_sorted: Array,
         masses_sorted: Array,
@@ -178,7 +187,7 @@ class SweepsMixin:
                     else (
                         None
                         if bool(defer_geometry)
-                        else compute_tree_geometry(
+                        else compute_tree_geometry_compiled(
                             tree,
                             positions_sorted,
                             max_leaf_size=int(resolved_leaf_cap),
@@ -268,7 +277,7 @@ class SweepsMixin:
         )
 
     def run_downward_sweep(
-        self: "FastMultipoleMethod",
+        self: "FMMEngine",
         tree: Tree,
         multipoles: NodeMultipoleData,
         interactions: NodeInteractionList,
@@ -289,12 +298,15 @@ class SweepsMixin:
         )
 
     def prepare_downward_sweep(
-        self: "FastMultipoleMethod",
+        self: "FMMEngine",
         tree: Tree,
         upward_data: TreeUpwardData,
         *,
         theta: Optional[float] = None,
-        mac_type: Optional[MACType] = None,
+        # Caller-facing, so the superset: this accepts "dehnen_error" and
+        # resolves it below. The boundary between caller-facing and
+        # traversal-facing runs through this function.
+        mac_type: Optional[MACTypeInput] = None,
         initial_locals: Optional[LocalExpansionData] = None,
         interactions: Optional[NodeInteractionList] = None,
         m2l_chunk_size: Optional[int] = None,
@@ -321,7 +333,14 @@ class SweepsMixin:
         self._ensure_execution_backend_supported(tree=tree)
 
         theta_val = float(self.theta if theta is None else theta)
-        mac_type_val = self.mac_type if mac_type is None else mac_type
+        # Resolve BEFORE the traversal sees it. Both branches: an explicitly
+        # passed "dehnen_error" needs the same mapping as the solver default,
+        # and both `mac_type_val` consumers below are traversal-facing. This
+        # used to hand `self.mac_type` over raw, so the jaccpot-level policy
+        # value travelled to a boundary that rejects it.
+        mac_type_val = self._mac_type_for_traversal(
+            self.mac_type if mac_type is None else mac_type
+        )
         dehnen_scale_val = float(
             self.dehnen_radius_scale
             if dehnen_radius_scale is None
@@ -340,13 +359,23 @@ class SweepsMixin:
             p_gears_val = (
                 self.p_gears if p_gears is None else tuple(int(v) for v in p_gears)
             )
+            # Substage (M2L / L2L) timing defaults ON whenever refresh timing is
+            # active. It costs a device sync per substage, which is why it is
+            # switchable at all -- but JACCPOT_REFRESH_TIMING_ENABLE already
+            # means "I am profiling this step", and the previous default of OFF
+            # meant refresh_dual_m2l_compute_seconds and its L2L sibling were
+            # reported as a hard 0.0 in exactly the mode where someone was
+            # reading them. A zero that means "not measured" is worse than no
+            # number: it drew an M2L band at zero and pushed the whole far field
+            # into "unattributed". Set the variable to 0 to opt back out.
             timing_recorder = None
             sync_substage_timing = str(
-                os.environ.get("JACCPOT_REFRESH_TIMING_SYNC_SUBSTAGES", "0")
+                os.environ.get("JACCPOT_REFRESH_TIMING_SYNC_SUBSTAGES", "1")
             ).strip().lower() in {"1", "true", "yes", "on"}
             if bool(getattr(self, "_refresh_timing_active", False)) and bool(
                 sync_substage_timing
             ):
+                self._refresh_timing_substages_measured = True
 
                 def timing_recorder(attr: str, elapsed: float) -> None:
                     setattr(self, attr, float(getattr(self, attr, 0.0)) + elapsed)

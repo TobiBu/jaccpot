@@ -138,7 +138,7 @@ acceleration field. **Right:** the largest single-component error, normalised by
 the rms $|a|$ -- reported alongside the $L_2$ norm because an $L_2$ norm averages
 away the tail that actually limits an integrator. Exact configuration is
 annotated; all values are read from
-`results/validation/force_error_vs_order.json`.
+`bench/results/validation/force_error_vs_order.json`.
 """
 
 # --------------------------------------------------------------------------- #
@@ -212,7 +212,7 @@ quantity. **Open markers mark configurations whose far field is empty**: there t
 solver has degenerated to an exact P2P direct sum, so the error is float64
 round-off and says nothing about the expansion -- a flat low-$\\theta$ tail would
 otherwise read as convergence. Values from
-`results/validation/error_vs_theta.json`.
+`bench/results/validation/error_vs_theta.json`.
 """
 
 # --------------------------------------------------------------------------- #
@@ -383,7 +383,7 @@ an application is limited by its worst particle or by its throughput.
 The eq. (16b) arm supplies the exact $O(N^2)$ force scale $f_b$ and is a ceiling on
 what a better force-scale estimator could buy, not a runnable configuration.
 Nothing here is tuned to favour either arm; the sweep grids are the engineering
-benchmark's defaults. Values from `results/validation/mac_comparison.json`.
+benchmark's defaults. Values from `bench/results/validation/mac_comparison.json`.
 """
 
 # --------------------------------------------------------------------------- #
@@ -490,7 +490,7 @@ an acceleration costs strictly more than a potential, so the acceleration series
 is shown separately (dashed) rather than timed against jaxFMM's output. The
 $O(N^2)$ direct sum is cut off where it becomes unaffordable. Exponents are fitted
 above the annotated $N$, below which a GPU is launch-overhead bound rather than
-algorithm bound. Values from `results/scaling/wallclock_vs_n.json`.
+algorithm bound. Values from `bench/results/scaling/wallclock_vs_n.json`.
 """
 
 # --------------------------------------------------------------------------- #
@@ -578,7 +578,7 @@ $N \\log N$ over this range, not evidence of a different asymptotic class.
 
 Counts come from the solver's public runtime diagnostics after `prepare_state`.
 Any ladder point that could not be measured is named on the figure. Values from
-`results/scaling/interaction_counts.json`.
+`bench/results/scaling/interaction_counts.json`.
 """
 
 # --------------------------------------------------------------------------- #
@@ -686,7 +686,7 @@ configuration used in figures 1-3. The stage timers do not partition the wall
 clock exactly -- local-to-particle evaluation and host-side bookkeeping are not
 separately instrumented -- so the remainder is shown explicitly as
 *unattributed* rather than rescaled into the measured stages. Values from
-`results/scaling/stage_breakdown.json`.
+`bench/results/scaling/stage_breakdown.json`.
 """
 
 # --------------------------------------------------------------------------- #
@@ -779,7 +779,7 @@ and overhead-bound rather than work-bound, so the speedup crosses unity only onc
 there is enough work to fill the card. The CPU arm is not run above the annotated
 $N$ and the curve is not extrapolated past the last measured pair. Measured on a
 shared 72-core host, so the ratio is indicative rather than a hardware review.
-Values from `results/scaling/gpu_vs_cpu.json`.
+Values from `bench/results/scaling/gpu_vs_cpu.json`.
 """
 
 # --------------------------------------------------------------------------- #
@@ -880,7 +880,7 @@ transpose and a small bounded factor is the expected result. Tree construction i
 outside both arms; including it in only the forward would flatter the ratio. Each
 measurement records whether the call was jitted or ran eagerly (eager dispatch
 re-traces per call), and jitted and eager points are never joined. Values from
-`results/differentiability/autodiff_overhead.json`.
+`bench/results/differentiability/autodiff_overhead.json`.
 """
 
 # --------------------------------------------------------------------------- #
@@ -960,14 +960,14 @@ charge autodiff for topology changes: the acceptance criterion is piecewise
 constant in the positions, so a perturbation that moves a pair across the
 acceptance boundary changes which interactions exist, and only the finite
 difference sees it. Values from
-`results/differentiability/grad_correctness.json`.
+`bench/results/differentiability/grad_correctness.json`.
 """
 
 SPECS = [
     (
         "fig_01_force_error_vs_order",
         "Figure 01 -- force error vs expansion order",
-        "Loads `results/validation/force_error_vs_order.json`, produced by "
+        "Loads `bench/results/validation/force_error_vs_order.json`, produced by "
         "`bench/validation/force_error_vs_order.py`. No computation here.",
         FIG01,
         FIG01_CAPTION,
@@ -975,7 +975,7 @@ SPECS = [
     (
         "fig_02_error_vs_theta",
         "Figure 02 -- force error vs opening angle",
-        "Loads `results/validation/error_vs_theta.json`, produced by "
+        "Loads `bench/results/validation/error_vs_theta.json`, produced by "
         "`bench/validation/error_vs_theta.py`. No computation here.",
         FIG02,
         FIG02_CAPTION,
@@ -983,7 +983,7 @@ SPECS = [
     (
         "fig_03_mac_comparison",
         "Figure 03 -- geometric vs mass-dependent MAC",
-        "Loads `results/validation/mac_comparison.json`, produced by "
+        "Loads `bench/results/validation/mac_comparison.json`, produced by "
         "`bench/validation/mac_comparison.py` (a wrapper over "
         "`bench/validation/mac_error_distribution.py`). No computation here.",
         FIG03,
@@ -992,7 +992,7 @@ SPECS = [
     (
         "fig_04_wallclock_vs_n",
         "Figure 04 -- wall-clock vs N",
-        "Loads `results/scaling/wallclock_vs_n.json`, produced by "
+        "Loads `bench/results/scaling/wallclock_vs_n.json`, produced by "
         "`bench/scaling/wallclock.py`. No computation here.",
         FIG04,
         FIG04_CAPTION,
@@ -1000,7 +1000,7 @@ SPECS = [
     (
         "fig_05_interaction_counts",
         "Figure 05 -- interaction counts vs N",
-        "Loads `results/scaling/interaction_counts.json`, produced by "
+        "Loads `bench/results/scaling/interaction_counts.json`, produced by "
         "`bench/scaling/interaction_counts.py`. No computation here.",
         FIG05,
         FIG05_CAPTION,
@@ -1008,7 +1008,7 @@ SPECS = [
     (
         "fig_06_stage_breakdown",
         "Figure 06 -- per-stage time breakdown vs N",
-        "Loads `results/scaling/stage_breakdown.json`, produced by "
+        "Loads `bench/results/scaling/stage_breakdown.json`, produced by "
         "`bench/scaling/stage_breakdown.py`. No computation here.",
         FIG06,
         FIG06_CAPTION,
@@ -1016,7 +1016,7 @@ SPECS = [
     (
         "fig_07_gpu_vs_cpu",
         "Figure 07 -- single-GPU vs CPU speedup",
-        "Loads `results/scaling/gpu_vs_cpu.json`, produced by "
+        "Loads `bench/results/scaling/gpu_vs_cpu.json`, produced by "
         "`bench/scaling/gpu_vs_cpu_speedup.py`. No computation here.",
         FIG07,
         FIG07_CAPTION,
@@ -1024,7 +1024,7 @@ SPECS = [
     (
         "fig_12_autodiff_overhead",
         "Figure 12 -- forward vs forward+backward cost",
-        "Loads `results/differentiability/autodiff_overhead.json`, produced by "
+        "Loads `bench/results/differentiability/autodiff_overhead.json`, produced by "
         "`bench/differentiability/autodiff_overhead.py`. No computation here.",
         FIG12,
         FIG12_CAPTION,
@@ -1032,7 +1032,7 @@ SPECS = [
     (
         "fig_13_grad_correctness",
         "Figure 13 -- finite-difference vs autodiff gradients",
-        "Loads `results/differentiability/grad_correctness.json`, produced by "
+        "Loads `bench/results/differentiability/grad_correctness.json`, produced by "
         "`bench/differentiability/grad_correctness.py`. No computation here.",
         FIG13,
         FIG13_CAPTION,

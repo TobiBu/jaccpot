@@ -87,11 +87,11 @@ here are cheap to fix now and expensive to discover mid-writing.
   `bench/bench_real_vs_complex.py` — mostly adaptation, not new code):
   force error vs. direct summation across expansion orders; error vs. theta;
   fixed-theta vs. mass-dependent MAC interaction-count comparison. Results to
-  `results/validation/*.json`.
+  `bench/results/validation/*.json`.
 - [ ] `bench/scaling/` (reuse `bench/bench_jaxfmm_paper_compare.py`,
   `bench/profile_refresh_stage_breakdown.py`, `profile_downward_breakdown.py`):
   wall-clock vs N; interaction counts vs N; per-stage time breakdown;
-  single-GPU vs CPU speedup. Results to `results/scaling/*.json`.
+  single-GPU vs CPU speedup. Results to `bench/results/scaling/*.json`.
 
 ### Tests
 - [ ] Smoke test that each bench script runs end-to-end on tiny N in CI (not
@@ -124,17 +124,17 @@ only to contextualize.
   timers (local build, self M2L, all_gather, coarse M2M, cross-walk, halo
   import, remote M2L, P2P) and per-GPU interaction-count collection.
 - [ ] `bench/multigpu/strong_scaling.py`: fixed N, sweep #GPUs →
-  `results/multigpu/strong_scaling.json`
+  `bench/results/multigpu/strong_scaling.json`
 - [ ] `bench/multigpu/weak_scaling.py`: N scaled with #GPUs →
-  `results/multigpu/weak_scaling.json`
+  `bench/results/multigpu/weak_scaling.json`
 - [ ] `bench/multigpu/comm_overhead.py`: reuses `harness.py`'s per-stage
   timers, splits into comm-bound (`all_gather_coarse`, `cross_walk`,
   `halo_import`) vs compute-bound stages →
-  `results/multigpu/comm_overhead.json`
+  `bench/results/multigpu/comm_overhead.json`
 - [ ] `bench/multigpu/load_balance.py`: per-GPU interaction counts on a
   clustered (Plummer/NFW-like) distribution, not `uniform_cube` — this is
   specifically where naive space-filling-curve partitioning can go unbalanced
-  → `results/multigpu/load_balance.json`
+  → `bench/results/multigpu/load_balance.json`
 
 ### Tests
 - [ ] `tests/unit/test_multigpu_harness_smoke.py`: harness runs end-to-end on
@@ -157,11 +157,11 @@ only to contextualize.
 - [ ] `bench/differentiability/autodiff_overhead.py`: forward-only vs.
   forward+backward wall-clock ratio vs N (single-device), and vs #GPUs at
   fixed N (using `bench/multigpu/harness.py`) →
-  `results/differentiability/autodiff_overhead.json`
+  `bench/results/differentiability/autodiff_overhead.json`
 - [ ] `bench/differentiability/grad_correctness.py`: finite-difference vs.
   autodiff gradient agreement swept across theta, small N (FD is expensive —
   subsample particles/components, don't do the full array) →
-  `results/differentiability/grad_correctness.json`
+  `bench/results/differentiability/grad_correctness.json`
 
 ### Tests
 - [ ] Already covered by `tests/unit/test_gradient_correctness.py` in
@@ -198,9 +198,9 @@ only to contextualize.
 
 ### Experiments (`bench/payoff/`)
 - [ ] `energy_conservation.py`: energy/angular-momentum vs. time, long
-  integration → `results/payoff/energy_conservation.json`
+  integration → `bench/results/payoff/energy_conservation.json`
 - [ ] `parameter_recovery_demo.py`: loss/parameter-error convergence curve →
-  `results/payoff/recovery.json`
+  `bench/results/payoff/recovery.json`
 
 ### Notebooks
 - [ ] `examples/jaccpot_paper/fig_energy_conservation.ipynb`

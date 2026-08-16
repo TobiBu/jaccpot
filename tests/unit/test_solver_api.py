@@ -7,7 +7,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
-from yggdrax.interactions import DualTreeTraversalConfig
+from yggdrax.interactions import DualTreeTraversalConfig, NodeInteractionList
 
 import jaccpot.runtime._fmm_impl as fmm_impl_private
 import jaccpot.runtime._interaction_cache as interaction_cache_private
@@ -225,7 +225,7 @@ def test_advanced_config_applies_to_runtime():
 
 
 def test_large_gpu_minimum_memory_streamed_path_caps_oversized_explicit_traversal():
-    impl = fmm_impl_private.FastMultipoleMethod(
+    impl = fmm_impl_private.FMMEngine(
         preset=FMMPreset.LARGE_N_GPU,
         expansion_basis="solidfmm",
         mac_type="engblom",
@@ -258,7 +258,7 @@ def test_large_gpu_minimum_memory_streamed_path_caps_oversized_explicit_traversa
 
 
 def test_large_gpu_minimum_memory_streamed_path_keeps_small_explicit_traversal():
-    impl = fmm_impl_private.FastMultipoleMethod(
+    impl = fmm_impl_private.FMMEngine(
         preset=FMMPreset.LARGE_N_GPU,
         expansion_basis="solidfmm",
         mac_type="engblom",
@@ -327,7 +327,7 @@ def test_large_gpu_minimum_memory_streamed_tree_guard_keeps_safe_seed():
 
 
 def test_large_gpu_minimum_memory_streamed_path_clamps_auto_traversal_seed():
-    impl = fmm_impl_private.FastMultipoleMethod(
+    impl = fmm_impl_private.FMMEngine(
         preset=FMMPreset.LARGE_N_GPU,
         expansion_basis="solidfmm",
         mac_type="engblom",
@@ -352,7 +352,7 @@ def test_large_gpu_minimum_memory_streamed_path_clamps_auto_traversal_seed():
 
 
 def test_large_gpu_minimum_memory_streamed_seed_scales_for_xl_particle_counts():
-    impl = fmm_impl_private.FastMultipoleMethod(
+    impl = fmm_impl_private.FMMEngine(
         preset=FMMPreset.LARGE_N_GPU,
         expansion_basis="solidfmm",
         memory_objective="minimum_memory",
@@ -374,7 +374,7 @@ def test_large_gpu_minimum_memory_streamed_seed_scales_for_xl_particle_counts():
 
 
 def test_prepare_bucketed_scatter_schedules_skips_int32_overflow_shape():
-    impl = fmm_impl_private.FastMultipoleMethod(
+    impl = fmm_impl_private.FMMEngine(
         preset=FMMPreset.LARGE_N_GPU,
         expansion_basis="solidfmm",
         memory_objective="minimum_memory",
@@ -405,7 +405,7 @@ def test_prepare_bucketed_scatter_schedules_skips_int32_overflow_shape():
 
 
 def test_large_gpu_minimum_memory_nearfield_prepare_skips_pair_vector_precompute():
-    impl = fmm_impl_private.FastMultipoleMethod(
+    impl = fmm_impl_private.FMMEngine(
         preset=FMMPreset.LARGE_N_GPU,
         expansion_basis="solidfmm",
         memory_objective="minimum_memory",
@@ -423,8 +423,11 @@ def test_large_gpu_minimum_memory_nearfield_prepare_skips_pair_vector_precompute
         particle_order_to_native_leaf=jnp.zeros((1,), dtype=jnp.int32),
     )
 
+    # `neighbor_list=None` used to be passed here with the comment "unused on the
+    # short-circuit path". It was unused on EVERY path -- 0 references in the
+    # method's 112 lines -- so the parameter is gone rather than widened to
+    # `Optional[...]` to accommodate a value nothing read (F40).
     out = impl._prepare_nearfield_precompute_artifacts(
-        neighbor_list=None,  # unused on the short-circuit path
         nearfield_interop=nearfield_interop,
         leaf_cap=128,
         num_particles=2_097_152,
@@ -1152,6 +1155,16 @@ def test_compute_accelerations_returns_acc_derivatives_when_requested():
 
 
 def test_compute_accelerations_and_jerk_matches_direct_sum_small_n():
+    """Jerk matches direct summation in the NEAR-FIELD-ONLY regime.
+
+    ``theta=1e-4`` with ``leaf_size=12`` accepts **no** M2L pairs at this N, so
+    this is a direct-summation self-check: it bounds the near-field jerk and the
+    L2P/evaluation plumbing, and says nothing about the far field. Measured error
+    is ~1e-7, i.e. fp32 round-off, and it is identical for both ``jerk_mode``
+    values -- which is the tell that the far-field source-motion term never runs
+    here. Far-field coverage is
+    :func:`test_jerk_modes_diverge_against_direct_sum_when_far_field_engaged`.
+    """
     n = 20
     positions, masses = _sample_problem(n=n)
     velocities = _sample_velocities(n=n)
@@ -1183,6 +1196,16 @@ def test_compute_accelerations_and_jerk_matches_direct_sum_small_n():
 
 
 def test_compute_accelerations_and_jerk_accurate_mode_matches_direct_sum_tighter():
+    """``jerk_mode="accurate"`` matches direct summation, near-field-only regime.
+
+    Same caveat as
+    :func:`test_compute_accelerations_and_jerk_matches_direct_sum_small_n`:
+    ``theta=1e-4`` accepts no M2L pairs, so the tighter 2e-3 bound here reflects a
+    smaller N rather than the ``"accurate"`` scheme doing more work. The two
+    tolerances in these two tests are NOT a measurement of what ``"fast_approx"``
+    gives up; see
+    :func:`test_jerk_modes_diverge_against_direct_sum_when_far_field_engaged`.
+    """
     n = 16
     positions, masses = _sample_problem(n=n)
     velocities = _sample_velocities(n=n)
@@ -1211,6 +1234,92 @@ def test_compute_accelerations_and_jerk_accurate_mode_matches_direct_sum_tighter
         np.linalg.norm(np.asarray(jerk_ref)) + 1e-12
     )
     assert err_acc < 2e-3
+
+
+def _far_pair_count(state) -> int:
+    """M2L interactions in a prepared topology; 0 means the far field never runs."""
+    interactions = state.interactions
+    if interactions is not None:
+        return int(jnp.sum(interactions.counts))
+    dual = state.dual_tree_result
+    if dual is not None:
+        return int(jnp.sum(dual.far_pair_count))
+    return 0
+
+
+def test_jerk_modes_diverge_against_direct_sum_when_far_field_engaged():
+    """``"accurate"`` beats ``"fast_approx"`` against direct summation -- measured.
+
+    The two direct-sum jerk tests above both run at ``theta=1e-4``, which accepts
+    no M2L pairs, so neither exercises the far-field source-motion term that is the
+    only difference between the modes. This does, and it is the test that actually
+    bounds what ``"fast_approx"`` gives up.
+
+    Configuration matters and is asserted, not assumed: ``leaf_size=4`` is what
+    makes the MAC accept anything at this N. At ``leaf_size=12`` -- what the tests
+    above use -- the far-pair count is **zero** and both modes return bit-identical
+    jerks, so a version of this test with the usual leaf size would pass while
+    measuring nothing. Hence the ``far_pairs > 0`` guard.
+
+    Measured at N=96, leaf 4, p=4, ``theta=0.6`` (106 M2L pairs), relative L2
+    against direct summation:
+
+        fast_approx  1.74e-03
+        accurate     4.34e-04     -> 4.0x better
+
+    The ratio is the load-bearing assertion. Across N in {48, 96, 256} and theta in
+    {0.4, 0.5, 0.6} it ranges 2.8x-8.2x, and it collapses to exactly 1.0x whenever
+    the far-pair count is 0 -- so it is a direct probe of the source-motion term
+    being present. A floor of 2.0 sits below the measured minimum with margin.
+    Absolute bounds are set from the measurement plus roughly 3x headroom for the
+    fp32 sample; they are not tight convergence bounds and should not be read as
+    such.
+    """
+    n = 96
+    leaf_size = 4
+    order = 4
+    theta = 0.6
+
+    positions, masses = _sample_problem(n=n)
+    velocities = _sample_velocities(n=n)
+
+    # Anti-vacuity guard: the same parameters must actually accept M2L pairs.
+    probe = FastMultipoleMethod(preset=FMMPreset.ACCURATE, basis="solidfmm")
+    far_pairs = _far_pair_count(
+        probe.prepare_state(
+            positions, masses, max_order=order, leaf_size=leaf_size, theta=theta
+        )
+    )
+    assert far_pairs > 0, (
+        "config must engage the far field or this test measures nothing "
+        f"(got {far_pairs} M2L pairs; leaf_size=12 gives 0 at this N)"
+    )
+
+    jerk_ref = _direct_sum_jerk(positions, masses, velocities, G=1.0, softening=1e-3)
+    ref_norm = np.linalg.norm(np.asarray(jerk_ref)) + 1e-12
+
+    errors = {}
+    for mode in ("fast_approx", "accurate"):
+        fmm = FastMultipoleMethod(preset=FMMPreset.ACCURATE, basis="solidfmm")
+        kwargs = dict(leaf_size=leaf_size, max_order=order, theta=theta, jerk_mode=mode)
+        if mode == "accurate":
+            kwargs["jerk_fd_dt"] = 1e-3
+        _, jerk = fmm.compute_accelerations_and_jerk(
+            positions, masses, velocities, **kwargs
+        )
+        errors[mode] = float(np.linalg.norm(np.asarray(jerk - jerk_ref)) / ref_norm)
+
+    assert errors["fast_approx"] < 6e-3, errors
+    assert errors["accurate"] < 2e-3, errors
+
+    improvement = errors["fast_approx"] / max(errors["accurate"], 1e-30)
+    assert improvement > 2.0, (
+        "jerk_mode='accurate' should be materially closer to direct summation "
+        f"than 'fast_approx' once the far field is engaged, but improved only "
+        f"{improvement:.2f}x (fast={errors['fast_approx']:.3e}, "
+        f"accurate={errors['accurate']:.3e}). A ratio near 1.0 means the analytic "
+        "far-field source-motion term is not contributing."
+    )
 
 
 def test_compute_accelerations_and_jerk_accurate_mode_reuses_prepared_topology(
@@ -1705,13 +1814,21 @@ def test_large_n_compiled_eval_uses_specialized_nearfield(monkeypatch):
 
 
 def test_bucket_far_pairs_by_level_split_returns_two_gears():
-    interactions = type(
-        "DummyInteractions",
-        (),
-        {"level_offsets": jnp.asarray([0, 2, 4], dtype=jnp.int32)},
-    )()
+    # A real `NodeInteractionList`, not a one-attribute stub. The function only
+    # reads `level_offsets`, so a stub passed -- but it also made the test assert
+    # nothing about the declared contract, and it was one of the things that made
+    # `JACCPOT_RUNTIME_TYPECHECK=1` red (F40). Building the real NamedTuple costs
+    # five more lines and means the test breaks if the contract changes.
     src = jnp.asarray([0, 1, 2, 3], dtype=jnp.int32)
     tgt = jnp.asarray([4, 5, 6, 7], dtype=jnp.int32)
+    interactions = NodeInteractionList(
+        offsets=jnp.asarray([0, 4], dtype=jnp.int32),
+        sources=src,
+        targets=tgt,
+        counts=jnp.asarray([4], dtype=jnp.int32),
+        level_offsets=jnp.asarray([0, 2, 4], dtype=jnp.int32),
+        target_levels=jnp.asarray([0, 0, 1, 1], dtype=jnp.int32),
+    )
     gears, buckets = fmm_impl_private._bucket_far_pairs_by_level_split(
         interactions=interactions,
         src_far=src,
@@ -2116,9 +2233,16 @@ def test_minimum_memory_gpu_runtime_starts_with_smaller_traversal_capacities():
         )
 
     assert overrides.traversal_config is not None
-    # The small memory-safe pair-queue seed (32768) is the load-bearing
-    # assertion: the minimum-memory GPU lane must start from a bounded queue.
-    assert int(overrides.traversal_config.max_pair_queue) == 32768
+    # A *bounded* pair queue is the load-bearing assertion, and it now scales with
+    # the particle count rather than being one constant for every N below a
+    # million. At N=524288 that is 131072 (N/4 rounded to a power of two); the
+    # historical flat 32768 remains the floor and is what N <= 131072 still gets,
+    # asserted in tests/unit/runtime/test_capacity_replanning.py. The constant was
+    # a hard ceiling in the middle of the measured range: N=262144 raised
+    # "Pair queue capacity exceeded" on an A100 with 29.62 GiB free and the
+    # largest static buffer at 0.31 GiB.
+    assert int(overrides.traversal_config.max_pair_queue) == 131072
+    assert int(overrides.traversal_config.max_pair_queue) >= 32768
     # process_block is floored to the streamed minimum-memory ceiling (256, i.e.
     # _GPU_STREAMED_MINIMUM_MEMORY_EXPLICIT_PROCESS_BLOCK) to avoid underfilled
     # count-pass kernels -- matching the sibling auto-seed tests above. (The

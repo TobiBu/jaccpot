@@ -44,3 +44,9 @@ class BasisMetadata:
     p_max: int
     coefficient_ordering: str
     runtime_expansion_basis: str
+
+
+__all__ = [
+    "BasisInterface",
+    "BasisMetadata",
+]

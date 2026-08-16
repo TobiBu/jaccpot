@@ -5,7 +5,7 @@ repos:
       - id: black
 
   - repo: https://github.com/PyCQA/isort
-    rev: 9.0.0b1
+    rev: 9.0.0b2
     hooks:
       - id: isort
 
@@ -13,8 +13,46 @@ repos:
     rev: 0.9.1
     hooks:
       - id: pydoclint
-        args: ["--style", "numpy"]
-        stages: [manual]
+        # Runs on commit. Docstring drift is cheap to catch now and expensive to fix
+        # in bulk later. Config lives in pyproject.toml so that
+        # `pydoclint --config pyproject.toml jaccpot/` reproduces the hook exactly.
+        args: ["--config", "pyproject.toml"]
+
+  - repo: https://github.com/PyCQA/flake8
+    rev: 7.3.0
+    hooks:
+      - id: flake8
+        # UNDEFINED NAMES ONLY -- deliberately not a style linter.
+        #
+        # black, isort and pydoclint cannot see a name that is used but never
+        # imported, and neither can the test suite: every runtime module has
+        # `from __future__ import annotations`, so an unimported name inside an
+        # annotation is stored as a lazy string and never evaluated. Three real
+        # defects shipped through the full green gate that way -- audit G.1a
+        # (`_accumulate_from_multipoles`), G.1b
+        # (`evaluate_local_complex_with_grad_analytic`), and PR #94's
+        # `MACTypeInput`.
+        #
+        # `--select` is the whole point: F821 undefined name and F822 undefined
+        # name in `__all__`. Line length, import order and formatting stay with
+        # black and isort, so this hook adds no style opinions and cannot start
+        # arguing with them.
+        #
+        # F811 (redefinition) was tried and dropped. It fires on the legitimate
+        # "None, then conditionally def the same name" idiom at
+        # `fmm_sweeps.py:380`, so keeping it would mean annotating correct code to
+        # satisfy the linter. The three defects this hook exists for were all
+        # undefined names.
+        args: ["--select=F821,F822"]
+        # NOT scoped: the whole repo, `examples/` and `bench/` and `tests/` included.
+        # It was `files: ^jaccpot/` when introduced, because
+        # `examples/benchmark_gpu_radix_worker.py` carried 14 pre-existing F821s and
+        # cleaning them was its own PR. That PR happened; the count across every
+        # tracked file is now zero, so the restriction is gone.
+        #
+        # `bench/` and `examples/` are exempt from CLAUDE.md's test-first rule, which
+        # is about *tests*, not about whether a name resolves -- an undefined name in a
+        # benchmark is still a crash waiting for the branch that reaches it.
 
   - repo: local
     hooks:

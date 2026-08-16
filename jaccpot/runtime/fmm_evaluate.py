@@ -1,11 +1,12 @@
-"""EvaluateMixin: fmm_evaluate methods extracted from the FastMultipoleMethod
+"""EvaluateMixin: fmm_evaluate methods extracted from the FMMEngine
 god-class (Phase 2d mixin split). Methods are verbatim (self unchanged); the
 engine class inherits this mixin. Sibling of _fmm_impl at runtime level.
 """
 
 from __future__ import annotations
 
-from typing import Any, Optional, Union
+import warnings
+from typing import TYPE_CHECKING, Any, Callable, Optional, Union
 
 import jax
 import jax.numpy as jnp
@@ -18,10 +19,10 @@ from yggdrax.tree import Tree
 
 from jaccpot.config import GradConfig
 from jaccpot.downward.local_expansions import LocalExpansionData, TreeDownwardData
-from jaccpot.nearfield.near_field import (
-    compute_leaf_p2p_accelerations,
+from jaccpot.nearfield._fast_lane import (
     compute_leaf_p2p_accelerations_radix_fast_lane,
 )
+from jaccpot.nearfield.near_field import compute_leaf_p2p_accelerations
 
 from ._large_n_pipeline import evaluate_large_n_state
 from ._large_n_types import LargeNPreparedState
@@ -46,11 +47,67 @@ from .kernels.core import (
 )
 from .reference import direct_sum as reference_direct_sum
 
+if TYPE_CHECKING:  # pragma: no cover - annotations only, no runtime import
+    # `_fmm_impl` imports this mixin, and `_large_n_grad` is already deferred to a
+    # function-local import below for compile-time reasons, so both must stay out of
+    # the module-scope import graph. Before this block these names were dangling.
+    from ._fmm_impl import FMMEngine, PreparedStateLike
+    from ._large_n_grad import LargeNGradPlan
+
+_OUTER_JIT_WARNED = False
+
+
+def _warn_if_traced_under_an_outer_jit(positions: Any, masses: Any) -> None:
+    """Say, once, that an outer ``jax.jit`` here means a long compile.
+
+    XLA gives no progress output, so the compile of this pipeline reads exactly
+    like a hang -- and it defeats every ``try: jit / except: fall back``, because
+    slowness is not an exception. Measured on an A100 at N=4096, leaf 32, p=4,
+    fp64: 19.1 s to compile the forward on ``preset="accurate"``, 159.6 s for the
+    gradient, and a single inner module (``jit__accumulate_m2l_fullbatch``)
+    taking 3m28s on the default preset. Those are real one-time costs, not
+    failures -- but a user watching a silent terminal has no way to know that,
+    and the tranche-1 measurement recorded it as "did not finish".
+
+    Warned rather than raised: an outer jit is legitimate and, on the radix path,
+    worth it (measured 264x on the steady-state forward). The warning names
+    ``differentiable_step_fn``, which pays the same compile at a point the caller
+    chose instead of inside a timed region.
+
+    Parameters
+    ----------
+    positions : Any
+        Candidate positions. Typed ``Any`` because the whole question is whether
+        it is a tracer -- an ``Array`` annotation would be checked before the
+        function could ask.
+    masses : Any
+        Candidate masses, on the same terms. Either being a tracer is enough.
+    """
+
+    global _OUTER_JIT_WARNED
+    if _OUTER_JIT_WARNED:
+        return
+    if not any(isinstance(value, jax.core.Tracer) for value in (positions, masses)):
+        return
+    _OUTER_JIT_WARNED = True
+    warnings.warn(
+        "differentiable_accelerations is being traced (an outer jax.jit or "
+        "jax.grad is in charge). Compiling this pipeline takes tens of seconds "
+        "to minutes and XLA reports no progress, so it looks like a hang: "
+        "measured on an A100 at N=4096/fp64, 19 s for the forward, 160 s for the "
+        "gradient, and one inner module alone at 3m28s. It is a one-time cost. "
+        "To pay it deliberately rather than inside a timed region, use "
+        "FMMEngine.differentiable_step_fn(state, compile_now=(pos, "
+        "mass)). This warning is issued once per process.",
+        UserWarning,
+        stacklevel=3,
+    )
+
 
 class EvaluateMixin:
     @jaxtyped(typechecker=beartype)
     def compute_accelerations(
-        self: "FastMultipoleMethod",
+        self: "FMMEngine",
         positions: Array,
         masses: Array,
         *,
@@ -112,12 +169,37 @@ class EvaluateMixin:
         reuse_prepared_state : bool
             Reuse the most recent prepared state when identical array objects
             and preparation parameters are provided.
+        max_acc_derivative_order : int
+            Highest acceleration-derivative order to return alongside the
+            accelerations. ``0`` (the default) returns none. Non-zero requires
+            ``expansion_basis="solidfmm"`` and is rejected on the traced
+            fallback; see ``Raises``.
 
         Returns
         -------
-        Union[Array, Tuple[Array, Array]]
-            Accelerations for all particles or selected targets. When
-            ``return_potential`` is ``True``, also returns the potential.
+        Union[Array, Tuple[Array, Array], Tuple[Array, PackedAccelerationDerivatives], Tuple[Array, Array, PackedAccelerationDerivatives]]
+            Accelerations ``[N, 3]`` for all particles, or ``[len(target_indices), 3]``
+            when ``target_indices`` is given. ``return_potential`` inserts the
+            potentials next, and ``max_acc_derivative_order > 0`` appends a
+            :class:`PackedAccelerationDerivatives` last, so the four shapes are
+            ``a``, ``(a, pot)``, ``(a, derivs)`` and ``(a, pot, derivs)``.
+
+        Raises
+        ------
+        NotImplementedError
+            If ``positions`` or ``masses`` is a tracer (an outer ``jit``/``grad``
+            is in charge) *and* either ``return_potential`` is ``True`` or
+            ``max_acc_derivative_order`` is non-zero. The traced path falls back
+            to a direct sum that supports neither.
+
+        Notes
+        -----
+        This is the forward-only convenience entry point. For gradients use
+        :meth:`differentiable_accelerations`, or
+        :meth:`differentiable_step_fn` to pay the compile at a chosen moment --
+        under an outer trace this method falls back to an O(N^2) direct sum
+        rather than running the FMM pipeline, which is correct but not what a
+        caller timing "the FMM" is measuring.
         """
 
         cache_key: Optional[tuple[Any, ...]] = None
@@ -213,7 +295,7 @@ class EvaluateMixin:
 
     @jaxtyped(typechecker=beartype)
     def evaluate_prepared_state(
-        self: "FastMultipoleMethod",
+        self: "FMMEngine",
         state: PreparedStateLike,
         *,
         target_indices: Optional[Array] = None,
@@ -226,7 +308,42 @@ class EvaluateMixin:
         Tuple[Array, PackedAccelerationDerivatives],
         Tuple[Array, Array, PackedAccelerationDerivatives],
     ]:
-        """Evaluate accelerations/potentials for all particles or targets."""
+        """Evaluate accelerations/potentials for all particles or targets.
+
+        Evaluates the expansions ``state`` already carries, so it takes no live
+        positions or masses and must not be differentiated -- see
+        :meth:`differentiable_accelerations` for that. Dispatches on the state's
+        type: a ``LargeNPreparedState`` goes to the large-N lane, everything else
+        to the radix path.
+
+        Parameters
+        ----------
+        state : PreparedStateLike
+            Prepared tree and interaction lists, of either kind.
+        target_indices : Optional[Array]
+            1-D indices selecting which targets to return; all particles remain
+            sources.
+        return_potential : bool
+            Also return the potential.
+        jit_traversal : bool
+            Use the compiled traversal.
+        max_acc_derivative_order : int
+            Packed spatial derivative tower depth; ``0`` returns no tower.
+
+        Returns
+        -------
+        Union[Array, Tuple[Array, Array], Tuple[Array, PackedAccelerationDerivatives], Tuple[Array, Array, PackedAccelerationDerivatives]]
+            Accelerations, with potentials inserted next under
+            ``return_potential`` and the packed derivative tower appended last.
+
+        Raises
+        ------
+        ValueError
+            If the requested combination is not supported for this state.
+        NotImplementedError
+            For options the large-N lane does not implement, such as a target
+            subset on that path.
+        """
 
         if isinstance(state, LargeNPreparedState):
             return evaluate_large_n_state(
@@ -391,7 +508,7 @@ class EvaluateMixin:
 
     @jaxtyped(typechecker=beartype)
     def _evaluate_prepared_state_at_positions_sorted(
-        self: "FastMultipoleMethod",
+        self: "FMMEngine",
         state: FMMPreparedState,
         positions_sorted: Array,
         *,
@@ -415,6 +532,40 @@ class EvaluateMixin:
         ``masses_sorted`` are differentiable inputs, and the result never reads
         ``state.upward``/``state.downward``, so ``jax.grad`` over this method is an
         exact fixed-topology gradient.
+
+        Parameters
+        ----------
+        state : FMMPreparedState
+            Frozen topology. Read for its discrete artifacts only; its baked
+            expansions are deliberately not used.
+        positions_sorted : Array
+            Live positions ``[N, 3]`` in the state's Morton order. Differentiable.
+        masses_sorted : Optional[Array]
+            Live masses ``[N]``, likewise differentiable. ``None`` reuses the
+            state's, which is the difference between a position-only gradient and
+            one that also flows to mass.
+        target_indices : Optional[Array]
+            Subset of targets to return; all particles remain sources.
+        jit_traversal : bool
+            Use the compiled traversal.
+        nearfield_mode_override : Optional[str]
+            Force the near-field mode; ``None`` keeps the resolved policy.
+        nearfield_reverse_options : Optional[Any]
+            Reverse-pass tuning for the leaf-major lane; inert elsewhere. ``Any``
+            to keep the grad types out of this module.
+        force_ungrouped_farfield : bool
+            Take the ungrouped far-field path regardless of policy.
+
+        Returns
+        -------
+        Array
+            Accelerations in the state's sorted order.
+
+        Raises
+        ------
+        ValueError
+            If the supplied arrays do not match the state's particle count or
+            ordering.
         """
         positions_sorted_arr = jnp.asarray(positions_sorted, dtype=state.working_dtype)
         if positions_sorted_arr.shape != state.positions_sorted.shape:
@@ -548,7 +699,7 @@ class EvaluateMixin:
 
     @jaxtyped(typechecker=beartype)
     def differentiable_accelerations(
-        self: "FastMultipoleMethod",
+        self: "FMMEngine",
         state: Union[FMMPreparedState, LargeNPreparedState],
         positions: Array,
         masses: Array,
@@ -584,8 +735,12 @@ class EvaluateMixin:
             ``LargeNPreparedState`` (the ``large_n_gpu`` preset) additionally
             needs ``retain_far_pairs_for_grad=True`` so the frozen M2L pair list
             survives ``prepare_state``.
-        positions, masses : Array
-            Differentiated inputs, in the ORIGINAL (unsorted) particle order.
+        positions : Array
+            Differentiated source/target positions ``[N, 3]``, in the ORIGINAL
+            (unsorted) particle order -- this method applies ``state``'s
+            permutation itself.
+        masses : Array
+            Differentiated masses ``[N]``, in the same original order.
         target_indices : Optional[Array]
             Optional targets to return (all particles are still sources). Not
             supported on the large-N path.
@@ -630,6 +785,7 @@ class EvaluateMixin:
         explicitly requests ``grouped_interactions=True`` gets a forward force
         that differs from the force this gradient is taken of.
         """
+        _warn_if_traced_under_an_outer_jit(positions, masses)
         options = resolve_grad_options(
             grad_config,
             num_particles=int(jnp.asarray(positions).shape[0]),
@@ -657,8 +813,133 @@ class EvaluateMixin:
                 options=options,
             )
 
+    def differentiable_step_fn(
+        self: "FMMEngine",
+        state: Union[FMMPreparedState, LargeNPreparedState],
+        *,
+        target_indices: Optional[Array] = None,
+        grad_config: Optional[GradConfig] = None,
+        jit_traversal: bool = False,
+        compile_now: Optional[Tuple[Array, Array]] = None,
+    ) -> Callable[[Array, Array], Array]:
+        """Return a compiled ``f(positions, masses) -> accelerations``.
+
+        The step seam for a training or inference loop: build ``state`` once with
+        :meth:`prepare_state`, then call this once, then call the result per step.
+        The compile is paid once and amortised; the returned function is
+        differentiable, so ``jax.grad`` over it works and is compiled too.
+
+        Why this exists rather than "just wrap it in ``jax.jit``". Eagerly,
+        ``differentiable_accelerations`` re-traces its whole pipeline on every
+        call, and the re-tracing dominates. Measured on an idle A100 at N=4096,
+        leaf 64, p=4, real basis, evaluating a prebuilt tree:
+
+        ==============  ===========  =============  =========  =========
+        preset          eager        compile once   compiled   factor
+        ==============  ===========  =============  =========  =========
+        ``accurate``       6.681 s        18.88 s    0.0110 s      607x
+        ``large_n_gpu``    2.843 s         6.11 s    4.036 s       0.7x
+        ==============  ===========  =============  =========  =========
+
+        Both numbers are reported because they disagree, and the disagreement is
+        the useful part: on the radix path compiling is transformative, while on
+        the large-N production path the fast-lane kernels are already compiled
+        individually and folding them into one module is slightly *worse*. The
+        reverse pass on ``large_n_gpu`` behaves the same way (eager 12.62 s,
+        compiled 15.11 s after a 19.3 s compile). So this is a seam to reach for
+        on the radix path, and to measure before adopting on the large-N one.
+
+        The forward is bit-identical on ``large_n_gpu`` (max abs diff 0.0) and
+        agrees to 2.3e-12 on ``accurate`` at fp64, which is reassociation.
+
+        Parameters
+        ----------
+        state : Union[FMMPreparedState, LargeNPreparedState]
+            A prepared state from :meth:`prepare_state`. Closed over as a
+            constant, exactly as :meth:`differentiable_accelerations` treats it.
+        target_indices : Optional[Array]
+            Optional targets to return; all particles remain sources. Passed
+            through to :meth:`differentiable_accelerations` unchanged.
+        grad_config : Optional[GradConfig]
+            Grad-path options, passed through unchanged but resolved **once**,
+            here, rather than per call -- so a later environment change does not
+            take effect on an already-returned step function.
+        jit_traversal : bool
+            Passed through to :meth:`differentiable_accelerations` unchanged.
+        compile_now : Optional[Tuple[Array, Array]]
+            ``(positions, masses)`` to compile against immediately, so the
+            one-time cost lands here rather than inside the first timed step.
+            Recommended when benchmarking.
+
+        Returns
+        -------
+        Callable[[Array, Array], Array]
+            A compiled ``f(positions, masses) -> accelerations`` closing over
+            ``state``. Differentiable, so ``jax.grad`` over it works and is
+            itself compiled. Positions and masses are in the original (unsorted)
+            particle order, as for :meth:`differentiable_accelerations`.
+
+        Raises
+        ------
+        TypeError
+            If ``state`` holds tracers, i.e. it was built inside a trace. Tree
+            construction is host-side and not traceable, so such a state cannot
+            be a compile-time constant. Raised here rather than deep inside the
+            trace, where it surfaces as a leaked-tracer error naming an internal
+            cache.
+        """
+
+        from .fmm_caches import _contains_tracer
+
+        if _contains_tracer(state):
+            raise TypeError(
+                "differentiable_step_fn needs a concrete prepared state, but this "
+                "one holds tracers -- it was built inside a jax transform. "
+                "prepare_state does host-side tree construction and is not "
+                "traceable; build the state outside, then call this."
+            )
+        options = resolve_grad_options(
+            grad_config,
+            num_particles=int(
+                getattr(getattr(state, "inverse_permutation", None), "shape", (0,))[0]
+            ),
+            supports_fast_lane=not isinstance(state, LargeNPreparedState),
+        )
+
+        def _step(positions: Array, masses: Array) -> Array:
+            with grad_option_overrides(options):
+                if isinstance(state, LargeNPreparedState):
+                    return self._differentiable_accelerations_large_n(
+                        state,
+                        positions,
+                        masses,
+                        target_indices=target_indices,
+                        grad_plan=None,
+                        options=options,
+                    )
+                return self._differentiable_accelerations_radix(
+                    state,
+                    positions,
+                    masses,
+                    target_indices=target_indices,
+                    jit_traversal=jit_traversal,
+                    options=options,
+                )
+
+        compiled = jax.jit(_step)
+        if compile_now is not None:
+            # Warm the jit cache by CALLING it, not by returning
+            # `.lower(...).compile()`: an AOT-compiled object is specialised to
+            # one signature and rejects JAX transformations, so returning it
+            # would make the seam undifferentiable -- the one thing it exists
+            # for. (`jax.grad` over it fails with "Cannot apply JAX
+            # transformations to a function lowered and compiled for a
+            # particular signature".)
+            jax.block_until_ready(compiled(*compile_now))
+        return compiled
+
     def _forward_permutation(
-        self: "FastMultipoleMethod",
+        self: "FMMEngine",
         state: Union[FMMPreparedState, LargeNPreparedState],
     ) -> Array:
         """Original-order -> Morton-sorted gather index, memoized on the state.
@@ -680,25 +961,68 @@ class EvaluateMixin:
         alive. The cache is a single slot keyed by the permutation array's
         identity, and holds a strong reference to it, so a live entry pins its own
         key and no freed array's id can be reused against a stale entry.
+
+        Parameters
+        ----------
+        state : Union[FMMPreparedState, LargeNPreparedState]
+            Prepared state whose ``inverse_permutation`` is inverted. Its array
+            identity is the cache key.
+
+        Returns
+        -------
+        Array
+            Integer gather index ``fwd`` with ``positions_sorted ==
+            positions[fwd]``.
         """
         permutation = state.inverse_permutation
         cached = getattr(self, "_forward_permutation_memo", None)
         if cached is not None and cached[0] is permutation:
-            return cached[1]
+            # Never hand back a cached tracer. A memo written during a trace that
+            # outlives it makes the NEXT call fail with UnexpectedTracerError
+            # pointing here, which reads as a bug in the caller. Dropping the
+            # entry costs one host sort and cannot be wrong.
+            if not _contains_tracer(cached):
+                return cached[1]
+            self._forward_permutation_memo = None
         inverse_permutation_host = np.asarray(jax.device_get(permutation))
         forward_permutation = jnp.asarray(
             np.argsort(inverse_permutation_host, kind="stable"), dtype=INDEX_DTYPE
         )
-        self._forward_permutation_memo = (permutation, forward_permutation)
+        # Only memoise concrete values, for the same reason: this method is called
+        # from inside `jax.jit`/`jax.grad` traces by design (see
+        # differentiable_step_fn), and the memo lives on the solver, which
+        # outlives any single trace.
+        if not _contains_tracer((permutation, forward_permutation)):
+            self._forward_permutation_memo = (permutation, forward_permutation)
         return forward_permutation
 
     def _sorted_inputs(
-        self: "FastMultipoleMethod",
+        self: "FMMEngine",
         state: Union[FMMPreparedState, LargeNPreparedState],
         positions: Array,
         masses: Array,
     ) -> Tuple[Array, Array]:
-        """Gather live positions/masses into Morton order at frozen topology."""
+        """Gather live positions/masses into Morton order at frozen topology.
+
+        Both are cast to the state's working dtype before the gather, so a
+        caller passing fp64 into an fp32 state does not silently widen the
+        pipeline.
+
+        Parameters
+        ----------
+        state : Union[FMMPreparedState, LargeNPreparedState]
+            Supplies the permutation and the working dtype.
+        positions : Array
+            Live positions ``[N, 3]`` in the caller's original order.
+        masses : Array
+            Live masses ``[N]``, same order.
+
+        Returns
+        -------
+        Tuple[Array, Array]
+            ``(positions_sorted, masses_sorted)``. A gather, so its VJP is a
+            scatter-add and cotangents flow back to both inputs.
+        """
         forward_permutation = self._forward_permutation(state)
         return (
             jnp.asarray(positions, dtype=state.working_dtype)[forward_permutation],
@@ -706,16 +1030,32 @@ class EvaluateMixin:
         )
 
     def _grad_output_dtype(
-        self: "FastMultipoleMethod",
+        self: "FMMEngine",
         state: Union[FMMPreparedState, LargeNPreparedState],
     ) -> Any:
-        """Return accelerations in the caller's float dtype where there is one."""
+        """Return accelerations in the caller's float dtype where there is one.
+
+        "Where there is one" is the whole condition: an integer or otherwise
+        non-floating ``input_dtype`` cannot hold a gradient, so the working dtype
+        is used rather than round-tripping the result through it.
+
+        Parameters
+        ----------
+        state : Union[FMMPreparedState, LargeNPreparedState]
+            Supplies both candidate dtypes.
+
+        Returns
+        -------
+        Any
+            ``state.input_dtype`` when it is a floating type, else
+            ``state.working_dtype``.
+        """
         if jnp.issubdtype(state.input_dtype, jnp.floating):
             return state.input_dtype
         return state.working_dtype
 
     def _differentiable_accelerations_large_n(
-        self: "FastMultipoleMethod",
+        self: "FMMEngine",
         state: LargeNPreparedState,
         positions: Array,
         masses: Array,
@@ -732,6 +1072,34 @@ class EvaluateMixin:
         the fused Pallas fast lane driven through its ``custom_vjp``. The
         near-field lane is therefore not selectable here -- this state has exactly
         one differentiable near field. See ``runtime/_large_n_grad.py``.
+
+        Parameters
+        ----------
+        state : LargeNPreparedState
+            Frozen large-N topology. Carries compact far pairs instead of an
+            interaction list.
+        positions : Array
+            Live positions ``[N, 3]``, differentiated.
+        masses : Array
+            Live masses ``[N]``, differentiated.
+        target_indices : Optional[Array]
+            Must be ``None`` here; the large-N lane has no target-subset path.
+        grad_plan : Optional[LargeNGradPlan]
+            Prebuilt validation and pair-list setup, so an optimisation loop can
+            hoist it out. ``None`` builds it per call.
+        options : Any
+            Resolved :class:`~jaccpot.config.GradConfig`. Its ``nearfield_lane``
+            is ignored on this state -- see above.
+
+        Returns
+        -------
+        Array
+            Accelerations ``(N, 3)`` in the caller's original order.
+
+        Raises
+        ------
+        NotImplementedError
+            For options this lane does not support, including a target subset.
         """
         from ._large_n_grad import (
             evaluate_large_n_state_at_positions_and_masses_sorted,
@@ -773,7 +1141,7 @@ class EvaluateMixin:
         )
 
     def _differentiable_accelerations_radix(
-        self: "FastMultipoleMethod",
+        self: "FMMEngine",
         state: FMMPreparedState,
         positions: Array,
         masses: Array,
@@ -800,6 +1168,33 @@ class EvaluateMixin:
         orthogonal opt-in: the fused kernels carry their own ``custom_vjp``, so
         the flag simply routes the M2L dispatch through them, falling back to
         pure-JAX on non-Ampere hardware.
+
+        Parameters
+        ----------
+        state : FMMPreparedState
+            Frozen radix topology.
+        positions : Array
+            Live positions ``[N, 3]``, differentiated.
+        masses : Array
+            Live masses ``[N]``, differentiated.
+        target_indices : Optional[Array]
+            Subset of targets to return; all particles remain sources.
+        jit_traversal : bool
+            Kept ``False`` on the gradient path.
+        options : Any
+            Resolved :class:`~jaccpot.config.GradConfig`; ``nearfield_lane``
+            selects between the two lanes described above.
+
+        Returns
+        -------
+        Array
+            Accelerations ``(N, 3)`` in the caller's original order.
+
+        Raises
+        ------
+        NotImplementedError
+            If the resolved lane or option combination has no implementation for
+            this state.
         """
         if getattr(state, "expansion_basis", None) != "solidfmm":
             raise NotImplementedError(
@@ -822,7 +1217,7 @@ class EvaluateMixin:
         )
 
     def _evaluate_leaf_major_nearfield(
-        self: "FastMultipoleMethod",
+        self: "FMMEngine",
         tree: Tree,
         neighbor_list: NodeNeighborList,
         nearfield_interop: Optional[NearfieldInteropData],
@@ -846,6 +1241,40 @@ class EvaluateMixin:
         state carries no interop view -- deliberately NOT through
         ``_build_nearfield_interop_data``, whose device-side index work would be
         traced (and so unusable as a static shape) under an outer ``jax.jit``.
+
+        Parameters
+        ----------
+        tree : Tree
+            Frozen tree, read for its topology.
+        neighbor_list : NodeNeighborList
+            Frozen neighbour lists; with ``tree`` this is what the memoized
+            payload is keyed on.
+        nearfield_interop : Optional[NearfieldInteropData]
+            Prebuilt interop view; ``None`` reads the topology directly, which is
+            the jit-safe route described above.
+        positions : Array
+            Live positions ``[N, 3]`` in sorted order.
+        masses : Array
+            Live masses ``[N]`` in sorted order.
+        max_leaf_size : int
+            Padded leaf width. Static -- it sizes the leaf-major blocks.
+        return_potential : bool
+            Also return the potential.
+        reverse_options : Optional[Any]
+            Reverse-pass tuning for this lane. ``Any`` to keep the grad types out
+            of this module.
+
+        Returns
+        -------
+        Array
+            Near-field accelerations in sorted order, with potentials alongside
+            when requested.
+
+        Raises
+        ------
+        NotImplementedError
+            If the lane is unavailable for this configuration -- notably when
+            Pallas is required but the hardware is pre-Ampere.
         """
         if bool(return_potential):
             raise NotImplementedError(
@@ -873,7 +1302,7 @@ class EvaluateMixin:
 
     @jaxtyped(typechecker=beartype)
     def evaluate_tree(
-        self: "FastMultipoleMethod",
+        self: "FMMEngine",
         tree: Tree,
         positions_sorted: Array,
         masses_sorted: Array,
@@ -899,15 +1328,74 @@ class EvaluateMixin:
 
         ``nearfield_mode_override`` forces the near-field execution mode instead
         of the policy resolution (used by the differentiable path to select the
-        vectorized ``"bucketed"`` near-field, which is bit-identical to the
-        default ``"baseline"`` scan but orders of magnitude faster and has a
-        cheaper reverse pass). ``None`` keeps the resolved policy unchanged.
+        vectorized ``"bucketed"`` near-field, which is orders of magnitude faster
+        than the default ``"baseline"`` scan and has a cheaper reverse pass).
+        ``None`` keeps the resolved policy unchanged.
+
+        ``"bucketed"`` agrees with ``"baseline"`` **to a tolerance, not
+        bit-exactly** -- the two differ in edge order, hence in accumulation
+        order. Asserted by
+        ``tests/integration/test_fmm.py::test_nearfield_bucketed_matches_baseline``
+        over N x dtype x chunk size, at ``1e-6`` (fp32) and ``1e-13`` (fp64) --
+        both derived from measured round-off. See
+        :func:`~jaccpot.nearfield.near_field.compute_leaf_p2p_accelerations` for
+        why the fp64 cases are the ones that can actually fail.
 
         The extra value ``"fast_lane"`` is not a mode of the edge-list kernel at
         all: it re-expresses the near field leaf-major and routes it through
         :func:`compute_leaf_p2p_accelerations_radix_fast_lane`, which owns the
         analytic O(N) leaf-pair reverse. Same edge set, same force; a different
         traversal. See :mod:`jaccpot.runtime._nearfield_fastlane`.
+
+        Parameters
+        ----------
+        tree : Tree
+            Built tree.
+        positions_sorted : Array
+            Morton-sorted positions ``[N, 3]``.
+        masses_sorted : Array
+            Morton-sorted masses ``[N]``.
+        locals_or_downward : Union[LocalExpansionData, TreeDownwardData]
+            Local expansions, or the downward result carrying them.
+        neighbor_list : NodeNeighborList
+            Leaf ordering and neighbour lists.
+        nearfield_interop : Optional[NearfieldInteropData]
+            Prebuilt near-field view; ``None`` builds one.
+        farfield_local_data : Optional[LocalExpansionData]
+            Far-field locals override; ``None`` uses those in
+            ``locals_or_downward``.
+        farfield_leaf_nodes : Optional[Array]
+            Far-field leaf view override; ``None`` uses the radix view.
+        farfield_node_ranges : Optional[Array]
+            Far-field node-range override; ``None`` as above.
+        precomputed_target_leaf_ids : Optional[Array]
+            Per-edge target leaf ids. ``None`` means absent -- unlike the
+            compiled kernel further down the stack, which opts in by *shape*.
+        precomputed_source_leaf_ids : Optional[Array]
+            Per-edge source leaf ids.
+        precomputed_valid_pairs : Optional[Array]
+            Per-edge validity mask.
+        precomputed_chunk_sort_indices : Optional[Array]
+            Chunk scatter sort permutation.
+        precomputed_chunk_group_ids : Optional[Array]
+            Chunk scatter group ids.
+        precomputed_chunk_unique_indices : Optional[Array]
+            Chunk unique-target indices.
+        max_leaf_size : Optional[int]
+            Padded leaf width; ``None`` measures it, which needs concrete values.
+        return_potential : bool
+            Also return the potential.
+        nearfield_mode_override : Optional[str]
+            Forces the near-field mode; see above. Accepted here and NOT by
+            :meth:`evaluate_tree_compiled`, which resolves its own policy.
+        nearfield_reverse_options : Optional[Any]
+            Grad-path reverse tuning for the leaf-major lane; inert elsewhere.
+
+        Returns
+        -------
+        Union[Array, Tuple[Array, Array]]
+            Morton-sorted accelerations, or ``(accelerations, potentials)`` under
+            ``return_potential``.
         """
 
         setup = _prepare_tree_evaluation_inputs(
@@ -1018,7 +1506,7 @@ class EvaluateMixin:
 
     @jaxtyped(typechecker=beartype)
     def evaluate_tree_compiled(
-        self: "FastMultipoleMethod",
+        self: "FMMEngine",
         tree: Tree,
         positions_sorted: Array,
         masses_sorted: Array,
@@ -1038,7 +1526,64 @@ class EvaluateMixin:
         max_leaf_size: Optional[int] = None,
         return_potential: bool = False,
     ) -> Union[Array, Tuple[Array, Array]]:
-        """JIT-compiled variant of :meth:`evaluate_tree`."""
+        """JIT-compiled variant of :meth:`evaluate_tree`.
+
+        Same evaluation, same arguments, minus the two overrides: the compiled
+        traversal resolves its own near-field policy, so
+        ``nearfield_mode_override`` and ``nearfield_reverse_options`` have no
+        route in here. That is why the differentiable path uses
+        ``jit_traversal=False`` -- it needs those overrides to reach the near
+        field.
+
+        Parameters
+        ----------
+        tree : Tree
+            Built tree.
+        positions_sorted : Array
+            Morton-sorted positions ``[N, 3]``.
+        masses_sorted : Array
+            Morton-sorted masses ``[N]``.
+        locals_or_downward : Union[LocalExpansionData, TreeDownwardData]
+            Local expansions, or the downward result carrying them.
+        neighbor_list : NodeNeighborList
+            Leaf ordering and neighbour lists.
+        nearfield_interop : Optional[NearfieldInteropData]
+            Prebuilt near-field view; ``None`` builds one.
+        farfield_local_data : Optional[LocalExpansionData]
+            Far-field locals override.
+        farfield_leaf_nodes : Optional[Array]
+            Far-field leaf view override.
+        farfield_node_ranges : Optional[Array]
+            Far-field node-range override.
+        precomputed_target_leaf_ids : Optional[Array]
+            Per-edge target leaf ids.
+        precomputed_source_leaf_ids : Optional[Array]
+            Per-edge source leaf ids.
+        precomputed_valid_pairs : Optional[Array]
+            Per-edge validity mask.
+        precomputed_chunk_sort_indices : Optional[Array]
+            Chunk scatter sort permutation.
+        precomputed_chunk_group_ids : Optional[Array]
+            Chunk scatter group ids.
+        precomputed_chunk_unique_indices : Optional[Array]
+            Chunk unique-target indices.
+        max_leaf_size : Optional[int]
+            Padded leaf width. Required under a trace -- measuring it would need
+            to concretize.
+        return_potential : bool
+            Also return the potential. Static: it changes the return arity.
+
+        Returns
+        -------
+        Union[Array, Tuple[Array, Array]]
+            Morton-sorted accelerations, or ``(accelerations, potentials)``.
+
+        Raises
+        ------
+        ValueError
+            If ``max_leaf_size`` is absent where the compiled path needs it
+            concrete, or the supplied views do not align with the tree.
+        """
 
         resolved_max_leaf = (
             self.fixed_max_leaf_size

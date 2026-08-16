@@ -1,4 +1,4 @@
-"""StrictCapProfileMixin: fmm_strict_cap_profile methods extracted from the FastMultipoleMethod
+"""StrictCapProfileMixin: fmm_strict_cap_profile methods extracted from the FMMEngine
 god-class (Phase 2d mixin split). Methods are verbatim (self unchanged); the
 engine class inherits this mixin. Sibling of _fmm_impl at runtime level.
 """
@@ -8,12 +8,20 @@ from __future__ import annotations
 import hashlib
 import json
 import os
-from typing import Any, Optional
+from typing import TYPE_CHECKING, Any, Optional
 
 import jax
 import jax.numpy as jnp
 from beartype.typing import Tuple
 from yggdrax.interactions import DualTreeRetryEvent
+
+if TYPE_CHECKING:  # pragma: no cover - annotations only, no runtime import
+    # The mixins annotate `self` as the engine they are mixed into, which lives in
+    # `_fmm_impl` and imports *them* -- so this must stay under TYPE_CHECKING or it
+    # would form the cycle ARCHITECTURE §8 forbids. Before this block the names were
+    # dangling: `typing.get_type_hints` raised NameError on every mixin method, so the
+    # annotations documented an intent no tool could check.
+    from ._fmm_impl import FMMEngine, PreparedStateLike
 
 
 class StrictCapProfileMixin:
@@ -165,7 +173,7 @@ class StrictCapProfileMixin:
             return
 
     def _compiled_profile_from_prepared_state(
-        self: "FastMultipoleMethod",
+        self: "FMMEngine",
         state: PreparedStateLike,
     ) -> dict[str, Any]:
         """Build a stable-shape profile summary for compile-reuse diagnostics."""
@@ -241,13 +249,13 @@ class StrictCapProfileMixin:
         }
 
     def _compiled_profile_fingerprint(
-        self: "FastMultipoleMethod", profile: dict[str, Any]
+        self: "FMMEngine", profile: dict[str, Any]
     ) -> str:
         payload = json.dumps(profile, sort_keys=True, separators=(",", ":"))
         return hashlib.sha1(payload.encode("utf-8")).hexdigest()
 
     def _compiled_profile_capacity_compatible(
-        self: "FastMultipoleMethod",
+        self: "FMMEngine",
         base_profile: dict[str, Any],
         candidate_profile: dict[str, Any],
     ) -> bool:
@@ -265,7 +273,7 @@ class StrictCapProfileMixin:
         )
 
     def _compiled_profile_record_transition(
-        self: "FastMultipoleMethod",
+        self: "FMMEngine",
         profile_fingerprint: str,
     ) -> None:
         prev = self._compiled_profile_fingerprint_last
@@ -273,7 +281,7 @@ class StrictCapProfileMixin:
             self._compiled_profile_transitions += 1
         self._compiled_profile_fingerprint_last = profile_fingerprint
 
-    def _strict_fused_profile_allows_n(self: "FastMultipoleMethod", n: int) -> bool:
+    def _strict_fused_profile_allows_n(self: "FMMEngine", n: int) -> bool:
         raw = str(getattr(self, "_strict_fused_profile_set_raw", "")).strip()
         if raw == "":
             return True

@@ -3,4 +3,4 @@ call `bench/bench_jaxfmm_paper_compare.py` (repo root) rather than
 reimplement its N-sweep. `interaction_counts.py` adapts
 `jaccpot/runtime/fmm_diagnostics.py`. `stage_breakdown.py` aggregates
 `bench/profile_refresh_stage_breakdown.py` /
-`bench/profile_downward_breakdown.py`. All dump JSON to `results/scaling/`.
+`bench/profile_downward_breakdown.py`. All dump JSON to `bench/results/scaling/`.

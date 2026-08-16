@@ -1,0 +1,56 @@
+{
+  "rows": [
+    {
+      "n": 1000000,
+      "leaf_size": 256,
+      "theta": 0.5,
+      "total_nodes": 7813,
+      "num_leaves": 3907,
+      "max_interactions_per_node": 8192,
+      "monolithic_far_tag_buffer_mib": 244.15625,
+      "build": "split",
+      "arm": "no_policy",
+      "far_pairs": 1706946,
+      "peak_mib": 3633.99951171875
+    },
+    {
+      "n": 1000000,
+      "leaf_size": 256,
+      "theta": 0.5,
+      "total_nodes": 7813,
+      "num_leaves": 3907,
+      "max_interactions_per_node": 8192,
+      "monolithic_far_tag_buffer_mib": 244.15625,
+      "build": "split",
+      "arm": "with_policy",
+      "far_pairs": 1706946,
+      "peak_mib": 4610.624755859375
+    },
+    {
+      "n": 1000000,
+      "leaf_size": 256,
+      "theta": 0.5,
+      "total_nodes": 7813,
+      "num_leaves": 3907,
+      "max_interactions_per_node": 8192,
+      "monolithic_far_tag_buffer_mib": 244.15625,
+      "build": "monolithic",
+      "arm": "no_policy",
+      "far_pairs": 1706946,
+      "peak_mib": 4041.622314453125
+    },
+    {
+      "n": 1000000,
+      "leaf_size": 256,
+      "theta": 0.5,
+      "total_nodes": 7813,
+      "num_leaves": 3907,
+      "max_interactions_per_node": 8192,
+      "monolithic_far_tag_buffer_mib": 244.15625,
+      "build": "monolithic",
+      "arm": "with_policy",
+      "far_pairs": 1706946,
+      "peak_mib": 5010.555908203125
+    }
+  ]
+}

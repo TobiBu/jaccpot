@@ -1,4 +1,4 @@
-"""AutotuneMixin: fmm_autotune methods extracted from the FastMultipoleMethod
+"""AutotuneMixin: fmm_autotune methods extracted from the FMMEngine
 god-class (Phase 2d mixin split). Methods are verbatim (self unchanged); the
 engine class inherits this mixin. Sibling of _fmm_impl at runtime level.
 """
@@ -7,15 +7,14 @@ from __future__ import annotations
 
 import math
 import time
-from typing import Optional
+from typing import TYPE_CHECKING, Optional
 
 import jax
 import jax.numpy as jnp
 import numpy as np
 from jaxtyping import Array
 
-from jaccpot.basis.real_sh import complex_to_real_coeffs
-from jaccpot.operators.real_harmonics import sh_size
+from jaccpot.operators.real_harmonics import complex_to_dehnen_real_coeffs, sh_size
 from jaccpot.upward.tree_expansions import TreeUpwardData
 
 from .dtypes import INDEX_DTYPE, complex_dtype_for_real
@@ -31,6 +30,14 @@ from .fmm_caches import (
     _m2l_autotune_store,
 )
 from .kernels.core import _accumulate_m2l_chunked_scan
+
+if TYPE_CHECKING:  # pragma: no cover - annotations only, no runtime import
+    # The mixins annotate `self` as the engine they are mixed into, which lives in
+    # `_fmm_impl` and imports *them* -- so this must stay under TYPE_CHECKING or it
+    # would form the cycle ARCHITECTURE §8 forbids. Before this block the names were
+    # dangling: `typing.get_type_hints` raised NameError on every mixin method, so the
+    # annotations documented an intent no tool could check.
+    from ._fmm_impl import FMMEngine
 
 
 class AutotuneMixin:
@@ -167,7 +174,20 @@ class AutotuneMixin:
             multip_all = jnp.asarray(upward.multipoles.packed).astype(coeff_dtype)
         else:
             coeff_dtype = centers.dtype
-            multip_all = complex_to_real_coeffs(
+            # The Dehnen no-sqrt2 converter, NOT `basis.real_sh`'s: the kernel
+            # being timed below is the real M2L, which consumes that basis. The
+            # sqrt(2) tesseral converter was used here and is a different,
+            # incompatible normalization (see the note on
+            # `complex_to_dehnen_real_coeffs`, and the guard in
+            # tests/unit/operators/test_real_sh_roundtrip.py).
+            #
+            # This does not change the chunk size this function returns: the
+            # accumulate result is discarded (`_ = ...`) and the choice is made
+            # on `perf_counter` alone, and both converters produce the same
+            # shapes and dtypes, so the kernel does identical arithmetic either
+            # way. The fix is that the benchmark now feeds the kernel the data it
+            # actually runs on, instead of data that only looks like it.
+            multip_all = complex_to_dehnen_real_coeffs(
                 jnp.asarray(upward.multipoles.packed), order=order_int
             ).astype(coeff_dtype)
         multip = multip_all[local_to_global, :coeff_count]

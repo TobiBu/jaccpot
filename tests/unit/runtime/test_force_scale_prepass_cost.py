@@ -30,6 +30,18 @@ from jaccpot import (
 )
 from tests.unit.runtime._reproducibility import assert_reproducible
 
+# Compile-bound: every test here builds a solver and runs at least one full FMM
+# solve, measured at 26-95 s each on CPU. `ci.yml` runs the version-compatibility
+# matrix (`test-smoke`) with `-m "not slow and not experimental"` on a 30 minute
+# budget and reserves the compile-heavy tests for `test-full` on 3.13. Leaving
+# these unmarked put 94 such cases into that matrix and timed it out.
+#
+# `test_dehnen_mac_reference.py` is deliberately NOT marked: it checks eqs (12),
+# (13), (15) and (16a) against independent numpy references at 1-10 s per test, so
+# the criterion's correctness is still verified on every supported Python.
+pytestmark = pytest.mark.slow
+
+
 # eq (16a) is very conservative at small N: the threshold is set by the
 # *least*-accelerated particle in the target cell, so N=64/leaf=4 accepts nothing
 # at any eps in [1e-5, 1e-2]. N=512/leaf=8 at eps=3e-3 is the smallest setting
@@ -145,7 +157,22 @@ def test_paper_mode_runs_the_prepass_on_every_call(monkeypatch):
 
 
 def test_paper_cached_cold_call_reproduces_paper_mode_exactly():
-    """Reuse must not change *what* the cold call computes, only how often."""
+    """Reuse must not change *what* the cold call computes, only how often.
+
+    Uses ``assert_reproducible`` rather than ``assert_array_equal`` because these
+    are two INDEPENDENT solves, and the paper force scale is derived from a full
+    FMM acceleration, which scatter-adds. On a GPU that lowers to atomics, so two
+    runs of the same graph differ in the last bits -- see this directory's
+    ``_reproducibility`` module, which was written for exactly this comparison.
+
+    This became visible only once the GPU near-field auto policy moved off
+    ``baseline``: the per-leaf-pair ``lax.scan`` it used to select accumulates one
+    pair at a time in a fixed order, which happens to be bit-deterministic, while
+    the bucketed traversal batches pairs and lets atomics order them. Measured
+    drift here is 7.9e-16 relative, three orders inside the helper's 1e-13 band
+    and many orders below the 23% mass loss and 15-41x error-tail blowups this
+    area's real defects produced.
+    """
 
     positions, masses = _sample_problem()
 
@@ -155,7 +182,8 @@ def test_paper_cached_cold_call_reproduces_paper_mode_exactly():
     fs_cached = np.asarray(_prepare(cached, positions, masses).force_scale_nodes)
     fs_paper = np.asarray(_prepare(paper, positions, masses).force_scale_nodes)
 
-    np.testing.assert_array_equal(fs_cached, fs_paper)
+    assert fs_cached.shape == fs_paper.shape
+    assert_reproducible(fs_cached, fs_paper)
 
 
 def test_paper_cached_rebuilds_the_scale_when_the_node_count_changes():

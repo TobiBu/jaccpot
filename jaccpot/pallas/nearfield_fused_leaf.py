@@ -29,6 +29,8 @@ import jax.numpy as jnp
 from jax import lax
 from jaxtyping import Array
 
+from jaccpot.pallas._compat import KernelRef
+
 try:
     from jax.experimental import pallas as pl
     from jax.experimental.pallas import triton as plgpu
@@ -46,15 +48,42 @@ _DEFAULT_TARGET_SUBTILE = 32
 
 
 def _pow2_floor(x: int) -> int:
-    """Largest power of two <= x (>= 1)."""
+    """Largest power of two <= x (>= 1).
+
+    Parameters
+    ----------
+    x : int
+        Requested width; values <= 1 clamp to 1.
+
+    Returns
+    -------
+    int
+        ``x`` rounded DOWN to a power of two. Down, not up, because this sizes a
+        subtile that must not exceed the leaf width.
+    """
     x = int(x)
     if x <= 1:
         return 1
     return 1 << (x.bit_length() - 1)
 
 
-def _resolve_subtile(target_subtile, leaf_width: int) -> int:
-    """Resolve the target-subtile vector width to a power of two <= leaf_width."""
+def _resolve_subtile(target_subtile: int | None, leaf_width: int) -> int:
+    """Resolve the target-subtile vector width to a power of two <= leaf_width.
+
+    Parameters
+    ----------
+    target_subtile : int | None
+        Requested subtile width, or None/0 to take ``_DEFAULT_TARGET_SUBTILE``.
+    leaf_width : int
+        Targets per leaf. The result never exceeds it, so a small leaf is never
+        padded up to a larger tile.
+
+    Returns
+    -------
+    int
+        A power of two in ``[1, leaf_width]``. Triton requires power-of-two array
+        sizes, which is the whole reason this rounding exists.
+    """
     bt = int(target_subtile) if target_subtile else _DEFAULT_TARGET_SUBTILE
     bt = max(1, min(bt, int(leaf_width)))
     return _pow2_floor(bt)
@@ -65,7 +94,15 @@ _POS_WIDTH = 4
 
 
 def pallas_nearfield_fused_supported() -> bool:
-    """Return whether the active accelerator can run the fused leaf kernel."""
+    """Return whether the active accelerator can run the fused leaf kernel.
+
+    Returns
+    -------
+    bool
+        True only on an Ampere-or-later GPU with Pallas and its Triton backend
+        importable. Failures in device discovery return False rather than raising,
+        since this is called to choose a lane.
+    """
 
     if pl is None or plgpu is None:
         return False
@@ -95,25 +132,47 @@ def nearfield_fused_leaf_jax(
 ) -> Array:
     """Reference leaf-major fused near-field update in pure JAX.
 
+    The pure-JAX counterpart of :func:`nearfield_fused_leaf_pallas`, and the
+    reference that path is checked against; the kernel is an execution
+    accelerator only.
+
     Parameters
     ----------
-    target_positions:
-        ``(num_leaves, W_t, 3)`` leaf-major target positions.
-    target_mask:
-        ``(num_leaves, W_t)`` boolean validity of each target lane.
-    source_positions:
-        ``(num_leaves, K, 3)`` flattened source positions for each target leaf
+    target_positions : Array
+        ``[num_leaves, W_t, 3]`` leaf-major target positions.
+    target_mask : Array
+        ``[num_leaves, W_t]`` boolean validity of each target lane.
+    source_positions : Array
+        ``[num_leaves, K, 3]`` flattened source positions for each target leaf
         (``K = num_source_slots * W_s``).
-    source_masses:
-        ``(num_leaves, K)`` flattened source masses.
-    source_mask:
-        ``(num_leaves, K)`` boolean validity of each flattened source.
+    source_masses : Array
+        ``[num_leaves, K]`` flattened source masses.
+    source_mask : Array
+        ``[num_leaves, K]`` boolean validity of each flattened source.
+    softening_sq : Array
+        Scalar *squared* Plummer softening, added to every squared separation.
+    G : Array
+        Scalar gravitational constant, applied as a plain multiplier.
 
     Returns
     -------
     Array
-        ``(num_leaves, W_t, 4)`` with acceleration in lanes ``0:3`` and
+        ``[num_leaves, W_t, 4]`` with acceleration in lanes ``0:3`` and
         potential in lane ``3``.
+
+    Notes
+    -----
+    Differentiable in the positions, ``source_masses``, ``softening_sq`` and
+    ``G``; the masks are boolean and carry no gradient.
+
+    Masked pairs use the double-``where`` idiom: the squared distance is replaced
+    by 1 *before* ``rsqrt`` and the result masked to 0 after. Both halves are
+    needed -- masking only the output still evaluates ``rsqrt(0) = inf`` on the
+    padded lanes, and the reverse pass then propagates ``inf * 0 = NaN``. Do not
+    "simplify" this to a single ``where``.
+
+    With ``softening_sq == 0`` a coincident valid pair is still singular; the
+    guard covers padding, not physics.
     """
 
     diff = target_positions[:, :, None, :] - source_positions[:, None, :, :]
@@ -136,18 +195,52 @@ def nearfield_fused_leaf_jax(
 
 
 def _nearfield_fused_leaf_kernel(
-    target_positions_ref,  # (1, W_t, _POS_WIDTH)
-    target_mask_ref,  # (1, W_t)
-    source_positions_ref,  # (1, K, _POS_WIDTH)
-    source_masses_ref,  # (1, K)
-    source_mask_ref,  # (1, K)
-    softening_sq_ref,  # (1,)
-    g_ref,  # (1,)
-    out_ref,  # (1, W_t, _OUT_WIDTH)
+    target_positions_ref: KernelRef,
+    target_mask_ref: KernelRef,
+    source_positions_ref: KernelRef,
+    source_masses_ref: KernelRef,
+    source_mask_ref: KernelRef,
+    softening_sq_ref: KernelRef,
+    g_ref: KernelRef,
+    out_ref: KernelRef,
     *,
     num_sources: int,
-):
-    """Fused near-field update for one target leaf (vector of W_t targets)."""
+) -> None:
+    """Fused near-field update for one target leaf (vector of W_t targets).
+
+    One program instance per (leaf, target subtile); every ref is already narrowed to
+    it. Shapes live here rather than in trailing comments so there is one source.
+
+    Parameters
+    ----------
+    target_positions_ref : KernelRef
+        Target coordinates, shape ``(1, W_t, _POS_WIDTH)``. Padded to width 4 for
+        aligned vector loads, so lane 3 is unused.
+    target_mask_ref : KernelRef
+        Which of the ``W_t`` target lanes are real particles, shape ``(1, W_t)``.
+    source_positions_ref : KernelRef
+        Source coordinates, shape ``(1, K, _POS_WIDTH)``.
+    source_masses_ref : KernelRef
+        Source masses, shape ``(1, K)``.
+    source_mask_ref : KernelRef
+        Which source lanes are real, shape ``(1, K)``. Padding is masked out of the
+        accumulation rather than skipped, keeping the trip count static.
+    softening_sq_ref : KernelRef
+        Squared softening length, shape ``(1,)``. Pre-squared by the caller so the
+        kernel adds it directly to the squared separation.
+    g_ref : KernelRef
+        Gravitational constant, shape ``(1,)``.
+    out_ref : KernelRef
+        **Output**, shape ``(1, W_t, _OUT_WIDTH)``: acceleration in lanes 0:3 and
+        potential in lane 3.
+    num_sources : int
+        Source lane count. Static, since it is the reduction trip count.
+
+    Returns
+    -------
+    None
+        The result is the write to ``out_ref``.
+    """
 
     tvalid = target_mask_ref[0, :]  # (W_t,)
     tx = target_positions_ref[0, :, 0]
@@ -216,6 +309,45 @@ def nearfield_fused_leaf_pallas(
     knob: with large leaves (e.g. ``W_t=256``) a per-leaf grid launches too few
     programs to fill the SMs. Sources are shared across a leaf's subtiles (same
     source block), so L2 reuse is preserved.
+
+    Parameters
+    ----------
+    target_positions : Array
+        Target coordinates per leaf, shape ``(num_leaves, W_t, 3)``.
+    target_mask : Array
+        Which target slots hold real particles, shape ``(num_leaves, W_t)``.
+    source_positions : Array
+        Source coordinates per leaf-slot, shape ``(num_leaves, K, 3)``.
+    source_masses : Array
+        Source masses, shape ``(num_leaves, K)``.
+    source_mask : Array
+        Which source slots are real, shape ``(num_leaves, K)``.
+    softening_sq : Array
+        Scalar squared softening length -- squared by the caller, not here.
+    G : Array
+        Scalar gravitational constant.
+    num_warps : int | None
+        Triton launch parameter; None lets the backend choose.
+    num_stages : int
+        Triton pipelining depth.
+    target_subtile : int | None
+        Targets per program. The primary occupancy knob -- see
+        :func:`nearfield_fused_leaf_pallas`.
+    interpret : bool
+        Run under Pallas interpret mode (CPU semantics, no lowering).
+
+    Returns
+    -------
+    Array
+        Shape ``(num_leaves, W_t, _OUT_WIDTH)``: acceleration in lanes 0:3, potential
+        in lane 3.
+
+    Raises
+    ------
+    RuntimeError
+        If Pallas or its Triton backend could not be imported.
+    ValueError
+        If the input shapes are mutually inconsistent.
     """
 
     if pl is None or plgpu is None:
@@ -313,7 +445,43 @@ def nearfield_fused_leaf(
     num_stages: int = 1,
     target_subtile: int | None = None,
 ) -> Array:
-    """Fused leaf-major near-field update using the best available backend."""
+    """Fused leaf-major near-field update using the best available backend.
+
+    Parameters
+    ----------
+    target_positions : Array
+        Target coordinates per leaf, shape ``(num_leaves, W_t, 3)``.
+    target_mask : Array
+        Which target slots hold real particles, shape ``(num_leaves, W_t)``.
+    source_positions : Array
+        Source coordinates per leaf-slot, shape ``(num_leaves, K, 3)``.
+    source_masses : Array
+        Source masses, shape ``(num_leaves, K)``.
+    source_mask : Array
+        Which source slots are real, shape ``(num_leaves, K)``.
+    softening_sq : Array
+        Scalar squared softening length -- squared by the caller, not here.
+    G : Array
+        Scalar gravitational constant.
+    prefer_pallas : bool
+        Whether to take the Pallas lane when the hardware supports it. False pins the
+        pure-JAX reference, which is how a caller compares the two.
+    interpret : bool
+        Run under Pallas interpret mode (CPU semantics, no lowering).
+    num_warps : int | None
+        Triton launch parameter; None lets the backend choose.
+    num_stages : int
+        Triton pipelining depth.
+    target_subtile : int | None
+        Targets per program. The primary occupancy knob -- see
+        :func:`nearfield_fused_leaf_pallas`.
+
+    Returns
+    -------
+    Array
+        Shape ``(num_leaves, W_t, _OUT_WIDTH)``: acceleration in lanes 0:3, potential
+        in lane 3.
+    """
 
     use_pallas = interpret or (prefer_pallas and pallas_nearfield_fused_supported())
     if use_pallas and pl is not None:
@@ -342,7 +510,20 @@ def nearfield_fused_leaf(
 
 
 def nearfield_fused_leaf_backend(*, prefer_pallas: bool = True) -> str:
-    """Describe which backend :func:`nearfield_fused_leaf` will use."""
+    """Describe which backend :func:`nearfield_fused_leaf` will use.
+
+    Parameters
+    ----------
+    prefer_pallas : bool
+        Whether to take Pallas when the hardware allows it; False pins the pure-JAX
+        reference.
+
+    Returns
+    -------
+    str
+        ``"pallas"`` or ``"jax"``. Reports the decision without performing it, so a
+        caller can assert on which lane ran.
+    """
 
     if prefer_pallas and pallas_nearfield_fused_supported():
         return "pallas"
@@ -372,21 +553,54 @@ def nearfield_leafpair_jax(
 ) -> Array:
     """Reference leaf-pair near-field update in pure JAX (dense; test-scale only).
 
+    The pure-JAX counterpart of :func:`nearfield_leafpair_pallas`, and the
+    reference that path is checked against. It materialises the full
+    ``[L, W_t, S, W_s]`` pair block, which is exactly the padding blow-up the
+    Pallas kernel exists to avoid, so it is usable at test scale only.
+
     Parameters
     ----------
-    leaf_positions:
-        ``(num_leaves, W, 3)`` leaf-major particle positions (target = source).
-    leaf_masses / leaf_mask:
-        ``(num_leaves, W)`` per-particle mass / validity.
-    source_leaf_ids:
-        ``(num_leaves, S)`` neighbour source-leaf ids for each target leaf.
-    source_valid:
-        ``(num_leaves, S)`` validity of each source slot.
+    leaf_positions : Array
+        ``[num_leaves, W, 3]`` leaf-major particle positions. Targets and sources
+        are drawn from this same table.
+    leaf_masses : Array
+        ``[num_leaves, W]`` per-particle masses, aligned with ``leaf_positions``.
+    leaf_mask : Array
+        ``[num_leaves, W]`` per-particle validity.
+    source_leaf_ids : Array
+        ``[num_leaves, S]`` neighbour source-leaf ids for each target leaf.
+        Entries where ``source_valid`` is false are never read, so they may hold
+        anything -- they are clamped to 0 before the gather.
+    source_valid : Array
+        ``[num_leaves, S]`` validity of each source slot.
+    softening_sq : Array
+        Scalar *squared* Plummer softening, added to every squared separation.
+    G : Array
+        Scalar gravitational constant, applied as a plain multiplier.
 
     Returns
     -------
     Array
-        ``(num_leaves, W, 4)`` leaf-major acceleration (0:3) + potential (3).
+        ``[num_leaves, W, 4]`` leaf-major acceleration in lanes ``0:3`` and
+        potential in lane ``3``.
+
+    Notes
+    -----
+    Differentiable in ``leaf_positions``, ``leaf_masses``, ``softening_sq`` and
+    ``G``; the masks and id arrays are integer/boolean and carry no gradient.
+
+    Same double-``where`` requirement as :func:`nearfield_fused_leaf_jax`: the
+    squared distance is replaced by 1 before ``rsqrt`` and masked to 0 after,
+    because masking only the output leaves ``rsqrt(0) = inf`` on padded lanes and
+    the reverse pass turns that into ``NaN``.
+
+    **A leaf must not appear in its own ``source_leaf_ids``.** Nothing here masks
+    ``i == j``: a self-pair has ``diff == 0``, which leaves the acceleration
+    unchanged but adds a spurious ``-G * m_i * rsqrt(softening_sq)`` to that
+    particle's potential, and at ``softening_sq == 0`` makes the acceleration
+    ``inf * 0 == NaN``. The unit tests honour this by construction
+    (``tests/unit/operators/test_pallas_nearfield_fused.py`` draws sources from
+    ``x != i``); it is a precondition, not a check.
     """
     safe_sids = jnp.where(source_valid, source_leaf_ids, 0)
     src_pos = leaf_positions[safe_sids]  # (L, S, W, 3)
@@ -409,21 +623,63 @@ def nearfield_leafpair_jax(
 
 
 def _nearfield_leafpair_kernel(
-    target_positions_ref,  # (1, Bt, _POS_WIDTH)
-    target_mask_ref,  # (1, Bt)
-    src_table_pos_ref,  # (L, W, _POS_WIDTH) full gather table
-    src_table_mass_ref,  # (L, W)
-    src_table_mask_ref,  # (L, W)
-    source_leaf_ids_ref,  # (1, S)
-    source_valid_ref,  # (1, S)
-    softening_sq_ref,  # (1,)
-    g_ref,  # (1,)
-    out_ref,  # (1, Bt, _OUT_WIDTH)
+    target_positions_ref: KernelRef,
+    target_mask_ref: KernelRef,
+    src_table_pos_ref: KernelRef,
+    src_table_mass_ref: KernelRef,
+    src_table_mask_ref: KernelRef,
+    source_leaf_ids_ref: KernelRef,
+    source_valid_ref: KernelRef,
+    softening_sq_ref: KernelRef,
+    g_ref: KernelRef,
+    out_ref: KernelRef,
     *,
     num_source_slots: int,
     leaf_width: int,
-):
-    """Leaf-pair near-field update for one target subtile (vector of Bt targets)."""
+) -> None:
+    """Leaf-pair near-field update for one target subtile (vector of Bt targets).
+
+    The production lane. Sources arrive as leaf *ids* and are gathered inside the
+    kernel from the full particle tables, which is what avoids materialising the dense
+    ``(num_leaves, num_source_slots, W_s)`` tensor that is ~99% padding and OOMs at
+    large leaf sizes -- see the section comment above.
+
+    Parameters
+    ----------
+    target_positions_ref : KernelRef
+        Target coordinates for this subtile, shape ``(1, Bt, _POS_WIDTH)``.
+    target_mask_ref : KernelRef
+        Which target lanes are real, shape ``(1, Bt)``.
+    src_table_pos_ref : KernelRef
+        FULL particle position table, shape ``(L, W, _POS_WIDTH)`` -- not narrowed to
+        this program, because the gather indexes it by leaf id.
+    src_table_mass_ref : KernelRef
+        Full particle mass table, shape ``(L, W)``.
+    src_table_mask_ref : KernelRef
+        Full particle validity table, shape ``(L, W)``.
+    source_leaf_ids_ref : KernelRef
+        Source leaf ids for this target, shape ``(1, S)``.
+    source_valid_ref : KernelRef
+        Which of the ``S`` slots hold a real source leaf, shape ``(1, S)``. Invalid
+        slots are skipped with ``lax.cond``, so a heavily padded slot tensor costs
+        only a per-slot predicate.
+    softening_sq_ref : KernelRef
+        Squared softening length, shape ``(1,)``.
+    g_ref : KernelRef
+        Gravitational constant, shape ``(1,)``.
+    out_ref : KernelRef
+        **Output**, shape ``(1, Bt, _OUT_WIDTH)``: acceleration lanes 0:3, potential
+        lane 3.
+    num_source_slots : int
+        ``S``. Static.
+    leaf_width : int
+        ``W``, particles per leaf in the gather tables. Static.
+
+    Returns
+    -------
+    None
+        The result is the write to ``out_ref``.
+    """
 
     tvalid = target_mask_ref[0, :]
     tx = target_positions_ref[0, :, 0]
@@ -495,6 +751,47 @@ def nearfield_leafpair_pallas(
     leaves are gathered by id from ``leaf_positions`` inside the kernel; invalid
     source slots are skipped with ``lax.cond`` so heavily-padded slot tensors
     cost only a cheap per-slot predicate check.
+
+    Parameters
+    ----------
+    leaf_positions : Array
+        Particle coordinates per leaf, shape ``(num_leaves, W, 3)``. Serves as BOTH
+        the target rows and the source gather table -- see
+        :func:`nearfield_leafpair_pallas_decoupled` to separate them.
+    leaf_masses : Array
+        Particle masses, shape ``(num_leaves, W)``.
+    leaf_mask : Array
+        Which particle slots are real, shape ``(num_leaves, W)``.
+    source_leaf_ids : Array
+        Source leaf id per target leaf and slot, shape ``(num_leaves, S)``.
+    source_valid : Array
+        Which slots hold a real source leaf, shape ``(num_leaves, S)``.
+    softening_sq : Array
+        Scalar squared softening length.
+    G : Array
+        Scalar gravitational constant.
+    num_warps : int | None
+        Triton launch parameter; None lets the backend choose.
+    num_stages : int
+        Triton pipelining depth.
+    target_subtile : int | None
+        Targets per program. The primary occupancy knob -- see
+        :func:`nearfield_fused_leaf_pallas`.
+    interpret : bool
+        Run under Pallas interpret mode (CPU semantics, no lowering).
+
+    Returns
+    -------
+    Array
+        Shape ``(num_leaves, W, _OUT_WIDTH)``: acceleration lanes 0:3, potential
+        lane 3.
+
+    Raises
+    ------
+    RuntimeError
+        If Pallas or its Triton backend could not be imported.
+    ValueError
+        If the input shapes are mutually inconsistent.
     """
 
     if pl is None or plgpu is None:
@@ -611,7 +908,48 @@ def nearfield_leafpair_pallas_decoupled(
     (the near-field leaf-block chunking used by the distributed driver). Passing the same array
     as both target and source reproduces :func:`nearfield_leafpair_pallas` bit-for-bit.
 
-    Returns ``[num_targets, W, _OUT_WIDTH]`` (accel lanes 0:3, potential lane 3).
+    Parameters
+    ----------
+    target_positions : Array
+        Target coordinates, shape ``(num_targets, W, 3)``.
+    target_mask : Array
+        Which target slots are real, shape ``(num_targets, W)``.
+    source_positions : Array
+        Source gather table, shape ``(num_sources, W, 3)``.
+    source_masses : Array
+        Source masses, shape ``(num_sources, W)``.
+    source_mask : Array
+        Which source slots are real, shape ``(num_sources, W)``.
+    source_leaf_ids : Array
+        Source row ids in ``[0, num_sources)``, shape ``(num_targets, S)``.
+    source_valid : Array
+        Which slots are real, shape ``(num_targets, S)``.
+    softening_sq : Array
+        Scalar squared softening length.
+    G : Array
+        Scalar gravitational constant.
+    num_warps : int | None
+        Triton launch parameter; None lets the backend choose.
+    num_stages : int
+        Triton pipelining depth.
+    target_subtile : int | None
+        Targets per program. The primary occupancy knob -- see
+        :func:`nearfield_fused_leaf_pallas`.
+    interpret : bool
+        Run under Pallas interpret mode (CPU semantics, no lowering).
+
+    Returns
+    -------
+    Array
+        Shape ``(num_targets, W, _OUT_WIDTH)``: acceleration lanes 0:3, potential
+        lane 3.
+
+    Raises
+    ------
+    RuntimeError
+        If Pallas or its Triton backend could not be imported.
+    ValueError
+        If the input shapes are mutually inconsistent.
     """
 
     if pl is None or plgpu is None:
@@ -722,7 +1060,7 @@ def nearfield_leafpair_pallas_decoupled(
 # SCOPE -- read before wiring either wrapper into a runtime path. These two are
 # **unit-level VJP oracles**, not the production differentiable near field. The
 # rule the grad path actually runs is
-# ``jaccpot.nearfield.near_field._radix_fast_lane_prepacked_accel_cvjp``: same
+# ``jaccpot.nearfield._fast_lane._radix_fast_lane_prepacked_accel_cvjp``: same
 # Pallas forward, but an ANALYTIC O(N) leaf-pair reverse. The reverse below is
 # ``jax.vjp`` of ``nearfield_leafpair_jax``, whose dense ``(leaves, W_t, K, 3)``
 # difference tensor is ~50 TB at the fiducial large-N config -- correct, and
@@ -745,7 +1083,41 @@ def nearfield_fused_leaf_pallas_cvjp(
     target_subtile: int | None,
     interpret: bool,
 ) -> Array:
-    """Differentiable fused leaf-major near-field (pairs lane); see module comment."""
+    """Differentiable fused leaf-major near-field (pairs lane); see module comment.
+
+    Parameters
+    ----------
+    target_positions : Array
+        Target coordinates, shape ``(num_leaves, W_t, 3)``.
+    target_mask_f : Array
+        Target validity as a FLOAT, thresholded at 0.5 inside. Float because
+        ``custom_vjp`` inputs must be differentiable types; the mask itself carries no
+        gradient.
+    source_positions : Array
+        Source coordinates, shape ``(num_leaves, K, 3)``.
+    source_masses : Array
+        Source masses, shape ``(num_leaves, K)``.
+    source_mask_f : Array
+        Source validity as a float, thresholded at 0.5 inside.
+    softening_sq : Array
+        Scalar squared softening length.
+    G : Array
+        Scalar gravitational constant.
+    num_warps : int | None
+        Triton launch parameter. ``nondiff_argnums``.
+    num_stages : int
+        Triton pipelining depth. ``nondiff_argnums``.
+    target_subtile : int | None
+        Targets per program. ``nondiff_argnums``.
+    interpret : bool
+        Interpret mode. ``nondiff_argnums``.
+
+    Returns
+    -------
+    Array
+        Shape ``(num_leaves, W_t, _OUT_WIDTH)``: acceleration in lanes 0:3, potential
+        in lane 3.
+    """
     return nearfield_fused_leaf_pallas(
         target_positions,
         target_mask_f > 0.5,
@@ -855,6 +1227,39 @@ def nearfield_leafpair_pallas_cvjp(
 
     ``source_leaf_ids_f`` carries the gather ids as floats (exact for the small
     non-negative leaf ids); reconstructed via ``round().astype(int32)`` inside.
+
+    Parameters
+    ----------
+    leaf_positions : Array
+        Particle coordinates per leaf, shape ``(num_leaves, W, 3)``.
+    leaf_masses : Array
+        Particle masses, shape ``(num_leaves, W)``.
+    leaf_mask_f : Array
+        Particle validity as a float, thresholded inside. Float for the same reason as
+        the ids: ``custom_vjp`` inputs must be differentiable types.
+    source_leaf_ids_f : Array
+        Source leaf ids as floats, shape ``(num_leaves, S)``. Exact for the small
+        non-negative ids in play, so the round-trip is lossless.
+    source_valid_f : Array
+        Slot validity as a float, shape ``(num_leaves, S)``.
+    softening_sq : Array
+        Scalar squared softening length.
+    G : Array
+        Scalar gravitational constant.
+    num_warps : int | None
+        Triton launch parameter. ``nondiff_argnums``.
+    num_stages : int
+        Triton pipelining depth. ``nondiff_argnums``.
+    target_subtile : int | None
+        Targets per program. ``nondiff_argnums``.
+    interpret : bool
+        Interpret mode. ``nondiff_argnums``.
+
+    Returns
+    -------
+    Array
+        Shape ``(num_leaves, W, _OUT_WIDTH)``: acceleration lanes 0:3, potential
+        lane 3.
     """
     return nearfield_leafpair_pallas(
         leaf_positions,

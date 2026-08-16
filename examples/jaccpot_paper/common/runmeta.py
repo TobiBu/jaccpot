@@ -64,7 +64,7 @@ def add_common_args(parser: Any) -> Any:
         default=None,
         help=(
             "Where to write the result JSON. Relative paths resolve under "
-            "results/. Defaults to the script's canonical results/ path."
+            "bench/results/. Defaults to the script's canonical results path."
         ),
     )
     return parser

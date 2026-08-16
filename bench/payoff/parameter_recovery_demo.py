@@ -3,7 +3,7 @@ recovery -- the paper's payoff experiment.
 
 Depends on jaccpot/applications/potential_recovery/ (this branch, Phase 4).
 Sequence this last, once N and theta operating points are known from
-Phases 1-3. Writes results/payoff/recovery.json:
+Phases 1-3. Writes bench/results/payoff/recovery.json:
 {"iteration": [...], "loss": [...], "param_rel_error": [...]}
 """
 

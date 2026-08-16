@@ -22,6 +22,7 @@ import jaccpot
 
 # The frozen top-level export set. Changing this set is a public-API change.
 EXPECTED_ALL = {
+    "BlockStepFMM",
     "ComplexSHBasis",
     "FMMAdvancedConfig",
     "FMMPreset",
@@ -33,8 +34,9 @@ EXPECTED_ALL = {
     "OdisseoFMMCoupler",
     "RealSHBasis",
     "RuntimePolicyConfig",
+    "TraversalOverrides",
     "TreeConfig",
-    "differentiable_gravitational_acceleration",
+    "direct_sum_gravitational_acceleration",
 }
 
 # Frozen preset members (name -> value). ODISSEO selects presets by these.
@@ -56,6 +58,8 @@ EXPECTED_FMM_INIT_KWARGS = {
     "reuse_topology",
     "rebuild_every",
     "mac_force_scale_mode",
+    "mac_force_scale_prepass_theta",
+    "mac_force_scale_fb_inflation",
     "adaptive_error_model",
     "adaptive_eps",
     "dehnen_geometry_mode",
@@ -76,6 +80,7 @@ EXPECTED_FMM_PUBLIC_METHODS = {
     "compute_accelerations_and_jerk",
     "compute_accelerations_with_time_derivatives",
     "differentiable_accelerations",
+    "differentiable_step_fn",
     "evaluate_prepared_state",
     "evaluate_prepared_state_with_jerk",
     "evaluate_prepared_state_with_time_derivatives",
@@ -108,6 +113,7 @@ def test_every_export_is_importable_from_top_level() -> None:
 def test_export_kinds() -> None:
     # Classes / dataclasses.
     for name in (
+        "BlockStepFMM",
         "ComplexSHBasis",
         "FMMAdvancedConfig",
         "FarFieldConfig",
@@ -117,13 +123,14 @@ def test_export_kinds() -> None:
         "OdisseoFMMCoupler",
         "RealSHBasis",
         "RuntimePolicyConfig",
+        "TraversalOverrides",
         "TreeConfig",
     ):
         assert inspect.isclass(getattr(jaccpot, name)), f"{name} should be a class"
     # Enum.
     assert issubclass(jaccpot.FMMPreset, enum.Enum)
     # Callable (function).
-    assert callable(jaccpot.differentiable_gravitational_acceleration)
+    assert callable(jaccpot.direct_sum_gravitational_acceleration)
 
 
 def test_public_class_is_the_solver_facade() -> None:

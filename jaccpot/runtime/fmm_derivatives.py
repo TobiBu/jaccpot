@@ -1,4 +1,4 @@
-"""DerivativesMixin: fmm_derivatives methods extracted from the FastMultipoleMethod
+"""DerivativesMixin: fmm_derivatives methods extracted from the FMMEngine
 god-class (Phase 2d mixin split). Methods are verbatim (self unchanged); the
 engine class inherits this mixin. Sibling of _fmm_impl at runtime level.
 """
@@ -6,7 +6,7 @@ engine class inherits this mixin. Sibling of _fmm_impl at runtime level.
 from __future__ import annotations
 
 from math import comb
-from typing import Any, Optional
+from typing import TYPE_CHECKING, Any, Optional
 
 import jax
 import jax.numpy as jnp
@@ -14,7 +14,6 @@ from beartype import beartype
 from beartype.typing import Tuple
 from jax import lax
 from jaxtyping import Array, jaxtyped
-from yggdrax.geometry import compute_tree_geometry
 from yggdrax.tree_moments import compute_tree_mass_moments
 
 from jaccpot.downward.local_expansions import LocalExpansionData
@@ -23,9 +22,9 @@ from jaccpot.upward.solidfmm_complex_tree_expansions import (
     prepare_solidfmm_complex_source_motion_multipoles,
 )
 from jaccpot.upward.tree_expansions import NodeMultipoleData, TreeUpwardData
+from jaccpot.upward.tree_geometry import compute_tree_geometry_compiled
 
 from .dtypes import INDEX_DTYPE
-from .fmm_caches import _contains_tracer
 from .fmm_state import FMMPreparedState
 from .kernels.core import (
     PackedAccelerationDerivatives,
@@ -37,11 +36,19 @@ from .kernels.core import (
     _map_targets_to_leaf_positions,
 )
 
+if TYPE_CHECKING:  # pragma: no cover - annotations only, no runtime import
+    # The mixins annotate `self` as the engine they are mixed into, which lives in
+    # `_fmm_impl` and imports *them* -- so this must stay under TYPE_CHECKING or it
+    # would form the cycle ARCHITECTURE §8 forbids. Before this block the names were
+    # dangling: `typing.get_type_hints` raised NameError on every mixin method, so the
+    # annotations documented an intent no tool could check.
+    from ._fmm_impl import FMMEngine
+
 
 class DerivativesMixin:
     @jaxtyped(typechecker=beartype)
     def compute_accelerations_and_jerk(
-        self: "FastMultipoleMethod",
+        self: "FMMEngine",
         positions: Array,
         masses: Array,
         velocities: Array,
@@ -132,7 +139,7 @@ class DerivativesMixin:
 
     @jaxtyped(typechecker=beartype)
     def compute_accelerations_with_time_derivatives(
-        self: "FastMultipoleMethod",
+        self: "FMMEngine",
         positions: Array,
         masses: Array,
         velocities: Array,
@@ -218,7 +225,7 @@ class DerivativesMixin:
 
     @jaxtyped(typechecker=beartype)
     def evaluate_prepared_state_with_jerk(
-        self: "FastMultipoleMethod",
+        self: "FMMEngine",
         state: FMMPreparedState,
         velocities: Array,
         *,
@@ -357,7 +364,7 @@ class DerivativesMixin:
 
     @jaxtyped(typechecker=beartype)
     def evaluate_prepared_state_with_time_derivatives(
-        self: "FastMultipoleMethod",
+        self: "FMMEngine",
         state: FMMPreparedState,
         velocities: Array,
         *,
@@ -423,7 +430,7 @@ class DerivativesMixin:
 
     @jaxtyped(typechecker=beartype)
     def _evaluate_target_nearfield_jerk(
-        self: "FastMultipoleMethod",
+        self: "FMMEngine",
         state: FMMPreparedState,
         velocities: Array,
         *,
@@ -476,7 +483,7 @@ class DerivativesMixin:
 
     @jaxtyped(typechecker=beartype)
     def _evaluate_target_nearfield_time_derivatives(
-        self: "FastMultipoleMethod",
+        self: "FMMEngine",
         state: FMMPreparedState,
         velocities: Array,
         *,
@@ -559,7 +566,7 @@ class DerivativesMixin:
 
     @jaxtyped(typechecker=beartype)
     def _evaluate_source_motion_farfield_jerk(
-        self: "FastMultipoleMethod",
+        self: "FMMEngine",
         state: FMMPreparedState,
         velocities: Array,
         *,
@@ -593,7 +600,7 @@ class DerivativesMixin:
             source_motion_packed=None,
         )
         source_motion_upward = TreeUpwardData(
-            geometry=compute_tree_geometry(state.tree, state.positions_sorted),
+            geometry=compute_tree_geometry_compiled(state.tree, state.positions_sorted),
             mass_moments=compute_tree_mass_moments(
                 state.tree,
                 state.positions_sorted,
@@ -668,7 +675,7 @@ class DerivativesMixin:
 
     @jaxtyped(typechecker=beartype)
     def _evaluate_farfield_time_derivative_orders(
-        self: "FastMultipoleMethod",
+        self: "FMMEngine",
         state: FMMPreparedState,
         velocities: Array,
         *,
@@ -736,7 +743,7 @@ class DerivativesMixin:
 
         # Build local coefficient streams L_k = ∂t^k L, including k=0.
         locals_by_k: list[LocalExpansionData] = [state.downward.locals]
-        geometry = compute_tree_geometry(state.tree, state.positions_sorted)
+        geometry = compute_tree_geometry_compiled(state.tree, state.positions_sorted)
         mass_moments = compute_tree_mass_moments(
             state.tree, state.positions_sorted, state.masses_sorted
         )

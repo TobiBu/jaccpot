@@ -44,6 +44,7 @@ from jax import lax
 from jaxtyping import Array
 
 from jaccpot.experimental.treecode_walk import TreecodeLeafLists
+from jaccpot.pallas._compat import KernelRef
 
 try:
     from jax.experimental import pallas as pl
@@ -56,7 +57,21 @@ _SENTINEL = -1
 
 
 def _pow2_ceil(x: int) -> int:
-    """Smallest power of two >= x (>= 1). Triton needs pow2 full-tensor widths."""
+    """Smallest power of two >= x (>= 1). Triton needs pow2 full-tensor widths.
+
+    Parameters
+    ----------
+    x : int
+        Requested width. Values <= 1 clamp to 1, since a zero-width block is not a
+        thing Triton can allocate.
+
+    Returns
+    -------
+    int
+        ``x`` rounded up to a power of two. This is why the kernel carries both
+        ``max_far`` and ``max_far_pad``: the block is padded, the returned slice is
+        not.
+    """
     x = int(x)
     if x <= 1:
         return 1
@@ -64,7 +79,17 @@ def _pow2_ceil(x: int) -> int:
 
 
 def pallas_treecode_walk_supported() -> bool:
-    """Return whether the active accelerator can run the treecode-walk kernel."""
+    """Return whether the active accelerator can run the treecode-walk kernel.
+
+    Returns
+    -------
+    bool
+        True only on a GPU of compute capability >= 8.0 (Ampere) with both Pallas and
+        its Triton backend importable. Stricter than the other kernels in this
+        package, which accept any GPU or TPU: this one is Triton-only and needs the
+        Ampere feature set. Device discovery failures return False rather than raising,
+        because this is called to *choose* a path.
+    """
 
     if pl is None or plgpu is None:
         return False
@@ -82,21 +107,21 @@ def pallas_treecode_walk_supported() -> bool:
 
 
 def _treecode_walk_kernel(
-    cx_ref,  # (N,)  node centre x
-    cy_ref,  # (N,)  node centre y
-    cz_ref,  # (N,)  node centre z
-    ext_ref,  # (N,)  MAC extents
-    lc_ref,  # (N,)  left child (-1 at leaves)
-    rc_ref,  # (N,)  right child (-1 at leaves)
-    leaf_ref,  # (1,) this program's target leaf node id
-    theta_ref,  # (1,) theta^2
-    root_ref,  # (1,) root node id
-    far_ref,  # (1, max_far_pad) out: accepted far source node ids
-    near_ref,  # (1, max_near_pad) out: near source leaf node ids
-    fc_ref,  # (1,) out: far count
-    nc_ref,  # (1,) out: near count
-    ovf_ref,  # (1,) out: overflow flag (this leaf)
-    stack_ref,  # (1, max_stack) scratch: private descent stack (discarded)
+    cx_ref: KernelRef,
+    cy_ref: KernelRef,
+    cz_ref: KernelRef,
+    ext_ref: KernelRef,
+    lc_ref: KernelRef,
+    rc_ref: KernelRef,
+    leaf_ref: KernelRef,
+    theta_ref: KernelRef,
+    root_ref: KernelRef,
+    far_ref: KernelRef,
+    near_ref: KernelRef,
+    fc_ref: KernelRef,
+    nc_ref: KernelRef,
+    ovf_ref: KernelRef,
+    stack_ref: KernelRef,
     *,
     num_internal: int,
     max_far: int,
@@ -105,8 +130,78 @@ def _treecode_walk_kernel(
     max_near_pad: int,
     max_stack: int,
     max_iters: int,
-):
-    """Treecode descent for ONE target leaf (mirrors ``_single_leaf_walk``)."""
+) -> None:
+    """Treecode descent for ONE target leaf (mirrors ``_single_leaf_walk``).
+
+    ``grid=(num_leaves,)``, one program instance per target leaf, so every ref below
+    is either a whole-tree table (indexed by node id) or already narrowed to this
+    leaf. Shapes are given here rather than in trailing comments so there is a single
+    source for them.
+
+    Parameters
+    ----------
+    cx_ref : KernelRef
+        Node centre x for all nodes, shape ``(N,)``.
+    cy_ref : KernelRef
+        Node centre y, shape ``(N,)``.
+    cz_ref : KernelRef
+        Node centre z, shape ``(N,)``. Split into three refs rather than one
+        ``(N, 3)`` block because the descent reads single components.
+    ext_ref : KernelRef
+        Per-node MAC extent, shape ``(N,)``. Compared against squared distance, so
+        the acceptance test needs no square root.
+    lc_ref : KernelRef
+        Left child per node, shape ``(N,)``, ``-1`` at leaves.
+    rc_ref : KernelRef
+        Right child per node, shape ``(N,)``, ``-1`` at leaves.
+    leaf_ref : KernelRef
+        This program's target leaf node id, shape ``(1,)``.
+    theta_ref : KernelRef
+        ``theta ** 2``, shape ``(1,)`` -- pre-squared by the caller to match
+        ``ext_ref``.
+    root_ref : KernelRef
+        Root node id to start the descent from, shape ``(1,)``.
+    far_ref : KernelRef
+        **Output.** Accepted far source node ids, shape ``(1, max_far_pad)``,
+        sentinel-filled with ``-1``; only ``[:max_far]`` is returned.
+    near_ref : KernelRef
+        **Output.** Near source leaf node ids, shape ``(1, max_near_pad)``, likewise
+        sentinel-filled.
+    fc_ref : KernelRef
+        **Output.** Number of far entries written, shape ``(1,)``.
+    nc_ref : KernelRef
+        **Output.** Number of near entries written, shape ``(1,)``.
+    ovf_ref : KernelRef
+        **Output.** Overflow flag for this leaf, shape ``(1,)`` -- set when the walk
+        would exceed ``max_far``/``max_near``/``max_stack``/``max_iters``. The caller
+        must check it; a silently truncated interaction list is a wrong force.
+    stack_ref : KernelRef
+        **Scratch.** Private descent stack, shape ``(1, max_stack)``. An output block
+        used as HBM scratch because the Triton backend has no shared-memory scratch:
+        written and read, never returned. Needs no initialisation, since only slots
+        below the stack pointer are ever read.
+    num_internal : int
+        Node count below which a node has children. Static.
+    max_far : int
+        Far-list capacity actually returned. Static.
+    max_near : int
+        Near-list capacity actually returned. Static.
+    max_far_pad : int
+        ``max_far`` rounded up to a power of two -- the real block width. Static.
+    max_near_pad : int
+        ``max_near`` rounded up to a power of two. Static.
+    max_stack : int
+        Descent-stack depth. Static.
+    max_iters : int
+        Hard bound on descent steps, so the walk terminates even on a malformed
+        tree. Static.
+
+    Returns
+    -------
+    None
+        Pallas kernels return nothing; results are the writes to ``far_ref``,
+        ``near_ref``, ``fc_ref``, ``nc_ref`` and ``ovf_ref``.
+    """
 
     leaf_node = leaf_ref[0]
     ctx = cx_ref[leaf_node]
@@ -235,6 +330,60 @@ def treecode_leaf_walk_pallas(
     The private descent stack is realised as a per-program output block used as
     HBM scratch (the Triton backend has no shared-memory scratch); it is written
     and read but not returned.
+
+    Parameters
+    ----------
+    leaf_nodes : Array
+        Target leaf node ids, shape ``(num_leaves,)``. Its length is the grid.
+    centers : Array
+        Node centres, shape ``(N, 3)``. Split into three per-axis blocks for the
+        kernel; its dtype sets the working dtype for extents and theta.
+    mac_extents : Array
+        Per-node MAC extent, shape ``(N,)``.
+    left_child_full : Array
+        Left child per node, shape ``(N,)``, ``-1`` at leaves. Its dtype fixes the
+        index dtype used for every other id array.
+    right_child_full : Array
+        Right child per node, shape ``(N,)``, ``-1`` at leaves.
+    theta_sq : Array
+        Scalar ``theta ** 2``. Pre-squared so the acceptance test needs no square
+        root.
+    root_idx : Array
+        Scalar root node id to descend from.
+    num_internal : int
+        Node count below which a node has children. Static.
+    max_far : int
+        Far-list capacity per leaf. Static; sizes the output.
+    max_near : int
+        Near-list capacity per leaf. Static; sizes the output.
+    max_stack : int
+        Descent-stack depth. Static.
+    max_iters : int
+        Hard bound on descent steps, so a malformed tree cannot hang the kernel.
+        Static.
+    num_warps : int
+        Triton launch parameter.
+    num_stages : int
+        Triton launch parameter.
+    interpret : bool
+        Run under Pallas interpret mode (CPU semantics, no lowering), which is how
+        the parity test compares against the pure-JAX walk without a GPU.
+
+    Returns
+    -------
+    TreecodeLeafLists
+        Far and near source lists per leaf with their counts and the per-leaf
+        overflow flags -- bit-identical to
+        :func:`jaccpot.experimental.treecode_walk.treecode_leaf_walk`. **Check the
+        overflow flags:** a truncated interaction list is a wrong force, not a
+        slow one.
+
+    Raises
+    ------
+    RuntimeError
+        If Pallas or its Triton backend could not be imported.
+    ValueError
+        If the input shapes are inconsistent with each other or with ``num_internal``.
     """
 
     if pl is None or plgpu is None:
@@ -357,7 +506,21 @@ def treecode_leaf_walk_pallas(
 
 
 def treecode_leaf_walk_backend(*, prefer_pallas: bool = True) -> str:
-    """Describe which backend a dual-path walk would use (see step 3 wiring)."""
+    """Describe which backend a dual-path walk would use (see step 3 wiring).
+
+    Parameters
+    ----------
+    prefer_pallas : bool
+        Whether to take the Pallas path when the hardware supports it. Passing False
+        forces ``"jax"`` and is how a caller pins the reference path.
+
+    Returns
+    -------
+    str
+        ``"pallas"`` or ``"jax"``. A *description*, not a dispatch -- it reports what
+        a dual-path walk would choose, so a caller can log or assert on the decision
+        without running one.
+    """
 
     if prefer_pallas and pallas_treecode_walk_supported():
         return "pallas"

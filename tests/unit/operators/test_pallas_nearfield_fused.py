@@ -19,6 +19,7 @@ from jaccpot.pallas.nearfield_fused_leaf import (
     nearfield_fused_leaf_pallas,
     nearfield_leafpair_jax,
     nearfield_leafpair_pallas,
+    nearfield_leafpair_pallas_decoupled,
     pallas_nearfield_fused_supported,
 )
 
@@ -162,6 +163,48 @@ def test_leafpair_interpret_subtile_matches_jax_reference():
         interpret=True,
     )
     assert np.allclose(np.asarray(got), np.asarray(ref), rtol=1e-5, atol=1e-6)
+
+
+def test_leafpair_decoupled_same_array_reproduces_the_coupled_kernel():
+    """The decoupled kernel's own docstring claim, which nothing asserted.
+
+    :func:`nearfield_leafpair_pallas_decoupled` says that "passing the same array as
+    both target and source reproduces :func:`nearfield_leafpair_pallas` bit-for-bit".
+    That claim is load-bearing: the decoupled kernel is what
+    ``distributed/fmm.py`` runs (via
+    ``nearfield._fast_lane._radix_fast_lane_prepacked_pallas_decoupled``) to compute a
+    block of target leaves while keeping the full source pool resident. So it is the
+    statement that the distributed near field computes the same force as the
+    single-device one, and it was asserted nowhere -- grepping ``tests/`` for
+    "decoupled" returned nothing.
+
+    Asserted bit-for-bit (``rtol=atol=0``) rather than to a tolerance, because the
+    claim is bit-for-bit: with the same array on both sides the kernel does the same
+    arithmetic in the same order, so anything else means the two lanes have diverged.
+    """
+    lp, lm, lmask, sids, svalid = _leafpair_inputs(seed=7)
+    soft = jnp.float32(0.02**2)
+    G = jnp.float32(1.1)
+
+    coupled = nearfield_leafpair_pallas(
+        lp, lm, lmask, sids, svalid, softening_sq=soft, G=G, interpret=True
+    )
+    decoupled = nearfield_leafpair_pallas_decoupled(
+        lp,
+        lmask,
+        lp,
+        lm,
+        lmask,
+        sids,
+        svalid,
+        softening_sq=soft,
+        G=G,
+        interpret=True,
+    )
+
+    # Non-vacuity: a kernel that returned zeros would satisfy bit-equality trivially.
+    assert np.any(np.asarray(coupled) != 0.0)
+    np.testing.assert_array_equal(np.asarray(decoupled), np.asarray(coupled))
 
 
 def test_leafpair_interpret_no_valid_sources_is_zero():

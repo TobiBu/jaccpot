@@ -13,6 +13,15 @@ from beartype.typing import Tuple
 from jaxtyping import Array
 from yggdrax.interactions import DualTreeRetryEvent, DualTreeTraversalConfig, MACType
 
+# `_read_large_n_env_config` is re-imported although only its memoising wrapper
+# is called here: it was a module attribute of this module before Tier 1.8, and
+# the F16 lesson from `near_field.py` is that a module's attribute surface is
+# wider than its import surface. Keeping it costs nothing and cannot break a
+# caller that reaches it as `_large_n_pipeline._read_large_n_env_config`.
+from ._large_n_env import (  # noqa: F401
+    _large_n_env_config_for_fmm,
+    _read_large_n_env_config,
+)
 from ._large_n_nearfield import (
     build_large_n_leaf_particle_groups,
     build_large_n_nearfield_precompute,
@@ -35,287 +44,6 @@ def _contains_jax_tracer(value: Any) -> bool:
     return any(
         isinstance(leaf, jax.core.Tracer) for leaf in jax.tree_util.tree_leaves(value)
     )
-
-
-def _read_large_n_env_config() -> dict[str, Any]:
-    def _env_bool(name: str, default: bool) -> bool:
-        raw = str(os.environ.get(name, "1" if default else "0")).strip().lower()
-        return raw in {"1", "true", "yes", "on"}
-
-    def _env_pos_int(name: str, default: int) -> int:
-        try:
-            value = int(os.environ.get(name, str(default)))
-        except Exception:
-            value = int(default)
-        return max(1, int(value))
-
-    def _canonical_static_int(
-        value_env: str,
-        default_value: int,
-        options_env: str,
-        default_options: str,
-    ) -> int:
-        try:
-            raw_value = int(os.environ.get(value_env, str(default_value)))
-        except Exception:
-            raw_value = int(default_value)
-        options_raw = str(os.environ.get(options_env, default_options)).strip()
-        options: list[int] = []
-        for token in options_raw.split(","):
-            token = token.strip()
-            if not token:
-                continue
-            try:
-                val = int(token)
-            except Exception:
-                continue
-            if val > 0 and val not in options:
-                options.append(val)
-        if not options:
-            options = [int(default_value)]
-        if raw_value in options:
-            return int(raw_value)
-        return int(min(options, key=lambda v: (abs(v - raw_value), v)))
-
-    overflow_profile_headroom_raw = os.environ.get(
-        "JACCPOT_LARGE_N_OVERFLOW_PROFILE_HEADROOM",
-        "2.0",
-    )
-    try:
-        overflow_profile_headroom = max(1.0, float(overflow_profile_headroom_raw))
-    except Exception:
-        overflow_profile_headroom = 2.0
-    overflow_profile_caps_raw = os.environ.get(
-        "JACCPOT_LARGE_N_OVERFLOW_PROFILE_CAP_OPTIONS",
-        "64,128,256,512,1024,2048,4096,8192,16384,32768,65536",
-    )
-    overflow_profile_caps: list[int] = []
-    for token in str(overflow_profile_caps_raw).split(","):
-        token = token.strip()
-        if not token:
-            continue
-        try:
-            value = int(token)
-        except Exception:
-            continue
-        if value > 0 and value not in overflow_profile_caps:
-            overflow_profile_caps.append(value)
-    overflow_profile_caps = sorted(overflow_profile_caps)
-    if not overflow_profile_caps:
-        overflow_profile_caps = [64, 128, 256, 512, 1024]
-
-    neighbor_profile_headroom_raw = os.environ.get(
-        "JACCPOT_LARGE_N_NEIGHBOR_EDGE_PROFILE_HEADROOM",
-        "1.0",
-    )
-    try:
-        neighbor_profile_headroom = max(1.0, float(neighbor_profile_headroom_raw))
-    except Exception:
-        neighbor_profile_headroom = 1.0
-    neighbor_profile_caps_raw = os.environ.get(
-        "JACCPOT_LARGE_N_NEIGHBOR_EDGE_PROFILE_CAP_OPTIONS",
-        "4096,8192,12288,16384,20480,24576,28672,32768,49152,65536,98304,131072",
-    )
-    neighbor_profile_caps: list[int] = []
-    for token in str(neighbor_profile_caps_raw).split(","):
-        token = token.strip()
-        if not token:
-            continue
-        try:
-            value = int(token)
-        except Exception:
-            continue
-        if value > 0 and value not in neighbor_profile_caps:
-            neighbor_profile_caps.append(value)
-    neighbor_profile_caps = sorted(neighbor_profile_caps)
-    if not neighbor_profile_caps:
-        neighbor_profile_caps = [4096, 8192, 12288, 16384, 20480, 24576, 28672, 32768]
-    neighbor_profile_bootstrap_cap_raw = os.environ.get(
-        "JACCPOT_LARGE_N_NEIGHBOR_EDGE_PROFILE_BOOTSTRAP_CAP",
-        "0",
-    )
-    try:
-        neighbor_profile_bootstrap_cap = max(
-            0,
-            int(neighbor_profile_bootstrap_cap_raw),
-        )
-    except Exception:
-        neighbor_profile_bootstrap_cap = 0
-    overflow_profile_bootstrap_cap_raw = os.environ.get(
-        "JACCPOT_LARGE_N_OVERFLOW_PROFILE_BOOTSTRAP_CAP",
-        "0",
-    )
-    try:
-        overflow_profile_bootstrap_cap = max(
-            0,
-            int(overflow_profile_bootstrap_cap_raw),
-        )
-    except Exception:
-        overflow_profile_bootstrap_cap = 0
-
-    static_runtime_fixed_sizing = _env_bool(
-        "JACCPOT_STATIC_RUNTIME_FIXED_SIZING",
-        True,
-    )
-    try:
-        overflow_profile_fixed_cap = max(
-            0,
-            int(
-                os.environ.get(
-                    "JACCPOT_LARGE_N_OVERFLOW_PROFILE_FIXED_CAP",
-                    str(int(overflow_profile_bootstrap_cap)),
-                )
-            ),
-        )
-    except Exception:
-        overflow_profile_fixed_cap = int(max(0, int(overflow_profile_bootstrap_cap)))
-    try:
-        neighbor_profile_fixed_cap = max(
-            0,
-            int(
-                os.environ.get(
-                    "JACCPOT_LARGE_N_NEIGHBOR_EDGE_PROFILE_FIXED_CAP",
-                    str(int(neighbor_profile_bootstrap_cap)),
-                )
-            ),
-        )
-    except Exception:
-        neighbor_profile_fixed_cap = int(max(0, int(neighbor_profile_bootstrap_cap)))
-
-    # Static target-block cap. Supports "auto" (data-driven sizing; sentinel 0)
-    # in addition to explicit ints, and — for any value — auto-grows to fit the
-    # densest leaf at build time (see _large_n_pipeline static-block region),
-    # mirroring the neighbor/overflow cap profiling (headroom + caps ladder).
-    static_target_blocks_cap_raw = (
-        str(os.environ.get("JACCPOT_LARGE_N_STATIC_TARGET_BLOCKS_MAX_PER_LEAF", "32"))
-        .strip()
-        .lower()
-    )
-    static_target_blocks_auto = static_target_blocks_cap_raw in {"auto", "-1"}
-    if static_target_blocks_auto:
-        static_target_blocks_max_per_leaf = 0
-    else:
-        try:
-            static_target_blocks_max_per_leaf = max(
-                1, int(static_target_blocks_cap_raw)
-            )
-        except Exception:
-            static_target_blocks_max_per_leaf = 0
-            static_target_blocks_auto = True
-    static_target_blocks_headroom_raw = os.environ.get(
-        "JACCPOT_LARGE_N_STATIC_TARGET_BLOCKS_HEADROOM", "1.25"
-    )
-    try:
-        static_target_blocks_headroom = max(
-            1.0, float(static_target_blocks_headroom_raw)
-        )
-    except Exception:
-        static_target_blocks_headroom = 1.25
-    static_target_blocks_cap_options: list[int] = []
-    for token in str(
-        os.environ.get(
-            "JACCPOT_LARGE_N_STATIC_TARGET_BLOCKS_MAX_PER_LEAF_OPTIONS",
-            "8,16,32,64,128,256,512,1024,2048,4096",
-        )
-    ).split(","):
-        token = token.strip()
-        if not token:
-            continue
-        try:
-            value = int(token)
-        except Exception:
-            continue
-        if value > 0 and value not in static_target_blocks_cap_options:
-            static_target_blocks_cap_options.append(value)
-    static_target_blocks_cap_options = sorted(static_target_blocks_cap_options)
-    if not static_target_blocks_cap_options:
-        static_target_blocks_cap_options = [8, 16, 32, 64, 128, 256, 512, 1024]
-
-    return {
-        "nearfield_delayed_scatter_chunks_per_superchunk": _env_pos_int(
-            "JACCPOT_LARGE_N_DELAYED_SCATTER_CHUNKS", 1
-        ),
-        "nearfield_chunk_scan_batch_size": _env_pos_int(
-            "JACCPOT_LARGE_N_CHUNK_SCAN_BATCH_SIZE", 1
-        ),
-        "nearfield_chunk_scan_unroll": _env_pos_int(
-            "JACCPOT_LARGE_N_CHUNK_SCAN_UNROLL", 1
-        ),
-        "nearfield_superchunk_scan_unroll": _env_pos_int(
-            "JACCPOT_LARGE_N_SUPERCHUNK_SCAN_UNROLL", 1
-        ),
-        "nearfield_sorted_scatter_hint": _env_bool(
-            "JACCPOT_LARGE_N_SORTED_SCATTER_HINT", False
-        ),
-        "nearfield_grouped_sorted_scatter": _env_bool(
-            "JACCPOT_LARGE_N_GROUPED_SORTED_SCATTER", False
-        ),
-        "nearfield_superchunk_target_reduce": _env_bool(
-            "JACCPOT_LARGE_N_SUPERCHUNK_TARGET_REDUCE", False
-        ),
-        "nearfield_disable_chunk_cond": _env_bool(
-            "JACCPOT_LARGE_N_DISABLE_CHUNK_COND", True
-        ),
-        "nearfield_target_leaf_batch_size": _canonical_static_int(
-            "JACCPOT_LARGE_N_TARGET_LEAF_BATCH_SIZE",
-            16,
-            "JACCPOT_LARGE_N_TARGET_LEAF_BATCH_OPTIONS",
-            "16,32,64",
-        ),
-        "nearfield_target_block_tile_size": _canonical_static_int(
-            "JACCPOT_LARGE_N_TARGET_BLOCK_TILE_SIZE",
-            4,
-            "JACCPOT_LARGE_N_TARGET_BLOCK_TILE_OPTIONS",
-            "4,8,16",
-        ),
-        "nearfield_target_block_tile_scan_unroll": _canonical_static_int(
-            "JACCPOT_LARGE_N_TARGET_BLOCK_TILE_SCAN_UNROLL",
-            1,
-            "JACCPOT_LARGE_N_TARGET_BLOCK_TILE_SCAN_UNROLL_OPTIONS",
-            "1,2,4",
-        ),
-        "nearfield_target_block_batch_scan_unroll": _canonical_static_int(
-            "JACCPOT_LARGE_N_TARGET_BLOCK_BATCH_SCAN_UNROLL",
-            1,
-            "JACCPOT_LARGE_N_TARGET_BLOCK_BATCH_SCAN_UNROLL_OPTIONS",
-            "1,2,4",
-        ),
-        "nearfield_target_block_overflow_fast_max_blocks": _canonical_static_int(
-            "JACCPOT_LARGE_N_TARGET_BLOCK_OVERFLOW_FAST_MAX_BLOCKS",
-            65536,
-            "JACCPOT_LARGE_N_TARGET_BLOCK_OVERFLOW_FAST_MAX_BLOCKS_OPTIONS",
-            "16384,32768,65536,131072",
-        ),
-        "static_target_blocks_enabled": _env_bool(
-            "JACCPOT_LARGE_N_STATIC_TARGET_BLOCKS", True
-        ),
-        "static_target_blocks_max_per_leaf": int(static_target_blocks_max_per_leaf),
-        "static_target_blocks_auto": bool(static_target_blocks_auto),
-        "static_target_blocks_headroom": float(static_target_blocks_headroom),
-        "static_target_blocks_cap_options": tuple(
-            int(v) for v in static_target_blocks_cap_options
-        ),
-        "overflow_profile_headroom": float(overflow_profile_headroom),
-        "overflow_profile_caps": tuple(int(v) for v in overflow_profile_caps),
-        "neighbor_profile_headroom": float(neighbor_profile_headroom),
-        "neighbor_profile_caps": tuple(int(v) for v in neighbor_profile_caps),
-        "neighbor_profile_bootstrap_cap": int(neighbor_profile_bootstrap_cap),
-        "overflow_profile_bootstrap_cap": int(overflow_profile_bootstrap_cap),
-        "static_runtime_fixed_sizing": bool(static_runtime_fixed_sizing),
-        "overflow_profile_fixed_cap": int(overflow_profile_fixed_cap),
-        "neighbor_profile_fixed_cap": int(neighbor_profile_fixed_cap),
-        "disable_specialized_large_n_nearfield": _env_bool(
-            "JACCPOT_DISABLE_LARGE_N_SPECIALIZED_NEARFIELD", False
-        ),
-    }
-
-
-def _large_n_env_config_for_fmm(fmm: object) -> dict[str, Any]:
-    cfg = getattr(fmm, "_large_n_env_config_cached", None)
-    if cfg is None:
-        cfg = _read_large_n_env_config()
-        setattr(fmm, "_large_n_env_config_cached", cfg)
-    return cfg
 
 
 def prepare_large_n_state(
@@ -342,6 +70,7 @@ def prepare_large_n_state(
     collected_retries: list[DualTreeRetryEvent],
     tree_artifacts: Optional[Any] = None,
     dual_downward_artifacts: Optional[Any] = None,
+    supplied_force_scale: Optional[Array] = None,
     fused_device_mode: bool = False,
     execution_config_override: Optional[Any] = None,
     large_n_env_cfg_override: Optional[dict[str, Any]] = None,
@@ -371,8 +100,22 @@ def prepare_large_n_state(
     built_tree_artifacts = tree_artifacts is None
     built_dual_downward_artifacts = dual_downward_artifacts is None
 
+    # The Dehnen mass-dependent MAC needs its per-node force scale resolved
+    # *between* the tree/upward build and the dual build: the criterion's
+    # threshold is `eps * min_b |a_b|` (eq 16a) or `eps * min_b f_b` (eq 16b), and
+    # `_prepare_state_dual_and_downward` builds the policy state from whatever
+    # `force_scale_nodes` it is handed. Handing it None is not a no-op --
+    # `build_adaptive_policy_state` substitutes `jnp.ones(...)`, so the traversal
+    # would run a threshold of `eps * 1`: a different criterion, entirely
+    # silently. The fused tree+dual helper leaves no seam for the prepass, so a
+    # criterion run takes the unfused path.
+    criterion_active = bool(
+        getattr(fmm, "_uses_paper_style_force_scale", None)
+    ) and bool(fmm._uses_paper_style_force_scale())
+
     if (
         not bool(disable_fused_tree_dual_prepare)
+        and not criterion_active
         and tree_artifacts is None
         and dual_downward_artifacts is None
     ):
@@ -436,10 +179,41 @@ def prepare_large_n_state(
             )
 
         stage_t0 = _now()
+        force_scale_nodes = None
+        if criterion_active and dual_downward_artifacts is None:
+            force_scale_nodes = fmm._resolve_force_scale_nodes_for_prepare(
+                tree_artifacts=tree_artifacts,
+                supplied_force_scale=supplied_force_scale,
+                positions_arr=positions_arr,
+                masses_arr=masses_arr,
+                bounds=bounds,
+                leaf_size=int(leaf_size),
+                max_order=int(max_order),
+                jit_tree=jit_tree_override,
+                upward_center_mode=upward_center_mode,
+                runtime_traversal_config=runtime_traversal_config,
+                runtime_m2l_chunk_size=runtime_m2l_chunk_size,
+                runtime_l2l_chunk_size=runtime_l2l_chunk_size,
+                grouped_interactions=False,
+                farfield_mode="pair_grouped",
+                record_retry=record_retry,
+                refine_local_val=refine_local_val,
+                max_refine_levels_val=max_refine_levels_val,
+                aspect_threshold_val=aspect_threshold_val,
+            )
+            if force_scale_nodes is None:
+                # Unreachable via the public surface, but the consequence of it
+                # ever becoming reachable is a silent unit force scale, so refuse.
+                raise RuntimeError(
+                    "the large-N lane was asked to run the Dehnen paper MAC but "
+                    "no per-node force scale could be resolved; the traversal "
+                    "would silently fall back to a unit scale, i.e. a threshold "
+                    "of eps*1 rather than eps*min_b|a_b|"
+                )
         if dual_downward_artifacts is None:
             dual_downward_artifacts = fmm._prepare_state_dual_and_downward(
                 tree_artifacts=tree_artifacts,
-                force_scale_nodes=None,
+                force_scale_nodes=force_scale_nodes,
                 upward_center_mode=upward_center_mode,
                 theta_val=theta_val,
                 mac_type_val=mac_type_val,
@@ -1573,6 +1347,74 @@ def prepare_large_n_state(
     return out_state
 
 
+def _large_n_fastlane_eval_fn(
+    fmm: Any,
+    state: Any,
+    *,
+    body: Callable[[Any], Array],
+    cache_key: tuple[Any, ...],
+) -> Optional[Callable[[Any], Array]]:
+    """Return a cached ``jax.jit`` of ``body``, or None to run it eagerly.
+
+    The radix fast-lane acceleration evaluate was dispatched **op by op**: the
+    index gathers, the fused Pallas near-field call, the L2P expansion gradient
+    and the scatter-add each went to the device as their own executable, with
+    nothing able to fuse or overlap across the boundaries. That is the fixed cost
+    behind the paper's figure 04 -- measured on an idle A100, ``large_n_gpu``,
+    leaf 64, p=4, real basis, evaluating a prebuilt tree:
+
+    =======  =========  ========  =======
+    N        op-by-op   compiled  factor
+    =======  =========  ========  =======
+    4096      187.2 ms   13.9 ms   13.5x
+    16384     189.0 ms   16.7 ms   11.3x
+    =======  =========  ========  =======
+
+    ...and the output is **bit-identical** (max abs diff 0.0): compiling the same
+    graph does not reassociate it. The near field alone accounted for 185 ms of
+    the 187 (measured via JACCPOT_LARGE_N_EVAL_DIAG_MODE: zero 1.0 ms,
+    permutation_only 2.5 ms, far_only 1.7 ms, near_only 185.2 ms), and it barely
+    moved from N=2048 to N=65536 -- a constant, which is why figure 04's fit gave
+    alpha=0.20 at R^2=0.89 over three decades.
+
+    Returns None -- meaning "run eagerly" -- when compiling would be wrong or
+    pointless:
+
+    * the state already contains tracers, i.e. an outer ``jax.jit``/``grad`` is
+      in charge and nesting a second one would only re-trace;
+    * ``JACCPOT_LARGE_N_EVAL_JIT=0``, the escape hatch for A/B measurement and
+      for bisecting a suspected compile problem.
+
+    The compile is paid once per (state structure, shapes, tuning) and cached on
+    the solver, so a refresh loop reusing topology recompiles nothing. ``jax.jit``
+    keys on the pytree structure and leaf avals by itself; ``cache_key`` adds the
+    Python-level constants the body closes over, which jit cannot see.
+    """
+
+    if not str(os.environ.get("JACCPOT_LARGE_N_EVAL_JIT", "1")).strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }:
+        return None
+    if _contains_jax_tracer(state):
+        return None
+
+    cache = getattr(fmm, "_large_n_fastlane_eval_jit_cache", None)
+    if cache is None:
+        cache = {}
+        try:
+            setattr(fmm, "_large_n_fastlane_eval_jit_cache", cache)
+        except Exception:  # pragma: no cover - defensive, fmm is a normal object
+            return None
+    cached = cache.get(cache_key)
+    if cached is None:
+        cached = jax.jit(body)
+        cache[cache_key] = cached
+    return cached
+
+
 def evaluate_large_n_state(
     fmm: object,
     state: Union[LargeNPreparedState, LargeNCompiledState],
@@ -1676,39 +1518,66 @@ def evaluate_large_n_state(
             output_dtype = state_prepared.working_dtype
         if eval_diag_mode == "zero":
             return jnp.zeros_like(state_prepared.positions_sorted).astype(output_dtype)
-        if bool(disable_near_eval):
-            near_acc = jnp.zeros_like(state_prepared.positions_sorted)
-        else:
-            near_acc = evaluate_large_n_nearfield_fast_lane(
-                fmm,
-                state_prepared,
-                return_potential=False,
-            )
-        if bool(disable_far_eval):
-            far_acc = jnp.zeros_like(state_prepared.positions_sorted)
-        else:
-            far_grad, _, _ = _evaluate_local_expansions_for_particles(
-                state_prepared.local_data,
-                state_prepared.positions_sorted,
-                leaf_nodes=leaf_nodes,
-                node_ranges=node_ranges,
-                max_leaf_size=max_leaf_size,
-                order=local_order,
-                expansion_basis="solidfmm",
-                return_potential=False,
-                max_acc_derivative_order=0,
-            )
-            far_acc = -float(getattr(fmm, "G")) * far_grad
-        if eval_diag_mode == "permutation_only":
-            accelerations_sorted = state_prepared.positions_sorted * jnp.asarray(
-                0.0,
-                dtype=state_prepared.positions_sorted.dtype,
-            )
-        else:
-            accelerations_sorted = near_acc + far_acc
-        return jnp.asarray(accelerations_sorted)[
-            state_prepared.inverse_permutation
-        ].astype(output_dtype)
+
+        def _fastlane_body(state_in: Any) -> Array:
+            if bool(disable_near_eval):
+                near_acc = jnp.zeros_like(state_in.positions_sorted)
+            else:
+                near_acc = evaluate_large_n_nearfield_fast_lane(
+                    fmm,
+                    state_in,
+                    return_potential=False,
+                )
+            if bool(disable_far_eval):
+                far_acc = jnp.zeros_like(state_in.positions_sorted)
+            else:
+                far_grad, _, _ = _evaluate_local_expansions_for_particles(
+                    state_in.local_data,
+                    state_in.positions_sorted,
+                    leaf_nodes=jnp.asarray(
+                        state_in.neighbor_list.leaf_indices, dtype=INDEX_DTYPE
+                    ),
+                    node_ranges=jnp.asarray(
+                        state_in.tree.node_ranges, dtype=INDEX_DTYPE
+                    ),
+                    max_leaf_size=max_leaf_size,
+                    order=local_order,
+                    expansion_basis="solidfmm",
+                    return_potential=False,
+                    max_acc_derivative_order=0,
+                )
+                far_acc = -float(getattr(fmm, "G")) * far_grad
+            if eval_diag_mode == "permutation_only":
+                accelerations_sorted = state_in.positions_sorted * jnp.asarray(
+                    0.0,
+                    dtype=state_in.positions_sorted.dtype,
+                )
+            else:
+                accelerations_sorted = near_acc + far_acc
+            return jnp.asarray(accelerations_sorted)[
+                state_in.inverse_permutation
+            ].astype(output_dtype)
+
+        compiled = _large_n_fastlane_eval_fn(
+            fmm,
+            state_prepared,
+            body=_fastlane_body,
+            cache_key=(
+                "fastlane_accel",
+                str(eval_diag_mode),
+                bool(disable_near_eval),
+                bool(disable_far_eval),
+                int(max_leaf_size),
+                int(local_order),
+                jnp.dtype(output_dtype).name,
+                float(getattr(fmm, "G")),
+                float(getattr(fmm, "softening")),
+                bool(getattr(fmm, "use_pallas", False)),
+            ),
+        )
+        if compiled is not None:
+            return compiled(state_prepared)
+        return _fastlane_body(state_prepared)
 
     nearfield_edge_chunk_size = int(state_prepared.nearfield_edge_chunk_size)
     eval_out = _evaluate_tree_compiled_impl(
@@ -1930,22 +1799,24 @@ def can_use_large_n_prepare_path(
     if str(getattr(fmm, "complex_rotation", "")).strip().lower() != "solidfmm":
         return False
     if (
-        bool(getattr(fmm, "_uses_paper_style_force_scale"))
-        and fmm._uses_paper_style_force_scale()
+        bool(getattr(fmm, "_uses_per_node_effective_theta", None))
+        and fmm._uses_per_node_effective_theta()
     ):
-        # The Dehnen paper MAC needs a solver-owned pair policy plus a p=1 force
-        # scale prepass, neither of which this lane supports, so the whole large-N
-        # prepare path is skipped. Record why: without this the caller sees only a
-        # slowdown and has no way to tell the requested lane never engaged.
-        _record_large_n_decline(fmm, "paper_style_force_scale")
+        # `dehnen_theta` folds the criterion into `geometry.radius` *before* the
+        # dual build, via `_apply_per_node_effective_theta`. This lane has no such
+        # step, so it would run the plain geometric MAC at the solver's theta --
+        # and paper mode pins that at 1.0, so acceptance would be wildly loose
+        # rather than merely different. The mode is refuted anyway (see
+        # `_uses_per_node_effective_theta`), so decline rather than plumb it.
+        _record_large_n_decline(fmm, "per_node_effective_theta")
         if runtime_path == "large_n":
             raise RuntimeError(
                 "runtime_path='large_n' was requested explicitly, but the large-N "
-                "prepare path cannot run the Dehnen paper MAC "
-                "(mac_type='dehnen_error' / adaptive_error_model='dehnen_paper'), "
-                "which requires a solver-owned pair policy and a low-order force "
-                "scale prepass. Use mac_type='dehnen', or runtime_path='auto' to "
-                "fall back to the generic radix lane."
+                "prepare path cannot run mac_type='dehnen_theta': the criterion is "
+                "folded into per-node opening angles before the dual build, which "
+                "this lane does not do, so it would silently run the geometric MAC "
+                "at theta=1.0. Use mac_type='dehnen_error' (which this lane does "
+                "carry) or mac_type='dehnen'."
             )
         return False
     if int(positions_arr.shape[0]) != int(masses_arr.shape[0]):

@@ -1,0 +1,113 @@
+{
+  "config": {
+    "n": 1000000,
+    "leaf_size": 1024,
+    "order": 8,
+    "distribution": "plummer",
+    "seed": 0,
+    "theta": "0.65",
+    "eps": "3e-4",
+    "arms": "fixed,mass",
+    "geometry_mode": "com",
+    "softening": 0.0,
+    "G": 1.0,
+    "force_scale_mode": "paper_cached",
+    "runtime_lane": "large_n",
+    "split_build": "on",
+    "precision": "fp32",
+    "min_far_pairs": 5000,
+    "json_out": "bench/results/validation/split_build_ab_1e6_leaf1024_on.json"
+  },
+  "records": [
+    {
+      "arm": "fixed",
+      "knob": 0.65,
+      "far_pairs": 133396,
+      "near_leaf_pairs": 441046,
+      "prepare_s": 104.78,
+      "nodes": 1953,
+      "dual_calls": 1,
+      "runtime_lane": "large_n",
+      "prepared_state_type": "LargeNPreparedState",
+      "large_n_path_declined_reason": null,
+      "threshold": null,
+      "pair_policy_installed": false,
+      "retry_final_caps": [
+        {
+          "max_pair_queue": -1,
+          "max_interactions_per_node": -1
+        },
+        {
+          "max_pair_queue": -1,
+          "max_interactions_per_node": -1
+        },
+        {
+          "max_pair_queue": -1,
+          "max_interactions_per_node": -1
+        },
+        {
+          "max_pair_queue": -1,
+          "max_interactions_per_node": -1
+        }
+      ]
+    },
+    {
+      "arm": "mass",
+      "knob": 0.0003,
+      "far_pairs": 171692,
+      "near_leaf_pairs": 420334,
+      "prepare_s": 51.97,
+      "nodes": 1953,
+      "dual_calls": 2,
+      "runtime_lane": "large_n",
+      "prepared_state_type": "LargeNPreparedState",
+      "large_n_path_declined_reason": null,
+      "threshold": {
+        "dtype": "float32",
+        "nodes": 1953,
+        "min": 0.7424294948577881,
+        "max": 103.72270965576172,
+        "constant": false
+      },
+      "pair_policy_installed": true,
+      "retry_final_caps": [
+        {
+          "max_pair_queue": -1,
+          "max_interactions_per_node": -1
+        },
+        {
+          "max_pair_queue": -1,
+          "max_interactions_per_node": -1
+        },
+        {
+          "max_pair_queue": -1,
+          "max_interactions_per_node": -1
+        },
+        {
+          "max_pair_queue": -1,
+          "max_interactions_per_node": -1
+        },
+        {
+          "max_pair_queue": -1,
+          "max_interactions_per_node": -1
+        },
+        {
+          "max_pair_queue": -1,
+          "max_interactions_per_node": -1
+        },
+        {
+          "max_pair_queue": -1,
+          "max_interactions_per_node": -1
+        },
+        {
+          "max_pair_queue": -1,
+          "max_interactions_per_node": -1
+        },
+        {
+          "max_pair_queue": -1,
+          "max_interactions_per_node": -1
+        }
+      ]
+    }
+  ]
+}

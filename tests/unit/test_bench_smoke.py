@@ -278,6 +278,21 @@ def test_every_paper_bench_script_is_covered() -> None:
             # their paper wrappers; only the wrappers need a smoke case.
             if name in {"mac_error_distribution", "force_scale_prepare_cost"}:
                 continue
+            # `main`'s MAC engineering benchmarks, which arrived with the merge
+            # of the Dehnen mass-dependent MAC work. They answer development
+            # questions -- how many far pairs a criterion accepts, what a leaf
+            # sweep costs at a common matched median, whether the pair-policy
+            # far tag fits in memory -- and none of them feeds a figure in the
+            # manuscript, which is what this test is scoped to. If one later
+            # becomes a figure's source it moves into CASES with that figure.
+            if name in {
+                "far_pair_census",
+                "leaf_sweep_common_target",
+                "mac_end_to_end_walltime",
+                "pair_policy_far_tag_memory",
+                "per_node_theta_fidelity",
+            }:
+                continue
             # Runnable scripts only. A helper module with no entry point (e.g.
             # grad_bench_lib) has nothing to run end to end; detect that
             # structurally rather than by maintaining a name list that would go

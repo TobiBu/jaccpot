@@ -87,7 +87,23 @@ def test_custom_crossover_threshold_is_honoured():
 
 
 def test_invalid_lane_is_rejected_at_construction():
-    with pytest.raises(ValueError, match="nearfield_lane"):
+    """An out-of-set lane must be refused at construction, not silently accepted.
+
+    WHICH exception depends on whether the runtime typecheck is on, and both are
+    correct refusals. `nearfield_lane` is annotated `GradNearFieldLane`, a
+    `Literal`, so under `JACCPOT_RUNTIME_TYPECHECK=1` beartype rejects the value
+    before `__post_init__`'s loud `ValueError` (STYLE_GUIDE §9) ever runs. Asserting
+    only `ValueError` made this test fail under the hook while the behaviour it
+    checks was working -- one of F40's 122. The property is "refused", so accept
+    either refusal rather than weakening it to a bare `Exception`.
+    """
+    import jaxtyping
+
+    # `jaxtyping.TypeCheckError`, not beartype's own class: the hook wraps
+    # beartype's violation, and it is the wrapper that propagates. Both messages
+    # name the parameter, so the `match` still pins WHICH field was refused.
+    refusals = (ValueError, jaxtyping.TypeCheckError)
+    with pytest.raises(refusals, match="nearfield_lane"):
         GradConfig(nearfield_lane="leaf_major")
     with pytest.raises(ValueError, match="min_particles"):
         GradConfig(nearfield_fast_lane_min_particles=-1)
@@ -162,14 +178,56 @@ def test_gate_helpers_are_bound_in_their_calling_modules():
     caller without the import. ``import jaccpot`` still succeeded -- the NameError
     only fires at call time, deep in the real-basis L2P reverse -- so this cheap
     host-side check is worth having next to the GPU tests that caught it.
+
+    The module named for each gate is the one whose body **calls** it, which is
+    what the guard is about. The L2P gate moved from ``real_harmonics`` to
+    ``real_p2m_l2p`` when the former was split into its mathematical seams
+    (Tier 1.3); ``real_harmonics`` is now a re-export aggregator and does not
+    consult any gate itself, so asserting there would no longer test the thing
+    this test exists to test.
     """
     from jaccpot.nearfield import near_field as nf
-    from jaccpot.operators import real_harmonics as rh
+    from jaccpot.operators import real_p2m_l2p
     from jaccpot.runtime.kernels import core
 
-    assert callable(rh.analytic_l2p_vjp_enabled)
+    assert callable(real_p2m_l2p.analytic_l2p_vjp_enabled)
     assert callable(nf.analytic_p2p_vjp_enabled)
     assert callable(core.fused_m2l_pallas_enabled)
+
+    # And derive the same check rather than hard-coding three modules, so that a
+    # future split cannot move a gate call into a module that forgot the import
+    # and still leave this test green.
+    import ast
+    import importlib
+    import pathlib
+
+    gates = {
+        "analytic_l2p_vjp_enabled",
+        "analytic_p2p_vjp_enabled",
+        "fused_m2l_pallas_enabled",
+    }
+    package_root = pathlib.Path(nf.__file__).resolve().parents[1]
+    callers: dict[str, set[str]] = {}
+    for path in sorted(package_root.rglob("*.py")):
+        module_tree = ast.parse(path.read_text())
+        called = {
+            node.func.id
+            for node in ast.walk(module_tree)
+            if isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Name)
+            and node.func.id in gates
+        }
+        if called:
+            relative = path.relative_to(package_root.parent).with_suffix("")
+            callers[relative.as_posix().replace("/", ".")] = called
+
+    assert callers, "found no module calling a grad gate -- the scan is vacuous"
+    for module_name, called in callers.items():
+        module = importlib.import_module(module_name)
+        for gate in sorted(called):
+            assert callable(
+                getattr(module, gate, None)
+            ), f"{module_name} calls {gate}() but does not have it bound"
 
 
 def test_tier_knobs_respond_after_import(monkeypatch):

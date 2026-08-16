@@ -547,7 +547,7 @@ def test_force_scale_min_ignores_empty_leaves():
     points happens to have none, which would make this test vacuous.
     """
 
-    from types import SimpleNamespace
+    import dataclasses
 
     from jaccpot.runtime._adaptive_policy import (
         compute_node_force_scale_from_sorted_acc,
@@ -577,12 +577,20 @@ def test_force_scale_min_ignores_empty_leaves():
     blank_hi = int(node_ranges[blanked, 1])
     node_ranges[blanked] = [blank_lo, blank_lo - 1]
 
-    tree = SimpleNamespace(
-        node_ranges=jnp.asarray(node_ranges, dtype=jnp.int32),
-        num_internal_nodes=num_internal,
-        left_child=real_tree.left_child,
-        right_child=real_tree.right_child,
+    # A real tree carrying the edit, not a namespace imitating one. `node_ranges` is
+    # not a field of the tree itself -- it lives on `tree.topology`, a NamedTuple --
+    # so the edit goes in through `_replace` and every other field stays consistent
+    # instead of simply being absent. `SimpleNamespace` used to stand in here, which
+    # violated `compute_node_force_scale_from_sorted_acc`'s declared `tree: Tree` and
+    # was the last of F40's runtime-typecheck failures.
+    tree = dataclasses.replace(
+        real_tree,
+        topology=real_tree.topology._replace(
+            node_ranges=jnp.asarray(node_ranges, dtype=jnp.int32)
+        ),
     )
+    assert isinstance(tree, Tree)
+    assert int(tree.num_internal_nodes) == num_internal
 
     accelerations = jnp.asarray(rng.normal(size=(n, 3)) + 3.0, dtype=jnp.float64)
     scales = np.asarray(

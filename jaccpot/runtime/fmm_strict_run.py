@@ -1,4 +1,4 @@
-"""StrictRunMixin: fmm_strict_run methods extracted from the FastMultipoleMethod
+"""StrictRunMixin: fmm_strict_run methods extracted from the FMMEngine
 god-class (Phase 2d mixin split). Methods are verbatim (self unchanged); the
 engine class inherits this mixin. Sibling of _fmm_impl at runtime level.
 """
@@ -8,7 +8,7 @@ from __future__ import annotations
 import os
 import time
 from dataclasses import replace
-from typing import Any, Optional
+from typing import TYPE_CHECKING, Any, Optional
 
 import jax
 import jax.numpy as jnp
@@ -32,10 +32,18 @@ from .fmm_state import (
 )
 from .kernels.core import _empty_interaction_storage_for_tree, _FarPairCOO
 
+if TYPE_CHECKING:  # pragma: no cover - annotations only, no runtime import
+    # The mixins annotate `self` as the engine they are mixed into, which lives in
+    # `_fmm_impl` and imports *them* -- so this must stay under TYPE_CHECKING or it
+    # would form the cycle ARCHITECTURE §8 forbids. Before this block the names were
+    # dangling: `typing.get_type_hints` raised NameError on every mixin method, so the
+    # annotations documented an intent no tool could check.
+    from ._fmm_impl import FMMEngine, PreparedStateLike
+
 
 class StrictRunMixin:
     def refresh_prepared_state(
-        self: "FastMultipoleMethod",
+        self: "FMMEngine",
         prepared_state: PreparedStateLike,
         positions: Array,
         masses: Array,
@@ -143,8 +151,11 @@ class StrictRunMixin:
                 )
         finally:
             self._refresh_timing_active = was_refresh_timing_active
-        prepare_elapsed = time.perf_counter() - refresh_t0
-
+        # NOTE: the prepare stage has no timer of its own here on purpose -- its
+        # cost is already the sum of the `_refresh_timing_{input,tree_upward,
+        # dual_downward,nearfield}_seconds` fields accumulated below, and
+        # `_refresh_timing_compile_or_sync_suspect_seconds` catches whatever those
+        # do not account for. A dead `prepare_elapsed = ...` used to sit here.
         profile_t0 = time.perf_counter()
         next_profile = self._compiled_profile_from_prepared_state(next_state)
         next_fingerprint = self._compiled_profile_fingerprint(next_profile)
@@ -194,7 +205,7 @@ class StrictRunMixin:
         return next_state
 
     def strict_prepare_refresh_and_evaluate(
-        self: "FastMultipoleMethod",
+        self: "FMMEngine",
         prepared_state: Optional[PreparedStateLike],
         positions: Array,
         masses: Array,
@@ -275,6 +286,13 @@ class StrictRunMixin:
                 )
             next_state = next_state_try
 
+        # Timed, because "per step" for a caller means refresh AND evaluate, while
+        # every refresh_* counter covers only the refresh. Leaving the evaluate
+        # out made it the single largest term in "unattributed" -- and an
+        # unattributed remainder that is really one named stage is a gap in the
+        # taxonomy, not a measurement.
+        evaluate_timing_active = bool(getattr(self, "_refresh_timing_active", False))
+        evaluate_t0 = time.perf_counter() if evaluate_timing_active else 0.0
         acc = self.evaluate_prepared_state(
             next_state,
             target_indices=None,
@@ -286,10 +304,18 @@ class StrictRunMixin:
             ),
             max_acc_derivative_order=0,
         )
-        return next_state, jnp.asarray(acc)
+        acc = jnp.asarray(acc)
+        if evaluate_timing_active:
+            # Block, or this records dispatch rather than the evaluate: the
+            # counter's whole purpose is to be comparable with the refresh
+            # stages, which are blocked.
+            if not _contains_tracer(acc):
+                jax.block_until_ready(acc)
+            self._refresh_timing_evaluate_seconds += time.perf_counter() - evaluate_t0
+        return next_state, acc
 
     def strict_run_segmented(
-        self: "FastMultipoleMethod",
+        self: "FMMEngine",
         *,
         state: Any,
         masses: Array,
@@ -372,7 +398,7 @@ class StrictRunMixin:
         return state_curr, prepared_curr, history
 
     def strict_run_v2(
-        self: "FastMultipoleMethod",
+        self: "FMMEngine",
         *,
         state: Array,
         masses: Array,
@@ -801,7 +827,7 @@ class StrictRunMixin:
         return state_curr, prepared_out, history_out
 
     def strict_fused_prepared_eval_fn(
-        self: "FastMultipoleMethod",
+        self: "FMMEngine",
         *,
         positions: Array,
         masses: Array,
@@ -873,7 +899,7 @@ class StrictRunMixin:
         return prepared, _eval
 
     def _refresh_large_n_same_topology(
-        self: "FastMultipoleMethod",
+        self: "FMMEngine",
         prepared_state: LargeNPreparedState,
         positions: Array,
         masses: Array,
@@ -1304,13 +1330,17 @@ class StrictRunMixin:
 
         if refresh_timing_active:
             elapsed = time.perf_counter() - dual_t0
-            recorded = float(
-                getattr(self, "_refresh_timing_dual_downward_seconds", 0.0)
-            )
-            # _prepare_state_dual_and_downward records detailed timing itself.
-            # Keep this branch intentionally empty except to make the elapsed
-            # value visible while avoiding double accounting.
-            _ = (elapsed, recorded)
+            if reuse_static_compact_pairs:
+                # The compact-far-pair reuse branch above does NOT go through
+                # _prepare_state_dual_and_downward, so nothing else records this
+                # stage -- and this is the steady-state route once topology is
+                # frozen, which is precisely when a per-step breakdown is being
+                # read. Leaving it unrecorded made the entire downward pass
+                # (~30% of per-step time at N=65536) land in "unattributed", and
+                # made every dual_* counter read as a hard zero.
+                self._refresh_timing_dual_downward_seconds += elapsed
+            # Otherwise _prepare_state_dual_and_downward has already recorded
+            # this stage and its children; adding elapsed here would double-count.
 
         if (
             tree_config.mode != "static_radix"
@@ -1385,7 +1415,7 @@ class StrictRunMixin:
         return refreshed_state
 
     def _large_n_neighbor_list_matches(
-        self: "FastMultipoleMethod",
+        self: "FMMEngine",
         previous: NodeNeighborList,
         current: NodeNeighborList,
     ) -> bool:
@@ -1427,7 +1457,7 @@ class StrictRunMixin:
             return False
 
     def update_multipoles_only(
-        self: "FastMultipoleMethod",
+        self: "FMMEngine",
         prepared_state: PreparedStateLike,
         positions: Array,
         masses: Array,
@@ -1465,7 +1495,7 @@ class StrictRunMixin:
         return refreshed
 
     def rebuild_topology_in_place(
-        self: "FastMultipoleMethod",
+        self: "FMMEngine",
         prepared_state: PreparedStateLike,
         positions: Array,
         masses: Array,

@@ -23,7 +23,38 @@ def _extract_positions_from_state(state: Array) -> Array:
 
 @dataclass
 class OdisseoFMMCoupler:
-    """Cache-oriented adapter for coupling ODISSEO and Jaccpot FMM."""
+    """Adapter that lets ODISSEO reuse one prepared FMM state across steps.
+
+    ODISSEO integrates with a fixed particle set whose positions move each step, so
+    the expensive part -- the tree build and interaction lists -- can be built once
+    and reused while only the numerics are re-evaluated. This holds that state and
+    the masses it was built against.
+
+    Not frozen, because :meth:`prepare` and :meth:`clear` mutate the cache. Not
+    thread-safe, and not a pytree: the cached state is a host-side object, so a
+    coupler instance must not be closed over by a jitted function.
+
+    **The cache is not self-invalidating**, and that is the thing to know before
+    using this in a long run. :meth:`accelerations` reuses the cached tree unless
+    you pass ``rebuild_sources=True``; it does not measure drift and will not warn.
+    Once the particles have moved far enough that the cached partition is wrong, the
+    forces come back computed against the stale partition, with no error and no NaN.
+    The caller owns the rebuild cadence. :meth:`clear` drops the cache outright.
+
+    Two private fields hold the cache -- ``_prepared_state`` (``None`` before the
+    first :meth:`prepare`) and ``_masses`` (the masses that state was built
+    against), which is why ``masses`` is required on the first
+    :meth:`accelerations` call and optional afterwards.
+
+    Attributes
+    ----------
+    solver : FastMultipoleMethod
+        The solver used to build and evaluate state.
+    leaf_size : int
+        Default leaf size for :meth:`prepare`, overridable per call.
+    max_order : int
+        Default expansion order for :meth:`prepare`, overridable per call.
+    """
 
     solver: FastMultipoleMethod
     leaf_size: int = 16
@@ -87,6 +118,11 @@ class OdisseoFMMCoupler:
             Also return the potential. Not available on the differentiable path.
         rebuild_sources : bool
             Rebuild the tree from ``state`` before evaluating.
+        bounds : Optional[Tuple[Array, Array]]
+            Explicit ``(lower, upper)`` domain bounds for tree construction,
+            forwarded to :meth:`prepare`. Used only when a rebuild actually
+            happens -- i.e. when ``rebuild_sources=True`` or no state is cached
+            yet; otherwise it is silently ignored.
         differentiable : bool
             Route through :meth:`~jaccpot.FastMultipoleMethod.differentiable_accelerations`
             so ``jax.grad`` over this call gives exact fixed-topology gradients
@@ -110,6 +146,19 @@ class OdisseoFMMCoupler:
             positions or masses. Differentiating it therefore returns **exactly
             zero** rather than failing -- the worst outcome available, so it is
             rejected explicitly instead. Pass ``differentiable=True``.
+
+            Also raised on the differentiable path when a rebuild is needed while
+            tracing (``prepare_state`` is not traceable, so the source tree must
+            be built outside the differentiated function), and when
+            ``return_potential=True`` is combined with ``differentiable=True``
+            (the potential half of the near-field ``custom_vjp`` is not wired).
+        ValueError
+            If ``masses`` is ``None`` on a call that needs to build or rebuild
+            the tree and nothing has been cached by a previous
+            :meth:`prepare`/evaluation.
+        RuntimeError
+            If the prepared state is missing after a successful prepare. A
+            defensive invariant check, not a reachable user error.
         """
         traced = _contains_tracer(state) or _contains_tracer(masses)
         if traced and not differentiable:
@@ -178,3 +227,8 @@ class OdisseoFMMCoupler:
             target_indices=active_indices,
             return_potential=return_potential,
         )
+
+
+__all__ = [
+    "OdisseoFMMCoupler",
+]

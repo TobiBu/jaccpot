@@ -1,6 +1,6 @@
 """Multi-GPU strong scaling: fixed N, wall-clock vs. #GPUs.
 
-Uses harness.py (this directory). Writes results/multigpu/strong_scaling.json:
+Uses harness.py (this directory). Writes bench/results/multigpu/strong_scaling.json:
 {"n": [...], "n_gpus": [...], "wall_clock_total_s": [...]}
 """
 

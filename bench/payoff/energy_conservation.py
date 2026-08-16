@@ -3,7 +3,7 @@
 Check nornax's integrator examples first -- this is a standard N-body
 sanity test that may already exist there (Hermite integrator suite built on
 jaccpot forces). Only write new code if nornax has nothing suitable. Writes
-results/payoff/energy_conservation.json:
+bench/results/payoff/energy_conservation.json:
 {"step": [...], "time": [...], "energy": [...], "lz": [...]}
 """
 

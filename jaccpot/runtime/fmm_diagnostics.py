@@ -1,16 +1,91 @@
-"""DiagnosticsMixin: fmm_diagnostics methods extracted from the FastMultipoleMethod
+"""DiagnosticsMixin: fmm_diagnostics methods extracted from the FMMEngine
 god-class (Phase 2d mixin split). Methods are verbatim (self unchanged); the
 engine class inherits this mixin. Sibling of _fmm_impl at runtime level.
 """
 
 from __future__ import annotations
 
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+from .fmm_stage_timing import (
+    aggregate_counter_names,
+    leaf_counter_names,
+    stage_timing_tree,
+)
+
+if TYPE_CHECKING:  # pragma: no cover - annotations only, no runtime import
+    # The mixins annotate `self` as the engine they are mixed into, which lives in
+    # `_fmm_impl` and imports *them* -- so this must stay under TYPE_CHECKING or it
+    # would form the cycle ARCHITECTURE §8 forbids. Before this block the names were
+    # dangling: `typing.get_type_hints` raised NameError on every mixin method, so the
+    # annotations documented an intent no tool could check.
+    from ._fmm_impl import FMMEngine, PreparedStateLike
 
 
 class DiagnosticsMixin:
+    def get_stage_timing(
+        self: "FMMEngine",
+        *,
+        per_call: bool = False,
+    ) -> dict[str, Any]:
+        """Return the refresh stage timers as a nested tree, not a flat bag.
+
+        The ``refresh_*_seconds`` entries in :meth:`get_runtime_diagnostics` are a
+        **hierarchy**: ``refresh_nearfield_seconds`` is the sum of the
+        ``refresh_nearfield_*`` children, and ``refresh_tree_upward_seconds`` the
+        sum of the ``refresh_upward_*`` ones. Measured at N=65536: nearfield
+        80.33 ms against children summing to 79.4 ms. Summing "all the counters"
+        therefore double-counts, and nothing in the flat dict said which names
+        were aggregates.
+
+        Each node carries ``seconds``, ``measured``, and the flat ``counter`` name
+        it corresponds to; a parent additionally carries ``children``,
+        ``children_seconds`` and ``unattributed_seconds``. To sum a partition,
+        take one level of ``children``, or take the leaves -- never both a parent
+        and its children.
+
+        ``measured=False`` means the counter's instrumentation did not run on
+        this configuration, as distinct from a stage that took no time. Both used
+        to serialise as ``0.0``.
+
+        Parameters
+        ----------
+        per_call : bool
+            Divide every ``seconds`` value by ``refresh_timing_calls`` to get
+            per-step seconds instead of cumulative ones.
+
+        Returns
+        -------
+        dict[str, Any]
+            The stage tree, one entry per top-level stage. Each node carries
+            ``seconds``, ``measured`` and ``counter``; parents additionally carry
+            ``children``, ``children_seconds`` and ``unattributed_seconds``.
+
+        See Also
+        --------
+        jaccpot.runtime.fmm_stage_timing : the declared parent/child structure,
+            plus ``leaf_counter_names()`` and ``aggregate_counter_names()`` for
+            consumers that would rather keep working with the flat dict.
+        """
+
+        return stage_timing_tree(self, per_call=per_call)
+
+    @staticmethod
+    def stage_timing_counter_roles() -> dict[str, tuple[str, ...]]:
+        """Which ``refresh_*_seconds`` names are aggregates and which are leaves.
+
+        For a consumer that already reads the flat
+        :meth:`get_runtime_diagnostics` dict and just needs to know what it may
+        safely add up.
+        """
+
+        return {
+            "aggregates": tuple(sorted(aggregate_counter_names())),
+            "leaves": tuple(sorted(leaf_counter_names())),
+        }
+
     def _record_large_n_eval_shape_diagnostics(
-        self: "FastMultipoleMethod",
+        self: "FMMEngine",
         state: PreparedStateLike,
     ) -> None:
         """Record shape-only local-eval diagnostics outside compiled hot loops."""
@@ -83,7 +158,7 @@ class DiagnosticsMixin:
         )
         self._large_n_target_block_source_leaf_padded_shape = padded_source_leaf_shape
 
-    def get_runtime_diagnostics(self: "FastMultipoleMethod") -> dict[str, Any]:
+    def get_runtime_diagnostics(self: "FMMEngine") -> dict[str, Any]:
         """Return read-only runtime diagnostics for compile/profile reuse audits."""
         return {
             # Why the large-N prepare path declined, or None if it was not
@@ -476,5 +551,18 @@ class DiagnosticsMixin:
             "refresh_nearfield_residual_seconds": float(
                 self._refresh_timing_nearfield_residual_seconds
             ),
+            "refresh_evaluate_seconds": float(self._refresh_timing_evaluate_seconds),
             "refresh_timing_calls": int(self._refresh_timing_calls),
+            # False means the M2L/L2L substage timers did not run, so their
+            # counters above are 0.0 for want of measurement rather than for want
+            # of work. They cost a device sync per substage, so they only run when
+            # refresh timing is active (see JACCPOT_REFRESH_TIMING_SYNC_SUBSTAGES).
+            "refresh_substages_measured": bool(
+                getattr(self, "_refresh_timing_substages_measured", False)
+            ),
+            # The counters above are a hierarchy, not a partition. This says which
+            # names are sums of which, so a consumer can add up a partition
+            # instead of guessing; see get_stage_timing() for the nested form.
+            "refresh_stage_timing_roles": self.stage_timing_counter_roles(),
+            "refresh_stage_timing": stage_timing_tree(self),
         }

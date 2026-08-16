@@ -8,6 +8,7 @@ from typing import Any, NamedTuple, Optional, Union
 import jax
 import jax.numpy as jnp
 from beartype.typing import Tuple
+from jax.typing import ArrayLike
 from jaxtyping import Array
 from yggdrax.interactions import (
     CompactTaggedFarPairs,
@@ -19,6 +20,7 @@ from yggdrax.tree import Tree
 from jaccpot.downward.local_expansions import LocalExpansionData
 
 from .dtypes import INDEX_DTYPE
+from .fmm_constants import _NEARFIELD_TARGET_BLOCK_OVERFLOW_FAST_MAX_BLOCKS
 
 
 class _CompatInteractionStorage(NamedTuple):
@@ -48,15 +50,29 @@ class LargeNExecutionConfig:
 @jax.tree_util.register_pytree_node_class
 @dataclass(frozen=True)
 class RadixFastNearfieldPayload:
-    """Canonical payload contract for radix fast-lane nearfield evaluation."""
+    """Canonical payload contract for radix fast-lane nearfield evaluation.
 
-    target_leaf_ids: Array
-    target_particle_ids: Array
-    target_particle_mask: Array
-    source_leaf_ids: Array
-    source_leaf_valid_mask: Array
-    source_particle_ids: Array
-    source_particle_mask: Array
+    THE ARRAY FIELDS ARE ``ArrayLike``, NOT ``Array``, AND THAT IS DELIBERATE.
+    The production builder (``runtime/_nearfield_fastlane._payload``) fills them
+    with **NumPy**, and its comment says why: this payload is memoized and reused
+    across traces, so ``jnp`` arrays minted inside the first trace would be that
+    trace's tracers and leak into the next one as an ``UnexpectedTracerError``.
+    Host constants re-enter each trace cleanly, and the lane's own ``jnp.asarray``
+    converts them at the point of use.
+
+    So a ``jax.Array`` hint here was simply wrong -- it described neither what the
+    builder produces nor what the consumers want, and it made every construction
+    fail under ``JACCPOT_RUNTIME_TYPECHECK=1`` (F40). Do **not** "fix" this by
+    converting the builder to ``jnp``: that reintroduces the tracer leak.
+    """
+
+    target_leaf_ids: ArrayLike
+    target_particle_ids: ArrayLike
+    target_particle_mask: ArrayLike
+    source_leaf_ids: ArrayLike
+    source_leaf_valid_mask: ArrayLike
+    source_particle_ids: ArrayLike
+    source_particle_mask: ArrayLike
     batch_tile_t: int
     batch_tile_s: int
     source_slot_scan_unroll: int = 1
@@ -266,7 +282,9 @@ class LargeNPreparedState:
     nearfield_target_block_tile_size: int = 8
     nearfield_target_block_tile_scan_unroll: int = 1
     nearfield_target_block_batch_scan_unroll: int = 1
-    nearfield_target_block_overflow_fast_max_blocks: int = 65536
+    nearfield_target_block_overflow_fast_max_blocks: int = (
+        _NEARFIELD_TARGET_BLOCK_OVERFLOW_FAST_MAX_BLOCKS
+    )
     nearfield_target_block_overflow_profile_capacity: int = 0
     nearfield_target_block_overflow_active_blocks: int = 0
     speed_prepared_layout: bool = False
@@ -412,7 +430,9 @@ class LargeNPreparedState:
             nearfield_target_block_tile_size = 8
             nearfield_target_block_tile_scan_unroll = 1
             nearfield_target_block_batch_scan_unroll = 1
-            nearfield_target_block_overflow_fast_max_blocks = 65536
+            nearfield_target_block_overflow_fast_max_blocks = (
+                _NEARFIELD_TARGET_BLOCK_OVERFLOW_FAST_MAX_BLOCKS
+            )
             nearfield_target_block_overflow_profile_capacity = 0
             nearfield_target_block_overflow_active_blocks = 0
             disable_specialized_large_n_nearfield = False
@@ -445,7 +465,9 @@ class LargeNPreparedState:
             nearfield_target_block_tile_size = 8
             nearfield_target_block_tile_scan_unroll = 1
             nearfield_target_block_batch_scan_unroll = 1
-            nearfield_target_block_overflow_fast_max_blocks = 65536
+            nearfield_target_block_overflow_fast_max_blocks = (
+                _NEARFIELD_TARGET_BLOCK_OVERFLOW_FAST_MAX_BLOCKS
+            )
             nearfield_target_block_overflow_profile_capacity = 0
             nearfield_target_block_overflow_active_blocks = 0
         elif len(aux) == 29:

@@ -1,6 +1,6 @@
 """Multi-GPU weak scaling: N scaled with #GPUs.
 
-Uses harness.py (this directory). Writes results/multigpu/weak_scaling.json:
+Uses harness.py (this directory). Writes bench/results/multigpu/weak_scaling.json:
 {"n": [...], "n_gpus": [...], "wall_clock_total_s": [...]}
 Throughput-per-GPU (n / wall_clock / n_gpus) is computed in the notebook.
 """

@@ -34,7 +34,7 @@ from jaccpot.nearfield.near_field import (
     prepare_leaf_neighbor_pairs,
 )
 from jaccpot.runtime.fmm import (
-    FastMultipoleMethod,
+    FMMEngine,
     compute_gravitational_acceleration,
     compute_gravitational_potential,
 )
@@ -79,19 +79,19 @@ def test_compute_expansion_orders():
     masses = jnp.array([2.0, 1.0])
 
     # Order 0: only monopole, dipole/quadrupole zero
-    exp0 = FastMultipoleMethod.compute_expansion(positions, masses, order=0)
+    exp0 = FMMEngine.compute_expansion(positions, masses, order=0)
     assert jnp.isclose(exp0.monopole, 3.0)
     assert jnp.allclose(exp0.dipole, jnp.zeros(3))
     assert jnp.allclose(exp0.quadrupole, jnp.zeros((3, 3)))
 
     # Order 1: dipole enabled, quad still zero
-    exp1 = FastMultipoleMethod.compute_expansion(positions, masses, order=1)
+    exp1 = FMMEngine.compute_expansion(positions, masses, order=1)
     assert jnp.isclose(exp1.monopole, exp0.monopole)
     assert jnp.all(jnp.isfinite(exp1.dipole))
     assert jnp.allclose(exp1.quadrupole, jnp.zeros((3, 3)))
 
     # Order 2: quadrupole enabled
-    exp2 = FastMultipoleMethod.compute_expansion(positions, masses, order=2)
+    exp2 = FMMEngine.compute_expansion(positions, masses, order=2)
     assert jnp.isclose(exp2.monopole, exp0.monopole)
     assert jnp.all(jnp.isfinite(exp2.dipole))
     assert jnp.all(jnp.isfinite(exp2.quadrupole))
@@ -99,7 +99,7 @@ def test_compute_expansion_orders():
 
 def test_evaluate_expansion_consistency():
     """evaluate_expansion gives consistent results across orders."""
-    fmm = FastMultipoleMethod(G=1.0, softening=0.0)
+    fmm = FMMEngine(G=1.0, softening=0.0)
     positions = jnp.array(
         [
             [0.0, 0.0, 0.0],
@@ -109,8 +109,8 @@ def test_evaluate_expansion_consistency():
     masses = jnp.array([1.0, 2.0])
     point = jnp.array([2.0, 0.5, -1.0])
 
-    exp0 = FastMultipoleMethod.compute_expansion(positions, masses, order=0)
-    exp2 = FastMultipoleMethod.compute_expansion(positions, masses, order=2)
+    exp0 = FMMEngine.compute_expansion(positions, masses, order=0)
+    exp2 = FMMEngine.compute_expansion(positions, masses, order=2)
 
     # Monopole evaluation should match regardless of expansion order
     a0 = fmm.evaluate_expansion(exp0, order=0, eval_point=point)
@@ -130,16 +130,16 @@ def test_multipole_accuracy_improves_with_order():
     pos = 0.1 * jax.random.normal(key, (n, 3))
     mass = jnp.ones((n,))
 
-    fmm = FastMultipoleMethod(G=1.0, softening=0.0)
+    fmm = FMMEngine(G=1.0, softening=0.0)
     eval_point = jnp.array([3.0, 0.5, -1.0])
 
     # Reference direct sum at eval point
     a_ref = fmm.direct_sum(pos, mass, eval_point)
 
     # Expansions around CoM
-    exp0 = FastMultipoleMethod.compute_expansion(pos, mass, order=0)
-    exp1 = FastMultipoleMethod.compute_expansion(pos, mass, order=1)
-    exp2 = FastMultipoleMethod.compute_expansion(pos, mass, order=2)
+    exp0 = FMMEngine.compute_expansion(pos, mass, order=0)
+    exp1 = FMMEngine.compute_expansion(pos, mass, order=1)
+    exp2 = FMMEngine.compute_expansion(pos, mass, order=2)
 
     a0 = fmm.evaluate_expansion(exp0, order=0, eval_point=eval_point)
     a1 = fmm.evaluate_expansion(exp1, order=1, eval_point=eval_point)
@@ -162,7 +162,7 @@ def test_zero_total_mass_expansion():
     positions = jnp.array([[0.0, 0.0, 0.0], [1.0, 1.0, 1.0]])
     masses = jnp.array([0.0, 0.0])
 
-    exp = FastMultipoleMethod.compute_expansion(positions, masses, order=2)
+    exp = FMMEngine.compute_expansion(positions, masses, order=2)
     assert jnp.isclose(exp.monopole, 0.0)
     assert jnp.allclose(exp.dipole, 0.0)
     assert jnp.allclose(exp.quadrupole, 0.0)
@@ -181,7 +181,7 @@ def test_monopole_expansion():
     )
     masses = jnp.array([1.0, 1.0])
 
-    expansion = FastMultipoleMethod.compute_expansion(
+    expansion = FMMEngine.compute_expansion(
         positions,
         masses,
         order=0,
@@ -226,7 +226,7 @@ def test_prepare_state_fixed_depth_tree():
         axis=1,
     )
     masses = jnp.ones((n,))
-    fmm = FastMultipoleMethod(
+    fmm = FMMEngine(
         theta=0.6,
         tree_build_mode="fixed_depth",
         target_leaf_particles=8,
@@ -267,7 +267,7 @@ def test_prepare_refresh_static_radix_tree_preserves_static_shape(monkeypatch):
     positions = jnp.concatenate([core, halo], axis=0)
     masses = jnp.ones((positions.shape[0],), dtype=jnp.float32)
 
-    fmm = FastMultipoleMethod(
+    fmm = FMMEngine(
         preset="large_n_gpu",
         runtime_path="large_n",
         working_dtype=jnp.float32,
@@ -355,7 +355,7 @@ def test_static_radix_refresh_rebuilds_current_large_n_payloads(monkeypatch):
         fixed_order=2,
     )
 
-    fmm = FastMultipoleMethod(**kwargs)
+    fmm = FMMEngine(**kwargs)
     state = fmm.prepare_state(positions, masses, leaf_size=128, max_order=2)
     refreshed = fmm.refresh_prepared_state(
         state,
@@ -366,7 +366,7 @@ def test_static_radix_refresh_rebuilds_current_large_n_payloads(monkeypatch):
     )
     diagnostics = fmm.get_runtime_diagnostics()
 
-    fresh_fmm = FastMultipoleMethod(**kwargs)
+    fresh_fmm = FMMEngine(**kwargs)
     fresh = fresh_fmm.prepare_state(moved, masses, leaf_size=128, max_order=2)
 
     assert diagnostics["large_n_same_topology_refresh_hits"] >= 1
@@ -475,7 +475,7 @@ def test_static_radix_refresh_dual_planner_mode_parity_and_diagnostics(monkeypat
     )
 
     monkeypatch.setenv("JACCPOT_LARGE_N_REFRESH_DUAL_PLANNER_MODE", "off")
-    fmm_off = FastMultipoleMethod(**kwargs)
+    fmm_off = FMMEngine(**kwargs)
     state_off = fmm_off.prepare_state(positions, masses, leaf_size=128, max_order=2)
     refreshed_off = fmm_off.refresh_prepared_state(
         state_off,
@@ -488,7 +488,7 @@ def test_static_radix_refresh_dual_planner_mode_parity_and_diagnostics(monkeypat
 
     monkeypatch.setenv("JACCPOT_LARGE_N_REFRESH_DUAL_PLANNER_MODE", "on")
     monkeypatch.setenv("JACCPOT_STATIC_STRICT_GPU_MODE", "on")
-    fmm_on = FastMultipoleMethod(**kwargs)
+    fmm_on = FMMEngine(**kwargs)
     state_on = fmm_on.prepare_state(positions, masses, leaf_size=128, max_order=2)
     refreshed_on = fmm_on.refresh_prepared_state(
         state_on,
@@ -550,7 +550,7 @@ def test_strict_prepare_refresh_and_evaluate_api_and_diagnostics(monkeypatch):
         axis=1,
     )
 
-    fmm = FastMultipoleMethod(
+    fmm = FMMEngine(
         preset="large_n_gpu",
         runtime_path="large_n",
         expansion_basis="solidfmm",
@@ -627,7 +627,7 @@ def test_strict_exact_cap_profile_match_fail_fast(monkeypatch, tmp_path):
     masses = jnp.ones((1024,), dtype=jnp.float32)
     moved = positions + 1e-3
 
-    fmm = FastMultipoleMethod(
+    fmm = FMMEngine(
         preset="large_n_gpu",
         runtime_path="large_n",
         expansion_basis="solidfmm",
@@ -684,7 +684,7 @@ def test_strict_run_v2_api(monkeypatch):
         axis=1,
     )
 
-    fmm = FastMultipoleMethod(
+    fmm = FMMEngine(
         preset="large_n_gpu",
         runtime_path="large_n",
         expansion_basis="solidfmm",
@@ -763,7 +763,7 @@ def test_strict_fused_moved_endpoint_matches_fresh_prepare(monkeypatch):
         tree_build_mode="static_radix",
         fixed_order=2,
     )
-    fmm = FastMultipoleMethod(**kwargs)
+    fmm = FMMEngine(**kwargs)
     state_out, prepared_out, history = fmm.strict_run_v2(
         state=state0,
         masses=masses,
@@ -781,7 +781,7 @@ def test_strict_fused_moved_endpoint_matches_fresh_prepare(monkeypatch):
     assert diagnostics["strict_fused_fallback_count"] == 0
     assert diagnostics["strict_self_force_endpoint_evaluations"] == 1
 
-    fresh_fmm = FastMultipoleMethod(**kwargs)
+    fresh_fmm = FMMEngine(**kwargs)
     fresh = fresh_fmm.prepare_state(
         state_out[:, 0, :], masses, leaf_size=128, max_order=2
     )
@@ -825,7 +825,7 @@ def test_strict_fused_compact_far_pair_cap_fails(monkeypatch):
     )
     state0 = jnp.stack([positions, jnp.zeros_like(positions)], axis=1)
 
-    fmm = FastMultipoleMethod(
+    fmm = FMMEngine(
         preset="large_n_gpu",
         runtime_path="large_n",
         expansion_basis="solidfmm",
@@ -857,7 +857,7 @@ def test_strict_fused_compact_far_pair_cap_fails(monkeypatch):
 
 def test_capacity_fixed_depth_tree_mode_is_removed():
     with pytest.raises(ValueError, match="tree_build_mode"):
-        FastMultipoleMethod(tree_build_mode="capacity_fixed_depth")
+        FMMEngine(tree_build_mode="capacity_fixed_depth")
 
 
 def _fixed_depth_sample():
@@ -891,7 +891,7 @@ def test_compute_accelerations_fixed_depth_matches_direct():
     G = 1.1
     softening = 0.02
 
-    fmm = FastMultipoleMethod(
+    fmm = FMMEngine(
         theta=theta,
         G=G,
         softening=softening,
@@ -931,7 +931,7 @@ def test_compute_accelerations_refined_tree_matches_non_refined():
     aspect_threshold = 4.0
 
     def run(refine_local_flag: bool):
-        fmm = FastMultipoleMethod(
+        fmm = FMMEngine(
             theta=theta,
             G=G,
             softening=softening,
@@ -970,7 +970,7 @@ def test_compute_accelerations_fixed_depth_jitted_matches_eager():
     positions, masses = _fixed_depth_sample()
 
     def run(jit_tree: bool, jit_traversal: bool):
-        fmm = FastMultipoleMethod(
+        fmm = FMMEngine(
             theta=0.7,
             G=1.1,
             softening=0.02,
@@ -1000,13 +1000,13 @@ def test_acceleration_magnitude():
     positions = jnp.array([[0.0, 0.0, 0.0]])
     masses = jnp.array([1.0])
 
-    fmm = FastMultipoleMethod(G=1.0, softening=0.0)
+    fmm = FMMEngine(G=1.0, softening=0.0)
 
     # Points at distance 1 and 2
     point1 = jnp.array([1.0, 0.0, 0.0])
     point2 = jnp.array([2.0, 0.0, 0.0])
 
-    expansion = FastMultipoleMethod.compute_expansion(
+    expansion = FMMEngine.compute_expansion(
         positions,
         masses,
         order=0,
@@ -1094,7 +1094,7 @@ def test_stf_symmetry_and_trace_free():
     pos = 0.2 * jax.random.normal(key, (n, 3))
     mass = jax.random.uniform(key, (n,), minval=0.1, maxval=2.0)
 
-    exp = FastMultipoleMethod.compute_expansion(pos, mass, order=4)
+    exp = FMMEngine.compute_expansion(pos, mass, order=4)
 
     # Quadrupole symmetry and trace-free
     Q = exp.quadrupole
@@ -1155,7 +1155,7 @@ def test_prepare_downward_sweep_matches_module_helper():
         leaf_size=DEFAULT_TEST_LEAF_SIZE,
     )
 
-    fmm = FastMultipoleMethod(theta=0.4)
+    fmm = FMMEngine(theta=0.4)
     upward = fmm.prepare_upward_sweep(
         tree,
         pos_sorted,
@@ -1236,8 +1236,8 @@ def test_fmm_dense_downward_matches_sparse_path():
     )
 
     kwargs = dict(bounds=bounds, leaf_size=2, max_order=2, theta=0.6)
-    fmm_sparse = FastMultipoleMethod(theta=0.6, use_dense_interactions=False)
-    fmm_dense = FastMultipoleMethod(theta=0.6, use_dense_interactions=True)
+    fmm_sparse = FMMEngine(theta=0.6, use_dense_interactions=False)
+    fmm_dense = FMMEngine(theta=0.6, use_dense_interactions=True)
 
     state_sparse = fmm_sparse.prepare_state(positions, masses, **kwargs)
     state_dense = fmm_dense.prepare_state(positions, masses, **kwargs)
@@ -1255,13 +1255,13 @@ def test_far_field_accuracy_order3_vs_order4():
     pos = 0.1 * jax.random.normal(key, (n, 3))
     mass = jax.random.uniform(key, (n,), minval=0.5, maxval=1.5)
 
-    fmm = FastMultipoleMethod(G=1.0, softening=0.0)
+    fmm = FMMEngine(G=1.0, softening=0.0)
     eval_point = jnp.array([6.0, -3.0, 2.0])
 
     a_ref = fmm.direct_sum(pos, mass, eval_point)
 
-    exp3 = FastMultipoleMethod.compute_expansion(pos, mass, order=3)
-    exp4 = FastMultipoleMethod.compute_expansion(pos, mass, order=4)
+    exp3 = FMMEngine.compute_expansion(pos, mass, order=3)
+    exp4 = FMMEngine.compute_expansion(pos, mass, order=4)
 
     a3 = fmm.evaluate_expansion(exp3, order=3, eval_point=eval_point)
     a4 = fmm.evaluate_expansion(exp4, order=4, eval_point=eval_point)
@@ -1298,7 +1298,7 @@ def test_evaluate_tree_matches_direct_sum_all_near_field():
     geometry = compute_tree_geometry(tree, pos_sorted)
     neighbor_list = build_leaf_neighbor_lists(tree, geometry, theta=5.0)
 
-    fmm = FastMultipoleMethod(theta=5.0, G=1.3, softening=0.05)
+    fmm = FMMEngine(theta=5.0, G=1.3, softening=0.05)
     upward = fmm.prepare_upward_sweep(
         tree,
         pos_sorted,
@@ -1359,7 +1359,7 @@ def test_evaluate_tree_far_field_accuracy():
     geometry = compute_tree_geometry(tree, pos_sorted)
     neighbor_list = build_leaf_neighbor_lists(tree, geometry, theta=0.4)
 
-    fmm = FastMultipoleMethod(theta=0.4, G=1.0, softening=0.01)
+    fmm = FMMEngine(theta=0.4, G=1.0, softening=0.01)
     upward = fmm.prepare_upward_sweep(
         tree,
         pos_sorted,
@@ -1416,7 +1416,7 @@ def test_fmm_pipeline_matches_direct_sum():
     )
     masses = jnp.array([1.0, 1.2, 0.9, 1.1], dtype=jnp.float64)
 
-    fmm = FastMultipoleMethod(theta=5.0, G=1.3, softening=0.05)
+    fmm = FMMEngine(theta=5.0, G=1.3, softening=0.05)
     acc_class, pot_class = fmm.compute_accelerations(
         positions,
         masses,
@@ -1477,7 +1477,7 @@ def test_evaluate_tree_compiled_matches_eager():
         return_reordered=True,
     )
 
-    fmm = FastMultipoleMethod(theta=0.7, G=1.0, softening=0.02)
+    fmm = FMMEngine(theta=0.7, G=1.0, softening=0.02)
     upward = fmm.prepare_upward_sweep(
         tree,
         pos_sorted,
@@ -1518,22 +1518,67 @@ def test_evaluate_tree_compiled_matches_eager():
     assert np.allclose(np.asarray(eager_pot), np.asarray(jit_pot))
 
 
-def test_nearfield_bucketed_matches_baseline():
+@pytest.mark.parametrize(
+    ("num_particles", "dtype", "chunk_size", "tolerance"),
+    [
+        # (96, float32, 128) is the configuration this test has always used.
+        pytest.param(96, jnp.float32, 128, 1e-6, id="n96-f32-chunk128"),
+        pytest.param(96, jnp.float64, 128, 1e-13, id="n96-f64-chunk128"),
+        pytest.param(256, jnp.float32, 64, 1e-6, id="n256-f32-chunk64"),
+        pytest.param(256, jnp.float64, 64, 1e-13, id="n256-f64-chunk64"),
+    ],
+)
+def test_nearfield_bucketed_matches_baseline(
+    num_particles, dtype, chunk_size, tolerance
+):
+    """``nearfield_mode`` "bucketed" and "baseline" agree to round-off.
+
+    The two modes deliberately differ in edge order (``sort_by_source``), so they
+    differ in float accumulation order and are **not** expected to be bit-equal --
+    measured, they never are. What they must agree to is round-off, and this pins
+    that at a tolerance derived from measurement rather than assumed.
+
+    Measured relative L2 across 5 PRNG seeds x N in {96, 256}:
+
+        float32   6.9e-08 .. 1.03e-07     (~1 eps_f32)
+        float64   1.4e-16 .. 2.33e-16     (~1 eps_f64)
+
+    Bounds are 1e-6 (fp32, ~8 eps) and 1e-13 (fp64), leaving roughly 10x and a
+    wide margin respectively. Both are far tighter than the 1e-5 this test used
+    before, which at fp32/N=96 was ~100x looser than the round-off it was meant to
+    bound and would have admitted a real algorithmic divergence.
+
+    The **float64 cases are the sharp instrument here**, and adding them matters
+    more than tightening fp32. Mutation check: perturbing the bucketed path's
+    softening by 3e-6 relative induces a ~1e-10 relative divergence in the force.
+    The fp64 cases fail on it (1.3e-10 and 7.2e-10 against a 1e-13 bound); the fp32
+    cases cannot see it at all, because fp32 round-off is already ~1e-7. So fp32
+    can only ever catch a divergence above ~1e-6, and before this parametrisation
+    there was no fp64 case at all.
+
+    ``fixed_order`` stays at 3 rather than being parametrised: measured at orders
+    2, 3 and 4 the near-field agreement is bit-for-bit unchanged, which is expected
+    -- this exercises a near-field traversal, not the expansion. Adding that axis
+    would cost compile time and measure nothing.
+
+    The fp32/chunk-128 cases run in the CI smoke leg; the N=256 cases are listed in
+    ``slow_tests.txt``. Before parametrisation the single case was slow-only, so no
+    fast leg checked this equivalence at all.
+    """
     key = jax.random.PRNGKey(515)
-    num_particles = 96
     positions = jax.random.uniform(
         key,
         (num_particles, 3),
         minval=-1.0,
         maxval=1.0,
-        dtype=jnp.float32,
+        dtype=dtype,
     )
-    masses = jnp.abs(jax.random.normal(key, (num_particles,), dtype=jnp.float32)) + 1.0
+    masses = jnp.abs(jax.random.normal(key, (num_particles,), dtype=dtype)) + 1.0
 
     base_kwargs = dict(
         theta=0.6,
         softening=1e-3,
-        working_dtype=jnp.float32,
+        working_dtype=dtype,
         expansion_basis="solidfmm",
         complex_rotation="solidfmm",
         mac_type="dehnen",
@@ -1543,13 +1588,13 @@ def test_nearfield_bucketed_matches_baseline():
         farfield_mode="class_major",
     )
 
-    fmm_baseline = FastMultipoleMethod(
+    fmm_baseline = FMMEngine(
         nearfield_mode="baseline",
         **base_kwargs,
     )
-    fmm_bucketed = FastMultipoleMethod(
+    fmm_bucketed = FMMEngine(
         nearfield_mode="bucketed",
-        nearfield_edge_chunk_size=128,
+        nearfield_edge_chunk_size=chunk_size,
         **base_kwargs,
     )
 
@@ -1568,8 +1613,16 @@ def test_nearfield_bucketed_matches_baseline():
         jit_tree=False,
     )
 
-    assert np.allclose(
-        np.asarray(acc_bucketed), np.asarray(acc_baseline), rtol=1e-5, atol=1e-5
+    baseline_np = np.asarray(acc_baseline, dtype=np.float64)
+    bucketed_np = np.asarray(acc_bucketed, dtype=np.float64)
+    rel_l2 = float(
+        np.linalg.norm(bucketed_np - baseline_np)
+        / max(float(np.linalg.norm(baseline_np)), 1e-300)
+    )
+    assert rel_l2 < tolerance, (
+        f"bucketed vs baseline near-field disagree beyond round-off: rel-L2 "
+        f"{rel_l2:.3e} > {tolerance:.0e} (N={num_particles}, {np.dtype(dtype).name}, "
+        f"chunk={chunk_size})"
     )
 
 
@@ -1749,7 +1802,7 @@ def test_radix_fast_lane_prepared_state_matches_large_n_baseline(monkeypatch):
         working_dtype=jnp.float32,
     )
 
-    fmm = FastMultipoleMethod(**kwargs)
+    fmm = FMMEngine(**kwargs)
     state = fmm.prepare_state(
         positions,
         masses,
@@ -1808,7 +1861,7 @@ def test_radix_fast_lane_includes_overflow_target_blocks(monkeypatch):
         dtype=jnp.float32,
     )
 
-    fmm = FastMultipoleMethod(
+    fmm = FMMEngine(
         preset="large_n_gpu",
         expansion_basis="solidfmm",
         theta=0.6,
@@ -1872,7 +1925,7 @@ def test_radix_fast_lane_auto_full_prefix_eliminates_overflow(monkeypatch):
         dtype=jnp.float32,
     )
 
-    fmm = FastMultipoleMethod(
+    fmm = FMMEngine(
         preset="large_n_gpu",
         expansion_basis="solidfmm",
         theta=0.6,
@@ -1920,7 +1973,7 @@ def test_large_n_prepacked_overflow_fallback_matches_tiled_overflow(monkeypatch)
         dtype=jnp.float32,
     )
 
-    fmm = FastMultipoleMethod(
+    fmm = FMMEngine(
         preset="large_n_gpu",
         expansion_basis="solidfmm",
         theta=0.6,
@@ -2099,8 +2152,8 @@ def test_radix_fast_lane_fixed_seed_repeatability(monkeypatch):
         grouped_interactions=False,
         working_dtype=jnp.float32,
     )
-    fmm_a = FastMultipoleMethod(**kwargs)
-    fmm_b = FastMultipoleMethod(**kwargs)
+    fmm_a = FMMEngine(**kwargs)
+    fmm_b = FMMEngine(**kwargs)
 
     state_a = fmm_a.prepare_state(
         positions_a,
@@ -2166,7 +2219,7 @@ def test_prepare_state_reuses_cached_interactions_when_inputs_match():
     )
     masses = jnp.linspace(0.5, 1.5, num_particles, dtype=jnp.float32)
 
-    fmm = FastMultipoleMethod(
+    fmm = FMMEngine(
         theta=0.6,
         softening=1e-3,
         working_dtype=jnp.float32,
@@ -2211,7 +2264,7 @@ def test_compute_accelerations_reuses_prepared_state_when_enabled():
     )
     masses = jnp.linspace(0.75, 1.25, num_particles, dtype=jnp.float32)
 
-    fmm = FastMultipoleMethod(
+    fmm = FMMEngine(
         theta=0.6,
         softening=1e-3,
         working_dtype=jnp.float32,
@@ -2249,7 +2302,7 @@ def test_compute_accelerations_reuse_cache_invalidates_on_parameter_and_value_ch
     masses = jnp.ones((num_particles,), dtype=jnp.float32)
     masses_changed = masses.at[0].set(jnp.float32(1.5))
 
-    fmm = FastMultipoleMethod(
+    fmm = FMMEngine(
         theta=0.55,
         softening=1e-3,
         working_dtype=jnp.float32,
@@ -2293,7 +2346,7 @@ def test_compute_accelerations_reuses_prepared_state_for_value_equal_copies():
     positions_copy = jnp.array(np.asarray(positions))
     masses_copy = jnp.array(np.asarray(masses))
 
-    fmm = FastMultipoleMethod(
+    fmm = FMMEngine(
         theta=0.55,
         softening=1e-3,
         working_dtype=jnp.float32,
@@ -2336,7 +2389,7 @@ def test_prepare_state_precomputes_bucketed_scatter_schedule():
     )
     masses = jnp.ones((num_particles,), dtype=jnp.float32)
 
-    fmm = FastMultipoleMethod(
+    fmm = FMMEngine(
         theta=0.6,
         softening=1e-3,
         working_dtype=jnp.float32,
@@ -2373,7 +2426,7 @@ def test_prepare_state_cache_respects_theta_changes():
     positions = jax.random.normal(key, (num_particles, 3), dtype=jnp.float32)
     masses = jnp.ones((num_particles,), dtype=jnp.float32)
 
-    fmm = FastMultipoleMethod(
+    fmm = FMMEngine(
         theta=0.5,
         softening=1e-3,
         working_dtype=jnp.float32,
@@ -2410,7 +2463,7 @@ def test_prepare_state_cache_respects_dehnen_radius_scale_changes():
     positions = jax.random.normal(key, (num_particles, 3), dtype=jnp.float32)
     masses = jnp.ones((num_particles,), dtype=jnp.float32)
 
-    fmm = FastMultipoleMethod(
+    fmm = FMMEngine(
         theta=0.55,
         softening=1e-3,
         working_dtype=jnp.float32,
@@ -2465,7 +2518,7 @@ def test_prepare_state_cache_respects_traversal_config_changes():
         max_neighbors_per_leaf=4096,
     )
 
-    fmm = FastMultipoleMethod(
+    fmm = FMMEngine(
         theta=0.55,
         softening=5e-4,
         working_dtype=jnp.float32,
@@ -2513,7 +2566,7 @@ def test_prepare_state_reuses_topology_when_morton_order_stable():
         jnp.asarray([1.0, 1.0, 1.0], dtype=jnp.float32),
     )
 
-    fmm = FastMultipoleMethod(
+    fmm = FMMEngine(
         theta=0.6,
         softening=1e-3,
         working_dtype=jnp.float32,
@@ -2565,7 +2618,7 @@ def test_prepare_state_rebuilds_topology_after_rebuild_every_steps():
         jnp.asarray([1.0, 1.0, 1.0], dtype=jnp.float32),
     )
 
-    fmm = FastMultipoleMethod(
+    fmm = FMMEngine(
         theta=0.6,
         softening=1e-3,
         working_dtype=jnp.float32,
@@ -2622,7 +2675,7 @@ def test_prepare_state_reuses_grouped_buffers_from_cache():
     )
     masses = jnp.abs(jax.random.normal(key, (num_particles,), dtype=jnp.float32)) + 1.0
 
-    fmm = FastMultipoleMethod(
+    fmm = FMMEngine(
         theta=0.6,
         softening=1e-3,
         working_dtype=jnp.float32,
@@ -2665,7 +2718,7 @@ def test_prepare_state_reuses_grouped_class_segments_from_cache():
     )
     masses = jnp.abs(jax.random.normal(key, (num_particles,), dtype=jnp.float32)) + 1.0
 
-    fmm = FastMultipoleMethod(
+    fmm = FMMEngine(
         theta=0.6,
         softening=1e-3,
         working_dtype=jnp.float32,
@@ -2710,7 +2763,7 @@ def test_prepare_state_cache_key_respects_center_mode():
     )
     masses = jnp.abs(jax.random.normal(key, (num_particles,), dtype=jnp.float32)) + 1.0
 
-    fmm = FastMultipoleMethod(
+    fmm = FMMEngine(
         theta=0.6,
         softening=1e-3,
         working_dtype=jnp.float32,
@@ -2756,7 +2809,7 @@ def test_fast_preset_sets_lbvh_defaults():
     positions = jax.random.normal(key, (num_particles, 3), dtype=jnp.float32)
     masses = jnp.ones((num_particles,), dtype=jnp.float32)
 
-    fmm = FastMultipoleMethod(preset="fast", theta=0.6, softening=1e-3)
+    fmm = FMMEngine(preset="fast", theta=0.6, softening=1e-3)
 
     assert fmm.tree_build_mode == "lbvh"
     assert fmm.target_leaf_particles == 64
@@ -2775,7 +2828,7 @@ def test_fast_preset_sets_lbvh_defaults():
 
 
 def test_fast_preset_allows_explicit_overrides():
-    fmm = FastMultipoleMethod(
+    fmm = FMMEngine(
         preset=FMMPreset.FAST,
         tree_build_mode="lbvh",
         target_leaf_particles=12,
@@ -2789,7 +2842,7 @@ def test_fast_preset_allows_explicit_overrides():
 
 
 def test_fast_preset_defaults_to_auto_jit_tree_policy():
-    fmm = FastMultipoleMethod(preset=FMMPreset.FAST)
+    fmm = FMMEngine(preset=FMMPreset.FAST)
     assert fmm._jit_tree_default == "auto"
 
 
@@ -2805,7 +2858,7 @@ def test_solidfmm_float32_uses_complex64_locals():
     )
     masses = jnp.abs(jax.random.normal(key, (num_particles,), dtype=jnp.float32)) + 1.0
 
-    fmm = FastMultipoleMethod(
+    fmm = FMMEngine(
         theta=0.6,
         softening=1e-3,
         working_dtype=jnp.float32,
@@ -2838,7 +2891,7 @@ def test_solidfmm_float64_uses_complex128_locals():
             jnp.abs(jax.random.normal(key, (num_particles,), dtype=jnp.float64)) + 1.0
         )
 
-        fmm = FastMultipoleMethod(
+        fmm = FMMEngine(
             theta=0.6,
             softening=1e-3,
             working_dtype=jnp.float64,
@@ -2856,7 +2909,73 @@ def test_solidfmm_float64_uses_complex128_locals():
         assert state.downward.locals.coefficients.dtype == jnp.complex128
 
 
+def _m2l_far_pair_count(state) -> int:
+    """M2L interactions in a prepared topology; 0 means the far field never runs."""
+    interactions = getattr(state, "interactions", None)
+    if interactions is not None:
+        return int(jnp.sum(interactions.counts))
+    dual = getattr(state, "dual_tree_result", None)
+    if dual is not None:
+        return int(jnp.sum(dual.far_pair_count))
+    return 0
+
+
+# leaf_size=4 is load-bearing: see the docstring's first paragraph.
+_CHUNKED_M2L_LEAF_SIZE = 4
+
+
 def test_solidfmm_chunked_m2l_matches_fullbatch():
+    """Chunking the M2L reduction must not change the force.
+
+    Two things about this test were previously not true of it.
+
+    First, it ran at ``leaf_size=16``, where this system accepts **zero** M2L
+    pairs -- so ``m2l_chunk_size=4096`` and ``m2l_chunk_size=32`` had nothing to
+    chunk and could not possibly differ. Measured far-pair counts at N=128,
+    ``theta=0.6``, ``mac_type="dehnen"``::
+
+        leaf_size    16      8      4      2
+        far_pairs     0      0    158   1412
+
+    The two fp32 outputs were bit-identical (difference exactly 0.0) because the
+    chunked M2L never executed, not because chunking is correct. This is the same
+    vacuity failure `NUMERICS_AND_JAX.md` section 3 describes for gradient tests.
+    ``leaf_size=4`` is now used and the pair count is asserted, so the test cannot
+    silently return to testing nothing.
+
+    Second, it compared the two **fp32** paths to each other. Two fp32 paths
+    agreeing proves nothing -- they can be identically wrong, which is exactly why
+    the neighbouring ``test_solidfmm_m2l_ignores_padded_compact_far_pairs`` was
+    rewritten to use a float64 reference. Each path is now checked against a
+    float64 reference built from the *same* particles cast up. (Re-drawing the
+    particles in float64 instead would silently compare a different physical
+    system: ``jax.random.uniform`` with the same key returns different values per
+    dtype, measured rel-L2 1.2-1.4, which looks like catastrophic error.)
+
+    Bounds, measured over 4 seeds on both backends (rel-L2 against the float64
+    reference, and the two fp32 paths against each other)::
+
+                        vs float64 ref     chunked vs fullbatch
+        CPU             1.06e-07 .. 1.79e-07     0.0 .. 1.29e-08
+        A100 (sm_80)    1.30e-07 .. 2.27e-07   3.80e-08 .. 5.89e-08
+
+    So ~1-2 eps_float32 against truth, and the two paths differ at round-off
+    because chunk boundaries reorder the M2L sum -- exact agreement is not the
+    claim and never was achievable once the far field actually runs. The bounds
+    below carry ~9x headroom over the worst measurement. They are not slack: a
+    dropped or double-counted chunk moves the result by order 1, five orders
+    above these.
+
+    The direct fp32-vs-fp32 comparison is kept as a secondary check, bounded by
+    reordering round-off rather than by the old elementwise
+    ``allclose(rtol=1e-6, atol=1e-6)``. That form was a knife edge on GPU: it is
+    elementwise, so near-zero acceleration components made ``atol`` the binding
+    term, and the test failed ~1 run in 3 on an A100 from reduction
+    nondeterminism alone (`ARCHITECTURE.md` section 10).
+    """
+    if not jax.config.read("jax_enable_x64"):
+        pytest.skip("float64 reference needs JAX_ENABLE_X64=1")
+
     key = jax.random.PRNGKey(13)
     num_particles = 128
     positions = jax.random.uniform(
@@ -2868,38 +2987,76 @@ def test_solidfmm_chunked_m2l_matches_fullbatch():
     )
     masses = jnp.abs(jax.random.normal(key, (num_particles,), dtype=jnp.float32)) + 1.0
 
-    base_kwargs = dict(
-        theta=0.6,
-        softening=1e-3,
-        working_dtype=jnp.float32,
-        expansion_basis="solidfmm",
-        complex_rotation="solidfmm",
-        mac_type="dehnen",
-        tree_build_mode="lbvh",
-        fixed_order=4,
-        fixed_max_leaf_size=16,
+    def solver(*, chunk_size, dtype):
+        return FMMEngine(
+            theta=0.6,
+            softening=1e-3,
+            working_dtype=dtype,
+            expansion_basis="solidfmm",
+            complex_rotation="solidfmm",
+            mac_type="dehnen",
+            tree_build_mode="lbvh",
+            fixed_order=4,
+            fixed_max_leaf_size=_CHUNKED_M2L_LEAF_SIZE,
+            m2l_chunk_size=chunk_size,
+        )
+
+    def accelerations(*, chunk_size, dtype):
+        return np.asarray(
+            solver(chunk_size=chunk_size, dtype=dtype).compute_accelerations(
+                positions.astype(dtype),
+                masses.astype(dtype),
+                leaf_size=_CHUNKED_M2L_LEAF_SIZE,
+                max_order=4,
+                jit_tree=False,
+            )
+        )
+
+    # Vacuity gate: without far pairs there is no M2L to chunk and both branches
+    # collapse to the same near-field-only sum.
+    far_pairs = _m2l_far_pair_count(
+        solver(chunk_size=4096, dtype=jnp.float32).prepare_state(
+            positions,
+            masses,
+            leaf_size=_CHUNKED_M2L_LEAF_SIZE,
+            max_order=4,
+        )
+    )
+    assert far_pairs > 0, (
+        f"no M2L pairs accepted at leaf_size={_CHUNKED_M2L_LEAF_SIZE}: the chunked "
+        "and fullbatch M2L cannot differ, so this test would pass vacuously"
+    )
+    # 32 < 158 so the chunked path really does take more than one chunk.
+    assert far_pairs > 32, (
+        f"only {far_pairs} far pairs: m2l_chunk_size=32 would fit them in a single "
+        "chunk and the chunked reduction would never loop"
     )
 
-    full = FastMultipoleMethod(m2l_chunk_size=4096, **base_kwargs)
-    chunked = FastMultipoleMethod(m2l_chunk_size=32, **base_kwargs)
+    reference = accelerations(chunk_size=4096, dtype=jnp.float64)
+    acc_full = accelerations(chunk_size=4096, dtype=jnp.float32)
+    acc_chunked = accelerations(chunk_size=32, dtype=jnp.float32)
 
-    acc_full = full.compute_accelerations(
-        positions,
-        masses,
-        leaf_size=16,
-        max_order=4,
-        jit_tree=False,
-    )
-    acc_chunked = chunked.compute_accelerations(
-        positions,
-        masses,
-        leaf_size=16,
-        max_order=4,
-        jit_tree=False,
-    )
+    assert np.isfinite(acc_full).all()
+    assert np.isfinite(acc_chunked).all()
 
-    assert np.allclose(
-        np.asarray(acc_chunked), np.asarray(acc_full), rtol=1e-6, atol=1e-6
+    reference_norm = np.linalg.norm(reference)
+
+    def rel_l2(candidate, other):
+        return float(np.linalg.norm(candidate - other) / reference_norm)
+
+    # 2e-6 is ~9x the worst measured 2.27e-07; a leaked or dropped chunk is order 1.
+    for label, candidate in (("fullbatch", acc_full), ("chunked", acc_chunked)):
+        error = rel_l2(candidate, reference)
+        assert error < 2.0e-6, (
+            f"{label} M2L drifted from the float64 reference: rel-L2 {error:.3e} "
+            f"> 2e-6 ({far_pairs} far pairs, leaf={_CHUNKED_M2L_LEAF_SIZE})"
+        )
+
+    # 5e-7 is ~8x the worst measured 5.89e-08 chunk-boundary reordering difference.
+    reorder = rel_l2(acc_chunked, acc_full)
+    assert reorder < 5.0e-7, (
+        f"chunked and fullbatch M2L disagree by more than reordering round-off: "
+        f"rel-L2 {reorder:.3e} > 5e-7 ({far_pairs} far pairs)"
     )
 
 
@@ -3040,7 +3197,7 @@ def test_solidfmm_m2l_ignores_padded_compact_far_pairs():
 
 
 def test_fast_preset_adaptive_large_cpu_policy_applies():
-    fmm = FastMultipoleMethod(
+    fmm = FMMEngine(
         preset=FMMPreset.FAST,
         expansion_basis="solidfmm",
         complex_rotation="solidfmm",
@@ -3069,7 +3226,7 @@ def test_fast_preset_adaptive_large_cpu_policy_applies():
 
 
 def test_fast_preset_adaptive_class_major_threshold():
-    fmm = FastMultipoleMethod(
+    fmm = FMMEngine(
         preset=FMMPreset.FAST,
         expansion_basis="solidfmm",
         complex_rotation="solidfmm",
@@ -3090,7 +3247,7 @@ def test_fast_preset_adaptive_class_major_threshold():
 
 
 def test_adaptive_nearfield_edge_chunk_size_auto_policy(monkeypatch):
-    fmm_cpu = FastMultipoleMethod(
+    fmm_cpu = FMMEngine(
         preset=FMMPreset.FAST,
         expansion_basis="solidfmm",
         complex_rotation="solidfmm",
@@ -3129,7 +3286,7 @@ def test_adaptive_nearfield_edge_chunk_size_auto_policy(monkeypatch):
         == 4096
     )
 
-    fmm_gpu = FastMultipoleMethod(
+    fmm_gpu = FMMEngine(
         preset=FMMPreset.LARGE_N_GPU,
         expansion_basis="solidfmm",
         complex_rotation="solidfmm",
@@ -3170,7 +3327,7 @@ def test_fast_preset_adaptive_policy_respects_explicit_overrides():
         max_interactions_per_node=4096,
         max_neighbors_per_leaf=4096,
     )
-    fmm = FastMultipoleMethod(
+    fmm = FMMEngine(
         preset=FMMPreset.FAST,
         expansion_basis="solidfmm",
         complex_rotation="solidfmm",
@@ -3201,7 +3358,7 @@ def test_solidfmm_grouped_interactions_matches_sparse_path():
     )
     masses = jnp.abs(jax.random.normal(key, (num_particles,), dtype=jnp.float32)) + 1.0
 
-    fmm = FastMultipoleMethod(
+    fmm = FMMEngine(
         theta=0.6,
         softening=1e-3,
         working_dtype=jnp.float32,
@@ -3252,8 +3409,21 @@ def test_solidfmm_grouped_interactions_matches_sparse_path():
 
 
 def test_solidfmm_grouped_class_major_matches_pair_grouped():
+    """The two grouped far-field modes are one computation, differently batched.
+
+    They share the class rotation blocks and the per-pair displacement, so they
+    must agree to reassociation. This used to be asserted at 112 particles with
+    ``leaf_size=16`` and ``theta=0.6``, which produces **zero** far pairs -- the
+    assertion compared two all-zero local arrays and could not fail. It missed
+    G.11 (``docs/refactor_audit_2026-08.md``): ``pair_grouped`` gathered its
+    rotation with ``class_ids``, which yggdrax stores in the original rather than
+    the class-sorted pair order, so ~70% of pairs were rotated by another class.
+    At the sizes below that put the two modes a relative L2 of ~1.0 apart.
+
+    The far-pair count is asserted explicitly so it can never go vacuous again.
+    """
     key = jax.random.PRNGKey(31)
-    num_particles = 112
+    num_particles = 512
     positions = jax.random.uniform(
         key,
         (num_particles, 3),
@@ -3263,7 +3433,7 @@ def test_solidfmm_grouped_class_major_matches_pair_grouped():
     )
     masses = jnp.abs(jax.random.normal(key, (num_particles,), dtype=jnp.float32)) + 1.0
 
-    fmm = FastMultipoleMethod(
+    fmm = FMMEngine(
         theta=0.6,
         softening=1e-3,
         working_dtype=jnp.float32,
@@ -3283,7 +3453,7 @@ def test_solidfmm_grouped_class_major_matches_pair_grouped():
         positions,
         masses,
         bounds,
-        leaf_size=16,
+        leaf_size=8,
         return_reordered=True,
     )
     upward = fmm.prepare_upward_sweep(
@@ -3309,11 +3479,17 @@ def test_solidfmm_grouped_class_major_matches_pair_grouped():
         farfield_mode="class_major",
     )
 
-    assert np.allclose(
-        np.asarray(downward_class.locals.coefficients),
-        np.asarray(downward_pair.locals.coefficients),
-        rtol=1e-5,
-        atol=1e-5,
+    far_pairs = int(downward_pair.interactions.sources.shape[0])
+    assert far_pairs > 0, "vacuous: no far pairs, so the M2L modes ran on nothing"
+
+    pair_locals = np.asarray(downward_pair.locals.coefficients)
+    class_locals = np.asarray(downward_class.locals.coefficients)
+    # Relative, not absolute: the local coefficients here are O(1e2), so the old
+    # atol=1e-5 would have been the only binding term.
+    rel_l2 = np.linalg.norm(pair_locals - class_locals) / np.linalg.norm(class_locals)
+    assert rel_l2 < 1e-6, (
+        f"grouped far-field modes disagree at rel-L2 {rel_l2:.3e} over "
+        f"{far_pairs} far pairs; they are the same computation, differently batched"
     )
 
 
@@ -3355,21 +3531,21 @@ def test_solidfmm_basis_rejects_non_solidfmm_rotation():
         ValueError,
         match="complex_rotation must be 'solidfmm'",
     ):
-        FastMultipoleMethod(expansion_basis="solidfmm", complex_rotation="cached")
+        FMMEngine(expansion_basis="solidfmm", complex_rotation="cached")
 
 
 def test_dehnen_radius_scale_must_be_positive():
     with pytest.raises(ValueError, match="dehnen_radius_scale must be > 0"):
-        FastMultipoleMethod(dehnen_radius_scale=0.0)
+        FMMEngine(dehnen_radius_scale=0.0)
 
 
 def test_nearfield_mode_validation():
     with pytest.raises(
         ValueError, match="nearfield_mode must be 'auto', 'baseline', or 'bucketed'"
     ):
-        FastMultipoleMethod(nearfield_mode="unknown")
+        FMMEngine(nearfield_mode="unknown")
     with pytest.raises(ValueError, match="nearfield_edge_chunk_size must be positive"):
-        FastMultipoleMethod(nearfield_edge_chunk_size=0)
+        FMMEngine(nearfield_edge_chunk_size=0)
 
 
 def test_solidfmm_dehnen_accuracy_improves_with_order():
@@ -3399,7 +3575,7 @@ def test_solidfmm_dehnen_accuracy_improves_with_order():
 
         errors = []
         for order in (1, 2, 4):
-            fmm = FastMultipoleMethod(
+            fmm = FMMEngine(
                 theta=0.9,
                 softening=softening,
                 working_dtype=jnp.float64,

@@ -1,0 +1,100 @@
+{
+ "args": {
+  "n": 1000000,
+  "leaf_size": 1024,
+  "order": 8,
+  "distribution": "plummer",
+  "seed": 0,
+  "softening": 0.0,
+  "theta": 0.65,
+  "eps": 0.0003,
+  "repeats": 3,
+  "warmups": 1,
+  "precision": "fp32",
+  "arms": "fixed,mass,mass_16b_est",
+  "json_out": "bench/results/validation/mac_walltime_1e6_leaf1024.json"
+ },
+ "records": [
+  {
+   "arm": "fixed",
+   "knob": 0.65,
+   "prepare_s": {
+    "median": 0.22344243014231324,
+    "min": 0.2143592881038785,
+    "max": 0.3077594172209501,
+    "samples": [
+     0.3077594172209501,
+     0.2143592881038785,
+     0.22344243014231324
+    ]
+   },
+   "evaluate_s": {
+    "median": 1.5006991382688284,
+    "min": 1.4909324189648032,
+    "max": 1.5226650917902589,
+    "samples": [
+     1.5006991382688284,
+     1.5226650917902589,
+     1.4909324189648032
+    ]
+   },
+   "total_s": 1.7241415684111416,
+   "prepared_state_type": "LargeNPreparedState",
+   "large_n_path_declined_reason": null
+  },
+  {
+   "arm": "mass",
+   "knob": 0.0003,
+   "prepare_s": {
+    "median": 0.6332228151150048,
+    "min": 0.5912648881785572,
+    "max": 0.756141783669591,
+    "samples": [
+     0.756141783669591,
+     0.5912648881785572,
+     0.6332228151150048
+    ]
+   },
+   "evaluate_s": {
+    "median": 1.447353318799287,
+    "min": 1.4369334927760065,
+    "max": 1.448401560075581,
+    "samples": [
+     1.447353318799287,
+     1.4369334927760065,
+     1.448401560075581
+    ]
+   },
+   "total_s": 2.080576133914292,
+   "prepared_state_type": "LargeNPreparedState",
+   "large_n_path_declined_reason": null
+  },
+  {
+   "arm": "mass_16b_est",
+   "knob": 0.0003,
+   "prepare_s": {
+    "median": 0.5895018987357616,
+    "min": 0.5873103057965636,
+    "max": 0.6099921888671815,
+    "samples": [
+     0.6099921888671815,
+     0.5873103057965636,
+     0.5895018987357616
+    ]
+   },
+   "evaluate_s": {
+    "median": 1.3633685507811606,
+    "min": 1.3504848489537835,
+    "max": 1.3922318257391453,
+    "samples": [
+     1.3504848489537835,
+     1.3922318257391453,
+     1.3633685507811606
+    ]
+   },
+   "total_s": 1.9528704495169222,
+   "prepared_state_type": "LargeNPreparedState",
+   "large_n_path_declined_reason": null
+  }
+ ]
+}

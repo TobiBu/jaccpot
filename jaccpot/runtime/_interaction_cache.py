@@ -1,5 +1,7 @@
 """Dual-tree interaction cache helpers for the runtime FMM implementation."""
 
+from __future__ import annotations
+
 import hashlib
 import os
 import time
@@ -29,10 +31,44 @@ from yggdrax.interactions import (
 )
 from yggdrax.tree import Tree
 
+from jaccpot._env import env_flag
+
 
 @dataclass(frozen=True)
 class _DualTreeArtifacts:
-    """Artifacts emitted by the dual-tree traversal builder."""
+    """Artifacts emitted by the dual-tree traversal builder.
+
+    Attributes
+    ----------
+    interactions : Optional[NodeInteractionList]
+        Accepted far-field node pairs, or ``None`` on the streamed path.
+    neighbor_list : NodeNeighborList
+        Near-neighbour list produced by the same traversal.
+    traversal_result : Optional[DualTreeWalkResult]
+        Full walk result, or ``None`` when it was not retained.
+    compact_far_pairs : Optional[CompactTaggedFarPairs]
+        Compact tagged far pairs, or ``None`` when not requested.
+    dense_buffers : Optional[DenseInteractionBuffers]
+        Dense interaction buffers, or ``None`` when unused.
+    grouped_buffers : Optional[GroupedInteractionBuffers]
+        Grouped (class-major) interaction buffers, or ``None`` when unused.
+    grouped_segment_starts : Optional[Array]
+        Start offset of each grouped segment.
+    grouped_segment_lengths : Optional[Array]
+        Length of each grouped segment.
+    grouped_segment_class_ids : Optional[Array]
+        Class id of each grouped segment.
+    grouped_segment_sort_permutation : Optional[Array]
+        Permutation sorting segments into class-major order.
+    grouped_segment_group_ids : Optional[Array]
+        Group id of each grouped segment.
+    grouped_segment_unique_targets : Optional[Array]
+        Unique target nodes per grouped segment.
+    grouped_chunk_size : Optional[int]
+        Pairs per grouped chunk, or ``None`` for the default.
+    cache_hit : bool
+        Whether these artifacts came from the cache rather than a fresh build.
+    """
 
     interactions: Optional[NodeInteractionList]
     neighbor_list: NodeNeighborList
@@ -51,7 +87,55 @@ class _DualTreeArtifacts:
 
 
 class _InteractionCacheEntry(NamedTuple):
-    """Cache entry for dual-tree interaction artifacts keyed by build options."""
+    """Cache entry for dual-tree interaction artifacts keyed by build options.
+
+    Attributes
+    ----------
+    key : str
+        Hash of the build options this entry was keyed on.
+    interactions : Optional[NodeInteractionList]
+        Accepted far-field node pairs, or ``None`` on the streamed path.
+    neighbor_list : NodeNeighborList
+        Near-neighbour list produced by the same traversal.
+    dual_tree_result : Optional[DualTreeWalkResult]
+        Full walk result, or ``None`` when it was not retained.
+    compact_far_pairs : Optional[CompactTaggedFarPairs]
+        Compact tagged far pairs, or ``None`` when not requested.
+    grouped_buffers : Optional[GroupedInteractionBuffers]
+        Grouped (class-major) interaction buffers, or ``None`` when unused.
+    grouped_segment_starts : Optional[Array]
+        Start offset of each grouped segment.
+    grouped_segment_lengths : Optional[Array]
+        Length of each grouped segment.
+    grouped_segment_class_ids : Optional[Array]
+        Class id of each grouped segment.
+    grouped_segment_sort_permutation : Optional[Array]
+        Permutation sorting segments into class-major order.
+    grouped_segment_group_ids : Optional[Array]
+        Group id of each grouped segment.
+    grouped_segment_unique_targets : Optional[Array]
+        Unique target nodes per grouped segment.
+    grouped_chunk_size : Optional[int]
+        Pairs per grouped chunk, or ``None`` for the default.
+    nearfield_target_leaf_ids : Optional[Array]
+        Target leaf id per near-field pair.
+    nearfield_source_leaf_ids : Optional[Array]
+        Source leaf id per near-field pair.
+    nearfield_valid_pairs : Optional[Array]
+        Mask marking which near-field pair slots are real.
+    nearfield_chunk_sort_indices : Optional[Array]
+        Permutation sorting near-field pairs into chunks.
+    nearfield_chunk_group_ids : Optional[Array]
+        Chunk id per near-field pair.
+    nearfield_chunk_unique_indices : Optional[Array]
+        Unique target index per near-field chunk.
+    nearfield_mode : Optional[str]
+        Near-field traversal mode the entry was built for.
+    nearfield_edge_chunk_size : Optional[int]
+        Edge chunk size the entry was built for.
+    nearfield_leaf_cap : Optional[int]
+        Leaf capacity the entry was built for.
+    """
 
     key: str
     interactions: Optional[NodeInteractionList]
@@ -78,7 +162,37 @@ class _InteractionCacheEntry(NamedTuple):
 
 
 class _DualTreeCacheHit(NamedTuple):
-    """Resolved cached dual-tree payload reused for a build request."""
+    """Resolved cached dual-tree payload reused for a build request.
+
+    Attributes
+    ----------
+    interactions : Optional[NodeInteractionList]
+        Accepted far-field node pairs, or ``None`` on the streamed path.
+    neighbor_list : NodeNeighborList
+        Near-neighbour list produced by the same traversal.
+    traversal_result : Optional[DualTreeWalkResult]
+        Full walk result, or ``None`` when it was not retained.
+    compact_far_pairs : Optional[CompactTaggedFarPairs]
+        Compact tagged far pairs, or ``None`` when not requested.
+    grouped_buffers : Optional[GroupedInteractionBuffers]
+        Grouped (class-major) interaction buffers, or ``None`` when unused.
+    grouped_segment_starts : Optional[Array]
+        Start offset of each grouped segment.
+    grouped_segment_lengths : Optional[Array]
+        Length of each grouped segment.
+    grouped_segment_class_ids : Optional[Array]
+        Class id of each grouped segment.
+    grouped_segment_sort_permutation : Optional[Array]
+        Permutation sorting segments into class-major order.
+    grouped_segment_group_ids : Optional[Array]
+        Group id of each grouped segment.
+    grouped_segment_unique_targets : Optional[Array]
+        Unique target nodes per grouped segment.
+    grouped_chunk_size_cached : Optional[int]
+        The chunk size the cached payload was built with.
+    cache_out : Optional['_InteractionCacheEntry']
+        Entry to write back, or ``None`` when nothing needs storing.
+    """
 
     interactions: Optional[NodeInteractionList]
     neighbor_list: NodeNeighborList
@@ -96,7 +210,15 @@ class _DualTreeCacheHit(NamedTuple):
 
 
 class _RefreshDualPlannerHint(NamedTuple):
-    """Cached refresh planner decision for dual artifact build routing."""
+    """Cached refresh planner decision for dual artifact build routing.
+
+    Attributes
+    ----------
+    use_split_build : bool
+        Whether to build far and near traversal in separate passes.
+    suppress_substage_timing : bool
+        Whether to skip the per-substage timing callbacks.
+    """
 
     use_split_build: bool
     suppress_substage_timing: bool = False
@@ -108,8 +230,6 @@ def _compiled_refresh_dual_planner_route(
     allow_split_build_flag: Array,
     grouped_interactions_flag: Array,
     need_traversal_result_flag: Array,
-    has_pair_policy_flag: Array,
-    has_policy_state_flag: Array,
     leaf_count: Array,
     need_node_interactions_flag: Array,
     need_compact_far_pairs_flag: Array,
@@ -119,14 +239,40 @@ def _compiled_refresh_dual_planner_route(
 
     This keeps steady-state route/plan branching in JAX control flow so the
     refresh hot path avoids repeated Python-side conditional orchestration.
+
+    A pair policy no longer routes away from the split build; it is threaded into
+    it instead. That also closes a hole: the caller's planner cache key never
+    included the policy flags, so a routing decision cached by a no-policy call
+    could be replayed for a policy call, sending it down a split build that
+    dropped the policy silently.
+
+    Parameters
+    ----------
+    allow_split_build_flag : Array
+        Traced flag: whether a split build is permitted.
+    grouped_interactions_flag : Array
+        Traced flag: whether grouped interactions are active.
+    need_traversal_result_flag : Array
+        See the module docstring.
+    leaf_count : Array
+        See the module docstring.
+    need_node_interactions_flag : Array
+        See the module docstring.
+    need_compact_far_pairs_flag : Array
+        See the module docstring.
+    use_dense_interactions_flag : Array
+        See the module docstring.
+
+    Returns
+    -------
+    tuple[Array, Array, Array]
+        The routing decisions as traced values, so the refresh path can branch without a host sync.
     """
 
     use_split_build = (
         allow_split_build_flag
         & (~grouped_interactions_flag)
         & (~need_traversal_result_flag)
-        & (~has_pair_policy_flag)
-        & (~has_policy_state_flag)
     )
     need_far_payload = (
         need_node_interactions_flag
@@ -143,7 +289,18 @@ def _compiled_refresh_dual_planner_route(
 def _without_grouped_class_segments(
     entry: _InteractionCacheEntry,
 ) -> _InteractionCacheEntry:
-    """Drop cached class-major schedule arrays from an interaction cache entry."""
+    """Drop cached class-major schedule arrays from an interaction cache entry.
+
+    Parameters
+    ----------
+    entry : _InteractionCacheEntry
+        Cache entry being transformed.
+
+    Returns
+    -------
+    _InteractionCacheEntry
+        The entry with its class-major schedule arrays dropped.
+    """
     return _InteractionCacheEntry(
         key=entry.key,
         interactions=entry.interactions,
@@ -179,7 +336,28 @@ def _dual_tree_cache_lookup(
     need_node_interactions: bool,
     precompute_grouped_class_segments: bool,
 ) -> Optional[_DualTreeCacheHit]:
-    """Return reusable cached dual-tree artifacts when available."""
+    """Return reusable cached dual-tree artifacts when available.
+
+    Parameters
+    ----------
+    cache_key : Optional[str]
+        Key for the interaction cache, or ``None`` to bypass it.
+    cache_entry : Optional[_InteractionCacheEntry]
+        Existing cache entry, or ``None`` on a miss.
+    need_traversal_result : bool
+        Whether the full walk result must be retained.
+    need_compact_far_pairs : bool
+        Whether the compact tagged far-pair payload is required.
+    need_node_interactions : bool
+        Whether a node interaction list must be emitted.
+    precompute_grouped_class_segments : bool
+        Whether class-major schedules are materialised now.
+
+    Returns
+    -------
+    Optional[_DualTreeCacheHit]
+        The reusable cached payload, or ``None`` when nothing matches the request.
+    """
 
     if not (
         cache_key is not None
@@ -376,7 +554,24 @@ def _dual_tree_unpack_build_output(
     Optional[CompactTaggedFarPairs],
     Optional[GroupedInteractionBuffers],
 ]:
-    """Normalize raw builder outputs into a fixed tuple."""
+    """Normalize raw builder outputs into a fixed tuple.
+
+    Parameters
+    ----------
+    build_out : Any
+        Raw tuple returned by the yggdrax builder.
+    grouped_interactions : bool
+        Whether the grouped class-major layout is in use.
+    need_traversal_result : bool
+        Whether the full walk result must be retained.
+    need_compact_far_pairs : bool
+        Whether the compact tagged far-pair payload is required.
+
+    Returns
+    -------
+    tuple[Optional[NodeInteractionList], NodeNeighborList, Optional[DualTreeWalkResult], Optional[CompactTaggedFarPairs], Optional[GroupedInteractionBuffers]]
+        The raw builder output normalised to a fixed five-tuple, whichever optional payloads were requested.
+    """
 
     if grouped_interactions:
         if need_traversal_result and need_compact_far_pairs:
@@ -425,23 +620,28 @@ def _can_split_dual_tree_build(
     split_enabled: bool,
     grouped_interactions: bool,
     need_traversal_result: bool,
-    pair_policy,
-    policy_state,
 ) -> bool:
     """Return whether far/near traversal can be built in separate passes.
 
-    This path is intentionally narrow. It is meant for the minimum-memory
-    streamed GPU regime where we do not need traversal tags/results and can
-    trade extra prepare work for a lower peak by never materializing far and
-    near traversal buffers in the same kernel.
+    This path is meant for the minimum-memory streamed GPU regime where we do
+    not need traversal tags/results and can trade extra prepare work for a lower
+    peak by never materializing far and near traversal buffers in the same
+    kernel.
+
+    It used to decline whenever a ``pair_policy`` or ``policy_state`` was
+    installed, which shut the Dehnen mass-dependent MAC out of the lane
+    entirely. The three yggdrax entry points the split build calls all take a
+    ``pair_policy``; jaccpot simply never passed it. They do now, so the policy
+    is carried rather than routed around -- which matters at N >= 10^7, where the
+    node-interaction buffers the monolithic build materializes
+    (``num_nodes x max_interactions_per_node``) are the binding memory
+    constraint.
     """
 
     return (
         bool(split_enabled)
         and not bool(grouped_interactions)
         and not bool(need_traversal_result)
-        and pair_policy is None
-        and policy_state is None
     )
 
 
@@ -459,9 +659,17 @@ def _build_dual_tree_artifacts_split(
     need_node_interactions: bool,
     need_compact_far_pairs: bool,
     use_dense_interactions: bool,
+    pair_policy,
+    policy_state,
     timing_callback: Optional[Callable[[str, float], None]] = None,
 ) -> _DualTreeArtifacts:
-    """Build far and near traversal products in separate Yggdrax calls."""
+    """Build far and near traversal products in separate Yggdrax calls.
+
+    ``pair_policy``/``policy_state`` have no default: every branch below runs a
+    separate traversal, and a branch that forgot to forward the policy would
+    silently fall back to the geometric MAC underneath it -- the exact
+    "faster and wronger" failure this criterion keeps producing.
+    """
     timing_enabled = timing_callback is not None
 
     def _record(name: str, start: Optional[float]) -> None:
@@ -488,6 +696,8 @@ def _build_dual_tree_artifacts_split(
                 traversal_config=traversal_config,
                 retry_logger=retry_logger,
                 timing_callback=timing_callback,
+                pair_policy=pair_policy,
+                policy_state=policy_state,
             )
         )
         _record("dual_split_shared_far_pairs_leaf_neighbors", stage_t0)
@@ -509,6 +719,8 @@ def _build_dual_tree_artifacts_split(
             process_block=pair_process_block,
             traversal_config=traversal_config,
             retry_logger=retry_logger,
+            pair_policy=pair_policy,
+            policy_state=policy_state,
         )
         _record("dual_split_interactions_and_neighbors", stage_t0)
         compact_far_pairs = None
@@ -531,6 +743,8 @@ def _build_dual_tree_artifacts_split(
             process_block=pair_process_block,
             traversal_config=traversal_config,
             retry_logger=retry_logger,
+            pair_policy=pair_policy,
+            policy_state=policy_state,
         )
         _record("dual_split_leaf_neighbors", stage_t0)
     stage_t0 = time.perf_counter() if timing_enabled else None
@@ -558,6 +772,42 @@ def _build_dual_tree_artifacts_split(
     )
 
 
+# Bounded capacity re-planning for the strict streamed walk. Floors are the
+# smallest values the policy ever hands out; the ceiling is where a capacity
+# stops being the plausible explanation (2^25 slots is ~268 MB of pair indices)
+# and the caller should be told rather than retried at.
+_STRICT_STREAMED_QUEUE_FLOOR = 32_768
+_STRICT_STREAMED_FAR_PAIR_FLOOR = 131_072
+_STRICT_STREAMED_RETRY_LIMIT = 1 << 25
+_STRICT_STREAMED_RETRY_ATTEMPTS = 12
+
+
+def _strict_streamed_retry_diag(grew: list[str]) -> None:
+    """Report a successful re-plan, so a silent 2x memory bump is visible.
+
+    Opt-in via JACCPOT_PREPARE_DIAGNOSTICS, matching the other prepare-time
+    diagnostics. Silence here would trade one invisible failure for another.
+
+    Parameters
+    ----------
+    grew : list[str]
+        See the module docstring.
+
+    Returns
+    -------
+    None
+        Nothing; it emits the diagnostic as a side effect.
+    """
+
+    if not env_flag("JACCPOT_PREPARE_DIAGNOSTICS", False):
+        return
+    print(
+        "[jaccpot.prepare] strict streamed dual-tree walk re-planned: "
+        + "; ".join(grew),
+        flush=True,
+    )
+
+
 def _build_dual_tree_artifacts_split_strict_streamed(
     *,
     tree: Tree,
@@ -568,12 +818,19 @@ def _build_dual_tree_artifacts_split_strict_streamed(
     max_pair_queue: Optional[int],
     pair_process_block: Optional[int],
     traversal_config: Optional[DualTreeTraversalConfig],
+    pair_policy,
+    policy_state,
 ) -> _DualTreeArtifacts:
     """Strict static fast-lane: single compact shared far+near build call.
 
     This path intentionally avoids generic split-builder host branching and
     callback plumbing. It is valid only for streamed compact far-pairs with no
     dense/grouped/interactions payload requests.
+
+    ``pair_policy``/``policy_state`` are forwarded rather than assumed absent:
+    this branch is selected on payload shape (``fail_fast`` + compact far pairs),
+    not on whether a criterion is installed, so dropping them here would run the
+    geometric MAC under a caller that asked for the Dehnen one.
     """
 
     if traversal_config is not None:
@@ -611,6 +868,19 @@ def _build_dual_tree_artifacts_split_strict_streamed(
         "JACCPOT_STATIC_STRICT_FUSED_TREECODE_WALK", "0"
     ) not in ("0", "false", "False", "off", "OFF")
     if treecode_enabled:
+        if pair_policy is not None or policy_state is not None:
+            # The treecode walk evaluates its own device-resident `_mac_ok` from
+            # per-node extents; there is no seam for a solver-owned pair policy.
+            # Running it anyway would answer the geometric MAC while the caller
+            # asked for the Dehnen mass-dependent one, and cost nothing visible.
+            raise RuntimeError(
+                "JACCPOT_STATIC_STRICT_FUSED_TREECODE_WALK cannot carry a "
+                "solver-owned pair policy (mac_type='dehnen_error' / "
+                "adaptive_error_model='dehnen_paper'): its acceptance test is a "
+                "per-node geometric extent comparison with no policy seam, so "
+                "the criterion would be silently replaced by the geometric MAC. "
+                "Unset the env flag, or use mac_type='dehnen'."
+            )
         return _build_treecode_artifacts_strict_streamed(
             tree=tree,
             geometry=geometry,
@@ -620,21 +890,87 @@ def _build_dual_tree_artifacts_split_strict_streamed(
             compact_far_pair_capacity=compact_far_pair_capacity,
         )
 
-    compact_far_pairs, neighbor_list = build_compact_far_pairs_and_leaf_neighbor_lists(
-        tree,
-        geometry,
-        theta=theta,
-        mac_type=mac_type,
-        dehnen_radius_scale=dehnen_radius_scale,
-        max_interactions_per_node=max_interactions_per_node,
-        max_neighbors_per_leaf=max_neighbors_per_leaf,
-        max_pair_queue=max_pair_queue_resolved,
-        process_block=process_block_resolved,
-        traversal_config=None,
-        retry_logger=None,
-        timing_callback=None,
-        compact_far_pair_capacity=compact_far_pair_capacity,
-    )
+    # Re-plan on a capacity overflow instead of surfacing it. The generic
+    # `_build_dual_tree_artifacts` has retried since it was written; this strict
+    # streamed path -- the one `large_n_gpu`/static_radix actually takes -- never
+    # did, so a capacity ceiling reached the caller as a hard wall. Measured on an
+    # A100, large_n_gpu/static_radix/leaf 256/order 4/theta 0.6: N=262144 raised
+    # "Pair queue capacity exceeded" with the queue resolved to 65536, while the
+    # device had 29.62 GiB free and the largest static buffer was 0.31 GiB. It was
+    # never a memory limit. Growing the queue then hit the NEXT flat constant, the
+    # compact far-pair cap of 131072 -- same shape of bug, one layer down.
+    #
+    # Both are grown by doubling rather than predicted, because predicting either
+    # needs a model of the interaction-list length that theta, the distribution
+    # and the leaf size all move. Each retry is one extra traversal; the queue
+    # costs ~8 B a slot and a far pair ~8 B, so even the last rung is megabytes.
+    attempt_queue = max_pair_queue_resolved
+    attempt_far_cap = compact_far_pair_capacity
+    grew: list[str] = []
+    for attempt in range(_STRICT_STREAMED_RETRY_ATTEMPTS):
+        try:
+            (
+                compact_far_pairs,
+                neighbor_list,
+            ) = build_compact_far_pairs_and_leaf_neighbor_lists(
+                tree,
+                geometry,
+                theta=theta,
+                mac_type=mac_type,
+                dehnen_radius_scale=dehnen_radius_scale,
+                max_interactions_per_node=max_interactions_per_node,
+                max_neighbors_per_leaf=max_neighbors_per_leaf,
+                max_pair_queue=attempt_queue,
+                process_block=process_block_resolved,
+                traversal_config=None,
+                retry_logger=None,
+                timing_callback=None,
+                compact_far_pair_capacity=attempt_far_cap,
+                pair_policy=pair_policy,
+                policy_state=policy_state,
+            )
+            if grew:
+                _strict_streamed_retry_diag(grew)
+            break
+        except Exception as exc:
+            text = str(exc).lower()
+            if "queue capacity exceeded" in text:
+                which, current = "max_pair_queue", (
+                    _STRICT_STREAMED_QUEUE_FLOOR
+                    if attempt_queue is None
+                    else int(attempt_queue)
+                )
+            elif "compact far-pair cap exceeded" in text:
+                which, current = "compact_far_pair_capacity", (
+                    _STRICT_STREAMED_FAR_PAIR_FLOOR
+                    if attempt_far_cap is None
+                    else int(attempt_far_cap)
+                )
+            else:
+                raise
+            grown = current * 2
+            if (
+                attempt == _STRICT_STREAMED_RETRY_ATTEMPTS - 1
+                or grown > _STRICT_STREAMED_RETRY_LIMIT
+            ):
+                raise RuntimeError(
+                    f"{which} overflowed on the strict streamed dual-tree walk and "
+                    f"re-planning did not fit it: grew to {current} (ceiling "
+                    f"{_STRICT_STREAMED_RETRY_LIMIT}) over {attempt + 1} attempts"
+                    + (f" after also growing {', '.join(grew)}" if grew else "")
+                    + ". Raise leaf_size to reduce the leaf count, or set "
+                    "JACCPOT_STATIC_STRICT_FUSED_COMPACT_FAR_PAIR_CAP / pass "
+                    "jaccpot.TraversalOverrides(max_pair_queue=...) explicitly. "
+                    "A TraversalOverrides merges onto the preset's other tuning "
+                    "rather than replacing it."
+                ) from exc
+            grew.append(f"{which} {current}->{grown}")
+            if which == "max_pair_queue":
+                attempt_queue = grown
+            else:
+                attempt_far_cap = grown
+    else:  # pragma: no cover - the loop always breaks or raises
+        raise RuntimeError("strict streamed dual-tree walk did not run")
     return _DualTreeArtifacts(
         interactions=None,
         neighbor_list=neighbor_list,
@@ -966,7 +1302,23 @@ def _dual_tree_build_grouped_class_segments(
     grouped_buffers: GroupedInteractionBuffers,
     grouped_chunk_size: int,
 ) -> tuple[Array, Array, Array, int]:
-    """Materialize class-major grouped schedule arrays."""
+    """Materialize class-major grouped schedule arrays.
+
+    Parameters
+    ----------
+    grouped_buffers : GroupedInteractionBuffers
+        See the module docstring.
+    grouped_chunk_size : int
+        Pairs per grouped chunk, or ``None`` for the default.
+
+    Returns
+    -------
+    tuple[Array, Array, Array, int]
+        ``(starts, lengths, class_ids, chunk_size)``: the class-major segment
+        schedule and the chunk size it was built for. Three arrays and an int, not
+        the six arrays ``_DualTreeArtifacts`` stores -- the caller derives the
+        remaining two from these.
+    """
 
     from . import fmm as _runtime_fmm
 
@@ -1010,7 +1362,18 @@ _CAPACITY_RETRY_NEIGHBORS_MAX = 65_536
 
 
 def _looks_like_capacity_error(exc: BaseException) -> bool:
-    """Return whether an exception likely indicates traversal-capacity overflow."""
+    """Return whether an exception likely indicates traversal-capacity overflow.
+
+    Parameters
+    ----------
+    exc : BaseException
+        The exception under inspection.
+
+    Returns
+    -------
+    bool
+        Whether the exception looks like a traversal capacity overflow rather than an unrelated failure.
+    """
     msg = str(exc).lower()
     needles = (
         "capacity exceeded",
@@ -1030,7 +1393,22 @@ def _next_retry_traversal_settings(
     max_pair_queue: Optional[int],
     pair_process_block: Optional[int],
 ) -> tuple[DualTreeTraversalConfig, Optional[int], Optional[int]]:
-    """Scale traversal capacities for one retry attempt."""
+    """Scale traversal capacities for one retry attempt.
+
+    Parameters
+    ----------
+    traversal_config : Optional[DualTreeTraversalConfig]
+        Traversal capacities, or ``None`` to take the template.
+    max_pair_queue : Optional[int]
+        Traversal pair-queue capacity, or ``None`` for the default.
+    pair_process_block : Optional[int]
+        Pairs processed per traversal block, or ``None`` for the default.
+
+    Returns
+    -------
+    tuple[DualTreeTraversalConfig, Optional[int], Optional[int]]
+        The scaled traversal config and the queue/block sizes for the next attempt.
+    """
     if traversal_config is None:
         queue = (
             _CAPACITY_RETRY_QUEUE_BASE
@@ -1091,7 +1469,24 @@ def _format_capacity_error_hint(
     max_pair_queue: Optional[int],
     pair_process_block: Optional[int],
 ) -> str:
-    """Augment traversal capacity failures with actionable tuning hints."""
+    """Augment traversal capacity failures with actionable tuning hints.
+
+    Parameters
+    ----------
+    exc : RuntimeError
+        The exception under inspection.
+    traversal_config : Optional[DualTreeTraversalConfig]
+        Traversal capacities, or ``None`` to take the template.
+    max_pair_queue : Optional[int]
+        Traversal pair-queue capacity, or ``None`` for the default.
+    pair_process_block : Optional[int]
+        Pairs processed per traversal block, or ``None`` for the default.
+
+    Returns
+    -------
+    str
+        The original message with the capacity knobs and a workable configuration appended.
+    """
     msg = str(exc).strip()
     if traversal_config is None:
         queue = None if max_pair_queue is None else int(max_pair_queue)
@@ -1128,6 +1523,118 @@ def _format_capacity_error_hint(
     return " ".join(details)
 
 
+#: Identity meaning "this request must not be served from, or written to, the
+#: interaction cache at all". See :func:`pair_policy_cache_identity`.
+POLICY_IDENTITY_UNCACHEABLE = "pair_policy_identity_uncacheable_v1"
+
+
+def _hash_array_or_none(hasher: Any, label: bytes, value: Optional[Array]) -> bool:
+    """Fold ``value`` into ``hasher``; return False if it cannot be read on host."""
+
+    hasher.update(label)
+    if value is None:
+        hasher.update(b"none")
+        return True
+    try:
+        arr = np.asarray(jax.device_get(value))
+    except Exception:
+        return False
+    hasher.update(str(arr.dtype).encode("utf8"))
+    hasher.update(np.asarray(arr.shape, dtype=np.int64).tobytes())
+    hasher.update(np.ascontiguousarray(arr).tobytes())
+    return True
+
+
+def pair_policy_cache_identity(
+    *,
+    pair_policy: Any,
+    policy_state: Any,
+    eps: Optional[float],
+    force_scale_mode: Optional[str],
+    geometry_mode: Optional[str],
+    theta_max: Optional[float],
+    error_model_code: Optional[int],
+    force_scale_nodes: Optional[Array],
+    mac_geometry_radius: Optional[Array],
+) -> str:
+    """Return an identity for the *acceptance criterion* behind a build request.
+
+    :func:`_interaction_cache_key` describes geometry: topology, ``theta``, the
+    base ``mac_type``, ``dehnen_radius_scale``, basis, centre mode, caps and
+    refinement. Under the Dehnen mass-dependent MAC none of that describes what
+    is actually accepted. ``mac_type="dehnen_error"`` reports the geometric base
+    MAC ``"dehnen"`` (see ``_base_mac_type``) and paper mode pins ``theta`` at
+    1.0 because it does not gate acceptance -- so two solvers at different
+    ``adaptive_eps`` hash identically while answering different criteria.
+
+    Serving one criterion's interaction list to another request makes the solver
+    *cheaper* and silently wrong, which no cost measurement can detect (trap 6
+    in ``docs/dehnen_mass_mac_status_and_plan.md``). Measured before this
+    existed, at N=2048 / leaf 8 / eps=1e-3 with ``mac_type="dehnen_theta"``:
+    injected per-node force scales of 1e-3, 1.0 and 1e+3 -- the whole right-hand
+    side of eq (16a), across six orders of magnitude -- all returned the same
+    17520 far pairs, because the second prepare hit the cache.
+
+    Three outcomes:
+
+    * ``""`` -- nothing criterion-shaped is in play, so the geometric key is
+      already complete and keys stay exactly what they were.
+    * :data:`POLICY_IDENTITY_UNCACHEABLE` -- a solver-owned ``pair_policy`` or
+      ``policy_state`` is installed, or an input is a tracer. **Refuse to
+      cache.** A pair policy is evaluated against ``policy_state``, which is
+      built from the multipole power (hence the *masses*) and the per-particle
+      positions; the geometric key hashes neither, so no entry can honestly be
+      shown to match. Caching is a perf optimisation, so it yields -- and the
+      large-N production profile does not depend on it, because the interaction
+      cache is already off for ``static_radix`` trees.
+    * a hex digest -- the criterion is carried by data this function *can* see,
+      which is the ``dehnen_theta`` case: the criterion is folded into
+      ``geometry.radius``, so hashing those radii pins acceptance regardless of
+      what produced them.
+    """
+
+    if pair_policy is not None or policy_state is not None:
+        return POLICY_IDENTITY_UNCACHEABLE
+    if (
+        eps is None
+        and force_scale_mode is None
+        and geometry_mode is None
+        and theta_max is None
+        and error_model_code is None
+        and force_scale_nodes is None
+        and mac_geometry_radius is None
+    ):
+        return ""
+
+    hasher = hashlib.sha256()
+    hasher.update(b"pair_policy_identity_v1")
+    hasher.update(b"eps")
+    hasher.update(
+        b"none" if eps is None else np.asarray(float(eps), dtype=np.float64).tobytes()
+    )
+    hasher.update(b"force_scale_mode")
+    hasher.update(str(force_scale_mode).encode("utf8"))
+    hasher.update(b"geometry_mode")
+    hasher.update(str(geometry_mode).encode("utf8"))
+    hasher.update(b"theta_max")
+    hasher.update(
+        b"none"
+        if theta_max is None
+        else np.asarray(float(theta_max), dtype=np.float64).tobytes()
+    )
+    hasher.update(b"error_model_code")
+    hasher.update(
+        b"none"
+        if error_model_code is None
+        else np.asarray(int(error_model_code), dtype=np.int64).tobytes()
+    )
+    if not _hash_array_or_none(hasher, b"force_scale_nodes", force_scale_nodes):
+        return POLICY_IDENTITY_UNCACHEABLE
+    if not _hash_array_or_none(hasher, b"mac_geometry_radius", mac_geometry_radius):
+        return POLICY_IDENTITY_UNCACHEABLE
+    return hasher.hexdigest()
+
+
 def _interaction_cache_key(
     tree: Tree,
     *,
@@ -1145,12 +1652,63 @@ def _interaction_cache_key(
     refine_local: Optional[bool],
     max_refine_levels: Optional[int],
     aspect_threshold: Optional[float],
+    pair_policy_identity: str,
 ) -> Optional[str]:
     """Return a hash for the interaction list of a tree/theta configuration.
 
     If any tree arrays are tracers (for example under grad/jit), return ``None``
     to disable caching and avoid host round-trips on traced values.
+
+    ``pair_policy_identity`` carries everything about the *acceptance criterion*
+    that the geometric fields below cannot see; it has no default on purpose,
+    because a silent default is how the criterion came to be missing from this
+    key in the first place. See :func:`pair_policy_cache_identity`.
+
+    Parameters
+    ----------
+    tree : Tree
+        The tree being traversed.
+    topology_key : Optional[str]
+        See the module docstring.
+    tree_mode : str
+        See the module docstring.
+    leaf_parameter : int
+        See the module docstring.
+    theta : float
+        Opening angle for the acceptance test.
+    mac_type : MACType
+        Geometric MAC family, already translated for the traversal.
+    dehnen_radius_scale : float
+        Multiplier on the Dehnen acceptance radius.
+    expansion_basis : str
+        See the module docstring.
+    center_mode : str
+        See the module docstring.
+    max_pair_queue : Optional[int]
+        Traversal pair-queue capacity, or ``None`` for the default.
+    pair_process_block : Optional[int]
+        Pairs processed per traversal block, or ``None`` for the default.
+    traversal_config : Optional[DualTreeTraversalConfig]
+        Traversal capacities, or ``None`` to take the template.
+    refine_local : Optional[bool]
+        See the module docstring.
+    max_refine_levels : Optional[int]
+        See the module docstring.
+    aspect_threshold : Optional[float]
+        See the module docstring.
+    pair_policy_identity : str
+        Identity of the *acceptance criterion* in force for this build. No
+        default on purpose: a silent default is how the criterion came to be
+        missing from this key. See :func:`pair_policy_cache_identity`.
+
+    Returns
+    -------
+    Optional[str]
+        A stable key for this build request, or ``None`` when caching does not apply.
     """
+
+    if pair_policy_identity == POLICY_IDENTITY_UNCACHEABLE:
+        return None
 
     hasher = hashlib.sha256()
 
@@ -1219,6 +1777,8 @@ def _interaction_cache_key(
     hasher.update(np.asarray(refine_val, dtype=np.int64).tobytes())
     hasher.update(np.asarray(max_refine_val, dtype=np.int64).tobytes())
     hasher.update(np.asarray(aspect_val, dtype=np.float64).tobytes())
+    hasher.update(b"pair_policy_identity")
+    hasher.update(str(pair_policy_identity).encode("utf8"))
     return hasher.hexdigest()
 
 
@@ -1295,8 +1855,6 @@ def _build_dual_tree_artifacts(
                 split_enabled=bool(allow_split_build),
                 grouped_interactions=grouped_interactions,
                 need_traversal_result=need_traversal_result,
-                pair_policy=pair_policy,
-                policy_state=policy_state,
             )
         if use_split_build:
             strict_streamed_split = bool(
@@ -1317,6 +1875,8 @@ def _build_dual_tree_artifacts(
                     max_pair_queue=max_pair_queue,
                     pair_process_block=pair_process_block,
                     traversal_config=traversal_config,
+                    pair_policy=pair_policy,
+                    policy_state=policy_state,
                 )
                 if strict_streamed_split
                 else _build_dual_tree_artifacts_split(
@@ -1332,6 +1892,8 @@ def _build_dual_tree_artifacts(
                     need_node_interactions=need_node_interactions,
                     need_compact_far_pairs=need_compact_far_pairs,
                     use_dense_interactions=use_dense_interactions,
+                    pair_policy=pair_policy,
+                    policy_state=policy_state,
                     timing_callback=timing_callback,
                 )
             )

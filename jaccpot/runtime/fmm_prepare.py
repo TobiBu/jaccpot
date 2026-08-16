@@ -1,4 +1,4 @@
-"""PrepareMixin: fmm_prepare methods extracted from the FastMultipoleMethod
+"""PrepareMixin: fmm_prepare methods extracted from the FMMEngine
 god-class (Phase 2d mixin split). Methods are verbatim (self unchanged); the
 engine class inherits this mixin. Sibling of _fmm_impl at runtime level.
 """
@@ -8,7 +8,7 @@ from __future__ import annotations
 import hashlib
 import os
 import time
-from typing import Any, Optional
+from typing import TYPE_CHECKING, Any, NamedTuple, Optional
 
 import jax
 import jax.numpy as jnp
@@ -17,7 +17,6 @@ from beartype import beartype
 from beartype.typing import Callable, Tuple
 from jaxtyping import Array, jaxtyped
 from yggdrax.dense_interactions import DenseInteractionBuffers
-from yggdrax.geometry import compute_tree_geometry
 from yggdrax.grouped_interactions import GroupedInteractionBuffers
 from yggdrax.interactions import (
     CompactTaggedFarPairs,
@@ -50,11 +49,13 @@ from jaccpot.nearfield.near_field import (
 )
 from jaccpot.operators.multipole_utils import MAX_MULTIPOLE_ORDER, total_coefficients
 from jaccpot.upward.tree_expansions import TreeUpwardData
+from jaccpot.upward.tree_geometry import compute_tree_geometry_compiled
 
 from ._adaptive_policy import (
     adaptive_pair_policy,
     adaptive_policy_tolerance,
     bucket_far_pairs_by_tag,
+    compute_node_force_scale_from_sorted_magnitudes,
 )
 from ._interaction_cache import (
     _build_dual_tree_artifacts,
@@ -63,6 +64,7 @@ from ._interaction_cache import (
     _interaction_cache_key,
     _InteractionCacheEntry,
     _RefreshDualPlannerHint,
+    pair_policy_cache_identity,
 )
 from ._large_n_pipeline import can_use_large_n_prepare_path, prepare_large_n_state
 from ._nearfield_cache import (
@@ -72,6 +74,10 @@ from ._nearfield_cache import (
     with_nearfield_cache_artifacts,
 )
 from ._octree_adapter import build_octree_execution_data_with_status
+from .capacity_diagnostics import (
+    is_capacity_failure,
+    reraise_with_capacity_report,
+)
 from .dtypes import INDEX_DTYPE
 from .fmm_caches import _contains_tracer, _estimate_payload_nbytes, _format_nbytes
 from .fmm_constants import (
@@ -110,6 +116,95 @@ from .kernels.core import (
     _infer_bounds,
 )
 
+if TYPE_CHECKING:  # pragma: no cover - annotations only, no runtime import
+    # The mixins annotate `self` as the engine they are mixed into, which lives in
+    # `_fmm_impl` and imports *them* -- so this must stay under TYPE_CHECKING or it
+    # would form the cycle ARCHITECTURE §8 forbids. Before this block the names were
+    # dangling: `typing.get_type_hints` raised NameError on every mixin method, so the
+    # annotations documented an intent no tool could check.
+    from ._fmm_impl import FMMEngine, PreparedStateLike
+
+
+class _DualDownwardPlan(NamedTuple):
+    """Everything the dual/downward phase resolves before it builds anything.
+
+    Seventeen host-side decisions -- which traversal build to use, whether the
+    stateful interaction cache may be reused, which far-field payload shape the
+    M2L feed needs, and whether the strict streamed fast lane is eligible --
+    resolved together because they constrain each other. ARCHITECTURE §4 and the
+    two bugs behind ``b462e45`` / ``dee46d6`` are both about *resolution order*
+    here, which is the reason this is one bundle produced by one function rather
+    than flags set at their point of use.
+
+    ``runtime_traversal_config`` is carried through rather than merely read: the
+    resolution can clamp it, and the clamped value is what the build must see.
+
+    Every field is annotated ``object`` rather than its real type. That is
+    deliberate and predates this docstring: the precise types live in
+    ``yggdrax`` and importing them here would pull the traversal package into a
+    module the engine imports, which section 8 forbids. The descriptions below
+    carry what the annotations cannot.
+
+    Attributes
+    ----------
+    adaptive_order_active : object
+        Whether per-node adaptive expansion order is switched on for this build.
+    allow_split_build : object
+        Whether the prepare stage may split tree build and traversal into two
+        device passes to cap peak memory.
+    grouped_interactions_active : object
+        Whether the M2L feed uses the grouped (class-major) interaction layout.
+    jit_traversal_for_prepare : object
+        Whether this build's traversal runs jitted.
+    mixed_order_farfield_active : object
+        Whether the far field mixes expansion orders across gears.
+    need_compact_far_pairs : object
+        Whether the traversal must emit the compact tagged far-pair payload.
+    need_node_interactions : object
+        Whether the traversal must emit a node interaction list. False is the
+        streamed path, which never materialises one.
+    need_traversal_result : object
+        Whether the full walk result is retained rather than discarded once the
+        payloads are extracted.
+    retain_interactions_active : object
+        Whether the prepared state keeps its interaction list for reuse.
+    runtime_traversal_config : object
+        The traversal capacities this build must use -- possibly clamped during
+        resolution, which is why it is carried rather than re-read.
+    stateful_cache_enabled : object
+        Whether the process-level interaction cache may be consulted and written.
+    strict_mode_active : object
+        Whether the static-radix strict lane is in play.
+    strict_streamed_fast_path : object
+        Whether the strict lane additionally qualifies for the streamed fast path.
+    tree_mode_static_radix : object
+        Whether the tree build is the static radix mode the strict lane requires.
+    use_compact_streamed_pairs : object
+        Whether far pairs are consumed in the compact streamed form.
+    use_dense_interactions_for_prepare : object
+        Whether this build uses dense interaction buffers.
+    use_paper_fixed_policy : object
+        Whether the Dehnen paper-style fixed acceptance policy applies.
+    """
+
+    adaptive_order_active: object
+    allow_split_build: object
+    grouped_interactions_active: object
+    jit_traversal_for_prepare: object
+    mixed_order_farfield_active: object
+    need_compact_far_pairs: object
+    need_node_interactions: object
+    need_traversal_result: object
+    retain_interactions_active: object
+    runtime_traversal_config: object
+    stateful_cache_enabled: object
+    strict_mode_active: object
+    strict_streamed_fast_path: object
+    tree_mode_static_radix: object
+    use_compact_streamed_pairs: object
+    use_dense_interactions_for_prepare: object
+    use_paper_fixed_policy: object
+
 
 class PrepareMixin:
     def _validate_prepare_state_request(
@@ -118,7 +213,27 @@ class PrepareMixin:
         leaf_size: int,
         max_order: int,
     ) -> None:
-        """Validate order/leaf-size constraints for state preparation."""
+        """Validate order/leaf-size constraints for state preparation.
+
+        Parameters
+        ----------
+        leaf_size : int
+            Requested particles per leaf.
+        max_order : int
+            Expansion order ``p`` for this prepare.
+
+        Returns
+        -------
+        None
+            Nothing; it raises if the request is not supportable.
+
+        Raises
+        ------
+        NotImplementedError
+            If the requested order exceeds what the active basis supports.
+        ValueError
+            If the order or leaf size is outside its valid range.
+        """
         if leaf_size < 1:
             raise ValueError("leaf_size must be >= 1")
         if self.fixed_order is not None and int(self.fixed_order) != int(max_order):
@@ -133,7 +248,25 @@ class PrepareMixin:
         positions: Array,
         masses: Array,
     ) -> tuple[Array, Array, Any]:
-        """Validate prepare-state inputs and cast them to the working dtype."""
+        """Validate prepare-state inputs and cast them to the working dtype.
+
+        Parameters
+        ----------
+        positions : Array
+            Particle positions, shape ``(N, 3)``.
+        masses : Array
+            Particle masses, shape ``(N,)``.
+
+        Returns
+        -------
+        tuple[Array, Array, Any]
+            ``(positions, masses, dtype)`` cast to the working dtype.
+
+        Raises
+        ------
+        ValueError
+            If positions and masses disagree in shape or are not finite.
+        """
         positions_arr = jnp.asarray(positions)
         masses_arr = jnp.asarray(masses)
         input_dtype = positions_arr.dtype
@@ -158,7 +291,20 @@ class PrepareMixin:
         positions: Array,
         bounds: Optional[Tuple[Array, Array]],
     ) -> tuple[Array, Array]:
-        """Return bounds converted to the working dtype or infer them."""
+        """Return bounds converted to the working dtype or infer them.
+
+        Parameters
+        ----------
+        positions : Array
+            Particle positions, shape ``(N, 3)``.
+        bounds : Optional[Tuple[Array, Array]]
+            Explicit domain bounds, or None to infer them from the particles.
+
+        Returns
+        -------
+        tuple[Array, Array]
+            ``(lower, upper)`` domain bounds at the working dtype.
+        """
         if bounds is None:
             min_corner, max_corner = _infer_bounds(positions)
             return min_corner, max_corner
@@ -180,7 +326,32 @@ class PrepareMixin:
         aspect_threshold: float,
         allow_stateful_cache: bool,
     ) -> Optional[_TopologyReuseCandidate]:
-        """Return a radix-topology reuse signature when host-side caching is safe."""
+        """Return a radix-topology reuse signature when host-side caching is safe.
+
+        Parameters
+        ----------
+        positions : Array
+            Particle positions, shape ``(N, 3)``.
+        bounds : Tuple[Array, Array]
+            Explicit domain bounds, or None to infer them from the particles.
+        tree_config : TreeBuilderConfig
+            Resolved tree-builder settings.
+        leaf_size : int
+            Requested particles per leaf.
+        refine_local : bool
+            Whether to refine leaves locally, or None for the default.
+        max_refine_levels : int
+            Extra refinement levels, or None for the default.
+        aspect_threshold : float
+            Leaf aspect ratio triggering refinement, or None for the default.
+        allow_stateful_cache : bool
+            Whether the process-level interaction cache may be used.
+
+        Returns
+        -------
+        Optional[_TopologyReuseCandidate]
+            A reuse signature, or None when host-side caching cannot apply.
+        """
 
         if (
             (not self.reuse_topology and tree_config.mode != "static_radix")
@@ -240,7 +411,28 @@ class PrepareMixin:
         max_refine_levels: int,
         aspect_threshold: float,
     ) -> Optional[str]:
-        """Build a stable topology key from sorted Morton codes and tree options."""
+        """Build a stable topology key from sorted Morton codes and tree options.
+
+        Parameters
+        ----------
+        sorted_codes : Array
+            Morton codes in sorted order.
+        tree_config : TreeBuilderConfig
+            Resolved tree-builder settings.
+        leaf_size : int
+            Requested particles per leaf.
+        refine_local : bool
+            Whether to refine leaves locally, or None for the default.
+        max_refine_levels : int
+            Extra refinement levels, or None for the default.
+        aspect_threshold : float
+            Leaf aspect ratio triggering refinement, or None for the default.
+
+        Returns
+        -------
+        Optional[str]
+            A stable topology key, or None when one cannot be formed.
+        """
 
         try:
             hasher = hashlib.sha256()
@@ -269,7 +461,20 @@ class PrepareMixin:
         *,
         leaf_size: int,
     ) -> Optional[str]:
-        """Return a stable key for a static-radix data-structure shape."""
+        """Return a stable key for a static-radix data-structure shape.
+
+        Parameters
+        ----------
+        tree : RadixTree
+            The radix tree this prepare is building against.
+        leaf_size : int
+            Requested particles per leaf.
+
+        Returns
+        -------
+        Optional[str]
+            A stable key for the static-radix shape, or None.
+        """
 
         try:
             hasher = hashlib.sha256()
@@ -294,7 +499,29 @@ class PrepareMixin:
         positions: Array,
         masses: Array,
     ) -> _TreeBuildArtifacts:
-        """Reorder particles and attach them to a cached radix topology."""
+        """Reorder particles and attach them to a cached radix topology.
+
+        Parameters
+        ----------
+        candidate : _TopologyReuseCandidate
+            Topology reuse signature computed for this request.
+        entry : _TopologyReuseEntry
+            Cached topology entry being considered for reuse.
+        positions : Array
+            Particle positions, shape ``(N, 3)``.
+        masses : Array
+            Particle masses, shape ``(N,)``.
+
+        Returns
+        -------
+        _TreeBuildArtifacts
+            Tree artifacts with particles reordered onto the cached topology.
+
+        Raises
+        ------
+        ValueError
+            If the cached topology does not match the particle count.
+        """
 
         positions_sorted, masses_sorted, inverse = reorder_particles_by_indices(
             positions,
@@ -359,7 +586,35 @@ class PrepareMixin:
         max_leaf_size: int,
         cache_leaf_parameter: int,
     ) -> _TreeBuildArtifacts:
-        """Refresh static-radix tree artifacts from a fixed template topology."""
+        """Refresh static-radix tree artifacts from a fixed template topology.
+
+        Parameters
+        ----------
+        template_tree : RadixTree
+            Fixed template topology the static-radix lane refreshes from.
+        positions : Array
+            Particle positions, shape ``(N, 3)``.
+        masses : Array
+            Particle masses, shape ``(N,)``.
+        bounds : Optional[Tuple[Array, Array]]
+            Explicit domain bounds, or None to infer them from the particles.
+        max_leaf_size : int
+            Largest leaf occupancy in the built tree.
+        cache_leaf_parameter : int
+            Leaf parameter the cache entry was built with.
+
+        Returns
+        -------
+        _TreeBuildArtifacts
+            Tree artifacts refreshed against the fixed template topology.
+
+        Raises
+        ------
+        RuntimeError
+            If the template cannot be refreshed for this input.
+        ValueError
+            If the template topology disagrees with the request.
+        """
 
         rebuilt_result = rebuild_static_radix_tree_from_template(
             positions,
@@ -393,7 +648,24 @@ class PrepareMixin:
         max_order: int,
         pos_sorted: Array,
     ) -> Optional[LocalExpansionData]:
-        """Build initial local-expansion buffers matching the active basis."""
+        """Build initial local-expansion buffers matching the active basis.
+
+        Parameters
+        ----------
+        tree : Tree
+            The radix tree this prepare is building against.
+        upward : TreeUpwardData
+            Upward-sweep artifacts: geometry, mass moments and packed multipoles.
+        max_order : int
+            Expansion order ``p`` for this prepare.
+        pos_sorted : Array
+            Particle positions in tree order.
+
+        Returns
+        -------
+        Optional[LocalExpansionData]
+            Zeroed local-expansion buffers, or None when the basis needs none.
+        """
         if self.expansion_basis == "solidfmm":
             # Solid-FMM does not reuse a cached locals template across prepare calls.
             # Let the downward pass allocate its accumulator on demand so we do not
@@ -437,7 +709,38 @@ class PrepareMixin:
         upward_center_mode: str,
         allow_stateful_cache: bool,
     ) -> _PrepareStateTreeUpwardArtifacts:
-        """Build tree artifacts and run upward preparation for prepare_state."""
+        """Build tree artifacts and run upward preparation for prepare_state.
+
+        Parameters
+        ----------
+        positions_arr : Array
+            Particle positions already cast to the working dtype.
+        masses_arr : Array
+            Particle masses already cast to the working dtype.
+        bounds : Optional[Tuple[Array, Array]]
+            Explicit domain bounds, or None to infer them from the particles.
+        leaf_size : int
+            Requested particles per leaf.
+        max_order : int
+            Expansion order ``p`` for this prepare.
+        refine_local_val : bool
+            Resolved local-refinement flag.
+        max_refine_levels_val : int
+            Resolved extra-refinement level count.
+        aspect_threshold_val : float
+            Resolved leaf aspect-ratio threshold.
+        jit_tree_override : Optional[bool]
+            Force the tree build jitted or eager, or None to resolve it.
+        upward_center_mode : str
+            Expansion centre convention for the upward sweep.
+        allow_stateful_cache : bool
+            Whether the process-level interaction cache may be used.
+
+        Returns
+        -------
+        _PrepareStateTreeUpwardArtifacts
+            Tree build plus upward sweep, bundled for the next phase.
+        """
         tree_config = self.config.tree
         if self.tree_type != "radix" and tree_config.mode in (
             "fixed_depth",
@@ -677,7 +980,50 @@ class PrepareMixin:
         runtime_l2l_chunk_size: Optional[int],
         record_retry: Callable[[DualTreeRetryEvent], None],
     ) -> tuple[_PrepareStateTreeUpwardArtifacts, _PrepareStateDualDownwardArtifacts]:
-        """Build tree/upward and dual/downward artifacts in one helper call."""
+        """Build tree/upward and dual/downward artifacts in one helper call.
+
+        Parameters
+        ----------
+        positions_arr : Array
+            Particle positions already cast to the working dtype.
+        masses_arr : Array
+            Particle masses already cast to the working dtype.
+        bounds : Optional[Tuple[Array, Array]]
+            Explicit domain bounds, or None to infer them from the particles.
+        leaf_size : int
+            Requested particles per leaf.
+        max_order : int
+            Expansion order ``p`` for this prepare.
+        refine_local_val : bool
+            Resolved local-refinement flag.
+        max_refine_levels_val : int
+            Resolved extra-refinement level count.
+        aspect_threshold_val : float
+            Resolved leaf aspect-ratio threshold.
+        jit_tree_override : Optional[bool]
+            Force the tree build jitted or eager, or None to resolve it.
+        upward_center_mode : str
+            Expansion centre convention for the upward sweep.
+        allow_stateful_cache : bool
+            Whether the process-level interaction cache may be used.
+        theta_val : float
+            Resolved opening angle for this build.
+        mac_type_val : MACType
+            Resolved geometric MAC, already translated for the traversal.
+        runtime_traversal_config : Optional[DualTreeTraversalConfig]
+            Traversal capacities for this build, possibly already clamped.
+        runtime_m2l_chunk_size : Optional[int]
+            M2L chunk size for this run, or None to autotune.
+        runtime_l2l_chunk_size : Optional[int]
+            L2L chunk size for this run, or None for the default.
+        record_retry : Callable[[DualTreeRetryEvent], None]
+            Callback invoked when a traversal capacity retry occurs.
+
+        Returns
+        -------
+        tuple[_PrepareStateTreeUpwardArtifacts, _PrepareStateDualDownwardArtifacts]
+            Both phase bundles, built in order.
+        """
 
         tree_artifacts = self._prepare_state_tree_and_upward(
             positions_arr=positions_arr,
@@ -732,6 +1078,7 @@ class PrepareMixin:
         aspect_threshold_val: float,
         allow_stateful_cache: bool,
         suppress_host_side_effects: bool = False,
+        retain_compact_far_pairs: bool = False,
     ) -> _PrepareStateDualDownwardArtifacts:
         """Build/reuse interactions and prepare downward artifacts.
 
@@ -742,6 +1089,61 @@ class PrepareMixin:
         returned ``TreeDownwardData`` is meant to survive into prepared state;
         grouped schedules and other M2L feed artifacts are transient and should
         stay scoped to this helper.
+
+        Parameters
+        ----------
+        tree_artifacts : _PrepareStateTreeUpwardArtifacts
+            Tree and upward artifacts produced by the earlier phase.
+        force_scale_nodes : Optional[Array]
+            Per-node force scales overriding the adaptive prepass.
+        upward_center_mode : str
+            Expansion centre convention for the upward sweep.
+        theta_val : float
+            Resolved opening angle for this build.
+        mac_type_val : MACType
+            Resolved geometric MAC, already translated for the traversal.
+        dehnen_radius_scale : float
+            Multiplier on the Dehnen acceptance radius.
+        runtime_traversal_config : Optional[DualTreeTraversalConfig]
+            Traversal capacities for this build, possibly already clamped.
+        runtime_m2l_chunk_size : Optional[int]
+            M2L chunk size for this run, or None to autotune.
+        runtime_l2l_chunk_size : Optional[int]
+            L2L chunk size for this run, or None for the default.
+        grouped_interactions : bool
+            Whether the grouped class-major layout is in use.
+        farfield_mode : str
+            Far-field feed shape: ``auto``, ``pair_grouped`` or ``class_major``.
+        record_retry : Callable[[DualTreeRetryEvent], None]
+            Callback invoked when a traversal capacity retry occurs.
+        refine_local_val : bool
+            Resolved local-refinement flag.
+        max_refine_levels_val : int
+            Resolved extra-refinement level count.
+        aspect_threshold_val : float
+            Resolved leaf aspect-ratio threshold.
+        allow_stateful_cache : bool
+            Whether the process-level interaction cache may be used.
+        suppress_host_side_effects : bool
+            Whether to skip host-side caching and diagnostics.
+        retain_compact_far_pairs : bool
+            Keep the streamed lane's compact far pairs instead of discarding them
+            after the build. eq (16b)'s ``f_b`` prepass needs the far/near
+            partition it just produced -- exact scalar sums over near pairs,
+            monopoles over far ones -- and the streamed lane emits compact pairs
+            and no node interaction list, so without this the far term is simply
+            absent and the estimate reads as an ordinary under-estimate rather
+            than a missing term.
+
+        Returns
+        -------
+        _PrepareStateDualDownwardArtifacts
+            Interactions plus downward artifacts for the prepared state.
+
+        Raises
+        ------
+        ValueError
+            If the resolved plan is internally inconsistent.
         """
         suppress_host_side_effects = bool(suppress_host_side_effects)
         refresh_timing_active = bool(
@@ -789,324 +1191,37 @@ class PrepareMixin:
         pair_policy = None
         policy_state = None
         cache_key = None
-        use_paper_fixed_policy = (not self.adaptive_order) and (
-            self._uses_paper_style_traversal_policy()
+        # The 17 interdependent build decisions, resolved together -- see
+        # `_DualDownwardPlan`. Unpacked back into locals so every expression
+        # below reads exactly as it did before the extraction.
+        (
+            adaptive_order_active,
+            allow_split_build,
+            grouped_interactions_active,
+            jit_traversal_for_prepare,
+            mixed_order_farfield_active,
+            need_compact_far_pairs,
+            need_node_interactions,
+            need_traversal_result,
+            retain_interactions_active,
+            runtime_traversal_config,
+            stateful_cache_enabled,
+            strict_mode_active,
+            strict_streamed_fast_path,
+            tree_mode_static_radix,
+            use_compact_streamed_pairs,
+            use_dense_interactions_for_prepare,
+            use_paper_fixed_policy,
+        ) = self._resolve_dual_downward_plan(
+            tree_artifacts=tree_artifacts,
+            theta_val=theta_val,
+            mac_type_val=mac_type_val,
+            runtime_traversal_config=runtime_traversal_config,
+            grouped_interactions=grouped_interactions,
+            farfield_mode=farfield_mode,
+            allow_stateful_cache=allow_stateful_cache,
+            suppress_host_side_effects=suppress_host_side_effects,
         )
-        if (
-            bool(suppress_host_side_effects)
-            and bool(getattr(self, "_strict_fused_mode_active", False))
-            and bool(getattr(self, "_strict_fused_device_only", False))
-        ):
-            # This lane cannot carry a solver-owned pair policy, so the Dehnen
-            # mass-dependent MAC would silently degrade to the plain geometric
-            # MAC underneath it -- producing a different force with no signal to
-            # the caller, and quietly invalidating any measurement taken here.
-            # Refuse, in the same spirit as the streamed-fast-lane refusal below.
-            if use_paper_fixed_policy:
-                raise RuntimeError(
-                    "the strict fused device-only lane cannot carry the Dehnen "
-                    "paper MAC (mac_type='dehnen_error' / "
-                    "adaptive_error_model='dehnen_paper'): it requires a "
-                    "solver-owned pair policy, which this lane does not support. "
-                    "Silently falling back would run the geometric MAC instead. "
-                    "Use mac_type='dehnen' for this lane, or disable the strict "
-                    "fused device-only path."
-                )
-            use_paper_fixed_policy = False
-
-        # A static-radix topology key describes the capacity-fixed tree shape,
-        # not the current leaf membership, geometry, or MAC decisions. Reusing
-        # cached dual-tree artifacts across evolved positions can therefore
-        # attach stale neighbor/far-field payloads to freshly sorted particles.
-        stateful_cache_enabled = (
-            bool(allow_stateful_cache)
-            and bool(self.enable_interaction_cache)
-            and str(tree_artifacts.tree_mode) != "static_radix"
-            and (not suppress_host_side_effects)
-        )
-        grouped_interactions_active = bool(grouped_interactions)
-        strict_fused_device_only_hot_path = (
-            bool(suppress_host_side_effects)
-            and bool(getattr(self, "_strict_fused_mode_active", False))
-            and bool(getattr(self, "_strict_fused_device_only", False))
-        )
-        adaptive_order_active = bool(self.adaptive_order) and not bool(
-            strict_fused_device_only_hot_path
-        )
-        mixed_order_farfield_active = bool(self.mixed_order_farfield) and not bool(
-            strict_fused_device_only_hot_path
-        )
-        retain_interactions_active = bool(self.retain_interactions) and not bool(
-            strict_fused_device_only_hot_path
-        )
-        need_traversal_result = (
-            bool(self.retain_traversal_result)
-            and not bool(strict_fused_device_only_hot_path)
-        ) or bool(use_paper_fixed_policy)
-        traced_prepare_inputs = bool(
-            _contains_tracer(
-                (tree_artifacts.positions_sorted, tree_artifacts.masses_sorted)
-            )
-        )
-        strict_fused_node_interactions_safe_path = (
-            bool(strict_fused_device_only_hot_path)
-            and str(
-                os.environ.get(
-                    "JACCPOT_STATIC_STRICT_FUSED_NODE_INTERACTIONS_SAFE_PATH",
-                    "0",
-                )
-            )
-            .strip()
-            .lower()
-            in {"1", "true", "yes", "on"}
-            and not (
-                str(
-                    os.environ.get(
-                        "JACCPOT_STATIC_STRICT_FUSED_ALLOW_UNSAFE_COMPACT_PAIR_REUSE",
-                        "0",
-                    )
-                )
-                .strip()
-                .lower()
-                in {"1", "true", "yes", "on"}
-            )
-        )
-        use_compact_streamed_pairs = (
-            (bool(self.streamed_far_pairs) or bool(strict_fused_device_only_hot_path))
-            and not bool(strict_fused_node_interactions_safe_path)
-            and not adaptive_order_active
-            and not grouped_interactions_active
-            and not mixed_order_farfield_active
-            and not retain_interactions_active
-            and not bool(need_traversal_result)
-            and (
-                not bool(traced_prepare_inputs)
-                or bool(strict_fused_device_only_hot_path)
-            )
-        )
-        need_compact_far_pairs = (
-            bool(adaptive_order_active) and not bool(need_traversal_result)
-        ) or bool(use_compact_streamed_pairs)
-        need_node_interactions = not bool(use_compact_streamed_pairs)
-        use_dense_interactions_for_prepare = bool(self.use_dense_interactions) and (
-            self.expansion_basis != "solidfmm"
-        )
-        if not suppress_host_side_effects:
-            _prepare_diag(
-                "dual-tree start "
-                f"theta={theta_val:.3f} mac_type={mac_type_val} "
-                f"streamed={bool(self.streamed_far_pairs)} grouped={grouped_interactions_active} "
-                f"farfield_mode={farfield_mode} memory_objective={self.memory_objective} "
-                f"traversal_config={runtime_traversal_config} "
-                f"need_compact_far_pairs={bool(need_compact_far_pairs)} "
-                f"need_node_interactions={bool(need_node_interactions)} "
-                f"dense_buffers={bool(use_dense_interactions_for_prepare)}"
-            )
-        if (
-            runtime_traversal_config is not None
-            and self.memory_objective == "minimum_memory"
-            and jax.default_backend() == "gpu"
-            and self.tree_type == "radix"
-            and self.expansion_basis == "solidfmm"
-            and bool(self.streamed_far_pairs)
-            and not grouped_interactions_active
-        ):
-            total_nodes = int(tree_artifacts.tree.parent.shape[0])
-            num_internal = int(jnp.asarray(tree_artifacts.tree.left_child).shape[0])
-            num_leaves = max(1, total_nodes - num_internal)
-            sanitized_traversal_config = (
-                _cap_minimum_memory_streamed_gpu_traversal_config_for_tree(
-                    traversal_config=runtime_traversal_config,
-                    total_nodes=total_nodes,
-                    num_leaves=num_leaves,
-                    num_particles=int(tree_artifacts.positions_sorted.shape[0]),
-                )
-            )
-            if sanitized_traversal_config != runtime_traversal_config:
-                far_slots_before = total_nodes * int(
-                    runtime_traversal_config.max_interactions_per_node
-                )
-                near_slots_before = num_leaves * int(
-                    runtime_traversal_config.max_neighbors_per_leaf
-                )
-                if not suppress_host_side_effects:
-                    _prepare_diag(
-                        "capped explicit traversal_config for legacy streamed GPU walk "
-                        f"total_nodes={total_nodes} num_leaves={num_leaves} "
-                        f"far_slots={far_slots_before} near_slots={near_slots_before} "
-                        f"from={runtime_traversal_config} "
-                        f"to={sanitized_traversal_config}"
-                    )
-                runtime_traversal_config = sanitized_traversal_config
-        jit_traversal_for_prepare = bool(
-            self._jit_traversal_default
-        ) and not _contains_tracer(
-            (tree_artifacts.positions_sorted, tree_artifacts.masses_sorted)
-        )
-        if self.prepare_stage_memory_split_enabled is not None:
-            allow_split_build = bool(self.prepare_stage_memory_split_enabled)
-        elif self._prepare_stage_memory_split_env_override is None:
-            # Default to the lower-peak split traversal build in the production
-            # minimum-memory streamed GPU path; keep env opt-out for debugging.
-            allow_split_build = bool(
-                self._streamed_minimum_memory_gpu_default_split_build
-                and not grouped_interactions_active
-            )
-        else:
-            allow_split_build = bool(self._prepare_stage_memory_split_env_override)
-        if bool(strict_fused_device_only_hot_path):
-            allow_split_build = True
-        if not suppress_host_side_effects:
-            _prepare_diag(f"allow_split_build={bool(allow_split_build)}")
-        tree_mode_static_radix = (
-            str(tree_artifacts.tree_mode).strip().lower() == "static_radix"
-        )
-        strict_mode_active = bool(
-            (
-                self._strict_gpu_mode_on
-                or (
-                    self._strict_gpu_mode_auto
-                    and self._large_n_gpu_production_profile_cached
-                    and tree_mode_static_radix
-                )
-            )
-        )
-        if strict_mode_active:
-            strict_context_key = self._strict_cap_profile_context_key(
-                tree_mode=str(tree_artifacts.tree_mode),
-                leaf_parameter=int(tree_artifacts.leaf_parameter),
-                particle_count=int(
-                    jnp.asarray(tree_artifacts.positions_sorted).shape[0]
-                ),
-            )
-            strict_fused_hot_path = bool(
-                getattr(self, "_strict_fused_mode_active", False)
-            )
-            strict_profile_key_stable = str(self._strict_profiled_context_key) == str(
-                strict_context_key
-            )
-            if not (strict_fused_hot_path and strict_profile_key_stable):
-                self._maybe_load_strict_cap_profile(context_key=strict_context_key)
-            if bool(self._strict_cap_require_exact_profile_match):
-                if str(self._strict_profiled_context_key) != str(strict_context_key):
-                    self._strict_runner_fail_fast_reject_count += 1
-                    raise RuntimeError(
-                        "strict static lane requires exact cap profile key match: "
-                        f"requested={strict_context_key} "
-                        f"resolved={self._strict_profiled_context_key or 'none'}"
-                    )
-            profiled_q = int(self._strict_profiled_max_pair_queue)
-            profiled_b = int(self._strict_profiled_pair_process_block)
-            if bool(self._strict_cap_require_exact_profile_match) and profiled_q <= 0:
-                self._strict_runner_fail_fast_reject_count += 1
-                raise RuntimeError(
-                    "strict static lane requires non-zero profiled max_pair_queue "
-                    f"for key {strict_context_key}"
-                )
-            if profiled_q > 0:
-                if runtime_traversal_config is not None:
-                    runtime_traversal_config = DualTreeTraversalConfig(
-                        max_pair_queue=max(
-                            int(runtime_traversal_config.max_pair_queue),
-                            int(profiled_q),
-                        ),
-                        process_block=(
-                            int(profiled_b)
-                            if profiled_b > 0
-                            else int(runtime_traversal_config.process_block)
-                        ),
-                        max_interactions_per_node=int(
-                            runtime_traversal_config.max_interactions_per_node
-                        ),
-                        max_neighbors_per_leaf=int(
-                            runtime_traversal_config.max_neighbors_per_leaf
-                        ),
-                    )
-                else:
-                    runtime_traversal_config = DualTreeTraversalConfig(
-                        max_pair_queue=int(profiled_q),
-                        process_block=(
-                            int(profiled_b)
-                            if profiled_b > 0
-                            else int(self.pair_process_block or 1024)
-                        ),
-                        max_interactions_per_node=8192,
-                        max_neighbors_per_leaf=4096,
-                    )
-            if bool(traced_prepare_inputs) and not bool(
-                strict_fused_device_only_hot_path
-            ):
-                allow_split_build = False
-            if not suppress_host_side_effects:
-                self._refresh_strict_mode_active_count += 1
-                # Strict mode contract: one-shot shared count->fill and single queue.
-                if not bool(getattr(self, "_strict_shared_env_applied", False)):
-                    os.environ["YGGDRAX_DUAL_TREE_SHARED_COUNT_FILL_ONE_SHOT"] = "1"
-                    os.environ[
-                        "YGGDRAX_DUAL_TREE_SHARED_COUNT_FILL_STEADY_SINGLE_QUEUE"
-                    ] = "1"
-                    self._strict_shared_env_applied = True
-        strict_streamed_fast_path = bool(
-            strict_mode_active
-            and bool(allow_split_build)
-            and bool(use_compact_streamed_pairs)
-            and not grouped_interactions_active
-            and not bool(need_traversal_result)
-            and not adaptive_order_active
-            and not mixed_order_farfield_active
-            and (
-                not bool(traced_prepare_inputs)
-                or bool(strict_fused_device_only_hot_path)
-            )
-        )
-        if bool(strict_fused_device_only_hot_path):
-            blockers: list[str] = []
-            if not bool(strict_mode_active):
-                blockers.append("strict_mode_inactive")
-            if not bool(allow_split_build):
-                blockers.append("split_build_disabled")
-            if not bool(use_compact_streamed_pairs):
-                blockers.append("compact_streamed_pairs_disabled")
-            if bool(grouped_interactions_active):
-                blockers.append("grouped_interactions_active")
-            if bool(need_traversal_result):
-                blockers.append("traversal_result_required")
-            if bool(adaptive_order_active):
-                blockers.append("adaptive_order_active")
-            if bool(mixed_order_farfield_active):
-                blockers.append("mixed_order_farfield_active")
-            if bool(traced_prepare_inputs) and not bool(strict_streamed_fast_path):
-                blockers.append("compact_streamed_tracer_unsupported")
-            if bool(getattr(self, "_strict_fused_fastlane_diag_enabled", True)):
-                self._strict_fused_fastlane_attempts += 1
-                if bool(strict_streamed_fast_path):
-                    self._strict_fused_fastlane_hits += 1
-                    self._strict_fused_fastlane_last_blockers = tuple()
-                else:
-                    self._strict_fused_fastlane_misses += 1
-                    self._strict_fused_fastlane_last_blockers = tuple(blockers)
-                    counts = dict(
-                        getattr(self, "_strict_fused_fastlane_block_counts", {})
-                    )
-                    for key in blockers:
-                        counts[str(key)] = int(counts.get(str(key), 0)) + 1
-                    self._strict_fused_fastlane_block_counts = counts
-            if not bool(strict_streamed_fast_path):
-                # Production fused device-only hot path MUST engage the radix
-                # streamed fast lane. Never silently fall back to the slower
-                # generic build -- raise loudly with the blocking reasons so a
-                # misconfiguration is caught instead of quietly running the
-                # ~10x-slower generic path.
-                self._strict_fused_fallback_count += 1
-                self._strict_fused_last_fallback_reason = (
-                    "fused_device_only_hot_path_fastlane_blocked:" + ",".join(blockers)
-                )
-                raise RuntimeError(
-                    "strict fused device-only production lane could not engage the "
-                    "radix streamed fast lane and must not silently fall back to a "
-                    f"slower path (blockers={blockers}). This indicates a "
-                    "misconfiguration of the large-N GPU production profile."
-                )
         if strict_streamed_fast_path:
             if not suppress_host_side_effects:
                 self._refresh_dual_planner_cache_hits += 1
@@ -1161,157 +1276,96 @@ class PrepareMixin:
                 dehnen_geometry_mode=self.dehnen_geometry_mode,
             )
             pair_policy = adaptive_pair_policy
-        else:
-            cache_key = _interaction_cache_key(
-                tree_artifacts.tree,
-                topology_key=tree_artifacts.topology_key,
-                tree_mode=tree_artifacts.tree_mode,
-                leaf_parameter=tree_artifacts.leaf_parameter,
-                theta=theta_val,
-                mac_type=mac_type_val,
-                dehnen_radius_scale=dehnen_radius_scale,
-                expansion_basis=self.expansion_basis,
-                center_mode=upward_center_mode,
-                max_pair_queue=self.max_pair_queue,
-                pair_process_block=self.pair_process_block,
-                traversal_config=runtime_traversal_config,
-                refine_local=refine_local_val,
-                max_refine_levels=max_refine_levels_val,
-                aspect_threshold=aspect_threshold_val,
-            )
+
+        # The cache key has to see the *acceptance criterion*, not only geometry.
+        # `dehnen_error` reports the geometric base MAC "dehnen" and paper mode
+        # pins theta at 1.0, so nothing else in the key separates two solvers at
+        # different `adaptive_eps` -- and serving one criterion's interaction list
+        # to another request is cheaper *and* silently wrong, which no cost
+        # measurement can detect. A solver-owned pair policy resolves to
+        # "uncacheable" (key None), which is what the old control flow achieved by
+        # accident: it computed the key only on the no-policy branch. Stating it
+        # here is what makes it survive the fast-lane relaxation in Step 3'.
+        criterion_active = self._uses_paper_style_force_scale()
+        folded_geometry = tree_artifacts.upward.geometry if criterion_active else None
+        cache_key = _interaction_cache_key(
+            tree_artifacts.tree,
+            topology_key=tree_artifacts.topology_key,
+            tree_mode=tree_artifacts.tree_mode,
+            leaf_parameter=tree_artifacts.leaf_parameter,
+            theta=theta_val,
+            mac_type=mac_type_val,
+            dehnen_radius_scale=dehnen_radius_scale,
+            expansion_basis=self.expansion_basis,
+            center_mode=upward_center_mode,
+            max_pair_queue=self.max_pair_queue,
+            pair_process_block=self.pair_process_block,
+            traversal_config=runtime_traversal_config,
+            refine_local=refine_local_val,
+            max_refine_levels=max_refine_levels_val,
+            aspect_threshold=aspect_threshold_val,
+            pair_policy_identity=pair_policy_cache_identity(
+                pair_policy=pair_policy,
+                policy_state=policy_state,
+                eps=(self.adaptive_eps if criterion_active else None),
+                force_scale_mode=(
+                    self.mac_force_scale_mode if criterion_active else None
+                ),
+                geometry_mode=(self.dehnen_geometry_mode if criterion_active else None),
+                theta_max=(
+                    float(getattr(self, "mac_theta_max", 1.0))
+                    if criterion_active
+                    else None
+                ),
+                error_model_code=(
+                    self._traversal_policy_error_model_code()
+                    if criterion_active
+                    else None
+                ),
+                force_scale_nodes=force_scale_nodes if criterion_active else None,
+                # `dehnen_theta` carries the criterion in `geometry.radius`
+                # rather than in a policy, so the radii the traversal will
+                # actually read are what pins acceptance here.
+                mac_geometry_radius=(
+                    folded_geometry.radius
+                    if (
+                        self._uses_per_node_effective_theta()
+                        and folded_geometry is not None
+                    )
+                    else None
+                ),
+            ),
+        )
         has_pair_policy = pair_policy is not None
         has_policy_state = policy_state is not None
-        planner_enabled = bool(
-            (
-                self._refresh_dual_planner_mode_on
-                or (
-                    self._refresh_dual_planner_mode_auto
-                    and self._large_n_gpu_production_profile_cached
-                    and tree_mode_static_radix
-                )
-            )
+        planner_hint, planner_cache_hit = self._resolve_dual_downward_planner_hint(
+            tree_artifacts=tree_artifacts,
+            theta_val=theta_val,
+            mac_type_val=mac_type_val,
+            runtime_traversal_config=runtime_traversal_config,
+            plan=_DualDownwardPlan(
+                adaptive_order_active=adaptive_order_active,
+                allow_split_build=allow_split_build,
+                grouped_interactions_active=grouped_interactions_active,
+                jit_traversal_for_prepare=jit_traversal_for_prepare,
+                mixed_order_farfield_active=mixed_order_farfield_active,
+                need_compact_far_pairs=need_compact_far_pairs,
+                need_node_interactions=need_node_interactions,
+                need_traversal_result=need_traversal_result,
+                retain_interactions_active=retain_interactions_active,
+                runtime_traversal_config=runtime_traversal_config,
+                stateful_cache_enabled=stateful_cache_enabled,
+                strict_mode_active=strict_mode_active,
+                strict_streamed_fast_path=strict_streamed_fast_path,
+                tree_mode_static_radix=tree_mode_static_radix,
+                use_compact_streamed_pairs=use_compact_streamed_pairs,
+                use_dense_interactions_for_prepare=use_dense_interactions_for_prepare,
+                use_paper_fixed_policy=use_paper_fixed_policy,
+            ),
+            has_pair_policy=has_pair_policy,
+            has_policy_state=has_policy_state,
+            suppress_host_side_effects=suppress_host_side_effects,
         )
-        planner_hint: Optional[_RefreshDualPlannerHint] = None
-        planner_cache_hit = False
-        if planner_enabled:
-            strict_split_fastlane = bool(
-                (
-                    bool(suppress_host_side_effects)
-                    and not has_pair_policy
-                    and not has_policy_state
-                )
-                or (
-                    strict_mode_active
-                    and bool(allow_split_build)
-                    and not grouped_interactions_active
-                    and not bool(need_traversal_result)
-                    and not has_pair_policy
-                    and not has_policy_state
-                )
-            )
-            if strict_split_fastlane:
-                # Strict/static production lane: keep routing fully on a
-                # fixed host-side decision and skip compiled route probing +
-                # device_get round-trips in the refresh hot path.
-                planner_hint = _RefreshDualPlannerHint(
-                    use_split_build=bool(allow_split_build),
-                    suppress_substage_timing=True,
-                )
-                planner_cache_hit = True
-                if not suppress_host_side_effects:
-                    self._refresh_dual_planner_cache_hits += 1
-                    self._refresh_dual_planner_execute_count += 1
-            else:
-                traversal_key = (
-                    "none"
-                    if runtime_traversal_config is None
-                    else (
-                        f"{int(runtime_traversal_config.max_pair_queue)}:"
-                        f"{int(runtime_traversal_config.process_block)}:"
-                        f"{int(runtime_traversal_config.max_interactions_per_node)}:"
-                        f"{int(runtime_traversal_config.max_neighbors_per_leaf)}"
-                    )
-                )
-                planner_key = "|".join(
-                    (
-                        str(tree_artifacts.topology_key),
-                        str(tree_artifacts.tree_mode),
-                        str(int(tree_artifacts.leaf_parameter)),
-                        f"{float(theta_val):.12g}",
-                        str(mac_type_val),
-                        str(grouped_interactions_active),
-                        str(bool(need_traversal_result)),
-                        str(bool(need_compact_far_pairs)),
-                        str(bool(need_node_interactions)),
-                        str(bool(allow_split_build)),
-                        str(traversal_key),
-                    )
-                )
-                planner_hint = self._refresh_dual_planner_cache.get(planner_key)
-                if planner_hint is None:
-                    if not suppress_host_side_effects:
-                        self._refresh_dual_planner_cache_misses += 1
-                    total_nodes_planner = int(tree_artifacts.tree.parent.shape[0])
-                    internal_nodes_planner = int(
-                        jnp.asarray(tree_artifacts.tree.left_child).shape[0]
-                    )
-                    leaf_count_planner = max(
-                        0, total_nodes_planner - internal_nodes_planner
-                    )
-                    (
-                        use_split_build_compiled,
-                        _use_compact_shared_far_near_compiled,
-                        suppress_substage_timing_compiled,
-                    ) = _compiled_refresh_dual_planner_route(
-                        allow_split_build_flag=jnp.asarray(
-                            bool(allow_split_build), dtype=jnp.bool_
-                        ),
-                        grouped_interactions_flag=jnp.asarray(
-                            grouped_interactions_active, dtype=jnp.bool_
-                        ),
-                        need_traversal_result_flag=jnp.asarray(
-                            bool(need_traversal_result), dtype=jnp.bool_
-                        ),
-                        has_pair_policy_flag=jnp.asarray(
-                            has_pair_policy, dtype=jnp.bool_
-                        ),
-                        has_policy_state_flag=jnp.asarray(
-                            has_policy_state, dtype=jnp.bool_
-                        ),
-                        leaf_count=jnp.asarray(leaf_count_planner, dtype=jnp.int32),
-                        need_node_interactions_flag=jnp.asarray(
-                            bool(need_node_interactions), dtype=jnp.bool_
-                        ),
-                        need_compact_far_pairs_flag=jnp.asarray(
-                            bool(need_compact_far_pairs), dtype=jnp.bool_
-                        ),
-                        use_dense_interactions_flag=jnp.asarray(
-                            bool(use_dense_interactions_for_prepare), dtype=jnp.bool_
-                        ),
-                    )
-                    if suppress_host_side_effects:
-                        use_split_build_compiled_bool = bool(allow_split_build)
-                        suppress_substage_timing_compiled_bool = True
-                    else:
-                        use_split_build_compiled_bool = bool(use_split_build_compiled)
-                        suppress_substage_timing_compiled_bool = bool(
-                            suppress_substage_timing_compiled
-                        )
-                    if not suppress_host_side_effects:
-                        self._refresh_dual_planner_compiled_route_count += 1
-                    planner_hint = _RefreshDualPlannerHint(
-                        use_split_build=use_split_build_compiled_bool,
-                        suppress_substage_timing=suppress_substage_timing_compiled_bool,
-                    )
-                    if not suppress_host_side_effects:
-                        self._refresh_dual_planner_cache[planner_key] = planner_hint
-                        self._refresh_dual_planner_compile_count += 1
-                else:
-                    planner_cache_hit = True
-                    if not suppress_host_side_effects:
-                        self._refresh_dual_planner_cache_hits += 1
-                if not suppress_host_side_effects:
-                    self._refresh_dual_planner_execute_count += 1
         planner_allow_steady_timing_bypass = bool(
             self._planner_steady_timing_bypass_enabled
         )
@@ -1331,7 +1385,7 @@ class PrepareMixin:
         geometry_factory = (
             None
             if tree_artifacts.upward.geometry is not None
-            else lambda: compute_tree_geometry(
+            else lambda: compute_tree_geometry_compiled(
                 tree_artifacts.tree,
                 tree_artifacts.positions_sorted,
                 max_leaf_size=int(tree_artifacts.leaf_cap),
@@ -1579,6 +1633,15 @@ class PrepareMixin:
                 if (
                     bool(adaptive_order_active)
                     or bool(strict_streamed_direct_far_pairs)
+                    # eq (16b)'s prepass needs the far/near partition it just built:
+                    # `f_b` sums exact scalar terms over near pairs and monopoles over
+                    # far ones, so discarding the far list here leaves it with the near
+                    # field only -- which captures 53-66% of `f_b` once there are
+                    # enough leaves for the far field to matter, and reads as an
+                    # ordinary under-estimate rather than a missing term. The streamed
+                    # lane produces compact pairs and no node interaction list, so
+                    # without this the whole of eq (16b) is unreachable at 1e6.
+                    or bool(retain_compact_far_pairs)
                     # Gradients need the FROZEN M2L pair list to re-run the
                     # downward sweep against. The pairs are already built here
                     # whenever ``use_compact_streamed_pairs`` holds (which the
@@ -1596,13 +1659,634 @@ class PrepareMixin:
             cache_entry=cache_entry,
         )
 
+    def _resolve_dual_downward_plan(
+        self,
+        *,
+        tree_artifacts: _PrepareStateTreeUpwardArtifacts,
+        theta_val: float,
+        mac_type_val: MACType,
+        runtime_traversal_config: Optional[DualTreeTraversalConfig],
+        grouped_interactions: bool,
+        farfield_mode: str,
+        allow_stateful_cache: bool,
+        suppress_host_side_effects: bool,
+    ) -> _DualDownwardPlan:
+        """Resolve the dual/downward build plan: 17 interdependent host decisions.
+
+        Extracted verbatim from :meth:`_prepare_state_dual_and_downward` (Tier
+        1.7). Pure host-side policy -- it traces nothing and allocates no device
+        buffer -- but it does two things with side effects that must stay here
+        rather than move to the call site: it raises loudly when the strict fused
+        device-only lane is asked for a configuration it cannot honour (rather
+        than silently degrading the MAC, STYLE_GUIDE §9), and it sets the
+        ``YGGDRAX_DUAL_TREE_SHARED_*`` environment once for the strict lane.
+
+        Parameters
+        ----------
+        tree_artifacts : _PrepareStateTreeUpwardArtifacts
+            Tree and upward-sweep artifacts this prepare call already built.
+        theta_val : float
+            Resolved opening angle.
+        mac_type_val : MACType
+            Resolved multipole acceptance criterion.
+        runtime_traversal_config : Optional[DualTreeTraversalConfig]
+            Caller-resolved traversal capacities; may be clamped here, which is
+            why the (possibly replaced) value is returned in the plan.
+        grouped_interactions : bool
+            Whether the grouped far-field layout was requested.
+        farfield_mode : str
+            Resolved far-field batching mode.
+        allow_stateful_cache : bool
+            Whether this call may reuse cached dual-tree artifacts.
+        suppress_host_side_effects : bool
+            Traced/refresh hot path: skip counters, diagnostics and env writes.
+
+        Returns
+        -------
+        _DualDownwardPlan
+            The 17 resolved decisions, in the order the bundle declares them.
+
+        Raises
+        ------
+        RuntimeError
+            If the strict fused device-only lane is combined with a
+            configuration it cannot honour -- the Dehnen paper MAC, which needs a
+            solver-owned pair policy this lane does not carry, or a blocked
+            streamed fast lane. Both refuse loudly rather than degrading the
+            acceptance criterion silently (STYLE_GUIDE §9).
+        """
+        # `dehnen_theta` evaluates the same criterion but has already folded it into
+        # per-node opening angles (rescaled `geometry.radius`), so the traversal's
+        # own scalar-theta test carries it. Installing a pair policy here would both
+        # double-apply the criterion and re-impose the fast-lane vetoes this mode
+        # exists to avoid.
+        use_paper_fixed_policy = (not self.adaptive_order) and (
+            self._uses_paper_style_traversal_policy()
+            and not self._uses_per_node_effective_theta()
+        )
+        if (
+            bool(suppress_host_side_effects)
+            and bool(getattr(self, "_strict_fused_mode_active", False))
+            and bool(getattr(self, "_strict_fused_device_only", False))
+        ):
+            # This lane cannot carry a solver-owned pair policy, so the Dehnen
+            # mass-dependent MAC would silently degrade to the plain geometric
+            # MAC underneath it -- producing a different force with no signal to
+            # the caller, and quietly invalidating any measurement taken here.
+            # Refuse, in the same spirit as the streamed-fast-lane refusal below.
+            if use_paper_fixed_policy:
+                raise RuntimeError(
+                    "the strict fused device-only lane cannot carry the Dehnen "
+                    "paper MAC (mac_type='dehnen_error' / "
+                    "adaptive_error_model='dehnen_paper'): it requires a "
+                    "solver-owned pair policy, which this lane does not support. "
+                    "Silently falling back would run the geometric MAC instead. "
+                    "Use mac_type='dehnen' for this lane, or disable the strict "
+                    "fused device-only path."
+                )
+            use_paper_fixed_policy = False
+
+        # A static-radix topology key describes the capacity-fixed tree shape,
+        # not the current leaf membership, geometry, or MAC decisions. Reusing
+        # cached dual-tree artifacts across evolved positions can therefore
+        # attach stale neighbor/far-field payloads to freshly sorted particles.
+        stateful_cache_enabled = (
+            bool(allow_stateful_cache)
+            and bool(self.enable_interaction_cache)
+            and str(tree_artifacts.tree_mode) != "static_radix"
+            and (not suppress_host_side_effects)
+        )
+        grouped_interactions_active = bool(grouped_interactions)
+        strict_fused_device_only_hot_path = (
+            bool(suppress_host_side_effects)
+            and bool(getattr(self, "_strict_fused_mode_active", False))
+            and bool(getattr(self, "_strict_fused_device_only", False))
+        )
+        adaptive_order_active = bool(self.adaptive_order) and not bool(
+            strict_fused_device_only_hot_path
+        )
+        mixed_order_farfield_active = bool(self.mixed_order_farfield) and not bool(
+            strict_fused_device_only_hot_path
+        )
+        retain_interactions_active = bool(self.retain_interactions) and not bool(
+            strict_fused_device_only_hot_path
+        )
+        # The paper policy used to force this on. Nothing consumed it: the traversal
+        # result feeds `_prepare_state_extract_adaptive_far_pairs`, which runs only
+        # under `adaptive_order`, and `use_paper_fixed_policy` requires
+        # `not adaptive_order`. What the forcing *did* do was disqualify the
+        # split/streamed build (`_can_split_dual_tree_build` refuses when the
+        # traversal result is needed) and force `need_node_interactions`, so the
+        # criterion could only ever run the monolithic build and materialise
+        # `num_nodes x max_interactions_per_node` -- ~2.5 GiB at N=1e7 / leaf 256,
+        # which is the binding constraint there.
+        #
+        # Dropping it is measured, not reasoned: same solver, same inputs, the
+        # streamed path and the node-interaction path agree on the accept mask
+        # (5708 far pairs both) and on the accelerations to the last printed digit
+        # (|a|_rms 2.514572614e+03 both) at N=8192 / leaf 32 / p=4 / eps=1e-3.
+        need_traversal_result = bool(self.retain_traversal_result) and not bool(
+            strict_fused_device_only_hot_path
+        )
+        traced_prepare_inputs = bool(
+            _contains_tracer(
+                (tree_artifacts.positions_sorted, tree_artifacts.masses_sorted)
+            )
+        )
+        strict_fused_node_interactions_safe_path = (
+            bool(strict_fused_device_only_hot_path)
+            and str(
+                os.environ.get(
+                    "JACCPOT_STATIC_STRICT_FUSED_NODE_INTERACTIONS_SAFE_PATH",
+                    "0",
+                )
+            )
+            .strip()
+            .lower()
+            in {"1", "true", "yes", "on"}
+            and not (
+                str(
+                    os.environ.get(
+                        "JACCPOT_STATIC_STRICT_FUSED_ALLOW_UNSAFE_COMPACT_PAIR_REUSE",
+                        "0",
+                    )
+                )
+                .strip()
+                .lower()
+                in {"1", "true", "yes", "on"}
+            )
+        )
+        use_compact_streamed_pairs = (
+            (bool(self.streamed_far_pairs) or bool(strict_fused_device_only_hot_path))
+            and not bool(strict_fused_node_interactions_safe_path)
+            and not adaptive_order_active
+            and not grouped_interactions_active
+            and not mixed_order_farfield_active
+            and not retain_interactions_active
+            and not bool(need_traversal_result)
+            and (
+                not bool(traced_prepare_inputs)
+                or bool(strict_fused_device_only_hot_path)
+            )
+        )
+        need_compact_far_pairs = (
+            bool(adaptive_order_active) and not bool(need_traversal_result)
+        ) or bool(use_compact_streamed_pairs)
+        need_node_interactions = not bool(use_compact_streamed_pairs)
+        use_dense_interactions_for_prepare = bool(self.use_dense_interactions) and (
+            self.expansion_basis != "solidfmm"
+        )
+        if not suppress_host_side_effects:
+            _prepare_diag(
+                "dual-tree start "
+                f"theta={theta_val:.3f} mac_type={mac_type_val} "
+                f"streamed={bool(self.streamed_far_pairs)} grouped={grouped_interactions_active} "
+                f"farfield_mode={farfield_mode} memory_objective={self.memory_objective} "
+                f"traversal_config={runtime_traversal_config} "
+                f"need_compact_far_pairs={bool(need_compact_far_pairs)} "
+                f"need_node_interactions={bool(need_node_interactions)} "
+                f"dense_buffers={bool(use_dense_interactions_for_prepare)}"
+            )
+        if (
+            runtime_traversal_config is not None
+            and self.memory_objective == "minimum_memory"
+            and jax.default_backend() == "gpu"
+            and self.tree_type == "radix"
+            and self.expansion_basis == "solidfmm"
+            and bool(self.streamed_far_pairs)
+            and not grouped_interactions_active
+        ):
+            total_nodes = int(tree_artifacts.tree.parent.shape[0])
+            num_internal = int(jnp.asarray(tree_artifacts.tree.left_child).shape[0])
+            num_leaves = max(1, total_nodes - num_internal)
+            sanitized_traversal_config = (
+                _cap_minimum_memory_streamed_gpu_traversal_config_for_tree(
+                    traversal_config=runtime_traversal_config,
+                    total_nodes=total_nodes,
+                    num_leaves=num_leaves,
+                    num_particles=int(tree_artifacts.positions_sorted.shape[0]),
+                )
+            )
+            if sanitized_traversal_config != runtime_traversal_config:
+                far_slots_before = total_nodes * int(
+                    runtime_traversal_config.max_interactions_per_node
+                )
+                near_slots_before = num_leaves * int(
+                    runtime_traversal_config.max_neighbors_per_leaf
+                )
+                if not suppress_host_side_effects:
+                    _prepare_diag(
+                        "capped explicit traversal_config for legacy streamed GPU walk "
+                        f"total_nodes={total_nodes} num_leaves={num_leaves} "
+                        f"far_slots={far_slots_before} near_slots={near_slots_before} "
+                        f"from={runtime_traversal_config} "
+                        f"to={sanitized_traversal_config}"
+                    )
+                runtime_traversal_config = sanitized_traversal_config
+        jit_traversal_for_prepare = bool(
+            self._jit_traversal_default
+        ) and not _contains_tracer(
+            (tree_artifacts.positions_sorted, tree_artifacts.masses_sorted)
+        )
+        if self.prepare_stage_memory_split_enabled is not None:
+            allow_split_build = bool(self.prepare_stage_memory_split_enabled)
+        elif self._prepare_stage_memory_split_env_override is None:
+            # Default to the lower-peak split traversal build in the production
+            # minimum-memory streamed GPU path; keep env opt-out for debugging.
+            allow_split_build = bool(
+                self._streamed_minimum_memory_gpu_default_split_build
+                and not grouped_interactions_active
+            )
+        else:
+            allow_split_build = bool(self._prepare_stage_memory_split_env_override)
+        if bool(strict_fused_device_only_hot_path):
+            allow_split_build = True
+        if not suppress_host_side_effects:
+            _prepare_diag(f"allow_split_build={bool(allow_split_build)}")
+        tree_mode_static_radix = (
+            str(tree_artifacts.tree_mode).strip().lower() == "static_radix"
+        )
+        strict_mode_active = bool(
+            (
+                self._strict_gpu_mode_on
+                or (
+                    self._strict_gpu_mode_auto
+                    and self._large_n_gpu_production_profile_cached
+                    and tree_mode_static_radix
+                )
+            )
+        )
+        if strict_mode_active:
+            strict_context_key = self._strict_cap_profile_context_key(
+                tree_mode=str(tree_artifacts.tree_mode),
+                leaf_parameter=int(tree_artifacts.leaf_parameter),
+                particle_count=int(
+                    jnp.asarray(tree_artifacts.positions_sorted).shape[0]
+                ),
+            )
+            strict_fused_hot_path = bool(
+                getattr(self, "_strict_fused_mode_active", False)
+            )
+            strict_profile_key_stable = str(self._strict_profiled_context_key) == str(
+                strict_context_key
+            )
+            if not (strict_fused_hot_path and strict_profile_key_stable):
+                self._maybe_load_strict_cap_profile(context_key=strict_context_key)
+            if bool(self._strict_cap_require_exact_profile_match):
+                if str(self._strict_profiled_context_key) != str(strict_context_key):
+                    self._strict_runner_fail_fast_reject_count += 1
+                    raise RuntimeError(
+                        "strict static lane requires exact cap profile key match: "
+                        f"requested={strict_context_key} "
+                        f"resolved={self._strict_profiled_context_key or 'none'}"
+                    )
+            profiled_q = int(self._strict_profiled_max_pair_queue)
+            profiled_b = int(self._strict_profiled_pair_process_block)
+            if bool(self._strict_cap_require_exact_profile_match) and profiled_q <= 0:
+                self._strict_runner_fail_fast_reject_count += 1
+                raise RuntimeError(
+                    "strict static lane requires non-zero profiled max_pair_queue "
+                    f"for key {strict_context_key}"
+                )
+            if profiled_q > 0:
+                if runtime_traversal_config is not None:
+                    runtime_traversal_config = DualTreeTraversalConfig(
+                        max_pair_queue=max(
+                            int(runtime_traversal_config.max_pair_queue),
+                            int(profiled_q),
+                        ),
+                        process_block=(
+                            int(profiled_b)
+                            if profiled_b > 0
+                            else int(runtime_traversal_config.process_block)
+                        ),
+                        max_interactions_per_node=int(
+                            runtime_traversal_config.max_interactions_per_node
+                        ),
+                        max_neighbors_per_leaf=int(
+                            runtime_traversal_config.max_neighbors_per_leaf
+                        ),
+                    )
+                else:
+                    runtime_traversal_config = DualTreeTraversalConfig(
+                        max_pair_queue=int(profiled_q),
+                        process_block=(
+                            int(profiled_b)
+                            if profiled_b > 0
+                            else int(self.pair_process_block or 1024)
+                        ),
+                        max_interactions_per_node=8192,
+                        max_neighbors_per_leaf=4096,
+                    )
+            if bool(traced_prepare_inputs) and not bool(
+                strict_fused_device_only_hot_path
+            ):
+                allow_split_build = False
+            if not suppress_host_side_effects:
+                self._refresh_strict_mode_active_count += 1
+                # Strict mode contract: one-shot shared count->fill and single queue.
+                if not bool(getattr(self, "_strict_shared_env_applied", False)):
+                    os.environ["YGGDRAX_DUAL_TREE_SHARED_COUNT_FILL_ONE_SHOT"] = "1"
+                    os.environ[
+                        "YGGDRAX_DUAL_TREE_SHARED_COUNT_FILL_STEADY_SINGLE_QUEUE"
+                    ] = "1"
+                    self._strict_shared_env_applied = True
+        strict_streamed_fast_path = bool(
+            strict_mode_active
+            and bool(allow_split_build)
+            and bool(use_compact_streamed_pairs)
+            and not grouped_interactions_active
+            and not bool(need_traversal_result)
+            and not adaptive_order_active
+            and not mixed_order_farfield_active
+            # `_prepare_state_dual_and_downward_strict_streamed_fast` hardcodes
+            # `pair_policy=None`, so this lane cannot carry the Dehnen criterion --
+            # it would run the geometric MAC underneath a caller that asked for the
+            # criterion, cheaper and with no signal. Until the forcing below was
+            # dropped, `need_traversal_result` happened to exclude paper mode here;
+            # relying on that again would be relying on an accident.
+            and not bool(use_paper_fixed_policy)
+            and (
+                not bool(traced_prepare_inputs)
+                or bool(strict_fused_device_only_hot_path)
+            )
+        )
+        if bool(strict_fused_device_only_hot_path):
+            blockers: list[str] = []
+            if not bool(strict_mode_active):
+                blockers.append("strict_mode_inactive")
+            if not bool(allow_split_build):
+                blockers.append("split_build_disabled")
+            if not bool(use_compact_streamed_pairs):
+                blockers.append("compact_streamed_pairs_disabled")
+            if bool(grouped_interactions_active):
+                blockers.append("grouped_interactions_active")
+            if bool(need_traversal_result):
+                blockers.append("traversal_result_required")
+            if bool(adaptive_order_active):
+                blockers.append("adaptive_order_active")
+            if bool(mixed_order_farfield_active):
+                blockers.append("mixed_order_farfield_active")
+            if bool(traced_prepare_inputs) and not bool(strict_streamed_fast_path):
+                blockers.append("compact_streamed_tracer_unsupported")
+            if bool(getattr(self, "_strict_fused_fastlane_diag_enabled", True)):
+                self._strict_fused_fastlane_attempts += 1
+                if bool(strict_streamed_fast_path):
+                    self._strict_fused_fastlane_hits += 1
+                    self._strict_fused_fastlane_last_blockers = tuple()
+                else:
+                    self._strict_fused_fastlane_misses += 1
+                    self._strict_fused_fastlane_last_blockers = tuple(blockers)
+                    counts = dict(
+                        getattr(self, "_strict_fused_fastlane_block_counts", {})
+                    )
+                    for key in blockers:
+                        counts[str(key)] = int(counts.get(str(key), 0)) + 1
+                    self._strict_fused_fastlane_block_counts = counts
+            if not bool(strict_streamed_fast_path):
+                # Production fused device-only hot path MUST engage the radix
+                # streamed fast lane. Never silently fall back to the slower
+                # generic build -- raise loudly with the blocking reasons so a
+                # misconfiguration is caught instead of quietly running the
+                # ~10x-slower generic path.
+                self._strict_fused_fallback_count += 1
+                self._strict_fused_last_fallback_reason = (
+                    "fused_device_only_hot_path_fastlane_blocked:" + ",".join(blockers)
+                )
+                raise RuntimeError(
+                    "strict fused device-only production lane could not engage the "
+                    "radix streamed fast lane and must not silently fall back to a "
+                    f"slower path (blockers={blockers}). This indicates a "
+                    "misconfiguration of the large-N GPU production profile."
+                )
+        return _DualDownwardPlan(
+            adaptive_order_active=adaptive_order_active,
+            allow_split_build=allow_split_build,
+            grouped_interactions_active=grouped_interactions_active,
+            jit_traversal_for_prepare=jit_traversal_for_prepare,
+            mixed_order_farfield_active=mixed_order_farfield_active,
+            need_compact_far_pairs=need_compact_far_pairs,
+            need_node_interactions=need_node_interactions,
+            need_traversal_result=need_traversal_result,
+            retain_interactions_active=retain_interactions_active,
+            runtime_traversal_config=runtime_traversal_config,
+            stateful_cache_enabled=stateful_cache_enabled,
+            strict_mode_active=strict_mode_active,
+            strict_streamed_fast_path=strict_streamed_fast_path,
+            tree_mode_static_radix=tree_mode_static_radix,
+            use_compact_streamed_pairs=use_compact_streamed_pairs,
+            use_dense_interactions_for_prepare=use_dense_interactions_for_prepare,
+            use_paper_fixed_policy=use_paper_fixed_policy,
+        )
+
+    def _resolve_dual_downward_planner_hint(
+        self,
+        *,
+        tree_artifacts: _PrepareStateTreeUpwardArtifacts,
+        theta_val: float,
+        mac_type_val: MACType,
+        runtime_traversal_config: Optional[DualTreeTraversalConfig],
+        plan: _DualDownwardPlan,
+        has_pair_policy: bool,
+        has_policy_state: bool,
+        suppress_host_side_effects: bool,
+    ) -> Tuple[Optional[_RefreshDualPlannerHint], bool]:
+        """Look up or compile the refresh planner hint for this topology.
+
+        Extracted verbatim from :meth:`_prepare_state_dual_and_downward` (Tier
+        1.7). The planner memoises the route the dual-tree build should take for
+        a given static-radix topology, so a steady refresh does not re-probe it;
+        a hit is what allows the substage timing to be bypassed downstream.
+
+        Parameters
+        ----------
+        tree_artifacts : _PrepareStateTreeUpwardArtifacts
+            Tree and upward-sweep artifacts this prepare call already built.
+        theta_val : float
+            Resolved opening angle; part of the planner key.
+        mac_type_val : MACType
+            Resolved acceptance criterion; part of the planner key.
+        runtime_traversal_config : Optional[DualTreeTraversalConfig]
+            Traversal capacities as resolved by the plan.
+        plan : _DualDownwardPlan
+            The resolved build plan; the planner key is derived from it.
+        has_pair_policy : bool
+            Whether a solver-owned pair policy is active for this call.
+        has_policy_state : bool
+            Whether that policy carries prepass state.
+        suppress_host_side_effects : bool
+            Traced/refresh hot path: skip planner counters and cache writes.
+
+        Returns
+        -------
+        Tuple[Optional[_RefreshDualPlannerHint], bool]
+            The hint (``None`` when the planner is off) and whether it was a
+            cache hit.
+        """
+        allow_split_build = plan.allow_split_build
+        grouped_interactions_active = plan.grouped_interactions_active
+        need_compact_far_pairs = plan.need_compact_far_pairs
+        need_node_interactions = plan.need_node_interactions
+        need_traversal_result = plan.need_traversal_result
+        strict_mode_active = plan.strict_mode_active
+        tree_mode_static_radix = plan.tree_mode_static_radix
+        use_dense_interactions_for_prepare = plan.use_dense_interactions_for_prepare
+        planner_hint: Optional[_RefreshDualPlannerHint] = None
+        planner_cache_hit = False
+        planner_enabled = bool(
+            (
+                self._refresh_dual_planner_mode_on
+                or (
+                    self._refresh_dual_planner_mode_auto
+                    and self._large_n_gpu_production_profile_cached
+                    and tree_mode_static_radix
+                )
+            )
+        )
+        planner_hint: Optional[_RefreshDualPlannerHint] = None
+        planner_cache_hit = False
+        if planner_enabled:
+            strict_split_fastlane = bool(
+                (
+                    bool(suppress_host_side_effects)
+                    and not has_pair_policy
+                    and not has_policy_state
+                )
+                or (
+                    strict_mode_active
+                    and bool(allow_split_build)
+                    and not grouped_interactions_active
+                    and not bool(need_traversal_result)
+                    and not has_pair_policy
+                    and not has_policy_state
+                )
+            )
+            if strict_split_fastlane:
+                # Strict/static production lane: keep routing fully on a
+                # fixed host-side decision and skip compiled route probing +
+                # device_get round-trips in the refresh hot path.
+                planner_hint = _RefreshDualPlannerHint(
+                    use_split_build=bool(allow_split_build),
+                    suppress_substage_timing=True,
+                )
+                planner_cache_hit = True
+                if not suppress_host_side_effects:
+                    self._refresh_dual_planner_cache_hits += 1
+                    self._refresh_dual_planner_execute_count += 1
+            else:
+                traversal_key = (
+                    "none"
+                    if runtime_traversal_config is None
+                    else (
+                        f"{int(runtime_traversal_config.max_pair_queue)}:"
+                        f"{int(runtime_traversal_config.process_block)}:"
+                        f"{int(runtime_traversal_config.max_interactions_per_node)}:"
+                        f"{int(runtime_traversal_config.max_neighbors_per_leaf)}"
+                    )
+                )
+                planner_key = "|".join(
+                    (
+                        str(tree_artifacts.topology_key),
+                        str(tree_artifacts.tree_mode),
+                        str(int(tree_artifacts.leaf_parameter)),
+                        f"{float(theta_val):.12g}",
+                        str(mac_type_val),
+                        str(grouped_interactions_active),
+                        str(bool(need_traversal_result)),
+                        str(bool(need_compact_far_pairs)),
+                        str(bool(need_node_interactions)),
+                        str(bool(allow_split_build)),
+                        str(traversal_key),
+                    )
+                )
+                planner_hint = self._refresh_dual_planner_cache.get(planner_key)
+                if planner_hint is None:
+                    if not suppress_host_side_effects:
+                        self._refresh_dual_planner_cache_misses += 1
+                    total_nodes_planner = int(tree_artifacts.tree.parent.shape[0])
+                    internal_nodes_planner = int(
+                        jnp.asarray(tree_artifacts.tree.left_child).shape[0]
+                    )
+                    leaf_count_planner = max(
+                        0, total_nodes_planner - internal_nodes_planner
+                    )
+                    (
+                        use_split_build_compiled,
+                        _use_compact_shared_far_near_compiled,
+                        suppress_substage_timing_compiled,
+                    ) = _compiled_refresh_dual_planner_route(
+                        allow_split_build_flag=jnp.asarray(
+                            bool(allow_split_build), dtype=jnp.bool_
+                        ),
+                        grouped_interactions_flag=jnp.asarray(
+                            grouped_interactions_active, dtype=jnp.bool_
+                        ),
+                        need_traversal_result_flag=jnp.asarray(
+                            bool(need_traversal_result), dtype=jnp.bool_
+                        ),
+                        leaf_count=jnp.asarray(leaf_count_planner, dtype=jnp.int32),
+                        need_node_interactions_flag=jnp.asarray(
+                            bool(need_node_interactions), dtype=jnp.bool_
+                        ),
+                        need_compact_far_pairs_flag=jnp.asarray(
+                            bool(need_compact_far_pairs), dtype=jnp.bool_
+                        ),
+                        use_dense_interactions_flag=jnp.asarray(
+                            bool(use_dense_interactions_for_prepare), dtype=jnp.bool_
+                        ),
+                    )
+                    if suppress_host_side_effects:
+                        use_split_build_compiled_bool = bool(allow_split_build)
+                        suppress_substage_timing_compiled_bool = True
+                    else:
+                        use_split_build_compiled_bool = bool(use_split_build_compiled)
+                        suppress_substage_timing_compiled_bool = bool(
+                            suppress_substage_timing_compiled
+                        )
+                    if not suppress_host_side_effects:
+                        self._refresh_dual_planner_compiled_route_count += 1
+                    planner_hint = _RefreshDualPlannerHint(
+                        use_split_build=use_split_build_compiled_bool,
+                        suppress_substage_timing=suppress_substage_timing_compiled_bool,
+                    )
+                    if not suppress_host_side_effects:
+                        self._refresh_dual_planner_cache[planner_key] = planner_hint
+                        self._refresh_dual_planner_compile_count += 1
+                else:
+                    planner_cache_hit = True
+                    if not suppress_host_side_effects:
+                        self._refresh_dual_planner_cache_hits += 1
+                if not suppress_host_side_effects:
+                    self._refresh_dual_planner_execute_count += 1
+        return planner_hint, planner_cache_hit
+
     def _prepare_state_extract_adaptive_far_pairs(
         self,
         *,
         traversal_result: Optional[DualTreeWalkResult],
         compact_far_pairs: Optional[CompactTaggedFarPairs],
     ) -> tuple[Array, Array, Array]:
-        """Extract tagged far pairs for adaptive-order downward planning."""
+        """Extract tagged far pairs for adaptive-order downward planning.
+
+        Parameters
+        ----------
+        traversal_result : Optional[DualTreeWalkResult]
+            Full dual-tree walk result, or None when not retained.
+        compact_far_pairs : Optional[CompactTaggedFarPairs]
+            Compact tagged far pairs, or None when not requested.
+
+        Returns
+        -------
+        tuple[Array, Array, Array]
+            ``(sources, targets, tags)`` for adaptive-order planning.
+
+        Raises
+        ------
+        RuntimeError
+            If the traversal produced no usable tagged far pairs.
+        ValueError
+            If the tagged pair payload has an unexpected shape.
+        """
 
         if len(self.p_gears) == 0:
             raise ValueError("adaptive_order=True requires non-empty p_gears")
@@ -1633,7 +2317,29 @@ class PrepareMixin:
         compact_far_pairs: Optional[CompactTaggedFarPairs],
         upward: TreeUpwardData,
     ) -> tuple[_FarPairCOO, tuple[tuple[Array, Array], ...], tuple[int, ...]]:
-        """Build streamed far-pair payloads and per-gear buckets."""
+        """Build streamed far-pair payloads and per-gear buckets.
+
+        Parameters
+        ----------
+        interactions : Optional[NodeInteractionList]
+            Node interaction list, or None on the streamed path.
+        compact_far_pairs : Optional[CompactTaggedFarPairs]
+            Compact tagged far pairs, or None when not requested.
+        upward : TreeUpwardData
+            Upward-sweep artifacts: geometry, mass moments and packed multipoles.
+
+        Returns
+        -------
+        tuple[_FarPairCOO, tuple[tuple[Array, Array], ...], tuple[int, ...]]
+            ``(coo, per_gear_buckets, gear_orders)``: the COO far-pair payload, the
+            source/target pairs bucketed per adaptive-order gear, and the expansion
+            order each gear runs at.
+
+        Raises
+        ------
+        RuntimeError
+            If the streamed payload could not be built.
+        """
 
         if compact_far_pairs is not None:
             src_far = jnp.asarray(compact_far_pairs.sources, dtype=INDEX_DTYPE)
@@ -1694,7 +2400,24 @@ class PrepareMixin:
         compact_far_pairs: Optional[CompactTaggedFarPairs],
         upward: TreeUpwardData,
     ) -> _PrepareStateFarPairPlan:
-        """Prepare far-pair payloads consumed by the downward sweep."""
+        """Prepare far-pair payloads consumed by the downward sweep.
+
+        Parameters
+        ----------
+        interactions : Optional[NodeInteractionList]
+            Node interaction list, or None on the streamed path.
+        traversal_result : Optional[DualTreeWalkResult]
+            Full dual-tree walk result, or None when not retained.
+        compact_far_pairs : Optional[CompactTaggedFarPairs]
+            Compact tagged far pairs, or None when not requested.
+        upward : TreeUpwardData
+            Upward-sweep artifacts: geometry, mass moments and packed multipoles.
+
+        Returns
+        -------
+        _PrepareStateFarPairPlan
+            The far-pair payloads the downward sweep will consume.
+        """
 
         far_pairs_by_gear = None
         far_pairs_coo: Optional[_FarPairCOO] = None
@@ -1749,7 +2472,24 @@ class PrepareMixin:
         p_gears_for_downward: tuple[int, ...],
         runtime_m2l_chunk_size: Optional[int],
     ) -> Optional[int]:
-        """Choose runtime M2L chunk size for the downward pass."""
+        """Choose runtime M2L chunk size for the downward pass.
+
+        Parameters
+        ----------
+        upward : TreeUpwardData
+            Upward-sweep artifacts: geometry, mass moments and packed multipoles.
+        far_pairs_by_gear : Optional[tuple[tuple[Array, Array], ...]]
+            Far pairs bucketed per adaptive-order gear.
+        p_gears_for_downward : tuple[int, ...]
+            Gear orders the downward sweep will consume.
+        runtime_m2l_chunk_size : Optional[int]
+            M2L chunk size for this run, or None to autotune.
+
+        Returns
+        -------
+        Optional[int]
+            The chosen M2L chunk size, or None to leave it unset.
+        """
 
         static_runtime_fixed_sizing = bool(
             getattr(self, "_static_runtime_fixed_sizing", True)
@@ -1803,7 +2543,20 @@ class PrepareMixin:
         interactions: Optional[NodeInteractionList],
         far_pairs_coo: Optional[_FarPairCOO],
     ) -> Optional[NodeInteractionList]:
-        """Choose whether downward should consume node interactions or COO pairs."""
+        """Choose whether downward should consume node interactions or COO pairs.
+
+        Parameters
+        ----------
+        interactions : Optional[NodeInteractionList]
+            Node interaction list, or None on the streamed path.
+        far_pairs_coo : Optional[_FarPairCOO]
+            Far pairs in coordinate form for the streamed feed.
+
+        Returns
+        -------
+        Optional[NodeInteractionList]
+            The interaction list, or None when downward consumes COO pairs instead.
+        """
 
         if (
             self.streamed_far_pairs
@@ -1826,7 +2579,28 @@ class PrepareMixin:
         cache_entry: Optional[_InteractionCacheEntry],
         allow_stateful_cache: bool,
     ) -> NearfieldPrecomputeArtifacts:
-        """Build/reuse near-field precompute artifacts for prepare_state."""
+        """Build/reuse near-field precompute artifacts for prepare_state.
+
+        Parameters
+        ----------
+        neighbor_list : NodeNeighborList
+            Near neighbour list from the traversal.
+        nearfield_interop : NearfieldInteropData
+            Near-field interop payload shared with the evaluate path.
+        leaf_cap : int
+            Resolved upper bound on particles per leaf.
+        num_particles : int
+            Particle count ``N``.
+        cache_entry : Optional[_InteractionCacheEntry]
+            Interaction cache entry, or None on a miss.
+        allow_stateful_cache : bool
+            Whether the process-level interaction cache may be used.
+
+        Returns
+        -------
+        NearfieldPrecomputeArtifacts
+            Near-field precompute artifacts, reused when already cached.
+        """
         effective_leaf_cap = (
             int(nearfield_interop.leaf_particle_indices.shape[1])
             if nearfield_interop.leaf_particle_indices is not None
@@ -1855,7 +2629,6 @@ class PrepareMixin:
             return nearfield_from_cache(cache_entry)
 
         nearfield_artifacts = self._prepare_nearfield_precompute_artifacts(
-            neighbor_list=neighbor_list,
             nearfield_interop=nearfield_interop,
             leaf_cap=effective_leaf_cap,
             num_particles=num_particles,
@@ -1880,7 +2653,22 @@ class PrepareMixin:
         upward: TreeUpwardData,
         max_order: int,
     ) -> None:
-        """Update reusable cartesian local-expansion template after prepare_state."""
+        """Update reusable cartesian local-expansion template after prepare_state.
+
+        Parameters
+        ----------
+        locals_template : Optional[LocalExpansionData]
+            Preallocated local-expansion buffers, or None to build them.
+        upward : TreeUpwardData
+            Upward-sweep artifacts: geometry, mass moments and packed multipoles.
+        max_order : int
+            Expansion order ``p`` for this prepare.
+
+        Returns
+        -------
+        None
+            Nothing; it updates the reusable template cache in place.
+        """
         if locals_template is not None and self.expansion_basis == "cartesian":
             self._locals_template = LocalExpansionData(
                 order=max_order,
@@ -1893,7 +2681,6 @@ class PrepareMixin:
     def _prepare_nearfield_precompute_artifacts(
         self,
         *,
-        neighbor_list: NodeNeighborList,
         nearfield_interop: NearfieldInteropData,
         leaf_cap: int,
         num_particles: int,
@@ -1901,7 +2688,28 @@ class PrepareMixin:
         nearfield_edge_chunk_size: Optional[int] = None,
         retain_pair_vectors: Optional[bool] = None,
     ) -> NearfieldPrecomputeArtifacts:
-        """Best-effort precompute of nearfield leaf-pair and scatter artifacts."""
+        """Best-effort precompute of nearfield leaf-pair and scatter artifacts.
+
+        Parameters
+        ----------
+        nearfield_interop : NearfieldInteropData
+            Near-field interop payload shared with the evaluate path.
+        leaf_cap : int
+            Resolved upper bound on particles per leaf.
+        num_particles : int
+            Particle count ``N``.
+        nearfield_mode : Optional[str]
+            Near-field traversal mode, or None to resolve it.
+        nearfield_edge_chunk_size : Optional[int]
+            Edge chunk size for the near field, or None for the default.
+        retain_pair_vectors : Optional[bool]
+            Whether near-field pair vectors are retained, or None to resolve.
+
+        Returns
+        -------
+        NearfieldPrecomputeArtifacts
+            Precomputed leaf-pair and scatter artifacts; best-effort, so a failure yields empty artifacts rather than raising.
+        """
         nearfield_chunk_sort_indices = None
         nearfield_chunk_group_ids = None
         nearfield_chunk_unique_indices = None
@@ -2008,7 +2816,18 @@ class PrepareMixin:
         *,
         num_particles: int,
     ) -> bool:
-        """Decide whether prepared-state near-field pair vectors should be retained."""
+        """Decide whether prepared-state near-field pair vectors should be retained.
+
+        Parameters
+        ----------
+        num_particles : int
+            Particle count ``N``.
+
+        Returns
+        -------
+        bool
+            Whether the prepared state keeps its near-field pair vectors.
+        """
         if self.memory_objective == "minimum_memory":
             return False
         if jax.default_backend() != "gpu":
@@ -2020,7 +2839,18 @@ class PrepareMixin:
         *,
         num_particles: int,
     ) -> bool:
-        """Decide whether to materialize near-field scatter schedules."""
+        """Decide whether to materialize near-field scatter schedules.
+
+        Parameters
+        ----------
+        num_particles : int
+            Particle count ``N``.
+
+        Returns
+        -------
+        bool
+            Whether to materialise near-field scatter schedules now.
+        """
         if not bool(self.precompute_nearfield_scatter_schedules):
             return False
         if jax.default_backend() != "gpu":
@@ -2034,7 +2864,20 @@ class PrepareMixin:
         *,
         nearfield_interop: NearfieldInteropData,
     ) -> tuple[Optional[Array], Optional[Array], Optional[Array]]:
-        """Best-effort leaf neighbor pair generation."""
+        """Best-effort leaf neighbor pair generation.
+
+        Parameters
+        ----------
+        nearfield_interop : NearfieldInteropData
+            Near-field interop payload shared with the evaluate path.
+
+        Returns
+        -------
+        tuple[Optional[Array], Optional[Array], Optional[Array]]
+            ``(target_leaf_ids, source_leaf_ids, valid_mask)``, or all ``None`` if
+            generation failed. Best-effort by design: a failure here costs speed, not
+            correctness, so it degrades instead of raising.
+        """
         try:
             return prepare_leaf_neighbor_pairs(
                 jnp.asarray(nearfield_interop.node_ranges, dtype=INDEX_DTYPE),
@@ -2057,7 +2900,27 @@ class PrepareMixin:
         leaf_cap: int,
         edge_chunk_size: int,
     ) -> tuple[Optional[Array], Optional[Array], Optional[Array]]:
-        """Best-effort bucketed scatter schedule generation."""
+        """Best-effort bucketed scatter schedule generation.
+
+        Parameters
+        ----------
+        nearfield_interop : NearfieldInteropData
+            Near-field interop payload shared with the evaluate path.
+        target_leaf_ids : Array
+            Leaf id per target particle.
+        valid_pairs : Array
+            Mask marking which candidate leaf pairs are real.
+        leaf_cap : int
+            Resolved upper bound on particles per leaf.
+        edge_chunk_size : int
+            Near-field edge chunk size.
+
+        Returns
+        -------
+        tuple[Optional[Array], Optional[Array], Optional[Array]]
+            ``(offsets, indices, counts)``, or all ``None`` if generation failed --
+            best-effort for the same reason as the leaf-pair helper above.
+        """
         try:
             edge_count = int(target_leaf_ids.shape[0])
             chunk = int(edge_chunk_size)
@@ -2101,7 +2964,22 @@ class PrepareMixin:
         leaf_cap: int,
         edge_chunk_size: int,
     ) -> int:
-        """Return the max near-field schedule items allowed for this workload."""
+        """Return the max near-field schedule items allowed for this workload.
+
+        Parameters
+        ----------
+        edge_count : int
+            Number of near-field edges.
+        leaf_cap : int
+            Resolved upper bound on particles per leaf.
+        edge_chunk_size : int
+            Near-field edge chunk size.
+
+        Returns
+        -------
+        int
+            Maximum near-field schedule items permitted for this workload.
+        """
         del edge_count, leaf_cap, edge_chunk_size
         if self.nearfield_schedule_item_cap is not None:
             return int(self.nearfield_schedule_item_cap)
@@ -2129,7 +3007,20 @@ class PrepareMixin:
         grouped_chunk_size: Optional[int],
         farfield_mode: str,
     ) -> bool:
-        """Decide whether grouped class-major schedules should be materialized."""
+        """Decide whether grouped class-major schedules should be materialized.
+
+        Parameters
+        ----------
+        grouped_chunk_size : Optional[int]
+            Chunk size for grouped interaction processing.
+        farfield_mode : str
+            Far-field feed shape: ``auto``, ``pair_grouped`` or ``class_major``.
+
+        Returns
+        -------
+        bool
+            Whether grouped class-major schedules should be materialised.
+        """
         if grouped_chunk_size is None:
             return False
         if str(farfield_mode).strip().lower() != "class_major":
@@ -2139,7 +3030,13 @@ class PrepareMixin:
         return self.memory_objective != "minimum_memory"
 
     def _grouped_schedule_item_budget(self) -> int:
-        """Return max bytes allowed for cached grouped schedule matrices."""
+        """Return max bytes allowed for cached grouped schedule matrices.
+
+        Returns
+        -------
+        int
+            Maximum bytes allowed for cached grouped schedule matrices.
+        """
         return int(self.grouped_schedule_budget_bytes)
 
     def _resolve_target_indices(
@@ -2148,7 +3045,25 @@ class PrepareMixin:
         target_indices: Optional[Array],
         num_particles: int,
     ) -> Optional[Array]:
-        """Validate and normalize optional target particle indices."""
+        """Validate and normalize optional target particle indices.
+
+        Parameters
+        ----------
+        target_indices : Optional[Array]
+            Subset of particles to evaluate, or None for all.
+        num_particles : int
+            Particle count ``N``.
+
+        Returns
+        -------
+        Optional[Array]
+            Normalised target indices, or None when all particles are targets.
+
+        Raises
+        ------
+        ValueError
+            If any index is out of range for the particle count.
+        """
         if target_indices is None:
             return None
         indices = jnp.asarray(target_indices)
@@ -2171,7 +3086,13 @@ class PrepareMixin:
         self,
         dual_artifacts: _DualTreeArtifacts,
     ) -> tuple[
-        NodeInteractionList,
+        # Optional, not NodeInteractionList: the streamed path deliberately drops
+        # interaction storage (`test_prepare_state_streamed_can_drop_interaction_storage`),
+        # so `None` here is a supported outcome rather than a failure. Three other
+        # declarations of this same value already said so -- the `_DualTreeArtifacts`
+        # field it is read from, `_dual_tree_unpack_build_output`, which unpacks the
+        # same field, and `_prepare_downward_with_artifacts`, which consumes it.
+        Optional[NodeInteractionList],
         NodeNeighborList,
         Optional[DualTreeWalkResult],
         Optional[CompactTaggedFarPairs],
@@ -2184,7 +3105,21 @@ class PrepareMixin:
         Optional[Array],
         Optional[Array],
     ]:
-        """Unpack dual-tree artifacts for downward preparation and state export."""
+        """Unpack dual-tree artifacts for downward preparation and state export.
+
+        Parameters
+        ----------
+        dual_artifacts : _DualTreeArtifacts
+            Bundle produced by the dual-tree build phase.
+
+        Returns
+        -------
+        tuple[Optional[NodeInteractionList], NodeNeighborList, Optional[DualTreeWalkResult], Optional[CompactTaggedFarPairs], Optional[DenseInteractionBuffers], Optional[GroupedInteractionBuffers], Optional[Array], Optional[Array], Optional[Array], Optional[Array], Optional[Array], Optional[Array]]
+            The twelve dual-tree artifacts in the order the downward phase consumes
+            them: the interaction list (``None`` on the streamed path), the neighbour
+            list, the walk result, the compact far pairs, the dense and grouped
+            buffers, and the six grouped-segment arrays.
+        """
         return (
             dual_artifacts.interactions,
             dual_artifacts.neighbor_list,
@@ -2227,7 +3162,62 @@ class PrepareMixin:
         adaptive_order: bool = False,
         p_gears: tuple[int, ...] = tuple(),
     ) -> TreeDownwardData:
-        """Prepare downward sweep using precomputed interaction artifacts."""
+        """Prepare downward sweep using precomputed interaction artifacts.
+
+        Parameters
+        ----------
+        tree : Tree
+            The radix tree this prepare is building against.
+        upward : TreeUpwardData
+            Upward-sweep artifacts: geometry, mass moments and packed multipoles.
+        theta_val : float
+            Resolved opening angle for this build.
+        locals_template : Optional[LocalExpansionData]
+            Preallocated local-expansion buffers, or None to build them.
+        interactions : Optional[NodeInteractionList]
+            Node interaction list, or None on the streamed path.
+        runtime_m2l_chunk_size : Optional[int]
+            M2L chunk size for this run, or None to autotune.
+        runtime_l2l_chunk_size : Optional[int]
+            L2L chunk size for this run, or None for the default.
+        runtime_traversal_config : Optional[DualTreeTraversalConfig]
+            Traversal capacities for this build, possibly already clamped.
+        record_retry : Callable[[DualTreeRetryEvent], None]
+            Callback invoked when a traversal capacity retry occurs.
+        dense_buffers : Optional[DenseInteractionBuffers]
+            Dense interaction buffers, or None when unused.
+        grouped_interactions : bool
+            Whether the grouped class-major layout is in use.
+        grouped_buffers : Optional[GroupedInteractionBuffers]
+            Grouped interaction buffers, or None when unused.
+        grouped_segment_starts : Optional[Array]
+            Start offset of each grouped segment.
+        grouped_segment_lengths : Optional[Array]
+            Length of each grouped segment.
+        grouped_segment_class_ids : Optional[Array]
+            Class id of each grouped segment.
+        grouped_segment_sort_permutation : Optional[Array]
+            Permutation sorting segments into class-major order.
+        grouped_segment_group_ids : Optional[Array]
+            Group id of each grouped segment.
+        grouped_segment_unique_targets : Optional[Array]
+            Unique target nodes per grouped segment.
+        farfield_mode : str
+            Far-field feed shape: ``auto``, ``pair_grouped`` or ``class_major``.
+        far_pairs_coo : Optional[_FarPairCOO]
+            Far pairs in coordinate form for the streamed feed.
+        far_pairs_by_gear : Optional[tuple[tuple[Array, Array], ...]]
+            Far pairs bucketed per adaptive-order gear.
+        adaptive_order : bool
+            Whether adaptive per-node order is active.
+        p_gears : tuple[int, ...]
+            Expansion orders available to the adaptive-order gears.
+
+        Returns
+        -------
+        TreeDownwardData
+            The downward sweep result.
+        """
         return self.prepare_downward_sweep(
             tree,
             upward,
@@ -2269,12 +3259,48 @@ class PrepareMixin:
         retain_interactions: bool = False,
         suppress_host_side_effects: bool = False,
     ) -> _PrepareStateDualDownwardArtifacts:
-        """Strict static fast path with compact streamed far-pairs only."""
+        """Strict static fast path with compact streamed far-pairs only.
+
+        Parameters
+        ----------
+        tree_artifacts : _PrepareStateTreeUpwardArtifacts
+            Tree and upward artifacts produced by the earlier phase.
+        theta_val : float
+            Resolved opening angle for this build.
+        mac_type_val : MACType
+            Resolved geometric MAC, already translated for the traversal.
+        dehnen_radius_scale : float
+            Multiplier on the Dehnen acceptance radius.
+        runtime_traversal_config : Optional[DualTreeTraversalConfig]
+            Traversal capacities for this build, possibly already clamped.
+        runtime_m2l_chunk_size : Optional[int]
+            M2L chunk size for this run, or None to autotune.
+        runtime_l2l_chunk_size : Optional[int]
+            L2L chunk size for this run, or None for the default.
+        record_retry : Callable[[DualTreeRetryEvent], None]
+            Callback invoked when a traversal capacity retry occurs.
+        farfield_mode : str
+            Far-field feed shape: ``auto``, ``pair_grouped`` or ``class_major``.
+        retain_interactions : bool
+            Whether the prepared state keeps its interaction list.
+        suppress_host_side_effects : bool
+            Whether to skip host-side caching and diagnostics.
+
+        Returns
+        -------
+        _PrepareStateDualDownwardArtifacts
+            Dual/downward artifacts built by the strict streamed fast path.
+
+        Raises
+        ------
+        RuntimeError
+            If the strict streamed preconditions do not hold at build time.
+        """
 
         geometry_factory = (
             None
             if tree_artifacts.upward.geometry is not None
-            else lambda: compute_tree_geometry(
+            else lambda: compute_tree_geometry_compiled(
                 tree_artifacts.tree,
                 tree_artifacts.positions_sorted,
                 max_leaf_size=int(tree_artifacts.leaf_cap),
@@ -2418,9 +3444,282 @@ class PrepareMixin:
             cache_entry=cache_entry,
         )
 
+    def _resolve_force_scale_nodes_for_prepare(
+        self,
+        *,
+        tree_artifacts: _PrepareStateTreeUpwardArtifacts,
+        supplied_force_scale: Optional[Array],
+        positions_arr: Array,
+        masses_arr: Array,
+        bounds: Optional[Tuple[Array, Array]],
+        leaf_size: int,
+        max_order: int,
+        jit_tree: Optional[bool],
+        upward_center_mode: str,
+        runtime_traversal_config: Optional[DualTreeTraversalConfig],
+        runtime_m2l_chunk_size: Optional[int],
+        runtime_l2l_chunk_size: Optional[int],
+        grouped_interactions: bool,
+        farfield_mode: str,
+        record_retry: Callable[[DualTreeRetryEvent], None],
+        refine_local_val: bool,
+        max_refine_levels_val: int,
+        aspect_threshold_val: float,
+    ) -> Optional[Array]:
+        """Resolve the per-node force scale the acceptance criterion needs.
+
+        Extracted from :meth:`_prepare_state_uncaught` so the large-N lane runs the
+        *same* resolution rather than a copy of it. The large-N lane used to pass
+        ``force_scale_nodes=None`` straight through to the dual build, where
+        ``build_adaptive_policy_state`` substitutes ``jnp.ones(...)`` -- a unit
+        force scale, i.e. a threshold of ``eps * 1`` instead of
+        ``eps * min_b |a_b|``. That is a different criterion, chosen silently.
+
+        Ordering matters and is deliberate: an explicitly supplied scale wins
+        outright, then the reuse modes, then a prepass. Two of the bugs this
+        branch fixed came from duplicating parts of this decision, so it lives in
+        exactly one place.
+        """
+
+        force_scale_nodes: Optional[Array] = None
+        use_paper_force_scale = self._uses_paper_style_force_scale()
+        if supplied_force_scale is not None:
+            # An explicitly supplied scale wins outright: no prepass, no cache read,
+            # and no cache *write* either. Seeding the cache here would make the next
+            # prepare_state silently inherit an externally injected scale, which is
+            # the confusion this parameter exists to remove.
+            node_count = int(tree_artifacts.tree.parent.shape[0])
+            supplied = jnp.asarray(supplied_force_scale, dtype=positions_arr.dtype)
+            if supplied.ndim != 1 or int(supplied.shape[0]) != node_count:
+                raise ValueError(
+                    "force_scale_nodes must be a 1-D array of length "
+                    f"{node_count} (the node count of the tree this call built); "
+                    f"got shape {tuple(supplied.shape)}"
+                )
+            force_scale_nodes = supplied
+        elif use_paper_force_scale:
+            node_count = int(tree_artifacts.tree.parent.shape[0])
+            previous_force_scale = self._last_force_scale_nodes
+            reduction_mode = self._force_scale_reduction_mode()
+            need_prepass = False
+            policy_orders = self._policy_orders_for_prepare_state(
+                max_order=int(max_order)
+            )
+            reusable_force_scale = (
+                previous_force_scale is not None
+                and int(previous_force_scale.shape[0]) == node_count
+            )
+            if self._in_force_scale_prepass:
+                # A prepass is already running and this is its inner prepare_state.
+                # It must never ask for a prepass of its own: 'paper' and 'prepass'
+                # both set need_prepass unconditionally, and the non-paper prepass
+                # re-enters prepare_state, so a mode that requests one on every call
+                # recursed until the interpreter stack ran out. Reachable from public
+                # kwargs (adaptive_order=True, adaptive_error_model='tail_proxy',
+                # mac_force_scale_mode='paper'). The inner solve only needs *some*
+                # force scale, so take the cached one or fall back to unity.
+                if reusable_force_scale:
+                    force_scale_nodes = jnp.asarray(
+                        previous_force_scale,
+                        dtype=positions_arr.dtype,
+                    )
+                else:
+                    force_scale_nodes = jnp.ones(
+                        (node_count,),
+                        dtype=positions_arr.dtype,
+                    )
+            elif self.mac_force_scale_mode in ("paper", "paper_fb"):
+                need_prepass = True
+            elif self.mac_force_scale_mode in (
+                "prev",
+                "paper_cached",
+                "paper_fb_cached",
+            ):
+                if reusable_force_scale:
+                    force_scale_nodes = jnp.asarray(
+                        previous_force_scale,
+                        dtype=positions_arr.dtype,
+                    )
+                elif (
+                    self.mac_force_scale_mode in ("paper_cached", "paper_fb_cached")
+                    or self._uses_paper_style_traversal_policy()
+                ):
+                    need_prepass = True
+                else:
+                    force_scale_nodes = jnp.ones(
+                        (node_count,),
+                        dtype=positions_arr.dtype,
+                    )
+            else:
+                need_prepass = True
+            if need_prepass:
+                if len(policy_orders) == 0:
+                    raise ValueError(
+                        f"mac_force_scale_mode={self.mac_force_scale_mode!r} needs a "
+                        "force-scale prepass, which requires non-empty orders"
+                    )
+                use_fb_prepass = self._uses_fb_force_scale()
+                use_paper_prepass = (
+                    self.mac_force_scale_mode
+                    in (
+                        "paper",
+                        "paper_cached",
+                    )
+                    and self._uses_paper_style_traversal_policy()
+                )
+                low_order = int(min(policy_orders))
+                if use_paper_prepass:
+                    low_order = 1 if int(max_order) >= 1 else 0
+                if use_fb_prepass:
+                    # eq (16b): the scale is `min_b f_b`, a scalar per particle, so
+                    # it goes through the magnitude reduction directly rather than
+                    # through the vector `|a_b|` entry point.
+                    fb_sorted = (
+                        self._compute_force_scale_fb_prepass_from_tree_artifacts(
+                            tree_artifacts=tree_artifacts,
+                            upward_center_mode=upward_center_mode,
+                            runtime_traversal_config=runtime_traversal_config,
+                            runtime_m2l_chunk_size=runtime_m2l_chunk_size,
+                            runtime_l2l_chunk_size=runtime_l2l_chunk_size,
+                            grouped_interactions=grouped_interactions,
+                            farfield_mode=farfield_mode,
+                            record_retry=record_retry,
+                            refine_local_val=refine_local_val,
+                            max_refine_levels_val=max_refine_levels_val,
+                            aspect_threshold_val=aspect_threshold_val,
+                        )
+                    )
+                    force_scale_nodes = compute_node_force_scale_from_sorted_magnitudes(
+                        tree=tree_artifacts.tree,
+                        magnitudes_sorted=fb_sorted,
+                        reduction=reduction_mode,
+                    ).astype(positions_arr.dtype)
+                    self._last_force_scale_nodes = force_scale_nodes
+                    self._last_force_scale_particles = fb_sorted
+                elif use_paper_prepass:
+                    prepass_sorted = (
+                        self._compute_force_scale_paper_prepass_from_tree_artifacts(
+                            tree_artifacts=tree_artifacts,
+                            low_order=low_order,
+                            theta_val=self._force_scale_prepass_theta(),
+                            upward_center_mode=upward_center_mode,
+                            runtime_traversal_config=runtime_traversal_config,
+                            runtime_m2l_chunk_size=runtime_m2l_chunk_size,
+                            runtime_l2l_chunk_size=runtime_l2l_chunk_size,
+                            grouped_interactions=grouped_interactions,
+                            farfield_mode=farfield_mode,
+                            record_retry=record_retry,
+                            refine_local_val=refine_local_val,
+                            max_refine_levels_val=max_refine_levels_val,
+                            aspect_threshold_val=aspect_threshold_val,
+                        )
+                    )
+                else:
+                    with self._force_scale_prepass_scope(low_order=low_order):
+                        prepass_acc = self.compute_accelerations(
+                            positions_arr,
+                            masses_arr,
+                            bounds=bounds,
+                            leaf_size=int(leaf_size),
+                            max_order=low_order,
+                            return_potential=False,
+                            theta=self._force_scale_prepass_theta(),
+                            reuse_prepared_state=False,
+                            jit_tree=jit_tree,
+                            jit_traversal=False,
+                        )
+                    prepass_sorted = jnp.asarray(prepass_acc)[
+                        jnp.argsort(tree_artifacts.inverse_permutation)
+                    ]
+                if not use_fb_prepass:
+                    force_scale_nodes = self._compute_node_force_scale_from_sorted_acc(
+                        tree=tree_artifacts.tree,
+                        accelerations_sorted=prepass_sorted,
+                        reduction=reduction_mode,
+                    ).astype(positions_arr.dtype)
+                    self._last_force_scale_nodes = force_scale_nodes
+        return force_scale_nodes
+
     @jaxtyped(typechecker=beartype)
     def prepare_state(
-        self: "FastMultipoleMethod",
+        self: "FMMEngine",
+        positions: Array,
+        masses: Array,
+        **kwargs: Any,
+    ) -> PreparedStateLike:
+        """Precompute tree and interaction data for repeated evaluations.
+
+        Keyword arguments are those of :meth:`_prepare_state_uncaught`, which
+        holds the implementation and the full signature; the public facade in
+        ``jaccpot.solver`` documents them for users. They are forwarded verbatim
+        as ``**kwargs`` ON PURPOSE: an earlier version of this wrapper repeated
+        the parameter list, and a parameter added to the implementation would
+        then have been silently dropped here -- the exact failure mode the rest
+        of this change set is about.
+
+        This wrapper exists to turn an allocation or traversal-capacity failure
+        into something actionable: the error is re-raised with the
+        statically-sized buffers for this configuration largest-first, the knob
+        that sizes each, and a configuration that would fit, with the original
+        chained. "Out of memory while trying to allocate 8.00GiB" on a 40 GB card
+        named neither the buffer nor a way forward. See
+        :mod:`jaccpot.runtime.capacity_diagnostics`.
+
+        Parameters
+        ----------
+        positions : Array
+            Particle positions, shape ``(N, 3)``.
+        masses : Array
+            Particle masses, shape ``(N,)``.
+        **kwargs : Any
+            Forwarded verbatim to :meth:`_prepare_state_uncaught` -- see the note
+            above on why they are not repeated here.
+
+        Returns
+        -------
+        PreparedStateLike
+            The prepared state: an ``FMMPreparedState``, or a ``LargeNPreparedState``
+            under the large-N preset.
+
+        Raises
+        ------
+        Exception
+            Whatever the implementation raised, re-raised after being annotated with
+            a capacity report. The type is deliberately not narrowed: this wrapper
+            adds context to any allocation or traversal failure rather than
+            classifying it.
+        """
+
+        try:
+            return self._prepare_state_uncaught(positions, masses, **kwargs)
+        except Exception as exc:
+            if not is_capacity_failure(exc):
+                raise
+            try:
+                num_particles = int(jnp.asarray(positions).shape[0])
+            except Exception:
+                num_particles = 0
+            traversal_config = None
+            try:
+                traversal_config = self._resolve_runtime_execution_overrides(
+                    num_particles=num_particles
+                ).traversal_config
+            except Exception:
+                pass
+            reraise_with_capacity_report(
+                exc,
+                num_particles=num_particles,
+                leaf_size=int(kwargs.get("leaf_size", 16)),
+                max_order=int(kwargs.get("max_order", 2)),
+                working_dtype=self.working_dtype,
+                preset=self.preset,
+                traversal_config=traversal_config,
+                nearfield_mode=str(self.nearfield_mode),
+            )
+            raise  # pragma: no cover - reraise_with_capacity_report always raises
+
+    def _prepare_state_uncaught(
+        self: "FMMEngine",
         positions: Array,
         masses: Array,
         *,
@@ -2450,6 +3749,48 @@ class PrepareMixin:
         must equal the node count of the tree this call builds, which the caller
         generally learns from a prior ``prepare_state`` on the same
         positions/`leaf_size`.
+
+        See :meth:`prepare_state` for the capacity-failure reporting that
+        wraps this method; it forwards ``**kwargs`` here verbatim.
+
+        Parameters
+        ----------
+        positions : Array
+            Particle positions, shape ``(N, 3)``.
+        masses : Array
+            Particle masses, shape ``(N,)``.
+        bounds : Optional[Tuple[Array, Array]]
+            Explicit domain bounds, or None to infer them from the particles.
+        leaf_size : int
+            Requested particles per leaf.
+        max_order : int
+            Expansion order ``p`` for this prepare.
+        theta : Optional[float]
+            Opening angle, or None to take the solver's own.
+        jit_tree : Optional[bool]
+            Whether the tree build runs jitted, or None to resolve it.
+        refine_local : Optional[bool]
+            Whether to refine leaves locally, or None for the default.
+        max_refine_levels : Optional[int]
+            Extra refinement levels, or None for the default.
+        aspect_threshold : Optional[float]
+            Leaf aspect ratio triggering refinement, or None for the default.
+        force_scale_nodes : Optional[Array]
+            Per-node force scales overriding the adaptive prepass.
+        runtime_overrides_override : Optional[_RuntimeExecutionOverrides]
+            Explicit runtime execution overrides for this call only.
+        fused_device_mode : bool
+            Whether the device-resident fused hot path is in use.
+
+        Returns
+        -------
+        PreparedStateLike
+            As :meth:`prepare_state`, without the caller-facing error wrapping.
+
+        Raises
+        ------
+        ValueError
+            If the request or its resolved configuration is invalid.
         """
 
         self._validate_prepare_state_request(
@@ -2542,6 +3883,12 @@ class PrepareMixin:
                 upward_center_mode=upward_center_mode,
                 record_retry=record_retry,
                 collected_retries=collected_retries,
+                # Threaded, not dropped: the lane now carries the criterion, so an
+                # externally injected scale has to reach it. Silently ignoring it
+                # here would make a prepare/evaluate loop measure the prepass's
+                # scale while believing it measured the injected one -- the same
+                # back-door `force_scale_nodes=` was added to close.
+                supplied_force_scale=force_scale_nodes,
                 fused_device_mode=bool(fused_device_mode),
             )
 
@@ -2558,134 +3905,47 @@ class PrepareMixin:
             upward_center_mode=upward_center_mode,
             allow_stateful_cache=allow_stateful_cache,
         )
-        supplied_force_scale = force_scale_nodes
-        force_scale_nodes = None
-        use_paper_force_scale = self._uses_paper_style_force_scale()
-        if supplied_force_scale is not None:
-            # An explicitly supplied scale wins outright: no prepass, no cache read,
-            # and no cache *write* either. Seeding the cache here would make the next
-            # prepare_state silently inherit an externally injected scale, which is
-            # the confusion this parameter exists to remove.
-            node_count = int(tree_artifacts.tree.parent.shape[0])
-            supplied = jnp.asarray(supplied_force_scale, dtype=positions_arr.dtype)
-            if supplied.ndim != 1 or int(supplied.shape[0]) != node_count:
-                raise ValueError(
-                    "force_scale_nodes must be a 1-D array of length "
-                    f"{node_count} (the node count of the tree this call built); "
-                    f"got shape {tuple(supplied.shape)}"
-                )
-            force_scale_nodes = supplied
-        elif use_paper_force_scale:
-            node_count = int(tree_artifacts.tree.parent.shape[0])
-            previous_force_scale = self._last_force_scale_nodes
-            reduction_mode = self._force_scale_reduction_mode()
-            need_prepass = False
-            policy_orders = self._policy_orders_for_prepare_state(
-                max_order=int(max_order)
-            )
-            reusable_force_scale = (
-                previous_force_scale is not None
-                and int(previous_force_scale.shape[0]) == node_count
-            )
-            if self._in_force_scale_prepass:
-                # A prepass is already running and this is its inner prepare_state.
-                # It must never ask for a prepass of its own: 'paper' and 'prepass'
-                # both set need_prepass unconditionally, and the non-paper prepass
-                # re-enters prepare_state, so a mode that requests one on every call
-                # recursed until the interpreter stack ran out. Reachable from public
-                # kwargs (adaptive_order=True, adaptive_error_model='tail_proxy',
-                # mac_force_scale_mode='paper'). The inner solve only needs *some*
-                # force scale, so take the cached one or fall back to unity.
-                if reusable_force_scale:
-                    force_scale_nodes = jnp.asarray(
-                        previous_force_scale,
-                        dtype=positions_arr.dtype,
-                    )
-                else:
-                    force_scale_nodes = jnp.ones(
-                        (node_count,),
-                        dtype=positions_arr.dtype,
-                    )
-            elif self.mac_force_scale_mode == "paper":
-                need_prepass = True
-            elif self.mac_force_scale_mode in ("prev", "paper_cached"):
-                if reusable_force_scale:
-                    force_scale_nodes = jnp.asarray(
-                        previous_force_scale,
-                        dtype=positions_arr.dtype,
-                    )
-                elif (
-                    self.mac_force_scale_mode == "paper_cached"
-                    or self._uses_paper_style_traversal_policy()
-                ):
-                    need_prepass = True
-                else:
-                    force_scale_nodes = jnp.ones(
-                        (node_count,),
-                        dtype=positions_arr.dtype,
-                    )
-            else:
-                need_prepass = True
-            if need_prepass:
-                if len(policy_orders) == 0:
-                    raise ValueError(
-                        f"mac_force_scale_mode={self.mac_force_scale_mode!r} needs a "
-                        "force-scale prepass, which requires non-empty orders"
-                    )
-                use_paper_prepass = (
-                    self.mac_force_scale_mode
-                    in (
-                        "paper",
-                        "paper_cached",
-                    )
-                    and self._uses_paper_style_traversal_policy()
-                )
-                low_order = int(min(policy_orders))
-                if use_paper_prepass:
-                    low_order = 1 if int(max_order) >= 1 else 0
-                if use_paper_prepass:
-                    prepass_sorted = (
-                        self._compute_force_scale_paper_prepass_from_tree_artifacts(
-                            tree_artifacts=tree_artifacts,
-                            low_order=low_order,
-                            theta_val=theta_val,
-                            upward_center_mode=upward_center_mode,
-                            runtime_traversal_config=runtime_traversal_config,
-                            runtime_m2l_chunk_size=runtime_m2l_chunk_size,
-                            runtime_l2l_chunk_size=runtime_l2l_chunk_size,
-                            grouped_interactions=grouped_interactions,
-                            farfield_mode=farfield_mode,
-                            record_retry=record_retry,
-                            refine_local_val=refine_local_val,
-                            max_refine_levels_val=max_refine_levels_val,
-                            aspect_threshold_val=aspect_threshold_val,
-                        )
-                    )
-                else:
-                    with self._force_scale_prepass_scope(low_order=low_order):
-                        prepass_acc = self.compute_accelerations(
-                            positions_arr,
-                            masses_arr,
-                            bounds=bounds,
-                            leaf_size=int(leaf_size),
-                            max_order=low_order,
-                            return_potential=False,
-                            theta=theta_val,
-                            reuse_prepared_state=False,
-                            jit_tree=jit_tree,
-                            jit_traversal=False,
-                        )
-                    prepass_sorted = jnp.asarray(prepass_acc)[
-                        jnp.argsort(tree_artifacts.inverse_permutation)
-                    ]
-                force_scale_nodes = self._compute_node_force_scale_from_sorted_acc(
-                    tree=tree_artifacts.tree,
-                    accelerations_sorted=prepass_sorted,
-                    reduction=reduction_mode,
-                ).astype(positions_arr.dtype)
-                self._last_force_scale_nodes = force_scale_nodes
-        dual_downward_artifacts = self._prepare_state_dual_and_downward(
+        force_scale_nodes = self._resolve_force_scale_nodes_for_prepare(
             tree_artifacts=tree_artifacts,
+            supplied_force_scale=force_scale_nodes,
+            positions_arr=positions_arr,
+            masses_arr=masses_arr,
+            bounds=bounds,
+            leaf_size=int(leaf_size),
+            max_order=int(max_order),
+            jit_tree=jit_tree,
+            upward_center_mode=upward_center_mode,
+            runtime_traversal_config=runtime_traversal_config,
+            runtime_m2l_chunk_size=runtime_m2l_chunk_size,
+            runtime_l2l_chunk_size=runtime_l2l_chunk_size,
+            grouped_interactions=grouped_interactions,
+            farfield_mode=farfield_mode,
+            record_retry=record_retry,
+            refine_local_val=refine_local_val,
+            max_refine_levels_val=max_refine_levels_val,
+            aspect_threshold_val=aspect_threshold_val,
+        )
+        dual_tree_artifacts = tree_artifacts
+        if self._uses_per_node_effective_theta():
+            # Fold the criterion into geometry.radius *before* the dual build, since
+            # that is what `_build_mac_extents` reads. `dehnen_radius_scale` must stay
+            # at 1.0 here: it multiplies the same radii, so any other value silently
+            # rescales every per-node angle.
+            if float(self.dehnen_radius_scale) != 1.0:
+                raise ValueError(
+                    "mac_type='dehnen_theta' requires dehnen_radius_scale=1.0; it "
+                    "scales the same geometry.radius the per-node opening angles are "
+                    f"folded into (got {self.dehnen_radius_scale})"
+                )
+            dual_tree_artifacts = self._apply_per_node_effective_theta(
+                tree_artifacts=tree_artifacts,
+                force_scale_nodes=force_scale_nodes,
+                max_order=int(max_order),
+                theta_val=theta_val,
+            )
+
+        dual_downward_artifacts = self._prepare_state_dual_and_downward(
+            tree_artifacts=dual_tree_artifacts,
             force_scale_nodes=force_scale_nodes,
             upward_center_mode=upward_center_mode,
             theta_val=theta_val,

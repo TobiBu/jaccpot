@@ -1,5 +1,7 @@
 """Near-field cache helpers for prepared-state artifacts."""
 
+from __future__ import annotations
+
 from typing import NamedTuple, Optional
 
 from jaxtyping import Array

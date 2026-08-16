@@ -1,7 +1,7 @@
 """Communication vs. compute fraction vs. #GPUs.
 
 Reuses harness.py's per-stage timers (this directory). Writes
-results/multigpu/comm_overhead.json:
+bench/results/multigpu/comm_overhead.json:
 {"n": [...], "n_gpus": [...], "stage": [...], "time_s": [...]}
 (long format -- the notebook sums by comm/compute category using
 harness.COMM_STAGES, so the category split stays a plotting choice, not

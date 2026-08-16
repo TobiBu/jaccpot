@@ -70,7 +70,7 @@ def main(argv: list[str]) -> int:
 
     print()
     pdfs = sorted((REPO_ROOT / "results" / "figures").glob("*.pdf"))
-    print(f"{len(pdfs)} PDF(s) in results/figures/:")
+    print(f"{len(pdfs)} PDF(s) in bench/results/figures/:")
     for pdf in pdfs:
         print(f"  {pdf.name}  ({pdf.stat().st_size // 1024} KiB)")
 

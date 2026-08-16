@@ -26,12 +26,14 @@ class ParametricPotential:
 
     params: jnp.ndarray
 
-    def potential(self, positions: jnp.ndarray) -> jnp.ndarray:
+    def potential(self: "ParametricPotential", positions: jnp.ndarray) -> jnp.ndarray:
         raise NotImplementedError(
             "Choose and implement the parametric potential family."
         )
 
-    def acceleration(self, positions: jnp.ndarray) -> jnp.ndarray:
+    def acceleration(
+        self: "ParametricPotential", positions: jnp.ndarray
+    ) -> jnp.ndarray:
         raise NotImplementedError("Analytic or autodiff gradient of potential().")
 
 

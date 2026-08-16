@@ -116,24 +116,37 @@ def chunked_direct_accelerations(
     softening: float,
     G: float,
     block: int = 512,
+    targets: Optional[np.ndarray] = None,
 ) -> jnp.ndarray:
     """Exact direct-sum accelerations, chunked over targets.
 
     The dense O(N^2) formulation the notebooks use needs 6.4 GB at N=16384 in
     float64; this streams over target blocks instead so the reference survives
     the N values the claim has to be checked at.
+
+    ``targets`` restricts evaluation to a subset of target indices while still
+    summing over *all* sources, which is what makes N=1e6 tractable: 1e4 targets
+    against 1e6 sources is 1e10 pairs rather than 1e12. Returns one row per entry
+    of ``targets``, in that order.
     """
 
     pos = jnp.asarray(positions)
     mass = jnp.asarray(masses)
     n = int(pos.shape[0])
     eps_sq = jnp.asarray(softening * softening, dtype=pos.dtype)
+    target_idx = (
+        jnp.arange(n, dtype=jnp.int32)
+        if targets is None
+        else jnp.asarray(targets, dtype=jnp.int32)
+    )
+    num_targets = int(target_idx.shape[0])
 
     def block_acc(start: jnp.ndarray) -> jnp.ndarray:
-        idx = start + jnp.arange(block)
-        safe = jnp.clip(idx, 0, n - 1)
-        targets = pos[safe]
-        delta = pos[None, :, :] - targets[:, None, :]
+        slot = start + jnp.arange(block)
+        safe_slot = jnp.clip(slot, 0, num_targets - 1)
+        safe = target_idx[safe_slot]
+        target_pos = pos[safe]
+        delta = pos[None, :, :] - target_pos[:, None, :]
         dist_sq = jnp.sum(delta * delta, axis=2) + eps_sq
         inv = jnp.where(
             jnp.arange(n)[None, :] == safe[:, None],
@@ -144,9 +157,9 @@ def chunked_direct_accelerations(
             "ij,j,ijk->ik", inv, mass, delta
         )
 
-    starts = jnp.arange(0, n, block)
+    starts = jnp.arange(0, num_targets, block)
     out = jax.lax.map(block_acc, starts)
-    return out.reshape(-1, 3)[:n]
+    return out.reshape(-1, 3)[:num_targets]
 
 
 def per_particle_relative_error(
@@ -168,8 +181,16 @@ def chunked_force_scale(
     softening: float,
     G: float,
     block: int = 512,
+    targets: Optional[np.ndarray] = None,
 ) -> jnp.ndarray:
     """Dehnen's per-particle force scale ``f_b = sum_{a!=b} G m_a / |x_a - x_b|^2``.
+
+    ``targets`` restricts evaluation to a subset of target indices while summing
+    over all sources, matching :func:`chunked_direct_accelerations`. Note that the
+    ``mass_16b`` arm needs ``f_b`` for **every** particle, not just the measured
+    subset, because it feeds the node reduction -- so that arm is unavailable under
+    subsampling, and the driver rejects the combination rather than silently
+    injecting a partial scale.
 
     This is the sum of pairwise force *magnitudes*, i.e. the acceleration a
     particle would feel if none of its interactions cancelled. Unlike ``|a_b|`` it
@@ -191,12 +212,19 @@ def chunked_force_scale(
     mass = jnp.asarray(masses)
     n = int(pos.shape[0])
     eps_sq = jnp.asarray(softening * softening, dtype=pos.dtype)
+    target_idx = (
+        jnp.arange(n, dtype=jnp.int32)
+        if targets is None
+        else jnp.asarray(targets, dtype=jnp.int32)
+    )
+    num_targets = int(target_idx.shape[0])
 
     def block_scale(start: jnp.ndarray) -> jnp.ndarray:
-        idx = start + jnp.arange(block)
-        safe = jnp.clip(idx, 0, n - 1)
-        targets = pos[safe]
-        delta = pos[None, :, :] - targets[:, None, :]
+        slot = start + jnp.arange(block)
+        safe_slot = jnp.clip(slot, 0, num_targets - 1)
+        safe = target_idx[safe_slot]
+        target_pos = pos[safe]
+        delta = pos[None, :, :] - target_pos[:, None, :]
         dist_sq = jnp.sum(delta * delta, axis=2) + eps_sq
         contrib = jnp.where(
             jnp.arange(n)[None, :] == safe[:, None],
@@ -205,8 +233,8 @@ def chunked_force_scale(
         )
         return jnp.asarray(G, dtype=pos.dtype) * jnp.sum(contrib, axis=1)
 
-    starts = jnp.arange(0, n, block)
-    return jax.lax.map(block_scale, starts).reshape(-1)[:n]
+    starts = jnp.arange(0, num_targets, block)
+    return jax.lax.map(block_scale, starts).reshape(-1)[:num_targets]
 
 
 def per_particle_dehnen_scaled_error(

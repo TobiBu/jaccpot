@@ -32,6 +32,7 @@ Tree construction and traversal artifacts are provided by the companion package
 - Near-field and far-field execution paths with optional prepared state reuse
 - Explicit octree execution backend for `basis="solidfmm"`
 - **End-to-end differentiable FMM force** — exact `jax.grad`/`jax.vjp` gradients w.r.t. positions and masses at fixed topology, verified from N=64 to N=1,000,000 (see [Differentiable FMM](#differentiable-fmm))
+- **Momentum-conserving (mutual) force** for block-step individual timesteps — `sum_i m_i a_i` cancels to round-off instead of to the truncation error (see [Momentum-Conserving FMM](#momentum-conserving-fmm))
 - Differentiable direct-sum helper via JAX autodiff, retained as the exact-gradient oracle
 
 ## Installation
@@ -203,14 +204,46 @@ Example:
 
 ## Basis Selection
 
-- `basis="complex"` or `basis="solidfmm"`:
-  default complex solidFMM-compatible path
-- `basis="real"`:
-  real spherical harmonic coefficient layout with rotate+scale-to-z M2L
-- `basis="cartesian"`:
-  cartesian multipole/local expansion path
+- `basis="real"` (**the default, and the production choice**):
+  real spherical harmonic coefficient layout (Dehnen, no sqrt-2) with
+  rotate+scale-to-z M2L. The large-N radix fast lane runs pure-real end to end,
+  with no complex<->real conversion.
+- `basis="solidfmm"` — complex solid-harmonic path, kept for cross-checking.
+  `real` vs `solidfmm` agree to 4.5e-13 at N=2048/p=4/theta=0.5, which is a
+  genuine independent-basis check and a good result.
+- `basis="complex"` — **an alias for `solidfmm`**, not a third basis. The two
+  select the same code path and produce bit-identical forces (measured at
+  N=2048/p=4/theta=0.5: max difference exactly 0.0). Prefer spelling it
+  `"solidfmm"`; `"complex"` is retained for backwards compatibility.
+- `basis="cartesian"` — **experimental; not for quantitative work.**
+  Its relative L2 force error is ~1.8e-1 *independent of expansion order*, which
+  is a divergent-series signature rather than truncation error: raising the order
+  does not improve it. solidfmm is 8.1e-5 on the same configuration, ~2000x
+  better. Selecting it emits a `UserWarning`; set
+  `JACCPOT_ALLOW_CARTESIAN_BASIS=1` to silence it. It is the sole reason the
+  characterization anchor for cartesian carries a 0.35 tolerance. See
+  `docs/dehnen_mass_mac_status_and_plan.md`.
 
-The default remains the existing complex solidFMM-compatible path.
+## Reproducibility on a GPU
+
+**GPU results are reproducible to a few ulps, not to the bit.** The near field
+and M2L accumulate via scatter-add, which XLA lowers to atomics, and floating
+point addition is not associative, so the summation order varies run to run.
+
+Measured on an A100 at N=512/leaf=16/p=4/float64, 8 runs on identical inputs:
+**0 of the 7 later runs were bit-identical to the first**; the worst elementwise
+deviation was **3.8 eps** (8.1e-17 relative to the rms |a|). This is normal for a
+GPU FMM rather than a defect, but it means a test must not assert bit equality
+between two GPU runs — see `tests/unit/runtime/_reproducibility.py` for the
+helpers the suite uses instead.
+
+`XLA_FLAGS=--xla_gpu_deterministic_ops=true` does restore bit equality, at a cost
+that makes it unusable for a suite: with it set, three tests in
+`tests/unit/runtime` did not finish in 50 minutes. Use it for a one-off
+investigation, not as a default.
+
+CPU results *are* bit-reproducible run to run, which is why the characterization
+goldens are generated and checked there.
 
 ## Precision Control
 
@@ -371,6 +404,33 @@ scales. Select how those scales are estimated with `mac_force_scale_mode`:
   run the paper-style prepass once, on the cold call, then reuse the cached scale
   (refreshed from each full evaluation). This is what `mac_type="dehnen_error"`
   selects by default.
+- `"paper_fb"` / `"paper_fb_cached"`:
+  use Dehnen **eq (16b)**'s force scale `f_b = sum_{a != b} G m_a / |x_a - x_b|^2`
+  instead of eq (16a)'s `|a_b|`. `f_b` is the same sum without the vector
+  cancellation, so it never vanishes, and it measurably reduces the large-error
+  tail -- roughly 2x over (16a) at equal interaction work. Estimated in O(N) from
+  the traversal's own pair partition (exact scalar sums over near pairs, monopoles
+  over far ones), so it is cheaper than the eq (16a) prepass, which runs a whole
+  low-order FMM evaluation. Unlike `|a_b|`, `f_b` depends only on positions and
+  masses, so a completed evaluation contributes nothing to it and the `|a_b|`
+  recorder is suppressed under these modes.
+
+Two knobs apply to whichever prepass runs:
+
+- `mac_force_scale_prepass_theta` (default `0.5`): the opening angle of the
+  prepass's own geometric traversal. This is deliberately *not* the solver's
+  `theta`, which paper mode pins at 1.0 on the grounds that it does not gate
+  acceptance -- true of the criterion, false of the traversal underneath it. At
+  theta=1.0 the `f_b` estimate degrades to a median 0.74 of the exact value,
+  against 0.997 at 0.5 (near Dehnen section 5.2's `theta_crit ~ 0.46`).
+- `mac_force_scale_fb_inflation` (default `1.0`): inflates the far-field
+  source-to-target distance by the target node's radius, which makes every far
+  term an under-estimate and so makes the whole scale a strict lower bound on the
+  exact `f_b`. That direction is deliberate: eq (16a) accepts when the estimated
+  error falls below `eps * s`, so an over-large scale *loosens* acceptance and
+  makes the solver faster **and** wronger -- a failure no cost measurement can
+  detect. `0.0` gives the tighter, non-bounding variant; it is a measurement
+  setting, not a production one.
 
 Interpretation:
 
@@ -479,6 +539,53 @@ existing env-configured scripts keep working; an explicit field always wins.
 
 Full guide, contract, limits, and troubleshooting:
 **[docs/differentiable_fmm.md](docs/differentiable_fmm.md)**.
+
+## Momentum-Conserving FMM
+
+`FastMultipoleMethod` is target-centric: the near field gathers and the far field
+sweeps downward, so every pair is evaluated **twice, independently**. The two
+roundings differ, and `sum_i m_i a_i` lands at the force accuracy (~1e-3 … 1e-5).
+That is fine for a global timestep and wrong for a block-step individual-timestep
+KDK, where per-level antisymmetry is the defining correctness property rather
+than a diagnostic.
+
+`BlockStepFMM` evaluates each interaction **once** and applies `+f`/`-f` to both
+endpoints, through the separate `jaccpot.mutual` path:
+
+```python
+from jaccpot import BlockStepFMM
+
+fmm = BlockStepFMM(softening=1e-2, k_max=3, theta=0.7, max_order=4, leaf_size=32)
+
+# Once per base step: build the frozen topology (host operation, not traceable).
+fmm.prepare(positions, masses)
+
+# Production path -- one mutual traversal per sub-step boundary.
+velocities = fmm.boundary_kick(
+    positions, velocities, masses,
+    rung=rung, active_floor=1, dt_max=1e-3, half=1.0,
+)
+```
+
+The force stays FMM-approximate; the momentum does not:
+
+| order `p` | force error | momentum residual |
+|---|---|---|
+| 2 | 4.0e-03 | 4.1e-16 |
+| 4 | 2.8e-05 | 4.1e-16 |
+| 6 | 1.6e-07 | 4.2e-16 |
+
+The force error moves five orders of magnitude across that range and the residual
+does not move at all — the cancellation is algebraic, not numerical, so it is flat
+in `theta` and in expansion order.
+
+Weighting each pair by `level_weights[max(rung_i, rung_j)]` lets one traversal
+serve a whole sub-step boundary, taking a base step at `k_max=3` from about 19
+traversals to `n_sub + 1 = 9` — measured 2.1×. The path is differentiable at fixed
+topology on the same terms as [Differentiable FMM](#differentiable-fmm).
+
+Details, backend comparison, and the scaling study:
+[docs/momentum_conserving_fmm.md](docs/momentum_conserving_fmm.md).
 
 ## Topology Reuse
 
@@ -597,6 +704,8 @@ export JACCPOT_RUNTIME_TYPECHECK=1
 - `jaccpot/runtime`: execution internals and integration with yggdrax artifacts
 - `jaccpot/operators`: harmonic, translation, and multipole operators
 - `jaccpot/upward`, `jaccpot/downward`, `jaccpot/nearfield`: sweep and near-field modules
+- `jaccpot/mutual`: momentum-conserving (mutual) evaluation path — a separate lane, not a variant of the above
+- `jaccpot/nornax_adapter.py`: `BlockStepFMM`, the block-step KDK facade over `jaccpot/mutual`
 - `tests`: unit, integration, and performance checks
 
 ## CI

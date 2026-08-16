@@ -3,304 +3,128 @@ Fast Multipole Method (FMM) for computing gravitational accelerations.
 
 This implementation uses multipole and local expansions to compute
 gravitational forces in O(N) time instead of O(N^2) for direct summation.
+
+RE-EXPORTS. Eleven of the imports below are unused *here* and are not dead. Each
+carries ``# noqa: F401`` so an ``--select=F401`` sweep leaves it alone:
+
+    NearfieldInteropData                     _bucket_far_pairs_by_level_split
+    _PrepareStateTreeUpwardArtifacts         _build_nearfield_interop_data
+    _build_tree_with_config                  _prepare_solidfmm_downward_sweep
+    _evaluate_local_expansions_for_particles build_interactions_and_neighbors
+    adaptive_pair_policy                     sh_size
+    enforce_conjugate_symmetry_batch
+
+They are reached in THREE ways, and a sweep has to account for all three -- this
+cleanup removed ``_build_tree_with_config`` on the strength of the first two and
+the suite caught it:
+
+1. ``from ._fmm_impl import X``            -- greppable
+2. ``_fmm_impl.X`` on a module alias       -- greppable
+3. ``mock.patch.object(alias, "X", ...)``  -- the name is a STRING, and the call
+   is usually split across lines, so no single-line grep finds it. Only an AST
+   walk over ``patch.object``/``setattr`` calls does.
+
+``__all__`` would be the tidier mechanism and is DELIBERATELY NOT USED here.
+``runtime/fmm/__init__.py`` does ``from .._fmm_impl import *``; with no
+``__all__`` that pulls every public name, and adding one narrows the star to
+whatever the list happens to contain. Tried during this cleanup: it broke
+``jaccpot.runtime.fmm.FMMPreparedState`` and, through it, ``import jaccpot``.
+Any future ``__all__`` here has to enumerate the whole star surface, not just
+the re-exports.
+
+The ``noqa`` markers are less precise than they look, and that is a known cost
+rather than an oversight: isort hoists a trailing comment from the name onto the
+``from ... import (`` line and re-merges duplicate imports from one module, so
+three of the ten end up suppressing F401 for their whole import group. A name
+that later goes unused inside one of those groups will not be flagged. Splitting
+them apart does not survive isort -- it re-merges on the next run.
+
+Reaching internals through this module is a habit worth breaking rather than
+extending -- ``examples/benchmark_gpu_radix_worker.py`` did it for thirteen
+symbols and silently broke on six of them when ``kernels/core.py`` was split,
+because an attribute lookup fails at call time rather than at import. New
+callers should import from the module that defines the symbol.
 """
 
-import hashlib
+from __future__ import annotations
+
 import json
-import math
 import os
-import time
 import warnings
-from collections import OrderedDict
-from dataclasses import dataclass, replace
-from functools import lru_cache, partial
-from math import comb
-from typing import Any, Literal, NamedTuple, Optional, Union
+from typing import Any, Literal, Mapping, Optional, Union
 
 import jax
-import jax.numpy as jnp
-import numpy as np
 from beartype import beartype
 from beartype.typing import Callable, Tuple
 from jaxtyping import Array, DTypeLike, jaxtyped
-from yggdrax import build_tree
-from yggdrax.dense_interactions import DenseInteractionBuffers
-from yggdrax.geometry import compute_tree_geometry
-from yggdrax.grouped_interactions import GroupedInteractionBuffers
-from yggdrax.interactions import (
-    CompactTaggedFarPairs,
-    CompactTaggedOctreeFarPairs,
+from yggdrax.interactions import (  # noqa: F401
     DualTreeRetryEvent,
     DualTreeTraversalConfig,
-    DualTreeWalkResult,
-    MACType,
-    NodeInteractionList,
-    NodeNeighborList,
-    OctreeNativeNeighborList,
     build_interactions_and_neighbors,
-    build_octree_native_far_pairs,
-    build_octree_native_neighbor_lists,
-    build_well_separated_interactions,
 )
-from yggdrax.morton import morton_encode
-from yggdrax.tree import (
-    RadixTree,
-    Tree,
-    TreeType,
-    available_tree_types,
-    get_node_levels,
-    rebuild_static_radix_tree_from_template,
-    reorder_particles_by_indices,
-)
-from yggdrax.tree_moments import compute_tree_mass_moments
+from yggdrax.tree import Tree, TreeType, available_tree_types
 
-from jaccpot.basis.real_sh import complex_to_real_coeffs
-from jaccpot.config import FMMExecutionBackend, FMMPreset, MemoryObjective
-from jaccpot.downward.local_expansions import (
-    LocalExpansionData,
-    TreeDownwardData,
-    initialize_local_expansions,
+from jaccpot.config import (
+    FMMExecutionBackend,
+    FMMPreset,
+    MACTypeInput,
+    MemoryObjective,
+    TraversalOverrides,
 )
-from jaccpot.downward.local_expansions import (
-    prepare_downward_sweep as prepare_tree_downward_sweep,
-)
-from jaccpot.downward.local_expansions import (
-    run_downward_sweep as run_tree_downward_sweep,
-)
-from jaccpot.downward.local_expansions import translate_local_expansion
-from jaccpot.nearfield.near_field import (
-    compute_leaf_p2p_accelerations,
-    compute_leaf_p2p_accelerations_large_n_accel_only,
-    prepare_bucketed_scatter_schedules,
-    prepare_bucketed_scatter_schedules_from_groups,
-    prepare_leaf_neighbor_pairs,
-)
-from jaccpot.operators.complex_ops import (
-    complex_rotation_blocks_from_z_solidfmm_batch,
-    complex_rotation_blocks_to_z_solidfmm_batch,
+from jaccpot.downward.local_expansions import LocalExpansionData
+from jaccpot.operators.complex_ops import (  # noqa: F401
     enforce_conjugate_symmetry_batch,
-    evaluate_local_complex_derivative_tower_batch,
-    evaluate_local_complex_grad_analytic,
-    evaluate_local_complex_grad_analytic_batch,
-    evaluate_local_complex_grad_analytic_preserve_dtype,
-    evaluate_local_complex_grad_order4_unrolled,
-    evaluate_local_complex_with_grad,
-    evaluate_local_complex_with_grad_analytic_batch,
-    evaluate_local_complex_with_grad_batch,
-    l2l_complex,
-    l2l_complex_batch,
-    m2l_complex_reference,
-    m2l_complex_reference_batch,
-    m2l_complex_reference_batch_cached_blocks,
 )
-from jaccpot.operators.m2l_real_rot_scale import (
-    m2l_rot_scale_real_batch,
-    m2l_rot_scale_real_batch_cached_blocks,
-    real_rotation_blocks_from_z_local_batch,
-    real_rotation_blocks_to_z_multipole_batch,
-)
-from jaccpot.operators.multipole_utils import (
-    LOCAL_LEVEL_COMBOS,
-    MAX_MULTIPOLE_ORDER,
-    level_offset,
-    total_coefficients,
-)
-from jaccpot.operators.real_harmonics import (
-    evaluate_local_real_derivative_tower_batch,
-    evaluate_local_real_with_grad,
-    l2l_real,
-    sh_size,
-)
-from jaccpot.operators.symmetric_tensors import (
-    component_lift_index_map_3d,
-    contract_symmetric_one_axis_3d,
-)
-from jaccpot.upward.real_tree_expansions import (
-    prepare_real_upward_sweep,
-)
-from jaccpot.upward.solidfmm_complex_tree_expansions import (
-    prepare_solidfmm_complex_source_motion_multipoles,
-    prepare_solidfmm_complex_upward_sweep,
-)
-from jaccpot.upward.tree_expansions import (
-    NodeMultipoleData,
-    TreeUpwardData,
-)
-from jaccpot.upward.tree_expansions import (
-    prepare_upward_sweep as prepare_tree_upward_sweep,
-)
+from jaccpot.operators.real_harmonics import sh_size  # noqa: F401
 
-from ._adaptive_policy import (
-    adaptive_pair_policy,
-    adaptive_policy_tolerance,
-    bucket_far_pairs_by_tag,
-    build_adaptive_policy_state,
-    compute_node_force_scale_from_sorted_acc,
-    source_error_proxy_by_order_from_multipoles,
-)
-from ._interaction_cache import (
-    _build_dual_tree_artifacts,
-    _compiled_refresh_dual_planner_route,
-    _DualTreeArtifacts,
-    _interaction_cache_key,
-    _InteractionCacheEntry,
-    _RefreshDualPlannerHint,
-)
-from ._large_n_pipeline import (
-    can_use_large_n_prepare_path,
-    evaluate_large_n_state,
-    prepare_large_n_state,
-)
+from ._adaptive_policy import adaptive_pair_policy  # noqa: F401
+from ._interaction_cache import _InteractionCacheEntry, _RefreshDualPlannerHint
 from ._large_n_types import LargeNPreparedState
-from ._nearfield_cache import (
-    NearfieldPrecomputeArtifacts,
-    nearfield_cache_matches,
-    nearfield_from_cache,
-    with_nearfield_cache_artifacts,
-)
-from ._octree_adapter import (
-    OctreeExecutionData,
-    build_octree_execution_data,
-    build_octree_execution_data_with_status,
-)
-from ._octree_fmm import (
-    OctreeSolidFMMComplexMultipoles,
-    OctreeSolidFMMDownwardPlan,
-    accumulate_octree_solidfmm_m2l,
-    build_octree_downward_plan,
-    build_octree_interaction_plan,
-    build_octree_interaction_plan_from_native_pairs,
-    build_octree_upward_plan,
-    prepare_octree_solidfmm_complex_multipoles,
-    propagate_octree_solidfmm_l2l,
-)
-from .dtypes import INDEX_DTYPE, as_index, complex_dtype_for_real
 from .fmm_autotune import AutotuneMixin
 from .fmm_caches import (
-    _GPU_M2L_AUTOTUNE_LARGE_CANDIDATES,
-    _GPU_M2L_AUTOTUNE_MAX_SAMPLE_NODES,
-    _GPU_M2L_AUTOTUNE_MAX_SAMPLE_PAIRS,
-    _GPU_M2L_AUTOTUNE_MEDIUM_CANDIDATES,
-    _GPU_M2L_AUTOTUNE_PAIR_BINS,
-    _GPU_M2L_AUTOTUNE_SMALL_CANDIDATES,
-    _GPU_M2L_AUTOTUNE_XL_CANDIDATES,
-    _M2L_FULLBATCH_MAX_PAIRS,
     _clear_global_runtime_caches,
-    _contains_tracer,
-    _estimate_payload_nbytes,
-    _format_nbytes,
-    _grouped_operator_cache_get,
-    _grouped_operator_cache_key,
-    _grouped_operator_cache_put,
-    _grouped_segment_cache_get,
-    _grouped_segment_cache_key,
-    _grouped_segment_cache_put,
-    _m2l_autotune_lookup,
     _m2l_autotune_payload,
-    _m2l_autotune_store,
     _restore_m2l_autotune_payload,
 )
 from .fmm_constants import (
-    _CLASS_MAJOR_CPU_PARTICLE_THRESHOLD,
-    _GPU_LARGE_PARTICLE_THRESHOLD,
-    _GPU_MAX_INTERACTIONS_PER_NODE,
-    _GPU_MAX_NEIGHBORS_PER_LEAF,
-    _GPU_MIN_INTERACTIONS_PER_NODE,
-    _GPU_MIN_NEIGHBORS_PER_LEAF,
-    _GPU_MIN_PAIR_QUEUE_LARGE,
-    _GPU_MIN_PAIR_QUEUE_MEDIUM,
-    _GPU_MIN_PAIR_QUEUE_XL,
-    _GPU_MINIMUM_MEMORY_INTERACTIONS_PER_NODE,
-    _GPU_MINIMUM_MEMORY_NEIGHBORS_PER_LEAF,
-    _GPU_MINIMUM_MEMORY_PAIR_QUEUE,
-    _GPU_MINIMUM_MEMORY_PROCESS_BLOCK,
     _GROUPED_SCHEDULE_BUDGET_DEFAULT,
-    _KDTREE_DEFAULT_TRAVERSAL_CONFIG,
-    _LARGE_CPU_M2L_CHUNK_SIZE,
-    _LARGE_CPU_PARTICLE_THRESHOLD,
-    _LARGE_CPU_TRAVERSAL_CONFIG,
-    _MINIMUM_MEMORY_CPU_M2L_CHUNK_SIZE,
-    _MINIMUM_MEMORY_GPU_M2L_CHUNK_SIZE,
-    _NEARFIELD_BUCKETED_CPU_EDGE_CHUNK_LARGE,
-    _NEARFIELD_BUCKETED_CPU_EDGE_CHUNK_MEDIUM,
-    _NEARFIELD_BUCKETED_CPU_EDGE_CHUNK_XL,
-    _NEARFIELD_BUCKETED_CPU_PARTICLE_THRESHOLD,
-    _NEARFIELD_GPU_PRECOMPUTE_MAX_PARTICLES,
-    _NEARFIELD_SCATTER_SCHEDULE_INT32_ITEM_LIMIT,
-    _NEARFIELD_SCATTER_SCHEDULE_ITEM_CAP,
-    _NEARFIELD_SCATTER_SCHEDULE_ITEM_CAP_GPU,
-    _TRACING_MAX_INTERACTIONS_PER_NODE,
-    _TRACING_MAX_NEIGHBORS_PER_LEAF,
-    _TRACING_MAX_PAIR_QUEUE,
-    _TRACING_MAX_PROCESS_BLOCK,
-    _cap_minimum_memory_streamed_gpu_traversal_config_for_tree,
-    _env_int,
-    _minimum_memory_streamed_gpu_traversal_ceiling,
-    _minimum_memory_streamed_gpu_traversal_seed,
-    _prepare_diag,
+    _LARGE_N_GPU_UPWARD_LEAF_BATCH_SIZE,
 )
 from .fmm_derivatives import DerivativesMixin
 from .fmm_diagnostics import DiagnosticsMixin
 from .fmm_evaluate import EvaluateMixin
-from .fmm_overrides import OverridesMixin
+from .fmm_overrides import (
+    OverridesMixin,
+    normalize_traversal_config_request,
+    warn_full_traversal_config_replacement,
+)
 from .fmm_policy import PolicyMixin
 from .fmm_prepare import PrepareMixin
-from .fmm_presets import get_preset_config
-from .fmm_state import (
+from .fmm_presets import FMMPresetConfig, get_preset_config
+from .fmm_state import (  # noqa: F401
     FMMPreparedState,
-    TreeBuilderConfig,
+    FMMResolvedConfig,
     _bucket_far_pairs_by_level_split,
-    _build_octree_downward_artifacts,
-    _build_octree_upward_artifacts,
     _build_tree_with_config,
-    _empty_interaction_storage_like,
-    _finalize_octree_downward_artifacts,
     _GeometryReuseEntry,
     _normalize_strict_refresh_diag_mode,
-    _octree_farfield_eval_inputs,
-    _prepared_state_octree_upward_payload,
-    _prepared_state_upward_payload,
-    _PrepareStateDualDownwardArtifacts,
-    _PrepareStateFarPairPlan,
     _PrepareStateTreeUpwardArtifacts,
     _resolve_fmm_config,
-    _RuntimeExecutionOverrides,
     _strict_refresh_diag_stage_flags,
-    _TopologyReuseCandidate,
     _TopologyReuseEntry,
-    _TreeBuildArtifacts,
-    _velocity_verlet_state_update,
 )
 from .fmm_strict_cap_profile import StrictCapProfileMixin
 from .fmm_strict_run import StrictRunMixin
 from .fmm_sweeps import SweepsMixin
-from .kernels.core import (
+from .kernels.core import (  # noqa: F401
     ExpansionBasis,
     NearfieldInteropData,
-    PackedAccelerationDerivatives,
     _build_nearfield_interop_data,
-    _build_target_nearfield_source_index_matrix,
-    _compute_targeted_nearfield,
-    _empty_interaction_storage_for_tree,
     _evaluate_local_expansions_for_particles,
-    _evaluate_local_expansions_for_target_particles,
-    _evaluate_prepared_tree,
-    _evaluate_prepared_tree_targets,
-    _evaluate_tree_compiled_impl,
-    _FarPairCOO,
-    _infer_bounds,
-    _infer_order_from_coeff_count,
-    _map_targets_to_leaf_positions,
-    _max_leaf_size_from_tree,
     _normalize_strict_refresh_detail_diag_mode,
     _prepare_solidfmm_downward_sweep,
-    _prepare_tree_evaluation_inputs,
 )
-from .reference import MultipoleExpansion
-from .reference import compute_expansion as reference_compute_expansion
 from .reference import compute_gravitational_potential as reference_compute_potential
-from .reference import direct_sum as reference_direct_sum
-from .reference import evaluate_expansion as reference_evaluate_expansion
 
 FarFieldMode = Literal["auto", "pair_grouped", "class_major"]
 NearFieldMode = Literal["auto", "baseline", "bucketed"]
@@ -308,7 +132,61 @@ JerkMode = Literal["fast_approx", "accurate"]
 PreparedStateLike = Union["FMMPreparedState", LargeNPreparedState]
 
 
-class FastMultipoleMethod(
+def derive_split_build_default(
+    *,
+    memory_objective: str,
+    backend: str,
+    tree_type: str,
+    expansion_basis: str,
+    streamed_far_pairs: bool,
+) -> bool:
+    """Whether the low-peak split dual-tree build is the default for this config.
+
+    Pulled out of :meth:`FMMEngine._resolve_derived_lane_flags` so it can be
+    evaluated twice against different field values, and so the five conjuncts are
+    testable without a GPU. ``backend`` is a parameter rather than a call to
+    :func:`jax.default_backend` for exactly that second reason.
+
+    **This is evaluated twice on purpose.** The first evaluation happens while the
+    caller's configuration is still in force; the second, in
+    :meth:`FMMEngine._apply_large_n_gpu_production_contract`, after that contract
+    has coerced ``memory_objective`` and ``streamed_far_pairs`` to the values the
+    ``large_n_gpu`` preset requires. Without the second, a caller who passes an
+    ``advanced=`` config alongside the preset gets the predicate computed from
+    their config's *defaults* -- ``streamed_far_pairs=None`` becoming ``False`` --
+    and the preset silently runs the monolithic dual-tree build it exists to
+    avoid. Measured consequence: an N=1e7 census OOMed on a 4.77 GiB allocation
+    inside ``_dual_tree_build_raw``.
+
+    Parameters
+    ----------
+    memory_objective : str
+        Resolved memory objective; only ``"minimum_memory"`` selects the split build.
+    backend : str
+        JAX default backend name. The split build is a GPU-only default.
+    tree_type : str
+        Resolved tree type; the split build exists for ``"radix"``.
+    expansion_basis : str
+        Resolved expansion basis; paired with ``"solidfmm"`` on this lane.
+    streamed_far_pairs : bool
+        Whether far pairs are streamed rather than materialised.
+
+    Returns
+    -------
+    bool
+        ``True`` when every conjunct holds, i.e. the split build is the default.
+    """
+
+    return bool(
+        memory_objective == "minimum_memory"
+        and backend == "gpu"
+        and tree_type == "radix"
+        and expansion_basis == "solidfmm"
+        and bool(streamed_far_pairs)
+    )
+
+
+class FMMEngine(
     PrepareMixin,
     EvaluateMixin,
     StrictRunMixin,
@@ -342,7 +220,7 @@ class FastMultipoleMethod(
     """
 
     def __init__(
-        self: "FastMultipoleMethod",
+        self: "FMMEngine",
         theta: float = 0.5,
         G: float = 1.0,
         softening: float = 1e-12,
@@ -357,18 +235,28 @@ class FastMultipoleMethod(
         reuse_topology: bool = False,
         rebuild_every: int = 1,
         mac_force_scale_mode: str = "prev",
+        mac_force_scale_prepass_theta: Optional[float] = None,
+        mac_force_scale_fb_inflation: float = 1.0,
         adaptive_error_model: str = "tail_proxy",
         adaptive_eps: Optional[float] = None,
         dehnen_geometry_mode: str = "com",
         mac_theta_max: float = 1.0,
-        mac_type: MACType = "bh",
+        # `MACTypeInput`, not yggdrax's `MACType`: this constructor accepts a
+        # fourth value, "dehnen_error", which `_base_mac_type()` maps to "dehnen"
+        # before the traversal sees it. See the alias.
+        mac_type: MACTypeInput = "bh",
         complex_rotation: str = "solidfmm",  # "cached",
         dehnen_radius_scale: float = 1.0,
         m2l_chunk_size: Optional[int] = None,
         l2l_chunk_size: Optional[int] = None,
         max_pair_queue: Optional[int] = None,
         pair_process_block: Optional[int] = None,
-        traversal_config: Optional[DualTreeTraversalConfig] = None,
+        # DualTreeTraversalConfig (replace all four capacities), or a
+        # TraversalOverrides / mapping of named capacities (merge onto the
+        # preset's resolved sizing). See normalize_traversal_config_request.
+        traversal_config: Optional[
+            Union[DualTreeTraversalConfig, TraversalOverrides, Mapping[str, int]]
+        ] = None,
         tree_build_mode: Optional[str] = None,
         tree_type: str = "radix",
         target_leaf_particles: Optional[int] = None,
@@ -405,118 +293,32 @@ class FastMultipoleMethod(
         fixed_order: Optional[int] = None,
         fixed_max_leaf_size: Optional[int] = None,
     ):
-        basis_norm = str(expansion_basis).strip().lower()
-        if basis_norm == "complex":
-            basis_norm = "solidfmm"
-        if basis_norm not in ("cartesian", "solidfmm"):
-            raise ValueError(
-                "expansion_basis must be 'cartesian', 'solidfmm', or 'complex'",
-            )
-        self.expansion_basis = basis_norm  # type: ignore[assignment]
-        self.basis_impl = basis_impl
-        self.m2l_impl = None if m2l_impl is None else str(m2l_impl).strip().lower()
-        if self.m2l_impl is None and self._solidfmm_basis_mode() == "real":
-            self.m2l_impl = "rot_scale"
-        self.adaptive_order = bool(adaptive_order)
-        self.p_gears = tuple(int(v) for v in (p_gears or ()))
-        # Default the Pallas near-field ON wherever it can run (Ampere sm_80+),
-        # and fall back to the pure-JAX near-field ONLY on hardware that cannot
-        # run Pallas (e.g. RTX 2080 / sm_75) or CPU. Leaving it off by default
-        # silently ran the ~10x-slower launch-bound jnp near-field on capable
-        # GPUs; the non-Pallas path is retained solely as the sm_75/CPU lane.
-        # An explicit use_pallas=True/False still overrides this resolution.
-        if use_pallas is None:
-            try:
-                from jaccpot.pallas.nearfield_fused_leaf import (
-                    pallas_nearfield_fused_supported,
-                )
-
-                resolved_use_pallas = bool(pallas_nearfield_fused_supported())
-            except Exception:
-                resolved_use_pallas = False
-        else:
-            resolved_use_pallas = bool(use_pallas)
-        self.use_pallas = resolved_use_pallas
-        self.reuse_topology = bool(reuse_topology)
-        if int(rebuild_every) <= 0:
-            raise ValueError("rebuild_every must be positive")
-        self.rebuild_every = int(rebuild_every)
-        self._recent_far_pairs_by_gear_counts: tuple[int, ...] = tuple()
-        self._recent_dual_node_count: int = 0
-        self._recent_dual_leaf_count: int = 0
-        self._recent_dual_neighbor_count: int = 0
-        self._recent_dual_far_pair_count: int = 0
-        self._recent_dual_m2l_chunk_size: int = 0
-        self._static_radix_tree_leaf_count: int = 0
-        self._static_radix_tree_node_count: int = 0
-        # Concrete tree depth (unpadded), stashed at build so the traced refresh
-        # can pass it as a static arg to the upward M2M level loop. Radix trees
-        # pad level_offsets to full Morton depth; using the padded shape makes the
-        # M2M loop iterate many empty levels. See _resolve_upward_num_levels.
-        self._static_upward_num_levels: Optional[int] = None
-        self._static_radix_far_pair_count: int = 0
-        self._static_radix_m2l_chunk_count: int = 0
-        self._static_radix_l2l_edge_count: int = 0
-        force_scale_mode_norm = str(mac_force_scale_mode).strip().lower()
-        if force_scale_mode_norm not in ("prev", "prepass", "paper", "paper_cached"):
-            raise ValueError(
-                "mac_force_scale_mode must be 'prev', 'prepass', 'paper', "
-                "or 'paper_cached'"
-            )
-        self.mac_force_scale_mode = force_scale_mode_norm
-        adaptive_error_model_norm = str(adaptive_error_model).strip().lower()
-        if adaptive_error_model_norm not in (
-            "tail_proxy",
-            "dehnen_degree",
-            "dehnen_paper",
-        ):
-            raise ValueError(
-                "adaptive_error_model must be 'tail_proxy', 'dehnen_degree', or 'dehnen_paper'"
-            )
-        self.adaptive_error_model = adaptive_error_model_norm
-        dehnen_geometry_mode_norm = str(dehnen_geometry_mode).strip().lower()
-        if dehnen_geometry_mode_norm not in (
-            "com",
-            "exact",
-            "tree",
-            "tree_approx",
-            "runtime",
-        ):
-            raise ValueError(
-                "dehnen_geometry_mode must be 'com', 'exact', 'tree', "
-                "'tree_approx', or 'runtime'"
-            )
-        self.dehnen_geometry_mode = dehnen_geometry_mode_norm
-        self.mac_theta_max = float(mac_theta_max)
-        if not (0.0 < self.mac_theta_max <= 1.0):
-            raise ValueError("mac_theta_max must be in (0, 1]")
-        self.adaptive_eps = None if adaptive_eps is None else float(adaptive_eps)
-        if self.adaptive_eps is not None and self.adaptive_eps <= 0.0:
-            raise ValueError("adaptive_eps must be > 0 when provided")
-        self._last_force_scale_nodes: Optional[Array] = None
-        self._in_force_scale_prepass = False
-
-        rotation_norm = str(complex_rotation).strip().lower()
-        if rotation_norm != "solidfmm":
-            raise ValueError("complex_rotation must be 'solidfmm'")
-        self.complex_rotation = rotation_norm
-        farfield_mode_norm = str(farfield_mode).strip().lower()
-        if farfield_mode_norm not in ("auto", "pair_grouped", "class_major"):
-            raise ValueError(
-                "farfield_mode must be 'auto', 'pair_grouped', or 'class_major'"
-            )
-        self.farfield_mode = farfield_mode_norm
-        self._explicit_streamed_far_pairs = streamed_far_pairs is not None
-        self.streamed_far_pairs = bool(streamed_far_pairs)
-        self.mixed_order_farfield = bool(mixed_order_farfield)
-        self.mixed_order_min_order = (
-            None if mixed_order_min_order is None else int(mixed_order_min_order)
+        self._validate_expansion_family(
+            adaptive_order=adaptive_order,
+            basis_impl=basis_impl,
+            expansion_basis=expansion_basis,
+            m2l_impl=m2l_impl,
+            p_gears=p_gears,
+            use_pallas=use_pallas,
         )
-        if (
-            self.mixed_order_min_order is not None
-            and int(self.mixed_order_min_order) < 0
-        ):
-            raise ValueError("mixed_order_min_order must be >= 0")
+        self._init_recent_topology_counters(
+            rebuild_every=rebuild_every,
+            reuse_topology=reuse_topology,
+        )
+        self._resolve_mac_and_adaptive_policy(
+            adaptive_eps=adaptive_eps,
+            adaptive_error_model=adaptive_error_model,
+            complex_rotation=complex_rotation,
+            dehnen_geometry_mode=dehnen_geometry_mode,
+            farfield_mode=farfield_mode,
+            mac_force_scale_fb_inflation=mac_force_scale_fb_inflation,
+            mac_force_scale_mode=mac_force_scale_mode,
+            mac_force_scale_prepass_theta=mac_force_scale_prepass_theta,
+            mac_theta_max=mac_theta_max,
+            mixed_order_farfield=mixed_order_farfield,
+            mixed_order_min_order=mixed_order_min_order,
+            streamed_far_pairs=streamed_far_pairs,
+        )
         nearfield_mode_norm = str(nearfield_mode).strip().lower()
         if nearfield_mode_norm not in ("auto", "baseline", "bucketed"):
             raise ValueError("nearfield_mode must be 'auto', 'baseline', or 'bucketed'")
@@ -558,6 +360,390 @@ class FastMultipoleMethod(
         )
         self.fail_fast = bool(fail_fast)
         self.autotune_m2l_chunk = bool(autotune_m2l_chunk) and not self.fail_fast
+        self._resolve_schedule_budgets(
+            grouped_schedule_budget_bytes=grouped_schedule_budget_bytes,
+            nearfield_schedule_item_cap=nearfield_schedule_item_cap,
+            precompute_grouped_class_segments=precompute_grouped_class_segments,
+            upward_leaf_batch_size=upward_leaf_batch_size,
+        )
+        self._resolve_tree_options(
+            dehnen_radius_scale=dehnen_radius_scale,
+            host_refine_mode=host_refine_mode,
+            tree_type=tree_type,
+        )
+        preset_config = get_preset_config(preset) if preset is not None else None
+
+        # Split the traversal request before resolution. A full
+        # DualTreeTraversalConfig keeps its historical "replace everything"
+        # meaning (and warns, because that also replaces the capacities the
+        # caller did not intend to touch); a TraversalOverrides/mapping becomes a
+        # field-by-field merge applied after the policy has sized for this N, so
+        # naming one capacity cannot move the other three.
+        traversal_config, traversal_field_overrides = (
+            normalize_traversal_config_request(traversal_config)
+        )
+        self._traversal_field_overrides: dict[str, int] = traversal_field_overrides
+        if traversal_config is not None:
+            warn_full_traversal_config_replacement(
+                supplied=traversal_config,
+                preset_name=(
+                    str(preset_config.name.value) if preset_config is not None else None
+                ),
+            )
+
+        resolved = _resolve_fmm_config(
+            theta=theta,
+            G=G,
+            softening=softening,
+            working_dtype=working_dtype,
+            tree_build_mode=tree_build_mode,
+            target_leaf_particles=target_leaf_particles,
+            refine_local=refine_local,
+            max_refine_levels=max_refine_levels,
+            aspect_threshold=aspect_threshold,
+            m2l_chunk_size=m2l_chunk_size,
+            l2l_chunk_size=l2l_chunk_size,
+            max_pair_queue=max_pair_queue,
+            pair_process_block=pair_process_block,
+            traversal_config=traversal_config,
+            use_dense_interactions=use_dense_interactions,
+            preset_config=preset_config,
+        )
+
+        self._unpack_resolved_config(
+            mac_type=mac_type,
+            resolved=resolved,
+        )
+        self._check_dehnen_paper_requirements()
+        self._resolve_runtime_defaults(
+            resolved=resolved,
+            preset_config=preset_config,
+            interaction_retry_logger=interaction_retry_logger,
+        )
+        self._resolve_refresh_and_strict_modes()
+        self._resolve_large_n_diag_modes()
+        self._init_compiled_lane_caches(
+            m2l_chunk_size=m2l_chunk_size,
+            l2l_chunk_size=l2l_chunk_size,
+            traversal_config=traversal_config,
+            max_pair_queue=max_pair_queue,
+            pair_process_block=pair_process_block,
+            grouped_interactions=grouped_interactions,
+            fixed_order=fixed_order,
+            fixed_max_leaf_size=fixed_max_leaf_size,
+        )
+        self._resolve_derived_lane_flags()
+        self._resolve_static_sizing_flags(
+            retain_far_pairs_for_grad=retain_far_pairs_for_grad,
+        )
+
+    def _validate_expansion_family(
+        self,
+        *,
+        adaptive_order: bool,
+        basis_impl: Optional[Any],
+        expansion_basis: ExpansionBasis,
+        m2l_impl: Optional[str],
+        p_gears: Optional[tuple[int, ...]],
+        use_pallas: Optional[bool],
+    ) -> None:
+        """Validate the expansion family and resolve the Pallas near-field default.
+
+        Extracted verbatim from ``__init__`` lines 418-449 (audit 2.1 step 3),
+        called in the original position so the resolution order is unchanged.
+
+        Parameters
+        ----------
+        adaptive_order : bool
+            Passed through from ``__init__`` unchanged.
+        basis_impl : Optional[Any]
+            Passed through from ``__init__`` unchanged.
+        expansion_basis : ExpansionBasis
+            Passed through from ``__init__`` unchanged.
+        m2l_impl : Optional[str]
+            Passed through from ``__init__`` unchanged.
+        p_gears : Optional[tuple[int, ...]]
+            Passed through from ``__init__`` unchanged.
+        use_pallas : Optional[bool]
+            Passed through from ``__init__`` unchanged.
+
+        Returns
+        -------
+        None
+            Mutates ``self`` in place, exactly as the inlined code did.
+
+        Raises
+        ------
+        ValueError
+            If the expansion basis is not 'cartesian' or 'solidfmm'.
+        """
+        basis_norm = str(expansion_basis).strip().lower()
+        if basis_norm == "complex":
+            basis_norm = "solidfmm"
+        if basis_norm not in ("cartesian", "solidfmm"):
+            raise ValueError(
+                "expansion_basis must be 'cartesian', 'solidfmm', or 'complex'",
+            )
+        self.expansion_basis = basis_norm  # type: ignore[assignment]
+        self.basis_impl = basis_impl
+        self.m2l_impl = None if m2l_impl is None else str(m2l_impl).strip().lower()
+        if self.m2l_impl is None and self._solidfmm_basis_mode() == "real":
+            self.m2l_impl = "rot_scale"
+        self.adaptive_order = bool(adaptive_order)
+        self.p_gears = tuple(int(v) for v in (p_gears or ()))
+        # Default the Pallas near-field ON wherever it can run (Ampere sm_80+),
+        # and fall back to the pure-JAX near-field ONLY on hardware that cannot
+        # run Pallas (e.g. RTX 2080 / sm_75) or CPU. Leaving it off by default
+        # silently ran the ~10x-slower launch-bound jnp near-field on capable
+        # GPUs; the non-Pallas path is retained solely as the sm_75/CPU lane.
+        # An explicit use_pallas=True/False still overrides this resolution.
+        if use_pallas is None:
+            try:
+                from jaccpot.pallas.nearfield_fused_leaf import (
+                    pallas_nearfield_fused_supported,
+                )
+
+                resolved_use_pallas = bool(pallas_nearfield_fused_supported())
+            except Exception:
+                resolved_use_pallas = False
+        else:
+            resolved_use_pallas = bool(use_pallas)
+        self.use_pallas = resolved_use_pallas
+
+    def _init_recent_topology_counters(
+        self,
+        *,
+        rebuild_every: int,
+        reuse_topology: bool,
+    ) -> None:
+        """Zero the most-recent-topology counters and the reuse/rebuild policy.
+
+        Extracted verbatim from ``__init__`` lines 450-469 (audit 2.1 step 3),
+        called in the original position so the resolution order is unchanged.
+
+        Parameters
+        ----------
+        rebuild_every : int
+            Passed through from ``__init__`` unchanged.
+        reuse_topology : bool
+            Passed through from ``__init__`` unchanged.
+
+        Returns
+        -------
+        None
+            Mutates ``self`` in place, exactly as the inlined code did.
+
+        Raises
+        ------
+        ValueError
+            If ``rebuild_every`` is not positive.
+        """
+        self.reuse_topology = bool(reuse_topology)
+        if int(rebuild_every) <= 0:
+            raise ValueError("rebuild_every must be positive")
+        self.rebuild_every = int(rebuild_every)
+        self._recent_far_pairs_by_gear_counts: tuple[int, ...] = tuple()
+        self._recent_dual_node_count: int = 0
+        self._recent_dual_leaf_count: int = 0
+        self._recent_dual_neighbor_count: int = 0
+        self._recent_dual_far_pair_count: int = 0
+        self._recent_dual_m2l_chunk_size: int = 0
+        self._static_radix_tree_leaf_count: int = 0
+        self._static_radix_tree_node_count: int = 0
+        # Concrete tree depth (unpadded), stashed at build so the traced refresh
+        # can pass it as a static arg to the upward M2M level loop. Radix trees
+        # pad level_offsets to full Morton depth; using the padded shape makes the
+        # M2M loop iterate many empty levels. See _resolve_upward_num_levels.
+        self._static_upward_num_levels: Optional[int] = None
+        self._static_radix_far_pair_count: int = 0
+        self._static_radix_m2l_chunk_count: int = 0
+        self._static_radix_l2l_edge_count: int = 0
+
+    def _resolve_mac_and_adaptive_policy(
+        self,
+        *,
+        adaptive_eps: Optional[float],
+        adaptive_error_model: str,
+        complex_rotation: str,
+        dehnen_geometry_mode: str,
+        farfield_mode: FarFieldMode,
+        mac_force_scale_fb_inflation: Optional[float],
+        mac_force_scale_mode: str,
+        mac_force_scale_prepass_theta: Optional[float],
+        mac_theta_max: float,
+        mixed_order_farfield: bool,
+        mixed_order_min_order: Optional[int],
+        streamed_far_pairs: Optional[bool],
+    ) -> None:
+        """Resolve the MAC family, the adaptive-order error model and mixed order.
+
+        Extracted verbatim from ``__init__`` lines 470-529 (audit 2.1 step 3),
+        called in the original position so the resolution order is unchanged.
+
+        Parameters
+        ----------
+        adaptive_eps : Optional[float]
+            Passed through from ``__init__`` unchanged.
+        adaptive_error_model : str
+            Passed through from ``__init__`` unchanged.
+        complex_rotation : str
+            Passed through from ``__init__`` unchanged.
+        dehnen_geometry_mode : str
+            Passed through from ``__init__`` unchanged.
+        farfield_mode : FarFieldMode
+            Passed through from ``__init__`` unchanged.
+        mac_force_scale_fb_inflation : Optional[float]
+            Passed through from ``__init__`` unchanged. Inflates the far-field
+            source-to-target distance so the eq (16b) scale is a strict lower
+            bound; ``None`` takes the default.
+        mac_force_scale_mode : str
+            Passed through from ``__init__`` unchanged.
+        mac_force_scale_prepass_theta : Optional[float]
+            Passed through from ``__init__`` unchanged. Opening angle for the
+            force-scale prepass's own traversal; ``None`` takes the default.
+        mac_theta_max : float
+            Passed through from ``__init__`` unchanged.
+        mixed_order_farfield : bool
+            Passed through from ``__init__`` unchanged.
+        mixed_order_min_order : Optional[int]
+            Passed through from ``__init__`` unchanged.
+        streamed_far_pairs : Optional[bool]
+            Passed through from ``__init__`` unchanged.
+
+        Returns
+        -------
+        None
+            Mutates ``self`` in place, exactly as the inlined code did.
+
+        Raises
+        ------
+        ValueError
+            If a MAC/adaptive option is outside its documented domain, or a paper-style MAC is given a non-positive ``adaptive_eps``.
+        """
+        force_scale_mode_norm = str(mac_force_scale_mode).strip().lower()
+        if force_scale_mode_norm not in (
+            "prev",
+            "prepass",
+            "paper",
+            "paper_cached",
+            "paper_fb",
+            "paper_fb_cached",
+        ):
+            raise ValueError(
+                "mac_force_scale_mode must be 'prev', 'prepass', 'paper', "
+                "'paper_cached', 'paper_fb', or 'paper_fb_cached'"
+            )
+        self.mac_force_scale_mode = force_scale_mode_norm
+        self.mac_force_scale_prepass_theta = (
+            None
+            if mac_force_scale_prepass_theta is None
+            else float(mac_force_scale_prepass_theta)
+        )
+        if self.mac_force_scale_prepass_theta is not None and not (
+            0.0 < self.mac_force_scale_prepass_theta <= 1.0
+        ):
+            raise ValueError("mac_force_scale_prepass_theta must be in (0, 1]")
+        self.mac_force_scale_fb_inflation = float(mac_force_scale_fb_inflation)
+        if self.mac_force_scale_fb_inflation < 0.0:
+            raise ValueError("mac_force_scale_fb_inflation must be >= 0")
+        adaptive_error_model_norm = str(adaptive_error_model).strip().lower()
+        if adaptive_error_model_norm not in (
+            "tail_proxy",
+            "dehnen_degree",
+            "dehnen_paper",
+        ):
+            raise ValueError(
+                "adaptive_error_model must be 'tail_proxy', 'dehnen_degree', or 'dehnen_paper'"
+            )
+        self.adaptive_error_model = adaptive_error_model_norm
+        dehnen_geometry_mode_norm = str(dehnen_geometry_mode).strip().lower()
+        if dehnen_geometry_mode_norm not in (
+            "com",
+            "exact",
+            "tree",
+            "tree_approx",
+            "runtime",
+        ):
+            raise ValueError(
+                "dehnen_geometry_mode must be 'com', 'exact', 'tree', "
+                "'tree_approx', or 'runtime'"
+            )
+        self.dehnen_geometry_mode = dehnen_geometry_mode_norm
+        self.mac_theta_max = float(mac_theta_max)
+        if not (0.0 < self.mac_theta_max <= 1.0):
+            raise ValueError("mac_theta_max must be in (0, 1]")
+        self.adaptive_eps = None if adaptive_eps is None else float(adaptive_eps)
+        if self.adaptive_eps is not None and self.adaptive_eps <= 0.0:
+            raise ValueError("adaptive_eps must be > 0 when provided")
+        self._last_force_scale_nodes: Optional[Array] = None
+        #: Per-particle force scale from the most recent eq (16b) prepass, in sorted
+        #: (tree) order. Diagnostic only -- the criterion consumes the node-reduced
+        #: array above. It exists so the estimator can be scored against an exact
+        #: O(N^2) f_b without re-running the prepass, which is how the O(N) estimate
+        #: was validated (see bench/validation/fb_estimator_fidelity.py).
+        self._last_force_scale_particles: Optional[Array] = None
+        self._in_force_scale_prepass = False
+        #: Per-node effective opening angles from the most recent prepare_state under
+        #: mac_type='dehnen_theta'. Diagnostic only -- the traversal consumes them as
+        #: rescaled geometry.radius, not from here.
+        self._recent_effective_theta_nodes: Optional[Array] = None
+
+        rotation_norm = str(complex_rotation).strip().lower()
+        if rotation_norm != "solidfmm":
+            raise ValueError("complex_rotation must be 'solidfmm'")
+        self.complex_rotation = rotation_norm
+        farfield_mode_norm = str(farfield_mode).strip().lower()
+        if farfield_mode_norm not in ("auto", "pair_grouped", "class_major"):
+            raise ValueError(
+                "farfield_mode must be 'auto', 'pair_grouped', or 'class_major'"
+            )
+        self.farfield_mode = farfield_mode_norm
+        self._explicit_streamed_far_pairs = streamed_far_pairs is not None
+        self.streamed_far_pairs = bool(streamed_far_pairs)
+        self.mixed_order_farfield = bool(mixed_order_farfield)
+        self.mixed_order_min_order = (
+            None if mixed_order_min_order is None else int(mixed_order_min_order)
+        )
+        if (
+            self.mixed_order_min_order is not None
+            and int(self.mixed_order_min_order) < 0
+        ):
+            raise ValueError("mixed_order_min_order must be >= 0")
+
+    def _resolve_schedule_budgets(
+        self,
+        *,
+        grouped_schedule_budget_bytes: Optional[int],
+        nearfield_schedule_item_cap: Optional[int],
+        precompute_grouped_class_segments: Optional[bool],
+        upward_leaf_batch_size: Optional[int],
+    ) -> None:
+        """Resolve the grouped/near-field schedule budgets and the upward batch size.
+
+        Extracted verbatim from ``__init__`` lines 571-597 (audit 2.1 step 3),
+        called in the original position so the resolution order is unchanged.
+
+        Parameters
+        ----------
+        grouped_schedule_budget_bytes : Optional[int]
+            Passed through from ``__init__`` unchanged.
+        nearfield_schedule_item_cap : Optional[int]
+            Passed through from ``__init__`` unchanged.
+        precompute_grouped_class_segments : Optional[bool]
+            Passed through from ``__init__`` unchanged.
+        upward_leaf_batch_size : Optional[int]
+            Passed through from ``__init__`` unchanged.
+
+        Returns
+        -------
+        None
+            Mutates ``self`` in place, exactly as the inlined code did.
+
+        Raises
+        ------
+        ValueError
+            If a schedule budget, item cap or batch size is not positive.
+        """
         self.precompute_grouped_class_segments = (
             None
             if precompute_grouped_class_segments is None
@@ -585,6 +771,38 @@ class FastMultipoleMethod(
         )
         if self.upward_leaf_batch_size is not None and self.upward_leaf_batch_size <= 0:
             raise ValueError("upward_leaf_batch_size must be > 0 when provided")
+
+    def _resolve_tree_options(
+        self,
+        *,
+        dehnen_radius_scale: float,
+        host_refine_mode: str,
+        tree_type: str,
+    ) -> None:
+        """Resolve the Dehnen radius scale, host refinement and tree type.
+
+        Extracted verbatim from ``__init__`` lines 598-617 (audit 2.1 step 3),
+        called in the original position so the resolution order is unchanged.
+
+        Parameters
+        ----------
+        dehnen_radius_scale : float
+            Passed through from ``__init__`` unchanged.
+        host_refine_mode : str
+            Passed through from ``__init__`` unchanged.
+        tree_type : str
+            Passed through from ``__init__`` unchanged.
+
+        Returns
+        -------
+        None
+            Mutates ``self`` in place, exactly as the inlined code did.
+
+        Raises
+        ------
+        ValueError
+            If ``host_refine_mode`` or ``tree_type`` is outside its documented domain.
+        """
         dehnen_scale_val = float(dehnen_radius_scale)
         if dehnen_scale_val <= 0.0:
             raise ValueError("dehnen_radius_scale must be > 0")
@@ -605,31 +823,45 @@ class FastMultipoleMethod(
             )
         self.tree_type: TreeType = tree_type_norm  # type: ignore[assignment]
 
-        preset_config = get_preset_config(preset) if preset is not None else None
+    def _unpack_resolved_config(
+        self,
+        *,
+        mac_type: MACTypeInput,
+        resolved: FMMResolvedConfig,
+    ) -> None:
+        """Unpack the resolved config bundle onto self and pick the force-scale mode.
 
-        resolved = _resolve_fmm_config(
-            theta=theta,
-            G=G,
-            softening=softening,
-            working_dtype=working_dtype,
-            tree_build_mode=tree_build_mode,
-            target_leaf_particles=target_leaf_particles,
-            refine_local=refine_local,
-            max_refine_levels=max_refine_levels,
-            aspect_threshold=aspect_threshold,
-            m2l_chunk_size=m2l_chunk_size,
-            l2l_chunk_size=l2l_chunk_size,
-            max_pair_queue=max_pair_queue,
-            pair_process_block=pair_process_block,
-            traversal_config=traversal_config,
-            use_dense_interactions=use_dense_interactions,
-            preset_config=preset_config,
-        )
+        Extracted verbatim from ``__init__`` lines 657-671 (audit 2.1 step 3),
+        called in the original position so the resolution order is unchanged.
 
+        Parameters
+        ----------
+        mac_type : MACTypeInput
+            Passed through from ``__init__`` unchanged.
+        resolved : FMMResolvedConfig
+            Passed through from ``__init__`` unchanged.
+
+        Returns
+        -------
+        None
+            Mutates ``self`` in place, exactly as the inlined code did.
+        """
         self.config = resolved
         self.preset = resolved.preset
         self.theta = resolved.theta
         self.mac_type = mac_type
+        if self._uses_per_node_effective_theta():
+            warnings.warn(
+                "mac_type='dehnen_theta' is a refuted experiment retained only so "
+                "its negative result stays reproducible. Measured against the exact "
+                "criterion at N=4096/p=8: 12-9300x worse force error at 1.35-15x "
+                "more interaction work (p99.99 reached 2.3e+02 on bulge+halo). A "
+                "per-node opening angle cannot carry eq (16a), whose acceptance "
+                "needs a product of a source and a sink term where the traversal "
+                "test is a sum. Use mac_type='dehnen_error' for the exact criterion.",
+                FutureWarning,
+                stacklevel=2,
+            )
         if self._uses_dehnen_error_policy():
             if self.adaptive_error_model == "tail_proxy":
                 self.adaptive_error_model = "dehnen_paper"
@@ -641,6 +873,23 @@ class FastMultipoleMethod(
                 # re-runs the full prepass on *every* prepare_state, which costs
                 # ~3.5x steady state. Keep 'paper' for whoever asks for it.
                 self.mac_force_scale_mode = "paper_cached"
+
+    def _check_dehnen_paper_requirements(self) -> None:
+        """Reject a paper-style MAC that was given no explicit accuracy target.
+
+        Extracted verbatim from ``__init__`` lines 672-692 (audit 2.1 step 3),
+        called in the original position so the resolution order is unchanged.
+
+        Returns
+        -------
+        None
+            Mutates ``self`` in place, exactly as the inlined code did.
+
+        Raises
+        ------
+        ValueError
+            If a paper-style MAC was requested without an explicit ``adaptive_eps``.
+        """
         # Dehnen eq (16a) is parameterised by a relative force-accuracy target
         # `eps`, not by an opening angle: acceptance is gated only by the error
         # test plus eq (16a)'s own `theta < 1` convergence guard, so `theta` has
@@ -662,6 +911,34 @@ class FastMultipoleMethod(
                 "and is far too loose here. Note that theta itself does not "
                 "gate acceptance in this mode."
             )
+
+    def _resolve_runtime_defaults(
+        self,
+        *,
+        resolved: FMMResolvedConfig,
+        preset_config: Optional[FMMPresetConfig],
+        interaction_retry_logger: Optional[Callable[[DualTreeRetryEvent], None]],
+    ) -> None:
+        """Resolve G/softening/dtype, jit defaults, chunk sizes, traversal and tree build.
+
+        Extracted verbatim from ``__init__`` lines 692-806 (audit 2.1 step 2).
+        Called in the original position, so the resolution order is unchanged --
+        that order is load-bearing (b462e45, dee46d6).
+
+        Parameters
+        ----------
+        resolved : FMMResolvedConfig
+            Passed through from ``__init__`` unchanged.
+        preset_config : Optional[FMMPresetConfig]
+            Passed through from ``__init__`` unchanged.
+        interaction_retry_logger : Optional[Callable[[DualTreeRetryEvent], None]]
+            Passed through from ``__init__`` unchanged.
+
+        Returns
+        -------
+        None
+            Mutates ``self`` in place, exactly as the inlined code did.
+        """
         self.G = resolved.G
         self.softening = resolved.softening
         self.working_dtype = resolved.working_dtype
@@ -776,6 +1053,25 @@ class FastMultipoleMethod(
         self._refresh_timing_nearfield_neighbor_padding_seconds: float = 0.0
         self._refresh_timing_nearfield_state_pack_seconds: float = 0.0
         self._refresh_timing_nearfield_residual_seconds: float = 0.0
+        self._refresh_timing_evaluate_seconds: float = 0.0
+
+    def _resolve_refresh_and_strict_modes(self) -> None:
+        """Resolve the refresh-timing, dual-planner and strict-lane execution modes.
+
+        Extracted verbatim from ``__init__`` lines 807-901 (audit 2.1 step 2).
+        Called in the original position, so the resolution order is unchanged --
+        that order is load-bearing (b462e45, dee46d6).
+
+        Returns
+        -------
+        None
+            Mutates ``self`` in place, exactly as the inlined code did.
+        """
+        # Whether the M2L/L2L substage timers actually ran. They cost a device
+        # sync per substage, so they are conditional -- and a conditional timer
+        # that reports 0.0 when it did not run is indistinguishable from a stage
+        # that was free. Surfaced as refresh_substages_measured.
+        self._refresh_timing_substages_measured: bool = False
         self._refresh_timing_calls: int = 0
         self._refresh_timing_active: bool = False
         self._refresh_timing_enabled: bool = str(
@@ -866,6 +1162,19 @@ class FastMultipoleMethod(
                 "0",
             )
         ).strip().lower() in {"1", "true", "yes", "on"}
+
+    def _resolve_large_n_diag_modes(self) -> None:
+        """Resolve the large-N fused defaults and every diagnostic-mode env switch.
+
+        Extracted verbatim from ``__init__`` lines 902-1003 (audit 2.1 step 2).
+        Called in the original position, so the resolution order is unchanged --
+        that order is load-bearing (b462e45, dee46d6).
+
+        Returns
+        -------
+        None
+            Mutates ``self`` in place, exactly as the inlined code did.
+        """
         # Default ON: the device-only fused hot path enables the streamed
         # fast-lane (_prepare_state_dual_and_downward_strict_streamed_fast),
         # which is ~10x faster than the host-routed path for the strict fused
@@ -968,6 +1277,54 @@ class FastMultipoleMethod(
         self._strict_fused_jit_function_cache: dict[
             tuple[Any, ...], tuple[Any, ...]
         ] = {}
+
+    def _init_compiled_lane_caches(
+        self,
+        *,
+        m2l_chunk_size: Optional[int],
+        l2l_chunk_size: Optional[int],
+        traversal_config: Optional[DualTreeTraversalConfig],
+        max_pair_queue: Optional[int],
+        pair_process_block: Optional[int],
+        grouped_interactions: Optional[bool],
+        fixed_order: Optional[int],
+        fixed_max_leaf_size: Optional[int],
+    ) -> None:
+        """Initialise the compiled-lane caches and record which knobs the caller set.
+
+        Extracted verbatim from ``__init__`` lines 1004-1022 (audit 2.1 step 2).
+        Called in the original position, so the resolution order is unchanged --
+        that order is load-bearing (b462e45, dee46d6).
+
+        Parameters
+        ----------
+        m2l_chunk_size : Optional[int]
+            Passed through from ``__init__`` unchanged.
+        l2l_chunk_size : Optional[int]
+            Passed through from ``__init__`` unchanged.
+        traversal_config : Optional[DualTreeTraversalConfig]
+            Passed through from ``__init__`` unchanged.
+        max_pair_queue : Optional[int]
+            Passed through from ``__init__`` unchanged.
+        pair_process_block : Optional[int]
+            Passed through from ``__init__`` unchanged.
+        grouped_interactions : Optional[bool]
+            Passed through from ``__init__`` unchanged.
+        fixed_order : Optional[int]
+            Passed through from ``__init__`` unchanged.
+        fixed_max_leaf_size : Optional[int]
+            Passed through from ``__init__`` unchanged.
+
+        Returns
+        -------
+        None
+            Mutates ``self`` in place, exactly as the inlined code did.
+        """
+        # Compiled radix fast-lane acceleration evaluates, keyed by the
+        # Python constants the traced body closes over (jax.jit keys on the
+        # pytree structure and avals itself). See
+        # _large_n_pipeline._large_n_fastlane_eval_fn.
+        self._large_n_fastlane_eval_jit_cache: dict[tuple[Any, ...], Any] = {}
         self._strict_profiled_max_pair_queue: int = 0
         self._strict_profiled_pair_process_block: int = 0
         self._strict_profiled_context_key: str = ""
@@ -982,12 +1339,27 @@ class FastMultipoleMethod(
         self._explicit_pair_process_block = pair_process_block is not None
         self._explicit_grouped_interactions = grouped_interactions is not None
         self.grouped_interactions = grouped_interactions
-        self._streamed_minimum_memory_gpu_default_split_build: bool = bool(
-            self.memory_objective == "minimum_memory"
-            and jax.default_backend() == "gpu"
-            and self.tree_type == "radix"
-            and self.expansion_basis == "solidfmm"
-            and bool(self.streamed_far_pairs)
+
+    def _resolve_derived_lane_flags(self) -> None:
+        """Derive the two cross-cutting lane flags from the already-resolved config.
+
+        Extracted verbatim from ``__init__`` lines 1023-1035 (audit 2.1 step 2).
+        Called in the original position, so the resolution order is unchanged --
+        that order is load-bearing (b462e45, dee46d6).
+
+        Returns
+        -------
+        None
+            Mutates ``self`` in place, exactly as the inlined code did.
+        """
+        self._streamed_minimum_memory_gpu_default_split_build: bool = (
+            derive_split_build_default(
+                memory_objective=self.memory_objective,
+                backend=jax.default_backend(),
+                tree_type=self.tree_type,
+                expansion_basis=self.expansion_basis,
+                streamed_far_pairs=self.streamed_far_pairs,
+            )
         )
         self._large_n_gpu_production_profile_cached: bool = (
             str(self.preset).strip().lower() == "large_n_gpu"
@@ -995,6 +1367,28 @@ class FastMultipoleMethod(
             and str(self.expansion_basis).strip().lower() == "solidfmm"
             and str(self.execution_backend).strip().lower() != "octree"
         )
+
+    def _resolve_static_sizing_flags(
+        self,
+        *,
+        retain_far_pairs_for_grad: bool,
+    ) -> None:
+        """Resolve static runtime sizing, grad far-pair retention and fast-lane centres.
+
+        Extracted verbatim from ``__init__`` lines 1036-1069 (audit 2.1 step 2).
+        Called in the original position, so the resolution order is unchanged --
+        that order is load-bearing (b462e45, dee46d6).
+
+        Parameters
+        ----------
+        retain_far_pairs_for_grad : bool
+            Passed through from ``__init__`` unchanged.
+
+        Returns
+        -------
+        None
+            Mutates ``self`` in place, exactly as the inlined code did.
+        """
         self._static_runtime_fixed_sizing: bool = str(
             os.environ.get("JACCPOT_STATIC_RUNTIME_FIXED_SIZING", "1")
         ).strip().lower() in {"1", "true", "yes", "on"}
@@ -1107,7 +1501,27 @@ class FastMultipoleMethod(
         self.retain_interactions = False
         self.precompute_grouped_class_segments = False
         if self.upward_leaf_batch_size is None:
-            self.upward_leaf_batch_size = 2048
+            self.upward_leaf_batch_size = _LARGE_N_GPU_UPWARD_LEAF_BATCH_SIZE
+
+        # Re-derive the split-build default from the fields this contract has just
+        # coerced. `_resolve_derived_lane_flags` ran BEFORE them, so it saw whatever
+        # the caller supplied: on the bare preset that is already correct, but a
+        # caller who also passes `advanced=FMMAdvancedConfig(...)` replaces the
+        # preset's config with their own, whose defaults are
+        # `memory_objective="balanced"` and `streamed_far_pairs=None` -> False. The
+        # predicate then came out False and this preset silently ran the monolithic
+        # dual-tree build it exists to avoid. Note `streamed_far_pairs` is the
+        # load-bearing conjunct, not `memory_objective`: setting only the latter in
+        # an advanced config left the predicate False.
+        self._streamed_minimum_memory_gpu_default_split_build = (
+            derive_split_build_default(
+                memory_objective=self.memory_objective,
+                backend=jax.default_backend(),
+                tree_type=self.tree_type,
+                expansion_basis=self.expansion_basis,
+                streamed_far_pairs=self.streamed_far_pairs,
+            )
+        )
 
     def _resolve_execution_backend(self) -> str:
         """Resolve the active FMM execution backend without altering tree choice."""
@@ -1134,19 +1548,19 @@ class FastMultipoleMethod(
 
     @property
     def recent_retry_events(
-        self: "FastMultipoleMethod",
+        self: "FMMEngine",
     ) -> Tuple[DualTreeRetryEvent, ...]:
         """Return retry telemetry collected during the latest build."""
 
         return self._recent_retry_events
 
     @property
-    def recent_topology_reused(self: "FastMultipoleMethod") -> bool:
+    def recent_topology_reused(self: "FMMEngine") -> bool:
         """Whether the most recent prepare/evaluate path reused cached topology."""
 
         return bool(self._recent_topology_reused)
 
-    def clear_prepared_state_cache(self: "FastMultipoleMethod") -> None:
+    def clear_prepared_state_cache(self: "FMMEngine") -> None:
         """Clear cached prepared-state payloads used by reuse mode."""
 
         self._prepared_state_cache_key = None
@@ -1157,7 +1571,7 @@ class FastMultipoleMethod(
         self._recent_topology_reused = False
 
     def clear_runtime_caches(
-        self: "FastMultipoleMethod", *, clear_jax_compilation: bool = False
+        self: "FMMEngine", *, clear_jax_compilation: bool = False
     ) -> None:
         """Release solver/runtime caches to reduce memory pressure."""
 
@@ -1168,6 +1582,7 @@ class FastMultipoleMethod(
         self._interaction_cache_misses = 0
         self._tree_workspace = None
         self._last_force_scale_nodes = None
+        self._last_force_scale_particles = None
         self._recent_retry_events = tuple()
         self._recent_far_pairs_by_gear_counts = tuple()
         self._recent_dual_node_count = 0
@@ -1258,6 +1673,8 @@ class FastMultipoleMethod(
         self._refresh_timing_nearfield_neighbor_padding_seconds = 0.0
         self._refresh_timing_nearfield_state_pack_seconds = 0.0
         self._refresh_timing_nearfield_residual_seconds = 0.0
+        self._refresh_timing_evaluate_seconds = 0.0
+        self._refresh_timing_substages_measured = False
         self._refresh_timing_calls = 0
         self._refresh_timing_active = False
         self._refresh_dual_planner_cache = {}
@@ -1309,13 +1726,13 @@ class FastMultipoleMethod(
         self._strict_profile_loaded_once = False
         _clear_global_runtime_caches(clear_jax_compilation=bool(clear_jax_compilation))
 
-    def export_m2l_autotune_cache(self: "FastMultipoleMethod") -> list[dict[str, Any]]:
+    def export_m2l_autotune_cache(self: "FMMEngine") -> list[dict[str, Any]]:
         """Return a JSON-serializable snapshot of global M2L autotune results."""
 
         return _m2l_autotune_payload()
 
     def import_m2l_autotune_cache(
-        self: "FastMultipoleMethod",
+        self: "FMMEngine",
         payload: list[dict[str, Any]],
         *,
         merge: bool = True,
@@ -1324,7 +1741,7 @@ class FastMultipoleMethod(
 
         return _restore_m2l_autotune_payload(payload, merge=bool(merge))
 
-    def save_m2l_autotune_cache(self: "FastMultipoleMethod", path: str) -> int:
+    def save_m2l_autotune_cache(self: "FMMEngine", path: str) -> int:
         """Write global M2L autotune cache to a JSON file."""
 
         payload = self.export_m2l_autotune_cache()
@@ -1333,7 +1750,7 @@ class FastMultipoleMethod(
         return int(len(payload))
 
     def load_m2l_autotune_cache(
-        self: "FastMultipoleMethod",
+        self: "FMMEngine",
         path: str,
         *,
         merge: bool = True,
@@ -1376,7 +1793,7 @@ def compute_gravitational_acceleration(
 ) -> Union[Array, Tuple[Array, Array]]:
     """Compute gravitational accelerations via the Fast Multipole Method."""
 
-    fmm = FastMultipoleMethod(
+    fmm = FMMEngine(
         theta=theta,
         G=G,
         softening=softening,

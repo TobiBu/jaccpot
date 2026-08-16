@@ -4,7 +4,7 @@ Uses harness.py's per_gpu_interaction_counts (this directory). Use a
 Plummer-sphere-like or NFW-like clustered distribution rather than
 uniform_cube -- this is specifically the case where naive
 space-filling-curve partitioning can go unbalanced. Writes
-results/multigpu/load_balance.json:
+bench/results/multigpu/load_balance.json:
 {"gpu_index": [...], "interaction_count": [...]}
 """
 

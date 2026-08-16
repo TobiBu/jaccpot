@@ -153,7 +153,7 @@ outer-jittable at arbitrary N is a scoped follow-up.
 
 ## 6. Correctness strategy (Phase 3)
 
-- **Primary gate:** `grad(differentiable_accelerations)` vs `grad(differentiable_gravitational_acceleration)`
+- **Primary gate:** `grad(differentiable_accelerations)` vs `grad(direct_sum_gravitational_acceleration)`
   (the exactly-differentiable direct O(N²) sum) — must agree to the FMM's own **force**
   accuracy (not machine precision), for masses and positions.
 - **FD vs AD** swept over θ, N, p; FD perturbs the *same frozen-topology function*
@@ -274,7 +274,7 @@ near-field by default.**
    itself was hardened with the sm_80 check.
 
 4. **Coverage.** Added the missing forward parity test for `m2l_real_fused`
-   (`tests/test_m2l_real_fused_pallas.py`: Pallas-interpret vs the twin and vs the
+   (`tests/unit/operators/test_m2l_real_fused_pallas.py`: Pallas-interpret vs the twin and vs the
    rot-scale reference it accelerates). VJP parity for all three kernels via
    `assert_vjp_matches` — interpret on CPU CI + real Pallas on the A100 (12 passed).
    Gradient-correctness + grad-vs-direct-sum re-run with the flag ON on the A100
@@ -439,7 +439,7 @@ as the adaptive branch does.
 **Why nothing caught A–D:** the largest real particle count in the suite is n=1500;
 the `num_particles=1000000` references only unit-test chunk-size resolvers, and the
 one N=65536 test uses `preset="large_n_gpu"` (which forces `pair_grouped`) and is
-env-gated off. `tests/unit/test_large_n_grad_path.py` now covers the resolver policy
+env-gated off. `tests/unit/test_large_n_config_thresholds.py` now covers the resolver policy
 (host-only, instant), the grouped-vs-ungrouped grad equivalence, and fp32 far-field
 gradient finiteness.
 

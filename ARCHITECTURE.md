@@ -11,7 +11,7 @@ This document is about *where the code lives and why*.
 ## 1. Layering at a glance
 
 ```
-jaccpot/__init__.py            public surface (12 __all__ names)
+jaccpot/__init__.py            public surface (15 __all__ names)
         |
 jaccpot/solver.py              FastMultipoleMethod  <-- the ONLY public class
         |                      preset-first facade; resolves preset/basis/advanced
@@ -19,7 +19,7 @@ jaccpot/solver.py              FastMultipoleMethod  <-- the ONLY public class
 jaccpot/runtime/fmm/           orchestrator package (re-export seam)
         |                      __init__ re-exports the engine; must NOT be the
         |                      import that forms a cycle (see section 8)
-jaccpot/runtime/_fmm_impl.py   FastMultipoleMethod engine (thin coordinator)
+jaccpot/runtime/_fmm_impl.py   FMMEngine (thin coordinator)
         |                      + 10 method-cluster mixins (section 4)
         |
 jaccpot/runtime/kernels/       reusable numerical core (LEAF -- never imports
@@ -32,6 +32,25 @@ artifacts, and the shared constant/cache modules — never on the orchestrator.
 `distributed/` and `experimental/` reach straight past the engine into
 `kernels/`, which is what proves the leaf boundary is real.
 
+**The one path that does not go through this stack** is the mutual force:
+
+```
+jaccpot/nornax_adapter.py      BlockStepFMM  <-- the second public class
+        |                      block-step KDK facade; no nornax import
+jaccpot/mutual/               momentum-conserving evaluation path
+        topology.py            host-side symmetric dual traversal (frozen)
+        nearfield.py           leaf-pair P2P, +F/-F to both endpoints
+        farfield.py            dual M2L, one evaluation per accepted pair
+        force.py               rung/level vocabulary over the two above
+```
+
+It reaches `operators/` and `pallas/` directly and never touches
+`runtime/`, because the property it exists to provide — `sum_i m_i a_i` zero to
+round-off rather than to the truncation error — depends on evaluating each pair
+**once**, and the production runtime is target-centric by construction (each pair
+evaluated twice, independently). This is a deliberate second lane, not a
+duplicate: see [`docs/momentum_conserving_fmm.md`](docs/momentum_conserving_fmm.md).
+
 ## 2. Public API contract
 
 `jaccpot/__init__.py __all__` is the stable surface downstream code (e.g. the
@@ -43,14 +62,23 @@ ODISSEO coupling) depends on. It is frozen by
 | `FastMultipoleMethod` | the solver class (in `solver.py`) |
 | `FMMPreset` | preset enum (FAST / BALANCED / ACCURATE / LARGE_N_GPU) |
 | `FMMAdvancedConfig`, `FarFieldConfig`, `NearFieldConfig`, `RuntimePolicyConfig`, `TreeConfig` | advanced config dataclasses |
+| `TraversalOverrides` | named traversal capacities, merged onto a preset's sizing |
+| `GradConfig` | the supported interface for configuring the differentiable path (section 6) |
 | `MemoryObjective` | memory-policy literal |
 | `ComplexSHBasis`, `RealSHBasis` | expansion bases |
 | `OdisseoFMMCoupler` | ODISSEO integration adapter |
-| `differentiable_gravitational_acceleration` | autodiff-able **direct-sum** oracle (the differentiable FMM itself is `FastMultipoleMethod.differentiable_accelerations`; see section 6) |
+| `BlockStepFMM` | momentum-conserving force for a block-step individual-timestep KDK (in `nornax_adapter.py`; see section 1) |
+| `direct_sum_gravitational_acceleration` | autodiff-able **direct-sum** oracle (the differentiable FMM itself is `FastMultipoleMethod.differentiable_accelerations`; see section 6) |
 
-`FastMultipoleMethod` in `solver.py` is the sole public class name; the runtime
-engine class (currently also named `FastMultipoleMethod` in `_fmm_impl.py`) is
-an internal implementation detail reached only through the facade.
+`FastMultipoleMethod` in `solver.py` is the facade for the production force. The
+runtime engine is `FMMEngine` in `_fmm_impl.py` -- an internal implementation
+detail reached only through the facade. The two used to share the name, which this
+document flagged as confusing; audit 2.4 renamed the engine, so a reference to
+`FastMultipoleMethod` now unambiguously means the public class.
+
+`BlockStepFMM` is the only other public class, and it is **not** an alternative
+spelling of the same thing -- it computes a different number (momentum-exact rather
+than target-centric) through a separate path.
 
 ## 3. runtime/ package map
 
@@ -85,14 +113,19 @@ import cycle (section 8).
 
 ## 4. The engine: coordinator + mixins
 
-`_fmm_impl.FastMultipoleMethod` is a thin coordinator (constructor, backend
-plumbing, cache lifecycle, autotune-cache IO) that inherits its behaviour from
-**10 method-cluster mixins**, each a sibling `runtime/fmm_<cluster>.py` module.
+`_fmm_impl.FMMEngine` coordinates (constructor, backend plumbing, cache
+lifecycle, autotune-cache IO) and inherits its behaviour from **10 method-cluster
+mixins**, each a sibling `runtime/fmm_<cluster>.py` module. It used to be described
+as *thin*, which the mixin split achieved for everything except the constructor.
+`__init__` was 722 lines with 60 parameters against 316 for the rest of the class;
+audit 2.1 staged it into 13 private resolvers, so the body is now **141 lines** of
+named phases. It still takes 60 parameters -- that is the public surface, not the
+body, and is item 2.4's territory.
 Methods were moved verbatim during the god-class breakup; `self` is unchanged;
 cross-cluster calls resolve through the MRO.
 
 ```python
-class FastMultipoleMethod(
+class FMMEngine(
     PrepareMixin, EvaluateMixin, StrictRunMixin, SweepsMixin, OverridesMixin,
     AutotuneMixin, PolicyMixin, DerivativesMixin, StrictCapProfileMixin,
     DiagnosticsMixin,
@@ -133,7 +166,16 @@ kernel did, so consolidation is source-level dedup with no numerical change.
 - `_accumulate_m2l_fullbatch` — one full interaction batch → `segment_sum`
 - `_accumulate_m2l_chunked_scan` — chunked `lax.scan` reduction (bounded memory)
 - grouped / class-major variants (`_accumulate_solidfmm_m2l_grouped[_class_major]`)
-  — cached class blocks; already `basis_mode`-parametrised
+  — cached class blocks; `basis_mode`-parametrised, but **not exercised in the real
+  basis by any production path**. `basis="real"` with `grouped_interactions=True`
+  raises in `prepare_upward_sweep` (grouped classification needs AABB expansion
+  centres; the native real-basis upward sweep accepts `center_mode="com"` only), so
+  every grouped M2L that actually runs today is complex. The real branch is therefore
+  parametrised-but-latent, and the only thing standing behind it is
+  `tests/unit/runtime/test_grouped_m2l_basis_mode.py` — which exists because
+  `_accumulate_solidfmm_m2l_grouped` did drop `basis_mode` on its fullbatch branch,
+  silently applying the complex cached kernel to real blocks (3.8e-01 relative error,
+  no exception).
 
 **L2L / downward:** `_propagate_solidfmm_locals_by_level` (unifies real+complex
 behind `basis_mode`), `_propagate_{solidfmm,real}_locals_to_children`, the
@@ -223,7 +265,7 @@ derivative/jerk towers, and cached-vs-uncached M2L dispatch.
   measurement record: `docs/differentiable_fmm_audit.md`,
   `docs/differentiable_fmm_design.md`, and for multi-GPU
   `docs/differentiable_fmm_distributed_audit.md`.
-- `differentiable_gravitational_acceleration` remains the deliberately differentiable
+- `direct_sum_gravitational_acceleration` remains the deliberately differentiable
   **direct O(N²) sum** — retained as the simple exact-gradient reference and the
   **gradient oracle** for tests (`grad(FMM)` must match `grad(direct-sum)` to FMM force
   accuracy), not as "the" differentiable path.
@@ -301,6 +343,15 @@ fmm_constants -> fmm_caches -> kernels -> {_interaction_cache, _large_n_pipeline
 
 `distributed/` and `experimental/` depend only on `kernels/` (not the engine).
 
+`mutual/` sits beside the sweeps and depends on `operators/` at module scope and
+on `pallas/` from **six function-local sites** (`farfield.py` ×4,
+`nearfield.py` ×2) — the same deferred-heavy-import pattern
+`nearfield/near_field.py` uses, and deliberate for the same reason. Two further
+imports reach the `jaccpot` facade function-locally to break a cycle
+(`mutual/topology.py` and `nornax_adapter.py`, both for `FastMultipoleMethod`).
+Nothing in `mutual/` imports `runtime/`, and nothing in `runtime/` imports
+`mutual/`; `pallas/nearfield_mutual.py` depends only on `pallas/_compat`.
+
 **Cycle rule:** `runtime/fmm/__init__.py` must not eagerly import the engine
 class in a way that reforms
 `_interaction_cache -> fmm -> engine -> prepare -> _interaction_cache`.
@@ -310,10 +361,20 @@ at the `runtime/` level until the engine is fully dissolved into `fmm/engine.py`
 
 ## 9. Validation harness
 
+- **Gradient golden** —
+  [`tests/characterization/test_fmm_grad_golden.py`](tests/characterization/test_fmm_grad_golden.py)
+  snapshots `jax.grad` of a fixed-cotangent loss on `differentiable_accelerations`
+  w.r.t. positions and masses, over 6 cases, with the same two gates as the forward
+  oracle (inertness at `rtol=1e-12`; physics anchor against `jax.grad` of the direct
+  sum, per-order bounds). The forward oracle cannot see a reverse-only regression:
+  measured, scaling the analytic real L2P reverse rule by `1+1e-6` leaves the forward
+  golden green and turns this one red. `leaf_size=4` is load-bearing -- at leaf >= 8
+  these systems accept **zero** M2L pairs, so the far-field reverse would not be
+  traced at all; a vacuity gate asserts the pair count per case.
 - **Golden characterization oracle** —
   [`tests/characterization/test_fmm_golden.py`](tests/characterization/test_fmm_golden.py)
-  drives the FMM over a grid (N, order, basis, farfield modes, outputs) and applies
-  two gates: (1) an **inertness** gate — outputs match the committed `.npz` goldens
+  drives the FMM over a grid of (distribution, N, basis, order) -- 13 cases, all
+  `preset="accurate"`, **accelerations only** -- and applies two gates: (1) an **inertness** gate — outputs match the committed `.npz` goldens
   under `tests/characterization/golden/` to float64 round-off (`atol=0, rtol≈1e-12`),
   and (2) a **physics** gate — each output is anchored to a direct O(N²) sum to a
   loose relative-L2 bound, so a regenerated golden can never silently encode a wrong
@@ -321,13 +382,39 @@ at the `runtime/` level until the engine is fully dissolved into `fmm/engine.py`
   numerical one. Regenerate goldens intentionally with `JACCPOT_REGEN_GOLDEN=1`.
 - **Public-API guard** —
   [`tests/unit/test_public_api_surface.py`](tests/unit/test_public_api_surface.py)
-  freezes the 12 `__all__` names + `FMMPreset` members. Red = the refactor leaked
+  freezes the 14 `__all__` names + `FMMPreset` members. Red = the refactor leaked
   into the public contract.
 - **Runtime typecheck** — set `JACCPOT_RUNTIME_TYPECHECK=1` to enable beartype
   runtime checks over the suite.
 - **GPU/Pallas parity (A100, manual/nightly):** run the fused-Pallas M2L parity
   tests + golden with `JACCPOT_STATIC_STRICT_FUSED_M2L_PALLAS=1` under
   `JAX_ENABLE_X64=1` to confirm the Pallas paths match the pure-JAX reference.
+  See `CLAUDE.md` for the worker-capped invocation — the default `-n auto` is
+  unusable on one card.
+
+### Known GPU-only failures (A100 sm_80, jax 0.10.2)
+
+These five fail on the A100 and pass on CPU. **All predate Tier 1** — they reproduce on
+`128a0e2`, before the first Tier 1 merge — so bisect against a pre-branch commit before
+attributing one to your change. Re-measured 2026-08-12, three runs per configuration:
+
+| test | fails (default XLA) | fails (deterministic ops) |
+|---|---|---|
+| `test_fmm_grad_golden[clu_real_n128_p4]` | 3/3 | **3/3** |
+| `test_real_basis_tracks_complex_basis[nearfield-only-f32]` | 3/3 | 0/3 |
+| `test_solidfmm_chunked_m2l_matches_fullbatch` | 1/3 | 0/3 |
+| `test_compiled_dispatch_is_bit_identical[None]` | 1/3 | 0/3 |
+| `test_compiled_dispatch_is_bit_identical[32]` | 1/3 | 0/3 |
+
+`XLA_FLAGS="--xla_gpu_deterministic_ops=true"` is the fast triage lever: **four of the five
+go green under it**, so still-red-with-the-flag means a real discrepancy and green-with-the-flag
+means you were looking at reduction nondeterminism (§10).
+
+The one that survives the flag is a genuine platform difference, not noise:
+`test_fmm_grad_golden[clu_real_n128_p4]` has one element of 384 sitting ~7.9e-12 relative from
+a golden that was **generated on CPU**, against `rtol=atol=1e-12`. All GPU values cluster
+~2.1e-9 below the committed value. It is not a regression and the golden has not been touched;
+whether goldens gain a platform-aware band or become explicitly CPU-only is an open decision.
 
 ## 10. Kernel-consolidation invariant
 
@@ -335,9 +422,43 @@ When merging real/complex kernel families, the merge is numerics-preserving
 **only** because every discriminator (`basis_mode`, `rotation`, `m2l_impl`,
 `order`, `chunk_size`) is a `static_argname`, so XLA specialises the merged
 `jax.jit` per static combination. This is source-level dedup, never a runtime
-branch inside a compiled kernel. Any consolidation PR must show:
+branch inside a compiled kernel. What that argument does **not** cover is the call
+sites: a discriminator with a default (`basis_mode: str = "complex"` on every
+accumulator) is silently satisfied by a caller that forgets to forward it, and the
+specialisation then happily compiles the wrong basis. That is exactly how
+`_accumulate_solidfmm_m2l_grouped`'s fullbatch branch went wrong — see §5. Audit the
+callers, not only the kernels. Any consolidation PR must show:
 
 1. merged-vs-old **bit-identical** output on a fixed input grid (rtol=0),
 2. the golden oracle exact-green,
 3. the full suite with no new failures vs the frozen baseline,
 4. an A100 Pallas-on vs pure-JAX parity run when the change touches Pallas.
+
+**Items 1 and 2 are unsatisfiable on GPU without `--xla_gpu_deterministic_ops=true`.**
+Measured on an A100 (`docs/refactor_audit_2026-08.md` B.3): under default XLA the *same*
+tree on the *same* card differs run-to-run by up to `2.1e-11`, which is **larger** than
+the difference a consolidation PR is trying to bound — so an exact-equality check run
+without the flag reports a difference that carries no information about the change. With
+the flag the same comparison is exactly equal, `rtol=0`, on every case. Set it on both
+sides, and say in the PR that you did.
+
+The corollary for item 3: a GPU run of the suite has four pre-existing failures that go
+green under the flag, so the "frozen baseline" for item 3 must be a baseline taken the
+same way. Run the *old* code on the *same* card in the same session — a CPU baseline is
+not a baseline for a GPU comparison.
+
+**Run the same-tree-twice control first**, before reading any cross-tree number. Compare
+a tree against *itself* on the same card: if A-vs-A differs as much as A-vs-B, the harness
+has not yet earned the right to report A-vs-B as a difference. That control is what
+identified the problem above — the same-tree difference (`4.4e-15` of typical `|a|`, ~65%
+of entries affected) turned out to exceed the two-tree difference (`1.8e-15`).
+
+Deterministic ops serialise the scatters and are measurably slower, so use the flag for
+correctness comparisons only — **never for the timing runs** in `NUMERICS_AND_JAX.md` §4.
+
+**When item 4 actually runs.** There is no GPU runner in CI — every job is
+`ubuntu-latest` — so item 4 is a *manual* step, not an enforced merge gate, and it has
+been discharged in arrears before (Tier 1 merged ten PRs owing it; the run is recorded in
+`docs/tier1_gpu_validation_report.html`). Treat it as a release-level obligation for any
+Pallas-touching batch and say in the PR whether it was run. A nightly GPU leg is tracked
+as audit item F11.

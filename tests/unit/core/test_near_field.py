@@ -8,16 +8,19 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
+from jaxtyping import TypeCheckError
 from yggdrax.dtypes import INDEX_DTYPE
 from yggdrax.geometry import compute_tree_geometry
 from yggdrax.interactions import build_leaf_neighbor_lists
 from yggdrax.tree import build_tree
 
+from jaccpot.nearfield._fast_lane import (
+    compute_leaf_p2p_accelerations_radix_fast_lane,
+)
 from jaccpot.nearfield.near_field import (
     collect_radix_fast_lane_counters,
     compute_leaf_p2p_accelerations,
     compute_leaf_p2p_accelerations_large_n_accel_only,
-    compute_leaf_p2p_accelerations_radix_fast_lane,
     prepare_leaf_neighbor_pairs,
 )
 from jaccpot.runtime._large_n_types import RadixFastNearfieldPayload
@@ -1040,3 +1043,178 @@ def test_collect_radix_fast_lane_counters_matches_payload_formula():
     assert int(counters.scatter_ops) == int(expected_scatter_ops)
     assert int(counters.target_batches) >= 1
     assert int(counters.source_slot_tiles) >= 0
+
+
+# ===========================================================================
+# Edge-order invariant behind the precomputed_* contract
+# ===========================================================================
+
+
+def _synthetic_neighbor_csr():
+    """A small CSR leaf-neighbour list that is deliberately not source-sorted.
+
+    Seven nodes; nodes 3..6 are the leaves. Each leaf has two neighbours, listed
+    in an order that ``argsort(source_leaf_ids)`` will genuinely permute -- which
+    is what makes the assertions below non-vacuous.
+    """
+    node_ranges = jnp.asarray(
+        [[0, 7], [0, 3], [4, 7], [0, 1], [2, 3], [4, 5], [6, 7]], dtype=INDEX_DTYPE
+    )
+    leaf_nodes = jnp.asarray([3, 4, 5, 6], dtype=INDEX_DTYPE)
+    offsets = jnp.asarray([0, 2, 4, 6, 8], dtype=INDEX_DTYPE)
+    neighbors = jnp.asarray([5, 6, 6, 3, 3, 4, 4, 5], dtype=INDEX_DTYPE)
+    return node_ranges, leaf_nodes, offsets, neighbors
+
+
+def test_prepare_leaf_neighbor_pairs_unsorted_is_positionally_aligned():
+    """``sort_by_source=False`` must keep the pair vectors aligned with ``neighbors``.
+
+    This is the unchecked half of the ``precomputed_*`` contract on
+    :func:`compute_leaf_p2p_accelerations`. A consumer handed
+    ``precomputed_target_leaf_ids`` but no ``precomputed_source_leaf_ids``
+    re-derives the sources positionally as ``leaf_lookup[neighbors]``. If the
+    stored vectors were source-sorted instead, they would be paired against
+    unsorted sources -- and because both orderings have identical shapes, no shape
+    check anywhere can detect it. The result is wrong forces with no error and no
+    NaN, which is why this invariant is worth a test rather than a comment alone.
+    """
+    node_ranges, leaf_nodes, offsets, neighbors = _synthetic_neighbor_csr()
+
+    target_ids, source_ids, valid = prepare_leaf_neighbor_pairs(
+        node_ranges, leaf_nodes, offsets, neighbors, sort_by_source=False
+    )
+
+    # Exactly the derivation a consumer performs when source ids are absent.
+    total_nodes = int(node_ranges.shape[0])
+    leaf_lookup = jnp.full((total_nodes,), -1, dtype=INDEX_DTYPE)
+    leaf_lookup = leaf_lookup.at[leaf_nodes].set(
+        jnp.arange(leaf_nodes.shape[0], dtype=INDEX_DTYPE)
+    )
+    rederived = leaf_lookup[jnp.clip(neighbors, 0, total_nodes - 1)]
+
+    assert jnp.array_equal(source_ids, rederived), (
+        "sort_by_source=False must leave source ids positionally aligned with "
+        "`neighbors`, or the consumer-side re-derivation silently mispairs edges"
+    )
+    # Targets follow the CSR row structure, so they are non-decreasing.
+    assert bool(jnp.all(jnp.diff(target_ids) >= 0))
+    assert bool(jnp.all(valid))
+
+
+def test_prepare_leaf_neighbor_pairs_sorted_breaks_positional_alignment():
+    """``sort_by_source=True`` permutes the edges -- the value the contract forbids.
+
+    Documents by assertion why the default is unsafe for anything persisted: the
+    sorted variant is a permutation of the same edge set, so it is equally valid
+    on its own, but it no longer satisfies the positional identity above.
+    """
+    node_ranges, leaf_nodes, offsets, neighbors = _synthetic_neighbor_csr()
+
+    unsorted_t, unsorted_s, unsorted_v = prepare_leaf_neighbor_pairs(
+        node_ranges, leaf_nodes, offsets, neighbors, sort_by_source=False
+    )
+    sorted_t, sorted_s, sorted_v = prepare_leaf_neighbor_pairs(
+        node_ranges, leaf_nodes, offsets, neighbors, sort_by_source=True
+    )
+
+    # Non-vacuity: if these ever coincided the test above would prove nothing.
+    assert not jnp.array_equal(unsorted_t, sorted_t)
+    assert not jnp.array_equal(unsorted_s, sorted_s)
+
+    # Same edge set, different order -- and now source-major.
+    assert jnp.array_equal(jnp.sort(unsorted_t), jnp.sort(sorted_t))
+    assert jnp.array_equal(jnp.sort(unsorted_s), jnp.sort(sorted_s))
+    assert bool(jnp.all(jnp.diff(sorted_s) >= 0))
+    assert int(jnp.sum(unsorted_v)) == int(jnp.sum(sorted_v))
+
+
+def test_prepare_leaf_neighbor_pairs_drops_padding_edges():
+    """Negative ``neighbors`` padding must be masked out, not wrapped to leaf 0.
+
+    ``leaf_lookup[-1]`` would index the last row, so the implementation clips and
+    masks. Without the mask a padded edge becomes a real interaction.
+    """
+    node_ranges, leaf_nodes, offsets, _ = _synthetic_neighbor_csr()
+    padded = jnp.asarray([5, -1, 6, -1, 3, -1, 4, -1], dtype=INDEX_DTYPE)
+
+    _, source_ids, valid = prepare_leaf_neighbor_pairs(
+        node_ranges, leaf_nodes, offsets, padded, sort_by_source=False
+    )
+
+    expected_valid = jnp.asarray([True, False] * 4)
+    assert jnp.array_equal(valid, expected_valid)
+    # The masked-out slots may hold anything; only the valid ones are contractual.
+    assert bool(jnp.all(source_ids[valid] >= 0))
+
+
+# ---------------------------------------------------------------------------
+# Staticness contracts. These are documented in
+# `compute_leaf_p2p_accelerations`'s `Raises` / `Parameters` sections and, before
+# these tests, asserted nowhere -- which is the general pattern flagged as D.7 in
+# docs/refactor_audit_2026-08.md: staticness is documented across this file and
+# almost never tested. They are cheap and they break loudly if a refactor
+# accidentally turns a static value into a traced one, which NUMERICS_AND_JAX §1
+# calls out as able to leave runtime untouched while tripling compile time.
+# ---------------------------------------------------------------------------
+
+
+def test_max_leaf_size_is_required_under_jit(accel_only_case):
+    """``max_leaf_size=None`` must fail loudly when tracing, and work when eager.
+
+    The bound is read from the data with ``.item()`` when omitted, which is the one
+    deliberate host sync in this function. Under a tracer that raises ``TypeError``,
+    re-raised as a ``ValueError`` naming the expectation -- the "fail loudly rather
+    than silently substituting" policy of STYLE_GUIDE §9.
+
+    Both directions are asserted. Without the eager half, a guard that raised
+    unconditionally would also pass, and the point of the parameter is that omitting
+    it is legal outside ``jit``.
+    """
+    case = accel_only_case
+
+    def call(positions, masses):
+        return compute_leaf_p2p_accelerations(
+            case.tree,
+            case.neighbor_list,
+            positions,
+            masses,
+            G=1.0,
+            softening=1e-2,
+            max_leaf_size=None,
+        )
+
+    with pytest.raises(ValueError, match="max_leaf_size must be provided"):
+        jax.jit(call)(case.pos_sorted, case.mass_sorted)
+
+    eager = call(case.pos_sorted, case.mass_sorted)
+    assert np.asarray(eager).shape == np.asarray(case.pos_sorted).shape
+    assert np.all(np.isfinite(np.asarray(eager)))
+
+
+def test_softening_must_be_concrete(accel_only_case):
+    """A traced ``softening`` must be rejected, not silently mis-handled.
+
+    The docstring says ``softening`` "must be a concrete Python float, not a tracer",
+    because it is squared host-side via ``float(softening)``. What actually enforces
+    this is the always-on ``@jaxtyped(typechecker=beartype)`` decorator on this
+    function -- it rejects the tracer against the ``float`` annotation before
+    ``float()`` is ever reached. That is a *stronger* guarantee than the docstring
+    describes (it fails at the boundary rather than mid-body), and it is worth pinning
+    precisely because it does not depend on ``JACCPOT_RUNTIME_TYPECHECK``: this
+    decorator is unconditional, so the contract holds in production, not only under
+    the opt-in typecheck hook.
+    """
+    case = accel_only_case
+
+    with pytest.raises(TypeCheckError):
+        jax.jit(
+            lambda soft: compute_leaf_p2p_accelerations(
+                case.tree,
+                case.neighbor_list,
+                case.pos_sorted,
+                case.mass_sorted,
+                G=1.0,
+                softening=soft,
+                max_leaf_size=2,
+            )
+        )(jnp.asarray(1e-2))

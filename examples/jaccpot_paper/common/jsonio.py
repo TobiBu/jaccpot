@@ -27,7 +27,7 @@ __all__ = [
 
 # `parents[4]` walks examples/jaccpot_paper/common/jsonio.py -> repo root.
 _REPO_ROOT = pathlib.Path(__file__).resolve().parents[3]
-RESULTS_ROOT = _REPO_ROOT / "results"
+RESULTS_ROOT = _REPO_ROOT / "bench" / "results"
 
 # The axes that make a number reproducible. A bench script that cannot fill one
 # of these in does not yet know what it measured.
@@ -49,7 +49,7 @@ def repo_root() -> pathlib.Path:
 
 
 def results_path(*parts: str) -> pathlib.Path:
-    """Return ``results/<parts...>``, e.g. ``results_path("validation", "x.json")``."""
+    """Return ``bench/results/<parts...>``, e.g. ``results_path("validation", "x.json")``."""
 
     return RESULTS_ROOT.joinpath(*parts)
 
@@ -82,6 +82,28 @@ def write_result(
 
     Idempotent: rerunning a bench script overwrites the same path rather than
     accumulating timestamped siblings, so a figure always has exactly one input.
+
+    Parameters
+    ----------
+    path : str | pathlib.Path
+        Destination. A relative path resolves under :data:`RESULTS_ROOT`.
+    config : Mapping[str, Any]
+        The axes that make the number reproducible; see
+        :data:`REQUIRED_CONFIG_KEYS`.
+    data : Any
+        The measurement itself, as JSON-serialisable values.
+    meta : Optional[Mapping[str, Any]]
+        Provenance that is not a measurement axis (git revision, device name,
+        wall-clock). Defaults to an empty mapping.
+    required_config_keys : Iterable[str]
+        Keys ``config`` must carry. Defaults to :data:`REQUIRED_CONFIG_KEYS`.
+    indent : int
+        Indentation passed to :func:`json.dumps`.
+
+    Returns
+    -------
+    pathlib.Path
+        The resolved path actually written.
 
     Raises
     ------

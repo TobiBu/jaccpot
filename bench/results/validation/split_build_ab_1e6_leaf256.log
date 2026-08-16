@@ -1,0 +1,9 @@
+=== run=1 split-build=on ===
+mass        3e-05      1783414          2964516     258.98     7813  eps*s in [7.424e-02, 1.077e+01] float32
+=== run=1 split-build=off ===
+mass        3e-05      1783416          2964516     751.48     7813  eps*s in [7.424e-02, 1.077e+01] float32
+=== run=2 split-build=on ===
+mass        3e-05      1783416          2964516     256.83     7813  eps*s in [7.424e-02, 1.077e+01] float32
+=== run=2 split-build=off ===
+mass        3e-05      1783414          2964516     472.43     7813  eps*s in [7.424e-02, 1.077e+01] float32
+=== AB DONE ===

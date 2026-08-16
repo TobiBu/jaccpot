@@ -12,6 +12,7 @@ from jaccpot.operators.complex_ops import (
     evaluate_local_complex_derivative_tower,
     evaluate_local_complex_with_grad,
     l2l_complex,
+    m2l_complex_reference,
     m2m_complex,
     regular_solid_harmonic_directional_derivative,
     regular_solid_harmonic_directional_derivative_batch,
@@ -312,6 +313,34 @@ def test_evaluate_local_complex_derivative_tower_matches_third_order_autodiff() 
     assert np.allclose(np.asarray(d3), d3_ref, rtol=1e-11, atol=1e-11)
 
 
+@pytest.mark.parametrize(
+    "delta",
+    [[0.0, 0.0, 0.0], [0.0, 0.0, 0.37], [0.0, 0.0, -0.37]],
+    ids=["origin", "plus_z", "minus_z"],
+)
+@pytest.mark.parametrize("order", [1, 2, 4])
+def test_evaluate_local_complex_grad_at_rho_zero_matches_limit(delta, order) -> None:
+    """The complex L2P has no azimuthal degeneracy -- keep it that way.
+
+    ``complex_R_solidfmm`` is a pure polynomial recursion in (x, y, z): it never
+    forms an azimuth, so it is smooth at the expansion centre and on its z axis
+    where the real-basis L2P used to lose both transverse gradient components.
+    """
+    local = jnp.asarray(_complex_coeffs(order, 23))
+    delta = jnp.asarray(delta, dtype=jnp.float64)
+
+    grad, pot = evaluate_local_complex_with_grad(local, delta, order=order)
+    grad_off, pot_off = evaluate_local_complex_with_grad(
+        local, delta + jnp.asarray([3e-15, -4e-15, 0.0]), order=order
+    )
+
+    assert np.all(np.isfinite(np.asarray(grad)))
+    assert np.allclose(np.asarray(grad), np.asarray(grad_off), rtol=1e-9, atol=1e-12)
+    assert np.allclose(float(pot), float(pot_off), rtol=1e-9, atol=1e-12)
+    assert abs(float(grad[0])) > 1e-6
+    assert abs(float(grad[1])) > 1e-6
+
+
 def test_contract_spatial_derivative_with_velocity_matches_hessian_times_v() -> None:
     # Packed Hessian layout: xx, xy, xz, yy, yz, zz
     hessian_packed = jnp.array([2.0, -1.0, 4.0, 3.0, -2.0, 5.0], dtype=jnp.float64)
@@ -392,3 +421,133 @@ def test_regular_harmonic_directional_derivative_batch_matches_single(
         axis=0,
     )
     assert np.allclose(np.asarray(got), np.asarray(ref), rtol=1e-12, atol=1e-12)
+
+
+# The rotate -> z-translate -> rotate-back cascade at the degenerate separation
+# rho == 0, where the solidfmm alignment azimuth is undefined. The complex-basis
+# counterpart of
+# tests/unit/operators/test_real_harmonics.py::test_rotation_cascade_transverse_gradient_at_rho_zero
+# -- same defect (G.10), same fix, and worth asserting separately because the
+# generators are built from this basis' own swap matrices rather than derived from
+# the real ones.
+_COMPLEX_CASCADE_OPERATORS = [
+    pytest.param(m2l_complex_reference, id="m2l_complex_reference"),
+    pytest.param(m2m_complex, id="m2m_complex"),
+    pytest.param(l2l_complex, id="l2l_complex"),
+]
+
+_COMPLEX_CASCADE_ORDER = 4
+_COMPLEX_CASCADE_Z = 2.5
+# Probe radius for the rho -> 0 limit. NOT smaller: the polar route loses transverse
+# gradient accuracy like eps / rho, so at rho = 1e-9 the eight-direction spread is
+# round-off (4.6e-05) rather than the O(rho) structure being measured, and at 1e-7 it
+# is 1.2e-06 to 2.4e-06 and scales linearly in rho as it should.
+_COMPLEX_PROBE_RHO = 1.0e-7
+
+
+def _complex_cascade_gradient(operator, delta):
+    """``grad`` of a fixed-cotangent real scalar loss on ``operator`` w.r.t. ``delta``."""
+    coeffs = jnp.asarray(
+        _complex_coeffs(_COMPLEX_CASCADE_ORDER, 5), dtype=jnp.complex128
+    )
+    weights = jnp.asarray(
+        _complex_coeffs(_COMPLEX_CASCADE_ORDER, 6), dtype=jnp.complex128
+    )
+
+    def loss(d):
+        out = operator(coeffs, d, order=_COMPLEX_CASCADE_ORDER)
+        return jnp.real(jnp.sum(weights * out))
+
+    return np.asarray(
+        jax.grad(loss)(jnp.asarray(delta, dtype=jnp.float64)), dtype=np.float64
+    )
+
+
+def _complex_cascade_offaxis_limit(operator, num_directions=8, rho=_COMPLEX_PROBE_RHO):
+    """The ``rho -> 0`` gradient limit, averaged over approach directions.
+
+    Averaging is only meaningful because the limit is direction-independent, which
+    :func:`test_complex_cascade_gradient_limit_is_direction_independent` asserts
+    separately rather than leaving to assumption.
+    """
+    grads = [
+        _complex_cascade_gradient(
+            operator,
+            [
+                rho * np.cos(2.0 * np.pi * k / num_directions),
+                rho * np.sin(2.0 * np.pi * k / num_directions),
+                _COMPLEX_CASCADE_Z,
+            ],
+        )
+        for k in range(num_directions)
+    ]
+    return np.mean(np.array(grads), axis=0)
+
+
+@pytest.mark.parametrize("operator", _COMPLEX_CASCADE_OPERATORS)
+def test_complex_cascade_gradient_limit_is_direction_independent(operator) -> None:
+    """The complex cascade is genuinely differentiable at ``rho == 0``.
+
+    The premise the next test rests on: if the gradient limit depended on the approach
+    direction there would be no derivative there, and a zero cotangent would be a
+    defensible subgradient rather than a defect.
+
+    The measured spread across eight directions at ``rho = 1e-7`` is 1.2e-06 (M2L) to
+    2.4e-06 (L2L) against gradient components of 1.9 to 18.5, i.e. ~1.3e-07 relative,
+    and it scales as ``O(rho)`` -- it is the genuine second-order variation of the
+    gradient with position, not structure in the limit. The bound below is 1e-4
+    relative: ~1000x above that measurement, and ~1e4 below the ``O(1)`` relative
+    spread a genuinely direction-dependent limit would produce.
+    """
+    if not jax.config.jax_enable_x64:
+        pytest.skip("gradient limits require float64 (JAX_ENABLE_X64=1)")
+
+    grads = np.array(
+        [
+            _complex_cascade_gradient(
+                operator,
+                [
+                    _COMPLEX_PROBE_RHO * np.cos(2.0 * np.pi * k / 8),
+                    _COMPLEX_PROBE_RHO * np.sin(2.0 * np.pi * k / 8),
+                    _COMPLEX_CASCADE_Z,
+                ],
+            )
+            for k in range(8)
+        ]
+    )
+    spread = float(np.max(grads.max(axis=0) - grads.min(axis=0)))
+    scale = max(float(np.max(np.abs(grads))), 1.0)
+    assert spread <= 1.0e-4 * scale, (
+        "the rho -> 0 gradient limit must be direction-independent for the derivative "
+        f"to exist; spread across 8 directions is {spread:.3e} against a gradient "
+        f"scale of {scale:.3f}"
+    )
+
+
+@pytest.mark.parametrize("operator", _COMPLEX_CASCADE_OPERATORS)
+def test_complex_cascade_transverse_gradient_at_rho_zero(operator) -> None:
+    """``d/dx`` and ``d/dy`` at ``rho == 0`` must equal the off-axis limit.
+
+    ``_angles_from_delta_solidfmm`` guards its azimuth at ``rho == 0`` and so returns a
+    zero transverse cotangent; the cascade carries a ``custom_jvp`` that supplies the
+    analytic derivative instead (G.10 -- see
+    :mod:`jaccpot.operators._transverse_degeneracy_jvp`). Without it these two
+    components come out as exactly 0.0 against limits of 1.9 to 18.5, so the test does
+    not depend on the tolerance being tight; the measured agreement is <= 6e-08
+    absolute, and the 1e-5 relative bound leaves the O(rho) offset of the probe radius
+    plenty of room.
+    """
+    if not jax.config.jax_enable_x64:
+        pytest.skip("gradient limits require float64 (JAX_ENABLE_X64=1)")
+
+    at_zero = _complex_cascade_gradient(operator, [0.0, 0.0, _COMPLEX_CASCADE_Z])
+    limit = _complex_cascade_offaxis_limit(operator)
+
+    assert np.all(np.isfinite(at_zero)), f"gradient is not finite: {at_zero}"
+    for component, axis in ((0, "x"), (1, "y"), (2, "z")):
+        assert abs(at_zero[component] - limit[component]) <= 1.0e-5 * max(
+            abs(limit[component]), 1.0
+        ), (
+            f"d/d{axis} at rho == 0 is {at_zero[component]:.9f}, but the off-axis "
+            f"limit is {limit[component]:.9f}"
+        )

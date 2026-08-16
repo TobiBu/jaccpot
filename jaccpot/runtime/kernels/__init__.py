@@ -1,19 +1,22 @@
 """Reusable FMM numerical kernel library (leaf package).
 
-The numerical core currently lives in :mod:`jaccpot.runtime.kernels.core` (a
-single module extracted from ``_fmm_impl``); it will be subdivided into
-m2l/l2l/pallas_gates/downward/eval submodules as a follow-up. This package
-re-exports the core's symbols so consumers import from ``jaccpot.runtime.kernels``.
+The numerical core was one module extracted from ``_fmm_impl``; Tier 1.6
+subdivided it into ``_shared`` / ``_downward_prep`` / ``_m2l`` / ``_l2l`` /
+``_evaluate``, which is the follow-up this docstring used to promise.
+:mod:`jaccpot.runtime.kernels.core` is now the aggregator over those five, and
+this package re-exports its symbols so consumers import from
+``jaccpot.runtime.kernels``.
 
 Leaf contract: this package and ``core`` must NOT import the engine
 (``runtime.fmm.engine`` / the prepare pipeline), so ``distributed`` and
 ``experimental`` can use the kernels without dragging in the orchestrator.
 """
 
+from __future__ import annotations
+
 from .core import (
     _STRICT_REFRESH_DETAIL_DIAG_MODES,
     ExpansionBasis,
-    NearfieldInteropData,
     PackedAccelerationDerivatives,
     _accumulate_m2l_chunked_scan,
     _accumulate_m2l_fullbatch,
@@ -67,7 +70,6 @@ from .core import (
     _scatter_rank3,
     _scatter_scalars,
     _scatter_vectors,
-    _solidfmm_downward_accumulate_from_multipoles,
     _SolidFMMDownwardChildInputs,
     _SolidFMMDownwardInit,
     _SolidFMMDownwardInteractionInputs,

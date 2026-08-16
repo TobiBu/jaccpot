@@ -12,6 +12,28 @@ YGGDRAX_ROOT = REPO_ROOT.parent / "yggdrax"
 if YGGDRAX_ROOT.exists() and str(YGGDRAX_ROOT) not in sys.path:
     sys.path.insert(0, str(YGGDRAX_ROOT))
 
+
+# nornax is a TEST-ONLY dependency, used by the cross-repo momentum/block-step
+# checks. The library never imports it -- the dependency graph is
+# Jaccpot -> Yggdrax, Nornax standalone, ODISSEO -> both -- so it is put on the
+# path here rather than declared as a package dependency. Absent, those tests skip.
+#
+# Searched across REPO_ROOT's ancestors rather than just `REPO_ROOT.parent`,
+# because a git worktree checkout sits at `<repo>/.claude/worktrees/<name>`, so its
+# parent is `worktrees/` and the plain sibling lookup finds nothing.
+def _find_sibling_checkout(name: str) -> pathlib.Path | None:
+    """Return a sibling source checkout of ``name``, searching upward."""
+    for ancestor in (REPO_ROOT, *REPO_ROOT.parents):
+        candidate = ancestor.parent / name
+        if (candidate / name / "__init__.py").exists():
+            return candidate
+    return None
+
+
+NORNAX_ROOT = _find_sibling_checkout("nornax")
+if NORNAX_ROOT is not None and str(NORNAX_ROOT) not in sys.path:
+    sys.path.insert(0, str(NORNAX_ROOT))
+
 # --- Test-suite performance setup -------------------------------------------
 # The FMM correctness tests assume float64; set it once here so individual
 # tests/modules do not each have to depend on the ambient environment.
@@ -86,16 +108,100 @@ _DIFF_FMM_TEST_FILES = frozenset(
         "test_gradient_correctness.py",
         "test_custom_vjp_parity.py",
         "test_nearfield_fastlane_grad_path.py",
+        # The gradient golden compiles one reverse program per (basis, order, N)
+        # case and measures 1.1-1.5 GB peak each, so it belongs on this list for
+        # exactly the reason above -- it is a characterization test, but the
+        # footprint is a differentiable-FMM footprint.
+        "test_fmm_grad_golden.py",
     }
 )
+
+# Cleared only when the on-disk JAX cache is available to serve the recompiles.
+#
+# The mutual FMM suite belongs in the set above for exactly the reason given
+# there and was simply never added: it is the heaviest file in
+# `tests/integration`, and its gradient tests (FD-vs-AD, vs-direct-sum, rollout,
+# per-level, and the Pallas backend) each leave another reverse-mode executable
+# behind. Omitting it is what let `test-full` drift back to the ceiling and
+# start OOM-killing the runner. Measured on `tests/integration` at `-n 2 --cov`,
+# clearing here moves peak RSS 12.68 GB -> 5.47 GB (-57%).
+#
+# It is gated because that trade is only good when the recompiles are warm -- the
+# note above ("the follow-up recompiles are warm-cache reads") holds only where
+# JACCPOT_TEST_JAX_CACHE_DIR is set. Ungated, this cost +66% wall on the mutual
+# tests and pushed both test-smoke jobs from 27.9/29.9 min straight into their
+# cap, trading one CI failure for another.
+#
+# The gate is on the CONDITION, not on a job name, which is what makes it still
+# correct now that test-smoke has a JAX cache of its own: the clearing simply
+# switches itself on there, because the premise it waits for is now true. Do not
+# rewrite this as "test-full only" -- that was a symptom of which jobs had a
+# cache, not the rule.
+_DIFF_FMM_TEST_FILES_WARM_ONLY = frozenset(
+    {
+        "test_mutual_fmm.py",
+        "test_mutual_fmm_nornax.py",
+    }
+)
+
+
+# The same footprint, arrived at from the other direction. tests/unit/runtime is the
+# Dehnen-MAC suite: ~94 cases that each build a solver and run a full FMM solve. None takes
+# a gradient, so none qualifies for the list above, but the retained-executable pile is the
+# same pile -- measured 8.20 GB peak RSS for `pytest -n 2 tests/unit/runtime`, against the
+# ~7 GB the CI runner has. That is why its job (test-mac-runtime) OOM-kills an xdist worker
+# intermittently, and why the crash lands on an arbitrary victim -- whichever test happened
+# to be executing when the worker died, which is what made it look like a flake:
+#
+#     main, 2026-08-02   gw1  test_supplied_force_scale_rejects_a_mismatched_shape[two_dim]
+#     branch             gw0  test_supplied_force_scale_rejects_a_mismatched_shape[short]
+#     branch             gw0  test_far_near_partition_is_complete[dehnen-None-False]
+#
+# Three victims, one cause, and the first predates the branch that surfaced it. Listed as a
+# directory rather than filenames because the whole suite has this shape.
+#
+# WHAT IT COSTS, because it is more than the note above implies. Clearing after each of 94
+# solver tests takes that command from 269 s to 506 s, a 1.9x wall-clock cost, while peak
+# RSS drops to 3.33 GB. The on-disk cache recovers only ~12% of the recompiles (577 s cold
+# vs 506 s warm), NOT most of them: `JAX_PERSISTENT_CACHE_MIN_COMPILE_TIME_SECS` is 1.0
+# above, so the many sub-second compiles this suite churns through are never written to
+# disk. The trade is taken anyway -- test-mac-runtime runs ~8 min against a 50 min cap, so
+# there is room, and an intermittently-crashing job is worth more than the minutes. If that
+# ever stops being true, the lever is a coarser trigger (clear every k tests, or only above
+# an RSS watermark) rather than dropping this.
+_SOLVER_HEAVY_TEST_DIRS = frozenset(
+    {pathlib.Path(__file__).parent / "unit" / "runtime"}
+)
+
+
+def _retains_heavy_executables(node: pytest.Item) -> bool:
+    """Whether this test leaves a compiled-executable pile worth dropping.
+
+    Parameters
+    ----------
+    node : pytest.Item
+        The test item that just finished.
+
+    Returns
+    -------
+    bool
+        True when the test is one of the differentiable-FMM modules, lives in a
+        solver-heavy directory, or is one of the warm-only modules and the on-disk
+        JAX cache is available to serve its recompiles.
+    """
+    return (
+        node.path.name in _DIFF_FMM_TEST_FILES
+        or node.path.parent in _SOLVER_HEAVY_TEST_DIRS
+        or (bool(_jax_cache_dir) and node.path.name in _DIFF_FMM_TEST_FILES_WARM_ONLY)
+    )
 
 
 @pytest.fixture(autouse=True)
 def _bound_diff_fmm_compile_cache(request):
     """Free JAX's in-process compiled-executable cache after each heavy
-    differentiable-FMM test (see note above)."""
+    differentiable-FMM or solver-heavy test (see the notes above)."""
     yield
-    if request.node.path.name in _DIFF_FMM_TEST_FILES:
+    if _retains_heavy_executables(request.node):
         import gc
 
         import jax
@@ -131,6 +237,34 @@ def _isolate_process_env(tmp_path):
     across FastMultipoleMethod instances *within* one test). Tests that set env
     vars themselves (via monkeypatch or directly) are unaffected -- their
     changes simply do not survive past their own teardown.
+
+    **The restore touches only the keys that actually changed, and that is a
+    correctness requirement, not an optimisation.** It used to be
+    ``os.environ.clear(); os.environ.update(saved)``, which issues one ``unsetenv``
+    and one ``putenv`` per variable -- roughly 200 C-level environment mutations per
+    test, ~35k across the Dehnen-MAC job. ``setenv``/``unsetenv`` are **not
+    thread-safe**: glibc's ``unsetenv`` frees entries in ``environ`` while any other
+    thread calling ``getenv`` may be reading them, and both JAX and ``execnet``'s
+    receiver thread are live during teardown. That is a segfault, and it was
+    happening -- ``test-mac-runtime`` died with ``Fatal Python error: Segmentation
+    fault`` whose faulting frame is this fixture's teardown inside
+    ``os.environ.__setitem__`` -> ``os.encode``:
+
+        File ".../tests/conftest.py", line 197 in _isolate_process_env
+        File "<frozen _collections_abc>", line 991 in update
+        File "<frozen os>", line 723 in __setitem__
+        File "<frozen os>", line 875 in encode
+
+    Restoring only the diff makes that one mutation for a typical test (the
+    cap-profile path this fixture itself sets) instead of ~200, which shrinks the
+    race window by the same factor. The final environment is identical either way.
+
+    NOTE: the earlier ``worker 'gwN' crashed`` failures in ``tests/unit/runtime``
+    were attributed to memory in the note above. At least one of them was this
+    segfault instead, which is why the ``clear_caches`` mitigation did not stop them
+    -- a compiled-executable pile has nothing to do with an ``environ`` race. The
+    memory measurements in that note stand on their own; the crash attribution did
+    not.
     """
     saved_environ = dict(os.environ)
     os.environ["JACCPOT_STATIC_STRICT_CAP_PROFILE_PATH"] = str(
@@ -139,5 +273,9 @@ def _isolate_process_env(tmp_path):
     try:
         yield
     finally:
-        os.environ.clear()
-        os.environ.update(saved_environ)
+        current_environ = dict(os.environ)
+        for key in current_environ.keys() - saved_environ.keys():
+            del os.environ[key]
+        for key, value in saved_environ.items():
+            if current_environ.get(key) != value:
+                os.environ[key] = value
