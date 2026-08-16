@@ -24,6 +24,7 @@ from jaccpot.config import MACTypeInput
 from jaccpot.upward.tree_expansions import TreeUpwardData
 
 from ._adaptive_policy import (
+    AdaptivePolicyState,
     build_adaptive_policy_state,
     compute_node_force_scale_from_sorted_acc,
     estimate_particle_force_scale,
@@ -79,6 +80,21 @@ def _far_pair_arrays_for_fb_prepass(
     mass to ``own[root]`` and the downward accumulation would push it into
     *every* node -- inflating ``f_b``, loosening ``eps * s``, and making the
     solver faster and wronger with nothing to show it.
+
+    Parameters
+    ----------
+    interactions : object
+        Node interaction list, when the lane produced one. Preferred: its arrays
+        already use the ``-1`` convention, so they pass through untouched.
+    compact_far_pairs : object
+        Streamed-lane compact far pairs, used when there is no interaction list.
+        Its padding is rewritten to ``-1`` here.
+
+    Returns
+    -------
+    tuple[Optional[Array], Optional[Array]]
+        ``(sources, targets)`` as flat COO arrays with ``-1`` marking inactive
+        entries, or ``(None, None)`` when neither input was supplied.
     """
 
     if interactions is not None:
@@ -97,7 +113,17 @@ def _far_pair_arrays_for_fb_prepass(
 
 class PolicyMixin:
     def _solidfmm_basis_mode(self: "FMMEngine") -> str:
-        """Return active solidfmm coefficient family ('complex' or 'real')."""
+        """Return active solidfmm coefficient family ('complex' or 'real').
+
+        Reads the basis object's own name rather than ``expansion_basis``: the
+        two agree in normal use, but this is the one the coefficient layout
+        actually follows.
+
+        Returns
+        -------
+        str
+            ``"real"`` or ``"complex"``; anything unrecognized reads as complex.
+        """
         basis_obj = self.basis_impl
         name = str(getattr(basis_obj, "name", "")).strip().lower()
         if name == "real":
@@ -111,7 +137,24 @@ class PolicyMixin:
         accelerations_sorted: Array,
         reduction: str = "max",
     ) -> Array:
-        """Estimate per-node force scales from sorted per-particle accelerations."""
+        """Estimate per-node force scales from sorted per-particle accelerations.
+
+        Parameters
+        ----------
+        tree : Tree
+            Built tree, supplying the per-node particle ranges.
+        accelerations_sorted : Array
+            Per-particle accelerations ``[N, 3]`` in Morton order.
+        reduction : str
+            ``"min"`` or ``"max"`` over each node's particles. Not a tuning
+            knob -- eq (16a) wants ``min``; see
+            :meth:`_force_scale_reduction_mode`.
+
+        Returns
+        -------
+        Array
+            One force scale per node.
+        """
 
         return compute_node_force_scale_from_sorted_acc(
             tree=tree,
@@ -139,6 +182,18 @@ class PolicyMixin:
         instance attribute must never capture a tracer), during a prepass (the
         caller reduces that result itself), and for target-subset evaluations,
         whose accelerations do not cover every node.
+
+        Parameters
+        ----------
+        state : FMMPreparedState
+            The state just evaluated; supplies the tree the reduction runs over.
+        evaluation : object
+            The evaluation result. A tuple's first element is taken as the
+            accelerations, so this accepts every return shape the evaluate
+            entry points produce.
+        full_evaluation : bool
+            Whether every particle was evaluated. A target subset does not cover
+            every node, so its accelerations must not be cached.
         """
 
         if not full_evaluation or self._in_force_scale_prepass:
@@ -172,7 +227,22 @@ class PolicyMixin:
         multipole_packed: Array,
         p_gears: tuple[int, ...],
     ) -> Array:
-        """Compute a conservative per-node residual proxy for each candidate order."""
+        """Compute a conservative per-node residual proxy for each candidate order.
+
+        Parameters
+        ----------
+        multipole_packed : Array
+            Packed multipole coefficients per node.
+        p_gears : tuple[int, ...]
+            Candidate expansion orders to score. Must be non-empty.
+
+        Returns
+        -------
+        Array
+            Residual proxy per ``(node, gear)``. Conservative by construction --
+            it bounds the truncation residual from above, so an order it accepts
+            is safe and one it rejects may still have been fine.
+        """
 
         return source_error_proxy_by_order_from_multipoles(
             multipole_packed=multipole_packed,
@@ -180,7 +250,15 @@ class PolicyMixin:
         )
 
     def _adaptive_error_model_code(self: "FMMEngine") -> int:
-        """Return the integer policy code for the active adaptive error model."""
+        """Return the integer policy code for the active adaptive error model.
+
+        Returns
+        -------
+        int
+            ``2`` for ``"dehnen_paper"``, ``1`` for ``"dehnen_degree"``, ``0``
+            otherwise. The codes are what the traversal consumes, so they are an
+            interface, not an implementation detail.
+        """
 
         if self.adaptive_error_model == "dehnen_paper":
             return 2
@@ -198,6 +276,12 @@ class PolicyMixin:
         ``adaptive_eps``, the low-order prepass, the ``"dehnen"`` base MAC and the
         paper error-model code. They diverge at exactly one place: whether a pair
         policy is installed. See :meth:`_uses_per_node_effective_theta`.
+
+        Returns
+        -------
+        bool
+            ``True`` for ``mac_type`` in ``("dehnen_error", "dehnen_theta")``.
+            This set must stay in step with :meth:`_mac_type_for_traversal`.
         """
 
         return str(self.mac_type) in ("dehnen_error", "dehnen_theta")
@@ -225,29 +309,67 @@ class PolicyMixin:
         which recovers <=0.6% of the exact criterion's far pairs at its optimum).
         Carrying this criterion into the fast lanes needs pair-policy support in the
         lanes themselves.
+
+        Returns
+        -------
+        bool
+            ``True`` only for ``mac_type == "dehnen_theta"``. Its sibling
+            ``dehnen_error`` shares the criterion but installs a pair policy
+            instead.
         """
 
         return str(self.mac_type) == "dehnen_theta"
 
     def _uses_dehnen_paper_error_model(self: "FMMEngine") -> bool:
-        """Return whether the active adaptive error model is the paper estimator."""
+        """Return whether the active adaptive error model is the paper estimator.
+
+        Returns
+        -------
+        bool
+            ``True`` for ``adaptive_error_model == "dehnen_paper"`` -- the eq (15)
+            estimator, which also flips the force-scale reduction to ``min``.
+        """
 
         return self.adaptive_error_model == "dehnen_paper"
 
     def _uses_paper_style_traversal_policy(self: "FMMEngine") -> bool:
-        """Return whether traversal should use the paper-style error policy."""
+        """Return whether traversal should use the paper-style error policy.
+
+        Returns
+        -------
+        bool
+            ``True`` when either the paper error model or a Dehnen mass-dependent
+            MAC is active -- the two reach the traversal the same way.
+        """
 
         return self._uses_dehnen_paper_error_model() or self._uses_dehnen_error_policy()
 
     def _traversal_policy_error_model_code(self: "FMMEngine") -> int:
-        """Return the policy error model code used during traversal."""
+        """Return the policy error model code used during traversal.
+
+        Returns
+        -------
+        int
+            ``2`` whenever a Dehnen mass-dependent MAC is active, since that
+            criterion needs the paper estimator regardless of
+            ``adaptive_error_model``; otherwise
+            :meth:`_adaptive_error_model_code`.
+        """
 
         if self._uses_dehnen_error_policy():
             return 2
         return self._adaptive_error_model_code()
 
     def _force_scale_reduction_mode(self: "FMMEngine") -> str:
-        """Return the node reduction mode used for adaptive force scales."""
+        """Return the node reduction mode used for adaptive force scales.
+
+        Returns
+        -------
+        str
+            ``"min"`` under the paper estimator, ``"max"`` otherwise. eq (16a)
+            takes ``min_b |a_b|`` over the node, so the reduction is part of the
+            criterion rather than a tuning choice.
+        """
 
         return "min" if self._uses_dehnen_paper_error_model() else "max"
 
@@ -259,6 +381,12 @@ class PolicyMixin:
         estimator are untouched, so the whole of (16b) is a different per-node
         force scale -- which is why it needs no traversal work, only a different
         prepass.
+
+        Returns
+        -------
+        bool
+            ``True`` for ``mac_force_scale_mode`` in
+            ``("paper_fb", "paper_fb_cached")``.
         """
 
         return str(self.mac_force_scale_mode) in ("paper_fb", "paper_fb_cached")
@@ -287,6 +415,13 @@ class PolicyMixin:
         So the default is 0.5, near Dehnen §5.2's ``theta_crit ~ 0.46``, where the
         estimate is essentially exact. ``mac_force_scale_prepass_theta`` overrides
         it.
+
+        Returns
+        -------
+        float
+            The override when one is set, otherwise
+            ``_DEFAULT_FORCE_SCALE_PREPASS_THETA``. Independent of the solver's
+            own ``theta`` -- which is the point.
         """
 
         override = getattr(self, "mac_force_scale_prepass_theta", None)
@@ -295,7 +430,14 @@ class PolicyMixin:
         return _DEFAULT_FORCE_SCALE_PREPASS_THETA
 
     def _uses_paper_style_force_scale(self: "FMMEngine") -> bool:
-        """Return whether prepare_state needs paper-style force-scale handling."""
+        """Return whether prepare_state needs paper-style force-scale handling.
+
+        Returns
+        -------
+        bool
+            ``True`` when adaptive order is on or a paper-style traversal policy
+            is active -- either way a force scale has to be produced.
+        """
 
         return self.adaptive_order or self._uses_paper_style_traversal_policy()
 
@@ -339,14 +481,37 @@ class PolicyMixin:
         )
 
     def _base_mac_type(self: "FMMEngine") -> MACType:
-        """Return the Yggdrax-facing geometric MAC for the active solver mode."""
+        """Return the Yggdrax-facing geometric MAC for the active solver mode.
+
+        Returns
+        -------
+        MACType
+            ``self.mac_type`` mapped through :meth:`_mac_type_for_traversal`, so
+            the jaccpot-level policies collapse to ``"dehnen"``.
+        """
 
         return self._mac_type_for_traversal(self.mac_type)
 
     def _policy_orders_for_prepare_state(
         self: "FMMEngine", *, max_order: int
     ) -> tuple[int, ...]:
-        """Return candidate orders used to build adaptive traversal policy state."""
+        """Return candidate orders used to build adaptive traversal policy state.
+
+        The paper estimator without adaptive order runs at a single fixed order,
+        so offering it the full gear set would build policy state for orders that
+        can never be selected.
+
+        Parameters
+        ----------
+        max_order : int
+            The order this call will actually run at.
+
+        Returns
+        -------
+        tuple[int, ...]
+            ``(max_order,)`` for the paper estimator at fixed order, otherwise
+            ``self.p_gears``.
+        """
 
         if (not self.adaptive_order) and self._uses_dehnen_paper_error_model():
             return (int(max_order),)
@@ -364,8 +529,41 @@ class PolicyMixin:
         theta: Array,
         error_model_code: Array,
         dehnen_geometry_mode: str,
-    ):
-        """Build the solver-owned adaptive policy state from upward data."""
+    ) -> AdaptivePolicyState:
+        """Build the solver-owned adaptive policy state from upward data.
+
+        The state the traversal consults per pair. "Solver-owned" is the point:
+        yggdrax evaluates the geometric MAC, and everything mass-dependent about
+        Dehnen §5 lives in this object rather than in the traversal.
+
+        Parameters
+        ----------
+        upward : TreeUpwardData
+            Upward-sweep result; supplies the multipoles the error proxy reads.
+        tree : Tree
+            Built tree.
+        positions_sorted : Array
+            Particle positions ``[N, 3]`` in Morton order.
+        p_gears : tuple[int, ...]
+            Candidate orders, from :meth:`_policy_orders_for_prepare_state`.
+        force_scale_nodes : Optional[Array]
+            Per-node force scale; ``None`` leaves the policy to fall back to a
+            unit scale, which makes eq (16a) vacuous rather than wrong.
+        eps : Array
+            Relative force-accuracy target of eq (16a).
+        theta : Array
+            Opening angle entering the criterion.
+        error_model_code : Array
+            Which estimator to evaluate; see
+            :meth:`_traversal_policy_error_model_code`.
+        dehnen_geometry_mode : str
+            How node centres and radii are measured.
+
+        Returns
+        -------
+        AdaptivePolicyState
+            The policy state, ready to hand to the traversal.
+        """
 
         return build_adaptive_policy_state(
             gravitational_constant=float(self.G),
@@ -400,6 +598,31 @@ class PolicyMixin:
 
         ``theta_val`` cancels out of acceptance, so its value does not matter here;
         it is threaded through only because the traversal compares against it.
+
+        Parameters
+        ----------
+        tree_artifacts : _PrepareStateTreeUpwardArtifacts
+            Tree and upward artifacts whose geometry radii are rescaled.
+        force_scale_nodes : Optional[Array]
+            Per-node force scale. Required -- without it there is no criterion to
+            fold, so this raises rather than silently returning the artifacts
+            unchanged.
+        max_order : int
+            Expansion order entering the per-node angle.
+        theta_val : float
+            The angle the traversal will compare against. Cancels out of
+            acceptance; see above.
+
+        Returns
+        -------
+        _PrepareStateTreeUpwardArtifacts
+            The artifacts with ``geometry.radius`` replaced by the rescaled
+            radii. A new value -- the input is not mutated.
+
+        Raises
+        ------
+        ValueError
+            If ``force_scale_nodes`` is ``None``.
         """
 
         if force_scale_nodes is None:
@@ -464,6 +687,19 @@ class PolicyMixin:
           cadence and the tree was rebuilt twice as often as requested.
 
         Both prepass branches share this scope so they cannot drift apart again.
+
+        Parameters
+        ----------
+        low_order : int
+            The single order the prepass runs at. The prepass only needs a scale,
+            not an accurate force, so this is deliberately far below the solver's
+            own order.
+
+        Yields
+        ------
+        None
+            A bare scope. Everything it manages is solver attributes, restored on
+            exit whether or not the body raised.
         """
 
         saved_p_gears = self.p_gears
@@ -513,6 +749,47 @@ class PolicyMixin:
         The traversal runs with the geometric MAC at
         :meth:`_force_scale_prepass_theta` and with no pair policy, so it cannot
         recurse into the criterion it is computing the scale for.
+
+        Parameters
+        ----------
+        tree_artifacts : _PrepareStateTreeUpwardArtifacts
+            Tree and upward artifacts the prepass traverses.
+        upward_center_mode : str
+            Centre convention for the prepass upward data.
+        runtime_traversal_config : Optional[DualTreeTraversalConfig]
+            Traversal override for the prepass; ``None`` takes the default.
+        runtime_m2l_chunk_size : Optional[int]
+            M2L chunk size. Threaded through for shape consistency -- the prepass
+            applies no expansions.
+        runtime_l2l_chunk_size : Optional[int]
+            L2L chunk size, likewise.
+        grouped_interactions : bool
+            Whether the prepass traversal groups interactions.
+        farfield_mode : str
+            Far-field mode for the prepass traversal.
+        record_retry : Callable[[DualTreeRetryEvent], None]
+            Sink for traversal retry events, so a retry inside the prepass is
+            still visible in the outer call's diagnostics.
+        refine_local_val : bool
+            Local refinement setting for the prepass build.
+        max_refine_levels_val : int
+            Refinement level cap for the prepass build.
+        aspect_threshold_val : float
+            Aspect threshold for the prepass build.
+
+        Returns
+        -------
+        Array
+            ``f_b`` per particle ``[N]``, in Morton order. Strictly larger than
+            ``|a_b|`` and never vanishing, being a cancellation-free sum of
+            magnitudes -- which is why it must not be overwritten by a recorded
+            acceleration; see :meth:`_record_force_scale_from_evaluation`.
+
+        Raises
+        ------
+        RuntimeError
+            If the prepass traversal produced neither an interaction list nor
+            compact far pairs, leaving nothing for the estimator to read.
         """
 
         prepass_theta = self._force_scale_prepass_theta()
@@ -602,7 +879,51 @@ class PolicyMixin:
         max_refine_levels_val: int,
         aspect_threshold_val: float,
     ) -> Array:
-        """Compute paper-mode force scales via a low-order prepass on the current tree."""
+        """Compute paper-mode force scales via a low-order prepass on the current tree.
+
+        The eq (16a) counterpart of
+        :meth:`_compute_force_scale_fb_prepass_from_tree_artifacts`, and the more
+        expensive of the two: it runs a complete low-order FMM *evaluation* --
+        upward, M2L, L2L, L2P -- because ``|a_b|`` is an acceleration and there is
+        no cheaper way to get one. The f_b prepass needs only the pair partition.
+
+        Parameters
+        ----------
+        tree_artifacts : _PrepareStateTreeUpwardArtifacts
+            Tree and upward artifacts the prepass evaluates on.
+        low_order : int
+            Order for the prepass evaluation. Low on purpose -- the result is a
+            scale, not a force.
+        theta_val : float
+            Opening angle for the prepass evaluation.
+        upward_center_mode : str
+            Centre convention for the prepass upward data.
+        runtime_traversal_config : Optional[DualTreeTraversalConfig]
+            Traversal override; ``None`` takes the default.
+        runtime_m2l_chunk_size : Optional[int]
+            M2L chunk size for the prepass evaluation.
+        runtime_l2l_chunk_size : Optional[int]
+            L2L chunk size for the prepass evaluation.
+        grouped_interactions : bool
+            Whether the prepass traversal groups interactions.
+        farfield_mode : str
+            Far-field mode for the prepass.
+        record_retry : Callable[[DualTreeRetryEvent], None]
+            Sink for traversal retry events raised inside the prepass.
+        refine_local_val : bool
+            Local refinement setting for the prepass build.
+        max_refine_levels_val : int
+            Refinement level cap for the prepass build.
+        aspect_threshold_val : float
+            Aspect threshold for the prepass build.
+
+        Returns
+        -------
+        Array
+            Per-node force scale, reduced with
+            :meth:`_force_scale_reduction_mode` -- ``min`` under the paper
+            estimator, which is what eq (16a) asks for.
+        """
 
         low_upward = self.prepare_upward_sweep(
             tree_artifacts.tree,
