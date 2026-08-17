@@ -10,6 +10,12 @@ CONVENTION (CRITICAL). The coded ``B`` is the **x <-> z** swap, so
 not ``atan2(y, x)``. That is the documented historical bug site; it is now a
 tested fact (see the note above the builders).
 
+The four public builders below share the ``(x, y, z, ell, dtype)`` signature and
+differ only in direction (world->z vs z->world) and representation (multipole vs
+local), so nothing in the shapes distinguishes them. ``docs/operator_conventions.md``
+section 3 tabulates which is which, and
+``tests/unit/operators/test_convention_contracts.py`` keeps them distinguishable.
+
 The ``real_transverse_generators`` family supplies the representation generators
 that :mod:`jaccpot.operators._transverse_degeneracy_jvp` needs to reconstruct the
 transverse derivative on the ``rho == 0`` axis, where the individual alignment

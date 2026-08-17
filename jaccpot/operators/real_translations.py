@@ -406,7 +406,8 @@ def m2l_a6_real_only(
         3-vector from the multipole (source) centre to the local (target)
         centre, i.e. ``target - source``. Note this is the OPPOSITE sign
         convention from :func:`m2m_real` and :func:`l2l_real`, which take
-        ``destination -> source``.
+        ``source - destination``. See ``docs/operator_conventions.md`` section 1,
+        which measures what each wrong sign costs.
     order : int
         Maximum SH degree ``p``.
 
@@ -470,7 +471,8 @@ def m2l_real(
         3-vector from the multipole (source) centre to the local (target)
         centre, i.e. ``target - source``. Note this is the OPPOSITE sign
         convention from :func:`m2m_real` and :func:`l2l_real`, which take
-        ``destination -> source``.
+        ``source - destination``. See ``docs/operator_conventions.md`` section 1,
+        which measures what each wrong sign costs.
     order : int
         Maximum SH degree ``p``.
 
@@ -505,7 +507,8 @@ def m2l_optimized_real(
         3-vector from the multipole (source) centre to the local (target)
         centre, i.e. ``target - source``. Note this is the OPPOSITE sign
         convention from :func:`m2m_real` and :func:`l2l_real`, which take
-        ``destination -> source``.
+        ``source - destination``. See ``docs/operator_conventions.md`` section 1,
+        which measures what each wrong sign costs.
     order : int
         Maximum SH degree ``p``.
 
