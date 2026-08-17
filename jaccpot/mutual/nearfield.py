@@ -248,7 +248,15 @@ def mutual_near_field_forces(
     soft_sq = jnp.asarray(softening, dtype=dtype) ** 2
     g_arr = jnp.asarray(G, dtype=dtype)
 
-    def _pallas_block(la, lb, va, vb, *, exclude_diagonal, emit_b):
+    def _pallas_block(
+        la: Array,
+        lb: Array,
+        va: Array,
+        vb: Array,
+        *,
+        exclude_diagonal: bool,
+        emit_b: bool,
+    ) -> tuple[Array, Array, Array, Array]:
         """Gather two leaf blocks, run the kernel, return ``(F_a, F_b)``."""
         from jaccpot.pallas.nearfield_mutual import mutual_leafpair_block_cvjp
 
