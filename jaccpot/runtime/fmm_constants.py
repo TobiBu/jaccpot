@@ -110,12 +110,39 @@ def _env_int(name: str, default: int, *, minimum: int = 1) -> int:
 
     Clamps to ``minimum`` (default 1): every caller here sizes a buffer or a
     chunk, where a 0 would be a shape error rather than a slow configuration.
+
+    Parameters
+    ----------
+    name : str
+        Environment variable to read.
+    default : int
+        Value used when the variable is unset or unparseable.
+    minimum : int
+        Lower clamp applied to whatever value is produced.
+
+    Returns
+    -------
+    int
+        The clamped value. An unparseable setting falls back to ``default``
+        rather than raising -- these are tuning knobs, not correctness inputs.
     """
     return env_int(name, default, minimum=minimum)
 
 
 def _env_flag(name: str, default: bool = False) -> bool:
-    """Read a boolean env flag with a defensive fallback."""
+    """Read a boolean env flag with a defensive fallback.
+    Parameters
+    ----------
+    name : str
+        Environment variable to read.
+    default : bool
+        Value used when the variable is unset.
+
+    Returns
+    -------
+    bool
+        The parsed flag, or ``default``.
+    """
     return env_flag(name, default)
 
 
@@ -127,6 +154,18 @@ def _minimum_memory_streamed_gpu_traversal_ceiling(
     These ceilings mirror the lean engblom/streamed production profile that has
     been substantially more memory-efficient than oversized explicit traversal
     caps in large-N minimum-memory benchmarks.
+
+    Parameters
+    ----------
+    num_particles : int
+        Particle count the ceilings are sized for.
+
+    Returns
+    -------
+    DualTreeTraversalConfig
+        Explicit ceilings. A CEILING, not a seed -- it bounds a config the
+        caller already has, whereas
+        :func:`_minimum_memory_streamed_gpu_traversal_seed` produces one.
     """
 
     n = int(num_particles)
@@ -163,6 +202,17 @@ def _sub_million_minimum_memory_pair_queue(*, num_particles: int) -> int:
     ~8 bytes per slot (a node pair of int32s): 2 MB at N=1048576, which is
     nothing against the buffers this path already carries, so scaling it does not
     compromise the minimum-memory objective this seed exists to serve.
+
+    Parameters
+    ----------
+    num_particles : int
+        Particle count the queue is scaled against.
+
+    Returns
+    -------
+    int
+        Pair-queue capacity: ``N/4`` rounded up to a power of two, floored at
+        32768.
     """
 
     n = max(1, int(num_particles))
@@ -183,6 +233,18 @@ def _minimum_memory_streamed_gpu_traversal_seed(
     process-block floor to avoid underfilled count-pass kernels. Multi-million
     particle runs use a larger fixed seed to avoid early fail-fast traversal
     overflow.
+
+    Parameters
+    ----------
+    num_particles : int
+        Particle count the seed is seeded from.
+
+    Returns
+    -------
+    DualTreeTraversalConfig
+        A deterministic starting configuration. Deterministic matters: two runs
+        at the same ``N`` must traverse with the same capacities, or their
+        timings and their retry behaviour are not comparable.
     """
 
     n = int(num_particles)
@@ -271,6 +333,25 @@ def _cap_minimum_memory_streamed_gpu_traversal_config_for_tree(
     that are guaranteed to exhaust device memory. Cap only the impossible cases
     to the existing lean streamed-GPU ceiling, while preserving smaller explicit
     configs unchanged.
+
+    Parameters
+    ----------
+    traversal_config : Optional[DualTreeTraversalConfig]
+        Explicit config to clamp. ``None`` passes straight through.
+    total_nodes : int
+        Node count; one factor of the far-buffer size.
+    num_leaves : int
+        Leaf count; one factor of the near-buffer size.
+    num_particles : int
+        Particle count, used to pick the ceiling to clamp against.
+
+    Returns
+    -------
+    Optional[DualTreeTraversalConfig]
+        The config unchanged when it is achievable, the lean ceiling when it is
+        not, or ``None`` when ``None`` was passed. Only *impossible* configs are
+        touched -- a merely large one is left alone, because a caller who sized
+        it deliberately should not be silently overridden.
     """
 
     if traversal_config is None:
@@ -326,6 +407,16 @@ def _prepare_diag(message: str) -> None:
     The flag is read per call, not captured at import: a user who sets
     ``JACCPOT_PREPARE_DIAGNOSTICS=1`` after importing jaccpot (in a notebook,
     say) should get diagnostics, not silence.
+
+    Parameters
+    ----------
+    message : str
+        Line to print when ``JACCPOT_PREPARE_DIAGNOSTICS`` is set.
+
+    Returns
+    -------
+    None
+        Writes to stdout, or does nothing when the flag is unset.
     """
     if _env_flag("JACCPOT_PREPARE_DIAGNOSTICS", False):
         print(f"[jaccpot.prepare] {message}", flush=True)
