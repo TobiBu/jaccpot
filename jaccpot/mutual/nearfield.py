@@ -58,7 +58,24 @@ _PALLAS_OUTPUT_BUDGET_BYTES = 256 << 20
 def resolve_near_chunk_size(
     max_leaf_size: int, itemsize: int, requested: Optional[int] = None
 ) -> int:
-    """Pick how many leaf pairs to process per scan step."""
+    """Pick how many leaf pairs to process per scan step.
+    A memory/throughput knob only: chunking changes how the pair tensors are
+    blocked, never the result.
+
+    Parameters
+    ----------
+    max_leaf_size : int
+        Slots per leaf block; the pair tensors go as its square.
+    itemsize : int
+        Bytes per element of the working dtype.
+    requested : Optional[int]
+        Explicit override; ``None`` derives the chunk from the memory budget.
+
+    Returns
+    -------
+    int
+        Leaf pairs per scan step, at least ``1``.
+    """
     if requested is not None:
         return max(1, int(requested))
     per_pair = max(1, int(max_leaf_size) ** 2 * 3 * int(itemsize))
@@ -68,7 +85,24 @@ def resolve_near_chunk_size(
 def _resolve_pallas_chunk_size(
     max_leaf_size: int, itemsize: int, requested: Optional[int] = None
 ) -> int:
-    """Pick the scan chunk for the Pallas lane, bounded by its output tensors."""
+    """Pick the scan chunk for the Pallas lane, bounded by its output tensors.
+    Bounded separately from the pure-JAX lane because the Pallas kernel's output
+    blocks, not its pair tensors, are what dominate its footprint.
+
+    Parameters
+    ----------
+    max_leaf_size : int
+        Slots per leaf block; the pair tensors go as its square.
+    itemsize : int
+        Bytes per element of the working dtype.
+    requested : Optional[int]
+        Explicit override; ``None`` derives the chunk from the memory budget.
+
+    Returns
+    -------
+    int
+        Leaf pairs per scan step, at least ``1``.
+    """
     if requested is not None:
         return max(1, int(requested))
     # Two (chunk, S, 4) outputs, forward; the analytic reverse writes the same
@@ -78,7 +112,21 @@ def _resolve_pallas_chunk_size(
 
 
 def mutual_nearfield_pallas_active(use_pallas: bool, interpret: bool) -> bool:
-    """Whether the near field should dispatch the mutual Pallas kernel."""
+    """Whether the near field should dispatch the mutual Pallas kernel.
+    Parameters
+    ----------
+    use_pallas : bool
+        Whether the caller asked for the Pallas lane.
+    interpret : bool
+        Whether the kernel would run in interpret mode. Interpret mode counts as
+        active, so the parity tests reach the real kernel logic on CPU rather
+        than silently falling back to pure JAX.
+
+    Returns
+    -------
+    bool
+        ``True`` when the Pallas kernel should be dispatched.
+    """
     if not use_pallas:
         return False
     if interpret:
@@ -93,7 +141,26 @@ def _pair_weights(
     rung_b: Optional[Array],
     level_weights: Optional[Array],
 ) -> Optional[Array]:
-    """Return ``level_weights[max(rung_i, rung_j)]`` for a particle-pair block."""
+    """Return ``level_weights[max(rung_i, rung_j)]`` for a particle-pair block.
+    A pair belongs to the level of its FINER endpoint, which is why the reduction
+    is a max. This is the exact per-particle predicate; the far field's
+    cell-level approximation lives in :mod:`jaccpot.mutual.force`.
+
+    Parameters
+    ----------
+    rung_a : Optional[Array]
+        Per-slot rung of the ``a`` block, or ``None``.
+    rung_b : Optional[Array]
+        Per-slot rung of the ``b`` block, or ``None``.
+    level_weights : Optional[Array]
+        Weight per interaction level, or ``None``.
+
+    Returns
+    -------
+    Optional[Array]
+        Per-pair weights, or ``None`` when any input is ``None`` -- the
+        unweighted full-force case.
+    """
     if level_weights is None or rung_a is None or rung_b is None:
         return None
     pair_level = jnp.maximum(rung_a[:, :, None], rung_b[:, None, :])
@@ -121,6 +188,32 @@ def _block_forces(
     ``dr`` is ``x_b - x_a``, so ``F`` is the force on the ``a`` particle. The
     caller obtains the ``b`` side by negating and reducing over the other axis --
     never by recomputing, which is the whole point.
+
+    Parameters
+    ----------
+    x_a : Array
+        ``(chunk, S, 3)`` positions of the ``a`` blocks.
+    m_a : Array
+        ``(chunk, S)`` masses of the ``a`` blocks; padding slots carry zero.
+    x_b : Array
+        ``(chunk, S, 3)`` positions of the ``b`` blocks.
+    m_b : Array
+        ``(chunk, S)`` masses of the ``b`` blocks.
+    valid : Array
+        ``(chunk, S, S)`` pair validity mask.
+    weights : Optional[Array]
+        ``(chunk, S, S)`` level weights from :func:`_pair_weights`, or ``None``
+        for unit weights.
+    softening : float
+        Plummer softening length.
+    G : float
+        Gravitational constant.
+
+    Returns
+    -------
+    Array
+        ``(chunk, S, S, 3)`` per-pair force on the ``a`` particle. Masked pairs
+        are exactly zero.
     """
     dr = x_b[:, None, :, :] - x_a[:, :, None, :]
     r2 = jnp.sum(dr * dr, axis=-1) + jnp.asarray(softening, dtype=dr.dtype) ** 2
@@ -142,7 +235,29 @@ def _gather_leaf_block(
     particles: Array,
     valid: Array,
 ) -> tuple[Array, Array, Optional[Array]]:
-    """Gather a padded leaf block; padding slots carry exactly zero mass."""
+    """Gather a padded leaf block; padding slots carry exactly zero mass.
+    Zero mass rather than a mask is what makes the padding inert in the force sum
+    without a separate branch.
+
+    Parameters
+    ----------
+    positions : Array
+        All particle positions, in Morton-sorted order.
+    masses : Array
+        All particle masses, same order.
+    rung : Optional[Array]
+        All particle rungs, same order, or ``None``.
+    particles : Array
+        ``(chunk, S)`` particle indices of the blocks to gather.
+    valid : Array
+        ``(chunk, S)`` occupancy mask over those slots.
+
+    Returns
+    -------
+    tuple[Array, Array, Optional[Array]]
+        ``(positions, masses, rungs)`` for the block, with ``rungs`` ``None``
+        exactly when ``rung`` was.
+    """
     x = positions[particles]
     m = jnp.where(valid, masses[particles], jnp.zeros_like(masses[particles]))
     r = None if rung is None else rung[particles]
@@ -248,8 +363,38 @@ def mutual_near_field_forces(
     soft_sq = jnp.asarray(softening, dtype=dtype) ** 2
     g_arr = jnp.asarray(G, dtype=dtype)
 
-    def _pallas_block(la, lb, va, vb, *, exclude_diagonal, emit_b):
-        """Gather two leaf blocks, run the kernel, return ``(F_a, F_b)``."""
+    def _pallas_block(
+        la: Array,
+        lb: Array,
+        va: Array,
+        vb: Array,
+        *,
+        exclude_diagonal: bool,
+        emit_b: bool,
+    ) -> tuple[Array, Array, Array, Array]:
+        """Gather two leaf blocks, run the kernel, return ``(F_a, F_b)``.
+        Parameters
+        ----------
+        la : Array
+            Leaf index of the ``a`` side of each pair in the chunk.
+        lb : Array
+            Leaf index of the ``b`` side.
+        va : Array
+            Occupancy mask of the ``a`` blocks.
+        vb : Array
+            Occupancy mask of the ``b`` blocks.
+        exclude_diagonal : bool
+            Drop ``i == j``; set on the self-pair path, where ``la is lb``.
+        emit_b : bool
+            Produce the ``b``-side force. Cleared on the self-pair path, where
+            both sides are the same block.
+
+        Returns
+        -------
+        tuple[Array, Array, Array, Array]
+            ``(particles_a, particles_b, F_a, F_b)`` -- the two index arrays the
+            caller scatters into, alongside the two force blocks.
+        """
         from jaccpot.pallas.nearfield_mutual import mutual_leafpair_block_cvjp
 
         pa, pb = leaf_particles[la], leaf_particles[lb]

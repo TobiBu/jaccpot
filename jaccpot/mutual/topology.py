@@ -151,7 +151,13 @@ class MutualTopology:
         return int(self.near_a.shape[0])
 
     def summary(self: "MutualTopology") -> dict[str, Any]:
-        """Return a small dict of size counters, for tests and benchmarks."""
+        """Return a small dict of size counters, for tests and benchmarks.
+        Returns
+        -------
+        dict[str, Any]
+            Size counters only -- no arrays, so it is cheap to log and safe to
+            compare across runs.
+        """
         return {
             "num_particles": self.num_particles,
             "num_nodes": self.num_nodes,
@@ -176,6 +182,23 @@ def _node_depths(
     node slots behind (a padded node array, a leaf that lost its particles to
     refinement); folding one of those into an M2M level would translate a stale
     expansion into a live parent.
+
+    Parameters
+    ----------
+    parent : np.ndarray
+        Parent index per node.
+    left_child : np.ndarray
+        Left child per internal node.
+    right_child : np.ndarray
+        Right child per internal node.
+    root : int
+        Index of the root node.
+
+    Returns
+    -------
+    np.ndarray
+        Depth per node, with ``-1`` marking every node unreachable from the
+        root. Callers must treat ``-1`` as "drop", not as depth zero.
     """
     num_nodes = int(parent.shape[0])
     depth = np.full(num_nodes, -1, dtype=np.int64)
@@ -209,6 +232,21 @@ def _group_levels(
     ``level_nodes[d]`` are the nodes at depth ``d + 1``. Returned shallowest
     first, which is the L2L (push-down) order; the M2M (pull-up) cascade walks
     the same tuple in reverse.
+
+    Parameters
+    ----------
+    depth : np.ndarray
+        Per-node depth from :func:`_node_depths`; ``-1`` entries are skipped.
+    parent : np.ndarray
+        Parent index per node.
+    root : int
+        Index of the root node, which is excluded from the levels.
+
+    Returns
+    -------
+    Tuple[Tuple[np.ndarray, ...], Tuple[np.ndarray, ...]]
+        ``(level_nodes, level_parents)``, aligned entry for entry, shallowest
+        level first.
     """
     max_depth = int(depth.max())
     level_nodes: list[np.ndarray] = []
@@ -247,6 +285,31 @@ def _dual_traverse(
     size, which is the standard dual-traversal heuristic and bounds the number of
     pairs per node. Because a split always replaces an internal node with its
     children, every pair strictly descends and the walk terminates.
+
+    Parameters
+    ----------
+    centers : np.ndarray
+        Per-node centre used by the MAC.
+    radii : np.ndarray
+        Per-node radius used by the MAC.
+    num_internal : int
+        Number of internal nodes; a node index at or above this is a leaf.
+    left_child : np.ndarray
+        Left child per internal node.
+    right_child : np.ndarray
+        Right child per internal node.
+    theta : float
+        Opening angle of the mutual MAC, ``theta * |c_b - c_a| > r_a + r_b``.
+    root : int
+        Index of the root node; the walk starts from ``(root, root)``.
+
+    Returns
+    -------
+    Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]
+        ``(far_a, far_b, near_a, near_b)``. Each pair appears **once**, in
+        canonical ``a <= b`` order -- the mutual sweep supplies both directions
+        from a single entry, so duplicating them here would double-count the
+        force.
     """
     far_a: list[np.ndarray] = []
     far_b: list[np.ndarray] = []
@@ -347,7 +410,23 @@ def _dual_traverse(
 def _leaf_blocks(
     leaf_nodes: np.ndarray, node_ranges: np.ndarray
 ) -> Tuple[np.ndarray, np.ndarray, int]:
-    """Pad each leaf's particle span into a dense ``(num_leaves, S)`` block."""
+    """Pad each leaf's particle span into a dense ``(num_leaves, S)`` block.
+    ``S`` is the widest leaf's occupancy, so every leaf pays the widest one's
+    width. That is what makes the near-field kernels a fixed shape.
+
+    Parameters
+    ----------
+    leaf_nodes : np.ndarray
+        Node index of each leaf.
+    node_ranges : np.ndarray
+        Per-node ``[start, stop)`` span into the Morton-sorted particle order.
+
+    Returns
+    -------
+    Tuple[np.ndarray, np.ndarray, int]
+        ``(particle_indices, valid_mask, S)``, the first two of shape
+        ``(num_leaves, S)``.
+    """
     starts = node_ranges[leaf_nodes, 0].astype(np.int64)
     ends = node_ranges[leaf_nodes, 1].astype(np.int64)
     counts = np.maximum(ends - starts + 1, 0)
@@ -375,6 +454,26 @@ def build_mutual_topology_from_tree(
     force is later evaluated at -- they are the topology's reference
     configuration, exactly as in
     :meth:`jaccpot.FastMultipoleMethod.differentiable_accelerations`.
+
+    Parameters
+    ----------
+    tree : Any
+        Prebuilt yggdrax tree. Typed loosely so this module does not depend on
+        a particular tree family.
+    positions_sorted : np.ndarray
+        Positions in the tree's Morton order, used only for the discrete
+        decisions.
+    masses_sorted : np.ndarray
+        Masses in the same order, same purpose.
+    theta : float
+        Opening angle of the mutual MAC.
+    order : int
+        Expansion order recorded on the topology.
+
+    Returns
+    -------
+    MutualTopology
+        A frozen host-side topology.
     """
     positions = np.asarray(positions_sorted, dtype=np.float64)
     masses = np.asarray(masses_sorted, dtype=np.float64)
@@ -468,6 +567,28 @@ def build_mutual_topology(
     caller can keep the tree alive (the topology indexes into its Morton order).
     The tree build itself is reused rather than reimplemented: Morton ordering,
     local refinement and leaf sizing are exactly jaccpot's.
+
+    Parameters
+    ----------
+    positions : np.ndarray
+        ``(n, 3)`` particle positions.
+    masses : np.ndarray
+        ``(n,)`` particle masses.
+    theta : float
+        Opening angle of the mutual MAC.
+    order : int
+        Expansion order recorded on the topology.
+    leaf_size : int
+        Target particles per leaf for the tree build.
+    solver : Optional[Any]
+        Reuse an existing solver instead of constructing one.
+
+    Returns
+    -------
+    Tuple[MutualTopology, Any]
+        ``(topology, prepared_state)``. The state must be kept alive: the
+        topology indexes into its Morton order, so dropping it invalidates every
+        index array.
     """
     from jaccpot import FastMultipoleMethod
 
