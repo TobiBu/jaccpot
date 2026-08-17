@@ -12,7 +12,60 @@ from .dtypes import INDEX_DTYPE
 
 
 class OctreeExecutionData(NamedTuple):
-    """JAX-friendly octree view retained alongside radix-indexed FMM state."""
+    """JAX-friendly octree view retained alongside radix-indexed FMM state.
+
+    A padded, fixed-shape view: every array is sized to the node capacity and
+    masked by ``valid_mask``, so the shapes stay static under ``jit``. Kept
+    ALONGSIDE the radix-indexed FMM state rather than replacing it, which is why
+    the four cross-index maps exist.
+
+    Attributes
+    ----------
+    valid_mask : Array
+        Which node slots are live; every other array is padding outside it.
+    parent : Array
+        Parent node index.
+    children : Array
+        Per-node child indices.
+    child_counts : Array
+        Number of live children per node.
+    node_codes : Array
+        Morton code per node.
+    node_depths : Array
+        Depth per node.
+    node_ranges : Array
+        Particle span per node.
+    nodes_by_level : Array
+        Node indices grouped by level.
+    level_offsets : Array
+        Offsets into ``nodes_by_level``.
+    num_levels : Array
+        Level count, as a device scalar.
+    leaf_mask : Array
+        Which nodes are leaves.
+    leaf_nodes : Array
+        Node index of each leaf.
+    radix_node_to_oct : Array
+        Radix node index -> octree node index.
+    radix_leaf_to_oct : Array
+        Radix leaf index -> octree leaf index.
+    oct_to_radix_node : Array
+        The inverse of ``radix_node_to_oct``.
+    oct_to_radix_leaf : Array
+        The inverse of ``radix_leaf_to_oct``.
+    num_valid_nodes : Array
+        Live node count, as a device scalar.
+    num_leaf_nodes : Array
+        Live leaf count, as a device scalar.
+    box_centers : Array
+        Cell centre per node.
+    box_half_extents : Array
+        Per-axis half extent per node.
+    box_radii : Array
+        Bounding-sphere radius per node.
+    box_max_extents : Array
+        Largest half extent per node.
+    """
 
     valid_mask: Array
     parent: Array
@@ -39,7 +92,24 @@ class OctreeExecutionData(NamedTuple):
 
 
 def _build_fallback_octree_execution_data(tree: object) -> OctreeExecutionData:
-    """Build a consistent octree execution view from radix topology fields."""
+    """Build a consistent octree execution view from radix topology fields.
+
+    The BINARY fallback, used when the native explicit-octree view is degenerate.
+    It is consistent with the radix topology but NOT with the native octree node
+    space, so far/near lists must be built from the same radix tree -- see
+    :func:`build_octree_execution_data_with_status`.
+
+    Parameters
+    ----------
+    tree : object
+        Tree to build the view from. Typed loosely so this module does not
+        depend on a particular tree family.
+
+    Returns
+    -------
+    OctreeExecutionData
+        A view derived from radix fields only.
+    """
 
     parent = jnp.asarray(getattr(tree, "parent"), dtype=INDEX_DTYPE)
     left_child = jnp.asarray(getattr(tree, "left_child"), dtype=INDEX_DTYPE)
@@ -136,6 +206,20 @@ def build_octree_execution_data_with_status(
     same (compat/radix) tree, not from ``build_octree_native_far_pairs`` (which walks the
     degenerate native view). Mixing a native-octree far list with this fallback view is
     exactly what corrupted the octree backend on uniform data.
+
+    Parameters
+    ----------
+    tree : object
+        Tree to build the view from. Typed loosely so this module does not
+        depend on a particular tree family.
+
+    Returns
+    -------
+    tuple[Optional[OctreeExecutionData], bool]
+        ``(data, used_native)``. ``data`` is ``None`` when the tree has no explicit
+        octree fields at all; ``used_native=False`` means ``data`` is the binary
+        fallback and the caller MUST NOT pair it with
+        ``build_octree_native_far_pairs``.
     """
     if not hasattr(tree, "oct_valid_mask"):
         return None, False
@@ -176,7 +260,24 @@ def build_octree_execution_data_with_status(
 
 
 def build_octree_execution_data(tree: object) -> Optional[OctreeExecutionData]:
-    """Return a padded octree execution view when explicit octree fields exist."""
+    """Return a padded octree execution view when explicit octree fields exist.
+
+    Thin wrapper over :func:`build_octree_execution_data_with_status` that DROPS
+    the status flag. Only safe where the caller does not build native-octree far
+    pairs -- if it does, it needs the flag, because mixing a native far list with
+    a fallback view is what corrupted the octree backend on uniform data.
+
+    Parameters
+    ----------
+    tree : object
+        Tree to build the view from. Typed loosely so this module does not
+        depend on a particular tree family.
+
+    Returns
+    -------
+    Optional[OctreeExecutionData]
+        The view, or ``None`` when the tree carries no explicit octree fields.
+    """
     data, _ = build_octree_execution_data_with_status(tree)
     return data
 
