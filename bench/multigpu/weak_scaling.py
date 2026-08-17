@@ -13,7 +13,9 @@ import pathlib
 
 from harness import weak_scaling
 
-RESULTS_DIR = pathlib.Path(__file__).resolve().parents[2] / "results" / "multigpu"
+RESULTS_DIR = (
+    pathlib.Path(__file__).resolve().parents[2] / "bench" / "results" / "multigpu"
+)
 
 
 def _parse_args() -> argparse.Namespace:

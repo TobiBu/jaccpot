@@ -144,13 +144,13 @@ def main() -> int:
         print(f"error: {figures_dir} does not exist", file=sys.stderr)
         return 1
 
-    pdf_src = REPO_ROOT / "results" / "figures"
+    pdf_src = REPO_ROOT / "bench" / "results" / "figures"
     rows: list[str] = []
     copied = missing = 0
 
     for stem, label, notebook, artifact in FIGURES:
         pdf = pdf_src / f"{stem}.pdf"
-        art_path = REPO_ROOT / "results" / artifact
+        art_path = REPO_ROOT / "bench" / "results" / artifact
 
         if not pdf.exists() or not art_path.exists():
             what = []

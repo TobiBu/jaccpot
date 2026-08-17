@@ -13,7 +13,9 @@ import argparse
 import json
 import pathlib
 
-RESULTS_DIR = pathlib.Path(__file__).resolve().parents[2] / "results" / "payoff"
+RESULTS_DIR = (
+    pathlib.Path(__file__).resolve().parents[2] / "bench" / "results" / "payoff"
+)
 
 
 def _parse_args() -> argparse.Namespace:

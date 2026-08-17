@@ -36,7 +36,7 @@ import matplotlib.pyplot as plt
 from examples.jaccpot_paper.common import jsonio, style
 
 style.apply()
-FIG_DIR = jsonio.repo_root() / "results" / "figures"
+FIG_DIR = jsonio.RESULTS_ROOT / "figures"
 FIG_DIR.mkdir(parents=True, exist_ok=True)
 """
 
