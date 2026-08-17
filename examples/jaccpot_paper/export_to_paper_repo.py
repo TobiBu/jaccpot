@@ -86,7 +86,7 @@ FIGURES = [
 HEADER = """# Figure provenance
 
 Figures are never computed here. They are generated in the `jaccpot` repo
-(`examples/jaccpot_paper/fig_*.ipynb`, reading from `results/**/*.json` produced
+(`examples/jaccpot_paper/fig_*.ipynb`, reading from `bench/results/**/*.json` produced
 by `bench/**/*.py` on branch `paper/jaccpot-i`), exported, and copied into this
 directory.
 
@@ -160,7 +160,7 @@ def main() -> int:
                 what.append("artifact")
             rows.append(
                 f"| {label} | `{stem}.pdf` | `examples/jaccpot_paper/{notebook}` "
-                f"| `results/{artifact}` | _not yet generated ({' and '.join(what)} "
+                f"| `bench/results/{artifact}` | _not yet generated ({' and '.join(what)} "
                 f"missing)_ | | | | |"
             )
             missing += 1
@@ -179,7 +179,7 @@ def main() -> int:
         )
         rows.append(
             f"| {label} | `{stem}.pdf` | `examples/jaccpot_paper/{notebook}` "
-            f"| `results/{artifact}` | `{sha}` | {dirty} | {device} "
+            f"| `bench/results/{artifact}` | `{sha}` | {dirty} | {device} "
             f"| {_config_summary(config)} | {date} |"
         )
 
