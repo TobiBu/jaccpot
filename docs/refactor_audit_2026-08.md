@@ -1257,38 +1257,49 @@ Characterization first, because everything after it depends on the net existing.
 0.3 are done** (`e1f1455`, `e5d8e41`); 0.3's ordering was wrong in the original plan and is
 corrected below.
 
-> **RECONCILED 2026-08-17.** The rows below were written when only 0.1/0.3/0.4 carried a
-> status, and most of the rest had in fact landed — the table had stopped saying what was
-> outstanding, which matters because every Tier 1 row is *"gated on the Tier 0
-> characterization named in its row"*. Each row was re-checked against the tree rather
-> than against memory; the result is the **Status** column added below. Two rows are
-> genuinely open (0.2 is done, 0.9 is not), and three could not be settled from the tree
-> alone and say so. The audit is not self-verifying: it now records the check that was
-> run, so the next reader can re-run it.
-
-| # | Status (2026-08-17) | Evidence |
-|---|---|---|
-| 0.1 | **done** | as marked (`e1f1455`) |
-| 0.2 | **done** | `tests/characterization/golden_modes/` exists with 6 `.npz`; `test_fmm_golden.py` carries `class_major` ×7, `pair_grouped` ×8, `bucketed` ×3, `potential` ×12. 25 goldens total across `golden/` (13), `golden_grad/` (6), `golden_modes/` (6) |
-| 0.3 | **done** | as marked (`e5d8e41`) |
-| 0.4 | **blocked** | as marked — became bug report G.10 |
-| 0.5 | **done** | `test_p2m_real_direct_dehnen_table3` |
-| 0.6 | **done** | `test_real_static_num_levels_bit_identical_to_padded` in `tests/unit/core/test_real_upward_sweep.py` |
-| 0.7 | **done** | `test_leafpair_decoupled_same_array_reproduces_the_coupled_kernel` |
-| 0.8 | **done** | `test_custom_vjp_parity.py:670` + `monkeypatch.setenv("JACCPOT_FUSED_M2L_VJP", "0")` |
-| 0.9 | **OPEN — no evidence found** | `tests/unit/core/test_near_field.py` has 20 tests and none matches a staticness/tracer contract (searched for `softening.*[Tt]racer`, `ConcretizationTypeError`, `staticness`, `def test.*static`). Either never landed or landed somewhere the search missed |
-| 0.10 | **done** | `[tool.coverage.run]` now carries the comment *"used to be omitted here too"* plus the 92% measurement; the omit entry is gone |
-| 0.11 | **not verifiable from the tree** | The cited sites were docstring *corrections*; with the wrong text gone there is nothing left to detect. Not re-openable by inspection |
-| 0.12 | **likely done** | `GradConfig` ×2 and `TraversalOverrides` ×1 now appear in `ARCHITECTURE.md`, which the row asked for. The twelve→fourteen phrasing is no longer present in either form, so the count claim cannot be re-checked verbatim |
-| 0.13 | **not verifiable from the tree** | Neither `4/5` nor `7/11` appears in `STYLE_GUIDE.md`; §8 has been rewritten since, so the inventory numbers the row names no longer exist to compare |
-| 0.14 | **done** | `flake8 --select=F401 jaccpot/` → **0**. (`pyflakes` reports 178 because it does not honour `# noqa`; those are the deliberate re-exports from the `_fmm_impl` import cleanup) |
-| 0.15 | **done** | 11 of the `runtime/fmm_*.py` mixins carry `if TYPE_CHECKING`; `PreparedStateLike` now lives in `fmm_state.py` |
-| 0.16 | **done** | exactly one module lacks `from __future__ import annotations`: `jaccpot/experimental/__init__.py` |
-| 0.17 | **done** | all four old paths absent: `benchmarks/n_ladder_production`, `results/validation`, `bench/real_vs_complex_gpu_plan.md`, `OCTREE_JACCPOT_STATUS_2026-03-15.md` |
-| 0.18 | **done** | `tests/` root holds only `__init__.py` and `conftest.py` |
-| 0.19 | **done** | `test_large_n_grad_path.py` gone, `test_large_n_config_thresholds.py` present |
-| 0.20 | **done, and subsumed** | superseded by the 2.5 programme — see that row |
-| 0.21 | **done** | `NUMERICS_AND_JAX.md:126` — *"A gradient test at a default leaf size covers no far field. Assert the M2L pair count…"* |
+> **RECONCILED 2026-08-17 — and the first attempt at this got it wrong.**
+>
+> The per-item rows below carry a status on only three of twenty-one (0.1, 0.3, 0.4), which
+> is what prompted this. But the running status table at the **top of this document**
+> already records every one of them, and ends with *"Tier 0 complete — verified"*. My first
+> pass re-derived status from the tree without reading that table, and consequently reported
+> **0.9 as open when it has been done since `92c8e73`** — the search used the words
+> `staticness` / `tracer` / `ConcretizationTypeError`, and the tests are actually named
+> `test_max_leaf_size_is_required_under_jit` and `test_softening_must_be_concrete`
+> (`tests/unit/core/test_near_field.py:1161`, `:1194`). Searching for the wrong words and
+> concluding absence.
+>
+> That is the mirror image of the error this document already warns about six rows into the
+> top table: *"This line was wrong when written. It came from the running status block, not
+> from checking the per-item rows."* Checking only the code is no safer than checking only
+> the table. **Both, or neither.**
+>
+> **Tier 0 is complete.** No item is open. What the column below adds is the commit for each
+> row, so the per-item rows stop disagreeing with the top table by omission.
+>
+> | # | Status | Commit / evidence |
+> |---|---|---|
+> | 0.1 | done | `e1f1455` |
+> | 0.2 | done | `ef7ce15` — 4 new cases in `tests/characterization/golden_modes/` (6 `.npz`); potentials goldened for the first time; surfaced G.11 |
+> | 0.3 | done | `e5d8e41` — physics identities, the Wigner reference being unusable (F39) |
+> | 0.4 | **blocked, by design** | became bug report G.10, then **fixed** in PRs #70-#72; four GPU-gated tests still unexecuted |
+> | 0.5 | done | `8bd24a6` — an absolute anchor from the derivative recurrences, not a Table 3 transcription. `test_p2m_real_direct_dehnen_table3` |
+> | 0.6 | done | `c2874b6`, `20ba5d8` — `test_real_static_num_levels_bit_identical_to_padded` |
+> | 0.7 | done | `26cef45` — `test_leafpair_decoupled_same_array_reproduces_the_coupled_kernel` |
+> | 0.8 | done | `568deca` — both halves: gate read per call, reverse matches the twin |
+> | 0.9 | done | `92c8e73` — the two contracts D.7's last two rows name |
+> | 0.10 | done | `ff4c911` — `m2l_real_fused.py` measured at 92%, omit entry gone |
+> | 0.11 | done | `c2874b6` (F05, F06, F24) + `8bd24a6` (the F07 half) |
+> | 0.12 | done | `e2959eb` — A.8; `GradConfig` and `TraversalOverrides` now in ARCHITECTURE.md |
+> | 0.13 | done | `e2959eb` — A.2; §8 rewritten, so the old `4/5 -> 7/11` phrasing no longer appears |
+> | 0.14 | done | `934c252` (safe subset; F16 was wrong, see its correction). `flake8 --select=F401 jaccpot/` → 0 today; `pyflakes` reports 178 only because it ignores `# noqa` |
+> | 0.15 | done | `ad7b00c` — 11 runtime mixins carry `if TYPE_CHECKING` |
+> | 0.16 | done | `23ccc9d` — one module lacks `__future__` annotations, `jaccpot/experimental/__init__.py` |
+> | 0.17 | done | `6839a6c` — all four old paths absent |
+> | 0.18 | done | `a54f29e` — `tests/` root holds only `__init__.py` and `conftest.py` |
+> | 0.19 | done | `d941805` |
+> | 0.20 | done | `4b2a66a` (targeted half); the ~58 numerics functions went to 1.10, and are now finished — see 2.5 |
+> | 0.21 | done | `e2959eb` — `NUMERICS_AND_JAX.md:126` |
 
 
 | # | Item | Touches | Closes | Verified by |
