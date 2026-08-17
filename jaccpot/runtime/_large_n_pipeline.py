@@ -41,6 +41,19 @@ from .dtypes import INDEX_DTYPE
 
 
 def _contains_jax_tracer(value: Any) -> bool:
+    """Return ``True`` when a pytree contains any JAX tracer leaf.
+
+    Parameters
+    ----------
+    value : Any
+        Pytree to inspect.
+
+    Returns
+    -------
+    bool
+        ``True`` if any leaf is a tracer, which is the gate on every host-side
+        decision this module makes.
+    """
     return any(
         isinstance(leaf, jax.core.Tracer) for leaf in jax.tree_util.tree_leaves(value)
     )
@@ -76,7 +89,85 @@ def prepare_large_n_state(
     large_n_env_cfg_override: Optional[dict[str, Any]] = None,
     return_compiled_state: bool = False,
 ) -> Union[LargeNPreparedState, LargeNCompiledState]:
-    """Prepare the slim large-N state using the dedicated narrow path."""
+    """Prepare the slim large-N state using the dedicated narrow path.
+    "Narrow" is the point: this path materialises only the artifacts the fast
+    lane reads, which is what keeps peak memory tractable at galaxy scale. The
+    twenty-seven parameters are the already-resolved runtime configuration --
+    the caller (``PrepareMixin``) owns resolution, and nothing is re-resolved
+    here.
+
+    Parameters
+    ----------
+    fmm : object
+        The engine, typed loosely to avoid the ARCHITECTURE section 8 import
+        cycle.
+    positions_arr : Array
+        Particle positions in the caller's order.
+    masses_arr : Array
+        Particle masses, same order.
+    input_dtype : jnp.dtype
+        Dtype the caller supplied, recorded so outputs can be cast back.
+    bounds : Optional[Tuple[Array, Array]]
+        Explicit domain bounds for the tree build.
+    leaf_size : int
+        Target particles per leaf.
+    max_order : int
+        Expansion order.
+    theta_val : float
+        Resolved MAC opening angle.
+    mac_type_val : MACType
+        Resolved traversal-facing acceptance criterion.
+    refine_local_val : bool
+        Resolved local-refinement toggle.
+    max_refine_levels_val : int
+        Resolved refinement depth cap.
+    aspect_threshold_val : float
+        Resolved leaf aspect-ratio split threshold.
+    jit_tree_override : Optional[bool]
+        Force or forbid the jitted tree build.
+    allow_stateful_cache : bool
+        Permit process-level caches; cleared when the caller needs purity.
+    runtime_traversal_config : Optional[DualTreeTraversalConfig]
+        Resolved traversal capacities.
+    runtime_m2l_chunk_size : Optional[int]
+        Resolved M2L chunk size.
+    runtime_l2l_chunk_size : Optional[int]
+        Resolved L2L chunk size.
+    upward_center_mode : str
+        Centre selection for the upward sweep.
+    record_retry : Callable[[DualTreeRetryEvent], None]
+        Sink for traversal retry events.
+    collected_retries : list[DualTreeRetryEvent]
+        Accumulator the sink appends to; read back by the caller.
+    tree_artifacts : Optional[Any]
+        Reuse an already-built tree instead of building one.
+    dual_downward_artifacts : Optional[Any]
+        Reuse an already-built downward plan.
+    supplied_force_scale : Optional[Array]
+        Per-node force scale for the Dehnen paper MAC. Required by that MAC --
+        see ``Raises``.
+    fused_device_mode : bool
+        Run the fused device-resident refresh rather than the eager path.
+    execution_config_override : Optional[Any]
+        Pre-resolved large-N execution policy.
+    large_n_env_cfg_override : Optional[dict[str, Any]]
+        Pre-read environment configuration, for tests.
+    return_compiled_state : bool
+        Return a ``LargeNCompiledState`` rather than a ``LargeNPreparedState``.
+
+    Returns
+    -------
+    Union[LargeNPreparedState, LargeNCompiledState]
+        The prepared state, compiled variant when ``return_compiled_state``.
+
+    Raises
+    ------
+    RuntimeError
+        If the Dehnen paper MAC is requested with no resolvable per-node force
+        scale -- the traversal would silently fall back to a unit scale, i.e. a
+        different acceptance threshold -- or if a fused-payload static cap was
+        not preflighted or is exceeded, or a compaction invariant fails.
+    """
 
     refresh_timing_active = bool(
         getattr(fmm, "_refresh_timing_active", False)
@@ -1389,6 +1480,25 @@ def _large_n_fastlane_eval_fn(
     the solver, so a refresh loop reusing topology recompiles nothing. ``jax.jit``
     keys on the pytree structure and leaf avals by itself; ``cache_key`` adds the
     Python-level constants the body closes over, which jit cannot see.
+
+    Parameters
+    ----------
+    fmm : Any
+        The engine, whose per-solver cache the compiled function is stored on.
+    state : Any
+        Prepared state; its pytree structure participates in the jit key.
+    body : Callable[[Any], Array]
+        The evaluation to compile.
+    cache_key : tuple[Any, ...]
+        The Python-level constants ``body`` closes over. These are invisible to
+        ``jax.jit``, so omitting one would silently reuse a stale executable.
+
+    Returns
+    -------
+    Optional[Callable[[Any], Array]]
+        The cached compiled callable, or ``None`` to signal the caller should
+        run ``body`` eagerly -- which is the escape hatch for measuring the
+        compile's benefit and for bisecting a suspected compile problem.
     """
 
     if not str(os.environ.get("JACCPOT_LARGE_N_EVAL_JIT", "1")).strip().lower() in {
@@ -1429,6 +1539,36 @@ def evaluate_large_n_state(
     radix fast-lane payload route. Potential evaluation still falls back to the
     compiled generic evaluator until a dedicated fast-lane potential path is
     implemented.
+
+    Parameters
+    ----------
+    fmm : object
+        The engine, typed loosely to avoid the import cycle.
+    state : Union[LargeNPreparedState, LargeNCompiledState]
+        Prepared or compiled large-N state.
+    target_indices : Optional[Array]
+        Must be ``None`` -- this lane evaluates the full particle set only.
+    return_potential : bool
+        Also return potentials, which routes to the compiled generic evaluator
+        rather than the fast lane.
+    max_acc_derivative_order : int
+        Must be ``0``; acceleration derivatives are not wired on this lane.
+
+    Returns
+    -------
+    Any
+        Accelerations, or ``(accelerations, potentials)`` when
+        ``return_potential`` is set.
+
+    Raises
+    ------
+    NotImplementedError
+        If ``target_indices`` is given, or ``max_acc_derivative_order`` is
+        non-zero. Both are unimplemented rather than invalid, so they raise
+        loudly instead of silently ignoring the request.
+    RuntimeError
+        If the state was not prepared with ``nearfield_mode='bucketed'``, or
+        carries no radix fast-lane payload. A wiring fault, not user input.
     """
 
     from .kernels.core import (
@@ -1757,6 +1897,18 @@ def _record_large_n_decline(fmm: Any, reason: str) -> None:
     The lane is selected silently, so a caller that configures a feature the lane
     does not support sees only an unexplained slowdown. Surfacing the reason makes
     "my large-N run is slow" answerable without bisecting the selection predicate.
+
+    Parameters
+    ----------
+    fmm : Any
+        The engine the reason is recorded on.
+    reason : str
+        Why the lane declined, phrased for the user who will read it back.
+
+    Returns
+    -------
+    None
+        Records the reason on ``fmm`` in place.
     """
 
     try:
@@ -1772,7 +1924,34 @@ def can_use_large_n_prepare_path(
     masses_arr: Array,
     allow_stateful_cache: bool,
 ) -> bool:
-    """Decide whether prepare_state should dispatch to the large-N path."""
+    """Decide whether prepare_state should dispatch to the large-N path.
+    Declining is silent by design -- the caller just uses the general path --
+    which is why every rejection also goes through
+    :func:`_record_large_n_decline`.
+
+    Parameters
+    ----------
+    fmm : object
+        The engine whose configuration is being tested.
+    positions_arr : Array
+        Particle positions; consulted for count and concreteness.
+    masses_arr : Array
+        Particle masses, likewise.
+    allow_stateful_cache : bool
+        Whether process-level caches may be used.
+
+    Returns
+    -------
+    bool
+        ``True`` when the large-N path should be dispatched.
+
+    Raises
+    ------
+    RuntimeError
+        If ``runtime_path='large_n'`` was requested **explicitly** but the lane
+        cannot honour the configuration. An explicit request is the one case
+        where declining silently would be wrong, so it raises instead.
+    """
 
     runtime_path = str(getattr(fmm, "runtime_path", "auto")).strip().lower()
     if runtime_path not in ("auto", "large_n"):

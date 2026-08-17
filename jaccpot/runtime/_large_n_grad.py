@@ -47,6 +47,30 @@ class LargeNGradPlan:
     Built once, concretely, outside any trace; captured as a constant by the
     differentiated function. Hoist it out of an optimisation loop to avoid
     rebuilding it per step.
+
+    Attributes
+    ----------
+    far_pair_sources : Array
+        Source node of each frozen far pair.
+    far_pair_targets : Array
+        Target node of each frozen far pair.
+    far_pair_active_count : Optional[Array]
+        Live pair count when the lists are padded. Consumed as a MASK, not as a
+        loop bound -- that is what keeps the M2L reverse-mode safe.
+    order : int
+        Expansion order the plan was frozen at.
+    max_leaf_size : int
+        Leaf slot capacity.
+    center_mode : str
+        How expansion centres are chosen.
+    farfield_mode : str
+        Far-field lane the recomputation must reproduce.
+    m2l_chunk_size : Optional[int]
+        M2L chunk size; ``None`` leaves it to the runtime.
+    l2l_chunk_size : Optional[int]
+        L2L chunk size; ``None`` leaves it to the runtime.
+    num_far_pairs : int
+        Allocated pair capacity, as a Python int so it can size a scan.
     """
 
     far_pair_sources: Array
@@ -62,6 +86,29 @@ class LargeNGradPlan:
 
 
 def _require(condition: bool, message: str) -> None:
+    """Raise ``NotImplementedError`` unless ``condition`` holds.
+
+    NotImplementedError rather than ValueError on purpose: every rejection in
+    this module means a large-N seam is not wired for differentiation, which is a
+    gap in the implementation and not bad user input.
+
+    Parameters
+    ----------
+    condition : bool
+        The requirement being checked.
+    message : str
+        What is unsupported, phrased for the user who hit it.
+
+    Returns
+    -------
+    None
+        Returns normally when ``condition`` holds.
+
+    Raises
+    ------
+    NotImplementedError
+        If ``condition`` is false.
+    """
     if not condition:
         raise NotImplementedError(message)
 
@@ -73,6 +120,17 @@ def _engine(fmm: Any) -> Any:
     solver holds it as ``_impl``. Callers reach this module both ways -- from
     ``differentiable_accelerations`` (already the engine) and from user code
     holding the facade -- so normalise rather than fail on an attribute lookup.
+
+    Parameters
+    ----------
+    fmm : Any
+        Either the public facade or the runtime engine.
+
+    Returns
+    -------
+    Any
+        The runtime engine -- ``fmm._impl`` when given the facade, otherwise
+        ``fmm`` unchanged.
     """
     return getattr(fmm, "_impl", fmm)
 
@@ -86,6 +144,28 @@ def prepare_large_n_grad_plan(
     Every rejection here is loud on purpose. A partially-wired large-N seam does
     not fail -- it returns an incomplete gradient -- so anything unsupported must
     raise rather than degrade.
+
+    Parameters
+    ----------
+    fmm : Any
+        Facade or runtime engine; normalised by :func:`_engine`.
+    state : LargeNPreparedState
+        Prepared state to freeze. Must carry a retained far-pair list --
+        ``retain_far_pairs_for_grad=True`` at construction -- since the M2L
+        recomputation runs against it.
+
+    Returns
+    -------
+    LargeNGradPlan
+        The frozen discriminators, safe to capture as a constant.
+
+    Raises
+    ------
+    RuntimeError
+        If the state is missing the retained far pairs, or its configuration is
+        one this seam cannot differentiate. Loud rather than degraded: a
+        partially-wired seam returns an incomplete gradient, which nothing
+        downstream would notice.
     """
     _require(
         isinstance(state, LargeNPreparedState),
@@ -198,6 +278,25 @@ def large_n_farfield_locals_at(
     The M2L runs against the frozen pair list via ``far_pairs_coo``. Note
     ``active_count`` is consumed as a MASK rather than a loop bound, which is what
     keeps it reverse-mode safe.
+
+    Parameters
+    ----------
+    fmm : Any
+        Facade or runtime engine.
+    state : LargeNPreparedState
+        Prepared state supplying the frozen topology.
+    positions_sorted : Array
+        Live positions in the state's sorted order.
+    masses_sorted : Array
+        Live masses, same order.
+    plan : LargeNGradPlan
+        Frozen discriminators from :func:`prepare_large_n_grad_plan`.
+
+    Returns
+    -------
+    Any
+        Freshly computed local expansions -- NOT ``state.local_data``, which is
+        prebaked and would cut the source-side chain.
     """
     engine = _engine(fmm)
     upward = engine.prepare_upward_sweep(
@@ -252,6 +351,36 @@ def evaluate_large_n_state_at_positions_and_masses_sorted(
     ``include_near`` / ``include_far`` exist for the diagnostic split that the
     correctness gate relies on: with the near field disabled, a mass gradient that
     comes out exactly zero proves the far-field chain is not wired.
+
+    Parameters
+    ----------
+    fmm : Any
+        Facade or runtime engine.
+    state : LargeNPreparedState
+        Prepared state supplying the frozen topology.
+    positions_sorted : Array
+        Live positions in the state's sorted order.
+    masses_sorted : Array
+        Live masses, same order.
+    plan : LargeNGradPlan
+        Frozen discriminators from :func:`prepare_large_n_grad_plan`.
+    include_near : bool
+        Include the near-field contribution.
+    include_far : bool
+        Include the far-field contribution.
+
+    Returns
+    -------
+    Array
+        Accelerations in SORTED order -- the caller applies the inverse
+        permutation. Returning sorted is deliberate: it keeps this function
+        expression-for-expression comparable with the production fast lane.
+
+    Raises
+    ------
+    ValueError
+        If ``positions_sorted`` or ``masses_sorted`` does not match the state's
+        shapes.
     """
     positions = jnp.asarray(positions_sorted, dtype=state.working_dtype)
     masses = jnp.asarray(masses_sorted, dtype=state.working_dtype)
