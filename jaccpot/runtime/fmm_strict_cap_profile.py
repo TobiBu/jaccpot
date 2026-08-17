@@ -176,7 +176,30 @@ class StrictCapProfileMixin:
         self: "FMMEngine",
         state: PreparedStateLike,
     ) -> dict[str, Any]:
-        """Build a stable-shape profile summary for compile-reuse diagnostics."""
+        """Build a stable-shape profile summary for compile-reuse diagnostics.
+
+        Shapes only -- it flattens the state's pytree and records dimensions,
+        never values. Two states holding different numbers under an identical
+        topology therefore produce the same profile, which is the point: the
+        profile answers "will this recompile?", not "is this the same problem?".
+
+        Parameters
+        ----------
+        state : PreparedStateLike
+            The prepared state to summarise. Duck-typed, and every field is read
+            defensively -- a missing array records 0 rather than raising, so a
+            state from a different lane still profiles.
+
+        Returns
+        -------
+        dict[str, Any]
+            JSON-serialisable, which is load-bearing:
+            :meth:`_compiled_profile_fingerprint` hashes
+            ``json.dumps(..., sort_keys=True)`` of it, so anything unserialisable
+            added here breaks fingerprinting rather than degrading it. The
+            ``max_*`` entries are capacities and are what
+            :meth:`_compiled_profile_capacity_compatible` compares.
+        """
 
         def _shape0(value: Any) -> int:
             if value is None:
@@ -259,7 +282,32 @@ class StrictCapProfileMixin:
         base_profile: dict[str, Any],
         candidate_profile: dict[str, Any],
     ) -> bool:
-        """Return True when candidate usage fits within base profile capacities."""
+        """Return True when candidate usage fits within base profile capacities.
+
+        Asymmetric on purpose: a candidate that needs *less* than the base is
+        compatible, since the compiled executable's padded shapes still hold it.
+        So this is "fits inside", not "equals" -- reversing the arguments is a
+        different question and generally gives a different answer.
+
+        Only five capacity fields are compared. Any other difference between the
+        two profiles is ignored here, so a ``True`` does not mean the profiles
+        match; it means the capacities do not force a recompile.
+
+        Parameters
+        ----------
+        base_profile : dict[str, Any]
+            Profile of the already-compiled state -- the capacities available.
+        candidate_profile : dict[str, Any]
+            Profile of the state being considered for reuse.
+
+        Returns
+        -------
+        bool
+            Whether every compared capacity in the candidate is within the base.
+            Missing keys read as 0 on both sides, so a profile lacking a field
+            compares as needing none of it -- which makes an unrecognised
+            profile look compatible rather than incompatible.
+        """
         capacity_fields = (
             "max_nodes",
             "max_leaves",
