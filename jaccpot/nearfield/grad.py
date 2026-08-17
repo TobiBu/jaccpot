@@ -405,7 +405,9 @@ def _leafpair_accel_analytic_vjp(
     leaf_offsets = jnp.arange(batch, dtype=INDEX_DTYPE)
     slot_offsets = jnp.arange(tile, dtype=INDEX_DTYPE)
 
-    def _pass(carry, tier_leaves, tier_slots):
+    def _pass(
+        carry: Tuple[Array, Array], tier_leaves: Array, tier_slots: int
+    ) -> Tuple[Array, Array]:
         """One occupancy tier: ``tier_leaves`` targets against ``tier_slots`` slots."""
         tier_count = int(tier_leaves.shape[0])
         leaf_starts = jnp.arange(0, tier_count, batch, dtype=INDEX_DTYPE)
@@ -439,7 +441,9 @@ def _leafpair_accel_analytic_vjp(
                 valid_slot = valid_slot & tgt_in_range[:, None]
                 safe_src = jnp.where(valid_slot, src_leaf, 0)
 
-                def _apply(acc_in):
+                def _apply(
+                    acc_in: Tuple[Array, Array, Array],
+                ) -> Tuple[Array, Array, Array]:
                     pos_in, mass_in, tgt_in = acc_in
                     src_pos = leaf_positions[safe_src]  # (B, T, W, 3)
                     src_mass = leaf_masses[safe_src]  # (B, T, W)
@@ -611,14 +615,14 @@ def _pair_accel_cvjp(
 
 
 def _pair_accel_cvjp_fwd(
-    target_positions,
-    source_positions,
-    source_masses,
-    target_mask_f,
-    source_mask_f,
-    softening_sq,
-    G,
-):
+    target_positions: Array,
+    source_positions: Array,
+    source_masses: Array,
+    target_mask_f: Array,
+    source_mask_f: Array,
+    softening_sq: Array,
+    G: Array,
+) -> Tuple[Array, Tuple[Array, ...]]:
     # The residual carries only the O(B*W) INPUTS; the O(B*Wt*Ws) pair
     # intermediates are rematerialized in the reverse pass. Storing
     # (diff, inv_dist3, inv_dist5) instead cost 5 doubles per particle PAIR, and
@@ -651,7 +655,9 @@ def _pair_accel_cvjp_fwd(
     return accels, residual
 
 
-def _pair_accel_cvjp_bwd(residual, cotangent):
+def _pair_accel_cvjp_bwd(
+    residual: Tuple[Array, ...], cotangent: Array
+) -> Tuple[Array, ...]:
     (
         target_positions,
         source_positions,
