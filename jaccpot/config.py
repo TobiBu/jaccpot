@@ -78,15 +78,24 @@ class FMMPreset(str, Enum):
     ``solver._default_advanced_for_preset`` and never reach ``get_preset_config``
     at all. See ARCHITECTURE.md section 6.
 
-    The members, in increasing cost:
-
-    * ``FAST`` -- lowest accuracy, lowest cost. The default.
-    * ``BALANCED`` -- middle ground; resolves through advanced-config defaults.
-    * ``ACCURATE`` -- tightest accuracy settings. What the golden characterization
-      suite uses.
-    * ``LARGE_N_GPU`` -- galaxy-scale GPU profile, canonicalized to the low-memory
-      streamed fast path (see :class:`RuntimePolicyConfig`). Measured at 1M
-      particles: forward 2.5 s, forward+backward 69 s, 11 GB peak.
+    Attributes
+    ----------
+    FAST :
+        ``"fast"``. Lowest accuracy, lowest cost. The package default, and the
+        first of the two members that resolve through ``get_preset_config``.
+    BALANCED :
+        ``"balanced"``. Middle ground; resolves through advanced-config defaults.
+    ACCURATE :
+        ``"accurate"``. Tightest accuracy settings. What the golden
+        characterization suite uses.
+    LARGE_N_GPU :
+        ``"large_n_gpu"``. Galaxy-scale GPU profile, canonicalized to the
+        low-memory streamed fast path (see :class:`RuntimePolicyConfig`).
+        Measured at 1M particles: forward 2.5 s, forward+backward 69 s, 11 GB
+        peak. It is not "more accurate than ``ACCURATE``": its bundle carries no
+        accuracy knob at all, and it shares ``FAST``'s tree settings exactly
+        (``lbvh``, 64 particles per leaf, no host-side refinement), differing
+        only in traversal capacities and in forcing ``jit_tree``.
     """
 
     FAST = "fast"
@@ -299,7 +308,17 @@ class TraversalOverrides:
                 )
 
     def as_dict(self: "TraversalOverrides") -> dict[str, int]:
-        """Return only the fields that were set, as ``{name: int}``."""
+        """Return only the fields that were set, as ``{name: int}``.
+
+        Returns
+        -------
+        dict[str, int]
+            One entry per non-``None`` field, coerced to ``int``. Fields left at
+            ``None`` are **absent**, not present-and-``None``: downstream code
+            merges this over the preset's traversal config, so an omitted key is
+            what "leave the preset's choice alone" is expressed as. An
+            all-defaults instance therefore yields ``{}``.
+        """
 
         return {
             name: int(getattr(self, name))
