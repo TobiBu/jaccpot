@@ -153,6 +153,23 @@ def build_Q_dehnen_no_sqrt2(ell: int) -> np.ndarray:
              = -i(Θ_n^m - (-1)^m Θ_n^{-m}) / 2
 
     Note: NO √2 factors!
+
+    The absent sqrt(2) is the whole point: this is the DEHNEN real convention, not
+    the unitary tesseral one. Coefficients in this basis are a factor of two
+    smaller on every ``m != 0`` channel than the genuine-complex form -- the
+    relationship ``m2l_solidfmm_reference`` carries
+    (``docs/operator_conventions.md``).
+
+    Parameters
+    ----------
+    ell : int
+        Degree ``l``.
+
+    Returns
+    -------
+    np.ndarray
+        ``[2l+1, 2l+1]`` complex transform taking packed complex coefficients to
+        Dehnen no-sqrt2 real ones. NumPy, not JAX: a compile-time constant.
     """
     n = 2 * ell + 1
     Q = np.zeros((n, n), dtype=np.complex128)
@@ -192,6 +209,25 @@ def _dehnen_real_Q_full(order: int) -> np.ndarray:
     ``((p+1)^2, (p+1)^2)`` complex matrix ``Q`` such that, for packed complex
     solidfmm coefficients ``c`` (conjugate-symmetric), ``real(Q @ c)`` are the
     packed Dehnen no-sqrt2 real coefficients used by this module's operators.
+
+    Parameters
+    ----------
+    order : int
+        Maximum degree ``p``.
+
+    Returns
+    -------
+    np.ndarray
+        ``[(p+1)^2, (p+1)^2]`` block-diagonal complex ``Q``. For conjugate-symmetric
+        packed complex coefficients ``c``, ``real(Q @ c)`` are the packed Dehnen
+        no-sqrt2 real coefficients this module's operators consume -- the
+        conjugate symmetry is what makes taking the real part lossless rather than
+        a projection.
+
+    Raises
+    ------
+    ValueError
+        If ``order`` is negative.
     """
     p = int(order)
     if p < 0:
@@ -327,6 +363,29 @@ def _compute_B_real_dehnen_via_Q(
     - B² = I (involution) for both B_T and B_U
     - Checkerboard sparsity: ~25% non-zero entries
     - D_y(β) = B @ D_z(-β) @ B
+
+    Parameters
+    ----------
+    ell : int
+        Degree ``l``.
+    dtype_key : str
+        Dtype name used to build the complex ``B``; part of the memoisation key
+        rather than a dtype object, which would not be hashable in the same way.
+
+    Returns
+    -------
+    Tuple[np.ndarray, np.ndarray]
+        ``(B_T, B_U)`` -- the local and multipole swap matrices, both purely real
+        with the checkerboard sparsity noted above, and both involutory
+        (``B @ B == I`` exactly, checked for ``l = 1..3``).
+
+        ``B_U`` is built as ``Q B_complex^T Q^-1``, which is **not** the transpose
+        of ``B_T`` here: that identity needs a unitary ``Q``, and the no-sqrt2
+        ``Q`` is exactly the non-unitary one. Measured ``max|B_U - B_T^T|`` is
+        1.0, 1.5 and 2.5 at ``l = 1, 2, 3``. The parenthetical "(= B_T^T in real
+        basis)" in the summary above predates this check and does not hold in this
+        basis -- flagged rather than edited, since it is a claim about the algebra
+        and belongs in its own change.
     """
     B_complex = _compute_dehnen_B_matrix_complex(ell, "float64")
     Q = build_Q_dehnen_no_sqrt2(ell)
