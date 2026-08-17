@@ -71,7 +71,25 @@ class SweepsMixin:
         masses: Array,
         order: int = 1,
     ) -> MultipoleExpansion:
-        """Return the multipole expansion via the shared reference helper."""
+        """Return the multipole expansion via the shared reference helper.
+
+        A diagnostic entry point, not part of the FMM pipeline: it delegates to
+        the reference implementation and takes no tree.
+
+        Parameters
+        ----------
+        positions : Array
+            ``(n, 3)`` particle positions.
+        masses : Array
+            ``(n,)`` particle masses.
+        order : int
+            Expansion order.
+
+        Returns
+        -------
+        MultipoleExpansion
+            The reference expansion about the particles' own centre.
+        """
 
         return reference_compute_expansion(positions, masses, order=order)
 
@@ -82,7 +100,26 @@ class SweepsMixin:
         order: int = 1,
         eval_point: Optional[Array] = None,
     ) -> Array:
-        """Evaluate multipole expansions via the shared reference helper."""
+        """Evaluate multipole expansions via the shared reference helper.
+
+        Diagnostic counterpart to :meth:`compute_expansion`; ``G`` and
+        ``softening`` come from the engine rather than the call.
+
+        Parameters
+        ----------
+        expansion : MultipoleExpansion
+            Expansion to evaluate.
+        order : int
+            Expansion order to evaluate to.
+        eval_point : Optional[Array]
+            Point of evaluation; ``None`` defers to the reference helper's
+            default.
+
+        Returns
+        -------
+        Array
+            Acceleration at ``eval_point``.
+        """
 
         return reference_evaluate_expansion(
             expansion,
@@ -100,7 +137,28 @@ class SweepsMixin:
         eval_point: Array,
         eval_mass: float = 0.0,
     ) -> Array:
-        """Compute direct-sum accelerations for diagnostic comparisons."""
+        """Compute direct-sum accelerations for diagnostic comparisons.
+
+        The O(N^2) oracle the FMM paths are checked against, so it is exact and
+        deliberately not fast.
+
+        Parameters
+        ----------
+        positions : Array
+            ``(n, 3)`` source positions.
+        masses : Array
+            ``(n,)`` source masses.
+        eval_point : Array
+            Point at which to evaluate the acceleration.
+        eval_mass : float
+            Ignored. Retained for backwards compatibility with callers that
+            still pass it.
+
+        Returns
+        -------
+        Array
+            Direct-sum acceleration at ``eval_point``.
+        """
 
         _ = eval_mass  # Unused but preserved for backwards compatibility.
         return reference_direct_sum(
@@ -121,7 +179,20 @@ class SweepsMixin:
         populated by the eager full-prepare that always precedes the traced
         refresh, so the hot path gets the concrete depth. Returns ``None`` only
         if nothing concrete has been seen yet (callers then fall back to the
-        padded shape-derived depth, which is correct, just slower)."""
+        padded shape-derived depth, which is correct, just slower).
+
+        Parameters
+        ----------
+        tree : Tree
+            Tree whose depth is wanted. May be concrete or traced.
+
+        Returns
+        -------
+        Optional[int]
+            The concrete depth, or ``None`` if no concrete tree has been seen
+            yet. Any failure to read the depth falls back to the stashed value
+            rather than raising, so this never breaks a traced refresh.
+        """
         probe = getattr(tree, "parent", None)
         if probe is None or isinstance(probe, jax.core.Tracer):
             return self._static_upward_num_levels
@@ -151,7 +222,45 @@ class SweepsMixin:
         precomputed_geometry: Optional[Any] = None,
         defer_geometry: bool = False,
     ) -> TreeUpwardData:
-        """Bundle geometry, raw moments, and packed expansions for a tree."""
+        """Bundle geometry, raw moments, and packed expansions for a tree.
+
+        The P2M + M2M half of the pipeline. On the real basis this runs the native
+        real sweep -- no complex intermediate and no basis conversion, per the
+        "real everywhere, never convert bases" contract.
+
+        Parameters
+        ----------
+        tree : Tree
+            Tree to build expansions for.
+        positions_sorted : Array
+            ``(n, 3)`` positions in the tree's own order.
+        masses_sorted : Array
+            ``(n,)`` masses, same order.
+        max_order : int
+            Expansion order.
+        center_mode : str
+            How expansion centres are chosen. The native real sweep supports
+            ``"com"`` only -- see ``Raises``.
+        explicit_centers : Optional[Array]
+            Caller-supplied centres, when ``center_mode`` asks for them.
+        max_leaf_size : Optional[int]
+            Leaf capacity; ``None`` derives it from the tree.
+        precomputed_geometry : Optional[Any]
+            Reuse an already-built geometry instead of recomputing it.
+        defer_geometry : bool
+            Skip building geometry here, leaving it to a later stage.
+
+        Returns
+        -------
+        TreeUpwardData
+            Geometry, mass moments and packed multipoles.
+
+        Raises
+        ------
+        ValueError
+            If the native real-basis sweep is asked for a ``center_mode`` other
+            than ``"com"``.
+        """
         self._ensure_execution_backend_supported(tree=tree)
 
         if self.expansion_basis == "solidfmm":
@@ -286,7 +395,31 @@ class SweepsMixin:
         m2l_chunk_size: Optional[int] = None,
         dense_buffers: Optional[DenseInteractionBuffers] = None,
     ) -> LocalExpansionData:
-        """Execute an M2L+L2L pass for the provided multipoles."""
+        """Execute an M2L+L2L pass for the provided multipoles.
+
+        Takes an interaction list as given; :meth:`prepare_downward_sweep` is the
+        entry point that builds one.
+
+        Parameters
+        ----------
+        tree : Tree
+            Tree being swept.
+        multipoles : NodeMultipoleData
+            Source multipoles from the upward sweep.
+        interactions : NodeInteractionList
+            Far-pair list to accumulate.
+        initial_locals : Optional[LocalExpansionData]
+            Locals to accumulate into; ``None`` starts from zeros.
+        m2l_chunk_size : Optional[int]
+            Pairs per M2L chunk; a memory/throughput knob only.
+        dense_buffers : Optional[DenseInteractionBuffers]
+            Pre-built dense interaction buffers, when the dense lane is in use.
+
+        Returns
+        -------
+        LocalExpansionData
+            Local expansions after M2L and the L2L cascade.
+        """
 
         return run_tree_downward_sweep(
             tree,
@@ -329,7 +462,75 @@ class SweepsMixin:
         adaptive_order: Optional[bool] = None,
         p_gears: Optional[tuple[int, ...]] = None,
     ) -> TreeDownwardData:
-        """Build interactions and locals needed for the downward sweep."""
+        """Build interactions and locals needed for the downward sweep.
+
+        The caller-facing boundary for ``mac_type``: this accepts the wider
+        jaccpot-level vocabulary, including ``"dehnen_error"``, and resolves it to
+        a traversal-facing value before the traversal sees it. Passing
+        ``self.mac_type`` straight through was a defect -- see the inline comment.
+
+        Parameters
+        ----------
+        tree : Tree
+            Tree being swept.
+        upward_data : TreeUpwardData
+            Upward-pass result.
+        theta : Optional[float]
+            Per-call MAC opening angle; ``None`` takes the engine's.
+        mac_type : Optional[MACTypeInput]
+            Caller-facing MAC selector; ``None`` takes the engine's. Resolved to
+            the traversal vocabulary here.
+        initial_locals : Optional[LocalExpansionData]
+            Locals to accumulate into; ``None`` starts from zeros.
+        interactions : Optional[NodeInteractionList]
+            Pre-built far-pair list; ``None`` traverses.
+        m2l_chunk_size : Optional[int]
+            Pairs per M2L chunk.
+        l2l_chunk_size : Optional[int]
+            Nodes per L2L chunk.
+        traversal_config : Optional[DualTreeTraversalConfig]
+            Traversal capacities and retry policy.
+        dense_buffers : Optional[DenseInteractionBuffers]
+            Pre-built dense interaction buffers.
+        retry_logger : Optional[Callable[[DualTreeRetryEvent], None]]
+            Called when the traversal retries with a larger capacity.
+        grouped_interactions : bool
+            Use the grouped M2L lanes.
+        grouped_buffers : Optional[GroupedInteractionBuffers]
+            Pre-built grouped buffers; built on demand when ``None``.
+        grouped_segment_starts : Optional[Array]
+            Class-major segment starts.
+        grouped_segment_lengths : Optional[Array]
+            Class-major segment lengths.
+        grouped_segment_class_ids : Optional[Array]
+            Translation class of each segment.
+        grouped_segment_sort_permutation : Optional[Array]
+            Permutation into class-major order.
+        grouped_segment_group_ids : Optional[Array]
+            Group id of each segment.
+        grouped_segment_unique_targets : Optional[Array]
+            Distinct target nodes per segment.
+        farfield_mode : str
+            ``"pair_grouped"`` or ``"class_major"`` on the grouped path.
+        dehnen_radius_scale : Optional[float]
+            Node-radius scale for the Dehnen criteria; ``None`` takes the
+            engine's.
+        far_pairs_coo : Optional[_FarPairCOO]
+            Pre-built COO far pairs, which take precedence over
+            ``interactions``.
+        far_pairs_by_gear : Optional[tuple[tuple[Array, Array], ...]]
+            Per-gear far-pair lists for the adaptive-order path.
+        adaptive_order : Optional[bool]
+            Choose the order per interaction; ``None`` takes the engine's.
+        p_gears : Optional[tuple[int, ...]]
+            Candidate orders for ``adaptive_order``; ``None`` takes the
+            engine's.
+
+        Returns
+        -------
+        TreeDownwardData
+            Interactions plus the local expansions they produced.
+        """
         self._ensure_execution_backend_supported(tree=tree)
 
         theta_val = float(self.theta if theta is None else theta)
