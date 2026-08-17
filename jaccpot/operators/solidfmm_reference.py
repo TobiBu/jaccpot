@@ -6,6 +6,15 @@ normalization as jaccpot.operators.real_harmonics (no √2 real basis).
 
 It is intended as a correctness reference to compare against the fast real
 operators and to help debug rotation/translation conventions.
+
+**It did not earn that description off axis until the two conventions in
+``_angles_from_delta`` were corrected** -- an azimuth and a polar tilt, which made
+:func:`m2l_solidfmm_reference` wrong by 1.2e-2 relative for any non-axis-aligned
+``delta``, flat in expansion order. ``translate_along_z_m2l_complex`` (the z-only
+piece, cross-checked against ``complex_ops`` in ``test_complex_ops.py``) was never
+affected. See ``docs/operator_conventions.md`` section 4 for the diagnosis and the
+note on ``_angles_from_delta`` for the expressions. Nothing outside ``tests/``
+imports this module, so the defect only ever weakened an oracle.
 """
 
 from __future__ import annotations
@@ -72,10 +81,45 @@ def _complex_swap_matrices(ell: int) -> Tuple[np.ndarray, np.ndarray]:
 
 
 def _angles_from_delta(delta: np.ndarray) -> Tuple[float, float]:
+    """The two alignment angles this module's rotations consume.
+
+    **Both conventions here were wrong until this commit, and they were the whole
+    reason** :func:`m2l_solidfmm_reference` **was wrong off axis** -- by 1.2e-2
+    relative, *flat in expansion order*, which is the signature of a convention
+    error rather than truncation. Diagnosis and measurements:
+    ``docs/operator_conventions.md`` section 4.
+
+    Two expressions, matching
+    :func:`~jaccpot.operators.complex_ops._angles_from_delta_solidfmm`, whose
+    rotation composition is otherwise identical to the one here:
+
+    * ``alpha`` is ``atan2(x, y)``, the azimuth that removes the *x* component,
+      because the coded ``B`` is the ``x <-> z`` swap and so ``B Dz(theta) B``
+      turns about ``x``. The old ``atan2(y, x)`` suited a ``y <-> z`` swap, which
+      is not the matrix this module uses -- the same error already fixed once in
+      the real rotations.
+    * ``beta`` is ``atan2(-rho, z)``, the negated polar tilt.
+
+    Do not "simplify" either back. ``atan2(y, x)`` and ``atan2(rho, z)`` are what
+    a reader expects from spherical-coordinate habit, which is exactly why this
+    went unnoticed;
+    ``test_solidfmm_reference_matches_m2l_real_off_axis`` is what now catches it.
+
+    Parameters
+    ----------
+    delta : np.ndarray
+        3-vector, ``target centre - source centre``.
+
+    Returns
+    -------
+    Tuple[float, float]
+        ``(alpha, beta)`` in radians, as Python floats -- they become
+        :func:`_complex_Dz` cache keys.
+    """
     x, y, z = float(delta[0]), float(delta[1]), float(delta[2])
     rho = math.hypot(x, y)
-    alpha = math.atan2(y, x)
-    beta = math.atan2(rho, z)
+    alpha = math.atan2(x, y)
+    beta = math.atan2(-rho, z)
     return alpha, beta
 
 
@@ -186,11 +230,24 @@ def m2l_solidfmm_reference(
     pinned on-axis against the pure z-translate by
     ``test_solidfmm_reference_matches_z_axis_m2l``.
 
-    That channel rescale is **not** the right comparison for a general off-axis
-    ``delta`` -- the factor of two is per-``|m|`` in the *aligned* frame, and
-    rotating back mixes ``m`` channels -- so do not use a diagonal rescale to
-    cross-check the two off-axis. No test asserts an off-axis relationship
-    between them.
+    That factor-of-two rescale *is* the correct relationship at every ``delta`` --
+    it relates the two bases, not the geometry, and
+    ``test_dehnen_local_channel_factor_holds_at_any_delta`` shows it holding to
+    3.1e-16 off axis for the production complex M2L. **This function failed it
+    until the two conventions in** :func:`_angles_from_delta` **were corrected**,
+    by 3.9e-2 (order 2) to 1.7 (order 6), with an evaluated potential that
+    plateaued at 2.1e-2 to 8.5e-2 relative error, flat in ``order``. It now agrees
+    with ``m2l_real`` to 3e-17 on the rescaled coefficients, and its potential
+    converges identically (1.1e-6, 3.8e-10, 1.2e-13 at orders 2, 4, 6).
+
+    Two earlier versions of this note were wrong in opposite directions: the first
+    blamed the comparison rather than the code; the second, written from a field
+    check that omitted the channel rescale, claimed a second undiagnosed defect
+    remained. There was one defect, in two expressions.
+
+    The ``m != 0`` factor of two still applies. If you compare this function's
+    output against a real-basis quantity, rescale first -- omitting it is what
+    produced the second wrong note.
 
     Parameters
     ----------
