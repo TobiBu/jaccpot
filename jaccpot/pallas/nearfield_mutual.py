@@ -32,14 +32,14 @@ stay non-vacuous without a GPU.
 from __future__ import annotations
 
 import functools
-from typing import Optional
+from typing import Any, Optional
 
 import jax
 import jax.numpy as jnp
 from jax import lax
 from jaxtyping import Array
 
-from jaccpot.pallas._compat import pallas_backend_kwargs
+from jaccpot.pallas._compat import KernelRef, pallas_backend_kwargs
 
 try:
     from jax.experimental import pallas as pl
@@ -65,6 +65,11 @@ def pallas_nearfield_mutual_supported() -> bool:
     Matches the gate the fused M2L kernel uses. A plain ``gpu`` check is not
     enough: on a pre-Ampere card the Triton lowering fails at runtime, so callers
     would get a crash rather than the pure-JAX fallback they asked for.
+
+    Returns
+    -------
+    bool
+        ``True`` when the fused mutual near-field kernel may be dispatched.
     """
     if pl is None:
         return False
@@ -84,6 +89,21 @@ def pallas_nearfield_mutual_supported() -> bool:
 
 
 def _next_pow2(n: int) -> int:
+    """Round ``n`` up to a power of two.
+
+    Triton tiles must be power-of-two sized, so a leaf block's slot axis is
+    padded out to this width.
+
+    Parameters
+    ----------
+    n : int
+        Value to round up.
+
+    Returns
+    -------
+    int
+        Smallest power of two that is at least ``n``.
+    """
     n = max(1, int(n))
     return 1 << (n - 1).bit_length()
 
@@ -104,6 +124,22 @@ def _pair_weight_tile(
 
     Rungs arrive as floats (see the ``_f`` convention on the ``custom_vjp``
     boundary below); they are small exact integers, so the comparison is exact.
+
+    Parameters
+    ----------
+    rung_a_f : Array
+        ``(S,)`` leaf-A rung, float-encoded.
+    rung_b_f : Array
+        ``(S,)`` leaf-B rung, float-encoded.
+    level_weights : Array
+        ``(num_levels,)`` weight per interaction level, read whole.
+    num_levels : int
+        Number of levels, i.e. the ``K`` of the masked reduction. Static.
+
+    Returns
+    -------
+    Array
+        ``(S, S)`` tile of ``level_weights[max(rung_i, rung_j)]``.
     """
     levels = int(num_levels)
     pair_level = jnp.maximum(rung_a_f[:, None], rung_b_f[None, :])
@@ -139,6 +175,37 @@ def _block_tile(
     packed array lowers to a ``gather``, which the Triton backend rejects
     outright ("Unimplemented primitive in Pallas GPU lowering: gather"). Pulling
     each component straight off its ref keeps every access a strided load.
+
+    Parameters
+    ----------
+    a_xyz : tuple[Array, Array, Array]
+        Leaf-A coordinates as three separate ``(S,)`` component vectors.
+    ma : Array
+        ``(S,)`` leaf-A masses.
+    va_f : Array
+        ``(S,)`` leaf-A validity mask, float-encoded and tested ``> 0.5`` -- float rather than
+        boolean because a Pallas ref carries the working dtype.
+    b_xyz : tuple[Array, Array, Array]
+        Leaf-B coordinates, same layout as ``a_xyz``.
+    mb : Array
+        ``(S,)`` leaf-B masses.
+    vb_f : Array
+        ``(S,)`` leaf-B validity mask, same encoding.
+    weight : Optional[Array]
+        ``(S, S)`` level weight from :func:`_pair_weight_tile`, or ``None`` for
+        unit weights.
+    softening_sq : Array
+        Squared Plummer softening length, scalar.
+    g_value : Array
+        Gravitational constant, scalar.
+    exclude_diagonal : bool
+        Drop ``i == j``, for a leaf paired with itself.
+
+    Returns
+    -------
+    tuple[Array, Array, Array]
+        The ``(S, S)`` x, y and z force tiles: the force on ``a_i`` due to
+        ``b_j``. Masked pairs are exactly zero.
     """
     ax, ay, az = a_xyz
     bx, by, bz = b_xyz
@@ -169,25 +236,70 @@ def _block_tile(
 
 
 def _mutual_leafpair_kernel(
-    xa_ref,
-    ma_ref,
-    va_ref,
-    xb_ref,
-    mb_ref,
-    vb_ref,
-    ra_ref,
-    rb_ref,
-    lw_ref,
-    soft_ref,
-    g_ref,
-    fa_ref,
-    fb_ref,
+    xa_ref: KernelRef,
+    ma_ref: KernelRef,
+    va_ref: KernelRef,
+    xb_ref: KernelRef,
+    mb_ref: KernelRef,
+    vb_ref: KernelRef,
+    ra_ref: KernelRef,
+    rb_ref: KernelRef,
+    lw_ref: KernelRef,
+    soft_ref: KernelRef,
+    g_ref: KernelRef,
+    fa_ref: KernelRef,
+    fb_ref: KernelRef,
     *,
     num_levels: int,
     exclude_diagonal: bool,
     emit_b: bool,
-):
-    """One leaf pair: evaluate the block once, emit ``+F`` and ``-F``."""
+) -> None:
+    """One leaf pair: evaluate the block once, emit ``+F`` and ``-F``.
+    Evaluating once and emitting both signs is what makes momentum cancel
+    algebraically rather than to within rounding.
+
+    Parameters
+    ----------
+    xa_ref : KernelRef
+        Leaf-A positions for this pair, ``(1, S, VEC)``.
+    ma_ref : KernelRef
+        Leaf-A masses, ``(1, S)``.
+    va_ref : KernelRef
+        Leaf-A validity mask, float-encoded and tested ``> 0.5`` -- float rather than
+        boolean because a Pallas ref carries the working dtype.
+    xb_ref : KernelRef
+        Leaf-B positions, same layout as ``xa_ref``.
+    mb_ref : KernelRef
+        Leaf-B masses.
+    vb_ref : KernelRef
+        Leaf-B validity mask, same encoding.
+    ra_ref : KernelRef
+        Leaf-A rungs, float-encoded.
+    rb_ref : KernelRef
+        Leaf-B rungs, float-encoded.
+    lw_ref : KernelRef
+        Level-weight table.
+    soft_ref : KernelRef
+        Squared softening length.
+    g_ref : KernelRef
+        Gravitational constant.
+    fa_ref : KernelRef
+        Output: force on the leaf-A particles.
+    fb_ref : KernelRef
+        Output: force on the leaf-B particles, written only when ``emit_b``.
+    num_levels : int
+        Number of interaction levels. ``<= 0`` disables level weighting entirely.
+    exclude_diagonal : bool
+        Drop ``i == j``, so a particle in a leaf paired with itself does not act
+        on itself.
+    emit_b : bool
+        Also produce the ``b``-side output.
+
+    Returns
+    -------
+    None
+        Writes through ``fa_ref`` and ``fb_ref``.
+    """
     # `lw_ref[...]` materialises the whole (few-entry) table once; indexing the
     # ref per level would emit a load the Triton lowering turns into a gather.
     weight = (
@@ -265,6 +377,41 @@ def _block_vjp_tiles(
     Components are passed and returned separately for the same reason as in
     :func:`_block_tile`: packed ``(S, 3)`` slicing lowers to a ``gather``, which
     the Pallas Triton backend does not implement.
+
+    Parameters
+    ----------
+    a_xyz : tuple[Array, Array, Array]
+        Leaf-A coordinates as three ``(S,)`` component vectors.
+    ma : Array
+        ``(S,)`` leaf-A masses.
+    va_f : Array
+        ``(S,)`` leaf-A validity mask, float-encoded and tested ``> 0.5`` -- float rather than
+        boolean because a Pallas ref carries the working dtype.
+    b_xyz : tuple[Array, Array, Array]
+        Leaf-B coordinates, same layout.
+    mb : Array
+        ``(S,)`` leaf-B masses.
+    vb_f : Array
+        ``(S,)`` leaf-B validity mask, same encoding.
+    weight : Optional[Array]
+        ``(S, S)`` level weight, or ``None`` for unit weights.
+    softening_sq : Array
+        Squared Plummer softening length, scalar.
+    g_value : Array
+        Gravitational constant, scalar.
+    fa_bar_xyz : tuple[Array, Array, Array]
+        Cotangent of the leaf-A force, as three ``(S,)`` components.
+    fb_bar_xyz : tuple[Array, Array, Array]
+        Cotangent of the leaf-B force, same layout. Both endpoints feed each
+        pair, which is the structural difference from the gather-shaped rule.
+    exclude_diagonal : bool
+        Drop ``i == j``, for a leaf paired with itself.
+
+    Returns
+    -------
+    tuple[tuple[Array, Array, Array], Array, tuple[Array, Array, Array], Array]
+        ``(xa_bar_xyz, ma_bar, xb_bar_xyz, mb_bar)`` -- position cotangents as
+        component triples, mass cotangents as ``(S,)`` vectors.
     """
     ax, ay, az = a_xyz
     bx_pos, by_pos, bz_pos = b_xyz
@@ -319,29 +466,79 @@ def _block_vjp_tiles(
 
 
 def _mutual_leafpair_vjp_kernel(
-    xa_ref,
-    ma_ref,
-    va_ref,
-    xb_ref,
-    mb_ref,
-    vb_ref,
-    ra_ref,
-    rb_ref,
-    lw_ref,
-    soft_ref,
-    g_ref,
-    fa_bar_ref,
-    fb_bar_ref,
-    xa_bar_ref,
-    ma_bar_ref,
-    xb_bar_ref,
-    mb_bar_ref,
+    xa_ref: KernelRef,
+    ma_ref: KernelRef,
+    va_ref: KernelRef,
+    xb_ref: KernelRef,
+    mb_ref: KernelRef,
+    vb_ref: KernelRef,
+    ra_ref: KernelRef,
+    rb_ref: KernelRef,
+    lw_ref: KernelRef,
+    soft_ref: KernelRef,
+    g_ref: KernelRef,
+    fa_bar_ref: KernelRef,
+    fb_bar_ref: KernelRef,
+    xa_bar_ref: KernelRef,
+    ma_bar_ref: KernelRef,
+    xb_bar_ref: KernelRef,
+    mb_bar_ref: KernelRef,
     *,
     num_levels: int,
     exclude_diagonal: bool,
     emit_b: bool,
-):
-    """One leaf pair's analytic reverse, tile-bounded like the forward."""
+) -> None:
+    """One leaf pair's analytic reverse, tile-bounded like the forward.
+    Parameters
+    ----------
+    xa_ref : KernelRef
+        Leaf-A positions for this pair, ``(1, S, VEC)``.
+    ma_ref : KernelRef
+        Leaf-A masses, ``(1, S)``.
+    va_ref : KernelRef
+        Leaf-A validity mask, float-encoded and tested ``> 0.5`` -- float rather than
+        boolean because a Pallas ref carries the working dtype.
+    xb_ref : KernelRef
+        Leaf-B positions, same layout as ``xa_ref``.
+    mb_ref : KernelRef
+        Leaf-B masses.
+    vb_ref : KernelRef
+        Leaf-B validity mask, same encoding.
+    ra_ref : KernelRef
+        Leaf-A rungs, float-encoded.
+    rb_ref : KernelRef
+        Leaf-B rungs, float-encoded.
+    lw_ref : KernelRef
+        Level-weight table.
+    soft_ref : KernelRef
+        Squared softening length.
+    g_ref : KernelRef
+        Gravitational constant.
+    fa_bar_ref : KernelRef
+        Cotangent of the leaf-A force.
+    fb_bar_ref : KernelRef
+        Cotangent of the leaf-B force.
+    xa_bar_ref : KernelRef
+        Output: leaf-A position cotangent.
+    ma_bar_ref : KernelRef
+        Output: leaf-A mass cotangent.
+    xb_bar_ref : KernelRef
+        Output: leaf-B position cotangent.
+    mb_bar_ref : KernelRef
+        Output: leaf-B mass cotangent.
+    num_levels : int
+        Number of interaction levels. ``<= 0`` disables level weighting entirely.
+    exclude_diagonal : bool
+        Drop ``i == j``, so a particle in a leaf paired with itself does not act
+        on itself.
+    emit_b : bool
+        Also produce the ``b``-side output.
+
+    Returns
+    -------
+    None
+        Writes through the four ``*_bar_ref`` outputs.
+    """
     weight = (
         None
         if num_levels <= 0
@@ -379,11 +576,32 @@ def _mutual_leafpair_vjp_kernel(
 
 
 def _pad_inputs(
-    xa: Array, ma: Array, va_f: Array, rung_a_f: Optional[Array], width: int, dtype
-):
+    xa: Array, ma: Array, va_f: Array, rung_a_f: Optional[Array], width: int, dtype: Any
+) -> tuple[Array, Array, Array, Array]:
     """Pad a leaf block's slot axis out to the Triton tile width.
 
     Padded slots get mask 0, so they are inert in every tile the kernels build.
+
+    Parameters
+    ----------
+    xa : Array
+        ``(pairs, slots, 3)`` positions for one side of the pair list.
+    ma : Array
+        ``(pairs, slots)`` masses.
+    va_f : Array
+        ``(pairs, slots)`` validity mask, float-encoded.
+    rung_a_f : Optional[Array]
+        ``(pairs, slots)`` rungs, or ``None`` to substitute zeros.
+    width : int
+        Padded slot width; a power of two from :func:`_next_pow2`.
+    dtype : Any
+        Working dtype every returned array is cast to.
+
+    Returns
+    -------
+    tuple[Array, Array, Array, Array]
+        ``(positions, masses, validity, rungs)``. Positions are also padded on
+        the component axis out to the vector width.
     """
     slots = int(ma.shape[1])
     pad = width - slots
@@ -417,6 +635,43 @@ def mutual_leafpair_block_jax(
     """Pure-jnp twin of the kernel: the correctness and AD oracle.
 
     Returns ``(F_a, F_b)`` of shape ``(pairs, slots, 3)``.
+
+    Parameters
+    ----------
+    xa : Array
+        ``(pairs, slots, 3)`` leaf-A positions.
+    ma : Array
+        ``(pairs, slots)`` leaf-A masses.
+    va_f : Array
+        ``(pairs, slots)`` leaf-A validity mask, float-encoded and tested ``> 0.5`` -- float rather than
+        boolean because a Pallas ref carries the working dtype.
+    xb : Array
+        ``(pairs, slots, 3)`` leaf-B positions.
+    mb : Array
+        ``(pairs, slots)`` leaf-B masses.
+    vb_f : Array
+        ``(pairs, slots)`` leaf-B validity mask, same encoding.
+    rung_a_f : Optional[Array]
+        ``(pairs, slots)`` leaf-A rung, float-encoded, or ``None``.
+    rung_b_f : Optional[Array]
+        ``(pairs, slots)`` leaf-B rung, float-encoded, or ``None``.
+    level_weights : Optional[Array]
+        ``(num_levels,)`` weight per interaction level. ``None`` -- like a
+        ``None`` rung -- disables level weighting, giving every pair weight one.
+    softening_sq : Array
+        Squared Plummer softening length, scalar.
+    g_value : Array
+        Gravitational constant, scalar.
+    exclude_diagonal : bool
+        Drop ``i == j``, so a particle in a leaf paired with itself does not act
+        on itself.
+    emit_b : bool
+        Also produce the ``b``-side output.
+
+    Returns
+    -------
+    tuple[Array, Array]
+        ``(F_a, F_b)``, each ``(pairs, slots, 3)``.
     """
     num_levels = 0 if level_weights is None else int(level_weights.shape[0])
 
@@ -489,7 +744,53 @@ def mutual_leafpair_block_pallas(
     interpret: bool = False,
     backend: str = "triton",
 ) -> tuple[Array, Array]:
-    """One Pallas program per leaf pair; same semantics as the jnp twin."""
+    """One Pallas program per leaf pair; same semantics as the jnp twin.
+    Not differentiable on its own -- ``pallas_call`` has no JVP or transpose
+    rule. Use :func:`mutual_leafpair_block_cvjp`, which wires this forward to
+    the analytic reverse below.
+
+    Parameters
+    ----------
+    xa : Array
+        ``(pairs, slots, 3)`` leaf-A positions.
+    ma : Array
+        ``(pairs, slots)`` leaf-A masses.
+    va_f : Array
+        ``(pairs, slots)`` leaf-A validity mask, float-encoded and tested ``> 0.5`` -- float rather than
+        boolean because a Pallas ref carries the working dtype.
+    xb : Array
+        ``(pairs, slots, 3)`` leaf-B positions.
+    mb : Array
+        ``(pairs, slots)`` leaf-B masses.
+    vb_f : Array
+        ``(pairs, slots)`` leaf-B validity mask, same encoding.
+    rung_a_f : Optional[Array]
+        ``(pairs, slots)`` leaf-A rung, float-encoded, or ``None``.
+    rung_b_f : Optional[Array]
+        ``(pairs, slots)`` leaf-B rung, float-encoded, or ``None``.
+    level_weights : Optional[Array]
+        ``(num_levels,)`` weight per interaction level. ``None`` -- like a
+        ``None`` rung -- disables level weighting, giving every pair weight one.
+    softening_sq : Array
+        Squared Plummer softening length, scalar.
+    g_value : Array
+        Gravitational constant, scalar.
+    exclude_diagonal : bool
+        Drop ``i == j``, so a particle in a leaf paired with itself does not act
+        on itself.
+    emit_b : bool
+        Also produce the ``b``-side output.
+    interpret : bool
+        Run the kernel in interpret mode, which executes the real kernel logic
+        on CPU and is how the parity tests reach it without a GPU.
+    backend : str
+        Pallas lowering backend.
+
+    Returns
+    -------
+    tuple[Array, Array]
+        ``(F_a, F_b)``, each ``(pairs, slots, 3)``, matching the jnp twin.
+    """
     pairs, slots = int(ma.shape[0]), int(ma.shape[1])
     dtype = jnp.asarray(xa).dtype
     if pairs == 0:
@@ -580,6 +881,51 @@ def mutual_leafpair_block_vjp_pallas(
     its intermediates stay tile-bounded: the ``S x S`` tiles live in registers and
     the only HBM traffic is ``O(pairs * S)``, against the ``O(pairs * S^2)``
     transient that linearizing the pure-JAX twin materialises.
+
+    Parameters
+    ----------
+    xa : Array
+        ``(pairs, slots, 3)`` leaf-A positions.
+    ma : Array
+        ``(pairs, slots)`` leaf-A masses.
+    va_f : Array
+        ``(pairs, slots)`` leaf-A validity mask, float-encoded and tested ``> 0.5`` -- float rather than
+        boolean because a Pallas ref carries the working dtype.
+    xb : Array
+        ``(pairs, slots, 3)`` leaf-B positions.
+    mb : Array
+        ``(pairs, slots)`` leaf-B masses.
+    vb_f : Array
+        ``(pairs, slots)`` leaf-B validity mask, same encoding.
+    rung_a_f : Optional[Array]
+        ``(pairs, slots)`` leaf-A rung, float-encoded, or ``None``.
+    rung_b_f : Optional[Array]
+        ``(pairs, slots)`` leaf-B rung, float-encoded, or ``None``.
+    level_weights : Optional[Array]
+        ``(num_levels,)`` weight per interaction level. ``None`` -- like a
+        ``None`` rung -- disables level weighting, giving every pair weight one.
+    softening_sq : Array
+        Squared Plummer softening length, scalar.
+    g_value : Array
+        Gravitational constant, scalar.
+    fa_bar : Array
+        Cotangent of ``F_a``, ``(pairs, slots, 3)``.
+    fb_bar : Array
+        Cotangent of ``F_b``, same shape.
+    exclude_diagonal : bool
+        Drop ``i == j``, so a particle in a leaf paired with itself does not act
+        on itself.
+    emit_b : bool
+        Also produce the ``b``-side output.
+    interpret : bool
+        Run the kernel in interpret mode.
+    backend : str
+        Pallas lowering backend.
+
+    Returns
+    -------
+    tuple[Array, Array, Array, Array]
+        ``(xa_bar, ma_bar, xb_bar, mb_bar)``.
     """
     pairs, slots = int(ma.shape[0]), int(ma.shape[1])
     dtype = jnp.asarray(xa).dtype
@@ -705,7 +1051,52 @@ def mutual_leafpair_block_cvjp(
     emit_b: bool,
     interpret: bool,
 ) -> tuple[Array, Array]:
-    """Differentiable mutual leaf-pair block: Pallas forward, analytic reverse."""
+    """Differentiable mutual leaf-pair block: Pallas forward, analytic reverse.
+    This is the entry point callers should use: it is the ``custom_vjp`` that
+    pairs :func:`mutual_leafpair_block_pallas` with
+    :func:`mutual_leafpair_block_vjp_pallas`. The velocity, rung, level-weight,
+    softening and ``G`` arguments receive zero cotangents.
+
+    Parameters
+    ----------
+    xa : Array
+        ``(pairs, slots, 3)`` leaf-A positions.
+    ma : Array
+        ``(pairs, slots)`` leaf-A masses.
+    va_f : Array
+        ``(pairs, slots)`` leaf-A validity mask, float-encoded and tested ``> 0.5`` -- float rather than
+        boolean because a Pallas ref carries the working dtype.
+    xb : Array
+        ``(pairs, slots, 3)`` leaf-B positions.
+    mb : Array
+        ``(pairs, slots)`` leaf-B masses.
+    vb_f : Array
+        ``(pairs, slots)`` leaf-B validity mask, same encoding.
+    rung_a_f : Array
+        ``(pairs, slots)`` leaf-A rung, float-encoded.
+    rung_b_f : Array
+        ``(pairs, slots)`` leaf-B rung, float-encoded.
+    level_weights : Array
+        ``(num_levels,)`` weight per interaction level.
+    softening_sq : Array
+        Squared Plummer softening length, scalar.
+    g_value : Array
+        Gravitational constant, scalar.
+    num_levels : int
+        Number of interaction levels. ``<= 0`` disables level weighting entirely.
+    exclude_diagonal : bool
+        Drop ``i == j``, so a particle in a leaf paired with itself does not act
+        on itself.
+    emit_b : bool
+        Also produce the ``b``-side output.
+    interpret : bool
+        Run the kernels in interpret mode.
+
+    Returns
+    -------
+    tuple[Array, Array]
+        ``(F_a, F_b)``, each ``(pairs, slots, 3)``.
+    """
     return mutual_leafpair_block_pallas(
         xa,
         ma,
@@ -725,22 +1116,22 @@ def mutual_leafpair_block_cvjp(
 
 
 def _mutual_leafpair_block_cvjp_fwd(
-    xa,
-    ma,
-    va_f,
-    xb,
-    mb,
-    vb_f,
-    rung_a_f,
-    rung_b_f,
-    level_weights,
-    softening_sq,
-    g_value,
-    num_levels,
-    exclude_diagonal,
-    emit_b,
-    interpret,
-):
+    xa: Array,
+    ma: Array,
+    va_f: Array,
+    xb: Array,
+    mb: Array,
+    vb_f: Array,
+    rung_a_f: Array,
+    rung_b_f: Array,
+    level_weights: Array,
+    softening_sq: Array,
+    g_value: Array,
+    num_levels: int,
+    exclude_diagonal: bool,
+    emit_b: bool,
+    interpret: bool,
+) -> tuple[tuple[Array, Array], tuple[Array, ...]]:
     out = mutual_leafpair_block_pallas(
         xa,
         ma,
@@ -778,8 +1169,13 @@ def _mutual_leafpair_block_cvjp_fwd(
 
 
 def _mutual_leafpair_block_cvjp_bwd(
-    num_levels, exclude_diagonal, emit_b, interpret, residual, cotangent
-):
+    num_levels: int,
+    exclude_diagonal: bool,
+    emit_b: bool,
+    interpret: bool,
+    residual: tuple[Array, ...],
+    cotangent: tuple[Array, Array],
+) -> tuple[Array, ...]:
     (
         xa,
         ma,
