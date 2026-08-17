@@ -15,6 +15,7 @@ import numpy as np
 from beartype.typing import Callable
 from jaxtyping import Array
 from yggdrax.dense_interactions import DenseInteractionBuffers, densify_interactions
+from yggdrax.geometry import TreeGeometry
 from yggdrax.grouped_interactions import GroupedInteractionBuffers
 from yggdrax.interactions import (
     CompactTaggedFarPairs,
@@ -24,6 +25,7 @@ from yggdrax.interactions import (
     MACType,
     NodeInteractionList,
     NodeNeighborList,
+    PairPolicy,
     build_compact_far_pairs,
     build_compact_far_pairs_and_leaf_neighbor_lists,
     build_interactions_and_neighbors_split,
@@ -32,6 +34,17 @@ from yggdrax.interactions import (
 from yggdrax.tree import Tree
 
 from jaccpot._env import env_flag
+
+# `_adaptive_policy` reaches only `fmm_caches` and `fmm_constants`, both UPSTREAM of
+# this module in ARCHITECTURE §8's DAG (`fmm_constants -> fmm_caches -> kernels ->
+# {_interaction_cache, ...}`), so this import runs with the layering rather than
+# against it. Verified acyclic by walking the relative-import graph, not by eye.
+#
+# It exists so `policy_state` can be annotated at all. Until it, the four dual-tree
+# builders took the Dehnen policy state as an untyped parameter, which is what made
+# this file undocumentable: pydoclint refuses a Parameters section for a signature
+# with missing hints (DOC106/107), so 70 violations sat behind one missing import.
+from ._adaptive_policy import AdaptivePolicyState
 
 
 @dataclass(frozen=True)
@@ -413,7 +426,7 @@ def _dual_tree_cache_lookup(
 def _dual_tree_build_raw(
     *,
     tree: Tree,
-    geometry,
+    geometry: TreeGeometry,
     theta: float,
     mac_type: MACType,
     dehnen_radius_scale: float,
@@ -426,11 +439,72 @@ def _dual_tree_build_raw(
     need_compact_far_pairs: bool,
     need_node_interactions: bool,
     grouped_interactions: bool,
-    pair_policy,
-    policy_state,
+    pair_policy: Optional[PairPolicy],
+    policy_state: Optional[AdaptivePolicyState],
     jit_traversal: bool,
 ) -> tuple[Any, Optional[DualTreeTraversalConfig], Optional[int], Optional[int]]:
-    """Run the raw dual-tree traversal builder with retry growth."""
+    """Run the raw dual-tree traversal builder with retry growth.
+
+    The single point where jaccpot calls yggdrax's traversal. Everything above
+    it -- caching, splitting, buffer construction -- is arrangement around this
+    one call.
+
+    Parameters
+    ----------
+    tree : Tree
+        Built tree.
+    geometry : TreeGeometry
+        Node centres and radii the MAC is evaluated against.
+    theta : float
+        Opening angle.
+    mac_type : MACType
+        Geometric criterion the traversal evaluates. jaccpot's Dehnen policies
+        must already be mapped to a yggdrax literal -- see
+        ``PolicyMixin._mac_type_for_traversal``.
+    dehnen_radius_scale : float
+        Radius inflation for the Dehnen MAC.
+    max_pair_queue : Optional[int]
+        Cap on the pending-pair queue; ``None`` lets the traversal size it.
+    pair_process_block : Optional[int]
+        Pairs drained per step; ``None`` as above.
+    traversal_config : Optional[DualTreeTraversalConfig]
+        Full traversal capacities, overriding the two above when given.
+    retry_logger : Optional[Callable[[DualTreeRetryEvent], None]]
+        Sink for capacity-retry events, so a retry stays visible in the caller's
+        diagnostics rather than being absorbed here.
+    fail_fast : bool
+        Raise on a capacity overflow instead of retrying with more room.
+    need_traversal_result : bool
+        Retain the full walk result.
+    need_compact_far_pairs : bool
+        Ask for far pairs in compact tagged form.
+    need_node_interactions : bool
+        Ask for a node interaction list. The streamed lane sets this ``False``
+        and reads compact pairs instead.
+    grouped_interactions : bool
+        Group interactions by displacement class during the walk.
+    pair_policy : Optional[PairPolicy]
+        Solver-owned per-pair acceptance callable. ``None`` leaves the traversal
+        running the geometric MAC alone -- that is the difference between the
+        Dehnen mass-dependent criterion being active and not.
+    policy_state : Optional[AdaptivePolicyState]
+        State the pair policy reads. Meaningless without ``pair_policy``.
+    jit_traversal : bool
+        Run the compiled traversal.
+
+    Returns
+    -------
+    tuple[Any, Optional[DualTreeTraversalConfig], Optional[int], Optional[int]]
+        ``(walk_result, resolved_config, resolved_pair_queue,
+        resolved_process_block)``. The three resolved capacities come back so a
+        caller can record what the traversal ACTUALLY used after any retry
+        growth, not what was requested.
+
+    Raises
+    ------
+    RuntimeError
+        On a capacity overflow when ``fail_fast`` is set.
+    """
 
     from . import fmm as _runtime_fmm
 
@@ -636,6 +710,20 @@ def _can_split_dual_tree_build(
     node-interaction buffers the monolithic build materializes
     (``num_nodes x max_interactions_per_node``) are the binding memory
     constraint.
+
+    Parameters
+    ----------
+    split_enabled : bool
+        Whether the caller permits a split build at all.
+    grouped_interactions : bool
+        Grouping needs the single combined walk, so it disqualifies the split.
+    need_traversal_result : bool
+        The full walk result likewise only exists on the combined path.
+
+    Returns
+    -------
+    bool
+        ``True`` only when all three allow it.
     """
 
     return (
@@ -648,7 +736,7 @@ def _can_split_dual_tree_build(
 def _build_dual_tree_artifacts_split(
     *,
     tree: Tree,
-    geometry,
+    geometry: TreeGeometry,
     theta: float,
     mac_type: MACType,
     dehnen_radius_scale: float,
@@ -659,8 +747,8 @@ def _build_dual_tree_artifacts_split(
     need_node_interactions: bool,
     need_compact_far_pairs: bool,
     use_dense_interactions: bool,
-    pair_policy,
-    policy_state,
+    pair_policy: Optional[PairPolicy],
+    policy_state: Optional[AdaptivePolicyState],
     timing_callback: Optional[Callable[[str, float], None]] = None,
 ) -> _DualTreeArtifacts:
     """Build far and near traversal products in separate Yggdrax calls.
@@ -669,6 +757,45 @@ def _build_dual_tree_artifacts_split(
     separate traversal, and a branch that forgot to forward the policy would
     silently fall back to the geometric MAC underneath it -- the exact
     "faster and wronger" failure this criterion keeps producing.
+
+    Parameters
+    ----------
+    tree : Tree
+        Built tree.
+    geometry : TreeGeometry
+        Node centres and radii the MAC is evaluated against.
+    theta : float
+        Opening angle.
+    mac_type : MACType
+        Geometric criterion, already mapped to a yggdrax literal.
+    dehnen_radius_scale : float
+        Radius inflation for the Dehnen MAC.
+    max_pair_queue : Optional[int]
+        Cap on the pending-pair queue; ``None`` lets the traversal size it.
+    pair_process_block : Optional[int]
+        Pairs drained per step; ``None`` as above.
+    traversal_config : Optional[DualTreeTraversalConfig]
+        Full traversal capacities, overriding the two above when given.
+    retry_logger : Optional[Callable[[DualTreeRetryEvent], None]]
+        Sink for capacity-retry events from either pass.
+    need_node_interactions : bool
+        Produce a node interaction list.
+    need_compact_far_pairs : bool
+        Produce compact tagged far pairs.
+    use_dense_interactions : bool
+        Also materialise dense buffers.
+    pair_policy : Optional[PairPolicy]
+        Solver-owned per-pair acceptance callable. ``None`` runs the geometric
+        MAC alone.
+    policy_state : Optional[AdaptivePolicyState]
+        State the pair policy reads. Meaningless without ``pair_policy``.
+    timing_callback : Optional[Callable[[str, float], None]]
+        Per-phase timing sink; the two passes report separately.
+
+    Returns
+    -------
+    _DualTreeArtifacts
+        The same artifact bundle the combined path produces.
     """
     timing_enabled = timing_callback is not None
 
@@ -811,15 +938,15 @@ def _strict_streamed_retry_diag(grew: list[str]) -> None:
 def _build_dual_tree_artifacts_split_strict_streamed(
     *,
     tree: Tree,
-    geometry,
+    geometry: TreeGeometry,
     theta: float,
     mac_type: MACType,
     dehnen_radius_scale: float,
     max_pair_queue: Optional[int],
     pair_process_block: Optional[int],
     traversal_config: Optional[DualTreeTraversalConfig],
-    pair_policy,
-    policy_state,
+    pair_policy: Optional[PairPolicy],
+    policy_state: Optional[AdaptivePolicyState],
 ) -> _DualTreeArtifacts:
     """Strict static fast-lane: single compact shared far+near build call.
 
@@ -831,6 +958,48 @@ def _build_dual_tree_artifacts_split_strict_streamed(
     this branch is selected on payload shape (``fail_fast`` + compact far pairs),
     not on whether a criterion is installed, so dropping them here would run the
     geometric MAC under a caller that asked for the Dehnen one.
+
+    Parameters
+    ----------
+    tree : Tree
+        Built tree.
+    geometry : TreeGeometry
+        Node centres and radii the MAC is evaluated against.
+    theta : float
+        Opening angle.
+    mac_type : MACType
+        Geometric criterion, already mapped to a yggdrax literal.
+    dehnen_radius_scale : float
+        Radius inflation for the Dehnen MAC.
+    max_pair_queue : Optional[int]
+        Cap on the pending-pair queue; ``None`` lets the traversal size it.
+    pair_process_block : Optional[int]
+        Pairs drained per step; ``None`` as above.
+    traversal_config : Optional[DualTreeTraversalConfig]
+        Full traversal capacities, overriding the two above when given.
+    pair_policy : Optional[PairPolicy]
+        Solver-owned per-pair acceptance callable. ``None`` runs the geometric
+        MAC alone.
+    policy_state : Optional[AdaptivePolicyState]
+        State the pair policy reads. Meaningless without ``pair_policy``.
+
+    Returns
+    -------
+    _DualTreeArtifacts
+        Compact far pairs and leaf neighbour lists; no node interaction list and
+        no walk result, which is what makes this lane cheap.
+
+    Raises
+    ------
+    ValueError
+        If the request is inconsistent with what this lane can produce.
+    RuntimeError
+        On a capacity overflow this lane cannot grow out of, and when the
+        treecode walk is asked to carry a solver-owned pair policy it cannot.
+    Exception
+        Re-raised unchanged when the retry loop sees a failure it does not
+        recognise as a capacity overflow -- it grows capacities only for the two
+        messages it knows, and refuses to guess at anything else.
     """
 
     if traversal_config is not None:
@@ -988,7 +1157,13 @@ def _build_dual_tree_artifacts_split_strict_streamed(
     )
 
 
-def _treecode_neighbor_list(prod, *, num_leaves, num_internal, idx_dtype):
+def _treecode_neighbor_list(
+    prod: Any,
+    *,
+    num_leaves: int,
+    num_internal: int,
+    idx_dtype: Any,
+) -> NodeNeighborList:
     """Full yggdrax ``NodeNeighborList`` from the treecode producer's near CSR.
 
     The radix fast lane reads only ``leaf_indices``/``offsets``/``neighbors``/
@@ -996,6 +1171,23 @@ def _treecode_neighbor_list(prod, *, num_leaves, num_internal, idx_dtype):
     remaining fields are cheap valid placeholders (``target_block_size=0``, i.e. no
     prebuilt blocks; ``neighbor_leaf_positions`` empty). This is validated end-to-end
     against direct N-body by tests/experimental/test_treecode_graft_solidfmm.py.
+
+    Parameters
+    ----------
+    prod : Any
+        Treecode walk product. ``Any`` because it is the walk's own result type,
+        which this module does not otherwise name.
+    num_leaves : int
+        Leaf count.
+    num_internal : int
+        Internal-node count; leaf ids start after these.
+    idx_dtype : Any
+        Index dtype for the rebuilt arrays.
+
+    Returns
+    -------
+    NodeNeighborList
+        A complete list, with the placeholder fields described above.
     """
     return NodeNeighborList(
         offsets=prod.near_offsets,
@@ -1013,8 +1205,26 @@ def _treecode_neighbor_list(prod, *, num_leaves, num_internal, idx_dtype):
     )
 
 
-def _raise_if_true(flag, message: str) -> None:
-    """Raise ``message`` if ``flag`` is true, under jit (via callback) or eagerly."""
+def _raise_if_true(flag: Any, message: str) -> None:
+    """Raise ``message`` if ``flag`` is true, under jit (via callback) or eagerly.
+
+    Under a trace the check cannot be a Python ``if``, so it goes through
+    ``jax.debug.callback`` -- which means the raise happens at EXECUTION time,
+    not trace time, and does not abort tracing.
+
+    Parameters
+    ----------
+    flag : Any
+        Condition. Typed ``Any`` because whether it is a tracer is precisely
+        what this function branches on.
+    message : str
+        Text of the ``RuntimeError``.
+
+    Raises
+    ------
+    RuntimeError
+        When ``flag`` is true.
+    """
     if isinstance(flag, jax.core.Tracer):
 
         def _callback(value):
@@ -1027,8 +1237,13 @@ def _raise_if_true(flag, message: str) -> None:
 
 
 def _treecode_mac_extents(
-    geometry, parent, num_internal, mac_type, dehnen_radius_scale, dtype
-):
+    geometry: TreeGeometry,
+    parent: Array,
+    num_internal: int,
+    mac_type: MACType,
+    dehnen_radius_scale: float,
+    dtype: Any,
+) -> Array:
     """Per-node MAC extents matching the yggdrax dual-tree exactly.
 
     Same recipe as ``_interactions_impl`` (bh: box ``max_extent``; dehnen/engblom:
@@ -1045,6 +1260,28 @@ def _treecode_mac_extents(
     secular heating over a multi-step integration (even though geometry is recomputed
     fresh each step). Prefer the sphere (dehnen) extents for multi-step integration; see
     :func:`_build_treecode_artifacts_strict_streamed` and docs/treecode_mac_stability.md.
+
+    Parameters
+    ----------
+    geometry : TreeGeometry
+        Source of box extents and bounding-sphere radii.
+    parent : Array
+        Parent index per node, for propagating extents upward.
+    num_internal : int
+        Internal-node count.
+    mac_type : MACType
+        Selects the extent recipe -- box ``max_extent`` for bh, bounding-sphere
+        ``radius`` for dehnen/engblom. See the stability note above: these are
+        not interchangeable.
+    dehnen_radius_scale : float
+        Applied to the dehnen radii only.
+    dtype : Any
+        Output dtype.
+
+    Returns
+    -------
+    Array
+        Per-node effective extents the treecode ``_mac_ok`` consumes.
     """
     from yggdrax._interactions_impl import (
         _compute_effective_extents,
@@ -1068,7 +1305,7 @@ def _treecode_mac_extents(
 def _build_treecode_artifacts_strict_streamed(
     *,
     tree: Tree,
-    geometry,
+    geometry: TreeGeometry,
     theta: float,
     mac_type: MACType,
     dehnen_radius_scale: float,
@@ -1132,6 +1369,30 @@ def _build_treecode_artifacts_strict_streamed(
     per-step ``jax.debug.callback`` would serialize the device-resident scan), so the
     auto-sized per-leaf caps (>= total node count) plus generous flat caps must stay
     overflow-proof for the whole trajectory.
+
+    Parameters
+    ----------
+    tree : Tree
+        Built tree.
+    geometry : TreeGeometry
+        Node centres and radii the MAC is evaluated against.
+    theta : float
+        Opening angle.
+    mac_type : MACType
+        Geometric criterion, already mapped to a yggdrax literal.
+    dehnen_radius_scale : float
+        Radius inflation for the Dehnen MAC.
+    compact_far_pair_capacity : Optional[int]
+        Fixed capacity for the compact far-pair arrays; ``None`` auto-sizes from
+        the tree.
+    near_cap : Optional[int]
+        Per-leaf near-list capacity; ``None`` auto-sizes likewise.
+
+    Returns
+    -------
+    _DualTreeArtifacts
+        Compact far pairs plus a neighbour list rebuilt by
+        :func:`_treecode_neighbor_list`.
     """
     from jaccpot.experimental.treecode_far_near import (
         build_treecode_far_pairs_and_neighbors,
@@ -1277,10 +1538,33 @@ def _build_treecode_artifacts_strict_streamed(
 def _dual_tree_build_grouped_buffers(
     *,
     tree: Tree,
-    geometry,
+    geometry: TreeGeometry,
     interactions: Optional[NodeInteractionList],
 ) -> GroupedInteractionBuffers:
-    """Materialize grouped interaction buffers from node interaction pairs."""
+    """Materialize grouped interaction buffers from node interaction pairs.
+
+    Parameters
+    ----------
+    tree : Tree
+        Built tree.
+    geometry : TreeGeometry
+        Node centres and radii; the displacement classes are formed from these.
+    interactions : Optional[NodeInteractionList]
+        Far-field pairs to group.
+
+    Returns
+    -------
+    GroupedInteractionBuffers
+        Class-sorted sources and targets, class offsets, keys and representative
+        displacements.
+
+    Raises
+    ------
+    RuntimeError
+        If the interaction list is absent or cannot be grouped -- grouping is
+        requested explicitly, so failing is better than silently returning the
+        ungrouped form.
+    """
 
     from yggdrax import interactions as _yggdrax_interactions
 
@@ -1339,11 +1623,30 @@ def _dual_tree_build_grouped_class_segments(
 def _dual_tree_build_dense_buffers(
     *,
     tree: Tree,
-    geometry,
+    geometry: TreeGeometry,
     interactions: Optional[NodeInteractionList],
     use_dense_interactions: bool,
 ) -> Optional[DenseInteractionBuffers]:
-    """Materialize dense interaction buffers when requested."""
+    """Materialize dense interaction buffers when requested.
+
+    Parameters
+    ----------
+    tree : Tree
+        Built tree.
+    geometry : TreeGeometry
+        Node centres and radii.
+    interactions : Optional[NodeInteractionList]
+        Far-field pairs to densify.
+    use_dense_interactions : bool
+        Whether to build them at all.
+
+    Returns
+    -------
+    Optional[DenseInteractionBuffers]
+        The dense buffers, or ``None`` when not requested or when there is no
+        interaction list to densify. Dense storage is quadratic in node count,
+        which is why it is opt-in rather than the default.
+    """
 
     if not use_dense_interactions:
         return None
@@ -1529,7 +1832,28 @@ POLICY_IDENTITY_UNCACHEABLE = "pair_policy_identity_uncacheable_v1"
 
 
 def _hash_array_or_none(hasher: Any, label: bytes, value: Optional[Array]) -> bool:
-    """Fold ``value`` into ``hasher``; return False if it cannot be read on host."""
+    """Fold ``value`` into ``hasher``; return False if it cannot be read on host.
+
+    A tracer cannot be hashed, and a cache key built from one would be wrong
+    rather than merely absent -- so the caller must treat ``False`` as "do not
+    cache this", not as "hashed nothing".
+
+    Parameters
+    ----------
+    hasher : Any
+        Incremental hash object, mutated in place.
+    label : bytes
+        Field tag folded in before the value, so two fields cannot collide by
+        carrying the same bytes.
+    value : Optional[Array]
+        Array to fold. ``None`` folds the label alone and still succeeds.
+
+    Returns
+    -------
+    bool
+        ``True`` when the value was folded in, ``False`` when it could not be
+        brought to the host.
+    """
 
     hasher.update(label)
     if value is None:
@@ -1591,6 +1915,35 @@ def pair_policy_cache_identity(
       which is the ``dehnen_theta`` case: the criterion is folded into
       ``geometry.radius``, so hashing those radii pins acceptance regardless of
       what produced them.
+
+    Parameters
+    ----------
+    pair_policy : Any
+        The policy callable, or ``None``. Its presence alone changes the
+        criterion, so it participates in the identity.
+    policy_state : Any
+        Policy state, or ``None``.
+    eps : Optional[float]
+        Relative force-accuracy target of eq (16a).
+    force_scale_mode : Optional[str]
+        How the per-node force scale was obtained.
+    geometry_mode : Optional[str]
+        Dehnen geometry mode.
+    theta_max : Optional[float]
+        Upper clamp on the adaptive opening angle.
+    error_model_code : Optional[int]
+        Which error estimator is active.
+    force_scale_nodes : Optional[Array]
+        Injected per-node force scale, folded in by value.
+    mac_geometry_radius : Optional[Array]
+        MAC radii, folded in likewise -- this is what pins the
+        ``dehnen_theta`` case, where the criterion lives in the radii.
+
+    Returns
+    -------
+    str
+        One of the three outcomes above: empty, the uncacheable sentinel, or a
+        hex digest.
     """
 
     if pair_policy is not None or policy_state is not None:
@@ -1784,7 +2137,7 @@ def _interaction_cache_key(
 
 def _build_dual_tree_artifacts(
     tree: Tree,
-    geometry,
+    geometry: TreeGeometry,
     *,
     geometry_factory: Optional[Callable[[], Any]] = None,
     theta: float,
@@ -1806,13 +2159,94 @@ def _build_dual_tree_artifacts(
     precompute_grouped_class_segments: bool,
     grouped_schedule_budget_bytes: Optional[int],
     allow_split_build: bool = False,
-    pair_policy=None,
-    policy_state=None,
+    pair_policy: Optional[PairPolicy] = None,
+    policy_state: Optional[AdaptivePolicyState] = None,
     jit_traversal: bool = True,
     timing_callback: Optional[Callable[[str, float], None]] = None,
     planner_hint: Optional[_RefreshDualPlannerHint] = None,
 ) -> tuple[_DualTreeArtifacts, Optional[_InteractionCacheEntry]]:
-    """Construct or reuse dual-tree traversal products for a tree."""
+    """Construct or reuse dual-tree traversal products for a tree.
+
+    The top of this module: resolve the cache, choose a build strategy (split,
+    strict-streamed, treecode, or the single traversal), construct whichever
+    buffers the caller asked for, and hand back an entry to store.
+
+    Parameters
+    ----------
+    tree : Tree
+        Built tree.
+    geometry : TreeGeometry
+        Node centres and radii the MAC is evaluated against.
+    geometry_factory : Optional[Callable[[], Any]]
+        Deferred geometry builder, for lanes that avoid materialising geometry
+        until the cache has been consulted.
+    theta : float
+        Opening angle.
+    mac_type : MACType
+        Geometric criterion the traversal evaluates. jaccpot's Dehnen policies
+        must already be mapped to a yggdrax literal -- see
+        ``PolicyMixin._mac_type_for_traversal``.
+    dehnen_radius_scale : float
+        Radius inflation for the Dehnen MAC.
+    cache_key : Optional[str]
+        Interaction-cache key; ``None`` disables both lookup and store.
+    cache_entry : Optional[_InteractionCacheEntry]
+        A previously stored entry to reuse rather than rebuild.
+    max_pair_queue : Optional[int]
+        Cap on the pending-pair queue; ``None`` lets the traversal size it.
+    pair_process_block : Optional[int]
+        Pairs drained per step; ``None`` as above.
+    traversal_config : Optional[DualTreeTraversalConfig]
+        Full traversal capacities, overriding the two above when given.
+    retry_logger : Optional[Callable[[DualTreeRetryEvent], None]]
+        Sink for capacity-retry events, so a retry stays visible in the caller's
+        diagnostics rather than being absorbed here.
+    fail_fast : bool
+        Raise on a capacity overflow instead of retrying with more room.
+    use_dense_interactions : bool
+        Materialise the interaction list densely.
+    grouped_interactions : bool
+        Group interactions by displacement class.
+    grouped_chunk_size : Optional[int]
+        Pairs per grouped segment; ``None`` lets the builder choose.
+    need_traversal_result : bool
+        Retain the full walk result.
+    need_compact_far_pairs : bool
+        Produce compact tagged far pairs.
+    need_node_interactions : bool
+        Produce a node interaction list.
+    precompute_grouped_class_segments : bool
+        Build the class-major segment table up front.
+    grouped_schedule_budget_bytes : Optional[int]
+        Memory ceiling for that schedule; ``None`` is unbounded.
+    allow_split_build : bool
+        Permit the two-phase split build when
+        :func:`_can_split_dual_tree_build` agrees.
+    pair_policy : Optional[PairPolicy]
+        Solver-owned per-pair acceptance callable. ``None`` leaves the traversal
+        running the geometric MAC alone -- that is the difference between the
+        Dehnen mass-dependent criterion being active and not.
+    policy_state : Optional[AdaptivePolicyState]
+        State the pair policy reads. Meaningless without ``pair_policy``.
+    jit_traversal : bool
+        Run the compiled traversal.
+    timing_callback : Optional[Callable[[str, float], None]]
+        Per-phase timing sink, named so a caller can attribute prepare cost.
+    planner_hint : Optional[_RefreshDualPlannerHint]
+        Hint from a previous refresh, letting the planner skip work whose answer
+        is already known.
+
+    Returns
+    -------
+    tuple[_DualTreeArtifacts, Optional[_InteractionCacheEntry]]
+        The artifacts, and an entry to store when a ``cache_key`` was supplied --
+        ``None`` when there is nothing worth caching.
+
+    Raises
+    ------
+    ValueError
+        If the requested combination of buffers and lanes is inconsistent.
+    """
 
     cache_out = cache_entry
     cache_hit = _dual_tree_cache_lookup(
