@@ -80,6 +80,19 @@ JAX_ENABLE_X64=1 pytest -q                     # xdist -n auto; use -n 0 for pdb
 JAX_ENABLE_X64=1 pytest -q tests/characterization   # golden reference — must not move
 ```
 
+pydoclint runs with `skip-checking-short-docstrings = false`, so a one-line summary over
+undocumented parameters **is** a violation. `.pydoclint-baseline.txt` holds the
+pre-existing tail, so only new violations fail. When a batch documents a file, drop its
+entries:
+
+```bash
+pydoclint --config pyproject.toml --generate-baseline True jaccpot/
+```
+
+Check that diff **only removes lines** — the hook passes staged filenames, so
+regenerating from a subset would silently discard other files' entries. That is also why
+`auto-regenerate-baseline` is `false`; do not turn it on.
+
 `pytest -q` is not the whole suite: the `addopts` in `pyproject.toml` add
 `-m "not experimental"` and `--ignore=tests/perf`, so the octree/treecode prototypes and the
 performance assertions are opt-in (`pytest -m experimental`, `pytest tests/perf`).

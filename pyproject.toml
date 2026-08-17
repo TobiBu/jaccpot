@@ -140,7 +140,39 @@ exclude = '''
 
 [tool.pydoclint]
 style = "numpy"
-exclude = '\.git|\.venv|build|dist|jaccpot/experimental'
+# `.claude` holds git worktrees -- full transient copies of this repo. Without
+# excluding them the baseline below picks up every violation four times over
+# (measured: 409 of 521 file entries, ~13k of 14.7k violations) and churns as
+# worktrees come and go.
+exclude = '\.git|\.venv|\.claude|build|dist|jaccpot/experimental'
+
+# The upstream default is `true`, and that made this hook VACUOUS for the whole
+# Tier 2.5 docstring programme: it skips argument and return checking on any
+# docstring that is a bare one-line summary, which is exactly the shape every
+# undocumented function has. Measured 2026-08-17 on `main`: 0 violations under
+# the default, 560 with it off. A function with a one-line summary and eight
+# undocumented parameters passed CI.
+#
+# It also let finished work come undone. `runtime/_adaptive_policy.py` was
+# driven to zero (PR #118), and `main` was never at zero: five functions from a
+# concurrent branch merged into the same file without conflict, and the hook
+# reported 0 the whole time (repaired in PR #149).
+skip-checking-short-docstrings = false
+
+# The pre-existing violations, so flipping the flag above does not turn ~370
+# findings into a red hook on every commit. Only NEW violations are reported;
+# the tail is retired by removing entries as batches land.
+#
+# `auto-regenerate-baseline` MUST stay false. The pre-commit hook passes staged
+# filenames, so pydoclint sees a SUBSET of the package; regenerating from a
+# subset rewrites the baseline with only those files' violations and silently
+# discards every other file's entries. Regenerate deliberately instead:
+#
+#   pydoclint --config pyproject.toml --generate-baseline True jaccpot/
+#
+# and check the diff only removes lines.
+baseline = ".pydoclint-baseline.txt"
+auto-regenerate-baseline = false
 
 [tool.isort]
 profile = "black"

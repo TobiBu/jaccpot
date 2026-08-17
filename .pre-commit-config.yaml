@@ -16,6 +16,12 @@ repos:
         # Runs on commit. Docstring drift is cheap to catch now and expensive to fix
         # in bulk later. Config lives in pyproject.toml so that
         # `pydoclint --config pyproject.toml jaccpot/` reproduces the hook exactly.
+        #
+        # `skip-checking-short-docstrings = false` there is what makes this hook
+        # mean anything; `.pydoclint-baseline.txt` carries the pre-existing tail so
+        # only NEW violations fail. See the comment block in pyproject.toml --
+        # in particular why the baseline must not be auto-regenerated, given that
+        # this hook receives only the staged files.
         args: ["--config", "pyproject.toml"]
 
   - repo: https://github.com/PyCQA/flake8
