@@ -135,6 +135,24 @@ Expect a handful of GPU-only failures that are **not** yours: see `ARCHITECTURE.
 current list, and §10 for why any exact-equality assertion needs
 `XLA_FLAGS="--xla_gpu_deterministic_ops=true"` before its result means anything.
 
+### The pre-release GPU gate
+
+There is no GPU leg in CI and there will not be one — see the audit's item 2.6 for the
+reasoning (public repo + self-hosted runner is a fork-PR execution risk; the box's GPUs
+are shared). Instead, before a release, run:
+
+```bash
+python -m bench.gpu_gate
+```
+
+It claims the least-used card with `autocvd`, applies the caps above, sets the
+determinism flag, runs the suite, and then **asserts the GPU-gated tests actually ran**.
+That last part is the point: a run that silently fell back to CPU skips all 17 of them and
+still prints green. Failures matching `ARCHITECTURE.md` §9's measured list are allowed
+through and reported separately; anything else fails the gate.
+
+It does **not** cover `tests/distributed/` (24 tests, needs two cards) — audit F34.
+
 ## Layout
 
 ```
