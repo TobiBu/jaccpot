@@ -469,6 +469,7 @@ def _multipole_align_from_z_block(
 ) -> Array:
     """Inverse of :func:`_multipole_align_to_z_block` (multipole z-frame ->
     world). Equals ``Dz(-az) @ B_U @ Dz(ax) @ B_U`` with the same angles.
+
     Parameters
     ----------
     x : Array

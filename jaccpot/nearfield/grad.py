@@ -105,6 +105,7 @@ def _check_float_id_range(num_particles: int, dtype: Any, *, what: str) -> None:
 
 def _grad_rev_tier_max() -> int:
     """Maximum occupancy tiers for the analytic reverse (``JACCPOT_GRAD_REV_TIERS``).
+
     Returns
     -------
     int
@@ -252,6 +253,7 @@ _tier_cache: "OrderedDict[tuple[Any, ...], tuple[Any, Any]]" = OrderedDict()
 
 def clear_leafpair_reverse_tier_cache() -> None:
     """Drop every memoized reverse-tier plan (tests / memory pressure).
+
     Returns
     -------
     None
@@ -491,6 +493,7 @@ def _leafpair_accel_analytic_vjp(
         carry: Tuple[Array, Array], tier_leaves: Array, tier_slots: int
     ) -> Tuple[Array, Array]:
         """One occupancy tier: ``tier_leaves`` targets against ``tier_slots`` slots.
+
         Parameters
         ----------
         carry : Tuple[Array, Array]

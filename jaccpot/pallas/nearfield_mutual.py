@@ -489,6 +489,7 @@ def _mutual_leafpair_vjp_kernel(
     emit_b: bool,
 ) -> None:
     """One leaf pair's analytic reverse, tile-bounded like the forward.
+
     Parameters
     ----------
     xa_ref : KernelRef

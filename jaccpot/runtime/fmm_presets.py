@@ -12,7 +12,43 @@ from jaccpot.config import FMMPreset
 
 @dataclass(frozen=True)
 class FMMPresetConfig:
-    """Resolved preset parameters used by :class:`FMMEngine`."""
+    """Resolved preset parameters used by :class:`FMMEngine`.
+    A frozen bundle applied BEFORE the individual constructor keywords, so an
+    explicit keyword always wins over its preset value.
+
+    Attributes
+    ----------
+    name : FMMPreset
+        Which preset this is.
+    tree_build_mode : str
+        Builder the preset selects.
+    target_leaf_particles : int
+        Leaf occupancy target.
+    refine_local : bool
+        Whether the host-side refinement pass runs.
+    max_refine_levels : int
+        Depth cap for that pass.
+    aspect_threshold : float
+        Leaf aspect ratio above which refinement splits a leaf.
+    m2l_chunk_size : Optional[int]
+        Pairs per M2L chunk; ``None`` leaves it to the runtime.
+    l2l_chunk_size : Optional[int]
+        Nodes per L2L chunk; ``None`` as above.
+    max_pair_queue : Optional[int]
+        Dual-tree pair-queue capacity.
+    pair_process_block : Optional[int]
+        Traversal process-block width.
+    traversal_config : Optional[DualTreeTraversalConfig]
+        Explicit traversal capacities.
+    use_dense_interactions : bool
+        Materialise the interaction list densely.
+    jit_tree : Union[bool, Literal['auto']]
+        JIT the tree build; ``"auto"`` defers the decision to the runtime.
+    jit_traversal : bool
+        JIT the traversal/evaluation path.
+    description : str
+        Human-readable summary, for diagnostics.
+    """
 
     name: FMMPreset
     tree_build_mode: str
@@ -91,7 +127,26 @@ _LARGE_N_GPU_PRESET = FMMPresetConfig(
 
 
 def resolve_preset(name: Union[str, FMMPreset]) -> FMMPreset:
-    """Normalise preset identifiers to :class:`FMMPreset`."""
+    """Normalise preset identifiers to :class:`FMMPreset`.
+
+    Parameters
+    ----------
+    name : Union[str, FMMPreset]
+        An enum member, or its value as a string. Strings are stripped and
+        lowercased, so ``" Fast "`` is accepted.
+
+    Returns
+    -------
+    FMMPreset
+        The normalised member.
+
+    Raises
+    ------
+    ValueError
+        If the string matches no preset. Unlike much of the runtime's option
+        handling, this does NOT fall back to a default -- a misspelled preset
+        would otherwise silently select different accuracy.
+    """
 
     if isinstance(name, FMMPreset):
         return name
@@ -110,7 +165,29 @@ def resolve_preset(name: Union[str, FMMPreset]) -> FMMPreset:
 
 
 def get_preset_config(name: Union[str, FMMPreset]) -> FMMPresetConfig:
-    """Return the :class:`FMMPresetConfig` for ``name``."""
+    """Return the :class:`FMMPresetConfig` for ``name``.
+
+    Parameters
+    ----------
+    name : Union[str, FMMPreset]
+        Preset identifier, normalised by :func:`resolve_preset` first.
+
+    Returns
+    -------
+    FMMPresetConfig
+        The frozen configuration for that preset.
+
+    Raises
+    ------
+    AssertionError
+        For ``BALANCED`` and ``ACCURATE``. Only ``FAST`` and ``LARGE_N_GPU`` have
+        engine-level bundles here; the other two resolve through
+        ``solver._default_advanced_for_preset`` and are documented never to reach
+        this function (see :class:`~jaccpot.config.FMMPreset` and ARCHITECTURE
+        section 6). Reaching it with either means the solver's routing was
+        bypassed -- ``FMMEngine(preset="balanced")`` does exactly that -- which is
+        an internal wiring fault, hence an assertion rather than a ValueError.
+    """
 
     preset = resolve_preset(name)
     if preset is FMMPreset.FAST:

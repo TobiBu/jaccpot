@@ -30,7 +30,25 @@ _CENTER_MODES = ("com", "aabb", "explicit")
 
 
 class NodeMultipoleData(NamedTuple):
-    """Packed multipole expansions and their metadata."""
+    """Packed multipole expansions and their metadata.
+
+    Attributes
+    ----------
+    order : int
+        Expansion order ``p``.
+    centers : Array
+        ``(num_nodes, 3)`` expansion centres.
+    moments : TreeMultipoleMoments
+        Raw (unpacked) moments the packing was built from.
+    packed : Array
+        ``(num_nodes, sh_size(order))`` packed coefficients -- what the sweeps
+        actually consume.
+    component_matrix : Optional[Array]
+        Per-component view, when a lane needs one; ``None`` otherwise.
+    source_motion_packed : Optional[Array]
+        Time-differentiated multipoles, present only when a derivative path asked
+        for them.
+    """
 
     order: int
     centers: Array
@@ -70,6 +88,31 @@ def _aggregate_m2m_impl(
     span a valid topological order for any tree shape. This matches the pattern
     ``compute_tree_merged_sphere_geometry`` and the force-scale node reduction
     already use for the same reason.
+
+    Parameters
+    ----------
+    packed : Array
+        ``(num_nodes, C)`` packed coefficients, updated in place through the
+        returned value; leaves must already hold their P2M result.
+    centers : Array
+        ``(num_nodes, 3)`` expansion centres.
+    left_child : Array
+        Left child of each internal node.
+    right_child : Array
+        Right child of each internal node.
+    node_ranges : Array
+        Per-node particle span. The SPAN WIDTH is what orders the reduction --
+        see above; this is not merely bookkeeping here.
+    order : int
+        Expansion order ``p``.
+    num_internal : int
+        Internal-node count.
+
+    Returns
+    -------
+    Array
+        ``(num_nodes, C)`` packed coefficients with every internal node
+        aggregated from its children.
     """
 
     prototype = packed[0]
@@ -298,7 +341,17 @@ def _aggregate_multipoles_via_m2m(
 
 
 class TreeUpwardData(NamedTuple):
-    """Container bundling data needed for the FMM upward sweep."""
+    """Container bundling data needed for the FMM upward sweep.
+
+    Attributes
+    ----------
+    geometry : TreeGeometry
+        Node centres, radii and extents.
+    mass_moments : TreeMassMoments
+        Per-node mass moments.
+    multipoles : NodeMultipoleData
+        Packed expansions and their metadata.
+    """
 
     geometry: TreeGeometry
     mass_moments: TreeMassMoments
@@ -316,7 +369,37 @@ def prepare_upward_sweep(
     explicit_centers: Optional[Array] = None,
     precomputed_geometry: Optional[TreeGeometry] = None,
 ) -> TreeUpwardData:
-    """Compute geometry, moments, and packed multipoles for a tree."""
+    """Compute geometry, moments, and packed multipoles for a tree.
+    The P2M + M2M half of the pipeline, in the complex/solidfmm basis.
+
+    Parameters
+    ----------
+    tree : Tree
+        Tree to build expansions for.
+    positions_sorted : Array
+        ``(n, 3)`` positions in the tree's own order.
+    masses_sorted : Array
+        ``(n,)`` masses, same order.
+    max_order : int
+        Expansion order ``p``.
+    center_mode : str
+        How expansion centres are chosen.
+    explicit_centers : Optional[Array]
+        Caller-supplied centres, when ``center_mode`` asks for them.
+    precomputed_geometry : Optional[TreeGeometry]
+        Reuse an already-built geometry instead of recomputing it.
+
+    Returns
+    -------
+    TreeUpwardData
+        Geometry, mass moments and packed multipoles.
+
+    Raises
+    ------
+    ValueError
+        If ``center_mode`` is outside its documented domain, or
+        ``explicit_centers`` is required and missing (or the wrong shape).
+    """
 
     geometry = (
         precomputed_geometry

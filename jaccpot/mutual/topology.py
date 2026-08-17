@@ -152,6 +152,7 @@ class MutualTopology:
 
     def summary(self: "MutualTopology") -> dict[str, Any]:
         """Return a small dict of size counters, for tests and benchmarks.
+
         Returns
         -------
         dict[str, Any]
