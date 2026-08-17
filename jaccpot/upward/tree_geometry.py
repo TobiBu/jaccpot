@@ -76,6 +76,29 @@ def compute_tree_geometry_compiled(
     * an outer trace is already in charge (tracers in the arguments), so nesting
       a second ``jax.jit`` would only re-trace;
     * ``JACCPOT_TREE_GEOMETRY_JIT=0``, the escape hatch for A/B measurement.
+
+    Parameters
+    ----------
+    tree : Any
+        A yggdrax tree artifact. Deliberately untyped: the cache key uses
+        ``type(tree)``, so any tree family ``compute_tree_geometry`` accepts
+        works here and gets its own compiled entry.
+    positions_sorted : Any
+        ``[num_particles, 3]`` positions in tree order. Its aval is part of what
+        ``jax.jit`` keys on, so sweeping particle counts recompiles even though
+        the Python-level cache key is unchanged.
+    max_leaf_size : Optional[int]
+        Leaf-capacity hint forwarded to ``compute_tree_geometry``; ``None`` (the
+        default) lets it derive one. Static -- it is baked into the compiled
+        closure, and it is half of the cache key, so distinct values compile
+        separately.
+
+    Returns
+    -------
+    TreeGeometry
+        Per-node centres and radii. Bit-identical to the uncompiled call (max abs
+        diff 0.0, see the module docstring), so which branch was taken is never
+        observable in the numbers.
     """
 
     if not _jit_enabled():
