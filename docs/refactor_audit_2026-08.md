@@ -698,7 +698,11 @@ Observations, no decisions:
   `Array` everywhere.
 - **Test breadth does not track importance**: `RealSHBasis` (the default basis) has 1
   referencing file; `MemoryObjective` has 1; `GradConfig` has 2.
-- **Rename candidates, for your call only** (each would be a Tier 2 PR with an API-guard
+- **Rename candidates — BOTH CARRIED OUT, `d473b48` (2026-08-17 note).** Left below as
+  written because the reasoning is still the record of *why*; the names are done and item
+  2.4 is closed. The first candidate's new name is already `direct_sum_gravitational_acceleration`
+  and the engine is `FMMEngine`; do not rename either again.
+  (each would be a Tier 2 PR with an API-guard
   update): `direct_sum_gravitational_acceleration` → something that says "direct sum"
   (ARCHITECTURE §2 and §6 and its own docstring each spend a paragraph explaining it is *not*
   the differentiable FMM — three disclaimers is a naming smell); and the engine class in
@@ -1336,8 +1340,35 @@ Each of these is gated on the Tier 0 characterization named in its row.
 > * **1.1-1.6 and 1.9 are closed** as their rows record (PRs #79-#85, #81).
 > * **1.7 is done AS SCOPED, not exhaustively.** Two of seven phases were extracted, by
 >   design — the row already lists the other five with the ratio that argued against
->   them. `_prepare_state_dual_and_downward` is still **600 lines**. Read the row as
->   "the two cuts that earned a signature were made", not "the function was decomposed".
+>   them. `_prepare_state_dual_and_downward` is still **600 lines** (1061-1660). Read the
+>   row as "the two cuts that earned a signature were made", not "the function was
+>   decomposed".
+>
+>   **Measured 2026-08-17, so this does not have to be re-litigated.** Crossing-variable
+>   width per stage — names read from an earlier stage, and names written that a later
+>   stage reads:
+>
+>   | stage | lines | reads earlier | writes used later | interface |
+>   |---|---|---|---|---|
+>   | `dual_setup` | 300 | 0 | 23 | **23** |
+>   | `dual_artifact_build` | 60 | 16 | 3 | **19** |
+>   | `dual_far_pair_plan` | 88 | 9 | 18 | **27** |
+>   | `dual_m2l_autotune` | 19 | 4 | 2 | 6 |
+>   | `dual_select_interactions` | 15 | 5 | 2 | 7 |
+>   | `dual_downward_compute` | 32 | 16 | 2 | **18** |
+>   | `dual_finalize` | 31 | 5 | 2 | 7 |
+>
+>   Four of seven need **18-27 names threaded across the boundary** — extracting
+>   `dual_far_pair_plan` means an 88-line body behind a 27-argument interface, which is the
+>   same code with a worse seam. The three narrow stages (6, 7, 7) are genuine wins but
+>   total **65 lines of 600**: extracting all three leaves the function at ~535 lines, an
+>   11% reduction.
+>
+>   **The 600 lines are wide because the data flow is wide, not because nobody tried.**
+>   Making it materially smaller needs a carried state object rather than more extractions
+>   — a real design change, its own Tier 2 PR, and it would alter how the whole prepare
+>   path reads. Recorded here rather than attempted: the current shape is the local
+>   optimum given the constraint that no expression may move.
 > * **1.8 leaves F11's deferred half OPEN**, and it is still blocked by the same thing:
 >   `.github/workflows/ci.yml` has **zero** `cuda`/`gpu`/`nvidia` legs, so the GPU
 >   coverage the row waits on does not exist. That is Tier 2 item **2.6**, and it is a
@@ -1369,7 +1400,7 @@ Each of these is gated on the Tier 0 characterization named in its row.
 | **2.1** ✔ **PRs #103, #104** | Break up `_fmm_impl.FastMultipoleMethod.__init__` (722 lines, 60 params) into staged private resolvers | Config-resolution *order* is load-bearing (`b462e45`, `dee46d6` are both bugs in exactly this) and 0.1/0.2 do not cover every preset | **Done.** Body 653 → 141 lines, 573 lines into 13 resolvers, every one byte-verbatim and called in its original position. The "0.1/0.2 do not cover every preset" objection was answered first, in its own PR: a constructor-state golden over **46 configurations × 272 attributes**, which then gated the move. Boundaries came from a cut-cost profile, not from reading the code — and five of six step-2 boundaries landed mid-statement before being snapped to AST statement starts. Three blocks are deliberately left inline, by ratio of lines moved to parameters passed; the worst, `A6a`, would have been a 16-argument method calling a 16-argument function. |
 | **2.2** ✔ **PR #105** | Consolidate the four hand-rolled env parsers (F13, A.4) | Changes malformed-value semantics — which reverse-mode M2L kernel runs. Requires deciding what a garbage value should mean | **Done. Decided: a malformed value means THE DEFAULT, whatever it is**, plus a one-time warning naming the variable and the value ignored. That is not a new convention — `env_int`/`env_float` already did it and `env_flag` was the outlier, so `_env` disagreed with itself. The "four parsers" were really *three* semantics (denylist flag ×2, allowlist flag, enum-with-fallback), which is why they could not be deduped mechanically; `env_choice` was added for the third. Verified over 14 inputs per reader: FUSED and DIAG unchanged on all 14, JIT differs on 6 malformed inputs (False → the default), which is the intended consequence. A.4's specific warning is satisfied. `_env` also had **no tests**; it has 39 now, written first. |
 | **2.3** ✔ **CLOSED (`ab58c3d`)** | Delete or wire up the Wigner reference family (F32, ~260 lines, 8 `__all__` names) | Removes module-public names | **Already done; this row was stale.** G.4 records the decision (deleted) and `ab58c3d` carried it out. Verified 2026-08-15: `grep -ri wigner jaccpot/` returns **two prose mentions and no code** — `operators/_precision.py:5` and `operators/real_rotations.py:51-55`, both explaining why the closed-form Dehnen builders are the only rotation path. No `__all__` name remains. Nothing to do. |
-| **2.4** | Any rename from section C | Public API; `test_public_api_surface.py` must change in the same commit | Your call, per your instruction |
+| **2.4** ✔ **DONE `d473b48`** | Any rename from section C | Public API; `test_public_api_surface.py` must change in the same commit | **Both candidates section C named were carried out in one commit** (2026-08-15, *"rename the two names section C flagged (2.4)"*): `differentiable_gravitational_acceleration` → `direct_sum_gravitational_acceleration`, which is what "something that says direct sum" asked for; and the engine class → `FMMEngine`, so `_fmm_impl.py:189` and the `solver.py:540` facade no longer share a name. Nothing further is outstanding, and a third name for the same function would be churn -- the current one already satisfies the recommendation. The "rename candidates" paragraph at the end of section C still reads as open; it is not. |
 | **2.5** ✔ **DONE `cc3b4b9` (PR #150) — unblocked a different way** | Turn off `--skip-checking-short-docstrings` in `pyproject.toml` | ~~2840 violations must be at zero first; this is the *last* commit of the docstring programme, not the first~~ **This premise was wrong, and waiting on it was the mistake.** The flag is now off, with `baseline = ".pydoclint-baseline.txt"` carrying the pre-existing tail — so the gate is live *while* the tail retires, instead of the tail being unprotected until the end. What forced the rethink: `runtime/_adaptive_policy.py` was driven to zero (PR #118) and `main` was never at zero, because five functions from a concurrent branch merged into the same file without conflict and the vacuous hook reported 0 throughout (repaired in PR #149). Absolute counts on `main` after the programme: **`jaccpot/` 153**, `tests/` 1034, `bench/` 121, `examples/` 60. Regenerate with `pydoclint --config pyproject.toml --generate-baseline True .` and check the diff only *removes* lines; `auto-regenerate-baseline` must stay `false` because the pre-commit hook passes staged filenames and would rebuild the baseline from a subset. | **Cannot be done yet: 2403 violations across 524 distinct functions remain** with the flag off. Down from 2840 (0.20, 1.10 batches 1–2, F23 part 3), i.e. the programme is ~15% complete, not nearly finished. Worst files: `operators/complex_ops.py` 250, `runtime/fmm_prepare.py` 150, `downward/local_expansions.py` 117, `runtime/_interaction_cache.py` 109, `runtime/_adaptive_policy.py` 108, `solver.py` 100. By code: 507 DOC201 + 498 DOC203 (missing/mismatched `Returns`), 495 DOC101 + 495 DOC103 (missing/mismatched `Parameters`), 138 DOC501 + 138 DOC503 (missing `Raises`). `jaccpot/pallas/` is the only package-level directory at zero. **Measurement note:** pydoclint writes findings to **stderr**, so a `2>/dev/null` in the counting command reports 0 for any directory — that is how an early pass here produced "every subdirectory is clean" against a package total of 2403. |
 | **2.6** ✔ **DECIDED AND CLOSED 2026-08-17 — as a local gate, not CI** | ~~Nightly GPU CI leg~~ → `bench/gpu_gate.py`, run deliberately before a release | Infrastructure, and it is what unblocks F27/F33/F34 and the deferred half of F11 | **Decided: no CI leg.** `TobiBu/jaccpot` is **public**, and a self-hosted runner on a public repository lets a fork PR execute arbitrary code on the box; the box's GPUs are also shared, and a `schedule:` job cannot honour CLAUDE.md's "confirm before occupying one". GitHub-hosted runners have no GPU and the paid GPU runners were not worth the cost for this. So the gate is a **script**: `python -m bench.gpu_gate`. It claims the least-used card via `autocvd`, applies the measured caps (`-n 6`, `MEM_FRACTION=.12`), sets `--xla_gpu_deterministic_ops=true`, runs the suite, allows §9's five measured GPU-only failures through, and **fails if the 17 GPU-gated tests skipped** — because a run that fell back to CPU otherwise passes while proving nothing. Covers F27's 0%-coverage lanes, F33's strict/refresh lane and Pallas outside interpret mode. **Does not cover F34** (`tests/distributed/`, 24 tests, needs two cards) — which F34 itself already records as out of scope for this pass. **NOT YET EXECUTED ON HARDWARE:** written and unit-checked on a Mac with no GPU, so the preflight, the argument surface and the output parsers are verified but the run itself is not. First real invocation should be treated as commissioning the gate, not as a clean bill of health. |
 
