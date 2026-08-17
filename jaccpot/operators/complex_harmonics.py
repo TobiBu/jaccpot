@@ -21,7 +21,26 @@ from .real_harmonics import sh_index, sh_size
 
 
 def _pack_complex(full_nm: jnp.ndarray) -> jnp.ndarray:
-    """Pack a (p+1, p+1) complex array (m>=0) into (p+1)^2 with m in [-n,n]."""
+    """Pack a (p+1, p+1) complex array (m>=0) into (p+1)^2 with m in [-n,n].
+
+    The recurrences only ever fill ``m >= 0``; the negative-``m`` half is
+    reconstructed here from the conjugate symmetry
+    ``H_n^{-m} = (-1)^m conj(H_n^m)`` stated in the module docstring. Storing both
+    halves is what makes the packed layout interchangeable with the real basis's
+    ``(p+1)^2`` indexing.
+
+    Parameters
+    ----------
+    full_nm : jnp.ndarray
+        ``(p+1, p+1)`` complex array whose ``[n, m]`` entry holds degree ``n``,
+        order ``m >= 0``. Entries above the diagonal are never read.
+
+    Returns
+    -------
+    jnp.ndarray
+        ``(sh_size(p),)`` packed complex coefficients, indexed by
+        :func:`~jaccpot.operators.real_harmonics.sh_index`.
+    """
     p = full_nm.shape[0] - 1
     out = jnp.zeros((sh_size(p),), dtype=full_nm.dtype)
     real_dtype = jnp.real(jnp.zeros((), dtype=full_nm.dtype)).dtype
@@ -43,6 +62,28 @@ def complex_R_solidfmm(delta: jnp.ndarray, *, order: int) -> jnp.ndarray:
     """Regular complex solid harmonics R (solidfmm recursion).
 
     Returns packed complex coefficients for degrees 0..order, m in [-n,n].
+
+    Computes in float64/complex128 regardless of ``delta``'s dtype. That is
+    deliberate -- this is the reference implementation, and
+    :func:`complex_R_solidfmm_preserve_dtype` is the variant to use when the
+    caller's precision must be respected.
+
+    Parameters
+    ----------
+    delta : jnp.ndarray
+        Length-3 displacement vector.
+    order : int
+        Maximum degree ``p``. Must be non-negative.
+
+    Returns
+    -------
+    jnp.ndarray
+        ``(sh_size(order),)`` packed complex128 coefficients.
+
+    Raises
+    ------
+    ValueError
+        If ``order`` is negative.
     """
     p = int(order)
     if p < 0:
@@ -84,6 +125,28 @@ def complex_R_solidfmm_preserve_dtype(delta: jnp.ndarray, *, order: int) -> jnp.
     The reference ``complex_R_solidfmm`` intentionally computes in float64/complex128.
     This variant keeps float32 inputs in complex64 for the large-N GPU local-eval
     path while retaining complex128 when the incoming positions are float64.
+
+    Same recurrence as the reference, term for term; only the working dtype
+    differs, so a float64 caller gets bit-identical results from either.
+
+    Parameters
+    ----------
+    delta : jnp.ndarray
+        Length-3 displacement vector. A non-floating dtype falls back to
+        float32 rather than raising.
+    order : int
+        Maximum degree ``p``. Must be non-negative.
+
+    Returns
+    -------
+    jnp.ndarray
+        ``(sh_size(order),)`` packed coefficients: complex128 for a float64
+        ``delta``, complex64 otherwise.
+
+    Raises
+    ------
+    ValueError
+        If ``order`` is negative.
     """
     p = int(order)
     if p < 0:
@@ -140,6 +203,32 @@ def complex_S_solidfmm(delta: jnp.ndarray, *, order: int) -> jnp.ndarray:
     """Singular complex solid harmonics S (solidfmm recursion).
 
     Returns packed complex coefficients for degrees 0..order, m in [-n,n].
+
+    Unlike the regular harmonics these are singular at the origin -- every term
+    carries a power of ``1/r``. The squared radius is floored at ``1e-60`` so the
+    reciprocal stays finite there, which makes ``delta == 0`` return a huge but
+    finite value rather than a NaN. That floor is a guard against blow-up, not a
+    physically meaningful limit: a caller must not rely on the value at or near
+    the origin.
+
+    Computes in float64/complex128 regardless of ``delta``'s dtype.
+
+    Parameters
+    ----------
+    delta : jnp.ndarray
+        Length-3 displacement vector.
+    order : int
+        Maximum degree ``p``. Must be non-negative.
+
+    Returns
+    -------
+    jnp.ndarray
+        ``(sh_size(order),)`` packed complex128 coefficients.
+
+    Raises
+    ------
+    ValueError
+        If ``order`` is negative.
     """
     p = int(order)
     if p < 0:
@@ -184,6 +273,20 @@ def p2m_complex(delta: jnp.ndarray, mass: jnp.ndarray, *, order: int) -> jnp.nda
     """P2M for a single point mass in the solidfmm complex basis.
 
     Computes M_n^m = mass * R_n^m(delta).
+
+    Parameters
+    ----------
+    delta : jnp.ndarray
+        Particle position minus expansion centre.
+    mass : jnp.ndarray
+        Scalar particle mass.
+    order : int
+        Maximum degree ``p``.
+
+    Returns
+    -------
+    jnp.ndarray
+        ``(sh_size(order),)`` packed complex multipole coefficients.
     """
     coeffs = complex_R_solidfmm(delta, order=order)
     return jnp.asarray(mass) * coeffs
@@ -196,7 +299,25 @@ def p2m_complex_batch(
     *,
     order: int,
 ) -> jnp.ndarray:
-    """Batch P2M for point masses in the solidfmm complex basis."""
+    """Batch P2M for point masses in the solidfmm complex basis.
+
+    A ``vmap`` of :func:`p2m_complex`; per-particle contributions are NOT summed,
+    so the caller still owns the leaf reduction.
+
+    Parameters
+    ----------
+    deltas : jnp.ndarray
+        ``(n, 3)`` particle positions minus their expansion centre.
+    masses : jnp.ndarray
+        ``(n,)`` particle masses.
+    order : int
+        Maximum degree ``p``. Static under ``jit``.
+
+    Returns
+    -------
+    jnp.ndarray
+        ``(n, sh_size(order))`` packed complex coefficients, one row per particle.
+    """
     return jax.vmap(
         lambda d, m: p2m_complex(d, m, order=order),
         in_axes=(0, 0),
