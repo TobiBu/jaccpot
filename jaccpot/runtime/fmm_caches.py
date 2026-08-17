@@ -66,7 +66,22 @@ _M2L_FULLBATCH_MAX_PAIRS = 2_048
 
 
 def _array_nbytes(arr: Array) -> int:
-    """Return approximate storage size in bytes for one array leaf."""
+    """Return approximate storage size in bytes for one array leaf.
+
+    Approximate because it is ``prod(shape) * itemsize`` -- the logical size, not
+    whatever the device actually allocated after padding or layout choices. Good
+    enough to drive the cache budgets, which are advisory ceilings.
+
+    Parameters
+    ----------
+    arr : Array
+        Array to size. A missing ``shape`` is treated as scalar.
+
+    Returns
+    -------
+    int
+        Logical byte count.
+    """
     shape = tuple(int(dim) for dim in getattr(arr, "shape", ()))
     if len(shape) == 0:
         return int(np.dtype(arr.dtype).itemsize)
@@ -76,12 +91,38 @@ def _array_nbytes(arr: Array) -> int:
 
 
 def _tuple_array_nbytes(value: tuple[Array, ...]) -> int:
-    """Return total bytes for a tuple of array leaves."""
+    """Return total bytes for a tuple of array leaves.
+
+    Parameters
+    ----------
+    value : tuple[Array, ...]
+        Cache entry as stored by the grouped caches.
+
+    Returns
+    -------
+    int
+        Sum of :func:`_array_nbytes` over the tuple.
+    """
     return int(sum(_array_nbytes(arr) for arr in value))
 
 
 def _ordered_dict_values_nbytes(cache: OrderedDict) -> int:
-    """Return cumulative bytes of array-valued OrderedDict entries."""
+    """Return cumulative bytes of array-valued OrderedDict entries.
+
+    Recomputed from scratch on every call, and every ``*_cache_put`` calls it in
+    its eviction loop, so it is O(entries x leaves) per insertion. That is fine at
+    the current cache caps (32 entries) and is the thing to revisit if they grow.
+
+    Parameters
+    ----------
+    cache : OrderedDict
+        Cache whose values are tuples of arrays.
+
+    Returns
+    -------
+    int
+        Total bytes across all entries.
+    """
     total = 0
     for value in cache.values():
         total += _tuple_array_nbytes(value)
@@ -89,6 +130,19 @@ def _ordered_dict_values_nbytes(cache: OrderedDict) -> int:
 
 
 def _format_nbytes(count: int) -> str:
+    """Render a byte count in binary units, for diagnostics.
+
+    Parameters
+    ----------
+    count : int
+        Byte count; negatives are clamped to zero.
+
+    Returns
+    -------
+    str
+        Two-decimal value with a ``B``/``KiB``/``MiB``/``GiB``/``TiB`` suffix,
+        saturating at ``TiB``.
+    """
     value = float(max(int(count), 0))
     for unit in ("B", "KiB", "MiB", "GiB", "TiB"):
         if value < 1024.0 or unit == "TiB":
@@ -98,7 +152,23 @@ def _format_nbytes(count: int) -> str:
 
 
 def _estimate_payload_nbytes(value: Any) -> int:
-    """Best-effort recursive byte estimate for array-centric payloads."""
+    """Best-effort recursive byte estimate for array-centric payloads.
+
+    Walks arrays, dicts, tuples/lists, ``NamedTuple``s and plain objects with a
+    ``__dict__``. Anything else contributes **zero** rather than raising, so this
+    under-reports rather than failing -- appropriate for a diagnostic, and the
+    reason it must not be used as a hard memory bound.
+
+    Parameters
+    ----------
+    value : Any
+        Payload to size. ``None`` is zero.
+
+    Returns
+    -------
+    int
+        Estimated bytes.
+    """
     if value is None:
         return 0
     if hasattr(value, "shape") and hasattr(value, "dtype"):
@@ -115,7 +185,21 @@ def _estimate_payload_nbytes(value: Any) -> int:
 
 
 def _m2l_autotune_lookup(key: tuple[Any, ...]) -> Optional[int]:
-    """Return cached M2L chunk size for an autotune signature."""
+    """Return cached M2L chunk size for an autotune signature.
+
+    A hit refreshes the entry's LRU position, so lookups are not read-only with
+    respect to eviction order.
+
+    Parameters
+    ----------
+    key : tuple[Any, ...]
+        Autotune signature.
+
+    Returns
+    -------
+    Optional[int]
+        Cached chunk size, or ``None`` on a miss.
+    """
 
     cached = _m2l_chunk_autotune_cache.get(key)
     if cached is None:
@@ -125,7 +209,20 @@ def _m2l_autotune_lookup(key: tuple[Any, ...]) -> Optional[int]:
 
 
 def _m2l_autotune_store(key: tuple[Any, ...], chunk_size: int) -> None:
-    """Store one autotuned M2L chunk size with LRU eviction."""
+    """Store one autotuned M2L chunk size with LRU eviction.
+
+    Parameters
+    ----------
+    key : tuple[Any, ...]
+        Autotune signature.
+    chunk_size : int
+        Measured chunk size to remember.
+
+    Returns
+    -------
+    None
+        Mutates the process-level cache in place.
+    """
 
     _m2l_chunk_autotune_cache[key] = int(chunk_size)
     _m2l_chunk_autotune_cache.move_to_end(key)
@@ -134,7 +231,14 @@ def _m2l_autotune_store(key: tuple[Any, ...], chunk_size: int) -> None:
 
 
 def _m2l_autotune_payload() -> list[dict[str, Any]]:
-    """Return a JSON-serializable snapshot of the global M2L autotune cache."""
+    """Return a JSON-serializable snapshot of the global M2L autotune cache.
+
+    Returns
+    -------
+    list[dict[str, Any]]
+        One ``{"key": [...], "chunk_size": int}`` entry per cached signature, in
+        LRU order (least recently used first).
+    """
 
     payload: list[dict[str, Any]] = []
     for key, chunk in _m2l_chunk_autotune_cache.items():
@@ -147,7 +251,26 @@ def _restore_m2l_autotune_payload(
     *,
     merge: bool = True,
 ) -> int:
-    """Restore global M2L autotune cache entries from serialized payload."""
+    """Restore global M2L autotune cache entries from serialized payload.
+
+    Deliberately lenient: malformed entries, non-list keys, unparseable chunk
+    sizes and non-positive chunk sizes are **skipped silently** rather than
+    raising, so one bad record in a cache file cannot break a run. The return
+    value is how a caller detects that something was dropped.
+
+    Parameters
+    ----------
+    payload : list[dict[str, Any]]
+        Entries as produced by :func:`_m2l_autotune_payload`.
+    merge : bool
+        Merge into the existing cache rather than clearing it first.
+
+    Returns
+    -------
+    int
+        Number of entries actually restored, which may be fewer than were
+        supplied.
+    """
 
     if not merge:
         _m2l_chunk_autotune_cache.clear()
@@ -172,7 +295,23 @@ def _restore_m2l_autotune_payload(
 
 
 def _clear_global_runtime_caches(*, clear_jax_compilation: bool = False) -> None:
-    """Drop process-level runtime caches that can retain large array payloads."""
+    """Drop process-level runtime caches that can retain large array payloads.
+
+    Clears the grouped operator and segment caches. Note it does **not** clear the
+    M2L autotune cache -- that holds only integers, so it costs nothing to keep and
+    is worth preserving across a memory-pressure event.
+
+    Parameters
+    ----------
+    clear_jax_compilation : bool
+        Also call ``jax.clear_caches()``. Off by default because that cache is
+        process-global and shared with everything else in the process.
+
+    Returns
+    -------
+    None
+        Mutates the process-level caches in place.
+    """
     _grouped_operator_blocks_cache.clear()
     _grouped_segment_cache.clear()
     if clear_jax_compilation:
@@ -180,14 +319,45 @@ def _clear_global_runtime_caches(*, clear_jax_compilation: bool = False) -> None
 
 
 def _contains_tracer(value: Any) -> bool:
-    """Return ``True`` when a pytree contains JAX tracer values."""
+    """Return ``True`` when a pytree contains JAX tracer values.
+
+    The gate on host-side caching: a tracer has no concrete bytes to digest, so a
+    traced payload must not be keyed.
+
+    Parameters
+    ----------
+    value : Any
+        Pytree to inspect.
+
+    Returns
+    -------
+    bool
+        ``True`` if any leaf is a tracer.
+    """
     return any(
         isinstance(leaf, jax.core.Tracer) for leaf in jax.tree_util.tree_leaves(value)
     )
 
 
 def _array_digest(arr: Array) -> Optional[tuple[tuple[int, ...], str, bytes]]:
-    """Return (shape, dtype, digest) for stable host-side cache keys."""
+    """Return (shape, dtype, digest) for stable host-side cache keys.
+
+    Digests the array's **contents**, so two structurally identical arrays with
+    different values get different keys. This forces a device-to-host transfer and
+    a full hash of the buffer, which is why it is only used to build prepare-time
+    keys and never on a per-evaluation path.
+
+    Parameters
+    ----------
+    arr : Array
+        Array to digest.
+
+    Returns
+    -------
+    Optional[tuple[tuple[int, ...], str, bytes]]
+        ``(shape, dtype, blake2b-128 digest)``, or ``None`` when the array is
+        traced and therefore uncacheable.
+    """
     if _contains_tracer(arr):
         return None
     arr_np = np.asarray(jax.device_get(arr))
@@ -204,6 +374,27 @@ def _grouped_operator_cache_key(
     class_keys: Array,
     class_deltas: Array,
 ) -> Optional[tuple]:
+    """Build a content-addressed key for the grouped rotation-block cache.
+
+    Parameters
+    ----------
+    order : int
+        Expansion order.
+    rotation : str
+        Rotation lane name.
+    dtype : jnp.dtype
+        Working dtype of the blocks.
+    class_keys : Array
+        Translation-class keys; digested by content.
+    class_deltas : Array
+        Per-class displacement vectors; digested by content.
+
+    Returns
+    -------
+    Optional[tuple]
+        The key, or ``None`` if either array is traced -- in which case the
+        caller must skip caching rather than fall back to a weaker key.
+    """
     keys_sig = _array_digest(class_keys)
     deltas_sig = _array_digest(class_deltas)
     if keys_sig is None or deltas_sig is None:
@@ -223,6 +414,23 @@ def _grouped_segment_cache_key(
     class_targets: Array,
     chunk_size: int,
 ) -> Optional[tuple]:
+    """Build a content-addressed key for the grouped segment-table cache.
+
+    Parameters
+    ----------
+    class_offsets : Array
+        Per-class segment offsets; digested by content.
+    class_targets : Array
+        Per-class target nodes; digested by content.
+    chunk_size : int
+        Chunk size the tables were built for; part of the key because the
+        segmentation depends on it.
+
+    Returns
+    -------
+    Optional[tuple]
+        The key, or ``None`` if either array is traced.
+    """
     offsets_sig = _array_digest(class_offsets)
     targets_sig = _array_digest(class_targets)
     if offsets_sig is None or targets_sig is None:
@@ -231,6 +439,18 @@ def _grouped_segment_cache_key(
 
 
 def _grouped_operator_cache_get(key: tuple) -> Optional[tuple[Array, Array]]:
+    """Look up cached grouped rotation blocks, refreshing their LRU position.
+
+    Parameters
+    ----------
+    key : tuple
+        Key from :func:`_grouped_operator_cache_key`.
+
+    Returns
+    -------
+    Optional[tuple[Array, Array]]
+        The cached blocks, or ``None`` on a miss.
+    """
     blocks = _grouped_operator_blocks_cache.get(key)
     if blocks is None:
         return None
@@ -239,6 +459,24 @@ def _grouped_operator_cache_get(key: tuple) -> Optional[tuple[Array, Array]]:
 
 
 def _grouped_operator_cache_put(key: tuple, value: tuple[Array, Array]) -> None:
+    """Insert grouped rotation blocks, honouring the entry and total byte caps.
+
+    An entry larger than the per-entry cap is **dropped rather than stored**, so a
+    single oversized payload cannot evict the whole cache. Insertion then evicts
+    least-recently-used entries until both the count and total-byte caps hold.
+
+    Parameters
+    ----------
+    key : tuple
+        Key from :func:`_grouped_operator_cache_key`.
+    value : tuple[Array, Array]
+        Blocks to cache.
+
+    Returns
+    -------
+    None
+        Mutates the process-level cache in place.
+    """
     if _tuple_array_nbytes(value) > _GROUPED_OPERATOR_CACHE_ENTRY_MAX_BYTES:
         return
     _grouped_operator_blocks_cache[key] = value
@@ -254,6 +492,18 @@ def _grouped_operator_cache_put(key: tuple, value: tuple[Array, Array]) -> None:
 def _grouped_segment_cache_get(
     key: tuple,
 ) -> Optional[tuple[Array, Array, Array]]:
+    """Look up cached grouped segment tables, refreshing their LRU position.
+
+    Parameters
+    ----------
+    key : tuple
+        Key from :func:`_grouped_segment_cache_key`.
+
+    Returns
+    -------
+    Optional[tuple[Array, Array, Array]]
+        The cached tables, or ``None`` on a miss.
+    """
     cached = _grouped_segment_cache.get(key)
     if cached is None:
         return None
@@ -265,6 +515,23 @@ def _grouped_segment_cache_put(
     key: tuple,
     value: tuple[Array, Array, Array],
 ) -> None:
+    """Insert grouped segment tables, honouring the entry and total byte caps.
+
+    Same drop-if-oversized and LRU-evict-to-fit policy as
+    :func:`_grouped_operator_cache_put`, against the segment cache's own caps.
+
+    Parameters
+    ----------
+    key : tuple
+        Key from :func:`_grouped_segment_cache_key`.
+    value : tuple[Array, Array, Array]
+        Tables to cache.
+
+    Returns
+    -------
+    None
+        Mutates the process-level cache in place.
+    """
     if _tuple_array_nbytes(value) > _GROUPED_SEGMENT_CACHE_ENTRY_MAX_BYTES:
         return
     _grouped_segment_cache[key] = value
