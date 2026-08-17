@@ -14,7 +14,29 @@ from .solver import FastMultipoleMethod, FMMPreparedState
 
 
 def _extract_positions_from_state(state: Array) -> Array:
-    """Extract an ``(N, 3)`` position array from ODISSEO primitive state."""
+    """Extract an ``(N, 3)`` position array from ODISSEO primitive state.
+
+    Parameters
+    ----------
+    state : Array
+        ODISSEO primitive state ``[N, 2, 3]``: slot 0 of the middle axis is
+        position, slot 1 is velocity. The shape is checked so a transposed or
+        already-flattened array fails loudly here rather than producing a tree
+        built on velocities.
+
+    Returns
+    -------
+    Array
+        ``[N, 3]`` positions -- a view-like slice of ``state``, so it stays
+        differentiable with respect to it.
+
+    Raises
+    ------
+    ValueError
+        If ``state`` is not three-dimensional with trailing shape ``(2, 3)``.
+        A host-side check on the static shape, so it fires at trace time and is
+        safe under ``jit``.
+    """
     state_arr = jnp.asarray(state)
     if state_arr.ndim != 3 or state_arr.shape[1:] != (2, 3):
         raise ValueError("state must have shape (N, 2, 3)")
@@ -76,7 +98,39 @@ class OdisseoFMMCoupler:
         leaf_size: Optional[int] = None,
         max_order: Optional[int] = None,
     ) -> FMMPreparedState:
-        """Prepare source tree/interactions from an ODISSEO primitive state."""
+        """Prepare source tree/interactions from an ODISSEO primitive state.
+
+        Overwrites the cache unconditionally -- both ``_prepared_state`` and the
+        ``_masses`` it was built against. Calling this is the explicit rebuild
+        that :meth:`accelerations` will not do for you.
+
+        Parameters
+        ----------
+        state : Array
+            ODISSEO primitive state ``[N, 2, 3]``; only the position slot is
+            read. Velocities do not enter the tree.
+        masses : Array
+            ``[N]`` particle masses. Retained on the instance, which is what
+            makes ``masses`` optional on later :meth:`accelerations` calls.
+        bounds : Optional[Tuple[Array, Array]]
+            ``(lower, upper)`` root-box corners, or ``None`` (the default) to
+            derive them from the positions. Supplying fixed bounds across steps
+            is what keeps the tree topology -- and so the compiled shapes --
+            stable in a run.
+        leaf_size : Optional[int]
+            Particles per leaf; ``None`` (the default) uses the instance's
+            ``leaf_size``.
+        max_order : Optional[int]
+            Expansion order; ``None`` (the default) uses the instance's
+            ``max_order``.
+
+        Returns
+        -------
+        FMMPreparedState
+            The prepared state, also stored on the instance. Returned so a
+            caller can hold it directly; the two are the same object, so
+            :meth:`clear` does not invalidate a reference already taken.
+        """
         positions = _extract_positions_from_state(state)
         state_prepared = self.solver.prepare_state(
             positions,
