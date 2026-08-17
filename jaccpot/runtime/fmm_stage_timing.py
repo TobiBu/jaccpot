@@ -126,13 +126,33 @@ _CONDITIONAL: dict[str, str] = {
 
 
 def aggregate_counter_names() -> frozenset[str]:
-    """``refresh_*_seconds`` names that are sums of other counters."""
+    """``refresh_*_seconds`` names that are sums of other counters.
+
+    Returns
+    -------
+    frozenset[str]
+        The counter name of every stage that has children, fully prefixed. These
+        overlap their children by construction, so adding an aggregate to a leaf
+        double-counts -- see :func:`leaf_counter_names` for the set that does
+        not. A name here can also appear in the leaf set of no other stage; the
+        two sets are disjoint.
+    """
 
     return frozenset(f"refresh_{name}_seconds" for name in STAGE_TREE)
 
 
 def leaf_counter_names() -> frozenset[str]:
-    """``refresh_*_seconds`` names that form a partition (no double counting)."""
+    """``refresh_*_seconds`` names that form a partition (no double counting).
+
+    Returns
+    -------
+    frozenset[str]
+        Counter names for stages that appear as somebody's child and have no
+        children themselves. Safe to sum: no leaf contains another. Stages whose
+        measurement is conditional are included regardless of whether they were
+        measured on a given run, so a leaf may legitimately read 0.0 rather than
+        be absent.
+    """
 
     children: set[str] = set()
     for names in STAGE_TREE.values():
@@ -238,7 +258,30 @@ def _known_names() -> frozenset[str]:
 
 
 def format_stage_timing_tree(tree: Mapping[str, Any]) -> str:
-    """Render :func:`stage_timing_tree` output as indented text, for a log."""
+    """Render :func:`stage_timing_tree` output as indented text, for a log.
+
+    Presentation only -- it derives no timings, and unmeasured stages are marked
+    ``[not measured]`` rather than dropped, so a zero that means "we did not look"
+    is distinguishable from a zero that means "it was free".
+
+    Parameters
+    ----------
+    tree : Mapping[str, Any]
+        A :func:`stage_timing_tree` result. Indexed by the layout that function
+        produces: ``seconds`` is required on every node, while ``children``,
+        ``measured``, ``unattributed_seconds`` and the top-level
+        ``unmapped_nonzero`` are optional. A mapping missing ``seconds`` raises
+        ``KeyError``; the rest degrade quietly.
+
+    Returns
+    -------
+    str
+        Newline-joined lines, no trailing newline. Times are milliseconds.
+        Per-node residuals appear as ``(unattributed in <stage>)`` and counters
+        the tree does not place appear as ``[unmapped]`` -- both are there so a
+        reader can see that the children do not account for the parent, which is
+        the failure mode this format exists to expose.
+    """
 
     lines: list[str] = []
 
