@@ -75,7 +75,24 @@ def _l2l_complex_batch_kernel(
     order: int,
     rotation: str,
 ) -> Array:
-    """Vectorized complex-basis L2L translation kernel."""
+    """Vectorized complex-basis L2L translation kernel.
+
+    Parameters
+    ----------
+    coeffs : Array
+        ``(pairs, C)`` parent local coefficients, one row per child.
+    deltas : Array
+        ``(pairs, 3)`` displacements, ``parent centre - child centre``.
+    order : int
+        Expansion order.
+    rotation : str
+        Rotation lane for the complex L2L.
+
+    Returns
+    -------
+    Array
+        ``(pairs, C)`` local coefficients re-centred on the children.
+    """
     return l2l_complex_batch(coeffs, deltas, order=order, rotation=rotation)
 
 
@@ -86,7 +103,23 @@ def _l2l_real_batch_kernel(
     *,
     order: int,
 ) -> Array:
-    """Vectorized real-basis L2L translation kernel."""
+    """Vectorized real-basis L2L translation kernel.
+
+    Parameters
+    ----------
+    coeffs : Array
+        ``(pairs, C)`` parent local coefficients, one row per child.
+    deltas : Array
+        ``(pairs, 3)`` displacements, ``parent centre - child centre`` -- the
+        same sign convention as the complex kernel.
+    order : int
+        Expansion order.
+
+    Returns
+    -------
+    Array
+        ``(pairs, C)`` local coefficients re-centred on the children.
+    """
     return jax.vmap(lambda c, d: l2l_real(c, d, order=order))(coeffs, deltas)
 
 
@@ -105,7 +138,35 @@ def _propagate_solidfmm_locals_to_children(
     rotation: str,
     total_nodes: int,
 ) -> Array:
-    """Apply solidfmm L2L translations from parents to their children."""
+    """Apply solidfmm L2L translations from parents to their children.
+
+    One level of descent only. Use
+    :func:`_propagate_solidfmm_locals_by_level` when expansions may have been
+    deposited above the leaves, which is the general case.
+
+    Parameters
+    ----------
+    coeffs_local : Array
+        ``(total_nodes, C)`` local coefficients; parents are read, children
+        written.
+    centers_local : Array
+        ``(total_nodes, 3)`` expansion centres.
+    left_child : Array
+        Left child of each internal node.
+    right_child : Array
+        Right child of each internal node.
+    order : int
+        Expansion order.
+    rotation : str
+        Rotation lane for the complex L2L.
+    total_nodes : int
+        Node count, i.e. the scatter extent.
+
+    Returns
+    -------
+    Array
+        ``(total_nodes, C)`` locals with each child's inherited expansion added.
+    """
     num_internal_nodes = left_child.shape[0]
     parent_idx = jnp.arange(num_internal_nodes, dtype=INDEX_DTYPE)
     child_idx = jnp.concatenate(
@@ -172,6 +233,39 @@ def _propagate_solidfmm_locals_by_level(
     current level, so each node's fully-accumulated expansion (its own plus
     everything inherited from shallower ancestors) is propagated to its children
     before those children are used as parents in turn.
+
+    Parameters
+    ----------
+    coeffs_local : Array
+        ``(total_nodes, C)`` local coefficients, updated in the cascade.
+    centers : Array
+        ``(total_nodes, 3)`` expansion centres.
+    left_child : Array
+        Left child of each internal node.
+    right_child : Array
+        Right child of each internal node.
+    node_levels : Array
+        Depth of each node; drives which parents are active per iteration.
+    order : int
+        Expansion order.
+    rotation : str
+        Rotation lane for the complex L2L.
+    total_nodes : int
+        Node count.
+    basis_mode : str
+        ``"complex"`` or ``"real"``; selects the batch kernel.
+    l2l_grouped : bool
+        Use the grouped L2L lane.
+    mm_class_capacity : int
+        Per-class capacity for the grouped lane.
+    num_levels : Optional[int]
+        Concrete tree depth. ``None`` falls back to the padded shape-derived
+        depth, which is correct but iterates more levels than necessary.
+
+    Returns
+    -------
+    Array
+        ``(total_nodes, C)`` locals after the full root-to-leaf cascade.
     """
     num_internal = int(left_child.shape[0])
     if num_internal <= 0:
@@ -245,6 +339,28 @@ def _propagate_solidfmm_locals_by_level(
         cascade depth, capping accuracy (~3e-3 at theta>=0.5) regardless of
         expansion order, while looking fine at small theta where the cascade is
         shallow.
+
+        Parameters
+        ----------
+        state_in : Array
+            ``(total_nodes, C)`` locals accumulated so far. Parents are read from
+            here, so it must already carry everything inherited from shallower
+            levels.
+        centers_all : Array
+            ``(total_nodes, 3)`` expansion centres. Loop-invariant, so it is
+            hoisted out of the level scan and its residual counted once.
+        safe_child : Array
+            Child index per active parent slot, with invalid slots pointed at
+            ``0`` so the gather stays in bounds.
+        valid : Array
+            Mask over ``safe_child``; invalid slots are zeroed after the
+            translate rather than skipped.
+
+        Returns
+        -------
+        Array
+            ``(total_nodes, C)`` translated contributions, zero outside the
+            active children, ready to be added to ``state_in``.
         """
         parent_coeffs = state_in[parent_rep]
         deltas = centers_all[parent_rep] - centers_all[safe_child]
@@ -293,7 +409,32 @@ def _propagate_real_locals_to_children(
     order: int,
     total_nodes: int,
 ) -> Array:
-    """Apply real-basis L2L translations from parents to their children."""
+    """Apply real-basis L2L translations from parents to their children.
+
+    Real-basis twin of :func:`_propagate_solidfmm_locals_to_children`; one level
+    of descent only.
+
+    Parameters
+    ----------
+    coeffs_local : Array
+        ``(total_nodes, C)`` local coefficients; parents are read, children
+        written.
+    centers_local : Array
+        ``(total_nodes, 3)`` expansion centres.
+    left_child : Array
+        Left child of each internal node.
+    right_child : Array
+        Right child of each internal node.
+    order : int
+        Expansion order.
+    total_nodes : int
+        Node count, i.e. the scatter extent.
+
+    Returns
+    -------
+    Array
+        ``(total_nodes, C)`` locals with each child's inherited expansion added.
+    """
     num_internal_nodes = left_child.shape[0]
     parent_idx = jnp.arange(num_internal_nodes, dtype=INDEX_DTYPE)
     child_idx = jnp.concatenate(
@@ -350,6 +491,84 @@ def _prepare_solidfmm_downward_sweep(
     The returned value intentionally retains only the locals plus a minimal
     interaction handle. Grouped layouts, chunk schedules, and other M2L feed
     structures are execution inputs, not part of the long-lived downward state.
+
+    Parameters
+    ----------
+    tree : Tree
+        Tree being swept.
+    upward : TreeUpwardData
+        Upward-pass result supplying multipoles and geometry.
+    theta : float
+        MAC opening angle.
+    mac_type : MACType
+        Traversal-facing acceptance criterion. Already resolved -- the
+        caller-facing vocabulary is mapped in
+        :meth:`~jaccpot.runtime.fmm_sweeps.SweepsMixin.prepare_downward_sweep`.
+    initial_locals : Optional[LocalExpansionData]
+        Locals to accumulate into; ``None`` starts from zeros.
+    interactions : Optional[NodeInteractionList]
+        Pre-built far-pair list; ``None`` traverses.
+    m2l_chunk_size : Optional[int]
+        Pairs per M2L chunk.
+    l2l_chunk_size : Optional[int]
+        Nodes per L2L chunk.
+    complex_rotation : str
+        Rotation lane on the complex basis.
+    basis_mode : str
+        ``"complex"`` or ``"real"``.
+    m2l_impl : Optional[str]
+        M2L implementation selector for the flat lanes.
+    traversal_config : Optional[DualTreeTraversalConfig]
+        Traversal capacities and retry policy.
+    dense_buffers : Optional[DenseInteractionBuffers]
+        Pre-built dense interaction buffers.
+    retry_logger : Optional[Callable[[DualTreeRetryEvent], None]]
+        Called when the traversal retries with a larger capacity.
+    grouped_interactions : bool
+        Use the grouped M2L lanes.
+    grouped_buffers : Optional[GroupedInteractionBuffers]
+        Pre-built grouped buffers; built on demand when ``None``.
+    grouped_segment_starts : Optional[Array]
+        Class-major segment starts.
+    grouped_segment_lengths : Optional[Array]
+        Class-major segment lengths.
+    grouped_segment_class_ids : Optional[Array]
+        Translation class of each segment.
+    grouped_segment_sort_permutation : Optional[Array]
+        Permutation into class-major order.
+    grouped_segment_group_ids : Optional[Array]
+        Group id of each segment.
+    grouped_segment_unique_targets : Optional[Array]
+        Distinct target nodes per segment.
+    farfield_mode : str
+        ``"pair_grouped"`` or ``"class_major"`` on the grouped path.
+    far_pairs_coo : Optional[_FarPairCOO]
+        Pre-built COO far pairs, which take precedence over ``interactions``.
+    far_pairs_by_gear : Optional[tuple[tuple[Array, Array], ...]]
+        Per-gear far-pair lists for the adaptive-order path.
+    adaptive_order : bool
+        Choose the expansion order per interaction from ``p_gears``.
+    p_gears : tuple[int, ...]
+        Candidate orders for ``adaptive_order``.
+    dehnen_radius_scale : float
+        Node-radius scale for the Dehnen criteria.
+    use_pallas : bool
+        Allow the Pallas M2L lanes.
+    timing_recorder : Optional[Callable[[str, float], None]]
+        Per-stage timing sink. Passing one forces host synchronisation via
+        ``block_until_ready``, so it changes timing behaviour and is for
+        profiling only.
+
+    Returns
+    -------
+    TreeDownwardData
+        Local expansions plus a minimal interaction handle.
+
+    Raises
+    ------
+    ValueError
+        If a basis, rotation or far-field mode option is outside its documented
+        domain.
     """
 
     interaction_inputs = _prepare_solidfmm_downward_interaction_inputs(
