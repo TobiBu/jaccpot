@@ -10,9 +10,12 @@ and pinned by `tests/unit/operators/test_convention_contracts.py`.
 **If you are about to change a sign or an enumeration order in these files, read the
 matching section first, then run that test file.**
 
-Section 4 was added later and is a different animal: two helpers with the same role
-and the same name, one of which is simply **wrong**. It is an open defect, pinned by
-a strict `xfail` rather than reconciled.
+Section 4 is a different animal: two helpers with the same role and the same name,
+one of which was simply **wrong**. Unlike 1-3 it was not a convention to reconcile but
+a defect to fix, and it **has been fixed** -- two expressions in
+`solidfmm_reference._angles_from_delta`. Kept here because the diagnosis is the
+transferable part, and because the wrong expressions are the ones a reader's
+spherical-coordinate instinct will reach for.
 
 ---
 
@@ -183,16 +186,38 @@ and the reference has nowhere left to hide.
 `tests/unit/operators/test_real_harmonics.py` carries both halves:
 `test_dehnen_local_channel_factor_holds_at_any_delta` (passing, with an inertness
 gate asserting that dropping the factor of two breaks the identity by ≥ 1e-4) and
-`test_solidfmm_reference_matches_m2l_real_off_axis` (`xfail(strict=True)`).
+`test_solidfmm_reference_matches_m2l_real_off_axis` (now passing; it carried
+`xfail(strict=True)` until the fix landed, and the marker was dropped in the same
+commit as the fix — strict, so leaving it would have failed the suite).
 
-### Why it is not fixed here
+### The fix
 
-Fixing it changes what the module computes, which CLAUDE.md makes its own
-sign-off-carrying change. The blast radius is small — `solidfmm_reference` is
-imported only by `tests/`, and only `translate_along_z_m2l_complex` (unaffected;
-it has no rotation) is used by `test_complex_ops.py`. The one existing test of
-`m2l_solidfmm_reference`, `test_solidfmm_reference_matches_z_axis_m2l`, is
-on-axis and stays green either way.
+Two expressions in `_angles_from_delta`, and nothing else:
+
+| | was | is |
+| --- | --- | --- |
+| azimuth | `atan2(y, x)` | `atan2(x, y)` |
+| polar | `atan2(rho, z)` | `atan2(-rho, z)` |
+
+After it, rescaled coefficients agree with `m2l_real` to **3e-17** and the evaluated
+potential converges identically — 1.1e-6, 3.8e-10, 1.2e-13 at orders 2, 4, 6, against
+the flat 1.2e-2 plateau before.
+
+Blast radius was small and was checked, not assumed: `solidfmm_reference` is imported
+only by `tests/`, and the three consuming files
+(`test_complex_ops.py`, `test_m2l_complex_fused_pallas.py`, `test_real_harmonics.py`)
+give **171 passed** after the change — nothing had been calibrated against the wrong
+oracle. `translate_along_z_m2l_complex` has no rotation and was never affected.
+
+### A caution that outlived the defect
+
+Two successive versions of the `m2l_solidfmm_reference` docstring were wrong in
+opposite directions. The first blamed the comparison rather than the code. The second,
+written from a field-level check that **omitted the `m != 0` factor of two**, reported
+a residual 1.5e-3 and concluded a second undiagnosed defect remained. There was one
+defect in two expressions; the 1.5e-3 was the missing rescale — this module's own
+normalisation trap, sprung while documenting it. If you compare this function's output
+to a real-basis quantity, rescale first.
 
 ---
 

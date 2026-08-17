@@ -812,14 +812,6 @@ def test_dehnen_local_channel_factor_holds_at_any_delta(order: int) -> None:
         )
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "m2l_solidfmm_reference rotates with the wrong two conventions off "
-        "axis: docs/operator_conventions.md section 4. If this XPASSes the "
-        "reference has been repaired -- drop the marker, do not relax the test."
-    ),
-)
 def test_solidfmm_reference_matches_m2l_real_off_axis():
     """``m2l_solidfmm_reference`` must agree with ``m2l_real`` off axis.
 
