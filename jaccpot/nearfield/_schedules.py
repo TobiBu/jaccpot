@@ -61,6 +61,27 @@ def prepare_leaf_neighbor_pairs(
 
     The default stays ``True`` because the non-bucketed path uses it live for
     gather locality and does not persist the result.
+
+    Parameters
+    ----------
+    node_ranges : Array
+        Per-node ``[start, stop)`` span into the sorted particle order.
+    leaf_nodes : Array
+        Node index of each leaf.
+    offsets : Array
+        Per-leaf offsets into ``neighbors``.
+    neighbors : Array
+        Flat neighbour-node list.
+    sort_by_source : bool
+        Reorder the edges by source leaf for gather locality. **Pass ``False``
+        whenever the result will be stored and fed back as a ``precomputed_*``
+        array** -- see the warning above.
+
+    Returns
+    -------
+    Tuple[Array, Array, Array]
+        ``(target_leaf_ids, source_leaf_ids, valid_pairs)``, positionally
+        aligned with ``neighbors`` only when ``sort_by_source`` is ``False``.
     """
     total_nodes = node_ranges.shape[0]
     leaf_lookup = jnp.full((total_nodes,), -1, dtype=INDEX_DTYPE)
@@ -99,7 +120,38 @@ def prepare_bucketed_scatter_schedules(
     max_leaf_size: int,
     edge_chunk_size: int,
 ) -> Tuple[Array, Array, Array]:
-    """Precompute per-chunk scatter schedules for bucketed near-field scans."""
+    """Precompute per-chunk scatter schedules for bucketed near-field scans.
+    Built once at prepare time and reused across evaluations, so it is only
+    valid while the topology and ``edge_chunk_size`` are unchanged.
+
+    Parameters
+    ----------
+    node_ranges : Array
+        Per-node ``[start, stop)`` span into the sorted particle order.
+    leaf_nodes : Array
+        Node index of each leaf.
+    target_leaf_ids : Array
+        Target leaf of each edge. Must be positionally aligned with the edge
+        list the schedule will be applied to.
+    valid_pairs : Array
+        Validity mask over the edges.
+    max_leaf_size : int
+        Slot capacity per leaf.
+    edge_chunk_size : int
+        Edges per chunk; part of what the schedule is specialised to.
+
+    Returns
+    -------
+    Tuple[Array, Array, Array]
+        One ``(sort_idx, group_ids, unique_indices)`` schedule per chunk, as
+        consumed by :mod:`jaccpot.nearfield._scatter`'s ``*_with_schedule``
+        helpers.
+
+    Raises
+    ------
+    ValueError
+        If ``edge_chunk_size`` or ``max_leaf_size`` is not positive.
+    """
     chunk = int(edge_chunk_size)
     if chunk <= 0:
         raise ValueError("edge_chunk_size must be positive")
@@ -152,7 +204,34 @@ def prepare_bucketed_scatter_schedules_from_groups(
     *,
     edge_chunk_size: int,
 ) -> Tuple[Array, Array, Array]:
-    """Precompute per-chunk scatter schedules for explicit leaf-particle groups."""
+    """Precompute per-chunk scatter schedules for explicit leaf-particle groups.
+    The membership-driven twin of :func:`prepare_bucketed_scatter_schedules`:
+    it takes explicit per-leaf particle groups rather than deriving them from
+    ``node_ranges``, which is what the large-N lane already has on hand.
+
+    Parameters
+    ----------
+    leaf_particle_indices : Array
+        ``(num_leaves, S)`` particle indices per leaf.
+    leaf_particle_mask : Array
+        Occupancy mask of the same shape.
+    target_leaf_ids : Array
+        Target leaf of each edge, positionally aligned with the edge list.
+    valid_pairs : Array
+        Validity mask over the edges.
+    edge_chunk_size : int
+        Edges per chunk.
+
+    Returns
+    -------
+    Tuple[Array, Array, Array]
+        One ``(sort_idx, group_ids, unique_indices)`` schedule per chunk.
+
+    Raises
+    ------
+    ValueError
+        If ``edge_chunk_size`` is not positive.
+    """
     chunk = int(edge_chunk_size)
     if chunk <= 0:
         raise ValueError("edge_chunk_size must be positive")
@@ -197,7 +276,30 @@ def _prepare_leaf_data(
     *,
     max_leaf_size: int,
 ) -> Tuple[Array, Array, Array, Array]:
-    """Pad per-leaf particle data to a uniform shape."""
+    """Pad per-leaf particle data to a uniform shape.
+    Every leaf is padded to ``max_leaf_size`` so the kernels see one static
+    shape. Padding slots get zero mass, which makes them inert in the force sum
+    without a branch.
+
+    Parameters
+    ----------
+    node_ranges : Array
+        Per-node ``[start, stop)`` span into the sorted particle order.
+    leaf_nodes : Array
+        Node index of each leaf.
+    positions : Array
+        All particle positions, in sorted order.
+    masses : Array
+        All particle masses, same order.
+    max_leaf_size : int
+        Slot capacity per leaf.
+
+    Returns
+    -------
+    Tuple[Array, Array, Array, Array]
+        ``(particle_indices, positions, masses, mask)``, the last three padded
+        to ``(num_leaves, max_leaf_size, ...)``.
+    """
 
     leaf_ranges = node_ranges[leaf_nodes]
     counts = leaf_ranges[:, 1] - leaf_ranges[:, 0] + 1
@@ -227,7 +329,27 @@ def _prepare_leaf_data_from_groups(
     positions: Array,
     masses: Array,
 ) -> Tuple[Array, Array, Array, Array]:
-    """Gather per-leaf particle data from explicit particle-membership groups."""
+    """Gather per-leaf particle data from explicit particle-membership groups.
+    Same output contract as :func:`_prepare_leaf_data`, but the membership is
+    given rather than derived, so the slot width comes from the caller's groups.
+
+    Parameters
+    ----------
+    leaf_particle_indices : Array
+        ``(num_leaves, S)`` particle indices per leaf.
+    leaf_particle_mask : Array
+        Occupancy mask of the same shape.
+    positions : Array
+        All particle positions, in sorted order.
+    masses : Array
+        All particle masses, same order.
+
+    Returns
+    -------
+    Tuple[Array, Array, Array, Array]
+        ``(particle_indices, positions, masses, mask)``, with masked slots
+        carrying zero mass.
+    """
     leaf_particle_indices = jnp.asarray(leaf_particle_indices, dtype=INDEX_DTYPE)
     leaf_particle_mask = jnp.asarray(leaf_particle_mask, dtype=bool)
     if leaf_particle_indices.size == 0:
