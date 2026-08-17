@@ -131,6 +131,7 @@ def _env_int(name: str, default: int, *, minimum: int = 1) -> int:
 
 def _env_flag(name: str, default: bool = False) -> bool:
     """Read a boolean env flag with a defensive fallback.
+
     Parameters
     ----------
     name : str

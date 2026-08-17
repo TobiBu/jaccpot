@@ -113,6 +113,7 @@ def _resolve_pallas_chunk_size(
 
 def mutual_nearfield_pallas_active(use_pallas: bool, interpret: bool) -> bool:
     """Whether the near field should dispatch the mutual Pallas kernel.
+
     Parameters
     ----------
     use_pallas : bool
@@ -373,6 +374,7 @@ def mutual_near_field_forces(
         emit_b: bool,
     ) -> tuple[Array, Array, Array, Array]:
         """Gather two leaf blocks, run the kernel, return ``(F_a, F_b)``.
+
         Parameters
         ----------
         la : Array
