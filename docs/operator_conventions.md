@@ -10,6 +10,10 @@ and pinned by `tests/unit/operators/test_convention_contracts.py`.
 **If you are about to change a sign or an enumeration order in these files, read the
 matching section first, then run that test file.**
 
+Section 4 was added later and is a different animal: two helpers with the same role
+and the same name, one of which is simply **wrong**. It is an open defect, pinned by
+a strict `xfail` rather than reconciled.
+
 ---
 
 ## 1. The two translation sign conventions are opposite
@@ -95,6 +99,100 @@ asymmetric one).
 interchangeable across representations: the M2L sandwich deliberately crosses them —
 rotate the *multipole* world→z, translate along z, rotate the *local* z→world — so
 `from_z_local @ to_z_multipole` is emphatically not the identity.
+
+## 4. Two `_angles_from_delta`, one of them wrong (OPEN DEFECT)
+
+Unlike sections 1–3, this one is **not** a pair of locally reasonable
+conventions. It is a bug, still in the tree, pinned rather than fixed.
+
+| function | azimuth | polar |
+| --- | --- | --- |
+| `complex_ops._angles_from_delta_solidfmm` (production) | `atan2(x, y)` | `atan2(-rho, z)` |
+| `solidfmm_reference._angles_from_delta` (reference) | `atan2(y, x)` | `atan2(rho, z)` |
+
+Both feed a **byte-identical** rotation composition — `B_U Dz(beta) B_U Dz(alpha)`
+to go into the z-aligned frame, `Dz(-alpha) B_T Dz(-beta) B_T` to bring the local
+back out — so the reference differs from production by exactly these two
+expressions. Both differences matter, and neither is visible on an axis-aligned
+`delta`, where `alpha` is irrelevant and `beta == 0`.
+
+`atan2(y, x)` is the same error already fixed once in the real-basis rotations:
+the coded `B` (`_compute_dehnen_B_matrix_complex`) is the **x ↔ z** swap, so
+`B Dz(theta) B` turns about *x*, and aligning a direction with `+z` needs the
+azimuth that removes the *x* component. `atan2(y, x)` suits a y ↔ z swap, which
+is not the matrix in this repo. See the convention note on
+`real_rotations._multipole_align_to_z_block`, which says so at the site.
+
+### The measurement
+
+The right comparison is *not* a coefficient diff against `m2l_real` alone — the
+two carry different normalisations. It is the evaluated potential against a
+direct sum, which is basis-independent. Single unit mass at `(0.2, -0.1, 0.3)`
+from the source centre, evaluated at `(0.15, 0.2, -0.1)` from the target centre,
+float64, reference output rescaled by the correct channel factor (below):
+
+| `delta` | order | `m2l_real` | reference |
+| --- | --- | --- | --- |
+| `(0, 0, 4)` | 2 / 4 / 6 | 5.2e-05 / 1.3e-05 / 9.8e-08 | 5.2e-05 / 1.3e-05 / 9.8e-08 |
+| `(4, 1.5, -2.5)` | 2 / 4 / 6 | 4.5e-04 / 6.1e-07 / 2.7e-08 | **5.5e-02 / 5.5e-02 / 5.5e-02** |
+| `(5, 0, 0)` | 2 / 4 / 6 | 1.1e-04 / 1.5e-06 / 1.8e-08 | **5.5e-02 / 5.5e-02 / 5.5e-02** |
+| `(-2, -3, -1.5)` | 2 / 4 / 6 | 2.2e-04 / 5.2e-06 / 1.0e-07 | **7.5e-02 / 7.4e-02 / 7.4e-02** |
+| `(1e-6, 0, 5)` | 2 / 4 / 6 | 3.5e-05 / 4.2e-06 / 2.1e-08 | 3.5e-05 / 4.2e-06 / 3.3e-08 |
+
+**Flat in order** is the tell: truncation error falls with `p`, a wrong rotation
+does not. Note the last row — at `rho ≈ 0` the `m != 0` channels carry
+`(rho/r)^|m|` and suppress the defect to 1.9e-08 in the coefficients, so a
+near-axis direction makes any test of this vacuous.
+
+Restoring **both** conventions (and nothing else) makes the reference reproduce
+`m2l_real` to ≤ 2.5e-16 and its field error identical to `m2l_real`'s at all
+seven directions tried, orders 2/4/6. Restoring only one leaves a plateau:
+1.9e-02 to 9.9e-02 for the azimuth alone, 2.2e-02 to 7.3e-02 for the polar sign
+alone. Independently, the corrected complex block `B_U Dz(-ax) B_U Dz(atan2(x,y))`
+conjugates by `Q` onto `real_rotation_to_z_axis_multipole` to 8.9e-16, while the
+shipped one matches **none** of the four real rotation builders of section 3
+(nearest mismatch 1.5 at order 2).
+
+### The factor of two is not the problem
+
+The reference is a factor of two smaller than `m2l_real` on every `m != 0`
+channel, and it is tempting to blame *that* for the off-axis disagreement — the
+argument being that the factor is per-`|m|` in the aligned frame and rotating
+back mixes `m` channels, so a diagonal rescale cannot be valid off axis. **That
+argument is wrong**, and it was in the `m2l_solidfmm_reference` docstring until
+this change.
+
+The factor relates the two *bases*, not the geometry, and it comes entirely from
+the translate stage:
+
+* multipole coefficients are harmonic **values** (`M_n^m = mass * U_n^m`), so
+  they convert with `Q` alone — `complex_to_dehnen_real_coeffs`;
+* local coefficients are the **dual** objects (`evaluate_local_real` forms the
+  plain sum `Psi = sum F_n^m U_n^m`), and collapsing the complex sum over
+  `m in [-n, n]` onto the `m >= 0` real channels folds each conjugate pair
+  together. So locals convert with `D Q`, `D = diag(1 if m == 0 else 2)`.
+
+Verified: `D Q Cz Q^-1 == translate_along_z_m2l_real` to 7.6e-17 for orders 2–4,
+where `Cz` is `translate_along_z_m2l_complex` as a matrix; and `Q^T D Q == J`,
+the `m -> -m` conjugation flip, which is *why* locals get `D` and multipoles do
+not. Applied to the production complex M2L, `D Q` reproduces `m2l_real` to
+≤ 3.1e-16 at every direction and order in the table above — an off-axis,
+geometry-general result, so the diagonal rescale is exactly the right comparison
+and the reference has nowhere left to hide.
+
+`tests/unit/operators/test_real_harmonics.py` carries both halves:
+`test_dehnen_local_channel_factor_holds_at_any_delta` (passing, with an inertness
+gate asserting that dropping the factor of two breaks the identity by ≥ 1e-4) and
+`test_solidfmm_reference_matches_m2l_real_off_axis` (`xfail(strict=True)`).
+
+### Why it is not fixed here
+
+Fixing it changes what the module computes, which CLAUDE.md makes its own
+sign-off-carrying change. The blast radius is small — `solidfmm_reference` is
+imported only by `tests/`, and only `translate_along_z_m2l_complex` (unaffected;
+it has no rotation) is used by `test_complex_ops.py`. The one existing test of
+`m2l_solidfmm_reference`, `test_solidfmm_reference_matches_z_axis_m2l`, is
+on-axis and stays green either way.
 
 ---
 
