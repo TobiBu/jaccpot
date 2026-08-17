@@ -3479,6 +3479,84 @@ class PrepareMixin:
         outright, then the reuse modes, then a prepass. Two of the bugs this
         branch fixed came from duplicating parts of this decision, so it lives in
         exactly one place.
+
+        Most of the parameter list is not consulted at all on the common paths:
+        an explicitly supplied scale, a reusable cached one, or the unity
+        fallback each return without touching the build knobs. They are here
+        because the prepass branch re-enters a full solve and needs the *same*
+        configuration the caller is preparing -- a prepass run under different
+        knobs would measure a different problem.
+
+        Not jittable. It branches on Python-level engine state, can re-enter
+        :meth:`compute_accelerations`, and writes back to
+        ``self._last_force_scale_nodes``.
+
+        Parameters
+        ----------
+        tree_artifacts : _PrepareStateTreeUpwardArtifacts
+            The tree and upward data this prepare already built. Its node count
+            is what a supplied scale is validated against, and reusing it is what
+            keeps the prepass on the same topology.
+        supplied_force_scale : Optional[Array]
+            Caller-provided per-node scale, or ``None``. When given it wins
+            outright -- no prepass, no cache read, **and no cache write**, so the
+            next prepare does not silently inherit it.
+        positions_arr : Array
+            ``[N, 3]`` positions. Its dtype is the dtype every returned scale is
+            cast to; the values are used only if a prepass runs.
+        masses_arr : Array
+            ``[N]`` masses. Used only by the re-entrant prepass.
+        bounds : Optional[Tuple[Array, Array]]
+            Root-box corners forwarded to the prepass solve, or ``None``.
+        leaf_size : int
+            Leaf size forwarded to the prepass solve.
+        max_order : int
+            The caller's expansion order. Not used directly for the prepass,
+            which runs at a *low* order -- ``min(policy_orders)``, or 1 for the
+            paper prepass -- since the scale only needs a magnitude estimate.
+        jit_tree : Optional[bool]
+            Forwarded to the prepass solve; ``None`` leaves the engine default.
+        upward_center_mode : str
+            Expansion-centre mode forwarded to the prepass builders.
+        runtime_traversal_config : Optional[DualTreeTraversalConfig]
+            Traversal capacities forwarded to the prepass builders.
+        runtime_m2l_chunk_size : Optional[int]
+            M2L chunk size forwarded to the prepass builders.
+        runtime_l2l_chunk_size : Optional[int]
+            L2L chunk size forwarded to the prepass builders.
+        grouped_interactions : bool
+            Grouped-interaction flag forwarded to the prepass builders.
+        farfield_mode : str
+            Far-field mode forwarded to the prepass builders.
+        record_retry : Callable[[DualTreeRetryEvent], None]
+            Sink for traversal retry events raised inside the prepass, so a
+            capacity retry during the prepass is reported against the caller's
+            prepare rather than lost.
+        refine_local_val : bool
+            Host-side refinement flag forwarded to the prepass builders.
+        max_refine_levels_val : int
+            Refinement depth cap forwarded to the prepass builders.
+        aspect_threshold_val : float
+            Aspect-ratio threshold forwarded to the prepass builders.
+
+        Returns
+        -------
+        Optional[Array]
+            ``[num_nodes]`` per-node force scale in ``positions_arr``'s dtype, or
+            ``None`` when the configuration does not use a paper-style scale.
+            ``None`` is meaningful, not a failure: downstream,
+            ``build_adaptive_policy_state`` substitutes ``jnp.ones(...)``, which
+            is a *different acceptance criterion* (``eps * 1`` rather than
+            ``eps * min_b |a_b|``). That silent substitution is exactly what this
+            method was extracted to stop happening by accident.
+
+        Raises
+        ------
+        ValueError
+            If ``supplied_force_scale`` is not one-dimensional of length equal to
+            the node count of the tree this call built; or if a prepass is needed
+            but ``policy_orders`` is empty, which would leave no order to run it
+            at.
         """
 
         force_scale_nodes: Optional[Array] = None
