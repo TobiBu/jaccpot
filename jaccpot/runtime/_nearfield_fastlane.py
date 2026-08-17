@@ -61,12 +61,36 @@ class NearfieldTopologyNotConcrete(RuntimeError):
 
 
 def clear_nearfield_fastlane_payload_cache() -> None:
-    """Drop every memoized leaf-major payload (tests / memory pressure)."""
+    """Drop every memoized leaf-major payload (tests / memory pressure).
+    Returns
+    -------
+    None
+        Clears the module-level cache in place.
+    """
     _payload_cache.clear()
 
 
 def _host(array: Any, what: str) -> np.ndarray:
-    """Pull a frozen-topology array to the host, or say precisely why we cannot."""
+    """Pull a frozen-topology array to the host, or say precisely why we cannot.
+    Parameters
+    ----------
+    array : Any
+        Frozen-topology array to materialise on the host.
+    what : str
+        Name of the array, used to make the failure message actionable.
+
+    Returns
+    -------
+    np.ndarray
+        The host copy.
+
+    Raises
+    ------
+    NearfieldTopologyNotConcrete
+        If ``array`` is a tracer. This lane needs host constants -- see the
+        module docstring -- so a traced input cannot be worked around here and
+        the caller has to prepare outside the trace.
+    """
     try:
         return np.asarray(jax.device_get(array))
     except Exception as exc:  # tracer, or anything else non-concrete
@@ -79,6 +103,13 @@ def _host(array: Any, what: str) -> np.ndarray:
 
 
 def _fastlane_tiles() -> tuple[int, int, int]:
+    """Read the fast-lane tile sizes from the environment.
+
+    Returns
+    -------
+    tuple[int, int, int]
+        ``(batch_tile_t, batch_tile_s, fallback_block_tile_size)``.
+    """
     return (
         max(1, _env_int(_FASTLANE_BLOCK_SIZE, 8)),
         max(1, _env_int(_FASTLANE_LEAF_BATCH, 32)),
@@ -100,6 +131,23 @@ def resolve_leaf_particle_groups(
     contiguous Morton ranges. This reproduces
     :func:`~jaccpot.nearfield.near_field._prepare_leaf_data`'s index/mask half so
     both lanes address identical particles.
+
+    Parameters
+    ----------
+    node_ranges : np.ndarray
+        Per-node ``[start, stop)`` span into the sorted particle order.
+    leaf_nodes : np.ndarray
+        Node index of each leaf.
+    num_particles : int
+        Total particle count.
+    max_leaf_size : int
+        Slot capacity per leaf.
+
+    Returns
+    -------
+    tuple[np.ndarray, np.ndarray]
+        ``(leaf_particle_indices, leaf_particle_mask)``, both
+        ``(num_leaves, max_leaf_size)``.
     """
     leaf_ranges = node_ranges[leaf_nodes]
     counts = leaf_ranges[:, 1] - leaf_ranges[:, 0] + 1
@@ -135,6 +183,40 @@ def build_leaf_major_nearfield_payload(
     purpose: that is what selects the prepacked source-leaf-id layout (the lane
     with the analytic O(N) reverse) over the materialized per-particle "pairs"
     layout, whose reverse is not wired.
+
+    Parameters
+    ----------
+    node_ranges : Any
+        Per-node ``[start, stop)`` span into the sorted particle order.
+    leaf_nodes : Any
+        Node index of each leaf.
+    offsets : Any
+        Per-leaf offsets into ``neighbors``.
+    neighbors : Any
+        Flat neighbour-node list, possibly ``-1``-padded inside each leaf slice.
+    num_particles : int
+        Total particle count.
+    max_leaf_size : int
+        Slot capacity per leaf.
+    leaf_particle_indices : Optional[Any]
+        Explicit per-leaf membership when the interop view carries it, else
+        ``None`` to derive it from ``node_ranges``.
+    leaf_particle_mask : Optional[Any]
+        Occupancy mask matching ``leaf_particle_indices``.
+
+    Returns
+    -------
+    RadixFastNearfieldPayload
+        Host-resident (NumPy, not JAX) payload. Host constants re-enter each
+        trace cleanly, whereas arrays minted inside one trace would leak into
+        the next as that trace's tracers.
+
+    Raises
+    ------
+    ValueError
+        If the CSR ``offsets`` describe a different number of leaves than the
+        leaf-particle groups do. The two must share one leaf ordering, and a
+        mismatch means the caller mixed views from different topologies.
     """
     block, batch, tile = _fastlane_tiles()
 
@@ -178,7 +260,9 @@ def build_leaf_major_nearfield_payload(
     # traces; jnp arrays minted inside the first trace would be that trace's
     # tracers and leak into the next one (UnexpectedTracerError). Host constants
     # re-enter each trace cleanly -- the lane's own ``jnp.asarray`` converts them.
-    def _payload(source_ids, source_valid):
+    def _payload(
+        source_ids: np.ndarray, source_valid: np.ndarray
+    ) -> RadixFastNearfieldPayload:
         return RadixFastNearfieldPayload(
             target_leaf_ids=np.arange(num_leaves, dtype=index_dtype),
             target_particle_ids=target_ids_np.astype(index_dtype, copy=False),
@@ -241,6 +325,32 @@ def leaf_major_nearfield_payload_cached(
     a strong reference to those arrays, which is what makes ``id()`` safe here:
     a live entry pins its arrays, so no freed object can have its id reused by a
     different array that would then hit a stale entry.
+
+    Parameters
+    ----------
+    node_ranges : Any
+        Per-node ``[start, stop)`` span into the sorted particle order.
+    leaf_nodes : Any
+        Node index of each leaf.
+    offsets : Any
+        Per-leaf offsets into ``neighbors``.
+    neighbors : Any
+        Flat neighbour-node list, possibly ``-1``-padded inside each leaf slice.
+    num_particles : int
+        Total particle count.
+    max_leaf_size : int
+        Slot capacity per leaf.
+    leaf_particle_indices : Optional[Any]
+        Explicit per-leaf membership when the interop view carries it, else
+        ``None`` to derive it from ``node_ranges``.
+    leaf_particle_mask : Optional[Any]
+        Occupancy mask matching ``leaf_particle_indices``.
+
+    Returns
+    -------
+    RadixFastNearfieldPayload
+        The memoized payload; identical object across calls with the same
+        topology arrays.
     """
     key_arrays = (
         node_ranges,
@@ -289,6 +399,22 @@ def nearfield_topology_arrays(
     :func:`~jaccpot.runtime.kernels.core._build_nearfield_interop_data`. That
     builder does device-side index work, and anything it produces inside an
     outer ``jax.jit`` is a tracer -- unusable here (see the module docstring).
+
+    Parameters
+    ----------
+    tree : Any
+        Prepared tree.
+    neighbor_list : Any
+        Near-field neighbour list.
+    nearfield_interop : Optional[Any]
+        Prepared interop view; preferred when present precisely because it was
+        built outside any trace.
+
+    Returns
+    -------
+    dict[str, Any]
+        The CSR arrays :func:`build_leaf_major_nearfield_payload` consumes,
+        keyed by its parameter names.
     """
     if nearfield_interop is not None:
         return {
