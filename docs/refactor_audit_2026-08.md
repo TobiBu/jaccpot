@@ -698,7 +698,11 @@ Observations, no decisions:
   `Array` everywhere.
 - **Test breadth does not track importance**: `RealSHBasis` (the default basis) has 1
   referencing file; `MemoryObjective` has 1; `GradConfig` has 2.
-- **Rename candidates, for your call only** (each would be a Tier 2 PR with an API-guard
+- **Rename candidates — BOTH CARRIED OUT, `d473b48` (2026-08-17 note).** Left below as
+  written because the reasoning is still the record of *why*; the names are done and item
+  2.4 is closed. The first candidate's new name is already `direct_sum_gravitational_acceleration`
+  and the engine is `FMMEngine`; do not rename either again.
+  (each would be a Tier 2 PR with an API-guard
   update): `direct_sum_gravitational_acceleration` → something that says "direct sum"
   (ARCHITECTURE §2 and §6 and its own docstring each spend a paragraph explaining it is *not*
   the differentiable FMM — three disclaimers is a naming smell); and the engine class in
@@ -1257,6 +1261,51 @@ Characterization first, because everything after it depends on the net existing.
 0.3 are done** (`e1f1455`, `e5d8e41`); 0.3's ordering was wrong in the original plan and is
 corrected below.
 
+> **RECONCILED 2026-08-17 — and the first attempt at this got it wrong.**
+>
+> The per-item rows below carry a status on only three of twenty-one (0.1, 0.3, 0.4), which
+> is what prompted this. But the running status table at the **top of this document**
+> already records every one of them, and ends with *"Tier 0 complete — verified"*. My first
+> pass re-derived status from the tree without reading that table, and consequently reported
+> **0.9 as open when it has been done since `92c8e73`** — the search used the words
+> `staticness` / `tracer` / `ConcretizationTypeError`, and the tests are actually named
+> `test_max_leaf_size_is_required_under_jit` and `test_softening_must_be_concrete`
+> (`tests/unit/core/test_near_field.py:1161`, `:1194`). Searching for the wrong words and
+> concluding absence.
+>
+> That is the mirror image of the error this document already warns about six rows into the
+> top table: *"This line was wrong when written. It came from the running status block, not
+> from checking the per-item rows."* Checking only the code is no safer than checking only
+> the table. **Both, or neither.**
+>
+> **Tier 0 is complete.** No item is open. What the column below adds is the commit for each
+> row, so the per-item rows stop disagreeing with the top table by omission.
+>
+> | # | Status | Commit / evidence |
+> |---|---|---|
+> | 0.1 | done | `e1f1455` |
+> | 0.2 | done | `ef7ce15` — 4 new cases in `tests/characterization/golden_modes/` (6 `.npz`); potentials goldened for the first time; surfaced G.11 |
+> | 0.3 | done | `e5d8e41` — physics identities, the Wigner reference being unusable (F39) |
+> | 0.4 | **blocked, by design** | became bug report G.10, then **fixed** in PRs #70-#72; four GPU-gated tests still unexecuted |
+> | 0.5 | done | `8bd24a6` — an absolute anchor from the derivative recurrences, not a Table 3 transcription. `test_p2m_real_direct_dehnen_table3` |
+> | 0.6 | done | `c2874b6`, `20ba5d8` — `test_real_static_num_levels_bit_identical_to_padded` |
+> | 0.7 | done | `26cef45` — `test_leafpair_decoupled_same_array_reproduces_the_coupled_kernel` |
+> | 0.8 | done | `568deca` — both halves: gate read per call, reverse matches the twin |
+> | 0.9 | done | `92c8e73` — the two contracts D.7's last two rows name |
+> | 0.10 | done | `ff4c911` — `m2l_real_fused.py` measured at 92%, omit entry gone |
+> | 0.11 | done | `c2874b6` (F05, F06, F24) + `8bd24a6` (the F07 half) |
+> | 0.12 | done | `e2959eb` — A.8; `GradConfig` and `TraversalOverrides` now in ARCHITECTURE.md |
+> | 0.13 | done | `e2959eb` — A.2; §8 rewritten, so the old `4/5 -> 7/11` phrasing no longer appears |
+> | 0.14 | done | `934c252` (safe subset; F16 was wrong, see its correction). `flake8 --select=F401 jaccpot/` → 0 today; `pyflakes` reports 178 only because it ignores `# noqa` |
+> | 0.15 | done | `ad7b00c` — 11 runtime mixins carry `if TYPE_CHECKING` |
+> | 0.16 | done | `23ccc9d` — one module lacks `__future__` annotations, `jaccpot/experimental/__init__.py` |
+> | 0.17 | done | `6839a6c` — all four old paths absent |
+> | 0.18 | done | `a54f29e` — `tests/` root holds only `__init__.py` and `conftest.py` |
+> | 0.19 | done | `d941805` |
+> | 0.20 | done | `4b2a66a` (targeted half); the ~58 numerics functions went to 1.10, and are now finished — see 2.5 |
+> | 0.21 | done | `e2959eb` — `NUMERICS_AND_JAX.md:126` |
+
+
 | # | Item | Touches | Closes | Verified by |
 |---|---|---|---|---|
 | ~~**0.1**~~ **DONE `e1f1455`** | **Gradient golden.** `tests/characterization/test_fmm_grad_golden.py` + **6** `.npz` (not 8 — the reverse compile costs ~1.1-1.5 GB per case, so the grid was trimmed and `_DIFF_FMM_TEST_FILES` in `tests/conftest.py` extended). Two gates as specified | `tests/characterization/`, `tests/conftest.py`, `tests/slow_tests.txt` | F03, D.1 | Done: full suite 839 passed / 57 skipped; forward golden unmoved; reverse-only mutation caught (D.1). **G.9 risk now RESOLVED** (per-particle inertness gate; see G.9) |
@@ -1285,6 +1334,52 @@ corrected below.
 
 Each of these is gated on the Tier 0 characterization named in its row.
 
+> **RECONCILED 2026-08-17. Tier 1 is effectively closed, with two asterisks and one
+> stale row.**
+>
+> * **1.1-1.6 and 1.9 are closed** as their rows record (PRs #79-#85, #81).
+> * **1.7 is done AS SCOPED, not exhaustively.** Two of seven phases were extracted, by
+>   design — the row already lists the other five with the ratio that argued against
+>   them. `_prepare_state_dual_and_downward` is still **600 lines** (1061-1660). Read the
+>   row as "the two cuts that earned a signature were made", not "the function was
+>   decomposed".
+>
+>   **Measured 2026-08-17, so this does not have to be re-litigated.** Crossing-variable
+>   width per stage — names read from an earlier stage, and names written that a later
+>   stage reads:
+>
+>   | stage | lines | reads earlier | writes used later | interface |
+>   |---|---|---|---|---|
+>   | `dual_setup` | 300 | 0 | 23 | **23** |
+>   | `dual_artifact_build` | 60 | 16 | 3 | **19** |
+>   | `dual_far_pair_plan` | 88 | 9 | 18 | **27** |
+>   | `dual_m2l_autotune` | 19 | 4 | 2 | 6 |
+>   | `dual_select_interactions` | 15 | 5 | 2 | 7 |
+>   | `dual_downward_compute` | 32 | 16 | 2 | **18** |
+>   | `dual_finalize` | 31 | 5 | 2 | 7 |
+>
+>   Four of seven need **18-27 names threaded across the boundary** — extracting
+>   `dual_far_pair_plan` means an 88-line body behind a 27-argument interface, which is the
+>   same code with a worse seam. The three narrow stages (6, 7, 7) are genuine wins but
+>   total **65 lines of 600**: extracting all three leaves the function at ~535 lines, an
+>   11% reduction.
+>
+>   **The 600 lines are wide because the data flow is wide, not because nobody tried.**
+>   Making it materially smaller needs a carried state object rather than more extractions
+>   — a real design change, its own Tier 2 PR, and it would alter how the whole prepare
+>   path reads. Recorded here rather than attempted: the current shape is the local
+>   optimum given the constraint that no expression may move.
+> * **1.8 leaves F11's deferred half OPEN**, and it is still blocked by the same thing:
+>   `.github/workflows/ci.yml` has **zero** `cuda`/`gpu`/`nvidia` legs, so the GPU
+>   coverage the row waits on does not exist. That is Tier 2 item **2.6**, and it is a
+>   budget decision, not work.
+> * **1.10 was marked "◐ part 1 of 3" and its substance is now COMPLETE.** Its target
+>   set — numerics functions with ≥8 parameters still violating under
+>   `--skip-checking-short-docstrings=False` — measures **zero**. The row is stale, not
+>   outstanding. The programme that finished it is item 2.5's, not 1.10's own three PRs.
+>
+> So nothing in Tier 1 needs doing except a decision on 2.6.
+
 | # | Item | Touches | Closes | Gated on | Verified by |
 |---|---|---|---|---|---|
 | **1.1** ✔ **PR #79** | Extract `_alignment_angles(x, y, z)` from `_multipole_align_{to,from}_z_block` — verbatim expression move, **no new `@jit`** | `operators/real_harmonics.py` | F30 | 0.3, 0.4 | **Done.** The duplication had grown, not shrunk: G.10 turned 12 shared lines + a 9-line comment into 6 + 38. Verified bit-identical *including all three JVP components* (`np.array_equal`) over 7 directions × `ell` 0..6 — the tangent check is the load-bearing one, since these are the guards G.10 proved wrong at `rho == 0`. |
@@ -1305,9 +1400,9 @@ Each of these is gated on the Tier 0 characterization named in its row.
 | **2.1** ✔ **PRs #103, #104** | Break up `_fmm_impl.FastMultipoleMethod.__init__` (722 lines, 60 params) into staged private resolvers | Config-resolution *order* is load-bearing (`b462e45`, `dee46d6` are both bugs in exactly this) and 0.1/0.2 do not cover every preset | **Done.** Body 653 → 141 lines, 573 lines into 13 resolvers, every one byte-verbatim and called in its original position. The "0.1/0.2 do not cover every preset" objection was answered first, in its own PR: a constructor-state golden over **46 configurations × 272 attributes**, which then gated the move. Boundaries came from a cut-cost profile, not from reading the code — and five of six step-2 boundaries landed mid-statement before being snapped to AST statement starts. Three blocks are deliberately left inline, by ratio of lines moved to parameters passed; the worst, `A6a`, would have been a 16-argument method calling a 16-argument function. |
 | **2.2** ✔ **PR #105** | Consolidate the four hand-rolled env parsers (F13, A.4) | Changes malformed-value semantics — which reverse-mode M2L kernel runs. Requires deciding what a garbage value should mean | **Done. Decided: a malformed value means THE DEFAULT, whatever it is**, plus a one-time warning naming the variable and the value ignored. That is not a new convention — `env_int`/`env_float` already did it and `env_flag` was the outlier, so `_env` disagreed with itself. The "four parsers" were really *three* semantics (denylist flag ×2, allowlist flag, enum-with-fallback), which is why they could not be deduped mechanically; `env_choice` was added for the third. Verified over 14 inputs per reader: FUSED and DIAG unchanged on all 14, JIT differs on 6 malformed inputs (False → the default), which is the intended consequence. A.4's specific warning is satisfied. `_env` also had **no tests**; it has 39 now, written first. |
 | **2.3** ✔ **CLOSED (`ab58c3d`)** | Delete or wire up the Wigner reference family (F32, ~260 lines, 8 `__all__` names) | Removes module-public names | **Already done; this row was stale.** G.4 records the decision (deleted) and `ab58c3d` carried it out. Verified 2026-08-15: `grep -ri wigner jaccpot/` returns **two prose mentions and no code** — `operators/_precision.py:5` and `operators/real_rotations.py:51-55`, both explaining why the closed-form Dehnen builders are the only rotation path. No `__all__` name remains. Nothing to do. |
-| **2.4** | Any rename from section C | Public API; `test_public_api_surface.py` must change in the same commit | Your call, per your instruction |
-| **2.5** ✖ **BLOCKED — measured 2026-08-15** | Turn off `--skip-checking-short-docstrings` in `pyproject.toml` | 2840 violations must be at zero first; this is the *last* commit of the docstring programme, not the first | **Cannot be done yet: 2403 violations across 524 distinct functions remain** with the flag off. Down from 2840 (0.20, 1.10 batches 1–2, F23 part 3), i.e. the programme is ~15% complete, not nearly finished. Worst files: `operators/complex_ops.py` 250, `runtime/fmm_prepare.py` 150, `downward/local_expansions.py` 117, `runtime/_interaction_cache.py` 109, `runtime/_adaptive_policy.py` 108, `solver.py` 100. By code: 507 DOC201 + 498 DOC203 (missing/mismatched `Returns`), 495 DOC101 + 495 DOC103 (missing/mismatched `Parameters`), 138 DOC501 + 138 DOC503 (missing `Raises`). `jaccpot/pallas/` is the only package-level directory at zero. **Measurement note:** pydoclint writes findings to **stderr**, so a `2>/dev/null` in the counting command reports 0 for any directory — that is how an early pass here produced "every subdirectory is clean" against a package total of 2403. |
-| **2.6** | Nightly GPU CI leg for `_large_n_*`, `distributed/`, and Pallas non-interpret | Infrastructure, and it is what unblocks F27/F33/F34 and the deferred half of F11 | A decision on GPU budget — CLAUDE.md says confirm before occupying one |
+| **2.4** ✔ **DONE `d473b48`** | Any rename from section C | Public API; `test_public_api_surface.py` must change in the same commit | **Both candidates section C named were carried out in one commit** (2026-08-15, *"rename the two names section C flagged (2.4)"*): `differentiable_gravitational_acceleration` → `direct_sum_gravitational_acceleration`, which is what "something that says direct sum" asked for; and the engine class → `FMMEngine`, so `_fmm_impl.py:189` and the `solver.py:540` facade no longer share a name. Nothing further is outstanding, and a third name for the same function would be churn -- the current one already satisfies the recommendation. The "rename candidates" paragraph at the end of section C still reads as open; it is not. |
+| **2.5** ✔ **DONE `cc3b4b9` (PR #150) — unblocked a different way** | Turn off `--skip-checking-short-docstrings` in `pyproject.toml` | ~~2840 violations must be at zero first; this is the *last* commit of the docstring programme, not the first~~ **This premise was wrong, and waiting on it was the mistake.** The flag is now off, with `baseline = ".pydoclint-baseline.txt"` carrying the pre-existing tail — so the gate is live *while* the tail retires, instead of the tail being unprotected until the end. What forced the rethink: `runtime/_adaptive_policy.py` was driven to zero (PR #118) and `main` was never at zero, because five functions from a concurrent branch merged into the same file without conflict and the vacuous hook reported 0 throughout (repaired in PR #149). Absolute counts on `main` after the programme: **`jaccpot/` 153**, `tests/` 1034, `bench/` 121, `examples/` 60. Regenerate with `pydoclint --config pyproject.toml --generate-baseline True .` and check the diff only *removes* lines; `auto-regenerate-baseline` must stay `false` because the pre-commit hook passes staged filenames and would rebuild the baseline from a subset. | **Cannot be done yet: 2403 violations across 524 distinct functions remain** with the flag off. Down from 2840 (0.20, 1.10 batches 1–2, F23 part 3), i.e. the programme is ~15% complete, not nearly finished. Worst files: `operators/complex_ops.py` 250, `runtime/fmm_prepare.py` 150, `downward/local_expansions.py` 117, `runtime/_interaction_cache.py` 109, `runtime/_adaptive_policy.py` 108, `solver.py` 100. By code: 507 DOC201 + 498 DOC203 (missing/mismatched `Returns`), 495 DOC101 + 495 DOC103 (missing/mismatched `Parameters`), 138 DOC501 + 138 DOC503 (missing `Raises`). `jaccpot/pallas/` is the only package-level directory at zero. **Measurement note:** pydoclint writes findings to **stderr**, so a `2>/dev/null` in the counting command reports 0 for any directory — that is how an early pass here produced "every subdirectory is clean" against a package total of 2403. |
+| **2.6** ✔ **DECIDED AND CLOSED 2026-08-17 — as a local gate, not CI** | ~~Nightly GPU CI leg~~ → `bench/gpu_gate.py`, run deliberately before a release | Infrastructure, and it is what unblocks F27/F33/F34 and the deferred half of F11 | **Decided: no CI leg.** `TobiBu/jaccpot` is **public**, and a self-hosted runner on a public repository lets a fork PR execute arbitrary code on the box; the box's GPUs are also shared, and a `schedule:` job cannot honour CLAUDE.md's "confirm before occupying one". GitHub-hosted runners have no GPU and the paid GPU runners were not worth the cost for this. So the gate is a **script**: `python -m bench.gpu_gate`. It claims the least-used card via `autocvd`, applies the measured caps (`-n 6`, `MEM_FRACTION=.12`), sets `--xla_gpu_deterministic_ops=true`, runs the suite, allows §9's five measured GPU-only failures through, and **fails if the 17 GPU-gated tests skipped** — because a run that fell back to CPU otherwise passes while proving nothing. Covers F27's 0%-coverage lanes, F33's strict/refresh lane and Pallas outside interpret mode. **Does not cover F34** (`tests/distributed/`, 24 tests, needs two cards) — which F34 itself already records as out of scope for this pass. **NOT YET EXECUTED ON HARDWARE:** written and unit-checked on a Mac with no GPU, so the preflight, the argument surface and the output parsers are verified but the run itself is not. First real invocation should be treated as commissioning the gate, not as a clean bill of health. |
 
 ---
 

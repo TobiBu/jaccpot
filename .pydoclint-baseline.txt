@@ -219,50 +219,6 @@ jaccpot/_typecheck.py
     DOC201: Function `enable_runtime_typecheck` does not have a return section in docstring
     DOC203: Function `enable_runtime_typecheck` return type(s) in docstring not consistent with the return annotation. Return annotation has 1 type(s); docstring return section has 0 type(s).
 --------------------
-jaccpot/basis/base.py
-    DOC601: Class `BasisInterface`: Class docstring contains fewer class attributes than actual class attributes.  (Please read https://jsh9.github.io/pydoclint/checking_class_attributes.html on how to correctly document class attributes.)
-    DOC603: Class `BasisInterface`: Class docstring attributes are different from actual class attributes. (Or could be other formatting issues: https://jsh9.github.io/pydoclint/violation_codes.html#notes-on-doc103 ). Attributes in the class definition but not in the docstring: [coefficient_ordering: str, name: str, p_max: int, runtime_expansion_basis: str]. (Please read https://jsh9.github.io/pydoclint/checking_class_attributes.html on how to correctly document class attributes.)
-    DOC101: Method `BasisInterface.n_coeffs`: Docstring contains fewer arguments than in function signature.
-    DOC103: Method `BasisInterface.n_coeffs`: Docstring arguments are different from function arguments. (Or could be other formatting issues: https://jsh9.github.io/pydoclint/violation_codes.html#notes-on-doc103 ). Arguments in the function signature but not in the docstring: [p: int].
-    DOC201: Method `BasisInterface.n_coeffs` does not have a return section in docstring
-    DOC203: Method `BasisInterface.n_coeffs` return type(s) in docstring not consistent with the return annotation. Return annotation has 1 type(s); docstring return section has 0 type(s).
-    DOC101: Method `BasisInterface.pack_coeffs`: Docstring contains fewer arguments than in function signature.
-    DOC103: Method `BasisInterface.pack_coeffs`: Docstring arguments are different from function arguments. (Or could be other formatting issues: https://jsh9.github.io/pydoclint/violation_codes.html#notes-on-doc103 ). Arguments in the function signature but not in the docstring: [coeffs: Array, order: int].
-    DOC201: Method `BasisInterface.pack_coeffs` does not have a return section in docstring
-    DOC203: Method `BasisInterface.pack_coeffs` return type(s) in docstring not consistent with the return annotation. Return annotation has 1 type(s); docstring return section has 0 type(s).
-    DOC101: Method `BasisInterface.unpack_coeffs`: Docstring contains fewer arguments than in function signature.
-    DOC103: Method `BasisInterface.unpack_coeffs`: Docstring arguments are different from function arguments. (Or could be other formatting issues: https://jsh9.github.io/pydoclint/violation_codes.html#notes-on-doc103 ). Arguments in the function signature but not in the docstring: [order: int, packed: Array].
-    DOC201: Method `BasisInterface.unpack_coeffs` does not have a return section in docstring
-    DOC203: Method `BasisInterface.unpack_coeffs` return type(s) in docstring not consistent with the return annotation. Return annotation has 1 type(s); docstring return section has 0 type(s).
-    DOC101: Method `BasisInterface.m2l_rot_scale`: Docstring contains fewer arguments than in function signature.
-    DOC103: Method `BasisInterface.m2l_rot_scale`: Docstring arguments are different from function arguments. (Or could be other formatting issues: https://jsh9.github.io/pydoclint/violation_codes.html#notes-on-doc103 ). Arguments in the function signature but not in the docstring: [deltas: Array, order: int, sources: Array].
-    DOC201: Method `BasisInterface.m2l_rot_scale` does not have a return section in docstring
-    DOC203: Method `BasisInterface.m2l_rot_scale` return type(s) in docstring not consistent with the return annotation. Return annotation has 1 type(s); docstring return section has 0 type(s).
-    DOC601: Class `BasisMetadata`: Class docstring contains fewer class attributes than actual class attributes.  (Please read https://jsh9.github.io/pydoclint/checking_class_attributes.html on how to correctly document class attributes.)
-    DOC603: Class `BasisMetadata`: Class docstring attributes are different from actual class attributes. (Or could be other formatting issues: https://jsh9.github.io/pydoclint/violation_codes.html#notes-on-doc103 ). Attributes in the class definition but not in the docstring: [coefficient_ordering: str, name: str, p_max: int, runtime_expansion_basis: str]. (Please read https://jsh9.github.io/pydoclint/checking_class_attributes.html on how to correctly document class attributes.)
---------------------
-jaccpot/basis/complex_sh.py
-    DOC101: Method `ComplexSHBasis.n_coeffs`: Docstring contains fewer arguments than in function signature.
-    DOC103: Method `ComplexSHBasis.n_coeffs`: Docstring arguments are different from function arguments. (Or could be other formatting issues: https://jsh9.github.io/pydoclint/violation_codes.html#notes-on-doc103 ). Arguments in the function signature but not in the docstring: [p: int].
-    DOC201: Method `ComplexSHBasis.n_coeffs` does not have a return section in docstring
-    DOC203: Method `ComplexSHBasis.n_coeffs` return type(s) in docstring not consistent with the return annotation. Return annotation has 1 type(s); docstring return section has 0 type(s).
-    DOC101: Method `ComplexSHBasis.pack_coeffs`: Docstring contains fewer arguments than in function signature.
-    DOC103: Method `ComplexSHBasis.pack_coeffs`: Docstring arguments are different from function arguments. (Or could be other formatting issues: https://jsh9.github.io/pydoclint/violation_codes.html#notes-on-doc103 ). Arguments in the function signature but not in the docstring: [coeffs: Array, order: int].
-    DOC201: Method `ComplexSHBasis.pack_coeffs` does not have a return section in docstring
-    DOC203: Method `ComplexSHBasis.pack_coeffs` return type(s) in docstring not consistent with the return annotation. Return annotation has 1 type(s); docstring return section has 0 type(s).
-    DOC501: Method `ComplexSHBasis.pack_coeffs` has raise statements, but the docstring does not have a "Raises" section
-    DOC503: Method `ComplexSHBasis.pack_coeffs` exceptions in the "Raises" section in the docstring do not match those in the function body. Raised exceptions in the docstring: []. Raised exceptions in the body: ['ValueError'].
-    DOC101: Method `ComplexSHBasis.unpack_coeffs`: Docstring contains fewer arguments than in function signature.
-    DOC103: Method `ComplexSHBasis.unpack_coeffs`: Docstring arguments are different from function arguments. (Or could be other formatting issues: https://jsh9.github.io/pydoclint/violation_codes.html#notes-on-doc103 ). Arguments in the function signature but not in the docstring: [order: int, packed: Array].
-    DOC201: Method `ComplexSHBasis.unpack_coeffs` does not have a return section in docstring
-    DOC203: Method `ComplexSHBasis.unpack_coeffs` return type(s) in docstring not consistent with the return annotation. Return annotation has 1 type(s); docstring return section has 0 type(s).
-    DOC101: Method `ComplexSHBasis.m2l_rot_scale`: Docstring contains fewer arguments than in function signature.
-    DOC103: Method `ComplexSHBasis.m2l_rot_scale`: Docstring arguments are different from function arguments. (Or could be other formatting issues: https://jsh9.github.io/pydoclint/violation_codes.html#notes-on-doc103 ). Arguments in the function signature but not in the docstring: [deltas: Array, order: int, sources: Array].
-    DOC201: Method `ComplexSHBasis.m2l_rot_scale` does not have a return section in docstring
-    DOC203: Method `ComplexSHBasis.m2l_rot_scale` return type(s) in docstring not consistent with the return annotation. Return annotation has 1 type(s); docstring return section has 0 type(s).
-    DOC501: Method `ComplexSHBasis.m2l_rot_scale` has raise statements, but the docstring does not have a "Raises" section
-    DOC503: Method `ComplexSHBasis.m2l_rot_scale` exceptions in the "Raises" section in the docstring do not match those in the function body. Raised exceptions in the docstring: []. Raised exceptions in the body: ['ValueError'].
---------------------
 jaccpot/config.py
     DOC601: Class `FMMPreset`: Class docstring contains fewer class attributes than actual class attributes.  (Please read https://jsh9.github.io/pydoclint/checking_class_attributes.html on how to correctly document class attributes.)
     DOC603: Class `FMMPreset`: Class docstring attributes are different from actual class attributes. (Or could be other formatting issues: https://jsh9.github.io/pydoclint/violation_codes.html#notes-on-doc103 ). Attributes in the class definition but not in the docstring: [ACCURATE: , BALANCED: , FAST: , LARGE_N_GPU: ]. (Please read https://jsh9.github.io/pydoclint/checking_class_attributes.html on how to correctly document class attributes.)
@@ -297,32 +253,6 @@ jaccpot/nearfield/_large_n_blocks.py
     DOC203: Function `_collect_target_leaf_batch_acc` return type(s) in docstring not consistent with the return annotation. Return annotation has 1 type(s); docstring return section has 0 type(s).
     DOC501: Function `_collect_target_leaf_batch_acc` has raise statements, but the docstring does not have a "Raises" section
     DOC503: Function `_collect_target_leaf_batch_acc` exceptions in the "Raises" section in the docstring do not match those in the function body. Raised exceptions in the docstring: []. Raised exceptions in the body: ['ValueError'].
---------------------
-jaccpot/nearfield/_schedules.py
-    DOC101: Function `prepare_leaf_neighbor_pairs`: Docstring contains fewer arguments than in function signature.
-    DOC103: Function `prepare_leaf_neighbor_pairs`: Docstring arguments are different from function arguments. (Or could be other formatting issues: https://jsh9.github.io/pydoclint/violation_codes.html#notes-on-doc103 ). Arguments in the function signature but not in the docstring: [leaf_nodes: Array, neighbors: Array, node_ranges: Array, offsets: Array, sort_by_source: bool].
-    DOC201: Function `prepare_leaf_neighbor_pairs` does not have a return section in docstring
-    DOC203: Function `prepare_leaf_neighbor_pairs` return type(s) in docstring not consistent with the return annotation. Return annotation has 3 type(s); docstring return section has 0 type(s).
-    DOC101: Function `prepare_bucketed_scatter_schedules`: Docstring contains fewer arguments than in function signature.
-    DOC103: Function `prepare_bucketed_scatter_schedules`: Docstring arguments are different from function arguments. (Or could be other formatting issues: https://jsh9.github.io/pydoclint/violation_codes.html#notes-on-doc103 ). Arguments in the function signature but not in the docstring: [edge_chunk_size: int, leaf_nodes: Array, max_leaf_size: int, node_ranges: Array, target_leaf_ids: Array, valid_pairs: Array].
-    DOC201: Function `prepare_bucketed_scatter_schedules` does not have a return section in docstring
-    DOC203: Function `prepare_bucketed_scatter_schedules` return type(s) in docstring not consistent with the return annotation. Return annotation has 3 type(s); docstring return section has 0 type(s).
-    DOC501: Function `prepare_bucketed_scatter_schedules` has raise statements, but the docstring does not have a "Raises" section
-    DOC503: Function `prepare_bucketed_scatter_schedules` exceptions in the "Raises" section in the docstring do not match those in the function body. Raised exceptions in the docstring: []. Raised exceptions in the body: ['ValueError'].
-    DOC101: Function `prepare_bucketed_scatter_schedules_from_groups`: Docstring contains fewer arguments than in function signature.
-    DOC103: Function `prepare_bucketed_scatter_schedules_from_groups`: Docstring arguments are different from function arguments. (Or could be other formatting issues: https://jsh9.github.io/pydoclint/violation_codes.html#notes-on-doc103 ). Arguments in the function signature but not in the docstring: [edge_chunk_size: int, leaf_particle_indices: Array, leaf_particle_mask: Array, target_leaf_ids: Array, valid_pairs: Array].
-    DOC201: Function `prepare_bucketed_scatter_schedules_from_groups` does not have a return section in docstring
-    DOC203: Function `prepare_bucketed_scatter_schedules_from_groups` return type(s) in docstring not consistent with the return annotation. Return annotation has 3 type(s); docstring return section has 0 type(s).
-    DOC501: Function `prepare_bucketed_scatter_schedules_from_groups` has raise statements, but the docstring does not have a "Raises" section
-    DOC503: Function `prepare_bucketed_scatter_schedules_from_groups` exceptions in the "Raises" section in the docstring do not match those in the function body. Raised exceptions in the docstring: []. Raised exceptions in the body: ['ValueError'].
-    DOC101: Function `_prepare_leaf_data`: Docstring contains fewer arguments than in function signature.
-    DOC103: Function `_prepare_leaf_data`: Docstring arguments are different from function arguments. (Or could be other formatting issues: https://jsh9.github.io/pydoclint/violation_codes.html#notes-on-doc103 ). Arguments in the function signature but not in the docstring: [leaf_nodes: Array, masses: Array, max_leaf_size: int, node_ranges: Array, positions: Array].
-    DOC201: Function `_prepare_leaf_data` does not have a return section in docstring
-    DOC203: Function `_prepare_leaf_data` return type(s) in docstring not consistent with the return annotation. Return annotation has 4 type(s); docstring return section has 0 type(s).
-    DOC101: Function `_prepare_leaf_data_from_groups`: Docstring contains fewer arguments than in function signature.
-    DOC103: Function `_prepare_leaf_data_from_groups`: Docstring arguments are different from function arguments. (Or could be other formatting issues: https://jsh9.github.io/pydoclint/violation_codes.html#notes-on-doc103 ). Arguments in the function signature but not in the docstring: [leaf_particle_indices: Array, leaf_particle_mask: Array, masses: Array, positions: Array].
-    DOC201: Function `_prepare_leaf_data_from_groups` does not have a return section in docstring
-    DOC203: Function `_prepare_leaf_data_from_groups` return type(s) in docstring not consistent with the return annotation. Return annotation has 4 type(s); docstring return section has 0 type(s).
 --------------------
 jaccpot/nearfield/near_field.py
     DOC601: Class `RadixFastLanePerfCounters`: Class docstring contains fewer class attributes than actual class attributes.  (Please read https://jsh9.github.io/pydoclint/checking_class_attributes.html on how to correctly document class attributes.)
@@ -370,133 +300,11 @@ jaccpot/operators/dtypes.py
     DOC201: Function `floor_squared_radius` does not have a return section in docstring
     DOC203: Function `floor_squared_radius` return type(s) in docstring not consistent with the return annotation. Return annotation has 1 type(s); docstring return section has 0 type(s).
 --------------------
-jaccpot/operators/real_dehnen_q.py
-    DOC101: Function `build_Q_dehnen_no_sqrt2`: Docstring contains fewer arguments than in function signature.
-    DOC103: Function `build_Q_dehnen_no_sqrt2`: Docstring arguments are different from function arguments. (Or could be other formatting issues: https://jsh9.github.io/pydoclint/violation_codes.html#notes-on-doc103 ). Arguments in the function signature but not in the docstring: [ell: int].
-    DOC201: Function `build_Q_dehnen_no_sqrt2` does not have a return section in docstring
-    DOC203: Function `build_Q_dehnen_no_sqrt2` return type(s) in docstring not consistent with the return annotation. Return annotation has 1 type(s); docstring return section has 0 type(s).
-    DOC101: Function `_dehnen_real_Q_full`: Docstring contains fewer arguments than in function signature.
-    DOC103: Function `_dehnen_real_Q_full`: Docstring arguments are different from function arguments. (Or could be other formatting issues: https://jsh9.github.io/pydoclint/violation_codes.html#notes-on-doc103 ). Arguments in the function signature but not in the docstring: [order: int].
-    DOC201: Function `_dehnen_real_Q_full` does not have a return section in docstring
-    DOC203: Function `_dehnen_real_Q_full` return type(s) in docstring not consistent with the return annotation. Return annotation has 1 type(s); docstring return section has 0 type(s).
-    DOC501: Function `_dehnen_real_Q_full` has raise statements, but the docstring does not have a "Raises" section
-    DOC503: Function `_dehnen_real_Q_full` exceptions in the "Raises" section in the docstring do not match those in the function body. Raised exceptions in the docstring: []. Raised exceptions in the body: ['ValueError'].
-    DOC101: Function `_compute_B_real_dehnen_via_Q`: Docstring contains fewer arguments than in function signature.
-    DOC103: Function `_compute_B_real_dehnen_via_Q`: Docstring arguments are different from function arguments. (Or could be other formatting issues: https://jsh9.github.io/pydoclint/violation_codes.html#notes-on-doc103 ). Arguments in the function signature but not in the docstring: [dtype_key: str, ell: int].
-    DOC201: Function `_compute_B_real_dehnen_via_Q` does not have a return section in docstring
-    DOC203: Function `_compute_B_real_dehnen_via_Q` return type(s) in docstring not consistent with the return annotation. Return annotation has 2 type(s); docstring return section has 0 type(s).
---------------------
-jaccpot/operators/real_p2m_l2p.py
-    DOC101: Function `_evaluate_local_real_with_grad_cvjp`: Docstring contains fewer arguments than in function signature.
-    DOC103: Function `_evaluate_local_real_with_grad_cvjp`: Docstring arguments are different from function arguments. (Or could be other formatting issues: https://jsh9.github.io/pydoclint/violation_codes.html#notes-on-doc103 ). Arguments in the function signature but not in the docstring: [delta: Array, local_coeffs: Array, order: int].
-    DOC201: Function `_evaluate_local_real_with_grad_cvjp` does not have a return section in docstring
-    DOC203: Function `_evaluate_local_real_with_grad_cvjp` return type(s) in docstring not consistent with the return annotation. Return annotation has 2 type(s); docstring return section has 0 type(s).
-    DOC101: Function `evaluate_local_real_derivative_tower`: Docstring contains fewer arguments than in function signature.
-    DOC103: Function `evaluate_local_real_derivative_tower`: Docstring arguments are different from function arguments. (Or could be other formatting issues: https://jsh9.github.io/pydoclint/violation_codes.html#notes-on-doc103 ). Arguments in the function signature but not in the docstring: [delta: Array, local_coeffs: Array, max_derivative_order: int, order: int].
-    DOC201: Function `evaluate_local_real_derivative_tower` does not have a return section in docstring
-    DOC203: Function `evaluate_local_real_derivative_tower` return type(s) in docstring not consistent with the return annotation. Return annotation has 1 type(s); docstring return section has 0 type(s).
-    DOC501: Function `evaluate_local_real_derivative_tower` has raise statements, but the docstring does not have a "Raises" section
-    DOC503: Function `evaluate_local_real_derivative_tower` exceptions in the "Raises" section in the docstring do not match those in the function body. Raised exceptions in the docstring: []. Raised exceptions in the body: ['ValueError'].
-    DOC101: Function `evaluate_local_real_derivative_tower_batch`: Docstring contains fewer arguments than in function signature.
-    DOC103: Function `evaluate_local_real_derivative_tower_batch`: Docstring arguments are different from function arguments. (Or could be other formatting issues: https://jsh9.github.io/pydoclint/violation_codes.html#notes-on-doc103 ). Arguments in the function signature but not in the docstring: [deltas: Array, local_coeffs: Array, max_derivative_order: int, order: int].
-    DOC201: Function `evaluate_local_real_derivative_tower_batch` does not have a return section in docstring
-    DOC203: Function `evaluate_local_real_derivative_tower_batch` return type(s) in docstring not consistent with the return annotation. Return annotation has 1 type(s); docstring return section has 0 type(s).
---------------------
-jaccpot/operators/solidfmm_reference.py
-    DOC101: Function `_complex_Dz`: Docstring contains fewer arguments than in function signature.
-    DOC103: Function `_complex_Dz`: Docstring arguments are different from function arguments. (Or could be other formatting issues: https://jsh9.github.io/pydoclint/violation_codes.html#notes-on-doc103 ). Arguments in the function signature but not in the docstring: [angle: float, ell: int].
-    DOC201: Function `_complex_Dz` does not have a return section in docstring
-    DOC203: Function `_complex_Dz` return type(s) in docstring not consistent with the return annotation. Return annotation has 1 type(s); docstring return section has 0 type(s).
-    DOC101: Function `_complex_swap_matrices`: Docstring contains fewer arguments than in function signature.
-    DOC103: Function `_complex_swap_matrices`: Docstring arguments are different from function arguments. (Or could be other formatting issues: https://jsh9.github.io/pydoclint/violation_codes.html#notes-on-doc103 ). Arguments in the function signature but not in the docstring: [ell: int].
-    DOC201: Function `_complex_swap_matrices` does not have a return section in docstring
-    DOC203: Function `_complex_swap_matrices` return type(s) in docstring not consistent with the return annotation. Return annotation has 2 type(s); docstring return section has 0 type(s).
-    DOC101: Function `translate_along_z_m2l_complex`: Docstring contains fewer arguments than in function signature.
-    DOC103: Function `translate_along_z_m2l_complex`: Docstring arguments are different from function arguments. (Or could be other formatting issues: https://jsh9.github.io/pydoclint/violation_codes.html#notes-on-doc103 ). Arguments in the function signature but not in the docstring: [multipole: np.ndarray, order: int, r: float].
-    DOC201: Function `translate_along_z_m2l_complex` does not have a return section in docstring
-    DOC203: Function `translate_along_z_m2l_complex` return type(s) in docstring not consistent with the return annotation. Return annotation has 1 type(s); docstring return section has 0 type(s).
-    DOC101: Function `m2l_solidfmm_reference`: Docstring contains fewer arguments than in function signature.
-    DOC103: Function `m2l_solidfmm_reference`: Docstring arguments are different from function arguments. (Or could be other formatting issues: https://jsh9.github.io/pydoclint/violation_codes.html#notes-on-doc103 ). Arguments in the function signature but not in the docstring: [delta: jnp.ndarray, multipole_real: jnp.ndarray, order: int].
-    DOC201: Function `m2l_solidfmm_reference` does not have a return section in docstring
-    DOC203: Function `m2l_solidfmm_reference` return type(s) in docstring not consistent with the return annotation. Return annotation has 1 type(s); docstring return section has 0 type(s).
---------------------
-jaccpot/runtime/_adaptive_policy.py
-    DOC101: Function `node_span_mass`: Docstring contains fewer arguments than in function signature.
-    DOC103: Function `node_span_mass`: Docstring arguments are different from function arguments. (Or could be other formatting issues: https://jsh9.github.io/pydoclint/violation_codes.html#notes-on-doc103 ). Arguments in the function signature but not in the docstring: [masses_sorted: Array, tree: Tree].
-    DOC201: Function `node_span_mass` does not have a return section in docstring
-    DOC203: Function `node_span_mass` return type(s) in docstring not consistent with the return annotation. Return annotation has 1 type(s); docstring return section has 0 type(s).
-    DOC101: Function `_particle_leaf_ids`: Docstring contains fewer arguments than in function signature.
-    DOC103: Function `_particle_leaf_ids`: Docstring arguments are different from function arguments. (Or could be other formatting issues: https://jsh9.github.io/pydoclint/violation_codes.html#notes-on-doc103 ). Arguments in the function signature but not in the docstring: [max_leaf_size: int, num_particles: int, tree: Tree].
-    DOC201: Function `_particle_leaf_ids` does not have a return section in docstring
-    DOC203: Function `_particle_leaf_ids` return type(s) in docstring not consistent with the return annotation. Return annotation has 1 type(s); docstring return section has 0 type(s).
-    DOC101: Function `estimate_particle_force_scale`: Docstring contains fewer arguments than in function signature.
-    DOC103: Function `estimate_particle_force_scale`: Docstring arguments are different from function arguments. (Or could be other formatting issues: https://jsh9.github.io/pydoclint/violation_codes.html#notes-on-doc103 ). Arguments in the function signature but not in the docstring: [far_center_inflation: float, gravitational_constant: float, interaction_sources: Array, interaction_targets: Array, masses_sorted: Array, max_leaf_size: int, near_pair_chunk: int, neighbor_counts: Array, neighbor_indices: Array, neighbor_leaf_indices: Array, neighbor_offsets: Array, node_centers: Array, node_radii: Array, positions_sorted: Array, softening: float, tree: Tree].
-    DOC201: Function `estimate_particle_force_scale` does not have a return section in docstring
-    DOC203: Function `estimate_particle_force_scale` return type(s) in docstring not consistent with the return annotation. Return annotation has 1 type(s); docstring return section has 0 type(s).
-    DOC101: Function `_near_field_force_scale`: Docstring contains fewer arguments than in function signature.
-    DOC103: Function `_near_field_force_scale`: Docstring arguments are different from function arguments. (Or could be other formatting issues: https://jsh9.github.io/pydoclint/violation_codes.html#notes-on-doc103 ). Arguments in the function signature but not in the docstring: [chunk: int, eps_sq: Array, g: Array, leaf_cap: int, masses: Array, neighbor_counts: Array, neighbor_indices: Array, neighbor_leaf_indices: Array, neighbor_offsets: Array, node_ranges: Array, positions: Array].
-    DOC201: Function `_near_field_force_scale` does not have a return section in docstring
-    DOC203: Function `_near_field_force_scale` return type(s) in docstring not consistent with the return annotation. Return annotation has 1 type(s); docstring return section has 0 type(s).
-    DOC101: Function `_far_field_force_scale_by_node`: Docstring contains fewer arguments than in function signature.
-    DOC103: Function `_far_field_force_scale_by_node`: Docstring arguments are different from function arguments. (Or could be other formatting issues: https://jsh9.github.io/pydoclint/violation_codes.html#notes-on-doc103 ). Arguments in the function signature but not in the docstring: [eps_sq: Array, g: Array, inflation: Array, interaction_sources: Array, interaction_targets: Array, masses: Array, node_centers: Array, node_radii: Array, tree: Tree].
-    DOC201: Function `_far_field_force_scale_by_node` does not have a return section in docstring
-    DOC203: Function `_far_field_force_scale_by_node` return type(s) in docstring not consistent with the return annotation. Return annotation has 1 type(s); docstring return section has 0 type(s).
---------------------
 jaccpot/runtime/_large_n_farfield.py
     DOC101: Function `evaluate_large_n_farfield`: Docstring contains fewer arguments than in function signature.
     DOC103: Function `evaluate_large_n_farfield`: Docstring arguments are different from function arguments. (Or could be other formatting issues: https://jsh9.github.io/pydoclint/violation_codes.html#notes-on-doc103 ). Arguments in the function signature but not in the docstring: [return_potential: bool, state: LargeNPreparedState].
     DOC201: Function `evaluate_large_n_farfield` does not have a return section in docstring
     DOC203: Function `evaluate_large_n_farfield` return type(s) in docstring not consistent with the return annotation. Return annotation has 3 type(s); docstring return section has 0 type(s).
---------------------
-jaccpot/runtime/_large_n_grad.py
-    DOC601: Class `LargeNGradPlan`: Class docstring contains fewer class attributes than actual class attributes.  (Please read https://jsh9.github.io/pydoclint/checking_class_attributes.html on how to correctly document class attributes.)
-    DOC603: Class `LargeNGradPlan`: Class docstring attributes are different from actual class attributes. (Or could be other formatting issues: https://jsh9.github.io/pydoclint/violation_codes.html#notes-on-doc103 ). Attributes in the class definition but not in the docstring: [center_mode: str, far_pair_active_count: Optional[Array], far_pair_sources: Array, far_pair_targets: Array, farfield_mode: str, l2l_chunk_size: Optional[int], m2l_chunk_size: Optional[int], max_leaf_size: int, num_far_pairs: int, order: int]. (Please read https://jsh9.github.io/pydoclint/checking_class_attributes.html on how to correctly document class attributes.)
-    DOC101: Function `_engine`: Docstring contains fewer arguments than in function signature.
-    DOC103: Function `_engine`: Docstring arguments are different from function arguments. (Or could be other formatting issues: https://jsh9.github.io/pydoclint/violation_codes.html#notes-on-doc103 ). Arguments in the function signature but not in the docstring: [fmm: Any].
-    DOC201: Function `_engine` does not have a return section in docstring
-    DOC203: Function `_engine` return type(s) in docstring not consistent with the return annotation. Return annotation has 1 type(s); docstring return section has 0 type(s).
-    DOC101: Function `prepare_large_n_grad_plan`: Docstring contains fewer arguments than in function signature.
-    DOC103: Function `prepare_large_n_grad_plan`: Docstring arguments are different from function arguments. (Or could be other formatting issues: https://jsh9.github.io/pydoclint/violation_codes.html#notes-on-doc103 ). Arguments in the function signature but not in the docstring: [fmm: Any, state: LargeNPreparedState].
-    DOC201: Function `prepare_large_n_grad_plan` does not have a return section in docstring
-    DOC203: Function `prepare_large_n_grad_plan` return type(s) in docstring not consistent with the return annotation. Return annotation has 1 type(s); docstring return section has 0 type(s).
-    DOC501: Function `prepare_large_n_grad_plan` has raise statements, but the docstring does not have a "Raises" section
-    DOC503: Function `prepare_large_n_grad_plan` exceptions in the "Raises" section in the docstring do not match those in the function body. Raised exceptions in the docstring: []. Raised exceptions in the body: ['RuntimeError'].
-    DOC101: Function `large_n_farfield_locals_at`: Docstring contains fewer arguments than in function signature.
-    DOC103: Function `large_n_farfield_locals_at`: Docstring arguments are different from function arguments. (Or could be other formatting issues: https://jsh9.github.io/pydoclint/violation_codes.html#notes-on-doc103 ). Arguments in the function signature but not in the docstring: [fmm: Any, masses_sorted: Array, plan: LargeNGradPlan, positions_sorted: Array, state: LargeNPreparedState].
-    DOC201: Function `large_n_farfield_locals_at` does not have a return section in docstring
-    DOC203: Function `large_n_farfield_locals_at` return type(s) in docstring not consistent with the return annotation. Return annotation has 1 type(s); docstring return section has 0 type(s).
-    DOC101: Function `evaluate_large_n_state_at_positions_and_masses_sorted`: Docstring contains fewer arguments than in function signature.
-    DOC103: Function `evaluate_large_n_state_at_positions_and_masses_sorted`: Docstring arguments are different from function arguments. (Or could be other formatting issues: https://jsh9.github.io/pydoclint/violation_codes.html#notes-on-doc103 ). Arguments in the function signature but not in the docstring: [fmm: Any, include_far: bool, include_near: bool, masses_sorted: Array, plan: LargeNGradPlan, positions_sorted: Array, state: LargeNPreparedState].
-    DOC201: Function `evaluate_large_n_state_at_positions_and_masses_sorted` does not have a return section in docstring
-    DOC203: Function `evaluate_large_n_state_at_positions_and_masses_sorted` return type(s) in docstring not consistent with the return annotation. Return annotation has 1 type(s); docstring return section has 0 type(s).
-    DOC501: Function `evaluate_large_n_state_at_positions_and_masses_sorted` has raise statements, but the docstring does not have a "Raises" section
-    DOC503: Function `evaluate_large_n_state_at_positions_and_masses_sorted` exceptions in the "Raises" section in the docstring do not match those in the function body. Raised exceptions in the docstring: []. Raised exceptions in the body: ['ValueError'].
---------------------
-jaccpot/runtime/_large_n_pipeline.py
-    DOC101: Function `prepare_large_n_state`: Docstring contains fewer arguments than in function signature.
-    DOC103: Function `prepare_large_n_state`: Docstring arguments are different from function arguments. (Or could be other formatting issues: https://jsh9.github.io/pydoclint/violation_codes.html#notes-on-doc103 ). Arguments in the function signature but not in the docstring: [allow_stateful_cache: bool, aspect_threshold_val: float, bounds: Optional[Tuple[Array, Array]], collected_retries: list[DualTreeRetryEvent], dual_downward_artifacts: Optional[Any], execution_config_override: Optional[Any], fmm: object, fused_device_mode: bool, input_dtype: jnp.dtype, jit_tree_override: Optional[bool], large_n_env_cfg_override: Optional[dict[str, Any]], leaf_size: int, mac_type_val: MACType, masses_arr: Array, max_order: int, max_refine_levels_val: int, positions_arr: Array, record_retry: Callable[[DualTreeRetryEvent], None], refine_local_val: bool, return_compiled_state: bool, runtime_l2l_chunk_size: Optional[int], runtime_m2l_chunk_size: Optional[int], runtime_traversal_config: Optional[DualTreeTraversalConfig], supplied_force_scale: Optional[Array], theta_val: float, tree_artifacts: Optional[Any], upward_center_mode: str].
-    DOC201: Function `prepare_large_n_state` does not have a return section in docstring
-    DOC203: Function `prepare_large_n_state` return type(s) in docstring not consistent with the return annotation. Return annotation has 1 type(s); docstring return section has 0 type(s).
-    DOC501: Function `prepare_large_n_state` has raise statements, but the docstring does not have a "Raises" section
-    DOC503: Function `prepare_large_n_state` exceptions in the "Raises" section in the docstring do not match those in the function body. Raised exceptions in the docstring: []. Raised exceptions in the body: ['RuntimeError'].
-    DOC101: Function `_large_n_fastlane_eval_fn`: Docstring contains fewer arguments than in function signature.
-    DOC103: Function `_large_n_fastlane_eval_fn`: Docstring arguments are different from function arguments. (Or could be other formatting issues: https://jsh9.github.io/pydoclint/violation_codes.html#notes-on-doc103 ). Arguments in the function signature but not in the docstring: [body: Callable[[Any], Array], cache_key: tuple[Any, ...], fmm: Any, state: Any].
-    DOC201: Function `_large_n_fastlane_eval_fn` does not have a return section in docstring
-    DOC203: Function `_large_n_fastlane_eval_fn` return type(s) in docstring not consistent with the return annotation. Return annotation has 1 type(s); docstring return section has 0 type(s).
-    DOC101: Function `evaluate_large_n_state`: Docstring contains fewer arguments than in function signature.
-    DOC103: Function `evaluate_large_n_state`: Docstring arguments are different from function arguments. (Or could be other formatting issues: https://jsh9.github.io/pydoclint/violation_codes.html#notes-on-doc103 ). Arguments in the function signature but not in the docstring: [fmm: object, max_acc_derivative_order: int, return_potential: bool, state: Union[LargeNPreparedState, LargeNCompiledState], target_indices: Optional[Array]].
-    DOC201: Function `evaluate_large_n_state` does not have a return section in docstring
-    DOC203: Function `evaluate_large_n_state` return type(s) in docstring not consistent with the return annotation. Return annotation has 1 type(s); docstring return section has 0 type(s).
-    DOC501: Function `evaluate_large_n_state` has raise statements, but the docstring does not have a "Raises" section
-    DOC503: Function `evaluate_large_n_state` exceptions in the "Raises" section in the docstring do not match those in the function body. Raised exceptions in the docstring: []. Raised exceptions in the body: ['NotImplementedError', 'RuntimeError'].
-    DOC101: Function `_record_large_n_decline`: Docstring contains fewer arguments than in function signature.
-    DOC103: Function `_record_large_n_decline`: Docstring arguments are different from function arguments. (Or could be other formatting issues: https://jsh9.github.io/pydoclint/violation_codes.html#notes-on-doc103 ). Arguments in the function signature but not in the docstring: [fmm: Any, reason: str].
-    DOC101: Function `can_use_large_n_prepare_path`: Docstring contains fewer arguments than in function signature.
-    DOC103: Function `can_use_large_n_prepare_path`: Docstring arguments are different from function arguments. (Or could be other formatting issues: https://jsh9.github.io/pydoclint/violation_codes.html#notes-on-doc103 ). Arguments in the function signature but not in the docstring: [allow_stateful_cache: bool, fmm: object, masses_arr: Array, positions_arr: Array].
-    DOC201: Function `can_use_large_n_prepare_path` does not have a return section in docstring
-    DOC203: Function `can_use_large_n_prepare_path` return type(s) in docstring not consistent with the return annotation. Return annotation has 1 type(s); docstring return section has 0 type(s).
-    DOC501: Function `can_use_large_n_prepare_path` has raise statements, but the docstring does not have a "Raises" section
-    DOC503: Function `can_use_large_n_prepare_path` exceptions in the "Raises" section in the docstring do not match those in the function body. Raised exceptions in the docstring: []. Raised exceptions in the body: ['RuntimeError'].
 --------------------
 jaccpot/runtime/_large_n_types.py
     DOC601: Class `LargeNExecutionConfig`: Class docstring contains fewer class attributes than actual class attributes.  (Please read https://jsh9.github.io/pydoclint/checking_class_attributes.html on how to correctly document class attributes.)
@@ -507,80 +315,6 @@ jaccpot/runtime/_large_n_types.py
     DOC603: Class `LargeNCompiledState`: Class docstring attributes are different from actual class attributes. (Or could be other formatting issues: https://jsh9.github.io/pydoclint/violation_codes.html#notes-on-doc103 ). Attributes in the class definition but not in the docstring: [inverse_permutation: Array, local_order: int, masses_sorted: Array, max_leaf_size: int, positions_sorted: Array, prepared: LargeNPreparedState, topology_key: Optional[str]]. (Please read https://jsh9.github.io/pydoclint/checking_class_attributes.html on how to correctly document class attributes.)
     DOC601: Class `LargeNPreparedState`: Class docstring contains fewer class attributes than actual class attributes.  (Please read https://jsh9.github.io/pydoclint/checking_class_attributes.html on how to correctly document class attributes.)
     DOC603: Class `LargeNPreparedState`: Class docstring attributes are different from actual class attributes. (Or could be other formatting issues: https://jsh9.github.io/pydoclint/violation_codes.html#notes-on-doc103 ). Attributes in the class definition but not in the docstring: [compact_far_pairs: Optional[CompactTaggedFarPairs], disable_specialized_large_n_nearfield: bool, execution_backend: str, expansion_basis: str, force_scale_nodes: Optional[Array], input_dtype: jnp.dtype, local_data: LocalExpansionData, local_order: int, max_leaf_size: int, nearfield_chunk_group_ids: Optional[Array], nearfield_chunk_scan_batch_size: int, nearfield_chunk_scan_unroll: int, nearfield_chunk_sort_indices: Optional[Array], nearfield_chunk_unique_indices: Optional[Array], nearfield_delayed_scatter_chunks_per_superchunk: int, nearfield_disable_chunk_cond: bool, nearfield_edge_chunk_size: int, nearfield_grouped_sorted_scatter: bool, nearfield_leaf_particle_indices: Array, nearfield_leaf_particle_mask: Array, nearfield_mode: str, nearfield_sorted_scatter_hint: bool, nearfield_source_leaf_ids: Optional[Array], nearfield_superchunk_scan_unroll: int, nearfield_superchunk_target_reduce: bool, nearfield_target_block_batch_scan_unroll: int, nearfield_target_block_leaf_ids: Optional[Array], nearfield_target_block_offsets: Optional[Array], nearfield_target_block_overflow_active_blocks: int, nearfield_target_block_overflow_fast_max_blocks: int, nearfield_target_block_overflow_profile_capacity: int, nearfield_target_block_size: int, nearfield_target_block_source_leaf_ids: Optional[Array], nearfield_target_block_source_leaf_ids_padded: Optional[Array], nearfield_target_block_tile_scan_unroll: int, nearfield_target_block_tile_size: int, nearfield_target_block_valid_mask: Optional[Array], nearfield_target_block_valid_mask_padded: Optional[Array], nearfield_target_leaf_batch_size: int, nearfield_target_leaf_ids: Optional[Array], nearfield_valid_pairs: Optional[Array], neighbor_list: NodeNeighborList, radix_fast_lane: bool, radix_fast_payload: Optional[RadixFastNearfieldPayload], radix_overflow_payload: Optional[RadixFastNearfieldPayload], retry_events: Tuple[DualTreeRetryEvent, ...], speed_prepared_layout: bool, theta: float, topology_key: Optional[str], tree: Tree, working_dtype: jnp.dtype]. (Please read https://jsh9.github.io/pydoclint/checking_class_attributes.html on how to correctly document class attributes.)
---------------------
-jaccpot/runtime/_nearfield_cache.py
-    DOC601: Class `NearfieldPrecomputeArtifacts`: Class docstring contains fewer class attributes than actual class attributes.  (Please read https://jsh9.github.io/pydoclint/checking_class_attributes.html on how to correctly document class attributes.)
-    DOC603: Class `NearfieldPrecomputeArtifacts`: Class docstring attributes are different from actual class attributes. (Or could be other formatting issues: https://jsh9.github.io/pydoclint/violation_codes.html#notes-on-doc103 ). Attributes in the class definition but not in the docstring: [chunk_group_ids: Optional[Array], chunk_sort_indices: Optional[Array], chunk_unique_indices: Optional[Array], source_leaf_ids: Optional[Array], target_leaf_ids: Optional[Array], valid_pairs: Optional[Array]]. (Please read https://jsh9.github.io/pydoclint/checking_class_attributes.html on how to correctly document class attributes.)
-    DOC101: Function `nearfield_cache_matches`: Docstring contains fewer arguments than in function signature.
-    DOC103: Function `nearfield_cache_matches`: Docstring arguments are different from function arguments. (Or could be other formatting issues: https://jsh9.github.io/pydoclint/violation_codes.html#notes-on-doc103 ). Arguments in the function signature but not in the docstring: [cache_entry: Optional[_InteractionCacheEntry], leaf_cap: int, nearfield_edge_chunk_size: int, nearfield_mode: str, require_pair_vectors: bool].
-    DOC201: Function `nearfield_cache_matches` does not have a return section in docstring
-    DOC203: Function `nearfield_cache_matches` return type(s) in docstring not consistent with the return annotation. Return annotation has 1 type(s); docstring return section has 0 type(s).
-    DOC101: Function `nearfield_from_cache`: Docstring contains fewer arguments than in function signature.
-    DOC103: Function `nearfield_from_cache`: Docstring arguments are different from function arguments. (Or could be other formatting issues: https://jsh9.github.io/pydoclint/violation_codes.html#notes-on-doc103 ). Arguments in the function signature but not in the docstring: [cache_entry: _InteractionCacheEntry].
-    DOC201: Function `nearfield_from_cache` does not have a return section in docstring
-    DOC203: Function `nearfield_from_cache` return type(s) in docstring not consistent with the return annotation. Return annotation has 1 type(s); docstring return section has 0 type(s).
-    DOC101: Function `with_nearfield_cache_artifacts`: Docstring contains fewer arguments than in function signature.
-    DOC103: Function `with_nearfield_cache_artifacts`: Docstring arguments are different from function arguments. (Or could be other formatting issues: https://jsh9.github.io/pydoclint/violation_codes.html#notes-on-doc103 ). Arguments in the function signature but not in the docstring: [artifacts: NearfieldPrecomputeArtifacts, cache_entry: _InteractionCacheEntry, leaf_cap: int, nearfield_edge_chunk_size: int, nearfield_mode: str].
-    DOC201: Function `with_nearfield_cache_artifacts` does not have a return section in docstring
-    DOC203: Function `with_nearfield_cache_artifacts` return type(s) in docstring not consistent with the return annotation. Return annotation has 1 type(s); docstring return section has 0 type(s).
---------------------
-jaccpot/runtime/_nearfield_fastlane.py
-    DOC101: Function `_host`: Docstring contains fewer arguments than in function signature.
-    DOC103: Function `_host`: Docstring arguments are different from function arguments. (Or could be other formatting issues: https://jsh9.github.io/pydoclint/violation_codes.html#notes-on-doc103 ). Arguments in the function signature but not in the docstring: [array: Any, what: str].
-    DOC201: Function `_host` does not have a return section in docstring
-    DOC203: Function `_host` return type(s) in docstring not consistent with the return annotation. Return annotation has 1 type(s); docstring return section has 0 type(s).
-    DOC501: Function `_host` has raise statements, but the docstring does not have a "Raises" section
-    DOC503: Function `_host` exceptions in the "Raises" section in the docstring do not match those in the function body. Raised exceptions in the docstring: []. Raised exceptions in the body: ['NearfieldTopologyNotConcrete'].
-    DOC101: Function `resolve_leaf_particle_groups`: Docstring contains fewer arguments than in function signature.
-    DOC103: Function `resolve_leaf_particle_groups`: Docstring arguments are different from function arguments. (Or could be other formatting issues: https://jsh9.github.io/pydoclint/violation_codes.html#notes-on-doc103 ). Arguments in the function signature but not in the docstring: [leaf_nodes: np.ndarray, max_leaf_size: int, node_ranges: np.ndarray, num_particles: int].
-    DOC201: Function `resolve_leaf_particle_groups` does not have a return section in docstring
-    DOC203: Function `resolve_leaf_particle_groups` return type(s) in docstring not consistent with the return annotation. Return annotation has 2 type(s); docstring return section has 0 type(s).
-    DOC101: Function `build_leaf_major_nearfield_payload`: Docstring contains fewer arguments than in function signature.
-    DOC103: Function `build_leaf_major_nearfield_payload`: Docstring arguments are different from function arguments. (Or could be other formatting issues: https://jsh9.github.io/pydoclint/violation_codes.html#notes-on-doc103 ). Arguments in the function signature but not in the docstring: [leaf_nodes: Any, leaf_particle_indices: Optional[Any], leaf_particle_mask: Optional[Any], max_leaf_size: int, neighbors: Any, node_ranges: Any, num_particles: int, offsets: Any].
-    DOC201: Function `build_leaf_major_nearfield_payload` does not have a return section in docstring
-    DOC203: Function `build_leaf_major_nearfield_payload` return type(s) in docstring not consistent with the return annotation. Return annotation has 1 type(s); docstring return section has 0 type(s).
-    DOC501: Function `build_leaf_major_nearfield_payload` has raise statements, but the docstring does not have a "Raises" section
-    DOC503: Function `build_leaf_major_nearfield_payload` exceptions in the "Raises" section in the docstring do not match those in the function body. Raised exceptions in the docstring: []. Raised exceptions in the body: ['ValueError'].
-    DOC101: Function `leaf_major_nearfield_payload_cached`: Docstring contains fewer arguments than in function signature.
-    DOC103: Function `leaf_major_nearfield_payload_cached`: Docstring arguments are different from function arguments. (Or could be other formatting issues: https://jsh9.github.io/pydoclint/violation_codes.html#notes-on-doc103 ). Arguments in the function signature but not in the docstring: [leaf_nodes: Any, leaf_particle_indices: Optional[Any], leaf_particle_mask: Optional[Any], max_leaf_size: int, neighbors: Any, node_ranges: Any, num_particles: int, offsets: Any].
-    DOC201: Function `leaf_major_nearfield_payload_cached` does not have a return section in docstring
-    DOC203: Function `leaf_major_nearfield_payload_cached` return type(s) in docstring not consistent with the return annotation. Return annotation has 1 type(s); docstring return section has 0 type(s).
-    DOC101: Function `nearfield_topology_arrays`: Docstring contains fewer arguments than in function signature.
-    DOC103: Function `nearfield_topology_arrays`: Docstring arguments are different from function arguments. (Or could be other formatting issues: https://jsh9.github.io/pydoclint/violation_codes.html#notes-on-doc103 ). Arguments in the function signature but not in the docstring: [nearfield_interop: Optional[Any], neighbor_list: Any, tree: Any].
-    DOC201: Function `nearfield_topology_arrays` does not have a return section in docstring
-    DOC203: Function `nearfield_topology_arrays` return type(s) in docstring not consistent with the return annotation. Return annotation has 1 type(s); docstring return section has 0 type(s).
---------------------
-jaccpot/runtime/_octree_adapter.py
-    DOC601: Class `OctreeExecutionData`: Class docstring contains fewer class attributes than actual class attributes.  (Please read https://jsh9.github.io/pydoclint/checking_class_attributes.html on how to correctly document class attributes.)
-    DOC603: Class `OctreeExecutionData`: Class docstring attributes are different from actual class attributes. (Or could be other formatting issues: https://jsh9.github.io/pydoclint/violation_codes.html#notes-on-doc103 ). Attributes in the class definition but not in the docstring: [box_centers: Array, box_half_extents: Array, box_max_extents: Array, box_radii: Array, child_counts: Array, children: Array, leaf_mask: Array, leaf_nodes: Array, level_offsets: Array, node_codes: Array, node_depths: Array, node_ranges: Array, nodes_by_level: Array, num_leaf_nodes: Array, num_levels: Array, num_valid_nodes: Array, oct_to_radix_leaf: Array, oct_to_radix_node: Array, parent: Array, radix_leaf_to_oct: Array, radix_node_to_oct: Array, valid_mask: Array]. (Please read https://jsh9.github.io/pydoclint/checking_class_attributes.html on how to correctly document class attributes.)
-    DOC101: Function `_build_fallback_octree_execution_data`: Docstring contains fewer arguments than in function signature.
-    DOC103: Function `_build_fallback_octree_execution_data`: Docstring arguments are different from function arguments. (Or could be other formatting issues: https://jsh9.github.io/pydoclint/violation_codes.html#notes-on-doc103 ). Arguments in the function signature but not in the docstring: [tree: object].
-    DOC201: Function `_build_fallback_octree_execution_data` does not have a return section in docstring
-    DOC203: Function `_build_fallback_octree_execution_data` return type(s) in docstring not consistent with the return annotation. Return annotation has 1 type(s); docstring return section has 0 type(s).
-    DOC101: Function `build_octree_execution_data_with_status`: Docstring contains fewer arguments than in function signature.
-    DOC103: Function `build_octree_execution_data_with_status`: Docstring arguments are different from function arguments. (Or could be other formatting issues: https://jsh9.github.io/pydoclint/violation_codes.html#notes-on-doc103 ). Arguments in the function signature but not in the docstring: [tree: object].
-    DOC201: Function `build_octree_execution_data_with_status` does not have a return section in docstring
-    DOC203: Function `build_octree_execution_data_with_status` return type(s) in docstring not consistent with the return annotation. Return annotation has 2 type(s); docstring return section has 0 type(s).
-    DOC101: Function `build_octree_execution_data`: Docstring contains fewer arguments than in function signature.
-    DOC103: Function `build_octree_execution_data`: Docstring arguments are different from function arguments. (Or could be other formatting issues: https://jsh9.github.io/pydoclint/violation_codes.html#notes-on-doc103 ). Arguments in the function signature but not in the docstring: [tree: object].
-    DOC201: Function `build_octree_execution_data` does not have a return section in docstring
-    DOC203: Function `build_octree_execution_data` return type(s) in docstring not consistent with the return annotation. Return annotation has 1 type(s); docstring return section has 0 type(s).
---------------------
-jaccpot/runtime/capacity_diagnostics.py
-    DOC101: Function `capacity_report`: Docstring contains fewer arguments than in function signature.
-    DOC103: Function `capacity_report`: Docstring arguments are different from function arguments. (Or could be other formatting issues: https://jsh9.github.io/pydoclint/violation_codes.html#notes-on-doc103 ). Arguments in the function signature but not in the docstring: [leaf_size: int, max_order: int, nearfield_mode: Optional[str], num_particles: int, preset: Optional[str], traversal_config: Any, working_dtype: Any].
-    DOC201: Function `capacity_report` does not have a return section in docstring
-    DOC203: Function `capacity_report` return type(s) in docstring not consistent with the return annotation. Return annotation has 1 type(s); docstring return section has 0 type(s).
-    DOC201: Function `_device_memory_gib` does not have a return section in docstring
-    DOC203: Function `_device_memory_gib` return type(s) in docstring not consistent with the return annotation. Return annotation has 1 type(s); docstring return section has 0 type(s).
-    DOC101: Function `reraise_with_capacity_report`: Docstring contains fewer arguments than in function signature.
-    DOC103: Function `reraise_with_capacity_report`: Docstring arguments are different from function arguments. (Or could be other formatting issues: https://jsh9.github.io/pydoclint/violation_codes.html#notes-on-doc103 ). Arguments in the function signature but not in the docstring: [exc: BaseException, leaf_size: int, max_order: int, nearfield_mode: Optional[str], num_particles: int, preset: Optional[str], traversal_config: Any, working_dtype: Any].
-    DOC501: Function `reraise_with_capacity_report` has raise statements, but the docstring does not have a "Raises" section
-    DOC503: Function `reraise_with_capacity_report` exceptions in the "Raises" section in the docstring do not match those in the function body. Raised exceptions in the docstring: []. Raised exceptions in the body: ['RuntimeError'].
-    DOC101: Function `is_capacity_failure`: Docstring contains fewer arguments than in function signature.
-    DOC103: Function `is_capacity_failure`: Docstring arguments are different from function arguments. (Or could be other formatting issues: https://jsh9.github.io/pydoclint/violation_codes.html#notes-on-doc103 ). Arguments in the function signature but not in the docstring: [exc: BaseException].
-    DOC201: Function `is_capacity_failure` does not have a return section in docstring
-    DOC203: Function `is_capacity_failure` return type(s) in docstring not consistent with the return annotation. Return annotation has 1 type(s); docstring return section has 0 type(s).
 --------------------
 jaccpot/runtime/dtypes.py
     DOC201: Function `_resolve_index_dtype` does not have a return section in docstring
@@ -624,22 +358,6 @@ jaccpot/runtime/fmm_prepare.py
     DOC501: Method `PrepareMixin._resolve_force_scale_nodes_for_prepare` has raise statements, but the docstring does not have a "Raises" section
     DOC503: Method `PrepareMixin._resolve_force_scale_nodes_for_prepare` exceptions in the "Raises" section in the docstring do not match those in the function body. Raised exceptions in the docstring: []. Raised exceptions in the body: ['ValueError'].
 --------------------
-jaccpot/runtime/fmm_presets.py
-    DOC601: Class `FMMPresetConfig`: Class docstring contains fewer class attributes than actual class attributes.  (Please read https://jsh9.github.io/pydoclint/checking_class_attributes.html on how to correctly document class attributes.)
-    DOC603: Class `FMMPresetConfig`: Class docstring attributes are different from actual class attributes. (Or could be other formatting issues: https://jsh9.github.io/pydoclint/violation_codes.html#notes-on-doc103 ). Attributes in the class definition but not in the docstring: [aspect_threshold: float, description: str, jit_traversal: bool, jit_tree: Union[bool, Literal['auto']], l2l_chunk_size: Optional[int], m2l_chunk_size: Optional[int], max_pair_queue: Optional[int], max_refine_levels: int, name: FMMPreset, pair_process_block: Optional[int], refine_local: bool, target_leaf_particles: int, traversal_config: Optional[DualTreeTraversalConfig], tree_build_mode: str, use_dense_interactions: bool]. (Please read https://jsh9.github.io/pydoclint/checking_class_attributes.html on how to correctly document class attributes.)
-    DOC101: Function `resolve_preset`: Docstring contains fewer arguments than in function signature.
-    DOC103: Function `resolve_preset`: Docstring arguments are different from function arguments. (Or could be other formatting issues: https://jsh9.github.io/pydoclint/violation_codes.html#notes-on-doc103 ). Arguments in the function signature but not in the docstring: [name: Union[str, FMMPreset]].
-    DOC201: Function `resolve_preset` does not have a return section in docstring
-    DOC203: Function `resolve_preset` return type(s) in docstring not consistent with the return annotation. Return annotation has 1 type(s); docstring return section has 0 type(s).
-    DOC501: Function `resolve_preset` has raise statements, but the docstring does not have a "Raises" section
-    DOC503: Function `resolve_preset` exceptions in the "Raises" section in the docstring do not match those in the function body. Raised exceptions in the docstring: []. Raised exceptions in the body: ['ValueError'].
-    DOC101: Function `get_preset_config`: Docstring contains fewer arguments than in function signature.
-    DOC103: Function `get_preset_config`: Docstring arguments are different from function arguments. (Or could be other formatting issues: https://jsh9.github.io/pydoclint/violation_codes.html#notes-on-doc103 ). Arguments in the function signature but not in the docstring: [name: Union[str, FMMPreset]].
-    DOC201: Function `get_preset_config` does not have a return section in docstring
-    DOC203: Function `get_preset_config` return type(s) in docstring not consistent with the return annotation. Return annotation has 1 type(s); docstring return section has 0 type(s).
-    DOC501: Function `get_preset_config` has raise statements, but the docstring does not have a "Raises" section
-    DOC503: Function `get_preset_config` exceptions in the "Raises" section in the docstring do not match those in the function body. Raised exceptions in the docstring: []. Raised exceptions in the body: ['AssertionError'].
---------------------
 jaccpot/runtime/fmm_stage_timing.py
     DOC201: Function `aggregate_counter_names` does not have a return section in docstring
     DOC203: Function `aggregate_counter_names` return type(s) in docstring not consistent with the return annotation. Return annotation has 1 type(s); docstring return section has 0 type(s).
@@ -660,43 +378,9 @@ jaccpot/runtime/fmm_strict_cap_profile.py
     DOC201: Method `StrictCapProfileMixin._compiled_profile_capacity_compatible` does not have a return section in docstring
     DOC203: Method `StrictCapProfileMixin._compiled_profile_capacity_compatible` return type(s) in docstring not consistent with the return annotation. Return annotation has 1 type(s); docstring return section has 0 type(s).
 --------------------
-jaccpot/runtime/grad_options.py
-    DOC601: Class `LeafPairReverseOptions`: Class docstring contains fewer class attributes than actual class attributes.  (Please read https://jsh9.github.io/pydoclint/checking_class_attributes.html on how to correctly document class attributes.)
-    DOC603: Class `LeafPairReverseOptions`: Class docstring attributes are different from actual class attributes. (Or could be other formatting issues: https://jsh9.github.io/pydoclint/violation_codes.html#notes-on-doc103 ). Attributes in the class definition but not in the docstring: [block_tile: int, leaf_batch: int, max_tiers: int, skip_empty_tiles: bool, tier_min_gain: float, tiered: bool]. (Please read https://jsh9.github.io/pydoclint/checking_class_attributes.html on how to correctly document class attributes.)
-    DOC601: Class `ResolvedGradOptions`: Class docstring contains fewer class attributes than actual class attributes.  (Please read https://jsh9.github.io/pydoclint/checking_class_attributes.html on how to correctly document class attributes.)
-    DOC603: Class `ResolvedGradOptions`: Class docstring attributes are different from actual class attributes. (Or could be other formatting issues: https://jsh9.github.io/pydoclint/violation_codes.html#notes-on-doc103 ). Attributes in the class definition but not in the docstring: [analytic_l2p_vjp: bool, analytic_p2p_vjp: bool, fused_m2l_pallas: bool, nearfield_lane: str, nearfield_lane_was_auto: bool, reverse: LeafPairReverseOptions]. (Please read https://jsh9.github.io/pydoclint/checking_class_attributes.html on how to correctly document class attributes.)
-    DOC201: Function `fused_m2l_pallas_enabled` does not have a return section in docstring
-    DOC203: Function `fused_m2l_pallas_enabled` return type(s) in docstring not consistent with the return annotation. Return annotation has 1 type(s); docstring return section has 0 type(s).
-    DOC201: Function `analytic_p2p_vjp_enabled` does not have a return section in docstring
-    DOC203: Function `analytic_p2p_vjp_enabled` return type(s) in docstring not consistent with the return annotation. Return annotation has 1 type(s); docstring return section has 0 type(s).
-    DOC201: Function `analytic_l2p_vjp_enabled` does not have a return section in docstring
-    DOC203: Function `analytic_l2p_vjp_enabled` return type(s) in docstring not consistent with the return annotation. Return annotation has 1 type(s); docstring return section has 0 type(s).
-    DOC101: Function `grad_option_overrides`: Docstring contains fewer arguments than in function signature.
-    DOC103: Function `grad_option_overrides`: Docstring arguments are different from function arguments. (Or could be other formatting issues: https://jsh9.github.io/pydoclint/violation_codes.html#notes-on-doc103 ). Arguments in the function signature but not in the docstring: [options: ResolvedGradOptions].
---------------------
 jaccpot/runtime/kernels/_shared.py
     DOC601: Class `NearfieldInteropData`: Class docstring contains fewer class attributes than actual class attributes.  (Please read https://jsh9.github.io/pydoclint/checking_class_attributes.html on how to correctly document class attributes.)
     DOC603: Class `NearfieldInteropData`: Class docstring attributes are different from actual class attributes. (Or could be other formatting issues: https://jsh9.github.io/pydoclint/violation_codes.html#notes-on-doc103 ). Attributes in the class definition but not in the docstring: [counts: Array, leaf_nodes: Array, leaf_particle_indices: Optional[Array], leaf_particle_mask: Optional[Array], neighbor_leaf_positions: Optional[Array], neighbors: Array, node_ranges: Array, offsets: Array, particle_order_leaf_indices: Array, particle_order_node_ranges: Array, particle_order_to_native_leaf: Array, particle_to_leaf_position: Optional[Array]]. (Please read https://jsh9.github.io/pydoclint/checking_class_attributes.html on how to correctly document class attributes.)
---------------------
-jaccpot/runtime/reference.py
-    DOC101: Function `compute_expansion`: Docstring contains fewer arguments than in function signature.
-    DOC103: Function `compute_expansion`: Docstring arguments are different from function arguments. (Or could be other formatting issues: https://jsh9.github.io/pydoclint/violation_codes.html#notes-on-doc103 ). Arguments in the function signature but not in the docstring: [masses: Array, order: int, positions: Array].
-    DOC201: Function `compute_expansion` does not have a return section in docstring
-    DOC203: Function `compute_expansion` return type(s) in docstring not consistent with the return annotation. Return annotation has 1 type(s); docstring return section has 0 type(s).
-    DOC101: Function `evaluate_expansion`: Docstring contains fewer arguments than in function signature.
-    DOC103: Function `evaluate_expansion`: Docstring arguments are different from function arguments. (Or could be other formatting issues: https://jsh9.github.io/pydoclint/violation_codes.html#notes-on-doc103 ). Arguments in the function signature but not in the docstring: [G: Union[float, Array], eval_point: Optional[Array], expansion: MultipoleExpansion, order: int, softening: Union[float, Array]].
-    DOC201: Function `evaluate_expansion` does not have a return section in docstring
-    DOC203: Function `evaluate_expansion` return type(s) in docstring not consistent with the return annotation. Return annotation has 1 type(s); docstring return section has 0 type(s).
-    DOC501: Function `evaluate_expansion` has raise statements, but the docstring does not have a "Raises" section
-    DOC503: Function `evaluate_expansion` exceptions in the "Raises" section in the docstring do not match those in the function body. Raised exceptions in the docstring: []. Raised exceptions in the body: ['ValueError'].
-    DOC101: Function `direct_sum`: Docstring contains fewer arguments than in function signature.
-    DOC103: Function `direct_sum`: Docstring arguments are different from function arguments. (Or could be other formatting issues: https://jsh9.github.io/pydoclint/violation_codes.html#notes-on-doc103 ). Arguments in the function signature but not in the docstring: [G: Union[float, Array], eval_point: Array, masses: Array, positions: Array, softening: Union[float, Array]].
-    DOC201: Function `direct_sum` does not have a return section in docstring
-    DOC203: Function `direct_sum` return type(s) in docstring not consistent with the return annotation. Return annotation has 1 type(s); docstring return section has 0 type(s).
-    DOC101: Function `compute_gravitational_potential`: Docstring contains fewer arguments than in function signature.
-    DOC103: Function `compute_gravitational_potential`: Docstring arguments are different from function arguments. (Or could be other formatting issues: https://jsh9.github.io/pydoclint/violation_codes.html#notes-on-doc103 ). Arguments in the function signature but not in the docstring: [G: Union[float, Array], eval_points: Array, masses: Array, positions: Array, softening: Union[float, Array]].
-    DOC201: Function `compute_gravitational_potential` does not have a return section in docstring
-    DOC203: Function `compute_gravitational_potential` return type(s) in docstring not consistent with the return annotation. Return annotation has 1 type(s); docstring return section has 0 type(s).
 --------------------
 jaccpot/upward/real_tree_expansions.py
     DOC601: Class `RealNodeMultipoleData`: Class docstring contains fewer class attributes than actual class attributes.  (Please read https://jsh9.github.io/pydoclint/checking_class_attributes.html on how to correctly document class attributes.)
@@ -721,22 +405,6 @@ jaccpot/upward/solidfmm_complex_tree_expansions.py
     DOC103: Function `_m2m_level_apply`: Docstring arguments are different from function arguments. (Or could be other formatting issues: https://jsh9.github.io/pydoclint/violation_codes.html#notes-on-doc103 ). Arguments in the function signature but not in the docstring: [child_mask: Array, gather_nodes: Array, node_centers_all: Array, safe_child_idx: Array, state_in: Array].
     DOC201: Function `_m2m_level_apply` does not have a return section in docstring
     DOC203: Function `_m2m_level_apply` return type(s) in docstring not consistent with the return annotation. Return annotation has 1 type(s); docstring return section has 0 type(s).
---------------------
-jaccpot/upward/tree_expansions.py
-    DOC601: Class `NodeMultipoleData`: Class docstring contains fewer class attributes than actual class attributes.  (Please read https://jsh9.github.io/pydoclint/checking_class_attributes.html on how to correctly document class attributes.)
-    DOC603: Class `NodeMultipoleData`: Class docstring attributes are different from actual class attributes. (Or could be other formatting issues: https://jsh9.github.io/pydoclint/violation_codes.html#notes-on-doc103 ). Attributes in the class definition but not in the docstring: [centers: Array, component_matrix: Optional[Array], moments: TreeMultipoleMoments, order: int, packed: Array, source_motion_packed: Optional[Array]]. (Please read https://jsh9.github.io/pydoclint/checking_class_attributes.html on how to correctly document class attributes.)
-    DOC101: Function `_aggregate_m2m_impl`: Docstring contains fewer arguments than in function signature.
-    DOC103: Function `_aggregate_m2m_impl`: Docstring arguments are different from function arguments. (Or could be other formatting issues: https://jsh9.github.io/pydoclint/violation_codes.html#notes-on-doc103 ). Arguments in the function signature but not in the docstring: [centers: Array, left_child: Array, node_ranges: Array, num_internal: int, order: int, packed: Array, right_child: Array].
-    DOC201: Function `_aggregate_m2m_impl` does not have a return section in docstring
-    DOC203: Function `_aggregate_m2m_impl` return type(s) in docstring not consistent with the return annotation. Return annotation has 1 type(s); docstring return section has 0 type(s).
-    DOC601: Class `TreeUpwardData`: Class docstring contains fewer class attributes than actual class attributes.  (Please read https://jsh9.github.io/pydoclint/checking_class_attributes.html on how to correctly document class attributes.)
-    DOC603: Class `TreeUpwardData`: Class docstring attributes are different from actual class attributes. (Or could be other formatting issues: https://jsh9.github.io/pydoclint/violation_codes.html#notes-on-doc103 ). Attributes in the class definition but not in the docstring: [geometry: TreeGeometry, mass_moments: TreeMassMoments, multipoles: NodeMultipoleData]. (Please read https://jsh9.github.io/pydoclint/checking_class_attributes.html on how to correctly document class attributes.)
-    DOC101: Function `prepare_upward_sweep`: Docstring contains fewer arguments than in function signature.
-    DOC103: Function `prepare_upward_sweep`: Docstring arguments are different from function arguments. (Or could be other formatting issues: https://jsh9.github.io/pydoclint/violation_codes.html#notes-on-doc103 ). Arguments in the function signature but not in the docstring: [center_mode: str, explicit_centers: Optional[Array], masses_sorted: Array, max_order: int, positions_sorted: Array, precomputed_geometry: Optional[TreeGeometry], tree: Tree].
-    DOC201: Function `prepare_upward_sweep` does not have a return section in docstring
-    DOC203: Function `prepare_upward_sweep` return type(s) in docstring not consistent with the return annotation. Return annotation has 1 type(s); docstring return section has 0 type(s).
-    DOC501: Function `prepare_upward_sweep` has raise statements, but the docstring does not have a "Raises" section
-    DOC503: Function `prepare_upward_sweep` exceptions in the "Raises" section in the docstring do not match those in the function body. Raised exceptions in the docstring: []. Raised exceptions in the body: ['ValueError'].
 --------------------
 jaccpot/upward/tree_geometry.py
     DOC101: Function `compute_tree_geometry_compiled`: Docstring contains fewer arguments than in function signature.

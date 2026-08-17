@@ -61,6 +61,7 @@ def compute_expansion(
     order: int = 1,
 ) -> MultipoleExpansion:
     """Compute multipole expansion up to ``order`` around the center of mass.
+
     Parameters
     ----------
     positions : Array
