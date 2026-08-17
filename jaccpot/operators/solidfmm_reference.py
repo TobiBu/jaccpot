@@ -28,7 +28,25 @@ from .real_harmonics import (
 
 @lru_cache(maxsize=None)
 def _complex_Dz(ell: int, angle: float) -> np.ndarray:
-    """Complex z-rotation for degree ell: diag(exp(i m angle))."""
+    """Complex z-rotation for degree ell: diag(exp(i m angle)).
+
+    Memoized on ``(ell, angle)``, so it is only useful for the handful of angles
+    a reference run visits -- an unbounded cache keyed on a float would be a leak
+    in production, which this module is not.
+
+    Parameters
+    ----------
+    ell : int
+        Degree ``l``.
+    angle : float
+        Rotation angle about ``+z``, in radians. Must be a Python float: it is
+        part of the cache key.
+
+    Returns
+    -------
+    np.ndarray
+        ``[2l+1, 2l+1]`` complex diagonal matrix.
+    """
     m_vals = np.arange(-ell, ell + 1)
     diag = np.exp(1j * m_vals * angle)
     return np.diag(diag)
@@ -36,7 +54,19 @@ def _complex_Dz(ell: int, angle: float) -> np.ndarray:
 
 @lru_cache(maxsize=None)
 def _complex_swap_matrices(ell: int) -> Tuple[np.ndarray, np.ndarray]:
-    """Complex swap matrices for local (B_T) and multipole (B_U) bases."""
+    """Complex swap matrices for local (B_T) and multipole (B_U) bases.
+
+    Parameters
+    ----------
+    ell : int
+        Degree ``l``.
+
+    Returns
+    -------
+    Tuple[np.ndarray, np.ndarray]
+        ``(B_T, B_U)`` as ``(B, B.T)`` -- the local and multipole swaps are
+        transposes of one another, which is why one matrix builds both.
+    """
     B = _compute_dehnen_B_matrix_complex(ell, "float64")
     return B, B.T
 
@@ -95,7 +125,26 @@ def translate_along_z_m2l_complex(
     *,
     order: int,
 ) -> np.ndarray:
-    """Complex-basis M2L along +z using Dehnen's series (reference)."""
+    """Complex-basis M2L along +z using Dehnen's series (reference).
+
+    A direct triple loop in NumPy, not a vectorised kernel: readability over
+    speed, which is this module's whole purpose.
+
+    Parameters
+    ----------
+    multipole : np.ndarray
+        Packed complex multipole coefficients in the z-aligned frame.
+    r : float
+        Separation along ``+z``. The series forms ``r**-(n+k+1)``, so it must be
+        strictly positive; nothing here floors it.
+    order : int
+        Expansion order ``p``.
+
+    Returns
+    -------
+    np.ndarray
+        Packed complex local coefficients, ``complex128``.
+    """
     p = int(order)
     ncoeff = sh_size(p)
     out = np.zeros((ncoeff,), dtype=np.complex128)
@@ -122,7 +171,43 @@ def m2l_solidfmm_reference(
     *,
     order: int,
 ) -> jnp.ndarray:
-    """Reference M2L using complex basis and solidfmm-style rotations."""
+    """Reference M2L using complex basis and solidfmm-style rotations.
+
+    Takes and returns REAL packed coefficients, but works internally in the
+    genuine-complex basis: real -> complex per degree, rotate to z, z-translate,
+    rotate back, complex -> real.
+
+    **Not a drop-in replacement for**
+    :func:`~jaccpot.operators.real_translations.m2l_real`, despite the identical
+    signature. It carries the genuine-complex normalisation, which is a factor of
+    two smaller on every ``m != 0`` channel than the real no-sqrt2 basis. On an
+    axis-aligned ``delta``, rescaling those channels by two reproduces
+    ``m2l_real`` to round-off (measured 3.5e-17 at order 4); the relationship is
+    pinned on-axis against the pure z-translate by
+    ``test_solidfmm_reference_matches_z_axis_m2l``.
+
+    That channel rescale is **not** the right comparison for a general off-axis
+    ``delta`` -- the factor of two is per-``|m|`` in the *aligned* frame, and
+    rotating back mixes ``m`` channels -- so do not use a diagonal rescale to
+    cross-check the two off-axis. No test asserts an off-axis relationship
+    between them.
+
+    Parameters
+    ----------
+    multipole_real : jnp.ndarray
+        Packed REAL multipole coefficients.
+    delta : jnp.ndarray
+        3-vector, ``target centre - source centre``; see
+        ``docs/operator_conventions.md`` section 1.
+    order : int
+        Expansion order ``p``.
+
+    Returns
+    -------
+    jnp.ndarray
+        Packed REAL local coefficients, cast back to ``multipole_real``'s dtype,
+        in the genuine-complex normalisation described above.
+    """
     p = int(order)
     delta_np = np.asarray(delta, dtype=np.float64)
     multipole_np = np.asarray(multipole_real, dtype=np.float64)
