@@ -32,14 +32,14 @@ stay non-vacuous without a GPU.
 from __future__ import annotations
 
 import functools
-from typing import Optional
+from typing import Any, Optional
 
 import jax
 import jax.numpy as jnp
 from jax import lax
 from jaxtyping import Array
 
-from jaccpot.pallas._compat import pallas_backend_kwargs
+from jaccpot.pallas._compat import KernelRef, pallas_backend_kwargs
 
 try:
     from jax.experimental import pallas as pl
@@ -169,24 +169,24 @@ def _block_tile(
 
 
 def _mutual_leafpair_kernel(
-    xa_ref,
-    ma_ref,
-    va_ref,
-    xb_ref,
-    mb_ref,
-    vb_ref,
-    ra_ref,
-    rb_ref,
-    lw_ref,
-    soft_ref,
-    g_ref,
-    fa_ref,
-    fb_ref,
+    xa_ref: KernelRef,
+    ma_ref: KernelRef,
+    va_ref: KernelRef,
+    xb_ref: KernelRef,
+    mb_ref: KernelRef,
+    vb_ref: KernelRef,
+    ra_ref: KernelRef,
+    rb_ref: KernelRef,
+    lw_ref: KernelRef,
+    soft_ref: KernelRef,
+    g_ref: KernelRef,
+    fa_ref: KernelRef,
+    fb_ref: KernelRef,
     *,
     num_levels: int,
     exclude_diagonal: bool,
     emit_b: bool,
-):
+) -> None:
     """One leaf pair: evaluate the block once, emit ``+F`` and ``-F``."""
     # `lw_ref[...]` materialises the whole (few-entry) table once; indexing the
     # ref per level would emit a load the Triton lowering turns into a gather.
@@ -319,28 +319,28 @@ def _block_vjp_tiles(
 
 
 def _mutual_leafpair_vjp_kernel(
-    xa_ref,
-    ma_ref,
-    va_ref,
-    xb_ref,
-    mb_ref,
-    vb_ref,
-    ra_ref,
-    rb_ref,
-    lw_ref,
-    soft_ref,
-    g_ref,
-    fa_bar_ref,
-    fb_bar_ref,
-    xa_bar_ref,
-    ma_bar_ref,
-    xb_bar_ref,
-    mb_bar_ref,
+    xa_ref: KernelRef,
+    ma_ref: KernelRef,
+    va_ref: KernelRef,
+    xb_ref: KernelRef,
+    mb_ref: KernelRef,
+    vb_ref: KernelRef,
+    ra_ref: KernelRef,
+    rb_ref: KernelRef,
+    lw_ref: KernelRef,
+    soft_ref: KernelRef,
+    g_ref: KernelRef,
+    fa_bar_ref: KernelRef,
+    fb_bar_ref: KernelRef,
+    xa_bar_ref: KernelRef,
+    ma_bar_ref: KernelRef,
+    xb_bar_ref: KernelRef,
+    mb_bar_ref: KernelRef,
     *,
     num_levels: int,
     exclude_diagonal: bool,
     emit_b: bool,
-):
+) -> None:
     """One leaf pair's analytic reverse, tile-bounded like the forward."""
     weight = (
         None
@@ -379,8 +379,8 @@ def _mutual_leafpair_vjp_kernel(
 
 
 def _pad_inputs(
-    xa: Array, ma: Array, va_f: Array, rung_a_f: Optional[Array], width: int, dtype
-):
+    xa: Array, ma: Array, va_f: Array, rung_a_f: Optional[Array], width: int, dtype: Any
+) -> tuple[Array, Array, Array, Array]:
     """Pad a leaf block's slot axis out to the Triton tile width.
 
     Padded slots get mask 0, so they are inert in every tile the kernels build.
@@ -725,22 +725,22 @@ def mutual_leafpair_block_cvjp(
 
 
 def _mutual_leafpair_block_cvjp_fwd(
-    xa,
-    ma,
-    va_f,
-    xb,
-    mb,
-    vb_f,
-    rung_a_f,
-    rung_b_f,
-    level_weights,
-    softening_sq,
-    g_value,
-    num_levels,
-    exclude_diagonal,
-    emit_b,
-    interpret,
-):
+    xa: Array,
+    ma: Array,
+    va_f: Array,
+    xb: Array,
+    mb: Array,
+    vb_f: Array,
+    rung_a_f: Array,
+    rung_b_f: Array,
+    level_weights: Array,
+    softening_sq: Array,
+    g_value: Array,
+    num_levels: int,
+    exclude_diagonal: bool,
+    emit_b: bool,
+    interpret: bool,
+) -> tuple[tuple[Array, Array], tuple[Array, ...]]:
     out = mutual_leafpair_block_pallas(
         xa,
         ma,
@@ -778,8 +778,13 @@ def _mutual_leafpair_block_cvjp_fwd(
 
 
 def _mutual_leafpair_block_cvjp_bwd(
-    num_levels, exclude_diagonal, emit_b, interpret, residual, cotangent
-):
+    num_levels: int,
+    exclude_diagonal: bool,
+    emit_b: bool,
+    interpret: bool,
+    residual: tuple[Array, ...],
+    cotangent: tuple[Array, Array],
+) -> tuple[Array, ...]:
     (
         xa,
         ma,
