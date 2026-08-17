@@ -21,7 +21,25 @@ MAX_MULTIPOLE_ORDER = 4
 
 
 def multi_index_tuples(level: int) -> tuple[tuple[int, int, int], ...]:
-    """Return tuples ``(i, j, k)`` satisfying ``i + j + k = level``."""
+    """Return tuples ``(i, j, k)`` satisfying ``i + j + k = level``.
+
+    Parameters
+    ----------
+    level : int
+        Tensor order ``l``. Must be non-negative.
+
+    Returns
+    -------
+    tuple[tuple[int, int, int], ...]
+        All multi-indices of that order, in the same sequence as
+        :func:`triangular_indices` produces them, so the two are
+        interchangeable as a packed-layout ordering.
+
+    Raises
+    ------
+    ValueError
+        If ``level`` is negative.
+    """
 
     lvl = int(level)
     if lvl < 0:
@@ -34,7 +52,21 @@ def multi_index_tuples(level: int) -> tuple[tuple[int, int, int], ...]:
 
 
 def multi_index_factorial(combo: tuple[int, int, int]) -> int:
-    """Return ``i! * j! * k!`` for a multi-index tuple."""
+    """Return ``i! * j! * k!`` for a multi-index tuple.
+
+    This is the symmetry weight of a Cartesian multipole component: the number
+    of distinct index permutations the packed layout collapses into one slot.
+
+    Parameters
+    ----------
+    combo : tuple[int, int, int]
+        Multi-index ``(i, j, k)``.
+
+    Returns
+    -------
+    int
+        The product of the three factorials.
+    """
 
     i, j, k = combo
     return math.factorial(i) * math.factorial(j) * math.factorial(k)
@@ -42,7 +74,24 @@ def multi_index_factorial(combo: tuple[int, int, int]) -> int:
 
 @jaxtyped(typechecker=beartype)
 def multi_power(vec: Array, combo: tuple[int, int, int]) -> Array:
-    """Return ``vec[0]^i * vec[1]^j * vec[2]^k`` for ``combo = (i, j, k)``."""
+    """Return ``vec[0]^i * vec[1]^j * vec[2]^k`` for ``combo = (i, j, k)``.
+
+    Zero exponents are skipped rather than raised to the power of zero, which
+    keeps the result exact at ``vec == 0`` instead of relying on ``0 ** 0``.
+
+    Parameters
+    ----------
+    vec : Array
+        Length-3 vector. Traced values are fine; ``combo`` drives Python-level
+        branching, ``vec`` does not.
+    combo : tuple[int, int, int]
+        Exponents, static under ``jit``.
+
+    Returns
+    -------
+    Array
+        Scalar monomial, same dtype as ``vec``.
+    """
 
     value = jnp.array(1.0, dtype=vec.dtype)
     if combo[0]:
@@ -56,7 +105,18 @@ def multi_power(vec: Array, combo: tuple[int, int, int]) -> Array:
 
 @jaxtyped(typechecker=beartype)
 def level_size(level: int) -> int:
-    """Return coefficient count for a symmetric tensor of order ``level``."""
+    """Return coefficient count for a symmetric tensor of order ``level``.
+
+    Parameters
+    ----------
+    level : int
+        Tensor order ``l``.
+
+    Returns
+    -------
+    int
+        ``(l + 1)(l + 2) / 2``, the size of one packed level.
+    """
 
     level_int = int(level)
     return (level_int + 1) * (level_int + 2) // 2
@@ -68,6 +128,16 @@ def level_offset(level: int) -> int:
 
     Offsets accumulate contributions from lower orders using the closed
     form ``level(level+1)(level+2)/6``.
+
+    Parameters
+    ----------
+    level : int
+        Tensor order ``l``.
+
+    Returns
+    -------
+    int
+        Index of the first slot of level ``l`` in the concatenated layout.
     """
 
     level_int = int(level)
@@ -76,7 +146,21 @@ def level_offset(level: int) -> int:
 
 @jaxtyped(typechecker=beartype)
 def total_coefficients(max_order: int) -> int:
-    """Return total packed length for orders ``0..max_order`` inclusive."""
+    """Return total packed length for orders ``0..max_order`` inclusive.
+
+    Equal to ``level_offset(max_order + 1)`` -- the two are the same closed
+    form read from opposite ends.
+
+    Parameters
+    ----------
+    max_order : int
+        Highest order included.
+
+    Returns
+    -------
+    int
+        ``(p + 1)(p + 2)(p + 3) / 6`` for ``p = max_order``.
+    """
 
     order = int(max_order)
     return (order + 1) * (order + 2) * (order + 3) // 6
@@ -88,6 +172,26 @@ def triangular_index(level: int, i: int, j: int) -> int:
 
     The mapping assumes ``i >= 0``, ``j >= 0`` and ``i + j <= level``.  The
     remaining index is ``k = level - i - j``.
+
+    Parameters
+    ----------
+    level : int
+        Tensor order ``l``.
+    i : int
+        First Cartesian index.
+    j : int
+        Second Cartesian index.
+
+    Returns
+    -------
+    int
+        Slot within level ``l``, i.e. relative to :func:`level_offset`, not an
+        index into the whole concatenated buffer.
+
+    Raises
+    ------
+    ValueError
+        If the indices are negative or ``i + j > level``.
     """
 
     lvl = int(level)
@@ -101,7 +205,21 @@ def triangular_index(level: int, i: int, j: int) -> int:
 
 @jaxtyped(typechecker=beartype)
 def triangular_indices(level: int) -> Array:
-    """Enumerate all ``(i, j, k)`` tuples for a given tensor order."""
+    """Enumerate all ``(i, j, k)`` tuples for a given tensor order.
+
+    The array form of :func:`multi_index_tuples`, in the same order, and it is
+    this ordering that defines the packed layout used by :func:`pack_tensor`.
+
+    Parameters
+    ----------
+    level : int
+        Tensor order ``l``. Static under ``jit``: it fixes the output length.
+
+    Returns
+    -------
+    Array
+        ``[level_size(level), 3]`` of ``INDEX_DTYPE`` multi-indices.
+    """
 
     lvl = int(level)
     grid_i = jnp.arange(lvl + 1, dtype=INDEX_DTYPE)
@@ -158,7 +276,32 @@ def pack_tensor(level: int, tensor: Array) -> Array:
 
 @jaxtyped(typechecker=beartype)
 def unpack_tensor(level: int, data: Array) -> Array:
-    """Unpack a packed triangular buffer back into Cartesian components."""
+    """Unpack a packed triangular buffer back into Cartesian components.
+
+    The inverse of :func:`pack_tensor` on the simplex, and its VJP: a scatter
+    where packing is a gather. Round-tripping is exact, but only on the
+    ``i + j + k == level`` entries -- everything off the simplex comes back
+    zero, since packing never read it.
+
+    Parameters
+    ----------
+    level : int
+        Tensor order ``l``. Static under ``jit``: it fixes the output shape.
+    data : Array
+        Packed buffer whose last axis has length ``level_size(level)``.
+
+    Returns
+    -------
+    Array
+        Cartesian components ``[l+1, l+1, l+1]``, same dtype as ``data``, zero
+        off the simplex.
+
+    Raises
+    ------
+    ValueError
+        If the last axis of ``data`` is not ``level_size(level)``. A static-shape
+        check, so it fires at trace time and never inside a compiled step.
+    """
 
     lvl = int(level)
     expected = level_size(lvl)
