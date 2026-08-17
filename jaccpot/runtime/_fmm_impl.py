@@ -198,25 +198,205 @@ class FMMEngine(
     StrictCapProfileMixin,
     DiagnosticsMixin,
 ):
-    """
-    Fast Multipole Method for gravitational N-body simulations.
+    """Fast Multipole Method engine for gravitational N-body simulations.
 
-    Args:
-        theta: Opening angle criterion (typically 0.5-1.0)
-        G: Gravitational constant (default: 1.0)
-        softening: Softening length to avoid singularities (default: 0.0)
-        tree_build_mode:
-            Choose between "lbvh" and "fixed_depth" builders.
-        tree_type:
-            Yggdrax tree family selector (e.g. ``"radix"`` or ``"kdtree"``).
-        target_leaf_particles:
-            Desired particle count per leaf for fixed-depth trees.
-        refine_local:
-            Enable host-side refinement of elongated leaves.
-        max_refine_levels:
-            Maximum refinement depth for the local refinement pass.
-        aspect_threshold:
-            Aspect ratio threshold that triggers extra splits.
+    The concrete engine every mixin in ``runtime/`` is mixed into, and the object
+    :class:`~jaccpot.solver.FMMSolver` constructs. Almost every keyword below is a
+    lane or sizing knob rather than a physics choice: the ones that change the
+    computed numbers are ``theta``, ``G``, ``softening``, ``working_dtype``,
+    ``expansion_basis``, the ``mac_*``/``adaptive_*`` family and the order pins.
+    The rest bound memory or pick between implementations that compute the same
+    thing.
+
+    Constructor arguments are documented here rather than on ``__init__`` because
+    pydoclint runs with ``allow-init-docstring`` off.
+
+    **Resolution order is load-bearing.** ``__init__`` delegates to a sequence of
+    ``_resolve_*`` / ``_init_*`` helpers that mutate ``self`` in place, and each
+    was extracted verbatim and left in its original position for that reason
+    (commits b462e45, dee46d6). Reordering them changes what the engine resolves
+    to. A later contract can also override what a caller asked for:
+    :meth:`_apply_large_n_gpu_production_contract` forces ``runtime_path`` to
+    ``"large_n"`` and clears ``precompute_nearfield_scatter_schedules`` and
+    ``mixed_order_farfield``.
+
+    Parameters
+    ----------
+    theta : float
+        Opening angle for the multipole acceptance criterion; typically 0.5-1.0.
+    G : float
+        Gravitational constant.
+    softening : float
+        Plummer softening length, which bounds the near-field pair force at short
+        separation.
+    working_dtype : Optional[DTypeLike]
+        Dtype the sweeps compute in. ``None`` resolves against the device later
+        rather than here.
+    expansion_basis : ExpansionBasis
+        Expansion algebra. ``"cartesian"`` or ``"solidfmm"``; ``"complex"`` is
+        accepted as an alias and normalised to ``"solidfmm"``.
+    basis_impl : Optional[Any]
+        The basis object, when one exists. ``None`` for bases the runtime implements
+        internally rather than through the interface.
+    m2l_impl : Optional[str]
+        M2L translation implementation. ``None`` means "let the basis decide", which
+        selects ``"rot_scale"`` for the real basis.
+    adaptive_order : bool
+        Choose the expansion order per interaction from ``p_gears`` instead of using
+        ``max_order`` everywhere.
+    p_gears : Optional[tuple[int, ...]]
+        Candidate orders for ``adaptive_order``, smallest passing one wins. Ignored
+        when ``adaptive_order`` is ``False``.
+    use_pallas : Optional[bool]
+        Near-field kernel selection; ``None`` auto-detects from the device.
+    reuse_topology : bool
+        Reuse the tree across calls instead of rebuilding every time. Trades
+        accuracy for speed as the particles drift from the tree they were binned
+        into.
+    rebuild_every : int
+        With ``reuse_topology``, rebuild after this many calls. Must be positive.
+    mac_force_scale_mode : str
+        How the per-node force scale entering Dehnen's eq (16a) is obtained:
+        ``"prev"`` (default) reuses the previous full evaluation's accelerations,
+        ``"paper"``/``"paper_fb"`` run a prepass, and the ``*_cached`` variants
+        require a cached scale rather than computing one.
+    mac_force_scale_prepass_theta : Optional[float]
+        Opening angle for the force-scale prepass's own traversal. ``None`` takes
+        the default. Only consulted by the prepass modes.
+    mac_force_scale_fb_inflation : float
+        Inflates the far-field source-to-target distance so the eq (16b) scale stays
+        a strict lower bound.
+    adaptive_error_model : str
+        Error estimator for adaptive acceptance: ``"tail_proxy"`` (default),
+        ``"dehnen_degree"``, or ``"dehnen_paper"`` -- the last being the eq (15)
+        estimator, which also switches the node force-scale reduction from max to
+        min.
+    adaptive_eps : Optional[float]
+        Relative force-accuracy target of eq (16a). ``None`` takes the default,
+        which a paper-style MAC rejects -- see ``Raises``.
+    dehnen_geometry_mode : str
+        How node centres and radii entering the Dehnen MAC are measured: ``"com"``
+        (default), ``"exact"``, ``"tree"``, ``"tree_approx"`` or ``"runtime"``. Some
+        modes run a host loop over nodes and warn.
+    mac_theta_max : float
+        Upper clamp on the opening angle the adaptive MAC may choose.
+    mac_type : MACTypeInput
+        Multipole acceptance criterion, e.g. ``"bh"`` or ``"dehnen"``. Lives here
+        rather than in a group because it straddles traversal and accuracy.
+    complex_rotation : str
+        Rotation backend for the complex basis; must be ``"solidfmm"`` there.
+    dehnen_radius_scale : float
+        Scale applied to node radii in the Dehnen MAC.
+    m2l_chunk_size : Optional[int]
+        Pairs per chunk in the chunked M2L ``lax.scan``. A memory/throughput knob;
+        it bounds peak memory rather than changing the result.
+    l2l_chunk_size : Optional[int]
+        The same for the L2L cascade.
+    max_pair_queue : Optional[int]
+        Capacity of the dual-tree pair queue.
+    pair_process_block : Optional[int]
+        Legacy override for the traversal process-block width.
+    traversal_config : Optional[Union[DualTreeTraversalConfig, TraversalOverrides, Mapping[str, int]]]
+        Traversal capacities -- see the note above for the two accepted forms and
+        why they behave differently.
+    tree_build_mode : Optional[str]
+        Which builder constructs the tree. ``None`` takes the default, ``"lbvh"``;
+        ``"fixed_depth"`` enables the refinement knobs below.
+    tree_type : str
+        Yggdrax tree family, e.g. ``"radix"`` (the production default) or
+        ``"kdtree"``.
+    target_leaf_particles : Optional[int]
+        Desired particle count per leaf for the fixed-depth builder. At least 1.
+    refine_local : Optional[bool]
+        Enable the host-side refinement pass that splits elongated leaves.
+    max_refine_levels : Optional[int]
+        Depth cap for that refinement pass.
+    aspect_threshold : Optional[float]
+        Leaf aspect ratio above which refinement splits a leaf.
+    interaction_retry_logger : Optional[Callable[[DualTreeRetryEvent], None]]
+        Called once per dual-tree retry, when the traversal overflows its pair
+        capacity and re-runs with a larger one. Purely observational -- use it to
+        detect that ``traversal_config`` is undersized.
+    use_dense_interactions : Optional[bool]
+        Materialize the interaction list densely rather than as a compact list --
+        faster for small trees, quadratic in memory for large ones.
+    grouped_interactions : Optional[bool]
+        Group M2L pairs into displacement classes so one rotation block serves a
+        whole class. Requires geometric (not centre-of-mass) expansion centres,
+        because the classification quantises pair displacements onto a lattice and
+        applies one representative displacement per class.
+    retain_far_pairs_for_grad : bool
+        Keep the frozen M2L pair list on the prepared state so a gradient path can
+        re-run the downward sweep against it. Costs ~24 B/pair of steady-state
+        memory, so it is off by default (the large-N preset targets minimum memory);
+        **required** to differentiate the large-N path.
+    farfield_mode : FarFieldMode
+        Far-field interaction mode; ``"auto"`` lets the runtime choose.
+    streamed_far_pairs : Optional[bool]
+        Stream the far-pair list instead of materialising it, trading recompute for
+        peak memory.
+    mixed_order_farfield : bool
+        Allow the far field to use a lower expansion order on well-separated pairs,
+        floored by ``mixed_order_min_order``.
+    mixed_order_min_order : Optional[int]
+        Floor on the per-pair order when ``mixed_order`` is on.
+    nearfield_mode : NearFieldMode
+        Near-field interaction mode; ``"auto"`` lets the runtime choose.
+    runtime_path : Literal['auto', 'large_n']
+        ``"auto"`` or ``"large_n"``. Forcing ``"large_n"`` selects the memory-lean
+        lane regardless of particle count.
+    execution_backend : FMMExecutionBackend
+        ``"auto"``, ``"radix"`` or ``"octree"``. ``"auto"`` may choose; an explicit
+        request is honoured or fails loudly, never silently substituted.
+    nearfield_edge_chunk_size : int
+        Pairs per chunk in the bucketed near-field kernel. A memory/throughput knob;
+        it does not change the result.
+    precompute_nearfield_scatter_schedules : bool
+        Build the near-field scatter schedules at prepare time rather than per
+        evaluation. Trades prepare-time memory for per-call throughput.
+    memory_objective : MemoryObjective
+        ``"balanced"``, ``"throughput"`` or ``"minimum_memory"``; steers the chunk-
+        size and streaming defaults.
+    memory_budget_bytes : Optional[int]
+        Advisory ceiling used when resolving those defaults.
+    enable_interaction_cache : bool
+        Reuse the process-level interaction-list cache across calls.
+    retain_traversal_result : bool
+        Keep the dual-tree walk result on the prepared state.
+    retain_interactions : bool
+        Keep the resolved M2L interaction list on the prepared state.
+    prepare_stage_memory_split_enabled : Optional[bool]
+        Split the prepare stage to lower peak memory at some throughput cost.
+    autotune_m2l_chunk : bool
+        Measure and pick the M2L chunk size at prepare time. Off by default, and
+        consequently the autotune path is thinly covered.
+    precompute_grouped_class_segments : Optional[bool]
+        Build grouped-class segment tables at prepare time.
+    grouped_schedule_budget_bytes : Optional[int]
+        Byte budget above which grouped-class precomputation is skipped.
+    nearfield_schedule_item_cap : Optional[int]
+        Item cap above which the near-field scatter schedules fall back to being
+        recomputed per evaluation.
+    upward_leaf_batch_size : Optional[int]
+        Leaves per batch in the P2M sweep.
+    host_refine_mode : str
+        Whether leaf refinement runs on the host, on device, or by policy.
+    fail_fast : bool
+        Raise instead of falling back when a requested configuration cannot run.
+    preset : Optional[Union[str, FMMPreset]]
+        Named configuration bundle applied before the individual keywords above. An
+        enum member or its string value.
+    fixed_order : Optional[int]
+        Pin the expansion order, bypassing preset and adaptive selection.
+    fixed_max_leaf_size : Optional[int]
+        Pin the maximum leaf size, bypassing preset selection.
+
+    Raises
+    ------
+    ValueError
+        If any option above is outside its documented domain. The checks are
+        spread across the ``_resolve_*`` helpers, so the message names the
+        offending knob rather than pointing here.
     """
 
     def __init__(
@@ -1425,7 +1605,18 @@ class FMMEngine(
         self._apply_large_n_gpu_production_contract()
 
     def _is_large_n_gpu_production_profile(self) -> bool:
-        """Whether this solver should run the canonical large-N GPU contract."""
+        """Whether this solver should run the canonical large-N GPU contract.
+
+        All four conditions must hold: the ``large_n_gpu`` preset, a radix tree,
+        the solidfmm basis and a non-octree backend. A cached attribute, when
+        present, overrides the live check.
+
+        Returns
+        -------
+        bool
+            ``True`` when the profile matches and the contract in
+            :meth:`_apply_large_n_gpu_production_contract` should be applied.
+        """
         return bool(
             getattr(
                 self,
@@ -1524,7 +1715,16 @@ class FMMEngine(
         )
 
     def _resolve_execution_backend(self) -> str:
-        """Resolve the active FMM execution backend without altering tree choice."""
+        """Resolve the active FMM execution backend without altering tree choice.
+
+        Returns
+        -------
+        str
+            The configured backend, with ``"auto"`` resolved to ``"radix"``.
+            Deliberately does not touch ``tree_type`` -- backend and tree family
+            are independent choices, and only the ``"octree"`` backend constrains
+            the tree (see :meth:`_ensure_execution_backend_supported`).
+        """
         if self.execution_backend == "auto":
             return "radix"
         return self.execution_backend
@@ -1532,7 +1732,30 @@ class FMMEngine(
     def _ensure_execution_backend_supported(
         self, *, tree: Optional[Tree] = None
     ) -> str:
-        """Validate execution backends that are available for the current tree."""
+        """Validate execution backends that are available for the current tree.
+
+        Only ``"octree"`` has requirements; every other backend returns
+        immediately.
+
+        Parameters
+        ----------
+        tree : Optional[Tree]
+            Tree whose ``tree_type`` is checked. ``None`` falls back to the
+            engine's configured ``tree_type``.
+
+        Returns
+        -------
+        str
+            The validated backend name.
+
+        Raises
+        ------
+        ValueError
+            If the ``"octree"`` backend is paired with a non-octree tree.
+        NotImplementedError
+            If the ``"octree"`` backend is paired with a basis other than
+            ``"solidfmm"``.
+        """
         backend = self._resolve_execution_backend()
         if backend != "octree":
             return backend
@@ -1573,7 +1796,24 @@ class FMMEngine(
     def clear_runtime_caches(
         self: "FMMEngine", *, clear_jax_compilation: bool = False
     ) -> None:
-        """Release solver/runtime caches to reduce memory pressure."""
+        """Release solver/runtime caches to reduce memory pressure.
+
+        Drops every retained cache, template and diagnostic counter, so the next
+        call re-prepares from scratch. Numerically inert -- it frees memory and
+        costs recompute, and cannot change what a subsequent evaluation returns.
+
+        Parameters
+        ----------
+        clear_jax_compilation : bool
+            Also clear JAX's own compilation cache. Off by default because that
+            cache is process-global and shared with everything else in the
+            process, so clearing it makes unrelated code recompile too.
+
+        Returns
+        -------
+        None
+            Mutates ``self`` in place.
+        """
 
         self.clear_prepared_state_cache()
         self._locals_template = None
@@ -1727,7 +1967,17 @@ class FMMEngine(
         _clear_global_runtime_caches(clear_jax_compilation=bool(clear_jax_compilation))
 
     def export_m2l_autotune_cache(self: "FMMEngine") -> list[dict[str, Any]]:
-        """Return a JSON-serializable snapshot of global M2L autotune results."""
+        """Return a JSON-serializable snapshot of global M2L autotune results.
+
+        The autotune cache is **process-global**, not per-engine: this reads the
+        same table every engine in the process writes to, so the method is on the
+        engine for discoverability only.
+
+        Returns
+        -------
+        list[dict[str, Any]]
+            One entry per autotuned configuration, ready for ``json.dump``.
+        """
 
         return _m2l_autotune_payload()
 
@@ -1737,12 +1987,39 @@ class FMMEngine(
         *,
         merge: bool = True,
     ) -> int:
-        """Restore global M2L autotune results from serialized payload."""
+        """Restore global M2L autotune results from serialized payload.
+
+        Writes to the process-global table, so this affects every engine in the
+        process, not just this one.
+
+        Parameters
+        ----------
+        payload : list[dict[str, Any]]
+            Entries as produced by :meth:`export_m2l_autotune_cache`.
+        merge : bool
+            Merge into the existing table rather than replacing it.
+
+        Returns
+        -------
+        int
+            Number of entries restored.
+        """
 
         return _restore_m2l_autotune_payload(payload, merge=bool(merge))
 
     def save_m2l_autotune_cache(self: "FMMEngine", path: str) -> int:
-        """Write global M2L autotune cache to a JSON file."""
+        """Write global M2L autotune cache to a JSON file.
+
+        Parameters
+        ----------
+        path : str
+            Destination path, overwritten if it exists.
+
+        Returns
+        -------
+        int
+            Number of entries written.
+        """
 
         payload = self.export_m2l_autotune_cache()
         with open(path, "w", encoding="utf-8") as handle:
@@ -1755,7 +2032,25 @@ class FMMEngine(
         *,
         merge: bool = True,
     ) -> int:
-        """Load global M2L autotune cache from a JSON file."""
+        """Load global M2L autotune cache from a JSON file.
+
+        Parameters
+        ----------
+        path : str
+            Path to a file written by :meth:`save_m2l_autotune_cache`.
+        merge : bool
+            Merge into the existing table rather than replacing it.
+
+        Returns
+        -------
+        int
+            Number of entries restored.
+
+        Raises
+        ------
+        ValueError
+            If the file's top-level JSON value is not a list.
+        """
 
         with open(path, "r", encoding="utf-8") as handle:
             payload = json.load(handle)
@@ -1791,7 +2086,39 @@ def compute_gravitational_acceleration(
     max_order: int = 2,
     return_potential: bool = False,
 ) -> Union[Array, Tuple[Array, Array]]:
-    """Compute gravitational accelerations via the Fast Multipole Method."""
+    """Compute gravitational accelerations via the Fast Multipole Method.
+
+    A one-shot convenience wrapper: it builds a fresh :class:`FMMEngine` per call
+    and therefore reuses nothing between calls. Construct an engine directly if
+    you are evaluating more than once.
+
+    Parameters
+    ----------
+    positions : Array
+        Source and target particle positions.
+    masses : Array
+        Particle masses aligned with ``positions``.
+    theta : float
+        Opening angle for the acceptance criterion.
+    G : Union[float, Array]
+        Gravitational constant.
+    softening : Union[float, Array]
+        Plummer softening length.
+    bounds : Optional[Tuple[Array, Array]]
+        Optional explicit domain bounds used during tree construction.
+    leaf_size : int
+        Target maximum particle count per leaf.
+    max_order : int
+        Multipole/local expansion order.
+    return_potential : bool
+        When ``True``, return ``(accelerations, potentials)``.
+
+    Returns
+    -------
+    Union[Array, Tuple[Array, Array]]
+        Accelerations ``[N, 3]``, or ``(accelerations, potentials)`` when
+        ``return_potential`` is set.
+    """
 
     fmm = FMMEngine(
         theta=theta,
@@ -1816,7 +2143,31 @@ def compute_gravitational_potential(
     G: Union[float, Array] = 1.0,
     softening: Union[float, Array] = 0.0,
 ) -> Array:
-    """Compute gravitational potential at evaluation points."""
+    """Compute gravitational potential at evaluation points.
+
+    Delegates to the **direct-sum reference** implementation, not to the FMM. It
+    is exact and quadratic in the particle count, so it is a correctness oracle
+    rather than a fast path -- unlike
+    :func:`compute_gravitational_acceleration`, which does run the FMM.
+
+    Parameters
+    ----------
+    positions : Array
+        Source particle positions.
+    masses : Array
+        Particle masses aligned with ``positions``.
+    eval_points : Array
+        Points at which to evaluate the potential.
+    G : Union[float, Array]
+        Gravitational constant.
+    softening : Union[float, Array]
+        Plummer softening length.
+
+    Returns
+    -------
+    Array
+        Potential at each entry of ``eval_points``.
+    """
 
     return reference_compute_potential(
         positions,
