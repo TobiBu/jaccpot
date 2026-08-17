@@ -1257,6 +1257,40 @@ Characterization first, because everything after it depends on the net existing.
 0.3 are done** (`e1f1455`, `e5d8e41`); 0.3's ordering was wrong in the original plan and is
 corrected below.
 
+> **RECONCILED 2026-08-17.** The rows below were written when only 0.1/0.3/0.4 carried a
+> status, and most of the rest had in fact landed — the table had stopped saying what was
+> outstanding, which matters because every Tier 1 row is *"gated on the Tier 0
+> characterization named in its row"*. Each row was re-checked against the tree rather
+> than against memory; the result is the **Status** column added below. Two rows are
+> genuinely open (0.2 is done, 0.9 is not), and three could not be settled from the tree
+> alone and say so. The audit is not self-verifying: it now records the check that was
+> run, so the next reader can re-run it.
+
+| # | Status (2026-08-17) | Evidence |
+|---|---|---|
+| 0.1 | **done** | as marked (`e1f1455`) |
+| 0.2 | **done** | `tests/characterization/golden_modes/` exists with 6 `.npz`; `test_fmm_golden.py` carries `class_major` ×7, `pair_grouped` ×8, `bucketed` ×3, `potential` ×12. 25 goldens total across `golden/` (13), `golden_grad/` (6), `golden_modes/` (6) |
+| 0.3 | **done** | as marked (`e5d8e41`) |
+| 0.4 | **blocked** | as marked — became bug report G.10 |
+| 0.5 | **done** | `test_p2m_real_direct_dehnen_table3` |
+| 0.6 | **done** | `test_real_static_num_levels_bit_identical_to_padded` in `tests/unit/core/test_real_upward_sweep.py` |
+| 0.7 | **done** | `test_leafpair_decoupled_same_array_reproduces_the_coupled_kernel` |
+| 0.8 | **done** | `test_custom_vjp_parity.py:670` + `monkeypatch.setenv("JACCPOT_FUSED_M2L_VJP", "0")` |
+| 0.9 | **OPEN — no evidence found** | `tests/unit/core/test_near_field.py` has 20 tests and none matches a staticness/tracer contract (searched for `softening.*[Tt]racer`, `ConcretizationTypeError`, `staticness`, `def test.*static`). Either never landed or landed somewhere the search missed |
+| 0.10 | **done** | `[tool.coverage.run]` now carries the comment *"used to be omitted here too"* plus the 92% measurement; the omit entry is gone |
+| 0.11 | **not verifiable from the tree** | The cited sites were docstring *corrections*; with the wrong text gone there is nothing left to detect. Not re-openable by inspection |
+| 0.12 | **likely done** | `GradConfig` ×2 and `TraversalOverrides` ×1 now appear in `ARCHITECTURE.md`, which the row asked for. The twelve→fourteen phrasing is no longer present in either form, so the count claim cannot be re-checked verbatim |
+| 0.13 | **not verifiable from the tree** | Neither `4/5` nor `7/11` appears in `STYLE_GUIDE.md`; §8 has been rewritten since, so the inventory numbers the row names no longer exist to compare |
+| 0.14 | **done** | `flake8 --select=F401 jaccpot/` → **0**. (`pyflakes` reports 178 because it does not honour `# noqa`; those are the deliberate re-exports from the `_fmm_impl` import cleanup) |
+| 0.15 | **done** | 11 of the `runtime/fmm_*.py` mixins carry `if TYPE_CHECKING`; `PreparedStateLike` now lives in `fmm_state.py` |
+| 0.16 | **done** | exactly one module lacks `from __future__ import annotations`: `jaccpot/experimental/__init__.py` |
+| 0.17 | **done** | all four old paths absent: `benchmarks/n_ladder_production`, `results/validation`, `bench/real_vs_complex_gpu_plan.md`, `OCTREE_JACCPOT_STATUS_2026-03-15.md` |
+| 0.18 | **done** | `tests/` root holds only `__init__.py` and `conftest.py` |
+| 0.19 | **done** | `test_large_n_grad_path.py` gone, `test_large_n_config_thresholds.py` present |
+| 0.20 | **done, and subsumed** | superseded by the 2.5 programme — see that row |
+| 0.21 | **done** | `NUMERICS_AND_JAX.md:126` — *"A gradient test at a default leaf size covers no far field. Assert the M2L pair count…"* |
+
+
 | # | Item | Touches | Closes | Verified by |
 |---|---|---|---|---|
 | ~~**0.1**~~ **DONE `e1f1455`** | **Gradient golden.** `tests/characterization/test_fmm_grad_golden.py` + **6** `.npz` (not 8 — the reverse compile costs ~1.1-1.5 GB per case, so the grid was trimmed and `_DIFF_FMM_TEST_FILES` in `tests/conftest.py` extended). Two gates as specified | `tests/characterization/`, `tests/conftest.py`, `tests/slow_tests.txt` | F03, D.1 | Done: full suite 839 passed / 57 skipped; forward golden unmoved; reverse-only mutation caught (D.1). **G.9 risk now RESOLVED** (per-particle inertness gate; see G.9) |
@@ -1285,6 +1319,25 @@ corrected below.
 
 Each of these is gated on the Tier 0 characterization named in its row.
 
+> **RECONCILED 2026-08-17. Tier 1 is effectively closed, with two asterisks and one
+> stale row.**
+>
+> * **1.1-1.6 and 1.9 are closed** as their rows record (PRs #79-#85, #81).
+> * **1.7 is done AS SCOPED, not exhaustively.** Two of seven phases were extracted, by
+>   design — the row already lists the other five with the ratio that argued against
+>   them. `_prepare_state_dual_and_downward` is still **600 lines**. Read the row as
+>   "the two cuts that earned a signature were made", not "the function was decomposed".
+> * **1.8 leaves F11's deferred half OPEN**, and it is still blocked by the same thing:
+>   `.github/workflows/ci.yml` has **zero** `cuda`/`gpu`/`nvidia` legs, so the GPU
+>   coverage the row waits on does not exist. That is Tier 2 item **2.6**, and it is a
+>   budget decision, not work.
+> * **1.10 was marked "◐ part 1 of 3" and its substance is now COMPLETE.** Its target
+>   set — numerics functions with ≥8 parameters still violating under
+>   `--skip-checking-short-docstrings=False` — measures **zero**. The row is stale, not
+>   outstanding. The programme that finished it is item 2.5's, not 1.10's own three PRs.
+>
+> So nothing in Tier 1 needs doing except a decision on 2.6.
+
 | # | Item | Touches | Closes | Gated on | Verified by |
 |---|---|---|---|---|---|
 | **1.1** ✔ **PR #79** | Extract `_alignment_angles(x, y, z)` from `_multipole_align_{to,from}_z_block` — verbatim expression move, **no new `@jit`** | `operators/real_harmonics.py` | F30 | 0.3, 0.4 | **Done.** The duplication had grown, not shrunk: G.10 turned 12 shared lines + a 9-line comment into 6 + 38. Verified bit-identical *including all three JVP components* (`np.array_equal`) over 7 directions × `ell` 0..6 — the tangent check is the load-bearing one, since these are the guards G.10 proved wrong at `rho == 0`. |
@@ -1306,7 +1359,7 @@ Each of these is gated on the Tier 0 characterization named in its row.
 | **2.2** ✔ **PR #105** | Consolidate the four hand-rolled env parsers (F13, A.4) | Changes malformed-value semantics — which reverse-mode M2L kernel runs. Requires deciding what a garbage value should mean | **Done. Decided: a malformed value means THE DEFAULT, whatever it is**, plus a one-time warning naming the variable and the value ignored. That is not a new convention — `env_int`/`env_float` already did it and `env_flag` was the outlier, so `_env` disagreed with itself. The "four parsers" were really *three* semantics (denylist flag ×2, allowlist flag, enum-with-fallback), which is why they could not be deduped mechanically; `env_choice` was added for the third. Verified over 14 inputs per reader: FUSED and DIAG unchanged on all 14, JIT differs on 6 malformed inputs (False → the default), which is the intended consequence. A.4's specific warning is satisfied. `_env` also had **no tests**; it has 39 now, written first. |
 | **2.3** ✔ **CLOSED (`ab58c3d`)** | Delete or wire up the Wigner reference family (F32, ~260 lines, 8 `__all__` names) | Removes module-public names | **Already done; this row was stale.** G.4 records the decision (deleted) and `ab58c3d` carried it out. Verified 2026-08-15: `grep -ri wigner jaccpot/` returns **two prose mentions and no code** — `operators/_precision.py:5` and `operators/real_rotations.py:51-55`, both explaining why the closed-form Dehnen builders are the only rotation path. No `__all__` name remains. Nothing to do. |
 | **2.4** | Any rename from section C | Public API; `test_public_api_surface.py` must change in the same commit | Your call, per your instruction |
-| **2.5** ✖ **BLOCKED — measured 2026-08-15** | Turn off `--skip-checking-short-docstrings` in `pyproject.toml` | 2840 violations must be at zero first; this is the *last* commit of the docstring programme, not the first | **Cannot be done yet: 2403 violations across 524 distinct functions remain** with the flag off. Down from 2840 (0.20, 1.10 batches 1–2, F23 part 3), i.e. the programme is ~15% complete, not nearly finished. Worst files: `operators/complex_ops.py` 250, `runtime/fmm_prepare.py` 150, `downward/local_expansions.py` 117, `runtime/_interaction_cache.py` 109, `runtime/_adaptive_policy.py` 108, `solver.py` 100. By code: 507 DOC201 + 498 DOC203 (missing/mismatched `Returns`), 495 DOC101 + 495 DOC103 (missing/mismatched `Parameters`), 138 DOC501 + 138 DOC503 (missing `Raises`). `jaccpot/pallas/` is the only package-level directory at zero. **Measurement note:** pydoclint writes findings to **stderr**, so a `2>/dev/null` in the counting command reports 0 for any directory — that is how an early pass here produced "every subdirectory is clean" against a package total of 2403. |
+| **2.5** ✔ **DONE `cc3b4b9` (PR #150) — unblocked a different way** | Turn off `--skip-checking-short-docstrings` in `pyproject.toml` | ~~2840 violations must be at zero first; this is the *last* commit of the docstring programme, not the first~~ **This premise was wrong, and waiting on it was the mistake.** The flag is now off, with `baseline = ".pydoclint-baseline.txt"` carrying the pre-existing tail — so the gate is live *while* the tail retires, instead of the tail being unprotected until the end. What forced the rethink: `runtime/_adaptive_policy.py` was driven to zero (PR #118) and `main` was never at zero, because five functions from a concurrent branch merged into the same file without conflict and the vacuous hook reported 0 throughout (repaired in PR #149). Absolute counts on `main` after the programme: **`jaccpot/` 153**, `tests/` 1034, `bench/` 121, `examples/` 60. Regenerate with `pydoclint --config pyproject.toml --generate-baseline True .` and check the diff only *removes* lines; `auto-regenerate-baseline` must stay `false` because the pre-commit hook passes staged filenames and would rebuild the baseline from a subset. | **Cannot be done yet: 2403 violations across 524 distinct functions remain** with the flag off. Down from 2840 (0.20, 1.10 batches 1–2, F23 part 3), i.e. the programme is ~15% complete, not nearly finished. Worst files: `operators/complex_ops.py` 250, `runtime/fmm_prepare.py` 150, `downward/local_expansions.py` 117, `runtime/_interaction_cache.py` 109, `runtime/_adaptive_policy.py` 108, `solver.py` 100. By code: 507 DOC201 + 498 DOC203 (missing/mismatched `Returns`), 495 DOC101 + 495 DOC103 (missing/mismatched `Parameters`), 138 DOC501 + 138 DOC503 (missing `Raises`). `jaccpot/pallas/` is the only package-level directory at zero. **Measurement note:** pydoclint writes findings to **stderr**, so a `2>/dev/null` in the counting command reports 0 for any directory — that is how an early pass here produced "every subdirectory is clean" against a package total of 2403. |
 | **2.6** | Nightly GPU CI leg for `_large_n_*`, `distributed/`, and Pallas non-interpret | Infrastructure, and it is what unblocks F27/F33/F34 and the deferred half of F11 | A decision on GPU budget — CLAUDE.md says confirm before occupying one |
 
 ---
