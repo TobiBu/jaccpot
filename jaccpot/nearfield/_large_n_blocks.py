@@ -20,7 +20,7 @@ unchanged.
 from __future__ import annotations
 
 from functools import partial
-from typing import Union
+from typing import Callable, Union
 
 import jax
 import jax.numpy as jnp
@@ -55,7 +55,43 @@ def _compute_leaf_p2p_prepared_large_n_self_only_impl(
     G: Union[float, Array],
     softening_sq: Array,
 ) -> Array:
-    """Self-leaf portion of the specialized large-N accel-only kernel."""
+    """Self-leaf portion of the specialized large-N accel-only kernel.
+
+    Intra-leaf interactions only, already scattered back to particle order. It is
+    one of two additive halves -- the cross-leaf pair blocks are the other -- so
+    the array returned here is not the near field on its own.
+
+    Decorated with a bare :func:`jax.jit`, so every argument is traced and none
+    may be a Python-level switch.
+
+    Parameters
+    ----------
+    positions : Array
+        ``[N, 3]`` particle positions in tree order. Read only for its shape and
+        dtype: the values that matter come in through ``leaf_positions``, and
+        this fixes the output shape and the working dtype.
+    leaf_positions : Array
+        ``[num_leaves, W, 3]`` padded leaf-major positions.
+    leaf_masses : Array
+        ``[num_leaves, W]`` padded leaf-major masses.
+    leaf_mask : Array
+        ``[num_leaves, W]`` occupancy; masked slots contribute exactly zero and
+        are also excluded from the scatter.
+    leaf_particle_idx : Array
+        ``[num_leaves, W]`` particle index behind each slot, clipped so a masked
+        slot cannot gather or scatter out of bounds.
+    G : Union[float, Array]
+        Gravitational constant, cast to ``positions.dtype`` internally.
+    softening_sq : Array
+        Plummer softening **squared**. Squared, not linear -- passing the
+        softening length itself gives a silently over-softened force.
+
+    Returns
+    -------
+    Array
+        ``[N, 3]`` accelerations in particle order, zero for every particle whose
+        leaf slot was masked.
+    """
     dtype = positions.dtype
     g_const = jnp.asarray(G, dtype=dtype)
     accelerations = jnp.zeros_like(positions)
@@ -501,9 +537,51 @@ def _collect_target_leaf_batch_acc(
     leaf_size: int,
     target_leaf_batch_size: int,
     batch_scan_unroll: int,
-    batch_body,
+    batch_body: Callable[[Array], Array],
 ) -> Array:
-    """Collect fixed-shape target-leaf batch accumulations into leaf-major form."""
+    """Collect fixed-shape target-leaf batch accumulations into leaf-major form.
+
+    The batching loop shared by the three target-block lanes. It owns only the
+    scan over leaf batches and the reshape back to leaf-major; all the physics
+    lives in ``batch_body``.
+
+    The trailing ``[:num_leaves]`` is what makes a ragged leaf count work: the
+    scan runs ``ceil(num_leaves / target_leaf_batch_size)`` fixed-width batches,
+    so the last one overhangs, and the overhang rows are dropped here rather than
+    guarded inside the body. ``batch_body`` must therefore still return a
+    full-width, well-defined block for a partial batch -- its own
+    ``target_active`` masking is what keeps those rows finite.
+
+    Parameters
+    ----------
+    num_leaves : int
+        Number of target leaves. Static; sets the batch count and the final trim.
+    leaf_size : int
+        Slot capacity ``W`` per leaf. Static; must match the trailing width of
+        what ``batch_body`` returns, or the reshape fails.
+    target_leaf_batch_size : int
+        Leaves per batch. Static. A tuning knob only -- it changes the scan
+        shape, not the result.
+    batch_scan_unroll : int
+        ``lax.scan`` unroll factor. Static, tuning only.
+    batch_body : Callable[[Array], Array]
+        Called once per batch with the traced first leaf id of that batch, and
+        must return ``[target_leaf_batch_size, leaf_size, 3]``. It is invoked
+        under ``scan``, so it must be traceable and shape-invariant across
+        batches.
+
+    Returns
+    -------
+    Array
+        ``[num_leaves, leaf_size, 3]`` accelerations in leaf-major order --
+        **not** particle order; the caller scatters.
+
+    Raises
+    ------
+    ValueError
+        If ``target_leaf_batch_size`` or ``batch_scan_unroll`` is not positive.
+        Both are host-side checks on static values.
+    """
     leaf_batch = int(target_leaf_batch_size)
     if leaf_batch <= 0:
         raise ValueError("target_leaf_batch_size must be positive")
