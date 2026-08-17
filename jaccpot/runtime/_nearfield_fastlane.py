@@ -62,6 +62,7 @@ class NearfieldTopologyNotConcrete(RuntimeError):
 
 def clear_nearfield_fastlane_payload_cache() -> None:
     """Drop every memoized leaf-major payload (tests / memory pressure).
+
     Returns
     -------
     None
@@ -72,6 +73,7 @@ def clear_nearfield_fastlane_payload_cache() -> None:
 
 def _host(array: Any, what: str) -> np.ndarray:
     """Pull a frozen-topology array to the host, or say precisely why we cannot.
+
     Parameters
     ----------
     array : Any
