@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from typing import Optional, Tuple, Union
 
 import jax.numpy as jnp
-from jaxtyping import Array
+from jaxtyping import Array, Float, Int
 
 from .config import GradConfig
 from .runtime.fmm_caches import _contains_tracer
@@ -91,10 +91,10 @@ class OdisseoFMMCoupler:
 
     def prepare(
         self: "OdisseoFMMCoupler",
-        state: Array,
-        masses: Array,
+        state: Float[Array, "n 2 3"],
+        masses: Float[Array, "n"],
         *,
-        bounds: Optional[Tuple[Array, Array]] = None,
+        bounds: Optional[Tuple[Float[Array, "3"], Float[Array, "3"]]] = None,
         leaf_size: Optional[int] = None,
         max_order: Optional[int] = None,
     ) -> FMMPreparedState:
@@ -106,13 +106,13 @@ class OdisseoFMMCoupler:
 
         Parameters
         ----------
-        state : Array
+        state : Float[Array, 'n 2 3']
             ODISSEO primitive state ``[N, 2, 3]``; only the position slot is
             read. Velocities do not enter the tree.
-        masses : Array
+        masses : Float[Array, 'n']
             ``[N]`` particle masses. Retained on the instance, which is what
             makes ``masses`` optional on later :meth:`accelerations` calls.
-        bounds : Optional[Tuple[Array, Array]]
+        bounds : Optional[Tuple[Float[Array, '3'], Float[Array, '3']]]
             ``(lower, upper)`` root-box corners, or ``None`` (the default) to
             derive them from the positions. Supplying fixed bounds across steps
             is what keeps the tree topology -- and so the compiled shapes --
@@ -145,13 +145,13 @@ class OdisseoFMMCoupler:
 
     def accelerations(
         self: "OdisseoFMMCoupler",
-        state: Array,
-        masses: Optional[Array] = None,
+        state: Float[Array, "n 2 3"],
+        masses: Optional[Float[Array, "n"]] = None,
         *,
-        active_indices: Optional[Array] = None,
+        active_indices: Optional[Int[Array, "t"]] = None,
         return_potential: bool = False,
         rebuild_sources: bool = False,
-        bounds: Optional[Tuple[Array, Array]] = None,
+        bounds: Optional[Tuple[Float[Array, "3"], Float[Array, "3"]]] = None,
         differentiable: bool = False,
         grad_config: Optional[GradConfig] = None,
     ) -> Union[Array, Tuple[Array, Array]]:
@@ -162,17 +162,17 @@ class OdisseoFMMCoupler:
 
         Parameters
         ----------
-        state : Array
+        state : Float[Array, 'n 2 3']
             ODISSEO primitive state, shape ``(N, 2, 3)``.
-        masses : Optional[Array]
+        masses : Optional[Float[Array, 'n']]
             Particle masses; required on the first call, cached thereafter.
-        active_indices : Optional[Array]
+        active_indices : Optional[Int[Array, 't']]
             Evaluate only these targets (all particles remain sources).
         return_potential : bool
             Also return the potential. Not available on the differentiable path.
         rebuild_sources : bool
             Rebuild the tree from ``state`` before evaluating.
-        bounds : Optional[Tuple[Array, Array]]
+        bounds : Optional[Tuple[Float[Array, '3'], Float[Array, '3']]]
             Explicit ``(lower, upper)`` domain bounds for tree construction,
             forwarded to :meth:`prepare`. Used only when a rebuild actually
             happens -- i.e. when ``rebuild_sources=True`` or no state is cached

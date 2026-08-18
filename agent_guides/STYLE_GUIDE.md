@@ -128,6 +128,33 @@ Never write a docstring that restates the name. `"""Compute the multipole."""` o
 - **`jaxtyping` for array arguments** (already in 49 modules) so shape and dtype live in the
   signature. Plain `Array` throws away exactly what the reader needs. Keep axis names
   consistent so `jaxtyping` can cross-check within a signature.
+
+  **The axis vocabulary.** Lowercase, and shared across the package so a reader learns it
+  once. Extend it deliberately -- each name also has to be added to the `--builtins` list on
+  the flake8 hook, for the reason recorded there.
+
+  | axis | meaning |
+  |---|---|
+  | `n` | particles |
+  | `t` | targets, when a call returns a subset of the particles |
+  | `levels` | block-step levels, `k_max + 1` of them |
+  | `3` | the spatial dimension -- a literal, not a name |
+
+  Applied to the public facade (`solver.py`, `autodiff.py`, `odisseo.py`,
+  `nornax_adapter.py`) first, because that is where the shape is least guessable from
+  context. **Do not annotate a function that is `vmap`ped or used as a `scan` body with the
+  batch axis**: it receives one slice, so `Float[Array, "n 3"]` sees `(3,)` and fails under
+  `JACCPOT_RUNTIME_TYPECHECK=1`. There are 122 `vmap`/`scan` sites in the package, so this is
+  the common case inside the kernels, not an edge case.
+
+  **Return types are often not annotatable, and that is not an oversight.** Where a call takes
+  an optional `target_indices`, the result is `[n, 3]` without it and `[t, 3]` with it;
+  jaxtyping cannot express "this axis or that one", so those returns stay bare. Annotating
+  them would require asserting one of two shapes is always right, which is worse than silence.
+
+  Docstring parameter types mirror the annotation verbatim, as everywhere else -- pydoclint
+  enforces it -- using single quotes inside the docstring so the type does not terminate it:
+  `positions : Float[Array, 'n 3']`.
 - `beartype` provides the runtime check; it is opt-in via `JACCPOT_RUNTIME_TYPECHECK=1`.
   Run it on the unit tests when you touch signatures.
 - Use `TypeVar` for decorators that must preserve the wrapped signature (see

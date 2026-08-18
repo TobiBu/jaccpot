@@ -57,7 +57,31 @@ repos:
         # `fmm_sweeps.py:380`, so keeping it would mean annotating correct code to
         # satisfy the linter. The three defects this hook exists for were all
         # undefined names.
-        args: ["--select=F821,F822"]
+        #
+        # `--builtins` is the jaxtyping axis vocabulary, and it is here because
+        # pyflakes parses a string inside an annotation as a forward reference.
+        # `Float[Array, "n 3"]` is fine -- "n 3" is not a Python identifier, so it
+        # is ignored -- but `Float[Array, "n"]` reports `F821 undefined name 'n'`.
+        # Only SINGLE-identifier axes trip it, which is exactly the 1-D case where
+        # a shape annotation is cheapest and most useful (`masses: Float[Array,
+        # "n"]`). Measured 2026-08-18.
+        #
+        # The alternative was a `# noqa: F821` per annotation, rejected because the
+        # count grows with every annotation added and the suppression would end up
+        # on hundreds of lines. This list is the axis vocabulary itself, so it also
+        # documents it:
+        #
+        #     n       particles
+        #     t       targets, when a call returns a subset of the particles
+        #     levels  block-step levels, `k_max + 1` of them
+        #
+        # THE COST, stated because it is real: a bare `n` used in code and never
+        # assigned is no longer flagged. Verified that everything this hook exists
+        # for still is -- `MACTypeInput` (PR #94's defect) still reports F821, and
+        # F822 on `__all__` is untouched. Grow this list only alongside the
+        # annotations that need it, one reviewed entry at a time; it is not a
+        # general-purpose ignore.
+        args: ["--select=F821,F822", "--builtins=n,t,levels"]
         # NOT scoped: the whole repo, `examples/` and `bench/` and `tests/` included.
         # It was `files: ^jaccpot/` when introduced, because
         # `examples/benchmark_gpu_radix_worker.py` carried 14 pre-existing F821s and
