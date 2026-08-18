@@ -39,6 +39,10 @@ if TYPE_CHECKING:  # pragma: no cover - annotations only, no runtime import
     # annotations documented an intent no tool could check.
     from ._fmm_impl import FMMEngine
 
+__all__ = [
+    "AutotuneMixin",
+]
+
 
 class AutotuneMixin:
     def _select_autotune_m2l_candidates(self, *, pair_count: int) -> tuple[int, ...]:

@@ -80,6 +80,30 @@ from .grad import (  # noqa: F401
     clear_leafpair_reverse_tier_cache,
 )
 
+__all__ = [
+    "RadixFastLanePerfCounters",
+    "build_leafpair_reverse_tiers",
+    "collect_radix_fast_lane_counters",
+    "compute_leaf_p2p_accelerations",
+    "compute_leaf_p2p_accelerations_large_n_accel_only",
+    "compute_leaf_p2p_accelerations_target_block_pairs_only",
+    "prepare_bucketed_scatter_schedules",
+    "prepare_bucketed_scatter_schedules_from_groups",
+]
+
+# RE-EXPORTS. The names below are imported for other modules to reach through
+# this one, and are unused *here*. Holding references makes that a fact the
+# interpreter can see: `pyflakes` counts them as used, so whatever it still
+# reports for this module is a real dead import rather than noise. A tuple of
+# STRINGS would not do it, and neither does `# noqa` -- pyflakes ignores noqa,
+# and isort hoists a trailing comment onto the whole import group, so a name that
+# later goes unused inside that group is never flagged. Verified, 2026-08-18.
+_REEXPORTS = (
+    _leafpair_accel_analytic_vjp,
+    _pair_accel_cvjp,
+    _pair_accel_masked_accels,
+)
+
 _LARGE_N_NEARFIELD_DIAG_MODES = frozenset(("full", "self_only", "pairs_only", "zero"))
 
 
