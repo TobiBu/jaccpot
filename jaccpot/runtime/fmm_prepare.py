@@ -124,6 +124,10 @@ if TYPE_CHECKING:  # pragma: no cover - annotations only, no runtime import
     # annotations documented an intent no tool could check.
     from ._fmm_impl import FMMEngine, PreparedStateLike
 
+__all__ = [
+    "PrepareMixin",
+]
+
 
 class _DualDownwardPlan(NamedTuple):
     """Everything the dual/downward phase resolves before it builds anything.

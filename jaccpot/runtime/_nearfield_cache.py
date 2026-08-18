@@ -8,6 +8,13 @@ from jaxtyping import Array
 
 from ._interaction_cache import _InteractionCacheEntry
 
+__all__ = [
+    "NearfieldPrecomputeArtifacts",
+    "nearfield_cache_matches",
+    "nearfield_from_cache",
+    "with_nearfield_cache_artifacts",
+]
+
 
 class NearfieldPrecomputeArtifacts(NamedTuple):
     """Precomputed near-field pair lists and optional bucket schedules.

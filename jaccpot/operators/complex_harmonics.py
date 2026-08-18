@@ -19,6 +19,14 @@ import jax.numpy as jnp
 
 from .real_harmonics import sh_index, sh_size
 
+__all__ = [
+    "complex_R_solidfmm",
+    "complex_R_solidfmm_preserve_dtype",
+    "complex_S_solidfmm",
+    "p2m_complex",
+    "p2m_complex_batch",
+]
+
 
 def _pack_complex(full_nm: jnp.ndarray) -> jnp.ndarray:
     """Pack a (p+1, p+1) complex array (m>=0) into (p+1)^2 with m in [-n,n].

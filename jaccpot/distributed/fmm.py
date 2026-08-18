@@ -105,6 +105,18 @@ from jaccpot.upward.solidfmm_complex_tree_expansions import (
 )
 from jaccpot.upward.tree_geometry import compute_tree_geometry_compiled
 
+__all__ = [
+    "DIAG_FIELDS",
+    "DistributedFMMConfig",
+    "DistributedFMMResult",
+    "GRAD_HALO_EXCHANGES",
+    "JAX_RAGGED_GRAD_FIXED_VERSION",
+    "distributed_fmm_accelerations",
+    "make_force_evaluator",
+    "partition_for_devices",
+    "resolve_grad_halo_exchange",
+]
+
 # Reverse-pass tiling for the differentiable fused near field. Mirrors the
 # single-GPU defaults in ``runtime/grad_options.py`` (leaf_batch/block_tile = 8);
 # the distributed body has no GradConfig channel, so they are fixed here.

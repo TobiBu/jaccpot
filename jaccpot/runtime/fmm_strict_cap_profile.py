@@ -23,6 +23,10 @@ if TYPE_CHECKING:  # pragma: no cover - annotations only, no runtime import
     # annotations documented an intent no tool could check.
     from ._fmm_impl import FMMEngine, PreparedStateLike
 
+__all__ = [
+    "StrictCapProfileMixin",
+]
+
 
 class StrictCapProfileMixin:
     def _strict_cap_profile_path(self) -> str:

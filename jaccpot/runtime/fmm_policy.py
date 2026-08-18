@@ -53,6 +53,10 @@ if TYPE_CHECKING:  # pragma: no cover - annotations only, no runtime import
     # annotations documented an intent no tool could check.
     from ._fmm_impl import FMMEngine
 
+__all__ = [
+    "PolicyMixin",
+]
+
 
 #: Opening angle the force-scale prepass traversal defaults to. See
 #: :meth:`PolicyMixin._force_scale_prepass_theta` for the measurement behind it.

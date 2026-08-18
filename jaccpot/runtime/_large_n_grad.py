@@ -39,6 +39,13 @@ from ._large_n_types import LargeNPreparedState
 from .dtypes import INDEX_DTYPE
 from .kernels.core import _evaluate_local_expansions_for_particles, _FarPairCOO
 
+__all__ = [
+    "LargeNGradPlan",
+    "evaluate_large_n_state_at_positions_and_masses_sorted",
+    "large_n_farfield_locals_at",
+    "prepare_large_n_grad_plan",
+]
+
 
 @dataclass(frozen=True)
 class LargeNGradPlan:

@@ -60,6 +60,12 @@ if TYPE_CHECKING:  # pragma: no cover - annotations only, no runtime import
     # annotations documented an intent no tool could check.
     from ._fmm_impl import PreparedStateLike
 
+__all__ = [
+    "OverridesMixin",
+    "normalize_traversal_config_request",
+    "warn_full_traversal_config_replacement",
+]
+
 
 # Merge base for a field-by-field override that arrives on a route with no
 # resolved config at all (no preset, no policy default). Only the fields the

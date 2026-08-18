@@ -53,6 +53,8 @@ from ._m2l import (
     _accumulate_solidfmm_m2l_grouped_class_major,
 )
 
+__all__: list[str] = []
+
 
 class _FarPairCOO(NamedTuple):
     """Compact COO-style far-pair representation for streamed M2L execution.

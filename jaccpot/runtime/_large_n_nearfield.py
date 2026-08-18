@@ -25,6 +25,16 @@ from ._large_n_types import LargeNExecutionConfig, LargeNPreparedState
 from ._nearfield_cache import NearfieldPrecomputeArtifacts
 from .dtypes import INDEX_DTYPE, as_index
 
+__all__ = [
+    "build_large_n_leaf_particle_groups",
+    "build_large_n_nearfield_precompute",
+    "build_large_n_target_owned_blocks",
+    "build_large_n_target_owned_blocks_static",
+    "evaluate_large_n_nearfield_fast_lane",
+    "normalize_large_n_nearfield_diag_mode",
+    "resolve_large_n_execution_config",
+]
+
 _RADIX_FAST_LANE_DEFAULT_TARGET_BLOCK_SIZE = 32
 _LARGE_N_NEARFIELD_DIAG_MODES = frozenset(
     ("full", "self_only", "pairs_only", "overflow_only", "zero")
