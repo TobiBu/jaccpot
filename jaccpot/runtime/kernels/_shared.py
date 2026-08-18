@@ -16,6 +16,12 @@ from typing import Literal, NamedTuple, Optional
 
 from jaxtyping import Array
 
+__all__ = [
+    "ExpansionBasis",
+    "NearfieldInteropData",
+    "PackedAccelerationDerivatives",
+]
+
 ExpansionBasis = Literal["cartesian", "solidfmm", "complex"]
 PackedAccelerationDerivatives = tuple[Array, ...]
 _STRICT_REFRESH_DETAIL_DIAG_MODES = frozenset(

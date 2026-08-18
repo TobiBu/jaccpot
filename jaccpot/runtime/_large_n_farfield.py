@@ -11,6 +11,10 @@ from ._large_n_types import LargeNPreparedState
 from .dtypes import INDEX_DTYPE
 from .kernels._shared import PackedAccelerationDerivatives
 
+__all__ = [
+    "evaluate_large_n_farfield",
+]
+
 
 def evaluate_large_n_farfield(
     state: LargeNPreparedState,

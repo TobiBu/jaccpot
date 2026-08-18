@@ -22,6 +22,16 @@ from typing import Any, Optional
 
 from .fmm import DistributedFMMConfig
 
+__all__ = [
+    "CAP_FIELDS",
+    "apply_caps",
+    "caps_of",
+    "load_presets",
+    "lookup",
+    "record",
+    "save_presets",
+]
+
 # The traversal-buffer capacities the retry loop grows -- everything that affects a
 # static buffer shape. Order-independent; None means "driver right-sizes it".
 CAP_FIELDS = (

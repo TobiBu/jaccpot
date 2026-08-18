@@ -34,6 +34,11 @@ from .real_harmonics import (
     sh_size,
 )
 
+__all__ = [
+    "m2l_solidfmm_reference",
+    "translate_along_z_m2l_complex",
+]
+
 
 @lru_cache(maxsize=None)
 def _complex_Dz(ell: int, angle: float) -> np.ndarray:

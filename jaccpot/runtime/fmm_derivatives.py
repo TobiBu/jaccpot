@@ -44,6 +44,10 @@ if TYPE_CHECKING:  # pragma: no cover - annotations only, no runtime import
     # annotations documented an intent no tool could check.
     from ._fmm_impl import FMMEngine
 
+__all__ = [
+    "DerivativesMixin",
+]
+
 
 class DerivativesMixin:
     @jaxtyped(typechecker=beartype)

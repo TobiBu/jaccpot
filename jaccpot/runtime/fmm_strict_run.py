@@ -40,6 +40,10 @@ if TYPE_CHECKING:  # pragma: no cover - annotations only, no runtime import
     # annotations documented an intent no tool could check.
     from ._fmm_impl import FMMEngine, PreparedStateLike
 
+__all__ = [
+    "StrictRunMixin",
+]
+
 
 class StrictRunMixin:
     def refresh_prepared_state(
