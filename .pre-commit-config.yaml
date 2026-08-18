@@ -18,10 +18,18 @@ repos:
         # `pydoclint --config pyproject.toml jaccpot/` reproduces the hook exactly.
         #
         # `skip-checking-short-docstrings = false` there is what makes this hook
-        # mean anything; `.pydoclint-baseline.txt` carries the pre-existing tail so
-        # only NEW violations fail. See the comment block in pyproject.toml --
-        # in particular why the baseline must not be auto-regenerated, given that
-        # this hook receives only the staged files.
+        # mean anything. There is no baseline any more: the Tier 2.5 programme drove
+        # `jaccpot/` to 0 and the baseline was retired, because one that suppresses
+        # nothing real can still absorb a NEW violation in a file it still lists.
+        #
+        # SCOPED, and the scope is what makes retiring the baseline safe. The
+        # baseline's final 1215 entries were entirely outside `jaccpot/` (tests/
+        # 1034, bench/ 121, examples/ 60), so an unscoped hook with no baseline
+        # would be red on day one over violations it had never been catching.
+        # `^jaccpot/` keeps enforcement on the package exactly as it was, minus the
+        # suppression mechanism. Widening this to tests/, bench/ or examples/ means
+        # documenting those 1215 first -- it is a real backlog, not a flag flip.
+        files: ^jaccpot/
         args: ["--config", "pyproject.toml"]
 
   - repo: https://github.com/PyCQA/flake8
