@@ -2,40 +2,31 @@
 
 from __future__ import annotations
 
+from typing import Optional
+
 import jax.numpy as jnp
 from jaxtyping import Array
 
 from ._large_n_types import LargeNPreparedState
 from .dtypes import INDEX_DTYPE
+from .kernels._shared import PackedAccelerationDerivatives
 
 
 def evaluate_large_n_farfield(
     state: LargeNPreparedState,
     *,
     return_potential: bool,
-) -> tuple[Array, Array, Array]:
+) -> tuple[Array, Optional[Array], Optional[PackedAccelerationDerivatives]]:
     """Evaluate leaf-local expansions for every particle in sorted order.
 
     A thin adapter: it unpacks ``state`` and defers to
     :func:`~jaccpot.runtime.kernels._evaluate._evaluate_local_expansions_for_particles`,
     pinning ``expansion_basis="solidfmm"`` and ``max_acc_derivative_order=0``.
     Neither is a parameter here, so this wrapper cannot reach the real basis or
-    the derivative outputs.
+    the derivative outputs -- which is why the third return slot is always
+    ``None``.
 
     Far field only -- the near field is a separate additive term.
-
-    .. warning::
-       **The return annotation is wrong, and the ``Returns`` section below
-       matches the annotation rather than reality**, because pydoclint compares
-       the two textually. The delegate is annotated
-       ``tuple[Array, Optional[Array], Optional[PackedAccelerationDerivatives]]``
-       and genuinely returns ``None`` in the last two slots: the potential is
-       ``None`` unless ``return_potential``, and the derivative tuple is *always*
-       ``None`` here because ``max_acc_derivative_order`` is pinned to 0.
-       Unpacking this as three arrays will fail. The function currently has no
-       callers anywhere in ``jaccpot/``, ``tests/`` or ``bench/``, which is why
-       nothing has tripped over it; correcting the annotation needs its own
-       change with its own test.
 
     Parameters
     ----------
@@ -51,14 +42,14 @@ def evaluate_large_n_farfield(
     Returns
     -------
     Array
-        ``[N, 3]`` accelerations in **sorted** (tree) order, not the caller's
-        input order. This one is genuinely an ``Array``.
-    Array
-        Potentials ``[N]`` -- but ``None`` when ``return_potential`` is false.
-        See the warning above.
-    Array
-        Packed acceleration derivatives -- always ``None`` here. See the warning
-        above.
+        ``[N, 3]`` field in **sorted** (tree) order, not the caller's input
+        order. As in the delegate, this is the gradient, not the acceleration.
+    Optional[Array]
+        Potentials ``[N]``, or ``None`` when ``return_potential`` is false.
+    Optional[PackedAccelerationDerivatives]
+        Packed acceleration derivatives -- **always** ``None`` here, because
+        ``max_acc_derivative_order`` is pinned to 0 above. The hint stays as wide
+        as the delegate's own so the two signatures line up.
     """
     # Import lazily to avoid a circular dependency during module import.
     from .kernels.core import _evaluate_local_expansions_for_particles
