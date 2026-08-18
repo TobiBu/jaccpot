@@ -6,17 +6,17 @@ from typing import Optional, Tuple
 
 import jax.numpy as jnp
 from jax import lax
-from jaxtyping import Array
+from jaxtyping import Array, Float, Int
 
 
 def direct_sum_gravitational_acceleration(
-    positions: Array,
-    masses: Array,
+    positions: Float[Array, "n 3"],
+    masses: Float[Array, "n"],
     *,
     theta: float = 0.6,
     G: float = 1.0,
     softening: float = 1e-3,
-    bounds: Optional[Tuple[Array, Array]] = None,
+    bounds: Optional[Tuple[Float[Array, "3"], Float[Array, "3"]]] = None,
     leaf_size: int = 16,
     max_order: int = 4,
 ) -> Array:
@@ -42,10 +42,10 @@ def direct_sum_gravitational_acceleration(
 
     Parameters
     ----------
-    positions : Array
+    positions : Float[Array, 'n 3']
         Particle positions ``[N, 3]``. Any order; unlike the FMM there is no Morton
         sort, so the output is aligned with the input.
-    masses : Array
+    masses : Float[Array, 'n']
         Particle masses ``[N]``.
     theta : float
         **Ignored.** Accepted for signature compatibility with the FMM.
@@ -55,7 +55,7 @@ def direct_sum_gravitational_acceleration(
         Plummer softening length. Added in quadrature, so a coincident pair is
         finite for any nonzero value; at ``softening == 0`` a coincident pair is a
         genuine singularity that this function does not guard.
-    bounds : Optional[Tuple[Array, Array]]
+    bounds : Optional[Tuple[Float[Array, '3'], Float[Array, '3']]]
         **Ignored.** Accepted for signature compatibility with the FMM.
     leaf_size : int
         **Ignored.** Accepted for signature compatibility with the FMM.

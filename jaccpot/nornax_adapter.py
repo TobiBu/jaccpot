@@ -51,7 +51,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 from jax import lax
-from jaxtyping import Array
+from jaxtyping import Array, Float, Int
 
 from jaccpot.mutual.force import (
     MutualFMMState,
@@ -165,7 +165,7 @@ class BlockStepFMM:
         return self._state
 
     def prepare(
-        self: "BlockStepFMM", positions: Array, masses: Array
+        self: "BlockStepFMM", positions: Float[Array, "n 3"], masses: Float[Array, "n"]
     ) -> MutualFMMState:
         """Build the frozen topology for ``positions``/``masses`` and cache it.
 
@@ -177,9 +177,9 @@ class BlockStepFMM:
 
         Parameters
         ----------
-        positions : Array
+        positions : Float[Array, 'n 3']
             ``(n, 3)`` particle positions.
-        masses : Array
+        masses : Float[Array, 'n']
             ``(n,)`` particle masses.
 
         Returns
@@ -217,7 +217,7 @@ class BlockStepFMM:
         return self._state
 
     def refresh(
-        self: "BlockStepFMM", positions: Array, masses: Array
+        self: "BlockStepFMM", positions: Float[Array, "n 3"], masses: Float[Array, "n"]
     ) -> MutualFMMState:
         """Rebuild the frozen topology (alias of :meth:`prepare`).
 
@@ -226,9 +226,9 @@ class BlockStepFMM:
 
         Parameters
         ----------
-        positions : Array
+        positions : Float[Array, 'n 3']
             ``(n, 3)`` particle positions.
-        masses : Array
+        masses : Float[Array, 'n']
             ``(n,)`` particle masses.
 
         Returns
@@ -335,10 +335,10 @@ class BlockStepFMM:
 
     def level_accelerations(
         self: "BlockStepFMM",
-        positions: Array,
-        masses: Array,
+        positions: Float[Array, "n 3"],
+        masses: Float[Array, "n"],
         *,
-        rung: Array,
+        rung: Int[Array, "n"],
         level: int,
         args: object = None,
     ) -> Array:
@@ -356,11 +356,11 @@ class BlockStepFMM:
 
         Parameters
         ----------
-        positions : Array
+        positions : Float[Array, 'n 3']
             ``(n, 3)`` particle positions.
-        masses : Array
+        masses : Float[Array, 'n']
             ``(n,)`` particle masses.
-        rung : Array
+        rung : Int[Array, 'n']
             ``(n,)`` per-particle rung assignment.
         level : int
             Interaction level to isolate. Must lie in ``[0, k_max]``.
@@ -395,10 +395,10 @@ class BlockStepFMM:
 
     def total_accelerations(
         self: "BlockStepFMM",
-        positions: Array,
-        masses: Array,
+        positions: Float[Array, "n 3"],
+        masses: Float[Array, "n"],
         *,
-        rung: Optional[Array] = None,
+        rung: Optional[Int[Array, "n"]] = None,
         args: object = None,
     ) -> Array:
         """Return the full acceleration in a single traversal.
@@ -408,11 +408,11 @@ class BlockStepFMM:
 
         Parameters
         ----------
-        positions : Array
+        positions : Float[Array, 'n 3']
             ``(n, 3)`` particle positions.
-        masses : Array
+        masses : Float[Array, 'n']
             ``(n,)`` particle masses.
-        rung : Optional[Array]
+        rung : Optional[Int[Array, 'n']]
             Ignored -- the unweighted total does not depend on the rung
             assignment. Accepted so the signature matches the level-aware methods.
         args : object
@@ -431,15 +431,15 @@ class BlockStepFMM:
 
     def boundary_kick(
         self: "BlockStepFMM",
-        positions: Array,
-        velocities: Array,
-        masses: Array,
+        positions: Float[Array, "n 3"],
+        velocities: Float[Array, "n 3"],
+        masses: Float[Array, "n"],
         *,
-        rung: Array,
+        rung: Int[Array, "n"],
         active_floor: Any = None,
         dt_max: Any = None,
         half: Any = 1.0,
-        level_weights: Optional[Array] = None,
+        level_weights: Optional[Float[Array, "levels"]] = None,
         args: object = None,
     ) -> Array:
         """Apply one sub-step boundary's kick in a single mutual traversal.
@@ -454,13 +454,13 @@ class BlockStepFMM:
 
         Parameters
         ----------
-        positions : Array
+        positions : Float[Array, 'n 3']
             ``(N, 3)`` particle positions, in the caller's original order.
-        velocities : Array
+        velocities : Float[Array, 'n 3']
             ``(N, 3)`` velocities to kick.
-        masses : Array
+        masses : Float[Array, 'n']
             ``(N,)`` particle masses.
-        rung : Array
+        rung : Int[Array, 'n']
             ``(N,)`` per-particle block-step rung, in ``[0, k_max]``.
         active_floor : Any
             Smallest level kicked at this boundary (nornax's
@@ -471,7 +471,7 @@ class BlockStepFMM:
         half : Any
             ``0.5`` at the base step's synchronized ends, ``1.0`` inside. May be
             a tracer.
-        level_weights : Optional[Array]
+        level_weights : Optional[Float[Array, 'levels']]
             The ``(k_max + 1,)`` weight vector, supplied directly instead of being
             derived from ``active_floor``/``half``/``dt_max``. Takes precedence
             over all three, which are then ignored.
@@ -531,11 +531,11 @@ class BlockStepFMM:
 
     def boundary_kick_at(
         self: "BlockStepFMM",
-        positions: Array,
-        velocities: Array,
-        masses: Array,
+        positions: Float[Array, "n 3"],
+        velocities: Float[Array, "n 3"],
+        masses: Float[Array, "n"],
         *,
-        rung: Array,
+        rung: Int[Array, "n"],
         s: int,
         dt_max: float,
         args: object = None,
@@ -547,13 +547,13 @@ class BlockStepFMM:
 
         Parameters
         ----------
-        positions : Array
+        positions : Float[Array, 'n 3']
             ``(n, 3)`` particle positions.
-        velocities : Array
+        velocities : Float[Array, 'n 3']
             ``(n, 3)`` particle velocities, the quantity being kicked.
-        masses : Array
+        masses : Float[Array, 'n']
             ``(n,)`` particle masses.
-        rung : Array
+        rung : Int[Array, 'n']
             ``(n,)`` per-particle rung assignment.
         s : int
             Sub-step boundary index, ``0 .. n_sub``. Must be concrete -- it drives
@@ -581,11 +581,11 @@ class BlockStepFMM:
 
     def advance_base_step(
         self: "BlockStepFMM",
-        positions: Array,
-        velocities: Array,
-        masses: Array,
+        positions: Float[Array, "n 3"],
+        velocities: Float[Array, "n 3"],
+        masses: Float[Array, "n"],
         *,
-        rung: Array,
+        rung: Int[Array, "n"],
         dt_max: float,
         scan_boundaries: bool = False,
     ) -> Tuple[Array, Array, Array]:
@@ -630,13 +630,13 @@ class BlockStepFMM:
 
         Parameters
         ----------
-        positions : Array
+        positions : Float[Array, 'n 3']
             ``(n, 3)`` positions at the start of the base step.
-        velocities : Array
+        velocities : Float[Array, 'n 3']
             ``(n, 3)`` velocities at the start of the base step.
-        masses : Array
+        masses : Float[Array, 'n']
             ``(n,)`` particle masses.
-        rung : Array
+        rung : Int[Array, 'n']
             ``(n,)`` per-particle rung assignment, held fixed for the whole step.
         dt_max : float
             Base-step size, the time step of level ``0``.
