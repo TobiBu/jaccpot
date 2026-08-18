@@ -126,6 +126,27 @@ from .kernels.core import (  # noqa: F401
 )
 from .reference import compute_gravitational_potential as reference_compute_potential
 
+# RE-EXPORTS. The names below are imported for other modules to reach through
+# this one, and are unused *here*. Holding references makes that a fact the
+# interpreter can see: `pyflakes` counts them as used, so whatever it still
+# reports for this module is a real dead import rather than noise. A tuple of
+# STRINGS would not do it, and neither does `# noqa` -- pyflakes ignores noqa,
+# and isort hoists a trailing comment onto the whole import group, so a name that
+# later goes unused inside that group is never flagged. Verified, 2026-08-18.
+_REEXPORTS = (
+    NearfieldInteropData,
+    _PrepareStateTreeUpwardArtifacts,
+    _bucket_far_pairs_by_level_split,
+    _build_nearfield_interop_data,
+    _build_tree_with_config,
+    _evaluate_local_expansions_for_particles,
+    _prepare_solidfmm_downward_sweep,
+    adaptive_pair_policy,
+    build_interactions_and_neighbors,
+    enforce_conjugate_symmetry_batch,
+    sh_size,
+)
+
 FarFieldMode = Literal["auto", "pair_grouped", "class_major"]
 NearFieldMode = Literal["auto", "baseline", "bucketed"]
 JerkMode = Literal["fast_approx", "accurate"]

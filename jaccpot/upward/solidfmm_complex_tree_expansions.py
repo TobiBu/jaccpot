@@ -35,6 +35,13 @@ from jaccpot.operators.real_harmonics import sh_size
 
 from .tree_geometry import compute_tree_geometry_compiled
 
+__all__ = [
+    "SolidFMMComplexNodeMultipoleData",
+    "SolidFMMComplexTreeUpwardData",
+    "prepare_solidfmm_complex_source_motion_multipoles",
+    "prepare_solidfmm_complex_upward_sweep",
+]
+
 
 class SolidFMMComplexNodeMultipoleData(NamedTuple):
     """Packed complex multipole coefficients and their metadata.

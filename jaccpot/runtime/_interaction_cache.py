@@ -46,6 +46,11 @@ from jaccpot._env import env_flag
 # with missing hints (DOC106/107), so 70 violations sat behind one missing import.
 from ._adaptive_policy import AdaptivePolicyState
 
+__all__ = [
+    "POLICY_IDENTITY_UNCACHEABLE",
+    "pair_policy_cache_identity",
+]
+
 
 @dataclass(frozen=True)
 class _DualTreeArtifacts:

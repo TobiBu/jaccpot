@@ -54,14 +54,14 @@ EXCLUDED_PARTS = frozenset({"experimental"})
 # in review, and `test_no_module_silently_lacks_exports` fails either way round.
 MODULES_WITHOUT_ALL = frozenset(
     {
-        "jaccpot/nearfield/near_field.py",
+        # Star-imported by `runtime/fmm/__init__.py:17`, and its own module
+        # docstring records that adding `__all__` here narrowed that star and
+        # broke `jaccpot.runtime.fmm.FMMPreparedState` -- and through it,
+        # `import jaccpot`. Any `__all__` here has to enumerate the whole star
+        # surface, not just the re-exports, so it is deliberately absent. Its 11
+        # re-exports are marked with `_REEXPORTS` instead, which is private and
+        # therefore cannot change what the star pulls.
         "jaccpot/runtime/_fmm_impl.py",
-        "jaccpot/runtime/_interaction_cache.py",
-        "jaccpot/runtime/_large_n_pipeline.py",
-        "jaccpot/runtime/fmm_autotune.py",
-        "jaccpot/runtime/fmm_sweeps.py",
-        "jaccpot/runtime/kernels/core.py",
-        "jaccpot/upward/solidfmm_complex_tree_expansions.py",
     }
 )
 

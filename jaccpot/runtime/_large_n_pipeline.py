@@ -39,6 +39,12 @@ from ._large_n_types import (
 )
 from .dtypes import INDEX_DTYPE
 
+__all__ = [
+    "can_use_large_n_prepare_path",
+    "evaluate_large_n_state",
+    "prepare_large_n_state",
+]
+
 
 def _contains_jax_tracer(value: Any) -> bool:
     """Return ``True`` when a pytree contains any JAX tracer leaf.

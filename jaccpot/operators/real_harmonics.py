@@ -238,6 +238,17 @@ from .real_translations import (  # noqa: F401
     z_shift_translation_tables,
 )
 
+# RE-EXPORTS. Both names are imported for other modules to reach through this
+# aggregator and are unused *here*. Holding references makes that a fact the
+# interpreter can see, so `pyflakes` reports only genuinely dead re-exports for
+# this module. `__all__` cannot carry them: it declares the PUBLIC surface, and
+# these are private by name -- which is why an `__all__` alone left this module
+# reporting 10 unused imports (audit A.11).
+_REEXPORTS = (
+    _compute_dehnen_B_matrix_complex,
+    _dehnen_real_Q_full,
+)
+
 # ===========================================================================
 # Exports
 # ===========================================================================
