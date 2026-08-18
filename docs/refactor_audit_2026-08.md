@@ -4,6 +4,52 @@ Scope: `jaccpot/` excluding `jaccpot/experimental/`, plus `tests/`, repository r
 `pyproject.toml`. Baseline commit `32857c4` (`main`, clean tree). No production code was
 modified in producing this document, and none has been modified since.
 
+---
+
+## State as of 2026-08-18
+
+A reader should not have to work through 1,900 lines to find out where this stands. This
+section is the summary; everything below is the evidence, and where the two disagree the
+evidence wins.
+
+**Done.** Tier 0 (all 21 items), Tier 1 (all ten), and Tier 2 items 2.1-2.6. The docstring
+programme that ran through 0.20, 1.10 and 2.5 is **finished**: `jaccpot/` measures **0**
+strict pydoclint violations, and as of `680d3da` there is no baseline file at all — see 2.5.
+Sections A.6, A.7, A.8, D.1, D.5, D.7, D.9, D.10, E.2 and G.1, G.4, G.8, G.9, G.10, G.11 are
+closed.
+
+**Open, and they are all coverage, not structure.** F11's deferred half, F27 (the large-N
+reverse path at 0%), F33 (`fmm_strict_run.py` at 55%) and F34 (`tests/distributed/`, needs two
+cards). Every one of them is blocked on the same thing: GPU execution. 2.6 built the vehicle
+(`bench/gpu_gate.py`) but records that it **has never been run on hardware**, so these stay
+open until it has. E.1 (jaxtyping carries no shape information anywhere) and E.3 (the policy
+that would fix it) are untouched and are a project, not a pass.
+
+**One new finding, in A.11:** `__all__` is missing from **35** of the 91 non-`__init__`
+modules, which is what stops item **0.14**'s "no dead imports remain" from being checkable by
+anything but hand.
+
+**Decisions still waiting on you — three, not five.** The list carried in earlier drafts was
+G.2, G.3, G.5, G.7 and 2.4. Two of those five are no longer decisions:
+
+- **G.7 is settled**, and was settled before it was last listed as open. It asked for evidence
+  that the two `near_field.py` staticness contracts have tests. Item **0.9** wrote them
+  (`92c8e73`): `test_max_leaf_size_is_required_under_jit`
+  (`tests/unit/core/test_near_field.py:1161`) and `test_softening_must_be_concrete` (`:1194`).
+  That makes twice this document has mis-stated 0.9's status from the same cause — searching
+  for the words the audit used (`staticness`, `tracer`, `ConcretizationTypeError`) rather than
+  for what the tests are called. The Tier 0 reconciled block caught it the first time and wrote
+  the lesson down; the lesson did not propagate 400 lines to G.7, which is its own finding
+  about how this file is maintained.
+- **2.4 is done** (`d473b48`), as both its own row and section C's closing paragraph record.
+
+So the live decisions are **G.2** (does STYLE_GUIDE §8 or `_env.py` state the policy on who may
+read the environment), **G.3** (may `operators/` import `pallas/`), and **G.5** (`local_walk="treecode"`
+reaches a 0%-covered `experimental/` module from a production path). None of the three is a
+refactoring question and none blocks anything else.
+
+---
+
 **Status — updated after executing Tier 0.1 and 0.3.** Two items of section F have been
 carried out on branch `test/close-rotation-and-grad-golden-gaps`, both test-only:
 
@@ -187,7 +233,36 @@ readers incident it consolidated). The likely resolution is that §8's sentence 
 *resolves policy* rather than *reads environment variables*. Section G — I am not going to
 guess which document is authoritative.
 
-### A.4 Four hand-rolled env parsers survive alongside `_env.py`
+> **RE-MEASURED 2026-08-18. The count collapsed from 16 to 2, and G.2 is still open — those are
+> not in tension, and the reason is the point.**
+>
+> Raw `os.environ` / `os.getenv` reads outside `runtime/`, excluding `_env.py` itself:
+>
+> | Site | Variable |
+> |---|---|
+> | `jaccpot/_typecheck.py:12` | `JACCPOT_RUNTIME_TYPECHECK` |
+> | `jaccpot/mutual/farfield.py:132` | `JACCPOT_MUTUAL_M2L` |
+>
+> All 13 `near_field.py` sites, both `pallas/` sites and `upward/tree_geometry.py:54` now go
+> through `_env`'s readers instead. That was not a fix for this finding — it is 2.2 (PR #105),
+> which consolidated the parsers and in doing so converted the raw reads. **Seven modules
+> outside `runtime/` import from `jaccpot._env`**: `solver.py`, `nearfield/near_field.py`,
+> `nearfield/grad.py`, `pallas/m2l_real_fused.py`, `pallas/m2l_complex_fused.py`,
+> `upward/tree_geometry.py`, `upward/solidfmm_complex_tree_expansions.py`.
+>
+> **So the question G.2 asks is unchanged and the evidence for it is stronger.** Seven
+> non-`runtime/` modules reading the environment through the sanctioned helper is a more
+> pointed contradiction of §8's *"the only place that reads environment variables"* than 16
+> ad-hoc reads were, because nobody can call it drift: `_env.py`'s docstring says any layer
+> may, and seven layers took it at its word. The answer determines whether A.3 is **7 findings
+> or zero**, which was the original framing with a smaller number.
+>
+> The two remaining raw reads are worth separating. `_typecheck.py` reads its own import-hook
+> flag before `jaccpot` is importable enough to use `_env` — that one is structural. Nothing
+> similar protects `mutual/farfield.py:132`, which hand-parses an `"auto"` policy string; that
+> is the exact shape A.4 warns about and it postdates the consolidation.
+
+### A.4 Four hand-rolled env parsers survive alongside `_env.py` — **CLOSED by 2.2 (PR #105); one new instance, below**
 
 `_env.py` exists to be the single implementation. Four call sites bypass it:
 
@@ -204,12 +279,45 @@ value; these four return the *default* (i.e. `True` for the default-on ones). Re
 reverse-mode kernel runs. Either extend `_env` with a `default-on` reader or leave them and
 comment why.
 
-### A.5 Vestigial re-export aliases and one unused import in `near_field.py`
+> **Closed by 2.2 (PR #105), and the warning above is the reason it took a design decision
+> rather than a dedupe.** The chosen semantics — a malformed value means *the default* — is
+> what `env_int`/`env_float` already did, so `env_flag` was the outlier and `_env` disagreed
+> with itself. Verified 2026-08-18: the four function *names* still exist, which is why a
+> grep still finds them, but they are now thin wrappers —
+> `_large_n_nearfield_diag_mode` is a two-line call to `env_choice(...)`, the reader 2.2 added
+> for the third semantics this row conflated with the other two. The specific hazard named
+> above did not materialise: FUSED is unchanged on all 14 test inputs.
+>
+> **One instance postdates the consolidation and is not covered by it:**
+> `mutual/farfield.py:132` hand-parses `JACCPOT_MUTUAL_M2L` with
+> `os.environ.get(...).strip().lower()` — an `"auto"` enum, exactly what `env_choice` now
+> exists for. `mutual/` is a second lane added beside the three sweeps (see CLAUDE.md's layout
+> note) and it did not inherit the convention. Small, and it is how a consolidated helper
+> stops being consolidated.
+
+### A.5 Vestigial re-export aliases and one unused import in `near_field.py` — **half of this stopped being true, and not because anyone fixed it**
 
 `near_field.py:54-55` are `_env_flag = env_flag` and `_env_int = env_int` — aliases left
 behind by the `_env` consolidation so call sites did not have to change. `env_float` is
 imported at `near_field.py:23` and never used anywhere in the file (grep: one hit, the import
 itself). Pure Tier 0.
+
+**Re-measured 2026-08-18, and the word "vestigial" is now wrong for the aliases.** They are at
+`near_field.py:95-96` (the file is 4313 → 1605 lines after 1.4/1.5, so every citation moved),
+and `nearfield/_fast_lane.py:61` **imports both of them from here** and calls them at ten
+sites. The 1.4 split turned two dead aliases into a live cross-module interface without anyone
+deciding that it should — the extracted lane kept calling `_env_flag`, and the shortest way to
+make that work was to import the alias rather than the real `env_flag`. Removing them is now a
+two-file change with a caller, not the "pure Tier 0" this row promised.
+
+The other half is unchanged and is still open: `env_float` is imported at `near_field.py:23`
+and used **zero** times (`grep -c env_float` → 1, the import). It is one of the 114 unused
+imports A.11 counts, and one of the 17 in this file.
+
+This is worth keeping rather than editing down to "still open", because the failure mode is
+general: a split that moves callers can promote dead code to live code, and nothing in the
+verification block notices. The 1.4 and 1.5 rows both assert "carried lines verbatim", which
+was true and did not cover this.
 
 ### A.6 20 test files sat outside the five documented test tiers — CLOSED (`a54f29e`)
 
@@ -238,7 +346,7 @@ minutes and no headroom. The 17 ids and 32 downstream path references were there
 from git's own rename detection, and the guard was the collected counts (911/949 and 779 under
 `-m "not slow"`, identical before and after). CLAUDE.md now documents the coupling.
 
-### A.7 Repository-root clutter — confirmed, with a recommendation
+### A.7 Repository-root clutter — CLOSED (`6839a6c`)
 
 | Path | Contents | Recommendation |
 |---|---|---|
@@ -308,6 +416,61 @@ Line counts and the largest unit inside each:
 the problem, and the module gained a bundle type plus two documented signatures in
 exchange for the driver halving. Whether the mixin still wants splitting is now a
 question you can answer against a 493-line driver.
+
+> **RE-MEASURED 2026-08-18. The list above is obsolete, and so is the table that was
+> already labelled "current state" — it predates the docstring programme.**
+>
+> A raw `wc -l` no longer means what this section meant by it. The Tier 2.5 programme added
+> **27,027 docstring lines** to a 71,855-line package: docstrings are now 38% of
+> `jaccpot/`, so a module can grow by a third without gaining a statement. Both numbers are
+> therefore reported below — total lines, and total minus docstring lines. "Code" here means
+> everything that is not a docstring body, so it still includes comments and blanks; the
+> comment and blank columns are given so the residual is visible rather than implied.
+>
+> Measured by AST walk over every non-`experimental` module (docstring extents from
+> `ast.get_docstring` end/start line numbers, so multi-line docstrings count fully):
+>
+> | Module | total | − docstrings | docstrings | comments | blank |
+> |---|---|---|---|---|---|
+> | `runtime/fmm_prepare.py` | **4231** | **3196** | 1035 | 139 | 216 |
+> | `operators/complex_ops.py` | 2731 | 1583 | 1148 | 140 | 349 |
+> | `runtime/_interaction_cache.py` | 2576 | 1670 | 906 | 86 | 197 |
+> | `runtime/kernels/_evaluate.py` | 2532 | 1807 | 725 | 45 | 189 |
+> | `runtime/_adaptive_policy.py` | 2443 | 1563 | 880 | 106 | 283 |
+> | `solver.py` | 2227 | 1127 | 1100 | 24 | 186 |
+> | `runtime/_fmm_impl.py` | 2178 | 1432 | 746 | 120 | 151 |
+> | `runtime/_large_n_pipeline.py` | 2003 | 1772 | 231 | 47 | 96 |
+> | `downward/local_expansions.py` | 1954 | 1256 | 698 | 12 | 271 |
+> | `runtime/fmm_strict_run.py` | 1911 | 1493 | 418 | 47 | 109 |
+> | `distributed/fmm.py` | 1863 | 1457 | 406 | 253 | 154 |
+> | `runtime/kernels/_m2l.py` | 1748 | 927 | 821 | 48 | 175 |
+> | `runtime/fmm_evaluate.py` | 1703 | 1045 | 658 | 41 | 122 |
+> | `nearfield/near_field.py` | 1605 | 1164 | 441 | 36 | 130 |
+> | `runtime/fmm_state.py` | 1553 | 820 | 733 | 12 | 171 |
+>
+> **`runtime/fmm_prepare.py` is now the worst case on both measures, and by a wide margin.**
+> At 3196 non-docstring lines it carries **more code than `kernels/core.py` had (3827 total,
+> pre-docstring-programme) when A.9 named `core.py` the worst case** — the comparison is not
+> exact, since `core.py`'s 3827 was a raw count, but it is close enough to make the point: the
+> module A.9 identified as needing a split the least got a function extraction and then grew
+> past the module it identified as needing one the most.
+>
+> Two entries need reading with their history attached:
+>
+> * **`runtime/kernels/_evaluate.py` (2532 / 1807) is a product of the 1.6 split.** `core.py`
+>   went 3827 → 106 lines, and this is where the largest share went. The split relocated bulk
+>   and made the seams reviewable; it did not reduce the bulk, and this row is the evidence.
+>   The same is true one step down for `kernels/_m2l.py` (1748).
+> * **`runtime/_large_n_pipeline.py` (2003 / 1772)** has the lowest docstring fraction of the
+>   fifteen (12%), which is consistent with A.9's own finding that `prepare_large_n_state`
+>   has a one-line docstring and 26 parameters. Its ranking is unchanged by the docstring
+>   programme because the programme largely did not reach it.
+>
+> **No seams are re-planned here, deliberately.** Every line citation in the paragraphs below
+> is pre-Tier-1 and every one has shifted; the 1.3 row already records that citations moved
+> once and 1.4/1.5 moved them again. Any further structural pass needs a fresh analysis from
+> the current tree, not an update to these ranges. What this table is for is settling *which*
+> module a fresh analysis should start with, and the answer is `fmm_prepare.py`.
 
 **`nearfield/near_field.py` — split, along five seams.** The 46 top-level defs partition
 cleanly by line range:
@@ -402,6 +565,73 @@ and `_compute_leaf_p2p_impl` carries an extra `static_argnums=(12,)`. Turning it
 wrapper means a jitted function calling a jitted function. XLA inlines that, but it creates a
 second compilation-cache entry — and NUMERICS §1 says compile time is a first-class metric.
 **Measure compile time before and after.**
+
+### A.11 New finding (2026-08-18): `__all__` is missing in 35 modules, and that is what blocks 0.14
+
+Item **0.14** (dead-code removal) is marked done, and its evidence line is
+*"`flake8 --select=F401 jaccpot/` → 0 today; `pyflakes` reports 178 only because it ignores
+`# noqa`"*. That evidence does not support the conclusion, and this finding is why.
+
+Measured 2026-08-18 over `jaccpot/`, excluding `experimental/`:
+
+| | count |
+|---|---|
+| non-`__init__` modules | 91 |
+| of those, **without `__all__`** | **35** (34 in scope + `experimental/treecode_walk.py`) |
+| `pyflakes` "imported but unused", excluding `__init__.py` | **114** |
+| of those, in four modules | **104** |
+
+The four:
+
+| Module | lines | `__all__` | unused imports |
+|---|---|---|---|
+| `runtime/kernels/core.py` | 106 | **no** | 66 |
+| `nearfield/near_field.py` | 1605 | **no** | 17 |
+| `runtime/_fmm_impl.py` | 2178 | **no** | 11 |
+| `operators/real_harmonics.py` | 283 | yes, 28 names | 10 |
+
+**Three of the four are the post-split aggregators**, and that is not a coincidence: 1.3, 1.4,
+1.5 and 1.6 each left behind a file whose whole remaining job is to re-export what moved out of
+it. `core.py` is 106 lines and 66 of its imports are "unused" — which is the correct reading
+for a linter and the wrong reading for a human, because every one of them is a deliberate
+re-export keeping 35-odd call sites working. Without `__all__`, **neither `pyflakes` nor a
+reader can tell a deliberate re-export from a genuinely dead import.** That is the blocking
+relationship: 0.14's claim is "no dead imports remain", and there is currently no mechanical
+way to check it in exactly the files most likely to accumulate them.
+
+`# noqa: F401` is what makes `flake8 --select=F401` report 0, so the two tools disagree by
+construction and the disagreement is the whole signal. A `# noqa` is a per-line assertion that
+*this* import is intentional; `__all__` is a per-module statement of what the module exports.
+Only the second is checkable — `flake8 --select=F822` (already enabled, see
+`.pre-commit-config.yaml`) fails on an `__all__` naming something that does not exist, so an
+`__all__` that drifts is caught, whereas a stale `# noqa` is silent forever.
+
+**`operators/real_harmonics.py` shows that `__all__` alone is not sufficient**, which sharpens
+the item rather than contradicting it. It *has* `__all__` (28 names, byte-identical across the
+1.3 split by design) and still reports 10 unused imports — because all ten are **private**
+names (`_alignment_angles`, `_dehnen_real_Q_full`, `_multipole_align_to_z_block`, …) re-exported
+for tests and internal callers, which by convention do not belong in `__all__`. So the rule the
+work needs is two-part: `__all__` for the public re-exports, and an explicit marker for the
+private ones. Picking that marker is part of the item, not a prerequisite for it.
+
+**Ordering consequence for the work plan.** `__all__` was in scope for **0.16**, whose row
+reads *"`__all__` in the non-`__init__` modules missing it"*, and whose reconciled status reads
+*"done (`__future__` complete at 80/80; `__all__` **scoped to the public modules** — the rest
+is the F16 star-export seam)"*. That scoping is what left 35 modules without one, and it was a
+reasonable call at the time. The consequence, not visible then, is that **0.14 cannot be
+verified until 0.16's deferred half lands.** So the ordering is:
+
+1. `__all__` in the 34 in-scope modules, plus a convention for private re-exports (0.16's
+   deferred half, and the F16 star-export seam it names).
+2. *Then* re-measure `pyflakes` and close 0.14 on evidence rather than on `# noqa` count.
+
+Doing them in the other order is what produced the current state: 0.14 shipped a removal pass
+and an evidence line that cannot be re-derived by anyone who was not there.
+
+**`from __future__ import annotations` is complete**, for the record, and this finding does not
+touch it: **91 of 91** non-`__init__` modules carry it. The single module without it is
+`jaccpot/experimental/__init__.py`, which is out of scope by the audit's own scope line and is
+exactly what 0.16's status row says.
 
 ---
 
@@ -658,10 +888,26 @@ scoping decisions, both measured rather than assumed:
   reformatting files a change does not otherwise touch, so cleaning them is its own PR —
   **still open**, and the reason the hook is narrower than it looks.
 
+  > **That PR happened, and this bullet plus the "scoped `files: ^jaccpot/`" above are both
+  > stale as of 2026-08-18.** `.pre-commit-config.yaml` carries **no `files:`** on the flake8
+  > hook and says so explicitly: the count across every tracked file is zero, so the
+  > restriction was removed. The hook is repo-wide.
+  >
+  > Worth reading against `680d3da`, which did the opposite for pydoclint on the same day —
+  > **added** `files: ^jaccpot/` in order to delete the baseline. The two are consistent, and
+  > the shared rule is the useful part: **a hook's scope should be the set of files that
+  > actually pass it.** flake8 earned its widening by someone cleaning the 15 findings;
+  > pydoclint earned its narrowing because 1215 findings in `tests/`/`bench/`/`examples/`
+  > have *not* been cleaned and were being hidden by a baseline instead. Scope states the
+  > truth; a baseline conceals the absence of it.
+
 No style codes are selected, so the hook cannot start disagreeing with black or isort.
 Verified it actually fires by injecting an undefined name into `fmm_policy.py`.
 Undefined names in `jaccpot/` go **4 → 2**, and both survivors are deliberate: `kernels/`
-is a true leaf and must never name the engine, even under `TYPE_CHECKING` (§1).
+is a true leaf and must never name the engine, even under `TYPE_CHECKING` (§1). **Still 2,
+re-measured 2026-08-18** — they moved to `kernels/_evaluate.py:1128` and `:1887` in the 1.6
+split and were renamed to `FMMEngine` by 2.4, and `flake8 --select=F821,F822` reports 0
+because both carry `# noqa: F821`. See E.2 for why a raw `pyflakes` grep says 3.
 
 ---
 
@@ -780,6 +1026,23 @@ covered, despite §9's *"farfield modes, outputs"*:
 The `class_major` / `pair_grouped` gap is the one I would close first after D.1: those are
 the paths `_accumulate_solidfmm_m2l_grouped_class_major` (`kernels/core.py:1335`) and friends,
 which the M2L split in F/Tier-1 touches directly.
+
+> **Four of the seven rows are CLOSED by 0.2 (`ef7ce15`)**, and the one this paragraph names
+> as "close first" is among them — which is also how G.11 was found, so the priority was right.
+> Verified 2026-08-18 in `tests/characterization/golden_modes/`:
+>
+> | Axis | then | now |
+> |---|---|---|
+> | output | accelerations only | **potentials goldened** |
+> | nearfield mode | whatever `accurate` resolves to | **`bucketed`** — `bkt_uni_real_n256_p4`, `bkt_uni_solidfmm_n256_p4` |
+> | farfield mode | resolver default | **`class_major`** (`cm_uni_*`, `cm_clu_*`) and **`pair_grouped`** (`pg_uni_*`, `pg_clu_*`) |
+> | basis | real, solidfmm, cartesian | unchanged (was already good) |
+>
+> **Still open, and all three for the same reason:** preset (`fast`, `balanced`,
+> `large_n_gpu`), M2L implementation (fused Pallas), and lane (strict/refresh, large-N). Each
+> needs either a GPU or the strict lane's own characterization — F33 and 2.6. The `fast_lane`
+> nearfield mode is in the same position. So D.2's remaining gap is now **exactly** the set
+> that 2.6's gate was built to reach, and nothing else.
 
 ### D.3 Numerically load-bearing code with no test that could catch a *wrong answer*
 
@@ -1037,7 +1300,7 @@ mention it, and no test. Both are called from `runtime/fmm_sweeps.py:198, 242`.
 
 Fix: copy the test (Tier 0) and the docstring (Tier 0). Not a code change.
 
-### D.10 pydoclint's exemption is the reason the docstring layer looks finished
+### D.10 pydoclint's exemption is the reason the docstring layer looks finished — **CLOSED 2026-08-18; every number below is historical**
 
 Recorded here rather than only in F22 because it changes what "the package is at 0 pydoclint
 violations" licenses you to conclude:
@@ -1058,6 +1321,35 @@ validation a policy, and *"an explicit request may not be quietly overridden"* i
 **Do not turn the flag off in one commit** — 2840 violations is not a PR. The useful subset is
 the 73 functions with ≥8 parameters in the numerics directories (F23), and the 161
 `Raises` omissions, which are independently addressable.
+
+> **CLOSED, and the advice above was half right in a way worth naming.**
+>
+> Current measurement, 2026-08-18, with no baseline in play (a stripped config; `.claude`
+> worktrees excluded; **stdout and stderr both captured**):
+>
+> ```
+> pydoclint --config <no-baseline> jaccpot/     →  0 violations
+> ```
+>
+> So both lines of the box at the top of this section now read 0, and the gap this section
+> exists to describe — 0 with the exemption, 2840 without — **is gone**. The trajectory was
+> 2840 → 2403 → 153 → 0. The 161 DOC501/503 that this section called "the semantically
+> important ones" were the right thing to call out: an undocumented `raise` is an
+> undocumented part of the contract, and they are now documented.
+>
+> **What was right:** "2840 violations is not a PR." It was a 20-plus-PR programme.
+>
+> **What was wrong, and it cost time:** *"Do not turn the flag off"* until the count is zero.
+> Item 2.5 records the reversal in full — the flag went off **first** (`cc3b4b9`), with a
+> baseline carrying the tail, so the gate was live while the tail retired. Leaving the flag on
+> until the end would have left every already-documented file unprotected for the duration,
+> and `runtime/_adaptive_policy.py` proved that concretely: driven to zero in PR #118, then
+> silently re-broken by five functions merging in from a concurrent branch, with the vacuous
+> hook reporting 0 throughout (repaired in PR #149). **The order was the mistake, not the
+> scale.**
+>
+> The baseline that made that ordering possible has itself now been retired (`680d3da`) — see
+> 2.5 for why, and for the scope change that had to accompany it.
 
 ### D.11 What characterization must exist before section F's Tier 1 is safe
 
@@ -1231,6 +1523,35 @@ as a bug-finder here, which matters concretely because the two genuine `NameErro
 found only by filtering them out of 397 lines of noise. `kernels/core.py`'s two engine
 annotations stay dangling on purpose — see the comment now at the site.
 
+**Re-measured 2026-08-18: 3, and the residue is entirely deliberate.** `pyflakes jaccpot/`
+matches three lines on "undefined name", and they are not three findings:
+
+| Site | What it is |
+|---|---|
+| `runtime/kernels/_evaluate.py:1128` | `fmm: "FMMEngine"` — deliberate, `# noqa: F821`, with an eight-line comment at the site |
+| `runtime/kernels/_evaluate.py:1887` | the same, second occurrence |
+| `runtime/fmm/__init__.py:17` | *"`from .._fmm_impl import *` used; unable to detect undefined names"* — a caveat about a star import, **not an undefined name**; it matches the grep because the message contains the words |
+
+So the honest count is **2 deliberate exemptions and one star-import caveat**, and
+`flake8 --select=F821,F822` — the form the pre-commit hook actually runs — reports **0**,
+because flake8 honours the `# noqa` that pyflakes ignores.
+
+Two consequences worth stating rather than leaving implicit:
+
+* The `5 → 3` movement is **not** further work on E.2. The two `core.py` annotations this
+  section says "stay dangling on purpose" are the two that remain; they moved to
+  `kernels/_evaluate.py` in the 1.6 split (G.1 carries the re-location table) and were renamed
+  `FastMultipoleMethod` → `FMMEngine` by 2.4 (`d473b48`).
+* `TYPE_CHECKING` blocks are present in **11** `runtime/*.py` modules (12 across the package),
+  and `PreparedStateLike` is defined at `runtime/_fmm_impl.py:132` — the line moved from the
+  `:305` this section cites, which is a citation drift, not a change of fact.
+
+**Work-plan item 0.15 and this finding are the same change, not two.** Both cite `ad7b00c`,
+because 0.15 *is* the plan-side entry for closing E.2 — the commit's own message opens by
+naming *"the audit (F21 / §E.2)"* and then corrects it. Neither subsumed the other and neither
+is outstanding. The reason this looks ambiguous from the tables alone is that F21 (the finding
+id in the Tier 0 row) and E.2 (the section) are two names for one thing.
+
 ### E.3 Recommended annotation policy, if you want one
 
 A full `Float[Array, "..."]` conversion of 1534 sites is not a refactor pass; it is a project.
@@ -1281,24 +1602,48 @@ corrected below.
 > **Tier 0 is complete.** No item is open. What the column below adds is the commit for each
 > row, so the per-item rows stop disagreeing with the top table by omission.
 >
+> **SECOND RECONCILIATION, 2026-08-18.** The paragraph above says the per-item rows carry a
+> status on only three of twenty-one, and then fixes that by adding a *second* table instead
+> of touching the rows — so the disagreement-by-omission it names was recorded, not removed,
+> and it survived another eight months of reading. The rows themselves now carry their status
+> in the `#` column, like 0.1 and 0.3 always did.
+>
+> Three findings from doing it, none of which the summary table could have shown:
+>
+> * **0.4 was still marked "blocked, by design"** and has not been blocked since PRs #70-#72.
+>   The bug it was blocked on was fixed; the test landed in a **new file**
+>   (`tests/unit/operators/test_transverse_degeneracy_jvp.py`) rather than the planned one, so
+>   nothing pointed back at this row.
+> * **0.16 is half done, not done.** `__future__` is complete at 91/91; `__all__` was scoped
+>   down at the time and 35 modules still lack it. That deferral now blocks **0.14** — new
+>   finding **A.11**.
+> * **0.10 and 0.14 both have evidence lines that fail if taken literally.** 0.10's is fine as
+>   written but invites the wrong check (`[tool.coverage.run]` still has an `omit` list, and
+>   should); 0.14's cites a `# noqa`-driven zero that cannot be re-derived. Both rows now say so.
+>
+> **So: "Tier 0 is complete" is still true of the work and was never true of this table.** The
+> lesson the block above draws — *check the code and the table, both or neither* — was right
+> and incomplete. Reconciling a table by appending a corrected copy leaves the stale copy in
+> place, and readers hit the stale one first because it is the one in the position they expect.
+>
 > | # | Status | Commit / evidence |
 > |---|---|---|
 > | 0.1 | done | `e1f1455` |
 > | 0.2 | done | `ef7ce15` — 4 new cases in `tests/characterization/golden_modes/` (6 `.npz`); potentials goldened for the first time; surfaced G.11 |
 > | 0.3 | done | `e5d8e41` — physics identities, the Wigner reference being unusable (F39) |
-> | 0.4 | **blocked, by design** | became bug report G.10, then **fixed** in PRs #70-#72; four GPU-gated tests still unexecuted |
+> | 0.4 | ~~blocked, by design~~ **done** | became bug report G.10, then **fixed** in PRs #70-#72 — which unblocked the test. It landed as `tests/unit/operators/test_transverse_degeneracy_jvp.py`, a new module rather than the planned addition to `test_real_harmonics.py`. **This row said "blocked" for as long as it did because it recorded the reason the item was deferred and never re-read after the reason was removed** — the fix and the item it unblocked were tracked in different places. Four GPU-gated tests still unexecuted (`docs/handoff_g10_gpu_validation.md`), and that is a 2.6 dependency, not this item's |
 > | 0.5 | done | `8bd24a6` — an absolute anchor from the derivative recurrences, not a Table 3 transcription. `test_p2m_real_direct_dehnen_table3` |
 > | 0.6 | done | `c2874b6`, `20ba5d8` — `test_real_static_num_levels_bit_identical_to_padded` |
 > | 0.7 | done | `26cef45` — `test_leafpair_decoupled_same_array_reproduces_the_coupled_kernel` |
 > | 0.8 | done | `568deca` — both halves: gate read per call, reverse matches the twin |
 > | 0.9 | done | `92c8e73` — the two contracts D.7's last two rows name |
-> | 0.10 | done | `ff4c911` — `m2l_real_fused.py` measured at 92%, omit entry gone |
+> | 0.10 | done | `ff4c911` — `m2l_real_fused.py` measured at 92%, its omit entry gone. **Check this one by the entry, not by the key:** `[tool.coverage.run]` still has an `omit` list, and always should — it holds `experimental/octree_fmm_uvwx.py` and `experimental/treecode_far_near.py`, listed individually rather than as a glob precisely because a glob was hiding a covered module. "No `omit` remains" would be the wrong test and would fail; the item asked only for the `m2l_real_fused.py` line, and that line is gone |
 > | 0.11 | done | `c2874b6` (F05, F06, F24) + `8bd24a6` (the F07 half) |
 > | 0.12 | done | `e2959eb` — A.8; `GradConfig` and `TraversalOverrides` now in ARCHITECTURE.md |
 > | 0.13 | done | `e2959eb` — A.2; §8 rewritten, so the old `4/5 -> 7/11` phrasing no longer appears |
-> | 0.14 | done | `934c252` (safe subset; F16 was wrong, see its correction). `flake8 --select=F401 jaccpot/` → 0 today; `pyflakes` reports 178 only because it ignores `# noqa` |
+> | 0.14 | done, **but its evidence does not hold — see A.11** | `934c252` (safe subset; F16 was wrong, see its correction). `flake8 --select=F401 jaccpot/` → 0 today; `pyflakes` reports 178 only because it ignores `# noqa`. **That disagreement is the finding, not the explanation.** `# noqa` is a per-line assertion nobody can re-check; `__all__` is a per-module statement that `flake8 --select=F822` already validates. 35 modules have no `__all__`, including three of the four aggregators that hold 104 of the 114 non-`__init__` unused imports, so "no dead imports remain" is currently unverifiable in exactly the files most likely to accumulate them. **Ordering: 0.16's deferred `__all__` half must land before this row can be closed on evidence** |
 > | 0.15 | done | `ad7b00c` — 11 runtime mixins carry `if TYPE_CHECKING` |
-> | 0.16 | done | `23ccc9d` — one module lacks `__future__` annotations, `jaccpot/experimental/__init__.py` |
+> | 0.16 | **half done** | `23ccc9d`. `__future__`: **complete**, re-verified 2026-08-18 at **91/91** non-`__init__` modules; the one module without it is `jaccpot/experimental/__init__.py`, out of scope. `__all__`: **deferred, and this is the open half** — scoped to the public modules at the time, which left **35** of 91 without one. Reasonable then; the consequence, not visible then, is that it blocks 0.14. See A.11 |
 > | 0.17 | done | `6839a6c` — all four old paths absent |
 > | 0.18 | done | `a54f29e` — `tests/` root holds only `__init__.py` and `conftest.py` |
 > | 0.19 | done | `d941805` |
@@ -1309,26 +1654,26 @@ corrected below.
 | # | Item | Touches | Closes | Verified by |
 |---|---|---|---|---|
 | ~~**0.1**~~ **DONE `e1f1455`** | **Gradient golden.** `tests/characterization/test_fmm_grad_golden.py` + **6** `.npz` (not 8 — the reverse compile costs ~1.1-1.5 GB per case, so the grid was trimmed and `_DIFF_FMM_TEST_FILES` in `tests/conftest.py` extended). Two gates as specified | `tests/characterization/`, `tests/conftest.py`, `tests/slow_tests.txt` | F03, D.1 | Done: full suite 839 passed / 57 skipped; forward golden unmoved; reverse-only mutation caught (D.1). **G.9 risk now RESOLVED** (per-particle inertness gate; see G.9) |
-| **0.2** | **Widen the forward golden**: add a `farfield_mode` axis (`pair_grouped`, `class_major`), a `nearfield_mode` axis (`bucketed`), and a potentials output. ~8 new cases | `tests/characterization/` only | D.2, D.11 | New goldens generated with `JACCPOT_REGEN_GOLDEN=1`, each anchored to the direct sum before committing |
+| ~~**0.2**~~ **DONE `ef7ce15`** | **Widen the forward golden**: add a `farfield_mode` axis (`pair_grouped`, `class_major`), a `nearfield_mode` axis (`bucketed`), and a potentials output. ~8 new cases | `tests/characterization/` only | D.2, D.11 | New goldens generated with `JACCPOT_REGEN_GOLDEN=1`, each anchored to the direct sum before committing |
 | ~~**0.3**~~ **DONE `e5d8e41`** — and it should have been item 0.1, since it was the only item whose *outcome* could invalidate the plan | **Rotation blocks vs. an independent reference.** ~~vs `_real_wigner_rotation`~~ — impossible, that path raises `ImportError` (F39). Implemented instead as **physics identities**: `D_to @ p2m(s) == p2m(g @ s)` for multipoles, and frame-invariance of the evaluated potential for locals | `tests/unit/operators/test_real_harmonics.py` | F29, D.5 (**not** F32 — the family stays unused, see G.4) | Green: production builders correct to ~2.5e-15. Mutation: azimuth swap fails 8/8 new, passes 4/4 pre-existing |
-| **0.4** | ~~Degenerate rotation subgradient~~ **BLOCKED — became a bug report (G.10).** Writing the test refuted the claim it was meant to pin. Re-plan as: bug-fix PR first (G.10), *then* this test as its regression guard | `tests/unit/operators/test_real_harmonics.py` | F31, D.6 → **G.10** | Cannot be green against current behaviour. Do not land a test asserting the present (wrong) values |
-| **0.5** | **Dehnen Table 3, degrees 2-6, as committed data.** Literal polynomial table in the test module; assert `p2m_real_direct` matches at several generic points | `tests/unit/operators/test_real_harmonics.py` | D.8 item 2 | Green **and** consistent with `test_complex_to_dehnen_real_matches_p2m_real_direct`; disagreement between the two is section G |
-| **0.6** | `static_num_levels` bit-identity test for the **real** upward sweep, copied from the complex one | `tests/unit/core/` | D.9 | Green |
-| **0.7** | `nearfield_leafpair_pallas_decoupled` same-array-both-sides parity test, `interpret=True` | `tests/unit/operators/test_pallas_nearfield_fused.py` | F25 | Green on CPU |
-| **0.8** | `JACCPOT_FUSED_M2L_VJP=0` fallback parity test (monkeypatch the env, `interpret=True`) | `tests/unit/test_custom_vjp_parity.py` | F26 | Green; both branches now exercised |
-| **0.9** | Staticness-contract tests: passing a tracer for `softening` / omitting `max_leaf_size` under `jit` raises the documented error | `tests/unit/core/test_near_field.py` | D.7 last two rows | Green |
-| **0.10** | **Fix the coverage omit.** Delete `jaccpot/pallas/m2l_real_fused.py` from `[tool.coverage.run] omit`, replacing the comment with the measurement (92% from CPU tests) | `pyproject.toml` | F04 | `pytest --cov=jaccpot --cov-report=term-missing` shows the module at ~92%, TOTAL rises |
-| **0.11** | **Docstring corrections.** `real_harmonics.py:371-382` (F07/D.8 item 1), `near_field.py:2862-2867` (F05), `fmm_evaluate.py:1117` (F06), `real_tree_expansions.py:242-257` (F24), plus a one-line note at `real_harmonics.py:1267` that the unused `R` entries are deliberate narration (F19) | docstrings/comments only | F05, F06, F07, F19, F24 | `pre-commit run --all-files`; diff contains no code lines |
-| **0.12** | **ARCHITECTURE.md corrections.** §2/§9 twelve→fourteen names + add `GradConfig`, `TraversalOverrides`; §9 golden-grid axes; §4 drop "thin coordinator" or qualify it with the 722-line constructor | `ARCHITECTURE.md` | A.8 | Cross-checked against `test_public_api_surface.py:25-39` and `test_fmm_golden.py:76-90` |
-| **0.13** | **STYLE_GUIDE §8 corrections.** Upward-import inventory 4/5 → 7/11 with the three additions and their classification | `agent_guides/STYLE_GUIDE.md` | A.2 | Re-run the import-graph script; counts match |
-| **0.14** | **Dead code removal.** 19 unused imports (F16, F17, F14), the two `_env_*` aliases (F15), the two unused locals (F18 — check `prepare_elapsed` is not a dropped diagnostic first) | 8 files, import blocks only | F14-F18 | `pyflakes jaccpot` clean of "imported but unused"; suite green |
-| **0.15** | **`TYPE_CHECKING` blocks.** Add per-mixin `if TYPE_CHECKING: from ._fmm_impl import FastMultipoleMethod`; define or replace `PreparedStateLike`; import `LargeNGradPlan` and `NearfieldInteropData` | 10 `runtime/fmm_*.py` + `fmm_state.py` | F21, E.2 | `typing.get_type_hints` resolves on every mixin method; `JACCPOT_RUNTIME_TYPECHECK=1 pytest tests/unit` green |
-| **0.16** | `from __future__ import annotations` in the 13 modules missing it; `__all__` in the non-`__init__` modules missing it | 13 + 30 files, headers only | F36 | Suite green; no import-order change (isort clean) |
-| **0.17** | **Repo-hygiene moves** (git `mv` only): `benchmarks/n_ladder_production/` → `bench/results/`, `results/validation/` → `bench/results/validation/`, `bench/real_vs_complex_gpu_plan.md` → `docs/`, `OCTREE_JACCPOT_STATUS_2026-03-15.md` → `docs/` with a superseded-by header | directory moves | A.7 | `grep -rn` for each old path returns nothing; `pytest -q` and `bench/ci_benchmark_guard.py --help` still work |
-| **0.18** | **Test-layout moves** (git `mv` only): the 20 root test files into `tests/{unit,integration}/` and a new `tests/distributed/` | `tests/` moves + `tests/slow_tests.txt` paths | A.6 | Same collected test count before/after (`pytest --collect-only -q \| wc -l`); `slow_tests.txt` paths updated; CI workflow paths checked |
-| **0.19** | Rename `tests/unit/test_large_n_grad_path.py` → `test_large_n_config_thresholds.py` (or similar) and add one line to its docstring saying it does **not** enter `LargeNPreparedState` | one file | F28 | Collected count unchanged |
-| **0.20** | **Docstring completion, batch 1**: the 14 public-surface names in section C, and the ~15 highest-parameter numerics functions from F23 | docstrings only | F08 (partly), F23 (partly), C | `pydoclint --skip-checking-short-docstrings=False` violation count drops measurably; record before/after in the PR |
-| **0.21** | **Write D.12 into `NUMERICS_AND_JAX.md` §3**: a gradient test at a default leaf size covers no far field, so it needs an explicit M2L-count assertion. One paragraph beside the existing physical-edge-case list | `agent_guides/NUMERICS_AND_JAX.md` | D.12 | Docs only. The two in-repo guards it describes already exist (`test_gradient_correctness.py`, the new golden) |
+| ~~**0.4**~~ **DONE — and the "blocked" note below is history, not status** | ~~Degenerate rotation subgradient~~ ~~**BLOCKED — became a bug report (G.10).**~~ Writing the test refuted the claim it was meant to pin, so the item was re-planned as: bug-fix PR first (G.10), *then* this test as its regression guard. **That is exactly what happened.** G.10 was fixed and merged (PRs #70-#72), which unblocked this item, and the test landed as its own module: `tests/unit/operators/test_transverse_degeneracy_jvp.py` — not in `test_real_harmonics.py` as planned, which is why a search of the planned file finds nothing | ~~`tests/unit/operators/test_real_harmonics.py`~~ → `tests/unit/operators/test_transverse_degeneracy_jvp.py` (new file) | F31, D.6, **G.10** | ~~Cannot be green against current behaviour.~~ It is green: G.10's fix made the correct values the present values, so the warning *"do not land a test asserting the present (wrong) values"* was discharged by fixing the code, which is what the re-plan asked for. The two tracking xfails G.10 carried were flipped and their markers removed |
+| ~~**0.5**~~ **DONE `8bd24a6`** | **Dehnen Table 3, degrees 2-6, as committed data.** Literal polynomial table in the test module; assert `p2m_real_direct` matches at several generic points | `tests/unit/operators/test_real_harmonics.py` | D.8 item 2 | Green **and** consistent with `test_complex_to_dehnen_real_matches_p2m_real_direct`; disagreement between the two is section G |
+| ~~**0.6**~~ **DONE `c2874b6`, `20ba5d8`** | `static_num_levels` bit-identity test for the **real** upward sweep, copied from the complex one | `tests/unit/core/` | D.9 | Green |
+| ~~**0.7**~~ **DONE `26cef45`** | `nearfield_leafpair_pallas_decoupled` same-array-both-sides parity test, `interpret=True` | `tests/unit/operators/test_pallas_nearfield_fused.py` | F25 | Green on CPU |
+| ~~**0.8**~~ **DONE `568deca`** | `JACCPOT_FUSED_M2L_VJP=0` fallback parity test (monkeypatch the env, `interpret=True`) | `tests/unit/test_custom_vjp_parity.py` | F26 | Green; both branches now exercised |
+| ~~**0.9**~~ **DONE `92c8e73`** | Staticness-contract tests: passing a tracer for `softening` / omitting `max_leaf_size` under `jit` raises the documented error | `tests/unit/core/test_near_field.py` | D.7 last two rows | Green |
+| ~~**0.10**~~ **DONE `ff4c911`** | **Fix the coverage omit.** Delete `jaccpot/pallas/m2l_real_fused.py` from `[tool.coverage.run] omit`, replacing the comment with the measurement (92% from CPU tests) | `pyproject.toml` | F04 | `pytest --cov=jaccpot --cov-report=term-missing` shows the module at ~92%, TOTAL rises |
+| ~~**0.11**~~ **DONE `c2874b6` + `8bd24a6`** | **Docstring corrections.** `real_harmonics.py:371-382` (F07/D.8 item 1), `near_field.py:2862-2867` (F05), `fmm_evaluate.py:1117` (F06), `real_tree_expansions.py:242-257` (F24), plus a one-line note at `real_harmonics.py:1267` that the unused `R` entries are deliberate narration (F19) | docstrings/comments only | F05, F06, F07, F19, F24 | `pre-commit run --all-files`; diff contains no code lines |
+| ~~**0.12**~~ **DONE `e2959eb`** | **ARCHITECTURE.md corrections.** §2/§9 twelve→fourteen names + add `GradConfig`, `TraversalOverrides`; §9 golden-grid axes; §4 drop "thin coordinator" or qualify it with the 722-line constructor | `ARCHITECTURE.md` | A.8 | Cross-checked against `test_public_api_surface.py:25-39` and `test_fmm_golden.py:76-90` |
+| ~~**0.13**~~ **DONE `e2959eb`** | **STYLE_GUIDE §8 corrections.** Upward-import inventory 4/5 → 7/11 with the three additions and their classification | `agent_guides/STYLE_GUIDE.md` | A.2 | Re-run the import-graph script; counts match |
+| ~~**0.14**~~ **DONE `934c252` — but not verifiable, see A.11** | **Dead code removal.** 19 unused imports (F16, F17, F14), the two `_env_*` aliases (F15), the two unused locals (F18 — check `prepare_elapsed` is not a dropped diagnostic first) | 8 files, import blocks only | F14-F18 | `pyflakes jaccpot` clean of "imported but unused"; suite green |
+| ~~**0.15**~~ **DONE `ad7b00c` — same commit as E.2** | **`TYPE_CHECKING` blocks.** Add per-mixin `if TYPE_CHECKING: from ._fmm_impl import FastMultipoleMethod`; define or replace `PreparedStateLike`; import `LargeNGradPlan` and `NearfieldInteropData` | 10 `runtime/fmm_*.py` + `fmm_state.py` | F21, E.2 | `typing.get_type_hints` resolves on every mixin method; `JACCPOT_RUNTIME_TYPECHECK=1 pytest tests/unit` green |
+| ~~**0.16**~~ **DONE `23ccc9d` for `__future__`; the `__all__` half is DEFERRED, see A.11** | `from __future__ import annotations` in the 13 modules missing it; `__all__` in the non-`__init__` modules missing it | 13 + 30 files, headers only | F36 | Suite green; no import-order change (isort clean) |
+| ~~**0.17**~~ **DONE `6839a6c`** | **Repo-hygiene moves** (git `mv` only): `benchmarks/n_ladder_production/` → `bench/results/`, `results/validation/` → `bench/results/validation/`, `bench/real_vs_complex_gpu_plan.md` → `docs/`, `OCTREE_JACCPOT_STATUS_2026-03-15.md` → `docs/` with a superseded-by header | directory moves | A.7 | `grep -rn` for each old path returns nothing; `pytest -q` and `bench/ci_benchmark_guard.py --help` still work |
+| ~~**0.18**~~ **DONE `a54f29e`** | **Test-layout moves** (git `mv` only): the 20 root test files into `tests/{unit,integration}/` and a new `tests/distributed/` | `tests/` moves + `tests/slow_tests.txt` paths | A.6 | Same collected test count before/after (`pytest --collect-only -q \| wc -l`); `slow_tests.txt` paths updated; CI workflow paths checked |
+| ~~**0.19**~~ **DONE `d941805`** | Rename `tests/unit/test_large_n_grad_path.py` → `test_large_n_config_thresholds.py` (or similar) and add one line to its docstring saying it does **not** enter `LargeNPreparedState` | one file | F28 | Collected count unchanged |
+| ~~**0.20**~~ **DONE `4b2a66a`** | **Docstring completion, batch 1**: the 14 public-surface names in section C, and the ~15 highest-parameter numerics functions from F23 | docstrings only | F08 (partly), F23 (partly), C | `pydoclint --skip-checking-short-docstrings=False` violation count drops measurably; record before/after in the PR |
+| ~~**0.21**~~ **DONE `e2959eb`** | **Write D.12 into `NUMERICS_AND_JAX.md` §3**: a gradient test at a default leaf size covers no far field, so it needs an explicit M2L-count assertion. One paragraph beside the existing physical-edge-case list | `agent_guides/NUMERICS_AND_JAX.md` | D.12 | Docs only. The two in-repo guards it describes already exist (`test_gradient_correctness.py`, the new golden) |
 
 ### Tier 1 — structural; no expression-level change to numerical code
 
@@ -1377,8 +1722,17 @@ Each of these is gated on the Tier 0 characterization named in its row.
 >   set — numerics functions with ≥8 parameters still violating under
 >   `--skip-checking-short-docstrings=False` — measures **zero**. The row is stale, not
 >   outstanding. The programme that finished it is item 2.5's, not 1.10's own three PRs.
+>   **The row itself now says so** (2026-08-18); until then this bullet was the only place it
+>   was written down, and the `◐` in the table was what a reader saw first.
 >
 > So nothing in Tier 1 needs doing except a decision on 2.6.
+>
+> **2026-08-18: 2.6 is decided and closed, so nothing in Tier 1 needs doing at all.** What the
+> 2.6 decision did *not* do is execute anything — `bench/gpu_gate.py` exists and has never run
+> on hardware. **1.8's deferred F11 half therefore stays open on exactly the same condition it
+> has always had** (`_large_n_grad.py` / `_large_n_farfield.py` at 0%), and that condition is
+> now waiting on a gate run rather than on a budget decision. That is progress worth naming:
+> the blocker moved from "someone must choose" to "someone must run it".
 
 | # | Item | Touches | Closes | Gated on | Verified by |
 |---|---|---|---|---|---|
@@ -1391,7 +1745,7 @@ Each of these is gated on the Tier 0 characterization named in its row.
 | **1.7** ✔ **PR #86** | Extract from `PrepareMixin._prepare_state_dual_and_downward` (883 lines) — named private methods along its internal phases, no expression changes | `runtime/fmm_prepare.py` (883 → 493) | F10 | 0.1, 0.2 | **Done, two phases of seven.** The cut points are not guesswork: the function is already instrumented with `_record_dual_stage("..._dual_<phase>_seconds", ...)` at each boundary, and the data flow across every one was measured. Extracted the two where the interface earns a signature (317 lines → a 17-field bundle; 131 lines → 2 outputs); the PR lists the other five with the ratio that argued against them. The driver unpacks the bundle back into the same local names so no later expression changed. |
 | **1.8** ✔ **PR #87** | Extract `_read_large_n_env_config` (271 lines) into `runtime/_large_n_env.py`. **Nothing else** | `runtime/` (2048 → 1768) | F11 (partly) | — | **Done.** The "re-open if GPU coverage has landed" check was run, not assumed: CI is still ubuntu-latest with no cuda leg and `_large_n_grad.py` / `_large_n_farfield.py` are still at **0%**, so A.9's leave-it-whole argument stands and F11 stays open. Datum for the cut line: the extracted reader measures **69%** from three CPU policy test files. |
 | **1.9** ✔ **PR #81** | Move F37's inline thresholds into `runtime/fmm_constants.py` with `#:` comments | `runtime/` | F37 | 0.1 | **Done.** Note that **three different policies cross over at 262144** (`_CLASS_MAJOR_CPU_PARTICLE_THRESHOLD` plus the two named here), so they stay three constants: collapsing them would assert an equivalence that is not established. One site beyond F37's list was named too — the `< 262_144` fifty lines from its twin, the same drift hazard F37 describes. |
-| **1.10** ◐ **PR #88 = part 1 of 3** | Docstring completion, batch 2: the remaining ~58 numerics functions with ≥8 params | docstrings only | F23 | — | **Partly done, and the item is a three-PR programme — see the F23 row.** Measured target set: **60** (confirming ~58). 18 done: `upward/` and `downward/` are clear of the finding, plus `distributed/fmm.py` and `nearfield/grad.py`. pydoclint with `--skip-checking-short-docstrings=False`: **2778 → 2710**. |
+| ~~**1.10** ◐ **PR #88 = part 1 of 3**~~ ✔✔ **COMPLETE** | Docstring completion, batch 2: the remaining ~58 numerics functions with ≥8 params | docstrings only | F23 | — | ~~**Partly done, and the item is a three-PR programme.**~~ **DONE.** The numbers below are the state at PR #88 and are kept because they are the measurement, not the status: target set **60** (confirming ~58); 18 done; pydoclint strict **2778 → 2710**, i.e. **~15%**, which is where the "part 1 of 3" reading came from. **Re-measured 2026-08-18: `jaccpot/` is at 0**, so the target set is empty and this item has nothing left in it. It was not finished by its own three PRs — the 2.5 programme absorbed it and ran to zero across the whole package, which is a superset of this row. Read "part 1 of 3" as a plan that was overtaken, not as 15% of the work outstanding. |
 
 ### Tier 2 — numerics-sensitive or API-affecting. One PR each, your sign-off each.
 
@@ -1401,8 +1755,8 @@ Each of these is gated on the Tier 0 characterization named in its row.
 | **2.2** ✔ **PR #105** | Consolidate the four hand-rolled env parsers (F13, A.4) | Changes malformed-value semantics — which reverse-mode M2L kernel runs. Requires deciding what a garbage value should mean | **Done. Decided: a malformed value means THE DEFAULT, whatever it is**, plus a one-time warning naming the variable and the value ignored. That is not a new convention — `env_int`/`env_float` already did it and `env_flag` was the outlier, so `_env` disagreed with itself. The "four parsers" were really *three* semantics (denylist flag ×2, allowlist flag, enum-with-fallback), which is why they could not be deduped mechanically; `env_choice` was added for the third. Verified over 14 inputs per reader: FUSED and DIAG unchanged on all 14, JIT differs on 6 malformed inputs (False → the default), which is the intended consequence. A.4's specific warning is satisfied. `_env` also had **no tests**; it has 39 now, written first. |
 | **2.3** ✔ **CLOSED (`ab58c3d`)** | Delete or wire up the Wigner reference family (F32, ~260 lines, 8 `__all__` names) | Removes module-public names | **Already done; this row was stale.** G.4 records the decision (deleted) and `ab58c3d` carried it out. Verified 2026-08-15: `grep -ri wigner jaccpot/` returns **two prose mentions and no code** — `operators/_precision.py:5` and `operators/real_rotations.py:51-55`, both explaining why the closed-form Dehnen builders are the only rotation path. No `__all__` name remains. Nothing to do. |
 | **2.4** ✔ **DONE `d473b48`** | Any rename from section C | Public API; `test_public_api_surface.py` must change in the same commit | **Both candidates section C named were carried out in one commit** (2026-08-15, *"rename the two names section C flagged (2.4)"*): `differentiable_gravitational_acceleration` → `direct_sum_gravitational_acceleration`, which is what "something that says direct sum" asked for; and the engine class → `FMMEngine`, so `_fmm_impl.py:189` and the `solver.py:540` facade no longer share a name. Nothing further is outstanding, and a third name for the same function would be churn -- the current one already satisfies the recommendation. The "rename candidates" paragraph at the end of section C still reads as open; it is not. |
-| **2.5** ✔✔ **CLOSED — flag off in `cc3b4b9` (PR #150), `jaccpot/` at zero in PRs #158 / #159 / #160** | Turn off `--skip-checking-short-docstrings` in `pyproject.toml` | ~~2840 violations must be at zero first; this is the *last* commit of the docstring programme, not the first~~ **This premise was wrong, and waiting on it was the mistake.** The flag is now off, with `baseline = ".pydoclint-baseline.txt"` carrying the pre-existing tail — so the gate is live *while* the tail retires, instead of the tail being unprotected until the end. What forced the rethink: `runtime/_adaptive_policy.py` was driven to zero (PR #118) and `main` was never at zero, because five functions from a concurrent branch merged into the same file without conflict and the vacuous hook reported 0 throughout (repaired in PR #149). Absolute counts: **`jaccpot/` is now 0** (was 153 when this row was last written; the final 153 closed across 22 files, one commit per file). Unchanged and out of scope by design: `tests/` 1034, `bench/` 121, `examples/` 60 — 1215 baseline entries, none of them `jaccpot/`. Regenerate with `pydoclint --config pyproject.toml --generate-baseline True .` and check the diff only *removes* lines; `auto-regenerate-baseline` must stay `false` because the pre-commit hook passes staged filenames and would rebuild the baseline from a subset. | **Closed 2026-08-18.** `jaccpot/` measures 0 absolute strict violations (2840 at the original measurement -> 2403 -> 153 entering the final three batches -> 0). The baseline was regenerated by hand and the diff **only removed lines** (0 added, 197 removed); `auto-regenerate-baseline` stays `false` for the reason in the previous column. One annotation shipped alongside the docs (`batch_body`, the last unannotated parameter in `jaccpot/`); it could not be its own commit, because baseline entries are matched by message **text** and the DOC103 message embeds the parameter's type, so annotating alone invalidates the entry without removing the violation. Two follow-ups left open: `tests/unit/test_docstring_section_formatting.py` was found **red on `main`** (three headers butted onto their summary line — fixed in PR #156), and `evaluate_large_n_farfield` has a wrong return annotation (declares three arrays, returns `None` in two slots; zero callers, documented with a warning, needs its own test). **Second measurement note:** `baseline` is set in `pyproject.toml` and applies even when style flags are overridden on the command line, so a plain run reports zero *new*, not zero absolute — pass `--baseline /dev/null --auto-regenerate-baseline False`, and exclude `.claude/worktrees/`, which holds transient full copies of the repo and inflates counts ~10x. |
-| **2.6** ✔ **DECIDED AND CLOSED 2026-08-17 — as a local gate, not CI** | ~~Nightly GPU CI leg~~ → `bench/gpu_gate.py`, run deliberately before a release | Infrastructure, and it is what unblocks F27/F33/F34 and the deferred half of F11 | **Decided: no CI leg.** `TobiBu/jaccpot` is **public**, and a self-hosted runner on a public repository lets a fork PR execute arbitrary code on the box; the box's GPUs are also shared, and a `schedule:` job cannot honour CLAUDE.md's "confirm before occupying one". GitHub-hosted runners have no GPU and the paid GPU runners were not worth the cost for this. So the gate is a **script**: `python -m bench.gpu_gate`. It claims the least-used card via `autocvd`, applies the measured caps (`-n 6`, `MEM_FRACTION=.12`), sets `--xla_gpu_deterministic_ops=true`, runs the suite, allows §9's five measured GPU-only failures through, and **fails if the 17 GPU-gated tests skipped** — because a run that fell back to CPU otherwise passes while proving nothing. Covers F27's 0%-coverage lanes, F33's strict/refresh lane and Pallas outside interpret mode. **Does not cover F34** (`tests/distributed/`, 24 tests, needs two cards) — which F34 itself already records as out of scope for this pass. **NOT YET EXECUTED ON HARDWARE:** written and unit-checked on a Mac with no GPU, so the preflight, the argument surface and the output parsers are verified but the run itself is not. First real invocation should be treated as commissioning the gate, not as a clean bill of health. |
+| **2.5** ✔✔ **CLOSED — flag off in `cc3b4b9` (PR #150), `jaccpot/` at zero in PRs #158 / #159 / #160, baseline retired in `680d3da`** | Turn off `--skip-checking-short-docstrings` in `pyproject.toml` | ~~2840 violations must be at zero first; this is the *last* commit of the docstring programme, not the first~~ **This premise was wrong, and waiting on it was the mistake.** The flag is now off, with `baseline = ".pydoclint-baseline.txt"` carrying the pre-existing tail — so the gate is live *while* the tail retires, instead of the tail being unprotected until the end. What forced the rethink: `runtime/_adaptive_policy.py` was driven to zero (PR #118) and `main` was never at zero, because five functions from a concurrent branch merged into the same file without conflict and the vacuous hook reported 0 throughout (repaired in PR #149). Absolute counts: **`jaccpot/` is now 0** (was 153 when this row was last written; the final 153 closed across 22 files, one commit per file). Unchanged and out of scope by design: `tests/` 1034, `bench/` 121, `examples/` 60 — 1215 baseline entries, none of them `jaccpot/`. Regenerate with `pydoclint --config pyproject.toml --generate-baseline True .` and check the diff only *removes* lines; `auto-regenerate-baseline` must stay `false` because the pre-commit hook passes staged filenames and would rebuild the baseline from a subset. | **Closed 2026-08-18.** `jaccpot/` measures 0 absolute strict violations (2840 at the original measurement -> 2403 -> 153 entering the final three batches -> 0). The baseline was regenerated by hand and the diff **only removed lines** (0 added, 197 removed); `auto-regenerate-baseline` stays `false` for the reason in the previous column. One annotation shipped alongside the docs (`batch_body`, the last unannotated parameter in `jaccpot/`); it could not be its own commit, because baseline entries are matched by message **text** and the DOC103 message embeds the parameter's type, so annotating alone invalidates the entry without removing the violation. Two follow-ups left open: `tests/unit/test_docstring_section_formatting.py` was found **red on `main`** (three headers butted onto their summary line — fixed in PR #156), and `evaluate_large_n_farfield` has a wrong return annotation (declares three arrays, returns `None` in two slots; zero callers, documented with a warning, needs its own test). **Second measurement note:** `baseline` is set in `pyproject.toml` and applies even when style flags are overridden on the command line, so a plain run reports zero *new*, not zero absolute — pass `--baseline /dev/null --auto-regenerate-baseline False`, and exclude `.claude/worktrees/`, which holds transient full copies of the repo and inflates counts ~10x. **UPDATE 2026-08-18 (`680d3da`): the baseline no longer exists, and the regenerate instructions two sentences above are obsolete — do not follow them.** With `jaccpot/` at zero the file could not suppress anything real, but it could still absorb a *future* violation in any file it still listed, since entries match by message text. Deleting it was not a one-line change, and the reason is the correction this row most needs: **the baseline's final 1215 entries were entirely outside `jaccpot/`** — `tests/` 1034, `bench/` 121, `examples/` 60, exactly the live counts there — and the pydoclint hook had **no `files:` restriction**, so deleting the baseline alone would have turned `pre-commit run --all-files` red with 1215 findings it had never been catching. This row already recorded those three counts as "unchanged and out of scope by design"; what it did not record is that "out of scope" was being enforced *by the baseline itself*, which is a load-bearing job for a file described here as merely carrying a tail. The hook is now scoped `files: ^jaccpot/` and the scope is where that policy lives — checkable, and stated in `.pre-commit-config.yaml`. Verified the hook is still not vacuous: a one-line-summary function with two undocumented parameters is caught. Widening to `tests/`/`bench/`/`examples/` means documenting those 1215 first. |
+| **2.6** ✔ **DECIDED AND CLOSED 2026-08-17 — as a local gate, not CI** | ~~Nightly GPU CI leg~~ → `bench/gpu_gate.py`, run deliberately before a release | Infrastructure, and it is what unblocks F27/F33/F34 and the deferred half of F11 | **The reusable part of this row is the security reasoning, not the script — so read that first: a self-hosted runner on a PUBLIC repository executes fork-PR code on the box. That is the argument, it is not specific to GPUs, and it applies to any future proposal to attach this machine to CI.** The two supporting grounds are that the box's GPUs are shared, and that a `schedule:` job structurally cannot honour CLAUDE.md's "confirm before occupying one" — an unattended job has nobody to confirm with. **Decided: no CI leg.** `TobiBu/jaccpot` is **public**, and a self-hosted runner on a public repository lets a fork PR execute arbitrary code on the box; the box's GPUs are also shared, and a `schedule:` job cannot honour CLAUDE.md's "confirm before occupying one". GitHub-hosted runners have no GPU and the paid GPU runners were not worth the cost for this. So the gate is a **script**: `python -m bench.gpu_gate`. It claims the least-used card via `autocvd`, applies the measured caps (`-n 6`, `MEM_FRACTION=.12`), sets `--xla_gpu_deterministic_ops=true`, runs the suite, allows §9's five measured GPU-only failures through, and **fails if the 17 GPU-gated tests skipped** — because a run that fell back to CPU otherwise passes while proving nothing. Covers F27's 0%-coverage lanes, F33's strict/refresh lane and Pallas outside interpret mode. **Does not cover F34** (`tests/distributed/`, 24 tests, needs two cards) — which F34 itself already records as out of scope for this pass. **NOT YET EXECUTED ON HARDWARE:** written and unit-checked on a Mac with no GPU, so the preflight, the argument surface and the output parsers are verified but the run itself is not. First real invocation should be treated as commissioning the gate, not as a clean bill of health. |
 
 ---
 
@@ -1551,7 +1905,8 @@ accept the exposure. Not a refactoring decision.
 
 ### G.6 Priorities I need ranked — **partly answered**
 
-**Answered:** the docstring programme is the *targeted* subset now (done, `4b2a66a`) with
+**Answered, and the third question was answered by events rather than by a decision — see
+below.** The docstring programme is the *targeted* subset now (done, `4b2a66a`) with
 the full sweep folded into Tier 1.10 and the `--skip-checking-short-docstrings` flip as the
 closing gate at Tier 2.5. **Deferred by you:** the GPU questions, to be reported after this
 phase — which leaves F27 (0% on the large-N reverse), F33 (`fmm_strict_run.py` at 55%) and
@@ -1571,7 +1926,17 @@ The original questions, for the record:
   the ~73 worst plus the public surface. Do you want the full sweep to zero (a multi-PR
   programme ending at Tier 2.5), or the targeted subset and the flag left as it is?
 
-### G.7 One thing I checked and could not settle
+  **Answered: the full sweep, and it is finished.** `jaccpot/` is at **0**. But note *how* it
+  was answered — this question offered "flag left as it is" as one of two options, and the
+  actual course was neither: the flag went off **first**, early, with a baseline holding the
+  tail (2.5), and the sweep ran underneath a live gate. Both options on offer here assumed the
+  flag flips at one end or the other. The reason that mattered is in D.10.
+
+- **GPU budget** — **decided** at 2.6, against a CI leg, on the fork-PR execution risk of a
+  self-hosted runner on a public repository. F27, F33, F34 and F11's deferred half stay open,
+  but they now wait on `bench/gpu_gate.py` being **run**, not on a decision.
+
+### G.7 ~~One thing I checked and could not settle~~ **SETTLED (`92c8e73`) — and it was settled long before it stopped being listed as open**
 
 `near_field.py:2829-2836` documents that omitting `max_leaf_size` under `jit` raises
 `ValueError` (re-raised from the `TypeError` that `.item()` throws on a tracer), and it
@@ -1581,6 +1946,29 @@ documents at `:2766` that `softening` must be a concrete float. I could not find
 around the `.item()` call is hit. If it is not, these are two more Tier 0 tests (0.9 assumes
 they are missing). I flagged them rather than assert them because a staticness contract with
 no test is a common pattern in this file and I did not want to over-count it.
+
+> **Settled, and the caution above was the correct instinct applied to the wrong conclusion.**
+> The two tests did not exist when this was written; item **0.9** wrote them, in `92c8e73`:
+>
+> * `test_max_leaf_size_is_required_under_jit` — `tests/unit/core/test_near_field.py:1161`
+> * `test_softening_must_be_concrete` — `:1194`
+>
+> So 0.9's assumption *"they are missing"* was right, the item was executed, and this entry
+> should have closed with it.
+>
+> **Why it stayed open for three reconciliations is the part worth keeping.** Every attempt to
+> re-derive 0.9's status searched for the audit's own vocabulary — `staticness`, `tracer`,
+> `ConcretizationTypeError` — and the tests are named after the *contract* rather than the
+> mechanism, so the search returned nothing and absence-of-evidence was read as evidence. The
+> Tier 0 reconciled block already names this exact failure and calls it *"searching for the
+> wrong words and concluding absence"*. It named it for 0.9's row and did not propagate to
+> G.7, because the two live 400 lines apart and nothing connects them.
+>
+> This entry's own suggested method would have worked on the first try. *"Grep `tests/` for
+> the `ValueError` message text"* is a search for something the code and the test must share,
+> which is why it survives a renaming; searching for a concept is a search for something only
+> the author's vocabulary contains. **When checking whether a contract is tested, grep the
+> contract, not the concept.**
 
 ### G.8 `sympy`: declare it, delete the code that needs it, or move that code out? — **DECIDED: deleted (`ab58c3d`)**
 
