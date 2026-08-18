@@ -33,10 +33,11 @@ bounds over tree levels, so the whole sweep transposes cleanly under
 from __future__ import annotations
 
 import os
-from typing import NamedTuple, Optional, Tuple
+from typing import Any, NamedTuple, Optional, Tuple
 
 import jax
 import jax.numpy as jnp
+import numpy as np
 from jax import lax
 from jaxtyping import Array
 
@@ -140,18 +141,153 @@ def _fused_m2l_chunk(order: int, itemsize: int) -> int:
 
 
 class MutualTreeArrays(NamedTuple):
-    """Device-resident frozen topology consumed by the far-field sweep."""
+    """Device-resident frozen topology consumed by the far-field sweep.
+
+    The level schedule is a **dense** ``(depth_cap, width_cap)`` block rather
+    than a tuple of ragged per-level arrays. That is a shape decision, not a
+    cosmetic one: a tuple's arity is the tree depth, so it is part of the pytree
+    *structure*, and a rebuild that changes the depth by one changes the
+    structure and forces a retrace. Padded to capacities, the whole topology is
+    keyed on capacities alone and one compiled program serves every rebuild.
+
+    ``level_nodes[d]`` holds the nodes at depth ``d + 1`` and
+    ``level_parents[d]`` their parents, shallowest first. Slots where
+    ``level_valid`` is false are padding: they hold index 0 and every consumer
+    masks their contribution to the identity, so a padded slot is a no-op rather
+    than a write to node 0.
+    """
 
     num_nodes: int
     order: int
     leaf_nodes: Array
     leaf_particles: Array
     leaf_particle_valid: Array
-    level_nodes: Tuple[Array, ...]
-    level_parents: Tuple[Array, ...]
+    level_nodes: Array
+    level_parents: Array
+    level_valid: Array
     far_source: Array
     far_target: Array
     far_valid: Array
+
+
+# Capacities are snapped onto a ladder rather than used raw, for the reason
+# `jaccpot/runtime/_large_n_env.py` gives for its own tunables: each distinct
+# capacity is a distinct compiled shape, so a free-running integer recompiles
+# per rebuild -- which is exactly the cost this padding exists to remove.
+# A 1 / 1.5 / 2 x powers-of-two ladder rather than powers of two alone. The
+# rungs matter because the kernels do work proportional to the *capacity*, not
+# the occupancy: the M2L chunks its directed pair list at a fixed budget, so a
+# cap 2x the real pair count means twice the M2L chunks. Pure powers of two
+# overshoot by up to 2x; adding the 1.5x rungs halves that to 1.33x worst case.
+# Within a single run only one rung is ever used, so a finer ladder costs
+# nothing -- it only means two runs at different N may not share a compile.
+CAPACITY_LADDER: Tuple[int, ...] = tuple(
+    sorted(
+        {m * (1 << k) for k in range(3, 26) for m in (2, 3)} | {1 << k for k in range(3, 27)}
+    )
+)
+
+
+def snap_capacity(
+    value: int, *, relative: float = 0.10, absolute: int = 256, minimum: int = 8
+) -> int:
+    """Smallest ladder entry at or above ``value * (1 + relative) + absolute``.
+
+    The headroom is deliberately **additive plus relative**, not a single
+    multiplicative factor, because measured drift does not look like one factor.
+    Over a 12 base-step Hernquist rollout at N = 4096 the near-pair count moved
+    8040 -> 8118 and the far-pair count 10 -> 74: 1.0% against 640% in relative
+    terms, but **+78 against +64 in absolute terms**. The absolute floor is what
+    covers a small list whose relative swing is enormous; the relative term is
+    what covers a large list where a fixed floor would be nothing.
+
+    A single multiplicative factor sized for the far list (4x) was measured to
+    resolve a cap of 262144 for 32830 real far pairs at N = 20 000 -- 8x the
+    occupancy, and therefore 8x the M2L chunks. This form gives 49152 there.
+    """
+    want = max(
+        int(minimum),
+        int(max(0, value) * (1.0 + float(relative))) + int(absolute),
+    )
+    for entry in CAPACITY_LADDER:
+        if entry >= want:
+            return int(entry)
+    raise ValueError(
+        f"capacity {value} (+{relative:.0%}/+{absolute}) exceeds the largest "
+        f"ladder entry {CAPACITY_LADDER[-1]}; widen CAPACITY_LADDER deliberately "
+        "rather than falling back to an unsnapped value"
+    )
+
+
+def dense_level_schedule(
+    level_nodes: Tuple[Array, ...],
+    level_parents: Tuple[Array, ...],
+    *,
+    depth_cap: Optional[int] = None,
+    width_cap: Optional[int] = None,
+    index_dtype: Any = jnp.int32,
+) -> Tuple[Array, Array, Array, int, int]:
+    """Pack ragged per-level index arrays into one ``(depth, width)`` block.
+
+    Returns ``(nodes, parents, valid, depth_cap, width_cap)``. Levels stay
+    shallowest-first; padded slots hold index 0 with ``valid`` false, so every
+    consumer masks them to its own identity.
+
+    A depth beyond the real tree is an entirely-invalid row, which every cascade
+    treats as a no-op -- so ``depth_cap`` may exceed the tree depth freely, and
+    that headroom is what lets one program survive a rebuild that deepens the
+    tree.
+    """
+    depths = len(level_nodes)
+    widths = [int(level.shape[0]) for level in level_nodes] or [0]
+    d_cap = int(depth_cap) if depth_cap is not None else snap_capacity(depths)
+    w_cap = int(width_cap) if width_cap is not None else snap_capacity(max(widths))
+    if depths > d_cap:
+        raise ValueError(f"tree depth {depths} exceeds depth_cap {d_cap}")
+    if max(widths) > w_cap:
+        raise ValueError(f"widest level {max(widths)} exceeds width_cap {w_cap}")
+
+    nodes = np.zeros((d_cap, w_cap), dtype=np.int64)
+    parents = np.zeros((d_cap, w_cap), dtype=np.int64)
+    valid = np.zeros((d_cap, w_cap), dtype=bool)
+    for d, (lvl_nodes, lvl_parents) in enumerate(zip(level_nodes, level_parents)):
+        n = int(np.asarray(lvl_nodes).shape[0])
+        nodes[d, :n] = np.asarray(lvl_nodes)
+        parents[d, :n] = np.asarray(lvl_parents)
+        valid[d, :n] = True
+    return (
+        jnp.asarray(nodes, dtype=index_dtype),
+        jnp.asarray(parents, dtype=index_dtype),
+        jnp.asarray(valid),
+        d_cap,
+        w_cap,
+    )
+
+
+def _scan_levels(body, carry, tree: MutualTreeArrays, *, deepest_first: bool):
+    """Run ``body`` once per tree level, in cascade order.
+
+    The cascades are inherently sequential -- a level must be complete before the
+    next reads it -- so this is a ``lax.scan``, not a ``vmap``. Replacing the
+    Python loop it grew from costs nothing at runtime (the same number of
+    kernels) and buys two things: the traced graph no longer grows with tree
+    depth, and depth stops being part of the program's identity.
+
+    ``body(carry, nodes, parents, valid) -> carry``; ``deepest_first`` reverses
+    the scan for the upward passes.
+    """
+
+    def step(acc, level):
+        nodes, parents, valid = level
+        return body(acc, nodes, parents, valid), None
+
+    out, _ = lax.scan(
+        step,
+        carry,
+        (tree.level_nodes, tree.level_parents, tree.level_valid),
+        reverse=bool(deepest_first),
+    )
+    return out
 
 
 def _safe_translate(
@@ -296,9 +432,21 @@ def mutual_upward_sweep(
     )
 
     # Deepest level first: `level_nodes[d]` sits at depth d+1, its parents at d.
-    for nodes, parents in zip(reversed(tree.level_nodes), reversed(tree.level_parents)):
-        node_mass = node_mass.at[parents].add(node_mass[nodes])
-        node_moment = node_moment.at[parents].add(node_moment[nodes])
+    def _accumulate(acc, nodes, parents, valid):
+        mass, moment = acc
+        child = jnp.where(valid, nodes, 0)
+        parent = jnp.where(valid, parents, 0)
+        # Padding slots gather node 0 and contribute an additive zero, so they
+        # land on node 0 as a no-op instead of double-counting it.
+        mass = mass.at[parent].add(jnp.where(valid, mass[child], 0.0))
+        moment = moment.at[parent].add(
+            jnp.where(valid[:, None], moment[child], 0.0)
+        )
+        return mass, moment
+
+    node_mass, node_moment = _scan_levels(
+        _accumulate, (node_mass, node_moment), tree, deepest_first=True
+    )
 
     massive = node_mass > 0
     safe_mass = jnp.where(massive, node_mass, jnp.ones_like(node_mass))
@@ -317,12 +465,17 @@ def mutual_upward_sweep(
         .at[tree.leaf_nodes]
         .add(leaf_multipoles.astype(dtype))
     )
-    for nodes, parents in zip(reversed(tree.level_nodes), reversed(tree.level_parents)):
+    def _m2m(acc, nodes, parents, valid):
+        child = jnp.where(valid, nodes, 0)
+        parent = jnp.where(valid, parents, 0)
         # M2M convention: delta = child centre - parent centre.
         translated = _safe_translate(
-            multipoles[nodes], centers[nodes] - centers[parents], m2m_real, order=p
+            acc[child], centers[child] - centers[parent], m2m_real, order=p
         )
-        multipoles = multipoles.at[parents].add(translated.astype(dtype))
+        translated = jnp.where(valid[:, None], translated, 0.0)
+        return acc.at[parent].add(translated.astype(dtype))
+
+    multipoles = _scan_levels(_m2m, multipoles, tree, deepest_first=True)
 
     return node_mass, centers, multipoles
 
@@ -414,13 +567,18 @@ def _dual_m2l(
 def _push_locals_down(locals_: Array, centers: Array, tree: MutualTreeArrays) -> Array:
     """L2L cascade, shallowest level first so parents are complete when read."""
     p = int(tree.order)
-    for nodes, parents in zip(tree.level_nodes, tree.level_parents):
+
+    def _l2l(acc, nodes, parents, valid):
+        child = jnp.where(valid, nodes, 0)
+        parent = jnp.where(valid, parents, 0)
         # L2L convention: delta = parent centre - child centre.
         translated = _safe_translate(
-            locals_[parents], centers[parents] - centers[nodes], l2l_real, order=p
+            acc[parent], centers[parent] - centers[child], l2l_real, order=p
         )
-        locals_ = locals_.at[nodes].add(translated.astype(locals_.dtype))
-    return locals_
+        translated = jnp.where(valid[:, None], translated, 0.0)
+        return acc.at[child].add(translated.astype(acc.dtype))
+
+    return _scan_levels(_l2l, locals_, tree, deepest_first=False)
 
 
 def _l2p_forces(
