@@ -40,6 +40,7 @@ from typing import Any, Iterable, Mapping, Optional
 __all__ = [
     "STAGE_TREE",
     "aggregate_counter_names",
+    "format_stage_timing_tree",
     "leaf_counter_names",
     "stage_timing_tree",
 ]
