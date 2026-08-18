@@ -103,10 +103,15 @@ interchangeable across representations: the M2L sandwich deliberately crosses th
 rotate the *multipole* world→z, translate along z, rotate the *local* z→world — so
 `from_z_local @ to_z_multipole` is emphatically not the identity.
 
-## 4. Two `_angles_from_delta`, one of them wrong (OPEN DEFECT)
+## 4. Two `_angles_from_delta`, one of them was wrong (FIXED)
 
-Unlike sections 1–3, this one is **not** a pair of locally reasonable
-conventions. It is a bug, still in the tree, pinned rather than fixed.
+Unlike sections 1–3, this one was **not** a pair of locally reasonable
+conventions. It was a bug, and it is fixed — see "The fix" below. The diagnosis
+is kept because it is the transferable part: the wrong expressions are the ones a
+reader's spherical-coordinate instinct reaches for, and the tables below are what
+distinguishes a convention error from a tolerance question.
+
+Tenses below are as originally written, describing the defect while it was live.
 
 | function | azimuth | polar |
 | --- | --- | --- |
