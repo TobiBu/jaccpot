@@ -628,6 +628,61 @@ verified until 0.16's deferred half lands.** So the ordering is:
 Doing them in the other order is what produced the current state: 0.14 shipped a removal pass
 and an evidence line that cannot be re-derived by anyone who was not there.
 
+> **CORRECTION, 2026-08-18, from executing this item — the weighting above is backwards.**
+>
+> This finding presents `__all__` as the fix and the private-re-export marker as a footnote
+> ("the rule the work needs is two-part"). Measured properly while implementing it, the
+> proportions are the other way round:
+>
+> | | count |
+> |---|---|
+> | non-`__init__` unused imports | 114 |
+> | of those, **public** names — the ones `__all__` can govern | **31** |
+> | of those, **private** names — which `__all__` cannot govern at all | **83** |
+> | private share in `runtime/kernels/core.py` alone | **62 of 66** |
+>
+> `__all__` declares the *public* surface. `_apply_m2l` and its 58 siblings in `core.py` are
+> private by name, so no `__all__` anywhere makes them legible — which means the sentence above
+> that this "blocks 0.14" is right about the *consequence* and wrong about the *instrument*.
+> The finding survives; the prescription does not.
+>
+> **The mechanism, chosen by measurement rather than by taste.** Five candidates, all tested
+> against `pyflakes`:
+>
+> | candidate | result |
+> |---|---|
+> | bare re-export | flagged |
+> | names listed in `__all__` | **silent** |
+> | `_REEXPORTS = ("_foo", "_bar")` — strings | flagged |
+> | `_REEXPORTS = (_foo, _bar)` — references | **silent** |
+> | `from x import _foo as _foo` — the PEP 484 form | flagged (`.pyi` only) |
+> | `# noqa: F401` | flagged — **pyflakes ignores `noqa` entirely** |
+>
+> That last row is worth keeping on its own: 0.14's evidence line reads *"`pyflakes` reports
+> 178 only because it ignores `# noqa`"*, which is true and was offered as the reassurance. It
+> is the opposite of one — it says the marker 0.14 relied on is invisible to the only tool that
+> could audit it.
+>
+> Landed as a tuple of references, with `_fmm_impl.py` deliberately taking `_REEXPORTS` and
+> **no** `__all__`: it is the package's one star-imported module, and a private name cannot
+> narrow the star that broke `import jaccpot` last time this was attempted.
+>
+> **Result: 114 → 31.** The 31 are a worklist, not noise, so 0.14 can now be closed against
+> named candidates. Among them, three that had been hiding in the 114: `FMMEngine` imported
+> under `if TYPE_CHECKING` in `fmm_autotune.py` by `ad7b00c` for annotations that module never
+> writes; `MACType` in `fmm_sweeps.py`, which uses `MACTypeInput`; and
+> `enforce_conjugate_symmetry` where only its `_batch` twin is ever called.
+>
+> **One methodological note, because it nearly shipped a wrong answer.** The classifier that
+> separates deliberate re-exports from dead imports has to resolve module aliases, not grep for
+> them: `_fmm_impl` is imported as `fmm_impl_private`, which shares no substring with it. And
+> relative imports must drop the module name before applying the level, or `from .core import X`
+> inside `kernels/__init__.py` resolves to a package that does not exist — which reported all 66
+> of `core.py`'s re-exports as dead, `_apply_m2l` among them. Both versions were confident.
+> What caught them was a hand-written control that already existed: `_fmm_impl.py`'s docstring
+> states *"Eleven of the imports below are unused here and are not dead"*, and any classifier
+> worth trusting has to reproduce that number before it is believed anywhere else.
+
 **`from __future__ import annotations` is complete**, for the record, and this finding does not
 touch it: **91 of 91** non-`__init__` modules carry it. The single module without it is
 `jaccpot/experimental/__init__.py`, which is out of scope by the audit's own scope line and is
