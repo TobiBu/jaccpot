@@ -310,7 +310,11 @@ class BlockStepFMM:
             order=self.max_order,
         )
         if self.static_shapes and self._caps is None:
-            self._caps = resolve_mutual_capacities(topology)
+            # Only the host lane asks for drift headroom. It rebuilds an LBVH
+            # tree every base step, and LBVH depth is volatile over a rollout;
+            # the device lane's static-radix linkage is frozen, so freeze_template
+            # overrides depth with the invariant measured value instead.
+            self._caps = resolve_mutual_capacities(topology, drift_headroom=True)
         self._state = build_mutual_state(
             topology,
             softening=self.softening,

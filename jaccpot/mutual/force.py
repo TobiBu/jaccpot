@@ -159,6 +159,7 @@ def resolve_mutual_capacities(
     *,
     relative: float = 0.10,
     absolute: int = 256,
+    drift_headroom: bool = False,
 ) -> MutualCapacities:
     """Size capacities from one built topology, with drift headroom.
 
@@ -172,48 +173,27 @@ def resolve_mutual_capacities(
     (depth 22 -> 24, widest level 20 -> 24), and where over-provisioning a level
     row costs real work in the cascades.
 
-
-
     Parameters
-
-
     ----------
-
-
     topology : MutualTopology
-
-
         One built topology to size the capacities from.
-
-
     relative : float
-
-
         Fractional headroom on the pair lists. Default ``0.10``.
-
-
     absolute : int
-
-
         Additive headroom on the pair lists. Default ``256``.
-
-
+    drift_headroom : bool
+        Size ``depth``/``width`` for a *rollout* that rebuilds the tree, rather
+        than for this one topology. Off by default: it costs 3.6-5.3x the level
+        schedule at test scale, and the cascade walks that schedule on every
+        evaluation, so only a caller that will actually rebuild should pay it. A
+        static-radix template does not need it either -- its linkage is frozen,
+        so its depth is invariant across rebuilds.
 
     Returns
-
-
     -------
-
-
     MutualCapacities
-
-
         Capacities snapped onto :data:`~jaccpot.mutual.farfield.CAPACITY_LADDER`,
-
-
         with ``queue`` left at 0 for the caller to resolve by trial.
-
-
     """
     widths = [int(np.asarray(level).shape[0]) for level in topology.level_nodes] or [0]
     num_leaves = int(np.asarray(topology.leaf_nodes).shape[0])
@@ -249,19 +229,34 @@ def resolve_mutual_capacities(
         depth=snap_capacity(
             max(
                 len(topology.level_nodes),
-                # A *bound*, not a measurement. A measured depth cap with any
-                # fixed headroom is fragile for LBVH: over a Hernquist cusp the
-                # depth was seen to go 16 -> 30 at N = 2e4 and 12 -> 34 at
-                # N = 1e5, because tree depth follows the Morton-code
-                # distribution and a central cusp concentrates it hard. Four
-                # times the balanced depth of the same leaf count covers those
-                # and is still O(log N).
-                4 * max(1, int(np.ceil(np.log2(max(2, int(num_leaves)))))),
+                # Only with `drift_headroom`. A measured depth cap with any fixed
+                # margin is fragile for LBVH over a *rollout*: on a Hernquist cusp
+                # the depth was seen to go 16 -> 30 at N = 2e4 and 12 -> 34 at
+                # N = 1e5, because tree depth follows the Morton-code distribution
+                # and a central cusp concentrates it hard. Four times the balanced
+                # depth of the leaf count covers those and is still O(log N).
+                #
+                # It is NOT the default, because `depth` is the cascade scan's
+                # iteration count and `width` the work inside each, so this is
+                # paid on every evaluation by every caller -- including one-shot
+                # builds that never rebuild and so cannot drift. Measured
+                # inflation of the level schedule at test scale: 4.0x at N = 512,
+                # 5.3x at 2048, 3.6x at 4096. That is what OOM-killed a 16 GB CI
+                # runner.
+                (
+                    4 * max(1, int(np.ceil(np.log2(max(2, int(num_leaves))))))
+                    if drift_headroom
+                    else 0
+                ),
             ),
-            relative=1.0,
-            absolute=8,
+            relative=1.0 if drift_headroom else 0.25,
+            absolute=8 if drift_headroom else 4,
         ),
-        width=snap_capacity(max(widths), relative=0.5, absolute=32),
+        width=snap_capacity(
+            max(widths),
+            relative=0.5 if drift_headroom else 0.25,
+            absolute=32 if drift_headroom else 16,
+        ),
         # Left unresolved: see MutualCapacities.queue. A host topology does not
         # record the widest pair front it passed through.
         queue=0,
@@ -503,26 +498,12 @@ def build_mutual_state(
     MutualFMMState
         Device-resident state ready for repeated evaluation.
 
-
-
     Raises
-
-
     ------
-
-
     MutualCapacityOverflow
-
-
         If ``caps`` is given and this topology does not fit it. Raised rather than
-
-
         truncated: a dropped canonical pair loses both of its halves, so momentum
-
-
         stays exactly conserved and nothing else would reveal the loss.
-
-
     """
     topo = topology
     node_to_leaf = jnp.zeros((topo.num_nodes,), dtype=index_dtype)
