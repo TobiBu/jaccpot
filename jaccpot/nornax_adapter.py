@@ -320,6 +320,9 @@ class BlockStepFMM:
             return
         import numpy as _np
         from yggdrax._tree_impl import rebuild_static_radix_tree_from_template
+
+        from jaccpot.mutual.device_topology import node_depths
+        from jaccpot.mutual.farfield import snap_capacity
         from yggdrax.tree import Tree
 
         tree = Tree.from_particles(
@@ -358,6 +361,26 @@ class BlockStepFMM:
                     order=self.max_order,
                 )
             )
+        # The generous depth bound `resolve_mutual_capacities` applies exists for
+        # LBVH, whose depth follows the Morton-code distribution and was measured
+        # to swing 12 -> 34 over a Hernquist rollout. It does not apply here and
+        # costs real work: `depth` is the cascade scan's iteration count, so a 4x
+        # bound is 4x the M2M/L2L iterations.
+        #
+        # A static-radix template's node linkage is a fixed balanced bisection
+        # over leaf-bucket *indices* and is frozen for the run -- `rebuild_state`
+        # re-sorts the particles but never rewires the tree -- so the level
+        # structure, and hence the depth, is literally invariant across rebuilds.
+        # One row of slack is enough.
+        measured_depth = 0
+        probe_depth = node_depths(
+            jnp.asarray(refreshed.parent), root, depth_cap=int(self._caps.depth) + 2
+        )
+        measured_depth = int(jnp.max(probe_depth)) + 1
+        self._caps = self._caps._replace(
+            depth=snap_capacity(measured_depth, relative=0.0, absolute=2)
+        )
+
         # Resolve the wavefront capacity by trial. It bounds the widest
         # *intermediate* pair front, which no finished topology records, so
         # there is nothing to compute it from -- only something to test it
@@ -415,7 +438,16 @@ class BlockStepFMM:
                 G=self.G,
                 max_pair_queue=queue,
             )
-            if not bool(probe.topology_overflow):
+            # Only the pair-queue cause is this resolver's business. Doubling the
+            # wavefront cannot fix a starved far/near/level cap, so conflating the
+            # causes here would exhaust the ladder and report "no workable
+            # wavefront" for a profile whose actual problem is somewhere else --
+            # a misleading error for a real misconfiguration. Those causes are
+            # left to `prepare`, which names them.
+            from jaccpot.mutual.force import OVERFLOW_CAUSES
+
+            queue_bit = 1 << OVERFLOW_CAUSES.index("pair_queue")
+            if not bool(int(probe.overflow_causes) & queue_bit):
                 # One doubling of headroom: the front widens as the system
                 # evolves, and a re-resolve mid-run would change the compiled
                 # shape out from under an already-traced program.

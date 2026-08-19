@@ -151,6 +151,7 @@ def resolve_mutual_capacities(
     row costs real work in the cascades.
     """
     widths = [int(np.asarray(level).shape[0]) for level in topology.level_nodes] or [0]
+    num_leaves = int(np.asarray(topology.leaf_nodes).shape[0])
     return MutualCapacities(
         near=snap_capacity(
             int(np.asarray(topology.near_a).shape[0]),
@@ -162,8 +163,40 @@ def resolve_mutual_capacities(
             relative=relative,
             absolute=absolute,
         ),
-        depth=snap_capacity(len(topology.level_nodes), relative=0.25, absolute=4),
-        width=snap_capacity(max(widths), relative=0.25, absolute=16),
+        # Depth and width need *generous* headroom, not the small absolute
+        # margin the pair lists get. Measured drift on a two-clump N = 4096
+        # rollout was a couple of levels (22 -> 24), which is what the earlier
+        # +25%/+4 policy was sized for -- and it is not representative. On a
+        # Hernquist cusp the LBVH tree depth went 16 -> 30 mid-rollout, nearly
+        # doubling, because tree depth follows the Morton-code distribution and a
+        # central cusp concentrates it hard. Over-provisioning a level row costs
+        # one all-invalid (no-op) iteration of the cascade scan; under-
+        # provisioning raises and ends the run.
+        # Neither is free: `depth` is the number of cascade-scan iterations and
+        # `width` is the work inside each, so over-provisioning depth is not a
+        # no-op the way an invalid *slot* is. They get different policies because
+        # they drift differently. Depth is the volatile one -- an LBVH tree over a
+        # Hernquist cusp went 16 -> 30 mid-rollout, nearly doubling, because tree
+        # depth follows the Morton-code distribution and a central cusp
+        # concentrates it hard -- and the failure mode is a hard raise that ends
+        # the run, with no option to re-resolve (that would change the compiled
+        # shape). Width drifted only ~20% in the same measurements.
+        depth=snap_capacity(
+            max(
+                len(topology.level_nodes),
+                # A *bound*, not a measurement. A measured depth cap with any
+                # fixed headroom is fragile for LBVH: over a Hernquist cusp the
+                # depth was seen to go 16 -> 30 at N = 2e4 and 12 -> 34 at
+                # N = 1e5, because tree depth follows the Morton-code
+                # distribution and a central cusp concentrates it hard. Four
+                # times the balanced depth of the same leaf count covers those
+                # and is still O(log N).
+                4 * max(1, int(np.ceil(np.log2(max(2, int(num_leaves)))))),
+            ),
+            relative=1.0,
+            absolute=8,
+        ),
+        width=snap_capacity(max(widths), relative=0.5, absolute=32),
         # Left unresolved: see MutualCapacities.queue. A host topology does not
         # record the widest pair front it passed through.
         queue=0,
