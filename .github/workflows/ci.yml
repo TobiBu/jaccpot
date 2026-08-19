@@ -123,12 +123,35 @@ jobs:
           # here (173 / 641 / 53 / 202 = 1069) were measured before that merge and
           # are what the re-measurement above replaces -- the partition was still
           # exact, only the totals had drifted.
+          # `integration` MINUS the two mutual-FMM files, which are now their own
+          # shard. That split is this job's own prescribed remedy applied again:
+          # the shard is memory-bound, `tests/integration` was already the hog at
+          # 12.10 GB of a 16 GB runner, and the mutual work pushed it over -- the
+          # OOM surfacing, exactly as the note above predicts, as "The operation
+          # was canceled" at ~26 min with zero test failures and 34 min of the
+          # 60-minute cap still unused.
+          #
+          # Split HERE because the mutual files are both the biggest half and the
+          # expensive kind: 84 of the shard's 187 collected cases (72 + 12), and
+          # the float64 FMM gradient tests this note already names as dominating
+          # -- `test_rollout_gradient_finite_difference` alone is 330 s locally.
+          # 187 = 103 (integration) + 84 (mutual), so the partition stays exact.
           - shard: integration
             paths: tests/integration
+            extra: >-
+              --ignore=tests/integration/test_mutual_fmm.py
+              --ignore=tests/integration/test_mutual_fmm_nornax.py
+          - shard: mutual
+            paths: >-
+              tests/integration/test_mutual_fmm.py
+              tests/integration/test_mutual_fmm_nornax.py
+            extra: ""
           - shard: unit
             paths: tests/unit
+            extra: ""
           - shard: rest
             paths: tests/characterization tests/distributed
+            extra: ""
     env:
       JAX_ENABLE_X64: "1"
       # Persist JAX's compiled executables across runs so the heavy FMM
@@ -191,6 +214,7 @@ jobs:
         # passing the flag would be inert decoration.
         run: |
           pytest -n 2 --dist loadgroup -m "not experimental" ${{ matrix.paths }} \
+            ${{ matrix.extra }} \
             --ignore=tests/unit/runtime \
             --cov=jaccpot \
             --cov-report=xml --cov-report=term:skip-covered
