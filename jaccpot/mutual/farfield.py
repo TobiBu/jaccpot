@@ -65,8 +65,10 @@ from jaccpot.operators.real_harmonics import (
 
 __all__ = [
     "MutualTreeArrays",
-    "mutual_upward_sweep",
+    "dense_level_schedule",
     "mutual_far_field_forces",
+    "mutual_upward_sweep",
+    "snap_capacity",
 ]
 
 _M2L_BATCH_BUDGET = 1 << 16
@@ -407,7 +409,7 @@ def _scan_levels(
         The final carry.
     """
 
-    def step(acc, level):
+    def step(acc: Any, level: Any) -> Any:
         nodes, parents, valid = level
         return body(acc, nodes, parents, valid), None
 

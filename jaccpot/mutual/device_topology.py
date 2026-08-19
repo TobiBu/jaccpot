@@ -28,7 +28,7 @@ The gradient seam is the caller's responsibility and is documented on
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Optional, Tuple
+from typing import TYPE_CHECKING, Any, Optional, Tuple
 
 import jax
 import jax.numpy as jnp
@@ -148,7 +148,7 @@ def node_centers_and_radii(
     parent = jnp.asarray(parent).astype(index_dtype)
     leaf_of_particle = jnp.asarray(leaf_of_particle).astype(index_dtype)
 
-    def step(node, _):
+    def step(node: Array, _: Any) -> Tuple[Array, Array]:
         delta = x - centers[node]
         dist = jnp.sqrt(jnp.sum(delta * delta, axis=-1))
         contribution = jnp.zeros((num_nodes,), dtype=dtype).at[node].max(dist)
@@ -191,7 +191,7 @@ def node_depths(parent: Array, root: Array, *, depth_cap: int) -> Array:
     # parent chain never reaches it.
     depth = jnp.where(jnp.arange(num_nodes) == root, 0, -1).astype(jnp.int32)
 
-    def relax(d, _):
+    def relax(d: Array, _: Any) -> Tuple[Array, None]:
         safe_parent = jnp.where(parent >= 0, parent, 0)
         from_parent = jnp.where(parent >= 0, d[safe_parent] + 1, -1)
         # Only adopt a depth once the parent has one.
@@ -243,7 +243,7 @@ def dense_level_schedule(
     num_nodes = int(depth.shape[0])
     node_ids = jnp.arange(num_nodes, dtype=index_dtype)
 
-    def pack(_, d):
+    def pack(_: Any, d: Array) -> Tuple[None, Tuple[Array, Array, Array, Array]]:
         mask = depth == (d + 1)
         live = mask.astype(jnp.int32)
         prefix = jnp.cumsum(live) - live

@@ -1308,6 +1308,44 @@ def test_capacity_overflow_raises_rather_than_truncating():
 # ---------------------------------------------------------------------------
 
 
+def _yggdrax_has_mutual_walk() -> bool:
+    """Whether the installed yggdrax carries the canonical-pair mutual walk.
+
+    The device topology composes ``yggdrax.interactions.dual_tree_walk_mutual``
+    (TobiBu/yggdrax#45), which is newer than any released yggdrax. CI installs a
+    released one, so these tests must SKIP there rather than error -- the same
+    treatment ``test_mutual_fmm_nornax.py`` gives nornax. Catches ``Exception``
+    rather than ``ImportError`` so a future import-time incompatibility also
+    reports as skipped.
+    """
+    try:
+        from yggdrax.interactions import dual_tree_walk_mutual  # noqa: F401
+    except Exception:
+        return False
+    return True
+
+
+def _nornax_available() -> bool:
+    """Whether nornax can be imported; it is a test-only optional dependency."""
+    try:
+        import nornax  # noqa: F401
+    except Exception:
+        return False
+    return True
+
+
+needs_device_topology = pytest.mark.skipif(
+    not _yggdrax_has_mutual_walk(),
+    reason=(
+        "needs a yggdrax carrying dual_tree_walk_mutual (TobiBu/yggdrax#45); "
+        "the device mutual topology is built on it"
+    ),
+)
+needs_nornax = pytest.mark.skipif(
+    not _nornax_available(), reason="nornax is a test-only optional dependency"
+)
+
+
 def _host_topology(positions, masses, *, theta, leaf, order):
     """Build the host topology and return it with the tree bits the device needs."""
     from jaccpot import FastMultipoleMethod
@@ -1359,6 +1397,7 @@ def _pair_set(a, b, count):
 @pytest.mark.parametrize(
     "n,theta,leaf", [(512, 0.9, 16), (2048, 0.6, 16), (4096, 0.7, 32)]
 )
+@needs_device_topology
 def test_the_device_walk_reproduces_the_host_traversal_pair_for_pair(n, theta, leaf):
     """The load-bearing gate for the device topology.
 
@@ -1431,6 +1470,7 @@ def test_the_device_walk_reproduces_the_host_traversal_pair_for_pair(n, theta, l
 
 
 @pytest.mark.parametrize("n,theta,leaf,order", [(512, 0.9, 16, 4), (4096, 0.7, 32, 4)])
+@needs_device_topology
 def test_a_device_built_state_gives_the_same_force_and_gradient(n, theta, leaf, order):
     """Same force *and* same gradient as the host-built state, to round-off."""
     from jaccpot.mutual.force import resolve_mutual_capacities
@@ -1464,6 +1504,7 @@ def test_a_device_built_state_gives_the_same_force_and_gradient(n, theta, leaf, 
     assert rel < 1.0e-13, f"gradient differs at {rel:.3e}"
 
 
+@needs_device_topology
 def test_topology_build_and_force_are_one_jitted_program():
     """The point of the whole exercise: no host round-trip, one compile.
 
@@ -1519,6 +1560,8 @@ def test_topology_build_and_force_are_one_jitted_program():
     assert float(jnp.linalg.norm(grad)) > 0.0
 
 
+@needs_device_topology
+@needs_nornax
 def test_the_device_backend_matches_the_exact_sum_as_well_as_the_host_one():
     """``topology_backend="device"`` is not a downgrade.
 
@@ -1571,6 +1614,7 @@ def test_the_device_backend_matches_the_exact_sum_as_well_as_the_host_one():
     )
 
 
+@needs_device_topology
 def test_an_undersized_capacity_profile_is_raised_not_truncated():
     """The failure this flag exists for, reproduced deliberately.
 
@@ -1597,6 +1641,7 @@ def test_an_undersized_capacity_profile_is_raised_not_truncated():
         model.prepare(positions, masses)
 
 
+@needs_device_topology
 def test_a_rollout_with_the_tree_rebuilt_inside_the_scan_is_one_program():
     """The end state: a jitted rollout that rebuilds its own topology per step.
 

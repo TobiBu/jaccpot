@@ -250,19 +250,12 @@ class BlockStepFMM:
             The freshly built state, also cached on ``self`` so the force methods
             can find it.
 
-
         Raises
-
         ------
-
         RuntimeError
-
             On the device backend, if the built topology overflowed its capacity
-
             profile. Overflow drops interactions while leaving momentum exactly
-
             conserved, so it is raised here rather than reported.
-
         """
         from jaccpot import FastMultipoleMethod
 
@@ -331,7 +324,11 @@ class BlockStepFMM:
 
     # -- device topology backend -------------------------------------------
 
-    def freeze_template(self: "BlockStepFMM", positions: Array, masses: Array) -> None:
+    def freeze_template(
+        self: "BlockStepFMM",
+        positions: Float[Array, "n 3"],
+        masses: Float[Array, "n"],
+    ) -> None:
         """Build the static-radix template and capacity profile. Host-side, once.
 
         Only the *data structure* is frozen here -- the parent/child links and the
@@ -346,19 +343,12 @@ class BlockStepFMM:
         Idempotent: a second call is a no-op, because re-freezing would silently
         change the capacities out from under an already-compiled program.
 
-
         Parameters
-
         ----------
-
-        positions : Array
-
-            ``(N, 3)`` concrete positions to build the template from.
-
-        masses : Array
-
-            ``(N,)`` concrete particle masses.
-
+        positions : Float[Array, 'n 3']
+            Concrete positions to build the template from.
+        masses : Float[Array, 'n']
+            Concrete particle masses.
         """
         if self._template is not None:
             return
@@ -461,49 +451,28 @@ class BlockStepFMM:
         Raises rather than returning an overflowing capacity: a truncated
         traversal is a wrong force that looks healthy from every other angle.
 
-
         Parameters
-
         ----------
-
         refreshed : Any
-
             The refreshed static-radix tree to probe against.
-
         sorted_positions : Array
-
             ``(N, 3)`` positions in tree order.
-
         sorted_masses : Array
-
             ``(N,)`` masses in tree order.
-
         root : int
-
             Index of the root node.
 
-
         Returns
-
         -------
-
         int
-
             A wavefront capacity that traverses this configuration without overflowing,
-
             with one doubling of headroom for the front widening as the system evolves.
 
-
         Raises
-
         ------
-
         RuntimeError
-
             If no capacity up to the ceiling traverses it. A larger ``leaf_size``
-
             shrinks the tree and hence the pair front.
-
         """
         from jaccpot.mutual.device_topology import build_mutual_state_device
 
@@ -551,11 +520,11 @@ class BlockStepFMM:
     def weighted_accelerations(
         self: "BlockStepFMM",
         state: MutualFMMState,
-        positions: Array,
-        masses: Array,
+        positions: Float[Array, "n 3"],
+        masses: Float[Array, "n"],
         *,
-        rung: Optional[Array] = None,
-        level_weights: Optional[Array] = None,
+        rung: Optional[Int[Array, "n"]] = None,
+        level_weights: Optional[Float[Array, "levels"]] = None,
     ) -> Array:
         """Evaluate ``sum_k level_weights[k] * a_k`` against an explicit state.
 
@@ -568,40 +537,23 @@ class BlockStepFMM:
         With both ``rung`` and ``level_weights`` omitted this is the full
         acceleration.
 
-
         Parameters
-
         ----------
-
         state : MutualFMMState
-
             The prepared topology to evaluate against.
-
-        positions : Array
-
-            ``(N, 3)`` positions, in the caller's original order.
-
-        masses : Array
-
-            ``(N,)`` particle masses.
-
-        rung : Optional[Array]
-
-            ``(N,)`` per-particle rung; ``None`` weights every pair equally.
-
-        level_weights : Optional[Array]
-
-            ``(k_max + 1,)`` per-level weights; ``None`` means all ones.
-
+        positions : Float[Array, 'n 3']
+            Positions, in the caller's original order.
+        masses : Float[Array, 'n']
+            Particle masses.
+        rung : Optional[Int[Array, 'n']]
+            Per-particle rung; ``None`` weights every pair equally.
+        level_weights : Optional[Float[Array, 'levels']]
+            Per-level weights, ``k_max + 1`` of them; ``None`` means all ones.
 
         Returns
-
         -------
-
         Array
-
             ``(N, 3)`` weighted acceleration.
-
         """
         return mutual_weighted_accelerations(
             state, positions, masses, rung=rung, level_weights=level_weights
@@ -620,43 +572,30 @@ class BlockStepFMM:
         Exposed so a caller driving :meth:`weighted_accelerations` directly does
         not have to re-derive the schedule, and cannot get it subtly wrong.
 
-
         Parameters
-
         ----------
-
         active_floor : Any
-
             Smallest level kicked at this boundary. May be a tracer.
-
         dt_max : Any
-
             Base-step timestep. May be a tracer.
-
         half : Any
-
             ``0.5`` at a synchronized end of the base step, ``1.0`` inside.
-
         dtype : Any
-
             Result dtype; ``None`` takes the model's working dtype.
 
-
         Returns
-
         -------
-
         Array
-
             ``(k_max + 1,)`` weight row.
-
         """
         return level_weights_from_floor(
             active_floor, self.k_max, dt_max, half=half, dtype=dtype
         )
 
     def rebuild_state(
-        self: "BlockStepFMM", positions: Array, masses: Array
+        self: "BlockStepFMM",
+        positions: Float[Array, "n 3"],
+        masses: Float[Array, "n"],
     ) -> MutualFMMState:
         """Build a complete mutual state on device. **Traceable.**
 
@@ -671,39 +610,23 @@ class BlockStepFMM:
         under trace there is nothing meaningful to cache, and a driver carrying
         the state through a ``lax.scan`` needs it returned, not stashed.
 
-
         Parameters
-
         ----------
-
-        positions : Array
-
-            ``(N, 3)`` positions, in the caller's original order.
-
-        masses : Array
-
-            ``(N,)`` particle masses.
-
+        positions : Float[Array, 'n 3']
+            Positions, in the caller's original order.
+        masses : Float[Array, 'n']
+            Particle masses.
 
         Returns
-
         -------
-
         MutualFMMState
-
             A freshly built device state at the frozen template's capacities.
 
-
         Raises
-
         ------
-
         RuntimeError
-
             If :meth:`freeze_template` has not been called. The template and the
-
             capacity profile are host-built and cannot be derived under trace.
-
         """
         if self._template is None:
             raise RuntimeError(
