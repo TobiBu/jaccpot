@@ -1,4 +1,19 @@
-"""Helpers for constructing node multipole expansions."""
+"""Helpers for constructing node multipole expansions.
+
+Axis names used in the annotations below, per STYLE_GUIDE section 4:
+
+    n         particles
+    nodes     tree nodes (``tree.parent.shape[0]``)
+    internal  internal nodes (``tree.left_child.shape[0]``)
+    ct        packed coefficients per node
+
+``ct`` is deliberately NOT the package-wide ``c``. Elsewhere ``C`` means
+``sh_size(p) == (p+1)**2``, the spherical-harmonic packing. This module packs
+CARTESIAN moments, so its coefficient count is
+``total_coefficients(p) == (p+1)(p+2)(p+3)/6`` -- 10 at p=2 where ``sh_size``
+is 9. The two agree only at p=1, which is why one symbol served both for so
+long. Measured 2026-08-18; see the ``packed`` attribute below.
+"""
 
 from __future__ import annotations
 
@@ -9,7 +24,7 @@ import jax
 import jax.numpy as jnp
 from beartype import beartype
 from jax import lax
-from jaxtyping import Array, jaxtyped
+from jaxtyping import Array, Float, Int, jaxtyped
 from yggdrax.dtypes import INDEX_DTYPE
 from yggdrax.geometry import TreeGeometry
 from yggdrax.multipole_utils import total_coefficients
@@ -36,38 +51,53 @@ class NodeMultipoleData(NamedTuple):
     ----------
     order : int
         Expansion order ``p``.
-    centers : Array
-        ``(num_nodes, 3)`` expansion centres.
+    centers : Float[Array, 'nodes 3']
+        ``(nodes, 3)`` expansion centres.
     moments : TreeMultipoleMoments
         Raw (unpacked) moments the packing was built from.
-    packed : Array
-        ``(num_nodes, sh_size(order))`` packed coefficients -- what the sweeps
-        actually consume.
-    component_matrix : Optional[Array]
-        Per-component view, when a lane needs one; ``None`` otherwise.
-    source_motion_packed : Optional[Array]
+    packed : Float[Array, 'nodes ct']
+        ``(nodes, total_coefficients(order))`` packed coefficients -- what the
+        sweeps actually consume.
+
+        **Corrected 2026-08-18.** This said ``sh_size(order)``, i.e. ``(p+1)^2``,
+        and that is wrong: the packing is Cartesian, so the count is
+        ``total_coefficients(order) == (p+1)(p+2)(p+3)/6``. Measured for p=1..4:
+        4, 10, 20, 35 columns against ``sh_size`` of 4, 9, 16, 25. Only p=1
+        agrees, and p=2 is the default order -- so the documented shape was wrong
+        for every order this package actually runs at.
+    component_matrix : Optional[Float[Array, 'nodes ct']]
+        Per-component view, when a lane needs one; ``None`` otherwise. Same
+        shape as ``packed`` -- both come from ``moments.raw_packed``.
+    source_motion_packed : Optional[Float[Array, 'nodes ct']]
         Time-differentiated multipoles, present only when a derivative path asked
-        for them.
+        for them. Always ``None`` on the paths in this module.
     """
 
     order: int
-    centers: Array
+    centers: Float[Array, "nodes 3"]
     moments: TreeMultipoleMoments
-    packed: Array
-    component_matrix: Optional[Array]
-    source_motion_packed: Optional[Array] = None
+    packed: Float[Array, "nodes ct"]
+    component_matrix: Optional[Float[Array, "nodes ct"]]
+    source_motion_packed: Optional[Float[Array, "nodes ct"]] = None
 
 
 @partial(jax.jit, static_argnames=("order", "num_internal"))
 def _aggregate_m2m_impl(
-    packed: Array,
-    centers: Array,
-    left_child: Array,
-    right_child: Array,
-    node_ranges: Array,
+    packed: Float[Array, "nodes ct"],
+    centers: Float[Array, "nodes 3"],
+    left_child: Int[Array, "internal"],
+    right_child: Int[Array, "internal"],
+    node_ranges: Int[Array, "nodes 2"],
     *,
     order: int,
     num_internal: int,
+    # The return is deliberately bare `Array`, not `Float[Array, "nodes ct"]`.
+    # pydoclint 0.9.1 CRASHES on a shaped return whose axis spec has more than
+    # one token: `ReturnAnnotation.decompose()` re-parses the annotation as
+    # Python and `Float[Array, nodes ct]` is a SyntaxError. Single-token axes
+    # (`Float[Array, "n"]`) and shaped PARAMETERS are both fine -- it is
+    # specifically multi-token axes in a return position. Measured 2026-08-18.
+    # The shape is documented in the Returns section instead.
 ) -> Array:
     """Translate child expansions into their parents, children first.
 
@@ -91,18 +121,20 @@ def _aggregate_m2m_impl(
 
     Parameters
     ----------
-    packed : Array
-        ``(num_nodes, C)`` packed coefficients, updated in place through the
-        returned value; leaves must already hold their P2M result.
-    centers : Array
-        ``(num_nodes, 3)`` expansion centres.
-    left_child : Array
-        Left child of each internal node.
-    right_child : Array
+    packed : Float[Array, 'nodes ct']
+        ``(nodes, ct)`` packed coefficients, updated in place through the
+        returned value; leaves must already hold their P2M result. ``ct`` is the
+        Cartesian count, not ``(p+1)^2`` -- see the module docstring.
+    centers : Float[Array, 'nodes 3']
+        ``(nodes, 3)`` expansion centres.
+    left_child : Int[Array, 'internal']
+        Left child of each internal node. Length ``internal``, NOT ``nodes``:
+        only internal nodes have children.
+    right_child : Int[Array, 'internal']
         Right child of each internal node.
-    node_ranges : Array
-        Per-node particle span. The SPAN WIDTH is what orders the reduction --
-        see above; this is not merely bookkeeping here.
+    node_ranges : Int[Array, 'nodes 2']
+        Per-node particle span, ``(nodes, 2)``. The SPAN WIDTH is what orders the
+        reduction -- see above; this is not merely bookkeeping here.
     order : int
         Expansion order ``p``.
     num_internal : int
@@ -111,8 +143,9 @@ def _aggregate_m2m_impl(
     Returns
     -------
     Array
-        ``(num_nodes, C)`` packed coefficients with every internal node
-        aggregated from its children.
+        ``(nodes, ct)`` packed coefficients with every internal node
+        aggregated from its children -- same shape and dtype as ``packed``.
+        Not annotated as ``Float[Array, 'nodes ct']``; see the signature.
     """
 
     prototype = packed[0]
@@ -166,8 +199,8 @@ def _aggregate_m2m_impl(
 @jaxtyped(typechecker=beartype)
 def compute_node_multipoles(
     tree: Tree,
-    positions_sorted: Array,
-    masses_sorted: Array,
+    positions_sorted: Float[Array, "n 3"],
+    masses_sorted: Float[Array, "n"],
     *,
     max_order: int = 2,
     center_mode: str = "com",
@@ -181,12 +214,12 @@ def compute_node_multipoles(
         Radix tree built from Morton-sorted particles, as produced by
         ``yggdrax``. Its ``left_child`` / ``right_child`` / ``node_ranges``
         arrays define the aggregation order.
-    positions_sorted : Array
-        Particle positions ``[N, 3]``, reordered to match
+    positions_sorted : Float[Array, 'n 3']
+        Particle positions ``[n, 3]``, reordered to match
         ``tree.particle_indices``. Passing unsorted positions is silently wrong,
         not an error.
-    masses_sorted : Array
-        Particle masses ``[N]``, in the same order as ``positions_sorted``. G=1
+    masses_sorted : Float[Array, 'n']
+        Particle masses ``[n]``, in the same order as ``positions_sorted``. G=1
         is a caller convention; no gravitational constant is applied here.
     max_order : int
         Highest Cartesian multipole order to keep. Static under ``jit``: it fixes
@@ -264,6 +297,16 @@ def compute_node_multipoles(
     z-axis-aligned -- the rotation-angle builders return a zero cotangent by
     construction. See :func:`jaccpot.operators.complex_ops._angles_from_delta_solidfmm`.
     """
+
+    # `explicit_centers` is deliberately left bare. Its shape IS known --
+    # `(nodes, 3)`, and both functions check it explicitly below -- but this
+    # function carries `@jaxtyped(typechecker=beartype)`, which is active in
+    # every run, not only under JACCPOT_RUNTIME_TYPECHECK=1. Annotating the
+    # shape would make a wrong-shaped array raise a beartype violation BEFORE
+    # the body runs, replacing the `ValueError` this function documents in its
+    # Raises section and making that branch unreachable for shape errors. That
+    # is a behaviour change, not a documentation change, so it is not being
+    # made in the same PR that adds annotations. See the pilot writeup.
 
     mode = center_mode.lower()
     if mode not in _CENTER_MODES:
@@ -361,8 +404,8 @@ class TreeUpwardData(NamedTuple):
 @jaxtyped(typechecker=beartype)
 def prepare_upward_sweep(
     tree: Tree,
-    positions_sorted: Array,
-    masses_sorted: Array,
+    positions_sorted: Float[Array, "n 3"],
+    masses_sorted: Float[Array, "n"],
     *,
     max_order: int = 2,
     center_mode: str = "com",
@@ -376,9 +419,9 @@ def prepare_upward_sweep(
     ----------
     tree : Tree
         Tree to build expansions for.
-    positions_sorted : Array
+    positions_sorted : Float[Array, 'n 3']
         ``(n, 3)`` positions in the tree's own order.
-    masses_sorted : Array
+    masses_sorted : Float[Array, 'n']
         ``(n,)`` masses, same order.
     max_order : int
         Expansion order ``p``.
@@ -400,6 +443,16 @@ def prepare_upward_sweep(
         If ``center_mode`` is outside its documented domain, or
         ``explicit_centers`` is required and missing (or the wrong shape).
     """
+
+    # `explicit_centers` is deliberately left bare. Its shape IS known --
+    # `(nodes, 3)`, and both functions check it explicitly below -- but this
+    # function carries `@jaxtyped(typechecker=beartype)`, which is active in
+    # every run, not only under JACCPOT_RUNTIME_TYPECHECK=1. Annotating the
+    # shape would make a wrong-shaped array raise a beartype violation BEFORE
+    # the body runs, replacing the `ValueError` this function documents in its
+    # Raises section and making that branch unreachable for shape errors. That
+    # is a behaviour change, not a documentation change, so it is not being
+    # made in the same PR that adds annotations. See the pilot writeup.
 
     geometry = (
         precomputed_geometry
