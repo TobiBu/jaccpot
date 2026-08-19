@@ -125,41 +125,130 @@ Never write a docstring that restates the name. `"""Compute the multipole."""` o
 ## 4. Type annotations
 
 - Full annotations on public functions and on internal functions whose types are not obvious.
-- **`jaxtyping` for array arguments** (already in 49 modules) so shape and dtype live in the
-  signature. Plain `Array` throws away exactly what the reader needs. Keep axis names
-  consistent so `jaxtyping` can cross-check within a signature.
-
-  **The axis vocabulary.** Lowercase, and shared across the package so a reader learns it
-  once. Extend it deliberately -- each name also has to be added to the `--builtins` list on
-  the flake8 hook, for the reason recorded there.
-
-  | axis | meaning |
-  |---|---|
-  | `n` | particles |
-  | `t` | targets, when a call returns a subset of the particles |
-  | `levels` | block-step levels, `k_max + 1` of them |
-  | `3` | the spatial dimension -- a literal, not a name |
-
-  Applied to the public facade (`solver.py`, `autodiff.py`, `odisseo.py`,
-  `nornax_adapter.py`) first, because that is where the shape is least guessable from
-  context. **Do not annotate a function that is `vmap`ped or used as a `scan` body with the
-  batch axis**: it receives one slice, so `Float[Array, "n 3"]` sees `(3,)` and fails under
-  `JACCPOT_RUNTIME_TYPECHECK=1`. There are 122 `vmap`/`scan` sites in the package, so this is
-  the common case inside the kernels, not an edge case.
-
-  **Return types are often not annotatable, and that is not an oversight.** Where a call takes
-  an optional `target_indices`, the result is `[n, 3]` without it and `[t, 3]` with it;
-  jaxtyping cannot express "this axis or that one", so those returns stay bare. Annotating
-  them would require asserting one of two shapes is always right, which is worse than silence.
-
-  Docstring parameter types mirror the annotation verbatim, as everywhere else -- pydoclint
-  enforces it -- using single quotes inside the docstring so the type does not terminate it:
-  `positions : Float[Array, 'n 3']`.
-- `beartype` provides the runtime check; it is opt-in via `JACCPOT_RUNTIME_TYPECHECK=1`.
-  Run it on the unit tests when you touch signatures.
 - Use `TypeVar` for decorators that must preserve the wrapped signature (see
   `_precision.py`). A targeted `# type: ignore[return-value]` with an obvious reason is
   acceptable; a bare `# type: ignore` is not.
+
+### 4.1 `jaxtyping` shapes: annotate what nothing else validates
+
+Plain `Array` is an alias for `jax.Array`, so a bare annotation asserts "is an array" and
+nothing more. **But do not read that as "shape-annotate everything."** Three measured pilots
+(audit E.3; PRs #170, #171, #174) found the payoff varies by an order of magnitude, and the
+predictor is not the module and not "the public surface":
+
+| pilot | module | malformed inputs `main` already caught, so the annotation added nothing |
+|---|---|---|
+| 1 | `upward/tree_expansions.py` | **3 of 3** — yggdrax validated everything |
+| 2 | `nearfield/near_field.py` | **0 of 4** — silently accepted, wrong answers returned |
+| 3 | `runtime/fmm_evaluate.py` | **2 of 5** — split by parameter family |
+
+**The rule that follows from that:**
+
+> Shape-annotate an array parameter when nothing else validates it. Skip it when the value
+> flows straight into a library that checks it.
+
+In this package the unvalidated families are `precomputed_*` and `*_override`, plus internal
+functions taking several arrays whose axes must agree. Pilot 3 is the sharpest case: in one
+signature the `farfield_*` overrides were already rejected with a domain `ValueError`, while
+every `precomputed_*` corruption — wrong dtype, wrong rank, mismatched lengths — reached the
+kernels silently.
+
+Annotating an already-validated parameter is not free: it replaces a domain error
+(`"masses_sorted must match tree.num_particles"`) with a generic `TypeCheckError`. Do it only
+for consistency within a signature you are already annotating.
+
+### 4.2 Derive the shape by execution, not from the docstring
+
+The docstrings are not a reliable source, and this is measured, not a slur:
+
+- `NodeMultipoleData.packed` documented `(num_nodes, sh_size(order))`. It is
+  `total_coefficients(order)` — 10 columns at p=2, not 9. Wrong for **every** order the
+  package runs at, right only at p=1 (PR #170).
+- 11 of 12 `Optional[Array]` parameters on `compute_leaf_p2p_accelerations` document no shape
+  at all (PR #171).
+- `farfield_leaf_nodes` and `farfield_node_ranges` sit on adjacent lines and share a prefix,
+  and are **different axes**: `(3,)` with `(5, 2)`, `(5,)` with `(9, 2)`, `(9,)` with
+  `(17, 2)` — leaves against `2*leaves-1` nodes (PR #174).
+
+Instrument the function, run the suite, tally the shapes against the live `n`/`leaves` for each
+call, and annotate what you observed. A wrong shape annotation is worse than none, because the
+decorator enforces it.
+
+### 4.3 The axis vocabulary
+
+Lowercase, shared package-wide so a reader learns it once. Every new **single-identifier** name
+must also be added to the flake8 hook's `--builtins` list — see 4.4.
+
+| axis | meaning |
+|---|---|
+| `n` | particles |
+| `t` | targets, when a call returns a subset of the particles |
+| `nodes` | tree nodes |
+| `internal` | internal nodes, i.e. those with children |
+| `leaves` | leaf nodes |
+| `leaves+1` | CSR-style offsets over leaves; symbolic expressions are legal |
+| `w` | leaf width (`max_leaf_size`) |
+| `edges` | entries of the flattened neighbour list |
+| `pairs` | entries of a precomputed leaf-pair schedule |
+| `chunks`, `chunkflat` | the 2-D chunked scatter schedule |
+| `ct` | Cartesian packed coefficients, `(p+1)(p+2)(p+3)/6` |
+| `levels` | block-step levels, `k_max + 1` of them |
+| `2`, `3` | literals -- the `(start, end)` pair and the spatial dimension |
+| `_` | anonymous: deliberately unnamed, see below |
+
+**`ct` is not `C`.** Elsewhere in the package `C` means `sh_size(p) == (p+1)**2`, the
+spherical-harmonic packing. `upward/tree_expansions.py` packs Cartesian moments, so its count is
+`(p+1)(p+2)(p+3)/6`. The two agree only at p=1, which is how one symbol served both for so long.
+
+**Anonymous axes are a legitimate answer, not a cop-out.** Where a leading axis is
+*caller-dependent*, naming it binds it to whichever caller ran first and breaks the other.
+`near_field.py::node_ranges_override` is `(nodes, 2)` from the single-GPU path and
+`(leaves+1, 2)` from `distributed/fmm.py`; the distributed lane cannot even be exercised
+locally, since every test in `tests/distributed/` skips below 2 devices. So it is
+`Int[Array, "_ 2"]` — which still rejects `(M, 3)`, the perturbation that matters.
+
+### 4.4 Hard constraints, all measured
+
+**`@jaxtyped(typechecker=beartype)` is UNCONDITIONAL.** The 45 decorated functions check on
+every call, in production, not only under `JACCPOT_RUNTIME_TYPECHECK=1`. That env var installs
+the package-wide import hook, which extends checking to *undecorated* functions. Adding a shape
+to a decorated function therefore changes production behaviour;
+`tests/unit/core/test_near_field.py` pins exactly this for `softening`.
+
+**Never annotate the batch axis of a `vmap`ped function or a `scan` body.** It receives one
+slice, so `Float[Array, "n 3"]` sees `(3,)` and fails. There are 122 `vmap`/`scan` sites, so
+inside the kernels this is the common case, not an edge case.
+
+**Return annotations are effectively unavailable.** Two independent reasons:
+
+- pydoclint 0.9.1 **crashes** on a shaped return whose axis spec has more than one token:
+  `ReturnAnnotation.decompose()` re-parses it as Python and `Float[Array, nodes ct]` is a
+  `SyntaxError`. Shaped *parameters* are fine; single-token returns are fine.
+- Where a call takes an optional `target_indices`, the result is `[n, 3]` without it and
+  `[t, 3]` with it, and jaxtyping cannot express "this axis or that one".
+
+Put the shape in the `Returns` section instead.
+
+**Single-identifier axes trip flake8 F821.** `pyflakes` parses a string inside an annotation as
+a forward reference, so `Float[Array, "n"]` reports `undefined name 'n'` while
+`Float[Array, "n 3"]` is clean. The axis names are declared via `--builtins` on the flake8 hook
+rather than suppressed per line; the cost — a bare `n` in code is no longer flagged — is
+recorded there.
+
+**Widths are wrong, families are right.** Use `Int`, never `Int32`/`Int64`: `INDEX_DTYPE` is
+selectable via `JACCPOT_INDEX_PRECISION`, and pilot 3 observed `precomputed_target_leaf_ids` as
+int32 alongside `precomputed_source_leaf_ids` as int64 *in the same call*. Likewise `Float`, not
+a width — positions were observed as both float32 and float64. Scalars that accept a Python
+number keep `Union[float, Array]`.
+
+### 4.5 Mechanics
+
+Docstring parameter types mirror the annotation verbatim — pydoclint enforces it — with single
+quotes inside the docstring so the type does not terminate it:
+`positions : Float[Array, 'n 3']`.
+
+`tests/unit/test_type_annotation_guard.py` holds the modules already converted, so they cannot
+regress to bare `Array`. Add a module to its list in the same PR that annotates it.
 
 ---
 

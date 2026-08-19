@@ -93,6 +93,40 @@ FACADE_MODULES = (
     "jaccpot/nornax_adapter.py",
 )
 
+# Modules converted by the E.3 shape programme, in the order they landed. Listing
+# a module here says "its unvalidated array parameters carry shapes, and must keep
+# them" -- not "every array parameter in it is shaped". Some are deliberately bare
+# with the reason recorded at the site: `explicit_centers` in tree_expansions would
+# preempt a documented `ValueError` and make that branch unreachable for shape
+# errors, so it is left alone (and it is outside the families below anyway).
+#
+# Add a module here in the same PR that annotates it. See STYLE_GUIDE.md section 4.
+CONVERTED_MODULES = (
+    "jaccpot/upward/tree_expansions.py",
+    "jaccpot/nearfield/near_field.py",
+    "jaccpot/runtime/fmm_evaluate.py",
+)
+
+# The parameter families the E.3 pilots measured as validated by NOTHING else, and
+# therefore the ones worth pinning. Before the pilots, a wrong dtype, wrong rank or
+# mismatched length in any `precomputed_*` argument was accepted silently and
+# reached the kernels.
+#
+# `farfield_*` is deliberately NOT here: pilot 3 measured it as already rejected
+# with a domain `ValueError`, so requiring a shape would assert a guarantee the
+# package makes elsewhere and better. The families are the unit of this policy,
+# not the modules.
+UNVALIDATED_PARAM_PREFIXES = ("precomputed_",)
+UNVALIDATED_PARAM_SUFFIXES = ("_override",)
+
+# Array parameters in those families that are deliberately bare. EMPTY as measured
+# 2026-08-19, and that is the intended steady state: the three bare parameters
+# matching these names (`precomputed_geometry`, and `nearfield_mode_override` twice)
+# are not arrays at all -- `Optional[TreeGeometry]` and `Optional[str]` -- so they
+# never reach the shape check. Kept so a future exemption has somewhere to go that
+# is checked rather than assumed.
+DELIBERATELY_BARE: frozenset[tuple[str, str]] = frozenset()
+
 # Parameters carrying particle-indexed arrays, which therefore have a knowable
 # shape. Deliberately a name list rather than "every Array parameter": several
 # facade parameters are genuinely shape-agnostic (`compile_now` is a sample tuple,
@@ -168,3 +202,116 @@ def test_public_facade_array_params_carry_shapes() -> None:
         "Public facade array parameters must carry a jaxtyping shape "
         "(see STYLE_GUIDE.md section 4 for the axis vocabulary):\n" + details
     )
+
+
+def _is_unvalidated_family(name: str) -> bool:
+    """Whether a parameter belongs to a family nothing else validates.
+
+    Parameters
+    ----------
+    name : str
+        Parameter name.
+
+    Returns
+    -------
+    bool
+        ``True`` for the ``precomputed_*`` and ``*_override`` families that the
+        E.3 pilots measured as unchecked before annotation.
+    """
+    return name.startswith(UNVALIDATED_PARAM_PREFIXES) or name.endswith(
+        UNVALIDATED_PARAM_SUFFIXES
+    )
+
+
+def _iter_unshaped_unvalidated_params() -> list[tuple[str, int, str, str, str]]:
+    """Find unvalidated-family array parameters that lost their shape.
+
+    Only ``@jaxtyped``-decorated functions are examined, because those are the
+    ones whose annotations are enforced on every call. An undecorated function's
+    annotation is inert outside ``JACCPOT_RUNTIME_TYPECHECK=1``, so requiring one
+    there would assert a guarantee the package does not actually make.
+
+    Returns
+    -------
+    list[tuple[str, int, str, str, str]]
+        One ``(path, lineno, function, parameter, annotation)`` per offender.
+    """
+    offenders: list[tuple[str, int, str, str, str]] = []
+
+    for rel in CONVERTED_MODULES:
+        tree = ast.parse((PROJECT_ROOT / rel).read_text())
+
+        for node in ast.walk(tree):
+            if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                continue
+            decorated = any(
+                "jaxtyped" in ast.unparse(dec) for dec in node.decorator_list
+            )
+            if not decorated:
+                continue
+
+            args = node.args
+            for arg in args.posonlyargs + args.args + args.kwonlyargs:
+                if not _is_unvalidated_family(arg.arg):
+                    continue
+                if (rel, arg.arg) in DELIBERATELY_BARE:
+                    continue
+                if arg.annotation is None:
+                    continue
+                text = ast.unparse(arg.annotation)
+                if "Array" not in text:
+                    continue
+                if any(marker in text for marker in _SHAPE_MARKERS):
+                    continue
+                offenders.append((rel, arg.lineno, node.name, arg.arg, text))
+
+    return offenders
+
+
+def test_converted_modules_keep_shapes_on_unvalidated_params() -> None:
+    """The ``precomputed_*`` / ``*_override`` families must stay shaped.
+
+    These are the parameters the E.3 pilots measured as validated by nothing else:
+    before annotation, a wrong dtype, wrong rank or mismatched length in any of
+    them was accepted silently and reached the kernels. Losing the annotation
+    restores that hole without any test going red, which is why this guard exists.
+    """
+    offenders = _iter_unshaped_unvalidated_params()
+    details = "\n".join(
+        f"- {path}:{lineno} `{func}` parameter `{param}` is `{text}`"
+        for path, lineno, func, param, text in offenders
+    )
+    assert not offenders, (
+        "Unvalidated-family parameters must carry a jaxtyping shape "
+        "(STYLE_GUIDE.md section 4). Nothing else checks these:\n" + details
+    )
+
+
+def test_deliberately_bare_list_has_not_rotted() -> None:
+    """Every ``DELIBERATELY_BARE`` entry must still exist and still be bare.
+
+    Asserted in both directions so the exemption list cannot become a place
+    where entries accumulate unexamined: an entry naming a parameter that no
+    longer exists, or one that has since been shaped, fails here.
+    """
+    stale: list[str] = []
+    for rel, param in sorted(DELIBERATELY_BARE):
+        tree = ast.parse((PROJECT_ROOT / rel).read_text())
+        found = False
+        for node in ast.walk(tree):
+            if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                continue
+            args = node.args
+            for arg in args.posonlyargs + args.args + args.kwonlyargs:
+                if arg.arg != param or arg.annotation is None:
+                    continue
+                found = True
+                text = ast.unparse(arg.annotation)
+                if any(marker in text for marker in _SHAPE_MARKERS):
+                    stale.append(
+                        f"- {rel} `{param}` is shaped now (`{text}`); remove the exemption"
+                    )
+        if not found:
+            stale.append(f"- {rel} has no parameter `{param}`; remove the exemption")
+
+    assert not stale, "\n".join(["DELIBERATELY_BARE has rotted:", *stale])
