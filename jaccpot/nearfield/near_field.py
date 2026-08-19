@@ -15,7 +15,7 @@ import numpy as np
 from beartype import beartype
 from beartype.typing import Tuple
 from jax import lax
-from jaxtyping import Array, jaxtyped
+from jaxtyping import Array, Bool, Float, Int, jaxtyped
 from yggdrax.dtypes import INDEX_DTYPE, as_index
 from yggdrax.interactions import NodeNeighborList
 from yggdrax.tree import Tree
@@ -927,8 +927,8 @@ def _compute_leaf_p2p_from_prepared_leaf_data_impl(
 def compute_leaf_p2p_accelerations(
     tree: Tree,
     neighbor_list: NodeNeighborList,
-    positions_sorted: Array,
-    masses_sorted: Array,
+    positions_sorted: Float[Array, "n 3"],
+    masses_sorted: Float[Array, "n"],
     *,
     G: Union[float, Array] = 1.0,
     softening: float = 0.0,
@@ -937,19 +937,27 @@ def compute_leaf_p2p_accelerations(
     collect_neighbor_pairs: bool = False,
     nearfield_mode: str = "baseline",
     edge_chunk_size: int = 256,
-    precomputed_target_leaf_ids: Optional[Array] = None,
-    precomputed_source_leaf_ids: Optional[Array] = None,
-    precomputed_valid_pairs: Optional[Array] = None,
-    precomputed_chunk_sort_indices: Optional[Array] = None,
-    precomputed_chunk_group_ids: Optional[Array] = None,
-    precomputed_chunk_unique_indices: Optional[Array] = None,
-    node_ranges_override: Optional[Array] = None,
-    leaf_nodes_override: Optional[Array] = None,
-    neighbor_offsets_override: Optional[Array] = None,
-    neighbor_indices_override: Optional[Array] = None,
-    neighbor_counts_override: Optional[Array] = None,
-    leaf_particle_indices_override: Optional[Array] = None,
-    leaf_particle_mask_override: Optional[Array] = None,
+    precomputed_target_leaf_ids: Optional[Int[Array, "pairs"]] = None,
+    precomputed_source_leaf_ids: Optional[Int[Array, "pairs"]] = None,
+    precomputed_valid_pairs: Optional[Bool[Array, "pairs"]] = None,
+    precomputed_chunk_sort_indices: Optional[Int[Array, "chunks chunkflat"]] = None,
+    precomputed_chunk_group_ids: Optional[Int[Array, "chunks chunkflat"]] = None,
+    precomputed_chunk_unique_indices: Optional[Int[Array, "chunks chunkflat"]] = None,
+    # NOT `Int[Array, "nodes 2"]`, and that is a finding rather than caution: the
+    # leading axis is CALLER-DEPENDENT. The single-GPU path passes
+    # `tree.node_ranges`, one row per tree node (5, 7, ... 187 observed across 63
+    # captured calls); `distributed/fmm.py:1565` passes `jnp.zeros((u_leaves+1, 2))`.
+    # Naming that axis would bind it to whichever caller ran first and break the
+    # other -- and the distributed lane cannot be exercised here, because every
+    # test in tests/distributed/ skips below 2 devices. Only the trailing `2` is
+    # invariant across callers, so only the trailing `2` is asserted.
+    node_ranges_override: Optional[Int[Array, "_ 2"]] = None,
+    leaf_nodes_override: Optional[Int[Array, "leaves"]] = None,
+    neighbor_offsets_override: Optional[Int[Array, "leaves+1"]] = None,
+    neighbor_indices_override: Optional[Int[Array, "edges"]] = None,
+    neighbor_counts_override: Optional[Int[Array, "leaves"]] = None,
+    leaf_particle_indices_override: Optional[Int[Array, "leaves w"]] = None,
+    leaf_particle_mask_override: Optional[Bool[Array, "leaves w"]] = None,
 ) -> Union[
     Array,
     Tuple[Array, Array],
@@ -966,9 +974,9 @@ def compute_leaf_p2p_accelerations(
         Precomputed leaf-neighbour CSR metadata (``leaf_indices``, ``offsets``,
         ``neighbors``, ``counts``). Each ``*_override`` below replaces exactly
         one of these fields.
-    positions_sorted : Array
+    positions_sorted : Float[Array, 'n 3']
         Particle positions ``[N, 3]`` in Morton order.
-    masses_sorted : Array
+    masses_sorted : Float[Array, 'n']
         Particle masses ``[N]`` in Morton order.
     G : Union[float, Array]
         Gravitational constant, applied as a plain multiplier.
@@ -994,37 +1002,37 @@ def compute_leaf_p2p_accelerations(
     edge_chunk_size : int
         Chunk width for the bucketed edge scan. Static under ``jit``; a
         performance knob, not a numerical one.
-    precomputed_target_leaf_ids : Optional[Array]
+    precomputed_target_leaf_ids : Optional[Int[Array, 'pairs']]
         Leaf-pair schedule buffer: target leaf id per edge. Supplied together
         with the other ``precomputed_*`` arrays by prepared state to skip
         re-deriving the schedule. Must match the neighbour-list edge order the
         rest of the schedule was built against.
-    precomputed_source_leaf_ids : Optional[Array]
+    precomputed_source_leaf_ids : Optional[Int[Array, 'pairs']]
         Source leaf id per edge, same ordering contract.
-    precomputed_valid_pairs : Optional[Array]
+    precomputed_valid_pairs : Optional[Bool[Array, 'pairs']]
         Boolean mask marking which padded edge slots are real.
-    precomputed_chunk_sort_indices : Optional[Array]
+    precomputed_chunk_sort_indices : Optional[Int[Array, 'chunks chunkflat']]
         Scatter-schedule permutation for the chunked accumulation.
-    precomputed_chunk_group_ids : Optional[Array]
+    precomputed_chunk_group_ids : Optional[Int[Array, 'chunks chunkflat']]
         Chunk group id per sorted edge.
-    precomputed_chunk_unique_indices : Optional[Array]
+    precomputed_chunk_unique_indices : Optional[Int[Array, 'chunks chunkflat']]
         Unique-chunk boundary indices. This and the previous two are consumed as
         a set: the precomputed scatter path only engages when all three are given.
-    node_ranges_override : Optional[Array]
+    node_ranges_override : Optional[Int[Array, '_ 2']]
         Replaces ``tree.node_ranges``.
-    leaf_nodes_override : Optional[Array]
+    leaf_nodes_override : Optional[Int[Array, 'leaves']]
         Replaces ``neighbor_list.leaf_indices``.
-    neighbor_offsets_override : Optional[Array]
+    neighbor_offsets_override : Optional[Int[Array, 'leaves+1']]
         Replaces ``neighbor_list.offsets``.
-    neighbor_indices_override : Optional[Array]
+    neighbor_indices_override : Optional[Int[Array, 'edges']]
         Replaces ``neighbor_list.neighbors``.
-    neighbor_counts_override : Optional[Array]
+    neighbor_counts_override : Optional[Int[Array, 'leaves']]
         Replaces ``neighbor_list.counts``.
-    leaf_particle_indices_override : Optional[Array]
+    leaf_particle_indices_override : Optional[Int[Array, 'leaves w']]
         Explicit per-leaf particle index table ``[num_leaves, max_leaf_size]``.
         Supplying it *sets* ``max_leaf_size`` from its second axis, overriding
         the argument.
-    leaf_particle_mask_override : Optional[Array]
+    leaf_particle_mask_override : Optional[Bool[Array, 'leaves w']]
         Validity mask matching ``leaf_particle_indices_override``.
 
     Returns
