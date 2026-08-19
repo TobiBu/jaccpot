@@ -1306,6 +1306,7 @@ __all__ = [
     "OctreeUpwardPlan",
     "build_octree_interaction_plan",
     "build_octree_interaction_plan_from_native_pairs",
+    "build_octree_interaction_plan_from_octree_pairs",
     "build_octree_upward_plan",
     "compute_octree_center_of_mass",
     "propagate_octree_solidfmm_l2l",

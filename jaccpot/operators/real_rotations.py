@@ -10,6 +10,12 @@ CONVENTION (CRITICAL). The coded ``B`` is the **x <-> z** swap, so
 not ``atan2(y, x)``. That is the documented historical bug site; it is now a
 tested fact (see the note above the builders).
 
+The four public builders below share the ``(x, y, z, ell, dtype)`` signature and
+differ only in direction (world->z vs z->world) and representation (multipole vs
+local), so nothing in the shapes distinguishes them. ``docs/operator_conventions.md``
+section 3 tabulates which is which, and
+``tests/unit/operators/test_convention_contracts.py`` keeps them distinguishable.
+
 The ``real_transverse_generators`` family supplies the representation generators
 that :mod:`jaccpot.operators._transverse_degeneracy_jvp` needs to reconstruct the
 transverse derivative on the ``rho == 0`` axis, where the individual alignment
@@ -79,6 +85,21 @@ def real_Dz_diagonal(ell: int, angle: Array, *, dtype: DTypeLike) -> Array:
 
     For each m, the coefficient transforms as if rotating the angular part:
     cos(mφ) → cos(m(φ+α)) = cos(mφ)cos(mα) - sin(mφ)sin(mα).
+
+    Parameters
+    ----------
+    ell : int
+        Degree ``l``; the returned block is ``[2l+1, 2l+1]``.
+    angle : Array
+        Rotation angle about ``+z``, in radians.
+    dtype : DTypeLike
+        Output dtype.
+
+    Returns
+    -------
+    Array
+        The ``[2l+1, 2l+1]`` z-rotation block for degree ``l``. Real, and sparse
+        by construction -- a z-rotation does not mix different ``|m|``.
     """
     n = 2 * ell + 1
     D = jnp.zeros((n, n), dtype=dtype)
@@ -411,6 +432,24 @@ def _multipole_align_to_z_block(
     y-rotation swap), followed by the polar tilt about x,
     ``ax = atan2(rho, z)``. In coordinate space ``g = Rx(ax) @ Rz(az)`` whose
     multipole representation is ``B_U @ Dz(-ax) @ B_U @ Dz(az)``.
+
+    Parameters
+    ----------
+    x : Array
+        First Cartesian component of the alignment direction.
+    y : Array
+        Second Cartesian component.
+    z : Array
+        Third Cartesian component.
+    ell : int
+        Degree ``l``; the returned block is ``[2l+1, 2l+1]``.
+    dtype : DTypeLike
+        Output dtype.
+
+    Returns
+    -------
+    Array
+        The ``[2l+1, 2l+1]`` world->z alignment block for a multipole.
     """
     # The guards inside :func:`_alignment_angles` are deliberately NOT
     # gradient-correct at rho == 0; read the WARNING there before touching them.
@@ -429,7 +468,27 @@ def _multipole_align_from_z_block(
     x: Array, y: Array, z: Array, ell: int, *, dtype: DTypeLike
 ) -> Array:
     """Inverse of :func:`_multipole_align_to_z_block` (multipole z-frame ->
-    world). Equals ``Dz(-az) @ B_U @ Dz(ax) @ B_U`` with the same angles."""
+    world). Equals ``Dz(-az) @ B_U @ Dz(ax) @ B_U`` with the same angles.
+
+    Parameters
+    ----------
+    x : Array
+        First Cartesian component of the alignment direction.
+    y : Array
+        Second Cartesian component.
+    z : Array
+        Third Cartesian component.
+    ell : int
+        Degree ``l``; the returned block is ``[2l+1, 2l+1]``.
+    dtype : DTypeLike
+        Output dtype.
+
+    Returns
+    -------
+    Array
+        The ``[2l+1, 2l+1]`` z->world block, the inverse of
+        :func:`_multipole_align_to_z_block` at the same direction.
+    """
     # The guards inside :func:`_alignment_angles` are deliberately NOT
     # gradient-correct at rho == 0; read the WARNING there before touching them.
     az, ax = _alignment_angles(x, y, z)
@@ -456,6 +515,25 @@ def real_rotation_to_z_axis_multipole(
     z-aligned frame. After applying ``D @ M``, the multipole expansion is
     expressed in the frame where the original ``(x, y, z)`` direction lies on
     ``+z``.
+
+    Parameters
+    ----------
+    x : Array
+        First Cartesian component of the alignment direction.
+    y : Array
+        Second Cartesian component.
+    z : Array
+        Third Cartesian component.
+    ell : int
+        Degree ``l``; the returned block is ``[2l+1, 2l+1]``.
+    dtype : DTypeLike
+        Output dtype.
+
+    Returns
+    -------
+    Array
+        The ``[2l+1, 2l+1]`` rotation taking a world-frame multipole into the
+        z-aligned frame.
     """
     return _multipole_align_to_z_block(x, y, z, ell, dtype=dtype)
 
@@ -475,6 +553,25 @@ def real_rotation_from_z_axis_local(
     transform as the (matrix) transpose of the multipole rotation -- NOT via a
     separate ``B_T`` matrix. This block is therefore the transpose of the
     multipole world->z rotation (:func:`real_rotation_to_z_axis_multipole`).
+
+    Parameters
+    ----------
+    x : Array
+        First Cartesian component of the alignment direction.
+    y : Array
+        Second Cartesian component.
+    z : Array
+        Third Cartesian component.
+    ell : int
+        Degree ``l``; the returned block is ``[2l+1, 2l+1]``.
+    dtype : DTypeLike
+        Output dtype.
+
+    Returns
+    -------
+    Array
+        The ``[2l+1, 2l+1]`` rotation taking a z-frame local expansion back to
+        the world frame.
     """
     return _multipole_align_to_z_block(x, y, z, ell, dtype=dtype).T
 
@@ -491,6 +588,25 @@ def real_rotation_from_z_axis_multipole(
 
     This is the inverse of :func:`real_rotation_to_z_axis_multipole`; apply it
     to rotate a z-frame multipole back to the world frame (``M = D @ M_z``).
+
+    Parameters
+    ----------
+    x : Array
+        First Cartesian component of the alignment direction.
+    y : Array
+        Second Cartesian component.
+    z : Array
+        Third Cartesian component.
+    ell : int
+        Degree ``l``; the returned block is ``[2l+1, 2l+1]``.
+    dtype : DTypeLike
+        Output dtype.
+
+    Returns
+    -------
+    Array
+        The ``[2l+1, 2l+1]`` rotation taking a z-frame multipole back to the
+        world frame.
     """
     return _multipole_align_from_z_block(x, y, z, ell, dtype=dtype)
 
@@ -510,5 +626,24 @@ def real_rotation_to_z_axis_local(
     :func:`evaluate_local_real`). The world->z local rotation is therefore the
     transpose of the multipole z->world rotation
     (:func:`real_rotation_from_z_axis_multipole`).
+
+    Parameters
+    ----------
+    x : Array
+        First Cartesian component of the alignment direction.
+    y : Array
+        Second Cartesian component.
+    z : Array
+        Third Cartesian component.
+    ell : int
+        Degree ``l``; the returned block is ``[2l+1, 2l+1]``.
+    dtype : DTypeLike
+        Output dtype.
+
+    Returns
+    -------
+    Array
+        The ``[2l+1, 2l+1]`` rotation taking a world-frame local expansion into
+        the z-aligned frame.
     """
     return _multipole_align_from_z_block(x, y, z, ell, dtype=dtype).T

@@ -140,7 +140,39 @@ exclude = '''
 
 [tool.pydoclint]
 style = "numpy"
-exclude = '\.git|\.venv|build|dist|jaccpot/experimental'
+# `.claude` holds git worktrees -- full transient copies of this repo. Without
+# excluding them a manual run over `.` reports every violation four times over
+# (measured against the old baseline: 409 of 521 file entries, ~13k of 14.7k
+# violations) and the result churns as worktrees come and go.
+exclude = '\.git|\.venv|\.claude|build|dist|jaccpot/experimental'
+
+# The upstream default is `true`, and that made this hook VACUOUS for the whole
+# Tier 2.5 docstring programme: it skips argument and return checking on any
+# docstring that is a bare one-line summary, which is exactly the shape every
+# undocumented function has. Measured 2026-08-17 on `main`: 0 violations under
+# the default, 560 with it off. A function with a one-line summary and eight
+# undocumented parameters passed CI.
+#
+# It also let finished work come undone. `runtime/_adaptive_policy.py` was
+# driven to zero (PR #118), and `main` was never at zero: five functions from a
+# concurrent branch merged into the same file without conflict, and the hook
+# reported 0 the whole time (repaired in PR #149).
+skip-checking-short-docstrings = false
+
+# There is deliberately NO baseline any more. `.pydoclint-baseline.txt` carried
+# the pre-existing tail while the Tier 2.5 docstring programme ran; that
+# programme finished, `jaccpot/` measured 0 violations with the baseline out of
+# play (2026-08-18), and a baseline with nothing real left to suppress is worse
+# than none: it cannot hide a violation that exists, but it can silently absorb
+# a NEW one in any file that still has an entry.
+#
+# Retiring it moved the enforcement scope into `.pre-commit-config.yaml`
+# instead. The baseline's last 1215 entries were all outside `jaccpot/`
+# (tests/ 1034, bench/ 121, examples/ 60 -- exactly the live count there), so
+# deleting it repo-wide would have turned the hook red without catching
+# anything it was not already suppressing. The hook is now scoped `^jaccpot/`,
+# which leaves enforcement on the package unchanged and unconditional, and
+# leaves tests/bench/examples exactly as unchecked as the baseline had them.
 
 [tool.isort]
 profile = "black"

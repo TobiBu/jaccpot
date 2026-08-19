@@ -39,10 +39,33 @@ if TYPE_CHECKING:  # pragma: no cover - annotations only, no runtime import
     # annotations documented an intent no tool could check.
     from ._fmm_impl import FMMEngine
 
+__all__ = [
+    "AutotuneMixin",
+]
+
 
 class AutotuneMixin:
     def _select_autotune_m2l_candidates(self, *, pair_count: int) -> tuple[int, ...]:
-        """Return candidate chunk sizes for one pair-count regime."""
+        """Return candidate chunk sizes for one pair-count regime.
+
+        Pure table lookup against ``_GPU_M2L_AUTOTUNE_PAIR_BINS`` -- it times
+        nothing. The timing happens in
+        :meth:`_autotune_runtime_m2l_chunk_size`, which uses this to bound how
+        many candidates it has to measure.
+
+        Parameters
+        ----------
+        pair_count : int
+            Number of far pairs the run will process. Host-side; only its bin
+            matters, so nearby counts share a candidate list -- and share a cache
+            entry downstream.
+
+        Returns
+        -------
+        tuple[int, ...]
+            Chunk sizes to try, smallest regime first. Never empty, so a caller
+            always has something to time.
+        """
 
         pairs = int(pair_count)
         if pairs < _GPU_M2L_AUTOTUNE_PAIR_BINS[0]:
@@ -61,7 +84,53 @@ class AutotuneMixin:
         max_pairs: int = _GPU_M2L_AUTOTUNE_MAX_SAMPLE_PAIRS,
         max_nodes: int = _GPU_M2L_AUTOTUNE_MAX_SAMPLE_NODES,
     ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-        """Sample far pairs and remap node ids to a compact contiguous range."""
+        """Sample far pairs and remap node ids to a compact contiguous range.
+
+        Builds a small stand-in problem for the timing loop. Two reductions
+        happen and both are lossy on purpose, because this feeds a benchmark
+        rather than a result: the pair list is **strided**, not randomly sampled,
+        and node ids are renumbered into a dense range so the sampled multipoles
+        can be gathered into a compact array.
+
+        Node admission stops at ``max_nodes``, and pairs whose endpoints did not
+        make it in are **dropped** -- so the returned pair count can be well below
+        ``max_pairs`` on a wide tree, and the sample is biased towards nodes seen
+        early in the pair list. Acceptable for choosing a chunk size, not for
+        anything whose value depends on which pairs were kept.
+
+        Calls ``jax.device_get``, so this is a host sync and must not be reached
+        from inside a jitted path.
+
+        Parameters
+        ----------
+        src : Array
+            Source node id per far pair, any shape -- flattened here.
+        tgt : Array
+            Target node id per far pair, flattened the same way. Paired with
+            ``src`` positionally after the flatten, so the two must share a
+            layout.
+        max_pairs : int
+            Upper bound on sampled pairs; defaults to
+            ``_GPU_M2L_AUTOTUNE_MAX_SAMPLE_PAIRS``. Applied as a stride first,
+            then a truncation.
+        max_nodes : int
+            Upper bound on distinct nodes admitted; defaults to
+            ``_GPU_M2L_AUTOTUNE_MAX_SAMPLE_NODES``. This is what bounds the
+            multipole array the benchmark allocates.
+
+        Returns
+        -------
+        np.ndarray
+            Sampled source ids remapped to ``[0, num_local)``, int32.
+        np.ndarray
+            Sampled target ids under the same remapping, int32.
+        np.ndarray
+            Local-to-global node id table, int64. Its length is the local node
+            count, and it is the gather index for the multipoles.
+
+            All three are empty when there are no pairs, which the caller treats
+            as "do not autotune" rather than as an error.
+        """
 
         src_np = np.asarray(jax.device_get(src), dtype=np.int64).reshape(-1)
         tgt_np = np.asarray(jax.device_get(tgt), dtype=np.int64).reshape(-1)
@@ -120,7 +189,48 @@ class AutotuneMixin:
         order: int,
         pair_count: int,
     ) -> Optional[int]:
-        """Auto-select M2L chunk size on GPU for streamed far-pair execution."""
+        """Auto-select M2L chunk size on GPU for streamed far-pair execution.
+
+        Times :func:`_accumulate_m2l_chunked_scan` once per candidate on a
+        sampled sub-problem and keeps the fastest. Each candidate is run twice
+        and only the second run is timed, so the compile is not counted.
+
+        Returns ``None`` -- meaning "no opinion, leave the chunk size alone" --
+        whenever autotuning is off, the basis is not ``solidfmm``, the backend is
+        not GPU, there are no pairs, or the sample came back empty. ``None`` is
+        never a failure signal.
+
+        The result is memoized in the process-wide autotune store under a key of
+        (backend, basis mode, dtype, order, rotation, m2l impl, Pallas flag, pair
+        **bin**). The bin, not the pair count -- so a second run at a nearby
+        problem size reuses this measurement rather than re-timing.
+
+        This is a wall-clock measurement, so it is only as good as the machine is
+        quiet: on a shared or loaded GPU the winner is noise. It does not affect
+        the numbers computed -- the accumulate result is discarded and the choice
+        is made on ``perf_counter`` alone.
+
+        Parameters
+        ----------
+        upward : TreeUpwardData
+            Upward-sweep output. Read for the multipole centres, their dtype, and
+            the packed coefficients the benchmark feeds the kernel.
+        src : Array
+            Source node id per far pair.
+        tgt : Array
+            Target node id per far pair.
+        order : int
+            Expansion order ``p``, part of the cache key.
+        pair_count : int
+            Total far pairs. Selects both the candidate list and the cache bin;
+            a non-positive value short-circuits to ``None``.
+
+        Returns
+        -------
+        Optional[int]
+            The winning chunk size, or ``None`` to leave the caller's choice
+            untouched. See above for every route to ``None``.
+        """
 
         if (
             not bool(self.autotune_m2l_chunk)

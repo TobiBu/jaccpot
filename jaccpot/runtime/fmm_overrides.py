@@ -60,6 +60,12 @@ if TYPE_CHECKING:  # pragma: no cover - annotations only, no runtime import
     # annotations documented an intent no tool could check.
     from ._fmm_impl import PreparedStateLike
 
+__all__ = [
+    "OverridesMixin",
+    "normalize_traversal_config_request",
+    "warn_full_traversal_config_replacement",
+]
+
 
 # Merge base for a field-by-field override that arrives on a route with no
 # resolved config at all (no preset, no policy default). Only the fields the
@@ -95,6 +101,27 @@ def normalize_traversal_config_request(
     Rejecting an unknown mapping key by name matters more than it looks: a typo
     in a dict key would otherwise be a silently ignored tuning request, which is
     the exact failure this whole seam exists to prevent.
+
+    Parameters
+    ----------
+    traversal_config : Any
+        ``None``, a ``DualTreeTraversalConfig``, a
+        :class:`~jaccpot.config.TraversalOverrides`, or a ``Mapping`` of the same
+        keys. Typed ``Any`` because discriminating between those is the job.
+
+    Returns
+    -------
+    tuple[Optional[DualTreeTraversalConfig], dict[str, int]]
+        ``(full, fields)``, at most one of which is non-empty; ``(None, {})``
+        when nothing was requested.
+
+    Raises
+    ------
+    ValueError
+        If a mapping carries a key that is not a traversal-override field --
+        deliberately noisy, per the paragraph above.
+    TypeError
+        If the request is none of the accepted shapes.
     """
 
     if traversal_config is None:
@@ -143,6 +170,15 @@ def warn_full_traversal_config_replacement(
     measured all four capacities together. But the failure mode it caused
     (measured 3x slower at N=65536 from an override intended to be a no-op) was
     silent, and the fix for silence is to say something.
+
+    Parameters
+    ----------
+    supplied : DualTreeTraversalConfig
+        The config the caller passed; named in the warning so the message points
+        at their value rather than at the concept.
+    preset_name : Optional[str]
+        Preset whose sizing is being replaced, when there is one. ``None`` still
+        warns -- the replacement is what matters, not which preset lost.
     """
 
     warnings.warn(
@@ -171,6 +207,19 @@ class OverridesMixin:
         Applied last, after every policy clamp, so a field the caller named wins
         and a field they did not name keeps the value the preset resolved for
         this N. Idempotent, so calling it on more than one route is safe.
+
+        Parameters
+        ----------
+        traversal_config : Optional[DualTreeTraversalConfig]
+            The runtime-resolved config to merge onto. ``None`` stays ``None``:
+            named overrides do not conjure a config where the runtime resolved
+            none.
+
+        Returns
+        -------
+        Optional[DualTreeTraversalConfig]
+            A new config with the caller's named fields applied, or the input
+            unchanged when nothing was named.
         """
 
         fields = getattr(self, "_traversal_field_overrides", None)
@@ -201,7 +250,28 @@ class OverridesMixin:
         positions: Array,
         masses: Array,
     ) -> Optional[PreparedStateLike]:
-        """Return cached prepared state when key and inputs exactly match."""
+        """Return cached prepared state when key and inputs exactly match.
+
+        A single slot, and the match is exact on all three parts: the key, then
+        the array SHAPES, then array IDENTITY. Identity, not value -- mutating an
+        array in place and passing it again is a hit, and returns a state built
+        from the old contents. That is the documented meaning of
+        ``reuse_prepared_state`` on the public API, not an accident here.
+
+        Parameters
+        ----------
+        key : tuple[Any, ...]
+            Preparation parameters that must match exactly.
+        positions : Array
+            Positions the caller is about to prepare with.
+        masses : Array
+            Masses likewise.
+
+        Returns
+        -------
+        Optional[PreparedStateLike]
+            The cached state on an exact match, else ``None``.
+        """
         cached_key = self._prepared_state_cache_key
         cached_value = self._prepared_state_cache_value
         cached_positions = self._prepared_state_cache_positions
@@ -233,7 +303,24 @@ class OverridesMixin:
         masses: Array,
         state: PreparedStateLike,
     ) -> None:
-        """Store prepared-state payload and the exact input arrays used."""
+        """Store prepared-state payload and the exact input arrays used.
+
+        One slot, overwritten unconditionally: the reuse pattern this serves is a
+        loop repeating the same preparation, where a second entry would never be
+        consulted before eviction. The input arrays are kept because the lookup
+        matches on their identity, not their contents.
+
+        Parameters
+        ----------
+        key : tuple[Any, ...]
+            Preparation parameters to match on later.
+        positions : Array
+            Positions the state was built from.
+        masses : Array
+            Masses likewise.
+        state : PreparedStateLike
+            The state to cache.
+        """
         if _contains_tracer((positions, masses, state)):
             return
         self._prepared_state_cache_key = key
@@ -247,7 +334,22 @@ class OverridesMixin:
         *,
         jit_tree_override: Optional[bool],
     ) -> bool:
-        """Resolve tree-build JIT mode with a CPU-friendly auto heuristic."""
+        """Resolve tree-build JIT mode with a CPU-friendly auto heuristic.
+
+        Parameters
+        ----------
+        positions : Array
+            Particle positions; their count is what the ``"auto"`` heuristic
+            decides on.
+        jit_tree_override : Optional[bool]
+            Per-call override. ``None`` defers to the engine's configured value,
+            which may itself be ``"auto"``.
+
+        Returns
+        -------
+        bool
+            A resolved flag -- ``"auto"`` never escapes this method.
+        """
 
         if self.tree_type != "radix":
             return False
@@ -286,6 +388,33 @@ class OverridesMixin:
         -- otherwise an oversized preset/explicit seed (e.g. the large_n_gpu
         262144 pair-queue default) reaches the GPU traversal build unclamped and
         inflates device-memory footprint (a minimum-memory OOM regression).
+
+        Parameters
+        ----------
+        traversal_config : Optional[DualTreeTraversalConfig]
+            Config to clamp; ``None`` passes through.
+        backend_name : str
+            Active backend. These clamps are GPU-only.
+        n_particles : int
+            Particle count the thresholds are expressed in.
+        minimum_memory : bool
+            Whether the minimum-memory objective is active, which tightens the
+            ceilings.
+        production_large_n : bool
+            Whether this is the large-N production lane.
+        grouped_interactions : bool
+            Whether grouped traversal is active; it changes which buffers
+            dominate the footprint.
+        honor_explicit_traversal : bool
+            Whether a caller-supplied config should otherwise be left alone.
+            Note these are memory-SAFETY clamps, so per the paragraph above they
+            still apply where an adaptive performance rewrite would not.
+
+        Returns
+        -------
+        Optional[DualTreeTraversalConfig]
+            The clamped config, or the input unchanged off-GPU or when there is
+            nothing to clamp.
         """
 
         if (
@@ -457,7 +586,26 @@ class OverridesMixin:
         num_particles: int,
         backend: Optional[str] = None,
     ) -> _RuntimeExecutionOverrides:
-        """Resolve adaptive runtime traversal/chunk settings."""
+        """Resolve adaptive runtime traversal/chunk settings.
+
+        Runs the adaptive policy for this particle count and backend and returns
+        the whole knob set as one value. Check ``adaptive_applied`` on the result
+        before taking the override path: ``False`` means every field equals the
+        engine's own setting, so there is nothing to apply.
+
+        Parameters
+        ----------
+        num_particles : int
+            Particle count the policy decides on.
+        backend : Optional[str]
+            Backend name; ``None`` asks JAX for the default.
+
+        Returns
+        -------
+        _RuntimeExecutionOverrides
+            Traversal config, chunk sizes, far-field and centre modes, the
+            refine-local override, and the ``adaptive_applied`` flag.
+        """
 
         traversal_config = self.traversal_config
         m2l_chunk_size = self.m2l_chunk_size
@@ -688,6 +836,22 @@ class OverridesMixin:
 
         Applies only when prepare_state runs under tracing and the user did not
         explicitly provide traversal_config overrides.
+
+        The explicit-override check is the point of the split from
+        :meth:`_resolve_tracing_traversal_config_unchecked`: a caller who named
+        capacities has measured them, and silently shrinking those would make a
+        deliberate tuning request a no-op.
+
+        Parameters
+        ----------
+        traversal_config : Optional[DualTreeTraversalConfig]
+            Config to clamp. ``None`` passes straight through.
+
+        Returns
+        -------
+        Optional[DualTreeTraversalConfig]
+            The clamped config, or the input unchanged when it is ``None`` or the
+            caller supplied capacities explicitly.
         """
 
         if traversal_config is None or self._explicit_traversal_config:
@@ -711,7 +875,24 @@ class OverridesMixin:
         *,
         traversal_config: DualTreeTraversalConfig,
     ) -> DualTreeTraversalConfig:
-        """Apply the traced-capacity ceilings unconditionally."""
+        """Apply the traced-capacity ceilings unconditionally.
+
+        The clamp itself, with no policy around it -- each capacity is reduced to
+        at most its ``_TRACING_MAX_*`` ceiling and never raised. Callers that must
+        respect an explicit override should go through
+        :meth:`_resolve_tracing_traversal_config` instead; this one is
+        "unchecked" in exactly that sense.
+
+        Parameters
+        ----------
+        traversal_config : DualTreeTraversalConfig
+            Config to clamp. Not optional here.
+
+        Returns
+        -------
+        DualTreeTraversalConfig
+            A config whose four capacities are each ``min(current, ceiling)``.
+        """
 
         current_queue = int(traversal_config.max_pair_queue)
         capped_queue = min(current_queue, _TRACING_MAX_PAIR_QUEUE)
@@ -758,6 +939,17 @@ class OverridesMixin:
 
         Deliberately GPU-only: on a CPU the per-pair scan has no launch cost to
         pay and the existing CPU crossovers below stay as they were measured.
+
+        Parameters
+        ----------
+        num_particles : int
+            Particle count the crossovers are expressed in.
+
+        Returns
+        -------
+        str
+            A concrete mode -- ``"baseline"`` or ``"bucketed"``. ``"auto"`` is
+            resolved here and never reaches the kernels.
         """
 
         if self._is_large_n_gpu_production_profile():
@@ -795,7 +987,27 @@ class OverridesMixin:
         num_particles: int,
         nearfield_mode: str,
     ) -> int:
-        """Resolve near-field edge chunk size with large-N auto policy."""
+        """Resolve near-field edge chunk size with large-N auto policy.
+
+        Parameters
+        ----------
+        num_particles : int
+            Particle count; the chunk size scales with it.
+        nearfield_mode : str
+            A resolved mode, not ``"auto"`` -- call
+            :meth:`_resolve_nearfield_mode` first.
+
+        Returns
+        -------
+        int
+            Edges per chunk, positive.
+
+        Raises
+        ------
+        ValueError
+            If the resolved chunk size would not be positive; the chunk-count
+            division downstream would be ill-defined rather than merely slow.
+        """
         base_chunk = int(self.nearfield_edge_chunk_size)
         if base_chunk <= 0:
             raise ValueError("nearfield_edge_chunk_size must be positive")

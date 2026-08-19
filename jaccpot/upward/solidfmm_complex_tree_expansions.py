@@ -35,9 +35,37 @@ from jaccpot.operators.real_harmonics import sh_size
 
 from .tree_geometry import compute_tree_geometry_compiled
 
+__all__ = [
+    "SolidFMMComplexNodeMultipoleData",
+    "SolidFMMComplexTreeUpwardData",
+    "prepare_solidfmm_complex_source_motion_multipoles",
+    "prepare_solidfmm_complex_upward_sweep",
+]
+
 
 class SolidFMMComplexNodeMultipoleData(NamedTuple):
-    """Packed complex multipole coefficients and their metadata."""
+    """Packed complex multipole coefficients and their metadata.
+
+    Attributes
+    ----------
+    order : int
+        Expansion order ``p``. A Python ``int``, static under ``jit``.
+    centers : Array
+        ``[num_nodes, 3]`` expansion centres, real-valued. Which centre these are
+        depends on the sweep's ``center_mode`` -- centre of mass, AABB centre, or
+        caller-supplied -- so they are not interchangeable across modes.
+    packed : Array
+        ``[num_nodes, (p+1)^2]`` complex solid-harmonic coefficients in the
+        solidfmm convention. Complex, and in a different basis from
+        :class:`~jaccpot.upward.real_tree_expansions.RealNodeMultipoleData.packed`
+        despite the matching field name.
+    source_motion_packed : Optional[Array]
+        Time-differentiated multipoles, ``[num_nodes, (p+1)^2]``, or ``None``.
+        ``None`` is the normal case: only the derivative/jerk paths in
+        :mod:`jaccpot.runtime.fmm_derivatives` populate it, and consumers such as
+        :mod:`jaccpot.runtime.kernels._l2l` branch on it being ``None`` rather
+        than assuming it is present.
+    """
 
     order: int
     centers: Array  # (num_nodes, 3)
@@ -46,7 +74,26 @@ class SolidFMMComplexNodeMultipoleData(NamedTuple):
 
 
 class SolidFMMComplexTreeUpwardData(NamedTuple):
-    """Container bundling data needed for the complex upward sweep."""
+    """Container bundling data needed for the complex upward sweep.
+
+    Carries two fields beyond
+    :class:`~jaccpot.upward.real_tree_expansions.RealTreeUpwardData`, which
+    exposes ``multipoles`` alone. Code that must accept either lane can only rely
+    on ``multipoles``.
+
+    Attributes
+    ----------
+    geometry : TreeGeometry
+        Per-node box extents and radii, from
+        :func:`~jaccpot.upward.tree_geometry.compute_tree_geometry_compiled`.
+        Needed by the MAC, not by the expansion algebra.
+    mass_moments : TreeMassMoments
+        Per-node total mass and centre of mass. Retained because the downward
+        sweep and the force-scale machinery re-read them; recomputing would be
+        a second pass over the particles.
+    multipoles : SolidFMMComplexNodeMultipoleData
+        The packed complex coefficients and their centres.
+    """
 
     geometry: TreeGeometry
     mass_moments: TreeMassMoments
@@ -62,6 +109,15 @@ def _upward_diagnostics() -> bool:
 
     Read per call rather than captured at import, so setting
     ``JACCPOT_PREPARE_DIAGNOSTICS=1`` after importing jaccpot takes effect.
+
+    Returns
+    -------
+    bool
+        Whether ``JACCPOT_PREPARE_DIAGNOSTICS`` is set to a truthy value. A
+        host-side Python ``bool``, so it is a trace-time constant and branching
+        on it does not break ``jit`` -- but for the same reason, flipping the
+        variable after a function has been traced will not change the compiled
+        graph.
     """
     return env_flag("JACCPOT_PREPARE_DIAGNOSTICS", False)
 
@@ -572,6 +628,33 @@ def _aggregate_m2m_complex_by_level(
         The zero-displacement case (a single-child internal node shares its child's
         centre of mass) is guarded inside ``m2m_complex`` itself, which is enclosed
         here, so the recomputed ``deltas`` keep that protection.
+
+        Parameters
+        ----------
+        state_in : Array
+            Carried coefficients ``[num_nodes + 1, (p+1)^2]`` -- the extra row is
+            the dead scatter target described below, so this is one row taller
+            than ``packed``.
+        node_centers_all : Array
+            ``[num_nodes, 3]`` centres for every node. Passed as an argument
+            rather than closed over, for the hoisting reason above.
+        safe_child_idx : Array
+            ``[batch_width, 2]`` child ids with the invalid entries already
+            replaced by ``0``, so the gather is always in range. The mask, not
+            this array, is what removes them.
+        gather_nodes : Array
+            ``[batch_width]`` parent node ids for this level.
+        child_mask : Array
+            ``[batch_width, 2]`` boolean, true where the child slot is real.
+            Applied *after* the translation, so a masked-off slot still costs a
+            full M2M -- correct but not free.
+
+        Returns
+        -------
+        Array
+            ``[batch_width, (p+1)^2]`` parent coefficients with conjugate
+            symmetry re-enforced. This is the level's contribution only; the
+            caller scatters it into the carry.
         """
         child_coeffs = state_in[safe_child_idx]
         child_centers = node_centers_all[safe_child_idx]

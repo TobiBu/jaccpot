@@ -54,6 +54,10 @@ if TYPE_CHECKING:  # pragma: no cover - annotations only, no runtime import
     from ._fmm_impl import FMMEngine, PreparedStateLike
     from ._large_n_grad import LargeNGradPlan
 
+__all__ = [
+    "EvaluateMixin",
+]
+
 _OUTER_JIT_WARNED = False
 
 

@@ -80,7 +80,17 @@ __all__ = [
 
 
 class MutualForceResult(NamedTuple):
-    """Accelerations plus the near/far force split that produced them."""
+    """Accelerations plus the near/far force split that produced them.
+
+    Attributes
+    ----------
+    accelerations : Array
+        ``(n, 3)`` accelerations in the caller's original particle order.
+    near_forces : Array
+        ``(n, 3)`` direct P2P contribution to the force, same order.
+    far_forces : Array
+        ``(n, 3)`` multipole contribution to the force, same order.
+    """
 
     accelerations: Array
     near_forces: Array
@@ -106,8 +116,6 @@ class MutualCapacities(NamedTuple):
     against the shape silently stops working. Use ``state.num_far_pairs`` /
     ``state.num_near_pairs``.
 
-    ``near`` and ``far`` bound the canonical pair lists; ``depth`` and ``width``
-    bound the level schedule; ``queue`` bounds the device traversal's wavefront.
     Everything else about a mutual state is already fixed by
     ``(N, leaf_size, order)``: ``num_leaves == ceil(N / leaf_size)`` and
     ``max_leaf_size == leaf_size``, because the tree builder slices the Morton
@@ -123,6 +131,20 @@ class MutualCapacities(NamedTuple):
     front yielded 11 022 far pairs against the correct 341 504, a **90% force
     error** -- with momentum still conserved to 7e-22, because dropping a
     canonical pair drops both of its halves.
+
+    Attributes
+    ----------
+    near : int
+        Capacity of the canonical near (leaf-pair) list.
+    far : int
+        Capacity of the canonical far (node-pair) list.
+    depth : int
+        Rows in the dense level schedule, i.e. the deepest tree level covered.
+        Also the cascade scan's iteration count, so over-provisioning costs work.
+    width : int
+        Slots per level row, i.e. the widest level covered.
+    queue : int
+        Wavefront capacity for the device traversal.
     """
 
     near: int
@@ -149,6 +171,49 @@ def resolve_mutual_capacities(
     levels and nodes-per-level, where measured drift is a couple of units
     (depth 22 -> 24, widest level 20 -> 24), and where over-provisioning a level
     row costs real work in the cascades.
+
+
+
+    Parameters
+
+
+    ----------
+
+
+    topology : MutualTopology
+
+
+        One built topology to size the capacities from.
+
+
+    relative : float
+
+
+        Fractional headroom on the pair lists. Default ``0.10``.
+
+
+    absolute : int
+
+
+        Additive headroom on the pair lists. Default ``256``.
+
+
+
+    Returns
+
+
+    -------
+
+
+    MutualCapacities
+
+
+        Capacities snapped onto :data:`~jaccpot.mutual.farfield.CAPACITY_LADDER`,
+
+
+        with ``queue`` left at 0 for the caller to resolve by trial.
+
+
     """
     widths = [int(np.asarray(level).shape[0]) for level in topology.level_nodes] or [0]
     num_leaves = int(np.asarray(topology.leaf_nodes).shape[0])
@@ -201,6 +266,8 @@ def resolve_mutual_capacities(
         # record the widest pair front it passed through.
         queue=0,
     )
+
+
 # A pytree child needs a dtype, so the default must be an array -- but a
 # dataclass rejects an array default as "mutable", hence the factory.
 def _no_overflow() -> Array:
@@ -214,7 +281,6 @@ def _no_cause() -> Array:
 #: Bit positions in ``MutualFMMState.overflow_causes``, in the order a report
 #: should read them.
 OVERFLOW_CAUSES = ("far", "near", "pair_queue", "level_width", "tree_depth")
-
 
 
 @dataclass(frozen=True)
@@ -233,6 +299,58 @@ class MutualFMMState:
     has to stay hashable -- the host-side ``MutualTopology`` used to live here and
     was removed for exactly that reason (it holds NumPy arrays, so it is
     unhashable, and nothing but ``num_particles`` ever read it).
+
+    Every index array below is a frozen integer constant: cotangents flow to
+    positions and masses, never to the topology.
+
+    Attributes
+    ----------
+    tree : MutualTreeArrays
+        Device-resident tree the far-field sweep walks.
+    leaf_particles : Array
+        ``(num_leaves, leaf_capacity)`` particle indices, Morton-sorted order.
+    leaf_particle_valid : Array
+        Boolean mask of the same shape marking occupied slots in the padding.
+    near_a : Array
+        Leaf index of the first endpoint of each canonical near pair.
+    near_b : Array
+        Leaf index of the second endpoint of each canonical near pair.
+    near_valid : Array
+        Boolean mask over the near pair list, which is padded to its capacity.
+    self_leaves : Array
+        Leaf indices whose intra-leaf self-interaction is evaluated.
+    far_a : Array
+        Node index of the first endpoint of each canonical far pair.
+    far_b : Array
+        Node index of the second endpoint of each canonical far pair.
+    forward_permutation : Array
+        Maps original particle order to Morton-sorted order.
+    inverse_permutation : Array
+        Maps Morton-sorted order back to the caller's original order.
+    softening : float
+        Plummer softening length used by the near-field kernel.
+    G : float
+        Gravitational constant.
+    order : int
+        Expansion order.
+    use_pallas : bool
+        Whether to dispatch the fused Pallas kernels instead of pure JAX.
+    near_chunk_size : Optional[int]
+        Pair-chunk size for the near kernel; ``None`` leaves it unchunked.
+    pallas_interpret : bool
+        Run the Pallas kernels in interpret mode (CPU debugging).
+    num_particles_ : int
+        Particle count, as aux data. Trailing underscore because
+        ``num_particles`` is the property that reads it.
+    num_near_pairs : Array
+        Live entries in the near pair list. Read this, **not**
+        ``near_a.shape[0]``, which is the capacity once padded.
+    num_far_pairs : Array
+        Live entries in the canonical far pair list, same caveat.
+    topology_overflow : Array
+        True when a capacity was exceeded while building this state on device.
+    overflow_causes : Array
+        Bitmask over :data:`OVERFLOW_CAUSES` naming which capacities overflowed.
     """
 
     tree: MutualTreeArrays
@@ -262,33 +380,70 @@ class MutualFMMState:
     num_far_pairs: Array = 0
     topology_overflow: Array = field(default_factory=_no_overflow)
     overflow_causes: Array = field(default_factory=_no_cause)
-    """True when a capacity was exceeded while building this state on device.
-
-    A 0-d device bool, not an exception: the device builder runs under trace,
-    where raising is not available. It must be *read* -- overflow silently drops
-    interactions, and a mutual list that has lost a canonical pair has lost both
-    its halves, so it still conserves momentum exactly and the diagnostic this
-    lane is usually judged on will not notice. The host builder leaves it False.
-    """
 
     @property
     def num_particles(self: "MutualFMMState") -> int:
-        """Number of particles this state was built for."""
+        """Number of particles this state was built for.
+
+        Returns
+        -------
+        int
+            Particle count, read from aux data rather than from a host-side
+            topology object -- that object was removed from the state so aux
+            could stay hashable.
+        """
         return int(self.num_particles_)
 
     @property
     def near_capacity(self: "MutualFMMState") -> int:
-        """Allocated slots for canonical near pairs -- ``>= num_near_pairs``."""
+        """Allocated slots for canonical near pairs.
+
+        Returns
+        -------
+        int
+            The capacity, which is ``>= num_near_pairs``. This is what
+            ``near_a.shape[0]`` reports once the list is padded, which is why the
+            occupancy has its own field.
+        """
         return int(self.near_a.shape[0])
 
     @property
     def far_capacity(self: "MutualFMMState") -> int:
-        """Allocated slots for canonical far pairs -- ``>= num_far_pairs``."""
+        """Allocated slots for canonical far pairs.
+
+        Returns
+        -------
+        int
+            The capacity, which is ``>= num_far_pairs``; same caveat as
+            :attr:`near_capacity`.
+        """
         return int(self.far_a.shape[0])
 
 
-def _pad_pair_list(values, cap: int, *, index_dtype) -> Array:
-    """Pad a 1-D index list up to ``cap`` with zeros (masked by its valid array)."""
+def _pad_pair_list(values: Any, cap: int, *, index_dtype: Any) -> Array:
+    """Pad a 1-D index list up to ``cap`` with zeros.
+
+    Parameters
+    ----------
+    values : Any
+        The live entries, in order.
+    cap : int
+        Target capacity.
+    index_dtype : Any
+        Integer dtype of the returned array.
+
+    Returns
+    -------
+    Array
+        A ``(cap,)`` array whose leading entries are ``values``. The padding is
+        index 0, not -1, because every consumer gathers by it before masking; the
+        companion ``*_valid`` array is what removes the contribution.
+
+    Raises
+    ------
+    ValueError
+        If ``values`` is longer than ``cap``.
+    """
     arr = np.asarray(values, dtype=np.int64).reshape(-1)
     if arr.shape[0] > cap:
         raise ValueError(f"pair list of {arr.shape[0]} exceeds capacity {cap}")
@@ -308,15 +463,66 @@ def build_mutual_state(
     index_dtype: Any = jnp.int32,
     caps: Optional["MutualCapacities"] = None,
 ) -> MutualFMMState:
-    """Move a host-built topology onto the device.
+    """Move a host-built topology onto the device as compile-time constants.
+
+    The canonical far pair list is doubled here, into ``(b -> a, a -> b)``, so a
+    single kernel invocation with one rounding regime produces both halves of
+    every pair. That is what makes the ``+F / -F`` cancellation exact rather
+    than approximate.
 
     With ``caps=None`` every array is sized exactly to the topology, which is the
     historical behaviour and the right choice for a one-shot evaluation. Pass
-    ``caps`` (see :func:`resolve_mutual_capacities`) to pad the pair lists and the
-    level schedule to fixed capacities instead: the arrays then depend on the
-    *capacities* rather than on the particle distribution, so one compiled
-    program serves every rebuild. That is the difference between paying jaccpot's
-    ~200 s mutual-force compile once and paying it per base step.
+    ``caps`` to pad the pair lists and the level schedule to fixed capacities
+    instead: the arrays then depend on the *capacities* rather than on the
+    particle distribution, so one compiled program serves every rebuild. That is
+    the difference between paying jaccpot's ~200 s mutual-force compile once and
+    paying it per base step.
+
+    Parameters
+    ----------
+    topology : MutualTopology
+        Frozen host-side topology: leaves, pair lists and the Morton permutation.
+    softening : float
+        Plummer softening length handed to the near-field kernel.
+    G : float
+        Gravitational constant. Default ``1.0``.
+    use_pallas : bool
+        Dispatch the fused Pallas kernels instead of the pure-JAX lanes.
+    near_chunk_size : Optional[int]
+        Pair-chunk size for the near kernel; ``None`` leaves it unchunked.
+    pallas_interpret : bool
+        Run the Pallas kernels in interpret mode, for CPU debugging.
+    index_dtype : Any
+        Integer dtype for every index array. Default ``jnp.int32``.
+    caps : Optional[MutualCapacities]
+        Fixed capacities to pad to; see :func:`resolve_mutual_capacities`.
+        ``None`` sizes every array exactly to this topology.
+
+    Returns
+    -------
+    MutualFMMState
+        Device-resident state ready for repeated evaluation.
+
+
+
+    Raises
+
+
+    ------
+
+
+    MutualCapacityOverflow
+
+
+        If ``caps`` is given and this topology does not fit it. Raised rather than
+
+
+        truncated: a dropped canonical pair loses both of its halves, so momentum
+
+
+        stays exactly conserved and nothing else would reveal the loss.
+
+
     """
     topo = topology
     node_to_leaf = jnp.zeros((topo.num_nodes,), dtype=index_dtype)
@@ -335,8 +541,12 @@ def build_mutual_state(
             "silently truncating the interaction list would give a wrong force."
         )
 
-    near_a = node_to_leaf[_pad_pair_list(topo.near_a, near_cap, index_dtype=index_dtype)]
-    near_b = node_to_leaf[_pad_pair_list(topo.near_b, near_cap, index_dtype=index_dtype)]
+    near_a = node_to_leaf[
+        _pad_pair_list(topo.near_a, near_cap, index_dtype=index_dtype)
+    ]
+    near_b = node_to_leaf[
+        _pad_pair_list(topo.near_b, near_cap, index_dtype=index_dtype)
+    ]
     near_valid = jnp.arange(near_cap) < n_near
 
     far_a = _pad_pair_list(topo.far_a, far_cap, index_dtype=index_dtype)
@@ -396,6 +606,7 @@ def build_mutual_state(
         near_chunk_size=near_chunk_size,
         pallas_interpret=bool(pallas_interpret),
     )
+
 
 # ---------------------------------------------------------------------------
 # pytree registration
@@ -482,8 +693,6 @@ jax.tree_util.register_pytree_node(MutualTreeArrays, _flatten_tree, _unflatten_t
 jax.tree_util.register_pytree_node(MutualFMMState, _flatten_state, _unflatten_state)
 
 
-
-
 # ---------------------------------------------------------------------------
 # Block-step schedule. Duplicated from nornax's ``blockstep.schedule`` on purpose:
 # the adapter must not import nornax (the dependency graph is Jaccpot -> Yggdrax,
@@ -493,17 +702,62 @@ jax.tree_util.register_pytree_node(MutualFMMState, _flatten_state, _unflatten_st
 
 
 def n_sub(k_max: int) -> int:
-    """Return the number of smallest sub-steps per base step, ``2**k_max``."""
+    """Return the number of smallest sub-steps per base step, ``2**k_max``.
+
+    Parameters
+    ----------
+    k_max : int
+        Finest rung in the hierarchy.
+
+    Returns
+    -------
+    int
+        Number of sub-steps, ``2**k_max``.
+    """
     return 1 << int(k_max)
 
 
 def is_sync_boundary(s: int, k_max: int) -> bool:
-    """Return whether boundary ``s`` is synchronized across every rung."""
+    """Return whether boundary ``s`` is synchronized across every rung.
+
+    The two ends of a base step, ``s = 0`` and ``s = 2**k_max``, are the only
+    boundaries where every level is kicked together.
+
+    Parameters
+    ----------
+    s : int
+        Sub-step boundary index, ``0 .. 2**k_max``.
+    k_max : int
+        Finest rung in the hierarchy.
+
+    Returns
+    -------
+    bool
+        ``True`` at a synchronized end of the base step.
+    """
     return int(s) == 0 or int(s) == (1 << int(k_max))
 
 
 def active_level_floor(s: int, k_max: int) -> int:
-    """Return the smallest level kicked at boundary ``s``."""
+    """Return the smallest level kicked at boundary ``s``.
+
+    Levels at or above the floor are active; coarser ones are not due a kick
+    yet. The floor follows the trailing-zero count of ``s``, which is the usual
+    block-step identity: the more factors of two divide the boundary index, the
+    coarser the levels that reach it.
+
+    Parameters
+    ----------
+    s : int
+        Sub-step boundary index, ``0 .. 2**k_max``.
+    k_max : int
+        Finest rung in the hierarchy.
+
+    Returns
+    -------
+    int
+        Smallest active level, ``0`` at a synchronized boundary.
+    """
     s, k_max = int(s), int(k_max)
     if is_sync_boundary(s, k_max):
         return 0
@@ -531,6 +785,25 @@ def level_weights_from_floor(
     callers keep bit-identical weights (the traced form evaluates the product in
     ``dtype`` where the Python form evaluates it in double and then casts, which can
     differ by an ulp in float32).
+
+    Parameters
+    ----------
+    active_floor : int
+        Smallest level to kick; may be a tracer.
+    k_max : int
+        Finest rung in the hierarchy. Always static -- it sets the output shape.
+    dt_max : float
+        Base-step size, the time step of level ``0``. May be a tracer.
+    half : float
+        Overall scale, ``0.5`` at a synchronized boundary and ``1.0`` inside.
+        May be a tracer. Default ``1.0``.
+    dtype : Any
+        Output dtype. Default ``jnp.float64``.
+
+    Returns
+    -------
+    Array
+        ``(k_max + 1,)`` kick weights, zero below ``active_floor``.
     """
     k_max = int(k_max)
     if all(
@@ -571,6 +844,20 @@ def boundary_weight_table(
 
     The schedule is data-independent, so the table is a compile-time constant; it
     is ``(2**k_max + 1) x (k_max + 1)`` floats, i.e. 72 values at ``k_max = 3``.
+
+    Parameters
+    ----------
+    k_max : int
+        Finest rung in the hierarchy. Static -- it sets the table shape.
+    dt_max : Any
+        Base-step size, the time step of level ``0``. May be a tracer.
+    dtype : Any
+        Output dtype. Default ``jnp.float64``.
+
+    Returns
+    -------
+    Array
+        ``(2**k_max + 1, k_max + 1)`` table, row ``s`` being boundary ``s``.
     """
     return jnp.stack(
         [
@@ -589,6 +876,22 @@ def boundary_level_weights(
     inside. Feeding this straight into the kernels' ``level_weights`` is the
     fused-boundary primitive: one traversal per boundary instead of one per
     active level.
+
+    Parameters
+    ----------
+    s : int
+        Sub-step boundary index, ``0 .. 2**k_max``.
+    k_max : int
+        Finest rung in the hierarchy.
+    dt_max : float
+        Base-step size, the time step of level ``0``.
+    dtype : Any
+        Output dtype. Default ``jnp.float64``.
+
+    Returns
+    -------
+    Array
+        ``(k_max + 1,)`` kick weights, zero on the levels this boundary skips.
     """
     return level_weights_from_floor(
         active_level_floor(s, k_max),
@@ -605,6 +908,18 @@ def _cell_rungs(state: MutualFMMState, rung_sorted: Array) -> Array:
     Leaves reduce their padded block with a ``-1`` fill so empty slots cannot win
     the maximum; internal nodes then take the running maximum up the same level
     schedule the multipole sweep uses.
+
+    Parameters
+    ----------
+    state : MutualFMMState
+        Frozen state supplying the tree and its leaf blocks.
+    rung_sorted : Array
+        ``(n,)`` per-particle rung, already in Morton-sorted order.
+
+    Returns
+    -------
+    Array
+        ``(num_nodes,)`` node rung; ``-1`` for nodes holding no particles.
     """
     tree = state.tree
     valid = tree.leaf_particle_valid
@@ -627,7 +942,26 @@ def _far_pair_weights(
     rung_sorted: Optional[Array],
     level_weights: Optional[Array],
 ) -> Optional[Array]:
-    """Cell-level weights for each directed far entry (both directions equal)."""
+    """Cell-level weights for each directed far entry (both directions equal).
+
+    A far pair sits at level ``max(rung_a, rung_b)``, the level of its finer
+    endpoint, exactly as a particle pair does.
+
+    Parameters
+    ----------
+    state : MutualFMMState
+        Frozen state supplying the canonical far pair list.
+    rung_sorted : Optional[Array]
+        ``(n,)`` per-particle rung in Morton-sorted order, or ``None``.
+    level_weights : Optional[Array]
+        ``(k_max + 1,)`` kick weights, or ``None``.
+
+    Returns
+    -------
+    Optional[Array]
+        Weight per directed far entry, or ``None`` when either input is
+        ``None`` -- the unweighted full-force case.
+    """
     if rung_sorted is None or level_weights is None:
         return None
     node_rung = _cell_rungs(state, rung_sorted)
@@ -654,6 +988,28 @@ def mutual_weighted_accelerations(
     outputs are in the caller's original particle order; the Morton permutation
     is applied internally and is a frozen integer constant, so cotangents flow to
     positions and masses but never to the index arrays.
+
+    Parameters
+    ----------
+    state : MutualFMMState
+        Frozen state from :func:`build_mutual_state`.
+    positions : Array
+        ``(n, 3)`` positions in the caller's original order.
+    masses : Array
+        ``(n,)`` masses in the caller's original order.
+    rung : Optional[Array]
+        ``(n,)`` per-particle rung. Required whenever ``level_weights`` is given.
+    level_weights : Optional[Array]
+        ``(k_max + 1,)`` weight per interaction level. ``None`` weights every
+        level by one, giving the full acceleration.
+    return_parts : bool
+        Return the near/far split alongside the acceleration.
+
+    Returns
+    -------
+    Array | MutualForceResult
+        ``(n, 3)`` accelerations, or a :class:`MutualForceResult` when
+        ``return_parts`` is set. Zero-mass particles get zero acceleration.
     """
     positions = jnp.asarray(positions)
     masses = jnp.asarray(masses)
@@ -706,7 +1062,25 @@ def mutual_weighted_accelerations(
 def mutual_accelerations(
     state: MutualFMMState, positions: Array, masses: Array, **kwargs: Any
 ) -> Array | MutualForceResult:
-    """Return the full mutual FMM acceleration (all levels, unit weights)."""
+    """Return the full mutual FMM acceleration (all levels, unit weights).
+
+    Parameters
+    ----------
+    state : MutualFMMState
+        Frozen state from :func:`build_mutual_state`.
+    positions : Array
+        ``(n, 3)`` positions in the caller's original order.
+    masses : Array
+        ``(n,)`` masses in the caller's original order.
+    **kwargs : Any
+        Forwarded verbatim to :func:`mutual_weighted_accelerations`.
+
+    Returns
+    -------
+    Array | MutualForceResult
+        ``(n, 3)`` accelerations, or a :class:`MutualForceResult` if
+        ``return_parts=True`` was forwarded.
+    """
     return mutual_weighted_accelerations(state, positions, masses, **kwargs)
 
 
@@ -724,6 +1098,26 @@ def mutual_level_accelerations(
     Implements the ``MutualForceModel`` contract structurally: only interactions
     assigned to ``level`` contribute, they are applied antisymmetrically, and
     summing over ``k = 0 .. k_max`` reproduces the full acceleration.
+
+    Parameters
+    ----------
+    state : MutualFMMState
+        Frozen state from :func:`build_mutual_state`.
+    positions : Array
+        ``(n, 3)`` positions in the caller's original order.
+    masses : Array
+        ``(n,)`` masses in the caller's original order.
+    rung : Array
+        ``(n,)`` per-particle rung, in the caller's original order.
+    level : int
+        Interaction level to isolate.
+    k_max : int
+        Finest rung in the hierarchy; sets the length of the weight vector.
+
+    Returns
+    -------
+    Array
+        ``(n, 3)`` accelerations from level ``level`` alone.
     """
     weights = jnp.zeros((int(k_max) + 1,), dtype=jnp.asarray(positions).dtype)
     weights = weights.at[int(level)].set(1.0)

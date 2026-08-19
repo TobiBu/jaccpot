@@ -80,6 +80,30 @@ from .grad import (  # noqa: F401
     clear_leafpair_reverse_tier_cache,
 )
 
+__all__ = [
+    "RadixFastLanePerfCounters",
+    "build_leafpair_reverse_tiers",
+    "collect_radix_fast_lane_counters",
+    "compute_leaf_p2p_accelerations",
+    "compute_leaf_p2p_accelerations_large_n_accel_only",
+    "compute_leaf_p2p_accelerations_target_block_pairs_only",
+    "prepare_bucketed_scatter_schedules",
+    "prepare_bucketed_scatter_schedules_from_groups",
+]
+
+# RE-EXPORTS. The names below are imported for other modules to reach through
+# this one, and are unused *here*. Holding references makes that a fact the
+# interpreter can see: `pyflakes` counts them as used, so whatever it still
+# reports for this module is a real dead import rather than noise. A tuple of
+# STRINGS would not do it, and neither does `# noqa` -- pyflakes ignores noqa,
+# and isort hoists a trailing comment onto the whole import group, so a name that
+# later goes unused inside that group is never flagged. Verified, 2026-08-18.
+_REEXPORTS = (
+    _leafpair_accel_analytic_vjp,
+    _pair_accel_cvjp,
+    _pair_accel_masked_accels,
+)
+
 _LARGE_N_NEARFIELD_DIAG_MODES = frozenset(("full", "self_only", "pairs_only", "zero"))
 
 
@@ -98,7 +122,29 @@ _env_int = env_int
 
 @dataclass(frozen=True)
 class RadixFastLanePerfCounters:
-    """Static-shape payload counters for radix fast-lane nearfield diagnostics."""
+    """Static-shape payload counters for radix fast-lane nearfield diagnostics.
+
+    Derived from the payload's *shapes*, not from a run: every field counts the
+    padded slot capacity, so masked-off slots are included. That is the point --
+    these are what the lane will move regardless of occupancy -- but it means a
+    sparsely occupied payload reports the same traffic as a full one, and none of
+    these numbers is a measurement.
+
+    Attributes
+    ----------
+    gather_bytes : int
+        Bytes read gathering target and source positions and masses.
+    scatter_bytes : int
+        Bytes written scattering accelerations back to particle order.
+    scatter_ops : int
+        Number of scattered target slots, i.e. ``scatter_bytes`` before the
+        per-element width is applied.
+    target_batches : int
+        Target-leaf batches the lane will scan, ``ceil`` of the leaf count over
+        the payload's ``batch_tile_t``.
+    source_slot_tiles : int
+        Source-slot tiles per target batch, ``ceil`` over ``batch_tile_s``.
+    """
 
     gather_bytes: int
     scatter_bytes: int
@@ -114,7 +160,36 @@ def collect_radix_fast_lane_counters(
     masses_dtype: jnp.dtype,
     accelerations_dtype: Optional[jnp.dtype] = None,
 ) -> RadixFastLanePerfCounters:
-    """Estimate deterministic payload gather/scatter costs for one evaluation."""
+    """Estimate deterministic payload gather/scatter costs for one evaluation.
+
+    Host-side and shape-only: it calls ``int()`` on array sizes, so it must not be
+    used on tracers and cannot be called from inside a jitted function. The
+    payload arrays themselves are never read, only measured.
+
+    Parameters
+    ----------
+    payload : Any
+        A ``RadixFastNearfieldPayload``. Untyped to keep the runtime layer out of
+        this module's imports. ``target_particle_ids`` and
+        ``source_particle_ids`` are required; ``batch_tile_t`` and
+        ``batch_tile_s`` are read through ``getattr`` defaulting to 1, so a
+        payload lacking them yields one batch per leaf rather than an error.
+    positions_dtype : jnp.dtype
+        Dtype the positions will be gathered in; both target and source sides are
+        assumed to share it.
+    masses_dtype : jnp.dtype
+        Dtype the masses will be gathered in.
+    accelerations_dtype : Optional[jnp.dtype]
+        Dtype accelerations will be scattered in. ``None`` (the default) reuses
+        ``positions_dtype``, which is the usual case; pass it explicitly for a
+        mixed-precision lane.
+
+    Returns
+    -------
+    RadixFastLanePerfCounters
+        Padded-capacity byte and tile counts. See the class docstring for why
+        these are an upper bound rather than an observation.
+    """
 
     if accelerations_dtype is None:
         accelerations_dtype = positions_dtype

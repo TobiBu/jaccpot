@@ -1413,7 +1413,9 @@ def test_the_device_walk_reproduces_the_host_traversal_pair_for_pair(n, theta, l
     host_far = set(
         map(
             tuple,
-            np.stack([np.asarray(topology.far_a), np.asarray(topology.far_b)], 1).tolist(),
+            np.stack(
+                [np.asarray(topology.far_a), np.asarray(topology.far_b)], 1
+            ).tolist(),
         )
     )
     host_near = set(
@@ -1512,9 +1514,7 @@ def test_topology_build_and_force_are_one_jitted_program():
     rel = float(jnp.linalg.norm(out - ref) / jnp.linalg.norm(ref))
     assert rel < 1.0e-14, f"jitted device build differs at {rel:.3e}"
 
-    grad = jax.grad(
-        lambda p: jnp.sum(build_and_force(p, ms, p, masses) ** 2)
-    )(xs)
+    grad = jax.grad(lambda p: jnp.sum(build_and_force(p, ms, p, masses) ** 2))(xs)
     assert bool(jnp.all(jnp.isfinite(grad)))
     assert float(jnp.linalg.norm(grad)) > 0.0
 
@@ -1533,13 +1533,21 @@ def test_the_device_backend_matches_the_exact_sum_as_well_as_the_host_one():
     n, theta, leaf = 4096, 0.7, 32
     positions, masses = _system(n, seed=21)
     host = BlockStepFMM(
-        softening=SOFTENING, k_max=2, theta=theta, max_order=4,
-        leaf_size=leaf, static_shapes=True,
+        softening=SOFTENING,
+        k_max=2,
+        theta=theta,
+        max_order=4,
+        leaf_size=leaf,
+        static_shapes=True,
     )
     host.prepare(positions, masses)
     device = BlockStepFMM(
-        softening=SOFTENING, k_max=2, theta=theta, max_order=4,
-        leaf_size=leaf, topology_backend="device",
+        softening=SOFTENING,
+        k_max=2,
+        theta=theta,
+        max_order=4,
+        leaf_size=leaf,
+        topology_backend="device",
     )
     device.prepare(positions, masses)
     assert not bool(device.state.topology_overflow)
@@ -1577,8 +1585,13 @@ def test_an_undersized_capacity_profile_is_raised_not_truncated():
     positions, masses = _system(n, seed=22)
     starved = MutualCapacities(far=64, near=256, depth=2, width=4)
     model = BlockStepFMM(
-        softening=SOFTENING, k_max=1, theta=theta, max_order=4,
-        leaf_size=leaf, topology_backend="device", caps=starved,
+        softening=SOFTENING,
+        k_max=1,
+        theta=theta,
+        max_order=4,
+        leaf_size=leaf,
+        topology_backend="device",
+        caps=starved,
     )
     with pytest.raises(RuntimeError, match="overflowed its capacity profile"):
         model.prepare(positions, masses)
@@ -1595,12 +1608,14 @@ def test_a_rollout_with_the_tree_rebuilt_inside_the_scan_is_one_program():
     """
     n, theta, leaf, k_max = 2048, 0.7, 32, 1
     positions, masses = _system(n, seed=23)
-    velocities = jnp.asarray(
-        np.random.default_rng(24).normal(scale=0.15, size=(n, 3))
-    )
+    velocities = jnp.asarray(np.random.default_rng(24).normal(scale=0.15, size=(n, 3)))
     model = BlockStepFMM(
-        softening=SOFTENING, k_max=k_max, theta=theta, max_order=4,
-        leaf_size=leaf, topology_backend="device",
+        softening=SOFTENING,
+        k_max=k_max,
+        theta=theta,
+        max_order=4,
+        leaf_size=leaf,
+        topology_backend="device",
     )
     model.freeze_template(positions, masses)
 
@@ -1613,8 +1628,11 @@ def test_a_rollout_with_the_tree_rebuilt_inside_the_scan_is_one_program():
             state = model.rebuild_state(pos, masses)
             for _ in range(2):
                 vel = vel + mutual_weighted_accelerations(
-                    state, pos, masses,
-                    rung=jnp.zeros((n,), jnp.int32), level_weights=weights,
+                    state,
+                    pos,
+                    masses,
+                    rung=jnp.zeros((n,), jnp.int32),
+                    level_weights=weights,
                 )
                 pos = pos + 1.0e-3 * vel
             return (pos, vel), state.num_far_pairs

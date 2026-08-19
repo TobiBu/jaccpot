@@ -287,7 +287,45 @@ def _compute_leaf_p2p_prepared_large_n_self_only_with_potential_impl(
     G: Union[float, Array],
     softening_sq: Array,
 ) -> Tuple[Array, Array]:
-    """Self-leaf accel + potential portion of the large-N kernel."""
+    """Self-leaf accel + potential portion of the large-N kernel.
+
+    The potential-carrying twin of
+    :func:`~jaccpot.nearfield._large_n_blocks._compute_leaf_p2p_prepared_large_n_self_only_impl`,
+    and its accelerations are the same numbers -- the extra return is an addition,
+    not a different scheme. Intra-leaf interactions only; the cross-leaf pair
+    blocks are added by the caller.
+
+    Unlike its accel-only twin this is **not** wrapped in :func:`jax.jit` at the
+    definition site; it is jitted by whatever encloses it.
+
+    Parameters
+    ----------
+    positions : Array
+        ``[N, 3]`` particle positions in tree order. Read for shape and dtype
+        only -- the values used come in leaf-major through ``leaf_positions``.
+    leaf_positions : Array
+        ``[num_leaves, W, 3]`` padded leaf-major positions.
+    leaf_masses : Array
+        ``[num_leaves, W]`` padded leaf-major masses.
+    leaf_mask : Array
+        ``[num_leaves, W]`` occupancy; masked slots contribute exactly zero to
+        both outputs and are skipped by both scatters.
+    leaf_particle_idx : Array
+        ``[num_leaves, W]`` particle index behind each slot, clipped so a masked
+        slot cannot address out of bounds.
+    G : Union[float, Array]
+        Gravitational constant, cast to ``positions.dtype`` internally.
+    softening_sq : Array
+        Plummer softening **squared**, not the softening length.
+
+    Returns
+    -------
+    Array
+        ``[N, 3]`` accelerations in particle order.
+    Array
+        ``[N]`` potentials in particle order. Self-leaf contributions only, so
+        this is a partial sum and is not the near-field potential by itself.
+    """
     dtype = positions.dtype
     g_const = jnp.asarray(G, dtype=dtype)
     accelerations = jnp.zeros_like(positions)
@@ -1268,7 +1306,47 @@ def compute_leaf_p2p_accelerations_radix_payload_pairs_only(
     softening: float = 0.0,
     use_pallas: bool = False,
 ) -> Array:
-    """Evaluate payload pair contributions without intra-leaf self work."""
+    """Evaluate payload pair contributions without intra-leaf self work.
+
+    Cross-leaf pair blocks only. The intra-leaf self term is deliberately absent
+    -- callers that want the whole near field add
+    :func:`_compute_leaf_p2p_prepared_large_n_self_only_impl`'s result to this
+    one. Using this alone is the way to get a silently incomplete force.
+
+    Keyword-only throughout, so the argument order here is not a contract.
+
+    Parameters
+    ----------
+    positions_sorted : Array
+        ``[N, 3]`` positions in tree order. Also fixes the output shape.
+    masses_sorted : Array
+        ``[N]`` masses under the same permutation.
+    payload : Any
+        A ``RadixFastNearfieldPayload``. Deliberately untyped, to keep this
+        module free of a runtime import of the runtime layer. The ``batch_tile_s``
+        / ``batch_tile_t`` tiles and the four particle-id/mask arrays are
+        required; ``source_slot_scan_unroll`` and ``target_batch_scan_unroll``
+        are read through ``getattr`` with a default of 1, so an older payload
+        without them still works.
+    G : Union[float, Array]
+        Gravitational constant; defaults to 1.
+    softening : float
+        Plummer softening **length**; defaults to 0. Squared here, which is the
+        opposite convention from the ``softening_sq`` arguments elsewhere in this
+        module -- passing an already-squared value softens by its square.
+    use_pallas : bool
+        Request the fused Pallas lane; defaults to ``False``. A request, not a
+        guarantee: it falls through to the scan lane unless
+        ``pallas_nearfield_fused_supported()`` or
+        ``JACCPOT_NEARFIELD_PALLAS_INTERPRET`` says otherwise. The two lanes are
+        meant to produce the same numbers.
+
+    Returns
+    -------
+    Array
+        ``[N, 3]`` accelerations in particle order, all zero when the payload
+        carries no target or source particles.
+    """
     positions = jnp.asarray(positions_sorted)
     masses = jnp.asarray(masses_sorted)
 

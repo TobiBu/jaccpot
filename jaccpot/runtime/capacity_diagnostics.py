@@ -52,6 +52,30 @@ def capacity_report(
     Every entry is closed-form in the arguments -- no device work -- so this is
     safe to call from an exception handler on a device that has just failed to
     allocate.
+
+    Parameters
+    ----------
+    num_particles : int
+        Particle count.
+    leaf_size : int
+        Leaf occupancy target.
+    max_order : int
+        Expansion order.
+    working_dtype : Any
+        Working dtype, for the per-element size.
+    preset : Optional[str]
+        Preset name, when one was used.
+    traversal_config : Any
+        Traversal capacities, which size the pair buffers.
+    nearfield_mode : Optional[str]
+        Near-field mode, which decides whether the bucketed buffers exist.
+
+    Returns
+    -------
+    list[tuple[str, float, str]]
+        ``(buffer name, GiB, sizing knob)`` per buffer, largest first. Estimates,
+        not measurements -- they say what the configuration ASKS for, which is the
+        useful thing when the allocation has already failed.
     """
 
     n = max(1, int(num_particles))
@@ -113,7 +137,15 @@ def capacity_report(
 
 
 def _device_memory_gib() -> Optional[tuple[float, float]]:
-    """``(bytes_in_use, bytes_limit)`` in GiB for the default device, if exposed."""
+    """``(bytes_in_use, bytes_limit)`` in GiB for the default device, if exposed.
+
+    Returns
+    -------
+    Optional[tuple[float, float]]
+        ``(in_use, limit)`` in GiB, or ``None`` when the backend does not expose
+        memory stats -- CPU, for instance. Callers must treat ``None`` as "unknown",
+        not as zero.
+    """
 
     try:
         import jax
@@ -146,6 +178,36 @@ def reraise_with_capacity_report(
     Only for allocation and capacity failures -- the caller checks. Chains the
     original with ``from exc`` so the XLA message and its allocation size stay
     visible.
+
+    Parameters
+    ----------
+    exc : BaseException
+        The original failure. Chained with ``from exc``.
+    num_particles : int
+        Particle count.
+    leaf_size : int
+        Leaf occupancy target.
+    max_order : int
+        Expansion order.
+    working_dtype : Any
+        Working dtype, for the per-element size.
+    preset : Optional[str]
+        Preset name, when one was used.
+    traversal_config : Any
+        Traversal capacities, which size the pair buffers.
+    nearfield_mode : Optional[str]
+        Near-field mode, which decides whether the bucketed buffers exist.
+
+    Returns
+    -------
+    None
+        Never returns normally.
+
+    Raises
+    ------
+    RuntimeError
+        Always -- carrying the buffer table and a suggested configuration, with
+        ``exc`` chained so the XLA message and its allocation size stay visible.
     """
 
     entries = capacity_report(
@@ -181,7 +243,21 @@ def reraise_with_capacity_report(
 
 
 def is_capacity_failure(exc: BaseException) -> bool:
-    """Whether ``exc`` is an allocation or a traversal-capacity overflow."""
+    """Whether ``exc`` is an allocation or a traversal-capacity overflow.
+    Matched on message text, not exception type: XLA reports OOM as a generic
+    error, so there is no class to test. That makes this a heuristic -- a false
+    negative just means the caller re-raises without the buffer table.
+
+    Parameters
+    ----------
+    exc : BaseException
+        Exception to classify.
+
+    Returns
+    -------
+    bool
+        ``True`` when the message looks like an allocation or capacity failure.
+    """
 
     text = str(exc).lower()
     return any(

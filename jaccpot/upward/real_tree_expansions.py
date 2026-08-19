@@ -44,7 +44,25 @@ _DEFAULT_LEAF_BATCH_SIZE = 2048
 
 
 class RealNodeMultipoleData(NamedTuple):
-    """Packed real multipole coefficients and their metadata."""
+    """Packed real multipole coefficients and their metadata.
+
+    Attributes
+    ----------
+    order : int
+        Expansion order ``p``. A Python ``int``, static under ``jit`` -- it is
+        what ``packed``'s trailing width is derived from.
+    centers : Array
+        ``[num_nodes, 3]`` expansion centres. These are **centres of mass**, from
+        ``compute_tree_mass_moments(...).center_of_mass``, not geometric box
+        centres; an M2L partner built against box centres will not translate
+        correctly against these.
+    packed : Array
+        ``[num_nodes, (p+1)^2]`` real solid-harmonic coefficients, in the real
+        basis rather than the complex one -- these are not interchangeable with
+        :class:`~jaccpot.upward.solidfmm_complex_tree_expansions.SolidFMMComplexNodeMultipoleData.packed`
+        despite the matching field name. Rows are indexed by global node id, so
+        internal and leaf nodes share one array.
+    """
 
     order: int
     centers: Array  # (num_nodes, 3)
@@ -52,7 +70,18 @@ class RealNodeMultipoleData(NamedTuple):
 
 
 class RealTreeUpwardData(NamedTuple):
-    """Container mirroring the complex sweep's ``.multipoles`` access path."""
+    """Container mirroring the complex sweep's ``.multipoles`` access path.
+
+    The mirroring is of that one attribute only. The complex counterpart
+    :class:`~jaccpot.upward.solidfmm_complex_tree_expansions.SolidFMMComplexTreeUpwardData`
+    also carries ``geometry`` and ``mass_moments``; code written against it and
+    handed one of these will fail on those, not on ``multipoles``.
+
+    Attributes
+    ----------
+    multipoles : RealNodeMultipoleData
+        The packed real-basis coefficients and their centres.
+    """
 
     multipoles: RealNodeMultipoleData
 
@@ -361,6 +390,46 @@ def prepare_real_upward_sweep(
     just slower), and it is **bit-identical** to the padded result: asserted for
     this sweep by
     ``tests/unit/core/test_real_upward_sweep.py::test_real_static_num_levels_bit_identical_to_padded``.
+
+    Parameters
+    ----------
+    tree : Tree
+        A yggdrax tree artifact. Read for ``node_ranges``, ``parent``,
+        ``left_child``/``right_child``, and the level tables; its topology is
+        treated as fixed, so the shapes it implies must not change between
+        traced calls.
+    positions_sorted : Array
+        ``[num_particles, 3]`` positions **already permuted into tree order**.
+        Passing unsorted positions is silent: ``node_ranges`` slices them by
+        position, so the sweep will happily build multipoles for the wrong
+        particles. Its dtype sets the working dtype of the centres.
+    masses_sorted : Array
+        ``[num_particles]`` masses under the same permutation as
+        ``positions_sorted``.
+    max_order : int
+        Expansion order ``p``; defaults to 2. Static under ``jit``.
+    max_leaf_size : int
+        Maximum particles per leaf. Keyword-only and **required** -- see above.
+        It must be an upper bound on the true leaf occupancy; too small silently
+        drops the particles past it from their leaf's P2M.
+    leaf_batch_size : Optional[int]
+        Leaves per P2M batch. ``None`` (the default) uses
+        ``min(num_leaves, 2048)``. Tuning knob only -- it does not change the
+        result.
+    static_num_levels : Optional[int]
+        Concrete tree depth, or ``None`` (the default) to derive it from the
+        padded ``level_offsets`` shape. See above. Clamped to at least 1.
+
+    Returns
+    -------
+    RealTreeUpwardData
+        Multipoles for every node, leaves and internal alike, in the real basis.
+
+    Raises
+    ------
+    ValueError
+        If ``max_order`` is negative. A host-side check on a static value, so it
+        fires at trace time rather than during execution.
     """
 
     p = int(max_order)

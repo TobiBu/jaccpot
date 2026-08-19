@@ -67,6 +67,27 @@ def _check_float_id_range(num_particles: int, dtype: Any, *, what: str) -> None:
     cotangents rather than plain zeros. The differentiable lanes therefore encode
     ids as floats (reconstructed with ``round().astype``), which is exact only
     below the mantissa bound.
+
+    Parameters
+    ----------
+    num_particles : int
+        Largest id that will be encoded.
+    dtype : Any
+        Float dtype the ids will be stored in.
+    what : str
+        Caller name, used to prefix the error message.
+
+    Returns
+    -------
+    None
+        Returns normally when the encoding is exact.
+
+    Raises
+    ------
+    ValueError
+        If ``dtype`` is float32 and ``num_particles`` exceeds the float32 exact
+        integer limit. Refused rather than rounded, because a silently rounded id
+        aliases one particle onto another.
     """
     if (
         jnp.dtype(dtype) == jnp.float32
@@ -83,7 +104,13 @@ def _check_float_id_range(num_particles: int, dtype: Any, *, what: str) -> None:
 
 
 def _grad_rev_tier_max() -> int:
-    """Maximum occupancy tiers for the analytic reverse (``JACCPOT_GRAD_REV_TIERS``)."""
+    """Maximum occupancy tiers for the analytic reverse (``JACCPOT_GRAD_REV_TIERS``).
+
+    Returns
+    -------
+    int
+        Tier cap, default ``4``.
+    """
     return env_int("JACCPOT_GRAD_REV_TIERS", 4)
 
 
@@ -91,6 +118,11 @@ def _grad_rev_tier_min_gain() -> float:
     """Minimum predicted slot-visit reduction before tiering pays for itself.
 
     See :func:`build_leafpair_reverse_tiers` for the measurements behind 3.0.
+
+    Returns
+    -------
+    float
+        Minimum gain factor, default ``3.0``.
     """
     return env_float("JACCPOT_GRAD_REV_TIER_MIN_GAIN", 3.0)
 
@@ -125,6 +157,31 @@ def build_leafpair_reverse_tiers(
     keeps the single-pass path byte-identical. Leaf ids come back as plain int
     tuples so the result is hashable -- it rides through the ``custom_vjp`` in
     ``nondiff_argnums``, which JAX requires to be hashable and comparable.
+
+    Parameters
+    ----------
+    source_valid : Any
+        Padded per-slot validity mask of the frozen payload. Pulled to the host
+        and histogrammed, so it must be concrete.
+    slot_tile : int
+        Slot-tile width the reverse pass will scan with; tier widths are rounded
+        against it.
+    max_tiers : Optional[int]
+        Tier cap; ``None`` takes :func:`_grad_rev_tier_max`.
+    min_gain : Optional[float]
+        Minimum predicted slot-visit reduction before tiering is worth it;
+        ``None`` takes :func:`_grad_rev_tier_min_gain`.
+
+    Returns
+    -------
+    Optional[Tuple[Tuple[Tuple[int, ...], int], ...]]
+        One ``(leaf_ids, width)`` entry per tier, or ``None`` when tiering cannot
+        pay -- which keeps the single-pass path byte-identical.
+
+    Raises
+    ------
+    ValueError
+        If ``slot_tile`` is not positive.
     """
     valid = np.asarray(jax.device_get(source_valid))
     num_leaves = int(valid.shape[0])
@@ -195,7 +252,13 @@ _tier_cache: "OrderedDict[tuple[Any, ...], tuple[Any, Any]]" = OrderedDict()
 
 
 def clear_leafpair_reverse_tier_cache() -> None:
-    """Drop every memoized reverse-tier plan (tests / memory pressure)."""
+    """Drop every memoized reverse-tier plan (tests / memory pressure).
+
+    Returns
+    -------
+    None
+        Clears the module-level cache in place.
+    """
     _tier_cache.clear()
 
 
@@ -224,6 +287,27 @@ def _leafpair_reverse_tiers_cached(
     the payload itself is memoized); ``source_valid`` is what actually gets
     histogrammed. They are the same data -- passing both lets the reduction read
     the host-side original when there is one, instead of a fresh device copy.
+
+    Parameters
+    ----------
+    cache_key_mask : Any
+        The payload's own mask attribute, used only for its ``id()`` as the cache
+        key. The entry keeps a strong reference to it, so a live entry pins its
+        key and no freed object can have its id reused by a different array.
+    source_valid : Any
+        The same data, histogrammed by the builder.
+    slot_tile : int
+        Slot-tile width; part of the key.
+    max_tiers : Optional[int]
+        Tier cap; resolved before keying, so ``None`` and the resolved default
+        share one entry.
+    min_gain : Optional[float]
+        Minimum gain factor; resolved before keying, as above.
+
+    Returns
+    -------
+    Optional[Tuple[Tuple[Tuple[int, ...], int], ...]]
+        The memoized tier plan, or ``None`` when tiering cannot pay.
     """
     resolved_max_tiers = _grad_rev_tier_max() if max_tiers is None else int(max_tiers)
     resolved_min_gain = (
@@ -405,8 +489,27 @@ def _leafpair_accel_analytic_vjp(
     leaf_offsets = jnp.arange(batch, dtype=INDEX_DTYPE)
     slot_offsets = jnp.arange(tile, dtype=INDEX_DTYPE)
 
-    def _pass(carry, tier_leaves, tier_slots):
-        """One occupancy tier: ``tier_leaves`` targets against ``tier_slots`` slots."""
+    def _pass(
+        carry: Tuple[Array, Array], tier_leaves: Array, tier_slots: int
+    ) -> Tuple[Array, Array]:
+        """One occupancy tier: ``tier_leaves`` targets against ``tier_slots`` slots.
+
+        Parameters
+        ----------
+        carry : Tuple[Array, Array]
+            ``(pos_bar, mass_bar)`` accumulators threaded across tiers.
+        tier_leaves : Array
+            Global leaf ids in this tier, in Morton order. Ids are never
+            renumbered -- only the visiting order changes.
+        tier_slots : int
+            This tier's slot width. Static, so the pass compiles to a
+            right-sized ``lax.scan``.
+
+        Returns
+        -------
+        Tuple[Array, Array]
+            The updated ``(pos_bar, mass_bar)`` accumulators.
+        """
         tier_count = int(tier_leaves.shape[0])
         leaf_starts = jnp.arange(0, tier_count, batch, dtype=INDEX_DTYPE)
         slot_starts = jnp.arange(0, tier_slots, tile, dtype=INDEX_DTYPE)
@@ -439,7 +542,9 @@ def _leafpair_accel_analytic_vjp(
                 valid_slot = valid_slot & tgt_in_range[:, None]
                 safe_src = jnp.where(valid_slot, src_leaf, 0)
 
-                def _apply(acc_in):
+                def _apply(
+                    acc_in: Tuple[Array, Array, Array],
+                ) -> Tuple[Array, Array, Array]:
                     pos_in, mass_in, tgt_in = acc_in
                     src_pos = leaf_positions[safe_src]  # (B, T, W, 3)
                     src_mass = leaf_masses[safe_src]  # (B, T, W)
@@ -538,7 +643,30 @@ def _pair_accel_masked_accels(
     G: Array,
 ) -> Array:
     """Accel-only batched pair contributions (matches the accel output of
-    :func:`_pair_contributions_batched`)."""
+    :func:`_pair_contributions_batched`).
+
+    Parameters
+    ----------
+    target_positions : Array
+        ``(B, Wt, 3)`` target positions.
+    source_positions : Array
+        ``(B, Ws, 3)`` source positions.
+    source_masses : Array
+        ``(B, Ws)`` source masses.
+    target_mask : Array
+        ``(B, Wt)`` boolean target validity.
+    source_mask : Array
+        ``(B, Ws)`` boolean source validity.
+    softening_sq : Union[float, Array]
+        Squared Plummer softening length.
+    G : Array
+        Gravitational constant.
+
+    Returns
+    -------
+    Array
+        ``(B, Wt, 3)`` accelerations, zero on masked targets.
+    """
     diff = target_positions[:, :, None, :] - source_positions[:, None, :, :]
     dist_sq = jnp.sum(diff * diff, axis=-1) + softening_sq
     pair_mask = target_mask[:, :, None] & source_mask[:, None, :]
@@ -564,6 +692,25 @@ def _pair_accel_pair_terms(
     ``(B, Wt, Ws)``-shaped pair intermediates instead of carrying them in the
     ``custom_vjp`` residual, without the forward and reverse expressions drifting
     apart. See :func:`_pair_accel_cvjp_fwd` for why that matters.
+
+    Parameters
+    ----------
+    target_positions : Array
+        ``(B, Wt, 3)`` target positions.
+    source_positions : Array
+        ``(B, Ws, 3)`` source positions.
+    target_mask : Array
+        ``(B, Wt)`` boolean target validity.
+    source_mask : Array
+        ``(B, Ws)`` boolean source validity.
+    softening_sq : Union[float, Array]
+        Squared Plummer softening length.
+
+    Returns
+    -------
+    Tuple[Array, Array, Array]
+        ``(diff, inv_dist3, inv_dist5)``, shapes ``(B, Wt, Ws, 3)`` and
+        ``(B, Wt, Ws)`` twice. Masked pairs are exactly zero.
     """
     diff = target_positions[:, :, None, :] - source_positions[:, None, :, :]
     dist_sq = jnp.sum(diff * diff, axis=-1) + softening_sq
@@ -596,6 +743,28 @@ def _pair_accel_cvjp(
     (``Jᵀc = Jc``) in one extra pair pass -- exactly the reverse rule a future
     fused-Pallas near-field ``custom_vjp`` reuses. Verified bit-for-bit against
     autodiff in ``tests/unit/test_custom_vjp_parity.py``.
+
+    Parameters
+    ----------
+    target_positions : Array
+        ``(B, Wt, 3)`` target positions.
+    source_positions : Array
+        ``(B, Ws, 3)`` source positions.
+    source_masses : Array
+        ``(B, Ws)`` source masses.
+    target_mask_f : Array
+        ``(B, Wt)`` target validity as 0/1 floats, thresholded at ``0.5``.
+    source_mask_f : Array
+        ``(B, Ws)`` source validity, same encoding.
+    softening_sq : Array
+        Squared Plummer softening length.
+    G : Array
+        Gravitational constant.
+
+    Returns
+    -------
+    Array
+        ``(B, Wt, 3)`` accelerations, zero on masked targets.
     """
     target_mask = target_mask_f > 0.5
     source_mask = source_mask_f > 0.5
@@ -611,14 +780,14 @@ def _pair_accel_cvjp(
 
 
 def _pair_accel_cvjp_fwd(
-    target_positions,
-    source_positions,
-    source_masses,
-    target_mask_f,
-    source_mask_f,
-    softening_sq,
-    G,
-):
+    target_positions: Array,
+    source_positions: Array,
+    source_masses: Array,
+    target_mask_f: Array,
+    source_mask_f: Array,
+    softening_sq: Array,
+    G: Array,
+) -> Tuple[Array, Tuple[Array, ...]]:
     # The residual carries only the O(B*W) INPUTS; the O(B*Wt*Ws) pair
     # intermediates are rematerialized in the reverse pass. Storing
     # (diff, inv_dist3, inv_dist5) instead cost 5 doubles per particle PAIR, and
@@ -651,7 +820,9 @@ def _pair_accel_cvjp_fwd(
     return accels, residual
 
 
-def _pair_accel_cvjp_bwd(residual, cotangent):
+def _pair_accel_cvjp_bwd(
+    residual: Tuple[Array, ...], cotangent: Array
+) -> Tuple[Array, ...]:
     (
         target_positions,
         source_positions,

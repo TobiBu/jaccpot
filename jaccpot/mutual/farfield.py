@@ -108,6 +108,25 @@ def _m2l_lane(use_pallas: bool, interpret: bool) -> str:
     Both Pallas lanes stay wired, differentiable and covered by the interpret
     tests; set ``JACCPOT_MUTUAL_M2L=fused`` (or ``zcore``) to force one on
     hardware and reproduce the A/B.
+
+    Parameters
+    ----------
+    use_pallas : bool
+        Whether the caller asked for a Pallas lane at all. ``False`` short-cuts
+        to ``"jax"`` without consulting the environment.
+    interpret : bool
+        Whether the Pallas kernels would run in interpret mode.
+
+    Returns
+    -------
+    str
+        One of ``"jax"``, ``"fused"`` or ``"zcore"``.
+
+    Raises
+    ------
+    ValueError
+        If ``JACCPOT_MUTUAL_M2L`` is set to something other than ``"auto"``,
+        ``"jax"``, ``"fused"`` or ``"zcore"``.
     """
     if not use_pallas:
         return "jax"
@@ -132,7 +151,24 @@ def _m2l_lane(use_pallas: bool, interpret: bool) -> str:
 
 
 def _fused_m2l_chunk(order: int, itemsize: int) -> int:
-    """Pairs per scan step that keep the fused lane's block tensors in budget."""
+    """Pairs per scan step that keep the fused lane's block tensors in budget.
+
+    The fused kernel takes its rotations as explicit ``(pairs, Bp, mdp, mdp)``
+    operands, so its per-pair cost is set by the block tables, not by the
+    coefficient vectors the three-stage sandwich moves.
+
+    Parameters
+    ----------
+    order : int
+        Expansion order; fixes the block-table shapes.
+    itemsize : int
+        Bytes per element of the working dtype.
+
+    Returns
+    -------
+    int
+        Chunk size, at least ``1``.
+    """
     from jaccpot.pallas.m2l_real_fused import m2l_real_fused_tables
 
     tables = m2l_real_fused_tables(int(order))
@@ -150,11 +186,38 @@ class MutualTreeArrays(NamedTuple):
     structure and forces a retrace. Padded to capacities, the whole topology is
     keyed on capacities alone and one compiled program serves every rebuild.
 
-    ``level_nodes[d]`` holds the nodes at depth ``d + 1`` and
-    ``level_parents[d]`` their parents, shallowest first. Slots where
-    ``level_valid`` is false are padding: they hold index 0 and every consumer
-    masks their contribution to the identity, so a padded slot is a no-op rather
-    than a write to node 0.
+    ``far_source`` and ``far_target`` carry each canonical pair **twice**, once
+    per direction, so one kernel invocation produces both halves under a single
+    rounding regime -- the structural reason momentum cancels exactly.
+
+    Attributes
+    ----------
+    num_nodes : int
+        Total node count; sets the shape of every per-node accumulator.
+    order : int
+        Expansion order.
+    leaf_nodes : Array
+        Node index of each leaf, in leaf order.
+    leaf_particles : Array
+        ``(num_leaves, leaf_capacity)`` particle indices, Morton-sorted order.
+    leaf_particle_valid : Array
+        Boolean mask of the same shape marking occupied slots in the padding.
+    level_nodes : Array
+        ``(depth_cap, width_cap)`` node indices, row ``d`` holding the nodes at
+        depth ``d + 1``, shallowest first.
+    level_parents : Array
+        Parent of each entry of ``level_nodes``, same shape and order.
+    level_valid : Array
+        Boolean mask over the level schedule. Padded slots hold index 0 and every
+        consumer masks their contribution to the identity, so a padded slot is a
+        no-op rather than a write to node 0 -- and a whole padded *row*, i.e. a
+        level beyond the real tree depth, is a no-op iteration.
+    far_source : Array
+        Source node of each directed far entry.
+    far_target : Array
+        Target node of each directed far entry.
+    far_valid : Array
+        Boolean mask over the directed far entries.
     """
 
     num_nodes: int
@@ -183,7 +246,8 @@ class MutualTreeArrays(NamedTuple):
 # nothing -- it only means two runs at different N may not share a compile.
 CAPACITY_LADDER: Tuple[int, ...] = tuple(
     sorted(
-        {m * (1 << k) for k in range(3, 26) for m in (2, 3)} | {1 << k for k in range(3, 27)}
+        {m * (1 << k) for k in range(3, 26) for m in (2, 3)}
+        | {1 << k for k in range(3, 27)}
     )
 )
 
@@ -204,6 +268,29 @@ def snap_capacity(
     A single multiplicative factor sized for the far list (4x) was measured to
     resolve a cap of 262144 for 32830 real far pairs at N = 20 000 -- 8x the
     occupancy, and therefore 8x the M2L chunks. This form gives 49152 there.
+
+    Parameters
+    ----------
+    value : int
+        Observed occupancy to size the capacity from.
+    relative : float
+        Fractional headroom. Default ``0.10``.
+    absolute : int
+        Additive headroom, in the same units as ``value``. Default ``256``.
+    minimum : int
+        Floor on the result. Default ``8``.
+
+    Returns
+    -------
+    int
+        The smallest ladder entry at or above the padded value.
+
+    Raises
+    ------
+    ValueError
+        If the padded value exceeds the largest ladder entry. Widen
+        :data:`CAPACITY_LADDER` deliberately rather than falling back to an
+        unsnapped value.
     """
     want = max(
         int(minimum),
@@ -237,6 +324,34 @@ def dense_level_schedule(
     treats as a no-op -- so ``depth_cap`` may exceed the tree depth freely, and
     that headroom is what lets one program survive a rebuild that deepens the
     tree.
+
+    Parameters
+    ----------
+    level_nodes : Tuple[Array, ...]
+        Ragged per-level node indices, shallowest first.
+    level_parents : Tuple[Array, ...]
+        Parent of each entry of ``level_nodes``.
+    depth_cap : Optional[int]
+        Rows to emit; ``None`` sizes it from the schedule itself.
+    width_cap : Optional[int]
+        Slots per row; ``None`` sizes it from the schedule itself.
+    index_dtype : Any
+        Integer dtype of the packed index arrays.
+
+    Returns
+    -------
+    Tuple[Array, Array, Array, int, int]
+        ``(nodes, parents, valid, depth_used, width_used)``: the first three are
+        ``(depth_cap, width_cap)``, the last two report the occupancy that was
+        packed.
+
+    Raises
+    ------
+    ValueError
+        If the tree is deeper than ``depth_cap`` or a level wider than
+        ``width_cap``. Padding a level schedule too small silently drops nodes from
+        the M2M/L2L cascade, which is a force error and nothing else, so this is
+        raised rather than masked.
     """
     depths = len(level_nodes)
     widths = [int(level.shape[0]) for level in level_nodes] or [0]
@@ -264,7 +379,9 @@ def dense_level_schedule(
     )
 
 
-def _scan_levels(body, carry, tree: MutualTreeArrays, *, deepest_first: bool):
+def _scan_levels(
+    body: Any, carry: Any, tree: MutualTreeArrays, *, deepest_first: bool
+) -> Any:
     """Run ``body`` once per tree level, in cascade order.
 
     The cascades are inherently sequential -- a level must be complete before the
@@ -273,8 +390,21 @@ def _scan_levels(body, carry, tree: MutualTreeArrays, *, deepest_first: bool):
     kernels) and buys two things: the traced graph no longer grows with tree
     depth, and depth stops being part of the program's identity.
 
-    ``body(carry, nodes, parents, valid) -> carry``; ``deepest_first`` reverses
-    the scan for the upward passes.
+    Parameters
+    ----------
+    body : Any
+        ``body(carry, nodes, parents, valid) -> carry``, applied once per level.
+    carry : Any
+        Value threaded through the levels.
+    tree : MutualTreeArrays
+        Supplies the dense ``(depth_cap, width_cap)`` level schedule.
+    deepest_first : bool
+        Reverse the scan, as the upward (M2M) cascade needs.
+
+    Returns
+    -------
+    Any
+        The final carry.
     """
 
     def step(acc, level):
@@ -306,6 +436,25 @@ def _safe_translate(
     coincides with its only massive child), and the correct answer there is the
     identity, so substitute a dummy axis and select the untranslated coefficients
     back. Both branches are evaluated, which is what keeps the reverse finite.
+
+    Parameters
+    ----------
+    coeffs : Array
+        ``(pairs, sh_size(order))`` coefficients to translate.
+    deltas : Array
+        ``(pairs, 3)`` displacements, in whatever convention the caller's
+        ``translate`` expects.
+    translate : object
+        A rotate-scale translation operator, called as
+        ``translate(coeffs_row, delta_row, order=order)``.
+    order : int
+        Expansion order.
+
+    Returns
+    -------
+    Array
+        Translated coefficients, with the degenerate rows passed through
+        unchanged.
     """
     d2 = jnp.sum(deltas * deltas, axis=-1)
     # Anything at or below the operators' own squared-radius floor is degenerate
@@ -349,6 +498,24 @@ def _m2l_batch(
 
     ``interpret`` runs the Pallas kernel in interpret mode, which works on CPU and
     is how the parity tests exercise the kernel logic without a GPU.
+
+    Parameters
+    ----------
+    multipoles : Array
+        ``(pairs, sh_size(order))`` source multipoles, one row per directed pair.
+    deltas : Array
+        ``(pairs, 3)`` target centre minus source centre.
+    order : int
+        Expansion order.
+    use_pallas : bool
+        Request a Pallas lane; see :func:`_m2l_lane` for how it resolves.
+    interpret : bool
+        Run the Pallas kernel in interpret mode.
+
+    Returns
+    -------
+    Array
+        ``(pairs, sh_size(order))`` local coefficients at the target centres.
     """
     p = int(order)
     # NaN-safe radius: `norm` has a 0/0 reverse gradient at delta == 0. The
@@ -412,6 +579,22 @@ def mutual_upward_sweep(
     from their padded particle blocks and internal nodes are then accumulated
     level by level from the deepest upward, so every node's children are complete
     before it is read.
+
+    Parameters
+    ----------
+    positions : Array
+        ``(n, 3)`` positions in Morton-sorted order.
+    masses : Array
+        ``(n,)`` masses in Morton-sorted order.
+    tree : MutualTreeArrays
+        Frozen device-resident topology.
+
+    Returns
+    -------
+    Tuple[Array, Array, Array]
+        ``(node_mass, node_center, multipoles)`` -- ``(num_nodes,)`` masses,
+        ``(num_nodes, 3)`` centres of mass and ``(num_nodes, sh_size(order))``
+        multipole coefficients.
     """
     p = int(tree.order)
     dtype = positions.dtype
@@ -439,9 +622,7 @@ def mutual_upward_sweep(
         # Padding slots gather node 0 and contribute an additive zero, so they
         # land on node 0 as a no-op instead of double-counting it.
         mass = mass.at[parent].add(jnp.where(valid, mass[child], 0.0))
-        moment = moment.at[parent].add(
-            jnp.where(valid[:, None], moment[child], 0.0)
-        )
+        moment = moment.at[parent].add(jnp.where(valid[:, None], moment[child], 0.0))
         return mass, moment
 
     node_mass, node_moment = _scan_levels(
@@ -465,6 +646,7 @@ def mutual_upward_sweep(
         .at[tree.leaf_nodes]
         .add(leaf_multipoles.astype(dtype))
     )
+
     def _m2m(acc, nodes, parents, valid):
         child = jnp.where(valid, nodes, 0)
         parent = jnp.where(valid, parents, 0)
@@ -495,6 +677,27 @@ def _dual_m2l(
     per direction, built from a single canonical list. Batching the two
     directions together is not just convenient: it guarantees the same kernel,
     the same order and the same rounding mode apply to both halves of a pair.
+
+    Parameters
+    ----------
+    centers : Array
+        ``(num_nodes, 3)`` centres of mass from the upward sweep.
+    multipoles : Array
+        ``(num_nodes, sh_size(order))`` multipole coefficients.
+    tree : MutualTreeArrays
+        Frozen device-resident topology supplying the directed pair list.
+    far_weights : Optional[Array]
+        Per-directed-entry weight, or ``None`` for unit weights. Both directions
+        of a pair must carry the same weight or the cancellation breaks.
+    use_pallas : bool
+        Request a Pallas lane; see :func:`_m2l_lane` for how it resolves.
+    interpret : bool
+        Run the Pallas kernel in interpret mode.
+
+    Returns
+    -------
+    Array
+        ``(num_nodes, sh_size(order))`` accumulated local coefficients.
     """
     p = int(tree.order)
     dtype = centers.dtype
@@ -565,7 +768,22 @@ def _dual_m2l(
 
 
 def _push_locals_down(locals_: Array, centers: Array, tree: MutualTreeArrays) -> Array:
-    """L2L cascade, shallowest level first so parents are complete when read."""
+    """L2L cascade, shallowest level first so parents are complete when read.
+
+    Parameters
+    ----------
+    locals_ : Array
+        ``(num_nodes, sh_size(order))`` local coefficients from the M2L stage.
+    centers : Array
+        ``(num_nodes, 3)`` centres of mass from the upward sweep.
+    tree : MutualTreeArrays
+        Frozen device-resident topology supplying the level schedule.
+
+    Returns
+    -------
+    Array
+        The same array with each node's ancestors' expansions folded in.
+    """
     p = int(tree.order)
 
     def _l2l(acc, nodes, parents, valid):
@@ -588,7 +806,30 @@ def _l2p_forces(
     locals_: Array,
     tree: MutualTreeArrays,
 ) -> Array:
-    """Evaluate leaf local expansions at their particles and return forces."""
+    """Evaluate leaf local expansions at their particles and return forces.
+
+    Forces, not accelerations: the mass factor is applied here and divided out
+    once at the very end, because the quantity that cancels structurally between
+    the two halves of a pair is the force.
+
+    Parameters
+    ----------
+    positions : Array
+        ``(n, 3)`` positions in Morton-sorted order.
+    masses : Array
+        ``(n,)`` masses in Morton-sorted order.
+    centers : Array
+        ``(num_nodes, 3)`` centres of mass from the upward sweep.
+    locals_ : Array
+        ``(num_nodes, sh_size(order))`` local coefficients, post-L2L.
+    tree : MutualTreeArrays
+        Frozen device-resident topology.
+
+    Returns
+    -------
+    Array
+        ``(n, 3)`` far-field forces, zero in the padded slots.
+    """
     p = int(tree.order)
     particles = tree.leaf_particles
     valid = tree.leaf_particle_valid
@@ -633,6 +874,31 @@ def mutual_far_field_forces(
     a pair carry the *same* weight, the scaling commutes with the ``F_A + F_B``
     cancellation and momentum stays exact for any weighting -- which is what lets
     one traversal serve a whole block-step boundary.
+
+    Parameters
+    ----------
+    positions : Array
+        ``(n, 3)`` positions in Morton-sorted order.
+    masses : Array
+        ``(n,)`` masses in Morton-sorted order.
+    tree : MutualTreeArrays
+        Frozen device-resident topology.
+    G : float
+        Gravitational constant. Default ``1.0``.
+    far_weights : Optional[Array]
+        Per-directed-entry weight, or ``None`` for unit weights.
+    use_pallas : bool
+        Request a Pallas lane; see :func:`_m2l_lane` for how it resolves.
+    interpret : bool
+        Run the Pallas kernel in interpret mode.
+    return_multipoles : bool
+        Also return the upward sweep's node masses and centres.
+
+    Returns
+    -------
+    Array | Tuple[Array, Array, Array]
+        ``(n, 3)`` forces, or ``(forces, node_mass, centers)`` when
+        ``return_multipoles`` is set.
     """
     node_mass, centers, multipoles = mutual_upward_sweep(positions, masses, tree)
     locals_ = _dual_m2l(

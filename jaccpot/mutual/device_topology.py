@@ -28,12 +28,16 @@ The gradient seam is the caller's responsibility and is documented on
 
 from __future__ import annotations
 
-from typing import Tuple
+from typing import TYPE_CHECKING, Optional, Tuple
 
 import jax
 import jax.numpy as jnp
 from jax import lax
 from jaxtyping import Array
+
+if TYPE_CHECKING:  # pragma: no cover - import cycle at runtime
+    # `force` imports this module, so these are annotation-only here.
+    from jaccpot.mutual.force import MutualCapacities, MutualFMMState
 
 __all__ = [
     "dense_level_schedule",
@@ -62,22 +66,30 @@ def node_centers_and_radii(
 
     Parameters
     ----------
-    positions_sorted, masses_sorted:
-        ``(N, 3)`` and ``(N,)`` in **tree order**.
-    node_ranges:
+    positions_sorted : Array
+        ``(N, 3)`` particle positions in **tree order**.
+    masses_sorted : Array
+        ``(N,)`` particle masses in the same order.
+    node_ranges : Array
         ``(num_nodes, 2)`` inclusive particle ranges.
-    parent:
+    parent : Array
         ``(num_nodes,)`` parent index, negative at the root.
-    leaf_of_particle:
+    leaf_of_particle : Array
         ``(N,)`` the leaf *node* index each particle sits in. Invert
         ``leaf_particles`` to get it rather than assuming ``i // leaf_size``:
         that identity holds for the bucket-slicing builders and is not part of
         the tree contract.
-    depth_cap:
+    depth_cap : int
         Static bound on tree depth. The upward walk saturates at the root, and a
         max-scatter is idempotent, so **over**-provisioning is free and only
         under-provisioning is wrong -- which is why this is a cap and not a
         measured depth.
+
+    Returns
+    -------
+    Tuple[Array, Array]
+        ``(centers, radii)``: the centre of mass of each node's particles, and
+        the exact ``max_i |x_i - c_n|`` over the same particles.
 
     Notes
     -----
@@ -108,9 +120,7 @@ def node_centers_and_radii(
     cum_wx = jnp.concatenate([zero3, jnp.cumsum(m[:, None] * x, axis=0)], axis=0)
     cum_x = jnp.concatenate([zero3, jnp.cumsum(x, axis=0)], axis=0)
     cum_m = jnp.concatenate([zero1, jnp.cumsum(m)], axis=0)
-    cum_n = jnp.concatenate(
-        [zero1, jnp.cumsum(jnp.ones_like(m))], axis=0
-    )
+    cum_n = jnp.concatenate([zero1, jnp.cumsum(jnp.ones_like(m))], axis=0)
 
     total_mass = cum_m[hi + 1] - cum_m[lo]
     total_count = cum_n[hi + 1] - cum_n[lo]
@@ -160,6 +170,20 @@ def node_depths(parent: Array, root: Array, *, depth_cap: int) -> Array:
     free (the relaxation is stable at its fixed point); under-provisioning
     silently leaves deep nodes short, so the caller must bound it correctly --
     the same contract as everywhere else in this module.
+
+    Parameters
+    ----------
+    parent : Array
+        ``(num_nodes,)`` parent index, negative at the root.
+    root : Array
+        Index of the root node.
+    depth_cap : int
+        Number of relaxation sweeps; must be at least the true depth.
+
+    Returns
+    -------
+    Array
+        ``(num_nodes,)`` int32 depth, root at 0 and unreachable nodes at -1.
     """
     parent = jnp.asarray(parent).astype(jnp.int32)
     num_nodes = int(parent.shape[0])
@@ -171,7 +195,9 @@ def node_depths(parent: Array, root: Array, *, depth_cap: int) -> Array:
         safe_parent = jnp.where(parent >= 0, parent, 0)
         from_parent = jnp.where(parent >= 0, d[safe_parent] + 1, -1)
         # Only adopt a depth once the parent has one.
-        updated = jnp.where((d < 0) & (d[safe_parent] >= 0) & (parent >= 0), from_parent, d)
+        updated = jnp.where(
+            (d < 0) & (d[safe_parent] >= 0) & (parent >= 0), from_parent, d
+        )
         return updated, None
 
     depth, _ = lax.scan(relax, depth, xs=None, length=int(depth_cap))
@@ -184,7 +210,7 @@ def dense_level_schedule(
     *,
     depth_cap: int,
     width_cap: int,
-) -> Tuple[Array, Array, Array]:
+) -> Tuple[Array, Array, Array, Array]:
     """Pack nodes by depth into ``(depth_cap, width_cap)``, shallowest first.
 
     Row ``d`` holds the nodes at depth ``d + 1`` and their parents, matching the
@@ -192,6 +218,24 @@ def dense_level_schedule(
     consumer masks a padded slot to its own identity, so a row beyond the real
     tree depth is an all-invalid no-op -- which is what lets one compiled program
     survive a rebuild that deepens the tree.
+
+    Parameters
+    ----------
+    depth : Array
+        ``(num_nodes,)`` node depth, as returned by :func:`node_depths`.
+    parent : Array
+        ``(num_nodes,)`` parent index, negative at the root.
+    depth_cap : int
+        Rows to emit, i.e. the maximum tree depth covered.
+    width_cap : int
+        Slots per row, i.e. the maximum nodes at any one level.
+
+    Returns
+    -------
+    Tuple[Array, Array, Array, Array]
+        ``(level_nodes, level_parents, level_valid, overflow)``. The first three are
+        ``(depth_cap, width_cap)``; ``overflow`` is a scalar bool set when a level
+        held more nodes than ``width_cap``.
     """
     depth = jnp.asarray(depth)
     index_dtype = jnp.int32
@@ -216,9 +260,7 @@ def dense_level_schedule(
             .at[slot]
             .set(jnp.where(ok, jnp.where(parent >= 0, parent, zero), zero), mode="drop")
         )
-        valid = (
-            jnp.zeros((width_cap,), dtype=bool).at[slot].set(ok, mode="drop")
-        )
+        valid = jnp.zeros((width_cap,), dtype=bool).at[slot].set(ok, mode="drop")
         overflow = jnp.any(mask & (prefix >= width_cap))
         return None, (nodes, parents, valid, overflow)
 
@@ -228,13 +270,31 @@ def dense_level_schedule(
     return nodes, parents, valid, jnp.any(overflow)
 
 
-def leaf_blocks(node_ranges: Array, leaf_nodes: Array, *, leaf_size: int) -> Tuple[Array, Array]:
+def leaf_blocks(
+    node_ranges: Array, leaf_nodes: Array, *, leaf_size: int
+) -> Tuple[Array, Array]:
     """Per-leaf particle blocks, ``(num_leaves, leaf_size)`` plus a validity mask.
 
     The host builds these with ``arange(start, end + 1)`` per leaf; here it is one
     broadcast, because a leaf's particles are always a contiguous run in tree
     order. ``leaf_size`` is the block width, not an assumption about occupancy:
     slots past a leaf's ``end`` are simply invalid.
+
+    Parameters
+    ----------
+    node_ranges : Array
+        ``(num_nodes, 2)`` inclusive particle ranges per node.
+    leaf_nodes : Array
+        ``(num_leaves,)`` node index of each leaf.
+    leaf_size : int
+        Block width.
+
+    Returns
+    -------
+    Tuple[Array, Array]
+        ``(particles, valid)``, both ``(num_leaves, leaf_size)``. Padded slots repeat
+        the leaf's first particle so a gather stays in bounds; ``valid`` is what
+        removes their contribution.
     """
     node_ranges = jnp.asarray(node_ranges)
     starts = node_ranges[leaf_nodes, 0]
@@ -260,15 +320,15 @@ def build_mutual_state_device(
     theta: float,
     order: int,
     leaf_size: int,
-    caps,
+    caps: "MutualCapacities",
     softening: float,
     G: float = 1.0,
     use_pallas: bool = False,
-    near_chunk_size=None,
+    near_chunk_size: Optional[int] = None,
     pallas_interpret: bool = False,
     max_pair_queue: int = 1 << 16,
     freeze_topology_gradient: bool = True,
-):
+) -> "MutualFMMState":
     """Build a :class:`~jaccpot.mutual.force.MutualFMMState` entirely on device.
 
     Drop-in replacement for
@@ -290,15 +350,62 @@ def build_mutual_state_device(
     a truncated mutual list still conserves momentum exactly (dropping a
     canonical pair drops both halves), so nothing else will tell you.
 
-    Gradients
-    ---------
-    With ``freeze_topology_gradient`` (the default) the positions and masses that
+    Notes
+    -----
+    **Gradients.** With ``freeze_topology_gradient`` (the default) the positions and masses that
     feed the **MAC geometry** are ``stop_gradient``-ed, while the copies returned
     for the upward sweep stay live. That split is the whole gradient contract:
     the accept/reject decisions are discrete and must be severed, but the
     expansion centres are recomputed from live positions on every evaluation and
     carry a real gradient term -- freezing those would silently drop it. It is
     the same seam ``jaccpot/distributed/fmm.py`` uses.
+
+    Parameters
+    ----------
+    positions_sorted : Array
+        ``(N, 3)`` particle positions in tree order.
+    masses_sorted : Array
+        ``(N,)`` particle masses in tree order.
+    parent : Array
+        ``(num_nodes,)`` parent index, negative at the root.
+    left_child : Array
+        ``(num_internal,)`` left-child index.
+    right_child : Array
+        ``(num_internal,)`` right-child index.
+    node_ranges : Array
+        ``(num_nodes, 2)`` inclusive particle ranges.
+    inverse_permutation : Array
+        ``(N,)`` map from tree order back to the caller's original order.
+    root : Array
+        Index of the root node.
+    theta : float
+        Mutual MAC parameter.
+    order : int
+        Multipole expansion order.
+    leaf_size : int
+        Particles per leaf block.
+    caps : MutualCapacities
+        Fixed capacities; every output shape comes from these.
+    softening : float
+        Plummer softening length.
+    G : float
+        Gravitational constant. Default ``1.0``.
+    use_pallas : bool
+        Dispatch the fused Pallas near-field kernel.
+    near_chunk_size : Optional[int]
+        Pair-chunk size for the near kernel; ``None`` derives it.
+    pallas_interpret : bool
+        Run the Pallas kernels in interpret mode.
+    max_pair_queue : int
+        Wavefront capacity for the device traversal.
+    freeze_topology_gradient : bool
+        ``stop_gradient`` the copy of positions feeding the MAC geometry.
+
+    Returns
+    -------
+    MutualFMMState
+        Device-resident state, padded to ``caps``, with its occupancy counters and
+        overflow flags set.
     """
     from yggdrax.interactions import dual_tree_walk_mutual
 
@@ -318,12 +425,16 @@ def build_mutual_state_device(
     leaf_nodes = jnp.arange(num_internal, num_nodes, dtype=index_dtype)
 
     lc_full = jnp.concatenate(
-        [jnp.asarray(left_child).astype(index_dtype),
-         jnp.full((num_leaves,), -1, dtype=index_dtype)]
+        [
+            jnp.asarray(left_child).astype(index_dtype),
+            jnp.full((num_leaves,), -1, dtype=index_dtype),
+        ]
     )
     rc_full = jnp.concatenate(
-        [jnp.asarray(right_child).astype(index_dtype),
-         jnp.full((num_leaves,), -1, dtype=index_dtype)]
+        [
+            jnp.asarray(right_child).astype(index_dtype),
+            jnp.full((num_leaves,), -1, dtype=index_dtype),
+        ]
     )
 
     leaf_particles, leaf_valid = leaf_blocks(
@@ -338,13 +449,23 @@ def build_mutual_state_device(
     )
 
     centers, radii = node_centers_and_radii(
-        x_topo, m_topo, node_ranges, parent, leaf_of_particle,
+        x_topo,
+        m_topo,
+        node_ranges,
+        parent,
+        leaf_of_particle,
         depth_cap=int(caps.depth) + 1,
     )
     walk = dual_tree_walk_mutual(
-        lc_full, rc_full, centers, radii, float(theta), root,
+        lc_full,
+        rc_full,
+        centers,
+        radii,
+        float(theta),
+        root,
         max_pair_queue=int(max_pair_queue),
-        far_cap=int(caps.far), near_cap=int(caps.near),
+        far_cap=int(caps.far),
+        near_cap=int(caps.near),
     )
 
     depth = node_depths(parent, root, depth_cap=int(caps.depth) + 1)

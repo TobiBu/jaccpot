@@ -60,7 +60,23 @@ def compute_expansion(
     masses: Array,
     order: int = 1,
 ) -> MultipoleExpansion:
-    """Compute multipole expansion up to ``order`` around the center of mass."""
+    """Compute multipole expansion up to ``order`` around the center of mass.
+
+    Parameters
+    ----------
+    positions : Array
+        ``(n, 3)`` particle positions.
+    masses : Array
+        ``(n,)`` particle masses.
+    order : int
+        Highest moment to compute. Moments above this are left zero rather than
+        omitted, so the returned container has a fixed layout.
+
+    Returns
+    -------
+    MultipoleExpansion
+        Moments about the centre of mass of the given particles.
+    """
 
     total_mass = jnp.sum(masses)
     center_num = jnp.sum(positions * masses[:, None], axis=0)
@@ -188,6 +204,34 @@ def evaluate_expansion(
 
     The potential is assembled from moments up to ``order`` and then
     differentiated with ``jax.grad`` to produce acceleration.
+
+    Taking the gradient of the assembled potential, rather than coding an
+    acceleration series, is what makes this a usable oracle: there is no second
+    expression that could drift from the first.
+
+    Parameters
+    ----------
+    expansion : MultipoleExpansion
+        Moments to evaluate.
+    order : int
+        Highest moment to include. May be below the expansion's own order.
+    eval_point : Optional[Array]
+        Point of evaluation. ``None`` is rejected -- see ``Raises``.
+    G : Union[float, Array]
+        Gravitational constant.
+    softening : Union[float, Array]
+        Plummer softening length.
+
+    Returns
+    -------
+    Array
+        Acceleration at ``eval_point``.
+
+    Raises
+    ------
+    ValueError
+        If ``eval_point`` is ``None``, or ``order`` exceeds what the expansion
+        carries.
     """
 
     if eval_point is None:
@@ -253,7 +297,28 @@ def direct_sum(
     G: Union[float, Array] = 1.0,
     softening: Union[float, Array] = 0.0,
 ) -> Array:
-    """Compute gravitational acceleration via O(N) direct summation."""
+    """Compute gravitational acceleration via O(N) direct summation.
+    O(N) for one evaluation point, so O(N^2) to evaluate at every particle. Exact
+    -- this is the oracle the FMM paths are checked against.
+
+    Parameters
+    ----------
+    positions : Array
+        ``(n, 3)`` source positions.
+    masses : Array
+        ``(n,)`` source masses.
+    eval_point : Array
+        Single point at which to evaluate.
+    G : Union[float, Array]
+        Gravitational constant.
+    softening : Union[float, Array]
+        Plummer softening length.
+
+    Returns
+    -------
+    Array
+        Acceleration at ``eval_point``.
+    """
 
     r_vec = eval_point - positions
     dist_sq = jnp.sum(r_vec**2, axis=1, keepdims=True)
@@ -270,7 +335,28 @@ def compute_gravitational_potential(
     G: Union[float, Array] = 1.0,
     softening: Union[float, Array] = 0.0,
 ) -> Array:
-    """Compute gravitational potential at ``eval_points`` with direct sums."""
+    """Compute gravitational potential at ``eval_points`` with direct sums.
+    Vectorised over ``eval_points``, unlike :func:`direct_sum`, which takes one
+    point.
+
+    Parameters
+    ----------
+    positions : Array
+        ``(n, 3)`` source positions.
+    masses : Array
+        ``(n,)`` source masses.
+    eval_points : Array
+        ``(m, 3)`` points at which to evaluate.
+    G : Union[float, Array]
+        Gravitational constant.
+    softening : Union[float, Array]
+        Plummer softening length.
+
+    Returns
+    -------
+    Array
+        ``(m,)`` potentials.
+    """
 
     def compute_potential(eval_point: Array) -> Array:
         r_vec = eval_point - positions

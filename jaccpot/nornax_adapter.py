@@ -51,7 +51,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 from jax import lax
-from jaxtyping import Array
+from jaxtyping import Array, Float, Int
 
 from jaccpot.mutual.force import (
     MutualCapacities,
@@ -109,10 +109,15 @@ class BlockStepFMM:
     pallas_interpret : bool
         Run the Pallas kernels in interpret mode. Works without a GPU, so it lets
         the Pallas path's *logic* be exercised on CPU; far too slow for real use.
+    topology_backend : str
+        ``"host"`` (default) builds the topology with the NumPy dual-tree
+        traversal in :mod:`jaccpot.mutual.topology`, which cannot be traced.
+        ``"device"`` builds it in JAX instead, so :meth:`rebuild_state` can live
+        inside a ``jax.jit`` or a ``lax.scan``; it implies ``static_shapes``,
+        because every device output shape comes from the capacities.
     static_shapes : bool
         Pad the pair lists and the level schedule to fixed capacities, resolved
         from the first :meth:`prepare` and then held (see :attr:`capacities`).
-
         Without it a prepared state's shapes track the particle distribution, so
         every rebuild is a distinct set of compile-time constants and a jitted
         force recompiles per base step -- measured ~200 s each at N = 20 000, with
@@ -222,7 +227,7 @@ class BlockStepFMM:
         return self._caps
 
     def prepare(
-        self: "BlockStepFMM", positions: Array, masses: Array
+        self: "BlockStepFMM", positions: Float[Array, "n 3"], masses: Float[Array, "n"]
     ) -> MutualFMMState:
         """Build the frozen topology for ``positions``/``masses`` and cache it.
 
@@ -231,6 +236,33 @@ class BlockStepFMM:
         :meth:`jaccpot.FastMultipoleMethod.prepare_state`. Call it once per base
         step; the rung schedule is reassigned at the same cadence, so the two
         discrete refreshes line up.
+
+        Parameters
+        ----------
+        positions : Float[Array, 'n 3']
+            ``(n, 3)`` particle positions.
+        masses : Float[Array, 'n']
+            ``(n,)`` particle masses.
+
+        Returns
+        -------
+        MutualFMMState
+            The freshly built state, also cached on ``self`` so the force methods
+            can find it.
+
+
+        Raises
+
+        ------
+
+        RuntimeError
+
+            On the device backend, if the built topology overflowed its capacity
+
+            profile. Overflow drops interactions while leaving momentum exactly
+
+            conserved, so it is raised here rather than reported.
+
         """
         from jaccpot import FastMultipoleMethod
 
@@ -299,9 +331,7 @@ class BlockStepFMM:
 
     # -- device topology backend -------------------------------------------
 
-    def freeze_template(
-        self: "BlockStepFMM", positions: Array, masses: Array
-    ) -> None:
+    def freeze_template(self: "BlockStepFMM", positions: Array, masses: Array) -> None:
         """Build the static-radix template and capacity profile. Host-side, once.
 
         Only the *data structure* is frozen here -- the parent/child links and the
@@ -315,15 +345,29 @@ class BlockStepFMM:
 
         Idempotent: a second call is a no-op, because re-freezing would silently
         change the capacities out from under an already-compiled program.
+
+
+        Parameters
+
+        ----------
+
+        positions : Array
+
+            ``(N, 3)`` concrete positions to build the template from.
+
+        masses : Array
+
+            ``(N,)`` concrete particle masses.
+
         """
         if self._template is not None:
             return
         import numpy as _np
         from yggdrax._tree_impl import rebuild_static_radix_tree_from_template
+        from yggdrax.tree import Tree
 
         from jaccpot.mutual.device_topology import node_depths
         from jaccpot.mutual.farfield import snap_capacity
-        from yggdrax.tree import Tree
 
         tree = Tree.from_particles(
             positions,
@@ -416,6 +460,50 @@ class BlockStepFMM:
 
         Raises rather than returning an overflowing capacity: a truncated
         traversal is a wrong force that looks healthy from every other angle.
+
+
+        Parameters
+
+        ----------
+
+        refreshed : Any
+
+            The refreshed static-radix tree to probe against.
+
+        sorted_positions : Array
+
+            ``(N, 3)`` positions in tree order.
+
+        sorted_masses : Array
+
+            ``(N,)`` masses in tree order.
+
+        root : int
+
+            Index of the root node.
+
+
+        Returns
+
+        -------
+
+        int
+
+            A wavefront capacity that traverses this configuration without overflowing,
+
+            with one doubling of headroom for the front widening as the system evolves.
+
+
+        Raises
+
+        ------
+
+        RuntimeError
+
+            If no capacity up to the ceiling traverses it. A larger ``leaf_size``
+
+            shrinks the tree and hence the pair front.
+
         """
         from jaccpot.mutual.device_topology import build_mutual_state_device
 
@@ -479,6 +567,41 @@ class BlockStepFMM:
 
         With both ``rung`` and ``level_weights`` omitted this is the full
         acceleration.
+
+
+        Parameters
+
+        ----------
+
+        state : MutualFMMState
+
+            The prepared topology to evaluate against.
+
+        positions : Array
+
+            ``(N, 3)`` positions, in the caller's original order.
+
+        masses : Array
+
+            ``(N,)`` particle masses.
+
+        rung : Optional[Array]
+
+            ``(N,)`` per-particle rung; ``None`` weights every pair equally.
+
+        level_weights : Optional[Array]
+
+            ``(k_max + 1,)`` per-level weights; ``None`` means all ones.
+
+
+        Returns
+
+        -------
+
+        Array
+
+            ``(N, 3)`` weighted acceleration.
+
         """
         return mutual_weighted_accelerations(
             state, positions, masses, rung=rung, level_weights=level_weights
@@ -490,12 +613,43 @@ class BlockStepFMM:
         dt_max: Any,
         half: Any = 1.0,
         *,
-        dtype=None,
+        dtype: Any = None,
     ) -> Array:
         """The ``(k_max + 1,)`` weight row for one sub-step boundary.
 
         Exposed so a caller driving :meth:`weighted_accelerations` directly does
         not have to re-derive the schedule, and cannot get it subtly wrong.
+
+
+        Parameters
+
+        ----------
+
+        active_floor : Any
+
+            Smallest level kicked at this boundary. May be a tracer.
+
+        dt_max : Any
+
+            Base-step timestep. May be a tracer.
+
+        half : Any
+
+            ``0.5`` at a synchronized end of the base step, ``1.0`` inside.
+
+        dtype : Any
+
+            Result dtype; ``None`` takes the model's working dtype.
+
+
+        Returns
+
+        -------
+
+        Array
+
+            ``(k_max + 1,)`` weight row.
+
         """
         return level_weights_from_floor(
             active_floor, self.k_max, dt_max, half=half, dtype=dtype
@@ -516,6 +670,40 @@ class BlockStepFMM:
         Unlike :meth:`prepare` it does **not** cache the result on the instance:
         under trace there is nothing meaningful to cache, and a driver carrying
         the state through a ``lax.scan`` needs it returned, not stashed.
+
+
+        Parameters
+
+        ----------
+
+        positions : Array
+
+            ``(N, 3)`` positions, in the caller's original order.
+
+        masses : Array
+
+            ``(N,)`` particle masses.
+
+
+        Returns
+
+        -------
+
+        MutualFMMState
+
+            A freshly built device state at the frozen template's capacities.
+
+
+        Raises
+
+        ------
+
+        RuntimeError
+
+            If :meth:`freeze_template` has not been called. The template and the
+
+            capacity profile are host-built and cannot be derived under trace.
+
         """
         if self._template is None:
             raise RuntimeError(
@@ -551,9 +739,25 @@ class BlockStepFMM:
         )
 
     def refresh(
-        self: "BlockStepFMM", positions: Array, masses: Array
+        self: "BlockStepFMM", positions: Float[Array, "n 3"], masses: Float[Array, "n"]
     ) -> MutualFMMState:
-        """Rebuild the frozen topology (alias of :meth:`prepare`)."""
+        """Rebuild the frozen topology (alias of :meth:`prepare`).
+
+        Present because ``refresh`` is the name nornax's integrator calls at a base
+        step boundary; there is no behavioural difference.
+
+        Parameters
+        ----------
+        positions : Float[Array, 'n 3']
+            ``(n, 3)`` particle positions.
+        masses : Float[Array, 'n']
+            ``(n,)`` particle masses.
+
+        Returns
+        -------
+        MutualFMMState
+            The rebuilt state.
+        """
         return self.prepare(positions, masses)
 
     _NO_TOPOLOGY_UNDER_TRACE = (
@@ -564,7 +768,31 @@ class BlockStepFMM:
     )
 
     def _require_state(self, positions: Array, masses: Array) -> MutualFMMState:
-        """Return the cached state, building it if that is legal here."""
+        """Return the cached state, building it if that is legal here.
+
+        Reuses the cached state only when the particle count still matches, and
+        otherwise rebuilds -- legal on concrete arrays, impossible under a trace.
+
+        Parameters
+        ----------
+        positions : Array
+            ``(n, 3)`` particle positions.
+        masses : Array
+            ``(n,)`` particle masses.
+
+        Returns
+        -------
+        MutualFMMState
+            A state matching the current particle count.
+
+        Raises
+        ------
+        RuntimeError
+            If no usable state is cached and one cannot be built because the
+            arrays are traced. The low-level concretization failure is translated
+            into an actionable instruction: prepare on concrete arrays once per
+            base step, then jit or differentiate the evaluation.
+        """
         state = self._state
         if state is not None and state.num_particles == int(
             jnp.asarray(positions).shape[0]
@@ -600,6 +828,24 @@ class BlockStepFMM:
         catches is otherwise a NaN velocity many steps later. Set
         ``validate_rung=False`` once the caller has checked the range itself,
         which is what a driver stepping a fixed rung ladder can do.
+
+        Parameters
+        ----------
+        rung : Array
+            ``(n,)`` per-particle rung assignment.
+
+        Returns
+        -------
+        Array
+            ``rung`` as an array, unchanged. Returned rather than validated in
+            place so callers can use it inline.
+
+        Raises
+        ------
+        ValueError
+            If the bound is readable and any rung falls outside ``[0, k_max]``.
+            When it cannot be read the check is skipped, so passing this is not
+            proof the rungs are in range.
         """
         rung = jnp.asarray(rung)
         if not self.validate_rung:
@@ -620,10 +866,10 @@ class BlockStepFMM:
 
     def level_accelerations(
         self: "BlockStepFMM",
-        positions: Array,
-        masses: Array,
+        positions: Float[Array, "n 3"],
+        masses: Float[Array, "n"],
         *,
-        rung: Array,
+        rung: Int[Array, "n"],
         level: int,
         args: object = None,
     ) -> Array:
@@ -638,6 +884,29 @@ class BlockStepFMM:
         of its most active particle and splits at cell granularity, so this is a
         different -- but equally valid -- partition from a direct-sum oracle's.
         See :mod:`jaccpot.mutual.force`.
+
+        Parameters
+        ----------
+        positions : Float[Array, 'n 3']
+            ``(n, 3)`` particle positions.
+        masses : Float[Array, 'n']
+            ``(n,)`` particle masses.
+        rung : Int[Array, 'n']
+            ``(n,)`` per-particle rung assignment.
+        level : int
+            Interaction level to isolate. Must lie in ``[0, k_max]``.
+        args : object
+            Ignored; present because the ``MutualForceModel`` contract passes it.
+
+        Returns
+        -------
+        Array
+            ``(n, 3)`` accelerations from ``level`` alone.
+
+        Raises
+        ------
+        ValueError
+            If ``level`` is outside ``[0, k_max]``, or the rungs are out of range.
         """
         del args
         state = self._require_state(positions, masses)
@@ -657,16 +926,33 @@ class BlockStepFMM:
 
     def total_accelerations(
         self: "BlockStepFMM",
-        positions: Array,
-        masses: Array,
+        positions: Float[Array, "n 3"],
+        masses: Float[Array, "n"],
         *,
-        rung: Optional[Array] = None,
+        rung: Optional[Int[Array, "n"]] = None,
         args: object = None,
     ) -> Array:
         """Return the full acceleration in a single traversal.
 
         Equivalent to summing :meth:`level_accelerations` over every level, but
         at one traversal instead of ``k_max + 1``.
+
+        Parameters
+        ----------
+        positions : Float[Array, 'n 3']
+            ``(n, 3)`` particle positions.
+        masses : Float[Array, 'n']
+            ``(n,)`` particle masses.
+        rung : Optional[Int[Array, 'n']]
+            Ignored -- the unweighted total does not depend on the rung
+            assignment. Accepted so the signature matches the level-aware methods.
+        args : object
+            Ignored; present for the ``MutualForceModel`` contract.
+
+        Returns
+        -------
+        Array
+            ``(n, 3)`` full accelerations.
         """
         del args, rung
         state = self._require_state(positions, masses)
@@ -676,15 +962,15 @@ class BlockStepFMM:
 
     def boundary_kick(
         self: "BlockStepFMM",
-        positions: Array,
-        velocities: Array,
-        masses: Array,
+        positions: Float[Array, "n 3"],
+        velocities: Float[Array, "n 3"],
+        masses: Float[Array, "n"],
         *,
-        rung: Array,
+        rung: Int[Array, "n"],
         active_floor: Any = None,
         dt_max: Any = None,
         half: Any = 1.0,
-        level_weights: Optional[Array] = None,
+        level_weights: Optional[Float[Array, "levels"]] = None,
         args: object = None,
     ) -> Array:
         """Apply one sub-step boundary's kick in a single mutual traversal.
@@ -699,13 +985,13 @@ class BlockStepFMM:
 
         Parameters
         ----------
-        positions : Array
+        positions : Float[Array, 'n 3']
             ``(N, 3)`` particle positions, in the caller's original order.
-        velocities : Array
+        velocities : Float[Array, 'n 3']
             ``(N, 3)`` velocities to kick.
-        masses : Array
+        masses : Float[Array, 'n']
             ``(N,)`` particle masses.
-        rung : Array
+        rung : Int[Array, 'n']
             ``(N,)`` per-particle block-step rung, in ``[0, k_max]``.
         active_floor : Any
             Smallest level kicked at this boundary (nornax's
@@ -716,11 +1002,10 @@ class BlockStepFMM:
         half : Any
             ``0.5`` at the base step's synchronized ends, ``1.0`` inside. May be
             a tracer.
-        level_weights : Optional[Array]
+        level_weights : Optional[Float[Array, 'levels']]
             The ``(k_max + 1,)`` weight vector, supplied directly instead of being
             derived from ``active_floor``/``half``/``dt_max``. Takes precedence
             over all three, which are then ignored.
-
             This is the seam that lets an integrator drive the boundaries with
             ``lax.scan`` rather than unrolling them. With the weights derived
             from *static* ``active_floor``/``half``, a fused base step has to emit
@@ -776,11 +1061,11 @@ class BlockStepFMM:
 
     def boundary_kick_at(
         self: "BlockStepFMM",
-        positions: Array,
-        velocities: Array,
-        masses: Array,
+        positions: Float[Array, "n 3"],
+        velocities: Float[Array, "n 3"],
+        masses: Float[Array, "n"],
         *,
-        rung: Array,
+        rung: Int[Array, "n"],
         s: int,
         dt_max: float,
         args: object = None,
@@ -789,6 +1074,29 @@ class BlockStepFMM:
 
         Derives ``active_floor`` and ``half`` from the standard block schedule,
         so a caller that knows only ``s`` and ``k_max`` needs nothing else.
+
+        Parameters
+        ----------
+        positions : Float[Array, 'n 3']
+            ``(n, 3)`` particle positions.
+        velocities : Float[Array, 'n 3']
+            ``(n, 3)`` particle velocities, the quantity being kicked.
+        masses : Float[Array, 'n']
+            ``(n,)`` particle masses.
+        rung : Int[Array, 'n']
+            ``(n,)`` per-particle rung assignment.
+        s : int
+            Sub-step boundary index, ``0 .. n_sub``. Must be concrete -- it drives
+            Python-level schedule arithmetic.
+        dt_max : float
+            Base-step size, the time step of level ``0``.
+        args : object
+            Forwarded to :meth:`boundary_kick`, which ignores it.
+
+        Returns
+        -------
+        Array
+            ``(n, 3)`` velocities after the kick.
         """
         return self.boundary_kick(
             positions,
@@ -803,11 +1111,11 @@ class BlockStepFMM:
 
     def advance_base_step(
         self: "BlockStepFMM",
-        positions: Array,
-        velocities: Array,
-        masses: Array,
+        positions: Float[Array, "n 3"],
+        velocities: Float[Array, "n 3"],
+        masses: Float[Array, "n"],
         *,
-        rung: Array,
+        rung: Int[Array, "n"],
         dt_max: float,
         scan_boundaries: bool = False,
     ) -> Tuple[Array, Array, Array]:
@@ -849,6 +1157,28 @@ class BlockStepFMM:
         base step's rung assignment. It is a separate evaluation on purpose: a
         boundary kick returns *weighted* levels, and the unweighted total cannot be
         recovered from them.
+
+        Parameters
+        ----------
+        positions : Float[Array, 'n 3']
+            ``(n, 3)`` positions at the start of the base step.
+        velocities : Float[Array, 'n 3']
+            ``(n, 3)`` velocities at the start of the base step.
+        masses : Float[Array, 'n']
+            ``(n,)`` particle masses.
+        rung : Int[Array, 'n']
+            ``(n,)`` per-particle rung assignment, held fixed for the whole step.
+        dt_max : float
+            Base-step size, the time step of level ``0``.
+        scan_boundaries : bool
+            Walk the boundaries with ``lax.scan`` rather than an unrolled Python
+            loop. Off by default -- see the memory trade above.
+
+        Returns
+        -------
+        Tuple[Array, Array, Array]
+            ``(positions, velocities, acceleration)`` at the end of the step, the
+            acceleration being the full unweighted field at the final positions.
         """
         state = self._require_state(positions, masses)
         rung = self._validate_rung(rung)
