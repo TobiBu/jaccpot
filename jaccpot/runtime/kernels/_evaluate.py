@@ -27,8 +27,9 @@ from typing import Any, NamedTuple, Optional, Union
 import jax
 import jax.numpy as jnp
 import numpy as np
+from beartype import beartype
 from beartype.typing import Tuple
-from jaxtyping import Array
+from jaxtyping import Array, Bool, Float, Int, jaxtyped
 from yggdrax.interactions import (
     NodeNeighborList,
     OctreeNativeNeighborList,
@@ -752,33 +753,65 @@ def _prepare_tree_evaluation_inputs(
         "disable_specialized_large_n_nearfield",
     ),
 )
+# `@jaxtyped` sits INSIDE `jax.jit`, and the order is forced rather than chosen:
+# applying it outside raises `AttributeError: 'PjitFunction' object has no attribute
+# '__globals__'`, because jaxtyping resolves string annotations against the wrapped
+# function's globals and a compiled JAX callable has none. Inside, the check runs on
+# TRACERS at trace time -- once per compilation, not once per call -- which is the
+# cheap place for it on a hot path. Measured: warm per-call and trace+compile both
+# unchanged; see the PR.
+#
+# `_evaluate_prepared_tree` below is deliberately NOT decorated: it annotates
+# `fmm: "FMMEngine"`, a forward reference `runtime/kernels/` must never resolve
+# (ARCHITECTURE section 1 -- this package is a true leaf and must not name the
+# engine). beartype would try to resolve it at call time.
+@jaxtyped(typechecker=beartype)
 def _evaluate_tree_compiled_impl(
     tree: Tree,
-    positions: Array,
-    masses: Array,
+    positions: Float[Array, "n 3"],
+    masses: Float[Array, "n"],
     locals_data: LocalExpansionData,
     neighbor_list: NodeNeighborList,
-    nearfield_leaf_nodes: Array,
-    nearfield_node_ranges: Array,
-    nearfield_offsets: Array,
-    nearfield_neighbors: Array,
-    nearfield_counts: Array,
-    nearfield_leaf_particle_indices: Array,
-    nearfield_leaf_particle_mask: Array,
-    leaf_nodes: Array,
-    node_ranges: Array,
-    precomputed_target_leaf_ids: Array,
-    precomputed_source_leaf_ids: Array,
-    precomputed_valid_pairs: Array,
-    precomputed_chunk_sort_indices: Array,
-    precomputed_chunk_group_ids: Array,
-    precomputed_chunk_unique_indices: Array,
-    precomputed_target_block_offsets: Array,
-    precomputed_target_block_leaf_ids: Array,
-    precomputed_target_block_source_leaf_ids: Array,
-    precomputed_target_block_valid_mask: Array,
-    precomputed_target_block_source_leaf_ids_padded: Array,
-    precomputed_target_block_valid_mask_padded: Array,
+    nearfield_leaf_nodes: Int[Array, "leaves"],
+    nearfield_node_ranges: Int[Array, "_ 2"],
+    nearfield_offsets: Int[Array, "leaves+1"],
+    nearfield_neighbors: Int[Array, "edges"],
+    nearfield_counts: Int[Array, "leaves"],
+    # RANK-ONLY, deliberately. The families below are passed as ZERO-SIZED
+    # sentinels whenever their lane is off -- `(0,)`, `(0, 0)`, `(leaves, 0, 0)` --
+    # because a jitted signature cannot take `None` conditionally. Across 64
+    # captured calls through `tests/unit/core/test_near_field.py` and
+    # `tests/integration/` they were empty EVERY time: they are filled only from
+    # `_large_n_pipeline.py`, and the large-N lane is at 0% CPU coverage (audit
+    # F27). So the rank and dtype are measured and the axis extents are NOT.
+    # Naming those axes would be inventing a contract for a lane nothing here
+    # exercises; `_` asserts exactly what was observed.
+    nearfield_leaf_particle_indices: Int[Array, "_ _"],
+    nearfield_leaf_particle_mask: Bool[Array, "_ _"],
+    # `farleaves`, NOT `leaves`. The far-field leaf view is a DIFFERENT axis from
+    # the near-field one above: on the octree execution backend `leaf_nodes` is
+    # length 5 where `nearfield_leaf_nodes` is 3. Binding both to `leaves` asserted
+    # an equality that holds only for the radix tree, and broke 7 octree tests --
+    # caught by the decorator this commit adds, on its first full run. The 64
+    # captured calls that sized every other axis here came from `test_near_field.py`
+    # and `tests/integration/`, neither of which enters the octree backend, so the
+    # equality looked safe and was not.
+    leaf_nodes: Int[Array, "farleaves"],
+    node_ranges: Int[Array, "_ 2"],
+    precomputed_target_leaf_ids: Int[Array, "pairs"],
+    precomputed_source_leaf_ids: Int[Array, "pairs"],
+    precomputed_valid_pairs: Bool[Array, "pairs"],
+    precomputed_chunk_sort_indices: Int[Array, "chunks chunkflat"],
+    precomputed_chunk_group_ids: Int[Array, "chunks chunkflat"],
+    precomputed_chunk_unique_indices: Int[Array, "chunks chunkflat"],
+    # `farleaves+1`, tracking `leaf_nodes` above rather than the near-field count.
+    # Measured in both lanes: radix 3 leaves -> 4 offsets, octree 5 -> 6.
+    precomputed_target_block_offsets: Int[Array, "farleaves+1"],
+    precomputed_target_block_leaf_ids: Int[Array, "_"],
+    precomputed_target_block_source_leaf_ids: Int[Array, "_ _"],
+    precomputed_target_block_valid_mask: Bool[Array, "_ _"],
+    precomputed_target_block_source_leaf_ids_padded: Int[Array, "farleaves _ _"],
+    precomputed_target_block_valid_mask_padded: Bool[Array, "farleaves _ _"],
     *,
     G: float,
     softening: float,
@@ -822,59 +855,59 @@ def _evaluate_tree_compiled_impl(
     ----------
     tree : Tree
         Built tree.
-    positions : Array
+    positions : Float[Array, 'n 3']
         Morton-sorted particle positions ``[N, 3]``.
-    masses : Array
+    masses : Float[Array, 'n']
         Morton-sorted particle masses ``[N]``.
     locals_data : LocalExpansionData
         Local expansions to contract at the particles.
     neighbor_list : NodeNeighborList
         Leaf ordering and neighbour lists. Its edge count is the reference every
         ``precomputed_*`` shape check compares against.
-    nearfield_leaf_nodes : Array
+    nearfield_leaf_nodes : Int[Array, 'leaves']
         Near-field leaf node ids.
-    nearfield_node_ranges : Array
+    nearfield_node_ranges : Int[Array, '_ 2']
         Near-field per-node particle ranges.
-    nearfield_offsets : Array
+    nearfield_offsets : Int[Array, 'leaves+1']
         CSR offsets into ``nearfield_neighbors``.
-    nearfield_neighbors : Array
+    nearfield_neighbors : Int[Array, 'edges']
         Flattened neighbour lists, one segment per leaf.
-    nearfield_counts : Array
+    nearfield_counts : Int[Array, 'leaves']
         Neighbour count per leaf.
-    nearfield_leaf_particle_indices : Array
+    nearfield_leaf_particle_indices : Int[Array, '_ _']
         Padded per-leaf particle indices. A non-empty leading axis is one of the
         conditions for the specialized large-N lane.
-    nearfield_leaf_particle_mask : Array
+    nearfield_leaf_particle_mask : Bool[Array, '_ _']
         Validity mask for the padding above.
-    leaf_nodes : Array
+    leaf_nodes : Int[Array, 'farleaves']
         Far-field leaf node ids.
-    node_ranges : Array
+    node_ranges : Int[Array, '_ 2']
         Far-field per-node particle ranges.
-    precomputed_target_leaf_ids : Array
+    precomputed_target_leaf_ids : Int[Array, 'pairs']
         Per-edge target leaf id. Used only if its length equals the edge count.
-    precomputed_source_leaf_ids : Array
+    precomputed_source_leaf_ids : Int[Array, 'pairs']
         Per-edge source leaf id, gated on its own length in addition to the
         pair-list gate -- so the target ids can be used without these.
-    precomputed_valid_pairs : Array
+    precomputed_valid_pairs : Bool[Array, 'pairs']
         Per-edge validity mask, gated with the target ids.
-    precomputed_chunk_sort_indices : Array
+    precomputed_chunk_sort_indices : Int[Array, 'chunks chunkflat']
         Chunk-local sort permutation for the scatter, ``[chunks, chunk * leaf]``.
-    precomputed_chunk_group_ids : Array
+    precomputed_chunk_group_ids : Int[Array, 'chunks chunkflat']
         Chunk-local scatter group ids, same shape.
-    precomputed_chunk_unique_indices : Array
+    precomputed_chunk_unique_indices : Int[Array, 'chunks chunkflat']
         Chunk-local unique-target indices, same shape. All three must match or
         the scatter schedule is recomputed.
-    precomputed_target_block_offsets : Array
+    precomputed_target_block_offsets : Int[Array, 'farleaves+1']
         CSR offsets over target blocks, length ``leaves + 1``.
-    precomputed_target_block_leaf_ids : Array
+    precomputed_target_block_leaf_ids : Int[Array, '_']
         Target leaf id per block.
-    precomputed_target_block_source_leaf_ids : Array
+    precomputed_target_block_source_leaf_ids : Int[Array, '_ _']
         Source leaf id per block entry.
-    precomputed_target_block_valid_mask : Array
+    precomputed_target_block_valid_mask : Bool[Array, '_ _']
         Validity mask, shaped like the source ids above.
-    precomputed_target_block_source_leaf_ids_padded : Array
+    precomputed_target_block_source_leaf_ids_padded : Int[Array, 'farleaves _ _']
         Rectangular form of the block source ids, ``[leaves, blocks, width]``.
-    precomputed_target_block_valid_mask_padded : Array
+    precomputed_target_block_valid_mask_padded : Bool[Array, 'farleaves _ _']
         Validity mask for the padded form, gated together with it.
     G : float
         Gravitational constant. Static.

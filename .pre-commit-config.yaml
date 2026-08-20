@@ -78,6 +78,14 @@ repos:
         #     leaves    leaf nodes
         #     edges     entries of the flattened neighbour list
         #     pairs     entries of a precomputed leaf-pair schedule
+        #     farleaves the FAR-field leaf view, which is not the near-field one:
+        #               they differ on the octree backend (5 vs 3)
+        #     _         an anonymous axis: rank asserted, extent deliberately not.
+        #               Needed as a builtin only for the SINGLE-axis spelling
+        #               `Int[Array, "_"]`; `"_ 2"` and `"leaves _ _"` are
+        #               multi-token and pyflakes already ignores them. The cost is
+        #               narrow but real: a bare `_` used and never assigned stops
+        #               being flagged.
         #
         # THE COST, stated because it is real: a bare `n` used in code and never
         # assigned is no longer flagged. Verified that everything this hook exists
@@ -88,7 +96,7 @@ repos:
         args:
           [
             "--select=F821,F822",
-            "--builtins=n,t,levels,internal,leaves,edges,pairs",
+            "--builtins=n,t,levels,internal,leaves,edges,pairs,farleaves,_",
           ]
         # NOT scoped: the whole repo, `examples/` and `bench/` and `tests/` included.
         # It was `files: ^jaccpot/` when introduced, because
