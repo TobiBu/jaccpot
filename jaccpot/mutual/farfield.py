@@ -357,8 +357,32 @@ def dense_level_schedule(
     """
     depths = len(level_nodes)
     widths = [int(level.shape[0]) for level in level_nodes] or [0]
-    d_cap = int(depth_cap) if depth_cap is not None else snap_capacity(depths)
-    w_cap = int(width_cap) if width_cap is not None else snap_capacity(max(widths))
+    # `None` means EXACTLY this schedule, which is what the docstring promises and
+    # what the unpadded path needs. It used to mean `snap_capacity(...)`, and that
+    # was wrong in a way worth spelling out, because it was invisible in every
+    # correctness test: `snap_capacity`'s defaults are sized for the PAIR lists,
+    # whose occupancies run to the thousands, so its `absolute=256` floor was being
+    # added to a depth and a width of a few tens.
+    #
+    #   n = 256, leaf 8   depth 6, width 32, 63 nodes  ->  384 x 384 = 147,456 slots
+    #
+    # a 2340x inflation, and the cascades are a `lax.scan` over the rows, so that is
+    # 384 iterations over 384 slots for a 63-node tree -- differentiated, since the
+    # reverse pass keeps per-iteration residuals. Measured on the integration
+    # shard, the same 173 tests, cold JAX cache, CI's own `-n 2 --dist loadgroup`:
+    #
+    #   merge-base library      11.87 GiB
+    #   with the snapped default 37.91 GiB   <- OOM-killed the 16 GB CI runner
+    #   sized exactly (this)    12.01 GiB
+    #
+    # 171 passed / 2 skipped in all three, so nothing about it was visible as a
+    # failure -- only as a runner that stopped reporting.
+    #
+    # The padded path is unaffected: `caps` comes from `resolve_mutual_capacities`,
+    # which snaps depth and width with headroom scaled to THEM (`absolute=8/4` and
+    # `32/16`), not with the pair-list floor.
+    d_cap = int(depth_cap) if depth_cap is not None else depths
+    w_cap = int(width_cap) if width_cap is not None else max(widths)
     if depths > d_cap:
         raise ValueError(f"tree depth {depths} exceeds depth_cap {d_cap}")
     if max(widths) > w_cap:

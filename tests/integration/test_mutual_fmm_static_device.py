@@ -357,8 +357,26 @@ def test_the_device_walk_reproduces_the_host_traversal_pair_for_pair(n, theta, l
     assert _pair_set(walk.near_a, walk.near_b, walk.near_count) == host_near
 
 
+# Marked `slow` so test-smoke skips it, matching what the five Pallas/padding
+# cases in test_mutual_fmm.py do and for the same reason. Measured peak RSS on
+# CPU/float64, each as the step it adds to a serial run of this module:
+#
+#   test_a_device_built_state_gives_the_same_force_and_gradient[512]   2.79 GiB
+#   test_the_device_backend_matches_the_exact_sum_as_well_as_the_host   0.97 GiB
+#   test_a_device_built_state_gives_the_same_force_and_gradient[4096]   0.39 GiB
+#
+# test-smoke runs the whole tree at `-n 2` with no `--dist loadgroup`, so any two
+# of these can land on the two workers together. They ran there for free until
+# TobiBu/yggdrax#45 merged, because `needs_device_topology` skipped them; once it
+# landed they became live and both smoke jobs went over the runner. test-full
+# still runs them -- `slow` is not deselected there -- in this module's own shard,
+# where the whole module measures 7.50 GiB.
+_SMOKE_TOO_HEAVY = pytest.mark.slow
+
+
 @pytest.mark.parametrize("n,theta,leaf,order", [(512, 0.9, 16, 4), (4096, 0.7, 32, 4)])
 @needs_device_topology
+@_SMOKE_TOO_HEAVY
 def test_a_device_built_state_gives_the_same_force_and_gradient(n, theta, leaf, order):
     """Same force *and* same gradient as the host-built state, to round-off."""
     from jaccpot.mutual.force import resolve_mutual_capacities
@@ -450,6 +468,7 @@ def test_topology_build_and_force_are_one_jitted_program():
 
 @needs_device_topology
 @needs_nornax
+@_SMOKE_TOO_HEAVY
 def test_the_device_backend_matches_the_exact_sum_as_well_as_the_host_one():
     """``topology_backend="device"`` is not a downgrade.
 
