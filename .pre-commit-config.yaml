@@ -78,6 +78,8 @@ repos:
         #     leaves    leaf nodes
         #     edges     entries of the flattened neighbour list
         #     pairs     entries of a precomputed leaf-pair schedule
+        #     blocks    target blocks; extent never observed non-zero
+        #     blocksize the target block size, `JACCPOT_LARGE_N_TARGET_BLOCK_SIZE`
         #     farleaves the FAR-field leaf view, which is not the near-field one:
         #               they differ on the octree backend (5 vs 3)
         #     _         an anonymous axis: rank asserted, extent deliberately not.
@@ -96,7 +98,7 @@ repos:
         args:
           [
             "--select=F821,F822",
-            "--builtins=n,t,levels,internal,leaves,edges,pairs,farleaves,_",
+            "--builtins=n,t,levels,internal,leaves,edges,pairs,farleaves,blocks,blocksize,_",
           ]
         # NOT scoped: the whole repo, `examples/` and `bench/` and `tests/` included.
         # It was `files: ^jaccpot/` when introduced, because
