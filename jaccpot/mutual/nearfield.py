@@ -282,6 +282,7 @@ def mutual_near_field_forces(
     chunk_size: Optional[int] = None,
     use_pallas: bool = False,
     interpret: bool = False,
+    skip_padded_chunks: bool = False,
 ) -> Array:
     """Return the mutual near-field **force** on every particle.
 
@@ -321,6 +322,31 @@ def mutual_near_field_forces(
     interpret : bool
         Run the Pallas kernel under CPU interpret semantics, which is what keeps
         the parity tests non-vacuous off-GPU.
+    skip_padded_chunks : bool
+        Branch past whole chunks holding no live pair, instead of evaluating and
+        masking them. Default False, and that default is measured rather than
+        cautious: it is a large win on the Pallas branch and a large LOSS on the
+        pure-JAX one.
+
+        The trip count comes from ``near_a.shape[0]``, which under capacity padding
+        is the capacity, so this loop does padded work and then discards it --
+        24-41% of the near field at N = 1e5-1e6. Skipping is legal because
+        :func:`resolve_mutual_capacities` pads a contiguous tail, so only trailing
+        chunks can ever be skipped and no live pair hides inside one. Measured at
+        N = 1e6, leaf 64, A100, fp64, near field alone:
+
+        ==========  =========  =========
+        branch      off        on
+        ==========  =========  =========
+        pure JAX     1200 ms    1859 ms
+        Pallas        855 ms     604 ms
+        ==========  =========  =========
+
+        The Pallas branch wants it (-29%); the JAX branch is 1.55x *slower* with
+        it, presumably because wrapping a large scan body in a conditional costs
+        more fusion or loop-invariant hoisting than the skipped work is worth. So
+        it is per-branch rather than a global improvement, and the default stays
+        off because ``"jax"`` is the default backend.
 
     Returns
     -------
@@ -496,11 +522,9 @@ def mutual_near_field_forces(
         near_b = jnp.concatenate([near_b, jnp.zeros((pad,), dtype=near_b.dtype)])
         near_valid = jnp.concatenate([near_valid, jnp.zeros((pad,), dtype=bool)])
 
-    def pair_body(acc: Array, idx: Array) -> tuple[Array, None]:
-        start = idx * pair_chunk
+    def pair_chunk_work(acc: Array, start: Array, live: Array) -> Array:
         la = lax.dynamic_slice_in_dim(near_a, start, pair_chunk)
         lb = lax.dynamic_slice_in_dim(near_b, start, pair_chunk)
-        live = lax.dynamic_slice_in_dim(near_valid, start, pair_chunk)
         va = leaf_particle_valid[la] & live[:, None]
         vb = leaf_particle_valid[lb] & live[:, None]
         if pallas:
@@ -511,7 +535,7 @@ def mutual_near_field_forces(
             contrib_b = jnp.where(vb[..., None], contrib_b, 0.0)
             acc = acc.at[pa].add(contrib_a.astype(acc.dtype))
             acc = acc.at[pb].add(contrib_b.astype(acc.dtype))
-            return acc, None
+            return acc
         pa, pb = leaf_particles[la], leaf_particles[lb]
         xa, ma, ra = _gather_leaf_block(positions, masses, rung, pa, va)
         xb, mb, rb = _gather_leaf_block(positions, masses, rung, pb, vb)
@@ -526,6 +550,41 @@ def mutual_near_field_forces(
         contrib_b = jnp.where(vb[..., None], -jnp.sum(block, axis=1), 0.0)
         acc = acc.at[pa].add(contrib_a.astype(acc.dtype))
         acc = acc.at[pb].add(contrib_b.astype(acc.dtype))
+        return acc
+
+    def pair_body(acc: Array, idx: Array) -> tuple[Array, None]:
+        start = idx * pair_chunk
+        live = lax.dynamic_slice_in_dim(near_valid, start, pair_chunk)
+        # Skip a chunk with no live pair in it, rather than evaluating it and
+        # masking the result to zero.
+        #
+        # The trip count comes from `near_a.shape[0]`, which under capacity padding
+        # is the CAPACITY, not the occupancy -- so this loop was doing the padded
+        # work and then throwing it away. Measured cost of that, near field alone,
+        # A100, fp64, theta 0.7, order 4, by slicing the lists to their occupancy:
+        #
+        #   leaf 64   N=2e4  17.4%    N=1e5  35.9%    N=1e6  41.0%
+        #   leaf 32   N=2e4  21.0%    N=1e5  57.1%
+        #   leaf 256  N=2e4  64.5%
+        #
+        # i.e. it grows with N, and at 1e6 the near field is 59% of a traversal, so
+        # this was ~24% of the whole force. `lax.cond` is the right tool rather than
+        # `jnp.where`: XLA executes only the taken branch, where `where` would
+        # compute the block and discard it.
+        #
+        # This recovers the padding to CHUNK granularity, which is the right
+        # granularity to stop at: `resolve_mutual_capacities` pads the tail
+        # contiguously (`near_valid = arange < n_near`), so the skipped chunks are
+        # the trailing ones and no live pair is ever inside a skipped chunk.
+        if skip_padded_chunks:
+            acc = lax.cond(
+                jnp.any(live),
+                lambda a: pair_chunk_work(a, start, live),
+                lambda a: a,
+                acc,
+            )
+        else:
+            acc = pair_chunk_work(acc, start, live)
         return acc, None
 
     forces, _ = lax.scan(pair_body, forces, jnp.arange(steps))
