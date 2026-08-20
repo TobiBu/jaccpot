@@ -60,10 +60,18 @@ G.2, G.3, G.5, G.7 and 2.4. Two of those five are no longer decisions:
   about how this file is maintained.
 - **2.4 is done** (`d473b48`), as both its own row and section C's closing paragraph record.
 
-So the live decisions are **G.2** (does STYLE_GUIDE §8 or `_env.py` state the policy on who may
-read the environment), **G.3** (may `operators/` import `pallas/`), and **G.5** (`local_walk="treecode"`
-reaches a 0%-covered `experimental/` module from a production path). None of the three is a
-refactoring question and none blocks anything else.
+~~So the live decisions are **G.2**, **G.3** and **G.5**.~~ **All three answered 2026-08-20:**
+
+- **G.2 — `_env.py` wins**, §8 narrowed to *resolves `"auto"` policies*. A.3 collapses from
+  "16 findings or zero" to **one**: `mutual/farfield.py`, which must not be converted
+  mechanically because it raises where `env_choice` warns-and-defaults. See G.2.
+- **G.3 — move the dispatch up** into `runtime/kernels/`. Re-measuring found one site had become
+  three, and that it is a *cycle*, so this is a refactor in M2L code with its own PR and its own
+  numerics verification, not a documentation change.
+- **G.5 — left as-is**, exposure accepted. But a **second** `experimental/` edge turned up that
+  the decision does not cover: `import jaccpot.pallas` loads `experimental/treecode_walk`
+  eagerly, contradicting §8's *"not imported by production paths"*. Open as its own item, filed
+  rather than absorbed.
 
 ---
 
@@ -249,6 +257,25 @@ Those cannot both be the policy. Measured env reads outside `runtime/`:
 readers incident it consolidated). The likely resolution is that §8's sentence should say
 *resolves policy* rather than *reads environment variables*. Section G — I am not going to
 guess which document is authoritative.
+
+> **Decided by you, 2026-08-20: that resolution, exactly.** §8 now reads *"the only place that
+> resolves `"auto"` policies"*, and `_env.py` is the sanctioned reader for any layer. Reverting
+> the other way would have undone 2.2 and re-created the divergence `_env.py` exists to prevent.
+>
+> **One genuine violation of the narrowed rule falls out, and it must NOT be fixed
+> mechanically.** `mutual/farfield.py:135` resolves `JACCPOT_MUTUAL_M2L="auto"` into
+> `"fused"`/`"jax"` outside `runtime/`. Routing it through `env_choice` looks like the obvious
+> one-line fix and is wrong: it **raises `ValueError`** on an unrecognised value and documents
+> that in its `Raises` section, while `env_choice` warns once and falls back to the default —
+> 2.2's deliberate semantics. The mechanical conversion would turn a loud failure into a quiet
+> default, which is the exact class of change 2.2 was careful about. The real fix is moving the
+> resolution into `runtime/`, and that is the mutual lane's decision.
+>
+> `_typecheck.py:12` is the other raw read and is structural: it reads its own import-hook flag
+> before `jaccpot` is importable enough to use `_env`. Not a violation.
+>
+> So A.3 resolves to **one** finding, not "16 findings or zero" — and the 16 was a pre-2.2
+> number that survived in §8's own note until now.
 
 > **RE-MEASURED 2026-08-18. The count collapsed from 16 to 2, and G.2 is still open — those are
 > not in tension, and the reason is the point.**
@@ -2030,19 +2057,32 @@ non-batch function exists at `operators/complex_ops.py:551`. Reachable when
 
 Both want a regression test that enters the branch, which is why they are not Tier 0.
 
-### G.2 STYLE_GUIDE §8 vs `_env.py`: which is the policy?
+### G.2 STYLE_GUIDE §8 vs `_env.py`: which is the policy? — **DECIDED 2026-08-20: `_env.py` wins, §8 narrowed**
 
 §8 says `runtime/` is *"the only place that reads environment variables"*; `_env.py:21-22`
 says any layer may. 16 reads live outside `runtime/` (A.3). My reading is that `_env.py` is the
 newer decision and §8's sentence should be narrowed to *"the only place that resolves `"auto"`
 policies"* — but that is your call, and it determines whether A.3 is 16 findings or zero.
 
-### G.3 Should `operators/` be allowed to import `pallas/`?
+### G.3 Should `operators/` be allowed to import `pallas/`? — **DECIDED 2026-08-20: move the dispatch up into `runtime/kernels/`**
 
 `operators/m2l_real_rot_scale.py:78` imports `pallas/m2l_core_z_real` (function-local). §8
 defines `operators/` as pure algebra. The three ways out: accept and document it (like the
 `grad_options` case), move the dispatch up into `runtime/kernels/`, or note that `pallas/`
 kernels are algebra-with-a-backend and belong in the same tier. I have no basis for choosing.
+
+> **Re-measured 2026-08-20: it is one site no longer, and it is a cycle.** Three function-local
+> `operators/ -> pallas/` imports now exist —
+> `m2l_real_rot_scale.py:148` (`m2l_core_z_real`), `:840` (`m2l_real_fused`), and
+> `complex_ops.py:2745` (`m2l_complex_fused`) — while `pallas/` imports `operators/` at **module
+> scope** in three modules. The deferred direction is load-bearing, not incidental: the comment
+> at `m2l_real_rot_scale.py:39-43` records that a module-scope import here breaks
+> `from jaccpot.pallas import ...` when that is the first `jaccpot` import.
+>
+> **Decided by you: option (b), move the dispatch up.** The structurally clean answer, and the
+> one that makes §8's definition of `operators/` true rather than true-with-exceptions. It is a
+> real refactor in M2L code, so it is its own PR with its own numerics verification, not folded
+> into this decision commit.
 
 ### G.4 Delete the Wigner reference family, or wire it up? — **DECIDED: deleted (`ab58c3d`)**
 
@@ -2073,7 +2113,7 @@ cross-check we would never reach for is not worth carrying at all. Landed in `ab
 together with G.8. Kept: a comment at the rotation section recording what checks these builders
 now, so the next reader does not repeat the search.
 
-### G.5 `runtime/_interaction_cache.py:892` → `experimental/treecode_far_near.py`
+### G.5 `runtime/_interaction_cache.py:892` → `experimental/treecode_far_near.py` — **DECIDED 2026-08-20: left as-is, exposure accepted**
 
 Already documented in §8 as *"the weakest-covered production option in the tree"*. My
 measurement confirms `treecode_far_near.py` at 0%, and it is reachable from
@@ -2081,6 +2121,25 @@ measurement confirms `treecode_far_near.py` at 0%, and it is reachable from
 violation that is a correctness exposure rather than a style one. Options: promote the module
 out of `experimental/`, remove `local_walk="treecode"` as a supported option, or leave it and
 accept the exposure. Not a refactoring decision.
+
+> **Decided by you, 2026-08-20: leave it, exposure accepted.** The import at
+> `_interaction_cache.py:1402` (the line moved) is function-local, so nothing loads unless
+> `local_walk="treecode"` is selected, and the default is `"dual_tree"`. The blast radius is
+> bounded to callers who opt in.
+>
+> **A SECOND EDGE, which this entry never mentioned and which the decision above does not
+> cover.** `jaccpot/pallas/__init__.py:13` imports `treecode_walk_pallas`, which imports
+> `jaccpot.experimental.treecode_walk` at **module scope** — not deferred. Measured:
+>
+>     import jaccpot          -> experimental NOT loaded
+>     import jaccpot.pallas   -> loads jaccpot.experimental.treecode_walk
+>
+> So §8's *"`experimental/` … not imported by production paths"* is false for anyone who imports
+> `jaccpot.pallas` directly. It is **not** a correctness exposure — `treecode_walk.py` is at
+> 100% coverage, which is why `[tool.coverage.run]`'s omit list deliberately excludes it — but
+> it does contradict the layering claim, and making that one import deferred would restore it.
+> Left open as its own item rather than folded into the decision above, because it is a
+> different edge with a different risk.
 
 ### G.6 Priorities I need ranked — **partly answered**
 

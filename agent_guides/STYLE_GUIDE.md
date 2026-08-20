@@ -350,7 +350,9 @@ Keep the seams in the layout clean and the import graph acyclic:
 - `pallas/` — accelerated kernels that must stay numerically equivalent to their reference
   counterparts. Equivalence is stated in both docstrings and tested.
 - `runtime/` — orchestration, config resolution, lane selection, dispatch. The only place
-  that reads environment variables or resolves `"auto"` policies.
+  that **resolves `"auto"` policies**. Reading a `JACCPOT_*` variable is not restricted to
+  `runtime/`: `jaccpot/_env.py` is the sanctioned reader for **any** layer, and seven modules
+  outside `runtime/` use it. See the note at the end of this section.
 - `distributed/` — decomposition, halo exchange, collectives.
 - `experimental/` — prototypes. Not production, not held to production standards, not
   imported by production paths.
@@ -397,12 +399,38 @@ reader auditing the layering does not have to rediscover them:
 - `basis/complex_sh.py` imports `operators/{complex_ops,real_harmonics}`. Within the single
   "mathematical algebra" tier this section defines, so benign.
 
-Separately, and worth knowing because this section's wording implies otherwise: `runtime/` is
-**not** the only place that reads environment variables. `jaccpot/_env.py` exists so that any
-layer can, and its module docstring says so explicitly; there are 16 such reads outside
-`runtime/` (13 in `nearfield/near_field.py`, two in `pallas/`, one in `upward/`). Either that
-sentence should say *resolves `"auto"` policies* rather than *reads environment variables*, or
-`_env.py`'s docstring is wrong. Unresolved.
+**Environment variables: `_env.py` is the reader, `runtime/` owns the policy.** This was audit
+G.2, and it is now decided. The old wording — *"the only place that reads environment
+variables"* — contradicted `jaccpot/_env.py`, whose docstring says any layer may use it. `_env.py`
+wins, because it exists to prevent a real bug: four near-identical private readers had
+accumulated and did **not** agree, so the same value meant different things depending on which
+module read it. Item 2.2 consolidated them deliberately, and seven modules outside `runtime/`
+now read through it. Reverting that would re-create the divergence.
+
+So the rule is narrower: **`runtime/` is the only place that resolves an `"auto"` policy into a
+concrete choice.** Reading a flag where it is used is fine.
+
+Re-measured 2026-08-20, because the count this note used to carry was stale by an order of
+magnitude — it said 16 raw reads outside `runtime/` (a pre-2.2 number):
+
+| | count |
+|---|---|
+| modules outside `runtime/` reading via `_env.py` | 7 — sanctioned |
+| raw `os.environ` / `os.getenv` outside `runtime/` | **2** |
+
+The two raw reads are not equivalent:
+
+- `_typecheck.py:12` is **structural**. It reads its own import-hook flag before `jaccpot` is
+  importable enough to use `_env`, so it cannot route through it.
+- `mutual/farfield.py:135` is a **genuine violation of the narrowed rule**: it resolves
+  `JACCPOT_MUTUAL_M2L="auto"` into `"fused"`/`"jax"` outside `runtime/`.
+
+**Do not "fix" that second one by swapping in `env_choice`.** It raises `ValueError` on an
+unrecognised value and documents that in its `Raises` section; `env_choice` warns once and falls
+back to the default, which is 2.2's deliberate house semantics. A mechanical conversion would
+silently turn a loud failure into a quiet default — the exact class of change 2.2 was careful
+about. Moving the resolution into `runtime/` is the real fix, and it is the mutual lane's own
+decision to make.
 
 Function-local imports are used deliberately in a few places to break cycles or defer heavy
 Pallas imports (see `runtime/kernels/core.py`). Leave them; do not hoist them to module
