@@ -211,7 +211,12 @@ def _pytest_cmd(extra: list[str]) -> list[str]:
         # thereby switched *off* every `FAILED` line in the short summary -- the
         # lines :func:`_classify_failures` was written to read.
         "-rfEs",
-        "-v",
+        # NOT `-v`. `-v` and `-q` are counters, and `addopts` in pyproject.toml
+        # carries `-q`, so `-v` netted to verbosity 0: the run printed progress
+        # dots and no per-test line at all, leaving the not-vacuous check nothing
+        # to read no matter how it parsed. `--verbosity` sets an absolute value,
+        # so it cannot be cancelled by a flag someone adds to `addopts` later.
+        "--verbosity=1",
         *extra,
     ]
 
@@ -257,18 +262,27 @@ def _run_pytest(env: dict[str, str], extra: list[str]) -> tuple[int, str]:
 
 
 _XDIST_PREFIX = re.compile(r"^\[gw\d+\]\s+\[\s*\d+%\]\s+")
-_VERDICTS = frozenset({"PASSED", "FAILED", "ERROR", "SKIPPED", "XFAIL", "XPASS"})
+_PROGRESS_SUFFIX = re.compile(r"\s*\[\s*\d+%\]\s*$")
+_VERDICTS = ("PASSED", "FAILED", "ERROR", "SKIPPED", "XFAIL", "XPASS")
 
 
 def _outcomes_by_node(output: str) -> dict[str, set[str]]:
     """Parse reported test outcomes out of pytest output, in either layout.
 
-    Both layouts have to be handled, and getting this wrong is silent. Plain
-    ``-v`` writes ``<node id> PASSED``; under ``-n`` the same run writes
-    ``[gw3] [ 42%] PASSED <node id>`` -- verdict *first*, behind a worker prefix.
-    This gate runs with ``-n``, so a parser written against the plain layout
-    matches nothing at all, reports every GPU-gated test as never having run, and
-    fails the gate for a reason that has nothing to do with the GPU.
+    Three things here are load-bearing, each having been wrong once:
+
+    * **Layout.** Plain ``-v`` writes ``<node id> PASSED``; under ``-n`` the same
+      run writes ``[gw3] [ 42%] PASSED <node id>`` -- verdict *first*, behind a
+      worker prefix. This gate runs with ``-n``, so a parser written against the
+      plain layout matches nothing at all.
+    * **Node ids contain spaces.** ``test_x[delta0-exact-zero displacement
+      (single-child COM L2L)-float32]`` is a real id from this suite. Splitting
+      on whitespace truncates it at the first space, and the ``float32`` and
+      ``float64`` cases then collapse to one key -- silently undercounting.
+      So the id is taken as the rest of the line, not as a token.
+    * **Short-summary reasons.** ``-rfEs`` writes
+      ``FAILED <node id> - AssertionError: ...``, so the reason has to be cut off
+      the end or it becomes part of the id.
 
     Parameters
     ----------
@@ -284,14 +298,21 @@ def _outcomes_by_node(output: str) -> dict[str, set[str]]:
     outcomes: dict[str, set[str]] = {}
     for raw in output.splitlines():
         line = _XDIST_PREFIX.sub("", raw.strip())
-        parts = line.split()
-        if len(parts) < 2:
-            continue
-        if parts[0] in _VERDICTS and "::" in parts[1]:
-            verdict, node = parts[0], parts[1]
-        elif parts[1] in _VERDICTS and "::" in parts[0]:
-            verdict, node = parts[1], parts[0]
-        else:
+        verdict, node = None, None
+        for candidate in _VERDICTS:
+            if line.startswith(f"{candidate} "):
+                # Verdict first: the id is the rest of the line, minus any
+                # ` - reason` the short summary appends.
+                verdict = candidate
+                node = line[len(candidate) :].strip().split(" - ")[0].strip()
+                break
+            if line.endswith(f" {candidate}") or f" {candidate} " in line:
+                # Verdict last, optionally followed by a ` [ 42%]` counter.
+                head, _, _ = line.rpartition(candidate)
+                verdict = candidate
+                node = _PROGRESS_SUFFIX.sub("", head).strip()
+                break
+        if verdict is None or not node or "::" not in node:
             continue
         outcomes.setdefault(node, set()).add(verdict)
     return outcomes
