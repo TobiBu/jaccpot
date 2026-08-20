@@ -191,6 +191,8 @@ must also be added to the flake8 hook's `--builtins` list — see 4.4.
 | `edges` | entries of the flattened neighbour list |
 | `pairs` | entries of a precomputed leaf-pair schedule |
 | `chunks`, `chunkflat` | the 2-D chunked scatter schedule |
+| `farleaves` | the **far-field** leaf view, which is not `leaves`: they differ on the octree backend |
+| `blocks`, `blocksize` | target blocks and the block size (`JACCPOT_LARGE_N_TARGET_BLOCK_SIZE`) |
 | `ct` | Cartesian packed coefficients, `(p+1)(p+2)(p+3)/6` |
 | `levels` | block-step levels, `k_max + 1` of them |
 | `2`, `3` | literals -- the `(start, end)` pair and the spatial dimension |
@@ -199,6 +201,30 @@ must also be added to the flake8 hook's `--builtins` list — see 4.4.
 **`ct` is not `C`.** Elsewhere in the package `C` means `sh_size(p) == (p+1)**2`, the
 spherical-harmonic packing. `upward/tree_expansions.py` packs Cartesian moments, so its count is
 `(p+1)(p+2)(p+3)/6`. The two agree only at p=1, which is how one symbol served both for so long.
+
+**`farleaves` exists because of a mistake worth not repeating.** `leaf_nodes` in
+`runtime/kernels/_evaluate.py` was annotated `leaves`, sharing the axis with
+`nearfield_leaf_nodes`. That equality holds for the radix tree and fails on the octree
+execution backend (5 against 3), and it broke 7 tests the moment a decorator made the
+annotation enforced. The shapes had been derived from 64 captured calls -- through
+`test_near_field.py` and `tests/integration/`, neither of which enters that backend. **Capture
+coverage bounds annotation validity:** an axis equality observed in every call you recorded is
+only as strong as the lanes you recorded.
+
+**A named axis can be impossible even when the shape is known**, and this is the sharper case.
+`runtime/kernels/_evaluate.py`'s `nearfield_leaf_particle_indices` is measurably `(leaves, w)`
+when its lane is live -- pinned across three configurations in
+`tests/unit/runtime/test_large_n_nearfield_shapes.py`. It still cannot be annotated that way.
+A jitted signature cannot take `None` conditionally, so when the lane is off the array arrives
+as a zero-sized sentinel, and the same parameter is `(leaves, w)` live and `(0, 0)` absent.
+Naming the first axis asserts the sentinel has `leaves` rows; it has 0. Annotating it fails 87
+tests, the characterization goldens among them.
+
+The rule that falls out: **a name is unusable once something else in the same signature has
+already bound it to a live extent.** In the same function `blocks blocksize` is fine, because
+those names appear on nothing else, so `(0, 32)` and a live `(nblocks, 32)` both satisfy them --
+and what gets asserted is that the two block arrays agree with each other, which is real.
+Knowing the shape and being able to annotate it are different questions.
 
 **Anonymous axes are a legitimate answer, not a cop-out.** Where a leading axis is
 *caller-dependent*, naming it binds it to whichever caller ran first and breaks the other.

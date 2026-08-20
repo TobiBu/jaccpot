@@ -777,15 +777,21 @@ def _evaluate_tree_compiled_impl(
     nearfield_offsets: Int[Array, "leaves+1"],
     nearfield_neighbors: Int[Array, "edges"],
     nearfield_counts: Int[Array, "leaves"],
-    # RANK-ONLY, deliberately. The families below are passed as ZERO-SIZED
-    # sentinels whenever their lane is off -- `(0,)`, `(0, 0)`, `(leaves, 0, 0)` --
-    # because a jitted signature cannot take `None` conditionally. Across 64
-    # captured calls through `tests/unit/core/test_near_field.py` and
-    # `tests/integration/` they were empty EVERY time: they are filled only from
-    # `_large_n_pipeline.py`, and the large-N lane is at 0% CPU coverage (audit
-    # F27). So the rank and dtype are measured and the axis extents are NOT.
-    # Naming those axes would be inventing a contract for a lane nothing here
-    # exercises; `_` asserts exactly what was observed.
+    # RANK-ONLY, and this is now a MEASURED necessity rather than caution.
+    #
+    # The live shape is `(leaves, w)`: verified on a real `LargeNPreparedState`
+    # built on CPU with the backend probe stubbed, across three configurations --
+    # leaf_size 32/16/64 giving (16,32)/(32,16)/(16,64), so both axes are pinned.
+    # `tests/unit/runtime/test_large_n_nearfield_shapes.py` holds that contract.
+    #
+    # It STILL cannot be written here. Whenever the lane is off these arrive as
+    # zero-sized sentinels -- a jitted signature cannot take `None` conditionally --
+    # so the same parameter is `(leaves, w)` live and `(0, 0)` absent. Naming the
+    # first axis asserts the sentinel has `leaves` rows, and it has 0: annotating
+    # `"leaves w"` fails 87 tests, the characterization goldens among them, with
+    # "size of dimension leaves is 0 which does not equal the existing value of 1".
+    # jaxtyping has no way to say "this shape or the empty one", so rank is the
+    # most that can be asserted. Measured 2026-08-20 by trying it.
     nearfield_leaf_particle_indices: Int[Array, "_ _"],
     nearfield_leaf_particle_mask: Bool[Array, "_ _"],
     # `farleaves`, NOT `leaves`. The far-field leaf view is a DIFFERENT axis from
@@ -807,9 +813,23 @@ def _evaluate_tree_compiled_impl(
     # `farleaves+1`, tracking `leaf_nodes` above rather than the near-field count.
     # Measured in both lanes: radix 3 leaves -> 4 offsets, octree 5 -> 6.
     precomputed_target_block_offsets: Int[Array, "farleaves+1"],
+    # Stays rank-only. The docstrings call this "leaf id per target block", which
+    # would make it `blocks` -- but its length was 0 in every observation, so
+    # coupling it to the two arrays above rests on prose, not measurement. That is
+    # the exact mistake `leaf_nodes` made against the octree backend one commit ago.
     precomputed_target_block_leaf_ids: Int[Array, "_"],
-    precomputed_target_block_source_leaf_ids: Int[Array, "_ _"],
-    precomputed_target_block_valid_mask: Bool[Array, "_ _"],
+    # `blocks blocksize` DOES survive, and the difference is instructive: those two
+    # names appear nowhere else in this signature, so they bind freely per call --
+    # the `(0, 32)` sentinel and a live `(nblocks, 32)` both satisfy it, and what is
+    # asserted is that the two arrays agree with each other. A name only becomes
+    # unusable once something else in the same signature already bound it.
+    # `blocksize` is the target block size and is MEASURED: it follows
+    # `JACCPOT_LARGE_N_TARGET_BLOCK_SIZE` exactly (8 -> 8, 16 -> 16, 64 -> 64),
+    # and these two arrays shared it in every observation. `blocks` is the block
+    # count; it was 0 in all of them, so the shared binding says "these two agree",
+    # which is what was observed, and nothing about the extent.
+    precomputed_target_block_source_leaf_ids: Int[Array, "blocks blocksize"],
+    precomputed_target_block_valid_mask: Bool[Array, "blocks blocksize"],
     precomputed_target_block_source_leaf_ids_padded: Int[Array, "farleaves _ _"],
     precomputed_target_block_valid_mask_padded: Bool[Array, "farleaves _ _"],
     *,
@@ -901,9 +921,9 @@ def _evaluate_tree_compiled_impl(
         CSR offsets over target blocks, length ``leaves + 1``.
     precomputed_target_block_leaf_ids : Int[Array, '_']
         Target leaf id per block.
-    precomputed_target_block_source_leaf_ids : Int[Array, '_ _']
+    precomputed_target_block_source_leaf_ids : Int[Array, 'blocks blocksize']
         Source leaf id per block entry.
-    precomputed_target_block_valid_mask : Bool[Array, '_ _']
+    precomputed_target_block_valid_mask : Bool[Array, 'blocks blocksize']
         Validity mask, shaped like the source ids above.
     precomputed_target_block_source_leaf_ids_padded : Int[Array, 'farleaves _ _']
         Rectangular form of the block source ids, ``[leaves, blocks, width]``.
