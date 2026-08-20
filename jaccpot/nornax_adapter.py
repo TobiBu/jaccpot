@@ -77,6 +77,38 @@ _SUPPORTED_BACKENDS = ("jax", "pallas")
 class BlockStepFMM:
     """Rung-aware, momentum-conserving FMM force model.
 
+    **On the leaf_size default of 64.** It is measured, not conventional, and the
+    measurement is worth recording because leaf size is the knob that decides
+    which *stage* of a traversal dominates -- and therefore which optimisation is
+    worth doing at all. Full mutual traversal, A100, fp64, theta 0.7, order 4,
+    device topology, Hernquist (absolutes are contention-soft by ~1.4x; the shape
+    reproduced across three problem sizes):
+
+    ======  ==========  =========  =========  ===============  ==============
+    leaf    N = 2e4     N = 1e5    N = 1e6    near, M2L @ 1e6  force err @ 1e5
+    ======  ==========  =========  =========  ===============  ==============
+    16      --           396.9 ms   5987 ms   17.8%, 68.7%     2.34e-3
+    32       40.5 ms     237.8 ms   3846 ms   31.7%, 53.2%     2.28e-3
+    **64**   28.8 ms    *193.1 ms* *3037 ms*  59.0%, 31.1%     2.10e-3
+    128      28.3 ms     338.0 ms   4808 ms   80.4%, 10.8%     1.78e-3
+    256     --           527.6 ms   8401 ms   94.7%,  2.5%     8.27e-4
+    ======  ==========  =========  =========  ===============  ==============
+
+    A U-curve whose minimum is 64 at every size measured (64 and 128 tie at
+    N = 2e4). The previous default of 32 was **1.23-1.41x slower AND less
+    accurate**, so moving to 64 costs nothing on either axis -- the accuracy
+    gradient runs *with* leaf size, because a bigger leaf resolves more pairs by
+    exact near-field summation instead of by a multipole approximation.
+
+    Above 64 the curve buys accuracy with time at roughly a linear rate (leaf 256:
+    2.54x better force error for 2.77x the time), so 128 and 256 are legitimate
+    choices for an accuracy-led run -- they are on the Pareto frontier. 16 and 32
+    are not: they are dominated on both axes.
+
+    The share columns are the reason this note exists. M2L is 2.5% of a traversal
+    at leaf 256 and 68.7% at leaf 16; the near field is 94.7% and 17.8%. Any claim
+    that one stage "is the hotspot" is a claim about this knob.
+
     Parameters
     ----------
     softening : float
@@ -102,7 +134,9 @@ class BlockStepFMM:
         translation -- the far-field hotspot -- through jaccpot's Pallas kernel
         where the hardware supports it, falling back to pure JAX otherwise.
     leaf_size : int
-        Target particles per leaf for the tree build.
+        Target particles per leaf for the tree build. Default 64, which is the
+        measured optimum for this lane rather than a convention -- see the note
+        above :class:`BlockStepFMM` for the curve.
     near_chunk_size : Optional[int]
         Leaf pairs per near-field scan step; ``None`` derives it from the
         pair-tensor memory budget.
@@ -150,7 +184,7 @@ class BlockStepFMM:
         G: float = 1.0,
         basis: str = "real",
         backend: str = "jax",
-        leaf_size: int = 32,
+        leaf_size: int = 64,
         near_chunk_size: Optional[int] = None,
         pallas_interpret: bool = False,
         topology_backend: str = "host",
