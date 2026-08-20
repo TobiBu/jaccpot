@@ -98,6 +98,37 @@ class TestOutcomeParsing:
         )
         assert list(_outcomes_by_node(doubled)) == ["tests/unit/test_x.py::test_a"]
 
+    def test_node_ids_containing_spaces_are_not_truncated(self) -> None:
+        """Parametrised ids have spaces in them, and truncation silently merges.
+
+        Both ids below are real, from ``test_large_n_config_thresholds.py``.
+        Splitting the line on whitespace cuts them at ``[delta0-exact-zero`` and
+        the float32/float64 pair collapses to one key -- which undercounted the
+        gate's own not-vacuous tally by 3 of 20 without any error.
+        """
+        stem = (
+            "tests/unit/test_large_n_config_thresholds.py"
+            "::test_translation_reverse_is_finite_at_degenerate_displacements"
+        )
+        f32 = f"{stem}[delta0-exact-zero displacement (single-child COM L2L)-float32]"
+        f64 = f"{stem}[delta0-exact-zero displacement (single-child COM L2L)-float64]"
+        outcomes = _outcomes_by_node(
+            f"[gw3] [ 50%] PASSED {f32} \n[gw3] [ 55%] PASSED {f64} \n"
+        )
+        assert set(outcomes) == {f32, f64}
+
+    def test_short_summary_reason_is_not_part_of_the_node_id(self) -> None:
+        """``-rfEs`` appends ``- <reason>``, which must not join the id."""
+        node = "tests/unit/test_x.py::test_a[a b]"
+        outcomes = _outcomes_by_node(f"FAILED {node} - AssertionError: nope\n")
+        assert set(outcomes) == {node}
+
+    def test_plain_layout_with_a_progress_counter(self) -> None:
+        """Non-xdist ``-v`` appends ``[ 33%]`` after the verdict."""
+        node = "tests/unit/test_x.py::test_a[a b]"
+        outcomes = _outcomes_by_node(f"{node} PASSED    [ 33%]\n")
+        assert outcomes == {node: {"PASSED"}}
+
     def test_skip_summary_lines_are_not_mistaken_for_nodes(self) -> None:
         """``SKIPPED [1] path.py:4: reason`` carries no node id and is ignored."""
         line = "SKIPPED [1] tests/unit/test_x.py:4: needs gpu\n"
@@ -184,6 +215,21 @@ class TestPytestCommand:
         r_flags = [a for a in cmd if a.startswith("-r")]
         assert r_flags, "the gate must ask for a short test summary"
         assert all("f" in f and "E" in f and "s" in f for f in r_flags)
+
+    def test_verbosity_is_absolute_not_a_counter(self) -> None:
+        """`-v` is not enough: `addopts` carries `-q` and the two cancel.
+
+        Measured on the 2026-08-20 gate run: with `-v`, pytest printed progress
+        dots and not one per-test line, so the not-vacuous check had nothing to
+        read whatever layout it expected. `--verbosity=N` is absolute and cannot
+        be cancelled by a counter flag added to `addopts` later.
+        """
+        cmd = _pytest_cmd([])
+        assert any(a.startswith("--verbosity=") for a in cmd), (
+            "the gate must set an absolute verbosity; a bare -v is cancelled by "
+            "the -q in pyproject.toml's addopts"
+        )
+        assert "-v" not in cmd
 
     def test_worker_count_is_capped(self) -> None:
         """``-n auto`` on this box means 64 workers on one card; see CLAUDE.md."""
