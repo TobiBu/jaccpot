@@ -267,6 +267,17 @@ def test_every_paper_bench_script_is_covered() -> None:
     excused = {
         # See the note above CASES.
         "stage_breakdown",
+        # Needs >= 2 devices, so it cannot run on a CPU-only runner as itself.
+        # It *can* be coerced onto two forced host devices
+        # (XLA_FLAGS=--xla_force_host_platform_device_count=2), but only with
+        # --halo-exchange buf: the production path uses jax.lax.ragged_all_to_all,
+        # which XLA:CPU does not implement. That makes a CPU smoke case a 150 s
+        # exercise of the deprecated fallback -- the buf path exists only for
+        # JAX < 0.9.1 and goes away when the floor in pyproject.toml rises -- so
+        # it would guard a route we intend to delete while leaving the real one
+        # untested. Covered on real devices by
+        # tests/distributed/test_distributed_grad_correctness.py instead.
+        "distributed_grad_correctness",
     }
     on_disk = set()
     for directory in ("validation", "scaling", "differentiability"):
