@@ -135,12 +135,23 @@ forward rel-L2 vs exact went 2.639e-16 → **4.199e-01** after one gradient, whi
 matching the *local-only* force to 2.249e-16. It hit every evaluator built before
 the gradient, including forward-only ones.
 
-Worked around, not fixed: `halo_exchange=` defaults to the safe `"buf"`. This is
-an upstream JAX/XLA ragged-collective bug (draft report in
-`docs/jax_ragged_all_to_all_bug_report.md`). After a JAX upgrade, run
-`JACCPOT_CHECK_UPSTREAM_RAGGED_FIX=1 pytest tests/distributed/test_distributed_grad_correctness.py`;
-when `test_native_halo_exchange_is_fixed_upstream` passes, make `"native"` the
-default and delete `_grad_halo_exchange`.
+An upstream JAX/XLA ragged-collective bug (draft report in
+`docs/jax_ragged_all_to_all_bug_report.md`), worked around behind a **version
+gate** rather than a fixed default. `halo_exchange=` defaults to `"auto"`, and
+`resolve_grad_halo_exchange` returns `"native"` on JAX >=
+`JAX_RAGGED_GRAD_FIXED_VERSION` = (0, 9, 1) and the bandwidth-hungry but safe
+`"buf"` below it.
+
+**This host is on jax 0.10.2, so `auto` already resolves to `"native"`** — the
+workaround is not in force here, and the suite result above was obtained on the
+native ragged exchange, `test_forward_survives_a_gradient` included. The audit's
+own text still says the default is `"buf"`, which predates the gate; read the
+code, not that sentence.
+
+The remaining cleanup is therefore only the dead-code half of the audit's
+follow-up: `_grad_halo_exchange` and the `"buf"` path still exist for users below
+the floor. Keep them until the JAX floor in `pyproject.toml` rises above 0.9.1,
+at which point both become unreachable and can go.
 
 ### What is already verified
 

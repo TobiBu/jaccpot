@@ -70,12 +70,19 @@ def add_common_args(parser: Any) -> Any:
     return parser
 
 
-def select_gpu(mode: str = "least-used") -> Optional[str]:
-    """Pin a free GPU via ``autocvd``. Call before the first ``import jax``.
+def select_gpu(mode: str = "least-used", *, num_gpus: int = 1) -> Optional[str]:
+    """Pin free GPU(s) via ``autocvd``. Call before the first ``import jax``.
 
     Returns the selected ``CUDA_VISIBLE_DEVICES`` value, or ``None`` if selection
     was skipped. Respects a ``CUDA_VISIBLE_DEVICES`` already set by the caller so
     an explicit outer pin (or a CI runner's) is never silently overridden.
+
+    ``num_gpus`` is what the distributed benchmarks need: a multi-GPU run must
+    claim its whole mesh in one selection, because selecting one card at a time
+    races another process onto the same device and then reports a scaling number
+    measured against a competitor. It is also why a partial selection is fatal
+    below rather than a warning -- a strong-scaling point silently taken on
+    fewer devices than requested is worse than no point at all.
     """
 
     if mode == "none":
@@ -95,8 +102,14 @@ def select_gpu(mode: str = "least-used") -> Optional[str]:
         return os.environ.get("CUDA_VISIBLE_DEVICES")
 
     try:
-        autocvd(num_gpus=1, least_used=(mode == "least-used"))
+        autocvd(num_gpus=num_gpus, least_used=(mode == "least-used"))
     except Exception as exc:  # pragma: no cover - no free GPU, or no GPU at all
+        if num_gpus > 1:
+            raise RuntimeError(
+                f"autocvd could not claim {num_gpus} GPUs ({exc}). Refusing to "
+                "fall back: a distributed measurement taken on a different "
+                "device count than requested is not the measurement asked for."
+            ) from exc
         print(f"[bench] autocvd could not select a GPU ({exc}); using the default")
     # Keep the allocator honest: preallocating the whole card makes concurrent
     # runs on this shared host fail with RESOURCE_EXHAUSTED rather than queue.
