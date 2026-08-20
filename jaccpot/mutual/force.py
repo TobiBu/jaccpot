@@ -41,22 +41,32 @@ rather than level by level. Keeping one multipole set per cell is what avoids th
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, NamedTuple, Optional
 
 import jax
 import jax.numpy as jnp
+import numpy as np
 from jax import lax
 from jaxtyping import Array
 
-from jaccpot.mutual.farfield import MutualTreeArrays, mutual_far_field_forces
+from jaccpot.mutual.farfield import (
+    MutualTreeArrays,
+    _scan_levels,
+    dense_level_schedule,
+    mutual_far_field_forces,
+    snap_capacity,
+)
 from jaccpot.mutual.nearfield import mutual_near_field_forces
 from jaccpot.mutual.topology import MutualTopology
 
 __all__ = [
+    "MutualCapacities",
+    "MutualCapacityOverflow",
     "MutualFMMState",
     "MutualForceResult",
     "build_mutual_state",
+    "resolve_mutual_capacities",
     "mutual_accelerations",
     "mutual_level_accelerations",
     "mutual_weighted_accelerations",
@@ -87,6 +97,187 @@ class MutualForceResult(NamedTuple):
     far_forces: Array
 
 
+class MutualCapacityOverflow(RuntimeError):
+    """A topology did not fit the capacities its state was built for.
+
+    Raised rather than truncating. A truncated interaction list still conserves
+    momentum -- dropping a pair drops both its halves -- so the error would not
+    show up in the diagnostic this lane is judged on, only in a silently wrong
+    force.
+    """
+
+
+class MutualCapacities(NamedTuple):
+    """Fixed capacities that make a prepared state's shapes distribution-free.
+
+    Note the consequence for anything that read ``state.far_a.shape[0]`` as a
+    *count*: once padded, that is the **capacity**. A configuration with no far
+    pairs at all still reports a nonzero capacity, so a vacuity check written
+    against the shape silently stops working. Use ``state.num_far_pairs`` /
+    ``state.num_near_pairs``.
+
+    Everything else about a mutual state is already fixed by
+    ``(N, leaf_size, order)``: ``num_leaves == ceil(N / leaf_size)`` and
+    ``max_leaf_size == leaf_size``, because the tree builder slices the Morton
+    order into fixed-width buckets.
+
+    ``queue`` cannot be derived from a *finished* host topology -- it bounds the
+    widest intermediate pair front, which the host traversal does not record --
+    so it is resolved by trial in
+    :meth:`jaccpot.BlockStepFMM.freeze_template` and defaults to 0, meaning "not
+    resolved yet, use the builder's own default". Getting it wrong is severe and
+    quiet: the device walk's loop *terminates* on queue overflow, so the pair
+    lists come back drastically short. Measured at N = 100 000, leaf 32: a 65 536
+    front yielded 11 022 far pairs against the correct 341 504, a **90% force
+    error** -- with momentum still conserved to 7e-22, because dropping a
+    canonical pair drops both of its halves.
+
+    Attributes
+    ----------
+    near : int
+        Capacity of the canonical near (leaf-pair) list.
+    far : int
+        Capacity of the canonical far (node-pair) list.
+    depth : int
+        Rows in the dense level schedule, i.e. the deepest tree level covered.
+        Also the cascade scan's iteration count, so over-provisioning costs work.
+    width : int
+        Slots per level row, i.e. the widest level covered.
+    queue : int
+        Wavefront capacity for the device traversal.
+    """
+
+    near: int
+    far: int
+    depth: int
+    width: int
+    queue: int = 0
+
+
+def resolve_mutual_capacities(
+    topology: MutualTopology,
+    *,
+    relative: float = 0.10,
+    absolute: int = 256,
+    drift_headroom: bool = False,
+) -> MutualCapacities:
+    """Size capacities from one built topology, with drift headroom.
+
+    Every value is snapped onto :data:`~jaccpot.mutual.farfield.CAPACITY_LADDER`
+    with the additive-plus-relative headroom
+    :func:`~jaccpot.mutual.farfield.snap_capacity` documents, so nearby
+    topologies resolve to the *same* capacity and share one compiled program.
+
+    Depth and width use a small absolute margin instead: they are counted in
+    levels and nodes-per-level, where measured drift is a couple of units
+    (depth 22 -> 24, widest level 20 -> 24), and where over-provisioning a level
+    row costs real work in the cascades.
+
+    Parameters
+    ----------
+    topology : MutualTopology
+        One built topology to size the capacities from.
+    relative : float
+        Fractional headroom on the pair lists. Default ``0.10``.
+    absolute : int
+        Additive headroom on the pair lists. Default ``256``.
+    drift_headroom : bool
+        Size ``depth``/``width`` for a *rollout* that rebuilds the tree, rather
+        than for this one topology. Off by default: it costs 3.6-5.3x the level
+        schedule at test scale, and the cascade walks that schedule on every
+        evaluation, so only a caller that will actually rebuild should pay it. A
+        static-radix template does not need it either -- its linkage is frozen,
+        so its depth is invariant across rebuilds.
+
+    Returns
+    -------
+    MutualCapacities
+        Capacities snapped onto :data:`~jaccpot.mutual.farfield.CAPACITY_LADDER`,
+        with ``queue`` left at 0 for the caller to resolve by trial.
+    """
+    widths = [int(np.asarray(level).shape[0]) for level in topology.level_nodes] or [0]
+    num_leaves = int(np.asarray(topology.leaf_nodes).shape[0])
+    return MutualCapacities(
+        near=snap_capacity(
+            int(np.asarray(topology.near_a).shape[0]),
+            relative=relative,
+            absolute=absolute,
+        ),
+        far=snap_capacity(
+            int(np.asarray(topology.far_a).shape[0]),
+            relative=relative,
+            absolute=absolute,
+        ),
+        # Depth and width need *generous* headroom, not the small absolute
+        # margin the pair lists get. Measured drift on a two-clump N = 4096
+        # rollout was a couple of levels (22 -> 24), which is what the earlier
+        # +25%/+4 policy was sized for -- and it is not representative. On a
+        # Hernquist cusp the LBVH tree depth went 16 -> 30 mid-rollout, nearly
+        # doubling, because tree depth follows the Morton-code distribution and a
+        # central cusp concentrates it hard. Over-provisioning a level row costs
+        # one all-invalid (no-op) iteration of the cascade scan; under-
+        # provisioning raises and ends the run.
+        # Neither is free: `depth` is the number of cascade-scan iterations and
+        # `width` is the work inside each, so over-provisioning depth is not a
+        # no-op the way an invalid *slot* is. They get different policies because
+        # they drift differently. Depth is the volatile one -- an LBVH tree over a
+        # Hernquist cusp went 16 -> 30 mid-rollout, nearly doubling, because tree
+        # depth follows the Morton-code distribution and a central cusp
+        # concentrates it hard -- and the failure mode is a hard raise that ends
+        # the run, with no option to re-resolve (that would change the compiled
+        # shape). Width drifted only ~20% in the same measurements.
+        depth=snap_capacity(
+            max(
+                len(topology.level_nodes),
+                # Only with `drift_headroom`. A measured depth cap with any fixed
+                # margin is fragile for LBVH over a *rollout*: on a Hernquist cusp
+                # the depth was seen to go 16 -> 30 at N = 2e4 and 12 -> 34 at
+                # N = 1e5, because tree depth follows the Morton-code distribution
+                # and a central cusp concentrates it hard. Four times the balanced
+                # depth of the leaf count covers those and is still O(log N).
+                #
+                # It is NOT the default, because `depth` is the cascade scan's
+                # iteration count and `width` the work inside each, so this is
+                # paid on every evaluation by every caller -- including one-shot
+                # builds that never rebuild and so cannot drift. Measured
+                # inflation of the level schedule at test scale: 4.0x at N = 512,
+                # 5.3x at 2048, 3.6x at 4096. That is what OOM-killed a 16 GB CI
+                # runner.
+                (
+                    4 * max(1, int(np.ceil(np.log2(max(2, int(num_leaves))))))
+                    if drift_headroom
+                    else 0
+                ),
+            ),
+            relative=1.0 if drift_headroom else 0.25,
+            absolute=8 if drift_headroom else 4,
+        ),
+        width=snap_capacity(
+            max(widths),
+            relative=0.5 if drift_headroom else 0.25,
+            absolute=32 if drift_headroom else 16,
+        ),
+        # Left unresolved: see MutualCapacities.queue. A host topology does not
+        # record the widest pair front it passed through.
+        queue=0,
+    )
+
+
+# A pytree child needs a dtype, so the default must be an array -- but a
+# dataclass rejects an array default as "mutable", hence the factory.
+def _no_overflow() -> Array:
+    return jnp.asarray(False)
+
+
+def _no_cause() -> Array:
+    return jnp.asarray(0, dtype=jnp.int32)
+
+
+#: Bit positions in ``MutualFMMState.overflow_causes``, in the order a report
+#: should read them.
+OVERFLOW_CAUSES = ("far", "near", "pair_queue", "level_width", "tree_depth")
+
+
 @dataclass(frozen=True)
 class MutualFMMState:
     """Device-resident frozen state for repeated mutual FMM evaluations.
@@ -95,13 +286,20 @@ class MutualFMMState:
     reused across every boundary of that step. Holding it fixed is what makes
     ``jax.grad`` over an evaluation an exact fixed-topology gradient.
 
+    Registered as a **pytree**, so it can be a traced ``jax.jit`` argument rather
+    than a closed-over constant. That is the difference between one compiled
+    program per *rebuild* and one per *capacity profile*; combined with the
+    padding in :func:`build_mutual_state` it is one program for a whole run. The
+    array fields are the children and the scalars are aux data, which is why aux
+    has to stay hashable -- the host-side ``MutualTopology`` used to live here and
+    was removed for exactly that reason (it holds NumPy arrays, so it is
+    unhashable, and nothing but ``num_particles`` ever read it).
+
     Every index array below is a frozen integer constant: cotangents flow to
     positions and masses, never to the topology.
 
     Attributes
     ----------
-    topology : MutualTopology
-        The host-side topology this state was built from, kept for provenance.
     tree : MutualTreeArrays
         Device-resident tree the far-field sweep walks.
     leaf_particles : Array
@@ -113,7 +311,7 @@ class MutualFMMState:
     near_b : Array
         Leaf index of the second endpoint of each canonical near pair.
     near_valid : Array
-        Boolean mask over the near pair list.
+        Boolean mask over the near pair list, which is padded to its capacity.
     self_leaves : Array
         Leaf indices whose intra-leaf self-interaction is evaluated.
     far_a : Array
@@ -129,16 +327,27 @@ class MutualFMMState:
     G : float
         Gravitational constant.
     order : int
-        Expansion order, taken from the topology.
+        Expansion order.
     use_pallas : bool
         Whether to dispatch the fused Pallas kernels instead of pure JAX.
     near_chunk_size : Optional[int]
         Pair-chunk size for the near kernel; ``None`` leaves it unchunked.
     pallas_interpret : bool
         Run the Pallas kernels in interpret mode (CPU debugging).
+    num_particles_ : int
+        Particle count, as aux data. Trailing underscore because
+        ``num_particles`` is the property that reads it.
+    num_near_pairs : Array
+        Live entries in the near pair list. Read this, **not**
+        ``near_a.shape[0]``, which is the capacity once padded.
+    num_far_pairs : Array
+        Live entries in the canonical far pair list, same caveat.
+    topology_overflow : Array
+        True when a capacity was exceeded while building this state on device.
+    overflow_causes : Array
+        Bitmask over :data:`OVERFLOW_CAUSES` naming which capacities overflowed.
     """
 
-    topology: MutualTopology
     tree: MutualTreeArrays
     leaf_particles: Array
     leaf_particle_valid: Array
@@ -156,6 +365,16 @@ class MutualFMMState:
     use_pallas: bool
     near_chunk_size: Optional[int] = None
     pallas_interpret: bool = False
+    num_particles_: int = 0
+    # Occupancy counters. These are 0-d *arrays*, i.e. pytree children, not aux
+    # data -- deliberately. Aux data is part of the treedef and therefore part of
+    # the jit cache key, so a counter that changes every rebuild would re-key the
+    # cache and undo the whole point of the padding. As children they are simply
+    # traced (and unused) inside the compiled force, and readable on the host.
+    num_near_pairs: Array = 0
+    num_far_pairs: Array = 0
+    topology_overflow: Array = field(default_factory=_no_overflow)
+    overflow_causes: Array = field(default_factory=_no_cause)
 
     @property
     def num_particles(self: "MutualFMMState") -> int:
@@ -164,9 +383,68 @@ class MutualFMMState:
         Returns
         -------
         int
-            Particle count of the underlying topology.
+            Particle count, read from aux data rather than from a host-side
+            topology object -- that object was removed from the state so aux
+            could stay hashable.
         """
-        return int(self.topology.num_particles)
+        return int(self.num_particles_)
+
+    @property
+    def near_capacity(self: "MutualFMMState") -> int:
+        """Allocated slots for canonical near pairs.
+
+        Returns
+        -------
+        int
+            The capacity, which is ``>= num_near_pairs``. This is what
+            ``near_a.shape[0]`` reports once the list is padded, which is why the
+            occupancy has its own field.
+        """
+        return int(self.near_a.shape[0])
+
+    @property
+    def far_capacity(self: "MutualFMMState") -> int:
+        """Allocated slots for canonical far pairs.
+
+        Returns
+        -------
+        int
+            The capacity, which is ``>= num_far_pairs``; same caveat as
+            :attr:`near_capacity`.
+        """
+        return int(self.far_a.shape[0])
+
+
+def _pad_pair_list(values: Any, cap: int, *, index_dtype: Any) -> Array:
+    """Pad a 1-D index list up to ``cap`` with zeros.
+
+    Parameters
+    ----------
+    values : Any
+        The live entries, in order.
+    cap : int
+        Target capacity.
+    index_dtype : Any
+        Integer dtype of the returned array.
+
+    Returns
+    -------
+    Array
+        A ``(cap,)`` array whose leading entries are ``values``. The padding is
+        index 0, not -1, because every consumer gathers by it before masking; the
+        companion ``*_valid`` array is what removes the contribution.
+
+    Raises
+    ------
+    ValueError
+        If ``values`` is longer than ``cap``.
+    """
+    arr = np.asarray(values, dtype=np.int64).reshape(-1)
+    if arr.shape[0] > cap:
+        raise ValueError(f"pair list of {arr.shape[0]} exceeds capacity {cap}")
+    out = np.zeros((cap,), dtype=np.int64)
+    out[: arr.shape[0]] = arr
+    return jnp.asarray(out, dtype=index_dtype)
 
 
 def build_mutual_state(
@@ -178,6 +456,7 @@ def build_mutual_state(
     near_chunk_size: Optional[int] = None,
     pallas_interpret: bool = False,
     index_dtype: Any = jnp.int32,
+    caps: Optional["MutualCapacities"] = None,
 ) -> MutualFMMState:
     """Move a host-built topology onto the device as compile-time constants.
 
@@ -185,6 +464,14 @@ def build_mutual_state(
     single kernel invocation with one rounding regime produces both halves of
     every pair. That is what makes the ``+F / -F`` cancellation exact rather
     than approximate.
+
+    With ``caps=None`` every array is sized exactly to the topology, which is the
+    historical behaviour and the right choice for a one-shot evaluation. Pass
+    ``caps`` to pad the pair lists and the level schedule to fixed capacities
+    instead: the arrays then depend on the *capacities* rather than on the
+    particle distribution, so one compiled program serves every rebuild. That is
+    the difference between paying jaccpot's ~200 s mutual-force compile once and
+    paying it per base step.
 
     Parameters
     ----------
@@ -202,27 +489,63 @@ def build_mutual_state(
         Run the Pallas kernels in interpret mode, for CPU debugging.
     index_dtype : Any
         Integer dtype for every index array. Default ``jnp.int32``.
+    caps : Optional[MutualCapacities]
+        Fixed capacities to pad to; see :func:`resolve_mutual_capacities`.
+        ``None`` sizes every array exactly to this topology.
 
     Returns
     -------
     MutualFMMState
         Device-resident state ready for repeated evaluation.
+
+    Raises
+    ------
+    MutualCapacityOverflow
+        If ``caps`` is given and this topology does not fit it. Raised rather than
+        truncated: a dropped canonical pair loses both of its halves, so momentum
+        stays exactly conserved and nothing else would reveal the loss.
     """
     topo = topology
     node_to_leaf = jnp.zeros((topo.num_nodes,), dtype=index_dtype)
     node_to_leaf = node_to_leaf.at[jnp.asarray(topo.leaf_nodes)].set(
         jnp.arange(topo.num_leaves, dtype=index_dtype)
     )
-    near_a = node_to_leaf[jnp.asarray(topo.near_a)]
-    near_b = node_to_leaf[jnp.asarray(topo.near_b)]
 
-    far_a = jnp.asarray(topo.far_a, dtype=index_dtype)
-    far_b = jnp.asarray(topo.far_b, dtype=index_dtype)
+    n_near = int(np.asarray(topo.near_a).shape[0])
+    n_far = int(np.asarray(topo.far_a).shape[0])
+    near_cap = n_near if caps is None else int(caps.near)
+    far_cap = n_far if caps is None else int(caps.far)
+    if n_near > near_cap or n_far > far_cap:
+        raise MutualCapacityOverflow(
+            f"topology overflows its capacities: near {n_near}/{near_cap}, "
+            f"far {n_far}/{far_cap}. Re-resolve the capacities with more headroom; "
+            "silently truncating the interaction list would give a wrong force."
+        )
+
+    near_a = node_to_leaf[
+        _pad_pair_list(topo.near_a, near_cap, index_dtype=index_dtype)
+    ]
+    near_b = node_to_leaf[
+        _pad_pair_list(topo.near_b, near_cap, index_dtype=index_dtype)
+    ]
+    near_valid = jnp.arange(near_cap) < n_near
+
+    far_a = _pad_pair_list(topo.far_a, far_cap, index_dtype=index_dtype)
+    far_b = _pad_pair_list(topo.far_b, far_cap, index_dtype=index_dtype)
     # Both directions of every canonical pair, in one batch, so a single kernel
     # invocation with one rounding regime produces both halves.
     far_source = jnp.concatenate([far_b, far_a])
     far_target = jnp.concatenate([far_a, far_b])
-    far_valid = jnp.ones((int(far_source.shape[0]),), dtype=bool)
+    one_dir_valid = jnp.arange(far_cap) < n_far
+    far_valid = jnp.concatenate([one_dir_valid, one_dir_valid])
+
+    level_nodes, level_parents, level_valid, _, _ = dense_level_schedule(
+        topo.level_nodes,
+        topo.parent_of_level_nodes,
+        depth_cap=None if caps is None else int(caps.depth),
+        width_cap=None if caps is None else int(caps.width),
+        index_dtype=index_dtype,
+    )
 
     tree = MutualTreeArrays(
         num_nodes=int(topo.num_nodes),
@@ -230,25 +553,28 @@ def build_mutual_state(
         leaf_nodes=jnp.asarray(topo.leaf_nodes, dtype=index_dtype),
         leaf_particles=jnp.asarray(topo.leaf_particles, dtype=index_dtype),
         leaf_particle_valid=jnp.asarray(topo.leaf_particle_valid),
-        level_nodes=tuple(
-            jnp.asarray(level, dtype=index_dtype) for level in topo.level_nodes
-        ),
-        level_parents=tuple(
-            jnp.asarray(level, dtype=index_dtype)
-            for level in topo.parent_of_level_nodes
-        ),
+        level_nodes=level_nodes,
+        level_parents=level_parents,
+        level_valid=level_valid,
         far_source=far_source,
         far_target=far_target,
         far_valid=far_valid,
     )
     return MutualFMMState(
-        topology=topo,
+        num_particles_=int(topo.num_particles),
+        num_near_pairs=jnp.asarray(n_near, dtype=jnp.int32),
+        num_far_pairs=jnp.asarray(n_far, dtype=jnp.int32),
+        # A pytree child must be an array. The host traversal never overflows --
+        # it allocates to the exact counts -- but the leaf still has to have a
+        # dtype, or every consumer that walks the state's leaves trips over it.
+        topology_overflow=jnp.asarray(False),
+        overflow_causes=jnp.asarray(0, dtype=jnp.int32),
         tree=tree,
         leaf_particles=tree.leaf_particles,
         leaf_particle_valid=tree.leaf_particle_valid,
         near_a=near_a,
         near_b=near_b,
-        near_valid=jnp.ones((int(near_a.shape[0]),), dtype=bool),
+        near_valid=near_valid,
         self_leaves=jnp.arange(topo.num_leaves, dtype=index_dtype),
         far_a=far_a,
         far_b=far_b,
@@ -261,6 +587,91 @@ def build_mutual_state(
         near_chunk_size=near_chunk_size,
         pallas_interpret=bool(pallas_interpret),
     )
+
+
+# ---------------------------------------------------------------------------
+# pytree registration
+# ---------------------------------------------------------------------------
+#
+# Both types are registered so a prepared state can be a *traced* jit argument.
+# The split is the same in each: array leaves become children, scalars become
+# aux data. Aux data must be hashable and comparable -- jax uses it in the
+# treedef, which is part of the jit cache key -- so nothing holding a NumPy array
+# may live there.
+#
+# `MutualTreeArrays` needs an explicit registration even though it is a
+# NamedTuple (and so already a pytree): as a NamedTuple its `num_nodes` and
+# `order` ints are *children*, which means they would arrive traced and break
+# every `int(tree.order)` the operators do. Registering it moves them to aux.
+
+_STATE_CHILDREN = (
+    "tree",
+    "leaf_particles",
+    "leaf_particle_valid",
+    "near_a",
+    "near_b",
+    "near_valid",
+    "self_leaves",
+    "far_a",
+    "far_b",
+    "forward_permutation",
+    "inverse_permutation",
+    "num_near_pairs",
+    "num_far_pairs",
+    "topology_overflow",
+    "overflow_causes",
+)
+_STATE_AUX = (
+    "softening",
+    "G",
+    "order",
+    "use_pallas",
+    "near_chunk_size",
+    "pallas_interpret",
+    "num_particles_",
+)
+_TREE_CHILDREN = (
+    "leaf_nodes",
+    "leaf_particles",
+    "leaf_particle_valid",
+    "level_nodes",
+    "level_parents",
+    "level_valid",
+    "far_source",
+    "far_target",
+    "far_valid",
+)
+_TREE_AUX = ("num_nodes", "order")
+
+
+def _flatten_tree(tree: MutualTreeArrays):
+    return (
+        tuple(getattr(tree, name) for name in _TREE_CHILDREN),
+        tuple(int(getattr(tree, name)) for name in _TREE_AUX),
+    )
+
+
+def _unflatten_tree(aux, children) -> MutualTreeArrays:
+    return MutualTreeArrays(
+        **dict(zip(_TREE_AUX, aux)), **dict(zip(_TREE_CHILDREN, children))
+    )
+
+
+def _flatten_state(state: MutualFMMState):
+    return (
+        tuple(getattr(state, name) for name in _STATE_CHILDREN),
+        tuple(getattr(state, name) for name in _STATE_AUX),
+    )
+
+
+def _unflatten_state(aux, children) -> MutualFMMState:
+    return MutualFMMState(
+        **dict(zip(_STATE_CHILDREN, children)), **dict(zip(_STATE_AUX, aux))
+    )
+
+
+jax.tree_util.register_pytree_node(MutualTreeArrays, _flatten_tree, _unflatten_tree)
+jax.tree_util.register_pytree_node(MutualFMMState, _flatten_state, _unflatten_state)
 
 
 # ---------------------------------------------------------------------------
@@ -496,9 +907,15 @@ def _cell_rungs(state: MutualFMMState, rung_sorted: Array) -> Array:
     per_slot = jnp.where(valid, rung_sorted[tree.leaf_particles], -1)
     node_rung = jnp.full((tree.num_nodes,), -1, dtype=per_slot.dtype)
     node_rung = node_rung.at[tree.leaf_nodes].max(jnp.max(per_slot, axis=1))
-    for nodes, parents in zip(reversed(tree.level_nodes), reversed(tree.level_parents)):
-        node_rung = node_rung.at[parents].max(node_rung[nodes])
-    return node_rung
+
+    def _propagate(acc, nodes, parents, valid):
+        child = jnp.where(valid, nodes, 0)
+        parent = jnp.where(valid, parents, 0)
+        # -1 is the identity for this max: every real rung is >= 0 and `acc`
+        # starts at -1, so a padded slot's `.max(-1)` on node 0 cannot change it.
+        return acc.at[parent].max(jnp.where(valid, acc[child], -1))
+
+    return _scan_levels(_propagate, node_rung, tree, deepest_first=True)
 
 
 def _far_pair_weights(

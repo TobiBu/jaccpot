@@ -141,6 +141,13 @@ _DIFF_FMM_TEST_FILES_WARM_ONLY = frozenset(
     {
         "test_mutual_fmm.py",
         "test_mutual_fmm_nornax.py",
+        # Split out of test_mutual_fmm.py, and it has to be re-listed here or the
+        # split silently un-does the clearing for the cases that moved. That is
+        # not hypothetical: it is what put both test-smoke jobs over the runner
+        # after the move, while they had passed on the identical test set the run
+        # before -- smoke runs `-m "not slow"` over the whole tree, and these
+        # cases are heavy (1-3 GiB each; the module measures 7.35 GiB).
+        "test_mutual_fmm_static_device.py",
     }
 )
 

@@ -635,7 +635,7 @@ def test_rollout_gradient_finite_difference():
         softening=SOFTENING, k_max=1, theta=1.0, max_order=4, leaf_size=8
     )
     topology_state = fmm.prepare(positions, masses)
-    assert topology_state.topology.num_far_pairs > 0
+    assert topology_state.num_far_pairs > 0
 
     def summary(p):
         final_x, final_v = _rollout(
@@ -1157,3 +1157,8 @@ def test_scanned_base_step_traces_one_boundary_kick_not_two_to_the_k():
 
     scanned, unrolled = equations(True), equations(False)
     assert unrolled > 4 * scanned, (unrolled, scanned)
+
+
+# ---------------------------------------------------------------------------
+# static shapes: one compiled program for a whole run
+# ---------------------------------------------------------------------------

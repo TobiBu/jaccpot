@@ -54,6 +54,7 @@ from jax import lax
 from jaxtyping import Array, Float, Int
 
 from jaccpot.mutual.force import (
+    MutualCapacities,
     MutualFMMState,
     active_level_floor,
     boundary_weight_table,
@@ -63,6 +64,7 @@ from jaccpot.mutual.force import (
     mutual_level_accelerations,
     mutual_weighted_accelerations,
     n_sub,
+    resolve_mutual_capacities,
 )
 from jaccpot.mutual.topology import build_mutual_topology_from_tree
 
@@ -107,6 +109,30 @@ class BlockStepFMM:
     pallas_interpret : bool
         Run the Pallas kernels in interpret mode. Works without a GPU, so it lets
         the Pallas path's *logic* be exercised on CPU; far too slow for real use.
+    topology_backend : str
+        ``"host"`` (default) builds the topology with the NumPy dual-tree
+        traversal in :mod:`jaccpot.mutual.topology`, which cannot be traced.
+        ``"device"`` builds it in JAX instead, so :meth:`rebuild_state` can live
+        inside a ``jax.jit`` or a ``lax.scan``; it implies ``static_shapes``,
+        because every device output shape comes from the capacities.
+    static_shapes : bool
+        Pad the pair lists and the level schedule to fixed capacities, resolved
+        from the first :meth:`prepare` and then held (see :attr:`capacities`).
+        Without it a prepared state's shapes track the particle distribution, so
+        every rebuild is a distinct set of compile-time constants and a jitted
+        force recompiles per base step -- measured ~200 s each at N = 20 000, with
+        no warm-up. With it the shapes depend on the capacities alone and one
+        program serves the run. The cost is doing a little work on padding: the
+        pair lists carry their existing ``near_valid``/``far_valid`` masks, and a
+        padded level row is an entirely-invalid no-op.
+    caps : Optional[MutualCapacities]
+        Use these capacities instead of resolving them from the first build.
+        Implies ``static_shapes=True``. Pass a profile recorded from a previous
+        run to make the *first* compile reusable too.
+    validate_rung : bool
+        Check that rungs lie in ``[0, k_max]``. The check is a device-to-host
+        sync on concrete inputs, so a driver that has already established the
+        range can turn it off; see :meth:`_validate_rung`.
 
     Raises
     ------
@@ -127,6 +153,10 @@ class BlockStepFMM:
         leaf_size: int = 32,
         near_chunk_size: Optional[int] = None,
         pallas_interpret: bool = False,
+        topology_backend: str = "host",
+        static_shapes: bool = False,
+        caps: Optional[MutualCapacities] = None,
+        validate_rung: bool = True,
     ) -> None:
         basis = str(basis).lower()
         if basis not in _SUPPORTED_BASES:
@@ -154,8 +184,27 @@ class BlockStepFMM:
         self.leaf_size = int(leaf_size)
         self.near_chunk_size = near_chunk_size
         self.pallas_interpret = bool(pallas_interpret)
+        topology_backend = str(topology_backend).lower()
+        if topology_backend not in ("host", "device"):
+            raise ValueError(
+                "topology_backend must be 'host' or 'device'; got "
+                f"{topology_backend!r}"
+            )
+        self.topology_backend = topology_backend
+        # A device topology has no unpadded form to fall back on: every output
+        # shape comes from the capacities, so they are not optional there.
+        self.static_shapes = (
+            bool(static_shapes) or caps is not None or topology_backend == "device"
+        )
+        self.validate_rung = bool(validate_rung)
+        self._caps: Optional[MutualCapacities] = caps
         self._state: Optional[MutualFMMState] = None
         self._solver: Any = None
+        # Device backend only: the frozen static-radix template and the tree
+        # arrays derived from it. Built once on the host; every later refresh is
+        # traceable.
+        self._template: Any = None
+        self._tree_static: Optional[dict] = None
 
     # -- topology lifetime --------------------------------------------------
 
@@ -163,6 +212,19 @@ class BlockStepFMM:
     def state(self: "BlockStepFMM") -> Optional[MutualFMMState]:
         """The prepared frozen state, or ``None`` before the first build."""
         return self._state
+
+    @property
+    def capacities(self: "BlockStepFMM") -> Optional[MutualCapacities]:
+        """The frozen capacity profile, or ``None`` when shapes float.
+
+        With ``static_shapes=True`` this is resolved from the *first* topology and
+        then held: the pair lists and level schedule are padded to it on every
+        subsequent build, so the prepared state's shapes stop depending on the
+        particle distribution and one compiled program serves the whole run. It
+        is the same resolve-eagerly-then-freeze discipline
+        ``jaccpot/runtime/_large_n_pipeline.py`` uses for its own caps.
+        """
+        return self._caps
 
     def prepare(
         self: "BlockStepFMM", positions: Float[Array, "n 3"], masses: Float[Array, "n"]
@@ -187,8 +249,49 @@ class BlockStepFMM:
         MutualFMMState
             The freshly built state, also cached on ``self`` so the force methods
             can find it.
+
+        Raises
+        ------
+        RuntimeError
+            On the device backend, if the built topology overflowed its capacity
+            profile. Overflow drops interactions while leaving momentum exactly
+            conserved, so it is raised here rather than reported.
         """
         from jaccpot import FastMultipoleMethod
+
+        if self.topology_backend == "device":
+            # Freeze the template on the first call, then every refresh -- this
+            # one included -- goes through the traceable device path.
+            self.freeze_template(positions, masses)
+            self._state = self.rebuild_state(positions, masses)
+            # prepare() is the eager entry point, so this is the one place the
+            # overflow flag can be turned into an exception. A driver stepping
+            # through rebuild_state under trace must check it itself.
+            try:
+                overflowed = bool(self._state.topology_overflow)
+            except jax.errors.JAXTypeError:  # pragma: no cover - traced caller
+                overflowed = False
+            if overflowed:
+                from jaccpot.mutual.force import OVERFLOW_CAUSES
+
+                bits = int(self._state.overflow_causes)
+                blamed = [
+                    name
+                    for index, name in enumerate(OVERFLOW_CAUSES)
+                    if bits & (1 << index)
+                ]
+                raise RuntimeError(
+                    "the device topology overflowed its capacity profile: "
+                    f"{', '.join(blamed) or 'unknown'} exceeded. Profile was "
+                    f"far={self._caps.far}, near={self._caps.near}, "
+                    f"depth={self._caps.depth}, width={self._caps.width}. "
+                    "Interactions were dropped, and that is invisible in the "
+                    "force -- a dropped canonical pair loses both halves, so "
+                    "momentum stays exact -- hence the raise. Rebuild with larger "
+                    "caps, or pass caps=None to resolve them from this "
+                    "configuration."
+                )
+            return self._state
 
         if self._solver is None:
             self._solver = FastMultipoleMethod(preset="balanced", basis="real")
@@ -206,6 +309,12 @@ class BlockStepFMM:
             theta=self.theta,
             order=self.max_order,
         )
+        if self.static_shapes and self._caps is None:
+            # Only the host lane asks for drift headroom. It rebuilds an LBVH
+            # tree every base step, and LBVH depth is volatile over a rollout;
+            # the device lane's static-radix linkage is frozen, so freeze_template
+            # overrides depth with the invariant measured value instead.
+            self._caps = resolve_mutual_capacities(topology, drift_headroom=True)
         self._state = build_mutual_state(
             topology,
             softening=self.softening,
@@ -213,8 +322,348 @@ class BlockStepFMM:
             use_pallas=(self.backend == "pallas"),
             near_chunk_size=self.near_chunk_size,
             pallas_interpret=self.pallas_interpret,
+            caps=self._caps,
         )
         return self._state
+
+    # -- device topology backend -------------------------------------------
+
+    def freeze_template(
+        self: "BlockStepFMM",
+        positions: Float[Array, "n 3"],
+        masses: Float[Array, "n"],
+    ) -> None:
+        """Build the static-radix template and capacity profile. Host-side, once.
+
+        Only the *data structure* is frozen here -- the parent/child links and the
+        leaf bucket boundaries, which for a static-radix tree are
+        ``arange(0, N, leaf_size)`` and so do not depend on the particle
+        distribution at all. The spatial content is not frozen: every
+        :meth:`rebuild_state` re-sorts the particles by Morton code and
+        recomputes the centres of mass and radii from the live positions, so the
+        MAC re-decides which pairs are far on every call. Only the *number* of
+        such pairs is bounded, by the capacities.
+
+        Idempotent: a second call is a no-op, because re-freezing would silently
+        change the capacities out from under an already-compiled program.
+
+        Parameters
+        ----------
+        positions : Float[Array, 'n 3']
+            Concrete positions to build the template from.
+        masses : Float[Array, 'n']
+            Concrete particle masses.
+        """
+        if self._template is not None:
+            return
+        import numpy as _np
+        from yggdrax._tree_impl import rebuild_static_radix_tree_from_template
+        from yggdrax.tree import Tree
+
+        from jaccpot.mutual.device_topology import node_depths
+        from jaccpot.mutual.farfield import snap_capacity
+
+        tree = Tree.from_particles(
+            positions,
+            masses,
+            tree_type="radix",
+            build_mode="static_radix",
+            leaf_size=self.leaf_size,
+        )
+        template = getattr(tree, "topology", tree)
+        refreshed, sorted_positions, sorted_masses, inverse = (
+            rebuild_static_radix_tree_from_template(
+                positions, masses, template, return_reordered=True
+            )
+        )
+        parent = _np.asarray(refreshed.parent)
+        root = int(_np.flatnonzero(parent < 0)[0]) if (parent < 0).any() else 0
+        if self._caps is None:
+            # Resolve the capacities from a host build on this configuration --
+            # the one place the host traversal is still used, and only once.
+            class _Shim:
+                pass
+
+            shim = _Shim()
+            shim.parent = refreshed.parent
+            shim.left_child = refreshed.left_child
+            shim.right_child = refreshed.right_child
+            shim.node_ranges = refreshed.node_ranges
+            shim.inverse_permutation = inverse
+            self._caps = resolve_mutual_capacities(
+                build_mutual_topology_from_tree(
+                    shim,
+                    np.asarray(sorted_positions),
+                    np.asarray(sorted_masses),
+                    theta=self.theta,
+                    order=self.max_order,
+                )
+            )
+        # The generous depth bound `resolve_mutual_capacities` applies exists for
+        # LBVH, whose depth follows the Morton-code distribution and was measured
+        # to swing 12 -> 34 over a Hernquist rollout. It does not apply here and
+        # costs real work: `depth` is the cascade scan's iteration count, so a 4x
+        # bound is 4x the M2M/L2L iterations.
+        #
+        # A static-radix template's node linkage is a fixed balanced bisection
+        # over leaf-bucket *indices* and is frozen for the run -- `rebuild_state`
+        # re-sorts the particles but never rewires the tree -- so the level
+        # structure, and hence the depth, is literally invariant across rebuilds.
+        # One row of slack is enough.
+        measured_depth = 0
+        probe_depth = node_depths(
+            jnp.asarray(refreshed.parent), root, depth_cap=int(self._caps.depth) + 2
+        )
+        measured_depth = int(jnp.max(probe_depth)) + 1
+        self._caps = self._caps._replace(
+            depth=snap_capacity(measured_depth, relative=0.0, absolute=2)
+        )
+
+        # Resolve the wavefront capacity by trial. It bounds the widest
+        # *intermediate* pair front, which no finished topology records, so
+        # there is nothing to compute it from -- only something to test it
+        # against. Doubling from a floor and stopping at the first front that
+        # does not overflow mirrors yggdrax's own capacity-retry ladder, and is
+        # the same resolve-eagerly-then-freeze discipline the rest of the
+        # capacities use. Done once, here, on concrete arrays.
+        if int(self._caps.queue) <= 0:
+            self._caps = self._caps._replace(
+                queue=self._resolve_queue_capacity(
+                    refreshed, sorted_positions, sorted_masses, root
+                )
+            )
+        self._template = template
+        self._tree_static = {
+            "parent": jnp.asarray(refreshed.parent),
+            "left_child": jnp.asarray(refreshed.left_child),
+            "right_child": jnp.asarray(refreshed.right_child),
+            "root": jnp.asarray(root),
+        }
+
+    _QUEUE_FLOOR = 1 << 14
+    _QUEUE_CEILING = 1 << 24
+
+    def _resolve_queue_capacity(
+        self: "BlockStepFMM",
+        refreshed: Any,
+        sorted_positions: Array,
+        sorted_masses: Array,
+        root: int,
+    ) -> int:
+        """Smallest power-of-two wavefront this configuration traverses cleanly.
+
+        Raises rather than returning an overflowing capacity: a truncated
+        traversal is a wrong force that looks healthy from every other angle.
+
+        Parameters
+        ----------
+        refreshed : Any
+            The refreshed static-radix tree to probe against.
+        sorted_positions : Array
+            ``(N, 3)`` positions in tree order.
+        sorted_masses : Array
+            ``(N,)`` masses in tree order.
+        root : int
+            Index of the root node.
+
+        Returns
+        -------
+        int
+            A wavefront capacity that traverses this configuration without overflowing,
+            with one doubling of headroom for the front widening as the system evolves.
+
+        Raises
+        ------
+        RuntimeError
+            If no capacity up to the ceiling traverses it. A larger ``leaf_size``
+            shrinks the tree and hence the pair front.
+        """
+        from jaccpot.mutual.device_topology import build_mutual_state_device
+
+        queue = self._QUEUE_FLOOR
+        while queue <= self._QUEUE_CEILING:
+            probe = build_mutual_state_device(
+                sorted_positions,
+                sorted_masses,
+                parent=jnp.asarray(refreshed.parent),
+                left_child=jnp.asarray(refreshed.left_child),
+                right_child=jnp.asarray(refreshed.right_child),
+                node_ranges=refreshed.node_ranges,
+                inverse_permutation=jnp.arange(int(sorted_positions.shape[0])),
+                root=jnp.asarray(root),
+                theta=self.theta,
+                order=self.max_order,
+                leaf_size=self.leaf_size,
+                caps=self._caps._replace(queue=queue),
+                softening=self.softening,
+                G=self.G,
+                max_pair_queue=queue,
+            )
+            # Only the pair-queue cause is this resolver's business. Doubling the
+            # wavefront cannot fix a starved far/near/level cap, so conflating the
+            # causes here would exhaust the ladder and report "no workable
+            # wavefront" for a profile whose actual problem is somewhere else --
+            # a misleading error for a real misconfiguration. Those causes are
+            # left to `prepare`, which names them.
+            from jaccpot.mutual.force import OVERFLOW_CAUSES
+
+            queue_bit = 1 << OVERFLOW_CAUSES.index("pair_queue")
+            if not bool(int(probe.overflow_causes) & queue_bit):
+                # One doubling of headroom: the front widens as the system
+                # evolves, and a re-resolve mid-run would change the compiled
+                # shape out from under an already-traced program.
+                return min(queue * 2, self._QUEUE_CEILING)
+            queue *= 2
+        raise RuntimeError(
+            f"could not find a wavefront capacity <= {self._QUEUE_CEILING} that "
+            f"traverses this configuration (N={int(sorted_positions.shape[0])}, "
+            f"leaf_size={self.leaf_size}, theta={self.theta}) without overflow. "
+            "A larger leaf_size shrinks the tree and hence the pair front."
+        )
+
+    def weighted_accelerations(
+        self: "BlockStepFMM",
+        state: MutualFMMState,
+        positions: Float[Array, "n 3"],
+        masses: Float[Array, "n"],
+        *,
+        rung: Optional[Int[Array, "n"]] = None,
+        level_weights: Optional[Float[Array, "levels"]] = None,
+    ) -> Array:
+        """Evaluate ``sum_k level_weights[k] * a_k`` against an explicit state.
+
+        The stateless counterpart of :meth:`boundary_kick` /
+        :meth:`total_accelerations`, which read ``self._state``. A driver that
+        rebuilds the topology inside a ``lax.scan`` has the state as a traced
+        value in its carry, not on the instance, so it needs this form -- and
+        having it here keeps ``jaccpot.mutual``'s internals out of the caller.
+
+        With both ``rung`` and ``level_weights`` omitted this is the full
+        acceleration.
+
+        Parameters
+        ----------
+        state : MutualFMMState
+            The prepared topology to evaluate against.
+        positions : Float[Array, 'n 3']
+            Positions, in the caller's original order.
+        masses : Float[Array, 'n']
+            Particle masses.
+        rung : Optional[Int[Array, 'n']]
+            Per-particle rung; ``None`` weights every pair equally.
+        level_weights : Optional[Float[Array, 'levels']]
+            Per-level weights, ``k_max + 1`` of them; ``None`` means all ones.
+
+        Returns
+        -------
+        Array
+            ``(N, 3)`` weighted acceleration.
+        """
+        return mutual_weighted_accelerations(
+            state, positions, masses, rung=rung, level_weights=level_weights
+        )
+
+    def boundary_weights(
+        self: "BlockStepFMM",
+        active_floor: Any,
+        dt_max: Any,
+        half: Any = 1.0,
+        *,
+        dtype: Any = None,
+    ) -> Array:
+        """The ``(k_max + 1,)`` weight row for one sub-step boundary.
+
+        Exposed so a caller driving :meth:`weighted_accelerations` directly does
+        not have to re-derive the schedule, and cannot get it subtly wrong.
+
+        Parameters
+        ----------
+        active_floor : Any
+            Smallest level kicked at this boundary. May be a tracer.
+        dt_max : Any
+            Base-step timestep. May be a tracer.
+        half : Any
+            ``0.5`` at a synchronized end of the base step, ``1.0`` inside.
+        dtype : Any
+            Result dtype; ``None`` takes the model's working dtype.
+
+        Returns
+        -------
+        Array
+            ``(k_max + 1,)`` weight row.
+        """
+        return level_weights_from_floor(
+            active_floor, self.k_max, dt_max, half=half, dtype=dtype
+        )
+
+    def rebuild_state(
+        self: "BlockStepFMM",
+        positions: Float[Array, "n 3"],
+        masses: Float[Array, "n"],
+    ) -> MutualFMMState:
+        """Build a complete mutual state on device. **Traceable.**
+
+        This is the seam a fully-jitted rollout drives: Morton re-sort, node
+        geometry, dual-tree traversal, level schedule and leaf blocks, all in
+        JAX, all at capacities fixed by :meth:`freeze_template`. One compiled
+        program serves every call, including calls where the accepted pair set
+        changes -- measured: far pairs 404 -> 542 on a displaced system with the
+        jit cache still at one entry.
+
+        Unlike :meth:`prepare` it does **not** cache the result on the instance:
+        under trace there is nothing meaningful to cache, and a driver carrying
+        the state through a ``lax.scan`` needs it returned, not stashed.
+
+        Parameters
+        ----------
+        positions : Float[Array, 'n 3']
+            Positions, in the caller's original order.
+        masses : Float[Array, 'n']
+            Particle masses.
+
+        Returns
+        -------
+        MutualFMMState
+            A freshly built device state at the frozen template's capacities.
+
+        Raises
+        ------
+        RuntimeError
+            If :meth:`freeze_template` has not been called. The template and the
+            capacity profile are host-built and cannot be derived under trace.
+        """
+        if self._template is None:
+            raise RuntimeError(
+                "call freeze_template(positions, masses) on concrete arrays once "
+                "before rebuild_state; the template and capacities are host-built "
+                "and cannot be derived under trace"
+            )
+        from yggdrax._tree_impl import rebuild_static_radix_tree_from_template
+
+        from jaccpot.mutual.device_topology import build_mutual_state_device
+
+        refreshed, sorted_positions, sorted_masses, inverse = (
+            rebuild_static_radix_tree_from_template(
+                positions, masses, self._template, return_reordered=True
+            )
+        )
+        return build_mutual_state_device(
+            sorted_positions,
+            sorted_masses,
+            node_ranges=refreshed.node_ranges,
+            inverse_permutation=inverse,
+            caps=self._caps,
+            theta=self.theta,
+            order=self.max_order,
+            leaf_size=self.leaf_size,
+            softening=self.softening,
+            G=self.G,
+            use_pallas=(self.backend == "pallas"),
+            near_chunk_size=self.near_chunk_size,
+            pallas_interpret=self.pallas_interpret,
+            max_pair_queue=int(self._caps.queue) or (1 << 16),
+            **self._tree_static,
+        )
 
     def refresh(
         self: "BlockStepFMM", positions: Float[Array, "n 3"], masses: Float[Array, "n"]
@@ -300,6 +749,13 @@ class BlockStepFMM:
         a ``ConcretizationTypeError``. Attempting the read is the only test that
         actually asks the question "can a value be read here".
 
+        On a concrete array the read is a **device-to-host sync**, paid on every
+        ``boundary_kick`` -- ``2**k_max + 1`` times per base step. That is cheap
+        next to a traversal and worth it by default, because the failure it
+        catches is otherwise a NaN velocity many steps later. Set
+        ``validate_rung=False`` once the caller has checked the range itself,
+        which is what a driver stepping a fixed rung ladder can do.
+
         Parameters
         ----------
         rung : Array
@@ -319,6 +775,8 @@ class BlockStepFMM:
             proof the rungs are in range.
         """
         rung = jnp.asarray(rung)
+        if not self.validate_rung:
+            return rung
         try:
             lo, hi = int(jnp.min(rung)), int(jnp.max(rung))
         except jax.errors.JAXTypeError:
@@ -475,7 +933,6 @@ class BlockStepFMM:
             The ``(k_max + 1,)`` weight vector, supplied directly instead of being
             derived from ``active_floor``/``half``/``dt_max``. Takes precedence
             over all three, which are then ignored.
-
             This is the seam that lets an integrator drive the boundaries with
             ``lax.scan`` rather than unrolling them. With the weights derived
             from *static* ``active_floor``/``half``, a fused base step has to emit
