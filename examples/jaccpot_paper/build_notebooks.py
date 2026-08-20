@@ -963,6 +963,214 @@ difference sees it. Values from
 `bench/results/differentiability/grad_correctness.json`.
 """
 
+# --------------------------------------------------------------------------- #
+# figure 08 -- strong scaling
+# --------------------------------------------------------------------------- #
+
+FIG08 = """\
+art = jsonio.read_result("multigpu/strong_scaling.json")
+cfg, recs = art["config"], art["data"]["records"]
+
+# A point whose traversal buffers overflowed produced a TRUNCATED force, so its
+# wall clock is padded-buffer overhead over a wrong answer. Those are dropped
+# from the curve and reported on the figure rather than silently omitted -- the
+# regime boundary is the result here, not an inconvenience.
+ok = [r for r in recs if r.get("valid")]
+bad = [r for r in recs if not r.get("valid")]
+if not ok:
+    raise SystemExit(
+        "strong_scaling.json has no valid points: every device count overflowed. "
+        "Lower the fixed N, or raise leaf_size and the traversal caps."
+    )
+ok.sort(key=lambda r: r["ndev"])
+
+ndev = [r["ndev"] for r in ok]
+t = [r["median_s"] for r in ok]
+# Efficiency is referenced to the smallest VALID device count, not to 1: a
+# single-device run is not the same code path.
+ref_d, ref_t = ndev[0], t[0]
+eff = [(ref_t * ref_d) / (ti * di) for di, ti in zip(ndev, t)]
+
+fig, axes = style.figure(width=style.TWO_COL, height=2.7, ncols=2)
+
+axes[0].plot(ndev, t, marker=style.MARKERS[0], color=style.entity_color("wall", 0))
+axes[0].set_xlabel("devices")
+axes[0].set_ylabel("time per force evaluation [s]")
+axes[0].set_yscale("log")
+axes[0].set_title("wall clock at fixed $N$", fontsize=8)
+style.finish(axes[0], legend=False)
+
+axes[1].plot(ndev, eff, marker=style.MARKERS[1], color=style.entity_color("eff", 1),
+             label="measured")
+axes[1].axhline(1.0, linestyle=":", linewidth=0.8, color="0.5", label="ideal")
+axes[1].set_xlabel("devices")
+axes[1].set_ylabel(f"parallel efficiency (ref. {ref_d} devices)")
+axes[1].set_ylim(0, 1.15)
+axes[1].set_title("efficiency", fontsize=8)
+style.finish(axes[1], legend=True, legend_kwargs={"loc": "best", "fontsize": 6.2})
+
+note = jsonio.config_caption(cfg, ["order", "leaf_size", "precision", "device"])
+if bad:
+    dropped = ", ".join(f"{r['ndev']}x" for r in sorted(bad, key=lambda r: r["ndev"]))
+    note += (
+        f"\\ndropped (buffer overflow, force truncated): {dropped}"
+        f"  |  healthy load {cfg['healthy_per_device_n']}/device"
+    )
+style.annotate_config(axes[0], note)
+style.save(fig, FIG_DIR / "fig08_strong_scaling.pdf")
+
+for r in sorted(recs, key=lambda r: r["ndev"]):
+    flag = "" if r.get("valid") else "   INVALID (overflow: %s)" % ",".join(r.get("overflowed", []))
+    print(f"ndev={r['ndev']:<3d} n={r.get('n')} per_dev={r.get('per_device_n')} "
+          f"median={r.get('median_s')}{flag}")
+"""
+
+FIG08_CAPTION = """\
+Strong scaling at fixed total $N$: time per force evaluation and parallel
+efficiency against device count. Efficiency is referenced to the smallest device
+count that produced a valid force, not to a single device, because the
+single-device path is a different code path. Points at which a traversal buffer
+overflowed are excluded and named on the figure: an overflow truncates the force,
+so those runs are not slow correct answers but fast wrong ones. The excluded
+region is the low-device-count end, where the per-device load is highest.\
+"""
+
+# --------------------------------------------------------------------------- #
+# figure 09 -- weak scaling
+# --------------------------------------------------------------------------- #
+
+FIG09 = """\
+art = jsonio.read_result("multigpu/weak_scaling.json")
+cfg, recs = art["config"], art["data"]["records"]
+
+ok = [r for r in recs if r.get("valid")]
+bad = [r for r in recs if not r.get("valid")]
+if not ok:
+    raise SystemExit(
+        "weak_scaling.json has no valid points: the per-device load overflows "
+        "even at the smallest device count."
+    )
+ok.sort(key=lambda r: r["ndev"])
+
+ndev = [r["ndev"] for r in ok]
+thru = [r["throughput_particles_per_s"] for r in ok]
+t = [r["median_s"] for r in ok]
+
+fig, axes = style.figure(width=style.TWO_COL, height=2.7, ncols=2)
+
+# Throughput. Perfect weak scaling is a straight line through the origin: each
+# added device adds its own share of work and its own share of throughput.
+axes[0].plot(ndev, thru, marker=style.MARKERS[0], color=style.entity_color("thru", 0),
+             label="measured")
+ideal = [thru[0] * (d / ndev[0]) for d in ndev]
+axes[0].plot(ndev, ideal, linestyle=":", linewidth=0.8, color="0.5", label="ideal")
+axes[0].set_xlabel("devices")
+axes[0].set_ylabel("throughput [particles s$^{-1}$]")
+axes[0].set_title("throughput at fixed load per device", fontsize=8)
+style.finish(axes[0], legend=True, legend_kwargs={"loc": "best", "fontsize": 6.2})
+
+# Time per evaluation. Flat is perfect; the rise is communication plus whatever
+# padding the capacity retries added.
+axes[1].plot(ndev, t, marker=style.MARKERS[1], color=style.entity_color("wall", 1))
+axes[1].axhline(t[0], linestyle=":", linewidth=0.8, color="0.5")
+axes[1].set_xlabel("devices")
+axes[1].set_ylabel("time per force evaluation [s]")
+axes[1].set_title("cost per evaluation (flat is ideal)", fontsize=8)
+style.finish(axes[1], legend=False)
+
+note = jsonio.config_caption(cfg, ["order", "leaf_size", "precision", "device"])
+note += f"\\n{cfg.get('per_device_n_fixed')} particles/device"
+if bad:
+    note += f"  |  {len(bad)} point(s) dropped (overflow)"
+style.annotate_config(axes[0], note)
+style.save(fig, FIG_DIR / "fig09_weak_scaling.pdf")
+
+for r in sorted(recs, key=lambda r: r["ndev"]):
+    flag = "" if r.get("valid") else "   INVALID"
+    print(f"ndev={r['ndev']:<3d} n={r.get('n')} median={r.get('median_s')} "
+          f"throughput={r.get('throughput_particles_per_s')}{flag}")
+"""
+
+FIG09_CAPTION = """\
+Weak scaling: the particle count per device is held fixed and devices are added,
+so the ideal throughput is linear in device count and the ideal cost per
+evaluation is flat. This is the load-bearing scaling measurement for this
+implementation, because the per-device particle count is what the traversal
+buffers are sized against; holding it fixed is the regime the code is built to
+run in.\
+"""
+
+# --------------------------------------------------------------------------- #
+# figure 11 -- load balance on a clustered distribution
+# --------------------------------------------------------------------------- #
+
+FIG11 = """\
+art = jsonio.read_result("multigpu/load_balance.json")
+cfg, recs = art["config"], art["data"]["records"]
+
+ok = [r for r in recs if r.get("valid")]
+if not ok:
+    raise SystemExit("load_balance.json has no valid points")
+
+dists = [d for d in cfg["distributions"] if any(r["distribution"] == d for r in ok)]
+
+fig, axes = style.figure(width=style.TWO_COL, height=2.7, ncols=2)
+
+# Left: pair work per device. A space-filling-curve split balances *particles* by
+# construction, so a uniform cube looks perfect whatever the partition does. The
+# clustered case is the one that can disagree, because the device holding the
+# dense centre is handed more pair work than the ones holding the outskirts.
+width = 0.8 / max(1, len(dists))
+for di, dist in enumerate(dists):
+    sel = [r for r in ok if r["distribution"] == dist]
+    r = max(sel, key=lambda r: r["ndev"])
+    work = r["per_device_work_total"]
+    xs = [i + (di - (len(dists) - 1) / 2) * width for i in range(len(work))]
+    axes[0].bar(xs, work, width=width, label=dist,
+                color=style.entity_color(dist, di), edgecolor="white", linewidth=0.4)
+axes[0].set_xlabel("device")
+axes[0].set_ylabel("interaction pairs")
+axes[0].set_xticks(range(len(work)))
+axes[0].set_title("pair work per device", fontsize=8)
+style.finish(axes[0], legend=True, legend_kwargs={"loc": "best", "fontsize": 6.2})
+
+# Right: imbalance vs device count. 1.0 is perfect; the ratio is the busiest
+# device over the mean, which is what sets the step time -- every other device
+# waits for it.
+for di, dist in enumerate(dists):
+    sel = sorted((r for r in ok if r["distribution"] == dist), key=lambda r: r["ndev"])
+    axes[1].plot([r["ndev"] for r in sel], [r["work_imbalance"] for r in sel],
+                 marker=style.MARKERS[di % len(style.MARKERS)],
+                 color=style.entity_color(dist, di), label=dist)
+axes[1].axhline(1.0, linestyle=":", linewidth=0.8, color="0.5")
+axes[1].set_xlabel("devices")
+axes[1].set_ylabel("busiest device / mean")
+axes[1].set_title("work imbalance", fontsize=8)
+style.finish(axes[1], legend=True, legend_kwargs={"loc": "best", "fontsize": 6.2})
+
+style.annotate_config(
+    axes[0],
+    jsonio.config_caption(cfg, ["order", "leaf_size", "precision", "device"])
+    + f"\\n{cfg.get('per_device_n_fixed')} particles/device",
+)
+style.save(fig, FIG_DIR / "fig11_load_balance.pdf")
+
+for r in sorted(ok, key=lambda r: (r["distribution"], r["ndev"])):
+    print(f"{r['distribution']:<9s} ndev={r['ndev']:<3d} "
+          f"imbalance={r['work_imbalance']:.4f} work={r['per_device_work_total']}")
+"""
+
+FIG11_CAPTION = """\
+Per-device pair work for a uniform and a centrally concentrated (Plummer)
+distribution, and the resulting imbalance against device count. The imbalance is
+the busiest device's share divided by the mean, which is the quantity that sets
+the step time because every other device waits on it. A uniform cube is balanced
+by construction under any reasonable partition, so it is shown as the control;
+the clustered case is the one in which balancing particle counts and balancing
+work come apart.\
+"""
+
+
 SPECS = [
     (
         "fig_01_force_error_vs_order",
@@ -1028,6 +1236,30 @@ SPECS = [
         "`bench/differentiability/autodiff_overhead.py`. No computation here.",
         FIG12,
         FIG12_CAPTION,
+    ),
+    (
+        "fig_08_strong_scaling",
+        "Figure 08 -- strong scaling",
+        "Loads `bench/results/multigpu/strong_scaling.json`, produced by "
+        "`bench/multigpu/strong_scaling.py`. No computation here.",
+        FIG08,
+        FIG08_CAPTION,
+    ),
+    (
+        "fig_09_weak_scaling",
+        "Figure 09 -- weak scaling",
+        "Loads `bench/results/multigpu/weak_scaling.json`, produced by "
+        "`bench/multigpu/weak_scaling.py`. No computation here.",
+        FIG09,
+        FIG09_CAPTION,
+    ),
+    (
+        "fig_11_load_balance",
+        "Figure 11 -- load balance on a clustered distribution",
+        "Loads `bench/results/multigpu/load_balance.json`, produced by "
+        "`bench/multigpu/load_balance.py`. No computation here.",
+        FIG11,
+        FIG11_CAPTION,
     ),
     (
         "fig_13_grad_correctness",

@@ -70,6 +70,24 @@ FIGURES = [
         "scaling/gpu_vs_cpu.json",
     ),
     (
+        "fig08_strong_scaling",
+        "08",
+        "fig_08_strong_scaling.ipynb",
+        "multigpu/strong_scaling.json",
+    ),
+    (
+        "fig09_weak_scaling",
+        "09",
+        "fig_09_weak_scaling.ipynb",
+        "multigpu/weak_scaling.json",
+    ),
+    (
+        "fig11_load_balance",
+        "11",
+        "fig_11_load_balance.ipynb",
+        "multigpu/load_balance.json",
+    ),
+    (
         "fig12_autodiff_overhead",
         "12",
         "fig_12_autodiff_overhead.ipynb",
