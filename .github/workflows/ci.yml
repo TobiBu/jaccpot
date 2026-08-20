@@ -123,52 +123,28 @@ jobs:
           # here (173 / 641 / 53 / 202 = 1069) were measured before that merge and
           # are what the re-measurement above replaces -- the partition was still
           # exact, only the totals had drifted.
-          # `integration` MINUS the two mutual-FMM files, which are now their own
-          # shard. That split is this job's own prescribed remedy applied again:
-          # the shard is memory-bound, `tests/integration` was already the hog at
-          # 12.10 GB of a 16 GB runner, and the mutual work pushed it over -- the
-          # OOM surfacing, exactly as the note above predicts, as "The operation
-          # was canceled" at ~26 min with zero test failures and 34 min of the
-          # 60-minute cap still unused.
+          # `integration` MINUS the new static-shape/device module, which gets its
+          # own shard below. This shard's composition is otherwise exactly main's,
+          # deliberately: it is memory-bound (see the note above), and bisecting
+          # the OOM under a 15 GB cgroup showed it lands in
+          # `test_mutual_fmm.py`'s own gradient/rollout tests at positions 28-38
+          # of the run -- so the pile is main's, and the fix is to keep NEW cases
+          # out of it rather than to regroup what is already here.
           #
-          # Split HERE because the mutual files are both the biggest half and the
-          # expensive kind: 84 of the shard's 187 collected cases (72 + 12), and
-          # the float64 FMM gradient tests this note already names as dominating
-          # -- `test_rollout_gradient_finite_difference` alone is 330 s locally.
-          # 187 = 103 (integration) + 84 (mutual), so the partition stays exact.
+          # An earlier attempt moved all the mutual files into one shard instead.
+          # That concentrated those hogs into a single worker and OOM-killed at
+          # both `-n 2` and `-n 1`. Do not group them.
           - shard: integration
             paths: tests/integration
-            procs: "2"
-            extra: >-
-              --ignore=tests/integration/test_mutual_fmm.py
-              --ignore=tests/integration/test_mutual_fmm_nornax.py
-          # `-n 1`, not `-n 2`. Splitting the mutual files out of `integration`
-          # fixed that shard (26 min OOM -> 15m47s green) but the mutual shard
-          # then OOM-killed on its own, at 39 of 84 cases -- same signature, no
-          # test failure, 40 min of cap unused. These 84 are the float64 FMM
-          # gradient and rollout tests, and a worker's RSS grows across the tests
-          # it runs because JAX holds compiled executables in-process, so two
-          # workers hold two such piles at once.
-          #
-          # This is the trade the preamble calls unattractive for the *whole*
-          # suite -- halve concurrent memory, roughly double wall-clock -- taken
-          # here because a shard this small has the headroom the whole suite does
-          # not: it was 19m36s at `-n 2` when it died partway, against a 60-minute
-          # cap. If it ever stops fitting, split by path again rather than raising
-          # the cap.
-          - shard: mutual
-            paths: >-
-              tests/integration/test_mutual_fmm.py
-              tests/integration/test_mutual_fmm_nornax.py
-            procs: "1"
+            extra: --ignore=tests/integration/test_mutual_fmm_static_device.py
+          - shard: mutual-static-device
+            paths: tests/integration/test_mutual_fmm_static_device.py
             extra: ""
           - shard: unit
             paths: tests/unit
-            procs: "2"
             extra: ""
           - shard: rest
             paths: tests/characterization tests/distributed
-            procs: "2"
             extra: ""
     env:
       JAX_ENABLE_X64: "1"
@@ -231,7 +207,7 @@ jobs:
         # `--cov-branch` on the command line cannot override that either way, so
         # passing the flag would be inert decoration.
         run: |
-          pytest -n ${{ matrix.procs }} --dist loadgroup -m "not experimental" ${{ matrix.paths }} \
+          pytest -n 2 --dist loadgroup -m "not experimental" ${{ matrix.paths }} \
             ${{ matrix.extra }} \
             --ignore=tests/unit/runtime \
             --cov=jaccpot \
