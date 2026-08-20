@@ -1,77 +1,429 @@
-"""Shared multi-GPU benchmark harness for strong_scaling.py, weak_scaling.py,
-comm_overhead.py, and load_balance.py.
+"""One multi-GPU force evaluation, measured -- and the sweep driver over it.
 
-This is the harness referenced but not yet present in
-docs/phase5_multigpu_pallas_foldin_plan.md (item 5d: "multi-GPU perf/scaling
-... via the benchmark_multigpu/ harness"). It wraps
-jaccpot.distributed.fmm's shard_map driver with per-stage timers so strong
-scaling, weak scaling, the comm/compute split, and load balance all come out
-of the same runs.
+Shared by ``strong_scaling.py``, ``weak_scaling.py`` and ``load_balance.py``.
 
-Before relying on this for real numbers, confirm against
-docs/phase5_multigpu_pallas_foldin_plan.md's STATUS block which basis/MAC
-the distributed path is currently running (solidfmm+bh as of the last
-update) -- see PROJECT_PLAN.md Phase 0.
+Two structural facts decide this module's shape, and both differ from the
+scaffold it replaces.
+
+**A device-count sweep cannot happen inside one process.** JAX initialises its
+backend once, and the device count is fixed for the lifetime of the process, so
+``[run_once(n, g) for g in gpu_counts]`` -- which is what the scaffold did --
+cannot work however it is implemented. Every point is therefore its own process.
+:func:`sweep` spawns one, and this module is runnable as that worker
+(``python -m bench.multigpu.harness --ndev 4 --n 32000``), which is also what
+makes the sweep portable to a batch scheduler: the same command line is an array
+job, one task per point.
+
+**Running one evaluation per process is required anyway.** The ``jit=True``
+illegal-address fault documented in ``docs/phase5_multigpu_pallas_foldin_plan.md``
+is intermittent and nondeterministic. Isolating points means a fault kills one
+measurement rather than the sweep, and cannot silently corrupt the ones after it.
+
+What is measured
+----------------
+Steady-state device time for a *built* evaluator: ``make_force_evaluator`` once,
+warm up, then time repeated calls and report the median. This is deliberately not
+``distributed_fmm_accelerations``, which rebuilds and recompiles per call (50-80 s)
+and would report compile time dressed up as force time.
+
+An overflowing point is **invalid, not slow**. When a traversal buffer overflows
+the forces are truncated, so the wall clock is padding overhead over a wrong
+answer. Above roughly 8000 particles per device the caps overflow even after the
+maximum number of retries. Such a point is returned with ``valid=False`` and the
+offending counters attached; callers must drop it rather than plot it.
+
+What is NOT measured, and why
+-----------------------------
+**Per-stage timings do not exist on this path.** The driver's per-device
+diagnostic vector (``DIAG_FIELDS``) carries interaction counts and overflow flags
+and no timers at all. The single-device breakdown of figure 06 comes from
+``_refresh_timing_*`` counters that live on the strict refresh path with fusion
+disabled -- "fusing the stages is exactly what makes them unmeasurable" -- and
+the distributed ``shard_map`` pipeline has no equivalent instrumentation.
+
+So the comm/compute split (figure 10) has no mechanism behind it yet, and this
+module does not pretend otherwise: it exposes no ``STAGE_NAMES`` and no
+``COMM_STAGES``. The scaffold defined both, naming eight stages that nothing in
+the code emits; anything reading them would have been reporting invented
+structure. Getting figure 10 needs real instrumentation inside the sharded
+region -- a host callback per stage, or attributing a profiler trace's XLA ops to
+stages -- which is library work, not analysis, and belongs in its own change.
+
+What *is* available per device is the interaction census, which is what figure 11
+(load balance) actually needs: how much pair work each device was handed.
 """
 
 from __future__ import annotations
 
-import dataclasses
+import argparse
+import json
+import pathlib
+import subprocess
+import sys
+from typing import Any, Optional
 
-import numpy as np
+REPO_ROOT = pathlib.Path(__file__).resolve().parents[2]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
 
-STAGE_NAMES = (
-    "local_tree_build",
-    "self_m2l_near",
-    "all_gather_coarse",
-    "coarse_m2m",
-    "cross_walk",
-    "halo_import",
-    "remote_m2l",
-    "p2p_combined",
+from examples.jaccpot_paper.common import runmeta  # noqa: E402
+
+# Per-device pair counts. These are the load-balance signal: the P2P cost tracks
+# near pairs and the far-field cost tracks far pairs, so an imbalance in these is
+# an imbalance in work, which an equal-particle-count partition would not show.
+WORK_FIELDS = (
+    "self_near_pairs",
+    "self_far_pairs",
+    "cross_near_pairs",
+    "cross_far_pairs",
 )
 
-COMM_STAGES = ("all_gather_coarse", "cross_walk", "halo_import")
+# A nonzero value in any of these means the forces were truncated.
+OVERFLOW_FIELDS = (
+    "self_queue_overflow",
+    "self_near_overflow",
+    "self_far_overflow",
+    "cross_queue_overflow",
+    "cross_near_overflow",
+    "cross_far_overflow",
+)
 
 
-@dataclasses.dataclass
-class MultiGPURunResult:
-    n_particles: int
-    n_gpus: int
-    wall_clock_total: float
-    stage_times: dict[str, float]
-    per_gpu_interaction_counts: np.ndarray  # for load-balance
+def make_distribution(name: str, n: int, ndev: int, seed: int) -> tuple[Any, Any]:
+    """Return ``(positions, masses)`` for the named distribution.
 
+    Parameters
+    ----------
+    name : str
+        ``uniform`` (a cube) or ``plummer`` (centrally concentrated).
+    n : int
+        Total particle count.
+    ndev : int
+        Device count; ``plummer`` is scaled so the domains are comparably filled.
+    seed : int
+        RNG seed.
 
-def run_once(
-    n_particles: int,
-    n_gpus: int,
-    distribution: str = "uniform_cube",
-    seed: int = 0,
-) -> MultiGPURunResult:
-    """Run the distributed FMM once and collect timings.
-
-    TODO: call jaccpot.distributed.fmm's shard_map driver directly (see
-    jaccpot/distributed/fmm.py's docstring for the per-device pipeline
-    stages), instrumenting each of STAGE_NAMES with a
-    jax.block_until_ready()-guarded timer. per_gpu_interaction_counts should
-    come from the M2L/P2P list sizes per device (needed for load_balance.py
-    on a clustered distribution).
+    Returns
+    -------
+    tuple
+        ``(positions[n, 3], masses[n])`` as float64 NumPy arrays.
     """
-    raise NotImplementedError(
-        "Instrument jaccpot/distributed/fmm.py's shard_map pipeline stage by "
-        "stage. This is the main new code this paper plan requires -- see "
-        "PROJECT_PLAN.md Phase 2."
+
+    import numpy as np
+
+    rng = np.random.default_rng(seed)
+    if name == "uniform":
+        return rng.uniform(-1.0, 1.0, size=(n, 3)), rng.uniform(0.5, 1.5, size=n)
+    if name == "plummer":
+        # Clustered on purpose: a space-filling-curve split of a uniform cube is
+        # balanced by construction, so a uniform distribution cannot show whether
+        # the partition balances *work*. Plummer concentrates particles centrally,
+        # which is where equal-particle-count partitioning and equal-work
+        # partitioning come apart.
+        u = rng.uniform(size=n)
+        radius = np.minimum(
+            u ** (1.0 / 3.0) / np.sqrt(np.maximum(1.0 - u ** (2.0 / 3.0), 1e-12)), 20.0
+        )
+        cos_t = rng.uniform(-1.0, 1.0, size=n)
+        sin_t = np.sqrt(np.maximum(1.0 - cos_t**2, 0.0))
+        phi = rng.uniform(0.0, 2.0 * np.pi, size=n)
+        pos = np.stack(
+            [
+                radius * sin_t * np.cos(phi),
+                radius * sin_t * np.sin(phi),
+                radius * cos_t,
+            ],
+            axis=1,
+        )
+        return pos, np.full(n, 1.0 / n)
+    raise SystemExit(f"unknown --distribution {name!r} (use uniform or plummer)")
+
+
+def measure_point(
+    *,
+    ndev: int,
+    n: int,
+    order: int = 3,
+    theta: float = 0.4,
+    leaf_size: int = 128,
+    basis: str = "real",
+    mac_type: str = "dehnen",
+    nearfield_backend: str = "auto",
+    distribution: str = "uniform",
+    seed: int = 0,
+    repeats: int = 5,
+    warmup: int = 2,
+    auto_scale_caps: bool = True,
+    max_cap_retries: int = 4,
+) -> dict[str, Any]:
+    """Measure one ``(ndev, n)`` point in this process.
+
+    Requires ``ndev`` visible devices; the caller is responsible for having
+    selected them before JAX was imported.
+
+    Parameters
+    ----------
+    ndev : int
+        Device count, which must match what JAX sees.
+    n : int
+        Total particle count across all devices.
+    order : int
+        Multipole order.
+    theta : float
+        Local self MAC opening angle.
+    leaf_size : int
+        Leaf occupancy.
+    basis : str
+        Far-field expansion basis.
+    mac_type : str
+        Acceptance criterion.
+    nearfield_backend : str
+        ``auto``, ``pallas`` or ``baseline``.
+    distribution : str
+        See :func:`make_distribution`.
+    seed : int
+        RNG seed.
+    repeats : int
+        Timed calls after warmup; the median is reported.
+    warmup : int
+        Untimed calls, to pay compilation and let the allocator settle.
+    auto_scale_caps : bool
+        Grow an overflowing traversal buffer and retry.
+    max_cap_retries : int
+        Retry ceiling for the above.
+
+    Returns
+    -------
+    dict
+        The measurement record. ``valid`` is False when a buffer overflowed,
+        in which case the timings describe a truncated force and must be dropped.
+    """
+
+    import dataclasses
+    import time
+
+    import jax
+    import jax.numpy as jnp
+    import numpy as np
+    from yggdrax.distributed import device_count, make_mesh
+
+    from jaccpot.distributed import DistributedFMMConfig
+    from jaccpot.distributed.fmm import (
+        DIAG_FIELDS,
+        make_force_evaluator,
+        partition_for_devices,
     )
 
+    if device_count() < ndev:
+        raise SystemExit(
+            f"need {ndev} devices, JAX sees {device_count()}. Refusing to measure: "
+            "a scaling point taken on a different device count is not the point "
+            "that was asked for."
+        )
 
-def strong_scaling(
-    n_particles: int, gpu_counts: list[int], **kw
-) -> list[MultiGPURunResult]:
-    return [run_once(n_particles, g, **kw) for g in gpu_counts]
+    config = dataclasses.replace(
+        DistributedFMMConfig(),
+        order=order,
+        theta=theta,
+        leaf_size=leaf_size,
+        basis=basis,
+        mac_type=mac_type,
+        nearfield_backend=nearfield_backend,
+    )
+    positions, masses = make_distribution(distribution, n, ndev, seed)
+    part = partition_for_devices(positions, masses, ndev, leaf_size=config.leaf_size)
+    mesh = make_mesh(ndev)
+    args = (
+        jnp.asarray(part["pos_flat"]),
+        jnp.asarray(part["mass_flat"]),
+        jnp.asarray(part["gid_flat"]),
+        jnp.asarray(part["counts"]),
+    )
+
+    # Build once, then grow caps only if a buffer actually overflowed. Rebuilding
+    # per call would report compile time as force time.
+    attempt = 0
+    while True:
+        evaluate = make_force_evaluator(config, ndev, part["cap"], mesh, jit=True)
+        accel, _gid, diag = evaluate(*args)
+        jax.block_until_ready(accel)
+        diag_np = np.asarray(diag)
+        counters = {f: diag_np[:, i].tolist() for i, f in enumerate(DIAG_FIELDS)}
+        overflowed = [f for f in OVERFLOW_FIELDS if any(counters.get(f, []))]
+        if not overflowed or not auto_scale_caps or attempt >= max_cap_retries:
+            break
+        config = config.with_selective_scaled_caps(diag_np, 2.0)
+        attempt += 1
+
+    for _ in range(max(0, warmup)):
+        jax.block_until_ready(evaluate(*args)[0])
+
+    times: list[float] = []
+    for _ in range(max(1, repeats)):
+        t0 = time.perf_counter()
+        jax.block_until_ready(evaluate(*args)[0])
+        times.append(time.perf_counter() - t0)
+    times.sort()
+    median = times[len(times) // 2]
+
+    per_device_work = {f: counters[f] for f in WORK_FIELDS if f in counters}
+    total_work = [sum(vals) for vals in zip(*per_device_work.values())] or [0] * ndev
+
+    return {
+        "ndev": ndev,
+        "n": int(part["n"]),
+        "per_device_n": int(-(-int(part["n"]) // ndev)),
+        "cap": int(part["cap"]),
+        "cap_retries": attempt,
+        "distribution": distribution,
+        "seed": seed,
+        "median_s": median,
+        "min_s": times[0],
+        "max_s": times[-1],
+        "repeats": len(times),
+        "throughput_particles_per_s": (int(part["n"]) / median) if median > 0 else None,
+        # Per-device pair counts, and their per-device total: the load-balance signal.
+        "per_device_work": per_device_work,
+        "per_device_work_total": total_work,
+        "work_imbalance": (
+            (max(total_work) / (sum(total_work) / len(total_work)))
+            if total_work and sum(total_work) > 0
+            else None
+        ),
+        "overflowed": overflowed,
+        # A truncated force is not a slow force. Drop these points.
+        "valid": not overflowed,
+        "config": {
+            "order": order,
+            "theta": theta,
+            "leaf_size": leaf_size,
+            "basis": basis,
+            "mac_type": mac_type,
+            "nearfield_backend": nearfield_backend,
+        },
+    }
 
 
-def weak_scaling(
-    n_per_gpu: int, gpu_counts: list[int], **kw
-) -> list[MultiGPURunResult]:
-    return [run_once(n_per_gpu * g, g, **kw) for g in gpu_counts]
+def sweep(
+    points: list[dict[str, Any]], *, extra_argv: Optional[list[str]] = None
+) -> list[dict[str, Any]]:
+    """Run each ``(ndev, n)`` point in a fresh process and collect the records.
+
+    Parameters
+    ----------
+    points : list
+        Dicts carrying at least ``ndev`` and ``n``.
+    extra_argv : list, optional
+        Further flags forwarded verbatim to every worker.
+
+    Returns
+    -------
+    list
+        One record per point, in input order. A point whose worker failed is
+        recorded with ``valid=False`` and the worker's stderr, so a partial sweep
+        is visible in the artifact instead of looking complete.
+    """
+
+    out: list[dict[str, Any]] = []
+    for p in points:
+        cmd = [
+            sys.executable,
+            "-m",
+            "bench.multigpu.harness",
+            "--ndev",
+            str(p["ndev"]),
+            "--n",
+            str(p["n"]),
+            "--emit-json",
+        ] + list(extra_argv or [])
+        proc = subprocess.run(cmd, capture_output=True, text=True, cwd=REPO_ROOT)
+        payload = None
+        for line in reversed(proc.stdout.splitlines()):
+            if line.startswith("{"):
+                try:
+                    payload = json.loads(line)
+                except json.JSONDecodeError:
+                    payload = None
+                break
+        if payload is None:
+            print(
+                f"[harness] point ndev={p['ndev']} n={p['n']} FAILED "
+                f"(exit {proc.returncode})",
+                file=sys.stderr,
+            )
+            payload = {
+                "ndev": p["ndev"],
+                "n": p["n"],
+                "valid": False,
+                "error": (proc.stderr or "").strip()[-2000:],
+                "returncode": proc.returncode,
+            }
+        else:
+            flag = "" if payload.get("valid") else "  [INVALID: overflow]"
+            print(
+                f"[harness] ndev={payload['ndev']} n={payload['n']} "
+                f"median={payload['median_s']*1e3:.1f}ms{flag}"
+            )
+        out.append(payload)
+    return out
+
+
+def _parse_args() -> argparse.Namespace:
+    p = argparse.ArgumentParser(description="Measure one multi-GPU point.")
+    runmeta.add_common_args(p)
+    p.add_argument("--ndev", type=int, required=True)
+    p.add_argument("--n", type=int, required=True)
+    p.add_argument("--order", type=int, default=3)
+    p.add_argument("--theta", type=float, default=0.4)
+    p.add_argument("--leaf-size", type=int, default=128)
+    p.add_argument("--basis", default="real")
+    p.add_argument("--mac-type", default="dehnen")
+    p.add_argument("--nearfield-backend", default="auto")
+    p.add_argument("--distribution", default="uniform")
+    p.add_argument("--repeats", type=int, default=5)
+    p.add_argument("--warmup", type=int, default=2)
+    p.add_argument(
+        "--emit-json",
+        action="store_true",
+        help="print the record as one JSON line on stdout (used by sweep())",
+    )
+    return p.parse_args()
+
+
+def main() -> int:
+    """Single-point worker entry point.
+
+    Returns
+    -------
+    int
+        0 on success, 1 when the point overflowed and is therefore invalid.
+    """
+
+    args = _parse_args()
+    runmeta.select_gpu(args.gpu_select, num_gpus=int(args.ndev))
+    runmeta.enable_x64(args.dtype)
+
+    record = measure_point(
+        ndev=int(args.ndev),
+        n=int(args.n),
+        order=int(args.order),
+        theta=float(args.theta),
+        leaf_size=int(args.leaf_size),
+        basis=args.basis,
+        mac_type=args.mac_type,
+        nearfield_backend=args.nearfield_backend,
+        distribution=args.distribution,
+        seed=int(args.seed),
+        repeats=int(args.repeats),
+        warmup=int(args.warmup),
+    )
+    record["meta"] = runmeta.run_meta({"argv": sys.argv[1:]})
+    if args.emit_json:
+        print(json.dumps(record))
+    else:
+        print(json.dumps(record, indent=2))
+    return 0 if record["valid"] else 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
