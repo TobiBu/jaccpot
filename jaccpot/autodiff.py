@@ -6,7 +6,7 @@ from typing import Optional, Tuple
 
 import jax.numpy as jnp
 from jax import lax
-from jaxtyping import Array, Float, Int
+from jaxtyping import Array, Float
 
 
 def direct_sum_gravitational_acceleration(

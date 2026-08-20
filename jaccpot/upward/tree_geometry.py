@@ -32,7 +32,6 @@ avals), so a refresh loop on frozen topology recompiles nothing.
 
 from __future__ import annotations
 
-import os
 from typing import Any, Callable, Optional
 
 import jax

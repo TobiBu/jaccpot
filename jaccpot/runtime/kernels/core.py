@@ -29,14 +29,13 @@ from __future__ import annotations
 # Keeping it here means the seam split changes no test.
 from jaccpot.runtime.grad_options import fused_m2l_pallas_enabled  # noqa: F401
 
-from ._downward_prep import (  # noqa: F401
+from ._downward_prep import (
     _empty_interaction_storage_for_tree,
     _FarPairCOO,
     _prepare_solidfmm_downward_child_inputs,
     _prepare_solidfmm_downward_init,
     _prepare_solidfmm_downward_interaction_inputs,
     _prepare_solidfmm_downward_multipole_inputs,
-    _solidfmm_downward_accumulate_from_multipoles,
     _SolidFMMDownwardChildInputs,
     _SolidFMMDownwardInit,
     _SolidFMMDownwardInteractionInputs,
@@ -72,7 +71,7 @@ from ._l2l import (  # noqa: F401
     _propagate_solidfmm_locals_by_level,
     _propagate_solidfmm_locals_to_children,
 )
-from ._m2l import (  # noqa: F401
+from ._m2l import (
     _accumulate_m2l_chunked_scan,
     _accumulate_m2l_fullbatch,
     _accumulate_solidfmm_m2l_class_major_chunked_scan,
@@ -81,13 +80,11 @@ from ._m2l import (  # noqa: F401
     _accumulate_solidfmm_m2l_grouped_class_major,
     _accumulate_solidfmm_m2l_grouped_fullbatch,
     _apply_complex_m2l,
-    _apply_m2l,
     _apply_real_m2l,
     _build_grouped_class_segments,
     _chunk_segment_scatter_add,
     _fused_complex_m2l_pallas_active,
     _m2l_cached_kernel_dispatch,
-    _m2l_chunk_contributions,
     _m2l_complex_batch_cached_kernel,
     _m2l_complex_batch_kernel,
     _m2l_complex_batch_kernel_fused_pallas,
