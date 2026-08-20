@@ -2140,6 +2140,22 @@ accept the exposure. Not a refactoring decision.
 > it does contradict the layering claim, and making that one import deferred would restore it.
 > Left open as its own item rather than folded into the decision above, because it is a
 > different edge with a different risk.
+>
+> **FIXED 2026-08-20.** The import is now `TYPE_CHECKING` for the annotation plus a
+> function-local import for the two places `TreecodeLeafLists` is *constructed* --
+> `TYPE_CHECKING` alone would have left a `NameError` at call time, since this is a runtime
+> dependency and not merely an annotation.
+>
+> The claim is now **tested** rather than asserted in prose:
+> `tests/unit/test_experimental_is_not_on_an_import_path.py` imports each of six production
+> packages in a clean subprocess and fails if `jaccpot.experimental` appears in `sys.modules`.
+> A subprocess per case because `sys.modules` is process-global -- an in-process check would
+> pass or fail on collection order. Mutation-verified: restoring the eager import fails
+> exactly the `jaccpot.pallas` case and no other.
+>
+> It covers the **eager** graph only, which is the right scope: G.5's accepted exposure is a
+> function-local import, and those load nothing until called. §8's wording gains the word
+> "eagerly" to match.
 
 ### G.6 Priorities I need ranked — **partly answered**
 
