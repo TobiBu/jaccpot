@@ -22,12 +22,29 @@ closed.
 reverse path at 0%), F33 (`fmm_strict_run.py` at 55%) and F34 (`tests/distributed/`, needs two
 cards). Every one of them is blocked on the same thing: GPU execution. 2.6 built the vehicle
 (`bench/gpu_gate.py`) but records that it **has never been run on hardware**, so these stay
-open until it has. E.1 (jaxtyping carries no shape information anywhere) and E.3 (the policy
-that would fix it) are untouched and are a project, not a pass.
+open until it has.
 
-**One new finding, in A.11:** `__all__` is missing from **35** of the 91 non-`__init__`
-modules, which is what stops item **0.14**'s "no dead imports remain" from being checkable by
-anything but hand.
+**Updated 2026-08-20.** Two things this paragraph used to list as open are done, and one new
+item is open.
+
+* **E.1 and E.3 are executed**, not "a project, not a pass". Three measured pilots (#170, #171,
+  #174), a policy rewritten from what they measured (#175, STYLE_GUIDE §4), one decorator added
+  deliberately (#176), and the large-N shapes measured (#177). `jaxtyping` is no longer inert:
+  156 shaped params across 4 enforced modules. E.3's *scope* was rejected in the process — see
+  the executed note under E.3, because the reason is reusable. What is NOT done, by policy
+  rather than omission: the ~1693 remaining bare `Array` params.
+* **A.11 is closed**, and 0.14 with it: modules without `__all__` went 35 → **2**, unused
+  imports 114 → **32**, and both are now guarded in both directions. 0.14's removal work is a
+  bounded, named list.
+* **New and open: the `blocks` axis extent in `kernels/_evaluate.py`.** No reachable
+  configuration makes the target-block count non-zero, so that axis is bound but unmeasured and
+  `precomputed_target_block_leaf_ids` stays rank-only. Same root cause as F27 — it needs the
+  lane to actually engage on a GPU.
+
+**Still waiting on a person, unchanged:** G.2, G.3, G.5. And one operational risk found while
+merging this work: `test-full (integration)` runs 35-39 min against a **60-minute cap** and has
+hit it twice in a week (#170's and #176's runs), which produces red CI on PRs that did nothing
+wrong.
 
 **Decisions still waiting on you — three, not five.** The list carried in earlier drafts was
 G.2, G.3, G.5, G.7 and 2.4. Two of those five are no longer decisions:
@@ -666,6 +683,31 @@ and an evidence line that cannot be re-derived by anyone who was not there.
 > Landed as a tuple of references, with `_fmm_impl.py` deliberately taking `_REEXPORTS` and
 > **no** `__all__`: it is the package's one star-imported module, and a private name cannot
 > narrow the star that broke `import jaccpot` last time this was attempted.
+>
+> **CLOSED 2026-08-20, and 0.14 closes with it.** Re-measured on `main` after #166 landed (via
+> #172 — see the note below, it did not reach `main` the first time):
+>
+> | | at A.11 | now |
+> |---|---|---|
+> | modules without `__all__` | 35 of 91 | **2** |
+> | non-`__init__` unused imports (`pyflakes`) | 114 | **32** |
+>
+> The two remaining are both deliberate: `runtime/_fmm_impl.py`, the star seam described above,
+> and `experimental/treecode_walk.py`, out of scope by this audit's own scope line.
+> `tests/unit/test_module_exports_guard.py` asserts that set in **both** directions, so neither
+> can grow silently.
+>
+> **Item 0.14 is therefore closable on evidence rather than on a `# noqa` count.** Its original
+> claim — "no dead imports remain" — can now be checked: 32 candidates remain, they are named,
+> and every one of them is a genuine finding rather than a deliberate re-export, because the
+> re-exports are marked. The largest concentrations are `nearfield/near_field.py` (10),
+> `operators/real_harmonics.py` (8) and `runtime/kernels/core.py` (3). Removing them is 0.14's
+> remaining work and it is now a bounded list.
+>
+> **A process note worth keeping.** #166 showed MERGED while its commits were **not on `main`**:
+> its base was a stacked branch, and when that branch merged, #166 went into the stale copy. It
+> took a `git merge-base --is-ancestor <sha> origin/main` check to notice, and a re-merge (#172)
+> to land. `gh pr list` showing "merged" is not evidence that code shipped.
 >
 > **Result: 114 → 31.** The 31 are a worklist, not noise, so 0.14 can now be closed against
 > named candidates. Among them, three that had been hiding in the 114: `FMMEngine` imported
@@ -1537,6 +1579,37 @@ The 350 unannotated parameters are all on private functions:
 `tests/unit/test_type_annotation_guard.py:41` skips names starting with `_`, so the guard is
 satisfied while the numerically densest code is unannotated.
 
+> **SUPERSEDED 2026-08-20 — the headline of this section is no longer true, and the number that
+> replaced it is smaller than "we fixed it" would suggest.** Five PRs (#170, #171, #174, #175,
+> #176, #177) took `jaxtyping` from inert to enforced on four modules. Re-measured on `main`:
+>
+> | | audited | now |
+> |---|---|---|
+> | shape/dtype-annotated `Array` params | **0** | **156** |
+> | bare `Array` params | 1534 | 1693 |
+> | unannotated params | 350 | 252 |
+> | `from jaxtyping import` statements | 47 | 68 |
+> | `@jaxtyped(typechecker=beartype)` decorators | 45 | 46 |
+>
+> **Bare `Array` GREW, from 1534 to 1693.** That is not a regression and it is worth being
+> precise about: the package gained code over the same period, and the programme was never a
+> sweep. 156 shaped params across 8 modules is what it bought — `solver.py` (45),
+> `runtime/fmm_evaluate.py` (31), `nornax_adapter.py` (23), `runtime/kernels/_evaluate.py` (23),
+> `nearfield/near_field.py` (15), `upward/tree_expansions.py` (9), `odisseo.py` (7),
+> `autodiff.py` (3).
+>
+> **One correction to this section's own framing.** It says beartype "is opt-in via
+> `JACCPOT_RUNTIME_TYPECHECK=1`". It is not: `@jaxtyped(typechecker=beartype)` is
+> **unconditional** on all 46 decorated functions, so a shape added to one of them changes
+> production behaviour. The env var installs the package-wide import hook, which extends
+> checking to *undecorated* functions. That distinction is the difference between documentation
+> and a runtime contract, and getting it backwards is what made "annotating is harmless" look
+> true.
+>
+> The decorator count barely moved (45 → 46) because only ONE was added, deliberately:
+> `kernels/_evaluate.py::_evaluate_tree_compiled_impl` (#176). Annotating is documentation;
+> adding a decorator is a behaviour change, and the two were kept in separate PRs throughout.
+
 ### E.2 89 dangling forward references make the mixin annotations decorative
 
 No `TYPE_CHECKING` block exists anywhere under `runtime/`. Result (pyflakes):
@@ -1622,6 +1695,57 @@ A cheaper policy that gets most of the value:
    than three half-conventions.
 3. Extend `test_type_annotation_guard.py` to cover private functions **in the operator and
    kernel directories only**, so the 350 gap cannot grow where it matters.
+
+> **EXECUTED 2026-08-20, and the policy this section proposed is not the policy that was
+> adopted.** Three pilots measured it, one module at a time, and E.3's premise — that the
+> public surface plus the operator/kernel boundaries is the right scope — did not survive
+> contact:
+>
+> | pilot | module | malformed inputs `main` ALREADY caught |
+> |---|---|---|
+> | 1 (#170) | `upward/tree_expansions.py` | **3 of 3** — yggdrax validated everything |
+> | 2 (#171) | `nearfield/near_field.py` | **0 of 4** — silently accepted, wrong answers |
+> | 3 (#174) | `runtime/fmm_evaluate.py` | **2 of 5** — split by parameter family |
+>
+> **The predictor is not the surface. It is whether anything else validates the parameter.**
+> Pilot 1 annotated a module whose inputs yggdrax already checked, and bought nothing except a
+> worse error message — a domain `ValueError` replaced by a generic `TypeCheckError`. Pilot 2
+> annotated a module where nothing checked the `*_override` family at all, and caught four real
+> corruptions that had been reaching the kernels silently. Pilot 3 found both in one signature.
+>
+> The adopted policy is in STYLE_GUIDE §4, rewritten in #175 to describe it: annotate an array
+> parameter when nothing else validates it; skip it when the value flows into a library that
+> checks it. `tests/unit/test_type_annotation_guard.py` holds the four converted modules.
+>
+> **Item 3 of this section landed differently too.** It proposed extending the guard to private
+> functions in `operators/` and `kernels/`. What it actually guards is every array parameter on
+> a `@jaxtyped`-decorated function in a converted module — scoped to *decorated* functions
+> because an undecorated annotation is inert outside the env hook, so requiring one would assert
+> a guarantee the package does not make. Three parameters are exempt, each documented.
+>
+> **Four things were found by executing this that no amount of reading would have produced**,
+> and they are the reusable part:
+>
+> 1. **`NodeMultipoleData.packed` was documented `sh_size(order)` = `(p+1)^2`.** It is
+>    `total_coefficients(order)` = `(p+1)(p+2)(p+3)/6` — 10 columns at p=2, not 9. They agree
+>    only at p=1, so the documented shape was wrong for every order the package runs at.
+> 2. **pydoclint 0.9.1 CRASHES on a shaped return** whose axis spec has more than one token, and
+>    flake8's F821 rejects single-identifier axes. Between them there is no legal spelling for a
+>    multi-axis return annotation, so returns stay bare with the shape in the `Returns` section.
+> 3. **Capture coverage bounds annotation validity.** `leaf_nodes` was bound to the same axis as
+>    `nearfield_leaf_nodes` on the strength of 64 captured calls; they differ on the octree
+>    backend (5 vs 3), which no captured call entered. The decorator caught it on its first full
+>    run — 7 failures. Hence the separate `farleaves` axis.
+> 4. **A shape can be known and still unannotatable.** `nearfield_leaf_particle_indices` is
+>    measurably `(leaves, w)` when its lane is live, but arrives as a `(0, 0)` sentinel when the
+>    lane is off, and `leaves` is already bound elsewhere in that signature. Annotating it fails
+>    87 tests including the characterization goldens. Rank-only is the most that can be said.
+>
+> Deliberately NOT done, and each for a stated reason: the ~1693 remaining bare `Array` params
+> (out of scope by the adopted policy, not a backlog); return annotations (blocked by the
+> tooling in item 2); and the extent of the `blocks` axis in `kernels/_evaluate.py`, which no
+> reachable configuration makes non-zero — that needs the target-block lane engaging, which is
+> GPU work (F27 / 2.6).
 
 ---
 

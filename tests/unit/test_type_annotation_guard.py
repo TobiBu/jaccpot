@@ -105,27 +105,29 @@ CONVERTED_MODULES = (
     "jaccpot/upward/tree_expansions.py",
     "jaccpot/nearfield/near_field.py",
     "jaccpot/runtime/fmm_evaluate.py",
+    # Added late, and the delay is the point: this module was annotated and given
+    # its `@jaxtyped` decorator without being listed here, so for two commits the
+    # one module whose shapes are the ONLY check on its inputs was the one module
+    # this guard did not hold. STYLE_GUIDE section 4 says to add a module in the
+    # same PR that annotates it; that is the rule this omission broke.
+    "jaccpot/runtime/kernels/_evaluate.py",
 )
 
-# The parameter families the E.3 pilots measured as validated by NOTHING else, and
-# therefore the ones worth pinning. Before the pilots, a wrong dtype, wrong rank or
-# mismatched length in any `precomputed_*` argument was accepted silently and
-# reached the kernels.
-#
-# `farfield_*` is deliberately NOT here: pilot 3 measured it as already rejected
-# with a domain `ValueError`, so requiring a shape would assert a guarantee the
-# package makes elsewhere and better. The families are the unit of this policy,
-# not the modules.
-UNVALIDATED_PARAM_PREFIXES = ("precomputed_",)
-UNVALIDATED_PARAM_SUFFIXES = ("_override",)
-
-# Array parameters in those families that are deliberately bare. EMPTY as measured
-# 2026-08-19, and that is the intended steady state: the three bare parameters
-# matching these names (`precomputed_geometry`, and `nearfield_mode_override` twice)
-# are not arrays at all -- `Optional[TreeGeometry]` and `Optional[str]` -- so they
-# never reach the shape check. Kept so a future exemption has somewhere to go that
-# is checked rather than assumed.
-DELIBERATELY_BARE: frozenset[tuple[str, str]] = frozenset()
+# Array parameters deliberately left bare, each with its reason recorded at the
+# site. The rot check below asserts every entry still exists AND is still bare, so
+# this cannot become a place where exemptions accumulate unexamined.
+DELIBERATELY_BARE: frozenset[tuple[str, str]] = frozenset(
+    {
+        # Annotating the shape would raise a beartype violation BEFORE the body,
+        # replacing the `ValueError` both functions document in their Raises
+        # section and making that branch unreachable for shape errors. Changing
+        # which exception a caller sees is a behaviour change, not a docs change.
+        ("jaccpot/upward/tree_expansions.py", "explicit_centers"),
+        # `Union[float, Array]`: a scalar that legitimately accepts a Python
+        # number, so `Float[Array, ""]` would break every defaulted call.
+        ("jaccpot/nearfield/near_field.py", "G"),
+    }
+)
 
 # Parameters carrying particle-indexed arrays, which therefore have a knowable
 # shape. Deliberately a name list rather than "every Array parameter": several
@@ -204,27 +206,8 @@ def test_public_facade_array_params_carry_shapes() -> None:
     )
 
 
-def _is_unvalidated_family(name: str) -> bool:
-    """Whether a parameter belongs to a family nothing else validates.
-
-    Parameters
-    ----------
-    name : str
-        Parameter name.
-
-    Returns
-    -------
-    bool
-        ``True`` for the ``precomputed_*`` and ``*_override`` families that the
-        E.3 pilots measured as unchecked before annotation.
-    """
-    return name.startswith(UNVALIDATED_PARAM_PREFIXES) or name.endswith(
-        UNVALIDATED_PARAM_SUFFIXES
-    )
-
-
-def _iter_unshaped_unvalidated_params() -> list[tuple[str, int, str, str, str]]:
-    """Find unvalidated-family array parameters that lost their shape.
+def _iter_unshaped_converted_params() -> list[tuple[str, int, str, str, str]]:
+    """Find array parameters in converted modules that lost their shape.
 
     Only ``@jaxtyped``-decorated functions are examined, because those are the
     ones whose annotations are enforced on every call. An undecorated function's
@@ -252,8 +235,6 @@ def _iter_unshaped_unvalidated_params() -> list[tuple[str, int, str, str, str]]:
 
             args = node.args
             for arg in args.posonlyargs + args.args + args.kwonlyargs:
-                if not _is_unvalidated_family(arg.arg):
-                    continue
                 if (rel, arg.arg) in DELIBERATELY_BARE:
                     continue
                 if arg.annotation is None:
@@ -268,21 +249,21 @@ def _iter_unshaped_unvalidated_params() -> list[tuple[str, int, str, str, str]]:
     return offenders
 
 
-def test_converted_modules_keep_shapes_on_unvalidated_params() -> None:
-    """The ``precomputed_*`` / ``*_override`` families must stay shaped.
+def test_converted_modules_keep_shapes_on_array_params() -> None:
+    """Every array parameter in the converted modules must stay shaped.
 
     These are the parameters the E.3 pilots measured as validated by nothing else:
     before annotation, a wrong dtype, wrong rank or mismatched length in any of
     them was accepted silently and reached the kernels. Losing the annotation
     restores that hole without any test going red, which is why this guard exists.
     """
-    offenders = _iter_unshaped_unvalidated_params()
+    offenders = _iter_unshaped_converted_params()
     details = "\n".join(
         f"- {path}:{lineno} `{func}` parameter `{param}` is `{text}`"
         for path, lineno, func, param, text in offenders
     )
     assert not offenders, (
-        "Unvalidated-family parameters must carry a jaxtyping shape "
+        "Array parameters in converted modules must carry a jaxtyping shape "
         "(STYLE_GUIDE.md section 4). Nothing else checks these:\n" + details
     )
 
