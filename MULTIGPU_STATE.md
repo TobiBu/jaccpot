@@ -12,10 +12,11 @@ are pre-Phase-5 scaffolds, there is no JSON, and there are no notebooks. So this
 tranche is *wrap-and-write* for §2.6/§1, and *build-then-measure-then-write* for
 §5 and figs 08–11.
 
-**Nothing below was measured in this session.** Every GPU on this host was
-occupied (7 of 8 cards holding 34–39 GB of 40 GB; the only lightly-loaded card at
-52% utilisation), so all execution is deferred. Commands to run are given in
-"Blocked on hardware".
+**Update 2026-08-20.** Two things changed since this was written. The
+distributed gradient result has now been *measured and recorded* (§3), and the
+scaling pipeline of §2 has been built, though not yet run at scale. What remains
+blocked is the scaling measurement itself, and figure 10, which turns out to have
+no mechanism behind it at all.
 
 ---
 
@@ -53,25 +54,49 @@ open follow-ups.
 
 ---
 
-## 2. Paper-facing scaling pipeline — MISSING
+## 2. Paper-facing scaling pipeline — BUILT, not yet run at scale
+
+Rewritten 2026-08-20 (`a6269a6`, `348ca65`). The scaffolds are gone.
 
 | piece | state |
 | --- | --- |
-| `bench/multigpu/harness.py` | exists, 77 lines, **pre-Phase-5 scaffold** |
-| `bench/multigpu/{strong,weak}_scaling.py` | exist, 40/41 lines, scaffolds |
-| `bench/multigpu/{comm_overhead,load_balance}.py` | exist, 46/~46 lines, scaffolds |
-| `bench/results/multigpu/*.json` | **only `.gitkeep`** — no data at all |
-| `examples/jaccpot_paper/fig_{08..11}*.ipynb` | **do not exist** |
+| `bench/multigpu/harness.py` | rebuilt: single-point worker + subprocess sweep |
+| `bench/multigpu/_sweep_cli.py` | new: shared args, artifact writing, provenance |
+| `bench/multigpu/{strong,weak}_scaling.py` | rewritten on the new harness |
+| `bench/multigpu/load_balance.py` | rewritten; sweeps uniform **and** plummer |
+| `bench/multigpu/comm_overhead.py` | **refuses to run** — see below |
+| `bench/results/multigpu/*.json` | still only `.gitkeep` — nothing measured yet |
+| `examples/jaccpot_paper/fig_{08,09,11}*.ipynb` | still absent |
 
-`harness.py`'s own docstring is stale in a way that matters: it says to confirm
-the basis/MAC "(solidfmm+bh as of the last update)". That is now wrong — the
-default is real+dehnen (§1). Any harness rewrite must not inherit that assumption.
+Two structural facts drove the rewrite, both discovered rather than assumed:
 
-The scaffolds also predate the per-stage timing the tranche needs (local build,
-self M2L, `all_gather` coarse, coarse M2M, cross-walk, halo import, remote M2L,
-P2P) and the per-GPU interaction counts fig 11 depends on.
+1. **A device-count sweep cannot happen in one process.** JAX fixes its device
+   count at backend initialisation, so the scaffold's
+   `[run_once(n, g) for g in gpu_counts]` could never have worked. Every point is
+   now its own process, which additionally isolates the intermittent `jit`
+   illegal-address fault and makes the sweep an array job on a scheduler.
+2. **There are no per-stage timers on the distributed path.** `DIAG_FIELDS`
+   carries interaction counts and overflow flags and nothing else. Figure 06's
+   single-device breakdown is not transferable: it reads `_refresh_timing_*`
+   counters that live on the strict refresh path with fusion disabled, and the
+   `shard_map` pipeline has no analogue.
 
----
+**Figure 10 (comm/compute split) therefore has no mechanism.** The scaffold
+declared eight stage names and a `COMM_STAGES` subset; nothing in the code emits
+any of them, so anything built on them would have reported invented structure.
+They are deleted, and `comm_overhead.py` exits 2 with an explanation rather than
+producing a plausible artifact. Getting the figure needs one of: a host callback
+per stage inside the sharded region (perturbs what it measures), attributing a
+`jax.profiler` trace's XLA ops to stages (most promising, brittle against
+fusion), or stage ablation (cheapest, least trustworthy). That is library work
+and belongs in its own change.
+
+What *is* measurable: total wall clock (figs 08, 09) and per-device pair counts
+(fig 11). An overflowing point is recorded `valid=false` — its wall clock is
+padding overhead over a **truncated force**, so it must never be plotted.
+
+The whole pipeline was validated without GPUs on forced host devices
+(`XLA_FLAGS=--xla_force_host_platform_device_count=2`).
 
 ## 3. Distributed differentiability — ALREADY DONE, and the mechanism is not the expected one
 
