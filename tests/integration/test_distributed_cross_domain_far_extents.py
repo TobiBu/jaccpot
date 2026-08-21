@@ -89,9 +89,10 @@ _PER = 64
 # field dilutes it.
 #
 # 0.001535 is an order 3 expansion's truncation error at the separations the MAC
-# accepts, so the bar sits ~6.5x above the passing case and ~680x below the failing
-# one: nothing about it is finely tuned. The float32 M2L floor is ~1e-6 at leaf 8, four
-# orders below, so this threshold tests the scheme and not precision.
+# accepts, so the bar sits ~6.5x above the passing case and ~104x below the failing one
+# (which are themselves ~680x apart): nothing about it is finely tuned. The float32 M2L
+# floor is ~1e-6 at leaf 8, four orders below, so this threshold tests the scheme and
+# not precision.
 _CROSS_FAR_RTOL = 1e-2
 
 _INTERPENETRATING_XFAIL = pytest.mark.xfail(
