@@ -108,9 +108,14 @@ def test_distributed_solidfmm_far_matches_direct():
     n = per * ndev
     cap = per
     rng = np.random.default_rng(4)
-    # ndev spatially SEPARATED clusters (one per Morton domain) so cross-domain
-    # interactions are genuinely far-field -- otherwise adjacent domains resolve
-    # everything as near and the far path is never exercised.
+    # ndev spatially SEPARATED clusters so cross-domain interactions engage the far
+    # path at all -- adjacent domains would resolve everything as near.
+    # MEASURED 2026-08-21: this yields one cluster per Morton domain only at ndev=4.
+    # The 7x1x1 global box puts the cluster-separating axis away from the Morton
+    # code's leading bits, so at ndev=2 the split cuts across the clusters (38/26 per
+    # domain) and the domains interpenetrate. The far path is still engaged (12 far
+    # pairs per domain), which is why the FULL check below is red while LOCAL passes:
+    # see docs/distributed_cross_domain_far_diagnosis.md.
     cluster_centers = np.array(
         [[0.0, 0.0, 0.0], [6.0, 0.0, 0.0], [0.0, 6.0, 0.0], [0.0, 0.0, 6.0]],
         dtype=np.float32,

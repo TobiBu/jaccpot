@@ -47,7 +47,15 @@ PER = 32
 
 
 def _clusters(ndev: int, per: int, seed: int = 4):
-    """One spatially separated cluster per Morton domain (engages cross-domain)."""
+    """``ndev`` spatially separated clusters (engages the cross-domain path).
+
+    NB the Morton split does not land on the cluster boundaries at ``NDEV=2``: each
+    domain gets 18 particles from one cluster and 14 from the other (measured), so the
+    domains interpenetrate. Harmless here -- these tests check forward/reverse
+    consistency, not far-field accuracy -- but see
+    ``docs/distributed_cross_domain_far_diagnosis.md`` before reusing this IC for an
+    accuracy assertion.
+    """
     rng = np.random.default_rng(seed)
     centers = np.array(
         [[0.0, 0.0, 0.0], [6.0, 0.0, 0.0], [0.0, 6.0, 0.0], [0.0, 0.0, 6.0]],

@@ -3,9 +3,20 @@
 Proves that ``jaccpot.distributed.distributed_fmm_accelerations`` reproduces the
 result of the validated in-test assembly in
 ``test_distributed_solidfmm_far_shardmap.py``: on the same spatially-separated
-cluster IC (one cluster per Morton domain, so the cross-domain far-field is
-genuinely engaged), the reassembled per-particle accelerations match a direct
-N-body sum to within 1%.
+cluster IC, the reassembled per-particle accelerations match a direct N-body sum
+to within 1%.
+
+CAUTION about the IC (measured 2026-08-21, was stated the other way round here for
+as long as this file went unexecuted): ``_separated_clusters`` puts one cluster per
+Morton domain **only at ndev=4**. The global box is 7x1x1, so the leading bits of
+the Morton code are not the axis that separates the clusters and a contiguous split
+of the Morton order cuts across them -- at ndev=2 each domain gets 38 particles from
+one cluster and 26 from the other, and the cross-domain field is 74.8% of the local
+field rather than 1.0%. That is a legitimate decomposition and these assertions are
+correct for it, but it is a far harder configuration than "separated clusters"
+suggests, and it is what the cross-domain far-field defect in
+``docs/distributed_cross_domain_far_diagnosis.md`` needs to show itself. Do not
+"fix" the IC to make the aggL2 assertions pass.
 
     CUDA_VISIBLE_DEVICES=$(autocvd -n 3 -l -o) \
         pytest tests/distributed/test_distributed_fmm_driver.py -o addopts="" -q
@@ -36,7 +47,11 @@ def _direct(all_pos, all_mass, G, soft):
 
 
 def _separated_clusters(ndev, per, seed=4):
-    """ndev spatially separated clusters (one per Morton domain)."""
+    """``ndev`` spatially separated clusters (one per Morton domain at ndev=4 only).
+
+    See the module docstring: the Morton split lands on cluster boundaries at ndev=4
+    and cuts across them at ndev=2 and ndev=3.
+    """
     rng = np.random.default_rng(seed)
     cluster_centers = np.array(
         [[0.0, 0.0, 0.0], [6.0, 0.0, 0.0], [0.0, 6.0, 0.0], [0.0, 0.0, 6.0]],
@@ -161,6 +176,16 @@ def test_driver_auto_scale_caps():
     The cross-domain LET grows with device count, so the fixed default caps can
     overflow at higher ``ndev``. Deliberately tiny caps force the overflow here;
     the retry must clear it and still match direct N-body.
+
+    The per-node/per-leaf caps have to be genuinely tiny *for this problem size*.
+    At 16 (what this test asked for until 2026-08-21, when it first executed) nothing
+    overflows at ndev=2: the LET needs about 7 neighbours per leaf and 5 interactions
+    per node, so the premise was false and ``auto_scale_caps`` -- the whole point of
+    the test -- was never reached. Measured at 4: ``cross_near_overflow`` and
+    ``self_near_overflow`` both fire, and the retry clears them in one round
+    (per-leaf 4 -> 8). The queue caps stay where they were; they do not overflow at
+    this size, and keeping them low would only halt the walk before the LET buffers
+    can overflow, which is the failure mode this test is about.
     """
     ndev = min(4, device_count())
     mesh = make_mesh(ndev)
@@ -171,10 +196,10 @@ def test_driver_auto_scale_caps():
         nearfield_backend="baseline",  # pallas is GPU-only; CI runs on CPU
         max_pair_queue=64,
         cross_max_pair_queue=64,
-        max_interactions_per_node=16,
-        cross_max_interactions_per_node=16,
-        max_neighbors_per_leaf=16,
-        cross_max_neighbors_per_leaf=16,
+        max_interactions_per_node=4,
+        cross_max_interactions_per_node=4,
+        max_neighbors_per_leaf=4,
+        cross_max_neighbors_per_leaf=4,
     )
 
     r0 = distributed_fmm_accelerations(pts, mass, config=tiny, mesh=mesh, jit=False)
