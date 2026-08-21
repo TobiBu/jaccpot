@@ -141,6 +141,25 @@ The same replay with separated domains never overlaps (worst ratio 0.199 over 47
 accepted pairs) and stays at 1.4e-3, which is the counterfactual: same code, same
 walk, same order — only the domain geometry differs.
 
+### Two isolation levels, two numbers — do not conflate them
+
+The table above measures `far + near` against the **whole** cross field, because that
+is what the driver's assertion sums. `tests/integration/test_distributed_cross_domain_far_extents.py`
+measures something tighter: the far term alone, against the direct sum over **exactly
+the pairs the walk accepted as far**. Dropping the near pairs from both sides removes
+the dilution and the defect shows up at full size:
+
+| | far + near vs whole cross field | far alone vs its own pairs |
+| --- | --- | --- |
+| separated | 0.001437 | 0.001535 |
+| interpenetrating | 0.052164 | **1.042014** |
+
+The right-hand column is the honest statement of severity: the far term is off by more
+than 100% of its own reference, so it is not an inaccurate approximation of the cross
+field — it is uncorrelated with it. Every step down the chain (whole field 1.8e-2 →
+cross field 5.2e-2 → far term alone 1.04) is dilution being removed, not a different
+defect.
+
 The replay is faithful. Its pair counts reproduce the driver's own diagnostics exactly:
 12 far and 51 near for device 0 at `theta_cross=0.1`, against the driver's
 `cross_far_pairs: [12, 10]` and `cross_near_pairs: [51, 51]`.
