@@ -176,6 +176,16 @@ def test_driver_auto_scale_caps():
     The cross-domain LET grows with device count, so the fixed default caps can
     overflow at higher ``ndev``. Deliberately tiny caps force the overflow here;
     the retry must clear it and still match direct N-body.
+
+    The per-node/per-leaf caps have to be genuinely tiny *for this problem size*.
+    At 16 (what this test asked for until 2026-08-21, when it first executed) nothing
+    overflows at ndev=2: the LET needs about 7 neighbours per leaf and 5 interactions
+    per node, so the premise was false and ``auto_scale_caps`` -- the whole point of
+    the test -- was never reached. Measured at 4: ``cross_near_overflow`` and
+    ``self_near_overflow`` both fire, and the retry clears them in one round
+    (per-leaf 4 -> 8). The queue caps stay where they were; they do not overflow at
+    this size, and keeping them low would only halt the walk before the LET buffers
+    can overflow, which is the failure mode this test is about.
     """
     ndev = min(4, device_count())
     mesh = make_mesh(ndev)
@@ -186,10 +196,10 @@ def test_driver_auto_scale_caps():
         nearfield_backend="baseline",  # pallas is GPU-only; CI runs on CPU
         max_pair_queue=64,
         cross_max_pair_queue=64,
-        max_interactions_per_node=16,
-        cross_max_interactions_per_node=16,
-        max_neighbors_per_leaf=16,
-        cross_max_neighbors_per_leaf=16,
+        max_interactions_per_node=4,
+        cross_max_interactions_per_node=4,
+        max_neighbors_per_leaf=4,
+        cross_max_neighbors_per_leaf=4,
     )
 
     r0 = distributed_fmm_accelerations(pts, mass, config=tiny, mesh=mesh, jit=False)
