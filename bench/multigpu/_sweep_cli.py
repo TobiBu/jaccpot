@@ -66,6 +66,16 @@ def add_sweep_args(p: argparse.ArgumentParser) -> argparse.ArgumentParser:
         ),
     )
     p.add_argument("--max-pair-queue", type=int, default=DEFAULT_PAIR_QUEUE)
+    p.add_argument(
+        "--cross-far-cap",
+        type=int,
+        default=1 << 20,
+        help=(
+            "cross-domain far-list capacity. Its default is floored at 16384, which "
+            "the honest coarse extents now exceed at higher device counts -- the "
+            "far field is engaged, so the far list is no longer nearly empty"
+        ),
+    )
     p.add_argument("--cross-max-pair-queue", type=int, default=DEFAULT_PAIR_QUEUE)
     p.add_argument("--basis", default="real")
     p.add_argument("--mac-type", default="dehnen")
@@ -80,6 +90,16 @@ def add_sweep_args(p: argparse.ArgumentParser) -> argparse.ArgumentParser:
         choices=("least-used", "first", "none"),
         default="least-used",
         help="passed to each worker; workers claim their whole mesh at once",
+    )
+    p.add_argument(
+        "--accuracy-targets",
+        type=int,
+        default=0,
+        help=(
+            "per point, compare against a direct sum on this many sampled targets. "
+            "Section 5 needs it: a scaling curve without an accuracy column cannot "
+            "distinguish a working far field from a truncated one"
+        ),
     )
     p.add_argument("--json-out", default=None)
     return p
@@ -119,6 +139,10 @@ def worker_argv(args: argparse.Namespace) -> list[str]:
         args.dtype,
         "--gpu-select",
         args.gpu_select,
+        "--accuracy-targets",
+        str(args.accuracy_targets),
+        "--cross-far-cap",
+        str(args.cross_far_cap),
     ]
 
 
@@ -192,6 +216,7 @@ def write_sweep(
         "repeats": args.repeats,
         "warmup": args.warmup,
         "healthy_per_device_n": HEALTHY_PER_DEVICE_N,
+        "accuracy_targets": args.accuracy_targets,
         "process_block": args.process_block,
         "max_pair_queue": args.max_pair_queue,
         "cross_max_pair_queue": args.cross_max_pair_queue,

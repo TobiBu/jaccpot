@@ -162,6 +162,7 @@ def measure_point(
     process_block: Optional[int] = None,
     l2l_num_levels: Optional[int] = None,
     accuracy_targets: int = 0,
+    cross_far_cap: Optional[int] = None,
 ) -> dict[str, Any]:
     """Measure one ``(ndev, n)`` point in this process.
 
@@ -277,6 +278,7 @@ def measure_point(
             ("max_interactions_per_node", max_interactions_per_node),
             ("max_neighbors_per_leaf", max_neighbors_per_leaf),
             ("process_block", process_block),
+            ("cross_far_cap", cross_far_cap),
         )
         if v is not None
     }
@@ -407,6 +409,7 @@ def measure_point(
             "max_interactions_per_node": int(config.max_interactions_per_node),
             "max_neighbors_per_leaf": int(config.max_neighbors_per_leaf),
             "process_block": int(config.process_block),
+            "cross_far_cap": config.cross_far_cap,
             "l2l_num_levels": l2l_num_levels,
         },
     }
@@ -496,6 +499,7 @@ def _parse_args() -> argparse.Namespace:
     p.add_argument("--max-interactions-per-node", type=int, default=None)
     p.add_argument("--max-neighbors-per-leaf", type=int, default=None)
     p.add_argument("--process-block", type=int, default=None)
+    p.add_argument("--cross-far-cap", type=int, default=None)
     p.add_argument("--l2l-num-levels", type=int, default=None)
     p.add_argument(
         "--accuracy-targets",
@@ -549,6 +553,7 @@ def main() -> int:
         process_block=args.process_block,
         l2l_num_levels=args.l2l_num_levels,
         accuracy_targets=int(args.accuracy_targets),
+        cross_far_cap=args.cross_far_cap,
     )
     record["meta"] = runmeta.run_meta({"argv": sys.argv[1:]})
     if args.emit_json:

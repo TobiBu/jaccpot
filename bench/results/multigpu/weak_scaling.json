@@ -4,7 +4,8 @@
       32768,
       49152,
       65536,
-      81920
+      81920,
+      98304
     ],
     "theta": 0.4,
     "order": 3,
@@ -16,35 +17,47 @@
       2,
       3,
       4,
-      5
+      5,
+      6
     ],
-    "leaf_size": 256,
+    "leaf_size": 64,
     "mac_type": "dehnen",
     "nearfield_backend": "auto",
     "distribution": "uniform",
     "repeats": 3,
-    "warmup": 1,
+    "warmup": 2,
     "healthy_per_device_n": 16384,
-    "process_block": 256,
-    "max_pair_queue": 262144,
-    "cross_max_pair_queue": 262144,
+    "accuracy_targets": 1024,
+    "process_block": 1024,
+    "max_pair_queue": 1048576,
+    "cross_max_pair_queue": 1048576,
     "n_valid": 4,
-    "n_invalid": 0,
+    "n_invalid": 1,
     "per_device_n_fixed": 16384
   },
   "meta": {
-    "git_sha": "7d55dbc016a034716bbadf866045c3699707ea2f",
+    "git_sha": "cf33eeddbfc956c08336005c8d8839fa7fbba8b7",
     "git_branch": "paper/jaccpot-i",
-    "git_dirty": false,
+    "git_dirty": true,
     "argv": [
       "--ndevs",
-      "2,3,4,5",
+      "2,3,4,5,6",
       "--per-device-n",
       "16384",
+      "--leaf-size",
+      "64",
+      "--process-block",
+      "1024",
+      "--max-pair-queue",
+      "1048576",
+      "--cross-max-pair-queue",
+      "1048576",
+      "--accuracy-targets",
+      "1024",
       "--repeats",
       "3",
       "--warmup",
-      "1",
+      "2",
       "--gpu-select",
       "none"
     ],
@@ -53,10 +66,11 @@
     "worker_jax": "0.10.2",
     "worker_device_kind": "NVIDIA A100-PCIE-40GB",
     "worker_cuda_visible_devices": [
-      "2,4,5,6,7",
-      "2,4,5,6,7",
-      "2,4,5,6,7",
-      "2,4,5,6,7"
+      "1,2,4,5,6,7",
+      "1,2,4,5,6,7",
+      "1,2,4,5,6,7",
+      "1,2,4,5,6,7",
+      "1,2,4,5,6,7"
     ]
   },
   "data": {
@@ -66,56 +80,58 @@
         "n": 32768,
         "per_device_n": 16384,
         "cap": 16384,
-        "cap_retries": 0,
+        "cap_retries": 1,
         "distribution": "uniform",
         "seed": 0,
-        "median_s": 0.059095785953104496,
-        "min_s": 0.054265914019197226,
-        "max_s": 0.07409438397735357,
+        "median_s": 0.11662970716133714,
+        "min_s": 0.1159817990846932,
+        "max_s": 0.11722377315163612,
         "repeats": 3,
-        "throughput_particles_per_s": 554489.6217473623,
+        "throughput_particles_per_s": 280957.57759788516,
         "per_device_work": {
           "self_near_pairs": [
-            4024.0,
-            4018.0
+            53482.0,
+            53836.0
           ],
           "self_far_pairs": [
-            8.0,
-            12.0
+            7024.0,
+            7080.0
           ],
           "cross_near_pairs": [
-            4096.0,
-            4096.0
+            59810.0,
+            58571.0
           ],
           "cross_far_pairs": [
-            0.0,
-            0.0
+            3972.0,
+            4607.0
           ]
         },
         "per_device_work_total": [
-          8128.0,
-          8126.0
+          124288.0,
+          124094.0
         ],
-        "work_imbalance": 1.0001230466346744,
+        "work_imbalance": 1.0007810549878815,
+        "accuracy": null,
         "overflowed": [],
         "valid": true,
         "config": {
           "order": 3,
           "theta": 0.4,
-          "leaf_size": 256,
+          "leaf_size": 64,
           "basis": "real",
           "mac_type": "dehnen",
           "nearfield_backend": "auto",
-          "max_pair_queue": 262144,
-          "cross_max_pair_queue": 262144,
+          "max_pair_queue": 1048576,
+          "cross_max_pair_queue": 1048576,
           "max_interactions_per_node": 512,
-          "max_neighbors_per_leaf": 128,
-          "process_block": 256
+          "max_neighbors_per_leaf": 256,
+          "process_block": 1024,
+          "l2l_num_levels": null
         },
         "meta": {
-          "git_sha": "7d55dbc016a034716bbadf866045c3699707ea2f",
+          "git_sha": "cf33eeddbfc956c08336005c8d8839fa7fbba8b7",
           "git_branch": "paper/jaccpot-i",
-          "git_dirty": false,
+          "git_dirty": true,
           "jax_version": "0.10.2",
           "jax_backend": "gpu",
           "devices": [
@@ -123,11 +139,12 @@
             "cuda:1",
             "cuda:2",
             "cuda:3",
-            "cuda:4"
+            "cuda:4",
+            "cuda:5"
           ],
           "device_kind": "NVIDIA A100-PCIE-40GB",
           "jax_enable_x64": true,
-          "cuda_visible_devices": "2,4,5,6,7",
+          "cuda_visible_devices": "1,2,4,5,6,7",
           "argv": [
             "--ndev",
             "2",
@@ -139,13 +156,13 @@
             "--theta",
             "0.4",
             "--leaf-size",
-            "256",
+            "64",
             "--process-block",
-            "256",
+            "1024",
             "--max-pair-queue",
-            "262144",
+            "1048576",
             "--cross-max-pair-queue",
-            "262144",
+            "1048576",
             "--basis",
             "real",
             "--mac-type",
@@ -157,7 +174,7 @@
             "--repeats",
             "3",
             "--warmup",
-            "1",
+            "2",
             "--seed",
             "0",
             "--dtype",
@@ -172,61 +189,63 @@
         "n": 49152,
         "per_device_n": 16384,
         "cap": 16384,
-        "cap_retries": 0,
+        "cap_retries": 2,
         "distribution": "uniform",
         "seed": 0,
-        "median_s": 0.06718135206028819,
-        "min_s": 0.06479805521667004,
-        "max_s": 0.07204363169148564,
+        "median_s": 0.1311074709519744,
+        "min_s": 0.13055746629834175,
+        "max_s": 0.1311390409246087,
         "repeats": 3,
-        "throughput_particles_per_s": 731631.5985407863,
+        "throughput_particles_per_s": 374898.54424851754,
         "per_device_work": {
           "self_near_pairs": [
-            4008.0,
-            3782.0,
-            4006.0
+            49832.0,
+            39930.0,
+            49710.0
           ],
           "self_far_pairs": [
-            18.0,
-            156.0,
-            16.0
+            7802.0,
+            8830.0,
+            8336.0
           ],
           "cross_near_pairs": [
-            8192.0,
-            8192.0,
-            8192.0
+            100543.0,
+            110115.0,
+            100590.0
           ],
           "cross_far_pairs": [
-            0.0,
-            0.0,
-            0.0
+            16793.0,
+            12754.0,
+            18141.0
           ]
         },
         "per_device_work_total": [
-          12218.0,
-          12130.0,
-          12214.0
+          174970.0,
+          171629.0,
+          176777.0
         ],
-        "work_imbalance": 1.00251627372682,
+        "work_imbalance": 1.013288725505182,
+        "accuracy": null,
         "overflowed": [],
         "valid": true,
         "config": {
           "order": 3,
           "theta": 0.4,
-          "leaf_size": 256,
+          "leaf_size": 64,
           "basis": "real",
           "mac_type": "dehnen",
           "nearfield_backend": "auto",
-          "max_pair_queue": 262144,
-          "cross_max_pair_queue": 262144,
+          "max_pair_queue": 1048576,
+          "cross_max_pair_queue": 1048576,
           "max_interactions_per_node": 512,
-          "max_neighbors_per_leaf": 128,
-          "process_block": 256
+          "max_neighbors_per_leaf": 256,
+          "process_block": 1024,
+          "l2l_num_levels": null
         },
         "meta": {
-          "git_sha": "7d55dbc016a034716bbadf866045c3699707ea2f",
+          "git_sha": "cf33eeddbfc956c08336005c8d8839fa7fbba8b7",
           "git_branch": "paper/jaccpot-i",
-          "git_dirty": false,
+          "git_dirty": true,
           "jax_version": "0.10.2",
           "jax_backend": "gpu",
           "devices": [
@@ -234,11 +253,12 @@
             "cuda:1",
             "cuda:2",
             "cuda:3",
-            "cuda:4"
+            "cuda:4",
+            "cuda:5"
           ],
           "device_kind": "NVIDIA A100-PCIE-40GB",
           "jax_enable_x64": true,
-          "cuda_visible_devices": "2,4,5,6,7",
+          "cuda_visible_devices": "1,2,4,5,6,7",
           "argv": [
             "--ndev",
             "3",
@@ -250,13 +270,13 @@
             "--theta",
             "0.4",
             "--leaf-size",
-            "256",
+            "64",
             "--process-block",
-            "256",
+            "1024",
             "--max-pair-queue",
-            "262144",
+            "1048576",
             "--cross-max-pair-queue",
-            "262144",
+            "1048576",
             "--basis",
             "real",
             "--mac-type",
@@ -268,7 +288,7 @@
             "--repeats",
             "3",
             "--warmup",
-            "1",
+            "2",
             "--seed",
             "0",
             "--dtype",
@@ -283,66 +303,68 @@
         "n": 65536,
         "per_device_n": 16384,
         "cap": 16384,
-        "cap_retries": 1,
+        "cap_retries": 3,
         "distribution": "uniform",
         "seed": 0,
-        "median_s": 0.07860792288556695,
-        "min_s": 0.07813164731487632,
-        "max_s": 0.08950901823118329,
+        "median_s": 0.16583673795685172,
+        "min_s": 0.16491145733743906,
+        "max_s": 0.16584003809839487,
         "repeats": 3,
-        "throughput_particles_per_s": 833707.3108445273,
+        "throughput_particles_per_s": 395183.8465192888,
         "per_device_work": {
           "self_near_pairs": [
-            4026.0,
-            4032.0,
-            4026.0,
-            4022.0
+            52480.0,
+            51640.0,
+            51228.0,
+            51406.0
           ],
           "self_far_pairs": [
-            6.0,
-            0.0,
-            6.0,
-            10.0
+            6818.0,
+            7098.0,
+            7050.0,
+            7648.0
           ],
           "cross_near_pairs": [
-            12288.0,
-            12288.0,
-            12288.0,
-            12288.0
+            135249.0,
+            135047.0,
+            136038.0,
+            133955.0
           ],
           "cross_far_pairs": [
-            0.0,
-            0.0,
-            0.0,
-            0.0
+            30737.0,
+            30973.0,
+            30856.0,
+            32670.0
           ]
         },
         "per_device_work_total": [
-          16320.0,
-          16320.0,
-          16320.0,
-          16320.0
+          225284.0,
+          224758.0,
+          225172.0,
+          225679.0
         ],
-        "work_imbalance": 1.0,
+        "work_imbalance": 1.0020235477465138,
+        "accuracy": null,
         "overflowed": [],
         "valid": true,
         "config": {
           "order": 3,
           "theta": 0.4,
-          "leaf_size": 256,
+          "leaf_size": 64,
           "basis": "real",
           "mac_type": "dehnen",
           "nearfield_backend": "auto",
-          "max_pair_queue": 262144,
-          "cross_max_pair_queue": 262144,
+          "max_pair_queue": 1048576,
+          "cross_max_pair_queue": 1048576,
           "max_interactions_per_node": 512,
-          "max_neighbors_per_leaf": 128,
-          "process_block": 256
+          "max_neighbors_per_leaf": 256,
+          "process_block": 1024,
+          "l2l_num_levels": null
         },
         "meta": {
-          "git_sha": "7d55dbc016a034716bbadf866045c3699707ea2f",
+          "git_sha": "cf33eeddbfc956c08336005c8d8839fa7fbba8b7",
           "git_branch": "paper/jaccpot-i",
-          "git_dirty": false,
+          "git_dirty": true,
           "jax_version": "0.10.2",
           "jax_backend": "gpu",
           "devices": [
@@ -350,11 +372,12 @@
             "cuda:1",
             "cuda:2",
             "cuda:3",
-            "cuda:4"
+            "cuda:4",
+            "cuda:5"
           ],
           "device_kind": "NVIDIA A100-PCIE-40GB",
           "jax_enable_x64": true,
-          "cuda_visible_devices": "2,4,5,6,7",
+          "cuda_visible_devices": "1,2,4,5,6,7",
           "argv": [
             "--ndev",
             "4",
@@ -366,13 +389,13 @@
             "--theta",
             "0.4",
             "--leaf-size",
-            "256",
+            "64",
             "--process-block",
-            "256",
+            "1024",
             "--max-pair-queue",
-            "262144",
+            "1048576",
             "--cross-max-pair-queue",
-            "262144",
+            "1048576",
             "--basis",
             "real",
             "--mac-type",
@@ -384,7 +407,7 @@
             "--repeats",
             "3",
             "--warmup",
-            "1",
+            "2",
             "--seed",
             "0",
             "--dtype",
@@ -399,71 +422,73 @@
         "n": 81920,
         "per_device_n": 16384,
         "cap": 16384,
-        "cap_retries": 1,
+        "cap_retries": 3,
         "distribution": "uniform",
         "seed": 0,
-        "median_s": 0.08585740020498633,
-        "min_s": 0.08575854869559407,
-        "max_s": 0.08934346679598093,
+        "median_s": 0.16872042790055275,
+        "min_s": 0.16801449097692966,
+        "max_s": 0.16962532699108124,
         "repeats": 3,
-        "throughput_particles_per_s": 954140.2349059521,
+        "throughput_particles_per_s": 485536.93835037755,
         "per_device_work": {
           "self_near_pairs": [
-            3986.0,
-            3780.0,
-            3248.0,
-            3796.0,
-            3996.0
+            50484.0,
+            43604.0,
+            35352.0,
+            43802.0,
+            51212.0
           ],
           "self_far_pairs": [
-            46.0,
-            162.0,
-            434.0,
-            158.0,
-            34.0
+            6756.0,
+            7222.0,
+            5008.0,
+            7382.0,
+            6404.0
           ],
           "cross_near_pairs": [
-            16384.0,
-            16384.0,
-            16384.0,
-            16384.0,
-            16384.0
+            157273.0,
+            174475.0,
+            179000.0,
+            172923.0,
+            157579.0
           ],
           "cross_far_pairs": [
-            0.0,
-            0.0,
-            0.0,
-            0.0,
-            0.0
+            44229.0,
+            40153.0,
+            39231.0,
+            40646.0,
+            43880.0
           ]
         },
         "per_device_work_total": [
-          20416.0,
-          20326.0,
-          20066.0,
-          20338.0,
-          20414.0
+          258742.0,
+          265454.0,
+          258591.0,
+          264753.0,
+          259075.0
         ],
-        "work_imbalance": 1.0051201260338716,
+        "work_imbalance": 1.0158080230213185,
+        "accuracy": null,
         "overflowed": [],
         "valid": true,
         "config": {
           "order": 3,
           "theta": 0.4,
-          "leaf_size": 256,
+          "leaf_size": 64,
           "basis": "real",
           "mac_type": "dehnen",
           "nearfield_backend": "auto",
-          "max_pair_queue": 262144,
-          "cross_max_pair_queue": 262144,
+          "max_pair_queue": 1048576,
+          "cross_max_pair_queue": 1048576,
           "max_interactions_per_node": 512,
-          "max_neighbors_per_leaf": 128,
-          "process_block": 256
+          "max_neighbors_per_leaf": 256,
+          "process_block": 1024,
+          "l2l_num_levels": null
         },
         "meta": {
-          "git_sha": "7d55dbc016a034716bbadf866045c3699707ea2f",
+          "git_sha": "cf33eeddbfc956c08336005c8d8839fa7fbba8b7",
           "git_branch": "paper/jaccpot-i",
-          "git_dirty": false,
+          "git_dirty": true,
           "jax_version": "0.10.2",
           "jax_backend": "gpu",
           "devices": [
@@ -471,11 +496,12 @@
             "cuda:1",
             "cuda:2",
             "cuda:3",
-            "cuda:4"
+            "cuda:4",
+            "cuda:5"
           ],
           "device_kind": "NVIDIA A100-PCIE-40GB",
           "jax_enable_x64": true,
-          "cuda_visible_devices": "2,4,5,6,7",
+          "cuda_visible_devices": "1,2,4,5,6,7",
           "argv": [
             "--ndev",
             "5",
@@ -487,13 +513,13 @@
             "--theta",
             "0.4",
             "--leaf-size",
-            "256",
+            "64",
             "--process-block",
-            "256",
+            "1024",
             "--max-pair-queue",
-            "262144",
+            "1048576",
             "--cross-max-pair-queue",
-            "262144",
+            "1048576",
             "--basis",
             "real",
             "--mac-type",
@@ -505,7 +531,138 @@
             "--repeats",
             "3",
             "--warmup",
-            "1",
+            "2",
+            "--seed",
+            "0",
+            "--dtype",
+            "float64",
+            "--gpu-select",
+            "none"
+          ]
+        }
+      },
+      {
+        "ndev": 6,
+        "n": 98304,
+        "per_device_n": 16384,
+        "cap": 16384,
+        "cap_retries": 4,
+        "distribution": "uniform",
+        "seed": 0,
+        "median_s": 0.18077776674181223,
+        "min_s": 0.18052792409434915,
+        "max_s": 0.18193091917783022,
+        "repeats": 3,
+        "throughput_particles_per_s": 543783.6840876472,
+        "per_device_work": {
+          "self_near_pairs": [
+            50974.0,
+            37970.0,
+            51330.0,
+            50364.0,
+            38460.0,
+            51908.0
+          ],
+          "self_far_pairs": [
+            5704.0,
+            6318.0,
+            6718.0,
+            6360.0,
+            8048.0,
+            6640.0
+          ],
+          "cross_near_pairs": [
+            180917.0,
+            203616.0,
+            194393.0,
+            188772.0,
+            139863.0,
+            56306.0
+          ],
+          "cross_far_pairs": [
+            54121.0,
+            48816.0,
+            58690.0,
+            55177.0,
+            46549.0,
+            33544.0
+          ]
+        },
+        "per_device_work_total": [
+          291716.0,
+          296720.0,
+          311131.0,
+          300673.0,
+          232920.0,
+          148398.0
+        ],
+        "work_imbalance": 1.1803462155671811,
+        "accuracy": null,
+        "overflowed": [
+          "cross_far_overflow"
+        ],
+        "valid": false,
+        "config": {
+          "order": 3,
+          "theta": 0.4,
+          "leaf_size": 64,
+          "basis": "real",
+          "mac_type": "dehnen",
+          "nearfield_backend": "auto",
+          "max_pair_queue": 1048576,
+          "cross_max_pair_queue": 1048576,
+          "max_interactions_per_node": 512,
+          "max_neighbors_per_leaf": 256,
+          "process_block": 1024,
+          "l2l_num_levels": null
+        },
+        "meta": {
+          "git_sha": "cf33eeddbfc956c08336005c8d8839fa7fbba8b7",
+          "git_branch": "paper/jaccpot-i",
+          "git_dirty": true,
+          "jax_version": "0.10.2",
+          "jax_backend": "gpu",
+          "devices": [
+            "cuda:0",
+            "cuda:1",
+            "cuda:2",
+            "cuda:3",
+            "cuda:4",
+            "cuda:5"
+          ],
+          "device_kind": "NVIDIA A100-PCIE-40GB",
+          "jax_enable_x64": true,
+          "cuda_visible_devices": "1,2,4,5,6,7",
+          "argv": [
+            "--ndev",
+            "6",
+            "--n",
+            "98304",
+            "--emit-json",
+            "--order",
+            "3",
+            "--theta",
+            "0.4",
+            "--leaf-size",
+            "64",
+            "--process-block",
+            "1024",
+            "--max-pair-queue",
+            "1048576",
+            "--cross-max-pair-queue",
+            "1048576",
+            "--basis",
+            "real",
+            "--mac-type",
+            "dehnen",
+            "--nearfield-backend",
+            "auto",
+            "--distribution",
+            "uniform",
+            "--repeats",
+            "3",
+            "--warmup",
+            "2",
             "--seed",
             "0",
             "--dtype",
