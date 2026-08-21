@@ -21,7 +21,6 @@ from jaccpot.operators.real_dehnen_q import (
     compute_real_B_matrix_multipole,
 )
 from jaccpot.operators.real_harmonics import (
-    _alignment_angles,
     real_Dz_diagonal,
     real_rotation_from_z_axis_local,
     real_rotation_from_z_axis_multipole,
@@ -34,6 +33,11 @@ from jaccpot.operators.real_harmonics import (
     translate_along_z_m2l_real,
     translate_along_z_m2m_real,
 )
+
+# Private, and imported from where it is DEFINED rather than through a
+# re-export: `real_harmonics` used to re-export it and main has since stopped,
+# which broke CI while the branch head still imported fine.
+from jaccpot.operators.real_rotations import _alignment_angles
 
 from ._precision import highest_matmul_precision
 from ._transverse_degeneracy_jvp import (
