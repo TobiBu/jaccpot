@@ -162,6 +162,7 @@ def measure_point(
     max_neighbors_per_leaf: Optional[int] = None,
     process_block: Optional[int] = None,
     l2l_num_levels: Optional[int] = None,
+    accuracy_targets: int = 0,
 ) -> dict[str, Any]:
     """Measure one ``(ndev, n)`` point in this process.
 
@@ -215,6 +216,16 @@ def measure_point(
         Starting far-list capacity per node.
     max_neighbors_per_leaf : int, optional
         Starting near-list capacity per leaf.
+    accuracy_targets : int
+        When > 0, compare the force against a direct-sum reference on this many
+        randomly chosen target particles. The reference sums over **all** sources,
+        so it is exact; only the target set is subsampled, which is what makes it
+        affordable. 0 disables it.
+
+        This exists because a speed measurement is worthless for any knob that
+        trades accuracy -- notably ``theta``/``theta_cross``. Without it a
+        criterion sweep can only report that a looser criterion is faster, which
+        is true by construction and says nothing.
     l2l_num_levels : int, optional
         Static level bound for the L2L cascade. The default derives
         ``num_internal - 1`` from a shape because the tree depth is not knowable
@@ -320,6 +331,46 @@ def measure_point(
     times.sort()
     median = times[len(times) // 2]
 
+    accuracy: dict[str, Any] = {}
+    if int(accuracy_targets) > 0:
+        accel_np = np.asarray(evaluate(*args)[0])
+        gid_np = np.asarray(args[2]).reshape(-1)
+        valid_rows = np.flatnonzero(gid_np >= 0)
+        k = min(int(accuracy_targets), valid_rows.size)
+        pick = np.random.default_rng(seed).choice(valid_rows, size=k, replace=False)
+        tgt_ids = gid_np[pick].astype(np.int64)
+
+        src_pos = jnp.asarray(positions)
+        src_mass = jnp.asarray(masses)
+        soft_sq = jnp.asarray(config.softening**2, dtype=src_pos.dtype)
+        g_const = jnp.asarray(config.G, dtype=src_pos.dtype)
+
+        def direct_block(tid: Any) -> Any:
+            """Exact acceleration on the targets in ``tid``, summing all sources."""
+            tp = src_pos[tid]
+            delta = src_pos[None, :, :] - tp[:, None, :]
+            dsq = jnp.sum(delta * delta, axis=2) + soft_sq
+            # self-interaction excluded by index, not by distance
+            same = jnp.arange(src_pos.shape[0])[None, :] == tid[:, None]
+            inv = jnp.where(same, 0.0, dsq ** (-1.5))
+            return g_const * jnp.einsum("ij,j,ijk->ik", inv, src_mass, delta)
+
+        # chunk the targets so the [k, N, 3] intermediate never materialises whole
+        block = 256
+        ref_parts = [
+            np.asarray(direct_block(jnp.asarray(tgt_ids[i : i + block])))
+            for i in range(0, k, block)
+        ]
+        ref = np.concatenate(ref_parts, axis=0)
+        got = accel_np[pick]
+        denom = float(np.linalg.norm(ref))
+        accuracy = {
+            "targets": int(k),
+            "rel_l2_vs_direct": float(np.linalg.norm(got - ref) / (denom + 1e-300)),
+            "max_abs_err": float(np.abs(got - ref).max()),
+            "ref_rms": float(np.sqrt(np.mean(np.sum(ref * ref, axis=1)))),
+        }
+
     per_device_work = {f: counters[f] for f in WORK_FIELDS if f in counters}
     total_work = [sum(vals) for vals in zip(*per_device_work.values())] or [0] * ndev
 
@@ -344,6 +395,7 @@ def measure_point(
             if total_work and sum(total_work) > 0
             else None
         ),
+        "accuracy": accuracy or None,
         "overflowed": overflowed,
         # A truncated force is not a slow force. Drop these points.
         "valid": not overflowed,
@@ -454,6 +506,16 @@ def _parse_args() -> argparse.Namespace:
     p.add_argument("--process-block", type=int, default=None)
     p.add_argument("--l2l-num-levels", type=int, default=None)
     p.add_argument(
+        "--accuracy-targets",
+        type=int,
+        default=0,
+        help=(
+            "compare against a direct sum on this many sampled targets (0 = off). "
+            "Required for any theta/theta_cross sweep: speed alone cannot judge a "
+            "criterion that trades accuracy"
+        ),
+    )
+    p.add_argument(
         "--emit-json",
         action="store_true",
         help="print the record as one JSON line on stdout (used by sweep())",
@@ -495,6 +557,7 @@ def main() -> int:
         max_neighbors_per_leaf=args.max_neighbors_per_leaf,
         process_block=args.process_block,
         l2l_num_levels=args.l2l_num_levels,
+        accuracy_targets=int(args.accuracy_targets),
     )
     record["meta"] = runmeta.run_meta({"argv": sys.argv[1:]})
     if args.emit_json:
