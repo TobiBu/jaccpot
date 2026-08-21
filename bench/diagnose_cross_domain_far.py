@@ -1,49 +1,63 @@
-"""Why the distributed cross-domain FAR field is wrong, measured from first inputs.
+"""The distributed cross-domain FAR field, held to account against the direct sum.
 
 WHY THIS EXISTS. ``tests/distributed/`` is gated on ``device_count() >= 2``, so it
 skipped in CPU CI and in every local run until it was first executed on two cards on
-2026-08-21 (audit row F34: `distributed/fmm.py` 19% -> 81% coverage). Four of the five
-failures it produced are one defect in the cross-domain far field, and this script is
+2026-08-21 (audit row F34: `distributed/fmm.py` 19% -> 83% coverage). Four of the five
+failures it produced were one defect in the cross-domain far field, and this script is
 the evidence trail for it -- see ``docs/distributed_cross_domain_far_diagnosis.md``.
 
-It merges two diagnostics: the omission baseline from #190 (*an approximation
-cannot be worse than omission*, with its domain masking corrected -- see
-:func:`omission_baseline`) and the single-device isolation that localises the
-error to the MAC extents rather than to the M2L.
+It merges two diagnostics: the omission baseline from #190 (*an approximation cannot be
+worse than omission*, with its domain masking corrected -- see
+:func:`omission_baseline`) and the single-device isolation that localises the error to
+the MAC extents rather than to the M2L.
 
-THE DEFECT. ``build_coarse_frontier`` reduces every remote leaf to a single point (its
-centre of mass), ``build_remote_coarse_tree`` builds the coarse tree over those points,
-and its geometry -- hence the MAC extent the cross walk tests -- therefore bounds the
-**centres of mass**, not the particles behind them. A coarse *leaf* gets an extent of
-~0 no matter how large the remote leaf it stands for actually is. The cross-domain MAC
-consequently accepts pairs whose true separation is smaller than the source's own
-radius, and the M2L is evaluated inside the region it is expanding. The error then
-**exceeds the term being approximated**, which is why dropping the cross far field
-entirely is more accurate than computing it.
+THE DEFECT, NOW FIXED UPSTREAM (TobiBu/yggdrax#47). ``build_coarse_frontier`` reduces
+every remote leaf to a single point -- its centre of mass -- and
+``build_remote_coarse_tree`` built the coarse tree's geometry over those points alone.
+The MAC extent the cross walk divides by therefore bounded the **centres of mass**, not
+the particles behind them: a coarse *leaf* presented an extent of ~0 however large the
+remote leaf it stood for actually was. The MAC accepted pairs whose true separation was
+smaller than the source's own radius, the M2L was evaluated inside the region it
+expands, and the error **exceeded the term being approximated** -- dropping the cross
+far field entirely was more accurate than computing it.
 
-Measured, ndev=2, N=128, order 3, dehnen, leaf 8 (the failing default):
+The frontier now carries each leaf's radius and the coarse geometry bounds the balls,
+which is what this script measures both sides of. Measured at ndev=2, N=128, order 3,
+dehnen, leaf 8, interpenetrating Morton domains, theta=0.4:
 
-    worst accepted far pair, true (r_src + r_tgt) / d   1.193
-    the same ratio as the MAC computed it               0.104     <- 11x understated
-    largest "leaf" radius the coarse tree sees as 0     5.047
+                                        COM-only (pre-#47)   bounding the particles
+    worst accepted (r_src + r_tgt)/d          4.591                  0.176
+    far + near vs the whole cross field       0.790732               0.000008
+    accepted far pairs                       13                     10
+    of those, overlapping their source        12                      0
 
-CORRECTING THE EXTENTS IS WHAT FIXES IT, not the order, the basis or the rotation:
-inflating the coarse extents to bound the true remote leaves takes the cross-field
-error from 6.4e-01 to 8e-06 at theta_cross=1.0 while still accepting 10 far pairs.
-``--inflate`` reruns any configuration with that correction applied, which is how that
-number is produced. The correction itself belongs in yggdrax (``CoarseFrontier`` has to
-carry the leaf radius), so nothing here is shipped in the force path.
+(That middle row is THIS script's ``relerr`` column -- far + near against the entire
+cross-domain field, which is what the driver's assertion sums. The regression test in
+``tests/integration/`` isolates one level further, the far term against the direct sum
+over only the pairs it approximates, and reads 1.042014 / 0.001651 on the same two
+configurations. Two different denominators; do not compare them across.)
 
-NO GPU NEEDED. The failure is geometric, not hardware-dependent: two forced CPU
-devices reproduce the two-A100 aggL2 to six digits (10.090412 vs 10.090450, 0.260355,
-0.018223, 0.000003). That is the default here, so this runs anywhere in ~2 min.
+``--com-only-extents`` reproduces the left-hand column; the default is what ships. The
+largest "leaf" the COM-only tree treated as a zero-extent point had a true radius of
+**5.047** -- an interleaved domain holds leaves spanning the gap between clusters.
+
+ONE THETA. There was a separate ``theta`` (0.1 against theta's 0.4) whose only
+job was to compensate for the understated extents. With honest extents it merely
+rejects well-separated pairs: at 0.1 the walk accepts ZERO cross far pairs and ships
+the whole cross field through the halo import. The knob is gone; ``--theta`` here
+sweeps the single MAC, which the driver applies to both walks.
+
+NO GPU NEEDED. The behaviour is geometric, not hardware-dependent: two forced CPU
+devices reproduced the two-A100 aggL2 to six digits (10.090412 vs 10.090450, then
+0.260355, 0.018223, 0.000003 identically). That is the default here, so this runs
+anywhere in ~2 min.
 
 Run::
 
-    python bench/diagnose_cross_domain_far.py                 # everything, 2 CPU devices
-    python bench/diagnose_cross_domain_far.py --skip-driver   # geometry only, seconds
-    python bench/diagnose_cross_domain_far.py --inflate       # with the correction
-    python bench/diagnose_cross_domain_far.py --gpu           # claim 2 cards instead
+    python bench/diagnose_cross_domain_far.py                     # all, 2 CPU devices
+    python bench/diagnose_cross_domain_far.py --skip-driver       # geometry only, secs
+    python bench/diagnose_cross_domain_far.py --com-only-extents  # the pre-#47 defect
+    python bench/diagnose_cross_domain_far.py --gpu               # claim 2 cards
 """
 
 from __future__ import annotations
@@ -61,19 +75,21 @@ _PARSER.add_argument(
 _PARSER.add_argument(
     "--skip-driver",
     action="store_true",
-    help="skip the theta_cross sweep through the real driver (the slow part)",
+    help="skip the theta sweep through the real driver (the slow part)",
 )
 _PARSER.add_argument(
-    "--inflate",
+    "--com-only-extents",
     action="store_true",
-    help="inflate the coarse MAC extents to bound the true remote leaves",
+    help="bound the coarse MAC extents by the frontier COMs only, reproducing the "
+    "pre-yggdrax#47 defect instead of the shipped behaviour",
 )
 _PARSER.add_argument(
-    "--theta-cross",
+    "--theta",
     type=float,
     nargs="+",
-    default=[1e6, 1.0, 0.1, 0.01],
-    help="theta_cross values to sweep (default: 1e6 1.0 0.1 0.01)",
+    default=[1e6, 1.0, 0.4, 0.1, 0.01],
+    help="theta values to sweep (default: 1e6 1.0 0.4 0.1 0.01); the driver applies "
+    "each to BOTH walks, the isolation passes it to the cross walk",
 )
 _PARSER.add_argument("--per", type=int, default=64, help="particles per device")
 _ARGS = _PARSER.parse_args()
@@ -308,12 +324,12 @@ def report_domain_geometry(per, ndev):
         )
 
 
-def driver_theta_cross_sweep(ndev, per, thetas):
-    """Sweep ``theta_cross`` through the real driver and report aggL2 vs direct.
+def driver_theta_sweep(ndev, per, thetas):
+    """Sweep ``theta`` through the real driver and report aggL2 vs direct.
 
     Caps are grown for every run so a buffer overflow can never be mistaken for a
-    numerical result. ``theta_cross -> 0`` sends every cross pair through the halo
-    import and P2P (no expansion, so exact); ``theta_cross -> inf`` sends every cross
+    numerical result. ``theta -> 0`` sends every cross pair through the halo
+    import and P2P (no expansion, so exact); ``theta -> inf`` sends every cross
     pair through the coarse M2L.
 
     Parameters
@@ -323,7 +339,7 @@ def driver_theta_cross_sweep(ndev, per, thetas):
     per : int
         Particles per device.
     thetas : list[float]
-        ``theta_cross`` values to sweep.
+        ``theta`` values to sweep.
 
     Returns
     -------
@@ -346,24 +362,24 @@ def driver_theta_cross_sweep(ndev, per, thetas):
         cross_max_pair_queue=131072,
     )
     baseline = omission_baseline(pts, mass, domains_of(pts, mass, ndev))
-    print(f"\n=== driver theta_cross sweep (ndev={ndev}, N={ndev * per}) ===")
+    print(f"\n=== driver theta sweep (ndev={ndev}, N={ndev * per}) ===")
     print(
         f"omission baseline ||a_cross||/||a_full|| = {baseline:.6f}  "
         "(masked by the REAL Morton domain; see omission_baseline)"
     )
     print(
-        f"{'theta_cross':>12} {'aggL2':>12} {'/baseline':>10} {'overflow':>9}"
+        f"{'theta':>12} {'aggL2':>12} {'/baseline':>10} {'overflow':>9}"
         "  cross far / near"
     )
-    for theta_cross in thetas:
-        cfg = dataclasses.replace(base, theta_cross=float(theta_cross), **roomy)
+    for theta in thetas:
+        cfg = dataclasses.replace(base, theta=float(theta), **roomy)
         res = distributed_fmm_accelerations(pts, mass, config=cfg, mesh=mesh, jit=False)
         err = float(np.linalg.norm(res.accelerations - direct) / (norm + 1e-30))
         far = np.asarray(res.diagnostics["cross_far_pairs"]).sum()
         near = np.asarray(res.diagnostics["cross_near_pairs"]).sum()
         ratio = err / baseline if baseline else float("inf")
         print(
-            f"{theta_cross:>12g} {err:>12.6f} {ratio:>9.3f}x "
+            f"{theta:>12g} {err:>12.6f} {ratio:>9.3f}x "
             f"{str(bool(res.overflow)):>9}  {far:.0f} / {near:.0f}",
             flush=True,
         )
@@ -400,7 +416,7 @@ class _DomainView:
         )
 
 
-def isolate_cross_far(per, thetas, interpenetrating, inflate, target_device=0):
+def isolate_cross_far(per, thetas, interpenetrating, com_only_extents, target_device=0):
     """Measure the cross-domain far field alone, against the exact cross direct sum.
 
     Replays ``distributed/fmm.py``'s cross-far sequence for ndev=2 without
@@ -409,20 +425,21 @@ def isolate_cross_far(per, thetas, interpenetrating, inflate, target_device=0):
     This is what shows the M2L, the coarse seeding, the M2M, the L2L and the L2P to be
     correct, and localises the error to the MAC extents. The walk here is the real
     ``dual_tree_walk_cross_impl``, and its pair counts reproduce the driver's
-    diagnostics exactly (12 far / 51 near per device at theta_cross=0.1).
+    diagnostics exactly (12 far / 51 near per device at the default theta).
 
     Parameters
     ----------
     per : int
         Particles per device.
     thetas : list[float]
-        ``theta_cross`` values to sweep.
+        ``theta`` values to sweep.
     interpenetrating : bool
         Take the two domains from the real Morton partition (True, what the driver
         does at ndev=2) or hand-assign one cluster per device (False, what the tests'
         docstrings assume).
-    inflate : bool
-        Correct the coarse MAC extents to bound the true remote leaves.
+    com_only_extents : bool
+        Bound the coarse extents by the frontier COMs only (the pre-yggdrax#47
+        defect) instead of by the particles behind them.
     target_device : int
         Which of the two domains is the target (the other is the remote source). Both
         are needed to account for the driver's aggregate aggL2; see
@@ -431,7 +448,7 @@ def isolate_cross_far(per, thetas, interpenetrating, inflate, target_device=0):
     Returns
     -------
     dict[float, float]
-        ``theta_cross`` -> ABSOLUTE L2 error of this domain's cross-domain field. The
+        ``theta`` -> ABSOLUTE L2 error of this domain's cross-domain field. The
         printed ``relerr`` column is the same quantity divided by ``||exact cross||``.
     """
     pts, mass = separated_clusters(2, per)
@@ -467,10 +484,16 @@ def isolate_cross_far(per, thetas, interpenetrating, inflate, target_device=0):
         return_reordered=True,
         leaf_size=1,
     )
-    coarse_geometry = compute_tree_geometry(
-        coarse_tree, coarse_tree.positions_sorted, max_leaf_size=1
-    )
     perm = jnp.asarray(coarse_tree.particle_indices, INDEX_DTYPE)
+    # Mirrors build_remote_coarse_tree: each coarse particle is bounded as the ball its
+    # remote leaf occupies. ``--com-only-extents`` drops the radius to reproduce the
+    # pre-yggdrax#47 behaviour, which is the whole point of the comparison.
+    coarse_geometry = compute_tree_geometry(
+        coarse_tree,
+        coarse_tree.positions_sorted,
+        max_leaf_size=1,
+        particle_radius=(None if com_only_extents else source.frontier.radius[perm]),
+    )
     tag_range = np.asarray(frontier.node_range[perm])
     tag_node_id = np.asarray(frontier.node_id[perm])
     coarse_up = prepare_real_upward_sweep(
@@ -526,21 +549,6 @@ def isolate_cross_far(per, thetas, interpenetrating, inflate, target_device=0):
                 src_pos[lo : hi + 1] - coarse_pos[p], axis=1
             ).max()
 
-    if inflate:
-        pad = np.zeros(c_total)
-        for node in range(c_total):
-            lo, hi = c_ranges[node]
-            if hi >= lo:
-                pad[node] = true_radius[lo : hi + 1].max()
-        coarse_geometry = coarse_geometry._replace(
-            radius=jnp.asarray(
-                np.asarray(coarse_geometry.radius) + pad, coarse_geometry.radius.dtype
-            ),
-            max_extent=jnp.asarray(
-                np.asarray(coarse_geometry.max_extent) + pad,
-                coarse_geometry.max_extent.dtype,
-            ),
-        )
     believed_radius = np.asarray(coarse_geometry.radius)
 
     reference = np.asarray(direct_sum(target.lp, source.lp, source.lm))
@@ -549,7 +557,7 @@ def isolate_cross_far(per, thetas, interpenetrating, inflate, target_device=0):
     label = "INTERPENETRATING" if interpenetrating else "one cluster per domain"
     print(
         f"\n=== cross-domain far field in isolation: {label}"
-        f"{', extents CORRECTED' if inflate else ''}"
+        f"{', extents COM-ONLY (pre-#47)' if com_only_extents else ''}"
         f" -- domain {target_device} <- {1 - target_device} ==="
     )
     print(
@@ -602,18 +610,18 @@ def isolate_cross_far(per, thetas, interpenetrating, inflate, target_device=0):
         return np.asarray(rows, dtype=np.int64)
 
     header = (
-        f"  {'theta_cross':>11} {'far':>4} {'near':>5} {'||far||':>11} "
+        f"  {'theta':>11} {'far':>4} {'near':>5} {'||far||':>11} "
         f"{'||near||':>10} {'relerr':>10} {'true r/d':>9} {'believed':>9} {'overlap':>8}"
     )
     print(header)
     absolute_errors = {}
-    for theta_cross in thetas:
+    for theta in thetas:
         walk = dual_tree_walk_cross_impl(
             target.tree,
             target.geometry,
             coarse_tree,
             coarse_geometry,
-            theta_cross,
+            theta,
             mac_type=MAC,
             max_interactions_per_node=512,
             max_neighbors_per_leaf=128,
@@ -686,9 +694,9 @@ def isolate_cross_far(per, thetas, interpenetrating, inflate, target_device=0):
             overlapping += int(r_src + r_tgt > distance)
 
         absolute = float(np.linalg.norm(far + near - reference))
-        absolute_errors[float(theta_cross)] = absolute
+        absolute_errors[float(theta)] = absolute
         print(
-            f"  {theta_cross:>11g} {far_tgt.size:>4d} {near_pairs:>5d} "
+            f"  {theta:>11g} {far_tgt.size:>4d} {near_pairs:>5d} "
             f"{np.linalg.norm(far):>11.4f} {np.linalg.norm(near):>10.4f} "
             f"{absolute / ref_norm:>10.6f} {worst_true:>9.3f} "
             f"{worst_believed:>9.3f} {overlapping:>4d}/{far_tgt.size:<3d}",
@@ -710,14 +718,14 @@ def predict_driver_aggl2(per, thetas, per_domain_errors):
     per : int
         Particles per device.
     thetas : list[float]
-        ``theta_cross`` values that were swept.
+        ``theta`` values that were swept.
     per_domain_errors : list[dict[float, float]]
-        One ``theta_cross -> absolute error`` mapping per target domain.
+        One ``theta -> absolute error`` mapping per target domain.
 
     Returns
     -------
     None
-        Prints one row per ``theta_cross``.
+        Prints one row per ``theta``.
     """
     pts, mass = separated_clusters(2, per)
     norm = float(
@@ -730,20 +738,20 @@ def predict_driver_aggl2(per, thetas, per_domain_errors):
     print("\n=== does the isolated cross error account for the driver's aggL2? ===")
     print(f"  ||direct|| over all {2 * per} particles = {norm:.4f}")
     print(
-        f"  {'theta_cross':>11} {'|err| dom 0':>12} {'|err| dom 1':>12} {'predicted aggL2':>16}"
+        f"  {'theta':>11} {'|err| dom 0':>12} {'|err| dom 1':>12} {'predicted aggL2':>16}"
     )
-    for theta_cross in thetas:
-        key = float(theta_cross)
+    for theta in thetas:
+        key = float(theta)
         e0 = per_domain_errors[0].get(key, float("nan"))
         e1 = per_domain_errors[1].get(key, float("nan"))
         predicted = float(np.sqrt(e0**2 + e1**2)) / norm
         print(
-            f"  {theta_cross:>11g} {e0:>12.4f} {e1:>12.4f} {predicted:>16.6f}",
+            f"  {theta:>11g} {e0:>12.4f} {e1:>12.4f} {predicted:>16.6f}",
             flush=True,
         )
     print(
-        "  compare with the driver sweep above: at theta_cross=0.1 both are 0.018223, "
-        "so the cross far field is the whole error and nothing else contributes."
+        "  compare with the driver sweep above: the two agree row for row, so the "
+        "cross far field is the whole error and nothing else contributes."
     )
 
 
@@ -761,15 +769,15 @@ def main():
         print("fewer than 2 devices: skipping the driver sweep", file=sys.stderr)
     report_domain_geometry(_ARGS.per, ndev)
     if ndev >= 2 and not _ARGS.skip_driver:
-        driver_theta_cross_sweep(min(4, ndev), _ARGS.per, _ARGS.theta_cross)
+        driver_theta_sweep(min(4, ndev), _ARGS.per, _ARGS.theta)
     interleaved_errors = [
         isolate_cross_far(
-            _ARGS.per, _ARGS.theta_cross, True, _ARGS.inflate, target_device=d
+            _ARGS.per, _ARGS.theta, True, _ARGS.com_only_extents, target_device=d
         )
         for d in (0, 1)
     ]
-    predict_driver_aggl2(_ARGS.per, _ARGS.theta_cross, interleaved_errors)
-    isolate_cross_far(_ARGS.per, _ARGS.theta_cross, False, _ARGS.inflate)
+    predict_driver_aggl2(_ARGS.per, _ARGS.theta, interleaved_errors)
+    isolate_cross_far(_ARGS.per, _ARGS.theta, False, _ARGS.com_only_extents)
     return 0
 
 
