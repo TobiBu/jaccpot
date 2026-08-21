@@ -115,6 +115,72 @@ works is the op listing with **call counts** -- a slow stage shows up as time, a
 dispatch-bound path shows up as a count. `bench/multigpu/stage_profile.py` reports
 both and does not spread the unattributed remainder over the stages.
 
+### LOCALISED (2026-08-21): the floor is the Morton `argsort` in the tree build
+
+The compiled HLO names it. Ops grouped by scope path, from
+`module_*.jit_evaluate.sm_8.0_gpu_after_optimizations.txt`:
+
+| HLO ops | scope path |
+| --- | --- |
+| **7978** | `jit(evaluate)/shard_map/jit(<lambda>)` |
+| **3642** | `jit(evaluate)/shard_map/jit(<lambda>)/jit(_where)` |
+| 890 | `jc_cross_walk/while/body/cond/branch_1_fun` |
+| 604 | `jc_l2p/.../evaluate_local_real_with_grad` |
+| 523 | `jc_upward_local/while/body/.../m2m_real` |
+| 523 | `jc_coarse_m2m/while/body/.../m2m_real` |
+| 514 | `jc_l2p/_propagate_solidfmm_locals_by_level/.../l2l_real` |
+
+**~11 600 ops -- 40% of the module -- come from one anonymous jitted lambda**, an
+order of magnitude more than any physics stage. The ops inside it are
+`shift_left`, `shift_right_logical`, `xor`, `eq`, `iota`, `select_n` on `s64`:
+bit manipulation, not arithmetic. That is Morton encoding and sorting.
+
+`yggdrax.sort_by_morton` is `jnp.argsort`, which XLA lowers on GPU to a **bitonic
+sort network**: O(log^2 N) stages, each a separate kernel launch, none of which
+fuse with each other.
+
+**The quantitative check passes.** If the floor is a launch-bound sort its cost
+tracks the *number of stages*, log^2(N), not N:
+
+| particles/device | log^2 N | predicted ratio | measured |
+| --- | --- | --- | --- |
+| 1 024 | 100 | -- | ~50 ms |
+| 16 384 | 196 | 1.96x | **1.94x** (97 ms) |
+
+This also explains every negative result at once. The sort depends on the
+particle count alone, so it is invariant to `leaf_size`, `theta_cross`, the
+near-field cap, the traversal queue and the L2L bound -- which is exactly what
+five measurements found.
+
+### CORRECTION: static structures were wrongly demoted
+
+The re-ordering below demoted static structures on the reasoning that "a per-call
+tree rebuild cannot be the floor when a 4-leaf tree also takes ~50 ms". **That
+reasoning was wrong.** The rebuild's cost is dominated by the sort over
+*particles*, which is independent of leaf count -- a 4-leaf tree still sorts 1024
+particles. "Small tree" is not "little to sort".
+
+So the original plan's Stage 4, and the instinct behind it, target precisely the
+dominant cost. Revised priority:
+
+1. **Hoist the tree build out of the per-call path** (was Stage 4, now first).
+   The Morton codes and the sort are *topology*: at fixed topology they are
+   recomputed every evaluation for no reason. A
+   `prepare_distributed_state` / `evaluate(state, pos, mass)` split removes
+   ~40% of the module's ops from the per-call path. The seam already exists --
+   the differentiable path builds topology from `stop_gradient`-ed inputs and
+   re-evaluates numerics on live ones -- so this is hoisting, not inventing.
+   Hazards unchanged: the coarse tree's COMs are expansion centres and must stay
+   live, and the host-side driver is not differentiable.
+2. **If the sort must stay traced, replace `argsort` on the hot path.** A radix
+   sort over fixed-width Morton keys is O(bits) passes rather than O(log^2 N)
+   stages, and each pass is one kernel. This is an upstream `yggdrax` change and
+   should be raised there rather than worked around here.
+3. Right-size the cross-far M2L cap and revisit `theta_cross` -- unchanged, and
+   still much easier to judge once the floor is gone.
+4. Pallas cross M2L -- still gated on the far field being non-empty.
+5. Communication -- ~10 ms of ~75 ms; real, still not dominant.
+
 ### Consequence: the stages below are re-ordered
 
 The original ordering put a Pallas cross-M2L kernel and the static-structure
