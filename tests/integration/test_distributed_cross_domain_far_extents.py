@@ -7,12 +7,10 @@ device's view: ``build_remote_coarse_tree`` all-gathers both frontiers and keeps
 ``domain != me``, so what device 0 sees *is* the coarse tree over device 1's frontier,
 built from the same array in the same order. Replaying that on one device makes the
 cross-domain far field testable in CPU CI for the first time. The replay is verified
-faithful by its pair counts: it reproduces the driver's ``cross_far_pairs`` /
-``cross_near_pairs`` diagnostics (12 far, 51 near for device 0 at the default
-``theta_cross=0.1``) exactly.
+faithful by its pair counts: at the default ``theta`` it accepts 10 far pairs for
+device 0, against the driver's own ``cross_far_pairs`` diagnostic of ``[10, 8]``.
 
-WHAT IT PINS. Two properties of the cross far field, each measured in both domain
-geometries:
+WHAT IT PINS. Two properties of the cross far field, each in both domain geometries:
 
 1. **Well-separatedness.** Every pair the cross walk accepts as far must satisfy
    ``r_source + r_target < d(centres)`` on the *true* particle extents. Violating it
@@ -22,13 +20,19 @@ geometries:
    sum over exactly the (target node, source node) pairs the walk accepted -- the cross
    term isolated, with same-domain pairs excluded by construction.
 
-Both hold when the Morton domains are spatially separated and both FAIL when they
-interpenetrate, which is the state ``tests/distributed/test_distributed_fmm_driver.py``
-is red in. The cause is that ``build_coarse_frontier`` reduces each remote leaf to its
-centre of mass and ``build_remote_coarse_tree`` computes the coarse geometry -- hence
-the MAC extent -- over those points, so it bounds the centres of mass and not the
-particles. See ``docs/distributed_cross_domain_far_diagnosis.md`` for the measurements
-and ``bench/diagnose_cross_domain_far.py`` to reproduce them.
+Both hold in both geometries, and that is recent. Until TobiBu/yggdrax#47,
+``build_coarse_frontier`` reduced each remote leaf to its centre of mass and
+``build_remote_coarse_tree`` computed the coarse geometry -- hence the MAC extent --
+over those points alone, bounding the centres of mass and not the particles behind
+them. The interpenetrating case was then a strict xfail on both counts: the worst
+accepted pair had a true ``(r_src + r_tgt)/d`` of 4.591 and the far term was off by
+124% of its own direct sum. See ``docs/distributed_cross_domain_far_diagnosis.md`` for
+the diagnosis and ``bench/diagnose_cross_domain_far.py`` to reproduce it.
+
+THIS FILE NEEDS A YGGDRAX WITH #47. It reads ``frontier.radius``, which that PR adds,
+and passes it to ``compute_tree_geometry`` exactly as the fixed builder does -- so the
+replay tracks production rather than freezing the old behaviour. Against an older
+yggdrax it fails at import/attribute level, which is the intended loud failure.
 """
 
 from __future__ import annotations
@@ -67,12 +71,17 @@ from jaccpot.upward.real_tree_expansions import (  # noqa: E402
 )
 from jaccpot.upward.tree_geometry import compute_tree_geometry_compiled  # noqa: E402
 
-# The failing driver tests' default config, spelled out so a default change cannot
-# silently move what this file measures.
+# The driver tests' default config, spelled out so a default change cannot silently
+# move what this file measures.
 _CONFIG = DistributedFMMConfig()
 _ORDER = _CONFIG.order
 _LEAF = _CONFIG.leaf_size
-_THETA_CROSS = _CONFIG.theta_cross
+# ONE theta, for both walks. There used to be a separate ``theta_cross`` at 0.1
+# against this 0.4; see DistributedFMMConfig for why that was compensation for the
+# understated extents rather than physics. Reading the production knob (rather than
+# hardcoding an angle) is deliberate: this file's job is to hold the cross far field
+# to account at whatever opening angle production actually ships.
+_CROSS_THETA = _CONFIG.theta
 _MAC = _CONFIG.mac_type
 _ROTATION = _CONFIG.rotation
 _G = _CONFIG.G
@@ -81,47 +90,29 @@ _PER = 64
 
 # Same 1% bar the driver tests hold the total field to, applied to the cross far term
 # in isolation. That is strictly harder, because the term is not diluted here by the
-# local field or by the near pairs: MEASURED 0.001535 with separated domains (47
-# accepted far pairs) against 1.042014 with interpenetrating ones (12 pairs). The
-# interpenetrating far term is off by more than 100% of its own reference -- it is not
-# an inaccurate approximation of the field, it is uncorrelated with it -- while the
-# driver's aggregate sees the same defect as a comparatively mild 1.8e-2 once the local
-# field dilutes it.
+# local field or by the near pairs. MEASURED at theta=0.4 with the extents bounding
+# the particles: 0.001392 separated (1 accepted far pair, resolved at the root) and
+# 0.001651 interpenetrating (10 pairs). Both are an order 3 expansion's truncation
+# error at the separations the MAC accepts, so the bar sits ~6x above the worse of
+# them; the float32 M2L floor is ~1e-6 at leaf 8, three orders below, so this
+# threshold tests the scheme and not precision.
 #
-# 0.001535 is an order 3 expansion's truncation error at the separations the MAC
-# accepts, so the bar sits ~6.5x above the passing case and ~104x below the failing one
-# (which are themselves ~680x apart): nothing about it is finely tuned. The float32 M2L
-# floor is ~1e-6 at leaf 8, four orders below, so this threshold tests the scheme and
-# not precision.
+# For scale, the interpenetrating case measured 1.042014 here before yggdrax#47 --
+# off by more than 100% of its own reference, i.e. uncorrelated with the field it
+# approximates rather than merely inaccurate, while the driver's aggregate saw the
+# same defect as a comparatively mild 1.8e-2 once the local field diluted it. A
+# regression would land nearer that number than this bar.
 _CROSS_FAR_RTOL = 1e-2
 
-_INTERPENETRATING_XFAIL = pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "Known defect in the cross-domain far field, root cause in yggdrax: "
-        "build_coarse_frontier reduces each remote leaf to its centre of mass, and "
-        "build_remote_coarse_tree computes the coarse tree's geometry -- the MAC "
-        "extent the cross walk tests -- over those points. The extent therefore "
-        "bounds the centres of mass, not the particles behind them, so a coarse leaf "
-        "presents an extent of ~0 however large the remote leaf actually is. Where "
-        "the Morton domains interpenetrate (measured: ndev=2 and ndev=3 on the "
-        "separated-cluster IC) the MAC accepts pairs whose true separation is smaller "
-        "than the source's own radius and the M2L is evaluated inside the region it "
-        "expands -- worst accepted pair (r_src + r_tgt)/d = 1.193 against the 0.104 "
-        "the MAC computed, an 11x understatement, and the resulting far term is off by "
-        "104% of its own direct sum (1.042014 against 0.001535 when the same code runs "
-        "on separated domains). The fix is for CoarseFrontier to "
-        "carry each leaf's radius and build_remote_coarse_tree to inflate the coarse "
-        "extents by it; that takes the cross-field error from 6.4e-1 to 8e-6 at "
-        "theta_cross=1.0 while still accepting 10 far pairs. Remove this marker once "
-        "yggdrax bounds the true extents. See "
-        "docs/distributed_cross_domain_far_diagnosis.md."
-    ),
-)
-
+# Both geometries must now PASS. They did not until yggdrax bounded the coarse
+# tree's extents by the particles behind each frontier point rather than by the
+# centres of mass those points are (TobiBu/yggdrax#47); before that the
+# interpenetrating case was a strict xfail, with the far term off by 104% of its
+# own direct sum. If it fails again, the extents have regressed upstream -- read
+# docs/distributed_cross_domain_far_diagnosis.md before touching anything here.
 _GEOMETRIES = [
     pytest.param(False, id="separated"),
-    pytest.param(True, id="interpenetrating", marks=_INTERPENETRATING_XFAIL),
+    pytest.param(True, id="interpenetrating"),
 ]
 
 
@@ -289,10 +280,19 @@ class _CrossView:
             return_reordered=True,
             leaf_size=1,
         )
-        self.coarse_geometry = compute_tree_geometry(
-            self.coarse_tree, self.coarse_tree.positions_sorted, max_leaf_size=1
-        )
         perm = jnp.asarray(self.coarse_tree.particle_indices, INDEX_DTYPE)
+        # ``particle_radius`` is the whole point: each coarse particle is a remote leaf
+        # reduced to its centre of mass, so the geometry has to bound the ball it
+        # stands for. Mirrors build_remote_coarse_tree exactly -- if that ever stops
+        # passing the frontier radius through, this replay stops matching production
+        # and the pair counts below (checked against the driver's own diagnostics)
+        # will say so.
+        self.coarse_geometry = compute_tree_geometry(
+            self.coarse_tree,
+            self.coarse_tree.positions_sorted,
+            max_leaf_size=1,
+            particle_radius=frontier.radius[perm],
+        )
         self.tag_range = np.asarray(frontier.node_range[perm])
         tag_node_id = np.asarray(frontier.node_id[perm])
         self.coarse_ranges = np.asarray(self.coarse_tree.node_ranges)
@@ -337,7 +337,7 @@ class _CrossView:
             self.target.geometry,
             self.coarse_tree,
             self.coarse_geometry,
-            _THETA_CROSS,
+            _CROSS_THETA,
             mac_type=_MAC,
             max_interactions_per_node=_CONFIG.cross_max_interactions_per_node,
             max_neighbors_per_leaf=_CONFIG.cross_max_neighbors_per_leaf,
