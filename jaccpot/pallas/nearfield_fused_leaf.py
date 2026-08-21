@@ -997,7 +997,7 @@ def nearfield_leafpair_pallas_decoupled(
     if num_warps is None:
         num_warps = max(1, bt // 32)
 
-    def _kernel(*refs: object) -> None:
+    def _kernel(*refs: KernelRef) -> None:
         return _nearfield_leafpair_kernel(
             *refs, num_source_slots=num_source_slots, leaf_width=leaf_width
         )

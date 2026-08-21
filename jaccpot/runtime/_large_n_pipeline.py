@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import os
 import time
-from typing import Any, Callable, Optional, Union
+from typing import TYPE_CHECKING, Any, Callable, Optional, Union
 
 import jax
 import jax.numpy as jnp
@@ -38,6 +38,15 @@ from ._large_n_types import (
 )
 from .dtypes import INDEX_DTYPE
 
+if TYPE_CHECKING:  # pragma: no cover - annotations only, no runtime import
+    # The engine lives in `_fmm_impl`, which reaches this module through the
+    # mixins it inherits, so this import must stay under TYPE_CHECKING or it
+    # would form the cycle ARCHITECTURE section 8 forbids. Unlike `self` on a
+    # mixin, `fmm` here is an ordinary parameter, so naming the engine is both
+    # valid and what lets the `fmm.<attribute>` reads below be checked at all
+    # (audit E.4 bucket E).
+    from ._fmm_impl import FMMEngine
+
 __all__ = [
     "can_use_large_n_prepare_path",
     "evaluate_large_n_state",
@@ -63,7 +72,7 @@ def _contains_jax_tracer(value: Any) -> bool:
 
 
 def prepare_large_n_state(
-    fmm: object,
+    fmm: "FMMEngine",
     *,
     positions_arr: Array,
     masses_arr: Array,
@@ -101,7 +110,7 @@ def prepare_large_n_state(
 
     Parameters
     ----------
-    fmm : object
+    fmm : FMMEngine
         The engine, typed loosely to avoid the ARCHITECTURE section 8 import
         cycle.
     positions_arr : Array
@@ -1554,7 +1563,7 @@ def _large_n_fastlane_eval_fn(
 
 
 def evaluate_large_n_state(
-    fmm: object,
+    fmm: "FMMEngine",
     state: Union[LargeNPreparedState, LargeNCompiledState],
     *,
     target_indices: Optional[Array],
@@ -1570,7 +1579,7 @@ def evaluate_large_n_state(
 
     Parameters
     ----------
-    fmm : object
+    fmm : FMMEngine
         The engine, typed loosely to avoid the import cycle.
     state : Union[LargeNPreparedState, LargeNCompiledState]
         Prepared or compiled large-N state.
@@ -1947,7 +1956,7 @@ def _record_large_n_decline(fmm: Any, reason: str) -> None:
 
 
 def can_use_large_n_prepare_path(
-    fmm: object,
+    fmm: "FMMEngine",
     *,
     positions_arr: Array,
     masses_arr: Array,
@@ -1960,7 +1969,7 @@ def can_use_large_n_prepare_path(
 
     Parameters
     ----------
-    fmm : object
+    fmm : FMMEngine
         The engine whose configuration is being tested.
     positions_arr : Array
         Particle positions; consulted for count and concreteness.
