@@ -28,7 +28,6 @@ from __future__ import annotations
 
 from typing import NamedTuple, Optional
 
-import jax
 import jax.numpy as jnp
 from jax import Array
 from jaxtyping import DTypeLike

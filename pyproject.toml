@@ -110,6 +110,13 @@ dev = [
   # black and isort above: the hook runs on every commit now, and a floating ">="
   # would let a local pydoclint disagree with it about what counts as a violation.
   "pydoclint==0.9.1",
+  # Pinned, but NOT for the reason black/isort/pydoclint are: pyright is not a
+  # pre-commit hook and not in CI, so there is nothing for it to disagree with.
+  # It is pinned because the error counts the audit's E.2 records (705 on the
+  # `self:`-annotated tree, 408 after the `_EngineBase` change) are specific to
+  # this version, and with no gate to catch drift an unpinned checker would make
+  # them quietly unreproducible. Bump it deliberately and re-record the numbers.
+  "pyright==1.1.411",
   "pytest>=8.3.0",
   "pytest-cov>=5.0.0",
   "pytest-xdist>=3.6.0",
@@ -173,6 +180,29 @@ skip-checking-short-docstrings = false
 # anything it was not already suppressing. The hook is now scoped `^jaccpot/`,
 # which leaves enforcement on the package unchanged and unconditional, and
 # leaves tests/bench/examples exactly as unchecked as the baseline had them.
+
+[tool.pyright]
+# Scoped to the package, mirroring the pydoclint hook's `files: ^jaccpot/`: the
+# same backlog argument applies -- `tests/`, `bench/` and `examples/` have never
+# been checked and would swamp the signal.
+include = ["jaccpot"]
+# `experimental/` is opt-in prototype code, excluded here for the same reason
+# `[tool.coverage.run].omit` excludes it and the `experimental` marker deselects
+# its tests. Listed as the package, not a glob -- see the note on `omit` below.
+exclude = ["jaccpot/experimental"]
+pythonVersion = "3.11"
+# Set explicitly rather than left to the default, so a pyright release that moves
+# its default mode cannot silently change what this reports.
+typeCheckingMode = "standard"
+#
+# Deliberately NOT configured: `reportMissingImports`. On a machine where
+# `yggdrax` is an editable install pointing at a sibling working tree, pyright
+# cannot resolve it and emits 98 errors (`--pythonpath` does not help). Silencing
+# the rule package-wide to work around one machine's install layout would also
+# hide a genuine missing import, which is a bad trade for cosmetic quiet.
+#
+# There is no gate. `pyright jaccpot/` reports 408 errors, ~310 of them real, and
+# a hook at that count would need a baseline -- exactly what item 2.5 retired.
 
 [tool.isort]
 profile = "black"

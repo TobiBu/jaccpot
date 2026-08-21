@@ -25,7 +25,6 @@ kernel, so the two are trivially equivalent.
 from __future__ import annotations
 
 import functools
-import os
 
 import jax
 import jax.numpy as jnp

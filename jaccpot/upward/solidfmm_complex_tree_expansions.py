@@ -26,7 +26,6 @@ from yggdrax.tree_moments import TreeMassMoments, compute_tree_mass_moments
 from jaccpot._env import env_flag
 from jaccpot.operators.complex_harmonics import p2m_complex_batch
 from jaccpot.operators.complex_ops import (
-    enforce_conjugate_symmetry,
     enforce_conjugate_symmetry_batch,
     m2m_complex,
     regular_solid_harmonic_directional_derivative_order_batch,

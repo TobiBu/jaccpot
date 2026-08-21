@@ -73,6 +73,18 @@ G.2, G.3, G.5, G.7 and 2.4. Two of those five are no longer decisions:
   eagerly, contradicting §8's *"not imported by production paths"*. Open as its own item, filed
   rather than absorbed.
 
+**Updated 2026-08-21 — a static type checker is finally installed, and it re-opened E.2.**
+`pyright` 1.1.411 over `jaccpot/` reports **705** errors on `main`, of which **208** are
+`Cannot access attribute … for class "*Mixin"`: the 50 bare `self` params that 0.14 left
+behind, which I had called "documentation only". They were not. Fixing them by *annotating*
+`self` — the convention already used on the other 69 methods — turns out to be invalid
+(`self: "FMMEngine"` declares a subtype of the mixin as its own `self`, 119 errors), so the
+mixins now inherit a `TYPE_CHECKING`-only `_EngineBase` alias instead: **705 → 408**, both
+categories at zero, `FMMEngine.__mro__` unchanged. Of the residual 408, **98 are a local
+editable-install artefact** (`yggdrax`), leaving ~310 real findings — untriaged, and the
+natural successor to this item. `pyright` is declared in `[dev]` but is deliberately **not**
+a gate: a gate at 408 needs a baseline, and 2.5 retired baselines for cause. See E.2.
+
 ---
 
 **Status — updated after executing Tier 0.1 and 0.3.** Two items of section F have been
@@ -1707,6 +1719,78 @@ naming *"the audit (F21 / §E.2)"* and then corrects it. Neither subsumed the ot
 is outstanding. The reason this looks ambiguous from the tables alone is that F21 (the finding
 id in the Tier 0 row) and E.2 (the section) are two names for one thing.
 
+**A static checker finally arrived, 2026-08-21, and it says the `self:` convention was the
+wrong fix.** E.2 above closed the *dangling* half of the problem — the names now resolve — but
+it could only guess at the payoff, because item E.2 also records that no checker was installed.
+`pyright` 1.1.411 over `jaccpot/` (105 files) reports **705 errors**, and the largest single
+category is the mixins:
+
+| | count |
+|---|---|
+| `reportAttributeAccessIssue`, total | 261 |
+| — of which `Cannot access attribute … for class "*Mixin"` | **208** |
+| `reportMissingImports`, total (all `yggdrax`) | 98 |
+
+The 208 are the *unannotated* `self` params: 135 in `fmm_prepare.py`, 72 in
+`fmm_overrides.py`, 1 in `fmm_strict_cap_profile.py`. So the 50 methods that item 0.14 left
+bare — which I had described as "documentation only, leave them until a static checker is in
+the toolchain" — were in fact costing 208 checkable errors. That advice was wrong, and wrong
+for the reason E.2's own correction warns about: it was reasoned from the absence of a
+consumer rather than measured with one.
+
+Annotating those 50 the way the other 69 already were gives **705 → 547**, but the drop is
+208 attribute errors *minus 50 new ones*, and the new ones indict the convention itself:
+
+```
+Type of parameter "self" must be a supertype of its class "PrepareMixin"
+```
+
+`FMMEngine` is a *sub*type of every mixin, so `self: "FMMEngine"` is invalid by construction —
+119 occurrences once applied consistently (69 that predate this work, 50 added by it). The
+convention traded one error per method for four.
+
+**Resolved instead by inheritance, and this is the form now in the tree.** Each mixin binds a
+`TYPE_CHECKING`-only alias and inherits it:
+
+```python
+if TYPE_CHECKING:
+    from ._fmm_impl import FMMEngine
+
+    _EngineBase = FMMEngine
+else:  # pragma: no cover
+    _EngineBase = object
+
+
+class PrepareMixin(_EngineBase):
+```
+
+Under a checker the mixin *is* the engine, so `self.<engine attribute>` resolves with `self`
+left bare; at runtime the alias is `object`. Measured:
+
+| | total errors | `for class *Mixin` | `self` supertype |
+|---|---|---|---|
+| `main` | 705 | 208 | 69 |
+| annotating `self` on the remaining 50 | 547 | 0 | 119 |
+| `_EngineBase` inheritance (this change) | **408** | **0** | **0** |
+
+`FMMEngine.__mro__` is byte-identical to `main`'s — 12 entries, same order — because an
+explicit `object` base changes nothing. All 109 `self: "FMMEngine"` annotations under
+`runtime/` are gone; the 9 in `_fmm_impl.py` stay, where the class *is* `FMMEngine` and the
+annotation is therefore valid.
+
+Two caveats on the residual 408, so it is not read as a to-do list of 408 real defects:
+
+* **98 are `yggdrax` `reportMissingImports`, and they are an artefact of this machine,** not of
+  the code: `yggdrax` is installed editable, pointing at a sibling working tree, which pyright
+  does not resolve (`--pythonpath` does not help). A normal site-packages install should
+  resolve them — unverified here, since no such install exists on this box. Real findings are
+  therefore ~310, led by `reportArgumentType` (86), `reportOptionalMemberAccess` (52) and
+  `reportPossiblyUnbound` (48).
+* **`pyright` is declared in `[dev]` but is not a gate, and cannot be one yet.** At 408 errors
+  a hook would need a baseline, which is exactly what 2.5 retired and told us not to
+  reintroduce. Triaging the ~310 into fix / annotate / configure is its own work, and it is
+  the natural successor to this item.
+
 ### E.3 Recommended annotation policy, if you want one
 
 A full `Float[Array, "..."]` conversion of 1534 sites is not a refactor pass; it is a project.
@@ -2140,6 +2224,22 @@ accept the exposure. Not a refactoring decision.
 > it does contradict the layering claim, and making that one import deferred would restore it.
 > Left open as its own item rather than folded into the decision above, because it is a
 > different edge with a different risk.
+>
+> **FIXED 2026-08-20.** The import is now `TYPE_CHECKING` for the annotation plus a
+> function-local import for the two places `TreecodeLeafLists` is *constructed* --
+> `TYPE_CHECKING` alone would have left a `NameError` at call time, since this is a runtime
+> dependency and not merely an annotation.
+>
+> The claim is now **tested** rather than asserted in prose:
+> `tests/unit/test_experimental_is_not_on_an_import_path.py` imports each of six production
+> packages in a clean subprocess and fails if `jaccpot.experimental` appears in `sys.modules`.
+> A subprocess per case because `sys.modules` is process-global -- an in-process check would
+> pass or fail on collection order. Mutation-verified: restoring the eager import fails
+> exactly the `jaccpot.pallas` case and no other.
+>
+> It covers the **eager** graph only, which is the right scope: G.5's accepted exposure is a
+> function-local import, and those load nothing until called. §8's wording gains the word
+> "eagerly" to match.
 
 ### G.6 Priorities I need ranked — **partly answered**
 

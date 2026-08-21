@@ -47,7 +47,6 @@ from typing import Any, NamedTuple, Optional
 import jax
 import jax.numpy as jnp
 import numpy as np
-from jax import lax
 from jaxtyping import Array
 
 from jaccpot.mutual.farfield import (

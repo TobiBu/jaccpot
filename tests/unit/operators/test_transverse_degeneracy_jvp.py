@@ -31,18 +31,18 @@ from jaccpot.operators.complex_ops import (
     complex_rotation_blocks_to_z_solidfmm_batch,
     l2l_complex,
     m2l_complex_fused_align_deltas,
-    m2l_complex_fused_carry_axis_derivative,
     m2l_complex_reference,
     m2l_complex_reference_batch,
     m2l_complex_reference_batch_cached_blocks,
     m2m_complex,
+    make_m2l_complex_fused_carry_axis_derivative,
 )
 from jaccpot.operators.m2l_real_rot_scale import (
     l2l_rot_scale_real_batch_cached_blocks,
-    m2l_real_fused_carry_axis_derivative,
     m2l_rot_scale_real_batch,
     m2l_rot_scale_real_batch_cached_blocks,
     m2m_rot_scale_real_batch_cached_blocks,
+    make_m2l_real_fused_carry_axis_derivative,
     real_rotation_blocks_from_z_local_batch,
     real_rotation_blocks_from_z_multipole_batch,
     real_rotation_blocks_to_z_local_batch,
@@ -738,7 +738,7 @@ def test_fused_pallas_m2l_matches_the_pure_jax_lane_in_gradient(interpret):
     is covered instead by the pair
     :func:`~jaccpot.operators._transverse_degeneracy_jvp.withdraw_unresolvable_transverse`
     (before the blocks and radius are built) and
-    :func:`~jaccpot.operators.m2l_real_rot_scale.m2l_real_fused_carry_axis_derivative`
+    :func:`~jaccpot.operators.m2l_real_rot_scale.make_m2l_real_fused_carry_axis_derivative`
     (after the kernel), neither of which differentiates the kernel.
 
     Measured without the carrier the on-axis rows come back as exactly ``(0, 0)`` and the
@@ -750,6 +750,7 @@ def test_fused_pallas_m2l_matches_the_pure_jax_lane_in_gradient(interpret):
     if not jax.config.jax_enable_x64:
         pytest.skip("requires float64 (JAX_ENABLE_X64=1)")
     from jaccpot.pallas.m2l_real_fused import (
+        m2l_real_fused_jax,
         m2l_real_fused_pallas_cvjp,
         pallas_m2l_real_fused_supported,
     )
@@ -779,9 +780,8 @@ def test_fused_pallas_m2l_matches_the_pure_jax_lane_in_gradient(interpret):
         out = m2l_real_fused_pallas_cvjp(
             multipoles, to_z, from_z, radii, _ORDER, interpret, "triton"
         )
-        out = m2l_real_fused_carry_axis_derivative(
-            out, multipoles, d, to_z, from_z, radii, order=_ORDER
-        )
+        carry = make_m2l_real_fused_carry_axis_derivative(m2l_real_fused_jax)
+        out = carry(out, multipoles, d, to_z, from_z, radii, order=_ORDER)
         return jnp.sum(weights * out)
 
     try:
@@ -832,6 +832,7 @@ def test_fused_pallas_complex_m2l_matches_the_pure_jax_lane_in_gradient(interpre
     if not jax.config.jax_enable_x64:
         pytest.skip("requires float64 (JAX_ENABLE_X64=1)")
     from jaccpot.pallas.m2l_complex_fused import (
+        m2l_complex_fused_jax,
         m2l_complex_fused_pallas_cvjp,
         pallas_m2l_complex_fused_supported,
     )
@@ -862,9 +863,8 @@ def test_fused_pallas_complex_m2l_matches_the_pure_jax_lane_in_gradient(interpre
         out = m2l_complex_fused_pallas_cvjp(
             multipoles, to_z, from_z, radii, _ORDER, interpret, "triton"
         )
-        out = m2l_complex_fused_carry_axis_derivative(
-            out, multipoles, d, to_z, from_z, radii, order=_ORDER
-        )
+        carry = make_m2l_complex_fused_carry_axis_derivative(m2l_complex_fused_jax)
+        out = carry(out, multipoles, d, to_z, from_z, radii, order=_ORDER)
         return jnp.real(jnp.sum(weights * out))
 
     try:

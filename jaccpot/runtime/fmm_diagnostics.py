@@ -14,21 +14,26 @@ from .fmm_stage_timing import (
 )
 
 if TYPE_CHECKING:  # pragma: no cover - annotations only, no runtime import
-    # The mixins annotate `self` as the engine they are mixed into, which lives in
-    # `_fmm_impl` and imports *them* -- so this must stay under TYPE_CHECKING or it
-    # would form the cycle ARCHITECTURE §8 forbids. Before this block the names were
-    # dangling: `typing.get_type_hints` raised NameError on every mixin method, so the
-    # annotations documented an intent no tool could check.
+    # The engine lives in `_fmm_impl`, which imports *these mixins* -- so this import
+    # must stay under TYPE_CHECKING or it would form the cycle ARCHITECTURE §8
+    # forbids. Inheriting `_EngineBase` makes each mixin *be* the engine under a type
+    # checker, so every `self.<engine attribute>` resolves; at runtime the alias is
+    # `object`, leaving the MRO exactly as it was. The audit's E.2 records why this
+    # beats annotating `self`, and what it does not buy at runtime.
     from ._fmm_impl import FMMEngine, PreparedStateLike
+
+    _EngineBase = FMMEngine
+else:  # pragma: no cover - annotations only, never an import at runtime
+    _EngineBase = object
 
 __all__ = [
     "DiagnosticsMixin",
 ]
 
 
-class DiagnosticsMixin:
+class DiagnosticsMixin(_EngineBase):
     def get_stage_timing(
-        self: "FMMEngine",
+        self,
         *,
         per_call: bool = False,
     ) -> dict[str, Any]:
@@ -97,7 +102,7 @@ class DiagnosticsMixin:
         }
 
     def _record_large_n_eval_shape_diagnostics(
-        self: "FMMEngine",
+        self,
         state: PreparedStateLike,
     ) -> None:
         """Record shape-only local-eval diagnostics outside compiled hot loops.
@@ -188,7 +193,7 @@ class DiagnosticsMixin:
         )
         self._large_n_target_block_source_leaf_padded_shape = padded_source_leaf_shape
 
-    def get_runtime_diagnostics(self: "FMMEngine") -> dict[str, Any]:
+    def get_runtime_diagnostics(self) -> dict[str, Any]:
         """Return read-only runtime diagnostics for compile/profile reuse audits.
 
         Returns

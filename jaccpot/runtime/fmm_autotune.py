@@ -32,19 +32,27 @@ from .fmm_caches import (
 from .kernels.core import _accumulate_m2l_chunked_scan
 
 if TYPE_CHECKING:  # pragma: no cover - annotations only, no runtime import
-    # The mixins annotate `self` as the engine they are mixed into, which lives in
-    # `_fmm_impl` and imports *them* -- so this must stay under TYPE_CHECKING or it
-    # would form the cycle ARCHITECTURE §8 forbids. Before this block the names were
-    # dangling: `typing.get_type_hints` raised NameError on every mixin method, so the
-    # annotations documented an intent no tool could check.
+    # The engine lives in `_fmm_impl`, which imports *these mixins* -- so this import
+    # must stay under TYPE_CHECKING or it would form the cycle ARCHITECTURE section 8
+    # forbids. Inheriting `_EngineBase` makes the mixin *be* the engine under a type
+    # checker, so every `self.<engine attribute>` resolves; at runtime the alias is
+    # `object`, leaving the MRO exactly as it was.
+    #
+    # `ad7b00c` added this import to all eleven mixins and annotated `self` in most of
+    # them, but not this one's three methods, so the import sat unused until audit item
+    # 0.14 removed it as dead. Inheritance is what the import earns now -- see E.2.
     from ._fmm_impl import FMMEngine
+
+    _EngineBase = FMMEngine
+else:  # pragma: no cover - annotations only, never an import at runtime
+    _EngineBase = object
 
 __all__ = [
     "AutotuneMixin",
 ]
 
 
-class AutotuneMixin:
+class AutotuneMixin(_EngineBase):
     def _select_autotune_m2l_candidates(self, *, pair_count: int) -> tuple[int, ...]:
         """Return candidate chunk sizes for one pair-count regime.
 

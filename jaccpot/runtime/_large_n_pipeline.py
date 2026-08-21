@@ -18,10 +18,7 @@ from yggdrax.interactions import DualTreeRetryEvent, DualTreeTraversalConfig, MA
 # the F16 lesson from `near_field.py` is that a module's attribute surface is
 # wider than its import surface. Keeping it costs nothing and cannot break a
 # caller that reaches it as `_large_n_pipeline._read_large_n_env_config`.
-from ._large_n_env import (  # noqa: F401
-    _large_n_env_config_for_fmm,
-    _read_large_n_env_config,
-)
+from ._large_n_env import _large_n_env_config_for_fmm
 from ._large_n_nearfield import (
     build_large_n_leaf_particle_groups,
     build_large_n_nearfield_precompute,

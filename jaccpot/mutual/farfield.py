@@ -246,11 +246,31 @@ class MutualTreeArrays(NamedTuple):
 # overshoot by up to 2x; adding the 1.5x rungs halves that to 1.33x worst case.
 # Within a single run only one rung is ever used, so a finer ladder costs
 # nothing -- it only means two runs at different N may not share a compile.
+# Quarter-octave rungs: {4,5,6,7} x 2^k, so consecutive entries never differ by
+# more than 1.25x.
+#
+# This is a strict SUPERSET of the {1,2,3} x 2^k ladder it replaces -- 4*2^k is
+# 2^(k+2) and 6*2^k is 3*2^(k+1) -- so no capacity that used to be reachable
+# stops being reachable, and a recorded cap profile still snaps to itself.
+#
+# The old ladder's rungs were up to 2x apart (8 -> 16) and 1.5x apart in the
+# common case (2^k -> 3*2^(k-1)), and the near/far pair capacities land in that
+# gap, so the SNAP was costing far more than the headroom it was carrying. The
+# near cap, measured against real occupancies (theta 0.7, order 4):
+#
+#   N=1e5 leaf 64   occ   394,995  asked   434,750  ->   524,288  (+20.6% snap)
+#   N=1e6 leaf 64   occ 4,570,257  asked 5,027,538  -> 6,291,456  (+25.1% snap)
+#   N=1e6 leaf 32   occ 8,619,048  asked 9,481,208  -> 12,582,912 (+32.7% snap)
+#
+# and the capacity is what the near-field loop's trip count comes from, so those
+# percentages are near-field work -- 59% of a traversal at leaf 64 -- plus the
+# array memory. On quarter-octaves the same three land on 458,752 / 5,242,880 /
+# 10,485,760, i.e. 12-17% smaller. This is the cheapest form of the fix: it needs
+# no kernel change, no control flow, and cannot perturb gradients, unlike skipping
+# padded chunks at run time (see `skip_padded_chunks` in mutual/nearfield.py, which
+# measured 1.5x WORSE on the pure-JAX branch at N=1e6).
 CAPACITY_LADDER: Tuple[int, ...] = tuple(
-    sorted(
-        {m * (1 << k) for k in range(3, 26) for m in (2, 3)}
-        | {1 << k for k in range(3, 27)}
-    )
+    sorted({m * (1 << k) for k in range(1, 25) for m in (4, 5, 6, 7)})
 )
 
 

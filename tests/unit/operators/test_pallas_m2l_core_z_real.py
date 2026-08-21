@@ -12,7 +12,10 @@ from jaccpot.operators.real_harmonics import (
     sh_size,
     translate_along_z_m2l_real,
 )
-from jaccpot.pallas.m2l_core_z_real import m2l_core_z_real_pallas
+from jaccpot.pallas.m2l_core_z_real import (
+    m2l_core_z_real_pallas,
+    pallas_m2l_real_supported,
+)
 
 
 @pytest.mark.filterwarnings(
@@ -31,11 +34,23 @@ def test_pallas_core_z_matches_pure_jax():
         maxval=jnp.asarray(1.25, dtype=jnp.float32),
     )
 
-    pure = np.asarray(m2l_core_z_real(multipoles, radii, order=order, use_pallas=False))
+    # Calls the kernel DIRECTLY. This used to go through
+    # `m2l_core_z_real(use_pallas=True)`, and that dispatch is gone -- `operators/`
+    # no longer imports `pallas/` (audit G.3). The change also makes the skip
+    # honest: the old route fell back to pure-JAX off GPU, so on CPU this test
+    # compared pure against pure and passed while asserting nothing. It is now
+    # gated on `pallas_m2l_real_supported()` and skips instead.
+    #
+    # `m2l_core_z_real` floors radii at 1e-30 before translating, so the kernel is
+    # given the same treatment. Immaterial for the [0.25, 1.25] draws here, and
+    # correct if that range ever changes.
+    if not pallas_m2l_real_supported():
+        pytest.skip("Pallas real z-M2L unsupported on this backend")
+
+    pure = np.asarray(m2l_core_z_real(multipoles, radii, order=order))
+    floored = jnp.maximum(radii, jnp.asarray(1.0e-30, dtype=radii.dtype))
     try:
-        pallas = np.asarray(
-            m2l_core_z_real(multipoles, radii, order=order, use_pallas=True)
-        )
+        pallas = np.asarray(m2l_core_z_real_pallas(multipoles, floored, order=order))
     except Exception as exc:  # pragma: no cover - backend/hardware dependent
         msg = str(exc).lower()
         if "warpgroup" in msg or "ptx" in msg or "triton" in msg:
@@ -50,8 +65,8 @@ def test_pallas_core_z_interpret_matches_pure_jax(order):
     """The Pallas kernel LOGIC must equal the pure-JAX z-M2L recurrence.
 
     Runs the actual Pallas kernel in interpret mode so this executes on CPU CI
-    (the ``use_pallas=True`` dispatch silently falls back to pure-JAX off GPU,
-    so it cannot catch kernel drift). This is the guard that keeps the two
+    (the sibling test above needs real hardware and skips without it, so it
+    cannot catch kernel drift on CI). This is the guard that keeps the two
     independent encodings of the recurrence -- the inline loops in
     translate_along_z_m2l_real and the static tables in
     jaccpot.pallas.m2l_core_z_real -- in sync.

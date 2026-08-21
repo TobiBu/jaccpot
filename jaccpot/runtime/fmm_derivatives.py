@@ -37,22 +37,27 @@ from .kernels.core import (
 )
 
 if TYPE_CHECKING:  # pragma: no cover - annotations only, no runtime import
-    # The mixins annotate `self` as the engine they are mixed into, which lives in
-    # `_fmm_impl` and imports *them* -- so this must stay under TYPE_CHECKING or it
-    # would form the cycle ARCHITECTURE §8 forbids. Before this block the names were
-    # dangling: `typing.get_type_hints` raised NameError on every mixin method, so the
-    # annotations documented an intent no tool could check.
+    # The engine lives in `_fmm_impl`, which imports *these mixins* -- so this import
+    # must stay under TYPE_CHECKING or it would form the cycle ARCHITECTURE §8
+    # forbids. Inheriting `_EngineBase` makes each mixin *be* the engine under a type
+    # checker, so every `self.<engine attribute>` resolves; at runtime the alias is
+    # `object`, leaving the MRO exactly as it was. The audit's E.2 records why this
+    # beats annotating `self`, and what it does not buy at runtime.
     from ._fmm_impl import FMMEngine
+
+    _EngineBase = FMMEngine
+else:  # pragma: no cover - annotations only, never an import at runtime
+    _EngineBase = object
 
 __all__ = [
     "DerivativesMixin",
 ]
 
 
-class DerivativesMixin:
+class DerivativesMixin(_EngineBase):
     @jaxtyped(typechecker=beartype)
     def compute_accelerations_and_jerk(
-        self: "FMMEngine",
+        self,
         positions: Array,
         masses: Array,
         velocities: Array,
@@ -194,7 +199,7 @@ class DerivativesMixin:
 
     @jaxtyped(typechecker=beartype)
     def compute_accelerations_with_time_derivatives(
-        self: "FMMEngine",
+        self,
         positions: Array,
         masses: Array,
         velocities: Array,
@@ -331,7 +336,7 @@ class DerivativesMixin:
 
     @jaxtyped(typechecker=beartype)
     def evaluate_prepared_state_with_jerk(
-        self: "FMMEngine",
+        self,
         state: FMMPreparedState,
         velocities: Array,
         *,
@@ -516,7 +521,7 @@ class DerivativesMixin:
 
     @jaxtyped(typechecker=beartype)
     def evaluate_prepared_state_with_time_derivatives(
-        self: "FMMEngine",
+        self,
         state: FMMPreparedState,
         velocities: Array,
         *,
@@ -621,7 +626,7 @@ class DerivativesMixin:
 
     @jaxtyped(typechecker=beartype)
     def _evaluate_target_nearfield_jerk(
-        self: "FMMEngine",
+        self,
         state: FMMPreparedState,
         velocities: Array,
         *,
@@ -700,7 +705,7 @@ class DerivativesMixin:
 
     @jaxtyped(typechecker=beartype)
     def _evaluate_target_nearfield_time_derivatives(
-        self: "FMMEngine",
+        self,
         state: FMMPreparedState,
         velocities: Array,
         *,
@@ -814,7 +819,7 @@ class DerivativesMixin:
 
     @jaxtyped(typechecker=beartype)
     def _evaluate_source_motion_farfield_jerk(
-        self: "FMMEngine",
+        self,
         state: FMMPreparedState,
         velocities: Array,
         *,
@@ -952,7 +957,7 @@ class DerivativesMixin:
 
     @jaxtyped(typechecker=beartype)
     def _evaluate_farfield_time_derivative_orders(
-        self: "FMMEngine",
+        self,
         state: FMMPreparedState,
         velocities: Array,
         *,

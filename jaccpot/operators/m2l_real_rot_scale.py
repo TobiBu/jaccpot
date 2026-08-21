@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import os
 from functools import partial
-from typing import Any
+from typing import Any, Callable
 
 import jax
 import jax.numpy as jnp
@@ -42,12 +42,6 @@ from ._transverse_degeneracy_jvp import (
     withdraw_unresolvable_transverse,
     without_unresolvable_transverse_jvp,
 )
-
-# NOTE: ``jaccpot.pallas.m2l_core_z_real`` is imported lazily inside
-# ``m2l_core_z_real`` below. A top-level import creates a circular import
-# (``jaccpot.pallas.__init__`` -> ``m2l_core_z_real`` -> ``jaccpot.operators``
-# -> this module -> ``jaccpot.pallas.m2l_core_z_real``), which breaks
-# ``from jaccpot.pallas import ...`` when it is the first jaccpot import.
 
 
 @highest_matmul_precision
@@ -292,13 +286,13 @@ def m2l_core_z_real(
     radii: Array,
     *,
     order: int,
-    use_pallas: bool = False,
 ) -> Array:
     """Apply z-axis real M2L translation to a batch of rotated multipoles.
 
-    When ``use_pallas=True``, the function dispatches to the optional Pallas
-    kernel on supported accelerator backends and otherwise falls back to the
-    pure-JAX recurrence.
+    Pure JAX. The Pallas z-core is reached by calling
+    :func:`jaccpot.pallas.m2l_core_z_real.m2l_core_z_real_pallas` directly, from
+    `runtime/kernels/` or from a parity test -- this module does not dispatch to
+    it, so `operators/` stays free of accelerator imports (audit G.3).
 
     Radii are floored at 1e-30 before use. That is not cosmetic: the z-translation
     divides by ``r``, so a coincident pair would produce inf/NaN rather than a
@@ -314,9 +308,6 @@ def m2l_core_z_real(
         Pair separations ``[N]``, floored as above.
     order : int
         Expansion order ``p``. Static.
-    use_pallas : bool
-        Prefer the Pallas kernel. Silently falls back when the backend does not
-        support it, so this is a request rather than an assertion.
 
     Returns
     -------
@@ -325,14 +316,7 @@ def m2l_core_z_real(
         routes are numerically equivalent -- see the module docstring of
         ``runtime/kernels/_m2l.py`` for the equivalence the suite asserts.
     """
-    from jaccpot.pallas.m2l_core_z_real import (
-        m2l_core_z_real_pallas,
-        pallas_m2l_real_supported,
-    )
-
     r = jnp.maximum(jnp.asarray(radii), jnp.asarray(1.0e-30, dtype=radii.dtype))
-    if bool(use_pallas) and pallas_m2l_real_supported():
-        return m2l_core_z_real_pallas(multipole_rot, r, order=int(order))
     return jax.vmap(lambda m, rr: translate_along_z_m2l_real(m, rr, order=int(order)))(
         multipole_rot,
         r,
@@ -344,7 +328,6 @@ def _m2l_rot_scale_real_cascade(
     deltas: Array,
     *,
     order: int,
-    use_pallas: bool = False,
 ) -> Array:
     """The rotate -> z-translate -> rotate-back body of :func:`m2l_rot_scale_real_batch`.
 
@@ -360,8 +343,6 @@ def _m2l_rot_scale_real_cascade(
         Source-to-target centre displacements ``[N, 3]``.
     order : int
         Maximum SH degree ``p``. Static under ``jit``.
-    use_pallas : bool
-        Route the z-translation through the Pallas kernel where supported. Static.
 
     Returns
     -------
@@ -384,7 +365,6 @@ def _m2l_rot_scale_real_cascade(
         mult_rot,
         radii,
         order=int(order),
-        use_pallas=bool(use_pallas),
     )
     return jax.vmap(lambda l, d: _rotate_local_from_z_single(l, d, order=int(order)))(
         locals_z,
@@ -410,7 +390,6 @@ def m2l_rot_scale_real_batch(
     deltas: Array,
     *,
     order: int,
-    use_pallas: bool = False,
 ) -> Array:
     """Batched rotate+scale real-basis M2L translation.
 
@@ -430,10 +409,6 @@ def m2l_rot_scale_real_batch(
     order : int
         Maximum SH degree ``p``. Static under ``jit`` -- it sets the Python-level
         loop bounds in the rotation builders.
-    use_pallas : bool
-        Route the z-translation through the optional Pallas kernel when the
-        backend supports it. Static under ``jit``. The kernel is an execution
-        accelerator only; see :func:`m2l_core_z_real` for the equivalence.
 
     Returns
     -------
@@ -494,7 +469,7 @@ def m2l_rot_scale_real_batch(
         raise ValueError("deltas must have shape (batch, 3)")
 
     return _m2l_rot_scale_real_cascade_with_axis_derivative(
-        mult, delta, order=int(order), use_pallas=bool(use_pallas)
+        mult, delta, order=int(order)
     )
 
 
@@ -982,54 +957,13 @@ def l2l_rot_scale_real_batch_cached_blocks(
 # --------------------------------------------------------------------------
 
 
-def _m2l_real_fused_twin(
-    multipoles: Array,
-    blocks_to_z: Array,
-    blocks_from_z: Array,
-    radii: Array,
-    *,
-    order: int,
-) -> Array:
-    """Pure-JAX twin of the fused Pallas real M2L, for the transverse correction only.
-
-    Deferred import: :mod:`jaccpot.pallas.m2l_real_fused` reaches back into
-    :mod:`jaccpot.operators`, so a module-scope import is a cycle. This is the same twin
-    the fused kernel's own ``custom_vjp`` uses as its correctness reference, which is why
-    it is the right thing to compute the correction with -- the kernel itself cannot be
-    used, because the correction lives inside a JVP rule and a ``custom_vjp`` is not
-    forward-differentiable.
-
-    Parameters
-    ----------
-    multipoles : Array
-        Source multipole coefficients ``[N, (p+1)^2]``.
-    blocks_to_z : Array
-        Multipole world->z blocks ``[N, p+1, 2p+1, 2p+1]``.
-    blocks_from_z : Array
-        Local z->world blocks, same shape.
-    radii : Array
-        Translation distances ``[N]``.
-    order : int
-        Maximum SH degree ``p``. Static under ``jit``.
-
-    Returns
-    -------
-    Array
-        Real local expansion contributions ``[N, (p+1)^2]``.
-    """
-    from jaccpot.pallas.m2l_real_fused import m2l_real_fused_jax
-
-    return m2l_real_fused_jax(
-        multipoles, blocks_to_z, blocks_from_z, radii, order=int(order)
-    )
-
-
 #: Re-exported so the fused lane's two halves come from one module and cannot be reached
 #: apart: this one withdraws the unresolvable transverse tangent from the displacement
-#: *before* anything is built from it, and :data:`m2l_real_fused_carry_axis_derivative`
+#: *before* anything is built from it, and :func:`make_m2l_real_fused_carry_axis_derivative`
 #: puts the analytic term back *after* the kernel. Using either alone gives a wrong
 #: gradient. See :mod:`jaccpot.operators._transverse_degeneracy_jvp` for both.
 m2l_real_fused_align_deltas = withdraw_unresolvable_transverse
+
 
 #: Puts the analytic transverse derivative back onto the fused Pallas M2L's output.
 #: Signature ``(out, multipoles, deltas, blocks_to_z, blocks_from_z, radii, order=p)``;
@@ -1037,16 +971,50 @@ m2l_real_fused_align_deltas = withdraw_unresolvable_transverse
 #: :func:`~jaccpot.operators._transverse_degeneracy_jvp.withdraw_unresolvable_transverse`
 #: on the displacement *before* the blocks and radius are built from it -- see
 #: ``runtime/kernels/core.py::_m2l_real_batch_kernel_fused_pallas``, its only caller.
-m2l_real_fused_carry_axis_derivative = with_transverse_degeneracy_tangent(
-    _m2l_real_fused_twin,
-    generators=_M2L_TRANSVERSE_GENERATORS,
-)
+def make_m2l_real_fused_carry_axis_derivative(
+    twin: Callable[..., Array],
+) -> Callable[..., Array]:
+    """Build the fused real M2L's transverse-tangent carrier around ``twin``.
+
+    A factory rather than a module-level object because the pure-JAX twin this
+    needs lives in :mod:`jaccpot.pallas.m2l_real_fused`, and ``operators/`` no
+    longer imports ``pallas/`` (audit G.3). The derivative rule stays here, where
+    the rest of the transverse-degeneracy work lives; only the choice of twin
+    moved out. Its one caller is ``runtime/kernels/_m2l.py``.
+
+    Worth knowing before moving anything else: the twin is **pure jnp**, not the
+    accelerated kernel. It is the fused kernel's own correctness reference, which
+    is why it is the right thing to compute the correction with -- the kernel
+    cannot be, because the correction lives inside a JVP rule and a
+    ``custom_vjp`` is not forward-differentiable. So the dependency this removed
+    was never on an accelerator; it was on a reference implementation that
+    happens to be filed under ``pallas/``.
+
+    Build the result ONCE and reuse it. It is a ``custom_jvp`` object, so a fresh
+    one per call is a fresh primitive per call, and every call would retrace.
+
+    Parameters
+    ----------
+    twin : Callable[..., Array]
+        Pure-JAX twin, ``twin(coeffs, blocks_to_z, blocks_from_z, radii, order=p)``.
+        Must be linear in ``coeffs``.
+
+    Returns
+    -------
+    Callable[..., Array]
+        ``carry(out, coeffs, delta, blocks_to_z, blocks_from_z, radii, order=p)``,
+        returning ``out`` unchanged in the primal.
+    """
+    return with_transverse_degeneracy_tangent(
+        twin,
+        generators=_M2L_TRANSVERSE_GENERATORS,
+    )
 
 
 __all__ = [
     "m2l_core_z_real",
     "m2l_real_fused_align_deltas",
-    "m2l_real_fused_carry_axis_derivative",
+    "make_m2l_real_fused_carry_axis_derivative",
     "m2l_rot_scale_real_batch",
     "m2l_rot_scale_real_batch_cached_blocks",
     "m2m_rot_scale_real_batch_cached_blocks",

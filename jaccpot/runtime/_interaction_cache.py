@@ -26,7 +26,6 @@ from yggdrax.interactions import (
     NodeInteractionList,
     NodeNeighborList,
     PairPolicy,
-    build_compact_far_pairs,
     build_compact_far_pairs_and_leaf_neighbor_lists,
     build_interactions_and_neighbors_split,
     build_leaf_neighbor_lists,
