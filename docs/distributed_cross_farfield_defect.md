@@ -96,3 +96,100 @@ scaling figures were measured at is a near-degenerate FMM: a direct sum with
 tree-accelerated neighbour finding. That is worth revisiting independently --
 jztree, the tree library this work takes inspiration from, defaults to
 `max_leaf_size` 32-48, not 8 (our distributed default) or 256 (these benchmarks).
+
+---
+
+# COORDINATION (2026-08-21): same defect found independently; fix belongs upstream
+
+A parallel session reached the same root cause on branch
+`diag/cross-far-coarse-extent-mac` (worktree
+`.claude/worktrees/reactive-forging-wall`), and its diagnosis is more complete
+than this one. Read
+**`docs/distributed_cross_domain_far_diagnosis.md` on that branch** as the
+primary account; this file is retained for the independent corroboration below.
+
+## Where that analysis is ahead of this one
+
+- **It eliminates the alternatives by measurement**, rather than by reading: halo
+  import / cross P2P / decomposition (exact to 3e-6 at `theta_cross<=0.01`), the
+  M2L, the coarse seeding, the M2M, the L2L and the L2P (replayed single-device
+  against the exact cross direct sum: 1.4e-3, which *is* order-3 truncation), the
+  near/far partition (no double counting), a sign error, and the basis.
+- **It quantifies the MAC's error directly.** At the default `theta_cross=0.1` the
+  walk accepts a pair whose true `(r_src+r_tgt)/d` is **1.193** -- the target lies
+  *inside* the source's own radius -- while the MAC computes **0.104**, an 11x
+  understatement just under the threshold. True radius of a coarse "point" source:
+  median 0.5327, max 5.0473, represented as zero.
+- **It explains the real/solidfmm agreement to 8 digits** that this file flagged as
+  suspicious: at order 3 the two bases are the same expansion in two
+  representations, so identical numbers are evidence the error is structural, not
+  evidence of a shared bug.
+- **It found the pre-existing workaround.** `docs/north_star_phase3_scale_plan.md:132`
+  already says "θ_cross ≤ 0.1 (under-separated far-field goes garbage)". So the
+  strict default is compensation for this defect, not a physical choice -- which is
+  the real answer to "why not just loosen `theta_cross`".
+- **It reproduces without a GPU** (`bench/diagnose_cross_domain_far.py`, two forced
+  CPU devices matching 2xA100 aggL2 to six digits) and pins the defect with strict
+  xfails in `tests/integration/test_distributed_cross_domain_far_extents.py`.
+- **It corrects the IC docstrings**: the "one cluster per Morton domain" claim holds
+  only at `ndev=4`. At `ndev=2` the Morton split cuts across the clusters and the
+  domains interpenetrate, which is why the four `tests/distributed/` driver
+  failures appear at two cards. That supersedes the explanation offered earlier in
+  this session, which put those failures down to a tolerance calibrated at four
+  devices.
+
+## The fix is in yggdrax, and a jaccpot-side correction was wrong
+
+That branch locates the fix in `yggdrax/distributed/let.py` -- `CoarseFrontier`
+must carry each leaf's radius and `build_remote_coarse_tree` must inflate the
+coarse geometry -- verified live in yggdrax `main` at cb9cfe8, and argues:
+
+> jaccpot only receives `rct.geometry` and passes it to the walk, so a
+> jaccpot-side correction would be patching a dependency's output from outside and
+> would silently diverge the day yggdrax fixes it too.
+
+That is correct, and it refutes the correction implemented in this session. A
+`_inflate_coarse_geometry` helper was added to `jaccpot/distributed/fmm.py` here
+and has been **reverted**; the diff is kept out of the tree at
+`scratchpad/jaccpot_side_inflation_REJECTED.patch` for reference only. Double
+inflation once yggdrax lands its own bound is exactly the failure mode the
+argument predicts.
+
+## Independent corroboration this session adds
+
+The two diagnoses used different configurations, which makes them a genuine
+cross-check rather than a repetition. That one is `ndev=2`, `N=128`, leaf 8,
+order 3, interpenetrating domains. This one is `ndev=4`, `N=65 536`
+(16 384/device), leaf 256, uniform, with an order sweep:
+
+| order | `theta_cross` | cross_far | rel-L2 vs direct |
+| --- | --- | --- | --- |
+| 3 | 0.25 | 3497 | 2.90e-03 |
+| 5 | 0.25 | 3497 | 4.54e-03 |
+| 8 | 0.25 | 3497 | **1.29e-02** |
+| 8 | 0.10 | 0 | 2.06e-07 |
+
+**Error rising with expansion order at a fixed accepted-pair count** is the
+divergent-series signature, and it is a different observable from the extent-ratio
+table -- both point at the same cause. The control (order 3 -> 8 improving 31x when
+the cross far field is empty) isolates it to the cross path.
+
+Also worth carrying over: the reverted jaccpot-side inflation measured
+**5.6-8.2x** better accuracy at `theta_cross=0.25` (order 5: 4.54e-3 -> 8.15e-4;
+order 8: 1.29e-2 -> 1.58e-3), with `cross_far` falling 3497 -> 227 as honest
+extents reclassified pairs to near. Consistent with that branch's five-orders
+result at `theta_cross=1.0`, and with its warning that the correction costs
+near-field work. Note the error still *rose* with order after that partial
+correction, which suggests a bottom-up bound of
+`max(|c_child - c_node| + r_child)` is not equivalent to the simpler
+`point_radius + max_represented_radius` that branch specifies -- their form should
+be preferred.
+
+## Tooling this session adds, which that branch can use
+
+`bench/multigpu/harness.py --accuracy-targets K` measures relative L2 against a
+direct sum over **all** sources on K sampled targets. It is what turns any
+`theta_cross` or order sweep into a real measurement rather than a speed
+comparison, and it will be needed for the "revisit `theta_cross` once the extents
+are honest" follow-up that branch flags -- probably to `theta` itself, since 0.1
+exists only to compensate.
