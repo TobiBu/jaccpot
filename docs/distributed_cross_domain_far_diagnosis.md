@@ -157,8 +157,19 @@ with the numbers above.
 
 `CoarseFrontier` should carry each leaf's radius about the centre of mass it is reduced
 to, and `build_remote_coarse_tree` should inflate the coarse geometry's `radius` and
-`max_extent` by the largest such radius among the coarse particles a node holds. Both
-are in yggdrax. It costs one extra float per leaf in the frontier all-gather.
+`max_extent` by the largest such radius among the coarse particles a node holds. It
+costs one extra float per leaf in the frontier all-gather.
+
+Both are in **yggdrax**, `yggdrax/distributed/let.py` — `CoarseFrontier` and
+`build_coarse_frontier` at `:44`/`:61`, `build_remote_coarse_tree` at `:243`. Verified
+present in yggdrax `main` at cb9cfe8 (the installed copy in jaccpot's venv is
+byte-identical to that checkout), so this is a live upstream defect and not a stale
+pin. Nothing in jaccpot can fix it at the right layer: jaccpot only receives
+`rct.geometry` and passes it to the walk, so a jaccpot-side correction would be
+patching a dependency's output from outside and would silently diverge the day yggdrax
+fixes it too. The per-node bound is a plain bottom-up max over the coarse tree
+(`maxr[internal] = max(maxr[left], maxr[right])`), so it costs one level pass and no
+extra communication beyond the single float.
 
 Measured by rerunning the replay with exactly that correction applied
 (`--inflate`), interpenetrating domains, `theta_cross=1.0`:
