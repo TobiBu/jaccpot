@@ -257,8 +257,11 @@ Two consequences worth knowing before shipping it:
   `tests/integration/test_distributed_cross_domain_far_extents.py` flip to failures,
   which is the signal to delete the markers and re-measure the four driver tests.
 - A change to `partition_for_devices` that makes Morton domains spatially compact would
-  hide the defect on this IC without fixing it. The strict xfails are geometric, not
-  IC-derived, so they would still hold — but the driver tests would go green for the
-  wrong reason.
+  hide the defect on this IC without fixing it, and the four driver tests would go green
+  for the wrong reason. The pin's `interpenetrating` case is built *from* the
+  partitioner, so it would have been fooled the same way — it therefore asserts the
+  geometry it is named for (each domain holds particles on both sides of x=3) before it
+  measures anything, and fails with "the interpenetrating case is no longer
+  interpenetrating" rather than flipping to a false pass.
 - Any change to `theta_cross`'s default. It is currently load-bearing in a way the
   config does not admit; the paragraph above is the reason.

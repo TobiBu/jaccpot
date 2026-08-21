@@ -253,6 +253,30 @@ class _CrossView:
             pos_d = pts.reshape(2, _PER, 3)
             mass_d = mass.reshape(2, _PER)
 
+        # Both parametrisations are self-validating, because neither is a property of
+        # this file: the interpenetrating one comes out of partition_for_devices, and a
+        # future partitioner that made Morton domains spatially compact would quietly
+        # turn it into the separated case -- flipping the strict xfails and reading as
+        # "yggdrax fixed the extents" when nothing of the kind happened. Assert the
+        # geometry each case is named for, so that change fails loudly here instead.
+        # The clusters sit at x=0 and x=6, so x=3 separates them.
+        spans_both = [
+            bool((pos_d[d][:, 0] < 3.0).any() and (pos_d[d][:, 0] > 3.0).any())
+            for d in range(2)
+        ]
+        if interpenetrating:
+            assert all(spans_both), (
+                "the interpenetrating case is no longer interpenetrating: "
+                f"per-domain 'spans both clusters' = {spans_both}. The Morton "
+                "partition changed, so this parametrisation no longer exercises what "
+                "it is named for -- re-derive it before trusting any verdict here."
+            )
+        else:
+            assert not any(spans_both), (
+                "the separated case is not separated: per-domain 'spans both "
+                f"clusters' = {spans_both}"
+            )
+
         self.target = _Domain(pos_d[0], mass_d[0], bounds)
         self.source = _Domain(pos_d[1], mass_d[1], bounds)
 
