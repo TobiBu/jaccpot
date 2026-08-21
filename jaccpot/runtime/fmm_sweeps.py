@@ -18,7 +18,6 @@ from yggdrax.grouped_interactions import GroupedInteractionBuffers
 from yggdrax.interactions import (
     DualTreeRetryEvent,
     DualTreeTraversalConfig,
-    MACType,
     NodeInteractionList,
 )
 from yggdrax.tree import Tree, get_node_levels

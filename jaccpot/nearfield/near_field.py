@@ -2,16 +2,12 @@
 
 from __future__ import annotations
 
-import os
-import warnings
-from collections import OrderedDict
 from dataclasses import dataclass
 from functools import partial
 from typing import Any, Optional, Union
 
 import jax
 import jax.numpy as jnp
-import numpy as np
 from beartype import beartype
 from beartype.typing import Tuple
 from jax import lax
@@ -20,11 +16,7 @@ from yggdrax.dtypes import INDEX_DTYPE, as_index
 from yggdrax.interactions import NodeNeighborList
 from yggdrax.tree import Tree
 
-from jaccpot._env import env_choice, env_flag, env_float, env_int
-from jaccpot.runtime.grad_options import (  # noqa: F401
-    LeafPairReverseOptions,
-    analytic_p2p_vjp_enabled,
-)
+from jaccpot._env import env_choice, env_flag, env_int
 
 # Several of these are unused *in this module* -- some were already, and four more
 # became so when the radix fast lane moved to `_fast_lane.py` (Tier 1.4). They are
@@ -70,14 +62,11 @@ from ._schedules import (  # noqa: F401  -- public re-export surface, see below
     prepare_bucketed_scatter_schedules_from_groups,
     prepare_leaf_neighbor_pairs,
 )
-from .grad import (  # noqa: F401
-    _check_float_id_range,
+from .grad import (
     _leafpair_accel_analytic_vjp,
-    _leafpair_reverse_tiers_cached,
     _pair_accel_cvjp,
     _pair_accel_masked_accels,
     build_leafpair_reverse_tiers,
-    clear_leafpair_reverse_tier_cache,
 )
 
 __all__ = [

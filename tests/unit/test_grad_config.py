@@ -185,13 +185,28 @@ def test_gate_helpers_are_bound_in_their_calling_modules():
     (Tier 1.3); ``real_harmonics`` is now a re-export aggregator and does not
     consult any gate itself, so asserting there would no longer test the thing
     this test exists to test.
+
+    **The P2P gate moved the same way, and this test did not follow it.** Tier
+    1.4/1.5 split ``near_field`` and the call went to ``nearfield/_kernels.py``
+    (which imports the gate itself, at its own module scope); ``near_field`` kept
+    only an unconsulted re-export. The hard-coded line below therefore asserted a
+    re-export on an aggregator for two tiers -- the exact thing the paragraph above
+    says is not worth asserting -- and it went unnoticed because a stale re-export
+    keeps such an assertion green. It surfaced only when audit item 0.14 removed
+    the dead import.
+
+    Note the two halves are not redundant: the AST-derived scan below is the real
+    invariant and it was already correct here, since it resolves the caller rather
+    than trusting a name written years earlier. These three lines are a fast,
+    readable smoke check, and they have to name the current callers to be worth
+    anything.
     """
-    from jaccpot.nearfield import near_field as nf
+    from jaccpot.nearfield import _kernels as nf_kernels
     from jaccpot.operators import real_p2m_l2p
     from jaccpot.runtime.kernels import core
 
     assert callable(real_p2m_l2p.analytic_l2p_vjp_enabled)
-    assert callable(nf.analytic_p2p_vjp_enabled)
+    assert callable(nf_kernels.analytic_p2p_vjp_enabled)
     assert callable(core.fused_m2l_pallas_enabled)
 
     # And derive the same check rather than hard-coding three modules, so that a
@@ -206,7 +221,7 @@ def test_gate_helpers_are_bound_in_their_calling_modules():
         "analytic_p2p_vjp_enabled",
         "fused_m2l_pallas_enabled",
     }
-    package_root = pathlib.Path(nf.__file__).resolve().parents[1]
+    package_root = pathlib.Path(nf_kernels.__file__).resolve().parents[1]
     callers: dict[str, set[str]] = {}
     for path in sorted(package_root.rglob("*.py")):
         module_tree = ast.parse(path.read_text())

@@ -32,11 +32,14 @@ from .fmm_caches import (
 from .kernels.core import _accumulate_m2l_chunked_scan
 
 if TYPE_CHECKING:  # pragma: no cover - annotations only, no runtime import
-    # The mixins annotate `self` as the engine they are mixed into, which lives in
-    # `_fmm_impl` and imports *them* -- so this must stay under TYPE_CHECKING or it
-    # would form the cycle ARCHITECTURE §8 forbids. Before this block the names were
-    # dangling: `typing.get_type_hints` raised NameError on every mixin method, so the
-    # annotations documented an intent no tool could check.
+    # `self` is the engine these methods are mixed into, and it lives in
+    # `_fmm_impl`, which imports *them* -- so this must stay under TYPE_CHECKING or
+    # it would form the cycle ARCHITECTURE section 8 forbids.
+    #
+    # `ad7b00c` added this import to all eleven mixins and the annotations to most
+    # of them, but not to this one's three methods, so the import sat unused until
+    # audit item 0.14 removed it as dead. This is the other resolution of that
+    # finding: write the annotations the import was added for.
     from ._fmm_impl import FMMEngine
 
 __all__ = [
@@ -45,7 +48,9 @@ __all__ = [
 
 
 class AutotuneMixin:
-    def _select_autotune_m2l_candidates(self, *, pair_count: int) -> tuple[int, ...]:
+    def _select_autotune_m2l_candidates(
+        self: "FMMEngine", *, pair_count: int
+    ) -> tuple[int, ...]:
         """Return candidate chunk sizes for one pair-count regime.
 
         Pure table lookup against ``_GPU_M2L_AUTOTUNE_PAIR_BINS`` -- it times
@@ -77,7 +82,7 @@ class AutotuneMixin:
         return _GPU_M2L_AUTOTUNE_XL_CANDIDATES
 
     def _sample_and_remap_far_pairs_for_autotune(
-        self,
+        self: "FMMEngine",
         *,
         src: Array,
         tgt: Array,
@@ -181,7 +186,7 @@ class AutotuneMixin:
         )
 
     def _autotune_runtime_m2l_chunk_size(
-        self,
+        self: "FMMEngine",
         *,
         upward: TreeUpwardData,
         src: Array,

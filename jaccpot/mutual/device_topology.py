@@ -30,7 +30,6 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any, Optional, Tuple
 
-import jax
 import jax.numpy as jnp
 from jax import lax
 from jaxtyping import Array
