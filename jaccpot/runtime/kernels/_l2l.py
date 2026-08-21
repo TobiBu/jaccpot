@@ -368,7 +368,13 @@ def _propagate_solidfmm_locals_by_level(
         deltas = centers_all[parent_rep] - centers_all[safe_child]
         if use_grouped_l2l:
             translated = l2l_rot_scale_real_batch_cached_blocks(
-                parent_coeffs, deltas, l2l_bt, l2l_bf, order=order
+                # Both are bound under the same `use_grouped_l2l` test that
+                # gates this call -- E.4 bucket D.
+                parent_coeffs,
+                deltas,
+                l2l_bt,  # pyright: ignore[reportPossiblyUnboundVariable]
+                l2l_bf,  # pyright: ignore[reportPossiblyUnboundVariable]
+                order=order,
             ).astype(state_in.dtype)
         elif real_basis:
             translated = _l2l_real_batch_kernel(

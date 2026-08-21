@@ -3,6 +3,23 @@ god-class (Phase 2d mixin split). Methods are verbatim (self unchanged); the
 engine class inherits this mixin. Sibling of _fmm_impl at runtime level.
 """
 
+# pyright: reportPossiblyUnboundVariable=false
+#
+# Scoped to this ONE rule, not to type checking of this file. Every instance here
+# is the same reviewed pattern: `pot_sorted` and `potentials` are bound and read
+# under the same `return_potential` test, in an evaluation dispatch that tests it
+# in several sibling branches. All seven were checked individually and none can be
+# unbound (audit E.4 bucket D).
+#
+# Suppressed at file scope rather than per line because a trailing
+# `# pyright: ignore` does not survive `black` here -- it wraps these subscript
+# expressions and carries the comment onto the closing bracket, off the line the
+# error is reported on, so the suppression silently stops working. The per-line
+# alternatives are a `None` sentinel (which only moves the complaint to
+# `jnp.asarray`) or a temporary per use, and neither is worth reshaping a hot
+# dispatch path for. The cost of this form is real and worth naming: a genuinely
+# unbound local in this file would no longer be reported by this rule.
+
 from __future__ import annotations
 
 import warnings
@@ -483,7 +500,11 @@ class EvaluateMixin(_EngineBase):
             accelerations = accelerations.astype(output_dtype)
             derivatives = tuple(level.astype(output_dtype) for level in derivatives)
             if return_potential:
-                return accelerations, potentials.astype(output_dtype), derivatives
+                return (
+                    accelerations,
+                    potentials.astype(output_dtype),
+                    derivatives,
+                )
             return accelerations, derivatives
 
         if return_potential:

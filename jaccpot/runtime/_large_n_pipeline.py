@@ -521,6 +521,20 @@ def prepare_large_n_state(
     target_block_source_leaf_ids_padded = None
     target_block_valid_mask_padded = None
     static_target_blocks_used = False
+    # Declared here and asserted non-None after the branch chain below, rather
+    # than left to the chain to bind. Every path does bind all four -- the last
+    # `elif` is unconditional once `static_target_blocks_used` is False, and when
+    # it is True the static branch above has already bound them -- but that is a
+    # correlation between a flag and a binding, which no type checker can follow
+    # (41 "possibly unbound" reports, all false; audit E.4 bucket D).
+    #
+    # `None`, not zero-sized sentinels, on purpose: a sentinel would turn a
+    # broken invariant into a silently wrong force, which is the one failure mode
+    # this library must not have. `None` keeps it loud.
+    target_block_leaf_ids: Optional[Array] = None
+    target_block_source_leaf_ids: Optional[Array] = None
+    target_block_valid_mask: Optional[Array] = None
+    target_block_offsets: Optional[Array] = None
     fused_payload_enabled = str(
         os.environ.get(
             "JACCPOT_LARGE_N_RADIX_FAST_PAYLOAD_IN_FUSED",
@@ -716,6 +730,17 @@ def prepare_large_n_state(
         target_block_valid_mask = jnp.zeros((0, block_size), dtype=bool)
         target_block_offsets = jnp.zeros((num_leaves + 1,), dtype=INDEX_DTYPE)
         target_blocks_leaf_major = True
+    if (
+        target_block_leaf_ids is None
+        or target_block_source_leaf_ids is None
+        or target_block_valid_mask is None
+        or target_block_offsets is None
+    ):  # pragma: no cover - unreachable, see the declarations above
+        raise RuntimeError(
+            "large-N target-block arrays were not bound: the branch chain above "
+            "must bind all four on every path. This is an internal invariant, "
+            "not a configuration error."
+        )
     _record_nf("_refresh_timing_nearfield_target_blocks_seconds", substage_t0)
 
     substage_t0 = _now()
@@ -1875,16 +1900,17 @@ def evaluate_large_n_state(
     else:
         output_dtype = state_prepared.working_dtype
 
-    if return_potential:
-        accelerations_sorted, potentials_sorted = eval_out
-    else:
-        accelerations_sorted = eval_out
-
+    # The early return comes before the unpack so the two-value case is bound and
+    # used in one place; splitting them left `potentials_sorted` bound under one
+    # `return_potential` test and read under another, which reads as possibly
+    # unbound even though it never is.
     if not return_potential:
+        accelerations_sorted = eval_out
         return jnp.asarray(accelerations_sorted)[
             state_prepared.inverse_permutation
         ].astype(output_dtype)
 
+    accelerations_sorted, potentials_sorted = eval_out
     accelerations = jnp.asarray(accelerations_sorted)[
         state_prepared.inverse_permutation
     ].astype(output_dtype)
