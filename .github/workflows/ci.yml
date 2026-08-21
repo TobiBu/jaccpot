@@ -106,13 +106,15 @@ jobs:
           # Split by path so the set is a partition with no test left behind:
           # `tests/experimental` is excluded by the marker and `tests/perf` (3
           # cases) by the default addopts, and everything else lives under
-          # exactly one of these three entries or the `test-mac-runtime` job.
+          # exactly one of these entries or the `test-mac-runtime` job -- EXCEPT
+          # `tests/distributed`, which is deliberately unsharded; see below.
           # Verified by collection count, with `--ignore=tests/unit/runtime` as
           # the step applies it and `-m "not experimental"` applied throughout.
-          # Re-measured after merging main at dc96643 (Tier 2):
-          #   integration 173 + unit 682 + rest 59  = 914  (these three shards)
-          #                        + tests/unit/runtime 213 = 1127
-          # and 1127 is the whole selectable universe.
+          # Re-measured 2026-08-21:
+          #   integration 165 + mutual-static-device 14 + unit 755 + rest 34 = 968
+          #                        + tests/unit/runtime 273 = 1241
+          # plus tests/distributed 25 (NOT run here) = 1266, the whole collectable
+          # universe.
           #
           # This is the check paying for itself, not a formality. `rest` used to be
           # `tests/characterization tests/test_*.py`; the move of the 20 root-level
@@ -120,9 +122,26 @@ jobs:
           # which belonged to no shard. Unsharded on main the directory still ran,
           # so nothing was red -- it would simply have stopped being tested here.
           # Re-measure when a test directory appears or moves. The previous figures
-          # here (173 / 641 / 53 / 202 = 1069) were measured before that merge and
-          # are what the re-measurement above replaces -- the partition was still
-          # exact, only the totals had drifted.
+          # (173 / 682 / 59 / 213 = 1127, and before that 173 / 641 / 53 / 202 =
+          # 1069) are what the re-measurement above replaces -- the partition was
+          # exact each time, only the totals had drifted.
+          #
+          # WHY `tests/distributed` IS NOT IN ANY SHARD. It cannot run here. Every
+          # file in it skips on `device_count() < 2` and GitHub's runners have no
+          # GPU, so all 25 cases collect and skip: the shard paid collection and
+          # import cost to assert nothing. Worse, it read as covered -- audit row
+          # F34 recorded `distributed/fmm.py` at 19% for exactly this reason, and
+          # when the tier was finally executed on two cards (2026-08-21) it failed
+          # 5 of 25, four of them one real cross-domain far-field defect that had
+          # been latent for as long as the directory had been "in CI".
+          #
+          # Removing it is therefore honest, not a reduction in coverage: there was
+          # none. Do not add it back to buy a green tick. It is run deliberately,
+          # on two cards, per `docs/refactor_audit_2026-08.md` row F34; and the
+          # parts of it that need no collectives have been lifted into
+          # `tests/integration/test_distributed_cross_domain_far_extents.py`, which
+          # DOES run here on one device -- that is where to put anything new that
+          # can be made single-device, rather than here.
           # `integration` MINUS the new static-shape/device module, which gets its
           # own shard below. This shard's composition is otherwise exactly main's,
           # deliberately: it is memory-bound (see the note above), and bisecting
@@ -144,7 +163,7 @@ jobs:
             paths: tests/unit
             extra: ""
           - shard: rest
-            paths: tests/characterization tests/distributed
+            paths: tests/characterization
             extra: ""
     env:
       JAX_ENABLE_X64: "1"
