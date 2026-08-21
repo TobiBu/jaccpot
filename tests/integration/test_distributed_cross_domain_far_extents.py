@@ -80,11 +80,18 @@ _SOFTENING = _CONFIG.softening
 _PER = 64
 
 # Same 1% bar the driver tests hold the total field to, applied to the cross far term
-# in isolation. That is strictly harder: here the term is not diluted by the local
-# field it is 1% of, so an error the aggregate test sees as 1.8e-2 shows up at full
-# size. Measured with separated domains: 1.4e-3, an order 3 expansion's truncation
-# error at the separations the MAC accepts. The float32 M2L floor is ~1e-6 at leaf 8,
-# four orders below this bar, so this threshold is testing the scheme and not precision.
+# in isolation. That is strictly harder, because the term is not diluted here by the
+# local field or by the near pairs: MEASURED 0.001535 with separated domains (47
+# accepted far pairs) against 1.042014 with interpenetrating ones (12 pairs). The
+# interpenetrating far term is off by more than 100% of its own reference -- it is not
+# an inaccurate approximation of the field, it is uncorrelated with it -- while the
+# driver's aggregate sees the same defect as a comparatively mild 1.8e-2 once the local
+# field dilutes it.
+#
+# 0.001535 is an order 3 expansion's truncation error at the separations the MAC
+# accepts, so the bar sits ~6.5x above the passing case and ~680x below the failing
+# one: nothing about it is finely tuned. The float32 M2L floor is ~1e-6 at leaf 8, four
+# orders below, so this threshold tests the scheme and not precision.
 _CROSS_FAR_RTOL = 1e-2
 
 _INTERPENETRATING_XFAIL = pytest.mark.xfail(
@@ -100,7 +107,9 @@ _INTERPENETRATING_XFAIL = pytest.mark.xfail(
         "separated-cluster IC) the MAC accepts pairs whose true separation is smaller "
         "than the source's own radius and the M2L is evaluated inside the region it "
         "expands -- worst accepted pair (r_src + r_tgt)/d = 1.193 against the 0.104 "
-        "the MAC computed, an 11x understatement. The fix is for CoarseFrontier to "
+        "the MAC computed, an 11x understatement, and the resulting far term is off by "
+        "104% of its own direct sum (1.042014 against 0.001535 when the same code runs "
+        "on separated domains). The fix is for CoarseFrontier to "
         "carry each leaf's radius and build_remote_coarse_tree to inflate the coarse "
         "extents by it; that takes the cross-field error from 6.4e-1 to 8e-6 at "
         "theta_cross=1.0 while still accepting 10 far pairs. Remove this marker once "
@@ -466,6 +475,11 @@ def test_accepted_cross_far_pairs_are_well_separated(cross_views, interpenetrati
                 distance,
             )
 
+    print(
+        f"worst accepted far pair (r_src + r_tgt)/d = {worst_ratio:.3f} over "
+        f"{view.far_targets.size} pairs "
+        f"({'interpenetrating' if interpenetrating else 'separated'} domains)"
+    )
     assert worst_ratio < 1.0, (
         f"cross far pair overlaps its own source region: worst "
         f"(r_src + r_tgt)/d = {worst_ratio:.3f} for (target node, coarse source, "
@@ -487,6 +501,11 @@ def test_cross_far_field_matches_its_direct_sum(cross_views, interpenetrating):
     got = view.far_field()
     reference = view.far_field_reference()
     error = float(np.linalg.norm(got - reference) / (np.linalg.norm(reference) + 1e-30))
+    print(
+        f"cross far aggL2 vs its own direct sum = {error:.6f} over "
+        f"{view.far_targets.size} accepted far pairs "
+        f"({'interpenetrating' if interpenetrating else 'separated'} domains)"
+    )
     assert error < _CROSS_FAR_RTOL, (
         f"cross far field aggL2 {error:.6f} exceeds {_CROSS_FAR_RTOL:g} over "
         f"{view.far_targets.size} accepted far pairs "
