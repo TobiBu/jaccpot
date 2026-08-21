@@ -53,12 +53,17 @@ from .fmm_constants import (
 from .fmm_state import _RuntimeExecutionOverrides
 
 if TYPE_CHECKING:  # pragma: no cover - annotations only, no runtime import
-    # The mixins annotate `self` as the engine they are mixed into, which lives in
-    # `_fmm_impl` and imports *them* -- so this must stay under TYPE_CHECKING or it
-    # would form the cycle ARCHITECTURE §8 forbids. Before this block the names were
-    # dangling: `typing.get_type_hints` raised NameError on every mixin method, so the
-    # annotations documented an intent no tool could check.
-    from ._fmm_impl import PreparedStateLike
+    # The engine lives in `_fmm_impl`, which imports *these mixins* -- so this import
+    # must stay under TYPE_CHECKING or it would form the cycle ARCHITECTURE §8
+    # forbids. Inheriting `_EngineBase` makes each mixin *be* the engine under a type
+    # checker, so every `self.<engine attribute>` resolves; at runtime the alias is
+    # `object`, leaving the MRO exactly as it was. The audit's E.2 records why this
+    # beats annotating `self`, and what it does not buy at runtime.
+    from ._fmm_impl import FMMEngine, PreparedStateLike
+
+    _EngineBase = FMMEngine
+else:  # pragma: no cover - annotations only, never an import at runtime
+    _EngineBase = object
 
 __all__ = [
     "OverridesMixin",
@@ -197,7 +202,7 @@ def warn_full_traversal_config_replacement(
     )
 
 
-class OverridesMixin:
+class OverridesMixin(_EngineBase):
     def _apply_traversal_field_overrides(
         self,
         traversal_config: Optional[DualTreeTraversalConfig],

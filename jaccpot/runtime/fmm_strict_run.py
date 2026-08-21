@@ -33,21 +33,26 @@ from .fmm_state import (
 from .kernels.core import _empty_interaction_storage_for_tree, _FarPairCOO
 
 if TYPE_CHECKING:  # pragma: no cover - annotations only, no runtime import
-    # The mixins annotate `self` as the engine they are mixed into, which lives in
-    # `_fmm_impl` and imports *them* -- so this must stay under TYPE_CHECKING or it
-    # would form the cycle ARCHITECTURE §8 forbids. Before this block the names were
-    # dangling: `typing.get_type_hints` raised NameError on every mixin method, so the
-    # annotations documented an intent no tool could check.
+    # The engine lives in `_fmm_impl`, which imports *these mixins* -- so this import
+    # must stay under TYPE_CHECKING or it would form the cycle ARCHITECTURE §8
+    # forbids. Inheriting `_EngineBase` makes each mixin *be* the engine under a type
+    # checker, so every `self.<engine attribute>` resolves; at runtime the alias is
+    # `object`, leaving the MRO exactly as it was. The audit's E.2 records why this
+    # beats annotating `self`, and what it does not buy at runtime.
     from ._fmm_impl import FMMEngine, PreparedStateLike
+
+    _EngineBase = FMMEngine
+else:  # pragma: no cover - annotations only, never an import at runtime
+    _EngineBase = object
 
 __all__ = [
     "StrictRunMixin",
 ]
 
 
-class StrictRunMixin:
+class StrictRunMixin(_EngineBase):
     def refresh_prepared_state(
-        self: "FMMEngine",
+        self,
         prepared_state: PreparedStateLike,
         positions: Array,
         masses: Array,
@@ -249,7 +254,7 @@ class StrictRunMixin:
         return next_state
 
     def strict_prepare_refresh_and_evaluate(
-        self: "FMMEngine",
+        self,
         prepared_state: Optional[PreparedStateLike],
         positions: Array,
         masses: Array,
@@ -408,7 +413,7 @@ class StrictRunMixin:
         return next_state, acc
 
     def strict_run_segmented(
-        self: "FMMEngine",
+        self,
         *,
         state: Any,
         masses: Array,
@@ -545,7 +550,7 @@ class StrictRunMixin:
         return state_curr, prepared_curr, history
 
     def strict_run_v2(
-        self: "FMMEngine",
+        self,
         *,
         state: Array,
         masses: Array,
@@ -1047,7 +1052,7 @@ class StrictRunMixin:
         return state_curr, prepared_out, history_out
 
     def strict_fused_prepared_eval_fn(
-        self: "FMMEngine",
+        self,
         *,
         positions: Array,
         masses: Array,
@@ -1145,7 +1150,7 @@ class StrictRunMixin:
         return prepared, _eval
 
     def _refresh_large_n_same_topology(
-        self: "FMMEngine",
+        self,
         prepared_state: LargeNPreparedState,
         positions: Array,
         masses: Array,
@@ -1706,7 +1711,7 @@ class StrictRunMixin:
         return refreshed_state
 
     def _large_n_neighbor_list_matches(
-        self: "FMMEngine",
+        self,
         previous: NodeNeighborList,
         current: NodeNeighborList,
     ) -> bool:
@@ -1772,7 +1777,7 @@ class StrictRunMixin:
             return False
 
     def update_multipoles_only(
-        self: "FMMEngine",
+        self,
         prepared_state: PreparedStateLike,
         positions: Array,
         masses: Array,
@@ -1845,7 +1850,7 @@ class StrictRunMixin:
         return refreshed
 
     def rebuild_topology_in_place(
-        self: "FMMEngine",
+        self,
         prepared_state: PreparedStateLike,
         positions: Array,
         masses: Array,

@@ -14,18 +14,46 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 PACKAGE_ROOT = PROJECT_ROOT / "jaccpot"
 
 
-def _is_fully_annotated(node: ast.FunctionDef | ast.AsyncFunctionDef) -> bool:
-    args = node.args
-    all_args = args.posonlyargs + args.args + args.kwonlyargs
+def _annotation_status(node: ast.FunctionDef | ast.AsyncFunctionDef):
+    """Return ``(args_ok, return_ok)`` for one function definition.
 
-    args_ok = all(arg.annotation is not None for arg in all_args)
+    A leading ``self`` or ``cls`` is exempt. Python supplies it implicitly, so
+    beartype has never validated it -- and for the ``runtime/`` mixins annotating
+    it is not merely redundant but *wrong*: ``self: "FMMEngine"`` declares a
+    subtype of the mixin as its own ``self``, which a type checker rejects (119
+    errors, measured; see the audit's E.2). Those mixins reach the engine's
+    attributes by inheriting ``_EngineBase`` instead, which is guarded by
+    ``test_mixin_engine_base_guard.py``.
+
+    This exemption is not a relaxation of what the file's docstring asks for.
+    The stated purpose is that "jaxtyping+beartype can validate contracts at
+    runtime", and an annotation on ``self`` bought none of that: it was an
+    unresolvable forward reference under ``TYPE_CHECKING``, which beartype skips.
+    The requirement was inert for its own purpose before it was removed.
+
+    Parameters
+    ----------
+    node
+        The function definition to inspect.
+
+    Returns
+    -------
+    tuple of (bool, bool)
+        Whether every non-implicit parameter is annotated, and whether the
+        return is annotated.
+    """
+    args = node.args
+    positional = args.posonlyargs + args.args
+    if positional and positional[0].arg in ("self", "cls"):
+        positional = positional[1:]
+
+    args_ok = all(arg.annotation is not None for arg in positional + args.kwonlyargs)
     if args.vararg is not None:
         args_ok = args_ok and args.vararg.annotation is not None
     if args.kwarg is not None:
         args_ok = args_ok and args.kwarg.annotation is not None
 
-    return_ok = node.returns is not None
-    return args_ok and return_ok
+    return args_ok, node.returns is not None
 
 
 def _iter_missing_annotations() -> list[tuple[str, int, str, bool, bool]]:
@@ -43,16 +71,8 @@ def _iter_missing_annotations() -> list[tuple[str, int, str, bool, bool]]:
             if node.name.startswith("_"):
                 continue
 
-            args = node.args
-            all_args = args.posonlyargs + args.args + args.kwonlyargs
-            args_ok = all(arg.annotation is not None for arg in all_args)
-            if args.vararg is not None:
-                args_ok = args_ok and args.vararg.annotation is not None
-            if args.kwarg is not None:
-                args_ok = args_ok and args.kwarg.annotation is not None
-            ret_ok = node.returns is not None
-
-            if not _is_fully_annotated(node):
+            args_ok, ret_ok = _annotation_status(node)
+            if not (args_ok and ret_ok):
                 missing.append(
                     (
                         str(path.relative_to(PROJECT_ROOT)),
