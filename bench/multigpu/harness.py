@@ -145,7 +145,6 @@ def measure_point(
     n: int,
     order: int = 3,
     theta: float = 0.4,
-    theta_cross: Optional[float] = None,
     leaf_size: int = 128,
     basis: str = "real",
     mac_type: str = "dehnen",
@@ -161,6 +160,8 @@ def measure_point(
     max_interactions_per_node: Optional[int] = None,
     max_neighbors_per_leaf: Optional[int] = None,
     process_block: Optional[int] = None,
+    l2l_num_levels: Optional[int] = None,
+    accuracy_targets: int = 0,
 ) -> dict[str, Any]:
     """Measure one ``(ndev, n)`` point in this process.
 
@@ -177,10 +178,6 @@ def measure_point(
         Multipole order.
     theta : float
         Local self MAC opening angle.
-    theta_cross : float, optional
-        Cross-domain MAC. Its default (0.1) is 4x stricter than ``theta`` and
-        leaves the cross-domain far field completely empty, so every
-        cross-domain interaction is direct-summed.
     leaf_size : int
         Leaf occupancy.
     basis : str
@@ -214,6 +211,22 @@ def measure_point(
         Starting far-list capacity per node.
     max_neighbors_per_leaf : int, optional
         Starting near-list capacity per leaf.
+    accuracy_targets : int
+        When > 0, compare the force against a direct-sum reference on this many
+        randomly chosen target particles. The reference sums over **all** sources,
+        so it is exact; only the target set is subsampled, which is what makes it
+        affordable. 0 disables it.
+
+        This exists because a speed measurement is worthless for any knob that
+        trades accuracy -- notably ``theta``. Without it a
+        criterion sweep can only report that a looser criterion is faster, which
+        is true by construction and says nothing.
+    l2l_num_levels : int, optional
+        Static level bound for the L2L cascade. The default derives
+        ``num_internal - 1`` from a shape because the tree depth is not knowable
+        inside ``shard_map``; a balanced tree is only ~log2(num_leaves) deep, so
+        the default can be orders of magnitude loose and the extra levels cost
+        time while contributing exactly zero.
     process_block : int, optional
         Dual-tree walk process block. Its default (64) coincides exactly with the
         measured ceiling of 64 leaves per device, which is why it is exposed.
@@ -255,7 +268,6 @@ def measure_point(
         basis=basis,
         mac_type=mac_type,
         nearfield_backend=nearfield_backend,
-        **({} if theta_cross is None else {"theta_cross": float(theta_cross)}),
     )
     overrides = {
         k: int(v)
@@ -284,7 +296,14 @@ def measure_point(
     # per call would report compile time as force time.
     attempt = 0
     while True:
-        evaluate = make_force_evaluator(config, ndev, part["cap"], mesh, jit=True)
+        evaluate = make_force_evaluator(
+            config,
+            ndev,
+            part["cap"],
+            mesh,
+            jit=True,
+            l2l_num_levels=l2l_num_levels,
+        )
         accel, _gid, diag = evaluate(*args)
         jax.block_until_ready(accel)
         diag_np = np.asarray(diag)
@@ -305,6 +324,46 @@ def measure_point(
         times.append(time.perf_counter() - t0)
     times.sort()
     median = times[len(times) // 2]
+
+    accuracy: dict[str, Any] = {}
+    if int(accuracy_targets) > 0:
+        accel_np = np.asarray(evaluate(*args)[0])
+        gid_np = np.asarray(args[2]).reshape(-1)
+        valid_rows = np.flatnonzero(gid_np >= 0)
+        k = min(int(accuracy_targets), valid_rows.size)
+        pick = np.random.default_rng(seed).choice(valid_rows, size=k, replace=False)
+        tgt_ids = gid_np[pick].astype(np.int64)
+
+        src_pos = jnp.asarray(positions)
+        src_mass = jnp.asarray(masses)
+        soft_sq = jnp.asarray(config.softening**2, dtype=src_pos.dtype)
+        g_const = jnp.asarray(config.G, dtype=src_pos.dtype)
+
+        def direct_block(tid: Any) -> Any:
+            """Exact acceleration on the targets in ``tid``, summing all sources."""
+            tp = src_pos[tid]
+            delta = src_pos[None, :, :] - tp[:, None, :]
+            dsq = jnp.sum(delta * delta, axis=2) + soft_sq
+            # self-interaction excluded by index, not by distance
+            same = jnp.arange(src_pos.shape[0])[None, :] == tid[:, None]
+            inv = jnp.where(same, 0.0, dsq ** (-1.5))
+            return g_const * jnp.einsum("ij,j,ijk->ik", inv, src_mass, delta)
+
+        # chunk the targets so the [k, N, 3] intermediate never materialises whole
+        block = 256
+        ref_parts = [
+            np.asarray(direct_block(jnp.asarray(tgt_ids[i : i + block])))
+            for i in range(0, k, block)
+        ]
+        ref = np.concatenate(ref_parts, axis=0)
+        got = accel_np[pick]
+        denom = float(np.linalg.norm(ref))
+        accuracy = {
+            "targets": int(k),
+            "rel_l2_vs_direct": float(np.linalg.norm(got - ref) / (denom + 1e-300)),
+            "max_abs_err": float(np.abs(got - ref).max()),
+            "ref_rms": float(np.sqrt(np.mean(np.sum(ref * ref, axis=1)))),
+        }
 
     per_device_work = {f: counters[f] for f in WORK_FIELDS if f in counters}
     total_work = [sum(vals) for vals in zip(*per_device_work.values())] or [0] * ndev
@@ -330,6 +389,7 @@ def measure_point(
             if total_work and sum(total_work) > 0
             else None
         ),
+        "accuracy": accuracy or None,
         "overflowed": overflowed,
         # A truncated force is not a slow force. Drop these points.
         "valid": not overflowed,
@@ -340,7 +400,6 @@ def measure_point(
             "basis": basis,
             "mac_type": mac_type,
             "nearfield_backend": nearfield_backend,
-            "theta_cross": float(config.theta_cross),
             # The caps the final (possibly retried) evaluation actually ran with.
             # A per-device load means nothing without these and leaf_size.
             "max_pair_queue": int(config.max_pair_queue),
@@ -348,6 +407,7 @@ def measure_point(
             "max_interactions_per_node": int(config.max_interactions_per_node),
             "max_neighbors_per_leaf": int(config.max_neighbors_per_leaf),
             "process_block": int(config.process_block),
+            "l2l_num_levels": l2l_num_levels,
         },
     }
 
@@ -423,7 +483,6 @@ def _parse_args() -> argparse.Namespace:
     p.add_argument("--n", type=int, required=True)
     p.add_argument("--order", type=int, default=3)
     p.add_argument("--theta", type=float, default=0.4)
-    p.add_argument("--theta-cross", type=float, default=None)
     p.add_argument("--leaf-size", type=int, default=128)
     p.add_argument("--basis", default="real")
     p.add_argument("--mac-type", default="dehnen")
@@ -437,6 +496,17 @@ def _parse_args() -> argparse.Namespace:
     p.add_argument("--max-interactions-per-node", type=int, default=None)
     p.add_argument("--max-neighbors-per-leaf", type=int, default=None)
     p.add_argument("--process-block", type=int, default=None)
+    p.add_argument("--l2l-num-levels", type=int, default=None)
+    p.add_argument(
+        "--accuracy-targets",
+        type=int,
+        default=0,
+        help=(
+            "compare against a direct sum on this many sampled targets (0 = off). "
+            "Required for any theta sweep: speed alone cannot judge a "
+            "criterion that trades accuracy"
+        ),
+    )
     p.add_argument(
         "--emit-json",
         action="store_true",
@@ -463,7 +533,6 @@ def main() -> int:
         n=int(args.n),
         order=int(args.order),
         theta=float(args.theta),
-        theta_cross=args.theta_cross,
         leaf_size=int(args.leaf_size),
         basis=args.basis,
         mac_type=args.mac_type,
@@ -478,6 +547,8 @@ def main() -> int:
         max_interactions_per_node=args.max_interactions_per_node,
         max_neighbors_per_leaf=args.max_neighbors_per_leaf,
         process_block=args.process_block,
+        l2l_num_levels=args.l2l_num_levels,
+        accuracy_targets=int(args.accuracy_targets),
     )
     record["meta"] = runmeta.run_meta({"argv": sys.argv[1:]})
     if args.emit_json:
