@@ -32,7 +32,12 @@ the diagnosis and ``bench/diagnose_cross_domain_far.py`` to reproduce it.
 THIS FILE NEEDS A YGGDRAX WITH #47. It reads ``frontier.radius``, which that PR adds,
 and passes it to ``compute_tree_geometry`` exactly as the fixed builder does -- so the
 replay tracks production rather than freezing the old behaviour. Against an older
-yggdrax it fails at import/attribute level, which is the intended loud failure.
+yggdrax the whole module skips, with the reason naming the PR: jaccpot's dependency
+range (``yggdrax>=0.0.1,<0.1.0``) cannot express "has this field", because yggdrax does
+not bump its version per change, so a skip is the only way to say it. **Delete the guard
+once that is expressible** -- either yggdrax releases a version carrying the field and
+jaccpot raises its floor to it, or #47 is old enough that the guard can never fire. A
+skip that outlives its reason is how a test stops being a test.
 """
 
 from __future__ import annotations
@@ -41,6 +46,18 @@ import numpy as np
 import pytest
 
 pytest.importorskip("yggdrax")
+
+from yggdrax.distributed.let import CoarseFrontier  # noqa: E402
+
+if "radius" not in getattr(CoarseFrontier, "__dataclass_fields__", {}):
+    pytest.skip(
+        "needs a yggdrax whose CoarseFrontier carries the per-leaf radius "
+        "(TobiBu/yggdrax#47). Without it the coarse tree's MAC extents bound the "
+        "frontier's centres of mass rather than the particles behind them, which "
+        "is the defect this file exists to pin -- see "
+        "docs/distributed_cross_domain_far_diagnosis.md.",
+        allow_module_level=True,
+    )
 
 import jax  # noqa: E402
 import jax.numpy as jnp  # noqa: E402
