@@ -145,6 +145,7 @@ def measure_point(
     n: int,
     order: int = 3,
     theta: float = 0.4,
+    theta_cross: Optional[float] = None,
     leaf_size: int = 128,
     basis: str = "real",
     mac_type: str = "dehnen",
@@ -176,6 +177,10 @@ def measure_point(
         Multipole order.
     theta : float
         Local self MAC opening angle.
+    theta_cross : float, optional
+        Cross-domain MAC. Its default (0.1) is 4x stricter than ``theta`` and
+        leaves the cross-domain far field completely empty, so every
+        cross-domain interaction is direct-summed.
     leaf_size : int
         Leaf occupancy.
     basis : str
@@ -250,6 +255,7 @@ def measure_point(
         basis=basis,
         mac_type=mac_type,
         nearfield_backend=nearfield_backend,
+        **({} if theta_cross is None else {"theta_cross": float(theta_cross)}),
     )
     overrides = {
         k: int(v)
@@ -334,6 +340,7 @@ def measure_point(
             "basis": basis,
             "mac_type": mac_type,
             "nearfield_backend": nearfield_backend,
+            "theta_cross": float(config.theta_cross),
             # The caps the final (possibly retried) evaluation actually ran with.
             # A per-device load means nothing without these and leaf_size.
             "max_pair_queue": int(config.max_pair_queue),
@@ -416,6 +423,7 @@ def _parse_args() -> argparse.Namespace:
     p.add_argument("--n", type=int, required=True)
     p.add_argument("--order", type=int, default=3)
     p.add_argument("--theta", type=float, default=0.4)
+    p.add_argument("--theta-cross", type=float, default=None)
     p.add_argument("--leaf-size", type=int, default=128)
     p.add_argument("--basis", default="real")
     p.add_argument("--mac-type", default="dehnen")
@@ -455,6 +463,7 @@ def main() -> int:
         n=int(args.n),
         order=int(args.order),
         theta=float(args.theta),
+        theta_cross=args.theta_cross,
         leaf_size=int(args.leaf_size),
         basis=args.basis,
         mac_type=args.mac_type,
