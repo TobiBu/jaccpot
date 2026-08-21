@@ -93,9 +93,12 @@ behind, which I had called "documentation only". They were not. Fixing them by *
 (`self: "FMMEngine"` declares a subtype of the mixin as its own `self`, 119 errors), so the
 mixins now inherit a `TYPE_CHECKING`-only `_EngineBase` alias instead: **705 → 408**, both
 categories at zero, `FMMEngine.__mro__` unchanged. Of the residual 408, **98 are a local
-editable-install artefact** (`yggdrax`), leaving ~310 real findings — untriaged, and the
-natural successor to this item. `pyright` is declared in `[dev]` but is deliberately **not**
-a gate: a gate at 408 needs a baseline, and 2.5 retired baselines for cause. See E.2.
+editable-install artefact** (`yggdrax`). `pyright` is declared in `[dev]` but is deliberately
+**not** a gate: a gate at 408 needs a baseline, and 2.5 retired baselines for cause.
+See E.2 — and **E.4, which triages the 306 that remain**: twelve buckets by cause, of which
+one file holds 22% and one pattern holds 16%, no defect found in the ~35 sites read
+individually, and 69 deliberately left unreviewed because that is where a real one would be.
+E.4 also records that #188 introduced 10 errors of its own, and why I did not see them.
 
 ---
 
@@ -1790,6 +1793,18 @@ explicit `object` base changes nothing. All 109 `self: "FMMEngine"` annotations 
 `runtime/` are gone; the 9 in `_fmm_impl.py` stay, where the class *is* `FMMEngine` and the
 annotation is therefore valid.
 
+**Corrected in E.4: "both categories at zero" was not the whole result.** The change also
+*introduced* 10 errors — `Class cannot derive from itself`, one per mixin base of
+`FMMEngine`, because each mixin now statically derives from the class that derives from it.
+The net is still 277 removed for 10 added, but the table above reports only the two
+categories the change was aimed at. The cause of the miss is worth more than the miss: the
+pattern was validated on one mixin file *in isolation*, where pyright cannot see
+`_fmm_impl`'s declaration and therefore cannot see the cycle, and the package-wide run was
+then checked for the aggregate and for those two categories only. Ten new errors are
+invisible inside a 297-error drop. Checking for *newly introduced* categories, not just
+movement in the targeted ones, is the step that was missing. See E.4 bucket A for why a
+245-member `Protocol` is the wrong remedy.
+
 Two caveats on the residual 408, so it is not read as a to-do list of 408 real defects:
 
 * **98 are `yggdrax` `reportMissingImports`, and they are an artefact of this machine,** not of
@@ -1802,6 +1817,125 @@ Two caveats on the residual 408, so it is not read as a to-do list of 408 real d
   a hook would need a baseline, which is exactly what 2.5 retired and told us not to
   reintroduce. Triaging the ~310 into fix / annotate / configure is its own work, and it is
   the natural successor to this item.
+
+### E.4 The 306 pyright errors, triaged
+
+E.2 left "~310 real findings, untriaged" as its successor. This is that triage,
+measured 2026-08-21 on `a253aaa`. `pyright jaccpot/` reports **402**; 96 are the
+`yggdrax` editable-install artefact E.2 describes, leaving **306**.
+
+Twelve buckets by *cause*, not by rule -- the rule names scatter one cause across
+four categories and hide that two files carry a third of the total:
+
+| | bucket | n | % | verified how |
+|---|---|---|---|---|
+| A | `_EngineBase` cycle -- **self-inflicted, see below** | 10 | 3.3% | read all 10 |
+| B | `jax.core.Tracer` stub mismatch | 20 | 6.5% | resolved at runtime, absent from `jax.__all__` |
+| C | `Optional` not narrowed | 86 | 28.1% | 12 sites read individually |
+| D | flag-gated binding | 48 | 15.7% | **all 48 proven false** |
+| E | parameter annotated `object` | 31 | 10.1% | read the pattern |
+| F | union return needs `@overload` | 10 | 3.3% | read all 10 |
+| G | `Protocol` body missing `...` | 4 | 1.3% | read all 4 |
+| H | shadowed local closure | 5 | 1.6% | read all 5 |
+| I | jaxtyping dynamic axis | 6 | 2.0% | checker limitation |
+| J | deliberate `# noqa: F821` exemption | 2 | 0.7% | E.2 already documents them |
+| K | `str` where a `Literal` is declared | 15 | 4.9% | read the pattern |
+| L | **residual, unreviewed** | 69 | 22.5% | **not read** |
+
+Where it lives -- one file is 22% of the total, and it is the same file F27 flags
+as the untested large-N reverse path:
+
+| `runtime/_large_n_pipeline.py` | 66 |
+| `runtime/fmm_prepare.py` | 24 |
+| `nornax_adapter.py` | 20 |
+| `runtime/fmm_evaluate.py` | 16 |
+| `pallas/nearfield_mutual.py` | 15 |
+| `runtime/_fmm_impl.py` | 14 |
+| `runtime/kernels/_evaluate.py` | 14 |
+| `distributed/fmm.py` | 13 |
+
+**The headline is not a bug list.** Every one of the ~35 sites read individually
+was a false positive. Bucket D is the cleanest case and worth stating in full,
+because it is 16% of the total from a single pattern: four `target_block_*`
+variables in `_large_n_pipeline.py` are bound in each of four branches, and the
+chain's last `elif` (line 712) is unconditional once the `static_target_blocks_used`
+flag is false -- so they are always bound. Pyright cannot correlate a boolean flag
+with a binding, and neither can any other checker. The 41 errors on those four
+names, plus `potentials_sorted` (guarded by `return_potential` two lines above),
+are all this one shape.
+
+So the value of pyright here is **not** that it found defects. It is that at 306
+errors it cannot tell us when it does. Every bucket below is priced on how much
+noise it removes per unit of risk, and the honest reason to do any of it is to get
+the floor low enough that a new error means something.
+
+**Bucket A is mine, and it is a verification failure worth recording.** The
+`_EngineBase` change in #188 introduced 10 new errors -- `Class cannot derive from
+itself`, one per mixin base of `FMMEngine`, because each mixin now statically
+derives from the class that derives from it. I missed them because I validated the
+pattern on *one file in isolation*, where pyright cannot see `_fmm_impl`'s
+declaration, and then compared only the aggregate and the two categories I was
+targeting. Ten new errors are invisible inside a 297-error drop. The net is still
+strongly positive -- 277 removed for 10 added -- but "both categories at zero" was
+not the whole result, and checking for *newly introduced* categories is the step
+that was missing.
+
+The textbook fix is a `Protocol` in a leaf module instead of the engine itself,
+which breaks the cycle. Measured before recommending it: the mixins reference
+**245 distinct `self.<member>` names they do not themselves define, across 702
+references**. That is a 245-member Protocol to keep in lockstep with `FMMEngine`,
+i.e. a new drift surface of exactly the kind A.11 was written to close. Ten
+suppressed errors at one site is the better trade, and a per-line
+`# pyright: ignore[reportGeneralTypeIssues]` with a comment naming the reason is
+consistent with how the two `# noqa: F821` exemptions in bucket J are handled --
+a targeted, explained suppression, which is a different animal from the generated
+baseline item 2.5 retired.
+
+**Suggested order, by noise removed per unit of risk.** Nothing here is started;
+each is its own PR.
+
+1. **D (48), one file, four hoisted defaults.** Bind the four `target_block_*`
+   sentinels before the branch chain. Behaviour-preserving because every path
+   overwrites them. The one thing to measure first: it adds four `jnp.zeros`
+   allocations to a prepare path on every call, and "negligible" needs measuring
+   rather than assuming in this repo.
+2. **B (20), one alias module.** A `jaccpot/_jax_compat.py` exporting `Tracer`
+   with a single ignore turns 20 errors into ~1 *and* centralises a real
+   forward-compatibility risk: `jax.core` is private, 22 call sites across 13
+   files depend on it, and the JAX ceiling is load-bearing per `pyproject.toml`.
+   This is the one bucket with value beyond noise reduction.
+3. **E (31), annotate the real type.** These are parameters typed `object` that
+   then have engine attributes read off them -- `_large_n_pipeline.py` alone has
+   8, all `fmm: object`. Unlike `self` on a mixin, `fmm: "FMMEngine"` is valid
+   here, so this is the annotation E.2's convention was actually right about.
+4. **A (10), suppress at the site** with the reasoning above.
+5. **C (86), three sub-patterns.** The 9 `pl.BlockSpec`/`pl.pallas_call` are the
+   optional-import idiom (`pl = None` on `ImportError`) and are fixed properly by
+   importing the real module under `TYPE_CHECKING`; the closure captures
+   (`timing_callback`, `step_callback`) by rebinding inside the guard; the
+   correlated guards (`counts_np` vs `max_neighbors == 0` in
+   `_nearfield_fastlane.py:299`) by naming the invariant in the early return.
+   Largest bucket, most heterogeneous, so worth splitting.
+6. **G (4), add `...`** to the `BasisInterface` Protocol bodies.
+7. **K (15)** and **F (10)** are real annotation debt: a declared `Literal`
+   receiving a bare `str`, and functions returning `Array | Tuple[Array, ...]`
+   depending on a bool flag, which needs `@overload` before any caller can be
+   checked.
+8. **H (5)** is four same-named `_chunk_body` closures plus one `_edge_body` in
+   `nearfield/near_field.py`. Correct as written -- each is used by the `lax.scan`
+   immediately below it -- so this is readability in a numerics-critical file,
+   which puts it last rather than first.
+9. **I (6)** and **J (2)** are not fixable and should not be. They are a
+   jaxtyping dynamic-axis form pyright cannot parse, and two documented
+   exemptions.
+
+**L (69) is the one that matters and is not done.** It is `reportArgumentType`
+(20), `reportReturnType` (19), `reportAssignmentType` (11),
+`reportAttributeAccessIssue` (11) and `reportCallIssue` (7), concentrated in
+`nornax_adapter.py` (11) and `downward/local_expansions.py` (10). These have no
+common shape, which is exactly why a real defect would be here rather than in the
+mechanical buckets -- and why "306 errors, no bugs found" must be read as *not
+yet read*, not as *clean*.
 
 ### E.3 Recommended annotation policy, if you want one
 
