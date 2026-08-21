@@ -115,6 +115,69 @@ works is the op listing with **call counts** -- a slow stage shows up as time, a
 dispatch-bound path shows up as a count. `bench/multigpu/stage_profile.py` reports
 both and does not spread the unattributed remainder over the stages.
 
+### RETRACTED (2026-08-21, same day): the sort is NOT the floor
+
+**Measured, under `shard_map` at the same device count and per-device sizes:**
+
+| per-device N | `argsort` only | full `Tree.from_particles` |
+| --- | --- | --- |
+| 1 024 | 2.90 ms | 2.75 ms |
+| 16 384 | 2.55 ms | **0.95 ms** |
+
+The tree build costs **1-3 ms**, not the 40-90 ms a floor of ~50-97 ms would need,
+and it does not grow with particle count. The section below is wrong and is kept
+only as a record of how it went wrong.
+
+**Two lessons, both expensive.**
+
+1. **Op count is a bad proxy for time.** The sort lambda is ~11 600 HLO ops, 40% of
+   the module, and costs 1-3 ms. Never rank optimisation targets by op count.
+2. **The "quantitative confirmation" was a coincidence.** The log^2(N) prediction
+   (1.96x) matching the measurement (1.94x) was presented as a passing check. It
+   was two points agreeing by chance. Two points are not a test.
+
+### What the measurements actually support
+
+| | per device per evaluation |
+| --- | --- |
+| near-field Pallas kernel | 16.9 ms (**1** launch) |
+| collectives (AllGather + ragged + barrier) | ~7.5 ms (~13 launches) |
+| tree build incl. Morton `argsort` | **1-3 ms** |
+| ~15 496 remaining small kernels @ ~2.5 us | ~39 ms |
+| total device time | ~75 ms |
+| total launches | 15 510 |
+
+About a third of the evaluation is real work and two thirds is thousands of small
+kernels. The HLO shows those coming from per-iteration launches inside the
+pipeline's `while` loops -- `jc_geometry/while/body`, `jc_upward_local/while/body`
+(M2M), `jc_coarse_m2m/while/body`, and the L2L cascade -- which run on **every**
+call irrespective of topology.
+
+### Consequence: the prepare/evaluate split is NOT a performance fix
+
+This is a direct answer to the plan's own top item, and it is negative. Hoisting
+topology removes the tree build, which is ~2 ms of ~75 ms. It cannot recover the
+floor, because the floor is in the numeric pipeline's loop structure, not in the
+topology.
+
+The split may still be worth doing for other reasons -- a stable state object
+avoids recompiles when shapes change, it matches the single-device API, and it is
+the natural home for a right-sized cap set -- but it must not be sold as a speed
+fix, and it should not be prioritised as one.
+
+**What the evidence does point at:** reduce the *number* of kernels in the numeric
+pipeline. The per-level loops each launch several kernels per iteration; batching
+across levels, or fusing the small per-level updates, attacks the two thirds. That
+is an XLA-structure problem in the upward/downward sweeps, shared with the
+single-GPU path, and it should be measured on the cheaper single-GPU path first.
+
+### Scoreboard: six hypotheses, six failures
+
+`theta_cross`, the fused-M2L flag, near-field padding, the traversal pair queue,
+the L2L level bound, the Morton sort. Every one predicted this floor; every one was
+measured and wrong. What survived every attempt was the launch count -- which was
+visible in the very first profile and which no configuration knob moves.
+
 ### LOCALISED (2026-08-21): the floor is the Morton `argsort` in the tree build
 
 The compiled HLO names it. Ops grouped by scope path, from
