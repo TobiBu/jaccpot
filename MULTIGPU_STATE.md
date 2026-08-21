@@ -33,18 +33,35 @@ Items **5a, 5b, 5c, 5d are all DONE**. Read from the STATUS block:
 - 5c: fused real M2L Pallas is parity-neutral (4.4e-9 flag-on vs flag-off); fused
   leafpair Pallas near-field is 2.1e-7 vs baseline P2P. **The near field was the
   entire bottleneck**: 10.7 s → 43.5 ms (~245x) at ndev=2, per=8000, leaf=128.
-- **Healthy per-GPU N ≈ 8000.**
-- **Strong scaling is density-limited — confirmed, not assumed.** At per-GPU
-  N > ~8000 the fixed-topology traversal caps overflow even at cap×64 (max
-  retries), so forces are *truncated* and the 400–720 ms readings are padded
-  pair-queue overhead, not physics. At total N=40 000 only ndev=5 (per=8000) is a
-  valid point. The scaling story is therefore weak scaling; strong scaling
-  saturates for a capacity reason, and §5 must say so in those terms.
+- ~~**Healthy per-GPU N ≈ 8000.**~~ **CORRECTED 2026-08-21.** That figure is
+  `leaf_size=128 × 64 leaves` and means nothing without both factors. The real
+  limit is **64 leaves per device**, set by `process_block` (default 64), so
+  per-device capacity is `leaves × leaf_size` and both are configuration.
+  **32 768 particles/device** runs clean at leaf 512; 16 384 at leaf 128 once
+  `process_block=256`. Full account: `docs/distributed_per_device_ceiling.md`.
+- ~~**Strong scaling is density-limited.**~~ **WRONG, corrected 2026-08-21.**
+  Two errors here. (a) The truncation above the ceiling is real, but the cause is
+  a fixed traversal block width, not density — and it is not a capacity-retry
+  problem either: growing the self queue to 16.7M entries (64× the single-device
+  value) still truncated. (b) The 400–720 ms readings are **not** padded
+  pair-queue overhead; they are truncated walks, which do *less* work and so read
+  *faster*. Measured strong scaling, once inside the verified envelope, is
+  **flat**: 83.9/80.0/79.6/82.6 ms for ndev 2..5 at N=65 536, median of three
+  invocations. The mechanism is in the deterministic counters — local work per
+  device falls 6.3× from 2 to 5 devices while cross-domain work falls only 1.5×.
+- **Timings on this host need replicate invocations.** Within-run repeats span
+  0–34%; between-invocation spread reached **2.5×** on one contended run, from
+  which an earlier draft of this document drew a "negative scaling" conclusion
+  that the clean replicates then refuted. Three independent invocations agree to
+  1.1–12.5%; quote nothing that has not been replicated that way.
 
-**Numbers that exist only as a markdown table** (weak scaling, ndev 2→5,
-N 16 000→40 000, 41.6→64.3 ms, throughput 3.8e5→6.2e5 part/s). Per the tranche's
-own rule these are an engineering log, not paper figures: they need the
-seeded-script → JSON → notebook treatment before §5 can quote them.
+~~**Numbers that exist only as a markdown table**~~ — **superseded 2026-08-21.**
+The sweeps have been run through the script → JSON → notebook path and figures
+08, 09 and 11 are built from `bench/results/multigpu/*.json` on a clean tree
+(`7d55dbc`), with replicates. The log's figures (N 16 000→40 000, 41.6→64.3 ms,
+3.8e5→6.2e5 part/s) are superseded: at the corrected configuration the same five
+devices carry **81 920 particles in 85.9 ms at 9.5e5 part/s**, i.e. 2× the
+particles for 1.34× the time.
 
 **Live caveat.** The `jit=True` illegal-address crash is **intermittent**
 (nondeterministic OOB) — most runs succeed, one recurred at weak ndev=2. Run each
