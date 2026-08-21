@@ -54,19 +54,24 @@ from .reference import direct_sum as reference_direct_sum
 from .reference import evaluate_expansion as reference_evaluate_expansion
 
 if TYPE_CHECKING:  # pragma: no cover - annotations only, no runtime import
-    # The mixins annotate `self` as the engine they are mixed into, which lives in
-    # `_fmm_impl` and imports *them* -- so this must stay under TYPE_CHECKING or it
-    # would form the cycle ARCHITECTURE §8 forbids. Before this block the names were
-    # dangling: `typing.get_type_hints` raised NameError on every mixin method, so the
-    # annotations documented an intent no tool could check.
+    # The engine lives in `_fmm_impl`, which imports *these mixins* -- so this import
+    # must stay under TYPE_CHECKING or it would form the cycle ARCHITECTURE §8
+    # forbids. Inheriting `_EngineBase` makes each mixin *be* the engine under a type
+    # checker, so every `self.<engine attribute>` resolves; at runtime the alias is
+    # `object`, leaving the MRO exactly as it was. The audit's E.2 records why this
+    # beats annotating `self`, and what it does not buy at runtime.
     from ._fmm_impl import FMMEngine
+
+    _EngineBase = FMMEngine
+else:  # pragma: no cover - annotations only, never an import at runtime
+    _EngineBase = object
 
 __all__ = [
     "SweepsMixin",
 ]
 
 
-class SweepsMixin:
+class SweepsMixin(_EngineBase):
     @staticmethod
     @jaxtyped(typechecker=beartype)
     def compute_expansion(
@@ -98,7 +103,7 @@ class SweepsMixin:
 
     @jaxtyped(typechecker=beartype)
     def evaluate_expansion(
-        self: "FMMEngine",
+        self,
         expansion: MultipoleExpansion,
         order: int = 1,
         eval_point: Optional[Array] = None,
@@ -134,7 +139,7 @@ class SweepsMixin:
 
     @jaxtyped(typechecker=beartype)
     def direct_sum(
-        self: "FMMEngine",
+        self,
         positions: Array,
         masses: Array,
         eval_point: Array,
@@ -213,7 +218,7 @@ class SweepsMixin:
         return self._static_upward_num_levels
 
     def prepare_upward_sweep(
-        self: "FMMEngine",
+        self,
         tree: Tree,
         positions_sorted: Array,
         masses_sorted: Array,
@@ -389,7 +394,7 @@ class SweepsMixin:
         )
 
     def run_downward_sweep(
-        self: "FMMEngine",
+        self,
         tree: Tree,
         multipoles: NodeMultipoleData,
         interactions: NodeInteractionList,
@@ -434,7 +439,7 @@ class SweepsMixin:
         )
 
     def prepare_downward_sweep(
-        self: "FMMEngine",
+        self,
         tree: Tree,
         upward_data: TreeUpwardData,
         *,

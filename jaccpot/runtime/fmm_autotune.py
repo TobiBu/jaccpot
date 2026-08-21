@@ -32,25 +32,28 @@ from .fmm_caches import (
 from .kernels.core import _accumulate_m2l_chunked_scan
 
 if TYPE_CHECKING:  # pragma: no cover - annotations only, no runtime import
-    # `self` is the engine these methods are mixed into, and it lives in
-    # `_fmm_impl`, which imports *them* -- so this must stay under TYPE_CHECKING or
-    # it would form the cycle ARCHITECTURE section 8 forbids.
+    # The engine lives in `_fmm_impl`, which imports *these mixins* -- so this import
+    # must stay under TYPE_CHECKING or it would form the cycle ARCHITECTURE section 8
+    # forbids. Inheriting `_EngineBase` makes the mixin *be* the engine under a type
+    # checker, so every `self.<engine attribute>` resolves; at runtime the alias is
+    # `object`, leaving the MRO exactly as it was.
     #
-    # `ad7b00c` added this import to all eleven mixins and the annotations to most
-    # of them, but not to this one's three methods, so the import sat unused until
-    # audit item 0.14 removed it as dead. This is the other resolution of that
-    # finding: write the annotations the import was added for.
+    # `ad7b00c` added this import to all eleven mixins and annotated `self` in most of
+    # them, but not this one's three methods, so the import sat unused until audit item
+    # 0.14 removed it as dead. Inheritance is what the import earns now -- see E.2.
     from ._fmm_impl import FMMEngine
+
+    _EngineBase = FMMEngine
+else:  # pragma: no cover - annotations only, never an import at runtime
+    _EngineBase = object
 
 __all__ = [
     "AutotuneMixin",
 ]
 
 
-class AutotuneMixin:
-    def _select_autotune_m2l_candidates(
-        self: "FMMEngine", *, pair_count: int
-    ) -> tuple[int, ...]:
+class AutotuneMixin(_EngineBase):
+    def _select_autotune_m2l_candidates(self, *, pair_count: int) -> tuple[int, ...]:
         """Return candidate chunk sizes for one pair-count regime.
 
         Pure table lookup against ``_GPU_M2L_AUTOTUNE_PAIR_BINS`` -- it times
@@ -82,7 +85,7 @@ class AutotuneMixin:
         return _GPU_M2L_AUTOTUNE_XL_CANDIDATES
 
     def _sample_and_remap_far_pairs_for_autotune(
-        self: "FMMEngine",
+        self,
         *,
         src: Array,
         tgt: Array,
@@ -186,7 +189,7 @@ class AutotuneMixin:
         )
 
     def _autotune_runtime_m2l_chunk_size(
-        self: "FMMEngine",
+        self,
         *,
         upward: TreeUpwardData,
         src: Array,

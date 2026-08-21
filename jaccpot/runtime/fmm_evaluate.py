@@ -50,9 +50,15 @@ from .reference import direct_sum as reference_direct_sum
 if TYPE_CHECKING:  # pragma: no cover - annotations only, no runtime import
     # `_fmm_impl` imports this mixin, and `_large_n_grad` is already deferred to a
     # function-local import below for compile-time reasons, so both must stay out of
-    # the module-scope import graph. Before this block these names were dangling.
+    # the module-scope import graph. Inheriting `_EngineBase` makes the mixin *be* the
+    # engine under a type checker, so every `self.<engine attribute>` resolves; at
+    # runtime the alias is `object`, leaving the MRO exactly as it was. See E.2.
     from ._fmm_impl import FMMEngine, PreparedStateLike
     from ._large_n_grad import LargeNGradPlan
+
+    _EngineBase = FMMEngine
+else:  # pragma: no cover - annotations only, never an import at runtime
+    _EngineBase = object
 
 __all__ = [
     "EvaluateMixin",
@@ -108,10 +114,10 @@ def _warn_if_traced_under_an_outer_jit(positions: Any, masses: Any) -> None:
     )
 
 
-class EvaluateMixin:
+class EvaluateMixin(_EngineBase):
     @jaxtyped(typechecker=beartype)
     def compute_accelerations(
-        self: "FMMEngine",
+        self,
         positions: Float[Array, "n 3"],
         masses: Float[Array, "n"],
         *,
@@ -299,7 +305,7 @@ class EvaluateMixin:
 
     @jaxtyped(typechecker=beartype)
     def evaluate_prepared_state(
-        self: "FMMEngine",
+        self,
         state: PreparedStateLike,
         *,
         target_indices: Optional[Int[Array, "t"]] = None,
@@ -512,7 +518,7 @@ class EvaluateMixin:
 
     @jaxtyped(typechecker=beartype)
     def _evaluate_prepared_state_at_positions_sorted(
-        self: "FMMEngine",
+        self,
         state: FMMPreparedState,
         positions_sorted: Float[Array, "n 3"],
         *,
@@ -703,7 +709,7 @@ class EvaluateMixin:
 
     @jaxtyped(typechecker=beartype)
     def differentiable_accelerations(
-        self: "FMMEngine",
+        self,
         state: Union[FMMPreparedState, LargeNPreparedState],
         positions: Float[Array, "n 3"],
         masses: Float[Array, "n"],
@@ -818,7 +824,7 @@ class EvaluateMixin:
             )
 
     def differentiable_step_fn(
-        self: "FMMEngine",
+        self,
         state: Union[FMMPreparedState, LargeNPreparedState],
         *,
         target_indices: Optional[Array] = None,
@@ -943,7 +949,7 @@ class EvaluateMixin:
         return compiled
 
     def _forward_permutation(
-        self: "FMMEngine",
+        self,
         state: Union[FMMPreparedState, LargeNPreparedState],
     ) -> Array:
         """Original-order -> Morton-sorted gather index, memoized on the state.
@@ -1001,7 +1007,7 @@ class EvaluateMixin:
         return forward_permutation
 
     def _sorted_inputs(
-        self: "FMMEngine",
+        self,
         state: Union[FMMPreparedState, LargeNPreparedState],
         positions: Array,
         masses: Array,
@@ -1034,7 +1040,7 @@ class EvaluateMixin:
         )
 
     def _grad_output_dtype(
-        self: "FMMEngine",
+        self,
         state: Union[FMMPreparedState, LargeNPreparedState],
     ) -> Any:
         """Return accelerations in the caller's float dtype where there is one.
@@ -1059,7 +1065,7 @@ class EvaluateMixin:
         return state.working_dtype
 
     def _differentiable_accelerations_large_n(
-        self: "FMMEngine",
+        self,
         state: LargeNPreparedState,
         positions: Array,
         masses: Array,
@@ -1145,7 +1151,7 @@ class EvaluateMixin:
         )
 
     def _differentiable_accelerations_radix(
-        self: "FMMEngine",
+        self,
         state: FMMPreparedState,
         positions: Array,
         masses: Array,
@@ -1221,7 +1227,7 @@ class EvaluateMixin:
         )
 
     def _evaluate_leaf_major_nearfield(
-        self: "FMMEngine",
+        self,
         tree: Tree,
         neighbor_list: NodeNeighborList,
         nearfield_interop: Optional[NearfieldInteropData],
@@ -1306,7 +1312,7 @@ class EvaluateMixin:
 
     @jaxtyped(typechecker=beartype)
     def evaluate_tree(
-        self: "FMMEngine",
+        self,
         tree: Tree,
         positions_sorted: Float[Array, "n 3"],
         masses_sorted: Float[Array, "n"],
@@ -1519,7 +1525,7 @@ class EvaluateMixin:
 
     @jaxtyped(typechecker=beartype)
     def evaluate_tree_compiled(
-        self: "FMMEngine",
+        self,
         tree: Tree,
         positions_sorted: Float[Array, "n 3"],
         masses_sorted: Float[Array, "n"],
