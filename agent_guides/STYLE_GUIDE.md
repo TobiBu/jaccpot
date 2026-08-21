@@ -354,8 +354,15 @@ Keep the seams in the layout clean and the import graph acyclic:
   `runtime/`: `jaccpot/_env.py` is the sanctioned reader for **any** layer, and seven modules
   outside `runtime/` use it. See the note at the end of this section.
 - `distributed/` — decomposition, halo exchange, collectives.
-- `experimental/` — prototypes. Not production, not held to production standards, not
-  imported by production paths.
+- `experimental/` — prototypes. Not production, not held to production standards, and not
+  **eagerly** imported by production paths. That last word is load-bearing and the claim is
+  now tested: `tests/unit/test_experimental_is_not_on_an_import_path.py` asserts it in a
+  clean subprocess per package. It was false until audit G.5's second edge was fixed —
+  `import jaccpot` was clean while `import jaccpot.pallas` pulled in
+  `experimental/treecode_walk`, a prose guarantee that held at the entry point and failed
+  one package down. Deliberate **lazy** reach-ins remain: `runtime/_interaction_cache.py`
+  imports `treecode_far_near` inside a function when `local_walk="treecode"` is selected,
+  which G.5 accepted as a bounded exposure.
 
 Physics must not live in a utility module; runtime policy must not leak into operators. If
 you find yourself importing "up" that list, report it rather than adding the import.
