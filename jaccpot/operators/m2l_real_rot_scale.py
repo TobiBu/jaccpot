@@ -7,15 +7,21 @@ then rotate local coefficients back.
 
 from __future__ import annotations
 
+import os
 from functools import partial
 from typing import Any, Callable
 
 import jax
 import jax.numpy as jnp
+import numpy as np
 from jax import lax
 from jaxtyping import Array
 
+from jaccpot.operators.real_dehnen_q import (
+    compute_real_B_matrix_multipole,
+)
 from jaccpot.operators.real_harmonics import (
+    real_Dz_diagonal,
     real_rotation_from_z_axis_local,
     real_rotation_from_z_axis_multipole,
     real_rotation_to_z_axis_local,
@@ -27,6 +33,11 @@ from jaccpot.operators.real_harmonics import (
     translate_along_z_m2l_real,
     translate_along_z_m2m_real,
 )
+
+# Private, and imported from where it is DEFINED rather than through a
+# re-export: `real_harmonics` used to re-export it and main has since stopped,
+# which broke CI while the branch head still imported fine.
+from jaccpot.operators.real_rotations import _alignment_angles
 
 from ._precision import highest_matmul_precision
 from ._transverse_degeneracy_jvp import (
@@ -61,6 +72,10 @@ def _rotate_multipole_to_z_single(
     Array
         Coefficients in the z-aligned frame, same shape and dtype.
     """
+    if _DEGREE_BATCHED:
+        return _rotate_degree_batched(
+            multipole, delta, order=int(order), local_side=False
+        )
     x, y, z = delta[0], delta[1], delta[2]
     out = jnp.zeros_like(multipole)
     for ell in range(int(order) + 1):
@@ -68,6 +83,173 @@ def _rotate_multipole_to_z_single(
         block = real_rotation_to_z_axis_multipole(x, y, z, ell, dtype=multipole.dtype)
         out = out.at[sl].set(block @ multipole[sl])
     return out
+
+
+# Collapse the per-degree launches, or keep the unrolled form. Off by default
+# until the A/B lands; see `_rotate_degree_batched`.
+_DEGREE_BATCHED = os.environ.get("JACCPOT_M2L_DEGREE_BATCHED", "0").strip().lower() in {
+    "1",
+    "true",
+    "yes",
+    "on",
+}
+
+
+def _centred_degree_maps(order: int) -> tuple[Array, Array]:
+    """Gather indices and mask putting every degree in ONE centred width-(2p+1) row.
+
+    Within a degree the packed layout is ``m = -ell..ell`` at index ``ell + m``, so
+    ``m = 0`` sits at the block *centre*, not a corner. Centring the padding is
+    therefore what makes the padded blocks degree-independent: degree ``ell``
+    occupies ``p - ell .. p + ell`` of a width ``2p + 1`` row, and ``m`` lands at
+    ``p + m`` for every degree at once.
+
+    Parameters
+    ----------
+    order : int
+        Expansion order ``p``. Static.
+
+    Returns
+    -------
+    tuple[Array, Array]
+        ``(idx, mask)``, both ``(p + 1, 2p + 1)``: the global coefficient index of
+        each padded slot, and whether that slot is a real coefficient.
+    """
+    p = int(order)
+    width = 2 * p + 1
+    idx = np.zeros((p + 1, width), dtype=np.int32)
+    mask = np.zeros((p + 1, width), dtype=bool)
+    for ell in range(p + 1):
+        for m in range(-ell, ell + 1):
+            idx[ell, p + m] = sh_offset(ell) + ell + m
+            mask[ell, p + m] = True
+    return jnp.asarray(idx), jnp.asarray(mask)
+
+
+def _padded_dz(order: int, angle: Array, *, dtype: Any) -> Array:
+    """``real_Dz_diagonal`` at full width, valid for EVERY degree at once.
+
+    A z-rotation is block-diagonal in ``|m|`` -- it never mixes different ``|m|``
+    and never mixes degrees -- so one width-``(2p+1)`` construction serves all
+    degrees under the centred layout, and the blocks for ``|m| > ell`` act only on
+    padded slots that are zero. That is what lets this hoist out of the degree
+    axis entirely instead of being rebuilt ``p + 1`` times.
+
+    Parameters
+    ----------
+    order : int
+        Expansion order ``p``. Static.
+    angle : Array
+        Rotation angle about ``+z``.
+    dtype : Any
+        Output dtype.
+
+    Returns
+    -------
+    Array
+        ``(2p + 1, 2p + 1)`` z-rotation.
+    """
+    p = int(order)
+    return real_Dz_diagonal(p, angle, dtype=dtype)
+
+
+def _rotate_degree_batched(
+    coeffs: Array, delta: Array, *, order: int, local_side: bool
+) -> Array:
+    """One batched einsum over degrees, instead of ``p + 1`` unrolled blocks.
+
+    Same arithmetic, restructured. The unrolled loop is what makes M2L
+    launch-bound: measured on an A100, the two rotations account for ~99% of the
+    stage's compiled kernels (order 4: 108 fusions each, against 2 for the actual
+    z-axis translation), and M2L's wall time tracks the kernel count rather than
+    the flops -- order 2 to 6 grows the fusion count 4.32x, the measured time
+    4.68x and the arithmetic 29.6x.
+
+    The restructure is possible because of what the per-degree block actually is:
+    ``B_U @ Dz(-ax) @ B_U @ Dz(az)``, where ``B_U`` depends only on the degree
+    (a compile-time constant) and ``Dz`` is block-diagonal in ``|m|``. So the
+    angle-dependent factors hoist out of the degree axis, the constant factors
+    become one padded stack, and what remains is a single batched contraction over
+    a ``p + 1 <= 7`` axis.
+
+    The padding costs arithmetic -- dense ``(p+1)(2p+1)^2`` against the ragged
+    ``sum_ell (2ell+1)^2``, i.e. 2.45x at order 4 -- which is close to free at
+    0.24% of fp64 peak.
+
+    Parameters
+    ----------
+    coeffs : Array
+        ``(sh_size(order),)`` coefficients for one pair.
+    delta : Array
+        ``(3,)`` target centre minus source centre.
+    order : int
+        Expansion order ``p``. Static.
+    local_side : bool
+        Build the local from-z rotation rather than the multipole to-z one. The
+        two are different matrices, not transposes of each other.
+
+    Returns
+    -------
+    Array
+        ``(sh_size(order),)`` rotated coefficients.
+    """
+    p = int(order)
+    dtype = coeffs.dtype
+    x, y, z = delta[0], delta[1], delta[2]
+    width = 2 * p + 1
+    idx, mask = _centred_degree_maps(p)
+
+    # The whole point: assemble the block from its FACTORS rather than calling the
+    # per-degree builder p+1 times.
+    #
+    # `_multipole_align_to_z_block` is `B_U @ Dz(-ax) @ B_U @ Dz(az)`, in which
+    # `B_U` depends only on the degree and `Dz` is block-diagonal in |m|. So:
+    #
+    #   * the `B_U` stack is a compile-time CONSTANT -- built with numpy so it
+    #     lowers to a literal and costs no kernels at all;
+    #   * `Dz` is built TWICE at full width instead of 2(p+1) times, because under
+    #     the centred layout its |m| blocks map the active index set to itself, so
+    #     one width-(2p+1) construction restricts correctly to every degree.
+    #
+    # An earlier attempt batched only the *application* and moved the fusion count
+    # 108 -> 100 at order 4 (~7%), because the per-degree construction is ~93% of
+    # it. This is the version that actually removes the per-degree launches.
+    # `ensure_compile_time_eval` is load-bearing: `compute_real_B_matrix_multipole`
+    # is itself jitted, so calling it inside this trace yields tracers rather than
+    # values, and the stack would become traced work instead of the literal it
+    # should be. Evaluating eagerly here folds it to a constant.
+    with jax.ensure_compile_time_eval():
+        b_stack = jnp.stack(
+            [
+                jnp.zeros((width, width), dtype=dtype)
+                .at[p - ell : p + ell + 1, p - ell : p + ell + 1]
+                .set(compute_real_B_matrix_multipole(ell, dtype=dtype))
+                for ell in range(p + 1)
+            ]
+        )
+
+    az, ax = _alignment_angles(x, y, z)
+    dz_az = _padded_dz(p, az, dtype=dtype)
+    dz_ax = _padded_dz(p, -ax, dtype=dtype)
+
+    # `precision=HIGHEST` on every one of these, and it is not decoration: XLA
+    # lowers fp32 matmuls to TF32 on Ampere+, which measured a ~6e-04 ceiling on
+    # M2L relative accuracy from order 4 up -- i.e. raising the order bought
+    # nothing. The CPU parity test cannot catch it, because TF32 does not exist
+    # there; `test_every_jnp_dot_call_sets_precision` is what caught it here.
+    blocks = jnp.einsum("lij,jk->lik", b_stack, dz_ax, precision=lax.Precision.HIGHEST)
+    blocks = jnp.einsum(
+        "lik,lkm->lim", blocks, b_stack, precision=lax.Precision.HIGHEST
+    )
+    blocks = jnp.einsum("lim,mn->lin", blocks, dz_az, precision=lax.Precision.HIGHEST)
+    if local_side:
+        # The local from-z block is the transpose of the multipole world->z block.
+        blocks = jnp.swapaxes(blocks, -1, -2)
+
+    rows = jnp.where(mask, coeffs[idx], jnp.zeros((), dtype=dtype))
+    out_rows = jnp.einsum("lin,ln->li", blocks, rows, precision=lax.Precision.HIGHEST)
+    out = jnp.zeros_like(coeffs)
+    return out.at[idx].add(jnp.where(mask, out_rows, jnp.zeros((), dtype=dtype)))
 
 
 @highest_matmul_precision
@@ -92,6 +274,8 @@ def _rotate_local_from_z_single(local_z: Array, delta: Array, *, order: int) -> 
     Array
         Coefficients back in the world frame.
     """
+    if _DEGREE_BATCHED:
+        return _rotate_degree_batched(local_z, delta, order=int(order), local_side=True)
     x, y, z = delta[0], delta[1], delta[2]
     out = jnp.zeros_like(local_z)
     for ell in range(int(order) + 1):
