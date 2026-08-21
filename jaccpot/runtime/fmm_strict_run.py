@@ -33,17 +33,26 @@ from .fmm_state import (
 from .kernels.core import _empty_interaction_storage_for_tree, _FarPairCOO
 
 if TYPE_CHECKING:  # pragma: no cover - annotations only, no runtime import
-    # The mixins annotate `self` as the engine they are mixed into, which lives in
-    # `_fmm_impl` and imports *them* -- so this must stay under TYPE_CHECKING or it
-    # would form the cycle ARCHITECTURE §8 forbids. Before this block the names were
-    # dangling: `typing.get_type_hints` raised NameError on every mixin method, so the
-    # annotations documented an intent no tool could check.
+    # The engine lives in `_fmm_impl`, which imports *these mixins* -- so this import
+    # must stay under TYPE_CHECKING or it would form the cycle ARCHITECTURE §8
+    # forbids. Inheriting `_EngineBase` makes each mixin *be* the engine under a type
+    # checker, so every `self.<engine attribute>` resolves; at runtime the alias is
+    # `object`, leaving the MRO exactly as it was. The audit's E.2 records why this
+    # beats annotating `self`, and what it does not buy at runtime.
     from ._fmm_impl import FMMEngine, PreparedStateLike
 
+    _EngineBase = FMMEngine
+else:  # pragma: no cover - annotations only, never an import at runtime
+    _EngineBase = object
 
-class StrictRunMixin:
+__all__ = [
+    "StrictRunMixin",
+]
+
+
+class StrictRunMixin(_EngineBase):
     def refresh_prepared_state(
-        self: "FMMEngine",
+        self,
         prepared_state: PreparedStateLike,
         positions: Array,
         masses: Array,
@@ -54,7 +63,47 @@ class StrictRunMixin:
         theta: Optional[float] = None,
         fused_device_mode: bool = False,
     ) -> PreparedStateLike:
-        """Refresh prepared state under large-N/radix profile constraints."""
+        """Refresh prepared state under large-N/radix profile constraints.
+
+        Rebinds an existing state to new particle data without a full
+        ``prepare_state``. Tries the same-topology fast path first
+        (:meth:`_refresh_large_n_same_topology`) and falls back to a full
+        preparation when that declines.
+        Supported only on the large-N production profile (``preset="large_n_gpu"``,
+        radix tree, solidfmm basis); anything else raises rather than silently
+        taking a slower path.
+
+        Parameters
+        ----------
+        prepared_state : PreparedStateLike
+            State to refresh. Must be a ``LargeNPreparedState``.
+        positions : Array
+            New particle positions ``[N, 3]``.
+        masses : Array
+            New particle masses ``[N]``.
+        bounds : Optional[Tuple[Array, Array]]
+            Explicit ``(lower, upper)`` domain bounds.
+        leaf_size : Optional[int]
+            Leaf target; ``None`` keeps the state's own.
+        max_order : Optional[int]
+            Expansion order; ``None`` keeps the state's own.
+        theta : Optional[float]
+            Opening angle; ``None`` keeps the state's own.
+        fused_device_mode : bool
+            Refresh into the fused device-resident layout.
+
+        Returns
+        -------
+        PreparedStateLike
+            A NEW state -- nothing is mutated in place, despite what the two
+            wrappers around this one are called.
+
+        Raises
+        ------
+        NotImplementedError
+            If the profile is not large-N production, or the state is not a
+            ``LargeNPreparedState``.
+        """
         if not self._is_large_n_gpu_production_profile():
             raise NotImplementedError(
                 "refresh_prepared_state is currently supported only for "
@@ -205,7 +254,7 @@ class StrictRunMixin:
         return next_state
 
     def strict_prepare_refresh_and_evaluate(
-        self: "FMMEngine",
+        self,
         prepared_state: Optional[PreparedStateLike],
         positions: Array,
         masses: Array,
@@ -218,7 +267,56 @@ class StrictRunMixin:
         runtime_overrides: Optional[_RuntimeExecutionOverrides] = None,
         fused_device_mode: Optional[bool] = None,
     ) -> tuple[PreparedStateLike, Array]:
-        """Strict static-radix helper: prepare/refresh once, then evaluate."""
+        """Strict static-radix helper: prepare/refresh once, then evaluate.
+
+        Prepares when ``prepared_state`` is ``None`` and refreshes otherwise, so a
+        loop can call this unconditionally and let the first iteration build.
+        Returning the state alongside the accelerations is what makes that
+        possible.
+
+        Every call is counted against a profile key (particle count, leaf size,
+        order, theta); a key it has not seen before counts as a compile. That is
+        what the strict-runner diagnostics report, and it is why changing any of
+        those four mid-loop is visible rather than merely slow.
+        Supported only on the large-N production profile (``preset="large_n_gpu"``,
+        radix tree, solidfmm basis); anything else raises rather than silently
+        taking a slower path.
+
+        Parameters
+        ----------
+        prepared_state : Optional[PreparedStateLike]
+            State to refresh, or ``None`` to prepare one.
+        positions : Array
+            Particle positions ``[N, 3]``.
+        masses : Array
+            Particle masses ``[N]``.
+        bounds : Optional[Tuple[Array, Array]]
+            Explicit ``(lower, upper)`` domain bounds.
+        leaf_size : int
+            Target maximum particles per leaf.
+        max_order : int
+            Expansion order ``p``.
+        theta : Optional[float]
+            Per-call MAC opening-angle override.
+        jit_traversal : Optional[bool]
+            Per-call override of jitted traversal.
+        runtime_overrides : Optional[_RuntimeExecutionOverrides]
+            Replacement runtime overrides for this call.
+        fused_device_mode : Optional[bool]
+            Use the fused device-resident layout; ``None`` takes the engine's
+            current setting.
+
+        Returns
+        -------
+        tuple[PreparedStateLike, Array]
+            ``(prepared_state, accelerations)``. Feed the state back in next
+            call.
+
+        Raises
+        ------
+        RuntimeError
+            If the profile is not large-N production.
+        """
         if not self._is_large_n_gpu_production_profile():
             self._strict_runner_fail_fast_reject_count += 1
             raise RuntimeError(
@@ -315,7 +413,7 @@ class StrictRunMixin:
         return next_state, acc
 
     def strict_run_segmented(
-        self: "FMMEngine",
+        self,
         *,
         state: Any,
         masses: Array,
@@ -331,7 +429,61 @@ class StrictRunMixin:
         rematerialize_fn: Optional[Callable[[Any], Any]] = None,
         collect_history: bool = False,
     ) -> tuple[Any, PreparedStateLike, Optional[list[Any]]]:
-        """Run strict refresh/evaluate cadence with caller-provided segment runner."""
+        """Run strict refresh/evaluate cadence with caller-provided segment runner.
+
+        The integrator-agnostic runner: it owns only the refresh cadence, and the
+        caller supplies the stepping. ``num_steps`` is cut into segments of
+        ``refresh_every`` plus a tail, the state is refreshed at each boundary,
+        and ``segment_runner`` advances the caller's own state within a segment.
+        Use :meth:`strict_run_v2` instead when the integrator is velocity Verlet
+        over a raw array.
+
+        Parameters
+        ----------
+        state : Any
+            The caller's integrator state, opaque here: it is only passed to
+            ``segment_runner`` and ``positions_getter``.
+        masses : Array
+            Particle masses ``[N]``.
+        num_steps : int
+            Total steps. Must be positive.
+        refresh_every : int
+            Steps per segment. Must be positive.
+        segment_runner : Callable[[Any, Array, int], tuple[Any, Any]]
+            ``(state, accelerations, num_steps) -> (next_state, output)``. The
+            output is collected only under ``collect_history``.
+        positions_getter : Callable[[Any], Array]
+            Extracts ``[N, 3]`` positions from the caller's state, so the refresh
+            knows where the particles are.
+        prepared_state : Optional[PreparedStateLike]
+            Existing state to refresh, or ``None`` to prepare on the first
+            segment.
+        leaf_size : int
+            Target maximum particles per leaf.
+        max_order : int
+            Expansion order ``p``.
+        theta : Optional[float]
+            Per-call MAC opening-angle override.
+        jit_traversal : Optional[bool]
+            Per-call override of jitted traversal.
+        rematerialize_fn : Optional[Callable[[Any], Any]]
+            Applied to the state between segments, for callers that must rebuild
+            device arrays across a refresh.
+        collect_history : bool
+            Accumulate each segment's output. Off by default because the history
+            is retained on device.
+
+        Returns
+        -------
+        tuple[Any, PreparedStateLike, Optional[list[Any]]]
+            ``(final_state, prepared_state, history)``; ``history`` is ``None``
+            unless ``collect_history``.
+
+        Raises
+        ------
+        ValueError
+            If ``num_steps`` or ``refresh_every`` is not positive.
+        """
         if int(num_steps) <= 0:
             raise ValueError("num_steps must be positive")
         if int(refresh_every) <= 0:
@@ -398,7 +550,7 @@ class StrictRunMixin:
         return state_curr, prepared_curr, history
 
     def strict_run_v2(
-        self: "FMMEngine",
+        self,
         *,
         state: Array,
         masses: Array,
@@ -428,7 +580,80 @@ class StrictRunMixin:
         ``jax.debug.callback`` internally to ship only small, on-device-reduced
         data to the host (e.g. a projected density grid), so the GPU is not
         stalled. It does not touch the scan carry and is independent of
-        ``return_history``."""
+        ``return_history``.
+
+        Endpoint-correct velocity Verlet, run device-resident. Unlike
+        :meth:`strict_run_segmented` the integrator is fixed and the state is a
+        raw array, which is what lets the whole loop live inside one scan.
+
+        ``refresh_every`` must be 1: endpoint correctness needs the self-gravity
+        refreshed at every step, so any other value is rejected rather than
+        silently approximated.
+
+        Parameters
+        ----------
+        state : Array
+            Packed integrator state ``[N, 2, 3]`` -- positions and velocities
+            stacked on axis 1.
+        masses : Array
+            Particle masses ``[N]``.
+        dt : float
+            Timestep.
+        num_steps : int
+            Total steps. Must be positive.
+        refresh_every : int
+            Must be 1; see above.
+        leaf_size : int
+            Target maximum particles per leaf.
+        max_order : int
+            Expansion order ``p``.
+        theta : Optional[float]
+            Per-call MAC opening-angle override.
+        prepared_state : Optional[PreparedStateLike]
+            Existing state to refresh, or ``None`` to prepare.
+        initial_self_acceleration : Optional[Array]
+            Self-gravity at step 0 ``[N, 3]`` if already known; ``None`` costs one
+            extra evaluation to obtain it.
+        jit_traversal : Optional[bool]
+            Per-call override of jitted traversal.
+        add_external : bool
+            Add ``external_acceleration_fn`` to the self-gravity each step.
+        external_acceleration_fn : Optional[Callable[[Array], Array]]
+            ``positions -> accelerations``; traced into the scan, so it must be
+            jittable.
+        rematerialize_between_refresh : bool
+            Rebuild device arrays at refresh boundaries.
+        return_history : bool
+            Return every step's state rather than only the last.
+        return_prepared_state : bool
+            Return the prepared state so the next call can reuse it.
+        step_callback : Optional[Callable[[Array, Array], None]]
+            Fire-and-forget streaming hook; see above.
+        step_callback_stride : int
+            Steps between ``step_callback`` invocations.
+
+        Returns
+        -------
+        tuple[Array, Optional[PreparedStateLike], Optional[Array]]
+            ``(final_state, prepared_state, history)``. The second is ``None``
+            unless ``return_prepared_state``, the third ``None`` unless
+            ``return_history``.
+
+        Raises
+        ------
+        RuntimeError
+            If the profile is not large-N production; if fused mode was requested
+            at an unsupported particle count; if a refresh hits a
+            topology/profile mismatch; or if the fused scan fails while
+            ``_strict_fused_disallow_host_segment_fallback`` is set, in which case
+            the original error is chained.
+        ValueError
+            If ``num_steps`` is not positive, or ``refresh_every`` is not 1.
+        Exception
+            Re-raised unchanged when the fused scan fails and the host-segment
+            fallback IS allowed -- the caller sees the underlying failure rather
+            than a wrapper, because the fallback path is expected to handle it.
+        """
         state_arr = jnp.asarray(state)
         masses_arr = jnp.asarray(masses)
         dt_arr = jnp.asarray(float(dt), dtype=state_arr.dtype)
@@ -827,7 +1052,7 @@ class StrictRunMixin:
         return state_curr, prepared_out, history_out
 
     def strict_fused_prepared_eval_fn(
-        self: "FMMEngine",
+        self,
         *,
         positions: Array,
         masses: Array,
@@ -847,6 +1072,32 @@ class StrictRunMixin:
         velocity-Verlet update**.
 
         Returns ``(prepared_state, eval_fn)``; time ``eval_fn(prepared_state)``.
+
+        Parameters
+        ----------
+        positions : Array
+            Particle positions ``[N, 3]``.
+        masses : Array
+            Particle masses ``[N]``.
+        leaf_size : int
+            Target maximum particles per leaf.
+        max_order : int
+            Expansion order ``p``.
+        theta : Optional[float]
+            Per-call MAC opening-angle override.
+
+        Returns
+        -------
+        tuple[PreparedStateLike, Callable[[PreparedStateLike], Array]]
+            ``(prepared_state, eval_fn)``. A benchmarking seam, not a simulation
+            entry point -- ``eval_fn`` deliberately omits the refresh and the
+            Verlet update that ``strict_run_v2`` bundles with the same
+            evaluation.
+
+        Raises
+        ------
+        RuntimeError
+            If the profile is not large-N production.
         """
         positions_arr = jnp.asarray(positions)
         masses_arr = jnp.asarray(masses)
@@ -899,7 +1150,7 @@ class StrictRunMixin:
         return prepared, _eval
 
     def _refresh_large_n_same_topology(
-        self: "FMMEngine",
+        self,
         prepared_state: LargeNPreparedState,
         positions: Array,
         masses: Array,
@@ -911,7 +1162,52 @@ class StrictRunMixin:
         runtime_overrides_override: Optional[_RuntimeExecutionOverrides] = None,
         fused_device_mode: bool = False,
     ) -> Optional[LargeNPreparedState]:
-        """Refresh large-N numeric payloads when the radix topology is unchanged."""
+        """Refresh large-N numeric payloads when the radix topology is unchanged.
+
+        The fast path behind :meth:`refresh_prepared_state`: when the Morton
+        topology is unchanged, only the numeric payloads need rebuilding, not the
+        tree or the interaction lists.
+
+        **``None`` is a miss, not a failure.** Every early return increments a
+        named counter (no radix tree, traced inputs, neighbour list changed, ...)
+        and hands the decision back to the caller, which then does a full
+        preparation. Nothing here raises to signal "could not reuse" -- that is
+        the protocol, and it is why the diagnostics carry a miss breakdown rather
+        than a single hit rate.
+
+        Parameters
+        ----------
+        prepared_state : LargeNPreparedState
+            State whose payloads are refreshed.
+        positions : Array
+            New particle positions ``[N, 3]``.
+        masses : Array
+            New particle masses ``[N]``.
+        bounds : Optional[Tuple[Array, Array]]
+            Explicit ``(lower, upper)`` domain bounds.
+        leaf_size : int
+            Leaf target.
+        max_order : int
+            Expansion order ``p``.
+        theta : Optional[float]
+            Opening angle; ``None`` keeps the state's own.
+        runtime_overrides_override : Optional[_RuntimeExecutionOverrides]
+            Replacement runtime overrides for this refresh.
+        fused_device_mode : bool
+            Refresh into the fused device-resident layout. Also relaxes the
+            traced-input guard, since the fused lane is designed to be traced.
+
+        Returns
+        -------
+        Optional[LargeNPreparedState]
+            The refreshed state, or ``None`` when the fast path declined -- see
+            above.
+
+        Raises
+        ------
+        RuntimeError
+            Only for genuine inconsistencies, not for a declined reuse.
+        """
 
         self._large_n_same_topology_refresh_attempts += 1
         if not isinstance(prepared_state.tree, RadixTree):
@@ -1415,11 +1711,35 @@ class StrictRunMixin:
         return refreshed_state
 
     def _large_n_neighbor_list_matches(
-        self: "FMMEngine",
+        self,
         previous: NodeNeighborList,
         current: NodeNeighborList,
     ) -> bool:
-        """Return True when current active neighbor edges match previous state."""
+        """Return True when current active neighbor edges match previous state.
+
+        Compares only the **active** prefix ``neighbors[:active_edges]``, where
+        the active count comes from the CSR offsets. The arrays are
+        fixed-capacity and padded, so comparing them whole would report a
+        difference whenever the padding differs -- which says nothing about the
+        edges.
+
+        Conservative by construction: any exception is caught and reported as
+        "changed". A false negative costs a full rebuild; a false positive would
+        reuse a stale topology, which is a wrong force.
+
+        Parameters
+        ----------
+        previous : NodeNeighborList
+            Neighbour list from the prepared state.
+        current : NodeNeighborList
+            Newly built neighbour list.
+
+        Returns
+        -------
+        bool
+            ``True`` only when offsets, counts, leaf indices and the active edge
+            prefix all match exactly.
+        """
 
         try:
             prev_offsets = np.asarray(jax.device_get(previous.offsets))
@@ -1457,7 +1777,7 @@ class StrictRunMixin:
             return False
 
     def update_multipoles_only(
-        self: "FMMEngine",
+        self,
         prepared_state: PreparedStateLike,
         positions: Array,
         masses: Array,
@@ -1466,7 +1786,42 @@ class StrictRunMixin:
         max_order: Optional[int] = None,
         theta: Optional[float] = None,
     ) -> PreparedStateLike:
-        """Refresh multipole/local payloads when topology key remains unchanged."""
+        """Refresh multipole/local payloads when topology key remains unchanged.
+
+        A :meth:`refresh_prepared_state` under a different name and its own
+        diagnostic counter, for the case where the caller knows the tree mapping
+        still holds. It takes no ``bounds``, since changing the domain would
+        change that mapping. Large-N production profile only.
+
+        Parameters
+        ----------
+        prepared_state : PreparedStateLike
+            State whose payloads are refreshed.
+        positions : Array
+            New particle positions ``[N, 3]``.
+        masses : Array
+            New particle masses ``[N]``.
+        leaf_size : Optional[int]
+            Leaf target; ``None`` keeps the state's own.
+        max_order : Optional[int]
+            Expansion order; ``None`` keeps the state's own.
+        theta : Optional[float]
+            Opening angle; ``None`` keeps the state's own.
+
+        Returns
+        -------
+        PreparedStateLike
+            The refreshed state.
+
+        Raises
+        ------
+        NotImplementedError
+            If the profile is not large-N production, or the state is not a
+            ``LargeNPreparedState``.
+        RuntimeError
+            If the refresh could not preserve the topology mapping the caller
+            asserted was unchanged.
+        """
         if not self._is_large_n_gpu_production_profile():
             raise NotImplementedError(
                 "update_multipoles_only is currently supported only for "
@@ -1495,7 +1850,7 @@ class StrictRunMixin:
         return refreshed
 
     def rebuild_topology_in_place(
-        self: "FMMEngine",
+        self,
         prepared_state: PreparedStateLike,
         positions: Array,
         masses: Array,
@@ -1505,7 +1860,45 @@ class StrictRunMixin:
         max_order: Optional[int] = None,
         theta: Optional[float] = None,
     ) -> PreparedStateLike:
-        """Rebuild topology while attempting to remain profile-capacity compatible."""
+        """Rebuild topology while attempting to remain profile-capacity compatible.
+
+        The third face of :meth:`refresh_prepared_state`: same call, its own
+        counter, and ``bounds`` forwarded because a rebuild may legitimately
+        change the domain.
+
+        "In place" names the intent to stay within the compiled profile's
+        capacities so the existing executables keep applying -- NOT mutation. A
+        new state is returned and the input is untouched. Large-N production
+        profile only.
+
+        Parameters
+        ----------
+        prepared_state : PreparedStateLike
+            State whose topology is rebuilt.
+        positions : Array
+            New particle positions ``[N, 3]``.
+        masses : Array
+            New particle masses ``[N]``.
+        bounds : Optional[Tuple[Array, Array]]
+            Explicit ``(lower, upper)`` domain bounds.
+        leaf_size : Optional[int]
+            Leaf target; ``None`` keeps the state's own.
+        max_order : Optional[int]
+            Expansion order; ``None`` keeps the state's own.
+        theta : Optional[float]
+            Opening angle; ``None`` keeps the state's own.
+
+        Returns
+        -------
+        PreparedStateLike
+            The rebuilt state.
+
+        Raises
+        ------
+        NotImplementedError
+            If the profile is not large-N production, or the state is not a
+            ``LargeNPreparedState``.
+        """
         if not self._is_large_n_gpu_production_profile():
             raise NotImplementedError(
                 "rebuild_topology_in_place is currently supported only for "

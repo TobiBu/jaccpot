@@ -50,6 +50,22 @@ def highest_matmul_precision(fn: _F) -> _F:
     Apply to any function whose body contains ``@`` matmuls on expansion
     coefficients or rotation blocks. See the module docstring for the measured
     accuracy this protects.
+
+    Parameters
+    ----------
+    fn : _F
+        The function to wrap. Only matmuls executed *inside* ``fn``'s body are
+        covered — a callable that ``fn`` merely returns for someone else to call
+        runs outside the context and stays at the default precision.
+
+    Returns
+    -------
+    _F
+        ``fn`` wrapped by :func:`functools.wraps`, so name, docstring, and
+        ``__wrapped__`` survive. The ``TypeVar`` is what preserves the signature
+        for type checkers; at runtime this is an ordinary ``*args, **kwargs``
+        wrapper, so it is not itself a ``jax`` transformation and composes with
+        ``jit``/``grad`` in either order.
     """
 
     @functools.wraps(fn)

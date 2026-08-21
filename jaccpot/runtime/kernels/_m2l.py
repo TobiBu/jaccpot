@@ -31,6 +31,7 @@ Split out of ``core.py`` (Tier 1.6, A.9 seam 2); every function body is unchange
 
 from __future__ import annotations
 
+import functools
 from functools import partial
 from typing import Any, Optional
 
@@ -46,17 +47,60 @@ from jaccpot.operators.complex_ops import (
     complex_rotation_blocks_from_z_solidfmm_batch,
     complex_rotation_blocks_to_z_solidfmm_batch,
     m2l_complex_fused_align_deltas,
-    m2l_complex_fused_carry_axis_derivative,
     m2l_complex_reference_batch,
     m2l_complex_reference_batch_cached_blocks,
+    make_m2l_complex_fused_carry_axis_derivative,
 )
 from jaccpot.operators.m2l_real_rot_scale import (
     m2l_rot_scale_real_batch,
     m2l_rot_scale_real_batch_cached_blocks,
+    make_m2l_real_fused_carry_axis_derivative,
     real_rotation_blocks_from_z_local_batch,
     real_rotation_blocks_to_z_multipole_batch,
 )
 from jaccpot.runtime.grad_options import fused_m2l_pallas_enabled
+
+# The two fused-M2L transverse-tangent carriers, built ONCE each and cached.
+#
+# Cached rather than module-level for two independent reasons. The pure-JAX twins
+# each carrier needs live in `jaccpot.pallas.*`, and importing that at module scope
+# would drag `jax.experimental.pallas` onto the `import jaccpot` path, which it is
+# deliberately not on -- every pallas import in this module is function-local for
+# that reason. And they are `custom_jvp` objects, so building one per call would
+# create a fresh primitive per call and retrace every time; `lru_cache` keeps the
+# identity stable.
+#
+# `operators/` supplies the derivative rule, this module supplies the twin: that is
+# audit G.3's inversion, which is why the factories exist at all.
+
+
+@functools.lru_cache(maxsize=1)
+def _real_fused_carry_axis_derivative() -> Any:
+    """The real fused M2L's tangent carrier, built once.
+
+    Returns
+    -------
+    Any
+        ``carry(out, coeffs, delta, blocks_to_z, blocks_from_z, radii, order=p)``.
+    """
+    from jaccpot.pallas.m2l_real_fused import m2l_real_fused_jax
+
+    return make_m2l_real_fused_carry_axis_derivative(m2l_real_fused_jax)
+
+
+@functools.lru_cache(maxsize=1)
+def _complex_fused_carry_axis_derivative() -> Any:
+    """The complex fused M2L's tangent carrier, built once.
+
+    Returns
+    -------
+    Any
+        ``carry(out, coeffs, delta, blocks_to_z, blocks_from_z, radii, order=p)``.
+    """
+    from jaccpot.pallas.m2l_complex_fused import m2l_complex_fused_jax
+
+    return make_m2l_complex_fused_carry_axis_derivative(m2l_complex_fused_jax)
+
 
 from ..dtypes import INDEX_DTYPE
 from ..fmm_caches import (
@@ -68,6 +112,8 @@ from ..fmm_caches import (
     _grouped_segment_cache_key,
     _grouped_segment_cache_put,
 )
+
+__all__: list[str] = []
 
 
 @partial(jax.jit, static_argnames=("order", "rotation"))
@@ -1077,7 +1123,7 @@ def _m2l_real_batch_kernel(
     mode = str(m2l_impl).strip().lower()
     if mode != "rot_scale":
         raise ValueError("real-basis m2l_impl must be 'rot_scale'")
-    return m2l_rot_scale_real_batch(multipoles, deltas, order=order, use_pallas=False)
+    return m2l_rot_scale_real_batch(multipoles, deltas, order=order)
 
 
 def _real_m2l_pallas_active() -> bool:
@@ -1131,7 +1177,7 @@ def _m2l_real_batch_kernel_fused_pallas(
       ``deltas`` **before** the radius and both block stacks are built, so
       everything the kernel sees comes from a displacement whose unusable transverse
       tangent has already been removed;
-    * :func:`~jaccpot.operators.m2l_real_rot_scale.m2l_real_fused_carry_axis_derivative`
+    * :func:`~jaccpot.operators.m2l_real_rot_scale.make_m2l_real_fused_carry_axis_derivative`
       runs on the output and adds the analytic term back, computing the one operator
       application it needs with the pure-JAX twin the kernel's own ``custom_vjp`` already
       uses as its correctness reference.
@@ -1179,7 +1225,6 @@ def _m2l_real_batch_kernel_fused_pallas(
         raise ValueError("real-basis m2l_impl must be 'rot_scale'")
     from jaccpot.operators.m2l_real_rot_scale import (
         m2l_real_fused_align_deltas,
-        m2l_real_fused_carry_axis_derivative,
         real_rotation_blocks_from_z_local_batch,
         real_rotation_blocks_to_z_multipole_batch,
     )
@@ -1201,7 +1246,7 @@ def _m2l_real_batch_kernel_fused_pallas(
     # custom_vjp wrapper (forward == raw kernel) so this fused path is also
     # differentiable; see the complex counterpart above.
     out = m2l_real_fused_pallas_cvjp(multipoles, bto, bfr, r, order, False, "triton")
-    return m2l_real_fused_carry_axis_derivative(
+    return _real_fused_carry_axis_derivative()(
         out, multipoles, deltas, bto, bfr, r, order=order
     )
 
@@ -1309,7 +1354,7 @@ def _m2l_complex_batch_kernel_fused_pallas(
     wrap it. Instead
     :data:`~jaccpot.operators.complex_ops.m2l_complex_fused_align_deltas` runs on
     ``deltas`` **before** the radius and both block stacks are built, and
-    :data:`~jaccpot.operators.complex_ops.m2l_complex_fused_carry_axis_derivative` runs on
+    :func:`~jaccpot.operators.complex_ops.make_m2l_complex_fused_carry_axis_derivative` runs on
     the output and adds the analytic term back.
 
     The withdrawal alone was already in force here, because
@@ -1351,7 +1396,7 @@ def _m2l_complex_batch_kernel_fused_pallas(
     out = m2l_complex_fused_pallas_cvjp(
         src_mult, blocks_to_z, blocks_from_z, r, order, False, "triton"
     )
-    return m2l_complex_fused_carry_axis_derivative(
+    return _complex_fused_carry_axis_derivative()(
         out, src_mult, deltas, blocks_to_z, blocks_from_z, r, order=order
     )
 

@@ -37,6 +37,7 @@ from yggdrax.tree import (
     reorder_particles_by_indices,
 )
 
+from jaccpot._jax_compat import Tracer
 from jaccpot.downward.local_expansions import (
     LocalExpansionData,
     TreeDownwardData,
@@ -117,12 +118,21 @@ from .kernels.core import (
 )
 
 if TYPE_CHECKING:  # pragma: no cover - annotations only, no runtime import
-    # The mixins annotate `self` as the engine they are mixed into, which lives in
-    # `_fmm_impl` and imports *them* -- so this must stay under TYPE_CHECKING or it
-    # would form the cycle ARCHITECTURE §8 forbids. Before this block the names were
-    # dangling: `typing.get_type_hints` raised NameError on every mixin method, so the
-    # annotations documented an intent no tool could check.
+    # The engine lives in `_fmm_impl`, which imports *these mixins* -- so this import
+    # must stay under TYPE_CHECKING or it would form the cycle ARCHITECTURE §8
+    # forbids. Inheriting `_EngineBase` makes each mixin *be* the engine under a type
+    # checker, so every `self.<engine attribute>` resolves; at runtime the alias is
+    # `object`, leaving the MRO exactly as it was. The audit's E.2 records why this
+    # beats annotating `self`, and what it does not buy at runtime.
     from ._fmm_impl import FMMEngine, PreparedStateLike
+
+    _EngineBase = FMMEngine
+else:  # pragma: no cover - annotations only, never an import at runtime
+    _EngineBase = object
+
+__all__ = [
+    "PrepareMixin",
+]
 
 
 class _DualDownwardPlan(NamedTuple):
@@ -139,74 +149,81 @@ class _DualDownwardPlan(NamedTuple):
     ``runtime_traversal_config`` is carried through rather than merely read: the
     resolution can clamp it, and the clamped value is what the build must see.
 
-    Every field is annotated ``object`` rather than its real type. That is
-    deliberate and predates this docstring: the precise types live in
-    ``yggdrax`` and importing them here would pull the traversal package into a
-    module the engine imports, which section 8 forbids. The descriptions below
-    carry what the annotations cannot.
+    Every field used to be annotated ``object``, on the stated grounds that "the
+    precise types live in ``yggdrax`` and importing them here would pull the
+    traversal package into a module the engine imports, which section 8 forbids".
+    That reason did not hold, and the annotations are now the real types.
+
+    It did not hold for two independent reasons. This module already imports
+    ``yggdrax.interactions`` at module scope, so the import it warned about was
+    present either way; and sixteen of the seventeen fields are plain booleans
+    that need no import at all -- every one of them is assigned a ``bool(...)``,
+    a ``not``, or a comparison in ``_resolve_dual_downward_plan``. Only
+    ``runtime_traversal_config`` needs a yggdrax name, and that name
+    (``DualTreeTraversalConfig``) was already imported. See audit E.4 bucket E.
 
     Attributes
     ----------
-    adaptive_order_active : object
+    adaptive_order_active : bool
         Whether per-node adaptive expansion order is switched on for this build.
-    allow_split_build : object
+    allow_split_build : bool
         Whether the prepare stage may split tree build and traversal into two
         device passes to cap peak memory.
-    grouped_interactions_active : object
+    grouped_interactions_active : bool
         Whether the M2L feed uses the grouped (class-major) interaction layout.
-    jit_traversal_for_prepare : object
+    jit_traversal_for_prepare : bool
         Whether this build's traversal runs jitted.
-    mixed_order_farfield_active : object
+    mixed_order_farfield_active : bool
         Whether the far field mixes expansion orders across gears.
-    need_compact_far_pairs : object
+    need_compact_far_pairs : bool
         Whether the traversal must emit the compact tagged far-pair payload.
-    need_node_interactions : object
+    need_node_interactions : bool
         Whether the traversal must emit a node interaction list. False is the
         streamed path, which never materialises one.
-    need_traversal_result : object
+    need_traversal_result : bool
         Whether the full walk result is retained rather than discarded once the
         payloads are extracted.
-    retain_interactions_active : object
+    retain_interactions_active : bool
         Whether the prepared state keeps its interaction list for reuse.
-    runtime_traversal_config : object
+    runtime_traversal_config : Optional[DualTreeTraversalConfig]
         The traversal capacities this build must use -- possibly clamped during
         resolution, which is why it is carried rather than re-read.
-    stateful_cache_enabled : object
+    stateful_cache_enabled : bool
         Whether the process-level interaction cache may be consulted and written.
-    strict_mode_active : object
+    strict_mode_active : bool
         Whether the static-radix strict lane is in play.
-    strict_streamed_fast_path : object
+    strict_streamed_fast_path : bool
         Whether the strict lane additionally qualifies for the streamed fast path.
-    tree_mode_static_radix : object
+    tree_mode_static_radix : bool
         Whether the tree build is the static radix mode the strict lane requires.
-    use_compact_streamed_pairs : object
+    use_compact_streamed_pairs : bool
         Whether far pairs are consumed in the compact streamed form.
-    use_dense_interactions_for_prepare : object
+    use_dense_interactions_for_prepare : bool
         Whether this build uses dense interaction buffers.
-    use_paper_fixed_policy : object
+    use_paper_fixed_policy : bool
         Whether the Dehnen paper-style fixed acceptance policy applies.
     """
 
-    adaptive_order_active: object
-    allow_split_build: object
-    grouped_interactions_active: object
-    jit_traversal_for_prepare: object
-    mixed_order_farfield_active: object
-    need_compact_far_pairs: object
-    need_node_interactions: object
-    need_traversal_result: object
-    retain_interactions_active: object
-    runtime_traversal_config: object
-    stateful_cache_enabled: object
-    strict_mode_active: object
-    strict_streamed_fast_path: object
-    tree_mode_static_radix: object
-    use_compact_streamed_pairs: object
-    use_dense_interactions_for_prepare: object
-    use_paper_fixed_policy: object
+    adaptive_order_active: bool
+    allow_split_build: bool
+    grouped_interactions_active: bool
+    jit_traversal_for_prepare: bool
+    mixed_order_farfield_active: bool
+    need_compact_far_pairs: bool
+    need_node_interactions: bool
+    need_traversal_result: bool
+    retain_interactions_active: bool
+    runtime_traversal_config: Optional[DualTreeTraversalConfig]
+    stateful_cache_enabled: bool
+    strict_mode_active: bool
+    strict_streamed_fast_path: bool
+    tree_mode_static_radix: bool
+    use_compact_streamed_pairs: bool
+    use_dense_interactions_for_prepare: bool
+    use_paper_fixed_policy: bool
 
 
-class PrepareMixin:
+class PrepareMixin(_EngineBase):
     def _validate_prepare_state_request(
         self,
         *,
@@ -3074,7 +3091,7 @@ class PrepareMixin:
         if indices.shape[0] == 0:
             return indices.astype(INDEX_DTYPE)
         # Under JAX tracing we cannot materialize min/max as Python ints.
-        if isinstance(indices, jax.core.Tracer):
+        if isinstance(indices, Tracer):
             return indices.astype(INDEX_DTYPE)
         min_idx = int(jnp.min(indices))
         max_idx = int(jnp.max(indices))
@@ -3479,6 +3496,84 @@ class PrepareMixin:
         outright, then the reuse modes, then a prepass. Two of the bugs this
         branch fixed came from duplicating parts of this decision, so it lives in
         exactly one place.
+
+        Most of the parameter list is not consulted at all on the common paths:
+        an explicitly supplied scale, a reusable cached one, or the unity
+        fallback each return without touching the build knobs. They are here
+        because the prepass branch re-enters a full solve and needs the *same*
+        configuration the caller is preparing -- a prepass run under different
+        knobs would measure a different problem.
+
+        Not jittable. It branches on Python-level engine state, can re-enter
+        :meth:`compute_accelerations`, and writes back to
+        ``self._last_force_scale_nodes``.
+
+        Parameters
+        ----------
+        tree_artifacts : _PrepareStateTreeUpwardArtifacts
+            The tree and upward data this prepare already built. Its node count
+            is what a supplied scale is validated against, and reusing it is what
+            keeps the prepass on the same topology.
+        supplied_force_scale : Optional[Array]
+            Caller-provided per-node scale, or ``None``. When given it wins
+            outright -- no prepass, no cache read, **and no cache write**, so the
+            next prepare does not silently inherit it.
+        positions_arr : Array
+            ``[N, 3]`` positions. Its dtype is the dtype every returned scale is
+            cast to; the values are used only if a prepass runs.
+        masses_arr : Array
+            ``[N]`` masses. Used only by the re-entrant prepass.
+        bounds : Optional[Tuple[Array, Array]]
+            Root-box corners forwarded to the prepass solve, or ``None``.
+        leaf_size : int
+            Leaf size forwarded to the prepass solve.
+        max_order : int
+            The caller's expansion order. Not used directly for the prepass,
+            which runs at a *low* order -- ``min(policy_orders)``, or 1 for the
+            paper prepass -- since the scale only needs a magnitude estimate.
+        jit_tree : Optional[bool]
+            Forwarded to the prepass solve; ``None`` leaves the engine default.
+        upward_center_mode : str
+            Expansion-centre mode forwarded to the prepass builders.
+        runtime_traversal_config : Optional[DualTreeTraversalConfig]
+            Traversal capacities forwarded to the prepass builders.
+        runtime_m2l_chunk_size : Optional[int]
+            M2L chunk size forwarded to the prepass builders.
+        runtime_l2l_chunk_size : Optional[int]
+            L2L chunk size forwarded to the prepass builders.
+        grouped_interactions : bool
+            Grouped-interaction flag forwarded to the prepass builders.
+        farfield_mode : str
+            Far-field mode forwarded to the prepass builders.
+        record_retry : Callable[[DualTreeRetryEvent], None]
+            Sink for traversal retry events raised inside the prepass, so a
+            capacity retry during the prepass is reported against the caller's
+            prepare rather than lost.
+        refine_local_val : bool
+            Host-side refinement flag forwarded to the prepass builders.
+        max_refine_levels_val : int
+            Refinement depth cap forwarded to the prepass builders.
+        aspect_threshold_val : float
+            Aspect-ratio threshold forwarded to the prepass builders.
+
+        Returns
+        -------
+        Optional[Array]
+            ``[num_nodes]`` per-node force scale in ``positions_arr``'s dtype, or
+            ``None`` when the configuration does not use a paper-style scale.
+            ``None`` is meaningful, not a failure: downstream,
+            ``build_adaptive_policy_state`` substitutes ``jnp.ones(...)``, which
+            is a *different acceptance criterion* (``eps * 1`` rather than
+            ``eps * min_b |a_b|``). That silent substitution is exactly what this
+            method was extracted to stop happening by accident.
+
+        Raises
+        ------
+        ValueError
+            If ``supplied_force_scale`` is not one-dimensional of length equal to
+            the node count of the tree this call built; or if a prepass is needed
+            but ``policy_orders`` is empty, which would leave no order to run it
+            at.
         """
 
         force_scale_nodes: Optional[Array] = None
@@ -3634,7 +3729,10 @@ class PrepareMixin:
                 if not use_fb_prepass:
                     force_scale_nodes = self._compute_node_force_scale_from_sorted_acc(
                         tree=tree_artifacts.tree,
-                        accelerations_sorted=prepass_sorted,
+                        # Bound by both the `use_paper_prepass` and the `else`
+                        # branch above, i.e. exactly when `use_fb_prepass` is
+                        # False, which is what gates this block -- E.4 bucket D.
+                        accelerations_sorted=prepass_sorted,  # pyright: ignore[reportPossiblyUnboundVariable]
                         reduction=reduction_mode,
                     ).astype(positions_arr.dtype)
                     self._last_force_scale_nodes = force_scale_nodes
@@ -3642,7 +3740,7 @@ class PrepareMixin:
 
     @jaxtyped(typechecker=beartype)
     def prepare_state(
-        self: "FMMEngine",
+        self,
         positions: Array,
         masses: Array,
         **kwargs: Any,
@@ -3719,7 +3817,7 @@ class PrepareMixin:
             raise  # pragma: no cover - reraise_with_capacity_report always raises
 
     def _prepare_state_uncaught(
-        self: "FMMEngine",
+        self,
         positions: Array,
         masses: Array,
         *,

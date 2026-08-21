@@ -25,7 +25,6 @@ kernel, so the two are trivially equivalent.
 from __future__ import annotations
 
 import functools
-import os
 
 import jax
 import jax.numpy as jnp
@@ -412,6 +411,7 @@ def _block_matmul_vjp(
 
     Forward: ``o = block @ vec`` in complex (real/imag), i.e.
     ``o_r = Br vr - Bi vi``, ``o_i = Br vi + Bi vr`` (sum over j).
+
     Parameters
     ----------
     block_r : Array

@@ -52,6 +52,22 @@ class LeafPairReverseOptions:
     travel four layers down (``differentiable_accelerations`` -> the eval seam
     -> ``evaluate_tree`` -> the fast lane) and ride through a ``custom_vjp`` in
     ``nondiff_argnums``, which requires it to be hashable.
+
+    Attributes
+    ----------
+    tiered : bool
+        Use the occupancy-tiered reverse rather than a single pass.
+    max_tiers : int
+        Cap on the number of tiers.
+    tier_min_gain : float
+        Minimum predicted slot-visit reduction before tiering is worth its
+        compile cost.
+    skip_empty_tiles : bool
+        Skip tiles with no live pairs.
+    leaf_batch : int
+        Target leaves per reverse batch.
+    block_tile : int
+        Slot-tile width the reverse scans with.
     """
 
     tiered: bool = True
@@ -64,7 +80,30 @@ class LeafPairReverseOptions:
 
 @dataclass(frozen=True)
 class ResolvedGradOptions:
-    """Fully-resolved grad-path execution options. No ``None`` values remain."""
+    """Fully-resolved grad-path execution options. No ``None`` values remain.
+
+    "Resolved" is the contract: every field is concrete, so the deep gates never
+    have to re-derive a default or consult the environment. Produced once at the
+    top of a grad call and installed with :func:`grad_option_overrides`.
+
+    Attributes
+    ----------
+    nearfield_lane : str
+        Which near-field reverse lane runs.
+    nearfield_lane_was_auto : bool
+        Whether ``nearfield_lane`` came from auto-selection rather than the caller.
+        Kept because a diagnostic needs to distinguish "chose this" from "was told
+        this".
+    fused_m2l_pallas : bool
+        Whether the fused Pallas M2L is requested; hardware support is checked
+        separately.
+    analytic_p2p_vjp : bool
+        Use the analytic near-field P2P reverse rule.
+    analytic_l2p_vjp : bool
+        Use the analytic real-basis L2P reverse rule.
+    reverse : LeafPairReverseOptions
+        Tuning for the analytic leaf-pair reverse.
+    """
 
     nearfield_lane: str  # "bucketed" | "fast_lane"
     nearfield_lane_was_auto: bool
@@ -204,7 +243,14 @@ _analytic_l2p_vjp_override: ContextVar[Optional[bool]] = ContextVar(
 
 
 def fused_m2l_pallas_enabled() -> bool:
-    """Whether the fused-Pallas M2L is requested (hardware support checked separately)."""
+    """Whether the fused-Pallas M2L is requested (hardware support checked separately).
+
+    Returns
+    -------
+    bool
+        ``True`` when the fused lane is requested. Requested, not available: the
+        Ampere+ gate is a separate check, so a ``True`` here can still fall back.
+    """
     override = _fused_m2l_pallas_override.get()
     if override is not None:
         return bool(override)
@@ -212,7 +258,13 @@ def fused_m2l_pallas_enabled() -> bool:
 
 
 def analytic_p2p_vjp_enabled() -> bool:
-    """Whether the analytic near-field P2P reverse rule is enabled (default on)."""
+    """Whether the analytic near-field P2P reverse rule is enabled (default on).
+
+    Returns
+    -------
+    bool
+        ``True`` when the analytic P2P reverse is enabled. On by default.
+    """
     override = _analytic_p2p_vjp_override.get()
     if override is not None:
         return bool(override)
@@ -220,7 +272,13 @@ def analytic_p2p_vjp_enabled() -> bool:
 
 
 def analytic_l2p_vjp_enabled() -> bool:
-    """Whether the analytic real-basis L2P reverse rule is enabled (default on)."""
+    """Whether the analytic real-basis L2P reverse rule is enabled (default on).
+
+    Returns
+    -------
+    bool
+        ``True`` when the analytic L2P reverse is enabled. On by default.
+    """
     override = _analytic_l2p_vjp_override.get()
     if override is not None:
         return bool(override)
@@ -232,6 +290,20 @@ def grad_option_overrides(options: ResolvedGradOptions) -> Iterator[None]:
     """Install ``options`` as the context-local answer for the deep gates.
 
     Scoped to the ``with`` block and restored on exit, including on exception.
+
+    The gates are read far below the call that resolves them, so the value travels
+    context-locally rather than through four layers of arguments.
+
+    Parameters
+    ----------
+    options : ResolvedGradOptions
+        Fully-resolved options to install for the duration of the block.
+
+    Yields
+    ------
+    None
+        Nothing; the value is delivered through the module-local gates, not through
+        the ``as`` target.
     """
     tokens = (
         _fused_m2l_pallas_override.set(options.fused_m2l_pallas),

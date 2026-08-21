@@ -12,9 +12,11 @@ import jax.numpy as jnp
 from beartype.typing import Callable
 from jaxtyping import Array
 from yggdrax.interactions import (
+    CompactTaggedFarPairs,
     DualTreeRetryEvent,
     DualTreeTraversalConfig,
     MACType,
+    NodeInteractionList,
     build_octree_native_far_pairs,
     build_octree_native_neighbor_lists,
 )
@@ -46,12 +48,21 @@ from .fmm_state import (
 from .kernels.core import _build_nearfield_interop_data
 
 if TYPE_CHECKING:  # pragma: no cover - annotations only, no runtime import
-    # The mixins annotate `self` as the engine they are mixed into, which lives in
-    # `_fmm_impl` and imports *them* -- so this must stay under TYPE_CHECKING or it
-    # would form the cycle ARCHITECTURE §8 forbids. Before this block the names were
-    # dangling: `typing.get_type_hints` raised NameError on every mixin method, so the
-    # annotations documented an intent no tool could check.
+    # The engine lives in `_fmm_impl`, which imports *these mixins* -- so this import
+    # must stay under TYPE_CHECKING or it would form the cycle ARCHITECTURE §8
+    # forbids. Inheriting `_EngineBase` makes each mixin *be* the engine under a type
+    # checker, so every `self.<engine attribute>` resolves; at runtime the alias is
+    # `object`, leaving the MRO exactly as it was. The audit's E.2 records why this
+    # beats annotating `self`, and what it does not buy at runtime.
     from ._fmm_impl import FMMEngine
+
+    _EngineBase = FMMEngine
+else:  # pragma: no cover - annotations only, never an import at runtime
+    _EngineBase = object
+
+__all__ = [
+    "PolicyMixin",
+]
 
 
 #: Opening angle the force-scale prepass traversal defaults to. See
@@ -61,8 +72,8 @@ _DEFAULT_FORCE_SCALE_PREPASS_THETA = 0.5
 
 def _far_pair_arrays_for_fb_prepass(
     *,
-    interactions: object,
-    compact_far_pairs: object,
+    interactions: Optional[NodeInteractionList],
+    compact_far_pairs: Optional[CompactTaggedFarPairs],
 ) -> tuple[Optional[Array], Optional[Array]]:
     """Return flat (sources, targets) far-pair arrays for the eq (16b) estimator.
 
@@ -83,10 +94,10 @@ def _far_pair_arrays_for_fb_prepass(
 
     Parameters
     ----------
-    interactions : object
+    interactions : Optional[NodeInteractionList]
         Node interaction list, when the lane produced one. Preferred: its arrays
         already use the ``-1`` convention, so they pass through untouched.
-    compact_far_pairs : object
+    compact_far_pairs : Optional[CompactTaggedFarPairs]
         Streamed-lane compact far pairs, used when there is no interaction list.
         Its padding is rewritten to ``-1`` here.
 
@@ -111,8 +122,8 @@ def _far_pair_arrays_for_fb_prepass(
     return jnp.where(live, sources, sentinel), jnp.where(live, targets, sentinel)
 
 
-class PolicyMixin:
-    def _solidfmm_basis_mode(self: "FMMEngine") -> str:
+class PolicyMixin(_EngineBase):
+    def _solidfmm_basis_mode(self) -> str:
         """Return active solidfmm coefficient family ('complex' or 'real').
 
         Reads the basis object's own name rather than ``expansion_basis``: the
@@ -131,7 +142,7 @@ class PolicyMixin:
         return "complex"
 
     def _compute_node_force_scale_from_sorted_acc(
-        self: "FMMEngine",
+        self,
         *,
         tree: Tree,
         accelerations_sorted: Array,
@@ -163,7 +174,7 @@ class PolicyMixin:
         )
 
     def _record_force_scale_from_evaluation(
-        self: "FMMEngine",
+        self,
         *,
         state: FMMPreparedState,
         evaluation: object,
@@ -222,7 +233,7 @@ class PolicyMixin:
         )
 
     def _source_error_proxy_by_order_from_multipoles(
-        self: "FMMEngine",
+        self,
         *,
         multipole_packed: Array,
         p_gears: tuple[int, ...],
@@ -249,7 +260,7 @@ class PolicyMixin:
             p_gears=p_gears,
         )
 
-    def _adaptive_error_model_code(self: "FMMEngine") -> int:
+    def _adaptive_error_model_code(self) -> int:
         """Return the integer policy code for the active adaptive error model.
 
         Returns
@@ -266,7 +277,7 @@ class PolicyMixin:
             return 1
         return 0
 
-    def _uses_dehnen_error_policy(self: "FMMEngine") -> bool:
+    def _uses_dehnen_error_policy(self) -> bool:
         """Return whether the solver evaluates the Dehnen error criterion at all.
 
         True for both ``dehnen_error`` (exact, evaluated pair-by-pair through a
@@ -286,7 +297,7 @@ class PolicyMixin:
 
         return str(self.mac_type) in ("dehnen_error", "dehnen_theta")
 
-    def _uses_per_node_effective_theta(self: "FMMEngine") -> bool:
+    def _uses_per_node_effective_theta(self) -> bool:
         """Return whether the MAC is folded into a per-node opening angle.
 
         ``dehnen_theta`` evaluates the same Dehnen criterion as ``dehnen_error``,
@@ -320,7 +331,7 @@ class PolicyMixin:
 
         return str(self.mac_type) == "dehnen_theta"
 
-    def _uses_dehnen_paper_error_model(self: "FMMEngine") -> bool:
+    def _uses_dehnen_paper_error_model(self) -> bool:
         """Return whether the active adaptive error model is the paper estimator.
 
         Returns
@@ -332,7 +343,7 @@ class PolicyMixin:
 
         return self.adaptive_error_model == "dehnen_paper"
 
-    def _uses_paper_style_traversal_policy(self: "FMMEngine") -> bool:
+    def _uses_paper_style_traversal_policy(self) -> bool:
         """Return whether traversal should use the paper-style error policy.
 
         Returns
@@ -344,7 +355,7 @@ class PolicyMixin:
 
         return self._uses_dehnen_paper_error_model() or self._uses_dehnen_error_policy()
 
-    def _traversal_policy_error_model_code(self: "FMMEngine") -> int:
+    def _traversal_policy_error_model_code(self) -> int:
         """Return the policy error model code used during traversal.
 
         Returns
@@ -360,7 +371,7 @@ class PolicyMixin:
             return 2
         return self._adaptive_error_model_code()
 
-    def _force_scale_reduction_mode(self: "FMMEngine") -> str:
+    def _force_scale_reduction_mode(self) -> str:
         """Return the node reduction mode used for adaptive force scales.
 
         Returns
@@ -373,7 +384,7 @@ class PolicyMixin:
 
         return "min" if self._uses_dehnen_paper_error_model() else "max"
 
-    def _uses_fb_force_scale(self: "FMMEngine") -> bool:
+    def _uses_fb_force_scale(self) -> bool:
         """Return whether the force scale is eq (16b)'s ``f_b`` rather than ``|a_b|``.
 
         eq (16b) is eq (16a) with ``min_b f_b`` on the right-hand side instead of
@@ -391,7 +402,7 @@ class PolicyMixin:
 
         return str(self.mac_force_scale_mode) in ("paper_fb", "paper_fb_cached")
 
-    def _force_scale_prepass_theta(self: "FMMEngine") -> float:
+    def _force_scale_prepass_theta(self) -> float:
         """Return the opening angle the force-scale prepass traversal should use.
 
         The prepass runs a *geometric* traversal, so its own theta decides how much
@@ -429,7 +440,7 @@ class PolicyMixin:
             return float(override)
         return _DEFAULT_FORCE_SCALE_PREPASS_THETA
 
-    def _uses_paper_style_force_scale(self: "FMMEngine") -> bool:
+    def _uses_paper_style_force_scale(self) -> bool:
         """Return whether prepare_state needs paper-style force-scale handling.
 
         Returns
@@ -480,7 +491,7 @@ class PolicyMixin:
             "dehnen" if str(mac_type) in ("dehnen_error", "dehnen_theta") else mac_type
         )
 
-    def _base_mac_type(self: "FMMEngine") -> MACType:
+    def _base_mac_type(self) -> MACType:
         """Return the Yggdrax-facing geometric MAC for the active solver mode.
 
         Returns
@@ -492,9 +503,7 @@ class PolicyMixin:
 
         return self._mac_type_for_traversal(self.mac_type)
 
-    def _policy_orders_for_prepare_state(
-        self: "FMMEngine", *, max_order: int
-    ) -> tuple[int, ...]:
+    def _policy_orders_for_prepare_state(self, *, max_order: int) -> tuple[int, ...]:
         """Return candidate orders used to build adaptive traversal policy state.
 
         The paper estimator without adaptive order runs at a single fixed order,
@@ -518,7 +527,7 @@ class PolicyMixin:
         return self.p_gears
 
     def _build_adaptive_policy_state(
-        self: "FMMEngine",
+        self,
         *,
         upward: TreeUpwardData,
         tree: Tree,
@@ -580,7 +589,7 @@ class PolicyMixin:
         )
 
     def _apply_per_node_effective_theta(
-        self: "FMMEngine",
+        self,
         *,
         tree_artifacts: _PrepareStateTreeUpwardArtifacts,
         force_scale_nodes: Optional[Array],
@@ -669,9 +678,7 @@ class PolicyMixin:
         )
 
     @contextlib.contextmanager
-    def _force_scale_prepass_scope(
-        self: "FMMEngine", *, low_order: int
-    ) -> Iterator[None]:
+    def _force_scale_prepass_scope(self, *, low_order: int) -> Iterator[None]:
         """Run a force-scale prepass with solver state restored on the way out.
 
         A prepass is an inner solve on the same particles, so it necessarily
@@ -724,7 +731,7 @@ class PolicyMixin:
             self._in_force_scale_prepass = False
 
     def _compute_force_scale_fb_prepass_from_tree_artifacts(
-        self: "FMMEngine",
+        self,
         *,
         tree_artifacts: _PrepareStateTreeUpwardArtifacts,
         upward_center_mode: str,
@@ -863,7 +870,7 @@ class PolicyMixin:
         )
 
     def _compute_force_scale_paper_prepass_from_tree_artifacts(
-        self: "FMMEngine",
+        self,
         *,
         tree_artifacts: _PrepareStateTreeUpwardArtifacts,
         low_order: int,

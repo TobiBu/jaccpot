@@ -46,7 +46,46 @@ def _self_contributions(
     G: Array,
     compute_potential: bool,
 ) -> Tuple[Array, Optional[Array]]:
-    """Compute intra-leaf particle-particle contributions."""
+    """Compute intra-leaf particle-particle contributions.
+
+    Self interaction only -- each leaf against itself, with the diagonal removed.
+    The cross-leaf half is :func:`_pair_contributions`; summing the two is what
+    makes the near field. This term is deliberately **not** covered by
+    ``_pair_accel_cvjp`` (see the comment at the remat site), so it differentiates
+    through the ordinary autodiff of the block below.
+
+    Parameters
+    ----------
+    leaf_positions : Array
+        ``[num_leaves, W, 3]`` positions, leaf-major and slot-padded to the leaf
+        capacity ``W``. Padded slots must be excluded by ``mask``; their
+        coordinate values are otherwise unconstrained and never read.
+    leaf_masses : Array
+        ``[num_leaves, W]`` masses under the same padding.
+    mask : Array
+        ``[num_leaves, W]`` boolean occupancy. Load-bearing twice over: it gates
+        the pair block, and it zeroes the output rows for padded targets. A mask
+        that admits a padded slot contributes a spurious body at whatever
+        coordinates the padding holds.
+    softening_sq : Union[float, Array]
+        Plummer softening **squared**, added to every squared separation. A
+        scalar applies to all leaves.
+    G : Array
+        Gravitational constant. An array, not a float, so it can be traced.
+    compute_potential : bool
+        Whether to return potentials. Static under ``jit`` -- it selects the
+        return arity, so it cannot be a traced value.
+
+    Returns
+    -------
+    Array
+        ``[num_leaves, W, 3]`` accelerations, zero on padded slots.
+    Optional[Array]
+        ``[num_leaves, W]`` potentials when ``compute_potential`` is true, else
+        ``None``. Turning it off skips the potential reduction but not the pair
+        work, and the scan still carries a zero-filled ``[num_leaves, W]`` stack
+        that is then dropped -- so it saves flops, not that allocation.
+    """
     dtype = leaf_positions.dtype
     leaf_size = leaf_positions.shape[1]
     identity = jnp.eye(leaf_size, dtype=bool)

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import os
-from typing import Any, Optional
+from typing import TYPE_CHECKING, Any, Optional
 
 import jax.numpy as jnp
 from jaxtyping import Array
@@ -25,6 +25,25 @@ from ._large_n_types import LargeNExecutionConfig, LargeNPreparedState
 from ._nearfield_cache import NearfieldPrecomputeArtifacts
 from .dtypes import INDEX_DTYPE, as_index
 
+if TYPE_CHECKING:  # pragma: no cover - annotations only, no runtime import
+    # The engine lives in `_fmm_impl`, which reaches this module through the
+    # mixins it inherits, so this import must stay under TYPE_CHECKING or it
+    # would form the cycle ARCHITECTURE section 8 forbids. Unlike `self` on a
+    # mixin, `fmm` here is an ordinary parameter, so naming the engine is both
+    # valid and what lets the `fmm.<attribute>` reads below be checked at all
+    # (audit E.4 bucket E).
+    from ._fmm_impl import FMMEngine
+
+__all__ = [
+    "build_large_n_leaf_particle_groups",
+    "build_large_n_nearfield_precompute",
+    "build_large_n_target_owned_blocks",
+    "build_large_n_target_owned_blocks_static",
+    "evaluate_large_n_nearfield_fast_lane",
+    "normalize_large_n_nearfield_diag_mode",
+    "resolve_large_n_execution_config",
+]
+
 _RADIX_FAST_LANE_DEFAULT_TARGET_BLOCK_SIZE = 32
 _LARGE_N_NEARFIELD_DIAG_MODES = frozenset(
     ("full", "self_only", "pairs_only", "overflow_only", "zero")
@@ -32,6 +51,17 @@ _LARGE_N_NEARFIELD_DIAG_MODES = frozenset(
 
 
 def normalize_large_n_nearfield_diag_mode() -> str:
+    """Read the large-N near-field diagnostic mode from the environment.
+
+    Set by ``JACCPOT_LARGE_N_NEARFIELD_DIAG_MODE``. An unrecognised value falls
+    back to ``"full"`` rather than raising, since this only selects how much
+    diagnostic work runs.
+
+    Returns
+    -------
+    str
+        A recognised diagnostic mode; ``"full"`` by default.
+    """
     mode = (
         str(os.environ.get("JACCPOT_LARGE_N_NEARFIELD_DIAG_MODE", "full"))
         .strip()
@@ -46,7 +76,23 @@ def build_large_n_leaf_particle_groups(
     *,
     max_leaf_size: Optional[int] = None,
 ) -> tuple[Array, Array]:
-    """Return explicit per-leaf particle membership for radix full evaluation."""
+    """Return explicit per-leaf particle membership for radix full evaluation.
+
+    Parameters
+    ----------
+    tree : Tree
+        Tree supplying the node ranges and particle permutation.
+    neighbor_list : NodeNeighborList
+        Neighbour list supplying which nodes are leaves.
+    max_leaf_size : Optional[int]
+        Slot capacity per leaf; ``None`` derives it from the tree's widest leaf.
+
+    Returns
+    -------
+    tuple[Array, Array]
+        ``(particle_indices, mask)``, both ``(num_leaves, max_leaf_size)``, with
+        the mask marking the occupied slots in the padding.
+    """
 
     node_ranges = jnp.asarray(tree.node_ranges, dtype=INDEX_DTYPE)
     leaf_nodes = jnp.asarray(neighbor_list.leaf_indices, dtype=INDEX_DTYPE)
@@ -75,7 +121,7 @@ def build_large_n_leaf_particle_groups(
 
 
 def resolve_large_n_execution_config(
-    fmm: object,
+    fmm: "FMMEngine",
     *,
     num_particles: int,
 ) -> LargeNExecutionConfig:
@@ -84,6 +130,28 @@ def resolve_large_n_execution_config(
     The production large-N GPU radix/solidfmm path is locked to radix fast-lane
     execution. If no valid explicit target block size is provided via
     ``JACCPOT_LARGE_N_TARGET_BLOCK_SIZE``, the fast lane defaults to block size 32.
+
+    Parameters
+    ----------
+    fmm : FMMEngine
+        The engine whose configuration is being checked. Typed loosely to avoid
+        importing the engine here, which would close the ARCHITECTURE §8 cycle.
+    num_particles : int
+        Particle count, used to size the resolved schedule.
+
+    Returns
+    -------
+    LargeNExecutionConfig
+        The resolved near-field execution policy.
+
+    Raises
+    ------
+    ValueError
+        If the engine's configuration is not the locked fast-lane combination.
+        All five requirements are checked separately, so the message names the
+        one that failed: ``tree_type='radix'``, ``preset='large_n_gpu'``,
+        ``expansion_basis='solidfmm'``, ``working_dtype=float32`` and
+        ``grouped_interactions=False``.
     """
 
     nearfield_mode = "bucketed"
@@ -144,7 +212,28 @@ def build_large_n_target_owned_blocks(
     neighbor_list: NodeNeighborList,
     block_size: int,
 ) -> tuple[Array, Array, Array, Array]:
-    """Precompute target-owned source-leaf blocks for the large-N nearfield path."""
+    """Precompute target-owned source-leaf blocks for the large-N nearfield path.
+
+    Target-owned means each target leaf owns the blocks it reads, so the
+    evaluation scatters nothing across targets. The dynamic sibling of
+    :func:`build_large_n_target_owned_blocks_static`, which trades a capacity
+    limit for fixed shapes.
+
+    Parameters
+    ----------
+    tree : Tree
+        Tree supplying leaf identity.
+    neighbor_list : NodeNeighborList
+        Neighbour list defining each target leaf's sources.
+    block_size : int
+        Source leaves per block.
+
+    Returns
+    -------
+    tuple[Array, Array, Array, Array]
+        ``(block_target_leaf, block_source_leaf_ids, block_valid,
+        blocks_per_leaf)``.
+    """
 
     k = int(block_size)
     if k <= 0:
@@ -236,6 +325,36 @@ def build_large_n_target_owned_blocks_static(
     block_size)``. If any leaf needs more than ``max_blocks_per_leaf`` blocks,
     ``capacity_ok`` is false and callers should fall back to the dynamic
     builder.
+
+    The point of the fixed capacity is static shapes: a ``jit``-ed evaluation
+    needs the block tensors' shapes not to depend on the neighbour statistics.
+    Returning ``capacity_ok=False`` rather than raising is what lets the caller
+    degrade to the dynamic builder instead of failing.
+
+    Parameters
+    ----------
+    tree : Tree
+        Tree supplying leaf identity.
+    neighbor_list : NodeNeighborList
+        Neighbour list defining each target leaf's sources.
+    block_size : int
+        Source leaves per block.
+    max_blocks_per_leaf : int
+        Fixed per-leaf block capacity.
+    check_capacity : bool
+        Verify that no leaf needs more than ``max_blocks_per_leaf`` blocks. When
+        ``False`` the check is skipped and ``capacity_ok`` comes back ``True``
+        **without having been verified**, while any leaf needing more than
+        ``max_blocks_per_leaf * block_size`` sources has the excess silently
+        dropped -- a missing near-field contribution, not an error. Only pass
+        ``False`` when capacity is already known to hold.
+
+    Returns
+    -------
+    tuple[Array, Array, bool]
+        ``(source_leaf_ids_padded, valid_mask_padded, capacity_ok)``. On a
+        capacity failure the two tensors are zeros and ``capacity_ok`` is
+        ``False``, so a caller must check it before using them.
     """
 
     k = int(block_size)
@@ -310,7 +429,36 @@ def build_large_n_nearfield_precompute(
     leaf_particle_mask: Array,
     execution_config: LargeNExecutionConfig,
 ) -> NearfieldPrecomputeArtifacts:
-    """Build only the near-field artifacts needed by the large-N path."""
+    """Build only the near-field artifacts needed by the large-N path.
+
+    Deliberately narrower than the general near-field precompute: the large-N
+    lane's whole purpose is to not materialise artifacts it will not read.
+
+    Parameters
+    ----------
+    tree : Tree
+        Tree being prepared.
+    neighbor_list : NodeNeighborList
+        Near-field neighbour list.
+    leaf_particle_indices : Array
+        ``(num_leaves, max_leaf_size)`` particle membership.
+    leaf_particle_mask : Array
+        Occupancy mask of the same shape.
+    execution_config : LargeNExecutionConfig
+        Resolved policy from :func:`resolve_large_n_execution_config`.
+
+    Returns
+    -------
+    NearfieldPrecomputeArtifacts
+        Only the artifacts the large-N lane consumes.
+
+    Raises
+    ------
+    RuntimeError
+        If the engine is not in ``nearfield_mode='bucketed'``. A RuntimeError
+        rather than a ValueError because reaching here in another mode is a
+        wiring fault, not bad user input.
+    """
 
     if str(execution_config.nearfield_mode).strip().lower() != "bucketed":
         raise RuntimeError(
@@ -373,7 +521,7 @@ def build_large_n_nearfield_precompute(
 
 
 def evaluate_large_n_nearfield_fast_lane(
-    fmm: object,
+    fmm: "FMMEngine",
     state: LargeNPreparedState,
     *,
     return_potential: bool,
@@ -388,6 +536,37 @@ def evaluate_large_n_nearfield_fast_lane(
     both default to the state's own arrays, so production callers are unaffected.
     ``differentiable`` routes the fused Pallas lanes through their ``custom_vjp``
     wrappers (``pallas_call`` itself has no autodiff rule).
+
+    Parameters
+    ----------
+    fmm : FMMEngine
+        The engine, typed loosely to avoid the ARCHITECTURE §8 import cycle.
+    state : LargeNPreparedState
+        Prepared state carrying the frozen topology and the radix payload.
+    return_potential : bool
+        Also return potentials alongside accelerations.
+    positions_sorted : Any
+        Live positions overriding the state's frozen ones; ``None`` uses the
+        state's.
+    masses_sorted : Any
+        Live masses, same convention.
+    differentiable : bool
+        Route the Pallas lanes through their ``custom_vjp`` wrappers. Required
+        for a gradient; ``pallas_call`` alone has no autodiff rule, so leaving
+        this ``False`` under ``jax.grad`` fails rather than silently
+        approximating.
+
+    Returns
+    -------
+    Any
+        Accelerations, or ``(accelerations, potentials)`` when
+        ``return_potential`` is set.
+
+    Raises
+    ------
+    RuntimeError
+        If the prepared state carries no ``radix_fast_payload``. A wiring fault
+        rather than user input, as above.
     """
 
     use_pallas = bool(getattr(fmm, "use_pallas", False))

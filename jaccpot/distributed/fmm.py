@@ -11,7 +11,7 @@ inside one ``shard_map``:
     remote coarse tree  (frontier of leaf COMs, own domain excluded)
       all_gather local multipoles -> seed coarse leaves with the REAL order-p
       multipole of the remote leaf they stand for -> M2M up the coarse tree
-    cross-walk local vs coarse tree at ``theta_cross`` -> far (M2L) + near
+    cross-walk local vs coarse tree at ``theta`` -> far (M2L) + near
     two-round ragged halo import of the near remote particles
     far = self M2L (local list) + remote M2L (cross list, separate src/tgt
           centres) -> level-by-level L2L cascade -> L2P            (far = -G*grad)
@@ -105,6 +105,18 @@ from jaccpot.upward.solidfmm_complex_tree_expansions import (
 )
 from jaccpot.upward.tree_geometry import compute_tree_geometry_compiled
 
+__all__ = [
+    "DIAG_FIELDS",
+    "DistributedFMMConfig",
+    "DistributedFMMResult",
+    "GRAD_HALO_EXCHANGES",
+    "JAX_RAGGED_GRAD_FIXED_VERSION",
+    "distributed_fmm_accelerations",
+    "make_force_evaluator",
+    "partition_for_devices",
+    "resolve_grad_halo_exchange",
+]
+
 # Reverse-pass tiling for the differentiable fused near field. Mirrors the
 # single-GPU defaults in ``runtime/grad_options.py`` (leaf_batch/block_tile = 8);
 # the distributed body has no GradConfig channel, so they are fixed here.
@@ -154,19 +166,31 @@ class _TreecodeWalkDiag(NamedTuple):
 class DistributedFMMConfig:
     """Static knobs for the distributed FMM force evaluation.
 
-    ``order`` (multipole order ``p``), ``theta`` (local self MAC), ``theta_cross``
-    (cross-domain far-field MAC), ``leaf_size``, ``softening`` and ``G`` are the
-    physics/accuracy knobs.  The ``*_cap`` fields set fixed traversal buffer
+    ``order`` (multipole order ``p``), ``theta`` (the MAC, for **both** the local
+    self walk and the cross-domain walk), ``leaf_size``, ``softening`` and ``G`` are
+    the physics/accuracy knobs.  The ``*_cap`` fields set fixed traversal buffer
     shapes and therefore must be large enough to hold the interaction/neighbour
     lists without truncation -- grow them (see the capacity calibrator in the
     benchmark harness) for large N or strongly clustered distributions.  An
     overflow shows up in the returned diagnostics as a nonzero
     ``*_overflow`` flag.
+
+    ONE THETA, NOT TWO. There used to be a separate ``theta_cross``, defaulting to
+    0.1 against ``theta``'s 0.4. It was not physics: both walks apply the same MAC
+    to the same expansion order, and the stricter cross angle existed to compensate
+    for a defect in the coarse tree's MAC extents, which bounded the frontier's
+    centres of mass instead of the particles behind them (yggdrax
+    ``distributed/let.py``; see ``docs/distributed_cross_domain_far_diagnosis.md``).
+    Once the extents bound the particles, a fourfold-stricter cross angle only
+    rejects far pairs that were perfectly well separated, pushing the whole cross
+    field through the halo import for no accuracy gain -- measured at
+    ``theta_cross=0.1``: **zero** cross far pairs and 128 near, against 18 far and
+    106 near at 0.4, both at the float32 error floor. Do not reintroduce the knob to
+    "tune accuracy"; if the cross field is inaccurate the extents are wrong again.
     """
 
     order: int = 3
     theta: float = 0.4
-    theta_cross: float = 0.1
     leaf_size: int = 8
     softening: float = 0.02
     G: float = 1.0
@@ -860,7 +884,6 @@ def _make_fn(
     rot = config.rotation
     mac = config.mac_type
     theta = config.theta
-    theta_cross = config.theta_cross
     is_real = str(config.basis).strip().lower() == "real"
 
     # Local self-walk selection: dual-tree (default) or the fast-lane treecode walk.
@@ -1195,12 +1218,14 @@ def _make_fn(
             )
         coarse_packed_use = coarse_packed  # real when is_real, complex otherwise
 
+        # Same MAC as the self walk above: ``rct.geometry`` bounds the particles behind
+        # each coarse node, so the acceptance test means the same thing on both sides.
         cross = dual_tree_walk_cross_impl(
             tree,
             geom,
             rct.tree,
             rct.geometry,
-            theta_cross,
+            theta,
             mac_type=mac,
             max_interactions_per_node=KC,
             max_neighbors_per_leaf=KN,

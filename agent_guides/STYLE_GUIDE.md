@@ -125,14 +125,156 @@ Never write a docstring that restates the name. `"""Compute the multipole."""` o
 ## 4. Type annotations
 
 - Full annotations on public functions and on internal functions whose types are not obvious.
-- **`jaxtyping` for array arguments** (already in 49 modules) so shape and dtype live in the
-  signature. Plain `Array` throws away exactly what the reader needs. Keep axis names
-  consistent so `jaxtyping` can cross-check within a signature.
-- `beartype` provides the runtime check; it is opt-in via `JACCPOT_RUNTIME_TYPECHECK=1`.
-  Run it on the unit tests when you touch signatures.
 - Use `TypeVar` for decorators that must preserve the wrapped signature (see
   `_precision.py`). A targeted `# type: ignore[return-value]` with an obvious reason is
   acceptable; a bare `# type: ignore` is not.
+
+### 4.1 `jaxtyping` shapes: annotate what nothing else validates
+
+Plain `Array` is an alias for `jax.Array`, so a bare annotation asserts "is an array" and
+nothing more. **But do not read that as "shape-annotate everything."** Three measured pilots
+(audit E.3; PRs #170, #171, #174) found the payoff varies by an order of magnitude, and the
+predictor is not the module and not "the public surface":
+
+| pilot | module | malformed inputs `main` already caught, so the annotation added nothing |
+|---|---|---|
+| 1 | `upward/tree_expansions.py` | **3 of 3** — yggdrax validated everything |
+| 2 | `nearfield/near_field.py` | **0 of 4** — silently accepted, wrong answers returned |
+| 3 | `runtime/fmm_evaluate.py` | **2 of 5** — split by parameter family |
+
+**The rule that follows from that:**
+
+> Shape-annotate an array parameter when nothing else validates it. Skip it when the value
+> flows straight into a library that checks it.
+
+In this package the unvalidated families are `precomputed_*` and `*_override`, plus internal
+functions taking several arrays whose axes must agree. Pilot 3 is the sharpest case: in one
+signature the `farfield_*` overrides were already rejected with a domain `ValueError`, while
+every `precomputed_*` corruption — wrong dtype, wrong rank, mismatched lengths — reached the
+kernels silently.
+
+Annotating an already-validated parameter is not free: it replaces a domain error
+(`"masses_sorted must match tree.num_particles"`) with a generic `TypeCheckError`. Do it only
+for consistency within a signature you are already annotating.
+
+### 4.2 Derive the shape by execution, not from the docstring
+
+The docstrings are not a reliable source, and this is measured, not a slur:
+
+- `NodeMultipoleData.packed` documented `(num_nodes, sh_size(order))`. It is
+  `total_coefficients(order)` — 10 columns at p=2, not 9. Wrong for **every** order the
+  package runs at, right only at p=1 (PR #170).
+- 11 of 12 `Optional[Array]` parameters on `compute_leaf_p2p_accelerations` document no shape
+  at all (PR #171).
+- `farfield_leaf_nodes` and `farfield_node_ranges` sit on adjacent lines and share a prefix,
+  and are **different axes**: `(3,)` with `(5, 2)`, `(5,)` with `(9, 2)`, `(9,)` with
+  `(17, 2)` — leaves against `2*leaves-1` nodes (PR #174).
+
+Instrument the function, run the suite, tally the shapes against the live `n`/`leaves` for each
+call, and annotate what you observed. A wrong shape annotation is worse than none, because the
+decorator enforces it.
+
+### 4.3 The axis vocabulary
+
+Lowercase, shared package-wide so a reader learns it once. Every new **single-identifier** name
+must also be added to the flake8 hook's `--builtins` list — see 4.4.
+
+| axis | meaning |
+|---|---|
+| `n` | particles |
+| `t` | targets, when a call returns a subset of the particles |
+| `nodes` | tree nodes |
+| `internal` | internal nodes, i.e. those with children |
+| `leaves` | leaf nodes |
+| `leaves+1` | CSR-style offsets over leaves; symbolic expressions are legal |
+| `w` | leaf width (`max_leaf_size`) |
+| `edges` | entries of the flattened neighbour list |
+| `pairs` | entries of a precomputed leaf-pair schedule |
+| `chunks`, `chunkflat` | the 2-D chunked scatter schedule |
+| `farleaves` | the **far-field** leaf view, which is not `leaves`: they differ on the octree backend |
+| `blocks`, `blocksize` | target blocks and the block size (`JACCPOT_LARGE_N_TARGET_BLOCK_SIZE`) |
+| `ct` | Cartesian packed coefficients, `(p+1)(p+2)(p+3)/6` |
+| `levels` | block-step levels, `k_max + 1` of them |
+| `2`, `3` | literals -- the `(start, end)` pair and the spatial dimension |
+| `_` | anonymous: deliberately unnamed, see below |
+
+**`ct` is not `C`.** Elsewhere in the package `C` means `sh_size(p) == (p+1)**2`, the
+spherical-harmonic packing. `upward/tree_expansions.py` packs Cartesian moments, so its count is
+`(p+1)(p+2)(p+3)/6`. The two agree only at p=1, which is how one symbol served both for so long.
+
+**`farleaves` exists because of a mistake worth not repeating.** `leaf_nodes` in
+`runtime/kernels/_evaluate.py` was annotated `leaves`, sharing the axis with
+`nearfield_leaf_nodes`. That equality holds for the radix tree and fails on the octree
+execution backend (5 against 3), and it broke 7 tests the moment a decorator made the
+annotation enforced. The shapes had been derived from 64 captured calls -- through
+`test_near_field.py` and `tests/integration/`, neither of which enters that backend. **Capture
+coverage bounds annotation validity:** an axis equality observed in every call you recorded is
+only as strong as the lanes you recorded.
+
+**A named axis can be impossible even when the shape is known**, and this is the sharper case.
+`runtime/kernels/_evaluate.py`'s `nearfield_leaf_particle_indices` is measurably `(leaves, w)`
+when its lane is live -- pinned across three configurations in
+`tests/unit/runtime/test_large_n_nearfield_shapes.py`. It still cannot be annotated that way.
+A jitted signature cannot take `None` conditionally, so when the lane is off the array arrives
+as a zero-sized sentinel, and the same parameter is `(leaves, w)` live and `(0, 0)` absent.
+Naming the first axis asserts the sentinel has `leaves` rows; it has 0. Annotating it fails 87
+tests, the characterization goldens among them.
+
+The rule that falls out: **a name is unusable once something else in the same signature has
+already bound it to a live extent.** In the same function `blocks blocksize` is fine, because
+those names appear on nothing else, so `(0, 32)` and a live `(nblocks, 32)` both satisfy them --
+and what gets asserted is that the two block arrays agree with each other, which is real.
+Knowing the shape and being able to annotate it are different questions.
+
+**Anonymous axes are a legitimate answer, not a cop-out.** Where a leading axis is
+*caller-dependent*, naming it binds it to whichever caller ran first and breaks the other.
+`near_field.py::node_ranges_override` is `(nodes, 2)` from the single-GPU path and
+`(leaves+1, 2)` from `distributed/fmm.py`; the distributed lane cannot even be exercised
+locally, since every test in `tests/distributed/` skips below 2 devices. So it is
+`Int[Array, "_ 2"]` — which still rejects `(M, 3)`, the perturbation that matters.
+
+### 4.4 Hard constraints, all measured
+
+**`@jaxtyped(typechecker=beartype)` is UNCONDITIONAL.** The 45 decorated functions check on
+every call, in production, not only under `JACCPOT_RUNTIME_TYPECHECK=1`. That env var installs
+the package-wide import hook, which extends checking to *undecorated* functions. Adding a shape
+to a decorated function therefore changes production behaviour;
+`tests/unit/core/test_near_field.py` pins exactly this for `softening`.
+
+**Never annotate the batch axis of a `vmap`ped function or a `scan` body.** It receives one
+slice, so `Float[Array, "n 3"]` sees `(3,)` and fails. There are 122 `vmap`/`scan` sites, so
+inside the kernels this is the common case, not an edge case.
+
+**Return annotations are effectively unavailable.** Two independent reasons:
+
+- pydoclint 0.9.1 **crashes** on a shaped return whose axis spec has more than one token:
+  `ReturnAnnotation.decompose()` re-parses it as Python and `Float[Array, nodes ct]` is a
+  `SyntaxError`. Shaped *parameters* are fine; single-token returns are fine.
+- Where a call takes an optional `target_indices`, the result is `[n, 3]` without it and
+  `[t, 3]` with it, and jaxtyping cannot express "this axis or that one".
+
+Put the shape in the `Returns` section instead.
+
+**Single-identifier axes trip flake8 F821.** `pyflakes` parses a string inside an annotation as
+a forward reference, so `Float[Array, "n"]` reports `undefined name 'n'` while
+`Float[Array, "n 3"]` is clean. The axis names are declared via `--builtins` on the flake8 hook
+rather than suppressed per line; the cost — a bare `n` in code is no longer flagged — is
+recorded there.
+
+**Widths are wrong, families are right.** Use `Int`, never `Int32`/`Int64`: `INDEX_DTYPE` is
+selectable via `JACCPOT_INDEX_PRECISION`, and pilot 3 observed `precomputed_target_leaf_ids` as
+int32 alongside `precomputed_source_leaf_ids` as int64 *in the same call*. Likewise `Float`, not
+a width — positions were observed as both float32 and float64. Scalars that accept a Python
+number keep `Union[float, Array]`.
+
+### 4.5 Mechanics
+
+Docstring parameter types mirror the annotation verbatim — pydoclint enforces it — with single
+quotes inside the docstring so the type does not terminate it:
+`positions : Float[Array, 'n 3']`.
+
+`tests/unit/test_type_annotation_guard.py` holds the modules already converted, so they cannot
+regress to bare `Array`. Add a module to its list in the same PR that annotates it.
 
 ---
 
@@ -208,10 +350,19 @@ Keep the seams in the layout clean and the import graph acyclic:
 - `pallas/` — accelerated kernels that must stay numerically equivalent to their reference
   counterparts. Equivalence is stated in both docstrings and tested.
 - `runtime/` — orchestration, config resolution, lane selection, dispatch. The only place
-  that reads environment variables or resolves `"auto"` policies.
+  that **resolves `"auto"` policies**. Reading a `JACCPOT_*` variable is not restricted to
+  `runtime/`: `jaccpot/_env.py` is the sanctioned reader for **any** layer, and seven modules
+  outside `runtime/` use it. See the note at the end of this section.
 - `distributed/` — decomposition, halo exchange, collectives.
-- `experimental/` — prototypes. Not production, not held to production standards, not
-  imported by production paths.
+- `experimental/` — prototypes. Not production, not held to production standards, and not
+  **eagerly** imported by production paths. That last word is load-bearing and the claim is
+  now tested: `tests/unit/test_experimental_is_not_on_an_import_path.py` asserts it in a
+  clean subprocess per package. It was false until audit G.5's second edge was fixed —
+  `import jaccpot` was clean while `import jaccpot.pallas` pulled in
+  `experimental/treecode_walk`, a prose guarantee that held at the entry point and failed
+  one package down. Deliberate **lazy** reach-ins remain: `runtime/_interaction_cache.py`
+  imports `treecode_far_near` inside a function when `local_walk="treecode"` is selected,
+  which G.5 accepted as a bounded exposure.
 
 Physics must not live in a utility module; runtime policy must not leak into operators. If
 you find yourself importing "up" that list, report it rather than adding the import.
@@ -255,12 +406,38 @@ reader auditing the layering does not have to rediscover them:
 - `basis/complex_sh.py` imports `operators/{complex_ops,real_harmonics}`. Within the single
   "mathematical algebra" tier this section defines, so benign.
 
-Separately, and worth knowing because this section's wording implies otherwise: `runtime/` is
-**not** the only place that reads environment variables. `jaccpot/_env.py` exists so that any
-layer can, and its module docstring says so explicitly; there are 16 such reads outside
-`runtime/` (13 in `nearfield/near_field.py`, two in `pallas/`, one in `upward/`). Either that
-sentence should say *resolves `"auto"` policies* rather than *reads environment variables*, or
-`_env.py`'s docstring is wrong. Unresolved.
+**Environment variables: `_env.py` is the reader, `runtime/` owns the policy.** This was audit
+G.2, and it is now decided. The old wording — *"the only place that reads environment
+variables"* — contradicted `jaccpot/_env.py`, whose docstring says any layer may use it. `_env.py`
+wins, because it exists to prevent a real bug: four near-identical private readers had
+accumulated and did **not** agree, so the same value meant different things depending on which
+module read it. Item 2.2 consolidated them deliberately, and seven modules outside `runtime/`
+now read through it. Reverting that would re-create the divergence.
+
+So the rule is narrower: **`runtime/` is the only place that resolves an `"auto"` policy into a
+concrete choice.** Reading a flag where it is used is fine.
+
+Re-measured 2026-08-20, because the count this note used to carry was stale by an order of
+magnitude — it said 16 raw reads outside `runtime/` (a pre-2.2 number):
+
+| | count |
+|---|---|
+| modules outside `runtime/` reading via `_env.py` | 7 — sanctioned |
+| raw `os.environ` / `os.getenv` outside `runtime/` | **2** |
+
+The two raw reads are not equivalent:
+
+- `_typecheck.py:12` is **structural**. It reads its own import-hook flag before `jaccpot` is
+  importable enough to use `_env`, so it cannot route through it.
+- `mutual/farfield.py:135` is a **genuine violation of the narrowed rule**: it resolves
+  `JACCPOT_MUTUAL_M2L="auto"` into `"fused"`/`"jax"` outside `runtime/`.
+
+**Do not "fix" that second one by swapping in `env_choice`.** It raises `ValueError` on an
+unrecognised value and documents that in its `Raises` section; `env_choice` warns once and falls
+back to the default, which is 2.2's deliberate house semantics. A mechanical conversion would
+silently turn a loud failure into a quiet default — the exact class of change 2.2 was careful
+about. Moving the resolution into `runtime/` is the real fix, and it is the mutual lane's own
+decision to make.
 
 Function-local imports are used deliberately in a few places to break cycles or defer heavy
 Pallas imports (see `runtime/kernels/core.py`). Leave them; do not hoist them to module

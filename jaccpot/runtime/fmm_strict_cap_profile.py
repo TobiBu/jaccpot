@@ -16,15 +16,24 @@ from beartype.typing import Tuple
 from yggdrax.interactions import DualTreeRetryEvent
 
 if TYPE_CHECKING:  # pragma: no cover - annotations only, no runtime import
-    # The mixins annotate `self` as the engine they are mixed into, which lives in
-    # `_fmm_impl` and imports *them* -- so this must stay under TYPE_CHECKING or it
-    # would form the cycle ARCHITECTURE §8 forbids. Before this block the names were
-    # dangling: `typing.get_type_hints` raised NameError on every mixin method, so the
-    # annotations documented an intent no tool could check.
+    # The engine lives in `_fmm_impl`, which imports *these mixins* -- so this import
+    # must stay under TYPE_CHECKING or it would form the cycle ARCHITECTURE §8
+    # forbids. Inheriting `_EngineBase` makes each mixin *be* the engine under a type
+    # checker, so every `self.<engine attribute>` resolves; at runtime the alias is
+    # `object`, leaving the MRO exactly as it was. The audit's E.2 records why this
+    # beats annotating `self`, and what it does not buy at runtime.
     from ._fmm_impl import FMMEngine, PreparedStateLike
 
+    _EngineBase = FMMEngine
+else:  # pragma: no cover - the mixin is only ever mixed into the engine
+    _EngineBase = object
 
-class StrictCapProfileMixin:
+__all__ = [
+    "StrictCapProfileMixin",
+]
+
+
+class StrictCapProfileMixin(_EngineBase):
     def _strict_cap_profile_path(self) -> str:
         return str(
             os.environ.get(
@@ -173,10 +182,33 @@ class StrictCapProfileMixin:
             return
 
     def _compiled_profile_from_prepared_state(
-        self: "FMMEngine",
+        self,
         state: PreparedStateLike,
     ) -> dict[str, Any]:
-        """Build a stable-shape profile summary for compile-reuse diagnostics."""
+        """Build a stable-shape profile summary for compile-reuse diagnostics.
+
+        Shapes only -- it flattens the state's pytree and records dimensions,
+        never values. Two states holding different numbers under an identical
+        topology therefore produce the same profile, which is the point: the
+        profile answers "will this recompile?", not "is this the same problem?".
+
+        Parameters
+        ----------
+        state : PreparedStateLike
+            The prepared state to summarise. Duck-typed, and every field is read
+            defensively -- a missing array records 0 rather than raising, so a
+            state from a different lane still profiles.
+
+        Returns
+        -------
+        dict[str, Any]
+            JSON-serialisable, which is load-bearing:
+            :meth:`_compiled_profile_fingerprint` hashes
+            ``json.dumps(..., sort_keys=True)`` of it, so anything unserialisable
+            added here breaks fingerprinting rather than degrading it. The
+            ``max_*`` entries are capacities and are what
+            :meth:`_compiled_profile_capacity_compatible` compares.
+        """
 
         def _shape0(value: Any) -> int:
             if value is None:
@@ -248,18 +280,41 @@ class StrictCapProfileMixin:
             "leaf_shapes": tuple(leaf_shapes),
         }
 
-    def _compiled_profile_fingerprint(
-        self: "FMMEngine", profile: dict[str, Any]
-    ) -> str:
+    def _compiled_profile_fingerprint(self, profile: dict[str, Any]) -> str:
         payload = json.dumps(profile, sort_keys=True, separators=(",", ":"))
         return hashlib.sha1(payload.encode("utf-8")).hexdigest()
 
     def _compiled_profile_capacity_compatible(
-        self: "FMMEngine",
+        self,
         base_profile: dict[str, Any],
         candidate_profile: dict[str, Any],
     ) -> bool:
-        """Return True when candidate usage fits within base profile capacities."""
+        """Return True when candidate usage fits within base profile capacities.
+
+        Asymmetric on purpose: a candidate that needs *less* than the base is
+        compatible, since the compiled executable's padded shapes still hold it.
+        So this is "fits inside", not "equals" -- reversing the arguments is a
+        different question and generally gives a different answer.
+
+        Only five capacity fields are compared. Any other difference between the
+        two profiles is ignored here, so a ``True`` does not mean the profiles
+        match; it means the capacities do not force a recompile.
+
+        Parameters
+        ----------
+        base_profile : dict[str, Any]
+            Profile of the already-compiled state -- the capacities available.
+        candidate_profile : dict[str, Any]
+            Profile of the state being considered for reuse.
+
+        Returns
+        -------
+        bool
+            Whether every compared capacity in the candidate is within the base.
+            Missing keys read as 0 on both sides, so a profile lacking a field
+            compares as needing none of it -- which makes an unrecognised
+            profile look compatible rather than incompatible.
+        """
         capacity_fields = (
             "max_nodes",
             "max_leaves",
@@ -273,7 +328,7 @@ class StrictCapProfileMixin:
         )
 
     def _compiled_profile_record_transition(
-        self: "FMMEngine",
+        self,
         profile_fingerprint: str,
     ) -> None:
         prev = self._compiled_profile_fingerprint_last
@@ -281,7 +336,7 @@ class StrictCapProfileMixin:
             self._compiled_profile_transitions += 1
         self._compiled_profile_fingerprint_last = profile_fingerprint
 
-    def _strict_fused_profile_allows_n(self: "FMMEngine", n: int) -> bool:
+    def _strict_fused_profile_allows_n(self, n: int) -> bool:
         raw = str(getattr(self, "_strict_fused_profile_set_raw", "")).strip()
         if raw == "":
             return True

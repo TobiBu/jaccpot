@@ -38,13 +38,27 @@ set-equal. That is the parity gate (``interpret=True`` on CPU + on-device A100).
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
 import jax
 import jax.numpy as jnp
 from jax import lax
 from jaxtyping import Array
 
-from jaccpot.experimental.treecode_walk import TreecodeLeafLists
 from jaccpot.pallas._compat import KernelRef
+
+if TYPE_CHECKING:  # pragma: no cover - annotation only, no runtime import
+    # DEFERRED DELIBERATELY. This was a module-scope import, and because
+    # `pallas/__init__.py` re-exports this module it made `import jaccpot.pallas`
+    # load `jaccpot.experimental` eagerly -- contradicting STYLE_GUIDE section 8's
+    # "`experimental/` ... not imported by production paths". Measured before the
+    # change: `import jaccpot` was clean but `import jaccpot.pallas` pulled in
+    # `jaccpot.experimental.treecode_walk`. Audit G.5, second edge.
+    #
+    # `TreecodeLeafLists` is CONSTRUCTED here, not just annotated, so this pairs
+    # with a function-local import in `treecode_leaf_walk_pallas`; TYPE_CHECKING
+    # alone would leave a NameError at call time.
+    from jaccpot.experimental.treecode_walk import TreecodeLeafLists
 
 try:
     from jax.experimental import pallas as pl
@@ -385,6 +399,7 @@ def treecode_leaf_walk_pallas(
     ValueError
         If the input shapes are inconsistent with each other or with ``num_internal``.
     """
+    from jaccpot.experimental.treecode_walk import TreecodeLeafLists
 
     if pl is None or plgpu is None:
         raise RuntimeError("jax.experimental.pallas is not available")

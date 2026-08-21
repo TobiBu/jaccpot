@@ -85,6 +85,24 @@ def z_shift_translation_tables(order: int, which: str) -> Tuple[np.ndarray, np.n
     read harmlessly then zeroed), ``valid`` the contribution mask. Mirrors
     :func:`z_m2l_translation_tables` so the recurrence is defined once and the vectorised kernel
     cannot drift from the reference.
+
+    Parameters
+    ----------
+    order : int
+        Maximum SH degree ``p``.
+    which : str
+        ``"m2m"`` or ``"l2l"``; selects which same-type shift the tables encode.
+
+    Returns
+    -------
+    Tuple[np.ndarray, np.ndarray]
+        Per-term source-index and coefficient tables. NumPy rather than JAX
+        because these are compile-time constants built once per order.
+
+    Raises
+    ------
+    ValueError
+        If ``which`` is neither ``"m2m"`` nor ``"l2l"``.
     """
     p = int(order)
     if p < 0:
@@ -126,6 +144,23 @@ def _translate_along_z_shift_real(
     reference no longer exists -- it was replaced when the M2M/L2L z-translates were
     table-vectorised -- so the claim was untestable as written and has been replaced by
     the property above, which is the one this implementation actually guarantees.
+
+    Parameters
+    ----------
+    coeffs : Array
+        Packed real coefficients to shift.
+    dz : Array
+        Signed shift along ``+z``.
+    order : int
+        Maximum SH degree ``p``. Static: it selects the term tables.
+    which : str
+        ``"m2m"`` or ``"l2l"``, forwarded to
+        :func:`z_shift_translation_tables`.
+
+    Returns
+    -------
+    Array
+        Packed real coefficients at the shifted centre.
     """
     p = int(order)
     coeffs = jnp.asarray(coeffs)
@@ -156,6 +191,20 @@ def translate_along_z_m2m_real(
     For real harmonics, this is the SAME formula as for complex harmonics
     because the z-axis translation is diagonal in m (doesn't mix different m).
     Vectorised over the shared per-term tables (:func:`z_shift_translation_tables`).
+
+    Parameters
+    ----------
+    multipole : Array
+        Packed real multipole coefficients.
+    dz : Array
+        Signed shift along ``+z``.
+    order : int
+        Maximum SH degree ``p``.
+
+    Returns
+    -------
+    Array
+        Packed real multipole coefficients at the shifted centre.
     """
     return _translate_along_z_shift_real(multipole, dz, order=order, which="m2m")
 
@@ -187,6 +236,23 @@ def z_m2l_translation_tables(order: int) -> Tuple[np.ndarray, ...]:
     recurrence is defined exactly once and the two encodings cannot drift. The
     parity test in ``tests/unit/operators/test_pallas_m2l_core_z_real.py``
     guards this invariant on CPU (Pallas interpret mode).
+
+    Parameters
+    ----------
+    order : int
+        Maximum SH degree ``p``.
+
+    Returns
+    -------
+    Tuple[np.ndarray, ...]
+        Host-side tables describing the M2L recurrence. NumPy because they are
+        compile-time constants, and shared with the Pallas kernel -- which is
+        why they live here once rather than being re-derived per lane.
+
+    Raises
+    ------
+    ValueError
+        If ``order`` is outside the supported range.
     """
     p = int(order)
     if p < 0:
@@ -226,6 +292,21 @@ def translate_along_z_m2l_real(
     Implemented as a vectorized contraction over the shared per-term tables from
     :func:`z_m2l_translation_tables` (the single source of the recurrence, also
     used by the Pallas kernel).
+
+    Parameters
+    ----------
+    multipole : Array
+        Packed real multipole coefficients.
+    r : Array
+        Separation along ``+z``. The recurrence forms ``r**-(n+k+1)``, so the
+        caller is responsible for flooring it away from zero.
+    order : int
+        Maximum SH degree ``p``.
+
+    Returns
+    -------
+    Array
+        Packed real local coefficients at the target centre.
     """
     p = int(order)
     multipole = jnp.asarray(multipole)
@@ -316,6 +397,24 @@ def m2l_a6_real_only(
     differentiating the alignment azimuth, which is undefined there and ill-conditioned
     nearby; the analytic branch applies inside exactly zero outside a narrow band around that axis (``rho <= sqrt(eps) * |delta|``, the measured crossover between the two routes' errors) and the polar route is left
     untouched outside it.
+
+    Parameters
+    ----------
+    multipole : Array
+        Packed real multipole coefficients of the source.
+    delta : Array
+        3-vector from the multipole (source) centre to the local (target)
+        centre, i.e. ``target - source``. Note this is the OPPOSITE sign
+        convention from :func:`m2m_real` and :func:`l2l_real`, which take
+        ``source - destination``. See ``docs/operator_conventions.md`` section 1,
+        which measures what each wrong sign costs.
+    order : int
+        Maximum SH degree ``p``.
+
+    Returns
+    -------
+    Array
+        Packed real local coefficients at the target centre.
     """
     multipole = jnp.asarray(multipole)
     delta = jnp.asarray(delta)
@@ -360,6 +459,27 @@ def m2l_real(
     """M2L in real harmonic basis using Dehnen A6 rotation/translation.
 
     Uses a real-only Dehnen A6 rotation/translation path (no complex basis).
+
+    A thin alias for :func:`m2l_a6_real_only`; see that function for the
+    differentiability treatment near the ``rho == 0`` axis.
+
+    Parameters
+    ----------
+    multipole : Array
+        Packed real multipole coefficients of the source.
+    delta : Array
+        3-vector from the multipole (source) centre to the local (target)
+        centre, i.e. ``target - source``. Note this is the OPPOSITE sign
+        convention from :func:`m2m_real` and :func:`l2l_real`, which take
+        ``source - destination``. See ``docs/operator_conventions.md`` section 1,
+        which measures what each wrong sign costs.
+    order : int
+        Maximum SH degree ``p``.
+
+    Returns
+    -------
+    Array
+        Packed real local coefficients at the target centre.
     """
     return m2l_a6_real_only(multipole, delta, order=order)
 
@@ -375,6 +495,27 @@ def m2l_optimized_real(
 
     Delegates to the real-only Dehnen A6 implementation. This keeps behavior
     aligned with :func:`m2l_real`.
+
+    Despite the name, there is no separate optimisation here -- it is the same
+    call. The name is retained for API compatibility.
+
+    Parameters
+    ----------
+    multipole : Array
+        Packed real multipole coefficients of the source.
+    delta : Array
+        3-vector from the multipole (source) centre to the local (target)
+        centre, i.e. ``target - source``. Note this is the OPPOSITE sign
+        convention from :func:`m2m_real` and :func:`l2l_real`, which take
+        ``source - destination``. See ``docs/operator_conventions.md`` section 1,
+        which measures what each wrong sign costs.
+    order : int
+        Maximum SH degree ``p``.
+
+    Returns
+    -------
+    Array
+        Packed real local coefficients at the target centre.
     """
     return m2l_a6_real_only(multipole, delta, order=order)
 

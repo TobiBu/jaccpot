@@ -80,6 +80,17 @@ JAX_ENABLE_X64=1 pytest -q                     # xdist -n auto; use -n 0 for pdb
 JAX_ENABLE_X64=1 pytest -q tests/characterization   # golden reference — must not move
 ```
 
+pydoclint runs with `skip-checking-short-docstrings = false`, so a one-line summary over
+undocumented parameters **is** a violation. There is **no baseline** — the Tier 2.5
+docstring programme drove `jaccpot/` to zero and `.pydoclint-baseline.txt` was retired,
+because a baseline that suppresses nothing real can still absorb a new violation in a file
+it still lists. Do not reintroduce one; document the function instead.
+
+The hook is scoped `files: ^jaccpot/`. That scope is load-bearing: the baseline's final
+1215 entries were all in `tests/` (1034), `bench/` (121) and `examples/` (60), so an
+unscoped hook with no baseline is red on day one over violations it was never catching.
+Widening the scope means documenting that backlog first.
+
 `pytest -q` is not the whole suite: the `addopts` in `pyproject.toml` add
 `-m "not experimental"` and `--ignore=tests/perf`, so the octree/treecode prototypes and the
 performance assertions are opt-in (`pytest -m experimental`, `pytest tests/perf`).
@@ -121,6 +132,24 @@ different GPUs.
 Expect a handful of GPU-only failures that are **not** yours: see `ARCHITECTURE.md` §9 for the
 current list, and §10 for why any exact-equality assertion needs
 `XLA_FLAGS="--xla_gpu_deterministic_ops=true"` before its result means anything.
+
+### The pre-release GPU gate
+
+There is no GPU leg in CI and there will not be one — see the audit's item 2.6 for the
+reasoning (public repo + self-hosted runner is a fork-PR execution risk; the box's GPUs
+are shared). Instead, before a release, run:
+
+```bash
+python -m bench.gpu_gate
+```
+
+It claims the least-used card with `autocvd`, applies the caps above, sets the
+determinism flag, runs the suite, and then **asserts the GPU-gated tests actually ran**.
+That last part is the point: a run that silently fell back to CPU skips all 17 of them and
+still prints green. Failures matching `ARCHITECTURE.md` §9's measured list are allowed
+through and reported separately; anything else fails the gate.
+
+It does **not** cover `tests/distributed/` (24 tests, needs two cards) — audit F34.
 
 ## Layout
 

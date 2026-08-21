@@ -2,29 +2,21 @@
 
 from __future__ import annotations
 
-import os
-import warnings
-from collections import OrderedDict
 from dataclasses import dataclass
 from functools import partial
 from typing import Any, Optional, Union
 
 import jax
 import jax.numpy as jnp
-import numpy as np
 from beartype import beartype
 from beartype.typing import Tuple
 from jax import lax
-from jaxtyping import Array, jaxtyped
+from jaxtyping import Array, Bool, Float, Int, jaxtyped
 from yggdrax.dtypes import INDEX_DTYPE, as_index
 from yggdrax.interactions import NodeNeighborList
 from yggdrax.tree import Tree
 
-from jaccpot._env import env_choice, env_flag, env_float, env_int
-from jaccpot.runtime.grad_options import (  # noqa: F401
-    LeafPairReverseOptions,
-    analytic_p2p_vjp_enabled,
-)
+from jaccpot._env import env_choice, env_flag, env_int
 
 # Several of these are unused *in this module* -- some were already, and four more
 # became so when the radix fast lane moved to `_fast_lane.py` (Tier 1.4). They are
@@ -70,14 +62,35 @@ from ._schedules import (  # noqa: F401  -- public re-export surface, see below
     prepare_bucketed_scatter_schedules_from_groups,
     prepare_leaf_neighbor_pairs,
 )
-from .grad import (  # noqa: F401
-    _check_float_id_range,
+from .grad import (
     _leafpair_accel_analytic_vjp,
-    _leafpair_reverse_tiers_cached,
     _pair_accel_cvjp,
     _pair_accel_masked_accels,
     build_leafpair_reverse_tiers,
-    clear_leafpair_reverse_tier_cache,
+)
+
+__all__ = [
+    "RadixFastLanePerfCounters",
+    "build_leafpair_reverse_tiers",
+    "collect_radix_fast_lane_counters",
+    "compute_leaf_p2p_accelerations",
+    "compute_leaf_p2p_accelerations_large_n_accel_only",
+    "compute_leaf_p2p_accelerations_target_block_pairs_only",
+    "prepare_bucketed_scatter_schedules",
+    "prepare_bucketed_scatter_schedules_from_groups",
+]
+
+# RE-EXPORTS. The names below are imported for other modules to reach through
+# this one, and are unused *here*. Holding references makes that a fact the
+# interpreter can see: `pyflakes` counts them as used, so whatever it still
+# reports for this module is a real dead import rather than noise. A tuple of
+# STRINGS would not do it, and neither does `# noqa` -- pyflakes ignores noqa,
+# and isort hoists a trailing comment onto the whole import group, so a name that
+# later goes unused inside that group is never flagged. Verified, 2026-08-18.
+_REEXPORTS = (
+    _leafpair_accel_analytic_vjp,
+    _pair_accel_cvjp,
+    _pair_accel_masked_accels,
 )
 
 _LARGE_N_NEARFIELD_DIAG_MODES = frozenset(("full", "self_only", "pairs_only", "zero"))
@@ -98,7 +111,29 @@ _env_int = env_int
 
 @dataclass(frozen=True)
 class RadixFastLanePerfCounters:
-    """Static-shape payload counters for radix fast-lane nearfield diagnostics."""
+    """Static-shape payload counters for radix fast-lane nearfield diagnostics.
+
+    Derived from the payload's *shapes*, not from a run: every field counts the
+    padded slot capacity, so masked-off slots are included. That is the point --
+    these are what the lane will move regardless of occupancy -- but it means a
+    sparsely occupied payload reports the same traffic as a full one, and none of
+    these numbers is a measurement.
+
+    Attributes
+    ----------
+    gather_bytes : int
+        Bytes read gathering target and source positions and masses.
+    scatter_bytes : int
+        Bytes written scattering accelerations back to particle order.
+    scatter_ops : int
+        Number of scattered target slots, i.e. ``scatter_bytes`` before the
+        per-element width is applied.
+    target_batches : int
+        Target-leaf batches the lane will scan, ``ceil`` of the leaf count over
+        the payload's ``batch_tile_t``.
+    source_slot_tiles : int
+        Source-slot tiles per target batch, ``ceil`` over ``batch_tile_s``.
+    """
 
     gather_bytes: int
     scatter_bytes: int
@@ -114,7 +149,36 @@ def collect_radix_fast_lane_counters(
     masses_dtype: jnp.dtype,
     accelerations_dtype: Optional[jnp.dtype] = None,
 ) -> RadixFastLanePerfCounters:
-    """Estimate deterministic payload gather/scatter costs for one evaluation."""
+    """Estimate deterministic payload gather/scatter costs for one evaluation.
+
+    Host-side and shape-only: it calls ``int()`` on array sizes, so it must not be
+    used on tracers and cannot be called from inside a jitted function. The
+    payload arrays themselves are never read, only measured.
+
+    Parameters
+    ----------
+    payload : Any
+        A ``RadixFastNearfieldPayload``. Untyped to keep the runtime layer out of
+        this module's imports. ``target_particle_ids`` and
+        ``source_particle_ids`` are required; ``batch_tile_t`` and
+        ``batch_tile_s`` are read through ``getattr`` defaulting to 1, so a
+        payload lacking them yields one batch per leaf rather than an error.
+    positions_dtype : jnp.dtype
+        Dtype the positions will be gathered in; both target and source sides are
+        assumed to share it.
+    masses_dtype : jnp.dtype
+        Dtype the masses will be gathered in.
+    accelerations_dtype : Optional[jnp.dtype]
+        Dtype accelerations will be scattered in. ``None`` (the default) reuses
+        ``positions_dtype``, which is the usual case; pass it explicitly for a
+        mixed-precision lane.
+
+    Returns
+    -------
+    RadixFastLanePerfCounters
+        Padded-capacity byte and tile counts. See the class docstring for why
+        these are an upper bound rather than an observation.
+    """
 
     if accelerations_dtype is None:
         accelerations_dtype = positions_dtype
@@ -852,8 +916,8 @@ def _compute_leaf_p2p_from_prepared_leaf_data_impl(
 def compute_leaf_p2p_accelerations(
     tree: Tree,
     neighbor_list: NodeNeighborList,
-    positions_sorted: Array,
-    masses_sorted: Array,
+    positions_sorted: Float[Array, "n 3"],
+    masses_sorted: Float[Array, "n"],
     *,
     G: Union[float, Array] = 1.0,
     softening: float = 0.0,
@@ -862,19 +926,27 @@ def compute_leaf_p2p_accelerations(
     collect_neighbor_pairs: bool = False,
     nearfield_mode: str = "baseline",
     edge_chunk_size: int = 256,
-    precomputed_target_leaf_ids: Optional[Array] = None,
-    precomputed_source_leaf_ids: Optional[Array] = None,
-    precomputed_valid_pairs: Optional[Array] = None,
-    precomputed_chunk_sort_indices: Optional[Array] = None,
-    precomputed_chunk_group_ids: Optional[Array] = None,
-    precomputed_chunk_unique_indices: Optional[Array] = None,
-    node_ranges_override: Optional[Array] = None,
-    leaf_nodes_override: Optional[Array] = None,
-    neighbor_offsets_override: Optional[Array] = None,
-    neighbor_indices_override: Optional[Array] = None,
-    neighbor_counts_override: Optional[Array] = None,
-    leaf_particle_indices_override: Optional[Array] = None,
-    leaf_particle_mask_override: Optional[Array] = None,
+    precomputed_target_leaf_ids: Optional[Int[Array, "pairs"]] = None,
+    precomputed_source_leaf_ids: Optional[Int[Array, "pairs"]] = None,
+    precomputed_valid_pairs: Optional[Bool[Array, "pairs"]] = None,
+    precomputed_chunk_sort_indices: Optional[Int[Array, "chunks chunkflat"]] = None,
+    precomputed_chunk_group_ids: Optional[Int[Array, "chunks chunkflat"]] = None,
+    precomputed_chunk_unique_indices: Optional[Int[Array, "chunks chunkflat"]] = None,
+    # NOT `Int[Array, "nodes 2"]`, and that is a finding rather than caution: the
+    # leading axis is CALLER-DEPENDENT. The single-GPU path passes
+    # `tree.node_ranges`, one row per tree node (5, 7, ... 187 observed across 63
+    # captured calls); `distributed/fmm.py:1565` passes `jnp.zeros((u_leaves+1, 2))`.
+    # Naming that axis would bind it to whichever caller ran first and break the
+    # other -- and the distributed lane cannot be exercised here, because every
+    # test in tests/distributed/ skips below 2 devices. Only the trailing `2` is
+    # invariant across callers, so only the trailing `2` is asserted.
+    node_ranges_override: Optional[Int[Array, "_ 2"]] = None,
+    leaf_nodes_override: Optional[Int[Array, "leaves"]] = None,
+    neighbor_offsets_override: Optional[Int[Array, "leaves+1"]] = None,
+    neighbor_indices_override: Optional[Int[Array, "edges"]] = None,
+    neighbor_counts_override: Optional[Int[Array, "leaves"]] = None,
+    leaf_particle_indices_override: Optional[Int[Array, "leaves w"]] = None,
+    leaf_particle_mask_override: Optional[Bool[Array, "leaves w"]] = None,
 ) -> Union[
     Array,
     Tuple[Array, Array],
@@ -891,9 +963,9 @@ def compute_leaf_p2p_accelerations(
         Precomputed leaf-neighbour CSR metadata (``leaf_indices``, ``offsets``,
         ``neighbors``, ``counts``). Each ``*_override`` below replaces exactly
         one of these fields.
-    positions_sorted : Array
+    positions_sorted : Float[Array, 'n 3']
         Particle positions ``[N, 3]`` in Morton order.
-    masses_sorted : Array
+    masses_sorted : Float[Array, 'n']
         Particle masses ``[N]`` in Morton order.
     G : Union[float, Array]
         Gravitational constant, applied as a plain multiplier.
@@ -919,37 +991,37 @@ def compute_leaf_p2p_accelerations(
     edge_chunk_size : int
         Chunk width for the bucketed edge scan. Static under ``jit``; a
         performance knob, not a numerical one.
-    precomputed_target_leaf_ids : Optional[Array]
+    precomputed_target_leaf_ids : Optional[Int[Array, 'pairs']]
         Leaf-pair schedule buffer: target leaf id per edge. Supplied together
         with the other ``precomputed_*`` arrays by prepared state to skip
         re-deriving the schedule. Must match the neighbour-list edge order the
         rest of the schedule was built against.
-    precomputed_source_leaf_ids : Optional[Array]
+    precomputed_source_leaf_ids : Optional[Int[Array, 'pairs']]
         Source leaf id per edge, same ordering contract.
-    precomputed_valid_pairs : Optional[Array]
+    precomputed_valid_pairs : Optional[Bool[Array, 'pairs']]
         Boolean mask marking which padded edge slots are real.
-    precomputed_chunk_sort_indices : Optional[Array]
+    precomputed_chunk_sort_indices : Optional[Int[Array, 'chunks chunkflat']]
         Scatter-schedule permutation for the chunked accumulation.
-    precomputed_chunk_group_ids : Optional[Array]
+    precomputed_chunk_group_ids : Optional[Int[Array, 'chunks chunkflat']]
         Chunk group id per sorted edge.
-    precomputed_chunk_unique_indices : Optional[Array]
+    precomputed_chunk_unique_indices : Optional[Int[Array, 'chunks chunkflat']]
         Unique-chunk boundary indices. This and the previous two are consumed as
         a set: the precomputed scatter path only engages when all three are given.
-    node_ranges_override : Optional[Array]
+    node_ranges_override : Optional[Int[Array, '_ 2']]
         Replaces ``tree.node_ranges``.
-    leaf_nodes_override : Optional[Array]
+    leaf_nodes_override : Optional[Int[Array, 'leaves']]
         Replaces ``neighbor_list.leaf_indices``.
-    neighbor_offsets_override : Optional[Array]
+    neighbor_offsets_override : Optional[Int[Array, 'leaves+1']]
         Replaces ``neighbor_list.offsets``.
-    neighbor_indices_override : Optional[Array]
+    neighbor_indices_override : Optional[Int[Array, 'edges']]
         Replaces ``neighbor_list.neighbors``.
-    neighbor_counts_override : Optional[Array]
+    neighbor_counts_override : Optional[Int[Array, 'leaves']]
         Replaces ``neighbor_list.counts``.
-    leaf_particle_indices_override : Optional[Array]
+    leaf_particle_indices_override : Optional[Int[Array, 'leaves w']]
         Explicit per-leaf particle index table ``[num_leaves, max_leaf_size]``.
         Supplying it *sets* ``max_leaf_size`` from its second axis, overriding
         the argument.
-    leaf_particle_mask_override : Optional[Array]
+    leaf_particle_mask_override : Optional[Bool[Array, 'leaves w']]
         Validity mask matching ``leaf_particle_indices_override``.
 
     Returns

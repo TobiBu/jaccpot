@@ -3,6 +3,23 @@ god-class (Phase 2d mixin split). Methods are verbatim (self unchanged); the
 engine class inherits this mixin. Sibling of _fmm_impl at runtime level.
 """
 
+# pyright: reportPossiblyUnboundVariable=false
+#
+# Scoped to this ONE rule, not to type checking of this file. Every instance here
+# is the same reviewed pattern: `pot_sorted` and `potentials` are bound and read
+# under the same `return_potential` test, in an evaluation dispatch that tests it
+# in several sibling branches. All seven were checked individually and none can be
+# unbound (audit E.4 bucket D).
+#
+# Suppressed at file scope rather than per line because a trailing
+# `# pyright: ignore` does not survive `black` here -- it wraps these subscript
+# expressions and carries the comment onto the closing bracket, off the line the
+# error is reported on, so the suppression silently stops working. The per-line
+# alternatives are a `None` sentinel (which only moves the complaint to
+# `jnp.asarray`) or a temporary per use, and neither is worth reshaping a hot
+# dispatch path for. The cost of this form is real and worth naming: a genuinely
+# unbound local in this file would no longer be reported by this rule.
+
 from __future__ import annotations
 
 import warnings
@@ -13,10 +30,11 @@ import jax.numpy as jnp
 import numpy as np
 from beartype import beartype
 from beartype.typing import Tuple
-from jaxtyping import Array, jaxtyped
+from jaxtyping import Array, Bool, Float, Int, jaxtyped
 from yggdrax.interactions import NodeNeighborList
 from yggdrax.tree import Tree
 
+from jaccpot._jax_compat import Tracer
 from jaccpot.config import GradConfig
 from jaccpot.downward.local_expansions import LocalExpansionData, TreeDownwardData
 from jaccpot.nearfield._fast_lane import (
@@ -50,9 +68,19 @@ from .reference import direct_sum as reference_direct_sum
 if TYPE_CHECKING:  # pragma: no cover - annotations only, no runtime import
     # `_fmm_impl` imports this mixin, and `_large_n_grad` is already deferred to a
     # function-local import below for compile-time reasons, so both must stay out of
-    # the module-scope import graph. Before this block these names were dangling.
+    # the module-scope import graph. Inheriting `_EngineBase` makes the mixin *be* the
+    # engine under a type checker, so every `self.<engine attribute>` resolves; at
+    # runtime the alias is `object`, leaving the MRO exactly as it was. See E.2.
     from ._fmm_impl import FMMEngine, PreparedStateLike
     from ._large_n_grad import LargeNGradPlan
+
+    _EngineBase = FMMEngine
+else:  # pragma: no cover - annotations only, never an import at runtime
+    _EngineBase = object
+
+__all__ = [
+    "EvaluateMixin",
+]
 
 _OUTER_JIT_WARNED = False
 
@@ -87,7 +115,7 @@ def _warn_if_traced_under_an_outer_jit(positions: Any, masses: Any) -> None:
     global _OUTER_JIT_WARNED
     if _OUTER_JIT_WARNED:
         return
-    if not any(isinstance(value, jax.core.Tracer) for value in (positions, masses)):
+    if not any(isinstance(value, Tracer) for value in (positions, masses)):
         return
     _OUTER_JIT_WARNED = True
     warnings.warn(
@@ -104,15 +132,15 @@ def _warn_if_traced_under_an_outer_jit(positions: Any, masses: Any) -> None:
     )
 
 
-class EvaluateMixin:
+class EvaluateMixin(_EngineBase):
     @jaxtyped(typechecker=beartype)
     def compute_accelerations(
-        self: "FMMEngine",
-        positions: Array,
-        masses: Array,
+        self,
+        positions: Float[Array, "n 3"],
+        masses: Float[Array, "n"],
         *,
-        target_indices: Optional[Array] = None,
-        bounds: Optional[Tuple[Array, Array]] = None,
+        target_indices: Optional[Int[Array, "t"]] = None,
+        bounds: Optional[Tuple[Float[Array, "3"], Float[Array, "3"]]] = None,
         leaf_size: int = 16,
         max_order: int = 2,
         return_potential: bool = False,
@@ -134,14 +162,14 @@ class EvaluateMixin:
 
         Parameters
         ----------
-        positions : Array
+        positions : Float[Array, 'n 3']
             Source and target particle positions.
-        masses : Array
+        masses : Float[Array, 'n']
             Particle masses aligned with ``positions``.
-        target_indices : Optional[Array]
+        target_indices : Optional[Int[Array, 't']]
             Optional 1D index array selecting which target-particle outputs to
             return. All particles are still used as source masses.
-        bounds : Optional[Tuple[Array, Array]]
+        bounds : Optional[Tuple[Float[Array, '3'], Float[Array, '3']]]
             Optional explicit domain bounds used during tree construction.
         leaf_size : int
             Target maximum particle count per leaf for the prepared tree.
@@ -295,10 +323,10 @@ class EvaluateMixin:
 
     @jaxtyped(typechecker=beartype)
     def evaluate_prepared_state(
-        self: "FMMEngine",
+        self,
         state: PreparedStateLike,
         *,
-        target_indices: Optional[Array] = None,
+        target_indices: Optional[Int[Array, "t"]] = None,
         return_potential: bool = False,
         jit_traversal: bool = True,
         max_acc_derivative_order: int = 0,
@@ -320,7 +348,7 @@ class EvaluateMixin:
         ----------
         state : PreparedStateLike
             Prepared tree and interaction lists, of either kind.
-        target_indices : Optional[Array]
+        target_indices : Optional[Int[Array, 't']]
             1-D indices selecting which targets to return; all particles remain
             sources.
         return_potential : bool
@@ -358,9 +386,9 @@ class EvaluateMixin:
             target_indices=target_indices,
             num_particles=int(state.inverse_permutation.shape[0]),
         )
-        tracing_targets = isinstance(
-            state.positions_sorted, jax.core.Tracer
-        ) or isinstance(resolved_target_indices, jax.core.Tracer)
+        tracing_targets = isinstance(state.positions_sorted, Tracer) or isinstance(
+            resolved_target_indices, Tracer
+        )
         derivative_order = int(max_acc_derivative_order)
         if derivative_order < 0:
             raise ValueError("max_acc_derivative_order must be non-negative")
@@ -473,7 +501,11 @@ class EvaluateMixin:
             accelerations = accelerations.astype(output_dtype)
             derivatives = tuple(level.astype(output_dtype) for level in derivatives)
             if return_potential:
-                return accelerations, potentials.astype(output_dtype), derivatives
+                return (
+                    accelerations,
+                    potentials.astype(output_dtype),
+                    derivatives,
+                )
             return accelerations, derivatives
 
         if return_potential:
@@ -508,12 +540,12 @@ class EvaluateMixin:
 
     @jaxtyped(typechecker=beartype)
     def _evaluate_prepared_state_at_positions_sorted(
-        self: "FMMEngine",
+        self,
         state: FMMPreparedState,
-        positions_sorted: Array,
+        positions_sorted: Float[Array, "n 3"],
         *,
-        masses_sorted: Optional[Array] = None,
-        target_indices: Optional[Array] = None,
+        masses_sorted: Optional[Float[Array, "n"]] = None,
+        target_indices: Optional[Int[Array, "t"]] = None,
         jit_traversal: bool = True,
         nearfield_mode_override: Optional[str] = None,
         nearfield_reverse_options: Optional[Any] = None,
@@ -538,13 +570,13 @@ class EvaluateMixin:
         state : FMMPreparedState
             Frozen topology. Read for its discrete artifacts only; its baked
             expansions are deliberately not used.
-        positions_sorted : Array
+        positions_sorted : Float[Array, 'n 3']
             Live positions ``[N, 3]`` in the state's Morton order. Differentiable.
-        masses_sorted : Optional[Array]
+        masses_sorted : Optional[Float[Array, 'n']]
             Live masses ``[N]``, likewise differentiable. ``None`` reuses the
             state's, which is the difference between a position-only gradient and
             one that also flows to mass.
-        target_indices : Optional[Array]
+        target_indices : Optional[Int[Array, 't']]
             Subset of targets to return; all particles remain sources.
         jit_traversal : bool
             Use the compiled traversal.
@@ -628,9 +660,9 @@ class EvaluateMixin:
             target_indices=target_indices,
             num_particles=int(state.inverse_permutation.shape[0]),
         )
-        tracing_targets = isinstance(
-            positions_sorted_arr, jax.core.Tracer
-        ) or isinstance(resolved_target_indices, jax.core.Tracer)
+        tracing_targets = isinstance(positions_sorted_arr, Tracer) or isinstance(
+            resolved_target_indices, Tracer
+        )
         # Octree backend: evaluate octree-native far-field locals (full path only).
         (
             octree_farfield_local_data,
@@ -699,12 +731,12 @@ class EvaluateMixin:
 
     @jaxtyped(typechecker=beartype)
     def differentiable_accelerations(
-        self: "FMMEngine",
+        self,
         state: Union[FMMPreparedState, LargeNPreparedState],
-        positions: Array,
-        masses: Array,
+        positions: Float[Array, "n 3"],
+        masses: Float[Array, "n"],
         *,
-        target_indices: Optional[Array] = None,
+        target_indices: Optional[Int[Array, "t"]] = None,
         jit_traversal: bool = False,
         grad_plan: Optional["LargeNGradPlan"] = None,
         grad_config: Optional[GradConfig] = None,
@@ -735,13 +767,13 @@ class EvaluateMixin:
             ``LargeNPreparedState`` (the ``large_n_gpu`` preset) additionally
             needs ``retain_far_pairs_for_grad=True`` so the frozen M2L pair list
             survives ``prepare_state``.
-        positions : Array
+        positions : Float[Array, 'n 3']
             Differentiated source/target positions ``[N, 3]``, in the ORIGINAL
             (unsorted) particle order -- this method applies ``state``'s
             permutation itself.
-        masses : Array
+        masses : Float[Array, 'n']
             Differentiated masses ``[N]``, in the same original order.
-        target_indices : Optional[Array]
+        target_indices : Optional[Int[Array, 't']]
             Optional targets to return (all particles are still sources). Not
             supported on the large-N path.
         jit_traversal : bool
@@ -814,7 +846,7 @@ class EvaluateMixin:
             )
 
     def differentiable_step_fn(
-        self: "FMMEngine",
+        self,
         state: Union[FMMPreparedState, LargeNPreparedState],
         *,
         target_indices: Optional[Array] = None,
@@ -939,7 +971,7 @@ class EvaluateMixin:
         return compiled
 
     def _forward_permutation(
-        self: "FMMEngine",
+        self,
         state: Union[FMMPreparedState, LargeNPreparedState],
     ) -> Array:
         """Original-order -> Morton-sorted gather index, memoized on the state.
@@ -997,7 +1029,7 @@ class EvaluateMixin:
         return forward_permutation
 
     def _sorted_inputs(
-        self: "FMMEngine",
+        self,
         state: Union[FMMPreparedState, LargeNPreparedState],
         positions: Array,
         masses: Array,
@@ -1030,7 +1062,7 @@ class EvaluateMixin:
         )
 
     def _grad_output_dtype(
-        self: "FMMEngine",
+        self,
         state: Union[FMMPreparedState, LargeNPreparedState],
     ) -> Any:
         """Return accelerations in the caller's float dtype where there is one.
@@ -1055,7 +1087,7 @@ class EvaluateMixin:
         return state.working_dtype
 
     def _differentiable_accelerations_large_n(
-        self: "FMMEngine",
+        self,
         state: LargeNPreparedState,
         positions: Array,
         masses: Array,
@@ -1141,7 +1173,7 @@ class EvaluateMixin:
         )
 
     def _differentiable_accelerations_radix(
-        self: "FMMEngine",
+        self,
         state: FMMPreparedState,
         positions: Array,
         masses: Array,
@@ -1217,7 +1249,7 @@ class EvaluateMixin:
         )
 
     def _evaluate_leaf_major_nearfield(
-        self: "FMMEngine",
+        self,
         tree: Tree,
         neighbor_list: NodeNeighborList,
         nearfield_interop: Optional[NearfieldInteropData],
@@ -1302,23 +1334,32 @@ class EvaluateMixin:
 
     @jaxtyped(typechecker=beartype)
     def evaluate_tree(
-        self: "FMMEngine",
+        self,
         tree: Tree,
-        positions_sorted: Array,
-        masses_sorted: Array,
+        positions_sorted: Float[Array, "n 3"],
+        masses_sorted: Float[Array, "n"],
         locals_or_downward: Union[LocalExpansionData, TreeDownwardData],
         neighbor_list: NodeNeighborList,
         *,
         nearfield_interop: Optional[NearfieldInteropData] = None,
         farfield_local_data: Optional[LocalExpansionData] = None,
-        farfield_leaf_nodes: Optional[Array] = None,
-        farfield_node_ranges: Optional[Array] = None,
-        precomputed_target_leaf_ids: Optional[Array] = None,
-        precomputed_source_leaf_ids: Optional[Array] = None,
-        precomputed_valid_pairs: Optional[Array] = None,
-        precomputed_chunk_sort_indices: Optional[Array] = None,
-        precomputed_chunk_group_ids: Optional[Array] = None,
-        precomputed_chunk_unique_indices: Optional[Array] = None,
+        farfield_leaf_nodes: Optional[Int[Array, "leaves"]] = None,
+        # `farfield_leaf_nodes` and `farfield_node_ranges` are NOT the same axis,
+        # despite the shared prefix. Observed across the captured calls:
+        # leaf_nodes (3,) with node_ranges (5, 2); (5,) with (9, 2); (9,) with
+        # (17, 2) -- i.e. leaves and 2*leaves-1 nodes, which is what a binary
+        # radix tree gives. Binding both to `leaves` would have been wrong. The
+        # node axis is left anonymous for the same reason as
+        # `near_field.py::node_ranges_override`: only the trailing 2 is invariant.
+        farfield_node_ranges: Optional[Int[Array, "_ 2"]] = None,
+        precomputed_target_leaf_ids: Optional[Int[Array, "pairs"]] = None,
+        precomputed_source_leaf_ids: Optional[Int[Array, "pairs"]] = None,
+        precomputed_valid_pairs: Optional[Bool[Array, "pairs"]] = None,
+        precomputed_chunk_sort_indices: Optional[Int[Array, "chunks chunkflat"]] = None,
+        precomputed_chunk_group_ids: Optional[Int[Array, "chunks chunkflat"]] = None,
+        precomputed_chunk_unique_indices: Optional[
+            Int[Array, "chunks chunkflat"]
+        ] = None,
         max_leaf_size: Optional[int] = None,
         return_potential: bool = False,
         nearfield_mode_override: Optional[str] = None,
@@ -1351,9 +1392,9 @@ class EvaluateMixin:
         ----------
         tree : Tree
             Built tree.
-        positions_sorted : Array
+        positions_sorted : Float[Array, 'n 3']
             Morton-sorted positions ``[N, 3]``.
-        masses_sorted : Array
+        masses_sorted : Float[Array, 'n']
             Morton-sorted masses ``[N]``.
         locals_or_downward : Union[LocalExpansionData, TreeDownwardData]
             Local expansions, or the downward result carrying them.
@@ -1364,22 +1405,22 @@ class EvaluateMixin:
         farfield_local_data : Optional[LocalExpansionData]
             Far-field locals override; ``None`` uses those in
             ``locals_or_downward``.
-        farfield_leaf_nodes : Optional[Array]
+        farfield_leaf_nodes : Optional[Int[Array, 'leaves']]
             Far-field leaf view override; ``None`` uses the radix view.
-        farfield_node_ranges : Optional[Array]
+        farfield_node_ranges : Optional[Int[Array, '_ 2']]
             Far-field node-range override; ``None`` as above.
-        precomputed_target_leaf_ids : Optional[Array]
+        precomputed_target_leaf_ids : Optional[Int[Array, 'pairs']]
             Per-edge target leaf ids. ``None`` means absent -- unlike the
             compiled kernel further down the stack, which opts in by *shape*.
-        precomputed_source_leaf_ids : Optional[Array]
+        precomputed_source_leaf_ids : Optional[Int[Array, 'pairs']]
             Per-edge source leaf ids.
-        precomputed_valid_pairs : Optional[Array]
+        precomputed_valid_pairs : Optional[Bool[Array, 'pairs']]
             Per-edge validity mask.
-        precomputed_chunk_sort_indices : Optional[Array]
+        precomputed_chunk_sort_indices : Optional[Int[Array, 'chunks chunkflat']]
             Chunk scatter sort permutation.
-        precomputed_chunk_group_ids : Optional[Array]
+        precomputed_chunk_group_ids : Optional[Int[Array, 'chunks chunkflat']]
             Chunk scatter group ids.
-        precomputed_chunk_unique_indices : Optional[Array]
+        precomputed_chunk_unique_indices : Optional[Int[Array, 'chunks chunkflat']]
             Chunk unique-target indices.
         max_leaf_size : Optional[int]
             Padded leaf width; ``None`` measures it, which needs concrete values.
@@ -1506,23 +1547,32 @@ class EvaluateMixin:
 
     @jaxtyped(typechecker=beartype)
     def evaluate_tree_compiled(
-        self: "FMMEngine",
+        self,
         tree: Tree,
-        positions_sorted: Array,
-        masses_sorted: Array,
+        positions_sorted: Float[Array, "n 3"],
+        masses_sorted: Float[Array, "n"],
         locals_or_downward: Union[LocalExpansionData, TreeDownwardData],
         neighbor_list: NodeNeighborList,
         *,
         nearfield_interop: Optional[NearfieldInteropData] = None,
         farfield_local_data: Optional[LocalExpansionData] = None,
-        farfield_leaf_nodes: Optional[Array] = None,
-        farfield_node_ranges: Optional[Array] = None,
-        precomputed_target_leaf_ids: Optional[Array] = None,
-        precomputed_source_leaf_ids: Optional[Array] = None,
-        precomputed_valid_pairs: Optional[Array] = None,
-        precomputed_chunk_sort_indices: Optional[Array] = None,
-        precomputed_chunk_group_ids: Optional[Array] = None,
-        precomputed_chunk_unique_indices: Optional[Array] = None,
+        farfield_leaf_nodes: Optional[Int[Array, "leaves"]] = None,
+        # `farfield_leaf_nodes` and `farfield_node_ranges` are NOT the same axis,
+        # despite the shared prefix. Observed across the captured calls:
+        # leaf_nodes (3,) with node_ranges (5, 2); (5,) with (9, 2); (9,) with
+        # (17, 2) -- i.e. leaves and 2*leaves-1 nodes, which is what a binary
+        # radix tree gives. Binding both to `leaves` would have been wrong. The
+        # node axis is left anonymous for the same reason as
+        # `near_field.py::node_ranges_override`: only the trailing 2 is invariant.
+        farfield_node_ranges: Optional[Int[Array, "_ 2"]] = None,
+        precomputed_target_leaf_ids: Optional[Int[Array, "pairs"]] = None,
+        precomputed_source_leaf_ids: Optional[Int[Array, "pairs"]] = None,
+        precomputed_valid_pairs: Optional[Bool[Array, "pairs"]] = None,
+        precomputed_chunk_sort_indices: Optional[Int[Array, "chunks chunkflat"]] = None,
+        precomputed_chunk_group_ids: Optional[Int[Array, "chunks chunkflat"]] = None,
+        precomputed_chunk_unique_indices: Optional[
+            Int[Array, "chunks chunkflat"]
+        ] = None,
         max_leaf_size: Optional[int] = None,
         return_potential: bool = False,
     ) -> Union[Array, Tuple[Array, Array]]:
@@ -1539,9 +1589,9 @@ class EvaluateMixin:
         ----------
         tree : Tree
             Built tree.
-        positions_sorted : Array
+        positions_sorted : Float[Array, 'n 3']
             Morton-sorted positions ``[N, 3]``.
-        masses_sorted : Array
+        masses_sorted : Float[Array, 'n']
             Morton-sorted masses ``[N]``.
         locals_or_downward : Union[LocalExpansionData, TreeDownwardData]
             Local expansions, or the downward result carrying them.
@@ -1551,21 +1601,21 @@ class EvaluateMixin:
             Prebuilt near-field view; ``None`` builds one.
         farfield_local_data : Optional[LocalExpansionData]
             Far-field locals override.
-        farfield_leaf_nodes : Optional[Array]
+        farfield_leaf_nodes : Optional[Int[Array, 'leaves']]
             Far-field leaf view override.
-        farfield_node_ranges : Optional[Array]
+        farfield_node_ranges : Optional[Int[Array, '_ 2']]
             Far-field node-range override.
-        precomputed_target_leaf_ids : Optional[Array]
+        precomputed_target_leaf_ids : Optional[Int[Array, 'pairs']]
             Per-edge target leaf ids.
-        precomputed_source_leaf_ids : Optional[Array]
+        precomputed_source_leaf_ids : Optional[Int[Array, 'pairs']]
             Per-edge source leaf ids.
-        precomputed_valid_pairs : Optional[Array]
+        precomputed_valid_pairs : Optional[Bool[Array, 'pairs']]
             Per-edge validity mask.
-        precomputed_chunk_sort_indices : Optional[Array]
+        precomputed_chunk_sort_indices : Optional[Int[Array, 'chunks chunkflat']]
             Chunk scatter sort permutation.
-        precomputed_chunk_group_ids : Optional[Array]
+        precomputed_chunk_group_ids : Optional[Int[Array, 'chunks chunkflat']]
             Chunk scatter group ids.
-        precomputed_chunk_unique_indices : Optional[Array]
+        precomputed_chunk_unique_indices : Optional[Int[Array, 'chunks chunkflat']]
             Chunk unique-target indices.
         max_leaf_size : Optional[int]
             Padded leaf width. Required under a trace -- measuring it would need

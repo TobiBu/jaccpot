@@ -189,15 +189,8 @@ Example usage::
 
 from __future__ import annotations
 
-from ._sh_indexing import (  # noqa: F401
-    _azimuth_from_floored_rho,
-    _factorial_table_jax,
-    sh_index,
-    sh_offset,
-    sh_size,
-)
-from .real_dehnen_q import (  # noqa: F401
-    _compute_B_real_dehnen_via_Q,
+from ._sh_indexing import sh_index, sh_offset, sh_size
+from .real_dehnen_q import (
     _compute_dehnen_B_matrix_complex,
     _dehnen_real_Q_full,
     build_Q_dehnen_no_sqrt2,
@@ -206,18 +199,14 @@ from .real_dehnen_q import (  # noqa: F401
     compute_real_B_matrix_multipole,
     verify_real_B_matrix,
 )
-from .real_p2m_l2p import (  # noqa: F401
-    _evaluate_local_real_with_grad_cvjp,
+from .real_p2m_l2p import (
     evaluate_local_real,
     evaluate_local_real_derivative_tower,
     evaluate_local_real_derivative_tower_batch,
     evaluate_local_real_with_grad,
     p2m_real_direct,
 )
-from .real_rotations import (  # noqa: F401
-    _alignment_angles,
-    _multipole_align_from_z_block,
-    _multipole_align_to_z_block,
+from .real_rotations import (
     real_Dz_diagonal,
     real_rotation_from_z_axis_local,
     real_rotation_from_z_axis_multipole,
@@ -225,7 +214,7 @@ from .real_rotations import (  # noqa: F401
     real_rotation_to_z_axis_multipole,
     real_transverse_generators,
 )
-from .real_translations import (  # noqa: F401
+from .real_translations import (
     l2l_real,
     m2l_a6_real_only,
     m2l_optimized_real,
@@ -235,7 +224,17 @@ from .real_translations import (  # noqa: F401
     translate_along_z_m2l_real,
     translate_along_z_m2m_real,
     z_m2l_translation_tables,
-    z_shift_translation_tables,
+)
+
+# RE-EXPORTS. Both names are imported for other modules to reach through this
+# aggregator and are unused *here*. Holding references makes that a fact the
+# interpreter can see, so `pyflakes` reports only genuinely dead re-exports for
+# this module. `__all__` cannot carry them: it declares the PUBLIC surface, and
+# these are private by name -- which is why an `__all__` alone left this module
+# reporting 10 unused imports (audit A.11).
+_REEXPORTS = (
+    _compute_dehnen_B_matrix_complex,
+    _dehnen_real_Q_full,
 )
 
 # ===========================================================================

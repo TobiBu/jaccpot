@@ -8,7 +8,7 @@ from typing import Any, Callable, Literal, NamedTuple, Optional, Sequence, Tuple
 
 import jax
 import jax.numpy as jnp
-from jaxtyping import Array, DTypeLike
+from jaxtyping import Array, DTypeLike, Float, Int
 
 from ._env import env_flag
 from .basis import BasisInterface, ComplexSHBasis, RealSHBasis
@@ -916,11 +916,11 @@ class FastMultipoleMethod:
 
     def compute_accelerations(
         self: "FastMultipoleMethod",
-        positions: Array,
-        masses: Array,
+        positions: Float[Array, "n 3"],
+        masses: Float[Array, "n"],
         *,
-        target_indices: Optional[Array] = None,
-        bounds: Optional[Tuple[Array, Array]] = None,
+        target_indices: Optional[Int[Array, "t"]] = None,
+        bounds: Optional[Tuple[Float[Array, "3"], Float[Array, "3"]]] = None,
         leaf_size: int = 16,
         max_order: int = 4,
         return_potential: bool = False,
@@ -940,15 +940,15 @@ class FastMultipoleMethod:
 
         Parameters
         ----------
-        positions : Array
+        positions : Float[Array, 'n 3']
             Source and target particle positions ``[N, 3]``.
-        masses : Array
+        masses : Float[Array, 'n']
             Particle masses ``[N]``, aligned with ``positions``. G=1 unless the
             solver was configured otherwise.
-        target_indices : Optional[Array]
+        target_indices : Optional[Int[Array, 't']]
             1-D indices selecting which targets to return. All particles remain
             sources.
-        bounds : Optional[Tuple[Array, Array]]
+        bounds : Optional[Tuple[Float[Array, '3'], Float[Array, '3']]]
             Explicit ``(lower, upper)`` domain bounds for tree construction.
             Defaults to the particle bounding box.
         leaf_size : int
@@ -1011,10 +1011,10 @@ class FastMultipoleMethod:
 
     def prepare_state(
         self: "FastMultipoleMethod",
-        positions: Array,
-        masses: Array,
+        positions: Float[Array, "n 3"],
+        masses: Float[Array, "n"],
         *,
-        bounds: Optional[Tuple[Array, Array]] = None,
+        bounds: Optional[Tuple[Float[Array, "3"], Float[Array, "3"]]] = None,
         leaf_size: int = 16,
         max_order: int = 4,
         theta: Optional[float] = None,
@@ -1040,11 +1040,11 @@ class FastMultipoleMethod:
 
         Parameters
         ----------
-        positions : Array
+        positions : Float[Array, 'n 3']
             Source and target particle positions ``[N, 3]``.
-        masses : Array
+        masses : Float[Array, 'n']
             Particle masses ``[N]``, aligned with ``positions``.
-        bounds : Optional[Tuple[Array, Array]]
+        bounds : Optional[Tuple[Float[Array, '3'], Float[Array, '3']]]
             Explicit ``(lower, upper)`` domain bounds for tree construction.
             Defaults to the particle bounding box.
         leaf_size : int
@@ -1084,12 +1084,12 @@ class FastMultipoleMethod:
 
     def compute_accelerations_and_jerk(
         self: "FastMultipoleMethod",
-        positions: Array,
-        masses: Array,
-        velocities: Array,
+        positions: Float[Array, "n 3"],
+        masses: Float[Array, "n"],
+        velocities: Float[Array, "n 3"],
         *,
-        target_indices: Optional[Array] = None,
-        bounds: Optional[Tuple[Array, Array]] = None,
+        target_indices: Optional[Int[Array, "t"]] = None,
+        bounds: Optional[Tuple[Float[Array, "3"], Float[Array, "3"]]] = None,
         leaf_size: int = 16,
         max_order: int = 4,
         theta: Optional[float] = None,
@@ -1101,17 +1101,17 @@ class FastMultipoleMethod:
 
         Parameters
         ----------
-        positions : Array
+        positions : Float[Array, 'n 3']
             Particle positions ``[N, 3]``.
-        masses : Array
+        masses : Float[Array, 'n']
             Particle masses ``[N]``.
-        velocities : Array
+        velocities : Float[Array, 'n 3']
             Particle velocities ``[N, 3]``. Used only for the jerk; the
             acceleration does not depend on them.
-        target_indices : Optional[Array]
+        target_indices : Optional[Int[Array, 't']]
             1-D indices selecting which targets to return; all particles remain
             sources.
-        bounds : Optional[Tuple[Array, Array]]
+        bounds : Optional[Tuple[Float[Array, '3'], Float[Array, '3']]]
             Explicit ``(lower, upper)`` domain bounds for tree construction.
         leaf_size : int
             Target maximum particles per leaf.
@@ -1181,12 +1181,12 @@ class FastMultipoleMethod:
 
     def compute_accelerations_with_time_derivatives(
         self: "FastMultipoleMethod",
-        positions: Array,
-        masses: Array,
-        velocities: Array,
+        positions: Float[Array, "n 3"],
+        masses: Float[Array, "n"],
+        velocities: Float[Array, "n 3"],
         *,
-        target_indices: Optional[Array] = None,
-        bounds: Optional[Tuple[Array, Array]] = None,
+        target_indices: Optional[Int[Array, "t"]] = None,
+        bounds: Optional[Tuple[Float[Array, "3"], Float[Array, "3"]]] = None,
         leaf_size: int = 16,
         max_order: int = 4,
         theta: Optional[float] = None,
@@ -1202,17 +1202,17 @@ class FastMultipoleMethod:
 
         Parameters
         ----------
-        positions : Array
+        positions : Float[Array, 'n 3']
             Source and target particle positions ``[N, 3]``.
-        masses : Array
+        masses : Float[Array, 'n']
             Particle masses ``[N]``, aligned with ``positions``.
-        velocities : Array
+        velocities : Float[Array, 'n 3']
             Particle velocities ``[N, 3]``. Used only for the time derivatives;
             the acceleration does not depend on them.
-        target_indices : Optional[Array]
+        target_indices : Optional[Int[Array, 't']]
             1-D indices selecting which targets to return; all particles remain
             sources.
-        bounds : Optional[Tuple[Array, Array]]
+        bounds : Optional[Tuple[Float[Array, '3'], Float[Array, '3']]]
             Explicit ``(lower, upper)`` domain bounds for tree construction.
         leaf_size : int
             Target maximum particles per leaf.
@@ -1254,8 +1254,8 @@ class FastMultipoleMethod:
     def prepare_upward_sweep(
         self: "FastMultipoleMethod",
         tree: Any,
-        positions_sorted: Array,
-        masses_sorted: Array,
+        positions_sorted: Float[Array, "n 3"],
+        masses_sorted: Float[Array, "n"],
         *,
         max_order: int = 4,
     ) -> Any:
@@ -1270,9 +1270,9 @@ class FastMultipoleMethod:
         tree : Any
             A built tree artifact. ``Any`` so this module need not import the
             ``yggdrax`` tree types.
-        positions_sorted : Array
+        positions_sorted : Float[Array, 'n 3']
             Particle positions ``[N, 3]`` in ``tree``'s sort order.
-        masses_sorted : Array
+        masses_sorted : Float[Array, 'n']
             Particle masses ``[N]`` in the same order.
         max_order : int
             Expansion order ``p``.
@@ -1298,7 +1298,7 @@ class FastMultipoleMethod:
         # correctly. Only the annotation said otherwise.
         state: Union[FMMPreparedState, LargeNPreparedState],
         *,
-        target_indices: Optional[Array] = None,
+        target_indices: Optional[Int[Array, "t"]] = None,
         return_potential: bool = False,
         jit_traversal: Optional[bool] = None,
         max_acc_derivative_order: int = 0,
@@ -1318,7 +1318,7 @@ class FastMultipoleMethod:
         ----------
         state : Union[FMMPreparedState, LargeNPreparedState]
             Tree and interaction lists from :meth:`prepare_state`.
-        target_indices : Optional[Array]
+        target_indices : Optional[Int[Array, 't']]
             1-D indices selecting which targets to return; all particles remain
             sources.
         return_potential : bool
@@ -1358,10 +1358,10 @@ class FastMultipoleMethod:
     def differentiable_accelerations(
         self: "FastMultipoleMethod",
         state: Union[FMMPreparedState, LargeNPreparedState],
-        positions: Array,
-        masses: Array,
+        positions: Float[Array, "n 3"],
+        masses: Float[Array, "n"],
         *,
-        target_indices: Optional[Array] = None,
+        target_indices: Optional[Int[Array, "t"]] = None,
         jit_traversal: bool = False,
         grad_plan: Optional[Any] = None,
         grad_config: Optional[GradConfig] = None,
@@ -1388,12 +1388,12 @@ class FastMultipoleMethod:
         ----------
         state : Union[FMMPreparedState, LargeNPreparedState]
             Frozen topology from :meth:`prepare_state`, captured as a constant.
-        positions : Array
+        positions : Float[Array, 'n 3']
             Differentiated positions ``[N, 3]``, in the original (unsorted)
             particle order -- the method applies ``state``'s permutation itself.
-        masses : Array
+        masses : Float[Array, 'n']
             Differentiated masses ``[N]``, in the same original order.
-        target_indices : Optional[Array]
+        target_indices : Optional[Int[Array, 't']]
             Optional subset of targets to return; all particles remain sources.
             Not supported on the large-N path.
         jit_traversal : bool
@@ -1431,7 +1431,7 @@ class FastMultipoleMethod:
         self: "FastMultipoleMethod",
         state: Union[FMMPreparedState, LargeNPreparedState],
         *,
-        target_indices: Optional[Array] = None,
+        target_indices: Optional[Int[Array, "t"]] = None,
         grad_config: Optional[GradConfig] = None,
         jit_traversal: bool = False,
         compile_now: Optional[Tuple[Array, Array]] = None,
@@ -1464,7 +1464,7 @@ class FastMultipoleMethod:
         state : Union[FMMPreparedState, LargeNPreparedState]
             Frozen topology from :meth:`prepare_state`, captured as a constant.
             Must hold concrete arrays, not tracers.
-        target_indices : Optional[Array]
+        target_indices : Optional[Int[Array, 't']]
             Optional subset of targets to return; all particles remain sources.
         grad_config : Optional[GradConfig]
             Gradient-path execution options; see
@@ -1493,9 +1493,9 @@ class FastMultipoleMethod:
     def evaluate_prepared_state_with_jerk(
         self: "FastMultipoleMethod",
         state: FMMPreparedState,
-        velocities: Array,
+        velocities: Float[Array, "n 3"],
         *,
-        target_indices: Optional[Array] = None,
+        target_indices: Optional[Int[Array, "t"]] = None,
         jerk_mode: str = "fast_approx",
         jerk_fd_dt: float = 1e-3,
     ) -> tuple[Array, Array]:
@@ -1507,10 +1507,10 @@ class FastMultipoleMethod:
             Tree and interaction lists from :meth:`prepare_state`. Reused as-is;
             the topology is not rebuilt, so this is only valid while the
             positions it was built from remain appropriate.
-        velocities : Array
+        velocities : Float[Array, 'n 3']
             Particle velocities ``[N, 3]`` in the original (unsorted) particle
             order.
-        target_indices : Optional[Array]
+        target_indices : Optional[Int[Array, 't']]
             1-D indices selecting which targets to return; all particles remain
             sources.
         jerk_mode : str
@@ -1551,9 +1551,9 @@ class FastMultipoleMethod:
     def evaluate_prepared_state_with_time_derivatives(
         self: "FastMultipoleMethod",
         state: FMMPreparedState,
-        velocities: Array,
+        velocities: Float[Array, "n 3"],
         *,
-        target_indices: Optional[Array] = None,
+        target_indices: Optional[Int[Array, "t"]] = None,
         max_time_derivative_order: int = 1,
         mode: str = "accurate",
     ) -> tuple[Array, tuple[Array, ...]]:
@@ -1569,10 +1569,10 @@ class FastMultipoleMethod:
         ----------
         state : FMMPreparedState
             Tree and interaction lists from :meth:`prepare_state`.
-        velocities : Array
+        velocities : Float[Array, 'n 3']
             Particle velocities ``[N, 3]`` in the original (unsorted) particle
             order.
-        target_indices : Optional[Array]
+        target_indices : Optional[Int[Array, 't']]
             1-D indices selecting which targets to return; all particles remain
             sources.
         max_time_derivative_order : int
@@ -1604,10 +1604,10 @@ class FastMultipoleMethod:
     def refresh_prepared_state(
         self: "FastMultipoleMethod",
         prepared_state: FMMPreparedState,
-        positions: Array,
-        masses: Array,
+        positions: Float[Array, "n 3"],
+        masses: Float[Array, "n"],
         *,
-        bounds: Optional[Tuple[Array, Array]] = None,
+        bounds: Optional[Tuple[Float[Array, "3"], Float[Array, "3"]]] = None,
         leaf_size: Optional[int] = None,
         max_order: Optional[int] = None,
         theta: Optional[float] = None,
@@ -1629,11 +1629,11 @@ class FastMultipoleMethod:
         ----------
         prepared_state : FMMPreparedState
             State to refresh.
-        positions : Array
+        positions : Float[Array, 'n 3']
             New particle positions ``[N, 3]``.
-        masses : Array
+        masses : Float[Array, 'n']
             New particle masses ``[N]``.
-        bounds : Optional[Tuple[Array, Array]]
+        bounds : Optional[Tuple[Float[Array, '3'], Float[Array, '3']]]
             Explicit ``(lower, upper)`` domain bounds.
         leaf_size : Optional[int]
             Leaf target; ``None`` keeps the state's own.
@@ -1664,10 +1664,10 @@ class FastMultipoleMethod:
     def strict_prepare_refresh_and_evaluate(
         self: "FastMultipoleMethod",
         prepared_state: Optional[FMMPreparedState],
-        positions: Array,
-        masses: Array,
+        positions: Float[Array, "n 3"],
+        masses: Float[Array, "n"],
         *,
-        bounds: Optional[Tuple[Array, Array]] = None,
+        bounds: Optional[Tuple[Float[Array, "3"], Float[Array, "3"]]] = None,
         leaf_size: int = 16,
         max_order: int = 4,
         theta: Optional[float] = None,
@@ -1684,11 +1684,11 @@ class FastMultipoleMethod:
         ----------
         prepared_state : Optional[FMMPreparedState]
             State to refresh, or ``None`` to prepare one.
-        positions : Array
+        positions : Float[Array, 'n 3']
             Particle positions ``[N, 3]``.
-        masses : Array
+        masses : Float[Array, 'n']
             Particle masses ``[N]``.
-        bounds : Optional[Tuple[Array, Array]]
+        bounds : Optional[Tuple[Float[Array, '3'], Float[Array, '3']]]
             Explicit ``(lower, upper)`` domain bounds.
         leaf_size : int
             Target maximum particles per leaf.
@@ -1721,7 +1721,7 @@ class FastMultipoleMethod:
         self: "FastMultipoleMethod",
         *,
         state: Any,
-        masses: Array,
+        masses: Float[Array, "n"],
         num_steps: int,
         refresh_every: int,
         segment_runner: Callable[[Any, Array, int], tuple[Any, Any]],
@@ -1748,7 +1748,7 @@ class FastMultipoleMethod:
         state : Any
             The caller's integrator state, opaque to this method: it is only
             passed to ``segment_runner`` and ``positions_getter``.
-        masses : Array
+        masses : Float[Array, 'n']
             Particle masses ``[N]``.
         num_steps : int
             Total steps. Must be positive.
@@ -1803,8 +1803,8 @@ class FastMultipoleMethod:
     def strict_run_v2(
         self: "FastMultipoleMethod",
         *,
-        state: Array,
-        masses: Array,
+        state: Float[Array, "n 2 3"],
+        masses: Float[Array, "n"],
         dt: float,
         num_steps: int,
         refresh_every: int,
@@ -1812,7 +1812,7 @@ class FastMultipoleMethod:
         max_order: int,
         theta: Optional[float] = None,
         prepared_state: Optional[FMMPreparedState] = None,
-        initial_self_acceleration: Optional[Array] = None,
+        initial_self_acceleration: Optional[Float[Array, "n 3"]] = None,
         jit_traversal: Optional[bool] = True,
         add_external: bool = False,
         external_acceleration_fn: Optional[Callable[[Array], Array]] = None,
@@ -1837,10 +1837,10 @@ class FastMultipoleMethod:
 
         Parameters
         ----------
-        state : Array
+        state : Float[Array, 'n 2 3']
             Packed integrator state ``[N, 2, 3]``: positions and velocities
             stacked on axis 1.
-        masses : Array
+        masses : Float[Array, 'n']
             Particle masses ``[N]``.
         dt : float
             Timestep.
@@ -1856,7 +1856,7 @@ class FastMultipoleMethod:
             Per-call MAC opening-angle override.
         prepared_state : Optional[FMMPreparedState]
             Existing state to refresh, or ``None`` to prepare.
-        initial_self_acceleration : Optional[Array]
+        initial_self_acceleration : Optional[Float[Array, 'n 3']]
             Self-gravity at step 0 ``[N, 3]``, if already known. ``None``
             evaluates it, costing one extra evaluation.
         jit_traversal : Optional[bool]
@@ -1908,8 +1908,8 @@ class FastMultipoleMethod:
     def strict_fused_prepared_eval_fn(
         self: "FastMultipoleMethod",
         *,
-        positions: Array,
-        masses: Array,
+        positions: Float[Array, "n 3"],
+        masses: Float[Array, "n"],
         leaf_size: int,
         max_order: int,
         theta: Optional[float] = None,
@@ -1924,9 +1924,9 @@ class FastMultipoleMethod:
 
         Parameters
         ----------
-        positions : Array
+        positions : Float[Array, 'n 3']
             Particle positions ``[N, 3]``.
-        masses : Array
+        masses : Float[Array, 'n']
             Particle masses ``[N]``.
         leaf_size : int
             Target maximum particles per leaf.
@@ -1952,8 +1952,8 @@ class FastMultipoleMethod:
     def update_multipoles_only(
         self: "FastMultipoleMethod",
         prepared_state: FMMPreparedState,
-        positions: Array,
-        masses: Array,
+        positions: Float[Array, "n 3"],
+        masses: Float[Array, "n"],
         *,
         leaf_size: Optional[int] = None,
         max_order: Optional[int] = None,
@@ -1970,9 +1970,9 @@ class FastMultipoleMethod:
         ----------
         prepared_state : FMMPreparedState
             State whose payloads are refreshed.
-        positions : Array
+        positions : Float[Array, 'n 3']
             New particle positions ``[N, 3]``.
-        masses : Array
+        masses : Float[Array, 'n']
             New particle masses ``[N]``.
         leaf_size : Optional[int]
             Leaf target; ``None`` keeps the state's own.
@@ -1998,10 +1998,10 @@ class FastMultipoleMethod:
     def rebuild_topology_in_place(
         self: "FastMultipoleMethod",
         prepared_state: FMMPreparedState,
-        positions: Array,
-        masses: Array,
+        positions: Float[Array, "n 3"],
+        masses: Float[Array, "n"],
         *,
-        bounds: Optional[Tuple[Array, Array]] = None,
+        bounds: Optional[Tuple[Float[Array, "3"], Float[Array, "3"]]] = None,
         leaf_size: Optional[int] = None,
         max_order: Optional[int] = None,
         theta: Optional[float] = None,
@@ -2018,11 +2018,11 @@ class FastMultipoleMethod:
         ----------
         prepared_state : FMMPreparedState
             State whose topology is rebuilt.
-        positions : Array
+        positions : Float[Array, 'n 3']
             New particle positions ``[N, 3]``.
-        masses : Array
+        masses : Float[Array, 'n']
             New particle masses ``[N]``.
-        bounds : Optional[Tuple[Array, Array]]
+        bounds : Optional[Tuple[Float[Array, '3'], Float[Array, '3']]]
             Explicit ``(lower, upper)`` domain bounds.
         leaf_size : Optional[int]
             Leaf target; ``None`` keeps the state's own.

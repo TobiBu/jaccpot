@@ -16,6 +16,7 @@ from jax import lax
 from jaxtyping import Array, jaxtyped
 from yggdrax.tree_moments import compute_tree_mass_moments
 
+from jaccpot._jax_compat import Tracer
 from jaccpot.downward.local_expansions import LocalExpansionData
 from jaccpot.operators.symmetric_tensors import contract_symmetric_one_axis_3d
 from jaccpot.upward.solidfmm_complex_tree_expansions import (
@@ -37,18 +38,27 @@ from .kernels.core import (
 )
 
 if TYPE_CHECKING:  # pragma: no cover - annotations only, no runtime import
-    # The mixins annotate `self` as the engine they are mixed into, which lives in
-    # `_fmm_impl` and imports *them* -- so this must stay under TYPE_CHECKING or it
-    # would form the cycle ARCHITECTURE §8 forbids. Before this block the names were
-    # dangling: `typing.get_type_hints` raised NameError on every mixin method, so the
-    # annotations documented an intent no tool could check.
+    # The engine lives in `_fmm_impl`, which imports *these mixins* -- so this import
+    # must stay under TYPE_CHECKING or it would form the cycle ARCHITECTURE §8
+    # forbids. Inheriting `_EngineBase` makes each mixin *be* the engine under a type
+    # checker, so every `self.<engine attribute>` resolves; at runtime the alias is
+    # `object`, leaving the MRO exactly as it was. The audit's E.2 records why this
+    # beats annotating `self`, and what it does not buy at runtime.
     from ._fmm_impl import FMMEngine
 
+    _EngineBase = FMMEngine
+else:  # pragma: no cover - annotations only, never an import at runtime
+    _EngineBase = object
 
-class DerivativesMixin:
+__all__ = [
+    "DerivativesMixin",
+]
+
+
+class DerivativesMixin(_EngineBase):
     @jaxtyped(typechecker=beartype)
     def compute_accelerations_and_jerk(
-        self: "FMMEngine",
+        self,
         positions: Array,
         masses: Array,
         velocities: Array,
@@ -72,6 +82,57 @@ class DerivativesMixin:
         Jerk combines:
         - exact near-field pairwise jerk from source/target velocities,
         - far-field convective term from acceleration Jacobian times target velocity.
+
+        Parameters
+        ----------
+        positions : Array
+            Source and target particle positions.
+        masses : Array
+            Particle masses aligned with ``positions``.
+        velocities : Array
+            Particle velocities aligned with ``positions``.
+        target_indices : Optional[Array]
+            Optional 1D index array selecting which target-particle outputs to
+            return. All particles are still used as source masses.
+        bounds : Optional[Tuple[Array, Array]]
+            Optional explicit domain bounds used during tree construction.
+        leaf_size : int
+            Target maximum particle count per leaf for the prepared tree.
+        max_order : int
+            Multipole/local expansion order used for the upward and downward
+            passes.
+        theta : Optional[float]
+            Optional per-call MAC opening angle override.
+        jit_tree : Optional[bool]
+            When ``True``, specialise tree construction via JIT to amortise
+            repeated builds for consistent tree sizes.
+        refine_local : Optional[bool]
+            Override the fixed-depth builder's local refinement toggle when
+            ``tree_build_mode`` is ``"fixed_depth"``.
+        max_refine_levels : Optional[int]
+            Maximum local refinement iterations passed to the builder.
+        aspect_threshold : Optional[float]
+            Aspect ratio threshold that triggers additional splits in the
+            refinement pass.
+        jit_traversal : Optional[bool]
+            When ``True``, evaluate the traversal/evaluation path with the
+            compiled implementation for improved throughput.
+        reuse_prepared_state : bool
+            Reuse the most recent prepared state when identical array objects
+            and preparation parameters are provided.
+        jerk_mode : str
+            ``"fast_approx"`` or ``"accurate"``; forwarded to
+            :meth:`evaluate_prepared_state_with_jerk`, which is where the two
+            differ and where an invalid value is rejected.
+        jerk_fd_dt : float
+            Finite-difference step used by the ``"accurate"`` mode on a
+            non-solidfmm basis. Ignored otherwise.
+
+        Returns
+        -------
+        tuple[Array, Array]
+            ``(accelerations, jerk)``, each ``[N, 3]`` for all particles or
+            ``[len(target_indices), 3]`` when ``target_indices`` is given.
         """
         cache_key: Optional[tuple[Any, ...]] = None
         state: Optional[FMMPreparedState] = None
@@ -139,7 +200,7 @@ class DerivativesMixin:
 
     @jaxtyped(typechecker=beartype)
     def compute_accelerations_with_time_derivatives(
-        self: "FMMEngine",
+        self,
         positions: Array,
         masses: Array,
         velocities: Array,
@@ -158,7 +219,58 @@ class DerivativesMixin:
         max_time_derivative_order: int = 1,
         mode: str = "accurate",
     ) -> tuple[Array, tuple[Array, ...]]:
-        """Run FMM and return accelerations plus time derivatives up to order K."""
+        """Run FMM and return accelerations plus time derivatives up to order K.
+
+        Parameters
+        ----------
+        positions : Array
+            Source and target particle positions.
+        masses : Array
+            Particle masses aligned with ``positions``.
+        velocities : Array
+            Particle velocities aligned with ``positions``.
+        target_indices : Optional[Array]
+            Optional 1D index array selecting which target-particle outputs to
+            return. All particles are still used as source masses.
+        bounds : Optional[Tuple[Array, Array]]
+            Optional explicit domain bounds used during tree construction.
+        leaf_size : int
+            Target maximum particle count per leaf for the prepared tree.
+        max_order : int
+            Multipole/local expansion order used for the upward and downward
+            passes.
+        theta : Optional[float]
+            Optional per-call MAC opening angle override.
+        jit_tree : Optional[bool]
+            When ``True``, specialise tree construction via JIT to amortise
+            repeated builds for consistent tree sizes.
+        refine_local : Optional[bool]
+            Override the fixed-depth builder's local refinement toggle when
+            ``tree_build_mode`` is ``"fixed_depth"``.
+        max_refine_levels : Optional[int]
+            Maximum local refinement iterations passed to the builder.
+        aspect_threshold : Optional[float]
+            Aspect ratio threshold that triggers additional splits in the
+            refinement pass.
+        jit_traversal : Optional[bool]
+            When ``True``, evaluate the traversal/evaluation path with the
+            compiled implementation for improved throughput.
+        reuse_prepared_state : bool
+            Reuse the most recent prepared state when identical array objects
+            and preparation parameters are provided.
+        max_time_derivative_order : int
+            Highest total time-derivative order to return. Forwarded to
+            :meth:`evaluate_prepared_state_with_time_derivatives`, which is
+            where the supported range is enforced.
+        mode : str
+            Currently only ``"accurate"``; validated downstream.
+
+        Returns
+        -------
+        tuple[Array, tuple[Array, ...]]
+            ``(accelerations, derivatives)`` with ``derivatives[n - 1]`` holding
+            ``D_t^n a``, so the tuple has ``max_time_derivative_order`` entries.
+        """
         cache_key: Optional[tuple[Any, ...]] = None
         state: Optional[FMMPreparedState] = None
         positions_arr = jnp.asarray(positions)
@@ -225,7 +337,7 @@ class DerivativesMixin:
 
     @jaxtyped(typechecker=beartype)
     def evaluate_prepared_state_with_jerk(
-        self: "FMMEngine",
+        self,
         state: FMMPreparedState,
         velocities: Array,
         *,
@@ -234,7 +346,53 @@ class DerivativesMixin:
         jerk_mode: str = "fast_approx",
         jerk_fd_dt: float = 1e-3,
     ) -> tuple[Array, Array]:
-        """Evaluate accelerations and jerk for all particles or targets."""
+        """Evaluate accelerations and jerk for all particles or targets.
+
+        ``jerk_mode`` picks between two genuinely different schemes rather than
+        two speed settings for one scheme:
+
+        * ``"fast_approx"`` -- near-field pairwise jerk plus the far-field
+          convective term ``(v . grad) a``. It omits the source-motion far-field
+          contribution ``d_t L``, so it is an approximation whose error grows with
+          how much the far field is itself moving.
+        * ``"accurate"`` -- adds that term. On ``expansion_basis="solidfmm"`` it
+          comes from the analytic ``dM -> dL`` contraction; on any other basis
+          there is no analytic path, so it falls back to a central finite
+          difference of the accelerations along ``dt * v`` with step
+          ``jerk_fd_dt``.
+
+        Parameters
+        ----------
+        state : FMMPreparedState
+            Prepared state to evaluate; not mutated.
+        velocities : Array
+            Particle velocities, in the caller's original order, with the same
+            shape as the state's positions.
+        target_indices : Optional[Array]
+            Optional 1D index array selecting which target-particle outputs to
+            return. All particles are still used as source masses.
+        jit_traversal : bool
+            Evaluate the traversal/evaluation path with the compiled
+            implementation.
+        jerk_mode : str
+            ``"fast_approx"`` or ``"accurate"``; see above.
+        jerk_fd_dt : float
+            Finite-difference step for the ``"accurate"`` non-solidfmm fallback.
+            Must be positive. Unused on the analytic paths.
+
+        Returns
+        -------
+        tuple[Array, Array]
+            ``(accelerations, jerk)``, cast to the state's input dtype when that
+            is a float type and to its working dtype otherwise.
+
+        Raises
+        ------
+        ValueError
+            If ``velocities`` does not match the state's position shape, if
+            ``jerk_mode`` is neither ``"fast_approx"`` nor ``"accurate"``, or if
+            the finite-difference fallback is selected with ``jerk_fd_dt <= 0``.
+        """
         vel_arr = jnp.asarray(velocities, dtype=state.working_dtype)
         if vel_arr.shape != state.positions_sorted.shape:
             raise ValueError(
@@ -364,7 +522,7 @@ class DerivativesMixin:
 
     @jaxtyped(typechecker=beartype)
     def evaluate_prepared_state_with_time_derivatives(
-        self: "FMMEngine",
+        self,
         state: FMMPreparedState,
         velocities: Array,
         *,
@@ -377,6 +535,45 @@ class DerivativesMixin:
 
         Returns ``(accelerations, derivatives)`` where ``derivatives[n-1]``
         corresponds to ``D_t^n a``.
+
+        Near-field and far-field terms are computed separately and summed per
+        order, so each returned derivative is a complete one rather than a
+        far-field-only estimate.
+
+        Parameters
+        ----------
+        state : FMMPreparedState
+            Prepared state to evaluate; not mutated.
+        velocities : Array
+            Particle velocities, in the caller's original order, with the same
+            shape as the state's positions.
+        target_indices : Optional[Array]
+            Optional 1D index array selecting which target-particle outputs to
+            return. All particles are still used as source masses.
+        jit_traversal : bool
+            Evaluate the traversal/evaluation path with the compiled
+            implementation.
+        max_time_derivative_order : int
+            Highest total time-derivative order to return. Must be ``1``, ``2``
+            or ``3``.
+        mode : str
+            Currently only ``"accurate"`` is implemented.
+
+        Returns
+        -------
+        tuple[Array, tuple[Array, ...]]
+            ``(accelerations, derivatives)`` with
+            ``max_time_derivative_order`` entries, cast to the state's input
+            dtype when that is a float type and to its working dtype otherwise.
+
+        Raises
+        ------
+        ValueError
+            If ``max_time_derivative_order < 1``, if ``mode`` is not
+            ``"accurate"``, or if ``velocities`` does not match the state's
+            position shape.
+        NotImplementedError
+            If ``max_time_derivative_order > 3``.
         """
         k_max = int(max_time_derivative_order)
         if k_max < 1:
@@ -430,12 +627,38 @@ class DerivativesMixin:
 
     @jaxtyped(typechecker=beartype)
     def _evaluate_target_nearfield_jerk(
-        self: "FMMEngine",
+        self,
         state: FMMPreparedState,
         velocities: Array,
         *,
         target_indices: Optional[Array] = None,
     ) -> Array:
+        """Evaluate the exact pairwise near-field jerk on the target particles.
+
+        This term is exact, not an expansion: the near-field kernel differentiates
+        the pair sum directly from the source and target velocities. Only the
+        far-field half of the jerk is ever approximated.
+
+        Parameters
+        ----------
+        state : FMMPreparedState
+            Prepared state supplying the tree, neighbour list and sorted arrays.
+        velocities : Array
+            Particle velocities in the caller's original order.
+        target_indices : Optional[Array]
+            Optional 1D index array selecting which targets to evaluate.
+
+        Returns
+        -------
+        Array
+            Near-field jerk, in the caller's original order when
+            ``target_indices`` is ``None`` and in target order otherwise.
+
+        Raises
+        ------
+        RuntimeError
+            If the near-field kernel returns no jerk despite being asked for it.
+        """
         particle_indices = jnp.asarray(state.tree.particle_indices, dtype=INDEX_DTYPE)
         vel_sorted = velocities[particle_indices]
 
@@ -483,14 +706,45 @@ class DerivativesMixin:
 
     @jaxtyped(typechecker=beartype)
     def _evaluate_target_nearfield_time_derivatives(
-        self: "FMMEngine",
+        self,
         state: FMMPreparedState,
         velocities: Array,
         *,
         target_indices: Optional[Array] = None,
         max_time_derivative_order: int,
     ) -> tuple[Array, ...]:
-        """Evaluate near-field time derivatives up to order K (currently K<=2)."""
+        """Evaluate near-field time derivatives up to order K (currently K<=2).
+
+        Like :meth:`_evaluate_target_nearfield_jerk`, these are exact pairwise
+        derivatives rather than expansion estimates. Jerk, snap and crackle come
+        out of a single near-field call, so the higher orders cost one traversal
+        between them rather than one each.
+
+        Parameters
+        ----------
+        state : FMMPreparedState
+            Prepared state supplying the tree, neighbour list and sorted arrays.
+        velocities : Array
+            Particle velocities in the caller's original order.
+        target_indices : Optional[Array]
+            Optional 1D index array selecting which targets to evaluate.
+        max_time_derivative_order : int
+            Highest order to return. ``<= 0`` returns an empty tuple.
+
+        Returns
+        -------
+        tuple[Array, ...]
+            ``max_time_derivative_order`` arrays, jerk first, in the caller's
+            original order when ``target_indices`` is ``None`` and in target
+            order otherwise.
+
+        Raises
+        ------
+        NotImplementedError
+            If ``max_time_derivative_order > 3``.
+        RuntimeError
+            If the near-field kernel omits a term that was requested.
+        """
         k_max = int(max_time_derivative_order)
         if k_max < 1:
             return tuple()
@@ -566,13 +820,42 @@ class DerivativesMixin:
 
     @jaxtyped(typechecker=beartype)
     def _evaluate_source_motion_farfield_jerk(
-        self: "FMMEngine",
+        self,
         state: FMMPreparedState,
         velocities: Array,
         *,
         target_indices: Optional[Array] = None,
     ) -> Array:
-        """Evaluate source-motion far-field jerk using analytic dM->dL contraction."""
+        """Evaluate source-motion far-field jerk using analytic dM->dL contraction.
+
+        This is the ``d_t L`` half of the far-field jerk -- the part that comes
+        from the *sources* moving, as distinct from the convective ``(v . grad) a``
+        part that comes from the target moving through a static field.
+        ``jerk_mode="fast_approx"`` drops exactly this term.
+
+        It runs a second full downward sweep on time-differentiated multipoles,
+        so it costs roughly another far-field evaluation.
+
+        Parameters
+        ----------
+        state : FMMPreparedState
+            Prepared state; must have ``expansion_basis == "solidfmm"``.
+        velocities : Array
+            Particle velocities in the caller's original order.
+        target_indices : Optional[Array]
+            Optional 1D index array selecting which targets to evaluate.
+
+        Returns
+        -------
+        Array
+            Source-motion far-field jerk, already scaled by ``-G``.
+
+        Raises
+        ------
+        NotImplementedError
+            If the state's expansion basis is not ``"solidfmm"``; no other basis
+            has the analytic source-motion multipoles this needs.
+        """
         if state.expansion_basis != "solidfmm":
             raise NotImplementedError(
                 "source-motion far-field jerk currently requires expansion_basis='solidfmm'"
@@ -624,9 +907,9 @@ class DerivativesMixin:
             farfield_mode=runtime_overrides.farfield_mode,
             dehnen_radius_scale=self.dehnen_radius_scale,
         )
-        tracing_targets = isinstance(
-            state.positions_sorted, jax.core.Tracer
-        ) or isinstance(target_indices, jax.core.Tracer)
+        tracing_targets = isinstance(state.positions_sorted, Tracer) or isinstance(
+            target_indices, Tracer
+        )
         if target_indices is None or tracing_targets:
             far_grad_sorted, _, _ = _evaluate_local_expansions_for_particles(
                 source_motion_downward.locals,
@@ -675,7 +958,7 @@ class DerivativesMixin:
 
     @jaxtyped(typechecker=beartype)
     def _evaluate_farfield_time_derivative_orders(
-        self: "FMMEngine",
+        self,
         state: FMMPreparedState,
         velocities: Array,
         *,
@@ -686,6 +969,36 @@ class DerivativesMixin:
 
         Uses binomial expansion of ``(∂t + v·∇)^n a`` with analytic source-motion
         locals ``L_k = ∂t^k L`` and acceleration spatial derivatives.
+
+        Concretely, ``D_t^n a = sum_k C(n, k) (v . grad)^(n-k) d_t^k a``: one
+        downward sweep per ``k`` builds ``L_k``, and each term contracts the
+        spatial-derivative tensor of order ``m = n - k`` against ``v`` ``m``
+        times. Cost therefore grows with ``max_time_derivative_order``, since a
+        fresh sweep is needed per order.
+
+        Parameters
+        ----------
+        state : FMMPreparedState
+            Prepared state; must have ``expansion_basis == "solidfmm"``.
+        velocities : Array
+            Particle velocities in the caller's original order.
+        target_indices : Optional[Array]
+            Optional 1D index array selecting which targets to evaluate.
+        max_time_derivative_order : int
+            Highest order to return. ``<= 0`` returns an empty tuple.
+
+        Returns
+        -------
+        tuple[Array, ...]
+            ``max_time_derivative_order`` arrays, order 1 first.
+
+        Raises
+        ------
+        NotImplementedError
+            If the state's expansion basis is not ``"solidfmm"``.
+        RuntimeError
+            If a requested acceleration-derivative tensor is missing from the
+            local-expansion evaluation.
         """
         if state.expansion_basis != "solidfmm":
             raise NotImplementedError(
@@ -701,7 +1014,28 @@ class DerivativesMixin:
             *,
             order: int,
         ) -> Array:
-            """Contract symmetric acceleration-derivative tensor ``order`` times."""
+            """Contract symmetric acceleration-derivative tensor ``order`` times.
+
+            Parameters
+            ----------
+            tensor : Array
+                Per-target symmetric derivative tensor, ``(n, 3, components)``.
+            velocity : Array
+                Per-target velocity, ``(n, 3)``.
+            order : int
+                Number of contractions, i.e. the derivative order. Must be
+                positive.
+
+            Returns
+            -------
+            Array
+                ``(n, 3)`` fully contracted result.
+
+            Raises
+            ------
+            ValueError
+                If ``order`` is not positive.
+            """
             if order <= 0:
                 raise ValueError("order must be positive")
 
@@ -732,9 +1066,9 @@ class DerivativesMixin:
             target_indices=target_indices,
             num_particles=int(state.inverse_permutation.shape[0]),
         )
-        tracing_targets = isinstance(
-            state.positions_sorted, jax.core.Tracer
-        ) or isinstance(resolved_target_indices, jax.core.Tracer)
+        tracing_targets = isinstance(state.positions_sorted, Tracer) or isinstance(
+            resolved_target_indices, Tracer
+        )
         vel_targets = (
             velocities
             if resolved_target_indices is None

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import os
 import time
-from typing import Any, Callable, Optional, Union
+from typing import TYPE_CHECKING, Any, Callable, Optional, Union
 
 import jax
 import jax.numpy as jnp
@@ -13,15 +13,14 @@ from beartype.typing import Tuple
 from jaxtyping import Array
 from yggdrax.interactions import DualTreeRetryEvent, DualTreeTraversalConfig, MACType
 
+from jaccpot._jax_compat import Tracer
+
 # `_read_large_n_env_config` is re-imported although only its memoising wrapper
 # is called here: it was a module attribute of this module before Tier 1.8, and
 # the F16 lesson from `near_field.py` is that a module's attribute surface is
 # wider than its import surface. Keeping it costs nothing and cannot break a
 # caller that reaches it as `_large_n_pipeline._read_large_n_env_config`.
-from ._large_n_env import (  # noqa: F401
-    _large_n_env_config_for_fmm,
-    _read_large_n_env_config,
-)
+from ._large_n_env import _large_n_env_config_for_fmm
 from ._large_n_nearfield import (
     build_large_n_leaf_particle_groups,
     build_large_n_nearfield_precompute,
@@ -39,15 +38,41 @@ from ._large_n_types import (
 )
 from .dtypes import INDEX_DTYPE
 
+if TYPE_CHECKING:  # pragma: no cover - annotations only, no runtime import
+    # The engine lives in `_fmm_impl`, which reaches this module through the
+    # mixins it inherits, so this import must stay under TYPE_CHECKING or it
+    # would form the cycle ARCHITECTURE section 8 forbids. Unlike `self` on a
+    # mixin, `fmm` here is an ordinary parameter, so naming the engine is both
+    # valid and what lets the `fmm.<attribute>` reads below be checked at all
+    # (audit E.4 bucket E).
+    from ._fmm_impl import FMMEngine
+
+__all__ = [
+    "can_use_large_n_prepare_path",
+    "evaluate_large_n_state",
+    "prepare_large_n_state",
+]
+
 
 def _contains_jax_tracer(value: Any) -> bool:
-    return any(
-        isinstance(leaf, jax.core.Tracer) for leaf in jax.tree_util.tree_leaves(value)
-    )
+    """Return ``True`` when a pytree contains any JAX tracer leaf.
+
+    Parameters
+    ----------
+    value : Any
+        Pytree to inspect.
+
+    Returns
+    -------
+    bool
+        ``True`` if any leaf is a tracer, which is the gate on every host-side
+        decision this module makes.
+    """
+    return any(isinstance(leaf, Tracer) for leaf in jax.tree_util.tree_leaves(value))
 
 
 def prepare_large_n_state(
-    fmm: object,
+    fmm: "FMMEngine",
     *,
     positions_arr: Array,
     masses_arr: Array,
@@ -76,7 +101,85 @@ def prepare_large_n_state(
     large_n_env_cfg_override: Optional[dict[str, Any]] = None,
     return_compiled_state: bool = False,
 ) -> Union[LargeNPreparedState, LargeNCompiledState]:
-    """Prepare the slim large-N state using the dedicated narrow path."""
+    """Prepare the slim large-N state using the dedicated narrow path.
+    "Narrow" is the point: this path materialises only the artifacts the fast
+    lane reads, which is what keeps peak memory tractable at galaxy scale. The
+    twenty-seven parameters are the already-resolved runtime configuration --
+    the caller (``PrepareMixin``) owns resolution, and nothing is re-resolved
+    here.
+
+    Parameters
+    ----------
+    fmm : FMMEngine
+        The engine, typed loosely to avoid the ARCHITECTURE section 8 import
+        cycle.
+    positions_arr : Array
+        Particle positions in the caller's order.
+    masses_arr : Array
+        Particle masses, same order.
+    input_dtype : jnp.dtype
+        Dtype the caller supplied, recorded so outputs can be cast back.
+    bounds : Optional[Tuple[Array, Array]]
+        Explicit domain bounds for the tree build.
+    leaf_size : int
+        Target particles per leaf.
+    max_order : int
+        Expansion order.
+    theta_val : float
+        Resolved MAC opening angle.
+    mac_type_val : MACType
+        Resolved traversal-facing acceptance criterion.
+    refine_local_val : bool
+        Resolved local-refinement toggle.
+    max_refine_levels_val : int
+        Resolved refinement depth cap.
+    aspect_threshold_val : float
+        Resolved leaf aspect-ratio split threshold.
+    jit_tree_override : Optional[bool]
+        Force or forbid the jitted tree build.
+    allow_stateful_cache : bool
+        Permit process-level caches; cleared when the caller needs purity.
+    runtime_traversal_config : Optional[DualTreeTraversalConfig]
+        Resolved traversal capacities.
+    runtime_m2l_chunk_size : Optional[int]
+        Resolved M2L chunk size.
+    runtime_l2l_chunk_size : Optional[int]
+        Resolved L2L chunk size.
+    upward_center_mode : str
+        Centre selection for the upward sweep.
+    record_retry : Callable[[DualTreeRetryEvent], None]
+        Sink for traversal retry events.
+    collected_retries : list[DualTreeRetryEvent]
+        Accumulator the sink appends to; read back by the caller.
+    tree_artifacts : Optional[Any]
+        Reuse an already-built tree instead of building one.
+    dual_downward_artifacts : Optional[Any]
+        Reuse an already-built downward plan.
+    supplied_force_scale : Optional[Array]
+        Per-node force scale for the Dehnen paper MAC. Required by that MAC --
+        see ``Raises``.
+    fused_device_mode : bool
+        Run the fused device-resident refresh rather than the eager path.
+    execution_config_override : Optional[Any]
+        Pre-resolved large-N execution policy.
+    large_n_env_cfg_override : Optional[dict[str, Any]]
+        Pre-read environment configuration, for tests.
+    return_compiled_state : bool
+        Return a ``LargeNCompiledState`` rather than a ``LargeNPreparedState``.
+
+    Returns
+    -------
+    Union[LargeNPreparedState, LargeNCompiledState]
+        The prepared state, compiled variant when ``return_compiled_state``.
+
+    Raises
+    ------
+    RuntimeError
+        If the Dehnen paper MAC is requested with no resolvable per-node force
+        scale -- the traversal would silently fall back to a unit scale, i.e. a
+        different acceptance threshold -- or if a fused-payload static cap was
+        not preflighted or is exceeded, or a compaction invariant fails.
+    """
 
     refresh_timing_active = bool(
         getattr(fmm, "_refresh_timing_active", False)
@@ -427,6 +530,20 @@ def prepare_large_n_state(
     target_block_source_leaf_ids_padded = None
     target_block_valid_mask_padded = None
     static_target_blocks_used = False
+    # Declared here and asserted non-None after the branch chain below, rather
+    # than left to the chain to bind. Every path does bind all four -- the last
+    # `elif` is unconditional once `static_target_blocks_used` is False, and when
+    # it is True the static branch above has already bound them -- but that is a
+    # correlation between a flag and a binding, which no type checker can follow
+    # (41 "possibly unbound" reports, all false; audit E.4 bucket D).
+    #
+    # `None`, not zero-sized sentinels, on purpose: a sentinel would turn a
+    # broken invariant into a silently wrong force, which is the one failure mode
+    # this library must not have. `None` keeps it loud.
+    target_block_leaf_ids: Optional[Array] = None
+    target_block_source_leaf_ids: Optional[Array] = None
+    target_block_valid_mask: Optional[Array] = None
+    target_block_offsets: Optional[Array] = None
     fused_payload_enabled = str(
         os.environ.get(
             "JACCPOT_LARGE_N_RADIX_FAST_PAYLOAD_IN_FUSED",
@@ -622,6 +739,17 @@ def prepare_large_n_state(
         target_block_valid_mask = jnp.zeros((0, block_size), dtype=bool)
         target_block_offsets = jnp.zeros((num_leaves + 1,), dtype=INDEX_DTYPE)
         target_blocks_leaf_major = True
+    if (
+        target_block_leaf_ids is None
+        or target_block_source_leaf_ids is None
+        or target_block_valid_mask is None
+        or target_block_offsets is None
+    ):  # pragma: no cover - unreachable, see the declarations above
+        raise RuntimeError(
+            "large-N target-block arrays were not bound: the branch chain above "
+            "must bind all four on every path. This is an internal invariant, "
+            "not a configuration error."
+        )
     _record_nf("_refresh_timing_nearfield_target_blocks_seconds", substage_t0)
 
     substage_t0 = _now()
@@ -1389,6 +1517,25 @@ def _large_n_fastlane_eval_fn(
     the solver, so a refresh loop reusing topology recompiles nothing. ``jax.jit``
     keys on the pytree structure and leaf avals by itself; ``cache_key`` adds the
     Python-level constants the body closes over, which jit cannot see.
+
+    Parameters
+    ----------
+    fmm : Any
+        The engine, whose per-solver cache the compiled function is stored on.
+    state : Any
+        Prepared state; its pytree structure participates in the jit key.
+    body : Callable[[Any], Array]
+        The evaluation to compile.
+    cache_key : tuple[Any, ...]
+        The Python-level constants ``body`` closes over. These are invisible to
+        ``jax.jit``, so omitting one would silently reuse a stale executable.
+
+    Returns
+    -------
+    Optional[Callable[[Any], Array]]
+        The cached compiled callable, or ``None`` to signal the caller should
+        run ``body`` eagerly -- which is the escape hatch for measuring the
+        compile's benefit and for bisecting a suspected compile problem.
     """
 
     if not str(os.environ.get("JACCPOT_LARGE_N_EVAL_JIT", "1")).strip().lower() in {
@@ -1416,7 +1563,7 @@ def _large_n_fastlane_eval_fn(
 
 
 def evaluate_large_n_state(
-    fmm: object,
+    fmm: "FMMEngine",
     state: Union[LargeNPreparedState, LargeNCompiledState],
     *,
     target_indices: Optional[Array],
@@ -1429,6 +1576,36 @@ def evaluate_large_n_state(
     radix fast-lane payload route. Potential evaluation still falls back to the
     compiled generic evaluator until a dedicated fast-lane potential path is
     implemented.
+
+    Parameters
+    ----------
+    fmm : FMMEngine
+        The engine, typed loosely to avoid the import cycle.
+    state : Union[LargeNPreparedState, LargeNCompiledState]
+        Prepared or compiled large-N state.
+    target_indices : Optional[Array]
+        Must be ``None`` -- this lane evaluates the full particle set only.
+    return_potential : bool
+        Also return potentials, which routes to the compiled generic evaluator
+        rather than the fast lane.
+    max_acc_derivative_order : int
+        Must be ``0``; acceleration derivatives are not wired on this lane.
+
+    Returns
+    -------
+    Any
+        Accelerations, or ``(accelerations, potentials)`` when
+        ``return_potential`` is set.
+
+    Raises
+    ------
+    NotImplementedError
+        If ``target_indices`` is given, or ``max_acc_derivative_order`` is
+        non-zero. Both are unimplemented rather than invalid, so they raise
+        loudly instead of silently ignoring the request.
+    RuntimeError
+        If the state was not prepared with ``nearfield_mode='bucketed'``, or
+        carries no radix fast-lane payload. A wiring fault, not user input.
     """
 
     from .kernels.core import (
@@ -1732,16 +1909,17 @@ def evaluate_large_n_state(
     else:
         output_dtype = state_prepared.working_dtype
 
-    if return_potential:
-        accelerations_sorted, potentials_sorted = eval_out
-    else:
-        accelerations_sorted = eval_out
-
+    # The early return comes before the unpack so the two-value case is bound and
+    # used in one place; splitting them left `potentials_sorted` bound under one
+    # `return_potential` test and read under another, which reads as possibly
+    # unbound even though it never is.
     if not return_potential:
+        accelerations_sorted = eval_out
         return jnp.asarray(accelerations_sorted)[
             state_prepared.inverse_permutation
         ].astype(output_dtype)
 
+    accelerations_sorted, potentials_sorted = eval_out
     accelerations = jnp.asarray(accelerations_sorted)[
         state_prepared.inverse_permutation
     ].astype(output_dtype)
@@ -1757,6 +1935,18 @@ def _record_large_n_decline(fmm: Any, reason: str) -> None:
     The lane is selected silently, so a caller that configures a feature the lane
     does not support sees only an unexplained slowdown. Surfacing the reason makes
     "my large-N run is slow" answerable without bisecting the selection predicate.
+
+    Parameters
+    ----------
+    fmm : Any
+        The engine the reason is recorded on.
+    reason : str
+        Why the lane declined, phrased for the user who will read it back.
+
+    Returns
+    -------
+    None
+        Records the reason on ``fmm`` in place.
     """
 
     try:
@@ -1766,13 +1956,40 @@ def _record_large_n_decline(fmm: Any, reason: str) -> None:
 
 
 def can_use_large_n_prepare_path(
-    fmm: object,
+    fmm: "FMMEngine",
     *,
     positions_arr: Array,
     masses_arr: Array,
     allow_stateful_cache: bool,
 ) -> bool:
-    """Decide whether prepare_state should dispatch to the large-N path."""
+    """Decide whether prepare_state should dispatch to the large-N path.
+    Declining is silent by design -- the caller just uses the general path --
+    which is why every rejection also goes through
+    :func:`_record_large_n_decline`.
+
+    Parameters
+    ----------
+    fmm : FMMEngine
+        The engine whose configuration is being tested.
+    positions_arr : Array
+        Particle positions; consulted for count and concreteness.
+    masses_arr : Array
+        Particle masses, likewise.
+    allow_stateful_cache : bool
+        Whether process-level caches may be used.
+
+    Returns
+    -------
+    bool
+        ``True`` when the large-N path should be dispatched.
+
+    Raises
+    ------
+    RuntimeError
+        If ``runtime_path='large_n'`` was requested **explicitly** but the lane
+        cannot honour the configuration. An explicit request is the one case
+        where declining silently would be wrong, so it raises instead.
+    """
 
     runtime_path = str(getattr(fmm, "runtime_path", "auto")).strip().lower()
     if runtime_path not in ("auto", "large_n"):

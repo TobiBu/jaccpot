@@ -67,6 +67,13 @@ from .kernels.core import (
     _max_leaf_size_from_tree,
 )
 
+__all__ = [
+    "FMMPreparedState",
+    "FMMResolvedConfig",
+    "TraversalExecutionConfig",
+    "TreeBuilderConfig",
+]
+
 _STRICT_REFRESH_DIAG_MODES = frozenset(
     {
         "full",

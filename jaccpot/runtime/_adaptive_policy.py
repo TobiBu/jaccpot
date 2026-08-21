@@ -99,7 +99,7 @@ class AdaptivePolicyState(NamedTuple):
 
 
 def adaptive_policy_tolerance(
-    *, theta: float, p_gears: tuple[int, ...], dtype: object
+    *, theta: float, p_gears: tuple[int, ...], dtype: DTypeLike
 ) -> Array:
     """Return a conservative solver-side adaptive tolerance derived from ``theta``.
 
@@ -109,7 +109,7 @@ def adaptive_policy_tolerance(
         Opening angle, or its squared form where the caller pre-squares it.
     p_gears : tuple[int, ...]
         Candidate expansion orders the adaptive policy may choose between.
-    dtype : object
+    dtype : DTypeLike
         Working dtype for the returned arrays.
 
     Returns
@@ -579,6 +579,18 @@ def node_span_mass(*, tree: Tree, masses_sorted: Array) -> Array:
 
     ``node_ranges`` is inclusive on both ends, and a node spanning nothing has
     ``hi < lo``, which yields zero rather than a negative mass.
+
+    Parameters
+    ----------
+    tree : Tree
+        Tree supplying ``node_ranges``.
+    masses_sorted : Array
+        ``(n,)`` masses in the tree's sorted order.
+
+    Returns
+    -------
+    Array
+        ``(num_nodes,)`` spanned mass; zero for a node spanning nothing.
     """
 
     masses = jnp.asarray(masses_sorted)
@@ -599,6 +611,20 @@ def _particle_leaf_ids(*, tree: Tree, num_particles: int, max_leaf_size: int) ->
     Scatter-based rather than ``searchsorted`` on leaf starts, because empty
     leaves -- which capacity-fixed ``static_radix`` trees have by construction --
     share a start index with a populated neighbour and would win the lookup.
+
+    Parameters
+    ----------
+    tree : Tree
+        Tree supplying leaf spans.
+    num_particles : int
+        Particle count, i.e. the output length.
+    max_leaf_size : int
+        Leaf capacity, which bounds the scatter width.
+
+    Returns
+    -------
+    Array
+        ``(num_particles,)`` leaf node index per sorted particle.
     """
 
     node_ranges = jnp.asarray(tree.node_ranges, dtype=jnp.int32)
@@ -684,6 +710,52 @@ def estimate_particle_force_scale(
     Returns the per-particle estimate in *sorted* (tree) order, so it can be fed
     straight to :func:`compute_node_force_scale_from_sorted_magnitudes` with
     ``reduction="min"`` exactly like an exact ``f_b`` array would be.
+
+    Parameters
+    ----------
+    tree : Tree
+        Tree being evaluated.
+    positions_sorted : Array
+        ``(n, 3)`` positions in sorted order.
+    masses_sorted : Array
+        ``(n,)`` masses in sorted order.
+    node_centers : Array
+        ``(num_nodes, 3)`` node centres used by the far term.
+    node_radii : Array
+        ``(num_nodes,)`` node radii; the target radius is what
+        ``far_center_inflation`` scales.
+    interaction_sources : Array
+        Source node of each far pair.
+    interaction_targets : Array
+        Target node of each far pair.
+    neighbor_offsets : Array
+        CSR offsets into the near-field neighbour list.
+    neighbor_counts : Array
+        Per-leaf neighbour counts.
+    neighbor_leaf_indices : Array
+        Node index of each leaf, for the near term.
+    neighbor_indices : Array
+        Flat neighbour entries the offsets index into.
+    max_leaf_size : int
+        Leaf capacity.
+    softening : float
+        Plummer softening length, squared internally.
+    gravitational_constant : float
+        ``G``.
+    far_center_inflation : float
+        Scales the target node's radius into the far-term distance. ``1.0``
+        (default) makes every far term an under-estimate, so the result is a
+        LOWER bound; ``0.0`` gives plain centre-to-centre, which is neither
+        bound -- a measurement knob, not a production setting.
+    near_pair_chunk : int
+        Pairs per chunk in the near-field scan; a memory knob only.
+
+    Returns
+    -------
+    Array
+        ``(n,)`` estimated ``f_b`` in SORTED order, ready for
+        :func:`compute_node_force_scale_from_sorted_magnitudes` with
+        ``reduction="min"``.
     """
 
     positions = jnp.asarray(positions_sorted)
@@ -751,7 +823,41 @@ def _near_field_force_scale(
     eps_sq: Array,
     chunk: int,
 ) -> Array:
-    """Exact ``sum G m_a / |x_a - x_b|^2`` over the near-field pair set."""
+    """Exact ``sum G m_a / |x_a - x_b|^2`` over the near-field pair set.
+    Exact for this pair set, which is the same one P2P evaluates: every near
+    (target leaf, source leaf) pair plus each leaf's own self block, excluding
+    ``a == b``.
+
+    Parameters
+    ----------
+    positions : Array
+        ``(n, 3)`` positions in sorted order.
+    masses : Array
+        ``(n,)`` masses in sorted order.
+    node_ranges : Array
+        Per-node ``[lo, hi]`` particle span, inclusive on both ends.
+    neighbor_offsets : Array
+        CSR offsets into ``neighbor_indices``.
+    neighbor_counts : Array
+        Per-leaf neighbour counts.
+    neighbor_leaf_indices : Array
+        Node index of each leaf.
+    neighbor_indices : Array
+        Flat neighbour entries.
+    leaf_cap : int
+        Leaf capacity, bounding the gathered block width.
+    g : Array
+        ``G`` as an array.
+    eps_sq : Array
+        Squared softening length.
+    chunk : int
+        Pairs per scan chunk; a memory knob only.
+
+    Returns
+    -------
+    Array
+        ``(n,)`` near-field contribution to ``f_b``, in sorted order.
+    """
 
     dtype = positions.dtype
     num_particles = int(positions.shape[0])
@@ -852,6 +958,35 @@ def _far_field_force_scale_by_node(
     ``own[U]`` is the contribution of ``U``'s own far list; the returned array is
     ``own[U] + own[parent(U)] + ...`` up to the root, which for a leaf is the
     complete far field the partition invariant assigns to its particles.
+
+    Parameters
+    ----------
+    tree : Tree
+        Tree supplying the parent chain the accumulation walks.
+    masses : Array
+        ``(num_nodes,)`` spanned node mass, from :func:`node_span_mass`.
+    node_centers : Array
+        ``(num_nodes, 3)`` node centres.
+    node_radii : Array
+        ``(num_nodes,)`` node radii; the target's is what ``inflation`` scales.
+    interaction_sources : Array
+        Source node of each far pair.
+    interaction_targets : Array
+        Target node of each far pair.
+    g : Array
+        ``G`` as an array.
+    eps_sq : Array
+        Squared softening length.
+    inflation : Array
+        Multiplier on the target radius added to the centre distance; ``1.0``
+        keeps every term an under-estimate.
+
+    Returns
+    -------
+    Array
+        ``(num_nodes,)`` far-field force scale, already accumulated over each
+        node's whole ancestor chain -- so a leaf's entry is complete and must
+        NOT be summed with its ancestors' again.
     """
 
     dtype = masses.dtype
@@ -2290,6 +2425,9 @@ __all__ = [
     "build_adaptive_policy_state",
     "compute_node_force_scale_from_sorted_acc",
     "compute_node_force_scale_from_sorted_magnitudes",
+    "estimate_particle_force_scale",
+    "node_span_mass",
+    "per_node_conservative_extent",
     "per_node_effective_theta",
     "per_node_mac_radius",
     "compute_center_referenced_radius_geometry",

@@ -415,6 +415,22 @@ def _evaluate_local_real_with_grad_cvjp(
     fixed, so no recurrence re-differentiation) plus one Hessian-vector product in
     delta. It is verified bit-for-bit against autodiff in
     ``tests/unit/test_custom_vjp_parity.py``.
+
+    Parameters
+    ----------
+    local_coeffs : Array
+        Packed real local coefficients.
+    delta : Array
+        Offset ``centre - eval_point``; see ``docs/operator_conventions.md``.
+    order : int
+        Expansion order ``p``.
+
+    Returns
+    -------
+    tuple[Array, Array]
+        ``(grad, potential)`` -- the gradient with respect to ``delta`` first, then
+        the scalar potential. Note the ORDER: the name says ``with_grad`` but the
+        gradient leads, unlike ``jax.value_and_grad``'s ``(value, grad)``.
     """
 
     def phi_fn(d: Array) -> Array:
@@ -548,6 +564,32 @@ def evaluate_local_real_derivative_tower(
 
     This mirrors :func:`evaluate_local_complex_derivative_tower` (also autodiff
     based) so downstream L2P code can consume either basis's tower identically.
+
+    Parameters
+    ----------
+    local_coeffs : Array
+        Packed real local coefficients.
+    delta : Array
+        Offset ``centre - eval_point``.
+    order : int
+        Expansion order ``p``.
+    max_derivative_order : int
+        Highest derivative order ``K`` to return.
+
+    Returns
+    -------
+    Tuple[Array, ...]
+        ``K + 1`` packed arrays ``D0..DK``. ``D0`` has shape ``(1,)`` and holds the
+        potential, so the tuple is one longer than ``max_derivative_order``.
+        Components follow
+        :func:`~jaccpot.operators.symmetric_tensors.symmetric_multi_indices_3d`,
+        which is the DESCENDING ordering -- not ``multipole_utils``' ascending one
+        (``docs/operator_conventions.md`` section 2).
+
+    Raises
+    ------
+    ValueError
+        If ``max_derivative_order`` is outside the supported range.
     """
     p = int(order)
     k_max = int(max_derivative_order)
@@ -578,7 +620,27 @@ def evaluate_local_real_derivative_tower_batch(
     order: int,
     max_derivative_order: int,
 ) -> Tuple[Array, ...]:
-    """Batched :func:`evaluate_local_real_derivative_tower` over ``deltas``."""
+    """Batched :func:`evaluate_local_real_derivative_tower` over ``deltas``.
+
+    A ``vmap`` over ``deltas`` only -- ``local_coeffs`` is shared across the batch,
+    so this evaluates ONE expansion at many points, not many expansions.
+
+    Parameters
+    ----------
+    local_coeffs : Array
+        Packed real local coefficients for a single expansion.
+    deltas : Array
+        ``(n, 3)`` offsets, each ``centre - eval_point``.
+    order : int
+        Expansion order ``p``.
+    max_derivative_order : int
+        Highest derivative order ``K``.
+
+    Returns
+    -------
+    Tuple[Array, ...]
+        ``K + 1`` arrays, each with a leading batch axis of length ``n``.
+    """
     return jax.vmap(
         lambda d: evaluate_local_real_derivative_tower(
             local_coeffs,

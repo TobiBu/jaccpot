@@ -14,17 +14,26 @@ from .fmm_stage_timing import (
 )
 
 if TYPE_CHECKING:  # pragma: no cover - annotations only, no runtime import
-    # The mixins annotate `self` as the engine they are mixed into, which lives in
-    # `_fmm_impl` and imports *them* -- so this must stay under TYPE_CHECKING or it
-    # would form the cycle ARCHITECTURE §8 forbids. Before this block the names were
-    # dangling: `typing.get_type_hints` raised NameError on every mixin method, so the
-    # annotations documented an intent no tool could check.
+    # The engine lives in `_fmm_impl`, which imports *these mixins* -- so this import
+    # must stay under TYPE_CHECKING or it would form the cycle ARCHITECTURE §8
+    # forbids. Inheriting `_EngineBase` makes each mixin *be* the engine under a type
+    # checker, so every `self.<engine attribute>` resolves; at runtime the alias is
+    # `object`, leaving the MRO exactly as it was. The audit's E.2 records why this
+    # beats annotating `self`, and what it does not buy at runtime.
     from ._fmm_impl import FMMEngine, PreparedStateLike
 
+    _EngineBase = FMMEngine
+else:  # pragma: no cover - annotations only, never an import at runtime
+    _EngineBase = object
 
-class DiagnosticsMixin:
+__all__ = [
+    "DiagnosticsMixin",
+]
+
+
+class DiagnosticsMixin(_EngineBase):
     def get_stage_timing(
-        self: "FMMEngine",
+        self,
         *,
         per_call: bool = False,
     ) -> dict[str, Any]:
@@ -77,6 +86,14 @@ class DiagnosticsMixin:
         For a consumer that already reads the flat
         :meth:`get_runtime_diagnostics` dict and just needs to know what it may
         safely add up.
+
+        Returns
+        -------
+        dict[str, tuple[str, ...]]
+            ``{"aggregates": (...), "leaves": (...)}``, each sorted. The two are
+            disjoint, and summing across both double-counts -- that is the whole
+            point of asking. Names only; call
+            :meth:`get_runtime_diagnostics` for the values.
         """
 
         return {
@@ -85,10 +102,28 @@ class DiagnosticsMixin:
         }
 
     def _record_large_n_eval_shape_diagnostics(
-        self: "FMMEngine",
+        self,
         state: PreparedStateLike,
     ) -> None:
-        """Record shape-only local-eval diagnostics outside compiled hot loops."""
+        """Record shape-only local-eval diagnostics outside compiled hot loops.
+
+        Reads shapes, never values, and writes the results onto ``self`` -- so it
+        is a mutator with no return, and calling it twice simply overwrites.
+        Every field is fetched through ``getattr(..., None)`` and every shape
+        through a helper that yields ``()`` for a missing array, so a state
+        lacking any of them records zeros rather than raising. That makes a
+        missing payload and a genuinely empty one indistinguishable here.
+
+        "Outside compiled hot loops" is a requirement, not a description: it
+        calls ``int()`` on shape entries, so it must run at trace or host time.
+
+        Parameters
+        ----------
+        state : PreparedStateLike
+            The prepared state to measure. Duck-typed deliberately -- the large-N
+            and standard states expose different subsets of these attributes, and
+            the missing ones are meant to record as zero.
+        """
         neighbor_list = getattr(state, "neighbor_list", None)
         leaf_nodes = (
             getattr(neighbor_list, "leaf_indices", None)
@@ -158,8 +193,20 @@ class DiagnosticsMixin:
         )
         self._large_n_target_block_source_leaf_padded_shape = padded_source_leaf_shape
 
-    def get_runtime_diagnostics(self: "FMMEngine") -> dict[str, Any]:
-        """Return read-only runtime diagnostics for compile/profile reuse audits."""
+    def get_runtime_diagnostics(self) -> dict[str, Any]:
+        """Return read-only runtime diagnostics for compile/profile reuse audits.
+
+        Returns
+        -------
+        dict[str, Any]
+            A flat snapshot of the engine's counters, built fresh on each call --
+            mutating it does not affect the engine, and holding one does not keep
+            it up to date. "Read-only" is about intent, not enforcement.
+
+            The ``refresh_*_seconds`` entries mix aggregates and leaves, so
+            summing the whole dict double-counts; use
+            :meth:`stage_timing_counter_roles` to tell them apart.
+        """
         return {
             # Why the large-N prepare path declined, or None if it was not
             # declined for a recorded reason. The lane is selected silently, so

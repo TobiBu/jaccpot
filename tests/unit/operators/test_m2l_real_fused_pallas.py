@@ -9,7 +9,7 @@ any GPU) against:
 
 * ``m2l_real_fused_jax`` -- the pure-jnp twin the Pallas kernel is a literal port
   of (the gradient reference for the ``custom_vjp``), and
-* ``m2l_rot_scale_real_batch`` (``use_pallas=False``) -- the pure-JAX rot-scale
+* ``m2l_rot_scale_real_batch`` -- the pure-JAX rot-scale
   M2L path the fused kernel is the runtime *accelerator* for, fed the SAME real
   rotation blocks the runtime builds (``_m2l_real_batch_kernel_fused_pallas``).
   This is the equivalence runtime dispatch relies on.
@@ -47,9 +47,7 @@ def _build_case(order, dtype, n=17, seed=0):
     jdt = jnp.float64 if dtype == np.float64 else jnp.float32
     bto = real_rotation_blocks_to_z_multipole_batch(deltas, order=order, dtype=jdt)
     bfr = real_rotation_blocks_from_z_local_batch(deltas, order=order, dtype=jdt)
-    ref = np.asarray(
-        m2l_rot_scale_real_batch(mult, deltas, order=order, use_pallas=False)
-    )
+    ref = np.asarray(m2l_rot_scale_real_batch(mult, deltas, order=order))
     return mult, bto, bfr, r, ref
 
 
