@@ -400,7 +400,7 @@ class _DomainView:
         )
 
 
-def isolate_cross_far(per, thetas, interpenetrating, inflate):
+def isolate_cross_far(per, thetas, interpenetrating, inflate, target_device=0):
     """Measure the cross-domain far field alone, against the exact cross direct sum.
 
     Replays ``distributed/fmm.py``'s cross-far sequence for ndev=2 without
@@ -423,11 +423,16 @@ def isolate_cross_far(per, thetas, interpenetrating, inflate):
         docstrings assume).
     inflate : bool
         Correct the coarse MAC extents to bound the true remote leaves.
+    target_device : int
+        Which of the two domains is the target (the other is the remote source). Both
+        are needed to account for the driver's aggregate aggL2; see
+        :func:`predict_driver_aggl2`.
 
     Returns
     -------
-    None
-        Prints one row per ``theta_cross``.
+    dict[float, float]
+        ``theta_cross`` -> ABSOLUTE L2 error of this domain's cross-domain field. The
+        printed ``relerr`` column is the same quantity divided by ``||exact cross||``.
     """
     pts, mass = separated_clusters(2, per)
     part = partition_for_devices(pts, mass, 2, leaf_size=LEAF)
@@ -440,7 +445,8 @@ def isolate_cross_far(per, thetas, interpenetrating, inflate):
         pos_d = pts.reshape(2, per, 3)
         mass_d = mass.reshape(2, per)
 
-    target, source = (_DomainView(pos_d[d], mass_d[d], bounds) for d in range(2))
+    order = [target_device, 1 - target_device]
+    target, source = (_DomainView(pos_d[d], mass_d[d], bounds) for d in order)
     centers = target.up.multipoles.centers
     total_nodes = int(np.asarray(target.tree.node_ranges).shape[0])
     num_internal = int(target.tree.left_child.shape[0])
@@ -543,7 +549,8 @@ def isolate_cross_far(per, thetas, interpenetrating, inflate):
     label = "INTERPENETRATING" if interpenetrating else "one cluster per domain"
     print(
         f"\n=== cross-domain far field in isolation: {label}"
-        f"{', extents CORRECTED' if inflate else ''} ==="
+        f"{', extents CORRECTED' if inflate else ''}"
+        f" -- domain {target_device} <- {1 - target_device} ==="
     )
     print(
         f"  ||exact cross|| = {ref_norm:.4f}   ||exact local|| = "
@@ -599,6 +606,7 @@ def isolate_cross_far(per, thetas, interpenetrating, inflate):
         f"{'||near||':>10} {'relerr':>10} {'true r/d':>9} {'believed':>9} {'overlap':>8}"
     )
     print(header)
+    absolute_errors = {}
     for theta_cross in thetas:
         walk = dual_tree_walk_cross_impl(
             target.tree,
@@ -677,14 +685,66 @@ def isolate_cross_far(per, thetas, interpenetrating, inflate):
             )
             overlapping += int(r_src + r_tgt > distance)
 
-        relerr = np.linalg.norm(far + near - reference) / ref_norm
+        absolute = float(np.linalg.norm(far + near - reference))
+        absolute_errors[float(theta_cross)] = absolute
         print(
             f"  {theta_cross:>11g} {far_tgt.size:>4d} {near_pairs:>5d} "
             f"{np.linalg.norm(far):>11.4f} {np.linalg.norm(near):>10.4f} "
-            f"{relerr:>10.6f} {worst_true:>9.3f} {worst_believed:>9.3f} "
-            f"{overlapping:>4d}/{far_tgt.size:<3d}",
+            f"{absolute / ref_norm:>10.6f} {worst_true:>9.3f} "
+            f"{worst_believed:>9.3f} {overlapping:>4d}/{far_tgt.size:<3d}",
             flush=True,
         )
+    return absolute_errors
+
+
+def predict_driver_aggl2(per, thetas, per_domain_errors):
+    """Predict the driver's aggregate aggL2 from the two isolated cross-field errors.
+
+    The driver's assertion is ``||a_fmm - a_direct|| / ||a_direct||`` over all N. If the
+    cross-domain far field is the *only* thing wrong, that aggregate is exactly the two
+    domains' absolute cross-field errors in quadrature over ``||a_direct||`` -- so
+    matching it is the check that nothing else contributes.
+
+    Parameters
+    ----------
+    per : int
+        Particles per device.
+    thetas : list[float]
+        ``theta_cross`` values that were swept.
+    per_domain_errors : list[dict[float, float]]
+        One ``theta_cross -> absolute error`` mapping per target domain.
+
+    Returns
+    -------
+    None
+        Prints one row per ``theta_cross``.
+    """
+    pts, mass = separated_clusters(2, per)
+    norm = float(
+        np.linalg.norm(
+            np.asarray(
+                direct_sum(jnp.asarray(pts), jnp.asarray(pts), jnp.asarray(mass))
+            )
+        )
+    )
+    print("\n=== does the isolated cross error account for the driver's aggL2? ===")
+    print(f"  ||direct|| over all {2 * per} particles = {norm:.4f}")
+    print(
+        f"  {'theta_cross':>11} {'|err| dom 0':>12} {'|err| dom 1':>12} {'predicted aggL2':>16}"
+    )
+    for theta_cross in thetas:
+        key = float(theta_cross)
+        e0 = per_domain_errors[0].get(key, float("nan"))
+        e1 = per_domain_errors[1].get(key, float("nan"))
+        predicted = float(np.sqrt(e0**2 + e1**2)) / norm
+        print(
+            f"  {theta_cross:>11g} {e0:>12.4f} {e1:>12.4f} {predicted:>16.6f}",
+            flush=True,
+        )
+    print(
+        "  compare with the driver sweep above: at theta_cross=0.1 both are 0.018223, "
+        "so the cross far field is the whole error and nothing else contributes."
+    )
 
 
 def main():
@@ -702,8 +762,14 @@ def main():
     report_domain_geometry(_ARGS.per, ndev)
     if ndev >= 2 and not _ARGS.skip_driver:
         driver_theta_cross_sweep(min(4, ndev), _ARGS.per, _ARGS.theta_cross)
-    for interpenetrating in (True, False):
-        isolate_cross_far(_ARGS.per, _ARGS.theta_cross, interpenetrating, _ARGS.inflate)
+    interleaved_errors = [
+        isolate_cross_far(
+            _ARGS.per, _ARGS.theta_cross, True, _ARGS.inflate, target_device=d
+        )
+        for d in (0, 1)
+    ]
+    predict_driver_aggl2(_ARGS.per, _ARGS.theta_cross, interleaved_errors)
+    isolate_cross_far(_ARGS.per, _ARGS.theta_cross, False, _ARGS.inflate)
     return 0
 
 

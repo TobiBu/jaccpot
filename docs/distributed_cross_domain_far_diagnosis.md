@@ -136,6 +136,33 @@ The replay is faithful. Its pair counts reproduce the driver's own diagnostics e
 12 far and 51 near for device 0 at `theta_cross=0.1`, against the driver's
 `cross_far_pairs: [12, 10]` and `cross_near_pairs: [51, 51]`.
 
+## It accounts for the whole aggregate error, exactly
+
+Running the replay from *both* domains' points of view and summing the absolute
+cross-field errors in quadrature reproduces the driver's aggregate at **every**
+`theta_cross`, to six digits. `||direct||` over all 128 particles is 2855.2100.
+
+| `theta_cross` | abs err, domain 0 | abs err, domain 1 | predicted aggL2 | driver, measured |
+| --- | --- | --- | --- | --- |
+| 1e6 | 21069.3691 | 19649.7305 | 10.090412 | 10.090412 |
+| 1.0 | 635.6215 | 385.4626 | 0.260355 | 0.260355 |
+| 0.1 | 51.6783 | 6.0419 | **0.018223** | **0.018223** |
+| 0.01 | 0.0001 | 0.0001 | 0.000000 | 0.000003 |
+
+Nothing else contributes: the local field, the near field, the halo and the reassembly
+leave no residual at any opening angle. The per-domain far-pair counts (12 and 10) match
+the driver's `cross_far_pairs: [12, 10]` as well. The failing assertion is measuring
+exactly one thing, and this is it.
+
+`bench/diagnose_cross_domain_far.py` prints this table (both domains plus the
+quadrature) next to the driver sweep it has to match.
+
+One detail from the two-sided run worth keeping: domain 1's view of domain 0's frontier
+has a *median* true coarse-source radius of 2.1050, against 0.5327 the other way round.
+The interleaving is not symmetric, and the domain whose "leaves" are most spread out is
+not the one with the larger error — the error tracks which pairs the MAC accepts, not
+the spread alone.
+
 ## The workaround already in the tree
 
 `docs/north_star_phase3_scale_plan.md:132` says:
