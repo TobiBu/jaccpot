@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import os
-from typing import Any, Optional
+from typing import TYPE_CHECKING, Any, Optional
 
 import jax.numpy as jnp
 from jaxtyping import Array
@@ -24,6 +24,15 @@ from jaccpot.nearfield.near_field import (
 from ._large_n_types import LargeNExecutionConfig, LargeNPreparedState
 from ._nearfield_cache import NearfieldPrecomputeArtifacts
 from .dtypes import INDEX_DTYPE, as_index
+
+if TYPE_CHECKING:  # pragma: no cover - annotations only, no runtime import
+    # The engine lives in `_fmm_impl`, which reaches this module through the
+    # mixins it inherits, so this import must stay under TYPE_CHECKING or it
+    # would form the cycle ARCHITECTURE section 8 forbids. Unlike `self` on a
+    # mixin, `fmm` here is an ordinary parameter, so naming the engine is both
+    # valid and what lets the `fmm.<attribute>` reads below be checked at all
+    # (audit E.4 bucket E).
+    from ._fmm_impl import FMMEngine
 
 __all__ = [
     "build_large_n_leaf_particle_groups",
@@ -112,7 +121,7 @@ def build_large_n_leaf_particle_groups(
 
 
 def resolve_large_n_execution_config(
-    fmm: object,
+    fmm: "FMMEngine",
     *,
     num_particles: int,
 ) -> LargeNExecutionConfig:
@@ -124,7 +133,7 @@ def resolve_large_n_execution_config(
 
     Parameters
     ----------
-    fmm : object
+    fmm : FMMEngine
         The engine whose configuration is being checked. Typed loosely to avoid
         importing the engine here, which would close the ARCHITECTURE §8 cycle.
     num_particles : int
@@ -512,7 +521,7 @@ def build_large_n_nearfield_precompute(
 
 
 def evaluate_large_n_nearfield_fast_lane(
-    fmm: object,
+    fmm: "FMMEngine",
     state: LargeNPreparedState,
     *,
     return_potential: bool,
@@ -530,7 +539,7 @@ def evaluate_large_n_nearfield_fast_lane(
 
     Parameters
     ----------
-    fmm : object
+    fmm : FMMEngine
         The engine, typed loosely to avoid the ARCHITECTURE §8 import cycle.
     state : LargeNPreparedState
         Prepared state carrying the frozen topology and the radix payload.

@@ -23,6 +23,7 @@ from yggdrax.interactions import (
 from yggdrax.tree import Tree, get_node_levels
 from yggdrax.tree_moments import compute_tree_mass_moments
 
+from jaccpot._jax_compat import Tracer
 from jaccpot.config import MACTypeInput
 from jaccpot.downward.local_expansions import (
     LocalExpansionData,
@@ -202,11 +203,11 @@ class SweepsMixin(_EngineBase):
             rather than raising, so this never breaks a traced refresh.
         """
         probe = getattr(tree, "parent", None)
-        if probe is None or isinstance(probe, jax.core.Tracer):
+        if probe is None or isinstance(probe, Tracer):
             return self._static_upward_num_levels
         try:
             levels = get_node_levels(tree)
-            if isinstance(levels, jax.core.Tracer):
+            if isinstance(levels, Tracer):
                 return self._static_upward_num_levels
             # ``levels`` is concrete here (the tracer branch returned above), but
             # under an outer ``jax.jit`` a ``jnp.max`` would be staged as a

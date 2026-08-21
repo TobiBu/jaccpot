@@ -45,6 +45,7 @@ rather than attempting a host traversal on tracers.
 
 from __future__ import annotations
 
+from types import SimpleNamespace
 from typing import Any, Optional, Tuple
 
 import jax
@@ -53,6 +54,7 @@ import numpy as np
 from jax import lax
 from jaxtyping import Array, Float, Int
 
+from jaccpot._jax_compat import Tracer
 from jaccpot.mutual.force import (
     MutualCapacities,
     MutualFMMState,
@@ -415,15 +417,17 @@ class BlockStepFMM:
         if self._caps is None:
             # Resolve the capacities from a host build on this configuration --
             # the one place the host traversal is still used, and only once.
-            class _Shim:
-                pass
-
-            shim = _Shim()
-            shim.parent = refreshed.parent
-            shim.left_child = refreshed.left_child
-            shim.right_child = refreshed.right_child
-            shim.node_ranges = refreshed.node_ranges
-            shim.inverse_permutation = inverse
+            # `SimpleNamespace` rather than a bare class with attributes bolted on
+            # afterwards: the same duck-typed object, but the attributes exist by
+            # construction instead of being five assignments a checker must reject
+            # (audit E.4 bucket L).
+            shim = SimpleNamespace(
+                parent=refreshed.parent,
+                left_child=refreshed.left_child,
+                right_child=refreshed.right_child,
+                node_ranges=refreshed.node_ranges,
+                inverse_permutation=inverse,
+            )
             self._caps = resolve_mutual_capacities(
                 build_mutual_topology_from_tree(
                     shim,
@@ -797,7 +801,7 @@ class BlockStepFMM:
         error; caught nowhere it surfaces as a NaN velocity many steps later.
 
         The check is attempted and skipped on failure, rather than gated on
-        ``isinstance(rung, jax.core.Tracer)``. That test looks equivalent and is
+        ``isinstance(rung, Tracer)``. That test looks equivalent and is
         not: a **concrete** array closed over by a ``lax.cond``/``lax.scan`` branch
         is not a ``Tracer``, yet reducing it still yields a tracer inside the
         trace, so ``int(...)`` raises. nornax's per-level integrator path closes

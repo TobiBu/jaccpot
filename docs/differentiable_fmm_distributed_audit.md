@@ -403,7 +403,13 @@ differentiates, which is the expected relationship and the strongest available
 signal that the reverse pass is the exact reverse of what the forward computes.
 The two near-field lanes produce gradients agreeing to every printed digit.
 
-Regime sweeps, which is how the halo bug was localised:
+Regime sweeps, which is how the halo bug was localised. NB `theta_cross` no longer
+exists: `DistributedFMMConfig` has a single `theta` for both walks (see
+`docs/distributed_cross_domain_far_diagnosis.md` for why the second knob was
+compensation for a coarse-extent defect, not physics). These rows are kept as the
+measurements that were taken, under the name they were taken with; to reproduce the
+regimes now, sweep `theta` — or drive the cross walk directly, as
+`bench/diagnose_cross_domain_far.py` does.
 
 | regime | outcome |
 | --- | --- |

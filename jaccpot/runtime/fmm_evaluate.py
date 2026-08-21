@@ -3,6 +3,23 @@ god-class (Phase 2d mixin split). Methods are verbatim (self unchanged); the
 engine class inherits this mixin. Sibling of _fmm_impl at runtime level.
 """
 
+# pyright: reportPossiblyUnboundVariable=false
+#
+# Scoped to this ONE rule, not to type checking of this file. Every instance here
+# is the same reviewed pattern: `pot_sorted` and `potentials` are bound and read
+# under the same `return_potential` test, in an evaluation dispatch that tests it
+# in several sibling branches. All seven were checked individually and none can be
+# unbound (audit E.4 bucket D).
+#
+# Suppressed at file scope rather than per line because a trailing
+# `# pyright: ignore` does not survive `black` here -- it wraps these subscript
+# expressions and carries the comment onto the closing bracket, off the line the
+# error is reported on, so the suppression silently stops working. The per-line
+# alternatives are a `None` sentinel (which only moves the complaint to
+# `jnp.asarray`) or a temporary per use, and neither is worth reshaping a hot
+# dispatch path for. The cost of this form is real and worth naming: a genuinely
+# unbound local in this file would no longer be reported by this rule.
+
 from __future__ import annotations
 
 import warnings
@@ -17,6 +34,7 @@ from jaxtyping import Array, Bool, Float, Int, jaxtyped
 from yggdrax.interactions import NodeNeighborList
 from yggdrax.tree import Tree
 
+from jaccpot._jax_compat import Tracer
 from jaccpot.config import GradConfig
 from jaccpot.downward.local_expansions import LocalExpansionData, TreeDownwardData
 from jaccpot.nearfield._fast_lane import (
@@ -97,7 +115,7 @@ def _warn_if_traced_under_an_outer_jit(positions: Any, masses: Any) -> None:
     global _OUTER_JIT_WARNED
     if _OUTER_JIT_WARNED:
         return
-    if not any(isinstance(value, jax.core.Tracer) for value in (positions, masses)):
+    if not any(isinstance(value, Tracer) for value in (positions, masses)):
         return
     _OUTER_JIT_WARNED = True
     warnings.warn(
@@ -368,9 +386,9 @@ class EvaluateMixin(_EngineBase):
             target_indices=target_indices,
             num_particles=int(state.inverse_permutation.shape[0]),
         )
-        tracing_targets = isinstance(
-            state.positions_sorted, jax.core.Tracer
-        ) or isinstance(resolved_target_indices, jax.core.Tracer)
+        tracing_targets = isinstance(state.positions_sorted, Tracer) or isinstance(
+            resolved_target_indices, Tracer
+        )
         derivative_order = int(max_acc_derivative_order)
         if derivative_order < 0:
             raise ValueError("max_acc_derivative_order must be non-negative")
@@ -483,7 +501,11 @@ class EvaluateMixin(_EngineBase):
             accelerations = accelerations.astype(output_dtype)
             derivatives = tuple(level.astype(output_dtype) for level in derivatives)
             if return_potential:
-                return accelerations, potentials.astype(output_dtype), derivatives
+                return (
+                    accelerations,
+                    potentials.astype(output_dtype),
+                    derivatives,
+                )
             return accelerations, derivatives
 
         if return_potential:
@@ -638,9 +660,9 @@ class EvaluateMixin(_EngineBase):
             target_indices=target_indices,
             num_particles=int(state.inverse_permutation.shape[0]),
         )
-        tracing_targets = isinstance(
-            positions_sorted_arr, jax.core.Tracer
-        ) or isinstance(resolved_target_indices, jax.core.Tracer)
+        tracing_targets = isinstance(positions_sorted_arr, Tracer) or isinstance(
+            resolved_target_indices, Tracer
+        )
         # Octree backend: evaluate octree-native far-field locals (full path only).
         (
             octree_farfield_local_data,
