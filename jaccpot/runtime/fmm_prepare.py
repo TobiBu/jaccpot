@@ -148,71 +148,78 @@ class _DualDownwardPlan(NamedTuple):
     ``runtime_traversal_config`` is carried through rather than merely read: the
     resolution can clamp it, and the clamped value is what the build must see.
 
-    Every field is annotated ``object`` rather than its real type. That is
-    deliberate and predates this docstring: the precise types live in
-    ``yggdrax`` and importing them here would pull the traversal package into a
-    module the engine imports, which section 8 forbids. The descriptions below
-    carry what the annotations cannot.
+    Every field used to be annotated ``object``, on the stated grounds that "the
+    precise types live in ``yggdrax`` and importing them here would pull the
+    traversal package into a module the engine imports, which section 8 forbids".
+    That reason did not hold, and the annotations are now the real types.
+
+    It did not hold for two independent reasons. This module already imports
+    ``yggdrax.interactions`` at module scope, so the import it warned about was
+    present either way; and sixteen of the seventeen fields are plain booleans
+    that need no import at all -- every one of them is assigned a ``bool(...)``,
+    a ``not``, or a comparison in ``_resolve_dual_downward_plan``. Only
+    ``runtime_traversal_config`` needs a yggdrax name, and that name
+    (``DualTreeTraversalConfig``) was already imported. See audit E.4 bucket E.
 
     Attributes
     ----------
-    adaptive_order_active : object
+    adaptive_order_active : bool
         Whether per-node adaptive expansion order is switched on for this build.
-    allow_split_build : object
+    allow_split_build : bool
         Whether the prepare stage may split tree build and traversal into two
         device passes to cap peak memory.
-    grouped_interactions_active : object
+    grouped_interactions_active : bool
         Whether the M2L feed uses the grouped (class-major) interaction layout.
-    jit_traversal_for_prepare : object
+    jit_traversal_for_prepare : bool
         Whether this build's traversal runs jitted.
-    mixed_order_farfield_active : object
+    mixed_order_farfield_active : bool
         Whether the far field mixes expansion orders across gears.
-    need_compact_far_pairs : object
+    need_compact_far_pairs : bool
         Whether the traversal must emit the compact tagged far-pair payload.
-    need_node_interactions : object
+    need_node_interactions : bool
         Whether the traversal must emit a node interaction list. False is the
         streamed path, which never materialises one.
-    need_traversal_result : object
+    need_traversal_result : bool
         Whether the full walk result is retained rather than discarded once the
         payloads are extracted.
-    retain_interactions_active : object
+    retain_interactions_active : bool
         Whether the prepared state keeps its interaction list for reuse.
-    runtime_traversal_config : object
+    runtime_traversal_config : Optional[DualTreeTraversalConfig]
         The traversal capacities this build must use -- possibly clamped during
         resolution, which is why it is carried rather than re-read.
-    stateful_cache_enabled : object
+    stateful_cache_enabled : bool
         Whether the process-level interaction cache may be consulted and written.
-    strict_mode_active : object
+    strict_mode_active : bool
         Whether the static-radix strict lane is in play.
-    strict_streamed_fast_path : object
+    strict_streamed_fast_path : bool
         Whether the strict lane additionally qualifies for the streamed fast path.
-    tree_mode_static_radix : object
+    tree_mode_static_radix : bool
         Whether the tree build is the static radix mode the strict lane requires.
-    use_compact_streamed_pairs : object
+    use_compact_streamed_pairs : bool
         Whether far pairs are consumed in the compact streamed form.
-    use_dense_interactions_for_prepare : object
+    use_dense_interactions_for_prepare : bool
         Whether this build uses dense interaction buffers.
-    use_paper_fixed_policy : object
+    use_paper_fixed_policy : bool
         Whether the Dehnen paper-style fixed acceptance policy applies.
     """
 
-    adaptive_order_active: object
-    allow_split_build: object
-    grouped_interactions_active: object
-    jit_traversal_for_prepare: object
-    mixed_order_farfield_active: object
-    need_compact_far_pairs: object
-    need_node_interactions: object
-    need_traversal_result: object
-    retain_interactions_active: object
-    runtime_traversal_config: object
-    stateful_cache_enabled: object
-    strict_mode_active: object
-    strict_streamed_fast_path: object
-    tree_mode_static_radix: object
-    use_compact_streamed_pairs: object
-    use_dense_interactions_for_prepare: object
-    use_paper_fixed_policy: object
+    adaptive_order_active: bool
+    allow_split_build: bool
+    grouped_interactions_active: bool
+    jit_traversal_for_prepare: bool
+    mixed_order_farfield_active: bool
+    need_compact_far_pairs: bool
+    need_node_interactions: bool
+    need_traversal_result: bool
+    retain_interactions_active: bool
+    runtime_traversal_config: Optional[DualTreeTraversalConfig]
+    stateful_cache_enabled: bool
+    strict_mode_active: bool
+    strict_streamed_fast_path: bool
+    tree_mode_static_radix: bool
+    use_compact_streamed_pairs: bool
+    use_dense_interactions_for_prepare: bool
+    use_paper_fixed_policy: bool
 
 
 class PrepareMixin(_EngineBase):

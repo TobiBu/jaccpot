@@ -12,9 +12,11 @@ import jax.numpy as jnp
 from beartype.typing import Callable
 from jaxtyping import Array
 from yggdrax.interactions import (
+    CompactTaggedFarPairs,
     DualTreeRetryEvent,
     DualTreeTraversalConfig,
     MACType,
+    NodeInteractionList,
     build_octree_native_far_pairs,
     build_octree_native_neighbor_lists,
 )
@@ -70,8 +72,8 @@ _DEFAULT_FORCE_SCALE_PREPASS_THETA = 0.5
 
 def _far_pair_arrays_for_fb_prepass(
     *,
-    interactions: object,
-    compact_far_pairs: object,
+    interactions: Optional[NodeInteractionList],
+    compact_far_pairs: Optional[CompactTaggedFarPairs],
 ) -> tuple[Optional[Array], Optional[Array]]:
     """Return flat (sources, targets) far-pair arrays for the eq (16b) estimator.
 
@@ -92,10 +94,10 @@ def _far_pair_arrays_for_fb_prepass(
 
     Parameters
     ----------
-    interactions : object
+    interactions : Optional[NodeInteractionList]
         Node interaction list, when the lane produced one. Preferred: its arrays
         already use the ``-1`` convention, so they pass through untouched.
-    compact_far_pairs : object
+    compact_far_pairs : Optional[CompactTaggedFarPairs]
         Streamed-lane compact far pairs, used when there is no interaction list.
         Its padding is rewritten to ``-1`` here.
 
