@@ -14,14 +14,19 @@ BIT-EXACT vs direct on 4 GPUs. Two separate issues are worked around / deferred:
     (`_prepare_leaf_data`) gives ~100x-wrong forces under shard_map (correct
     single-device). WORKED AROUND here by driving compute_leaf_p2p_accelerations
     through its explicit `leaf_particle_indices_override` path (bit-exact).
-  * COARSE FAR-FIELD BUG (open, NOT shard_map): the coarse-tree M2L (a leaf=1
-    tree over remote frontier COMs) produces garbage even single-device, and
-    error grows with more far interactions -> a real bug in the coarse M2L
-    path, distinct from shard_map (M2L/L2P are bit-exact under shard_map mesh=1;
-    the full-tree far in the single-device Phase 4c assembly is accurate). So
-    this test routes all remote through the (exact) near-field LET
-    (theta_cross->0). The coarse far-field M2L is a scaling optimisation,
-    deferred pending that debug (fast single-device cycles).
+  * COARSE FAR-FIELD BUG (**CLOSED 2026-08-21**, and it was never shard_map): the
+    coarse-tree far field (a leaf=1 tree over remote frontier COMs) produced
+    garbage even single-device, with error growing as more far interactions were
+    accepted. Recorded here as "a real bug in the coarse M2L path" -- which was
+    the wrong half. The M2L, the L2P and that degenerate leaf=1 tree were all
+    correct; what was wrong is the coarse tree's MAC *extents*, which bounded the
+    frontier's centres of mass rather than the particles behind them, so the walk
+    accepted pairs that were not well separated and the M2L was then evaluated
+    inside its own source region -- which is exactly why the error grew with the
+    number of far interactions. Fixed upstream in TobiBu/yggdrax#47; diagnosed in
+    docs/distributed_cross_domain_far_diagnosis.md. This test still routes all
+    remote through the near-field LET, now because being the exact all-NEAR end of
+    the regime is its job, not because the far path is untrustworthy.
 
 Domains are pre-split by Morton on the host and carried with a global id, so
 the distributed result can be matched to the reference (the SFC decompose
@@ -78,12 +83,24 @@ pytestmark = pytest.mark.skipif(
 _P = 2
 _THETA = 0.4
 # theta->0 routes all remote through the (exact) near-field LET halo path, so
-# the committed test is bit-exact. The far-field refinement below (REAL remote
-# multipoles M2M'd up the coarse tree) is built and exercised, but engaging it
-# (theta_cross>0) still shows the coarse-tree cross-walk/M2L is inaccurate
-# (~124%, and WORSE with more far interactions -> a bug in the cross-walk/M2L
-# over the degenerate leaf_size=1 coarse tree, NOT multipole content). Open.
-_THETA_CROSS = 0.001
+# this test is bit-exact by construction. That is its whole job: it is the
+# all-cross-pairs-NEAR end of the regime, and the far path is deliberately not
+# engaged here (its companion test_distributed_solidfmm_far_shardmap.py is).
+#
+# CLOSED 2026-08-21. This comment used to end "Open", recording that engaging the
+# far field showed the coarse cross-walk/M2L inaccurate "~124%, and WORSE with more
+# far interactions -> a bug in the cross-walk/M2L over the degenerate leaf_size=1
+# coarse tree, NOT multipole content".
+#
+# The 124% and "NOT multipole content" were both exactly right -- measured again as
+# 1.245859 for the far term against its own direct sum. The attribution was one step
+# off: the walk and the M2L are correct, and so is the degenerate leaf_size=1 coarse
+# tree. What was wrong is the coarse tree's MAC *extents*, which bounded the
+# frontier's centres of mass instead of the particles behind them, so the walk
+# accepted pairs that were not well separated and the M2L was evaluated inside its
+# own source region. Hence "WORSE with more far interactions". Fixed upstream in
+# TobiBu/yggdrax#47; see docs/distributed_cross_domain_far_diagnosis.md.
+_CROSS_THETA = 0.001  # all cross pairs NEAR, on purpose -- see above
 _MAC = "bh"
 _LEAF = 8
 _G = 1.0
@@ -281,7 +298,7 @@ def test_distributed_fmm_shardmap_matches_direct():
             geom,
             rct.tree,
             rct.geometry,
-            _THETA_CROSS,
+            _CROSS_THETA,
             mac_type=_MAC,
             max_interactions_per_node=KC,
             max_neighbors_per_leaf=KN,
@@ -464,7 +481,9 @@ def test_distributed_fmm_shardmap_matches_direct():
     print(f"LOCAL-ONLY   aggL2={err_self:.6f}")
     print(f"REMOTE (LET) aggL2={err_remote:.6f}")
     print(f"FULL         aggL2={err_full:.6f}")
-    # distributed FMM (local FMM + LET near-field, theta_cross->0) is bit-exact
-    # vs direct N-body. (Far-field M2L engaged via theta_cross>0 is still open.)
+    # distributed FMM (local FMM + LET near-field, cross angle ->0) is bit-exact
+    # vs direct N-body. The far field engaged is no longer open: it is asserted by
+    # test_distributed_solidfmm_far_shardmap.py at the production theta, and by
+    # tests/integration/test_distributed_cross_domain_far_extents.py on one device.
     assert err_self < 1e-3, f"LOCAL aggL2 err {err_self:.6f}"
     assert err_full < 1e-3, f"FULL aggL2 err {err_full:.6f}"

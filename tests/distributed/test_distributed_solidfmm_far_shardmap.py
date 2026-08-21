@@ -1,8 +1,8 @@
 """Live multi-GPU distributed far-field parity under jax.shard_map (solidfmm).
 
-Companion to test_distributed_fmm_shardmap.py (which keeps theta_cross->0 so all
+Companion to test_distributed_fmm_shardmap.py (which keeps its cross angle ->0 so all
 remote goes through the bit-exact near-field LET). This test ENGAGES the coarse
-far-field with a real theta_cross, using the solidfmm (spherical-harmonic) path:
+far-field at the production theta, using the solidfmm (spherical-harmonic) path:
 
   per device, inside one shard_map:
     local tree + solidfmm upward (P2M/M2M) multipoles
@@ -10,7 +10,7 @@ far-field with a real theta_cross, using the solidfmm (spherical-harmonic) path:
       coarse leaf with the real order-p multipole of the remote leaf it stands
       for (expansion centres coincide -- both the leaf COM), M2M up the coarse
       tree with the solidfmm rotation
-    cross-walk local tree vs coarse tree at theta_cross -> far (M2L) + near
+    cross-walk local tree vs coarse tree at theta -> far (M2L) + near
     far = self solidfmm M2L (local interaction list)
         + remote solidfmm M2L (cross list, separate source/target centres)
         -> level-by-level L2L cascade -> solidfmm L2P            (far_acc=-G*grad)
@@ -23,8 +23,8 @@ This depends on two solidfmm bug fixes:
     far-field never reaching the leaves) -- required whenever a far interaction
     is accepted above the leaf level.
 
-The far field is theta_cross-controlled: single-device this recipe matches direct
-to ~8e-5 at theta_cross=0.1. Here we assert the 4-GPU full force is within 1% of
+The far field is theta-controlled: single-device this recipe matches direct
+to ~8e-5. Here we assert the 4-GPU full force is within 1% of
 a global-id direct N-body sum.
 
     CUDA_VISIBLE_DEVICES=$(autocvd -n 4 -l -o) \
@@ -85,8 +85,13 @@ pytestmark = pytest.mark.skipif(
 )
 
 _P = 3
-_THETA = 0.4  # local self-interaction MAC
-_THETA_CROSS = 0.1  # engaged cross-domain far-field MAC
+_THETA = 0.4  # ONE MAC, for the local self walk and the cross walk alike.
+# There used to be a separate _THETA_CROSS = 0.1 here, mirroring the config knob of
+# the same name. Both are gone: 0.1 was compensation for the coarse tree's MAC
+# extents bounding the frontier COMs rather than the particles, and now that they
+# bound the particles (TobiBu/yggdrax#47) it accepts ZERO far pairs -- which would
+# leave this file asserting a "far path engaged" result with the far path off. See
+# docs/distributed_cross_domain_far_diagnosis.md.
 _MAC = "bh"
 _LEAF = 8
 _G = 1.0
@@ -299,7 +304,7 @@ def test_distributed_solidfmm_far_matches_direct():
             geom,
             rct.tree,
             rct.geometry,
-            _THETA_CROSS,
+            _THETA,
             mac_type=_MAC,
             max_interactions_per_node=KC,
             max_neighbors_per_leaf=KN,
@@ -505,3 +510,9 @@ def test_distributed_solidfmm_far_matches_direct():
     print(f"FULL  (solidfmm far engaged) aggL2={err_full:.6f}")
     assert err_self < 1e-2, f"LOCAL aggL2 err {err_self:.6f}"
     assert err_full < 1e-2, f"FULL aggL2 err {err_full:.6f}"
+    # The point of this file is the far path, so refuse to pass with it switched
+    # off: diag column 0 is the per-domain accepted cross far pair count.
+    assert diag_o[:, 0].sum() > 0, (
+        "no cross-domain far pairs were accepted, so the solidfmm far path this "
+        "file exists to exercise did not run"
+    )
