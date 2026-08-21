@@ -33,7 +33,7 @@ bounds over tree levels, so the whole sweep transposes cleanly under
 from __future__ import annotations
 
 import os
-from typing import Any, NamedTuple, Optional, Tuple
+from typing import Any, Callable, NamedTuple, Optional, Tuple
 
 import jax
 import jax.numpy as jnp
@@ -469,7 +469,7 @@ def _scan_levels(
 def _safe_translate(
     coeffs: Array,
     deltas: Array,
-    translate: object,
+    translate: Callable[..., Array],
     *,
     order: int,
 ) -> Array:
@@ -490,7 +490,7 @@ def _safe_translate(
     deltas : Array
         ``(pairs, 3)`` displacements, in whatever convention the caller's
         ``translate`` expects.
-    translate : object
+    translate : Callable[..., Array]
         A rotate-scale translation operator, called as
         ``translate(coeffs_row, delta_row, order=order)``.
     order : int

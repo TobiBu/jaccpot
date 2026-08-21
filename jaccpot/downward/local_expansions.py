@@ -257,7 +257,11 @@ def _differentiate_poly(
             continue
         new_exp = list(exp)
         new_exp[axis] -= 1
-        key = tuple(new_exp)
+        # Spelled out rather than `tuple(new_exp)` so the length survives: these
+        # dicts are keyed by (x, y, z) exponent triples, and `tuple(list)` erases
+        # that to `tuple[int, ...]`, which then fails to match the declared key
+        # type at every use (9 errors, audit E.4 bucket L).
+        key: Tuple[int, int, int] = (new_exp[0], new_exp[1], new_exp[2])
         result[key] = result.get(key, 0) + coeff * power
     return result
 
@@ -286,7 +290,11 @@ def _mul_by_axis(
     for exp, coeff in poly.items():
         new_exp = list(exp)
         new_exp[axis] += 1
-        key = tuple(new_exp)
+        # Spelled out rather than `tuple(new_exp)` so the length survives: these
+        # dicts are keyed by (x, y, z) exponent triples, and `tuple(list)` erases
+        # that to `tuple[int, ...]`, which then fails to match the declared key
+        # type at every use (9 errors, audit E.4 bucket L).
+        key: Tuple[int, int, int] = (new_exp[0], new_exp[1], new_exp[2])
         result[key] = result.get(key, 0) + coeff
     return result
 
@@ -313,7 +321,11 @@ def _mul_by_r2(
         for axis in range(3):
             new_exp = list(exp)
             new_exp[axis] += 2
-            key = tuple(new_exp)
+            # Spelled out rather than `tuple(new_exp)` so the length survives: these
+            # dicts are keyed by (x, y, z) exponent triples, and `tuple(list)` erases
+            # that to `tuple[int, ...]`, which then fails to match the declared key
+            # type at every use (9 errors, audit E.4 bucket L).
+            key: Tuple[int, int, int] = (new_exp[0], new_exp[1], new_exp[2])
             result[key] = result.get(key, 0) + coeff
     return result
 
