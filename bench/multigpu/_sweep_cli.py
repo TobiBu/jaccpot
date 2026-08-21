@@ -67,6 +67,16 @@ def add_sweep_args(p: argparse.ArgumentParser) -> argparse.ArgumentParser:
     )
     p.add_argument("--max-pair-queue", type=int, default=DEFAULT_PAIR_QUEUE)
     p.add_argument(
+        "--cross-max-interactions-per-node",
+        type=int,
+        default=4096,
+        help=(
+            "cross far-list capacity per target node. The library default of 512 is "
+            "what the retry grows on cross_far_overflow, and at higher device counts "
+            "four retries do not reach far enough now the far field is populated"
+        ),
+    )
+    p.add_argument(
         "--cross-far-cap",
         type=int,
         default=1 << 20,
@@ -143,6 +153,8 @@ def worker_argv(args: argparse.Namespace) -> list[str]:
         str(args.accuracy_targets),
         "--cross-far-cap",
         str(args.cross_far_cap),
+        "--cross-max-interactions-per-node",
+        str(args.cross_max_interactions_per_node),
     ]
 
 

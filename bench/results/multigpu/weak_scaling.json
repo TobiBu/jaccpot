@@ -36,7 +36,7 @@
     "per_device_n_fixed": 16384
   },
   "meta": {
-    "git_sha": "cf33eeddbfc956c08336005c8d8839fa7fbba8b7",
+    "git_sha": "4889f1dea2a0665d985f9a61fdf3f41627297718",
     "git_branch": "paper/jaccpot-i",
     "git_dirty": true,
     "argv": [
@@ -52,6 +52,8 @@
       "1048576",
       "--cross-max-pair-queue",
       "1048576",
+      "--cross-far-cap",
+      "4194304",
       "--accuracy-targets",
       "1024",
       "--repeats",
@@ -83,11 +85,11 @@
         "cap_retries": 1,
         "distribution": "uniform",
         "seed": 0,
-        "median_s": 0.11662970716133714,
-        "min_s": 0.1159817990846932,
-        "max_s": 0.11722377315163612,
+        "median_s": 0.11916397605091333,
+        "min_s": 0.11879625217989087,
+        "max_s": 0.11964347073808312,
         "repeats": 3,
-        "throughput_particles_per_s": 280957.57759788516,
+        "throughput_particles_per_s": 274982.4324928511,
         "per_device_work": {
           "self_near_pairs": [
             53482.0,
@@ -111,7 +113,12 @@
           124094.0
         ],
         "work_imbalance": 1.0007810549878815,
-        "accuracy": null,
+        "accuracy": {
+          "targets": 1024,
+          "rel_l2_vs_direct": 0.00016715916611016455,
+          "max_abs_err": 19.934755230856354,
+          "ref_rms": 15754.258255913719
+        },
         "overflowed": [],
         "valid": true,
         "config": {
@@ -126,10 +133,11 @@
           "max_interactions_per_node": 512,
           "max_neighbors_per_leaf": 256,
           "process_block": 1024,
+          "cross_far_cap": 4194304,
           "l2l_num_levels": null
         },
         "meta": {
-          "git_sha": "cf33eeddbfc956c08336005c8d8839fa7fbba8b7",
+          "git_sha": "4889f1dea2a0665d985f9a61fdf3f41627297718",
           "git_branch": "paper/jaccpot-i",
           "git_dirty": true,
           "jax_version": "0.10.2",
@@ -180,7 +188,11 @@
             "--dtype",
             "float64",
             "--gpu-select",
-            "none"
+            "none",
+            "--accuracy-targets",
+            "1024",
+            "--cross-far-cap",
+            "4194304"
           ]
         }
       },
@@ -192,11 +204,11 @@
         "cap_retries": 2,
         "distribution": "uniform",
         "seed": 0,
-        "median_s": 0.1311074709519744,
-        "min_s": 0.13055746629834175,
-        "max_s": 0.1311390409246087,
+        "median_s": 0.13466497091576457,
+        "min_s": 0.1332074562087655,
+        "max_s": 0.13572483323514462,
         "repeats": 3,
-        "throughput_particles_per_s": 374898.54424851754,
+        "throughput_particles_per_s": 364994.69509962975,
         "per_device_work": {
           "self_near_pairs": [
             49832.0,
@@ -225,7 +237,12 @@
           176777.0
         ],
         "work_imbalance": 1.013288725505182,
-        "accuracy": null,
+        "accuracy": {
+          "targets": 1024,
+          "rel_l2_vs_direct": 0.0001798561243513814,
+          "max_abs_err": 42.25434196718561,
+          "ref_rms": 23694.31678876717
+        },
         "overflowed": [],
         "valid": true,
         "config": {
@@ -240,10 +257,11 @@
           "max_interactions_per_node": 512,
           "max_neighbors_per_leaf": 256,
           "process_block": 1024,
+          "cross_far_cap": 4194304,
           "l2l_num_levels": null
         },
         "meta": {
-          "git_sha": "cf33eeddbfc956c08336005c8d8839fa7fbba8b7",
+          "git_sha": "4889f1dea2a0665d985f9a61fdf3f41627297718",
           "git_branch": "paper/jaccpot-i",
           "git_dirty": true,
           "jax_version": "0.10.2",
@@ -294,7 +312,11 @@
             "--dtype",
             "float64",
             "--gpu-select",
-            "none"
+            "none",
+            "--accuracy-targets",
+            "1024",
+            "--cross-far-cap",
+            "4194304"
           ]
         }
       },
@@ -306,11 +328,11 @@
         "cap_retries": 3,
         "distribution": "uniform",
         "seed": 0,
-        "median_s": 0.16583673795685172,
-        "min_s": 0.16491145733743906,
-        "max_s": 0.16584003809839487,
+        "median_s": 0.1673468709923327,
+        "min_s": 0.16646196227520704,
+        "max_s": 0.16804845910519361,
         "repeats": 3,
-        "throughput_particles_per_s": 395183.8465192888,
+        "throughput_particles_per_s": 391617.7195987289,
         "per_device_work": {
           "self_near_pairs": [
             52480.0,
@@ -344,7 +366,12 @@
           225679.0
         ],
         "work_imbalance": 1.0020235477465138,
-        "accuracy": null,
+        "accuracy": {
+          "targets": 1024,
+          "rel_l2_vs_direct": 0.00017589405911661425,
+          "max_abs_err": 32.36978160795479,
+          "ref_rms": 31515.73455851051
+        },
         "overflowed": [],
         "valid": true,
         "config": {
@@ -359,10 +386,11 @@
           "max_interactions_per_node": 512,
           "max_neighbors_per_leaf": 256,
           "process_block": 1024,
+          "cross_far_cap": 4194304,
           "l2l_num_levels": null
         },
         "meta": {
-          "git_sha": "cf33eeddbfc956c08336005c8d8839fa7fbba8b7",
+          "git_sha": "4889f1dea2a0665d985f9a61fdf3f41627297718",
           "git_branch": "paper/jaccpot-i",
           "git_dirty": true,
           "jax_version": "0.10.2",
@@ -413,7 +441,11 @@
             "--dtype",
             "float64",
             "--gpu-select",
-            "none"
+            "none",
+            "--accuracy-targets",
+            "1024",
+            "--cross-far-cap",
+            "4194304"
           ]
         }
       },
@@ -425,11 +457,11 @@
         "cap_retries": 3,
         "distribution": "uniform",
         "seed": 0,
-        "median_s": 0.16872042790055275,
-        "min_s": 0.16801449097692966,
-        "max_s": 0.16962532699108124,
+        "median_s": 0.17068857606500387,
+        "min_s": 0.16915889969095588,
+        "max_s": 0.17180069768801332,
         "repeats": 3,
-        "throughput_particles_per_s": 485536.93835037755,
+        "throughput_particles_per_s": 479938.38772667566,
         "per_device_work": {
           "self_near_pairs": [
             50484.0,
@@ -468,7 +500,12 @@
           259075.0
         ],
         "work_imbalance": 1.0158080230213185,
-        "accuracy": null,
+        "accuracy": {
+          "targets": 1024,
+          "rel_l2_vs_direct": 0.00017617089007853612,
+          "max_abs_err": 32.40837998483039,
+          "ref_rms": 39170.82781254717
+        },
         "overflowed": [],
         "valid": true,
         "config": {
@@ -483,10 +520,11 @@
           "max_interactions_per_node": 512,
           "max_neighbors_per_leaf": 256,
           "process_block": 1024,
+          "cross_far_cap": 4194304,
           "l2l_num_levels": null
         },
         "meta": {
-          "git_sha": "cf33eeddbfc956c08336005c8d8839fa7fbba8b7",
+          "git_sha": "4889f1dea2a0665d985f9a61fdf3f41627297718",
           "git_branch": "paper/jaccpot-i",
           "git_dirty": true,
           "jax_version": "0.10.2",
@@ -537,7 +575,11 @@
             "--dtype",
             "float64",
             "--gpu-select",
-            "none"
+            "none",
+            "--accuracy-targets",
+            "1024",
+            "--cross-far-cap",
+            "4194304"
           ]
         }
       },
@@ -549,11 +591,11 @@
         "cap_retries": 4,
         "distribution": "uniform",
         "seed": 0,
-        "median_s": 0.18077776674181223,
-        "min_s": 0.18052792409434915,
-        "max_s": 0.18193091917783022,
+        "median_s": 0.18621325585991144,
+        "min_s": 0.18588705267757177,
+        "max_s": 0.18914182391017675,
         "repeats": 3,
-        "throughput_particles_per_s": 543783.6840876472,
+        "throughput_particles_per_s": 527910.859761532,
         "per_device_work": {
           "self_near_pairs": [
             50974.0,
@@ -597,7 +639,12 @@
           148398.0
         ],
         "work_imbalance": 1.1803462155671811,
-        "accuracy": null,
+        "accuracy": {
+          "targets": 1024,
+          "rel_l2_vs_direct": 0.2568757068861745,
+          "max_abs_err": 35653.10362154622,
+          "ref_rms": 46755.949791870764
+        },
         "overflowed": [
           "cross_far_overflow"
         ],
@@ -614,10 +661,11 @@
           "max_interactions_per_node": 512,
           "max_neighbors_per_leaf": 256,
           "process_block": 1024,
+          "cross_far_cap": 4194304,
           "l2l_num_levels": null
         },
         "meta": {
-          "git_sha": "cf33eeddbfc956c08336005c8d8839fa7fbba8b7",
+          "git_sha": "4889f1dea2a0665d985f9a61fdf3f41627297718",
           "git_branch": "paper/jaccpot-i",
           "git_dirty": true,
           "jax_version": "0.10.2",
@@ -668,7 +716,11 @@
             "--dtype",
             "float64",
             "--gpu-select",
-            "none"
+            "none",
+            "--accuracy-targets",
+            "1024",
+            "--cross-far-cap",
+            "4194304"
           ]
         }
       }
