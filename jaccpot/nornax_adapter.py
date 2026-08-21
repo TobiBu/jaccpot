@@ -476,6 +476,20 @@ class BlockStepFMM:
 
     _QUEUE_FLOOR = 1 << 14
     _QUEUE_CEILING = 1 << 24
+    # Rungs to skip by starting the ladder near the answer instead of at the
+    # floor. Measured first-non-overflowing wavefront against the leaf count:
+    #
+    #   N=4e3   leaf 64        64 leaves   ->     16,384   (256 per leaf)
+    #   N=65e3  leaf 256      256 leaves   ->     16,384   ( 64 per leaf)
+    #   N=1e6   leaf 256    3,906 leaves   ->  1,048,576   (268 per leaf)
+    #   N=1e6   leaf 64    15,625 leaves   ->  2,097,152   (134 per leaf)
+    #
+    # so the requirement runs 64-268 wavefront slots per leaf. Seeded at the
+    # bottom of that range ON PURPOSE: the ladder has to converge on a TIGHT
+    # capacity, because the queue sizes the slices every walk iteration processes,
+    # so overshooting costs run time on every rebuild -- whereas undershooting
+    # only costs one more probe here, once per run.
+    _QUEUE_SEED_PER_LEAF = 64
 
     def _resolve_queue_capacity(
         self: "BlockStepFMM",
@@ -514,7 +528,15 @@ class BlockStepFMM:
         """
         from jaccpot.mutual.device_topology import build_mutual_state_device
 
-        queue = self._QUEUE_FLOOR
+        # Start near the answer rather than at the floor. This ladder is the bulk
+        # of `freeze_template`: measured 31-65 s across a leaf/N sweep, almost all
+        # of it climbing 2^14 -> 2^20/2^21/2^22, i.e. 6-8 full device topology
+        # builds spent discovering a capacity the leaf count already predicts. It
+        # also costs ~12 s on every device-lane test.
+        num_leaves = -(-int(sorted_positions.shape[0]) // int(self.leaf_size))
+        want = self._QUEUE_SEED_PER_LEAF * max(1, num_leaves)
+        queue = max(self._QUEUE_FLOOR, 1 << max(0, (want - 1).bit_length()))
+        queue = min(queue, self._QUEUE_CEILING)
         while queue <= self._QUEUE_CEILING:
             probe = build_mutual_state_device(
                 sorted_positions,
