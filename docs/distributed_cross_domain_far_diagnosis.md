@@ -128,6 +128,15 @@ true radius of a coarse "point" source:  min 0.4264   median 0.5327   max 5.0473
 An interleaved domain has leaves holding particles from *both* clusters, so one "leaf"
 spans 5 units of space. The coarse tree represents it as a single point of extent zero.
 
+A detail whoever writes the fix needs: the MAC does not literally divide by that zero.
+`_build_mac_extents` routes leaves through `_compute_leaf_effective_extents`, which
+substitutes a **depth-based** padding (`root_extent / 2**(depth+1)`) for any leaf whose
+extent is `<= 0`. That is what produces the 0.104 above rather than 0.0 — a heuristic
+standing in for a bound, with no relation to the extent it is standing in for. It also
+means the fix composes correctly rather than being overridden: once the coarse extents
+are inflated they are strictly positive, so the `extents <= 0.0` branch stops firing and
+the real bound is what the MAC tests.
+
 The same replay with separated domains never overlaps (worst ratio 0.199 over 47
 accepted pairs) and stays at 1.4e-3, which is the counterfactual: same code, same
 walk, same order — only the domain geometry differs.
