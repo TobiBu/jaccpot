@@ -37,6 +37,7 @@ from yggdrax.tree import (
     reorder_particles_by_indices,
 )
 
+from jaccpot._jax_compat import Tracer
 from jaccpot.downward.local_expansions import (
     LocalExpansionData,
     TreeDownwardData,
@@ -3083,7 +3084,7 @@ class PrepareMixin(_EngineBase):
         if indices.shape[0] == 0:
             return indices.astype(INDEX_DTYPE)
         # Under JAX tracing we cannot materialize min/max as Python ints.
-        if isinstance(indices, jax.core.Tracer):
+        if isinstance(indices, Tracer):
             return indices.astype(INDEX_DTYPE)
         min_idx = int(jnp.min(indices))
         max_idx = int(jnp.max(indices))

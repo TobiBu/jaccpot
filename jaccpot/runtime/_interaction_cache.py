@@ -33,6 +33,7 @@ from yggdrax.interactions import (
 from yggdrax.tree import Tree
 
 from jaccpot._env import env_flag
+from jaccpot._jax_compat import Tracer
 
 # `_adaptive_policy` reaches only `fmm_caches` and `fmm_constants`, both UPSTREAM of
 # this module in ARCHITECTURE §8's DAG (`fmm_constants -> fmm_caches -> kernels ->
@@ -1229,7 +1230,7 @@ def _raise_if_true(flag: Any, message: str) -> None:
     RuntimeError
         When ``flag`` is true.
     """
-    if isinstance(flag, jax.core.Tracer):
+    if isinstance(flag, Tracer):
 
         def _callback(value):
             if bool(value):
@@ -1505,7 +1506,7 @@ def _build_treecode_artifacts_strict_streamed(
     # overflow structurally impossible, and the eager prepare pass (concrete
     # `prod.overflow`) validates the flat far/near caps once before the scan is
     # compiled. See docs/phase5_m2l_a100_findings_and_padding_plan.md.
-    if not isinstance(prod.overflow, jax.core.Tracer):
+    if not isinstance(prod.overflow, Tracer):
         _raise_if_true(
             prod.overflow,
             "treecode walk overflowed a capacity (far/near per-leaf, stack, or "

@@ -13,6 +13,8 @@ from beartype.typing import Tuple
 from jaxtyping import Array
 from yggdrax.interactions import DualTreeRetryEvent, DualTreeTraversalConfig, MACType
 
+from jaccpot._jax_compat import Tracer
+
 # `_read_large_n_env_config` is re-imported although only its memoising wrapper
 # is called here: it was a module attribute of this module before Tier 1.8, and
 # the F16 lesson from `near_field.py` is that a module's attribute surface is
@@ -57,9 +59,7 @@ def _contains_jax_tracer(value: Any) -> bool:
         ``True`` if any leaf is a tracer, which is the gate on every host-side
         decision this module makes.
     """
-    return any(
-        isinstance(leaf, jax.core.Tracer) for leaf in jax.tree_util.tree_leaves(value)
-    )
+    return any(isinstance(leaf, Tracer) for leaf in jax.tree_util.tree_leaves(value))
 
 
 def prepare_large_n_state(

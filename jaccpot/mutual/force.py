@@ -49,6 +49,7 @@ import jax.numpy as jnp
 import numpy as np
 from jaxtyping import Array
 
+from jaccpot._jax_compat import Tracer
 from jaccpot.mutual.farfield import (
     MutualTreeArrays,
     _scan_levels,
@@ -787,8 +788,7 @@ def level_weights_from_floor(
     """
     k_max = int(k_max)
     if all(
-        not isinstance(jnp.asarray(v), jax.core.Tracer)
-        for v in (active_floor, half, dt_max)
+        not isinstance(jnp.asarray(v), Tracer) for v in (active_floor, half, dt_max)
     ):
         weights = [
             (

@@ -34,6 +34,7 @@ from jaxtyping import Array, Bool, Float, Int, jaxtyped
 from yggdrax.interactions import NodeNeighborList
 from yggdrax.tree import Tree
 
+from jaccpot._jax_compat import Tracer
 from jaccpot.config import GradConfig
 from jaccpot.downward.local_expansions import LocalExpansionData, TreeDownwardData
 from jaccpot.nearfield._fast_lane import (
@@ -114,7 +115,7 @@ def _warn_if_traced_under_an_outer_jit(positions: Any, masses: Any) -> None:
     global _OUTER_JIT_WARNED
     if _OUTER_JIT_WARNED:
         return
-    if not any(isinstance(value, jax.core.Tracer) for value in (positions, masses)):
+    if not any(isinstance(value, Tracer) for value in (positions, masses)):
         return
     _OUTER_JIT_WARNED = True
     warnings.warn(
@@ -385,9 +386,9 @@ class EvaluateMixin(_EngineBase):
             target_indices=target_indices,
             num_particles=int(state.inverse_permutation.shape[0]),
         )
-        tracing_targets = isinstance(
-            state.positions_sorted, jax.core.Tracer
-        ) or isinstance(resolved_target_indices, jax.core.Tracer)
+        tracing_targets = isinstance(state.positions_sorted, Tracer) or isinstance(
+            resolved_target_indices, Tracer
+        )
         derivative_order = int(max_acc_derivative_order)
         if derivative_order < 0:
             raise ValueError("max_acc_derivative_order must be non-negative")
@@ -659,9 +660,9 @@ class EvaluateMixin(_EngineBase):
             target_indices=target_indices,
             num_particles=int(state.inverse_permutation.shape[0]),
         )
-        tracing_targets = isinstance(
-            positions_sorted_arr, jax.core.Tracer
-        ) or isinstance(resolved_target_indices, jax.core.Tracer)
+        tracing_targets = isinstance(positions_sorted_arr, Tracer) or isinstance(
+            resolved_target_indices, Tracer
+        )
         # Octree backend: evaluate octree-native far-field locals (full path only).
         (
             octree_farfield_local_data,

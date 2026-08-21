@@ -66,6 +66,8 @@ from yggdrax.octree_uvwx import (
     build_uniform_octree_execution_view_device,
 )
 
+from jaccpot._jax_compat import Tracer
+
 from ..downward.local_expansions import LocalExpansionData
 from ..nearfield._fast_lane import _radix_fast_lane_prepacked_pallas
 from ..nearfield.near_field import (
@@ -822,7 +824,7 @@ def _raise_if_true(flag, message: str) -> None:
     Callers under a per-step integration scan should size caps from an eager probe and pass
     ``check_capacity=False`` instead, so the callback does not serialize the device scan.
     """
-    if isinstance(flag, jax.core.Tracer):
+    if isinstance(flag, Tracer):
 
         def _callback(value):
             if bool(value):

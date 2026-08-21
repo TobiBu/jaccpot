@@ -37,6 +37,7 @@ from yggdrax.interactions import (
 )
 from yggdrax.tree import Tree, get_node_levels
 
+from jaccpot._jax_compat import Tracer
 from jaccpot.downward.local_expansions import (
     LocalExpansionData,
     TreeDownwardData,
@@ -747,7 +748,7 @@ def _prepare_solidfmm_downward_sweep(
         # ``fori_loop`` bounds and is reverse-mode differentiable. When
         # ``node_levels`` is a tracer (jitted tree/traversal), fall back to the
         # kernel's internal dynamic reduction -- numerics are identical.
-        if isinstance(node_levels, jax.core.Tracer):
+        if isinstance(node_levels, Tracer):
             l2l_num_levels: Optional[int] = None
         else:
             # ``node_levels`` is concrete here, but under an outer ``jax.jit`` any

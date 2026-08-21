@@ -38,6 +38,7 @@ import jax
 from yggdrax.geometry import TreeGeometry, compute_tree_geometry
 
 from jaccpot._env import env_flag
+from jaccpot._jax_compat import Tracer
 
 __all__ = ["compute_tree_geometry_compiled"]
 
@@ -106,7 +107,7 @@ def compute_tree_geometry_compiled(
         )
 
     leaves = jax.tree_util.tree_leaves((tree, positions_sorted))
-    if any(isinstance(leaf, jax.core.Tracer) for leaf in leaves):
+    if any(isinstance(leaf, Tracer) for leaf in leaves):
         return compute_tree_geometry(
             tree, positions_sorted, max_leaf_size=max_leaf_size
         )

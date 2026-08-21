@@ -22,6 +22,8 @@ import jax.numpy as jnp
 import numpy as np
 from jaxtyping import Array
 
+from jaccpot._jax_compat import Tracer
+
 from .fmm_constants import _env_int
 
 __all__: list[str] = []
@@ -336,9 +338,7 @@ def _contains_tracer(value: Any) -> bool:
     bool
         ``True`` if any leaf is a tracer.
     """
-    return any(
-        isinstance(leaf, jax.core.Tracer) for leaf in jax.tree_util.tree_leaves(value)
-    )
+    return any(isinstance(leaf, Tracer) for leaf in jax.tree_util.tree_leaves(value))
 
 
 def _array_digest(arr: Array) -> Optional[tuple[tuple[int, ...], str, bytes]]:
