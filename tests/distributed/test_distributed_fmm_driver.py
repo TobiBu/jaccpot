@@ -64,6 +64,24 @@ def _separated_clusters(ndev, per, seed=4):
     return pts, mass
 
 
+def _assert_cross_far_engaged(result):
+    """Fail if the cross-domain far field contributed nothing to this evaluation.
+
+    Without this, an aggL2 assertion can pass while proving nothing about the far
+    field: if every cross pair resolves NEAR, the halo import and P2P carry the whole
+    cross-domain force and the coarse M2L is never exercised. That is not
+    hypothetical -- it is what a too-strict cross MAC did (the removed
+    ``theta_cross=0.1`` accepted zero far pairs on this IC), and it is the state a
+    future MAC or extent change could silently return to.
+    """
+    far = float(np.asarray(result.diagnostics["cross_far_pairs"]).sum())
+    assert far > 0, (
+        "no cross-domain far pairs were accepted, so this IC is not exercising the "
+        "coarse M2L at all and the accuracy assertion says nothing about it "
+        f"(cross_near_pairs={np.asarray(result.diagnostics['cross_near_pairs'])})"
+    )
+
+
 def test_driver_matches_direct():
     ndev = min(4, device_count())
     mesh = make_mesh(ndev)
@@ -71,7 +89,7 @@ def test_driver_matches_direct():
     pts, mass = _separated_clusters(ndev, per)
 
     # Defaults are the converged fast-lane config (real basis + dehnen MAC,
-    # order=3, theta=0.4, theta_cross=0.1, leaf=8, soft=0.02).
+    # order=3, theta=0.4 for both walks, leaf=8, soft=0.02).
     config = DistributedFMMConfig()
 
     result = distributed_fmm_accelerations(
@@ -91,6 +109,7 @@ def test_driver_matches_direct():
 
     assert not result.overflow, "traversal buffers overflowed -- grow the caps"
     assert err < 1e-2, f"driver aggL2 err {err:.6f} exceeds 1%"
+    _assert_cross_far_engaged(result)
 
 
 def test_driver_real_basis_matches_direct():
@@ -118,6 +137,7 @@ def test_driver_real_basis_matches_direct():
     print(f"driver REAL-basis FULL aggL2 vs direct = {err:.6f}  (ndev={ndev})")
     assert not result.overflow, "traversal buffers overflowed -- grow the caps"
     assert err < 1e-2, f"real-basis aggL2 err {err:.6f} exceeds 1%"
+    _assert_cross_far_engaged(result)
 
 
 def test_driver_solidfmm_matches_direct():
@@ -144,6 +164,7 @@ def test_driver_solidfmm_matches_direct():
     print(f"driver SOLIDFMM FULL aggL2 vs direct = {err:.6f}  (ndev={ndev})")
     assert not result.overflow, "traversal buffers overflowed -- grow the caps"
     assert err < 1e-2, f"solidfmm aggL2 err {err:.6f} exceeds 1%"
+    _assert_cross_far_engaged(result)
 
 
 def test_driver_jit_matches_eager():

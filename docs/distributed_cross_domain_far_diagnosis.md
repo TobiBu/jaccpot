@@ -1,15 +1,24 @@
-# The distributed cross-domain far field is wrong, and why
+# The distributed cross-domain far field was wrong, and why
+
+> **RESOLVED.** The defect is fixed upstream in **TobiBu/yggdrax#47**, and jaccpot
+> dropped the `theta_cross` knob that existed to compensate for it (one `theta` now
+> serves both walks). Measured through the driver on the configuration whose four
+> assertions this note was written to explain: **0.018223 -> 0.000003** at the default,
+> and **0.260355 -> 0.000006** at `theta=1.0` with the far path still engaged. The two
+> strict xfails that pinned the bug are gone, because both cases pass. Everything below
+> is kept as the diagnosis: it is the record of what was wrong, how it was localised,
+> and what would say it had come back.
 
 **Verdict: a real defect, in the cross-domain MAC's source extents.** Four of the five
 `tests/distributed/` failures found when that tier was first executed on two cards
-(2026-08-21, audit row F34) are one bug. Their assertions are correct and their
-tolerances must not be touched. The fifth failure
-(`test_driver_auto_scale_caps`) is unrelated and is a test-construction defect; it is
+(2026-08-21, audit row F34) were one bug. Their assertions were correct and their
+tolerances were not touched. The fifth failure
+(`test_driver_auto_scale_caps`) was unrelated and a test-construction defect; it was
 fixed in the same change as this note.
 
-The root cause is in **yggdrax**, not jaccpot, so nothing in the force path changed
-here. What changed is that the defect is now reproducible in seconds without a GPU, and
-pinned by two strict-xfail tests that run in CPU CI.
+The root cause was in **yggdrax**, not jaccpot, so the change that first landed here
+touched nothing in the force path. What it added is that the defect is reproducible in
+seconds without a GPU, and pinned by tests that run in CPU CI.
 
 ```
 tests/integration/test_distributed_cross_domain_far_extents.py   the pin
@@ -226,42 +235,55 @@ fixes it too. The per-node bound is a plain bottom-up max over the coarse tree
 (`maxr[internal] = max(maxr[left], maxr[right])`), so it costs one level pass and no
 extra communication beyond the single float.
 
-Measured by rerunning the replay with exactly that correction applied
-(`--inflate`), interpenetrating domains, `theta_cross=1.0`:
+Measured by rerunning the replay with exactly that correction applied, interpenetrating
+domains, cross-walk angle 1.0:
 
 | | far pairs | relerr(cross) | true ratio | as the MAC computes it |
 | --- | --- | --- | --- | --- |
-| today | 19 | 0.641596 | 2.704 | 0.998 |
-| extents corrected | 10 | **0.000008** | 0.176 | 0.179 |
+| COM-only extents | 19 | 0.641596 | 2.704 | 0.998 |
+| bounding the particles | 10 | **0.000008** | 0.176 | 0.179 |
 
 Five orders of magnitude, with the far path still engaged, and the MAC's belief now
 tracking the truth instead of understating it. Separated domains are unaffected
-(1.4e-3 before and after at `theta_cross=1.0`).
+(1.4e-3 before and after).
 
-Two consequences worth knowing before shipping it:
+## `theta_cross` is gone
 
-- **It costs near-field work.** Honest extents reject pairs the MAC used to accept, and
-  those pairs become halo imports. On the small ICs here `theta_cross=0.1` ends up
-  rejecting *everything* — the far path switches off at N=128 because 8 leaves of
-  radius 0.5 in clusters 6 apart simply are not far-field at an honest θ=0.1. At
-  production N the leaves are small relative to the domain and the effect shrinks, but
-  it has not been measured there.
-- **`theta_cross` should be revisited once it lands.** If 0.1 exists only to compensate
-  for understated extents, the correct value with honest extents is probably `theta`
-  itself, and keeping 0.1 would leave a permanent near-field tax. That is a separate
-  measurement, not a guess to ship.
+The paragraph that used to sit here said the knob "should be revisited once the fix
+lands". It was, and the answer was to delete it. Swept through the driver against the
+fixed extents, on the same IC (`cross_near` is halo traffic — every near pair ships a
+remote leaf's particles):
+
+| `theta` applied to both walks | 0.1 | 0.2 | **0.4** | 0.6 | 1.0 | 2.0 |
+| --- | --- | --- | --- | --- | --- | --- |
+| aggL2 | 3e-6 | 3e-6 | **6e-6** | 6e-6 | 6e-6 | 0.227 |
+| cross far pairs | **0** | 1 | **18** | 18 | 18 | 16 |
+| cross near pairs | 128 | 127 | **106** | 106 | 106 | 47 |
+
+At the old `theta_cross=0.1` the walk accepts **zero** far pairs: the entire cross field
+goes through the halo import, for no accuracy gain over 0.4. Accuracy holds at the
+float32 floor to 1.0 and breaks at 2.0 — correctly, since an opening angle of 2 is not
+well separated however honest the extents are. So `theta` alone, at its existing 0.4,
+is both the accurate and the cheap choice, and a second knob only invited the mistake
+of "tuning" it. See `DistributedFMMConfig` for the note that now guards against
+reintroducing it.
+
+One cost note survives the change: honest extents reject pairs the MAC used to accept,
+and those become halo imports. The table above is one N=128 IC and it saturates at 18
+far pairs from 0.4 upward; the effect has **not** been measured at production N.
 
 ## What would change the answer
 
-- A yggdrax release that bounds the true extents: both strict xfails in
-  `tests/integration/test_distributed_cross_domain_far_extents.py` flip to failures,
-  which is the signal to delete the markers and re-measure the four driver tests.
+- A regression in the coarse extents upstream. The pin in
+  `tests/integration/test_distributed_cross_domain_far_extents.py` reads
+  `frontier.radius` and passes it to `compute_tree_geometry` exactly as the fixed
+  builder does, so it tracks production rather than freezing either behaviour; if it
+  goes red, read this note before touching the test.
 - A change to `partition_for_devices` that makes Morton domains spatially compact would
-  hide the defect on this IC without fixing it, and the four driver tests would go green
-  for the wrong reason. The pin's `interpenetrating` case is built *from* the
-  partitioner, so it would have been fooled the same way — it therefore asserts the
-  geometry it is named for (each domain holds particles on both sides of x=3) before it
-  measures anything, and fails with "the interpenetrating case is no longer
-  interpenetrating" rather than flipping to a false pass.
-- Any change to `theta_cross`'s default. It is currently load-bearing in a way the
-  config does not admit; the paragraph above is the reason.
+  hide this class of defect on this IC. The pin's `interpenetrating` case is built
+  *from* the partitioner, so it would have been fooled the same way — it therefore
+  asserts the geometry it is named for (each domain holds particles on both sides of
+  x=3) before it measures anything, and fails with "the interpenetrating case is no
+  longer interpenetrating" rather than flipping to a false pass.
+- Any reintroduction of a separate cross-domain opening angle. The table above is the
+  reason it is one knob; a second one hides extent bugs instead of fixing them.
