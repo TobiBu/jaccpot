@@ -155,6 +155,11 @@ def measure_point(
     warmup: int = 2,
     auto_scale_caps: bool = True,
     max_cap_retries: int = 4,
+    max_pair_queue: Optional[int] = None,
+    cross_max_pair_queue: Optional[int] = None,
+    max_interactions_per_node: Optional[int] = None,
+    max_neighbors_per_leaf: Optional[int] = None,
+    process_block: Optional[int] = None,
 ) -> dict[str, Any]:
     """Measure one ``(ndev, n)`` point in this process.
 
@@ -190,7 +195,23 @@ def measure_point(
     auto_scale_caps : bool
         Grow an overflowing traversal buffer and retry.
     max_cap_retries : int
-        Retry ceiling for the above.
+        Retry ceiling for the above. Each retry rebuilds *and recompiles*, so a
+        long ladder is expensive; prefer starting from a cap that fits.
+    max_pair_queue : int, optional
+        Starting self pair-queue capacity, overriding the config default. The
+        default (32768) is a fixed constant with no particle-count dependence,
+        unlike the single-device presets, which is why a large per-device load
+        overflows it. Setting it directly is cheaper than growing into it by
+        recompiling.
+    cross_max_pair_queue : int, optional
+        As above, for the cross-domain walk.
+    max_interactions_per_node : int, optional
+        Starting far-list capacity per node.
+    max_neighbors_per_leaf : int, optional
+        Starting near-list capacity per leaf.
+    process_block : int, optional
+        Dual-tree walk process block. Its default (64) coincides exactly with the
+        measured ceiling of 64 leaves per device, which is why it is exposed.
 
     Returns
     -------
@@ -230,6 +251,19 @@ def measure_point(
         mac_type=mac_type,
         nearfield_backend=nearfield_backend,
     )
+    overrides = {
+        k: int(v)
+        for k, v in (
+            ("max_pair_queue", max_pair_queue),
+            ("cross_max_pair_queue", cross_max_pair_queue),
+            ("max_interactions_per_node", max_interactions_per_node),
+            ("max_neighbors_per_leaf", max_neighbors_per_leaf),
+            ("process_block", process_block),
+        )
+        if v is not None
+    }
+    if overrides:
+        config = dataclasses.replace(config, **overrides)
     positions, masses = make_distribution(distribution, n, ndev, seed)
     part = partition_for_devices(positions, masses, ndev, leaf_size=config.leaf_size)
     mesh = make_mesh(ndev)
@@ -300,6 +334,13 @@ def measure_point(
             "basis": basis,
             "mac_type": mac_type,
             "nearfield_backend": nearfield_backend,
+            # The caps the final (possibly retried) evaluation actually ran with.
+            # A per-device load means nothing without these and leaf_size.
+            "max_pair_queue": int(config.max_pair_queue),
+            "cross_max_pair_queue": int(config.cross_max_pair_queue),
+            "max_interactions_per_node": int(config.max_interactions_per_node),
+            "max_neighbors_per_leaf": int(config.max_neighbors_per_leaf),
+            "process_block": int(config.process_block),
         },
     }
 
@@ -382,6 +423,12 @@ def _parse_args() -> argparse.Namespace:
     p.add_argument("--distribution", default="uniform")
     p.add_argument("--repeats", type=int, default=5)
     p.add_argument("--warmup", type=int, default=2)
+    p.add_argument("--max-cap-retries", type=int, default=4)
+    p.add_argument("--max-pair-queue", type=int, default=None)
+    p.add_argument("--cross-max-pair-queue", type=int, default=None)
+    p.add_argument("--max-interactions-per-node", type=int, default=None)
+    p.add_argument("--max-neighbors-per-leaf", type=int, default=None)
+    p.add_argument("--process-block", type=int, default=None)
     p.add_argument(
         "--emit-json",
         action="store_true",
@@ -416,6 +463,12 @@ def main() -> int:
         seed=int(args.seed),
         repeats=int(args.repeats),
         warmup=int(args.warmup),
+        max_cap_retries=int(args.max_cap_retries),
+        max_pair_queue=args.max_pair_queue,
+        cross_max_pair_queue=args.cross_max_pair_queue,
+        max_interactions_per_node=args.max_interactions_per_node,
+        max_neighbors_per_leaf=args.max_neighbors_per_leaf,
+        process_block=args.process_block,
     )
     record["meta"] = runmeta.run_meta({"argv": sys.argv[1:]})
     if args.emit_json:

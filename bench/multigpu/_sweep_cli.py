@@ -20,11 +20,29 @@ if str(REPO_ROOT) not in sys.path:
 
 from examples.jaccpot_paper.common import jsonio  # noqa: E402
 
-# Measured healthy operating point: above roughly this many particles per device
-# the fixed-topology traversal buffers overflow even after the maximum number of
-# capacity retries, and the forces come back truncated. See
-# docs/phase5_multigpu_pallas_foldin_plan.md.
-HEALTHY_PER_DEVICE_N = 8000
+# The per-device ceiling is a LEAF-COUNT ceiling, not a particle-count one, and
+# it is set by ``process_block``. Measured 2026-08-21 on 2xA100:
+#
+#   64 leaves/device  @ process_block 64  -> valid, 0 retries, at every leaf size
+#   128 leaves/device @ process_block 64  -> truncated
+#   128 leaves/device @ process_block 128 -> truncated
+#   128 leaves/device @ process_block 256 -> valid
+#
+# Per-device capacity is therefore (leaves per device) x leaf_size, and both
+# factors are configuration. 32768 particles/device runs clean at leaf 512, and
+# 16384 at leaf 128 once process_block is 256 -- against the 8000 the phase-5 log
+# calls "healthy", which was leaf 128 x 64 leaves and nothing more fundamental.
+#
+# The failure mode is a TRUNCATED WALK, and it reads as *faster*, because a
+# truncated walk does less work. Never infer validity from a wall clock here:
+# check self_near_pairs, which is ~constant for a given leaf count and collapses
+# when the walk truncates.
+DEFAULT_LEAF_SIZE = 256
+DEFAULT_PROCESS_BLOCK = 256
+DEFAULT_PAIR_QUEUE = 262144
+# 64 leaves/device at the default leaf size -- the conservative point that needed
+# no capacity retries at every leaf size tested.
+HEALTHY_PER_DEVICE_N = DEFAULT_LEAF_SIZE * 64
 
 
 def add_sweep_args(p: argparse.ArgumentParser) -> argparse.ArgumentParser:
@@ -37,7 +55,18 @@ def add_sweep_args(p: argparse.ArgumentParser) -> argparse.ArgumentParser:
     )
     p.add_argument("--order", type=int, default=3)
     p.add_argument("--theta", type=float, default=0.4)
-    p.add_argument("--leaf-size", type=int, default=128)
+    p.add_argument("--leaf-size", type=int, default=DEFAULT_LEAF_SIZE)
+    p.add_argument(
+        "--process-block",
+        type=int,
+        default=DEFAULT_PROCESS_BLOCK,
+        help=(
+            "dual-tree walk block. This is the knob that sets the per-device leaf "
+            "ceiling; too small truncates the walk silently"
+        ),
+    )
+    p.add_argument("--max-pair-queue", type=int, default=DEFAULT_PAIR_QUEUE)
+    p.add_argument("--cross-max-pair-queue", type=int, default=DEFAULT_PAIR_QUEUE)
     p.add_argument("--basis", default="real")
     p.add_argument("--mac-type", default="dehnen")
     p.add_argument("--nearfield-backend", default="auto")
@@ -66,6 +95,12 @@ def worker_argv(args: argparse.Namespace) -> list[str]:
         str(args.theta),
         "--leaf-size",
         str(args.leaf_size),
+        "--process-block",
+        str(args.process_block),
+        "--max-pair-queue",
+        str(args.max_pair_queue),
+        "--cross-max-pair-queue",
+        str(args.cross_max_pair_queue),
         "--basis",
         args.basis,
         "--mac-type",
@@ -157,6 +192,9 @@ def write_sweep(
         "repeats": args.repeats,
         "warmup": args.warmup,
         "healthy_per_device_n": HEALTHY_PER_DEVICE_N,
+        "process_block": args.process_block,
+        "max_pair_queue": args.max_pair_queue,
+        "cross_max_pair_queue": args.cross_max_pair_queue,
         "n_valid": len(valid),
         "n_invalid": len(invalid),
     }
