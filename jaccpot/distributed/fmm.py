@@ -1011,9 +1011,10 @@ def _make_fn(
         gid_sorted = gid[perm]
         # Geometry feeds the MAC only, so it always takes the frozen positions
         # (the same values as ``lp``; identical forward, no cotangent path).
-        geom = compute_tree_geometry_compiled(
-            tree, tree.positions_sorted, max_leaf_size=leaf
-        )
+        with jax.named_scope("jc_geometry"):
+            geom = compute_tree_geometry_compiled(
+                tree, tree.positions_sorted, max_leaf_size=leaf
+            )
         total_nodes = jnp.asarray(tree.node_ranges).shape[0]
         cdtype = complex_dtype_for_real(lp.dtype)
 
@@ -1022,9 +1023,10 @@ def _make_fn(
         # bytes); solidfmm runs the complex sweep. Both produce per-node multipoles
         # + COM centers with the same API.
         if is_real:
-            up = prepare_real_upward_sweep(
-                tree, lp, lm, max_order=p, max_leaf_size=leaf
-            )
+            with jax.named_scope("jc_upward_local"):
+                up = prepare_real_upward_sweep(
+                    tree, lp, lm, max_order=p, max_leaf_size=leaf
+                )
         else:
             up = prepare_solidfmm_complex_upward_sweep(
                 tree, lp, lm, max_order=p, max_leaf_size=leaf, rotation=rot
@@ -1090,18 +1092,20 @@ def _make_fn(
                 near_overflow=(near_cnt > tc_near_cap).astype(jnp.int64),
             )
         else:
-            inter, nbr, self_res = build_interactions_and_neighbors(
-                tree,
-                geom,
-                theta=theta,
-                traversal_config=cfg,
-                mac_type=mac,
-                return_result=True,
-            )
+            with jax.named_scope("jc_self_walk"):
+                inter, nbr, self_res = build_interactions_and_neighbors(
+                    tree,
+                    geom,
+                    theta=theta,
+                    traversal_config=cfg,
+                    mac_type=mac,
+                    return_result=True,
+                )
 
         # remote coarse tree over frontier (leaf COM + mass)
-        mm = compute_tree_mass_moments(tree, lp, lm)
-        fr = build_coarse_frontier(tree, mm.mass, mm.center_of_mass)
+        with jax.named_scope("jc_coarse_frontier"):
+            mm = compute_tree_mass_moments(tree, lp, lm)
+            fr = build_coarse_frontier(tree, mm.mass, mm.center_of_mass)
         if differentiable:
             # The coarse tree's topology is discrete -> build it from a frozen
             # frontier (its own Tree.from_particles has the same non-transposable
@@ -1125,13 +1129,14 @@ def _make_fn(
 
         # coarse centres (COM) + level structure (same basis as the local sweep)
         if is_real:
-            upc = prepare_real_upward_sweep(
-                rct.tree,
-                coarse_pos_sorted,
-                coarse_mass_sorted,
-                max_order=p,
-                max_leaf_size=1,
-            )
+            with jax.named_scope("jc_upward_coarse"):
+                upc = prepare_real_upward_sweep(
+                    rct.tree,
+                    coarse_pos_sorted,
+                    coarse_mass_sorted,
+                    max_order=p,
+                    max_leaf_size=1,
+                )
         else:
             upc = prepare_solidfmm_complex_upward_sweep(
                 rct.tree,
@@ -1151,7 +1156,8 @@ def _make_fn(
 
         # seed coarse leaves with the remote leaves' own multipoles. The gathered
         # array is REAL in the real basis (half the bytes of the complex packed).
-        gpacked = jax.lax.all_gather(packed, "gpus", tiled=False)  # [ndev,N,C]
+        with jax.named_scope("jc_all_gather_coarse"):
+            gpacked = jax.lax.all_gather(packed, "gpus", tiled=False)  # [ndev,N,C]
         spos = c_nr[c_leaves, 0]
         dom = rct.tag_domain[spos]
         nod = rct.tag_node_id[spos]
@@ -1167,18 +1173,19 @@ def _make_fn(
         c_loff = get_level_offsets(rct.tree)
         c_numlev = int(c_loff.shape[0] - 1)
         if is_real:
-            coarse_packed = aggregate_m2m_real_by_level(
-                seed,
-                c_centers,
-                c_lc,
-                c_rc,
-                jnp.asarray(c_nbl, INDEX_DTYPE),
-                jnp.asarray(c_loff, INDEX_DTYPE),
-                order=p,
-                num_internal=c_nint,
-                num_levels=c_numlev,
-                level_batch_width=max(c_nint, 1),
-            )
+            with jax.named_scope("jc_coarse_m2m"):
+                coarse_packed = aggregate_m2m_real_by_level(
+                    seed,
+                    c_centers,
+                    c_lc,
+                    c_rc,
+                    jnp.asarray(c_nbl, INDEX_DTYPE),
+                    jnp.asarray(c_loff, INDEX_DTYPE),
+                    order=p,
+                    num_internal=c_nint,
+                    num_levels=c_numlev,
+                    level_batch_width=max(c_nint, 1),
+                )
         else:
             coarse_packed = _aggregate_m2m_complex_by_level(
                 seed,
@@ -1195,17 +1202,18 @@ def _make_fn(
             )
         coarse_packed_use = coarse_packed  # real when is_real, complex otherwise
 
-        cross = dual_tree_walk_cross_impl(
-            tree,
-            geom,
-            rct.tree,
-            rct.geometry,
-            theta_cross,
-            mac_type=mac,
-            max_interactions_per_node=KC,
-            max_neighbors_per_leaf=KN,
-            max_pair_queue=x_queue,
-        )
+        with jax.named_scope("jc_cross_walk"):
+            cross = dual_tree_walk_cross_impl(
+                tree,
+                geom,
+                rct.tree,
+                rct.geometry,
+                theta_cross,
+                mac_type=mac,
+                max_interactions_per_node=KC,
+                max_neighbors_per_leaf=KN,
+                max_pair_queue=x_queue,
+            )
         # The halo exchange is the one place cotangents cross devices. On the grad
         # path its implementation is pinned -- see _grad_halo_exchange for why the
         # native ragged path must not be used there.
@@ -1214,16 +1222,17 @@ def _make_fn(
             if differentiable
             else contextlib.nullcontext()
         ):
-            halo = import_near_halo(
-                rct,
-                cross,
-                lp,
-                lm,
-                ndev,
-                leaf_size=leaf,
-                max_req_leaves=max_req,
-                max_recv_leaves=max_recv,
-            )
+            with jax.named_scope("jc_halo_import"):
+                halo = import_near_halo(
+                    rct,
+                    cross,
+                    lp,
+                    lm,
+                    ndev,
+                    leaf_size=leaf,
+                    max_req_leaves=max_req,
+                    max_recv_leaves=max_recv,
+                )
 
         leaf_nodes = jnp.asarray(nbr.leaf_indices, INDEX_DTYPE)
         nr = jnp.asarray(tree.node_ranges, INDEX_DTYPE)
@@ -1408,7 +1417,8 @@ def _make_fn(
                 ).astype(cdtype)
             x_contribs = jnp.where(x_valid[:, None], x_contribs, 0)
             loc_full = loc_self + jax.ops.segment_sum(x_contribs, xt, int(total_nodes))
-        far_full = _l2p(loc_full)
+        with jax.named_scope("jc_l2p"):
+            far_full = _l2p(loc_full)
 
         # near: leaf particle-index groups into [local ; halo] buffer
         lranges = nr[leaf_nodes]
@@ -1461,15 +1471,16 @@ def _make_fn(
                     softening_sq=soft2_a,
                 )
             else:
-                self_acc = _compute_leaf_p2p_prepared_large_n_self_only_impl(
-                    concat_pos,
-                    leaf_positions,
-                    leaf_masses,
-                    leaf_mask_g,
-                    safe_idx,
-                    G=G,
-                    softening_sq=soft2_a,
-                )
+                with jax.named_scope("jc_near_p2p_self"):
+                    self_acc = _compute_leaf_p2p_prepared_large_n_self_only_impl(
+                        concat_pos,
+                        leaf_positions,
+                        leaf_masses,
+                        leaf_mask_g,
+                        safe_idx,
+                        G=G,
+                        softening_sq=soft2_a,
+                    )
                 # Densify the combined CSR (offsets/src_s/counts, sorted by target) into a
                 # padded [u_leaves, S_near] source-leaf-id table + validity mask.
                 # int32 index math: e/t_of_e/rank/flat are pure [num_edges] index temporaries

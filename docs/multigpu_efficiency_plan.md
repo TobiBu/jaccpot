@@ -71,6 +71,74 @@ Non-negotiable, because it is what the retractions above cost:
   `theta_cross`, device count, per-device N. A per-device load without its leaf
   size is what caused the 8000-particle myth.
 
+## STAGE 1 RESULT (2026-08-21): the evaluation is launch-bound
+
+**642 distinct device ops and 15 518 kernel launches per device per force
+evaluation** (4 devices, 16 384 particles/device, leaf 256). That alone accounts
+for the floor: at a few microseconds of launch overhead each, 15.5k launches is
+the whole ~75 ms of device time.
+
+| op | ms/dev/eval | launches/dev/eval |
+| --- | --- | --- |
+| `nearfield_leafpair_t32_s256_w256` | 16.94 | **1** |
+| `ncclDevKernel_AllGather_RING_LL` | 4.19 | 4 |
+| `memcpy32_post` | 2.41 | **1136** |
+| `RaggedAllToAllKernelImpl` | 1.95 | 3 |
+| `MultiGpuBarrierKernelImpl` | 1.33 | 6 |
+| `loop_multiply_fusion` | 0.91 | 256 |
+| `loop_add_fusion_1` | 0.81 | 447 |
+| `input_reduce_fusion` | 0.78 | 256 |
+
+The fused near-field kernel does its work in **one** launch and is not the
+problem. The collectives are ~10 ms and also not the problem. The remaining
+~15 517 launches are, and the top dozen ops account for only ~1 300 of them: the
+rest is spread over 642 distinct kernel types. That distribution -- many op
+*types*, each launched a few hundred times -- is the signature of unrolled loops
+emitting separate ops rather than a `scan` reusing one.
+
+This is inside a jitted `shard_map`, so it is not eager dispatch: XLA compiled it
+*into* 15.5k launches.
+
+**Why five configuration hypotheses failed.** `theta_cross`, the fused-M2L flag,
+the near-field cap, the traversal pair queue and the L2L level bound were each
+predicted to dominate and each measured wrong. They were all *configuration*
+explanations for a *dispatch* problem. (The L2L one died most cleanly: the library
+raises `l2l_num_levels only applies to differentiable=True (the forward path
+resolves the L2L depth exactly, on device)` -- so the audit's "~2 orders of
+magnitude loose" bound is real but only on the differentiable path, which the
+scaling benchmarks do not use.)
+
+**Scope attribution does not work here and the tool says so.** Only ~5% of device
+time lands in a `named_scope`: collectives keep their identity because they do not
+fuse, everything else folds into anonymous fusion kernels. The instrument that
+works is the op listing with **call counts** -- a slow stage shows up as time, a
+dispatch-bound path shows up as a count. `bench/multigpu/stage_profile.py` reports
+both and does not spread the unattributed remainder over the stages.
+
+### Consequence: the stages below are re-ordered
+
+The original ordering put a Pallas cross-M2L kernel and the static-structure
+rebuild ahead of dispatch. Both address minority terms if 60% of the time is
+launch overhead. Revised priority:
+
+1. **Cut the launch count** (new Stage 2). Find what emits ~15.5k launches and
+   whether unrolled loops can become `lax.scan`/`fori_loop`, so XLA emits one
+   kernel run many times instead of many kernels. Also worth checking what
+   `memcpy32_post` x1136 is: 1136 device-to-device copies per evaluation suggests
+   layout changes or slicing that could be avoided.
+2. Right-size the cross-far M2L cap and revisit `theta_cross` (old Stage 2) --
+   still worth doing, and cheaper to judge once the launch floor is down, because
+   an 18 ms difference is currently measured against a 50 ms floor of noise-adjacent
+   overhead.
+3. Static structures (old Stage 4) -- **demoted**. A per-call tree rebuild cannot
+   be the floor when a 4-leaf tree also takes ~50 ms, and the profile shows the
+   cost is not in one stage.
+4. Pallas cross M2L (old Stage 3) -- **demoted**, and gated on the far field being
+   non-empty and on the M2L actually appearing in the profile, which at
+   `theta_cross=0.1` it does not.
+5. Communication (old Stage 5) -- unchanged position. Measured at ~10 ms of ~75 ms,
+   so it is real but not dominant.
+
 ## Stage 1 -- Instrument the sharded region (prerequisite)
 
 Without this, the largest single cost in the evaluation cannot be attributed, and

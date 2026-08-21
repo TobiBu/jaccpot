@@ -161,6 +161,7 @@ def measure_point(
     max_interactions_per_node: Optional[int] = None,
     max_neighbors_per_leaf: Optional[int] = None,
     process_block: Optional[int] = None,
+    l2l_num_levels: Optional[int] = None,
 ) -> dict[str, Any]:
     """Measure one ``(ndev, n)`` point in this process.
 
@@ -214,6 +215,12 @@ def measure_point(
         Starting far-list capacity per node.
     max_neighbors_per_leaf : int, optional
         Starting near-list capacity per leaf.
+    l2l_num_levels : int, optional
+        Static level bound for the L2L cascade. The default derives
+        ``num_internal - 1`` from a shape because the tree depth is not knowable
+        inside ``shard_map``; a balanced tree is only ~log2(num_leaves) deep, so
+        the default can be orders of magnitude loose and the extra levels cost
+        time while contributing exactly zero.
     process_block : int, optional
         Dual-tree walk process block. Its default (64) coincides exactly with the
         measured ceiling of 64 leaves per device, which is why it is exposed.
@@ -284,7 +291,14 @@ def measure_point(
     # per call would report compile time as force time.
     attempt = 0
     while True:
-        evaluate = make_force_evaluator(config, ndev, part["cap"], mesh, jit=True)
+        evaluate = make_force_evaluator(
+            config,
+            ndev,
+            part["cap"],
+            mesh,
+            jit=True,
+            l2l_num_levels=l2l_num_levels,
+        )
         accel, _gid, diag = evaluate(*args)
         jax.block_until_ready(accel)
         diag_np = np.asarray(diag)
@@ -348,6 +362,7 @@ def measure_point(
             "max_interactions_per_node": int(config.max_interactions_per_node),
             "max_neighbors_per_leaf": int(config.max_neighbors_per_leaf),
             "process_block": int(config.process_block),
+            "l2l_num_levels": l2l_num_levels,
         },
     }
 
@@ -437,6 +452,7 @@ def _parse_args() -> argparse.Namespace:
     p.add_argument("--max-interactions-per-node", type=int, default=None)
     p.add_argument("--max-neighbors-per-leaf", type=int, default=None)
     p.add_argument("--process-block", type=int, default=None)
+    p.add_argument("--l2l-num-levels", type=int, default=None)
     p.add_argument(
         "--emit-json",
         action="store_true",
@@ -478,6 +494,7 @@ def main() -> int:
         max_interactions_per_node=args.max_interactions_per_node,
         max_neighbors_per_leaf=args.max_neighbors_per_leaf,
         process_block=args.process_block,
+        l2l_num_levels=args.l2l_num_levels,
     )
     record["meta"] = runmeta.run_meta({"argv": sys.argv[1:]})
     if args.emit_json:
