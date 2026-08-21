@@ -99,7 +99,7 @@ class AdaptivePolicyState(NamedTuple):
 
 
 def adaptive_policy_tolerance(
-    *, theta: float, p_gears: tuple[int, ...], dtype: object
+    *, theta: float, p_gears: tuple[int, ...], dtype: DTypeLike
 ) -> Array:
     """Return a conservative solver-side adaptive tolerance derived from ``theta``.
 
@@ -109,7 +109,7 @@ def adaptive_policy_tolerance(
         Opening angle, or its squared form where the caller pre-squares it.
     p_gears : tuple[int, ...]
         Candidate expansion orders the adaptive policy may choose between.
-    dtype : object
+    dtype : DTypeLike
         Working dtype for the returned arrays.
 
     Returns

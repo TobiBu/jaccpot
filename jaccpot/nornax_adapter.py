@@ -53,6 +53,7 @@ import numpy as np
 from jax import lax
 from jaxtyping import Array, Float, Int
 
+from jaccpot._jax_compat import Tracer
 from jaccpot.mutual.force import (
     MutualCapacities,
     MutualFMMState,
@@ -797,7 +798,7 @@ class BlockStepFMM:
         error; caught nowhere it surfaces as a NaN velocity many steps later.
 
         The check is attempted and skipped on failure, rather than gated on
-        ``isinstance(rung, jax.core.Tracer)``. That test looks equivalent and is
+        ``isinstance(rung, Tracer)``. That test looks equivalent and is
         not: a **concrete** array closed over by a ``lax.cond``/``lax.scan`` branch
         is not a ``Tracer``, yet reducing it still yields a tracer inside the
         trace, so ``int(...)`` raises. nornax's per-level integrator path closes

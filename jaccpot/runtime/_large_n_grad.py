@@ -34,6 +34,8 @@ import jax
 import jax.numpy as jnp
 from jaxtyping import Array
 
+from jaccpot._jax_compat import Tracer
+
 from ._large_n_nearfield import evaluate_large_n_nearfield_fast_lane
 from ._large_n_types import LargeNPreparedState
 from .dtypes import INDEX_DTYPE
@@ -235,7 +237,7 @@ def prepare_large_n_grad_plan(
         )
 
     positions = state.positions_sorted
-    if isinstance(positions, jax.core.Tracer):
+    if isinstance(positions, Tracer):
         raise RuntimeError(
             "prepare_large_n_grad_plan must be called OUTSIDE any trace: the plan "
             "freezes topology as concrete constants. Build the state and the plan "

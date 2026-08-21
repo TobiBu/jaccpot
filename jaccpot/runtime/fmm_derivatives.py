@@ -16,6 +16,7 @@ from jax import lax
 from jaxtyping import Array, jaxtyped
 from yggdrax.tree_moments import compute_tree_mass_moments
 
+from jaccpot._jax_compat import Tracer
 from jaccpot.downward.local_expansions import LocalExpansionData
 from jaccpot.operators.symmetric_tensors import contract_symmetric_one_axis_3d
 from jaccpot.upward.solidfmm_complex_tree_expansions import (
@@ -906,9 +907,9 @@ class DerivativesMixin(_EngineBase):
             farfield_mode=runtime_overrides.farfield_mode,
             dehnen_radius_scale=self.dehnen_radius_scale,
         )
-        tracing_targets = isinstance(
-            state.positions_sorted, jax.core.Tracer
-        ) or isinstance(target_indices, jax.core.Tracer)
+        tracing_targets = isinstance(state.positions_sorted, Tracer) or isinstance(
+            target_indices, Tracer
+        )
         if target_indices is None or tracing_targets:
             far_grad_sorted, _, _ = _evaluate_local_expansions_for_particles(
                 source_motion_downward.locals,
@@ -1065,9 +1066,9 @@ class DerivativesMixin(_EngineBase):
             target_indices=target_indices,
             num_particles=int(state.inverse_permutation.shape[0]),
         )
-        tracing_targets = isinstance(
-            state.positions_sorted, jax.core.Tracer
-        ) or isinstance(resolved_target_indices, jax.core.Tracer)
+        tracing_targets = isinstance(state.positions_sorted, Tracer) or isinstance(
+            resolved_target_indices, Tracer
+        )
         vel_targets = (
             velocities
             if resolved_target_indices is None

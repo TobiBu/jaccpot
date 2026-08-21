@@ -37,6 +37,7 @@ from yggdrax.tree import (
     reorder_particles_by_indices,
 )
 
+from jaccpot._jax_compat import Tracer
 from jaccpot.downward.local_expansions import (
     LocalExpansionData,
     TreeDownwardData,
@@ -3083,7 +3084,7 @@ class PrepareMixin(_EngineBase):
         if indices.shape[0] == 0:
             return indices.astype(INDEX_DTYPE)
         # Under JAX tracing we cannot materialize min/max as Python ints.
-        if isinstance(indices, jax.core.Tracer):
+        if isinstance(indices, Tracer):
             return indices.astype(INDEX_DTYPE)
         min_idx = int(jnp.min(indices))
         max_idx = int(jnp.max(indices))
@@ -3721,7 +3722,10 @@ class PrepareMixin(_EngineBase):
                 if not use_fb_prepass:
                     force_scale_nodes = self._compute_node_force_scale_from_sorted_acc(
                         tree=tree_artifacts.tree,
-                        accelerations_sorted=prepass_sorted,
+                        # Bound by both the `use_paper_prepass` and the `else`
+                        # branch above, i.e. exactly when `use_fb_prepass` is
+                        # False, which is what gates this block -- E.4 bucket D.
+                        accelerations_sorted=prepass_sorted,  # pyright: ignore[reportPossiblyUnboundVariable]
                         reduction=reduction_mode,
                     ).astype(positions_arr.dtype)
                     self._last_force_scale_nodes = force_scale_nodes
