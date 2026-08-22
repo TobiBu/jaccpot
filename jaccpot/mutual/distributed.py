@@ -785,7 +785,7 @@ def distributed_mutual_fmm(
     # Every other device can address at most this domain's whole particle set.
     recv_capacity = cfg.recv_capacity or (ndev - 1) * cap
 
-    def fn(pos, mass, gid):
+    def fn(pos: Array, mass: Array, gid: Array) -> tuple[Array, ...]:
         # One local tree per domain, over the global bounds so every domain's Morton
         # order is the same order -- the coarse tree merges these frontiers.
         tree = Tree.from_particles(
