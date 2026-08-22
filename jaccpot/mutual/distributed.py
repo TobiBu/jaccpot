@@ -740,6 +740,17 @@ def distributed_mutual_fmm(
         If fewer than two devices are available, or ``n < ndev``.
     """
     import numpy as np
+
+    # `jax.shard_map` directly, with no `jax.experimental` fallback. The fallback was
+    # not merely dead but wrong: `pyproject.toml` pins `jax>=0.10.2,<0.11` and the
+    # floor itself exports `jax.shard_map`, so the `except ImportError` branch is
+    # unreachable across the whole supported range -- and had it ever been taken it
+    # would have raised, because `jax.experimental.shard_map.shard_map` takes
+    # `check_rep`, not the `check_vma` passed below. A fallback that cannot run and
+    # would break if it did is worse than none: `tests/distributed/` needs two cards
+    # (audit F34), so nothing local would have caught it.
+    from jax import shard_map
+    from jax.sharding import PartitionSpec as P
     from yggdrax.distributed import device_count, make_mesh
     from yggdrax.tree import Tree
 
@@ -749,12 +760,6 @@ def distributed_mutual_fmm(
         node_centers_and_radii,
     )
     from jaccpot.mutual.force import mutual_accelerations
-
-    try:
-        from jax import shard_map
-    except ImportError:  # pragma: no cover - older JAX
-        from jax.experimental.shard_map import shard_map
-    from jax.sharding import PartitionSpec as P
 
     cfg = config if config is not None else DistributedMutualConfig()
     if mesh is None:

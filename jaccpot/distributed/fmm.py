@@ -40,13 +40,17 @@ from typing import Any, Callable, Iterator, NamedTuple, Optional
 import jax
 import jax.numpy as jnp
 import numpy as np
+
+# `jax.shard_map` directly, with no `jax.experimental` fallback. The fallback was
+# not merely dead but wrong: `pyproject.toml` pins `jax>=0.10.2,<0.11` and the
+# floor itself exports `jax.shard_map`, so the `except ImportError` branch is
+# unreachable across the whole supported range -- and had it ever been taken it
+# would have raised, because `jax.experimental.shard_map.shard_map` takes
+# `check_rep`, not the `check_vma` passed below. A fallback that cannot run and
+# would break if it did is worse than none: `tests/distributed/` needs two cards
+# (audit F34), so nothing local would have caught it.
+from jax import shard_map
 from jax.sharding import PartitionSpec as P
-
-try:
-    from jax import shard_map
-except ImportError:  # pragma: no cover
-    from jax.experimental.shard_map import shard_map
-
 from yggdrax import build_interactions_and_neighbors
 from yggdrax.distributed import device_count
 from yggdrax.distributed import let as _yggdrax_let
