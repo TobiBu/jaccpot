@@ -283,3 +283,161 @@ def test_a_starved_capacity_raises_across_devices():
     out, _p, _m = _run(nd, caps=dict(near_cap=1, max_pair_queue=4096, recv_capacity=8))
     flags = np.asarray(out.overflow).reshape(-1)
     assert flags.all(), f"overflow not reduced across devices: {flags}"
+
+
+# ---------------------------------------------------------------------------
+# The driver. Everything above drives `distributed_mutual_accelerations`, which is
+# one device's share; these drive the entry point that owns the host side.
+# ---------------------------------------------------------------------------
+
+DRIVER_N = 128
+DRIVER_LEAF = 8
+
+
+def _driver_config(theta=0.0):
+    from jaccpot.mutual.distributed import DistributedMutualConfig
+
+    return DistributedMutualConfig(
+        leaf_size=DRIVER_LEAF, theta=theta, order=4, softening=SOFT
+    )
+
+
+def _random_system(seed=17, n=DRIVER_N):
+    rng = np.random.default_rng(seed)
+    return rng.normal(size=(n, 3)), rng.uniform(0.5, 1.5, size=n)
+
+
+def test_the_driver_reproduces_an_exact_direct_sum():
+    """End to end from loose particles, with no tree or mesh supplied by the caller.
+
+    The driver owns the SFC split across devices, each domain's own tree, the
+    intra-domain force and the cross-domain half. At ``theta = 0`` every part of that
+    is exact -- cross pairs by construction, and intra-domain because this MAC accepts
+    nothing at small theta -- so a direct sum is the reference, not an approximation
+    to compare against loosely.
+    """
+    from jaccpot.mutual.distributed import distributed_mutual_fmm
+
+    nd = _ndev()
+    pos, mass = _random_system()
+    got = distributed_mutual_fmm(
+        jnp.asarray(pos), jnp.asarray(mass), config=_driver_config(), ndev=nd
+    )
+    assert not got.overflow, (
+        f"a capacity overflowed: cross={got.cross_overflow.tolist()} "
+        f"local={got.local_overflow.tolist()} "
+        f"causes={got.local_overflow_causes.tolist()}"
+    )
+    acc = np.asarray(got.accelerations)
+    want = _exact_all(pos, mass)
+    rel = np.linalg.norm(acc - want) / np.linalg.norm(want)
+    assert rel < 1e-12, f"relative force error {rel:.3e}"
+
+    p = (mass[:, None] * acc).sum(axis=0)
+    scale = np.abs(mass[:, None] * acc).sum()
+    assert np.linalg.norm(p) / scale < 1e-14, "global momentum broke"
+
+    # Vacuity guard: with one domain there would be no cross pairs at all, and the
+    # test would be checking the single-device lane through a longer pipe.
+    assert int(np.asarray(got.cross_pairs).sum()) > 0, "no cross pairs -- vacuous"
+
+
+def test_the_driver_returns_accelerations_in_the_callers_order():
+    """Permuting the input must permute the output, and nothing else.
+
+    The driver unwinds TWO permutations -- the SFC split across devices and each
+    domain's own tree sort -- and a bug in either is invisible to a norm against a
+    reference computed in the same order, because both sides would be scrambled
+    identically. Feeding a shuffled copy of the same system is what separates them:
+    the physics is unchanged, so the answer has to be the same vectors, just moved.
+    """
+    from jaccpot.mutual.distributed import distributed_mutual_fmm
+
+    nd = _ndev()
+    pos, mass = _random_system()
+    rng = np.random.default_rng(99)
+    order = rng.permutation(len(pos))
+
+    a_plain = np.asarray(
+        distributed_mutual_fmm(
+            jnp.asarray(pos), jnp.asarray(mass), config=_driver_config(), ndev=nd
+        ).accelerations
+    )
+    a_shuf = np.asarray(
+        distributed_mutual_fmm(
+            jnp.asarray(pos[order]),
+            jnp.asarray(mass[order]),
+            config=_driver_config(),
+            ndev=nd,
+        ).accelerations
+    )
+
+    # Not exact equality: a different input order changes which domain a particle
+    # lands in and therefore the summation order, so the two agree to round-off
+    # rather than bit-for-bit. A permutation bug is orders of magnitude away from
+    # that, so the tolerance does not blunt the test.
+    rel = np.linalg.norm(a_shuf - a_plain[order]) / np.linalg.norm(a_plain)
+    assert rel < 1e-12, f"output order does not follow the input order: {rel:.3e}"
+
+    # And the shuffled run is still a direct sum, so this cannot pass by both runs
+    # being wrong the same way.
+    want = _exact_all(pos[order], mass[order])
+    assert np.linalg.norm(a_shuf - want) / np.linalg.norm(want) < 1e-12
+
+
+def test_the_driver_refuses_a_single_device():
+    """One domain has no cross-domain pairs, so the lane is the wrong tool for it."""
+    from jaccpot.mutual.distributed import distributed_mutual_fmm
+
+    pos, mass = _random_system(n=32)
+    with pytest.raises(ValueError, match="needs >= 2 devices"):
+        distributed_mutual_fmm(
+            jnp.asarray(pos), jnp.asarray(mass), config=_driver_config(), ndev=1
+        )
+
+
+def test_the_driver_names_which_half_starved():
+    """A starved capacity is reported, and reported specifically enough to act on.
+
+    The driver runs two lanes with two independent capacity sets, so "overflow" alone
+    would leave a caller guessing which to raise. Starving the INTRA-domain caps must
+    set the local flag and leave the cross flag clear -- and name the cause, since a
+    truncated walk's own counters undercount and cannot be read after the fact.
+
+    Only the intra-domain half is starved here; the cross half's own starvation is
+    covered by ``test_a_starved_capacity_raises_across_devices``, and each extra
+    configuration is another compile in a suite that is already the slow one.
+    """
+    from jaccpot.mutual.distributed import (
+        DistributedMutualConfig,
+        distributed_mutual_fmm,
+    )
+    from jaccpot.mutual.force import OVERFLOW_CAUSES, MutualCapacities
+
+    nd = _ndev()
+    pos, mass = _random_system()
+    got = distributed_mutual_fmm(
+        jnp.asarray(pos),
+        jnp.asarray(mass),
+        config=DistributedMutualConfig(
+            leaf_size=DRIVER_LEAF,
+            theta=0.0,
+            order=4,
+            softening=SOFT,
+            caps=MutualCapacities(near=1, far=1, depth=4, width=4, queue=64),
+        ),
+        ndev=nd,
+    )
+    assert got.overflow, "a starved intra-domain capacity was not reported"
+    assert (
+        got.local_overflow.all()
+    ), f"local flag not set: {got.local_overflow.tolist()}"
+    assert not got.cross_overflow.any(), (
+        "the CROSS flag fired for an intra-domain starvation, so the two halves are "
+        f"not distinguishable: {got.cross_overflow.tolist()}"
+    )
+    near_bit = 1 << OVERFLOW_CAUSES.index("near")
+    assert all(int(c) & near_bit for c in got.local_overflow_causes), (
+        f"the 'near' cause was not named: {got.local_overflow_causes.tolist()} "
+        f"against {OVERFLOW_CAUSES}"
+    )
