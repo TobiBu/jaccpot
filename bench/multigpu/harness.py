@@ -159,6 +159,7 @@ def measure_point(
     cross_max_pair_queue: Optional[int] = None,
     max_interactions_per_node: Optional[int] = None,
     max_neighbors_per_leaf: Optional[int] = None,
+    cross_max_neighbors_per_leaf: Optional[int] = None,
     process_block: Optional[int] = None,
     l2l_num_levels: Optional[int] = None,
     accuracy_targets: int = 0,
@@ -213,6 +214,11 @@ def measure_point(
         Starting far-list capacity per node.
     max_neighbors_per_leaf : int, optional
         Starting near-list capacity per leaf.
+    cross_max_neighbors_per_leaf : int, optional
+        As above, for the cross-domain near list. This is a *separate* cap from
+        ``max_neighbors_per_leaf`` and defaults to 128, so raising only the local
+        one leaves ``cross_near_overflow`` untouched -- which reads as a genuine
+        capacity limit rather than an unset knob.
     accuracy_targets : int
         When > 0, compare the force against a direct-sum reference on this many
         randomly chosen target particles. The reference sums over **all** sources,
@@ -278,6 +284,7 @@ def measure_point(
             ("cross_max_pair_queue", cross_max_pair_queue),
             ("max_interactions_per_node", max_interactions_per_node),
             ("max_neighbors_per_leaf", max_neighbors_per_leaf),
+            ("cross_max_neighbors_per_leaf", cross_max_neighbors_per_leaf),
             ("process_block", process_block),
             ("cross_far_cap", cross_far_cap),
             ("cross_max_interactions_per_node", cross_max_interactions_per_node),
@@ -410,6 +417,7 @@ def measure_point(
             "cross_max_pair_queue": int(config.cross_max_pair_queue),
             "max_interactions_per_node": int(config.max_interactions_per_node),
             "max_neighbors_per_leaf": int(config.max_neighbors_per_leaf),
+            "cross_max_neighbors_per_leaf": int(config.cross_max_neighbors_per_leaf),
             "process_block": int(config.process_block),
             "cross_far_cap": config.cross_far_cap,
             "cross_max_interactions_per_node": int(
@@ -503,6 +511,7 @@ def _parse_args() -> argparse.Namespace:
     p.add_argument("--cross-max-pair-queue", type=int, default=None)
     p.add_argument("--max-interactions-per-node", type=int, default=None)
     p.add_argument("--max-neighbors-per-leaf", type=int, default=None)
+    p.add_argument("--cross-max-neighbors-per-leaf", type=int, default=None)
     p.add_argument("--process-block", type=int, default=None)
     p.add_argument("--cross-far-cap", type=int, default=None)
     p.add_argument("--cross-max-interactions-per-node", type=int, default=None)
@@ -556,6 +565,7 @@ def main() -> int:
         cross_max_pair_queue=args.cross_max_pair_queue,
         max_interactions_per_node=args.max_interactions_per_node,
         max_neighbors_per_leaf=args.max_neighbors_per_leaf,
+        cross_max_neighbors_per_leaf=args.cross_max_neighbors_per_leaf,
         process_block=args.process_block,
         l2l_num_levels=args.l2l_num_levels,
         accuracy_targets=int(args.accuracy_targets),
