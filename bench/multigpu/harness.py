@@ -331,8 +331,21 @@ def measure_point(
 
     accuracy: dict[str, Any] = {}
     if int(accuracy_targets) > 0:
-        accel_np = np.asarray(evaluate(*args)[0])
-        gid_np = np.asarray(args[2]).reshape(-1)
+        accel_out, gid_out, _ = evaluate(*args)
+        accel_np = np.asarray(accel_out)
+        # The gid the evaluator RETURNS, not the ``gid_flat`` in ``args[2]`` that went
+        # in. The accelerations come back in the per-device TREE order, and once a
+        # device is padded that is not the partition order the input gid names:
+        # ``partition_for_devices`` puts its padding rows at the device's
+        # Morton-minimum particle, so the tree build sorts them to the front and
+        # displaces every real particle after the first by the padding count. Scoring
+        # output row r against input particle r then compares each particle's force to
+        # a Morton neighbour's -- smooth, plausible, and wrong by tens of percent with
+        # every overflow counter clean. That, and not the solver, is the whole of
+        # docs/distributed_padding_force_defect.md. Unpadded runs are unaffected: the
+        # two arrays are identical whenever cap == count, so previously reported
+        # accuracy numbers on leaf-multiple per-device counts do not move.
+        gid_np = np.asarray(gid_out).reshape(-1)
         valid_rows = np.flatnonzero(gid_np >= 0)
         k = min(int(accuracy_targets), valid_rows.size)
         pick = np.random.default_rng(seed).choice(valid_rows, size=k, replace=False)
