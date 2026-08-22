@@ -239,7 +239,12 @@ def main() -> int:
 
     # 1. differentiable=True must not move the forward.
     shipped = np.asarray(forward(*args_t)[0])
-    grad_fwd = np.asarray(grad_path(*args_t)[0])
+    _fwd, _fwd_gid, _ = grad_path(*args_t)
+    grad_fwd = np.asarray(_fwd)
+    # Kept for the oracle below: the accelerations are in the per-device TREE order,
+    # which the INPUT gid does not name once a device is padded. See
+    # docs/distributed_padding_force_defect.md.
+    fwd_gid = np.asarray(_fwd_gid).reshape(-1)
     records.append(
         {
             "check": "forward_bit_identity",
@@ -301,10 +306,14 @@ def main() -> int:
         lambda p, m: jnp.sum(direct_accel(p, m) ** 2), argnums=(0, 1)
     )(positions0, masses0)
 
+    # The force comes back in the tree order -> the RETURNED gid maps it.
+    fwd_valid = fwd_gid >= 0
     scattered = np.zeros((positions0.shape[0], 3))
-    scattered[order_map] = grad_fwd[valid]
+    scattered[fwd_gid[fwd_valid].astype(int)] = grad_fwd[fwd_valid]
     force_err = _rel_l2(scattered, np.asarray(direct_accel(positions0, masses0)))
 
+    # The cotangents were taken w.r.t. the padded input arrays, so they stay in the
+    # input layout and keep the input map. Two arrays, two orders.
     fmm_gp = np.zeros_like(np.asarray(dg_pos))
     fmm_gm = np.zeros_like(np.asarray(dg_mass))
     fmm_gp[order_map] = np.asarray(g_pos)[valid]

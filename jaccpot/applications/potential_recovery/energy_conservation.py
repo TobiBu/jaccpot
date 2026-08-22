@@ -9,6 +9,8 @@ from __future__ import annotations
 
 import jax.numpy as jnp
 
+__all__ = ["integrate_and_track_conservation"]
+
 
 def integrate_and_track_conservation(
     positions: jnp.ndarray,
@@ -22,5 +24,29 @@ def integrate_and_track_conservation(
 
     TODO: check nornax for an existing Hermite-integrator-based version of
     this before implementing a new integration loop here.
+
+    Parameters
+    ----------
+    positions : jnp.ndarray
+        Initial particle positions, ``[N, 3]``.
+    velocities : jnp.ndarray
+        Initial particle velocities, ``[N, 3]``.
+    masses : jnp.ndarray
+        Particle masses, ``[N]``.
+    n_steps : int
+        Number of integration steps to take.
+    dt : float
+        Timestep.
+
+    Returns
+    -------
+    dict[str, jnp.ndarray]
+        Per-step conserved-quantity traces. The exact keys follow whichever
+        integrator the TODO above settles on, so they are not enumerated yet.
+
+    Raises
+    ------
+    NotImplementedError
+        Always: this is scaffolding for PROJECT_PLAN.md Phase 4.
     """
     raise NotImplementedError("Check nornax repo for an existing implementation first.")
