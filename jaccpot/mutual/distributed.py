@@ -69,7 +69,8 @@ Two capacities inherit the same caveat and will shrink with ``theta``:
 
 from __future__ import annotations
 
-from typing import NamedTuple, Optional
+from dataclasses import dataclass
+from typing import Any, NamedTuple, Optional
 
 import jax
 import jax.numpy as jnp
@@ -94,7 +95,13 @@ from yggdrax.dtypes import INDEX_DTYPE
 
 from jaccpot.mutual.device_topology import leaf_blocks
 
-__all__ = ["DistributedMutualResult", "distributed_mutual_accelerations"]
+__all__ = [
+    "DistributedMutualConfig",
+    "DistributedMutualForce",
+    "DistributedMutualResult",
+    "distributed_mutual_accelerations",
+    "distributed_mutual_fmm",
+]
 
 
 class DistributedMutualResult(NamedTuple):
@@ -547,4 +554,376 @@ def distributed_mutual_accelerations(
         acceleration=acc,
         cross_pairs=jnp.sum(live.astype(INDEX_DTYPE))[None],
         overflow=(jax.lax.pmax(overflow.astype(INDEX_DTYPE), axis_name) > 0)[None],
+    )
+
+
+# ---------------------------------------------------------------------------
+# The driver: everything above is one device's share, called inside shard_map.
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class DistributedMutualConfig:
+    """Everything the distributed mutual force needs beyond the particles.
+
+    ``theta`` is the **intra-domain** opening angle and nothing else. Cross-domain
+    interactions are exact regardless of it: the cross walk is driven at ``theta = 0``
+    (see the module docstring), so this knob trades accuracy against work *within* a
+    domain only. Turning it up does not make the boundary cheaper.
+
+    The capacity defaults are heuristics, not measurements, and they exist so a first
+    call works rather than because they are right. Under-provisioning is the safe
+    direction here -- it raises ``local_overflow``/``overflow`` loudly rather than
+    quietly returning a wrong force -- but it costs a rerun, so a repeated run at a
+    known size should carry measured ones. :mod:`jaccpot.mutual.cap_presets` is the
+    table for that, keyed on ``(per-device N, ndev, leaf_size, theta, order)``, and
+    ``caps`` is where its answer goes.
+
+    Attributes
+    ----------
+    leaf_size : int
+        Particles per leaf, for the per-device local tree.
+    theta : float
+        INTRA-domain opening angle. Cross-domain pairs are exact.
+    order : int
+        Multipole order for the intra-domain far field.
+    softening : float
+        Plummer softening length, shared by both halves.
+    g : float
+        Gravitational constant.
+    caps : Optional[MutualCapacities]
+        Capacities for the intra-domain lane. ``None`` derives them.
+    near_cap, max_pair_queue, recv_capacity, max_req_leaves, max_recv_leaves : Optional[int]
+        Cross-domain capacities. ``None`` derives each from ``(ndev, leaf_size)`` and
+        the per-device capacity.
+    coarse_depth_cap : int
+        Owner-propagation rounds up the coarse tree.
+    """
+
+    leaf_size: int = 32
+    theta: float = 0.5
+    order: int = 4
+    softening: float = 1e-3
+    g: float = 1.0
+    caps: Optional[Any] = None
+    near_cap: Optional[int] = None
+    max_pair_queue: Optional[int] = None
+    recv_capacity: Optional[int] = None
+    max_req_leaves: Optional[int] = None
+    max_recv_leaves: Optional[int] = None
+    coarse_depth_cap: int = 64
+
+
+class DistributedMutualForce(NamedTuple):
+    """What the driver returns.
+
+    ``accelerations`` is in the caller's INPUT order, not any internal one: the driver
+    owns two permutations (the SFC split across devices, and each device's local tree
+    sort) and undoes both, so a caller never sees either.
+
+    ``overflow`` is one bool for the whole system, already reduced across devices,
+    because a capacity exceeded anywhere is a wrong force everywhere. The per-device
+    arrays are carried alongside so a caller that has to *raise* a capacity can see
+    which one and where.
+
+    Attributes
+    ----------
+    accelerations : Array
+        ``(n, 3)`` in input order.
+    cross_pairs : Array
+        ``(ndev,)`` owned cross-domain leaf pairs per device.
+    overflow : bool
+        True if any capacity, on any device, in either half, was exceeded.
+    cross_overflow : Array
+        ``(ndev,)`` the cross-domain half's flag.
+    local_overflow : Array
+        ``(ndev,)`` the intra-domain half's flag.
+    local_overflow_causes : Array
+        ``(ndev,)`` packed cause bits from the local topology; decode against
+        ``jaccpot.mutual.force.OVERFLOW_CAUSES``.
+    """
+
+    accelerations: Array
+    cross_pairs: Array
+    overflow: bool
+    cross_overflow: Array
+    local_overflow: Array
+    local_overflow_causes: Array
+
+
+def _default_caps(per_device_n: int, leaf_size: int) -> Any:
+    """Heuristic intra-domain capacities for a first call at this size.
+
+    Deliberately generous on the pair lists and tight on ``depth``: a pair list is
+    linear in the leaf count and cheap to over-provision, while ``depth`` sets the
+    iteration count of the M2M/L2L cascade scan, so padding it costs work on every
+    evaluation (the reasoning :mod:`jaccpot.mutual.cap_presets` records for its
+    per-field scaling).
+
+    Parameters
+    ----------
+    per_device_n : int
+        Padded particle capacity of one device.
+    leaf_size : int
+        Particles per leaf.
+
+    Returns
+    -------
+    Any
+        A ``MutualCapacities``.
+    """
+    from jaccpot.mutual.force import MutualCapacities
+
+    n_leaves = max(1, -(-int(per_device_n) // int(leaf_size)))
+    return MutualCapacities(
+        # ~64 near neighbours per leaf is the 3D close-packing order of magnitude;
+        # the far list is the same order at moderate theta.
+        near=max(1024, 64 * n_leaves),
+        far=max(1024, 64 * n_leaves),
+        # A balanced tree over n_leaves leaves is log2(n_leaves) deep; +8 absorbs the
+        # imbalance a real distribution puts on top of that.
+        depth=max(16, int(n_leaves).bit_length() + 8),
+        width=max(256, 4 * n_leaves),
+        queue=max(1 << 16, 8 * n_leaves),
+    )
+
+
+def distributed_mutual_fmm(
+    positions: Any,
+    masses: Any,
+    *,
+    config: Optional[DistributedMutualConfig] = None,
+    mesh: Any = None,
+    ndev: Optional[int] = None,
+    jit: bool = True,
+) -> DistributedMutualForce:
+    """Momentum-conserving accelerations for a system split across devices.
+
+    The entry point for the lane :func:`distributed_mutual_accelerations` implements
+    one device's share of. It owns the host side: split the particles into SFC domains,
+    build each domain's own tree, evaluate that domain's own pairs with the
+    single-device mutual lane, add the cross-domain half, and put the result back in
+    the caller's order.
+
+    Momentum is conserved to round-off over the WHOLE system, not per device, and that
+    is the property worth stating: the intra-domain half cancels structurally because
+    one kernel writes both halves of every pair, and the cross-domain half cancels
+    because the ``-f`` is returned to the domain owning the other endpoint. Neither
+    mechanism is numerical.
+
+    Parameters
+    ----------
+    positions : Any
+        ``(n, 3)`` positions in any order.
+    masses : Any
+        ``(n,)`` masses, same order.
+    config : Optional[DistributedMutualConfig]
+        Physics and capacities. ``None`` uses the defaults, whose capacities are
+        heuristics -- see :class:`DistributedMutualConfig`.
+    mesh : Any
+        Device mesh. ``None`` builds one over ``ndev`` devices.
+    ndev : Optional[int]
+        Device count when ``mesh`` is ``None``. ``None`` uses every visible device.
+    jit : bool
+        Compile the mapped program. Default True.
+
+    Returns
+    -------
+    DistributedMutualForce
+        Accelerations in input order plus the per-device diagnostics. **Check
+        ``.overflow``**: a starved capacity is reported, never raised, because the
+        force it returns is wrong in a way no norm reveals.
+
+    Raises
+    ------
+    ValueError
+        If fewer than two devices are available, or ``n < ndev``.
+    """
+    import numpy as np
+    from yggdrax.distributed import device_count, make_mesh
+    from yggdrax.tree import Tree
+
+    from jaccpot.distributed.fmm import partition_for_devices
+    from jaccpot.mutual.device_topology import (
+        build_mutual_state_device,
+        node_centers_and_radii,
+    )
+    from jaccpot.mutual.force import mutual_accelerations
+
+    try:
+        from jax import shard_map
+    except ImportError:  # pragma: no cover - older JAX
+        from jax.experimental.shard_map import shard_map
+    from jax.sharding import PartitionSpec as P
+
+    cfg = config if config is not None else DistributedMutualConfig()
+    if mesh is None:
+        ndev = device_count() if ndev is None else int(ndev)
+        mesh = make_mesh(ndev)
+    else:
+        ndev = int(np.prod(list(mesh.shape.values())))
+    if ndev < 2:
+        raise ValueError(
+            f"the distributed mutual force needs >= 2 devices, got {ndev}: with one "
+            "domain there are no cross-domain pairs, so jaccpot.mutual's single-device "
+            "lane is the whole force"
+        )
+
+    leaf = int(cfg.leaf_size)
+    part = partition_for_devices(positions, masses, ndev, leaf_size=leaf)
+    cap = int(part["cap"])
+    n_leaves = max(1, -(-cap // leaf))
+    bounds = part["bounds"]
+    caps = cfg.caps if cfg.caps is not None else _default_caps(cap, leaf)
+
+    # At theta = 0 every local leaf pairs with every remote leaf, so the cross pair
+    # count is the full product; ownership halves what this device emits, and the
+    # margin is left in rather than tuned out because overflow costs a whole rerun.
+    cross_pairs_bound = n_leaves * n_leaves * (ndev - 1)
+    near_cap = cfg.near_cap or cross_pairs_bound
+    max_pair_queue = cfg.max_pair_queue or max(1 << 12, cross_pairs_bound)
+    # Every other device can address at most this domain's whole particle set.
+    recv_capacity = cfg.recv_capacity or (ndev - 1) * cap
+
+    def fn(pos: Array, mass: Array, gid: Array) -> tuple[Array, ...]:
+        # One local tree per domain, over the global bounds so every domain's Morton
+        # order is the same order -- the coarse tree merges these frontiers.
+        tree = Tree.from_particles(
+            pos,
+            mass,
+            tree_type="radix",
+            bounds=bounds,
+            return_reordered=True,
+            leaf_size=leaf,
+        )
+        ps = tree.positions_sorted
+        ms = tree.masses_sorted
+        perm = jnp.asarray(tree.particle_indices, dtype=INDEX_DTYPE)
+        parent = jnp.asarray(tree.parent, dtype=INDEX_DTYPE)
+        node_ranges = jnp.asarray(tree.node_ranges, dtype=INDEX_DTYPE)
+        left = jnp.asarray(tree.left_child, dtype=INDEX_DTYPE)
+        right = jnp.asarray(tree.right_child, dtype=INDEX_DTYPE)
+        root = jnp.argmin(parent).astype(INDEX_DTYPE)
+        n_local = ps.shape[0]
+        total_nodes = int(parent.shape[0])
+        num_internal = int(left.shape[0])
+        n_leaf_nodes = total_nodes - num_internal
+        leaf_nodes = jnp.arange(num_internal, total_nodes, dtype=INDEX_DTYPE)
+
+        # `inverse_permutation = arange`: everything on device stays in TREE order, so
+        # "the caller's order" and the tree's order are the same here. The two real
+        # permutations (SFC across devices, tree sort within one) are undone on the
+        # host, once, at the end.
+        state = build_mutual_state_device(
+            ps,
+            ms,
+            parent=parent,
+            left_child=left,
+            right_child=right,
+            node_ranges=node_ranges,
+            inverse_permutation=jnp.arange(n_local, dtype=INDEX_DTYPE),
+            root=root,
+            theta=float(cfg.theta),
+            order=int(cfg.order),
+            leaf_size=leaf,
+            caps=caps,
+            softening=float(cfg.softening),
+            G=float(cfg.g),
+            max_pair_queue=int(caps.queue),
+        )
+        local_acc = mutual_accelerations(state, ps, ms)
+
+        # The cross walk's MAC is defined on centres of MASS and exact
+        # COM-to-particle radii, which is a different extent set from the geometry the
+        # target-centric walk uses -- so they are computed here rather than taken from
+        # the tree's bounding boxes.
+        lp, lv = leaf_blocks(node_ranges, leaf_nodes, leaf_size=leaf)
+        leaf_of_particle = (
+            jnp.zeros((n_local,), dtype=INDEX_DTYPE)
+            .at[lp]
+            .max(jnp.where(lv, leaf_nodes[:, None], jnp.zeros((), INDEX_DTYPE)))
+        )
+        centers, radii = node_centers_and_radii(
+            ps,
+            ms,
+            node_ranges,
+            parent,
+            leaf_of_particle,
+            depth_cap=int(caps.depth) + 1,
+        )
+        pad = jnp.full((n_leaf_nodes,), -1, dtype=INDEX_DTYPE)
+        res = distributed_mutual_accelerations(
+            ps,
+            ms,
+            jnp.concatenate([left, pad]),
+            jnp.concatenate([right, pad]),
+            node_ranges,
+            centers,
+            radii,
+            root,
+            local_acc,
+            softening=float(cfg.softening),
+            g=float(cfg.g),
+            ndev=ndev,
+            leaf_width=leaf,
+            near_cap=int(near_cap),
+            max_pair_queue=int(max_pair_queue),
+            recv_capacity=int(recv_capacity),
+            max_req_leaves=cfg.max_req_leaves,
+            max_recv_leaves=cfg.max_recv_leaves,
+            coarse_depth_cap=int(cfg.coarse_depth_cap),
+        )
+        # Undo the local tree sort, so a row of the output lines up with the row of
+        # `pos`/`gid` this device was handed.
+        acc = jnp.zeros_like(res.acceleration).at[perm].set(res.acceleration)
+        return (
+            acc,
+            gid,
+            res.cross_pairs,
+            res.overflow,
+            state.topology_overflow[None],
+            state.overflow_causes[None],
+        )
+
+    mapped = shard_map(
+        fn,
+        mesh=mesh,
+        in_specs=(P(AXIS_NAME), P(AXIS_NAME), P(AXIS_NAME)),
+        out_specs=(P(AXIS_NAME),) * 6,
+        check_vma=False,
+    )
+    if jit:
+        mapped = jax.jit(mapped)
+    acc_o, gid_o, cross_o, xof_o, lof_o, causes_o = mapped(
+        jnp.asarray(part["pos_flat"]),
+        jnp.asarray(part["mass_flat"]),
+        jnp.asarray(part["gid_flat"]),
+    )
+
+    # Back to input order. Padding rows carry gid -1 and are dropped; a missing real
+    # particle means a capacity or partition bug, so it is raised rather than left as a
+    # silent zero row that would read as a plausible force.
+    acc_np = np.asarray(acc_o)
+    gid_np = np.asarray(gid_o).reshape(-1).astype(np.int64)
+    n = int(part["n"])
+    out = np.zeros((n, 3), acc_np.dtype)
+    seen = np.zeros(n, bool)
+    live = gid_np >= 0
+    out[gid_np[live]] = acc_np[live]
+    seen[gid_np[live]] = True
+    if not seen.all():
+        raise RuntimeError(
+            f"{int((~seen).sum())} of {n} particles missing from the distributed "
+            "result -- a padding or capacity bug, not a physics one"
+        )
+
+    cross_of = np.asarray(xof_o).reshape(-1).astype(bool)
+    local_of = np.asarray(lof_o).reshape(-1).astype(bool)
+    return DistributedMutualForce(
+        accelerations=out,
+        cross_pairs=np.asarray(cross_o).reshape(-1),
+        overflow=bool(cross_of.any() or local_of.any()),
+        cross_overflow=cross_of,
+        local_overflow=local_of,
+        local_overflow_causes=np.asarray(causes_o).reshape(-1),
     )
