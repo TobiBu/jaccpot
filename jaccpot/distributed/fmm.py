@@ -406,6 +406,42 @@ class DistributedFMMResult:
         return bool(self.diagnostics.get("overflow", False))
 
 
+def _rcb_groups(idx: np.ndarray, positions: np.ndarray, k: int) -> list:
+    """Split ``idx`` into ``k`` near-equal groups by recursive median bisection.
+
+    Cuts the LONGEST axis of the current group at the position that gives each side its
+    share of the remaining devices, then recurses. The cut is placed by device share
+    rather than at the plain median so ``k`` need not be a power of two and every group
+    comes out the same size to within one particle -- which matters here because the
+    lane pads every device to the largest count, so imbalance is wasted capacity on
+    every device at once.
+
+    Parameters
+    ----------
+    idx : np.ndarray
+        Particle indices in this group.
+    positions : np.ndarray
+        ``(n, 3)`` positions, indexed by ``idx``.
+    k : int
+        Groups to split into.
+
+    Returns
+    -------
+    list
+        ``k`` arrays of indices.
+    """
+    if k == 1:
+        return [idx]
+    left_k = k // 2
+    p = positions[idx]
+    axis = int(np.argmax(p.max(0) - p.min(0)))
+    ordered = idx[np.argsort(p[:, axis], kind="stable")]
+    cut = int(round(len(idx) * left_k / k))
+    return _rcb_groups(ordered[:cut], positions, left_k) + _rcb_groups(
+        ordered[cut:], positions, k - left_k
+    )
+
+
 def partition_for_devices(
     positions: np.ndarray,
     masses: np.ndarray,
@@ -413,6 +449,7 @@ def partition_for_devices(
     *,
     leaf_size: int,
     bounds: tuple | None = None,
+    partitioner: str = "morton",
 ) -> dict:
     """Morton-sort particles and split into ``ndev`` contiguous SFC domains.
 
@@ -424,6 +461,38 @@ def partition_for_devices(
 
     Returns a dict with the flat ``(ndev*cap, ...)`` arrays ready for
     ``shard_map`` plus ``cap``, ``counts`` and ``bounds``.
+
+    ``partitioner`` selects how particles are assigned to devices.
+
+    ``"morton"`` (the default, and what every existing caller gets) sorts by Morton
+    code and takes contiguous runs. That is compact for a roughly isotropic system and
+    poor for a flattened one, because a Morton code's three most significant bits are
+    ``(z, y, x)`` -- so its very first cut bisects ALL THREE axes at once, including the
+    thin one. For a disk centred in its box that first cut slices through the thickness,
+    separating particles 0.1 apart while keeping particles 20 apart together. No choice
+    of bounds fixes it: rescaling the box does not move the disk off its centre.
+    (Cubing the bounds was tried and measured -- it moves a thickness-0.4 disk's foreign
+    neighbour fraction from 0.521 to 0.484 against 0.070 for a compact split, i.e. it
+    does essentially nothing.)
+
+    ``"rcb"`` bisects the longest axis at the median and recurses, which gives compact
+    boxes by construction. Measured as the fraction of each particle's 16 nearest
+    neighbours living on another device -- the quantity the near field has to import and
+    the cross walk has to pair up:
+
+        geometry                ndev   morton     rcb    gain
+        disk, thickness 0.4        2    0.435   0.024   18.0x
+        disk, thickness 0.4        4    0.509   0.046   11.1x
+        disk, thickness 0.4        8    0.557   0.092    6.1x
+        disk, thickness 2.0        4    0.272   0.057    4.7x
+        ball                       4    0.148   0.124    1.2x
+        isotropic Gaussian         4    0.175   0.128    1.4x
+
+    ``"rcb"`` is better in every case measured, so the default is ``"morton"`` only
+    because changing it moves the domain assignment of every existing distributed run
+    and therefore every accuracy and timing baseline taken with it. That is a
+    re-baselining exercise, not a bug fix, and it should be a deliberate step of its
+    own.
     """
 
     positions = np.asarray(positions)
@@ -442,8 +511,20 @@ def partition_for_devices(
         span = np.where(hi > lo, hi - lo, 1.0)
         bounds = (jnp.asarray(lo - span * 1e-6), jnp.asarray(hi + span * 1e-6))
 
-    codes = np.asarray(morton_encode_impl(jnp.asarray(positions), bounds))
-    order = np.argsort(codes)
+    if partitioner == "morton":
+        order = np.argsort(
+            np.asarray(morton_encode_impl(jnp.asarray(positions), bounds))
+        )
+    elif partitioner == "rcb":
+        # Concatenated in group order, so the contiguous-chunk split below hands group
+        # d to device d -- the same downstream contract as the Morton order, which is
+        # why this is a drop-in: nothing downstream reads the GLOBAL ordering, only the
+        # per-device sets (each device re-sorts into its own tree anyway).
+        order = np.concatenate(
+            _rcb_groups(np.arange(n), np.asarray(positions), int(ndev))
+        )
+    else:
+        raise ValueError(f"partitioner must be 'morton' or 'rcb', got {partitioner!r}")
 
     pos_g = np.zeros((ndev, cap, 3), positions.dtype)
     mass_g = np.zeros((ndev, cap), masses.dtype)
