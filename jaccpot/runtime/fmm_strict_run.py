@@ -1136,7 +1136,7 @@ class StrictRunMixin(_EngineBase):
         self._record_large_n_eval_shape_diagnostics(prepared)
 
         @jax.jit
-        def _eval(prepared_in: PreparedStateLike) -> Array:
+        def _eval(prepared_in: LargeNPreparedState) -> Array:
             return jnp.asarray(
                 evaluate_large_n_state(
                     self,
