@@ -4,7 +4,17 @@ from __future__ import annotations
 
 import warnings
 from dataclasses import replace
-from typing import Any, Callable, Literal, NamedTuple, Optional, Sequence, Tuple, Union
+from typing import (
+    Any,
+    Callable,
+    Literal,
+    NamedTuple,
+    Optional,
+    Sequence,
+    Tuple,
+    Union,
+    overload,
+)
 
 import jax
 import jax.numpy as jnp
@@ -914,6 +924,71 @@ class FastMultipoleMethod:
         self.basis_impl = basis_resolution.basis_impl
         self.advanced = advanced_cfg
 
+    # Overloads for the two shapes callers actually ask for by name. The return
+    # is keyed on `return_potential` and on whether `max_acc_derivative_order` is
+    # zero, so a caller writing `return_potential=True` can be handed
+    # `Tuple[Array, Array]` instead of a four-member union it has to narrow.
+    #
+    # The third overload is the honest fallback and is not optional: when either
+    # flag is a runtime value, no literal overload can be selected, and a
+    # `Literal[0]` overload would then declare a derivative tuple for a call that
+    # returns a bare `Array`. That is why the *internal* multi-flag producers were
+    # left alone (audit E.4) -- every one of their call sites passes runtime
+    # values. This surface is different: it is what downstream code calls, and
+    # downstream calls with literals.
+    @overload
+    def compute_accelerations(
+        self: "FastMultipoleMethod",
+        positions: Float[Array, "n 3"],
+        masses: Float[Array, "n"],
+        *,
+        target_indices: Optional[Int[Array, "t"]] = ...,
+        bounds: Optional[Tuple[Float[Array, "3"], Float[Array, "3"]]] = ...,
+        leaf_size: int = ...,
+        max_order: int = ...,
+        return_potential: Literal[False] = ...,
+        theta: Optional[float] = ...,
+        reuse_prepared_state: bool = ...,
+        max_acc_derivative_order: Literal[0] = ...,
+    ) -> Array: ...
+
+    @overload
+    def compute_accelerations(
+        self: "FastMultipoleMethod",
+        positions: Float[Array, "n 3"],
+        masses: Float[Array, "n"],
+        *,
+        target_indices: Optional[Int[Array, "t"]] = ...,
+        bounds: Optional[Tuple[Float[Array, "3"], Float[Array, "3"]]] = ...,
+        leaf_size: int = ...,
+        max_order: int = ...,
+        return_potential: Literal[True],
+        theta: Optional[float] = ...,
+        reuse_prepared_state: bool = ...,
+        max_acc_derivative_order: Literal[0] = ...,
+    ) -> Tuple[Array, Array]: ...
+
+    @overload
+    def compute_accelerations(
+        self: "FastMultipoleMethod",
+        positions: Float[Array, "n 3"],
+        masses: Float[Array, "n"],
+        *,
+        target_indices: Optional[Int[Array, "t"]] = ...,
+        bounds: Optional[Tuple[Float[Array, "3"], Float[Array, "3"]]] = ...,
+        leaf_size: int = ...,
+        max_order: int = ...,
+        return_potential: bool = ...,
+        theta: Optional[float] = ...,
+        reuse_prepared_state: bool = ...,
+        max_acc_derivative_order: int = ...,
+    ) -> Union[
+        Array,
+        Tuple[Array, Array],
+        Tuple[Array, tuple[Array, ...]],
+        Tuple[Array, Array, tuple[Array, ...]],
+    ]: ...
+
     def compute_accelerations(
         self: "FastMultipoleMethod",
         positions: Float[Array, "n 3"],
@@ -1288,6 +1363,56 @@ class FastMultipoleMethod:
             masses_sorted,
             max_order=max_order,
         )
+
+    # Overloads for the two shapes callers actually ask for by name. The return
+    # is keyed on `return_potential` and on whether `max_acc_derivative_order` is
+    # zero, so a caller writing `return_potential=True` can be handed
+    # `Tuple[Array, Array]` instead of a four-member union it has to narrow.
+    #
+    # The third overload is the honest fallback and is not optional: when either
+    # flag is a runtime value, no literal overload can be selected, and a
+    # `Literal[0]` overload would then declare a derivative tuple for a call that
+    # returns a bare `Array`. That is why the *internal* multi-flag producers were
+    # left alone (audit E.4) -- every one of their call sites passes runtime
+    # values. This surface is different: it is what downstream code calls, and
+    # downstream calls with literals.
+    @overload
+    def evaluate_prepared_state(
+        self: "FastMultipoleMethod",
+        state: Union[FMMPreparedState, LargeNPreparedState],
+        *,
+        target_indices: Optional[Int[Array, "t"]] = ...,
+        return_potential: Literal[False] = ...,
+        jit_traversal: Optional[bool] = ...,
+        max_acc_derivative_order: Literal[0] = ...,
+    ) -> Array: ...
+
+    @overload
+    def evaluate_prepared_state(
+        self: "FastMultipoleMethod",
+        state: Union[FMMPreparedState, LargeNPreparedState],
+        *,
+        target_indices: Optional[Int[Array, "t"]] = ...,
+        return_potential: Literal[True],
+        jit_traversal: Optional[bool] = ...,
+        max_acc_derivative_order: Literal[0] = ...,
+    ) -> Tuple[Array, Array]: ...
+
+    @overload
+    def evaluate_prepared_state(
+        self: "FastMultipoleMethod",
+        state: Union[FMMPreparedState, LargeNPreparedState],
+        *,
+        target_indices: Optional[Int[Array, "t"]] = ...,
+        return_potential: bool = ...,
+        jit_traversal: Optional[bool] = ...,
+        max_acc_derivative_order: int = ...,
+    ) -> Union[
+        Array,
+        Tuple[Array, Array],
+        Tuple[Array, tuple[Array, ...]],
+        Tuple[Array, Array, tuple[Array, ...]],
+    ]: ...
 
     def evaluate_prepared_state(
         self: "FastMultipoleMethod",
