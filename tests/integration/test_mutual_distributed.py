@@ -17,6 +17,15 @@ The criteria from the issue, and why each is phrased the way it is:
   approximation error completely.
 * **Overflow raised across devices**, since a cap exceeded on one device is a wrong
   force everywhere.
+
+Force parity turns out to be the only one of the three that catches an ownership-key
+mismatch -- the failure mode a locally essential tree introduces, where two devices
+number the same remote node differently and so disagree about who owns a pair. Measured
+here with the key deliberately dropped: the force went 8.6e-3 wrong, global momentum
+stayed at 3.4e-17, and the cross-pair COUNT came out exactly right, because the pairs
+claimed twice and the pairs claimed by nobody happened to balance. So a census of
+emitted pairs is not a substitute for the direct-sum comparison, however much it looks
+like the more direct test of a partition.
 """
 
 from __future__ import annotations
@@ -27,7 +36,35 @@ import pytest
 jax = pytest.importorskip("jax")
 jnp = pytest.importorskip("jax.numpy")
 
-from jaccpot.mutual.distributed import distributed_mutual_accelerations
+# The LET path needs two things from yggdrax that arrived with it: the reverse-halo
+# return addresses, and the cross walk's `remote_index_in_owner`. Both land together in
+# TobiBu/yggdrax#48. Guarded rather than imported bare because an unguarded import fails
+# at COLLECTION time, which errors the whole test tier rather than skipping one module --
+# CI installs yggdrax from a release, so the two repos are not always in step. The
+# signature is checked as well as the import, so the skip names the real requirement
+# instead of waiting to fail with a TypeError deep inside a shard_map trace.
+try:
+    import inspect
+
+    from yggdrax.distributed.cross_walk import dual_tree_walk_cross_mutual
+
+    from jaccpot.mutual.distributed import distributed_mutual_accelerations
+
+    _needs_yggdrax = (
+        None
+        if "remote_index_in_owner"
+        in inspect.signature(dual_tree_walk_cross_mutual).parameters
+        else "a yggdrax whose cross-mutual walk takes remote_index_in_owner"
+    )
+except ImportError as _exc:  # pragma: no cover - yggdrax predates the LET reverse halo
+    _needs_yggdrax = f"a newer yggdrax ({_exc})"
+
+if _needs_yggdrax is not None:  # pragma: no cover - depends on the installed yggdrax
+    pytest.skip(
+        f"the distributed mutual force needs {_needs_yggdrax} "
+        "-- see TobiBu/yggdrax#48",
+        allow_module_level=True,
+    )
 
 try:
     from jax.experimental.shard_map import shard_map
@@ -68,6 +105,11 @@ def _domain(seed, offset, n, leaf):
     Built by hand rather than through a tree builder: the point under test is the
     cross-domain partition and the return path, so the tree only has to be a valid,
     consistent structure with centres of mass and covering radii.
+
+    ``node_ranges`` are **inclusive** ``[start, end]``, which is what yggdrax's tree
+    builders emit and what the LET's frontier records are read with -- the force now
+    hands these ranges straight to ``build_coarse_frontier``, so a half-open tree here
+    would name the wrong particles rather than merely disagree about a convention.
     """
     rng = np.random.default_rng(seed)
     pos = rng.normal(scale=0.3, size=(n, 3)) + np.asarray(offset)
@@ -77,16 +119,16 @@ def _domain(seed, offset, n, leaf):
     ranges = np.zeros((total, 2), dtype=np.int32)
     for li in range(n_leaves):
         node = n_leaves - 1 + li
-        ranges[node] = (li * leaf, (li + 1) * leaf)
+        ranges[node] = (li * leaf, (li + 1) * leaf - 1)
     for i in range(n_leaves - 2, -1, -1):
         ranges[i] = (ranges[left[i]][0], ranges[right[i]][1])
     centers = np.zeros((total, 3))
     radii = np.zeros(total)
     for i in range(total):
         s, e = ranges[i]
-        m = mass[s:e]
-        centers[i] = (pos[s:e] * m[:, None]).sum(0) / m.sum()
-        radii[i] = np.max(np.linalg.norm(pos[s:e] - centers[i], axis=1))
+        m = mass[s : e + 1]
+        centers[i] = (pos[s : e + 1] * m[:, None]).sum(0) / m.sum()
+        radii[i] = np.max(np.linalg.norm(pos[s : e + 1] - centers[i], axis=1))
     return (
         jnp.asarray(pos),
         jnp.asarray(mass),
@@ -116,12 +158,24 @@ def _exact_within(pos, mass, owner):
     return np.einsum("ij,j,ijk->ik", inv3, mass, d)
 
 
-def _run(nd, caps=None):
+def _run(nd, caps=None, dead_leaves=0):
+    """Run the distributed force over ``nd`` synthetic domains.
+
+    ``dead_leaves`` zeroes the masses of that many of domain 0's trailing leaves,
+    which is what an equalised real partition looks like: the domain is padded to a
+    common capacity and the padding carries no mass. It leaves the centres and radii
+    as they were, which is consistent because those feed only the MAC, and the MAC is
+    never consulted at theta = 0.
+    """
     doms = [_domain(7 + d, (2.0 * d, 0.0, 0.0), PER_DEV, LEAF) for d in range(nd)]
     n_leaves = doms[0][7]
-    stack = lambda i: jnp.stack([d[i] for d in doms])  # noqa: E731
-    pos_all = np.concatenate([np.asarray(d[0]) for d in doms])
-    mass_all = np.concatenate([np.asarray(d[1]) for d in doms])
+    mats = [[np.array(x) for x in d[:7]] for d in doms]
+    for k in range(dead_leaves):
+        start = (n_leaves - 1 - k) * LEAF
+        mats[0][1][start : start + LEAF] = 0.0
+    stack = lambda i: jnp.stack([jnp.asarray(m[i]) for m in mats])  # noqa: E731
+    pos_all = np.concatenate([m[0] for m in mats])
+    mass_all = np.concatenate([m[1] for m in mats])
     owner_all = np.repeat(np.arange(nd), PER_DEV)
     local_ref = _exact_within(pos_all, mass_all, owner_all).reshape(nd, PER_DEV, 3)
 
@@ -189,6 +243,38 @@ def test_total_momentum_conserves_across_devices():
     assert (
         np.linalg.norm(p) / scale < 1e-14
     ), f"global momentum residual {np.linalg.norm(p) / scale:.3e}"
+
+
+def test_padding_costs_only_force_on_the_padding_itself():
+    """A massless frontier leaf is dropped, and that has to cost nothing that matters.
+
+    An equalised partition pads each domain to a common capacity, so some leaves carry
+    no mass. Such a leaf is published with a placeholder centre of mass and no origin
+    node id, so it has no address to return `-f` to, and both sides of any pair
+    involving it drop it. The contract that makes that acceptable is narrow and worth
+    pinning: forces on MASSIVE particles stay exact, and global momentum stays exact;
+    only force on the padding itself is given up.
+    """
+    nd = _ndev()
+    out, pos_all, mass_all = _run(nd, dead_leaves=1)
+    assert not bool(out.overflow.reshape(-1)[0]), "a capacity overflowed"
+    got = np.asarray(out.acceleration).reshape(-1, 3)
+    want = _exact_all(pos_all, mass_all)
+    live = mass_all > 0
+    rel = np.linalg.norm(got[live] - want[live]) / np.linalg.norm(want[live])
+    assert rel < 1e-12, f"massive-particle force error {rel:.3e}"
+
+    p = (mass_all[:, None] * got).sum(axis=0)
+    scale = np.abs(mass_all[:, None] * got).sum()
+    assert np.linalg.norm(p) / scale < 1e-14, "global momentum broke"
+
+    # The guard has to have actually fired, or this passes for the wrong reason: with
+    # nothing dropped the run is just the all-massive case again.
+    n_leaves = PER_DEV // LEAF
+    census = (nd * (nd - 1) // 2) * n_leaves * n_leaves
+    assert (
+        int(np.asarray(out.cross_pairs).sum()) < census
+    ), "no pair was dropped, so the massless-leaf path was never taken"
 
 
 def test_a_starved_capacity_raises_across_devices():
