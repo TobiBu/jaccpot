@@ -190,19 +190,27 @@ include = ["jaccpot"]
 # `[tool.coverage.run].omit` excludes it and the `experimental` marker deselects
 # its tests. Listed as the package, not a glob -- see the note on `omit` below.
 exclude = ["jaccpot/experimental"]
+# Resolve the sibling `yggdrax` checkout. Relative to this file, so it is the
+# documented layout (ARCHITECTURE: "Sibling codebases ... yggdrax") rather
+# than one machine's paths, and it is the same assumption
+# `tests/conftest.py::_find_sibling_checkout` already makes.
+extraPaths = ["../yggdrax"]
 pythonVersion = "3.11"
 # Set explicitly rather than left to the default, so a pyright release that moves
 # its default mode cannot silently change what this reports.
 typeCheckingMode = "standard"
 #
-# Deliberately NOT configured: `reportMissingImports`. On a machine where
-# `yggdrax` is an editable install pointing at a sibling working tree, pyright
-# cannot resolve it and emits 98 errors (`--pythonpath` does not help). Silencing
-# the rule package-wide to work around one machine's install layout would also
-# hide a genuine missing import, which is a bad trade for cosmetic quiet.
+# `reportMissingImports` is left ON deliberately, and `extraPaths` above is what
+# makes that affordable. An earlier version of this comment said the rule had to
+# stay noisy because `yggdrax` is an editable install pyright cannot follow --
+# true, but the conclusion was wrong: those were not 100 cosmetic errors to
+# subtract, they were 100 *suppressions*. An unresolved import makes every symbol
+# from it `Unknown`, and `Unknown` is assignable to anything, so every call across
+# the jaccpot/yggdrax boundary went unchecked. Resolving it removed 125 errors and
+# switched 44 real checks back on. See audit E.5.
 #
-# There is no gate. `pyright jaccpot/` reports 408 errors, ~310 of them real, and
-# a hook at that count would need a baseline -- exactly what item 2.5 retired.
+# There is no gate. `pyright jaccpot/` reports 210 errors and a hook at that count
+# would need a baseline -- exactly what item 2.5 retired.
 
 [tool.isort]
 profile = "black"
