@@ -22,7 +22,7 @@ unchanged.
 from __future__ import annotations
 
 from functools import partial
-from typing import Any, Optional, Union
+from typing import Any, Literal, Optional, Union, overload
 
 import jax
 import jax.numpy as jnp
@@ -35,6 +35,47 @@ from jaccpot.runtime.grad_options import analytic_p2p_vjp_enabled
 from .grad import _pair_accel_cvjp
 
 __all__: list[str] = []
+
+
+# Overloads: the second element is an Array exactly when `compute_potential` is
+# set, and both in-tree callers that pass a literal get the concrete pair back
+# instead of an `Optional` they must narrow. The third is the honest fallback --
+# `near_field.py` passes a runtime flag, and promising a non-None potential there
+# would be a wrong annotation rather than a wide one. Audit E.4 bucket F.
+@overload
+def _self_contributions(
+    leaf_positions: Array,
+    leaf_masses: Array,
+    mask: Array,
+    *,
+    softening_sq: Union[float, Array],
+    G: Array,
+    compute_potential: Literal[True],
+) -> Tuple[Array, Array]: ...
+
+
+@overload
+def _self_contributions(
+    leaf_positions: Array,
+    leaf_masses: Array,
+    mask: Array,
+    *,
+    softening_sq: Union[float, Array],
+    G: Array,
+    compute_potential: Literal[False],
+) -> Tuple[Array, None]: ...
+
+
+@overload
+def _self_contributions(
+    leaf_positions: Array,
+    leaf_masses: Array,
+    mask: Array,
+    *,
+    softening_sq: Union[float, Array],
+    G: Array,
+    compute_potential: bool,
+) -> Tuple[Array, Optional[Array]]: ...
 
 
 def _self_contributions(

@@ -1317,7 +1317,12 @@ def compute_leaf_p2p_accelerations_radix_fast_lane(
             target_subtile=(pallas_subtile if pallas_subtile > 0 else None),
             interpret=pallas_interpret,
         )
-        if want_potential:
+        # Branch on the value, not on `want_potential`. Both say the same thing --
+        # the callee returns a pair exactly when the flag is set -- but the flag is
+        # a runtime bool, so it selects the fallback overload and leaves the result
+        # a union that cannot be added to an Array. `isinstance` narrows it, and a
+        # JAX array is never a tuple, so the discriminator is exact.
+        if isinstance(pairs_result, tuple):
             pair_acc, pair_pot = pairs_result
             return self_acc + pair_acc, self_pot + pair_pot
         return self_acc + pairs_result
@@ -1396,7 +1401,12 @@ def compute_leaf_p2p_accelerations_radix_fast_lane(
                 target_subtile=(pallas_subtile if pallas_subtile > 0 else None),
                 interpret=pallas_interpret,
             )
-            if want_potential:
+            # Branch on the value, not on `want_potential`. Both say the same thing --
+            # the callee returns a pair exactly when the flag is set -- but the flag is
+            # a runtime bool, so it selects the fallback overload and leaves the result
+            # a union that cannot be added to an Array. `isinstance` narrows it, and a
+            # JAX array is never a tuple, so the discriminator is exact.
+            if isinstance(prepacked_result, tuple):
                 pair_acc, pair_pot = prepacked_result
                 return self_acc + pair_acc, self_pot + pair_pot
             return self_acc + prepacked_result
