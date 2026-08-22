@@ -1263,6 +1263,29 @@ def translate_local_expansion(
     return result
 
 
+def _missing_raw_moment_message(name: str, order: int) -> str:
+    """Return the error text for a raw moment the requested order needs.
+
+    Parameters
+    ----------
+    name : str
+        The omitted keyword argument, e.g. ``"raw_second"``.
+    order : int
+        The resolved expansion order that requires it.
+
+    Returns
+    -------
+    str
+        A message naming the argument, the order, and the way out.
+    """
+    return (
+        f"translate_multipole_to_local was given `raw_mass`, which selects the "
+        f"raw-moment path, but order={order} also needs `{name}`. Supply every "
+        "raw moment up to the order, or omit `raw_mass` too and let the "
+        "packed-coefficient fallback recover them."
+    )
+
+
 @jaxtyped(typechecker=beartype)
 def translate_multipole_to_local(
     multipole: Array,
@@ -1316,7 +1339,8 @@ def translate_multipole_to_local(
     Raises
     ------
     ValueError
-        If ``order`` is negative.
+        If ``order`` is negative, or if ``raw_mass`` is given without every other
+        raw moment the order needs.
     NotImplementedError
         If ``order`` exceeds ``MAX_MULTIPOLE_ORDER`` (4).
     """
@@ -1335,13 +1359,27 @@ def translate_multipole_to_local(
     raw_supplied = raw_mass is not None
 
     if raw_supplied:
+        # `raw_mass` alone selects this branch, so each moment the order needs
+        # must be checked before it is used. Without these, a caller that
+        # supplies `raw_mass` and omits one reached yggdrax's
+        # `_quadrupole_from_second` (or a sibling) with `None` and failed there --
+        # `TypeError: trace requires ndarray or scalar arguments`, from a frame
+        # naming neither the argument nor this function. Same values, same
+        # failure-vs-success cases; only the message changes.
+        #
+        # Checked at each use rather than once up front so the narrowing is
+        # visible: a list comprehension collecting the missing names reads better
+        # but leaves every `raw_*` still `Optional` to a type checker.
         mass = jnp.asarray(raw_mass, dtype=dtype)
-        dipole = (
-            jnp.asarray(raw_dipole, dtype=dtype)
-            if order_int >= 1
-            else jnp.zeros((3,), dtype=dtype)
-        )
+        if order_int >= 1:
+            if raw_dipole is None:
+                raise ValueError(_missing_raw_moment_message("raw_dipole", order_int))
+            dipole = jnp.asarray(raw_dipole, dtype=dtype)
+        else:
+            dipole = jnp.zeros((3,), dtype=dtype)
         if order_int >= 2:
+            if raw_second is None:
+                raise ValueError(_missing_raw_moment_message("raw_second", order_int))
             second = jnp.asarray(
                 _quadrupole_from_second(raw_second),
                 dtype=dtype,
@@ -1349,6 +1387,8 @@ def translate_multipole_to_local(
         else:
             second = jnp.zeros((3, 3), dtype=dtype)
         if order_int >= 3:
+            if raw_third is None:
+                raise ValueError(_missing_raw_moment_message("raw_third", order_int))
             third = jnp.asarray(
                 _octupole_from_third(raw_third),
                 dtype=dtype,
@@ -1356,6 +1396,8 @@ def translate_multipole_to_local(
         else:
             third = jnp.zeros((3, 3, 3), dtype=dtype)
         if order_int >= 4:
+            if raw_fourth is None:
+                raise ValueError(_missing_raw_moment_message("raw_fourth", order_int))
             fourth = jnp.asarray(
                 _hexadecapole_from_fourth(raw_fourth),
                 dtype=dtype,
