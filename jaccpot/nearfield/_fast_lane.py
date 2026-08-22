@@ -29,7 +29,7 @@ Split out of ``near_field.py`` (Tier 1.4); every function body is unchanged.
 from __future__ import annotations
 
 from functools import partial
-from typing import Any, Optional, Union
+from typing import Any, Literal, Optional, Union, overload
 
 import jax
 import jax.numpy as jnp
@@ -353,6 +353,50 @@ def _compute_leaf_p2p_prepared_large_n_self_only_with_potential_impl(
     return acc, pot
 
 
+# Overloads: the return shape is keyed entirely on `compute_potential`, so a caller that does
+# not set it should not be handed a union to narrow. Generated from this
+# function's own signature rather than retyped -- including whether `compute_potential`
+# has a default, which is what makes the stubs consistent with it. The
+# implementation keeps the docstring: pydoclint ignores stubs and beartype
+# only ever sees the implementation. Audit E.4.
+@overload
+def _radix_fast_lane_pairs_pallas(
+    positions: Array,
+    masses: Array,
+    target_particle_ids: Array,
+    target_particle_mask: Array,
+    source_particle_ids: Array,
+    source_particle_mask: Array,
+    *,
+    G: Union[float, Array],
+    softening_sq: Array,
+    compute_potential: Literal[False],
+    num_warps: Optional[int] = ...,
+    num_stages: int = ...,
+    target_subtile: Optional[int] = ...,
+    interpret: bool = ...,
+) -> Array: ...
+
+
+@overload
+def _radix_fast_lane_pairs_pallas(
+    positions: Array,
+    masses: Array,
+    target_particle_ids: Array,
+    target_particle_mask: Array,
+    source_particle_ids: Array,
+    source_particle_mask: Array,
+    *,
+    G: Union[float, Array],
+    softening_sq: Array,
+    compute_potential: Literal[True],
+    num_warps: Optional[int] = ...,
+    num_stages: int = ...,
+    target_subtile: Optional[int] = ...,
+    interpret: bool = ...,
+) -> Tuple[Array, Array]: ...
+
+
 def _radix_fast_lane_pairs_pallas(
     positions: Array,
     masses: Array,
@@ -474,6 +518,52 @@ def _radix_fast_lane_pairs_pallas(
     return pair_acc
 
 
+# Overloads: the return shape is keyed entirely on `compute_potential`, so a caller that does
+# not set it should not be handed a union to narrow. Generated from this
+# function's own signature rather than retyped -- including whether `compute_potential`
+# has a default, which is what makes the stubs consistent with it. The
+# implementation keeps the docstring: pydoclint ignores stubs and beartype
+# only ever sees the implementation. Audit E.4.
+@overload
+def _radix_fast_lane_prepacked_pallas(
+    source_leaf_ids_padded: Array,
+    source_valid_mask_padded: Array,
+    leaf_positions: Array,
+    leaf_masses: Array,
+    leaf_mask: Array,
+    leaf_particle_idx: Array,
+    positions: Array,
+    *,
+    G: Union[float, Array],
+    softening_sq: Array,
+    compute_potential: Literal[False],
+    num_warps: Optional[int] = ...,
+    num_stages: int = ...,
+    target_subtile: Optional[int] = ...,
+    interpret: bool = ...,
+) -> Array: ...
+
+
+@overload
+def _radix_fast_lane_prepacked_pallas(
+    source_leaf_ids_padded: Array,
+    source_valid_mask_padded: Array,
+    leaf_positions: Array,
+    leaf_masses: Array,
+    leaf_mask: Array,
+    leaf_particle_idx: Array,
+    positions: Array,
+    *,
+    G: Union[float, Array],
+    softening_sq: Array,
+    compute_potential: Literal[True],
+    num_warps: Optional[int] = ...,
+    num_stages: int = ...,
+    target_subtile: Optional[int] = ...,
+    interpret: bool = ...,
+) -> Tuple[Array, Array]: ...
+
+
 def _radix_fast_lane_prepacked_pallas(
     source_leaf_ids_padded: Array,
     source_valid_mask_padded: Array,
@@ -588,6 +678,56 @@ def _radix_fast_lane_prepacked_pallas(
         )
         return pair_acc, pair_pot
     return pair_acc
+
+
+# Overloads: the return shape is keyed entirely on `compute_potential`, so a caller that does
+# not set it should not be handed a union to narrow. Generated from this
+# function's own signature rather than retyped -- including whether `compute_potential`
+# has a default, which is what makes the stubs consistent with it. The
+# implementation keeps the docstring: pydoclint ignores stubs and beartype
+# only ever sees the implementation. Audit E.4.
+@overload
+def _radix_fast_lane_prepacked_pallas_decoupled(
+    source_leaf_ids_padded: Array,
+    source_valid_mask_padded: Array,
+    target_positions: Array,
+    target_mask: Array,
+    target_particle_idx: Array,
+    source_positions: Array,
+    source_masses: Array,
+    source_mask: Array,
+    positions: Array,
+    *,
+    G: Union[float, Array],
+    softening_sq: Array,
+    compute_potential: Literal[False] = ...,
+    num_warps: Optional[int] = ...,
+    num_stages: int = ...,
+    target_subtile: Optional[int] = ...,
+    interpret: bool = ...,
+) -> Array: ...
+
+
+@overload
+def _radix_fast_lane_prepacked_pallas_decoupled(
+    source_leaf_ids_padded: Array,
+    source_valid_mask_padded: Array,
+    target_positions: Array,
+    target_mask: Array,
+    target_particle_idx: Array,
+    source_positions: Array,
+    source_masses: Array,
+    source_mask: Array,
+    positions: Array,
+    *,
+    G: Union[float, Array],
+    softening_sq: Array,
+    compute_potential: Literal[True],
+    num_warps: Optional[int] = ...,
+    num_stages: int = ...,
+    target_subtile: Optional[int] = ...,
+    interpret: bool = ...,
+) -> Tuple[Array, Array]: ...
 
 
 def _radix_fast_lane_prepacked_pallas_decoupled(
@@ -957,6 +1097,42 @@ def _radix_fast_lane_prepacked_accel_bwd(
 _radix_fast_lane_prepacked_accel_cvjp.defvjp(
     _radix_fast_lane_prepacked_accel_fwd, _radix_fast_lane_prepacked_accel_bwd
 )
+
+
+# Overloads: the return shape is keyed entirely on `return_potential`, so a caller that does
+# not set it should not be handed a union to narrow. Generated from this
+# function's own signature rather than retyped -- including whether `return_potential`
+# has a default, which is what makes the stubs consistent with it. The
+# implementation keeps the docstring: pydoclint ignores stubs and beartype
+# only ever sees the implementation. Audit E.4.
+@overload
+def compute_leaf_p2p_accelerations_radix_fast_lane(
+    *,
+    positions_sorted: Array,
+    masses_sorted: Array,
+    payload: Any,
+    G: Union[float, Array] = ...,
+    softening: float = ...,
+    return_potential: Literal[False] = ...,
+    use_pallas: bool = ...,
+    differentiable: bool = ...,
+    reverse_options: Optional["LeafPairReverseOptions"] = ...,
+) -> Array: ...
+
+
+@overload
+def compute_leaf_p2p_accelerations_radix_fast_lane(
+    *,
+    positions_sorted: Array,
+    masses_sorted: Array,
+    payload: Any,
+    G: Union[float, Array] = ...,
+    softening: float = ...,
+    return_potential: Literal[True],
+    use_pallas: bool = ...,
+    differentiable: bool = ...,
+    reverse_options: Optional["LeafPairReverseOptions"] = ...,
+) -> Tuple[Array, Array]: ...
 
 
 def compute_leaf_p2p_accelerations_radix_fast_lane(

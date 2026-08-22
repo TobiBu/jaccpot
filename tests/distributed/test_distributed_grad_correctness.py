@@ -153,6 +153,16 @@ def test_grad_matches_direct_sum_oracle(setup):
     The direct sum is exactly differentiable, so agreement is bounded by the
     FMM's own force accuracy -- asserted against the *measured* forward error so
     the gradient can never be looser than the force it differentiates.
+
+    TWO MAPS, NOT ONE. The cotangents come back in the layout they were taken with
+    respect to -- the padded partition order -- so the input ``gid_flat`` is their
+    map. The *accelerations* do not: they come back in the per-device tree order,
+    with their own ``gid`` beside them. The two orders coincide only while no device
+    is padded, which is true of this IC and was true of every distributed IC in the
+    suite, so reusing one map for both read correctly here and silently wrong the
+    moment a per-device count stopped dividing ``leaf_size``. See
+    ``tests/distributed/test_distributed_padded_partition.py`` and
+    ``docs/distributed_padding_force_defect.md``.
     """
     config = setup["config"]
     pos, mass = setup["pos"], setup["mass"]
@@ -177,12 +187,18 @@ def test_grad_matches_direct_sum_oracle(setup):
         lambda p, m: jnp.sum(direct_accel(p, m) ** 2), argnums=(0, 1)
     )(positions0, masses0)
 
-    # forward accuracy of this configuration, as the tolerance reference
-    accel = np.asarray(setup["grad_path"](pos, mass, setup["gid"], setup["counts"])[0])
+    # forward accuracy of this configuration, as the tolerance reference. The
+    # accelerations are in the per-device TREE order, so they are reassembled with
+    # the gid the evaluator returns -- see the docstring.
+    accel, gid_out, _ = setup["grad_path"](pos, mass, setup["gid"], setup["counts"])
+    accel = np.asarray(accel)
+    gid_out = np.asarray(gid_out).reshape(-1)
+    valid_out = gid_out >= 0
     scattered = np.zeros((positions0.shape[0], 3))
-    scattered[order_map] = accel[valid]
+    scattered[gid_out[valid_out].astype(int)] = accel[valid_out]
     force_err = _rel_l2(scattered, np.asarray(direct_accel(positions0, masses0)))
 
+    # The cotangents ARE in the input layout, so these keep the input-gid map.
     fmm_gp = np.zeros_like(np.asarray(dg_pos))
     fmm_gm = np.zeros_like(np.asarray(dg_mass))
     fmm_gp[order_map] = np.asarray(g_pos)[valid]
