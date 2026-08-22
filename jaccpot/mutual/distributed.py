@@ -233,6 +233,12 @@ def distributed_mutual_accelerations(
     max_req_leaves: Optional[int] = None,
     max_recv_leaves: Optional[int] = None,
     coarse_depth_cap: int = 64,
+    cross_theta: float = 0.0,
+    far_cap: int = 1,
+    far_recv_capacity: Optional[int] = None,
+    node_multipoles: Optional[Array] = None,
+    expansion_centers: Optional[Array] = None,
+    tree_arrays: Optional[Any] = None,
     axis_name: str = AXIS_NAME,
 ) -> DistributedMutualResult:
     """Add every cross-domain contribution to an already-computed local force.
@@ -285,6 +291,42 @@ def distributed_mutual_accelerations(
         ``(ndev - 1) * L``, which is what ``theta = 0`` actually reaches.
     max_recv_leaves:
         Import requests this device may receive. ``None`` takes the same worst case.
+    cross_theta:
+        Opening angle for the CROSS-domain MAC. ``0.0`` accepts nothing, so every
+        cross pair refines to leaf-leaf and is summed exactly -- the behaviour this
+        lane shipped with. Above zero, accepted pairs go through M2L against the
+        remote leaf's multipole, which requires ``node_multipoles``,
+        ``expansion_centers`` and ``tree_arrays``.
+    far_cap:
+        Output capacity for the cross FAR list. Irrelevant at ``cross_theta = 0``,
+        where the list cannot receive an entry.
+    far_recv_capacity:
+        Receive capacity for the expansion exchange, in rows of
+        ``sh_size(order)``. ``None`` takes ``(ndev - 1) * (2L - 1) * L`` for ``L``
+        local leaves, which is the worst case rather than a guess.
+
+        **Starving this one breaks MOMENTUM, not just accuracy**, which is not true
+        of any other capacity here. Everywhere else an overflow drops a pair before
+        it is evaluated, so both halves vanish together and the global sum stays
+        exact while the force is merely incomplete. A far pair's ``+f`` is applied
+        locally the moment it is computed and only the ``-f`` travels, so dropping
+        a received row leaves the ``+f`` behind with nothing to cancel it. Measured:
+        at ``cross_theta = 2`` on 4 devices the momentum residual went from 1.7e-2
+        with a starved receive to 2.3e-17 with this bound.
+    node_multipoles:
+        ``(nodes, sh_size(order))`` this domain's multipoles, about
+        ``expansion_centers``. Required when ``cross_theta > 0``.
+    expansion_centers:
+        ``(nodes, 3)`` the centres ``node_multipoles`` are expanded about. Separate
+        from ``centers`` on purpose: ``centers``/``radii`` are the MAC's extents,
+        while these have to be the *same* points the upward sweep used, or an M2L
+        delta and the expansion it translates disagree. This is also what the
+        frontier publishes as each leaf's COM, so a received expansion is applied
+        at exactly the point it was expanded about -- bit-for-bit, because it is
+        the same array value that crossed the wire, not a recomputation of it.
+    tree_arrays:
+        This domain's ``MutualTreeArrays``, for the L2L level schedule and the L2P.
+        Required when ``cross_theta > 0``.
     coarse_depth_cap:
         Rounds of owner propagation up the coarse tree. Under-provisioning is safe:
         an unresolved node is treated as straddling, which the walk refines rather
@@ -311,6 +353,19 @@ def distributed_mutual_accelerations(
         raise ValueError(
             f"ndev must be >= 2, got {ndev}: a single domain has no cross-domain "
             "pairs, so the single-device mutual lane is the whole force"
+        )
+
+    do_far = float(cross_theta) > 0.0
+    if do_far and (
+        node_multipoles is None or expansion_centers is None or tree_arrays is None
+    ):
+        raise ValueError(
+            "cross_theta > 0 routes accepted cross pairs through M2L, which needs "
+            "node_multipoles, expansion_centers and tree_arrays; got "
+            f"{'' if node_multipoles is not None else 'node_multipoles '}"
+            f"{'' if expansion_centers is not None else 'expansion_centers '}"
+            f"{'' if tree_arrays is not None else 'tree_arrays '}"
+            "missing"
         )
 
     me = jax.lax.axis_index(axis_name)
@@ -344,7 +399,13 @@ def distributed_mutual_accelerations(
             leaf_size=int(leaf_width),
         ),
         node_mass,
-        centers,
+        # The COM the frontier publishes is the point a remote device will expand
+        # about AND the point this device will apply a returned expansion at, so
+        # with far work on it must be the upward sweep's own centres -- the same
+        # array value shipped, not a second computation of the same quantity that
+        # agrees only to 1e-13.
+        expansion_centers if do_far else centers,
+        node_payload=node_multipoles if do_far else None,
     )
 
     # --- 2. every OTHER domain's frontier, merged into one coarse tree ---------
@@ -431,12 +492,17 @@ def distributed_mutual_accelerations(
         c_com,
         c_radii,
         c_root,
-        0.0,
+        float(cross_theta),
         this_device=me,
         remote_owner=c_owner,
         remote_index_in_owner=c_node_id,
+        # Unconditional, not just when far work is on: the remote tree here is
+        # ALWAYS a merged coarse tree, so an internal node never has an address in
+        # its owner's own tree. At cross_theta = 0 nothing is accepted anyway, so
+        # this states the invariant rather than changing behaviour.
+        accept_only_leaf_pairs=True,
         max_pair_queue=max_pair_queue,
-        far_cap=1,
+        far_cap=int(far_cap) if do_far else 1,
         near_cap=near_cap,
     )
     overflow = res.far_overflow | res.near_overflow | res.queue_overflow | degenerate
@@ -546,6 +612,92 @@ def distributed_mutual_accelerations(
     overflow = overflow | rev.overflow
     acc = apply_reverse_halo(acc, rev)
 
+    # --- 7. the cross FAR field: M2L against remote leaf multipoles -----------
+    # Only reachable at cross_theta > 0. Structured as a SEPARATE additive pass rather
+    # than an injection into the intra-domain far field, which is exact rather than
+    # merely convenient: `_push_locals_down` and `_l2p_forces` are both linear in the
+    # local coefficients, so pushing a cross-only `locals_` down and evaluating it is
+    # identical to adding those coefficients before the domain's own push-down. That
+    # keeps `mutual_far_field_forces` untouched.
+    if do_far:
+        from jaccpot.mutual.farfield import _l2p_forces, _m2l_batch, _push_locals_down
+        from jaccpot.operators._sh_indexing import sh_size
+
+        cap_f = int(far_cap)
+        p_order = int(tree_arrays.order)
+        n_nodes = int(expansion_centers.shape[0])
+        # A device receives, from each of the other ndev-1, at most one expansion
+        # per (their local node, one of MY leaves) pair -- so (2L-1)*L each. Sized
+        # at that bound rather than optimistically, because a starved receive here
+        # is worse than anywhere else in this lane: see the note below.
+        far_recv = (
+            (ndev - 1) * (2 * n_leaves - 1) * n_leaves
+            if far_recv_capacity is None
+            else int(far_recv_capacity)
+        )
+
+        frows = jnp.arange(cap_f, dtype=INDEX_DTYPE)
+        f_on = frows < res.far_count
+        f_local = jnp.where(f_on, res.far_local, root)
+        f_cpos = c_first[jnp.where(f_on, res.far_remote, c_root)]
+        # Same massless-leaf rule as the near path: no origin node id, no address.
+        f_live = f_on & (rct.tag_node_id[f_cpos] >= 0)
+
+        # The coarse "particle" position IS the remote leaf's COM, which is the point
+        # its multipole is expanded about -- so it is read from `positions_sorted`
+        # rather than from the coarse tree's own moments, which would be a second
+        # computation of the same point.
+        c_leaf_com = rct.positions_sorted[f_cpos]
+        tgt_c = expansion_centers[f_local]
+
+        # BOTH directions in ONE batch, as `_dual_m2l` does for the same reason it
+        # gives: same kernel, same order, same rounding for both halves of a pair is
+        # what makes F_A + F_B cancel algebraically rather than to the M2L's accuracy.
+        zero_mp = jnp.zeros_like(rct.payload[f_cpos])
+        mp = jnp.concatenate(
+            [
+                jnp.where(f_live[:, None], rct.payload[f_cpos], zero_mp),
+                jnp.where(f_live[:, None], node_multipoles[f_local], zero_mp),
+            ]
+        )
+        dl = jnp.concatenate([tgt_c - c_leaf_com, c_leaf_com - tgt_c])
+        loc = _m2l_batch(mp, dl, order=p_order, use_pallas=False, interpret=False)
+        loc_here, loc_there = loc[:cap_f], loc[cap_f:]
+
+        # `+f` lands on a local node; `-f` is addressed to a NODE in the owner's own
+        # tree (`tag_node_id`), not to a particle -- which is the whole reason far
+        # pairs may only be accepted against coarse leaves.
+        locals_ext = (
+            jnp.zeros((n_nodes, sh_size(p_order)), dtype=positions.dtype)
+            .at[jnp.where(f_live, f_local, n_nodes)]
+            .add(jnp.where(f_live[:, None], loc_here, 0.0), mode="drop")
+        )
+        rev_far = export_reverse_halo(
+            jnp.where(f_live, rct.tag_domain[f_cpos], -1),
+            jnp.where(f_live, rct.tag_node_id[f_cpos], 0),
+            jnp.where(f_live[:, None], loc_there, 0.0),
+            ndev,
+            recv_capacity=far_recv,
+            axis_name=axis_name,
+        )
+        overflow = overflow | rev_far.overflow
+        locals_ext = apply_reverse_halo(locals_ext, rev_far)
+
+        locals_ext = _push_locals_down(locals_ext, expansion_centers, tree_arrays)
+        # `_l2p_forces` returns FORCES -- the mass factor is already in -- while this
+        # function's near path returns accelerations, so the division is here. Guarded
+        # because padding rows have zero mass and 0/0 would poison the whole column.
+        f_far = _l2p_forces(
+            positions, masses, expansion_centers, locals_ext, tree_arrays
+        )
+        massive = masses > 0
+        safe_m = jnp.where(massive, masses, jnp.ones_like(masses))
+        acc = acc + jnp.where(
+            massive[:, None],
+            f_far / safe_m[:, None] * jnp.asarray(g, positions.dtype),
+            0.0,
+        )
+
     # Shape (1,) rather than scalar for the two diagnostics: `shard_map` cannot
     # concatenate rank-0 per-device outputs, so a function documented as "call inside
     # shard_map" should hand back something its `out_specs` can actually describe.
@@ -584,7 +736,15 @@ class DistributedMutualConfig:
     leaf_size : int
         Particles per leaf, for the per-device local tree.
     theta : float
-        INTRA-domain opening angle. Cross-domain pairs are exact.
+        INTRA-domain opening angle.
+    cross_theta : float
+        CROSS-domain opening angle. ``0.0`` (the default) makes every cross pair
+        exact -- nothing is accepted, so all of them refine to leaf-leaf and are
+        summed particle by particle. Above zero, accepted cross pairs go through
+        M2L against the remote leaf's multipole, which is what collapses the
+        import from the whole remote system to a surface halo.
+    far_cap, far_recv_capacity : Optional[int]
+        Cross far-list and expansion-receive capacities. ``None`` derives each.
     order : int
         Multipole order for the intra-domain far field.
     softening : float
@@ -619,6 +779,9 @@ class DistributedMutualConfig:
     softening: float = 1e-3
     g: float = 1.0
     caps: Optional[Any] = None
+    cross_theta: float = 0.0
+    far_cap: Optional[int] = None
+    far_recv_capacity: Optional[int] = None
     near_cap: Optional[int] = None
     max_pair_queue: Optional[int] = None
     recv_capacity: Optional[int] = None
@@ -773,6 +936,7 @@ def distributed_mutual_fmm(
         build_mutual_state_device,
         node_centers_and_radii,
     )
+    from jaccpot.mutual.farfield import mutual_upward_sweep
     from jaccpot.mutual.force import mutual_accelerations
 
     cfg = config if config is not None else DistributedMutualConfig()
@@ -805,6 +969,11 @@ def distributed_mutual_fmm(
     max_pair_queue = cfg.max_pair_queue or max(1 << 12, cross_pairs_bound)
     # Every other device can address at most this domain's whole particle set.
     recv_capacity = cfg.recv_capacity or (ndev - 1) * cap
+    do_far = float(cfg.cross_theta) > 0.0
+    # A far pair is (local node, remote coarse LEAF), so the bound is the local
+    # node count times the remote leaf count -- and unlike the near list it does
+    # not shrink with theta, it is what theta moves work INTO.
+    far_cap = cfg.far_cap or max(1024, (2 * n_leaves - 1) * n_leaves * (ndev - 1))
 
     def fn(pos: Array, mass: Array, gid: Array) -> tuple[Array, ...]:
         # One local tree per domain, over the global bounds so every domain's Morton
@@ -854,6 +1023,15 @@ def distributed_mutual_fmm(
         )
         local_acc = mutual_accelerations(state, ps, ms)
 
+        # One upward sweep serves both jobs the cross far field needs: the
+        # multipoles this domain publishes on its frontier, and the source
+        # expansions for the `-f` direction. Its centres are what both sides then
+        # expand about.
+        node_mp = None
+        exp_centers = None
+        if do_far:
+            _, exp_centers, node_mp = mutual_upward_sweep(ps, ms, state.tree)
+
         # The cross walk's MAC is defined on centres of MASS and exact
         # COM-to-particle radii, which is a different extent set from the geometry the
         # target-centric walk uses -- so they are computed here rather than taken from
@@ -893,6 +1071,12 @@ def distributed_mutual_fmm(
             max_req_leaves=cfg.max_req_leaves,
             max_recv_leaves=cfg.max_recv_leaves,
             coarse_depth_cap=int(cfg.coarse_depth_cap),
+            cross_theta=float(cfg.cross_theta),
+            far_cap=int(far_cap),
+            far_recv_capacity=cfg.far_recv_capacity,
+            node_multipoles=node_mp,
+            expansion_centers=exp_centers,
+            tree_arrays=state.tree if do_far else None,
         )
         # Undo the local tree sort, so a row of the output lines up with the row of
         # `pos`/`gid` this device was handed.

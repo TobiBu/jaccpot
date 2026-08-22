@@ -54,19 +54,30 @@ try:
 
     from jaccpot.mutual.distributed import distributed_mutual_accelerations
 
+    # Check EVERY parameter this module actually passes, not just the one that was
+    # newest when the guard was written. Pinned to `remote_index_in_owner` alone, this
+    # guard sailed straight past a yggdrax that had that but not
+    # `accept_only_leaf_pairs`, and the suite ran and failed 10 of 11 instead of
+    # skipping with a reason -- which is the exact outcome the guard exists to prevent.
+    _walk_params = inspect.signature(dual_tree_walk_cross_mutual).parameters
+    # Each name carries the PR that added it, because "needs a newer yggdrax" is not
+    # actionable and the two came from different ones.
+    _missing = [
+        f"{name} (TobiBu/yggdrax#{pr})"
+        for name, pr in (("remote_index_in_owner", 48), ("accept_only_leaf_pairs", 50))
+        if name not in _walk_params
+    ]
     _needs_yggdrax = (
         None
-        if "remote_index_in_owner"
-        in inspect.signature(dual_tree_walk_cross_mutual).parameters
-        else "a yggdrax whose cross-mutual walk takes remote_index_in_owner"
+        if not _missing
+        else "a yggdrax whose cross-mutual walk takes " + " and ".join(_missing)
     )
 except ImportError as _exc:  # pragma: no cover - yggdrax predates the LET reverse halo
     _needs_yggdrax = f"a newer yggdrax ({_exc})"
 
 if _needs_yggdrax is not None:  # pragma: no cover - depends on the installed yggdrax
     pytest.skip(
-        f"the distributed mutual force needs {_needs_yggdrax} "
-        "-- see TobiBu/yggdrax#48",
+        f"the distributed mutual force needs {_needs_yggdrax}",
         allow_module_level=True,
     )
 
@@ -445,3 +456,118 @@ def test_the_driver_names_which_half_starved():
         f"the 'near' cause was not named: {got.local_overflow_causes.tolist()} "
         f"against {OVERFLOW_CAUSES}"
     )
+
+
+# ---------------------------------------------------------------------------
+# The cross-domain FAR field (cross_theta > 0).
+# ---------------------------------------------------------------------------
+
+
+def _cross_only(pos, mass, nd, *, cross_theta, order, far_recv_capacity=None):
+    """Run with the intra-domain half EXACT, so only the cross far field approximates.
+
+    ``theta = 0`` accepts nothing intra-domain, so that half is a direct sum and any
+    error in the result belongs to the cross field alone. Without this isolation the
+    two approximations are indistinguishable.
+    """
+    from jaccpot.mutual.distributed import (
+        DistributedMutualConfig,
+        distributed_mutual_fmm,
+    )
+
+    cfg = DistributedMutualConfig(
+        leaf_size=DRIVER_LEAF,
+        theta=0.0,
+        cross_theta=cross_theta,
+        order=order,
+        softening=SOFT,
+        far_recv_capacity=far_recv_capacity,
+    )
+    return distributed_mutual_fmm(
+        jnp.asarray(pos), jnp.asarray(mass), config=cfg, ndev=nd
+    )
+
+
+def test_the_cross_far_field_converges_with_expansion_order():
+    """The test that catches a COVERAGE bug, which no other criterion here does.
+
+    An M2L that is merely inaccurate improves with order. One that is fed a pair set
+    the two devices disagree about does not, because a coverage error is not an
+    approximation error -- and neither the momentum criterion nor a direct-sum
+    tolerance distinguishes them.
+
+    That is not hypothetical. Restricting far acceptance to remote leaves only, and
+    letting the LOCAL endpoint be an internal node, made each device emit a
+    decomposition the other could not express: one quarter of a two-clump interaction
+    was claimed twice and one quarter never. The force error sat at 1.12e-2 for every
+    order from 2 to 5, global momentum stayed at 1e-17 throughout, and the result was
+    worse than treating each clump as a point mass. The fix is
+    ``accept_only_leaf_pairs`` in yggdrax; this is the regression test for it.
+    """
+    nd = _ndev()
+    pos, mass = _random_system(seed=23, n=512)
+    want = _exact_all(pos, mass)
+    wn = np.linalg.norm(want)
+
+    errs = []
+    for order in (2, 4):
+        got = _cross_only(pos, mass, nd, cross_theta=1.0, order=order)
+        assert not got.overflow, (
+            f"order {order}: capacity overflowed -- cross={got.cross_overflow.tolist()}"
+            f" local={got.local_overflow.tolist()}"
+        )
+        acc = np.asarray(got.accelerations)
+        errs.append(np.linalg.norm(acc - want) / wn)
+
+    # Vacuity guard: with nothing accepted as far this is the exact lane twice over
+    # and the ratio below is 1.0 for the wrong reason.
+    assert errs[0] > 1e-9, (
+        f"the cross far field never engaged (order-2 error {errs[0]:.3e} is round-off)"
+        " -- raise cross_theta or separate the domains"
+    )
+    assert errs[1] < errs[0] / 4.0, (
+        f"order 2 -> 4 improved only {errs[0] / errs[1]:.2f}x "
+        f"({errs[0]:.3e} -> {errs[1]:.3e}); a flat curve means the pair set is wrong, "
+        "not the expansion"
+    )
+
+
+def test_the_cross_far_field_conserves_momentum():
+    """Momentum survives theta > 0 -- necessary, and on its own not sufficient.
+
+    Kept as its own test because the mechanism is different from the near path's: the
+    two halves of an accepted far pair are one batched M2L call with negated deltas,
+    and the ``-f`` half is a local EXPANSION returned to the owner's node rather than
+    a force on a particle.
+    """
+    nd = _ndev()
+    pos, mass = _random_system(seed=23, n=512)
+    got = _cross_only(pos, mass, nd, cross_theta=1.5, order=4)
+    assert not got.overflow, "a capacity overflowed"
+    acc = np.asarray(got.accelerations)
+    p = (mass[:, None] * acc).sum(axis=0)
+    scale = np.abs(mass[:, None] * acc).sum()
+    assert (
+        np.linalg.norm(p) / scale < 1e-14
+    ), f"global momentum residual {np.linalg.norm(p) / scale:.3e}"
+
+
+def test_a_starved_expansion_receive_is_reported():
+    """The one capacity here whose starvation breaks MOMENTUM, not just accuracy.
+
+    Everywhere else an overflow drops a pair before it is evaluated, so both halves
+    vanish together and the global sum stays exact. A far pair's ``+f`` is applied
+    locally the moment it is computed and only the ``-f`` travels, so a dropped
+    received row leaves the ``+f`` with nothing to cancel it. Measured before the
+    default was sized to the worst case: momentum residual 1.7e-2 instead of 2.3e-17.
+
+    So this asserts the flag fires -- a caller who ignores it gets a silently
+    non-conserving force, which is the one thing this lane exists to rule out.
+    """
+    nd = _ndev()
+    pos, mass = _random_system(seed=23, n=512)
+    got = _cross_only(pos, mass, nd, cross_theta=1.5, order=4, far_recv_capacity=1)
+    assert got.overflow, "a starved expansion receive was not reported"
+    assert (
+        got.cross_overflow.all()
+    ), f"not reduced across devices: {got.cross_overflow.tolist()}"
