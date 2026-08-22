@@ -42,7 +42,7 @@ rather than level by level. Keeping one multipole set per cell is what avoids th
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, NamedTuple, Optional
+from typing import Any, Literal, NamedTuple, Optional, overload
 
 import jax
 import jax.numpy as jnp
@@ -951,6 +951,35 @@ def _far_pair_weights(
     # The canonical pair list was doubled into (b->a, a->b); the same weight must
     # ride both halves or the +F/-F cancellation breaks.
     return jnp.concatenate([weights, weights])
+
+
+# Overloads so a caller that does not ask for the parts is not handed a union it
+# then has to narrow. The return shape is keyed entirely on `return_parts`, so the
+# union in the implementation signature is an artefact of writing it once -- see
+# the audit's E.4. The implementation below carries the docstring; pydoclint
+# ignores overload stubs, and beartype only ever sees the implementation.
+@overload
+def mutual_weighted_accelerations(
+    state: MutualFMMState,
+    positions: Array,
+    masses: Array,
+    *,
+    rung: Optional[Array] = ...,
+    level_weights: Optional[Array] = ...,
+    return_parts: Literal[False] = ...,
+) -> Array: ...
+
+
+@overload
+def mutual_weighted_accelerations(
+    state: MutualFMMState,
+    positions: Array,
+    masses: Array,
+    *,
+    rung: Optional[Array] = ...,
+    level_weights: Optional[Array] = ...,
+    return_parts: Literal[True],
+) -> MutualForceResult: ...
 
 
 def mutual_weighted_accelerations(
