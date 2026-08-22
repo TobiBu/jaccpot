@@ -598,6 +598,19 @@ class DistributedMutualConfig:
         the per-device capacity.
     coarse_depth_cap : int
         Owner-propagation rounds up the coarse tree.
+    partitioner : str
+        How particles are assigned to devices -- ``"rcb"`` (the default here) or
+        ``"morton"``. See :func:`jaccpot.distributed.fmm.partition_for_devices`.
+
+        This lane defaults to ``"rcb"`` where the shared partitioner still defaults to
+        ``"morton"``, and the asymmetry is deliberate rather than an oversight: RCB is
+        better in every geometry measured and dramatically so for flattened ones (a
+        thickness-0.4 disk on 4 devices goes from 0.509 of each particle's nearest
+        neighbours living on another device to 0.046), but flipping the shared default
+        moves the domain assignment of every existing distributed run and so
+        invalidates every baseline taken with it. This lane is new enough to have no
+        baselines to invalidate, so it takes the better option now and the shared
+        default can be flipped as its own deliberate step.
     """
 
     leaf_size: int = 32
@@ -612,6 +625,7 @@ class DistributedMutualConfig:
     max_req_leaves: Optional[int] = None
     max_recv_leaves: Optional[int] = None
     coarse_depth_cap: int = 64
+    partitioner: str = "rcb"
 
 
 class DistributedMutualForce(NamedTuple):
@@ -775,7 +789,9 @@ def distributed_mutual_fmm(
         )
 
     leaf = int(cfg.leaf_size)
-    part = partition_for_devices(positions, masses, ndev, leaf_size=leaf)
+    part = partition_for_devices(
+        positions, masses, ndev, leaf_size=leaf, partitioner=cfg.partitioner
+    )
     cap = int(part["cap"])
     n_leaves = max(1, -(-cap // leaf))
     bounds = part["bounds"]
