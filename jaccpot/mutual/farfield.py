@@ -33,7 +33,7 @@ bounds over tree levels, so the whole sweep transposes cleanly under
 from __future__ import annotations
 
 import os
-from typing import Any, Callable, NamedTuple, Optional, Tuple
+from typing import Any, Callable, Literal, NamedTuple, Optional, Tuple, overload
 
 import jax
 import jax.numpy as jnp
@@ -901,6 +901,38 @@ def _l2p_forces(
     )(leaf_locals, offsets)
     contrib = jnp.where(valid[..., None], -grads * m[..., None], 0.0)
     return jnp.zeros_like(positions).at[particles].add(contrib.astype(positions.dtype))
+
+
+# Overloads: the return shape is keyed entirely on `return_multipoles`, so callers that do not
+# set it should not be handed a union to narrow. Generated from this function's
+# own signature, not retyped. The implementation below keeps the docstring --
+# pydoclint ignores stubs and beartype only sees the implementation. Audit E.4.
+@overload
+def mutual_far_field_forces(
+    positions: Array,
+    masses: Array,
+    tree: MutualTreeArrays,
+    *,
+    G: float = ...,
+    far_weights: Optional[Array] = ...,
+    use_pallas: bool = ...,
+    interpret: bool = ...,
+    return_multipoles: Literal[False] = ...,
+) -> Array: ...
+
+
+@overload
+def mutual_far_field_forces(
+    positions: Array,
+    masses: Array,
+    tree: MutualTreeArrays,
+    *,
+    G: float = ...,
+    far_weights: Optional[Array] = ...,
+    use_pallas: bool = ...,
+    interpret: bool = ...,
+    return_multipoles: Literal[True],
+) -> Tuple[Array, Array, Array]: ...
 
 
 def mutual_far_field_forces(
