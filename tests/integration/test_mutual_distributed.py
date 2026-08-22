@@ -36,7 +36,35 @@ import pytest
 jax = pytest.importorskip("jax")
 jnp = pytest.importorskip("jax.numpy")
 
-from jaccpot.mutual.distributed import distributed_mutual_accelerations
+# The LET path needs two things from yggdrax that arrived with it: the reverse-halo
+# return addresses, and the cross walk's `remote_index_in_owner`. Both land together in
+# TobiBu/yggdrax#48. Guarded rather than imported bare because an unguarded import fails
+# at COLLECTION time, which errors the whole test tier rather than skipping one module --
+# CI installs yggdrax from a release, so the two repos are not always in step. The
+# signature is checked as well as the import, so the skip names the real requirement
+# instead of waiting to fail with a TypeError deep inside a shard_map trace.
+try:
+    import inspect
+
+    from yggdrax.distributed.cross_walk import dual_tree_walk_cross_mutual
+
+    from jaccpot.mutual.distributed import distributed_mutual_accelerations
+
+    _needs_yggdrax = (
+        None
+        if "remote_index_in_owner"
+        in inspect.signature(dual_tree_walk_cross_mutual).parameters
+        else "a yggdrax whose cross-mutual walk takes remote_index_in_owner"
+    )
+except ImportError as _exc:  # pragma: no cover - yggdrax predates the LET reverse halo
+    _needs_yggdrax = f"a newer yggdrax ({_exc})"
+
+if _needs_yggdrax is not None:  # pragma: no cover - depends on the installed yggdrax
+    pytest.skip(
+        f"the distributed mutual force needs {_needs_yggdrax} "
+        "-- see TobiBu/yggdrax#48",
+        allow_module_level=True,
+    )
 
 try:
     from jax.experimental.shard_map import shard_map
