@@ -63,7 +63,9 @@
       "--repeats",
       "3",
       "--warmup",
-      "2"
+      "2",
+      "--json-out",
+      "multigpu/weak_scaling_rep2.json"
     ],
     "sweep_parent": true,
     "parent_imported_jax": false,
@@ -87,11 +89,11 @@
         "cap_retries": 1,
         "distribution": "uniform",
         "seed": 0,
-        "median_s": 0.1564707369543612,
-        "min_s": 0.15524225402623415,
-        "max_s": 0.1569208218716085,
+        "median_s": 0.15709936898201704,
+        "min_s": 0.15706310840323567,
+        "max_s": 0.15915678022429347,
         "repeats": 3,
-        "throughput_particles_per_s": 196330.64046320875,
+        "throughput_particles_per_s": 195545.024776748,
         "per_device_work": {
           "self_near_pairs": [
             48234.0,
@@ -117,7 +119,7 @@
         "work_imbalance": 1.0037235343679505,
         "accuracy": {
           "targets": 1024,
-          "rel_l2_vs_direct": 0.000148374204057441,
+          "rel_l2_vs_direct": 0.00014837420405744114,
           "max_abs_err": 16.037555258304565,
           "ref_rms": 14827.056133899647
         },
@@ -209,11 +211,11 @@
         "cap_retries": 2,
         "distribution": "uniform",
         "seed": 0,
-        "median_s": 0.18326987512409687,
-        "min_s": 0.18317374400794506,
-        "max_s": 0.1850376632064581,
+        "median_s": 0.18350435188040137,
+        "min_s": 0.18148497119545937,
+        "max_s": 0.18408475816249847,
         "repeats": 3,
-        "throughput_particles_per_s": 251432.48430107793,
+        "throughput_particles_per_s": 251111.2108667186,
         "per_device_work": {
           "self_near_pairs": [
             44520.0,
@@ -244,7 +246,7 @@
         "work_imbalance": 1.0088660070391497,
         "accuracy": {
           "targets": 1024,
-          "rel_l2_vs_direct": 0.00018227057401956306,
+          "rel_l2_vs_direct": 0.00018227057401956365,
           "max_abs_err": 30.074056139936147,
           "ref_rms": 22224.67200575094
         },
@@ -336,11 +338,11 @@
         "cap_retries": 3,
         "distribution": "uniform",
         "seed": 0,
-        "median_s": 0.20441787503659725,
-        "min_s": 0.20206569973379374,
-        "max_s": 0.20567767694592476,
+        "median_s": 0.20476491237059236,
+        "min_s": 0.20408667623996735,
+        "max_s": 0.2067263531498611,
         "repeats": 3,
-        "throughput_particles_per_s": 300560.7997294772,
+        "throughput_particles_per_s": 300051.40670196095,
         "per_device_work": {
           "self_near_pairs": [
             46784.0,
@@ -376,8 +378,8 @@
         "work_imbalance": 1.0027938421640028,
         "accuracy": {
           "targets": 1024,
-          "rel_l2_vs_direct": 0.00017130020767883142,
-          "max_abs_err": 51.719473696897694,
+          "rel_l2_vs_direct": 0.00017130020767882836,
+          "max_abs_err": 51.719473696895875,
           "ref_rms": 29497.482836273506
         },
         "overflowed": [],
@@ -468,11 +470,11 @@
         "cap_retries": 3,
         "distribution": "uniform",
         "seed": 0,
-        "median_s": 0.2192241088487208,
-        "min_s": 0.2183644501492381,
-        "max_s": 0.21975356433540583,
+        "median_s": 0.21969889802858233,
+        "min_s": 0.21749103488400578,
+        "max_s": 0.221326834987849,
         "repeats": 3,
-        "throughput_particles_per_s": 350326.4326324488,
+        "throughput_particles_per_s": 349569.3455413167,
         "per_device_work": {
           "self_near_pairs": [
             45502.0,
@@ -513,7 +515,7 @@
         "work_imbalance": 1.0072279537622044,
         "accuracy": {
           "targets": 1024,
-          "rel_l2_vs_direct": 0.0001750831633921805,
+          "rel_l2_vs_direct": 0.00017508316339217748,
           "max_abs_err": 27.051569178380305,
           "ref_rms": 36582.45983309779
         },
@@ -605,11 +607,11 @@
         "cap_retries": 4,
         "distribution": "uniform",
         "seed": 0,
-        "median_s": 0.45551376696676016,
-        "min_s": 0.4526877081952989,
-        "max_s": 0.45655935909599066,
+        "median_s": 0.3988362499512732,
+        "min_s": 0.3887953059747815,
+        "max_s": 0.39890197990462184,
         "repeats": 3,
-        "throughput_particles_per_s": 202320.99814169857,
+        "throughput_particles_per_s": 231072.27593093508,
         "per_device_work": {
           "self_near_pairs": [
             45626.0,
@@ -655,7 +657,7 @@
         "work_imbalance": 1.022846840729047,
         "accuracy": {
           "targets": 1024,
-          "rel_l2_vs_direct": 0.00015823578468140124,
+          "rel_l2_vs_direct": 0.0001582357846814004,
           "max_abs_err": 39.151842291423236,
           "ref_rms": 43814.907646316264
         },
