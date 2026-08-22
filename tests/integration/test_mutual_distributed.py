@@ -54,19 +54,30 @@ try:
 
     from jaccpot.mutual.distributed import distributed_mutual_accelerations
 
+    # Check EVERY parameter this module actually passes, not just the one that was
+    # newest when the guard was written. Pinned to `remote_index_in_owner` alone, this
+    # guard sailed straight past a yggdrax that had that but not
+    # `accept_only_leaf_pairs`, and the suite ran and failed 10 of 11 instead of
+    # skipping with a reason -- which is the exact outcome the guard exists to prevent.
+    _walk_params = inspect.signature(dual_tree_walk_cross_mutual).parameters
+    # Each name carries the PR that added it, because "needs a newer yggdrax" is not
+    # actionable and the two came from different ones.
+    _missing = [
+        f"{name} (TobiBu/yggdrax#{pr})"
+        for name, pr in (("remote_index_in_owner", 48), ("accept_only_leaf_pairs", 50))
+        if name not in _walk_params
+    ]
     _needs_yggdrax = (
         None
-        if "remote_index_in_owner"
-        in inspect.signature(dual_tree_walk_cross_mutual).parameters
-        else "a yggdrax whose cross-mutual walk takes remote_index_in_owner"
+        if not _missing
+        else "a yggdrax whose cross-mutual walk takes " + " and ".join(_missing)
     )
 except ImportError as _exc:  # pragma: no cover - yggdrax predates the LET reverse halo
     _needs_yggdrax = f"a newer yggdrax ({_exc})"
 
 if _needs_yggdrax is not None:  # pragma: no cover - depends on the installed yggdrax
     pytest.skip(
-        f"the distributed mutual force needs {_needs_yggdrax} "
-        "-- see TobiBu/yggdrax#48",
+        f"the distributed mutual force needs {_needs_yggdrax}",
         allow_module_level=True,
     )
 
