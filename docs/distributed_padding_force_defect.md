@@ -53,6 +53,14 @@ the output by input row is correct **by accident**. That accident is the whole d
 it made the wrong code work for as long as no per-device count failed to divide
 `leaf_size`.
 
+And it is a *robust* accident, which is why it survived so long. The obvious other way
+to break it -- tied Morton codes, where the host's unstable `np.argsort` and the
+device's `jnp.argsort(stable=True)` could disagree -- cannot: the device receives the
+chunk already in the host's order, and a stable sort leaves tied keys in the order they
+arrive, so it reproduces whatever the host chose. Measured on 64 particles with 55 tied
+codes, and on 16 positions each repeated four times: zero rows displaced in both.
+Padding is the only thing that breaks the identity, and it breaks it completely.
+
 Because the displacement is by a handful of slots *in Morton order*, each particle's
 force was compared against a spatial near-neighbour's -- smooth, plausible, and wrong
 by tens of percent rather than obviously garbage. That is also why the original
@@ -105,6 +113,21 @@ on the separated-cluster IC at defaults (order 3, leaf 8, `ndev=3`): padded aggL
 1.2e-05 against an unpadded control at 1.3e-05, and the same accelerations read
 through the input gid at 1.322194.
 
+**5. The harness itself**, before and after the one-line change, on 3 forced CPU
+devices at leaf 16 with `--accuracy-targets 256`:
+
+| n | count/dev | cap | pad | `rel_l2_vs_direct` before | after |
+| --- | --- | --- | --- | --- | --- |
+| 768 | 256 | 256 | 0 | 8.47210304036577e-16 | 8.47210304036577e-16 |
+| 750 | 250 | 256 | 6 | **9.203e-01** | **9.09e-16** |
+
+The unpadded point is bit-identical across the change, to every digit and in
+`max_abs_err` too: the fix cannot move a number that was already right. The padded
+point's pre-fix `max_abs_err / ref_rms` is 866.4 / 402.3 = **2.15**, which is the
+"per-particle worst case ~2.0" the original report measured on a completely different
+problem size -- the signature of a Morton-neighbour mismatch, not of a size-dependent
+numerical defect.
+
 ## What changed
 
 - **`jaccpot.distributed.scatter_to_input_order`** -- the reassembly, promoted out of
@@ -126,17 +149,30 @@ through the input gid at 1.322194.
 - **Docstrings** on `partition_for_devices` and `make_force_evaluator`, which
   documented the contract but not the trap.
 - **`bench/multigpu/harness.py`** and
-  `bench/differentiability/distributed_grad_correctness.py` (on `paper/jaccpot-i`,
-  where they live) -- routed through the helper.
+  `bench/differentiability/distributed_grad_correctness.py` -- the defect itself, and
+  the same misuse beside it. They live on `paper/jaccpot-i`, so they are fixed there
+  on their own branch, reading the returned gid inline rather than importing the
+  helper: it is not on that branch yet. Route them through it when the two meet.
 
-## What still needs doing
+## What this unblocks
 
-- **Re-measure the accuracy column** of any padded strong-scaling point. The timings
-  do not need re-running. Figure 08 is unblocked without changing a per-device count.
-- The original report's "older results are suspect" applies only to accuracy numbers
-  taken through this harness on padded configurations. The 21 846 and 13 108 per-device
-  strong-scaling points it flags were valid measurements of speed; their accuracy
-  columns were not.
+**Nothing published needs re-measuring.** Audited every record in
+`bench/results/multigpu/` (7 files, 36 records): all of them were taken at
+`n=30720`, whose per-device count is a leaf multiple at every `ndev` in the sweep
+(15360, 10240, 7680, 6144, 5120 at leaf 128). So `cap == count` throughout, no point
+was padded, and every accuracy entry was read back correctly. Their 8e-05 to 1.5e-04
+rel-L2 is the real number.
+
+What changes is that the constraint disappears. `n=30720` was picked *because* it
+divides cleanly -- the original report's suggestion 3, applied as a workaround -- and
+strong scaling no longer has to choose N that way. Any N at any device count now
+reports its true accuracy.
+
+The original report's "older results are suspect" was too broad in one direction and
+too narrow in another: no *force* was ever wrong, on any configuration, so every
+timing, throughput and work-count number ever taken stands; but any accuracy number
+read off a padded configuration during the investigation was wrong, and those are the
+ones in the report's own table.
 
 ## The lesson
 
