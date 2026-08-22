@@ -23,6 +23,7 @@ from .fmm import (
     distributed_fmm_accelerations,
     make_force_evaluator,
     partition_for_devices,
+    scatter_to_input_order,
 )
 
 __all__ = [
@@ -31,4 +32,5 @@ __all__ = [
     "distributed_fmm_accelerations",
     "make_force_evaluator",
     "partition_for_devices",
+    "scatter_to_input_order",
 ]

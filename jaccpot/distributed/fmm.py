@@ -115,6 +115,7 @@ __all__ = [
     "make_force_evaluator",
     "partition_for_devices",
     "resolve_grad_halo_exchange",
+    "scatter_to_input_order",
 ]
 
 # Reverse-pass tiling for the differentiable fused near field. Mirrors the
@@ -422,8 +423,52 @@ def partition_for_devices(
     id array is threaded through so distributed forces can be scattered back to
     the input order.
 
-    Returns a dict with the flat ``(ndev*cap, ...)`` arrays ready for
-    ``shard_map`` plus ``cap``, ``counts`` and ``bounds``.
+    THE RETURNED ``gid_flat`` IS NOT A READOUT MAP for the force. It names the rows
+    of *this* layout; the per-device pipeline re-Morton-sorts its own shard and
+    returns the accelerations in that tree order, together with the ``gid``
+    permuted to match. Reassemble with the ``gid`` the evaluator returns -- what
+    :func:`distributed_fmm_accelerations` does below, and what
+    :func:`make_force_evaluator`'s contract says.
+
+    The trap is that the two orders coincide whenever ``cap == count``: the shard is
+    handed over already in Morton order, so the tree's permutation is the identity
+    and reading the output by input row is right by accident. Padding breaks it.
+    The rows go at ``positions[chunk[0]]``, the device's *first* particle in Morton
+    order and hence its smallest Morton code, so the tree build sorts them to the
+    front and displaces every real particle after the first by the padding count.
+    A caller that reused ``gid_flat`` then compares each particle's force against a
+    Morton-neighbour's -- plausible, smooth, and wrong by tens of percent, with no
+    overflow counter able to see it. Measured, and pinned in
+    ``tests/distributed/test_distributed_padded_partition.py``.
+
+    Parameters
+    ----------
+    positions : np.ndarray
+        Particle positions ``[N, 3]`` in input order.
+    masses : np.ndarray
+        Particle masses ``[N]`` in input order.
+    ndev : int
+        Number of devices to split across.
+    leaf_size : int
+        Local-tree leaf size. ``cap`` is rounded up to a multiple of it, which is
+        where the padding comes from.
+    bounds : tuple | None
+        Global ``(min_corner, max_corner)`` box for the Morton encoding. Derived
+        from ``positions`` when ``None``, with the same relative pad the per-device
+        ``global_bounds`` applies, so the two agree on the code of every particle.
+
+    Returns
+    -------
+    dict
+        The flat ``(ndev * cap, ...)`` arrays ready for ``shard_map``
+        (``pos_flat``, ``mass_flat``, ``gid_flat``) plus ``counts``, ``cap``,
+        ``bounds``, ``n`` and ``ndev``.
+
+    Raises
+    ------
+    ValueError
+        If there are fewer particles than devices, which leaves a device with no
+        real particle to pad from.
     """
 
     positions = np.asarray(positions)
@@ -468,6 +513,86 @@ def partition_for_devices(
         "n": n,
         "ndev": ndev,
     }
+
+
+def scatter_to_input_order(
+    values: Any,
+    gid: Any,
+    n: int,
+) -> np.ndarray:
+    """Reassemble a per-device result into the original input particle order.
+
+    ``values`` is any per-row quantity the ``shard_map`` pipeline returns -- the
+    accelerations, a potential, a per-particle diagnostic -- laid out over the
+    ``(ndev * cap, ...)`` padded rows. ``gid`` is the global-id array **returned
+    beside it** by :func:`make_force_evaluator`'s callable, with ``-1`` on padding
+    rows. Every real particle must appear exactly once.
+
+    This exists because hand-rolling the scatter is how the padding defect of
+    ``docs/distributed_padding_force_defect.md`` happened: four call sites wrote the
+    same loop, and one of them reached for the ``gid_flat`` that went *in* rather
+    than the ``gid`` that came *out*. Those two arrays agree whenever no device is
+    padded, so the wrong one is right until a per-device count stops dividing
+    ``leaf_size`` -- and then it reads every particle's force off a Morton
+    neighbour, which is smooth, plausible and wrong by tens of percent. Prefer this
+    helper to writing the loop again.
+
+    Host-side NumPy, like :func:`distributed_fmm_accelerations`: not traceable, and
+    not meant to be. Take gradients through the evaluator, not through the
+    reassembly.
+
+    Parameters
+    ----------
+    values : Any
+        Per-row values in the padded per-device order, shape ``[ndev * cap, ...]``.
+        Converted with ``np.asarray``.
+    gid : Any
+        Global id per row, shape ``[ndev * cap]`` or ``[ndev * cap, 1]``; ``-1``
+        marks a padding row. Must be the array the evaluator returned.
+    n : int
+        Number of input particles, i.e. the number of rows in the result.
+
+    Returns
+    -------
+    np.ndarray
+        ``[n, ...]`` in the input particle order, float64 so a float32 force is
+        never the noisy side of a later comparison.
+
+    Raises
+    ------
+    ValueError
+        If ``values`` and ``gid`` disagree on the row count, or a global id falls
+        outside ``[0, n)``.
+    RuntimeError
+        If any input particle is missing from the result -- a padding or capacity
+        bug, and never something to paper over with a partial answer.
+    """
+
+    values_arr = np.asarray(values)
+    gid_arr = np.asarray(gid).reshape(-1).astype(np.int64)
+    if values_arr.shape[0] != gid_arr.shape[0]:
+        raise ValueError(
+            f"values has {values_arr.shape[0]} rows but gid has {gid_arr.shape[0]}; "
+            "they must be the two arrays the same evaluator call returned"
+        )
+
+    rows = np.flatnonzero(gid_arr >= 0)
+    ids = gid_arr[rows]
+    if ids.size and (ids.max() >= n or ids.min() < 0):
+        raise ValueError(
+            f"global ids out of range for n={n}: [{ids.min()}, {ids.max()}]"
+        )
+
+    out = np.zeros((n,) + values_arr.shape[1:], np.float64)
+    out[ids] = values_arr[rows]
+    seen = np.zeros(n, bool)
+    seen[ids] = True
+    if not seen.all():
+        raise RuntimeError(
+            f"{int((~seen).sum())} particles missing from the distributed result "
+            "(padding/capacity bug)"
+        )
+    return out
 
 
 def _chunked_real_m2l_accumulate(
@@ -1652,7 +1777,12 @@ def make_force_evaluator(
 
     Gradients are w.r.t. the *padded, per-device-partitioned* layout that
     :func:`partition_for_devices` produces, and ``accel`` rows are in that same
-    per-device Morton order -- map them back with the returned ``gid``.
+    per-device Morton order -- map them back with the returned ``gid``, never with
+    the ``gid_flat`` that was passed in. The two agree only while ``cap == count``;
+    once a device is padded the tree build sorts the padding rows to the front and
+    the input map is silently off by the padding count. See
+    :func:`partition_for_devices` for the mechanism and
+    ``docs/distributed_padding_force_defect.md`` for what it cost.
 
     ``l2l_num_levels`` (differentiable mode only) is the static level bound for
     the L2L cascade, whose default is safe but loose; see the note at its use
@@ -1849,22 +1979,9 @@ def distributed_fmm_accelerations(
         # and OOMs on connected ICs; see with_selective_scaled_caps.
         config = config.with_selective_scaled_caps(diag_o, cap_scale_factor)
         attempt += 1
-    accel_o = np.asarray(accel_o)
-    gid_o = np.asarray(gid_o).reshape(-1).astype(np.int64)
-
-    n = part["n"]
-    accel = np.zeros((n, 3), np.float64)
-    seen = np.zeros(n, bool)
-    for row in range(accel_o.shape[0]):
-        g = gid_o[row]
-        if g >= 0:
-            accel[g] = accel_o[row]
-            seen[g] = True
-    if not seen.all():
-        raise RuntimeError(
-            f"{int((~seen).sum())} particles missing from the distributed result "
-            "(padding/capacity bug)"
-        )
+    # The evaluator's OWN gid, not ``part["gid_flat"]``: the two agree only while no
+    # device is padded. See scatter_to_input_order.
+    accel = scatter_to_input_order(accel_o, gid_o, total_n)
 
     diag = {name: diag_o[:, i] for i, name in enumerate(DIAG_FIELDS)}
     diag["overflow"] = overflow
