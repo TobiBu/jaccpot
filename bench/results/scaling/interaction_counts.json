@@ -9,7 +9,8 @@
       131072,
       262144,
       524288,
-      1048576
+      1048576,
+      2097152
     ],
     "theta": 0.6,
     "order": 4,
@@ -25,32 +26,48 @@
     "counts_from": "get_runtime_diagnostics(): recent_dual_far_pair_count (M2L) and recent_dual_neighbor_count (P2P)"
   },
   "meta": {
-    "git_sha": "fdb14ef825c03aac6d7824712b03b9a7b0e4e364",
-    "git_branch": "paper/jaccpot-i-tranche1",
+    "git_sha": "6122658d01af1d85b2b2159e34bdc90a5d76fcd2",
+    "git_branch": "paper/jaccpot-i",
     "git_dirty": false,
-    "jax_version": "0.9.0.1",
+    "jax_version": "0.10.2",
     "jax_backend": "gpu",
     "devices": [
       "cuda:0"
     ],
     "device_kind": "NVIDIA A100-PCIE-40GB",
     "jax_enable_x64": true,
-    "cuda_visible_devices": "6",
+    "cuda_visible_devices": "7",
     "argv": [
       "--n-min-exp",
       "12",
       "--n-max-exp",
-      "20",
+      "21",
       "--n-steps",
-      "9",
+      "10",
       "--order",
       "4",
       "--theta",
       "0.6",
+      "--basis",
+      "real",
+      "--preset",
+      "accurate",
       "--leaf-size",
       "32",
+      "--distribution",
+      "uniform_cube",
       "--fit-min-n",
-      "16384"
+      "16384",
+      "--softening",
+      "0.001",
+      "--seed",
+      "0",
+      "--dtype",
+      "float32",
+      "--gpu-select",
+      "least-used",
+      "--json-out",
+      "/tmp/claude-2701/-export-home-tbuck-jaccpot/ac72b95d-4670-4c6c-82b1-035f9fcf1efe/scratchpad/fig05_ext.json"
     ]
   },
   "data": {
@@ -153,41 +170,53 @@
       },
       {
         "n": 1048576,
-        "error": "RESOURCE_EXHAUSTED: Out of memory while trying to allocate 8.00GiB."
+        "far_pairs": 9628530,
+        "near_pairs": 12481366,
+        "far_work": 240713250,
+        "near_work": 12814473216,
+        "coeffs_per_pair": 25,
+        "nodes": 65535,
+        "leaves": 32768,
+        "far_pairs_per_particle": 9.18248176574707,
+        "near_pairs_per_particle": 11.903158187866211
+      },
+      {
+        "n": 2097152,
+        "error": "jaccpot could not fit N=2097152 with preset=None, leaf_size=32, max_order=4, dtype=None.\nDevice: 16.75 GiB in use of 29.62 GiB.\nLargest statically-sized buffers for this configuration:\n      0.03 GiB  leaf-major particle payload (num_leaves x leaf x 4)\n           sized by: leaf_size\n      0.02 GiB  "
       }
     ],
     "fits": {
       "far_pairs": {
-        "exponent": 1.3172226538018699,
-        "intercept": -2.0043690572916883,
-        "r_squared": 0.9962192416055459,
-        "n_points": 6,
+        "exponent": 1.290021691209165,
+        "intercept": -1.7089854856605105,
+        "r_squared": 0.996796264034518,
+        "n_points": 7,
         "fit_min_n": 16384,
-        "fit_max_n": 524288
+        "fit_max_n": 1048576
       },
       "near_pairs": {
-        "exponent": 1.2015647828725602,
-        "intercept": -0.18814185113195311,
-        "r_squared": 0.999519724078964,
-        "n_points": 6,
+        "exponent": 1.1815727998334327,
+        "intercept": 0.028957206813565856,
+        "r_squared": 0.9992129216379181,
+        "n_points": 7,
         "fit_min_n": 16384,
-        "fit_max_n": 524288
+        "fit_max_n": 1048576
       },
       "far_work": {
-        "exponent": 1.3172226538018705,
-        "intercept": 1.2145067675765104,
-        "r_squared": 0.9962192416055459,
-        "n_points": 6,
+        "exponent": 1.290021691209166,
+        "intercept": 1.5098903392076852,
+        "r_squared": 0.996796264034518,
+        "n_points": 7,
         "fit_min_n": 16384,
-        "fit_max_n": 524288
+        "fit_max_n": 1048576
       },
       "near_work": {
-        "exponent": 1.2007766616917974,
-        "intercept": 6.756210130575889,
-        "r_squared": 0.9995256833891062,
-        "n_points": 6,
+        "exponent": 1.1808878442538495,
+        "intercept": 6.972188881707177,
+        "r_squared": 0.9992211745007763,
+        "n_points": 7,
         "fit_min_n": 16384,
-        "fit_max_n": 524288
+        "fit_max_n": 1048576
       }
     }
   }

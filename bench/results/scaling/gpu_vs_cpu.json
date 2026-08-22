@@ -25,10 +25,10 @@
     "shared_host": "measured on a shared 72-core / 8-GPU host; the CPU arm is not a dedicated-machine measurement and the ratio is indicative"
   },
   "meta": {
-    "git_sha": "92ef926ed3a6381efebc20ddc039e2b56ca53213",
-    "git_branch": "paper/jaccpot-i-tranche1",
-    "git_dirty": true,
-    "jax_version": "0.9.0.1",
+    "git_sha": "22dcdeb5bbf6b1c555cd1ee3fed629cf928878a2",
+    "git_branch": "paper/jaccpot-i",
+    "git_dirty": false,
+    "jax_version": "0.10.2",
     "jax_backend": "gpu",
     "devices": [
       "cuda:0",
@@ -46,36 +46,54 @@
     "argv": [
       "--n",
       "4096,16384,65536,262144,1048576",
+      "--order",
+      "4",
+      "--theta",
+      "0.6",
+      "--basis",
+      "real",
+      "--preset",
+      "large_n_gpu",
+      "--leaf-size",
+      "64",
       "--repeats",
       "8",
       "--warmup",
       "2",
-      "--leaf-size",
-      "64",
+      "--softening",
+      "0.001",
       "--cpu-max-n",
-      "65536"
+      "65536",
+      "--seed",
+      "0",
+      "--dtype",
+      "float32",
+      "--gpu-select",
+      "least-used",
+      "--json-out",
+      "/tmp/claude-2701/-export-home-tbuck-jaccpot/ac72b95d-4670-4c6c-82b1-035f9fcf1efe/scratchpad/fig07_new.json"
     ],
     "gpu_worker_meta": {
-      "git_sha": "92ef926ed3a6381efebc20ddc039e2b56ca53213",
-      "git_branch": "paper/jaccpot-i-tranche1",
-      "git_dirty": true,
-      "jax_version": "0.9.0.1",
+      "git_sha": "22dcdeb5bbf6b1c555cd1ee3fed629cf928878a2",
+      "git_branch": "paper/jaccpot-i",
+      "git_dirty": false,
+      "jax_version": "0.10.2",
       "jax_backend": "gpu",
       "devices": [
         "cuda:0"
       ],
       "device_kind": "NVIDIA A100-PCIE-40GB",
       "jax_enable_x64": true,
-      "cuda_visible_devices": "6"
+      "cuda_visible_devices": "7"
     },
     "cpu_worker_meta": {
-      "git_sha": "92ef926ed3a6381efebc20ddc039e2b56ca53213",
-      "git_branch": "paper/jaccpot-i-tranche1",
-      "git_dirty": true,
-      "jax_version": "0.9.0.1",
+      "git_sha": "22dcdeb5bbf6b1c555cd1ee3fed629cf928878a2",
+      "git_branch": "paper/jaccpot-i",
+      "git_dirty": false,
+      "jax_version": "0.10.2",
       "jax_backend": "cpu",
       "devices": [
-        "TFRT_CPU_0"
+        "cpu:0"
       ],
       "device_kind": "cpu",
       "jax_enable_x64": true,
@@ -86,42 +104,42 @@
     "records": [
       {
         "n": 4096,
-        "gpu_min_s": 0.17020488809794188,
-        "cpu_min_s": 0.05155118461698294,
-        "gpu_std_s": 0.006883807279445107,
-        "cpu_std_s": 0.0027602161510314137,
-        "speedup": 0.3028772275172178,
+        "gpu_min_s": 0.015447045210748911,
+        "cpu_min_s": 0.12856366392225027,
+        "gpu_std_s": 0.00036064131438460367,
+        "cpu_std_s": 0.0028848996593758,
+        "speedup": 8.322864481084611,
         "cpu_skipped": null,
         "gpu_error": null,
         "cpu_error": null
       },
       {
         "n": 16384,
-        "gpu_min_s": 0.20758980512619019,
-        "cpu_min_s": 0.43447298649698496,
-        "gpu_std_s": 0.04342646372792596,
-        "cpu_std_s": 0.008206758661481704,
-        "speedup": 2.09293990248161,
+        "gpu_min_s": 0.015481155831366777,
+        "cpu_min_s": 1.1762257851660252,
+        "gpu_std_s": 0.0024494476709951553,
+        "cpu_std_s": 0.025656308898612618,
+        "speedup": 75.9779048785778,
         "cpu_skipped": null,
         "gpu_error": null,
         "cpu_error": null
       },
       {
         "n": 65536,
-        "gpu_min_s": 0.21036947891116142,
-        "cpu_min_s": 2.5163426883518696,
-        "gpu_std_s": 0.011873438844335307,
-        "cpu_std_s": 0.13787930840011065,
-        "speedup": 11.96153881911033,
+        "gpu_min_s": 0.032485116738826036,
+        "cpu_min_s": 7.357398774009198,
+        "gpu_std_s": 0.006746629486477284,
+        "cpu_std_s": 0.0442864083416255,
+        "speedup": 226.48521885148944,
         "cpu_skipped": null,
         "gpu_error": null,
         "cpu_error": null
       },
       {
         "n": 262144,
-        "gpu_min_s": 0.29376096557825804,
+        "gpu_min_s": 0.09769237414002419,
         "cpu_min_s": null,
-        "gpu_std_s": 0.010145697339537327,
+        "gpu_std_s": 0.0010059277209882689,
         "cpu_std_s": null,
         "speedup": null,
         "cpu_skipped": "above --cpu-max-n",
@@ -136,7 +154,7 @@
         "cpu_std_s": null,
         "speedup": null,
         "cpu_skipped": "above --cpu-max-n",
-        "gpu_error": "RESOURCE_EXHAUSTED: Out of memory while trying to allocate 4.00GiB.",
+        "gpu_error": "RESOURCE_EXHAUSTED: Out of memory while trying to allocate 2.00GiB. [executable_name='jit__fastlane_body'] [tf-allocator-allocation-error='']",
         "cpu_error": null
       }
     ]
