@@ -390,6 +390,85 @@ jobs:
         # Override the default addopts marker to also drop `slow`.
         run: pytest -n 2 -m "not slow and not experimental"
 
+  test-distributed-mutual:
+    # The ONLY job that runs the distributed mutual FMM, because it is the only
+    # one with more than one device.
+    #
+    # `tests/integration/test_mutual_distributed.py` is guarded by
+    # `skipif(device_count() < 2)`, and every other job leaves JAX on its single
+    # default CPU device -- so before this job existed the suite was collected and
+    # skipped on every single run, and a green CI said nothing at all about the
+    # lane. That is not hypothetical: the cross-domain ownership rule was wrong for
+    # a merged LET coarse tree (two devices numbering the same remote node
+    # differently, so they disagreed about who owns a pair), and it was caught by
+    # hand locally, not here. The force was 8.6e-3 wrong while global momentum
+    # stayed at 3.4e-17 and the cross-pair count stayed exactly right, so nothing
+    # cheaper than this suite would have noticed.
+    #
+    # `--xla_force_host_platform_device_count=4` fakes four CPU devices, which is
+    # enough for the collectives to be real: the halo import and the reverse halo
+    # both go through a ragged all-to-all, and the pair partition needs at least
+    # two domains to have anything to partition. It is NOT a substitute for real
+    # multi-GPU -- NCCL is not exercised here -- but it is what makes the
+    # correctness criteria (force vs an exact direct sum, GLOBAL momentum, overflow
+    # reduced across devices) run at all.
+    #
+    # Its own job rather than an env var on an existing one: the flag changes the
+    # device topology for the whole process, so folding it into a shared tier would
+    # silently re-target every other test in that tier.
+    #
+    # Small on purpose -- 16 particles per device, seconds of compute -- so it adds
+    # no memory pressure to a workflow already sharded against a 16 GB ceiling.
+    runs-on: ubuntu-latest
+    # Measured 6:09 for the four tests serially on a fast workstation; hosted
+    # runners are the slower side of that, and every test compiles its own
+    # shard_map program. 35 leaves room for a 3-5x runner penalty without being
+    # so wide it stops detecting a real hang.
+    timeout-minutes: 35
+    env:
+      JAX_ENABLE_X64: "1"
+      JAX_PLATFORMS: cpu
+      XLA_FLAGS: --xla_force_host_platform_device_count=4
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+      - name: Install package + dev tools
+        run: |
+          python -m pip install --upgrade pip
+          pip install git+https://github.com/TobiBu/yggdrax.git
+          pip install -e ".[dev]"
+      - name: Distributed mutual FMM suite
+        # `-n 0`: four host devices live in ONE process and each test builds its
+        # own mesh, so serial keeps the device set unambiguous.
+        #
+        # `-rs` prints skip reasons, which the next step needs in the log: a
+        # module-level skip means the installed yggdrax predates the LET reverse
+        # halo, and that has to be readable rather than inferred.
+        run: |
+          set -o pipefail
+          pytest tests/integration/test_mutual_distributed.py -n 0 -rs -v \
+            | tee pytest-distributed-mutual.txt
+      - name: Fail if the suite was skipped rather than run
+        # A skipped suite PASSES, and a green-but-vacuous job is worse than a red
+        # one -- it is the exact state this job was added to end. Reuses the log
+        # from the step above rather than running the suite twice.
+        #
+        # Keyed on `-rs`'s SKIPPED lines, not on parsing a "N passed" summary:
+        # `addopts` already carries `-q`, so the summary line's presence depends on
+        # how the two verbosity flags happen to cancel, and a guard that silently
+        # stops matching is the failure mode being guarded against. Whether the
+        # tests PASSED is the previous step's exit code, not this step's business.
+        run: |
+          if grep -qE "^SKIPPED|no tests ran" pytest-distributed-mutual.txt; then
+            echo "::error::the distributed mutual suite was skipped, not run -- see the reason in the previous step"
+            exit 1
+          fi
+
   benchmark-guard:
     runs-on: ubuntu-latest
     env:

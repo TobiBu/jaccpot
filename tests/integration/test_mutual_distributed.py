@@ -38,11 +38,15 @@ jnp = pytest.importorskip("jax.numpy")
 
 # The LET path needs two things from yggdrax that arrived with it: the reverse-halo
 # return addresses, and the cross walk's `remote_index_in_owner`. Both land together in
-# TobiBu/yggdrax#48. Guarded rather than imported bare because an unguarded import fails
-# at COLLECTION time, which errors the whole test tier rather than skipping one module --
-# CI installs yggdrax from a release, so the two repos are not always in step. The
-# signature is checked as well as the import, so the skip names the real requirement
-# instead of waiting to fail with a TypeError deep inside a shard_map trace.
+# TobiBu/yggdrax#48.
+#
+# Guarded rather than imported bare because an unguarded import fails at COLLECTION
+# time, which errors the whole test tier rather than skipping one module. CI installs
+# yggdrax from `git+.../yggdrax.git`, i.e. its default branch -- so the window this
+# closes is a jaccpot PR that needs a yggdrax change which has not merged yet, which is
+# exactly the window this test was written in. The signature is checked as well as the
+# import, so the skip names the real requirement instead of waiting to fail with a
+# TypeError deep inside a shard_map trace.
 try:
     import inspect
 
