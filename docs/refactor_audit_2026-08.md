@@ -1944,6 +1944,66 @@ common shape, which is exactly why a real defect would be here rather than in th
 mechanical buckets -- and why "306 errors, no bugs found" must be read as *not
 yet read*, not as *clean*.
 
+### E.5 The `yggdrax` "environment artefact" was hiding real checks
+
+E.2 and E.4 both describe ~96-100 `reportMissingImports` as an artefact of this
+machine -- `yggdrax` installed editable, pointing at a sibling working tree,
+which pyright does not follow -- and both subtract them to reach a "real" count.
+That was wrong twice over, and one line of configuration shows how.
+
+`[tool.pyright]` now sets `extraPaths = ["../yggdrax"]`. It is *relative to
+`pyproject.toml`*, so it encodes the layout ARCHITECTURE already documents
+("Sibling codebases sharing these conventions: `astronomix`, `yggdrax`,
+`nornax`") rather than one machine's paths, and it is the same assumption
+`tests/conftest.py::_find_sibling_checkout` has always made. Measured:
+
+| | count |
+|---|---|
+| before | 293 total, 100 `reportMissingImports` |
+| after | **210 total, 1 `reportMissingImports`** |
+| distinct errors resolved | 125 |
+| distinct errors **newly visible** | **44** |
+
+The second row is the point. Subtracting the import failures treated them as
+*noise*; they were **suppression**. An unresolved import makes every symbol from
+it `Unknown`, and `Unknown` is assignable to anything, so every call that crossed
+the jaccpot/yggdrax boundary was silently unchecked. Resolving the import removed
+125 errors and switched 44 checks back on. So the "191 real errors" figure E.4's
+successor notes quote was wrong in **both** directions: inflated by artefacts
+that were not code, and deflated by checks that were not running.
+
+**What the 44 are, and none of them is fixed here.** They are their own work, and
+in three cases their own decision:
+
+* `distributed/fmm.py` and `mutual/distributed.py` account for 21, mostly
+  `Tree`-shaped values typed `object` and `str` passed where `MACType` is
+  declared. These are the same shape as E.4 bucket E, in the two files that are
+  hardest to test locally.
+* **A second `check_vma` site**, in `mutual/distributed.py`, matching the one
+  #200 flagged in `distributed/fmm.py`. The `ImportError` fallback trap described
+  there applies to both.
+* **An unguarded `Optional` in `downward/local_expansions.py:1346, 1353, 1360`.**
+  `raw_second`, `raw_third` and `raw_fourth` are `Optional[Array]`, but the guard
+  before they are used tests `order_int >= 2/3/4` -- only `raw_mass` is
+  None-checked, through `raw_supplied`. A caller supplying `raw_mass` at order 2
+  without `raw_second` puts `None` into `_quadrupole_from_second`. The only
+  in-repo caller supplies it, so this is an unchecked precondition rather than a
+  live defect; it is in `downward/`, so it gets its own change and its own test.
+* `nornax_adapter.py` unpacks `rebuild_static_radix_tree_from_template`, whose
+  return is keyed on `return_reordered` -- the same flag-keyed union shape E.4
+  bucket F describes, except the producer is in **yggdrax**, so the `@overload`
+  belongs there.
+
+**The cost, stated rather than discovered later.** With `extraPaths`, pyright's
+output depends on the freshness of the sibling checkout. Measured today against a
+`yggdrax` at `cb9cfe8` -- 22 commits behind its own `main` -- three symbols
+(`dual_tree_walk_cross_mutual`, `single_owner_domain`,
+`yggdrax.distributed.reverse_halo`) report as unknown even though they exist
+upstream. That is a *better* failure than the blanket unresolved-import it
+replaces, because it names what is missing, but it is still environment-
+dependent: a stale sibling reads as a code error. CI, which installs `yggdrax`
+normally, is unaffected either way.
+
 ### E.3 Recommended annotation policy, if you want one
 
 A full `Float[Array, "..."]` conversion of 1534 sites is not a refactor pass; it is a project.
