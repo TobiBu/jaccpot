@@ -64,7 +64,7 @@ from yggdrax.distributed.let import (
 from yggdrax.distributed.local_tree import sanitize_padding
 from yggdrax.distributed.partition import global_bounds
 from yggdrax.dtypes import INDEX_DTYPE, complex_dtype_for_real
-from yggdrax.interactions import DualTreeTraversalConfig
+from yggdrax.interactions import DualTreeTraversalConfig, MACType
 from yggdrax.morton import morton_encode_impl
 from yggdrax.tree import (
     Tree,
@@ -203,7 +203,12 @@ class DistributedFMMConfig:
     # dehnen bounding-SPHERE MAC extents (the correct multipole-radius bound, matching
     # the single-GPU fast lane and required for stable multi-step use). "bh" (box) is
     # cheaper but under-bounds the source radius; keep it only for single-shot use.
-    mac_type: str = "dehnen"
+    # `MACType`, not `str`: yggdrax declares it `Literal["bh", "engblom",
+    # "dehnen"]` and every consumer of this field passes it straight there, so
+    # `str` was wider than anything that works. Narrowing the annotation changes
+    # nothing at runtime and makes a bad value a type error instead of a failure
+    # inside the traversal.
+    mac_type: MACType = "dehnen"
     # Far-field expansion basis: "real" (Dehnen no-sqrt2, DEFAULT) or "solidfmm" (complex).
     # "real" is the per-device far field converged onto the single-GPU fast-lane path
     # (memory-lighter, and unlocks the fused real M2L Pallas kernel when

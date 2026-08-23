@@ -778,6 +778,18 @@ class StrictRunMixin(_EngineBase):
                 return jnp.asarray(prepared_in.positions_sorted)[
                     prepared_in.inverse_permutation
                 ] * jnp.asarray(0.0, dtype=state_in.dtype)
+            # `evaluate_large_n_state` takes only the large-N state. The profile
+            # guard at the top of `strict_run_v2` already admits nothing else --
+            # verified by calling the method on a non-large-N engine, which raises
+            # there and never reaches this closure -- but the parameter carries the
+            # wider union, so the requirement is stated where it is relied on.
+            if not isinstance(prepared_in, LargeNPreparedState):
+                raise RuntimeError(
+                    "strict_run_v2 reached the large-N self-evaluation with a "
+                    f"{type(prepared_in).__name__}. Only the large_n_gpu "
+                    "production profile gets this far, so this is an internal "
+                    "invariant, not a configuration error."
+                )
             return jnp.asarray(
                 evaluate_large_n_state(
                     self,
@@ -829,6 +841,15 @@ class StrictRunMixin(_EngineBase):
             if diag_mode in {"integrator_only", "eval_only"}:
                 prepared_new = prepared_in
             else:
+                # Same invariant as `_evaluate_self` above, restated at the
+                # second place that relies on it.
+                if not isinstance(prepared_in, LargeNPreparedState):
+                    raise RuntimeError(
+                        "strict_run_v2 reached the large-N refresh with a "
+                        f"{type(prepared_in).__name__}. Only the large_n_gpu "
+                        "production profile gets this far, so this is an "
+                        "internal invariant, not a configuration error."
+                    )
                 prepared_new = self._refresh_large_n_same_topology(
                     prepared_in,
                     state_position[:, 0, :],
