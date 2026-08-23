@@ -92,6 +92,20 @@ def _parse_args() -> argparse.Namespace:
         ),
     )
     p.add_argument(
+        "--mode",
+        default="auto",
+        choices=("auto", "jit", "eager", "step"),
+        help=(
+            "Dispatch arm to time. 'auto' (default, historical behaviour) tries an "
+            "outer jax.jit and falls back to eager. 'step' is the route out of the "
+            "compile wall documented in docs/fig12_autodiff_overhead_blocked.md: "
+            "build the state once, then take a compiled f(positions, masses) from "
+            "differentiable_step_fn and differentiate *that*, so the compile is "
+            "paid once at setup and the timed region is execution rather than "
+            "tracing. Prefer 'step' for a publishable ratio"
+        ),
+    )
+    p.add_argument(
         "--no-jit",
         action="store_true",
         help=(
@@ -217,10 +231,34 @@ def main() -> int:
                             state, p, m, grad_config=grad_config
                         )
 
+                    if mode == "step":
+                        # Route 1 of docs/fig12_autodiff_overhead_blocked.md. The
+                        # compile is paid here, at setup, via compile_now -- so it
+                        # is outside the timed region on BOTH arms rather than
+                        # being amortised unevenly between them.
+                        step_fn = fmm.differentiable_step_fn(
+                            state,
+                            grad_config=grad_config,
+                            compile_now=(positions, masses),
+                        )
+
+                        def accel(p, m):  # noqa: F811 -- the step-mode forward
+                            return step_fn(p, m)
+
                     def scalar(p, m):
                         return jnp.sum(probe * accel(p, m))
 
-                    fwd: Any = jax.jit(accel) if mode == "jit" else accel
+                    # Both arms must cross the SAME jit boundary or the ratio is
+                    # not a ratio. In step mode the reverse is jax.jit over a
+                    # function that calls the compiled step, which JAX inlines into
+                    # one module; timing the standalone step against that compares a
+                    # bare compiled call to a fused one, and measured on the complex
+                    # basis at N=4096 it produced ratios below 1.0 -- a
+                    # forward+backward apparently cheaper than its own forward.
+                    # Wrapping the forward the same way restores the symmetry. The
+                    # compile is still outside the timed region on both arms: the
+                    # inner one via compile_now, the outer via block_until_ready.
+                    fwd: Any = jax.jit(accel) if mode in ("jit", "step") else accel
                     jax.block_until_ready(fwd(positions, masses))
                     t_fwd, _, s_fwd = T.time_min_repeat(
                         lambda: fwd(positions, masses),
@@ -244,7 +282,9 @@ def main() -> int:
                             else 1 if wrt == "masses" else (0, 1)
                         )
                         vg_eager = jax.value_and_grad(scalar, argnums=argnums)
-                        vg: Any = jax.jit(vg_eager) if mode == "jit" else vg_eager
+                        vg: Any = (
+                            jax.jit(vg_eager) if mode in ("jit", "step") else vg_eager
+                        )
                         jax.block_until_ready(vg(positions, masses))
                         t_bwd, _, s_bwd = T.time_min_repeat(
                             lambda: vg(positions, masses),
@@ -259,9 +299,15 @@ def main() -> int:
                     return out
 
                 try:
-                    if args.no_jit:
+                    if args.mode == "step":
+                        row = measure("step")
+                    elif args.mode == "jit":
+                        row = measure("jit")
+                    elif args.mode == "eager" or args.no_jit:
                         row = measure("eager")
-                        row["jit_skipped"] = "--no-jit"
+                        row["jit_skipped"] = (
+                            "--no-jit" if args.no_jit else "--mode eager"
+                        )
                     else:
                         try:
                             row = measure("jit")
@@ -311,6 +357,7 @@ def main() -> int:
         "wrt": wrts,
         "lanes": [name for name, _ in lanes],
         "nearfield_lane": args.nearfield_lane,
+        "mode_requested": args.mode,
         "compute_capability": cc or None,
         "fused_m2l_pallas_engages": bool(fused_available),
         "timed_region": (
@@ -324,9 +371,13 @@ def main() -> int:
             "N=16384 float64 on an A100), so this sweep stays where it is reachable"
         ),
         "note": (
-            "Each row records `mode` (jit or eager). Eager rows include per-call "
-            "re-tracing and must not be compared against jitted rows; the ratio "
-            "is null where the forward and reverse arms did not share a mode."
+            "Each row records `mode` (jit, eager or step). Eager rows include "
+            "per-call re-tracing and must not be compared against jitted or step "
+            "rows; the ratio is null where the forward and reverse arms did not "
+            "share a mode. `step` rows are the publishable ones: the forward is a "
+            "compiled f(positions, masses) from differentiable_step_fn with the "
+            "compile paid at setup, and the reverse is jitted over that same "
+            "function, so both arms time execution rather than tracing."
         ),
     }
     out = jsonio.write_result(
