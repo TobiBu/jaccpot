@@ -248,20 +248,35 @@ def main() -> int:
                     def scalar(p, m):
                         return jnp.sum(probe * accel(p, m))
 
-                    # Both arms must cross the SAME jit boundary or the ratio is
-                    # not a ratio. In step mode the reverse is jax.jit over a
-                    # function that calls the compiled step, which JAX inlines into
-                    # one module; timing the standalone step against that compares a
-                    # bare compiled call to a fused one, and measured on the complex
-                    # basis at N=4096 it produced ratios below 1.0 -- a
-                    # forward+backward apparently cheaper than its own forward.
-                    # Wrapping the forward the same way restores the symmetry. The
-                    # compile is still outside the timed region on both arms: the
-                    # inner one via compile_now, the outer via block_until_ready.
-                    fwd: Any = jax.jit(accel) if mode in ("jit", "step") else accel
-                    jax.block_until_ready(fwd(positions, masses))
+                    # The ratio's denominator is the LOSS, not the bare force,
+                    # and that distinction is load-bearing. value_and_grad(scalar)
+                    # only ever needs the reduction sum(probe * a), so XLA fuses
+                    # the multiply-reduce into the producer and never materialises
+                    # the (N,3) acceleration array; a forward arm that returns the
+                    # array does materialise it. Past N=4096 that extra memory
+                    # traffic made the forward-only arm *more* expensive than the
+                    # fused value-and-gradient, i.e. ratios below 1.0 -- measured
+                    # 0.78x on the complex basis. Timing the same scalar on both
+                    # sides is what makes the quotient a ratio. The bare force is
+                    # still recorded, as forward_accel_min_s, because it is the
+                    # physically meaningful forward cost; it is just not a
+                    # comparable denominator.
+                    fwd_loss: Any = (
+                        jax.jit(scalar) if mode in ("jit", "step") else scalar
+                    )
+                    jax.block_until_ready(fwd_loss(positions, masses))
                     t_fwd, _, s_fwd = T.time_min_repeat(
-                        lambda: fwd(positions, masses),
+                        lambda: fwd_loss(positions, masses),
+                        warmup=int(args.warmup),
+                        repeats=int(args.repeats),
+                    )
+
+                    fwd_accel: Any = (
+                        jax.jit(accel) if mode in ("jit", "step") else accel
+                    )
+                    jax.block_until_ready(fwd_accel(positions, masses))
+                    t_accel, _, _ = T.time_min_repeat(
+                        lambda: fwd_accel(positions, masses),
                         warmup=int(args.warmup),
                         repeats=int(args.repeats),
                     )
@@ -273,6 +288,7 @@ def main() -> int:
                         "mode": mode,
                         "forward_min_s": t_fwd,
                         "forward_std_s": s_fwd,
+                        "forward_accel_min_s": t_accel,
                         "grads": {},
                     }
                     for wrt in wrts:
@@ -362,7 +378,11 @@ def main() -> int:
         "fused_m2l_pallas_engages": bool(fused_available),
         "timed_region": (
             "differentiable_accelerations on a prebuilt state (fixed topology); "
-            "tree construction is outside both arms"
+            "tree construction is outside both arms. `forward_min_s` times the "
+            "scalar loss and is the ratio's denominator; `forward_accel_min_s` "
+            "times the (N,3) force and is reported but NOT used as a denominator, "
+            "because value_and_grad fuses the loss reduction into the producer and "
+            "never materialises the force array, which drove ratios below 1.0"
         ),
         "loss": "sum(probe * a), fixed-seed standard-normal probe",
         "jit_compile_wall": (
