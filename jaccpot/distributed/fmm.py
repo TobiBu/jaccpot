@@ -454,7 +454,7 @@ def partition_for_devices(
     *,
     leaf_size: int,
     bounds: tuple | None = None,
-    partitioner: str = "morton",
+    partitioner: str = "rcb",
 ) -> dict:
     """Morton-sort particles and split into ``ndev`` contiguous SFC domains.
 
@@ -506,7 +506,7 @@ def partition_for_devices(
         from ``positions`` when ``None``, with the same relative pad the per-device
         ``global_bounds`` applies, so the two agree on the code of every particle.
     partitioner : str
-        How particles are assigned to devices: ``"morton"`` (default) or ``"rcb"``.
+        How particles are assigned to devices: ``"rcb"`` (default) or ``"morton"``.
 
         ``"morton"`` sorts by Morton code and takes contiguous runs. Compact for a
         roughly isotropic system and poor for a flattened one, because a Morton code's
@@ -531,10 +531,16 @@ def partition_for_devices(
             ball                       4    0.148   0.124    1.2x
             isotropic Gaussian         4    0.175   0.128    1.4x
 
-        Better in every case measured, so the default is ``"morton"`` only because
-        changing it moves the domain assignment of every existing distributed run and
-        therefore every baseline taken with it -- a re-baselining exercise, not a bug
-        fix, and one that deserves its own step.
+        ``"rcb"`` is the default because it is better in every case measured. It
+        did not start that way: it landed as opt-in so that flipping the default -- which
+        moves the domain assignment of every distributed run, and so every accuracy and
+        timing baseline taken with one -- could be a deliberate step with its own
+        verification rather than a side effect of adding the option.
+
+        ``"morton"`` is kept, and not only for reproducing old numbers: it is the
+        cheaper of the two (one sort against ``log2(ndev)`` partial sorts) and the gap
+        closes to ~1.2x on an isotropic system, so it remains the right choice for a
+        run that is known to be round.
 
     Returns
     -------
