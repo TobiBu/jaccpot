@@ -86,7 +86,10 @@ G.2, G.3, G.5, G.7 and 2.4. Two of those five are no longer decisions:
   mechanically because it raises where `env_choice` warns-and-defaults. See G.2.
 - **G.3 — move the dispatch up** into `runtime/kernels/`. Re-measuring found one site had become
   three, and that it is a *cycle*, so this is a refactor in M2L code with its own PR and its own
-  numerics verification, not a documentation change.
+  numerics verification, not a documentation change. **Executed — but by item 0.14's dead-import
+  sweep, not by a G.3 PR. Measured 2026-08-24: `operators/ -> pallas/` is 0 edges,
+  `pallas/ -> operators/` is 3, and the dispatch is in `runtime/kernels/_m2l.py`. Now guarded.
+  See G.3.**
 - **G.5 — left as-is**, exposure accepted. But a **second** `experimental/` edge turned up that
   the decision does not cover: `import jaccpot.pallas` loads `experimental/treecode_walk`
   eagerly, contradicting §8's *"not imported by production paths"*. Open as its own item, filed
@@ -2380,6 +2383,45 @@ kernels are algebra-with-a-backend and belong in the same tier. I have no basis 
 > one that makes §8's definition of `operators/` true rather than true-with-exceptions. It is a
 > real refactor in M2L code, so it is its own PR with its own numerics verification, not folded
 > into this decision commit.
+
+> **EXECUTED, and nobody executed it. Measured 2026-08-24:**
+>
+> | direction | edges |
+> |---|---|
+> | `operators/` -> `pallas/` | **0** |
+> | `pallas/` -> `operators/` | 3, module scope |
+>
+> The three function-local imports this decision was written about are gone, and the
+> dispatch is where option (b) said to put it: `runtime/kernels/_m2l.py` builds the
+> fused carriers lazily from the kernels it imports. ARCHITECTURE section 8's
+> description of `operators/` as pure algebra is now true without exceptions.
+>
+> **It closed as a side effect of item 0.14**, the dead-import sweep, and that is the
+> part worth recording. Removing the dead `use_pallas` parameter from three functions
+> in `m2l_real_rot_scale.py` took the first two edges with it, and converting
+> `_m2l_real_fused_twin` into `make_m2l_real_fused_carry_axis_derivative(twin)` -- a
+> factory that receives the kernel rather than importing it -- took the third, with
+> `complex_ops.py` following the same shape. None of those commits mentions G.3. A
+> decision recorded as "its own PR with its own numerics verification" was satisfied by
+> unrelated hygiene work, and the section sat here saying it was outstanding.
+>
+> The lesson matches 1.10's and G.7's: this document's failure mode is not wrong
+> analysis, it is **stale status** -- items that were closed elsewhere and never
+> reconciled. That is three occurrences now, so it is the pattern rather than the
+> exception.
+>
+> **Guarded, because nothing else would notice it coming back.**
+> `tests/unit/test_operators_do_not_import_pallas.py` reads the source rather than
+> importing: every edge this item measured was *function-local*, deferred precisely so
+> it would not fire at import time, so an import-time probe sees nothing -- which is how
+> three accumulated under a rule meant to forbid them. It asserts the reverse edge still
+> exists too, since a test that only checks for one absence passes equally well if
+> someone severs the dependency entirely. Mutation-checked in all three directions,
+> including the relative `from ..pallas import` form.
+>
+> The property the old comment at `m2l_real_rot_scale.py:37-39` protected still holds:
+> `from jaccpot.pallas import ...` and `import jaccpot.operators` each succeed as the
+> first `jaccpot` import, verified in clean subprocesses.
 
 ### G.4 Delete the Wigner reference family, or wire it up? — **DECIDED: deleted (`ab58c3d`)**
 
