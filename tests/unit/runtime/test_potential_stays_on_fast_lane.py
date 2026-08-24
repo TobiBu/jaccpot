@@ -32,13 +32,33 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 
+from jaccpot.pallas.nearfield_fused_leaf import pallas_nearfield_fused_supported
 from jaccpot.runtime import _large_n_nearfield
 from jaccpot.runtime._large_n_nearfield import evaluate_large_n_nearfield_fast_lane
 from jaccpot.runtime._large_n_types import LargeNPreparedState
 from jaccpot.runtime.fmm import FMMEngine
 
 # Compile-bound: a full large-N prepare plus several near-field evaluations.
-pytestmark = pytest.mark.slow
+#
+# Gated on the fused kernel's hardware because the lane this module pins is
+# unreachable without it: off Ampere, `pallas_nearfield_fused_supported()` is
+# False, the potential branch delegates to the generic path regardless of the
+# guards, and the premise these tests assert (a target-block payload present and
+# the fused lane taken) cannot be established. Interpret mode reaches the kernel
+# but not through `_large_n_nearfield`, which gates on hardware support rather
+# than on interpret the way `_fast_lane.py` does. Running these on CPU would
+# assert against the wrong lane, so they skip rather than pass vacuously.
+# See docs/potential_falls_off_the_fast_lane.md.
+pytestmark = [
+    pytest.mark.slow,
+    pytest.mark.skipif(
+        not pallas_nearfield_fused_supported(),
+        reason=(
+            "the large-N near-field potential lane requires an Ampere+ (sm_80+) "
+            "GPU; see docs/potential_falls_off_the_fast_lane.md"
+        ),
+    ),
+]
 
 N = 256
 LEAF = 32
