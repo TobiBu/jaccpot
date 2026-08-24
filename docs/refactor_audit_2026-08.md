@@ -27,7 +27,11 @@ closed.
 >
 > * **F27 was not unblocked by GPU execution.** `_large_n_grad.py` stayed at **0/73
 >   statements** with the whole suite green on a real card. It needed a *test*, not a card —
->   now **91%** (see F27).
+>   now **91%** (see F27). **That 91% is GPU-only**, re-measured 2026-08-25: the test carries
+>   a module-level `skipif(jax.default_backend() != "gpu")`, so on CPU the file is still at
+>   **0%** and the test does not run. Stated here because the sentence above reads as
+>   unconditional and was taken that way — see A.9b, where it is what made F11's deferral
+>   look lapsed when it had not.
 > * **F33 was not unblocked either.** `fmm_strict_run.py` is **55%**, statement for statement
 >   what it was on CPU (226 missed vs 227). The GPU does not enter the strict/refresh lane.
 > * **F34 was**, and it is the one this paragraph called out of scope: **19% -> 83%** on two
@@ -617,6 +621,56 @@ pass: it is the least-verified production lane in the tree, and moving 1253 line
 without a characterization net is exactly the change NUMERICS §3 warns against. Split the env
 reader (Tier 0/1), and leave the rest until it has coverage. That is a legitimate "stays
 whole" answer and I am giving it deliberately.
+
+### A.9b F11's deferral re-checked, 2026-08-25 — it holds, for a sharper reason
+
+F11 defers splitting `prepare_large_n_state` on a condition, and item 1.8 records
+the condition being *checked* rather than assumed: no cuda leg in CI, and
+`_large_n_grad.py` / `_large_n_farfield.py` at **0%**. #193 then reported F27's
+test taking `_large_n_grad.py` to **91%**, which reads as though the condition had
+lapsed. It has not, and the way it misleads is worth fixing rather than just
+correcting.
+
+**Measured on `main`, full suite, CPU:**
+
+| file | 1.8 recorded | now |
+|---|---|---|
+| `runtime/_large_n_grad.py` | 0% | **0%** — unchanged |
+| `runtime/_large_n_farfield.py` | 0% | **100%** (11 statements) |
+| `runtime/_large_n_pipeline.py` | — | 67% (580 statements, 157 missed) |
+
+**The 91% is a GPU-only number.** `tests/unit/runtime/test_large_n_grad_reverse_path.py`
+carries a module-level `pytest.mark.skipif(jax.default_backend() != "gpu")`, so on
+any machine without a card the file it covers is at 0% and F27's test does not run
+at all. #193's summary says "It needed a *test*, not a card — now **91%**", which
+is true of the A100 run it describes and false of every CPU run, and the sentence
+does not say which. That is exactly the inference I made from it, and anyone
+reading the summary alone would make it too.
+
+So F11's condition stands: the reverse/grad lane that `prepare_large_n_state`
+feeds is uncovered on any machine that can actually run this suite, and 2.6 closed
+the GPU-leg question permanently. One half did change — `_large_n_farfield.py` is
+no longer 0% — but it is 11 statements, and it is not the lane the deferral was
+about.
+
+**And the target grew.** F11 records 1253 lines and 26 parameters. Measured today:
+
+    prepare_large_n_state   1402 lines, 27 parameters   (~268 lines uncovered)
+
+So the finding is worse than audited, not better, and the case for eventually
+splitting it is stronger than when it was written. What has not changed is the
+thing that makes splitting *unsafe* to do blind: A.9's leave-it-whole argument
+rests on coverage catching a silent break, and the coverage that would catch one
+in the reverse path does not exist off-GPU.
+
+**What would change this**, concretely, so the next person does not have to
+re-derive it: either the grad reverse-path test stops being GPU-gated (it asserts
+gradients, so a CPU variant at small N may be viable and would be the cheapest
+unblock), or a gate run is made part of the split's verification — `bench/gpu_gate.py`
+exists and has been run once, so this is now a procedure rather than a project.
+
+Absent one of those, splitting a 1402-line numerics driver whose reverse path
+nothing exercises is the kind of change this document exists to argue against.
 
 ### A.10 The largest duplication in the package: ~460 lines, in the near field
 
