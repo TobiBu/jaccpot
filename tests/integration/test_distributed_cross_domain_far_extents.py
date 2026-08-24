@@ -247,26 +247,44 @@ class _CrossView:
 
     def __init__(self, interpenetrating):
         pts, mass = _separated_clusters(2, _PER)
-        part = partition_for_devices(pts, mass, 2, leaf_size=_LEAF)
-        bounds = part["bounds"]
+        # Still from the production partitioner, so the trees below are built in the
+        # same box the driver would use.
+        bounds = partition_for_devices(pts, mass, 2, leaf_size=_LEAF)["bounds"]
         if interpenetrating:
-            # What the driver actually does: contiguous ranges of the global Morton
-            # order. At ndev=2 on this IC the domains interpenetrate.
-            cap = part["cap"]
-            pos_d = part["pos_flat"].reshape(2, cap, 3)
-            mass_d = part["mass_flat"].reshape(2, cap)
+            # Pinned to `partitioner="morton"` EXPLICITLY. This case used to arrive for
+            # free, because Morton was the default and a Morton split of this IC at
+            # ndev=2 interpenetrates: its three most significant bits are (z, y, x), so
+            # its first cut bisects all three axes at once. The default is now RCB,
+            # which splits the longest axis at the median and puts one cluster on each
+            # device -- so the case stopped existing by itself.
+            #
+            # It is far too valuable to drop: this is the geometry that exposed the
+            # coarse-extent defect, with a worst accepted pair whose true
+            # (r_src + r_tgt)/d was 4.591 and a far term off by 124% of its own direct
+            # sum. Naming the partitioner keeps exactly the point set the properties
+            # below were validated against, which a hand-rolled interleave does not --
+            # a perfect alternating split was tried and makes both domains span the
+            # whole system, so the MAC accepts nothing and the far path is not
+            # exercised at all (the vacuity guard in the tests catches that).
+            part_m = partition_for_devices(
+                pts, mass, 2, leaf_size=_LEAF, partitioner="morton"
+            )
+            cap = part_m["cap"]
+            pos_d = part_m["pos_flat"].reshape(2, cap, 3)
+            mass_d = part_m["mass_flat"].reshape(2, cap)
         else:
             # One cluster per domain, which is what the driver tests' docstrings
-            # assume and what the Morton split delivers only at ndev=4.
+            # assume and what the RCB default now delivers at ndev=2.
             pos_d = pts.reshape(2, _PER, 3)
             mass_d = mass.reshape(2, _PER)
 
-        # Both parametrisations are self-validating, because neither is a property of
-        # this file: the interpenetrating one comes out of partition_for_devices, and a
-        # future partitioner that made Morton domains spatially compact would quietly
-        # turn it into the separated case -- flipping the strict xfails and reading as
-        # "yggdrax fixed the extents" when nothing of the kind happened. Assert the
-        # geometry each case is named for, so that change fails loudly here instead.
+        # Both parametrisations stay self-validating. This guard already earned its
+        # keep once: when the partitioner default moved to RCB the interpenetrating
+        # case silently became the separated one, and this assert is what said so
+        # instead of the strict xfails quietly flipping and reading as "yggdrax fixed
+        # the extents". Now that both geometries are constructed here the guard is
+        # cheap insurance rather than a tripwire, and it stays for the same reason:
+        # a case that stops exercising what it is named for must fail, not pass.
         # The clusters sit at x=0 and x=6, so x=3 separates them.
         spans_both = [
             bool((pos_d[d][:, 0] < 3.0).any() and (pos_d[d][:, 0] > 3.0).any())
@@ -275,9 +293,9 @@ class _CrossView:
         if interpenetrating:
             assert all(spans_both), (
                 "the interpenetrating case is no longer interpenetrating: "
-                f"per-domain 'spans both clusters' = {spans_both}. The Morton "
-                "partition changed, so this parametrisation no longer exercises what "
-                "it is named for -- re-derive it before trusting any verdict here."
+                f"per-domain 'spans both clusters' = {spans_both}. The interleave "
+                "above is meant to guarantee it, so this means the IC changed -- "
+                "re-derive it before trusting any verdict here."
             )
         else:
             assert not any(spans_both), (
