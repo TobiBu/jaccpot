@@ -204,3 +204,101 @@ def test_refresh_faces_reject_a_non_large_n_profile(face):
         getattr(fmm, face)(
             prepared, moved, masses, leaf_size=LEAF_SIZE, max_order=MAX_ORDER
         )
+
+
+@pytest.mark.slow
+def test_refresh_falls_back_to_a_full_prepare_when_topology_cannot_be_reused(
+    strict_env,
+):
+    """The branch a science run hits when the tree stops being reusable.
+
+    ``refresh_prepared_state`` tries ``_refresh_large_n_same_topology`` first and
+    calls ``prepare_state`` when it declines. That fallback was unexercised: the
+    suite only ever refreshed under conditions the fast path accepts.
+
+    Finding the trigger took measurement. The same-topology key is derived from
+    *configuration* and inferred bounds, not from the particle arrangement, so
+    none of the obvious candidates decline -- not an affine relocation (which
+    preserves the Morton structure), not an independent uniform draw, not a tight
+    Gaussian cluster, not explicit wider bounds. Changing ``leaf_size`` does,
+    because the leaf size is part of the key.
+    """
+    fmm = _engine()
+    positions, masses, moved = _particles()
+    prepared = fmm.prepare_state(
+        positions, masses, leaf_size=LEAF_SIZE, max_order=MAX_ORDER
+    )
+
+    misses_before = int(fmm._large_n_same_topology_refresh_misses)
+    refreshed = fmm.refresh_prepared_state(
+        prepared, moved, masses, leaf_size=LEAF_SIZE // 2, max_order=MAX_ORDER
+    )
+    misses_after = int(fmm._large_n_same_topology_refresh_misses)
+
+    assert misses_after == misses_before + 1, (
+        "the fast path should have declined on the changed leaf size; without "
+        "that this test silently exercises the fast path instead of the fallback"
+    )
+
+    fresh = fmm.prepare_state(
+        moved, masses, leaf_size=LEAF_SIZE // 2, max_order=MAX_ORDER
+    )
+    from_fallback = np.asarray(fmm.evaluate_prepared_state(refreshed))
+    from_fresh = np.asarray(fmm.evaluate_prepared_state(fresh))
+    relative = np.linalg.norm(from_fallback - from_fresh) / np.linalg.norm(from_fresh)
+    assert (
+        relative <= RELATIVE_TOLERANCE
+    ), f"the fallback disagrees with a fresh prepare by {relative:.3e} relative L2"
+
+
+@pytest.mark.slow
+def test_refresh_timing_path_returns_the_same_state(strict_env, monkeypatch):
+    """The instrumented variant must not be a second implementation.
+
+    ``refresh_prepared_state`` has two bodies: a fast one, and a duplicate under
+    ``JACCPOT_REFRESH_TIMING_ENABLE`` that wraps the same calls in
+    ``perf_counter`` accounting. The timed body is ~100 statements and was
+    entirely unexercised, so nothing checked that it still returns what the
+    untimed one returns.
+    """
+    monkeypatch.setenv("JACCPOT_REFRESH_TIMING_ENABLE", "1")
+    timed = _engine()
+    assert timed._refresh_timing_enabled, "the env flag did not reach the engine"
+
+    positions, masses, moved = _particles()
+    prepared = timed.prepare_state(
+        positions, masses, leaf_size=LEAF_SIZE, max_order=MAX_ORDER
+    )
+    refreshed = timed.refresh_prepared_state(
+        prepared, moved, masses, leaf_size=LEAF_SIZE, max_order=MAX_ORDER
+    )
+
+    assert int(timed._refresh_timing_calls) == 1, "the timed body did not run"
+
+    fresh = timed.prepare_state(moved, masses, leaf_size=LEAF_SIZE, max_order=MAX_ORDER)
+    from_timed = np.asarray(timed.evaluate_prepared_state(refreshed))
+    from_fresh = np.asarray(timed.evaluate_prepared_state(fresh))
+    relative = np.linalg.norm(from_timed - from_fresh) / np.linalg.norm(from_fresh)
+    assert (
+        relative <= RELATIVE_TOLERANCE
+    ), f"the timed refresh disagrees with a fresh prepare by {relative:.3e}"
+
+
+@pytest.mark.slow
+def test_refresh_rejects_a_prepared_state_that_is_not_large_n(strict_env):
+    """A large-N engine still refuses a state built by a non-large-N one.
+
+    The profile guard and this one are separate checks: passing the first says
+    the *engine* is large-N, not that the *state* is.
+    """
+    plain = FMMEngine(theta=0.6, working_dtype=jnp.float32, fixed_order=MAX_ORDER)
+    positions, masses, moved = _particles()
+    plain_state = plain.prepare_state(
+        positions, masses, leaf_size=LEAF_SIZE, max_order=MAX_ORDER
+    )
+    assert not isinstance(plain_state, LargeNPreparedState)
+
+    with pytest.raises(NotImplementedError, match="LargeNPreparedState"):
+        _engine().refresh_prepared_state(
+            plain_state, moved, masses, leaf_size=LEAF_SIZE, max_order=MAX_ORDER
+        )
