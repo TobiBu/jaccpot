@@ -309,11 +309,15 @@ DRIVER_N = 128
 DRIVER_LEAF = 8
 
 
-def _driver_config(theta=0.0):
+def _driver_config(theta=0.0, cross_theta=0.0, leaf_size=None):
     from jaccpot.mutual.distributed import DistributedMutualConfig
 
     return DistributedMutualConfig(
-        leaf_size=DRIVER_LEAF, theta=theta, order=4, softening=SOFT
+        leaf_size=DRIVER_LEAF if leaf_size is None else leaf_size,
+        theta=theta,
+        order=4,
+        softening=SOFT,
+        cross_theta=cross_theta,
     )
 
 
@@ -571,3 +575,153 @@ def test_a_starved_expansion_receive_is_reported():
     assert (
         got.cross_overflow.all()
     ), f"not reduced across devices: {got.cross_overflow.tolist()}"
+
+
+# ---------------------------------------------------------------------------
+# The production configuration: BOTH far fields approximate, at the same time.
+# ---------------------------------------------------------------------------
+#
+# Every test above this line runs at ``theta = 0``, where the intra-domain MAC
+# accepts nothing and that half is a direct sum. The cross-far tests raise
+# ``cross_theta`` but hold ``theta = 0`` to isolate the cross field, which is
+# deliberate and right for what they test. The consequence is that the
+# configuration a real run uses -- an approximate intra-domain far field AND an
+# approximate cross-domain far field together -- had never been executed.
+#
+# WHY THIS NEEDS ITS OWN SYSTEM, which is the more interesting half of the
+# finding. At ``DRIVER_N = 128`` with ``DRIVER_LEAF = 8`` on 4 devices, NO value
+# of either angle engages anything: theta 0/0.3/0.5/0.7 crossed with cross_theta
+# 0/0.4/0.8 gives twelve cells identical to the last digit -- rel 3.349e-16,
+# momentum 2.112e-17, 96 cross pairs, every one of them. Each device holds four
+# leaves of a unit-Gaussian blob, so nothing is ever well separated and both
+# angles are inert. A grid written at that size would have been twelve copies of
+# the direct-sum test wearing different parameters.
+#
+# WHAT ENGAGES IS THE NUMBER OF LEAVES TO SEPARATE, NOT THE PARTICLE COUNT, and
+# the two far fields do not turn on together. Measured, seed 17, order 4:
+#
+#     N=1024 leaf=16, ndev 4   both inert at theta 0.5 -- more particles, fewer
+#                              leaves, nothing separates
+#     N= 512 leaf= 8, ndev 4   both engage
+#     N= 512 leaf= 8, ndev 2   intra engages (1.2e-5), CROSS STAYS INERT
+#                              (6.978e-16, bit-identical to theta 0)
+#     N= 256 leaf= 4           both engage at ndev 2, 3 and 4
+#
+# The ndev=2 row is why the constants below are not the first ones that worked:
+# a grid tuned on four devices passes there and is half vacuous on two, with the
+# cross angle doing nothing and no assertion noticing. The plan's own verification
+# block runs this file on two.
+_FAR_N = 256
+_FAR_LEAF = 4
+
+#: ``(theta, cross_theta)``: both off, each alone, then both together.
+_FAR_GRID = ((0.0, 0.0), (0.5, 0.0), (0.0, 0.5), (0.5, 0.5))
+
+
+@pytest.fixture(scope="module")
+def far_grid():
+    """Run the 2x2 of far-field angles once, and return the measured table.
+
+    Module-scoped because each cell is a separate compile of the whole
+    distributed pipeline.
+    """
+    from jaccpot.mutual.distributed import distributed_mutual_fmm
+
+    nd = _ndev()
+    pos, mass = _random_system(n=_FAR_N)
+    ref = _exact_all(pos, mass)
+    scale = np.linalg.norm(ref)
+    table = {}
+    for theta, cross_theta in _FAR_GRID:
+        got = distributed_mutual_fmm(
+            jnp.asarray(pos),
+            jnp.asarray(mass),
+            config=_driver_config(
+                theta=theta, cross_theta=cross_theta, leaf_size=_FAR_LEAF
+            ),
+            ndev=nd,
+        )
+        acc = np.asarray(got.accelerations)
+        momentum = (
+            np.linalg.norm((mass[:, None] * acc).sum(axis=0))
+            / np.abs(mass[:, None] * acc).sum()
+        )
+        table[(theta, cross_theta)] = {
+            "rel": float(np.linalg.norm(acc - ref) / scale),
+            "momentum": float(momentum),
+            "overflow": bool(got.overflow),
+            "cross_pairs": int(np.asarray(got.cross_pairs).sum()),
+        }
+    return table
+
+
+@pytest.mark.slow
+def test_both_far_fields_are_engaged_and_each_one_alone_moves_the_answer(far_grid):
+    """The vacuity guard, and the reason this file needed its own system.
+
+    A pair count cannot serve here: this lane's result exposes ``cross_pairs``
+    (live cross NEAR pairs) and no far counters at all, so there is no
+    ``self_far_pairs``/``cross_far_pairs`` to assert on. The behavioural
+    equivalent is stronger anyway -- a nonzero far pair count does not prove the
+    far CONTRIBUTION was applied, which is exactly the coverage failure that once
+    passed both a momentum check at 1e-17 and a direct-sum check while being flat
+    in expansion order.
+
+    So engagement is asserted as an effect: with both angles at zero the answer is
+    a direct sum to round-off, and turning either one on alone must move it by
+    orders of magnitude. Measured, N=256, leaf 4, order 4, seed 17:
+
+        ndev   (0,0)      (0.5,0)    (0,0.5)    (0.5,0.5)
+          2    5.232e-16  1.866e-04  4.208e-05  1.810e-04
+          3    4.824e-16  2.335e-04  3.399e-05  2.328e-04
+          4    4.685e-16  6.156e-05  3.228e-05  7.022e-05
+
+    The smallest gap between an engaged cell and the direct-sum cell is ~6e10, so
+    the 1e3 factor below is not a tuned threshold -- it is the difference between
+    "an approximation happened" and "nothing happened", and it fails only when an
+    angle goes inert, which is the state this configuration was in at N=128.
+    """
+    exact = far_grid[(0.0, 0.0)]["rel"]
+    assert exact < 1e-12, f"both angles off should be a direct sum, got {exact:.3e}"
+
+    for cell, name in (((0.5, 0.0), "intra-domain"), ((0.0, 0.5), "cross-domain")):
+        rel = far_grid[cell]["rel"]
+        assert rel > exact * 1e3, (
+            f"the {name} far field is INERT at {cell}: rel {rel:.3e} against "
+            f"{exact:.3e} with it off. The angle is being ignored, or the "
+            "geometry is too small to separate anything -- either way this "
+            "configuration is not testing an FMM"
+        )
+
+
+@pytest.mark.slow
+def test_the_production_configuration_matches_a_direct_sum(far_grid):
+    """Both far fields approximate at once, against an exact O(N^2) reference.
+
+    The bound is loose on purpose: this is an order-4 expansion at theta 0.5 over
+    leaves of 4, so ~1e-4 is the expected truncation error and not a defect. The
+    worst measured across ndev 2/3/4 is 2.328e-04, and the bound sits ~10x above
+    it so ordinary variation with device count does not move it -- while staying
+    far below the ~1e-2 a genuine accuracy regression would produce.
+    """
+    cell = far_grid[(0.5, 0.5)]
+    assert not cell["overflow"], "a capacity overflowed"
+    assert cell["rel"] < 2e-3, f"relative force error {cell['rel']:.3e}"
+    assert cell["cross_pairs"] > 0, "no cross pairs -- vacuous"
+
+
+@pytest.mark.slow
+@pytest.mark.parametrize("cell", _FAR_GRID)
+def test_momentum_conserves_with_the_far_fields_on(far_grid, cell):
+    """Momentum is algebraic here, so approximating the field must not touch it.
+
+    Each pair is evaluated once and applied +f/-f, and that cancellation does not
+    care whether the force came from a direct sum or an expansion. A far field
+    that broke it would mean a pair got one half applied and not the other.
+
+    This is the weakest of the three assertions and is kept for what it is: the
+    ownership and coverage bugs this lane has actually had both held momentum at
+    1e-17 while the force was wrong. It cannot replace the direct-sum comparison.
+    """
+    residual = far_grid[cell]["momentum"]
+    assert residual < 1e-14, f"global momentum residual {residual:.3e} at {cell}"
