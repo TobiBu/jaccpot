@@ -601,6 +601,422 @@ def _apply_speed_prepared_target_block_layout(
     )
 
 
+def _size_fused_static_overflow_profile(
+    *,
+    fmm: "FMMEngine",
+    fused_device_mode: bool,
+    static_runtime_fixed_sizing: bool,
+    overflow_active_blocks: int,
+    overflow_profile_fixed_cap: int,
+    overflow_profile_bootstrap_cap: int,
+    overflow_profile_headroom: int,
+    block_size: int,
+    target_block_leaf_ids: Optional[Array],
+    target_block_source_leaf_ids: Optional[Array],
+    target_block_valid_mask: Optional[Array],
+    pick_overflow_profile_capacity: Callable[[int], int],
+) -> tuple[int, Optional[Array], Optional[Array], Optional[Array], int]:
+    """Size the fused static overflow profile and pad the target blocks to it.
+
+    Extracted verbatim from :func:`prepare_large_n_state` (audit item **F11**);
+    the body, both branches of its guard and every value it computes are
+    unchanged, including the cap-exceeded ``RuntimeError``.
+
+    ``pick_overflow_profile_capacity`` is passed in because the original is a
+    closure over the driver's ``overflow_profile_caps`` ladder. Handing the
+    closure across keeps the ladder and its lookup exactly as they were rather
+    than duplicating the search here.
+
+    Parameters
+    ----------
+    fmm : FMMEngine
+        Engine whose ``_large_n_overflow_profile_cap`` carries the bootstrapped
+        capacity between builds.
+    fused_device_mode : bool
+        Whether the fused device lane is in force.
+    static_runtime_fixed_sizing : bool
+        Whether the static runtime is using fixed sizing; with
+        ``fused_device_mode`` this selects the fixed-cap branch.
+    overflow_active_blocks : int
+        Active overflow blocks this build needs.
+    overflow_profile_fixed_cap : int
+        Configured fixed cap, or non-positive to derive one.
+    overflow_profile_bootstrap_cap : int
+        Cap used when bootstrapping a profile.
+    overflow_profile_headroom : int
+        Headroom added when growing the capacity.
+    block_size : int
+        Target-owned block size, in and out.
+    target_block_leaf_ids : Optional[Array]
+        Leaf id per target block, in and out -- padded to the chosen capacity.
+    target_block_source_leaf_ids : Optional[Array]
+        Source-leaf ids per target block, in and out.
+    target_block_valid_mask : Optional[Array]
+        Validity mask over those ids, in and out.
+    pick_overflow_profile_capacity : Callable[[int], int]
+        Maps a required block count onto the next capacity on the ladder.
+
+    Returns
+    -------
+    int
+        ``block_size``, passed through or reassigned.
+    Optional[Array]
+        ``target_block_leaf_ids``, padded where the profile required it.
+    Optional[Array]
+        ``target_block_source_leaf_ids``.
+    Optional[Array]
+        ``target_block_valid_mask``.
+    int
+        ``overflow_profile_capacity`` -- the sized capacity. Both branches of
+        the guard assign it, which is why it needs no prior value.
+
+    Raises
+    ------
+    RuntimeError
+        If the active block count exceeds the fixed overflow profile cap --
+        carried over verbatim with the block.
+    """
+    _pick_overflow_profile_capacity = pick_overflow_profile_capacity
+    if bool(fused_device_mode) and static_runtime_fixed_sizing:
+        overflow_profile_capacity = int(overflow_profile_fixed_cap)
+        if overflow_profile_capacity <= 0:
+            overflow_profile_capacity = int(
+                getattr(fmm, "_large_n_overflow_profile_cap", 0)
+            )
+            if overflow_profile_capacity <= 0:
+                overflow_profile_capacity = int(overflow_active_blocks)
+            setattr(
+                fmm, "_large_n_overflow_profile_cap", int(overflow_profile_capacity)
+            )
+        if overflow_active_blocks > overflow_profile_capacity:
+            raise RuntimeError(
+                "static runtime sizing overflow cap exceeded: "
+                f"active_blocks={overflow_active_blocks} cap={overflow_profile_capacity}. "
+                "Increase JACCPOT_LARGE_N_OVERFLOW_PROFILE_FIXED_CAP."
+            )
+        if overflow_active_blocks < overflow_profile_capacity:
+            pad_rows = int(overflow_profile_capacity - overflow_active_blocks)
+            block_size = int(target_block_source_leaf_ids.shape[1])
+            target_block_leaf_ids = jnp.concatenate(
+                [
+                    target_block_leaf_ids,
+                    jnp.zeros((pad_rows,), dtype=INDEX_DTYPE),
+                ],
+                axis=0,
+            )
+            target_block_source_leaf_ids = jnp.concatenate(
+                [
+                    target_block_source_leaf_ids,
+                    jnp.zeros((pad_rows, block_size), dtype=INDEX_DTYPE),
+                ],
+                axis=0,
+            )
+            target_block_valid_mask = jnp.concatenate(
+                [
+                    target_block_valid_mask,
+                    jnp.zeros((pad_rows, block_size), dtype=bool),
+                ],
+                axis=0,
+            )
+    elif bool(fused_device_mode):
+        # Backward-compatible non-fixed fused mode: keep dynamic active size.
+        overflow_profile_capacity = int(overflow_active_blocks)
+    elif static_runtime_fixed_sizing:
+        overflow_profile_capacity = int(overflow_profile_fixed_cap)
+        if (
+            overflow_profile_capacity > 0
+            and overflow_active_blocks > overflow_profile_capacity
+        ):
+            raise RuntimeError(
+                "static runtime sizing overflow cap exceeded: "
+                f"active_blocks={overflow_active_blocks} cap={overflow_profile_capacity}. "
+                "Increase JACCPOT_LARGE_N_OVERFLOW_PROFILE_FIXED_CAP."
+            )
+        if overflow_profile_capacity <= 0:
+            overflow_profile_capacity = int(overflow_active_blocks)
+        elif overflow_active_blocks < overflow_profile_capacity:
+            pad_rows = int(overflow_profile_capacity - overflow_active_blocks)
+            block_size = int(target_block_source_leaf_ids.shape[1])
+            target_block_leaf_ids = jnp.concatenate(
+                [
+                    target_block_leaf_ids,
+                    jnp.zeros((pad_rows,), dtype=INDEX_DTYPE),
+                ],
+                axis=0,
+            )
+            target_block_source_leaf_ids = jnp.concatenate(
+                [
+                    target_block_source_leaf_ids,
+                    jnp.zeros((pad_rows, block_size), dtype=INDEX_DTYPE),
+                ],
+                axis=0,
+            )
+            target_block_valid_mask = jnp.concatenate(
+                [
+                    target_block_valid_mask,
+                    jnp.zeros((pad_rows, block_size), dtype=bool),
+                ],
+                axis=0,
+            )
+    else:
+        overflow_profile_capacity = int(
+            getattr(fmm, "_large_n_overflow_profile_cap", 0)
+        )
+        if overflow_profile_capacity <= 0 and overflow_profile_bootstrap_cap > 0:
+            overflow_profile_capacity = _pick_overflow_profile_capacity(
+                int(overflow_profile_bootstrap_cap)
+            )
+            setattr(
+                fmm, "_large_n_overflow_profile_cap", int(overflow_profile_capacity)
+            )
+        if overflow_active_blocks > overflow_profile_capacity:
+            required_blocks = int(
+                np.ceil(
+                    float(overflow_active_blocks) * float(overflow_profile_headroom)
+                )
+            )
+            next_capacity = _pick_overflow_profile_capacity(required_blocks)
+            if (
+                overflow_profile_capacity > 0
+                and next_capacity > overflow_profile_capacity
+            ):
+                setattr(
+                    fmm,
+                    "_large_n_overflow_profile_reprofiles",
+                    int(getattr(fmm, "_large_n_overflow_profile_reprofiles", 0)) + 1,
+                )
+            overflow_profile_capacity = int(next_capacity)
+            setattr(
+                fmm, "_large_n_overflow_profile_cap", int(overflow_profile_capacity)
+            )
+
+        if (
+            overflow_profile_capacity > 0
+            and overflow_active_blocks < overflow_profile_capacity
+        ):
+            pad_rows = int(overflow_profile_capacity - overflow_active_blocks)
+            block_size = int(target_block_source_leaf_ids.shape[1])
+            target_block_leaf_ids = jnp.concatenate(
+                [
+                    target_block_leaf_ids,
+                    jnp.zeros((pad_rows,), dtype=INDEX_DTYPE),
+                ],
+                axis=0,
+            )
+            target_block_source_leaf_ids = jnp.concatenate(
+                [
+                    target_block_source_leaf_ids,
+                    jnp.zeros((pad_rows, block_size), dtype=INDEX_DTYPE),
+                ],
+                axis=0,
+            )
+            target_block_valid_mask = jnp.concatenate(
+                [
+                    target_block_valid_mask,
+                    jnp.zeros((pad_rows, block_size), dtype=bool),
+                ],
+                axis=0,
+            )
+    return (
+        block_size,
+        target_block_leaf_ids,
+        target_block_source_leaf_ids,
+        target_block_valid_mask,
+        overflow_profile_capacity,
+    )
+
+
+def _trim_radix_fast_lane_neighbor_list(
+    *,
+    execution_config: LargeNExecutionConfig,
+    fmm: "FMMEngine",
+    fused_device_mode: bool,
+    static_runtime_fixed_sizing: bool,
+    neighbor_payload: Any,
+    state_neighbor_list: Any,
+    precomputed_target_leaf_ids: Optional[Array],
+    precomputed_source_leaf_ids: Optional[Array],
+    precomputed_valid_pairs: Optional[Array],
+    neighbor_profile_fixed_cap: int,
+    neighbor_profile_bootstrap_cap: int,
+    neighbor_profile_headroom: float,
+    pick_neighbor_profile_capacity: Callable[[int], int],
+) -> tuple[Any, Optional[Array], Optional[Array], Optional[Array]]:
+    """Trim the neighbour list for the radix fast lane, or take the other branch.
+
+    Extracted verbatim from :func:`prepare_large_n_state` (audit item **F11**);
+    the body, both branches of its guard and every value it computes are
+    unchanged.
+
+    The guard is an ``if``/``else`` and **both** branches assign the three
+    ``state_*`` outputs, which is why they need no prior value and why the
+    extraction covers the whole statement rather than the ``if`` body -- moving
+    one branch and leaving the other would bind them on one path only.
+
+    ``pick_neighbor_profile_capacity`` is passed in because the original is a
+    closure over the driver's ``neighbor_profile_caps`` ladder; handing it
+    across keeps that ladder and its lookup exactly as they were.
+
+    Parameters
+    ----------
+    execution_config : LargeNExecutionConfig
+        Resolved large-N execution configuration; ``radix_fast_lane`` selects
+        the trimming branch.
+    fmm : FMMEngine
+        Engine carrying the bootstrapped neighbour profile capacity between
+        builds.
+    fused_device_mode : bool
+        Whether the fused device lane is in force.
+    static_runtime_fixed_sizing : bool
+        Whether the static runtime is using fixed sizing.
+    neighbor_payload : Any
+        Neighbour list built by the dual/downward stage.
+    state_neighbor_list : Any
+        The list as it stands before trimming, in and out.
+    precomputed_target_leaf_ids : Optional[Array]
+        Precomputed target-leaf ids, when the near-field precompute supplied
+        them.
+    precomputed_source_leaf_ids : Optional[Array]
+        Precomputed source-leaf ids.
+    precomputed_valid_pairs : Optional[Array]
+        Precomputed validity mask over those pairs.
+    neighbor_profile_fixed_cap : int
+        Configured fixed neighbour-edge cap, or non-positive to derive one.
+    neighbor_profile_bootstrap_cap : int
+        Cap used when bootstrapping a profile.
+    neighbor_profile_headroom : float
+        Headroom factor applied when growing the capacity.
+    pick_neighbor_profile_capacity : Callable[[int], int]
+        Maps a required edge count onto the next capacity on the ladder.
+
+    Returns
+    -------
+    Any
+        ``state_neighbor_list``, trimmed on the fast-lane branch and passed
+        through otherwise.
+    Optional[Array]
+        ``state_target_leaf_ids``.
+    Optional[Array]
+        ``state_source_leaf_ids``.
+    Optional[Array]
+        ``state_valid_pairs``.
+
+    Raises
+    ------
+    RuntimeError
+        If the active neighbour-edge count exceeds the fixed profile cap --
+        carried over verbatim with the block.
+    """
+    _pick_neighbor_profile_capacity = pick_neighbor_profile_capacity
+    if bool(execution_config.radix_fast_lane):
+        # Memory trim for radix fast lane:
+        # neighbor_leaf_positions duplicates information recoverable from
+        # offsets+neighbors and is not needed by the fast-lane accel path.
+        # Keep it out of prepared state to reduce resident memory.
+        state_neighbor_list = neighbor_payload._replace(neighbor_leaf_positions=None)
+        # The radix fast-lane evaluator does not require generic edge-list
+        # precompute vectors. Keeping them optional/empty avoids carrying
+        # topology-varying edge payloads that can trigger extra recompiles.
+        state_target_leaf_ids = None
+        state_source_leaf_ids = None
+        state_valid_pairs = None
+        neighbor_edges = jnp.asarray(state_neighbor_list.neighbors, dtype=INDEX_DTYPE)
+        neighbor_active_edges = int(neighbor_edges.shape[0])
+        neighbor_profile_capacity = 0
+        if static_runtime_fixed_sizing:
+            neighbor_profile_capacity = int(neighbor_profile_fixed_cap)
+            if neighbor_profile_capacity <= 0:
+                if bool(fused_device_mode):
+                    neighbor_profile_capacity = int(
+                        getattr(fmm, "_large_n_neighbor_edges_profile_cap", 0)
+                    )
+                    if neighbor_profile_capacity <= 0:
+                        neighbor_profile_capacity = int(neighbor_active_edges)
+                    setattr(
+                        fmm,
+                        "_large_n_neighbor_edges_profile_cap",
+                        int(neighbor_profile_capacity),
+                    )
+                else:
+                    neighbor_profile_capacity = int(neighbor_active_edges)
+        elif not bool(fused_device_mode):
+            neighbor_profile_capacity = int(
+                getattr(fmm, "_large_n_neighbor_edges_profile_cap", 0)
+            )
+            if neighbor_profile_capacity <= 0 and neighbor_profile_bootstrap_cap > 0:
+                neighbor_profile_capacity = _pick_neighbor_profile_capacity(
+                    int(neighbor_profile_bootstrap_cap)
+                )
+                setattr(
+                    fmm,
+                    "_large_n_neighbor_edges_profile_cap",
+                    int(neighbor_profile_capacity),
+                )
+            if neighbor_active_edges > neighbor_profile_capacity:
+                required_edges = int(
+                    np.ceil(
+                        float(neighbor_active_edges) * float(neighbor_profile_headroom)
+                    )
+                )
+                next_capacity = _pick_neighbor_profile_capacity(required_edges)
+                if (
+                    neighbor_profile_capacity > 0
+                    and next_capacity > neighbor_profile_capacity
+                ):
+                    setattr(
+                        fmm,
+                        "_large_n_neighbor_edges_profile_reprofiles",
+                        int(
+                            getattr(
+                                fmm,
+                                "_large_n_neighbor_edges_profile_reprofiles",
+                                0,
+                            )
+                        )
+                        + 1,
+                    )
+                neighbor_profile_capacity = int(next_capacity)
+                setattr(
+                    fmm,
+                    "_large_n_neighbor_edges_profile_cap",
+                    int(neighbor_profile_capacity),
+                )
+
+        if (
+            neighbor_profile_capacity > 0
+            and neighbor_active_edges > neighbor_profile_capacity
+        ):
+            raise RuntimeError(
+                "static runtime sizing neighbor-edge cap exceeded: "
+                f"active_edges={neighbor_active_edges} cap={neighbor_profile_capacity}. "
+                "Increase JACCPOT_LARGE_N_NEIGHBOR_EDGE_PROFILE_FIXED_CAP."
+            )
+
+        if (
+            neighbor_profile_capacity > 0
+            and neighbor_active_edges < neighbor_profile_capacity
+        ):
+            pad_edges = int(neighbor_profile_capacity - neighbor_active_edges)
+            neighbor_edges = jnp.concatenate(
+                [
+                    neighbor_edges,
+                    jnp.zeros((pad_edges,), dtype=INDEX_DTYPE),
+                ],
+                axis=0,
+            )
+            state_neighbor_list = state_neighbor_list._replace(neighbors=neighbor_edges)
+    else:
+        state_target_leaf_ids = precomputed_target_leaf_ids
+        state_source_leaf_ids = precomputed_source_leaf_ids
+        state_valid_pairs = precomputed_valid_pairs
+    return (
+        state_neighbor_list,
+        state_target_leaf_ids,
+        state_source_leaf_ids,
+        state_valid_pairs,
+    )
+
+
 def prepare_large_n_state(
     fmm: "FMMEngine",
     *,
@@ -1332,146 +1748,26 @@ def prepare_large_n_state(
 
     substage_t0 = _now()
     overflow_active_blocks = int(target_block_source_leaf_ids.shape[0])
-    if bool(fused_device_mode) and static_runtime_fixed_sizing:
-        overflow_profile_capacity = int(overflow_profile_fixed_cap)
-        if overflow_profile_capacity <= 0:
-            overflow_profile_capacity = int(
-                getattr(fmm, "_large_n_overflow_profile_cap", 0)
-            )
-            if overflow_profile_capacity <= 0:
-                overflow_profile_capacity = int(overflow_active_blocks)
-            setattr(
-                fmm, "_large_n_overflow_profile_cap", int(overflow_profile_capacity)
-            )
-        if overflow_active_blocks > overflow_profile_capacity:
-            raise RuntimeError(
-                "static runtime sizing overflow cap exceeded: "
-                f"active_blocks={overflow_active_blocks} cap={overflow_profile_capacity}. "
-                "Increase JACCPOT_LARGE_N_OVERFLOW_PROFILE_FIXED_CAP."
-            )
-        if overflow_active_blocks < overflow_profile_capacity:
-            pad_rows = int(overflow_profile_capacity - overflow_active_blocks)
-            block_size = int(target_block_source_leaf_ids.shape[1])
-            target_block_leaf_ids = jnp.concatenate(
-                [
-                    target_block_leaf_ids,
-                    jnp.zeros((pad_rows,), dtype=INDEX_DTYPE),
-                ],
-                axis=0,
-            )
-            target_block_source_leaf_ids = jnp.concatenate(
-                [
-                    target_block_source_leaf_ids,
-                    jnp.zeros((pad_rows, block_size), dtype=INDEX_DTYPE),
-                ],
-                axis=0,
-            )
-            target_block_valid_mask = jnp.concatenate(
-                [
-                    target_block_valid_mask,
-                    jnp.zeros((pad_rows, block_size), dtype=bool),
-                ],
-                axis=0,
-            )
-    elif bool(fused_device_mode):
-        # Backward-compatible non-fixed fused mode: keep dynamic active size.
-        overflow_profile_capacity = int(overflow_active_blocks)
-    elif static_runtime_fixed_sizing:
-        overflow_profile_capacity = int(overflow_profile_fixed_cap)
-        if (
-            overflow_profile_capacity > 0
-            and overflow_active_blocks > overflow_profile_capacity
-        ):
-            raise RuntimeError(
-                "static runtime sizing overflow cap exceeded: "
-                f"active_blocks={overflow_active_blocks} cap={overflow_profile_capacity}. "
-                "Increase JACCPOT_LARGE_N_OVERFLOW_PROFILE_FIXED_CAP."
-            )
-        if overflow_profile_capacity <= 0:
-            overflow_profile_capacity = int(overflow_active_blocks)
-        elif overflow_active_blocks < overflow_profile_capacity:
-            pad_rows = int(overflow_profile_capacity - overflow_active_blocks)
-            block_size = int(target_block_source_leaf_ids.shape[1])
-            target_block_leaf_ids = jnp.concatenate(
-                [
-                    target_block_leaf_ids,
-                    jnp.zeros((pad_rows,), dtype=INDEX_DTYPE),
-                ],
-                axis=0,
-            )
-            target_block_source_leaf_ids = jnp.concatenate(
-                [
-                    target_block_source_leaf_ids,
-                    jnp.zeros((pad_rows, block_size), dtype=INDEX_DTYPE),
-                ],
-                axis=0,
-            )
-            target_block_valid_mask = jnp.concatenate(
-                [
-                    target_block_valid_mask,
-                    jnp.zeros((pad_rows, block_size), dtype=bool),
-                ],
-                axis=0,
-            )
-    else:
-        overflow_profile_capacity = int(
-            getattr(fmm, "_large_n_overflow_profile_cap", 0)
-        )
-        if overflow_profile_capacity <= 0 and overflow_profile_bootstrap_cap > 0:
-            overflow_profile_capacity = _pick_overflow_profile_capacity(
-                int(overflow_profile_bootstrap_cap)
-            )
-            setattr(
-                fmm, "_large_n_overflow_profile_cap", int(overflow_profile_capacity)
-            )
-        if overflow_active_blocks > overflow_profile_capacity:
-            required_blocks = int(
-                np.ceil(
-                    float(overflow_active_blocks) * float(overflow_profile_headroom)
-                )
-            )
-            next_capacity = _pick_overflow_profile_capacity(required_blocks)
-            if (
-                overflow_profile_capacity > 0
-                and next_capacity > overflow_profile_capacity
-            ):
-                setattr(
-                    fmm,
-                    "_large_n_overflow_profile_reprofiles",
-                    int(getattr(fmm, "_large_n_overflow_profile_reprofiles", 0)) + 1,
-                )
-            overflow_profile_capacity = int(next_capacity)
-            setattr(
-                fmm, "_large_n_overflow_profile_cap", int(overflow_profile_capacity)
-            )
-
-        if (
-            overflow_profile_capacity > 0
-            and overflow_active_blocks < overflow_profile_capacity
-        ):
-            pad_rows = int(overflow_profile_capacity - overflow_active_blocks)
-            block_size = int(target_block_source_leaf_ids.shape[1])
-            target_block_leaf_ids = jnp.concatenate(
-                [
-                    target_block_leaf_ids,
-                    jnp.zeros((pad_rows,), dtype=INDEX_DTYPE),
-                ],
-                axis=0,
-            )
-            target_block_source_leaf_ids = jnp.concatenate(
-                [
-                    target_block_source_leaf_ids,
-                    jnp.zeros((pad_rows, block_size), dtype=INDEX_DTYPE),
-                ],
-                axis=0,
-            )
-            target_block_valid_mask = jnp.concatenate(
-                [
-                    target_block_valid_mask,
-                    jnp.zeros((pad_rows, block_size), dtype=bool),
-                ],
-                axis=0,
-            )
+    (
+        block_size,
+        target_block_leaf_ids,
+        target_block_source_leaf_ids,
+        target_block_valid_mask,
+        overflow_profile_capacity,
+    ) = _size_fused_static_overflow_profile(
+        fmm=fmm,
+        fused_device_mode=fused_device_mode,
+        static_runtime_fixed_sizing=static_runtime_fixed_sizing,
+        overflow_active_blocks=overflow_active_blocks,
+        overflow_profile_fixed_cap=overflow_profile_fixed_cap,
+        overflow_profile_bootstrap_cap=overflow_profile_bootstrap_cap,
+        overflow_profile_headroom=overflow_profile_headroom,
+        block_size=block_size,
+        target_block_leaf_ids=target_block_leaf_ids,
+        target_block_source_leaf_ids=target_block_source_leaf_ids,
+        target_block_valid_mask=target_block_valid_mask,
+        pick_overflow_profile_capacity=_pick_overflow_profile_capacity,
+    )
     _record_nf("_refresh_timing_nearfield_overflow_profile_seconds", substage_t0)
 
     radix_fast_payload, radix_overflow_payload = _build_radix_fast_lane_payloads(
@@ -1496,107 +1792,26 @@ def prepare_large_n_state(
 
     substage_t0 = _now()
     state_neighbor_list = neighbor_payload
-    if bool(execution_config.radix_fast_lane):
-        # Memory trim for radix fast lane:
-        # neighbor_leaf_positions duplicates information recoverable from
-        # offsets+neighbors and is not needed by the fast-lane accel path.
-        # Keep it out of prepared state to reduce resident memory.
-        state_neighbor_list = neighbor_payload._replace(neighbor_leaf_positions=None)
-        # The radix fast-lane evaluator does not require generic edge-list
-        # precompute vectors. Keeping them optional/empty avoids carrying
-        # topology-varying edge payloads that can trigger extra recompiles.
-        state_target_leaf_ids = None
-        state_source_leaf_ids = None
-        state_valid_pairs = None
-        neighbor_edges = jnp.asarray(state_neighbor_list.neighbors, dtype=INDEX_DTYPE)
-        neighbor_active_edges = int(neighbor_edges.shape[0])
-        neighbor_profile_capacity = 0
-        if static_runtime_fixed_sizing:
-            neighbor_profile_capacity = int(neighbor_profile_fixed_cap)
-            if neighbor_profile_capacity <= 0:
-                if bool(fused_device_mode):
-                    neighbor_profile_capacity = int(
-                        getattr(fmm, "_large_n_neighbor_edges_profile_cap", 0)
-                    )
-                    if neighbor_profile_capacity <= 0:
-                        neighbor_profile_capacity = int(neighbor_active_edges)
-                    setattr(
-                        fmm,
-                        "_large_n_neighbor_edges_profile_cap",
-                        int(neighbor_profile_capacity),
-                    )
-                else:
-                    neighbor_profile_capacity = int(neighbor_active_edges)
-        elif not bool(fused_device_mode):
-            neighbor_profile_capacity = int(
-                getattr(fmm, "_large_n_neighbor_edges_profile_cap", 0)
-            )
-            if neighbor_profile_capacity <= 0 and neighbor_profile_bootstrap_cap > 0:
-                neighbor_profile_capacity = _pick_neighbor_profile_capacity(
-                    int(neighbor_profile_bootstrap_cap)
-                )
-                setattr(
-                    fmm,
-                    "_large_n_neighbor_edges_profile_cap",
-                    int(neighbor_profile_capacity),
-                )
-            if neighbor_active_edges > neighbor_profile_capacity:
-                required_edges = int(
-                    np.ceil(
-                        float(neighbor_active_edges) * float(neighbor_profile_headroom)
-                    )
-                )
-                next_capacity = _pick_neighbor_profile_capacity(required_edges)
-                if (
-                    neighbor_profile_capacity > 0
-                    and next_capacity > neighbor_profile_capacity
-                ):
-                    setattr(
-                        fmm,
-                        "_large_n_neighbor_edges_profile_reprofiles",
-                        int(
-                            getattr(
-                                fmm,
-                                "_large_n_neighbor_edges_profile_reprofiles",
-                                0,
-                            )
-                        )
-                        + 1,
-                    )
-                neighbor_profile_capacity = int(next_capacity)
-                setattr(
-                    fmm,
-                    "_large_n_neighbor_edges_profile_cap",
-                    int(neighbor_profile_capacity),
-                )
-
-        if (
-            neighbor_profile_capacity > 0
-            and neighbor_active_edges > neighbor_profile_capacity
-        ):
-            raise RuntimeError(
-                "static runtime sizing neighbor-edge cap exceeded: "
-                f"active_edges={neighbor_active_edges} cap={neighbor_profile_capacity}. "
-                "Increase JACCPOT_LARGE_N_NEIGHBOR_EDGE_PROFILE_FIXED_CAP."
-            )
-
-        if (
-            neighbor_profile_capacity > 0
-            and neighbor_active_edges < neighbor_profile_capacity
-        ):
-            pad_edges = int(neighbor_profile_capacity - neighbor_active_edges)
-            neighbor_edges = jnp.concatenate(
-                [
-                    neighbor_edges,
-                    jnp.zeros((pad_edges,), dtype=INDEX_DTYPE),
-                ],
-                axis=0,
-            )
-            state_neighbor_list = state_neighbor_list._replace(neighbors=neighbor_edges)
-    else:
-        state_target_leaf_ids = precomputed_target_leaf_ids
-        state_source_leaf_ids = precomputed_source_leaf_ids
-        state_valid_pairs = precomputed_valid_pairs
+    (
+        state_neighbor_list,
+        state_target_leaf_ids,
+        state_source_leaf_ids,
+        state_valid_pairs,
+    ) = _trim_radix_fast_lane_neighbor_list(
+        execution_config=execution_config,
+        fmm=fmm,
+        fused_device_mode=fused_device_mode,
+        static_runtime_fixed_sizing=static_runtime_fixed_sizing,
+        neighbor_payload=neighbor_payload,
+        state_neighbor_list=state_neighbor_list,
+        precomputed_target_leaf_ids=precomputed_target_leaf_ids,
+        precomputed_source_leaf_ids=precomputed_source_leaf_ids,
+        precomputed_valid_pairs=precomputed_valid_pairs,
+        neighbor_profile_fixed_cap=neighbor_profile_fixed_cap,
+        neighbor_profile_bootstrap_cap=neighbor_profile_bootstrap_cap,
+        neighbor_profile_headroom=neighbor_profile_headroom,
+        pick_neighbor_profile_capacity=_pick_neighbor_profile_capacity,
+    )
     _record_nf("_refresh_timing_nearfield_neighbor_padding_seconds", substage_t0)
 
     substage_t0 = _now()
