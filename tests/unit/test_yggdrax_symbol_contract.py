@@ -66,6 +66,14 @@ _LOAD_BEARING = (
     # probe checked only jaccpot, so `"auto"` chose the device lane against an
     # older yggdrax and then died with an ImportError mid force-build.
     ("yggdrax.interactions", "dual_tree_walk_mutual"),
+    # Function-local in `nornax_adapter.py` (twice), and the most load-bearing of
+    # the five names the module-level rule used to drop: it is the SHARED tree
+    # rebuild, so unlike `dual_tree_walk_mutual` -- which is device-lane-only and
+    # which ODISSEO's `"auto"` backend can degrade around -- a yggdrax too old for
+    # this one breaks the host lane too, and no fallback rescues it. Nothing at
+    # runtime can usefully probe for that, which is the argument for catching it
+    # here.
+    ("yggdrax._tree_impl", "rebuild_static_radix_tree_from_template"),
 )
 
 
