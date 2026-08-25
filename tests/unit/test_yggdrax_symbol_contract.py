@@ -23,6 +23,8 @@ from __future__ import annotations
 import pathlib
 import textwrap
 
+import pytest
+
 from tests.conftest import (
     _JACCPOT_PACKAGE,
     _missing_yggdrax_symbols,
@@ -39,13 +41,24 @@ def test_the_environment_satisfies_the_contract() -> None:
     assert _missing_yggdrax_symbols(required) == []
 
 
-def test_the_scan_finds_a_known_module_level_import() -> None:
-    """`INDEX_DTYPE` is imported at module level and must be collected."""
+# The distributed mutual path is where jaccpot and yggdrax move together --
+# yggdrax#46/#49/#50/#51 and jaccpot#197/#202/#203/#205 were paired merges -- so
+# it is where a stale yggdrax bites first. These three are its load-bearing
+# imports, pinned by name so a refactor that moves one out of a module body
+# cannot quietly shrink the contract to something that still passes.
+_LOAD_BEARING = (
+    ("yggdrax.distributed.reverse_halo", "halo_return_addresses"),
+    ("yggdrax.distributed.cross_walk", "single_owner_domain"),
+    ("yggdrax.distributed.cross_walk", "dual_tree_walk_cross_mutual"),
+    ("yggdrax.dtypes", "INDEX_DTYPE"),
+)
+
+
+@pytest.mark.parametrize(("module", "name"), _LOAD_BEARING)
+def test_the_scan_finds_the_load_bearing_imports(module: str, name: str) -> None:
+    """Each named symbol is a module-level import and must be collected."""
     required = _yggdrax_symbols_jaccpot_imports(_JACCPOT_PACKAGE)
-    assert "INDEX_DTYPE" in required["yggdrax.dtypes"]
-    # The symbol whose absence produced the ImportError this guard was written
-    # for, pinned so a refactor that moves the import cannot quietly drop it.
-    assert "halo_return_addresses" in required["yggdrax.distributed.reverse_halo"]
+    assert name in required.get(module, set())
 
 
 def test_the_scan_ignores_imports_jaccpot_guards_itself(
