@@ -946,15 +946,34 @@ def _jax_version_tuple() -> tuple[int, ...]:
 
 
 def resolve_grad_halo_exchange(method: str = "auto") -> str:
-    """Resolve the grad-path halo exchange, version-gating the ragged one.
+    """Resolve the grad-path halo exchange, gating the ragged one two ways.
 
     ``"auto"`` picks ``"native"`` (``jax.lax.ragged_all_to_all``, which sends only
-    the actual halo) on JAX >= :data:`JAX_RAGGED_GRAD_FIXED_VERSION`, and the
-    bandwidth-hungry but safe ``"buf"`` below it. That keeps a user on an affected
-    JAX from silently computing wrong forces after their first gradient, while
-    anyone on a fixed JAX gets the cheap exchange with no action required.
+    the actual halo) when BOTH conditions hold, and the bandwidth-hungry but safe
+    ``"buf"`` otherwise:
 
-    The gate is a floor, not a range: no upper bound is asserted because a
+    * **JAX >=** :data:`JAX_RAGGED_GRAD_FIXED_VERSION`. Below it, executing the
+      ragged reverse pass corrupts every later ragged exchange in the process, so
+      a forward evaluated after a gradient silently loses the whole cross-domain
+      near field. That keeps a user on an affected JAX from computing wrong
+      forces, while anyone on a fixed JAX gets the cheap exchange for free.
+    * **The default backend is not CPU.** ``ragged_all_to_all`` has no XLA:CPU
+      lowering, so there ``"native"`` is not slower-or-riskier, it is
+      ``UNIMPLEMENTED: HLO opcode 'ragged-all-to-all' is not supported by
+      XLA:CPU ThunkEmitter``.
+
+    The backend condition is not a refinement of the version one -- it was added
+    because its absence had already killed the guard. On jax 0.10.2 the version
+    gate alone resolves to ``"native"`` on every backend, which failed six tests
+    in ``tests/distributed/test_distributed_grad_correctness.py``; and since
+    ``e98340d`` CI does not collect ``tests/distributed``, CPU was the only place
+    they ran. The only reachable guard on the distributed reverse pass was
+    therefore dead, for a reason having nothing to do with the code it guards.
+
+    Only CPU is excluded, rather than "anything that is not GPU". CPU is measured
+    to have no lowering; nothing is claimed here about a backend nobody has run.
+
+    The version gate is a floor, not a range: no upper bound is asserted because a
     regression would be caught by
     ``test_native_halo_exchange_is_fixed_upstream``, which is the check this
     constant is derived from.
@@ -966,6 +985,8 @@ def resolve_grad_halo_exchange(method: str = "auto") -> str:
         )
     if method != "auto":
         return method
+    if jax.default_backend() == "cpu":
+        return "buf"
     return "native" if _jax_version_tuple() >= JAX_RAGGED_GRAD_FIXED_VERSION else "buf"
 
 

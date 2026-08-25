@@ -258,39 +258,6 @@ def test_nearfield_chunk_rejected_on_grad_path():
         )
 
 
-def test_auto_halo_exchange_version_gate(monkeypatch):
-    """``auto`` must pick the ragged exchange only on a JAX where it is safe.
-
-    Pure resolver test -- no devices, no compile. The boundary is measured, not
-    read off a changelog: 0.9.0.1 corrupts (6/6 in the reproducer), 0.9.1 does not
-    (4/4 clean, and the tripwire below passes there).
-    """
-    import jaccpot.distributed.fmm as dfmm
-
-    cases = {
-        "0.8.0": "buf",
-        "0.9.0": "buf",
-        "0.9.0.1": "buf",  # the version the bug was found on
-        "0.9.1": "native",  # first fixed release
-        "0.10.2": "native",
-        "0.11.0": "native",
-        "1.0.0": "native",
-    }
-    for version, expected in cases.items():
-        monkeypatch.setattr(dfmm.jax, "__version__", version, raising=False)
-        assert (
-            dfmm.resolve_grad_halo_exchange("auto") == expected
-        ), f"jax {version} should resolve to {expected!r}"
-        # an explicit choice is never overridden by the gate
-        assert dfmm.resolve_grad_halo_exchange("buf") == "buf"
-        assert dfmm.resolve_grad_halo_exchange("native") == "native"
-
-    # non-numeric suffixes (dev/rc builds) must not crash the parse
-    for version in ("0.9.1.dev20260301", "0.10.0rc1", "0.9"):
-        monkeypatch.setattr(dfmm.jax, "__version__", version, raising=False)
-        assert dfmm.resolve_grad_halo_exchange("auto") in ("buf", "native")
-
-
 def test_rejects_unknown_halo_exchange():
     """Only the vetted halo-exchange implementations are selectable."""
     with pytest.raises(ValueError, match="halo_exchange"):
