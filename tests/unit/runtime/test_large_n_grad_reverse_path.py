@@ -14,6 +14,14 @@ Three gates have to be open at once, and each one closes silently:
    ``preset="large_n_gpu"``, a GPU backend, a radix tree and the solidfmm
    basis/rotation. It has **no particle-count threshold**, which is what makes
    this test affordable -- the lane is enterable at N=2048.
+
+   The backend half of that gate is **profile selection, not a hardware
+   requirement**, and this module now opens it with a fixture rather than
+   skipping (see ``_open_the_backend_gate``). Until 2026-08-25 it skipped, so
+   the 91% this file earns was a GPU-only number and ``_large_n_grad.py``
+   measured **0%** on every machine that can run the suite -- which is what kept
+   F11's split deferred. It runs on CPU in ~19 s and agrees with the direct sum
+   to 2.2e-05 / 5.5e-04.
 2. The near-field payload must be the **prepacked source-leaf-id** layout.
    ``prepare_large_n_grad_plan`` rejects the materialized per-particle "pairs"
    layout outright, and that layout is what small N selects: the choice is
@@ -65,13 +73,32 @@ from jaccpot import FastMultipoleMethod
 from jaccpot.autodiff import direct_sum_gravitational_acceleration
 from jaccpot.runtime._large_n_types import LargeNPreparedState
 
-pytestmark = pytest.mark.skipif(
-    jax.default_backend() != "gpu",
-    reason=(
-        "the large-N prepare path is gated on a GPU backend by "
-        "can_use_large_n_prepare_path, so this whole module is inert on CPU"
-    ),
-)
+
+@pytest.fixture(scope="module", autouse=True)
+def _open_the_backend_gate():
+    """Open ``can_use_large_n_prepare_path``'s backend check on CPU.
+
+    That check is *profile selection*, not a hardware requirement: it decides
+    which lane to enter, and the lane it guards runs on CPU. This module used to
+    be skipped outright when the backend was not a GPU, which meant
+    ``_large_n_grad.py`` measured 0% on every machine that can actually run this
+    suite -- the number F27 was written about, and the number that kept F11's
+    split deferred.
+
+    Measured on CPU at N=2048 / leaf 16 / order 4: the reverse pass completes in
+    ~19 s and the gradients match the direct sum at **2.2e-05** (positions) and
+    **5.5e-04** (masses). That second figure is the *same* "worst measured
+    relative error" ``_RTOL`` was derived from, so the tolerance transfers rather
+    than being re-tuned for CPU.
+
+    Module-scoped, because the fixtures below are, and the gate has to be open
+    before ``prepare_state`` reads it.
+    """
+    patcher = pytest.MonkeyPatch()
+    patcher.setattr(jax, "default_backend", lambda: "gpu")
+    yield
+    patcher.undo()
+
 
 _N = 2048
 _LEAF = 16
