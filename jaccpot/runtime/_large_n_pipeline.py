@@ -33,6 +33,7 @@ from ._large_n_types import (
     LargeNCompiledState,
     LargeNExecutionConfig,
     LargeNPreparedState,
+    LargeNPrepareRequest,
     RadixFastNearfieldPayload,
     large_n_as_prepared_state,
     large_n_to_compiled_state,
@@ -1020,25 +1021,10 @@ def _trim_radix_fast_lane_neighbor_list(
 def prepare_large_n_state(
     fmm: "FMMEngine",
     *,
+    request: LargeNPrepareRequest,
     positions_arr: Array,
     masses_arr: Array,
     input_dtype: jnp.dtype,
-    bounds: Optional[Tuple[Array, Array]],
-    leaf_size: int,
-    max_order: int,
-    theta_val: float,
-    mac_type_val: MACType,
-    refine_local_val: bool,
-    max_refine_levels_val: int,
-    aspect_threshold_val: float,
-    jit_tree_override: Optional[bool],
-    allow_stateful_cache: bool,
-    runtime_traversal_config: Optional[DualTreeTraversalConfig],
-    runtime_m2l_chunk_size: Optional[int],
-    runtime_l2l_chunk_size: Optional[int],
-    upward_center_mode: str,
-    record_retry: Callable[[DualTreeRetryEvent], None],
-    collected_retries: list[DualTreeRetryEvent],
     tree_artifacts: Optional[Any] = None,
     dual_downward_artifacts: Optional[Any] = None,
     supplied_force_scale: Optional[Array] = None,
@@ -1059,44 +1045,19 @@ def prepare_large_n_state(
     fmm : FMMEngine
         The engine, typed loosely to avoid the ARCHITECTURE section 8 import
         cycle.
+    request : LargeNPrepareRequest
+        The resolved build request -- bounds, leaf size, order, MAC parameters,
+        runtime overrides and the retry sink. These were sixteen keyword
+        arguments until audit item F11; both call sites passed the same sixteen
+        names in the same order, so they were already a bundle and the signature
+        did not say so. Unpacked into locals immediately below, which is what
+        keeps the body unchanged.
     positions_arr : Array
         Particle positions in the caller's order.
     masses_arr : Array
         Particle masses, same order.
     input_dtype : jnp.dtype
         Dtype the caller supplied, recorded so outputs can be cast back.
-    bounds : Optional[Tuple[Array, Array]]
-        Explicit domain bounds for the tree build.
-    leaf_size : int
-        Target particles per leaf.
-    max_order : int
-        Expansion order.
-    theta_val : float
-        Resolved MAC opening angle.
-    mac_type_val : MACType
-        Resolved traversal-facing acceptance criterion.
-    refine_local_val : bool
-        Resolved local-refinement toggle.
-    max_refine_levels_val : int
-        Resolved refinement depth cap.
-    aspect_threshold_val : float
-        Resolved leaf aspect-ratio split threshold.
-    jit_tree_override : Optional[bool]
-        Force or forbid the jitted tree build.
-    allow_stateful_cache : bool
-        Permit process-level caches; cleared when the caller needs purity.
-    runtime_traversal_config : Optional[DualTreeTraversalConfig]
-        Resolved traversal capacities.
-    runtime_m2l_chunk_size : Optional[int]
-        Resolved M2L chunk size.
-    runtime_l2l_chunk_size : Optional[int]
-        Resolved L2L chunk size.
-    upward_center_mode : str
-        Centre selection for the upward sweep.
-    record_retry : Callable[[DualTreeRetryEvent], None]
-        Sink for traversal retry events.
-    collected_retries : list[DualTreeRetryEvent]
-        Accumulator the sink appends to; read back by the caller.
     tree_artifacts : Optional[Any]
         Reuse an already-built tree instead of building one.
     dual_downward_artifacts : Optional[Any]
@@ -1126,6 +1087,24 @@ def prepare_large_n_state(
         different acceptance threshold -- or if a fused-payload static cap was
         not preflighted or is exceeded, or a compaction invariant fails.
     """
+    # Unpacked into the names the body already uses, so this change is a
+    # signature change only -- the 880 lines below are untouched.
+    bounds = request.bounds
+    leaf_size = request.leaf_size
+    max_order = request.max_order
+    theta_val = request.theta_val
+    mac_type_val = request.mac_type_val
+    refine_local_val = request.refine_local_val
+    max_refine_levels_val = request.max_refine_levels_val
+    aspect_threshold_val = request.aspect_threshold_val
+    jit_tree_override = request.jit_tree_override
+    allow_stateful_cache = request.allow_stateful_cache
+    runtime_traversal_config = request.runtime_traversal_config
+    runtime_m2l_chunk_size = request.runtime_m2l_chunk_size
+    runtime_l2l_chunk_size = request.runtime_l2l_chunk_size
+    upward_center_mode = request.upward_center_mode
+    record_retry = request.record_retry
+    collected_retries = request.collected_retries
 
     refresh_timing_active = bool(
         getattr(fmm, "_refresh_timing_active", False)
