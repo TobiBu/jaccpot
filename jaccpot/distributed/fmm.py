@@ -285,6 +285,17 @@ class DistributedFMMConfig:
     # (disjoint target blocks + scatter-add). Applies ONLY when the pallas near-field is
     # active (nearfield_backend "pallas", or "auto" on Ampere+); ignored for baseline.
     nearfield_chunk: Optional[int] = None
+    # How particles are assigned to devices: "rcb" (DEFAULT, matching
+    # partition_for_devices and DistributedMutualConfig) or "morton". RCB keeps a
+    # flattened system's near neighbours on one device where a Morton split scatters
+    # them -- a thickness-0.4 disk on 4 devices goes from 0.509 of each particle's
+    # nearest neighbours living off-device to 0.046 -- and is better in every geometry
+    # measured (#212). The field exists because the flip in #215 moves the domain
+    # assignment of every distributed run, and therefore every accuracy and timing
+    # baseline taken with one: "morton" is how you reproduce a pre-#215 number, and it
+    # is also still the cheaper of the two (one sort against log2(ndev) partial sorts)
+    # on a system known to be isotropic, where the gap narrows to ~1.2x.
+    partitioner: str = "rcb"
 
     def with_scaled_caps(
         self: "DistributedFMMConfig", factor: float
@@ -2047,7 +2058,13 @@ def distributed_fmm_accelerations(
     else:
         ndev = int(np.prod(list(mesh.shape.values())))
 
-    part = partition_for_devices(positions, masses, ndev, leaf_size=config.leaf_size)
+    part = partition_for_devices(
+        positions,
+        masses,
+        ndev,
+        leaf_size=config.leaf_size,
+        partitioner=config.partitioner,
+    )
     cap = part["cap"]
     counts_dev = jnp.asarray(part["counts"], INDEX_DTYPE)
     pos_f = jnp.asarray(part["pos_flat"])
