@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, NamedTuple, Optional, Union
+from typing import Any, Callable, NamedTuple, Optional, Union
 
 import jax
 import jax.numpy as jnp
@@ -13,6 +13,8 @@ from jaxtyping import Array
 from yggdrax.interactions import (
     CompactTaggedFarPairs,
     DualTreeRetryEvent,
+    DualTreeTraversalConfig,
+    MACType,
     NodeNeighborList,
 )
 from yggdrax.tree import Tree
@@ -25,6 +27,7 @@ from .fmm_constants import _NEARFIELD_TARGET_BLOCK_OVERFLOW_FAST_MAX_BLOCKS
 __all__ = [
     "LargeNCompiledState",
     "LargeNExecutionConfig",
+    "LargeNPrepareRequest",
     "LargeNPreparedState",
     "RadixFastNearfieldPayload",
     "large_n_as_prepared_state",
@@ -40,6 +43,83 @@ class _CompatInteractionStorage(NamedTuple):
 
 class _CompatDownwardView(NamedTuple):
     interactions: _CompatInteractionStorage
+
+
+@dataclass(frozen=True)
+class LargeNPrepareRequest:
+    """The resolved build request `prepare_large_n_state` is driven by.
+
+    Introduced for audit item **F11**, whose second half is the driver's
+    parameter count rather than its length. These sixteen fields were sixteen
+    keyword arguments, and both call sites -- ``fmm_prepare.py`` and
+    ``fmm_strict_run.py`` -- passed the *same* sixteen names in the *same*
+    order. That is what makes them a bundle rather than a taxonomy someone
+    imposed: they already travelled together, the signature just did not say so.
+
+    *Resolved*, in the same sense as :class:`LargeNExecutionConfig`: every
+    ``"auto"`` and every ``None``-means-default has been decided by the caller
+    before one of these exists. Frozen, and host-side only -- it is consumed
+    while building a prepared state and never carried into a trace.
+
+    What is deliberately **not** here: the particle data (``positions_arr``,
+    ``masses_arr``, ``input_dtype``), the injected artifacts
+    (``tree_artifacts``, ``dual_downward_artifacts``, ``supplied_force_scale``)
+    and the mode flags. Those differ between the two call sites, so bundling
+    them would invent a shape the callers do not have.
+
+    Attributes
+    ----------
+    bounds : Optional[Tuple[Array, Array]]
+        Explicit domain bounds, or ``None`` to infer them from the positions.
+    leaf_size : int
+        Target maximum particles per leaf.
+    max_order : int
+        Expansion order ``p``.
+    theta_val : float
+        Resolved opening angle.
+    mac_type_val : MACType
+        Resolved multipole acceptance criterion.
+    refine_local_val : bool
+        Whether local refinement is on.
+    max_refine_levels_val : int
+        Cap on refinement levels.
+    aspect_threshold_val : float
+        Aspect-ratio threshold governing refinement.
+    jit_tree_override : Optional[bool]
+        Force the jitted tree build on or off; ``None`` leaves it to the engine.
+    allow_stateful_cache : bool
+        Whether the stateful interaction cache may be reused for this build.
+    runtime_traversal_config : Optional[DualTreeTraversalConfig]
+        Traversal capacities, possibly clamped, or ``None`` for the preset's.
+    runtime_m2l_chunk_size : Optional[int]
+        M2L chunk size override, or ``None`` to let the runtime decide.
+    runtime_l2l_chunk_size : Optional[int]
+        L2L chunk size override, same convention.
+    upward_center_mode : str
+        Which centres the upward sweep expands about.
+    record_retry : Callable[[DualTreeRetryEvent], None]
+        Sink for traversal retry events.
+    collected_retries : list[DualTreeRetryEvent]
+        Accumulator the sink appends to; carried so the caller can inspect it
+        after the build.
+    """
+
+    bounds: Optional[Tuple[Array, Array]]
+    leaf_size: int
+    max_order: int
+    theta_val: float
+    mac_type_val: MACType
+    refine_local_val: bool
+    max_refine_levels_val: int
+    aspect_threshold_val: float
+    jit_tree_override: Optional[bool]
+    allow_stateful_cache: bool
+    runtime_traversal_config: Optional[DualTreeTraversalConfig]
+    runtime_m2l_chunk_size: Optional[int]
+    runtime_l2l_chunk_size: Optional[int]
+    upward_center_mode: str
+    record_retry: Callable[[DualTreeRetryEvent], None]
+    collected_retries: list[DualTreeRetryEvent]
 
 
 @dataclass(frozen=True)
