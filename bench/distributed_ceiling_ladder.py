@@ -214,7 +214,7 @@ def _one_point(
         positions, masses, ndev, leaf_size=args.leaf, partitioner=config.partitioner
     )
     cap = int(part["cap"])
-    resolved = config.resolved_for(cap)
+    resolved = config.resolved_for(cap, ndev)
     mesh = Mesh(np.asarray(jax.devices()[:ndev]).reshape(ndev), ("gpus",))
 
     row: dict[str, Any] = {

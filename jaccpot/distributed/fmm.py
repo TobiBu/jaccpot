@@ -226,7 +226,9 @@ def _round_up_pow2(value: int) -> int:
     return 1 << max(0, (max(1, int(value)) - 1).bit_length())
 
 
-def _derive_walk_caps(*, per_device_n: int, leaf_size: int) -> dict[str, int]:
+def _derive_walk_caps(
+    *, per_device_n: int, leaf_size: int, ndev: int
+) -> dict[str, int]:
     """Size the traversal buffers from the per-device particle count.
 
     THE LEAF COUNT IS THE VARIABLE, NOT N. Every one of these buffers is indexed by
@@ -264,12 +266,19 @@ def _derive_walk_caps(*, per_device_n: int, leaf_size: int) -> dict[str, int]:
     not papered over here: there is no upper clamp, because a clamp is exactly how a
     capacity becomes a silent truncation. A larger ``leaf_size`` is the lever (fewer,
     bigger leaves), which is the other half of why the default moved off 8, and
-    ``nearfield_chunk`` is the lever for the near-field densification
-    ``[u_leaves, S_near]`` that walls first -- 12.25 GiB at 524288/device and leaf
-    64. ``ndev`` deliberately does not enter: it widens only the *cross* lists, and
-    only through how much of the remote frontier is near, which the overflow flags
-    and ``auto_scale_caps`` now handle honestly because ``max_pair_queue`` finally
-    has an effect.
+    ``m2l_chunk`` / ``nearfield_chunk`` are the levers for the two full-batch walls
+    behind these caps (see ``bench/distributed_ceiling_ladder.py``).
+
+    AND ``ndev`` ENTERS, THROUGH THE CROSS CAPS ONLY. The coarse (LET) tree is built
+    over *every* device's leaf frontier -- ``build_coarse_frontier`` is "all leaf
+    nodes of ``tree``" -- so a local target leaf has ``(ndev - 1) * num_leaves``
+    remote coarse leaves available to be near it, and the same "worst leaf sees
+    everything" behaviour that sets the self near cap sets this one ``ndev - 1``
+    times larger. Sizing the cross caps as if ``ndev`` were 2 overflows
+    ``cross_near`` at *every* rung on 4 devices, with a 61 % force error: measured
+    at 32768, 131072, 524288 and 1048576 particles/device, leaf 256, on 4xA100.
+    The self caps are ndev-independent by construction -- the local tree is the
+    local tree.
 
     Parameters
     ----------
@@ -278,6 +287,9 @@ def _derive_walk_caps(*, per_device_n: int, leaf_size: int) -> dict[str, int]:
         :func:`partition_for_devices`, which is what the local tree is built over.
     leaf_size : int
         Local-tree leaf size, which sets how many leaves that capacity becomes.
+    ndev : int
+        Number of devices in the mesh, which sets how large the coarse frontier the
+        cross walk traverses is.
 
     Returns
     -------
@@ -287,6 +299,10 @@ def _derive_walk_caps(*, per_device_n: int, leaf_size: int) -> dict[str, int]:
 
     n = max(1, int(per_device_n))
     num_leaves = max(1, -(-n // max(1, int(leaf_size))))
+    # Remote leaf frontiers the cross walk can see. 1 rather than 0 on a
+    # single-device mesh, so the cross caps stay at their floors instead of
+    # collapsing to nothing.
+    remote_domains = max(1, int(ndev) - 1)
     # num_leaves ** 1.5, in integers: math.isqrt keeps the rule bit-identical on
     # every platform, and it only ever rounds down, which the power-of-two rounding
     # above it more than makes up for.
@@ -301,16 +317,23 @@ def _derive_walk_caps(*, per_device_n: int, leaf_size: int) -> dict[str, int]:
         ),
         "max_interactions_per_node": far_per_node,
         "max_neighbors_per_leaf": near_per_leaf,
-        # The cross walk's target side is the same set of local leaves and its source
-        # side is the coarse tree over every device's frontier, so the per-leaf and
-        # per-node budgets are the same shape as the self walk's. Its wavefront is
-        # not: see _CROSS_QUEUE_WAVEFRONT_COEFF.
+        # The cross walk's target side is the same set of local leaves; its source
+        # side is the coarse tree over every OTHER device's frontier, which is what
+        # ``remote_domains`` carries. Same shape as the self budgets above, that many
+        # times over -- plus a wider wavefront coefficient, for which see
+        # _CROSS_QUEUE_WAVEFRONT_COEFF.
         "cross_max_pair_queue": max(
             _MIN_PAIR_QUEUE,
-            _round_up_pow2(_CROSS_QUEUE_WAVEFRONT_COEFF * wavefront),
+            _round_up_pow2(_CROSS_QUEUE_WAVEFRONT_COEFF * remote_domains * wavefront),
         ),
-        "cross_max_interactions_per_node": far_per_node,
-        "cross_max_neighbors_per_leaf": near_per_leaf,
+        "cross_max_interactions_per_node": max(
+            _MIN_INTERACTIONS_PER_NODE,
+            _round_up_pow2(remote_domains * (num_leaves // 2)),
+        ),
+        "cross_max_neighbors_per_leaf": max(
+            _MIN_NEIGHBORS_PER_LEAF,
+            _round_up_pow2(remote_domains * num_leaves),
+        ),
     }
 
 
@@ -514,9 +537,9 @@ class DistributedFMMConfig:
     partitioner: str = "rcb"
 
     def resolved_for(
-        self: "DistributedFMMConfig", per_device_n: int
+        self: "DistributedFMMConfig", per_device_n: int, ndev: int
     ) -> "DistributedFMMConfig":
-        """Return a copy with every unset self-walk capacity derived from N.
+        """Return a copy with every unset traversal capacity derived from N.
 
         Idempotent: once a field holds a number there is no sentinel left to fill,
         so the driver can call this at its entry point and again deeper down
@@ -530,6 +553,9 @@ class DistributedFMMConfig:
         per_device_n : int
             Per-device particle capacity (``cap`` from
             :func:`partition_for_devices`).
+        ndev : int
+            Number of devices in the mesh. Only the cross-walk caps depend on it,
+            and they depend on it strongly -- see :func:`_derive_walk_caps`.
 
         Returns
         -------
@@ -541,7 +567,9 @@ class DistributedFMMConfig:
         if not unset:
             return self
         derived = _derive_walk_caps(
-            per_device_n=int(per_device_n), leaf_size=int(self.leaf_size)
+            per_device_n=int(per_device_n),
+            leaf_size=int(self.leaf_size),
+            ndev=int(ndev),
         )
         return dataclasses.replace(self, **{f: derived[f] for f in unset})
 
@@ -2222,7 +2250,7 @@ def make_force_evaluator(
     # so this is the one place a direct caller's unset capacities can be sized. A
     # no-op when they are already numbers, which is the case coming through
     # ``distributed_fmm_accelerations``.
-    config = config.resolved_for(cap)
+    config = config.resolved_for(cap, ndev)
 
     fn = _make_fn(
         config,
@@ -2348,7 +2376,7 @@ def distributed_fmm_accelerations(
     # the preset records them, so both need numbers rather than "derive me". A
     # preset still overrides what is derived here -- it is a measured value for this
     # exact (per-GPU N, ndev), which the rule is only an estimate of.
-    config = config.resolved_for(cap)
+    config = config.resolved_for(cap, ndev)
     counts_dev = jnp.asarray(part["counts"], INDEX_DTYPE)
     pos_f = jnp.asarray(part["pos_flat"])
     mass_f = jnp.asarray(part["mass_flat"])
