@@ -88,9 +88,17 @@ from jaccpot.upward.real_tree_expansions import (  # noqa: E402
 )
 from jaccpot.upward.tree_geometry import compute_tree_geometry_compiled  # noqa: E402
 
+# The mesh and per-device load this file mirrors. Declared before the config because
+# the traversal capacities are now derived from them.
+_NDEV = 2
+_PER = 64
+
 # The driver tests' default config, spelled out so a default change cannot silently
-# move what this file measures.
-_CONFIG = DistributedFMMConfig()
+# move what this file measures -- and RESOLVED the way the driver resolves it, since
+# the traversal capacities are derived from per-device N and the mesh size rather than
+# shipped as constants. Without that they are the ``None`` sentinel and the cross walk
+# below gets handed it.
+_CONFIG = DistributedFMMConfig().resolved_for(_PER, _NDEV)
 _ORDER = _CONFIG.order
 _LEAF = _CONFIG.leaf_size
 # ONE theta, for both walks. There used to be a separate ``theta_cross`` at 0.1
@@ -103,7 +111,6 @@ _MAC = _CONFIG.mac_type
 _ROTATION = _CONFIG.rotation
 _G = _CONFIG.G
 _SOFTENING = _CONFIG.softening
-_PER = 64
 
 # Same 1% bar the driver tests hold the total field to, applied to the cross far term
 # in isolation. That is strictly harder, because the term is not diluted here by the
@@ -246,7 +253,7 @@ class _CrossView:
     """
 
     def __init__(self, interpenetrating):
-        pts, mass = _separated_clusters(2, _PER)
+        pts, mass = _separated_clusters(_NDEV, _PER)
         # Still from the production partitioner, so the trees below are built in the
         # same box the driver would use.
         bounds = partition_for_devices(pts, mass, 2, leaf_size=_LEAF)["bounds"]
