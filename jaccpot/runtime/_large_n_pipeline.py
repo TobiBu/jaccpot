@@ -357,17 +357,17 @@ def _apply_speed_prepared_target_block_layout(
     block_size: int,
     nearfield_target_block_tile_size: int,
     target_leaf_block_counts: Optional[Array],
-    target_block_leaf_ids: Optional[Array],
-    target_block_source_leaf_ids: Optional[Array],
-    target_block_valid_mask: Optional[Array],
-    target_block_offsets: Optional[Array],
+    target_block_leaf_ids: Array,
+    target_block_source_leaf_ids: Array,
+    target_block_valid_mask: Array,
+    target_block_offsets: Array,
     target_block_source_leaf_ids_padded: Optional[Array],
     target_block_valid_mask_padded: Optional[Array],
 ) -> tuple[
-    Optional[Array],
-    Optional[Array],
-    Optional[Array],
-    Optional[Array],
+    Array,
+    Array,
+    Array,
+    Array,
     Optional[Array],
     Optional[Array],
 ]:
@@ -401,13 +401,13 @@ def _apply_speed_prepared_target_block_layout(
         Fallback block tile size.
     target_leaf_block_counts : Optional[Array]
         Per-leaf block counts, or ``None`` when the layout is not prepared.
-    target_block_leaf_ids : Optional[Array]
+    target_block_leaf_ids : Array
         Leaf id per target block, in and out.
-    target_block_source_leaf_ids : Optional[Array]
+    target_block_source_leaf_ids : Array
         Source-leaf ids per target block, in and out.
-    target_block_valid_mask : Optional[Array]
+    target_block_valid_mask : Array
         Validity mask over those ids, in and out.
-    target_block_offsets : Optional[Array]
+    target_block_offsets : Array
         CSR offsets over target blocks, in and out.
     target_block_source_leaf_ids_padded : Optional[Array]
         Padded source-leaf ids, in and out.
@@ -416,14 +416,14 @@ def _apply_speed_prepared_target_block_layout(
 
     Returns
     -------
-    Optional[Array]
+    Array
         ``target_block_leaf_ids``, reassigned where the layout applied and
         passed through otherwise. The same holds for all five below.
-    Optional[Array]
+    Array
         ``target_block_source_leaf_ids``.
-    Optional[Array]
+    Array
         ``target_block_valid_mask``.
-    Optional[Array]
+    Array
         ``target_block_offsets``.
     Optional[Array]
         ``target_block_source_leaf_ids_padded``.
@@ -610,13 +610,13 @@ def _size_fused_static_overflow_profile(
     overflow_active_blocks: int,
     overflow_profile_fixed_cap: int,
     overflow_profile_bootstrap_cap: int,
-    overflow_profile_headroom: int,
+    overflow_profile_headroom: float,
     block_size: int,
-    target_block_leaf_ids: Optional[Array],
-    target_block_source_leaf_ids: Optional[Array],
-    target_block_valid_mask: Optional[Array],
+    target_block_leaf_ids: Array,
+    target_block_source_leaf_ids: Array,
+    target_block_valid_mask: Array,
     pick_overflow_profile_capacity: Callable[[int], int],
-) -> tuple[int, Optional[Array], Optional[Array], Optional[Array], int]:
+) -> tuple[int, Array, Array, Array, int]:
     """Size the fused static overflow profile and pad the target blocks to it.
 
     Extracted verbatim from :func:`prepare_large_n_state` (audit item **F11**);
@@ -644,15 +644,15 @@ def _size_fused_static_overflow_profile(
         Configured fixed cap, or non-positive to derive one.
     overflow_profile_bootstrap_cap : int
         Cap used when bootstrapping a profile.
-    overflow_profile_headroom : int
+    overflow_profile_headroom : float
         Headroom added when growing the capacity.
     block_size : int
         Target-owned block size, in and out.
-    target_block_leaf_ids : Optional[Array]
+    target_block_leaf_ids : Array
         Leaf id per target block, in and out -- padded to the chosen capacity.
-    target_block_source_leaf_ids : Optional[Array]
+    target_block_source_leaf_ids : Array
         Source-leaf ids per target block, in and out.
-    target_block_valid_mask : Optional[Array]
+    target_block_valid_mask : Array
         Validity mask over those ids, in and out.
     pick_overflow_profile_capacity : Callable[[int], int]
         Maps a required block count onto the next capacity on the ladder.
@@ -661,11 +661,11 @@ def _size_fused_static_overflow_profile(
     -------
     int
         ``block_size``, passed through or reassigned.
-    Optional[Array]
+    Array
         ``target_block_leaf_ids``, padded where the profile required it.
-    Optional[Array]
+    Array
         ``target_block_source_leaf_ids``.
-    Optional[Array]
+    Array
         ``target_block_valid_mask``.
     int
         ``overflow_profile_capacity`` -- the sized capacity. Both branches of

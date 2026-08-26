@@ -2081,6 +2081,63 @@ replaces, because it names what is missing, but it is still environment-
 dependent: a stale sibling reads as a code error. CI, which installs `yggdrax`
 normally, is unaffected either way.
 
+### E.6 The F11 seams' pyright cost, measured — all 18 of it was mine
+
+E.4 counted 205 errors; after the six F11 seam extractions the count was 219, and
+I flagged but did not run the set-difference that would say whose the +14 was. Run
+now, and the honest answer is worse than the guess: **the seams added 18**, and the
+rest of the arithmetic was noise from a yggdrax refresh in between.
+
+**Method, because two things make this measurement easy to fake.** The comparison
+is `ab801d7` (the last `main` commit before seam 1) against `main`; in that span
+the only commits touching `jaccpot/` are the six seams, so nothing else is folded
+in. The baseline was checked out as a worktree at
+`Projects/jaccpot-f11-base` — deliberately a **sibling of `yggdrax`**, because
+`extraPaths = ["../yggdrax"]` is relative to `pyproject.toml`, and a worktree under
+`.claude/` would silently fail to resolve it. That failure does not *add* errors,
+it **removes** them (E.5: `Unknown` is assignable to anything), so it would have
+produced a flattering baseline and a false "the seams added nothing". Both runs
+were asserted to report **0 unresolved imports** and the same 104 files analysed.
+Errors are keyed on `(file, rule, message)`, not line number, since extraction
+moves every line.
+
+| | errors | `_large_n_pipeline.py` |
+|---|---|---|
+| pre-seam `ab801d7` | 201 | 15 |
+| after the six seams | 219 | 33 |
+| added / removed | **+18 / −0** | |
+
+All 18 in one file, nothing removed or masked. Two distinct causes:
+
+1. **One real annotation error (1).** `_size_fused_static_overflow_profile`'s
+   `overflow_profile_headroom` was annotated `int`. It is a **float multiplier** —
+   `float(max(1.0, ...))`, default `2.0`, consumed as
+   `float(overflow_active_blocks) * float(overflow_profile_headroom)`. Not
+   cosmetic: anyone trusting the annotation and writing `int(headroom)` turns a
+   1.5x headroom into 1x and silently under-sizes the profile.
+
+2. **Narrowing lost at the seam (17).** `target_block_leaf_ids`,
+   `target_block_source_leaf_ids`, `target_block_valid_mask` and
+   `target_block_offsets` are assigned real arrays on *every* driver path before
+   the call (lines 1714-1716, 1728-1732, 1778-1781, 1806). Inside the monolith
+   pyright could see that. Extracting made them `Optional[Array]` **parameters**,
+   which discards the narrowing — and because the same over-wide type came back
+   in the *return*, it re-poisoned the driver's own locals downstream (line 1845)
+   and cascaded into seam 3's twelve.
+
+The fix is annotations only — 28 lines, no executable change — narrowing those four
+to `Array` and the headroom to `float`. `target_leaf_block_counts` stays
+`Optional`, because it genuinely is `None` at line 1817; that distinction is the
+whole point. After it the error set is **identical to the pre-seam baseline: 201,
+0 added, 0 removed, no per-file differences.**
+
+**The generalisable lesson.** Extract-a-helper widens types by default: the safe
+choice when writing a signature is `Optional`, and the safe choice is wrong, because
+it throws away a fact the caller has already established and hands it back through
+the return. A seam is therefore not numerics-neutral just because the body moved
+verbatim — the *signature* is new code, and it is the part nothing tests. Set-
+difference the checker across an extraction; a total that moved by 14 hid 18.
+
 ### E.3 Recommended annotation policy, if you want one
 
 A full `Float[Array, "..."]` conversion of 1534 sites is not a refactor pass; it is a project.
