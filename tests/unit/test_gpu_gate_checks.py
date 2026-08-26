@@ -185,9 +185,14 @@ class TestClassifyFailures:
     @pytest.mark.parametrize(
         "node",
         [
-            "tests/characterization/test_fmm_grad_golden.py::test_fmm_grad_golden[clu_real_n128_p4]",
-            "tests/unit/test_solidfmm.py::test_solidfmm_chunked_m2l_matches_fullbatch",
-            "tests/unit/test_dispatch.py::test_compiled_dispatch_is_bit_identical[32]",
+            "tests/characterization/test_constructor_state_golden.py"
+            "::test_constructor_state_matches_the_committed_golden",
+            "tests/unit/runtime/test_potential_stays_on_fast_lane.py"
+            "::test_potential_does_not_delegate_to_the_generic_path",
+            "tests/unit/runtime/test_fb_force_scale_estimator.py"
+            "::test_the_far_field_term_is_load_bearing",
+            "tests/unit/runtime/test_tree_geometry_compiled.py"
+            "::test_compiled_dispatch_is_bit_identical[32]",
         ],
     )
     def test_documented_gpu_failures_are_allowed(self, node: str) -> None:
@@ -195,6 +200,28 @@ class TestClassifyFailures:
         unexpected, known = _classify_failures(f"[gw0] [ 10%] FAILED {node}\n")
         assert known == [node]
         assert unexpected == []
+
+    @pytest.mark.parametrize(
+        "node",
+        [
+            "tests/characterization/test_fmm_grad_golden.py"
+            "::test_fmm_grad_golden[clu_real_n128_p4]",
+            "tests/integration/test_fmm.py::test_solidfmm_chunked_m2l_matches_fullbatch",
+            "tests/integration/test_real_basis_runtime.py"
+            "::test_real_basis_tracks_complex_basis[nearfield-only-f32]",
+        ],
+    )
+    def test_failures_fixed_upstream_are_no_longer_tolerated(self, node: str) -> None:
+        """A fixed failure must leave the tuple, or a regression reads as "known".
+
+        These three were on §9's list and were fixed on 2026-08-14 by `aacd3cf`
+        and `86163f1`. Leaving them behind is the dangerous direction: the entry
+        stays, the test regresses later, and the gate classifies the regression as
+        expected and passes. This is the assertion that makes removing them stick.
+        """
+        unexpected, known = _classify_failures(f"[gw0] [ 10%] FAILED {node}\n")
+        assert known == []
+        assert unexpected == [node]
 
     def test_errors_count_as_failures(self) -> None:
         """A collection or fixture ERROR must not be silently tolerated."""
