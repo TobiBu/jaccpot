@@ -28,12 +28,18 @@ gated on the JAX version and not the backend. With that fixed (D1) the file that
 held all six goes to 12 passed, 1 skipped. `docs/plan_2026-08_shared.md` records
 that distributed correctness taken this way matches 2xA100 to six digits.
 
-**2. CI already does exactly this, for the sibling file.** The
-`test-distributed-mutual` job runs `tests/integration/test_mutual_distributed.py`
-under `--xla_force_host_platform_device_count=4`, serially, and then **fails the
-build if the suite skipped rather than ran**. The pattern, the anti-vacuity step
-and the reasoning are all already written down there. `tests/distributed/` is not
-a new problem; it is the same problem with the job not yet written.
+**2. CI already does this for the sibling file, and that is where the pattern
+ends.** The `test-distributed-mutual` job runs
+`tests/integration/test_mutual_distributed.py` under
+`--xla_force_host_platform_device_count=4`, serially, and then **fails the build if
+the suite skipped rather than ran**. It works because that file is small -- 6:09
+measured, 16 particles per device.
+
+It does not generalise to `tests/distributed/`, and the same comment says why: it
+budgets *"a 3-5x runner penalty"* for hosted runners against a workstation
+measurement. The tier is 73-79 minutes here, so that factor puts it at 4 to 6.5
+hours against a 6-hour job ceiling. What CI can afford is the mutual file, which it
+already runs.
 
 **3. Cards are slower here, not faster.** On the one file measured both ways,
 `test_distributed_grad_correctness.py`:
@@ -72,46 +78,49 @@ Smaller and sharper than the tier as a whole:
 
 **Two tiers, split on that boundary.**
 
-### Tier 1 -- CPU, in CI, every run
+### Tier 1 -- CPU, run by hand, NOT in CI
 
-Add a `test-distributed` job mirroring `test-distributed-mutual`: forced host
-devices, `-n 0`, and the same step that fails the build when the suite skips
-instead of running. It needs no hardware and closes the 37-test gap.
+`tests/distributed/` stays out of GitHub Actions. This reverses the first draft of
+this document, which proposed a `test-distributed` job, and the reversal is an
+arithmetic correction rather than a change of view.
 
-Ready to apply, and deliberately NOT applied here -- track D owns `tests/` and the
-halo resolver, and CI configuration was not its to change:
+The measurement was 73-79 minutes for the tier run serially on this box (4370 s and
+4732 s, two runs, both under load). The `test-distributed-mutual` job -- which this
+one was to be modelled on -- states the conversion in its own comment: *"Measured
+6:09 for the four tests serially on a fast workstation; hosted runners are the
+slower side of that... 35 leaves room for a 3-5x runner penalty"*. Applying that
+factor to 79 minutes gives **4 to 6.5 hours**, against GitHub's 6-hour job ceiling.
+The first draft quoted that job's structure and did not apply its arithmetic; the
+90-minute timeout it proposed is only reachable at a runner penalty of ~1x.
 
-```yaml
-  test-distributed:
-    runs-on: ubuntu-latest
-    timeout-minutes: 90        # 44 tests, each compiling its own shard_map program
-    env:
-      JAX_ENABLE_X64: "1"
-      JAX_PLATFORMS: cpu
-      XLA_FLAGS: --xla_force_host_platform_device_count=2
-    steps:
-      # ... checkout / setup / install, identical to test-distributed-mutual ...
-      - name: Distributed FMM suite
-        run: |
-          set -o pipefail
-          pytest tests/distributed -n 0 -rs -v | tee pytest-distributed.txt
-      - name: Fail if the suite was skipped rather than run
-        run: |
-          if grep -qE "^SKIPPED|no tests ran" pytest-distributed.txt; then
-            echo "::error::the distributed suite was skipped, not run"
-            exit 1
-          fi
+Sharding it across jobs would fit the ceiling and is still the wrong trade: it
+would spend hours of hosted-runner time per PR re-answering, on emulated devices,
+questions that two forced CPU devices answer locally in 79 minutes, for a tier that
+changes in bursts rather than continuously.
+
+So the tier is a **documented manual step**, listed here so it is a checklist rather
+than a memory:
+
+```bash
+cd <worktree> && export PYTHONPATH=$PWD
+XLA_FLAGS="--xla_force_host_platform_device_count=2" JAX_PLATFORMS=cpu \
+  JAX_ENABLE_X64=1 pytest -q -o addopts="" -n 0 -rs tests/distributed
 ```
 
-Two devices rather than four: the tier's guards are all `device_count() < 2`, and
-two is the cheaper way to satisfy them.
+Expect `43 passed, 1 skipped` in ~79 minutes; the skip is the opt-in native
+tripwire, which Tier 2 runs. `-n 0` because the forced devices live in one process.
+Run it before merging anything that touches `jaccpot/distributed/`, and quote the
+result in the PR body.
 
-The 90-minute timeout is deliberately generous and the number behind it is soft:
-the 1h12m49s measured locally was taken while a full GPU suite was compiling on
-the same box, so it is an upper bound on a contended machine rather than a clean
-figure. It is quoted that way on purpose -- a timeout wants the pessimistic
-number. Take a clean measurement before tightening it, and if it proves too wide,
-shard the job the way `test-full` already is rather than trimming the timeout.
+**What CI does still cover, which is more than nothing.** The existing
+`test-distributed-mutual` job runs
+`tests/integration/test_mutual_distributed.py` on four forced host devices on every
+run, with a step that fails the build if the suite skipped rather than ran. It has
+no `-m "not slow"`, so the production-configuration grid added in this PR runs there
+too -- the theta x cross_theta cells, the far-field engagement guard and the
+momentum checks are all in CI, at a measured ~90 s added to that job's 6:09 against
+its 35-minute timeout. It is `tests/distributed/` specifically, the expensive 33,
+that stays manual.
 
 ### Tier 2 -- two cards, manually, before merging a distributed change
 
@@ -143,14 +152,22 @@ It reported:
 The middle three lines are the whole point: they are the difference between "the
 suite was green" and "the suite ran".
 
-**Cadence.** Tier 1 on every CI run. Tier 2 before merging any PR that touches
-`jaccpot/distributed/` or `jaccpot/mutual/distributed.py`, and before a release,
-with the result quoted in the PR body the way `gpu_gate` results already are.
+**Cadence.** Both tiers are manual and both run before merging any PR that touches
+`jaccpot/distributed/` or `jaccpot/mutual/distributed.py`, with the results quoted
+in the PR body the way `gpu_gate` results already are. Tier 1 answers "does it still
+compute the right thing", Tier 2 answers "do the paths CPU cannot reach still work".
+CI keeps the mutual suite on every run, as it already did.
 
-**Not a nightly.** A nightly on this box would hold two shared GPUs unattended
-and report to nobody; the failure it would catch is one a pre-merge run catches
-earlier and with an owner attached. Revisit if the distributed lane starts
-changing faster than it is reviewed.
+**Why not automate Tier 1 anyway, at some cadence.** Because the thing that makes a
+manual step work is that a person is attached to the result. A nightly or weekly job
+whose 4-hour red goes to nobody is the same vacuous-green problem this document is
+about, wearing a different colour. If the distributed lane starts changing faster
+than it is reviewed, revisit -- but the fix then is a sharded job with an owner, not
+an unattended one.
+
+**Not a nightly, for Tier 2 either.** A nightly on this box would hold two shared
+GPUs unattended and report to nobody; the failure it would catch is one a pre-merge
+run catches earlier and with an owner attached.
 
 ## What is still not covered, stated plainly
 
