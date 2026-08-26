@@ -41,7 +41,7 @@
         "cross_max_interactions_per_node": 2048,
         "cross_max_pair_queue": 4194304
       },
-      "compile_and_first_call_s": 46.15,
+      "compile_and_first_call_s": 51.69,
       "cross_far_pairs": [
         1057656.0,
         1093653.0
@@ -97,12 +97,12 @@
         "l2l_level_overflow": 0.0
       },
       "any_overflow": false,
-      "oracle_s": 118.54,
+      "oracle_s": 127.06,
       "probe": 512,
-      "rel_l2": 0.0018212951186360854,
-      "seconds_median": 4.1735,
-      "seconds_min": 4.1212,
-      "seconds_max": 4.2258
+      "rel_l2": 0.0018212960539669264,
+      "seconds_median": 4.5829,
+      "seconds_min": 4.5463,
+      "seconds_max": 4.6194
     }
   ],
   "monotonicity_problems": []

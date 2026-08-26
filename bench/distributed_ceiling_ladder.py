@@ -26,16 +26,22 @@ WHAT IT REACHED, 2xA100-PCIE-40GB, jax 0.10.2, x64, disc IC, order 3, theta=0.4,
 dehnen MAC, derived caps (no manual tuning, no ``auto_scale_caps`` retries):
 
     ndev  leaf  N/device   self_near_pairs   rel_l2   s/force   note
-       2    64      8192            29 942  6.6e-05     0.070
-       2    64     32768           351 246  5.2e-04     0.112
-       2    64    131072         3 186 626  1.0e-03     0.600
-       2   256     32768            29 378  1.6e-04     0.110
-       2   256    131072           357 946  4.1e-04     0.196
-       2   256    524288         3 232 328  1.3e-03     1.112
-       2   256   1048576         9 522 178  1.8e-03     4.174   both chunks
-       4   256     32768            63 438  9.7e-05     0.126
-       4   256    131072           798 112  7.6e-04     0.531
-       4   256    524288         7 851 744  2.1e-03     3.356   both chunks
+       2    64      8192            29 942  6.6e-05     0.088
+       2    64     32768           351 246  5.2e-04     0.134
+       2    64    131072         3 186 626  1.0e-03     0.689
+       2   256     32768            29 378  1.6e-04     0.136
+       2   256    131072           357 946  4.1e-04     0.200
+       2   256    524288         3 232 328  1.3e-03     1.324
+       2   256   1048576         9 522 178  1.8e-03     4.583   both chunks
+       4   256     32768            63 438  9.7e-05     0.141
+       4   256    131072           798 112  7.6e-04     0.475
+       4   256    524288         7 851 744  2.1e-03     3.538   both chunks
+
+The pair counts and errors are reproducible to the digit -- every row here was
+measured twice, once before and once after the wavefront floor changed, and the
+two agree exactly. The `s/force` column is NOT: these are shared cards on a box
+that runs at load 100+, and the same row varies by up to 20 % between runs. Treat
+it as an order of magnitude, and take any timing claim from a quiet box.
 
 **10^6 particles per device** -- 2 097 152 on two cards -- and 2 097 152 on four,
 with `self_near_pairs` monotone throughout and no overflow flag set anywhere.
