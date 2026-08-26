@@ -2,6 +2,20 @@
 
 Paste the block below into a fresh session on the GPU box. It is self-contained.
 
+> **Status note, 2026-08-26 — two things below have moved.**
+> * **"The four tests" are now five.** The fp32 gap this handoff flags at the end
+>   ("does not cover either fused Pallas lane... report that it is still open") has
+>   since been closed: `test_the_analytic_branch_holds_at_float32_on_the_fused_pallas_lanes`
+>   exists, six parametrisations, and is sm_80-gated like the other four.
+> * **They are now asserted.** `bench/gpu_gate.py` did not check any of them. Its
+>   non-vacuity list held three *file* fragments, all gated on
+>   `jax.default_backend() != "gpu"`; these five gate on **sm_80**, so on a real but
+>   non-Ampere card every check passed and the gate printed green while all five
+>   skipped — precisely the failure this document warns about two paragraphs below
+>   ("a run on the wrong card looks green while asserting nothing"). They are now in
+>   `_MUST_RUN_SM80`, and `tests/unit/test_gpu_gate_checks.py` fails if a new
+>   sm_80-gated test is added without registering it.
+
 ---
 
 Validate the G.10 transverse-gradient fix on real GPU hardware. Everything is already
