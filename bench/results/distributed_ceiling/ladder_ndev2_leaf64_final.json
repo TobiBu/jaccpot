@@ -34,14 +34,14 @@
       "leaf_size": 64,
       "caps": {
         "process_block": 256,
-        "max_pair_queue": 32768,
+        "max_pair_queue": 8192,
         "max_interactions_per_node": 512,
         "max_neighbors_per_leaf": 128,
         "cross_max_neighbors_per_leaf": 128,
         "cross_max_interactions_per_node": 512,
         "cross_max_pair_queue": 32768
       },
-      "compile_and_first_call_s": 35.91,
+      "compile_and_first_call_s": 43.46,
       "cross_far_pairs": [
         955.0,
         933.0
@@ -99,10 +99,10 @@
       "any_overflow": false,
       "oracle_s": 0.78,
       "probe": 512,
-      "rel_l2": 6.55641006543045e-05,
-      "seconds_median": 0.0704,
-      "seconds_min": 0.0691,
-      "seconds_max": 0.0706
+      "rel_l2": 6.556432557963206e-05,
+      "seconds_median": 0.0883,
+      "seconds_min": 0.0731,
+      "seconds_max": 0.0965
     },
     {
       "per_device_n": 32768,
@@ -119,7 +119,7 @@
         "cross_max_interactions_per_node": 512,
         "cross_max_pair_queue": 262144
       },
-      "compile_and_first_call_s": 33.01,
+      "compile_and_first_call_s": 43.03,
       "cross_far_pairs": [
         36586.0,
         36725.0
@@ -175,12 +175,12 @@
         "l2l_level_overflow": 0.0
       },
       "any_overflow": false,
-      "oracle_s": 4.97,
+      "oracle_s": 3.52,
       "probe": 512,
-      "rel_l2": 0.0005234492255435376,
-      "seconds_median": 0.1118,
-      "seconds_min": 0.1094,
-      "seconds_max": 0.2518
+      "rel_l2": 0.000523452361425587,
+      "seconds_median": 0.1338,
+      "seconds_min": 0.1254,
+      "seconds_max": 0.2401
     },
     {
       "per_device_n": 131072,
@@ -197,7 +197,7 @@
         "cross_max_interactions_per_node": 1024,
         "cross_max_pair_queue": 2097152
       },
-      "compile_and_first_call_s": 37.28,
+      "compile_and_first_call_s": 47.22,
       "cross_far_pairs": [
         397417.0,
         400732.0
@@ -253,12 +253,12 @@
         "l2l_level_overflow": 0.0
       },
       "any_overflow": false,
-      "oracle_s": 17.39,
+      "oracle_s": 12.46,
       "probe": 512,
-      "rel_l2": 0.001007084095784293,
-      "seconds_median": 0.6,
-      "seconds_min": 0.5829,
-      "seconds_max": 0.7215
+      "rel_l2": 0.0010070846201277622,
+      "seconds_median": 0.6891,
+      "seconds_min": 0.5917,
+      "seconds_max": 0.7361
     }
   ],
   "monotonicity_problems": []

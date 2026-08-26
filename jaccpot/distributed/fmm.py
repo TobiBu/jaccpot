@@ -143,12 +143,37 @@ DERIVED_CAP_FIELDS = (
     "cross_max_neighbors_per_leaf",
 )
 
-#: Floors for the derived capacities: the constants the config used to ship, kept so
-#: that the tier's own 16-to-128-particle tests exercise exactly the buffers they
-#: always did.
-_MIN_PAIR_QUEUE = 1 << 15
+#: Floors for the two dense per-node buffers: the constants the config used to ship,
+#: kept so that the tier's own 16-to-128-particle tests exercise exactly the buffers
+#: they always did. These two DID size real buffers on the traced path, so preserving
+#: them preserves behaviour.
 _MIN_INTERACTIONS_PER_NODE = 512
 _MIN_NEIGHBORS_PER_LEAF = 128
+
+#: Floor for the two wavefronts, and deliberately NOT the 32768 the config used to
+#: ship, because that number was never what a traced walk used -- the ladder's first
+#: rung, ``max(1024, process_block * 16)``, was. Carrying 32768 down to tiny trees
+#: would not preserve behaviour, it would introduce a cost the bug had been hiding:
+#: the walk's wavefront loop evaluates the FULL capacity-length array every round
+#: (``valid_mask = wf_indices < wf_size``) and its round count is O(tree depth), so
+#: per-round work is linear in the capacity whether or not the pairs are live.
+#: Measured on a 64-particle/leaf-8 tree (15 nodes), traced, same answer (56 near
+#: pairs) at every capacity:
+#:
+#: ==============  ========  =====
+#: max_pair_queue  run time  ratio
+#: ==============  ========  =====
+#:           1024   3.64 ms   1.0x
+#:           8192   32.1 ms   8.8x
+#:          32768    105 ms  28.8x
+#: ==============  ========  =====
+#:
+#: 1024 is the ladder's own floor and it exceeds the number of distinct node pairs a
+#: tree that small has (15 nodes -> 120 pairs), so nothing is at risk below it. The
+#: ``num_leaves ** 1.5`` rule dominates this floor from 128 leaves upward, which is
+#: where the old 32768 was calibrated anyway, so the floor never decides a capacity
+#: that matters.
+_MIN_PAIR_QUEUE = 1 << 10
 
 #: ``process_block`` is a vectorisation width, not a capacity -- it stopped being one
 #: when the traced wavefront started coming from ``max_pair_queue`` (yggdrax

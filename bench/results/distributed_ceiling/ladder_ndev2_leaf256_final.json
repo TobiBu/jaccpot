@@ -34,14 +34,14 @@
       "leaf_size": 256,
       "caps": {
         "process_block": 256,
-        "max_pair_queue": 32768,
+        "max_pair_queue": 8192,
         "max_interactions_per_node": 512,
         "max_neighbors_per_leaf": 128,
         "cross_max_neighbors_per_leaf": 128,
         "cross_max_interactions_per_node": 512,
         "cross_max_pair_queue": 32768
       },
-      "compile_and_first_call_s": 37.97,
+      "compile_and_first_call_s": 43.1,
       "cross_far_pairs": [
         1101.0,
         1026.0
@@ -97,12 +97,12 @@
         "l2l_level_overflow": 0.0
       },
       "any_overflow": false,
-      "oracle_s": 2.97,
+      "oracle_s": 3.25,
       "probe": 512,
-      "rel_l2": 0.0001621743369410352,
-      "seconds_median": 0.1104,
-      "seconds_min": 0.0896,
-      "seconds_max": 0.1388
+      "rel_l2": 0.00016217384599473747,
+      "seconds_median": 0.1355,
+      "seconds_min": 0.1072,
+      "seconds_max": 0.1591
     },
     {
       "per_device_n": 131072,
@@ -119,7 +119,7 @@
         "cross_max_interactions_per_node": 512,
         "cross_max_pair_queue": 262144
       },
-      "compile_and_first_call_s": 37.38,
+      "compile_and_first_call_s": 40.95,
       "cross_far_pairs": [
         35671.0,
         34426.0
@@ -175,12 +175,12 @@
         "l2l_level_overflow": 0.0
       },
       "any_overflow": false,
-      "oracle_s": 12.0,
+      "oracle_s": 12.57,
       "probe": 512,
-      "rel_l2": 0.00041134856245869547,
-      "seconds_median": 0.1962,
-      "seconds_min": 0.1866,
-      "seconds_max": 0.349
+      "rel_l2": 0.0004113483509482393,
+      "seconds_median": 0.1995,
+      "seconds_min": 0.1992,
+      "seconds_max": 0.3358
     },
     {
       "per_device_n": 524288,
@@ -197,7 +197,7 @@
         "cross_max_interactions_per_node": 1024,
         "cross_max_pair_queue": 2097152
       },
-      "compile_and_first_call_s": 44.53,
+      "compile_and_first_call_s": 45.46,
       "cross_far_pairs": [
         383487.0,
         399968.0
@@ -253,12 +253,12 @@
         "l2l_level_overflow": 0.0
       },
       "any_overflow": false,
-      "oracle_s": 47.19,
+      "oracle_s": 46.98,
       "probe": 512,
-      "rel_l2": 0.0013078704378378088,
-      "seconds_median": 1.1115,
-      "seconds_min": 1.1035,
-      "seconds_max": 1.3855
+      "rel_l2": 0.0013078726183301489,
+      "seconds_median": 1.3242,
+      "seconds_min": 1.304,
+      "seconds_max": 1.4035
     }
   ],
   "monotonicity_problems": []

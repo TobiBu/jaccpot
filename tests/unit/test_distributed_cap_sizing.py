@@ -150,7 +150,7 @@ def test_the_capacity_ladder_is_powers_of_two():
             )
 
 
-def test_the_derived_queue_pulls_away_from_the_single_device_rule_above_its_calibration():
+def test_the_derived_queue_crosses_the_single_device_rule_at_its_calibration_point():
     """The ported rule is linear; the requirement is not. That is the whole fix.
 
     ``_sub_million_minimum_memory_pair_queue`` is ``max(32768, N/4)`` rounded to a
@@ -159,23 +159,29 @@ def test_the_derived_queue_pulls_away_from_the_single_device_rule_above_its_cali
     capacity exceeded'"*. At leaf 256 those are 512 and 1024 leaves.
 
     The measured requirement here is ``2.83 * num_leaves ** 1.5``, and
-    ``2.83 * 512 ** 1.5 == 32786`` -- the single-device rule's 32768 floor, to four
-    figures. So that rule is the ``num_leaves ** 1.5`` curve evaluated at exactly
-    the leaf count it was calibrated at, and the boundary its own docstring reports
-    (fits at 512 leaves, fails at 1024) is the point where a linear rule starts
-    falling below the curve. Two independent measurements, on two different lanes,
-    agreeing on where the wall is.
+    ``2.83 * 512 ** 1.5 == 32786`` -- that rule's 32768 floor, to four figures. So
+    the linear rule is this curve evaluated at its own calibration point, held flat
+    in both directions from there. Which means it is wrong in *both* directions,
+    and the derived rule must cross it exactly there:
 
-    Which is why this test asserts divergence rather than equality: below the
-    calibration point both sit on the shared floor, and above it the derived rule
-    must pull away monotonically, because that is the region the linear rule was
-    measured to get wrong.
+    * **below**, the flat floor over-sizes, and that is not free -- the walk's
+      wavefront loop is linear in the capacity, so 32768 on a 15-node tree is a
+      28.8x tax for an identical answer;
+    * **above**, it under-sizes, which is the wall its own docstring reports one
+      rung past the calibration point.
     """
     rule = _sub_million_minimum_memory_pair_queue
+    # Below the calibration point the derivation does not inherit the flat floor.
     for per_device_n in (256, 1024, 8192, 32768):
         derived = DistributedFMMConfig(leaf_size=256).resolved_for(per_device_n, _NDEV)
-        assert derived.max_pair_queue == rule(num_particles=per_device_n) == 1 << 15
+        assert derived.max_pair_queue <= rule(num_particles=per_device_n), (
+            f"at {per_device_n}/device and leaf 256 the derived queue "
+            f"({derived.max_pair_queue}) exceeds the flat rule "
+            f"({rule(num_particles=per_device_n)}), so it inherited an over-sizing "
+            "that costs run time for no coverage"
+        )
 
+    # At and above it, the derived rule pulls away monotonically.
     ratios = []
     for per_device_n in (131072, 262144, 524288, 1048576):
         derived = DistributedFMMConfig(leaf_size=256).resolved_for(per_device_n, _NDEV)
@@ -200,20 +206,72 @@ def test_the_derived_queue_pulls_away_from_the_single_device_rule_above_its_cali
     )
 
 
-def test_the_derived_capacities_never_fall_below_the_shipped_constants():
-    """Small problems stay exactly where they were.
+def test_the_derived_queue_covers_every_converged_ladder_capacity():
+    """Grounded on the oracle, not on the curve fit.
+
+    The eager retry ladder converges on a capacity that fits, so these are
+    measurements rather than extrapolations (``--sweep occupancy`` reports them as
+    ``converged_pair_queue``). Thin disc, leaf 64, dehnen MAC, theta=0.4.
+    """
+    for per_device_n, converged in ((8192, 4096), (32768, 32768), (131072, 262144)):
+        derived = DistributedFMMConfig(leaf_size=64).resolved_for(per_device_n, _NDEV)
+        assert derived.max_pair_queue >= converged, (
+            f"at {per_device_n}/device the eager ladder needed {converged} and the "
+            f"rule gives {derived.max_pair_queue}"
+        )
+
+
+def test_the_dense_buffer_floors_are_the_shipped_constants():
+    """Small problems keep exactly the per-node buffers they had.
 
     The tier's own tests run 16 to 128 particles per device; a derivation that
-    shrank their buffers would be changing what those tests exercise while
-    claiming to lift a ceiling.
+    shrank these would be changing what those tests exercise while claiming to
+    lift a ceiling. Both DID size real buffers on the traced path, so preserving
+    them preserves behaviour.
     """
     resolved = DistributedFMMConfig().resolved_for(16, _NDEV)
-    assert resolved.max_pair_queue >= 1 << 15
     assert resolved.max_interactions_per_node >= 512
     assert resolved.max_neighbors_per_leaf >= 128
-    assert resolved.cross_max_pair_queue >= 1 << 15
     assert resolved.cross_max_interactions_per_node >= 512
     assert resolved.cross_max_neighbors_per_leaf >= 128
+
+
+def test_a_tiny_tree_does_not_inherit_the_old_pair_queue_constant():
+    """The shipped 32768 was never what a traced walk used, so carrying it down
+    to a 15-node tree would not preserve behaviour -- it would introduce a cost.
+
+    The walk's wavefront loop evaluates the full capacity-length array every
+    round and its round count is O(tree depth), so per-round work is linear in
+    the capacity whether or not the pairs are live. Measured traced on a
+    64-particle/leaf-8 tree, identical answer (56 near pairs) throughout: 3.64 ms
+    at 1024, 32.1 ms at 8192, 105 ms at 32768 -- a 28.8x tax for nothing. The
+    ladder's own first rung was 1024, and 1024 already exceeds the 120 distinct
+    node pairs a 15-node tree has.
+
+    This is the one place the derivation deliberately goes *below* a shipped
+    constant, so it gets its own test rather than an exception inside another.
+    """
+    resolved = DistributedFMMConfig(leaf_size=8).resolved_for(64, _NDEV)
+    assert resolved.max_pair_queue == 1024, (
+        "a 15-node tree resolved to a wavefront of "
+        f"{resolved.max_pair_queue}; the ladder's own floor is 1024 and nothing "
+        "that small can need more"
+    )
+    assert resolved.cross_max_pair_queue == 1024
+
+
+def test_the_wavefront_rule_dominates_its_floor_from_128_leaves_up():
+    """So the floor never decides a capacity that matters.
+
+    128 leaves is where the eager ladder first converges above 1024 (it converged
+    on 4096 there), and it is also around where the single-GPU rule's own 32768
+    floor was calibrated. Above that point the rule is what sets the number, and
+    the floor is only there for trees too small to have a requirement.
+    """
+    for per_device_n in (8192, 32768, 131072, 1_048_576):
+        resolved = DistributedFMMConfig(leaf_size=64).resolved_for(per_device_n, _NDEV)
+        assert resolved.max_pair_queue > 1024
+        assert resolved.cross_max_pair_queue > 1024
 
 
 def test_the_cross_caps_are_derived_too():
