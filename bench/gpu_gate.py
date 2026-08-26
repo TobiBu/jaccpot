@@ -15,9 +15,14 @@ WHAT IT COVERS THAT CPU CI CANNOT
   stale number in a docstring reads as a check that is being performed.
 * Whole code paths that are never *entered* on CPU, which is the larger half and
   produces no skip to notice: ``can_use_large_n_prepare_path`` gates
-  ``_large_n_grad.py`` and ``_large_n_farfield.py`` on the GPU backend
-  (audit F27, both at 0% coverage), and the strict/refresh lane is only
-  partially reachable (F33).
+  ``_large_n_grad.py`` and ``_large_n_farfield.py``, and the strict/refresh lane
+  is only partially reachable (F33). **Corrected 2026-08-26:** this used to add
+  "(audit F27, both at 0% coverage)", and F27 is closed -- those files measure
+  **91%** and **100%** *on CPU*. The gate is what proved a GPU was never the
+  blocker: a full-suite GPU run left them at 0/73 too. The real gate is
+  ``preset="large_n_gpu"``, a profile, not the backend. Keeping the old number
+  here would have been the exact fault the paragraph above warns about -- a stale
+  number in a docstring reading as a check that is being performed.
 * Pallas kernels outside ``interpret=True``. On CPU the Triton lowering never
   runs at all, so a kernel can be wrong on hardware and green in CI.
 
