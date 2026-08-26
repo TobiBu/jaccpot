@@ -37,6 +37,11 @@ dehnen MAC, derived caps (no manual tuning, no ``auto_scale_caps`` retries):
        4   256    131072           798 112  7.6e-04     0.475
        4   256    524288         7 851 744  2.1e-03     3.538   both chunks
 
+`ladder_ndev2_leaf64_yggdrax_tree_bound.json` repeats the leaf-64 rows against a
+yggdrax that clamps the traced wavefront to `n * (n + 1) / 2` (the most pairs a
+tree can hold). Identical to the digit, which is the claim that clamp makes:
+above the bound the caller's capacity stands, and no rung here is below it.
+
 The pair counts and errors are reproducible to the digit -- every row here was
 measured twice, once before and once after the wavefront floor changed, and the
 two agree exactly. The `s/force` column is NOT: these are shared cards on a box
