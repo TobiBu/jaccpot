@@ -297,6 +297,19 @@ def test_scaling_a_resolved_config_still_grows_every_capacity():
         assert getattr(scaled, field) == 2 * getattr(resolved, field), field
 
 
+def test_the_default_leaf_size_is_a_production_leaf():
+    """``leaf_size=8`` was the smallest leaf in the codebase.
+
+    It put the shipped default below the documented operating point (64 to 1024 in
+    production runs) and made both dense traversal buffers -- which are
+    ``[nodes, cap]`` with the cap tracking ``num_leaves`` -- quadratically larger
+    than they need to be for the same particle count. Measured at 131072
+    particles/device on 2 A100s, leaf 256 is 3x faster than leaf 64 *and* more
+    accurate, so 64 is the conservative end of the range rather than the fastest.
+    """
+    assert DistributedFMMConfig().leaf_size >= 64
+
+
 def test_dataclass_replace_still_reaches_every_derived_field():
     """The sentinel must not have cost the fields their normal dataclass behaviour."""
     config = dataclasses.replace(DistributedFMMConfig(), max_pair_queue=1 << 20)

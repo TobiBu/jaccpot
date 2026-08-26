@@ -392,7 +392,17 @@ class DistributedFMMConfig:
 
     order: int = 3
     theta: float = 0.4
-    leaf_size: int = 8
+    # 8 was the smallest leaf in the codebase, below the 64-1024 the single-GPU lane
+    # runs in production, and the wrong end of a quadratic: both dense traversal
+    # buffers scale with the leaf COUNT (see _derive_walk_caps), so eight-particle
+    # leaves pay ~64x the buffer of 64-particle ones for the same particles.
+    # Measured, ndev=2 on 2xA100, default caps, 131072 particles/device: leaf 64
+    # needs a 524288-pair wavefront and takes 0.583 s per force; leaf 256 needs
+    # 65536 and takes 0.190 s, at a better force error (4.1e-4 against 1.0e-3). 64 is
+    # the single-GPU production leaf and the measured minimum of the mutual lane's
+    # cost curve at N=1e6; it is the conservative end of the production range, not
+    # the fastest point at every N.
+    leaf_size: int = 64
     softening: float = 0.02
     G: float = 1.0
     rotation: str = "solidfmm"

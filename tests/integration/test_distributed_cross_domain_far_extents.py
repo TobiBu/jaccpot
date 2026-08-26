@@ -96,9 +96,13 @@ _PER = 64
 # The driver tests' default config, spelled out so a default change cannot silently
 # move what this file measures -- and RESOLVED the way the driver resolves it, since
 # the traversal capacities are derived from per-device N and the mesh size rather than
-# shipped as constants. Without that they are the ``None`` sentinel and the cross walk
-# below gets handed it.
-_CONFIG = DistributedFMMConfig().resolved_for(_PER, _NDEV)
+# shipped as constants. Without that they are the ``None`` sentinel and the walk below
+# gets handed it.
+#
+# ``leaf_size`` is pinned at the old default of 8: at 64 particles/device the
+# production 64 is a single leaf, so there is no coarse frontier to bound and no cross
+# far pair to hold to account.
+_CONFIG = DistributedFMMConfig(leaf_size=8).resolved_for(_PER, _NDEV)
 _ORDER = _CONFIG.order
 _LEAF = _CONFIG.leaf_size
 # ONE theta, for both walks. There used to be a separate ``theta_cross`` at 0.1

@@ -39,6 +39,18 @@ pytestmark = pytest.mark.skipif(
 )
 
 
+#: The tier's own problems are tens of particles per device, so they need a leaf
+#: small enough that a device holds more than one of them.
+#: ``DistributedFMMConfig.leaf_size`` now defaults to a production 64, at which
+#: 64 particles/device is a SINGLE leaf: the dual-tree walk's degenerate branch
+#: returns immediately, there are no far pairs and no near pairs, and every
+#: direct-sum comparison here stops saying anything (the vacuity guards below catch
+#: it, which is how this was found). Pinned rather than inherited, so this file's
+#: tiny-N premise is explicit rather than borrowed from a default that has now
+#: moved twice.
+_LEAF = 8
+
+
 def _direct(all_pos, all_mass, G, soft):
     diff = all_pos[:, None, :] - all_pos[None, :, :]
     d2 = (diff**2).sum(-1) + soft**2
@@ -90,7 +102,7 @@ def test_driver_matches_direct():
 
     # Defaults are the converged fast-lane config (real basis + dehnen MAC,
     # order=3, theta=0.4 for both walks, leaf=8, soft=0.02).
-    config = DistributedFMMConfig()
+    config = DistributedFMMConfig(leaf_size=_LEAF)
 
     result = distributed_fmm_accelerations(
         pts, mass, config=config, mesh=mesh, jit=False
@@ -123,7 +135,7 @@ def test_driver_real_basis_matches_direct():
     mesh = make_mesh(ndev)
     per = 64
     pts, mass = _separated_clusters(ndev, per)
-    config = DistributedFMMConfig(basis="real", mac_type="bh")
+    config = DistributedFMMConfig(basis="real", mac_type="bh", leaf_size=_LEAF)
 
     result = distributed_fmm_accelerations(
         pts, mass, config=config, mesh=mesh, jit=False
@@ -150,7 +162,7 @@ def test_driver_solidfmm_matches_direct():
     mesh = make_mesh(ndev)
     per = 64
     pts, mass = _separated_clusters(ndev, per)
-    config = DistributedFMMConfig(basis="solidfmm", mac_type="bh")
+    config = DistributedFMMConfig(basis="solidfmm", mac_type="bh", leaf_size=_LEAF)
 
     result = distributed_fmm_accelerations(
         pts, mass, config=config, mesh=mesh, jit=False
@@ -173,7 +185,7 @@ def test_driver_jit_matches_eager():
     mesh = make_mesh(ndev)
     per = 64
     pts, mass = _separated_clusters(ndev, per)
-    config = DistributedFMMConfig()
+    config = DistributedFMMConfig(leaf_size=_LEAF)
 
     eager = distributed_fmm_accelerations(
         pts, mass, config=config, mesh=mesh, jit=False
@@ -213,7 +225,7 @@ def test_driver_auto_scale_caps():
     per = 64
     pts, mass = _separated_clusters(ndev, per)
     tiny = dataclasses.replace(
-        DistributedFMMConfig(),
+        DistributedFMMConfig(leaf_size=_LEAF),
         nearfield_backend="baseline",  # pallas is GPU-only; CI runs on CPU
         max_pair_queue=64,
         cross_max_pair_queue=64,
@@ -264,7 +276,7 @@ def test_driver_local_walk_treecode():
     mesh = make_mesh(ndev)
     per = 256
     pts, mass = _separated_clusters(ndev, per)
-    base = DistributedFMMConfig()
+    base = DistributedFMMConfig(leaf_size=_LEAF)
     cfg = dataclasses.replace(base, local_walk="treecode")
 
     r = distributed_fmm_accelerations(
