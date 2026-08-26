@@ -18,7 +18,8 @@ strict pydoclint violations, and as of `680d3da` there is no baseline file at al
 Sections A.6, A.7, A.8, D.1, D.5, D.7, D.9, D.10, E.2 and G.1, G.4, G.8, G.9, G.10, G.11 are
 closed.
 
-**Open, and they are all coverage, not structure.** F11's deferred half, F27, F33 and F34.
+**Open, and they are all coverage, not structure.** F11's deferred half, F33 and F34.
+**F27 closed `f5925a3`** — all three of its files are now covered, none of them on a GPU.
 
 > **The gate was run on hardware 2026-08-21, and the premise of this paragraph did not
 > survive it.** "Every one of them is blocked on the same thing: GPU execution" was wrong.
@@ -31,7 +32,11 @@ closed.
 >   a module-level `skipif(jax.default_backend() != "gpu")`, so on CPU the file is still at
 >   **0%** and the test does not run. Stated here because the sentence above reads as
 >   unconditional and was taken that way — see A.9b, where it is what made F11's deferral
->   look lapsed when it had not.
+>   look lapsed when it had not. **Superseded 2026-08-26:** that `skipif` has since been
+>   replaced by a module-scoped fixture that patches `jax.default_backend`, so the 91% is a
+>   CPU number and the test runs everywhere. F27's third file, `distributed/cap_presets.py`,
+>   went 0% -> **100%** the same way — a plain host-side test, no card. The pattern held for
+>   all three: what they needed was a test.
 > * **F33 was not unblocked either.** `fmm_strict_run.py` is **55%**, statement for statement
 >   what it was on CPU (226 missed vs 227). The GPU does not enter the strict/refresh lane.
 > * **F34 was**, and it is the one this paragraph called out of scope: **19% -> 83%** on two
@@ -885,7 +890,7 @@ Risk = probability the change breaks something. Effort = S (<1h), M (a day), L (
 | F24 **✔`20ba5d8`** | `upward/real_tree_expansions.py:242-257` | docstring | `prepare_real_upward_sweep` documents only `max_leaf_size`; `static_num_levels` (`:250`, used at `:272`) is undocumented, while the complex twin's identical parameter has a full bit-identity rationale (`upward/solidfmm_complex_tree_expansions.py:480-497`) *and* a test | The real sweep's copy of a documented-and-tested optimisation is neither | low | S | yes (see D.9) |
 | F25 **✔`26cef45`** | `pallas/nearfield_fused_leaf.py:667` | test-gap | *"Passing the same array as both target and source reproduces `nearfield_leafpair_pallas` bit-for-bit"* — asserted nowhere; grep for "decoupled" in `tests/` returns nothing | This is the kernel `distributed/fmm.py:575` runs via `_radix_fast_lane_prepacked_pallas_decoupled`. The distributed near-field's equivalence to the single-device one rests on an unasserted claim | low | M | yes |
 | F26 **✔`568deca`** | `pallas/m2l_real_fused.py:51`, `pallas/m2l_complex_fused.py:57` | test-gap | No test sets `JACCPOT_FUSED_M2L_VJP=0`, so the documented *"correctness reference"* fallback branch never runs | A fallback that is never exercised is not a fallback | low | S | yes |
-| F27 | `runtime/_large_n_grad.py` (whole file), `runtime/_large_n_farfield.py`, `distributed/cap_presets.py` | test-gap | **0% coverage**, measured. Gated behind `can_use_large_n_prepare_path`'s `jax.default_backend() != "gpu"` check (`_large_n_pipeline.py:2013`) | ARCHITECTURE §6 quotes measurements for this path ("1M particles, forward 2.5 s, forward+backward 69 s at 11 GB"). Nothing in CI touches it. **Re-measured 2026-08-21 on an A100: a full-suite GPU run left `_large_n_grad.py` at 0/73 — a GPU was never the blocker. `tests/unit/runtime/test_large_n_grad_reverse_path.py` takes it to 91% (73 stmts, 3 missed) at N=2048 by opening the three gates that each close silently: `preset="large_n_gpu"` (the gate has no particle-count threshold), the prepacked near-field layout via `JACCPOT_LARGE_N_RADIX_FAST_PAYLOAD_MAX_MB=0` (the same layout production selects at N=200000), and `retain_far_pairs_for_grad=True`. `_large_n_farfield.py` reached 100% (11 stmts) from the suite alone. `distributed/cap_presets.py` is STILL 0% in both the single-card and two-card runs — no test touches it.** | low | L | yes |
+| F27 **✔`f5925a3`** | `runtime/_large_n_grad.py` (whole file), `runtime/_large_n_farfield.py`, `distributed/cap_presets.py` | test-gap | **0% coverage**, measured. Gated behind `can_use_large_n_prepare_path`'s `jax.default_backend() != "gpu"` check (`_large_n_pipeline.py:2013`) | ARCHITECTURE §6 quotes measurements for this path ("1M particles, forward 2.5 s, forward+backward 69 s at 11 GB"). Nothing in CI touches it. **Re-measured 2026-08-21 on an A100: a full-suite GPU run left `_large_n_grad.py` at 0/73 — a GPU was never the blocker. `tests/unit/runtime/test_large_n_grad_reverse_path.py` takes it to 91% (73 stmts, 3 missed) at N=2048 by opening the three gates that each close silently: `preset="large_n_gpu"` (the gate has no particle-count threshold), the prepacked near-field layout via `JACCPOT_LARGE_N_RADIX_FAST_PAYLOAD_MAX_MB=0` (the same layout production selects at N=200000), and `retain_far_pairs_for_grad=True`. `_large_n_farfield.py` reached 100% (11 stmts) from the suite alone. `distributed/cap_presets.py` is STILL 0% in both the single-card and two-card runs — no test touches it.** **Closed 2026-08-26.** `tests/unit/test_distributed_cap_presets.py` takes `cap_presets.py` to **100%** statement and branch (41 stmts, 17 tests, 0.7 s, no device): it is host-side, and the `≥2 devices` gate D.3 recorded for it was never real. The tests pin the direction of error in `lookup` — nearest larger preset rather than any larger one, a measured over-estimate in preference to a scaled-up smaller one — because both mistakes round-trip cleanly and cost a recompile per retry. `_large_n_grad.py`'s 91% also became a CPU number when its `skipif` was replaced by a backend-patching fixture. All three files needed a test; none needed a card. | low | L | yes |
 | F28 **✔`d941805`** | `tests/unit/test_large_n_grad_path.py` | naming | Named for the large-N grad path; measured, it never enters it (20 tests pass, 0 skip, `_large_n_grad.py` stays at 0%). Its docstring is honest — it tests resolver policy at large-*N configuration thresholds* on the radix lane | The filename is the only documentation most readers will see, and it says the opposite of what the file does. Reinforces the false impression that F27 is covered | low | S | no |
 | F29 | `operators/real_harmonics.py:1520-1523` | test-gap | **CLOSED by `e5d8e41`.** The claimed identity was unasserted; it is now asserted, and it **holds** — measured 7.6e-15, and ~2.5e-15 worst case across all four builders. The production code was right | The azimuth convention here (`atan2(x, y)`, not `atan2(y, x)`) is the documented historical bug site. Mutation check: the swap fails 8/8 new tests and **passes 4/4 pre-existing ones** | low | M | yes |
 | F30 | `operators/real_harmonics.py:1526-1545`, `:1563-1580` | duplication | `_multipole_align_to_z_block` and `_multipole_align_from_z_block` share 12 identical lines of angle computation and a 9-line identical comment block | Two copies of a NaN-safe double-`where` guard is two places to get it wrong. Extractable verbatim with no expression change (do **not** add a `@jit`) | low | S | **yes** |
@@ -1277,6 +1282,21 @@ Fresh measured coverage, worst first. I have separated "structurally unreachable
 Remedy is a **nightly GPU leg**, not a CPU test. Until it exists, `_large_n_*` and
 `distributed/` are off-limits for this refactor — which is why A.9 argues to leave
 `_large_n_pipeline.py` whole.
+
+> **Three of those five rows were wrong, and in the same way (2026-08-26).** The table sorts
+> by *where the code runs* and infers the gate from that, but the gate on a `distributed/` or
+> `_large_n_*` file is not automatically a device:
+>
+> | Module | Then | Now | What the gate actually was |
+> |---|---|---|---|
+> | `runtime/_large_n_grad.py` | 0% | **91%** | `preset="large_n_gpu"` + a patched backend — profile selection, not hardware |
+> | `runtime/_large_n_farfield.py` | 0% | **100%** | reached by the suite once the above was opened |
+> | `distributed/cap_presets.py` | 0% | **100%** | none. Host-side: one `jax` reference in 127 lines, `≥2 devices` was never true of it |
+>
+> `distributed/fmm.py` (F34) and `treecode_far_near.py` (F35) are the two that really were
+> device-gated. So "off-limits for this refactor" over-generalised from those two to all
+> five, and the cost was real: three files sat at 0% waiting for a nightly leg that none of
+> them needed. Read a coverage gate off the *code*, not off the directory name.
 
 **Reachable on CPU and still substantially untested:**
 
@@ -2582,6 +2602,11 @@ The original questions, for the record:
 - **GPU budget** — **decided** at 2.6, against a CI leg, on the fork-PR execution risk of a
   self-hosted runner on a public repository. F27, F33, F34 and F11's deferred half stay open,
   but they now wait on `bench/gpu_gate.py` being **run**, not on a decision.
+  **Half of that was wrong (2026-08-26).** The gate was run, and F34 was the only one of the
+  four it moved. F27 and F33 were never waiting on it: their code is selected by *profile*,
+  not by hardware, so a green GPU run walks straight past them. F27 is now closed on CPU
+  (`f5925a3`) — see the correction under D.3. "Waits on a GPU" was a claim about the
+  directory a file lives in, and it should have been a claim about its gate.
 
 ### G.7 ~~One thing I checked and could not settle~~ **SETTLED (`92c8e73`) — and it was settled long before it stopped being listed as open**
 
