@@ -25,18 +25,24 @@ timeout (each retry is a fresh compile) rather than an answer either way.
 WHAT IT REACHED, 2xA100-PCIE-40GB, jax 0.10.2, x64, disc IC, order 3, theta=0.4,
 dehnen MAC, derived caps (no manual tuning, no ``auto_scale_caps`` retries):
 
-    leaf  N/device   self_near_pairs   rel_l2    s/force   note
-      64      8192            29 942  6.6e-05     0.070
-      64     32768           351 246  5.2e-04     0.112
-      64    131072         3 186 626  1.0e-03     0.600
-     256     32768            29 378  1.6e-04     0.110
-     256    131072           357 946  4.1e-04     0.196
-     256    524288         3 232 328  1.3e-03     1.112
-     256   1048576         9 522 178  1.8e-03     4.174   m2l_chunk + nearfield_chunk
+    ndev  leaf  N/device   self_near_pairs   rel_l2   s/force   note
+       2    64      8192            29 942  6.6e-05     0.070
+       2    64     32768           351 246  5.2e-04     0.112
+       2    64    131072         3 186 626  1.0e-03     0.600
+       2   256     32768            29 378  1.6e-04     0.110
+       2   256    131072           357 946  4.1e-04     0.196
+       2   256    524288         3 232 328  1.3e-03     1.112
+       2   256   1048576         9 522 178  1.8e-03     4.174   both chunks
+       4   256     32768            63 438  9.7e-05     0.126
+       4   256    131072           798 112  7.6e-04     0.531
+       4   256    524288         7 851 744  2.1e-03     3.356   both chunks
 
-10^6 particles per device -- 2 097 152 on two cards -- with `self_near_pairs`
-monotone throughout and no overflow flag set anywhere. Before this track a card
-carried ~10^4 in a mesh.
+**10^6 particles per device** -- 2 097 152 on two cards -- and 2 097 152 on four,
+with `self_near_pairs` monotone throughout and no overflow flag set anywhere.
+Before this track a card carried ~10^4 in a mesh.
+
+"both chunks" is `m2l_chunk=65536` and `nearfield_chunk=512`. Both are existing,
+documented, numerics-identical config fields, not new machinery.
 
 THE WALLS, IN THE ORDER THEY APPEAR, all named rather than tuned around:
 
