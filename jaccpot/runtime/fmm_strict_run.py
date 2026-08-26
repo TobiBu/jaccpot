@@ -19,7 +19,7 @@ from yggdrax.interactions import DualTreeRetryEvent, NodeNeighborList
 from yggdrax.tree import RadixTree
 
 from ._large_n_pipeline import evaluate_large_n_state, prepare_large_n_state
-from ._large_n_types import LargeNPreparedState
+from ._large_n_types import LargeNPreparedState, LargeNPrepareRequest
 from .dtypes import INDEX_DTYPE
 from .fmm_caches import _contains_tracer
 from .fmm_state import (
@@ -1704,22 +1704,24 @@ class StrictRunMixin(_EngineBase):
             positions_arr=positions_arr,
             masses_arr=masses_arr,
             input_dtype=input_dtype,
-            bounds=bounds,
-            leaf_size=int(leaf_size),
-            max_order=int(max_order),
-            theta_val=theta_val,
-            mac_type_val=mac_type_val,
-            refine_local_val=refine_local_val,
-            max_refine_levels_val=max_refine_levels_val,
-            aspect_threshold_val=aspect_threshold_val,
-            jit_tree_override=None,
-            allow_stateful_cache=allow_stateful_cache,
-            runtime_traversal_config=runtime_traversal_config,
-            runtime_m2l_chunk_size=runtime_m2l_chunk_size,
-            runtime_l2l_chunk_size=runtime_l2l_chunk_size,
-            upward_center_mode=upward_center_mode,
-            record_retry=record_retry,
-            collected_retries=collected_retries,
+            request=LargeNPrepareRequest(
+                bounds=bounds,
+                leaf_size=int(leaf_size),
+                max_order=int(max_order),
+                theta_val=theta_val,
+                mac_type_val=mac_type_val,
+                refine_local_val=refine_local_val,
+                max_refine_levels_val=max_refine_levels_val,
+                aspect_threshold_val=aspect_threshold_val,
+                jit_tree_override=None,
+                allow_stateful_cache=allow_stateful_cache,
+                runtime_traversal_config=runtime_traversal_config,
+                runtime_m2l_chunk_size=runtime_m2l_chunk_size,
+                runtime_l2l_chunk_size=runtime_l2l_chunk_size,
+                upward_center_mode=upward_center_mode,
+                record_retry=record_retry,
+                collected_retries=collected_retries,
+            ),
             tree_artifacts=tree_artifacts,
             dual_downward_artifacts=dual_downward_artifacts,
             fused_device_mode=bool(fused_device_mode),

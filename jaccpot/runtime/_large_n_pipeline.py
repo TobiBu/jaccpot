@@ -33,6 +33,7 @@ from ._large_n_types import (
     LargeNCompiledState,
     LargeNExecutionConfig,
     LargeNPreparedState,
+    LargeNPrepareRequest,
     RadixFastNearfieldPayload,
     large_n_as_prepared_state,
     large_n_to_compiled_state,
@@ -1017,151 +1018,100 @@ def _trim_radix_fast_lane_neighbor_list(
     )
 
 
-def prepare_large_n_state(
-    fmm: "FMMEngine",
+def _build_tree_and_dual_downward_artifacts(
     *,
+    fmm: "FMMEngine",
+    request: LargeNPrepareRequest,
     positions_arr: Array,
     masses_arr: Array,
-    input_dtype: jnp.dtype,
-    bounds: Optional[Tuple[Array, Array]],
-    leaf_size: int,
-    max_order: int,
-    theta_val: float,
-    mac_type_val: MACType,
-    refine_local_val: bool,
-    max_refine_levels_val: int,
-    aspect_threshold_val: float,
-    jit_tree_override: Optional[bool],
-    allow_stateful_cache: bool,
-    runtime_traversal_config: Optional[DualTreeTraversalConfig],
-    runtime_m2l_chunk_size: Optional[int],
-    runtime_l2l_chunk_size: Optional[int],
-    upward_center_mode: str,
-    record_retry: Callable[[DualTreeRetryEvent], None],
-    collected_retries: list[DualTreeRetryEvent],
-    tree_artifacts: Optional[Any] = None,
-    dual_downward_artifacts: Optional[Any] = None,
-    supplied_force_scale: Optional[Array] = None,
-    fused_device_mode: bool = False,
-    execution_config_override: Optional[Any] = None,
-    large_n_env_cfg_override: Optional[dict[str, Any]] = None,
-    return_compiled_state: bool = False,
-) -> Union[LargeNPreparedState, LargeNCompiledState]:
-    """Prepare the slim large-N state using the dedicated narrow path.
-    "Narrow" is the point: this path materialises only the artifacts the fast
-    lane reads, which is what keeps peak memory tractable at galaxy scale. The
-    twenty-seven parameters are the already-resolved runtime configuration --
-    the caller (``PrepareMixin``) owns resolution, and nothing is re-resolved
-    here.
+    tree_artifacts: Optional[Any],
+    dual_downward_artifacts: Optional[Any],
+    built_tree_artifacts: Optional[Any],
+    built_dual_downward_artifacts: Optional[Any],
+    supplied_force_scale: Optional[Array],
+    criterion_active: bool,
+    disable_fused_tree_dual_prepare: bool,
+    refresh_timing_active: bool,
+    now: Callable[[], float],
+) -> tuple[Optional[Any], Optional[Any], float]:
+    """Build the tree/upward and dual/downward artifacts, fused or staged.
+
+    Extracted verbatim from :func:`prepare_large_n_state` (audit item **F11**);
+    the body, both branches of its guard and every value it computes are
+    unchanged, including the fused-prepare ``RuntimeError``.
+
+    This block was the one the four earlier seams left alone: it read **26**
+    driver locals, which is the width at which extraction stops paying for
+    itself. Fifteen of those are fields of :class:`LargeNPrepareRequest`, so
+    once the request bundle existed the interface fell to twelve and the seam
+    became worth taking. The bundle is what made this extraction possible, not
+    merely tidier.
+
+    ``now`` is passed in because the driver's ``_now`` is a closure over
+    ``refresh_timing_active``; handing it across keeps the timing behaviour
+    identical rather than re-deriving it here.
 
     Parameters
     ----------
     fmm : FMMEngine
-        The engine, typed loosely to avoid the ARCHITECTURE section 8 import
-        cycle.
+        Engine supplying the prepare and traversal methods.
+    request : LargeNPrepareRequest
+        The resolved build request; supplies bounds, leaf size, order, the MAC
+        parameters, the runtime overrides and the retry sink.
     positions_arr : Array
-        Particle positions in the caller's order.
+        Particle positions.
     masses_arr : Array
-        Particle masses, same order.
-    input_dtype : jnp.dtype
-        Dtype the caller supplied, recorded so outputs can be cast back.
-    bounds : Optional[Tuple[Array, Array]]
-        Explicit domain bounds for the tree build.
-    leaf_size : int
-        Target particles per leaf.
-    max_order : int
-        Expansion order.
-    theta_val : float
-        Resolved MAC opening angle.
-    mac_type_val : MACType
-        Resolved traversal-facing acceptance criterion.
-    refine_local_val : bool
-        Resolved local-refinement toggle.
-    max_refine_levels_val : int
-        Resolved refinement depth cap.
-    aspect_threshold_val : float
-        Resolved leaf aspect-ratio split threshold.
-    jit_tree_override : Optional[bool]
-        Force or forbid the jitted tree build.
-    allow_stateful_cache : bool
-        Permit process-level caches; cleared when the caller needs purity.
-    runtime_traversal_config : Optional[DualTreeTraversalConfig]
-        Resolved traversal capacities.
-    runtime_m2l_chunk_size : Optional[int]
-        Resolved M2L chunk size.
-    runtime_l2l_chunk_size : Optional[int]
-        Resolved L2L chunk size.
-    upward_center_mode : str
-        Centre selection for the upward sweep.
-    record_retry : Callable[[DualTreeRetryEvent], None]
-        Sink for traversal retry events.
-    collected_retries : list[DualTreeRetryEvent]
-        Accumulator the sink appends to; read back by the caller.
+        Particle masses.
     tree_artifacts : Optional[Any]
-        Reuse an already-built tree instead of building one.
+        Caller-injected tree artifacts, in and out -- ``None`` means build them.
     dual_downward_artifacts : Optional[Any]
-        Reuse an already-built downward plan.
+        Caller-injected dual/downward artifacts, in and out.
+    built_tree_artifacts : Optional[Any]
+        Artifacts already built earlier in this call, if any.
+    built_dual_downward_artifacts : Optional[Any]
+        Dual/downward artifacts already built earlier in this call, if any.
     supplied_force_scale : Optional[Array]
-        Per-node force scale for the Dehnen paper MAC. Required by that MAC --
-        see ``Raises``.
-    fused_device_mode : bool
-        Run the fused device-resident refresh rather than the eager path.
-    execution_config_override : Optional[Any]
-        Pre-resolved large-N execution policy.
-    large_n_env_cfg_override : Optional[dict[str, Any]]
-        Pre-read environment configuration, for tests.
-    return_compiled_state : bool
-        Return a ``LargeNCompiledState`` rather than a ``LargeNPreparedState``.
+        Externally injected force scale, threaded through to the build.
+    criterion_active : bool
+        Whether a force-scale criterion is active; it forces the staged path.
+    disable_fused_tree_dual_prepare : bool
+        Environment switch turning the fused tree/dual prepare off.
+    refresh_timing_active : bool
+        Whether refresh timing is being accumulated.
+    now : Callable[[], float]
+        The driver's clock, returning ``0.0`` when timing is inactive.
 
     Returns
     -------
-    Union[LargeNPreparedState, LargeNCompiledState]
-        The prepared state, compiled variant when ``return_compiled_state``.
+    Optional[Any]
+        ``tree_artifacts``, built here or passed through.
+    Optional[Any]
+        ``dual_downward_artifacts``, built here or passed through.
+    float
+        ``stage_t0``, the stage start stamp the driver continues timing from.
 
     Raises
     ------
     RuntimeError
-        If the Dehnen paper MAC is requested with no resolvable per-node force
-        scale -- the traversal would silently fall back to a unit scale, i.e. a
-        different acceptance threshold -- or if a fused-payload static cap was
-        not preflighted or is exceeded, or a compaction invariant fails.
+        If the fused tree/dual prepare fails in a way the staged path cannot
+        recover -- carried over verbatim with the block.
     """
-
-    refresh_timing_active = bool(
-        getattr(fmm, "_refresh_timing_active", False)
-    ) and not (
-        bool(fused_device_mode)
-        and bool(getattr(fmm, "_strict_fused_disable_hot_timing", False))
-    )
-
-    def _now() -> float:
-        if not refresh_timing_active:
-            return 0.0
-        return float(time.perf_counter())
-
-    def _elapsed(start: float) -> float:
-        return float(_now() - start)
-
-    disable_fused_tree_dual_prepare = str(
-        os.environ.get("JACCPOT_LARGE_N_DISABLE_FUSED_TREE_DUAL_PREPARE", "0")
-    ).strip().lower() in {"1", "true", "yes", "on"}
-
-    built_tree_artifacts = tree_artifacts is None
-    built_dual_downward_artifacts = dual_downward_artifacts is None
-
-    # The Dehnen mass-dependent MAC needs its per-node force scale resolved
-    # *between* the tree/upward build and the dual build: the criterion's
-    # threshold is `eps * min_b |a_b|` (eq 16a) or `eps * min_b f_b` (eq 16b), and
-    # `_prepare_state_dual_and_downward` builds the policy state from whatever
-    # `force_scale_nodes` it is handed. Handing it None is not a no-op --
-    # `build_adaptive_policy_state` substitutes `jnp.ones(...)`, so the traversal
-    # would run a threshold of `eps * 1`: a different criterion, entirely
-    # silently. The fused tree+dual helper leaves no seam for the prepass, so a
-    # criterion run takes the unfused path.
-    criterion_active = bool(
-        getattr(fmm, "_uses_paper_style_force_scale", None)
-    ) and bool(fmm._uses_paper_style_force_scale())
-
+    _now = now
+    bounds = request.bounds
+    leaf_size = request.leaf_size
+    max_order = request.max_order
+    theta_val = request.theta_val
+    mac_type_val = request.mac_type_val
+    refine_local_val = request.refine_local_val
+    max_refine_levels_val = request.max_refine_levels_val
+    aspect_threshold_val = request.aspect_threshold_val
+    jit_tree_override = request.jit_tree_override
+    allow_stateful_cache = request.allow_stateful_cache
+    runtime_traversal_config = request.runtime_traversal_config
+    runtime_m2l_chunk_size = request.runtime_m2l_chunk_size
+    runtime_l2l_chunk_size = request.runtime_l2l_chunk_size
+    upward_center_mode = request.upward_center_mode
+    record_retry = request.record_retry
     if (
         not bool(disable_fused_tree_dual_prepare)
         and not criterion_active
@@ -1285,6 +1235,151 @@ def prepare_large_n_state(
                 float(getattr(fmm, "_refresh_timing_dual_downward_seconds", 0.0))
                 + float(_now() - stage_t0),
             )
+    return tree_artifacts, dual_downward_artifacts, stage_t0
+
+
+def prepare_large_n_state(
+    fmm: "FMMEngine",
+    *,
+    request: LargeNPrepareRequest,
+    positions_arr: Array,
+    masses_arr: Array,
+    input_dtype: jnp.dtype,
+    tree_artifacts: Optional[Any] = None,
+    dual_downward_artifacts: Optional[Any] = None,
+    supplied_force_scale: Optional[Array] = None,
+    fused_device_mode: bool = False,
+    execution_config_override: Optional[Any] = None,
+    large_n_env_cfg_override: Optional[dict[str, Any]] = None,
+    return_compiled_state: bool = False,
+) -> Union[LargeNPreparedState, LargeNCompiledState]:
+    """Prepare the slim large-N state using the dedicated narrow path.
+    "Narrow" is the point: this path materialises only the artifacts the fast
+    lane reads, which is what keeps peak memory tractable at galaxy scale. The
+    twenty-seven parameters are the already-resolved runtime configuration --
+    the caller (``PrepareMixin``) owns resolution, and nothing is re-resolved
+    here.
+
+    Parameters
+    ----------
+    fmm : FMMEngine
+        The engine, typed loosely to avoid the ARCHITECTURE section 8 import
+        cycle.
+    request : LargeNPrepareRequest
+        The resolved build request -- bounds, leaf size, order, MAC parameters,
+        runtime overrides and the retry sink. These were sixteen keyword
+        arguments until audit item F11; both call sites passed the same sixteen
+        names in the same order, so they were already a bundle and the signature
+        did not say so. Unpacked into locals immediately below, which is what
+        keeps the body unchanged.
+    positions_arr : Array
+        Particle positions in the caller's order.
+    masses_arr : Array
+        Particle masses, same order.
+    input_dtype : jnp.dtype
+        Dtype the caller supplied, recorded so outputs can be cast back.
+    tree_artifacts : Optional[Any]
+        Reuse an already-built tree instead of building one.
+    dual_downward_artifacts : Optional[Any]
+        Reuse an already-built downward plan.
+    supplied_force_scale : Optional[Array]
+        Per-node force scale for the Dehnen paper MAC. Required by that MAC --
+        see ``Raises``.
+    fused_device_mode : bool
+        Run the fused device-resident refresh rather than the eager path.
+    execution_config_override : Optional[Any]
+        Pre-resolved large-N execution policy.
+    large_n_env_cfg_override : Optional[dict[str, Any]]
+        Pre-read environment configuration, for tests.
+    return_compiled_state : bool
+        Return a ``LargeNCompiledState`` rather than a ``LargeNPreparedState``.
+
+    Returns
+    -------
+    Union[LargeNPreparedState, LargeNCompiledState]
+        The prepared state, compiled variant when ``return_compiled_state``.
+
+    Raises
+    ------
+    RuntimeError
+        If the Dehnen paper MAC is requested with no resolvable per-node force
+        scale -- the traversal would silently fall back to a unit scale, i.e. a
+        different acceptance threshold -- or if a fused-payload static cap was
+        not preflighted or is exceeded, or a compaction invariant fails.
+    """
+    # Unpacked into the names the body already uses, so this change is a
+    # signature change only -- the 880 lines below are untouched.
+    bounds = request.bounds
+    leaf_size = request.leaf_size
+    max_order = request.max_order
+    theta_val = request.theta_val
+    mac_type_val = request.mac_type_val
+    refine_local_val = request.refine_local_val
+    max_refine_levels_val = request.max_refine_levels_val
+    aspect_threshold_val = request.aspect_threshold_val
+    jit_tree_override = request.jit_tree_override
+    allow_stateful_cache = request.allow_stateful_cache
+    runtime_traversal_config = request.runtime_traversal_config
+    runtime_m2l_chunk_size = request.runtime_m2l_chunk_size
+    runtime_l2l_chunk_size = request.runtime_l2l_chunk_size
+    upward_center_mode = request.upward_center_mode
+    record_retry = request.record_retry
+    collected_retries = request.collected_retries
+
+    refresh_timing_active = bool(
+        getattr(fmm, "_refresh_timing_active", False)
+    ) and not (
+        bool(fused_device_mode)
+        and bool(getattr(fmm, "_strict_fused_disable_hot_timing", False))
+    )
+
+    def _now() -> float:
+        if not refresh_timing_active:
+            return 0.0
+        return float(time.perf_counter())
+
+    def _elapsed(start: float) -> float:
+        return float(_now() - start)
+
+    disable_fused_tree_dual_prepare = str(
+        os.environ.get("JACCPOT_LARGE_N_DISABLE_FUSED_TREE_DUAL_PREPARE", "0")
+    ).strip().lower() in {"1", "true", "yes", "on"}
+
+    built_tree_artifacts = tree_artifacts is None
+    built_dual_downward_artifacts = dual_downward_artifacts is None
+
+    # The Dehnen mass-dependent MAC needs its per-node force scale resolved
+    # *between* the tree/upward build and the dual build: the criterion's
+    # threshold is `eps * min_b |a_b|` (eq 16a) or `eps * min_b f_b` (eq 16b), and
+    # `_prepare_state_dual_and_downward` builds the policy state from whatever
+    # `force_scale_nodes` it is handed. Handing it None is not a no-op --
+    # `build_adaptive_policy_state` substitutes `jnp.ones(...)`, so the traversal
+    # would run a threshold of `eps * 1`: a different criterion, entirely
+    # silently. The fused tree+dual helper leaves no seam for the prepass, so a
+    # criterion run takes the unfused path.
+    criterion_active = bool(
+        getattr(fmm, "_uses_paper_style_force_scale", None)
+    ) and bool(fmm._uses_paper_style_force_scale())
+
+    (
+        tree_artifacts,
+        dual_downward_artifacts,
+        stage_t0,
+    ) = _build_tree_and_dual_downward_artifacts(
+        fmm=fmm,
+        request=request,
+        positions_arr=positions_arr,
+        masses_arr=masses_arr,
+        tree_artifacts=tree_artifacts,
+        dual_downward_artifacts=dual_downward_artifacts,
+        built_tree_artifacts=built_tree_artifacts,
+        built_dual_downward_artifacts=built_dual_downward_artifacts,
+        supplied_force_scale=supplied_force_scale,
+        criterion_active=criterion_active,
+        disable_fused_tree_dual_prepare=disable_fused_tree_dual_prepare,
+        refresh_timing_active=refresh_timing_active,
+        now=_now,
+    )
 
     stage_t0 = _now()
     if allow_stateful_cache:

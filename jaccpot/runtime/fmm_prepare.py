@@ -68,6 +68,7 @@ from ._interaction_cache import (
     pair_policy_cache_identity,
 )
 from ._large_n_pipeline import can_use_large_n_prepare_path, prepare_large_n_state
+from ._large_n_types import LargeNPrepareRequest
 from ._nearfield_cache import (
     NearfieldPrecomputeArtifacts,
     nearfield_cache_matches,
@@ -3965,22 +3966,24 @@ class PrepareMixin(_EngineBase):
                 positions_arr=positions_arr,
                 masses_arr=masses_arr,
                 input_dtype=input_dtype,
-                bounds=bounds,
-                leaf_size=int(leaf_size),
-                max_order=int(max_order),
-                theta_val=theta_val,
-                mac_type_val=mac_type_val,
-                refine_local_val=refine_local_val,
-                max_refine_levels_val=max_refine_levels_val,
-                aspect_threshold_val=aspect_threshold_val,
-                jit_tree_override=jit_tree,
-                allow_stateful_cache=allow_stateful_cache,
-                runtime_traversal_config=runtime_traversal_config,
-                runtime_m2l_chunk_size=runtime_m2l_chunk_size,
-                runtime_l2l_chunk_size=runtime_l2l_chunk_size,
-                upward_center_mode=upward_center_mode,
-                record_retry=record_retry,
-                collected_retries=collected_retries,
+                request=LargeNPrepareRequest(
+                    bounds=bounds,
+                    leaf_size=int(leaf_size),
+                    max_order=int(max_order),
+                    theta_val=theta_val,
+                    mac_type_val=mac_type_val,
+                    refine_local_val=refine_local_val,
+                    max_refine_levels_val=max_refine_levels_val,
+                    aspect_threshold_val=aspect_threshold_val,
+                    jit_tree_override=jit_tree,
+                    allow_stateful_cache=allow_stateful_cache,
+                    runtime_traversal_config=runtime_traversal_config,
+                    runtime_m2l_chunk_size=runtime_m2l_chunk_size,
+                    runtime_l2l_chunk_size=runtime_l2l_chunk_size,
+                    upward_center_mode=upward_center_mode,
+                    record_retry=record_retry,
+                    collected_retries=collected_retries,
+                ),
                 # Threaded, not dropped: the lane now carries the criterion, so an
                 # externally injected scale has to reach it. Silently ignoring it
                 # here would make a prepare/evaluate loop measure the prepass's
