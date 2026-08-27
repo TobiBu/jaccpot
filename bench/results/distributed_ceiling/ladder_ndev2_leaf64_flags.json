@@ -1,0 +1,176 @@
+{
+  "args": {
+    "ndev": 2,
+    "sizes": "32768,131072",
+    "leaf": 64,
+    "theta": 0.4,
+    "order": 3,
+    "mac_type": "dehnen",
+    "nearfield_backend": "auto",
+    "m2l_chunk": 0,
+    "nearfield_chunk": 0,
+    "reps": 3,
+    "probe": 512,
+    "max_rel_l2": 0.005,
+    "seed": 9,
+    "tag": "flags"
+  },
+  "jax": "0.10.2",
+  "x64": true,
+  "devices": [
+    "NVIDIA A100-PCIE-40GB",
+    "NVIDIA A100-PCIE-40GB"
+  ],
+  "host": "compgpu9",
+  "points": [
+    {
+      "per_device_n": 32768,
+      "ndev": 2,
+      "n_total": 65536,
+      "cap": 32768,
+      "leaf_size": 64,
+      "caps": {
+        "process_block": 256,
+        "max_pair_queue": 32768,
+        "max_interactions_per_node": 512,
+        "max_neighbors_per_leaf": 512
+      },
+      "compile_and_first_call_s": 40.45,
+      "cross_far_pairs": [
+        6.0,
+        332.0
+      ],
+      "cross_near_pairs": [
+        487.0,
+        2837.0
+      ],
+      "cross_queue_overflow": [
+        0.0,
+        0.0
+      ],
+      "cross_far_overflow": [
+        0.0,
+        0.0
+      ],
+      "cross_near_overflow": [
+        1.0,
+        1.0
+      ],
+      "self_far_pairs": [
+        25590.0,
+        27442.0
+      ],
+      "self_near_pairs": [
+        176642.0,
+        174604.0
+      ],
+      "self_queue_overflow": [
+        0.0,
+        0.0
+      ],
+      "self_far_overflow": [
+        0.0,
+        0.0
+      ],
+      "self_near_overflow": [
+        0.0,
+        0.0
+      ],
+      "l2l_level_overflow": [
+        0.0,
+        0.0
+      ],
+      "self_near_pairs_total": 351246.0,
+      "overflow": {
+        "cross_queue_overflow": 0.0,
+        "cross_far_overflow": 0.0,
+        "cross_near_overflow": 2.0,
+        "self_queue_overflow": 0.0,
+        "self_far_overflow": 0.0,
+        "self_near_overflow": 0.0,
+        "l2l_level_overflow": 0.0
+      },
+      "any_overflow": true,
+      "oracle_s": 4.71,
+      "probe": 512,
+      "rel_l2": 0.4858167729878971,
+      "timing_skipped": "overflow: cross_near_overflow"
+    },
+    {
+      "per_device_n": 131072,
+      "ndev": 2,
+      "n_total": 262144,
+      "cap": 131072,
+      "leaf_size": 64,
+      "caps": {
+        "process_block": 256,
+        "max_pair_queue": 32768,
+        "max_interactions_per_node": 1024,
+        "max_neighbors_per_leaf": 2048
+      },
+      "compile_and_first_call_s": 44.47,
+      "cross_far_pairs": [
+        54.0,
+        1966.0
+      ],
+      "cross_near_pairs": [
+        446.0,
+        2881.0
+      ],
+      "cross_queue_overflow": [
+        0.0,
+        1.0
+      ],
+      "cross_far_overflow": [
+        0.0,
+        0.0
+      ],
+      "cross_near_overflow": [
+        1.0,
+        1.0
+      ],
+      "self_far_pairs": [
+        1852.0,
+        1232.0
+      ],
+      "self_near_pairs": [
+        19498.0,
+        10096.0
+      ],
+      "self_queue_overflow": [
+        1.0,
+        1.0
+      ],
+      "self_far_overflow": [
+        0.0,
+        0.0
+      ],
+      "self_near_overflow": [
+        0.0,
+        0.0
+      ],
+      "l2l_level_overflow": [
+        0.0,
+        0.0
+      ],
+      "self_near_pairs_total": 29594.0,
+      "overflow": {
+        "cross_queue_overflow": 1.0,
+        "cross_far_overflow": 0.0,
+        "cross_near_overflow": 2.0,
+        "self_queue_overflow": 2.0,
+        "self_far_overflow": 0.0,
+        "self_near_overflow": 0.0,
+        "l2l_level_overflow": 0.0
+      },
+      "any_overflow": true,
+      "oracle_s": 19.83,
+      "probe": 512,
+      "rel_l2": 0.9792016981167283,
+      "timing_skipped": "overflow: cross_near_overflow,cross_queue_overflow,self_queue_overflow"
+    }
+  ],
+  "monotonicity_problems": [
+    "self_near_pairs fell from 351246 at 32768/device to 29594 at 131072/device -- the walk truncated"
+  ]
+}
