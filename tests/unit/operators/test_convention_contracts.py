@@ -311,7 +311,14 @@ def _rotation_blocks(ell: int) -> dict[str, np.ndarray]:
     dict[str, np.ndarray]
         The four ``[2l+1, 2l+1]`` blocks, keyed by direction and representation.
     """
-    x, y, z = _ROT_DIRECTION
+    # As arrays, because that is what the builders declare and what production
+    # passes: every call site in `operators/` supplies `delta[0], delta[1],
+    # delta[2]` -- traced scalars, never Python floats. Passing floats here made
+    # these six the last failures of `JACCPOT_RUNTIME_TYPECHECK=1 pytest
+    # tests/unit` (audit F40); beartype rejected them at the signature, so the
+    # test never reached the builders at all. Verified bit-identical to the
+    # float form, so the contracts below assert exactly what they did before.
+    x, y, z = (jnp.asarray(v, dtype=jnp.float64) for v in _ROT_DIRECTION)
     return {
         name: np.asarray(fn(x, y, z, ell, dtype=jnp.float64))
         for name, fn in (
