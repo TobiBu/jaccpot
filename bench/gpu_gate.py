@@ -15,9 +15,14 @@ WHAT IT COVERS THAT CPU CI CANNOT
   stale number in a docstring reads as a check that is being performed.
 * Whole code paths that are never *entered* on CPU, which is the larger half and
   produces no skip to notice: ``can_use_large_n_prepare_path`` gates
-  ``_large_n_grad.py`` and ``_large_n_farfield.py`` on the GPU backend
-  (audit F27, both at 0% coverage), and the strict/refresh lane is only
-  partially reachable (F33).
+  ``_large_n_grad.py`` and ``_large_n_farfield.py``, and the strict/refresh lane
+  is only partially reachable (F33). **Corrected 2026-08-26:** this used to add
+  "(audit F27, both at 0% coverage)", and F27 is closed -- those files measure
+  **91%** and **100%** *on CPU*. The gate is what proved a GPU was never the
+  blocker: a full-suite GPU run left them at 0/73 too. The real gate is
+  ``preset="large_n_gpu"``, a profile, not the backend. Keeping the old number
+  here would have been the exact fault the paragraph above warns about -- a stale
+  number in a docstring reading as a check that is being performed.
 * Pallas kernels outside ``interpret=True``. On CPU the Triton lowering never
   runs at all, so a kernel can be wrong on hardware and green in CI.
 
@@ -51,12 +56,41 @@ _REPO_ROOT = Path(__file__).resolve().parent.parent
 
 # Node-id fragments for tests that exist only to run on a GPU. If any of these is
 # reported as skipped, the run was vacuous. Kept as fragments rather than full
-# node ids so a parametrisation change does not silently empty the check -- the
-# count assertion below is what catches that.
+# node ids so a parametrisation change does not silently empty the check -- a
+# fragment that matches nothing reports "0 tests ran", which is the same
+# complaint as a skip, so a rename cannot quietly empty the check.
+#
+# BACKEND-gated: these skip when `jax.default_backend() != "gpu"`, so they empty
+# on a CPU fallback.
 _MUST_RUN = (
     "test_large_n_config_thresholds.py",
     "test_nearfield_mode_policy.py",
     "test_split_build_default_predicate.py",
+)
+
+# CAPABILITY-gated, and a sharper trap: these skip off **sm_80** via
+# `pallas_m2l_{real,complex}_fused_supported()`, so they empty on a *real GPU*
+# that is not Ampere+. The backend assertion above passes on such a card and
+# these still assert nothing -- which is the vacuity this script exists to
+# prevent, and it had a blind spot for exactly the tests that matter most:
+# `docs/handoff_g10_gpu_validation.md` calls the four G.10 fused-Pallas tests
+# "the headline item -- the whole reason this handoff exists", and warns that
+# they "self-skip off sm_80, so a run on the wrong card looks green while
+# asserting nothing". The fifth is the fp32 test added after that handoff.
+#
+# These are NODE-id fragments, not file fragments, for two reasons the file-level
+# form gets wrong:
+#   * the module's ~48 other tests run on CPU, so a file fragment always finds a
+#     passing test and reports "not vacuous" no matter what skipped;
+#   * `..._matches_the_pure_jax_lane_in_gradient` is parametrised on `interpret`,
+#     and only `[False]` reaches the real Triton kernel -- `[True]` runs in
+#     interpret mode on CPU. So the `[False]` is load-bearing.
+_MUST_RUN_SM80 = (
+    "test_the_analytic_branch_holds_at_float32_on_the_fused_pallas_lanes",
+    "test_fused_pallas_m2l_matches_the_pure_jax_lane_in_gradient[False]",
+    "test_fused_pallas_complex_m2l_matches_the_pure_jax_lane_in_gradient[False]",
+    "test_the_production_real_fused_m2l_kernel_carries_the_axis_derivative",
+    "test_the_production_complex_fused_m2l_kernel_carries_the_axis_derivative",
 )
 
 # Measured on an A100 sm_80 / jax 0.10.2 and documented in ARCHITECTURE.md §9,
@@ -340,6 +374,10 @@ def _outcomes_by_node(output: str) -> dict[str, set[str]]:
 def _check_not_vacuous(output: str) -> list[str]:
     """Assert the GPU-only tests actually ran rather than skipping.
 
+    Covers both gates, which fail differently: the backend-gated files empty on a
+    CPU fallback, and the sm_80-gated node ids empty on a *real GPU* that is not
+    Ampere+ -- a case the backend checks pass cleanly.
+
     Parameters
     ----------
     output : str
@@ -364,6 +402,19 @@ def _check_not_vacuous(output: str) -> list[str]:
             )
         else:
             print(f"  not-vacuous: {fragment} ran {ran} ({skipped} skipped)")
+    for fragment in _MUST_RUN_SM80:
+        matching = {n: v for n, v in outcomes.items() if fragment in n}
+        ran = sum(1 for v in matching.values() if v & {"PASSED", "FAILED"})
+        skipped = sum(1 for v in matching.values() if v == {"SKIPPED"})
+        if ran == 0:
+            complaints.append(
+                f"{fragment}: 0 tests ran ({skipped} skipped) -- the fused Pallas "
+                "M2L lanes need an Ampere+ (sm_80) card. On a non-Ampere GPU the "
+                "backend checks above still pass, so green here would mean the "
+                "lanes were never validated"
+            )
+        else:
+            print(f"  not-vacuous: sm_80 {fragment} ran {ran} ({skipped} skipped)")
     return complaints
 
 
