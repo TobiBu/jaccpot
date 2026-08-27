@@ -1,0 +1,174 @@
+{
+  "args": {
+    "num_particles": 1048576,
+    "leaf_size": 256,
+    "max_order": 4,
+    "runs": 3,
+    "warmup": 1,
+    "seed": 0,
+    "benchmark_scope": "steady_eval",
+    "blocks": "1,2,4,8,16,32,64,128",
+    "repeat": 2,
+    "cuda_visible_devices": "5",
+    "use_autocvd": false,
+    "autocvd_num_gpus": 1,
+    "autocvd_exclude": [],
+    "allow_missing_autocvd": true,
+    "tag": "card5"
+  },
+  "cuda_visible_devices": "5",
+  "metric_key": "evaluate_mean_seconds",
+  "frozen_config": {
+    "preset": "large_n_gpu",
+    "basis": "solidfmm",
+    "tree_type": "radix",
+    "leaf_target": 256,
+    "theta": 0.6,
+    "softening": 0.001,
+    "working_dtype": "float32",
+    "memory_objective": "minimum_memory",
+    "nearfield_mode": "bucketed",
+    "nearfield_edge_chunk_size": 512,
+    "streamed_far_pairs": true,
+    "grouped_interactions": false,
+    "enable_interaction_cache": false,
+    "retain_traversal_result": false,
+    "retain_interactions": false,
+    "traversal_config": {
+      "max_pair_queue": 524288,
+      "process_block": 256,
+      "max_interactions_per_node": 16384,
+      "max_neighbors_per_leaf": 8192
+    },
+    "worker_autotune_traversal": false,
+    "worker_autotune_nearfield_chunk": false
+  },
+  "medians": {
+    "1": 0.3939391002058983,
+    "2": 0.398496620512257,
+    "4": 0.3951217010617256,
+    "8": 0.3997089116213222,
+    "16": 0.3955623915729423,
+    "32": 0.3979680296033621,
+    "64": 0.3995665043282012,
+    "128": 0.39341369193668163
+  },
+  "spread": 1.0160015266719638,
+  "best_block": 128,
+  "worst_block": 8,
+  "verdict": "NOT usable as a guard axis: the whole sweep fits inside run-to-run spread",
+  "rows": [
+    {
+      "pass": 0,
+      "block_size": 1,
+      "seconds": 0.3947085980325937,
+      "resolved_nearfield_mode": "bucketed",
+      "resolved_nearfield_edge_chunk_size": 512
+    },
+    {
+      "pass": 0,
+      "block_size": 2,
+      "seconds": 0.4036607475330432,
+      "resolved_nearfield_mode": "bucketed",
+      "resolved_nearfield_edge_chunk_size": 512
+    },
+    {
+      "pass": 0,
+      "block_size": 4,
+      "seconds": 0.3932092267399033,
+      "resolved_nearfield_mode": "bucketed",
+      "resolved_nearfield_edge_chunk_size": 512
+    },
+    {
+      "pass": 0,
+      "block_size": 8,
+      "seconds": 0.4026356491570671,
+      "resolved_nearfield_mode": "bucketed",
+      "resolved_nearfield_edge_chunk_size": 512
+    },
+    {
+      "pass": 0,
+      "block_size": 16,
+      "seconds": 0.39742895836631453,
+      "resolved_nearfield_mode": "bucketed",
+      "resolved_nearfield_edge_chunk_size": 512
+    },
+    {
+      "pass": 0,
+      "block_size": 32,
+      "seconds": 0.40043054800480604,
+      "resolved_nearfield_mode": "bucketed",
+      "resolved_nearfield_edge_chunk_size": 512
+    },
+    {
+      "pass": 0,
+      "block_size": 64,
+      "seconds": 0.39872324218352634,
+      "resolved_nearfield_mode": "bucketed",
+      "resolved_nearfield_edge_chunk_size": 512
+    },
+    {
+      "pass": 0,
+      "block_size": 128,
+      "seconds": 0.392590109569331,
+      "resolved_nearfield_mode": "bucketed",
+      "resolved_nearfield_edge_chunk_size": 512
+    },
+    {
+      "pass": 1,
+      "block_size": 1,
+      "seconds": 0.39316960237920284,
+      "resolved_nearfield_mode": "bucketed",
+      "resolved_nearfield_edge_chunk_size": 512
+    },
+    {
+      "pass": 1,
+      "block_size": 2,
+      "seconds": 0.3933324934914708,
+      "resolved_nearfield_mode": "bucketed",
+      "resolved_nearfield_edge_chunk_size": 512
+    },
+    {
+      "pass": 1,
+      "block_size": 4,
+      "seconds": 0.3970341753835479,
+      "resolved_nearfield_mode": "bucketed",
+      "resolved_nearfield_edge_chunk_size": 512
+    },
+    {
+      "pass": 1,
+      "block_size": 8,
+      "seconds": 0.3967821740855773,
+      "resolved_nearfield_mode": "bucketed",
+      "resolved_nearfield_edge_chunk_size": 512
+    },
+    {
+      "pass": 1,
+      "block_size": 16,
+      "seconds": 0.3936958247795701,
+      "resolved_nearfield_mode": "bucketed",
+      "resolved_nearfield_edge_chunk_size": 512
+    },
+    {
+      "pass": 1,
+      "block_size": 32,
+      "seconds": 0.3955055112019181,
+      "resolved_nearfield_mode": "bucketed",
+      "resolved_nearfield_edge_chunk_size": 512
+    },
+    {
+      "pass": 1,
+      "block_size": 64,
+      "seconds": 0.40040976647287607,
+      "resolved_nearfield_mode": "bucketed",
+      "resolved_nearfield_edge_chunk_size": 512
+    },
+    {
+      "pass": 1,
+      "block_size": 128,
+      "seconds": 0.3942372743040323,
+      "resolved_nearfield_mode": "bucketed",
+      "resolved_nearfield_edge_chunk_size": 512
+    }
+  ]
+}
