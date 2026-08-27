@@ -52,6 +52,54 @@ it as an order of magnitude, and take any timing claim from a quiet box.
 with `self_near_pairs` monotone throughout and no overflow flag set anywhere.
 Before this track a card carried ~10^4 in a mesh.
 
+THE ACTUAL CEILING, probed afterwards one rung per process (so `peak_bytes_in_use`
+is attributable) at `XLA_PYTHON_CLIENT_MEM_FRACTION=0.95`, i.e. a 37.5 GiB limit on
+a 40 GB A100. Strict config throughout (order 3, theta 0.4, dehnen, fp64, both
+chunks on):
+
+    leaf  N/device   rel_l2    s/force   peak GiB   note
+     256   1048576  2.0e-03      4.08       1.93
+     256   2097152  3.0e-03     14.53       7.96
+     256   4194304  4.0e-03     44.77      27.14   72 % of the limit
+     512   4194304  3.1e-03     31.70       8.23
+     512   8388608  4.5e-03     93.24      32.59   16.8M on two cards
+     512  16777216       --        --          --   2^31 sort limit, see below
+    1024   4194304  6.6e-03        --       2.20   above the 5e-3 accuracy gate
+    1024  16777216  1.9e-02        --      27.78   33.5M on two cards, inaccurate
+
+Three things that table says and the 10^6 rows do not:
+
+1. **`leaf_size` is the memory lever, and it is quadratic.** At 4.19M/device the peak
+   falls 27.14 -> 8.23 -> 2.20 GiB across leaf 256 -> 512 -> 1024, because the dense
+   buffers are `[num_leaves, ~num_leaves]` and `num_leaves = N / leaf`. `N` is not
+   the variable; `N / leaf` is.
+2. **Memory is not the wall any more.** At leaf 512 and 16.8M/device the run dies on
+   `UNIMPLEMENTED: Stable sorting of more than 2^31-1 elements is not implemented` --
+   an int32 element-count limit inside XLA's sort, hit with 5 GiB still free. That is
+   a different kind of ceiling from everything else in this file and no capacity knob
+   moves it.
+3. **Accuracy, not capacity, is what actually binds at the top.** The leaf-1024 rows
+   reach 16.8M/device on memory but land at 6.6e-03 and 1.9e-02, above the 5e-3 gate,
+   so this tool withholds their timings. The largest per-device load that passes every
+   check is **8 388 608 at leaf 512** (rel_l2 4.5e-03) -- 16.8M particles on two
+   A100s.
+
+For comparison, the single-GPU fast lane was measured at ~4M on one card (36.3 GB of
+40, 8M OOM, 2026-07-19) at order 4 / theta 0.8 / fp32. The mesh reaches roughly the
+same per card at leaf 256 and twice it at leaf 512, at a stricter MAC in fp64 -- so
+the distributed lane is not behind the single-card lane per card, which the 10^6
+target on its own might suggest.
+
+A caution on the loose-config arm: repeating the leaf-256 ladder at the single-GPU
+lane's own settings (order 4, theta 0.8, fp32) reaches the same 4.19M/device at the
+same peak memory to two figures (26.98 against 27.14 GiB) while doing 3x less near
+work (19 989 992 self near pairs against 69 574 540). Peak memory here is set by the
+cap-sized traversal buffers, not by precision and not by how much work the walk does,
+so fp32 is not a memory lever on this lane. Its rel_l2 lands at 6e-03 to 1.5e-02 and
+its timings are withheld for that reason; theta=0.8 is a deliberately loose MAC and
+the single-GPU figure quoted at it is a median per-particle error, which is a more
+forgiving metric than this aggregate L2.
+
 "both chunks" is `m2l_chunk=65536` and `nearfield_chunk=512`. Both are existing,
 documented, numerics-identical config fields, not new machinery.
 
@@ -118,6 +166,50 @@ _SIZES = (8192, 32768, 131072, 524288, 1048576)
 #: Source-chunk width for the fp64 oracle, so the N x probe difference array stays
 #: bounded regardless of N.
 _ORACLE_CHUNK = 8192
+
+
+def _memory(ndev: int) -> dict:
+    """Per-device allocator peak and limit, in bytes.
+
+    ``peak_bytes_in_use`` is cumulative for the life of the PROCESS, not per call,
+    so a multi-rung sweep attributes the largest rung's peak to every later one.
+    Run one rung per process when the peak has to be attributable -- which is what
+    ``--sizes`` with a single value is for, and what the ceiling probe does.
+
+    ``bytes_limit`` is what XLA will hand out, i.e.
+    ``XLA_PYTHON_CLIENT_MEM_FRACTION`` times the card, not the card. At the default
+    0.75 an A100-40GB reports a 31.8 GB limit, so a ceiling measured without raising
+    it is a ceiling on the fraction.
+
+    Parameters
+    ----------
+    ndev : int
+        Number of devices to report.
+
+    Returns
+    -------
+    dict
+        ``peak_gib`` / ``in_use_gib`` / ``limit_gib`` per device, plus the peak as a
+        fraction of the limit.
+    """
+    peaks, in_use, limits = [], [], []
+    for device in jax.devices()[:ndev]:
+        try:
+            stats = device.memory_stats() or {}
+        except Exception:  # noqa: BLE001 -- CPU devices expose no stats
+            stats = {}
+        peaks.append(int(stats.get("peak_bytes_in_use", 0)))
+        in_use.append(int(stats.get("bytes_in_use", 0)))
+        limits.append(int(stats.get("bytes_limit", 0)))
+    gib = 1024.0**3
+    return {
+        "peak_gib": [round(v / gib, 3) for v in peaks],
+        "in_use_gib": [round(v / gib, 3) for v in in_use],
+        "limit_gib": [round(v / gib, 3) for v in limits],
+        "peak_fraction_of_limit": (
+            round(max(peaks) / max(limits), 3) if max(limits) else None
+        ),
+    }
 
 
 def _disc(
@@ -215,6 +307,8 @@ def _one_point(
         overrides["m2l_chunk"] = args.m2l_chunk
     if args.nearfield_chunk:
         overrides["nearfield_chunk"] = args.nearfield_chunk
+    if args.far_m2l_fp32:
+        overrides["far_m2l_fp32"] = True
     # The cross-walk caps, overridable so the rung that walls on one of them can be
     # bisected without editing the config's defaults.
     for name, value in (
@@ -291,6 +385,7 @@ def _one_point(
             if row["any_overflow"]
             else f"rel_l2 {row['rel_l2']:.4g}"
         )
+        row["memory"] = _memory(ndev)
         return row
 
     times = []
@@ -304,6 +399,7 @@ def _one_point(
     row["seconds_median"] = round(float(np.median(times)), 4)
     row["seconds_min"] = round(float(np.min(times)), 4)
     row["seconds_max"] = round(float(np.max(times)), 4)
+    row["memory"] = _memory(ndev)
     return row
 
 
@@ -325,6 +421,8 @@ def _line(row: dict) -> str:
         f"self_near={row['self_near_pairs_total']:13.0f} "
         f"ovf={fired or '-'} "
         f"rel_l2={row['rel_l2']:.3e} | {verdict} "
+        f"peak={max(row.get('memory', {}).get('peak_gib') or [0]):.2f}"
+        f"/{max(row.get('memory', {}).get('limit_gib') or [0]):.1f}GiB "
         f"(build {row['compile_and_first_call_s']}s)"
     )
 
@@ -361,6 +459,12 @@ def main(argv: Optional[list[str]] = None) -> int:
     ap.add_argument("--order", type=int, default=3)
     ap.add_argument("--mac-type", default="dehnen")
     ap.add_argument("--nearfield-backend", default="auto")
+    ap.add_argument(
+        "--far-m2l-fp32",
+        action="store_true",
+        help="run the far-field M2L in fp32 (the per-pair rotation blocks dominate "
+        "its peak, so this is the memory knob that matters most at large N)",
+    )
     ap.add_argument("--cross-neighbors", type=int, default=0)
     ap.add_argument("--cross-interactions", type=int, default=0)
     ap.add_argument("--cross-queue", type=int, default=0)
