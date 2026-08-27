@@ -46,6 +46,18 @@ NDEV = 2
 PER = 32
 
 
+#: The tier's own problems are tens of particles per device, so they need a leaf
+#: small enough that a device holds more than one of them.
+#: ``DistributedFMMConfig.leaf_size`` now defaults to a production 64, at which
+#: 64 particles/device is a SINGLE leaf: the dual-tree walk's degenerate branch
+#: returns immediately, there are no far pairs and no near pairs, and every
+#: direct-sum comparison here stops saying anything (the vacuity guards below catch
+#: it, which is how this was found). Pinned rather than inherited, so this file's
+#: tiny-N premise is explicit rather than borrowed from a default that has now
+#: moved twice.
+_LEAF = 8
+
+
 def _clusters(ndev: int, per: int, seed: int = 4):
     """``ndev`` spatially separated clusters (engages the cross-domain path).
 
@@ -76,7 +88,9 @@ def _rel_l2(a, b) -> float:
 def setup():
     """One partitioned system + both evaluators, shared across the tests."""
     config = dataclasses.replace(
-        DistributedFMMConfig(), nearfield_backend="baseline", local_walk="dual_tree"
+        DistributedFMMConfig(leaf_size=_LEAF),
+        nearfield_backend="baseline",
+        local_walk="dual_tree",
     )
     positions, masses = _clusters(NDEV, PER)
     part = partition_for_devices(positions, masses, NDEV, leaf_size=config.leaf_size)
@@ -250,7 +264,9 @@ def test_forward_survives_a_gradient(setup):
 def test_nearfield_chunk_rejected_on_grad_path():
     """The chunked near field has no autodiff rule; it must raise, not degrade."""
     config = dataclasses.replace(
-        DistributedFMMConfig(), nearfield_backend="pallas", nearfield_chunk=256
+        DistributedFMMConfig(leaf_size=_LEAF),
+        nearfield_backend="pallas",
+        nearfield_chunk=256,
     )
     with pytest.raises(NotImplementedError, match="nearfield_chunk"):
         make_force_evaluator(
@@ -262,7 +278,7 @@ def test_rejects_unknown_halo_exchange():
     """Only the vetted halo-exchange implementations are selectable."""
     with pytest.raises(ValueError, match="halo_exchange"):
         make_force_evaluator(
-            DistributedFMMConfig(),
+            DistributedFMMConfig(leaf_size=_LEAF),
             NDEV,
             32,
             make_mesh(NDEV),
@@ -325,7 +341,7 @@ def test_l2l_num_levels_requires_differentiable():
     """The static L2L bound is grad-path-only; the forward resolves it exactly."""
     with pytest.raises(ValueError, match="l2l_num_levels"):
         make_force_evaluator(
-            DistributedFMMConfig(),
+            DistributedFMMConfig(leaf_size=_LEAF),
             NDEV,
             32,
             make_mesh(NDEV),
