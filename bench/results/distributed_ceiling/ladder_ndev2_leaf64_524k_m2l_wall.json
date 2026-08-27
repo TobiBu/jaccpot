@@ -1,0 +1,38 @@
+{
+  "args": {
+    "ndev": 2,
+    "sizes": "524288",
+    "leaf": 64,
+    "theta": 0.4,
+    "order": 3,
+    "mac_type": "dehnen",
+    "nearfield_backend": "auto",
+    "cross_neighbors": 0,
+    "cross_interactions": 0,
+    "cross_queue": 0,
+    "m2l_chunk": 0,
+    "nearfield_chunk": 512,
+    "reps": 2,
+    "probe": 512,
+    "max_rel_l2": 0.005,
+    "seed": 9,
+    "tag": "l64_512k_chunk"
+  },
+  "jax": "0.10.2",
+  "x64": true,
+  "devices": [
+    "NVIDIA A100-PCIE-40GB",
+    "NVIDIA A100-PCIE-40GB"
+  ],
+  "host": "compgpu9",
+  "points": [
+    {
+      "per_device_n": 524288,
+      "ndev": 2,
+      "leaf_size": 64,
+      "failed": "JaxRuntimeError: INTERNAL: Failed to get configs for: 2 out of 492 instructions. See logs for all failures. Example failure: \nAutotuning failed for HLO: %gemm_fusion_dot.124 = f32[469733376,7]{1,0} fusion(%bitcast.1916.0, %constant.33069.clone.1.0), kind=kCustom, calls=%gemm_fusion_dot.124_computation, metadata={op_name=\"jit(evaluate)/shard_map/jit(_accumulate_m2l_fullbatch)/jit(_m2l_real_batch_kernel)/vmap()/dot_general\" stack_frame_id=4747}, backend_config={\"operation_queue_id\":\"0\",\"fusion_backend_config\":{\"kind\":\"__triton_gemm\"},\"force_earliest_schedule\":false,\"reification_cost\":[],\"device_type\":\"DEVICE_TYPE_INVALID\"}. Failed to pick best config: All configs failed during profiling.\nFailures (11):\nEXECUTION FAILED: RESOURCE_EXHAUSTED: Out of memory while trying to allocate 12.25GiB. [tf-allocator-allocation-error='']\nEXECUTION FAILED: RESOURCE_EXHAUSTED: Out of memory while trying to allocate 12.25GiB. [tf-allocator-allocation-error='']\nEXECUTION FAILED: RESOURCE_EXHAUSTED: Out of memory while trying to allocate 12.25GiB. [tf-allocator-allocation-error='']\nEXECUTION FAILED: RESOURCE_EXHAUSTED: Out of memory while trying to allocate 12.25GiB. [tf-allocator-allocation-error='']\nEXECUTION FAILED: RESOURCE_EXHAUSTED: Out of memory while trying to allocate 12.25GiB. [tf-allocator-allocation-error='']\nEXECUTION FAILED: RESOURCE_EXHAUSTED: Out of memory while trying to allocate 12.25GiB. [tf-allocator-allocation-error='']\nEXECUTION FAILED: RESOURCE_EXHAUSTED: Out of memory while trying to allocate 12.25GiB. [tf-allocator-allocation-error='']\nEXECUTION FAILED: RESOURCE_EXHAUSTED: Out of memory while trying to allocate 12.25GiB. [tf-allocator-allocation-error='']\nEXECUTION FAILED: RESOURCE_EXHAUSTED: Out of memory while trying to allocate 12.25GiB. [tf-allocator-allocation-error='']\nEXECUTION FAILED: RESOURCE_EXHAUSTED: Out of memory while trying to allocate 12.25GiB. [tf-allocator-allocation-error='']\nEXECUTION FAILED: RESOURCE_EXHAUSTED: Out of memory while trying to allocate 12.25GiB. [tf-allocator-allocation-error='']",
+      "traceback": "Traceback (most recent call last):\n  File \"/export/home/tbuck/jaccpot-ceiling-wt/bench/distributed_ceiling_ladder.py\", line 332, in main\n    row = _one_point(per_device_n=per_device_n, ndev=args.ndev, args=args)\n          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/export/home/tbuck/jaccpot-ceiling-wt/bench/distributed_ceiling_ladder.py\", line 194, in _one_point\n    accel_o, gid_o, diag_o = evaluate(\n                             ^^^^^^^^^\njax.errors.JaxRuntimeError: INTERNAL: Failed to get configs for: 2 out of 492 instructions. See logs for all failures. Example failure: \nAutotuning failed for HLO: %gemm_fusion_dot.124 = f32[469733376,7]{1,0} fusion(%bitcast.1916.0, %constant.33069.clone.1.0), kind=kCustom, calls=%gemm_fusion_dot.124_computation, metadata={op_name=\"jit(evaluate)/shard_map/jit(_accumulate_m2l_fullbatch)/jit(_m2l_real_batch_kernel)/vmap()/dot_general\" stack_frame_id=4747}, backend_config={\"operation_queue_id\":\"0\",\"fusion_backend_config\":{\"kind\":\"__triton_gemm\"},\"force_earliest_schedule\":false,\"reification_cost\":[],\"device_type\":\"DEVICE_TYPE_INVALID\"}. Failed to pick best config: All configs failed during profiling.\nFailures (11):\nEXECUTION FAILED: RESOURCE_EXHAUSTED: Out of memory while trying to allocate 12.25GiB. [tf-allocator-allocation-error='']\nEXECUTION FAILED: RESOURCE_EXHAUSTED: Out of memory while trying to allocate 12.25GiB. [tf-allocator-allocation-error='']\nEXECUTION FAILED: RESOURCE_EXHAUSTED: Out of memory while trying to allocate 12.25GiB. [tf-allocator-allocation-error='']\nEXECUTION FAILED: RESOURCE_EXHAUSTED: Out of memory while trying to allocate 12.25GiB. [tf-allocator-allocation-error='']\nEXECUTION FAILED: RESOURCE_EXHAUSTED: Out of memory while trying to allocate 12.25GiB. [tf-allocator-allocation-error='']\nEXECUTION FAILED: RESOURCE_EXHAUSTED: Out of memory while trying to allocate 12.25GiB. [tf-allocator-allocation-error='']\nEXECUTION FAILED: RESOURCE_EXHAUSTED: Out of memory while trying to allocate 12.25GiB. [tf-allocator-allocation-error='']\nEXECUTION FAILED: RESOURCE_EXHAUSTED: Out of memory while trying to allocate 12.25GiB. [tf-allocator-allocation-error='']\nEXECUTION FAILED: RESOURCE_EXHAUSTED: Out of memory while trying to allocate 12.25GiB. [tf-allocator-allocation-error='']\nEXECUTION FAILED: RESOURCE_EXHAUSTED: Out of memory while trying to allocate 12.25GiB. [tf-allocator-allocation-error='']\nEXECUTION FAILED: RESOURCE_EXHAUSTED: Out of memory while trying to allocate 12.25GiB. [tf-allocator-allocation-error='']\n--------------------\nFor simplicity, JAX has removed its internal frames from the traceback of the following exception. Set JAX_TRACEBACK_FILTERING=off to include these.\n"
+    }
+  ],
+  "monotonicity_problems": []
+}

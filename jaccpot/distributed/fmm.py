@@ -34,6 +34,7 @@ import contextlib
 import dataclasses
 import functools
 import itertools
+import math
 from dataclasses import dataclass
 from typing import Any, Callable, Iterator, NamedTuple, Optional
 
@@ -110,6 +111,7 @@ from jaccpot.upward.solidfmm_complex_tree_expansions import (
 from jaccpot.upward.tree_geometry import compute_tree_geometry_compiled
 
 __all__ = [
+    "DERIVED_CAP_FIELDS",
     "DIAG_FIELDS",
     "DistributedFMMConfig",
     "DistributedFMMResult",
@@ -127,6 +129,238 @@ __all__ = [
 # the distributed body has no GradConfig channel, so they are fixed here.
 _GRAD_NEARFIELD_REV_LEAF_BATCH = 8
 _GRAD_NEARFIELD_REV_BLOCK_TILE = 8
+
+#: The traversal capacities that are derived from per-device N when left ``None``.
+#: ``leaf_size`` is deliberately not among them: it decides the near/far split and
+#: therefore the accuracy, not just a buffer shape.
+DERIVED_CAP_FIELDS = (
+    "process_block",
+    "max_pair_queue",
+    "max_interactions_per_node",
+    "max_neighbors_per_leaf",
+    "cross_max_pair_queue",
+    "cross_max_interactions_per_node",
+    "cross_max_neighbors_per_leaf",
+)
+
+#: Floors for the two dense per-node buffers: the constants the config used to ship,
+#: kept so that the tier's own 16-to-128-particle tests exercise exactly the buffers
+#: they always did. These two DID size real buffers on the traced path, so preserving
+#: them preserves behaviour.
+_MIN_INTERACTIONS_PER_NODE = 512
+_MIN_NEIGHBORS_PER_LEAF = 128
+
+#: Floor for the two wavefronts, and deliberately NOT the 32768 the config used to
+#: ship, because that number was never what a traced walk used -- the ladder's first
+#: rung, ``max(1024, process_block * 16)``, was. Carrying 32768 down to tiny trees
+#: would not preserve behaviour, it would introduce a cost the bug had been hiding:
+#: the walk's wavefront loop evaluates the FULL capacity-length array every round
+#: (``valid_mask = wf_indices < wf_size``) and its round count is O(tree depth), so
+#: per-round work is linear in the capacity whether or not the pairs are live.
+#: Measured on a 64-particle/leaf-8 tree (15 nodes), traced, same answer (56 near
+#: pairs) at every capacity:
+#:
+#: ==============  ========  =====
+#: max_pair_queue  run time  ratio
+#: ==============  ========  =====
+#:           1024   3.64 ms   1.0x
+#:           8192   32.1 ms   8.8x
+#:          32768    105 ms  28.8x
+#: ==============  ========  =====
+#:
+#: 1024 is the ladder's own floor and it exceeds the number of distinct node pairs a
+#: tree that small has (15 nodes -> 120 pairs), so nothing is at risk below it. The
+#: ``num_leaves ** 1.5`` rule dominates this floor from 128 leaves upward, which is
+#: where the old 32768 was calibrated anyway, so the floor never decides a capacity
+#: that matters.
+_MIN_PAIR_QUEUE = 1 << 10
+
+#: ``process_block`` is a vectorisation width, not a capacity -- it stopped being one
+#: when the traced wavefront started coming from ``max_pair_queue`` (yggdrax
+#: ``_walk_inputs_are_traced``). 256 is the floor the single-device lane documents and
+#: asserts (``_GPU_STREAMED_MINIMUM_MEMORY_EXPLICIT_PROCESS_BLOCK``,
+#: ``tests/unit/test_solver_api.py``); the mesh shipped 64, chosen back when it *was*
+#: a capacity.
+_DISTRIBUTED_PROCESS_BLOCK = 256
+
+#: The wavefront scales as ``num_leaves ** 1.5``, and this is the coefficient in
+#: front of it for the SELF walk.
+#:
+#: Not a guess and not linear. The eager retry ladder converges on a capacity that
+#: fits, so asking it what it settled on measures the requirement directly, bracketed
+#: to within 2x by its own rungs (``bench/distributed_ceiling_sweep.py --sweep
+#: occupancy`` reports it as ``converged_pair_queue``). On a thin disc, leaf 64,
+#: dehnen MAC, theta=0.4:
+#:
+#: ==========  ================  ========  ==========================
+#: num_leaves  converged queue   per leaf  queue / num_leaves ** 1.5
+#: ==========  ================  ========  ==========================
+#:        128              4096        32                        2.83
+#:        512             32768        64                        2.83
+#:       2048            262144       128                        2.83
+#: ==========  ================  ========  ==========================
+#:
+#: The per-leaf column doubles for every 4x in leaves; the last column is constant
+#: to three figures over a 16x range. A LINEAR rule is therefore wrong in the
+#: dangerous direction -- it under-sizes further the bigger the problem gets.
+#:
+#: The single-GPU lane's ``_sub_million_minimum_memory_pair_queue`` is such a rule,
+#: and it corroborates this one from a completely different measurement. It is
+#: ``max(32768, N/4)``, calibrated at leaf 256, and its docstring records the
+#: boundary: *"N=131072 fits, N=262144 raises 'Pair queue capacity exceeded'"* --
+#: 512 leaves and 1024 leaves. ``2.83 * 512 ** 1.5 == 32786``, which is that rule's
+#: 32768 floor to four figures, so its floor is this curve evaluated at its own
+#: calibration point and the wall it reports one rung later is where linear falls
+#: below the curve. Two lanes, two measurements, same exponent.
+#:
+#: 4 gives ~1.4x headroom over the measured 2.83 and lands one ladder rung above the
+#: converged value at every point measured.
+_SELF_QUEUE_WAVEFRONT_COEFF = 4
+
+#: The same, for the CROSS walk, whose source side is a coarse tree over *every*
+#: device's leaf frontier rather than the local tree, so its wavefront is the wider
+#: of the two. ONE measured point, not three: at 32768/device, leaf 64, ndev 2 (512
+#: leaves) ``cross_max_pair_queue=32768`` overflows and 131072 clears with no flag
+#: set and a subsampled fp64 direct-sum agreement of 5.2e-4, i.e. a coefficient
+#: between 2.83 and 11.3. 16 clears the top of that bracket. The exponent is assumed
+#: to be the self walk's, on the grounds that it is the same traversal over a tree of
+#: the same shape; if that assumption breaks it breaks as an overflow flag, which is
+#: now honest.
+_CROSS_QUEUE_WAVEFRONT_COEFF = 16
+
+
+def _round_up_pow2(value: int) -> int:
+    """Round ``value`` up to a power of two (at least 1).
+
+    Each distinct capacity is a distinct compiled shape, so rounding to a ladder
+    keeps recompiles across an N sweep to ``log2(N)`` rather than one per N. Same
+    reasoning, and the same idiom, as
+    :func:`jaccpot.runtime.fmm_constants._sub_million_minimum_memory_pair_queue`.
+
+    Parameters
+    ----------
+    value : int
+        Capacity to round.
+
+    Returns
+    -------
+    int
+        The smallest power of two that is at least ``value``, floored at 1.
+    """
+
+    return 1 << max(0, (max(1, int(value)) - 1).bit_length())
+
+
+def _derive_walk_caps(
+    *, per_device_n: int, leaf_size: int, ndev: int
+) -> dict[str, int]:
+    """Size the traversal buffers from the per-device particle count.
+
+    THE LEAF COUNT IS THE VARIABLE, NOT N. Every one of these buffers is indexed by
+    node or by leaf -- ``[total_nodes, max_interactions_per_node]``,
+    ``[num_leaves, max_neighbors_per_leaf]``, a wavefront of node pairs -- so what
+    they need tracks ``num_leaves = per_device_n / leaf_size``. The shipped constants
+    were N-independent, which is what put a hard ceiling on per-device N; the
+    single-device pair-queue rule this ports is N-dependent but was measured at leaf
+    256 only, and under-sizes by 4x at leaf 64 for the same N.
+
+    Measured on a thin disc with the dehnen MAC at ``theta=0.4``, per-device N from
+    2048 to 131072 and leaf sizes 8 to 256
+    (``bench/distributed_ceiling_sweep.py --sweep occupancy``):
+
+    ==========  =================  ==================
+    num_leaves  max far per node   max near per leaf
+    ==========  =================  ==================
+            32                  0                  31
+           128                 21                 127
+           512                127                 511
+          2048                496                2047
+    ==========  =================  ==================
+
+    ``max_near_per_leaf`` is ``num_leaves - 1`` at *every* point measured, at both
+    leaf sizes: on a radix tree over a disc at least one leaf has a bounding sphere
+    wide enough to fail the MAC against every other leaf, so the worst leaf's near
+    list is complete. That is why 128 was not a small number but a wrong one -- it
+    truncates as soon as a device holds more than 128 leaves, which at the old
+    ``leaf_size=8`` is 1024 particles. ``max_far_per_node`` tracks ``num_leaves / 4``
+    across two decades and both leaf sizes, so half the leaf count leaves 2x
+    headroom.
+
+    Both therefore scale with ``num_leaves``, which makes both dense buffers
+    quadratic in per-device N at fixed leaf size. That is a real ceiling and it is
+    not papered over here: there is no upper clamp, because a clamp is exactly how a
+    capacity becomes a silent truncation. A larger ``leaf_size`` is the lever (fewer,
+    bigger leaves), which is the other half of why the default moved off 8, and
+    ``m2l_chunk`` / ``nearfield_chunk`` are the levers for the two full-batch walls
+    behind these caps (see ``bench/distributed_ceiling_ladder.py``).
+
+    AND ``ndev`` ENTERS, THROUGH THE CROSS CAPS ONLY. The coarse (LET) tree is built
+    over *every* device's leaf frontier -- ``build_coarse_frontier`` is "all leaf
+    nodes of ``tree``" -- so a local target leaf has ``(ndev - 1) * num_leaves``
+    remote coarse leaves available to be near it, and the same "worst leaf sees
+    everything" behaviour that sets the self near cap sets this one ``ndev - 1``
+    times larger. Sizing the cross caps as if ``ndev`` were 2 overflows
+    ``cross_near`` at *every* rung on 4 devices, with a 61 % force error: measured
+    at 32768, 131072, 524288 and 1048576 particles/device, leaf 256, on 4xA100.
+    The self caps are ndev-independent by construction -- the local tree is the
+    local tree.
+
+    Parameters
+    ----------
+    per_device_n : int
+        Per-device particle capacity -- the ``cap`` from
+        :func:`partition_for_devices`, which is what the local tree is built over.
+    leaf_size : int
+        Local-tree leaf size, which sets how many leaves that capacity becomes.
+    ndev : int
+        Number of devices in the mesh, which sets how large the coarse frontier the
+        cross walk traverses is.
+
+    Returns
+    -------
+    dict[str, int]
+        One entry per name in :data:`DERIVED_CAP_FIELDS`.
+    """
+
+    n = max(1, int(per_device_n))
+    num_leaves = max(1, -(-n // max(1, int(leaf_size))))
+    # Remote leaf frontiers the cross walk can see. 1 rather than 0 on a
+    # single-device mesh, so the cross caps stay at their floors instead of
+    # collapsing to nothing.
+    remote_domains = max(1, int(ndev) - 1)
+    # num_leaves ** 1.5, in integers: math.isqrt keeps the rule bit-identical on
+    # every platform, and it only ever rounds down, which the power-of-two rounding
+    # above it more than makes up for.
+    wavefront = num_leaves * math.isqrt(num_leaves)
+    far_per_node = max(_MIN_INTERACTIONS_PER_NODE, _round_up_pow2(num_leaves // 2))
+    near_per_leaf = max(_MIN_NEIGHBORS_PER_LEAF, _round_up_pow2(num_leaves))
+    return {
+        "process_block": _DISTRIBUTED_PROCESS_BLOCK,
+        "max_pair_queue": max(
+            _MIN_PAIR_QUEUE,
+            _round_up_pow2(_SELF_QUEUE_WAVEFRONT_COEFF * wavefront),
+        ),
+        "max_interactions_per_node": far_per_node,
+        "max_neighbors_per_leaf": near_per_leaf,
+        # The cross walk's target side is the same set of local leaves; its source
+        # side is the coarse tree over every OTHER device's frontier, which is what
+        # ``remote_domains`` carries. Same shape as the self budgets above, that many
+        # times over -- plus a wider wavefront coefficient, for which see
+        # _CROSS_QUEUE_WAVEFRONT_COEFF.
+        "cross_max_pair_queue": max(
+            _MIN_PAIR_QUEUE,
+            _round_up_pow2(_CROSS_QUEUE_WAVEFRONT_COEFF * remote_domains * wavefront),
+        ),
+        "cross_max_interactions_per_node": max(
+            _MIN_INTERACTIONS_PER_NODE,
+            _round_up_pow2(remote_domains * (num_leaves // 2)),
+        ),
+        "cross_max_neighbors_per_leaf": max(
+            _MIN_NEIGHBORS_PER_LEAF,
+            _round_up_pow2(remote_domains * num_leaves),
+        ),
+    }
+
 
 # Order of the per-device diagnostic vector returned alongside the forces.
 DIAG_FIELDS = (
@@ -173,12 +407,22 @@ class DistributedFMMConfig:
 
     ``order`` (multipole order ``p``), ``theta`` (the MAC, for **both** the local
     self walk and the cross-domain walk), ``leaf_size``, ``softening`` and ``G`` are
-    the physics/accuracy knobs.  The ``*_cap`` fields set fixed traversal buffer
+    the physics/accuracy knobs.  The capacity fields set fixed traversal buffer
     shapes and therefore must be large enough to hold the interaction/neighbour
-    lists without truncation -- grow them (see the capacity calibrator in the
-    benchmark harness) for large N or strongly clustered distributions.  An
-    overflow shows up in the returned diagnostics as a nonzero
-    ``*_overflow`` flag.
+    lists without truncation.  An overflow shows up in the returned diagnostics as
+    a nonzero ``*_overflow`` flag.
+
+    THE TRAVERSAL CAPACITIES ARE DERIVED, NOT CONSTANTS. The seven fields in
+    :data:`DERIVED_CAP_FIELDS` default to ``None``, meaning "size me from per-device
+    N" -- :meth:`resolved_for`, which the driver calls before it builds anything.
+    They used to ship as bare constants with no N dependence at all, which put a
+    hard ceiling on per-device N that no amount of cap tuning could move: the
+    neighbour cap truncates above ``max_neighbors_per_leaf`` leaves -- 128 of them,
+    i.e. 1024 particles at the old ``leaf_size=8`` -- and behind it
+    ``cross_max_neighbors_per_leaf`` and ``cross_max_pair_queue`` wall in turn.
+    :func:`_derive_walk_caps` carries the rule and the occupancy measurement it
+    comes from. An explicitly-set value is always honoured, including a deliberately
+    tiny one, so a test that starves a cap on purpose still does.
 
     ONE THETA, NOT TWO. There used to be a separate ``theta_cross``, defaulting to
     0.1 against ``theta``'s 0.4. It was not physics: both walks apply the same MAC
@@ -196,7 +440,17 @@ class DistributedFMMConfig:
 
     order: int = 3
     theta: float = 0.4
-    leaf_size: int = 8
+    # 8 was the smallest leaf in the codebase, below the 64-1024 the single-GPU lane
+    # runs in production, and the wrong end of a quadratic: both dense traversal
+    # buffers scale with the leaf COUNT (see _derive_walk_caps), so eight-particle
+    # leaves pay ~64x the buffer of 64-particle ones for the same particles.
+    # Measured, ndev=2 on 2xA100, default caps, 131072 particles/device: leaf 64
+    # needs a 524288-pair wavefront and takes 0.583 s per force; leaf 256 needs
+    # 65536 and takes 0.190 s, at a better force error (4.1e-4 against 1.0e-3). 64 is
+    # the single-GPU production leaf and the measured minimum of the mutual lane's
+    # cost curve at N=1e6; it is the conservative end of the production range, not
+    # the fastest point at every N.
+    leaf_size: int = 64
     softening: float = 0.02
     G: float = 1.0
     rotation: str = "solidfmm"
@@ -246,15 +500,25 @@ class DistributedFMMConfig:
     # ``auto_scale_caps`` grows them on overflow exactly like the dual-tree caps.
     treecode_near_cap: Optional[int] = None
     treecode_far_cap: Optional[int] = None
-    # self dual-tree walk capacities
-    max_interactions_per_node: int = 512
-    max_neighbors_per_leaf: int = 128
-    max_pair_queue: int = 1 << 15
-    process_block: int = 64
-    # cross-walk (local vs remote coarse tree) capacities
-    cross_max_interactions_per_node: int = 512
-    cross_max_neighbors_per_leaf: int = 128
-    cross_max_pair_queue: int = 1 << 15
+    # Self dual-tree walk capacities. ``None`` (the default) means "derive from
+    # per-device N", which :meth:`resolved_for` does and the driver calls before it
+    # builds anything -- see :func:`_derive_walk_caps` for the rule and the
+    # occupancy measurement behind it. These shipped as the bare constants 512 / 128
+    # / 32768 / 64 with no N dependence at all, which put a hard ceiling on
+    # per-device N: the neighbour cap truncates above 128 leaves, i.e. 1024
+    # particles at the old leaf_size=8. An explicit value is always honoured,
+    # including a deliberately tiny one.
+    max_interactions_per_node: Optional[int] = None
+    max_neighbors_per_leaf: Optional[int] = None
+    max_pair_queue: Optional[int] = None
+    process_block: Optional[int] = None
+    # Cross-walk (local vs remote coarse tree) capacities. Same sentinel contract as
+    # the self ones above: ``None`` means "derive from per-device N". These were the
+    # wall immediately behind the self caps -- at 32768/device and leaf 64 the self
+    # flags are clear and ``cross_near_overflow`` fires, with a 49% force error.
+    cross_max_interactions_per_node: Optional[int] = None
+    cross_max_neighbors_per_leaf: Optional[int] = None
+    cross_max_pair_queue: Optional[int] = None
     # Static length of the cross-far M2L input. The cross walk sizes its far buffer at
     # t_total * cross_max_interactions_per_node but PACKS the valid interactions into the
     # front; feeding the whole (mostly-invalid) buffer to the fused real-M2L pads it to a
@@ -297,6 +561,43 @@ class DistributedFMMConfig:
     # on a system known to be isotropic, where the gap narrows to ~1.2x.
     partitioner: str = "rcb"
 
+    def resolved_for(
+        self: "DistributedFMMConfig", per_device_n: int, ndev: int
+    ) -> "DistributedFMMConfig":
+        """Return a copy with every unset traversal capacity derived from N.
+
+        Idempotent: once a field holds a number there is no sentinel left to fill,
+        so the driver can call this at its entry point and again deeper down
+        without a second N changing anything. That matters because the capacities
+        are what the retry loop grows and what :mod:`jaccpot.distributed.cap_presets`
+        records -- both need concrete numbers, and both would otherwise see
+        ``None``.
+
+        Parameters
+        ----------
+        per_device_n : int
+            Per-device particle capacity (``cap`` from
+            :func:`partition_for_devices`).
+        ndev : int
+            Number of devices in the mesh. Only the cross-walk caps depend on it,
+            and they depend on it strongly -- see :func:`_derive_walk_caps`.
+
+        Returns
+        -------
+        DistributedFMMConfig
+            A copy with no ``None`` left in :data:`DERIVED_CAP_FIELDS`.
+        """
+
+        unset = [f for f in DERIVED_CAP_FIELDS if getattr(self, f) is None]
+        if not unset:
+            return self
+        derived = _derive_walk_caps(
+            per_device_n=int(per_device_n),
+            leaf_size=int(self.leaf_size),
+            ndev=int(ndev),
+        )
+        return dataclasses.replace(self, **{f: derived[f] for f in unset})
+
     def with_scaled_caps(
         self: "DistributedFMMConfig", factor: float
     ) -> "DistributedFMMConfig":
@@ -305,8 +606,11 @@ class DistributedFMMConfig:
         Handy for the overflow-retry loop in capacity calibration.
         """
 
-        def g(v: int) -> int:
-            return int(np.ceil(v * factor))
+        def g(v: Optional[int]) -> Optional[int]:
+            # ``None`` means "still derived from per-device N", which a multiply
+            # cannot express -- leave it for :meth:`resolved_for`. The retry loop
+            # only ever sees a resolved config, so this is for direct callers.
+            return None if v is None else int(np.ceil(v * factor))
 
         return dataclasses.replace(
             self,
@@ -355,10 +659,10 @@ class DistributedFMMConfig:
         def flagged(name: str) -> bool:
             return bool(np.any(diag[:, DIAG_FIELDS.index(name)] > 0))
 
-        def g(v: int) -> int:
-            return int(np.ceil(v * factor))
+        def g(v: Optional[int]) -> Optional[int]:
+            return None if v is None else int(np.ceil(v * factor))
 
-        def maybe(name: str, value: int) -> int:
+        def maybe(name: str, value: Optional[int]) -> Optional[int]:
             return g(value) if flagged(name) else value
 
         # Under the treecode local walk the self near/far caps derive from
@@ -1967,6 +2271,12 @@ def make_force_evaluator(
         ``accel`` in the padded per-device Morton order that ``gid`` maps back.
     """
 
+    # ``cap`` IS per-device N -- the padded capacity the local tree is built over --
+    # so this is the one place a direct caller's unset capacities can be sized. A
+    # no-op when they are already numbers, which is the case coming through
+    # ``distributed_fmm_accelerations``.
+    config = config.resolved_for(cap, ndev)
+
     fn = _make_fn(
         config,
         ndev,
@@ -2087,6 +2397,11 @@ def distributed_fmm_accelerations(
         partitioner=config.partitioner,
     )
     cap = part["cap"]
+    # Before the preset seed and before the retry loop: the loop grows the caps and
+    # the preset records them, so both need numbers rather than "derive me". A
+    # preset still overrides what is derived here -- it is a measured value for this
+    # exact (per-GPU N, ndev), which the rule is only an estimate of.
+    config = config.resolved_for(cap, ndev)
     counts_dev = jnp.asarray(part["counts"], INDEX_DTYPE)
     pos_f = jnp.asarray(part["pos_flat"])
     mass_f = jnp.asarray(part["mass_flat"])

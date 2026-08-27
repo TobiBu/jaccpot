@@ -48,10 +48,15 @@ pytestmark = pytest.mark.skipif(
     device_count() < 2, reason="distributed FMM needs >= 2 devices"
 )
 
-# Particles per cluster. 57 is not a multiple of the default leaf_size of 8, which is
-# the whole point: it pads each device by 64 - 57 = 7 rows. Do not round it up.
+# Particles per cluster. 57 is not a multiple of ``_LEAF``, which is the whole point:
+# it pads each device by 64 - 57 = 7 rows. Do not round it up.
 _PER = 57
-_LEAF = DistributedFMMConfig().leaf_size
+#: Pinned at 8, not read from ``DistributedFMMConfig``. This file needs a padded tree
+#: with more than one leaf in it, and the config default is now a production 64, at
+#: which 57 particles/device is a single leaf -- no far pairs, no near pairs, and
+#: nothing left for the padding to permute. The file's own vacuity guard on
+#: ``cross_far_pairs`` is what caught that.
+_LEAF = 8
 
 
 def _direct(all_pos, all_mass, G, soft):
@@ -117,7 +122,7 @@ def test_padded_partition_matches_direct(drop):
     """
     ndev = min(4, device_count())
     mesh = make_mesh(ndev)
-    config = DistributedFMMConfig()
+    config = DistributedFMMConfig(leaf_size=_LEAF)
 
     padded_pts, padded_mass = _clusters(ndev, _PER)
     if drop:
@@ -186,7 +191,7 @@ def test_padding_permutes_the_device_row_order():
     """
     ndev = min(4, device_count())
     mesh = make_mesh(ndev)
-    config = DistributedFMMConfig()
+    config = DistributedFMMConfig(leaf_size=_LEAF)
     pts, mass = _clusters(ndev, _PER)
     part = partition_for_devices(pts, mass, ndev, leaf_size=_LEAF)
     assert _padding_rows(part) > 0, "this test needs a padded partition"
