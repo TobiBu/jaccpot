@@ -87,13 +87,21 @@ class TestContextKey:
             == "tree_mode=dehnen|leaf=32|n=1000"
         )
 
-    def test_numeric_fields_are_coerced(self, engine):
-        """A float leaf or count must not produce a key like ``leaf=32.0``."""
+    def test_the_numeric_fields_land_in_the_key_unformatted(self, engine):
+        """Large counts must not pick up separators or exponent notation.
+
+        This used to pass floats to assert the ``int()`` coercion. That was
+        wrong: both parameters are annotated ``int``, so under
+        ``JACCPOT_RUNTIME_TYPECHECK=1`` beartype rejects the call and the test
+        asserted behaviour the contract forbids. The coercion is defensive, not
+        a contract, so what is worth pinning is the *format* of the key at a
+        size where a stray ``f"{n:,}"`` or float would show.
+        """
         assert (
             engine._strict_cap_profile_context_key(
-                tree_mode="dehnen", leaf_parameter=32.0, particle_count=1000.0
+                tree_mode="dehnen", leaf_parameter=64, particle_count=1_000_000
             )
-            == "tree_mode=dehnen|leaf=32|n=1000"
+            == "tree_mode=dehnen|leaf=64|n=1000000"
         )
 
 
@@ -387,15 +395,25 @@ class TestRecording:
         assert entry["max_pair_queue"] == 8192
 
     def test_an_unreadable_capacity_counts_as_zero(self, engine, profile_path):
-        """One malformed event must not lose the whole recording."""
+        """One malformed event must not lose the whole recording.
 
-        class _Exploding(tuple):
-            @property
-            def queue_capacity(self):
-                raise RuntimeError("no capacity here")
-
+        The bad event is a *real* ``DualTreeRetryEvent`` carrying a capacity that
+        ``int()`` cannot parse. An earlier version used a ``tuple`` subclass with
+        an exploding property, which beartype rejected under
+        ``JACCPOT_RUNTIME_TYPECHECK=1`` -- the parameter is annotated
+        ``Tuple[DualTreeRetryEvent, ...]``, so the stand-in never satisfied the
+        contract the function declares.
+        """
+        malformed = DualTreeRetryEvent(
+            attempt=1,
+            queue_capacity="not-a-number",
+            interaction_capacity=0,
+            status="grown",
+            far_pair_count=0,
+            near_pair_count=0,
+        )
         engine._record_strict_cap_profile_from_retries(
-            (_Exploding(), _retry(4096)), context_key=_key()
+            (malformed, _retry(4096)), context_key=_key()
         )
         assert engine._strict_profiled_max_pair_queue == 4096
 

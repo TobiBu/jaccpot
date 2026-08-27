@@ -167,12 +167,13 @@ def test_an_exception_is_reported_as_changed(engine):
     so a malformed list can never be mistaken for an unchanged one.
     """
 
-    class _NotAList:
-        pass
+    # A real ``NodeNeighborList`` carrying a ragged field: the parameter type is
+    # satisfied, and the exception comes from inside the comparison, which is
+    # where the predicate's ``except Exception`` actually lives. An earlier
+    # version passed a bare ``_NotAList`` stand-in, which beartype rejected under
+    # ``JACCPOT_RUNTIME_TYPECHECK=1`` -- the test could not reach the branch it
+    # was written to cover, because the call never got past the signature.
+    unreadable = _neighbor_list(**BASE)._replace(offsets=[[1, 2], [3]])
 
-    assert not engine._large_n_neighbor_list_matches(
-        _NotAList(), _neighbor_list(**BASE)
-    )
-    assert not engine._large_n_neighbor_list_matches(
-        _neighbor_list(**BASE), _NotAList()
-    )
+    assert not engine._large_n_neighbor_list_matches(unreadable, _neighbor_list(**BASE))
+    assert not engine._large_n_neighbor_list_matches(_neighbor_list(**BASE), unreadable)
