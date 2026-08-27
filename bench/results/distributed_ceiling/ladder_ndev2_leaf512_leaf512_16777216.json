@@ -1,0 +1,39 @@
+{
+  "args": {
+    "ndev": 2,
+    "sizes": "16777216",
+    "leaf": 512,
+    "theta": 0.4,
+    "order": 3,
+    "mac_type": "dehnen",
+    "nearfield_backend": "auto",
+    "far_m2l_fp32": false,
+    "cross_neighbors": 0,
+    "cross_interactions": 0,
+    "cross_queue": 0,
+    "m2l_chunk": 65536,
+    "nearfield_chunk": 512,
+    "reps": 2,
+    "probe": 192,
+    "max_rel_l2": 0.005,
+    "seed": 9,
+    "tag": "leaf512_16777216"
+  },
+  "jax": "0.10.2",
+  "x64": true,
+  "devices": [
+    "NVIDIA A100-PCIE-40GB",
+    "NVIDIA A100-PCIE-40GB"
+  ],
+  "host": "compgpu9",
+  "points": [
+    {
+      "per_device_n": 16777216,
+      "ndev": 2,
+      "leaf_size": 512,
+      "failed": "JaxRuntimeError: UNIMPLEMENTED: Stable sorting of more than 2^31-1 elements is not implemented",
+      "traceback": "Traceback (most recent call last):\n  File \"/export/home/tbuck/jaccpot-ceiling-wt/bench/distributed_ceiling_ladder.py\", line 450, in main\n    row = _one_point(per_device_n=per_device_n, ndev=args.ndev, args=args)\n          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/export/home/tbuck/jaccpot-ceiling-wt/bench/distributed_ceiling_ladder.py\", line 302, in _one_point\n    accel_o, gid_o, diag_o = evaluate(\n                             ^^^^^^^^^\njax.errors.JaxRuntimeError: UNIMPLEMENTED: Stable sorting of more than 2^31-1 elements is not implemented\n--------------------\nFor simplicity, JAX has removed its internal frames from the traceback of the following exception. Set JAX_TRACEBACK_FILTERING=off to include these.\n"
+    }
+  ],
+  "monotonicity_problems": []
+}
