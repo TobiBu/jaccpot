@@ -415,8 +415,7 @@ def test_large_gpu_minimum_memory_nearfield_prepare_skips_pair_vector_precompute
         preset=FMMPreset.LARGE_N_GPU,
         expansion_basis="solidfmm",
         runtime_policy=RuntimePolicyConfig(memory_objective="minimum_memory"),
-        nearfield_mode="bucketed",
-        precompute_nearfield_scatter_schedules=False,
+        nearfield=NearFieldConfig(mode="bucketed", precompute_scatter_schedules=False),
     )
     nearfield_interop = fmm_impl_private.NearfieldInteropData(
         leaf_nodes=jnp.zeros((1,), dtype=jnp.int32),

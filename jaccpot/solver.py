@@ -28,6 +28,7 @@ from .config import (
     FMMAdvancedConfig,
     FMMPreset,
     GradConfig,
+    NearFieldConfig,
 )
 from .runtime._large_n_types import LargeNPreparedState
 from .runtime.fmm import FMMEngine as _RuntimeFMM
@@ -887,13 +888,15 @@ class FastMultipoleMethod:
                 "l2l_chunk_size",
                 advanced_cfg.farfield.l2l_chunk_size,
             ),
-            nearfield_mode=runtime_overrides.nearfield_mode,
-            nearfield_edge_chunk_size=runtime_overrides.nearfield_edge_chunk_size,
-            precompute_nearfield_scatter_schedules=bool(
-                legacy_kwargs.pop(
-                    "precompute_nearfield_scatter_schedules",
-                    advanced_cfg.nearfield.precompute_scatter_schedules,
-                )
+            nearfield=NearFieldConfig(
+                mode=runtime_overrides.nearfield_mode,
+                edge_chunk_size=runtime_overrides.nearfield_edge_chunk_size,
+                precompute_scatter_schedules=bool(
+                    legacy_kwargs.pop(
+                        "precompute_nearfield_scatter_schedules",
+                        advanced_cfg.nearfield.precompute_scatter_schedules,
+                    )
+                ),
             ),
             dehnen_radius_scale=float(
                 legacy_kwargs.pop(
