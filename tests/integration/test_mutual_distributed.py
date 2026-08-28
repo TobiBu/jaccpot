@@ -725,3 +725,587 @@ def test_momentum_conserves_with_the_far_fields_on(far_grid, cell):
     """
     residual = far_grid[cell]["momentum"]
     assert residual < 1e-14, f"global momentum residual {residual:.3e} at {cell}"
+
+
+# ---------------------------------------------------------------------------
+# Rungs: the block-step level split, across devices.
+# ---------------------------------------------------------------------------
+#
+# Every pair -- intra-domain and cross-domain, near and far -- is scaled by
+# ``level_weights[max(rung_i, rung_j)]``, so one traversal evaluates any linear
+# combination of levels. Three properties are worth pinning, and they fail
+# independently:
+#
+# * **Partition.** One-hot weights at every level must sum to the unweighted total.
+#   This is what catches a weight applied to the near half and NOT the far half:
+#   the far contribution would then be counted ``k_max + 1`` times. Momentum cannot
+#   see that failure, because an unweighted far pair still cancels perfectly.
+# * **Linearity.** ``a(u) + a(v) == a(u + v)`` for fractional weight rows. This is
+#   what catches a weight applied TWICE -- once before the cross-domain export and
+#   again after the import -- which squares it. One-hot weights cannot: ``w**2 == w``
+#   for ``w`` in ``{0, 1}``, so the partition test above is blind to squaring, and
+#   the two tests together are what cover the exchange.
+# * **Per-level momentum**, with the cross FAR path engaged, because that half's
+#   ``-f`` is not a force on a particle but a local expansion returned to the owner's
+#   node -- a different mechanism from the near half's, so it earns its own check.
+#
+# The rung assignment is ``arange(n) % (k_max + 1)``: maximally mixed, so adjacent
+# particles differ and every cell holds every rung. That is the hard case for the far
+# field's cell-level split, not the easy one.
+
+_RUNG_KMAX = 2
+
+
+def _rungs(n, k_max=_RUNG_KMAX):
+    """Maximally rung-mixed assignment: every cell ends up holding every level."""
+    return np.arange(n, dtype=np.int32) % (k_max + 1)
+
+
+def _one_hot(level, k_max=_RUNG_KMAX):
+    w = np.zeros(k_max + 1)
+    w[level] = 1.0
+    return w
+
+
+def _weighted_evaluator(pos, mass, nd, *, theta, cross_theta, leaf_size, **cfgkw):
+    """One compiled evaluator for a configuration, reusable across weightings.
+
+    Every weighting below runs through the SAME evaluator on purpose. Two reasons, and
+    the second is the interesting one:
+
+    * ``distributed_mutual_fmm`` recompiles on every call -- ``shard_map`` wraps a
+      fresh closure, so ``jax.jit`` sees a fresh key -- and these fixtures make seven
+      calls each. Measured on 2 forced CPU devices at N = 256: ~25 s per call that way
+      against one ~25 s compile plus ~6 s per call this way.
+    * It is the claim under test. Only shapes are static, so ONE compiled program has
+      to serve every weight row and every rung assignment. If a weight value or a rung
+      leaked into the graph, these fixtures would recompile, and the numbers above are
+      how you would notice.
+    """
+    from jaccpot.mutual.distributed import (
+        DistributedMutualConfig,
+        make_distributed_mutual_evaluator,
+    )
+
+    cfg = DistributedMutualConfig(
+        leaf_size=leaf_size,
+        theta=theta,
+        cross_theta=cross_theta,
+        order=4,
+        softening=SOFT,
+        k_max=_RUNG_KMAX,
+        **cfgkw,
+    )
+    return make_distributed_mutual_evaluator(
+        jnp.asarray(pos), jnp.asarray(mass), config=cfg, ndev=nd
+    )
+
+
+def _weighted_run(evaluator, pos, mass, weights):
+    """One evaluation at ``weights`` (``None`` for the unweighted total)."""
+    kw = {}
+    if weights is not None:
+        kw = dict(
+            rung=jnp.asarray(_rungs(len(mass))), level_weights=jnp.asarray(weights)
+        )
+    got = evaluator(jnp.asarray(pos), jnp.asarray(mass), **kw)
+    assert not got.overflow, (
+        f"a capacity overflowed at weights={weights}: "
+        f"cross={np.asarray(got.cross_overflow).tolist()} "
+        f"local={np.asarray(got.local_overflow).tolist()}"
+    )
+    return got
+
+
+#: Fractional rows that sum to all-ones, for the linearity (anti-squaring) check.
+#: Deliberately none of them 0 or 1, since ``w**2 == w`` exactly there.
+_FRAC_U = np.array([0.3, 0.75, 0.4])
+_FRAC_V = 1.0 - _FRAC_U
+
+
+@pytest.fixture(scope="module")
+def exact_levels():
+    """Every weighting, on a configuration where the WHOLE force is a direct sum.
+
+    ``theta = cross_theta = 0`` accepts nothing anywhere, so both halves reduce to
+    exact leaf-leaf summation and the level split is the exact per-particle predicate
+    everywhere. That makes a NumPy oracle available, which is not true once either
+    far field is on -- the far field splits at CELL granularity, deliberately, and so
+    does not reproduce a direct sum's per-level decomposition.
+    """
+    nd = _ndev()
+    pos, mass = _random_system()
+    ev = _weighted_evaluator(
+        pos, mass, nd, theta=0.0, cross_theta=0.0, leaf_size=DRIVER_LEAF
+    )
+    out = {"pos": pos, "mass": mass, "nd": nd}
+    named = [("total", None), ("uniform", np.ones(_RUNG_KMAX + 1))]
+    named += [(f"level{k}", _one_hot(k)) for k in range(_RUNG_KMAX + 1)]
+    named += [("frac_u", _FRAC_U), ("frac_v", _FRAC_V)]
+    for name, w in named:
+        out[name] = _weighted_run(ev, pos, mass, w)
+    return out
+
+
+def _oracle_level(pos, mass, rung, level):
+    """Exact direct-sum acceleration from pairs with ``max(rung_i, rung_j) == level``."""
+    d = pos[None, :, :] - pos[:, None, :]
+    r2 = np.sum(d * d, axis=-1) + SOFT**2
+    on = np.maximum(rung[:, None], rung[None, :]) == level
+    inv3 = np.where(np.eye(len(pos), dtype=bool) | ~on, 0.0, r2 ** (-1.5))
+    return np.einsum("ij,j,ijk->ik", inv3, mass, d)
+
+
+def test_all_ones_weights_reproduce_the_unweighted_total(exact_levels):
+    """The weighted lane at weight 1 must be the unweighted lane, to round-off.
+
+    The first thing to establish, because everything below compares against the
+    unweighted total: if the weighted code path changed the answer at unit weight,
+    every later comparison would be measuring that instead of the level split.
+    """
+    a = np.asarray(exact_levels["total"].accelerations)
+    b = np.asarray(exact_levels["uniform"].accelerations)
+    rel = np.linalg.norm(a - b) / np.linalg.norm(a)
+    assert rel < 1e-14, f"unit weights moved the total by {rel:.3e}"
+
+
+def test_a_one_hot_weight_reproduces_that_levels_direct_sum(exact_levels):
+    """Each level, on its own, against an exact oracle over the same predicate."""
+    pos, mass = exact_levels["pos"], exact_levels["mass"]
+    rung = _rungs(len(mass))
+    scale = np.linalg.norm(_exact_all(pos, mass))
+    for k in range(_RUNG_KMAX + 1):
+        got = np.asarray(exact_levels[f"level{k}"].accelerations)
+        want = _oracle_level(pos, mass, rung, k)
+        # Vacuity guard: an empty level would pass any comparison against zero.
+        assert np.linalg.norm(want) / scale > 1e-3, f"level {k} is empty in the oracle"
+        rel = np.linalg.norm(got - want) / scale
+        assert rel < 1e-13, f"level {k} differs from its direct sum by {rel:.3e}"
+
+
+def test_the_levels_partition_the_total(exact_levels):
+    """``sum_k a_k == a_total`` -- the property a weighted half alone breaks.
+
+    A weight applied to the near half but not to the far half leaves every level
+    carrying the WHOLE far field, so the sum over levels overcounts it by ``k_max``
+    times. Global momentum stays exact throughout, because an unweighted far pair
+    cancels just as well as a weighted one, so this is the only criterion here that
+    sees it.
+    """
+    total = np.asarray(exact_levels["total"].accelerations)
+    summed = sum(
+        np.asarray(exact_levels[f"level{k}"].accelerations)
+        for k in range(_RUNG_KMAX + 1)
+    )
+    rel = np.linalg.norm(summed - total) / np.linalg.norm(total)
+    assert rel < 1e-13, f"the levels sum to {rel:.3e} away from the total"
+
+
+def test_the_weighting_is_linear_so_it_cannot_have_been_applied_twice(exact_levels):
+    """``a(u) + a(v) == a(u + v)`` at fractional weights: the anti-squaring check.
+
+    The cross-domain FAR half is the one place a weight can be applied twice without
+    any other criterion noticing: the ``-f`` travels as an expansion, so a weight put
+    on before the export and again after the import squares it. One-hot weights
+    cannot detect that -- ``w**2 == w`` for 0 and 1 -- which is why these rows are
+    fractional and why this test is separate from the partition test above.
+    """
+    u = np.asarray(exact_levels["frac_u"].accelerations)
+    v = np.asarray(exact_levels["frac_v"].accelerations)
+    total = np.asarray(exact_levels["total"].accelerations)
+    rel = np.linalg.norm(u + v - total) / np.linalg.norm(total)
+    assert rel < 1e-13, (
+        f"a(u) + a(1 - u) is {rel:.3e} away from a(1); a squared weight would give "
+        "exactly this signature"
+    )
+
+
+def test_every_level_conserves_momentum(exact_levels):
+    """``sum_i m_i a_i^(k) == 0`` per level -- the scheme's defining property."""
+    mass = exact_levels["mass"]
+    for k in range(_RUNG_KMAX + 1):
+        acc = np.asarray(exact_levels[f"level{k}"].accelerations)
+        p = np.linalg.norm((mass[:, None] * acc).sum(axis=0))
+        scale = np.abs(mass[:, None] * acc).sum()
+        assert p / scale < 1e-14, f"level {k} momentum residual {p / scale:.3e}"
+
+
+# --- and now with BOTH far fields engaged ----------------------------------
+
+
+@pytest.fixture(scope="module")
+def far_levels():
+    """The same weightings with both far fields on, which is the production shape.
+
+    ``_FAR_N``/``_FAR_LEAF`` rather than the driver constants because those are what
+    actually engage both angles on 2, 3 and 4 devices -- see the note above
+    ``_FAR_GRID``. At ``DRIVER_N`` nothing separates and every cell of the angle grid
+    is bit-identical, so a far-field test written at that size asserts nothing.
+    """
+    nd = _ndev()
+    pos, mass = _random_system(n=_FAR_N)
+    ev = _weighted_evaluator(
+        pos, mass, nd, theta=0.5, cross_theta=0.5, leaf_size=_FAR_LEAF
+    )
+    out = {"pos": pos, "mass": mass}
+    named = [("total", None)]
+    named += [(f"level{k}", _one_hot(k)) for k in range(_RUNG_KMAX + 1)]
+    named += [("frac_u", _FRAC_U), ("frac_v", _FRAC_V)]
+    for name, w in named:
+        out[name] = _weighted_run(ev, pos, mass, w)
+    return out
+
+
+@pytest.mark.slow
+def test_the_cross_far_path_is_actually_weighted(far_levels):
+    """Vacuity guard for everything below: the cross far list must be non-empty.
+
+    Without this the whole ``far_levels`` block could be the exact lane wearing a
+    different configuration, and would pass. Several tests in this repo were once
+    green for exactly that reason.
+    """
+    n_far = int(np.asarray(far_levels["total"].cross_far_pairs).sum())
+    assert n_far > 0, (
+        "no cross-domain FAR pairs were accepted, so the weighted far half never ran "
+        "-- raise cross_theta or shrink the leaf"
+    )
+
+
+@pytest.mark.slow
+def test_the_levels_partition_the_total_with_both_far_fields_on(far_levels):
+    """The partition survives an approximate intra-domain AND cross-domain far field.
+
+    A cell-level far split is a different partition from the near field's exact
+    per-particle one -- it over-refines -- but it is still a partition, so the levels
+    must still sum to the total. That is what makes both splits legal to mix.
+    """
+    total = np.asarray(far_levels["total"].accelerations)
+    summed = sum(
+        np.asarray(far_levels[f"level{k}"].accelerations) for k in range(_RUNG_KMAX + 1)
+    )
+    rel = np.linalg.norm(summed - total) / np.linalg.norm(total)
+    assert rel < 1e-13, f"the levels sum to {rel:.3e} away from the total"
+
+
+@pytest.mark.slow
+def test_the_weighting_stays_linear_across_the_expansion_exchange(far_levels):
+    """The anti-squaring check on the path where squaring is actually reachable.
+
+    The near half's weight rides one tensor on one device, so it cannot be applied
+    twice. The far half's ``-f`` crosses a wire as an expansion, so it can -- and this
+    is the configuration where that expansion is genuinely being exchanged.
+    """
+    u = np.asarray(far_levels["frac_u"].accelerations)
+    v = np.asarray(far_levels["frac_v"].accelerations)
+    total = np.asarray(far_levels["total"].accelerations)
+    rel = np.linalg.norm(u + v - total) / np.linalg.norm(total)
+    assert rel < 1e-13, f"a(u) + a(1 - u) is {rel:.3e} away from a(1)"
+
+
+@pytest.mark.slow
+@pytest.mark.parametrize("level", range(_RUNG_KMAX + 1))
+def test_every_level_conserves_momentum_with_the_far_path_engaged(far_levels, level):
+    """Per level, with the expansion return path carrying weighted coefficients.
+
+    Momentum is the weaker of the two criteria here -- it survives a weight applied
+    to neither half and a weight applied twice -- but it is the one the scheme is
+    defined by, and the far half's return path is a different mechanism from the near
+    half's, so it is checked separately on it.
+    """
+    mass = far_levels["mass"]
+    acc = np.asarray(far_levels[f"level{level}"].accelerations)
+    p = np.linalg.norm((mass[:, None] * acc).sum(axis=0))
+    scale = np.abs(mass[:, None] * acc).sum()
+    assert p / scale < 1e-14, f"level {level} momentum residual {p / scale:.3e}"
+
+
+# --- the guards on the way in ---------------------------------------------
+
+
+def test_level_weights_without_a_rung_is_refused():
+    """A weight table with nothing to index it by is a configuration error."""
+    from jaccpot.mutual.distributed import distributed_mutual_fmm
+
+    pos, mass = _random_system(n=32)
+    with pytest.raises(ValueError, match="needs rung"):
+        distributed_mutual_fmm(
+            jnp.asarray(pos),
+            jnp.asarray(mass),
+            level_weights=jnp.ones(3),
+            config=_driver_config(),
+            ndev=_ndev(),
+        )
+
+
+def test_a_rung_above_k_max_is_refused_rather_than_clamped():
+    """Named as a configuration error, not clamped into a silently wrong integration.
+
+    Clamping is what the traced kernels do, because under trace there is nothing else
+    available -- a float table indexed out of range hands back NaN and poisons the
+    whole force. On the host the bound is readable, so it is checked, which is the
+    same division of labour ``BlockStepFMM._validate_rung`` uses.
+    """
+    from jaccpot.mutual.distributed import (
+        DistributedMutualConfig,
+        distributed_mutual_fmm,
+    )
+
+    pos, mass = _random_system(n=32)
+    rung = np.zeros(len(mass), dtype=np.int32)
+    rung[0] = 7
+    with pytest.raises(ValueError, match=r"\[0, k_max=2\]"):
+        distributed_mutual_fmm(
+            jnp.asarray(pos),
+            jnp.asarray(mass),
+            rung=jnp.asarray(rung),
+            level_weights=jnp.ones(3),
+            config=DistributedMutualConfig(
+                leaf_size=DRIVER_LEAF, theta=0.0, order=4, softening=SOFT, k_max=2
+            ),
+            ndev=_ndev(),
+        )
+
+
+def test_a_weight_table_that_disagrees_with_k_max_is_refused():
+    """``k_max`` exists to be checked against, so it is."""
+    from jaccpot.mutual.distributed import (
+        DistributedMutualConfig,
+        distributed_mutual_fmm,
+    )
+
+    pos, mass = _random_system(n=32)
+    with pytest.raises(ValueError, match="k_max=2 asks for 3"):
+        distributed_mutual_fmm(
+            jnp.asarray(pos),
+            jnp.asarray(mass),
+            rung=jnp.zeros(len(mass), dtype=jnp.int32),
+            level_weights=jnp.ones(5),
+            config=DistributedMutualConfig(
+                leaf_size=DRIVER_LEAF, theta=0.0, order=4, softening=SOFT, k_max=2
+            ),
+            ndev=_ndev(),
+        )
+
+
+# ---------------------------------------------------------------------------
+# The one level-split bug the three criteria above cannot see.
+# ---------------------------------------------------------------------------
+#
+# Partition, linearity and momentum all hold for ANY level assignment, as long as it
+# is a single symmetric scalar per pair. Measured, by injecting each fault into the
+# cross FAR half and reading the same three numbers off a 2-device run at N = 256,
+# leaf 4, theta = cross_theta = 0.5 (33 cross far pairs, 991 cross near pairs):
+#
+#     fault                        partition   linearity   momentum
+#     none                          2.1e-16     2.9e-16     <4e-17
+#     far half left UNWEIGHTED      3.9e-02     2.0e-02     <4e-17
+#     far weight applied TWICE      2.1e-16     9.4e-03     <4e-17
+#     far ignores the REMOTE rung   2.1e-16     2.9e-16     <4e-17
+#
+# Momentum sees NONE of the three -- it is structurally blind here, so a per-level
+# residual at 1e-17 is not evidence the levels are right. The partition test sees the
+# first only (``w**2 == w`` kills it on the second, and the third is still a
+# partition). Linearity sees the first two. The third -- a level assignment that is
+# wrong yet CONSISTENT, one scalar per pair as required, just the wrong scalar -- gets
+# past all three, and is what the test below is for. Injected as
+# ``f_level = node_rung[f_local]``, it moves this test by 1.2e-3 against a 1e-13 bound
+# while every other number in the table stays at round-off.
+
+
+def test_the_cross_far_level_uses_the_REMOTE_endpoints_rung():
+    """Two rung-uniform clumps, one per device: level 0 must exclude every cross pair.
+
+    Set up so the answer is exactly computable. Two well-separated clumps, all of
+    clump A at rung 0 and all of clump B at rung ``k_max``; RCB's first cut on a
+    two-clump system falls between them, so each device holds one clump. Then:
+
+    * every intra-domain pair is (0, 0) on one device and (k, k) on the other;
+    * every CROSS pair is (0, k), so it belongs to level ``k`` and to no other.
+
+    A one-hot weight at level 0 must therefore reproduce exactly clump A's internal
+    direct sum and nothing else. If the far half read the local node's rung for both
+    endpoints -- or read the wrong payload column -- device 0's cross far pairs would
+    land at level 0 instead, and clump A would pick up a cross-domain contribution
+    that has no business being there. Nothing else in this file notices: the faulty
+    assignment is still a partition, still linear, and still conserves momentum
+    exactly.
+
+    ``cross_pairs == 0`` is not decoration. It is what establishes the premise: no
+    cross pair refined to leaf-leaf, so the two domains really are cleanly separated
+    and every cross interaction went through the FAR path. A partition that split a
+    clump would leave nearby particles on opposite devices, they would not be well
+    separated, they would refine to near pairs, and this would be non-zero -- which is
+    a failed premise rather than a failed force, so it is asserted separately.
+    """
+    k_max = 2
+    per_clump = 64
+    rng = np.random.default_rng(31)
+    a = rng.normal(scale=0.3, size=(per_clump, 3)) + np.array([-6.0, 0.0, 0.0])
+    b = rng.normal(scale=0.3, size=(per_clump, 3)) + np.array([6.0, 0.0, 0.0])
+    pos = np.concatenate([a, b])
+    mass = rng.uniform(0.5, 1.5, size=2 * per_clump)
+    clump = np.repeat([0, 1], per_clump)
+    rung = np.where(clump == 0, 0, k_max).astype(np.int32)
+
+    from jaccpot.mutual.distributed import (
+        DistributedMutualConfig,
+        distributed_mutual_fmm,
+    )
+
+    cfg = DistributedMutualConfig(
+        leaf_size=8,
+        theta=0.0,
+        cross_theta=1.0,
+        order=4,
+        softening=SOFT,
+        k_max=k_max,
+        partitioner="rcb",
+    )
+    got = distributed_mutual_fmm(
+        jnp.asarray(pos),
+        jnp.asarray(mass),
+        rung=jnp.asarray(rung),
+        level_weights=jnp.asarray(_one_hot(0, k_max)),
+        config=cfg,
+        ndev=2,
+    )
+    assert not got.overflow, "a capacity overflowed"
+
+    n_far = int(np.asarray(got.cross_far_pairs).sum())
+    n_near = int(np.asarray(got.cross_pairs).sum())
+    assert n_far > 0, "no cross FAR pairs -- the weighted far half never ran"
+    assert n_near == 0, (
+        f"{n_near} cross pairs refined to leaf-leaf, so the domains are not cleanly "
+        "separated and the premise of this test does not hold"
+    )
+
+    want = _exact_within(pos, mass, clump)
+    want = np.where(clump[:, None] == 0, want, 0.0)
+    acc = np.asarray(got.accelerations)
+    scale = np.linalg.norm(_exact_all(pos, mass))
+    rel = np.linalg.norm(acc - want) / scale
+    assert rel < 1e-13, (
+        f"level 0 differs from clump A's own direct sum by {rel:.3e}; a cross pair "
+        "leaked into level 0, so the far half is not reading the remote rung"
+    )
+
+
+# ---------------------------------------------------------------------------
+# The backend knob.
+# ---------------------------------------------------------------------------
+#
+# ``build_mutual_state_device`` has taken ``use_pallas`` all along and this lane never
+# passed it, so the distributed mutual force ran pure JAX everywhere regardless of what
+# the caller asked for. The routing mirrors the single-device lane's: the intra-domain
+# NEAR field goes to the Pallas kernel where the hardware supports it, the far field
+# stays pure JAX because both Pallas M2L shapes measured slower, and the cross-domain
+# near field is a different kernel with no Pallas lane at all.
+#
+# Parity is tested through ``pallas_interpret=True``, which is the only way to reach
+# the kernel's logic without a GPU. That is a real limit and worth naming: interpret
+# mode runs the jaxpr under CPU semantics and accepts primitives Triton does not
+# implement, so it cannot catch a lowering failure. Two mutual kernels passed every CPU
+# interpret test and then failed on their first GPU run. The ``interpret=False`` case
+# below is what exercises the real lowering, and it only does so on an sm_80+ card.
+
+
+@pytest.mark.slow
+@pytest.mark.parametrize("interpret", [True, False])
+def test_the_pallas_backend_matches_the_jax_backend(interpret):
+    """Forward parity between the two backends, and momentum unmoved.
+
+    Both are held to round-off rather than to a loose tolerance, because the two lanes
+    compute the same sums in a different order and nothing else differs. Momentum is
+    checked on the Pallas lane specifically: the kernel emits ``-f`` by reducing the
+    SAME tile over the other axis, and a kernel that recomputed ``dr`` instead of
+    negating it would still be accurate and would stop conserving momentum.
+    """
+    from jaccpot.mutual.distributed import (
+        DistributedMutualConfig,
+        distributed_mutual_fmm,
+    )
+    from jaccpot.mutual.nearfield import mutual_nearfield_pallas_active
+
+    if not interpret and not mutual_nearfield_pallas_active(True, False):
+        pytest.skip("the real Pallas lowering needs an sm_80+ GPU")
+
+    nd = _ndev()
+    pos, mass = _random_system(n=_FAR_N)
+
+    def run(backend):
+        ev = _weighted_evaluator(
+            pos,
+            mass,
+            nd,
+            theta=0.5,
+            cross_theta=0.5,
+            leaf_size=_FAR_LEAF,
+            backend=backend,
+            pallas_interpret=(backend == "pallas" and interpret),
+        )
+        return np.asarray(_weighted_run(ev, pos, mass, None).accelerations)
+
+    a_jax = run("jax")
+    a_pal = run("pallas")
+    rel = np.linalg.norm(a_pal - a_jax) / np.linalg.norm(a_jax)
+    assert rel < 1e-13, f"backend parity {rel:.3e}"
+
+    p = np.linalg.norm((mass[:, None] * a_pal).sum(axis=0))
+    scale = np.abs(mass[:, None] * a_pal).sum()
+    assert p / scale < 1e-14, f"pallas momentum residual {p / scale:.3e}"
+
+
+@pytest.mark.slow
+def test_the_pallas_backend_is_still_weighted_correctly():
+    """The level-weighted path, on the Pallas lane, which is where it broke before.
+
+    ``level_weights[k]`` with a static ``k`` lowered to a ``slice`` that Pallas GPU
+    does not implement, and the throughput benchmark never caught it because the
+    benchmark runs UNWEIGHTED. Any new dispatch into that kernel needs a weighted
+    test, so this is that test for the distributed lane: the levels must still
+    partition the total with the near field routed to Pallas.
+    """
+    from jaccpot.mutual.distributed import (
+        DistributedMutualConfig,
+        distributed_mutual_fmm,
+    )
+
+    nd = _ndev()
+    pos, mass = _random_system(n=_FAR_N)
+    ev = _weighted_evaluator(
+        pos,
+        mass,
+        nd,
+        theta=0.5,
+        cross_theta=0.5,
+        leaf_size=_FAR_LEAF,
+        backend="pallas",
+        pallas_interpret=True,
+    )
+
+    def run(weights):
+        return np.asarray(_weighted_run(ev, pos, mass, weights).accelerations)
+
+    total = run(None)
+    summed = sum(run(_one_hot(k)) for k in range(_RUNG_KMAX + 1))
+    rel = np.linalg.norm(summed - total) / np.linalg.norm(total)
+    assert rel < 1e-13, f"the levels sum to {rel:.3e} away from the total on Pallas"
+
+
+def test_an_unknown_backend_is_refused():
+    """Named, not silently degraded to pure JAX -- the caller asked for a lane."""
+    from jaccpot.mutual.distributed import (
+        DistributedMutualConfig,
+        distributed_mutual_fmm,
+    )
+
+    pos, mass = _random_system(n=32)
+    with pytest.raises(ValueError, match="'jax' or 'pallas'"):
+        distributed_mutual_fmm(
+            jnp.asarray(pos),
+            jnp.asarray(mass),
+            config=DistributedMutualConfig(
+                leaf_size=DRIVER_LEAF, softening=SOFT, backend="triton"
+            ),
+            ndev=_ndev(),
+        )
