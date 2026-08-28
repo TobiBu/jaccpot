@@ -181,6 +181,102 @@ memory an exact per-rung-multipole scheme (strategy B1) would need.
 no rung-mixed cells the two splits coincide and the oracle is reproduced level by
 level.
 
+### Rungs across devices
+
+`mutual/distributed.py` takes the same `rung` / `level_weights` pair, and
+`jaccpot.DistributedBlockStepFMM` exposes them in the same shape nornax consumes.
+The two halves of a cross-domain pair need different machinery, and the difference
+is where the interesting part is.
+
+**The near half is exact and per-particle, so the remote endpoint's rung has to
+travel with the remote endpoint.** It rides round B of the demand-driven halo import
+(`import_near_halo(payload_sorted=...)`, yggdrax), in the same buffer as the
+positions and masses, so it is sized by the halo rather than by the system. It could
+*not* go on the coarse frontier: that is `all_gather`-ed, so publishing `leaf_size`
+rung columns there would ship every remote particle's rung to every device —
+`O(N_total)`, which is exactly what the demand-driven import exists to avoid. The
+weight then multiplies the one tensor both sides of the tile read, so a weighted
+cross block is antisymmetric for the same reason an unweighted one is.
+
+**The far half is cell-level, so the frontier is the right channel**, one scalar per
+leaf appended to the multipole row it belongs to. The local endpoint may be an
+internal node — `accept_only_leaf_pairs` constrains the *remote* side, which has to
+be addressable — so node rungs are needed for the whole tree. `mutual/force.py`
+gets them by propagating a leaf maximum up the level schedule; the distributed lane
+has only the inclusive node ranges, so it takes the range maximum instead, as one
+prefix count per level (`k_max` is small). The two agree by construction and
+`tests/unit/mutual/test_distributed_node_rungs.py` checks that they do.
+
+The weight on the far half is applied **once, on the evaluating device, to both
+directions of the batched M2L, before either leaves**. That is a real decision and
+not the obvious one, because a far pair's `−f` is not a force on a particle: it is a
+local expansion returned to the owner's node. Applying the weight again on import
+would square it; applying it on neither side would leave the far half unweighted
+while the near half is weighted. Weighting the expansion is legal because everything
+downstream of one is linear in its coefficients — L2L re-centres, L2P evaluates — so
+scaling the coefficients scales the force by the same factor.
+
+#### Momentum is blind to all of it
+
+This is the part worth carrying away. Measured by injecting each fault into the cross
+far half and reading three criteria off a 2-device run at N = 256, leaf 4,
+θ = cross_θ = 0.5 (33 cross far pairs, 991 cross near pairs):
+
+| fault | level partition | weight linearity | momentum |
+|---|---|---|---|
+| none | 2.1e-16 | 2.9e-16 | < 4e-17 |
+| far half left **unweighted** | 3.9e-02 | 2.0e-02 | < 4e-17 |
+| far weight applied **twice** | 2.1e-16 | 9.4e-03 | < 4e-17 |
+| far ignores the **remote** rung | 2.1e-16 | 2.9e-16 | < 4e-17 |
+
+A per-level momentum residual at 1e-17 is therefore *not* evidence that the levels
+are right. Any single symmetric scalar per pair conserves momentum exactly, whatever
+that scalar is — so three distinct criteria are needed:
+
+* **the level partition** (one-hot weights must sum to the unweighted total) catches
+  a half left unweighted, and *cannot* catch squaring, because `w² == w` for 0 and 1;
+* **linearity** (`a(u) + a(1 − u) == a(1)` at fractional weights) catches squaring;
+* **a two-clump run with one rung per device**, where every cross pair provably
+  belongs to one level and clump A's level-0 force is an exact direct sum, catches an
+  assignment that is wrong yet consistent. Nothing else does.
+
+### Distributed backend
+
+`DistributedMutualConfig.backend` routes the intra-domain near field to the mutual
+Pallas kernel on sm_80+, mirroring the single-device lane — including its two
+measured decisions: the far field stays pure JAX (both Pallas M2L shapes are slower,
+see [Phase 5 outcome](#phase-5-outcome)), and every Pallas lane is reached through its
+`custom_vjp` wrapper. The cross-domain near field is pure JAX either way; it is a
+different kernel (`_tile_forces`, a local-leaf × halo-block tile) and giving it a
+Pallas lane is a new kernel, not a wiring change.
+
+### Compile once, not per force
+
+`distributed_mutual_fmm` rebuilds its mapped program on every call — `shard_map`
+wraps a fresh closure, so `jax.jit` sees a fresh cache key — which is fine for one
+force and ruinous for the `n_sub + 1` evaluations a base step asks for.
+`make_distributed_mutual_evaluator` splits the host side out: the partition, the
+padding layout, the bounds and the capacities are frozen once and the compiled
+program is held. Measured on 2 forced CPU devices at N = 128: build < 0.1 s, first
+evaluation 20.5 s, each later one ~8 s.
+
+Note what is *not* frozen. The per-device tree is rebuilt inside the mapped program
+from the positions handed in, so successive boundaries within a base step see trees
+built from their own positions — a *finer* rebuild cadence than the single-device
+lane's, not a coarser one. Every evaluation stays internally self-consistent, so its
+levels partition its own pairs and each level's momentum cancels exactly; what is
+lost is only the bit-level identity of the topology across a base step. So
+`prepare()` is called when the *partition* should change, not on a fixed cadence.
+
+The readout is a `jnp` scatter rather than a NumPy assignment, and the
+"every real particle appears exactly once" check moved to the partition, where it
+belongs — it depends only on the frozen gid layout. That is what makes a whole
+evaluation traceable, which is what lets nornax's `block_kdk_rollout` (a `lax.scan`
+over base steps) drive this lane at all. The overflow read is *attempted* rather
+than gated on `isinstance(..., Tracer)`, so it raises on every eager call and is
+skipped under trace — a traced driver gets no overflow check and must evaluate once
+eagerly first.
+
 ## Usage
 
 ```python

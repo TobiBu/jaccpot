@@ -451,8 +451,15 @@ jobs:
         # halo, and that has to be readable rather than inferred.
         run: |
           set -o pipefail
+          # Exit 5 is pytest's "no tests were collected", which is what a
+          # module-level skip produces in a job that runs ONE file. Tolerated here
+          # so the next step gets to say WHY: it fails on a vacuous run with an
+          # actionable message, where a bare exit 5 says nothing at all. Every other
+          # non-zero code still fails this step.
+          rc=0
           pytest tests/integration/test_mutual_distributed.py -n 0 -rs -v \
-            | tee pytest-distributed-mutual.txt
+            | tee pytest-distributed-mutual.txt || rc=$?
+          if [ "$rc" != 0 ] && [ "$rc" != 5 ]; then exit "$rc"; fi
       - name: Fail if the suite was skipped rather than run
         # A skipped suite PASSES, and a green-but-vacuous job is worse than a red
         # one -- it is the exact state this job was added to end. Reuses the log
@@ -463,8 +470,22 @@ jobs:
         # how the two verbosity flags happen to cancel, and a guard that silently
         # stops matching is the failure mode being guarded against. Whether the
         # tests PASSED is the previous step's exit code, not this step's business.
+        #
+        # It matches VACUITY, not any SKIPPED line, and the distinction is load
+        # bearing. Every skip in this file used to be a whole-module one -- an old
+        # yggdrax, or fewer than two devices -- so "any skip" and "nothing ran" were
+        # the same thing and `^SKIPPED` was exact. They are not the same any more:
+        # the file now carries per-test skips that are correct on this runner (a
+        # kernel needing sm_80, a level-weighted path needing a newer yggdrax while
+        # the unweighted lane runs fine), and reading one of those as vacuity would
+        # fail the job over a test that could not have run anywhere on a CPU box.
+        #
+        # So: nothing collected, or one of the two whole-module guards firing. Both
+        # module-level reasons say "the distributed mutual force needs", which is
+        # what anchors the second pattern.
         run: |
-          if grep -qE "^SKIPPED|no tests ran" pytest-distributed-mutual.txt; then
+          if grep -qE "no tests ran|collected 0 items" pytest-distributed-mutual.txt \
+             || grep -qE "^SKIPPED.*the distributed mutual force needs" pytest-distributed-mutual.txt; then
             echo "::error::the distributed mutual suite was skipped, not run -- see the reason in the previous step"
             exit 1
           fi

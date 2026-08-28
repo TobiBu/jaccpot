@@ -97,10 +97,12 @@ from jaccpot.mutual.device_topology import leaf_blocks
 
 __all__ = [
     "DistributedMutualConfig",
+    "DistributedMutualEvaluator",
     "DistributedMutualForce",
     "DistributedMutualResult",
     "distributed_mutual_accelerations",
     "distributed_mutual_fmm",
+    "make_distributed_mutual_evaluator",
 ]
 
 
@@ -117,10 +119,11 @@ class DistributedMutualResult(NamedTuple):
 
     acceleration: Array
     cross_pairs: Array
+    cross_far_pairs: Array
     overflow: Array
 
-    # `cross_pairs` and `overflow` carry a leading singleton axis so `shard_map` can
-    # concatenate them across devices; after the map both are `(ndev,)`.
+    # `cross_pairs`, `cross_far_pairs` and `overflow` carry a leading singleton axis so
+    # `shard_map` can concatenate them across devices; after the map all are `(ndev,)`.
 
 
 class _FrontierTree(NamedTuple):
@@ -170,12 +173,18 @@ class _NearAsNeighbors(NamedTuple):
     neighbor_indices: Array
 
 
-def _tile_forces(pos_a, mass_a, ok_a, pos_b, mass_b, ok_b, softening, g):
+def _tile_forces(pos_a, mass_a, ok_a, pos_b, mass_b, ok_b, softening, g, weights=None):
     """Antisymmetric leaf-pair block: force on every a-particle and every b-particle.
 
     One evaluation, two applications -- the ``b`` side is the negation of the same
     tensor, never an independent recomputation. That is what keeps the cancellation
     structural, so it holds whatever the softening or the masses.
+
+    The level weight rides ``shared``, which is the one tensor both sides read, so a
+    weighted block is antisymmetric for exactly the same reason an unweighted one is:
+    a single symmetric scalar per pair multiplies ``+f`` and ``-f`` alike. Momentum is
+    therefore exact for *any* weighting, which is what lets the block-step boundary be
+    fused into one traversal.
 
     Parameters
     ----------
@@ -195,6 +204,8 @@ def _tile_forces(pos_a, mass_a, ok_a, pos_b, mass_b, ok_b, softening, g):
         Plummer softening length.
     g:
         Gravitational constant.
+    weights:
+        ``(k, w, w)`` per-pair level weight, or ``None`` for unit weights.
 
     Returns
     -------
@@ -205,11 +216,122 @@ def _tile_forces(pos_a, mass_a, ok_a, pos_b, mass_b, ok_b, softening, g):
     r2 = jnp.sum(d * d, axis=-1) + jnp.asarray(softening, d.dtype) ** 2
     pair_ok = ok_a[:, :, None] & ok_b[:, None, :]
     inv3 = jnp.where(pair_ok, r2 ** (-1.5), 0.0)
+    if weights is not None:
+        inv3 = inv3 * weights
     # shared[k, i, j] is the geometric factor for the (i, j) pair; both sides read it.
     shared = (g * inv3)[..., None] * d
     f_a = jnp.sum(shared * mass_b[:, None, :, None], axis=2)
     f_b = -jnp.sum(shared * mass_a[:, :, None, None], axis=1)
     return f_a, f_b
+
+
+def _pair_level_weights(level_weights, rung_a, rung_b):
+    """``level_weights[max(rung_i, rung_j)]`` for a pair block, clamped in range.
+
+    The exact per-particle predicate, matching
+    :func:`jaccpot.mutual.nearfield._pair_weights` term for term: a pair belongs to
+    the level of its FINER endpoint, so the reduction is a max.
+
+    Parameters
+    ----------
+    level_weights:
+        ``(k_max + 1,)`` weight per interaction level. May be a tracer.
+    rung_a:
+        ``(k, w)`` a-side per-slot rung.
+    rung_b:
+        ``(k, w)`` b-side per-slot rung.
+
+    Returns
+    -------
+    Array
+        ``(k, w, w)`` per-pair weight.
+    """
+    pair_level = jnp.maximum(rung_a[:, :, None], rung_b[:, None, :])
+    # `jnp.take` defaults to mode="fill", which hands back NaN for an out-of-range
+    # index on a float array -- one rung above k_max would poison the whole force.
+    # Clamped for the same reason `mutual/nearfield.py` clamps: a caller that can see
+    # concrete rungs rejects the case up front, and under trace nothing can.
+    pair_level = jnp.clip(pair_level, 0, int(level_weights.shape[0]) - 1)
+    return jnp.take(level_weights, pair_level, axis=0, mode="clip")
+
+
+def _node_rungs(node_ranges, rung, masses, k_max):
+    """Assign each node the rung of its most active (finest) massive particle.
+
+    The cell-level split the far field uses -- falcON activity-gating, strategy B2 --
+    computed from the inclusive particle ranges alone, because that is all this
+    module has. :func:`jaccpot.mutual.force._cell_rungs` gets the same answer by
+    propagating a leaf max up the tree, which needs the level schedule; here the
+    equivalent is a range maximum, and a range maximum over a SMALL alphabet is a
+    prefix count per level:
+
+    ``node_rung = (#levels k with at least one particle at rung >= k in [s, e]) - 1``
+
+    which is exact because ``rung >= k`` is monotone in ``k``. ``k_max`` is small
+    (one row per block-step level), so this is ``O(n * k_max)`` and needs no parent
+    array, no depth cap and no propagation scan.
+
+    Empty and all-massless nodes come back ``-1``, the same sentinel ``_cell_rungs``
+    uses; every consumer clamps into ``[0, k_max]`` afterwards, so ``-1`` and ``0``
+    are indistinguishable in the weight -- and such a node carries no mass, hence no
+    force. Masking by mass is what makes the two lanes agree on a padded domain:
+    padding rows are massless, so they cannot raise a cell's rung on either side.
+
+    Parameters
+    ----------
+    node_ranges:
+        ``(nodes, 2)`` inclusive ``[start, end]`` particle range per node.
+    rung:
+        ``(n,)`` per-particle rung, in the same order the ranges index.
+    masses:
+        ``(n,)`` per-particle mass, same order.
+    k_max:
+        Highest level; levels run ``0 .. k_max``.
+
+    Returns
+    -------
+    Array
+        ``(nodes,)`` node rung, ``-1`` where a node holds no massive particle.
+    """
+    r = jnp.asarray(rung).astype(INDEX_DTYPE)
+    # A massless particle exerts no force, so it must not decide a cell's level.
+    eff = jnp.where(jnp.asarray(masses) > 0, r, jnp.asarray(-1, INDEX_DTYPE))
+    ks = jnp.arange(int(k_max) + 1, dtype=INDEX_DTYPE)
+    ge = (eff[None, :] >= ks[:, None]).astype(INDEX_DTYPE)
+    zero = jnp.zeros((int(k_max) + 1, 1), dtype=INDEX_DTYPE)
+    prefix = jnp.concatenate([zero, jnp.cumsum(ge, axis=1)], axis=1)
+    lo = node_ranges[:, 0]
+    hi = node_ranges[:, 1]
+    has = (prefix[:, hi + 1] - prefix[:, lo]) > 0
+    return jnp.sum(has.astype(INDEX_DTYPE), axis=0) - 1
+
+
+def _far_payload(node_multipoles, node_rung):
+    """The frontier payload for the cross far field: multipoles, then the cell rung.
+
+    Both are per-LEAF quantities, so the frontier is the right channel: it rides one
+    ``all_gather``, one row per remote leaf. The rung is appended rather than sent
+    separately so it cannot be attached to the wrong leaf -- the coarse tree's Morton
+    reorder moves whole payload rows, so a column stays with its multipole by
+    construction.
+
+    Parameters
+    ----------
+    node_multipoles:
+        ``(nodes, sh_size(order))`` per-node multipoles.
+    node_rung:
+        ``(nodes,)`` per-node cell rung, or ``None`` when unweighted.
+
+    Returns
+    -------
+    Array
+        ``(nodes, sh_size(order))`` unweighted, or one column wider when weighted.
+    """
+    if node_rung is None:
+        return node_multipoles
+    return jnp.concatenate(
+        [node_multipoles, node_rung.astype(node_multipoles.dtype)[:, None]], axis=1
+    )
 
 
 def distributed_mutual_accelerations(
@@ -239,6 +361,8 @@ def distributed_mutual_accelerations(
     node_multipoles: Optional[Array] = None,
     expansion_centers: Optional[Array] = None,
     tree_arrays: Optional[Any] = None,
+    rung: Optional[Array] = None,
+    level_weights: Optional[Array] = None,
     axis_name: str = AXIS_NAME,
 ) -> DistributedMutualResult:
     """Add every cross-domain contribution to an already-computed local force.
@@ -327,6 +451,29 @@ def distributed_mutual_accelerations(
     tree_arrays:
         This domain's ``MutualTreeArrays``, for the L2L level schedule and the L2P.
         Required when ``cross_theta > 0``.
+    rung:
+        ``(n,)`` per-particle block-step rung for this domain, in tree order.
+        Required whenever ``level_weights`` is given, ignored without it.
+    level_weights:
+        ``(k_max + 1,)`` weight per interaction level; every cross pair is scaled by
+        ``level_weights[max(rung_i, rung_j)]``. ``None`` weights every level by one,
+        which is the full cross-domain force and the behaviour this lane shipped with.
+
+        **May be a tracer**, and is treated as one: nothing here branches on its
+        value, so a caller can drive the whole sub-step boundary from a ``lax.scan``
+        indexing :func:`jaccpot.mutual.force.boundary_weight_table` with a traced
+        boundary index. Only its *length* is read, at trace time.
+
+        Momentum survives the weighting on both halves, for two different reasons
+        worth keeping apart. On the near half the weight is a single symmetric scalar
+        per pair multiplying the one tensor both sides read (:func:`_tile_forces`).
+        On the far half the ``-f`` is not a force at all but a local EXPANSION
+        returned to the owner's node, so the weight is applied ONCE, on the
+        evaluating device, to both directions of the batched M2L before either is
+        exported -- never again on import, which would square it, and never on
+        neither, which would leave the far half unweighted while the near half is
+        weighted. That last one breaks the level partition WITHOUT breaking momentum,
+        so no momentum residual can catch it; the level-partition test is what does.
     coarse_depth_cap:
         Rounds of owner propagation up the coarse tree. Under-provisioning is safe:
         an unresolved node is treated as straddling, which the walk refines rather
@@ -338,8 +485,8 @@ def distributed_mutual_accelerations(
     Returns
     -------
     DistributedMutualResult
-        Total acceleration for this domain, owned cross leaf-pair count, and the
-        across-device overflow flag.
+        Total acceleration for this domain, owned cross near and far pair counts, and
+        the across-device overflow flag.
 
     Raises
     ------
@@ -354,6 +501,28 @@ def distributed_mutual_accelerations(
             f"ndev must be >= 2, got {ndev}: a single domain has no cross-domain "
             "pairs, so the single-device mutual lane is the whole force"
         )
+
+    # A structural decision, not a value one: `level_weights` may be a tracer, so
+    # only "was one given at all" may be branched on.
+    weighted = level_weights is not None
+    k_max = 0
+    if weighted:
+        if rung is None:
+            raise ValueError(
+                "level_weights needs rung: the weight of a pair is "
+                "level_weights[max(rung_i, rung_j)], which cannot be formed without "
+                "a per-particle rung"
+            )
+        level_weights = jnp.asarray(level_weights, dtype=positions.dtype)
+        if level_weights.ndim != 1:
+            raise ValueError(
+                "level_weights must be a (k_max + 1,) vector, one weight per "
+                f"interaction level; got shape {tuple(level_weights.shape)}. A caller "
+                "scanning boundaries passes one ROW of boundary_weight_table, not the "
+                "whole table"
+            )
+        rung = jnp.asarray(rung).astype(INDEX_DTYPE)
+        k_max = int(level_weights.shape[0]) - 1
 
     do_far = float(cross_theta) > 0.0
     if do_far and (
@@ -383,6 +552,14 @@ def distributed_mutual_accelerations(
     node_ranges = jnp.asarray(node_ranges).astype(INDEX_DTYPE)
     root = jnp.asarray(root).astype(INDEX_DTYPE)
 
+    # Cell rungs, for the FAR half only -- the near half has the exact per-particle
+    # predicate and does not need them. Computed for every node because the far
+    # pair's LOCAL endpoint may be an internal node: `accept_only_leaf_pairs`
+    # constrains the remote side, which has to be addressable, not this one.
+    node_rung = (
+        _node_rungs(node_ranges, rung, masses, k_max) if (weighted and do_far) else None
+    )
+
     # --- 1. this domain's frontier: one (mass, COM) record per leaf ------------
     # Node mass by prefix sum over the inclusive range, rather than asking the caller
     # for it: `centers` is already documented as the centre of mass, so mass is the
@@ -405,7 +582,7 @@ def distributed_mutual_accelerations(
         # array value shipped, not a second computation of the same quantity that
         # agrees only to 1e-13.
         expansion_centers if do_far else centers,
-        node_payload=node_multipoles if do_far else None,
+        node_payload=_far_payload(node_multipoles, node_rung) if do_far else None,
     )
 
     # --- 2. every OTHER domain's frontier, merged into one coarse tree ---------
@@ -521,6 +698,20 @@ def distributed_mutual_accelerations(
     wanted = on_list & (rct.tag_node_id[cpos] >= 0)
 
     # --- 4. fetch only the remote leaves this device's own pairs named ---------
+    # The remote endpoint's rung has to travel with the remote endpoint. The near
+    # predicate is exact and per-particle, so a per-LEAF channel will not do -- and
+    # the frontier is the wrong channel anyway: it is all_gather-ed, so publishing
+    # `leaf_width` rung columns there would ship every remote particle's rung to
+    # every device, O(N_total), which is what the demand-driven import exists to
+    # avoid. It rides round B of the import instead, sized by the halo.
+    # Passed CONDITIONALLY rather than as `payload_sorted=None`, so the UNWEIGHTED
+    # lane still runs against a yggdrax that predates the parameter
+    # (TobiBu/yggdrax#53) -- only the rung-weighted path needs it. A weighted call
+    # against an older yggdrax raises a TypeError, which is the right failure: loud,
+    # immediate, and naming the argument.
+    halo_kwargs: dict[str, Any] = {}
+    if weighted:
+        halo_kwargs["payload_sorted"] = rung.astype(positions.dtype)[:, None]
     halo = import_near_halo(
         rct,
         _NearAsNeighbors(jnp.where(wanted, c_node, jnp.asarray(-1, INDEX_DTYPE))),
@@ -531,6 +722,7 @@ def distributed_mutual_accelerations(
         max_req_leaves=max_req,
         max_recv_leaves=max_recv,
         axis_name=axis_name,
+        **halo_kwargs,
     )
     overflow = overflow | halo.request_overflow
 
@@ -550,6 +742,15 @@ def distributed_mutual_accelerations(
     jb = jnp.where(live, block, 0)[:, None] * int(leaf_width) + off[None, :]
     okb = live[:, None] & halo.valid[jb]
 
+    near_w = None
+    if weighted:
+        # Integers survive the float round trip exactly -- a rung is a small
+        # non-negative int and every dtype here holds those without loss -- so this
+        # recovers the sender's own value rather than approximating it. A padding
+        # slot arrives as 0.0 and is masked out by `okb` regardless.
+        halo_rung = jnp.round(halo.payload[:, 0]).astype(INDEX_DTYPE)
+        near_w = _pair_level_weights(level_weights, rung[ia], halo_rung[jb])
+
     f_a, f_b = _tile_forces(
         positions[ia],
         jnp.where(oka, masses[ia], 0.0),
@@ -559,6 +760,7 @@ def distributed_mutual_accelerations(
         okb,
         softening,
         g,
+        weights=near_w,
     )
     acc = local_acceleration.at[jnp.where(oka, ia, n_local)].add(
         jnp.where(oka[..., None], f_a, 0.0), mode="drop"
@@ -619,6 +821,7 @@ def distributed_mutual_accelerations(
     # local coefficients, so pushing a cross-only `locals_` down and evaluating it is
     # identical to adding those coefficients before the domain's own push-down. That
     # keeps `mutual_far_field_forces` untouched.
+    far_pairs = jnp.zeros((), dtype=INDEX_DTYPE)
     if do_far:
         from jaccpot.mutual.farfield import _l2p_forces, _m2l_batch, _push_locals_down
         from jaccpot.operators._sh_indexing import sh_size
@@ -642,6 +845,7 @@ def distributed_mutual_accelerations(
         f_cpos = c_first[jnp.where(f_on, res.far_remote, c_root)]
         # Same massless-leaf rule as the near path: no origin node id, no address.
         f_live = f_on & (rct.tag_node_id[f_cpos] >= 0)
+        far_pairs = jnp.sum(f_live.astype(INDEX_DTYPE))
 
         # The coarse "particle" position IS the remote leaf's COM, which is the point
         # its multipole is expanded about -- so it is read from `positions_sorted`
@@ -653,16 +857,46 @@ def distributed_mutual_accelerations(
         # BOTH directions in ONE batch, as `_dual_m2l` does for the same reason it
         # gives: same kernel, same order, same rounding for both halves of a pair is
         # what makes F_A + F_B cancel algebraically rather than to the M2L's accuracy.
-        zero_mp = jnp.zeros_like(rct.payload[f_cpos])
+        # Sliced from the END, so the split cannot drift out of step with
+        # `_far_payload`: the rung is the last column BY CONSTRUCTION there. Indexing
+        # it at a computed `sh_size(order)` offset instead would state the multipole
+        # width twice, and a mismatch would read a coefficient as a rung -- which
+        # survives the clamp as a perfectly valid pair level, so it is a wrong force
+        # that momentum, the level partition and the linearity check are all blind to.
+        pay = rct.payload[f_cpos]
+        remote_mp = pay[:, :-1] if weighted else pay
+        zero_mp = jnp.zeros_like(remote_mp)
         mp = jnp.concatenate(
             [
-                jnp.where(f_live[:, None], rct.payload[f_cpos], zero_mp),
+                jnp.where(f_live[:, None], remote_mp, zero_mp),
                 jnp.where(f_live[:, None], node_multipoles[f_local], zero_mp),
             ]
         )
         dl = jnp.concatenate([tgt_c - c_leaf_com, c_leaf_com - tgt_c])
         loc = _m2l_batch(mp, dl, order=p_order, use_pallas=False, interpret=False)
         loc_here, loc_there = loc[:cap_f], loc[cap_f:]
+
+        if weighted:
+            # ONE weight per pair, applied ONCE, here -- on the device that evaluated
+            # the pair, to both directions, before either leaves. The importing side
+            # only adds what arrives.
+            #
+            # The cell rungs the two endpoints bring are each computed exactly once,
+            # by the device that owns the particles: the local node's from this
+            # domain's `rung`, the remote leaf's by its owner, published on the
+            # frontier. Neither is recomputed on the far side of the wire, so the two
+            # devices cannot disagree about which level a pair belongs to -- which is
+            # the failure a momentum residual is structurally blind to.
+            far_rung = jnp.round(pay[:, -1]).astype(INDEX_DTYPE)
+            f_level = jnp.maximum(node_rung[f_local], far_rung)
+            f_level = jnp.clip(f_level, 0, int(level_weights.shape[0]) - 1)
+            f_w = jnp.take(level_weights, f_level, axis=0, mode="clip")[:, None]
+            # Legal because everything downstream of an expansion is LINEAR in its
+            # coefficients: L2L re-centres and L2P evaluates, so scaling the
+            # coefficients scales the resulting force by the same factor. Weighting
+            # the expansion is weighting the pair.
+            loc_here = loc_here * f_w
+            loc_there = loc_there * f_w
 
         # `+f` lands on a local node; `-f` is addressed to a NODE in the owner's own
         # tree (`tag_node_id`), not to a particle -- which is the whole reason far
@@ -705,6 +939,7 @@ def distributed_mutual_accelerations(
     return DistributedMutualResult(
         acceleration=acc,
         cross_pairs=jnp.sum(live.astype(INDEX_DTYPE))[None],
+        cross_far_pairs=far_pairs[None],
         overflow=(jax.lax.pmax(overflow.astype(INDEX_DTYPE), axis_name) > 0)[None],
     )
 
@@ -747,6 +982,14 @@ class DistributedMutualConfig:
         Cross far-list and expansion-receive capacities. ``None`` derives each.
     order : int
         Multipole order for the intra-domain far field.
+    k_max : Optional[int]
+        Highest block-step rung, when this lane is driven with rungs. Used only to
+        CHECK the caller: ``level_weights`` must have ``k_max + 1`` entries and every
+        rung must lie in ``[0, k_max]``. ``None`` skips both checks and takes the
+        level count from ``level_weights`` itself. Setting it is worth it -- a rung
+        above the table's length has no weight, so the traversal would have to invent
+        one or drop the interaction, and either quietly integrates the wrong
+        equations. Clamping makes it silent; this makes it a configuration error.
     softening : float
         Plummer softening length, shared by both halves.
     g : float
@@ -758,6 +1001,37 @@ class DistributedMutualConfig:
         the per-device capacity.
     coarse_depth_cap : int
         Owner-propagation rounds up the coarse tree.
+    backend : str
+        ``"jax"`` (the default) runs the pure-JAX kernels everywhere. ``"pallas"``
+        routes the INTRA-domain near field through jaccpot's mutual P2P kernel where
+        the hardware supports it -- worth **2.2-3.6x forward and 3.1-4.1x reverse** on
+        one device, and at N = 1e5 per device the difference between the reverse pass
+        running and requesting a 30 GiB allocation.
+
+        The routing mirrors the single-device lane's exactly, which means two things
+        that look like omissions and are not:
+
+        * **The far field stays pure JAX.** Both Pallas M2L shapes measured *slower*
+          there (0.84x / 0.61x forward, worse at larger N) -- see
+          ``docs/momentum_conserving_fmm.md``, Phase 5 -- so ``backend="pallas"``
+          selects pure JAX for it on hardware, on this lane as on the other.
+        * **The gate is the hardware, not the flag.** Pallas needs sm_80+; below it
+          the near field falls back to pure JAX rather than failing. Every Pallas
+          lane is reached through its ``custom_vjp`` wrapper, never the bare
+          ``pallas_call``, which has no JVP or transpose rule and would be silently
+          non-differentiable.
+
+        The CROSS-domain near field is pure JAX either way. It is a different kernel
+        (:func:`_tile_forces`, a local-leaf x halo-block tile) and giving it a Pallas
+        lane is a new kernel, not a wiring change.
+    pallas_interpret : bool
+        Run the Pallas kernels in interpret mode, which works without a GPU. That is
+        what lets the ``backend="pallas"`` path be exercised on CPU at all -- but
+        interpret mode validates the kernel's LOGIC, not its lowerability: it runs the
+        jaxpr under CPU semantics and accepts primitives the Triton backend does not
+        implement. Two mutual kernels passed every CPU interpret test and then failed
+        on their first GPU run. Only a real GPU run stands between a lowering
+        regression and a broken ``backend="pallas"``.
     partitioner : str
         How particles are assigned to devices -- ``"rcb"`` (the default here) or
         ``"morton"``. See :func:`jaccpot.distributed.fmm.partition_for_devices`.
@@ -771,6 +1045,7 @@ class DistributedMutualConfig:
     leaf_size: int = 32
     theta: float = 0.5
     order: int = 4
+    k_max: Optional[int] = None
     softening: float = 1e-3
     g: float = 1.0
     caps: Optional[Any] = None
@@ -783,6 +1058,8 @@ class DistributedMutualConfig:
     max_req_leaves: Optional[int] = None
     max_recv_leaves: Optional[int] = None
     coarse_depth_cap: int = 64
+    backend: str = "jax"
+    pallas_interpret: bool = False
     partitioner: str = "rcb"
 
 
@@ -801,11 +1078,22 @@ class DistributedMutualForce(NamedTuple):
     Attributes
     ----------
     accelerations : Array
-        ``(n, 3)`` in input order.
+        ``(n, 3)`` in input order. A jax array: the readout is a scatter, not a NumPy
+        assignment, so a whole evaluation is traceable and an integrator can drive it
+        from a ``lax.scan``.
     cross_pairs : Array
-        ``(ndev,)`` owned cross-domain leaf pairs per device.
+        ``(ndev,)`` owned cross-domain NEAR leaf pairs per device.
+    cross_far_pairs : Array
+        ``(ndev,)`` owned cross-domain FAR pairs per device -- zero unless
+        ``cross_theta > 0``. Carried out because a test of the cross far field is
+        vacuous without it: several tests in this repo once passed on a
+        configuration that produced no far pairs at all.
     overflow : bool
-        True if any capacity, on any device, in either half, was exceeded.
+        True if any capacity, on any device, in either half, was exceeded. A Python
+        ``bool`` when the inputs are concrete; under trace it stays a traced scalar,
+        which a caller cannot branch on -- so a traced driver must check it outside
+        the trace, or use :class:`~jaccpot.nornax_adapter.DistributedBlockStepFMM`,
+        which raises on it eagerly.
     cross_overflow : Array
         ``(ndev,)`` the cross-domain half's flag.
     local_overflow : Array
@@ -817,6 +1105,7 @@ class DistributedMutualForce(NamedTuple):
 
     accelerations: Array
     cross_pairs: Array
+    cross_far_pairs: Array
     overflow: bool
     cross_overflow: Array
     local_overflow: Array
@@ -860,7 +1149,317 @@ def _default_caps(per_device_n: int, leaf_size: int) -> Any:
     )
 
 
-def distributed_mutual_fmm(
+class DistributedMutualEvaluator:
+    """A distributed mutual force compiled ONCE, at a frozen partition and capacities.
+
+    :func:`distributed_mutual_fmm` does everything on every call: it re-partitions the
+    particles, rebuilds the mapped program and hands it to ``jax.jit``. Since
+    ``shard_map`` wraps a fresh closure each time, that is a fresh cache key and so a
+    fresh compile -- measured in the tens of seconds even at test sizes, and the shared
+    plan's own measurement note says ~200 s at moderate N on the sibling lane. Fine for
+    one force; ruinous for a block-step base step, which asks for ``n_sub + 1``
+    evaluations of the SAME program on moved particles.
+
+    So the two halves are separated. This object owns the host side -- the domain
+    assignment, the padding layout, the global bounds and the capacities -- and holds
+    the compiled program; calling it evaluates live positions against them. It is the
+    distributed counterpart of what ``topology_backend="device"`` plus
+    :meth:`BlockStepFMM.freeze_template` do on one device: freeze the shapes once, then
+    every later evaluation is the same program.
+
+    **What is frozen, stated exactly, because it is not the topology.** The partition
+    (which particle belongs to which device), the padding layout, the tree bounds and
+    every capacity are fixed at construction. The TREE is not: each call rebuilds it
+    inside the mapped program from the positions handed in, which is traceable and
+    static-shape at fixed capacities. So successive calls within a base step see
+    slightly different accepted pair sets -- more often than the single-device lane,
+    which holds one topology for the whole base step. That is a *finer* rebuild
+    cadence, not a coarser one, and it changes nothing about legality: every call is
+    internally self-consistent, so its levels partition its own pairs and each level
+    conserves momentum exactly. What it does mean is that the per-level decomposition
+    of two different boundaries is taken on two slightly different trees.
+
+    Rebuild this object when the partition should change -- the system's extent has
+    moved materially, or the domains have gone badly out of balance. The bounds are
+    padded by 1e-6 of the span at construction and a particle that drifts outside them
+    is clamped by the Morton encoding rather than lost, so the failure is a gradual
+    loss of partition quality, not a wrong force.
+
+    Two programs are compiled at most, lazily: the unweighted force takes three
+    operands and the weighted one five, so they are structurally different graphs. The
+    weight VALUES are not: one compile serves every boundary of a base step, and every
+    rung assignment, because only shapes are static.
+    """
+
+    def __init__(
+        self,
+        *,
+        config: DistributedMutualConfig,
+        mesh: Any,
+        ndev: int,
+        part: dict,
+        build: Any,
+    ) -> None:
+        """Hold the frozen partition and the program builder.
+
+        Parameters
+        ----------
+        config : DistributedMutualConfig
+            Physics and capacities, already validated.
+        mesh : Any
+            The device mesh the program is mapped over.
+        ndev : int
+            Device count.
+        part : dict
+            The partition from :func:`~jaccpot.distributed.fmm.partition_for_devices`.
+        build : Any
+            ``build(weighted) -> callable``, the mapped (and possibly jitted) program.
+        """
+        import numpy as np
+
+        self.config = config
+        self.mesh = mesh
+        self.ndev = int(ndev)
+        self.n = int(part["n"])
+        self.cap = int(part["cap"])
+        self.bounds = part["bounds"]
+        self._build = build
+        self._programs: dict = {}
+
+        gid = np.asarray(part["gid_flat"]).reshape(-1).astype(np.int64)
+        self.gid_flat = gid
+        # Where each row of the layout takes its position from. Real rows take their
+        # own particle; a padding row takes its domain's FIRST particle, which is
+        # where `partition_for_devices` puts it -- at a real point, so the tree build
+        # sees no phantom geometry. Derived from `gid_flat` rather than reimplementing
+        # the split, then checked against the partition's own arrays below, so this
+        # cannot drift away from it silently.
+        g2 = gid.reshape(self.ndev, self.cap)
+        first = g2[:, 0]
+        self.source_index = np.where(g2 >= 0, g2, first[:, None]).reshape(-1)
+
+        pos_ref = np.asarray(part["pos_flat"])
+        mass_ref = np.asarray(part["mass_flat"])
+        pos_np = np.asarray(part["_positions"])
+        mass_np = np.asarray(part["_masses"])
+        if not np.array_equal(pos_np[self.source_index], pos_ref):
+            raise AssertionError(
+                "the reconstructed layout does not reproduce partition_for_devices' "
+                "own pos_flat -- the padding rule changed and this object would then "
+                "evaluate a different system than the one it was built for"
+            )
+        if not np.array_equal(
+            np.where(gid >= 0, mass_np[self.source_index], 0.0), mass_ref
+        ):
+            raise AssertionError(
+                "the reconstructed layout does not reproduce partition_for_devices' "
+                "own mass_flat"
+            )
+
+        # Every real particle must appear in the layout exactly once. This is a
+        # property of the frozen partition alone, so it is checked here rather than
+        # on every call -- which is also what makes the readout traceable: there is
+        # no per-call host predicate left to branch on.
+        live = gid[gid >= 0]
+        if live.shape[0] != self.n or np.unique(live).shape[0] != self.n:
+            raise AssertionError(
+                f"the partition names {np.unique(live).shape[0]} distinct particles "
+                f"in {live.shape[0]} live rows, for {self.n} particles -- a padding "
+                "or partition bug, not a physics one"
+            )
+        # Row -> output particle, with padding rows aimed past the end so a scatter
+        # in `mode="drop"` discards them.
+        self._scatter_index = jnp.asarray(np.where(gid >= 0, gid, self.n))
+
+    def layout(self, positions: Any, masses: Any) -> tuple[Array, Array]:
+        """Lay live positions and masses out in the frozen partition's row order.
+
+        Parameters
+        ----------
+        positions : Any
+            ``(n, 3)`` positions in the caller's order.
+        masses : Any
+            ``(n,)`` masses, same order.
+
+        Returns
+        -------
+        tuple[Array, Array]
+            ``(pos_flat, mass_flat)``, each ``(ndev * cap, ...)``.
+
+        Raises
+        ------
+        ValueError
+            If either input has the wrong length for the frozen partition.
+        """
+        positions = jnp.asarray(positions)
+        masses = jnp.asarray(masses)
+        if int(positions.shape[0]) != self.n or int(masses.shape[0]) != self.n:
+            raise ValueError(
+                f"this evaluator was built for {self.n} particles; got "
+                f"{int(positions.shape[0])} positions and {int(masses.shape[0])} masses"
+            )
+        src = jnp.asarray(self.source_index)
+        live = jnp.asarray(self.gid_flat) >= 0
+        # Padding rows keep a real POSITION and zero MASS, exactly as the partition
+        # built them: a massless row exerts and feels nothing, while a phantom
+        # position would stretch every node's extent.
+        return positions[src], jnp.where(live, masses[src], 0.0)
+
+    def rung_layout(self, rung: Any) -> Array:
+        """Lay a per-particle rung out in the frozen partition's row order.
+
+        Parameters
+        ----------
+        rung : Any
+            ``(n,)`` per-particle rung in the caller's order.
+
+        Returns
+        -------
+        Array
+            ``(ndev * cap,)`` rung, with padding rows at 0.
+
+        Raises
+        ------
+        ValueError
+            If ``rung`` has the wrong length, or a value outside ``[0, k_max]`` when
+            the config names one.
+        """
+        r = jnp.asarray(rung).reshape(-1)
+        if int(r.shape[0]) != self.n:
+            raise ValueError(
+                f"rung has {int(r.shape[0])} entries for {self.n} particles"
+            )
+        k_max = self.config.k_max
+        if k_max is not None:
+            # Attempted, not gated on `isinstance`, for the reason `__call__` gives:
+            # a concrete array closed over by a scan body is not a Tracer but cannot
+            # be read either. Under trace the range check is skipped and the kernels'
+            # clamp is what stands -- so passing this is not proof the rungs are in
+            # range, exactly as `BlockStepFMM._validate_rung` documents.
+            try:
+                lo, hi = int(jnp.min(r)), int(jnp.max(r))
+            except Exception:  # pragma: no cover - only reachable under trace
+                lo, hi = 0, int(k_max)
+            if lo < 0 or hi > int(k_max):
+                raise ValueError(
+                    f"rung values must lie in [0, k_max={int(k_max)}]; got [{lo}, {hi}]"
+                )
+        # Padding takes rung 0, which is inert: a padding row is massless, so it
+        # cannot raise any cell's rung and its own pairs carry no force.
+        live = jnp.asarray(self.gid_flat) >= 0
+        return jnp.where(live, r[jnp.asarray(self.source_index)], 0)
+
+    def _program(self, weighted: bool) -> Any:
+        """Return the compiled program for this weighting mode, building it once."""
+        key = bool(weighted)
+        if key not in self._programs:
+            self._programs[key] = self._build(key)
+        return self._programs[key]
+
+    def __call__(
+        self,
+        positions: Any,
+        masses: Any,
+        *,
+        rung: Any = None,
+        level_weights: Any = None,
+    ) -> DistributedMutualForce:
+        """Evaluate the force on live positions at the frozen partition.
+
+        Parameters
+        ----------
+        positions : Any
+            ``(n, 3)`` positions in the caller's order.
+        masses : Any
+            ``(n,)`` masses, same order.
+        rung : Any
+            ``(n,)`` per-particle block-step rung. Required with ``level_weights``.
+        level_weights : Any
+            ``(k_max + 1,)`` weight per interaction level; ``None`` gives the full
+            force. May be a traced array as far as this object is concerned -- only
+            its length is read -- so a caller can drive a base step's boundaries from
+            one weight table.
+
+        Returns
+        -------
+        DistributedMutualForce
+            Accelerations in the caller's input order, plus the per-device
+            diagnostics. **Check ``.overflow``.**
+
+        Raises
+        ------
+        ValueError
+            If ``level_weights`` is given without ``rung``, has the wrong rank, or
+            disagrees with ``config.k_max``.
+        RuntimeError
+            If a real particle is missing from the assembled result, which is a
+            padding or capacity bug rather than a physics one.
+        """
+        import numpy as np
+
+        weighted = level_weights is not None
+        if weighted and rung is None:
+            raise ValueError(
+                "level_weights needs rung: a pair's weight is "
+                "level_weights[max(rung_i, rung_j)]"
+            )
+        operands = list(self.layout(positions, masses))
+        operands.append(jnp.asarray(self.gid_flat))
+        if weighted:
+            lw = jnp.asarray(level_weights)
+            if lw.ndim != 1:
+                raise ValueError(
+                    "level_weights must be a (k_max + 1,) vector; got shape "
+                    f"{tuple(lw.shape)}"
+                )
+            k_max = self.config.k_max
+            if k_max is not None and int(lw.shape[0]) != int(k_max) + 1:
+                raise ValueError(
+                    f"level_weights has {int(lw.shape[0])} entries but "
+                    f"k_max={int(k_max)} asks for {int(k_max) + 1}"
+                )
+            operands += [self.rung_layout(rung), lw]
+
+        acc_o, _gid_o, cross_o, farx_o, xof_o, lof_o, causes_o = self._program(
+            weighted
+        )(*operands)
+
+        # Back to input order with a scatter rather than a NumPy assignment, so this
+        # whole call is traceable and an integrator can drive it from a `lax.scan`.
+        # Padding rows are aimed past the end and dropped; that a real particle is
+        # never among them was established when the partition was frozen, so there is
+        # no per-call check to make here.
+        out = (
+            jnp.zeros((self.n, 3), acc_o.dtype)
+            .at[self._scatter_index]
+            .set(acc_o, mode="drop")
+        )
+
+        cross_of = xof_o.reshape(-1).astype(jnp.bool_)
+        local_of = lof_o.reshape(-1).astype(jnp.bool_)
+        overflow = jnp.any(cross_of) | jnp.any(local_of)
+        # Attempted, not gated on `isinstance(..., Tracer)`: a CONCRETE array closed
+        # over by a `lax.scan` body is not a Tracer, yet reducing it inside the trace
+        # yields one, so `bool(...)` is the only test that actually asks "can this be
+        # read here". Same discipline as `BlockStepFMM._validate_rung`. Under trace it
+        # stays a traced scalar and the caller cannot branch on it -- which is why
+        # `DistributedBlockStepFMM` reads it eagerly and raises.
+        try:
+            overflow = bool(overflow)
+        except Exception:  # pragma: no cover - only reachable under trace
+            pass
+        return DistributedMutualForce(
+            accelerations=out,
+            cross_pairs=cross_o.reshape(-1),
+            cross_far_pairs=farx_o.reshape(-1),
+            overflow=overflow,
+            cross_overflow=cross_of,
+            local_overflow=local_of,
+            local_overflow_causes=causes_o.reshape(-1),
+        )
+
+
+def make_distributed_mutual_evaluator(
     positions: Any,
     masses: Any,
     *,
@@ -868,20 +1467,18 @@ def distributed_mutual_fmm(
     mesh: Any = None,
     ndev: Optional[int] = None,
     jit: bool = True,
-) -> DistributedMutualForce:
-    """Momentum-conserving accelerations for a system split across devices.
+) -> DistributedMutualEvaluator:
+    """Partition once, compile once, and return something callable on live inputs.
 
-    The entry point for the lane :func:`distributed_mutual_accelerations` implements
-    one device's share of. It owns the host side: split the particles into SFC domains,
-    build each domain's own tree, evaluate that domain's own pairs with the
-    single-device mutual lane, add the cross-domain half, and put the result back in
-    the caller's order.
+    Use this instead of :func:`distributed_mutual_fmm` for anything that evaluates the
+    force more than once at a fixed particle count -- a rollout, a boundary sweep, a
+    timing loop. ``distributed_mutual_fmm`` is this function plus one call, and pays a
+    fresh partition and a fresh compile every time it is invoked.
 
-    Momentum is conserved to round-off over the WHOLE system, not per device, and that
-    is the property worth stating: the intra-domain half cancels structurally because
-    one kernel writes both halves of every pair, and the cross-domain half cancels
-    because the ``-f`` is returned to the domain owning the other endpoint. Neither
-    mechanism is numerical.
+    ``positions``/``masses`` here are used for the PARTITION and the bounds. The
+    returned object may be called on moved particles; see
+    :class:`DistributedMutualEvaluator` for exactly what that freezes and what it
+    does not.
 
     Parameters
     ----------
@@ -901,15 +1498,14 @@ def distributed_mutual_fmm(
 
     Returns
     -------
-    DistributedMutualForce
-        Accelerations in input order plus the per-device diagnostics. **Check
-        ``.overflow``**: a starved capacity is reported, never raised, because the
-        force it returns is wrong in a way no norm reveals.
+    DistributedMutualEvaluator
+        Callable on live positions and masses at the frozen partition.
 
     Raises
     ------
     ValueError
-        If fewer than two devices are available, or ``n < ndev``.
+        If fewer than two devices are available, ``n < ndev``, or ``config.backend``
+        is not a known name.
     """
     import numpy as np
 
@@ -932,7 +1528,10 @@ def distributed_mutual_fmm(
         node_centers_and_radii,
     )
     from jaccpot.mutual.farfield import mutual_upward_sweep
-    from jaccpot.mutual.force import mutual_accelerations
+    from jaccpot.mutual.force import (
+        mutual_accelerations,
+        mutual_weighted_accelerations,
+    )
 
     cfg = config if config is not None else DistributedMutualConfig()
     if mesh is None:
@@ -947,10 +1546,20 @@ def distributed_mutual_fmm(
             "lane is the whole force"
         )
 
+    backend = str(cfg.backend).lower()
+    if backend not in ("jax", "pallas"):
+        raise ValueError(
+            f"backend must be 'jax' or 'pallas'; got {cfg.backend!r}. The same two "
+            "the single-device lane takes -- see BlockStepFMM"
+        )
+    use_pallas = backend == "pallas"
+
     leaf = int(cfg.leaf_size)
     part = partition_for_devices(
         positions, masses, ndev, leaf_size=leaf, partitioner=cfg.partitioner
     )
+    part["_positions"] = np.asarray(positions)
+    part["_masses"] = np.asarray(masses)
     cap = int(part["cap"])
     n_leaves = max(1, -(-cap // leaf))
     bounds = part["bounds"]
@@ -970,7 +1579,12 @@ def distributed_mutual_fmm(
     # not shrink with theta, it is what theta moves work INTO.
     far_cap = cfg.far_cap or max(1024, (2 * n_leaves - 1) * n_leaves * (ndev - 1))
 
-    def fn(pos: Array, mass: Array, gid: Array) -> tuple[Array, ...]:
+    def fn(pos: Array, mass: Array, gid: Array, *weights: Array) -> tuple[Array, ...]:
+        # Variadic rather than two defaulted parameters, so the unweighted call passes
+        # THREE operands and `in_specs` has three entries. A `None` operand would make
+        # the argument an empty pytree that its PartitionSpec no longer describes.
+        rng_, lw = weights if weights else (None, None)
+
         # One local tree per domain, over the global bounds so every domain's Morton
         # order is the same order -- the coarse tree merges these frontiers.
         tree = Tree.from_particles(
@@ -995,6 +1609,8 @@ def distributed_mutual_fmm(
         n_leaf_nodes = total_nodes - num_internal
         leaf_nodes = jnp.arange(num_internal, total_nodes, dtype=INDEX_DTYPE)
 
+        rung_sorted = None if rng_ is None else jnp.asarray(rng_)[perm]
+
         # `inverse_permutation = arange`: everything on device stays in TREE order, so
         # "the caller's order" and the tree's order are the same here. The two real
         # permutations (SFC across devices, tree sort within one) are undone on the
@@ -1014,9 +1630,26 @@ def distributed_mutual_fmm(
             caps=caps,
             softening=float(cfg.softening),
             G=float(cfg.g),
+            use_pallas=use_pallas,
+            pallas_interpret=bool(cfg.pallas_interpret),
             max_pair_queue=int(caps.queue),
         )
-        local_acc = mutual_accelerations(state, ps, ms)
+        # The rung takes the same tree sort as the particles (`ps = pos[perm]`), and
+        # this state's own permutations are the identity -- `inverse_permutation` is
+        # `arange` above, everything on device stays in tree order -- so the weighted
+        # call takes it in exactly this order.
+        #
+        # The intra-domain half applies the same two predicates the single-device lane
+        # does, exact per-particle near and cell-level far, so both halves of the
+        # system split their pairs the same way and the levels of the WHOLE system
+        # still partition it.
+        local_acc = (
+            mutual_accelerations(state, ps, ms)
+            if rung_sorted is None
+            else mutual_weighted_accelerations(
+                state, ps, ms, rung=rung_sorted, level_weights=lw
+            )
+        )
 
         # One upward sweep serves both jobs the cross far field needs: the
         # multipoles this domain publishes on its frontier, and the source
@@ -1072,6 +1705,8 @@ def distributed_mutual_fmm(
             node_multipoles=node_mp,
             expansion_centers=exp_centers,
             tree_arrays=state.tree if do_far else None,
+            rung=rung_sorted,
+            level_weights=lw,
         )
         # Undo the local tree sort, so a row of the output lines up with the row of
         # `pos`/`gid` this device was handed.
@@ -1080,50 +1715,108 @@ def distributed_mutual_fmm(
             acc,
             gid,
             res.cross_pairs,
+            res.cross_far_pairs,
             res.overflow,
             state.topology_overflow[None],
             state.overflow_causes[None],
         )
 
-    mapped = shard_map(
-        fn,
-        mesh=mesh,
-        in_specs=(P(AXIS_NAME), P(AXIS_NAME), P(AXIS_NAME)),
-        out_specs=(P(AXIS_NAME),) * 6,
-        check_vma=False,
-    )
-    if jit:
-        mapped = jax.jit(mapped)
-    acc_o, gid_o, cross_o, xof_o, lof_o, causes_o = mapped(
-        jnp.asarray(part["pos_flat"]),
-        jnp.asarray(part["mass_flat"]),
-        jnp.asarray(part["gid_flat"]),
-    )
-
-    # Back to input order. Padding rows carry gid -1 and are dropped; a missing real
-    # particle means a capacity or partition bug, so it is raised rather than left as a
-    # silent zero row that would read as a plausible force.
-    acc_np = np.asarray(acc_o)
-    gid_np = np.asarray(gid_o).reshape(-1).astype(np.int64)
-    n = int(part["n"])
-    out = np.zeros((n, 3), acc_np.dtype)
-    seen = np.zeros(n, bool)
-    live = gid_np >= 0
-    out[gid_np[live]] = acc_np[live]
-    seen[gid_np[live]] = True
-    if not seen.all():
-        raise RuntimeError(
-            f"{int((~seen).sum())} of {n} particles missing from the distributed "
-            "result -- a padding or capacity bug, not a physics one"
+    def build(weighted: bool) -> Any:
+        """Map and compile `fn` for one weighting mode."""
+        # `level_weights` is REPLICATED (`P()`), not sharded: it is one row of a
+        # boundary's kick weights and every device must apply the same one, or the two
+        # sides of a cross pair would weight it differently and the return path would
+        # stop cancelling. `rung` is sharded like the particles it belongs to.
+        in_specs = [P(AXIS_NAME)] * 3
+        if weighted:
+            in_specs += [P(AXIS_NAME), P()]
+        mapped = shard_map(
+            fn,
+            mesh=mesh,
+            in_specs=tuple(in_specs),
+            out_specs=(P(AXIS_NAME),) * 7,
+            check_vma=False,
         )
+        return jax.jit(mapped) if jit else mapped
 
-    cross_of = np.asarray(xof_o).reshape(-1).astype(bool)
-    local_of = np.asarray(lof_o).reshape(-1).astype(bool)
-    return DistributedMutualForce(
-        accelerations=out,
-        cross_pairs=np.asarray(cross_o).reshape(-1),
-        overflow=bool(cross_of.any() or local_of.any()),
-        cross_overflow=cross_of,
-        local_overflow=local_of,
-        local_overflow_causes=np.asarray(causes_o).reshape(-1),
+    return DistributedMutualEvaluator(
+        config=cfg, mesh=mesh, ndev=ndev, part=part, build=build
     )
+
+
+def distributed_mutual_fmm(
+    positions: Any,
+    masses: Any,
+    *,
+    rung: Any = None,
+    level_weights: Any = None,
+    config: Optional[DistributedMutualConfig] = None,
+    mesh: Any = None,
+    ndev: Optional[int] = None,
+    jit: bool = True,
+) -> DistributedMutualForce:
+    """Momentum-conserving accelerations for a system split across devices.
+
+    The one-shot entry point for the lane :func:`distributed_mutual_accelerations`
+    implements one device's share of. It owns the host side: split the particles into
+    SFC domains, build each domain's own tree, evaluate that domain's own pairs with
+    the single-device mutual lane, add the cross-domain half, and put the result back
+    in the caller's order.
+
+    Momentum is conserved to round-off over the WHOLE system, not per device, and that
+    is the property worth stating: the intra-domain half cancels structurally because
+    one kernel writes both halves of every pair, and the cross-domain half cancels
+    because the ``-f`` is returned to the domain owning the other endpoint. Neither
+    mechanism is numerical.
+
+    This is :func:`make_distributed_mutual_evaluator` plus one call, and it pays a
+    fresh partition and a fresh COMPILE on every invocation -- ``shard_map`` wraps a
+    new closure each time, so ``jax.jit`` sees a new cache key. **Build an evaluator
+    instead for anything that evaluates the force more than once**, which includes
+    every timing loop: timed this way you are measuring compilation.
+
+    Parameters
+    ----------
+    positions : Any
+        ``(n, 3)`` positions in any order.
+    masses : Any
+        ``(n,)`` masses, same order.
+    rung : Any
+        ``(n,)`` per-particle block-step rung, same order. Required whenever
+        ``level_weights`` is given, ignored without it.
+    level_weights : Any
+        ``(k_max + 1,)`` weight per interaction level; every pair -- intra-domain and
+        cross-domain, near and far -- is scaled by
+        ``level_weights[max(rung_i, rung_j)]``. ``None`` gives the full force.
+
+        A one-hot row isolates one level, so ``sum_k`` over one-hot rows reproduces
+        the unweighted total; a boundary's kick weights evaluate a whole block-step
+        sub-step boundary in ONE traversal, which is the point. Momentum is exact for
+        any weighting: see :func:`distributed_mutual_accelerations`.
+    config : Optional[DistributedMutualConfig]
+        Physics and capacities. ``None`` uses the defaults, whose capacities are
+        heuristics -- see :class:`DistributedMutualConfig`.
+    mesh : Any
+        Device mesh. ``None`` builds one over ``ndev`` devices.
+    ndev : Optional[int]
+        Device count when ``mesh`` is ``None``. ``None`` uses every visible device.
+    jit : bool
+        Compile the mapped program. Default True.
+
+    Returns
+    -------
+    DistributedMutualForce
+        Accelerations in input order plus the per-device diagnostics. **Check
+        ``.overflow``**: a starved capacity is reported, never raised, because the
+        force it returns is wrong in a way no norm reveals.
+
+    Raises
+    ------
+    ValueError
+        If fewer than two devices are available, ``n < ndev``, ``level_weights`` is
+        given without ``rung``, or the two disagree with ``config.k_max``.
+    """
+    evaluator = make_distributed_mutual_evaluator(
+        positions, masses, config=config, mesh=mesh, ndev=ndev, jit=jit
+    )
+    return evaluator(positions, masses, rung=rung, level_weights=level_weights)

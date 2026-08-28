@@ -70,7 +70,7 @@ from jaccpot.mutual.force import (
 )
 from jaccpot.mutual.topology import build_mutual_topology_from_tree
 
-__all__ = ["BlockStepFMM"]
+__all__ = ["BlockStepFMM", "DistributedBlockStepFMM"]
 
 _SUPPORTED_BASES = ("real",)
 _SUPPORTED_BACKENDS = ("jax", "pallas")
@@ -1209,4 +1209,659 @@ class BlockStepFMM:
                     pos = pos + dt_min * vel
 
         acc = mutual_weighted_accelerations(state, pos, masses)
+        return pos, vel, acc
+
+
+class DistributedBlockStepFMM:
+    """:class:`BlockStepFMM` over a device mesh, on the distributed mutual lane.
+
+    Same contract, same guarantees, one more thing frozen. It satisfies nornax's
+    ``MutualForceModel`` structurally -- ``level_accelerations(positions, masses, *,
+    rung, level, args=None)`` -- and :class:`~nornax.forces.FusedMutualForceModel` via
+    :meth:`boundary_kick`, without importing nornax, exactly as the single-device class
+    does.
+
+    Momentum is conserved across the WHOLE mesh, not per device, and by construction
+    rather than numerically: the intra-domain half evaluates each pair once and writes
+    ``+f``/``-f`` from the same tensor, and the cross-domain half returns the ``-f`` to
+    the domain that owns the other endpoint. The level weight rides both halves as a
+    single symmetric scalar per pair, so ``sum_i m_i Delta v_i == 0`` holds per level
+    for the fused kick as well.
+
+    **What :meth:`prepare` freezes, and how that differs from the single-device lane.**
+    On one device ``prepare`` builds the TOPOLOGY -- the accepted pair lists -- and
+    every boundary in the base step reuses it. Here it freezes the *partition* (which
+    particle belongs to which device), the padding layout, the tree bounds, the
+    capacities, and the compiled program; the per-device tree is rebuilt inside that
+    program on each call, from the positions handed in. Two consequences, both worth
+    stating plainly rather than glossing:
+
+    * The rebuild cadence is *finer*, not coarser: successive boundaries within a base
+      step see trees built from their own positions. Nothing about legality changes,
+      because each evaluation is internally self-consistent -- its levels partition its
+      own pairs and each level's momentum cancels exactly. What is lost is only the
+      bit-level identity of the topology across a base step.
+    * ``prepare`` therefore does not have to be called once per base step. Call it when
+      the *partition* should change -- the system's extent has moved materially, or the
+      domains have gone out of balance -- not on a fixed cadence.
+
+    The reason the compiled program is cached rather than rebuilt is not tidiness.
+    ``shard_map`` wraps a fresh closure on every call, so ``jax.jit`` sees a fresh
+    cache key and recompiles: :func:`~jaccpot.mutual.distributed.distributed_mutual_fmm`
+    pays that on every invocation, which is fine for one force and ruinous for the
+    ``n_sub + 1`` evaluations a base step asks for. Holding it is what makes a
+    distributed base step cost traversals instead of compiles -- the same
+    resolve-eagerly-then-freeze discipline
+    :meth:`BlockStepFMM.freeze_template` applies on one device.
+
+    **Eager, not traceable.** Every method returns concrete arrays: the driver
+    assembles the result back into input order with NumPy, and the partition itself is
+    host work. So there is no distributed counterpart to
+    :meth:`BlockStepFMM.rebuild_state` or to ``advance_base_step(scan_boundaries=True)``
+    -- a ``lax.scan`` over boundaries cannot cross this seam. A driver gets its
+    per-boundary traversals from :meth:`boundary_kick`, which is the seam nornax uses
+    anyway.
+
+    Parameters
+    ----------
+    softening : float
+        Plummer softening ``1 / (r^2 + eps^2)^{3/2}``, shared by both halves.
+    k_max : int
+        Highest block-step rung. Levels run ``0 .. k_max``.
+    theta : float
+        INTRA-domain opening angle. Sets the force accuracy within a domain; it has
+        no effect on momentum conservation, which is structural.
+    cross_theta : float
+        CROSS-domain opening angle. ``0.0`` makes every cross pair exact -- nothing is
+        accepted, so all of them refine to leaf-leaf and are summed particle by
+        particle. Above zero, accepted cross pairs go through M2L against the remote
+        leaf's multipole, which is what collapses the halo import from the whole remote
+        system to a surface.
+    max_order : int
+        Multipole expansion order ``p``.
+    G : float
+        Gravitational constant.
+    leaf_size : int
+        Particles per leaf for each domain's own tree.
+    backend : str
+        ``"jax"`` or ``"pallas"``; see
+        :class:`~jaccpot.mutual.distributed.DistributedMutualConfig`.
+    pallas_interpret : bool
+        Run the Pallas kernels in interpret mode, which works without a GPU.
+    ndev : Optional[int]
+        Device count when ``mesh`` is ``None``. ``None`` uses every visible device.
+    mesh : Any
+        Device mesh. ``None`` builds one over ``ndev`` devices.
+    caps : Any
+        Intra-domain capacities (a ``MutualCapacities``). ``None`` derives heuristics.
+    partitioner : str
+        ``"rcb"`` (default) or ``"morton"``.
+    cross_caps : Optional[dict]
+        Cross-domain capacity overrides, passed straight through to
+        :class:`~jaccpot.mutual.distributed.DistributedMutualConfig`: any of
+        ``near_cap``, ``max_pair_queue``, ``recv_capacity``, ``max_req_leaves``,
+        ``max_recv_leaves``, ``far_cap``, ``far_recv_capacity``, ``coarse_depth_cap``.
+    validate_rung : bool
+        Check that rungs lie in ``[0, k_max]``. Here the check is free rather than a
+        device sync -- the rung is laid out on the host anyway -- so leaving it on
+        costs nothing.
+
+    Attributes
+    ----------
+    traced_boundary_weights : bool
+        Read by nornax's ``supports_traced_level_weights``, and ``True`` here, so it
+        walks the boundaries with a ``lax.scan`` over a weight table rather than
+        unrolling ``2**k_max`` of them. Declared explicitly rather than left to
+        nornax's signature probe, because the case is stronger on this lane than on
+        one device: each boundary kick is a whole distributed program -- tree build,
+        cross walk, halo exchange, reverse halo -- and under an outer ``jit`` or
+        ``lax.scan`` over base steps the cached executable gets inlined anyway, so
+        unrolling would put ``2**k_max`` copies of it in one graph.
+        :meth:`boundary_kick` honours a traced ``level_weights``: only its LENGTH is
+        read anywhere on this lane.
+
+    Raises
+    ------
+    ValueError
+        If ``backend`` is unsupported, ``k_max`` is negative, or an unknown key
+        appears in ``cross_caps``.
+    """
+
+    traced_boundary_weights: bool = True
+
+    #: Cross-domain capacity names `cross_caps` may set.
+    _CROSS_CAP_KEYS = (
+        "near_cap",
+        "max_pair_queue",
+        "recv_capacity",
+        "max_req_leaves",
+        "max_recv_leaves",
+        "far_cap",
+        "far_recv_capacity",
+        "coarse_depth_cap",
+    )
+
+    def __init__(
+        self,
+        *,
+        softening: float,
+        k_max: int,
+        theta: float = 0.5,
+        cross_theta: float = 0.0,
+        max_order: int = 4,
+        G: float = 1.0,
+        leaf_size: int = 32,
+        backend: str = "jax",
+        pallas_interpret: bool = False,
+        ndev: Optional[int] = None,
+        mesh: Any = None,
+        caps: Any = None,
+        partitioner: str = "rcb",
+        cross_caps: Optional[dict] = None,
+        validate_rung: bool = True,
+    ) -> None:
+        backend = str(backend).lower()
+        if backend not in _SUPPORTED_BACKENDS:
+            raise ValueError(
+                "DistributedBlockStepFMM supports backend="
+                f"{_SUPPORTED_BACKENDS!r}; got {backend!r}"
+            )
+        if int(k_max) < 0:
+            raise ValueError(f"k_max must be >= 0; got {k_max!r}")
+        extra = set(cross_caps or ()) - set(self._CROSS_CAP_KEYS)
+        if extra:
+            raise ValueError(
+                f"unknown cross_caps keys {sorted(extra)}; known names are "
+                f"{list(self._CROSS_CAP_KEYS)}"
+            )
+
+        from jaccpot.mutual.distributed import DistributedMutualConfig
+
+        self.k_max = int(k_max)
+        self.softening = float(softening)
+        self.theta = float(theta)
+        self.cross_theta = float(cross_theta)
+        self.max_order = int(max_order)
+        self.G = float(G)
+        self.leaf_size = int(leaf_size)
+        self.backend = backend
+        self.validate_rung = bool(validate_rung)
+        self.mesh = mesh
+        self.ndev = ndev
+        self.config = DistributedMutualConfig(
+            leaf_size=int(leaf_size),
+            theta=float(theta),
+            cross_theta=float(cross_theta),
+            order=int(max_order),
+            k_max=int(k_max) if bool(validate_rung) else None,
+            softening=float(softening),
+            g=float(G),
+            caps=caps,
+            backend=backend,
+            pallas_interpret=bool(pallas_interpret),
+            partitioner=str(partitioner),
+            **(cross_caps or {}),
+        )
+        self._evaluator: Any = None
+
+    # -- partition lifetime -------------------------------------------------
+
+    @property
+    def evaluator(self) -> Any:
+        """The prepared evaluator, or ``None`` before the first :meth:`prepare`."""
+        return self._evaluator
+
+    def prepare(
+        self: "DistributedBlockStepFMM",
+        positions: Float[Array, "n 3"],
+        masses: Float[Array, "n"],
+    ) -> Any:
+        """Partition across the mesh, build the mapped program, and cache both.
+
+        Host work, and not traceable: the domain assignment is a NumPy sort. Call it
+        before any force method, and again when the partition should change -- see the
+        class docstring for why that is not once per base step.
+
+        The program is *built* here and compiled on its FIRST evaluation, lazily and
+        per weighting mode -- the unweighted force takes three operands and a weighted
+        one five, so they are different graphs. So this call is cheap and the first
+        force is not: measured on 2 forced CPU devices at N = 128, prepare < 0.1 s, the
+        first evaluation 20.5 s, and each later one ~8 s. That ~8 s is the whole point
+        of holding the program; without it every evaluation pays the 20.5 s.
+
+        Parameters
+        ----------
+        positions : Float[Array, 'n 3']
+            ``(n, 3)`` positions to partition on.
+        masses : Float[Array, 'n']
+            ``(n,)`` particle masses.
+
+        Returns
+        -------
+        Any
+            The :class:`~jaccpot.mutual.distributed.DistributedMutualEvaluator`, also
+            cached on the instance.
+        """
+        from jaccpot.mutual.distributed import make_distributed_mutual_evaluator
+
+        self._evaluator = make_distributed_mutual_evaluator(
+            positions,
+            masses,
+            config=self.config,
+            mesh=self.mesh,
+            ndev=self.ndev,
+        )
+        return self._evaluator
+
+    def _require_evaluator(self) -> Any:
+        """Return the prepared evaluator, or say what is missing.
+
+        Returns
+        -------
+        Any
+            The cached evaluator.
+
+        Raises
+        ------
+        RuntimeError
+            If :meth:`prepare` has not been called. Raised rather than partitioning
+            implicitly, because an implicit partition would silently recompile on
+            every call -- the exact cost this class exists to avoid.
+        """
+        if self._evaluator is None:
+            raise RuntimeError(
+                "call prepare(positions, masses) before evaluating a force. It is not "
+                "done implicitly: partitioning per call would recompile the mapped "
+                "program every time, which is what this class exists to avoid"
+            )
+        return self._evaluator
+
+    def _weighted(
+        self,
+        positions: Array,
+        masses: Array,
+        rung: Optional[Array],
+        level_weights: Optional[Array],
+    ) -> Array:
+        """One evaluation, checked for overflow, returned as a jax array.
+
+        Parameters
+        ----------
+        positions : Array
+            ``(n, 3)`` positions.
+        masses : Array
+            ``(n,)`` masses.
+        rung : Optional[Array]
+            ``(n,)`` per-particle rung, or ``None``.
+        level_weights : Optional[Array]
+            ``(k_max + 1,)`` weights, or ``None`` for the full force.
+
+        Returns
+        -------
+        Array
+            ``(n, 3)`` accelerations in the caller's order.
+
+        Raises
+        ------
+        RuntimeError
+            If any capacity on any device overflowed. **Raised, not reported**: the
+            single-device lane raises on ``topology_overflow`` for the same reason,
+            which is that a dropped canonical pair drops both its halves, so momentum
+            stays exact and no norm on the result reveals it.
+        """
+        got = self._require_evaluator()(
+            positions, masses, rung=rung, level_weights=level_weights
+        )
+        # `bool` exactly when the evaluator managed to read the flag -- it attempts
+        # the read itself and leaves a traced scalar alone. So this raises on every
+        # eager call and is skipped under trace, where an exception is not available
+        # and a branch on the value is not either. A traced driver therefore does NOT
+        # get this check: it has to evaluate once eagerly first, which is what
+        # `prepare` plus a warm-up call gives it.
+        if isinstance(got.overflow, bool) and got.overflow:
+            raise RuntimeError(
+                "a distributed mutual capacity overflowed -- "
+                f"cross={np.asarray(got.cross_overflow).tolist()} "
+                f"local={np.asarray(got.local_overflow).tolist()} "
+                f"causes={np.asarray(got.local_overflow_causes).tolist()}. "
+                "The force is wrong in a "
+                "way no norm reveals: a dropped pair loses both its halves, so "
+                "momentum stays exact. Raise the capacities (cross_caps / caps) and "
+                "call prepare again"
+            )
+        return jnp.asarray(got.accelerations)
+
+    def _validate_rung(self, rung: Array) -> Array:
+        """Reject rungs outside ``[0, k_max]``.
+
+        Unconditional here, unlike :meth:`BlockStepFMM._validate_rung`, and cheaper:
+        that one pays a device-to-host sync to read the bound, while this lane lays
+        the rung out on the host anyway, so the reduction is free. The check itself
+        happens inside the evaluator, which is where the layout is; this only enforces
+        that a rung was supplied at all.
+
+        Parameters
+        ----------
+        rung : Array
+            ``(n,)`` per-particle rung assignment.
+
+        Returns
+        -------
+        Array
+            ``rung`` as an array, unchanged.
+        """
+        return jnp.asarray(rung)
+
+    # -- MutualForceModel contract -----------------------------------------
+
+    def level_accelerations(
+        self: "DistributedBlockStepFMM",
+        positions: Float[Array, "n 3"],
+        masses: Float[Array, "n"],
+        *,
+        rung: Int[Array, "n"],
+        level: int,
+        args: object = None,
+    ) -> Array:
+        """Return the level-``k`` antisymmetric acceleration for every particle.
+
+        A one-hot weight row at ``level``, so it costs ONE traversal of the whole mesh
+        rather than a masked sweep. The near field applies the exact per-particle
+        predicate ``max(rung_i, rung_j) == level`` on both the intra- and
+        cross-domain halves; the far field splits at cell granularity on both, taking
+        each cell the rung of its most active particle. Both are partitions, so
+        summing over ``k = 0 .. k_max`` reproduces the full acceleration.
+
+        Parameters
+        ----------
+        positions : Float[Array, 'n 3']
+            ``(n, 3)`` particle positions.
+        masses : Float[Array, 'n']
+            ``(n,)`` particle masses.
+        rung : Int[Array, 'n']
+            ``(n,)`` per-particle rung assignment.
+        level : int
+            Interaction level to isolate. Must lie in ``[0, k_max]``.
+        args : object
+            Ignored; present because the ``MutualForceModel`` contract passes it.
+
+        Returns
+        -------
+        Array
+            ``(n, 3)`` accelerations from ``level`` alone.
+
+        Raises
+        ------
+        ValueError
+            If ``level`` is outside ``[0, k_max]``.
+        """
+        del args
+        if not 0 <= int(level) <= self.k_max:
+            raise ValueError(
+                f"level must lie in [0, k_max={self.k_max}]; got {level!r}"
+            )
+        weights = (
+            jnp.zeros((self.k_max + 1,), dtype=jnp.asarray(positions).dtype)
+            .at[int(level)]
+            .set(1.0)
+        )
+        return self._weighted(positions, masses, self._validate_rung(rung), weights)
+
+    def total_accelerations(
+        self: "DistributedBlockStepFMM",
+        positions: Float[Array, "n 3"],
+        masses: Float[Array, "n"],
+        *,
+        rung: Optional[Int[Array, "n"]] = None,
+        args: object = None,
+    ) -> Array:
+        """Return the full acceleration in a single traversal.
+
+        Parameters
+        ----------
+        positions : Float[Array, 'n 3']
+            ``(n, 3)`` particle positions.
+        masses : Float[Array, 'n']
+            ``(n,)`` particle masses.
+        rung : Optional[Int[Array, 'n']]
+            Ignored -- the unweighted total does not depend on the rung assignment.
+            Accepted so the signature matches the level-aware methods.
+        args : object
+            Ignored; present for the ``MutualForceModel`` contract.
+
+        Returns
+        -------
+        Array
+            ``(n, 3)`` full accelerations.
+        """
+        del args, rung
+        return self._weighted(positions, masses, None, None)
+
+    # -- fused boundary primitive ------------------------------------------
+
+    def boundary_weights(
+        self: "DistributedBlockStepFMM",
+        active_floor: Any,
+        dt_max: Any,
+        half: Any = 1.0,
+        *,
+        dtype: Any = None,
+    ) -> Array:
+        """The ``(k_max + 1,)`` weight row for one sub-step boundary.
+
+        Parameters
+        ----------
+        active_floor : Any
+            Smallest level kicked at this boundary.
+        dt_max : Any
+            Base-step timestep.
+        half : Any
+            ``0.5`` at a synchronized end of the base step, ``1.0`` inside.
+        dtype : Any
+            Result dtype; ``None`` takes the model's working dtype.
+
+        Returns
+        -------
+        Array
+            ``(k_max + 1,)`` weight row.
+        """
+        return level_weights_from_floor(
+            active_floor, self.k_max, dt_max, half=half, dtype=dtype
+        )
+
+    def boundary_kick(
+        self: "DistributedBlockStepFMM",
+        positions: Float[Array, "n 3"],
+        velocities: Float[Array, "n 3"],
+        masses: Float[Array, "n"],
+        *,
+        rung: Int[Array, "n"],
+        active_floor: Any = None,
+        dt_max: Any = None,
+        half: Any = 1.0,
+        level_weights: Optional[Float[Array, "levels"]] = None,
+        args: object = None,
+    ) -> Array:
+        """Apply one sub-step boundary's kick in a single traversal of the mesh.
+
+        Every level at or above ``active_floor`` is kicked with
+        ``half * dt_max / 2**k``, with the weights pushed *into* the traversal so the
+        whole mesh is walked once. That is what keeps a base step at ``n_sub + 1``
+        evaluations instead of ``sum_s (active levels at s)``; for a distributed FMM,
+        where each evaluation is a tree build, a cross walk and a halo exchange, the
+        difference is the individual-timestep advantage itself.
+
+        Momentum is untouched by the weighting on either half. On the near half the
+        weight is one symmetric scalar multiplying the tensor both sides read; on the
+        cross-domain far half it is applied once, on the evaluating device, to both
+        directions of the batched M2L before either crosses the wire.
+
+        Parameters
+        ----------
+        positions : Float[Array, 'n 3']
+            ``(N, 3)`` particle positions.
+        velocities : Float[Array, 'n 3']
+            ``(N, 3)`` velocities to kick.
+        masses : Float[Array, 'n']
+            ``(N,)`` particle masses.
+        rung : Int[Array, 'n']
+            ``(N,)`` per-particle block-step rung, in ``[0, k_max]``.
+        active_floor : Any
+            Smallest level kicked at this boundary.
+        dt_max : Any
+            Base-step timestep; level ``k`` is kicked with ``half * dt_max / 2**k``.
+        half : Any
+            ``0.5`` at the base step's synchronized ends, ``1.0`` inside.
+        level_weights : Optional[Float[Array, 'levels']]
+            The ``(k_max + 1,)`` weight vector supplied directly. Takes precedence
+            over ``active_floor``/``dt_max``/``half``, which are then ignored.
+        args : object
+            Unused; present for the ``MutualForceModel`` protocol's signature.
+
+        Returns
+        -------
+        Array
+            Updated velocities.
+
+        Raises
+        ------
+        ValueError
+            If neither ``level_weights`` nor both ``active_floor`` and ``dt_max`` are
+            given, or ``level_weights`` has the wrong length for ``k_max``.
+        """
+        del args
+        dtype = jnp.asarray(positions).dtype
+        if level_weights is None:
+            if dt_max is None or active_floor is None:
+                raise ValueError(
+                    "boundary_kick needs either level_weights, or both "
+                    "active_floor and dt_max"
+                )
+            level_weights = level_weights_from_floor(
+                active_floor, self.k_max, dt_max, half=half, dtype=dtype
+            )
+        else:
+            level_weights = jnp.asarray(level_weights, dtype=dtype)
+            if int(level_weights.shape[-1]) != self.k_max + 1:
+                raise ValueError(
+                    f"level_weights must have {self.k_max + 1} entries for "
+                    f"k_max={self.k_max}; got shape {tuple(level_weights.shape)}"
+                )
+        delta_v = self._weighted(
+            positions, masses, self._validate_rung(rung), level_weights
+        )
+        return jnp.asarray(velocities) + delta_v
+
+    def boundary_kick_at(
+        self: "DistributedBlockStepFMM",
+        positions: Float[Array, "n 3"],
+        velocities: Float[Array, "n 3"],
+        masses: Float[Array, "n"],
+        *,
+        rung: Int[Array, "n"],
+        s: int,
+        dt_max: float,
+        args: object = None,
+    ) -> Array:
+        """:meth:`boundary_kick` addressed by sub-step boundary index ``s``.
+
+        Parameters
+        ----------
+        positions : Float[Array, 'n 3']
+            ``(n, 3)`` particle positions.
+        velocities : Float[Array, 'n 3']
+            ``(n, 3)`` particle velocities, the quantity being kicked.
+        masses : Float[Array, 'n']
+            ``(n,)`` particle masses.
+        rung : Int[Array, 'n']
+            ``(n,)`` per-particle rung assignment.
+        s : int
+            Sub-step boundary index, ``0 .. n_sub``. Must be concrete.
+        dt_max : float
+            Base-step size, the time step of level ``0``.
+        args : object
+            Forwarded to :meth:`boundary_kick`, which ignores it.
+
+        Returns
+        -------
+        Array
+            ``(n, 3)`` velocities after the kick.
+        """
+        return self.boundary_kick(
+            positions,
+            velocities,
+            masses,
+            rung=rung,
+            active_floor=active_level_floor(int(s), self.k_max),
+            dt_max=dt_max,
+            half=0.5 if is_sync_boundary(int(s), self.k_max) else 1.0,
+            args=args,
+        )
+
+    def advance_base_step(
+        self: "DistributedBlockStepFMM",
+        positions: Float[Array, "n 3"],
+        velocities: Float[Array, "n 3"],
+        masses: Float[Array, "n"],
+        *,
+        rung: Int[Array, "n"],
+        dt_max: float,
+    ) -> Tuple[Array, Array, Array]:
+        """Run one full base step, at one traversal of the mesh per boundary.
+
+        The recursively-symmetric palindrome of Farr & Bertschinger (2007): a kick at
+        every boundary ``s = 0 .. n_sub`` (half at the synchronized ends, full inside)
+        with a drift of ``dt_min`` between consecutive boundaries. The rung assignment
+        is held fixed for the whole step, which is what makes the map symplectic and
+        time-reversible.
+
+        There is no ``scan_boundaries`` counterpart here: this lane's readout is a
+        NumPy scatter back to input order, so the boundary loop cannot be traced. The
+        loop is therefore always the unrolled Python one, which on this lane costs
+        nothing extra -- the mapped program is compiled once by :meth:`prepare` and
+        every boundary reuses it.
+
+        Returns ``(positions, velocities, acceleration)`` with the acceleration the
+        full field at the end-of-step positions, ready to seed the next base step's
+        rung assignment. It is a separate evaluation on purpose: a boundary kick
+        returns *weighted* levels, and the unweighted total cannot be recovered from
+        them.
+
+        Parameters
+        ----------
+        positions : Float[Array, 'n 3']
+            ``(n, 3)`` positions at the start of the base step.
+        velocities : Float[Array, 'n 3']
+            ``(n, 3)`` velocities at the start of the base step.
+        masses : Float[Array, 'n']
+            ``(n,)`` particle masses.
+        rung : Int[Array, 'n']
+            ``(n,)`` per-particle rung assignment, held fixed for the whole step.
+        dt_max : float
+            Base-step size, the time step of level ``0``.
+
+        Returns
+        -------
+        Tuple[Array, Array, Array]
+            ``(positions, velocities, acceleration)`` at the end of the step.
+        """
+        rung = self._validate_rung(rung)
+        dtype = jnp.asarray(positions).dtype
+        steps = n_sub(self.k_max)
+        dt_min = jnp.asarray(dt_max, dtype=dtype) / steps
+        pos, vel = jnp.asarray(positions), jnp.asarray(velocities)
+
+        for s in range(steps + 1):
+            weights = level_weights_from_floor(
+                active_level_floor(s, self.k_max),
+                self.k_max,
+                float(dt_max),
+                half=0.5 if is_sync_boundary(s, self.k_max) else 1.0,
+                dtype=dtype,
+            )
+            vel = vel + self._weighted(pos, masses, rung, weights)
+            if s < steps:
+                pos = pos + dt_min * vel
+
+        acc = self._weighted(pos, masses, None, None)
         return pos, vel, acc
