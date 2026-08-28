@@ -24,6 +24,7 @@ import jaccpot
 EXPECTED_ALL = {
     "BlockStepFMM",
     "ComplexSHBasis",
+    "DistributedBlockStepFMM",
     "FMMAdvancedConfig",
     "FMMPreset",
     "FarFieldConfig",
@@ -115,6 +116,7 @@ def test_export_kinds() -> None:
     for name in (
         "BlockStepFMM",
         "ComplexSHBasis",
+        "DistributedBlockStepFMM",
         "FMMAdvancedConfig",
         "FarFieldConfig",
         "GradConfig",

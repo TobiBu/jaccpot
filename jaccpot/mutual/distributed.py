@@ -1191,7 +1191,15 @@ class DistributedMutualEvaluator:
     rung assignment, because only shapes are static.
     """
 
-    def __init__(self, *, config, mesh, ndev, part, build):
+    def __init__(
+        self,
+        *,
+        config: DistributedMutualConfig,
+        mesh: Any,
+        ndev: int,
+        part: dict,
+        build: Any,
+    ) -> None:
         """Hold the frozen partition and the program builder.
 
         Parameters
@@ -1263,7 +1271,7 @@ class DistributedMutualEvaluator:
         # in `mode="drop"` discards them.
         self._scatter_index = jnp.asarray(np.where(gid >= 0, gid, self.n))
 
-    def layout(self, positions, masses):
+    def layout(self, positions: Any, masses: Any) -> tuple[Array, Array]:
         """Lay live positions and masses out in the frozen partition's row order.
 
         Parameters
@@ -1297,7 +1305,7 @@ class DistributedMutualEvaluator:
         # position would stretch every node's extent.
         return positions[src], jnp.where(live, masses[src], 0.0)
 
-    def rung_layout(self, rung):
+    def rung_layout(self, rung: Any) -> Array:
         """Lay a per-particle rung out in the frozen partition's row order.
 
         Parameters
@@ -1341,14 +1349,21 @@ class DistributedMutualEvaluator:
         live = jnp.asarray(self.gid_flat) >= 0
         return jnp.where(live, r[jnp.asarray(self.source_index)], 0)
 
-    def _program(self, weighted: bool):
+    def _program(self, weighted: bool) -> Any:
         """Return the compiled program for this weighting mode, building it once."""
         key = bool(weighted)
         if key not in self._programs:
             self._programs[key] = self._build(key)
         return self._programs[key]
 
-    def __call__(self, positions, masses, *, rung=None, level_weights=None):
+    def __call__(
+        self,
+        positions: Any,
+        masses: Any,
+        *,
+        rung: Any = None,
+        level_weights: Any = None,
+    ) -> DistributedMutualForce:
         """Evaluate the force on live positions at the frozen partition.
 
         Parameters
@@ -1706,7 +1721,7 @@ def make_distributed_mutual_evaluator(
             state.overflow_causes[None],
         )
 
-    def build(weighted: bool):
+    def build(weighted: bool) -> Any:
         """Map and compile `fn` for one weighting mode."""
         # `level_weights` is REPLICATED (`P()`), not sharded: it is one row of a
         # boundary's kick weights and every device must apply the same one, or the two
