@@ -69,6 +69,7 @@ from jaccpot.config import (
     FMMPreset,
     MACTypeInput,
     MemoryObjective,
+    NearFieldConfig,
     RuntimePolicyConfig,
     TraversalOverrides,
 )
@@ -355,17 +356,9 @@ class FMMEngine(
         floored by ``mixed_order_min_order``.
     mixed_order_min_order : Optional[int]
         Floor on the per-pair order when ``mixed_order`` is on.
-    nearfield_mode : NearFieldMode
-        Near-field interaction mode; ``"auto"`` lets the runtime choose.
     runtime_path : Literal['auto', 'large_n']
         ``"auto"`` or ``"large_n"``. Forcing ``"large_n"`` selects the memory-lean
         lane regardless of particle count.
-    nearfield_edge_chunk_size : int
-        Pairs per chunk in the bucketed near-field kernel. A memory/throughput knob;
-        it does not change the result.
-    precompute_nearfield_scatter_schedules : bool
-        Build the near-field scatter schedules at prepare time rather than per
-        evaluation. Trades prepare-time memory for per-call throughput.
     preset : Optional[Union[str, FMMPreset]]
         Named configuration bundle applied before the individual keywords above. An
         enum member or its string value.
@@ -374,6 +367,15 @@ class FMMEngine(
     fixed_max_leaf_size : Optional[int]
         Pin the maximum leaf size, bypassing preset selection.
 
+    nearfield : Optional[NearFieldConfig]
+        The near-field trio as one group: mode, edge chunk size and whether the
+        scatter schedules are precomputed. ``None`` means ``NearFieldConfig()``,
+        whose three defaults were checked against the flat parameters this
+        replaced before the swap. Note the names differ -- the class drops the
+        redundant ``nearfield_`` prefix -- so this is a rename mapping rather
+        than the straight pass-through ``runtime_policy`` gets; the mapping is
+        stated in full where the group is unpacked. Fields are documented on
+        :class:`jaccpot.config.NearFieldConfig`.
     runtime_policy : Optional[RuntimePolicyConfig]
         The seventeen execution-policy knobs, as one frozen group: backend and
         host-refine mode, ``fail_fast``, the memory objective and budget, the
@@ -448,13 +450,11 @@ class FMMEngine(
         streamed_far_pairs: Optional[bool] = None,
         mixed_order_farfield: bool = False,
         mixed_order_min_order: Optional[int] = None,
-        nearfield_mode: NearFieldMode = "auto",
         runtime_path: Literal["auto", "large_n"] = "auto",
-        nearfield_edge_chunk_size: int = 256,
-        precompute_nearfield_scatter_schedules: bool = True,
         preset: Optional[Union[str, FMMPreset]] = None,
         fixed_order: Optional[int] = None,
         fixed_max_leaf_size: Optional[int] = None,
+        nearfield: Optional[NearFieldConfig] = None,
         runtime_policy: Optional[RuntimePolicyConfig] = None,
     ):
         # The seventeen execution-policy knobs arrive as one frozen group
@@ -464,6 +464,15 @@ class FMMEngine(
         # field against the flat defaults before the swap -- all seventeen
         # matched, so a caller who omits the group gets exactly what it got.
         _policy = RuntimePolicyConfig() if runtime_policy is None else runtime_policy
+        # The near-field trio arrives as one group too (audit F09). Unlike the
+        # policy group above, the names differ: NearFieldConfig drops the
+        # redundant `nearfield_` prefix inside a class already called that. The
+        # mapping below is the whole of it, and all three defaults were checked
+        # against the flat ones before the swap.
+        _nf = NearFieldConfig() if nearfield is None else nearfield
+        nearfield_mode = _nf.mode
+        nearfield_edge_chunk_size = _nf.edge_chunk_size
+        precompute_nearfield_scatter_schedules = _nf.precompute_scatter_schedules
         execution_backend = _policy.execution_backend
         host_refine_mode = _policy.host_refine_mode
         fail_fast = _policy.fail_fast

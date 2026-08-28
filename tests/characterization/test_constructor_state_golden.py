@@ -33,7 +33,7 @@ import pytest
 
 import jaccpot
 from jaccpot import ComplexSHBasis, RealSHBasis
-from jaccpot.config import RuntimePolicyConfig
+from jaccpot.config import NearFieldConfig, RuntimePolicyConfig
 from jaccpot.runtime._fmm_impl import FMMEngine
 
 GOLDEN_PATH = Path(__file__).parent / "golden_modes" / "constructor_state.json"
@@ -123,8 +123,8 @@ CONFIGS: dict[str, dict[str, Any]] = {
     "farfield_dense": {"use_dense_interactions": True},
     "farfield_pair_grouped": {"farfield_mode": "pair_grouped"},
     "farfield_class_major": {"farfield_mode": "class_major"},
-    "nearfield_baseline": {"nearfield_mode": "baseline"},
-    "nearfield_bucketed": {"nearfield_mode": "bucketed"},
+    "nearfield_baseline": {"nearfield": NearFieldConfig(mode="baseline")},
+    "nearfield_bucketed": {"nearfield": NearFieldConfig(mode="bucketed")},
     "runtime_path_large_n": {"runtime_path": "large_n"},
     "backend_radix": {"runtime_policy": RuntimePolicyConfig(execution_backend="radix")},
     "backend_octree": {
