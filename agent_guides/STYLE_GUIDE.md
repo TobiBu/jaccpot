@@ -425,6 +425,13 @@ magnitude — it said 16 raw reads outside `runtime/` (a pre-2.2 number):
 | modules outside `runtime/` reading via `_env.py` | 7 — sanctioned |
 | raw `os.environ` / `os.getenv` outside `runtime/` | **2** |
 
+**This count is now enforced, because it did not hold on its own.** By 2026-08-27 there were
+three: `operators/m2l_real_rot_scale.py` had acquired a module-level `os.environ` read *after*
+G.2 decided the rule, and nothing caught it — a prose count in a guide is not a check. It was
+also the shape `_env.py` exists to prevent, a knob captured at import that silently does nothing
+when set later. Removed, and `tests/unit/test_shared_env_switches.py` now pins the set to the two
+below, so a fourth fails a test rather than aging into this table.
+
 The two raw reads are not equivalent:
 
 - `_typecheck.py:12` is **structural**. It reads its own import-hook flag before `jaccpot` is
