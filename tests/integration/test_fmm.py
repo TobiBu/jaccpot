@@ -18,7 +18,7 @@ import jaccpot.runtime.fmm as fmm_module
 import jaccpot.runtime.fmm_prepare as fmm_prepare_private
 import jaccpot.runtime.kernels.core as kernels_core
 from jaccpot import FMMPreset
-from jaccpot.config import RuntimePolicyConfig
+from jaccpot.config import NearFieldConfig, RuntimePolicyConfig
 from jaccpot.downward.local_expansions import (
     TreeDownwardData,
 )
@@ -348,8 +348,7 @@ def test_static_radix_refresh_rebuilds_current_large_n_payloads(monkeypatch):
         expansion_basis="solidfmm",
         complex_rotation="solidfmm",
         theta=0.6,
-        nearfield_mode="bucketed",
-        nearfield_edge_chunk_size=64,
+        nearfield=NearFieldConfig(mode="bucketed", edge_chunk_size=64),
         grouped_interactions=False,
         working_dtype=jnp.float32,
         tree_build_mode="static_radix",
@@ -467,8 +466,7 @@ def test_static_radix_refresh_dual_planner_mode_parity_and_diagnostics(monkeypat
         expansion_basis="solidfmm",
         complex_rotation="solidfmm",
         theta=0.6,
-        nearfield_mode="bucketed",
-        nearfield_edge_chunk_size=64,
+        nearfield=NearFieldConfig(mode="bucketed", edge_chunk_size=64),
         grouped_interactions=False,
         working_dtype=jnp.float32,
         tree_build_mode="static_radix",
@@ -557,8 +555,7 @@ def test_strict_prepare_refresh_and_evaluate_api_and_diagnostics(monkeypatch):
         expansion_basis="solidfmm",
         complex_rotation="solidfmm",
         theta=0.6,
-        nearfield_mode="bucketed",
-        nearfield_edge_chunk_size=64,
+        nearfield=NearFieldConfig(mode="bucketed", edge_chunk_size=64),
         grouped_interactions=False,
         working_dtype=jnp.float32,
         tree_build_mode="static_radix",
@@ -634,8 +631,7 @@ def test_strict_exact_cap_profile_match_fail_fast(monkeypatch, tmp_path):
         expansion_basis="solidfmm",
         complex_rotation="solidfmm",
         theta=0.6,
-        nearfield_mode="bucketed",
-        nearfield_edge_chunk_size=64,
+        nearfield=NearFieldConfig(mode="bucketed", edge_chunk_size=64),
         grouped_interactions=False,
         working_dtype=jnp.float32,
         tree_build_mode="static_radix",
@@ -691,8 +687,7 @@ def test_strict_run_v2_api(monkeypatch):
         expansion_basis="solidfmm",
         complex_rotation="solidfmm",
         theta=0.6,
-        nearfield_mode="bucketed",
-        nearfield_edge_chunk_size=64,
+        nearfield=NearFieldConfig(mode="bucketed", edge_chunk_size=64),
         grouped_interactions=False,
         working_dtype=jnp.float32,
         tree_build_mode="static_radix",
@@ -757,8 +752,7 @@ def test_strict_fused_moved_endpoint_matches_fresh_prepare(monkeypatch):
         expansion_basis="solidfmm",
         complex_rotation="solidfmm",
         theta=0.6,
-        nearfield_mode="bucketed",
-        nearfield_edge_chunk_size=64,
+        nearfield=NearFieldConfig(mode="bucketed", edge_chunk_size=64),
         grouped_interactions=False,
         working_dtype=jnp.float32,
         tree_build_mode="static_radix",
@@ -832,8 +826,7 @@ def test_strict_fused_compact_far_pair_cap_fails(monkeypatch):
         expansion_basis="solidfmm",
         complex_rotation="solidfmm",
         theta=0.6,
-        nearfield_mode="bucketed",
-        nearfield_edge_chunk_size=64,
+        nearfield=NearFieldConfig(mode="bucketed", edge_chunk_size=64),
         grouped_interactions=False,
         working_dtype=jnp.float32,
         tree_build_mode="static_radix",
@@ -1590,12 +1583,11 @@ def test_nearfield_bucketed_matches_baseline(
     )
 
     fmm_baseline = FMMEngine(
-        nearfield_mode="baseline",
+        nearfield=NearFieldConfig(mode="baseline"),
         **base_kwargs,
     )
     fmm_bucketed = FMMEngine(
-        nearfield_mode="bucketed",
-        nearfield_edge_chunk_size=chunk_size,
+        nearfield=NearFieldConfig(mode="bucketed", edge_chunk_size=chunk_size),
         **base_kwargs,
     )
 
@@ -1797,8 +1789,7 @@ def test_radix_fast_lane_prepared_state_matches_large_n_baseline(monkeypatch):
         preset="large_n_gpu",
         expansion_basis="solidfmm",
         theta=0.6,
-        nearfield_mode="bucketed",
-        nearfield_edge_chunk_size=64,
+        nearfield=NearFieldConfig(mode="bucketed", edge_chunk_size=64),
         grouped_interactions=False,
         working_dtype=jnp.float32,
     )
@@ -1866,8 +1857,7 @@ def test_radix_fast_lane_includes_overflow_target_blocks(monkeypatch):
         preset="large_n_gpu",
         expansion_basis="solidfmm",
         theta=0.6,
-        nearfield_mode="bucketed",
-        nearfield_edge_chunk_size=64,
+        nearfield=NearFieldConfig(mode="bucketed", edge_chunk_size=64),
         grouped_interactions=False,
         working_dtype=jnp.float32,
     )
@@ -1930,8 +1920,7 @@ def test_radix_fast_lane_auto_full_prefix_eliminates_overflow(monkeypatch):
         preset="large_n_gpu",
         expansion_basis="solidfmm",
         theta=0.6,
-        nearfield_mode="bucketed",
-        nearfield_edge_chunk_size=64,
+        nearfield=NearFieldConfig(mode="bucketed", edge_chunk_size=64),
         grouped_interactions=False,
         working_dtype=jnp.float32,
     )
@@ -1978,8 +1967,7 @@ def test_large_n_prepacked_overflow_fallback_matches_tiled_overflow(monkeypatch)
         preset="large_n_gpu",
         expansion_basis="solidfmm",
         theta=0.6,
-        nearfield_mode="bucketed",
-        nearfield_edge_chunk_size=64,
+        nearfield=NearFieldConfig(mode="bucketed", edge_chunk_size=64),
         grouped_interactions=False,
         working_dtype=jnp.float32,
     )
@@ -2148,8 +2136,7 @@ def test_radix_fast_lane_fixed_seed_repeatability(monkeypatch):
         preset="large_n_gpu",
         expansion_basis="solidfmm",
         theta=0.6,
-        nearfield_mode="bucketed",
-        nearfield_edge_chunk_size=64,
+        nearfield=NearFieldConfig(mode="bucketed", edge_chunk_size=64),
         grouped_interactions=False,
         working_dtype=jnp.float32,
     )
@@ -2394,8 +2381,7 @@ def test_prepare_state_precomputes_bucketed_scatter_schedule():
         theta=0.6,
         softening=1e-3,
         working_dtype=jnp.float32,
-        nearfield_mode="bucketed",
-        nearfield_edge_chunk_size=64,
+        nearfield=NearFieldConfig(mode="bucketed", edge_chunk_size=64),
     )
     state = fmm.prepare_state(
         positions,
@@ -3253,8 +3239,7 @@ def test_adaptive_nearfield_edge_chunk_size_auto_policy(monkeypatch):
         expansion_basis="solidfmm",
         complex_rotation="solidfmm",
         mac_type="dehnen",
-        nearfield_mode="auto",
-        nearfield_edge_chunk_size=256,
+        nearfield=NearFieldConfig(mode="auto", edge_chunk_size=256),
     )
     monkeypatch.setattr(jax, "default_backend", lambda: "cpu")
 
@@ -3291,8 +3276,7 @@ def test_adaptive_nearfield_edge_chunk_size_auto_policy(monkeypatch):
         preset=FMMPreset.LARGE_N_GPU,
         expansion_basis="solidfmm",
         complex_rotation="solidfmm",
-        nearfield_mode="auto",
-        nearfield_edge_chunk_size=128,
+        nearfield=NearFieldConfig(mode="auto", edge_chunk_size=128),
     )
     monkeypatch.setattr(jax, "default_backend", lambda: "gpu")
 
@@ -3544,9 +3528,13 @@ def test_nearfield_mode_validation():
     with pytest.raises(
         ValueError, match="nearfield_mode must be 'auto', 'baseline', or 'bucketed'"
     ):
-        FMMEngine(nearfield_mode="unknown")
+        FMMEngine(
+            nearfield=NearFieldConfig(mode="unknown"),
+        )
     with pytest.raises(ValueError, match="nearfield_edge_chunk_size must be positive"):
-        FMMEngine(nearfield_edge_chunk_size=0)
+        FMMEngine(
+            nearfield=NearFieldConfig(edge_chunk_size=0),
+        )
 
 
 def test_solidfmm_dehnen_accuracy_improves_with_order():

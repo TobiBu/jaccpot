@@ -6,6 +6,7 @@ import jax
 import jax.numpy as jnp
 import pytest
 
+from jaccpot.config import NearFieldConfig
 from jaccpot.runtime._large_n_nearfield import resolve_large_n_execution_config
 from jaccpot.runtime.fmm import FMMEngine
 
@@ -15,7 +16,7 @@ def _make_large_n_fmm():
         preset="large_n_gpu",
         expansion_basis="solidfmm",
         tree_type="radix",
-        nearfield_mode="bucketed",
+        nearfield=NearFieldConfig(mode="bucketed"),
         grouped_interactions=False,
         working_dtype=jnp.float32,
     )
