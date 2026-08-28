@@ -417,10 +417,16 @@ class FMMEngine(
     ValueError
         If any option above is outside its documented domain. The checks are
         spread across the ``_resolve_*`` helpers, so the message names the
-        offending knob rather than pointing here.
+        offending knob rather than pointing here. ``__init__`` itself now
+        contains no ``raise`` at all -- every validation lives in a helper --
+        which is why the ``def`` line below carries ``noqa: DOC502``. The
+        section stays because it is accurate for a caller: constructing with a
+        bad value does raise. The suppression is targeted at this one class
+        rather than turning ``--skip-checking-raises`` on repo-wide, which
+        would stop the check everywhere to fix it in one place.
     """
 
-    def __init__(
+    def __init__(  # noqa: DOC502
         self: "FMMEngine",
         theta: float = 0.5,
         G: float = 1.0,
@@ -520,47 +526,25 @@ class FMMEngine(
             mixed_order_min_order=mixed_order_min_order,
             streamed_far_pairs=streamed_far_pairs,
         )
-        nearfield_mode_norm = str(nearfield_mode).strip().lower()
-        if nearfield_mode_norm not in ("auto", "baseline", "bucketed"):
-            raise ValueError("nearfield_mode must be 'auto', 'baseline', or 'bucketed'")
-        runtime_path_norm = str(runtime_path).strip().lower()
-        if runtime_path_norm not in ("auto", "large_n"):
-            raise ValueError("runtime_path must be 'auto' or 'large_n'")
-        execution_backend_norm = str(execution_backend).strip().lower()
-        if execution_backend_norm not in ("auto", "radix", "octree"):
-            raise ValueError("execution_backend must be 'auto', 'radix', or 'octree'")
-        if int(nearfield_edge_chunk_size) <= 0:
-            raise ValueError("nearfield_edge_chunk_size must be positive")
-        self.nearfield_mode = nearfield_mode_norm
-        self._explicit_nearfield_mode = nearfield_mode_norm != "auto"
-        self.runtime_path = runtime_path_norm
-        self.execution_backend = execution_backend_norm
-        self.nearfield_edge_chunk_size = int(nearfield_edge_chunk_size)
-        self.precompute_nearfield_scatter_schedules = bool(
-            precompute_nearfield_scatter_schedules
+        self._resolve_lane_modes(
+            nearfield_mode=nearfield_mode,
+            runtime_path=runtime_path,
+            execution_backend=execution_backend,
+            nearfield_edge_chunk_size=nearfield_edge_chunk_size,
+            precompute_nearfield_scatter_schedules=(
+                precompute_nearfield_scatter_schedules
+            ),
         )
-        objective_norm = str(memory_objective).strip().lower()
-        if objective_norm not in ("balanced", "throughput", "minimum_memory"):
-            raise ValueError(
-                "memory_objective must be 'balanced', 'throughput', or 'minimum_memory'"
-            )
-        self.memory_objective: MemoryObjective = objective_norm  # type: ignore[assignment]
-        self._explicit_memory_objective = objective_norm != "balanced"
-        self.memory_budget_bytes = (
-            None if memory_budget_bytes is None else int(memory_budget_bytes)
+        self._resolve_memory_and_cache_options(
+            memory_objective=memory_objective,
+            memory_budget_bytes=memory_budget_bytes,
+            enable_interaction_cache=enable_interaction_cache,
+            retain_traversal_result=retain_traversal_result,
+            retain_interactions=retain_interactions,
+            prepare_stage_memory_split_enabled=prepare_stage_memory_split_enabled,
+            fail_fast=fail_fast,
+            autotune_m2l_chunk=autotune_m2l_chunk,
         )
-        if self.memory_budget_bytes is not None and self.memory_budget_bytes <= 0:
-            raise ValueError("memory_budget_bytes must be > 0 when provided")
-        self.enable_interaction_cache = bool(enable_interaction_cache)
-        self.retain_traversal_result = bool(retain_traversal_result)
-        self.retain_interactions = bool(retain_interactions)
-        self.prepare_stage_memory_split_enabled = (
-            None
-            if prepare_stage_memory_split_enabled is None
-            else bool(prepare_stage_memory_split_enabled)
-        )
-        self.fail_fast = bool(fail_fast)
-        self.autotune_m2l_chunk = bool(autotune_m2l_chunk) and not self.fail_fast
         self._resolve_schedule_budgets(
             grouped_schedule_budget_bytes=grouped_schedule_budget_bytes,
             nearfield_schedule_item_cap=nearfield_schedule_item_cap,
@@ -910,6 +894,151 @@ class FMMEngine(
             and int(self.mixed_order_min_order) < 0
         ):
             raise ValueError("mixed_order_min_order must be >= 0")
+
+    def _resolve_lane_modes(
+        self,
+        *,
+        nearfield_mode: str,
+        runtime_path: str,
+        execution_backend: str,
+        nearfield_edge_chunk_size: int,
+        precompute_nearfield_scatter_schedules: bool,
+    ) -> None:
+        """Normalise and validate the three lane-selection strings.
+
+        Extracted verbatim from ``__init__`` (audit **F09**) and called in the
+        original position, so the resolution order is unchanged. Characterised
+        first by ``tests/unit/runtime/test_engine_config_resolution.py``.
+
+        ``_explicit_nearfield_mode`` records whether the caller named a value, so
+        the policy layer can tell "left at auto" from "asked for auto". It is
+        computed as ``!= "auto"``, which means naming ``"auto"`` reads as *not*
+        explicit -- carried over unchanged, and pinned by that test.
+
+        Parameters
+        ----------
+        nearfield_mode : str
+            Passed through from ``__init__`` unchanged.
+        runtime_path : str
+            Passed through from ``__init__`` unchanged.
+        execution_backend : str
+            Passed through from ``__init__`` unchanged.
+        nearfield_edge_chunk_size : int
+            Passed through from ``__init__`` unchanged.
+        precompute_nearfield_scatter_schedules : bool
+            Passed through from ``__init__`` unchanged.
+
+        Returns
+        -------
+        None
+            Mutates ``self`` in place, exactly as the inlined code did.
+
+        Raises
+        ------
+        ValueError
+            If any lane string is unrecognised, or the edge chunk size is not
+            positive -- same messages as before the extraction.
+        """
+        nearfield_mode_norm = str(nearfield_mode).strip().lower()
+        if nearfield_mode_norm not in ("auto", "baseline", "bucketed"):
+            raise ValueError("nearfield_mode must be 'auto', 'baseline', or 'bucketed'")
+        runtime_path_norm = str(runtime_path).strip().lower()
+        if runtime_path_norm not in ("auto", "large_n"):
+            raise ValueError("runtime_path must be 'auto' or 'large_n'")
+        execution_backend_norm = str(execution_backend).strip().lower()
+        if execution_backend_norm not in ("auto", "radix", "octree"):
+            raise ValueError("execution_backend must be 'auto', 'radix', or 'octree'")
+        if int(nearfield_edge_chunk_size) <= 0:
+            raise ValueError("nearfield_edge_chunk_size must be positive")
+        self.nearfield_mode = nearfield_mode_norm
+        self._explicit_nearfield_mode = nearfield_mode_norm != "auto"
+        self.runtime_path = runtime_path_norm
+        self.execution_backend = execution_backend_norm
+        self.nearfield_edge_chunk_size = int(nearfield_edge_chunk_size)
+        self.precompute_nearfield_scatter_schedules = bool(
+            precompute_nearfield_scatter_schedules
+        )
+
+    def _resolve_memory_and_cache_options(
+        self,
+        *,
+        memory_objective: str,
+        memory_budget_bytes: Optional[int],
+        enable_interaction_cache: bool,
+        retain_traversal_result: bool,
+        retain_interactions: bool,
+        prepare_stage_memory_split_enabled: Optional[bool],
+        fail_fast: bool,
+        autotune_m2l_chunk: bool,
+    ) -> None:
+        """Resolve the memory objective, retention flags and the strict-lane pair.
+
+        Extracted verbatim from ``__init__`` (audit **F09**), called in the
+        original position.
+
+        ``fail_fast`` and ``autotune_m2l_chunk`` are resolved **here, together,
+        and in this order** on purpose: the second reads ``self.fail_fast`` set
+        by the first, because a timing-driven chunk search inside the lane whose
+        purpose is to fail rather than adapt would be a contradiction. Splitting
+        them across two helpers, or calling them the other way round, leaves the
+        autotune silently on under ``fail_fast`` and nothing else in the
+        constructor notices. That is the "resolution order" sensitivity F09
+        flags, and it is pinned in both directions by
+        ``tests/unit/runtime/test_engine_config_resolution.py``.
+
+        Parameters
+        ----------
+        memory_objective : str
+            Passed through from ``__init__`` unchanged.
+        memory_budget_bytes : Optional[int]
+            Passed through from ``__init__`` unchanged.
+        enable_interaction_cache : bool
+            Passed through from ``__init__`` unchanged.
+        retain_traversal_result : bool
+            Passed through from ``__init__`` unchanged.
+        retain_interactions : bool
+            Passed through from ``__init__`` unchanged.
+        prepare_stage_memory_split_enabled : Optional[bool]
+            Passed through from ``__init__`` unchanged. ``None`` means "let the
+            policy decide" and stays distinct from ``False``.
+        fail_fast : bool
+            Passed through from ``__init__`` unchanged.
+        autotune_m2l_chunk : bool
+            Passed through from ``__init__`` unchanged.
+
+        Returns
+        -------
+        None
+            Mutates ``self`` in place, exactly as the inlined code did.
+
+        Raises
+        ------
+        ValueError
+            If the objective is unrecognised, or a supplied memory budget is not
+            positive -- same messages as before the extraction.
+        """
+        objective_norm = str(memory_objective).strip().lower()
+        if objective_norm not in ("balanced", "throughput", "minimum_memory"):
+            raise ValueError(
+                "memory_objective must be 'balanced', 'throughput', or 'minimum_memory'"
+            )
+        self.memory_objective: MemoryObjective = objective_norm  # type: ignore[assignment]
+        self._explicit_memory_objective = objective_norm != "balanced"
+        self.memory_budget_bytes = (
+            None if memory_budget_bytes is None else int(memory_budget_bytes)
+        )
+        if self.memory_budget_bytes is not None and self.memory_budget_bytes <= 0:
+            raise ValueError("memory_budget_bytes must be > 0 when provided")
+        self.enable_interaction_cache = bool(enable_interaction_cache)
+        self.retain_traversal_result = bool(retain_traversal_result)
+        self.retain_interactions = bool(retain_interactions)
+        self.prepare_stage_memory_split_enabled = (
+            None
+            if prepare_stage_memory_split_enabled is None
+            else bool(prepare_stage_memory_split_enabled)
+        )
+        self.fail_fast = bool(fail_fast)
+        self.autotune_m2l_chunk = bool(autotune_m2l_chunk) and not self.fail_fast
 
     def _resolve_schedule_budgets(
         self,
