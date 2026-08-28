@@ -1,0 +1,52 @@
+{
+  "args": {
+    "num_particles": "1048576",
+    "orders": "4",
+    "leaves": "256",
+    "theta": 0.6,
+    "softening": 0.001,
+    "gravity": 1.0,
+    "distribution": "disc",
+    "seed": 0,
+    "repeats": 5,
+    "reference_targets": 512,
+    "measure_floor": false,
+    "floor_factor": 3.0,
+    "reference_block_bytes": 2000000000,
+    "tag": "ab_recheck"
+  },
+  "rows": [
+    {
+      "order": 4,
+      "leaf_size": 256,
+      "theta": 0.6,
+      "num_particles": 1048576,
+      "lane": "large_n",
+      "cuda_visible_devices": "7",
+      "device_kind": "NVIDIA A100-PCIE-40GB",
+      "prepare_seconds": 41.2488,
+      "evaluate_median_seconds": 0.53841,
+      "evaluate_min_seconds": 0.53498,
+      "evaluate_max_seconds": 0.54229,
+      "working_dtype": "float32",
+      "state_input_dtype": "float32",
+      "input_dtype": "float32",
+      "dehnen_rms": 0.00039033358469805124,
+      "dehnen_p9999": 0.002031875802270072,
+      "dehnen_median": 0.0002353546149155826,
+      "dehnen_p90": 0.0006120914682472001,
+      "dehnen_p99": 0.0011637403437209247,
+      "dehnen_p999": 0.001715029819750708,
+      "dehnen_max": 0.0020670809114389033,
+      "dehnen_mean": 0.0003063972714977282,
+      "rel_rms": 0.0024977060678904534,
+      "rel_p9999": 0.01732042948804155,
+      "rel_median": 0.0012314900517082666,
+      "rel_p90": 0.003653438360467062,
+      "rel_p99": 0.008190909855330093,
+      "rel_p999": 0.01578461251667194,
+      "rel_max": 0.017491075818193792,
+      "rel_mean": 0.0017655195100328668
+    }
+  ]
+}

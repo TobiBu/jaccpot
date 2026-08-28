@@ -1,0 +1,109 @@
+{
+  "args": {
+    "num_particles": 1048576,
+    "leaf_size": 128,
+    "max_order": 8,
+    "theta": 0.5,
+    "softening": 0.001,
+    "distribution": "disc",
+    "seed": 0,
+    "repeats": 5,
+    "peak_flops": 19500000000000.0,
+    "peak_bandwidth": 1555000000000.0,
+    "tag": "b5_flag1_leaf128_p8"
+  },
+  "device_kind": "NVIDIA A100-PCIE-40GB",
+  "cuda_visible_devices": "6",
+  "near_particle_pairs": 124057848658,
+  "timings": {
+    "zero": {
+      "median_s": 0.0019056303426623344,
+      "spread_frac": 1.5493694270473155,
+      "samples": [
+        0.00199,
+        0.00343,
+        0.00191,
+        0.00048,
+        0.0005
+      ]
+    },
+    "permutation_only": {
+      "median_s": 0.002517213113605976,
+      "spread_frac": 0.10877977473299352,
+      "samples": [
+        0.00246,
+        0.00272,
+        0.00274,
+        0.00252,
+        0.00249
+      ]
+    },
+    "near_only": {
+      "median_s": 1.072931476868689,
+      "spread_frac": 0.041516394978977154,
+      "samples": [
+        1.04574,
+        1.07293,
+        1.05637,
+        1.09028,
+        1.08136
+      ]
+    },
+    "far_only": {
+      "median_s": 0.10029986407607794,
+      "spread_frac": 0.5461636565887182,
+      "samples": [
+        0.1003,
+        0.06672,
+        0.12098,
+        0.10491,
+        0.0662
+      ]
+    },
+    "full": {
+      "median_s": 0.6315112775191665,
+      "spread_frac": 0.044994119875851654,
+      "samples": [
+        0.62783,
+        0.65625,
+        0.655,
+        0.62946,
+        0.63151
+      ]
+    }
+  },
+  "stages": [
+    {
+      "stage": "dispatch",
+      "seconds": 0.0019056303426623344,
+      "noise_seconds": 0.0059050507843494415,
+      "readable": true,
+      "share_of_full": 0.003017571356996864
+    },
+    {
+      "stage": "permutation+cast",
+      "seconds": 0.0006115827709436417,
+      "noise_seconds": 0.003226347267627716,
+      "readable": false,
+      "share_of_full": 0.0009684431501305691
+    },
+    {
+      "stage": "near",
+      "seconds": 1.070414263755083,
+      "noise_seconds": 0.044818068854510784,
+      "readable": true,
+      "share_of_full": 1.6950041936861466
+    },
+    {
+      "stage": "far",
+      "seconds": 0.09778265096247196,
+      "noise_seconds": 0.055053962394595146,
+      "readable": true,
+      "share_of_full": 0.15483912076218503
+    }
+  ],
+  "residual_seconds": -0.5392028503119946,
+  "achieved_flops": 2317940873149.3726,
+  "fraction_of_peak": 0.11886876272560885,
+  "verdict": "PARTLY BOUND: at 12% of peak a perfect kernel could win at most 8.4x, and only if nothing else binds. Weigh that against fewer pairs before writing one."
+}
