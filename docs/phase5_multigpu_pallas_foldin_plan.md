@@ -71,8 +71,10 @@ _Bookkeeping + plan, 2026-07-14._
     retry ladder that cannot be climbed under `shard_map` (the overflow flag is a tracer),
     so the traced wavefront came from `process_block`, not `max_pair_queue` — which is why
     raising `max_pair_queue` to 16.7 M changed nothing. Fixed in yggdrax `#52` plus the
-    derived caps in `jaccpot/distributed/fmm.py`. Per-device N now reaches **1 048 576**
-    (2 097 152 total on 2×A100, no overflow, rel_l2 1.8e-3), and strong scaling inside the
+    derived caps in `jaccpot/distributed/fmm.py`. On 2×A100 **no overflow flag fires
+    anywhere in the ladder** up to 16 777 216 particles/device; the largest configuration
+    clearing the accuracy gate too is **8 388 608/device = 16 777 216 total** (leaf 512,
+    rel_l2 4.5e-3, 93.2 s), against the 8000/GPU above. Strong scaling inside the
     verified envelope is **flat**, not density-limited.
   - **CAVEAT: the jit=True illegal-address crash is INTERMITTENT** (nondeterministic OOB) — most
     runs succeed but one recurred at weak ndev=2; run each eval in its own process. Root-cause +

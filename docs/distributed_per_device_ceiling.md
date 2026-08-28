@@ -4,8 +4,11 @@
 > was found on 2026-08-24 (see [Root cause](#root-cause-the-ladder-cannot-be-climbed-under-a-trace)
 > below) and fixed in yggdrax (`#52`, `_walk_inputs_are_traced`) together with the
 > capacity derivation in `jaccpot/distributed/fmm.py` (`_derive_walk_caps`,
-> `DERIVED_CAP_FIELDS`). Per-device N now reaches **1 048 576**, 128x the 8000 this
-> note set out to correct -- see [After the fix](#after-the-fix-measured-on-main).
+> `DERIVED_CAP_FIELDS`). On two devices **no overflow flag fires anywhere in the
+> ladder**, up to 16 777 216 particles per device; the largest configuration that also
+> clears the accuracy gate is **8 388 608 per device, 16 777 216 total on two cards**
+> (leaf 512) -- 1049x the 8000 this note set out to correct. See
+> [After the fix](#after-the-fix-measured-on-main).
 >
 > The note is kept, and kept in its original order, for two reasons. The measurements
 > in it are the evidence the fix was derived from, and the failure mode it describes --
@@ -173,30 +176,64 @@ default moved 64 -> 256. The reasoning is kept where the constants are, in
 ## After the fix: measured on main
 
 `bench/results/distributed_ceiling/`, harness `bench/distributed_ceiling_sweep.py`
-and `bench/distributed_ceiling_ladder.py`. A100-PCIE-40GB, jax 0.10.2, x64, leaf
-256, theta=0.4, order 3, dehnen MAC. `rel_l2` is against a 512-target direct-sum
-probe; validity is the overflow flags, checked **before** any wall clock is quoted.
+and `bench/distributed_ceiling_ladder.py`. A100-PCIE-40GB, jax 0.10.2, x64,
+theta=0.4, order 3, dehnen MAC, `m2l_chunk=65536` and `nearfield_chunk=512` from
+1M/device upward. `rel_l2` is against a subsampled fp64 direct-sum probe; the
+harness **withholds a timing** whenever the flags overflow *or* `rel_l2` exceeds its
+`max_rel_l2` gate (0.005), which is why several rows below have an accuracy figure
+and no seconds.
 
-| ndev | per-device N | total N | valid | rel_l2 | median s |
+**Two devices. No overflow flag fires anywhere in this ladder** -- not at any leaf
+size, not at any N up to 16 777 216 per device. The capacity ceiling this note was
+written about is simply gone, and what replaces it is an accuracy budget:
+
+| leaf | N/device | total | flags | rel_l2 | median s |
 | --- | --- | --- | --- | --- | --- |
-| 2 | 32 768 | 65 536 | yes | 1.6e-4 | 0.136 |
-| 2 | 131 072 | 262 144 | yes | 4.1e-4 | 0.200 |
-| 2 | 524 288 | 1 048 576 | yes | 1.3e-3 | 1.324 |
-| 2 | **1 048 576** | **2 097 152** | yes | 1.8e-3 | 4.583 |
-| 4 | 32 768 | 131 072 | yes | 9.7e-5 | 0.141 |
-| 4 | 131 072 | 524 288 | yes | 7.6e-4 | 0.475 |
-| 4 | 1 048 576 | 4 194 304 | **no** | -- | skipped |
+| 256 | 524 288 | 1 048 576 | clear | 1.3e-3 | 1.32 |
+| 256 | 1 048 576 | 2 097 152 | clear | 2.0e-3 | 4.08 |
+| 256 | 2 097 152 | 4 194 304 | clear | 3.0e-3 | 14.53 |
+| 256 | 3 145 728 | 6 291 456 | clear | 3.0e-3 | 31.67 |
+| 256 | **4 194 304** | **8 388 608** | clear | 4.0e-3 | 44.77 |
+| 512 | 4 194 304 | 8 388 608 | clear | 3.1e-3 | 31.70 |
+| 512 | **8 388 608** | **16 777 216** | clear | 4.5e-3 | 93.24 |
+| 1024 | 8 388 608 | 16 777 216 | clear | 5.9e-3 | *withheld, over gate* |
+| 1024 | 16 777 216 | 33 554 432 | clear | 1.9e-2 | *withheld, over gate* |
 
-Per-device N is **1 048 576**, against the 8000 this note set out to correct: 128x,
-and 4096 leaves per device against the 64 that named the ceiling. The two largest
-points need `m2l_chunk=65536` and `nearfield_chunk=512`, which bound the far-field
-and near-field peak memory rather than the pair count.
+So the largest configuration that clears both the flags **and** the accuracy gate is
+**8 388 608 particles per device, 16 777 216 total on two cards**, at leaf 512. That
+is 1049x the 8000 this note set out to correct. Beyond it the walk still fits --
+16 777 216/device runs with every flag clear -- but at order 3 the force error has
+drifted to 1.9e-2 and the harness refuses to call it a result.
 
-The last row is the wall that replaced this one, and it is recorded as a failure on
-purpose: at 4 devices and 1 048 576/device the **cross** near list overflows on
-every device. The harness set `timing_skipped: "overflow: cross_near_overflow"` and
-refused to report a time, which is the discipline this note argued for -- its
-`rel_l2` of 0.61 is what a truncated force looks like when someone does read it.
+**Leaf size is the lever on both axes at once.** At 4 194 304/device, leaf 512 is
+both **faster** (31.70 s against 44.77 s, 1.41x) and **more accurate** (3.1e-3
+against 4.0e-3) than leaf 256. That is the buffer story above read forwards: every
+dense buffer is indexed by leaf, so halving the leaf count halves the work the walk
+does on padding.
+
+**The wall that is left is throughput, and it is super-linear.** At leaf 256, going
+1 048 576 -> 4 194 304 per device is 4x the particles for **11x the time** (4.08 s ->
+44.77 s). Two things make it so: the dense buffers scale with `num_leaves` while the
+number of leaves scales with N, so their product is quadratic in per-device N at
+fixed leaf size; and honouring a wavefront capacity costs time *linearly* whether or
+not the pairs are live. Raising `leaf_size` attacks both, which is why the 512 and
+1024 rows exist.
+
+**A faster, looser arm exists and does not clear the gate.** The `fastlane_*` runs
+(theta=0.8, order 4, `far_m2l_fp32=True`) reach the same sizes with every flag
+clear, but `rel_l2` is 6.0e-3 at 1M/device rising to 8.0e-3 at 4.19M/device -- over
+the gate at every size from 1M/device up. It is a real configuration; it is not a
+result at this accuracy bar.
+
+**Four devices are a different and largely unmeasured story.** Post-fix the mesh is
+clean to 524 288/device (2 097 152 total, rel_l2 2.1e-3, 3.54 s). The one recorded
+failure above that -- 1 048 576/device, `cross_near_overflow` on all four devices,
+rel_l2 0.61 -- is a **pre-fix run and should not be read as the current state**: its
+recorded caps are `cross_max_neighbors_per_leaf=4096`, which is the ndev=2 value,
+where the shipped derivation gives `(ndev - 1) * num_leaves = 16384`. It is the
+"before" arm of the very commit that fixed this (`66b9ceb`), preserved deliberately.
+**4 devices above 524 288/device has not been re-measured since**, and that -- not a
+known wall -- is what the four-device column is waiting on.
 
 ## Follow-ups
 
@@ -215,9 +252,18 @@ refused to report a time, which is the discipline this note argued for -- its
 - ~~`theta_cross` defaults to 0.1, strict enough that nearly all cross-domain work
   lands in the near field.~~ **Superseded**: there is no `theta_cross` any more, and
   the cross walk runs at one theta with accepted pairs routed through M2L.
-- **Open: the cross near field is the next ceiling.** It is what fails at 4 devices
-  and 1 048 576/device in the table above, and unlike the self caps it is not
-  bounded by anything the local tree knows.
+- **Open: four devices above 524 288/device is unmeasured.** The one recorded failure
+  there is a *pre-fix* run (see the note under the table) and does not establish a
+  wall. It does mark the right place to look: the cross caps carry an `(ndev - 1)`
+  factor the self caps do not, so the cross buffers are the ones that grow with the
+  mesh.
+- **Open: throughput, not capacity, is what now limits per-device N.** 4x the
+  particles costs 11x the time at fixed leaf size. `leaf_size` is the lever and it
+  helps on both axes at once; whether it keeps helping past 1024 is unmeasured.
+- **Open: the accuracy budget at scale.** At order 3, `rel_l2` drifts from 1.3e-3 at
+  524 288/device to 1.9e-2 at 16 777 216/device. Whether raising the order buys that
+  back cheaply -- it is nearly free on one card, where the far field is under 1 % --
+  has not been tried on the mesh.
 
 ## Where this is used
 
