@@ -7,7 +7,6 @@ then rotate local coefficients back.
 
 from __future__ import annotations
 
-import os
 from functools import partial
 from typing import Any, Callable
 
@@ -17,6 +16,7 @@ import numpy as np
 from jax import lax
 from jaxtyping import Array
 
+from jaccpot._env import env_flag
 from jaccpot.operators.real_dehnen_q import (
     compute_real_B_matrix_multipole,
 )
@@ -72,7 +72,7 @@ def _rotate_multipole_to_z_single(
     Array
         Coefficients in the z-aligned frame, same shape and dtype.
     """
-    if _DEGREE_BATCHED:
+    if _degree_batched():
         return _rotate_degree_batched(
             multipole, delta, order=int(order), local_side=False
         )
@@ -85,14 +85,24 @@ def _rotate_multipole_to_z_single(
     return out
 
 
-# Collapse the per-degree launches, or keep the unrolled form. Off by default
-# until the A/B lands; see `_rotate_degree_batched`.
-_DEGREE_BATCHED = os.environ.get("JACCPOT_M2L_DEGREE_BATCHED", "0").strip().lower() in {
-    "1",
-    "true",
-    "yes",
-    "on",
-}
+def _degree_batched() -> bool:
+    """Whether to collapse the per-degree launches into the batched form.
+
+    Off by default until the A/B lands; see :func:`_rotate_degree_batched`.
+
+    Read at call time, not captured into a module-level constant. It used to be
+    the latter, which is the defect ``jaccpot._env`` exists to prevent: a knob
+    resolved at import cannot be changed by anyone who sets the variable after
+    ``import jaccpot``, so it silently does nothing -- worse, as that module's
+    docstring puts it, than not having the knob at all. Both call sites are
+    trace-time branches, so this costs one lookup per trace, not per element.
+
+    Returns
+    -------
+    bool
+        ``True`` when the batched rotation path should be taken.
+    """
+    return env_flag("JACCPOT_M2L_DEGREE_BATCHED", False)
 
 
 def _centred_degree_maps(order: int) -> tuple[Array, Array]:
@@ -274,7 +284,7 @@ def _rotate_local_from_z_single(local_z: Array, delta: Array, *, order: int) -> 
     Array
         Coefficients back in the world frame.
     """
-    if _DEGREE_BATCHED:
+    if _degree_batched():
         return _rotate_degree_batched(local_z, delta, order=int(order), local_side=True)
     x, y, z = delta[0], delta[1], delta[2]
     out = jnp.zeros_like(local_z)
