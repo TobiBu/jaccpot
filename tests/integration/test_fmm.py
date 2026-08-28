@@ -18,6 +18,7 @@ import jaccpot.runtime.fmm as fmm_module
 import jaccpot.runtime.fmm_prepare as fmm_prepare_private
 import jaccpot.runtime.kernels.core as kernels_core
 from jaccpot import FMMPreset
+from jaccpot.config import RuntimePolicyConfig
 from jaccpot.downward.local_expansions import (
     TreeDownwardData,
 )
@@ -2522,7 +2523,7 @@ def test_prepare_state_cache_respects_traversal_config_changes():
         theta=0.55,
         softening=5e-4,
         working_dtype=jnp.float32,
-        traversal_config=config_a,
+        runtime_policy=RuntimePolicyConfig(traversal_config=config_a),
     )
     fmm.prepare_state(
         positions,
@@ -3332,7 +3333,7 @@ def test_fast_preset_adaptive_policy_respects_explicit_overrides():
         expansion_basis="solidfmm",
         complex_rotation="solidfmm",
         mac_type="dehnen",
-        traversal_config=cfg,
+        runtime_policy=RuntimePolicyConfig(traversal_config=cfg),
         m2l_chunk_size=2048,
     )
 
@@ -3579,7 +3580,7 @@ def test_solidfmm_dehnen_accuracy_improves_with_order():
                 theta=0.9,
                 softening=softening,
                 working_dtype=jnp.float64,
-                traversal_config=traversal,
+                runtime_policy=RuntimePolicyConfig(traversal_config=traversal),
                 expansion_basis="solidfmm",
                 complex_rotation="solidfmm",
                 mac_type="dehnen",

@@ -25,15 +25,42 @@ value or accepted the default -- a distinction the policy layer later reads, so
 
 from __future__ import annotations
 
+import dataclasses
+
 import jax.numpy as jnp
 import pytest
 
+from jaccpot.config import RuntimePolicyConfig
 from jaccpot.runtime._fmm_impl import FMMEngine
+
+_POLICY_FIELDS = {f.name for f in dataclasses.fields(RuntimePolicyConfig)}
 
 
 def _engine(**kwargs):
+    """Build an engine, routing execution-policy knobs through their group.
+
+    The seventeen policy knobs moved into ``RuntimePolicyConfig`` (audit F09),
+    so this splits them out of ``kwargs`` and passes them as one object. Tests
+    below keep naming them individually, which is what makes them readable --
+    the grouping is a constructor detail, not something each test should have to
+    spell out.
+
+    Parameters
+    ----------
+    **kwargs
+        Engine keywords; any belonging to ``RuntimePolicyConfig`` are collected
+        into a ``runtime_policy=`` argument.
+
+    Returns
+    -------
+    FMMEngine
+        A fresh engine.
+    """
+    policy = {k: kwargs.pop(k) for k in list(kwargs) if k in _POLICY_FIELDS}
     base = dict(theta=0.6, working_dtype=jnp.float32)
     base.update(kwargs)
+    if policy:
+        base["runtime_policy"] = RuntimePolicyConfig(**policy)
     return FMMEngine(**base)
 
 

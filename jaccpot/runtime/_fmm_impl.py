@@ -69,6 +69,7 @@ from jaccpot.config import (
     FMMPreset,
     MACTypeInput,
     MemoryObjective,
+    RuntimePolicyConfig,
     TraversalOverrides,
 )
 from jaccpot.downward.local_expansions import LocalExpansionData
@@ -313,13 +314,6 @@ class FMMEngine(
         it bounds peak memory rather than changing the result.
     l2l_chunk_size : Optional[int]
         The same for the L2L cascade.
-    max_pair_queue : Optional[int]
-        Capacity of the dual-tree pair queue.
-    pair_process_block : Optional[int]
-        Legacy override for the traversal process-block width.
-    traversal_config : Optional[Union[DualTreeTraversalConfig, TraversalOverrides, Mapping[str, int]]]
-        Traversal capacities -- see the note above for the two accepted forms and
-        why they behave differently.
     tree_build_mode : Optional[str]
         Which builder constructs the tree. ``None`` takes the default, ``"lbvh"``;
         ``"fixed_depth"`` enables the refinement knobs below.
@@ -366,44 +360,12 @@ class FMMEngine(
     runtime_path : Literal['auto', 'large_n']
         ``"auto"`` or ``"large_n"``. Forcing ``"large_n"`` selects the memory-lean
         lane regardless of particle count.
-    execution_backend : FMMExecutionBackend
-        ``"auto"``, ``"radix"`` or ``"octree"``. ``"auto"`` may choose; an explicit
-        request is honoured or fails loudly, never silently substituted.
     nearfield_edge_chunk_size : int
         Pairs per chunk in the bucketed near-field kernel. A memory/throughput knob;
         it does not change the result.
     precompute_nearfield_scatter_schedules : bool
         Build the near-field scatter schedules at prepare time rather than per
         evaluation. Trades prepare-time memory for per-call throughput.
-    memory_objective : MemoryObjective
-        ``"balanced"``, ``"throughput"`` or ``"minimum_memory"``; steers the chunk-
-        size and streaming defaults.
-    memory_budget_bytes : Optional[int]
-        Advisory ceiling used when resolving those defaults.
-    enable_interaction_cache : bool
-        Reuse the process-level interaction-list cache across calls.
-    retain_traversal_result : bool
-        Keep the dual-tree walk result on the prepared state.
-    retain_interactions : bool
-        Keep the resolved M2L interaction list on the prepared state.
-    prepare_stage_memory_split_enabled : Optional[bool]
-        Split the prepare stage to lower peak memory at some throughput cost.
-    autotune_m2l_chunk : bool
-        Measure and pick the M2L chunk size at prepare time. Off by default, and
-        consequently the autotune path is thinly covered.
-    precompute_grouped_class_segments : Optional[bool]
-        Build grouped-class segment tables at prepare time.
-    grouped_schedule_budget_bytes : Optional[int]
-        Byte budget above which grouped-class precomputation is skipped.
-    nearfield_schedule_item_cap : Optional[int]
-        Item cap above which the near-field scatter schedules fall back to being
-        recomputed per evaluation.
-    upward_leaf_batch_size : Optional[int]
-        Leaves per batch in the P2M sweep.
-    host_refine_mode : str
-        Whether leaf refinement runs on the host, on device, or by policy.
-    fail_fast : bool
-        Raise instead of falling back when a requested configuration cannot run.
     preset : Optional[Union[str, FMMPreset]]
         Named configuration bundle applied before the individual keywords above. An
         enum member or its string value.
@@ -411,6 +373,19 @@ class FMMEngine(
         Pin the expansion order, bypassing preset and adaptive selection.
     fixed_max_leaf_size : Optional[int]
         Pin the maximum leaf size, bypassing preset selection.
+
+    runtime_policy : Optional[RuntimePolicyConfig]
+        The seventeen execution-policy knobs, as one frozen group: backend and
+        host-refine mode, ``fail_fast``, the memory objective and budget, the
+        traversal capacities and overrides, the cache/retention flags, the
+        autotune switch and the schedule budgets. ``None`` means
+        ``RuntimePolicyConfig()``, whose defaults were checked field by field
+        against the flat parameters this replaced -- all seventeen matched, so
+        omitting it is exactly the old behaviour. Each field is documented on
+        :class:`jaccpot.config.RuntimePolicyConfig`, which is the public
+        vocabulary the facade already builds; this signature used to flatten it
+        back out into seventeen keywords, and that duplication is what audit F09
+        called unreviewable.
 
     Raises
     ------
@@ -456,14 +431,9 @@ class FMMEngine(
         dehnen_radius_scale: float = 1.0,
         m2l_chunk_size: Optional[int] = None,
         l2l_chunk_size: Optional[int] = None,
-        max_pair_queue: Optional[int] = None,
-        pair_process_block: Optional[int] = None,
         # DualTreeTraversalConfig (replace all four capacities), or a
         # TraversalOverrides / mapping of named capacities (merge onto the
         # preset's resolved sizing). See normalize_traversal_config_request.
-        traversal_config: Optional[
-            Union[DualTreeTraversalConfig, TraversalOverrides, Mapping[str, int]]
-        ] = None,
         tree_build_mode: Optional[str] = None,
         tree_type: str = "radix",
         target_leaf_particles: Optional[int] = None,
@@ -480,26 +450,38 @@ class FMMEngine(
         mixed_order_min_order: Optional[int] = None,
         nearfield_mode: NearFieldMode = "auto",
         runtime_path: Literal["auto", "large_n"] = "auto",
-        execution_backend: FMMExecutionBackend = "auto",
         nearfield_edge_chunk_size: int = 256,
         precompute_nearfield_scatter_schedules: bool = True,
-        memory_objective: MemoryObjective = "balanced",
-        memory_budget_bytes: Optional[int] = None,
-        enable_interaction_cache: bool = True,
-        retain_traversal_result: bool = True,
-        retain_interactions: bool = True,
-        prepare_stage_memory_split_enabled: Optional[bool] = None,
-        autotune_m2l_chunk: bool = False,
-        precompute_grouped_class_segments: Optional[bool] = None,
-        grouped_schedule_budget_bytes: Optional[int] = None,
-        nearfield_schedule_item_cap: Optional[int] = None,
-        upward_leaf_batch_size: Optional[int] = None,
-        host_refine_mode: str = "auto",
-        fail_fast: bool = False,
         preset: Optional[Union[str, FMMPreset]] = None,
         fixed_order: Optional[int] = None,
         fixed_max_leaf_size: Optional[int] = None,
+        runtime_policy: Optional[RuntimePolicyConfig] = None,
     ):
+        # The seventeen execution-policy knobs arrive as one frozen group
+        # (audit F09). Unpacked into the same locals the flat parameters used,
+        # so every line below this point is untouched and the resolution order
+        # is unchanged. RuntimePolicyConfig's defaults were verified field by
+        # field against the flat defaults before the swap -- all seventeen
+        # matched, so a caller who omits the group gets exactly what it got.
+        _policy = RuntimePolicyConfig() if runtime_policy is None else runtime_policy
+        execution_backend = _policy.execution_backend
+        host_refine_mode = _policy.host_refine_mode
+        fail_fast = _policy.fail_fast
+        memory_objective = _policy.memory_objective
+        memory_budget_bytes = _policy.memory_budget_bytes
+        max_pair_queue = _policy.max_pair_queue
+        pair_process_block = _policy.pair_process_block
+        traversal_config = _policy.traversal_config
+        enable_interaction_cache = _policy.enable_interaction_cache
+        retain_traversal_result = _policy.retain_traversal_result
+        retain_interactions = _policy.retain_interactions
+        prepare_stage_memory_split_enabled = _policy.prepare_stage_memory_split_enabled
+        autotune_m2l_chunk = _policy.autotune_m2l_chunk
+        precompute_grouped_class_segments = _policy.precompute_grouped_class_segments
+        grouped_schedule_budget_bytes = _policy.grouped_schedule_budget_bytes
+        nearfield_schedule_item_cap = _policy.nearfield_schedule_item_cap
+        upward_leaf_batch_size = _policy.upward_leaf_batch_size
+
         self._validate_expansion_family(
             adaptive_order=adaptive_order,
             basis_impl=basis_impl,

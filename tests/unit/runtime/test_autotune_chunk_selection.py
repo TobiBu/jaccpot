@@ -28,6 +28,7 @@ import numpy as np
 import pytest
 
 import jaccpot.runtime.fmm_autotune as autotune_mod
+from jaccpot.config import RuntimePolicyConfig
 from jaccpot.runtime._fmm_impl import FMMEngine
 from jaccpot.runtime.fmm_autotune import _GPU_M2L_AUTOTUNE_PAIR_BINS
 
@@ -51,7 +52,7 @@ def problem():
         complex_rotation="solidfmm",
         theta=0.6,
         working_dtype=jnp.float32,
-        autotune_m2l_chunk=True,
+        runtime_policy=RuntimePolicyConfig(autotune_m2l_chunk=True),
     )
     key = jax.random.PRNGKey(2)
     key_pos, key_mass = jax.random.split(key)
@@ -86,7 +87,7 @@ def test_returns_none_when_autotuning_is_off(problem, on_gpu):
         complex_rotation="solidfmm",
         theta=0.6,
         working_dtype=jnp.float32,
-        autotune_m2l_chunk=False,
+        runtime_policy=RuntimePolicyConfig(autotune_m2l_chunk=False),
     )
     assert (
         off._autotune_runtime_m2l_chunk_size(
@@ -103,7 +104,7 @@ def test_returns_none_for_a_non_solidfmm_basis(problem, on_gpu):
         expansion_basis="cartesian",
         theta=0.6,
         working_dtype=jnp.float32,
-        autotune_m2l_chunk=True,
+        runtime_policy=RuntimePolicyConfig(autotune_m2l_chunk=True),
     )
     assert (
         other._autotune_runtime_m2l_chunk_size(
