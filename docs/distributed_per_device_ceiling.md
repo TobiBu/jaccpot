@@ -245,53 +245,79 @@ result at this accuracy bar.
 
 **Four devices, measured 2026-08-28** (4xA100-PCIE-40GB, jax 0.10.2, x64, disc IC,
 theta=0.4, dehnen MAC, fp64, `m2l_chunk=65536`, `nearfield_chunk=512`, order 3 unless
-stated; one rung per process):
+stated; one rung per process). **`probe` is quoted with every error**: it sets which
+targets the direct-sum reference covers, and a comparison across two probe values is
+not a comparison -- see the trap at the end of this section.
 
-| leaf | N/device | total | flags | rel_l2 | s/force | peak GiB |
-| --- | --- | --- | --- | --- | --- | --- |
-| 256 | 1 048 576 | 4 194 304 | clear | 4.1e-3 | 16.00 | 4.11 |
-| 512 | 2 097 152 | 8 388 608 | clear | 6.3e-3 | withheld | 3.94 |
-| 512 | 4 194 304 | 16 777 216 | clear | 8.3e-3 | withheld | 16.28 |
-| 512 | 4 194 304 | 16 777 216 | clear | 8.1e-3 *(order 5)* | withheld | 16.29 |
-| 1024 | **8 388 608** | **33 554 432** | clear | 1.2e-2 | withheld | 15.73 |
-| 512 | 8 388 608 | 33 554 432 | **OOM** -- 53.24 GiB in one allocation | -- | -- | -- |
+| leaf | N/device | total | leaves/dev | flags | rel_l2 (probe) | s/force | peak GiB |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| 256 | 1 048 576 | 4 194 304 | 4096 | clear | 4.1e-3 (256) | 16.00 | 4.11 |
+| 512 | 2 097 152 | 8 388 608 | 4096 | clear | 6.3e-3 (256) | withheld | 3.94 |
+| 512 | 4 194 304 | 16 777 216 | 8192 | clear | 8.3e-3 (256) | withheld | 16.28 |
+| 512 | 4 194 304 | 16 777 216 | 8192 | clear | 8.1e-3 (256) *order 5* | withheld | 16.29 |
+| 1024 | 8 388 608 | 33 554 432 | 8192 | clear | 1.2e-2 (256) | withheld | 15.73 |
+| 2048 | **16 777 216** | **67 108 864** | 8192 | clear | 2.3e-2 (128) | withheld | 17.08 |
+| 512 | 8 388 608 | 33 554 432 | 16384 | **OOM** 53.24 GiB | -- | -- | -- |
+| 1024 | 16 777 216 | 67 108 864 | 16384 | **OOM** 52.34 GiB | -- | -- | -- |
 
-Four things this settles.
+**1. The capacity wall is a LEAF-COUNT wall, not a particle wall.** Read the
+`leaves/dev` column against the outcome: **8192 leaves fits (15.7-17.1 GiB at every
+leaf size tried); 16 384 leaves OOMs, on a single ~53 GiB allocation, at both leaf 512
+and leaf 1024.** The two OOMs are the same allocation to within 2 %, at particle counts
+that differ by 2x. So per-device capacity is
 
-**1. The pre-fix "wall" is gone, confirmed rather than inferred.** 1 048 576/device on
-four devices -- the rung whose stale run this note used to quote as the next ceiling --
-now runs clean, at `cross_max_neighbors_per_leaf=16384`, the post-fix derived value,
-against the 4096 the stale record carries. Capacity reaches **33 554 432 particles on
-four cards**, eight times what that record implied.
+        max particles/device  ~=  8192 leaves  x  leaf_size
 
-**2. Accuracy binds long before capacity does.** Only the smallest rung clears the
-5e-3 gate. Everything above it runs with every flag clear and is refused a timing on
-accuracy alone.
+and raising `leaf_size` buys particles one-for-one. That is not a fitted rule: it was
+used to *predict* that leaf 2048 would put 16 777 216/device back under the wall, and it
+did -- **67 108 864 particles on four A100s**, at 17.08 of 29.6 GiB. The ~53 GiB
+allocation is not yet identified; identifying and chunking it is what would move this
+wall rather than trade around it.
 
-**3. The error is cross-domain-limited, not truncation-limited -- so raising the order
-does not buy it back.** At 4 194 304/device, going from order 3 to **order 5** moves
-`rel_l2` from 8.344e-3 to 8.146e-3: **2.4 %**, for two extra expansion orders. On one
-card raising the order is nearly free and does help; here it does not, because what
-is being approximated badly is the cross-domain term, and its accuracy is set by the
-coarse LET frontier and `theta`, not by `p`.
+**2. The pre-fix "wall" is gone, confirmed rather than inferred.** 1 048 576/device --
+the rung whose stale run this note used to quote as the next ceiling -- runs clean at
+`cross_max_neighbors_per_leaf=16384`, the post-fix derived value, against the 4096 the
+stale record carries.
 
-**4. Splitting a fixed problem across more devices costs accuracy, roughly 2x per
-doubling of the mesh.** At the same *total* N:
+**3. Accuracy binds long before capacity**, and **neither obvious lever moves it**:
 
-| total N | 2 devices | 4 devices | ratio |
+* **Expansion order does not.** At 4 194 304/device, order 3 -> **5** moves `rel_l2`
+  from 8.344e-3 to 8.146e-3: **2.4 %, for two extra orders**. On one card raising the
+  order is nearly free and does help; here it does not.
+* **A stricter MAC makes it WORSE**, which is the surprising one. At matched probe,
+  theta 0.4 -> 0.3 moves `rel_l2` from 4.417e-3 to 6.783e-3 on **two** devices and from
+  6.257e-3 to 9.610e-3 on **four**. Both with the wavefront honoured, no overflow flag,
+  and `self_near_pairs` rising as a stricter MAC requires (21.8M -> 32.2M on four). So
+  it is not truncation: moving work *out* of the multipole approximation and into exact
+  summation made the answer further from the exact answer. Whatever dominates this
+  error, it is not the MAC, and it is not the expansion order. **That is the open
+  question**, and it is not mesh-specific -- the same inversion appears at two devices.
+
+**4. Lowering theta silently truncates unless you also raise the wavefront.**
+`_derive_walk_caps` takes `(per_device_n, leaf_size, ndev)` and **not `theta`**, while
+its coefficient was measured at theta=0.4. A stricter MAC refines more pairs, so the
+derived self wavefront stops being sufficient. Measured, leaf 512, 2 097 152/device,
+four devices:
+
+| theta | `max_pair_queue` | `self_near_pairs` | flags |
 | --- | --- | --- | --- |
-| 8 388 608 | 3.1e-3 | 6.3e-3 | 2.0x |
-| 16 777 216 | 4.5e-3 | 8.3e-3 | 1.9x |
+| 0.4 | 1 048 576 (derived) | 21 814 458 | clear |
+| 0.3 | 1 048 576 (derived) | 19 526 578 | **`self_queue_overflow`** |
+| 0.2 | 1 048 576 (derived) | 4 212 018 | **`self_queue_overflow`** |
+| 0.3 | 4 194 304 (explicit) | 32 240 970 | clear |
 
-More domains means more of each device's interaction list is cross-domain, and
-cross-domain work is the approximated-most-coarsely part of this lane. That is a
-property of the decomposition, not a bug, and it is the thing to fix if four-device
-runs are to be quoted at the same accuracy as two-device ones.
+A near count that *falls* as the MAC gets stricter is the truncation signature this
+note exists to name. The `rel_l2` on those two truncated rows is 5.5e-1 and 8.5e-1.
 
-**And the memory wall has a cheap workaround, for the same reason leaf size is the
-lever everywhere else here.** At 8 388 608/device, leaf 512 OOMs on a single 53.24 GiB
-allocation while leaf 1024 peaks at 15.73 GiB and completes -- the same particles, half
-the leaves. `num_leaves`, not N, is what sizes the buffers.
+**The trap, recorded because it cost two wrong numbers in this file.** `rel_l2` is
+computed against a **subsampled** direct sum, and the sample is set by `--probe`. The
+same configuration reads **3.134e-3 at probe 192 and 4.417e-3 at probe 256** -- a 41 %
+difference from the reference alone. An earlier draft of this section reported "~2x
+error per mesh doubling" by comparing recorded two-device rows (probe 192) against new
+four-device rows (probe 256). At matched probe the figure is **1.42x** (4.417e-3 on two
+devices against 6.257e-3 on four, total N 8 388 608, leaf 512, theta 0.4), and one
+matched pair is not a trend. **Quote the probe with the error, or do not quote the
+error.**
 
 ## Follow-ups
 
@@ -313,11 +339,20 @@ the leaves. `num_leaves`, not N, is what sizes the buffers.
 - ~~**Open: four devices above 524 288/device is unmeasured.**~~ **Measured
   2026-08-28** -- capacity reaches 33 554 432 on four cards. What is open there is
   now accuracy, not capacity; see the next item.
-- **Open, and now the main one: the cross-domain error at mesh scale.** Four devices
-  cost ~2x the error of two at the same total N, and **order 5 does not buy it back**
-  (2.4 % at two extra orders). The lever has to be `theta` or the coarse LET frontier's
-  resolution, not `p`. Until that moves, a four-device run cannot be quoted at the
-  accuracy a two-device one can.
+- **Open, and now the main one: what actually sets the error at scale.** Neither
+  candidate survives measurement -- order 5 buys 2.4 %, and a *stricter* MAC makes the
+  error **worse**, at two devices as well as four. Moving work out of the multipole
+  approximation and into exact summation moving the answer away from the exact answer
+  is not a truncation signature, so the next step is per-stage error attribution
+  (self-far, cross-far, cross-near, halo) rather than another knob sweep.
+- **Open: `_derive_walk_caps` ignores `theta`.** Its wavefront coefficient was measured
+  at theta=0.4 and the rule has no theta term, so lowering theta silently truncates
+  (see the table above). Either derive the wavefront with a theta dependence, or make
+  the walk report a required size instead of truncating.
+- **Open: identify and chunk the ~53 GiB allocation** that sets the 16 384-leaf wall.
+  Every other full-batch wall on this lane already has a chunking knob (`m2l_chunk`,
+  `nearfield_chunk`); this one does not, and it is what stands between 67 M particles
+  on four cards and more.
 - **Open: throughput, not capacity, is what now limits per-device N.** 4x the
   particles costs 11x the time at fixed leaf size. `leaf_size` is the lever and it
   helps on time, memory and accuracy at once up to 512; at 1024 it still buys memory

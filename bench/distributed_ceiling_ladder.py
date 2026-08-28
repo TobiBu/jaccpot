@@ -309,12 +309,22 @@ def _one_point(
         overrides["nearfield_chunk"] = args.nearfield_chunk
     if args.far_m2l_fp32:
         overrides["far_m2l_fp32"] = True
-    # The cross-walk caps, overridable so the rung that walls on one of them can be
-    # bisected without editing the config's defaults.
+    # The cross-walk caps, plus the SELF wavefront, overridable so the rung that walls
+    # on one of them can be bisected without editing the config's defaults.
+    #
+    # `--pair-queue` exists because `_derive_walk_caps` takes (per_device_n, leaf_size,
+    # ndev) and NOT theta, while its coefficient was measured at theta=0.4. A stricter
+    # MAC refines more pairs, so lowering theta overflows the self wavefront at a cap
+    # the derivation still calls sufficient -- measured on 4xA100, leaf 512, 2 097 152
+    # per device, order 3: `self_near_pairs` 21 814 458 at theta 0.4 (clear), then
+    # 19 526 578 at 0.3 and 4 212 018 at 0.2, both with `self_queue_overflow` set. A
+    # near count that FALLS as the MAC gets stricter is the truncation signature. So
+    # theta cannot be used as an accuracy lever at scale without setting this too.
     for name, value in (
         ("cross_max_neighbors_per_leaf", args.cross_neighbors),
         ("cross_max_interactions_per_node", args.cross_interactions),
         ("cross_max_pair_queue", args.cross_queue),
+        ("max_pair_queue", args.pair_queue),
     ):
         if value:
             overrides[name] = value
@@ -468,6 +478,13 @@ def main(argv: Optional[list[str]] = None) -> int:
     ap.add_argument("--cross-neighbors", type=int, default=0)
     ap.add_argument("--cross-interactions", type=int, default=0)
     ap.add_argument("--cross-queue", type=int, default=0)
+    ap.add_argument(
+        "--pair-queue",
+        type=int,
+        default=0,
+        help="override the SELF wavefront capacity; needed to lower theta, whose "
+        "effect on the wavefront the derivation does not model (see _one_point)",
+    )
     ap.add_argument("--m2l-chunk", type=int, default=0)
     ap.add_argument("--nearfield-chunk", type=int, default=0)
     ap.add_argument("--reps", type=int, default=3)
