@@ -243,15 +243,55 @@ clear, but `rel_l2` is 6.0e-3 at 1M/device rising to 8.0e-3 at 4.19M/device -- o
 the gate at every size from 1M/device up. It is a real configuration; it is not a
 result at this accuracy bar.
 
-**Four devices are a different and largely unmeasured story.** Post-fix the mesh is
-clean to 524 288/device (2 097 152 total, rel_l2 2.1e-3, 3.54 s). The one recorded
-failure above that -- 1 048 576/device, `cross_near_overflow` on all four devices,
-rel_l2 0.61 -- is a **pre-fix run and should not be read as the current state**: its
-recorded caps are `cross_max_neighbors_per_leaf=4096`, which is the ndev=2 value,
-where the shipped derivation gives `(ndev - 1) * num_leaves = 16384`. It is the
-"before" arm of the very commit that fixed this (`66b9ceb`), preserved deliberately.
-**4 devices above 524 288/device has not been re-measured since**, and that -- not a
-known wall -- is what the four-device column is waiting on.
+**Four devices, measured 2026-08-28** (4xA100-PCIE-40GB, jax 0.10.2, x64, disc IC,
+theta=0.4, dehnen MAC, fp64, `m2l_chunk=65536`, `nearfield_chunk=512`, order 3 unless
+stated; one rung per process):
+
+| leaf | N/device | total | flags | rel_l2 | s/force | peak GiB |
+| --- | --- | --- | --- | --- | --- | --- |
+| 256 | 1 048 576 | 4 194 304 | clear | 4.1e-3 | 16.00 | 4.11 |
+| 512 | 2 097 152 | 8 388 608 | clear | 6.3e-3 | withheld | 3.94 |
+| 512 | 4 194 304 | 16 777 216 | clear | 8.3e-3 | withheld | 16.28 |
+| 512 | 4 194 304 | 16 777 216 | clear | 8.1e-3 *(order 5)* | withheld | 16.29 |
+| 1024 | **8 388 608** | **33 554 432** | clear | 1.2e-2 | withheld | 15.73 |
+| 512 | 8 388 608 | 33 554 432 | **OOM** -- 53.24 GiB in one allocation | -- | -- | -- |
+
+Four things this settles.
+
+**1. The pre-fix "wall" is gone, confirmed rather than inferred.** 1 048 576/device on
+four devices -- the rung whose stale run this note used to quote as the next ceiling --
+now runs clean, at `cross_max_neighbors_per_leaf=16384`, the post-fix derived value,
+against the 4096 the stale record carries. Capacity reaches **33 554 432 particles on
+four cards**, eight times what that record implied.
+
+**2. Accuracy binds long before capacity does.** Only the smallest rung clears the
+5e-3 gate. Everything above it runs with every flag clear and is refused a timing on
+accuracy alone.
+
+**3. The error is cross-domain-limited, not truncation-limited -- so raising the order
+does not buy it back.** At 4 194 304/device, going from order 3 to **order 5** moves
+`rel_l2` from 8.344e-3 to 8.146e-3: **2.4 %**, for two extra expansion orders. On one
+card raising the order is nearly free and does help; here it does not, because what
+is being approximated badly is the cross-domain term, and its accuracy is set by the
+coarse LET frontier and `theta`, not by `p`.
+
+**4. Splitting a fixed problem across more devices costs accuracy, roughly 2x per
+doubling of the mesh.** At the same *total* N:
+
+| total N | 2 devices | 4 devices | ratio |
+| --- | --- | --- | --- |
+| 8 388 608 | 3.1e-3 | 6.3e-3 | 2.0x |
+| 16 777 216 | 4.5e-3 | 8.3e-3 | 1.9x |
+
+More domains means more of each device's interaction list is cross-domain, and
+cross-domain work is the approximated-most-coarsely part of this lane. That is a
+property of the decomposition, not a bug, and it is the thing to fix if four-device
+runs are to be quoted at the same accuracy as two-device ones.
+
+**And the memory wall has a cheap workaround, for the same reason leaf size is the
+lever everywhere else here.** At 8 388 608/device, leaf 512 OOMs on a single 53.24 GiB
+allocation while leaf 1024 peaks at 15.73 GiB and completes -- the same particles, half
+the leaves. `num_leaves`, not N, is what sizes the buffers.
 
 ## Follow-ups
 
@@ -270,11 +310,14 @@ known wall -- is what the four-device column is waiting on.
 - ~~`theta_cross` defaults to 0.1, strict enough that nearly all cross-domain work
   lands in the near field.~~ **Superseded**: there is no `theta_cross` any more, and
   the cross walk runs at one theta with accepted pairs routed through M2L.
-- **Open: four devices above 524 288/device is unmeasured.** The one recorded failure
-  there is a *pre-fix* run (see the note under the table) and does not establish a
-  wall. It does mark the right place to look: the cross caps carry an `(ndev - 1)`
-  factor the self caps do not, so the cross buffers are the ones that grow with the
-  mesh.
+- ~~**Open: four devices above 524 288/device is unmeasured.**~~ **Measured
+  2026-08-28** -- capacity reaches 33 554 432 on four cards. What is open there is
+  now accuracy, not capacity; see the next item.
+- **Open, and now the main one: the cross-domain error at mesh scale.** Four devices
+  cost ~2x the error of two at the same total N, and **order 5 does not buy it back**
+  (2.4 % at two extra orders). The lever has to be `theta` or the coarse LET frontier's
+  resolution, not `p`. Until that moves, a four-device run cannot be quoted at the
+  accuracy a two-device one can.
 - **Open: throughput, not capacity, is what now limits per-device N.** 4x the
   particles costs 11x the time at fixed leaf size. `leaf_size` is the lever and it
   helps on time, memory and accuracy at once up to 512; at 1024 it still buys memory
