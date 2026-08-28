@@ -19,12 +19,13 @@ from .config import (
     TraversalOverrides,
     TreeConfig,
 )
-from .nornax_adapter import BlockStepFMM
+from .nornax_adapter import BlockStepFMM, DistributedBlockStepFMM
 from .odisseo import OdisseoFMMCoupler
 from .solver import FastMultipoleMethod
 
 __all__ = [
     "BlockStepFMM",
+    "DistributedBlockStepFMM",
     "FMMAdvancedConfig",
     "FMMPreset",
     "FarFieldConfig",
