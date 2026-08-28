@@ -793,6 +793,13 @@ against a direct-sum reference):
 | 0.6 | 0.484 s | 0.994 s | **2.05×** | 4.562e-4 | 3.158e-4 |
 | 0.7 | 0.431 s | 0.812 s | **1.88×** | 9.588e-4 | 7.258e-4 |
 
+Each row is one file, i.e. one process, so the **ratio within a row is sound** —
+ratios taken back-to-back in one process survive card contention where absolute
+seconds do not (the trap recorded in `bench/profile_large_n_nearfield_stages.py`,
+where the same configuration read 1307 ms busy against 542 ms idle). Do **not**
+compare seconds *across* rows: the θ=0.6 row is from a verified-idle card and the
+θ=0.5 and θ=0.7 rows are not.
+
 At **θ=0.5 the two are at equal accuracy** (1.933e-4 against 1.940e-4, leaf 128
 marginally the better of the pair) and leaf 1024 costs 2.08× the time. At θ=0.6 and 0.7
 leaf 1024 does buy accuracy — 1.44× and 1.32× better rms — but at ~2× the evaluation,

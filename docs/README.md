@@ -12,9 +12,15 @@ retained specifically so its traps stay checkable. And a corrected measurement *
 the old number** alongside what replaced it, because the seam is usually the interesting
 part.
 
-Legend: **[current]** the one to read · **[superseded]** kept, but read the successor
-first · **[closed]** the task is done; kept for its traps or its record ·
-**[open]** describes work not finished.
+Legend: **[current]** the one to read *among the alternatives here* ·
+**[superseded]** kept, but read the successor first · **[closed]** the task is done;
+kept for its traps or its record · **[open]** describes work not finished.
+
+**What the labels are not.** `[current]` says which file to open when two or three
+cover the same ground; it is **not** a warranty that every number inside is fresh.
+Where a file declares its own status, this index repeats it; where it does not, the
+label is a routing judgement. Trust a measurement because it names its harness and its
+hardware, not because a row here called the file current.
 
 ---
 
@@ -69,7 +75,7 @@ first · **[closed]** the task is done; kept for its traps or its record ·
 | file | |
 |---|---|
 | `large_n_runtime_contract_2026-04-21.md` | **[current]** The canonical production path for `preset="large_n_gpu"`. This is the contract; the status note below is the history. |
-| `large_n_runtime_status_2026-03-23.md` | **[superseded]** Handoff from the earlier `large_N_performance` branch. Read the contract instead. |
+| `large_n_runtime_status_2026-03-23.md` | Dated handoff from the earlier `large_N_performance` branch. It does **not** point forward, so treat it as a snapshot: the contract above is the canonical statement of the path. |
 | `potential_falls_off_the_fast_lane.md` | **[open]** Diagnosed, not fixed: why a potential request leaves the large-N fast lane. |
 | `nearfield_structural_comparison_2026-04-15.md` | jaxFMM vs jaccpot near-field structure, with a 2026-04-20 status addendum. |
 | `nearfield_tonb_runbook.md` | The copy/paste path for the cross-repo TONB A/B checks. |

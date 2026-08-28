@@ -4,10 +4,12 @@
 > was found on 2026-08-24 (see [Root cause](#root-cause-the-ladder-cannot-be-climbed-under-a-trace)
 > below) and fixed in yggdrax (`#52`, `_walk_inputs_are_traced`) together with the
 > capacity derivation in `jaccpot/distributed/fmm.py` (`_derive_walk_caps`,
-> `DERIVED_CAP_FIELDS`). On two devices **no overflow flag fires anywhere in the
-> ladder**, up to 16 777 216 particles per device; the largest configuration that also
-> clears the accuracy gate is **8 388 608 per device, 16 777 216 total on two cards**
-> (leaf 512) -- 1049x the 8000 this note set out to correct. See
+> `DERIVED_CAP_FIELDS`). On two devices **no overflow flag fires at any rung that runs
+> to completion**, up to 16 777 216 particles per device; the largest configuration
+> that also clears the accuracy gate is **8 388 608 per device, 16 777 216 total on two
+> cards** (leaf 512) -- 1049x the 8000 this note set out to correct, and about twice
+> what one card carries alone. What stops the ladder is no longer a capacity: it is an
+> XLA `2^31` sort limit, hit with 5 GiB free. See
 > [After the fix](#after-the-fix-measured-on-main).
 >
 > The note is kept, and kept in its original order, for two reasons. The measurements
@@ -183,33 +185,49 @@ harness **withholds a timing** whenever the flags overflow *or* `rel_l2` exceeds
 `max_rel_l2` gate (0.005), which is why several rows below have an accuracy figure
 and no seconds.
 
-**Two devices. No overflow flag fires anywhere in this ladder** -- not at any leaf
-size, not at any N up to 16 777 216 per device. The capacity ceiling this note was
-written about is simply gone, and what replaces it is an accuracy budget:
+**Two devices.** No overflow flag fires at any rung that ran to completion, at any
+leaf size, up to 16 777 216 particles per device. The capacity ceiling this note was
+written about is gone, and two different things replace it: an **accuracy budget**,
+and one **hard non-capacity wall**. The full table, with peak memory, is kept with the
+harness in `bench/distributed_ceiling_ladder.py`; reproduced here because it is the
+answer to "how far does this go":
 
-| leaf | N/device | total | flags | rel_l2 | median s |
-| --- | --- | --- | --- | --- | --- |
-| 256 | 524 288 | 1 048 576 | clear | 1.3e-3 | 1.32 |
-| 256 | 1 048 576 | 2 097 152 | clear | 2.0e-3 | 4.08 |
-| 256 | 2 097 152 | 4 194 304 | clear | 3.0e-3 | 14.53 |
-| 256 | 3 145 728 | 6 291 456 | clear | 3.0e-3 | 31.67 |
-| 256 | **4 194 304** | **8 388 608** | clear | 4.0e-3 | 44.77 |
-| 512 | 4 194 304 | 8 388 608 | clear | 3.1e-3 | 31.70 |
-| 512 | **8 388 608** | **16 777 216** | clear | 4.5e-3 | 93.24 |
-| 1024 | 8 388 608 | 16 777 216 | clear | 5.9e-3 | *withheld, over gate* |
-| 1024 | 16 777 216 | 33 554 432 | clear | 1.9e-2 | *withheld, over gate* |
+| leaf | N/device | total | rel_l2 | s/force | peak GiB | |
+| --- | --- | --- | --- | --- | --- | --- |
+| 256 | 1 048 576 | 2 097 152 | 2.0e-3 | 4.08 | 1.93 | |
+| 256 | 2 097 152 | 4 194 304 | 3.0e-3 | 14.53 | 7.96 | |
+| 256 | 4 194 304 | 8 388 608 | 4.0e-3 | 44.77 | 27.14 | 72 % of the limit |
+| 512 | 4 194 304 | 8 388 608 | 3.1e-3 | 31.70 | 8.23 | |
+| 512 | **8 388 608** | **16 777 216** | 4.5e-3 | 93.24 | 32.59 | **largest that passes everything** |
+| 512 | 16 777 216 | -- | -- | -- | -- | **2^31 sort limit** -- see below |
+| 1024 | 4 194 304 | 8 388 608 | 6.6e-3 | withheld | 2.20 | over the 5e-3 gate |
+| 1024 | 16 777 216 | 33 554 432 | 1.9e-2 | withheld | 27.78 | over the gate |
 
-So the largest configuration that clears both the flags **and** the accuracy gate is
-**8 388 608 particles per device, 16 777 216 total on two cards**, at leaf 512. That
-is 1049x the 8000 this note set out to correct. Beyond it the walk still fits --
-16 777 216/device runs with every flag clear -- but at order 3 the force error has
-drifted to 1.9e-2 and the harness refuses to call it a result.
+The harness **withholds a timing** whenever a flag overflows *or* `rel_l2` exceeds its
+`max_rel_l2` gate (0.005), which is why four rows have an accuracy figure and no
+seconds. The largest per-device load passing every check is **8 388 608 at leaf 512 --
+16 777 216 particles on two A100s**, 1049x the 8000 this note set out to correct.
 
-**Leaf size is the lever on both axes at once.** At 4 194 304/device, leaf 512 is
-both **faster** (31.70 s against 44.77 s, 1.41x) and **more accurate** (3.1e-3
-against 4.0e-3) than leaf 256. That is the buffer story above read forwards: every
-dense buffer is indexed by leaf, so halving the leaf count halves the work the walk
-does on padding.
+**Memory is no longer the wall, and the thing that stops the ladder is not a capacity
+at all.** At leaf 512 and 16 777 216/device the run dies on
+`UNIMPLEMENTED: Stable sorting of more than 2^31-1 elements is not implemented` -- an
+int32 element-count limit inside XLA's sort, hit **with 5 GiB still free**. No
+capacity knob moves it.
+
+**How this compares to one card, since that is the question it invites.** The
+single-GPU fast lane was measured at ~4M on one card (36.3 GB of 40, 8M OOM,
+2026-07-19) at order 4 / theta 0.8 / fp32. The mesh reaches roughly the same per card
+at leaf 256 and **twice it** at leaf 512, at a *stricter* MAC in fp64. So the
+distributed lane is not behind the single-card lane per card -- which a 10^6 target,
+quoted on its own, would wrongly suggest.
+
+**Leaf size is the lever, on all three axes at once, and on memory it is
+quadratic.** At 4 194 304/device, going leaf 256 -> 512 -> 1024 drops the peak
+**27.14 -> 8.23 -> 2.20 GiB**, because the dense buffers are `[num_leaves, ~num_leaves]`
+and `num_leaves = N / leaf`. *`N` is not the variable; `N / leaf` is.* At the same
+rung leaf 512 is also **faster** (31.70 s against 44.77 s, 1.41x) and **more
+accurate** (3.1e-3 against 4.0e-3) than leaf 256. Leaf 1024 keeps buying memory but
+starts losing accuracy (6.6e-3, over the gate), so it is not free in every direction.
 
 **The wall that is left is throughput, and it is super-linear.** At leaf 256, going
 1 048 576 -> 4 194 304 per device is 4x the particles for **11x the time** (4.08 s ->
@@ -259,7 +277,11 @@ known wall -- is what the four-device column is waiting on.
   mesh.
 - **Open: throughput, not capacity, is what now limits per-device N.** 4x the
   particles costs 11x the time at fixed leaf size. `leaf_size` is the lever and it
-  helps on both axes at once; whether it keeps helping past 1024 is unmeasured.
+  helps on time, memory and accuracy at once up to 512; at 1024 it still buys memory
+  but starts costing accuracy. Whether it keeps helping past 1024 is unmeasured.
+- **Open: the `2^31` sort limit.** It is the only thing stopping the two-device ladder
+  and no capacity knob moves it. It needs either a segmented sort or an int64 element
+  count upstream, so it is a different kind of work from everything else here.
 - **Open: the accuracy budget at scale.** At order 3, `rel_l2` drifts from 1.3e-3 at
   524 288/device to 1.9e-2 at 16 777 216/device. Whether raising the order buys that
   back cheaply -- it is nearly free on one card, where the far field is under 1 % --

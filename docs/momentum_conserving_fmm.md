@@ -757,9 +757,11 @@ that read it at import.
   deliberately **shuffled** 96.41 ms are all within 1.5 % and numerically
   identical. Shuffling the pair list costs nothing, so locality is not the lever.
 * **The Pallas M2L rejection above is now stale.** Both shapes were measured at
-  0.85× against a JAX baseline this makes 1.64× faster. That does not make them
-  wins — it means the comparison would have to be redone before either shape could
-  be argued for again.
+  0.85× and 0.84× forward at N=10⁴, against a JAX baseline this makes 1.64× faster.
+  That does not make them wins — the N=10⁵ column is 0.65×/0.58× and a 1.64× stage
+  win does not close that. It means the comparison would have to be redone before
+  either shape could be argued for again, and redone at N=10⁵ where it actually
+  lost.
 
 **Where this reaches, and where it does not.** The flag lives in
 `operators/m2l_real_rot_scale`, i.e. the **real** basis. The mutual lane's dual M2L

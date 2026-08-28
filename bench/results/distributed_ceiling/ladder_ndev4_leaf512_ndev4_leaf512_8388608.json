@@ -1,0 +1,41 @@
+{
+  "args": {
+    "ndev": 4,
+    "sizes": "8388608",
+    "leaf": 512,
+    "theta": 0.4,
+    "order": 3,
+    "mac_type": "dehnen",
+    "nearfield_backend": "auto",
+    "far_m2l_fp32": false,
+    "cross_neighbors": 0,
+    "cross_interactions": 0,
+    "cross_queue": 0,
+    "m2l_chunk": 65536,
+    "nearfield_chunk": 512,
+    "reps": 2,
+    "probe": 256,
+    "max_rel_l2": 0.005,
+    "seed": 9,
+    "tag": "ndev4_leaf512_8388608"
+  },
+  "jax": "0.10.2",
+  "x64": true,
+  "devices": [
+    "NVIDIA A100-PCIE-40GB",
+    "NVIDIA A100-PCIE-40GB",
+    "NVIDIA A100-PCIE-40GB",
+    "NVIDIA A100-PCIE-40GB"
+  ],
+  "host": "compgpu9",
+  "points": [
+    {
+      "per_device_n": 8388608,
+      "ndev": 4,
+      "leaf_size": 512,
+      "failed": "JaxRuntimeError: RESOURCE_EXHAUSTED: Out of memory while trying to allocate 53.24GiB. [tf-allocator-allocation-error=''] [executable_name='jit_evaluate']",
+      "traceback": "Traceback (most recent call last):\n  File \"/export/home/tbuck/jaccpot-record-wt/bench/distributed_ceiling_ladder.py\", line 498, in main\n    row = _one_point(per_device_n=per_device_n, ndev=args.ndev, args=args)\n          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/export/home/tbuck/jaccpot-record-wt/bench/distributed_ceiling_ladder.py\", line 353, in _one_point\n    jax.block_until_ready(accel_o)\n  File \"/export/home/tbuck/jaccpot/.venv/lib/python3.12/site-packages/jax/_src/api.py\", line 2509, in block_until_ready\n    try_to_block(arrays[0])\n  File \"/export/home/tbuck/jaccpot/.venv/lib/python3.12/site-packages/jax/_src/api.py\", line 2492, in try_to_block\n    return x.block_until_ready()\n           ^^^^^^^^^^^^^^^^^^^^^\njax.errors.JaxRuntimeError: RESOURCE_EXHAUSTED: Out of memory while trying to allocate 53.24GiB. [tf-allocator-allocation-error=''] [executable_name='jit_evaluate']\n"
+    }
+  ],
+  "monotonicity_problems": []
+}
