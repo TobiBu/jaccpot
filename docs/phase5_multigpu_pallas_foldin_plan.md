@@ -2,6 +2,13 @@
 
 _Bookkeeping + plan, 2026-07-14._
 
+> **Read `docs/distributed_per_device_ceiling.md` before configuring anything from this
+> file.** Its strong-scaling bullet below is **refuted** and marked superseded in place;
+> the per-GPU capacity numbers here were all taken while a traced retry ladder was
+> silently truncating the walk, so any of them above 64 leaves per device is suspect.
+> The rest of the file — the basis work, the near-field Pallas result, the LET wiring —
+> is unaffected.
+
 ## STATUS (branch `feat/phase5-multigpu-foldin`, off `feat/phase5-pallas-m2l-prototype`)
 
 - **DONE — 5a + 5b + native-real upward, CPU-validated (4 devices vs direct):**
@@ -50,15 +57,29 @@ _Bookkeeping + plan, 2026-07-14._
 
     Throughput RISES with GPU count (positive weak scaling); per-eval grows 42→64 ms from
     LET comm + the ×2 padded-cap overhead at ndev≥4.
-  - **Strong scaling** (total N=40 000) is **density-limited**: at per-GPU N > ~8000 (ndev 2-4:
+  - ~~**Strong scaling** (total N=40 000) is **density-limited**: at per-GPU N > ~8000 (ndev 2-4:
     per=20000/13333/10000) the fixed-topology traversal caps explode and STILL overflow at
     cap×64 (max retries) → forces truncated, 400-720 ms (padded pair-queue overhead dominates).
     Only ndev=5 (per=8000) is valid (64.7 ms). **Healthy regime = per-GPU N ≈ 8000**; scale by
-    adding GPUs to keep per-GPU N there (= weak scaling).
+    adding GPUs to keep per-GPU N there (= weak scaling).~~
+    **SUPERSEDED 2026-08-21, and BOTH claims are refuted — do not configure from this
+    bullet.** See `docs/distributed_per_device_ceiling.md`. The limit is not a density and
+    not a particle count: it was **64 leaves per device**, set by `process_block`, and 8000
+    is exactly `leaf_size=128 × 64 leaves` — two defaults meeting. The 400-720 ms readings
+    are not padding overhead but a **truncated walk**, which does less work and so reads
+    *faster*; `self_near_pairs` falls as N rises across them. Root-caused 2026-08-24 to a
+    retry ladder that cannot be climbed under `shard_map` (the overflow flag is a tracer),
+    so the traced wavefront came from `process_block`, not `max_pair_queue` — which is why
+    raising `max_pair_queue` to 16.7 M changed nothing. Fixed in yggdrax `#52` plus the
+    derived caps in `jaccpot/distributed/fmm.py`. Per-device N now reaches **1 048 576**
+    (2 097 152 total on 2×A100, no overflow, rel_l2 1.8e-3), and strong scaling inside the
+    verified envelope is **flat**, not density-limited.
   - **CAVEAT: the jit=True illegal-address crash is INTERMITTENT** (nondeterministic OOB) — most
     runs succeed but one recurred at weak ndev=2; run each eval in its own process. Root-cause +
     a padded-pair-queue right-sizing (to lift the per-GPU-N ceiling for strong scaling) are the
     two remaining follow-ups.
+    **The second of those is done** (2026-08-24): the queue was never the binding constraint
+    — the traced walk ignored it entirely. See `docs/distributed_per_device_ceiling.md`.
 
 ---
 
