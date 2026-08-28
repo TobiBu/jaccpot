@@ -17,29 +17,43 @@ conservation mechanism rather than an optimisation. Drop it or double-count it a
 force is wrong at the percent level while every device's *local* momentum sum still
 looks perfect -- which is why the tests assert a global sum.
 
-**The one simplification, stated plainly: cross-domain interactions are EXACT.** The
-cross walk is driven with ``theta = 0``, so its MAC never accepts and every
-cross-domain pair refines down to leaf-leaf. Those leaf pairs are then summed
-particle-by-particle, which is precisely what a near-field kernel does. So this lane
+**The default, stated plainly: cross-domain interactions are EXACT.** ``cross_theta``
+defaults to ``0.0``, so the cross walk's MAC never accepts and every cross-domain pair
+refines down to leaf-leaf. Those leaf pairs are then summed particle-by-particle, which
+is precisely what a near-field kernel does. At the default this lane therefore
 approximates *within* a domain exactly as the single-device lane does, and does not
 approximate *between* domains at all.
 
-That is a deliberate ordering of the work, not an oversight. It isolates the question
-this lane has to answer first -- does the pair partition and the return path conserve
-momentum globally, and does the force match a direct sum -- from the separate question
-of cross-domain far-field accuracy. Routing accepted cross far pairs through M2L is the
-optimisation that follows, and it will trade exactness for pair count; nothing about the
-ownership rule or the exchange changes when it lands.
+That is a deliberate ordering of the work. It isolates the question this lane had to
+answer first -- does the pair partition and the return path conserve momentum globally,
+and does the force match a direct sum -- from the separate question of cross-domain
+far-field accuracy. It remains the default for that reason, and because it is the
+configuration every accuracy baseline here was taken at.
 
-**Where remote structure comes from, and what theta = 0 does and does not buy.** Remote
+**Lifting it is implemented.** ``cross_theta > 0`` routes accepted cross pairs through
+M2L against the remote leaf's multipole (section 7 below), which is what collapses the
+residency described further down. It needs ``node_multipoles``, ``expansion_centers``
+and ``tree_arrays``, and it is a SEPARATE additive pass rather than an injection into
+the intra-domain far field -- exact rather than merely convenient, since
+``_push_locals_down`` and ``_l2p_forces`` are both linear in the local coefficients.
+Nothing about the ownership rule or the exchange changed when it landed, as predicted.
+
+One asymmetry is worth carrying: ``far_recv_capacity`` is the only capacity here whose
+starvation breaks MOMENTUM rather than merely accuracy. Everywhere else an overflow
+drops a pair before it is evaluated, so both halves vanish together; a far pair's
+``+f`` is applied locally the moment it is computed and only the ``-f`` travels, so a
+dropped receive row leaves the ``+f`` with nothing to cancel it.
+
+**Where remote structure comes from, and what ``cross_theta = 0`` does and does not
+buy.** Remote
 nodes arrive as a *locally essential tree*: each device publishes only its leaves' mass
 and centre of mass (``build_coarse_frontier``), every device merges every *other*
 domain's frontier into one coarse tree (``build_remote_coarse_tree``), the local tree is
 cross-walked against that, and only the remote leaves the walk actually names are
 fetched, by ragged all-to-all (``import_near_halo``).
 
-Be precise about the win, because at ``theta = 0`` it is not yet a volume win. What
-changes:
+Be precise about the win, because at ``cross_theta = 0`` it is not yet a volume win.
+What changes:
 
 * **One walk instead of ``ndev`` walks.** The stand-in looped over remote devices in
   PYTHON, so the traced program carried one ``while_loop`` and one near list per
@@ -52,19 +66,20 @@ changes:
 * **Particles arrive on demand**, by ragged all-to-all over the leaves the walk
   actually named, rather than by a dense ``all_gather`` of everything unconditionally.
 * **The ``-f`` exchange is sized by the halo**, one row per imported particle, not by
-  the pair list -- so it does not grow with the pair count that ``theta = 0`` inflates.
+  the pair list -- so it does not grow with the pair count that ``cross_theta = 0``
+  inflates.
 
-What does NOT change yet: per-device traffic and residency are still ``O(N_total)``.
-A MAC that never accepts refines every pair to leaf-leaf, so every local leaf pairs
-with every remote leaf and the demand-driven import ends up fetching the whole remote
-system anyway. Collapsing that to the surface halo is what lifting ``theta`` buys, and
-it needs the coarse M2L; that is the next step, not this one. What lands here is the
-machinery, in one program whose size no longer tracks the device count, with a force
-that is still exact.
-
-Two capacities inherit the same caveat and will shrink with ``theta``:
-``max_pair_queue`` must hold a wavefront that at ``theta = 0`` reaches
+What does NOT change **at the default**: per-device traffic and residency are
+``O(N_total)``. A MAC that never accepts refines every pair to leaf-leaf, so every
+local leaf pairs with every remote leaf and the demand-driven import ends up fetching
+the whole remote system anyway. That is the price of exactness, and it is the reason
+``cross_theta`` exists -- collapsing the import to the surface halo is what lifting it
+buys. Two capacities scale the same way and shrink with ``cross_theta``:
+``max_pair_queue`` must hold a wavefront that at ``cross_theta = 0`` reaches
 ``n_leaves * (ndev - 1) * n_leaves`` pairs, and ``near_cap`` roughly half of that.
+
+So the choice is: the default is exact and residency-bound, and ``cross_theta > 0``
+trades exactness for a halo that scales.
 """
 
 from __future__ import annotations
