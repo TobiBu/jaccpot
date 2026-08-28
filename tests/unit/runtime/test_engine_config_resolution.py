@@ -30,10 +30,17 @@ import dataclasses
 import jax.numpy as jnp
 import pytest
 
-from jaccpot.config import RuntimePolicyConfig
+from jaccpot.config import NearFieldConfig, RuntimePolicyConfig
 from jaccpot.runtime._fmm_impl import FMMEngine
 
 _POLICY_FIELDS = {f.name for f in dataclasses.fields(RuntimePolicyConfig)}
+# NearFieldConfig drops the redundant `nearfield_` prefix, so this group needs a
+# mapping where the policy group needed none. Engine-parameter name -> field name.
+_NEARFIELD_FIELDS = {
+    "nearfield_mode": "mode",
+    "nearfield_edge_chunk_size": "edge_chunk_size",
+    "precompute_nearfield_scatter_schedules": "precompute_scatter_schedules",
+}
 
 
 def _engine(**kwargs):
@@ -57,10 +64,17 @@ def _engine(**kwargs):
         A fresh engine.
     """
     policy = {k: kwargs.pop(k) for k in list(kwargs) if k in _POLICY_FIELDS}
+    nearfield = {
+        _NEARFIELD_FIELDS[k]: kwargs.pop(k)
+        for k in list(kwargs)
+        if k in _NEARFIELD_FIELDS
+    }
     base = dict(theta=0.6, working_dtype=jnp.float32)
     base.update(kwargs)
     if policy:
         base["runtime_policy"] = RuntimePolicyConfig(**policy)
+    if nearfield:
+        base["nearfield"] = NearFieldConfig(**nearfield)
     return FMMEngine(**base)
 
 
