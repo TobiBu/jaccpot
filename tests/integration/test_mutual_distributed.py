@@ -51,6 +51,7 @@ try:
     import inspect
 
     from yggdrax.distributed.cross_walk import dual_tree_walk_cross_mutual
+    from yggdrax.distributed.let import import_near_halo
 
     from jaccpot.mutual.distributed import distributed_mutual_accelerations
 
@@ -59,18 +60,27 @@ try:
     # guard sailed straight past a yggdrax that had that but not
     # `accept_only_leaf_pairs`, and the suite ran and failed 10 of 11 instead of
     # skipping with a reason -- which is the exact outcome the guard exists to prevent.
+    #
+    # `payload_sorted` on the halo import is the same story one release later: it is
+    # what carries a cross-domain near pair's REMOTE rung, so without it the weighted
+    # tests fail deep inside a shard_map trace rather than skipping.
     _walk_params = inspect.signature(dual_tree_walk_cross_mutual).parameters
+    _halo_params = inspect.signature(import_near_halo).parameters
     # Each name carries the PR that added it, because "needs a newer yggdrax" is not
-    # actionable and the two came from different ones.
+    # actionable and the three came from different ones.
     _missing = [
         f"{name} (TobiBu/yggdrax#{pr})"
-        for name, pr in (("remote_index_in_owner", 48), ("accept_only_leaf_pairs", 50))
-        if name not in _walk_params
+        for name, pr, params in (
+            ("remote_index_in_owner", 48, _walk_params),
+            ("accept_only_leaf_pairs", 50, _walk_params),
+            ("payload_sorted", 53, _halo_params),
+        )
+        if name not in params
     ]
     _needs_yggdrax = (
         None
         if not _missing
-        else "a yggdrax whose cross-mutual walk takes " + " and ".join(_missing)
+        else "a yggdrax whose distributed lane takes " + " and ".join(_missing)
     )
 except ImportError as _exc:  # pragma: no cover - yggdrax predates the LET reverse halo
     _needs_yggdrax = f"a newer yggdrax ({_exc})"

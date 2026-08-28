@@ -42,6 +42,30 @@ from yggdrax.distributed import device_count
 
 from jaccpot.nornax_adapter import DistributedBlockStepFMM
 
+# The same yggdrax requirement `test_mutual_distributed.py` guards, and guarded here
+# too rather than inherited: this module drives the WEIGHTED lane exclusively, so
+# against an older yggdrax every test in it would fail inside a shard_map trace instead
+# of skipping with a reason. Only the newest of the three names is checked, since they
+# landed in order and the older ones are a prerequisite of this lane existing at all.
+try:  # pragma: no cover - depends on the installed yggdrax
+    import inspect as _inspect
+
+    from yggdrax.distributed.let import import_near_halo as _import_near_halo
+
+    _needs_yggdrax = (
+        None
+        if "payload_sorted" in _inspect.signature(_import_near_halo).parameters
+        else "a yggdrax whose halo import takes payload_sorted (TobiBu/yggdrax#53)"
+    )
+except ImportError as _exc:  # pragma: no cover
+    _needs_yggdrax = f"a newer yggdrax ({_exc})"
+
+if _needs_yggdrax is not None:  # pragma: no cover
+    pytest.skip(
+        f"the distributed block-step force needs {_needs_yggdrax}",
+        allow_module_level=True,
+    )
+
 # `except Exception` rather than ImportError, as the single-device file does: an
 # import-time incompatibility should report as skipped, not errored.
 try:  # pragma: no cover - environment dependent
