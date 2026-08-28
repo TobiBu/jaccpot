@@ -704,6 +704,14 @@ def distributed_mutual_accelerations(
     # `leaf_width` rung columns there would ship every remote particle's rung to
     # every device, O(N_total), which is what the demand-driven import exists to
     # avoid. It rides round B of the import instead, sized by the halo.
+    # Passed CONDITIONALLY rather than as `payload_sorted=None`, so the UNWEIGHTED
+    # lane still runs against a yggdrax that predates the parameter
+    # (TobiBu/yggdrax#53) -- only the rung-weighted path needs it. A weighted call
+    # against an older yggdrax raises a TypeError, which is the right failure: loud,
+    # immediate, and naming the argument.
+    halo_kwargs: dict[str, Any] = {}
+    if weighted:
+        halo_kwargs["payload_sorted"] = rung.astype(positions.dtype)[:, None]
     halo = import_near_halo(
         rct,
         _NearAsNeighbors(jnp.where(wanted, c_node, jnp.asarray(-1, INDEX_DTYPE))),
@@ -713,8 +721,8 @@ def distributed_mutual_accelerations(
         leaf_size=int(leaf_width),
         max_req_leaves=max_req,
         max_recv_leaves=max_recv,
-        payload_sorted=(rung.astype(positions.dtype)[:, None] if weighted else None),
         axis_name=axis_name,
+        **halo_kwargs,
     )
     overflow = overflow | halo.request_overflow
 

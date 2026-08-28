@@ -60,30 +60,35 @@ try:
     # guard sailed straight past a yggdrax that had that but not
     # `accept_only_leaf_pairs`, and the suite ran and failed 10 of 11 instead of
     # skipping with a reason -- which is the exact outcome the guard exists to prevent.
-    #
-    # `payload_sorted` on the halo import is the same story one release later: it is
-    # what carries a cross-domain near pair's REMOTE rung, so without it the weighted
-    # tests fail deep inside a shard_map trace rather than skipping.
     _walk_params = inspect.signature(dual_tree_walk_cross_mutual).parameters
-    _halo_params = inspect.signature(import_near_halo).parameters
     # Each name carries the PR that added it, because "needs a newer yggdrax" is not
-    # actionable and the three came from different ones.
+    # actionable and the two came from different ones.
     _missing = [
         f"{name} (TobiBu/yggdrax#{pr})"
-        for name, pr, params in (
-            ("remote_index_in_owner", 48, _walk_params),
-            ("accept_only_leaf_pairs", 50, _walk_params),
-            ("payload_sorted", 53, _halo_params),
-        )
-        if name not in params
+        for name, pr in (("remote_index_in_owner", 48), ("accept_only_leaf_pairs", 50))
+        if name not in _walk_params
     ]
+
+    # `payload_sorted` on the halo import is a NARROWER requirement, and it is kept
+    # separate rather than folded in above. It carries a cross-domain near pair's
+    # REMOTE rung, so only the rung-WEIGHTED tests need it -- the force passes it
+    # conditionally, so the unweighted lane runs against a yggdrax that predates it.
+    # Folding it in would skip this whole module on the currently published yggdrax
+    # and take every pre-existing criterion down with it, which is the vacuous-green
+    # state the CI job for this file exists to prevent.
+    _needs_payload = (
+        None
+        if "payload_sorted" in inspect.signature(import_near_halo).parameters
+        else "a yggdrax whose halo import takes payload_sorted (TobiBu/yggdrax#53)"
+    )
     _needs_yggdrax = (
         None
         if not _missing
-        else "a yggdrax whose distributed lane takes " + " and ".join(_missing)
+        else "a yggdrax whose cross-mutual walk takes " + " and ".join(_missing)
     )
 except ImportError as _exc:  # pragma: no cover - yggdrax predates the LET reverse halo
     _needs_yggdrax = f"a newer yggdrax ({_exc})"
+    _needs_payload = _needs_yggdrax
 
 if _needs_yggdrax is not None:  # pragma: no cover - depends on the installed yggdrax
     pytest.skip(
@@ -103,6 +108,13 @@ from yggdrax.distributed.sharding import AXIS_NAME
 pytestmark = pytest.mark.skipif(
     device_count() < 2 or shard_map is None,
     reason="the distributed mutual force needs >= 2 devices and shard_map",
+)
+
+#: Applied to the rung-WEIGHTED tests only. See `_needs_payload` above for why this is
+#: not a module-level skip.
+needs_halo_payload = pytest.mark.skipif(
+    _needs_payload is not None,
+    reason=f"the level-weighted cross lane needs {_needs_payload}",
 )
 
 SOFT = 1e-2
@@ -843,6 +855,11 @@ def exact_levels():
     far field is on -- the far field splits at CELL granularity, deliberately, and so
     does not reproduce a direct sum's per-level decomposition.
     """
+    # From inside, not as a mark: a mark on a fixture has no effect in pytest, so
+    # `@needs_halo_payload` here would silently do nothing and every dependent test
+    # would fail instead of skipping.
+    if _needs_payload is not None:  # pragma: no cover - depends on yggdrax
+        pytest.skip(f"the level-weighted cross lane needs {_needs_payload}")
     nd = _ndev()
     pos, mass = _random_system()
     ev = _weighted_evaluator(
@@ -952,6 +969,11 @@ def far_levels():
     ``_FAR_GRID``. At ``DRIVER_N`` nothing separates and every cell of the angle grid
     is bit-identical, so a far-field test written at that size asserts nothing.
     """
+    # From inside, not as a mark: a mark on a fixture has no effect in pytest, so
+    # `@needs_halo_payload` here would silently do nothing and every dependent test
+    # would fail instead of skipping.
+    if _needs_payload is not None:  # pragma: no cover - depends on yggdrax
+        pytest.skip(f"the level-weighted cross lane needs {_needs_payload}")
     nd = _ndev()
     pos, mass = _random_system(n=_FAR_N)
     ev = _weighted_evaluator(
@@ -1122,6 +1144,7 @@ def test_a_weight_table_that_disagrees_with_k_max_is_refused():
 # while every other number in the table stays at round-off.
 
 
+@needs_halo_payload
 def test_the_cross_far_level_uses_the_REMOTE_endpoints_rung():
     """Two rung-uniform clumps, one per device: level 0 must exclude every cross pair.
 
@@ -1266,6 +1289,7 @@ def test_the_pallas_backend_matches_the_jax_backend(interpret):
 
 
 @pytest.mark.slow
+@needs_halo_payload
 def test_the_pallas_backend_is_still_weighted_correctly():
     """The level-weighted path, on the Pallas lane, which is where it broke before.
 
