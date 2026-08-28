@@ -147,6 +147,15 @@ exclude = '''
 
 [tool.pydoclint]
 style = "numpy"
+# Read DOC noqa comments at the `def` line, not the closing-docstring line.
+# `FMMEngine.__init__` has no docstring of its own -- pydoclint checks it against
+# the CLASS docstring -- so under the "docstring" default there is nowhere to put
+# a suppression for it except the class's closing quotes, which pydoclint does
+# not read for the method. Giving `__init__` a docstring purely to host a noqa
+# would then have to document 63 parameters to satisfy DOC101/DOC103, which is
+# a worse outcome than the suppression. There were zero DOC noqas in the tree
+# when this was set, so nothing depended on the old location.
+native-mode-noqa-location = "definition"
 # `.claude` holds git worktrees -- full transient copies of this repo. Without
 # excluding them a manual run over `.` reports every violation four times over
 # (measured against the old baseline: 409 of 521 file entries, ~13k of 14.7k
