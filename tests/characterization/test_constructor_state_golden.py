@@ -33,7 +33,7 @@ import pytest
 
 import jaccpot
 from jaccpot import ComplexSHBasis, RealSHBasis
-from jaccpot.config import NearFieldConfig, RuntimePolicyConfig
+from jaccpot.config import NearFieldConfig, RuntimePolicyConfig, TreeConfig
 from jaccpot.runtime._fmm_impl import FMMEngine
 
 GOLDEN_PATH = Path(__file__).parent / "golden_modes" / "constructor_state.json"
@@ -136,8 +136,8 @@ CONFIGS: dict[str, dict[str, Any]] = {
     },
     "mixed_order": {"mixed_order_farfield": True, "mixed_order_min_order": 2},
     # --- tree ---
-    "tree_fixed_depth": {"tree_build_mode": "fixed_depth"},
-    "tree_refine_local": {"refine_local": True, "max_refine_levels": 3},
+    "tree_fixed_depth": {"tree": TreeConfig(mode="fixed_depth")},
+    "tree_refine_local": {"tree": TreeConfig(refine_local=True, max_refine_levels=3)},
     "host_refine_on": {"runtime_policy": RuntimePolicyConfig(host_refine_mode="on")},
     "host_refine_off": {"runtime_policy": RuntimePolicyConfig(host_refine_mode="off")},
     # --- EXPLICIT overrides of hardware-dependent defaults. These exist because a

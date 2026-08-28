@@ -72,6 +72,7 @@ from jaccpot.config import (
     NearFieldConfig,
     RuntimePolicyConfig,
     TraversalOverrides,
+    TreeConfig,
 )
 from jaccpot.downward.local_expansions import LocalExpansionData
 from jaccpot.operators.complex_ops import (  # noqa: F401
@@ -315,20 +316,6 @@ class FMMEngine(
         it bounds peak memory rather than changing the result.
     l2l_chunk_size : Optional[int]
         The same for the L2L cascade.
-    tree_build_mode : Optional[str]
-        Which builder constructs the tree. ``None`` takes the default, ``"lbvh"``;
-        ``"fixed_depth"`` enables the refinement knobs below.
-    tree_type : str
-        Yggdrax tree family, e.g. ``"radix"`` (the production default) or
-        ``"kdtree"``.
-    target_leaf_particles : Optional[int]
-        Desired particle count per leaf for the fixed-depth builder. At least 1.
-    refine_local : Optional[bool]
-        Enable the host-side refinement pass that splits elongated leaves.
-    max_refine_levels : Optional[int]
-        Depth cap for that refinement pass.
-    aspect_threshold : Optional[float]
-        Leaf aspect ratio above which refinement splits a leaf.
     interaction_retry_logger : Optional[Callable[[DualTreeRetryEvent], None]]
         Called once per dual-tree retry, when the traversal overflows its pair
         capacity and re-runs with a larger one. Purely observational -- use it to
@@ -367,6 +354,18 @@ class FMMEngine(
     fixed_max_leaf_size : Optional[int]
         Pin the maximum leaf size, bypassing preset selection.
 
+    tree : Optional[TreeConfig]
+        Tree construction as one group: type, build mode, leaf target, and the
+        local-refinement knobs. ``None`` means ``TreeConfig()``.
+
+        Two names differ (``mode`` for ``tree_build_mode``, ``leaf_target`` for
+        ``target_leaf_particles``) and, uniquely among the groups so far, one
+        **default** differs: ``TreeConfig.tree_type`` is ``None`` where this
+        constructor defaulted to ``"radix"``. ``None`` there means "not
+        overridden", so the default is resolved at the unpack -- the same
+        ``or "radix"`` the facade already applies. Without that, every caller
+        omitting the group would silently get ``tree_type=None``. The field-by-
+        field default check across the mapping is what caught it.
     nearfield : Optional[NearFieldConfig]
         The near-field trio as one group: mode, edge chunk size and whether the
         scatter schedules are precomputed. ``None`` means ``NearFieldConfig()``,
@@ -436,12 +435,6 @@ class FMMEngine(
         # DualTreeTraversalConfig (replace all four capacities), or a
         # TraversalOverrides / mapping of named capacities (merge onto the
         # preset's resolved sizing). See normalize_traversal_config_request.
-        tree_build_mode: Optional[str] = None,
-        tree_type: str = "radix",
-        target_leaf_particles: Optional[int] = None,
-        refine_local: Optional[bool] = None,
-        max_refine_levels: Optional[int] = None,
-        aspect_threshold: Optional[float] = None,
         interaction_retry_logger: Optional[Callable[[DualTreeRetryEvent], None]] = None,
         use_dense_interactions: Optional[bool] = None,
         grouped_interactions: Optional[bool] = None,
@@ -454,6 +447,7 @@ class FMMEngine(
         preset: Optional[Union[str, FMMPreset]] = None,
         fixed_order: Optional[int] = None,
         fixed_max_leaf_size: Optional[int] = None,
+        tree: Optional[TreeConfig] = None,
         nearfield: Optional[NearFieldConfig] = None,
         runtime_policy: Optional[RuntimePolicyConfig] = None,
     ):
@@ -469,6 +463,21 @@ class FMMEngine(
         # redundant `nearfield_` prefix inside a class already called that. The
         # mapping below is the whole of it, and all three defaults were checked
         # against the flat ones before the swap.
+        # The tree group. Two of its names differ (`mode` for `tree_build_mode`,
+        # `leaf_target` for `target_leaf_particles`) and one DEFAULT differs, which
+        # is the first time the field-by-field check across a mapping has caught
+        # something: TreeConfig.tree_type defaults to None where this constructor
+        # defaulted to "radix". None there means "not overridden", so the default
+        # is resolved here -- the same `or "radix"` the facade already applies at
+        # `solver.py`'s construction call. Without this line every caller who omits
+        # the group would silently get tree_type=None instead of "radix".
+        _tree = TreeConfig() if tree is None else tree
+        tree_type = "radix" if _tree.tree_type is None else _tree.tree_type
+        tree_build_mode = _tree.mode
+        target_leaf_particles = _tree.leaf_target
+        refine_local = _tree.refine_local
+        max_refine_levels = _tree.max_refine_levels
+        aspect_threshold = _tree.aspect_threshold
         _nf = NearFieldConfig() if nearfield is None else nearfield
         nearfield_mode = _nf.mode
         nearfield_edge_chunk_size = _nf.edge_chunk_size
