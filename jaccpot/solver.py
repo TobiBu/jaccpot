@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import dataclasses
 import warnings
 from dataclasses import replace
 from typing import (
@@ -778,7 +779,75 @@ class FastMultipoleMethod:
             mac_theta_max=mac_theta_max,
             complex_rotation=runtime_overrides.complex_rotation,
             tree_type=runtime_overrides.tree_type or "radix",
-            execution_backend=runtime_overrides.execution_backend,
+            runtime_policy=dataclasses.replace(
+                advanced_cfg.runtime,
+                execution_backend=runtime_overrides.execution_backend,
+                host_refine_mode=legacy_kwargs.pop(
+                    "host_refine_mode", advanced_cfg.runtime.host_refine_mode
+                ),
+                fail_fast=bool(
+                    legacy_kwargs.pop("fail_fast", advanced_cfg.runtime.fail_fast)
+                ),
+                memory_objective=str(
+                    legacy_kwargs.pop(
+                        "memory_objective", advanced_cfg.runtime.memory_objective
+                    )
+                ),
+                memory_budget_bytes=legacy_kwargs.pop(
+                    "memory_budget_bytes", advanced_cfg.runtime.memory_budget_bytes
+                ),
+                max_pair_queue=legacy_kwargs.pop(
+                    "max_pair_queue", advanced_cfg.runtime.max_pair_queue
+                ),
+                pair_process_block=legacy_kwargs.pop(
+                    "pair_process_block", advanced_cfg.runtime.pair_process_block
+                ),
+                traversal_config=legacy_kwargs.pop(
+                    "traversal_config", traversal_config
+                ),
+                enable_interaction_cache=bool(
+                    legacy_kwargs.pop(
+                        "enable_interaction_cache",
+                        advanced_cfg.runtime.enable_interaction_cache,
+                    )
+                ),
+                retain_traversal_result=bool(
+                    legacy_kwargs.pop(
+                        "retain_traversal_result",
+                        advanced_cfg.runtime.retain_traversal_result,
+                    )
+                ),
+                retain_interactions=bool(
+                    legacy_kwargs.pop(
+                        "retain_interactions", advanced_cfg.runtime.retain_interactions
+                    )
+                ),
+                prepare_stage_memory_split_enabled=legacy_kwargs.pop(
+                    "prepare_stage_memory_split_enabled",
+                    advanced_cfg.runtime.prepare_stage_memory_split_enabled,
+                ),
+                autotune_m2l_chunk=bool(
+                    legacy_kwargs.pop(
+                        "autotune_m2l_chunk", advanced_cfg.runtime.autotune_m2l_chunk
+                    )
+                ),
+                precompute_grouped_class_segments=legacy_kwargs.pop(
+                    "precompute_grouped_class_segments",
+                    advanced_cfg.runtime.precompute_grouped_class_segments,
+                ),
+                grouped_schedule_budget_bytes=legacy_kwargs.pop(
+                    "grouped_schedule_budget_bytes",
+                    advanced_cfg.runtime.grouped_schedule_budget_bytes,
+                ),
+                nearfield_schedule_item_cap=legacy_kwargs.pop(
+                    "nearfield_schedule_item_cap",
+                    advanced_cfg.runtime.nearfield_schedule_item_cap,
+                ),
+                upward_leaf_batch_size=legacy_kwargs.pop(
+                    "upward_leaf_batch_size",
+                    advanced_cfg.runtime.upward_leaf_batch_size,
+                ),
+            ),
             tree_build_mode=runtime_overrides.tree_mode,
             target_leaf_particles=runtime_overrides.target_leaf_particles,
             refine_local=legacy_kwargs.pop(
@@ -826,85 +895,12 @@ class FastMultipoleMethod:
                     advanced_cfg.nearfield.precompute_scatter_schedules,
                 )
             ),
-            host_refine_mode=legacy_kwargs.pop(
-                "host_refine_mode",
-                advanced_cfg.runtime.host_refine_mode,
-            ),
-            fail_fast=bool(
-                legacy_kwargs.pop(
-                    "fail_fast",
-                    advanced_cfg.runtime.fail_fast,
-                )
-            ),
-            memory_objective=str(
-                legacy_kwargs.pop(
-                    "memory_objective",
-                    advanced_cfg.runtime.memory_objective,
-                )
-            ),
-            memory_budget_bytes=legacy_kwargs.pop(
-                "memory_budget_bytes",
-                advanced_cfg.runtime.memory_budget_bytes,
-            ),
-            max_pair_queue=legacy_kwargs.pop(
-                "max_pair_queue",
-                advanced_cfg.runtime.max_pair_queue,
-            ),
-            pair_process_block=legacy_kwargs.pop(
-                "pair_process_block",
-                advanced_cfg.runtime.pair_process_block,
-            ),
             dehnen_radius_scale=float(
                 legacy_kwargs.pop(
                     "dehnen_radius_scale", advanced_cfg.dehnen_radius_scale
                 )
             ),
             use_dense_interactions=legacy_kwargs.pop("use_dense_interactions", None),
-            traversal_config=legacy_kwargs.pop("traversal_config", traversal_config),
-            enable_interaction_cache=bool(
-                legacy_kwargs.pop(
-                    "enable_interaction_cache",
-                    advanced_cfg.runtime.enable_interaction_cache,
-                )
-            ),
-            retain_traversal_result=bool(
-                legacy_kwargs.pop(
-                    "retain_traversal_result",
-                    advanced_cfg.runtime.retain_traversal_result,
-                )
-            ),
-            retain_interactions=bool(
-                legacy_kwargs.pop(
-                    "retain_interactions",
-                    advanced_cfg.runtime.retain_interactions,
-                )
-            ),
-            prepare_stage_memory_split_enabled=legacy_kwargs.pop(
-                "prepare_stage_memory_split_enabled",
-                advanced_cfg.runtime.prepare_stage_memory_split_enabled,
-            ),
-            autotune_m2l_chunk=bool(
-                legacy_kwargs.pop(
-                    "autotune_m2l_chunk",
-                    advanced_cfg.runtime.autotune_m2l_chunk,
-                )
-            ),
-            precompute_grouped_class_segments=legacy_kwargs.pop(
-                "precompute_grouped_class_segments",
-                advanced_cfg.runtime.precompute_grouped_class_segments,
-            ),
-            grouped_schedule_budget_bytes=legacy_kwargs.pop(
-                "grouped_schedule_budget_bytes",
-                advanced_cfg.runtime.grouped_schedule_budget_bytes,
-            ),
-            nearfield_schedule_item_cap=legacy_kwargs.pop(
-                "nearfield_schedule_item_cap",
-                advanced_cfg.runtime.nearfield_schedule_item_cap,
-            ),
-            upward_leaf_batch_size=legacy_kwargs.pop(
-                "upward_leaf_batch_size",
-                advanced_cfg.runtime.upward_leaf_batch_size,
-            ),
             fixed_order=runtime_overrides.fixed_order,
             fixed_max_leaf_size=runtime_overrides.fixed_max_leaf_size,
             mac_type=runtime_overrides.mac_type,

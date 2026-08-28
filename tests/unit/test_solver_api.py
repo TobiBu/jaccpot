@@ -231,13 +231,15 @@ def test_large_gpu_minimum_memory_streamed_path_caps_oversized_explicit_traversa
         mac_type="engblom",
         streamed_far_pairs=True,
         grouped_interactions=False,
-        memory_objective="minimum_memory",
-        fail_fast=True,
-        traversal_config=DualTreeTraversalConfig(
-            max_pair_queue=1_048_576,
-            process_block=256,
-            max_interactions_per_node=32_768,
-            max_neighbors_per_leaf=16_384,
+        runtime_policy=RuntimePolicyConfig(
+            memory_objective="minimum_memory",
+            fail_fast=True,
+            traversal_config=DualTreeTraversalConfig(
+                max_pair_queue=1048576,
+                process_block=256,
+                max_interactions_per_node=32768,
+                max_neighbors_per_leaf=16384,
+            ),
         ),
     )
     # Adaptive minimum-memory capping now only runs when static-sizing is off
@@ -264,13 +266,15 @@ def test_large_gpu_minimum_memory_streamed_path_keeps_small_explicit_traversal()
         mac_type="engblom",
         streamed_far_pairs=True,
         grouped_interactions=False,
-        memory_objective="minimum_memory",
-        fail_fast=True,
-        traversal_config=DualTreeTraversalConfig(
-            max_pair_queue=32_768,
-            process_block=64,
-            max_interactions_per_node=1_024,
-            max_neighbors_per_leaf=256,
+        runtime_policy=RuntimePolicyConfig(
+            memory_objective="minimum_memory",
+            fail_fast=True,
+            traversal_config=DualTreeTraversalConfig(
+                max_pair_queue=32768,
+                process_block=64,
+                max_interactions_per_node=1024,
+                max_neighbors_per_leaf=256,
+            ),
         ),
     )
 
@@ -333,8 +337,9 @@ def test_large_gpu_minimum_memory_streamed_path_clamps_auto_traversal_seed():
         mac_type="engblom",
         streamed_far_pairs=True,
         grouped_interactions=False,
-        memory_objective="minimum_memory",
-        fail_fast=True,
+        runtime_policy=RuntimePolicyConfig(
+            memory_objective="minimum_memory", fail_fast=True
+        ),
     )
     # Adaptive auto-seed clamping runs on the adaptive path (static-sizing off).
     impl._static_runtime_fixed_sizing = False
@@ -355,8 +360,9 @@ def test_large_gpu_minimum_memory_streamed_seed_scales_for_xl_particle_counts():
     impl = fmm_impl_private.FMMEngine(
         preset=FMMPreset.LARGE_N_GPU,
         expansion_basis="solidfmm",
-        memory_objective="minimum_memory",
-        fail_fast=True,
+        runtime_policy=RuntimePolicyConfig(
+            memory_objective="minimum_memory", fail_fast=True
+        ),
     )
     # Adaptive seed scaling runs on the adaptive path (static-sizing off).
     impl._static_runtime_fixed_sizing = False
@@ -377,7 +383,7 @@ def test_prepare_bucketed_scatter_schedules_skips_int32_overflow_shape():
     impl = fmm_impl_private.FMMEngine(
         preset=FMMPreset.LARGE_N_GPU,
         expansion_basis="solidfmm",
-        memory_objective="minimum_memory",
+        runtime_policy=RuntimePolicyConfig(memory_objective="minimum_memory"),
     )
     nearfield_interop = fmm_impl_private.NearfieldInteropData(
         leaf_nodes=jnp.zeros((0,), dtype=jnp.int32),
@@ -408,7 +414,7 @@ def test_large_gpu_minimum_memory_nearfield_prepare_skips_pair_vector_precompute
     impl = fmm_impl_private.FMMEngine(
         preset=FMMPreset.LARGE_N_GPU,
         expansion_basis="solidfmm",
-        memory_objective="minimum_memory",
+        runtime_policy=RuntimePolicyConfig(memory_objective="minimum_memory"),
         nearfield_mode="bucketed",
         precompute_nearfield_scatter_schedules=False,
     )
