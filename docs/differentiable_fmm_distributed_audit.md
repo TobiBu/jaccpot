@@ -449,12 +449,35 @@ Scoped honestly, so nothing here reads as a broader claim than was measured.
   and the topology build cost is paid per gradient (forward-only — no cotangent
   path through it).
 * **The upstream ragged bug is worked around, not fixed.** The workaround is one
-  argument: `make_force_evaluator(..., halo_exchange=...)`, defaulting to the safe
-  `"buf"`. After a JAX upgrade, run
+  argument: `make_force_evaluator(..., halo_exchange=...)`, ~~defaulting to the safe
+  `"buf"`~~. **Correction (2026-08-28): the default is `"auto"`, and on this box it
+  resolves to `"native"`.** `resolve_grad_halo_exchange` picks `"native"`
+  (`jax.lax.ragged_all_to_all`, which sends only the actual halo) when **both**
+  conditions hold, and the bandwidth-hungry but safe `"buf"` otherwise:
+
+  * **jax >= `JAX_RAGGED_GRAD_FIXED_VERSION` = (0, 9, 1)**. Below it, executing the
+    ragged reverse pass corrupts every later ragged exchange in the process, so a
+    forward evaluated after a gradient silently loses the whole cross-domain near
+    field.
+  * **the default backend is not CPU** -- `ragged_all_to_all` has no XLA:CPU
+    lowering, so there `"native"` is not slower-or-riskier, it is
+    `UNIMPLEMENTED`.
+
+  The backend condition is not a refinement of the version one. It was added
+  because its absence had already killed the guard: on jax 0.10.2 the version gate
+  alone resolves to `"native"` on **every** backend, which failed six tests in
+  `tests/distributed/test_distributed_grad_correctness.py` -- and since CI stopped
+  collecting `tests/distributed`, CPU was the only place they ran. The only
+  reachable guard on the distributed reverse pass was therefore dead, for a reason
+  having nothing to do with the code it guards.
+
+  So on the installed jax (0.10.2) a GPU run gets `"native"` and a CPU run gets
+  `"buf"`, both without asking. Pass `halo_exchange="buf"` explicitly to pin the
+  safe path regardless. `_grad_halo_exchange` has **not** been deleted -- it is what
+  pins the choice inside the differentiated block. After a JAX upgrade, run
   `JACCPOT_CHECK_UPSTREAM_RAGGED_FIX=1 pytest tests/distributed/test_distributed_grad_correctness.py`
   -- `test_native_halo_exchange_is_fixed_upstream` differentiates through
-  `"native"` and checks the forward afterwards. When it passes, make `"native"` the
-  default and delete `_grad_halo_exchange`. A draft of the upstream report is in
+  `"native"` and checks the forward afterwards. A draft of the upstream report is in
   `docs/jax_ragged_all_to_all_bug_report.md`.
 
 ---
