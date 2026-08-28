@@ -95,8 +95,10 @@ the table under the first bullet.
 > (2026-08-16): all of PR #56, PR #67 and the 38 commits that followed are in `main`, and
 > the branch was reset onto `origin/main` rather than replaying patches already upstream.
 > Of the two open items, **the N=10⁶ leaf sweep is done** — see the leaf-sweep section
-> below; leaf 1024 is the production configuration. N=10⁷ remains open behind an
-> identified one-line blocker, whose trigger is narrower than first recorded.
+> below; leaf 1024 is the production configuration *for the criterion's tail advantage*
+> (on a galaxy disc at order 4 it costs ~2× the evaluation of leaf 128 — see "What to
+> quote"). N=10⁷ remains open behind an identified one-line blocker, whose trigger is
+> narrower than first recorded.
 
 Branch **`feat/dehnen-mass-dependent-mac`**, worktree
 **`/export/home/tbuck/jaccpot-mac-wt`**, off `main`. The upward-M2M fixes are already in
@@ -772,10 +774,37 @@ below ~3×10⁻⁶ at N=10⁶" — is a leaf-256 rule, not a general one.** Per 
 "distrust below ~2× that leaf's own measured floor", and the floor is what
 `bench/validation/leaf_sweep_common_target.py` reports and flags.
 
-**What to quote.** Leaf 1024 at N=10⁶ is the production configuration: eq (16b) via the
-O(N) estimator, p99.99 **43× [31, 71]** at **1.03×** work, 3 seeds, matched median 10⁻⁵.
-State the leaf size with it — item 2b's rule that the claim is meaningless without one
-applies here too, and the same criterion at leaf 256 is 5.3×.
+**What to quote.** Leaf 1024 at N=10⁶ is the production configuration **for this
+criterion's tail advantage**: eq (16b) via the O(N) estimator, p99.99 **43× [31, 71]** at
+**1.03×** work, 3 seeds, matched median 10⁻⁵. State the leaf size with it — item 2b's
+rule that the claim is meaningless without one applies here too, and the same criterion
+at leaf 256 is 5.3×.
+
+**Do not read that as a throughput recommendation, and the distinction is worth 2×.**
+Everything above measures *where the criterion helps most*, on Plummer and bulge+halo at
+p=8. On a **galaxy disc** the same leaf size costs about twice the evaluation. Measured
+independently (`bench/results/near_field/order_leaf_sweep_disc_*.json`, N=10⁶, order 4,
+fp32, large-N GPU lane, idle A100, `evaluate_median_seconds`; accuracy is `dehnen_rms`
+against a direct-sum reference):
+
+| θ | leaf 128 | leaf 1024 | ratio | rms @128 | rms @1024 |
+|---|---|---|---|---|---|
+| 0.5 | 0.612 s | 1.274 s | **2.08×** | 1.933e-4 | 1.940e-4 |
+| 0.6 | 0.484 s | 0.994 s | **2.05×** | 4.562e-4 | 3.158e-4 |
+| 0.7 | 0.431 s | 0.812 s | **1.88×** | 9.588e-4 | 7.258e-4 |
+
+At **θ=0.5 the two are at equal accuracy** (1.933e-4 against 1.940e-4, leaf 128
+marginally the better of the pair) and leaf 1024 costs 2.08× the time. At θ=0.6 and 0.7
+leaf 1024 does buy accuracy — 1.44× and 1.32× better rms — but at ~2× the evaluation,
+which is a trade to make deliberately rather than to inherit from this section. The
+curve over leaf 64/96/128/256/512/1024 at θ=0.6 is a **U with its minimum at leaf 128**
+(0.535 / 0.518 / 0.484 / 0.545 / 0.696 / 0.994 s), so it is not monotone in either
+direction and neither endpoint is a safe default.
+
+So: **leaf 1024 is where the criterion's advantage is largest; leaf 128 is what to run
+on a disc at order 4.** They are different questions measured on different problems, and
+the disc numbers do not contradict the sweep above — different distribution, different
+order, different metric.
 
 One caveat that did not exist before this sweep: **leaf 1024 is close to the largest leaf
 this measurement can reach in fp32**, so "bigger leaves keep helping" is *extrapolation
