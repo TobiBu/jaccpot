@@ -18,7 +18,7 @@ import jaccpot.runtime.fmm as fmm_module
 import jaccpot.runtime.fmm_prepare as fmm_prepare_private
 import jaccpot.runtime.kernels.core as kernels_core
 from jaccpot import FMMPreset
-from jaccpot.config import NearFieldConfig, RuntimePolicyConfig
+from jaccpot.config import NearFieldConfig, RuntimePolicyConfig, TreeConfig
 from jaccpot.downward.local_expansions import (
     TreeDownwardData,
 )
@@ -229,8 +229,7 @@ def test_prepare_state_fixed_depth_tree():
     masses = jnp.ones((n,))
     fmm = FMMEngine(
         theta=0.6,
-        tree_build_mode="fixed_depth",
-        target_leaf_particles=8,
+        tree=TreeConfig(mode="fixed_depth", leaf_target=8),
     )
 
     state = fmm.prepare_state(
@@ -274,7 +273,7 @@ def test_prepare_refresh_static_radix_tree_preserves_static_shape(monkeypatch):
         working_dtype=jnp.float32,
         expansion_basis="solidfmm",
         complex_rotation="solidfmm",
-        tree_build_mode="static_radix",
+        tree=TreeConfig(mode="static_radix"),
         fixed_order=2,
     )
     state = fmm.prepare_state(
@@ -351,7 +350,7 @@ def test_static_radix_refresh_rebuilds_current_large_n_payloads(monkeypatch):
         nearfield=NearFieldConfig(mode="bucketed", edge_chunk_size=64),
         grouped_interactions=False,
         working_dtype=jnp.float32,
-        tree_build_mode="static_radix",
+        tree=TreeConfig(mode="static_radix"),
         fixed_order=2,
     )
 
@@ -469,7 +468,7 @@ def test_static_radix_refresh_dual_planner_mode_parity_and_diagnostics(monkeypat
         nearfield=NearFieldConfig(mode="bucketed", edge_chunk_size=64),
         grouped_interactions=False,
         working_dtype=jnp.float32,
-        tree_build_mode="static_radix",
+        tree=TreeConfig(mode="static_radix"),
         fixed_order=2,
     )
 
@@ -558,7 +557,7 @@ def test_strict_prepare_refresh_and_evaluate_api_and_diagnostics(monkeypatch):
         nearfield=NearFieldConfig(mode="bucketed", edge_chunk_size=64),
         grouped_interactions=False,
         working_dtype=jnp.float32,
-        tree_build_mode="static_radix",
+        tree=TreeConfig(mode="static_radix"),
         fixed_order=2,
     )
     state0, acc0 = fmm.strict_prepare_refresh_and_evaluate(
@@ -634,7 +633,7 @@ def test_strict_exact_cap_profile_match_fail_fast(monkeypatch, tmp_path):
         nearfield=NearFieldConfig(mode="bucketed", edge_chunk_size=64),
         grouped_interactions=False,
         working_dtype=jnp.float32,
-        tree_build_mode="static_radix",
+        tree=TreeConfig(mode="static_radix"),
         fixed_order=2,
     )
     with pytest.raises(RuntimeError, match="exact cap profile key match"):
@@ -690,7 +689,7 @@ def test_strict_run_v2_api(monkeypatch):
         nearfield=NearFieldConfig(mode="bucketed", edge_chunk_size=64),
         grouped_interactions=False,
         working_dtype=jnp.float32,
-        tree_build_mode="static_radix",
+        tree=TreeConfig(mode="static_radix"),
         fixed_order=2,
     )
 
@@ -755,7 +754,7 @@ def test_strict_fused_moved_endpoint_matches_fresh_prepare(monkeypatch):
         nearfield=NearFieldConfig(mode="bucketed", edge_chunk_size=64),
         grouped_interactions=False,
         working_dtype=jnp.float32,
-        tree_build_mode="static_radix",
+        tree=TreeConfig(mode="static_radix"),
         fixed_order=2,
     )
     fmm = FMMEngine(**kwargs)
@@ -829,7 +828,7 @@ def test_strict_fused_compact_far_pair_cap_fails(monkeypatch):
         nearfield=NearFieldConfig(mode="bucketed", edge_chunk_size=64),
         grouped_interactions=False,
         working_dtype=jnp.float32,
-        tree_build_mode="static_radix",
+        tree=TreeConfig(mode="static_radix"),
         fixed_order=2,
     )
     with pytest.raises(
@@ -851,7 +850,9 @@ def test_strict_fused_compact_far_pair_cap_fails(monkeypatch):
 
 def test_capacity_fixed_depth_tree_mode_is_removed():
     with pytest.raises(ValueError, match="tree_build_mode"):
-        FMMEngine(tree_build_mode="capacity_fixed_depth")
+        FMMEngine(
+            tree=TreeConfig(mode="capacity_fixed_depth"),
+        )
 
 
 def _fixed_depth_sample():
@@ -889,8 +890,7 @@ def test_compute_accelerations_fixed_depth_matches_direct():
         theta=theta,
         G=G,
         softening=softening,
-        tree_build_mode="fixed_depth",
-        target_leaf_particles=2,
+        tree=TreeConfig(mode="fixed_depth", leaf_target=2),
     )
     acc, pot = fmm.compute_accelerations(
         positions,
@@ -929,8 +929,7 @@ def test_compute_accelerations_refined_tree_matches_non_refined():
             theta=theta,
             G=G,
             softening=softening,
-            tree_build_mode="fixed_depth",
-            target_leaf_particles=target_leaf_particles,
+            tree=TreeConfig(mode="fixed_depth", leaf_target=target_leaf_particles),
         )
         acc, pot = fmm.compute_accelerations(
             positions,
@@ -968,8 +967,7 @@ def test_compute_accelerations_fixed_depth_jitted_matches_eager():
             theta=0.7,
             G=1.1,
             softening=0.02,
-            tree_build_mode="fixed_depth",
-            target_leaf_particles=2,
+            tree=TreeConfig(mode="fixed_depth", leaf_target=2),
         )
         acc, pot = fmm.compute_accelerations(
             positions,
@@ -2817,9 +2815,7 @@ def test_fast_preset_sets_lbvh_defaults():
 def test_fast_preset_allows_explicit_overrides():
     fmm = FMMEngine(
         preset=FMMPreset.FAST,
-        tree_build_mode="lbvh",
-        target_leaf_particles=12,
-        refine_local=True,
+        tree=TreeConfig(mode="lbvh", leaf_target=12, refine_local=True),
     )
 
     assert fmm.tree_build_mode == "lbvh"
@@ -2982,7 +2978,7 @@ def test_solidfmm_chunked_m2l_matches_fullbatch():
             expansion_basis="solidfmm",
             complex_rotation="solidfmm",
             mac_type="dehnen",
-            tree_build_mode="lbvh",
+            tree=TreeConfig(mode="lbvh"),
             fixed_order=4,
             fixed_max_leaf_size=_CHUNKED_M2L_LEAF_SIZE,
             m2l_chunk_size=chunk_size,

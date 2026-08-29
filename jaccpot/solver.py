@@ -29,6 +29,7 @@ from .config import (
     FMMPreset,
     GradConfig,
     NearFieldConfig,
+    TreeConfig,
 )
 from .runtime._large_n_types import LargeNPreparedState
 from .runtime.fmm import FMMEngine as _RuntimeFMM
@@ -779,7 +780,20 @@ class FastMultipoleMethod:
             dehnen_geometry_mode=dehnen_geometry_mode,
             mac_theta_max=mac_theta_max,
             complex_rotation=runtime_overrides.complex_rotation,
-            tree_type=runtime_overrides.tree_type or "radix",
+            tree=TreeConfig(
+                tree_type=runtime_overrides.tree_type or "radix",
+                mode=runtime_overrides.tree_mode,
+                leaf_target=runtime_overrides.target_leaf_particles,
+                refine_local=legacy_kwargs.pop(
+                    "refine_local", advanced_cfg.tree.refine_local
+                ),
+                max_refine_levels=legacy_kwargs.pop(
+                    "max_refine_levels", advanced_cfg.tree.max_refine_levels
+                ),
+                aspect_threshold=legacy_kwargs.pop(
+                    "aspect_threshold", advanced_cfg.tree.aspect_threshold
+                ),
+            ),
             runtime_policy=dataclasses.replace(
                 advanced_cfg.runtime,
                 execution_backend=runtime_overrides.execution_backend,
@@ -848,19 +862,6 @@ class FastMultipoleMethod:
                     "upward_leaf_batch_size",
                     advanced_cfg.runtime.upward_leaf_batch_size,
                 ),
-            ),
-            tree_build_mode=runtime_overrides.tree_mode,
-            target_leaf_particles=runtime_overrides.target_leaf_particles,
-            refine_local=legacy_kwargs.pop(
-                "refine_local", advanced_cfg.tree.refine_local
-            ),
-            max_refine_levels=legacy_kwargs.pop(
-                "max_refine_levels",
-                advanced_cfg.tree.max_refine_levels,
-            ),
-            aspect_threshold=legacy_kwargs.pop(
-                "aspect_threshold",
-                advanced_cfg.tree.aspect_threshold,
             ),
             grouped_interactions=runtime_overrides.grouped_interactions,
             retain_far_pairs_for_grad=legacy_kwargs.pop(

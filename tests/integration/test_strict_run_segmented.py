@@ -23,6 +23,7 @@ import jax
 import jax.numpy as jnp
 import pytest
 
+from jaccpot.config import TreeConfig
 from jaccpot.runtime._fmm_impl import FMMEngine
 
 N_PARTICLES = 512
@@ -48,7 +49,7 @@ def _engine():
         complex_rotation="solidfmm",
         theta=0.6,
         working_dtype=jnp.float32,
-        tree_build_mode="static_radix",
+        tree=TreeConfig(mode="static_radix"),
         fixed_order=MAX_ORDER,
     )
 
