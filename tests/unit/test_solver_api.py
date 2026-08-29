@@ -229,8 +229,7 @@ def test_large_gpu_minimum_memory_streamed_path_caps_oversized_explicit_traversa
         preset=FMMPreset.LARGE_N_GPU,
         expansion_basis="solidfmm",
         mac_type="engblom",
-        streamed_far_pairs=True,
-        grouped_interactions=False,
+        farfield=FarFieldConfig(streamed_far_pairs=True, grouped_interactions=False),
         runtime_policy=RuntimePolicyConfig(
             memory_objective="minimum_memory",
             fail_fast=True,
@@ -264,8 +263,7 @@ def test_large_gpu_minimum_memory_streamed_path_keeps_small_explicit_traversal()
         preset=FMMPreset.LARGE_N_GPU,
         expansion_basis="solidfmm",
         mac_type="engblom",
-        streamed_far_pairs=True,
-        grouped_interactions=False,
+        farfield=FarFieldConfig(streamed_far_pairs=True, grouped_interactions=False),
         runtime_policy=RuntimePolicyConfig(
             memory_objective="minimum_memory",
             fail_fast=True,
@@ -335,8 +333,7 @@ def test_large_gpu_minimum_memory_streamed_path_clamps_auto_traversal_seed():
         preset=FMMPreset.LARGE_N_GPU,
         expansion_basis="solidfmm",
         mac_type="engblom",
-        streamed_far_pairs=True,
-        grouped_interactions=False,
+        farfield=FarFieldConfig(streamed_far_pairs=True, grouped_interactions=False),
         runtime_policy=RuntimePolicyConfig(
             memory_objective="minimum_memory", fail_fast=True
         ),

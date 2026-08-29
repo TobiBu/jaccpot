@@ -6,7 +6,7 @@ import jax
 import jax.numpy as jnp
 import pytest
 
-from jaccpot.config import NearFieldConfig, TreeConfig
+from jaccpot.config import FarFieldConfig, NearFieldConfig, TreeConfig
 from jaccpot.runtime._large_n_nearfield import resolve_large_n_execution_config
 from jaccpot.runtime.fmm import FMMEngine
 
@@ -17,7 +17,7 @@ def _make_large_n_fmm():
         expansion_basis="solidfmm",
         tree=TreeConfig(tree_type="radix"),
         nearfield=NearFieldConfig(mode="bucketed"),
-        grouped_interactions=False,
+        farfield=FarFieldConfig(grouped_interactions=False),
         working_dtype=jnp.float32,
     )
 

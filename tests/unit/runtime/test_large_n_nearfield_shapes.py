@@ -33,6 +33,7 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 
+from jaccpot.config import FarFieldConfig
 from jaccpot.runtime._large_n_types import LargeNPreparedState
 from jaccpot.runtime.fmm import FMMEngine
 
@@ -70,7 +71,7 @@ def _prepare(n_particles: int, leaf_size: int) -> LargeNPreparedState:
         runtime_path="large_n",
         working_dtype=jnp.float32,
         expansion_basis="solidfmm",
-        complex_rotation="solidfmm",
+        farfield=FarFieldConfig(rotation="solidfmm"),
         fixed_order=ORDER,
     )
     return engine.prepare_state(positions, masses, leaf_size=leaf_size, max_order=ORDER)

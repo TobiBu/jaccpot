@@ -33,7 +33,12 @@ import pytest
 
 import jaccpot
 from jaccpot import ComplexSHBasis, RealSHBasis
-from jaccpot.config import NearFieldConfig, RuntimePolicyConfig, TreeConfig
+from jaccpot.config import (
+    FarFieldConfig,
+    NearFieldConfig,
+    RuntimePolicyConfig,
+    TreeConfig,
+)
 from jaccpot.runtime._fmm_impl import FMMEngine
 
 GOLDEN_PATH = Path(__file__).parent / "golden_modes" / "constructor_state.json"
@@ -118,11 +123,11 @@ CONFIGS: dict[str, dict[str, Any]] = {
         "runtime_policy": RuntimePolicyConfig(memory_budget_bytes=2 * 1024**3)
     },
     # --- far/near field and runtime lane selection ---
-    "streamed_far_pairs_on": {"streamed_far_pairs": True},
-    "streamed_far_pairs_off": {"streamed_far_pairs": False},
+    "streamed_far_pairs_on": {"farfield": FarFieldConfig(streamed_far_pairs=True)},
+    "streamed_far_pairs_off": {"farfield": FarFieldConfig(streamed_far_pairs=False)},
     "farfield_dense": {"use_dense_interactions": True},
-    "farfield_pair_grouped": {"farfield_mode": "pair_grouped"},
-    "farfield_class_major": {"farfield_mode": "class_major"},
+    "farfield_pair_grouped": {"farfield": FarFieldConfig(mode="pair_grouped")},
+    "farfield_class_major": {"farfield": FarFieldConfig(mode="class_major")},
     "nearfield_baseline": {"nearfield": NearFieldConfig(mode="baseline")},
     "nearfield_bucketed": {"nearfield": NearFieldConfig(mode="bucketed")},
     "runtime_path_large_n": {"runtime_path": "large_n"},
@@ -131,10 +136,12 @@ CONFIGS: dict[str, dict[str, Any]] = {
         "runtime_policy": RuntimePolicyConfig(execution_backend="octree")
     },
     "grouped_interactions": {
-        "grouped_interactions": True,
+        "farfield": FarFieldConfig(grouped_interactions=True),
         "expansion_basis": "solidfmm",
     },
-    "mixed_order": {"mixed_order_farfield": True, "mixed_order_min_order": 2},
+    "mixed_order": {
+        "farfield": FarFieldConfig(mixed_order=True, mixed_order_min_order=2)
+    },
     # --- tree ---
     "tree_fixed_depth": {"tree": TreeConfig(mode="fixed_depth")},
     "tree_refine_local": {"tree": TreeConfig(refine_local=True, max_refine_levels=3)},
@@ -153,7 +160,9 @@ CONFIGS: dict[str, dict[str, Any]] = {
     "use_pallas_forced_on": {"use_pallas": True},
     # --- misc switches that gate whole code paths ---
     "fail_fast": {"runtime_policy": RuntimePolicyConfig(fail_fast=True)},
-    "retain_far_pairs_for_grad": {"retain_far_pairs_for_grad": True},
+    "retain_far_pairs_for_grad": {
+        "farfield": FarFieldConfig(retain_far_pairs_for_grad=True)
+    },
     "autotune_m2l": {"runtime_policy": RuntimePolicyConfig(autotune_m2l_chunk=True)},
     "no_interaction_cache": {
         "runtime_policy": RuntimePolicyConfig(enable_interaction_cache=False)

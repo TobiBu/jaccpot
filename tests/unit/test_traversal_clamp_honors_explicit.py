@@ -23,7 +23,7 @@ from yggdrax.interactions import DualTreeTraversalConfig
 
 import jaccpot.runtime._fmm_impl as fmm_impl_private
 from jaccpot import FMMPreset
-from jaccpot.config import RuntimePolicyConfig
+from jaccpot.config import FarFieldConfig, RuntimePolicyConfig
 
 # Streamed minimum-memory ceiling for the 1M <= N < 4.19M band (see fmm_constants).
 _CEILING_PAIR_QUEUE = 262_144
@@ -34,8 +34,7 @@ def _impl(traversal: DualTreeTraversalConfig):
         preset=FMMPreset.LARGE_N_GPU,
         expansion_basis="solidfmm",
         mac_type="engblom",
-        streamed_far_pairs=True,
-        grouped_interactions=False,
+        farfield=FarFieldConfig(streamed_far_pairs=True, grouped_interactions=False),
         runtime_policy=RuntimePolicyConfig(
             memory_objective="minimum_memory",
             fail_fast=True,

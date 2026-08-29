@@ -28,7 +28,7 @@ import numpy as np
 import pytest
 
 import jaccpot.runtime.fmm_autotune as autotune_mod
-from jaccpot.config import RuntimePolicyConfig
+from jaccpot.config import FarFieldConfig, RuntimePolicyConfig
 from jaccpot.runtime._fmm_impl import FMMEngine
 from jaccpot.runtime.fmm_autotune import _GPU_M2L_AUTOTUNE_PAIR_BINS
 
@@ -49,7 +49,7 @@ def problem():
     """A real upward sweep and far-pair list -- the loop reads both."""
     fmm = FMMEngine(
         expansion_basis="solidfmm",
-        complex_rotation="solidfmm",
+        farfield=FarFieldConfig(rotation="solidfmm"),
         theta=0.6,
         working_dtype=jnp.float32,
         runtime_policy=RuntimePolicyConfig(autotune_m2l_chunk=True),
@@ -84,7 +84,7 @@ def test_returns_none_when_autotuning_is_off(problem, on_gpu):
     _, upward, src, tgt = problem
     off = FMMEngine(
         expansion_basis="solidfmm",
-        complex_rotation="solidfmm",
+        farfield=FarFieldConfig(rotation="solidfmm"),
         theta=0.6,
         working_dtype=jnp.float32,
         runtime_policy=RuntimePolicyConfig(autotune_m2l_chunk=False),
