@@ -53,7 +53,7 @@ against `26eac02` rather than read.
 | F10 | `_prepare_state_dual_and_downward` 883 lines | **600 lines / 19 params** |
 | F11 | `prepare_large_n_state` 1253 lines / 26 params | **756 / 12** — first half done, remainder deferred by decision |
 | F13 | `_fused_m2l_vjp_enabled` duplicated | still two definitions |
-| F20 | 1534 bare `Array`, 0 shaped | **3174 bare, 381 shaped** — stale in both directions |
+| F20 | 1534 bare `Array`, 0 shaped | **3174 bare, 381 shaped** — stale in both directions, and the two halves were measured by different methods. Counted since 2026-08-29 by `python -m bench.annotation_census`: **1855 bare, 200 shaped** |
 | F33 | `fmm_strict_run.py` 55% | **81%**; 70 statements left, inside two 500-line bodies |
 | F34 | `distributed/fmm.py` 19% | **34%** default suite (tier skipped), **79%** once the tier runs on forced CPU devices — which CI now does — and 83% on two cards |
 | F35 | production reaches `experimental/` | **split**: layering settled by G.5 (`:1402` stays); the coverage half closed — 0% (invisible) -> **93%** |
@@ -936,7 +936,7 @@ Risk = probability the change breaks something. Effort = S (<1h), M (a day), L (
 | F17 **✔`934c252`** | `autodiff.py:7`; `operators/complex_harmonics.py:15,17,22`; `runtime/fmm_derivatives.py:28`; `runtime/kernels/__init__.py:13` | dead-code | 6 further unused imports (`jax`, `math`, `Tuple`, `sh_offset`, `_contains_tracer`, two unused re-exports) | — | low | S | no |
 | F18 **✔`934c252`** | `runtime/fmm_strict_run.py:146`; `runtime/_adaptive_policy.py:741` | dead-code | `prepare_elapsed` and `shift` assigned, never read | A dropped timing value in the strict lane is worth checking — it may be a lost diagnostic rather than dead code | low | S | no |
 | F19 | ~~`operators/real_harmonics.py:1267-1271`~~ | naming | **MOOT — the containing function (`_rotation_to_z_angles`) was deleted in `ab58c3d`.** Was: `R00`/`R01`/`R10`/`R11` computed and unused, which I judged to be deliberate narration rather than a defect | Recorded because the judgement still applies elsewhere: writing a full 3×3 out is the narration STYLE_GUIDE §5 asks for, and XLA eliminates it | low | S | no |
-| F20 | package-wide | typing | 1534 bare `Array` annotations; **0** shaped `jaxtyping` annotations; 350 unannotated parameters | STYLE_GUIDE §4's stated benefit is entirely unrealised; the runtime typecheck verifies nothing about shape. See §E **Re-measured 2026-08-27 and stale in both directions: 3174 bare `Array`** (this row says 1534) **and 381 shaped `jaxtyping` annotations** (this row says 0). The package grew and the shaped-annotation programme started; E.3's policy question is unchanged. | low | L | no (annotations only) |
+| F20 | package-wide | typing | 1534 bare `Array` annotations; **0** shaped `jaxtyping` annotations; 350 unannotated parameters | STYLE_GUIDE §4's stated benefit is entirely unrealised; the runtime typecheck verifies nothing about shape. See §E **Re-measured 2026-08-27 and stale in both directions: 3174 bare `Array`** (this row says 1534) **and 381 shaped `jaxtyping` annotations** (this row says 0). The package grew and the shaped-annotation programme started; E.3's policy question is unchanged. **Counted by script since 2026-08-29** — `python -m bench.annotation_census --reconcile`, which reports **1855 bare, 200 shaped, 217 unannotated** and reconciles its definition against this row's rung by rung. Three corrections fall out of that, and each of them makes the remaining work smaller than this row implies. **(a)** The two figures here are not disjoint: `Float[Array, "n 3"]` contains the token `Array`, so 3174 counts the 381 as well — worth 214 of the gap. A mention count cannot show a burn-down, because converting a parameter moves it *within* the number. **(b)** They were taken by different methods. No structural definition reaches 381; the widest gives 214. A text scan reaches it, because §4.5 makes pydoclint require the docstring type to mirror the annotation verbatim, so every shaped annotation sits in the source twice — `grep -Eo '(Float|Int|...)\[Array' jaccpot/` returns 423 against 214 annotations. **(c)** The companion unannotated figure (368, as carried in the rollout plan) counts **154 implicit `self`/`cls` parameters**, 42% of it, which E.2 measured 119 type-checker errors from annotating and which `test_type_annotation_guard.py` exempts. That part of the backlog must never be converted, so no PR can reduce it; excluding it gives 217. The ladder lands 5 short of 3174 on today's tree and 47 short at `24d8f2e`, the commit this row was measured at — the residual is small, its direction is not stable, and the original method was not recorded, which is the argument for the script. Pinned by `tests/unit/test_annotation_census.py`, whose classifier assertions were checked to bite by mutation (a dtype family with no axis spec counted as shaped; the `self`/`cls` exemption removed) — and the first attempt at that check was itself vacuous, its patch anchor silently matching nothing, which is F40's mode exactly. | low | L | no (annotations only) |
 | F21 **✔`ad7b00c`** | `runtime/fmm_*.py` (12 modules) | typing | 90 dangling forward refs (`FastMultipoleMethod`, `PreparedStateLike`, `LargeNGradPlan`, `NearfieldInteropData`), no `TYPE_CHECKING` block anywhere in `runtime/` | **The benefit I stated here was wrong.** I claimed the payoff was that `typing.get_type_hints` would stop raising; measured before and after, it is **identical** (50 resolvable / 63 not) — `TYPE_CHECKING` imports cannot help runtime introspection, which is inherent Python. The real payoff, measured: `pyflakes jaccpot/` undefined names **95 → 5**, which is what makes pyflakes usable as a bug-finder on this package — those 90 false positives are exactly what buried the two genuine `NameError`s of G.1 in 397 lines of noise. The static-checker benefit is real but unconsumed: neither mypy nor pyright is in `[dev]`. `kernels/core.py`'s two sites are deliberately left dangling to preserve the leaf invariant | low | M | no |
 | F22 | `pyproject.toml:141-143` | test-gap | pydoclint runs with the default `--skip-checking-short-docstrings=True`; flipping it reveals **2840** violations (584 DOC101, 600 DOC201, 161 DOC501/503) | The "structural docstring compliance is done" premise holds only for functions that already have sections **✔ VERIFIED CLOSED 2026-08-27** — `pydoclint --config pyproject.toml jaccpot/` reports **0**, with `skip-checking-short-docstrings = false` and no baseline. | low | L | no |
 | F23 **◐ part 1 `PR #88`** | 73 functions in the numerics dirs (worst: `runtime/kernels/core.py:2542` 48 params/1 doc line; `nearfield/near_field.py:4067` 31/1 — a *public* name; `runtime/_large_n_pipeline.py:321` 26/1) | docstring | ≥8 parameters, no `Parameters` section | These are precisely where STYLE_GUIDE §3's "shapes, units, static args, differentiability, accuracy regime" is load-bearing. **Re-measured over NUMERICS §1's six numerics dirs: 60 functions** (so ~58 was right). 18 closed by PR #88. The remaining 42 **cannot** go in one PR, for two structural reasons, both measured — see the note below the table | low | L | no |
@@ -1812,6 +1812,38 @@ satisfied while the numerically densest code is unannotated.
 > The decorator count barely moved (45 → 46) because only ONE was added, deliberately:
 > `kernels/_evaluate.py::_evaluate_tree_compiled_impl` (#176). Annotating is documentation;
 > adding a decorator is a behaviour change, and the two were kept in separate PRs throughout.
+
+> **UPDATED 2026-08-29 — this table is no longer maintained by hand, and the reason is that
+> maintaining it by hand did not work.** It has now been restated three times and been wrong
+> twice. The counter lives in `bench/annotation_census.py`; run it rather than reading a
+> number here:
+>
+> ```bash
+> python -m bench.annotation_census --reconcile
+> ```
+>
+> On `main` at 2026-08-29 it reports **200 shaped**, **1855 bare**, **217 unannotated**,
+> **46 `@jaxtyped` functions of which 36 have no shaped parameter**, 70 `from jaxtyping
+> import` statements, across 105 modules. Those are parameter counts excluding
+> `jaccpot/experimental/`, `self`/`cls`, and return annotations; the script's docstring
+> argues each exclusion.
+>
+> **Two things the reconciliation turned up, both of which change what the burn-down means:**
+>
+> 1. **This section's "bare" and "shaped" columns are not disjoint.** `Float[Array, "n 3"]`
+>    contains the token `Array`, so any count of mentions counts a converted annotation in
+>    the unconverted column too — worth 214 of the gap to F20's figure. Converting a
+>    parameter then moves it *within* one number instead of between two, so a mention count
+>    cannot show progress at all.
+> 2. **The shaped and bare halves of F20's row were measured by different methods.** No
+>    structural definition reaches 381 shaped; the widest gives 214. A text scan does:
+>    `grep -Eo '(Float|Int|...)\[Array' jaccpot/` returns 423, almost exactly twice 214,
+>    because §4.5 requires the docstring parameter type to mirror the annotation verbatim,
+>    so every shaped annotation is in the source twice. At the 179 shaped parameters standing
+>    on 2026-08-27, twice is 358.
+>
+> The old numbers stay above, per this repo's rule that a corrected measurement keeps the
+> one it replaced.
 
 ### E.2 89 dangling forward references make the mixin annotations decorative
 
