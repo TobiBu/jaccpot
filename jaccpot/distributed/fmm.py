@@ -35,6 +35,7 @@ import dataclasses
 import functools
 import itertools
 import math
+import os
 from dataclasses import dataclass
 from typing import Any, Callable, Iterator, NamedTuple, Optional
 
@@ -1172,6 +1173,26 @@ def _chunked_pallas_nearfield_accumulate(
     jax.Array
         Near-field accelerations in the ``concat_pos`` layout, ``[cap + halo, 3]``.
     """
+    # DIAGNOSTIC ONLY, off by default. `JACCPOT_NEARFIELD_ACCUM=wide_input` runs the
+    # whole near field in float64 while everything around it stays float32, which
+    # answers "if the near field were exact, what would rel_l2 be?" -- the measurement
+    # that decides whether widening the per-target accumulator can reach the float64
+    # accuracy floor, or whether the far field carries a floor of its own. It is not a
+    # shipping mode: it widens the pair arithmetic too, so its cost says nothing about
+    # the accumulator-only change. See docs/plan notes on the fp32 near-field floor.
+    _accum = os.environ.get("JACCPOT_NEARFIELD_ACCUM", "input")
+    _orig_dtype = concat_pos.dtype
+    if _accum == "wide_input":
+        leaf_positions = leaf_positions.astype(jnp.float64)
+        leaf_masses = leaf_masses.astype(jnp.float64)
+        concat_pos = concat_pos.astype(jnp.float64)
+        softening_sq = jnp.asarray(softening_sq, jnp.float64)
+        G = jnp.asarray(G, jnp.float64)
+    elif _accum != "input":
+        raise ValueError(
+            f"JACCPOT_NEARFIELD_ACCUM must be 'input' or 'wide_input', got {_accum!r}"
+        )
+
     nblk = -(-n_lloc // block)  # ceil
     num_edges = int(src_s.shape[0])
     near0 = jnp.zeros_like(concat_pos)
@@ -1229,7 +1250,7 @@ def _chunked_pallas_nearfield_accumulate(
         return near + self_blk + pair_blk, None
 
     near, _ = jax.lax.scan(_body, near0, jnp.arange(nblk, dtype=INDEX_DTYPE))
-    return near
+    return near.astype(_orig_dtype)
 
 
 #: Halo-exchange implementations selectable on the gradient path, plus ``"auto"``.
