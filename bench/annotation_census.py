@@ -433,8 +433,23 @@ def _iter_module_paths(package_root: Path, include_experimental: bool) -> list[P
     -------
     list of Path
         Sorted module paths.
+
+    Raises
+    ------
+    FileNotFoundError
+        If the root contains no Python modules at all.
     """
     paths = sorted(package_root.rglob("*.py"))
+    if not paths:
+        # A counter that reports "0 bare, 0 shaped" because it walked the wrong
+        # directory reads exactly like a finished burn-down. This tool exists to
+        # stop a number being taken on trust, so it must not produce the most
+        # flattering possible number by accident.
+        raise FileNotFoundError(
+            f"no Python modules under {package_root} -- wrong package root? "
+            "Refusing to report a zero census that would read as a finished "
+            "burn-down."
+        )
     if include_experimental:
         return paths
     return [p for p in paths if "experimental" not in p.relative_to(package_root).parts]
@@ -507,6 +522,11 @@ def census_package(
     -------
     tuple of (list of ModuleCensus, Totals)
         Per-module counts sorted by bare count descending, and the package totals.
+
+    Raises
+    ------
+    FileNotFoundError
+        If ``package_root`` contains no Python modules at all.
     """
     modules = [
         census_module(path, package_root)
