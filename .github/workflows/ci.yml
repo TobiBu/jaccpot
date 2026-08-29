@@ -563,6 +563,95 @@ jobs:
             exit 1
           fi
 
+  test-distributed-tier:
+    # `tests/distributed/` on forced CPU devices -- the tier itself, which until
+    # now ran nowhere.
+    #
+    # `test-distributed-mutual` above does this for ONE file
+    # (`tests/integration/test_mutual_distributed.py`). The tier proper was never
+    # in CI at all, and it is guarded on `device_count() < 2`, so every run
+    # collected it and skipped it. Measured on this repo:
+    #
+    #     no forced devices    4 passed, 28 skipped
+    #     2 forced devices    31 passed,  1 skipped
+    #
+    # `bench/distributed_gate.py` -- the two-card gate -- names this gap in its own
+    # docstring and calls it "the cheap 90% [that] needs no hardware at all". This
+    # job is that 90%. The remaining 10% is what CPU structurally cannot reach (the
+    # native ragged halo exchange, the fused Pallas near field, real NCCL), and
+    # that stays with the two-card gate; audit F34.
+    #
+    # TWO devices, not the sibling's four. Two is where every file in the tier
+    # un-skips, it is what the two-card gate targets, and it is what the numbers
+    # above were measured at. Four would cost more memory for nothing.
+    #
+    # Its own job for the reason the sibling documents: the flag changes device
+    # topology for the whole process, so folding it into a shared tier would
+    # silently re-target every other test there.
+    name: test-distributed-tier
+    runs-on: ubuntu-latest
+    # Measured 12:55 at `-n 2` on a fast workstation (31 passed, 1 skipped);
+    # 20:18 at `-n 0`, so xdist buys 36% and each worker gets its own forced
+    # devices with identical results. 60 leaves the ~4x runner penalty the
+    # sibling job budgets for, without being so wide it stops detecting a hang.
+    timeout-minutes: 60
+    env:
+      JAX_ENABLE_X64: "1"
+      JAX_PLATFORMS: cpu
+      XLA_FLAGS: --xla_force_host_platform_device_count=2
+      JACCPOT_TEST_JAX_CACHE_DIR: ${{ github.workspace }}/.jax_cache
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+      - name: Restore JAX compilation cache
+        uses: actions/cache@v4
+        with:
+          # Own key: every test here compiles its own `shard_map` program, which
+          # no other job compiles, and three jobs racing one key means two lose.
+          path: ${{ github.workspace }}/.jax_cache
+          key: jax-compile-py313-disttier-${{ hashFiles('jaccpot/**/*.py') }}
+          restore-keys: |
+            jax-compile-py313-disttier-
+      - name: Install package + dev tools
+        run: |
+          python -m pip install --upgrade pip
+          pip install git+https://github.com/TobiBu/yggdrax.git
+          pip install -e ".[dev]"
+      - name: Distributed tier on forced devices
+        run: |
+          set -o pipefail
+          rc=0
+          pytest tests/distributed -n 2 -rs -m "not experimental" \
+            | tee pytest-distributed-tier.txt || rc=$?
+          if [ "$rc" != 0 ] && [ "$rc" != 5 ]; then exit "$rc"; fi
+      - name: Fail if the tier was skipped rather than run
+        # The failure this job exists to end: `device_count() < 2` makes a skipped
+        # tier PASS, and a green-but-vacuous job is worse than a red one.
+        #
+        # Anchored on the module guards' own wording, `needs >= 2 devices`, which
+        # all four of them share -- NOT on any SKIPPED line. That distinction is
+        # load bearing here for the same reason the sibling records it: the tier
+        # carries one legitimate per-test skip on a CPU runner
+        # (`test_native_halo_exchange_is_fixed_upstream`, opt-in behind
+        # JACCPOT_CHECK_UPSTREAM_RAGGED_FIX and reachable only on real cards), and
+        # reading that as vacuity would fail the job over a test that could not
+        # have run here at all.
+        #
+        # Both patterns were validated against real logs before this landed: the
+        # unforced run (24 SKIPPED lines) fires it, the forced run does not, and
+        # the opt-in skip alone does not.
+        run: |
+          if grep -qE "no tests ran|collected 0 items" pytest-distributed-tier.txt \
+             || grep -qE "^SKIPPED.*needs >= 2 devices" pytest-distributed-tier.txt; then
+            echo "::error::the distributed tier was skipped, not run -- the forced-device flag did not take effect"
+            exit 1
+          fi
+
   benchmark-guard:
     runs-on: ubuntu-latest
     env:
