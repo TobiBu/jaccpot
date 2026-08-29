@@ -131,6 +131,11 @@ CONVERTED_MODULES = (
     # this guard did not hold. STYLE_GUIDE section 4 says to add a module in the
     # same PR that annotates it; that is the rule this omission broke.
     "jaccpot/runtime/kernels/_evaluate.py",
+    # Phase 1 of the rollout. Only the `delta`/`raw_*` family was unvalidated
+    # here; the `upward/solidfmm_complex_*` functions in the same phase were
+    # measured and left alone, because yggdrax and their own bodies already
+    # reject every malformed input tried (13 of 15 across the group).
+    "jaccpot/downward/local_expansions.py",
 )
 
 # Array parameters deliberately left bare, each with its reason recorded at the
@@ -146,6 +151,13 @@ DELIBERATELY_BARE: frozenset[tuple[str, str]] = frozenset(
         # `Union[float, Array]`: a scalar that legitimately accepts a Python
         # number, so `Float[Array, ""]` would break every defaulted call.
         ("jaccpot/nearfield/near_field.py", "G"),
+        # `initialize_local_expansions` already raises
+        # `ValueError("centers must have shape (num_nodes, 3)")`, and it fires on
+        # both a wrong node count and a wrong trailing dimension -- measured, not
+        # read off the docstring. Annotating would preempt that message with a
+        # generic `TypeCheckError`, which STYLE_GUIDE section 4.1 calls out as a
+        # loss rather than a gain.
+        ("jaccpot/downward/local_expansions.py", "centers"),
     }
 )
 
