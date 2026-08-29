@@ -301,6 +301,79 @@ jobs:
           name: coverage-xml-mac-runtime
           path: coverage-mac-runtime.xml
 
+  test-runtime-typecheck:
+    # `tests/unit` with jaxtyping + beartype enforcement ON.
+    #
+    # WHY THIS EXISTS. CLAUDE.md offers
+    # `JACCPOT_RUNTIME_TYPECHECK=1 pytest -q tests/unit` as a faster inner loop,
+    # and audit item F40 recorded that this documented command had never passed.
+    # It passes now. Nothing kept it passing, and the measured cost of that gap
+    # is specific: between 2026-08-25 and 2026-08-27 three regressions reached
+    # `main` through it -- all the same mistake, a stand-in object or a value
+    # outside the declared type -- and TWO OF THEM WERE TESTS THAT PASSED WHILE
+    # ASSERTING NOTHING. The call died at the signature, so the `except`
+    # branch each existed to cover never executed. A vacuous test that also
+    # reports line coverage is worse than no test, and only this run can see it.
+    #
+    # SCOPE: the WHOLE of `tests/unit`, deliberately including
+    # `tests/unit/runtime`. The `test-full (unit)` shard carries
+    # `--ignore=tests/unit/runtime` because `test-mac-runtime` owns that path --
+    # but all three of the regressions above were IN `tests/unit/runtime`
+    # (`test_strict_cap_profile.py`, `test_neighbor_list_matches.py`,
+    # `test_engine_config_resolution.py`), so inheriting that ignore would have
+    # caught none of them. The overlap with the other two jobs is the point: they
+    # run these tests for their results, this one runs them for their types.
+    #
+    # NO COVERAGE. It would duplicate what `test-full` already uploads, and cost
+    # memory and wall-clock for a report nobody reads. Types are the product here.
+    #
+    # COST, measured rather than guessed: 24:05 at `-n 2` on a 64-core dev box
+    # (1264 passed, 52 skipped). The hosted runner is slower and a PR branch
+    # misses the exact `.jax_cache` key, so expect the same 30-45 min bracket the
+    # other suites sit in. `timeout-minutes: 60` for the reason `test-full`
+    # documents at length: it has to sit above the real spread and below the ~2.6x
+    # CPU slowdown the JAX ceiling exists to catch.
+    name: test-runtime-typecheck
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      JAX_ENABLE_X64: "1"
+      # The switch this job exists for. `_typecheck.py` reads it at import, before
+      # `jaccpot` is importable enough to use `_env`, so it must be in the
+      # environment rather than set inside the test process.
+      JACCPOT_RUNTIME_TYPECHECK: "1"
+      JACCPOT_TEST_JAX_CACHE_DIR: ${{ github.workspace }}/.jax_cache
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+      - name: Restore JAX compilation cache
+        uses: actions/cache@v4
+        with:
+          # Its own key. This job compiles the same executables as the `unit`
+          # shard and `test-mac-runtime`, so sharing a key would have three jobs
+          # racing to save it and two always losing -- the failure the per-shard
+          # keying above already documents.
+          path: ${{ github.workspace }}/.jax_cache
+          key: jax-compile-py313-typecheck-${{ hashFiles('jaccpot/**/*.py') }}
+          restore-keys: |
+            jax-compile-py313-typecheck-
+      - name: Install package + dev tools
+        run: |
+          python -m pip install --upgrade pip
+          pip install git+https://github.com/TobiBu/yggdrax.git
+          pip install -e ".[dev]"
+      - name: Unit suite under runtime type checking
+        # `-n 2` for the same memory ceiling as `test-full` (overrides
+        # pyproject's `-n auto`). `-m "not experimental"` matches the default
+        # addopts and the sibling jobs.
+        run: |
+          pytest tests/unit -n 2 -m "not experimental"
+
   test-smoke:
     # Fast (non-slow) suite on the other supported Python versions for
     # version-compatibility. The ~50 compile-bound `slow` tests run only in
