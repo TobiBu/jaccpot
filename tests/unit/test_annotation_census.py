@@ -21,6 +21,8 @@ from __future__ import annotations
 import ast
 import textwrap
 
+import pytest
+
 from bench import annotation_census
 
 
@@ -171,6 +173,20 @@ def test_experimental_is_excluded_by_default_as_everywhere_else_in_the_audit():
     assert any(
         "experimental" in p.parts for p in with_experimental
     ), "jaccpot/experimental/ was not found, so the exclusion above proves nothing"
+
+
+def test_an_empty_walk_is_refused_rather_than_reported_as_zero():
+    """A zero census reads as a finished burn-down, which is the worst wrong answer.
+
+    Pointed at a directory with no modules the walk used to return `[]` and the
+    CLI printed `bare 0, shaped 0` -- indistinguishable from a completed
+    rollout. This module exists to stop a number being taken on trust, so it
+    must not produce the most flattering possible number by accident.
+    """
+    with pytest.raises(FileNotFoundError, match="no Python modules"):
+        annotation_census.census_package(
+            package_root=annotation_census.PACKAGE_ROOT / "does-not-exist"
+        )
 
 
 def test_the_reconciliation_ladders_only_ever_loosen():
