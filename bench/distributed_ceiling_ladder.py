@@ -213,16 +213,54 @@ def _memory(ndev: int) -> dict:
 
 
 def _disc(
-    n: int, radius: float = 10.0, thickness: float = 0.2, seed: int = 9
+    n: int,
+    radius: float = 10.0,
+    thickness: float = 0.2,
+    seed: int = 9,
+    fp64: bool = False,
 ) -> tuple[np.ndarray, np.ndarray]:
-    """A thin exponential-ish disc, in float32 as the production lane runs it."""
+    """A thin exponential-ish disc, in float32 as the production lane runs it.
+
+    The working precision of this whole lane is inherited from these arrays --
+    ``coeff_dtype = lp.dtype`` -- so ``jax_enable_x64`` only *permits* 64-bit and
+    does not promote float32 inputs. This function is therefore the only precision
+    knob the ladder has, and until ``fp64`` existed every recorded row was fp32
+    compute regardless of what the surrounding docs claimed.
+
+    Parameters
+    ----------
+    n : int
+        Total particle count.
+    radius : float
+        Disc radius.
+    thickness : float
+        Gaussian scale of the vertical distribution.
+    seed : int
+        Seed for the position and mass draws.
+    fp64 : bool
+        Widen the returned arrays to float64. **The draws are still made and
+        rounded in float32 first, then upcast** -- deliberately, so that an fp64
+        row differs from its fp32 twin in arithmetic precision *only* and not in
+        geometry. Drawing natively in float64 would move the coordinates, flip MAC
+        decisions, and confound the comparison the flag exists to make. With the
+        upcast the geometry is stable to a handful of pairs in tens of millions.
+
+    Returns
+    -------
+    tuple[np.ndarray, np.ndarray]
+        Positions ``[n, 3]`` and masses ``[n]``, float32 or float64.
+    """
     rng = np.random.default_rng(seed)
     r = radius * np.sqrt(rng.uniform(0.0, 1.0, n))
     th = rng.uniform(0.0, 2.0 * np.pi, n)
     pos = np.stack(
         [r * np.cos(th), r * np.sin(th), rng.normal(scale=thickness, size=n)], axis=1
     )
-    return pos.astype(np.float32), rng.uniform(0.8, 1.2, n).astype(np.float32)
+    pos32 = pos.astype(np.float32)
+    mass32 = rng.uniform(0.8, 1.2, n).astype(np.float32)
+    if fp64:
+        return pos32.astype(np.float64), mass32.astype(np.float64)
+    return pos32, mass32
 
 
 def _oracle_subset(
@@ -320,7 +358,9 @@ def _one_point(
             overrides[name] = value
     config = dataclasses.replace(DistributedFMMConfig(), **overrides)
 
-    positions, masses = _disc(per_device_n * ndev, seed=args.seed)
+    positions, masses = _disc(
+        per_device_n * ndev, seed=args.seed, fp64=bool(getattr(args, "fp64", False))
+    )
     part = partition_for_devices(
         positions, masses, ndev, leaf_size=args.leaf, partitioner=config.partitioner
     )
@@ -458,6 +498,14 @@ def main(argv: Optional[list[str]] = None) -> int:
     ap.add_argument("--theta", type=float, default=0.4)
     ap.add_argument("--order", type=int, default=3)
     ap.add_argument("--mac-type", default="dehnen")
+    ap.add_argument(
+        "--fp64",
+        action="store_true",
+        help="run the lane in float64 (the IC is drawn in float32 and upcast, so "
+        "only the arithmetic changes, not the geometry). The working dtype is "
+        "inherited from the input arrays, so this -- not jax_enable_x64 -- is what "
+        "selects double precision here.",
+    )
     ap.add_argument("--nearfield-backend", default="auto")
     ap.add_argument(
         "--far-m2l-fp32",
