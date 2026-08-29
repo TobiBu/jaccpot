@@ -25,6 +25,7 @@ from ._env import env_flag
 from .basis import BasisInterface, ComplexSHBasis, RealSHBasis
 from .config import (
     Basis,
+    FarFieldConfig,
     FMMAdvancedConfig,
     FMMPreset,
     GradConfig,
@@ -779,7 +780,30 @@ class FastMultipoleMethod:
             adaptive_eps=adaptive_eps,
             dehnen_geometry_mode=dehnen_geometry_mode,
             mac_theta_max=mac_theta_max,
-            complex_rotation=runtime_overrides.complex_rotation,
+            farfield=FarFieldConfig(
+                rotation=runtime_overrides.complex_rotation,
+                grouped_interactions=runtime_overrides.grouped_interactions,
+                retain_far_pairs_for_grad=legacy_kwargs.pop(
+                    "retain_far_pairs_for_grad",
+                    advanced_cfg.farfield.retain_far_pairs_for_grad,
+                ),
+                mode=runtime_overrides.farfield_mode,
+                streamed_far_pairs=legacy_kwargs.pop(
+                    "streamed_far_pairs", advanced_cfg.farfield.streamed_far_pairs
+                ),
+                mixed_order=legacy_kwargs.pop(
+                    "mixed_order_farfield", advanced_cfg.farfield.mixed_order
+                ),
+                mixed_order_min_order=legacy_kwargs.pop(
+                    "mixed_order_min_order", advanced_cfg.farfield.mixed_order_min_order
+                ),
+                m2l_chunk_size=legacy_kwargs.pop(
+                    "m2l_chunk_size", advanced_cfg.farfield.m2l_chunk_size
+                ),
+                l2l_chunk_size=legacy_kwargs.pop(
+                    "l2l_chunk_size", advanced_cfg.farfield.l2l_chunk_size
+                ),
+            ),
             tree=TreeConfig(
                 tree_type=runtime_overrides.tree_type or "radix",
                 mode=runtime_overrides.tree_mode,
@@ -862,32 +886,6 @@ class FastMultipoleMethod:
                     "upward_leaf_batch_size",
                     advanced_cfg.runtime.upward_leaf_batch_size,
                 ),
-            ),
-            grouped_interactions=runtime_overrides.grouped_interactions,
-            retain_far_pairs_for_grad=legacy_kwargs.pop(
-                "retain_far_pairs_for_grad",
-                advanced_cfg.farfield.retain_far_pairs_for_grad,
-            ),
-            farfield_mode=runtime_overrides.farfield_mode,
-            streamed_far_pairs=legacy_kwargs.pop(
-                "streamed_far_pairs",
-                advanced_cfg.farfield.streamed_far_pairs,
-            ),
-            mixed_order_farfield=legacy_kwargs.pop(
-                "mixed_order_farfield",
-                advanced_cfg.farfield.mixed_order,
-            ),
-            mixed_order_min_order=legacy_kwargs.pop(
-                "mixed_order_min_order",
-                advanced_cfg.farfield.mixed_order_min_order,
-            ),
-            m2l_chunk_size=legacy_kwargs.pop(
-                "m2l_chunk_size",
-                advanced_cfg.farfield.m2l_chunk_size,
-            ),
-            l2l_chunk_size=legacy_kwargs.pop(
-                "l2l_chunk_size",
-                advanced_cfg.farfield.l2l_chunk_size,
             ),
             nearfield=NearFieldConfig(
                 mode=runtime_overrides.nearfield_mode,

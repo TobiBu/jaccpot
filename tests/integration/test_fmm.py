@@ -18,7 +18,12 @@ import jaccpot.runtime.fmm as fmm_module
 import jaccpot.runtime.fmm_prepare as fmm_prepare_private
 import jaccpot.runtime.kernels.core as kernels_core
 from jaccpot import FMMPreset
-from jaccpot.config import NearFieldConfig, RuntimePolicyConfig, TreeConfig
+from jaccpot.config import (
+    FarFieldConfig,
+    NearFieldConfig,
+    RuntimePolicyConfig,
+    TreeConfig,
+)
 from jaccpot.downward.local_expansions import (
     TreeDownwardData,
 )
@@ -272,7 +277,7 @@ def test_prepare_refresh_static_radix_tree_preserves_static_shape(monkeypatch):
         runtime_path="large_n",
         working_dtype=jnp.float32,
         expansion_basis="solidfmm",
-        complex_rotation="solidfmm",
+        farfield=FarFieldConfig(rotation="solidfmm"),
         tree=TreeConfig(mode="static_radix"),
         fixed_order=2,
     )
@@ -345,10 +350,9 @@ def test_static_radix_refresh_rebuilds_current_large_n_payloads(monkeypatch):
         preset="large_n_gpu",
         runtime_path="large_n",
         expansion_basis="solidfmm",
-        complex_rotation="solidfmm",
+        farfield=FarFieldConfig(rotation="solidfmm", grouped_interactions=False),
         theta=0.6,
         nearfield=NearFieldConfig(mode="bucketed", edge_chunk_size=64),
-        grouped_interactions=False,
         working_dtype=jnp.float32,
         tree=TreeConfig(mode="static_radix"),
         fixed_order=2,
@@ -463,10 +467,9 @@ def test_static_radix_refresh_dual_planner_mode_parity_and_diagnostics(monkeypat
         preset="large_n_gpu",
         runtime_path="large_n",
         expansion_basis="solidfmm",
-        complex_rotation="solidfmm",
+        farfield=FarFieldConfig(rotation="solidfmm", grouped_interactions=False),
         theta=0.6,
         nearfield=NearFieldConfig(mode="bucketed", edge_chunk_size=64),
-        grouped_interactions=False,
         working_dtype=jnp.float32,
         tree=TreeConfig(mode="static_radix"),
         fixed_order=2,
@@ -552,10 +555,9 @@ def test_strict_prepare_refresh_and_evaluate_api_and_diagnostics(monkeypatch):
         preset="large_n_gpu",
         runtime_path="large_n",
         expansion_basis="solidfmm",
-        complex_rotation="solidfmm",
+        farfield=FarFieldConfig(rotation="solidfmm", grouped_interactions=False),
         theta=0.6,
         nearfield=NearFieldConfig(mode="bucketed", edge_chunk_size=64),
-        grouped_interactions=False,
         working_dtype=jnp.float32,
         tree=TreeConfig(mode="static_radix"),
         fixed_order=2,
@@ -628,10 +630,9 @@ def test_strict_exact_cap_profile_match_fail_fast(monkeypatch, tmp_path):
         preset="large_n_gpu",
         runtime_path="large_n",
         expansion_basis="solidfmm",
-        complex_rotation="solidfmm",
+        farfield=FarFieldConfig(rotation="solidfmm", grouped_interactions=False),
         theta=0.6,
         nearfield=NearFieldConfig(mode="bucketed", edge_chunk_size=64),
-        grouped_interactions=False,
         working_dtype=jnp.float32,
         tree=TreeConfig(mode="static_radix"),
         fixed_order=2,
@@ -684,10 +685,9 @@ def test_strict_run_v2_api(monkeypatch):
         preset="large_n_gpu",
         runtime_path="large_n",
         expansion_basis="solidfmm",
-        complex_rotation="solidfmm",
+        farfield=FarFieldConfig(rotation="solidfmm", grouped_interactions=False),
         theta=0.6,
         nearfield=NearFieldConfig(mode="bucketed", edge_chunk_size=64),
-        grouped_interactions=False,
         working_dtype=jnp.float32,
         tree=TreeConfig(mode="static_radix"),
         fixed_order=2,
@@ -749,10 +749,9 @@ def test_strict_fused_moved_endpoint_matches_fresh_prepare(monkeypatch):
         preset="large_n_gpu",
         runtime_path="large_n",
         expansion_basis="solidfmm",
-        complex_rotation="solidfmm",
+        farfield=FarFieldConfig(rotation="solidfmm", grouped_interactions=False),
         theta=0.6,
         nearfield=NearFieldConfig(mode="bucketed", edge_chunk_size=64),
-        grouped_interactions=False,
         working_dtype=jnp.float32,
         tree=TreeConfig(mode="static_radix"),
         fixed_order=2,
@@ -823,10 +822,9 @@ def test_strict_fused_compact_far_pair_cap_fails(monkeypatch):
         preset="large_n_gpu",
         runtime_path="large_n",
         expansion_basis="solidfmm",
-        complex_rotation="solidfmm",
+        farfield=FarFieldConfig(rotation="solidfmm", grouped_interactions=False),
         theta=0.6,
         nearfield=NearFieldConfig(mode="bucketed", edge_chunk_size=64),
-        grouped_interactions=False,
         working_dtype=jnp.float32,
         tree=TreeConfig(mode="static_radix"),
         fixed_order=2,
@@ -1572,12 +1570,12 @@ def test_nearfield_bucketed_matches_baseline(
         softening=1e-3,
         working_dtype=dtype,
         expansion_basis="solidfmm",
-        complex_rotation="solidfmm",
+        farfield=FarFieldConfig(
+            rotation="solidfmm", grouped_interactions=True, mode="class_major"
+        ),
         mac_type="dehnen",
         fixed_order=3,
         fixed_max_leaf_size=16,
-        grouped_interactions=True,
-        farfield_mode="class_major",
     )
 
     fmm_baseline = FMMEngine(
@@ -1788,7 +1786,7 @@ def test_radix_fast_lane_prepared_state_matches_large_n_baseline(monkeypatch):
         expansion_basis="solidfmm",
         theta=0.6,
         nearfield=NearFieldConfig(mode="bucketed", edge_chunk_size=64),
-        grouped_interactions=False,
+        farfield=FarFieldConfig(grouped_interactions=False),
         working_dtype=jnp.float32,
     )
 
@@ -1856,7 +1854,7 @@ def test_radix_fast_lane_includes_overflow_target_blocks(monkeypatch):
         expansion_basis="solidfmm",
         theta=0.6,
         nearfield=NearFieldConfig(mode="bucketed", edge_chunk_size=64),
-        grouped_interactions=False,
+        farfield=FarFieldConfig(grouped_interactions=False),
         working_dtype=jnp.float32,
     )
     state = fmm.prepare_state(
@@ -1919,7 +1917,7 @@ def test_radix_fast_lane_auto_full_prefix_eliminates_overflow(monkeypatch):
         expansion_basis="solidfmm",
         theta=0.6,
         nearfield=NearFieldConfig(mode="bucketed", edge_chunk_size=64),
-        grouped_interactions=False,
+        farfield=FarFieldConfig(grouped_interactions=False),
         working_dtype=jnp.float32,
     )
     state = fmm.prepare_state(
@@ -1966,7 +1964,7 @@ def test_large_n_prepacked_overflow_fallback_matches_tiled_overflow(monkeypatch)
         expansion_basis="solidfmm",
         theta=0.6,
         nearfield=NearFieldConfig(mode="bucketed", edge_chunk_size=64),
-        grouped_interactions=False,
+        farfield=FarFieldConfig(grouped_interactions=False),
         working_dtype=jnp.float32,
     )
     state = fmm.prepare_state(
@@ -2135,7 +2133,7 @@ def test_radix_fast_lane_fixed_seed_repeatability(monkeypatch):
         expansion_basis="solidfmm",
         theta=0.6,
         nearfield=NearFieldConfig(mode="bucketed", edge_chunk_size=64),
-        grouped_interactions=False,
+        farfield=FarFieldConfig(grouped_interactions=False),
         working_dtype=jnp.float32,
     )
     fmm_a = FMMEngine(**kwargs)
@@ -2453,7 +2451,7 @@ def test_prepare_state_cache_respects_dehnen_radius_scale_changes():
         softening=1e-3,
         working_dtype=jnp.float32,
         expansion_basis="solidfmm",
-        complex_rotation="solidfmm",
+        farfield=FarFieldConfig(rotation="solidfmm"),
         mac_type="dehnen",
         dehnen_radius_scale=1.0,
     )
@@ -2665,9 +2663,8 @@ def test_prepare_state_reuses_grouped_buffers_from_cache():
         softening=1e-3,
         working_dtype=jnp.float32,
         expansion_basis="solidfmm",
-        complex_rotation="solidfmm",
+        farfield=FarFieldConfig(rotation="solidfmm", grouped_interactions=True),
         mac_type="dehnen",
-        grouped_interactions=True,
     )
     fmm.prepare_state(
         positions,
@@ -2708,11 +2705,13 @@ def test_prepare_state_reuses_grouped_class_segments_from_cache():
         softening=1e-3,
         working_dtype=jnp.float32,
         expansion_basis="solidfmm",
-        complex_rotation="solidfmm",
+        farfield=FarFieldConfig(
+            rotation="solidfmm",
+            grouped_interactions=True,
+            mode="class_major",
+            m2l_chunk_size=128,
+        ),
         mac_type="dehnen",
-        grouped_interactions=True,
-        farfield_mode="class_major",
-        m2l_chunk_size=128,
     )
     fmm.prepare_state(
         positions,
@@ -2753,9 +2752,8 @@ def test_prepare_state_cache_key_respects_center_mode():
         softening=1e-3,
         working_dtype=jnp.float32,
         expansion_basis="solidfmm",
-        complex_rotation="solidfmm",
+        farfield=FarFieldConfig(rotation="solidfmm", grouped_interactions=False),
         mac_type="dehnen",
-        grouped_interactions=False,
     )
     # The cache-key-vs-center_mode behaviour depends on the adaptive resolver
     # setting center_mode="aabb" when grouped_interactions flips on. That is an
@@ -2846,7 +2844,7 @@ def test_solidfmm_float32_uses_complex64_locals():
         softening=1e-3,
         working_dtype=jnp.float32,
         expansion_basis="solidfmm",
-        complex_rotation="solidfmm",
+        farfield=FarFieldConfig(rotation="solidfmm"),
         mac_type="dehnen",
     )
     state = fmm.prepare_state(
@@ -2879,7 +2877,7 @@ def test_solidfmm_float64_uses_complex128_locals():
             softening=1e-3,
             working_dtype=jnp.float64,
             expansion_basis="solidfmm",
-            complex_rotation="solidfmm",
+            farfield=FarFieldConfig(rotation="solidfmm"),
             mac_type="dehnen",
         )
         state = fmm.prepare_state(
@@ -2976,12 +2974,11 @@ def test_solidfmm_chunked_m2l_matches_fullbatch():
             softening=1e-3,
             working_dtype=dtype,
             expansion_basis="solidfmm",
-            complex_rotation="solidfmm",
+            farfield=FarFieldConfig(rotation="solidfmm", m2l_chunk_size=chunk_size),
             mac_type="dehnen",
             tree=TreeConfig(mode="lbvh"),
             fixed_order=4,
             fixed_max_leaf_size=_CHUNKED_M2L_LEAF_SIZE,
-            m2l_chunk_size=chunk_size,
         )
 
     def accelerations(*, chunk_size, dtype):
@@ -3183,7 +3180,7 @@ def test_fast_preset_adaptive_large_cpu_policy_applies():
     fmm = FMMEngine(
         preset=FMMPreset.FAST,
         expansion_basis="solidfmm",
-        complex_rotation="solidfmm",
+        farfield=FarFieldConfig(rotation="solidfmm"),
         mac_type="dehnen",
     )
     # This test exercises the adaptive large-CPU runtime policy, which is the
@@ -3212,7 +3209,7 @@ def test_fast_preset_adaptive_class_major_threshold():
     fmm = FMMEngine(
         preset=FMMPreset.FAST,
         expansion_basis="solidfmm",
-        complex_rotation="solidfmm",
+        farfield=FarFieldConfig(rotation="solidfmm"),
         mac_type="dehnen",
     )
     # Adaptive class-major farfield policy is the non-default opt-out path;
@@ -3233,7 +3230,7 @@ def test_adaptive_nearfield_edge_chunk_size_auto_policy(monkeypatch):
     fmm_cpu = FMMEngine(
         preset=FMMPreset.FAST,
         expansion_basis="solidfmm",
-        complex_rotation="solidfmm",
+        farfield=FarFieldConfig(rotation="solidfmm"),
         mac_type="dehnen",
         nearfield=NearFieldConfig(mode="auto", edge_chunk_size=256),
     )
@@ -3271,7 +3268,7 @@ def test_adaptive_nearfield_edge_chunk_size_auto_policy(monkeypatch):
     fmm_gpu = FMMEngine(
         preset=FMMPreset.LARGE_N_GPU,
         expansion_basis="solidfmm",
-        complex_rotation="solidfmm",
+        farfield=FarFieldConfig(rotation="solidfmm"),
         nearfield=NearFieldConfig(mode="auto", edge_chunk_size=128),
     )
     monkeypatch.setattr(jax, "default_backend", lambda: "gpu")
@@ -3311,10 +3308,9 @@ def test_fast_preset_adaptive_policy_respects_explicit_overrides():
     fmm = FMMEngine(
         preset=FMMPreset.FAST,
         expansion_basis="solidfmm",
-        complex_rotation="solidfmm",
+        farfield=FarFieldConfig(rotation="solidfmm", m2l_chunk_size=2048),
         mac_type="dehnen",
         runtime_policy=RuntimePolicyConfig(traversal_config=cfg),
-        m2l_chunk_size=2048,
     )
 
     overrides = fmm._resolve_runtime_execution_overrides(
@@ -3344,7 +3340,7 @@ def test_solidfmm_grouped_interactions_matches_sparse_path():
         softening=1e-3,
         working_dtype=jnp.float32,
         expansion_basis="solidfmm",
-        complex_rotation="solidfmm",
+        farfield=FarFieldConfig(rotation="solidfmm"),
         mac_type="dehnen",
         fixed_order=3,
     )
@@ -3419,10 +3415,10 @@ def test_solidfmm_grouped_class_major_matches_pair_grouped():
         softening=1e-3,
         working_dtype=jnp.float32,
         expansion_basis="solidfmm",
-        complex_rotation="solidfmm",
+        farfield=FarFieldConfig(
+            rotation="solidfmm", grouped_interactions=True, mode="pair_grouped"
+        ),
         mac_type="dehnen",
-        grouped_interactions=True,
-        farfield_mode="pair_grouped",
         fixed_order=3,
     )
 
@@ -3512,7 +3508,10 @@ def test_solidfmm_basis_rejects_non_solidfmm_rotation():
         ValueError,
         match="complex_rotation must be 'solidfmm'",
     ):
-        FMMEngine(expansion_basis="solidfmm", complex_rotation="cached")
+        FMMEngine(
+            expansion_basis="solidfmm",
+            farfield=FarFieldConfig(rotation="cached"),
+        )
 
 
 def test_dehnen_radius_scale_must_be_positive():
@@ -3566,7 +3565,7 @@ def test_solidfmm_dehnen_accuracy_improves_with_order():
                 working_dtype=jnp.float64,
                 runtime_policy=RuntimePolicyConfig(traversal_config=traversal),
                 expansion_basis="solidfmm",
-                complex_rotation="solidfmm",
+                farfield=FarFieldConfig(rotation="solidfmm"),
                 mac_type="dehnen",
                 fixed_order=order,
                 fixed_max_leaf_size=16,

@@ -23,7 +23,7 @@ import jax
 import jax.numpy as jnp
 import pytest
 
-from jaccpot.config import TreeConfig
+from jaccpot.config import FarFieldConfig, TreeConfig
 from jaccpot.runtime._fmm_impl import FMMEngine
 
 N_PARTICLES = 512
@@ -46,7 +46,7 @@ def _engine():
         preset="large_n_gpu",
         runtime_path="large_n",
         expansion_basis="solidfmm",
-        complex_rotation="solidfmm",
+        farfield=FarFieldConfig(rotation="solidfmm"),
         theta=0.6,
         working_dtype=jnp.float32,
         tree=TreeConfig(mode="static_radix"),
