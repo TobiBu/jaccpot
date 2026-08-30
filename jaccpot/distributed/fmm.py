@@ -76,6 +76,12 @@ from yggdrax.tree import (
 )
 from yggdrax.tree_moments import compute_tree_mass_moments
 
+from jaccpot.config import MACTypeInput
+from jaccpot.distributed._force_scale import (
+    DISTRIBUTED_FORCE_SCALE_MODES,
+    distributed_force_scale_nodes,
+    policy_upward_view,
+)
 from jaccpot.downward.local_expansions import LocalExpansionData
 from jaccpot.nearfield._fast_lane import (
     _radix_fast_lane_prepacked_accel_cvjp,
@@ -92,6 +98,10 @@ from jaccpot.operators.complex_ops import (
     m2l_complex_reference_batch,
 )
 from jaccpot.operators.real_harmonics import sh_size
+from jaccpot.runtime._adaptive_policy import (
+    adaptive_pair_policy,
+    build_adaptive_policy_state,
+)
 from jaccpot.runtime._interaction_cache import (
     _build_treecode_artifacts_strict_streamed,
 )
@@ -415,6 +425,14 @@ def _derive_walk_caps(
     }
 
 
+#: ``dehnen_geometry_mode`` values verified to survive tracing under ``shard_map``.
+#: "exact" and "tree" fit a bounding sphere per node with a numpy host loop, which
+#: ``resolve_dehnen_geometry`` refuses on tracers outright. "tree_approx" is device
+#: -side but still reads its leaf-block width off the device
+#: (``compute_leaf_ritter_sphere_geometry``), so it is left out rather than listed
+#: on the strength of being JAX code -- untested is not the same as supported.
+_TRACEABLE_DEHNEN_GEOMETRY_MODES = ("com", "runtime")
+
 # Order of the per-device diagnostic vector returned alongside the forces.
 DIAG_FIELDS = (
     "cross_far_pairs",
@@ -433,6 +451,15 @@ DIAG_FIELDS = (
     # whenever ``l2l_num_levels`` is left to its safe default. Deliberately NOT in
     # ``_OVERFLOW_FIELDS``: no capacity retry can fix a caller-supplied bound.
     "l2l_level_overflow",
+    # Range of the Dehnen criterion's per-node force scale, and 0.0/0.0 when the
+    # criterion is off. Surfaced because trap 14's failure signature is a
+    # CONSTANT scale: `build_adaptive_policy_state` substitutes `jnp.ones(...)` for
+    # a missing force scale, which runs eq (16a) against `eps * 1` instead of
+    # `eps * min_b f_b` -- a different criterion, accepting far more, running
+    # faster, and reported nowhere. A min equal to the max is that fallback, and a
+    # test can see it from outside the mesh.
+    "force_scale_min",
+    "force_scale_max",
 )
 
 
@@ -510,12 +537,41 @@ class DistributedFMMConfig:
     # dehnen bounding-SPHERE MAC extents (the correct multipole-radius bound, matching
     # the single-GPU fast lane and required for stable multi-step use). "bh" (box) is
     # cheaper but under-bounds the source radius; keep it only for single-shot use.
-    # `MACType`, not `str`: yggdrax declares it `Literal["bh", "engblom",
-    # "dehnen"]` and every consumer of this field passes it straight there, so
-    # `str` was wider than anything that works. Narrowing the annotation changes
-    # nothing at runtime and makes a bad value a type error instead of a failure
-    # inside the traversal.
-    mac_type: MACType = "dehnen"
+    # `MACTypeInput`, not `MACType`: yggdrax's traversal declares
+    # `Literal["bh", "engblom", "dehnen"]` and raises on anything else, so every
+    # value reaching it goes through `_mac_type_for_traversal` first. The two extra
+    # literals are jaccpot-level POLICIES layered on the geometric test:
+    # "dehnen_error" (Dehnen 2014 section 5, evaluated pair-by-pair through a
+    # solver-owned pair policy) is supported here on the SELF walk; "dehnen_theta"
+    # is refuted (12-9300x worse error at 1.35-15x the work) and rejected below
+    # rather than silently translated, because folding the criterion into
+    # `geometry.radius` would leave the cross walk running a different criterion
+    # from the self walk with nothing to say so.
+    mac_type: MACTypeInput = "dehnen"
+    # Dehnen section 5 criterion knobs, read only when mac_type="dehnen_error".
+    #
+    # `adaptive_eps` is eq (16a)'s relative force-accuracy target and is MANDATORY
+    # under the criterion -- it replaces `theta` as the accuracy knob on the self
+    # walk, where the geometric MAC no longer gates acceptance at all (the pair
+    # policy discards `mac_ok` in paper mode). `theta` still gates the CROSS walk,
+    # which stays geometric; see `_force_scale.py` for the scope of this port.
+    adaptive_eps: Optional[float] = None
+    # Which force scale sits on eq (16a)'s right-hand side. Only eq (16b)'s `f_b`
+    # is available on a mesh -- see :data:`DISTRIBUTED_FORCE_SCALE_MODES` and the
+    # `_force_scale` module docstring for why eq (16a)'s `min_b |a_b|` is a second
+    # distributed evaluation rather than a read of lists that already exist.
+    mac_force_scale_mode: str = "paper_fb"
+    # eq (16a) first clause: `theta < mac_theta_max`, with 1.0 giving the paper's
+    # own `theta < 1`. Measured not to be needed (trap 4); do not lower it without
+    # a fresh reason.
+    mac_theta_max: float = 1.0
+    # How node centres and radii are measured for the criterion. "com" (the
+    # solver's own default) references centres and radii to the runtime's expansion
+    # centres, so the distance entering eqs (13)/(15) is exactly the M2L
+    # displacement. The sphere-fitting modes "exact" and "tree" run a numpy host
+    # loop over nodes and cannot be traced, so they are unreachable inside
+    # ``shard_map`` and rejected up front rather than at trace time.
+    dehnen_geometry_mode: str = "com"
     # Far-field expansion basis: "real" (Dehnen no-sqrt2, DEFAULT) or "solidfmm" (complex).
     # "real" is the per-device far field converged onto the single-GPU fast-lane path
     # (memory-lighter, and unlocks the fused real M2L Pallas kernel when
@@ -1545,7 +1601,6 @@ def _make_fn(
     G = config.G
     soft = config.softening
     rot = config.rotation
-    mac = config.mac_type
     theta = config.theta
     is_real = str(config.basis).strip().lower() == "real"
 
@@ -1557,6 +1612,55 @@ def _make_fn(
         )
     use_treecode_local = lw == "treecode"
     dehnen_radius_scale = float(config.dehnen_radius_scale)
+
+    # Dehnen section 5 criterion resolution (trace-time). `mac_type="dehnen_error"`
+    # is a jaccpot-level POLICY: yggdrax's traversal only knows the three geometric
+    # literals, so `mac` below is the translated one and the criterion rides in as a
+    # `pair_policy` on the self walk. `dehnen_theta` is refuted and is refused here
+    # rather than translated -- folding the criterion into `geometry.radius` would
+    # silently leave the cross walk on a different criterion from the self walk.
+    mac_requested = str(config.mac_type)
+    if mac_requested == "dehnen_theta":
+        raise ValueError(
+            "mac_type='dehnen_theta' is not available on the distributed lane. It is "
+            "REFUTED on the single-GPU lane (12-9300x worse error at 1.35-15x the "
+            "work, pinned by tests/unit/runtime/test_refuted_dehnen_theta_mode.py) "
+            "and it folds the criterion into geometry.radius, which the cross walk "
+            "does not carry. Use mac_type='dehnen_error'."
+        )
+    uses_criterion = mac_requested == "dehnen_error"
+    # The geometric MAC handed to both walks. Under the criterion this is the
+    # `dehnen` base test; on the self walk the pair policy discards its verdict
+    # (paper mode deletes `mac_ok`), and on the cross walk it is the whole test.
+    mac: MACType = "dehnen" if uses_criterion else mac_requested
+    if uses_criterion:
+        if config.adaptive_eps is None:
+            raise ValueError(
+                "mac_type='dehnen_error' requires adaptive_eps: eq (16a)'s relative "
+                "force-accuracy target replaces theta as the accuracy knob on the "
+                "self walk. There is no default, because a wrong one changes what "
+                "is accepted and costs LESS work, which no timing can detect."
+            )
+        if str(config.mac_force_scale_mode) not in DISTRIBUTED_FORCE_SCALE_MODES:
+            raise ValueError(
+                "mac_force_scale_mode must be one of "
+                f"{DISTRIBUTED_FORCE_SCALE_MODES} on the distributed lane; got "
+                f"{config.mac_force_scale_mode!r}"
+            )
+        if use_treecode_local:
+            raise ValueError(
+                "mac_type='dehnen_error' needs local_walk='dual_tree': the treecode "
+                "walk takes no pair policy, so it would run the geometric MAC and "
+                "report nothing -- faster, and answering a different criterion."
+            )
+        if str(config.dehnen_geometry_mode) not in _TRACEABLE_DEHNEN_GEOMETRY_MODES:
+            raise ValueError(
+                "dehnen_geometry_mode must be one of "
+                f"{_TRACEABLE_DEHNEN_GEOMETRY_MODES} on the distributed lane; got "
+                f"{config.dehnen_geometry_mode!r}. The sphere-fitting modes run a "
+                "numpy host loop over nodes, which cannot be traced inside "
+                "shard_map."
+            )
 
     # Near-field backend resolution (trace-time; sm_80+ gate mirrors the single-GPU
     # lane). "auto" -> fused leafpair Pallas on Ampere+, pure-JAX baseline elsewhere.
@@ -1894,6 +1998,133 @@ def _make_fn(
             max_neighbors_per_leaf=KN,
             max_pair_queue=x_queue,
         )
+
+        # Right-sized cross-far slice. The walk sizes `interaction_sources` at
+        # `t_total * KC` but PACKS the valid far interactions into the front
+        # [0, far_pair_count) with a -1 tail, so touching the whole buffer costs
+        # ~6 GiB at N >= 400k/GPU for interactions that are not there. Hoisted above
+        # the criterion block because the force-scale prepass reads the same array
+        # and would otherwise reintroduce exactly that allocation. `nbr.leaf_indices`
+        # is the same leaf set before and after the criterion walk -- same tree --
+        # so the cap does not move. A far volume above it is surfaced as
+        # `cross_far_overflow` below, so the slice never silently drops pairs.
+        max_far = int(jnp.asarray(cross.interaction_sources).shape[0])
+        num_tgt_leaves = int(jnp.asarray(nbr.leaf_indices).shape[0])
+        if config.cross_far_cap is not None:
+            xfar_cap = int(config.cross_far_cap)
+        else:
+            xfar_cap = max(1 << 14, KC * num_tgt_leaves)
+        xfar_cap = min(xfar_cap, max_far)
+
+        # 0.0/0.0 unless the criterion runs; see DIAG_FIELDS for why the RANGE and
+        # not just a flag.
+        fs_min = jnp.zeros((), jnp.float64)
+        fs_max = jnp.zeros((), jnp.float64)
+
+        if uses_criterion:
+            # ---- Dehnen section 5, eq (16b): the criterion's second self walk ----
+            #
+            # The walks above are the PREPASS. Their geometric far/near lists are
+            # what `f_b` is estimated from -- exactly as the single-GPU lane runs a
+            # geometric dual build and then the criterion one. The cross walk is
+            # reused rather than re-run: it is the source of the remote terms, and
+            # this port leaves it geometric (self-only scope), so one cross walk is
+            # both the prepass and the production list.
+            #
+            # `theta` is INERT for the walk below. In paper mode `adaptive_pair_policy`
+            # deletes `mac_ok`, so the geometric verdict decides nothing and
+            # `adaptive_eps` is the only accuracy knob on this walk. It is still
+            # passed because the traversal computes the verdict either way.
+            force_scale_nodes = distributed_force_scale_nodes(
+                tree=tree,
+                positions_sorted=lp,
+                masses_sorted=lm,
+                node_centers=jnp.asarray(geom.center),
+                node_radii=jnp.asarray(geom.radius),
+                self_far_sources=jnp.asarray(inter.sources),
+                self_far_targets=jnp.asarray(inter.targets),
+                self_near_offsets=jnp.asarray(nbr.offsets),
+                self_near_counts=jnp.asarray(nbr.counts),
+                self_near_indices=jnp.asarray(nbr.neighbors),
+                self_near_leaf_indices=jnp.asarray(nbr.leaf_indices),
+                coarse_tree=rct.tree,
+                coarse_masses_sorted=coarse_mass_sorted,
+                coarse_centers=jnp.asarray(rct.geometry.center),
+                coarse_radii=jnp.asarray(rct.geometry.radius),
+                cross_far_sources=jnp.asarray(cross.interaction_sources)[:xfar_cap],
+                cross_far_targets=jnp.asarray(cross.interaction_targets)[:xfar_cap],
+                cross_near_counts=jnp.asarray(cross.neighbor_counts),
+                cross_near_indices=jnp.asarray(cross.neighbor_indices),
+                cross_near_leaf_indices=jnp.asarray(cross.leaf_indices),
+                max_leaf_size=leaf,
+                softening=float(soft),
+                gravitational_constant=float(G),
+                force_scale_mode=str(config.mac_force_scale_mode),
+            )
+            # `force_scale_nodes` is always a real array here, and it has to stay
+            # that way: `build_adaptive_policy_state` substitutes `jnp.ones(...)`
+            # for a `None`, which runs eq (16a) against a threshold of `eps * 1`
+            # instead of `eps * min_b f_b` -- a different criterion, accepting far
+            # more, running faster, reported nowhere (trap 14). The diagnostic
+            # below is what makes that visible from outside the mesh rather than
+            # trusted.
+            #
+            # Over the nodes that span particles: a padded leaf's scale is the
+            # reduction identity (+inf), which would swamp the max and say nothing.
+            spans = (
+                jnp.asarray(tree.node_ranges)[:, 1]
+                >= jnp.asarray(tree.node_ranges)[:, 0]
+            )
+            fs_finite = jnp.where(
+                spans & jnp.isfinite(force_scale_nodes), force_scale_nodes, jnp.nan
+            ).astype(jnp.float64)
+            fs_min = jnp.nanmin(fs_finite)
+            fs_max = jnp.nanmax(fs_finite)
+            policy_state = build_adaptive_policy_state(
+                upward=policy_upward_view(upward=up, geometry=geom, mass_moments=mm),
+                tree=tree,
+                positions_sorted=lp,
+                p_gears=(int(p),),
+                force_scale_nodes=force_scale_nodes,
+                eps=jnp.asarray(
+                    float(config.adaptive_eps), dtype=up.multipoles.packed.real.dtype
+                ),
+                theta=jnp.asarray(theta, dtype=up.multipoles.packed.real.dtype),
+                # 2 = the eq (15) paper estimator. The criterion needs it regardless
+                # of any other error-model choice, so it is pinned rather than read.
+                error_model_code=2,
+                dehnen_geometry_mode=str(config.dehnen_geometry_mode),
+                gravitational_constant=float(G),
+                mac_theta_max=float(config.mac_theta_max),
+                # Static: the exact per-leaf maximum is a host read, and inside
+                # ``shard_map`` every value is abstract. The leaf capacity bounds it.
+                max_leaf_size=leaf,
+            )
+            prepass_res = self_res
+            inter, nbr, self_res = build_interactions_and_neighbors(
+                tree,
+                geom,
+                theta=theta,
+                traversal_config=cfg,
+                mac_type=mac,
+                pair_policy=adaptive_pair_policy,
+                policy_state=policy_state,
+                return_result=True,
+            )
+            # The prepass walk's own overflow flags would otherwise be DISCARDED,
+            # because the diagnostics below describe the criterion walk that
+            # replaced it. A truncated prepass list drops terms from `f_b`, which
+            # makes the scale smaller, the criterion tighter and the run slower --
+            # the safe direction, and therefore one that nothing else would ever
+            # report. Fold them in so `auto_scale_caps` grows the caps and retries
+            # instead of quietly estimating from a partial list. The counts stay
+            # the criterion walk's: those describe the work actually done.
+            self_res = self_res._replace(
+                queue_overflow=self_res.queue_overflow | prepass_res.queue_overflow,
+                far_overflow=self_res.far_overflow | prepass_res.far_overflow,
+                near_overflow=self_res.near_overflow | prepass_res.near_overflow,
+            )
+
         # The halo exchange is the one place cotangents cross devices. On the grad
         # path its implementation is pinned -- see _grad_halo_exchange for why the
         # native ragged path must not be used there.
@@ -2052,13 +2283,6 @@ def _make_fn(
         # far cap and is ~2x tighter than the t_total*KC buffer; cross_far_cap overrides.
         # A far volume above the cap is surfaced (cross_far_overflow, below) so auto_scale
         # widens it -- so the slice never silently drops interactions.
-        max_far = int(jnp.asarray(cross.interaction_sources).shape[0])
-        num_tgt_leaves = int(jnp.asarray(nbr.leaf_indices).shape[0])
-        if config.cross_far_cap is not None:
-            xfar_cap = int(config.cross_far_cap)
-        else:
-            xfar_cap = max(1 << 14, KC * num_tgt_leaves)
-        xfar_cap = min(xfar_cap, max_far)
         x_src = jnp.asarray(cross.interaction_sources, INDEX_DTYPE)[:xfar_cap]
         x_tgt = jnp.asarray(cross.interaction_targets, INDEX_DTYPE)[:xfar_cap]
         x_valid = x_tgt >= 0
@@ -2270,6 +2494,8 @@ def _make_fn(
                 self_res.far_overflow.astype(jnp.float64),
                 self_res.near_overflow.astype(jnp.float64),
                 l2l_overflow,
+                fs_min,
+                fs_max,
             ]
         )
         return accel, gid_sorted[:cap, None].astype(jnp.int64), diag[None, :]
