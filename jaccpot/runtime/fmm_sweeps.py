@@ -12,7 +12,7 @@ import jax
 import jax.numpy as jnp
 from beartype import beartype
 from beartype.typing import Callable
-from jaxtyping import Array, jaxtyped
+from jaxtyping import Array, Float, jaxtyped
 from yggdrax.dense_interactions import DenseInteractionBuffers
 from yggdrax.grouped_interactions import GroupedInteractionBuffers
 from yggdrax.interactions import (
@@ -76,8 +76,8 @@ class SweepsMixin(_EngineBase):
     @staticmethod
     @jaxtyped(typechecker=beartype)
     def compute_expansion(
-        positions: Array,
-        masses: Array,
+        positions: Float[Array, "n 3"],
+        masses: Float[Array, "n"],
         order: int = 1,
     ) -> MultipoleExpansion:
         """Return the multipole expansion via the shared reference helper.
@@ -87,10 +87,10 @@ class SweepsMixin(_EngineBase):
 
         Parameters
         ----------
-        positions : Array
-            ``(n, 3)`` particle positions.
-        masses : Array
-            ``(n,)`` particle masses.
+        positions : Float[Array, 'n 3']
+            Particle positions.
+        masses : Float[Array, 'n']
+            Particle masses.
         order : int
             Expansion order.
 
@@ -107,7 +107,7 @@ class SweepsMixin(_EngineBase):
         self,
         expansion: MultipoleExpansion,
         order: int = 1,
-        eval_point: Optional[Array] = None,
+        eval_point: Optional[Float[Array, "3"]] = None,
     ) -> Array:
         """Evaluate multipole expansions via the shared reference helper.
 
@@ -120,7 +120,7 @@ class SweepsMixin(_EngineBase):
             Expansion to evaluate.
         order : int
             Expansion order to evaluate to.
-        eval_point : Optional[Array]
+        eval_point : Optional[Float[Array, '3']]
             Point of evaluation; ``None`` defers to the reference helper's
             default.
 
@@ -141,9 +141,9 @@ class SweepsMixin(_EngineBase):
     @jaxtyped(typechecker=beartype)
     def direct_sum(
         self,
-        positions: Array,
-        masses: Array,
-        eval_point: Array,
+        positions: Float[Array, "n 3"],
+        masses: Float[Array, "n"],
+        eval_point: Float[Array, "3"],
         eval_mass: float = 0.0,
     ) -> Array:
         """Compute direct-sum accelerations for diagnostic comparisons.
@@ -153,11 +153,11 @@ class SweepsMixin(_EngineBase):
 
         Parameters
         ----------
-        positions : Array
-            ``(n, 3)`` source positions.
-        masses : Array
-            ``(n,)`` source masses.
-        eval_point : Array
+        positions : Float[Array, 'n 3']
+            Source positions.
+        masses : Float[Array, 'n']
+            Source masses.
+        eval_point : Float[Array, '3']
             Point at which to evaluate the acceleration.
         eval_mass : float
             Ignored. Retained for backwards compatibility with callers that

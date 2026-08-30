@@ -136,6 +136,12 @@ CONVERTED_MODULES = (
     # measured and left alone, because yggdrax and their own bodies already
     # reject every malformed input tried (13 of 15 across the group).
     "jaccpot/downward/local_expansions.py",
+    # Phase 1, `runtime/` half. Only the reference oracle and its sweeps facade
+    # were unvalidated: `fmm_derivatives.py`, `fmm_prepare.py` and `_fmm_impl.py`
+    # were measured and left alone, because each already rejects every malformed
+    # input tried, with a domain message an annotation would replace.
+    "jaccpot/runtime/reference.py",
+    "jaccpot/runtime/fmm_sweeps.py",
     # Phase 2, first change. NOT a module conversion: only the eleven functions
     # taking a single spatial `delta` (and `direction`) are shaped, because those
     # are the ones `bench/annotation_pilot` measured accepting a length-2 vector
@@ -165,6 +171,12 @@ DELIBERATELY_BARE: frozenset[tuple[str, str]] = frozenset(
         # generic `TypeCheckError`, which STYLE_GUIDE section 4.1 calls out as a
         # loss rather than a gain.
         ("jaccpot/downward/local_expansions.py", "centers"),
+        # Same `Union[float, Array]` reason as `near_field.py`'s `G` above, and
+        # here it is load-bearing for BOTH names: every one of these signatures
+        # defaults them to Python floats (`G=1.0`, `softening=0.0`), so
+        # `Float[Array, ""]` would reject the default path itself.
+        ("jaccpot/runtime/reference.py", "G"),
+        ("jaccpot/runtime/reference.py", "softening"),
     }
 )
 
