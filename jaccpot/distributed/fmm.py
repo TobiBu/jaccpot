@@ -33,6 +33,7 @@ from __future__ import annotations
 import contextlib
 import dataclasses
 import functools
+import inspect
 import itertools
 import math
 import os
@@ -126,6 +127,7 @@ from jaccpot.upward.tree_geometry import compute_tree_geometry_compiled
 __all__ = [
     "DERIVED_CAP_FIELDS",
     "DIAG_FIELDS",
+    "cross_walk_accepts_a_pair_policy",
     "DistributedFMMConfig",
     "DistributedFMMResult",
     "GRAD_HALO_EXCHANGES",
@@ -240,6 +242,28 @@ _SELF_QUEUE_WAVEFRONT_COEFF = 5.25
 #: the same shape; if that assumption breaks it breaks as an overflow flag, which is
 #: now honest.
 _CROSS_QUEUE_WAVEFRONT_COEFF = 8.25
+
+
+def cross_walk_accepts_a_pair_policy() -> bool:
+    """Whether the installed yggdrax's cross walk can carry a solver-owned policy.
+
+    ``pair_policy`` on ``dual_tree_walk_cross_impl`` is yggdrax PR #54, and jaccpot
+    depends on yggdrax by version range rather than by commit -- so an older one is a
+    perfectly ordinary install, not a broken one. Without the probe, asking for the
+    cross criterion against such an install raises ``TypeError: unexpected keyword
+    argument`` from inside a ``shard_map`` trace, several frames below anything the
+    caller wrote.
+
+    Returns
+    -------
+    bool
+        ``True`` when the cross walk takes a ``pair_policy``.
+    """
+
+    try:
+        return "pair_policy" in inspect.signature(dual_tree_walk_cross_impl).parameters
+    except (TypeError, ValueError):  # pragma: no cover - defensive
+        return False
 
 
 def _round_up_pow2(value: int) -> int:
@@ -1688,6 +1712,16 @@ def _make_fn(
     # Whether the criterion also decides the cross walk. False is the self-only
     # ablation; see the config field for why it stays addressable.
     use_cross_criterion = uses_criterion and bool(config.mac_cross_criterion)
+    if use_cross_criterion and not cross_walk_accepts_a_pair_policy():
+        raise ValueError(
+            "mac_cross_criterion=True needs a yggdrax whose "
+            "dual_tree_walk_cross_impl accepts a pair_policy (yggdrax PR #54). The "
+            "installed one does not, so the criterion would reach the self walk and "
+            "silently leave the cross walk on the geometric MAC -- which is FASTER "
+            "and answers a different question, and is 53% of the near-field work at "
+            "five devices. Upgrade yggdrax, or pass mac_cross_criterion=False to run "
+            "the self-only arm deliberately."
+        )
     # The geometric MAC handed to both walks. Under the criterion this is the
     # `dehnen` base test; on the self walk the pair policy discards its verdict
     # (paper mode deletes `mac_ok`), and on the cross walk it is the whole test.

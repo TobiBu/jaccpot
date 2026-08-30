@@ -34,7 +34,21 @@ import pytest
 from yggdrax.distributed import device_count, make_mesh
 
 from jaccpot.distributed import DistributedFMMConfig, distributed_fmm_accelerations
-from jaccpot.distributed.fmm import make_force_evaluator, partition_for_devices
+from jaccpot.distributed.fmm import (
+    cross_walk_accepts_a_pair_policy,
+    make_force_evaluator,
+    partition_for_devices,
+)
+
+#: The cross-domain half needs yggdrax PR #54. jaccpot depends on yggdrax by version
+#: RANGE, so an older one is an ordinary install rather than a broken one -- but a
+#: skip here must stay loud, because "the cross criterion is never exercised" and "the
+#: cross criterion works" look identical in a green run. The self-walk tests above do
+#: not need it and never skip.
+_needs_cross_hook = pytest.mark.skipif(
+    not cross_walk_accepts_a_pair_policy(),
+    reason="yggdrax's cross walk takes no pair_policy (needs yggdrax PR #54)",
+)
 
 pytestmark = pytest.mark.skipif(
     device_count() < 2, reason="distributed FMM needs >= 2 devices"
@@ -384,6 +398,7 @@ def _cross_near(diagnostics) -> int:
     return int(diagnostics["cross_near_pairs"].sum())
 
 
+@_needs_cross_hook
 def test_the_criterion_decides_the_cross_walk_too():
     """The cross-domain accept mask must move, and only when asked to.
 
@@ -426,6 +441,7 @@ def test_the_criterion_decides_the_cross_walk_too():
     )
 
 
+@_needs_cross_hook
 def test_the_self_walk_is_untouched_by_the_cross_ablation():
     """Turning the cross criterion off must not perturb the local walk.
 
@@ -456,6 +472,7 @@ def test_the_self_walk_is_untouched_by_the_cross_ablation():
     assert int(self_only["self_near_pairs"].sum()) == int(both["self_near_pairs"].sum())
 
 
+@_needs_cross_hook
 def test_the_cross_criterion_still_reproduces_the_direct_sum():
     """Carrying the policy across domains must not corrupt the force.
 
