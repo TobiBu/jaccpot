@@ -705,6 +705,7 @@ def _radix_fast_lane_prepacked_pallas_decoupled(
     num_stages: int = ...,
     target_subtile: Optional[int] = ...,
     interpret: bool = ...,
+    accum: str = ...,
 ) -> Array: ...
 
 
@@ -727,6 +728,7 @@ def _radix_fast_lane_prepacked_pallas_decoupled(
     num_stages: int = ...,
     target_subtile: Optional[int] = ...,
     interpret: bool = ...,
+    accum: str = ...,
 ) -> Tuple[Array, Array]: ...
 
 
@@ -748,6 +750,7 @@ def _radix_fast_lane_prepacked_pallas_decoupled(
     num_stages: int = 1,
     target_subtile: Optional[int] = None,
     interpret: bool = False,
+    accum: str = "input",
 ) -> Union[Array, Tuple[Array, Array]]:
     """Decoupled twin of :func:`_radix_fast_lane_prepacked_pallas`.
 
@@ -802,6 +805,15 @@ def _radix_fast_lane_prepacked_pallas_decoupled(
         Target sub-tile width; ``None`` lets the kernel pick.
     interpret : bool
         Run through Pallas' reference interpreter rather than Triton.
+    accum : str
+        Per-target accumulator width. ``"input"`` (default) is byte-identical to
+        the historical path -- the kernel takes the original code path verbatim,
+        not a specialisation of the widened one. ``"wide"`` accumulates in float64
+        with a float32 partial per source leaf, while every multiply and the
+        ``rsqrt`` stay in the input dtype. See
+        :func:`_nearfield_leafpair_kernel` for why widening only the accumulator is
+        the whole fix: measured 439x in force accuracy for 1.8 % in time on the
+        distributed lane at 10^7 particles.
 
     Returns
     -------
@@ -853,6 +865,7 @@ def _radix_fast_lane_prepacked_pallas_decoupled(
         num_warps=num_warps,
         num_stages=num_stages,
         target_subtile=target_subtile,
+        accum=accum,
         interpret=interpret,
     )
 

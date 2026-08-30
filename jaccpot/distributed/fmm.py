@@ -35,6 +35,7 @@ import dataclasses
 import functools
 import itertools
 import math
+import os
 from dataclasses import dataclass
 from typing import Any, Callable, Iterator, NamedTuple, Optional
 
@@ -215,7 +216,7 @@ _DISTRIBUTED_PROCESS_BLOCK = 256
 #:
 #: 4 gives ~1.4x headroom over the measured 2.83 and lands one ladder rung above the
 #: converged value at every point measured.
-_SELF_QUEUE_WAVEFRONT_COEFF = 4
+_SELF_QUEUE_WAVEFRONT_COEFF = 5.25
 
 #: The same, for the CROSS walk, whose source side is a coarse tree over *every*
 #: device's leaf frontier rather than the local tree, so its wavefront is the wider
@@ -226,7 +227,7 @@ _SELF_QUEUE_WAVEFRONT_COEFF = 4
 #: to be the self walk's, on the grounds that it is the same traversal over a tree of
 #: the same shape; if that assumption breaks it breaks as an overflow flag, which is
 #: now honest.
-_CROSS_QUEUE_WAVEFRONT_COEFF = 16
+_CROSS_QUEUE_WAVEFRONT_COEFF = 8.25
 
 
 def _round_up_pow2(value: int) -> int:
@@ -251,8 +252,45 @@ def _round_up_pow2(value: int) -> int:
     return 1 << max(0, (max(1, int(value)) - 1).bit_length())
 
 
+#: Opening angle the queue coefficients above were measured at.
+_QUEUE_THETA_REF = 0.4
+
+#: How the wavefront queue requirement grows as the MAC tightens. Measured, not
+#: assumed: at ndev 5, per-device 2 097 152, leaf 512, order 6, walking each queue
+#: down until ``self_near_pairs`` collapses gives floors in wavefront units of
+#:
+#:     theta     0.3   0.4   0.5   0.6   0.7   0.8
+#:     self       8     4     2     2     2     1
+#:     cross      -    16     8     8     4     4
+#:
+#: A ``theta ** -1.5`` law covers both with a uniform 2x margin after power-of-two
+#: rounding. That margin is deliberate: an OVER-provisioned queue costs time
+#: linearly, but an UNDER-provisioned one truncates the walk SILENTLY -- the run
+#: reads faster and only ``self_near_pairs`` witnesses it -- so the two errors are
+#: not symmetric and the safe side is known.
+_QUEUE_THETA_EXPONENT = 1.5
+
+
+def _queue_theta_scale(theta: float) -> float:
+    """Return the wavefront-queue multiplier for an opening angle.
+
+    Parameters
+    ----------
+    theta : float
+        Opening angle the walk will run at.
+
+    Returns
+    -------
+    float
+        ``(_QUEUE_THETA_REF / theta) ** _QUEUE_THETA_EXPONENT``, with theta clamped
+        away from zero so a bad value cannot produce an unbounded cap.
+    """
+
+    return (_QUEUE_THETA_REF / max(1e-3, float(theta))) ** _QUEUE_THETA_EXPONENT
+
+
 def _derive_walk_caps(
-    *, per_device_n: int, leaf_size: int, ndev: int
+    *, per_device_n: int, leaf_size: int, ndev: int, theta: float = _QUEUE_THETA_REF
 ) -> dict[str, int]:
     """Size the traversal buffers from the per-device particle count.
 
@@ -324,6 +362,7 @@ def _derive_walk_caps(
 
     n = max(1, int(per_device_n))
     num_leaves = max(1, -(-n // max(1, int(leaf_size))))
+    theta_scale = _queue_theta_scale(theta)
     # Remote leaf frontiers the cross walk can see. 1 rather than 0 on a
     # single-device mesh, so the cross caps stay at their floors instead of
     # collapsing to nothing.
@@ -338,7 +377,7 @@ def _derive_walk_caps(
         "process_block": _DISTRIBUTED_PROCESS_BLOCK,
         "max_pair_queue": max(
             _MIN_PAIR_QUEUE,
-            _round_up_pow2(_SELF_QUEUE_WAVEFRONT_COEFF * wavefront),
+            _round_up_pow2(int(_SELF_QUEUE_WAVEFRONT_COEFF * theta_scale * wavefront)),
         ),
         "max_interactions_per_node": far_per_node,
         "max_neighbors_per_leaf": near_per_leaf,
@@ -347,9 +386,23 @@ def _derive_walk_caps(
         # ``remote_domains`` carries. Same shape as the self budgets above, that many
         # times over -- plus a wider wavefront coefficient, for which see
         # _CROSS_QUEUE_WAVEFRONT_COEFF.
+        # sqrt(remote_domains), NOT remote_domains. Measured at theta 0.7 with
+        # per-device N fixed so only `remote` moves: floors of 524 288 / 1 048 576 /
+        # 1 048 576 at ndev 2 / 4 / 5. A linear factor predicts 2 097 152 at ndev 4
+        # and is refuted; sqrt fits all three points. The neighbour and interaction
+        # caps below keep their LINEAR factor -- that was not measured here, and
+        # `cross_max_neighbors_per_leaf` is known NOT to be over-provisioned: it
+        # overflows at a quarter of its derived value.
         "cross_max_pair_queue": max(
             _MIN_PAIR_QUEUE,
-            _round_up_pow2(_CROSS_QUEUE_WAVEFRONT_COEFF * remote_domains * wavefront),
+            _round_up_pow2(
+                int(
+                    _CROSS_QUEUE_WAVEFRONT_COEFF
+                    * math.sqrt(remote_domains)
+                    * theta_scale
+                    * wavefront
+                )
+            ),
         ),
         "cross_max_interactions_per_node": max(
             _MIN_INTERACTIONS_PER_NODE,
@@ -539,6 +592,23 @@ class DistributedFMMConfig:
     # >200k/GPU; self-far >1.2M/GPU). Scanning fixed-size blocks bounds peak M2L memory to
     # ~block pairs regardless of the total, removing the M2L per-GPU ceiling at some
     # throughput cost. Numerics-identical (associative masked segment-sum accumulation).
+    nearfield_accum: str = "input"
+    """Per-target near-field accumulator width. See :data:`NEARFIELD_ACCUM_MODES`.
+
+    ``"input"`` (default) is byte-identical to the historical path. ``"wide"``
+    accumulates each target's near-field total in float64 while every multiply and the
+    ``rsqrt`` stay in the input dtype -- the mirror image of ``far_m2l_fp32`` above,
+    which computes narrow and accumulates wide for memory; this computes narrow and
+    accumulates wide for accuracy.
+
+    Why this knob exists, measured at 10 485 760 / 5 x A100 / leaf 512 / order 6:
+    running the near field in float64 takes rel_l2 from 4.811e-03 to 1.097e-05, a
+    **438x** recovery landing within 3 % of the full float64 floor (1.068e-05). The
+    error is not in the per-term arithmetic -- it is in one linear sum of ~1.4e6 terms
+    whose net is a small residual of a much larger total, so only the three adds per
+    pair need to widen.
+    """
+
     m2l_chunk: Optional[int] = None
     # Chunk the fused-Pallas NEAR field over blocks of this many TARGET leaves (None = one
     # full batch). The near field densifies the combined CSR into [u_leaves, S_near] tables
@@ -595,6 +665,7 @@ class DistributedFMMConfig:
             per_device_n=int(per_device_n),
             leaf_size=int(self.leaf_size),
             ndev=int(ndev),
+            theta=float(self.theta),
         )
         return dataclasses.replace(self, **{f: derived[f] for f in unset})
 
@@ -1112,6 +1183,7 @@ def _chunked_pallas_nearfield_accumulate(
     block: int,
     G: Any,
     softening_sq: jax.Array,
+    accum: str = "input",
 ) -> jax.Array:
     """Fused-Pallas near field over blocks of TARGET leaves (bounded peak memory).
 
@@ -1172,6 +1244,26 @@ def _chunked_pallas_nearfield_accumulate(
     jax.Array
         Near-field accelerations in the ``concat_pos`` layout, ``[cap + halo, 3]``.
     """
+    # DIAGNOSTIC ONLY, off by default. `JACCPOT_NEARFIELD_ACCUM=wide_input` runs the
+    # whole near field in float64 while everything around it stays float32, which
+    # answers "if the near field were exact, what would rel_l2 be?" -- the measurement
+    # that decides whether widening the per-target accumulator can reach the float64
+    # accuracy floor, or whether the far field carries a floor of its own. It is not a
+    # shipping mode: it widens the pair arithmetic too, so its cost says nothing about
+    # the accumulator-only change. See docs/plan notes on the fp32 near-field floor.
+    _accum = accum
+    _orig_dtype = concat_pos.dtype
+    if _accum == "wide_input":
+        leaf_positions = leaf_positions.astype(jnp.float64)
+        leaf_masses = leaf_masses.astype(jnp.float64)
+        concat_pos = concat_pos.astype(jnp.float64)
+        softening_sq = jnp.asarray(softening_sq, jnp.float64)
+        G = jnp.asarray(G, jnp.float64)
+    elif _accum not in ("input", "wide"):
+        raise ValueError(
+            f"nearfield_accum must be one of {NEARFIELD_ACCUM_MODES}, got {_accum!r}"
+        )
+
     nblk = -(-n_lloc // block)  # ceil
     num_edges = int(src_s.shape[0])
     near0 = jnp.zeros_like(concat_pos)
@@ -1225,12 +1317,20 @@ def _chunked_pallas_nearfield_accumulate(
             G=G,
             softening_sq=softening_sq,
             compute_potential=False,
+            accum="wide" if _accum == "wide" else "input",
         )
         return near + self_blk + pair_blk, None
 
     near, _ = jax.lax.scan(_body, near0, jnp.arange(nblk, dtype=INDEX_DTYPE))
-    return near
+    return near.astype(_orig_dtype)
 
+
+#: Per-target near-field accumulator widths. ``"input"`` keeps the historical path
+#: verbatim; ``"wide"`` is the shipping fix (float64 accumulator, float32 pair
+#: arithmetic); ``"wide_input"`` is a DIAGNOSTIC that runs the whole near field in
+#: float64 -- it answers "if the near field were exact, what is rel_l2?" and its cost
+#: says nothing about ``"wide"``, because float64 ``rsqrt`` is a Newton iteration.
+NEARFIELD_ACCUM_MODES = ("input", "wide", "wide_input")
 
 #: Halo-exchange implementations selectable on the gradient path, plus ``"auto"``.
 #: See :func:`_grad_halo_exchange` for what each is and :func:`resolve_grad_halo_exchange`
@@ -2042,6 +2142,7 @@ def _make_fn(
                     offsets,
                     counts,
                     src_s,
+                    accum=str(config.nearfield_accum),
                     n_lloc=int(loc_idx.shape[0]),
                     S_near=S_near,
                     block=int(config.nearfield_chunk),
@@ -2417,7 +2518,9 @@ def distributed_fmm_accelerations(
         from . import cap_presets as _cp
 
         presets = _cp.load_presets(cap_presets_path)
-        seed = _cp.lookup(presets, per_gpu_n, ndev)
+        seed = _cp.lookup(
+            presets, per_gpu_n, ndev, float(config.theta), int(config.leaf_size)
+        )
         if seed is not None:
             config = _cp.apply_caps(config, seed)
 
@@ -2448,7 +2551,15 @@ def distributed_fmm_accelerations(
     if cap_presets_path is not None and not overflow:
         from . import cap_presets as _cp
 
-        _cp.record(presets, per_gpu_n, ndev, total_n, _cp.caps_of(config))
+        _cp.record(
+            presets,
+            per_gpu_n,
+            ndev,
+            total_n,
+            _cp.caps_of(config),
+            float(config.theta),
+            int(config.leaf_size),
+        )
         _cp.save_presets(cap_presets_path, presets)
 
     return DistributedFMMResult(

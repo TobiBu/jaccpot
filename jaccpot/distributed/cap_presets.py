@@ -59,8 +59,39 @@ def apply_caps(
     return dataclasses.replace(config, **{f: caps[f] for f in CAP_FIELDS if f in caps})
 
 
-def _key(per_gpu_n: int, ndev: int) -> str:
-    return f"{int(per_gpu_n)}:{int(ndev)}"
+def _key(per_gpu_n: int, ndev: int, theta: float = 0.0, leaf_size: int = 0) -> str:
+    """Build the presets key.
+
+    ``theta`` and ``leaf_size`` are part of the key because the caps depend on both
+    and a preset recorded under one is NOT valid under another. The wavefront queue
+    requirement scales as ``theta ** -1.5`` (measured), so a preset taken at
+    theta 0.7 is a 2.8x under-estimate at theta 0.4 -- and an under-sized queue
+    truncates the walk SILENTLY, reading faster with only ``self_near_pairs`` as the
+    witness. `leaf_size` sets ``num_leaves``, which every cap is derived from.
+
+    Legacy two-part keys (no theta, no leaf) are still read, so an existing presets
+    file keeps working; they are simply never written any more.
+
+    Parameters
+    ----------
+    per_gpu_n : int
+        Particles per device.
+    ndev : int
+        Device count.
+    theta : float
+        Opening angle. 0.0 reproduces the legacy two-part key.
+    leaf_size : int
+        Leaf size. 0 reproduces the legacy two-part key.
+
+    Returns
+    -------
+    str
+        The table key.
+    """
+
+    if not theta and not leaf_size:
+        return f"{int(per_gpu_n)}:{int(ndev)}"
+    return f"{int(per_gpu_n)}:{int(ndev)}:t{float(theta):g}:l{int(leaf_size)}"
 
 
 def load_presets(path: Optional[str]) -> dict:
@@ -87,7 +118,13 @@ def _scale_caps(caps: dict[str, Any], num: int, den: int) -> dict[str, Any]:
     }
 
 
-def lookup(presets: dict, per_gpu_n: int, ndev: int) -> Optional[dict]:
+def lookup(
+    presets: dict,
+    per_gpu_n: int,
+    ndev: int,
+    theta: float = 0.0,
+    leaf_size: int = 0,
+) -> Optional[dict]:
     """Caps for (per_gpu_n, ndev): exact match, else the nearest LARGER per-GPU N at the
     same ndev (a safe over-estimate), else the nearest SMALLER preset SCALED UP by the
     per-GPU-N ratio. The scaled seed is only a starting point -- auto_scale refines it (and
@@ -95,7 +132,7 @@ def lookup(presets: dict, per_gpu_n: int, ndev: int) -> Optional[dict]:
     or a little memory, not correctness. Extrapolating from a nearby preset is what makes
     calibration cheap at an unmeasured N (few retries instead of the full doubling ladder
     from the small defaults). None if no preset at this ndev at all."""
-    k = _key(per_gpu_n, ndev)
+    k = _key(per_gpu_n, ndev, theta, leaf_size)
     if k in presets:
         return presets[k]["caps"]
     same = [
@@ -113,10 +150,16 @@ def lookup(presets: dict, per_gpu_n: int, ndev: int) -> Optional[dict]:
 
 
 def record(
-    presets: dict, per_gpu_n: int, ndev: int, total_n: int, caps: dict[str, Any]
+    presets: dict,
+    per_gpu_n: int,
+    ndev: int,
+    total_n: int,
+    caps: dict[str, Any],
+    theta: float = 0.0,
+    leaf_size: int = 0,
 ) -> dict:
     """Insert/update the (per_gpu_n, ndev) entry with the given caps (in place)."""
-    presets[_key(per_gpu_n, ndev)] = {
+    presets[_key(per_gpu_n, ndev, theta, leaf_size)] = {
         "per_gpu_n": int(per_gpu_n),
         "ndev": int(ndev),
         "total_n": int(total_n),
