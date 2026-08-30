@@ -9,7 +9,7 @@ import jax
 import jax.numpy as jnp
 from beartype import beartype
 from jax import lax
-from jaxtyping import Array, jaxtyped
+from jaxtyping import Array, Float, jaxtyped
 
 
 class MultipoleExpansion(NamedTuple):
@@ -56,18 +56,18 @@ class MultipoleExpansion(NamedTuple):
 @partial(jax.jit, static_argnums=(2,))
 @jaxtyped(typechecker=beartype)
 def compute_expansion(
-    positions: Array,
-    masses: Array,
+    positions: Float[Array, "n 3"],
+    masses: Float[Array, "n"],
     order: int = 1,
 ) -> MultipoleExpansion:
     """Compute multipole expansion up to ``order`` around the center of mass.
 
     Parameters
     ----------
-    positions : Array
-        ``(n, 3)`` particle positions.
-    masses : Array
-        ``(n,)`` particle masses.
+    positions : Float[Array, 'n 3']
+        Particle positions.
+    masses : Float[Array, 'n']
+        Particle masses.
     order : int
         Highest moment to compute. Moments above this are left zero rather than
         omitted, so the returned container has a fixed layout.
@@ -195,7 +195,7 @@ def compute_expansion(
 def evaluate_expansion(
     expansion: MultipoleExpansion,
     order: int = 1,
-    eval_point: Optional[Array] = None,
+    eval_point: Optional[Float[Array, "3"]] = None,
     *,
     G: Union[float, Array] = 1.0,
     softening: Union[float, Array] = 0.0,
@@ -215,7 +215,7 @@ def evaluate_expansion(
         Moments to evaluate.
     order : int
         Highest moment to include. May be below the expansion's own order.
-    eval_point : Optional[Array]
+    eval_point : Optional[Float[Array, '3']]
         Point of evaluation. ``None`` is rejected -- see ``Raises``.
     G : Union[float, Array]
         Gravitational constant.
@@ -290,9 +290,9 @@ def evaluate_expansion(
 @partial(jax.jit, static_argnums=())
 @jaxtyped(typechecker=beartype)
 def direct_sum(
-    positions: Array,
-    masses: Array,
-    eval_point: Array,
+    positions: Float[Array, "n 3"],
+    masses: Float[Array, "n"],
+    eval_point: Float[Array, "3"],
     *,
     G: Union[float, Array] = 1.0,
     softening: Union[float, Array] = 0.0,
@@ -303,12 +303,16 @@ def direct_sum(
 
     Parameters
     ----------
-    positions : Array
-        ``(n, 3)`` source positions.
-    masses : Array
-        ``(n,)`` source masses.
-    eval_point : Array
-        Single point at which to evaluate.
+    positions : Float[Array, 'n 3']
+        Source positions.
+    masses : Float[Array, 'n']
+        Source masses.
+    eval_point : Float[Array, '3']
+        The single point at which to evaluate. A ``(1, 3)`` point used to be
+        accepted here and broadcast to the same answer; the shape is now
+        enforced, because the sibling
+        :func:`compute_gravitational_potential` had the mirror hole and it was
+        not benign there.
     G : Union[float, Array]
         Gravitational constant.
     softening : Union[float, Array]
@@ -329,9 +333,9 @@ def direct_sum(
 @jax.jit
 @jaxtyped(typechecker=beartype)
 def compute_gravitational_potential(
-    positions: Array,
-    masses: Array,
-    eval_points: Array,
+    positions: Float[Array, "n 3"],
+    masses: Float[Array, "n"],
+    eval_points: Float[Array, "points 3"],
     G: Union[float, Array] = 1.0,
     softening: Union[float, Array] = 0.0,
 ) -> Array:
@@ -341,12 +345,17 @@ def compute_gravitational_potential(
 
     Parameters
     ----------
-    positions : Array
-        ``(n, 3)`` source positions.
-    masses : Array
-        ``(n,)`` source masses.
-    eval_points : Array
-        ``(m, 3)`` points at which to evaluate.
+    positions : Float[Array, 'n 3']
+        Source positions.
+    masses : Float[Array, 'n']
+        Source masses.
+    eval_points : Float[Array, 'points 3']
+        Points at which to evaluate. **The rank is now enforced, and it was the
+        one shape hole in this module that returned a wrong answer**: a bare
+        ``(3,)`` vector was silently read as three separate evaluation points and
+        returned three potentials, none of them the right one. This is the oracle
+        the FMM paths are checked against, so a wrong answer here is worse than
+        one anywhere else.
     G : Union[float, Array]
         Gravitational constant.
     softening : Union[float, Array]
