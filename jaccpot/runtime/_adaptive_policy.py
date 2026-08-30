@@ -3,13 +3,13 @@
 from __future__ import annotations
 
 import math
-from typing import Literal, NamedTuple, Optional
+from typing import Literal, NamedTuple, Optional, Union
 
 import jax
 import jax.numpy as jnp
 import numpy as np
 from jaxtyping import Array, DTypeLike
-from yggdrax.tree import Tree
+from yggdrax.tree import Tree, get_num_internal_nodes
 
 from jaccpot.upward.tree_expansions import TreeUpwardData
 
@@ -439,6 +439,7 @@ def compute_node_force_scale_from_sorted_magnitudes(
     tree: Tree,
     magnitudes_sorted: Array,
     reduction: str = "max",
+    max_leaf_size: Optional[int] = None,
 ) -> Array:
     """Reduce a sorted per-particle scalar scale onto every node of the tree.
 
@@ -454,6 +455,16 @@ def compute_node_force_scale_from_sorted_magnitudes(
         Per-particle scalar magnitudes in tree order.
     reduction : str
         How to reduce per-particle values onto a node: ``min``, ``mean`` or ``max``.
+    max_leaf_size : Optional[int]
+        Static upper bound on particles per leaf, used as the gathered block width.
+        ``None`` (default) reads the exact maximum off the device, which is tighter
+        but is a **host read of a traced value** and therefore raises inside
+        ``jit``/``shard_map``; the distributed lane passes its leaf capacity instead.
+        The result is identical either way -- columns past a leaf's own count are
+        masked to the reduction identity -- **provided the value really is a bound**.
+        A value below the true maximum silently truncates the leaf block and reports
+        a scale reduced over only part of the leaf, which under ``min`` can only be
+        too LARGE, i.e. it loosens eq (16a) and makes the solver faster and wronger.
 
     Returns
     -------
@@ -463,12 +474,15 @@ def compute_node_force_scale_from_sorted_magnitudes(
     Raises
     ------
     ValueError
-        If ``reduction`` is not one of the supported reductions.
+        If ``reduction`` is not one of the supported reductions, or if
+        ``max_leaf_size`` is not positive.
     """
 
     reduction_norm = str(reduction).strip().lower()
     if reduction_norm not in ("max", "min"):
         raise ValueError("reduction must be 'max' or 'min'")
+    if max_leaf_size is not None and int(max_leaf_size) <= 0:
+        raise ValueError(f"max_leaf_size must be positive; got {max_leaf_size!r}")
     use_min = reduction_norm == "min"
 
     magnitudes = jnp.asarray(magnitudes_sorted)
@@ -480,7 +494,7 @@ def compute_node_force_scale_from_sorted_magnitudes(
     dtype = magnitudes.dtype
     node_ranges = jnp.asarray(tree.node_ranges, dtype=jnp.int32)
     num_nodes = int(node_ranges.shape[0])
-    num_internal = int(tree.num_internal_nodes)
+    num_internal = get_num_internal_nodes(tree)
     if num_nodes == 0:
         return jnp.zeros((0,), dtype=dtype)
 
@@ -491,7 +505,9 @@ def compute_node_force_scale_from_sorted_magnitudes(
 
     if leaf_count > 0:
         counts = jnp.maximum(leaf_ranges[:, 1] - leaf_ranges[:, 0] + 1, 0)
-        max_leaf = int(jnp.max(counts)) if leaf_count > 0 else 0
+        max_leaf = (
+            int(max_leaf_size) if max_leaf_size is not None else int(jnp.max(counts))
+        )
         if max_leaf > 0:
             idx = jnp.arange(max_leaf, dtype=jnp.int32)
             particle_idx = leaf_ranges[:, 0:1] + idx[None, :]
@@ -629,7 +645,7 @@ def _particle_leaf_ids(*, tree: Tree, num_particles: int, max_leaf_size: int) ->
 
     node_ranges = jnp.asarray(tree.node_ranges, dtype=jnp.int32)
     num_nodes = int(node_ranges.shape[0])
-    num_internal = int(tree.num_internal_nodes)
+    num_internal = get_num_internal_nodes(tree)
     leaf_ids = jnp.full((num_particles,), -1, dtype=jnp.int32)
     if num_internal >= num_nodes or max_leaf_size <= 0:
         return leaf_ids
@@ -1013,9 +1029,44 @@ def _far_field_force_scale_by_node(
         indices_are_sorted=False,
     )
 
+    return accumulate_own_down_parent_chain(tree=tree, own=own)
+
+
+def accumulate_own_down_parent_chain(*, tree: Tree, own: Array) -> Array:
+    """Push each node's own contribution down onto all of its descendants.
+
+    Turns ``own[U]`` -- what ``U``'s own list contributes -- into
+    ``own[U] + own[parent(U)] + ...`` up to the root, which for a leaf is the
+    complete set the far/near partition invariant assigns to its particles.
+
+    Shared by the single-tree far-field accumulation in
+    :func:`_far_field_force_scale_by_node` and by the distributed lane's
+    cross-domain terms (``jaccpot.distributed._force_scale``), which build a
+    different ``own`` on the same local tree. The ordering below is the whole
+    reason this is one function rather than two: getting it wrong is silent.
+
+    Parameters
+    ----------
+    tree : Tree
+        Tree supplying the parent chain the accumulation walks.
+    own : Array
+        ``(num_nodes,)`` per-node own contribution.
+
+    Returns
+    -------
+    Array
+        ``(num_nodes,)`` with every node's ancestors' contributions added in.
+    """
+
     left_child = jnp.asarray(tree.left_child, dtype=jnp.int32)
     right_child = jnp.asarray(tree.right_child, dtype=jnp.int32)
-    num_internal = int(tree.num_internal_nodes)
+    node_ranges = jnp.asarray(tree.node_ranges, dtype=jnp.int32)
+    # yggdrax's own accessor, which prefers ``left_child.shape[0]`` over the
+    # ``num_internal_nodes`` field. Same value -- a radix tree has exactly one
+    # ``left_child`` entry per internal node -- but the shape is static, and the
+    # field is a TRACER for a tree built inside ``shard_map``, where ``int()`` on it
+    # raises. That is how the distributed lane reaches this function.
+    num_internal = get_num_internal_nodes(tree)
     if num_internal <= 0:
         return own
 
@@ -1251,7 +1302,7 @@ def compute_leaf_enclosing_sphere_geometry(
 
     node_ranges = np.asarray(tree.node_ranges, dtype=np.int64)
     num_nodes = int(node_ranges.shape[0])
-    num_internal = int(tree.num_internal_nodes)
+    num_internal = get_num_internal_nodes(tree)
     centers = np.zeros((num_nodes, positions_sorted.shape[1]), dtype=np.float64)
     radii = np.zeros((num_nodes,), dtype=np.float64)
     if num_internal > 0:
@@ -1376,7 +1427,7 @@ def compute_leaf_ritter_sphere_geometry(
 
     node_ranges = jnp.asarray(tree.node_ranges, dtype=jnp.int32)
     num_nodes = int(node_ranges.shape[0])
-    num_internal = int(tree.num_internal_nodes)
+    num_internal = get_num_internal_nodes(tree)
     centers = jnp.zeros(
         (num_nodes, positions_sorted.shape[1]), dtype=positions_sorted.dtype
     )
@@ -1400,7 +1451,11 @@ def compute_leaf_ritter_sphere_geometry(
 
 
 def compute_center_referenced_radius_geometry(
-    *, tree: Tree, positions_sorted: Array, centers: Array
+    *,
+    tree: Tree,
+    positions_sorted: Array,
+    centers: Array,
+    max_leaf_size: Optional[int] = None,
 ) -> Array:
     """Return per-node radii measured about ``centers``, not about a fitted sphere.
 
@@ -1424,6 +1479,12 @@ def compute_center_referenced_radius_geometry(
         Particle positions in tree order, shape ``(N, 3)``.
     centers : Array
         Reference centre per node.
+    max_leaf_size : Optional[int]
+        Static upper bound on particles per leaf, used as the gathered block width.
+        ``None`` (default) reads the exact maximum off the device, which raises
+        inside ``jit``/``shard_map``; see
+        :func:`compute_node_force_scale_from_sorted_magnitudes` for the same knob
+        and for what a value below the true maximum would silently do.
 
     Returns
     -------
@@ -1435,7 +1496,7 @@ def compute_center_referenced_radius_geometry(
     pos = jnp.asarray(positions_sorted)
     node_centers = jnp.asarray(centers, dtype=pos.dtype)
     num_nodes = int(node_ranges.shape[0])
-    num_internal = int(tree.num_internal_nodes)
+    num_internal = get_num_internal_nodes(tree)
     dtype = pos.dtype
     radii = jnp.zeros((num_nodes,), dtype=dtype)
     if num_nodes == 0:
@@ -1444,7 +1505,9 @@ def compute_center_referenced_radius_geometry(
     leaf_ranges = node_ranges[num_internal:] if num_internal > 0 else node_ranges
     if int(leaf_ranges.shape[0]) > 0:
         counts = jnp.maximum(leaf_ranges[:, 1] - leaf_ranges[:, 0] + 1, 0)
-        max_leaf = int(jnp.max(counts))
+        max_leaf = (
+            int(max_leaf_size) if max_leaf_size is not None else int(jnp.max(counts))
+        )
         if max_leaf > 0:
             idx = jnp.arange(max_leaf, dtype=jnp.int32)
             particle_idx = leaf_ranges[:, 0:1] + idx[None, :]
@@ -1572,7 +1635,7 @@ def compute_tree_merged_sphere_geometry(
         )
     else:
         raise ValueError("leaf_mode must be 'exact' or 'approx'")
-    num_internal = int(tree.num_internal_nodes)
+    num_internal = get_num_internal_nodes(tree)
     if num_internal == 0:
         return centers, radii
     left_child = jnp.asarray(tree.left_child, dtype=jnp.int32)
@@ -1939,6 +2002,7 @@ def resolve_dehnen_geometry(
     positions_sorted: Array,
     upward: TreeUpwardData,
     dtype: DTypeLike,
+    max_leaf_size: Optional[int] = None,
 ) -> tuple[Array, Array]:
     """Return MAC centres and radii for the requested Dehnen geometry mode.
 
@@ -1962,6 +2026,10 @@ def resolve_dehnen_geometry(
         Upward-sweep artifacts supplying the multipoles and geometry.
     dtype : DTypeLike
         Working dtype for the returned arrays.
+    max_leaf_size : Optional[int]
+        Static upper bound on particles per leaf, forwarded to the ``com`` mode's
+        radius pass. ``None`` (default) lets it read the exact maximum off the
+        device, which raises inside ``jit``/``shard_map``.
 
     Returns
     -------
@@ -1999,6 +2067,7 @@ def resolve_dehnen_geometry(
             tree=tree,
             positions_sorted=positions_sorted,
             centers=mac_centers,
+            max_leaf_size=max_leaf_size,
         )
         geometry_centers = jnp.asarray(upward.geometry.center, dtype=dtype)
         half_extent = jnp.asarray(upward.geometry.half_extent, dtype=dtype)
@@ -2063,10 +2132,11 @@ def build_adaptive_policy_state(
     force_scale_nodes: Optional[Array],
     eps: Array,
     theta: Array,
-    error_model_code: Array,
+    error_model_code: Union[int, Array],
     dehnen_geometry_mode: str = "exact",
     gravitational_constant: float = 1.0,
     mac_theta_max: float = 1.0,
+    max_leaf_size: Optional[int] = None,
 ) -> AdaptivePolicyState:
     """Build the solver-owned adaptive traversal state from upward data.
 
@@ -2086,7 +2156,7 @@ def build_adaptive_policy_state(
         Relative force-accuracy target of eq (16a).
     theta : Array
         Opening angle, or its squared form where the caller pre-squares it.
-    error_model_code : Array
+    error_model_code : Union[int, Array]
         See the module docstring.
     dehnen_geometry_mode : str
         See the module docstring.
@@ -2094,6 +2164,11 @@ def build_adaptive_policy_state(
         See the module docstring.
     mac_theta_max : float
         See the module docstring.
+    max_leaf_size : Optional[int]
+        Static upper bound on particles per leaf, forwarded to the geometry pass.
+        ``None`` (default) lets it read the exact maximum off the device, which
+        raises inside ``jit``/``shard_map``; the distributed lane passes its leaf
+        capacity.
 
     Returns
     -------
@@ -2111,8 +2186,16 @@ def build_adaptive_policy_state(
     packed = upward.multipoles.packed
     dtype = packed.real.dtype if jnp.iscomplexobj(packed) else packed.dtype
     num_nodes = int(packed.shape[0])
-    error_model_code_arr = jnp.asarray(error_model_code, dtype=jnp.int32)
-    model_code = int(error_model_code_arr)
+    # The dispatch below is a Python ``if``, so the code has to be STATIC. A 0-d
+    # array is fine while it is concrete, which it is on the single-GPU lane. It is
+    # not inside ``shard_map``: there even ``jnp.asarray(2)`` is an abstract tracer
+    # and ``int()`` on it raises, so a caller under a mesh passes a plain ``int``
+    # and this takes it without a device read.
+    if isinstance(error_model_code, (int, np.integer)):
+        model_code = int(error_model_code)
+    else:
+        model_code = int(jnp.asarray(error_model_code, dtype=jnp.int32))
+    error_model_code_arr = jnp.asarray(model_code, dtype=jnp.int32)
 
     total_p = _packed_total_order(packed)
     empty_degree = jnp.zeros((num_nodes, total_p + 1), dtype=dtype)
@@ -2167,6 +2250,7 @@ def build_adaptive_policy_state(
             positions_sorted=positions_sorted,
             upward=upward,
             dtype=dtype,
+            max_leaf_size=max_leaf_size,
         )
     else:
         mac_centers, radius_bound = resolve_dehnen_geometry(
@@ -2175,6 +2259,7 @@ def build_adaptive_policy_state(
             positions_sorted=positions_sorted,
             upward=upward,
             dtype=dtype,
+            max_leaf_size=max_leaf_size,
         )
     source_mass = jnp.maximum(
         jnp.abs(jnp.asarray(upward.mass_moments.mass, dtype=dtype)),
@@ -2419,6 +2504,7 @@ def bucket_far_pairs_by_tag(
 
 __all__ = [
     "AdaptivePolicyState",
+    "accumulate_own_down_parent_chain",
     "adaptive_pair_policy",
     "adaptive_policy_tolerance",
     "bucket_far_pairs_by_tag",
