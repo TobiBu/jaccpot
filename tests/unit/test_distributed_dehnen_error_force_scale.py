@@ -467,3 +467,72 @@ def test_the_extracted_parent_chain_accumulation_matches_the_far_field_helper():
     np.testing.assert_allclose(
         np.asarray(rebuilt), np.asarray(combined), rtol=1e-12, atol=0.0
     )
+
+
+# --------------------------------------------------------------------------- #
+# cap sizing -- theta gates the cross walk, and nothing on the self walk
+# --------------------------------------------------------------------------- #
+
+
+def test_the_criterion_floors_the_self_queue_instead_of_scaling_it_by_theta():
+    """A loose theta must not shrink the self queue when a pair policy decides.
+
+    ``_derive_walk_caps`` scales every wavefront queue as ``(0.4 / theta) ** 1.5``,
+    which is right whenever ``theta`` is what the walk accepts on. Under
+    ``mac_type="dehnen_error"`` it is not: ``adaptive_pair_policy`` deletes
+    ``mac_ok`` outright in paper mode, so the geometric verdict decides nothing and
+    ``adaptive_eps`` is the accuracy knob. At a loose ``theta`` and a tight ``eps``
+    the unmodified rule under-provisions the self queue -- and the rule's own
+    docstring says what that costs: the walk truncates SILENTLY, reading *faster*
+    with only ``self_near_pairs`` as the witness.
+
+    The cross walk really is geometric here, so its queue must keep tracking
+    ``theta``. Both halves are asserted: a criterion config at theta 0.8 gets the
+    self queue of theta 0.3 and the cross queue of theta 0.8.
+    """
+
+    from jaccpot.distributed.fmm import (
+        _SELF_QUEUE_CRITERION_THETA,
+        DistributedFMMConfig,
+    )
+
+    common = dict(leaf_size=64, theta=0.8)
+    geometric = DistributedFMMConfig(**common).resolved_for(262144, 4)
+    criterion = DistributedFMMConfig(
+        **common, mac_type="dehnen_error", adaptive_eps=1e-4
+    ).resolved_for(262144, 4)
+    floored = DistributedFMMConfig(
+        **{**common, "theta": _SELF_QUEUE_CRITERION_THETA}
+    ).resolved_for(262144, 4)
+
+    assert criterion.max_pair_queue > geometric.max_pair_queue, (
+        "the criterion's self queue was sized by a theta that gates nothing "
+        f"({criterion.max_pair_queue} vs geometric {geometric.max_pair_queue})"
+    )
+    assert criterion.max_pair_queue == floored.max_pair_queue, (
+        "the criterion's self queue is not the theta-0.3 floor "
+        f"({criterion.max_pair_queue} vs {floored.max_pair_queue})"
+    )
+    assert (
+        criterion.cross_max_pair_queue == geometric.cross_max_pair_queue
+    ), "the CROSS walk is still geometric, so its queue must keep tracking theta"
+
+
+def test_a_theta_tighter_than_the_floor_still_raises_the_self_queue():
+    """The floor is a floor, not a pin.
+
+    A configured ``theta`` below ``_SELF_QUEUE_CRITERION_THETA`` means the prepass
+    walk underneath the criterion is itself tighter, so the queue requirement is
+    larger, not capped.
+    """
+
+    from jaccpot.distributed.fmm import DistributedFMMConfig
+
+    floored = DistributedFMMConfig(
+        leaf_size=64, theta=0.3, mac_type="dehnen_error", adaptive_eps=1e-4
+    ).resolved_for(262144, 4)
+    tighter = DistributedFMMConfig(
+        leaf_size=64, theta=0.15, mac_type="dehnen_error", adaptive_eps=1e-4
+    ).resolved_for(262144, 4)
+
+    assert tighter.max_pair_queue > floored.max_pair_queue

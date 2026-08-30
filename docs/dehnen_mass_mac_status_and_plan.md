@@ -172,9 +172,28 @@ devices, 1024/device, leaf 8, θ=0.5, order 4:
 |---|---|---|---|---|
 | geometric | 4 280 | 26 766 | 2 667 | — |
 | ε=1e-2 | 8 916 | **13 022** | 2 667 | [1.28e+02, 1.99e+03] |
+| ε=3e-3 | 8 182 | 18 074 | 2 667 | [1.28e+02, 1.99e+03] |
+| ε=1e-3 | 6 426 | 23 190 | 2 667 | [1.28e+02, 1.99e+03] |
+| ε=3e-4 | 3 572 | 28 136 | 2 667 | [1.28e+02, 1.99e+03] |
+| ε=1e-4 | 1 502 | 30 868 | 2 667 | [1.28e+02, 1.99e+03] |
+| ε=1e-5 | 64 | 32 448 | 2 667 | [1.28e+02, 1.99e+03] |
 
-The criterion does **less near-field work**, and the cross far count is untouched, which is
-the self-only scope showing up exactly where it should. This says nothing about accuracy.
+Strictly monotone in **both** directions with no overflow at any point, which is the
+validity gate trap 6 demands *before* any wall clock. The force scale is identical across
+every ε — correct, since `f_b` does not depend on ε, only the threshold does — and spans
+15.6× across nodes, which is what says it is not the unit-scale fallback. `cross_far` never
+moves: the self-only scope showing up exactly where it should. The criterion crosses the
+geometric arm's far count near ε ≈ 4×10⁻⁴. **This says nothing about accuracy.**
+
+**The θ-aware cap rule (PR #271) needs a criterion exception, and it now has one.**
+`_derive_walk_caps` scales every wavefront queue as `(0.4/θ)^1.5`, which is right whenever
+θ is what the walk accepts on. On the criterion's self walk it is not — `adaptive_pair_policy`
+deletes `mac_ok` outright — so a loose θ with a tight ε sizes the self queue from a knob that
+gates nothing, and that rule's own docstring says an under-provisioned queue truncates the
+walk **silently**, reading *faster* with only `self_near_pairs` as the witness. The self
+queue is therefore floored at θ=0.3, the tightest angle the law was fitted at, while the
+cross queue keeps tracking θ because the cross walk really is geometric. That is a floor,
+not a derivation: re-deriving the rule against the criterion still needs item 3 below.
 
 **NOT DONE, in the order it should be done:**
 

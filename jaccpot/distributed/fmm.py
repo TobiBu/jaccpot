@@ -265,6 +265,18 @@ def _round_up_pow2(value: int) -> int:
 #: Opening angle the queue coefficients above were measured at.
 _QUEUE_THETA_REF = 0.4
 
+#: Opening angle the SELF queue is sized at when the Dehnen criterion is running.
+#: Under ``mac_type="dehnen_error"`` the self walk's acceptance is decided by the pair
+#: policy and NOT by theta -- ``adaptive_pair_policy`` deletes ``mac_ok`` outright in
+#: paper mode. So the theta-scaled rule above would size that queue from a knob that
+#: gates nothing: at a loose theta and a tight ``adaptive_eps`` it under-provisions,
+#: and an under-provisioned queue truncates the walk SILENTLY, reading *faster* with
+#: only ``self_near_pairs`` as the witness. Until the rule is re-derived against the
+#: criterion (that needs the N=1e7 / 5-device measurement), take the tightest angle
+#: the law was fitted at as a FLOOR: never provision the self queue for less than
+#: theta 0.3, and let a tighter configured theta still raise it.
+_SELF_QUEUE_CRITERION_THETA = 0.3
+
 #: How the wavefront queue requirement grows as the MAC tightens. Measured, not
 #: assumed: at ndev 5, per-device 2 097 152, leaf 512, order 6, walking each queue
 #: down until ``self_near_pairs`` collapses gives floors in wavefront units of
@@ -300,7 +312,12 @@ def _queue_theta_scale(theta: float) -> float:
 
 
 def _derive_walk_caps(
-    *, per_device_n: int, leaf_size: int, ndev: int, theta: float = _QUEUE_THETA_REF
+    *,
+    per_device_n: int,
+    leaf_size: int,
+    ndev: int,
+    theta: float = _QUEUE_THETA_REF,
+    self_theta: Optional[float] = None,
 ) -> dict[str, int]:
     """Size the traversal buffers from the per-device particle count.
 
@@ -363,6 +380,14 @@ def _derive_walk_caps(
     ndev : int
         Number of devices in the mesh, which sets how large the coarse frontier the
         cross walk traverses is.
+    theta : float
+        Opening angle both walks will run at; scales every wavefront queue by
+        :func:`_queue_theta_scale`.
+    self_theta : Optional[float]
+        Overrides ``theta`` for the SELF queue only. ``None`` (default) keeps them
+        equal, which is right whenever theta is what the self walk accepts on. It is
+        not right under ``mac_type="dehnen_error"``, where a pair policy decides and
+        theta gates nothing -- see :data:`_SELF_QUEUE_CRITERION_THETA`.
 
     Returns
     -------
@@ -373,6 +398,11 @@ def _derive_walk_caps(
     n = max(1, int(per_device_n))
     num_leaves = max(1, -(-n // max(1, int(leaf_size))))
     theta_scale = _queue_theta_scale(theta)
+    # The self walk can be running an acceptance test that theta does not gate at
+    # all -- see `resolved_for` and `_SELF_QUEUE_CRITERION_THETA`.
+    self_theta_scale = _queue_theta_scale(
+        theta if self_theta is None else float(self_theta)
+    )
     # Remote leaf frontiers the cross walk can see. 1 rather than 0 on a
     # single-device mesh, so the cross caps stay at their floors instead of
     # collapsing to nothing.
@@ -387,7 +417,9 @@ def _derive_walk_caps(
         "process_block": _DISTRIBUTED_PROCESS_BLOCK,
         "max_pair_queue": max(
             _MIN_PAIR_QUEUE,
-            _round_up_pow2(int(_SELF_QUEUE_WAVEFRONT_COEFF * theta_scale * wavefront)),
+            _round_up_pow2(
+                int(_SELF_QUEUE_WAVEFRONT_COEFF * self_theta_scale * wavefront)
+            ),
         ),
         "max_interactions_per_node": far_per_node,
         "max_neighbors_per_leaf": near_per_leaf,
@@ -717,11 +749,20 @@ class DistributedFMMConfig:
         unset = [f for f in DERIVED_CAP_FIELDS if getattr(self, f) is None]
         if not unset:
             return self
+        # Under the Dehnen criterion the self walk accepts on the pair policy, not on
+        # theta, so the theta-scaled self queue would be sized from a knob that gates
+        # nothing -- and under-sizing it truncates the walk SILENTLY. Floor it at the
+        # tightest angle the queue law was fitted at. The CROSS queue keeps the
+        # configured theta, because the cross walk really is geometric.
+        self_theta = float(self.theta)
+        if str(self.mac_type) == "dehnen_error":
+            self_theta = min(self_theta, _SELF_QUEUE_CRITERION_THETA)
         derived = _derive_walk_caps(
             per_device_n=int(per_device_n),
             leaf_size=int(self.leaf_size),
             ndev=int(ndev),
             theta=float(self.theta),
+            self_theta=self_theta,
         )
         return dataclasses.replace(self, **{f: derived[f] for f in unset})
 
