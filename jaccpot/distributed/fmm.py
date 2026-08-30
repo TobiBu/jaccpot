@@ -2797,7 +2797,12 @@ def distributed_fmm_accelerations(
 
         presets = _cp.load_presets(cap_presets_path)
         seed = _cp.lookup(
-            presets, per_gpu_n, ndev, float(config.theta), int(config.leaf_size)
+            presets,
+            per_gpu_n,
+            ndev,
+            float(config.theta),
+            int(config.leaf_size),
+            str(config.mac_type),
         )
         if seed is not None:
             config = _cp.apply_caps(config, seed)
@@ -2837,6 +2842,7 @@ def distributed_fmm_accelerations(
             _cp.caps_of(config),
             float(config.theta),
             int(config.leaf_size),
+            str(config.mac_type),
         )
         _cp.save_presets(cap_presets_path, presets)
 

@@ -208,3 +208,53 @@ def test_load_presets_without_a_path_is_an_empty_table(path):
 
 def test_load_presets_from_a_missing_file_is_an_empty_table(tmp_path):
     assert load_presets(str(tmp_path / "does-not-exist.json")) == {}
+
+
+def test_the_criterion_does_not_share_a_preset_slot_with_the_geometric_mac():
+    """A ``dehnen_error`` run must not read back caps a geometric run recorded.
+
+    The two derive DIFFERENT self queues at the same ``(N, ndev, theta, leaf)``: the
+    criterion's is floored rather than theta-scaled, because a pair policy decides
+    its acceptance and theta gates nothing. Sharing a slot means the geometric run
+    records the smaller caps and the next criterion run applies them -- and an
+    under-sized queue truncates the walk SILENTLY, reading faster with only
+    ``self_near_pairs`` as the witness. Same failure the theta component of the key
+    already exists to prevent, reached from a different direction.
+    """
+
+    from jaccpot.distributed import cap_presets as cp
+
+    presets: dict = {}
+    geometric_caps = {f: 111 for f in cp.CAP_FIELDS}
+    cp.record(presets, 65536, 4, 262144, geometric_caps, 0.8, 64, "dehnen")
+
+    assert cp.lookup(presets, 65536, 4, 0.8, 64, "dehnen") == geometric_caps
+    assert (
+        cp.lookup(presets, 65536, 4, 0.8, 64, "dehnen_error") is None
+    ), "the criterion read back the geometric arm's caps"
+
+    criterion_caps = {f: 222 for f in cp.CAP_FIELDS}
+    cp.record(presets, 65536, 4, 262144, criterion_caps, 0.8, 64, "dehnen_error")
+    assert cp.lookup(presets, 65536, 4, 0.8, 64, "dehnen_error") == criterion_caps
+    assert (
+        cp.lookup(presets, 65536, 4, 0.8, 64, "dehnen") == geometric_caps
+    ), "recording the criterion overwrote the geometric entry"
+
+
+def test_geometric_preset_keys_are_unchanged_by_the_criterion_component():
+    """An existing presets file must keep working, byte for byte.
+
+    Only a non-geometric ``mac_type`` joins the key, so every key already on disk --
+    written before this component existed -- still resolves.
+    """
+
+    from jaccpot.distributed import cap_presets as cp
+
+    presets: dict = {}
+    caps = {f: 7 for f in cp.CAP_FIELDS}
+    cp.record(presets, 1024, 2, 2048, caps, 0.4, 32)
+    written = next(iter(presets))
+
+    assert written == "1024:2:t0.4:l32"
+    for mac in ("", "bh", "engblom", "dehnen"):
+        assert cp.lookup(presets, 1024, 2, 0.4, 32, mac) == caps, mac

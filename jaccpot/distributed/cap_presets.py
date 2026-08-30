@@ -22,6 +22,11 @@ from typing import Any, Optional
 
 from .fmm import DistributedFMMConfig
 
+#: MAC types that add nothing to a presets key: the three geometric literals the
+#: caps rule was calibrated against. Anything else is a jaccpot-level policy whose
+#: caps are derived differently, so it gets its own slot -- see :func:`_key`.
+_GEOMETRIC_MAC_TYPES = frozenset({"bh", "engblom", "dehnen"})
+
 __all__ = [
     "CAP_FIELDS",
     "apply_caps",
@@ -59,7 +64,13 @@ def apply_caps(
     return dataclasses.replace(config, **{f: caps[f] for f in CAP_FIELDS if f in caps})
 
 
-def _key(per_gpu_n: int, ndev: int, theta: float = 0.0, leaf_size: int = 0) -> str:
+def _key(
+    per_gpu_n: int,
+    ndev: int,
+    theta: float = 0.0,
+    leaf_size: int = 0,
+    mac_type: str = "",
+) -> str:
     """Build the presets key.
 
     ``theta`` and ``leaf_size`` are part of the key because the caps depend on both
@@ -68,6 +79,19 @@ def _key(per_gpu_n: int, ndev: int, theta: float = 0.0, leaf_size: int = 0) -> s
     theta 0.7 is a 2.8x under-estimate at theta 0.4 -- and an under-sized queue
     truncates the walk SILENTLY, reading faster with only ``self_near_pairs`` as the
     witness. `leaf_size` sets ``num_leaves``, which every cap is derived from.
+
+    ``mac_type`` is here for the same reason one step further out. Under
+    ``"dehnen_error"`` the self walk accepts on a pair policy and NOT on theta, so
+    its self queue is floored rather than theta-scaled (``_SELF_QUEUE_CRITERION_THETA``)
+    and it is deliberately LARGER than the geometric one at the same theta. Without
+    the criterion in the key those two runs share an entry: a geometric run at
+    theta 0.8 records the smaller caps, the next criterion run reads them back, and
+    the walk truncates silently -- exactly the failure the theta paragraph above
+    describes, reached from a different direction. This is the interaction-cache-key
+    hazard from ``docs/dehnen_mass_mac_status_and_plan.md`` in a second cache.
+
+    Only a non-geometric ``mac_type`` appears in the key, so every key an existing
+    presets file already holds is byte-identical to what it was.
 
     Legacy two-part keys (no theta, no leaf) are still read, so an existing presets
     file keeps working; they are simply never written any more.
@@ -82,6 +106,8 @@ def _key(per_gpu_n: int, ndev: int, theta: float = 0.0, leaf_size: int = 0) -> s
         Opening angle. 0.0 reproduces the legacy two-part key.
     leaf_size : int
         Leaf size. 0 reproduces the legacy two-part key.
+    mac_type : str
+        Acceptance criterion. Empty or a geometric literal adds nothing to the key.
 
     Returns
     -------
@@ -91,7 +117,11 @@ def _key(per_gpu_n: int, ndev: int, theta: float = 0.0, leaf_size: int = 0) -> s
 
     if not theta and not leaf_size:
         return f"{int(per_gpu_n)}:{int(ndev)}"
-    return f"{int(per_gpu_n)}:{int(ndev)}:t{float(theta):g}:l{int(leaf_size)}"
+    base = f"{int(per_gpu_n)}:{int(ndev)}:t{float(theta):g}:l{int(leaf_size)}"
+    mac = str(mac_type).strip()
+    if mac and mac not in _GEOMETRIC_MAC_TYPES:
+        return f"{base}:m{mac}"
+    return base
 
 
 def load_presets(path: Optional[str]) -> dict:
@@ -124,6 +154,7 @@ def lookup(
     ndev: int,
     theta: float = 0.0,
     leaf_size: int = 0,
+    mac_type: str = "",
 ) -> Optional[dict]:
     """Caps for (per_gpu_n, ndev): exact match, else the nearest LARGER per-GPU N at the
     same ndev (a safe over-estimate), else the nearest SMALLER preset SCALED UP by the
@@ -132,7 +163,7 @@ def lookup(
     or a little memory, not correctness. Extrapolating from a nearby preset is what makes
     calibration cheap at an unmeasured N (few retries instead of the full doubling ladder
     from the small defaults). None if no preset at this ndev at all."""
-    k = _key(per_gpu_n, ndev, theta, leaf_size)
+    k = _key(per_gpu_n, ndev, theta, leaf_size, mac_type)
     if k in presets:
         return presets[k]["caps"]
     same = [
@@ -157,9 +188,10 @@ def record(
     caps: dict[str, Any],
     theta: float = 0.0,
     leaf_size: int = 0,
+    mac_type: str = "",
 ) -> dict:
     """Insert/update the (per_gpu_n, ndev) entry with the given caps (in place)."""
-    presets[_key(per_gpu_n, ndev, theta, leaf_size)] = {
+    presets[_key(per_gpu_n, ndev, theta, leaf_size, mac_type)] = {
         "per_gpu_n": int(per_gpu_n),
         "ndev": int(ndev),
         "total_n": int(total_n),
