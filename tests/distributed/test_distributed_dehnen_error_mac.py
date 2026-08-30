@@ -369,3 +369,112 @@ def test_the_criterion_does_not_break_the_fixed_topology_seam():
             f"the {name} gradient is identically zero, so the reverse pass is not "
             "reaching the force at all"
         )
+
+
+# --------------------------------------------------------------------------- #
+# the cross-domain half -- the larger half of the near field on a mesh
+# --------------------------------------------------------------------------- #
+
+
+def _cross_far(diagnostics) -> int:
+    return int(diagnostics["cross_far_pairs"].sum())
+
+
+def _cross_near(diagnostics) -> int:
+    return int(diagnostics["cross_near_pairs"].sum())
+
+
+def test_the_criterion_decides_the_cross_walk_too():
+    """The cross-domain accept mask must move, and only when asked to.
+
+    Both halves matter. If the criterion never reached the cross walk, the cross
+    counts would equal the geometric arm's and every accuracy result would be
+    reporting a half-ported criterion. If it reached the cross walk unconditionally,
+    ``mac_cross_criterion=False`` would stop being an ablation and the measurement
+    that separates the two contributions would be gone.
+    """
+
+    ndev = min(4, device_count())
+    mesh = make_mesh(ndev)
+    pts, mass = _ic(ndev)
+
+    _, geometric = _run(mesh, pts, mass)
+    _, self_only = _run(
+        mesh,
+        pts,
+        mass,
+        mac_type="dehnen_error",
+        adaptive_eps=_EPS,
+        mac_cross_criterion=False,
+    )
+    _, both = _run(mesh, pts, mass, mac_type="dehnen_error", adaptive_eps=_EPS)
+
+    assert _cross_far(geometric) > 0, "no cross far field on this IC; nothing measured"
+    assert (_cross_far(self_only), _cross_near(self_only)) == (
+        _cross_far(geometric),
+        _cross_near(geometric),
+    ), (
+        "mac_cross_criterion=False changed the cross walk, so the self-only ablation "
+        "is not actually an ablation"
+    )
+    assert (_cross_far(both), _cross_near(both)) != (
+        _cross_far(geometric),
+        _cross_near(geometric),
+    ), (
+        "the criterion left the cross walk on the geometric MAC -- the larger half "
+        "of the near field at ndev>=2 is not being decided"
+    )
+
+
+def test_the_self_walk_is_untouched_by_the_cross_ablation():
+    """Turning the cross criterion off must not perturb the local walk.
+
+    The two walks are decided by the same force scale but by separate policy states.
+    If flipping ``mac_cross_criterion`` moved the self counts, the states would be
+    coupled somewhere they should not be -- and the ablation would no longer isolate
+    the cross-domain contribution.
+    """
+
+    ndev = min(4, device_count())
+    mesh = make_mesh(ndev)
+    pts, mass = _ic(ndev)
+
+    _, self_only = _run(
+        mesh,
+        pts,
+        mass,
+        mac_type="dehnen_error",
+        adaptive_eps=_EPS,
+        mac_cross_criterion=False,
+    )
+    _, both = _run(mesh, pts, mass, mac_type="dehnen_error", adaptive_eps=_EPS)
+
+    assert _far(self_only) == _far(both), (
+        f"self far moved from {_far(self_only)} to {_far(both)} when only the CROSS "
+        "walk's criterion was switched on"
+    )
+    assert int(self_only["self_near_pairs"].sum()) == int(both["self_near_pairs"].sum())
+
+
+def test_the_cross_criterion_still_reproduces_the_direct_sum():
+    """Carrying the policy across domains must not corrupt the force.
+
+    The cross walk drives the halo import, so a criterion applied in the wrong place
+    in the sequence would fetch one set of remote leaves and evaluate against
+    another. That shows up as missing sources -- a wrong force with every buffer flag
+    clear.
+    """
+
+    ndev = min(4, device_count())
+    mesh = make_mesh(ndev)
+    pts, mass = _ic(ndev)
+
+    result, diagnostics = _run(
+        mesh, pts, mass, mac_type="dehnen_error", adaptive_eps=_EPS
+    )
+    assert not result.overflow
+    assert _cross_far(diagnostics) > 0
+
+    direct = _direct(pts, mass, _SOFTENING)
+    err = float(np.linalg.norm(result.accelerations - direct) / np.linalg.norm(direct))
+    assert err < 1e-2, f"aggL2 err {err:.6f} exceeds 1% with the cross criterion on"

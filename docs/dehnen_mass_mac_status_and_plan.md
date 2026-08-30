@@ -195,6 +195,72 @@ queue is therefore floored at θ=0.3, the tightest angle the law was fitted at, 
 cross queue keeps tracking θ because the cross walk really is geometric. That is a floor,
 not a derivation: re-deriving the rule against the criterion still needs item 3 below.
 
+### 0b. The cross walk carries it too — **DONE, and it is where most of the win is**
+
+`yggdrax` PR #54 adds `pair_policy` to `dual_tree_walk_cross_impl`; jaccpot's
+`cross_policy_state` retargets the criterion's SOURCES onto the coarse (LET) tree while
+keeping the local cell's own `eps * min_b f_b` budget as the target. `mac_cross_criterion`
+(default on) keeps the self-only arm addressable, because the difference between the two
+arms is the measurement.
+
+**Three things this needed that the self walk did not**, each of which fails silently:
+
+- **A directed criterion.** `adaptive_pair_policy` symmetrises eq (16a) because the self
+  traversal emits both orientations. The cross walk emits `(target, source)` and never the
+  swap, and its two trees are DISJOINT INDEX SPACES — so the swapped call would index a
+  coarse-sized source array with a local node id, which JAX *clamps* rather than rejects.
+  `adaptive_cross_pair_policy` applies eq (16a) once, as written. It is a `functools.partial`
+  and not a field on `AdaptivePolicyState`: a bool in the state becomes a tracer the moment
+  the state crosses `jit`.
+- **A coarse source radius that bounds PARTICLES.** The coarse tree's `positions_sorted` are
+  remote leaf *centres of mass*, so every `resolve_dehnen_geometry` mode but `"runtime"`
+  would fit a radius to the COMs and under-bound the true source extent — and the criterion
+  would accept pairs whose source is far wider than it was told. **That is the cross-domain
+  far-field defect fixed in yggdrax PR #47, reachable again from here.**
+  `coarse_source_mac_geometry` takes the radius from `rct.geometry` and re-references it to
+  the expansion centre by `|c_com - c_geom| + rho_geom`.
+- **Order.** The criterion cross walk runs BEFORE the halo import, which is driven by the
+  cross NEAR list. Running it after would import the geometric arm's halo and evaluate the
+  criterion's near list against it: missing sources, every flag clear.
+
+**MEASURED, on 2 x A100, N = 1 048 576, order 4, theta 0.5, `nearfield_accum="wide"`,
+every arm with all overflow flags clear and a 65 536-particle fp64 probe.** Read at a
+matched MEDIAN (trap 9), interpolated inside an eps bracket that is interior in every case
+(`3e-5 .. 1e-4`), with the trap 3/8 guards enforced rather than assumed:
+
+| leaf | p99.99 gain | p99 gain | near-field work |
+|---|---|---|---|
+| 256 | 4.40x | 2.23x | 0.769x |
+| 512 | **5.56x** | 2.96x | 0.807x |
+| 1024 | **7.88x** | 2.81x | 0.873x |
+
+**Monotone in leaf size**, which is the same shape the single-GPU lane reports across the
+same three leaf sizes (2.7x -> 7.0x -> 21.8x) at a shallower slope — different order (4, not
+8), different profile, two devices. That the mesh port reproduces the *trend* is the best
+evidence available that it is faithful rather than accidentally flattering.
+
+**The ablation is the point.** At leaf 256, self-only against self+cross:
+
+| arm | p99.99 gain | p99 gain | near-field work |
+|---|---|---|---|
+| self walk only | 1.87x | 1.47x | 1.06x (**more**) |
+| self + cross | 4.40x | 2.23x | 0.77x |
+
+Carrying the criterion across domains roughly **doubles** the tail gain and turns a 6 % work
+increase into a 23 % decrease. A self-only port would have measured 1.87x and looked like a
+weak result; that would have been a statement about half a port, not about the criterion.
+
+Artifact: `bench/results/distributed_dehnen_mac/leafsweep_ndev2_1M_seed20260831.json`.
+
+**A truncated walk reads FASTER, and this run proved it again.** The first
+`eps=1e-3` arm at leaf 256 came back with `self_near = 827 536` and `ovf=True`; with the
+caps grown to clear the flag it is `1 293 194`. The truncated run reported 36 % LESS work
+than the correct one. Every number above is from a run with every flag clear.
+
+**What is still missing before this is a paper number:** N=10^7 and 5 devices (this is 10^6
+on 2, where cross-domain work is 31 % of the near field rather than 53 %), a matched
+WALL-CLOCK comparison rather than matched work, and more than one seed.
+
 **NOT DONE, in the order it should be done:**
 
 1. **Reproduce the single-GPU N=10⁶ / leaf 1024 numbers on today's `main`** before trusting
