@@ -59,17 +59,21 @@ import jax.numpy as jnp
 from jaxtyping import Array
 
 from jaccpot.runtime._adaptive_policy import (
+    AdaptivePolicyState,
     _near_field_force_scale,
     _particle_leaf_ids,
     accumulate_own_down_parent_chain,
     compute_node_force_scale_from_sorted_magnitudes,
+    dehnen_multipole_power_by_degree,
     node_span_mass,
 )
 from jaccpot.upward.tree_expansions import NodeMultipoleData, TreeUpwardData
 
 __all__ = [
     "DISTRIBUTED_FORCE_SCALE_MODES",
+    "coarse_source_mac_geometry",
     "cross_force_scale_own",
+    "cross_policy_state",
     "distributed_force_scale_nodes",
     "flatten_neighbor_csr",
     "policy_upward_view",
@@ -137,6 +141,150 @@ def policy_upward_view(*, upward: Any, geometry: Any, mass_moments: Any) -> Any:
             component_matrix=None,
             source_motion_packed=None,
         ),
+    )
+
+
+def coarse_source_mac_geometry(
+    *,
+    expansion_centers: Array,
+    geometry_centers: Array,
+    geometry_radii: Array,
+) -> tuple[Array, Array]:
+    """MAC centres and radii for coarse (LET) nodes acting as criterion sources.
+
+    **Do not build these with ``resolve_dehnen_geometry``.** Every mode of that
+    function except ``"runtime"`` measures the radius from ``positions_sorted``, and
+    the coarse tree's "positions" are remote leaf CENTRES OF MASS, not particles. A
+    radius fitted to COMs is a systematic under-bound of the true source extent, the
+    criterion then accepts pairs it should have refined, and the cross-domain far
+    field is silently under-resolved. That is the cross-domain far-field defect fixed
+    in yggdrax PR #47, reachable again from here; ``jaccpot/distributed/fmm.py``
+    already notes that ``rct.geometry`` is the extent that "bounds the particles
+    behind each coarse node".
+
+    So the radius comes from the particle-bounding coarse geometry, and is
+    re-referenced to the EXPANSION centre by the triangle inequality:
+    ``|x - c_com| <= |c_com - c_geom| + rho_geom`` for every particle ``x`` behind
+    the node. Using the expansion centre is what makes the criterion's distance the
+    same quantity as the M2L displacement, which eqs (13)/(15) assume; taking the
+    geometry centre instead would measure a different separation from the one the
+    error estimate is about.
+
+    Parameters
+    ----------
+    expansion_centers : Array
+        ``(num_coarse_nodes, 3)`` multipole/COM centres -- what the M2L expands about.
+    geometry_centers : Array
+        ``(num_coarse_nodes, 3)`` centres of the particle-bounding coarse geometry.
+    geometry_radii : Array
+        ``(num_coarse_nodes,)`` radii of that geometry, bounding PARTICLES.
+
+    Returns
+    -------
+    tuple[Array, Array]
+        ``(mac_centers, radius_bound)`` about the expansion centres, still a valid
+        upper bound on the distance to any particle behind the node.
+    """
+
+    com = jnp.asarray(expansion_centers)
+    dtype = com.dtype
+    geom_c = jnp.asarray(geometry_centers, dtype=dtype)
+    geom_r = jnp.asarray(geometry_radii, dtype=dtype)
+    offset = jnp.linalg.norm(com - geom_c, axis=1)
+    return com, offset + geom_r
+
+
+def cross_policy_state(
+    *,
+    self_state: AdaptivePolicyState,
+    coarse_tree: Any,
+    coarse_multipole_packed: Array,
+    coarse_masses_sorted: Array,
+    coarse_expansion_centers: Array,
+    coarse_geometry_centers: Array,
+    coarse_geometry_radii: Array,
+) -> AdaptivePolicyState:
+    """Retarget a self-walk policy state so its SOURCES are the coarse tree.
+
+    :class:`AdaptivePolicyState` already keeps ``source_*`` and ``target_*`` in
+    separate fields; the self walk simply fills both from the same tree. The cross
+    walk needs them from different ones: the criterion asks whether *this remote
+    node's* multipole, acting on *this local cell*, keeps the estimated force error
+    under the local cell's own budget. So the target side -- centres, radii and the
+    ``eps * min_b f_b`` threshold -- is kept exactly as the self walk built it, and
+    only the source side is replaced.
+
+    Everything else is untouched on purpose: the order tags, the eq (15) binomials
+    and exponents, ``mac_theta_max``, ``G`` and the error-model code all describe the
+    criterion rather than a tree, and both walks run at the same expansion order.
+
+    Pair this with
+    :data:`~jaccpot.runtime._adaptive_policy.adaptive_cross_pair_policy`, not the
+    self-walk policy: the symmetrised form would index these coarse-sized source
+    arrays with local node ids.
+
+    Parameters
+    ----------
+    self_state : AdaptivePolicyState
+        The state built for the local self walk; supplies every target field.
+    coarse_tree : Any
+        The all-gathered coarse (LET) tree.
+    coarse_multipole_packed : Array
+        Coarse-tree multipoles, the same array the cross M2L consumes.
+    coarse_masses_sorted : Array
+        Coarse-tree masses in its own sorted order. The node mass is taken from the
+        spans rather than from ``multipole_packed[:, 0]`` -- deliberately, because
+        that is the reading that would inherit an M2M defect as ordinary truncation
+        error.
+    coarse_expansion_centers : Array
+        Coarse multipole centres.
+    coarse_geometry_centers : Array
+        Centres of the particle-bounding coarse geometry.
+    coarse_geometry_radii : Array
+        Radii of that geometry. See :func:`coarse_source_mac_geometry`.
+
+    Returns
+    -------
+    AdaptivePolicyState
+        The same criterion, evaluated with coarse-tree sources.
+    """
+
+    dtype = jnp.asarray(self_state.target_radius_bound).dtype
+    packed = jax.lax.stop_gradient(coarse_multipole_packed)
+    source_power = dehnen_multipole_power_by_degree(multipole_packed=packed)
+    mac_centers, radius_bound = coarse_source_mac_geometry(
+        expansion_centers=jax.lax.stop_gradient(
+            jnp.asarray(coarse_expansion_centers, dtype=dtype)
+        ),
+        geometry_centers=jax.lax.stop_gradient(coarse_geometry_centers),
+        geometry_radii=jax.lax.stop_gradient(coarse_geometry_radii),
+    )
+    source_mass = jnp.maximum(
+        jnp.abs(
+            node_span_mass(
+                tree=coarse_tree,
+                masses_sorted=jax.lax.stop_gradient(
+                    jnp.asarray(coarse_masses_sorted, dtype=dtype)
+                ),
+            )
+        ),
+        jnp.asarray(1e-24, dtype=dtype),
+    )
+
+    # The unused error models still get TRACED -- `adaptive_pair_policy` selects with
+    # `lax.switch`, which traces every branch. Their source arrays must therefore be
+    # indexable by COARSE node ids, or the trace gathers out of bounds (clamped, so
+    # silent) on a branch nobody reads. Zeros of the right shape, since the criterion
+    # pins the error model to the eq (15) estimator.
+    num_coarse = int(jnp.asarray(source_power).shape[0])
+    proxy_orders = int(jnp.asarray(self_state.source_error_proxy_by_order).shape[1])
+    return self_state._replace(
+        source_error_proxy_by_order=jnp.zeros((num_coarse, proxy_orders), dtype=dtype),
+        source_degree_power=jnp.zeros_like(source_power),
+        source_dehnen_power=source_power.astype(dtype),
+        source_mass=source_mass,
+        source_mac_center=mac_centers.astype(dtype),
+        source_radius_bound=radius_bound.astype(dtype),
     )
 
 

@@ -79,6 +79,7 @@ from yggdrax.tree_moments import compute_tree_mass_moments
 from jaccpot.config import MACTypeInput
 from jaccpot.distributed._force_scale import (
     DISTRIBUTED_FORCE_SCALE_MODES,
+    cross_policy_state,
     distributed_force_scale_nodes,
     policy_upward_view,
 )
@@ -99,6 +100,7 @@ from jaccpot.operators.complex_ops import (
 )
 from jaccpot.operators.real_harmonics import sh_size
 from jaccpot.runtime._adaptive_policy import (
+    adaptive_cross_pair_policy,
     adaptive_pair_policy,
     build_adaptive_policy_state,
 )
@@ -597,6 +599,13 @@ class DistributedFMMConfig:
     # own `theta < 1`. Measured not to be needed (trap 4); do not lower it without
     # a fresh reason.
     mac_theta_max: float = 1.0
+    # Whether the criterion also decides the CROSS-domain walk, or only the local
+    # self walk. True (default) is the full port. False is the self-only ablation --
+    # worth keeping addressable, because cross-domain near-field work is 53% of the
+    # total at 5 devices, so the two arms answer different questions and the
+    # difference between them is the measurement that says how much of the
+    # criterion's advantage lives across domains.
+    mac_cross_criterion: bool = True
     # How node centres and radii are measured for the criterion. "com" (the
     # solver's own default) references centres and radii to the runtime's expansion
     # centres, so the distance entering eqs (13)/(15) is exactly the M2L
@@ -755,13 +764,19 @@ class DistributedFMMConfig:
         # tightest angle the queue law was fitted at. The CROSS queue keeps the
         # configured theta, because the cross walk really is geometric.
         self_theta = float(self.theta)
+        cross_theta = float(self.theta)
         if str(self.mac_type) == "dehnen_error":
             self_theta = min(self_theta, _SELF_QUEUE_CRITERION_THETA)
+            # Same argument for the cross queue, but only when the criterion is
+            # actually deciding there. Under the self-only ablation the cross walk
+            # really is geometric and theta really does size it.
+            if bool(self.mac_cross_criterion):
+                cross_theta = min(cross_theta, _SELF_QUEUE_CRITERION_THETA)
         derived = _derive_walk_caps(
             per_device_n=int(per_device_n),
             leaf_size=int(self.leaf_size),
             ndev=int(ndev),
-            theta=float(self.theta),
+            theta=cross_theta,
             self_theta=self_theta,
         )
         return dataclasses.replace(self, **{f: derived[f] for f in unset})
@@ -1670,6 +1685,9 @@ def _make_fn(
             "does not carry. Use mac_type='dehnen_error'."
         )
     uses_criterion = mac_requested == "dehnen_error"
+    # Whether the criterion also decides the cross walk. False is the self-only
+    # ablation; see the config field for why it stays addressable.
+    use_cross_criterion = uses_criterion and bool(config.mac_cross_criterion)
     # The geometric MAC handed to both walks. Under the criterion this is the
     # `dehnen` base test; on the self walk the pair policy discards its verdict
     # (paper mode deletes `mac_ok`), and on the cross walk it is the whole test.
@@ -2176,6 +2194,54 @@ def _make_fn(
                 far_overflow=self_res.far_overflow | prepass_res.far_overflow,
                 near_overflow=self_res.near_overflow | prepass_res.near_overflow,
             )
+
+            if use_cross_criterion:
+                # ---- and the same criterion across domains ----
+                #
+                # The cross walk above was the prepass. Re-run it against the coarse
+                # tree as SOURCE, with the criterion deciding instead of theta. This
+                # is where most of the near-field work is: 53% of the total at five
+                # devices, 31% at two.
+                #
+                # It must happen BEFORE the halo import, which is driven by the cross
+                # NEAR list -- so a criterion that moves pairs between far and near
+                # changes which remote leaves are fetched. Running it after would
+                # import the geometric arm's halo and evaluate the criterion's near
+                # list against it: missing sources, no diagnostic.
+                #
+                # `adaptive_cross_pair_policy`, NOT `adaptive_pair_policy`: the self
+                # walk's symmetrised form would index these coarse-sized source
+                # arrays with local node ids.
+                cross_state = cross_policy_state(
+                    self_state=policy_state,
+                    coarse_tree=rct.tree,
+                    coarse_multipole_packed=coarse_packed_use,
+                    coarse_masses_sorted=rct.masses_sorted,
+                    coarse_expansion_centers=c_centers,
+                    coarse_geometry_centers=rct.geometry.center,
+                    coarse_geometry_radii=rct.geometry.radius,
+                )
+                cross_prepass = cross
+                cross = dual_tree_walk_cross_impl(
+                    tree,
+                    geom,
+                    rct.tree,
+                    rct.geometry,
+                    theta,
+                    mac_type=mac,
+                    max_interactions_per_node=KC,
+                    max_neighbors_per_leaf=KN,
+                    max_pair_queue=x_queue,
+                    pair_policy=adaptive_cross_pair_policy,
+                    policy_state=cross_state,
+                )
+                # Same reasoning as the self prepass above: the prepass cross lists
+                # fed `f_b`, so a truncation there is a silently smaller force scale.
+                cross = cross._replace(
+                    queue_overflow=cross.queue_overflow | cross_prepass.queue_overflow,
+                    far_overflow=cross.far_overflow | cross_prepass.far_overflow,
+                    near_overflow=cross.near_overflow | cross_prepass.near_overflow,
+                )
 
         # The halo exchange is the one place cotangents cross devices. On the grad
         # path its implementation is pinned -- see _grad_halo_exchange for why the

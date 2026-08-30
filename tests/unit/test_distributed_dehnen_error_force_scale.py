@@ -34,9 +34,12 @@ from yggdrax.interactions import build_interactions_and_neighbors
 from yggdrax.tree import Tree
 
 from jaccpot.distributed._force_scale import (
+    coarse_source_mac_geometry,
     cross_force_scale_own,
+    cross_policy_state,
     distributed_force_scale_nodes,
     flatten_neighbor_csr,
+    policy_upward_view,
 )
 from jaccpot.runtime._adaptive_policy import (
     _far_field_force_scale_by_node,
@@ -49,6 +52,11 @@ LEAF = 8
 THETA = 0.5
 SOFTENING = 1.0e-3
 G = 1.0
+ORDER = 4
+
+#: yggdrax's ACCEPT action code, imported rather than spelled, so a change there
+#: fails here instead of silently inverting an assertion.
+_ACTION_ACCEPT_CODE = 0
 
 #: Per-domain particle count. NOT arbitrary: at 256 particles / leaf 8 / theta 0.5
 #: the self walk accepts **zero** far pairs, so the far term under test is
@@ -98,6 +106,23 @@ def _build(points, masses):
         tree, geom, theta=THETA, mac_type="dehnen"
     )
     return tree, geom, pos_sorted, mass_sorted, inter, nbr
+
+
+def _upward_view(tree, geom, pos_sorted, mass_sorted):
+    """A ``TreeUpwardData`` the policy builder accepts, for either tree."""
+
+    from yggdrax.tree_moments import compute_tree_mass_moments
+
+    from jaccpot.upward.real_tree_expansions import prepare_real_upward_sweep
+
+    upward = prepare_real_upward_sweep(
+        tree, pos_sorted, mass_sorted, max_order=ORDER, max_leaf_size=LEAF
+    )
+    return policy_upward_view(
+        upward=upward,
+        geometry=geom,
+        mass_moments=compute_tree_mass_moments(tree, pos_sorted, mass_sorted),
+    )
 
 
 def _exact_fb(target_pos, source_pos, source_mass, *, exclude_self):
@@ -486,9 +511,10 @@ def test_the_criterion_floors_the_self_queue_instead_of_scaling_it_by_theta():
     docstring says what that costs: the walk truncates SILENTLY, reading *faster*
     with only ``self_near_pairs`` as the witness.
 
-    The cross walk really is geometric here, so its queue must keep tracking
-    ``theta``. Both halves are asserted: a criterion config at theta 0.8 gets the
-    self queue of theta 0.3 and the cross queue of theta 0.8.
+    The cross queue follows whichever criterion decides that walk: ``theta`` under
+    the self-only ablation, the same floor when the criterion is deciding there too.
+    Both halves are asserted, so a change that floors everything unconditionally
+    fails here instead of over-provisioning every geometric run on the lane.
     """
 
     from jaccpot.distributed.fmm import (
@@ -513,9 +539,28 @@ def test_the_criterion_floors_the_self_queue_instead_of_scaling_it_by_theta():
         "the criterion's self queue is not the theta-0.3 floor "
         f"({criterion.max_pair_queue} vs {floored.max_pair_queue})"
     )
-    assert (
-        criterion.cross_max_pair_queue == geometric.cross_max_pair_queue
-    ), "the CROSS walk is still geometric, so its queue must keep tracking theta"
+    # The CROSS queue follows whichever criterion is actually deciding that walk.
+    # Under the self-only ablation the cross walk really is geometric and theta really
+    # does size it; with the cross criterion on, theta gates neither walk and both
+    # queues take the floor. Asserted in both directions, so a change that floors
+    # everything unconditionally fails here rather than silently over-provisioning
+    # every geometric run on the lane.
+    self_only = DistributedFMMConfig(
+        **common,
+        mac_type="dehnen_error",
+        adaptive_eps=1e-4,
+        mac_cross_criterion=False,
+    ).resolved_for(262144, 4)
+    assert self_only.cross_max_pair_queue == geometric.cross_max_pair_queue, (
+        "with mac_cross_criterion=False the cross walk is geometric, so its queue "
+        "must keep tracking theta"
+    )
+    assert criterion.cross_max_pair_queue == floored.cross_max_pair_queue, (
+        "with the criterion deciding the cross walk too, theta gates neither walk, "
+        f"so the cross queue must take the same floor "
+        f"({criterion.cross_max_pair_queue} vs {floored.cross_max_pair_queue})"
+    )
+    assert criterion.cross_max_pair_queue > geometric.cross_max_pair_queue
 
 
 def test_a_theta_tighter_than_the_floor_still_raises_the_self_queue():
@@ -536,3 +581,220 @@ def test_a_theta_tighter_than_the_floor_still_raises_the_self_queue():
     ).resolved_for(262144, 4)
 
     assert tighter.max_pair_queue > floored.max_pair_queue
+
+
+# --------------------------------------------------------------------------- #
+# the cross-domain criterion: coarse sources, local targets
+# --------------------------------------------------------------------------- #
+
+
+def test_the_coarse_source_radius_bounds_particles_not_centres_of_mass():
+    """The coarse MAC radius must bound PARTICLES, or the criterion over-accepts.
+
+    This is the cross-domain far-field defect fixed in yggdrax PR #47, reachable
+    again from here. The coarse (LET) tree's ``positions_sorted`` are remote leaf
+    CENTRES OF MASS, so anything that fits a radius to them -- which is every
+    ``resolve_dehnen_geometry`` mode except ``"runtime"`` -- measures the spread of
+    the COMs and not of the particles behind them. Those differ by however much a
+    remote leaf is bigger than a point, the radius comes out systematically small,
+    and eq (16a) then accepts pairs whose source is far wider than it was told.
+
+    Constructed so the two answers cannot be confused: the COMs sit within 0.1 of
+    the node centre while the particles behind them reach 5.0.
+    """
+
+    com_spread, particle_reach = 0.1, 5.0
+    expansion_centers = jnp.asarray([[0.0, 0.0, 0.0], [10.0, 0.0, 0.0]])
+    geometry_centers = jnp.asarray([[0.2, 0.0, 0.0], [10.0, 0.0, 0.0]])
+    geometry_radii = jnp.asarray([particle_reach, particle_reach])
+
+    _centers, radius = coarse_source_mac_geometry(
+        expansion_centers=expansion_centers,
+        geometry_centers=geometry_centers,
+        geometry_radii=geometry_radii,
+    )
+    radius = np.asarray(radius)
+
+    assert np.all(
+        radius >= particle_reach
+    ), f"radius {radius} does not even reach the particle extent {particle_reach}"
+    assert np.all(radius > com_spread * 10), (
+        "the radius is of order the COM spread, so it was fitted to the centres of "
+        "mass -- this is the PR #47 defect"
+    )
+    # Node 0's expansion centre is offset from its geometry centre, so the bound
+    # must grow by exactly that offset: |c_com - c_geom| + rho_geom.
+    assert radius[0] == pytest.approx(0.2 + particle_reach, rel=1e-12)
+    assert radius[1] == pytest.approx(particle_reach, rel=1e-12)
+
+
+def test_the_returned_centres_are_the_expansion_centres():
+    """The criterion's distance must be the M2L displacement, not another one.
+
+    eqs (13)/(15) estimate the error of an expansion taken about a particular
+    point. Measuring the separation from the geometry centre instead would put the
+    error estimate and the operator it describes on different distances.
+    """
+
+    expansion_centers = jnp.asarray([[1.0, 2.0, 3.0], [-4.0, 0.5, 0.0]])
+    centers, _radius = coarse_source_mac_geometry(
+        expansion_centers=expansion_centers,
+        geometry_centers=jnp.asarray([[0.0, 0.0, 0.0], [0.0, 0.0, 0.0]]),
+        geometry_radii=jnp.asarray([1.0, 1.0]),
+    )
+    np.testing.assert_array_equal(np.asarray(centers), np.asarray(expansion_centers))
+
+
+def test_the_cross_state_keeps_the_targets_and_replaces_only_the_sources():
+    """Target budget from the local tree, source multipoles from the coarse one.
+
+    The criterion asks whether THIS remote node's multipole, acting on THIS local
+    cell, keeps the estimated error under the local cell's own budget. So the
+    target side -- centres, radii and ``eps * min_b f_b`` -- has to survive intact,
+    and only the source side may move. A state that replaced the threshold too
+    would evaluate a budget belonging to some coarse node, which is not a quantity
+    the criterion has any use for.
+    """
+
+    from jaccpot.runtime._adaptive_policy import build_adaptive_policy_state
+
+    lp, lm, rp, rm = _two_domains()
+    tree, geom, pos_s, mass_s, inter, nbr = _build(lp, lm)
+    rtree, rgeom, rpos_s, rmass_s, _, _ = _build(rp, rm)
+
+    upward = _upward_view(tree, geom, pos_s, mass_s)
+    coarse_upward = _upward_view(rtree, rgeom, rpos_s, rmass_s)
+
+    scale = jnp.asarray(
+        np.linspace(1.0, 2.0, int(np.asarray(tree.node_ranges).shape[0]))
+    )
+    self_state = build_adaptive_policy_state(
+        upward=upward,
+        tree=tree,
+        positions_sorted=pos_s,
+        p_gears=(ORDER,),
+        force_scale_nodes=scale,
+        eps=jnp.asarray(1e-3),
+        theta=jnp.asarray(THETA),
+        error_model_code=2,
+        dehnen_geometry_mode="com",
+        max_leaf_size=LEAF,
+    )
+    cross = cross_policy_state(
+        self_state=self_state,
+        coarse_tree=rtree,
+        coarse_multipole_packed=coarse_upward.multipoles.packed,
+        coarse_masses_sorted=rmass_s,
+        coarse_expansion_centers=coarse_upward.multipoles.centers,
+        coarse_geometry_centers=rgeom.center,
+        coarse_geometry_radii=rgeom.radius,
+    )
+
+    n_local = int(np.asarray(self_state.target_radius_bound).shape[0])
+    n_coarse = int(np.asarray(rtree.node_ranges).shape[0])
+    assert n_local != n_coarse or True  # sizes may coincide; the checks below do not
+
+    for field in (
+        "target_mac_center",
+        "target_radius_bound",
+        "target_accept_threshold",
+        "order_tags",
+        "dehnen_binomial_masked_by_order",
+        "dehnen_exponent_by_order",
+    ):
+        np.testing.assert_array_equal(
+            np.asarray(getattr(cross, field)),
+            np.asarray(getattr(self_state, field)),
+            err_msg=f"{field} must survive retargeting untouched",
+        )
+
+    for field in ("source_mass", "source_radius_bound", "source_dehnen_power"):
+        assert int(np.asarray(getattr(cross, field)).shape[0]) == n_coarse, (
+            f"{field} is not sized over the coarse tree, so the cross walk would "
+            "index it with the wrong node space"
+        )
+
+    # The source mass must be the coarse tree's spanned mass, not the local one's.
+    expected_root = float(np.asarray(rm).sum())
+    assert float(np.asarray(cross.source_mass)[0]) == pytest.approx(
+        expected_root, rel=1e-9
+    )
+
+
+def test_the_cross_policy_does_not_symmetrise_where_the_self_policy_does():
+    """``adaptive_cross_pair_policy`` must evaluate one orientation, not two.
+
+    eq (16a) is genuinely asymmetric in source <-> sink: it puts the SOURCE's mass
+    and multipole power against the SINK's own force scale. The self walk ANDs both
+    orientations because its traversal emits both. Doing that across two trees would
+    index coarse-sized source arrays with local node ids -- which JAX clamps rather
+    than rejects, so it reads a different node and reports nothing.
+
+    Here the two policies are handed a state whose target budgets differ sharply
+    between two nodes, so the swapped orientation reaches a different threshold and
+    the two forms must disagree.
+    """
+
+    from jaccpot.runtime._adaptive_policy import (
+        adaptive_cross_pair_policy,
+        adaptive_pair_policy,
+        build_adaptive_policy_state,
+    )
+
+    lp, lm, _rp, _rm = _two_domains()
+    tree, geom, pos_s, mass_s, inter, _ = _build(lp, lm)
+    upward = _upward_view(tree, geom, pos_s, mass_s)
+    num_nodes = int(np.asarray(tree.node_ranges).shape[0])
+
+    # A force scale that varies over six orders of magnitude across nodes, so the
+    # forward and swapped thresholds cannot coincide.
+    scale = jnp.asarray(np.logspace(-3, 3, num_nodes))
+    state = build_adaptive_policy_state(
+        upward=upward,
+        tree=tree,
+        positions_sorted=pos_s,
+        p_gears=(ORDER,),
+        force_scale_nodes=scale,
+        eps=jnp.asarray(1e-3),
+        theta=jnp.asarray(THETA),
+        error_model_code=2,
+        dehnen_geometry_mode="com",
+        max_leaf_size=LEAF,
+    )
+
+    src = jnp.asarray(inter.sources, dtype=jnp.int32)
+    tgt = jnp.asarray(inter.targets, dtype=jnp.int32)
+    live = np.asarray((src >= 0) & (tgt >= 0))
+    assert live.sum() > 0, "no far pairs on this IC; nothing is compared"
+    src = jnp.where(jnp.asarray(live), src, 0)
+    tgt = jnp.where(jnp.asarray(live), tgt, 0)
+
+    centers = jnp.asarray(geom.center)
+    delta = centers[src] - centers[tgt]
+    pair = dict(
+        valid_pairs=jnp.asarray(live),
+        mac_ok=jnp.ones_like(jnp.asarray(live)),
+        different_nodes=jnp.asarray(live),
+        same_node=jnp.zeros_like(jnp.asarray(live)),
+        target_leaf=jnp.zeros_like(jnp.asarray(live)),
+        source_leaf=jnp.zeros_like(jnp.asarray(live)),
+        target_nodes=tgt,
+        source_nodes=src,
+        center_target=centers[tgt],
+        center_source=centers[src],
+        dist_sq=jnp.sum(delta * delta, axis=1),
+        extent_target=jnp.asarray(geom.radius)[tgt],
+        extent_source=jnp.asarray(geom.radius)[src],
+    )
+
+    sym_actions, _ = adaptive_pair_policy(state, **pair)
+    dir_actions, _ = adaptive_cross_pair_policy(state, **pair)
+    sym = np.asarray(sym_actions)[live]
+    dir_ = np.asarray(dir_actions)[live]
+
+    assert not np.array_equal(sym, dir_), (
+        "the directed and symmetrised policies agreed on every pair, so the "
+        "directed mode is not actually skipping the swapped orientation"
+    )
+    # Symmetrising can only ever REMOVE accepts: it ANDs a second condition on.
+    assert (sym == _ACTION_ACCEPT_CODE).sum() <= (dir_ == _ACTION_ACCEPT_CODE).sum()

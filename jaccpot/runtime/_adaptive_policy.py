@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import functools
 import math
 from typing import Literal, NamedTuple, Optional, Union
 
@@ -2298,8 +2299,8 @@ def build_adaptive_policy_state(
     )
 
 
-def adaptive_pair_policy(
-    policy_state: AdaptivePolicyState, **pair_data: Array
+def _adaptive_pair_policy_impl(
+    policy_state: AdaptivePolicyState, *, directed: bool = False, **pair_data: Array
 ) -> tuple[Array, Array]:
     """Return traversal actions and order tags from solver-owned adaptive state.
 
@@ -2307,6 +2308,15 @@ def adaptive_pair_policy(
     ----------
     policy_state : AdaptivePolicyState
         The solver-owned adaptive policy state.
+    directed : bool
+        Whether the pair is emitted in ONE orientation only. ``False`` (the self
+        walk) symmetrises eq (16a), because that traversal evaluates the policy in
+        both orientations and accepts only when they agree. ``True`` (the cross
+        walk) evaluates the source acting on the target and nothing else -- see
+        :func:`adaptive_cross_pair_policy`. A Python bool, deliberately: bound with
+        ``functools.partial`` rather than carried in ``policy_state``, because a
+        bool in the state would be flattened to a tracer the moment the state
+        crossed a ``jit`` boundary and the ``if`` below would stop working.
     **pair_data : Array
         The traversal's per-pair arrays. Keyword-splatted because yggdrax owns the
         call and may add fields, but the keys this policy actually reads are a
@@ -2427,9 +2437,15 @@ def adaptive_pair_policy(
         # the one model that does not gate acceptance on `allow_solver_override`.
         # Symmetrize here so both orientations return the same decision; the
         # effective tolerance is then the stricter of the two directions.
-        return _dehnen_paper_directional(
-            safe_sources, safe_targets
-        ) & _dehnen_paper_directional(safe_targets, safe_sources)
+        forward = _dehnen_paper_directional(safe_sources, safe_targets)
+        if directed:
+            # The cross walk emits `(target, source)` and never the swap, and its
+            # two trees are disjoint index spaces -- `safe_targets` are target-tree
+            # ids, so feeding them to the source arrays would read a different node
+            # rather than fail. There is no second orientation to agree with, so
+            # eq (16a) is applied as written: this source acting on this sink.
+            return forward
+        return forward & _dehnen_paper_directional(safe_targets, safe_sources)
 
     passes = jax.lax.switch(
         jnp.asarray(policy_state.error_model_code, dtype=jnp.int32),
@@ -2465,6 +2481,25 @@ def adaptive_pair_policy(
     )
     actions = jnp.where(near_mask, _ACTION_NEAR, actions)
     return actions, tags
+
+
+#: The self walk's policy: eq (16a) symmetrised, because that traversal evaluates
+#: every pair in both orientations and accepts only when they agree.
+adaptive_pair_policy = functools.partial(_adaptive_pair_policy_impl, directed=False)
+
+#: The cross walk's policy: eq (16a) as written, source acting on sink, evaluated
+#: once. ``yggdrax.distributed.cross_walk`` emits ordered ``(target, source)`` pairs
+#: and never the swap, and its two trees are disjoint index spaces -- so there is no
+#: second orientation to agree with, and constructing one would index a source-tree
+#: array with a target-tree node id, which reads the wrong node instead of raising.
+#:
+#: A ``partial`` rather than a flag on :class:`AdaptivePolicyState`: the state is a
+#: pytree that crosses ``jit``, where a Python bool leaf becomes a tracer and the
+#: branch it controls stops being static. The policy itself is passed as a static
+#: argument, so binding the flag to the callable keeps it static by construction.
+adaptive_cross_pair_policy = functools.partial(
+    _adaptive_pair_policy_impl, directed=True
+)
 
 
 def bucket_far_pairs_by_tag(
@@ -2505,6 +2540,7 @@ def bucket_far_pairs_by_tag(
 __all__ = [
     "AdaptivePolicyState",
     "accumulate_own_down_parent_chain",
+    "adaptive_cross_pair_policy",
     "adaptive_pair_policy",
     "adaptive_policy_tolerance",
     "bucket_far_pairs_by_tag",
