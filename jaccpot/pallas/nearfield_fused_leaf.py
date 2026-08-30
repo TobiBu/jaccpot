@@ -855,6 +855,15 @@ def nearfield_leafpair_pallas(
         :func:`nearfield_fused_leaf_pallas`.
     interpret : bool
         Run under Pallas interpret mode (CPU semantics, no lowering).
+    accum : str
+        Per-target accumulator width. ``"input"`` (default) is byte-identical to
+        the historical path -- the kernel takes the original code path verbatim,
+        not a specialisation of the widened one. ``"wide"`` accumulates in float64
+        with a float32 partial per source leaf, while every multiply and the
+        ``rsqrt`` stay in the input dtype. See
+        :func:`_nearfield_leafpair_kernel` for why widening only the accumulator is
+        the whole fix: measured 439x in force accuracy for 1.8 % in time on the
+        distributed lane at 10^7 particles.
 
     Returns
     -------
@@ -1019,6 +1028,15 @@ def nearfield_leafpair_pallas_decoupled(
         :func:`nearfield_fused_leaf_pallas`.
     interpret : bool
         Run under Pallas interpret mode (CPU semantics, no lowering).
+    accum : str
+        Per-target accumulator width. ``"input"`` (default) is byte-identical to
+        the historical path -- the kernel takes the original code path verbatim,
+        not a specialisation of the widened one. ``"wide"`` accumulates in float64
+        with a float32 partial per source leaf, while every multiply and the
+        ``rsqrt`` stay in the input dtype. See
+        :func:`_nearfield_leafpair_kernel` for why widening only the accumulator is
+        the whole fix: measured 439x in force accuracy for 1.8 % in time on the
+        distributed lane at 10^7 particles.
 
     Returns
     -------
