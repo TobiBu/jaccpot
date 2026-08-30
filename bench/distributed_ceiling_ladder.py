@@ -263,6 +263,91 @@ def _disc(
     return pos32, mass32
 
 
+_ORACLE_CACHE = _RESULTS / "_oracle_cache"
+
+
+def _cached_oracle_subset(
+    positions: np.ndarray,
+    masses: np.ndarray,
+    targets: np.ndarray,
+    *,
+    G: float,
+    softening: float,
+    n_total: int,
+    seed: int,
+    probe: int,
+    fp64: bool,
+    enabled: bool = True,
+) -> np.ndarray:
+    """:func:`_oracle_subset`, memoised on disk.
+
+    The oracle is a NumPy CPU direct sum costing O(probe x N) -- **636 s** at
+    N = 10 485 760 with ``--probe 512``, during which every GPU sits idle. It depends
+    only on ``(n_total, seed, probe, G, softening, fp64)`` and NOT on theta, order,
+    leaf size, ndev or any cap, because ``targets`` is drawn from
+    ``default_rng(seed + 1)`` and the sum is over every particle. So a
+    (theta x order) grid recomputes exactly the same array once per point: 25 points
+    is 4.4 hours of pure waste.
+
+    Correctness of the key. ``positions``/``masses`` come from ``_disc(n_total,
+    seed=seed, fp64=fp64)``, which is deterministic in those three arguments alone --
+    so the key is complete, and the stored array is verified against the live
+    ``targets`` before use rather than trusted.
+
+    Parameters
+    ----------
+    positions : np.ndarray
+        All particle positions, input order.
+    masses : np.ndarray
+        All particle masses.
+    targets : np.ndarray
+        Indices of the probe targets.
+    G : float
+        Gravitational constant.
+    softening : float
+        Plummer softening length.
+    n_total : int
+        Total particle count -- part of the cache key.
+    seed : int
+        IC seed -- part of the cache key.
+    probe : int
+        Probe size -- part of the cache key.
+    fp64 : bool
+        Whether the IC was widened -- part of the cache key, because it changes the
+        arithmetic the oracle sees even though the geometry is the same draws.
+    enabled : bool
+        Set False to bypass the cache entirely.
+
+    Returns
+    -------
+    np.ndarray
+        Accelerations ``[len(targets), 3]`` in float64.
+    """
+
+    if not enabled:
+        return _oracle_subset(
+            positions, masses, targets, G=G, softening=softening
+        )
+    key = f"n{n_total}_s{seed}_p{probe}_g{G!r}_e{softening!r}_{'f64' if fp64 else 'f32'}"
+    path = _ORACLE_CACHE / f"oracle_{key}.npz"
+    if path.exists():
+        try:
+            blob = np.load(path)
+            # Verify rather than trust: a stale or truncated file must not silently
+            # become a reference the whole grid is scored against.
+            if np.array_equal(blob["targets"], targets):
+                return blob["exact"]
+        except Exception:  # pragma: no cover - a corrupt cache must never be fatal
+            pass
+    exact = _oracle_subset(positions, masses, targets, G=G, softening=softening)
+    try:
+        _ORACLE_CACHE.mkdir(parents=True, exist_ok=True)
+        np.savez(path, exact=exact, targets=targets)
+    except OSError:  # pragma: no cover - a read-only tree must not fail the run
+        pass
+    return exact
+
+
 def _oracle_subset(
     positions: np.ndarray,
     masses: np.ndarray,
@@ -409,8 +494,17 @@ def _one_point(
     probe = min(args.probe, int(part["n"]))
     targets = np.sort(rng.choice(int(part["n"]), size=probe, replace=False))
     t0 = time.perf_counter()
-    exact = _oracle_subset(
-        positions, masses, targets, G=config.G, softening=config.softening
+    exact = _cached_oracle_subset(
+        positions,
+        masses,
+        targets,
+        G=config.G,
+        softening=config.softening,
+        n_total=int(part["n"]),
+        seed=int(args.seed),
+        probe=int(probe),
+        fp64=bool(getattr(args, "fp64", False)),
+        enabled=not bool(getattr(args, "no_oracle_cache", False)),
     )
     got = np.asarray(accel)[targets].astype(np.float64)
     row["oracle_s"] = round(time.perf_counter() - t0, 2)
@@ -499,6 +593,13 @@ def main(argv: Optional[list[str]] = None) -> int:
     ap.add_argument("--theta", type=float, default=0.4)
     ap.add_argument("--order", type=int, default=3)
     ap.add_argument("--mac-type", default="dehnen")
+    ap.add_argument(
+        "--no-oracle-cache",
+        action="store_true",
+        help="recompute the fp64 direct-sum reference instead of reusing the memoised "
+        "one. The cache is keyed on (n, seed, probe, G, softening, fp64) -- everything "
+        "the reference depends on -- and verifies the stored target indices before use.",
+    )
     ap.add_argument(
         "--nearfield-accum",
         default="input",
