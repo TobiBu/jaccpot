@@ -8,8 +8,10 @@ from typing import Callable
 import jax
 import jax.numpy as jnp
 import numpy as np
+from beartype import beartype
 from jax import lax
 from jaxtyping import DTypeLike as _jaxtyping_DTypeLike
+from jaxtyping import Float, Inexact, jaxtyped
 
 from ._precision import highest_matmul_precision
 from ._transverse_degeneracy_jvp import (
@@ -78,6 +80,39 @@ __all__ = [
     "translate_along_z_m2m_complex_solidfmm",
 ]
 
+# The eleven functions taking a single spatial `delta` (and `direction`) carry
+# `Float[Array, "3"]`, because a length-2 vector was reaching all of them silently:
+# JAX *clamps* an out-of-bounds index, so `delta[2]` on a length-2 array returns
+# `delta[1]` and the caller gets the answer for `(x, y, y)` with no error at all.
+# Measured module-wide by `bench/annotation_pilot`: 13 of its 41 silent acceptances
+# here were exactly this one mistake.
+#
+# NOTE: the annotation narrows the accepted input, and that is deliberate rather
+# than incidental. Before it, every one of them also took a numpy array, a list or
+# a tuple, because the bodies reach `jnp` ops that coerce; `Float[Array, "3"]`
+# admits only `jax.Array`. `downward/local_expansions.py` already made this trade
+# in the same programme. The alternative spelling,
+# `Float[Union[Array, np.ndarray], "3"]`, closes the same hole while keeping numpy
+# callers, and was rejected only to avoid two spellings of one idea -- so if a
+# numpy caller ever has to be supported here, that is the change to make, and it
+# does not reopen the hole.
+#
+# The coefficient parameter on the nine of them that take one is
+# `Inexact[Array, "_"]`, and both halves of that are measured rather than tidy:
+#
+#   - `Inexact`, not `Complex`, because every one of them accepts a REAL buffer
+#     today and returns a sensible answer for it. `Complex` would be the narrower
+#     and more obvious-looking annotation, and it would reject callers that work.
+#   - `"_"` -- one anonymous axis -- rather than a length tied to `order`, because
+#     the bodies slice `[:ncoeff]` and so deliberately tolerate a LONGER buffer.
+#     Binding the length would reject calls these functions have always taken.
+#     Same reasoning as `coefficients` in `downward/local_expansions.py`.
+#
+# What that leaves asserted is rank and dtype family, which is not nothing: a
+# too-SHORT buffer already raises a domain error from the body (`TypeError` from
+# the evaluators, `ValueError` from the rotations), so the annotation preempts no
+# message, and a 2-D `local` was reaching `evaluate_local_complex` silently before
+# it.
 Array = jnp.ndarray
 #: `jaxtyping.DTypeLike` admits anything that names a dtype -- a `numpy.dtype`, a
 #: string, and JAX's own scalar types (`jnp.complex128` is a `_ScalarMeta`, not a
@@ -243,9 +278,10 @@ def complex_dot(
     return jnp.sum(left * right)
 
 
+@jaxtyped(typechecker=beartype)
 def evaluate_local_complex(
-    local: Array,
-    delta: Array,
+    local: Inexact[Array, "_"],
+    delta: Float[Array, "3"],
     *,
     order: int,
     conjugate_left: bool = True,
@@ -256,9 +292,9 @@ def evaluate_local_complex(
 
     Parameters
     ----------
-    local : Array
+    local : Inexact[Array, '_']
         Packed complex local coefficients, length ``sh_size(order)``.
-    delta : Array
+    delta : Float[Array, '3']
         Displacement vector ``(3,)``, target centre minus source centre.
     order : int
         Expansion order ``p``. Static: it fixes every packed length and table shape.
@@ -275,9 +311,10 @@ def evaluate_local_complex(
     return jnp.real(pot)
 
 
+@jaxtyped(typechecker=beartype)
 def evaluate_local_complex_with_grad(
-    local: Array,
-    delta: Array,
+    local: Inexact[Array, "_"],
+    delta: Float[Array, "3"],
     *,
     order: int,
     conjugate_left: bool = True,
@@ -286,9 +323,9 @@ def evaluate_local_complex_with_grad(
 
     Parameters
     ----------
-    local : Array
+    local : Inexact[Array, '_']
         Packed complex local coefficients, length ``sh_size(order)``.
-    delta : Array
+    delta : Float[Array, '3']
         Displacement vector ``(3,)``, target centre minus source centre.
     order : int
         Expansion order ``p``. Static: it fixes every packed length and table shape.
@@ -517,9 +554,10 @@ def _build_complex_harmonic_derivative_coefficients(
     return tuple(levels)
 
 
+@jaxtyped(typechecker=beartype)
 def evaluate_local_complex_derivative_tower(
-    local: Array,
-    delta: Array,
+    local: Inexact[Array, "_"],
+    delta: Float[Array, "3"],
     *,
     order: int,
     max_derivative_order: int,
@@ -535,9 +573,9 @@ def evaluate_local_complex_derivative_tower(
 
     Parameters
     ----------
-    local : Array
+    local : Inexact[Array, '_']
         Packed complex local coefficients, length ``sh_size(order)``.
-    delta : Array
+    delta : Float[Array, '3']
         Displacement vector ``(3,)``, target centre minus source centre.
     order : int
         Expansion order ``p``. Static: it fixes every packed length and table shape.
@@ -894,9 +932,10 @@ def evaluate_local_complex_grad_order4_unrolled(
     return jnp.real(jnp.stack((acc_x, acc_y, acc_z), axis=0))
 
 
+@jaxtyped(typechecker=beartype)
 def evaluate_local_complex_with_grad_analytic(
-    local: Array,
-    delta: Array,
+    local: Inexact[Array, "_"],
+    delta: Float[Array, "3"],
     *,
     order: int,
     conjugate_left: bool = True,
@@ -905,9 +944,9 @@ def evaluate_local_complex_with_grad_analytic(
 
     Parameters
     ----------
-    local : Array
+    local : Inexact[Array, '_']
         Packed complex local coefficients, length ``sh_size(order)``.
-    delta : Array
+    delta : Float[Array, '3']
         Displacement vector ``(3,)``, target centre minus source centre.
     order : int
         Expansion order ``p``. Static: it fixes every packed length and table shape.
@@ -933,9 +972,10 @@ def evaluate_local_complex_with_grad_analytic(
     return grad, potential
 
 
+@jaxtyped(typechecker=beartype)
 def evaluate_local_complex_grad_analytic(
-    local: Array,
-    delta: Array,
+    local: Inexact[Array, "_"],
+    delta: Float[Array, "3"],
     *,
     order: int,
     conjugate_left: bool = True,
@@ -944,9 +984,9 @@ def evaluate_local_complex_grad_analytic(
 
     Parameters
     ----------
-    local : Array
+    local : Inexact[Array, '_']
         Packed complex local coefficients, length ``sh_size(order)``.
-    delta : Array
+    delta : Float[Array, '3']
         Displacement vector ``(3,)``, target centre minus source centre.
     order : int
         Expansion order ``p``. Static: it fixes every packed length and table shape.
@@ -1042,9 +1082,10 @@ def evaluate_local_complex_with_grad_analytic_batch(
 
 
 @partial(jax.jit, static_argnames=("order",))
+@jaxtyped(typechecker=beartype)
 def regular_solid_harmonic_directional_derivative(
-    delta: Array,
-    direction: Array,
+    delta: Float[Array, "3"],
+    direction: Float[Array, "3"],
     *,
     order: int,
 ) -> Array:
@@ -1052,9 +1093,9 @@ def regular_solid_harmonic_directional_derivative(
 
     Parameters
     ----------
-    delta : Array
+    delta : Float[Array, '3']
         Displacement vector ``(3,)``, target centre minus source centre.
-    direction : Array
+    direction : Float[Array, '3']
         Direction vector ``(3,)`` the derivative is taken along.
     order : int
         Expansion order ``p``. Static: it fixes every packed length and table shape.
@@ -1073,9 +1114,10 @@ def regular_solid_harmonic_directional_derivative(
 
 
 @partial(jax.jit, static_argnames=("order", "derivative_order"))
+@jaxtyped(typechecker=beartype)
 def regular_solid_harmonic_directional_derivative_order(
-    delta: Array,
-    direction: Array,
+    delta: Float[Array, "3"],
+    direction: Float[Array, "3"],
     *,
     order: int,
     derivative_order: int,
@@ -1084,9 +1126,9 @@ def regular_solid_harmonic_directional_derivative_order(
 
     Parameters
     ----------
-    delta : Array
+    delta : Float[Array, '3']
         Displacement vector ``(3,)``, target centre minus source centre.
-    direction : Array
+    direction : Float[Array, '3']
         Direction vector ``(3,)`` the derivative is taken along.
     order : int
         Expansion order ``p``. Static: it fixes every packed length and table shape.
@@ -2243,9 +2285,10 @@ def _apply_complex_rotation_blocks_padded_batch(
     return jax.vmap(lambda c: _unpack_coeffs_by_ell(c, order=order))(rotated)
 
 
+@jaxtyped(typechecker=beartype)
 def rotate_complex_multipole_to_z_solidfmm(
-    multipole: Array,
-    delta: Array,
+    multipole: Inexact[Array, "_"],
+    delta: Float[Array, "3"],
     *,
     order: int,
 ) -> Array:
@@ -2253,9 +2296,9 @@ def rotate_complex_multipole_to_z_solidfmm(
 
     Parameters
     ----------
-    multipole : Array
+    multipole : Inexact[Array, '_']
         Packed complex multipole coefficients, length ``sh_size(order)``.
-    delta : Array
+    delta : Float[Array, '3']
         Displacement vector ``(3,)``, target centre minus source centre.
     order : int
         Expansion order ``p``. Static: it fixes every packed length and table shape.
@@ -2271,9 +2314,10 @@ def rotate_complex_multipole_to_z_solidfmm(
     return _apply_complex_rotation_blocks_batched(multipole, blocks, order=order)
 
 
+@jaxtyped(typechecker=beartype)
 def rotate_complex_multipole_from_z_solidfmm(
-    multipole: Array,
-    delta: Array,
+    multipole: Inexact[Array, "_"],
+    delta: Float[Array, "3"],
     *,
     order: int,
 ) -> Array:
@@ -2281,9 +2325,9 @@ def rotate_complex_multipole_from_z_solidfmm(
 
     Parameters
     ----------
-    multipole : Array
+    multipole : Inexact[Array, '_']
         Packed complex multipole coefficients, length ``sh_size(order)``.
-    delta : Array
+    delta : Float[Array, '3']
         Displacement vector ``(3,)``, target centre minus source centre.
     order : int
         Expansion order ``p``. Static: it fixes every packed length and table shape.
@@ -2299,9 +2343,10 @@ def rotate_complex_multipole_from_z_solidfmm(
     return _apply_complex_rotation_blocks_batched(multipole, blocks, order=order)
 
 
+@jaxtyped(typechecker=beartype)
 def rotate_complex_local_to_z_solidfmm(
-    local: Array,
-    delta: Array,
+    local: Inexact[Array, "_"],
+    delta: Float[Array, "3"],
     *,
     order: int,
 ) -> Array:
@@ -2309,9 +2354,9 @@ def rotate_complex_local_to_z_solidfmm(
 
     Parameters
     ----------
-    local : Array
+    local : Inexact[Array, '_']
         Packed complex local coefficients, length ``sh_size(order)``.
-    delta : Array
+    delta : Float[Array, '3']
         Displacement vector ``(3,)``, target centre minus source centre.
     order : int
         Expansion order ``p``. Static: it fixes every packed length and table shape.
@@ -2327,9 +2372,10 @@ def rotate_complex_local_to_z_solidfmm(
     return _apply_complex_rotation_blocks_batched(local, blocks, order=order)
 
 
+@jaxtyped(typechecker=beartype)
 def rotate_complex_local_from_z_solidfmm(
-    local: Array,
-    delta: Array,
+    local: Inexact[Array, "_"],
+    delta: Float[Array, "3"],
     *,
     order: int,
 ) -> Array:
@@ -2337,9 +2383,9 @@ def rotate_complex_local_from_z_solidfmm(
 
     Parameters
     ----------
-    local : Array
+    local : Inexact[Array, '_']
         Packed complex local coefficients, length ``sh_size(order)``.
-    delta : Array
+    delta : Float[Array, '3']
         Displacement vector ``(3,)``, target centre minus source centre.
     order : int
         Expansion order ``p``. Static: it fixes every packed length and table shape.

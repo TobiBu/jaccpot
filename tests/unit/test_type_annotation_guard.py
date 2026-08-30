@@ -136,6 +136,13 @@ CONVERTED_MODULES = (
     # measured and left alone, because yggdrax and their own bodies already
     # reject every malformed input tried (13 of 15 across the group).
     "jaccpot/downward/local_expansions.py",
+    # Phase 2, first change. NOT a module conversion: only the eleven functions
+    # taking a single spatial `delta` (and `direction`) are shaped, because those
+    # are the ones `bench/annotation_pilot` measured accepting a length-2 vector
+    # silently. The rest of this 2400-line module is still bare and is its own
+    # work -- listing it here says the `"3"` family must not regress, not that
+    # the module is finished.
+    "jaccpot/operators/complex_ops.py",
 )
 
 # Array parameters deliberately left bare, each with its reason recorded at the
@@ -183,7 +190,29 @@ SHAPED_FACADE_PARAMS = frozenset(
     }
 )
 
-_SHAPE_MARKERS = ("Float[", "Int[", "Bool[", "Shaped[", "Complex[", "Num[")
+# Every jaxtyping dtype FAMILY, not the six that happened to be in use when this
+# guard was written. The short list was a false-negative generator in one
+# direction and a false positive in the other: `Inexact[Array, '_']` -- the right
+# annotation for a coefficient buffer that legitimately arrives real or complex --
+# was reported as unshaped, so the guard would have rejected a correct annotation
+# and pushed the author toward a wrong one.
+#
+# Family names only, deliberately: STYLE_GUIDE section 4.4 forbids the
+# width-suffixed spellings (`Int32`, `Float64`), so `Int32[Array, "n"]` still
+# reads as unshaped here and fails. That is the intended behaviour, not an
+# oversight -- the same set `bench/annotation_census.py` classifies on.
+_SHAPE_MARKERS = (
+    "Bool[",
+    "Complex[",
+    "Float[",
+    "Inexact[",
+    "Int[",
+    "Key[",
+    "Num[",
+    "Real[",
+    "Shaped[",
+    "UInt[",
+)
 
 
 def _iter_unshaped_facade_params() -> list[tuple[str, int, str, str, str]]:
@@ -298,6 +327,45 @@ def test_converted_modules_keep_shapes_on_array_params() -> None:
         "Array parameters in converted modules must carry a jaxtyping shape "
         "(STYLE_GUIDE.md section 4). Nothing else checks these:\n" + details
     )
+
+
+def test_shape_markers_accept_families_and_still_reject_widths() -> None:
+    """Pin both edges of ``_SHAPE_MARKERS``, because it was widened.
+
+    Widening a guard's accept-list is where a silent hole gets introduced, so the
+    two directions are asserted separately: every jaxtyping dtype family must read
+    as shaped, and a bare ``Array`` or a width-suffixed spelling must not. The
+    width case is the one that matters -- ``Int32[Array, 'n']`` violates
+    STYLE_GUIDE section 4.4 and has to keep failing this guard, even though it
+    looks shaped and would satisfy a naive "contains a bracket" test.
+    """
+    families = (
+        "Bool",
+        "Complex",
+        "Float",
+        "Inexact",
+        "Int",
+        "Key",
+        "Num",
+        "Real",
+        "Shaped",
+        "UInt",
+    )
+    for family in families:
+        text = f'{family}[Array, "n 3"]'
+        assert any(
+            marker in text for marker in _SHAPE_MARKERS
+        ), f"{family} is a jaxtyping dtype family and must read as shaped"
+
+    for text in (
+        "Array",
+        "Optional[Array]",
+        "Int32[Array, 'n']",
+        "Float64[Array, '3']",
+    ):
+        assert not any(
+            marker in text for marker in _SHAPE_MARKERS
+        ), f"`{text}` must not count as a shaped annotation"
 
 
 def test_deliberately_bare_list_has_not_rotted() -> None:
