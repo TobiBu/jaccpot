@@ -433,9 +433,13 @@ def _one_point(
         overrides["nearfield_chunk"] = args.nearfield_chunk
     if args.far_m2l_fp32:
         overrides["far_m2l_fp32"] = True
-    # The cross-walk caps, overridable so the rung that walls on one of them can be
-    # bisected without editing the config's defaults.
+    # The walk caps, overridable so the rung that walls on one of them can be
+    # bisected without editing the config's defaults. `--pair-queue` is the SELF
+    # wavefront: it is the cap the recorded theta=0.3 truncation fires on
+    # (`self_queue_overflow`, rel_l2 5.5e-01), and until now there was no way to
+    # bisect it from the CLI.
     for name, value in (
+        ("max_pair_queue", args.pair_queue),
         ("cross_max_neighbors_per_leaf", args.cross_neighbors),
         ("cross_max_interactions_per_node", args.cross_interactions),
         ("cross_max_pair_queue", args.cross_queue),
@@ -627,6 +631,13 @@ def main(argv: Optional[list[str]] = None) -> int:
     ap.add_argument("--cross-neighbors", type=int, default=0)
     ap.add_argument("--cross-interactions", type=int, default=0)
     ap.add_argument("--cross-queue", type=int, default=0)
+    ap.add_argument(
+        "--pair-queue",
+        type=int,
+        default=0,
+        help="override the SELF wavefront capacity (max_pair_queue). 0 keeps the "
+        "derived value. This is the cap a tightened theta silently truncates on.",
+    )
     ap.add_argument("--m2l-chunk", type=int, default=0)
     ap.add_argument("--nearfield-chunk", type=int, default=0)
     ap.add_argument("--reps", type=int, default=3)
