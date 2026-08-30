@@ -29,6 +29,7 @@ first · **[closed]** the task is done; kept for its traps or its record ·
 | what is the **production single-GPU path**? | `large_n_runtime_contract_2026-04-21.md` |
 | I am about to touch `operators/` | `operator_conventions.md` (and `agent_guides/NUMERICS_AND_JAX.md`) |
 | what is still **open** in the codebase? | `refactor_audit_2026-08.md` |
+| which module should the **jaxtyping rollout** convert next? | `annotation_pilot_phase2_2026-08-30.md` |
 
 ---
 
