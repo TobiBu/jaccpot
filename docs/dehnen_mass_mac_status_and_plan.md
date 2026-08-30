@@ -110,6 +110,90 @@ the *other* checkout, so without this you silently test the wrong code).
 being answered, and each was previously derailed by a configuration trap now recorded
 there.
 
+### 0. The multi-GPU port — **PLUMBING DONE (2026-08-30), UNMEASURED, and self-only**
+
+Branch **`feat/dehnen-error-distributed`**, worktree
+**`/export/home/tbuck/jaccpot-dehnenmgpu-wt`**, off `origin/main` (0154574).
+
+Until now this document contained **zero** mentions of multi-GPU, distributed,
+`shard_map` or mesh: the port was never attempted, let alone refuted. It now runs.
+`mac_type="dehnen_error"` reaches the distributed lane's **self walk**, decides a
+different accept mask from the geometric MAC at the same θ, and responds to `ε` with the
+sign eq (16a) says it has.
+
+**Read this before measuring anything on the mesh.**
+
+- **SELF WALK ONLY.** `build_interactions_and_neighbors` already took a `pair_policy`, so
+  the local walk was plumbing. `yggdrax/distributed/cross_walk.py` has **no `pair_policy`
+  anywhere**, so the cross walk is still geometric — and cross-domain near-field work is
+  **53 % of the total at 5 devices** (31 % at 2). A self-only port therefore cannot capture
+  more than half the available win, and because p99.99 is a **tail** statistic it may not
+  move the headline number *at all* while the other half is still chosen by θ. **Do not
+  read a null result at ndev=5 as "the criterion does not survive decomposition" until the
+  cross walk carries the policy too.** That needs a yggdrax change.
+- **eq (16b) only; eq (16a) raises.** `min_b |a_b|` is an *acceleration*, so on a mesh it
+  is a second full distributed evaluation including the halo exchange, not a read of lists
+  that already exist. eq (16b) is also the better arm (43.1× against 21.8× at N=10⁶ /
+  leaf 1024). `jaccpot/distributed/_force_scale.py` assembles `f_b` from four terms with
+  **no extra collective**: exact local near, monopole local far, and two remote terms from
+  the cross walk against the all-gathered coarse (LET) tree.
+- **The remote near term inflates by BOTH radii.** The single-GPU far term uses the target
+  radius alone, which is valid because a far pair's source is compact *by construction*. A
+  near pair's is not, and `1/r²` is not convex in the vector argument, so monopole-at-COM
+  is a bound in neither direction. Adding the source radius restores the under-estimate,
+  which is what keeps the whole estimate a **lower** bound — the safe direction per trap 6.
+- **Two self walks per call, one cross walk.** The walks that already ran are the prepass;
+  their geometric lists feed the estimate, then the self walk re-runs with the policy. The
+  prepass's overflow flags are OR-ed into the reported ones, because a truncated prepass
+  makes `f_b` *smaller*, the criterion *tighter* and the run *slower* — safe, and therefore
+  something nothing else would ever report.
+- **`force_scale_min` / `force_scale_max` are now in `DIAG_FIELDS`**, 0.0 when the criterion
+  is off. Trap 14's signature is a *constant* scale, which looks like an ordinary run; this
+  makes it readable from outside the mesh. Measured on 2 forced CPU devices, 1024/device,
+  leaf 8, θ=0.5: `[1.281e+02, 1.994e+03]`, i.e. a 15.6× spread and nowhere near 1.
+
+**Two hazards this document lists are moot, both verified rather than assumed.** The
+interaction-cache key already takes `pair_policy_identity` with no default
+(`pair_policy_cache_identity`, landed with Step 3′), *and* the distributed lane has no
+interaction cache at all — its only `_interaction_cache` import is
+`_build_treecode_artifacts_strict_streamed`, a builder with no lookup.
+
+**Four configurations raise rather than running a different criterion quietly**, because
+each would be *faster* than the correct behaviour and so invisible to any cost measurement:
+`dehnen_theta` (refuted, and it folds the criterion into `geometry.radius`, which the cross
+walk does not carry); a missing `adaptive_eps`; `local_walk="treecode"` (that walk takes no
+pair policy); and the eq (16a) force-scale modes. `dehnen_geometry_mode` is validated up
+front too — the sphere-fitting modes run a numpy host loop that cannot trace.
+
+**What is measured so far, and what it is worth.** Only CPU plumbing evidence. 2 forced
+devices, 1024/device, leaf 8, θ=0.5, order 4:
+
+| arm | self far | self near | cross far | force scale |
+|---|---|---|---|---|
+| geometric | 4 280 | 26 766 | 2 667 | — |
+| ε=1e-2 | 8 916 | **13 022** | 2 667 | [1.28e+02, 1.99e+03] |
+
+The criterion does **less near-field work**, and the cross far count is untouched, which is
+the self-only scope showing up exactly where it should. This says nothing about accuracy.
+
+**NOT DONE, in the order it should be done:**
+
+1. **Reproduce the single-GPU N=10⁶ / leaf 1024 numbers on today's `main`** before trusting
+   any new one. Not attempted here; it is a multi-hour GPU job.
+2. **Land the near-field accumulator fix (PR #273).** Without it leaf ≥1024 is
+   floor-limited rather than criterion-limited, and the criterion's advantage *grows* with
+   leaf size (2.7× → 7.0× → 21.8× across leaf 256 → 512 → 1024). Measuring the mesh port at
+   leaf 1024 in fp32 without it measures the fp32 floor.
+3. **Re-derive `_derive_walk_caps`.** It is calibrated against the geometric MAC at θ=0.4
+   and the criterion changes which pairs are near. Overflow is surfaced and
+   `auto_scale_caps` retries, so this is detectable rather than silent — but the rule needs
+   the N=10⁷ / 5-device measurement behind it.
+4. **The acceptance run**: N=10⁷ / 5 devices / leaf 512 and 1024, matched wall clock,
+   overflow flags clear and `self_near_pairs` monotone at every point (trap 6 governs this —
+   a wrong accept mask makes the run *faster*).
+5. **The cross walk**, if the self-only result is short of the bar — which, per the tail
+   argument above, is the expected outcome rather than a surprise.
+
 ### 1. The open question that decides the paper — does the benefit hold at Dehnen's ε?
 
 **ANSWERED (2026-08-02): yes, decisively, and by more than the N=4096 numbers
