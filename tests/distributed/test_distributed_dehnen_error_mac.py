@@ -27,11 +27,14 @@ the near field is still chosen by ``theta``. See ``jaccpot/distributed/_force_sc
 
 from __future__ import annotations
 
+import jax
+import jax.numpy as jnp
 import numpy as np
 import pytest
 from yggdrax.distributed import device_count, make_mesh
 
 from jaccpot.distributed import DistributedFMMConfig, distributed_fmm_accelerations
+from jaccpot.distributed.fmm import make_force_evaluator, partition_for_devices
 
 pytestmark = pytest.mark.skipif(
     device_count() < 2, reason="distributed FMM needs >= 2 devices"
@@ -66,19 +69,31 @@ def _ic(ndev: int, seed: int = 20260830):
     return pts, mass
 
 
+#: Memoised runs, keyed by the config knobs. A criterion evaluation on this tier is
+#: two self walks plus a policy graph, which is minutes per call on a forced-CPU
+#: mesh; the tests below ask for the same three arms repeatedly, and without this
+#: the file re-runs each one up to three times for no extra coverage.
+_RUNS: dict = {}
+
+
 def _run(mesh, pts, mass, **kwargs):
-    config = DistributedFMMConfig(
-        leaf_size=_LEAF,
-        order=_ORDER,
-        theta=_THETA,
-        softening=_SOFTENING,
-        **kwargs,
-    )
-    result = distributed_fmm_accelerations(
-        pts, mass, config=config, mesh=mesh, jit=False
-    )
-    diagnostics = {k: np.asarray(v) for k, v in result.diagnostics.items()}
-    return result, diagnostics
+    key = tuple(sorted(kwargs.items()))
+    if key not in _RUNS:
+        config = DistributedFMMConfig(
+            leaf_size=_LEAF,
+            order=_ORDER,
+            theta=_THETA,
+            softening=_SOFTENING,
+            **kwargs,
+        )
+        result = distributed_fmm_accelerations(
+            pts, mass, config=config, mesh=mesh, jit=False
+        )
+        _RUNS[key] = (
+            result,
+            {k: np.asarray(v) for k, v in result.diagnostics.items()},
+        )
+    return _RUNS[key]
 
 
 def _direct(pts, mass, softening):
@@ -205,11 +220,25 @@ def test_tightening_eps_refuses_far_pairs_rather_than_accepting_more():
 
 
 def _expect(match: str, **kwargs):
+    """Assert a configuration is refused, and refused for the stated reason.
+
+    Deliberately not routed through the memo: a refused call produces no run to
+    cache, and going through ``_run`` would make a passing test depend on the memo
+    never having been poisoned by one.
+    """
+
     ndev = min(4, device_count())
     mesh = make_mesh(ndev)
     pts, mass = _ic(ndev)
+    config = DistributedFMMConfig(
+        leaf_size=_LEAF,
+        order=_ORDER,
+        theta=_THETA,
+        softening=_SOFTENING,
+        **kwargs,
+    )
     with pytest.raises(ValueError, match=match):
-        _run(mesh, pts, mass, **kwargs)
+        distributed_fmm_accelerations(pts, mass, config=config, mesh=mesh, jit=False)
 
 
 def test_the_refuted_folded_angle_mode_is_rejected_not_translated():
@@ -268,3 +297,75 @@ def test_the_host_loop_geometry_modes_are_refused_before_the_trace():
         adaptive_eps=_EPS,
         dehnen_geometry_mode="exact",
     )
+
+
+# --------------------------------------------------------------------------- #
+# the seam -- the criterion decides topology, so it must carry no cotangent
+# --------------------------------------------------------------------------- #
+
+
+def _evaluators(ndev, mesh, part, **kwargs):
+    config = DistributedFMMConfig(
+        leaf_size=_LEAF,
+        order=_ORDER,
+        theta=_THETA,
+        softening=_SOFTENING,
+        nearfield_backend="baseline",
+        **kwargs,
+    )
+    return (
+        make_force_evaluator(
+            config, ndev, part["cap"], mesh, jit=True, differentiable=False
+        ),
+        make_force_evaluator(
+            config, ndev, part["cap"], mesh, jit=True, differentiable=True
+        ),
+    )
+
+
+def test_the_criterion_does_not_break_the_fixed_topology_seam():
+    """``jax.grad`` must still work, and the forward must not move.
+
+    The distributed lane's differentiable mode rests on a seam: the tree, its
+    geometry and every walk are built from ``stop_gradient``-ed inputs, so no
+    cotangent reaches the discrete topology -- which is what keeps the reverse pass
+    off the traversal's ``lax.while_loop``, which JAX cannot transpose.
+
+    The criterion decides the far/near split, so it is *on* the topology side of
+    that seam, and everything feeding it has to be frozen. The first version of
+    this port fed it ``lp``/``lm`` -- which in differentiable mode are the LIVE
+    re-gather, not the frozen sorted arrays -- and this is the test that says so.
+    """
+
+    ndev = min(4, device_count())
+    mesh = make_mesh(ndev)
+    pts, mass = _ic(ndev)
+    part = partition_for_devices(pts, mass, ndev, leaf_size=_LEAF)
+    forward, grad_path = _evaluators(
+        ndev, mesh, part, mac_type="dehnen_error", adaptive_eps=_EPS
+    )
+
+    args = (
+        jnp.asarray(part["pos_flat"]),
+        jnp.asarray(part["mass_flat"]),
+        jnp.asarray(part["gid_flat"]),
+        jnp.asarray(part["counts"]),
+    )
+    shipped = np.asarray(forward(*args)[0])
+    live = np.asarray(grad_path(*args)[0])
+    assert np.array_equal(shipped, live), (
+        "differentiable=True changed the forward force under the criterion "
+        f"(max abs diff {np.max(np.abs(shipped - live)):.3e})"
+    )
+
+    def loss(positions, masses):
+        return jnp.sum(grad_path(positions, masses, args[2], args[3])[0] ** 2)
+
+    g_pos, g_mass = jax.grad(loss, argnums=(0, 1))(args[0], args[1])
+    for name, g in (("positions", g_pos), ("masses", g_mass)):
+        g = np.asarray(g)
+        assert np.all(np.isfinite(g)), f"the {name} gradient has non-finite entries"
+        assert np.abs(g).max() > 0.0, (
+            f"the {name} gradient is identically zero, so the reverse pass is not "
+            "reaching the force at all"
+        )

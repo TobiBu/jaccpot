@@ -94,36 +94,48 @@ def policy_upward_view(*, upward: Any, geometry: Any, mass_moments: Any) -> Any:
     Both bases are wrapped, not only the real one, so the criterion measures its
     geometry from the SAME ``TreeGeometry`` the two walks used. The complex sweep
     computes a geometry of its own, and letting the criterion silently take that
-    one instead would put the acceptance test and the traversal on different
-    node radii.
+    one instead would put the acceptance test and the traversal on different node
+    radii.
+
+    **Everything here is frozen with ``stop_gradient``, and that is the point.**
+    The criterion decides the far/near split, which is part of the DISCRETE
+    topology, and the distributed lane's differentiable mode is built on a
+    fixed-topology seam: the tree, its geometry and every walk take
+    ``stop_gradient``-ed inputs so no cotangent can reach the accept mask, the
+    Morton order or node membership. The upward sweep handed in here is the LIVE
+    one -- it has to be, the M2L consumes it -- so wrapping it without freezing
+    would route cotangents into the traversal's ``lax.while_loop``, which is not
+    reverse-mode differentiable. Freezing happens inside this function rather than
+    at its call sites so a second caller cannot forget. The forward value is
+    unchanged, in both modes.
 
     Parameters
     ----------
     upward : Any
-        The per-device upward-sweep result, real or complex basis.
+        The per-device upward-sweep result, real or complex basis. May be live;
+        it is frozen here.
     geometry : Any
         The ``TreeGeometry`` the walks were run against.
     mass_moments : Any
-        Per-node mass moments for the same tree.
+        Per-node mass moments for the same tree. May be live; frozen here.
 
     Returns
     -------
     Any
-        A ``TreeUpwardData`` the policy builder can consume.
+        A ``TreeUpwardData`` the policy builder can consume, carrying no cotangent
+        path back to positions or masses.
     """
 
     return TreeUpwardData(
-        geometry=geometry,
-        mass_moments=mass_moments,
+        geometry=jax.lax.stop_gradient(geometry),
+        mass_moments=jax.lax.stop_gradient(mass_moments),
         multipoles=NodeMultipoleData(
             order=int(upward.multipoles.order),
-            centers=upward.multipoles.centers,
+            centers=jax.lax.stop_gradient(upward.multipoles.centers),
             moments=None,  # type: ignore[arg-type]
-            packed=upward.multipoles.packed,
+            packed=jax.lax.stop_gradient(upward.multipoles.packed),
             component_matrix=None,
-            source_motion_packed=getattr(
-                upward.multipoles, "source_motion_packed", None
-            ),
+            source_motion_packed=None,
         ),
     )
 

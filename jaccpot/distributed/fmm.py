@@ -2035,10 +2035,20 @@ def _make_fn(
             # deletes `mac_ok`, so the geometric verdict decides nothing and
             # `adaptive_eps` is the only accuracy knob on this walk. It is still
             # passed because the traversal computes the verdict either way.
+            #
+            # FROZEN INPUTS, on purpose. The criterion decides the far/near split,
+            # which is part of the discrete topology, and differentiable mode is
+            # built on a fixed-topology seam -- `geom` above already takes
+            # `tree.positions_sorted` rather than `lp` for exactly this reason. In
+            # that mode `lp`/`lm` are the LIVE re-gather and `coarse_mass_sorted`
+            # is the live coarse payload, so feeding either to the acceptance test
+            # would route cotangents into the traversal's `lax.while_loop`, which
+            # is not reverse-mode differentiable. The frozen arrays hold the same
+            # values, so the forward pass is identical in both modes.
             force_scale_nodes = distributed_force_scale_nodes(
                 tree=tree,
-                positions_sorted=lp,
-                masses_sorted=lm,
+                positions_sorted=tree.positions_sorted,
+                masses_sorted=tree.masses_sorted,
                 node_centers=jnp.asarray(geom.center),
                 node_radii=jnp.asarray(geom.radius),
                 self_far_sources=jnp.asarray(inter.sources),
@@ -2048,7 +2058,7 @@ def _make_fn(
                 self_near_indices=jnp.asarray(nbr.neighbors),
                 self_near_leaf_indices=jnp.asarray(nbr.leaf_indices),
                 coarse_tree=rct.tree,
-                coarse_masses_sorted=coarse_mass_sorted,
+                coarse_masses_sorted=rct.masses_sorted,
                 coarse_centers=jnp.asarray(rct.geometry.center),
                 coarse_radii=jnp.asarray(rct.geometry.radius),
                 cross_far_sources=jnp.asarray(cross.interaction_sources)[:xfar_cap],
@@ -2081,9 +2091,10 @@ def _make_fn(
             fs_min = jnp.nanmin(fs_finite)
             fs_max = jnp.nanmax(fs_finite)
             policy_state = build_adaptive_policy_state(
+                # `policy_upward_view` freezes what it is handed; see its docstring.
                 upward=policy_upward_view(upward=up, geometry=geom, mass_moments=mm),
                 tree=tree,
-                positions_sorted=lp,
+                positions_sorted=tree.positions_sorted,
                 p_gears=(int(p),),
                 force_scale_nodes=force_scale_nodes,
                 eps=jnp.asarray(
