@@ -540,6 +540,23 @@ class DistributedFMMConfig:
     # >200k/GPU; self-far >1.2M/GPU). Scanning fixed-size blocks bounds peak M2L memory to
     # ~block pairs regardless of the total, removing the M2L per-GPU ceiling at some
     # throughput cost. Numerics-identical (associative masked segment-sum accumulation).
+    nearfield_accum: str = "input"
+    """Per-target near-field accumulator width. See :data:`NEARFIELD_ACCUM_MODES`.
+
+    ``"input"`` (default) is byte-identical to the historical path. ``"wide"``
+    accumulates each target's near-field total in float64 while every multiply and the
+    ``rsqrt`` stay in the input dtype -- the mirror image of ``far_m2l_fp32`` above,
+    which computes narrow and accumulates wide for memory; this computes narrow and
+    accumulates wide for accuracy.
+
+    Why this knob exists, measured at 10 485 760 / 5 x A100 / leaf 512 / order 6:
+    running the near field in float64 takes rel_l2 from 4.811e-03 to 1.097e-05, a
+    **438x** recovery landing within 3 % of the full float64 floor (1.068e-05). The
+    error is not in the per-term arithmetic -- it is in one linear sum of ~1.4e6 terms
+    whose net is a small residual of a much larger total, so only the three adds per
+    pair need to widen.
+    """
+
     m2l_chunk: Optional[int] = None
     # Chunk the fused-Pallas NEAR field over blocks of this many TARGET leaves (None = one
     # full batch). The near field densifies the combined CSR into [u_leaves, S_near] tables
@@ -1113,6 +1130,7 @@ def _chunked_pallas_nearfield_accumulate(
     block: int,
     G: Any,
     softening_sq: jax.Array,
+    accum: str = "input",
 ) -> jax.Array:
     """Fused-Pallas near field over blocks of TARGET leaves (bounded peak memory).
 
@@ -1180,7 +1198,7 @@ def _chunked_pallas_nearfield_accumulate(
     # accuracy floor, or whether the far field carries a floor of its own. It is not a
     # shipping mode: it widens the pair arithmetic too, so its cost says nothing about
     # the accumulator-only change. See docs/plan notes on the fp32 near-field floor.
-    _accum = os.environ.get("JACCPOT_NEARFIELD_ACCUM", "input")
+    _accum = accum
     _orig_dtype = concat_pos.dtype
     if _accum == "wide_input":
         leaf_positions = leaf_positions.astype(jnp.float64)
@@ -1188,9 +1206,9 @@ def _chunked_pallas_nearfield_accumulate(
         concat_pos = concat_pos.astype(jnp.float64)
         softening_sq = jnp.asarray(softening_sq, jnp.float64)
         G = jnp.asarray(G, jnp.float64)
-    elif _accum != "input":
+    elif _accum not in ("input", "wide"):
         raise ValueError(
-            f"JACCPOT_NEARFIELD_ACCUM must be 'input' or 'wide_input', got {_accum!r}"
+            f"nearfield_accum must be one of {NEARFIELD_ACCUM_MODES}, got {_accum!r}"
         )
 
     nblk = -(-n_lloc // block)  # ceil
@@ -1246,12 +1264,20 @@ def _chunked_pallas_nearfield_accumulate(
             G=G,
             softening_sq=softening_sq,
             compute_potential=False,
+            accum="wide" if _accum == "wide" else "input",
         )
         return near + self_blk + pair_blk, None
 
     near, _ = jax.lax.scan(_body, near0, jnp.arange(nblk, dtype=INDEX_DTYPE))
     return near.astype(_orig_dtype)
 
+
+#: Per-target near-field accumulator widths. ``"input"`` keeps the historical path
+#: verbatim; ``"wide"`` is the shipping fix (float64 accumulator, float32 pair
+#: arithmetic); ``"wide_input"`` is a DIAGNOSTIC that runs the whole near field in
+#: float64 -- it answers "if the near field were exact, what is rel_l2?" and its cost
+#: says nothing about ``"wide"``, because float64 ``rsqrt`` is a Newton iteration.
+NEARFIELD_ACCUM_MODES = ("input", "wide", "wide_input")
 
 #: Halo-exchange implementations selectable on the gradient path, plus ``"auto"``.
 #: See :func:`_grad_halo_exchange` for what each is and :func:`resolve_grad_halo_exchange`
@@ -2063,6 +2089,7 @@ def _make_fn(
                     offsets,
                     counts,
                     src_s,
+                    accum=str(config.nearfield_accum),
                     n_lloc=int(loc_idx.shape[0]),
                     S_near=S_near,
                     block=int(config.nearfield_chunk),
