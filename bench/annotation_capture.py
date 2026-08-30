@@ -54,6 +54,13 @@ was missing -- only which ones it saw.
 
 WHAT IT CANNOT SEE
 ------------------
+**Methods.** The wrapper rebinds a MODULE attribute, so a function defined inside a class
+cannot be targeted at all -- `runtime/fmm_sweeps.py`'s three diagnostic methods are the
+first real case. Where such a method delegates to a module-level function, capture the
+function and the shapes are the same; where it does not, this tool has nothing to say and
+will report no observations, which must not be read as "never called". Supporting
+`module:Class.method` is the obvious extension and is not done yet.
+
 The wrapper replaces the module attribute, so it observes calls that resolve the name at
 call time -- which is the normal case, including calls from inside the defining module.
 A reference captured into a closure or a ``jit`` cache *before* the patch went on is not
