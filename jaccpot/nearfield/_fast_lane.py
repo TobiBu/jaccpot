@@ -705,6 +705,7 @@ def _radix_fast_lane_prepacked_pallas_decoupled(
     num_stages: int = ...,
     target_subtile: Optional[int] = ...,
     interpret: bool = ...,
+    accum: str = ...,
 ) -> Array: ...
 
 
@@ -727,6 +728,7 @@ def _radix_fast_lane_prepacked_pallas_decoupled(
     num_stages: int = ...,
     target_subtile: Optional[int] = ...,
     interpret: bool = ...,
+    accum: str = ...,
 ) -> Tuple[Array, Array]: ...
 
 
@@ -748,6 +750,7 @@ def _radix_fast_lane_prepacked_pallas_decoupled(
     num_stages: int = 1,
     target_subtile: Optional[int] = None,
     interpret: bool = False,
+    accum: str = "input",
 ) -> Union[Array, Tuple[Array, Array]]:
     """Decoupled twin of :func:`_radix_fast_lane_prepacked_pallas`.
 
@@ -853,6 +856,7 @@ def _radix_fast_lane_prepacked_pallas_decoupled(
         num_warps=num_warps,
         num_stages=num_stages,
         target_subtile=target_subtile,
+        accum=accum,
         interpret=interpret,
     )
 
