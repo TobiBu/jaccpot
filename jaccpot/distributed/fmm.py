@@ -216,7 +216,7 @@ _DISTRIBUTED_PROCESS_BLOCK = 256
 #:
 #: 4 gives ~1.4x headroom over the measured 2.83 and lands one ladder rung above the
 #: converged value at every point measured.
-_SELF_QUEUE_WAVEFRONT_COEFF = 4
+_SELF_QUEUE_WAVEFRONT_COEFF = 5.25
 
 #: The same, for the CROSS walk, whose source side is a coarse tree over *every*
 #: device's leaf frontier rather than the local tree, so its wavefront is the wider
@@ -227,7 +227,7 @@ _SELF_QUEUE_WAVEFRONT_COEFF = 4
 #: to be the self walk's, on the grounds that it is the same traversal over a tree of
 #: the same shape; if that assumption breaks it breaks as an overflow flag, which is
 #: now honest.
-_CROSS_QUEUE_WAVEFRONT_COEFF = 16
+_CROSS_QUEUE_WAVEFRONT_COEFF = 8.25
 
 
 def _round_up_pow2(value: int) -> int:
@@ -252,8 +252,45 @@ def _round_up_pow2(value: int) -> int:
     return 1 << max(0, (max(1, int(value)) - 1).bit_length())
 
 
+#: Opening angle the queue coefficients above were measured at.
+_QUEUE_THETA_REF = 0.4
+
+#: How the wavefront queue requirement grows as the MAC tightens. Measured, not
+#: assumed: at ndev 5, per-device 2 097 152, leaf 512, order 6, walking each queue
+#: down until ``self_near_pairs`` collapses gives floors in wavefront units of
+#:
+#:     theta     0.3   0.4   0.5   0.6   0.7   0.8
+#:     self       8     4     2     2     2     1
+#:     cross      -    16     8     8     4     4
+#:
+#: A ``theta ** -1.5`` law covers both with a uniform 2x margin after power-of-two
+#: rounding. That margin is deliberate: an OVER-provisioned queue costs time
+#: linearly, but an UNDER-provisioned one truncates the walk SILENTLY -- the run
+#: reads faster and only ``self_near_pairs`` witnesses it -- so the two errors are
+#: not symmetric and the safe side is known.
+_QUEUE_THETA_EXPONENT = 1.5
+
+
+def _queue_theta_scale(theta: float) -> float:
+    """Return the wavefront-queue multiplier for an opening angle.
+
+    Parameters
+    ----------
+    theta : float
+        Opening angle the walk will run at.
+
+    Returns
+    -------
+    float
+        ``(_QUEUE_THETA_REF / theta) ** _QUEUE_THETA_EXPONENT``, with theta clamped
+        away from zero so a bad value cannot produce an unbounded cap.
+    """
+
+    return (_QUEUE_THETA_REF / max(1e-3, float(theta))) ** _QUEUE_THETA_EXPONENT
+
+
 def _derive_walk_caps(
-    *, per_device_n: int, leaf_size: int, ndev: int
+    *, per_device_n: int, leaf_size: int, ndev: int, theta: float = _QUEUE_THETA_REF
 ) -> dict[str, int]:
     """Size the traversal buffers from the per-device particle count.
 
@@ -325,6 +362,7 @@ def _derive_walk_caps(
 
     n = max(1, int(per_device_n))
     num_leaves = max(1, -(-n // max(1, int(leaf_size))))
+    theta_scale = _queue_theta_scale(theta)
     # Remote leaf frontiers the cross walk can see. 1 rather than 0 on a
     # single-device mesh, so the cross caps stay at their floors instead of
     # collapsing to nothing.
@@ -339,7 +377,9 @@ def _derive_walk_caps(
         "process_block": _DISTRIBUTED_PROCESS_BLOCK,
         "max_pair_queue": max(
             _MIN_PAIR_QUEUE,
-            _round_up_pow2(_SELF_QUEUE_WAVEFRONT_COEFF * wavefront),
+            _round_up_pow2(
+                int(_SELF_QUEUE_WAVEFRONT_COEFF * theta_scale * wavefront)
+            ),
         ),
         "max_interactions_per_node": far_per_node,
         "max_neighbors_per_leaf": near_per_leaf,
@@ -348,9 +388,23 @@ def _derive_walk_caps(
         # ``remote_domains`` carries. Same shape as the self budgets above, that many
         # times over -- plus a wider wavefront coefficient, for which see
         # _CROSS_QUEUE_WAVEFRONT_COEFF.
+        # sqrt(remote_domains), NOT remote_domains. Measured at theta 0.7 with
+        # per-device N fixed so only `remote` moves: floors of 524 288 / 1 048 576 /
+        # 1 048 576 at ndev 2 / 4 / 5. A linear factor predicts 2 097 152 at ndev 4
+        # and is refuted; sqrt fits all three points. The neighbour and interaction
+        # caps below keep their LINEAR factor -- that was not measured here, and
+        # `cross_max_neighbors_per_leaf` is known NOT to be over-provisioned: it
+        # overflows at a quarter of its derived value.
         "cross_max_pair_queue": max(
             _MIN_PAIR_QUEUE,
-            _round_up_pow2(_CROSS_QUEUE_WAVEFRONT_COEFF * remote_domains * wavefront),
+            _round_up_pow2(
+                int(
+                    _CROSS_QUEUE_WAVEFRONT_COEFF
+                    * math.sqrt(remote_domains)
+                    * theta_scale
+                    * wavefront
+                )
+            ),
         ),
         "cross_max_interactions_per_node": max(
             _MIN_INTERACTIONS_PER_NODE,
@@ -613,6 +667,7 @@ class DistributedFMMConfig:
             per_device_n=int(per_device_n),
             leaf_size=int(self.leaf_size),
             ndev=int(ndev),
+            theta=float(self.theta),
         )
         return dataclasses.replace(self, **{f: derived[f] for f in unset})
 
@@ -2465,7 +2520,9 @@ def distributed_fmm_accelerations(
         from . import cap_presets as _cp
 
         presets = _cp.load_presets(cap_presets_path)
-        seed = _cp.lookup(presets, per_gpu_n, ndev)
+        seed = _cp.lookup(
+            presets, per_gpu_n, ndev, float(config.theta), int(config.leaf_size)
+        )
         if seed is not None:
             config = _cp.apply_caps(config, seed)
 
@@ -2496,7 +2553,15 @@ def distributed_fmm_accelerations(
     if cap_presets_path is not None and not overflow:
         from . import cap_presets as _cp
 
-        _cp.record(presets, per_gpu_n, ndev, total_n, _cp.caps_of(config))
+        _cp.record(
+            presets,
+            per_gpu_n,
+            ndev,
+            total_n,
+            _cp.caps_of(config),
+            float(config.theta),
+            int(config.leaf_size),
+        )
         _cp.save_presets(cap_presets_path, presets)
 
     return DistributedFMMResult(
