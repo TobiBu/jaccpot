@@ -335,6 +335,7 @@ def _one_point(
     )
 
     overrides: dict[str, Any] = dict(
+        nearfield_accum=args.nearfield_accum,
         leaf_size=args.leaf,
         theta=args.theta,
         order=args.order,
@@ -498,6 +499,15 @@ def main(argv: Optional[list[str]] = None) -> int:
     ap.add_argument("--theta", type=float, default=0.4)
     ap.add_argument("--order", type=int, default=3)
     ap.add_argument("--mac-type", default="dehnen")
+    ap.add_argument(
+        "--nearfield-accum",
+        default="input",
+        choices=("input", "wide", "wide_input"),
+        help="per-target near-field accumulator width. 'input' is the shipped path; "
+        "'wide' accumulates in float64 with float32 pair arithmetic; 'wide_input' is a "
+        "diagnostic that runs the whole near field in float64 (its cost is not "
+        "representative of 'wide').",
+    )
     ap.add_argument(
         "--fp64",
         action="store_true",

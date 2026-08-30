@@ -705,6 +705,7 @@ def _radix_fast_lane_prepacked_pallas_decoupled(
     num_stages: int = ...,
     target_subtile: Optional[int] = ...,
     interpret: bool = ...,
+    accum: str = ...,
 ) -> Array: ...
 
 
@@ -727,6 +728,7 @@ def _radix_fast_lane_prepacked_pallas_decoupled(
     num_stages: int = ...,
     target_subtile: Optional[int] = ...,
     interpret: bool = ...,
+    accum: str = ...,
 ) -> Tuple[Array, Array]: ...
 
 
@@ -748,6 +750,7 @@ def _radix_fast_lane_prepacked_pallas_decoupled(
     num_stages: int = 1,
     target_subtile: Optional[int] = None,
     interpret: bool = False,
+    accum: str = "input",
 ) -> Union[Array, Tuple[Array, Array]]:
     """Decoupled twin of :func:`_radix_fast_lane_prepacked_pallas`.
 
@@ -802,6 +805,11 @@ def _radix_fast_lane_prepacked_pallas_decoupled(
         Target sub-tile width; ``None`` lets the kernel pick.
     interpret : bool
         Run through Pallas' reference interpreter rather than Triton.
+    accum : str
+        Per-target near-field accumulator width, forwarded to
+        :func:`~jaccpot.pallas.nearfield_fused_leaf.nearfield_leafpair_pallas_decoupled`.
+        ``"input"`` (default) is byte-identical to the historical path; ``"wide"``
+        accumulates in float64 while the pair arithmetic stays in the input dtype.
 
     Returns
     -------
@@ -853,6 +861,7 @@ def _radix_fast_lane_prepacked_pallas_decoupled(
         num_warps=num_warps,
         num_stages=num_stages,
         target_subtile=target_subtile,
+        accum=accum,
         interpret=interpret,
     )
 

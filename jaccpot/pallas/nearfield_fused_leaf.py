@@ -23,6 +23,7 @@ the pure-JAX reference ``_pair_contributions_batched``.
 from __future__ import annotations
 
 from functools import partial
+from typing import Any
 
 import jax
 import jax.numpy as jnp
@@ -622,6 +623,39 @@ def nearfield_leafpair_jax(
     return jnp.concatenate([accels, potentials[..., None]], axis=-1)
 
 
+_ACCUM_MODES = ("input", "wide")
+
+
+def _resolve_accum_dtype(accum: str, dtype: Any) -> Any:
+    """Map an accumulator mode to the dtype the kernel should accumulate in.
+
+    Parameters
+    ----------
+    accum : str
+        One of :data:`_ACCUM_MODES`. ``"input"`` takes the original code path
+        verbatim rather than a specialisation of the widened one, so the default
+        stays byte-identical.
+    dtype : Any
+        The kernel's input and output dtype.
+
+    Returns
+    -------
+    Any
+        ``None`` to accumulate in ``dtype``, or a wider dtype to accumulate in.
+
+    Raises
+    ------
+    ValueError
+        If ``accum`` is not a known mode.
+    """
+
+    if accum not in _ACCUM_MODES:
+        raise ValueError(f"accum must be one of {_ACCUM_MODES}, got {accum!r}")
+    if accum == "input" or jnp.dtype(dtype) == jnp.dtype(jnp.float64):
+        return None
+    return jnp.float64
+
+
 def _nearfield_leafpair_kernel(
     target_positions_ref: KernelRef,
     target_mask_ref: KernelRef,
@@ -636,6 +670,7 @@ def _nearfield_leafpair_kernel(
     *,
     num_source_slots: int,
     leaf_width: int,
+    accum_dtype: Any = None,
 ) -> None:
     """Leaf-pair near-field update for one target subtile (vector of Bt targets).
 
@@ -674,6 +709,27 @@ def _nearfield_leafpair_kernel(
         ``S``. Static.
     leaf_width : int
         ``W``, particles per leaf in the gather tables. Static.
+    accum_dtype : Any
+        Optional wider dtype for the per-target accumulator. ``None`` (default) keeps
+        the historical path exactly: accumulate in the target dtype, one running
+        float32 register per lane over a strictly linear loop of
+        ``num_source_slots * leaf_width`` adds.
+
+        Why widening this and nothing else is the whole fix. At 10^7 on five devices a
+        target sums ~1.4e6 sources, and the net acceleration is a small residual of a
+        much larger sum of terms, so the LINEAR ACCUMULATION -- not the per-term
+        arithmetic -- carries the error: the accumulation term scales as
+        ``sqrt(N)*eps*C`` and the per-term term as ``eps*C/sqrt(N)``, which at the
+        measured cancellation factor is 2.5e-3 against 7e-9. Measured directly by
+        running the whole near field in float64 (``JACCPOT_NEARFIELD_ACCUM=wide_input``):
+        rel_l2 4.811e-03 -> 1.097e-05, a 438x recovery landing within 3 % of the full
+        float64 floor. So only the three adds per pair need to widen; every multiply
+        and the ``rsqrt`` stay in the input dtype.
+
+        Two-level accumulation is used when this is set: the inner lane loop keeps a
+        float32 partial per SOURCE LEAF and only the outer per-leaf add is wide, which
+        cuts the wide adds by ``leaf_width`` (512x at the production leaf) while still
+        removing the dominant ``sqrt(N)`` term.
 
     Returns
     -------
@@ -689,7 +745,12 @@ def _nearfield_leafpair_kernel(
     g_value = g_ref[0]
 
     zero = jnp.zeros_like(tx)
-    acc0 = (zero, zero, zero, zero)
+    wide = accum_dtype is not None
+    acc0 = (
+        tuple(jnp.zeros(tx.shape, accum_dtype) for _ in range(4))
+        if wide
+        else (zero, zero, zero, zero)
+    )
 
     def _slot_body(s, acc):
         sid = source_leaf_ids_ref[0, s]
@@ -719,11 +780,25 @@ def _nearfield_leafpair_kernel(
                 acc_p = acc_p - g_value * inv_r * sm
                 return (acc_x, acc_y, acc_z, acc_p)
 
-            return lax.fori_loop(0, leaf_width, _lane_body, acc)
+            if not wide:
+                return lax.fori_loop(0, leaf_width, _lane_body, acc)
+            # Two-level: this leaf's contribution accumulates in the narrow input
+            # dtype (leaf_width terms, so its own round-off is negligible), and only
+            # the per-leaf total is added into the wide running accumulator.
+            part = lax.fori_loop(0, leaf_width, _lane_body, (zero, zero, zero, zero))
+            return tuple(a + q.astype(accum_dtype) for a, q in zip(acc, part))
 
         return lax.cond(slot_valid, _apply, lambda acc: acc, acc)
 
     acc_x, acc_y, acc_z, acc_p = lax.fori_loop(0, num_source_slots, _slot_body, acc0)
+    if wide:
+        # One downcast, on the FINAL value rather than on the sum being accumulated:
+        # it costs one eps of the result (~6e-8), which is 170x below the 1.1e-05
+        # target, and it keeps every dtype outside this kernel unchanged.
+        acc_x = acc_x.astype(zero.dtype)
+        acc_y = acc_y.astype(zero.dtype)
+        acc_z = acc_z.astype(zero.dtype)
+        acc_p = acc_p.astype(zero.dtype)
 
     out_ref[0, :, 0] = jnp.where(tvalid, acc_x, zero)
     out_ref[0, :, 1] = jnp.where(tvalid, acc_y, zero)
@@ -744,6 +819,7 @@ def nearfield_leafpair_pallas(
     num_stages: int = 1,
     target_subtile: int | None = None,
     interpret: bool = False,
+    accum: str = "input",
 ) -> Array:
     """Leaf-pair near-field update with Pallas.
 
@@ -779,6 +855,15 @@ def nearfield_leafpair_pallas(
         :func:`nearfield_fused_leaf_pallas`.
     interpret : bool
         Run under Pallas interpret mode (CPU semantics, no lowering).
+    accum : str
+        Per-target accumulator width, one of :data:`_ACCUM_MODES`. ``"input"``
+        (default) takes the historical path verbatim -- accumulation order in P2P
+        is load-bearing, so the default is not a specialisation of the widened
+        path. ``"wide"`` keeps every multiply and the ``rsqrt`` in the input dtype
+        and accumulates each target's total in float64; see
+        :func:`_resolve_accum_dtype` and the ``accum_dtype`` note on
+        :func:`_nearfield_leafpair_kernel` for why the linear sum, and nothing
+        else, carries the float32 floor.
 
     Returns
     -------
@@ -835,9 +920,14 @@ def nearfield_leafpair_pallas(
     if num_warps is None:
         num_warps = max(1, bt // 32)
 
+    accum_dtype = _resolve_accum_dtype(accum, dtype)
+
     def _kernel(*refs):
         return _nearfield_leafpair_kernel(
-            *refs, num_source_slots=num_source_slots, leaf_width=leaf_width
+            *refs,
+            num_source_slots=num_source_slots,
+            leaf_width=leaf_width,
+            accum_dtype=accum_dtype,
         )
 
     kernel = pl.pallas_call(
@@ -863,7 +953,7 @@ def nearfield_leafpair_pallas(
             num_warps=int(num_warps), num_stages=int(num_stages)
         ),
         interpret=bool(interpret),
-        name=f"nearfield_leafpair_t{bt}_s{num_source_slots}_w{leaf_width}",
+        name=f"nearfield_leafpair_t{bt}_s{num_source_slots}_w{leaf_width}_a{accum}",
     )
     out = kernel(
         target_positions_padded,
@@ -896,6 +986,7 @@ def nearfield_leafpair_pallas_decoupled(
     num_stages: int = 1,
     target_subtile: int | None = None,
     interpret: bool = False,
+    accum: str = "input",
 ) -> Array:
     """Leaf-pair near-field with the target set decoupled from the source gather pool.
 
@@ -937,6 +1028,15 @@ def nearfield_leafpair_pallas_decoupled(
         :func:`nearfield_fused_leaf_pallas`.
     interpret : bool
         Run under Pallas interpret mode (CPU semantics, no lowering).
+    accum : str
+        Per-target accumulator width, one of :data:`_ACCUM_MODES`. ``"input"``
+        (default) takes the historical path verbatim -- accumulation order in P2P
+        is load-bearing, so the default is not a specialisation of the widened
+        path. ``"wide"`` keeps every multiply and the ``rsqrt`` in the input dtype
+        and accumulates each target's total in float64; see
+        :func:`_resolve_accum_dtype` and the ``accum_dtype`` note on
+        :func:`_nearfield_leafpair_kernel` for why the linear sum, and nothing
+        else, carries the float32 floor.
 
     Returns
     -------
@@ -997,9 +1097,14 @@ def nearfield_leafpair_pallas_decoupled(
     if num_warps is None:
         num_warps = max(1, bt // 32)
 
+    accum_dtype = _resolve_accum_dtype(accum, dtype)
+
     def _kernel(*refs: KernelRef) -> None:
         return _nearfield_leafpair_kernel(
-            *refs, num_source_slots=num_source_slots, leaf_width=leaf_width
+            *refs,
+            num_source_slots=num_source_slots,
+            leaf_width=leaf_width,
+            accum_dtype=accum_dtype,
         )
 
     kernel = pl.pallas_call(
@@ -1025,7 +1130,7 @@ def nearfield_leafpair_pallas_decoupled(
             num_warps=int(num_warps), num_stages=int(num_stages)
         ),
         interpret=bool(interpret),
-        name=f"nearfield_leafpair_dec_t{bt}_s{num_source_slots}_w{leaf_width}",
+        name=f"nearfield_leafpair_dec_t{bt}_s{num_source_slots}_w{leaf_width}_a{accum}",
     )
     out = kernel(
         tgt_pos_padded,
