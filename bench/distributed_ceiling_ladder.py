@@ -325,10 +325,10 @@ def _cached_oracle_subset(
     """
 
     if not enabled:
-        return _oracle_subset(
-            positions, masses, targets, G=G, softening=softening
-        )
-    key = f"n{n_total}_s{seed}_p{probe}_g{G!r}_e{softening!r}_{'f64' if fp64 else 'f32'}"
+        return _oracle_subset(positions, masses, targets, G=G, softening=softening)
+    key = (
+        f"n{n_total}_s{seed}_p{probe}_g{G!r}_e{softening!r}_{'f64' if fp64 else 'f32'}"
+    )
     path = _ORACLE_CACHE / f"oracle_{key}.npz"
     if path.exists():
         try:

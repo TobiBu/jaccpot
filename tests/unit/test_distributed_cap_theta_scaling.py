@@ -22,10 +22,23 @@ _PER_DEVICE_N = 2_097_152
 _LEAF = 512
 
 #: theta -> smallest self wavefront queue that did NOT truncate.
-_SELF_FLOORS = {0.3: 2_097_152, 0.4: 1_048_576, 0.5: 524_288, 0.6: 524_288, 0.7: 524_288, 0.8: 262_144}
+_SELF_FLOORS = {
+    0.3: 2_097_152,
+    0.4: 1_048_576,
+    0.5: 524_288,
+    0.6: 524_288,
+    0.7: 524_288,
+    0.8: 262_144,
+}
 
 #: theta -> smallest cross wavefront queue that did NOT truncate, at ndev 5.
-_CROSS_FLOORS = {0.4: 4_194_304, 0.5: 2_097_152, 0.6: 2_097_152, 0.7: 1_048_576, 0.8: 1_048_576}
+_CROSS_FLOORS = {
+    0.4: 4_194_304,
+    0.5: 2_097_152,
+    0.6: 2_097_152,
+    0.7: 1_048_576,
+    0.8: 1_048_576,
+}
 
 #: ndev -> smallest cross queue that did not truncate, at theta 0.7, per-device N fixed.
 #: A LINEAR remote factor predicts 2 097 152 at ndev 4 and is refuted by this row.

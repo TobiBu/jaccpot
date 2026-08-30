@@ -377,9 +377,7 @@ def _derive_walk_caps(
         "process_block": _DISTRIBUTED_PROCESS_BLOCK,
         "max_pair_queue": max(
             _MIN_PAIR_QUEUE,
-            _round_up_pow2(
-                int(_SELF_QUEUE_WAVEFRONT_COEFF * theta_scale * wavefront)
-            ),
+            _round_up_pow2(int(_SELF_QUEUE_WAVEFRONT_COEFF * theta_scale * wavefront)),
         ),
         "max_interactions_per_node": far_per_node,
         "max_neighbors_per_leaf": near_per_leaf,
