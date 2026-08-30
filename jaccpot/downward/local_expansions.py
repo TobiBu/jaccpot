@@ -11,7 +11,7 @@ import numpy as np
 from beartype import beartype
 from beartype.typing import Callable, Tuple
 from jax import lax
-from jaxtyping import Array, jaxtyped
+from jaxtyping import Array, Float, jaxtyped
 from yggdrax.dense_interactions import DenseInteractionBuffers
 from yggdrax.dtypes import INDEX_DTYPE, as_index
 from yggdrax.interactions import (
@@ -1177,8 +1177,8 @@ def _build_component_vector(
 
 @jaxtyped(typechecker=beartype)
 def translate_local_expansion(
-    coefficients: Array,
-    delta: Array,
+    coefficients: Float[Array, "ct"],
+    delta: Float[Array, "3"],
     *,
     order: int,
 ) -> Array:
@@ -1186,10 +1186,13 @@ def translate_local_expansion(
 
     Parameters
     ----------
-    coefficients : Array
-        Packed coefficients to wrap or reinterpret.
-    delta : Array
-        Displacement vector ``(3,)``, target centre minus source centre.
+    coefficients : Float[Array, 'ct']
+        Packed Cartesian coefficients, ``total_coefficients(order)`` of them. The
+        axis is free rather than tied to ``order``: the body indexes by level
+        offset and tolerates a longer buffer, so binding the length here would
+        reject callers this function has always accepted.
+    delta : Float[Array, '3']
+        Displacement vector, target centre minus source centre.
     order : int
         Expansion order ``p``.
 
@@ -1203,7 +1206,17 @@ def translate_local_expansion(
     NotImplementedError
         If the requested order exceeds the tabulated derivative metadata.
     ValueError
-        If ``delta`` or the coefficient length is the wrong shape.
+        If ``order`` is negative.
+
+    Notes
+    -----
+    A wrong-shaped ``delta`` raises from the ``@jaxtyped`` decorator, before the
+    body runs -- which is why it is not in ``Raises`` above. That section used to
+    promise a ``ValueError`` "if ``delta`` or the coefficient length is the wrong
+    shape" and **no such check existed**. Measured on `main`: a ``(2,)`` delta was
+    accepted and returned a wrong answer, because JAX clamps the out-of-bounds
+    ``delta[2]`` to ``delta[1]``, making the result bit-identical to passing
+    ``(x, y, y)``. The shape annotation is now the check the docstring claimed.
     """
 
     order_int = int(order)
@@ -1288,15 +1301,15 @@ def _missing_raw_moment_message(name: str, order: int) -> str:
 
 @jaxtyped(typechecker=beartype)
 def translate_multipole_to_local(
-    multipole: Array,
-    delta: Array,
+    multipole: Float[Array, "ct"],
+    delta: Float[Array, "3"],
     *,
     order: int,
-    raw_mass: Optional[Array] = None,
-    raw_dipole: Optional[Array] = None,
-    raw_second: Optional[Array] = None,
-    raw_third: Optional[Array] = None,
-    raw_fourth: Optional[Array] = None,
+    raw_mass: Optional[Float[Array, ""]] = None,
+    raw_dipole: Optional[Float[Array, "3"]] = None,
+    raw_second: Optional[Float[Array, "3 3"]] = None,
+    raw_third: Optional[Float[Array, "3 3 3"]] = None,
+    raw_fourth: Optional[Float[Array, "3 3 3 3"]] = None,
 ) -> Array:
     """Convert a multipole expansion into a local expansion at ``delta``.
 
@@ -1313,23 +1326,28 @@ def translate_multipole_to_local(
 
     Parameters
     ----------
-    multipole : Array
-        Packed Cartesian multipole coefficients for one source node.
-    delta : Array
-        Target-minus-source centre displacement ``[3]``.
+    multipole : Float[Array, 'ct']
+        Packed Cartesian multipole coefficients for one source node. The axis is
+        free rather than tied to ``order``: the body slices ``multipole[:total]``
+        and accepts a longer buffer.
+    delta : Float[Array, '3']
+        Target-minus-source centre displacement.
     order : int
         Expansion order ``p``. Static under ``jit``.
-    raw_mass : Optional[Array]
-        Monopole moment, if the caller already has it; recovered from
-        ``multipole`` when ``None``.
-    raw_dipole : Optional[Array]
-        Dipole moment ``[3]``, same convention.
-    raw_second : Optional[Array]
-        Second central moment, packed symmetric, same convention.
-    raw_third : Optional[Array]
-        Third central moment, same convention.
-    raw_fourth : Optional[Array]
-        Fourth central moment, same convention.
+    raw_mass : Optional[Float[Array, '']]
+        Monopole moment as a **scalar array**, if the caller already has it;
+        recovered from ``multipole`` when ``None``.
+    raw_dipole : Optional[Float[Array, '3']]
+        Dipole moment, same convention.
+    raw_second : Optional[Float[Array, '3 3']]
+        Second central moment, same convention. **Full Cartesian ``(3, 3)``, not
+        packed** -- this line read "packed symmetric" and was wrong: measured, a
+        packed length-6 second moment is rejected by the body's broadcasting,
+        while every recorded call passes ``(3, 3)``.
+    raw_third : Optional[Float[Array, '3 3 3']]
+        Third central moment, same convention. Full Cartesian.
+    raw_fourth : Optional[Float[Array, '3 3 3 3']]
+        Fourth central moment, same convention. Full Cartesian.
 
     Returns
     -------
@@ -1343,6 +1361,15 @@ def translate_multipole_to_local(
         raw moment the order needs.
     NotImplementedError
         If ``order`` exceeds ``MAX_MULTIPOLE_ORDER`` (4).
+
+    Notes
+    -----
+    A wrong-shaped ``delta`` or raw moment raises from the ``@jaxtyped``
+    decorator, before the body runs, so it is not in ``Raises`` above. The body
+    checks only that the raw moments are *present*, never their shape, and three
+    malformations were accepted silently before these annotations: a ``(2,)``
+    delta, a ``(2,)`` or ``(4,)`` ``raw_dipole``, and a ``raw_mass`` of shape
+    ``(1,)`` rather than a scalar. Each returned a number.
     """
 
     order_int = int(order)
