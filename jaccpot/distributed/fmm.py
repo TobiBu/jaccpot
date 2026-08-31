@@ -687,6 +687,23 @@ class DistributedFMMConfig:
     # rather than silently translated, because folding the criterion into
     # `geometry.radius` would leave the cross walk running a different criterion
     # from the self walk with nothing to say so.
+    #
+    # WHAT "dehnen_error" IS WORTH, so the numbers are reachable from the knob rather
+    # than only from a PR. Measured on 2 x A100 at N=1048576, matched median, all
+    # overflow flags clear, 3 seeds at leaf 512/1024 (`median [min, max]`):
+    #
+    #     leaf   p99.99 gain          near-field work
+    #      256   4.40x                0.77x
+    #      512   6.58x [5.56, 7.30]   0.80x
+    #     1024   7.69x [6.85, 7.88]   0.88x
+    #
+    # and it GROWS with the mesh -- 8.80x / 15.06x at leaf 512 / 1024 on four devices,
+    # total N held fixed -- because cross-domain work is 31 % of the near field at two
+    # devices and 53 % at five. The self-only ablation is 1.87x at 1.06x the work, so
+    # most of the advantage lives in the CROSS walk; that is what `mac_cross_criterion`
+    # exists to measure. Full record and the trap list:
+    # `docs/dehnen_mass_mac_status_and_plan.md` (items 0, 0b, 0c); raw rows under
+    # `bench/results/distributed_dehnen_mac/`.
     mac_type: MACTypeInput = "dehnen"
     # Dehnen section 5 criterion knobs, read only when mac_type="dehnen_error".
     #
@@ -2927,6 +2944,21 @@ def distributed_fmm_accelerations(
     auto_scale_caps : bool
         Retry on a traversal-buffer overflow with scaled capacities, as described
         above.
+
+        **It makes a run survive a wrong cap rule, and it also HIDES one.** A retry
+        leaves the overflow flags clear on the result, so a caller who only reads the
+        flags cannot tell a correctly-sized configuration from one that needed two
+        doublings. That is not hypothetical: two of the Dehnen criterion's far caps
+        shipped UNDER-provisioned and went unnoticed across every measurement on the
+        distributed lane, because auto-scaling was quietly fixing them and every flag
+        read clear. See :data:`_CRITERION_SELF_QUEUE_COEFF`.
+
+        So: leave it **on** for production runs, where surviving is the point. Turn it
+        **off** whenever the question is whether the derived caps are right -- a cap
+        calibration, a theta or eps sweep, or any run whose *timing* you intend to
+        quote, since a retried run has paid for the discarded attempts. ``cap_retries``
+        in the returned diagnostics is how many retries actually happened; a non-zero
+        value means the derived caps did not fit.
     cap_scale_factor : float
         Factor applied to the capacities on each retry. Default ``2.0``.
     max_cap_retries : int

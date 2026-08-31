@@ -21,6 +21,14 @@ response to ``eps``, and the range of the force scale that was actually installe
 The cross walk is **not** in scope here: it stays geometric, so at ndev >= 2 part of
 the near field is still chosen by ``theta``. See ``jaccpot/distributed/_force_scale.py``.
 
+Every test here that actually RUNS the mesh carries
+``@pytest.mark.distributed_criterion``, and CI runs those in their own job. One
+distributed evaluation is ~190 s of compilation -- flat in N, leaf size and expansion
+order, so it is a per-configuration cost that a smaller problem cannot reduce -- and the
+four distinct configurations below would otherwise push the standard distributed tier
+past what a 2-core hosted runner survives. The five refusal tests are unmarked: they
+raise before any tracing, cost nothing, and are worth having in the fast tier.
+
     CUDA_VISIBLE_DEVICES=$(autocvd -n 2 -l -o) \
         pytest tests/distributed/test_distributed_dehnen_error_mac.py -o addopts="" -q
 """
@@ -54,25 +62,46 @@ pytestmark = pytest.mark.skipif(
     device_count() < 2, reason="distributed FMM needs >= 2 devices"
 )
 
-#: Pinned rather than inherited. ``DistributedFMMConfig.leaf_size`` defaults to a
-#: production 64, at which this tier's per-device particle count gives a tree with
-#: no far field at all -- the walk accepts nothing, the run degenerates to direct
-#: summation, and every assertion here passes while measuring nothing (trap 11).
-#: Measured on this IC at theta 0.5: leaf 32 -> 2 far pairs, leaf 8 -> ~1250.
-_LEAF = 8
+#: Pinned rather than inherited, and sized for CI rather than for comfort.
+#:
+#: ``DistributedFMMConfig.leaf_size`` defaults to a production 64, at which this tier's
+#: per-device count gives a tree with NO far field -- the walk accepts nothing, the run
+#: degenerates to direct summation, and every assertion here passes while measuring
+#: nothing (trap 11). So the leaf has to be small enough to produce one.
+#:
+#: The cost here is COMPILATION, not the problem size: measured on two forced CPU
+#: devices, one criterion evaluation takes ~200 s at 1024 particles/device and ~190 s at
+#: 256, i.e. essentially flat in N. So the levers are the number of DISTINCT traced
+#: configurations (which is why ``_run`` memoises) and the graph size, which follows
+#: ``num_leaves``. An earlier 1024/leaf-8 version of this file cost ~6 compiles over
+#: ~20 minutes and killed the hosted runner outright.
+#:
+#: 256/leaf-4 is the cheapest configuration measured that still has a real far field on
+#: BOTH sides -- geometric self 1376 / cross 1026 far pairs, criterion self 2114 --
+#: which is what the vacuity guards below require. Do not raise these without checking
+#: the tier still fits its runner.
+_LEAF = 4
 _THETA = 0.5
 _ORDER = 4
-_PER_DEVICE = 1024
+_PER_DEVICE = 256
 _SOFTENING = 0.02
 
-#: An ``eps`` at which the criterion accepts a real far field on this IC. Tight
-#: ``eps`` at small N accepts *nothing* -- eq (16a)'s threshold is
-#: ``eps * min_b |a_b|`` over the target cell, so the least-accelerated particle
-#: sets the budget (trap 5). The vacuity guards below fail rather than pass if this
-#: drifts out of the usable window.
-_EPS = 1.0e-2
+#: An ``eps`` at which the criterion accepts a real far field on this IC AND clears the
+#: 1 % direct-sum bar. Tight ``eps`` at small N accepts *nothing* -- eq (16a)'s
+#: threshold is ``eps * min_b |a_b|`` over the target cell, so the least-accelerated
+#: particle sets the budget (trap 5) -- while loose ``eps`` accepts too much to be
+#: accurate. Measured on this IC at order 4 (aggL2 against a float64 direct sum):
+#:
+#:     eps      1e-2      3e-3      1e-3
+#:     aggL2    0.0104    0.0012    0.0005
+#:     self far  2114      1722      1226
+#:
+#: So 3e-3: two decades of margin under the 1 % bar with 1722 far pairs still accepted.
+#: 1e-2 does NOT clear the bar on this IC -- it was carried over from a 16x larger one
+#: and is the reason to re-measure this table rather than the tolerance if the IC moves.
+_EPS = 3.0e-3
 #: A tighter one, used only for the direction-of-response check.
-_EPS_TIGHT = 1.0e-3
+_EPS_TIGHT = 3.0e-4
 
 
 def _ic(ndev: int, seed: int = 20260830):
@@ -129,6 +158,7 @@ def _far(diagnostics) -> int:
     return int(diagnostics["self_far_pairs"].sum())
 
 
+@pytest.mark.distributed_criterion
 def test_the_criterion_runs_on_the_mesh_and_reproduces_the_direct_sum():
     """End to end: the policy traces under ``shard_map`` and the forces are right.
 
@@ -156,6 +186,7 @@ def test_the_criterion_runs_on_the_mesh_and_reproduces_the_direct_sum():
     assert err < 1e-2, f"aggL2 err {err:.6f} exceeds 1%"
 
 
+@pytest.mark.distributed_criterion
 def test_the_criterion_decides_a_different_accept_mask_from_the_geometric_mac():
     """The far/near split must differ from ``theta``'s, or no policy is installed.
 
@@ -179,6 +210,7 @@ def test_the_criterion_decides_a_different_accept_mask_from_the_geometric_mac():
     )
 
 
+@pytest.mark.distributed_criterion
 def test_the_installed_force_scale_is_neither_missing_nor_the_unit_fallback():
     """``min_b f_b`` must vary across nodes, and must not be a constant 1.
 
@@ -211,6 +243,7 @@ def test_the_installed_force_scale_is_neither_missing_nor_the_unit_fallback():
     )
 
 
+@pytest.mark.distributed_criterion
 def test_tightening_eps_refuses_far_pairs_rather_than_accepting_more():
     """The response to ``eps`` must have the sign eq (16a) says it has.
 
@@ -346,6 +379,7 @@ def _evaluators(ndev, mesh, part, **kwargs):
     )
 
 
+@pytest.mark.distributed_criterion
 def test_the_criterion_does_not_break_the_fixed_topology_seam():
     """``jax.grad`` must still work, and the forward must not move.
 
@@ -364,6 +398,12 @@ def test_the_criterion_does_not_break_the_fixed_topology_seam():
     mesh = make_mesh(ndev)
     pts, mass = _ic(ndev)
     part = partition_for_devices(pts, mass, ndev, leaf_size=_LEAF)
+    # Deliberately the SAME config the self-only tests above already traced. One
+    # distributed evaluation is ~190 s of COMPILATION on a forced-CPU mesh -- flat in
+    # N, leaf and expansion order, so the only lever on this tier's cost is how many
+    # DISTINCT configurations it traces. Reusing one lets the forward evaluator hit
+    # jax's compilation cache; only the differentiable twin is a new graph, and that
+    # one is the point of the test.
     forward, grad_path = _evaluators(
         ndev,
         mesh,
@@ -413,6 +453,7 @@ def _cross_near(diagnostics) -> int:
 
 
 @_needs_cross_hook
+@pytest.mark.distributed_criterion
 def test_the_criterion_decides_the_cross_walk_too():
     """The cross-domain accept mask must move, and only when asked to.
 
@@ -463,6 +504,7 @@ def test_the_criterion_decides_the_cross_walk_too():
 
 
 @_needs_cross_hook
+@pytest.mark.distributed_criterion
 def test_the_self_walk_is_untouched_by_the_cross_ablation():
     """Turning the cross criterion off must not perturb the local walk.
 
@@ -501,6 +543,7 @@ def test_the_self_walk_is_untouched_by_the_cross_ablation():
 
 
 @_needs_cross_hook
+@pytest.mark.distributed_criterion
 def test_the_cross_criterion_still_reproduces_the_direct_sum():
     """Carrying the policy across domains must not corrupt the force.
 
