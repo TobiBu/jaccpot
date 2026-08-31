@@ -1712,16 +1712,6 @@ def _make_fn(
     # Whether the criterion also decides the cross walk. False is the self-only
     # ablation; see the config field for why it stays addressable.
     use_cross_criterion = uses_criterion and bool(config.mac_cross_criterion)
-    if use_cross_criterion and not cross_walk_accepts_a_pair_policy():
-        raise ValueError(
-            "mac_cross_criterion=True needs a yggdrax whose "
-            "dual_tree_walk_cross_impl accepts a pair_policy (yggdrax PR #54). The "
-            "installed one does not, so the criterion would reach the self walk and "
-            "silently leave the cross walk on the geometric MAC -- which is FASTER "
-            "and answers a different question, and is 53% of the near-field work at "
-            "five devices. Upgrade yggdrax, or pass mac_cross_criterion=False to run "
-            "the self-only arm deliberately."
-        )
     # The geometric MAC handed to both walks. Under the criterion this is the
     # `dehnen` base test; on the self walk the pair policy discards its verdict
     # (paper mode deletes `mac_ok`), and on the cross walk it is the whole test.
@@ -1753,6 +1743,20 @@ def _make_fn(
                 f"{config.dehnen_geometry_mode!r}. The sphere-fitting modes run a "
                 "numpy host loop over nodes, which cannot be traced inside "
                 "shard_map."
+            )
+        # LAST of the criterion checks, deliberately. This one is about the installed
+        # yggdrax rather than about the configuration, so a caller who also got a
+        # config field wrong should hear about the field first -- and the refusal
+        # tests should be able to exercise those fields without a newer yggdrax.
+        if use_cross_criterion and not cross_walk_accepts_a_pair_policy():
+            raise ValueError(
+                "mac_cross_criterion=True needs a yggdrax whose "
+                "dual_tree_walk_cross_impl accepts a pair_policy (yggdrax PR #54). "
+                "The installed one does not, so the criterion would reach the self "
+                "walk and silently leave the cross walk on the geometric MAC -- "
+                "which is FASTER and answers a different question, and is 53% of "
+                "the near-field work at five devices. Upgrade yggdrax, or pass "
+                "mac_cross_criterion=False to run the self-only arm deliberately."
             )
 
     # Near-field backend resolution (trace-time; sm_80+ gate mirrors the single-GPU

@@ -265,6 +265,27 @@ and `..._seed2026090{1,2}.json`.
 caps grown to clear the flag it is `1 293 194`. The truncated run reported 36 % LESS work
 than the correct one. Every number above is from a run with every flag clear.
 
+**AND IT GROWS WITH THE MESH, which is the port's whole premise measured rather than
+argued.** Cross-domain work is 31 % of the near field at two devices and 53 % at five, so a
+criterion that decides BOTH walks should gain more as the mesh grows. TOTAL N held fixed at
+1 048 576 so the device count is not confounded with N (1 seed at ndev=4):
+
+| leaf | ndev=2, 3 seeds | ndev=4, 1 seed |
+|---|---|---|
+| 512 | 6.58x [5.56, 7.30] | **8.80x** (work 0.74x) |
+| 1024 | 7.69x [6.85, 7.88] | **15.06x** (work 0.88x) |
+
+Both leaf sizes gain at four devices — leaf 512 lands above the entire two-device band, and
+leaf 1024 roughly doubles — with near-field work still falling. Artifact:
+`bench/results/distributed_dehnen_mac/ndevsweep_ndev4_1M_seed20260831.json`.
+
+**A jaccpot worktree always tests against the MAIN yggdrax checkout**, and no `PYTHONPATH`
+changes that: `tests/conftest.py` computes `YGGDRAX_ROOT = REPO_ROOT.parent / "yggdrax"` and
+`sys.path.insert(0, ...)`, which lands ahead of anything the environment supplies. So the
+cross-domain tests SKIP in a worktree until yggdrax PR #54 is merged into
+`/export/home/tbuck/yggdrax`, and the GPU measurements above were taken by running the
+scripts directly (where `PYTHONPATH` does win) rather than under pytest.
+
 **What is still missing before this is a paper number:** N=10^7 and 5 devices (this is 10^6
 on 2, where cross-domain work is 31 % of the near field rather than 53 %), and a matched
 WALL-CLOCK comparison rather than matched work. The seed count is now 3 at leaf 512 and

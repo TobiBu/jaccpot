@@ -91,6 +91,12 @@ _RUNS: dict = {}
 
 
 def _run(mesh, pts, mass, **kwargs):
+    # Every test here pins `mac_cross_criterion` rather than inheriting the default.
+    # A test named for the SELF walk must not change what it exercises because the
+    # cross-walk default flipped -- and against a yggdrax without the cross hook the
+    # default would make it raise, which says nothing about the self walk. The
+    # cross-domain tests below pass True explicitly and skip when the hook is absent.
+    kwargs.setdefault("mac_cross_criterion", False)
     key = tuple(sorted(kwargs.items()))
     if key not in _RUNS:
         config = DistributedFMMConfig(
@@ -244,6 +250,9 @@ def _expect(match: str, **kwargs):
     ndev = min(4, device_count())
     mesh = make_mesh(ndev)
     pts, mass = _ic(ndev)
+    # Same reason as `_run`: a refusal test is about ONE rejected field, so it must
+    # not also depend on the cross-walk default and the yggdrax that default needs.
+    kwargs.setdefault("mac_cross_criterion", False)
     config = DistributedFMMConfig(
         leaf_size=_LEAF,
         order=_ORDER,
@@ -356,7 +365,12 @@ def test_the_criterion_does_not_break_the_fixed_topology_seam():
     pts, mass = _ic(ndev)
     part = partition_for_devices(pts, mass, ndev, leaf_size=_LEAF)
     forward, grad_path = _evaluators(
-        ndev, mesh, part, mac_type="dehnen_error", adaptive_eps=_EPS
+        ndev,
+        mesh,
+        part,
+        mac_type="dehnen_error",
+        adaptive_eps=_EPS,
+        mac_cross_criterion=False,
     )
 
     args = (
@@ -422,7 +436,14 @@ def test_the_criterion_decides_the_cross_walk_too():
         adaptive_eps=_EPS,
         mac_cross_criterion=False,
     )
-    _, both = _run(mesh, pts, mass, mac_type="dehnen_error", adaptive_eps=_EPS)
+    _, both = _run(
+        mesh,
+        pts,
+        mass,
+        mac_type="dehnen_error",
+        adaptive_eps=_EPS,
+        mac_cross_criterion=True,
+    )
 
     assert _cross_far(geometric) > 0, "no cross far field on this IC; nothing measured"
     assert (_cross_far(self_only), _cross_near(self_only)) == (
@@ -463,7 +484,14 @@ def test_the_self_walk_is_untouched_by_the_cross_ablation():
         adaptive_eps=_EPS,
         mac_cross_criterion=False,
     )
-    _, both = _run(mesh, pts, mass, mac_type="dehnen_error", adaptive_eps=_EPS)
+    _, both = _run(
+        mesh,
+        pts,
+        mass,
+        mac_type="dehnen_error",
+        adaptive_eps=_EPS,
+        mac_cross_criterion=True,
+    )
 
     assert _far(self_only) == _far(both), (
         f"self far moved from {_far(self_only)} to {_far(both)} when only the CROSS "
@@ -487,7 +515,12 @@ def test_the_cross_criterion_still_reproduces_the_direct_sum():
     pts, mass = _ic(ndev)
 
     result, diagnostics = _run(
-        mesh, pts, mass, mac_type="dehnen_error", adaptive_eps=_EPS
+        mesh,
+        pts,
+        mass,
+        mac_type="dehnen_error",
+        adaptive_eps=_EPS,
+        mac_cross_criterion=True,
     )
     assert not result.overflow
     assert _cross_far(diagnostics) > 0
