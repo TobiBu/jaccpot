@@ -162,3 +162,118 @@ def test_every_perturbation_actually_changes_the_shape():
     for shape in [(3,), (4, 3), (2, 5, 3)]:
         for label, perturbed in annotation_pilot.shape_perturbations(shape):
             assert perturbed != shape, f"{label} left {shape} unchanged"
+
+
+def test_a_tuple_of_arrays_is_a_container_not_an_opaque_object():
+    """`_block_tile` takes `a_xyz: tuple[Array, Array, Array]`, and it is describable.
+
+    The old rule accepted a tuple only when every element was a scalar, so a tuple
+    of arrays fell through to `opaque` and took the whole function out of the
+    measurement. Nothing about it is actually opaque: each element has a shape and
+    a dtype, which is the entire input the replay needs.
+    """
+    kind, elements, meta = annotation_pilot.describe_argument(
+        (_FakeArray((4,)), _FakeArray((4,)), _FakeArray((4,)))
+    )
+
+    assert (kind, meta) == ("container", "tuple")
+    assert elements == [("array", (4,), "float64")] * 3
+
+
+def test_a_tuple_of_scalars_is_still_a_tuple():
+    """The narrower description is kept where it applies, so old recordings replay."""
+    assert annotation_pilot.describe_argument((2, 4))[:2] == ("tuple", (2, 4))
+
+
+def test_a_container_holding_an_opaque_element_is_still_unreplayable():
+    """Widening must not swallow the thing it was meant to report.
+
+    The opaque check has to recurse, or a tuple with one un-describable element
+    reads as fully replayable and its control fails later as INCONCLUSIVE -- the
+    same understatement, relabelled.
+    """
+    kind, elements, _ = annotation_pilot.describe_argument((_FakeArray((4,)), object()))
+
+    assert kind == "container"
+    assert annotation_pilot.is_replayable(("container", elements, "tuple")) is False
+    assert annotation_pilot.is_replayable(("container", elements[:1], "tuple")) is True
+
+
+def test_a_dtype_argument_is_described_rather_than_making_the_call_opaque():
+    """`_pad_inputs` takes a working `dtype`, which is neither array nor scalar."""
+    import numpy as np
+
+    for spelling in [np.dtype("float64"), np.float32]:
+        kind, value, _ = annotation_pilot.describe_argument(spelling)
+        assert kind == "dtype", spelling
+        assert value in ("float64", "float32"), spelling
+
+
+def test_a_string_is_still_a_scalar_and_not_mistaken_for_a_dtype():
+    """`np.dtype('float64')` accepts a string, so ordering is load-bearing here.
+
+    `None` matters more: `np.dtype(None)` is `float64`, so an `Optional[Array]`
+    argument recorded as `None` would come back as a dtype and be rebuilt as one.
+    """
+    assert annotation_pilot.describe_argument("float64")[:2] == ("scalar", "float64")
+    assert annotation_pilot.describe_argument(None)[:2] == ("scalar", None)
+
+
+def test_arrays_inside_a_container_are_perturbed_and_not_merely_rebuilt():
+    """The failure mode this widening could introduce, in the same direction as the rest.
+
+    A container that rebuilds but is never perturbed makes an UNREPLAYABLE function
+    -- which is reported, and uncounted -- into one that passes its control, prints
+    "control OK", and contributes nothing. That is strictly worse: it converts a
+    visible gap into an invisible one. So the perturbation has to address arrays by
+    path, and this pins that it does.
+    """
+
+    def container_checks_nothing(xyz, m):
+        return 0
+
+    import bench.annotation_pilot as module
+
+    module.container_checks_nothing = container_checks_nothing
+    per_array = len(annotation_pilot.shape_perturbations((4,)))
+    recorded = {
+        f"{module.__name__}:container_checks_nothing": [
+            (
+                {
+                    "xyz": ("container", [("array", (4,), "float64")] * 3, "tuple"),
+                    "m": ("array", (4,), "float64"),
+                },
+                True,
+            )
+        ]
+    }
+    report, tally = annotation_pilot.replay(recorded)
+
+    assert tally["rejected"] == 0
+    assert tally["accepted"] == 4 * per_array, "a container's arrays were not perturbed"
+    assert (
+        "xyz[0]" in report and "xyz[2]" in report
+    ), "the report cannot name the element"
+
+
+def test_a_strict_function_still_rejects_when_the_bad_shape_is_inside_a_container():
+    """The other direction, so the container path cannot pass by accepting everything."""
+
+    def insists_on_the_component(xyz):
+        for component in xyz:
+            if component.shape != (4,):
+                raise ValueError("each component must be (4,)")
+        return 0
+
+    import bench.annotation_pilot as module
+
+    module.insists_on_the_component = insists_on_the_component
+    recorded = {
+        f"{module.__name__}:insists_on_the_component": [
+            ({"xyz": ("container", [("array", (4,), "float64")] * 3, "tuple")}, True)
+        ]
+    }
+    _, tally = annotation_pilot.replay(recorded)
+
+    assert tally["accepted"] == 0
+    assert tally["rejected"] == 3 * len(annotation_pilot.shape_perturbations((4,)))
