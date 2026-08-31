@@ -44,6 +44,26 @@ most comfortable possible answer, which is the same failure mode
 
 Functions with an argument this cannot describe are reported UNREPLAYABLE, also uncounted.
 
+WHAT COUNTS AS DESCRIBABLE, AND WHY IT GREW
+-------------------------------------------
+Shape+dtype for arrays, values for scalars -- and, since the `pallas/nearfield_mutual.py`
+pass, two more kinds, because three of that module's eight targets were UNREPLAYABLE for
+reasons that had nothing to do with the code being hard to describe:
+
+* **Sequences of arrays.** `_block_tile` and `_block_vjp_tiles` take their positions as
+  `tuple[Array, Array, Array]`. The old rule described a tuple only when every element
+  was a scalar, so these fell through to opaque -- yet each element has exactly the shape
+  and dtype the replay needs. They are now described element by element, and the
+  perturbation addresses arrays **by path**, so `a_xyz[0]` is corrupted individually.
+  That last part is not a detail: rebuilding a container without perturbing what it holds
+  would report "control OK, 0 array params", turning a gap the report NAMES into one it
+  hides. See `test_arrays_inside_a_container_are_perturbed_and_not_merely_rebuilt`.
+* **Dtype objects.** `_pad_inputs` takes the working `dtype`. It is not an array and not a
+  scalar, and it rebuilds from its name.
+
+Both widen what can be measured; neither widens what counts as validated. A container
+holding one un-describable element is still UNREPLAYABLE, checked recursively.
+
 WHAT IT DOES NOT MEASURE
 ------------------------
 * **Value-dependent validation.** A check like `if mask.sum() != n: raise` is invisible
@@ -84,11 +104,14 @@ import sys
 from collections import Counter
 from functools import wraps
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterator
+
+import numpy as np
 
 __all__ = [
     "PERTURBATIONS",
     "describe_argument",
+    "is_replayable",
     "main",
     "replay",
     "shape_perturbations",
@@ -116,20 +139,148 @@ def describe_argument(value: Any) -> tuple[str, Any, str]:
         ``("array", shape, dtype)`` for anything array-like -- shape and dtype
         only, because a tracer has both and no value. ``("scalar", value, type)``
         or ``("tuple", value, "tuple")`` for values that survive a trace.
-        ``("opaque", None, type)`` otherwise, which makes the call unreplayable.
+        ``("container", [description, ...], "tuple" | "list")`` for a sequence
+        holding anything else, described element by element. ``("dtype", name,
+        type)`` for a dtype object. ``("opaque", None, type)`` otherwise, which
+        makes the call unreplayable.
+
+    Notes
+    -----
+    The branch ORDER is load-bearing, because ``numpy.dtype`` is far more
+    permissive than it looks: ``np.dtype(None)`` is ``float64`` and
+    ``np.dtype("float64")`` parses the string, so an ``Optional[Array]``
+    argument recorded as ``None`` and any string argument would both come back
+    as dtypes if the dtype branch ran first. Scalars are matched before it for
+    that reason, and sequences before it too -- ``np.dtype((np.int32, 3))`` is
+    also a valid dtype spec.
     """
     if hasattr(value, "shape") and hasattr(value, "dtype"):
         try:
             return ("array", tuple(int(d) for d in value.shape), str(value.dtype))
         except TypeError:
-            return ("opaque", None, type(value).__name__)
+            # Both attributes present and the shape unreadable means this is not
+            # an array at all: numpy's scalar TYPES (`np.float32`, the class) carry
+            # `shape` and `dtype` as descriptors, and they are a legitimate dtype
+            # spelling. Fall through rather than concluding opaque here.
+            pass
     if isinstance(value, (int, float, bool, str, type(None))):
         return ("scalar", value, type(value).__name__)
     if isinstance(value, tuple) and all(
         isinstance(v, (int, float, bool, str, type(None))) for v in value
     ):
         return ("tuple", value, "tuple")
-    return ("opaque", None, type(value).__name__)
+    if isinstance(value, (tuple, list)):
+        kind = "tuple" if isinstance(value, tuple) else "list"
+        return ("container", [describe_argument(v) for v in value], kind)
+    try:
+        return ("dtype", str(np.dtype(value)), type(value).__name__)
+    except (TypeError, ValueError):
+        return ("opaque", None, type(value).__name__)
+
+
+def is_replayable(description: tuple[str, Any, str]) -> bool:
+    """Say whether one described argument can be rebuilt, looking inside containers.
+
+    The recursion is the point. A tuple holding one un-describable element is
+    NOT replayable, and reporting it as replayable would not hide the problem --
+    it would relabel it, because the control would then fail and the function
+    would be reported INCONCLUSIVE instead of UNREPLAYABLE. Both are uncounted,
+    so the tally survives either way, but the diagnosis in the report would name
+    the wrong cause and send the reader looking for a value-dependent kernel
+    that does not exist.
+
+    Parameters
+    ----------
+    description : tuple of (str, Any, str)
+        As returned by :func:`describe_argument`.
+
+    Returns
+    -------
+    bool
+        False if the description contains an opaque leaf at any depth.
+    """
+    kind, value, _ = description
+    if kind == "opaque":
+        return False
+    if kind == "container":
+        return all(is_replayable(element) for element in value)
+    return True
+
+
+def _leaves(
+    description: tuple[str, Any, str], wanted: str, prefix: tuple[int, ...] = ()
+) -> Iterator[tuple[tuple[int, ...], Any, str]]:
+    """Walk a description and yield every leaf of one kind, with its path.
+
+    Parameters
+    ----------
+    description : tuple of (str, Any, str)
+        As returned by :func:`describe_argument`.
+    wanted : str
+        The leaf kind to yield, ``"array"`` or ``"opaque"``.
+    prefix : tuple of int
+        Element indices walked so far.
+
+    Yields
+    ------
+    tuple of (tuple of int, Any, str)
+        ``(path, value, meta)`` -- path is empty for a description that is
+        itself a leaf, and holds one index per container level otherwise.
+    """
+    kind, value, meta = description
+    if kind == "container":
+        for index, element in enumerate(value):
+            yield from _leaves(element, wanted, prefix + (index,))
+    elif kind == wanted:
+        yield prefix, value, meta
+
+
+def _substitute(
+    description: tuple[str, Any, str],
+    path: tuple[int, ...],
+    replacement: tuple[str, Any, str],
+) -> tuple[str, Any, str]:
+    """Return a copy of a description with the leaf at ``path`` replaced.
+
+    Parameters
+    ----------
+    description : tuple of (str, Any, str)
+        The description to copy.
+    path : tuple of int
+        Element indices, as produced by :func:`_leaves`. Empty replaces the
+        whole description.
+    replacement : tuple of (str, Any, str)
+        The description to put there.
+
+    Returns
+    -------
+    tuple of (str, Any, str)
+        The copy. The original is not mutated.
+    """
+    if not path:
+        return replacement
+    kind, value, meta = description
+    elements = list(value)
+    elements[path[0]] = _substitute(elements[path[0]], path[1:], replacement)
+    return (kind, elements, meta)
+
+
+def _format_path(name: str, path: tuple[int, ...]) -> str:
+    """Render a parameter name and element path the way the source spells it.
+
+    Parameters
+    ----------
+    name : str
+        The parameter name.
+    path : tuple of int
+        Element indices into it.
+
+    Returns
+    -------
+    str
+        ``a_xyz`` or ``a_xyz[0]``.
+    """
+    return name + "".join(f"[{index}]" for index in path)
 
 
 def _wrap(function: Any, label: str, limit: int) -> Any:
@@ -161,7 +312,7 @@ def _wrap(function: Any, label: str, limit: int) -> Any:
                     name: describe_argument(value)
                     for name, value in bound.arguments.items()
                 }
-                replayable = not any(k == "opaque" for k, _, _ in snapshot.values())
+                replayable = all(is_replayable(d) for d in snapshot.values())
                 _recorded.setdefault(label, []).append((snapshot, replayable))
             except TypeError:
                 # A call that does not match the signature is about to raise on
@@ -304,22 +455,28 @@ def _build(kind: str, value: Any, meta: str) -> Any:
     Parameters
     ----------
     kind : str
-        ``"array"``, ``"scalar"`` or ``"tuple"``.
+        ``"array"``, ``"scalar"``, ``"tuple"``, ``"container"`` or ``"dtype"``.
     value : Any
-        Shape for an array, the value otherwise.
+        Shape for an array, the element descriptions for a container, the dtype
+        name for a dtype, the value itself otherwise.
     meta : str
-        Dtype string for an array.
+        Dtype string for an array, ``"tuple"`` or ``"list"`` for a container.
 
     Returns
     -------
     Any
         A stand-in argument.
     """
-    if kind != "array":
-        return value
     import jax.numpy as jnp
 
-    return jnp.zeros(value, dtype=jnp.dtype(meta))
+    if kind == "array":
+        return jnp.zeros(value, dtype=jnp.dtype(meta))
+    if kind == "container":
+        rebuilt = [_build(*element) for element in value]
+        return tuple(rebuilt) if meta == "tuple" else rebuilt
+    if kind == "dtype":
+        return jnp.dtype(value)
+    return value
 
 
 def replay(recorded: dict[str, list]) -> tuple[str, Counter]:
@@ -348,7 +505,11 @@ def replay(recorded: dict[str, list]) -> tuple[str, Counter]:
         function = getattr(importlib.import_module(module_path), function_name)
 
         if not replayable:
-            opaque = [k for k, (kind, _, _) in snapshot.items() if kind == "opaque"]
+            opaque = [
+                _format_path(name, path)
+                for name, description in snapshot.items()
+                for path, _, _ in _leaves(description, "opaque")
+            ]
             lines.append(
                 f"\n{label}\n  UNREPLAYABLE -- opaque args: {', '.join(opaque)}"
             )
@@ -370,14 +531,25 @@ def replay(recorded: dict[str, list]) -> tuple[str, Counter]:
             bump(label, "inconclusive")
             continue
 
-        arrays = [k for k, (kind, _, _) in snapshot.items() if kind == "array"]
+        # Addressed by PATH, not by parameter name, so the arrays inside a
+        # container are perturbed too. Rebuilding a container without perturbing
+        # what it holds would turn an UNREPLAYABLE function -- reported, and
+        # uncounted -- into one that prints "control OK, 0 array params" and
+        # contributes nothing, which converts a visible gap into an invisible one.
+        arrays = [
+            ((name,) + path, shape, dtype)
+            for name, description in snapshot.items()
+            for path, shape, dtype in _leaves(description, "array")
+        ]
         lines.append(f"\n{label}\n  control OK, {len(arrays)} array params")
         bump(label, "ok")
-        for name in arrays:
-            shape = snapshot[name][1]
+        for (name, *rest), shape, dtype in arrays:
+            path = tuple(rest)
             for plabel, new_shape in shape_perturbations(shape):
                 arguments = dict(base)
-                arguments[name] = _build("array", new_shape, snapshot[name][2])
+                arguments[name] = _build(
+                    *_substitute(snapshot[name], path, ("array", new_shape, dtype))
+                )
                 try:
                     function(**arguments)
                 except Exception:  # noqa: BLE001 -- any complaint counts as rejection
@@ -385,7 +557,7 @@ def replay(recorded: dict[str, list]) -> tuple[str, Counter]:
                     bump(label, "rejected")
                 else:
                     lines.append(
-                        f"    >> ACCEPTED  {name}{list(shape)} -> "
+                        f"    >> ACCEPTED  {_format_path(name, path)}{list(shape)} -> "
                         f"{list(new_shape)}  ({plabel})"
                     )
                     tally["accepted"] += 1
