@@ -232,6 +232,17 @@ testpaths = ["tests"]
 markers = [
     "slow: long-running / compile-heavy test (deselect with -m 'not slow')",
     "experimental: exercises experimental, non-production FMM code (octree/treecode prototypes); deselected by default, run explicitly with -m experimental",
+    # One distributed FMM evaluation is ~190 s of COMPILATION on a forced-CPU mesh,
+    # and that cost is flat in N, leaf size and expansion order (measured), so it is
+    # per-CONFIGURATION and cannot be shrunk by making the problem smaller. The
+    # Dehnen-criterion tier needs four distinct configurations, which is ~11 min on
+    # top of the ~24 min the rest of `tests/distributed` already costs -- enough to
+    # kill the 2-core hosted runner. So these run in their own CI job
+    # (`test-distributed-criterion`) with its own budget, and the standard tier
+    # deselects them. NOT marked `slow`: the tier deliberately runs slow-marked
+    # distributed tests, and reusing that marker would have stopped three
+    # pre-existing ones from running.
+    "distributed_criterion: end-to-end Dehnen-criterion run on a forced-device mesh; ~190 s of compile each, so opt-in via -m distributed_criterion",
 ]
 # `-n auto` runs the (compilation-bound) JAX test suite across all logical cores
 # via pytest-xdist. On a 72-core host this cuts wall-clock from ~25 min to ~2 min;

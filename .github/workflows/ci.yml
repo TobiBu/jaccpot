@@ -563,6 +563,68 @@ jobs:
             exit 1
           fi
 
+  # The Dehnen-criterion tier, in its own job because of what it costs.
+  #
+  # One distributed FMM evaluation is ~190 s of COMPILATION on a forced-CPU mesh, and
+  # that is flat in N, leaf size and expansion order -- all three measured -- so it is a
+  # per-CONFIGURATION cost that a smaller problem cannot reduce. The criterion needs four
+  # distinct configurations (geometric baseline, criterion with the cross walk, criterion
+  # self-only, and a second eps), plus a differentiable twin for the topology-seam test.
+  # Folded into `test-distributed-tier` that is ~11 min on top of its existing ~24, and
+  # the 2-core hosted runner was killed outright (SIGTERM after four tests, with 54 of
+  # its 60 minutes unused -- so memory, not time).
+  #
+  # Split rather than deselected: `slow` was the obvious marker to reuse and is the wrong
+  # one, because the standard tier deliberately RUNS three slow-marked distributed tests
+  # and excluding slow there would have silently dropped them.
+  test-distributed-criterion:
+    name: test-distributed-criterion
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    env:
+      JAX_ENABLE_X64: "1"
+      JAX_PLATFORMS: cpu
+      XLA_FLAGS: --xla_force_host_platform_device_count=2
+      JACCPOT_TEST_JAX_CACHE_DIR: ${{ github.workspace }}/.jax_cache
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Restore JAX compilation cache
+        uses: actions/cache@v4
+        with:
+          path: .jax_cache
+          key: jax-cache-criterion-${{ runner.os }}-${{ hashFiles('jaccpot/**/*.py') }}
+          restore-keys: |
+            jax-cache-criterion-${{ runner.os }}-
+      - name: Install package + dev tools
+        run: |
+          python -m pip install --upgrade pip
+          pip install git+https://github.com/TobiBu/yggdrax.git
+          pip install -e ".[dev]"
+      - name: Dehnen-criterion tier on forced devices
+        run: |
+          set -o pipefail
+          rc=0
+          pytest tests/distributed -n 1 -rs -m "distributed_criterion" \
+            | tee pytest-criterion-tier.txt || rc=$?
+          if [ "$rc" != 0 ] && [ "$rc" != 5 ]; then exit "$rc"; fi
+      - name: Fail if the tier was skipped rather than run
+        # Same failure this guard ends elsewhere: `device_count() < 2` makes a skipped
+        # tier PASS, and a green-but-vacuous job is worse than a red one. The
+        # cross-domain tests carry ONE legitimate skip -- they need yggdrax's cross-walk
+        # `pair_policy` (PR #54) and probe for it -- so the check is that the marked set
+        # ran at all, not that nothing skipped.
+        run: |
+          if grep -qE "no tests ran|collected 0 items" pytest-criterion-tier.txt \
+             || grep -qE "^SKIPPED.*needs >= 2 devices" pytest-criterion-tier.txt; then
+            echo "::error::the criterion tier did not run on forced devices"
+            exit 1
+          fi
+
   test-distributed-tier:
     # `tests/distributed/` on forced CPU devices -- the tier itself, which until
     # now ran nowhere.
@@ -626,7 +688,8 @@ jobs:
         run: |
           set -o pipefail
           rc=0
-          pytest tests/distributed -n 2 -rs -m "not experimental" \
+          pytest tests/distributed -n 2 -rs \
+            -m "not experimental and not distributed_criterion" \
             | tee pytest-distributed-tier.txt || rc=$?
           if [ "$rc" != 0 ] && [ "$rc" != 5 ]; then exit "$rc"; fi
       - name: Fail if the tier was skipped rather than run

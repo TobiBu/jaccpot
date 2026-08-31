@@ -427,6 +427,8 @@ def _one_point(
         mac_type=args.mac_type,
         nearfield_backend=args.nearfield_backend,
     )
+    if args.adaptive_eps:
+        overrides["adaptive_eps"] = args.adaptive_eps
     if args.m2l_chunk:
         overrides["m2l_chunk"] = args.m2l_chunk
     if args.nearfield_chunk:
@@ -597,6 +599,25 @@ def main(argv: Optional[list[str]] = None) -> int:
     ap.add_argument("--theta", type=float, default=0.4)
     ap.add_argument("--order", type=int, default=3)
     ap.add_argument("--mac-type", default="dehnen")
+    # The Dehnen section 5 criterion. `--adaptive-eps` is MANDATORY under
+    # `--mac-type dehnen_error` and the config raises without it: eps replaces theta
+    # as the accuracy knob on the self walk, and a default nobody chose would answer
+    # a different criterion while costing LESS work, which no timing here can see.
+    ap.add_argument(
+        "--adaptive-eps",
+        type=float,
+        default=0.0,
+        help=(
+            "eq (16a) relative force-accuracy target; required with "
+            "--mac-type dehnen_error. NOTE the cap coupling: eps -- not theta -- sets "
+            "how deep the criterion's walk descends, so the buffer requirement moves "
+            "with it (the per-node far cap needs 2x more at eps=1e-3 than at 1e-5). "
+            "Do NOT hold an explicit --pair-queue or --cross-* across an eps sweep: "
+            "the caps stay put while the requirement moves, a buffer truncates, and "
+            "the run gets FASTER with a changed error -- so the trend is the cap and "
+            "not the knob. See trap 16 in docs/dehnen_mass_mac_status_and_plan.md."
+        ),
+    )
     ap.add_argument(
         "--no-oracle-cache",
         action="store_true",
@@ -657,7 +678,9 @@ def main(argv: Optional[list[str]] = None) -> int:
         raise SystemExit(f"need {args.ndev} devices, saw {len(devices)}")
     print(
         f"# ndev={args.ndev} leaf={args.leaf} order={args.order} theta={args.theta} "
-        f"mac={args.mac_type} nearfield={args.nearfield_backend} "
+        f"mac={args.mac_type}"
+        + (f" eps={args.adaptive_eps:g}" if args.adaptive_eps else "")
+        + f" nearfield={args.nearfield_backend} "
         f"devices={[d.device_kind for d in devices[: args.ndev]]}",
         flush=True,
     )

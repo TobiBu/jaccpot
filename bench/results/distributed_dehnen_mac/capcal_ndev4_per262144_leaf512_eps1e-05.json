@@ -1,0 +1,88 @@
+{
+ "tag": "ndev4_per262144_leaf512_eps1e-05",
+ "ndev": 4,
+ "per_device": 262144,
+ "leaf": 512,
+ "eps": 1e-05,
+ "num_leaves": 512,
+ "reference": {
+  "seconds": 80.3,
+  "flags": {
+   "self_queue_overflow": 0.0,
+   "self_far_overflow": 0.0,
+   "self_near_overflow": 0.0,
+   "cross_queue_overflow": 0.0,
+   "cross_far_overflow": 0.0,
+   "cross_near_overflow": 0.0
+  },
+  "counts": {
+   "self_far_pairs": 18950.0,
+   "self_near_pairs": 1024712.0,
+   "cross_far_pairs": 529627.0,
+   "cross_near_pairs": 2101547.0
+  },
+  "overflow": false
+ },
+ "rows": [
+  {
+   "cap": "max_pair_queue",
+   "derived": 131072,
+   "floor": 32768,
+   "failed_at": 16384,
+   "structural": 11264,
+   "coeff_derived": 11.636363636363637,
+   "coeff_floor": 2.909090909090909,
+   "headroom": 4.0
+  },
+  {
+   "cap": "max_interactions_per_node",
+   "derived": 512,
+   "floor": 512,
+   "failed_at": 256,
+   "structural": 512,
+   "coeff_derived": 1.0,
+   "coeff_floor": 1.0,
+   "headroom": 1.0
+  },
+  {
+   "cap": "max_neighbors_per_leaf",
+   "derived": 512,
+   "floor": 512,
+   "failed_at": 256,
+   "structural": 512,
+   "coeff_derived": 1.0,
+   "coeff_floor": 1.0,
+   "headroom": 1.0
+  },
+  {
+   "cap": "cross_max_pair_queue",
+   "derived": 262144,
+   "floor": 131072,
+   "failed_at": 65536,
+   "structural": 19509.820296455833,
+   "coeff_derived": 13.436515355685836,
+   "coeff_floor": 6.718257677842918,
+   "headroom": 2.0
+  },
+  {
+   "cap": "cross_max_interactions_per_node",
+   "derived": 1024,
+   "floor": 1024,
+   "failed_at": 512,
+   "structural": 1536,
+   "coeff_derived": 0.6666666666666666,
+   "coeff_floor": 0.6666666666666666,
+   "headroom": 1.0
+  },
+  {
+   "cap": "cross_max_neighbors_per_leaf",
+   "derived": 2048,
+   "floor": 2048,
+   "failed_at": 1024,
+   "structural": 1536,
+   "coeff_derived": 1.3333333333333333,
+   "coeff_floor": 1.3333333333333333,
+   "headroom": 1.0
+  }
+ ]
+}

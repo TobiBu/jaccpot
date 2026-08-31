@@ -1,0 +1,38 @@
+{
+ "tag": "ndev2_per524288_leaf512_eps1e-05",
+ "ndev": 2,
+ "per_device": 524288,
+ "leaf": 512,
+ "eps": 1e-05,
+ "num_leaves": 1024,
+ "reference": {
+  "seconds": 84.5,
+  "flags": {
+   "self_queue_overflow": 0.0,
+   "self_far_overflow": 0.0,
+   "self_near_overflow": 0.0,
+   "cross_queue_overflow": 0.0,
+   "cross_far_overflow": 0.0,
+   "cross_near_overflow": 0.0
+  },
+  "counts": {
+   "self_far_pairs": 126694.0,
+   "self_near_pairs": 1933382.0,
+   "cross_far_pairs": 394669.0,
+   "cross_near_pairs": 1260607.0
+  },
+  "overflow": false
+ },
+ "rows": [
+  {
+   "cap": "cross_max_interactions_per_node",
+   "derived": 512,
+   "floor": 1024,
+   "failed_at": 512,
+   "structural": 1024,
+   "coeff_derived": 0.5,
+   "coeff_floor": 1.0,
+   "headroom": 0.5
+  }
+ ]
+}
