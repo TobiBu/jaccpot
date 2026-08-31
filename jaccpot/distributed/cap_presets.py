@@ -82,7 +82,7 @@ def _key(
 
     ``mac_type`` is here for the same reason one step further out. Under
     ``"dehnen_error"`` the self walk accepts on a pair policy and NOT on theta, so
-    its self queue is floored rather than theta-scaled (``_SELF_QUEUE_CRITERION_THETA``)
+    its caps come from measured criterion coefficients rather than from theta
     and it is deliberately LARGER than the geometric one at the same theta. Without
     the criterion in the key those two runs share an entry: a geometric run at
     theta 0.8 records the smaller caps, the next criterion run reads them back, and

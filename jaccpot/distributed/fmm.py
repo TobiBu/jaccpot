@@ -291,17 +291,59 @@ def _round_up_pow2(value: int) -> int:
 #: Opening angle the queue coefficients above were measured at.
 _QUEUE_THETA_REF = 0.4
 
-#: Opening angle the SELF queue is sized at when the Dehnen criterion is running.
-#: Under ``mac_type="dehnen_error"`` the self walk's acceptance is decided by the pair
-#: policy and NOT by theta -- ``adaptive_pair_policy`` deletes ``mac_ok`` outright in
-#: paper mode. So the theta-scaled rule above would size that queue from a knob that
-#: gates nothing: at a loose theta and a tight ``adaptive_eps`` it under-provisions,
-#: and an under-provisioned queue truncates the walk SILENTLY, reading *faster* with
-#: only ``self_near_pairs`` as the witness. Until the rule is re-derived against the
-#: criterion (that needs the N=1e7 / 5-device measurement), take the tightest angle
-#: the law was fitted at as a FLOOR: never provision the self queue for less than
-#: theta 0.3, and let a tighter configured theta still raise it.
-_SELF_QUEUE_CRITERION_THETA = 0.3
+#: Cap coefficients for the Dehnen mass-dependent MAC, MEASURED not inherited.
+#:
+#: Under ``mac_type="dehnen_error"`` theta decides nothing -- ``adaptive_pair_policy``
+#: deletes ``mac_ok`` outright in paper mode -- so the theta-scaled rule above is being
+#: driven by a knob that gates nothing, in BOTH directions: it over-provisions the
+#: queues (wasted time) and under-provisions two of the far caps (silent truncation).
+#: These replace it, and carry no theta factor at all.
+#:
+#: Bisected 2026-08-31 (``bench/results/distributed_dehnen_mac/capcal_*.json``): each
+#: cap walked down -- or UP -- with every other cap at 4x derived, until the walk
+#: truncated. Two witnesses per point, the buffer's own overflow flag AND the far/near
+#: counts against an untruncated reference, because a truncated walk reads FASTER and a
+#: flag is only a guard someone remembered to write. Four configurations, quoted as the
+#: coefficient on the structural quantity so the rule extrapolates:
+#:
+#:     coefficient at floor        ndev2      ndev4      ndev2      ndev2
+#:                                 l512       l512       l1024      l512
+#:                                 e1e-5      e1e-5      e1e-5      e1e-3    worst
+#:     self queue / wavefront       2.00       2.91       1.46       2.00      2.91
+#:     self far / leaves            0.50       1.00       0.50       1.00      1.00
+#:     self near / leaves           1.00       1.00       1.00       1.00      1.00
+#:     cross queue / (sqrt(r)*wf)   4.00       6.72       5.82       4.00      6.72
+#:     cross far / (r*leaves)       1.00       0.67       0.50       1.00      1.00
+#:     cross near / (r*leaves)      1.00       1.33       1.00       1.00      1.33
+#:
+#: Shipped values are the worst observed times ~2x, rounded by the power-of-two
+#: rounding downstream. The asymmetric margin is deliberate and is the same reasoning
+#: the geometric rule states: an OVER-provisioned buffer costs time linearly, an
+#: UNDER-provisioned one truncates the walk silently.
+#:
+#: TWO THINGS THE MEASUREMENT FOUND that reading the code would not have:
+#:
+#: * **The far caps peak at LOOSE eps, not tight.** `self far` needs 0.5*leaves at
+#:   eps=1e-5 and 1.0*leaves at eps=1e-3. Looser eps accepts far pairs higher in the
+#:   tree -- fewer but bigger -- so the per-node far list is largest in the MIDDLE of a
+#:   usable eps grid. Calibrating only at the tightest eps, which is the obvious choice
+#:   because tighter means a deeper walk, ships a cap that truncates at loose eps.
+#: * **The linear ``remote`` factor on the cross near cap is not enough.** At ndev 4 the
+#:   floor is 1.33x ``remote * num_leaves``. That factor was never measured for the
+#:   geometric MAC either -- ``_derive_walk_caps`` says so -- and it is the one a
+#:   five-device run leans on hardest.
+#: The values are the SMALLEST that keep every one of the 24 measured points at >= 2x
+#: its floor, solved numerically rather than eyeballed. Picking them by hand from the
+#: worst coefficient and doubling it looks equivalent and is not: the power-of-two
+#: rounding downstream compounds the coefficient, so a "2x margin" chosen on paper came
+#: out 4-8x in practice -- which is the over-provisioning this measurement existed to
+#: remove. The 2x is on the ROUNDED cap, where it can be checked.
+_CRITERION_SELF_QUEUE_COEFF = 3.0
+_CRITERION_CROSS_QUEUE_COEFF = 6.75
+_CRITERION_FAR_PER_NODE_COEFF = 1.25
+_CRITERION_NEAR_PER_LEAF_COEFF = 1.25
+_CRITERION_CROSS_FAR_COEFF = 1.25
+_CRITERION_CROSS_NEAR_COEFF = 1.5
 
 #: How the wavefront queue requirement grows as the MAC tightens. Measured, not
 #: assumed: at ndev 5, per-device 2 097 152, leaf 512, order 6, walking each queue
@@ -344,6 +386,8 @@ def _derive_walk_caps(
     ndev: int,
     theta: float = _QUEUE_THETA_REF,
     self_theta: Optional[float] = None,
+    criterion: bool = False,
+    cross_criterion: bool = False,
 ) -> dict[str, int]:
     """Size the traversal buffers from the per-device particle count.
 
@@ -411,9 +455,16 @@ def _derive_walk_caps(
         :func:`_queue_theta_scale`.
     self_theta : Optional[float]
         Overrides ``theta`` for the SELF queue only. ``None`` (default) keeps them
-        equal, which is right whenever theta is what the self walk accepts on. It is
-        not right under ``mac_type="dehnen_error"``, where a pair policy decides and
-        theta gates nothing -- see :data:`_SELF_QUEUE_CRITERION_THETA`.
+        equal. Ignored when ``criterion`` is set, since the criterion's caps carry no
+        theta factor at all.
+    criterion : bool
+        Whether the SELF walk accepts on the Dehnen criterion rather than on theta.
+        Switches its three caps onto the measured coefficients in
+        :data:`_CRITERION_SELF_QUEUE_COEFF` and friends.
+    cross_criterion : bool
+        The same for the CROSS walk. Separate from ``criterion`` because the self-only
+        ablation runs a criterion self walk against a geometric cross walk, and each
+        walk's caps must follow whichever test actually decides it.
 
     Returns
     -------
@@ -425,7 +476,7 @@ def _derive_walk_caps(
     num_leaves = max(1, -(-n // max(1, int(leaf_size))))
     theta_scale = _queue_theta_scale(theta)
     # The self walk can be running an acceptance test that theta does not gate at
-    # all -- see `resolved_for` and `_SELF_QUEUE_CRITERION_THETA`.
+    # all -- see `resolved_for` and `_CRITERION_SELF_QUEUE_COEFF`.
     self_theta_scale = _queue_theta_scale(
         theta if self_theta is None else float(self_theta)
     )
@@ -437,14 +488,26 @@ def _derive_walk_caps(
     # every platform, and it only ever rounds down, which the power-of-two rounding
     # above it more than makes up for.
     wavefront = num_leaves * math.isqrt(num_leaves)
-    far_per_node = max(_MIN_INTERACTIONS_PER_NODE, _round_up_pow2(num_leaves // 2))
-    near_per_leaf = max(_MIN_NEIGHBORS_PER_LEAF, _round_up_pow2(num_leaves))
+    if criterion:
+        far_per_node = max(
+            _MIN_INTERACTIONS_PER_NODE,
+            _round_up_pow2(int(_CRITERION_FAR_PER_NODE_COEFF * num_leaves)),
+        )
+        near_per_leaf = max(
+            _MIN_NEIGHBORS_PER_LEAF,
+            _round_up_pow2(int(_CRITERION_NEAR_PER_LEAF_COEFF * num_leaves)),
+        )
+    else:
+        far_per_node = max(_MIN_INTERACTIONS_PER_NODE, _round_up_pow2(num_leaves // 2))
+        near_per_leaf = max(_MIN_NEIGHBORS_PER_LEAF, _round_up_pow2(num_leaves))
     return {
         "process_block": _DISTRIBUTED_PROCESS_BLOCK,
         "max_pair_queue": max(
             _MIN_PAIR_QUEUE,
             _round_up_pow2(
-                int(_SELF_QUEUE_WAVEFRONT_COEFF * self_theta_scale * wavefront)
+                int(_CRITERION_SELF_QUEUE_COEFF * wavefront)
+                if criterion
+                else int(_SELF_QUEUE_WAVEFRONT_COEFF * self_theta_scale * wavefront)
             ),
         ),
         "max_interactions_per_node": far_per_node,
@@ -465,20 +528,31 @@ def _derive_walk_caps(
             _MIN_PAIR_QUEUE,
             _round_up_pow2(
                 int(
-                    _CROSS_QUEUE_WAVEFRONT_COEFF
+                    (
+                        _CRITERION_CROSS_QUEUE_COEFF
+                        if cross_criterion
+                        else _CROSS_QUEUE_WAVEFRONT_COEFF * theta_scale
+                    )
                     * math.sqrt(remote_domains)
-                    * theta_scale
                     * wavefront
                 )
             ),
         ),
         "cross_max_interactions_per_node": max(
             _MIN_INTERACTIONS_PER_NODE,
-            _round_up_pow2(remote_domains * (num_leaves // 2)),
+            _round_up_pow2(
+                int(_CRITERION_CROSS_FAR_COEFF * remote_domains * num_leaves)
+                if cross_criterion
+                else remote_domains * (num_leaves // 2)
+            ),
         ),
         "cross_max_neighbors_per_leaf": max(
             _MIN_NEIGHBORS_PER_LEAF,
-            _round_up_pow2(remote_domains * num_leaves),
+            _round_up_pow2(
+                int(_CRITERION_CROSS_NEAR_COEFF * remote_domains * num_leaves)
+                if cross_criterion
+                else remote_domains * num_leaves
+            ),
         ),
     }
 
@@ -787,21 +861,19 @@ class DistributedFMMConfig:
         # nothing -- and under-sizing it truncates the walk SILENTLY. Floor it at the
         # tightest angle the queue law was fitted at. The CROSS queue keeps the
         # configured theta, because the cross walk really is geometric.
-        self_theta = float(self.theta)
-        cross_theta = float(self.theta)
-        if str(self.mac_type) == "dehnen_error":
-            self_theta = min(self_theta, _SELF_QUEUE_CRITERION_THETA)
-            # Same argument for the cross queue, but only when the criterion is
-            # actually deciding there. Under the self-only ablation the cross walk
-            # really is geometric and theta really does size it.
-            if bool(self.mac_cross_criterion):
-                cross_theta = min(cross_theta, _SELF_QUEUE_CRITERION_THETA)
+        # Each walk's caps follow whichever test actually decides that walk. Under the
+        # criterion theta gates nothing, so its caps carry no theta factor -- see
+        # `_CRITERION_SELF_QUEUE_COEFF` for the bisection behind the coefficients, and
+        # for the two caps that turned out UNDER-provisioned rather than over.
+        criterion = str(self.mac_type) == "dehnen_error"
+        cross_criterion = criterion and bool(self.mac_cross_criterion)
         derived = _derive_walk_caps(
             per_device_n=int(per_device_n),
             leaf_size=int(self.leaf_size),
             ndev=int(ndev),
-            theta=cross_theta,
-            self_theta=self_theta,
+            theta=float(self.theta),
+            criterion=criterion,
+            cross_criterion=cross_criterion,
         )
         return dataclasses.replace(self, **{f: derived[f] for f in unset})
 

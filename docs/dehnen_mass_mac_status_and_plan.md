@@ -286,6 +286,56 @@ cross-domain tests SKIP in a worktree until yggdrax PR #54 is merged into
 `/export/home/tbuck/yggdrax`, and the GPU measurements above were taken by running the
 scripts directly (where `PYTHONPATH` does win) rather than under pytest.
 
+### 0c. The caps are CALIBRATED for the criterion — **DONE, and two were too SMALL**
+
+`_derive_walk_caps` was fitted against the geometric MAC and scales the queues as
+`(0.4/theta)^1.5`. Under the criterion theta gates nothing, so that rule was being driven
+by a knob that decides nothing — **in both directions**.
+
+Bisected 2026-08-31 on GPU: each cap walked down (or UP) with every other at 4x derived,
+until the walk truncated. Two witnesses per point — the buffer's own overflow flag AND the
+far/near counts against an untruncated reference — because a truncated walk reads FASTER and
+a flag is only a guard someone remembered to write. Four configurations, as coefficients on
+the structural quantity so the result extrapolates:
+
+| coefficient at floor | ndev2 l512 e1e-5 | ndev4 l512 e1e-5 | ndev2 l1024 e1e-5 | ndev2 l512 **e1e-3** | worst | shipped |
+|---|---|---|---|---|---|---|
+| self queue / wavefront | 2.00 | 2.91 | 1.46 | 2.00 | 2.91 | **3.0** |
+| self far / leaves | 0.50 | 1.00 | 0.50 | **1.00** | 1.00 | **1.25** |
+| self near / leaves | 1.00 | 1.00 | 1.00 | 1.00 | 1.00 | **1.25** |
+| cross queue / (sqrt(r)·wf) | 4.00 | 6.72 | 5.82 | 4.00 | 6.72 | **6.75** |
+| cross far / (r·leaves) | 1.00 | 0.67 | 0.50 | **1.00** | 1.00 | **1.25** |
+| cross near / (r·leaves) | 1.00 | **1.33** | 1.00 | 1.00 | 1.33 | **1.5** |
+
+Net effect: **queues 2–4x SMALLER** (the wavefront capacity sets per-iteration work in the
+traversal loop, so this is compute and not just memory) and the **far/near caps 2–4x
+LARGER**. The second half is not tuning, it is a correctness fix.
+
+**THREE THINGS THE MEASUREMENT FOUND THAT READING THE CODE WOULD NOT HAVE:**
+
+1. **`max_interactions_per_node` and `cross_max_interactions_per_node` were UNDER-provisioned
+   for the criterion.** Only `auto_scale_caps=True` was hiding it; with auto-scaling off the
+   cross far list truncates silently — faster, and wrong.
+2. **The far caps peak at LOOSE eps, not tight.** `self far` needs 0.5·leaves at eps=1e-5 and
+   1.0·leaves at eps=1e-3. Looser eps accepts far pairs higher in the tree — fewer but
+   bigger — so the per-node far list is largest in the MIDDLE of a usable grid. Calibrating
+   only at the tightest eps, which is the obvious choice because tighter means a deeper walk,
+   ships a cap that truncates at loose eps. This is trap 11's "do not read a falling far
+   count as a tightening criterion", one level out.
+3. **The linear `remote` factor on the cross near cap is not enough** — 1.33x at ndev 4. That
+   factor was never measured for the geometric MAC either (`_derive_walk_caps` says so), and
+   it is the one a five-device run leans on hardest.
+
+Coefficients are the SMALLEST keeping all 24 points at >=2x their floor, solved numerically.
+Choosing "worst observed x2" by hand looks equivalent and is not: the power-of-two rounding
+downstream compounds the coefficient, so a 2x margin picked on paper came out 4–8x.
+
+**VERIFIED with `auto_scale_caps=OFF`** — nothing may rescue an under-provisioned buffer —
+across 2 leaf sizes x 5 eps x 2 device counts: **20/20 configurations, zero flags**, including
+configurations outside the bisected set (ndev4/leaf1024 has num_leaves=256), so the
+coefficients extrapolate rather than merely fit. Artifacts:
+`bench/results/distributed_dehnen_mac/capcal_*.json`.
+
 **What is still missing before this is a paper number:** N=10^7 and 5 devices (this is 10^6
 on 2, where cross-domain work is 31 % of the near field rather than 53 %), and a matched
 WALL-CLOCK comparison rather than matched work. The seed count is now 3 at leaf 512 and

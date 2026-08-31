@@ -41,6 +41,7 @@ from jaccpot.distributed._force_scale import (
     flatten_neighbor_csr,
     policy_upward_view,
 )
+from jaccpot.distributed.fmm import DERIVED_CAP_FIELDS
 from jaccpot.runtime._adaptive_policy import (
     _far_field_force_scale_by_node,
     accumulate_own_down_parent_chain,
@@ -499,88 +500,116 @@ def test_the_extracted_parent_chain_accumulation_matches_the_far_field_helper():
 # --------------------------------------------------------------------------- #
 
 
-def test_the_criterion_floors_the_self_queue_instead_of_scaling_it_by_theta():
-    """A loose theta must not shrink the self queue when a pair policy decides.
+def test_the_criterion_caps_come_from_measurement_not_from_theta():
+    """Under the criterion the caps must not scale with ``theta`` at all.
 
-    ``_derive_walk_caps`` scales every wavefront queue as ``(0.4 / theta) ** 1.5``,
-    which is right whenever ``theta`` is what the walk accepts on. Under
-    ``mac_type="dehnen_error"`` it is not: ``adaptive_pair_policy`` deletes
-    ``mac_ok`` outright in paper mode, so the geometric verdict decides nothing and
-    ``adaptive_eps`` is the accuracy knob. At a loose ``theta`` and a tight ``eps``
-    the unmodified rule under-provisions the self queue -- and the rule's own
-    docstring says what that costs: the walk truncates SILENTLY, reading *faster*
-    with only ``self_near_pairs`` as the witness.
+    ``_derive_walk_caps`` scales the geometric queues as ``(0.4 / theta) ** 1.5``,
+    which is right whenever theta is what the walk accepts on. Under
+    ``mac_type="dehnen_error"`` it is not: ``adaptive_pair_policy`` deletes ``mac_ok``
+    outright, so theta gates nothing and a theta-scaled cap is driven by a knob that
+    decides nothing -- in BOTH directions, over-provisioning the queues and
+    under-provisioning two of the far caps.
 
-    The cross queue follows whichever criterion decides that walk: ``theta`` under
-    the self-only ablation, the same floor when the criterion is deciding there too.
-    Both halves are asserted, so a change that floors everything unconditionally
-    fails here instead of over-provisioning every geometric run on the lane.
-    """
-
-    from jaccpot.distributed.fmm import (
-        _SELF_QUEUE_CRITERION_THETA,
-        DistributedFMMConfig,
-    )
-
-    common = dict(leaf_size=64, theta=0.8)
-    geometric = DistributedFMMConfig(**common).resolved_for(262144, 4)
-    criterion = DistributedFMMConfig(
-        **common, mac_type="dehnen_error", adaptive_eps=1e-4
-    ).resolved_for(262144, 4)
-    floored = DistributedFMMConfig(
-        **{**common, "theta": _SELF_QUEUE_CRITERION_THETA}
-    ).resolved_for(262144, 4)
-
-    assert criterion.max_pair_queue > geometric.max_pair_queue, (
-        "the criterion's self queue was sized by a theta that gates nothing "
-        f"({criterion.max_pair_queue} vs geometric {geometric.max_pair_queue})"
-    )
-    assert criterion.max_pair_queue == floored.max_pair_queue, (
-        "the criterion's self queue is not the theta-0.3 floor "
-        f"({criterion.max_pair_queue} vs {floored.max_pair_queue})"
-    )
-    # The CROSS queue follows whichever criterion is actually deciding that walk.
-    # Under the self-only ablation the cross walk really is geometric and theta really
-    # does size it; with the cross criterion on, theta gates neither walk and both
-    # queues take the floor. Asserted in both directions, so a change that floors
-    # everything unconditionally fails here rather than silently over-provisioning
-    # every geometric run on the lane.
-    self_only = DistributedFMMConfig(
-        **common,
-        mac_type="dehnen_error",
-        adaptive_eps=1e-4,
-        mac_cross_criterion=False,
-    ).resolved_for(262144, 4)
-    assert self_only.cross_max_pair_queue == geometric.cross_max_pair_queue, (
-        "with mac_cross_criterion=False the cross walk is geometric, so its queue "
-        "must keep tracking theta"
-    )
-    assert criterion.cross_max_pair_queue == floored.cross_max_pair_queue, (
-        "with the criterion deciding the cross walk too, theta gates neither walk, "
-        f"so the cross queue must take the same floor "
-        f"({criterion.cross_max_pair_queue} vs {floored.cross_max_pair_queue})"
-    )
-    assert criterion.cross_max_pair_queue > geometric.cross_max_pair_queue
-
-
-def test_a_theta_tighter_than_the_floor_still_raises_the_self_queue():
-    """The floor is a floor, not a pin.
-
-    A configured ``theta`` below ``_SELF_QUEUE_CRITERION_THETA`` means the prepass
-    walk underneath the criterion is itself tighter, so the queue requirement is
-    larger, not capped.
+    So the criterion's caps are identical at theta 0.3 and theta 0.8, and the
+    geometric ones are not. Both halves asserted: a change that made the geometric
+    caps theta-blind too would be a silent regression for every geometric run.
     """
 
     from jaccpot.distributed.fmm import DistributedFMMConfig
 
-    floored = DistributedFMMConfig(
-        leaf_size=64, theta=0.3, mac_type="dehnen_error", adaptive_eps=1e-4
-    ).resolved_for(262144, 4)
-    tighter = DistributedFMMConfig(
-        leaf_size=64, theta=0.15, mac_type="dehnen_error", adaptive_eps=1e-4
-    ).resolved_for(262144, 4)
+    def caps(theta, **kw):
+        cfg = DistributedFMMConfig(leaf_size=64, theta=theta, **kw).resolved_for(
+            262144, 4
+        )
+        return {f: int(getattr(cfg, f)) for f in DERIVED_CAP_FIELDS}
 
-    assert tighter.max_pair_queue > floored.max_pair_queue
+    crit = dict(mac_type="dehnen_error", adaptive_eps=1e-4)
+    assert caps(0.3, **crit) == caps(
+        0.8, **crit
+    ), "the criterion's caps still move with theta, which gates nothing for it"
+    assert caps(0.3) != caps(0.8), (
+        "the GEOMETRIC caps stopped tracking theta -- that is a regression for every "
+        "geometric run, where theta really does set the descent depth"
+    )
+
+
+def test_the_criterion_grows_the_far_caps_it_was_measured_to_need():
+    """Two caps were UNDER-provisioned for the criterion, not over.
+
+    The bisection found the queues 4-8x too large *and* both far caps too SMALL --
+    ``max_interactions_per_node`` at loose eps and
+    ``cross_max_interactions_per_node`` throughout. Only ``auto_scale_caps=True`` was
+    hiding the second kind, and an under-provisioned buffer truncates the walk
+    silently, which is the direction that costs correctness rather than time.
+
+    Asserted as directions rather than as numbers, so retuning a coefficient does not
+    have to touch this test -- but reverting the fix does.
+    """
+
+    from jaccpot.distributed.fmm import DistributedFMMConfig
+
+    geo = DistributedFMMConfig(leaf_size=512, theta=0.5).resolved_for(524288, 2)
+    crit = DistributedFMMConfig(
+        leaf_size=512, theta=0.5, mac_type="dehnen_error", adaptive_eps=1e-5
+    ).resolved_for(524288, 2)
+
+    # queues shrink -- the compute the measurement was for
+    assert crit.max_pair_queue <= geo.max_pair_queue
+    # far caps grow -- the silent truncation the measurement found
+    assert crit.max_interactions_per_node > geo.max_interactions_per_node
+    assert crit.cross_max_interactions_per_node > geo.cross_max_interactions_per_node
+    assert crit.cross_max_neighbors_per_leaf > geo.cross_max_neighbors_per_leaf
+
+
+def test_the_shipped_criterion_caps_cover_every_measured_floor():
+    """Every bisected floor must sit at or below the shipped cap, with margin.
+
+    The floors are the measurement (``bench/results/distributed_dehnen_mac/capcal_*``);
+    the coefficients are a fit to them. Pinning the floors here is what makes a future
+    coefficient change fail loudly instead of quietly dropping below one of them --
+    and below a floor the walk truncates without raising.
+    """
+
+    from jaccpot.distributed.fmm import DistributedFMMConfig
+
+    # (ndev, per_device, leaf) -> measured floor per cap
+    measured = {
+        (2, 524288, 512): dict(
+            max_pair_queue=65536,
+            max_interactions_per_node=1024,  # the eps=1e-3 worst case
+            max_neighbors_per_leaf=1024,
+            cross_max_pair_queue=131072,
+            cross_max_interactions_per_node=1024,
+            cross_max_neighbors_per_leaf=1024,
+        ),
+        (4, 262144, 512): dict(
+            max_pair_queue=32768,
+            max_interactions_per_node=512,
+            max_neighbors_per_leaf=512,
+            cross_max_pair_queue=131072,
+            cross_max_interactions_per_node=1024,
+            cross_max_neighbors_per_leaf=2048,
+        ),
+        (2, 524288, 1024): dict(
+            max_pair_queue=16384,
+            max_interactions_per_node=256,
+            max_neighbors_per_leaf=512,
+            cross_max_pair_queue=65536,
+            cross_max_interactions_per_node=256,
+            cross_max_neighbors_per_leaf=512,
+        ),
+    }
+    for (ndev, per, leaf), floors in measured.items():
+        cfg = DistributedFMMConfig(
+            leaf_size=leaf, theta=0.5, mac_type="dehnen_error", adaptive_eps=1e-5
+        ).resolved_for(per, ndev)
+        for cap, floor in floors.items():
+            shipped = int(getattr(cfg, cap))
+            assert shipped >= 2 * floor, (
+                f"ndev={ndev} leaf={leaf}: {cap} ships {shipped} against a measured "
+                f"floor of {floor} -- below 2x the floor there is no margin left, and "
+                "below the floor the walk truncates silently"
+            )
 
 
 # --------------------------------------------------------------------------- #
