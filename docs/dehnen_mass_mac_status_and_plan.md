@@ -228,16 +228,23 @@ every arm with all overflow flags clear and a 65 536-particle fp64 probe.** Read
 matched MEDIAN (trap 9), interpolated inside an eps bracket that is interior in every case
 (`3e-5 .. 1e-4`), with the trap 3/8 guards enforced rather than assumed:
 
-| leaf | p99.99 gain | p99 gain | near-field work |
-|---|---|---|---|
-| 256 | 4.40x | 2.23x | 0.769x |
-| 512 | **5.56x** | 2.96x | 0.807x |
-| 1024 | **7.88x** | 2.81x | 0.873x |
+**3 seeds at leaf 512 and 1024**, quoted `median [min, max]` as the record requires:
 
-**Monotone in leaf size**, which is the same shape the single-GPU lane reports across the
-same three leaf sizes (2.7x -> 7.0x -> 21.8x) at a shallower slope — different order (4, not
-8), different profile, two devices. That the mesh port reproduces the *trend* is the best
-evidence available that it is faithful rather than accidentally flattering.
+| leaf | seeds | p99.99 gain | p99 gain | near-field work |
+|---|---|---|---|---|
+| 256 | 1 | 4.40x | 2.23x | 0.77x |
+| 512 | 3 | **6.58x** [5.56, 7.30] | 2.83x [2.73, 2.96] | 0.80x [0.80, 0.81] |
+| 1024 | 3 | **7.69x** [6.85, 7.88] | 2.93x [2.81, 3.18] | 0.88x [0.87, 0.88] |
+
+**This meets the accept condition at both leaf sizes** — p99.99 improved by >=5x with
+near-field work not increasing, every overflow flag clear and `self_near_pairs` monotone in
+`eps` at every point. Every seed is above 1x on every statistic.
+
+**What it does NOT establish is a leaf-size trend between 512 and 1024**: those two bands
+OVERLAP ([5.56, 7.30] against [6.85, 7.88]), so three seeds do not separate them. The
+single-GPU lane reports 2.7x -> 7.0x -> 21.8x across these three sizes with non-overlapping
+adjacent bands; here only the step from leaf 256 is clear. Do not quote a monotone
+leaf trend from this data — quote the bands.
 
 **The ablation is the point.** At leaf 256, self-only against self+cross:
 
@@ -250,7 +257,8 @@ Carrying the criterion across domains roughly **doubles** the tail gain and turn
 increase into a 23 % decrease. A self-only port would have measured 1.87x and looked like a
 weak result; that would have been a statement about half a port, not about the criterion.
 
-Artifact: `bench/results/distributed_dehnen_mac/leafsweep_ndev2_1M_seed20260831.json`.
+Artifacts: `bench/results/distributed_dehnen_mac/leafsweep_ndev2_1M_seed2026083{1}.json`
+and `..._seed2026090{1,2}.json`.
 
 **A truncated walk reads FASTER, and this run proved it again.** The first
 `eps=1e-3` arm at leaf 256 came back with `self_near = 827 536` and `ovf=True`; with the
@@ -258,8 +266,9 @@ caps grown to clear the flag it is `1 293 194`. The truncated run reported 36 % 
 than the correct one. Every number above is from a run with every flag clear.
 
 **What is still missing before this is a paper number:** N=10^7 and 5 devices (this is 10^6
-on 2, where cross-domain work is 31 % of the near field rather than 53 %), a matched
-WALL-CLOCK comparison rather than matched work, and more than one seed.
+on 2, where cross-domain work is 31 % of the near field rather than 53 %), and a matched
+WALL-CLOCK comparison rather than matched work. The seed count is now 3 at leaf 512 and
+1024, and 1 at leaf 256.
 
 **NOT DONE, in the order it should be done:**
 
