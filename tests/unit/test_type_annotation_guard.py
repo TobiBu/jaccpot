@@ -157,6 +157,13 @@ CONVERTED_MODULES = (
     # bigger prize; they wait for a GPU run, because interpret mode is not the
     # Triton lowering and there is no GPU leg in CI. Reason recorded at the site.
     "jaccpot/pallas/nearfield_mutual.py",
+    # Phase 2, the large-N lane. Six of the eleven functions: the `*_impl` kernels the
+    # runtime dispatches. `_collect_target_leaf_batch_acc` has NO array parameters
+    # (ints and a callable), the two tile-sequence helpers need two axis names this
+    # module does not have and are their own change, and two more were targeted and
+    # never reached by the capture -- annotating those would be deriving a shape
+    # from a docstring, which section 4.2 forbids.
+    "jaccpot/nearfield/_large_n_blocks.py",
 )
 
 # Array parameters deliberately left bare, each with its reason recorded at the
@@ -191,6 +198,12 @@ DELIBERATELY_BARE: frozenset[tuple[str, str]] = frozenset(
         # the annotation would catch is one the next line would catch too.
         ("jaccpot/pallas/nearfield_mutual.py", "softening_sq"),
         ("jaccpot/pallas/nearfield_mutual.py", "g_value"),
+        # Scalars again, and `G` is the `Union[float, Array]` case that would break
+        # every defaulted call -- the same entry as `near_field.py` above, which is
+        # where these two signatures got the spelling.
+        ("jaccpot/nearfield/_large_n_blocks.py", "G"),
+        ("jaccpot/nearfield/_large_n_blocks.py", "softening_sq"),
+        ("jaccpot/nearfield/_large_n_blocks.py", "g_const"),
     }
 )
 
