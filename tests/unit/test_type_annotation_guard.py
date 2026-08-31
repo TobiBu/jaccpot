@@ -149,6 +149,14 @@ CONVERTED_MODULES = (
     # work -- listing it here says the `"3"` family must not regress, not that
     # the module is finished.
     "jaccpot/operators/complex_ops.py",
+    # Phase 2, second change, and the FIRST enforced annotations anywhere in
+    # `jaccpot/pallas/`. Not a module conversion: the five module-level entry
+    # points carry shapes, the three tile helpers below them do not, and the split
+    # is on whether the check would execute inside a `pallas_call` body. The
+    # helpers hold 33 of the module's 99 measured silent acceptances and are the
+    # bigger prize; they wait for a GPU run, because interpret mode is not the
+    # Triton lowering and there is no GPU leg in CI. Reason recorded at the site.
+    "jaccpot/pallas/nearfield_mutual.py",
 )
 
 # Array parameters deliberately left bare, each with its reason recorded at the
@@ -177,6 +185,12 @@ DELIBERATELY_BARE: frozenset[tuple[str, str]] = frozenset(
         # `Float[Array, ""]` would reject the default path itself.
         ("jaccpot/runtime/reference.py", "G"),
         ("jaccpot/runtime/reference.py", "softening"),
+        # Scalars, and the third instance of the same reason: `Float[Array, ""]`
+        # buys nothing a scalar can get wrong, and both are reshaped to `(1,)` by
+        # the Pallas wrappers anyway, so the only shape a caller could pass that
+        # the annotation would catch is one the next line would catch too.
+        ("jaccpot/pallas/nearfield_mutual.py", "softening_sq"),
+        ("jaccpot/pallas/nearfield_mutual.py", "g_value"),
     }
 )
 
