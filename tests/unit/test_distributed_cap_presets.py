@@ -258,3 +258,54 @@ def test_geometric_preset_keys_are_unchanged_by_the_criterion_component():
     assert written == "1024:2:t0.4:l32"
     for mac in ("", "bh", "engblom", "dehnen"):
         assert cp.lookup(presets, 1024, 2, 0.4, 32, mac) == caps, mac
+
+
+def test_two_criterion_tolerances_do_not_share_a_preset_slot():
+    """A tight-eps run's caps must not be served to a loose-eps run.
+
+    Under the criterion, eps -- not theta -- sets how deep the walk descends, so the
+    cap requirement moves with it. Measured: the per-node far cap needs
+    ``0.5 * num_leaves`` at eps=1e-5 and ``1.0 * num_leaves`` at eps=1e-3, because
+    looser eps accepts far pairs higher in the tree. So a converged preset from a
+    tight-eps run is an UNDER-estimate for a loose-eps run at the same theta and leaf,
+    and reading it back truncates the far list -- faster, and wrong, with only the
+    overflow flag to say so.
+
+    This is the same hazard the ``theta`` and ``mac_type`` components already guard,
+    one knob further in.
+    """
+
+    from jaccpot.distributed import cap_presets as cp
+
+    presets: dict = {}
+    tight = {f: 111 for f in cp.CAP_FIELDS}
+    cp.record(presets, 65536, 4, 262144, tight, 0.5, 512, "dehnen_error", 1e-5)
+
+    assert cp.lookup(presets, 65536, 4, 0.5, 512, "dehnen_error", 1e-5) == tight
+    assert (
+        cp.lookup(presets, 65536, 4, 0.5, 512, "dehnen_error", 1e-3) is None
+    ), "the loose-eps run read back the tight-eps run's caps"
+
+    loose = {f: 222 for f in cp.CAP_FIELDS}
+    cp.record(presets, 65536, 4, 262144, loose, 0.5, 512, "dehnen_error", 1e-3)
+    assert cp.lookup(presets, 65536, 4, 0.5, 512, "dehnen_error", 1e-3) == loose
+    assert cp.lookup(presets, 65536, 4, 0.5, 512, "dehnen_error", 1e-5) == tight
+
+
+def test_the_eps_component_never_touches_a_geometric_key():
+    """An existing presets file must keep resolving, byte for byte.
+
+    ``adaptive_eps`` is meaningless without the criterion, so it joins the key only
+    alongside a non-geometric ``mac_type``. A geometric caller that happens to pass a
+    stray eps must still hit the same slot.
+    """
+
+    from jaccpot.distributed import cap_presets as cp
+
+    presets: dict = {}
+    caps = {f: 7 for f in cp.CAP_FIELDS}
+    cp.record(presets, 1024, 2, 2048, caps, 0.4, 32)
+    assert next(iter(presets)) == "1024:2:t0.4:l32"
+    for mac in ("", "bh", "engblom", "dehnen"):
+        for eps in (0.0, 1e-5, 1e-3):
+            assert cp.lookup(presets, 1024, 2, 0.4, 32, mac, eps) == caps, (mac, eps)

@@ -332,6 +332,14 @@ _QUEUE_THETA_REF = 0.4
 #:   floor is 1.33x ``remote * num_leaves``. That factor was never measured for the
 #:   geometric MAC either -- ``_derive_walk_caps`` says so -- and it is the one a
 #:   five-device run leans on hardest.
+#: AND THEREFORE: the cap requirement is a function of EPS, not just of geometry. A
+#: theta- or eps-sweep that holds explicit caps fixed measures the CAPS and not the knob
+#: -- a buffer truncates partway through, the run gets FASTER, the error moves, and the
+#: trend is an artefact. Leave the caps ``None`` so ``resolved_for`` re-derives them at
+#: every point, check the overflow flags before reading any timing or error, and note
+#: that ``cap_presets._key`` carries ``adaptive_eps`` for exactly this reason. Trap 16
+#: in ``docs/dehnen_mass_mac_status_and_plan.md`` has the numbers.
+#:
 #: The values are the SMALLEST that keep every one of the 24 measured points at >= 2x
 #: its floor, solved numerically rather than eyeballed. Picking them by hand from the
 #: worst coefficient and doubling it looks equivalent and is not: the power-of-two
@@ -2979,6 +2987,7 @@ def distributed_fmm_accelerations(
             float(config.theta),
             int(config.leaf_size),
             str(config.mac_type),
+            float(config.adaptive_eps or 0.0),
         )
         if seed is not None:
             config = _cp.apply_caps(config, seed)
@@ -3019,6 +3028,7 @@ def distributed_fmm_accelerations(
             float(config.theta),
             int(config.leaf_size),
             str(config.mac_type),
+            float(config.adaptive_eps or 0.0),
         )
         _cp.save_presets(cap_presets_path, presets)
 

@@ -70,6 +70,7 @@ def _key(
     theta: float = 0.0,
     leaf_size: int = 0,
     mac_type: str = "",
+    adaptive_eps: float = 0.0,
 ) -> str:
     """Build the presets key.
 
@@ -90,8 +91,19 @@ def _key(
     describes, reached from a different direction. This is the interaction-cache-key
     hazard from ``docs/dehnen_mass_mac_status_and_plan.md`` in a second cache.
 
-    Only a non-geometric ``mac_type`` appears in the key, so every key an existing
-    presets file already holds is byte-identical to what it was.
+    ``adaptive_eps`` is here for the same reason one knob further in. Under the
+    criterion, eps -- not theta -- sets how deep the walk descends, and the cap
+    requirement moves with it in BOTH directions. Measured 2026-08-31: the per-node far
+    cap needs ``0.5 * num_leaves`` at eps=1e-5 and ``1.0 * num_leaves`` at eps=1e-3,
+    because looser eps accepts far pairs higher in the tree -- fewer but bigger. So a
+    converged preset from a tight-eps run is an UNDER-estimate for a loose-eps run at
+    the same theta and leaf, and reading it back truncates the far list: faster, and
+    wrong, with only the overflow flag to say so. See
+    ``jaccpot.distributed.fmm._CRITERION_SELF_QUEUE_COEFF`` for the bisection.
+
+    Only a non-geometric ``mac_type`` and a non-zero ``adaptive_eps`` appear in the
+    key, so every key an existing presets file already holds is byte-identical to what
+    it was.
 
     Legacy two-part keys (no theta, no leaf) are still read, so an existing presets
     file keeps working; they are simply never written any more.
@@ -108,6 +120,8 @@ def _key(
         Leaf size. 0 reproduces the legacy two-part key.
     mac_type : str
         Acceptance criterion. Empty or a geometric literal adds nothing to the key.
+    adaptive_eps : float
+        The criterion's tolerance. ``0.0`` (the geometric default) adds nothing.
 
     Returns
     -------
@@ -120,7 +134,9 @@ def _key(
     base = f"{int(per_gpu_n)}:{int(ndev)}:t{float(theta):g}:l{int(leaf_size)}"
     mac = str(mac_type).strip()
     if mac and mac not in _GEOMETRIC_MAC_TYPES:
-        return f"{base}:m{mac}"
+        base = f"{base}:m{mac}"
+        if adaptive_eps:
+            base = f"{base}:e{float(adaptive_eps):g}"
     return base
 
 
@@ -155,6 +171,7 @@ def lookup(
     theta: float = 0.0,
     leaf_size: int = 0,
     mac_type: str = "",
+    adaptive_eps: float = 0.0,
 ) -> Optional[dict]:
     """Caps for (per_gpu_n, ndev): exact match, else the nearest LARGER per-GPU N at the
     same ndev (a safe over-estimate), else the nearest SMALLER preset SCALED UP by the
@@ -163,7 +180,7 @@ def lookup(
     or a little memory, not correctness. Extrapolating from a nearby preset is what makes
     calibration cheap at an unmeasured N (few retries instead of the full doubling ladder
     from the small defaults). None if no preset at this ndev at all."""
-    k = _key(per_gpu_n, ndev, theta, leaf_size, mac_type)
+    k = _key(per_gpu_n, ndev, theta, leaf_size, mac_type, adaptive_eps)
     if k in presets:
         return presets[k]["caps"]
     same = [
@@ -189,9 +206,10 @@ def record(
     theta: float = 0.0,
     leaf_size: int = 0,
     mac_type: str = "",
+    adaptive_eps: float = 0.0,
 ) -> dict:
     """Insert/update the (per_gpu_n, ndev) entry with the given caps (in place)."""
-    presets[_key(per_gpu_n, ndev, theta, leaf_size, mac_type)] = {
+    presets[_key(per_gpu_n, ndev, theta, leaf_size, mac_type, adaptive_eps)] = {
         "per_gpu_n": int(per_gpu_n),
         "ndev": int(ndev),
         "total_n": int(total_n),

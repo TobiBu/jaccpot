@@ -609,8 +609,13 @@ def main(argv: Optional[list[str]] = None) -> int:
         default=0.0,
         help=(
             "eq (16a) relative force-accuracy target; required with "
-            "--mac-type dehnen_error. The cross walk stays geometric and keeps "
-            "using --theta."
+            "--mac-type dehnen_error. NOTE the cap coupling: eps -- not theta -- sets "
+            "how deep the criterion's walk descends, so the buffer requirement moves "
+            "with it (the per-node far cap needs 2x more at eps=1e-3 than at 1e-5). "
+            "Do NOT hold an explicit --pair-queue or --cross-* across an eps sweep: "
+            "the caps stay put while the requirement moves, a buffer truncates, and "
+            "the run gets FASTER with a changed error -- so the trend is the cap and "
+            "not the knob. See trap 16 in docs/dehnen_mass_mac_status_and_plan.md."
         ),
     )
     ap.add_argument(

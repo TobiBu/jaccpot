@@ -1753,6 +1753,51 @@ is the **scaled error δa/f** with `f_b ≡ Σ_{a≠b} G μ_a / |x_a−x_b|²`.
    **constant** threshold across all nodes rather than an obviously wrong value.
    `_lane_probe.check_criterion_was_applied()` raises on it, and on a build that carried
    no `pair_policy` at all.
+16. **THE CAPS ARE A FUNCTION OF θ AND ε, so a θ- or ε-sweep with FIXED caps measures
+   the caps and not the knob.** This is the one that will bite the next distributed
+   sweep, and it bites runtime *and* accuracy at once.
+
+   Every traversal buffer is sized from `num_leaves`, `ndev` and — geometrically — θ.
+   But what the walk actually *needs* also moves with the acceptance knob, because the
+   knob is what sets how deep the walk descends:
+
+   - **Geometric arm:** the wavefront requirement scales as `θ^-1.5` (measured, PR #271).
+     A cap taken at θ=0.7 is a **2.8× under-estimate at θ=0.4**.
+   - **Criterion arm:** ε replaces θ, and the per-node *far* cap needs `0.5·num_leaves`
+     at ε=1e-5 but `1.0·num_leaves` at ε=1e-3 — a **2× swing across a usable grid**, and
+     it peaks in the MIDDLE, not at either end (looser ε accepts far pairs higher in the
+     tree: fewer but bigger). Bisected 2026-08-31, see item 0c.
+
+   So if you pass explicit caps — `--pair-queue`, `--cross-*`, a `cap_presets` entry,
+   anything that stops `resolved_for` from deriving them — and then sweep θ or ε, the
+   caps stay put while the requirement moves underneath them. At some point in the sweep
+   a buffer truncates, and truncation:
+
+   - **removes interactions, so the run gets FASTER**, and
+   - **changes the error**, usually for the worse but not always — dropping a diverged
+     contribution can make a point look *better*.
+
+   Either way the trend you plot is the cap, not the knob. A "θ improves runtime" or
+   "ε past here stops helping accuracy" reading is the classic shape of this.
+
+   **Rules:**
+
+   - **Leave the caps `None` across a knob sweep** so `resolved_for` re-derives them at
+     every point. That is what the derived rule is for.
+   - **Check the overflow flags at every point, before reading any timing or error.**
+     This is trap 6's discipline applied to the caps: nothing else in the output
+     distinguishes a truncated point from a fast one.
+   - **Never carry an explicit cap or a `cap_presets` entry across a θ or ε change.**
+     `cap_presets._key` carries `per_gpu_n`, `ndev`, θ, `leaf_size`, `mac_type` *and*
+     `adaptive_eps` for exactly this reason — every knob the requirement depends on is in
+     the key, so a preset from one point cannot be served to another. If you add a knob
+     that moves the caps, add it to the key in the same change.
+   - `auto_scale_caps=True` grows a cap and retries, which makes a sweep survive this —
+     but it also **hides** it. Two of the criterion's far caps were under-provisioned for
+     weeks of this branch's measurements and every flag read clear, because auto-scaling
+     was quietly fixing them. Use it for production runs; turn it **off** when the
+     question is whether the cap rule is right.
+
 15. **`preset="large_n_gpu"` pins `runtime_path="large_n"`.** So on the production preset
    every large-N lane decline *raises* instead of quietly falling back -- which is the
    behaviour you want, and also means the silent-decline branch is unreachable there and
