@@ -113,7 +113,106 @@ __all__ = [
 # the evaluators, `ValueError` from the rotations), so the annotation preempts no
 # message, and a 2-D `local` was reaching `evaluate_local_complex` silently before
 # it.
+#
+# ---------------------------------------------------------------------------
+#
+# THE REST OF THE SPATIAL-VECTOR FAMILY, and what the measurement changed about it.
+#
+# Twenty-four more functions now carry the same contract: `Float[Array, "3"]` on a
+# single `delta`/`direction`, `Float[Array, "_ 3"]` on the batched `deltas`/`directions`.
+# Derived by execution, four calls per function -- `(3,)` in every single-vector case,
+# and the batch axis observed VARYING (`(4, 3)` beside `(17, 3)`, `(6, 3)` beside
+# `(30, 3)`, `(8, 3)` beside `(32, 3)`), which is why that axis is anonymous rather
+# than named. Naming it would assert `deltas` and `directions` agree, and `jax.vmap`
+# already raises a specific error for inconsistent batch sizes, so the annotation
+# would only replace a better message.
+#
+# The `*_batch` siblings were left alone by the delta/direction PR, and the test that
+# pinned it -- `test_batch_variants_keep_taking_batched_deltas` -- warned against
+# annotating them `"3"` by pattern-match, not against annotating them at all. `"_ 3"`
+# satisfies that test rather than overriding it: it still takes the `(3, 3)` the test
+# feeds, and it now rejects the `(3,)` a caller might pass by mistake.
+#
+# FIVE OF THESE WERE INVISIBLE UNTIL THE GATES WERE OPENED, which is worth recording
+# because "not reached" and "unreachable" are different findings. `_evaluate.py` picks
+# between three gradient implementations on two env switches that default to "0":
+# `JACCPOT_LOCAL_EVAL_ORDER4_UNROLLED` and `JACCPOT_LOCAL_EVAL_DTYPE_PRESERVE`. So
+# `evaluate_local_complex_grad_order4_unrolled`,
+# `evaluate_local_complex_grad_analytic_preserve_dtype`,
+# `regular_solid_harmonic_gradient_coefficients_preserve_dtype` and
+# `_regular_solid_harmonic_order4_scalars` are never selected in a default run.
+# Re-recording with both switches set measured all four at `(3,)`.
+#
+# `evaluate_local_complex_with_grad_batch` STAYS BARE, and is the one thing here that
+# a shape cannot be honestly derived for: it is in `__all__`, it has no caller anywhere
+# in `jaccpot/`, `bench/`, `examples/` or `tests/`, and neither test tier reaches it
+# with the gates open or shut. Its docstring claims `(batch, 3)`; a probe that fed it
+# `(batch, 3)` would confirm only the probe. Section 4.2 says derive by execution, so
+# it waits for a caller or a test.
+#
+# HALF OF THESE CLOSE A HOLE AND HALF MOVE AN EXISTING ERROR, and the split was
+# measured rather than assumed -- the first draft of this note claimed all 24 closed
+# holes, and a vacuity check on the contract tests said otherwise (only 4 of 17 failed
+# against the unannotated module). Feeding each one a length-2 delta, one at a time:
+#
+#   SILENTLY ACCEPTED before, so the annotation is protection -- twelve of them:
+#     regular_solid_harmonic_gradient_coefficients (+ _preserve_dtype),
+#     evaluate_local_complex_grad_analytic_preserve_dtype,
+#     evaluate_local_complex_grad_order4_unrolled,
+#     _regular_solid_harmonic_order4_scalars, _angles_from_delta_solidfmm,
+#     _build_complex_harmonic_derivative_coefficients,
+#     _complex_rotation_blocks_{to,from}_z_solidfmm and their _padded twins,
+#     complex_rotation_blocks_{to,from}_z_solidfmm_batch.
+#
+#   ALREADY REJECTED, so the annotation moves the complaint to the boundary and names
+#   the parameter -- `m2m_complex`, `l2l_complex`, `m2l_complex_reference` and most of
+#   the batched family delegate into the eleven the earlier PR annotated, so a bad
+#   delta already raised `TypeCheckError` from a private callee; the unbatched-input
+#   cases already raised `vmap got inconsistent sizes`.
+#
+# Both are worth doing -- the second group's protection is an accident of the current
+# call path, and a refactor that stopped delegating would reopen it silently -- but
+# only the first group is a hole being closed, and the tests are labelled accordingly.
+#
+# THE COEFFICIENT BUFFERS CAME ALONG, and not as scope creep: decorating a function
+# brings EVERY array parameter on it under `test_type_annotation_guard.py`, which is
+# section 4.1's "do it for consistency within a signature you are already annotating"
+# made mechanical. Thirteen of them, all `Inexact[Array, ...]` for the two reasons the
+# note above already gives -- `Inexact` because a real buffer is accepted, anonymous
+# lengths because the bodies slice `[:ncoeff]` and tolerate a longer one.
+#
+# The RANKS are measured and one of them is counter-intuitive: `local` is 1-D even on
+# the `*_batch` functions -- `(25,)` beside a `(3, 3)` batch of deltas -- because one
+# shared expansion is vmapped against many displacements. Only the PLURAL names are
+# 2-D (`locals` `(6, 25)` and `(30, 25)`, `multipoles` `(4, 9)` up to `(17, 25)`).
+# Annotating `local` as `"_ _"` in a batch function by pattern-match would have been
+# wrong, and nothing but running it would have said so.
+#
+# `blocks_to_z` / `blocks_from_z` are `"_ _ _ _"`, rank only. They were observed
+# `(17, 3, 5, 5)`, `(17, 4, 7, 7)` and `(17, 5, 9, 9)`: the trailing pair is SQUARE at
+# three distinct extents, which is a real equality that nothing else checks, and a
+# non-square block array would fail later inside a matmul with an opaque message.
+# Asserting it needs an axis name the section 4.3 table does not have, and adding one
+# is a guide change -- so it is left as the obvious next assertion rather than smuggled
+# in here. The leading axes stay anonymous on purpose: `jax.vmap` already rejects a
+# batch mismatch between these and `multipoles`, with a better message.
+#
+# NOT EVERY ONE OF THESE NARROWS ITS INPUT the way the first eleven did.
+# `_complex_rotation_blocks_to_z_solidfmm_padded` and its `from_z` twin are wrapped by
+# `without_unresolvable_transverse_jvp`, which calls `jnp.asarray(deltas)` before
+# delegating -- so the check sits BEHIND a coercion and a numpy or list caller still
+# works there. Same annotation, different reach; not a reason to spell it differently,
+# but a reason not to claim the narrowing is uniform.
+#
+# That last asymmetry holds in DEFAULT MODE ONLY, which is a distinction worth the
+# line: under `JACCPOT_RUNTIME_TYPECHECK=1` the package-wide import hook enforces
+# `_transverse_degeneracy_jvp`'s own `builder_without_unresolvable(deltas: Array)`,
+# which rejects numpy before its `jnp.asarray` ever runs. So the numpy caller works
+# unchecked and fails checked, and neither behaviour comes from this module. Found by
+# running the contract tests under the hook, not the default suite -- the default
+# suite passed.
 Array = jnp.ndarray
+
 #: `jaxtyping.DTypeLike` admits anything that names a dtype -- a `numpy.dtype`, a
 #: string, and JAX's own scalar types (`jnp.complex128` is a `_ScalarMeta`, not a
 #: `numpy.dtype`). Aliased here beside `Array` because this module deliberately
@@ -486,8 +585,9 @@ def _lower_complex_harmonics_axis_maps(
     return idx_a, idx_b, fac_a, fac_b
 
 
+@jaxtyped(typechecker=beartype)
 def _build_complex_harmonic_derivative_coefficients(
-    delta: Array,
+    delta: Float[Array, "3"],
     *,
     order: int,
     max_derivative_order: int,
@@ -496,7 +596,7 @@ def _build_complex_harmonic_derivative_coefficients(
 
     Parameters
     ----------
-    delta : Array
+    delta : Float[Array, '3']
         Displacement vector ``(3,)``, target centre minus source centre.
     order : int
         Expansion order ``p``. Static: it fixes every packed length and table shape.
@@ -623,9 +723,10 @@ def evaluate_local_complex_derivative_tower(
     jax.jit,
     static_argnames=("order", "max_derivative_order", "conjugate_left"),
 )
+@jaxtyped(typechecker=beartype)
 def evaluate_local_complex_derivative_tower_batch(
-    local: Array,
-    deltas: Array,
+    local: Inexact[Array, "_"],
+    deltas: Float[Array, "_ 3"],
     *,
     order: int,
     max_derivative_order: int,
@@ -635,9 +736,9 @@ def evaluate_local_complex_derivative_tower_batch(
 
     Parameters
     ----------
-    local : Array
+    local : Inexact[Array, '_']
         Packed complex local coefficients, length ``sh_size(order)``.
-    deltas : Array
+    deltas : Float[Array, '_ 3']
         Batched displacement vectors, shape ``(batch, 3)``.
     order : int
         Expansion order ``p``. Static: it fixes every packed length and table shape.
@@ -689,8 +790,9 @@ def contract_spatial_derivative_with_velocity(
 
 
 @partial(jax.jit, static_argnames=("order",))
+@jaxtyped(typechecker=beartype)
 def regular_solid_harmonic_gradient_coefficients(
-    delta: Array,
+    delta: Float[Array, "3"],
     *,
     order: int,
 ) -> Array:
@@ -698,7 +800,7 @@ def regular_solid_harmonic_gradient_coefficients(
 
     Parameters
     ----------
-    delta : Array
+    delta : Float[Array, '3']
         Displacement vector ``(3,)``, target centre minus source centre.
     order : int
         Expansion order ``p``. Static: it fixes every packed length and table shape.
@@ -717,8 +819,9 @@ def regular_solid_harmonic_gradient_coefficients(
 
 
 @partial(jax.jit, static_argnames=("order",))
+@jaxtyped(typechecker=beartype)
 def regular_solid_harmonic_gradient_coefficients_preserve_dtype(
-    delta: Array,
+    delta: Float[Array, "3"],
     *,
     order: int,
 ) -> Array:
@@ -726,7 +829,7 @@ def regular_solid_harmonic_gradient_coefficients_preserve_dtype(
 
     Parameters
     ----------
-    delta : Array
+    delta : Float[Array, '3']
         Displacement vector ``(3,)``, target centre minus source centre.
     order : int
         Expansion order ``p``. Static: it fixes every packed length and table shape.
@@ -744,9 +847,10 @@ def regular_solid_harmonic_gradient_coefficients_preserve_dtype(
     return jnp.stack((grad_x, grad_y, grad_z), axis=0)
 
 
+@jaxtyped(typechecker=beartype)
 def evaluate_local_complex_grad_analytic_preserve_dtype(
-    local: Array,
-    delta: Array,
+    local: Inexact[Array, "_"],
+    delta: Float[Array, "3"],
     *,
     order: int,
     conjugate_left: bool = True,
@@ -755,9 +859,9 @@ def evaluate_local_complex_grad_analytic_preserve_dtype(
 
     Parameters
     ----------
-    local : Array
+    local : Inexact[Array, '_']
         Packed complex local coefficients, length ``sh_size(order)``.
-    delta : Array
+    delta : Float[Array, '3']
         Displacement vector ``(3,)``, target centre minus source centre.
     order : int
         Expansion order ``p``. Static: it fixes every packed length and table shape.
@@ -781,12 +885,15 @@ def evaluate_local_complex_grad_analytic_preserve_dtype(
     return jnp.real(jnp.sum(local_coeffs[None, :] * grad_coeffs, axis=-1))
 
 
-def _regular_solid_harmonic_order4_scalars(delta: Array) -> tuple[Array, ...]:
+@jaxtyped(typechecker=beartype)
+def _regular_solid_harmonic_order4_scalars(
+    delta: Float[Array, "3"],
+) -> tuple[Array, ...]:
     """Return packed order-4 regular harmonics as scalar expressions.
 
     Parameters
     ----------
-    delta : Array
+    delta : Float[Array, '3']
         Displacement vector ``(3,)``, target centre minus source centre.
 
     Returns
@@ -866,9 +973,10 @@ def _regular_solid_harmonic_order4_scalars(delta: Array) -> tuple[Array, ...]:
     return tuple(get(n, m) for n in range(5) for m in range(-n, n + 1))
 
 
+@jaxtyped(typechecker=beartype)
 def evaluate_local_complex_grad_order4_unrolled(
-    local: Array,
-    delta: Array,
+    local: Inexact[Array, "_"],
+    delta: Float[Array, "3"],
     *,
     order: int,
     conjugate_left: bool = True,
@@ -877,9 +985,9 @@ def evaluate_local_complex_grad_order4_unrolled(
 
     Parameters
     ----------
-    local : Array
+    local : Inexact[Array, '_']
         Packed complex local coefficients, length ``sh_size(order)``.
-    delta : Array
+    delta : Float[Array, '3']
         Displacement vector ``(3,)``, target centre minus source centre.
     order : int
         Expansion order ``p``. Static: it fixes every packed length and table shape.
@@ -1010,9 +1118,10 @@ def evaluate_local_complex_grad_analytic(
 
 
 @partial(jax.jit, static_argnames=("order", "conjugate_left"))
+@jaxtyped(typechecker=beartype)
 def evaluate_local_complex_grad_analytic_batch(
-    local: Array,
-    deltas: Array,
+    local: Inexact[Array, "_"],
+    deltas: Float[Array, "_ 3"],
     *,
     order: int,
     conjugate_left: bool = True,
@@ -1021,9 +1130,9 @@ def evaluate_local_complex_grad_analytic_batch(
 
     Parameters
     ----------
-    local : Array
+    local : Inexact[Array, '_']
         Packed complex local coefficients, length ``sh_size(order)``.
-    deltas : Array
+    deltas : Float[Array, '_ 3']
         Batched displacement vectors, shape ``(batch, 3)``.
     order : int
         Expansion order ``p``. Static: it fixes every packed length and table shape.
@@ -1046,9 +1155,10 @@ def evaluate_local_complex_grad_analytic_batch(
 
 
 @partial(jax.jit, static_argnames=("order", "conjugate_left"))
+@jaxtyped(typechecker=beartype)
 def evaluate_local_complex_with_grad_analytic_batch(
-    local: Array,
-    deltas: Array,
+    local: Inexact[Array, "_"],
+    deltas: Float[Array, "_ 3"],
     *,
     order: int,
     conjugate_left: bool = True,
@@ -1057,9 +1167,9 @@ def evaluate_local_complex_with_grad_analytic_batch(
 
     Parameters
     ----------
-    local : Array
+    local : Inexact[Array, '_']
         Packed complex local coefficients, length ``sh_size(order)``.
-    deltas : Array
+    deltas : Float[Array, '_ 3']
         Batched displacement vectors, shape ``(batch, 3)``.
     order : int
         Expansion order ``p``. Static: it fixes every packed length and table shape.
@@ -1168,9 +1278,10 @@ def regular_solid_harmonic_directional_derivative_order(
 
 
 @partial(jax.jit, static_argnames=("order",))
+@jaxtyped(typechecker=beartype)
 def regular_solid_harmonic_directional_derivative_batch(
-    deltas: Array,
-    directions: Array,
+    deltas: Float[Array, "_ 3"],
+    directions: Float[Array, "_ 3"],
     *,
     order: int,
 ) -> Array:
@@ -1178,9 +1289,9 @@ def regular_solid_harmonic_directional_derivative_batch(
 
     Parameters
     ----------
-    deltas : Array
+    deltas : Float[Array, '_ 3']
         Batched displacement vectors, shape ``(batch, 3)``.
-    directions : Array
+    directions : Float[Array, '_ 3']
         Batched direction vectors, shape ``(batch, 3)``.
     order : int
         Expansion order ``p``. Static: it fixes every packed length and table shape.
@@ -1203,9 +1314,10 @@ def regular_solid_harmonic_directional_derivative_batch(
 
 
 @partial(jax.jit, static_argnames=("order", "derivative_order"))
+@jaxtyped(typechecker=beartype)
 def regular_solid_harmonic_directional_derivative_order_batch(
-    deltas: Array,
-    directions: Array,
+    deltas: Float[Array, "_ 3"],
+    directions: Float[Array, "_ 3"],
     *,
     order: int,
     derivative_order: int,
@@ -1214,9 +1326,9 @@ def regular_solid_harmonic_directional_derivative_order_batch(
 
     Parameters
     ----------
-    deltas : Array
+    deltas : Float[Array, '_ 3']
         Batched displacement vectors, shape ``(batch, 3)``.
-    directions : Array
+    directions : Float[Array, '_ 3']
         Batched direction vectors, shape ``(batch, 3)``.
     order : int
         Expansion order ``p``. Static: it fixes every packed length and table shape.
@@ -1831,7 +1943,8 @@ def _solidfmm_rotscale(
     return re_out, im_out
 
 
-def _angles_from_delta_solidfmm(delta: Array) -> tuple[Array, Array]:
+@jaxtyped(typechecker=beartype)
+def _angles_from_delta_solidfmm(delta: Float[Array, "3"]) -> tuple[Array, Array]:
     """Angles matching solidfmm's euler() convention.
 
     solidfmm defines:
@@ -1841,7 +1954,7 @@ def _angles_from_delta_solidfmm(delta: Array) -> tuple[Array, Array]:
 
     Parameters
     ----------
-    delta : Array
+    delta : Float[Array, '3']
         Displacement vector ``(3,)``, target centre minus source centre.
 
     Returns
@@ -1915,8 +2028,9 @@ def _angles_from_delta_solidfmm(delta: Array) -> tuple[Array, Array]:
 
 
 @highest_matmul_precision
+@jaxtyped(typechecker=beartype)
 def _complex_rotation_blocks_to_z_solidfmm(
-    delta: Array,
+    delta: Float[Array, "3"],
     *,
     order: int,
     basis: str,
@@ -1926,7 +2040,7 @@ def _complex_rotation_blocks_to_z_solidfmm(
 
     Parameters
     ----------
-    delta : Array
+    delta : Float[Array, '3']
         Displacement vector ``(3,)``, target centre minus source centre.
     order : int
         Expansion order ``p``. Static: it fixes every packed length and table shape.
@@ -1965,8 +2079,9 @@ def _complex_rotation_blocks_to_z_solidfmm(
 
 
 @highest_matmul_precision
+@jaxtyped(typechecker=beartype)
 def _complex_rotation_blocks_from_z_solidfmm(
-    delta: Array,
+    delta: Float[Array, "3"],
     *,
     order: int,
     basis: str,
@@ -1976,7 +2091,7 @@ def _complex_rotation_blocks_from_z_solidfmm(
 
     Parameters
     ----------
-    delta : Array
+    delta : Float[Array, '3']
         Displacement vector ``(3,)``, target centre minus source centre.
     order : int
         Expansion order ``p``. Static: it fixes every packed length and table shape.
@@ -2110,8 +2225,9 @@ def _blocks_to_padded_array(
 # unpadded one feeds m2l_complex_reference / m2m_complex / l2l_complex, which already
 # carry the cascade-level rule themselves.
 @without_unresolvable_transverse_jvp
+@jaxtyped(typechecker=beartype)
 def _complex_rotation_blocks_to_z_solidfmm_padded(
-    delta: Array,
+    delta: Float[Array, "3"],
     *,
     order: int,
     basis: str,
@@ -2134,8 +2250,9 @@ def _complex_rotation_blocks_to_z_solidfmm_padded(
 # unpadded one feeds m2l_complex_reference / m2m_complex / l2l_complex, which already
 # carry the cascade-level rule themselves.
 @without_unresolvable_transverse_jvp
+@jaxtyped(typechecker=beartype)
 def _complex_rotation_blocks_from_z_solidfmm_padded(
-    delta: Array,
+    delta: Float[Array, "3"],
     *,
     order: int,
     basis: str,
@@ -2151,8 +2268,9 @@ def _complex_rotation_blocks_from_z_solidfmm_padded(
 
 
 @partial(jax.jit, static_argnames=("order", "basis", "dtype"))
+@jaxtyped(typechecker=beartype)
 def complex_rotation_blocks_to_z_solidfmm_batch(
-    deltas: Array,
+    deltas: Float[Array, "_ 3"],
     *,
     order: int,
     basis: str,
@@ -2162,7 +2280,7 @@ def complex_rotation_blocks_to_z_solidfmm_batch(
 
     Parameters
     ----------
-    deltas : Array
+    deltas : Float[Array, '_ 3']
         Batched displacement vectors, shape ``(batch, 3)``.
     order : int
         Expansion order ``p``. Static: it fixes every packed length and table shape.
@@ -2187,8 +2305,9 @@ def complex_rotation_blocks_to_z_solidfmm_batch(
 
 
 @partial(jax.jit, static_argnames=("order", "basis", "dtype"))
+@jaxtyped(typechecker=beartype)
 def complex_rotation_blocks_from_z_solidfmm_batch(
-    deltas: Array,
+    deltas: Float[Array, "_ 3"],
     *,
     order: int,
     basis: str,
@@ -2198,7 +2317,7 @@ def complex_rotation_blocks_from_z_solidfmm_batch(
 
     Parameters
     ----------
-    deltas : Array
+    deltas : Float[Array, '_ 3']
         Batched displacement vectors, shape ``(batch, 3)``.
     order : int
         Expansion order ``p``. Static: it fixes every packed length and table shape.
@@ -2408,9 +2527,10 @@ def rotate_complex_local_from_z_solidfmm(
 # :mod:`jaccpot.operators._transverse_degeneracy_jvp`.
 @partial(jax.jit, static_argnames=("order", "rotation"))
 @partial(with_transverse_degeneracy_jvp, generators=_M2M_TRANSVERSE_GENERATORS)
+@jaxtyped(typechecker=beartype)
 def m2m_complex(
-    multipole: Array,
-    delta: Array,
+    multipole: Inexact[Array, "_"],
+    delta: Float[Array, "3"],
     *,
     order: int,
     rotation: str = "solidfmm",
@@ -2419,9 +2539,9 @@ def m2m_complex(
 
     Parameters
     ----------
-    multipole : Array
+    multipole : Inexact[Array, '_']
         Packed complex multipole coefficients, length ``sh_size(order)``.
-    delta : Array
+    delta : Float[Array, '3']
         Displacement vector ``(3,)``, target centre minus source centre.
     order : int
         Expansion order ``p``. Static: it fixes every packed length and table shape.
@@ -2454,9 +2574,10 @@ def m2m_complex(
 
 @partial(jax.jit, static_argnames=("order", "rotation"))
 @partial(with_transverse_degeneracy_jvp, generators=_L2L_TRANSVERSE_GENERATORS)
+@jaxtyped(typechecker=beartype)
 def l2l_complex(
-    local: Array,
-    delta: Array,
+    local: Inexact[Array, "_"],
+    delta: Float[Array, "3"],
     *,
     order: int,
     rotation: str = "solidfmm",
@@ -2465,9 +2586,9 @@ def l2l_complex(
 
     Parameters
     ----------
-    local : Array
+    local : Inexact[Array, '_']
         Packed complex local coefficients, length ``sh_size(order)``.
-    delta : Array
+    delta : Float[Array, '3']
         Displacement vector ``(3,)``, target centre minus source centre.
     order : int
         Expansion order ``p``. Static: it fixes every packed length and table shape.
@@ -2499,9 +2620,10 @@ def l2l_complex(
 
 
 @partial(with_transverse_degeneracy_jvp, generators=_M2L_TRANSVERSE_GENERATORS)
+@jaxtyped(typechecker=beartype)
 def m2l_complex_reference(
-    multipole: Array,
-    delta: Array,
+    multipole: Inexact[Array, "_"],
+    delta: Float[Array, "3"],
     *,
     order: int,
     rotation: str = "solidfmm",
@@ -2515,9 +2637,9 @@ def m2l_complex_reference(
 
     Parameters
     ----------
-    multipole : Array
+    multipole : Inexact[Array, '_']
         Packed complex multipole coefficients, length ``sh_size(order)``.
-    delta : Array
+    delta : Float[Array, '3']
         Displacement vector ``(3,)``, target centre minus source centre.
     order : int
         Expansion order ``p``. Static: it fixes every packed length and table shape.
@@ -2554,9 +2676,10 @@ def m2l_complex_reference(
 
 
 @partial(jax.jit, static_argnames=("order", "rotation"))
+@jaxtyped(typechecker=beartype)
 def m2l_complex_reference_batch(
-    multipoles: Array,
-    deltas: Array,
+    multipoles: Inexact[Array, "_ _"],
+    deltas: Float[Array, "_ 3"],
     *,
     order: int,
     rotation: str = "solidfmm",
@@ -2565,9 +2688,9 @@ def m2l_complex_reference_batch(
 
     Parameters
     ----------
-    multipoles : Array
+    multipoles : Inexact[Array, '_ _']
         Batched packed complex multipoles, shape ``(batch, sh_size(order))``.
-    deltas : Array
+    deltas : Float[Array, '_ 3']
         Batched displacement vectors, shape ``(batch, 3)``.
     order : int
         Expansion order ``p``. Static: it fixes every packed length and table shape.
@@ -2588,11 +2711,12 @@ def m2l_complex_reference_batch(
 
 @partial(jax.jit, static_argnames=("order",))
 @partial(with_transverse_degeneracy_jvp, generators=_M2L_TRANSVERSE_GENERATORS)
+@jaxtyped(typechecker=beartype)
 def m2l_complex_reference_batch_cached_blocks(
-    multipoles: Array,
-    deltas: Array,
-    blocks_to_z: Array,
-    blocks_from_z: Array,
+    multipoles: Inexact[Array, "_ _"],
+    deltas: Float[Array, "_ 3"],
+    blocks_to_z: Inexact[Array, "_ _ _ _"],
+    blocks_from_z: Inexact[Array, "_ _ _ _"],
     *,
     order: int,
 ) -> Array:
@@ -2600,13 +2724,13 @@ def m2l_complex_reference_batch_cached_blocks(
 
     Parameters
     ----------
-    multipoles : Array
+    multipoles : Inexact[Array, '_ _']
         Batched packed complex multipoles, shape ``(batch, sh_size(order))``.
-    deltas : Array
+    deltas : Float[Array, '_ 3']
         Batched displacement vectors, shape ``(batch, 3)``.
-    blocks_to_z : Array
+    blocks_to_z : Inexact[Array, '_ _ _ _']
         Padded rotation blocks aligning the pair axis to +z.
-    blocks_from_z : Array
+    blocks_from_z : Inexact[Array, '_ _ _ _']
         Padded rotation blocks rotating back from +z.
     order : int
         Expansion order ``p``. Static: it fixes every packed length and table shape.
@@ -2722,9 +2846,10 @@ def translate_along_z_l2l_complex_batch(
 
 
 @partial(jax.jit, static_argnames=("order", "rotation"))
+@jaxtyped(typechecker=beartype)
 def l2l_complex_batch(
-    locals: Array,
-    deltas: Array,
+    locals: Inexact[Array, "_ _"],
+    deltas: Float[Array, "_ 3"],
     *,
     order: int,
     rotation: str = "solidfmm",
@@ -2733,9 +2858,9 @@ def l2l_complex_batch(
 
     Parameters
     ----------
-    locals : Array
+    locals : Inexact[Array, '_ _']
         Batched packed complex locals, shape ``(batch, sh_size(order))``.
-    deltas : Array
+    deltas : Float[Array, '_ 3']
         Batched displacement vectors, shape ``(batch, 3)``.
     order : int
         Expansion order ``p``. Static: it fixes every packed length and table shape.
