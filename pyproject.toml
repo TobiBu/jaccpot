@@ -102,10 +102,24 @@ dev = [
   # resolve to a different black whose style disagreed with the hook).
   "black==26.5.1",
   # Pinned to match .pre-commit-config.yaml. isort 7.0.0/8.0.1 regressed the
-  # black profile (force-wraps single-name imports); 9.0.0b1 fixes it. A
-  # floating ">=" here lets CI's `isort --check-only .` resolve to the broken
-  # 8.0.1 and disagree with pre-commit, so keep this equal to the hook rev.
-  "isort==9.0.0b1",
+  # black profile (force-wraps single-name imports); 9.0.0b1 fixed it and 9.0.1
+  # keeps it fixed. A floating ">=" here lets CI's `isort --check-only .` resolve
+  # to the broken 8.0.1 and disagree with pre-commit, so keep this equal to the
+  # hook rev.
+  #
+  # Re-verified before bumping 9.0.0b1 -> 9.0.1 (2026-09-01), because "the hook
+  # rev moved" is not evidence the regression stayed fixed. Three isolated venvs,
+  # `--profile black --line-length 88` from the repo root: `isort --check-only .`
+  # fails on 8.0.1 (1 file) and passes on both 9.0.0b1 and 9.0.1. Passing on an
+  # already-clean tree only proves idempotence, so also: 325 tracked .py files
+  # seeded from the 8.0.1-mangled state and normalised by each 9.x are
+  # byte-identical to each other and to the committed tree.
+  #
+  # If you re-test this, note that synthetic probes give a FALSE all-clear. The
+  # regression needs the "same module imported repeatedly, some imports aliased"
+  # shape that only `tests/unit/test_solver_api.py` had here; wrapping an
+  # over-length import is correct black behaviour and every version does it.
+  "isort==9.0.1",
   # Pinned to match .pre-commit-config.yaml's pydoclint rev, for the same reason as
   # black and isort above: the hook runs on every commit now, and a floating ">="
   # would let a local pydoclint disagree with it about what counts as a violation.
