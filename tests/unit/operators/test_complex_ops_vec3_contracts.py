@@ -555,6 +555,8 @@ def test_the_rotation_blocks_must_be_square():
         m2l_complex_reference_batch_cached_blocks(
             multipoles, deltas, square, other, order=ORDER
         )
+
+
 # ---------------------------------------------------------------------------
 # The nine parameters the pilot's LAST sweep of this module supports annotating,
 # and one test for the family it does NOT support.
