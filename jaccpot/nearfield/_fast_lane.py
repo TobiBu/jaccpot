@@ -33,9 +33,10 @@ from typing import Any, Literal, Optional, Union, overload
 
 import jax
 import jax.numpy as jnp
+from beartype import beartype
 from beartype.typing import Tuple
 from jax import lax
-from jaxtyping import Array
+from jaxtyping import Array, Bool, Float, Int, jaxtyped
 from yggdrax.dtypes import INDEX_DTYPE
 
 from jaccpot.runtime.grad_options import LeafPairReverseOptions
@@ -64,6 +65,46 @@ __all__ = [
     "compute_leaf_p2p_accelerations_radix_fast_lane",
     "compute_leaf_p2p_accelerations_radix_payload_pairs_only",
 ]
+
+
+# WHAT THE SHAPES ARE, AND WHAT THE CAPTURE COULD NOT SEE
+#
+# Derived by execution with `bench/annotation_capture` (STYLE_GUIDE section 4.2), never
+# from the docstrings -- which are wrong here too: `RadixFastNearfieldPayload` documents
+# `source_leaf_ids` as "per (target leaf, slot tile)", two axes, and every consumer in
+# this file reads `shape[2]`.
+#
+#   n 3 / n                      positions and masses, in particle order
+#   leaves w / leaves w 3        the padded near-field leaf table -- positions, masses,
+#                                mask, particle indices
+#   farleaves blocks blocksize   the prepacked source-leaf-id rectangle and its mask
+#
+# Extents behind those names, pooling three captures (`tests/unit/core/test_near_field.py`,
+# `tests/unit/test_custom_vjp_parity.py`, and a forced octree run -- see below):
+# `leaves` at 3, 6, 512, 528, 4096 and 4120; `w` at 2, 8, 32 and 64; `blocks` at 1 and 2;
+# `blocksize` at 2, 3, 26, 27 and 54; `n` at 6, 48, 512 and 1500. Section 4.3 asks for two
+# distinct extents per equality, because an equality seen at one problem size is one
+# observation however many calls produced it.
+#
+# `farleaves`, NOT `leaves`, ON THE PREPACKED RECTANGLE, and the reason is inherited
+# rather than rediscovered. `_large_n_blocks.py` takes the SAME two arrays as
+# `block_source_leaf_ids_padded`/`block_valid_mask_padded` and names their leading axis
+# `farleaves`, because that rectangle tracks the FAR-field leaf view, which the octree
+# backend separates from the near-field leaf table (the section 4.3 incident, 5 against
+# 3). Here the two were observed equal at six distinct extents -- including four from the
+# octree lane -- and that is exactly the evidence section 4.3 says not to promote: the
+# `farleaves` mistake was 64 honest captures agreeing. `farleaves` binds freely, since
+# nothing else in these signatures uses it, so what is asserted is that the ids and their
+# mask agree with each other in all three axes. That is measured, and it is all that is.
+#
+# THE OCTREE LANE IS UNREACHABLE FROM ANY TEST, which is worth stating rather than
+# leaving as an absence. `_radix_fast_lane_prepacked_pallas` is called from
+# `experimental/octree_fmm_uvwx.py`, but `_octree_near_field`'s `pallas_interpret` knob is
+# never plumbed out to `octree_fmm_accelerations`, so on CPU that call site always falls
+# through to the pure-JAX branch and on GPU there is no CI leg. The extents above come
+# from calling `_octree_near_field(..., use_pallas=True, pallas_interpret=True)` directly;
+# all three of its `near_mode` branches build `src_ids_3d` and `unit_pidx` with the same
+# leading axis, which is why the octree lane cannot falsify these annotations.
 
 
 @partial(
@@ -277,12 +318,13 @@ def _compute_radix_fast_lane_payload_pairs_impl(
     )
 
 
+@jaxtyped(typechecker=beartype)
 def _compute_leaf_p2p_prepared_large_n_self_only_with_potential_impl(
-    positions: Array,
-    leaf_positions: Array,
-    leaf_masses: Array,
-    leaf_mask: Array,
-    leaf_particle_idx: Array,
+    positions: Float[Array, "n 3"],
+    leaf_positions: Float[Array, "leaves w 3"],
+    leaf_masses: Float[Array, "leaves w"],
+    leaf_mask: Bool[Array, "leaves w"],
+    leaf_particle_idx: Int[Array, "leaves w"],
     *,
     G: Union[float, Array],
     softening_sq: Array,
@@ -300,17 +342,17 @@ def _compute_leaf_p2p_prepared_large_n_self_only_with_potential_impl(
 
     Parameters
     ----------
-    positions : Array
+    positions : Float[Array, 'n 3']
         ``[N, 3]`` particle positions in tree order. Read for shape and dtype
         only -- the values used come in leaf-major through ``leaf_positions``.
-    leaf_positions : Array
+    leaf_positions : Float[Array, 'leaves w 3']
         ``[num_leaves, W, 3]`` padded leaf-major positions.
-    leaf_masses : Array
+    leaf_masses : Float[Array, 'leaves w']
         ``[num_leaves, W]`` padded leaf-major masses.
-    leaf_mask : Array
+    leaf_mask : Bool[Array, 'leaves w']
         ``[num_leaves, W]`` occupancy; masked slots contribute exactly zero to
         both outputs and are skipped by both scatters.
-    leaf_particle_idx : Array
+    leaf_particle_idx : Int[Array, 'leaves w']
         ``[num_leaves, W]`` particle index behind each slot, clipped so a masked
         slot cannot address out of bounds.
     G : Union[float, Array]
@@ -526,13 +568,13 @@ def _radix_fast_lane_pairs_pallas(
 # only ever sees the implementation. Audit E.4.
 @overload
 def _radix_fast_lane_prepacked_pallas(
-    source_leaf_ids_padded: Array,
-    source_valid_mask_padded: Array,
-    leaf_positions: Array,
-    leaf_masses: Array,
-    leaf_mask: Array,
-    leaf_particle_idx: Array,
-    positions: Array,
+    source_leaf_ids_padded: Int[Array, "farleaves blocks blocksize"],
+    source_valid_mask_padded: Bool[Array, "farleaves blocks blocksize"],
+    leaf_positions: Float[Array, "leaves w 3"],
+    leaf_masses: Float[Array, "leaves w"],
+    leaf_mask: Bool[Array, "leaves w"],
+    leaf_particle_idx: Int[Array, "leaves w"],
+    positions: Float[Array, "n 3"],
     *,
     G: Union[float, Array],
     softening_sq: Array,
@@ -546,13 +588,13 @@ def _radix_fast_lane_prepacked_pallas(
 
 @overload
 def _radix_fast_lane_prepacked_pallas(
-    source_leaf_ids_padded: Array,
-    source_valid_mask_padded: Array,
-    leaf_positions: Array,
-    leaf_masses: Array,
-    leaf_mask: Array,
-    leaf_particle_idx: Array,
-    positions: Array,
+    source_leaf_ids_padded: Int[Array, "farleaves blocks blocksize"],
+    source_valid_mask_padded: Bool[Array, "farleaves blocks blocksize"],
+    leaf_positions: Float[Array, "leaves w 3"],
+    leaf_masses: Float[Array, "leaves w"],
+    leaf_mask: Bool[Array, "leaves w"],
+    leaf_particle_idx: Int[Array, "leaves w"],
+    positions: Float[Array, "n 3"],
     *,
     G: Union[float, Array],
     softening_sq: Array,
@@ -564,14 +606,15 @@ def _radix_fast_lane_prepacked_pallas(
 ) -> Tuple[Array, Array]: ...
 
 
+@jaxtyped(typechecker=beartype)
 def _radix_fast_lane_prepacked_pallas(
-    source_leaf_ids_padded: Array,
-    source_valid_mask_padded: Array,
-    leaf_positions: Array,
-    leaf_masses: Array,
-    leaf_mask: Array,
-    leaf_particle_idx: Array,
-    positions: Array,
+    source_leaf_ids_padded: Int[Array, "farleaves blocks blocksize"],
+    source_valid_mask_padded: Bool[Array, "farleaves blocks blocksize"],
+    leaf_positions: Float[Array, "leaves w 3"],
+    leaf_masses: Float[Array, "leaves w"],
+    leaf_mask: Bool[Array, "leaves w"],
+    leaf_particle_idx: Int[Array, "leaves w"],
+    positions: Float[Array, "n 3"],
     *,
     G: Union[float, Array],
     softening_sq: Array,
@@ -595,20 +638,20 @@ def _radix_fast_lane_prepacked_pallas(
 
     Parameters
     ----------
-    source_leaf_ids_padded : Array
+    source_leaf_ids_padded : Int[Array, 'farleaves blocks blocksize']
         Source leaf ids ``[num_leaves, max_blocks, block_size]``, padded to a
         rectangle.
-    source_valid_mask_padded : Array
+    source_valid_mask_padded : Bool[Array, 'farleaves blocks blocksize']
         Per-lane validity with the same shape; padded lanes contribute exactly zero.
-    leaf_positions : Array
+    leaf_positions : Float[Array, 'leaves w 3']
         Padded per-leaf positions ``[num_leaves, W, 3]``.
-    leaf_masses : Array
+    leaf_masses : Float[Array, 'leaves w']
         Padded per-leaf masses ``[num_leaves, W]``.
-    leaf_mask : Array
+    leaf_mask : Bool[Array, 'leaves w']
         Padded per-leaf validity ``[num_leaves, W]``.
-    leaf_particle_idx : Array
+    leaf_particle_idx : Int[Array, 'leaves w']
         Particle index behind each padded slot ``[num_leaves, W]``.
-    positions : Array
+    positions : Float[Array, 'n 3']
         Particle positions ``[N, 3]``; fixes the output shape.
     G : Union[float, Array]
         Gravitational constant.
@@ -1121,8 +1164,8 @@ _radix_fast_lane_prepacked_accel_cvjp.defvjp(
 @overload
 def compute_leaf_p2p_accelerations_radix_fast_lane(
     *,
-    positions_sorted: Array,
-    masses_sorted: Array,
+    positions_sorted: Float[Array, "n 3"],
+    masses_sorted: Float[Array, "n"],
     payload: Any,
     G: Union[float, Array] = ...,
     softening: float = ...,
@@ -1136,8 +1179,8 @@ def compute_leaf_p2p_accelerations_radix_fast_lane(
 @overload
 def compute_leaf_p2p_accelerations_radix_fast_lane(
     *,
-    positions_sorted: Array,
-    masses_sorted: Array,
+    positions_sorted: Float[Array, "n 3"],
+    masses_sorted: Float[Array, "n"],
     payload: Any,
     G: Union[float, Array] = ...,
     softening: float = ...,
@@ -1148,10 +1191,11 @@ def compute_leaf_p2p_accelerations_radix_fast_lane(
 ) -> Tuple[Array, Array]: ...
 
 
+@jaxtyped(typechecker=beartype)
 def compute_leaf_p2p_accelerations_radix_fast_lane(
     *,
-    positions_sorted: Array,
-    masses_sorted: Array,
+    positions_sorted: Float[Array, "n 3"],
+    masses_sorted: Float[Array, "n"],
     payload: Any,
     G: Union[float, Array] = 1.0,
     softening: float = 0.0,
@@ -1176,9 +1220,9 @@ def compute_leaf_p2p_accelerations_radix_fast_lane(
 
     Parameters
     ----------
-    positions_sorted : Array
+    positions_sorted : Float[Array, 'n 3']
         Particle positions ``[N, 3]`` in Morton order.
-    masses_sorted : Array
+    masses_sorted : Float[Array, 'n']
         Particle masses ``[N]`` in the same order.
     payload : Any
         The prepacked radix fast-lane payload
@@ -1496,10 +1540,11 @@ def compute_leaf_p2p_accelerations_radix_fast_lane(
     return self_acc + pair_acc
 
 
+@jaxtyped(typechecker=beartype)
 def compute_leaf_p2p_accelerations_radix_payload_pairs_only(
     *,
-    positions_sorted: Array,
-    masses_sorted: Array,
+    positions_sorted: Float[Array, "n 3"],
+    masses_sorted: Float[Array, "n"],
     payload: Any,
     G: Union[float, Array] = 1.0,
     softening: float = 0.0,
@@ -1516,9 +1561,9 @@ def compute_leaf_p2p_accelerations_radix_payload_pairs_only(
 
     Parameters
     ----------
-    positions_sorted : Array
+    positions_sorted : Float[Array, 'n 3']
         ``[N, 3]`` positions in tree order. Also fixes the output shape.
-    masses_sorted : Array
+    masses_sorted : Float[Array, 'n']
         ``[N]`` masses under the same permutation.
     payload : Any
         A ``RadixFastNearfieldPayload``. Deliberately untyped, to keep this

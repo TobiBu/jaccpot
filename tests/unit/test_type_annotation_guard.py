@@ -176,6 +176,18 @@ CONVERTED_MODULES = (
     # never reached by the capture -- annotating those would be deriving a shape
     # from a docstring, which section 4.2 forbids.
     "jaccpot/nearfield/_large_n_blocks.py",
+    # Phase 2, the radix fast lane -- and NOT a module conversion: the leaf-table
+    # family (the four `leaves w` arrays, the prepacked rectangle, `positions` and
+    # `masses`) is shaped across four functions, and three families in the same file
+    # are deliberately still bare, each for its own reason and each its own change.
+    # The `custom_vjp` triple is one: `_radix_fast_lane_prepacked_accel_cvjp` is
+    # reached by a single test at a single problem size, so no equality in it is
+    # proven at the two distinct extents section 4.3 asks for. The materialised
+    # source-particle layout is another: its middle axis was observed equal to `w` at
+    # two extents and that is a coincidence of the test payload builder, not a
+    # contract. `_radix_fast_lane_prepacked_pallas_decoupled` is the third, and the
+    # starkest -- no test reaches it at all, only `distributed/fmm.py`.
+    "jaccpot/nearfield/_fast_lane.py",
 )
 
 # Array parameters deliberately left bare, each with its reason recorded at the
@@ -216,6 +228,13 @@ DELIBERATELY_BARE: frozenset[tuple[str, str]] = frozenset(
         ("jaccpot/nearfield/_large_n_blocks.py", "G"),
         ("jaccpot/nearfield/_large_n_blocks.py", "softening_sq"),
         ("jaccpot/nearfield/_large_n_blocks.py", "g_const"),
+        # Fourth and fifth instances of the same two reasons, in the module that
+        # took its spelling from `_large_n_blocks.py` above: `G` is the
+        # `Union[float, Array]` scalar that every defaulted call passes as a Python
+        # float, and `softening_sq` was observed `[]` in every capture -- a shape
+        # annotation on a scalar asserts nothing a caller could get wrong.
+        ("jaccpot/nearfield/_fast_lane.py", "G"),
+        ("jaccpot/nearfield/_fast_lane.py", "softening_sq"),
     }
 )
 
