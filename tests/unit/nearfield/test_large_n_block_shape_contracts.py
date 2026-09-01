@@ -336,3 +336,211 @@ def test_short_block_offsets_is_still_accepted_and_that_is_deliberate():
     _call_target_blocks(
         **_leaf_table(), block_offsets=jnp.zeros((LEAVES,), dtype=jnp.int32)
     )
+
+
+# ---------------------------------------------------------------------------
+# The two tile-sequence helpers, added with the `tiles`/`tbatch` vocabulary.
+#
+# What is new here is not another `leaves w` sweep -- it is the two axes that
+# LOOK interchangeable with names the table already had, and are not:
+#
+#   `tbatch` is not `leaves`.  One scan step's worth of target leaves, set by
+#       `target_leaf_batch_size`, measured at 16 beside a 5-leaf table.
+#   `tiles`  is not `blocks`.  The sequence axis OUTSIDE the block/lane pair, so
+#       the layout is `tiles tbatch blocks blocksize`.
+#
+# Getting either wrong is a mistake an annotation would make permanent, so both
+# get a test that fails if the two names are ever collapsed.
+# ---------------------------------------------------------------------------
+
+TILES, TBATCH, BLOCKS_T, BSZ_T = 2, 3, 2, 1
+
+
+def _tile_sequence(tiles=TILES, tbatch=TBATCH, blocks=BLOCKS_T, bsz=BSZ_T):
+    """Build a valid `tiles tbatch blocks blocksize` pair of arrays.
+
+    Parameters
+    ----------
+    tiles : int
+        Tile-sequence length.
+    tbatch : int
+        Target leaves in this scan step.
+    blocks : int
+        Lane blocks per tile.
+    bsz : int
+        Lanes per block.
+
+    Returns
+    -------
+    dict
+        `tile_source_ids_seq` and `tile_source_valid_seq`.
+    """
+    return {
+        "tile_source_ids_seq": jnp.zeros((tiles, tbatch, blocks, bsz), dtype=jnp.int32),
+        "tile_source_valid_seq": jnp.ones((tiles, tbatch, blocks, bsz), dtype=bool),
+    }
+
+
+def _call_accumulate(**kw):
+    """Call the tile-sequence accumulator with a valid default configuration.
+
+    Parameters
+    ----------
+    **kw
+        Overrides for any array argument.
+
+    Returns
+    -------
+    Array
+        Per-target-leaf accelerations.
+    """
+    from jaccpot.nearfield._large_n_blocks import (
+        _accumulate_target_block_tile_sequence,
+    )
+
+    arguments = {
+        "target_pos": jnp.zeros((TBATCH, W, 3)),
+        "target_mask": jnp.ones((TBATCH, W), dtype=bool),
+        **_tile_sequence(),
+        "leaf_positions": jnp.zeros((LEAVES, W, 3)),
+        "leaf_masses": jnp.ones((LEAVES, W)),
+        "leaf_mask": jnp.ones((LEAVES, W), dtype=bool),
+        **kw,
+    }
+    return _accumulate_target_block_tile_sequence(
+        **arguments,
+        g_const=jnp.asarray(1.0),
+        softening_sq=jnp.asarray(1e-4),
+        tile_unroll=1,
+    )
+
+
+def _call_from_tiles(**kw):
+    """Call the canonical-tiled TONB path with a valid default configuration.
+
+    Parameters
+    ----------
+    **kw
+        Overrides for any array argument.
+
+    Returns
+    -------
+    Array
+        Per-particle accelerations.
+    """
+    from jaccpot.nearfield._large_n_blocks import (
+        _compute_target_block_pairs_from_source_tiles,
+    )
+
+    arguments = {
+        "positions": jnp.zeros((N, 3)),
+        "source_leaf_ids_tiles": jnp.zeros(
+            (TILES, LEAVES, BLOCKS_T, BSZ_T), dtype=jnp.int32
+        ),
+        "source_valid_tiles": jnp.ones((TILES, LEAVES, BLOCKS_T, BSZ_T), dtype=bool),
+        **_leaf_table(),
+        **kw,
+    }
+    return _compute_target_block_pairs_from_source_tiles(
+        **arguments,
+        g_const=jnp.asarray(1.0),
+        softening_sq=jnp.asarray(1e-4),
+        target_leaf_batch_size=2,
+        target_block_tile_scan_unroll=1,
+        target_block_batch_scan_unroll=1,
+    )
+
+
+def test_the_tile_helpers_accept_their_valid_configuration():
+    """Both controls. Every rejection below is worthless without them."""
+    _call_accumulate()
+    _call_from_tiles()
+
+
+def test_tbatch_is_not_leaves():
+    """The distinction the vocabulary row exists for.
+
+    `target_pos` is `(tbatch, w, 3)` and `leaf_positions` is `(leaves, w, 3)` in the
+    same signature, and they are independent: 16 against 5 in the capture. So a
+    tile sequence whose axis 1 matches `leaves` instead of `tbatch` must be
+    rejected, and a `tbatch` that differs from `leaves` must be accepted.
+    """
+    assert TBATCH != LEAVES, "the test needs the two extents to differ"
+
+    _call_accumulate()
+
+    with pytest.raises(TypeCheckError):
+        _call_accumulate(**_tile_sequence(tbatch=LEAVES))
+
+
+def test_tiles_is_not_blocks():
+    """Collapsing the sequence axis into the block axis drops a rank.
+
+    `tiles tbatch blocks blocksize` is rank four. The docstring claimed rank three
+    (`[num_tiles, batch, lanes]`) until the shape was derived by execution, so this
+    pins the measured rank against the documented one.
+    """
+    with pytest.raises(TypeCheckError):
+        _call_accumulate(
+            tile_source_ids_seq=jnp.zeros((TILES, TBATCH, BLOCKS_T), dtype=jnp.int32),
+            tile_source_valid_seq=jnp.ones((TILES, TBATCH, BLOCKS_T), dtype=bool),
+        )
+
+
+def test_the_tile_sequence_and_its_mask_must_agree():
+    """All four axes are shared between the ids and their validity mask."""
+    with pytest.raises(TypeCheckError):
+        _call_accumulate(
+            tile_source_valid_seq=jnp.ones(
+                (TILES + 1, TBATCH, BLOCKS_T, BSZ_T), dtype=bool
+            )
+        )
+
+
+def test_the_target_block_is_tied_to_its_own_mask_not_to_the_leaf_table():
+    """`tbatch w` on `target_pos`/`target_mask`, and `w` shared with the leaves.
+
+    `w` is shared BY CONSTRUCTION -- the caller builds `target_pos` as
+    `leaf_positions[safe_target_leaf_ids]`, a gather that cannot change the slot
+    width -- so a target block of a different width is a real error.
+    """
+    with pytest.raises(TypeCheckError):
+        _call_accumulate(target_pos=jnp.zeros((TBATCH, W + 1, 3)))
+    with pytest.raises(TypeCheckError):
+        _call_accumulate(target_mask=jnp.ones((TBATCH + 1, W), dtype=bool))
+
+
+def test_the_canonical_tiled_layout_is_not_tied_to_the_leaf_table():
+    """Its leaf axis is `farleaves`, and that must stay free of `leaves`.
+
+    `source_leaf_ids_tiles` is a reshape of the prepacked rectangle, which
+    `_evaluate.py` measures as the FAR-field leaf view -- radix 3 leaves against
+    octree 5. Axis 1 did match the near-field table at two distinct extents, but
+    both captures were on the radix backend, which is the lane where the two
+    coincide. If a later change "tidies" `farleaves` into `leaves`, this fails.
+    """
+    try:
+        _call_from_tiles(
+            source_leaf_ids_tiles=jnp.zeros(
+                (TILES, LEAVES + 2, BLOCKS_T, BSZ_T), dtype=jnp.int32
+            ),
+            source_valid_tiles=jnp.ones(
+                (TILES, LEAVES + 2, BLOCKS_T, BSZ_T), dtype=bool
+            ),
+        )
+    except TypeCheckError as error:  # pragma: no cover - the regression this guards
+        raise AssertionError(
+            "`farleaves` has been tied to `leaves` in the tiled layout; the octree "
+            f"backend has 5 far-field leaves against 3 near-field ones. {error}"
+        ) from error
+    except Exception:
+        # The body may still reject a rectangle wider than its leaf table; that is
+        # the kernel's own business. Only a TypeCheckError would mean the annotation
+        # had made the two views equal.
+        pass
+
+
+def test_two_component_positions_are_rejected_by_the_tiled_path():
+    """`positions` is `n 3` here too."""
+    with pytest.raises(TypeCheckError):
+        _call_from_tiles(positions=jnp.zeros((N, 2)))

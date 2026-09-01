@@ -193,10 +193,33 @@ must also be added to the flake8 hook's `--builtins` list — see 4.4.
 | `chunks`, `chunkflat` | the 2-D chunked scatter schedule |
 | `farleaves` | the **far-field** leaf view, which is not `leaves`: they differ on the octree backend |
 | `blocks`, `blocksize` | target blocks and the block size (`JACCPOT_LARGE_N_TARGET_BLOCK_SIZE`) |
+| `tiles` | source-block tiles in a fixed-shape tile sequence (`nearfield/_large_n_blocks.py`) |
+| `tbatch` | target leaves per scan step, i.e. `target_leaf_batch_size` |
+| `blockdim` | one solid-harmonic rotation block, square: `2*ell + 1` a side |
 | `ct` | Cartesian packed coefficients, `(p+1)(p+2)(p+3)/6` |
 | `levels` | block-step levels, `k_max + 1` of them |
 | `2`, `3` | literals -- the `(start, end)` pair and the spatial dimension |
 | `_` | anonymous: deliberately unnamed, see below |
+
+**`tbatch` is not `leaves`, and `tiles` is not `blocks`.** Both distinctions are measured, and
+both looked interchangeable before the capture. `_accumulate_target_block_tile_sequence` takes
+`target_pos` as `(tbatch, w, 3)` and `leaf_positions` as `(leaves, w, 3)` in the same signature,
+observed at 16 against 5 -- `tbatch` is a *scan step's worth* of target leaves, set by
+`target_leaf_batch_size`, and is unrelated to how many leaves exist. `tiles` is the sequence
+axis over source-block tiles (observed 1 and 4) and sits *outside* `blocks blocksize`, which is
+still the block/lane pair inside each tile: the full layout is
+`tiles tbatch blocks blocksize`.
+
+**`blockdim` asserts squareness, which is the whole point of naming it.** The rotation-block
+tensors in `operators/complex_ops.py` were observed `(17, 3, 5, 5)`, `(17, 4, 7, 7)` and
+`(17, 5, 9, 9)`: the trailing pair agrees at three distinct extents, and nothing else in the
+package checks it -- a non-square block reaches a matmul and fails there with a message naming
+neither parameter. Repeating the name on both the `to_z` and `from_z` tensors also ties them to
+each other. The two leading axes stay anonymous, because `jax.vmap` already rejects a batch
+mismatch against `multipoles` with a better message than an annotation would give.
+
+None of the three is added to the flake8 `--builtins` list, because none is ever used as a
+single-identifier axis -- see 4.4 for why that list exists and what it costs.
 
 **`ct` is not `C`.** Elsewhere in the package `C` means `sh_size(p) == (p+1)**2`, the
 spherical-harmonic packing. `upward/tree_expansions.py` packs Cartesian moments, so its count is

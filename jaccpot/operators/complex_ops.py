@@ -188,14 +188,16 @@ __all__ = [
 # Annotating `local` as `"_ _"` in a batch function by pattern-match would have been
 # wrong, and nothing but running it would have said so.
 #
-# `blocks_to_z` / `blocks_from_z` are `"_ _ _ _"`, rank only. They were observed
+# `blocks_to_z` / `blocks_from_z` are `"_ _ blockdim blockdim"`. They were observed
 # `(17, 3, 5, 5)`, `(17, 4, 7, 7)` and `(17, 5, 9, 9)`: the trailing pair is SQUARE at
 # three distinct extents, which is a real equality that nothing else checks, and a
-# non-square block array would fail later inside a matmul with an opaque message.
-# Asserting it needs an axis name the section 4.3 table does not have, and adding one
-# is a guide change -- so it is left as the obvious next assertion rather than smuggled
-# in here. The leading axes stay anonymous on purpose: `jax.vmap` already rejects a
-# batch mismatch between these and `multipoles`, with a better message.
+# non-square block array would fail later inside a matmul with a message naming
+# neither parameter. Repeating the name on both tensors ties them to each other too.
+# They shipped as `"_ _ _ _"` for exactly one PR, because asserting squareness needed
+# an axis name the section 4.3 table did not have and a guide change does not belong
+# inside an annotation sweep. The leading axes stay anonymous on purpose: `jax.vmap`
+# already rejects a batch mismatch between these and `multipoles`, with a better
+# message.
 #
 # NOT EVERY ONE OF THESE NARROWS ITS INPUT the way the first eleven did.
 # `_complex_rotation_blocks_to_z_solidfmm_padded` and its `from_z` twin are wrapped by
@@ -2715,8 +2717,8 @@ def m2l_complex_reference_batch(
 def m2l_complex_reference_batch_cached_blocks(
     multipoles: Inexact[Array, "_ _"],
     deltas: Float[Array, "_ 3"],
-    blocks_to_z: Inexact[Array, "_ _ _ _"],
-    blocks_from_z: Inexact[Array, "_ _ _ _"],
+    blocks_to_z: Inexact[Array, "_ _ blockdim blockdim"],
+    blocks_from_z: Inexact[Array, "_ _ blockdim blockdim"],
     *,
     order: int,
 ) -> Array:
@@ -2728,9 +2730,9 @@ def m2l_complex_reference_batch_cached_blocks(
         Batched packed complex multipoles, shape ``(batch, sh_size(order))``.
     deltas : Float[Array, '_ 3']
         Batched displacement vectors, shape ``(batch, 3)``.
-    blocks_to_z : Inexact[Array, '_ _ _ _']
+    blocks_to_z : Inexact[Array, '_ _ blockdim blockdim']
         Padded rotation blocks aligning the pair axis to +z.
-    blocks_from_z : Inexact[Array, '_ _ _ _']
+    blocks_from_z : Inexact[Array, '_ _ blockdim blockdim']
         Padded rotation blocks rotating back from +z.
     order : int
         Expansion order ``p``. Static: it fixes every packed length and table shape.

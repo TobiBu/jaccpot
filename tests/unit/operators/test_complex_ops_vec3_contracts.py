@@ -521,3 +521,37 @@ def test_the_batched_rotation_builders_now_reject_a_two_component_batch():
         with pytest.raises(TypeCheckError):
             fn(bad, **_ROT_KW)
         fn(jnp.stack([DELTA, DELTA + 0.1]), **_ROT_KW)
+
+
+def test_the_rotation_blocks_must_be_square():
+    """`blockdim` repeated is what asserts squareness, and nothing else checks it.
+
+    The cached-blocks M2L takes `(batch, cascade, blockdim, blockdim)` tensors --
+    measured `(17, 3, 5, 5)`, `(17, 4, 7, 7)` and `(17, 5, 9, 9)`, so the trailing
+    pair agrees at three distinct extents. A non-square block used to reach a matmul
+    and fail there, with a message naming neither parameter. Repeating the name also
+    ties the `to_z` and `from_z` tensors to each other.
+    """
+    from jaccpot.operators.complex_ops import m2l_complex_reference_batch_cached_blocks
+
+    batch, cascade, dim = 2, ORDER + 1, 2 * ORDER + 1
+    multipoles = jnp.stack([_local()] * batch)
+    deltas = jnp.stack([DELTA, DELTA + 0.1])
+    square = jnp.zeros((batch, cascade, dim, dim), dtype=jnp.complex128)
+
+    m2l_complex_reference_batch_cached_blocks(
+        multipoles, deltas, square, square, order=ORDER
+    )
+
+    oblong = jnp.zeros((batch, cascade, dim, dim + 1), dtype=jnp.complex128)
+    with pytest.raises(TypeCheckError):
+        m2l_complex_reference_batch_cached_blocks(
+            multipoles, deltas, oblong, square, order=ORDER
+        )
+
+    # And the two tensors must agree with each other, not merely each be square.
+    other = jnp.zeros((batch, cascade, dim + 2, dim + 2), dtype=jnp.complex128)
+    with pytest.raises(TypeCheckError):
+        m2l_complex_reference_batch_cached_blocks(
+            multipoles, deltas, square, other, order=ORDER
+        )
