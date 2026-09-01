@@ -250,6 +250,70 @@ __all__ = [
 # unchecked and fails checked, and neither behaviour comes from this module. Found by
 # running the contract tests under the hook, not the default suite -- the default
 # suite passed.
+# ---------------------------------------------------------------------------
+#
+# NINE MORE PARAMETERS, AND THE Z-TRANSLATION FAMILY DELIBERATELY LEFT OUT.
+#
+# This was scoped as "the rest of the module" and the measurement cut it down to
+# six functions, which is the intended outcome of asking section 4.1's question
+# instead of pattern-matching. `bench/annotation_pilot` perturbed all 24 remaining
+# candidates: 20 of 92 perturbations were silently accepted, and an annotation
+# closes only the ones that change RANK. Those are the nine below --
+# `coeffs -> (1, 25)`, `left -> (1, 16)`, `velocity -> (1, 3)`,
+# `coeffs -> (1, 4, 9)` and `-> (36,)`, and a rotation block flattened from
+# `(1, 1)` to `(1,)`.
+#
+# THE SEVEN `translate_along_z_*` FUNCTIONS ARE NOT HERE, and that is the finding
+# rather than an omission. Every acceptance in that family is a coefficient LENGTH
+# change -- `(25,) -> (24,)`, `(3, 25) -> (3, 24)` -- while their rank is already
+# validated, so the perturbations an annotation would catch are the ones already
+# being caught. Writing `Inexact[Array, "_"]` there would close none of the six.
+#
+# And the length is not expressible. The required extent is
+# `sh_size(order) == (order + 1) ** 2`, and `order` is a static Python int; a
+# jaxtyping axis can only reference an axis bound by another ARRAY argument, so
+# there is nothing to write. Section 4.3 already has a name for this situation --
+# "a named axis can be impossible even when the shape is known".
+#
+# THAT HOLE WAS REAL AND SILENT, and it is now CLOSED -- by a length check, not by
+# an annotation. At `order=4` (`ncoeff == 25`) a 24-entry multipole used to return a
+# full `(25,)` result whose values DIFFERED from the correct answer: the bodies index
+# by computed offset and JAX clamps an out-of-range index rather than raising. Same
+# mechanism as the `delta[2]` clamping documented above, same consequence -- plausible
+# numbers that are wrong. `_require_packed_length` above is the fix, added as its own
+# change because it alters behaviour. This paragraph is kept rather than deleted: it
+# records WHY the family is bare, which is still the reason, and the fix it points to
+# is the evidence that "not annotatable" did not mean "not fixable".
+#
+# Note also that the claim above -- "a too-SHORT buffer already raises a domain
+# error from the body" -- was measured on the EVALUATORS and does not hold for this
+# family. It is left as written rather than quietly broadened, because the two
+# statements are about different functions and it is the narrower one that was
+# actually tested.
+#
+# A VARIADIC CONTAINER ANNOTATION IS SAMPLED, NOT EXHAUSTIVE, and the two
+# `tuple[Inexact[Array, "_ _"], ...]` above are weaker than they look. beartype's
+# default O(1) strategy inspects roughly ONE element per call: measured on a
+# three-element tuple with a single bad element, 8/40, 11/40 and 14/40 rejections by
+# position. A FIXED-length `tuple[X, X, X]` is checked exhaustively -- 40/40 at every
+# position -- so `pallas/nearfield_mutual.py`'s three-component `a_xyz` is sound and
+# only the `...` form samples.
+#
+# What that leaves guaranteed: the argument is a tuple of rank-2 arrays, and a tuple
+# whose elements are SYSTEMATICALLY wrong is rejected every time. A single corrupted
+# element is caught only sometimes. Kept anyway -- it documents the contract, costs
+# nothing, and catches the systematic case -- but it is not a per-element guarantee,
+# and the first version of its test was flaky in the full suite for exactly that
+# reason while passing standalone.
+#
+# `_unpack_coeffs_by_ell`, `_pack_coeffs_by_ell`, `_complex_Dz` and
+# `_apply_complex_rotation_blocks_padded_batch` are also absent: the first accepts
+# only a length change (same reasoning as above) and the other three accepted
+# nothing at all, so they are already validated.
+#
+# The five `_solidfmm_*` rotscale helpers are absent for a different reason again:
+# the capture never reached them, so there is no measurement to annotate from.
+# ---------------------------------------------------------------------------
 Array = jnp.ndarray
 
 #: `jaxtyping.DTypeLike` admits anything that names a dtype -- a `numpy.dtype`, a
@@ -324,8 +388,9 @@ def enforce_conjugate_symmetry(
 
 
 @partial(jax.jit, static_argnames=("order",))
+@jaxtyped(typechecker=beartype)
 def enforce_conjugate_symmetry_batch(
-    coeffs: Array,
+    coeffs: Inexact[Array, "_ _"],
     *,
     order: int,
 ) -> Array:
@@ -333,7 +398,7 @@ def enforce_conjugate_symmetry_batch(
 
     Parameters
     ----------
-    coeffs : Array
+    coeffs : Inexact[Array, '_ _']
         Packed complex coefficients, length ``sh_size(order)``.
     order : int
         Expansion order ``p``. Static: it fixes every packed length and table shape.
@@ -441,9 +506,10 @@ def _require_packed_length(buffer: Array, *, name: str, order: int) -> None:
         )
 
 
+@jaxtyped(typechecker=beartype)
 def complex_dot(
-    left: Array,
-    right: Array,
+    left: Inexact[Array, "_"],
+    right: Inexact[Array, "_"],
     *,
     order: int,
     conjugate_left: bool = True,
@@ -455,9 +521,9 @@ def complex_dot(
 
     Parameters
     ----------
-    left : Array
+    left : Inexact[Array, '_']
         Left operand of the contraction.
-    right : Array
+    right : Inexact[Array, '_']
         Right operand of the contraction.
     order : int
         Expansion order ``p``. Static: it fixes every packed length and table shape.
@@ -581,8 +647,9 @@ def evaluate_local_complex_with_grad_batch(
     )(deltas)
 
 
+@jaxtyped(typechecker=beartype)
 def _lower_complex_harmonics_one_axis(
-    coeffs: Array,
+    coeffs: Inexact[Array, "_"],
     *,
     order: int,
     axis: int,
@@ -594,7 +661,7 @@ def _lower_complex_harmonics_one_axis(
 
     Parameters
     ----------
-    coeffs : Array
+    coeffs : Inexact[Array, '_']
         Packed complex coefficients, length ``sh_size(order)``.
     order : int
         Expansion order ``p``. Static: it fixes every packed length and table shape.
@@ -864,9 +931,10 @@ def evaluate_local_complex_derivative_tower_batch(
 
 
 @partial(jax.jit, static_argnames=("order",))
+@jaxtyped(typechecker=beartype)
 def contract_spatial_derivative_with_velocity(
-    packed: Array,
-    velocity: Array,
+    packed: Float[Array, "_"],
+    velocity: Float[Array, "3"],
     *,
     order: int,
 ) -> Array:
@@ -874,9 +942,9 @@ def contract_spatial_derivative_with_velocity(
 
     Parameters
     ----------
-    packed : Array
+    packed : Float[Array, '_']
         Packed coefficient array in this module's ``sh`` layout.
-    velocity : Array
+    velocity : Float[Array, '3']
         Velocity vector ``(3,)`` contracted against the derivative tensor.
     order : int
         Expansion order ``p``. Static: it fixes every packed length and table shape.
@@ -1873,186 +1941,6 @@ _L2L_TRANSVERSE_GENERATORS = partial(
 )
 
 
-def _solidfmm_pack_m_nonneg(block: Array, *, ell: int) -> tuple[Array, Array]:
-    """Extract m>=0 coefficients as (re, im) arrays.
-
-    Used for solidfmm-style swap/rotscale operations.
-
-    Parameters
-    ----------
-    block : Array
-        One square rotation block for a single degree.
-    ell : int
-        Spherical harmonic degree.
-
-    Returns
-    -------
-    tuple[Array, Array]
-        ``(re, im)`` for the ``m >= 0`` half of the block.
-    """
-    block = jnp.asarray(block)
-    start = ell
-    re = jnp.real(block[start:])
-    im = jnp.imag(block[start:])
-    return re, im
-
-
-def _solidfmm_unpack_m_nonneg(re: Array, im: Array, *, ell: int) -> Array:
-    """Reconstruct full m in [-ell, ell] block from m>=0 real/imag arrays.
-
-    Parameters
-    ----------
-    re : Array
-        Real parts of the ``m >= 0`` coefficients.
-    im : Array
-        Imaginary parts of the ``m >= 0`` coefficients.
-    ell : int
-        Spherical harmonic degree.
-
-    Returns
-    -------
-    Array
-        The full ``m`` in ``[-ell, ell]`` block rebuilt from the ``m >= 0`` half.
-    """
-    re = jnp.asarray(re)
-    im = jnp.asarray(im)
-    dtype = complex_dtype_for_real(jnp.result_type(re, im))
-    block = jnp.zeros((2 * ell + 1,), dtype=dtype)
-
-    m_vals = jnp.arange(0, ell + 1)
-    pos = ell + m_vals
-    block = block.at[pos].set(re + 1j * im)
-
-    neg_m = jnp.arange(1, ell + 1)
-    neg_pos = ell - neg_m
-    pos_m = ell + neg_m
-    signs = (-1.0) ** neg_m
-    block = block.at[neg_pos].set(signs * jnp.conjugate(block[pos_m]))
-    return block
-
-
-def _solidfmm_swap_mats(
-    B_swap: Array,
-    *,
-    ell: int,
-    dtype: DTypeLike,
-) -> tuple[Array, Array]:
-    """Build real/imag swap matrices for solidfmm's m>=0 storage.
-
-    These implement the real-linear map induced by B on coefficients with
-    conjugate symmetry.
-
-    Parameters
-    ----------
-    B_swap : Array
-        Involutory swap matrix exchanging the z and x axes for this degree.
-    ell : int
-        Spherical harmonic degree.
-    dtype : DTypeLike
-        Real working dtype the tables are built at.
-
-    Returns
-    -------
-    tuple[Array, Array]
-        Real and imaginary swap matrices for solidfmm's ``m >= 0`` storage.
-    """
-    m_vals = jnp.arange(0, ell + 1)
-    l_vals = jnp.arange(0, ell + 1)
-    row_idx = ell + m_vals[:, None]
-    col_pos = ell + l_vals[None, :]
-    col_neg = ell - l_vals[None, :]
-
-    B = jnp.asarray(B_swap, dtype=dtype)
-    B_pos = B[row_idx, col_pos]
-    B_neg = B[row_idx, col_neg]
-
-    signs = (-1.0) ** l_vals
-    real_mat = B_pos + signs * B_neg
-    imag_mat = B_pos - signs * B_neg
-
-    real_mat = real_mat.at[:, 0].set(B_pos[:, 0])
-    imag_mat = imag_mat.at[:, 0].set(jnp.zeros((ell + 1,), dtype=dtype))
-    return real_mat, imag_mat
-
-
-@highest_matmul_precision
-def _solidfmm_swap_apply(
-    re: Array,
-    im: Array,
-    B_swap: Array,
-    *,
-    ell: int,
-) -> tuple[Array, Array]:
-    """Apply solidfmm-style swap to m>=0 real/imag arrays.
-
-    Parameters
-    ----------
-    re : Array
-        Real parts of the ``m >= 0`` coefficients.
-    im : Array
-        Imaginary parts of the ``m >= 0`` coefficients.
-    B_swap : Array
-        Involutory swap matrix exchanging the z and x axes for this degree.
-    ell : int
-        Spherical harmonic degree.
-
-    Returns
-    -------
-    tuple[Array, Array]
-        The swapped ``(re, im)`` arrays.
-    """
-    dtype = jnp.result_type(re, im)
-    real_mat, imag_mat = _solidfmm_swap_mats(B_swap, ell=ell, dtype=dtype)
-    re_out = real_mat @ re
-    im_out = imag_mat @ im
-    return re_out, im_out
-
-
-def _solidfmm_rotscale(
-    re: Array,
-    im: Array,
-    *,
-    angle: Array,
-    scale: Array,
-    ell: int,
-    forward: bool,
-) -> tuple[Array, Array]:
-    """Solidfmm rotscale for m>=0 coefficients.
-
-    Parameters
-    ----------
-    re : Array
-        Real parts of the ``m >= 0`` coefficients.
-    im : Array
-        Imaginary parts of the ``m >= 0`` coefficients.
-    angle : Array
-        Rotation angle about z, in radians.
-    scale : Array
-        Per-order scale factor applied alongside the rotation.
-    ell : int
-        Spherical harmonic degree.
-    forward : bool
-        Direction of the rotscale: True applies it, False applies its inverse.
-
-    Returns
-    -------
-    tuple[Array, Array]
-        The rotated and scaled ``(re, im)`` arrays.
-    """
-    m_vals = jnp.arange(0, ell + 1, dtype=jnp.result_type(re, im, angle))
-    cos_m = jnp.cos(m_vals * angle)
-    sin_m = jnp.sin(m_vals * angle)
-    scale = jnp.asarray(scale)
-
-    if forward:
-        re_out = scale * (cos_m * re - sin_m * im)
-        im_out = scale * (sin_m * re + cos_m * im)
-    else:
-        re_out = scale * (cos_m * re + sin_m * im)
-        im_out = scale * (-sin_m * re + cos_m * im)
-    return re_out, im_out
-
-
 @jaxtyped(typechecker=beartype)
 def _angles_from_delta_solidfmm(delta: Float[Array, "3"]) -> tuple[Array, Array]:
     """Angles matching solidfmm's euler() convention.
@@ -2296,8 +2184,9 @@ def _unpack_coeffs_by_ell(
     return out
 
 
+@jaxtyped(typechecker=beartype)
 def _blocks_to_padded_array(
-    blocks: tuple[Array, ...],
+    blocks: tuple[Inexact[Array, "_ _"], ...],
     *,
     order: int,
     dtype: DTypeLike,
@@ -2306,7 +2195,7 @@ def _blocks_to_padded_array(
 
     Parameters
     ----------
-    blocks : tuple[Array, ...]
+    blocks : tuple[Inexact[Array, '_ _'], ...]
         Per-degree rotation blocks, one square matrix per degree.
     order : int
         Expansion order ``p``. Static: it fixes every packed length and table shape.
@@ -2451,9 +2340,10 @@ def complex_rotation_blocks_from_z_solidfmm_batch(
     )(deltas)
 
 
+@jaxtyped(typechecker=beartype)
 def _apply_complex_rotation_blocks_batched(
-    coeffs: Array,
-    blocks: tuple[Array, ...],
+    coeffs: Inexact[Array, "_"],
+    blocks: tuple[Inexact[Array, "_ _"], ...],
     *,
     order: int,
 ) -> Array:
@@ -2461,9 +2351,9 @@ def _apply_complex_rotation_blocks_batched(
 
     Parameters
     ----------
-    coeffs : Array
+    coeffs : Inexact[Array, '_']
         Packed complex coefficients, length ``sh_size(order)``.
-    blocks : tuple[Array, ...]
+    blocks : tuple[Inexact[Array, '_ _'], ...]
         Per-degree rotation blocks, one square matrix per degree.
     order : int
         Expansion order ``p``. Static: it fixes every packed length and table shape.

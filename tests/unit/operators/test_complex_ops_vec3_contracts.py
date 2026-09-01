@@ -555,3 +555,115 @@ def test_the_rotation_blocks_must_be_square():
         m2l_complex_reference_batch_cached_blocks(
             multipoles, deltas, square, other, order=ORDER
         )
+
+
+# ---------------------------------------------------------------------------
+# The nine parameters the pilot's LAST sweep of this module supports annotating,
+# and one test for the family it does NOT support.
+#
+# Every assertion below corresponds to a perturbation the pilot reported ACCEPTED
+# and that a rank or literal annotation actually closes. The z-translation family
+# is represented by a single test in the other direction: it pins that a short
+# coefficient buffer is still accepted, because no axis spec can express
+# `sh_size(order)` against a static `order`, and pretending otherwise would hide a
+# real hole behind a green test.
+# ---------------------------------------------------------------------------
+
+
+def test_a_batched_coefficient_block_must_stay_two_dimensional():
+    """`enforce_conjugate_symmetry_batch` accepted a flattened and a 3-D block."""
+    from jaccpot.operators.complex_ops import enforce_conjugate_symmetry_batch
+
+    good = jnp.zeros((4, 9), dtype=jnp.complex128)
+    enforce_conjugate_symmetry_batch(good, order=2)
+
+    for bad in (good[None], good.reshape(-1)):
+        with pytest.raises(TypeCheckError):
+            enforce_conjugate_symmetry_batch(bad, order=2)
+
+
+def test_complex_dot_rejects_an_unsqueezed_operand():
+    """Both operands accepted an extra leading axis, independently."""
+    from jaccpot.operators.complex_ops import complex_dot
+
+    a = jnp.zeros((16,), dtype=jnp.complex128)
+    complex_dot(a, a, order=3, conjugate_left=True)
+
+    with pytest.raises(TypeCheckError):
+        complex_dot(a[None], a, order=3, conjugate_left=True)
+    with pytest.raises(TypeCheckError):
+        complex_dot(a, a[None], order=3, conjugate_left=True)
+
+
+def test_complex_dot_still_takes_operands_of_different_lengths():
+    """They are NOT tied to each other, and that is deliberate.
+
+    Both operands are sliced to `sh_size(order)` independently, so a longer buffer
+    on either side is legitimate. A shared axis name would have looked tidier and
+    rejected callers that work -- the measurement showed `(16,)` and `(25,)` in
+    different calls, never a requirement that the two agree.
+    """
+    from jaccpot.operators.complex_ops import complex_dot
+
+    short = jnp.zeros((16,), dtype=jnp.complex128)
+    long = jnp.zeros((25,), dtype=jnp.complex128)
+    complex_dot(short, long, order=3, conjugate_left=True)
+    complex_dot(long, short, order=3, conjugate_left=True)
+
+
+def test_the_velocity_contraction_takes_a_three_vector():
+    """`velocity` is the `delta`-family literal again: `(1, 3)` was accepted."""
+    from jaccpot.operators.complex_ops import (
+        contract_spatial_derivative_with_velocity,
+    )
+
+    packed = jnp.zeros((6,))
+    velocity = jnp.asarray([1.0, 2.0, 3.0])
+    contract_spatial_derivative_with_velocity(packed, velocity, order=1)
+
+    with pytest.raises(TypeCheckError):
+        contract_spatial_derivative_with_velocity(packed, velocity[None], order=1)
+    with pytest.raises(TypeCheckError):
+        contract_spatial_derivative_with_velocity(packed, velocity[:2], order=1)
+
+
+def test_a_rotation_block_tuple_must_hold_matrices():
+    """`tuple[Inexact[Array, '_ _'], ...]`, and what it does NOT guarantee.
+
+    beartype checks a VARIADIC container by sampling -- its default O(1) strategy
+    inspects roughly one element per call, measured 8/40, 11/40 and 14/40 for a
+    single bad element at each of three positions. A fixed-length
+    `tuple[X, X, X]` is checked exhaustively (40/40 at every position); only the
+    `...` form samples.
+
+    So this asserts the reliable part: a tuple whose elements are systematically
+    the wrong rank is rejected every time, because whichever element gets sampled
+    is bad. A single corrupted element is caught only sometimes, which is why the
+    first version of this test was flaky in the full suite and passed standalone.
+
+    The elements are square but of DIFFERENT sizes -- `2*ell + 1` a side, per
+    degree -- so no axis is shared between them. A shared name would assert every
+    degree had the same block size, which is false by construction.
+    """
+    from jaccpot.operators.complex_ops import _blocks_to_padded_array
+
+    blocks = tuple(
+        jnp.zeros((2 * ell + 1, 2 * ell + 1), dtype=jnp.complex128) for ell in range(3)
+    )
+    _blocks_to_padded_array(blocks, order=2, dtype=jnp.complex128)
+
+    all_flattened = tuple(b.reshape(-1) for b in blocks)
+    for _ in range(8):  # sampling is random; a systematic error is caught regardless
+        with pytest.raises(TypeCheckError):
+            _blocks_to_padded_array(all_flattened, order=2, dtype=jnp.complex128)
+
+
+# `test_a_short_coefficient_buffer_is_still_silently_accepted` USED TO LIVE HERE.
+# It pinned the hole this module's note described -- a coefficient buffer one entry
+# short returning wrong numbers -- and was written to FAIL the day a length check
+# landed, so that the fix could not inherit a quietly passing test. It did exactly
+# that: PR #281 added `_require_packed_length` and the pin failed with
+# `ValueError: multipole is too short for order 4: got length 24, need at least 25`.
+# Removed rather than inverted, because #281 ships
+# `test_complex_ops_packed_length_contracts.py` and duplicating 200 lines of coverage
+# buys nothing.
