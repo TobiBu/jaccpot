@@ -155,7 +155,14 @@ jobs:
           # both `-n 2` and `-n 1`. Do not group them.
           - shard: integration
             paths: tests/integration
-            extra: --ignore=tests/integration/test_mutual_fmm_static_device.py
+            # The two `*_nornax.py` files belong to `test-cross-repo-nornax`, which
+            # installs nornax and guards against a vacuous run. Ignored here so they
+            # are not collected twice -- and so this shard's log stops showing 24
+            # module-level skips that look like a failure signal but are not.
+            extra: >-
+              --ignore=tests/integration/test_mutual_fmm_static_device.py
+              --ignore=tests/integration/test_mutual_fmm_nornax.py
+              --ignore=tests/integration/test_mutual_distributed_nornax.py
           - shard: mutual-static-device
             paths: tests/integration/test_mutual_fmm_static_device.py
             extra: ""
@@ -560,6 +567,133 @@ jobs:
           if grep -qE "no tests ran|collected 0 items" pytest-distributed-mutual.txt \
              || grep -qE "^SKIPPED.*the distributed mutual force needs" pytest-distributed-mutual.txt; then
             echo "::error::the distributed mutual suite was skipped, not run -- see the reason in the previous step"
+            exit 1
+          fi
+
+  # The cross-repo conformance tier, in TWO jobs because they cost two different
+  # things -- and because the cheap half is the one worth failing fast on.
+  #
+  # jaccpot's `BlockStepFMM` satisfies nornax's `MutualForceModel` /
+  # `FusedMutualForceModel` STRUCTURALLY: `jaccpot/nornax_adapter.py` deliberately does
+  # not import nornax, so the dependency graph stays acyclic (Jaccpot -> Yggdrax, Nornax
+  # standalone, ODISSEO -> both). These two files are the only thing that checks the
+  # duck-typing still holds -- the protocol match itself, both block-step schedules
+  # agreeing, and jaccpot's own base step matching nornax's.
+  #
+  # WHY THEY EXIST. Until they did, all 24 of those tests skipped on EVERY run and the
+  # suite stayed green. nornax was installed by no job, and `tests/conftest.py`'s
+  # `_find_sibling_checkout` resolves nornax from a SIBLING CHECKOUT -- which exists in a
+  # local layout and never in a single-repo `actions/checkout`. So the tests passed
+  # locally, skipped in CI, and nothing would have caught a protocol drift.
+  test-cross-repo-nornax:
+    name: test-cross-repo-nornax
+    runs-on: ubuntu-latest
+    # MEASURED: 12 tests in 137 s on a fast workstation, single device. 25 is ~10x that,
+    # which is generous for a job whose whole point is to fail fast.
+    timeout-minutes: 25
+    env:
+      JAX_ENABLE_X64: "1"
+      JAX_PLATFORMS: cpu
+      # NB: XLA_FLAGS is deliberately NOT set. Forcing four host devices makes this file
+      # ~5x slower (measured: ~11 s/test without, ~36 s/test with, same 12 tests, same
+      # box) and it needs exactly one device. The distributed half is the job below.
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+      - name: Install package + dev tools + nornax
+        # ORDER IS LOAD-BEARING, for the reason pyproject.toml already records for
+        # yggdrax: a bare `pip install git+...` resolves JAX unconstrained, and the
+        # `<0.11` ceiling in `pip install -e ".[dev]"` is what downgrades it back.
+        # nornax's own floor is jax>=0.8.0, so the resulting 0.10.2 satisfies it.
+        #
+        # nornax is TRACKED UNPINNED on purpose. A pinned SHA gives a reproducible build
+        # that by construction can never tell you the protocol drifted, which is the one
+        # thing these jobs are for. The cost is that a nornax push can redden jaccpot's
+        # CI. If that becomes disruptive, pin here and add a scheduled unpinned run.
+        run: |
+          python -m pip install --upgrade pip
+          pip install git+https://github.com/TobiBu/yggdrax.git
+          pip install git+https://github.com/TobiBu/nornax.git
+          pip install -e ".[dev]"
+      - name: Adapter conformance suite
+        # `-rs` puts skip reasons in the log, which the guard step reads.
+        run: |
+          set -o pipefail
+          rc=0
+          pytest tests/integration/test_mutual_fmm_nornax.py -n 0 -rs -v \
+            | tee pytest-cross-repo-adapter.txt || rc=$?
+          # Exit 5 is pytest's "no tests were collected", which is what a module-level
+          # skip produces in a job that runs ONE file. Tolerated so the guard below gets
+          # to say WHY, with an actionable message, rather than dying on a bare exit 5.
+          # Every other non-zero code still fails this step.
+          if [ "$rc" != 0 ] && [ "$rc" != 5 ]; then exit "$rc"; fi
+      - name: Fail if the suite was skipped rather than run
+        # A skipped suite PASSES, and a green-but-vacuous job is the exact state this job
+        # was added to end. Anchored on the module-level skip message --
+        # `pytest.skip(f"nornax unavailable: {exc!r}", allow_module_level=True)` -- and
+        # NOT on any SKIPPED line, so a legitimate per-test skip cannot fail the job.
+        run: |
+          if grep -qE "no tests ran|collected 0 items" pytest-cross-repo-adapter.txt \
+             || grep -qE "^SKIPPED.*nornax unavailable" pytest-cross-repo-adapter.txt; then
+            echo "::error::the cross-repo nornax adapter suite was skipped, not run -- see the reason in the previous step"
+            exit 1
+          fi
+
+  # The distributed half, split out for the same reason `test-distributed-criterion` is:
+  # what it costs. Its 12 tests each build their own mesh on forced host devices.
+  #
+  # MEASURED: the two files together, all 24 tests, took 32:48 on a fast workstation with
+  # four forced devices throughout. Subtracting the adapter file at that device count
+  # (~36 s/test x 12) leaves ~26 min for this half alone. Hosted runners are the slower
+  # side of that, which is why the timeout is 90 rather than the 35 a naive reading of the
+  # local number would suggest -- and why this is not folded into the job above, where it
+  # would hold a 2-minute protocol check hostage to a 26-minute mesh suite.
+  test-cross-repo-nornax-distributed:
+    name: test-cross-repo-nornax-distributed
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    env:
+      JAX_ENABLE_X64: "1"
+      JAX_PLATFORMS: cpu
+      # Below two devices these tests skip per-test rather than run.
+      XLA_FLAGS: --xla_force_host_platform_device_count=4
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+      - name: Install package + dev tools + nornax
+        # Same ordering constraint as the job above.
+        run: |
+          python -m pip install --upgrade pip
+          pip install git+https://github.com/TobiBu/yggdrax.git
+          pip install git+https://github.com/TobiBu/nornax.git
+          pip install -e ".[dev]"
+      - name: Distributed conformance suite
+        # `-n 0`: the four forced host devices live in ONE process and each test builds
+        # its own mesh, so serial keeps the device set unambiguous.
+        run: |
+          set -o pipefail
+          rc=0
+          pytest tests/integration/test_mutual_distributed_nornax.py -n 0 -rs -v \
+            | tee pytest-cross-repo-distributed.txt || rc=$?
+          if [ "$rc" != 0 ] && [ "$rc" != 5 ]; then exit "$rc"; fi
+      - name: Fail if the suite was skipped rather than run
+        # Vacuity only -- see the note in the job above. This file legitimately skips
+        # per-test when a kernel needs sm_80, and reading that as vacuity would fail the
+        # job over a test that could not have run on a CPU box.
+        run: |
+          if grep -qE "no tests ran|collected 0 items" pytest-cross-repo-distributed.txt \
+             || grep -qE "^SKIPPED.*nornax unavailable" pytest-cross-repo-distributed.txt; then
+            echo "::error::the cross-repo nornax distributed suite was skipped, not run -- see the reason in the previous step"
             exit 1
           fi
 
